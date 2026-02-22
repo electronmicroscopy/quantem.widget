@@ -69,6 +69,14 @@ class Show1D(anywidget.AnyWidget):
         Unit for the Y axis.
     log_scale : bool, default False
         Use logarithmic Y axis.
+    auto_contrast : bool, default False
+        Clip Y-axis range to ``[percentile_low, percentile_high]`` of the
+        data, revealing weak features hidden by outliers (e.g. core-loss
+        edges behind a zero-loss peak in EELS).
+    percentile_low : float, default 2.0
+        Lower percentile for auto-contrast clipping (0–100).
+    percentile_high : float, default 98.0
+        Upper percentile for auto-contrast clipping (0–100).
     show_stats : bool, default True
         Show statistics bar (mean, min, max, std per trace).
     show_legend : bool, default True
@@ -137,6 +145,9 @@ class Show1D(anywidget.AnyWidget):
     x_unit = traitlets.Unicode("").tag(sync=True)
     y_unit = traitlets.Unicode("").tag(sync=True)
     log_scale = traitlets.Bool(False).tag(sync=True)
+    auto_contrast = traitlets.Bool(False).tag(sync=True)
+    percentile_low = traitlets.Float(2.0).tag(sync=True)
+    percentile_high = traitlets.Float(98.0).tag(sync=True)
     show_stats = traitlets.Bool(True).tag(sync=True)
     show_legend = traitlets.Bool(True).tag(sync=True)
     show_grid = traitlets.Bool(True).tag(sync=True)
@@ -224,6 +235,12 @@ class Show1D(anywidget.AnyWidget):
     stats_min = traitlets.List(traitlets.Float()).tag(sync=True)
     stats_max = traitlets.List(traitlets.Float()).tag(sync=True)
     stats_std = traitlets.List(traitlets.Float()).tag(sync=True)
+    range_stats = traitlets.List(traitlets.Dict()).tag(sync=True)
+
+    # =========================================================================
+    # Peak FWHM
+    # =========================================================================
+    peak_fwhm = traitlets.List(traitlets.Dict()).tag(sync=True)
 
     def __init__(
         self,
@@ -237,6 +254,9 @@ class Show1D(anywidget.AnyWidget):
         x_unit: str = "",
         y_unit: str = "",
         log_scale: bool = False,
+        auto_contrast: bool = False,
+        percentile_low: float = 2.0,
+        percentile_high: float = 98.0,
         show_stats: bool = True,
         show_legend: bool = True,
         show_grid: bool = True,
@@ -310,9 +330,9 @@ class Show1D(anywidget.AnyWidget):
             self.labels = [str(l) for l in labels]
         else:
             if self.n_traces == 1:
-                self.labels = ["Trace"]
+                self.labels = ["Data"]
             else:
-                self.labels = [f"Trace {i + 1}" for i in range(self.n_traces)]
+                self.labels = [f"Data {i + 1}" for i in range(self.n_traces)]
 
         # Colors
         if colors is not None:
@@ -327,6 +347,9 @@ class Show1D(anywidget.AnyWidget):
         self.x_unit = x_unit
         self.y_unit = y_unit
         self.log_scale = log_scale
+        self.auto_contrast = auto_contrast
+        self.percentile_low = percentile_low
+        self.percentile_high = percentile_high
         self.show_stats = show_stats
         self.show_legend = show_legend
         self.show_grid = show_grid
@@ -354,6 +377,7 @@ class Show1D(anywidget.AnyWidget):
 
         # Compute stats and send data
         self._compute_stats()
+        self._compute_range_stats()
         self.y_bytes = self._data.tobytes()
 
         # Restore state
@@ -421,14 +445,16 @@ class Show1D(anywidget.AnyWidget):
             self.labels = [str(l) for l in labels]
         else:
             if self.n_traces == 1:
-                self.labels = ["Trace"]
+                self.labels = ["Data"]
             else:
-                self.labels = [f"Trace {i + 1}" for i in range(self.n_traces)]
+                self.labels = [f"Data {i + 1}" for i in range(self.n_traces)]
 
         # Assign default colors if count changed
         self.colors = [_DEFAULT_COLORS[i % len(_DEFAULT_COLORS)] for i in range(self.n_traces)]
 
         self._compute_stats()
+        self._compute_range_stats()
+        self.peak_fwhm = []
         self.y_bytes = self._data.tobytes()
         return self
 
@@ -458,13 +484,14 @@ class Show1D(anywidget.AnyWidget):
 
         self.n_traces = int(self._data.shape[0])
 
-        lbl = label if label is not None else f"Trace {self.n_traces}"
+        lbl = label if label is not None else f"Data {self.n_traces}"
         self.labels = list(self.labels) + [lbl]
 
         clr = color if color is not None else _DEFAULT_COLORS[(self.n_traces - 1) % len(_DEFAULT_COLORS)]
         self.colors = list(self.colors) + [clr]
 
         self._compute_stats()
+        self._compute_range_stats()
         self.y_bytes = self._data.tobytes()
         return self
 
@@ -487,6 +514,7 @@ class Show1D(anywidget.AnyWidget):
         clrs.pop(index)
         self.colors = clrs
         self._compute_stats()
+        self._compute_range_stats()
         self.y_bytes = self._data.tobytes()
         return self
 
@@ -501,6 +529,8 @@ class Show1D(anywidget.AnyWidget):
         self.stats_min = []
         self.stats_max = []
         self.stats_std = []
+        self.range_stats = []
+        self.peak_fwhm = []
         self.y_bytes = b""
         return self
 
@@ -518,11 +548,11 @@ class Show1D(anywidget.AnyWidget):
         markers = list(self.peak_markers)
         return [markers[i] for i in self.selected_peaks if 0 <= i < len(markers)]
 
-    def add_peak(self, x: float, trace_idx: int = 0, label: str = "", search: str = "max") -> Self:
+    def add_peak(self, x: float, trace_idx: int = 0, label: str = "") -> Self:
         """Add a peak marker at the given X position.
 
         Finds the nearest data point and searches ±5 points for a local
-        maximum or minimum.
+        maximum.
 
         Parameters
         ----------
@@ -532,14 +562,9 @@ class Show1D(anywidget.AnyWidget):
             Trace index to search for the peak.
         label : str
             Optional label for the peak marker.
-        search : str
-            ``"max"`` to find a local maximum (default), ``"min"`` for a local
-            minimum (valley).
         """
         if trace_idx < 0 or trace_idx >= self.n_traces:
             raise IndexError(f"Trace index {trace_idx} out of range [0, {self.n_traces}).")
-        if search not in ("max", "min"):
-            raise ValueError(f"search must be 'max' or 'min', got '{search}'.")
 
         trace = self._data[trace_idx]
 
@@ -550,14 +575,11 @@ class Show1D(anywidget.AnyWidget):
             nearest_idx = int(round(x))
             nearest_idx = max(0, min(self.n_points - 1, nearest_idx))
 
-        # Search ±5 points for local maximum or minimum
+        # Search ±5 points for local maximum
         lo = max(0, nearest_idx - 5)
         hi = min(self.n_points, nearest_idx + 6)
         region = trace[lo:hi]
-        if search == "max":
-            local_idx = lo + int(np.argmax(region))
-        else:
-            local_idx = lo + int(np.argmin(region))
+        local_idx = lo + int(np.argmax(region))
 
         peak_x = float(self._x[local_idx]) if self._x is not None else float(local_idx)
         peak_y = float(trace[local_idx])
@@ -567,7 +589,7 @@ class Show1D(anywidget.AnyWidget):
             "y": peak_y,
             "trace_idx": trace_idx,
             "label": label or f"{peak_x:.4g}",
-            "type": "valley" if search == "min" else "peak",
+            "type": "peak",
         }
         self.peak_markers = list(self.peak_markers) + [marker]
         return self
@@ -643,61 +665,6 @@ class Show1D(anywidget.AnyWidget):
         self.peak_markers = markers
         return self
 
-    def find_valleys(
-        self,
-        trace_idx: int = 0,
-        *,
-        depth=None,
-        prominence: float = 0.01,
-        distance: int = 1,
-        width=None,
-    ) -> Self:
-        """Auto-detect valleys (local minima) using scipy.signal.find_peaks on negated data.
-
-        Parameters
-        ----------
-        trace_idx : int
-            Trace index to search.
-        depth : float, optional
-            Minimum valley depth (positive value — how far below neighbors).
-        prominence : float
-            Minimum valley prominence (default 0.01).
-        distance : int
-            Minimum horizontal distance between valleys in samples.
-        width : float, optional
-            Minimum valley width in samples.
-        """
-        from scipy.signal import find_peaks as _find_peaks
-
-        if trace_idx < 0 or trace_idx >= self.n_traces:
-            raise IndexError(f"Trace index {trace_idx} out of range [0, {self.n_traces}).")
-
-        trace = self._data[trace_idx]
-        kwargs = {"distance": distance}
-        if depth is not None:
-            kwargs["height"] = depth
-        if prominence is not None:
-            kwargs["prominence"] = prominence
-        if width is not None:
-            kwargs["width"] = width
-
-        # Find peaks on negated signal = find valleys on original
-        indices, _ = _find_peaks(-trace, **kwargs)
-
-        markers = list(self.peak_markers)
-        for idx in indices:
-            val_x = float(self._x[idx]) if self._x is not None else float(idx)
-            val_y = float(trace[idx])
-            markers.append({
-                "x": val_x,
-                "y": val_y,
-                "trace_idx": trace_idx,
-                "label": f"{val_x:.4g}",
-                "type": "valley",
-            })
-        self.peak_markers = markers
-        return self
-
     def export_peaks(self, path: str) -> pathlib.Path:
         """Export peak markers to CSV or JSON.
 
@@ -742,8 +709,7 @@ class Show1D(anywidget.AnyWidget):
     ) -> pathlib.Path:
         """Save publication-quality figure as PNG or PDF.
 
-        Renders traces, grid, axes, labels, and peak/valley markers using
-        matplotlib.
+        Renders traces, grid, axes, labels, and peak markers using matplotlib.
 
         Parameters
         ----------
@@ -754,7 +720,7 @@ class Show1D(anywidget.AnyWidget):
         dpi : int
             Output resolution (default 150).
         include_peaks : bool
-            Render peak/valley markers on the figure (default True).
+            Render peak markers on the figure (default True).
 
         Returns
         -------
@@ -778,26 +744,22 @@ class Show1D(anywidget.AnyWidget):
         # Draw traces
         for t in range(self.n_traces):
             color = self.colors[t] if t < len(self.colors) else None
-            label = self.labels[t] if t < len(self.labels) else f"Trace {t + 1}"
+            label = self.labels[t] if t < len(self.labels) else f"Data {t + 1}"
             ax.plot(x, data[t], color=color, label=label, linewidth=self.line_width)
 
-        # Peak/valley markers
+        # Peak markers
         if include_peaks and self.peak_markers:
             for pk in self.peak_markers:
                 color = self.colors[pk["trace_idx"]] if pk["trace_idx"] < len(self.colors) else "C0"
-                is_valley = pk.get("type") == "valley"
-                marker = "v" if is_valley else "^"
-                ax.plot(pk["x"], pk["y"], marker=marker, color=color, markersize=6,
+                ax.plot(pk["x"], pk["y"], marker="^", color=color, markersize=6,
                         markeredgecolor="white", markeredgewidth=0.8, zorder=5)
-                va = "top" if is_valley else "bottom"
-                offset = -6 if is_valley else 6
                 ax.annotate(
                     pk.get("label", ""),
                     (pk["x"], pk["y"]),
                     textcoords="offset points",
-                    xytext=(0, offset),
+                    xytext=(0, 6),
                     ha="center",
-                    va=va,
+                    va="bottom",
                     fontsize=7,
                     color="#333",
                 )
@@ -820,6 +782,14 @@ class Show1D(anywidget.AnyWidget):
 
         if self.log_scale:
             ax.set_yscale("log")
+
+        if self.auto_contrast and not self.log_scale:
+            all_vals = self._data.ravel()
+            vmin = float(np.percentile(all_vals, self.percentile_low))
+            vmax = float(np.percentile(all_vals, self.percentile_high))
+            if vmin < vmax:
+                pad = (vmax - vmin) * 0.05
+                ax.set_ylim(vmin - pad, vmax + pad)
 
         if self.show_grid:
             ax.grid(True, alpha=0.3, linestyle="--")
@@ -846,6 +816,130 @@ class Show1D(anywidget.AnyWidget):
         self.stats_max = maxs
         self.stats_std = stds
 
+    def _compute_range_stats(self):
+        if not self.x_range or len(self.x_range) != 2 or self.n_traces == 0:
+            self.range_stats = []
+            return
+        x_lo, x_hi = self.x_range
+        x_arr = self._x if self._x is not None else np.arange(self.n_points, dtype=np.float32)
+        mask = (x_arr >= x_lo) & (x_arr <= x_hi)
+        if not np.any(mask):
+            self.range_stats = []
+            return
+        x_masked = x_arr[mask]
+        results = []
+        for i in range(self.n_traces):
+            trace = self._data[i]
+            y_masked = trace[mask]
+            entry = {
+                "mean": float(np.mean(y_masked)),
+                "min": float(np.min(y_masked)),
+                "max": float(np.max(y_masked)),
+                "std": float(np.std(y_masked)),
+                "integral": float(np.trapezoid(y_masked, x=x_masked)),
+                "n_points": int(np.sum(mask)),
+            }
+            results.append(entry)
+        self.range_stats = results
+
+    # =========================================================================
+    # Peak FWHM Methods
+    # =========================================================================
+    def _compute_peak_fwhm(self):
+        if not self.selected_peaks or not self.peak_markers or self.n_traces == 0:
+            self.peak_fwhm = []
+            return
+
+        x_arr = self._x if self._x is not None else np.arange(self.n_points, dtype=np.float32)
+        results = []
+
+        for peak_idx in self.selected_peaks:
+            if peak_idx < 0 or peak_idx >= len(self.peak_markers):
+                continue
+            pk = self.peak_markers[peak_idx]
+            trace_idx = pk["trace_idx"]
+            if trace_idx < 0 or trace_idx >= self.n_traces:
+                continue
+
+            trace = self._data[trace_idx]
+            if self._x is not None:
+                center_idx = int(np.argmin(np.abs(self._x - pk["x"])))
+            else:
+                center_idx = int(round(pk["x"]))
+                center_idx = max(0, min(self.n_points - 1, center_idx))
+
+            radius = self.peak_search_radius
+            lo = max(0, center_idx - radius)
+            hi = min(self.n_points, center_idx + radius + 1)
+
+            x_region = x_arr[lo:hi].astype(np.float64)
+            y_region = trace[lo:hi].astype(np.float64)
+
+            if len(x_region) < 4:
+                results.append({"peak_idx": peak_idx, "fwhm": None, "error": "Too few points"})
+                continue
+
+            try:
+                from scipy.optimize import curve_fit as _curve_fit
+
+                A0 = float(np.max(y_region) - np.min(y_region))
+                mu0 = float(x_arr[center_idx])
+                sigma0 = max(float((x_region[-1] - x_region[0]) / 6), 1e-10)
+                offset0 = float(np.min(y_region))
+
+                def gaussian(x, A, mu, sigma, offset):
+                    return A * np.exp(-0.5 * ((x - mu) / sigma) ** 2) + offset
+
+                popt, _ = _curve_fit(gaussian, x_region, y_region, p0=[A0, mu0, sigma0, offset0], maxfev=5000)
+                A, mu, sigma, offset = popt
+                fwhm = 2.3548200450309493 * abs(sigma)
+
+                y_pred = gaussian(x_region, *popt)
+                ss_res = np.sum((y_region - y_pred) ** 2)
+                ss_tot = np.sum((y_region - np.mean(y_region)) ** 2)
+                r_squared = float(1 - ss_res / ss_tot) if ss_tot > 0 else 0.0
+
+                results.append({
+                    "peak_idx": peak_idx,
+                    "fwhm": float(fwhm),
+                    "center": float(mu),
+                    "amplitude": float(A),
+                    "sigma": float(sigma),
+                    "offset": float(offset),
+                    "fit_quality": r_squared,
+                })
+            except Exception as e:
+                results.append({"peak_idx": peak_idx, "fwhm": None, "error": str(e)})
+
+        self.peak_fwhm = results
+
+    def measure_fwhm(self, peak_idx: int | None = None) -> Self:
+        """Compute FWHM for selected peaks (or a specific peak).
+
+        Parameters
+        ----------
+        peak_idx : int, optional
+            If given, adds this peak to the selection before computing.
+        """
+        if peak_idx is not None:
+            sel = list(self.selected_peaks)
+            if peak_idx not in sel:
+                sel.append(peak_idx)
+                self.selected_peaks = sel
+        self._compute_peak_fwhm()
+        return self
+
+    # =========================================================================
+    # Observers
+    # =========================================================================
+    @traitlets.observe("x_range")
+    def _on_x_range_change(self, change=None):
+        self._compute_range_stats()
+
+    @traitlets.observe("selected_peaks")
+    def _on_selected_peaks_change(self, change=None):
+        self._compute_peak_fwhm()
+
     # =========================================================================
     # State Persistence
     # =========================================================================
@@ -859,6 +953,9 @@ class Show1D(anywidget.AnyWidget):
             "x_unit": self.x_unit,
             "y_unit": self.y_unit,
             "log_scale": self.log_scale,
+            "auto_contrast": self.auto_contrast,
+            "percentile_low": self.percentile_low,
+            "percentile_high": self.percentile_high,
             "show_stats": self.show_stats,
             "show_legend": self.show_legend,
             "show_grid": self.show_grid,
@@ -885,7 +982,7 @@ class Show1D(anywidget.AnyWidget):
 
     def summary(self):
         lines = [self.title or "Show1D", "=" * 32]
-        lines.append(f"Traces:   {self.n_traces} x {self.n_points} points")
+        lines.append(f"Series:   {self.n_traces} x {self.n_points} points")
         if self.labels:
             lines.append(f"Labels:   {', '.join(self.labels)}")
         if self._x is not None:
@@ -909,6 +1006,8 @@ class Show1D(anywidget.AnyWidget):
                 )
         scale = "log" if self.log_scale else "linear"
         display = f"{scale}"
+        if self.auto_contrast:
+            display += f" | auto [{self.percentile_low:.1f}–{self.percentile_high:.1f}%]"
         if self.show_grid:
             display += " | grid"
             if self.grid_density != 10:

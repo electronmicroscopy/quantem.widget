@@ -22,7 +22,7 @@ import Slider from "@mui/material/Slider";
 import Button from "@mui/material/Button";
 import Tooltip from "@mui/material/Tooltip";
 import { useTheme } from "../theme";
-import { drawScaleBarHiDPI, drawColorbar, exportFigure, canvasToPDF } from "../scalebar";
+import { drawScaleBarHiDPI, drawFFTScaleBarHiDPI, drawColorbar, exportFigure, canvasToPDF } from "../scalebar";
 import { extractFloat32, formatNumber, downloadBlob } from "../format";
 import { computeHistogramFromBytes } from "../histogram";
 import { findDataRange, applyLogScale, percentileClip, sliderRange } from "../stats";
@@ -105,6 +105,46 @@ const upwardMenuProps = {
 };
 
 const DEFAULT_CANVAS_SIZE = 500;
+
+// ROI crop helper (single-mode, same as Show4D)
+function cropSingleROI(
+  data: Float32Array, imgW: number, imgH: number,
+  mode: string, centerRow: number, centerCol: number,
+  radius: number, roiW: number, roiH: number,
+): { cropped: Float32Array; cropW: number; cropH: number } | null {
+  if (mode === "off") return null;
+  let x0: number, y0: number, x1: number, y1: number;
+  if (mode === "rect") {
+    const hw = roiW / 2, hh = roiH / 2;
+    x0 = Math.max(0, Math.floor(centerCol - hw));
+    y0 = Math.max(0, Math.floor(centerRow - hh));
+    x1 = Math.min(imgW, Math.ceil(centerCol + hw));
+    y1 = Math.min(imgH, Math.ceil(centerRow + hh));
+  } else {
+    x0 = Math.max(0, Math.floor(centerCol - radius));
+    y0 = Math.max(0, Math.floor(centerRow - radius));
+    x1 = Math.min(imgW, Math.ceil(centerCol + radius));
+    y1 = Math.min(imgH, Math.ceil(centerRow + radius));
+  }
+  const cropW = x1 - x0, cropH = y1 - y0;
+  if (cropW < 2 || cropH < 2) return null;
+  const cropped = new Float32Array(cropW * cropH);
+  if (mode === "circle") {
+    const rSq = radius * radius;
+    for (let dy = 0; dy < cropH; dy++) {
+      for (let dx = 0; dx < cropW; dx++) {
+        const dR = (y0 + dy) - centerRow, dC = (x0 + dx) - centerCol;
+        cropped[dy * cropW + dx] = dR * dR + dC * dC <= rSq ? data[(y0 + dy) * imgW + (x0 + dx)] : 0;
+      }
+    }
+  } else {
+    for (let dy = 0; dy < cropH; dy++) {
+      const srcOff = (y0 + dy) * imgW + x0;
+      cropped.set(data.subarray(srcOff, srcOff + cropW), dy * cropW);
+    }
+  }
+  return { cropped, cropW, cropH };
+}
 
 type DisplayMode = "amplitude" | "phase" | "hsv" | "real" | "imag";
 
@@ -273,6 +313,7 @@ function Histogram({ data, vminPct, vmaxPct, onRangeChange, width = 110, height 
         valueLabelFormat={(pct) => { const val = dataMin + (pct / 100) * (dataMax - dataMin); return val >= 1000 ? val.toExponential(1) : val.toFixed(1); }}
         sx={{ width, py: 0, "& .MuiSlider-thumb": { width: 8, height: 8 }, "& .MuiSlider-rail": { height: 2 }, "& .MuiSlider-track": { height: 2 }, "& .MuiSlider-valueLabel": { fontSize: 10, padding: "2px 4px" } }}
       />
+      <Box sx={{ display: "flex", justifyContent: "space-between", width }}><Typography sx={{ fontSize: 8, fontFamily: "monospace", opacity: 0.6, lineHeight: 1 }}>{(() => { const v = dataMin + (vminPct / 100) * (dataMax - dataMin); return v >= 1000 ? v.toExponential(1) : v.toFixed(1); })()}</Typography><Typography sx={{ fontSize: 8, fontFamily: "monospace", opacity: 0.6, lineHeight: 1 }}>{(() => { const v = dataMin + (vmaxPct / 100) * (dataMax - dataMin); return v >= 1000 ? v.toExponential(1) : v.toFixed(1); })()}</Typography></Box>
     </Box>
   );
 }
@@ -280,6 +321,36 @@ function Histogram({ data, vminPct, vmaxPct, onRangeChange, width = 110, height 
 // ============================================================================
 // Main Component
 // ============================================================================
+
+// ============================================================================
+// FFT peak finder (snap to Bragg spot with sub-pixel centroid refinement)
+// ============================================================================
+function findFFTPeak(mag: Float32Array, width: number, height: number, col: number, row: number, radius: number): { row: number; col: number } {
+  const c0 = Math.max(0, Math.floor(col) - radius);
+  const r0 = Math.max(0, Math.floor(row) - radius);
+  const c1 = Math.min(width - 1, Math.floor(col) + radius);
+  const r1 = Math.min(height - 1, Math.floor(row) + radius);
+  let bestCol = Math.round(col), bestRow = Math.round(row), bestVal = -Infinity;
+  for (let ir = r0; ir <= r1; ir++) {
+    for (let ic = c0; ic <= c1; ic++) {
+      const val = mag[ir * width + ic];
+      if (val > bestVal) { bestVal = val; bestCol = ic; bestRow = ir; }
+    }
+  }
+  const wc0 = Math.max(0, bestCol - 1), wc1 = Math.min(width - 1, bestCol + 1);
+  const wr0 = Math.max(0, bestRow - 1), wr1 = Math.min(height - 1, bestRow + 1);
+  let sumW = 0, sumWC = 0, sumWR = 0;
+  for (let ir = wr0; ir <= wr1; ir++) {
+    for (let ic = wc0; ic <= wc1; ic++) {
+      const w = mag[ir * width + ic];
+      sumW += w; sumWC += w * ic; sumWR += w * ir;
+    }
+  }
+  if (sumW > 0) return { row: sumWR / sumW, col: sumWC / sumW };
+  return { row: bestRow, col: bestCol };
+}
+
+const FFT_SNAP_RADIUS = 5;
 
 function ShowComplex2D() {
   // Theme
@@ -363,6 +434,7 @@ function ShowComplex2D() {
 
   // FFT refs
   const fftCanvasRef = React.useRef<HTMLCanvasElement>(null);
+  const fftOverlayRef = React.useRef<HTMLCanvasElement>(null);
   const fftContainerRef = React.useRef<HTMLDivElement>(null);
 
   // Zoom/pan
@@ -402,6 +474,41 @@ function ShowComplex2D() {
   const [fftAuto, setFftAuto] = React.useState(true);
   const [fftColormap] = React.useState("inferno");
 
+  // FFT d-spacing measurement
+  const [fftClickInfo, setFftClickInfo] = React.useState<{
+    row: number; col: number; distPx: number;
+    spatialFreq: number | null; dSpacing: number | null;
+  } | null>(null);
+  const fftClickStartRef = React.useRef<{ x: number; y: number } | null>(null);
+
+  // FFT drag state
+  const [isFftDragging, setIsFftDragging] = React.useState(false);
+  const [fftPanStart, setFftPanStart] = React.useState<{ x: number; y: number; pX: number; pY: number } | null>(null);
+
+  // ROI state (single-mode, same pattern as Show4D)
+  const [roiMode, setRoiMode] = useModelState<string>("roi_mode");
+  const [roiCenterRow, setRoiCenterRow] = useModelState<number>("roi_center_row");
+  const [roiCenterCol, setRoiCenterCol] = useModelState<number>("roi_center_col");
+  const [, setRoiCenter] = useModelState<number[]>("roi_center");
+  const [roiRadius, setRoiRadius] = useModelState<number>("roi_radius");
+  const [roiWidth, setRoiWidth] = useModelState<number>("roi_width");
+  const [roiHeight, setRoiHeight] = useModelState<number>("roi_height");
+
+  const hideRoi = toolVisibility.isHidden("roi");
+  const lockRoi = toolVisibility.isLocked("roi");
+
+  // ROI drag state
+  const [isDraggingROI, setIsDraggingROI] = React.useState(false);
+  const [isDraggingROIResize, setIsDraggingROIResize] = React.useState<string | null>(null);
+  const roiDragOffsetRef = React.useRef<{ dRow: number; dCol: number }>({ dRow: 0, dCol: 0 });
+  const resizeAspectRef = React.useRef<number | null>(null);
+  const lastRoiModeRef = React.useRef<string>("circle");
+
+  // ROI FFT state
+  const accentGreen = themeInfo.theme === "dark" ? "#0f0" : "#1a7a1a";
+  const [fftCropDims, setFftCropDims] = React.useState<{ cropWidth: number; cropHeight: number; fftWidth: number; fftHeight: number } | null>(null);
+  const roiFftActive = effectiveShowFft && roiMode !== "off" && !hideRoi;
+
   // Hover cursor
   const [cursorInfo, setCursorInfo] = React.useState<{ row: number; col: number; value: string } | null>(null);
   const [exportAnchor, setExportAnchor] = React.useState<HTMLElement | null>(null);
@@ -410,6 +517,9 @@ function ShowComplex2D() {
   const realDataRef = React.useRef<Float32Array | null>(null);
   const imagDataRef = React.useRef<Float32Array | null>(null);
   const displayDataRef = React.useRef<Float32Array | null>(null);
+
+  // Cached colormapped offscreen canvas (avoids recomputing colormap on zoom/pan)
+  const offscreenCacheRef = React.useRef<HTMLCanvasElement | null>(null);
 
   // ============================================================================
   // Init GPU FFT
@@ -481,13 +591,11 @@ function ShowComplex2D() {
   }, [width, height, imageWidthPx]);
 
   // ============================================================================
-  // Main canvas rendering
+  // Build colormapped offscreen canvas (expensive: HSV render, colormap LUT, percentile clip)
+  // Excludes zoom/pan so dragging only triggers the cheap redraw below.
   // ============================================================================
   React.useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas || !width || !height) return;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
+    if (!width || !height) return;
 
     const r = realDataRef.current;
     const im = imagDataRef.current;
@@ -496,7 +604,6 @@ function ShowComplex2D() {
 
     const mode = displayMode as DisplayMode;
 
-    // Create offscreen canvas at native resolution
     const offscreen = document.createElement("canvas");
     offscreen.width = width;
     offscreen.height = height;
@@ -525,8 +632,21 @@ function ShowComplex2D() {
     }
 
     offCtx.putImageData(imgData, 0, 0);
+    offscreenCacheRef.current = offscreen;
+  }, [realBytes, imagBytes, displayMode, cmap, logScale, autoContrast, percentileLow, percentileHigh,
+      vminPct, vmaxPct, width, height, histRange]);
 
-    // Draw with zoom/pan (same pattern as Show2D)
+  // ============================================================================
+  // Redraw with zoom/pan (cheap: just drawImage from cached offscreen)
+  // useLayoutEffect prevents black flash when canvas dimensions change (resize)
+  // ============================================================================
+  React.useLayoutEffect(() => {
+    const canvas = canvasRef.current;
+    const offscreen = offscreenCacheRef.current;
+    if (!canvas || !offscreen || !width || !height) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
     ctx.imageSmoothingEnabled = zoom < 4;
     ctx.clearRect(0, 0, canvasW, canvasH);
 
@@ -604,58 +724,138 @@ function ShowComplex2D() {
       drawColorbar(ctx, canvasW, canvasH, lut, vmin, vmax, logScale && mode !== "phase");
     }
 
+    // ROI overlay
+    if (roiMode && roiMode !== "off" && !hideRoi) {
+      const roiColor = themeInfo.theme === "dark" ? "rgba(0, 255, 0, 0.7)" : "rgba(26, 122, 26, 0.8)";
+      const scX = (canvasW / width) * zoom;
+      const scY = (canvasH / height) * zoom;
+      const offX = (canvasW - canvasW * zoom) / 2 + panX;
+      const offY = (canvasH - canvasH * zoom) / 2 + panY;
+      const cx = offX + roiCenterCol * scX;
+      const cy = offY + roiCenterRow * scY;
+      ctx.save();
+      ctx.strokeStyle = roiColor;
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([4, 3]);
+      if (roiMode === "circle") {
+        const r = roiRadius * scX;
+        ctx.beginPath();
+        ctx.arc(cx, cy, r, 0, Math.PI * 2);
+        ctx.stroke();
+        // Resize handle
+        ctx.setLineDash([]);
+        ctx.fillStyle = roiColor;
+        ctx.beginPath();
+        ctx.arc(cx + r, cy, 4, 0, Math.PI * 2);
+        ctx.fill();
+      } else if (roiMode === "square") {
+        const r = roiRadius * scX;
+        ctx.strokeRect(cx - r, cy - r, r * 2, r * 2);
+        ctx.setLineDash([]);
+        ctx.fillStyle = roiColor;
+        ctx.beginPath();
+        ctx.arc(cx + r, cy + r, 4, 0, Math.PI * 2);
+        ctx.fill();
+      } else if (roiMode === "rect") {
+        const hw = (roiWidth / 2) * scX;
+        const hh = (roiHeight / 2) * scY;
+        ctx.strokeRect(cx - hw, cy - hh, hw * 2, hh * 2);
+        ctx.setLineDash([]);
+        ctx.fillStyle = roiColor;
+        ctx.beginPath();
+        ctx.arc(cx + hw, cy + hh, 4, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      // Center crosshair
+      ctx.setLineDash([]);
+      ctx.strokeStyle = roiColor;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(cx - 5, cy); ctx.lineTo(cx + 5, cy);
+      ctx.moveTo(cx, cy - 5); ctx.lineTo(cx, cy + 5);
+      ctx.stroke();
+      ctx.restore();
+    }
+
     ctx.restore();
   }, [displayMode, cmap, zoom, canvasW, canvasH, width, height, pixelSize, scaleBarVisible,
-      logScale, autoContrast, vminPct, vmaxPct, histRange, percentileLow, percentileHigh]);
+      logScale, autoContrast, vminPct, vmaxPct, histRange, percentileLow, percentileHigh,
+      roiMode, roiCenterRow, roiCenterCol, roiRadius, roiWidth, roiHeight, panX, panY, themeInfo.theme]);
 
   // ============================================================================
-  // FFT computation (async)
+  // FFT computation (async) — crops to ROI when roiFftActive
   // ============================================================================
   React.useEffect(() => {
     if (!effectiveShowFft || !displayDataRef.current || !width || !height) return;
     let cancelled = false;
     const data = displayDataRef.current;
-    const pw = nextPow2(width);
-    const ph = nextPow2(height);
-    const n = pw * ph;
-    const padR = new Float32Array(n);
-    const padI = new Float32Array(n);
-    for (let row = 0; row < height; row++) {
-      for (let col = 0; col < width; col++) {
-        padR[row * pw + col] = data[row * width + col];
+
+    let fftW: number, fftH: number;
+    let inputData: Float32Array;
+    let origCropW = 0, origCropH = 0;
+
+    if (roiFftActive) {
+      const crop = cropSingleROI(data, width, height, roiMode, roiCenterRow, roiCenterCol, roiRadius, roiWidth, roiHeight);
+      if (crop) {
+        origCropW = crop.cropW;
+        origCropH = crop.cropH;
+        fftW = nextPow2(crop.cropW);
+        fftH = nextPow2(crop.cropH);
+        const padded = new Float32Array(fftW * fftH);
+        for (let y = 0; y < crop.cropH; y++)
+          for (let x = 0; x < crop.cropW; x++)
+            padded[y * fftW + x] = crop.cropped[y * crop.cropW + x];
+        inputData = padded;
+      } else {
+        fftW = nextPow2(width);
+        fftH = nextPow2(height);
+        inputData = new Float32Array(fftW * fftH);
+        for (let r = 0; r < height; r++)
+          for (let c = 0; c < width; c++)
+            inputData[r * fftW + c] = data[r * width + c];
       }
+    } else {
+      fftW = nextPow2(width);
+      fftH = nextPow2(height);
+      inputData = new Float32Array(fftW * fftH);
+      for (let r = 0; r < height; r++)
+        for (let c = 0; c < width; c++)
+          inputData[r * fftW + c] = data[r * width + c];
     }
 
     const computeFFT = async () => {
+      const padI = new Float32Array(fftW * fftH);
       let fReal: Float32Array, fImag: Float32Array;
       if (gpuFFT) {
-        const result = await gpuFFT.fft2D(padR, padI, pw, ph, false);
+        const result = await gpuFFT.fft2D(inputData, padI, fftW, fftH, false);
         if (cancelled) return;
         fReal = result.real;
         fImag = result.imag;
       } else {
-        fft2d(padR, padI, pw, ph, false);
+        fft2d(inputData, padI, fftW, fftH, false);
         if (cancelled) return;
-        fReal = padR;
+        fReal = inputData;
         fImag = padI;
       }
-      fftshift(fReal, pw, ph);
-      fftshift(fImag, pw, ph);
+      fftshift(fReal, fftW, fftH);
+      fftshift(fImag, fftW, fftH);
       const mag = computeMagnitude(fReal, fImag);
       if (cancelled) return;
       fftMagRef.current = mag;
+      setFftCropDims(origCropW > 0 ? { cropWidth: origCropW, cropHeight: origCropH, fftWidth: fftW, fftHeight: fftH } : null);
       setFftMagVersion((v) => v + 1);
     };
     computeFFT();
     return () => { cancelled = true; };
-  }, [effectiveShowFft, realBytes, imagBytes, displayMode, logScale, width, height, gpuReady]);
+  }, [effectiveShowFft, realBytes, imagBytes, displayMode, logScale, width, height, gpuReady,
+      roiFftActive, roiMode, roiCenterRow, roiCenterCol, roiRadius, roiWidth, roiHeight]);
 
-  // FFT rendering (cheap, sync)
+  // FFT rendering (cheap, sync) — uses fftCropDims for ROI FFT
   React.useEffect(() => {
     const mag = fftMagRef.current;
     if (!effectiveShowFft || !mag) return;
-    const pw = nextPow2(width);
-    const ph = nextPow2(height);
+    const pw = fftCropDims?.fftWidth ?? nextPow2(width);
+    const ph = fftCropDims?.fftHeight ?? nextPow2(height);
 
     let processedMag: Float32Array;
     let vmin: number, vmax: number;
@@ -675,7 +875,6 @@ function ShowComplex2D() {
     setFftHistData(processedMag);
     setFftHistRange(findDataRange(processedMag));
 
-    // Render FFT (same pattern as Show2D)
     const fftCanvas = fftCanvasRef.current;
     if (!fftCanvas) return;
     const ctx = fftCanvas.getContext("2d");
@@ -696,19 +895,127 @@ function ShowComplex2D() {
     ctx.drawImage(offscreen, 0, 0);
     ctx.restore();
   }, [effectiveShowFft, fftMagVersion, fftLogScale, fftAuto, fftVminPct, fftVmaxPct, fftColormap,
-      fftZoom, fftPanX, fftPanY, width, height, canvasW, canvasH]);
+      fftZoom, fftPanX, fftPanY, width, height, canvasW, canvasH, fftCropDims]);
 
   // ============================================================================
-  // Mouse handlers
+  // Coordinate helper: screen → image
+  // ============================================================================
+  const screenToImage = React.useCallback((e: React.MouseEvent): { row: number; col: number } | null => {
+    const canvas = canvasRef.current;
+    if (!canvas || !width || !height) return null;
+    const rect = canvas.getBoundingClientRect();
+    const mx = (e.clientX - rect.left) * (canvas.width / rect.width);
+    const my = (e.clientY - rect.top) * (canvas.height / rect.height);
+    const cx = canvasW / 2, cy = canvasH / 2;
+    const imgX = (mx - cx - panX) / zoom + cx;
+    const imgY = (my - cy - panY) / zoom + cy;
+    const s = canvasW / width;
+    const col = imgX / s, row = imgY / s;
+    if (col >= 0 && col < width && row >= 0 && row < height) return { row, col };
+    return null;
+  }, [canvasW, canvasH, width, height, zoom, panX, panY]);
+
+  // ============================================================================
+  // ROI hit detection helper
+  // ============================================================================
+  const roiHitTest = React.useCallback((imgRow: number, imgCol: number): "body" | "resize" | null => {
+    if (!roiMode || roiMode === "off" || lockRoi || hideRoi) return null;
+    if (roiMode === "circle") {
+      const dR = imgRow - roiCenterRow, dC = imgCol - roiCenterCol;
+      const dist = Math.sqrt(dR * dR + dC * dC);
+      if (Math.abs(dist - roiRadius) < Math.max(3, roiRadius * 0.15)) return "resize";
+      if (dist < roiRadius) return "body";
+    } else if (roiMode === "square") {
+      const dR = Math.abs(imgRow - roiCenterRow), dC = Math.abs(imgCol - roiCenterCol);
+      const tol = Math.max(2, roiRadius * 0.12);
+      if (dR <= roiRadius + tol && dC <= roiRadius + tol) {
+        if (Math.abs(dR - roiRadius) < tol || Math.abs(dC - roiRadius) < tol) return "resize";
+        return "body";
+      }
+    } else if (roiMode === "rect") {
+      const hw = roiWidth / 2, hh = roiHeight / 2;
+      const dR = Math.abs(imgRow - roiCenterRow), dC = Math.abs(imgCol - roiCenterCol);
+      const tol = Math.max(2, Math.min(hw, hh) * 0.12);
+      if (dR <= hh + tol && dC <= hw + tol) {
+        if (Math.abs(dR - hh) < tol || Math.abs(dC - hw) < tol) return "resize";
+        return "body";
+      }
+    }
+    return null;
+  }, [roiMode, roiCenterRow, roiCenterCol, roiRadius, roiWidth, roiHeight, lockRoi, hideRoi]);
+
+  // ============================================================================
+  // Mouse handlers (with ROI drag/resize support)
   // ============================================================================
   const handleMouseDown = React.useCallback((e: React.MouseEvent) => {
-    if (lockView) return;
-    dragRef.current = { startX: e.clientX, startY: e.clientY, startPanX: panX, startPanY: panY, wasDrag: false };
-    setIsDragging(true);
-  }, [panX, panY, lockView]);
+    if (lockView && lockRoi) return;
+    // Check for ROI hit first
+    if (roiMode && roiMode !== "off" && !lockRoi) {
+      const pos = screenToImage(e);
+      if (pos) {
+        const hit = roiHitTest(pos.row, pos.col);
+        if (hit === "body") {
+          setIsDraggingROI(true);
+          roiDragOffsetRef.current = { dRow: pos.row - roiCenterRow, dCol: pos.col - roiCenterCol };
+          return;
+        }
+        if (hit === "resize") {
+          resizeAspectRef.current = roiMode === "rect" && roiWidth > 0 && roiHeight > 0 ? roiWidth / roiHeight : null;
+          setIsDraggingROIResize(roiMode);
+          return;
+        }
+      }
+    }
+    if (!lockView) {
+      dragRef.current = { startX: e.clientX, startY: e.clientY, startPanX: panX, startPanY: panY, wasDrag: false };
+      setIsDragging(true);
+    }
+  }, [panX, panY, lockView, lockRoi, roiMode, roiCenterRow, roiCenterCol, screenToImage, roiHitTest]);
 
   const handleMouseMove = React.useCallback((e: React.MouseEvent) => {
-    // Cursor info — same coordinate conversion as Show2D
+    // ROI drag
+    if (isDraggingROI) {
+      const pos = screenToImage(e);
+      if (pos) {
+        const newRow = pos.row - roiDragOffsetRef.current.dRow;
+        const newCol = pos.col - roiDragOffsetRef.current.dCol;
+        setRoiCenter([newRow, newCol]);
+      }
+      return;
+    }
+    // ROI resize
+    if (isDraggingROIResize) {
+      const pos = screenToImage(e);
+      if (pos) {
+        if (isDraggingROIResize === "circle" || isDraggingROIResize === "square") {
+          const dr = pos.row - roiCenterRow, dc = pos.col - roiCenterCol;
+          setRoiRadius(Math.max(2, Math.sqrt(dr * dr + dc * dc)));
+        } else if (isDraggingROIResize === "rect") {
+          let newW = Math.max(4, Math.abs(pos.col - roiCenterCol) * 2);
+          let newH = Math.max(4, Math.abs(pos.row - roiCenterRow) * 2);
+          if (e.shiftKey && resizeAspectRef.current != null) {
+            const aspect = resizeAspectRef.current;
+            if (newW / newH > aspect) newH = Math.max(4, Math.round(newW / aspect));
+            else newW = Math.max(4, Math.round(newH * aspect));
+          }
+          setRoiWidth(newW);
+          setRoiHeight(newH);
+        }
+      }
+      return;
+    }
+
+    // Fast-path: skip cursor readout during pan drag for 60fps
+    if (isDragging) {
+      const dx = e.clientX - dragRef.current.startX;
+      const dy = e.clientY - dragRef.current.startY;
+      if (Math.abs(dx) > 3 || Math.abs(dy) > 3) dragRef.current.wasDrag = true;
+      setPanX(dragRef.current.startPanX + dx);
+      setPanY(dragRef.current.startPanY + dy);
+      return;
+    }
+
+    // Cursor info (only when not dragging)
     const canvas = canvasRef.current;
     if (canvas && width && height) {
       const rect = canvas.getBoundingClientRect();
@@ -736,22 +1043,18 @@ function ShowComplex2D() {
         setCursorInfo(null);
       }
     }
-
-    if (isDragging) {
-      const dx = e.clientX - dragRef.current.startX;
-      const dy = e.clientY - dragRef.current.startY;
-      if (Math.abs(dx) > 3 || Math.abs(dy) > 3) dragRef.current.wasDrag = true;
-      setPanX(dragRef.current.startPanX + dx);
-      setPanY(dragRef.current.startPanY + dy);
-    }
-  }, [isDragging, canvasW, canvasH, width, height, zoom, panX, panY]);
+  }, [isDragging, isDraggingROI, isDraggingROIResize, canvasW, canvasH, width, height, zoom, panX, panY, screenToImage, roiCenterRow, roiCenterCol, setRoiCenter, setRoiRadius, setRoiWidth, setRoiHeight]);
 
   const handleMouseUp = React.useCallback(() => {
     setIsDragging(false);
+    setIsDraggingROI(false);
+    setIsDraggingROIResize(null);
   }, []);
 
   const handleMouseLeave = React.useCallback(() => {
     setIsDragging(false);
+    setIsDraggingROI(false);
+    setIsDraggingROIResize(null);
     setCursorInfo(null);
   }, []);
 
@@ -826,20 +1129,231 @@ function ShowComplex2D() {
 
   React.useEffect(() => {
     if (!isResizing) return;
+    let rafId = 0;
+    let latestW = resizeRef.current.startW;
+    const aspect = height / width;
     const onMove = (e: MouseEvent) => {
       const dx = e.clientX - resizeRef.current.startX;
       const dy = e.clientY - resizeRef.current.startY;
       const delta = Math.max(dx, dy);
-      const newW = Math.max(200, resizeRef.current.startW + delta);
-      const aspect = height / width;
-      setCanvasW(newW);
-      setCanvasH(Math.round(newW * aspect));
+      latestW = Math.max(200, resizeRef.current.startW + delta);
+      if (!rafId) {
+        rafId = requestAnimationFrame(() => {
+          rafId = 0;
+          setCanvasW(latestW);
+          setCanvasH(Math.round(latestW * aspect));
+        });
+      }
     };
-    const onUp = () => setIsResizing(false);
+    const onUp = () => {
+      if (rafId) { cancelAnimationFrame(rafId); rafId = 0; }
+      setCanvasW(latestW);
+      setCanvasH(Math.round(latestW * aspect));
+      setIsResizing(false);
+    };
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
-    return () => { window.removeEventListener("mousemove", onMove); window.removeEventListener("mouseup", onUp); };
+    return () => { if (rafId) cancelAnimationFrame(rafId); window.removeEventListener("mousemove", onMove); window.removeEventListener("mouseup", onUp); };
   }, [isResizing, width, height]);
+
+  // ============================================================================
+  // FFT overlay (d-spacing crosshair)
+  // ============================================================================
+  React.useEffect(() => {
+    const overlay = fftOverlayRef.current;
+    if (!overlay || !effectiveShowFft) return;
+    const ctx = overlay.getContext("2d");
+    if (!ctx) return;
+    overlay.width = Math.round(canvasW * DPR);
+    overlay.height = Math.round(canvasH * DPR);
+    ctx.clearRect(0, 0, overlay.width, overlay.height);
+
+    const fftW = fftCropDims?.fftWidth ?? nextPow2(width);
+    const fftH = fftCropDims?.fftHeight ?? nextPow2(height);
+
+    // D-spacing crosshair marker
+    if (fftClickInfo) {
+      ctx.save();
+      ctx.scale(DPR, DPR);
+      // Map FFT image coords to screen coords using the center-based transform
+      const scaleX = canvasW / fftW;
+      const scaleY = canvasH / fftH;
+      const screenX = canvasW / 2 + fftPanX + (fftClickInfo.col - fftW / 2) * fftZoom * scaleX;
+      const screenY = canvasH / 2 + fftPanY + (fftClickInfo.row - fftH / 2) * fftZoom * scaleY;
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.9)";
+      ctx.shadowColor = "rgba(0, 0, 0, 0.6)";
+      ctx.shadowBlur = 2;
+      ctx.lineWidth = 1.5;
+      const r = 8;
+      ctx.beginPath();
+      ctx.moveTo(screenX - r, screenY); ctx.lineTo(screenX - 3, screenY);
+      ctx.moveTo(screenX + 3, screenY); ctx.lineTo(screenX + r, screenY);
+      ctx.moveTo(screenX, screenY - r); ctx.lineTo(screenX, screenY - 3);
+      ctx.moveTo(screenX, screenY + 3); ctx.lineTo(screenX, screenY + r);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(screenX, screenY, 4, 0, Math.PI * 2);
+      ctx.stroke();
+      if (fftClickInfo.dSpacing != null) {
+        const d = fftClickInfo.dSpacing;
+        const label = d >= 10 ? `d = ${(d / 10).toFixed(2)} nm` : `d = ${d.toFixed(2)} Å`;
+        ctx.font = "bold 11px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+        ctx.fillStyle = "white";
+        ctx.textAlign = "left";
+        ctx.textBaseline = "bottom";
+        ctx.fillText(label, screenX + 10, screenY - 4);
+      }
+      ctx.restore();
+    }
+
+    // Reciprocal-space scale bar
+    if (pixelSize > 0) {
+      const fftPixelSize = 1 / (fftW * pixelSize);
+      drawFFTScaleBarHiDPI(overlay, DPR, fftZoom, fftPixelSize, fftW);
+    }
+  }, [effectiveShowFft, fftZoom, fftPanX, fftPanY, canvasW, canvasH, pixelSize, width, height,
+      fftClickInfo, fftCropDims]);
+
+  // ============================================================================
+  // FFT mouse handlers (zoom/pan + d-spacing click)
+  // ============================================================================
+
+  // Convert FFT canvas mouse position to FFT image pixel coordinates
+  // Accounts for center-based transform: translate(canvasW/2 + fftPanX, ...) scale(fftZoom * scaleX, ...)
+  const fftScreenToImg = (e: React.MouseEvent): { col: number; row: number } | null => {
+    const canvas = fftCanvasRef.current;
+    if (!canvas) return null;
+    const rect = canvas.getBoundingClientRect();
+    const mouseX = (e.clientX - rect.left) * (canvas.width / rect.width);
+    const mouseY = (e.clientY - rect.top) * (canvas.height / rect.height);
+    const fftW = fftCropDims?.fftWidth ?? nextPow2(width);
+    const fftH = fftCropDims?.fftHeight ?? nextPow2(height);
+    const scaleX = canvasW / fftW;
+    const scaleY = canvasH / fftH;
+    const imgCol = (mouseX - canvasW / 2 - fftPanX) / (fftZoom * scaleX) + fftW / 2;
+    const imgRow = (mouseY - canvasH / 2 - fftPanY) / (fftZoom * scaleY) + fftH / 2;
+    if (imgCol >= 0 && imgCol < fftW && imgRow >= 0 && imgRow < fftH) {
+      return { col: imgCol, row: imgRow };
+    }
+    return null;
+  };
+
+  const handleFftMouseDown = (e: React.MouseEvent) => {
+    if (lockView) return;
+    fftClickStartRef.current = { x: e.clientX, y: e.clientY };
+    setIsFftDragging(true);
+    setFftPanStart({ x: e.clientX, y: e.clientY, pX: fftPanX, pY: fftPanY });
+  };
+
+  const handleFftMouseMove = (e: React.MouseEvent) => {
+    if (lockView) return;
+    if (isFftDragging && fftPanStart) {
+      const canvas = fftCanvasRef.current;
+      if (!canvas) return;
+      const rect = canvas.getBoundingClientRect();
+      const scaleX = canvas.width / rect.width;
+      const scaleY = canvas.height / rect.height;
+      const dx = (e.clientX - fftPanStart.x) * scaleX;
+      const dy = (e.clientY - fftPanStart.y) * scaleY;
+      setFftPanX(fftPanStart.pX + dx);
+      setFftPanY(fftPanStart.pY + dy);
+    }
+  };
+
+  const handleFftMouseUp = (e: React.MouseEvent) => {
+    if (lockView) {
+      fftClickStartRef.current = null;
+      setIsFftDragging(false);
+      setFftPanStart(null);
+      return;
+    }
+    // Click detection for d-spacing measurement
+    if (fftClickStartRef.current) {
+      const dx = e.clientX - fftClickStartRef.current.x;
+      const dy = e.clientY - fftClickStartRef.current.y;
+      if (Math.sqrt(dx * dx + dy * dy) < 3) {
+        const pos = fftScreenToImg(e);
+        if (pos) {
+          const fftW = fftCropDims?.fftWidth ?? nextPow2(width);
+          const fftH = fftCropDims?.fftHeight ?? nextPow2(height);
+          let imgCol = pos.col;
+          let imgRow = pos.row;
+          if (fftMagRef.current) {
+            const snapped = findFFTPeak(fftMagRef.current, fftW, fftH, imgCol, imgRow, FFT_SNAP_RADIUS);
+            imgCol = snapped.col;
+            imgRow = snapped.row;
+          }
+          const halfW = Math.floor(fftW / 2);
+          const halfH = Math.floor(fftH / 2);
+          const dcol = imgCol - halfW;
+          const drow = imgRow - halfH;
+          const distPx = Math.sqrt(dcol * dcol + drow * drow);
+          if (distPx < 1) {
+            setFftClickInfo(null);
+          } else {
+            let spatialFreq: number | null = null;
+            let dSpacing: number | null = null;
+            if (pixelSize > 0) {
+              const paddedW = nextPow2(fftW);
+              const paddedH = nextPow2(fftH);
+              const binC = ((Math.round(imgCol) - halfW) % fftW + fftW) % fftW;
+              const binR = ((Math.round(imgRow) - halfH) % fftH + fftH) % fftH;
+              const freqC = binC <= paddedW / 2 ? binC / (paddedW * pixelSize) : (binC - paddedW) / (paddedW * pixelSize);
+              const freqR = binR <= paddedH / 2 ? binR / (paddedH * pixelSize) : (binR - paddedH) / (paddedH * pixelSize);
+              spatialFreq = Math.sqrt(freqC * freqC + freqR * freqR);
+              dSpacing = spatialFreq > 0 ? 1 / spatialFreq : null;
+            }
+            setFftClickInfo({ row: imgRow, col: imgCol, distPx, spatialFreq, dSpacing });
+          }
+        }
+      }
+      fftClickStartRef.current = null;
+    }
+    setIsFftDragging(false);
+    setFftPanStart(null);
+  };
+
+  const handleFftWheel = React.useCallback((e: WheelEvent) => {
+    e.preventDefault();
+    if (lockView) return;
+    const canvas = fftCanvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const mouseX = (e.clientX - rect.left) * (canvas.width / rect.width);
+    const mouseY = (e.clientY - rect.top) * (canvas.height / rect.height);
+    const zoomFactor = e.deltaY > 0 ? 0.9 : 1.1;
+    const newZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, fftZoom * zoomFactor));
+    const zoomRatio = newZoom / fftZoom;
+    // Zoom centered on mouse: adjust pan so the image point under the cursor stays fixed
+    const cx = canvasW / 2;
+    const cy = canvasH / 2;
+    const newPanX = (mouseX - cx) - ((mouseX - cx) - fftPanX) * zoomRatio;
+    const newPanY = (mouseY - cy) - ((mouseY - cy) - fftPanY) * zoomRatio;
+    setFftZoom(newZoom);
+    setFftPanX(newPanX);
+    setFftPanY(newPanY);
+  }, [fftZoom, fftPanX, fftPanY, canvasW, canvasH, lockView]);
+
+  const handleFftReset = () => {
+    if (lockView) return;
+    setFftZoom(3);
+    setFftPanX(0);
+    setFftPanY(0);
+    setFftClickInfo(null);
+  };
+
+  // Prevent scroll on FFT canvas
+  React.useEffect(() => {
+    const el = fftContainerRef.current;
+    if (!el || !effectiveShowFft) return;
+    el.addEventListener("wheel", handleFftWheel, { passive: false });
+    return () => el.removeEventListener("wheel", handleFftWheel);
+  }, [handleFftWheel, effectiveShowFft]);
+
+  // Clear d-spacing marker when display mode or ROI changes
+  React.useEffect(() => {
+    setFftClickInfo(null);
+  }, [displayMode, roiMode, roiCenterRow, roiCenterCol, roiRadius, roiWidth, roiHeight]);
 
   // ============================================================================
   // Export figure
@@ -952,10 +1466,11 @@ function ShowComplex2D() {
             <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>Auto: Percentile-based contrast (clips outliers). Disabled for phase/HSV modes.</Typography>
             <Typography sx={{ fontSize: 11, fontWeight: "bold", mt: 0.5 }}>Keyboard</Typography>
             <KeyboardShortcuts items={[
+              ["R", "Reset zoom & pan"],
+              ["F", "Toggle FFT"],
               ["Scroll", "Zoom in/out"],
               ["Drag", "Pan image"],
               ["Dbl-click", "Reset view"],
-              ["R", "Reset zoom & pan"],
             ]} />
           </Box>} />
           <ControlCustomizer
@@ -969,7 +1484,7 @@ function ShowComplex2D() {
         </Typography>
 
         {/* Controls row */}
-        <Stack direction="row" alignItems="center" spacing={`${SPACING.SM}px`} sx={{ mb: `${SPACING.XS}px`, height: 28, maxWidth: canvasW }}>
+        <Stack direction="row" alignItems="center" spacing={`${SPACING.SM}px`} sx={{ mb: `${SPACING.XS}px`, height: 28 }}>
           {!hideFft && (
             <>
               <Typography sx={{ ...typography.label, fontSize: 10 }}>FFT:</Typography>
@@ -1018,7 +1533,7 @@ function ShowComplex2D() {
 
         {/* Stats bar */}
         {!hideStats && showStats && (
-          <Box sx={{ mt: `${SPACING.XS}px`, px: 1, py: 0.5, bgcolor: themeColors.bgAlt, display: "flex", gap: 2, alignItems: "center", maxWidth: canvasW, boxSizing: "border-box", overflow: "hidden", whiteSpace: "nowrap", opacity: lockStats ? 0.5 : 1 }}>
+          <Box sx={{ mt: `${SPACING.XS}px`, px: 1, py: 0.5, bgcolor: themeColors.bgAlt, display: "flex", gap: 2, alignItems: "center", boxSizing: "border-box", overflow: "hidden", whiteSpace: "nowrap", opacity: lockStats ? 0.5 : 1 }}>
             <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Mean <Box component="span" sx={{ color: themeColors.accent }}>{formatNumber(statsMean)}</Box></Typography>
             <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Min <Box component="span" sx={{ color: themeColors.accent }}>{formatNumber(statsMin)}</Box></Typography>
             <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Max <Box component="span" sx={{ color: themeColors.accent }}>{formatNumber(statsMax)}</Box></Typography>
@@ -1028,7 +1543,7 @@ function ShowComplex2D() {
 
         {/* Controls: two rows left + histogram right (matches Show2D layout) */}
         {showControls && (
-          <Box sx={{ mt: `${SPACING.SM}px`, display: "flex", flexDirection: "column", gap: `${SPACING.XS}px`, maxWidth: canvasW, boxSizing: "border-box" }}>
+          <Box sx={{ mt: `${SPACING.SM}px`, display: "flex", flexDirection: "column", gap: `${SPACING.XS}px`, boxSizing: "border-box" }}>
             <Box sx={{ display: "flex", gap: `${SPACING.SM}px` }}>
               <Box sx={{ display: "flex", flexDirection: "column", gap: `${SPACING.XS}px`, flex: 1, justifyContent: "center" }}>
                 {/* Row 1: Scale + Color + Mode */}
@@ -1065,6 +1580,31 @@ function ShowComplex2D() {
                     )}
                   </Box>
                 )}
+                {/* Row 3: ROI */}
+                {!hideRoi && (
+                  <Box sx={{ ...controlRow, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, opacity: lockRoi ? 0.5 : 1, pointerEvents: lockRoi ? "none" : "auto" }}>
+                    <Typography sx={{ ...typography.label, fontSize: 10 }}>ROI:</Typography>
+                    <Select disabled={lockRoi} size="small" value={roiMode} onChange={(e) => { if (!lockRoi) { if (e.target.value !== "off") lastRoiModeRef.current = e.target.value; setRoiMode(e.target.value); } }} MenuProps={themedMenuProps} sx={{ ...themedSelect, minWidth: 60 }}>
+                      <MenuItem value="off">Off</MenuItem>
+                      <MenuItem value="circle">Circle</MenuItem>
+                      <MenuItem value="square">Square</MenuItem>
+                      <MenuItem value="rect">Rect</MenuItem>
+                    </Select>
+                    {roiMode === "rect" ? (
+                      <>
+                        <Typography sx={{ ...typography.label, fontSize: 10 }}>W:</Typography>
+                        <Slider disabled={lockRoi} value={roiWidth} min={4} max={width} step={1} onChange={(_, v) => setRoiWidth(v as number)} size="small" sx={{ width: 60, py: 0, "& .MuiSlider-thumb": { width: 8, height: 8 }, "& .MuiSlider-rail": { height: 2 }, "& .MuiSlider-track": { height: 2 } }} />
+                        <Typography sx={{ ...typography.label, fontSize: 10 }}>H:</Typography>
+                        <Slider disabled={lockRoi} value={roiHeight} min={4} max={height} step={1} onChange={(_, v) => setRoiHeight(v as number)} size="small" sx={{ width: 60, py: 0, "& .MuiSlider-thumb": { width: 8, height: 8 }, "& .MuiSlider-rail": { height: 2 }, "& .MuiSlider-track": { height: 2 } }} />
+                      </>
+                    ) : roiMode !== "off" && (
+                      <>
+                        <Typography sx={{ ...typography.label, fontSize: 10 }}>R:</Typography>
+                        <Slider disabled={lockRoi} value={roiRadius} min={2} max={Math.min(width, height) / 2} step={1} onChange={(_, v) => setRoiRadius(v as number)} size="small" sx={{ width: 80, py: 0, "& .MuiSlider-thumb": { width: 8, height: 8 }, "& .MuiSlider-rail": { height: 2 }, "& .MuiSlider-track": { height: 2 } }} />
+                      </>
+                    )}
+                  </Box>
+                )}
               </Box>
               {!hideHistogram && (
                 <Box sx={{ opacity: lockHistogram ? 0.5 : 1, pointerEvents: lockHistogram ? "none" : "auto" }}>
@@ -1086,17 +1626,48 @@ function ShowComplex2D() {
         {/* FFT Panel — side panel (same layout as Show2D) */}
         {effectiveShowFft && (
           <Box sx={{ width: canvasW }}>
-            {/* Spacer — matches main panel title row height */}
-            <Box sx={{ mb: `${SPACING.XS}px`, height: 16 }} />
+            {/* FFT label — shows "ROI FFT (WxH)" when ROI active */}
+            <Box sx={{ mb: `${SPACING.XS}px`, height: 16, display: "flex", alignItems: "center" }}>
+              {fftCropDims ? (
+                <Typography sx={{ fontSize: 10, fontFamily: "monospace", color: accentGreen, fontWeight: "bold" }}>
+                  ROI FFT ({fftCropDims.cropWidth}×{fftCropDims.cropHeight})
+                </Typography>
+              ) : (
+                <Typography sx={{ fontSize: 10, fontFamily: "monospace", color: themeColors.textMuted }}>
+                  FFT
+                </Typography>
+              )}
+            </Box>
             {/* Controls row — matches main panel controls row height */}
             <Stack direction="row" justifyContent="flex-end" alignItems="center" sx={{ mb: `${SPACING.XS}px`, height: 28 }}>
               {!hideView && (
-                <Button size="small" sx={compactButton} disabled={lockView || (fftZoom === 3 && fftPanX === 0 && fftPanY === 0)} onClick={() => { setFftZoom(3); setFftPanX(0); setFftPanY(0); }}>Reset</Button>
+                <Button size="small" sx={compactButton} disabled={lockView || (fftZoom === 3 && fftPanX === 0 && fftPanY === 0)} onClick={handleFftReset}>Reset</Button>
               )}
             </Stack>
-            <Box ref={fftContainerRef} sx={{ position: "relative", border: `1px solid ${borderColor}`, bgcolor: "#000", cursor: lockView ? "default" : "grab", width: canvasW, height: canvasH }}>
+            <Box
+              ref={fftContainerRef}
+              sx={{ position: "relative", border: `1px solid ${borderColor}`, bgcolor: "#000", cursor: lockView ? "default" : (isFftDragging ? "grabbing" : "grab"), width: canvasW, height: canvasH }}
+              onMouseDown={lockView ? undefined : handleFftMouseDown}
+              onMouseMove={lockView ? undefined : handleFftMouseMove}
+              onMouseUp={lockView ? undefined : handleFftMouseUp}
+              onMouseLeave={() => { fftClickStartRef.current = null; setIsFftDragging(false); setFftPanStart(null); }}
+              onDoubleClick={lockView ? undefined : handleFftReset}
+            >
               <canvas ref={fftCanvasRef} width={canvasW} height={canvasH} style={{ width: canvasW, height: canvasH, imageRendering: "pixelated" }} />
+              <canvas ref={fftOverlayRef} width={Math.round(canvasW * DPR)} height={Math.round(canvasH * DPR)} style={{ position: "absolute", top: 0, left: 0, width: canvasW, height: canvasH, pointerEvents: "none" }} />
             </Box>
+            {/* FFT d-spacing readout */}
+            {fftClickInfo && (
+              <Box sx={{ mt: `${SPACING.XS}px`, px: 1, py: 0.5, bgcolor: themeColors.bgAlt, display: "flex", gap: 2, alignItems: "center" }}>
+                <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>
+                  {fftClickInfo.dSpacing != null ? (
+                    <>d = <Box component="span" sx={{ color: themeColors.accent, fontWeight: "bold" }}>{fftClickInfo.dSpacing >= 10 ? `${(fftClickInfo.dSpacing / 10).toFixed(2)} nm` : `${fftClickInfo.dSpacing.toFixed(2)} Å`}</Box>{" | |g| = "}<Box component="span" sx={{ color: themeColors.accent }}>{fftClickInfo.spatialFreq!.toFixed(4)} Å⁻¹</Box></>
+                  ) : (
+                    <>dist = <Box component="span" sx={{ color: themeColors.accent }}>{fftClickInfo.distPx.toFixed(1)} px</Box></>
+                  )}
+                </Typography>
+              </Box>
+            )}
             {/* FFT controls + histogram */}
             <Box sx={{ mt: `${SPACING.SM}px`, display: "flex", flexDirection: "column", gap: `${SPACING.XS}px` }}>
               <Box sx={{ display: "flex", gap: `${SPACING.SM}px` }}>

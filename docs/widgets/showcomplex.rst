@@ -51,6 +51,47 @@ Display Modes
    * - ``imag``
      - Imaginary part only
 
+Methods
+-------
+
+.. code-block:: python
+
+   w = ShowComplex2D(data)
+
+   # Replace data (preserves display settings)
+   w.set_image(new_complex_data)
+   w.set_image((real_part, imag_part))  # tuple input also works
+
+   # ROI modes (single-mode pattern)
+   w.roi_circle(row=128, col=128, radius=20)
+   w.roi_square(row=128, col=128, radius=15)
+   w.roi_rect(row=128, col=128, width=30, height=20)
+
+   # Export
+   w.save_image("exit_wave.png")           # current display mode
+   w.save_image("phase.png", display_mode="phase")
+
+Control Groups
+--------------
+
+.. code-block:: python
+
+   # Lock groups (visible but non-interactive)
+   w = ShowComplex2D(
+       data,
+       disable_display=True,
+       disable_roi=True,
+       disable_export=True,
+   )
+
+   # Hide groups entirely
+   w = ShowComplex2D(
+       data,
+       hide_histogram=True,
+       hide_stats=True,
+       hidden_tools=["export"],
+   )
+
 State Persistence
 -----------------
 

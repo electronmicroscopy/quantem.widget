@@ -226,10 +226,8 @@ function computeNCC(
   const margin = 2;
   const area = (h - 2 * margin) * (w - 2 * margin);
   const step = area > 500000 ? Math.max(1, Math.floor(Math.sqrt(area / 500000))) : 1;
-  // Two-pass: first compute means, then NCC
+  // Two-pass without temporary arrays: first compute means, then NCC directly
   let sumA = 0, sumB = 0, n = 0;
-  const aVals: number[] = [];
-  const bVals: number[] = [];
   for (let y = margin; y < h - margin; y += step) {
     for (let x = margin; x < w - margin; x += step) {
       const rx = x - cxB;
@@ -242,28 +240,40 @@ function computeNCC(
       const fx = bx - ix;
       const fy = by - iy;
       const bi = iy * w + ix;
-      const bVal = dataB[bi] * (1 - fx) * (1 - fy) +
-                   dataB[bi + 1] * fx * (1 - fy) +
-                   dataB[bi + w] * (1 - fx) * fy +
-                   dataB[bi + w + 1] * fx * fy;
-      const aVal = dataA[y * w + x];
-      sumA += aVal;
-      sumB += bVal;
-      aVals.push(aVal);
-      bVals.push(bVal);
+      sumA += dataA[y * w + x];
+      sumB += dataB[bi] * (1 - fx) * (1 - fy) +
+              dataB[bi + 1] * fx * (1 - fy) +
+              dataB[bi + w] * (1 - fx) * fy +
+              dataB[bi + w + 1] * fx * fy;
       n++;
     }
   }
   if (n < 10) return 0;
   const meanA = sumA / n;
   const meanB = sumB / n;
+  // Second pass: recompute bilinear interp (cheap ~10 flops/px) to avoid GC from dynamic arrays
   let sumAB = 0, sumA2 = 0, sumB2 = 0;
-  for (let i = 0; i < n; i++) {
-    const a = aVals[i] - meanA;
-    const b = bVals[i] - meanB;
-    sumAB += a * b;
-    sumA2 += a * a;
-    sumB2 += b * b;
+  for (let y = margin; y < h - margin; y += step) {
+    for (let x = margin; x < w - margin; x += step) {
+      const rx = x - cxB;
+      const ry = y - cyB;
+      const bx = cosR * rx - sinR * ry + w / 2;
+      const by = sinR * rx + cosR * ry + h / 2;
+      if (bx < 0 || bx >= w - 1 || by < 0 || by >= h - 1) continue;
+      const ix = Math.floor(bx);
+      const iy = Math.floor(by);
+      const fx = bx - ix;
+      const fy = by - iy;
+      const bi = iy * w + ix;
+      const a = dataA[y * w + x] - meanA;
+      const b = dataB[bi] * (1 - fx) * (1 - fy) +
+                dataB[bi + 1] * fx * (1 - fy) +
+                dataB[bi + w] * (1 - fx) * fy +
+                dataB[bi + w + 1] * fx * fy - meanB;
+      sumAB += a * b;
+      sumA2 += a * a;
+      sumB2 += b * b;
+    }
   }
   const denom = Math.sqrt(sumA2 * sumB2);
   return denom > 0 ? sumAB / denom : 0;
@@ -784,8 +794,22 @@ function Align2D() {
   const rawARef = React.useRef<Float32Array | null>(null);
   const rawBRef = React.useRef<Float32Array | null>(null);
 
+  // Cached colormapped offscreen canvases (avoids recomputing colormap on zoom/pan)
+  const offscreenARef = React.useRef<HTMLCanvasElement | null>(null);
+  const offscreenBRef = React.useRef<HTMLCanvasElement | null>(null);
+  // Cached difference mode offscreen (pre-built, not rebuilt in render loop)
+  const offscreenDiffRef = React.useRef<HTMLCanvasElement | null>(null);
+  const [offscreenDiffVersion, setOffscreenDiffVersion] = React.useState(0);
+
   // Global contrast range (computed from both images)
   const globalRangeRef = React.useRef<{ min: number; max: number }>({ min: 0, max: 1 });
+
+  // Offscreen version counter — incremented when colormapped offscreens are rebuilt.
+  // Layout effects depend on this instead of cmap/vminPct/vmaxPct/getEffectiveRange/etc.
+  const [offscreenVersion, setOffscreenVersion] = React.useState(0);
+  // Cached background fill colors (computed during offscreen build, read by layout effects)
+  const bgFillARef = React.useRef<string>("#000");
+  const bgFillBRef = React.useRef<string>("#000");
 
   // Parse image data
   React.useEffect(() => {
@@ -810,6 +834,7 @@ function Align2D() {
   }, [imageABytes, imageBBytes]);
 
   // Compute FFT magnitudes with autoEnhanceFFT (DC mask + 99.9% percentile)
+  // Does NOT depend on histSource — histogram selection is handled in the effect below.
   React.useEffect(() => {
     if (!showFft) { fftARef.current = null; fftBRef.current = null; return; }
     const a = rawARef.current;
@@ -840,38 +865,31 @@ function Align2D() {
       if (magB[i] > fMax) fMax = magB[i];
     }
     fftRangeRef.current = { min: fMin, max: fMax };
-    // Update histogram to show FFT data
-    setHistogramData(histSource === "a" ? magA : magB);
-    setDataRange({ min: fMin, max: fMax });
-  }, [showFft, imageABytes, imageBBytes, imgW, imgH, histSource]);
+  }, [showFft, imageABytes, imageBBytes, imgW, imgH]);
 
-  // Update histogram source
+  // Unified histogram source effect — handles both FFT and raw data modes
   React.useEffect(() => {
-    if (showFft) return; // FFT mode handles its own histogram above
-    const data = histSource === "a" ? rawARef.current : rawBRef.current;
-    if (!data) return;
-    setHistogramData(data);
-    setDataRange(globalRangeRef.current);
+    if (showFft) {
+      const data = histSource === "a" ? fftARef.current : fftBRef.current;
+      if (data) { setHistogramData(data); setDataRange(fftRangeRef.current); }
+    } else {
+      const data = histSource === "a" ? rawARef.current : rawBRef.current;
+      if (data) { setHistogramData(data); setDataRange(globalRangeRef.current); }
+    }
   }, [imageABytes, imageBBytes, histSource, showFft]);
 
-  // Live NCC computation (throttled during rotation playback)
+  // Live NCC computation (always debounced 100ms — avoids blocking during drag/nudge/rotation)
   const nccTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   React.useEffect(() => {
-    const update = () => {
+    if (nccTimerRef.current) clearTimeout(nccTimerRef.current);
+    nccTimerRef.current = setTimeout(() => {
       const a = rawARef.current;
       const b = rawBRef.current;
       if (!a || !b) return;
-      const ncc = computeNCC(a, b, imgW, imgH, dx, dy, rotation);
-      setNccCurrent(ncc);
-    };
-    if (rotPlaying) {
-      if (nccTimerRef.current) clearTimeout(nccTimerRef.current);
-      nccTimerRef.current = setTimeout(update, 200);
-    } else {
-      update();
-    }
+      setNccCurrent(computeNCC(a, b, imgW, imgH, dx, dy, rotation));
+    }, 100);
     return () => { if (nccTimerRef.current) { clearTimeout(nccTimerRef.current); nccTimerRef.current = null; } };
-  }, [dx, dy, rotation, imageABytes, imageBBytes, imgW, imgH, rotPlaying]);
+  }, [dx, dy, rotation, imageABytes, imageBBytes, imgW, imgH]);
 
   // Memoized difference image (only recomputed when alignment or data changes)
   const differenceImage = React.useMemo(() => {
@@ -892,6 +910,18 @@ function Align2D() {
     }
     return { min: 0, max: dMax > 0 ? dMax : 1 };
   }, [differenceImage]);
+
+  // Pre-build difference offscreen canvas (avoids rebuilding inside merged render loop)
+  React.useEffect(() => {
+    if (!differenceImage || blendMode !== "difference") {
+      offscreenDiffRef.current = null;
+      setOffscreenDiffVersion(v => v + 1);
+      return;
+    }
+    const lut = COLORMAPS[cmap] || COLORMAPS.gray;
+    offscreenDiffRef.current = renderToOffscreen(differenceImage, imgW, imgH, lut, diffRange.min, diffRange.max);
+    setOffscreenDiffVersion(v => v + 1);
+  }, [differenceImage, diffRange, cmap, imgW, imgH, blendMode]);
 
   // Canvas sizing — each panel uses padded dimensions
   const displayScale = mainCanvasSize / Math.max(paddedW, paddedH);
@@ -922,18 +952,29 @@ function Align2D() {
 
   React.useEffect(() => {
     if (!isResizingMain) return;
+    let rafId = 0;
+    let latestSize = resizeStart ? resizeStart.size : mainCanvasSize;
     const handleMouseMove = (e: MouseEvent) => {
       if (!resizeStart) return;
       const delta = Math.max(e.clientX - resizeStart.x, e.clientY - resizeStart.y);
-      setMainCanvasSize(Math.max(150, Math.min(600, resizeStart.size + delta)));
+      latestSize = Math.max(150, Math.min(600, resizeStart.size + delta));
+      if (!rafId) {
+        rafId = requestAnimationFrame(() => {
+          rafId = 0;
+          setMainCanvasSize(latestSize);
+        });
+      }
     };
     const handleMouseUp = () => {
+      if (rafId) { cancelAnimationFrame(rafId); rafId = 0; }
+      setMainCanvasSize(latestSize);
       setIsResizingMain(false);
       setResizeStart(null);
     };
     document.addEventListener("mousemove", handleMouseMove);
     document.addEventListener("mouseup", handleMouseUp);
     return () => {
+      if (rafId) cancelAnimationFrame(rafId);
       document.removeEventListener("mousemove", handleMouseMove);
       document.removeEventListener("mouseup", handleMouseUp);
     };
@@ -967,48 +1008,60 @@ function Align2D() {
     return sliderRange(gMin, gMax, vminPct, vmaxPct);
   }, [vminPct, vmaxPct]);
 
-  // Render Image A canvas (with padding + zoom/pan synced from merged view)
+  // Build colormapped offscreen canvases (expensive: colormap LUT application)
+  // Excludes zoom/pan so dragging only triggers the cheap redraws below.
+  // Also caches background fill colors so layout effects don't depend on cmap/vmin/vmax.
   React.useEffect(() => {
+    if (!rawARef.current || !rawBRef.current || !imgW || !imgH) return;
+    const lut = COLORMAPS[cmap] || COLORMAPS.gray;
+    const dataA = showFft && fftARef.current ? fftARef.current : rawARef.current;
+    const dataB = showFft && fftBRef.current ? fftBRef.current : rawBRef.current;
+    const { vmin, vmax } = getEffectiveRange(showFft);
+    offscreenARef.current = buildOffscreen(dataA, imgW, imgH, lut, vmin, vmax);
+    offscreenBRef.current = buildOffscreen(dataB, imgW, imgH, lut, vmin, vmax);
+    // Cache background fill colors for layout effects
+    bgFillARef.current = showFft ? "#000" : getMedianRGB(medianA, lut, vmin, vmax);
+    bgFillBRef.current = showFft ? "#000" : getMedianRGB(medianB, lut, vmin, vmax);
+    setOffscreenVersion(v => v + 1);
+  }, [imageABytes, imageBBytes, imgW, imgH, cmap, vminPct, vmaxPct, showFft, medianA, medianB, buildOffscreen, getEffectiveRange, getMedianRGB]);
+
+  // Render Image A canvas (with padding + zoom/pan synced from merged view)
+  // useLayoutEffect prevents black flash when canvas dimensions change (resize)
+  React.useLayoutEffect(() => {
     if (!canvasARef.current || !rawARef.current) return;
+    const offA = offscreenARef.current;
+    if (!offA) return;
     const canvas = canvasARef.current;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
-    const lut = COLORMAPS[cmap] || COLORMAPS.gray;
-    const dataA = showFft && fftARef.current ? fftARef.current : rawARef.current;
-    const { vmin, vmax } = getEffectiveRange(showFft);
-    const off = buildOffscreen(dataA, imgW, imgH, lut, vmin, vmax);
-    if (!off) return;
     ctx.clearRect(0, 0, canvasW, canvasH);
-    ctx.fillStyle = showFft ? "#000" : getMedianRGB(medianA, lut, vmin, vmax);
+    ctx.fillStyle = bgFillARef.current;
     ctx.fillRect(0, 0, canvasW, canvasH);
     ctx.save();
     ctx.translate(panX, panY);
     ctx.scale(zoom, zoom);
     ctx.imageSmoothingEnabled = false;
-    ctx.drawImage(off, 0, 0, imgW, imgH, imgOffsetX, imgOffsetY, imgDisplayW, imgDisplayH);
+    ctx.drawImage(offA, 0, 0, imgW, imgH, imgOffsetX, imgOffsetY, imgDisplayW, imgDisplayH);
     ctx.restore();
-  }, [imageABytes, imgW, imgH, canvasW, canvasH, imgOffsetX, imgOffsetY, imgDisplayW, imgDisplayH, cmap, vminPct, vmaxPct, medianA, showFft, showPanels, zoom, panX, panY, buildOffscreen, getEffectiveRange, getMedianRGB]);
+  }, [offscreenVersion, imgW, imgH, canvasW, canvasH, imgOffsetX, imgOffsetY, imgDisplayW, imgDisplayH, showFft, showPanels, zoom, panX, panY]);
 
   // Render Image B corrected canvas (shifted + zoom/pan synced from merged view)
-  React.useEffect(() => {
+  React.useLayoutEffect(() => {
     if (!canvasBCorrectedRef.current || !rawBRef.current) return;
+    const offB = offscreenBRef.current;
+    if (!offB) return;
     const canvas = canvasBCorrectedRef.current;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
-    const lut = COLORMAPS[cmap] || COLORMAPS.gray;
-    const dataB = showFft && fftBRef.current ? fftBRef.current : rawBRef.current;
-    const { vmin, vmax } = getEffectiveRange(showFft);
-    const off = buildOffscreen(dataB, imgW, imgH, lut, vmin, vmax);
-    if (!off) return;
     ctx.clearRect(0, 0, canvasW, canvasH);
-    ctx.fillStyle = showFft ? "#000" : getMedianRGB(medianB, lut, vmin, vmax);
+    ctx.fillStyle = bgFillBRef.current;
     ctx.fillRect(0, 0, canvasW, canvasH);
     ctx.save();
     ctx.translate(panX, panY);
     ctx.scale(zoom, zoom);
     if (showFft) {
       ctx.imageSmoothingEnabled = false;
-      ctx.drawImage(off, 0, 0, imgW, imgH, imgOffsetX, imgOffsetY, imgDisplayW, imgDisplayH);
+      ctx.drawImage(offB, 0, 0, imgW, imgH, imgOffsetX, imgOffsetY, imgDisplayW, imgDisplayH);
     } else {
       ctx.imageSmoothingEnabled = true;
       const shiftX = dx * displayScale;
@@ -1019,28 +1072,27 @@ function Align2D() {
         ctx.save();
         ctx.translate(cx, cy);
         ctx.rotate(rotation * Math.PI / 180);
-        ctx.drawImage(off, 0, 0, imgW, imgH, -imgDisplayW / 2, -imgDisplayH / 2, imgDisplayW, imgDisplayH);
+        ctx.drawImage(offB, 0, 0, imgW, imgH, -imgDisplayW / 2, -imgDisplayH / 2, imgDisplayW, imgDisplayH);
         ctx.restore();
       } else {
-        ctx.drawImage(off, 0, 0, imgW, imgH, imgOffsetX + shiftX, imgOffsetY + shiftY, imgDisplayW, imgDisplayH);
+        ctx.drawImage(offB, 0, 0, imgW, imgH, imgOffsetX + shiftX, imgOffsetY + shiftY, imgDisplayW, imgDisplayH);
       }
     }
     ctx.restore();
-  }, [imageBBytes, imgW, imgH, canvasW, canvasH, imgOffsetX, imgOffsetY, imgDisplayW, imgDisplayH, cmap, vminPct, vmaxPct, medianB, dx, dy, rotation, displayScale, showFft, showPanels, zoom, panX, panY, buildOffscreen, getEffectiveRange, getMedianRGB]);
+  }, [offscreenVersion, imgW, imgH, canvasW, canvasH, imgOffsetX, imgOffsetY, imgDisplayW, imgDisplayH, dx, dy, rotation, displayScale, showFft, showPanels, zoom, panX, panY]);
 
   // Render merged view (with padding) — supports blend, difference, flicker modes
-  React.useEffect(() => {
+  React.useLayoutEffect(() => {
     if (!mergedCanvasRef.current || !rawARef.current || !rawBRef.current) return;
+    const offA = offscreenARef.current;
+    const offB = offscreenBRef.current;
+    if (!offA || !offB) return;
     const canvas = mergedCanvasRef.current;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
-    const lut = COLORMAPS[cmap] || COLORMAPS.gray;
-    const dataA = showFft && fftARef.current ? fftARef.current : rawARef.current;
-    const dataB = showFft && fftBRef.current ? fftBRef.current : rawBRef.current;
-    const { vmin, vmax } = getEffectiveRange(showFft);
 
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.fillStyle = showFft ? "#000" : getMedianRGB(medianA, lut, vmin, vmax);
+    ctx.fillStyle = bgFillARef.current;
     ctx.fillRect(0, 0, canvasW, canvasH);
 
     ctx.save();
@@ -1050,19 +1102,15 @@ function Align2D() {
     // FFT always uses blend mode
     const activeMode = showFft ? "blend" : blendMode;
 
-    if (activeMode === "difference" && differenceImage) {
-      // Difference: |A - B| with auto-scaled range
-      const offDiff = buildOffscreen(differenceImage, imgW, imgH, lut, diffRange.min, diffRange.max);
+    if (activeMode === "difference") {
+      // Difference: use pre-built offscreen from offscreenDiffRef
+      const offDiff = offscreenDiffRef.current;
       if (offDiff) {
         ctx.imageSmoothingEnabled = false;
         ctx.drawImage(offDiff, 0, 0, imgW, imgH, imgOffsetX, imgOffsetY, imgDisplayW, imgDisplayH);
       }
     } else if (activeMode === "flicker") {
       // Flicker: alternate between A and B
-      const offA = buildOffscreen(dataA, imgW, imgH, lut, vmin, vmax);
-      const offB = buildOffscreen(dataB, imgW, imgH, lut, vmin, vmax);
-      if (!offA || !offB) { ctx.restore(); return; }
-
       if (flickerShowA) {
         ctx.imageSmoothingEnabled = false;
         ctx.drawImage(offA, 0, 0, imgW, imgH, imgOffsetX, imgOffsetY, imgDisplayW, imgDisplayH);
@@ -1084,10 +1132,6 @@ function Align2D() {
       }
     } else {
       // Default: alpha blend
-      const offA = buildOffscreen(dataA, imgW, imgH, lut, vmin, vmax);
-      const offB = buildOffscreen(dataB, imgW, imgH, lut, vmin, vmax);
-      if (!offA || !offB) { ctx.restore(); return; }
-
       ctx.globalAlpha = 1 - opacity;
       ctx.imageSmoothingEnabled = false;
       ctx.drawImage(offA, 0, 0, imgW, imgH, imgOffsetX, imgOffsetY, imgDisplayW, imgDisplayH);
@@ -1116,7 +1160,7 @@ function Align2D() {
     }
 
     ctx.restore();
-  }, [imageABytes, imageBBytes, imgW, imgH, canvasW, canvasH, imgOffsetX, imgOffsetY, imgDisplayW, imgDisplayH, cmap, vminPct, vmaxPct, opacity, dx, dy, rotation, zoom, panX, panY, displayScale, medianA, medianB, showFft, blendMode, flickerShowA, differenceImage, diffRange, buildOffscreen, getEffectiveRange, getMedianRGB]);
+  }, [offscreenVersion, offscreenDiffVersion, imgW, imgH, canvasW, canvasH, imgOffsetX, imgOffsetY, imgDisplayW, imgDisplayH, opacity, dx, dy, rotation, zoom, panX, panY, displayScale, showFft, blendMode, flickerShowA]);
 
   // Scale bar on merged view
   React.useEffect(() => {
@@ -1228,8 +1272,8 @@ function Align2D() {
     switch (e.key) {
       case "ArrowLeft": case "a": case "A": if (lockAlignment) return; e.preventDefault(); clampDx(dx - step); break;
       case "ArrowRight": case "d": case "D": if (lockAlignment) return; e.preventDefault(); clampDx(dx + step); break;
-      case "w": case "W": if (lockAlignment) return; e.preventDefault(); clampDy(dy - step); break;
-      case "s": case "S": if (lockAlignment) return; e.preventDefault(); clampDy(dy + step); break;
+      case "ArrowUp": case "w": case "W": if (lockAlignment) return; e.preventDefault(); clampDy(dy - step); break;
+      case "ArrowDown": case "s": case "S": if (lockAlignment) return; e.preventDefault(); clampDy(dy + step); break;
       case "r": case "R": if (lockView) return; handleDoubleClick(); break;
       case " ": if (lockAlignment) return; e.preventDefault(); setRotPlaying((p) => !p); break;
     }
@@ -1288,7 +1332,7 @@ function Align2D() {
           ["Scroll", "Zoom"],
           ["Shift + scroll", "Rotate image B"],
           ["\u2190 \u2192 / A D", "Nudge dx (Shift: 0.1px)"],
-          ["W / S", "Nudge dy (Shift: 0.1px)"],
+          ["\u2191 \u2193 / W S", "Nudge dy (Shift: 0.1px)"],
           ["Space", "Play / pause rotation"],
           ["R", "Reset zoom / pan"],
           ["Dbl-click pad", "Reset offset"],

@@ -29,24 +29,12 @@ Features
 - **Grid lines** — Toggle grid with ``show_grid=True``
 - **Interactive zoom/pan** — Scroll to zoom, drag to pan, R to reset
 - **Crosshair** — Snap-to-nearest cursor readout with trace label
+- **Peak detection** — Find peaks with ``find_peaks()``, measure FWHM, export to CSV
 - **Export** — Publication PNG (white background) or screenshot PNG
+- **Tool lock/hide** — ``disable_*`` / ``hide_*`` API for shared read-only workflows
 
-State Persistence
------------------
-
-.. code-block:: python
-
-   w = Show1D(spectrum, title="EELS", log_scale=True)
-
-   w.summary()          # Print human-readable state
-   w.state_dict()       # Get all settings as a dict
-   w.save("state.json") # Save versioned envelope JSON file
-
-   # Restore from file or dict
-   w2 = Show1D(spectrum, state="state.json")
-
-Mutation Methods
-----------------
+Methods
+-------
 
 .. code-block:: python
 
@@ -61,6 +49,57 @@ Mutation Methods
 
    # Clear all traces
    w.clear()
+
+   # Peak detection
+   w.find_peaks(trace_idx=0, height=0.5, distance=10)
+   w.add_peak(x=42.0, trace_idx=0, label="Fe-K")
+   w.remove_peak(0)
+   w.clear_peaks()
+   w.measure_fwhm(peak_idx=0)
+   w.export_peaks("peaks.csv")
+
+   # Properties
+   w.peaks             # list of detected peaks
+   w.selected_peak_data  # data for the selected peak
+
+   # Export
+   w.save_image("spectrum.png")       # publication figure
+   w.save_image("spectrum.pdf")       # PDF format
+
+Control Groups
+--------------
+
+.. code-block:: python
+
+   # Lock groups (visible but non-interactive)
+   w = Show1D(
+       data,
+       disable_display=True,
+       disable_peaks=True,
+       disable_export=True,
+   )
+
+   # Hide groups entirely
+   w = Show1D(
+       data,
+       hide_stats=True,
+       hide_peaks=True,
+       hide_export=True,
+   )
+
+State Persistence
+-----------------
+
+.. code-block:: python
+
+   w = Show1D(spectrum, title="EELS", log_scale=True)
+
+   w.summary()          # Print human-readable state
+   w.state_dict()       # Get all settings as a dict
+   w.save("state.json") # Save versioned envelope JSON file
+
+   # Restore from file or dict
+   w2 = Show1D(spectrum, state="state.json")
 
 Examples
 --------

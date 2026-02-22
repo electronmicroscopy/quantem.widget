@@ -165,7 +165,12 @@ After modifying widget UI: `npm run build` → run smoke tests → visually veri
 
 ```bash
 pip install -e ".[docs]"
+
+# One-shot build
 sphinx-build docs docs/_build/html
+
+# Live reload (rebuilds on file change, opens browser)
+sphinx-autobuild docs docs/_build/html --open-browser --port 8322
 ```
 
 ### TestPyPI

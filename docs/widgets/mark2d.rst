@@ -61,6 +61,23 @@ Methods
    w.add_roi(128, 128, shape="circle", radius=20)
    center = w.roi_center()  # (row, col)
    radius = w.roi_radius()  # int for circle/square, None for rectangle
+   size = w.roi_size()      # (width, height)
+   w.clear_rois()
+
+   # Line profile
+   w.set_profile((10, 10), (200, 200))
+   w.profile_values    # Float32Array of intensity along line
+   w.profile_distance  # calibrated length
+   w.clear_profile()
+
+   # Point data access
+   w.points_as_array()  # NumPy array of (row, col)
+   w.points_as_dict()   # list of dicts
+   w.clear_points()
+   w.points_enabled = False  # disable point picking
+
+   # Export
+   w.save_image("annotated.png", include_markers=True)
 
    # Equivalent explicit list form:
    # Mark2D(image, disabled_tools=["points", "roi", "display"])
@@ -84,7 +101,6 @@ Examples
 --------
 
 - :doc:`Simple demo </examples/mark2d/mark2d_simple>`
-- :doc:`Disabled tools demo </examples/mark2d/mark2d_disabled_tools>`
 - :doc:`All features </examples/mark2d/mark2d_all_features>`
 
 API Reference

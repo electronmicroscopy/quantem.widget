@@ -30,17 +30,25 @@ Features
 - **Save merged result** to Zarr zip archive with ``.save_result(path)``
 - **Open in Show4DSTEM** with ``.to_show4dstem()``
 
-Merge Workflow
---------------
+Methods
+-------
 
 .. code-block:: python
 
    w = Merge4DSTEM(sources)
+
+   # Run the merge
    w.merge()                          # stack on GPU
+
+   # Access results
    w.result                           # -> Dataset4dstem (5D)
    w.result_array                     # -> numpy (5D)
-   w.save_result("merged.zarr.zip")   # save to disk
-   w.to_show4dstem()                  # open in viewer
+
+   # Save to disk
+   w.save_result("merged.zarr.zip")
+
+   # Open result in Show4DSTEM viewer
+   w.to_show4dstem()
 
 State Persistence
 -----------------

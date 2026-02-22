@@ -19,10 +19,24 @@ extensions = [
 ]
 
 templates_path = ["_templates"]
-exclude_patterns = ["_build", "Thumbs.db", ".DS_Store"]
+exclude_patterns = [
+    "_build",
+    "Thumbs.db",
+    ".DS_Store",
+    # Extra notebooks kept for internal use but excluded from published docs.
+    # Only simple + all_features notebooks are published per widget.
+    "examples/show2d/show2d_load_*.ipynb",
+    "examples/show3d/show3d_load_*.ipynb",
+    "examples/show4dstem/show4dstem_export_reproducibility.ipynb",
+    "examples/show4dstem/show4dstem_sparse_*.ipynb",
+    "examples/show4dstem/show4dstem_batch_*.ipynb",
+    "examples/show4dstem/notebooks",
+    "examples/mark2d/mark2d_disabled_tools.ipynb",
+]
 
 html_theme = "pydata_sphinx_theme"
 html_static_path = ["_static"]
+html_css_files = ["custom.css"]
 html_theme_options = {
     "github_url": "https://github.com/bobleesj/quantem.widget",
     "show_toc_level": 2,
@@ -60,6 +74,7 @@ numpydoc_class_members_toctree = False
 nbsphinx_execute = "auto"
 nbsphinx_timeout = 120
 nbsphinx_kernel_name = "python3"
+nbsphinx_prompt_width = "0"
 
 intersphinx_mapping = {
     "python": ("https://docs.python.org/3", None),

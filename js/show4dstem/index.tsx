@@ -1875,14 +1875,57 @@ function Show4DSTEM() {
     ctx.restore();
   }, [fftOffscreenVersion, fftZoom, fftPanX, fftPanY, effectiveShowFft]);
 
-  // Render FFT overlay with high-pass filter circle
+  // Render FFT overlay with d-spacing crosshair marker
   React.useEffect(() => {
     if (!fftOverlayRef.current) return;
     const canvas = fftOverlayRef.current;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-  }, [fftZoom, fftPanX, fftPanY, effectiveShowFft]);
+
+    // D-spacing crosshair marker
+    if (fftClickInfo && effectiveShowFft) {
+      const fftW = fftCropDims?.fftWidth ?? shapeCols;
+      const fftH = fftCropDims?.fftHeight ?? shapeRows;
+      ctx.save();
+      // Convert FFT image coords to canvas coords via zoom/pan transform
+      const screenX = fftPanX + fftZoom * fftClickInfo.col;
+      const screenY = fftPanY + fftZoom * fftClickInfo.row;
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.9)";
+      ctx.shadowColor = "rgba(0, 0, 0, 0.6)";
+      ctx.shadowBlur = 2;
+      ctx.lineWidth = 1.5;
+      // Scale crosshair size relative to canvas (not zoom-dependent)
+      const r = 8 * Math.max(fftW, fftH) / 450;
+      const gap = 3 * Math.max(fftW, fftH) / 450;
+      const dotR = 4 * Math.max(fftW, fftH) / 450;
+      ctx.beginPath();
+      ctx.moveTo(screenX - r, screenY); ctx.lineTo(screenX - gap, screenY);
+      ctx.moveTo(screenX + gap, screenY); ctx.lineTo(screenX + r, screenY);
+      ctx.moveTo(screenX, screenY - r); ctx.lineTo(screenX, screenY - gap);
+      ctx.moveTo(screenX, screenY + gap); ctx.lineTo(screenX, screenY + r);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(screenX, screenY, dotR, 0, Math.PI * 2);
+      ctx.stroke();
+      if (fftClickInfo.dSpacing != null) {
+        const d = fftClickInfo.dSpacing;
+        const label = d >= 10 ? `d = ${(d / 10).toFixed(2)} nm` : `d = ${d.toFixed(2)} \u00C5`;
+        const fontSize = Math.max(10, Math.round(11 * Math.max(fftW, fftH) / 450));
+        ctx.font = `bold ${fontSize}px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif`;
+        ctx.fillStyle = "white";
+        ctx.textAlign = "left";
+        ctx.textBaseline = "bottom";
+        ctx.fillText(label, screenX + r + 4, screenY - gap);
+      }
+      ctx.restore();
+    }
+  }, [fftZoom, fftPanX, fftPanY, effectiveShowFft, fftClickInfo, shapeCols, shapeRows, fftCropDims]);
+
+  // Clear FFT click info when virtual image changes (scan position, VI ROI, etc.)
+  React.useEffect(() => {
+    setFftClickInfo(null);
+  }, [virtualImageBytes]);
 
   // ─────────────────────────────────────────────────────────────────────────
   // High-DPI Scale Bar UI Overlays
@@ -3157,6 +3200,7 @@ function Show4DSTEM() {
     setFftZoom(1);
     setFftPanX(0);
     setFftPanY(0);
+    setFftClickInfo(null);
   };
 
   // FFT drag-to-pan handlers
@@ -4013,6 +4057,28 @@ function Show4DSTEM() {
                 <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Min <Box component="span" sx={{ color: themeColors.accent }}>{formatStat(fftStats[1])}</Box></Typography>
                 <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Max <Box component="span" sx={{ color: themeColors.accent }}>{formatStat(fftStats[2])}</Box></Typography>
                 <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Std <Box component="span" sx={{ color: themeColors.accent }}>{formatStat(fftStats[3])}</Box></Typography>
+              </Box>
+            )}
+
+            {/* FFT D-spacing readout */}
+            {fftClickInfo && (
+              <Box sx={{ mt: `${SPACING.XS}px`, px: 1, py: 0.5, bgcolor: themeColors.bgAlt, display: "flex", gap: 2, alignItems: "center" }}>
+                <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>
+                  Spot <Box component="span" sx={{ color: themeColors.accent }}>({fftClickInfo.row.toFixed(1)}, {fftClickInfo.col.toFixed(1)})</Box>
+                </Typography>
+                <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>
+                  dist <Box component="span" sx={{ color: themeColors.accent }}>{fftClickInfo.distPx.toFixed(1)} px</Box>
+                </Typography>
+                {fftClickInfo.dSpacing != null && (
+                  <Typography sx={{ fontSize: 11, fontWeight: "bold", color: themeColors.accent }}>
+                    d = {fftClickInfo.dSpacing >= 10 ? `${(fftClickInfo.dSpacing / 10).toFixed(2)} nm` : `${fftClickInfo.dSpacing.toFixed(2)} \u00C5`}
+                  </Typography>
+                )}
+                {fftClickInfo.spatialFreq != null && (
+                  <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>
+                    q = <Box component="span" sx={{ color: themeColors.accent }}>{fftClickInfo.spatialFreq.toFixed(4)} {"\u00C5\u207B\u00B9"}</Box>
+                  </Typography>
+                )}
               </Box>
             )}
 

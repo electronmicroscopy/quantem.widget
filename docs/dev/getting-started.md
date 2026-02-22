@@ -45,8 +45,9 @@ python -c "from quantem.widget import Show2D; print('OK')"
 ### JavaScript (layout, rendering, UI)
 
 1. `npm run dev` — watch mode, rebuilds on save
-2. Edit `js/<widget>/index.tsx`
-3. Re-run the notebook cell. No kernel restart needed.
+2. Set `%env ANYWIDGET_HMR=1` in the notebook for live reload without re-running cells
+3. Edit `js/<widget>/index.tsx`
+4. Re-run the notebook cell (or let HMR pick it up automatically)
 
 ### Python (data processing, observers)
 

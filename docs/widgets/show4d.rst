@@ -27,7 +27,6 @@ Features
 - **Scale bars** -- Calibrated for both navigation and signal panels
 - **Snap-to-peak** -- Click near a feature and snap to the local maximum
 - **Custom nav image** -- Override the default mean image
-- **Quick view presets** -- 3 save/load slots (UI buttons or keyboard ``1/2/3``, ``Shift+1/2/3``)
 
 Control Groups
 --------------
@@ -58,8 +57,13 @@ Methods
 
    w = Show4D(data)
 
+   # Replace data (preserves display settings)
+   w.set_image(new_data, nav_image=nav)
+
    # Position control
    w.position = (10, 20)
+   print(w.nav_shape)   # (rows, cols)
+   print(w.sig_shape)   # (rows, cols)
 
    # ROI modes
    w.roi_mode = "circle"
@@ -67,34 +71,34 @@ Methods
    w.roi_center_col = 16.0
    w.roi_radius = 5.0
 
+   # Line profile
+   w.set_profile((0, 0), (31, 31))
+   w.profile_values    # Float32Array of intensity along line
+   w.profile_distance  # calibrated length
+   w.clear_profile()
+
+   # Path animation
+   w.set_path([(0, 0), (10, 10), (20, 20)], interval_ms=100, loop=True)
+   w.raster(step=2, bidirectional=False)
+   w.play()
+   w.pause()
+   w.stop()
+   w.goto(5)
+
+   # Export
+   w.save_image("signal.png", view="signal")
+   w.save_image("nav.png", view="nav")
+
 State Persistence
 -----------------
 
 .. code-block:: python
 
    w = Show4D(data, cmap="viridis", log_scale=True)
-   w.set_view_preset("1", {
-       "navColormap": "viridis",
-       "sigColormap": "plasma",
-       "navScaleMode": "linear",
-       "sigScaleMode": "log",
-       "navVminPct": 5,
-       "navVmaxPct": 95,
-       "sigVminPct": 10,
-       "sigVmaxPct": 90,
-       "roiMode": "circle",
-       "profileActive": True,
-   })
 
    w.summary()          # Print human-readable state
    state = w.state_dict()  # Snapshot full state
    w.save("state.json") # Save versioned envelope JSON file
-
-   # Preset helpers
-   w.list_view_preset_slots()  # ('1',)
-   w.get_view_preset("1")
-   w.clear_view_preset("1")
-   w.reset_view_presets()
 
    # Restore in three ways
    w.load_state_dict(state)              # 1) apply dict in-place

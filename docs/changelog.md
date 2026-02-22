@@ -1,6 +1,6 @@
 # changelog
 
-## Unreleased
+## v0.0.7 (2026-02-21)
 
 ### New widgets
 - **Merge4DSTEM** — stack multiple 4D-STEM datasets along a time axis with GPU-accelerated merge, detector binning, source preview, and Zarr export
@@ -37,6 +37,8 @@
 - **breaking:** mask mode now uses rectangle tool only (brush, ellipse, threshold removed for stability)
 - undo/redo for mask operations (Ctrl+Z / Ctrl+Shift+Z) with 50-step history
 - `brush_size` trait removed from state_dict
+- per-image independent editing (`shared=False`) with Link toggle
+- ArrowUp/ArrowDown nudge, Shift+drag aspect lock, histogram range labels
 
 ### Show2D, Show3D, Mark2D, Show4D, Show4DSTEM, ShowComplex2D, Show3DVolume
 - ROI FFT: FFT shows cropped ROI region with real-time updates during drag
@@ -51,16 +53,8 @@
 ### Show2D, Show3D, Show4D, Show4DSTEM, ShowComplex2D, Show3DVolume
 - Shift+drag rectangle ROI corner locks aspect ratio
 
-### Edit2D
-- per-image independent editing (`shared=False`) with Link toggle
-- ArrowUp/ArrowDown nudge, Shift+drag aspect lock, histogram range labels
-
 ### Show3D, Show4D, Show4DSTEM
 - quick-view presets: save/recall 3 display configurations (`1/2/3`, `Shift+1/2/3`)
-
-## v0.0.8 (2026-02-20)
-
-## v0.0.7 (2026-02-19)
 
 ### Bin
 - `Bin` widget for calibration-aware 4D-STEM binning with BF/ADF QC previews

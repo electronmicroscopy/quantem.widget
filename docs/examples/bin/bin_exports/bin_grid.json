@@ -1,7 +1,7 @@
 {
   "metadata_version": "1.0",
   "widget_name": "Bin",
-  "widget_version": "0.4.0a2",
+  "widget_version": "0.4.0a3",
   "view": "grid",
   "format": "png",
   "export_kind": "single_view_image",
@@ -14,8 +14,6 @@
   },
   "bin_mode": "mean",
   "edge_mode": "crop",
-  "backend": "torch",
-  "device": "cpu",
   "shape": {
     "input": [
       48,

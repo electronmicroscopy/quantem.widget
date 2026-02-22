@@ -43,7 +43,7 @@ class Show3DVolume(anywidget.AnyWidget):
         Tool groups to lock while still showing controls. Supported:
         ``"display"``, ``"histogram"``, ``"playback"``, ``"fft"``,
         ``"navigation"``, ``"stats"``, ``"export"``, ``"view"``,
-        ``"volume"``, ``"all"``.
+        ``"volume"``, ``"all"``
     disable_* : bool, optional
         Convenience flags mirroring ``disabled_tools``.
     hidden_tools : list of str, optional

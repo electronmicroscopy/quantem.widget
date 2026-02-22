@@ -1,0 +1,5 @@
+/* Hide Jupyter In[]/Out[] prompt numbers from rendered notebooks */
+.nbinput .prompt,
+.nboutput .prompt {
+    display: none !important;
+}

@@ -1,7 +1,7 @@
 {
   "metadata_version": "1.0",
   "widget_name": "Bin",
-  "widget_version": "0.4.0a2",
+  "widget_version": "0.4.0a3",
   "format": "gif",
   "export_kind": "before_after_animation",
   "path": "bin_exports/bin_bf_compare.gif",

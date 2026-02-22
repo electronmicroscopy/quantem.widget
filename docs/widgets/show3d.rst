@@ -38,7 +38,6 @@ Features
 - **Export** — Figure/frame PNG, GIF, PNG ZIP, and one-click bundle export (PNG + ROI CSV + state JSON)
 - **File/folder loading** — Build stacks from EMD/PNG/TIFF files with explicit loader functions
 - **Tool customization** — Disable or hide control groups (including playback)
-- **Quick view presets** — 3 save/load slots (UI buttons or keyboard ``1/2/3``, ``Shift+1/2/3``)
 
 Methods
 -------
@@ -111,26 +110,10 @@ State Persistence
 
    w = Show3D(stack, cmap="gray", fps=12, boomerang=True)
    w.bookmarked_frames = [0, 15, 29]
-   w.set_view_preset(1, {
-       "cmap": "viridis",
-       "logScale": False,
-       "autoContrast": True,
-       "imageVminPct": 5,
-       "imageVmaxPct": 95,
-       "showFft": False,
-       "roiActive": True,
-       "profileActive": False,
-   })
 
    w.summary()          # Print human-readable state
    state = w.state_dict()  # Snapshot full state
    w.save("state.json") # Save versioned envelope JSON file
-
-   # Preset helpers
-   w.list_view_preset_slots()  # ('1',)
-   w.get_view_preset(1)
-   w.clear_view_preset(1)
-   w.reset_view_presets()
 
    # Restore in three ways
    w.load_state_dict(state)               # 1) apply dict in-place
@@ -142,10 +125,6 @@ Examples
 
 - :doc:`Simple demo </examples/show3d/show3d_simple>`
 - :doc:`All features </examples/show3d/show3d_all_features>`
-- :doc:`Loading hub </examples/show3d/show3d_load_hub>`
-- :doc:`Load PNG folder </examples/show3d/show3d_load_png_folder>`
-- :doc:`Load TIFF </examples/show3d/show3d_load_tiff>`
-- :doc:`Load EMD </examples/show3d/show3d_load_emd>`
 
 API Reference
 -------------

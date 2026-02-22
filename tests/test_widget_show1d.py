@@ -86,11 +86,11 @@ def test_show1d_title():
 
 def test_show1d_labels_default():
     w = Show1D(np.ones(5, dtype=np.float32))
-    assert w.labels == ["Trace"]
+    assert w.labels == ["Data"]
 
 def test_show1d_labels_multi_default():
     w = Show1D(np.ones((3, 5), dtype=np.float32))
-    assert w.labels == ["Trace 1", "Trace 2", "Trace 3"]
+    assert w.labels == ["Data 1", "Data 2", "Data 3"]
 
 def test_show1d_colors():
     w = Show1D(np.ones(5, dtype=np.float32), colors=["#ff0000"])
@@ -447,85 +447,13 @@ def test_show1d_find_peaks_with_x_values():
 
 
 # =========================================================================
-# find_valleys (local minima)
-# =========================================================================
-def test_show1d_find_valleys_basic():
-    # Data with clear valleys at indices 2 and 6
-    y = np.array([5, 3, 0, 3, 5, 3, 1, 4, 5], dtype=np.float32)
-    w = Show1D(y)
-    w.find_valleys(prominence=1.0)
-    assert len(w.peak_markers) >= 2
-    valley_ys = [m["y"] for m in w.peak_markers]
-    assert 0.0 in valley_ys
-    assert 1.0 in valley_ys
-    # All markers from find_valleys should have type "valley"
-    for m in w.peak_markers:
-        assert m["type"] == "valley"
-
-def test_show1d_find_valleys_with_x():
-    x = np.array([10, 20, 30, 40, 50], dtype=np.float32)
-    y = np.array([5, 1, 5, 0, 5], dtype=np.float32)
-    w = Show1D(y, x=x)
-    w.find_valleys(prominence=1.0)
-    valley_xs = [m["x"] for m in w.peak_markers]
-    assert 40.0 in valley_xs  # deepest valley at x=40
-
-def test_show1d_find_valleys_returns_self():
-    y = np.array([5, 0, 5], dtype=np.float32)
-    w = Show1D(y)
-    result = w.find_valleys(prominence=0.5)
-    assert result is w
-
-def test_show1d_find_valleys_invalid_trace():
-    y = np.array([5, 0, 5], dtype=np.float32)
-    w = Show1D(y)
-    with pytest.raises(IndexError):
-        w.find_valleys(trace_idx=5)
-
-def test_show1d_find_valleys_appends_to_peaks():
-    y = np.array([0, 5, 0, 1, 5, 0], dtype=np.float32)
-    w = Show1D(y)
-    w.find_peaks(prominence=1.0)
-    n_peaks = len(w.peak_markers)
-    w.find_valleys(prominence=0.5)
-    # Should have both peaks and valleys
-    assert len(w.peak_markers) > n_peaks
-
-
-# =========================================================================
-# add_peak search="min" (local minimum search)
-# =========================================================================
-def test_show1d_add_peak_search_min():
-    data = np.array([5.0, 3.0, 1.0, 4.0, 5.0], dtype=np.float32)
-    w = Show1D(data)
-    w.add_peak(2.0, search="min")
-    assert w.peak_markers[0]["y"] == pytest.approx(1.0)
-    assert w.peak_markers[0]["x"] == pytest.approx(2.0)
-    assert w.peak_markers[0]["type"] == "valley"
-
-def test_show1d_add_peak_search_min_with_x():
-    data = np.array([5.0, 1.0, 5.0], dtype=np.float32)
-    x = np.array([100.0, 200.0, 300.0], dtype=np.float32)
-    w = Show1D(data, x=x)
-    w.add_peak(150.0, search="min")
-    assert w.peak_markers[0]["x"] == pytest.approx(200.0)
-    assert w.peak_markers[0]["y"] == pytest.approx(1.0)
-
-def test_show1d_add_peak_search_invalid():
-    data = np.array([1.0, 2.0, 3.0], dtype=np.float32)
-    w = Show1D(data)
-    with pytest.raises(ValueError, match="search must be"):
-        w.add_peak(1.0, search="both")
-
-
-# =========================================================================
 # export_peaks
 # =========================================================================
 def test_show1d_export_peaks_csv(tmp_path):
     y = np.array([0, 5, 0, 3, 0], dtype=np.float32)
     w = Show1D(y)
     w.add_peak(1.0)
-    w.add_peak(3.0, search="min")
+    w.add_peak(3.0)
     path = tmp_path / "peaks.csv"
     result = w.export_peaks(str(path))
     assert result == path
@@ -535,7 +463,6 @@ def test_show1d_export_peaks_csv(tmp_path):
     lines = content.strip().split("\n")
     assert len(lines) == 3  # header + 2 peaks
     assert "peak" in lines[1]
-    assert "valley" in lines[2]
 
 def test_show1d_export_peaks_json(tmp_path):
     y = np.array([0, 5, 0, 3, 0], dtype=np.float32)
@@ -588,7 +515,7 @@ def test_show1d_save_image_with_peaks(tmp_path):
     data = np.array([0, 5, 0, 1, 5, 0], dtype=np.float32)
     w = Show1D(data)
     w.add_peak(1.0)
-    w.add_peak(4.0, search="min")
+    w.add_peak(4.0)
     path = tmp_path / "peaks.png"
     result = w.save_image(path, include_peaks=True)
     assert result == path
@@ -857,3 +784,150 @@ def test_show1d_range_unlock():
     assert w.x_range == [0.5, 2.5]
     w.x_range = []
     assert w.x_range == []
+
+
+# =========================================================================
+# Range Stats (Feature 1+4)
+# =========================================================================
+def test_show1d_range_stats_basic():
+    data = np.array([10.0, 20.0, 30.0, 40.0, 50.0], dtype=np.float32)
+    x = np.array([0.0, 1.0, 2.0, 3.0, 4.0], dtype=np.float32)
+    w = Show1D(data, x=x)
+    w.x_range = [1.0, 3.0]
+    assert len(w.range_stats) == 1
+    rs = w.range_stats[0]
+    assert rs["mean"] == pytest.approx(30.0)
+    assert rs["min"] == pytest.approx(20.0)
+    assert rs["max"] == pytest.approx(40.0)
+    assert rs["n_points"] == 3
+
+
+def test_show1d_range_stats_integral():
+    data = np.array([1.0, 2.0, 3.0, 4.0, 5.0], dtype=np.float32)
+    x = np.array([0.0, 1.0, 2.0, 3.0, 4.0], dtype=np.float32)
+    w = Show1D(data, x=x)
+    w.x_range = [0.0, 4.0]
+    rs = w.range_stats[0]
+    expected = float(np.trapezoid(data, x=x))
+    assert rs["integral"] == pytest.approx(expected, rel=1e-5)
+
+
+def test_show1d_range_stats_cleared_when_empty():
+    data = np.array([1.0, 2.0, 3.0], dtype=np.float32)
+    w = Show1D(data)
+    w.x_range = [0.0, 2.0]
+    assert len(w.range_stats) == 1
+    w.x_range = []
+    assert w.range_stats == []
+
+
+def test_show1d_range_stats_with_custom_x():
+    data = np.array([1.0, 5.0, 3.0, 7.0, 2.0], dtype=np.float32)
+    x = np.array([100.0, 200.0, 300.0, 400.0, 500.0], dtype=np.float32)
+    w = Show1D(data, x=x)
+    w.x_range = [200.0, 400.0]
+    rs = w.range_stats[0]
+    assert rs["n_points"] == 3
+    assert rs["mean"] == pytest.approx(5.0)
+
+
+def test_show1d_range_stats_updated_on_data_change():
+    data = np.array([1.0, 2.0, 3.0, 4.0, 5.0], dtype=np.float32)
+    x = np.array([0.0, 1.0, 2.0, 3.0, 4.0], dtype=np.float32)
+    w = Show1D(data, x=x)
+    w.x_range = [0.0, 4.0]
+    assert w.range_stats[0]["mean"] == pytest.approx(3.0)
+    w.set_data(np.array([10.0, 20.0, 30.0, 40.0, 50.0], dtype=np.float32), x=x)
+    w.x_range = [0.0, 4.0]
+    assert w.range_stats[0]["mean"] == pytest.approx(30.0)
+
+
+# =========================================================================
+# Peak FWHM (Feature 5)
+# =========================================================================
+def test_show1d_fwhm_known_gaussian():
+    # Create a Gaussian with known sigma → FWHM = 2.3548 * sigma
+    sigma = 5.0
+    x = np.linspace(-50, 50, 1001, dtype=np.float32)
+    y = (10.0 * np.exp(-0.5 * (x / sigma) ** 2) + 1.0).astype(np.float32)
+    w = Show1D(y, x=x)
+    w.add_peak(0.0)
+    w.selected_peaks = [0]
+    assert len(w.peak_fwhm) == 1
+    f = w.peak_fwhm[0]
+    assert f["fwhm"] is not None
+    expected_fwhm = 2.3548200450309493 * sigma
+    assert f["fwhm"] == pytest.approx(expected_fwhm, rel=0.05)
+
+
+def test_show1d_fwhm_no_selection():
+    data = np.array([1.0, 5.0, 3.0], dtype=np.float32)
+    w = Show1D(data)
+    w.add_peak(1.0)
+    # No selection → no FWHM
+    assert w.peak_fwhm == []
+
+
+def test_show1d_fwhm_fit_failure():
+    # Flat data → Gaussian fit should fail or give poor result
+    data = np.full(100, 5.0, dtype=np.float32)
+    w = Show1D(data)
+    w.add_peak(50.0)
+    w.selected_peaks = [0]
+    # Should produce a result (possibly with error or None fwhm)
+    assert len(w.peak_fwhm) == 1
+
+
+def test_show1d_measure_fwhm_method():
+    sigma = 5.0
+    x = np.linspace(-50, 50, 1001, dtype=np.float32)
+    y = (10.0 * np.exp(-0.5 * (x / sigma) ** 2) + 1.0).astype(np.float32)
+    w = Show1D(y, x=x)
+    w.add_peak(0.0)
+    result = w.measure_fwhm(peak_idx=0)
+    assert result is w
+    assert len(w.peak_fwhm) == 1
+    assert 0 in w.selected_peaks
+
+
+# =========================================================================
+# Auto-contrast / percentile clipping
+# =========================================================================
+def test_show1d_auto_contrast_default():
+    data = np.array([1.0, 2.0, 3.0], dtype=np.float32)
+    w = Show1D(data)
+    assert w.auto_contrast is False
+
+
+def test_show1d_auto_contrast_state_dict():
+    data = np.array([1.0, 2.0, 3.0], dtype=np.float32)
+    w = Show1D(data, auto_contrast=True, percentile_low=5.0, percentile_high=95.0)
+    sd = w.state_dict()
+    assert sd["auto_contrast"] is True
+    assert sd["percentile_low"] == 5.0
+    assert sd["percentile_high"] == 95.0
+    w2 = Show1D(data, state=sd)
+    assert w2.auto_contrast is True
+    assert w2.percentile_low == pytest.approx(5.0)
+    assert w2.percentile_high == pytest.approx(95.0)
+
+
+def test_show1d_percentile_traits():
+    data = np.array([1.0, 2.0, 3.0], dtype=np.float32)
+    w = Show1D(data)
+    assert w.percentile_low == pytest.approx(2.0)
+    assert w.percentile_high == pytest.approx(98.0)
+    w2 = Show1D(data, percentile_low=10.0, percentile_high=90.0)
+    assert w2.percentile_low == pytest.approx(10.0)
+    assert w2.percentile_high == pytest.approx(90.0)
+
+
+def test_show1d_save_image_auto_contrast(tmp_path):
+    # Spectrum with a huge outlier — auto-contrast should still export fine
+    data = np.array([1.0, 2.0, 3.0, 100.0, 2.0, 1.0], dtype=np.float32)
+    w = Show1D(data, auto_contrast=True, percentile_low=10.0, percentile_high=90.0)
+    path = tmp_path / "auto.png"
+    result = w.save_image(path)
+    assert result == path
+    assert path.exists()
+    assert path.stat().st_size > 0

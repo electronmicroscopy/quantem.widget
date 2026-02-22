@@ -36,6 +36,19 @@ Features
 - **Control customizer** -- Hover the widget header to reveal a menu for hiding control groups
 - **Tool lock/hide** -- ``disable_*`` / ``hide_*`` API for shared read-only workflows
 
+Methods
+-------
+
+.. code-block:: python
+
+   w = Edit2D(image)
+
+   # Replace data (preserves crop/mask settings)
+   w.set_image(new_image)
+
+   # Export
+   w.save_image("cropped.png")
+
 Properties
 ----------
 

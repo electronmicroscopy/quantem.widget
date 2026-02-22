@@ -25,6 +25,21 @@ Features
 - **BF/ADF QC previews** before and after binning with compact stats
 - **Export helpers**: ``save_image``, ``save_zip``, ``save_gif``
 
+Methods
+-------
+
+.. code-block:: python
+
+   w = Bin(data)
+
+   # Replace data (preserves bin settings)
+   w.set_data(new_data)
+
+   # Access results
+   w.result              # binned tensor (on device)
+   w.get_binned_data()   # copy as tensor
+   w.get_binned_data(as_numpy=True)  # copy as NumPy
+
 State Persistence
 -----------------
 

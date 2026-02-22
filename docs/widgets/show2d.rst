@@ -132,10 +132,6 @@ Examples
 
 - :doc:`Simple demo </examples/show2d/show2d_simple>`
 - :doc:`All features </examples/show2d/show2d_all_features>`
-- :doc:`Loading hub </examples/show2d/show2d_load_hub>`
-- :doc:`Load PNG folder </examples/show2d/show2d_load_png_folder>`
-- :doc:`Load TIFF </examples/show2d/show2d_load_tiff>`
-- :doc:`Load EMD </examples/show2d/show2d_load_emd>`
 
 API Reference
 -------------

@@ -1,7 +1,7 @@
 Widgets
 =======
 
-quantem.widget provides eleven interactive widgets for electron microscopy
+quantem.widget provides twelve interactive widgets for electron microscopy
 visualization and workflow operations.
 
 Visualization widgets support:

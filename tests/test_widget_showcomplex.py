@@ -517,6 +517,8 @@ def test_showcomplex_state_dict_completeness():
         "percentile_low", "percentile_high", "pixel_size",
         "scale_bar_visible", "show_fft", "show_stats", "show_controls",
         "image_width_px", "disabled_tools", "hidden_tools",
+        "roi_mode", "roi_center_row", "roi_center_col",
+        "roi_radius", "roi_width", "roi_height",
     }
     assert set(state.keys()) == expected_keys
 
@@ -860,3 +862,75 @@ def test_showcomplex_widget_version_is_set():
     data = (np.random.rand(8, 8) + 1j * np.random.rand(8, 8)).astype(np.complex64)
     w = ShowComplex2D(data)
     assert w.widget_version != "unknown"
+
+# =========================================================================
+# ROI — single-mode pattern
+# =========================================================================
+
+def test_showcomplex_roi_defaults():
+    """ROI starts off with centered defaults."""
+    data = (np.random.rand(64, 128) + 1j * np.random.rand(64, 128)).astype(np.complex64)
+    w = ShowComplex2D(data)
+    assert w.roi_mode == "off"
+    assert w.roi_center_row == pytest.approx(32.0)
+    assert w.roi_center_col == pytest.approx(64.0)
+    assert w.roi_radius > 0
+
+def test_showcomplex_roi_circle():
+    """roi_circle sets mode and position."""
+    data = (np.random.rand(32, 32) + 1j * np.random.rand(32, 32)).astype(np.complex64)
+    w = ShowComplex2D(data)
+    result = w.roi_circle(row=10, col=20, radius=5)
+    assert result is w
+    assert w.roi_mode == "circle"
+    assert w.roi_center_row == pytest.approx(10.0)
+    assert w.roi_center_col == pytest.approx(20.0)
+    assert w.roi_radius == pytest.approx(5.0)
+
+def test_showcomplex_roi_square():
+    """roi_square sets mode and position."""
+    data = (np.random.rand(32, 32) + 1j * np.random.rand(32, 32)).astype(np.complex64)
+    w = ShowComplex2D(data)
+    result = w.roi_square(row=8, col=12, radius=6)
+    assert result is w
+    assert w.roi_mode == "square"
+    assert w.roi_center_row == pytest.approx(8.0)
+    assert w.roi_radius == pytest.approx(6.0)
+
+def test_showcomplex_roi_rect():
+    """roi_rect sets mode and dimensions."""
+    data = (np.random.rand(32, 32) + 1j * np.random.rand(32, 32)).astype(np.complex64)
+    w = ShowComplex2D(data)
+    result = w.roi_rect(row=16, col=16, width=20, height=10)
+    assert result is w
+    assert w.roi_mode == "rect"
+    assert w.roi_width == pytest.approx(20.0)
+    assert w.roi_height == pytest.approx(10.0)
+
+def test_showcomplex_roi_center_compound():
+    """roi_center compound trait syncs to row/col."""
+    data = (np.random.rand(32, 32) + 1j * np.random.rand(32, 32)).astype(np.complex64)
+    w = ShowComplex2D(data)
+    w.roi_center = [5.0, 15.0]
+    assert w.roi_center_row == pytest.approx(5.0)
+    assert w.roi_center_col == pytest.approx(15.0)
+
+def test_showcomplex_roi_state_roundtrip():
+    """ROI state survives state_dict roundtrip."""
+    data = (np.random.rand(32, 32) + 1j * np.random.rand(32, 32)).astype(np.complex64)
+    w1 = ShowComplex2D(data)
+    w1.roi_circle(row=10, col=20, radius=7)
+    state = w1.state_dict()
+    w2 = ShowComplex2D(data, state=state)
+    assert w2.roi_mode == "circle"
+    assert w2.roi_center_row == pytest.approx(10.0)
+    assert w2.roi_center_col == pytest.approx(20.0)
+    assert w2.roi_radius == pytest.approx(7.0)
+
+def test_showcomplex_roi_tool_visibility():
+    """ROI can be hidden/disabled via tool groups."""
+    data = (np.random.rand(16, 16) + 1j * np.random.rand(16, 16)).astype(np.complex64)
+    w = ShowComplex2D(data, hide_roi=True)
+    assert "roi" in w.hidden_tools
+    w2 = ShowComplex2D(data, disable_roi=True)
+    assert "roi" in w2.disabled_tools

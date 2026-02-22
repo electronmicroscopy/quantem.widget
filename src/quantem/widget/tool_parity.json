@@ -23,7 +23,7 @@
       "aliases": {}
     },
     "ShowComplex2D": {
-      "tool_groups": ["display", "histogram", "fft", "stats", "export", "view", "all"],
+      "tool_groups": ["display", "histogram", "fft", "roi", "stats", "export", "view", "all"],
       "aliases": {}
     },
     "Mark2D": {

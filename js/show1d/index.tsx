@@ -28,7 +28,7 @@ import "./styles.css";
 import { useTheme } from "../theme";
 import { roundToNiceValue, canvasToPDF } from "../scalebar";
 import { extractFloat32, formatNumber, downloadBlob } from "../format";
-import { findDataRange } from "../stats";
+import { findDataRange, percentileClip } from "../stats";
 import { ControlCustomizer } from "../control-customizer";
 import { computeToolVisibility } from "../tool-parity";
 
@@ -89,7 +89,7 @@ interface PeakMarker {
   y: number;
   trace_idx: number;
   label: string;
-  type?: "peak" | "valley";
+  type?: "peak";
 }
 
 // ============================================================================
@@ -102,8 +102,8 @@ const UNFOCUSED_ALPHA = 0.2;
 function snap(v: number): number {
   return Math.round(v) + 0.5;
 }
-const DEFAULT_CANVAS_W = 500;
-const DEFAULT_CANVAS_H = 300;
+const DEFAULT_CANVAS_W = 600;
+const DEFAULT_CANVAS_H = 400;
 const MARGIN_TOP = 12;
 const MARGIN_RIGHT = 16;
 const MARGIN_BOTTOM_BASE = 28; // tick marks + tick labels
@@ -235,6 +235,9 @@ function Show1D() {
   const [xUnit] = useModelState<string>("x_unit");
   const [yUnit] = useModelState<string>("y_unit");
   const [logScale, setLogScale] = useModelState<boolean>("log_scale");
+  const [autoContrast, setAutoContrast] = useModelState<boolean>("auto_contrast");
+  const [percentileLow] = useModelState<number>("percentile_low");
+  const [percentileHigh] = useModelState<number>("percentile_high");
   const [showStats] = useModelState<boolean>("show_stats");
   const [showLegend, setShowLegend] = useModelState<boolean>("show_legend");
   const [showGrid, setShowGrid] = useModelState<boolean>("show_grid");
@@ -254,6 +257,12 @@ function Show1D() {
   const [modelYRange, setModelYRange] = useModelState<number[]>("y_range");
   const [disabledTools, setDisabledTools] = useModelState<string[]>("disabled_tools");
   const [hiddenTools, setHiddenTools] = useModelState<string[]>("hidden_tools");
+
+  // Range stats (Feature 1+4)
+  const [rangeStats] = useModelState<Array<{mean: number; min: number; max: number; std: number; integral: number; n_points: number}>>("range_stats");
+
+  // Peak FWHM (Feature 5)
+  const [peakFwhm] = useModelState<Array<{peak_idx: number; fwhm: number | null; center?: number; amplitude?: number; sigma?: number; offset?: number; fit_quality?: number; error?: string}>>("peak_fwhm");
 
   // Tool visibility
   const toolVisibility = React.useMemo(
@@ -350,6 +359,31 @@ function Show1D() {
     startH: number;
   } | null>(null);
 
+  // Range handle drag state
+  const rangeDragRef = React.useRef<{
+    handle: "left" | "right";
+    startPx: number;
+  } | null>(null);
+  const [hoverRangeHandle, setHoverRangeHandle] = React.useState<"left" | "right" | null>(null);
+
+  // Range input local state (committed on blur/enter)
+  const [rangeInputMin, setRangeInputMin] = React.useState<string>("");
+  const [rangeInputMax, setRangeInputMax] = React.useState<string>("");
+  const [rangeInputActive, setRangeInputActive] = React.useState(false);
+
+  // Y-range handle drag state (Feature 2)
+  const rangeDragYRef = React.useRef<{
+    handle: "top" | "bottom";
+    startPx: number;
+  } | null>(null);
+  const [hoverRangeHandleY, setHoverRangeHandleY] = React.useState<"top" | "bottom" | null>(null);
+  const [rangeInputYMin, setRangeInputYMin] = React.useState<string>("");
+  const [rangeInputYMax, setRangeInputYMax] = React.useState<string>("");
+  const [rangeInputYActive, setRangeInputYActive] = React.useState(false);
+
+  // CSV copy feedback (Feature 6)
+  const [csvCopied, setCsvCopied] = React.useState(false);
+
   // Export
   const [exportAnchor, setExportAnchor] = React.useState<HTMLElement | null>(null);
 
@@ -425,10 +459,24 @@ function Show1D() {
 
     let gYMin = Infinity;
     let gYMax = -Infinity;
-    for (const trace of traces) {
-      const r = findDataRange(trace);
-      if (r.min < gYMin) gYMin = r.min;
-      if (r.max > gYMax) gYMax = r.max;
+    if (autoContrast && traces.length > 0) {
+      // Concatenate all visible trace data for percentile clipping
+      const totalLen = traces.reduce((s, t) => s + t.length, 0);
+      const allData = new Float32Array(totalLen);
+      let offset = 0;
+      for (const trace of traces) {
+        allData.set(trace, offset);
+        offset += trace.length;
+      }
+      const clipped = percentileClip(allData, percentileLow, percentileHigh);
+      gYMin = clipped.vmin;
+      gYMax = clipped.vmax;
+    } else {
+      for (const trace of traces) {
+        const r = findDataRange(trace);
+        if (r.min < gYMin) gYMin = r.min;
+        if (r.max > gYMax) gYMax = r.max;
+      }
     }
     if (!isFinite(gYMin)) gYMin = 0;
     if (!isFinite(gYMax)) gYMax = 1;
@@ -446,7 +494,7 @@ function Show1D() {
     setXMax(gXMax);
     setYMin(gYMin);
     setYMax(gYMax);
-  }, [yData, xData, nTraces, nPoints]);
+  }, [yData, xData, nTraces, nPoints, autoContrast, percentileLow, percentileHigh]);
 
   // ========================================================================
   // Coordinate transforms
@@ -488,15 +536,15 @@ function Show1D() {
   // Reset view
   // ========================================================================
   const resetView = React.useCallback(() => {
-    if (!xLockedRef.current) {
-      setXMin(xDataRangeRef.current.min);
-      setXMax(xDataRangeRef.current.max);
-    }
-    if (!yLockedRef.current) {
-      setYMin(yDataRangeRef.current.min);
-      setYMax(yDataRangeRef.current.max);
-    }
-  }, []);
+    setXLocked(false);
+    setYLocked(false);
+    setModelXRange([]);
+    setModelYRange([]);
+    setXMin(xDataRangeRef.current.min);
+    setXMax(xDataRangeRef.current.max);
+    setYMin(yDataRangeRef.current.min);
+    setYMax(yDataRangeRef.current.max);
+  }, [setModelXRange, setModelYRange]);
 
   // ========================================================================
   // Main canvas render
@@ -677,8 +725,6 @@ function Show1D() {
         const cx = dataToCanvasX(pk.x);
         const cy = dataToCanvasY(pk.y);
 
-        const isValley = pk.type === "valley";
-
         // Vertical drop line (dashed)
         ctx.strokeStyle = color;
         ctx.lineWidth = 1;
@@ -686,26 +732,20 @@ function Show1D() {
         ctx.setLineDash([3, 3]);
         ctx.beginPath();
         ctx.moveTo(cx, cy);
-        ctx.lineTo(cx, isValley ? margin.top : margin.top + plotH);
+        ctx.lineTo(cx, margin.top + plotH);
         ctx.stroke();
         ctx.setLineDash([]);
         ctx.globalAlpha = 1.0;
 
-        // Marker shape: triangle-up for peaks, triangle-down for valleys
+        // Marker shape: triangle-up
         const s = isSelected ? 7 : 5;
         ctx.fillStyle = isSelected ? color : (isDark ? "#1a1a1a" : "#f8f8f8");
         ctx.strokeStyle = color;
         ctx.lineWidth = isSelected ? 2.5 : 1.5;
         ctx.beginPath();
-        if (isValley) {
-          ctx.moveTo(cx - s, cy - s);
-          ctx.lineTo(cx + s, cy - s);
-          ctx.lineTo(cx, cy + s);
-        } else {
-          ctx.moveTo(cx, cy - s);
-          ctx.lineTo(cx + s, cy + s);
-          ctx.lineTo(cx - s, cy + s);
-        }
+        ctx.moveTo(cx, cy - s);
+        ctx.lineTo(cx + s, cy + s);
+        ctx.lineTo(cx - s, cy + s);
         ctx.closePath();
         ctx.fill();
         ctx.stroke();
@@ -714,13 +754,8 @@ function Show1D() {
         ctx.font = `9px ${FONT}`;
         ctx.fillStyle = isDark ? "#ddd" : "#333";
         ctx.textAlign = "center";
-        if (isValley) {
-          ctx.textBaseline = "top";
-          ctx.fillText(pk.label || formatNumber(pk.x), cx, cy + s + 3);
-        } else {
-          ctx.textBaseline = "bottom";
-          ctx.fillText(pk.label || formatNumber(pk.x), cx, cy - s - 3);
-        }
+        ctx.textBaseline = "bottom";
+        ctx.fillText(pk.label || formatNumber(pk.x), cx, cy - s - 3);
       }
     }
 
@@ -809,7 +844,7 @@ function Show1D() {
       const legendPad = 6;
       let maxLabelW = 0;
       for (let t = 0; t < nTraces; t++) {
-        const lbl = traceLabels[t] || `Trace ${t + 1}`;
+        const lbl = traceLabels[t] || `Data ${t + 1}`;
         ctx.font = hasFocusLegend && t === focusedTrace ? `bold 11px ${FONT}` : `11px ${FONT}`;
         const w = ctx.measureText(lbl).width;
         if (w > maxLabelW) maxLabelW = w;
@@ -846,7 +881,7 @@ function Show1D() {
         ctx.fillStyle = isDark ? "#ddd" : "#333";
         ctx.textAlign = "left";
         ctx.textBaseline = "middle";
-        ctx.fillText(traceLabels[t] || `Trace ${t + 1}`, lx + legendPad + lineLen + gap, ey);
+        ctx.fillText(traceLabels[t] || `Data ${t + 1}`, lx + legendPad + lineLen + gap, ey);
         ctx.globalAlpha = 1.0;
       }
     } else {
@@ -973,6 +1008,42 @@ function Show1D() {
       ctx.fillText(formatNumber(sr.peakX), peakCX, peakCY - s - 3);
     }
 
+    // Range handles (when X locked)
+    if (xLocked) {
+      const handleColor = isDark ? "rgba(0,170,255,0.7)" : "rgba(0,120,255,0.6)";
+      const handleHoverColor = isDark ? "rgba(0,170,255,1.0)" : "rgba(0,120,255,0.9)";
+
+      for (const side of ["left", "right"] as const) {
+        const val = side === "left" ? xMin : xMax;
+        const cx = dataToCanvasX(val);
+        if (cx < margin.left - 2 || cx > margin.left + plotW + 2) continue;
+
+        const isHovered = hoverRangeHandle === side || rangeDragRef.current?.handle === side;
+        const color = isHovered ? handleHoverColor : handleColor;
+
+        // Dashed vertical line (full plot height)
+        ctx.strokeStyle = color;
+        ctx.lineWidth = isHovered ? 2 : 1;
+        ctx.setLineDash([4, 3]);
+        ctx.beginPath();
+        ctx.moveTo(snap(cx), margin.top);
+        ctx.lineTo(snap(cx), margin.top + plotH);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        // Triangle handle at bottom (▽)
+        const triY = margin.top + plotH + 1;
+        const triSize = 6;
+        ctx.fillStyle = color;
+        ctx.beginPath();
+        ctx.moveTo(cx - triSize, triY);
+        ctx.lineTo(cx + triSize, triY);
+        ctx.lineTo(cx, triY + triSize + 2);
+        ctx.closePath();
+        ctx.fill();
+      }
+    }
+
     // Locked axis indicators
     if (xLocked) {
       ctx.fillStyle = isDark ? "rgba(0,170,255,0.5)" : "rgba(0,120,255,0.4)";
@@ -988,7 +1059,100 @@ function Show1D() {
       ctx.textBaseline = "top";
       ctx.fillText("Y LOCKED", margin.left + 4, margin.top + 2);
     }
-  }, [canvasW, canvasH, cursorInfo, showLegend, nTraces, traceLabels, traceColors, isDark, dataToCanvasX, dataToCanvasY, plotW, plotH, focusedTrace, margin, axisDragCurrent, xLocked, yLocked, peakSearchRegion, peakActive, lockPeaks, peakSearchRadius]);
+
+    // Y-range handles (when Y locked) — Feature 2
+    if (yLocked) {
+      const handleColor = isDark ? "rgba(0,170,255,0.7)" : "rgba(0,120,255,0.6)";
+      const handleHoverColor = isDark ? "rgba(0,170,255,1.0)" : "rgba(0,120,255,0.9)";
+
+      for (const side of ["top", "bottom"] as const) {
+        const val = side === "top" ? yMax : yMin;
+        const cy = dataToCanvasY(val);
+        if (cy < margin.top - 2 || cy > margin.top + plotH + 2) continue;
+
+        const isHovered = hoverRangeHandleY === side || rangeDragYRef.current?.handle === side;
+        const color = isHovered ? handleHoverColor : handleColor;
+
+        // Dashed horizontal line
+        ctx.strokeStyle = color;
+        ctx.lineWidth = isHovered ? 2 : 1;
+        ctx.setLineDash([4, 3]);
+        ctx.beginPath();
+        ctx.moveTo(margin.left, snap(cy));
+        ctx.lineTo(margin.left + plotW, snap(cy));
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        // Triangle handle on left edge (◁)
+        const triX = margin.left - 1;
+        const triSize = 6;
+        ctx.fillStyle = color;
+        ctx.beginPath();
+        ctx.moveTo(triX, cy - triSize);
+        ctx.lineTo(triX, cy + triSize);
+        ctx.lineTo(triX - triSize - 2, cy);
+        ctx.closePath();
+        ctx.fill();
+      }
+    }
+
+    // FWHM arrows — Feature 5
+    if (peakFwhm && peakFwhm.length > 0) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(margin.left, margin.top, plotW, plotH);
+      ctx.clip();
+
+      for (const f of peakFwhm) {
+        if (f.fwhm == null || f.center == null || f.amplitude == null || f.offset == null) continue;
+        const halfMax = f.offset + f.amplitude / 2;
+        const cy = dataToCanvasY(halfMax);
+        const leftX = dataToCanvasX(f.center - f.fwhm / 2);
+        const rightX = dataToCanvasX(f.center + f.fwhm / 2);
+
+        // Find trace color
+        const pkIdx = f.peak_idx;
+        const pk = peakMarkers && pkIdx >= 0 && pkIdx < peakMarkers.length ? peakMarkers[pkIdx] : null;
+        const trColor = pk && traceColors && traceColors[pk.trace_idx] ? traceColors[pk.trace_idx] : "#4fc3f7";
+
+        // Horizontal double-arrow
+        ctx.strokeStyle = trColor;
+        ctx.fillStyle = trColor;
+        ctx.lineWidth = 1.5;
+        ctx.globalAlpha = 0.8;
+
+        ctx.beginPath();
+        ctx.moveTo(leftX, cy);
+        ctx.lineTo(rightX, cy);
+        ctx.stroke();
+
+        // Arrowheads
+        const arrowSize = 4;
+        ctx.beginPath();
+        ctx.moveTo(leftX, cy);
+        ctx.lineTo(leftX + arrowSize, cy - arrowSize);
+        ctx.lineTo(leftX + arrowSize, cy + arrowSize);
+        ctx.closePath();
+        ctx.fill();
+        ctx.beginPath();
+        ctx.moveTo(rightX, cy);
+        ctx.lineTo(rightX - arrowSize, cy - arrowSize);
+        ctx.lineTo(rightX - arrowSize, cy + arrowSize);
+        ctx.closePath();
+        ctx.fill();
+
+        // Label
+        ctx.font = `9px ${FONT}`;
+        ctx.fillStyle = isDark ? "#ddd" : "#333";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "bottom";
+        const midX = (leftX + rightX) / 2;
+        ctx.fillText(`FWHM: ${formatNumber(f.fwhm)}`, midX, cy - 3);
+        ctx.globalAlpha = 1.0;
+      }
+      ctx.restore();
+    }
+  }, [canvasW, canvasH, cursorInfo, showLegend, nTraces, traceLabels, traceColors, isDark, dataToCanvasX, dataToCanvasY, plotW, plotH, focusedTrace, margin, axisDragCurrent, xLocked, yLocked, peakSearchRegion, peakActive, lockPeaks, peakSearchRadius, hoverRangeHandle, xMin, xMax, hoverRangeHandleY, yMin, yMax, logScale, lineWidth, peakFwhm, peakMarkers]);
 
   // ========================================================================
   // Helper: find nearest data point to cursor
@@ -1083,6 +1247,41 @@ function Show1D() {
   );
 
   // ========================================================================
+  // Helper: hit-test range handles — returns "left" | "right" | null
+  // ========================================================================
+  const hitTestRangeHandle = React.useCallback(
+    (mx: number, my: number): "left" | "right" | null => {
+      if (!xLocked) return null;
+      if (my < margin.top || my > margin.top + plotH + 12) return null;
+      const leftX = dataToCanvasX(xMin);
+      const rightX = dataToCanvasX(xMax);
+      const leftDist = Math.abs(mx - leftX);
+      const rightDist = Math.abs(mx - rightX);
+      const threshold = 8;
+      if (leftDist < threshold && leftDist <= rightDist) return "left";
+      if (rightDist < threshold) return "right";
+      return null;
+    },
+    [xLocked, xMin, xMax, dataToCanvasX, margin.top, plotH],
+  );
+
+  const hitTestRangeHandleY = React.useCallback(
+    (mx: number, my: number): "top" | "bottom" | null => {
+      if (!yLocked) return null;
+      if (mx < margin.left - 12 || mx > margin.left + plotW) return null;
+      const topY = dataToCanvasY(yMax);
+      const bottomY = dataToCanvasY(yMin);
+      const topDist = Math.abs(my - topY);
+      const bottomDist = Math.abs(my - bottomY);
+      const threshold = 8;
+      if (topDist < threshold && topDist <= bottomDist) return "top";
+      if (bottomDist < threshold) return "bottom";
+      return null;
+    },
+    [yLocked, yMin, yMax, dataToCanvasY, margin.left, plotW],
+  );
+
+  // ========================================================================
   // Mouse handlers
   // ========================================================================
   const handleWheel = React.useCallback(
@@ -1121,6 +1320,22 @@ function Show1D() {
     return () => el.removeEventListener("wheel", handleWheel);
   }, [handleWheel]);
 
+  // Sync range inputs when xMin/xMax change (unless user is typing)
+  React.useEffect(() => {
+    if (!rangeInputActive) {
+      setRangeInputMin(xMin.toPrecision(6));
+      setRangeInputMax(xMax.toPrecision(6));
+    }
+  }, [xMin, xMax, rangeInputActive]);
+
+  // Sync Y range inputs
+  React.useEffect(() => {
+    if (!rangeInputYActive) {
+      setRangeInputYMin(yMin.toPrecision(6));
+      setRangeInputYMax(yMax.toPrecision(6));
+    }
+  }, [yMin, yMax, rangeInputYActive]);
+
   // Sync Python x_range/y_range → JS view state
   React.useEffect(() => {
     if (modelXRange && modelXRange.length === 2) {
@@ -1142,26 +1357,70 @@ function Show1D() {
     }
   }, [modelYRange]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Window-level resize drag handling
+  // Window-level resize and range drag handling
   React.useEffect(() => {
-    const handleResizeMove = (e: MouseEvent) => {
-      if (!resizeDragRef.current?.active) return;
-      const rd = resizeDragRef.current;
-      const newW = Math.max(200, rd.startW + (e.clientX - rd.startX));
-      const newH = Math.max(100, rd.startH + (e.clientY - rd.startY));
-      setCanvasW(newW);
-      setCanvasH(newH);
+    const handleWindowMove = (e: MouseEvent) => {
+      // Resize drag
+      if (resizeDragRef.current?.active) {
+        const rd = resizeDragRef.current;
+        const newW = Math.max(200, rd.startW + (e.clientX - rd.startX));
+        const newH = Math.max(100, rd.startH + (e.clientY - rd.startY));
+        setCanvasW(newW);
+        setCanvasH(newH);
+      }
+      // Range handle drag (window-level for when mouse leaves canvas)
+      if (rangeDragRef.current) {
+        const canvas = canvasRef.current;
+        if (!canvas) return;
+        const rect = canvas.getBoundingClientRect();
+        const mx = e.clientX - rect.left;
+        const clampedMx = Math.max(margin.left, Math.min(margin.left + plotW, mx));
+        const newVal = canvasToDataX(clampedMx);
+        const dataRange = xDataRangeRef.current;
+        const clamped = Math.max(dataRange.min, Math.min(dataRange.max, newVal));
+        if (rangeDragRef.current.handle === "left") {
+          setXMin((prevMin) => {
+            return Math.min(clamped, xMax - (xMax - prevMin) * 0.001);
+          });
+          setModelXRange([clamped, xMax]);
+        } else {
+          setXMax((prevMax) => {
+            return Math.max(clamped, xMin + (prevMax - xMin) * 0.001);
+          });
+          setModelXRange([xMin, clamped]);
+        }
+      }
+      // Y-range handle drag (window-level)
+      if (rangeDragYRef.current) {
+        const canvas = canvasRef.current;
+        if (!canvas) return;
+        const rect = canvas.getBoundingClientRect();
+        const my = e.clientY - rect.top;
+        const clampedMy = Math.max(margin.top, Math.min(margin.top + plotH, my));
+        const newVal = canvasToDataY(clampedMy);
+        const dataRange = yDataRangeRef.current;
+        const clamped = Math.max(dataRange.min, Math.min(dataRange.max, newVal));
+        if (rangeDragYRef.current.handle === "top") {
+          setYMax((prevMax) => Math.max(clamped, yMin + (prevMax - yMin) * 0.001));
+          setModelYRange([yMin, clamped]);
+        } else {
+          setYMin((prevMin) => Math.min(clamped, yMax - (yMax - prevMin) * 0.001));
+          setModelYRange([clamped, yMax]);
+        }
+      }
     };
-    const handleResizeUp = () => {
+    const handleWindowUp = () => {
       if (resizeDragRef.current?.active) resizeDragRef.current = null;
+      if (rangeDragRef.current) rangeDragRef.current = null;
+      if (rangeDragYRef.current) rangeDragYRef.current = null;
     };
-    window.addEventListener("mousemove", handleResizeMove);
-    window.addEventListener("mouseup", handleResizeUp);
+    window.addEventListener("mousemove", handleWindowMove);
+    window.addEventListener("mouseup", handleWindowUp);
     return () => {
-      window.removeEventListener("mousemove", handleResizeMove);
-      window.removeEventListener("mouseup", handleResizeUp);
+      window.removeEventListener("mousemove", handleWindowMove);
+      window.removeEventListener("mouseup", handleWindowUp);
     };
-  }, []);
+  }, [margin.left, margin.top, plotW, plotH, canvasToDataX, canvasToDataY, xMin, xMax, yMin, yMax, setModelXRange, setModelYRange]);
 
   const handleMouseDown = React.useCallback(
     (e: React.MouseEvent) => {
@@ -1185,6 +1444,22 @@ function Show1D() {
         axisDragRef.current = { axis: "y", startPx: my, startVal: canvasToDataY(my) };
         setAxisDragCurrent({ axis: "y", startVal: canvasToDataY(my), currentVal: canvasToDataY(my) });
         return;
+      }
+
+      // Range handle drag (intercept before plot area check)
+      if (xLocked) {
+        const handle = hitTestRangeHandle(mx, my);
+        if (handle) {
+          rangeDragRef.current = { handle, startPx: mx };
+          return;
+        }
+      }
+      if (yLocked) {
+        const handleY = hitTestRangeHandleY(mx, my);
+        if (handleY) {
+          rangeDragYRef.current = { handle: handleY, startPx: my };
+          return;
+        }
       }
 
       if (mx < margin.left || mx > margin.left + plotW ||
@@ -1234,7 +1509,7 @@ function Show1D() {
         startYMax: yMax,
       };
     },
-    [plotW, plotH, canvasH, xMin, xMax, yMin, yMax, margin.left, margin.top, canvasToDataX, canvasToDataY, peakActive, lockPeaks, focusedTrace, findNearestPeakMarker, findNearestPoint],
+    [plotW, plotH, canvasH, xMin, xMax, yMin, yMax, margin.left, margin.top, canvasToDataX, canvasToDataY, peakActive, lockPeaks, focusedTrace, findNearestPeakMarker, findNearestPoint, xLocked, yLocked, hitTestRangeHandle, hitTestRangeHandleY],
   );
 
   const handleMouseMove = React.useCallback(
@@ -1244,6 +1519,59 @@ function Show1D() {
       const rect = canvas.getBoundingClientRect();
       const mx = e.clientX - rect.left;
       const my = e.clientY - rect.top;
+
+      // Range handle drag (X)
+      if (rangeDragRef.current) {
+        const rd = rangeDragRef.current;
+        const clampedMx = Math.max(margin.left, Math.min(margin.left + plotW, mx));
+        const newVal = canvasToDataX(clampedMx);
+        const dataRange = xDataRangeRef.current;
+        const clamped = Math.max(dataRange.min, Math.min(dataRange.max, newVal));
+        if (rd.handle === "left") {
+          const newMin = Math.min(clamped, xMax - (xMax - xMin) * 0.001);
+          setXMin(newMin);
+          setModelXRange([newMin, xMax]);
+        } else {
+          const newMax = Math.max(clamped, xMin + (xMax - xMin) * 0.001);
+          setXMax(newMax);
+          setModelXRange([xMin, newMax]);
+        }
+        return;
+      }
+
+      // Range handle drag (Y)
+      if (rangeDragYRef.current) {
+        const rd = rangeDragYRef.current;
+        const clampedMy = Math.max(margin.top, Math.min(margin.top + plotH, my));
+        const newVal = canvasToDataY(clampedMy);
+        const dataRange = yDataRangeRef.current;
+        const clamped = Math.max(dataRange.min, Math.min(dataRange.max, newVal));
+        if (rd.handle === "top") {
+          const newMax = Math.max(clamped, yMin + (yMax - yMin) * 0.001);
+          setYMax(newMax);
+          setModelYRange([yMin, newMax]);
+        } else {
+          const newMin = Math.min(clamped, yMax - (yMax - yMin) * 0.001);
+          setYMin(newMin);
+          setModelYRange([newMin, yMax]);
+        }
+        return;
+      }
+
+      // Range handle hover detection
+      const noActive = !dragRef.current?.active && !peakDragRef.current?.active && !axisDragRef.current;
+      if (xLocked && noActive) {
+        const handle = hitTestRangeHandle(mx, my);
+        setHoverRangeHandle(handle);
+      } else {
+        if (hoverRangeHandle) setHoverRangeHandle(null);
+      }
+      if (yLocked && noActive) {
+        const handleY = hitTestRangeHandleY(mx, my);
+        setHoverRangeHandleY(handleY);
+      } else {
+        if (hoverRangeHandleY) setHoverRangeHandleY(null);
+      }
 
       // Axis range drag
       if (axisDragRef.current) {
@@ -1345,10 +1673,20 @@ function Show1D() {
         });
       }
     },
-    [plotW, plotH, findNearestPoint, findNearestPeakMarker, hitTestLegend, margin.left, margin.top, canvasToDataX, canvasToDataY],
+    [plotW, plotH, findNearestPoint, findNearestPeakMarker, hitTestLegend, margin.left, margin.top, canvasToDataX, canvasToDataY, xLocked, yLocked, xMin, xMax, yMin, yMax, hitTestRangeHandle, hitTestRangeHandleY, hoverRangeHandle, hoverRangeHandleY, setModelXRange, setModelYRange],
   );
 
   const handleMouseUp = React.useCallback((e: React.MouseEvent) => {
+    // Finalize range handle drag (X or Y)
+    if (rangeDragRef.current) {
+      rangeDragRef.current = null;
+      return;
+    }
+    if (rangeDragYRef.current) {
+      rangeDragYRef.current = null;
+      return;
+    }
+
     // Finalize axis range drag
     if (axisDragRef.current && axisDragCurrent) {
       const { startVal, currentVal, axis } = axisDragCurrent;
@@ -1488,11 +1826,15 @@ function Show1D() {
   const handleMouseLeave = React.useCallback(() => {
     dragRef.current = null;
     peakDragRef.current = null;
+    rangeDragRef.current = null;
+    rangeDragYRef.current = null;
     setPeakSearchRegion(null);
     axisDragRef.current = null;
     setAxisDragCurrent(null);
     setCursorInfo(null);
     setHoverPeakIdx(null);
+    setHoverRangeHandle(null);
+    setHoverRangeHandleY(null);
     hoverLegendRef.current = false;
   }, []);
 
@@ -1564,13 +1906,17 @@ function Show1D() {
         case "Backspace":
           if (!lockPeaks && peakMarkers && peakMarkers.length > 0) {
             e.preventDefault();
-            const newMarkers = [...peakMarkers];
-            newMarkers.pop();
-            setPeakMarkers(newMarkers);
-            // Clean up selected_peaks
             if (selectedPeaks && selectedPeaks.length > 0) {
-              const maxIdx = newMarkers.length - 1;
-              setSelectedPeaks(selectedPeaks.filter(i => i <= maxIdx));
+              // Delete selected peaks
+              const selSet = new Set(selectedPeaks);
+              const newMarkers = peakMarkers.filter((_: PeakMarker, i: number) => !selSet.has(i));
+              setPeakMarkers(newMarkers);
+              setSelectedPeaks([]);
+            } else {
+              // No selection — remove last peak
+              const newMarkers = [...peakMarkers];
+              newMarkers.pop();
+              setPeakMarkers(newMarkers);
             }
           }
           break;
@@ -1591,7 +1937,7 @@ function Show1D() {
     });
   }, [title]);
 
-  const handleExportFigure = React.useCallback(() => {
+  const handleExportFigure = React.useCallback((format: "pdf" | "png" = "pdf") => {
     setExportAnchor(null);
     const traces = tracesRef.current;
     const xVals = xValuesRef.current;
@@ -1749,22 +2095,15 @@ function Show1D() {
         const color = (traceColors && traceColors[pk.trace_idx]) || "#4fc3f7";
         const cx = dataToCanvasX(pk.x);
         const cy = dataToCanvasY(pk.y);
-        const isValley = pk.type === "valley";
 
         const s = 5;
         ctx.fillStyle = color;
         ctx.strokeStyle = "#fff";
         ctx.lineWidth = 1.5;
         ctx.beginPath();
-        if (isValley) {
-          ctx.moveTo(cx - s, cy - s);
-          ctx.lineTo(cx + s, cy - s);
-          ctx.lineTo(cx, cy + s);
-        } else {
-          ctx.moveTo(cx, cy - s);
-          ctx.lineTo(cx + s, cy + s);
-          ctx.lineTo(cx - s, cy + s);
-        }
+        ctx.moveTo(cx, cy - s);
+        ctx.lineTo(cx + s, cy + s);
+        ctx.lineTo(cx - s, cy + s);
         ctx.closePath();
         ctx.fill();
         ctx.stroke();
@@ -1772,13 +2111,8 @@ function Show1D() {
         ctx.font = `9px ${FONT}`;
         ctx.fillStyle = "#333";
         ctx.textAlign = "center";
-        if (isValley) {
-          ctx.textBaseline = "top";
-          ctx.fillText(pk.label || formatNumber(pk.x), cx, cy + s + 3);
-        } else {
-          ctx.textBaseline = "bottom";
-          ctx.fillText(pk.label || formatNumber(pk.x), cx, cy - s - 3);
-        }
+        ctx.textBaseline = "bottom";
+        ctx.fillText(pk.label || formatNumber(pk.x), cx, cy - s - 3);
       }
     }
 
@@ -1793,7 +2127,7 @@ function Show1D() {
       const legendPad = 6;
       let maxLabelW = 0;
       for (let t = 0; t < traces.length; t++) {
-        const lbl = traceLabels[t] || `Trace ${t + 1}`;
+        const lbl = traceLabels[t] || `Data ${t + 1}`;
         const w = ctx.measureText(lbl).width;
         if (w > maxLabelW) maxLabelW = w;
       }
@@ -1820,15 +2154,74 @@ function Show1D() {
         ctx.fillStyle = "#333";
         ctx.textAlign = "left";
         ctx.textBaseline = "middle";
-        ctx.fillText(traceLabels[t] || `Trace ${t + 1}`, lx + legendPad + lineLen + gap, ey);
+        ctx.fillText(traceLabels[t] || `Data ${t + 1}`, lx + legendPad + lineLen + gap, ey);
       }
     }
 
-    canvasToPDF(offscreen).then((blob) => downloadBlob(blob, `${title || "show1d"}_figure.pdf`));
+    if (format === "pdf") {
+      canvasToPDF(offscreen).then((blob) => downloadBlob(blob, `${title || "show1d"}_figure.pdf`));
+    } else {
+      offscreen.toBlob((blob) => {
+        if (blob) downloadBlob(blob, `${title || "show1d"}_figure.png`);
+      });
+    }
   }, [canvasW, canvasH, xMin, xMax, yMin, yMax, traceColors, traceLabels, lineWidth, logScale, showGrid, gridDensity, showLegend, xLabel, yLabel, xUnit, yUnit, title, dataToCanvasX, dataToCanvasY, plotW, plotH, peakMarkers]);
+
+  // ========================================================================
+  // CSV Export (Feature 6)
+  // ========================================================================
+  const buildCSV = React.useCallback((rangeOnly: boolean): string => {
+    const traces = tracesRef.current;
+    const xVals = xValuesRef.current;
+    if (traces.length === 0) return "";
+
+    const labels = traceLabels && traceLabels.length > 0 ? traceLabels : traces.map((_, i) => `Data ${i + 1}`);
+    const header = ["x", ...labels].join(",");
+    const rows: string[] = [header];
+
+    for (let i = 0; i < (xVals ? xVals.length : traces[0].length); i++) {
+      const xv = xVals ? xVals[i] : i;
+      if (rangeOnly && xLocked) {
+        if (xv < xMin || xv > xMax) continue;
+      }
+      const vals = [String(xv)];
+      for (const trace of traces) {
+        vals.push(String(trace[i] ?? ""));
+      }
+      rows.push(vals.join(","));
+    }
+    return rows.join("\n");
+  }, [traceLabels, xLocked, xMin, xMax]);
+
+  const handleCopyCSV = React.useCallback(() => {
+    const csv = buildCSV(true);
+    if (!csv) return;
+    navigator.clipboard.writeText(csv).then(() => {
+      setCsvCopied(true);
+      setTimeout(() => setCsvCopied(false), 1000);
+    });
+  }, [buildCSV]);
+
+  const handleExportCSVRange = React.useCallback(() => {
+    setExportAnchor(null);
+    const csv = buildCSV(true);
+    if (!csv) return;
+    downloadBlob(new Blob([csv], { type: "text/csv" }), `${title || "show1d"}_range.csv`);
+  }, [buildCSV, title]);
+
+  const handleExportCSVAll = React.useCallback(() => {
+    setExportAnchor(null);
+    const csv = buildCSV(false);
+    if (!csv) return;
+    downloadBlob(new Blob([csv], { type: "text/csv" }), `${title || "show1d"}.csv`);
+  }, [buildCSV, title]);
 
   // Cursor style
   const getCursor = () => {
+    if (rangeDragRef.current) return "ew-resize";
+    if (rangeDragYRef.current) return "ns-resize";
+    if (hoverRangeHandle) return "ew-resize";
+    if (hoverRangeHandleY) return "ns-resize";
     if (axisDragRef.current) return axisDragRef.current.axis === "x" ? "ew-resize" : "ns-resize";
     if (peakDragRef.current?.active) return "col-resize";
     if (dragRef.current?.active) return "grabbing";
@@ -1893,7 +2286,7 @@ function Show1D() {
 
       {/* Controls row */}
       {showControls && !toolVisibility.hideAll && (
-        <Box sx={{ display: "flex", alignItems: "center", gap: "4px", mb: "2px", height: 28, maxWidth: canvasW }}>
+        <Box sx={{ display: "flex", alignItems: "center", gap: "4px", mb: "2px", height: 28 }}>
           {!hideDisplay && (<>
             <Typography sx={{ ...typography.labelSmall, color: colors.text }}>
               Log:
@@ -1902,6 +2295,17 @@ function Show1D() {
               size="small"
               checked={logScale}
               onChange={(_, v) => setLogScale(v)}
+              sx={switchStyles.small}
+              disabled={lockDisplay}
+            />
+
+            <Typography sx={{ ...typography.labelSmall, color: colors.text, ml: "2px" }}>
+              Auto:
+            </Typography>
+            <Switch
+              size="small"
+              checked={autoContrast}
+              onChange={(_, v) => setAutoContrast(v)}
               sx={switchStyles.small}
               disabled={lockDisplay}
             />
@@ -1987,11 +2391,20 @@ function Show1D() {
               onClose={() => setExportAnchor(null)}
               {...upwardMenuProps}
             >
-              <MenuItem onClick={handleExportFigure} sx={{ fontSize: 12 }}>
-                Figure (publication PNG)
+              <MenuItem onClick={() => handleExportFigure("pdf")} sx={{ fontSize: 12 }}>
+                Figure (PDF)
+              </MenuItem>
+              <MenuItem onClick={() => handleExportFigure("png")} sx={{ fontSize: 12 }}>
+                Figure (PNG)
               </MenuItem>
               <MenuItem onClick={handleExportPNG} sx={{ fontSize: 12 }}>
                 PNG
+              </MenuItem>
+              <MenuItem onClick={handleExportCSVRange} sx={{ fontSize: 12 }}>
+                CSV (range)
+              </MenuItem>
+              <MenuItem onClick={handleExportCSVAll} sx={{ fontSize: 12 }}>
+                CSV (all)
               </MenuItem>
             </Menu>
           </>)}
@@ -2062,6 +2475,167 @@ function Show1D() {
         />
       </Box>
 
+      {/* Range input row (when X locked) */}
+      {xLocked && (
+        <Box sx={{ display: "flex", alignItems: "center", gap: "6px", mt: "4px", mb: "2px", height: 24 }}>
+          <Typography sx={{ ...typography.labelSmall, color: colors.text }}>
+            X range:
+          </Typography>
+          <input
+            type="number"
+            value={rangeInputMin}
+            onChange={(e) => { setRangeInputActive(true); setRangeInputMin(e.target.value); }}
+            onFocus={() => setRangeInputActive(true)}
+            onBlur={() => {
+              setRangeInputActive(false);
+              const val = parseFloat(rangeInputMin);
+              if (!isNaN(val)) {
+                const dataRange = xDataRangeRef.current;
+                let newMin = Math.max(dataRange.min, Math.min(dataRange.max, val));
+                if (newMin >= xMax) { const tmp = newMin; newMin = xMax; setXMax(tmp); setModelXRange([xMax, tmp]); setXMin(xMax); return; }
+                setXMin(newMin);
+                setModelXRange([newMin, xMax]);
+              }
+            }}
+            onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
+            style={{
+              width: 80,
+              fontSize: 10,
+              fontFamily: "monospace",
+              padding: "2px 4px",
+              border: `1px solid ${colors.border}`,
+              background: isDark ? "#2a2a2a" : "#fff",
+              color: isDark ? "#ddd" : "#333",
+              outline: "none",
+            }}
+          />
+          <Typography sx={{ ...typography.labelSmall, color: colors.textMuted || colors.text }}>—</Typography>
+          <input
+            type="number"
+            value={rangeInputMax}
+            onChange={(e) => { setRangeInputActive(true); setRangeInputMax(e.target.value); }}
+            onFocus={() => setRangeInputActive(true)}
+            onBlur={() => {
+              setRangeInputActive(false);
+              const val = parseFloat(rangeInputMax);
+              if (!isNaN(val)) {
+                const dataRange = xDataRangeRef.current;
+                let newMax = Math.max(dataRange.min, Math.min(dataRange.max, val));
+                if (newMax <= xMin) { const tmp = newMax; newMax = xMin; setXMin(tmp); setModelXRange([tmp, xMin]); setXMax(xMin); return; }
+                setXMax(newMax);
+                setModelXRange([xMin, newMax]);
+              }
+            }}
+            onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
+            style={{
+              width: 80,
+              fontSize: 10,
+              fontFamily: "monospace",
+              padding: "2px 4px",
+              border: `1px solid ${colors.border}`,
+              background: isDark ? "#2a2a2a" : "#fff",
+              color: isDark ? "#ddd" : "#333",
+              outline: "none",
+            }}
+          />
+          <Button
+            size="small"
+            sx={compactButton}
+            onClick={() => {
+              setXLocked(false);
+              setModelXRange([]);
+              setXMin(xDataRangeRef.current.min);
+              setXMax(xDataRangeRef.current.max);
+            }}
+          >
+            RESET
+          </Button>
+          {!hideExport && (
+            <Button size="small" sx={{ ...compactButton, ml: "4px" }} onClick={handleCopyCSV} disabled={lockExport}>
+              {csvCopied ? "COPIED" : "COPY CSV"}
+            </Button>
+          )}
+        </Box>
+      )}
+
+      {/* Y Range input row (when Y locked) — Feature 2 */}
+      {yLocked && (
+        <Box sx={{ display: "flex", alignItems: "center", gap: "6px", mt: "4px", mb: "2px", height: 24 }}>
+          <Typography sx={{ ...typography.labelSmall, color: colors.text }}>
+            Y range:
+          </Typography>
+          <input
+            type="number"
+            value={rangeInputYMin}
+            onChange={(e) => { setRangeInputYActive(true); setRangeInputYMin(e.target.value); }}
+            onFocus={() => setRangeInputYActive(true)}
+            onBlur={() => {
+              setRangeInputYActive(false);
+              const val = parseFloat(rangeInputYMin);
+              if (!isNaN(val)) {
+                const dataRange = yDataRangeRef.current;
+                let newMin = Math.max(dataRange.min, Math.min(dataRange.max, val));
+                if (newMin >= yMax) { const tmp = newMin; newMin = yMax; setYMax(tmp); setModelYRange([yMax, tmp]); setYMin(yMax); return; }
+                setYMin(newMin);
+                setModelYRange([newMin, yMax]);
+              }
+            }}
+            onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
+            style={{
+              width: 80,
+              fontSize: 10,
+              fontFamily: "monospace",
+              padding: "2px 4px",
+              border: `1px solid ${colors.border}`,
+              background: isDark ? "#2a2a2a" : "#fff",
+              color: isDark ? "#ddd" : "#333",
+              outline: "none",
+            }}
+          />
+          <Typography sx={{ ...typography.labelSmall, color: colors.textMuted || colors.text }}>—</Typography>
+          <input
+            type="number"
+            value={rangeInputYMax}
+            onChange={(e) => { setRangeInputYActive(true); setRangeInputYMax(e.target.value); }}
+            onFocus={() => setRangeInputYActive(true)}
+            onBlur={() => {
+              setRangeInputYActive(false);
+              const val = parseFloat(rangeInputYMax);
+              if (!isNaN(val)) {
+                const dataRange = yDataRangeRef.current;
+                let newMax = Math.max(dataRange.min, Math.min(dataRange.max, val));
+                if (newMax <= yMin) { const tmp = newMax; newMax = yMin; setYMin(tmp); setModelYRange([tmp, yMin]); setYMax(yMin); return; }
+                setYMax(newMax);
+                setModelYRange([yMin, newMax]);
+              }
+            }}
+            onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
+            style={{
+              width: 80,
+              fontSize: 10,
+              fontFamily: "monospace",
+              padding: "2px 4px",
+              border: `1px solid ${colors.border}`,
+              background: isDark ? "#2a2a2a" : "#fff",
+              color: isDark ? "#ddd" : "#333",
+              outline: "none",
+            }}
+          />
+          <Button
+            size="small"
+            sx={compactButton}
+            onClick={() => {
+              setYLocked(false);
+              setModelYRange([]);
+              setYMin(yDataRangeRef.current.min);
+              setYMax(yDataRangeRef.current.max);
+            }}
+          >
+            RESET
+          </Button>
+        </Box>
+      )}
+
       {/* Stats bar (Show4DSTEM pattern, one row per trace) */}
       {showStats && !hideStats && statsMean && statsMean.length > 0 && (() => {
         const showIndices = focusedTrace >= 0 && focusedTrace < nTraces
@@ -2077,7 +2651,7 @@ function Show1D() {
             }}
           >
             {showIndices.map((t) => {
-              const label = (traceLabels && traceLabels[t]) || `Trace ${t + 1}`;
+              const label = (traceLabels && traceLabels[t]) || `Data ${t + 1}`;
               const traceColor = (traceColors && traceColors[t]) || "#4fc3f7";
               return (
                 <Box key={t} sx={{ display: "flex", gap: 2, alignItems: "center", px: 1, py: 0.25 }}>
@@ -2092,10 +2666,62 @@ function Show1D() {
                 </Box>
               );
             })}
+
+            {/* Range stats (Feature 1+4) */}
+            {xLocked && rangeStats && rangeStats.length > 0 && (
+              <>
+                <Box sx={{ borderTop: `1px dashed ${colors.border}`, mx: 1, my: 0.25 }} />
+                {showIndices.map((t) => {
+                  const rs = rangeStats[t];
+                  if (!rs) return null;
+                  const traceColor = (traceColors && traceColors[t]) || "#4fc3f7";
+                  return (
+                    <Box key={`rs-${t}`} sx={{ display: "flex", gap: 2, alignItems: "center", px: 1, py: 0.25 }}>
+                      <Typography sx={{ fontSize: 10, color: isDark ? "#777" : "#aaa", minWidth: 60 }}>
+                        Range ({rs.n_points} pts)
+                      </Typography>
+                      <Typography sx={{ fontSize: 11, color: isDark ? "#888" : "#999" }}>Mean <Box component="span" sx={{ color: traceColor }}>{formatNumber(rs.mean)}</Box></Typography>
+                      <Typography sx={{ fontSize: 11, color: isDark ? "#888" : "#999" }}>Min <Box component="span" sx={{ color: traceColor }}>{formatNumber(rs.min)}</Box></Typography>
+                      <Typography sx={{ fontSize: 11, color: isDark ? "#888" : "#999" }}>Max <Box component="span" sx={{ color: traceColor }}>{formatNumber(rs.max)}</Box></Typography>
+                      <Typography sx={{ fontSize: 11, color: isDark ? "#888" : "#999" }}>Std <Box component="span" sx={{ color: traceColor }}>{formatNumber(rs.std)}</Box></Typography>
+                      <Typography sx={{ fontSize: 11, color: isDark ? "#888" : "#999" }}>∫ <Box component="span" sx={{ color: traceColor }}>{formatNumber(rs.integral)}</Box></Typography>
+                    </Box>
+                  );
+                })}
+              </>
+            )}
+
+            {/* FWHM stats (Feature 5) */}
+            {peakFwhm && peakFwhm.length > 0 && (
+              <>
+                <Box sx={{ borderTop: `1px dashed ${colors.border}`, mx: 1, my: 0.25 }} />
+                {peakFwhm.map((f, i) => {
+                  const pk = peakMarkers && f.peak_idx >= 0 && f.peak_idx < peakMarkers.length ? peakMarkers[f.peak_idx] : null;
+                  const traceColor = pk && traceColors && traceColors[pk.trace_idx] ? traceColors[pk.trace_idx] : "#4fc3f7";
+                  return (
+                    <Box key={`fwhm-${i}`} sx={{ display: "flex", gap: 2, alignItems: "center", px: 1, py: 0.25 }}>
+                      <Typography sx={{ fontSize: 10, color: isDark ? "#777" : "#aaa", minWidth: 60 }}>
+                        Peak {f.peak_idx}
+                      </Typography>
+                      {f.fwhm != null ? (
+                        <>
+                          <Typography sx={{ fontSize: 11, color: isDark ? "#888" : "#999" }}>FWHM <Box component="span" sx={{ color: traceColor }}>{formatNumber(f.fwhm)}</Box></Typography>
+                          <Typography sx={{ fontSize: 11, color: isDark ? "#888" : "#999" }}>Center <Box component="span" sx={{ color: traceColor }}>{formatNumber(f.center ?? 0)}</Box></Typography>
+                          <Typography sx={{ fontSize: 11, color: isDark ? "#888" : "#999" }}>R² <Box component="span" sx={{ color: traceColor }}>{(f.fit_quality ?? 0).toFixed(4)}</Box></Typography>
+                        </>
+                      ) : (
+                        <Typography sx={{ fontSize: 11, color: isDark ? "#666" : "#bbb" }}>
+                          {f.error || "Fit failed"}
+                        </Typography>
+                      )}
+                    </Box>
+                  );
+                })}
+              </>
+            )}
           </Box>
         );
       })()}
-
 
     </Box>
   );

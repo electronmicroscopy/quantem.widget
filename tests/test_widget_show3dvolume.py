@@ -388,3 +388,4 @@ def test_show3dvolume_widget_version_is_set():
     vol = np.random.rand(8, 8, 8).astype(np.float32)
     w = Show3DVolume(vol)
     assert w.widget_version != "unknown"
+

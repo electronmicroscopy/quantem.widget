@@ -35,9 +35,35 @@ Methods
 
    w = Align2D(img_a, img_b)
 
+   # Replace both images (re-runs auto-alignment)
+   w.set_images(new_a, new_b, auto_align=True)
+
    # Access alignment result
    dx, dy = w.offset
    print(f"NCC: {w.ncc_aligned:.4f}")
+
+   # Reset alignment to zero offset
+   w.reset_alignment()
+
+Control Groups
+--------------
+
+.. code-block:: python
+
+   # Lock groups (visible but non-interactive)
+   w = Align2D(
+       img_a, img_b,
+       disable_alignment=True,
+       disable_display=True,
+       disable_export=True,
+   )
+
+   # Hide groups entirely
+   w = Align2D(
+       img_a, img_b,
+       hide_stats=True,
+       hidden_tools=["export"],
+   )
 
 State Persistence
 -----------------

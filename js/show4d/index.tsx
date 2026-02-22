@@ -31,6 +31,35 @@ const CANVAS_SIZE = 450;
 const RESIZE_HIT_AREA_PX = 10;
 const CIRCLE_HANDLE_ANGLE = 0.707;
 
+// ============================================================================
+// FFT peak finder (snap to Bragg spot with sub-pixel centroid refinement)
+// ============================================================================
+function findFFTPeak(mag: Float32Array, width: number, height: number, col: number, row: number, radius: number): { row: number; col: number } {
+  const c0 = Math.max(0, Math.floor(col) - radius);
+  const r0 = Math.max(0, Math.floor(row) - radius);
+  const c1 = Math.min(width - 1, Math.floor(col) + radius);
+  const r1 = Math.min(height - 1, Math.floor(row) + radius);
+  let bestCol = Math.round(col), bestRow = Math.round(row), bestVal = -Infinity;
+  for (let ir = r0; ir <= r1; ir++) {
+    for (let ic = c0; ic <= c1; ic++) {
+      const val = mag[ir * width + ic];
+      if (val > bestVal) { bestVal = val; bestCol = ic; bestRow = ir; }
+    }
+  }
+  const wc0 = Math.max(0, bestCol - 1), wc1 = Math.min(width - 1, bestCol + 1);
+  const wr0 = Math.max(0, bestRow - 1), wr1 = Math.min(height - 1, bestRow + 1);
+  let sumW = 0, sumWC = 0, sumWR = 0;
+  for (let ir = wr0; ir <= wr1; ir++) {
+    for (let ic = wc0; ic <= wc1; ic++) {
+      const w = mag[ir * width + ic];
+      sumW += w; sumWC += w * ic; sumWR += w * ir;
+    }
+  }
+  if (sumW > 0) return { row: sumWR / sumW, col: sumWC / sumW };
+  return { row: bestRow, col: bestCol };
+}
+const FFT_SNAP_RADIUS = 5;
+
 function resolveScaleBarParams(pixelSize: number, unit: string): { pixelSize: number; unit: "Å" | "mrad" | "px" } {
   if (!(pixelSize > 0)) return { pixelSize: 1, unit: "px" };
   if (unit === "Å") return { pixelSize, unit: "Å" };
@@ -476,6 +505,7 @@ function Histogram({
           "& .MuiSlider-valueLabel": { fontSize: 10, padding: "2px 4px" },
         }}
       />
+      <Box sx={{ display: "flex", justifyContent: "space-between", width }}><Typography sx={{ fontSize: 8, fontFamily: "monospace", opacity: 0.6, lineHeight: 1 }}>{(() => { const v = dataMin + (vminPct / 100) * (dataMax - dataMin); return v >= 1000 ? v.toExponential(1) : v.toFixed(1); })()}</Typography><Typography sx={{ fontSize: 8, fontFamily: "monospace", opacity: 0.6, lineHeight: 1 }}>{(() => { const v = dataMin + (vmaxPct / 100) * (dataMax - dataMin); return v >= 1000 ? v.toExponential(1) : v.toFixed(1); })()}</Typography></Box>
     </Box>
   );
 }
@@ -711,6 +741,7 @@ function Show4D() {
   const [isDraggingRoi, setIsDraggingRoi] = React.useState(false);
   const [isDraggingRoiResize, setIsDraggingRoiResize] = React.useState(false);
   const [isHoveringRoiResize, setIsHoveringRoiResize] = React.useState(false);
+  const resizeAspectRef = React.useRef<number | null>(null);
   const [localRoiCenterRow, setLocalRoiCenterRow] = React.useState(roiCenterRow);
   const [localRoiCenterCol, setLocalRoiCenterCol] = React.useState(roiCenterCol);
 
@@ -746,6 +777,8 @@ function Show4D() {
   // Histogram data
   const [navHistogramData, setNavHistogramData] = React.useState<Float32Array | null>(null);
   const [sigHistogramData, setSigHistogramData] = React.useState<Float32Array | null>(null);
+  const [navOffscreenVersion, setNavOffscreenVersion] = React.useState(0);
+  const [sigOffscreenVersion, setSigOffscreenVersion] = React.useState(0);
 
   // Line profile state
   const [profileActive, setProfileActive] = React.useState(false);
@@ -769,6 +802,7 @@ function Show4D() {
   const fftOffscreenRef = React.useRef<HTMLCanvasElement | null>(null);
   const fftMagRef = React.useRef<Float32Array | null>(null);
   const [fftMagVersion, setFftMagVersion] = React.useState(0);
+  const [fftOffscreenVersion, setFftOffscreenVersion] = React.useState(0);
   const [fftZoom, setFftZoom] = React.useState(1);
   const [fftPanX, setFftPanX] = React.useState(0);
   const [fftPanY, setFftPanY] = React.useState(0);
@@ -782,6 +816,13 @@ function Show4D() {
   const [fftStats, setFftStats] = React.useState<{ mean: number; min: number; max: number; std: number }>({ mean: 0, min: 0, max: 0, std: 0 });
   const [isDraggingFft, setIsDraggingFft] = React.useState(false);
   const [fftDragStart, setFftDragStart] = React.useState<{ x: number; y: number; panX: number; panY: number } | null>(null);
+
+  // FFT d-spacing click measurement
+  const [fftClickInfo, setFftClickInfo] = React.useState<{
+    row: number; col: number; distPx: number;
+    spatialFreq: number | null; dSpacing: number | null;
+  } | null>(null);
+  const fftClickStartRef = React.useRef<{ x: number; y: number } | null>(null);
 
   // ROI toggle memory
   const lastRoiModeRef = React.useRef<string>("circle");
@@ -867,7 +908,7 @@ function Show4D() {
     const overlays = [navOverlayRef.current, sigOverlayRef.current, fftOverlayRef.current];
     overlays.forEach(el => el?.addEventListener("wheel", preventDefault, { passive: false }));
     return () => overlays.forEach(el => el?.removeEventListener("wheel", preventDefault));
-  }, []);
+  }, [effectiveShowFft]);
 
   // ── GPU FFT init ──
   React.useEffect(() => {
@@ -939,12 +980,9 @@ function Show4D() {
     setSigHistogramData(scaledData);
   }, [frameBytes, sigScaleMode, sigPowerExp]);
 
-  // ── Render nav image ──
+  // ── Render nav image to offscreen (colormap pipeline — no zoom/pan deps) ──
   React.useEffect(() => {
-    if (!rawNavImageRef.current || !navCanvasRef.current) return;
-    const canvas = navCanvasRef.current;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
+    if (!rawNavImageRef.current) return;
 
     const rawData = rawNavImageRef.current;
     let scaled: Float32Array;
@@ -985,22 +1023,28 @@ function Show4D() {
     }
     applyColormap(scaled, imgData.data, lut, vmin, vmax);
     offCtx.putImageData(imgData, 0, 0);
+    setNavOffscreenVersion(v => v + 1);
+  }, [navImageBytes, navColormap, navVminPct, navVmaxPct, navScaleMode, navPowerExp, navRows, navCols]);
 
+  // ── Nav zoom/pan redraw (lightweight — just drawImage with transform) ──
+  // useLayoutEffect prevents black flash when canvas dimensions change (resize)
+  React.useLayoutEffect(() => {
+    if (!navCanvasRef.current || !navOffscreenRef.current) return;
+    const canvas = navCanvasRef.current;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
     ctx.imageSmoothingEnabled = false;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.save();
     ctx.translate(navPanX, navPanY);
     ctx.scale(navZoom, navZoom);
-    ctx.drawImage(offscreen, 0, 0);
+    ctx.drawImage(navOffscreenRef.current, 0, 0);
     ctx.restore();
-  }, [navImageBytes, navColormap, navVminPct, navVmaxPct, navScaleMode, navPowerExp, navZoom, navPanX, navPanY, navRows, navCols]);
+  }, [navOffscreenVersion, navZoom, navPanX, navPanY]);
 
-  // ── Render signal frame ──
+  // ── Render signal frame to offscreen (colormap pipeline — no zoom/pan deps) ──
   React.useEffect(() => {
-    if (!frameBytes || !sigCanvasRef.current) return;
-    const canvas = sigCanvasRef.current;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
+    if (!frameBytes) return;
 
     const rawData = new Float32Array(frameBytes.buffer, frameBytes.byteOffset, frameBytes.byteLength / 4);
     let scaled: Float32Array;
@@ -1041,15 +1085,23 @@ function Show4D() {
     }
     applyColormap(scaled, imgData.data, lut, vmin, vmax);
     offCtx.putImageData(imgData, 0, 0);
+    setSigOffscreenVersion(v => v + 1);
+  }, [frameBytes, sigColormap, sigVminPct, sigVmaxPct, sigScaleMode, sigPowerExp, sigRows, sigCols]);
 
+  // ── Signal zoom/pan redraw (lightweight — just drawImage with transform) ──
+  React.useLayoutEffect(() => {
+    if (!sigCanvasRef.current || !sigOffscreenRef.current) return;
+    const canvas = sigCanvasRef.current;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
     ctx.imageSmoothingEnabled = false;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.save();
     ctx.translate(sigPanX, sigPanY);
     ctx.scale(sigZoom, sigZoom);
-    ctx.drawImage(offscreen, 0, 0);
+    ctx.drawImage(sigOffscreenRef.current, 0, 0);
     ctx.restore();
-  }, [frameBytes, sigColormap, sigVminPct, sigVmaxPct, sigScaleMode, sigPowerExp, sigZoom, sigPanX, sigPanY, sigRows, sigCols]);
+  }, [sigOffscreenVersion, sigZoom, sigPanX, sigPanY]);
 
   // ── Compute FFT from signal frame (supports ROI-scoped FFT) ──
   React.useEffect(() => {
@@ -1098,6 +1150,7 @@ function Show4D() {
       fftMagRef.current = computeMagnitude(real, imag);
       setFftCropDims(origCropW > 0 ? { cropWidth: origCropW, cropHeight: origCropH, fftWidth: fftW, fftHeight: fftH } : null);
       setFftMagVersion(v => v + 1);
+      setFftClickInfo(null);
     };
     computeFFT();
     return () => { cancelled = true; };
@@ -1131,37 +1184,25 @@ function Show4D() {
     const offscreen = renderToOffscreen(displayData, w, h, lut, vmin, vmax);
     if (!offscreen) return;
     fftOffscreenRef.current = offscreen;
-
-    if (fftCanvasRef.current) {
-      const ctx = fftCanvasRef.current.getContext("2d");
-      if (ctx) {
-        ctx.imageSmoothingEnabled = false;
-        ctx.clearRect(0, 0, sigCols, sigRows);
-        ctx.save();
-        ctx.translate(fftPanX, fftPanY);
-        ctx.scale(fftZoom, fftZoom);
-        ctx.drawImage(offscreen, 0, 0);
-        ctx.restore();
-      }
-    }
+    setFftOffscreenVersion(v => v + 1);
   }, [effectiveShowFft, fftMagVersion, fftLogScale, fftAuto, fftVminPct, fftVmaxPct, fftColormap, sigRows, sigCols, fftCropDims]);
 
-  // ── FFT zoom/pan redraw ──
-  React.useEffect(() => {
+  // ── FFT zoom/pan redraw (lightweight — just drawImage with transform) ──
+  React.useLayoutEffect(() => {
     if (!effectiveShowFft || !fftCanvasRef.current || !fftOffscreenRef.current) return;
     const canvas = fftCanvasRef.current;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
     ctx.imageSmoothingEnabled = false;
-    ctx.clearRect(0, 0, sigCols, sigRows);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.save();
     ctx.translate(fftPanX, fftPanY);
     ctx.scale(fftZoom, fftZoom);
     ctx.drawImage(fftOffscreenRef.current, 0, 0);
     ctx.restore();
-  }, [effectiveShowFft, fftZoom, fftPanX, fftPanY, sigCols, sigRows]);
+  }, [effectiveShowFft, fftOffscreenVersion, fftZoom, fftPanX, fftPanY]);
 
-  // ── FFT UI overlay ──
+  // ── FFT UI overlay (scale bar + d-spacing crosshair) ──
   React.useEffect(() => {
     if (!fftUiRef.current || !effectiveShowFft) return;
     const canvas = fftUiRef.current;
@@ -1174,7 +1215,42 @@ function Show4D() {
     } else {
       drawScaleBarHiDPI(canvas, DPR, fftZoom, 1, "px", fftW);
     }
-  }, [effectiveShowFft, fftZoom, fftPanX, fftPanY, sigPixelSize, sigPixelUnit, sigCols, sigCanvasWidth, sigCanvasHeight, fftCropDims]);
+
+    // D-spacing crosshair marker
+    if (fftClickInfo) {
+      const ctx = canvas.getContext("2d");
+      if (ctx) {
+        ctx.save();
+        ctx.scale(DPR, DPR);
+        const screenX = (fftPanX + fftClickInfo.col * fftZoom) * sigCanvasWidth / sigCols;
+        const screenY = (fftPanY + fftClickInfo.row * fftZoom) * sigCanvasHeight / sigRows;
+        ctx.strokeStyle = "rgba(255, 255, 255, 0.9)";
+        ctx.shadowColor = "rgba(0, 0, 0, 0.6)";
+        ctx.shadowBlur = 2;
+        ctx.lineWidth = 1.5;
+        const r = 8;
+        ctx.beginPath();
+        ctx.moveTo(screenX - r, screenY); ctx.lineTo(screenX - 3, screenY);
+        ctx.moveTo(screenX + 3, screenY); ctx.lineTo(screenX + r, screenY);
+        ctx.moveTo(screenX, screenY - r); ctx.lineTo(screenX, screenY - 3);
+        ctx.moveTo(screenX, screenY + 3); ctx.lineTo(screenX, screenY + r);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(screenX, screenY, 4, 0, Math.PI * 2);
+        ctx.stroke();
+        if (fftClickInfo.dSpacing != null) {
+          const d = fftClickInfo.dSpacing;
+          const label = d >= 10 ? `d = ${(d / 10).toFixed(2)} nm` : `d = ${d.toFixed(2)} \u00C5`;
+          ctx.font = "bold 11px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+          ctx.fillStyle = "white";
+          ctx.textAlign = "left";
+          ctx.textBaseline = "bottom";
+          ctx.fillText(label, screenX + 10, screenY - 4);
+        }
+        ctx.restore();
+      }
+    }
+  }, [effectiveShowFft, fftZoom, fftPanX, fftPanY, sigPixelSize, sigPixelUnit, sigCols, sigRows, sigCanvasWidth, sigCanvasHeight, fftCropDims, fftClickInfo]);
 
   // ── Nav HiDPI UI overlay ──
   React.useEffect(() => {
@@ -1447,6 +1523,8 @@ function Show4D() {
     if (roiMode !== "off") {
       if (lockRoi) return;
       if (isNearRoiResizeHandle(imgX, imgY)) {
+        e.preventDefault();
+        resizeAspectRef.current = roiMode === "rect" && roiWidth > 0 && roiHeight > 0 ? roiWidth / roiHeight : null;
         setIsDraggingRoiResize(true);
         return;
       }
@@ -1485,23 +1563,21 @@ function Show4D() {
     const imgX = (screenY - navPanY) / navZoom;
     const imgY = (screenX - navPanX) / navZoom;
 
-    // Cursor readout
-    const pxRow = Math.floor(imgX);
-    const pxCol = Math.floor(imgY);
-    if (pxRow >= 0 && pxRow < navRows && pxCol >= 0 && pxCol < navCols && rawNavImageRef.current) {
-      setCursorInfo({ row: pxRow, col: pxCol, value: rawNavImageRef.current[pxRow * navCols + pxCol], panel: "nav" });
-    } else {
-      setCursorInfo(prev => prev?.panel === "nav" ? null : prev);
-    }
-
-    // ROI resize dragging
+    // Fast path: during active drags, skip cursor readout and hover detection
     if (isDraggingRoiResize) {
       if (lockRoi) return;
       const dx = Math.abs(imgX - localRoiCenterRow);
       const dy = Math.abs(imgY - localRoiCenterCol);
       if (roiMode === "rect") {
-        setRoiWidth(Math.max(2, Math.round(dy * 2)));
-        setRoiHeight(Math.max(2, Math.round(dx * 2)));
+        let newW = Math.max(2, Math.round(dy * 2));
+        let newH = Math.max(2, Math.round(dx * 2));
+        if (e.shiftKey && resizeAspectRef.current != null) {
+          const aspect = resizeAspectRef.current;
+          if (newW / newH > aspect) newH = Math.max(2, Math.round(newW / aspect));
+          else newW = Math.max(2, Math.round(newH * aspect));
+        }
+        setRoiWidth(newW);
+        setRoiHeight(newH);
       } else if (roiMode === "square") {
         setRoiRadius(Math.max(1, Math.round(Math.max(dx, dy))));
       } else {
@@ -1510,17 +1586,7 @@ function Show4D() {
       return;
     }
 
-    // Hover check for resize handles
-    if (!isDraggingRoi && !isDraggingNav) {
-      if (!lockRoi) {
-        setIsHoveringRoiResize(isNearRoiResizeHandle(imgX, imgY));
-        if (roiMode !== "off") return;
-      } else {
-        setIsHoveringRoiResize(false);
-      }
-    }
-
-    // ROI center dragging
+    // ROI center dragging — skip cursor readout
     if (isDraggingRoi) {
       if (lockRoi) return;
       setLocalRoiCenterRow(imgX);
@@ -1532,21 +1598,39 @@ function Show4D() {
       return;
     }
 
-    // Position dragging
-    if (!isDraggingNav) return;
-    if (lockNavigation) return;
-    let newX = Math.round(Math.max(0, Math.min(navRows - 1, imgX)));
-    let newY = Math.round(Math.max(0, Math.min(navCols - 1, imgY)));
-    if (snapEnabled && rawNavImageRef.current) {
-      const snapped = findLocalMax(rawNavImageRef.current, navCols, navRows, newY, newX, snapRadius);
-      newX = snapped.row;
-      newY = snapped.col;
+    // Position dragging — skip cursor readout
+    if (isDraggingNav) {
+      if (lockNavigation) return;
+      let newX = Math.round(Math.max(0, Math.min(navRows - 1, imgX)));
+      let newY = Math.round(Math.max(0, Math.min(navCols - 1, imgY)));
+      if (snapEnabled && rawNavImageRef.current) {
+        const snapped = findLocalMax(rawNavImageRef.current, navCols, navRows, newY, newX, snapRadius);
+        newX = snapped.row;
+        newY = snapped.col;
+      }
+      setLocalPosRow(newX + 0.5);
+      setLocalPosCol(newY + 0.5);
+      model.set("pos_row", newX);
+      model.set("pos_col", newY);
+      model.save_changes();
+      return;
     }
-    setLocalPosRow(newX + 0.5);
-    setLocalPosCol(newY + 0.5);
-    model.set("pos_row", newX);
-    model.set("pos_col", newY);
-    model.save_changes();
+
+    // Idle: cursor readout + hover detection
+    const pxRow = Math.floor(imgX);
+    const pxCol = Math.floor(imgY);
+    if (pxRow >= 0 && pxRow < navRows && pxCol >= 0 && pxCol < navCols && rawNavImageRef.current) {
+      setCursorInfo({ row: pxRow, col: pxCol, value: rawNavImageRef.current[pxRow * navCols + pxCol], panel: "nav" });
+    } else {
+      setCursorInfo(prev => prev?.panel === "nav" ? null : prev);
+    }
+
+    // Hover check for resize handles
+    if (!lockRoi) {
+      setIsHoveringRoiResize(isNearRoiResizeHandle(imgX, imgY));
+    } else {
+      setIsHoveringRoiResize(false);
+    }
   };
 
   const handleNavMouseUp = () => {
@@ -1568,9 +1652,24 @@ function Show4D() {
     setNavPanY(0);
   };
 
+  // ── FFT screen-to-image coordinate helper ──
+  const fftScreenToImg = (e: React.MouseEvent): { row: number; col: number } | null => {
+    const canvas = fftOverlayRef.current;
+    if (!canvas) return null;
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    const canvasX = (e.clientX - rect.left) * scaleX;
+    const canvasY = (e.clientY - rect.top) * scaleY;
+    const imgCol = (canvasX - fftPanX) / fftZoom;
+    const imgRow = (canvasY - fftPanY) / fftZoom;
+    return { row: imgRow, col: imgCol };
+  };
+
   // ── FFT mouse handlers ──
   const handleFftMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
     if (lockView || lockFft) return;
+    fftClickStartRef.current = { x: e.clientX, y: e.clientY };
     setIsDraggingFft(true);
     setFftDragStart({ x: e.clientX, y: e.clientY, panX: fftPanX, panY: fftPanY });
   };
@@ -1587,13 +1686,60 @@ function Show4D() {
     setFftPanY(fftDragStart.panY + (e.clientY - fftDragStart.y) * scaleY);
   };
 
-  const handleFftMouseUp = () => { setIsDraggingFft(false); setFftDragStart(null); };
-  const handleFftMouseLeave = () => { setIsDraggingFft(false); setFftDragStart(null); };
+  const handleFftMouseUp = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    // Click detection for d-spacing measurement
+    if (fftClickStartRef.current) {
+      const dx = e.clientX - fftClickStartRef.current.x;
+      const dy = e.clientY - fftClickStartRef.current.y;
+      if (Math.sqrt(dx * dx + dy * dy) < 3) {
+        const pos = fftScreenToImg(e);
+        if (pos) {
+          const fftW = fftCropDims?.fftWidth ?? sigCols;
+          const fftH = fftCropDims?.fftHeight ?? sigRows;
+          let imgCol = pos.col;
+          let imgRow = pos.row;
+          // Snap to nearest Bragg spot (local max in FFT magnitude)
+          if (fftMagRef.current) {
+            const snapped = findFFTPeak(fftMagRef.current, fftW, fftH, imgCol, imgRow, FFT_SNAP_RADIUS);
+            imgCol = snapped.col;
+            imgRow = snapped.row;
+          }
+          const halfW = Math.floor(fftW / 2);
+          const halfH = Math.floor(fftH / 2);
+          const dcol = imgCol - halfW;
+          const drow = imgRow - halfH;
+          const distPx = Math.sqrt(dcol * dcol + drow * drow);
+          if (distPx < 1) {
+            setFftClickInfo(null);
+          } else {
+            let spatialFreq: number | null = null;
+            let dSpacing: number | null = null;
+            if (sigPixelSize > 0) {
+              const paddedW = nextPow2(fftW);
+              const paddedH = nextPow2(fftH);
+              const binC = ((Math.round(imgCol) - halfW) % fftW + fftW) % fftW;
+              const binR = ((Math.round(imgRow) - halfH) % fftH + fftH) % fftH;
+              const freqC = binC <= paddedW / 2 ? binC / (paddedW * sigPixelSize) : (binC - paddedW) / (paddedW * sigPixelSize);
+              const freqR = binR <= paddedH / 2 ? binR / (paddedH * sigPixelSize) : (binR - paddedH) / (paddedH * sigPixelSize);
+              spatialFreq = Math.sqrt(freqC * freqC + freqR * freqR);
+              dSpacing = spatialFreq > 0 ? 1 / spatialFreq : null;
+            }
+            setFftClickInfo({ row: imgRow, col: imgCol, distPx, spatialFreq, dSpacing });
+          }
+        }
+      }
+      fftClickStartRef.current = null;
+    }
+    setIsDraggingFft(false);
+    setFftDragStart(null);
+  };
+  const handleFftMouseLeave = () => { fftClickStartRef.current = null; setIsDraggingFft(false); setFftDragStart(null); };
   const handleFftDoubleClick = () => {
     if (lockView || lockFft) return;
     setFftZoom(1);
     setFftPanX(0);
     setFftPanY(0);
+    setFftClickInfo(null);
   };
 
   // ── Signal mouse handlers (drag-to-pan + profile click) ──
@@ -1648,6 +1794,18 @@ function Show4D() {
     const canvas = sigOverlayRef.current;
     if (!canvas) return;
     const rect = canvas.getBoundingClientRect();
+
+    // Fast path: during pan drag, skip all cursor/hover/profile work — just update pan
+    if (isDraggingSig && sigDragStart && !lockView) {
+      const scaleX = canvas.width / rect.width;
+      const scaleY = canvas.height / rect.height;
+      const dx = (e.clientX - sigDragStart.x) * scaleX;
+      const dy = (e.clientY - sigDragStart.y) * scaleY;
+      setSigPanX(sigDragStart.panX + dx);
+      setSigPanY(sigDragStart.panY + dy);
+      return;
+    }
+
     const screenX = (e.clientX - rect.left) * (canvas.width / rect.width);
     const screenY = (e.clientY - rect.top) * (canvas.height / rect.height);
     const imgCol = (screenX - sigPanX) / sigZoom;
@@ -1709,14 +1867,6 @@ function Show4D() {
       if (isHoveringProfileLine) setIsHoveringProfileLine(false);
     }
 
-    if (lockView) return;
-    if (!isDraggingSig || !sigDragStart) return;
-    const scaleX = canvas.width / rect.width;
-    const scaleY = canvas.height / rect.height;
-    const dx = (e.clientX - sigDragStart.x) * scaleX;
-    const dy = (e.clientY - sigDragStart.y) * scaleY;
-    setSigPanX(sigDragStart.panX + dx);
-    setSigPanY(sigDragStart.panY + dy);
   };
 
   const handleSigMouseUp = (e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -1792,18 +1942,29 @@ function Show4D() {
 
   React.useEffect(() => {
     if (!isResizing) return;
+    let rafId = 0;
+    let latestSize = resizeStart ? resizeStart.size : canvasSize;
     const handleMouseMove = (e: MouseEvent) => {
       if (!resizeStart) return;
       const delta = Math.max(e.clientX - resizeStart.x, e.clientY - resizeStart.y);
-      setCanvasSize(Math.max(CANVAS_SIZE, Math.min(800, resizeStart.size + delta)));
+      latestSize = Math.max(CANVAS_SIZE, Math.min(800, resizeStart.size + delta));
+      if (!rafId) {
+        rafId = requestAnimationFrame(() => {
+          rafId = 0;
+          setCanvasSize(latestSize);
+        });
+      }
     };
     const handleMouseUp = () => {
+      cancelAnimationFrame(rafId);
+      setCanvasSize(latestSize);
       setIsResizing(false);
       setResizeStart(null);
     };
     document.addEventListener("mousemove", handleMouseMove);
     document.addEventListener("mouseup", handleMouseUp);
     return () => {
+      cancelAnimationFrame(rafId);
       document.removeEventListener("mousemove", handleMouseMove);
       document.removeEventListener("mouseup", handleMouseUp);
     };
@@ -2431,6 +2592,29 @@ function Show4D() {
                 <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Min <Box component="span" sx={{ color: themeColors.accent }}>{formatStat(fftStats.min)}</Box></Typography>
                 <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Max <Box component="span" sx={{ color: themeColors.accent }}>{formatStat(fftStats.max)}</Box></Typography>
                 <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Std <Box component="span" sx={{ color: themeColors.accent }}>{formatStat(fftStats.std)}</Box></Typography>
+              </Box>
+            )}
+
+            {/* D-spacing readout */}
+            {fftClickInfo && (
+              <Box sx={{ mt: `${SPACING.XS}px`, px: 1, py: 0.5, bgcolor: themeColors.bgAlt, display: "flex", gap: 2, alignItems: "center" }}>
+                <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>
+                  Dist <Box component="span" sx={{ color: themeColors.accent }}>{fftClickInfo.distPx.toFixed(1)} px</Box>
+                </Typography>
+                {fftClickInfo.spatialFreq != null && (
+                  <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>
+                    Freq <Box component="span" sx={{ color: themeColors.accent }}>{fftClickInfo.spatialFreq.toFixed(4)} {"\u00C5\u207B\u00B9"}</Box>
+                  </Typography>
+                )}
+                {fftClickInfo.dSpacing != null && (
+                  <Typography sx={{ fontSize: 11, color: themeColors.textMuted, fontWeight: "bold" }}>
+                    d = <Box component="span" sx={{ color: themeColors.accent }}>
+                      {fftClickInfo.dSpacing >= 10
+                        ? `${(fftClickInfo.dSpacing / 10).toFixed(2)} nm`
+                        : `${fftClickInfo.dSpacing.toFixed(2)} \u00C5`}
+                    </Box>
+                  </Typography>
+                )}
               </Box>
             )}
 

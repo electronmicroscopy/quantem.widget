@@ -101,6 +101,15 @@ class ShowComplex2D(anywidget.AnyWidget):
     disabled_tools = traitlets.List(traitlets.Unicode()).tag(sync=True)
     hidden_tools = traitlets.List(traitlets.Unicode()).tag(sync=True)
 
+    # ROI (single-mode, same pattern as Show4D)
+    roi_mode = traitlets.Unicode("off").tag(sync=True)  # "off", "circle", "square", "rect"
+    roi_center_row = traitlets.Float(0.0).tag(sync=True)
+    roi_center_col = traitlets.Float(0.0).tag(sync=True)
+    roi_center = traitlets.List(traitlets.Float(), default_value=[0.0, 0.0]).tag(sync=True)
+    roi_radius = traitlets.Float(5.0).tag(sync=True)
+    roi_width = traitlets.Float(10.0).tag(sync=True)
+    roi_height = traitlets.Float(10.0).tag(sync=True)
+
     # Statistics (recomputed per display_mode)
     stats_mean = traitlets.Float(0.0).tag(sync=True)
     stats_min = traitlets.Float(0.0).tag(sync=True)
@@ -118,6 +127,7 @@ class ShowComplex2D(anywidget.AnyWidget):
         disable_display: bool = False,
         disable_histogram: bool = False,
         disable_fft: bool = False,
+        disable_roi: bool = False,
         disable_stats: bool = False,
         disable_export: bool = False,
         disable_view: bool = False,
@@ -131,6 +141,7 @@ class ShowComplex2D(anywidget.AnyWidget):
                 "display": disable_display,
                 "histogram": disable_histogram,
                 "fft": disable_fft,
+                "roi": disable_roi,
                 "stats": disable_stats,
                 "export": disable_export,
                 "view": disable_view,
@@ -144,6 +155,7 @@ class ShowComplex2D(anywidget.AnyWidget):
         hide_display: bool = False,
         hide_histogram: bool = False,
         hide_fft: bool = False,
+        hide_roi: bool = False,
         hide_stats: bool = False,
         hide_export: bool = False,
         hide_view: bool = False,
@@ -157,6 +169,7 @@ class ShowComplex2D(anywidget.AnyWidget):
                 "display": hide_display,
                 "histogram": hide_histogram,
                 "fft": hide_fft,
+                "roi": hide_roi,
                 "stats": hide_stats,
                 "export": hide_export,
                 "view": hide_view,
@@ -191,6 +204,7 @@ class ShowComplex2D(anywidget.AnyWidget):
         disable_display: bool = False,
         disable_histogram: bool = False,
         disable_fft: bool = False,
+        disable_roi: bool = False,
         disable_stats: bool = False,
         disable_export: bool = False,
         disable_view: bool = False,
@@ -199,6 +213,7 @@ class ShowComplex2D(anywidget.AnyWidget):
         hide_display: bool = False,
         hide_histogram: bool = False,
         hide_fft: bool = False,
+        hide_roi: bool = False,
         hide_stats: bool = False,
         hide_export: bool = False,
         hide_view: bool = False,
@@ -272,6 +287,7 @@ class ShowComplex2D(anywidget.AnyWidget):
             disable_display=disable_display,
             disable_histogram=disable_histogram,
             disable_fft=disable_fft,
+            disable_roi=disable_roi,
             disable_stats=disable_stats,
             disable_export=disable_export,
             disable_view=disable_view,
@@ -282,11 +298,21 @@ class ShowComplex2D(anywidget.AnyWidget):
             hide_display=hide_display,
             hide_histogram=hide_histogram,
             hide_fft=hide_fft,
+            hide_roi=hide_roi,
             hide_stats=hide_stats,
             hide_export=hide_export,
             hide_view=hide_view,
             hide_all=hide_all,
         )
+
+        # ROI defaults (centered, radius proportional to image size)
+        default_roi_size = max(3, min(self.height, self.width) // 6)
+        self.roi_center_row = float(self.height / 2)
+        self.roi_center_col = float(self.width / 2)
+        self.roi_center = [float(self.height / 2), float(self.width / 2)]
+        self.roi_radius = float(default_roi_size)
+        self.roi_width = float(default_roi_size * 2)
+        self.roi_height = float(default_roi_size)
 
         # Compute stats for initial display mode
         self._update_stats()
@@ -295,8 +321,9 @@ class ShowComplex2D(anywidget.AnyWidget):
         self.real_bytes = self._real.tobytes()
         self.imag_bytes = self._imag.tobytes()
 
-        # Observer
+        # Observers
         self.observe(self._on_display_mode_change, names=["display_mode"])
+        self.observe(self._on_roi_center_change, names=["roi_center"])
 
         # State restoration (must be last)
         if state is not None:
@@ -333,6 +360,44 @@ class ShowComplex2D(anywidget.AnyWidget):
 
     def _on_display_mode_change(self, change=None):
         self._update_stats()
+
+    def _on_roi_center_change(self, change=None):
+        val = self.roi_center
+        if isinstance(val, (list, tuple)) and len(val) >= 2:
+            self.roi_center_row = float(val[0])
+            self.roi_center_col = float(val[1])
+
+    def roi_circle(self, row=None, col=None, radius=None) -> "ShowComplex2D":
+        if row is not None:
+            self.roi_center_row = float(row)
+        if col is not None:
+            self.roi_center_col = float(col)
+        if radius is not None:
+            self.roi_radius = float(radius)
+        self.roi_mode = "circle"
+        return self
+
+    def roi_square(self, row=None, col=None, radius=None) -> "ShowComplex2D":
+        if row is not None:
+            self.roi_center_row = float(row)
+        if col is not None:
+            self.roi_center_col = float(col)
+        if radius is not None:
+            self.roi_radius = float(radius)
+        self.roi_mode = "square"
+        return self
+
+    def roi_rect(self, row=None, col=None, width=None, height=None) -> "ShowComplex2D":
+        if row is not None:
+            self.roi_center_row = float(row)
+        if col is not None:
+            self.roi_center_col = float(col)
+        if width is not None:
+            self.roi_width = float(width)
+        if height is not None:
+            self.roi_height = float(height)
+        self.roi_mode = "rect"
+        return self
 
     def set_image(self, data):
         """Replace the complex data. Preserves all display settings."""
@@ -488,6 +553,12 @@ class ShowComplex2D(anywidget.AnyWidget):
             "show_stats": self.show_stats,
             "show_controls": self.show_controls,
             "image_width_px": self.image_width_px,
+            "roi_mode": self.roi_mode,
+            "roi_center_row": self.roi_center_row,
+            "roi_center_col": self.roi_center_col,
+            "roi_radius": self.roi_radius,
+            "roi_width": self.roi_width,
+            "roi_height": self.roi_height,
             "disabled_tools": self.disabled_tools,
             "hidden_tools": self.hidden_tools,
         }

@@ -2,9 +2,22 @@ Show3DVolume
 ============
 
 .. autoclass:: quantem.widget.Show3DVolume
-   :members:
-   :exclude-members: __init__
+   :no-members:
 
-.. rubric:: Constructor
+.. rubric:: Key Methods
 
-.. automethod:: quantem.widget.Show3DVolume.__init__
+.. automethod:: quantem.widget.Show3DVolume.set_image
+.. automethod:: quantem.widget.Show3DVolume.save_image
+
+.. rubric:: Playback
+
+.. automethod:: quantem.widget.Show3DVolume.play
+.. automethod:: quantem.widget.Show3DVolume.pause
+.. automethod:: quantem.widget.Show3DVolume.stop
+
+.. rubric:: State Persistence
+
+.. automethod:: quantem.widget.Show3DVolume.state_dict
+.. automethod:: quantem.widget.Show3DVolume.save
+.. automethod:: quantem.widget.Show3DVolume.load_state_dict
+.. automethod:: quantem.widget.Show3DVolume.summary

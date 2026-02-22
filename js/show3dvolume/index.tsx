@@ -230,6 +230,7 @@ function Histogram({ data, vminPct, vmaxPct, onRangeChange, width = 110, height 
         valueLabelFormat={(pct) => { const val = dataMin + (pct / 100) * (dataMax - dataMin); return val >= 1000 ? val.toExponential(1) : val.toFixed(1); }}
         sx={{ width, py: 0, "& .MuiSlider-thumb": { width: 8, height: 8 }, "& .MuiSlider-rail": { height: 2 }, "& .MuiSlider-track": { height: 2 }, "& .MuiSlider-valueLabel": { fontSize: 10, padding: "2px 4px" } }}
       />
+      <Box sx={{ display: "flex", justifyContent: "space-between", width }}><Typography sx={{ fontSize: 8, fontFamily: "monospace", opacity: 0.6, lineHeight: 1 }}>{(() => { const v = dataMin + (vminPct / 100) * (dataMax - dataMin); return v >= 1000 ? v.toExponential(1) : v.toFixed(1); })()}</Typography><Typography sx={{ fontSize: 8, fontFamily: "monospace", opacity: 0.6, lineHeight: 1 }}>{(() => { const v = dataMin + (vmaxPct / 100) * (dataMax - dataMin); return v >= 1000 ? v.toExponential(1) : v.toFixed(1); })()}</Typography></Box>
     </Box>
   );
 }
@@ -237,6 +238,36 @@ function Histogram({ data, vminPct, vmaxPct, onRangeChange, width = 110, height 
 // ============================================================================
 // Main Component
 // ============================================================================
+// ============================================================================
+// FFT peak finder (snap to Bragg spot with sub-pixel centroid refinement)
+// ============================================================================
+function findFFTPeak(mag: Float32Array, width: number, height: number, col: number, row: number, radius: number): { row: number; col: number } {
+  const c0 = Math.max(0, Math.floor(col) - radius);
+  const r0 = Math.max(0, Math.floor(row) - radius);
+  const c1 = Math.min(width - 1, Math.floor(col) + radius);
+  const r1 = Math.min(height - 1, Math.floor(row) + radius);
+  let bestCol = Math.round(col), bestRow = Math.round(row), bestVal = -Infinity;
+  for (let ir = r0; ir <= r1; ir++) {
+    for (let ic = c0; ic <= c1; ic++) {
+      const val = mag[ir * width + ic];
+      if (val > bestVal) { bestVal = val; bestCol = ic; bestRow = ir; }
+    }
+  }
+  const wc0 = Math.max(0, bestCol - 1), wc1 = Math.min(width - 1, bestCol + 1);
+  const wr0 = Math.max(0, bestRow - 1), wr1 = Math.min(height - 1, bestRow + 1);
+  let sumW = 0, sumWC = 0, sumWR = 0;
+  for (let ir = wr0; ir <= wr1; ir++) {
+    for (let ic = wc0; ic <= wc1; ic++) {
+      const w = mag[ir * width + ic];
+      sumW += w; sumWC += w * ic; sumWR += w * ir;
+    }
+  }
+  if (sumW > 0) return { row: sumWR / sumW, col: sumWC / sumW };
+  return { row: bestRow, col: bestCol };
+}
+
+const FFT_SNAP_RADIUS = 5;
+
 function Show3DVolume() {
   // Theme detection
   const { themeInfo, colors: baseColors } = useTheme();
@@ -245,13 +276,6 @@ function Show3DVolume() {
     accentGreen: themeInfo.theme === "dark" ? "#0f0" : "#1a7a1a",
     accentYellow: themeInfo.theme === "dark" ? "#ff0" : "#b08800",
   };
-
-  // Initialize WebGPU FFT
-  React.useEffect(() => {
-    getWebGPUFFT().then(fft => {
-      if (fft) { gpuFFTRef.current = fft; setGpuReady(true); }
-    });
-  }, []);
 
   const themedSelect = {
     ...controlPanel.select,
@@ -314,6 +338,13 @@ function Show3DVolume() {
   const lockVolume = toolVisibility.isLocked("volume");
   const effectiveShowFft = showFft && !hideDisplay;
 
+  // Initialize WebGPU FFT
+  React.useEffect(() => {
+    getWebGPUFFT().then(fft => {
+      if (fft) { gpuFFTRef.current = fft; setGpuReady(true); }
+    });
+  }, []);
+
   // Canvas refs
   const canvasRefs = React.useRef<(HTMLCanvasElement | null)[]>([null, null, null]);
   const overlayRefs = React.useRef<(HTMLCanvasElement | null)[]>([null, null, null]);
@@ -326,9 +357,17 @@ function Show3DVolume() {
   const [fftZooms, setFftZooms] = React.useState<ZoomState[]>([DEFAULT_ZOOM, DEFAULT_ZOOM, DEFAULT_ZOOM]);
   const [fftDragAxis, setFftDragAxis] = React.useState<number | null>(null);
   const [fftDragStart, setFftDragStart] = React.useState<{ x: number; y: number; pX: number; pY: number } | null>(null);
+
+  // FFT d-spacing measurement
+  const [fftClickInfo, setFftClickInfo] = React.useState<{
+    axis: number; row: number; col: number; distPx: number;
+    spatialFreq: number | null; dSpacing: number | null;
+  } | null>(null);
+  const fftClickStartRef = React.useRef<{ x: number; y: number; axis: number } | null>(null);
   const fftCanvasRefs = React.useRef<(HTMLCanvasElement | null)[]>([null, null, null]);
   const fftOverlayRefs = React.useRef<(HTMLCanvasElement | null)[]>([null, null, null]);
   const fftOffscreenRefs = React.useRef<(HTMLCanvasElement | null)[]>([null, null, null]);
+  const fftMagCacheRefs = React.useRef<(Float32Array | null)[]>([null, null, null]);
   const gpuFFTRef = React.useRef<WebGPUFFT | null>(null);
   const [gpuReady, setGpuReady] = React.useState(false);
 
@@ -367,13 +406,16 @@ function Show3DVolume() {
   const [volumeCanvasSize, setVolumeCanvasSize] = React.useState(300);
   const [volumeResizing, setVolumeResizing] = React.useState(false);
   const volumeResizeStartRef = React.useRef<{ x: number; y: number; size: number } | null>(null);
-  const [showSlicePlanes, setShowSlicePlanes] = React.useState(false);
+  const [showSlicePlanes, setShowSlicePlanes] = React.useState(true);
 
   // Histogram state
   const [imageVminPct, setImageVminPct] = React.useState(0);
   const [imageVmaxPct, setImageVmaxPct] = React.useState(100);
   const [imageHistogramData, setImageHistogramData] = React.useState<Float32Array | null>(null);
   const [imageDataRange, setImageDataRange] = React.useState<{ min: number; max: number }>({ min: 0, max: 1 });
+
+  // Cached offscreen canvases for slice rendering (avoids recomputing colormap on zoom/pan)
+  const sliceOffscreenRefs = React.useRef<(HTMLCanvasElement | null)[]>([null, null, null]);
 
   // Colorbar state
   const [showColorbar, setShowColorbar] = React.useState(false);
@@ -584,9 +626,11 @@ function Show3DVolume() {
   const needsReset = zooms.some(z => z.zoom !== 1 || z.panX !== 0 || z.panY !== 0) || fftZooms.some(z => z.zoom !== 1 || z.panX !== 0 || z.panY !== 0) || cameraChanged;
 
   // -------------------------------------------------------------------------
-  // Render slices
+  // Build colormapped offscreen canvases (expensive: log scale, percentile, colormap LUT)
+  // Excludes zoom/pan so dragging only triggers the cheap redraw below.
+  // useLayoutEffect so offscreens are ready before the draw useLayoutEffect runs.
   // -------------------------------------------------------------------------
-  React.useEffect(() => {
+  React.useLayoutEffect(() => {
     if (!allFloats || allFloats.length === 0) return;
     const lut = COLORMAPS[cmap] || COLORMAPS.inferno;
     const sliceData = [
@@ -595,12 +639,7 @@ function Show3DVolume() {
       extractYZ(allFloats, nx, ny, nz, sliceX),
     ];
     for (let a = 0; a < 3; a++) {
-      const canvas = canvasRefs.current[a];
-      if (!canvas) continue;
-      const ctx = canvas.getContext("2d");
-      if (!ctx) continue;
       const [sliceH, sliceW] = sliceDims[a];
-      const { w: cw, h: ch } = canvasSizes[a];
       const processed = logScale ? applyLogScale(sliceData[a]) : sliceData[a];
       let vmin: number, vmax: number;
       if (autoContrast) {
@@ -613,8 +652,23 @@ function Show3DVolume() {
         vmin = r.min;
         vmax = r.max;
       }
-      const offscreen = renderToOffscreen(processed, sliceW, sliceH, lut, vmin, vmax);
-      if (!offscreen) continue;
+      sliceOffscreenRefs.current[a] = renderToOffscreen(processed, sliceW, sliceH, lut, vmin, vmax);
+    }
+  }, [allFloats, sliceX, sliceY, sliceZ, nx, ny, nz, cmap, logScale, autoContrast, sliceDims, imageVminPct, imageVmaxPct]);
+
+  // -------------------------------------------------------------------------
+  // Redraw slices with zoom/pan (cheap: just drawImage from cached offscreen)
+  // useLayoutEffect prevents black flash when canvas dimensions change (resize)
+  // -------------------------------------------------------------------------
+  React.useLayoutEffect(() => {
+    for (let a = 0; a < 3; a++) {
+      const canvas = canvasRefs.current[a];
+      const offscreen = sliceOffscreenRefs.current[a];
+      if (!canvas || !offscreen) continue;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) continue;
+      const [sliceH, sliceW] = sliceDims[a];
+      const { w: cw, h: ch } = canvasSizes[a];
       ctx.imageSmoothingEnabled = false;
       ctx.clearRect(0, 0, cw, ch);
       const zs = zooms[a];
@@ -689,6 +743,7 @@ function Show3DVolume() {
         const size = pxSize > 0 ? pxSize : 1;
         drawScaleBarHiDPI(uiCanvas, DPR, zooms[a].zoom, size, unit, sliceW);
       }
+
       if (showColorbar) {
         const lut = COLORMAPS[cmap] || COLORMAPS.inferno;
         const { vmin, vmax } = sliderRange(imageDataRange.min, imageDataRange.max, imageVminPct, imageVmaxPct);
@@ -700,7 +755,7 @@ function Show3DVolume() {
         uiCtx.restore();
       }
     }
-  }, [pixelSize, scaleBarVisible, zooms, canvasSizes, sliceDims, showColorbar, cmap, imageDataRange, imageVminPct, imageVmaxPct, logScale]);
+  }, [pixelSize, scaleBarVisible, zooms, canvasSizes, sliceDims, showColorbar, cmap, imageDataRange, imageVminPct, imageVmaxPct, logScale, themeInfo.theme]);
 
   // -------------------------------------------------------------------------
   // FFT computation and caching
@@ -721,8 +776,10 @@ function Show3DVolume() {
       for (let a = 0; a < 3; a++) {
         const data = sliceData[a];
         const [sliceH, sliceW] = dims[a];
-        // Pad to power-of-2 so fftshift works correctly on the full result
-        const pw = nextPow2(sliceW), ph = nextPow2(sliceH);
+
+        // Full-slice FFT
+        const pw = nextPow2(sliceW);
+        ph = nextPow2(sliceH);
         const paddedSize = pw * ph;
         let real: Float32Array, imag: Float32Array;
 
@@ -744,6 +801,7 @@ function Show3DVolume() {
         fftshift(imag, pw, ph);
 
         const mag = computeMagnitude(real, imag);
+        fftMagCacheRefs.current[a] = mag;
 
         let displayMin: number, displayMax: number;
         if (fftAuto) {
@@ -785,7 +843,7 @@ function Show3DVolume() {
   }, [effectiveShowFft, allFloats, sliceX, sliceY, sliceZ, nx, ny, nz, fftColormap, fftLogScale, fftAuto, gpuReady, canvasSizes, fftZooms]);
 
   // Redraw cached FFT with zoom/pan (cheap -- no recomputation)
-  React.useEffect(() => {
+  React.useLayoutEffect(() => {
     if (!effectiveShowFft) return;
     for (let a = 0; a < 3; a++) {
       const canvas = fftCanvasRefs.current[a];
@@ -810,9 +868,9 @@ function Show3DVolume() {
     }
   }, [effectiveShowFft, fftZooms, canvasSizes]);
 
-  // Render FFT overlays (reciprocal-space scale bars per axis)
+  // Render FFT overlays (reciprocal-space scale bars + d-spacing crosshair per axis)
   React.useEffect(() => {
-    if (!effectiveShowFft || pixelSize <= 0) return;
+    if (!effectiveShowFft) return;
     const dims: [number, number][] = [[ny, nx], [nz, nx], [nz, ny]];
     for (let a = 0; a < 3; a++) {
       const overlay = fftOverlayRefs.current[a];
@@ -823,12 +881,60 @@ function Show3DVolume() {
       const ctx = overlay.getContext("2d");
       if (!ctx) continue;
       ctx.clearRect(0, 0, overlay.width, overlay.height);
-      const [, sliceW] = dims[a];
-      const pw = nextPow2(sliceW);
-      const fftPixelSize = 1 / (pw * pixelSize);
-      drawFFTScaleBarHiDPI(overlay, DPR, fftZooms[a].zoom, fftPixelSize, pw);
+
+      // FFT scale bar (only when calibrated)
+      if (pixelSize > 0) {
+        const [, sliceW] = dims[a];
+        const pw = nextPow2(sliceW);
+        const fftPixelSize = 1 / (pw * pixelSize);
+        drawFFTScaleBarHiDPI(overlay, DPR, fftZooms[a].zoom, fftPixelSize, pw);
+      }
+
+      // D-spacing crosshair on clicked FFT panel
+      if (fftClickInfo && fftClickInfo.axis === a) {
+        const [sliceH, sliceW] = dims[a];
+        const fftW = nextPow2(sliceW);
+        const fftH = nextPow2(sliceH);
+
+        ctx.save();
+        ctx.scale(DPR, DPR);
+        const zs = fftZooms[a];
+        const cx = cw / 2, cy = ch / 2;
+        const rawX = fftClickInfo.col / fftW * cw;
+        const rawY = fftClickInfo.row / fftH * ch;
+        const screenX = (rawX - cx) * zs.zoom + cx + zs.panX;
+        const screenY = (rawY - cy) * zs.zoom + cy + zs.panY;
+
+        // Draw crosshair with gap in center
+        ctx.strokeStyle = "rgba(255, 255, 255, 0.9)";
+        ctx.shadowColor = "rgba(0, 0, 0, 0.6)";
+        ctx.shadowBlur = 2;
+        ctx.lineWidth = 1.5;
+        const r = 8;
+        ctx.beginPath();
+        ctx.moveTo(screenX - r, screenY); ctx.lineTo(screenX - 3, screenY);
+        ctx.moveTo(screenX + 3, screenY); ctx.lineTo(screenX + r, screenY);
+        ctx.moveTo(screenX, screenY - r); ctx.lineTo(screenX, screenY - 3);
+        ctx.moveTo(screenX, screenY + 3); ctx.lineTo(screenX, screenY + r);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(screenX, screenY, 4, 0, Math.PI * 2);
+        ctx.stroke();
+
+        // D-spacing label
+        if (fftClickInfo.dSpacing != null) {
+          const d = fftClickInfo.dSpacing;
+          const label = d >= 10 ? `d = ${(d / 10).toFixed(2)} nm` : `d = ${d.toFixed(2)} \u00C5`;
+          ctx.font = "bold 11px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+          ctx.fillStyle = "white";
+          ctx.textAlign = "left";
+          ctx.textBaseline = "bottom";
+          ctx.fillText(label, screenX + 10, screenY - 4);
+        }
+        ctx.restore();
+      }
     }
-  }, [effectiveShowFft, fftZooms, canvasSizes, pixelSize, nx, ny, nz]);
+  }, [effectiveShowFft, fftZooms, canvasSizes, pixelSize, nx, ny, nz, fftClickInfo]);
 
   // -------------------------------------------------------------------------
   // Playback logic (matching Show3D pattern)
@@ -946,7 +1052,18 @@ function Show3DVolume() {
   };
 
   const handleMouseMove = (e: React.MouseEvent, axis: number) => {
-    // Cursor readout: compute pixel position and intensity before drag check
+    // Fast-path: skip cursor readout during pan drag for 60fps
+    if (dragAxis === axis && dragStart) {
+      const canvas = canvasRefs.current[axis];
+      if (!canvas) return;
+      const rect = canvas.getBoundingClientRect();
+      const dx = (e.clientX - dragStart.x) * (canvas.width / rect.width);
+      const dy = (e.clientY - dragStart.y) * (canvas.height / rect.height);
+      setZooms(prev => { const next = [...prev]; next[axis] = { ...prev[axis], panX: dragStart.pX + dx, panY: dragStart.pY + dy }; return next; });
+      return;
+    }
+
+    // Cursor readout (only when not dragging)
     const cursorCanvas = canvasRefs.current[axis];
     if (cursorCanvas && allFloats && allFloats.length > 0) {
       const rect = cursorCanvas.getBoundingClientRect();
@@ -985,14 +1102,6 @@ function Show3DVolume() {
         setCursorInfo(null);
       }
     }
-
-    if (dragAxis !== axis || !dragStart) return;
-    const canvas = canvasRefs.current[axis];
-    if (!canvas) return;
-    const rect = canvas.getBoundingClientRect();
-    const dx = (e.clientX - dragStart.x) * (canvas.width / rect.width);
-    const dy = (e.clientY - dragStart.y) * (canvas.height / rect.height);
-    setZooms(prev => { const next = [...prev]; next[axis] = { ...prev[axis], panX: dragStart.pX + dx, panY: dragStart.pY + dy }; return next; });
   };
 
   const handleMouseUp = () => { setDragAxis(null); setDragStart(null); };
@@ -1166,6 +1275,7 @@ function Show3DVolume() {
   };
 
   const handleFftMouseDown = (e: React.MouseEvent, axis: number) => {
+    fftClickStartRef.current = { x: e.clientX, y: e.clientY, axis };
     const zs = fftZooms[axis];
     setFftDragAxis(axis);
     setFftDragStart({ x: e.clientX, y: e.clientY, pX: zs.panX, pY: zs.panY });
@@ -1181,9 +1291,70 @@ function Show3DVolume() {
     setFftZooms(prev => { const next = [...prev]; next[axis] = { ...prev[axis], panX: fftDragStart.pX + dx, panY: fftDragStart.pY + dy }; return next; });
   };
 
-  const handleFftMouseUp = () => { setFftDragAxis(null); setFftDragStart(null); };
+  const handleFftMouseUp = (e: React.MouseEvent, axis: number) => {
+    // Click detection for d-spacing measurement
+    if (fftClickStartRef.current && fftClickStartRef.current.axis === axis) {
+      const dx = e.clientX - fftClickStartRef.current.x;
+      const dy = e.clientY - fftClickStartRef.current.y;
+      if (Math.sqrt(dx * dx + dy * dy) < 3) {
+        const canvas = fftCanvasRefs.current[axis];
+        if (canvas) {
+          const rect = canvas.getBoundingClientRect();
+          const { w: cw, h: ch } = canvasSizes[axis];
+          const zs = fftZooms[axis];
 
-  const handleFftResetAll = () => { setFftZooms([DEFAULT_ZOOM, DEFAULT_ZOOM, DEFAULT_ZOOM]); };
+          // Determine FFT dimensions for this axis
+          const dims: [number, number][] = [[ny, nx], [nz, nx], [nz, ny]];
+          const [sliceH, sliceW] = dims[axis];
+          const fftW = nextPow2(sliceW);
+          const fftH = nextPow2(sliceH);
+
+          const mouseX = (e.clientX - rect.left) * (cw / rect.width);
+          const mouseY = (e.clientY - rect.top) * (ch / rect.height);
+          const cx = cw / 2, cy = ch / 2;
+          const imgX = (mouseX - cx - zs.panX) / zs.zoom + cx;
+          const imgY = (mouseY - cy - zs.panY) / zs.zoom + cy;
+          let imgCol = imgX / cw * fftW;
+          let imgRow = imgY / ch * fftH;
+
+          // Snap to nearest Bragg spot
+          const cachedMag = fftMagCacheRefs.current[axis];
+          if (cachedMag && imgCol >= 0 && imgCol < fftW && imgRow >= 0 && imgRow < fftH) {
+            const snapped = findFFTPeak(cachedMag, fftW, fftH, imgCol, imgRow, FFT_SNAP_RADIUS);
+            imgCol = snapped.col;
+            imgRow = snapped.row;
+          }
+
+          if (imgCol >= 0 && imgCol < fftW && imgRow >= 0 && imgRow < fftH) {
+            const dcCol = imgCol - fftW / 2;
+            const dcRow = imgRow - fftH / 2;
+            const distPx = Math.sqrt(dcCol * dcCol + dcRow * dcRow);
+
+            if (distPx < 1) {
+              setFftClickInfo(null);
+            } else {
+              let spatialFreq: number | null = null;
+              let dSpacing: number | null = null;
+              if (pixelSize > 0) {
+                const paddedW = fftW;
+                const paddedH = fftH;
+                const freqC = dcCol / paddedW / pixelSize;
+                const freqR = dcRow / paddedH / pixelSize;
+                spatialFreq = Math.sqrt(freqC * freqC + freqR * freqR);
+                dSpacing = spatialFreq > 0 ? 1 / spatialFreq : null;
+              }
+              setFftClickInfo({ axis, row: imgRow, col: imgCol, distPx, spatialFreq, dSpacing });
+            }
+          }
+        }
+      }
+    }
+    fftClickStartRef.current = null;
+    setFftDragAxis(null);
+    setFftDragStart(null);
+  };
+
+  const handleFftResetAll = () => { setFftZooms([DEFAULT_ZOOM, DEFAULT_ZOOM, DEFAULT_ZOOM]); setFftClickInfo(null); };
 
   const fftNeedsReset = fftZooms.some(z => z.zoom !== 1 || z.panX !== 0 || z.panY !== 0);
 
@@ -1199,19 +1370,29 @@ function Show3DVolume() {
 
   React.useEffect(() => {
     if (!isResizing) return;
+    let rafId = 0;
+    let latestSize = resizeStart ? resizeStart.size : canvasTarget;
     const handleMouseMove = (e: MouseEvent) => {
       if (!resizeStart) return;
       const delta = Math.max(e.clientX - resizeStart.x, e.clientY - resizeStart.y);
-      const newSize = Math.max(300, Math.min(800, resizeStart.size + delta));
-      setCanvasTarget(newSize);
+      latestSize = Math.max(300, Math.min(800, resizeStart.size + delta));
+      if (!rafId) {
+        rafId = requestAnimationFrame(() => {
+          rafId = 0;
+          setCanvasTarget(latestSize);
+        });
+      }
     };
     const handleMouseUp = () => {
+      if (rafId) { cancelAnimationFrame(rafId); rafId = 0; }
+      setCanvasTarget(latestSize);
       setIsResizing(false);
       setResizeStart(null);
     };
     document.addEventListener("mousemove", handleMouseMove);
     document.addEventListener("mouseup", handleMouseUp);
     return () => {
+      if (rafId) cancelAnimationFrame(rafId);
       document.removeEventListener("mousemove", handleMouseMove);
       document.removeEventListener("mouseup", handleMouseUp);
     };
@@ -1457,9 +1638,20 @@ function Show3DVolume() {
               {effectiveShowFft && (
                 <Box sx={{ mt: `${SPACING.SM}px` }}>
                   <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: `${SPACING.XS}px`, height: 20 }}>
-                    <Typography variant="caption" sx={{ ...typography.label, fontSize: 10 }}>
-                      FFT {["XY", "XZ", "YZ"][a]} {gpuReady ? "(GPU)" : "(CPU)"}
-                    </Typography>
+                    <Stack direction="row" alignItems="center" sx={{ overflow: "hidden" }}>
+                      <Typography variant="caption" sx={{ ...typography.label, fontSize: 10, flexShrink: 0 }}>
+                        {`FFT ${["XY", "XZ", "YZ"][a]} ${gpuReady ? "(GPU)" : "(CPU)"}`}
+                      </Typography>
+                      {fftClickInfo && fftClickInfo.axis === a && (
+                        <Typography sx={{ fontSize: 10, fontFamily: "monospace", color: tc.textMuted, ml: 1, whiteSpace: "nowrap" }}>
+                          {fftClickInfo.dSpacing != null ? (
+                            <>d=<Box component="span" sx={{ color: tc.accent, fontWeight: "bold" }}>{fftClickInfo.dSpacing >= 10 ? `${(fftClickInfo.dSpacing / 10).toFixed(2)} nm` : `${fftClickInfo.dSpacing.toFixed(2)} \u00C5`}</Box>{" |g|="}<Box component="span" sx={{ color: tc.accent }}>{fftClickInfo.spatialFreq!.toFixed(4)} \u00C5\u207B\u00B9</Box></>
+                          ) : (
+                            <>dist=<Box component="span" sx={{ color: tc.accent }}>{fftClickInfo.distPx.toFixed(1)} px</Box></>
+                          )}
+                        </Typography>
+                      )}
+                    </Stack>
                     {a === 0 && fftNeedsReset && (
                       <Button size="small" sx={compactButton} disabled={lockView} onClick={() => { if (!lockView) handleFftResetAll(); }}>Reset</Button>
                     )}
@@ -1468,8 +1660,8 @@ function Show3DVolume() {
                     sx={{ ...container.imageBox, width: cw, height: ch, cursor: "grab", borderColor: ["#4d80ff", "#4dff66", "#ff4d4d"][a] }}
                     onMouseDown={(e) => { if (!lockView) handleFftMouseDown(e, a); }}
                     onMouseMove={(e) => { if (!lockView) handleFftMouseMove(e, a); }}
-                    onMouseUp={() => { if (!lockView) handleFftMouseUp(); }}
-                    onMouseLeave={() => { if (!lockView) handleFftMouseUp(); }}
+                    onMouseUp={(e) => { if (!lockView) handleFftMouseUp(e, a); }}
+                    onMouseLeave={() => { if (!lockView) { fftClickStartRef.current = null; setFftDragAxis(null); setFftDragStart(null); } }}
                     onWheel={(e) => { if (!lockView) handleFftWheel(e, a); }}
                     onDoubleClick={() => { if (!lockView) handleFftDoubleClick(a); }}
                   >

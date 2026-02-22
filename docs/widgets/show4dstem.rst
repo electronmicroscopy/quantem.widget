@@ -80,35 +80,20 @@ State Persistence
 
    w = Show4DSTEM(data, center=(32, 32), bf_radius=9)
    w.dp_scale_mode = "log"
-   w.set_view_preset("1", {
-       "dpColormap": "viridis",
-       "viColormap": "inferno",
-       "fftColormap": "magma",
-       "dpScaleMode": "log",
-       "viScaleMode": "linear",
-       "fftScaleMode": "linear",
-       "dpVminPct": 5,
-       "dpVmaxPct": 95,
-       "viVminPct": 2,
-       "viVmaxPct": 98,
-       "fftVminPct": 1,
-       "fftVmaxPct": 99,
-       "showFft": True,
-       "roiMode": "annular",
-       "viRoiMode": "circle",
-       "profileActive": False,
-       "viProfileActive": False,
-   })
 
    w.summary()          # Print human-readable state
    state = w.state_dict()  # Snapshot full state
    w.save("state.json") # Save versioned envelope JSON file
 
-   # Preset helpers
-   w.list_view_preset_slots()  # ('1',)
-   w.get_view_preset("1")
-   w.clear_view_preset("1")
-   w.reset_view_presets()
+   # Detector presets (built-in)
+   w.apply_preset("bf")    # bright field
+   w.apply_preset("abf")   # annular bright field
+   w.apply_preset("adf")   # annular dark field
+   w.apply_preset("haadf") # high-angle annular dark field
+
+   # Save/load named presets (detector + display + export settings)
+   w.save_preset("my_workflow", path="my_workflow.json")
+   w.load_preset("my_workflow", path="my_workflow.json")
 
    # Restore in three ways
    w.load_state_dict(state)                  # 1) apply dict in-place
@@ -173,20 +158,6 @@ Built-in figure templates:
 - ``"dp_vi_fft"``
 - ``"publication_dp_vi"``
 - ``"publication_dp_vi_fft"``
-
-Presets and workflow helpers:
-
-.. code-block:: python
-
-   # Detector presets
-   w.apply_preset("bf")
-   w.apply_preset("abf")
-   w.apply_preset("adf")
-   w.apply_preset("haadf")
-
-   # Save/load named presets (detector + display + export settings)
-   w.save_preset("my_workflow", path="my_workflow.json")
-   w.load_preset("my_workflow", path="my_workflow.json")
 
 Sparse / Streaming Workflow APIs
 --------------------------------
@@ -257,10 +228,6 @@ Examples
 
 - :doc:`Simple demo </examples/show4dstem/show4dstem_simple>`
 - :doc:`All features </examples/show4dstem/show4dstem_all_features>`
-- :doc:`Export + reproducibility demo </examples/show4dstem/show4dstem_export_reproducibility>`
-- :doc:`Adaptive sparse benchmark (20/30/40%) </examples/show4dstem/show4dstem_sparse_adaptive_benchmark>`
-- :doc:`Batch CLI adaptive demo </examples/show4dstem/show4dstem_batch_cli_adaptive>`
-- :doc:`Sparse ingest + adaptive loop demo </examples/show4dstem/show4dstem_sparse_ingest_loop>`
 
 API Reference
 -------------

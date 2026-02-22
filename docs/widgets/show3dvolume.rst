@@ -25,6 +25,25 @@ Features
 - **FFT** — Toggle Fourier transform for each slice plane
 - **Tool customization** — Disable or hide control groups (including playback and 3D volume controls)
 
+Methods
+-------
+
+.. code-block:: python
+
+   w = Show3DVolume(volume)
+
+   # Replace data (preserves display settings)
+   w.set_image(new_volume)
+
+   # Playback (animate through slices)
+   w.play()
+   w.pause()
+   w.stop()
+
+   # Export
+   w.save_image("xy_slice.png")                      # current XY slice
+   w.save_image("xz.png", plane="xz", slice_idx=32)  # specific plane + slice
+
 Control Groups
 --------------
 
