@@ -30,8 +30,14 @@ CLAUDE.md
 # Screenshots
 *.png
 
-# Notebook export artifacts
-notebooks/**/paper_exports/
+# Private notebooks (real data)
+notebooks/collaboratorC/
+
+# Notebook export/benchmark artifacts (outputs, not source)
+**/paper_exports/
+**/paper_benchmark/
+**/paper_cli/batch_outputs/
+**/paper_sparse_ingest/
 
 # Sphinx build output
 docs/_build
