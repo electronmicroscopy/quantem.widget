@@ -614,7 +614,7 @@ def main():
 
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
-            context = browser.new_context(viewport={"width": 1400, "height": 900})
+            context = browser.new_context(viewport={"width": 1400, "height": 900}, device_scale_factor=2)
             page = context.new_page()
 
             notebook_rel_path = NOTEBOOK_PATH.relative_to(PROJECT_ROOT)
