@@ -29,6 +29,9 @@ CLAUDE.md
 
 # Screenshots
 *.png
+# But keep doc images
+!docs/img/*.png
+!docs/_static/catalog/*.png
 
 # Private notebooks (real data)
 notebooks/collaboratorC/
