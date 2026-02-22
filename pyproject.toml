@@ -1,10 +1,10 @@
 [build-system]
-requires = ["hatchling", "hatch-jupyter-builder>=0.5.0", "hatch-vcs"]
+requires = ["hatchling", "hatch-jupyter-builder>=0.5.0"]
 build-backend = "hatchling.build"
 
 [project]
 name = "quantem-widget"
-dynamic = ["version"]
+version = "0.0.8"
 description = "Interactive custom Python widgets for electron microscopy"
 readme = "README.md"
 license = "MIT"
@@ -42,7 +42,6 @@ docs = [
 quantem-show4dstem-export = "quantem.widget.show4dstem_batch:main"
 
 [tool.hatch.version]
-source = "vcs"
 
 [tool.hatch.build]
 only-packages = true

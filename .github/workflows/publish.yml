@@ -28,7 +28,7 @@ jobs:
         run: npm install && npm run build
 
       - name: Install Python build tools
-        run: pip install build hatch-vcs
+        run: pip install build
 
       - name: Build sdist and wheel
         run: python -m build
