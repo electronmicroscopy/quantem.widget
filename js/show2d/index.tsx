@@ -641,11 +641,12 @@ function Show2D() {
 
   // Layout calculations
   const isGallery = nImages > 1;
+  const effectiveNcols = Math.min(ncols, nImages);
   const displayScale = canvasSize / Math.max(width, height);
   const canvasW = Math.round(width * displayScale);
   const canvasH = Math.round(height * displayScale);
   const floatsPerImage = width * height;
-  const galleryGridWidth = isGallery ? ncols * canvasW + (ncols - 1) * 8 : canvasW;
+  const galleryGridWidth = isGallery ? effectiveNcols * canvasW + (effectiveNcols - 1) * 8 : canvasW;
   const profileCanvasWidth = galleryGridWidth;
 
   // ROI FFT active: both ROI and FFT on, with a selected ROI
@@ -2818,10 +2819,10 @@ function Show2D() {
   const calibratedFactor = calibratedUnit === "nm" ? pixelSize / 10 : pixelSize;
 
   return (
-    <Box className="show2d-root" tabIndex={0} onKeyDown={handleKeyDown} sx={{ p: 2, bgcolor: themeColors.bg, color: themeColors.text, overflow: "visible" }}>
+    <Box className="show2d-root" tabIndex={0} onKeyDown={handleKeyDown} sx={{ p: 2, bgcolor: themeColors.bg, color: themeColors.text, width: "fit-content" }}>
       <Stack direction="row" spacing={`${SPACING.LG}px`} alignItems="flex-start">
         {/* Main panel */}
-        <Box sx={{ width: galleryGridWidth }}>
+        <Box sx={{ width: galleryGridWidth, maxWidth: galleryGridWidth }}>
           {/* Title row */}
           <Typography variant="caption" sx={{ ...typography.label, color: themeColors.accent, mb: `${SPACING.XS}px`, display: "block", height: 16, lineHeight: "16px", overflow: "hidden" }}>
             {title || (isGallery ? "Gallery" : "Image")}
@@ -2949,12 +2950,12 @@ function Show2D() {
 
           {isGallery ? (
             /* Gallery mode */
-            <Box sx={{ display: "grid", gridTemplateColumns: `repeat(${ncols}, auto)`, gap: 1 }}>
+            <Box sx={{ display: "grid", gridTemplateColumns: `repeat(${effectiveNcols}, ${canvasW}px)`, gap: 1 }}>
               {Array.from({ length: nImages }).map((_, i) => (
                 <Box key={i} sx={{ cursor: i === selectedIdx ? ((isDraggingResize || isDraggingResizeInner || isHoveringResize || isHoveringResizeInner) ? "nwse-resize" : isDraggingROI ? "move" : (draggingProfileEndpoint !== null || isDraggingProfileLine) ? "grabbing" : (profileActive && (hoveredProfileEndpoint !== null || isHoveringProfileLine)) ? "grab" : (profileActive || roiActive || measureActive) ? "crosshair" : "grab") : (lockNavigation ? "default" : "pointer") }}>
                   <Box
                     ref={(el: HTMLDivElement | null) => { imageContainerRefs.current[i] = el; }}
-                    sx={{ position: "relative", bgcolor: "#000", border: `2px solid ${i === selectedIdx ? themeColors.accent : themeColors.border}`, borderRadius: 0 }}
+                    sx={{ position: "relative", bgcolor: "#000", border: `2px solid ${i === selectedIdx ? themeColors.accent : themeColors.border}`, borderRadius: 0, width: canvasW, height: canvasH }}
                     onMouseDown={(e) => handleMouseDown(e, i)}
                     onMouseMove={(e) => handleMouseMove(e, i)}
                     onMouseUp={(e) => handleMouseUp(e, i)}
