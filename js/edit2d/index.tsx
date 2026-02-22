@@ -3,7 +3,7 @@
  *
  * Features:
  * - Crop mode: draggable crop rectangle with corner/edge handles
- * - Mask mode: brush, rectangle, ellipse, and threshold tools
+ * - Mask mode: rectangle tool with undo/redo
  * - Semi-transparent overlays for crop dim and mask visualization
  * - Scroll to zoom, double-click to reset
  * - Automatic theme detection (light/dark mode)
@@ -87,15 +87,6 @@ const compactButton = {
   "&.Mui-disabled": {
     color: "#666",
     borderColor: "#444",
-  },
-};
-
-const sliderStyles = {
-  small: {
-    py: 0,
-    "& .MuiSlider-thumb": { width: 10, height: 10 },
-    "& .MuiSlider-rail": { height: 2 },
-    "& .MuiSlider-track": { height: 2 },
   },
 };
 
@@ -344,53 +335,6 @@ function getCursorForMode(dragMode: DragMode): string {
 // ============================================================================
 // Mask painting functions
 // ============================================================================
-function paintBrushCircle(
-  mask: Uint8Array,
-  w: number,
-  h: number,
-  centerCol: number,
-  centerRow: number,
-  radius: number,
-  value: number,
-): void {
-  const r = Math.ceil(radius);
-  const r2 = radius * radius;
-  const y0 = Math.max(0, Math.floor(centerRow - r));
-  const y1 = Math.min(h - 1, Math.ceil(centerRow + r));
-  const x0 = Math.max(0, Math.floor(centerCol - r));
-  const x1 = Math.min(w - 1, Math.ceil(centerCol + r));
-  for (let row = y0; row <= y1; row++) {
-    for (let col = x0; col <= x1; col++) {
-      const dc = col - centerCol;
-      const dr = row - centerRow;
-      if (dc * dc + dr * dr <= r2) {
-        mask[row * w + col] = value;
-      }
-    }
-  }
-}
-
-function paintBrushLine(
-  mask: Uint8Array,
-  w: number,
-  h: number,
-  col0: number,
-  row0: number,
-  col1: number,
-  row1: number,
-  radius: number,
-  value: number,
-): void {
-  const dc = col1 - col0;
-  const dr = row1 - row0;
-  const dist = Math.sqrt(dc * dc + dr * dr);
-  const steps = Math.max(1, Math.ceil(dist / Math.max(1, radius * 0.5)));
-  for (let i = 0; i <= steps; i++) {
-    const t = i / steps;
-    paintBrushCircle(mask, w, h, col0 + t * dc, row0 + t * dr, radius, value);
-  }
-}
-
 function fillRectMask(
   mask: Uint8Array,
   w: number,
@@ -408,32 +352,6 @@ function fillRectMask(
   for (let row = rowMin; row <= rowMax; row++) {
     for (let col = colMin; col <= colMax; col++) {
       mask[row * w + col] = value;
-    }
-  }
-}
-
-function fillEllipseMask(
-  mask: Uint8Array,
-  w: number,
-  h: number,
-  centerRow: number,
-  centerCol: number,
-  radiusRow: number,
-  radiusCol: number,
-  value: number,
-): void {
-  if (radiusRow < 0.5 || radiusCol < 0.5) return;
-  const rowMin = Math.max(0, Math.floor(centerRow - radiusRow));
-  const rowMax = Math.min(h - 1, Math.ceil(centerRow + radiusRow));
-  const colMin = Math.max(0, Math.floor(centerCol - radiusCol));
-  const colMax = Math.min(w - 1, Math.ceil(centerCol + radiusCol));
-  for (let row = rowMin; row <= rowMax; row++) {
-    for (let col = colMin; col <= colMax; col++) {
-      const dr = (row - centerRow) / radiusRow;
-      const dc = (col - centerCol) / radiusCol;
-      if (dr * dr + dc * dc <= 1) {
-        mask[row * w + col] = value;
-      }
     }
   }
 }
@@ -550,8 +468,6 @@ function Edit2D() {
 
   // Mask model state
   const [mode, setMode] = useModelState<string>("mode");
-  const [maskTool, setMaskTool] = useModelState<string>("mask_tool");
-  const [brushSize, setBrushSize] = useModelState<number>("brush_size");
   const [maskAction, setMaskAction] = useModelState<string>("mask_action");
 
   // Shared / independent mode
@@ -572,6 +488,7 @@ function Edit2D() {
   const [maskVersion, setMaskVersion] = React.useState(0);
   const [shapePreview, setShapePreview] = React.useState<{ r0: number; c0: number; r1: number; c1: number } | null>(null);
   const [exportAnchor, setExportAnchor] = React.useState<HTMLElement | null>(null);
+  const MAX_UNDO = 50;
 
   // Per-image independent crop/mask state
   interface CropState { top: number; left: number; bottom: number; right: number }
@@ -586,12 +503,13 @@ function Edit2D() {
   const canvasContainerRef = React.useRef<HTMLDivElement>(null);
   const dragStartRef = React.useRef<DragStart | null>(null);
   const rawDataRef = React.useRef<Float32Array | null>(null);
+  const offscreenCacheRef = React.useRef<HTMLCanvasElement | null>(null);
   const maskRef = React.useRef<Uint8Array | null>(null);
-  const isPaintingRef = React.useRef(false);
-  const lastPaintPosRef = React.useRef<{ row: number; col: number } | null>(null);
   const shapeStartRef = React.useRef<{ row: number; col: number } | null>(null);
   const isDraggingShapeRef = React.useRef(false);
   const maskCanvasRef = React.useRef<HTMLCanvasElement | null>(null);
+  const maskUndoStackRef = React.useRef<Uint8Array[]>([]);
+  const maskRedoStackRef = React.useRef<Uint8Array[]>([]);
   const previewCanvasRef = React.useRef<HTMLCanvasElement>(null);
 
   // ── Derived values ───────────────────────────────────────────────────
@@ -784,27 +702,6 @@ function Edit2D() {
     setImageHistogramData(processed);
   }, [frameBytes, selectedIdx, logScale, dataReady]);
 
-  // ── Threshold mask (when threshold tool active) ─────────────────────
-  React.useEffect(() => {
-    if (lockEdit) return;
-    if (mode !== "mask" || maskTool !== "threshold" || !rawDataRef.current || !maskRef.current) return;
-    const data = rawDataRef.current;
-    const processed = logScale ? applyLogScale(data) : data;
-    const { vmin, vmax } = sliderRange(imageDataRange.min, imageDataRange.max, imageVminPct, imageVmaxPct);
-    const mask = maskRef.current;
-    for (let i = 0; i < data.length; i++) {
-      const v = processed[i];
-      mask[i] = (v >= vmin && v <= vmax) ? 255 : 0;
-    }
-    setMaskVersion((v) => v + 1);
-    if (!shared && nImages > 1) {
-      perMasksRef.current.set(selectedIdx, maskRef.current.slice());
-      syncPerImageMasksToPython();
-    } else {
-      syncMaskToPython();
-    }
-  }, [lockEdit, mode, maskTool, imageVminPct, imageVmaxPct, imageDataRange, logScale, shared, nImages, selectedIdx, syncMaskToPython, syncPerImageMasksToPython]);
-
   // ── Prevent page scroll on wheel ────────────────────────────────────
   React.useEffect(() => {
     const el = canvasContainerRef.current;
@@ -822,13 +719,22 @@ function Edit2D() {
     e.stopPropagation();
     e.preventDefault();
     resizeRef.current = { startX: e.clientX, startSize: canvasSize };
+    let rafId = 0;
+    let latestSize = canvasSize;
     const onMove = (ev: MouseEvent) => {
       if (!resizeRef.current) return;
       const delta = ev.clientX - resizeRef.current.startX;
-      const newSize = Math.max(200, Math.min(1200, resizeRef.current.startSize + delta));
-      setCanvasSize(newSize);
+      latestSize = Math.max(200, Math.min(1200, resizeRef.current.startSize + delta));
+      if (!rafId) {
+        rafId = requestAnimationFrame(() => {
+          rafId = 0;
+          setCanvasSize(latestSize);
+        });
+      }
     };
     const onUp = () => {
+      if (rafId) { cancelAnimationFrame(rafId); rafId = 0; }
+      setCanvasSize(latestSize);
       resizeRef.current = null;
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
@@ -858,12 +764,10 @@ function Edit2D() {
     return ((screenY - cy - panY) / zoom + cy) / displayScale;
   }, [canvasH, displayScale, zoom, panY]);
 
-  // ── Render main image ────────────────────────────────────────────────
+  // ── Build colormapped offscreen (expensive: log scale, percentile, colormap LUT) ──
+  // Excludes zoom/pan so dragging only triggers the cheap redraw below.
   React.useEffect(() => {
-    if (!dataReady || !canvasRef.current || !rawDataRef.current) return;
-    const canvas = canvasRef.current;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
+    if (!dataReady || !rawDataRef.current || !width || !height) return;
 
     const raw = rawDataRef.current;
     const processed = logScale ? applyLogScale(raw) : raw;
@@ -876,8 +780,17 @@ function Edit2D() {
     }
 
     const lut = COLORMAPS[cmap] || COLORMAPS.gray;
-    const offscreen = renderToOffscreen(processed, width, height, lut, vmin, vmax);
-    if (!offscreen) return;
+    offscreenCacheRef.current = renderToOffscreen(processed, width, height, lut, vmin, vmax);
+  }, [dataReady, cmap, logScale, autoContrast, imageVminPct, imageVmaxPct, width, height, imageDataRange, frameBytes, selectedIdx]);
+
+  // ── Redraw with zoom/pan (cheap: just drawImage from cached offscreen) ──
+  // useLayoutEffect prevents black flash when canvas dimensions change (resize)
+  React.useLayoutEffect(() => {
+    const canvas = canvasRef.current;
+    const offscreen = offscreenCacheRef.current;
+    if (!canvas || !offscreen) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
 
     ctx.clearRect(0, 0, canvasW, canvasH);
     ctx.save();
@@ -1009,42 +922,20 @@ function Edit2D() {
       ctx.restore();
     }
 
-    // Draw brush cursor
-    if (maskTool === "brush" && cursorInfo) {
-      const sx = toScreenX(cursorInfo.col + 0.5);
-      const sy = toScreenY(cursorInfo.row + 0.5);
-      const sr = (brushSize / 2) * displayScale * zoom;
-      ctx.strokeStyle = maskAction === "add" ? "rgba(255,100,100,0.8)" : "rgba(100,100,255,0.8)";
-      ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      ctx.arc(sx, sy, sr, 0, Math.PI * 2);
-      ctx.stroke();
-    }
-
-    // Draw shape preview while dragging
+    // Draw rectangle shape preview while dragging
     if (shapePreview && isDraggingShapeRef.current) {
       const { r0, c0, r1, c1 } = shapePreview;
       ctx.strokeStyle = maskAction === "add" ? "rgba(255,100,100,0.8)" : "rgba(100,100,255,0.8)";
       ctx.lineWidth = 1.5;
       ctx.setLineDash([4, 3]);
-      if (maskTool === "rectangle") {
-        const sx0 = toScreenX(Math.min(c0, c1));
-        const sy0 = toScreenY(Math.min(r0, r1));
-        const sx1 = toScreenX(Math.max(c0, c1));
-        const sy1 = toScreenY(Math.max(r0, r1));
-        ctx.strokeRect(sx0, sy0, sx1 - sx0, sy1 - sy0);
-      } else if (maskTool === "ellipse") {
-        const scx = toScreenX((c0 + c1) / 2);
-        const scy = toScreenY((r0 + r1) / 2);
-        const rx = Math.abs(toScreenX(c1) - toScreenX(c0)) / 2;
-        const ry = Math.abs(toScreenY(r1) - toScreenY(r0)) / 2;
-        ctx.beginPath();
-        ctx.ellipse(scx, scy, Math.max(1, rx), Math.max(1, ry), 0, 0, Math.PI * 2);
-        ctx.stroke();
-      }
+      const sx0 = toScreenX(Math.min(c0, c1));
+      const sy0 = toScreenY(Math.min(r0, r1));
+      const sx1 = toScreenX(Math.max(c0, c1));
+      const sy1 = toScreenY(Math.max(r0, r1));
+      ctx.strokeRect(sx0, sy0, sx1 - sx0, sy1 - sy0);
       ctx.setLineDash([]);
     }
-  }, [mode, maskVersion, maskTool, brushSize, maskAction, cursorInfo, shapePreview, zoom, panX, panY, canvasW, canvasH, width, height, displayScale, toScreenX, toScreenY]);
+  }, [mode, maskVersion, maskAction, shapePreview, zoom, panX, panY, canvasW, canvasH, width, height, displayScale, toScreenX, toScreenY]);
 
   // ── Render scale bar ─────────────────────────────────────────────────
   React.useEffect(() => {
@@ -1117,35 +1008,64 @@ function Edit2D() {
     maskVersion, width, height, previewCanvasW, previewCanvasH, imageDataRange,
     frameBytes, selectedIdx]);
 
+  // ── Undo/Redo helpers ───────────────────────────────────────────────
+  const pushMaskUndo = React.useCallback(() => {
+    if (!maskRef.current) return;
+    const stack = maskUndoStackRef.current;
+    stack.push(maskRef.current.slice());
+    if (stack.length > MAX_UNDO) stack.shift();
+    maskRedoStackRef.current = [];
+  }, [MAX_UNDO]);
+
+  const syncMaskAfterChange = React.useCallback(() => {
+    setMaskVersion((v) => v + 1);
+    if (!shared && nImages > 1) {
+      perMasksRef.current.set(selectedIdx, maskRef.current!.slice());
+      syncPerImageMasksToPython();
+    } else {
+      syncMaskToPython();
+    }
+  }, [shared, nImages, selectedIdx, syncMaskToPython, syncPerImageMasksToPython]);
+
+  const handleUndo = React.useCallback(() => {
+    if (lockEdit) return;
+    if (!maskRef.current) return;
+    const stack = maskUndoStackRef.current;
+    if (stack.length === 0) return;
+    maskRedoStackRef.current.push(maskRef.current.slice());
+    maskRef.current = stack.pop()!;
+    syncMaskAfterChange();
+  }, [lockEdit, syncMaskAfterChange]);
+
+  const handleRedo = React.useCallback(() => {
+    if (lockEdit) return;
+    if (!maskRef.current) return;
+    const stack = maskRedoStackRef.current;
+    if (stack.length === 0) return;
+    maskUndoStackRef.current.push(maskRef.current.slice());
+    maskRef.current = stack.pop()!;
+    syncMaskAfterChange();
+  }, [lockEdit, syncMaskAfterChange]);
+
   // ── Mask operations ─────────────────────────────────────────────────
   const handleInvertMask = React.useCallback(() => {
     if (lockEdit) return;
     if (!maskRef.current) return;
+    pushMaskUndo();
     const mask = maskRef.current;
     for (let i = 0; i < mask.length; i++) {
       mask[i] = mask[i] > 0 ? 0 : 255;
     }
-    setMaskVersion((v) => v + 1);
-    if (!shared && nImages > 1) {
-      perMasksRef.current.set(selectedIdx, maskRef.current.slice());
-      syncPerImageMasksToPython();
-    } else {
-      syncMaskToPython();
-    }
-  }, [lockEdit, shared, nImages, selectedIdx, syncMaskToPython, syncPerImageMasksToPython]);
+    syncMaskAfterChange();
+  }, [lockEdit, pushMaskUndo, syncMaskAfterChange]);
 
   const handleClearMask = React.useCallback(() => {
     if (lockEdit) return;
     if (!maskRef.current) return;
+    pushMaskUndo();
     maskRef.current.fill(0);
-    setMaskVersion((v) => v + 1);
-    if (!shared && nImages > 1) {
-      perMasksRef.current.set(selectedIdx, maskRef.current.slice());
-      syncPerImageMasksToPython();
-    } else {
-      syncMaskToPython();
-    }
-  }, [lockEdit, shared, nImages, selectedIdx, syncMaskToPython, syncPerImageMasksToPython]);
+    syncMaskAfterChange();
+  }, [lockEdit, pushMaskUndo, syncMaskAfterChange]);
 
   // ── Mouse handlers ───────────────────────────────────────────────────
   const getCanvasCoords = React.useCallback((e: React.MouseEvent) => {
@@ -1163,23 +1083,12 @@ function Edit2D() {
     const imgCol = toImageCol(x);
     const imgRow = toImageRow(y);
 
-    // Mask mode mouse handling
-    if (mode === "mask" && !lockEdit) {
-      if (maskTool === "brush" && maskRef.current) {
-        isPaintingRef.current = true;
-        const value = maskAction === "add" ? 255 : 0;
-        paintBrushCircle(maskRef.current, width, height, imgCol, imgRow, brushSize / 2, value);
-        lastPaintPosRef.current = { row: imgRow, col: imgCol };
-        setMaskVersion((v) => v + 1);
-        return;
-      }
-      if ((maskTool === "rectangle" || maskTool === "ellipse") && maskRef.current) {
-        shapeStartRef.current = { row: imgRow, col: imgCol };
-        isDraggingShapeRef.current = true;
-        setShapePreview({ r0: imgRow, c0: imgCol, r1: imgRow, c1: imgCol });
-        return;
-      }
-      // Threshold: no mouse interaction, fall through to pan
+    // Mask mode mouse handling: rectangle only
+    if (mode === "mask" && !lockEdit && maskRef.current) {
+      shapeStartRef.current = { row: imgRow, col: imgCol };
+      isDraggingShapeRef.current = true;
+      setShapePreview({ r0: imgRow, c0: imgCol, r1: imgRow, c1: imgCol });
+      return;
     }
 
     // Crop mode mouse handling
@@ -1213,12 +1122,22 @@ function Edit2D() {
       cropTop: activeCrop.top, cropLeft: activeCrop.left, cropBottom: activeCrop.bottom, cropRight: activeCrop.right,
       panX, panY,
     };
-  }, [getCanvasCoords, mode, lockEdit, lockView, maskTool, maskAction, brushSize, width, height, activeCrop, toScreenX, toScreenY, toImageCol, toImageRow, panX, panY]);
+  }, [getCanvasCoords, mode, lockEdit, lockView, maskAction, width, height, activeCrop, toScreenX, toScreenY, toImageCol, toImageRow, panX, panY]);
 
   const handleMouseMove = React.useCallback((e: React.MouseEvent) => {
+    // Fast-path: skip cursor readout and hit-testing during pan drag for 60fps
+    if (dragMode === "pan" && dragStartRef.current) {
+      const ds = dragStartRef.current;
+      const dx = e.clientX - ds.mouseX;
+      const dy = e.clientY - ds.mouseY;
+      setPanX(ds.panX + dx);
+      setPanY(ds.panY + dy);
+      return;
+    }
+
     const { x, y } = getCanvasCoords(e);
 
-    // Cursor readout (always)
+    // Cursor readout
     const imgCol = toImageCol(x);
     const imgRow = toImageRow(y);
     if (imgCol >= 0 && imgCol < width && imgRow >= 0 && imgRow < height && rawDataRef.current) {
@@ -1229,22 +1148,7 @@ function Edit2D() {
       setCursorInfo(null);
     }
 
-    // Mask mode: brush painting
-    if (!lockEdit && mode === "mask" && maskTool === "brush" && isPaintingRef.current && maskRef.current) {
-      const value = maskAction === "add" ? 255 : 0;
-      if (lastPaintPosRef.current) {
-        paintBrushLine(maskRef.current, width, height,
-          lastPaintPosRef.current.col, lastPaintPosRef.current.row,
-          imgCol, imgRow, brushSize / 2, value);
-      } else {
-        paintBrushCircle(maskRef.current, width, height, imgCol, imgRow, brushSize / 2, value);
-      }
-      lastPaintPosRef.current = { row: imgRow, col: imgCol };
-      setMaskVersion((v) => v + 1);
-      return;
-    }
-
-    // Mask mode: shape drag
+    // Mask mode: rectangle drag
     if (!lockEdit && mode === "mask" && isDraggingShapeRef.current && shapeStartRef.current) {
       setShapePreview({
         r0: shapeStartRef.current.row,
@@ -1346,50 +1250,16 @@ function Edit2D() {
       updateCrop(newTop, newLeft, newBottom, newRight);
       return;
     }
-
-    // Pan (mask mode threshold / fallback)
-    if (!lockView && dragMode === "pan" && dragStartRef.current) {
-      const ds = dragStartRef.current;
-      const dx = e.clientX - ds.mouseX;
-      const dy = e.clientY - ds.mouseY;
-      setPanX(ds.panX + dx);
-      setPanY(ds.panY + dy);
-    }
-  }, [mode, lockEdit, lockView, maskTool, maskAction, brushSize, dragMode, getCanvasCoords, activeCrop, displayScale, zoom, toImageCol, toImageRow, toScreenX, toScreenY, width, height, updateCrop, setPanX, setPanY]);
+  }, [mode, lockEdit, lockView, maskAction, dragMode, getCanvasCoords, activeCrop, displayScale, zoom, toImageCol, toImageRow, toScreenX, toScreenY, width, height, updateCrop, setPanX, setPanY]);
 
   const handleMouseUp = React.useCallback(() => {
-    // Brush: stop painting, sync
-    if (isPaintingRef.current) {
-      isPaintingRef.current = false;
-      lastPaintPosRef.current = null;
-      if (!shared && nImages > 1) {
-        perMasksRef.current.set(selectedIdx, maskRef.current!.slice());
-        syncPerImageMasksToPython();
-      } else {
-        syncMaskToPython();
-      }
-    }
-
-    // Shape: apply and sync
+    // Rectangle: apply and sync with undo
     if (isDraggingShapeRef.current && shapeStartRef.current && maskRef.current && shapePreview) {
+      pushMaskUndo();
       const value = maskAction === "add" ? 255 : 0;
       const { r0, c0, r1, c1 } = shapePreview;
-      if (maskTool === "rectangle") {
-        fillRectMask(maskRef.current, width, height, r0, c0, r1, c1, value);
-      } else if (maskTool === "ellipse") {
-        const centerRow = (r0 + r1) / 2;
-        const centerCol = (c0 + c1) / 2;
-        const radiusRow = Math.abs(r1 - r0) / 2;
-        const radiusCol = Math.abs(c1 - c0) / 2;
-        fillEllipseMask(maskRef.current, width, height, centerRow, centerCol, radiusRow, radiusCol, value);
-      }
-      setMaskVersion((v) => v + 1);
-      if (!shared && nImages > 1) {
-        perMasksRef.current.set(selectedIdx, maskRef.current.slice());
-        syncPerImageMasksToPython();
-      } else {
-        syncMaskToPython();
-      }
+      fillRectMask(maskRef.current, width, height, r0, c0, r1, c1, value);
+      syncMaskAfterChange();
     }
     isDraggingShapeRef.current = false;
     shapeStartRef.current = null;
@@ -1397,26 +1267,16 @@ function Edit2D() {
 
     setDragMode("none");
     dragStartRef.current = null;
-  }, [syncMaskToPython, syncPerImageMasksToPython, shared, nImages, selectedIdx, maskAction, maskTool, width, height, shapePreview]);
+  }, [pushMaskUndo, syncMaskAfterChange, maskAction, width, height, shapePreview]);
 
   const handleMouseLeave = React.useCallback(() => {
-    if (isPaintingRef.current) {
-      isPaintingRef.current = false;
-      lastPaintPosRef.current = null;
-      if (!shared && nImages > 1) {
-        perMasksRef.current.set(selectedIdx, maskRef.current!.slice());
-        syncPerImageMasksToPython();
-      } else {
-        syncMaskToPython();
-      }
-    }
     isDraggingShapeRef.current = false;
     shapeStartRef.current = null;
     setShapePreview(null);
     setDragMode("none");
     dragStartRef.current = null;
     setCursorInfo(null);
-  }, [syncMaskToPython, syncPerImageMasksToPython, shared, nImages, selectedIdx]);
+  }, []);
 
   // ── Wheel zoom ───────────────────────────────────────────────────────
   const handleWheel = React.useCallback((e: React.WheelEvent) => {
@@ -1512,13 +1372,21 @@ function Edit2D() {
       return;
     }
 
+    // Undo/redo (both modes, but primarily useful in mask mode)
+    if (e.key === "z" && (e.ctrlKey || e.metaKey)) {
+      if (e.shiftKey) {
+        handleRedo();
+      } else {
+        handleUndo();
+      }
+      e.preventDefault();
+      return;
+    }
+
     // Mask mode shortcuts
     if (mode === "mask") {
       if (lockEdit) return;
-      if (e.key === "b" || e.key === "B") { setMaskTool("brush"); e.preventDefault(); }
-      else if (e.key === "t" || e.key === "T") { setMaskTool("rectangle"); e.preventDefault(); }
-      else if (e.key === "e" || e.key === "E") { setMaskTool("ellipse"); e.preventDefault(); }
-      else if (e.key === "i" || e.key === "I") { handleInvertMask(); e.preventDefault(); }
+      if (e.key === "i" || e.key === "I") { handleInvertMask(); e.preventDefault(); }
       else if (e.key === "c" || e.key === "C") { handleClearMask(); e.preventDefault(); }
       else if (e.key === "x" || e.key === "X") {
         setMaskAction(maskAction === "add" ? "subtract" : "add");
@@ -1559,23 +1427,20 @@ function Edit2D() {
       updateCrop(activeCrop.top + 1, activeCrop.left, activeCrop.bottom + 1, activeCrop.right);
       e.preventDefault();
     }
-  }, [mode, lockView, lockEdit, lockNavigation, handleReset, handleInvertMask, handleClearMask, maskAction, height, width, activeCrop, nImages, selectedIdx, updateCrop, setSelectedIdx, setMaskTool, setMaskAction]);
+  }, [mode, lockView, lockEdit, lockNavigation, handleReset, handleUndo, handleRedo, handleInvertMask, handleClearMask, maskAction, height, width, activeCrop, nImages, selectedIdx, updateCrop, setSelectedIdx, setMaskAction]);
 
   // ── Cursor style ────────────────────────────────────────────────────
   const canvasCursor = React.useMemo(() => {
     if (dragMode !== "none") {
       return dragMode === "pan" ? "grabbing" : getCursorForMode(dragMode);
     }
-    if (isPaintingRef.current) return "crosshair";
     if (mode === "mask") {
       if (lockEdit) return lockView ? "default" : "grab";
-      if (maskTool === "brush") return "crosshair";
-      if (maskTool === "rectangle" || maskTool === "ellipse") return "crosshair";
-      return "default";
+      return "crosshair";
     }
     if (mode === "crop" && lockEdit) return lockView ? "default" : "grab";
     return cursorStyle;
-  }, [dragMode, mode, lockEdit, lockView, maskTool, cursorStyle]);
+  }, [dragMode, mode, lockEdit, lockView, cursorStyle]);
 
   // ── Shared/independent toggle ───────────────────────────────────────
   const handleToggleShared = React.useCallback(() => {
@@ -1610,12 +1475,11 @@ function Edit2D() {
     ["Scroll", "Zoom in/out"],
     ["Dbl-click", "Reset view"],
     ["R", "Reset zoom"],
-    ["B", "Brush tool"],
-    ["T", "Rectangle tool"],
-    ["E", "Ellipse tool"],
     ["X", "Toggle add/subtract"],
     ["I", "Invert mask"],
     ["C", "Clear mask"],
+    ["\u2318/Ctrl+Z", "Undo"],
+    ["\u2318/Ctrl+\u21e7+Z", "Redo"],
   ] : [
     ["Scroll", "Zoom in/out"],
     ["Dbl-click", "Reset view"],
@@ -1666,7 +1530,7 @@ function Edit2D() {
         <InfoTooltip theme={themeInfo.theme} text={<Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
           <Typography sx={{ fontSize: 11, fontWeight: "bold" }}>Controls</Typography>
           <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>Crop: Drag handles to resize, drag inside to move crop region.</Typography>
-          <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>Mask: Paint binary mask with brush, rectangle, ellipse, or threshold tools.</Typography>
+          <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>Mask: Draw rectangles to mask regions. Undo/redo with Ctrl+Z / Ctrl+Shift+Z.</Typography>
           <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>Fill: Value used for padded regions outside the original image bounds.</Typography>
           <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>Auto: Percentile-based contrast — clips outliers for better visibility.</Typography>
           <Typography sx={{ fontSize: 11, fontWeight: "bold", mt: 0.5 }}>Keyboard</Typography>
@@ -1857,35 +1721,6 @@ function Edit2D() {
                 <>
                   {wantEditControlsGroup && (
                     <Box sx={{ ...controlRow, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, opacity: lockEdit ? 0.6 : 1 }}>
-                      {(["brush", "rectangle", "ellipse", "threshold"] as const).map((tool) => (
-                        <Button
-                          key={tool}
-                          size="small"
-                          disabled={lockEdit}
-                          variant={maskTool === tool ? "contained" : "outlined"}
-                          onClick={() => { if (!lockEdit) setMaskTool(tool); }}
-                          sx={{ ...compactButton, minWidth: 32 }}
-                        >
-                          {tool === "rectangle" ? "RECT" : tool === "threshold" ? "THRESH" : tool.toUpperCase()}
-                        </Button>
-                      ))}
-                      {maskTool === "brush" && (
-                        <>
-                          <Box sx={{ borderLeft: `1px solid ${themeColors.border}`, height: 16, mx: 0 }} />
-                          <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted }}>Size:</Typography>
-                          <Slider
-                            value={brushSize}
-                            disabled={lockEdit}
-                            onChange={(_, v) => { if (!lockEdit) setBrushSize(v as number); }}
-                            min={1}
-                            max={100}
-                            size="small"
-                            sx={{ ...sliderStyles.small, width: 60 }}
-                          />
-                          <Typography sx={{ ...typography.value }}>{brushSize}</Typography>
-                        </>
-                      )}
-                      <Box sx={{ borderLeft: `1px solid ${themeColors.border}`, height: 16, mx: 0 }} />
                       <Button
                         size="small"
                         disabled={lockEdit}
@@ -1904,12 +1739,13 @@ function Edit2D() {
                       >
                         SUB
                       </Button>
-                    </Box>
-                  )}
-                  {wantEditControlsGroup && (
-                    <Box sx={{ ...controlRow, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, opacity: lockEdit ? 0.6 : 1 }}>
+                      <Box sx={{ borderLeft: `1px solid ${themeColors.border}`, height: 16, mx: 0 }} />
                       <Button size="small" sx={compactButton} disabled={lockEdit} onClick={handleInvertMask}>INVERT</Button>
                       <Button size="small" sx={compactButton} disabled={lockEdit} onClick={handleClearMask}>CLEAR</Button>
+                      <Box sx={{ borderLeft: `1px solid ${themeColors.border}`, height: 16, mx: 0 }} />
+                      <Button size="small" sx={compactButton} disabled={lockEdit || maskUndoStackRef.current.length === 0} onClick={handleUndo}>UNDO</Button>
+                      <Button size="small" sx={compactButton} disabled={lockEdit || maskRedoStackRef.current.length === 0} onClick={handleRedo}>REDO</Button>
+                      <Box sx={{ borderLeft: `1px solid ${themeColors.border}`, height: 16, mx: 0 }} />
                       <Typography sx={{ ...typography.value, color: themeColors.accent }}>{maskCoverage.pct.toFixed(1)}%</Typography>
                     </Box>
                   )}

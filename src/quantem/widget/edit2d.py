@@ -154,8 +154,7 @@ class Edit2D(anywidget.AnyWidget):
     # Mask State
     # =========================================================================
     mask_bytes = traitlets.Bytes(b"").tag(sync=True)
-    mask_tool = traitlets.Unicode("brush").tag(sync=True)
-    brush_size = traitlets.Int(10).tag(sync=True)
+    mask_tool = traitlets.Unicode("rectangle").tag(sync=True)
     mask_action = traitlets.Unicode("add").tag(sync=True)
 
     # =========================================================================
@@ -658,7 +657,6 @@ class Edit2D(anywidget.AnyWidget):
             "crop_left": self.crop_left,
             "crop_bottom": self.crop_bottom,
             "crop_right": self.crop_right,
-            "brush_size": self.brush_size,
             "shared": self.shared,
         }
         if not self.shared and self.n_images > 1:
@@ -710,7 +708,6 @@ class Edit2D(anywidget.AnyWidget):
             total = self.height * self.width
             pct = 100 * mask_px / total if total > 0 else 0
             lines.append(f"Mask:     {mask_px} px ({pct:.1f}%)")
-            lines.append(f"Brush:    {self.brush_size} px")
         scale = "log" if self.log_scale else "linear"
         contrast = "auto" if self.auto_contrast else "manual"
         lines.append(f"Display:  {self.cmap} | {contrast} | {scale}")

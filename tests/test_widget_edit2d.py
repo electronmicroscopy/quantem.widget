@@ -325,7 +325,7 @@ def test_edit2d_state_dict_keys():
         "show_display_controls", "show_edit_controls", "show_histogram",
         "disabled_tools", "hidden_tools",
         "pixel_size", "fill_value",
-        "crop_top", "crop_left", "crop_bottom", "crop_right", "brush_size",
+        "crop_top", "crop_left", "crop_bottom", "crop_right",
         "shared",
     }
     assert set(sd.keys()) == expected

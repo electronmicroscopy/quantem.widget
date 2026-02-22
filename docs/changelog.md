@@ -33,6 +33,11 @@
 - one-click export bundle (`.zip` with PNG + ROI timeseries CSV + state JSON)
 - file loaders: `from_emd`, `from_tiff`, `from_png`, `from_folder(file_type=...)`
 
+### Edit2D
+- **breaking:** mask mode now uses rectangle tool only (brush, ellipse, threshold removed for stability)
+- undo/redo for mask operations (Ctrl+Z / Ctrl+Shift+Z) with 50-step history
+- `brush_size` trait removed from state_dict
+
 ### Show2D, Show3D, Mark2D, Show4D, Show4DSTEM, ShowComplex2D, Show3DVolume
 - ROI FFT: FFT shows cropped ROI region with real-time updates during drag
 - d-spacing click: click FFT panel to measure d-spacing with sub-pixel Bragg spot snap
