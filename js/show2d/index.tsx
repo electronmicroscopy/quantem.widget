@@ -2823,7 +2823,7 @@ function Show2D() {
         {/* Main panel */}
         <Box sx={{ width: galleryGridWidth }}>
           {/* Title row */}
-          <Typography variant="caption" sx={{ ...typography.label, color: themeColors.accent, mb: `${SPACING.XS}px`, display: "block" }}>
+          <Typography variant="caption" sx={{ ...typography.label, color: themeColors.accent, mb: `${SPACING.XS}px`, display: "block", height: 16, lineHeight: "16px", overflow: "hidden" }}>
             {title || (isGallery ? "Gallery" : "Image")}
             <InfoTooltip text={<Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
               <Typography sx={{ fontSize: 11, fontWeight: "bold" }}>Controls</Typography>
