@@ -175,6 +175,14 @@ sphinx-autobuild docs docs/_build/html --open-browser --port 8322
 
 ### TestPyPI
 
+Currently published on [TestPyPI](https://test.pypi.org/project/quantem-widget/) (not yet on PyPI).
+
 1. Bump version in `pyproject.toml`
-2. Tag and push: `git tag v0.0.6 && git push origin main && git push origin v0.0.6`
-3. CI builds and uploads. Verify: `./scripts/verify_testpypi.sh 0.0.X`
+2. Tag and push: `git tag vX.Y.Z && git push origin main && git push origin vX.Y.Z`
+3. CI builds and uploads to TestPyPI. Verify: `./scripts/verify_testpypi.sh X.Y.Z`
+
+Install from TestPyPI:
+
+```bash
+pip install -i https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ quantem-widget
+```

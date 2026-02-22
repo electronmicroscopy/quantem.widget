@@ -3,7 +3,9 @@
 Interactive Jupyter widgets for electron microscopy visualization.
 Works with NumPy, CuPy, and PyTorch arrays.
 
-## install
+## Install (TestPyPI)
+
+Currently published on [TestPyPI](https://test.pypi.org/project/quantem-widget/) (not yet on PyPI).
 
 ```bash
 pip install -i https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ quantem-widget
