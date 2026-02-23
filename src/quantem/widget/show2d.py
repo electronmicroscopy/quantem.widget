@@ -149,6 +149,7 @@ class Show2D(anywidget.AnyWidget):
     # Analysis Panels (FFT + Histogram shown together)
     # =========================================================================
     show_fft = traitlets.Bool(False).tag(sync=True)
+    fft_window = traitlets.Bool(True).tag(sync=True)
 
     # =========================================================================
     # Selected Image (for single-image analysis display)
@@ -595,6 +596,7 @@ class Show2D(anywidget.AnyWidget):
         pixel_size: float = 0.0,
         scale_bar_visible: bool = True,
         show_fft: bool = False,
+        fft_window: bool = True,
         show_controls: bool = True,
         show_stats: bool = True,
         log_scale: bool = False,
@@ -678,6 +680,7 @@ class Show2D(anywidget.AnyWidget):
         self.scale_bar_visible = scale_bar_visible
         self.canvas_size = canvas_size
         self.show_fft = show_fft
+        self.fft_window = fft_window
         self.show_controls = show_controls
         self.show_stats = show_stats
         self.log_scale = log_scale
@@ -865,6 +868,7 @@ class Show2D(anywidget.AnyWidget):
             "auto_contrast": self.auto_contrast,
             "show_stats": self.show_stats,
             "show_fft": self.show_fft,
+            "fft_window": self.fft_window,
             "show_controls": self.show_controls,
             "disabled_tools": self.disabled_tools,
             "hidden_tools": self.hidden_tools,
@@ -910,6 +914,8 @@ class Show2D(anywidget.AnyWidget):
         display = f"{cmap} | {contrast} | {scale}"
         if self.show_fft:
             display += " | FFT"
+            if not self.fft_window:
+                display += " (no window)"
         lines.append(f"Display:  {display}")
         if self.disabled_tools:
             lines.append(f"Locked:   {', '.join(self.disabled_tools)}")

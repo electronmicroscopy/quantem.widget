@@ -248,6 +248,7 @@ class Show4DSTEM(anywidget.AnyWidget):
 
     fft_auto = traitlets.Bool(True).tag(sync=True)
     show_fft = traitlets.Bool(False).tag(sync=True)
+    fft_window = traitlets.Bool(True).tag(sync=True)
     show_controls = traitlets.Bool(True).tag(sync=True)
     dp_show_colorbar = traitlets.Bool(False).tag(sync=True)
     export_default_view = traitlets.Unicode("all").tag(sync=True)
@@ -410,6 +411,8 @@ class Show4DSTEM(anywidget.AnyWidget):
         hide_virtual: bool = False,
         hide_frame: bool = False,
         hide_all: bool = False,
+        show_fft: bool = False,
+        fft_window: bool = True,
         show_controls: bool = True,
         state=None,
         **kwargs,
@@ -471,6 +474,8 @@ class Show4DSTEM(anywidget.AnyWidget):
             hide_frame=hide_frame,
             hide_all=hide_all,
         )
+        self.show_fft = show_fft
+        self.fft_window = fft_window
         self.show_controls = show_controls
         # Path animation (configured via set_path() or raster())
         self._path_points: list[tuple[int, int]] = []
@@ -740,6 +745,7 @@ class Show4DSTEM(anywidget.AnyWidget):
             "fft_vmax_pct": self.fft_vmax_pct,
             "fft_auto": self.fft_auto,
             "show_fft": self.show_fft,
+            "fft_window": self.fft_window,
             "show_controls": self.show_controls,
             "dp_show_colorbar": self.dp_show_colorbar,
             "export_default_view": self.export_default_view,
@@ -814,9 +820,10 @@ class Show4DSTEM(anywidget.AnyWidget):
             f"VI view:  {self.vi_colormap}, {self.vi_scale_mode}, {self.vi_vmin_pct:.1f}-{self.vi_vmax_pct:.1f}%"
         )
         if self.show_fft:
-            lines.append(
-                f"FFT view: {self.fft_colormap}, {self.fft_scale_mode}, {self.fft_vmin_pct:.1f}-{self.fft_vmax_pct:.1f}%, auto={self.fft_auto}"
-            )
+            fft_parts = [f"{self.fft_colormap}, {self.fft_scale_mode}, {self.fft_vmin_pct:.1f}-{self.fft_vmax_pct:.1f}%, auto={self.fft_auto}"]
+            if not self.fft_window:
+                fft_parts.append("no window")
+            lines.append(f"FFT view: {', '.join(fft_parts)}")
         if self.profile_line and len(self.profile_line) == 2:
             p0, p1 = self.profile_line[0], self.profile_line[1]
             lines.append(f"Profile:  ({p0['row']:.0f}, {p0['col']:.0f}) -> ({p1['row']:.0f}, {p1['col']:.0f}) width={self.profile_width}")

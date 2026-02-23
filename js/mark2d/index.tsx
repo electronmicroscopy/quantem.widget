@@ -17,7 +17,7 @@ import { extractFloat32, formatNumber, downloadBlob } from "../format";
 import { COLORMAPS, COLORMAP_NAMES, renderToOffscreen, renderToOffscreenReuse } from "../colormaps";
 import { computeHistogramFromBytes } from "../histogram";
 import { findDataRange, computeStats, percentileClip, sliderRange, applyLogScale } from "../stats";
-import { fft2d, fftshift, computeMagnitude, autoEnhanceFFT, getWebGPUFFT, nextPow2, type WebGPUFFT } from "../webgpu-fft";
+import { fft2d, fftshift, computeMagnitude, autoEnhanceFFT, getWebGPUFFT, nextPow2, applyHannWindow2D, type WebGPUFFT } from "../webgpu-fft";
 import JSZip from "jszip";
 
 type MarkerShape = "circle" | "triangle" | "square" | "diamond" | "star";
@@ -709,6 +709,7 @@ const render = createRender(() => {
   const [autoContrast, setAutoContrast] = useModelState<boolean>("auto_contrast");
   const [logScale, setLogScale] = useModelState<boolean>("log_scale");
   const [showFft, setShowFft] = useModelState<boolean>("show_fft");
+  const [fftWindow, setFftWindow] = useModelState<boolean>("fft_window");
   const effectiveShowFft = showFft && !hideDisplay;
   const roiFftActive = effectiveShowFft && !isGallery && activeRoiIdx >= 0 && activeRoiIdx < safeRois.length;
 
@@ -1331,6 +1332,8 @@ const render = createRender(() => {
         if (crop) {
           origCropW = crop.cropW;
           origCropH = crop.cropH;
+          // Apply Hann window to crop at native dimensions BEFORE zero-padding
+          if (fftWindow) applyHannWindow2D(crop.cropped, crop.cropW, crop.cropH);
           const padW = nextPow2(crop.cropW);
           const padH = nextPow2(crop.cropH);
           const padded = new Float32Array(padW * padH);
@@ -1347,7 +1350,8 @@ const render = createRender(() => {
 
       let real: Float32Array, imag: Float32Array;
       if (gpuFFTRef.current) {
-        const result = await gpuFFTRef.current.fft2D(inputData.slice(), new Float32Array(inputData.length), fftW, fftH, false);
+        const gpuReal = inputData.slice();
+        const result = await gpuFFTRef.current.fft2D(gpuReal, new Float32Array(inputData.length), fftW, fftH, false);
         real = result.real; imag = result.imag;
       } else {
         real = inputData.slice(); imag = new Float32Array(inputData.length);
@@ -1375,7 +1379,7 @@ const render = createRender(() => {
       }
     };
     compute();
-  }, [effectiveShowFft, roiFftActive, perImageData, isGallery, selectedIdx, width, height, cmap, canvasW, canvasH, safeRois, activeRoiIdx]);
+  }, [effectiveShowFft, roiFftActive, perImageData, isGallery, selectedIdx, width, height, cmap, canvasW, canvasH, safeRois, activeRoiIdx, fftWindow]);
 
   // Clear FFT measurement when image, FFT state, or ROI changes
   React.useEffect(() => { setFftClickInfo(null); }, [selectedIdx, effectiveShowFft, roiFftActive, activeRoiIdx]);
@@ -2545,6 +2549,12 @@ const render = createRender(() => {
             </Select>
             <Typography sx={{ ...typography.labelSmall, color: tc.textMuted }}>Auto:</Typography>
             <Switch checked={autoContrast} onChange={(e) => setAutoContrast(e.target.checked)} disabled={lockDisplay} size="small" sx={switchStyles.small} />
+            {fftCropDims && (
+              <>
+                <Typography sx={{ ...typography.label, fontSize: 10 }}>Win:</Typography>
+                <Switch checked={fftWindow} onChange={(e) => { if (!lockDisplay) setFftWindow(e.target.checked); }} disabled={lockDisplay} size="small" sx={switchStyles.small} />
+              </>
+            )}
             <Typography sx={{ ...typography.labelSmall, color: tc.textMuted }}>Color:</Typography>
             <Select disabled={lockDisplay} size="small" value={cmap || "gray"} onChange={(e) => setCmap(e.target.value)} variant="outlined" MenuProps={themedMenuProps} sx={{ ...themedSelect, minWidth: 65 }}>
               {COLORMAP_NAMES.map((name) => (

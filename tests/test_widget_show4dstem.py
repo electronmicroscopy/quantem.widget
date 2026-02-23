@@ -360,7 +360,7 @@ def test_show4dstem_title_in_repr():
 
 def test_show4dstem_state_dict_roundtrip():
     data = np.random.rand(4, 4, 16, 16).astype(np.float32)
-    w = Show4DSTEM(data, center=(5.0, 6.0), bf_radius=3.0)
+    w = Show4DSTEM(data, center=(5.0, 6.0), bf_radius=3.0, fft_window=False)
     w.dp_scale_mode = "log"
     sd = w.state_dict()
     assert sd["dp_scale_mode"] == "log"
@@ -369,9 +369,11 @@ def test_show4dstem_state_dict_roundtrip():
     assert sd["bf_radius"] == 3.0
     assert "disabled_tools" in sd
     assert "hidden_tools" in sd
+    assert sd["fft_window"] is False
     w2 = Show4DSTEM(data, state=sd)
     assert w2.dp_scale_mode == "log"
     assert w2.bf_radius == 3.0
+    assert w2.fft_window is False
 
 def test_show4dstem_save_load_file(tmp_path):
     import json

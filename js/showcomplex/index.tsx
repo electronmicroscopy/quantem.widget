@@ -26,7 +26,7 @@ import { drawScaleBarHiDPI, drawFFTScaleBarHiDPI, drawColorbar, exportFigure, ca
 import { extractFloat32, formatNumber, downloadBlob } from "../format";
 import { computeHistogramFromBytes } from "../histogram";
 import { findDataRange, applyLogScale, percentileClip, sliderRange } from "../stats";
-import { getWebGPUFFT, WebGPUFFT, fft2d, fftshift, computeMagnitude, autoEnhanceFFT, nextPow2 } from "../webgpu-fft";
+import { getWebGPUFFT, WebGPUFFT, fft2d, fftshift, computeMagnitude, autoEnhanceFFT, nextPow2, applyHannWindow2D } from "../webgpu-fft";
 import { COLORMAPS, COLORMAP_NAMES, applyColormap, renderToOffscreen } from "../colormaps";
 import { ControlCustomizer } from "../control-customizer";
 import { computeToolVisibility } from "../tool-parity";
@@ -393,6 +393,7 @@ function ShowComplex2D() {
   // UI
   const [showStats] = useModelState<boolean>("show_stats");
   const [showFft, setShowFft] = useModelState<boolean>("show_fft");
+  const [fftWindow, setFftWindow] = useModelState<boolean>("fft_window");
   const [showControls] = useModelState<boolean>("show_controls");
   const [imageWidthPx] = useModelState<number>("image_width_px");
 
@@ -799,6 +800,8 @@ function ShowComplex2D() {
       if (crop) {
         origCropW = crop.cropW;
         origCropH = crop.cropH;
+        // Apply Hann window to crop at native dimensions BEFORE zero-padding
+        if (fftWindow) applyHannWindow2D(crop.cropped, crop.cropW, crop.cropH);
         fftW = nextPow2(crop.cropW);
         fftH = nextPow2(crop.cropH);
         const padded = new Float32Array(fftW * fftH);
@@ -848,7 +851,7 @@ function ShowComplex2D() {
     computeFFT();
     return () => { cancelled = true; };
   }, [effectiveShowFft, realBytes, imagBytes, displayMode, logScale, width, height, gpuReady,
-      roiFftActive, roiMode, roiCenterRow, roiCenterCol, roiRadius, roiWidth, roiHeight]);
+      roiFftActive, roiMode, roiCenterRow, roiCenterCol, roiRadius, roiWidth, roiHeight, fftWindow]);
 
   // FFT rendering (cheap, sync) — uses fftCropDims for ROI FFT
   React.useEffect(() => {
@@ -1680,6 +1683,12 @@ function ShowComplex2D() {
                     </Select>
                     <Typography sx={{ ...typography.label, fontSize: 10 }}>Auto:</Typography>
                     <Switch checked={fftAuto} onChange={(e) => { if (!lockDisplay) setFftAuto(e.target.checked); }} disabled={lockDisplay} size="small" sx={switchStyles.small} />
+                    {fftCropDims && (
+                      <>
+                        <Typography sx={{ ...typography.label, fontSize: 10 }}>Win:</Typography>
+                        <Switch checked={fftWindow} onChange={(e) => { if (!lockDisplay) setFftWindow(e.target.checked); }} disabled={lockDisplay} size="small" sx={switchStyles.small} />
+                      </>
+                    )}
                   </Box>
                 </Box>
                 {!hideHistogram && (

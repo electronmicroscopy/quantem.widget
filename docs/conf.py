@@ -1,8 +1,12 @@
+import re
 import quantem.widget
 
 project = "quantem.widget"
 copyright = "2026, quantem contributors"
-version = quantem.widget.__version__
+# hatch-vcs produces strings like "0.1.dev1+g4903b2d.d20260222" in dev;
+# strip to the base version (e.g. "0.1" or "0.0.7") for clean docs header.
+_raw_version = quantem.widget.__version__
+version = re.match(r"[\d]+\.[\d]+\.?[\d]*", _raw_version).group()
 release = version
 
 extensions = [
@@ -35,6 +39,7 @@ exclude_patterns = [
 ]
 
 html_theme = "pydata_sphinx_theme"
+html_title = f"quantem.widget {version}"
 html_static_path = ["_static"]
 html_css_files = ["custom.css"]
 html_theme_options = {

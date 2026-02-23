@@ -207,6 +207,7 @@ class Show3D(anywidget.AnyWidget):
     # Analysis Panels (FFT + Histogram shown together)
     # =========================================================================
     show_fft = traitlets.Bool(False).tag(sync=True)
+    fft_window = traitlets.Bool(True).tag(sync=True)
     show_playback = traitlets.Bool(False).tag(sync=True)
     disabled_tools = traitlets.List(traitlets.Unicode()).tag(sync=True)
     hidden_tools = traitlets.List(traitlets.Unicode()).tag(sync=True)
@@ -647,6 +648,7 @@ class Show3D(anywidget.AnyWidget):
         timestamps: list[float] | None = None,
         timestamp_unit: str = "s",
         show_fft: bool = False,
+        fft_window: bool = True,
         show_playback: bool = False,
         show_stats: bool = True,
         show_controls: bool = True,
@@ -782,6 +784,7 @@ class Show3D(anywidget.AnyWidget):
         self.dim_label = dim_label
         self.diff_mode = diff_mode
         self.show_fft = show_fft
+        self.fft_window = fft_window
         self.show_playback = show_playback
         self.show_stats = show_stats
         self.show_controls = show_controls
@@ -894,6 +897,7 @@ class Show3D(anywidget.AnyWidget):
             "show_stats": self.show_stats,
             "show_controls": self.show_controls,
             "show_fft": self.show_fft,
+            "fft_window": self.fft_window,
             "show_playback": self.show_playback,
             "disabled_tools": self.disabled_tools,
             "hidden_tools": self.hidden_tools,
@@ -947,6 +951,8 @@ class Show3D(anywidget.AnyWidget):
         display = f"{cmap} | {contrast} | {scale}"
         if self.show_fft:
             display += " | FFT"
+            if not self.fft_window:
+                display += " (no window)"
         if self.diff_mode != "off":
             display += f" | diff={self.diff_mode}"
         lines.append(f"Display:  {display}")

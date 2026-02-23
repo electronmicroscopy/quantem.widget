@@ -66,7 +66,7 @@ const upwardMenuProps = {
   transformOrigin: { vertical: "bottom" as const, horizontal: "left" as const },
   sx: { zIndex: 9999 },
 };
-import { getWebGPUFFT, WebGPUFFT, fft2d, fftshift, computeMagnitude, autoEnhanceFFT, nextPow2 } from "../webgpu-fft";
+import { getWebGPUFFT, WebGPUFFT, fft2d, fftshift, computeMagnitude, autoEnhanceFFT, nextPow2, applyHannWindow2D } from "../webgpu-fft";
 import { COLORMAPS, COLORMAP_NAMES, renderToOffscreen, renderToOffscreenReuse } from "../colormaps";
 import "./show2d.css";
 
@@ -401,6 +401,7 @@ function Show2D() {
 
   // Analysis Panels (FFT + Histogram)
   const [showFft, setShowFft] = useModelState<boolean>("show_fft");
+  const [fftWindow, setFftWindow] = useModelState<boolean>("fft_window");
 
   // Selection
   const [selectedIdx, setSelectedIdx] = useModelState<number>("selected_idx");
@@ -1404,6 +1405,8 @@ function Show2D() {
         if (crop) {
           origCropW = crop.cropW;
           origCropH = crop.cropH;
+          // Apply Hann window to crop at native dimensions BEFORE zero-padding
+          if (fftWindow) applyHannWindow2D(crop.cropped, crop.cropW, crop.cropH);
           // Pad to next power-of-2 so fft2d doesn't truncate frequency data
           const padW = nextPow2(crop.cropW);
           const padH = nextPow2(crop.cropH);
@@ -1445,7 +1448,7 @@ function Show2D() {
     doCompute();
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [effectiveShowFft, isGallery, selectedIdx, width, height, gpuReady, dataReady, roiFftKey]);
+  }, [effectiveShowFft, isGallery, selectedIdx, width, height, gpuReady, dataReady, roiFftKey, fftWindow]);
 
   // Clear FFT measurement when image, FFT state, or ROI changes
   React.useEffect(() => { setFftClickInfo(null); }, [selectedIdx, effectiveShowFft, roiFftActive, roiSelectedIdx]);
@@ -1624,6 +1627,8 @@ function Show2D() {
         if (roi) {
           const crop = cropROIRegion(data, width, height, roi);
           if (crop) {
+            // Apply Hann window to crop at native dimensions BEFORE zero-padding
+            if (fftWindow) applyHannWindow2D(crop.cropped, crop.cropW, crop.cropH);
             const padW = nextPow2(crop.cropW);
             const padH = nextPow2(crop.cropH);
             const padded = new Float32Array(padW * padH);
@@ -1670,7 +1675,7 @@ function Show2D() {
 
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [effectiveShowFft, isGallery, nImages, width, height, gpuReady, dataReady, roiFftKey]);
+  }, [effectiveShowFft, isGallery, nImages, width, height, gpuReady, dataReady, roiFftKey, fftWindow]);
 
   // Gallery FFT data effect: normalize + colormap → cached offscreen canvases
   // (does NOT depend on gallery zoom/pan states)
@@ -3073,6 +3078,12 @@ function Show2D() {
                   </Select>
                   <Typography sx={{ ...typography.label, fontSize: 10 }}>Auto:</Typography>
                   <Switch checked={fftAuto} onChange={(e) => { if (!lockDisplay) setFftAuto(e.target.checked); }} disabled={lockDisplay} size="small" sx={switchStyles.small} />
+                  {fftCropDims && (
+                    <>
+                      <Typography sx={{ ...typography.label, fontSize: 10 }}>Win:</Typography>
+                      <Switch checked={fftWindow} onChange={(e) => { if (!lockDisplay) setFftWindow(e.target.checked); }} disabled={lockDisplay} size="small" sx={switchStyles.small} />
+                    </>
+                  )}
                   <Typography sx={{ ...typography.label, fontSize: 10 }}>Color:</Typography>
                   <Select disabled={lockDisplay} value={fftColormap} onChange={(e) => setFftColormap(String(e.target.value))} size="small" sx={{ ...themedSelect, minWidth: 65, fontSize: 10 }} MenuProps={themedMenuProps}>
                     {COLORMAP_NAMES.map((name) => (<MenuItem key={name} value={name}>{name.charAt(0).toUpperCase() + name.slice(1)}</MenuItem>))}
@@ -3358,6 +3369,12 @@ function Show2D() {
                   <Box sx={{ ...controlRow, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, opacity: lockDisplay ? 0.5 : 1, pointerEvents: lockDisplay ? "none" : "auto" }}>
                     <Typography sx={{ ...typography.label, fontSize: 10 }}>Auto:</Typography>
                     <Switch checked={fftAuto} onChange={(e) => { if (!lockDisplay) setFftAuto(e.target.checked); }} disabled={lockDisplay} size="small" sx={switchStyles.small} />
+                    {fftCropDims && (
+                      <>
+                        <Typography sx={{ ...typography.label, fontSize: 10 }}>Win:</Typography>
+                        <Switch checked={fftWindow} onChange={(e) => { if (!lockDisplay) setFftWindow(e.target.checked); }} disabled={lockDisplay} size="small" sx={switchStyles.small} />
+                      </>
+                    )}
                     {fftZoom !== DEFAULT_FFT_ZOOM && (
                       <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.accent, fontWeight: "bold" }}>{fftZoom.toFixed(1)}x</Typography>
                     )}

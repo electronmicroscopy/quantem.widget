@@ -21,7 +21,7 @@ import JSZip from "jszip";
 import "./styles.css";
 import { useTheme } from "../theme";
 import { COLORMAPS, applyColormap, renderToOffscreen } from "../colormaps";
-import { WebGPUFFT, getWebGPUFFT, fft2d, fftshift, autoEnhanceFFT, nextPow2 } from "../webgpu-fft";
+import { WebGPUFFT, getWebGPUFFT, fft2d, fftshift, autoEnhanceFFT, nextPow2, applyHannWindow2D } from "../webgpu-fft";
 import { drawScaleBarHiDPI, drawColorbar, roundToNiceValue, exportFigure, canvasToPDF } from "../scalebar";
 import { findDataRange, sliderRange, computeStats, applyLogScale } from "../stats";
 import { downloadBlob, formatNumber, downloadDataView } from "../format";
@@ -1064,6 +1064,7 @@ function Show4DSTEM() {
   const [dpStats] = useModelState<number[]>("dp_stats");  // [mean, min, max, std]
   const [viStats] = useModelState<number[]>("vi_stats");  // [mean, min, max, std]
   const [showFft, setShowFft] = useModelState<boolean>("show_fft");
+  const [fftWindow, setFftWindow] = useModelState<boolean>("fft_window");
   const [disabledTools, setDisabledTools] = useModelState<string[]>("disabled_tools");
   const [hiddenTools, setHiddenTools] = useModelState<string[]>("hidden_tools");
   const [showControls] = useModelState<boolean>("show_controls");
@@ -1752,6 +1753,8 @@ function Show4DSTEM() {
       if (crop) {
         origCropW = crop.cropW;
         origCropH = crop.cropH;
+        // Apply Hann window to crop at native dimensions BEFORE zero-padding
+        if (fftWindow) applyHannWindow2D(crop.cropped, crop.cropW, crop.cropH);
         const padW = nextPow2(crop.cropW);
         const padH = nextPow2(crop.cropH);
         const padded = new Float32Array(padW * padH);
@@ -1797,7 +1800,7 @@ function Show4DSTEM() {
       setFftCropDims(origCropW > 0 ? { cropWidth: origCropW, cropHeight: origCropH, fftWidth: fftW, fftHeight: fftH } : null);
       setFftVersion(v => v + 1);
     }
-  }, [virtualImageBytes, shapeRows, shapeCols, gpuReady, effectiveShowFft, roiFftActive, viRoiMode, viRoiCenterRow, viRoiCenterCol, viRoiRadius, viRoiWidth, viRoiHeight]);
+  }, [virtualImageBytes, shapeRows, shapeCols, gpuReady, effectiveShowFft, roiFftActive, viRoiMode, viRoiCenterRow, viRoiCenterCol, viRoiRadius, viRoiWidth, viRoiHeight, fftWindow]);
 
   // Expensive: FFT magnitude + histogram + colormap → cached offscreen canvas
   React.useEffect(() => {
@@ -4098,6 +4101,12 @@ function Show4DSTEM() {
                       </Select>
                       <Typography sx={{ ...typo.label, fontSize: 10 }}>Auto:</Typography>
                       <Switch checked={fftAuto} onChange={(e) => { if (!lockDisplay && !lockFft) setFftAuto(e.target.checked); }} disabled={lockDisplay || lockFft} size="small" sx={switchStyles.small} />
+                      {fftCropDims && (
+                        <>
+                          <Typography sx={{ ...typo.label, fontSize: 10 }}>Win:</Typography>
+                          <Switch checked={fftWindow} onChange={(e) => { if (!lockDisplay && !lockFft) setFftWindow(e.target.checked); }} disabled={lockDisplay || lockFft} size="small" sx={switchStyles.small} />
+                        </>
+                      )}
                     </Box>
                     {/* Row 2: Color */}
                     <Box sx={{ ...controlRow, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, opacity: (lockDisplay || lockFft) ? 0.6 : 1 }}>

@@ -21,7 +21,7 @@ import { drawScaleBarHiDPI, drawFFTScaleBarHiDPI, roundToNiceValue, exportFigure
 import { findDataRange, sliderRange, computeStats, applyLogScale } from "../stats";
 import { formatNumber, downloadBlob, downloadDataView } from "../format";
 import { computeHistogramFromBytes } from "../histogram";
-import { getWebGPUFFT, WebGPUFFT, fft2d, fftshift, computeMagnitude, autoEnhanceFFT, nextPow2 } from "../webgpu-fft";
+import { getWebGPUFFT, WebGPUFFT, fft2d, fftshift, computeMagnitude, autoEnhanceFFT, nextPow2, applyHannWindow2D } from "../webgpu-fft";
 import { ControlCustomizer } from "../control-customizer";
 import { computeToolVisibility } from "../tool-parity";
 
@@ -683,6 +683,7 @@ function Show4D() {
   const [showStats] = useModelState<boolean>("show_stats");
   const [showControls] = useModelState<boolean>("show_controls");
   const [showFft, setShowFft] = useModelState<boolean>("show_fft");
+  const [fftWindow, setFftWindow] = useModelState<boolean>("fft_window");
   const [disabledTools, setDisabledTools] = useModelState<string[]>("disabled_tools");
   const [hiddenTools, setHiddenTools] = useModelState<string[]>("hidden_tools");
 
@@ -1118,6 +1119,7 @@ function Show4D() {
       if (crop) {
         origCropW = crop.cropW;
         origCropH = crop.cropH;
+        if (fftWindow) applyHannWindow2D(crop.cropped, crop.cropW, crop.cropH);
         const padW = nextPow2(crop.cropW);
         const padH = nextPow2(crop.cropH);
         const padded = new Float32Array(padW * padH);
@@ -1136,7 +1138,8 @@ function Show4D() {
     const computeFFT = async () => {
       let real: Float32Array, imag: Float32Array;
       if (gpuReady && gpuFFTRef.current) {
-        const result = await gpuFFTRef.current.fft2D(inputData.slice(), new Float32Array(inputData.length), fftW, fftH, false);
+        const gpuInput = inputData.slice();
+        const result = await gpuFFTRef.current.fft2D(gpuInput, new Float32Array(inputData.length), fftW, fftH, false);
         real = result.real;
         imag = result.imag;
       } else {
@@ -1154,7 +1157,7 @@ function Show4D() {
     };
     computeFFT();
     return () => { cancelled = true; };
-  }, [effectiveShowFft, roiFftActive, frameBytes, sigRows, sigCols, gpuReady, roiMode, roiCenterRow, roiCenterCol, roiRadius, roiWidth, roiHeight]);
+  }, [effectiveShowFft, roiFftActive, frameBytes, sigRows, sigCols, gpuReady, roiMode, roiCenterRow, roiCenterCol, roiRadius, roiWidth, roiHeight, fftWindow]);
 
   // ── Render FFT image ──
   React.useEffect(() => {
@@ -2626,6 +2629,12 @@ function Show4D() {
                     <Box sx={{ ...controlRow, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, opacity: (lockDisplay || lockFft) ? 0.6 : 1 }}>
                       <Typography sx={{ ...typo.label, fontSize: 10 }}>Auto:</Typography>
                       <Switch checked={fftAuto} onChange={(e) => { if (!lockDisplay && !lockFft) setFftAuto(e.target.checked); }} disabled={lockDisplay || lockFft} size="small" sx={switchStyles.small} />
+                      {fftCropDims && (
+                        <>
+                          <Typography sx={{ ...typo.label, fontSize: 10 }}>Win:</Typography>
+                          <Switch checked={fftWindow} onChange={(e) => { if (!lockDisplay) setFftWindow(e.target.checked); }} disabled={lockDisplay} size="small" sx={switchStyles.small} />
+                        </>
+                      )}
                       <Typography sx={{ ...typo.label, fontSize: 10 }}>Color:</Typography>
                       <Select disabled={lockDisplay || lockFft} value={fftColormap} onChange={(e) => { if (!lockDisplay && !lockFft) setFftColormap(String(e.target.value)); }} size="small" sx={{ ...themedSelect, minWidth: 65, fontSize: 10 }} MenuProps={themedMenuProps}>
                         <MenuItem value="inferno">Inferno</MenuItem>

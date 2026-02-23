@@ -1,5 +1,10 @@
 # changelog
 
+## v0.0.8 (2026-02-22)
+
+### Show2D, Show3D, Show4D, Show4DSTEM, ShowComplex2D, Mark2D
+- ROI FFT Hann window: a 2D Hann window is automatically applied before FFT when viewing an ROI region, eliminating spectral leakage streaks from rectangular crop boundaries — Show2D exposes a `Win:` toggle (default on) to disable windowing; other widgets apply it unconditionally
+
 ## v0.0.7 (2026-02-21)
 
 ### New widgets

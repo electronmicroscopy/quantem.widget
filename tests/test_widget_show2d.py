@@ -293,17 +293,102 @@ def test_show2d_add_roi_chaining():
     result = w.add_roi(row=16, col=16).roi_square(half_size=5)
     assert result is w
 
+# ── FFT Hann Window Ground Truth ──────────────────────────────────────────
+
+def _js_hann_1d(n):
+    """Port of 1D Hann vector from applyHannWindow2D (js/webgpu-fft.ts line 178-180).
+    Extracts the exact loop: hannW[i] = 0.5 * (1 - cos(2*pi*i / wDenom))."""
+    denom = n - 1 if n > 1 else 1
+    return np.array([0.5 * (1 - np.cos(2 * np.pi * i / denom)) for i in range(n)])
+
+def _js_apply_hann_window_2d(data, width, height):
+    """Exact Python port of applyHannWindow2D from js/webgpu-fft.ts lines 175-186.
+    Applies in-place and returns the modified array for convenience."""
+    hann_w = _js_hann_1d(width)
+    hann_h = _js_hann_1d(height)
+    # Port of: data[offset + c] *= hr * hannW[c]  (outer product multiplication)
+    data *= np.outer(hann_h, hann_w)
+    return data
+
+def _next_pow2(n):
+    """Port of nextPow2 from js/webgpu-fft.ts."""
+    p = 1
+    while p < n:
+        p *= 2
+    return p
+
+def test_show2d_hann_js_port_matches_numpy():
+    """Ported JS 1D Hann window must match np.hanning for all practical sizes."""
+    for n in [8, 15, 20, 32, 64]:
+        js_1d = _js_hann_1d(n)
+        np_hann = np.hanning(n)
+        np.testing.assert_allclose(js_1d, np_hann, atol=1e-10,
+                                   err_msg=f"JS port != np.hanning at N={n}")
+        assert js_1d[0] == 0.0, f"First element should be 0 for N={n}"
+        assert js_1d[-1] == 0.0, f"Last element should be 0 for N={n}"
+
+def test_show2d_hann_js_port_2d_separable():
+    """Ported JS 2D Hann = outer product of np.hanning (all edges zero)."""
+    np.random.seed(42)
+    crop = np.random.rand(15, 20).astype(np.float32)
+    result = _js_apply_hann_window_2d(crop.copy(), 20, 15)
+    expected = crop * np.outer(np.hanning(15), np.hanning(20)).astype(np.float32)
+    np.testing.assert_allclose(result, expected, atol=1e-6)
+    assert np.all(result[0, :] == 0), "Top edge should be zero"
+    assert np.all(result[-1, :] == 0), "Bottom edge should be zero"
+    assert np.all(result[:, 0] == 0), "Left edge should be zero"
+    assert np.all(result[:, -1] == 0), "Right edge should be zero"
+
+def test_show2d_hann_then_pad_fft_pipeline():
+    """Full pipeline using JS port: window(crop) → pad → FFT matches NumPy equivalent."""
+    np.random.seed(123)
+    crop_h, crop_w = 15, 20
+    pad_h, pad_w = _next_pow2(crop_h), _next_pow2(crop_w)
+    crop_data = np.random.rand(crop_h, crop_w).astype(np.float32)
+    # Correct pipeline (what our JS now does): window at crop dims, then pad
+    windowed = _js_apply_hann_window_2d(crop_data.copy(), crop_w, crop_h)
+    padded = np.zeros((pad_h, pad_w), dtype=np.float32)
+    padded[:crop_h, :crop_w] = windowed
+    fft_correct = np.abs(np.fft.fftshift(np.fft.fft2(padded)))
+    # Verify seamless transition: windowed edges are zero → pad region is zero
+    assert windowed[-1, crop_w // 2] == 0.0, "Bottom edge of windowed crop should be 0"
+    assert padded[crop_h, crop_w // 2] == 0.0, "Pad region should be 0"
+    # Wrong pipeline (what our JS used to do): pad first, then window at padded dims
+    padded_wrong = np.zeros((pad_h, pad_w), dtype=np.float32)
+    padded_wrong[:crop_h, :crop_w] = crop_data
+    _js_apply_hann_window_2d(padded_wrong, pad_w, pad_h)
+    fft_wrong = np.abs(np.fft.fftshift(np.fft.fft2(padded_wrong)))
+    # Wrong pipeline has discontinuity at crop boundary
+    assert padded_wrong[crop_h - 1, crop_w // 2] != 0.0, "Wrong: crop boundary not zero"
+    # Correct pipeline should have less total energy (no leakage)
+    energy_correct = np.sum(fft_correct ** 2)
+    energy_wrong = np.sum(fft_wrong ** 2)
+    assert energy_correct < energy_wrong, "Correct windowing should have less spectral energy"
+
+def test_show2d_fft_window_trait():
+    """fft_window trait defaults True and roundtrips via state_dict."""
+    data = np.random.rand(32, 32).astype(np.float32)
+    w = Show2D(data)
+    assert w.fft_window is True
+    w2 = Show2D(data, fft_window=False)
+    assert w2.fft_window is False
+    sd = w2.state_dict()
+    assert sd["fft_window"] is False
+    w3 = Show2D(data, state=sd)
+    assert w3.fft_window is False
+
 # ── State Protocol ────────────────────────────────────────────────────────
 
 def test_show2d_state_dict_roundtrip():
     data = np.random.rand(32, 32).astype(np.float32)
     w = Show2D(data, cmap="viridis", log_scale=True, auto_contrast=True,
-               title="Test", pixel_size=2.5, show_fft=True,
+               title="Test", pixel_size=2.5, show_fft=True, fft_window=False,
                disabled_tools=["display", "view"], hidden_tools=["stats"])
     w.roi_active = True
     w.roi_list = [{"shape": "circle", "row": 10, "col": 15, "radius": 5}]
     w.roi_selected_idx = 0
     sd = w.state_dict()
+    assert sd["fft_window"] is False
     w2 = Show2D(data, state=sd)
     assert w2.cmap == "viridis"
     assert w2.log_scale is True
@@ -311,6 +396,7 @@ def test_show2d_state_dict_roundtrip():
     assert w2.title == "Test"
     assert w2.pixel_size == pytest.approx(2.5)
     assert w2.show_fft is True
+    assert w2.fft_window is False
     assert w2.disabled_tools == ["display", "view"]
     assert w2.hidden_tools == ["stats"]
     assert w2.roi_active is True

@@ -432,6 +432,7 @@ class Mark2D(anywidget.AnyWidget):
     auto_contrast = traitlets.Bool(True).tag(sync=True)
     log_scale = traitlets.Bool(False).tag(sync=True)
     show_fft = traitlets.Bool(False).tag(sync=True)
+    fft_window = traitlets.Bool(True).tag(sync=True)
 
     # Canvas sizing
     canvas_size = traitlets.Int(0).tag(sync=True)
@@ -556,6 +557,7 @@ class Mark2D(anywidget.AnyWidget):
         auto_contrast: bool = True,
         log_scale: bool = False,
         show_fft: bool = False,
+        fft_window: bool = True,
         canvas_size: int = 0,
         show_controls: bool = True,
         disabled_tools: Optional[List[str]] = None,
@@ -604,6 +606,7 @@ class Mark2D(anywidget.AnyWidget):
         self.auto_contrast = auto_contrast
         self.log_scale = log_scale
         self.show_fft = show_fft
+        self.fft_window = fft_window
         self.canvas_size = canvas_size
         self.show_controls = show_controls
         self.disabled_tools = self._build_disabled_tools(
@@ -1158,6 +1161,8 @@ class Mark2D(anywidget.AnyWidget):
         display = f"{cmap} | {contrast} | {scale}"
         if self.show_fft:
             display += " | FFT"
+            if not self.fft_window:
+                display += " (no window)"
         lines.append(f"Display:  {display}")
 
         # Point formatting helper
@@ -1446,6 +1451,7 @@ class Mark2D(anywidget.AnyWidget):
             "auto_contrast": self.auto_contrast,
             "log_scale": self.log_scale,
             "show_fft": self.show_fft,
+            "fft_window": self.fft_window,
             "show_stats": self.show_stats,
             "show_controls": self.show_controls,
             "disabled_tools": self.disabled_tools,

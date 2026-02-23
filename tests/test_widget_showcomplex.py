@@ -499,13 +499,14 @@ def test_showcomplex_set_image_updates_stats():
 def test_showcomplex_state_dict_roundtrip():
     """State dict can be saved and restored."""
     data = (np.random.rand(8, 8) + 1j * np.random.rand(8, 8)).astype(np.complex64)
-    w1 = ShowComplex2D(data, display_mode="phase", cmap="viridis", log_scale=True, title="Test")
+    w1 = ShowComplex2D(data, display_mode="phase", cmap="viridis", log_scale=True, title="Test", fft_window=False)
     state = w1.state_dict()
     w2 = ShowComplex2D(data, state=state)
     assert w2.display_mode == "phase"
     assert w2.cmap == "viridis"
     assert w2.log_scale is True
     assert w2.title == "Test"
+    assert w2.fft_window is False
 
 def test_showcomplex_state_dict_completeness():
     """State dict contains all expected keys."""
@@ -515,7 +516,7 @@ def test_showcomplex_state_dict_completeness():
     expected_keys = {
         "display_mode", "title", "cmap", "log_scale", "auto_contrast",
         "percentile_low", "percentile_high", "pixel_size",
-        "scale_bar_visible", "show_fft", "show_stats", "show_controls",
+        "scale_bar_visible", "show_fft", "fft_window", "show_stats", "show_controls",
         "image_width_px", "disabled_tools", "hidden_tools",
         "roi_mode", "roi_center_row", "roi_center_col",
         "roi_radius", "roi_width", "roi_height",

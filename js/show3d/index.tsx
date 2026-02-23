@@ -347,7 +347,7 @@ function Histogram({
   );
 }
 
-import { WebGPUFFT, getWebGPUFFT, fft2d, fftshift, computeMagnitude, autoEnhanceFFT, nextPow2 } from "../webgpu-fft";
+import { WebGPUFFT, getWebGPUFFT, fft2d, fftshift, computeMagnitude, autoEnhanceFFT, nextPow2, applyHannWindow2D } from "../webgpu-fft";
 
 /** Find the local peak in FFT magnitude near a clicked position with sub-pixel refinement. */
 function findFFTPeak(mag: Float32Array, width: number, height: number, col: number, row: number, radius: number): { row: number; col: number } {
@@ -766,6 +766,7 @@ function Show3D() {
 
   // FFT
   const [showFft, setShowFft] = useModelState<boolean>("show_fft");
+  const [fftWindow, setFftWindow] = useModelState<boolean>("fft_window");
   const [disabledTools, setDisabledTools] = useModelState<string[]>("disabled_tools");
   const [hiddenTools, setHiddenTools] = useModelState<string[]>("hidden_tools");
   const toolVisibility = React.useMemo(
@@ -1893,6 +1894,8 @@ function Show3D() {
         if (crop) {
           origCropW = crop.cropW;
           origCropH = crop.cropH;
+          // Apply Hann window to crop at native dimensions BEFORE zero-padding
+          if (fftWindow) applyHannWindow2D(crop.cropped, crop.cropW, crop.cropH);
           // Pad to next power-of-2 so fft2d doesn't truncate frequency data
           const padW = nextPow2(crop.cropW);
           const padH = nextPow2(crop.cropH);
@@ -1911,7 +1914,9 @@ function Show3D() {
       let real: Float32Array, imag: Float32Array;
 
       if (gpuReady && gpuFFTRef.current) {
-        const result = await gpuFFTRef.current.fft2D(inputData.slice(), new Float32Array(inputData.length), fftW, fftH, false);
+        const gpuReal = inputData.slice();
+        const gpuImag = new Float32Array(inputData.length);
+        const result = await gpuFFTRef.current.fft2D(gpuReal, gpuImag, fftW, fftH, false);
         real = result.real;
         imag = result.imag;
       } else {
@@ -1933,7 +1938,7 @@ function Show3D() {
     doCompute();
 
     return () => { cancelled = true; };
-  }, [effectiveShowFft, frameBytes, displaySliceIdx, width, height, gpuReady, roiFftActive, roiList, roiSelectedIdx]);
+  }, [effectiveShowFft, frameBytes, displaySliceIdx, width, height, gpuReady, roiFftActive, roiList, roiSelectedIdx, fftWindow]);
 
   // Clear FFT measurement when ROI FFT state changes
   React.useEffect(() => { setFftClickInfo(null); }, [roiFftActive, roiSelectedIdx]);
@@ -3728,6 +3733,12 @@ function Show3D() {
                   </Select>
                   <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted }}>Auto:</Typography>
                   <Switch checked={fftAuto} onChange={(e) => { if (!lockDisplay) setFftAuto(e.target.checked); }} disabled={lockDisplay} size="small" sx={switchStyles.small} />
+                  {fftCropDims && (
+                    <>
+                      <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted }}>Win:</Typography>
+                      <Switch checked={fftWindow} onChange={(e) => { if (!lockDisplay) setFftWindow(e.target.checked); }} disabled={lockDisplay} size="small" sx={switchStyles.small} />
+                    </>
+                  )}
                 </Box>
                 {/* Row 2: Color + Colorbar */}
                 <Box sx={{ ...controlRow, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>

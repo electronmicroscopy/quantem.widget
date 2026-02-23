@@ -166,6 +166,43 @@ export class WebGPUFFT {
 }
 
 // ============================================================================
+// FFT pre-processing helpers
+// ============================================================================
+
+/**
+ * Apply 2D Hann window in-place to reduce spectral leakage in ROI FFT.
+ *
+ * When an ROI is cropped from an image, the sharp rectangular boundary acts as
+ * a rect window whose sinc sidelobes produce streak artifacts in the FFT,
+ * obscuring real spectral features (Bragg spots, lattice frequencies).
+ * The Hann window smoothly tapers data to zero at all edges, suppressing
+ * sidelobes by ~31 dB at the cost of a slightly wider main lobe.
+ *
+ * Separable: window2D = outer(hann_h, hann_w), applied as element-wise multiply.
+ * Symmetric formula: w(i) = 0.5*(1 - cos(2πi/(N-1))), matching np.hanning —
+ * both endpoints are exactly zero for seamless transition to zero-padded regions.
+ * (Periodic variant ÷N is for overlapping STFT windows, not for zero-padding.)
+ *
+ * IMPORTANT: Must be called on the crop at its native dimensions BEFORE
+ * zero-padding to power-of-2. Window-then-pad ensures no discontinuity at the
+ * crop/pad boundary. Pad-then-window applies the wrong taper and reintroduces
+ * leakage. Validated against np.hanning in test_widget_show2d.py.
+ */
+export function applyHannWindow2D(data: Float32Array, width: number, height: number): void {
+  const hannW = new Float32Array(width);
+  const hannH = new Float32Array(height);
+  const wDenom = width > 1 ? width - 1 : 1;
+  const hDenom = height > 1 ? height - 1 : 1;
+  for (let i = 0; i < width; i++) hannW[i] = 0.5 * (1 - Math.cos((2 * Math.PI * i) / wDenom));
+  for (let i = 0; i < height; i++) hannH[i] = 0.5 * (1 - Math.cos((2 * Math.PI * i) / hDenom));
+  for (let r = 0; r < height; r++) {
+    const hr = hannH[r];
+    const offset = r * width;
+    for (let c = 0; c < width; c++) data[offset + c] *= hr * hannW[c];
+  }
+}
+
+// ============================================================================
 // FFT post-processing helpers
 // ============================================================================
 

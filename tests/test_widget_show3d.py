@@ -825,6 +825,7 @@ def test_show3d_state_dict_roundtrip():
     data = np.random.rand(10, 32, 32).astype(np.float32)
     w = Show3D(data, cmap="viridis", log_scale=True, auto_contrast=True,
                title="Stack", pixel_size=5.0, fps=15.0, show_fft=True,
+               fft_window=False,
                disabled_tools=["display", "navigation"], hidden_tools=["stats"])
     w.roi_active = True
     w.roi_list = [{"row": 10, "col": 15, "shape": "circle", "radius": 10, "radius_inner": 5, "width": 20, "height": 20, "color": "#4fc3f7", "line_width": 2, "highlight": False}]
@@ -837,6 +838,7 @@ def test_show3d_state_dict_roundtrip():
     assert w2.pixel_size == pytest.approx(5.0)
     assert w2.fps == pytest.approx(15.0)
     assert w2.show_fft is True
+    assert w2.fft_window is False
     assert w2.roi_active is True
     assert w2.roi_list[0]["row"] == 10
     assert w2.disabled_tools == ["display", "playback"]

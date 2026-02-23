@@ -279,17 +279,19 @@ def test_show4d_snap_toggle():
 def test_show4d_state_dict_roundtrip():
     data = np.random.rand(4, 4, 8, 8).astype(np.float32)
     w = Show4D(data, cmap="viridis", log_scale=True, title="4D Data",
-               snap_enabled=True, snap_radius=8,
+               snap_enabled=True, snap_radius=8, show_fft=True, fft_window=False,
                disabled_tools=["display"], hidden_tools=["roi"])
     sd = w.state_dict()
     assert "disabled_tools" in sd
     assert "hidden_tools" in sd
+    assert "fft_window" in sd
     w2 = Show4D(data, state=sd)
     assert w2.cmap == "viridis"
     assert w2.log_scale is True
     assert w2.title == "4D Data"
     assert w2.snap_enabled is True
     assert w2.snap_radius == 8
+    assert w2.fft_window is False
     assert w2.disabled_tools == ["display"]
     assert w2.hidden_tools == ["roi"]
 

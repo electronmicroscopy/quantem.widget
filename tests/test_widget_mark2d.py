@@ -878,7 +878,7 @@ def test_mark2d_state_dict_keys():
         "marker_shape", "marker_color", "dot_size", "max_points",
         "marker_border", "marker_opacity", "label_size", "label_color",
         "snap_enabled", "snap_radius", "cmap", "auto_contrast",
-        "log_scale", "show_fft", "show_stats", "show_controls",
+        "log_scale", "show_fft", "fft_window", "show_stats", "show_controls",
         "disabled_tools",
         "hidden_tools",
         "percentile_low", "percentile_high", "title",
@@ -893,7 +893,8 @@ def test_mark2d_state_dict_roundtrip():
                 marker_shape="star", marker_color="#00ff00", snap_enabled=True,
                 snap_radius=12, title="Test", pixel_size=2.5,
                 percentile_low=5.0, percentile_high=90.0, show_controls=False,
-                disabled_tools=["points", "roi"], hidden_tools=["display"])
+                disabled_tools=["points", "roi"], hidden_tools=["display"],
+                fft_window=False)
     w.add_roi(16, 16, shape="circle", radius=8)
     w.set_profile((0, 0), (31, 31))
 
@@ -914,6 +915,7 @@ def test_mark2d_state_dict_roundtrip():
     assert w2.show_controls is False
     assert w2.disabled_tools == ["points", "roi"]
     assert w2.hidden_tools == ["display"]
+    assert w2.fft_window is False
     assert len(w2.roi_list) == 1
     assert len(w2.profile_line) == 2
 

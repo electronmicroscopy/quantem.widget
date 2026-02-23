@@ -135,6 +135,7 @@ class Show4D(anywidget.AnyWidget):
     show_stats = traitlets.Bool(True).tag(sync=True)
     show_controls = traitlets.Bool(True).tag(sync=True)
     show_fft = traitlets.Bool(False).tag(sync=True)
+    fft_window = traitlets.Bool(True).tag(sync=True)
     disabled_tools = traitlets.List(traitlets.Unicode()).tag(sync=True)
     hidden_tools = traitlets.List(traitlets.Unicode()).tag(sync=True)
     percentile_low = traitlets.Float(0.5).tag(sync=True)
@@ -259,6 +260,7 @@ class Show4D(anywidget.AnyWidget):
         show_stats=True,
         show_controls=True,
         show_fft=False,
+        fft_window=True,
         nav_pixel_size=None,
         sig_pixel_size=None,
         nav_pixel_unit="px",
@@ -341,6 +343,7 @@ class Show4D(anywidget.AnyWidget):
         self.show_stats = show_stats
         self.show_controls = show_controls
         self.show_fft = show_fft
+        self.fft_window = fft_window
         self.percentile_low = percentile_low
         self.percentile_high = percentile_high
         self.snap_enabled = snap_enabled
@@ -539,6 +542,7 @@ class Show4D(anywidget.AnyWidget):
             "show_stats": self.show_stats,
             "show_controls": self.show_controls,
             "show_fft": self.show_fft,
+            "fft_window": self.fft_window,
             "disabled_tools": self.disabled_tools,
             "hidden_tools": self.hidden_tools,
             "percentile_low": self.percentile_low,
@@ -583,7 +587,12 @@ class Show4D(anywidget.AnyWidget):
         cmap = self.cmap
         scale = "log" if self.log_scale else "linear"
         contrast = "auto contrast" if self.auto_contrast else "manual contrast"
-        lines.append(f"Display:  {cmap} | {contrast} | {scale}")
+        display = f"{cmap} | {contrast} | {scale}"
+        if self.show_fft:
+            display += " | FFT"
+            if not self.fft_window:
+                display += " (no window)"
+        lines.append(f"Display:  {display}")
         if self.roi_mode != "off":
             lines.append(f"ROI:      {self.roi_mode} ({self.roi_reduce}) at ({self.roi_center_row:.1f}, {self.roi_center_col:.1f}) r={self.roi_radius:.1f}")
         if self.snap_enabled:

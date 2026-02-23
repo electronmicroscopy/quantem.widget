@@ -96,6 +96,7 @@ class ShowComplex2D(anywidget.AnyWidget):
     # UI
     show_stats = traitlets.Bool(True).tag(sync=True)
     show_fft = traitlets.Bool(False).tag(sync=True)
+    fft_window = traitlets.Bool(True).tag(sync=True)
     show_controls = traitlets.Bool(True).tag(sync=True)
     image_width_px = traitlets.Int(0).tag(sync=True)
     disabled_tools = traitlets.List(traitlets.Unicode()).tag(sync=True)
@@ -196,6 +197,7 @@ class ShowComplex2D(anywidget.AnyWidget):
         percentile_low: float = 1.0,
         percentile_high: float = 99.0,
         show_fft: bool = False,
+        fft_window: bool = True,
         show_stats: bool = True,
         show_controls: bool = True,
         scale_bar_visible: bool = True,
@@ -278,6 +280,7 @@ class ShowComplex2D(anywidget.AnyWidget):
         self.percentile_low = percentile_low
         self.percentile_high = percentile_high
         self.show_fft = show_fft
+        self.fft_window = fft_window
         self.show_stats = show_stats
         self.show_controls = show_controls
         self.scale_bar_visible = scale_bar_visible
@@ -550,6 +553,7 @@ class ShowComplex2D(anywidget.AnyWidget):
             "pixel_size": self.pixel_size,
             "scale_bar_visible": self.scale_bar_visible,
             "show_fft": self.show_fft,
+            "fft_window": self.fft_window,
             "show_stats": self.show_stats,
             "show_controls": self.show_controls,
             "image_width_px": self.image_width_px,
@@ -603,6 +607,8 @@ class ShowComplex2D(anywidget.AnyWidget):
         lines.append(f"Display:  {mode} | {cmap} | {contrast} | {scale}")
         if self.show_fft:
             lines[-1] += " | FFT"
+            if not self.fft_window:
+                lines[-1] += " (no window)"
         print("\n".join(lines))
 
     def __repr__(self) -> str:
