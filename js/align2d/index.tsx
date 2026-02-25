@@ -957,7 +957,7 @@ function Align2D() {
     const handleMouseMove = (e: MouseEvent) => {
       if (!resizeStart) return;
       const delta = Math.max(e.clientX - resizeStart.x, e.clientY - resizeStart.y);
-      latestSize = Math.max(150, Math.min(600, resizeStart.size + delta));
+      latestSize = Math.max(150, resizeStart.size + delta);
       if (!rafId) {
         rafId = requestAnimationFrame(() => {
           rafId = 0;

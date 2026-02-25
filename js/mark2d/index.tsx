@@ -2297,8 +2297,7 @@ const render = createRender(() => {
       if (!resizeStart) return;
       const delta = Math.max(e.clientX - resizeStart.x, e.clientY - resizeStart.y);
       const minSize = isGallery ? 100 : initialCanvasSizeRef.current;
-      const maxSize = isGallery ? 600 : 800;
-      latestSize = Math.max(minSize, Math.min(maxSize, resizeStart.size + delta));
+      latestSize = Math.max(minSize, resizeStart.size + delta);
       if (!rafId) {
         rafId = requestAnimationFrame(() => {
           rafId = 0;

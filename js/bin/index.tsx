@@ -1175,7 +1175,7 @@ function BinWidget() {
     const handleMouseMove = (e: MouseEvent) => {
       if (!resizeStart) return;
       const delta = Math.max(e.clientX - resizeStart.x, e.clientY - resizeStart.y);
-      setCanvasSize(Math.max(120, Math.min(600, resizeStart.size + delta)));
+      setCanvasSize(Math.max(120, resizeStart.size + delta));
     };
     const handleMouseUp = () => {
       setIsResizingCanvas(false);

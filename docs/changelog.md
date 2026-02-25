@@ -1,5 +1,10 @@
 # changelog
 
+## v0.0.11 (2026-02-25)
+
+### Shared
+- **canvas resize unlocked** — drag-resize on all widgets is no longer capped at 600–800px; resize as wide as your screen allows
+
 ## v0.0.10 (2026-02-25)
 
 ### Shared
