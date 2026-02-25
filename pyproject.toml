@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "quantem-widget"
-version = "0.0.9"
+version = "0.0.10a1"
 description = "Interactive custom Python widgets for electron microscopy"
 readme = "README.md"
 license = "MIT"
@@ -23,6 +23,10 @@ dependencies = [
     "anywidget>=0.9.0",
     "numpy>=2.0.0",
     "traitlets>=5.0.0",
+    "h5py>=3.0.0",
+    "hdf5plugin>=4.0.0",
+    "numba>=0.59.0",
+    "pyobjc-framework-Metal>=10.0; sys_platform == 'darwin'",
 ]
 
 [project.optional-dependencies]
