@@ -1375,7 +1375,7 @@ function Show3DVolume() {
     const handleMouseMove = (e: MouseEvent) => {
       if (!resizeStart) return;
       const delta = Math.max(e.clientX - resizeStart.x, e.clientY - resizeStart.y);
-      latestSize = Math.max(300, Math.min(800, resizeStart.size + delta));
+      latestSize = Math.max(300, resizeStart.size + delta);
       if (!rafId) {
         rafId = requestAnimationFrame(() => {
           rafId = 0;

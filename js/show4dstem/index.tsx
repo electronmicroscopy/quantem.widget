@@ -3338,7 +3338,7 @@ function Show4DSTEM() {
     const handleMouseMove = (e: MouseEvent) => {
       if (!resizeCanvasStart) return;
       const delta = Math.max(e.clientX - resizeCanvasStart.x, e.clientY - resizeCanvasStart.y);
-      latestSize = Math.max(CANVAS_SIZE, Math.min(800, resizeCanvasStart.size + delta));
+      latestSize = Math.max(CANVAS_SIZE, resizeCanvasStart.size + delta);
       if (!rafId) {
         rafId = requestAnimationFrame(() => {
           rafId = 0;
