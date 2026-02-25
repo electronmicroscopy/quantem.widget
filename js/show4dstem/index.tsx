@@ -1769,6 +1769,23 @@ function Show4DSTEM() {
       }
     }
 
+    // Pre-pad non-power-of-2 full images so fft2d doesn't truncate frequency data
+    if (!roiFftActive) {
+      const padW = nextPow2(width);
+      const padH = nextPow2(height);
+      if (padW !== width || padH !== height) {
+        const padded = new Float32Array(padW * padH);
+        for (let y = 0; y < height; y++) {
+          for (let x = 0; x < width; x++) {
+            padded[y * padW + x] = sourceData[y * width + x];
+          }
+        }
+        sourceData = padded;
+        width = padW;
+        height = padH;
+      }
+    }
+
     const fftW = width, fftH = height;
     if (gpuFFTRef.current && gpuReady) {
       const runGpuFFT = async () => {
@@ -1780,7 +1797,13 @@ function Show4DSTEM() {
         fftshift(fImag, fftW, fftH);
         fftRealRef.current = fReal;
         fftImagRef.current = fImag;
-        setFftCropDims(origCropW > 0 ? { cropWidth: origCropW, cropHeight: origCropH, fftWidth: fftW, fftHeight: fftH } : null);
+        if (origCropW > 0) {
+          setFftCropDims({ cropWidth: origCropW, cropHeight: origCropH, fftWidth: fftW, fftHeight: fftH });
+        } else if (fftW !== shapeCols || fftH !== shapeRows) {
+          setFftCropDims({ cropWidth: shapeCols, cropHeight: shapeRows, fftWidth: fftW, fftHeight: fftH });
+        } else {
+          setFftCropDims(null);
+        }
         setFftVersion(v => v + 1);
       };
       runGpuFFT();
@@ -1797,7 +1820,13 @@ function Show4DSTEM() {
       fftshift(imag, fftW, fftH);
       fftRealRef.current = real;
       fftImagRef.current = imag;
-      setFftCropDims(origCropW > 0 ? { cropWidth: origCropW, cropHeight: origCropH, fftWidth: fftW, fftHeight: fftH } : null);
+      if (origCropW > 0) {
+        setFftCropDims({ cropWidth: origCropW, cropHeight: origCropH, fftWidth: fftW, fftHeight: fftH });
+      } else if (fftW !== shapeCols || fftH !== shapeRows) {
+        setFftCropDims({ cropWidth: shapeCols, cropHeight: shapeRows, fftWidth: fftW, fftHeight: fftH });
+      } else {
+        setFftCropDims(null);
+      }
       setFftVersion(v => v + 1);
     }
   }, [virtualImageBytes, shapeRows, shapeCols, gpuReady, effectiveShowFft, roiFftActive, viRoiMode, viRoiCenterRow, viRoiCenterCol, viRoiRadius, viRoiWidth, viRoiHeight, fftWindow]);
@@ -1869,8 +1898,13 @@ function Show4DSTEM() {
     if (!ctx) return;
     const offscreen = fftOffscreenRef.current;
     if (!offscreen || !effectiveShowFft) { ctx.clearRect(0, 0, canvas.width, canvas.height); return; }
-    ctx.imageSmoothingEnabled = false;
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    const fftW = offscreen.width;
+    const fftH = offscreen.height;
+    const canvasW = canvas.width;
+    const canvasH = canvas.height;
+    // Use bilinear smoothing when FFT dims differ from canvas (non-pow2 padding or ROI crop)
+    ctx.imageSmoothingEnabled = fftW !== canvasW || fftH !== canvasH;
+    ctx.clearRect(0, 0, canvasW, canvasH);
     ctx.save();
     ctx.translate(fftPanX, fftPanY);
     ctx.scale(fftZoom, fftZoom);
@@ -4029,7 +4063,7 @@ function Show4DSTEM() {
           <Box sx={{ width: viCanvasWidth }}>
             {/* FFT Header */}
             <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: `${SPACING.XS}px`, height: 28 }}>
-              <Typography variant="caption" sx={{ ...typo.label, color: fftCropDims ? accentGreen : themeColors.textMuted }}>{fftCropDims ? `ROI FFT (${fftCropDims.cropWidth}\u00D7${fftCropDims.cropHeight})` : "FFT"}</Typography>
+              <Typography variant="caption" sx={{ ...typo.label, color: roiFftActive && fftCropDims ? accentGreen : themeColors.textMuted }}>{roiFftActive && fftCropDims ? `ROI FFT (${fftCropDims.cropWidth}\u00D7${fftCropDims.cropHeight})` : "FFT"}</Typography>
               <Stack direction="row" spacing={`${SPACING.SM}px`} alignItems="center">
                 {!hideView && (
                   <Button size="small" sx={compactButton} disabled={lockView || lockFft || (fftZoom === 1 && fftPanX === 0 && fftPanY === 0)} onClick={() => { if (!lockView && !lockFft) { setFftZoom(1); setFftPanX(0); setFftPanY(0); } }}>Reset</Button>

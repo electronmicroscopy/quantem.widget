@@ -14,6 +14,7 @@ import numpy as np
 import traitlets
 
 from quantem.widget.array_utils import to_numpy
+from quantem.widget.io import IOResult
 from quantem.widget.json_state import resolve_widget_version, save_state_file, unwrap_state_payload
 from quantem.widget.tool_parity import (
     bind_tool_runtime_api,
@@ -225,6 +226,14 @@ class ShowComplex2D(anywidget.AnyWidget):
     ):
         super().__init__(**kwargs)
         self.widget_version = resolve_widget_version()
+
+        # Check if data is an IOResult and extract metadata
+        if isinstance(data, IOResult):
+            if not title and data.title:
+                title = data.title
+            if pixel_size == 0.0 and data.pixel_size is not None:
+                pixel_size = data.pixel_size
+            data = data.data
 
         # Dataset duck typing
         _extracted_title = None

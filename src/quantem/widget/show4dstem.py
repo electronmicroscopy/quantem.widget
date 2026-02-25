@@ -28,6 +28,7 @@ import hashlib
 import json
 import math
 import pathlib
+import time
 from datetime import datetime, timezone
 from typing import Any, Self
 from uuid import uuid4
@@ -39,6 +40,7 @@ import traitlets
 
 from quantem.core.config import validate_device
 from quantem.widget.array_utils import to_numpy
+from quantem.widget.io import IOResult, _format_memory
 from quantem.widget.json_state import (
     build_json_header,
     resolve_widget_version,
@@ -414,11 +416,23 @@ class Show4DSTEM(anywidget.AnyWidget):
         show_fft: bool = False,
         fft_window: bool = True,
         show_controls: bool = True,
+        verbose: bool = True,
         state=None,
         **kwargs,
     ):
         super().__init__(**kwargs)
         self.widget_version = resolve_widget_version()
+        _t0 = time.perf_counter()
+        _verbose = verbose
+
+        # Check if data is an IOResult and extract metadata
+        _io_labels = None
+        if isinstance(data, IOResult):
+            if not title and data.title:
+                title = data.title
+            if data.labels:
+                _io_labels = data.labels
+            data = data.data
 
         # Extract calibration from Dataset4dstem if provided
         k_calibrated = False
@@ -491,29 +505,32 @@ class Show4DSTEM(anywidget.AnyWidget):
         # Convert to NumPy then PyTorch tensor using quantem device config
         data_np = to_numpy(data)
         device_str, _ = validate_device(None)  # Get device from quantem config
-        # MPS backend can't handle tensors >INT_MAX elements; fall back to CPU
-        # (still fast on Apple Silicon thanks to unified memory)
-        if data_np.size > 2**31 - 1 and device_str == "mps":
-            device_str = "cpu"
         self._device = torch.device(device_str)
-        self._data = torch.from_numpy(data_np.astype(np.float32)).to(self._device)
-        # Remove saturated hot pixels (65535 for uint16, 255 for uint8)
-        # Use torch.where instead of boolean indexing to avoid nonzero() INT_MAX limit
+        # Remove saturated hot pixels in numpy (before any torch conversion)
         saturated_value = 65535.0 if data_np.dtype == np.uint16 else 255.0 if data_np.dtype == np.uint8 else None
+        if data_np.dtype != np.float32:
+            _tc = time.perf_counter()
+            data_np = data_np.astype(np.float32)
+            if _verbose:
+                print(f"  astype float32: {time.perf_counter() - _tc:.2f}s")
         if saturated_value is not None:
-            self._data = torch.where(self._data >= saturated_value, torch.zeros(1, device=self._device), self._data)
-        # Handle flattened data — use self._data.shape (accounts for binning)
-        ndim = self._data.ndim
+            data_np[data_np >= saturated_value] = 0
+        # Handle dimensionality — 5D loads eagerly for instant frame switching
+        ndim = data_np.ndim
+        _tc = time.perf_counter()
         if ndim == 5:
-            self.n_frames = self._data.shape[0]
-            self._scan_shape = (self._data.shape[1], self._data.shape[2])
-            self._det_shape = (self._data.shape[3], self._data.shape[4])
+            self.n_frames = data_np.shape[0]
+            self._scan_shape = (data_np.shape[1], data_np.shape[2])
+            self._det_shape = (data_np.shape[3], data_np.shape[4])
+            if data_np.size > 2**31 - 1 and device_str == "mps":
+                self._device = torch.device("cpu")
+            self._data = torch.from_numpy(data_np).to(self._device)
         elif ndim == 3:
             self.n_frames = 1
             if scan_shape is not None:
                 self._scan_shape = scan_shape
             else:
-                n = self._data.shape[0]
+                n = data_np.shape[0]
                 side = int(n ** 0.5)
                 if side * side != n:
                     raise ValueError(
@@ -521,13 +538,24 @@ class Show4DSTEM(anywidget.AnyWidget):
                         f"Provide scan_shape explicitly."
                     )
                 self._scan_shape = (side, side)
-            self._det_shape = (self._data.shape[1], self._data.shape[2])
+            self._det_shape = (data_np.shape[1], data_np.shape[2])
+            # MPS backend can't handle tensors >INT_MAX elements; fall back to CPU
+            if data_np.size > 2**31 - 1 and device_str == "mps":
+                self._device = torch.device("cpu")
+            self._data = torch.from_numpy(data_np).to(self._device)
         elif ndim == 4:
             self.n_frames = 1
-            self._scan_shape = (self._data.shape[0], self._data.shape[1])
-            self._det_shape = (self._data.shape[2], self._data.shape[3])
+            self._scan_shape = (data_np.shape[0], data_np.shape[1])
+            self._det_shape = (data_np.shape[2], data_np.shape[3])
+            if data_np.size > 2**31 - 1 and device_str == "mps":
+                self._device = torch.device("cpu")
+            self._data = torch.from_numpy(data_np).to(self._device)
         else:
             raise ValueError(f"Expected 3D, 4D, or 5D array, got {ndim}D")
+        if _verbose:
+            if str(self._device) == "mps":
+                torch.mps.synchronize()
+            print(f"  to {self._device}: {time.perf_counter() - _tc:.2f}s ({data_np.nbytes / 1e9:.1f} GB)")
 
         self.shape_rows = self._scan_shape[0]
         self.shape_cols = self._scan_shape[1]
@@ -538,9 +566,12 @@ class Show4DSTEM(anywidget.AnyWidget):
         self.pos_col = self.shape_cols // 2
         # Frame dimension label (for 5D time/tilt series UI)
         self.frame_dim_label = frame_dim_label if frame_dim_label is not None else "Frame"
-        # Precompute global range for consistent scaling (hot pixels already removed)
-        self.dp_global_min = max(float(self._data.min()), MIN_LOG_VALUE)
-        self.dp_global_max = float(self._data.max())
+        # Store per-frame labels from IOResult (e.g. master file stems)
+        self._frame_labels = _io_labels if _io_labels else []
+        # Histogram axis range — first frame is enough (JS does per-frame percentile clipping)
+        first_frame = self._data[0] if self._data.ndim == 5 else self._data
+        self.dp_global_min = max(float(first_frame.min()), MIN_LOG_VALUE)
+        self.dp_global_max = float(first_frame.max())
         # Cache coordinate tensors for mask creation (avoid repeated torch.arange)
         self._det_row_coords = torch.arange(self.det_rows, device=self._device, dtype=torch.float32)[:, None]
         self._det_col_coords = torch.arange(self.det_cols, device=self._device, dtype=torch.float32)[None, :]
@@ -569,7 +600,10 @@ class Show4DSTEM(anywidget.AnyWidget):
             self.center_row = float(self.det_rows / 2)
             self.bf_radius = det_size * DEFAULT_BF_RATIO
             # Auto-detect center and bf_radius from the data
+            _tc = time.perf_counter()
             self.auto_detect_center(update_roi=False)
+            if _verbose:
+                print(f"  auto_detect_center: {time.perf_counter() - _tc:.2f}s")
 
         # Pre-compute and cache common virtual images (BF, ABF, ADF)
         # Each cache stores (bytes, stats) tuple
@@ -597,8 +631,11 @@ class Show4DSTEM(anywidget.AnyWidget):
         self.roi_active = True
         
         # Compute initial virtual image and frame
+        _tc = time.perf_counter()
         self._compute_virtual_image_from_roi()
         self._update_frame()
+        if _verbose:
+            print(f"  virtual image + frame: {time.perf_counter() - _tc:.2f}s")
         
         # Path animation: observe index changes from frontend
         self.observe(self._on_path_index_change, names=["path_index"])
@@ -634,19 +671,27 @@ class Show4DSTEM(anywidget.AnyWidget):
                 state = unwrap_state_payload(state)
             self.load_state_dict(state)
 
+        if _verbose:
+            shape = "x".join(str(s) for s in self._data.shape)
+            print(f"Show4DSTEM: {shape} {self._device}, {time.perf_counter() - _t0:.2f}s total")
+
     def set_image(self, data, scan_shape=None):
         """Replace the 4D-STEM data. Preserves all display and ROI settings."""
         if hasattr(data, "sampling") and hasattr(data, "array"):
             data = data.array
         data_np = to_numpy(data)
-        self._data = torch.from_numpy(data_np.astype(np.float32)).to(self._device)
         saturated_value = 65535.0 if data_np.dtype == np.uint16 else 255.0 if data_np.dtype == np.uint8 else None
+        if data_np.dtype != np.float32:
+            data_np = data_np.astype(np.float32)
         if saturated_value is not None:
-            self._data[self._data >= saturated_value] = 0
+            data_np[data_np >= saturated_value] = 0
         if data_np.ndim == 5:
             self.n_frames = data_np.shape[0]
             self._scan_shape = (data_np.shape[1], data_np.shape[2])
             self._det_shape = (data_np.shape[3], data_np.shape[4])
+            if data_np.size > 2**31 - 1 and str(self._device) == "mps":
+                self._device = torch.device("cpu")
+            self._data = torch.from_numpy(data_np).to(self._device)
         elif data_np.ndim == 3:
             self.n_frames = 1
             if scan_shape is not None:
@@ -658,10 +703,12 @@ class Show4DSTEM(anywidget.AnyWidget):
                     raise ValueError(f"Cannot infer square scan_shape from N={n}. Provide scan_shape explicitly.")
                 self._scan_shape = (side, side)
             self._det_shape = (data_np.shape[1], data_np.shape[2])
+            self._data = torch.from_numpy(data_np).to(self._device)
         elif data_np.ndim == 4:
             self.n_frames = 1
             self._scan_shape = (data_np.shape[0], data_np.shape[1])
             self._det_shape = (data_np.shape[2], data_np.shape[3])
+            self._data = torch.from_numpy(data_np).to(self._device)
         else:
             raise ValueError(f"Expected 3D, 4D, or 5D array, got {data_np.ndim}D")
         self.frame_idx = 0
@@ -669,8 +716,9 @@ class Show4DSTEM(anywidget.AnyWidget):
         self.shape_cols = self._scan_shape[1]
         self.det_rows = self._det_shape[0]
         self.det_cols = self._det_shape[1]
-        self.dp_global_min = max(float(self._data.min()), MIN_LOG_VALUE)
-        self.dp_global_max = float(self._data.max())
+        first_frame = self._data[0] if self._data.ndim == 5 else self._data
+        self.dp_global_min = max(float(first_frame.min()), MIN_LOG_VALUE)
+        self.dp_global_max = float(first_frame.max())
         self._det_row_coords = torch.arange(self.det_rows, device=self._device, dtype=torch.float32)[:, None]
         self._det_col_coords = torch.arange(self.det_cols, device=self._device, dtype=torch.float32)[None, :]
         self._scan_row_coords = torch.arange(self.shape_rows, device=self._device, dtype=torch.float32)[:, None]
@@ -787,6 +835,33 @@ class Show4DSTEM(anywidget.AnyWidget):
             self.pos_row = int(max(0, min(row, self.shape_rows - 1)))
             self.pos_col = int(max(0, min(col, self.shape_cols - 1)))
 
+    def free(self):
+        """Free GPU memory held by this widget.
+
+        Deletes the internal data tensor, runs garbage collection, and
+        flushes the MPS allocator cache. Call this before loading a new
+        dataset to avoid running out of GPU memory.
+
+        Examples
+        --------
+        >>> w.free()          # release ~9 GB of MPS memory
+        >>> del result        # free the source numpy array
+        """
+        import gc
+
+        device = str(self._device) if hasattr(self, "_device") else ""
+        nbytes = self._data.nbytes if hasattr(self._data, "nbytes") else 0
+        self._data = None
+        gc.collect()
+        if device == "mps":
+            try:
+                import torch
+                torch.mps.empty_cache()
+            except Exception:
+                pass
+        if nbytes > 0:
+            print(f"freed {_format_memory(nbytes)} ({device})")
+
     def summary(self):
         name = self.title if self.title else "Show4DSTEM"
         lines = [name, "═" * 32]
@@ -800,6 +875,11 @@ class Show4DSTEM(anywidget.AnyWidget):
             if self.frame_boomerang:
                 parts.append("bounce")
             lines.append(f"Frames:   {' | '.join(parts)}")
+            if self._frame_labels:
+                if len(self._frame_labels) <= 4:
+                    lines.append(f"Labels:   {self._frame_labels}")
+                else:
+                    lines.append(f"Labels:   {self._frame_labels[:3]} ... ({len(self._frame_labels)} total)")
         lines.append(f"Scan:     {self.shape_rows}×{self.shape_cols} ({self.pixel_size:.2f} Å/px)")
         k_unit = "mrad" if self.k_calibrated else "px"
         lines.append(f"Detector: {self.det_rows}×{self.det_cols} ({self.k_pixel_size:.4f} {k_unit}/px)")

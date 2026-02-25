@@ -512,7 +512,7 @@ def test_show2d_from_png_folder_gallery(tmp_path):
 
     widget = Show2D.from_folder(folder, file_type="png")
     assert widget.n_images == 3
-    assert widget.labels[0] == "slice_00.png"
+    assert widget.labels[0] == "slice_00"
 
     widget2 = Show2D.from_folder(folder, file_type="png", mode="mean")
     assert widget2.n_images == 1
@@ -559,20 +559,22 @@ def test_show2d_from_mixed_folder_explicit_type(tmp_path):
 
     png_widget = Show2D.from_folder(folder, file_type="png")
     assert png_widget.n_images == 1
-    assert png_widget.labels == ["a.png"]
+    assert png_widget.labels == ["a"]
 
     tiff_widget = Show2D.from_folder(folder, file_type="tiff")
     assert tiff_widget.n_images == 2
     assert tiff_widget.labels[0].startswith("b[0]")
 
-def test_show2d_rejects_dataset_path_for_non_emd(tmp_path):
+def test_show2d_ignores_dataset_path_for_non_emd(tmp_path):
     from PIL import Image
 
     path = tmp_path / "img.png"
     Image.fromarray((np.ones((8, 6), dtype=np.uint8) * 33)).save(path)
 
-    with pytest.raises(ValueError, match="dataset_path is only supported"):
-        Show2D.from_path(path, dataset_path="/data/signal")
+    # dataset_path is silently ignored for non-HDF5 files (IO.read handles this)
+    w = Show2D.from_path(path, dataset_path="/data/signal")
+    assert w.height == 8
+    assert w.width == 6
 
 def test_show2d_from_path_rejects_file_type_for_file(tmp_path):
     from PIL import Image

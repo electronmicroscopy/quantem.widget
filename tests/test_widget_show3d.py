@@ -921,7 +921,7 @@ def test_show3d_from_png_folder_explicit(tmp_path):
     assert widget.n_slices == 3
     assert widget.height == 8
     assert widget.width == 6
-    assert widget.labels[0] == "slice_00.png"
+    assert widget.labels[0] == "slice_00"
 
 def test_show3d_from_path_folder_requires_explicit_file_type(tmp_path):
     from PIL import Image
@@ -1013,7 +1013,7 @@ def test_show3d_from_path_mixed_folder_explicit_png(tmp_path):
 
     widget = Show3D.from_folder(folder, file_type="png")
     assert widget.n_slices == 1
-    assert widget.labels == ["a.png"]
+    assert widget.labels == ["a"]
     assert widget.data_min == pytest.approx(11.0)
     assert widget.data_max == pytest.approx(11.0)
 

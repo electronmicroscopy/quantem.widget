@@ -10,7 +10,6 @@ from quantem.widget import (
     Bin,
     Edit2D,
     Mark2D,
-    Merge4DSTEM,
     Show2D,
     Show3D,
     Show3DVolume,
@@ -43,7 +42,6 @@ def test_tool_parity_ci_gate_has_no_errors():
         (lambda: Edit2D(np.random.rand(8, 8).astype(np.float32)), "edit"),
         (lambda: Align2D(np.random.rand(8, 8).astype(np.float32), np.random.rand(8, 8).astype(np.float32)), "alignment"),
         (lambda: Bin(np.random.rand(4, 4, 8, 8).astype(np.float32)), "binning"),
-        (lambda: Merge4DSTEM([np.random.rand(4, 4, 8, 8).astype(np.float32), np.random.rand(4, 4, 8, 8).astype(np.float32)]), "sources"),
     ],
 )
 def test_runtime_tool_api_methods(factory, group):

@@ -251,20 +251,6 @@ Bin
      - .. image:: /_static/catalog/bin_default_dark.png
           :alt: Bin Default (dark)
 
-Merge4DSTEM
------------
-
-**Merge4DSTEM Default**
-
-.. list-table::
-   :widths: 50 50
-   :header-rows: 0
-
-   * - .. image:: /_static/catalog/merge4dstem_default_light.png
-          :alt: Merge4DSTEM Default (light)
-     - .. image:: /_static/catalog/merge4dstem_default_dark.png
-          :alt: Merge4DSTEM Default (dark)
-
 Tool Lock/Hide Demos
 --------------------
 

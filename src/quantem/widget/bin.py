@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import math
 import pathlib
+import time
 
 from typing import Self
 
@@ -20,7 +21,9 @@ import numpy as np
 import traitlets
 
 from quantem.widget.array_utils import to_numpy
+from quantem.widget.io import IOResult
 from quantem.widget.json_state import build_json_header, resolve_widget_version, save_state_file, unwrap_state_payload
+from quantem.widget.bin_batch import _bin_axis_torch as _bin_axis_standalone, _binned_axis_shape
 from quantem.widget.tool_parity import (
     bind_tool_runtime_api,
     build_tool_groups,
@@ -33,6 +36,19 @@ try:
     _HAS_TORCH = True
 except ImportError:
     _HAS_TORCH = False
+
+try:
+    import h5py
+
+    _HAS_H5PY = True
+except ImportError:
+    h5py = None  # type: ignore[assignment]
+    _HAS_H5PY = False
+
+try:
+    import hdf5plugin  # noqa: F401 — registers bitshuffle/LZ4 HDF5 filters
+except ImportError:
+    pass
 
 try:
     from quantem.core.config import validate_device
@@ -79,6 +95,80 @@ def _qc_stats_torch(image) -> list[float]:
     p99 = float(q[1])
     contrast = float((p99 - p1) / (abs(p99) + abs(p1) + 1e-12))
     return [mean, amin, amax, std, snr, contrast]
+
+
+def _discover_arina_chunks(master_path):
+    """Parse a Dectris arina master HDF5 and return chunk metadata.
+
+    Parameters
+    ----------
+    master_path : str or pathlib.Path
+        Path to the ``*_master.h5`` file.
+
+    Returns
+    -------
+    dict
+        Keys: ``chunks`` (list of (file_path, dataset_path, n_frames)),
+        ``total_frames``, ``det_rows``, ``det_cols``,
+        ``beam_center_x``, ``beam_center_y``, ``ntrigger``.
+    """
+    master_path = pathlib.Path(master_path).resolve()
+    master_dir = master_path.parent
+    chunks = []
+    total_frames = 0
+    det_rows = None
+    det_cols = None
+    with h5py.File(master_path, "r") as f:
+        data_group = f["/entry/data"]
+        for key in sorted(data_group.keys()):
+            link = data_group.get(key, getlink=True)
+            if isinstance(link, h5py.ExternalLink):
+                chunk_file = str(master_dir / link.filename)
+                chunk_ds_path = link.path
+            else:
+                chunk_file = str(master_path)
+                chunk_ds_path = f"/entry/data/{key}"
+            with h5py.File(chunk_file, "r") as cf:
+                ds = cf[chunk_ds_path]
+                n_frames = int(ds.shape[0])
+                if det_rows is None and ds.ndim >= 3:
+                    det_rows = int(ds.shape[1])
+                    det_cols = int(ds.shape[2])
+            total_frames += n_frames
+            chunks.append((chunk_file, chunk_ds_path, n_frames))
+        beam_center_x = None
+        beam_center_y = None
+        ntrigger = None
+        det = f.get("/entry/instrument/detector")
+        if det is not None:
+            if "beam_center_x" in det:
+                beam_center_x = float(np.asarray(det["beam_center_x"]))
+            if "beam_center_y" in det:
+                beam_center_y = float(np.asarray(det["beam_center_y"]))
+            spec = det.get("detectorSpecific")
+            if spec is not None and "ntrigger" in spec:
+                ntrigger = int(np.asarray(spec["ntrigger"]))
+    return {
+        "chunks": chunks,
+        "total_frames": total_frames,
+        "det_rows": det_rows,
+        "det_cols": det_cols,
+        "beam_center_x": beam_center_x,
+        "beam_center_y": beam_center_y,
+        "ntrigger": ntrigger,
+    }
+
+
+def _is_arina_master(h5f):
+    """Return True if the open HDF5 file looks like a Dectris arina master."""
+    if "/entry/data" not in h5f:
+        return False
+    data_group = h5f["/entry/data"]
+    for key in data_group.keys():
+        link = data_group.get(key, getlink=True)
+        if isinstance(link, h5py.ExternalLink):
+            return True
+    return False
 
 
 class Bin(anywidget.AnyWidget):
@@ -367,6 +457,12 @@ class Bin(anywidget.AnyWidget):
         self.adf_inner_ratio = float(adf_inner_ratio)
         self.adf_outer_ratio = float(adf_outer_ratio)
 
+        # Check if data is an IOResult and extract metadata
+        if isinstance(data, IOResult):
+            if not title and data.title:
+                title = data.title
+            data = data.data
+
         # Dataset-like duck typing: `array`, `sampling`, `units`
         dataset_pixel: float | tuple[float, float] | None = None
         dataset_k: float | tuple[float, float] | None = None
@@ -540,6 +636,473 @@ class Bin(anywidget.AnyWidget):
             self.load_state_dict(state)
 
     # ------------------------------------------------------------------
+    # Alternative constructors
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def file_info(cls, path, det_bin_row=2, det_bin_col=2, edge_mode="crop"):
+        """Print file summary without loading data.
+
+        Parameters
+        ----------
+        path : str or pathlib.Path
+            Path to a master or saved HDF5 file.
+        det_bin_row : int
+            Detector row binning factor (for estimating binned size).
+        det_bin_col : int
+            Detector column binning factor (for estimating binned size).
+        edge_mode : {"crop", "pad", "error"}
+            Edge handling (for estimating binned size).
+        """
+        if not _HAS_H5PY:
+            raise ImportError("h5py is required. Install: pip install h5py")
+        path = pathlib.Path(path).resolve()
+        disk_bytes = path.stat().st_size
+        disk_gb = disk_bytes / 1_000_000_000.0
+        with h5py.File(path, "r") as f:
+            is_arina = _is_arina_master(f)
+        if is_arina:
+            info = _discover_arina_chunks(path)
+            total = info["total_frames"]
+            det_r, det_c = info["det_rows"], info["det_cols"]
+            side = int(math.isqrt(total))
+            scan_r, scan_c = (side, side) if side * side == total else (total, 1)
+            raw_gb = total * det_r * det_c * 2 / 1e9  # uint16
+            binned_det_r, _ = _binned_axis_shape(det_r, det_bin_row, edge_mode, axis=0)
+            binned_det_c, _ = _binned_axis_shape(det_c, det_bin_col, edge_mode, axis=1)
+            mem_gb = scan_r * scan_c * binned_det_r * binned_det_c * 4 / 1e9
+            # sum chunk file sizes (master file itself is tiny)
+            chunk_paths = {c[0] for c in info["chunks"]}
+            disk_gb = sum(pathlib.Path(p).stat().st_size for p in chunk_paths) / 1e9
+            lines = [
+                f"File:      {path.name}",
+                f"Format:    Dectris arina master ({len(info['chunks'])} chunks)",
+                f"Disk:      {disk_gb:.2f} GB (bitshuffle+LZ4, {len(chunk_paths)} files)",
+                f"Raw:       {raw_gb:.1f} GB (uint16 uncompressed)",
+                f"Scan:      {scan_r} x {scan_c} ({total:,} frames)",
+                f"Detector:  {det_r} x {det_c}",
+                f"Binned:    {scan_r} x {scan_c} x {binned_det_r} x {binned_det_c} (det {det_bin_row}x{det_bin_col})",
+                f"Memory:    {mem_gb:.1f} GB (float32 after binning)",
+            ]
+        else:
+            with h5py.File(path, "r") as f:
+                ds = f["data"]
+                shape = tuple(int(v) for v in ds.shape)
+                mem_gb = np.prod(shape) * 4 / 1e9
+            lines = [
+                f"File:      {path.name}",
+                f"Format:    Saved binned HDF5",
+                f"Disk:      {disk_gb:.2f} GB (bitshuffle+LZ4)",
+                f"Shape:     {shape}",
+                f"Memory:    {mem_gb:.1f} GB (float32)",
+            ]
+        print("\n".join(lines))
+
+    @classmethod
+    def from_file(
+        cls,
+        path,
+        scan_shape=None,
+        det_bin_row=2,
+        det_bin_col=2,
+        bin_mode="mean",
+        edge_mode="crop",
+        frames_per_batch=1000,
+        pixel_size=None,
+        k_pixel_size=None,
+        center=None,
+        title="",
+        device=None,
+        **kwargs,
+    ) -> "Bin":
+        """Load an HDF5 file into a Bin widget.
+
+        Auto-detects the file format:
+
+        - **Dectris arina master** (``*_master.h5`` with external-link chunks):
+          streams frames in small batches, bins detector axes on the fly, and
+          assembles only the binned result in memory.
+        - **Saved binned file** (written by :meth:`save_h5`): loads the 4D
+          dataset and calibration directly — no re-binning needed.
+
+        Parameters
+        ----------
+        path : str or pathlib.Path
+            Path to the HDF5 file.
+        scan_shape : tuple[int, int], optional
+            Scan grid ``(rows, cols)``. Inferred as square if omitted.
+            Ignored when loading a saved binned file.
+        det_bin_row : int
+            Detector row binning factor (arina path only).
+        det_bin_col : int
+            Detector column binning factor (arina path only).
+        bin_mode : {"mean", "sum"}
+            Reduction mode for binning (arina path only).
+        edge_mode : {"crop", "pad", "error"}
+            How non-divisible detector edges are handled (arina path only).
+        frames_per_batch : int
+            Frames read per I/O batch (arina path only).
+        pixel_size : float or tuple[float, float], optional
+            Real-space sampling in Å/px. Overrides saved calibration.
+        k_pixel_size : float or tuple[float, float], optional
+            Detector sampling in mrad/px. Overrides saved calibration.
+        center : tuple[float, float], optional
+            Detector center ``(row, col)``. Overrides saved calibration.
+        title : str
+            Widget title.
+        device : str, optional
+            Torch device.
+        **kwargs
+            Forwarded to widget init (``cmap``, ``log_scale``, etc.).
+
+        Returns
+        -------
+        Bin
+            Widget ready for interactive exploration.
+        """
+        if not _HAS_H5PY:
+            raise ImportError("h5py is required for Bin.from_file(). Install: pip install h5py")
+        if not _HAS_TORCH:
+            raise ImportError("torch is required for Bin.from_file()")
+
+        path = pathlib.Path(path).resolve()
+
+        # -- auto-detect format ------------------------------------------------
+        with h5py.File(path, "r") as probe:
+            is_arina = _is_arina_master(probe)
+
+        if is_arina:
+            return cls._from_arina(
+                path,
+                scan_shape=scan_shape,
+                det_bin_row=det_bin_row,
+                det_bin_col=det_bin_col,
+                bin_mode=bin_mode,
+                edge_mode=edge_mode,
+                frames_per_batch=frames_per_batch,
+                pixel_size=pixel_size,
+                k_pixel_size=k_pixel_size,
+                center=center,
+                title=title,
+                device=device,
+                **kwargs,
+            )
+        return cls._from_binned_h5(
+            path,
+            pixel_size=pixel_size,
+            k_pixel_size=k_pixel_size,
+            center=center,
+            title=title,
+            device=device,
+            **kwargs,
+        )
+
+    @classmethod
+    def _from_binned_h5(cls, path, pixel_size=None, k_pixel_size=None,
+                        center=None, title="", device=None, **kwargs):
+        """Load a saved binned HDF5 (written by :meth:`save_h5`).
+
+        Uses the same zero-copy construction as ``_from_arina`` to avoid
+        doubling memory for large datasets.
+        """
+        t0 = time.time()
+        with h5py.File(path, "r") as f:
+            ds = f["data"]
+            data_np = np.asarray(ds, dtype=np.float32)
+            attrs = dict(ds.attrs)
+        elapsed = time.time() - t0
+        print(f"  Loaded {path.name}: {data_np.shape} in {elapsed:.1f}s")
+
+        scan_r, scan_c = int(data_np.shape[0]), int(data_np.shape[1])
+        det_r, det_c = int(data_np.shape[2]), int(data_np.shape[3])
+
+        # calibration from file, overridable by explicit kwargs
+        if pixel_size is None and "pixel_size_row" in attrs:
+            pixel_size = (float(attrs["pixel_size_row"]), float(attrs["pixel_size_col"]))
+        if k_pixel_size is None and "k_pixel_size_row" in attrs:
+            k_pixel_size = (float(attrs["k_pixel_size_row"]), float(attrs["k_pixel_size_col"]))
+        if center is None and "center_row" in attrs:
+            center = (float(attrs["center_row"]), float(attrs["center_col"]))
+        if not title and "title" in attrs:
+            title = str(attrs["title"])
+
+        pixel_unit = str(attrs.get("pixel_unit", "px"))
+        k_unit = str(attrs.get("k_unit", "px"))
+
+        # resolve device
+        numel = int(data_np.size)
+        if device is not None:
+            device_str = str(device).strip().lower()
+        elif _HAS_VALIDATE_DEVICE:
+            device_str, _ = validate_device(None)
+        else:
+            device_str = (
+                "mps"
+                if torch.backends.mps.is_available()
+                else "cuda"
+                if torch.cuda.is_available()
+                else "cpu"
+            )
+        if device_str == "mps" and numel > 2**31 - 1:
+            device_str = "cpu"
+        torch.zeros(1, device=torch.device(device_str))
+
+        # numpy → torch without an extra copy (from_numpy shares memory on cpu)
+        data_torch = torch.from_numpy(data_np)
+        if device_str != "cpu":
+            data_torch = data_torch.to(torch.device(device_str))
+
+        # build widget directly — same pattern as _from_arina
+        cmap = kwargs.pop("cmap", "inferno")
+        log_scale = kwargs.pop("log_scale", False)
+        show_controls = kwargs.pop("show_controls", True)
+        bf_radius_ratio = float(kwargs.pop("bf_radius_ratio", 0.125))
+        adf_inner_ratio = float(kwargs.pop("adf_inner_ratio", 0.30))
+        adf_outer_ratio = float(kwargs.pop("adf_outer_ratio", 0.45))
+
+        inst = cls.__new__(cls)
+        anywidget.AnyWidget.__init__(inst, **kwargs)
+        inst.widget_version = resolve_widget_version()
+        inst.bin_mode = "mean"
+        inst.edge_mode = "crop"
+        inst.title = title
+        inst.cmap = cmap
+        inst.log_scale = log_scale
+        inst.show_controls = show_controls
+        inst.bf_radius_ratio = bf_radius_ratio
+        inst.adf_inner_ratio = adf_inner_ratio
+        inst.adf_outer_ratio = adf_outer_ratio
+
+        # calibration
+        p_row, p_col = _as_pair(pixel_size, 1.0)
+        k_row, k_col = _as_pair(k_pixel_size, 1.0)
+        inst.pixel_size_row = p_row
+        inst.pixel_size_col = p_col
+        inst.pixel_unit = pixel_unit if pixel_unit != "px" else ("Å" if pixel_size is not None else "px")
+        inst.pixel_calibrated = pixel_unit != "px" or pixel_size is not None
+        inst.k_pixel_size_row = k_row
+        inst.k_pixel_size_col = k_col
+        inst.k_unit = k_unit if k_unit != "px" else ("mrad" if k_pixel_size is not None else "px")
+        inst.k_calibrated = k_unit != "px" or k_pixel_size is not None
+
+        inst.scan_rows = scan_r
+        inst.scan_cols = scan_c
+        inst.det_rows = det_r
+        inst.det_cols = det_c
+
+        inst._device = torch.device(device_str)
+        inst._data_torch = data_torch
+        inst.device = device_str
+
+        inst.max_scan_bin_row = max(1, scan_r)
+        inst.max_scan_bin_col = max(1, scan_c)
+        inst.max_det_bin_row = max(1, det_r)
+        inst.max_det_bin_col = max(1, det_c)
+
+        if center is not None:
+            inst.center_row = float(center[0])
+            inst.center_col = float(center[1])
+        else:
+            inst.center_row = det_r / 2.0
+            inst.center_col = det_c / 2.0
+
+        inst._binned_data_torch = inst._data_torch
+        inst._original_bf_torch = torch.zeros((scan_r, scan_c), dtype=torch.float32)
+        inst._original_adf_torch = torch.zeros((scan_r, scan_c), dtype=torch.float32)
+        inst._binned_bf_torch = torch.zeros((scan_r, scan_c), dtype=torch.float32)
+        inst._binned_adf_torch = torch.zeros((scan_r, scan_c), dtype=torch.float32)
+
+        inst.observe(
+            inst._on_params_changed,
+            names=[
+                "scan_bin_row", "scan_bin_col", "det_bin_row", "det_bin_col",
+                "bin_mode", "edge_mode", "center_row", "center_col",
+                "bf_radius_ratio", "adf_inner_ratio", "adf_outer_ratio",
+            ],
+        )
+        inst.observe(inst._on_position_changed, names=["_scan_position"])
+        inst.observe(inst._on_npy_export, names=["_npy_export_requested"])
+
+        inst.disabled_tools = cls._build_disabled_tools()
+        inst.hidden_tools = cls._build_hidden_tools()
+        inst._recompute_previews()
+        return inst
+
+    @classmethod
+    def _from_arina(cls, path, scan_shape=None, det_bin_row=2, det_bin_col=2,
+                    bin_mode="mean", edge_mode="crop", frames_per_batch=1000,
+                    pixel_size=None, k_pixel_size=None, center=None,
+                    title="", device=None, **kwargs):
+        """Stream arina master HDF5, bin detector axes on the fly."""
+        # -- discover chunks --------------------------------------------------
+        info = _discover_arina_chunks(path)
+        chunks = info["chunks"]
+        total_frames = info["total_frames"]
+        det_r = info["det_rows"]
+        det_c = info["det_cols"]
+
+        # -- scan shape --------------------------------------------------------
+        if scan_shape is None:
+            side = int(math.isqrt(total_frames))
+            if side * side != total_frames:
+                raise ValueError(
+                    f"Cannot infer square scan_shape from {total_frames} frames. "
+                    f"Provide scan_shape=(rows, cols)."
+                )
+            scan_shape = (side, side)
+        scan_r, scan_c = int(scan_shape[0]), int(scan_shape[1])
+
+        # -- binned detector shape ---------------------------------------------
+        binned_det_r, _ = _binned_axis_shape(det_r, det_bin_row, edge_mode, axis=0)
+        binned_det_c, _ = _binned_axis_shape(det_c, det_bin_col, edge_mode, axis=1)
+
+        # -- resolve torch device ----------------------------------------------
+        numel = scan_r * scan_c * binned_det_r * binned_det_c
+        if device is not None:
+            device_str = str(device).strip().lower()
+        elif _HAS_VALIDATE_DEVICE:
+            device_str, _ = validate_device(None)
+        else:
+            device_str = (
+                "mps"
+                if torch.backends.mps.is_available()
+                else "cuda"
+                if torch.cuda.is_available()
+                else "cpu"
+            )
+        if device_str == "mps" and numel > 2**31 - 1:
+            device_str = "cpu"
+        torch.zeros(1, device=torch.device(device_str))
+
+        # -- pre-allocate output -----------------------------------------------
+        output = torch.zeros(
+            (scan_r, scan_c, binned_det_r, binned_det_c),
+            dtype=torch.float32,
+            device=torch.device(device_str),
+        )
+
+        # -- stream chunks & bin detector axes ---------------------------------
+        frame_idx = 0
+        t0 = time.time()
+        for chunk_file, chunk_ds_path, chunk_n_frames in chunks:
+            with h5py.File(chunk_file, "r") as cf:
+                ds = cf[chunk_ds_path]
+                for batch_start in range(0, chunk_n_frames, frames_per_batch):
+                    batch_end = min(batch_start + frames_per_batch, chunk_n_frames)
+                    batch = torch.from_numpy(
+                        np.asarray(ds[batch_start:batch_end], dtype=np.float32)
+                    )
+                    # bin detector rows (axis 1) then cols (axis 2)
+                    binned = _bin_axis_standalone(batch, axis=1, factor=det_bin_row, mode=bin_mode, edge=edge_mode)
+                    binned = _bin_axis_standalone(binned, axis=2, factor=det_bin_col, mode=bin_mode, edge=edge_mode)
+                    # scatter into output using vectorized indexing
+                    n_batch = binned.shape[0]
+                    gi = torch.arange(frame_idx, frame_idx + n_batch, dtype=torch.long)
+                    rows = gi // scan_c
+                    cols = gi % scan_c
+                    mask = rows < scan_r
+                    if mask.any():
+                        output[rows[mask], cols[mask]] = binned[mask].to(device=output.device)
+                    frame_idx += n_batch
+                    elapsed = time.time() - t0
+                    pct = frame_idx / total_frames * 100
+                    fps = frame_idx / max(elapsed, 1e-6)
+                    remaining = (total_frames - frame_idx) / max(fps, 1e-6)
+                    print(
+                        f"\r  Loading: {frame_idx:,}/{total_frames:,} frames "
+                        f"({pct:.1f}%) {elapsed:.0f}s elapsed, ~{remaining:.0f}s remaining",
+                        end="",
+                        flush=True,
+                    )
+        elapsed_total = time.time() - t0
+        print(f"\n  Done: {total_frames:,} frames in {elapsed_total:.1f}s")
+
+        # -- build Bin instance without copying data ---------------------------
+        cmap = kwargs.pop("cmap", "inferno")
+        log_scale = kwargs.pop("log_scale", False)
+        show_controls = kwargs.pop("show_controls", True)
+        bf_radius_ratio = float(kwargs.pop("bf_radius_ratio", 0.125))
+        adf_inner_ratio = float(kwargs.pop("adf_inner_ratio", 0.30))
+        adf_outer_ratio = float(kwargs.pop("adf_outer_ratio", 0.45))
+
+        inst = cls.__new__(cls)
+        anywidget.AnyWidget.__init__(inst, **kwargs)
+        inst.widget_version = resolve_widget_version()
+        inst.bin_mode = bin_mode
+        inst.edge_mode = edge_mode
+        inst.title = title
+        inst.cmap = cmap
+        inst.log_scale = log_scale
+        inst.show_controls = show_controls
+        inst.bf_radius_ratio = bf_radius_ratio
+        inst.adf_inner_ratio = adf_inner_ratio
+        inst.adf_outer_ratio = adf_outer_ratio
+
+        # calibration
+        p_row, p_col = _as_pair(pixel_size, 1.0)
+        k_row, k_col = _as_pair(k_pixel_size, 1.0)
+        inst.pixel_size_row = p_row
+        inst.pixel_size_col = p_col
+        inst.pixel_unit = "Å" if pixel_size is not None else "px"
+        inst.pixel_calibrated = pixel_size is not None
+        inst.k_pixel_size_row = k_row
+        inst.k_pixel_size_col = k_col
+        inst.k_unit = "mrad" if k_pixel_size is not None else "px"
+        inst.k_calibrated = k_pixel_size is not None
+
+        # shape — the widget sees the already-binned detector dimensions
+        inst.scan_rows = scan_r
+        inst.scan_cols = scan_c
+        inst.det_rows = binned_det_r
+        inst.det_cols = binned_det_c
+
+        # torch data
+        inst._device = torch.device(device_str)
+        inst._data_torch = output
+        inst.device = device_str
+
+        # slider maxima
+        inst.max_scan_bin_row = max(1, scan_r)
+        inst.max_scan_bin_col = max(1, scan_c)
+        inst.max_det_bin_row = max(1, binned_det_r)
+        inst.max_det_bin_col = max(1, binned_det_c)
+
+        # detector center
+        if center is not None:
+            inst.center_row = float(center[0])
+            inst.center_col = float(center[1])
+        elif info["beam_center_y"] is not None and info["beam_center_x"] is not None:
+            inst.center_row = float(info["beam_center_y"]) / det_bin_row
+            inst.center_col = float(info["beam_center_x"]) / det_bin_col
+        else:
+            inst.center_row = binned_det_r / 2.0
+            inst.center_col = binned_det_c / 2.0
+
+        # internal preview tensors
+        inst._binned_data_torch = inst._data_torch
+        inst._original_bf_torch = torch.zeros((scan_r, scan_c), dtype=torch.float32)
+        inst._original_adf_torch = torch.zeros((scan_r, scan_c), dtype=torch.float32)
+        inst._binned_bf_torch = torch.zeros((scan_r, scan_c), dtype=torch.float32)
+        inst._binned_adf_torch = torch.zeros((scan_r, scan_c), dtype=torch.float32)
+
+        # observers
+        inst.observe(
+            inst._on_params_changed,
+            names=[
+                "scan_bin_row", "scan_bin_col", "det_bin_row", "det_bin_col",
+                "bin_mode", "edge_mode", "center_row", "center_col",
+                "bf_radius_ratio", "adf_inner_ratio", "adf_outer_ratio",
+            ],
+        )
+        inst.observe(inst._on_position_changed, names=["_scan_position"])
+        inst.observe(inst._on_npy_export, names=["_npy_export_requested"])
+
+        inst.disabled_tools = cls._build_disabled_tools()
+        inst.hidden_tools = cls._build_hidden_tools()
+        inst._recompute_previews()
+        return inst
+
+    # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
@@ -568,6 +1131,68 @@ class Bin(anywidget.AnyWidget):
 
     def save(self, path: str | pathlib.Path) -> None:
         save_state_file(path, "Bin", self.state_dict())
+
+    def save_h5(
+        self,
+        path: str | pathlib.Path,
+        source_file: str = "",
+    ) -> pathlib.Path:
+        """Save the current binned 4D data to HDF5 with bitshuffle + LZ4.
+
+        The file can be reloaded with ``Bin.from_file(path)`` — calibration,
+        center, and provenance metadata are stored as dataset attributes.
+
+        Parameters
+        ----------
+        path : str or pathlib.Path
+            Output ``.h5`` file path.
+        source_file : str
+            Optional provenance string (e.g. original master file path).
+
+        Returns
+        -------
+        pathlib.Path
+            The written file path.
+        """
+        if not _HAS_H5PY:
+            raise ImportError("h5py is required for save_h5(). Install: pip install h5py")
+        output_path = pathlib.Path(path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        arr = self._binned_data_torch.detach().cpu().numpy().astype(np.float32, copy=False)
+        compression_kwargs = {}
+        try:
+            compression_kwargs = dict(hdf5plugin.Bitshuffle(cname="lz4"))
+        except Exception:
+            pass
+        t0 = time.time()
+        with h5py.File(output_path, "w") as f:
+            ds = f.create_dataset(
+                "data",
+                data=arr,
+                chunks=True,
+                **compression_kwargs,
+            )
+            ds.attrs["pixel_size_row"] = float(self.binned_pixel_size_row)
+            ds.attrs["pixel_size_col"] = float(self.binned_pixel_size_col)
+            ds.attrs["pixel_unit"] = self.pixel_unit
+            ds.attrs["k_pixel_size_row"] = float(self.binned_k_pixel_size_row)
+            ds.attrs["k_pixel_size_col"] = float(self.binned_k_pixel_size_col)
+            ds.attrs["k_unit"] = self.k_unit
+            ds.attrs["center_row"] = float(self.binned_center_row)
+            ds.attrs["center_col"] = float(self.binned_center_col)
+            ds.attrs["title"] = self.title
+            ds.attrs["bin_factors"] = [
+                int(self.scan_bin_row),
+                int(self.scan_bin_col),
+                int(self.det_bin_row),
+                int(self.det_bin_col),
+            ]
+            if source_file:
+                ds.attrs["source_file"] = str(source_file)
+        elapsed = time.time() - t0
+        size_gb = float(output_path.stat().st_size) / 1_000_000_000.0
+        print(f"  Saved {output_path.name}: {arr.shape} in {elapsed:.1f}s ({size_gb:.2f} GB)")
+        return output_path
 
     def load_state_dict(self, state: dict) -> None:
         for key, value in state.items():

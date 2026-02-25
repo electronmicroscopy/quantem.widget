@@ -2,13 +2,27 @@
 
 ## v0.0.9a1 (2026-02-23)
 
-### Show2D, Show3D, Show4D, Show4DSTEM, ShowComplex2D, Mark2D
+### Shared
+- **`IO` module** — unified file loader for all common EM formats: `IO.file("image.dm4")` returns an `IOResult` with data, pixel_size, units, and title extracted from file metadata; `IO.folder("scans/")` stacks a folder of files with optional `file_type` filter and `recursive` flag; `IO.folder([folder1, folder2])` merges multiple folders into one stack; `IO.file([path1, path2])` reads and stacks multiple files/folders; supports PNG, TIFF, EMD, NPY/NPZ natively and DM3/DM4, MRC, SER via rsciio; `IO.supported_formats()` lists available extensions; folder auto-detects file type when `file_type` is omitted
+- **`IO.arina_file()`** — GPU-accelerated arina 4D-STEM loader: `IO.arina_file("master.h5", det_bin=2)` with auto-detected GPU backend (MPS now, CUDA/Intel coming soon), `det_bin="auto"` (RAM-based), `scan_bin` (navigation binning), and `hot_pixel_filter` (on by default). `IO.arina()` renamed to `IO.arina_file()` for consistency with `IO.arina_folder()`. `IO.arina()` still works as an alias.
+- **`IO.arina_file(list)`** — cherry-pick specific files into 5D: `IO.arina_file(["scan_00.h5", "scan_03.h5"], det_bin=4)` stacks selected master files into a 5D tensor; raises `ValueError` on shape mismatch
+- **`IO.arina_folder()`** — batch 5D-STEM loading: `IO.arina_folder("session/", det_bin=8)` finds all `*_master.h5` files, loads each with `IO.arina_file()`, and stacks into a 5D array; supports multi-folder (`IO.arina_folder([folder1, folder2])`), `recursive=True` for nested subdirectories, `pattern="SnMoS2"` for name filtering, and `max_files=50` to cap loaded files; incomplete files are auto-skipped with a warning; shape-mismatched files are skipped with a warning
+- **per-frame metadata** — `IO.arina_file(list)` and `IO.arina_folder()` extract full HDF5 metadata from each source file into `IOResult.frame_metadata` (schema-agnostic — stores every scalar dataset as-is)
+- **`IOResult.describe()`** — print a per-frame metadata table; `describe()` (default `diff=True`) shows only columns where values differ across frames; `describe(diff=False)` shows all; `describe(keys=["count_time"])` for custom columns
+- all widgets now accept `IOResult` directly — `Show2D(IO.file("image.dm4"))` passes data, pixel_size, title, and labels automatically
+- Show2D and Show3D gain `from_dm4()`, `from_dm3()`, `from_mrc()` convenience classmethods; `from_path()` now supports any format (not just PNG/TIFF/EMD)
+
+### Show4DSTEM
+- 5D IOResult from `IO.arina_folder()` now passes frame labels and title through automatically — `Show4DSTEM(result, frame_dim_label="Scan")` shows frame slider with file names
+- **`free()`** — convenience method to release GPU memory: deletes MPS tensor, runs garbage collection, and flushes MPS allocator cache back to system
+
+### Show2D, Show3D, Show4D, Show4DSTEM, Mark2D
+- FFT now renders correctly for non-power-of-2 images (e.g. 96x96 diffraction patterns from arina loader) — pre-pads to next power of 2 before FFT to preserve all frequency bins
 - ROI FFT Hann window: a 2D Hann window is automatically applied before FFT when viewing an ROI region, eliminating spectral leakage streaks from rectangular crop boundaries — Show2D exposes a `Win:` toggle (default on) to disable windowing; other widgets apply it unconditionally
 
 ## v0.0.7 (2026-02-21)
 
 ### New widgets
-- **Merge4DSTEM** — stack multiple 4D-STEM datasets along a time axis with GPU-accelerated merge, detector binning, source preview, and Zarr export
 - **Show1D** — interactive 1D viewer for spectra, profiles, and time series with multi-trace overlay, calibrated axes, log scale, and figure export
 
 ### Show2D, Show3D, Mark2D

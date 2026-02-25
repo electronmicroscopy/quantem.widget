@@ -3,6 +3,7 @@
 ```{toctree}
 :maxdepth: 1
 
+io
 show1d
 show2d
 show3d
@@ -14,6 +15,5 @@ mark2d
 edit2d
 align2d
 bin
-merge4dstem
 array_utils
 ```

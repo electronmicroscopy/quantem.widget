@@ -27,7 +27,6 @@ FEATURES = [
     "edit2d/edit2d_all_features.ipynb",
     "align2d/align2d_all_features.ipynb",
     "bin/bin_all_features.ipynb",
-    "merge4dstem/merge4dstem_all_features.ipynb",
 ]
 
 SIMPLE = [
@@ -42,7 +41,6 @@ SIMPLE = [
     "edit2d/edit2d_simple.ipynb",
     "align2d/align2d_simple.ipynb",
     "bin/bin_simple.ipynb",
-    "merge4dstem/merge4dstem_simple.ipynb",
 ]
 
 SHOWCASE = [

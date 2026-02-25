@@ -14,8 +14,8 @@ if TYPE_CHECKING:  # pragma: no cover
     from quantem.widget.align2d import Align2D
     from quantem.widget.bin import Bin
     from quantem.widget.edit2d import Edit2D
+    from quantem.widget.io import IO, IOResult
     from quantem.widget.mark2d import Mark2D
-    from quantem.widget.merge4dstem import Merge4DSTEM
     from quantem.widget.show1d import Show1D
     from quantem.widget.show2d import Show2D
     from quantem.widget.show3d import Show3D
@@ -29,8 +29,9 @@ _EXPORTS = {
     "Align2D": ("quantem.widget.align2d", "Align2D"),
     "Bin": ("quantem.widget.bin", "Bin"),
     "Edit2D": ("quantem.widget.edit2d", "Edit2D"),
+    "IO": ("quantem.widget.io", "IO"),
+    "IOResult": ("quantem.widget.io", "IOResult"),
     "Mark2D": ("quantem.widget.mark2d", "Mark2D"),
-    "Merge4DSTEM": ("quantem.widget.merge4dstem", "Merge4DSTEM"),
     "Show1D": ("quantem.widget.show1d", "Show1D"),
     "Show2D": ("quantem.widget.show2d", "Show2D"),
     "Show3D": ("quantem.widget.show3d", "Show3D"),
@@ -58,8 +59,9 @@ __all__ = [
     "Align2D",
     "Bin",
     "Edit2D",
+    "IO",
+    "IOResult",
     "Mark2D",
-    "Merge4DSTEM",
     "Show1D",
     "Show2D",
     "Show3D",

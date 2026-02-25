@@ -1,7 +1,7 @@
 Widgets
 =======
 
-quantem.widget provides twelve interactive widgets for electron microscopy
+quantem.widget provides eleven interactive widgets for electron microscopy
 visualization and workflow operations.
 
 Visualization widgets support:
@@ -15,7 +15,6 @@ Visualization widgets support:
 Workflow widgets:
 
 - ``Bin`` for calibration-aware 4D-STEM binning
-- ``Merge4DSTEM`` for stacking multiple 4D-STEM datasets along a time axis
 
 .. toctree::
    :maxdepth: 1
@@ -32,5 +31,4 @@ Workflow widgets:
    edit2d
    align2d
    bin
-   merge4dstem
    parity_matrix

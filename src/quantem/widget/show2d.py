@@ -19,6 +19,7 @@ import numpy as np
 import traitlets
 
 from quantem.widget.array_utils import to_numpy, _resize_image
+from quantem.widget.io import IO, IOResult
 from quantem.widget.json_state import resolve_widget_version, save_state_file, unwrap_state_payload
 from quantem.widget.tool_parity import (
     bind_tool_runtime_api,
@@ -27,14 +28,6 @@ from quantem.widget.tool_parity import (
 )
 
 _REDUCE_MODES = {"first", "index", "mean", "max", "sum"}
-
-try:
-    import h5py  # type: ignore
-
-    _HAS_H5PY = True
-except Exception:
-    h5py = None  # type: ignore[assignment]
-    _HAS_H5PY = False
 
 
 class Colormap(StrEnum):
@@ -253,130 +246,6 @@ class Show2D(anywidget.AnyWidget):
         return key
 
     @classmethod
-    def _normalize_folder_file_type(cls, file_type: str | None) -> str:
-        if file_type is None:
-            raise ValueError("file_type is required for folder loading. Use 'png', 'tiff', or 'emd'.")
-        value = str(file_type).strip().lower()
-        aliases = {"tif": "tiff"}
-        value = aliases.get(value, value)
-        if value not in {"png", "tiff", "emd"}:
-            raise ValueError("folder file_type must be one of: 'png', 'tiff', 'emd'.")
-        return value
-
-    @classmethod
-    def _load_image_2d(cls, path: pathlib.Path) -> np.ndarray:
-        from PIL import Image
-
-        with Image.open(path) as img:
-            return np.asarray(img.convert("F"), dtype=np.float32)
-
-    @classmethod
-    def _load_tiff_stack(cls, path: pathlib.Path) -> tuple[np.ndarray, list[str]]:
-        from PIL import Image, ImageSequence
-
-        frames: list[np.ndarray] = []
-        labels: list[str] = []
-        with Image.open(path) as img:
-            for i, page in enumerate(ImageSequence.Iterator(img)):
-                frame = np.asarray(page.convert("F"), dtype=np.float32)
-                frames.append(frame)
-                labels.append(f"{path.stem}[{i}]")
-
-        if not frames:
-            raise ValueError(f"No readable frames found in TIFF file: {path}")
-
-        shape0 = frames[0].shape
-        for i, frame in enumerate(frames[1:], start=1):
-            if frame.shape != shape0:
-                raise ValueError(
-                    f"Inconsistent TIFF frame shapes in {path}: frame 0={shape0}, frame {i}={frame.shape}"
-                )
-        return np.stack(frames, axis=0).astype(np.float32), labels
-
-    @classmethod
-    def _find_best_h5_dataset(cls, h5f):
-        candidates: list[tuple[int, str, object]] = []
-
-        def _walk(group, prefix: str = ""):
-            for key, item in group.items():
-                item_path = f"{prefix}/{key}" if prefix else key
-                if hasattr(item, "shape") and hasattr(item, "dtype"):
-                    try:
-                        ndim = int(item.ndim)
-                        size = int(item.size)
-                        dtype_kind = str(item.dtype.kind)
-                    except Exception:
-                        continue
-                    if size <= 0 or ndim < 2 or dtype_kind not in {"i", "u", "f", "c"}:
-                        continue
-
-                    score = size
-                    if ndim == 2:
-                        score += 10**15
-                    elif ndim == 3:
-                        score += 9 * 10**14
-                    elif ndim == 4:
-                        score += 8 * 10**14
-                    elif ndim == 5:
-                        score += 7 * 10**14
-
-                    lower_path = item_path.lower()
-                    for token in ["image", "stack", "series", "frame", "signal", "data"]:
-                        if token in lower_path:
-                            score += 10**12
-                    for token in ["preview", "thumb", "mask", "meta", "label", "calib"]:
-                        if token in lower_path:
-                            score -= 10**12
-
-                    candidates.append((score, item_path, item))
-                elif hasattr(item, "items"):
-                    _walk(item, item_path)
-
-        _walk(h5f)
-        if not candidates:
-            return "", None
-        candidates.sort(key=lambda item: item[0], reverse=True)
-        _, ds_path, ds = candidates[0]
-        return ds_path, ds
-
-    @classmethod
-    def _load_emd_array(cls, path: pathlib.Path, *, dataset_path: str | None = None) -> np.ndarray:
-        if not _HAS_H5PY:
-            raise RuntimeError("h5py is required to read .emd files. Install h5py to enable EMD loading.")
-
-        with h5py.File(path, "r") as h5f:  # type: ignore[name-defined]
-            if dataset_path is not None:
-                ds_path = str(dataset_path).strip()
-                if not ds_path:
-                    raise ValueError("dataset_path must be a non-empty string when provided.")
-                if ds_path not in h5f and ds_path.startswith("/") and ds_path[1:] in h5f:
-                    ds_path = ds_path[1:]
-                if ds_path not in h5f:
-                    raise ValueError(f"dataset_path '{dataset_path}' not found in EMD file: {path}")
-                ds = h5f[ds_path]
-            else:
-                ds_path, ds = cls._find_best_h5_dataset(h5f)
-            if ds is None:
-                raise ValueError(f"No array-like dataset found in EMD file: {path}")
-            if not hasattr(ds, "shape") or not hasattr(ds, "dtype"):
-                raise ValueError(f"dataset_path '{ds_path}' is not an array dataset in EMD file: {path}")
-            arr = np.asarray(ds)
-        return arr
-
-    @classmethod
-    def _as_stack_3d(cls, arr: np.ndarray) -> np.ndarray:
-        if np.iscomplexobj(arr):
-            arr = np.abs(arr)
-        if arr.ndim < 2:
-            raise ValueError(f"Expected at least 2D image data, got {arr.ndim}D")
-        if arr.ndim == 2:
-            return np.asarray(arr[None, ...], dtype=np.float32)
-        if arr.ndim == 3:
-            return np.asarray(arr, dtype=np.float32)
-        stack = np.asarray(arr).reshape((-1, arr.shape[-2], arr.shape[-1]))
-        return np.asarray(stack, dtype=np.float32)
-
-    @classmethod
     def _reduce_stack(cls, stack: np.ndarray, *, mode: str, index: int = 0) -> np.ndarray:
         if stack.ndim != 3:
             raise ValueError(f"Expected 3D stack for reduction, got {stack.ndim}D")
@@ -396,69 +265,6 @@ class Show2D(anywidget.AnyWidget):
         return np.asarray(frame, dtype=np.float32)
 
     @classmethod
-    def _load_folder_stack(
-        cls,
-        folder: pathlib.Path,
-        *,
-        file_type: str,
-        dataset_path: str | None = None,
-    ) -> tuple[np.ndarray, list[str]]:
-        allowed_exts = {".emd", ".png", ".tif", ".tiff"}
-        all_files = sorted(p for p in folder.iterdir() if p.is_file() and p.suffix.lower() in allowed_exts)
-        if not all_files:
-            raise ValueError(f"No supported files found in {folder}. Expected .png, .tif/.tiff, or .emd.")
-
-        selected_type = cls._normalize_folder_file_type(file_type)
-        if selected_type != "emd" and dataset_path is not None:
-            raise ValueError("dataset_path is only supported for EMD folder loading.")
-
-        if selected_type == "png":
-            files = [p for p in all_files if p.suffix.lower() == ".png"]
-        elif selected_type == "tiff":
-            files = [p for p in all_files if p.suffix.lower() in {".tif", ".tiff"}]
-        else:
-            files = [p for p in all_files if p.suffix.lower() == ".emd"]
-
-        if not files:
-            raise ValueError(f"No {selected_type.upper()} files found in {folder}.")
-
-        frames: list[np.ndarray] = []
-        labels: list[str] = []
-        if selected_type == "png":
-            for p in files:
-                frames.append(cls._load_image_2d(p))
-                labels.append(p.name)
-        elif selected_type == "tiff":
-            for p in files:
-                stack, _ = cls._load_tiff_stack(p)
-                if stack.shape[0] == 1:
-                    frames.append(stack[0])
-                    labels.append(p.name)
-                else:
-                    for i in range(stack.shape[0]):
-                        frames.append(stack[i])
-                        labels.append(f"{p.stem}[{i}]")
-        else:
-            for p in files:
-                arr = cls._load_emd_array(p, dataset_path=dataset_path)
-                stack = cls._as_stack_3d(np.asarray(arr))
-                if stack.shape[0] == 1:
-                    frames.append(stack[0])
-                    labels.append(p.name)
-                else:
-                    for i in range(stack.shape[0]):
-                        frames.append(stack[i])
-                        labels.append(f"{p.stem}[{i}]")
-
-        shape0 = frames[0].shape
-        for i, frame in enumerate(frames[1:], start=1):
-            if frame.shape != shape0:
-                raise ValueError(
-                    f"Inconsistent image shapes in folder {folder}: frame 0={shape0}, frame {i}={frame.shape}"
-                )
-        return np.stack(frames, axis=0).astype(np.float32), labels
-
-    @classmethod
     def from_path(
         cls,
         source: str | pathlib.Path,
@@ -474,11 +280,11 @@ class Show2D(anywidget.AnyWidget):
         Parameters
         ----------
         source : str or pathlib.Path
-            File path (.png/.tif/.tiff/.emd) or folder path.
-        file_type : {"png", "tiff", "emd"}, optional
+            File path (any format supported by ``IO.read``) or folder path.
+        file_type : str, optional
             Required for folder sources to select which files to load.
         dataset_path : str, optional
-            Explicit HDF dataset path for `.emd` inputs.
+            Explicit HDF dataset path for ``.emd`` inputs.
         mode : {"first", "index", "mean", "max", "sum"}, optional
             Optional reduction mode to collapse loaded stack to a single 2D image.
             If omitted, stacks are shown in Show2D gallery mode.
@@ -489,52 +295,28 @@ class Show2D(anywidget.AnyWidget):
         reduce_mode = cls._normalize_reduce_mode(mode)
 
         if path.is_dir():
-            stack, labels = cls._load_folder_stack(path, file_type=file_type, dataset_path=dataset_path)
-            kwargs.setdefault("title", path.name)
-            if reduce_mode is None:
-                kwargs.setdefault("labels", labels)
-                return cls(stack, **kwargs)
-            image = cls._reduce_stack(stack, mode=reduce_mode, index=index)
-            return cls(image, **kwargs)
+            if file_type is None:
+                raise ValueError("file_type is required for folder loading.")
+            result = IO.folder(path, file_type=file_type, dataset_path=dataset_path)
+        else:
+            if file_type is not None:
+                raise ValueError("file_type is only used for folder sources.")
+            result = IO.file(path, dataset_path=dataset_path)
 
-        if not path.is_file():
-            raise ValueError(f"Path does not exist: {path}")
-        if file_type is not None:
-            raise ValueError("file_type is only used for folder sources.")
+        kwargs.setdefault("title", result.title)
+        if result.pixel_size is not None:
+            kwargs.setdefault("pixel_size", result.pixel_size)
+        data = result.data
+        # Coerce high-dim data to 3D stack for gallery mode
+        if data.ndim > 3:
+            from quantem.widget.io import _coerce_to_stack_3d
+            data = _coerce_to_stack_3d(data)
+        if data.ndim == 3 and reduce_mode is not None:
+            data = cls._reduce_stack(data, mode=reduce_mode, index=index)
+        elif data.ndim == 3 and result.labels:
+            kwargs.setdefault("labels", result.labels)
 
-        ext = path.suffix.lower()
-        if ext == ".png":
-            if dataset_path is not None:
-                raise ValueError("dataset_path is only supported for .emd inputs.")
-            image = cls._load_image_2d(path)
-            kwargs.setdefault("title", path.stem)
-            return cls(image, **kwargs)
-
-        if ext in {".tif", ".tiff"}:
-            if dataset_path is not None:
-                raise ValueError("dataset_path is only supported for .emd inputs.")
-            stack, labels = cls._load_tiff_stack(path)
-            kwargs.setdefault("title", path.stem)
-            if reduce_mode is None:
-                kwargs.setdefault("labels", labels)
-                return cls(stack, **kwargs)
-            image = cls._reduce_stack(stack, mode=reduce_mode, index=index)
-            return cls(image, **kwargs)
-
-        if ext == ".emd":
-            arr = cls._load_emd_array(path, dataset_path=dataset_path)
-            stack = cls._as_stack_3d(np.asarray(arr))
-            kwargs.setdefault("title", path.stem)
-            if reduce_mode is None:
-                labels = [f"{path.stem}[{i}]" for i in range(stack.shape[0])]
-                kwargs.setdefault("labels", labels)
-                return cls(stack, **kwargs)
-            image = cls._reduce_stack(stack, mode=reduce_mode, index=index)
-            return cls(image, **kwargs)
-
-        raise ValueError(
-            f"Unsupported file type: {path.suffix}. Use .png, .tif, .tiff, .emd, or a folder of one explicit type."
-        )
+        return cls(data, **kwargs)
 
     @classmethod
     def from_folder(
@@ -587,6 +369,42 @@ class Show2D(anywidget.AnyWidget):
         """Create Show2D from an EMD file."""
         return cls.from_path(source, dataset_path=dataset_path, mode=mode, index=index, **kwargs)
 
+    @classmethod
+    def from_dm4(
+        cls,
+        source: str | pathlib.Path,
+        *,
+        mode: str | None = None,
+        index: int = 0,
+        **kwargs,
+    ) -> Self:
+        """Create Show2D from a DM4 file (requires rsciio)."""
+        return cls.from_path(source, mode=mode, index=index, **kwargs)
+
+    @classmethod
+    def from_dm3(
+        cls,
+        source: str | pathlib.Path,
+        *,
+        mode: str | None = None,
+        index: int = 0,
+        **kwargs,
+    ) -> Self:
+        """Create Show2D from a DM3 file (requires rsciio)."""
+        return cls.from_path(source, mode=mode, index=index, **kwargs)
+
+    @classmethod
+    def from_mrc(
+        cls,
+        source: str | pathlib.Path,
+        *,
+        mode: str | None = None,
+        index: int = 0,
+        **kwargs,
+    ) -> Self:
+        """Create Show2D from an MRC file (requires rsciio)."""
+        return cls.from_path(source, mode=mode, index=index, **kwargs)
+
     def __init__(
         self,
         data: Union[np.ndarray, List[np.ndarray]],
@@ -628,6 +446,16 @@ class Show2D(anywidget.AnyWidget):
     ):
         super().__init__(**kwargs)
         self.widget_version = resolve_widget_version()
+
+        # Check if data is an IOResult and extract metadata
+        if isinstance(data, IOResult):
+            if not title and data.title:
+                title = data.title
+            if pixel_size == 0.0 and data.pixel_size is not None:
+                pixel_size = data.pixel_size
+            if labels is None and data.labels:
+                labels = data.labels
+            data = data.data
 
         # Check if data is a Dataset2d and extract metadata
         if hasattr(data, "array") and hasattr(data, "name") and hasattr(data, "sampling"):

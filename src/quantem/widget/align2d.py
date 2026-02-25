@@ -12,6 +12,7 @@ import numpy as np
 import traitlets
 
 from quantem.widget.array_utils import to_numpy, _resize_image
+from quantem.widget.io import IOResult
 from quantem.widget.json_state import resolve_widget_version, save_state_file, unwrap_state_payload
 from quantem.widget.tool_parity import (
     bind_tool_runtime_api,
@@ -332,6 +333,19 @@ class Align2D(anywidget.AnyWidget):
     ):
         super().__init__(**kwargs)
         self.widget_version = resolve_widget_version()
+
+        # Check if inputs are IOResult and extract metadata
+        for img_ref in ("image_a", "image_b"):
+            img_data = image_a if img_ref == "image_a" else image_b
+            if isinstance(img_data, IOResult):
+                if not title and img_data.title:
+                    title = img_data.title
+                if pixel_size == 0.0 and img_data.pixel_size is not None:
+                    pixel_size = img_data.pixel_size
+                if img_ref == "image_a":
+                    image_a = img_data.data
+                else:
+                    image_b = img_data.data
 
         # Check if inputs are Dataset2d and extract metadata
         for img_data in (image_a, image_b):

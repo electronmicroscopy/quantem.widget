@@ -65,7 +65,7 @@ echo "==> Verifying imports and JS bundles..."
 python -c "
 from quantem.widget import (
     Show1D, Show2D, Show3D, Show3DVolume, Show4D, Show4DSTEM,
-    ShowComplex2D, Mark2D, Edit2D, Align2D, Bin, Folder, Merge4DSTEM,
+    ShowComplex2D, Mark2D, Edit2D, Align2D, Bin,
 )
 import numpy as np
 

@@ -68,7 +68,6 @@ quantem.widget/
 │   ├── bin/index.tsx
 │   ├── edit2d/index.tsx
 │   ├── mark2d/index.tsx
-│   ├── merge4dstem/index.tsx
 │   ├── show1d/index.tsx
 │   ├── show2d/index.tsx
 │   ├── show3d/index.tsx
@@ -89,7 +88,6 @@ quantem.widget/
 │   ├── bin.py
 │   ├── edit2d.py
 │   ├── mark2d.py
-│   ├── merge4dstem.py
 │   ├── show1d.py
 │   ├── show2d.py
 │   ├── show3d.py
@@ -116,15 +114,15 @@ its frontend is `js/show4dstem/index.tsx`.
 
 Each widget is self-contained, but a small set of utility modules are shared
 across **all** widgets. These exist because every widget needs them — they passed
-the bar of "used by 12+ widgets" before being extracted.
+the bar of "used by 11+ widgets" before being extracted.
 
 **Python** (`src/quantem/widget/`):
-- `array_utils.py` — `to_numpy()` converts any input (NumPy, PyTorch, CuPy) to NumPy. Used by all 12 widgets.
-- `json_state.py` — `save_state_file()` and `unwrap_state_payload()` for the versioned JSON state envelope. Used by all 12 widgets.
+- `array_utils.py` — `to_numpy()` converts any input (NumPy, PyTorch, CuPy) to NumPy. Used by all 11 widgets.
+- `json_state.py` — `save_state_file()` and `unwrap_state_payload()` for the versioned JSON state envelope. Used by all 11 widgets.
 - `tool_parity.py` — validates `disabled_tools` / `hidden_tools` keys. Used by 11 widgets.
 
 **JavaScript** (`js/`):
-- `theme.ts` — `useTheme()` hook for automatic light/dark mode. Used by all 12 widgets.
+- `theme.ts` — `useTheme()` hook for automatic light/dark mode. Used by all 11 widgets.
 - `colormaps.ts` — colormap LUTs and `applyColormap()`. Used by all image widgets.
 - `format.ts` — `extractFloat32()`, `formatNumber()`, `downloadBlob()`. Used by all widgets.
 - `stats.ts` — `computeStats()`, `percentileClip()`, `applyLogScale()`. Used by all image widgets.
@@ -223,4 +221,3 @@ rendering entirely in JavaScript.
 | `Edit2D` | Interactive crop/pad/mask editor with brush tool | No |
 | `Align2D` | Image alignment overlay with FFT-based auto-align | No |
 | `Bin` | Detector binning with live preview and batch export | Yes |
-| `Merge4DSTEM` | 4D-STEM sector merging with alignment and stitching | Yes |

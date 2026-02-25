@@ -98,43 +98,6 @@ w.save("bin_preset.json")
 binned = w.get_binned_data()
 ```
 
-### Merge4DSTEM - Out-of-Core Dataset Merge
-
-```python
-from quantem.widget import Merge4DSTEM
-
-m = Merge4DSTEM(folder_path="/path/to/data")
-m.selected_paths = ["/path/run01.h5", "/path/run02.h5"]
-m.merge_mode = "stack_time"  # create 5D (time, scan_r, scan_c, det_r, det_c)
-m.output_path = "/path/merged_5d.h5"
-m.output_dataset_path = "data/merged"
-m.merge_selected()
-
-# optional: rolling time smoothing + drift-aware average
-m.merge_mode = "rolling_mean_time"
-m.rolling_window_frames = 3
-m.drift_aware_average = True
-
-# reproducibility export/import
-m.save_pipeline_spec("merge_pipeline.json")
-m.load_pipeline_spec("merge_pipeline.json")
-```
-
-`Merge4DSTEM` is intentionally separate from `Bin`:
-- `Bin`: preprocess one dataset
-- `Merge4DSTEM`: construct merged 5D/time-reduced datasets with provenance
-
-Fast merge-only test lane:
-
-```bash
-./scripts/test_merge_quick.sh
-
-# equivalent explicit command:
-PYTHONPATH=src MPLCONFIGDIR=/tmp/quantem-widget-mplconfig \
-PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
-python -m pytest tests/test_widget_merge4dstem.py -q -m "merge and quick and not slow"
-```
-
 ### Mark2D - Interactive Image Annotation
 
 ```python

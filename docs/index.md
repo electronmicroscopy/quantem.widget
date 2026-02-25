@@ -11,6 +11,20 @@ Currently published on [TestPyPI](https://test.pypi.org/project/quantem-widget/)
 pip install -i https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ quantem-widget
 ```
 
+## IO
+
+Load any electron microscopy file with one line:
+
+```python
+from quantem.widget import IO
+
+result = IO.file("image.dm4")         # single file (DM3/DM4/MRC/EMD/TIFF/PNG/NPY/...)
+result = IO.folder("scans/")          # folder → stack
+data   = IO.arina_file("master.h5", det_bin=2)  # GPU-accelerated arina 4D-STEM
+```
+
+See the [IO API reference](api/io) for full documentation and examples.
+
 ## widgets
 
 | widget | description |
@@ -26,7 +40,6 @@ pip install -i https://test.pypi.org/simple/ --extra-index-url https://pypi.org/
 | [Edit2D](examples/edit2d/edit2d_simple) | interactive crop/pad/mask editor |
 | [Align2D](examples/align2d/align2d_simple) | image alignment overlay with phase correlation |
 | [Bin](examples/bin/bin_simple) | calibration-aware binning + BF/ADF quality control |
-| Merge4DSTEM | stack multiple 4D-STEM datasets along a time axis |
 
 ```{toctree}
 :maxdepth: 2
@@ -36,5 +49,6 @@ widgets/index
 examples/index
 api/index
 dev/index
+optimization
 changelog
 ```

@@ -16,6 +16,7 @@ import anywidget
 import traitlets
 
 from quantem.widget.array_utils import to_numpy
+from quantem.widget.io import IOResult
 from quantem.widget.json_state import build_json_header, resolve_widget_version, save_state_file, unwrap_state_payload
 from quantem.widget.tool_parity import (
     bind_tool_runtime_api,
@@ -298,6 +299,12 @@ class Show4D(anywidget.AnyWidget):
     ):
         super().__init__(**kwargs)
         self.widget_version = resolve_widget_version()
+
+        # Check if data is an IOResult and extract metadata
+        if isinstance(data, IOResult):
+            if not title and data.title:
+                title = data.title
+            data = data.data
 
         # Dataset duck typing
         if hasattr(data, "array") and hasattr(data, "sampling"):

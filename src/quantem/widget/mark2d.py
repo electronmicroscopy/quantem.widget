@@ -14,6 +14,7 @@ import numpy as np
 import traitlets
 
 from quantem.widget.array_utils import to_numpy, _resize_image
+from quantem.widget.io import IOResult
 from quantem.widget.json_state import resolve_widget_version, save_state_file, unwrap_state_payload
 from quantem.widget.tool_parity import (
     bind_tool_runtime_api,
@@ -637,6 +638,15 @@ class Mark2D(anywidget.AnyWidget):
         )
         self.percentile_low = percentile_low
         self.percentile_high = percentile_high
+        # Check if data is an IOResult and extract metadata
+        if isinstance(data, IOResult):
+            if not title and data.title:
+                title = data.title
+            if pixel_size == 0.0 and data.pixel_size is not None:
+                pixel_size = data.pixel_size
+            if labels is None and data.labels:
+                labels = data.labels
+            data = data.data
         self._set_data(data, labels)
         # Explicit overrides take priority over Dataset metadata
         if title:

@@ -1911,6 +1911,23 @@ function Show3D() {
         }
       }
 
+      // Pre-pad non-power-of-2 full images so fft2d doesn't truncate frequency data
+      if (origCropW === 0) {
+        const padW = nextPow2(fftW);
+        const padH = nextPow2(fftH);
+        if (padW !== fftW || padH !== fftH) {
+          const padded = new Float32Array(padW * padH);
+          for (let y = 0; y < fftH; y++) {
+            for (let x = 0; x < fftW; x++) {
+              padded[y * padW + x] = inputData[y * fftW + x];
+            }
+          }
+          inputData = padded;
+          fftW = padW;
+          fftH = padH;
+        }
+      }
+
       let real: Float32Array, imag: Float32Array;
 
       if (gpuReady && gpuFFTRef.current) {
@@ -1931,7 +1948,14 @@ function Show3D() {
 
       fftMagRef.current = computeMagnitude(real, imag);
       fftMagCacheRef.current = fftMagRef.current;
-      setFftCropDims(origCropW > 0 ? { cropWidth: origCropW, cropHeight: origCropH, fftWidth: fftW, fftHeight: fftH } : null);
+      // Track FFT dimensions when they differ from image dimensions (ROI crop or non-pow2 padding)
+      if (origCropW > 0) {
+        setFftCropDims({ cropWidth: origCropW, cropHeight: origCropH, fftWidth: fftW, fftHeight: fftH });
+      } else if (fftW !== width || fftH !== height) {
+        setFftCropDims({ cropWidth: width, cropHeight: height, fftWidth: fftW, fftHeight: fftH });
+      } else {
+        setFftCropDims(null);
+      }
       setFftMagVersion(v => v + 1);
     };
 
@@ -1979,7 +2003,8 @@ function Show3D() {
     if (fftCanvasRef.current) {
       const ctx = fftCanvasRef.current.getContext("2d");
       if (ctx) {
-        ctx.imageSmoothingEnabled = false;
+        // Use bilinear smoothing when FFT is smaller than canvas (avoids blocky upscaling)
+        ctx.imageSmoothingEnabled = fftW < canvasW || fftH < canvasH;
         ctx.clearRect(0, 0, canvasW, canvasH);
         ctx.save();
         ctx.translate(fftPanX, fftPanY);
@@ -1998,7 +2023,10 @@ function Show3D() {
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
-    ctx.imageSmoothingEnabled = false;
+    const offW = fftOffscreenRef.current.width;
+    const offH = fftOffscreenRef.current.height;
+    // Use bilinear smoothing when FFT is smaller than canvas (avoids blocky upscaling)
+    ctx.imageSmoothingEnabled = offW < canvasW || offH < canvasH;
     ctx.clearRect(0, 0, canvasW, canvasH);
     ctx.save();
     ctx.translate(fftPanX, fftPanY);
@@ -3676,7 +3704,7 @@ function Show3D() {
             <Box sx={{ mb: `${SPACING.XS}px`, height: 16 }} />
             {/* Controls row — matches main panel controls row height */}
             <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: `${SPACING.XS}px`, height: 28 }}>
-              {fftCropDims ? (
+              {roiFftActive && fftCropDims ? (
                 <Typography sx={{ ...typography.label, color: themeColors.accentGreen }}>
                   ROI FFT ({fftCropDims.cropWidth}&times;{fftCropDims.cropHeight})
                 </Typography>
@@ -3733,7 +3761,7 @@ function Show3D() {
                   </Select>
                   <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted }}>Auto:</Typography>
                   <Switch checked={fftAuto} onChange={(e) => { if (!lockDisplay) setFftAuto(e.target.checked); }} disabled={lockDisplay} size="small" sx={switchStyles.small} />
-                  {fftCropDims && (
+                  {roiFftActive && fftCropDims && (
                     <>
                       <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted }}>Win:</Typography>
                       <Switch checked={fftWindow} onChange={(e) => { if (!lockDisplay) setFftWindow(e.target.checked); }} disabled={lockDisplay} size="small" sx={switchStyles.small} />

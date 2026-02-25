@@ -1422,6 +1422,23 @@ function Show2D() {
         }
       }
 
+      // Pre-pad non-power-of-2 full images so fft2d doesn't truncate frequency data
+      if (origCropW === 0) {
+        const padW = nextPow2(fftW);
+        const padH = nextPow2(fftH);
+        if (padW !== fftW || padH !== fftH) {
+          const padded = new Float32Array(padW * padH);
+          for (let y = 0; y < fftH; y++) {
+            for (let x = 0; x < fftW; x++) {
+              padded[y * padW + x] = inputData[y * fftW + x];
+            }
+          }
+          inputData = padded;
+          fftW = padW;
+          fftH = padH;
+        }
+      }
+
       const real = inputData.slice();
       const imag = new Float32Array(inputData.length);
 
@@ -1441,7 +1458,14 @@ function Show2D() {
       fftshift(fImag, fftW, fftH);
 
       fftMagCacheRef.current = computeMagnitude(fReal, fImag);
-      setFftCropDims(origCropW > 0 ? { cropWidth: origCropW, cropHeight: origCropH, fftWidth: fftW, fftHeight: fftH } : null);
+      // Track FFT dimensions when they differ from image dimensions (ROI crop or non-pow2 padding)
+      if (origCropW > 0) {
+        setFftCropDims({ cropWidth: origCropW, cropHeight: origCropH, fftWidth: fftW, fftHeight: fftH });
+      } else if (fftW !== width || fftH !== height) {
+        setFftCropDims({ cropWidth: width, cropHeight: height, fftWidth: fftW, fftHeight: fftH });
+      } else {
+        setFftCropDims(null);
+      }
       setFftMagVersion(v => v + 1);
     };
 
@@ -1515,7 +1539,8 @@ function Show2D() {
     const fftW = offscreen.width;
     const fftH = offscreen.height;
 
-    ctx.imageSmoothingEnabled = false;
+    // Use bilinear smoothing when FFT is smaller than canvas (avoids blocky upscaling)
+    ctx.imageSmoothingEnabled = fftW < canvasW || fftH < canvasH;
     ctx.clearRect(0, 0, canvasW, canvasH);
     ctx.save();
 
@@ -1643,6 +1668,23 @@ function Show2D() {
           }
         }
 
+        // Pre-pad non-power-of-2 full images so fft2d doesn't truncate frequency data
+        if (!roi) {
+          const padW = nextPow2(fftW);
+          const padH = nextPow2(fftH);
+          if (padW !== fftW || padH !== fftH) {
+            const padded = new Float32Array(padW * padH);
+            for (let y = 0; y < fftH; y++) {
+              for (let x = 0; x < fftW; x++) {
+                padded[y * padW + x] = inputData[y * fftW + x];
+              }
+            }
+            inputData = padded;
+            fftW = padW;
+            fftH = padH;
+          }
+        }
+
         const real = inputData.slice();
         const imag = new Float32Array(inputData.length);
         let fReal: Float32Array;
@@ -1742,7 +1784,7 @@ function Show2D() {
       if (!ctx) continue;
 
       const { zoom, panX, panY } = getGalleryFftState(idx);
-      ctx.imageSmoothingEnabled = false;
+      ctx.imageSmoothingEnabled = fftW < canvasW || fftH < canvasH;
       ctx.clearRect(0, 0, canvasW, canvasH);
       ctx.save();
       const cx = canvasW / 2;
@@ -3078,7 +3120,7 @@ function Show2D() {
                   </Select>
                   <Typography sx={{ ...typography.label, fontSize: 10 }}>Auto:</Typography>
                   <Switch checked={fftAuto} onChange={(e) => { if (!lockDisplay) setFftAuto(e.target.checked); }} disabled={lockDisplay} size="small" sx={switchStyles.small} />
-                  {fftCropDims && (
+                  {roiFftActive && fftCropDims && (
                     <>
                       <Typography sx={{ ...typography.label, fontSize: 10 }}>Win:</Typography>
                       <Switch checked={fftWindow} onChange={(e) => { if (!lockDisplay) setFftWindow(e.target.checked); }} disabled={lockDisplay} size="small" sx={switchStyles.small} />
@@ -3300,7 +3342,7 @@ function Show2D() {
             <Box sx={{ mb: `${SPACING.XS}px`, height: 16 }} />
             {/* Controls row — matches main panel controls row height */}
             <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: `${SPACING.XS}px`, height: 28 }}>
-              {fftCropDims ? (
+              {roiFftActive && fftCropDims ? (
                 <Typography sx={{ fontSize: 10, fontFamily: "monospace", color: themeColors.accentGreen }}>
                   ROI FFT ({fftCropDims.cropWidth}&times;{fftCropDims.cropHeight})
                 </Typography>

@@ -1134,6 +1134,23 @@ function Show4D() {
       }
     }
 
+    // Pre-pad non-power-of-2 full images so fft2d doesn't truncate frequency data
+    if (origCropW === 0) {
+      const padW = nextPow2(w);
+      const padH = nextPow2(h);
+      if (padW !== w || padH !== h) {
+        const padded = new Float32Array(padW * padH);
+        for (let y = 0; y < h; y++) {
+          for (let x = 0; x < w; x++) {
+            padded[y * padW + x] = inputData[y * w + x];
+          }
+        }
+        inputData = padded;
+        w = padW;
+        h = padH;
+      }
+    }
+
     const fftW = w, fftH = h;
     const computeFFT = async () => {
       let real: Float32Array, imag: Float32Array;
@@ -1151,7 +1168,14 @@ function Show4D() {
       fftshift(real, fftW, fftH);
       fftshift(imag, fftW, fftH);
       fftMagRef.current = computeMagnitude(real, imag);
-      setFftCropDims(origCropW > 0 ? { cropWidth: origCropW, cropHeight: origCropH, fftWidth: fftW, fftHeight: fftH } : null);
+      // Track FFT dimensions when they differ from image dimensions (ROI crop or non-pow2 padding)
+      if (origCropW > 0) {
+        setFftCropDims({ cropWidth: origCropW, cropHeight: origCropH, fftWidth: fftW, fftHeight: fftH });
+      } else if (fftW !== sigCols || fftH !== sigRows) {
+        setFftCropDims({ cropWidth: sigCols, cropHeight: sigRows, fftWidth: fftW, fftHeight: fftH });
+      } else {
+        setFftCropDims(null);
+      }
       setFftMagVersion(v => v + 1);
       setFftClickInfo(null);
     };
@@ -1196,14 +1220,17 @@ function Show4D() {
     const canvas = fftCanvasRef.current;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
-    ctx.imageSmoothingEnabled = false;
+    const fftW = fftCropDims?.fftWidth ?? sigCols;
+    const fftH = fftCropDims?.fftHeight ?? sigRows;
+    // Use bilinear smoothing when FFT is smaller than canvas (avoids blocky upscaling)
+    ctx.imageSmoothingEnabled = fftW < canvas.width || fftH < canvas.height;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.save();
     ctx.translate(fftPanX, fftPanY);
     ctx.scale(fftZoom, fftZoom);
     ctx.drawImage(fftOffscreenRef.current, 0, 0);
     ctx.restore();
-  }, [effectiveShowFft, fftOffscreenVersion, fftZoom, fftPanX, fftPanY]);
+  }, [effectiveShowFft, fftOffscreenVersion, fftZoom, fftPanX, fftPanY, fftCropDims, sigCols, sigRows]);
 
   // ── FFT UI overlay (scale bar + d-spacing crosshair) ──
   React.useEffect(() => {
@@ -2555,8 +2582,8 @@ function Show4D() {
           <Box sx={{ width: sigCanvasWidth }}>
             {/* FFT Header */}
             <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: `${SPACING.XS}px`, height: 28 }}>
-              <Typography variant="caption" sx={{ ...typo.label, color: fftCropDims ? accentGreen : themeColors.textMuted }}>
-                {fftCropDims ? `ROI FFT (${fftCropDims.cropWidth}\u00D7${fftCropDims.cropHeight})` : "FFT (Signal)"}
+              <Typography variant="caption" sx={{ ...typo.label, color: roiFftActive && fftCropDims ? accentGreen : themeColors.textMuted }}>
+                {roiFftActive && fftCropDims ? `ROI FFT (${fftCropDims.cropWidth}\u00D7${fftCropDims.cropHeight})` : "FFT (Signal)"}
               </Typography>
               <Stack direction="row" spacing={`${SPACING.SM}px`}>
                 {!hideExport && (
@@ -2629,7 +2656,7 @@ function Show4D() {
                     <Box sx={{ ...controlRow, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, opacity: (lockDisplay || lockFft) ? 0.6 : 1 }}>
                       <Typography sx={{ ...typo.label, fontSize: 10 }}>Auto:</Typography>
                       <Switch checked={fftAuto} onChange={(e) => { if (!lockDisplay && !lockFft) setFftAuto(e.target.checked); }} disabled={lockDisplay || lockFft} size="small" sx={switchStyles.small} />
-                      {fftCropDims && (
+                      {roiFftActive && fftCropDims && (
                         <>
                           <Typography sx={{ ...typo.label, fontSize: 10 }}>Win:</Typography>
                           <Switch checked={fftWindow} onChange={(e) => { if (!lockDisplay) setFftWindow(e.target.checked); }} disabled={lockDisplay} size="small" sx={switchStyles.small} />

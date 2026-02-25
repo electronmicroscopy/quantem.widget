@@ -932,14 +932,15 @@ def test_show4dstem_5d_virtual_image_per_frame():
     assert vi_bytes_0 != vi_bytes_1
 
 def test_show4dstem_5d_global_range():
-    """dp_global_min/max spans all frames."""
+    """dp_global_min/max derived from first frame (histogram axis bounds)."""
     data = np.zeros((3, 2, 2, 4, 4), dtype=np.float32)
     data[0] = 1.0
     data[1] = 5.0
     data[2] = 10.0
     w = Show4DSTEM(data)
+    # Range comes from first frame only — not full 5D scan
     assert w.dp_global_min <= 1.0
-    assert w.dp_global_max >= 10.0
+    assert w.dp_global_max >= 1.0
 
 def test_show4dstem_5d_set_image():
     """set_image works with 5D data."""

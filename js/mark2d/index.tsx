@@ -1348,6 +1348,23 @@ const render = createRender(() => {
         }
       }
 
+      // Pre-pad non-power-of-2 full images so fft2d doesn't truncate frequency data
+      if (origCropW === 0) {
+        const padW = nextPow2(fftW);
+        const padH = nextPow2(fftH);
+        if (padW !== fftW || padH !== fftH) {
+          const padded = new Float32Array(padW * padH);
+          for (let y = 0; y < fftH; y++) {
+            for (let x = 0; x < fftW; x++) {
+              padded[y * padW + x] = inputData[y * fftW + x];
+            }
+          }
+          inputData = padded;
+          fftW = padW;
+          fftH = padH;
+        }
+      }
+
       let real: Float32Array, imag: Float32Array;
       if (gpuFFTRef.current) {
         const gpuReal = inputData.slice();
@@ -1365,14 +1382,21 @@ const render = createRender(() => {
       const logMag = applyLogScale(mag);
       const { min: logMin, max: logMax } = findDataRange(logMag);
       fftOffscreenRef.current = renderToOffscreen(logMag, fftW, fftH, lut, logMin, logMax);
-      setFftCropDims(origCropW > 0 ? { cropWidth: origCropW, cropHeight: origCropH, fftWidth: fftW, fftHeight: fftH } : null);
+      // Track FFT dimensions when they differ from image dimensions (ROI crop or non-pow2 padding)
+      if (origCropW > 0) {
+        setFftCropDims({ cropWidth: origCropW, cropHeight: origCropH, fftWidth: fftW, fftHeight: fftH });
+      } else if (fftW !== width || fftH !== height) {
+        setFftCropDims({ cropWidth: width, cropHeight: height, fftWidth: fftW, fftHeight: fftH });
+      } else {
+        setFftCropDims(null);
+      }
       // Trigger redraw
       if (fftCanvasRef.current && fftOffscreenRef.current) {
         const ctx = fftCanvasRef.current.getContext("2d");
         if (ctx) {
           fftCanvasRef.current.width = canvasW;
           fftCanvasRef.current.height = canvasH;
-          ctx.imageSmoothingEnabled = false;
+          ctx.imageSmoothingEnabled = fftW < canvasW || fftH < canvasH;
           ctx.clearRect(0, 0, canvasW, canvasH);
           ctx.drawImage(fftOffscreenRef.current, 0, 0, canvasW, canvasH);
         }
@@ -2476,8 +2500,8 @@ const render = createRender(() => {
                 onMouseLeave={handleFftMouseLeave}
               />
               <canvas ref={fftOverlayRef} width={Math.round(canvasW * DPR)} height={Math.round(canvasH * DPR)} style={{ position: "absolute", top: 0, left: 0, width: canvasW, height: canvasH, pointerEvents: "none" }} />
-              <Typography sx={{ position: "absolute", top: 4, left: 8, fontSize: 10, color: fftCropDims ? accentGreen : "#fff", textShadow: "0 0 3px #000" }}>
-                {fftCropDims ? `ROI FFT (${fftCropDims.cropWidth}\u00D7${fftCropDims.cropHeight})` : "FFT"}
+              <Typography sx={{ position: "absolute", top: 4, left: 8, fontSize: 10, color: roiFftActive && fftCropDims ? accentGreen : "#fff", textShadow: "0 0 3px #000" }}>
+                {roiFftActive && fftCropDims ? `ROI FFT (${fftCropDims.cropWidth}\u00D7${fftCropDims.cropHeight})` : "FFT"}
               </Typography>
             </Box>
           )}
@@ -2549,7 +2573,7 @@ const render = createRender(() => {
             </Select>
             <Typography sx={{ ...typography.labelSmall, color: tc.textMuted }}>Auto:</Typography>
             <Switch checked={autoContrast} onChange={(e) => setAutoContrast(e.target.checked)} disabled={lockDisplay} size="small" sx={switchStyles.small} />
-            {fftCropDims && (
+            {roiFftActive && fftCropDims && (
               <>
                 <Typography sx={{ ...typography.label, fontSize: 10 }}>Win:</Typography>
                 <Switch checked={fftWindow} onChange={(e) => { if (!lockDisplay) setFftWindow(e.target.checked); }} disabled={lockDisplay} size="small" sx={switchStyles.small} />

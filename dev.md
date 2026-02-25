@@ -101,7 +101,6 @@ quantem.widget/
 │   ├── edit2d/index.tsx
 │   ├── folder/index.tsx
 │   ├── mark2d/index.tsx
-│   ├── merge4dstem/index.tsx
 │   ├── show1d/index.tsx
 │   ├── show2d/index.tsx
 │   ├── show3d/index.tsx
@@ -123,7 +122,6 @@ quantem.widget/
 │   ├── edit2d.py
 │   ├── folder.py
 │   ├── mark2d.py
-│   ├── merge4dstem.py
 │   ├── show1d.py
 │   ├── show2d.py
 │   ├── show3d.py
@@ -188,7 +186,6 @@ many widgets. When in doubt, keep it in the widget file and extract later.
 | `Align2D` | Image alignment overlay with FFT-based auto-align | No |
 | `Bin` | Detector binning with live preview and batch export | Yes |
 | `Folder` | Folder browser for loading and viewing datasets | No |
-| `Merge4DSTEM` | 4D-STEM sector merging with alignment and stitching | Yes |
 
 ---
 
@@ -277,7 +274,7 @@ per click.** The widget never sends the full dataset to the browser.
 
 ### Where does the GPU work happen?
 
-`Show4DSTEM`, `Show4D`, `Bin`, and `Merge4DSTEM` are the widgets that use PyTorch
+`Show4DSTEM`, `Show4D`, and `Bin` are the widgets that use PyTorch
 and GPU. They load data by converting to NumPy first, then moving to a PyTorch
 tensor on the best available device:
 

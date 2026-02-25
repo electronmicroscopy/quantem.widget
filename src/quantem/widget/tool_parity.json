@@ -42,10 +42,6 @@
       "tool_groups": ["display", "binning", "mask", "preview", "stats", "export", "all"],
       "aliases": {}
     },
-    "Merge4DSTEM": {
-      "tool_groups": ["display", "sources", "merge", "preview", "stats", "export", "all"],
-      "aliases": {}
-    },
     "Show1D": {
       "tool_groups": ["display", "peaks", "stats", "export", "all"],
       "aliases": {}
