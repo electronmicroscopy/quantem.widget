@@ -8,6 +8,12 @@ Interactive Jupyter widgets for electron microscopy visualization. Works with Nu
 pip install quantem-widget
 ```
 
+Or with uv:
+
+```bash
+uv pip install quantem-widget
+```
+
 ## Quick Start
 
 ### Show1D - 1D Data Viewer
@@ -282,13 +288,32 @@ conda env remove -n test-widget-env -y
 
 ## Development
 
+### Option A: conda (recommended)
+
 ```bash
+conda create -n widget python=3.12 nodejs=20 -y
+conda activate widget
+pip install quantem
+
 git clone https://github.com/bobleesj/quantem.widget.git
 cd quantem.widget
 npm install
 npm run build
 pip install -e .
 ```
+
+### Option B: uv
+
+```bash
+git clone https://github.com/bobleesj/quantem.widget.git
+cd quantem.widget
+npm install
+npm run build
+uv sync
+```
+
+> **Note:** With `uv`, prefix Python commands with `uv run`, or activate with
+> `source .venv/bin/activate`.
 
 ## License
 

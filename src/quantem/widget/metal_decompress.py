@@ -460,9 +460,16 @@ def _parse_headers(
 
 def _metal_buffer_alloc(nbytes):
     """Allocate an MTLBuffer of given size (shared memory)."""
-    return _device.newBufferWithLength_options_(
+    buf = _device.newBufferWithLength_options_(
         nbytes, Metal.MTLResourceStorageModeShared
     )
+    if buf is None:
+        gb = nbytes / 1e9
+        raise MemoryError(
+            f"Metal buffer allocation failed ({gb:.1f} GB). "
+            f"Try a larger det_bin to reduce output size."
+        )
+    return buf
 
 
 def _numpy_view(mtl_buf, dtype, count):

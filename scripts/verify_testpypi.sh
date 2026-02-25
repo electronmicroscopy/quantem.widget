@@ -2,7 +2,7 @@
 # Verify quantem-widget from TestPyPI in a clean environment.
 #
 # Run this after pushing a version tag (which triggers CI publish).
-# It creates a fresh conda env, installs from TestPyPI, verifies imports,
+# It creates a fresh mamba env, installs from TestPyPI, verifies imports,
 # and opens JupyterLab for visual inspection.
 #
 # Usage:
@@ -10,7 +10,7 @@
 #   ./scripts/verify_testpypi.sh 0.0.4        # install specific version
 #
 # After verifying, press Ctrl+C to stop JupyterLab, then clean up:
-#   conda env remove -n test-widget-env -y
+#   mamba env remove -n test-widget-env -y
 #
 set -euo pipefail
 
@@ -19,7 +19,7 @@ NOTEBOOK="notebooks/test_pypi/test_all_widgets.ipynb"
 VERSION="${1:-}"
 PIP_VERSION="${VERSION:+==$VERSION}"
 
-# Find conda
+# Find conda/mamba
 CONDA_BASE="$(conda info --base 2>/dev/null || echo "$HOME/miniforge3")"
 source "$CONDA_BASE/etc/profile.d/conda.sh"
 
@@ -44,10 +44,10 @@ if [ -n "$VERSION" ]; then
 fi
 
 echo "==> Removing old env (if exists)..."
-conda env remove -n "$ENV_NAME" -y 2>/dev/null || true
+mamba env remove -n "$ENV_NAME" -y 2>/dev/null || true
 
 echo "==> Creating fresh env: $ENV_NAME (Python 3.11)..."
-conda create -n "$ENV_NAME" python=3.11 -y -q
+mamba create -n "$ENV_NAME" python=3.11 -y -q
 
 echo "==> Activating $ENV_NAME..."
 conda activate "$ENV_NAME"
@@ -65,8 +65,15 @@ echo "==> Verifying imports and JS bundles..."
 python -c "
 from quantem.widget import (
     Show1D, Show2D, Show3D, Show3DVolume, Show4D, Show4DSTEM,
-    ShowComplex2D, Mark2D, Edit2D, Align2D, Bin,
+    ShowComplex2D, Mark2D, Edit2D, Align2D, Bin, IO, IOResult,
 )
+import quantem.widget
+print(f'version: {quantem.widget.__version__}')
+import h5py, hdf5plugin, numba
+print(f'h5py: {h5py.__version__}, numba: {numba.__version__}')
+try:
+    import Metal; print('Metal: OK')
+except: print('Metal: not available')
 import numpy as np
 
 img = np.random.rand(64, 64).astype(np.float32)
@@ -98,6 +105,6 @@ print('All imports and instantiations passed.')
 echo ""
 echo "==> Opening JupyterLab — run all cells and visually verify each widget."
 echo "    Press Ctrl+C when done, then clean up with:"
-echo "    conda env remove -n $ENV_NAME -y"
+echo "    mamba env remove -n $ENV_NAME -y"
 echo ""
 jupyter lab "$NOTEBOOK"

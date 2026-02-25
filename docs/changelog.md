@@ -1,5 +1,11 @@
 # changelog
 
+## v0.0.10 (2026-02-25)
+
+### Shared
+- **Arina GPU deps now required** — h5py, hdf5plugin, numba, and pyobjc-framework-Metal (macOS) are installed automatically; no manual setup needed for GPU-accelerated Arina loading
+- graceful `MemoryError` when Metal buffer allocation fails (e.g. det_bin=1 on a dataset larger than RAM) — suggests using a larger det_bin instead of crashing with a cryptic error
+
 ## v0.0.9a1 (2026-02-23)
 
 ### Shared
