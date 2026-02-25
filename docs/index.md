@@ -1,15 +1,41 @@
 # quantem.widget
 
+[![TestPyPI](https://img.shields.io/pypi/v/quantem-widget?pypiBaseUrl=https://test.pypi.org&label=TestPyPI)](https://test.pypi.org/project/quantem-widget/)
+
 Interactive Jupyter widgets for electron microscopy visualization.
 Works with NumPy, CuPy, and PyTorch arrays.
 
-## Install (TestPyPI)
+> This package is currently on [TestPyPI](https://test.pypi.org/project/quantem-widget/) as a prototype. It will be merged into quantem's main repository once matured.
 
-Currently published on [TestPyPI](https://test.pypi.org/project/quantem-widget/) (not yet on PyPI).
+## How do I install quantem.widget?
 
 ```bash
+conda create -n widget-env python=3.14 -y
+conda activate widget-env
 pip install -i https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ quantem-widget
+pip install jupyterlab
+jupyter lab
 ```
+
+Verify:
+
+```bash
+python -c "import quantem.widget; print(quantem.widget.__version__)"
+```
+
+## How do I update quantem.widget?
+
+New features and fixes are released frequently. Check the badge above for the latest version, see what's new in the [changelog](changelog), and run:
+
+```bash
+conda activate widget-env
+pip install -i https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ --upgrade quantem-widget
+python -c "import quantem.widget; print(quantem.widget.__version__)"
+```
+
+## How do I report bugs or request features?
+
+Open an issue at [github.com/bobleesj/quantem.widget/issues](https://github.com/bobleesj/quantem.widget/issues). Please follow the [issue guidelines](https://github.com/ophusgroup/dev?tab=readme-ov-file#github-issues-and-pull-requests).
 
 ## IO
 
