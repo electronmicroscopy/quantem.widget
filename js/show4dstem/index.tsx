@@ -3694,8 +3694,8 @@ function Show4DSTEM() {
               )}
               {!hideExport && (
                 <Menu anchorEl={dpExportAnchor} open={Boolean(dpExportAnchor)} onClose={() => setDpExportAnchor(null)} anchorOrigin={{ vertical: "bottom", horizontal: "left" }} transformOrigin={{ vertical: "top", horizontal: "left" }} sx={{ zIndex: 9999 }}>
-                  <MenuItem disabled={lockExport} onClick={() => handleDpExportFigure(true)} sx={{ fontSize: 12 }}>Figure + colorbar</MenuItem>
-                  <MenuItem disabled={lockExport} onClick={() => handleDpExportFigure(false)} sx={{ fontSize: 12 }}>Figure</MenuItem>
+                  <MenuItem disabled={lockExport} onClick={() => handleDpExportFigure(true)} sx={{ fontSize: 12 }}>PDF + colorbar</MenuItem>
+                  <MenuItem disabled={lockExport} onClick={() => handleDpExportFigure(false)} sx={{ fontSize: 12 }}>PDF</MenuItem>
                   <MenuItem disabled={lockExport} onClick={handleDpExportPng} sx={{ fontSize: 12 }}>PNG</MenuItem>
                   <MenuItem disabled={lockExport} onClick={() => { if (!lockExport) { setDpExportAnchor(null); handleExportDP(); } }} sx={{ fontSize: 12 }}>ZIP (PNG + metadata)</MenuItem>
                   {pathLength > 0 && <MenuItem disabled={lockExport} onClick={handleDpExportGif} sx={{ fontSize: 12 }}>GIF (path animation)</MenuItem>}
@@ -3910,8 +3910,8 @@ function Show4DSTEM() {
               )}
               {!hideExport && (
                 <Menu anchorEl={viExportAnchor} open={Boolean(viExportAnchor)} onClose={() => setViExportAnchor(null)} anchorOrigin={{ vertical: "bottom", horizontal: "left" }} transformOrigin={{ vertical: "top", horizontal: "left" }} sx={{ zIndex: 9999 }}>
-                  <MenuItem disabled={lockExport || lockVirtual} onClick={() => handleViExportFigure(true)} sx={{ fontSize: 12 }}>Figure + colorbar</MenuItem>
-                  <MenuItem disabled={lockExport || lockVirtual} onClick={() => handleViExportFigure(false)} sx={{ fontSize: 12 }}>Figure</MenuItem>
+                  <MenuItem disabled={lockExport || lockVirtual} onClick={() => handleViExportFigure(true)} sx={{ fontSize: 12 }}>PDF + colorbar</MenuItem>
+                  <MenuItem disabled={lockExport || lockVirtual} onClick={() => handleViExportFigure(false)} sx={{ fontSize: 12 }}>PDF</MenuItem>
                   <MenuItem disabled={lockExport || lockVirtual} onClick={handleViExportPng} sx={{ fontSize: 12 }}>PNG</MenuItem>
                   <MenuItem disabled={lockExport || lockVirtual} onClick={() => { if (!lockExport && !lockVirtual) { setViExportAnchor(null); handleExportVI(); } }} sx={{ fontSize: 12 }}>ZIP (all panels + metadata)</MenuItem>
                 </Menu>

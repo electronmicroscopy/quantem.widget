@@ -20,6 +20,7 @@ export interface VolumeRenderParams {
   opacity: number;       // global opacity multiplier 0..1
   brightness: number;    // brightness adjustment 0.1..3
   showSlicePlanes: boolean;  // toggle slice plane indicators
+  slicePlaneOpacity: number; // slice plane alpha 0..1 (default 0.35)
   vmin: number;  // 0..1 normalized (maps to texture's [0,1] range)
   vmax: number;  // 0..1 normalized
 }
@@ -167,7 +168,7 @@ struct Uniforms {
   showSlicePlanes: u32,
   vmin: f32,
   vmax: f32,
-  _pad3: f32,
+  slicePlaneOpacity: f32,
   _pad4: f32,
   _pad5: f32,
 }
@@ -291,7 +292,7 @@ fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
       sliceValXY = clamp((sliceValXY - u.vmin) / (u.vmax - u.vmin), 0.0, 1.0);
       var sliceCol = textureSampleLevel(colormap, colormapSampler, vec2<f32>(clamp(sliceValXY * u.brightness, 0.0, 1.0), 0.5), 0.0).rgb;
       sliceCol = mix(sliceCol, vec3<f32>(0.3, 0.5, 1.0), 0.25);
-      let sliceAlpha = 0.35 * (1.0 - accum.a);
+      let sliceAlpha = u.slicePlaneOpacity * (1.0 - accum.a);
       accum = vec4<f32>(accum.rgb + sliceCol * sliceAlpha, accum.a + sliceAlpha);
       tSliceXY = -1.0;
     }
@@ -303,7 +304,7 @@ fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
       sliceValXZ = clamp((sliceValXZ - u.vmin) / (u.vmax - u.vmin), 0.0, 1.0);
       var sliceCol = textureSampleLevel(colormap, colormapSampler, vec2<f32>(clamp(sliceValXZ * u.brightness, 0.0, 1.0), 0.5), 0.0).rgb;
       sliceCol = mix(sliceCol, vec3<f32>(0.3, 1.0, 0.4), 0.25);
-      let sliceAlpha = 0.35 * (1.0 - accum.a);
+      let sliceAlpha = u.slicePlaneOpacity * (1.0 - accum.a);
       accum = vec4<f32>(accum.rgb + sliceCol * sliceAlpha, accum.a + sliceAlpha);
       tSliceXZ = -1.0;
     }
@@ -315,7 +316,7 @@ fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
       sliceValYZ = clamp((sliceValYZ - u.vmin) / (u.vmax - u.vmin), 0.0, 1.0);
       var sliceCol = textureSampleLevel(colormap, colormapSampler, vec2<f32>(clamp(sliceValYZ * u.brightness, 0.0, 1.0), 0.5), 0.0).rgb;
       sliceCol = mix(sliceCol, vec3<f32>(1.0, 0.3, 0.3), 0.25);
-      let sliceAlpha = 0.35 * (1.0 - accum.a);
+      let sliceAlpha = u.slicePlaneOpacity * (1.0 - accum.a);
       accum = vec4<f32>(accum.rgb + sliceCol * sliceAlpha, accum.a + sliceAlpha);
       tSliceYZ = -1.0;
     }
@@ -364,7 +365,8 @@ fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
 // 136     showSlicePlanes    u32                 4
 // 140     vmin               f32                 4
 // 144     vmax               f32                 4
-// 148-159 padding            3×f32              12
+// 148     slicePlaneOpacity  f32                 4
+// 152-159 padding            2×f32               8
 // total: 160 bytes (must be multiple of 16)
 
 const UNIFORM_BUFFER_SIZE = 160;
@@ -630,6 +632,8 @@ export class VolumeRenderer {
     f32[35] = params.vmin;
     // vmax at offset 144/4=36
     f32[36] = params.vmax;
+    // slicePlaneOpacity at offset 148/4=37
+    f32[37] = params.slicePlaneOpacity ?? 0.35;
 
     this.device.queue.writeBuffer(this.uniformBuffer, 0, uniformData);
 

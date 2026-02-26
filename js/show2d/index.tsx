@@ -2985,9 +2985,9 @@ function Show2D() {
               <>
                 <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} disabled={lockExport} onClick={(e) => { if (!lockExport) setExportAnchor(e.currentTarget); }}>Export</Button>
                 <Menu anchorEl={exportAnchor} open={Boolean(exportAnchor)} onClose={() => setExportAnchor(null)} anchorOrigin={{ vertical: "bottom", horizontal: "left" }} transformOrigin={{ vertical: "top", horizontal: "left" }} sx={{ zIndex: 9999 }}>
-                  <MenuItem disabled={lockExport} onClick={() => handleExportFigure(true, true)} sx={{ fontSize: 12 }}>Figure + scalebar + colorbar</MenuItem>
-                  <MenuItem disabled={lockExport} onClick={() => handleExportFigure(true, false)} sx={{ fontSize: 12 }}>Figure + scalebar</MenuItem>
-                  <MenuItem disabled={lockExport} onClick={() => handleExportFigure(false, false)} sx={{ fontSize: 12 }}>Figure</MenuItem>
+                  <MenuItem disabled={lockExport} onClick={() => handleExportFigure(true, true)} sx={{ fontSize: 12 }}>PDF + scalebar + colorbar</MenuItem>
+                  <MenuItem disabled={lockExport} onClick={() => handleExportFigure(true, false)} sx={{ fontSize: 12 }}>PDF + scalebar</MenuItem>
+                  <MenuItem disabled={lockExport} onClick={() => handleExportFigure(false, false)} sx={{ fontSize: 12 }}>PDF</MenuItem>
                   <MenuItem disabled={lockExport} onClick={handleExportAll} sx={{ fontSize: 12 }}>All (PNG + PDF)</MenuItem>
                 </Menu>
                 <Button size="small" sx={compactButton} disabled={lockExport} onClick={handleCopy}>Copy</Button>

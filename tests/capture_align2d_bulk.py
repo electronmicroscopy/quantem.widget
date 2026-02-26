@@ -24,7 +24,7 @@ JUPYTER_PORT = 8899
 SCREENSHOT_DIR = Path(__file__).parent / "screenshots" / "align2d_bulk"
 NOTEBOOK_PATH = Path(__file__).parent / "_test_align2d_bulk.ipynb"
 
-FEATURE_NAMES = ["before_after"]
+FEATURE_NAMES = ["before_after", "fft_toggle"]
 
 def create_test_notebook():
     notebook = {
@@ -207,6 +207,27 @@ def main():
             time.sleep(30)
 
             capture_widgets(page, "light")
+
+            # Toggle FFT on the widget via JS
+            try:
+                page.evaluate("""() => {
+                    const switches = document.querySelectorAll('.align2d-bulk-root .MuiSwitch-input');
+                    for (const sw of switches) sw.click();
+                }""")
+                time.sleep(2)
+                theme_dir = SCREENSHOT_DIR / "light"
+                widgets = page.locator(".align2d-bulk-root")
+                if widgets.count() > 0:
+                    widgets.nth(0).screenshot(path=str(theme_dir / "fft_toggle.png"))
+                    print("  Saved: fft_toggle.png (FFT on)")
+                # Toggle back off
+                page.evaluate("""() => {
+                    const switches = document.querySelectorAll('.align2d-bulk-root .MuiSwitch-input');
+                    for (const sw of switches) sw.click();
+                }""")
+                time.sleep(1)
+            except Exception as e:
+                print(f"  Warning: FFT toggle test failed: {e}")
 
             # Dark theme
             page.evaluate("""() => {

@@ -45,7 +45,7 @@ def test_bulk_recovers_integer_shift():
     ref = rng.random((64, 64)).astype(np.float32)
     shifted = np.roll(ref, (3, -5), axis=(0, 1))
     stack = np.stack([ref, shifted], axis=0)
-    w = Align2DBulk(stack, reference=0, max_shift=10, crop=False)
+    w = Align2DBulk(stack, reference=0, max_shift=10)
     dx, dy = w.offsets[1]
     # roll(3, -5) -> undo is dx=+5, dy=-3
     assert dx == pytest.approx(5.0, abs=1.5)
@@ -59,24 +59,23 @@ def test_bulk_subpixel_shift():
     ref = rng.random((64, 64)).astype(np.float32)
     shifted = _fourier_shift(ref, 2.3, -1.7)
     stack = np.stack([ref, shifted], axis=0)
-    w = Align2DBulk(stack, reference=0, max_shift=10, crop=False)
+    w = Align2DBulk(stack, reference=0, max_shift=10)
     dx, dy = w.offsets[1]
     assert abs(dx - 1.7) < 0.3, f"dx={dx}, expected ~1.7"
     assert abs(dy - (-2.3)) < 0.3, f"dy={dy}, expected ~-2.3"
 
 
-# === Crop vs no-crop ===
+# === Crop ===
 
 def test_bulk_crop_shrinks_output():
     rng = np.random.default_rng(42)
     ref = rng.random((64, 64)).astype(np.float32)
     shifted = np.roll(ref, (3, -5), axis=(0, 1))
     stack = np.stack([ref, shifted], axis=0)
-    w_crop = Align2DBulk(stack, reference=0, max_shift=10, crop=True)
-    w_nocrop = Align2DBulk(stack, reference=0, max_shift=10, crop=False)
-    assert w_crop.stack.shape[1] < w_nocrop.stack.shape[1] or w_crop.stack.shape[2] < w_nocrop.stack.shape[2]
-    assert w_crop.crop_box is not None
-    assert w_nocrop.crop_box is None
+    w = Align2DBulk(stack, reference=0, max_shift=10)
+    # Alignment always crops to common overlap — output should be smaller than input
+    assert w.stack.shape[1] < 64 or w.stack.shape[2] < 64
+    assert w.crop_box is not None
 
 
 # === max_shift clamping ===
@@ -86,7 +85,7 @@ def test_bulk_max_shift_clamps():
     ref = rng.random((64, 64)).astype(np.float32)
     shifted = np.roll(ref, (10, -15), axis=(0, 1))
     stack = np.stack([ref, shifted], axis=0)
-    w = Align2DBulk(stack, reference=0, max_shift=3, crop=False)
+    w = Align2DBulk(stack, reference=0, max_shift=3)
     dx, dy = w.offsets[1]
     assert abs(dx) <= 3.01
     assert abs(dy) <= 3.01
@@ -97,14 +96,20 @@ def test_bulk_max_shift_clamps():
 def test_bulk_bin_factor():
     rng = np.random.default_rng(42)
     stack = rng.random((3, 64, 64)).astype(np.float32)
-    w = Align2DBulk(stack, reference=0, bin=2, crop=False)
-    assert w.stack.shape == (3, 32, 32)
+    w = Align2DBulk(stack, reference=0, bin=2)
+    # After crop + bin, output is smaller than 32×32 (half of 64)
+    assert w.stack.shape[1] <= 32
+    assert w.stack.shape[2] <= 32
+    assert w.bin_factor == 2
 
 def test_bulk_bin_factor_4():
     rng = np.random.default_rng(42)
     stack = rng.random((3, 64, 64)).astype(np.float32)
-    w = Align2DBulk(stack, reference=0, bin=4, crop=False)
-    assert w.stack.shape == (3, 16, 16)
+    w = Align2DBulk(stack, reference=0, bin=4)
+    # After crop + bin, output is smaller than 16×16 (quarter of 64)
+    assert w.stack.shape[1] <= 16
+    assert w.stack.shape[2] <= 16
+    assert w.bin_factor == 4
 
 
 # === Non-zero reference ===
@@ -114,7 +119,7 @@ def test_bulk_nonzero_reference():
     ref = rng.random((64, 64)).astype(np.float32)
     shifted = np.roll(ref, (3, 5), axis=(0, 1))
     stack = np.stack([shifted, ref, shifted.copy()], axis=0)
-    w = Align2DBulk(stack, reference=1, max_shift=10, crop=False)
+    w = Align2DBulk(stack, reference=1, max_shift=10)
     assert w.offsets[1] == (0.0, 0.0)
     assert w.ncc[1] == pytest.approx(1.0)
     assert w.reference_idx == 1
@@ -126,7 +131,7 @@ def test_bulk_ncc_high_for_identical():
     rng = np.random.default_rng(42)
     ref = rng.random((32, 32)).astype(np.float32)
     stack = np.stack([ref, ref.copy(), ref.copy()], axis=0)
-    w = Align2DBulk(stack, reference=0, crop=False)
+    w = Align2DBulk(stack, reference=0)
     for ncc_val in w.ncc:
         assert ncc_val > 0.95
 
@@ -136,25 +141,25 @@ def test_bulk_ncc_high_for_identical():
 def test_bulk_repr():
     rng = np.random.default_rng(42)
     stack = rng.random((3, 32, 32)).astype(np.float32)
-    w = Align2DBulk(stack, reference=0, crop=False)
+    w = Align2DBulk(stack, reference=0)
     r = repr(w)
     assert "Align2DBulk" in r
     assert "3 frames" in r
 
-def test_bulk_summary(capsys):
+def test_bulk_summary():
     rng = np.random.default_rng(42)
     stack = rng.random((3, 32, 32)).astype(np.float32)
-    w = Align2DBulk(stack, reference=0, title="Test bulk", crop=False)
-    w.summary()
-    out = capsys.readouterr().out
-    assert "Test bulk" in out
-    assert "3" in out
+    w = Align2DBulk(stack, reference=0, title="Test bulk")
+    r = repr(w)
+    assert "3 frames" in r
+    assert "drift" in r
+    assert "NCC" in r
 
 def test_bulk_offsets_json_parseable():
     import json
     rng = np.random.default_rng(42)
     stack = rng.random((3, 32, 32)).astype(np.float32)
-    w = Align2DBulk(stack, reference=0, crop=False)
+    w = Align2DBulk(stack, reference=0)
     entries = json.loads(w.offsets_json)
     assert len(entries) == 3
     assert "dx" in entries[0]
@@ -164,6 +169,6 @@ def test_bulk_offsets_json_parseable():
 def test_bulk_bytes_not_empty():
     rng = np.random.default_rng(42)
     stack = rng.random((3, 32, 32)).astype(np.float32)
-    w = Align2DBulk(stack, reference=0, crop=False)
+    w = Align2DBulk(stack, reference=0)
     assert len(w.ref_bytes) > 0
     assert len(w.frame_bytes) > 0

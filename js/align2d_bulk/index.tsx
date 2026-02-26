@@ -14,13 +14,16 @@ import Select from "@mui/material/Select";
 import MenuItem from "@mui/material/MenuItem";
 import Button from "@mui/material/Button";
 import Switch from "@mui/material/Switch";
+import Tooltip from "@mui/material/Tooltip";
+import Menu from "@mui/material/Menu";
 import "./align2d_bulk.css";
 import { useTheme } from "../theme";
 import { COLORMAPS, COLORMAP_NAMES, renderToOffscreen } from "../colormaps";
 import { extractFloat32, downloadBlob } from "../format";
+import { canvasToPDF } from "../scalebar";
 import { computeHistogramFromBytes } from "../histogram";
 import { findDataRange, sliderRange, applyLogScale } from "../stats";
-import { fft2d, fftshift, computeMagnitude, autoEnhanceFFT } from "../webgpu-fft";
+import { fft2d, fftshift, computeMagnitude, autoEnhanceFFT, getWebGPUFFT, WebGPUFFT } from "../webgpu-fft";
 import { computeToolVisibility } from "../tool-parity";
 import { ControlCustomizer } from "../control-customizer";
 
@@ -72,6 +75,27 @@ const compactButton = {
   px: 1,
   minWidth: 0,
 };
+
+// Info tooltip component (matching Show3D)
+function InfoTooltip({ text, theme = "dark" }: { text: React.ReactNode; theme?: "light" | "dark" }) {
+  const isDark = theme === "dark";
+  const content = typeof text === "string"
+    ? <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>{text}</Typography>
+    : text;
+  return (
+    <Tooltip
+      title={content}
+      arrow
+      placement="bottom"
+      componentsProps={{
+        tooltip: { sx: { bgcolor: isDark ? "#333" : "#fff", color: isDark ? "#ddd" : "#333", border: `1px solid ${isDark ? "#555" : "#ccc"}`, maxWidth: 320, p: 1 } },
+        arrow: { sx: { color: isDark ? "#333" : "#fff", "&::before": { border: `1px solid ${isDark ? "#555" : "#ccc"}` } } },
+      }}
+    >
+      <Typography component="span" sx={{ fontSize: 12, color: isDark ? "#888" : "#666", cursor: "help", ml: 0.5, "&:hover": { color: isDark ? "#aaa" : "#444" } }}>ⓘ</Typography>
+    </Tooltip>
+  );
+}
 
 const DPR = window.devicePixelRatio || 1;
 const PANEL_SIZE = 350;
@@ -628,7 +652,7 @@ function useImagePanel(
 }
 
 // ============================================================================
-// FFT panel — computes and renders FFT of a float32 image
+// FFT panel — computes FFT (expensive, cached) then renders with scale/colormap (cheap)
 // ============================================================================
 function useFFTPanel(
   bytes: DataView | null,
@@ -639,26 +663,68 @@ function useFFTPanel(
   panY: number,
   canvasW: number,
   canvasH: number,
-  theme: "light" | "dark",
+  gpuFFTRef: React.MutableRefObject<WebGPUFFT | null>,
+  gpuReady: boolean,
+  scaleMode: "linear" | "log" | "power",
+  colormap: string,
+  autoEnhance: boolean,
 ) {
   const canvasRef = React.useRef<HTMLCanvasElement>(null);
   const offscreenRef = React.useRef<HTMLCanvasElement | null>(null);
-  const [version, setVersion] = React.useState(0);
+  const magCacheRef = React.useRef<Float32Array | null>(null);
+  const [magVersion, setMagVersion] = React.useState(0);
+  const [renderVersion, setRenderVersion] = React.useState(0);
 
+  // Step 1: Compute FFT magnitude (expensive, only when image data changes)
   React.useEffect(() => {
     const parsed = extractFloat32(bytes);
     if (!parsed || !imgW || !imgH) return;
-    const complex = fft2d(parsed, imgW, imgH);
-    const shifted = fftshift(complex, imgW, imgH);
-    const mag = computeMagnitude(shifted);
-    const enhanced = autoEnhanceFFT(mag, imgW, imgH);
-    const log = applyLogScale(enhanced);
-    const lut = COLORMAPS.gray;
-    const range = findDataRange(log);
-    offscreenRef.current = renderToOffscreen(log, imgW, imgH, lut, range.min, range.max);
-    setVersion(v => v + 1);
-  }, [bytes, imgW, imgH]);
+    let cancelled = false;
+    const doCompute = async () => {
+      const real = parsed.slice();
+      const imag = new Float32Array(parsed.length);
+      let fReal: Float32Array, fImag: Float32Array;
+      if (gpuFFTRef.current && gpuReady) {
+        const result = await gpuFFTRef.current.fft2D(real, imag, imgW, imgH, false);
+        fReal = result.real;
+        fImag = result.imag;
+      } else {
+        fft2d(real, imag, imgW, imgH, false);
+        fReal = real;
+        fImag = imag;
+      }
+      if (cancelled) return;
+      fftshift(fReal, imgW, imgH);
+      fftshift(fImag, imgW, imgH);
+      magCacheRef.current = computeMagnitude(fReal, fImag);
+      setMagVersion(v => v + 1);
+    };
+    doCompute();
+    return () => { cancelled = true; };
+  }, [bytes, imgW, imgH, gpuReady]);
 
+  // Step 2: Apply scale mode + colormap (cheap, runs when display settings change)
+  React.useEffect(() => {
+    const rawMag = magCacheRef.current;
+    if (!rawMag || !imgW || !imgH) return;
+    const magnitude = new Float32Array(rawMag.length);
+    for (let i = 0; i < rawMag.length; i++) {
+      if (scaleMode === "log") magnitude[i] = Math.log1p(rawMag[i]);
+      else if (scaleMode === "power") magnitude[i] = Math.pow(rawMag[i], 0.5);
+      else magnitude[i] = rawMag[i];
+    }
+    let displayMin: number, displayMax: number;
+    if (autoEnhance) {
+      ({ min: displayMin, max: displayMax } = autoEnhanceFFT(magnitude, imgW, imgH));
+    } else {
+      ({ min: displayMin, max: displayMax } = findDataRange(magnitude));
+    }
+    const lut = COLORMAPS[colormap] || COLORMAPS.gray;
+    offscreenRef.current = renderToOffscreen(magnitude, imgW, imgH, lut, displayMin, displayMax);
+    setRenderVersion(v => v + 1);
+  }, [magVersion, imgW, imgH, scaleMode, colormap, autoEnhance]);
+
+  // Step 3: Draw to canvas with zoom/pan
   React.useLayoutEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -679,7 +745,7 @@ function useFFTPanel(
     const dh = canvasH / zoom;
     ctx.drawImage(off, 0, 0, imgW, imgH, 0, 0, dw, dh);
     ctx.restore();
-  }, [version, canvasW, canvasH, imgW, imgH, zoom, panX, panY]);
+  }, [renderVersion, canvasW, canvasH, imgW, imgH, zoom, panX, panY]);
 
   return canvasRef;
 }
@@ -772,6 +838,15 @@ function Align2DBulk() {
     return opts.filter(v => v <= nImages);
   }, [nImages]);
 
+  // WebGPU FFT (shared across both panels)
+  const gpuFFTRef = React.useRef<WebGPUFFT | null>(null);
+  const [gpuReady, setGpuReady] = React.useState(false);
+  React.useEffect(() => {
+    getWebGPUFFT().then(fft => {
+      if (fft) { gpuFFTRef.current = fft; setGpuReady(true); }
+    });
+  }, []);
+
   // Shared view state
   const [zoom, setZoom] = React.useState(1);
   const [panX, setPanX] = React.useState(0);
@@ -781,6 +856,9 @@ function Align2DBulk() {
   const [vminPct, setVminPct] = React.useState(0);
   const [vmaxPct, setVmaxPct] = React.useState(100);
   const [showFFT, setShowFFT] = React.useState(false);
+  const [fftScaleMode, setFftScaleMode] = React.useState<"linear" | "log" | "power">("log");
+  const [fftColormap, setFftColormap] = React.useState("gray");
+  const [fftAuto, setFftAuto] = React.useState(true);
 
   // Histogram data from aligned frame
   const histData = React.useMemo(() => extractFloat32(frameBytes), [frameBytes]);
@@ -821,10 +899,16 @@ function Align2DBulk() {
     { refBytes, opacity, blendMode, flickerShowRef },
   );
 
-  // FFT panel (computed from aligned frame)
-  const fftRef = useFFTPanel(
+  // FFT panels — one for Before (raw), one for After (aligned)
+  const fftBeforeRef = useFFTPanel(
+    showFFT ? rawFrameBytes : null, rawW, rawH,
+    zoom, panX, panY, panelW, panelH, gpuFFTRef, gpuReady,
+    fftScaleMode, fftColormap, fftAuto,
+  );
+  const fftAfterRef = useFFTPanel(
     showFFT ? frameBytes : null, imgW, imgH,
-    zoom, panX, panY, panelW, panelH, themeInfo.theme,
+    zoom, panX, panY, panelW, panelH, gpuFFTRef, gpuReady,
+    fftScaleMode, fftColormap, fftAuto,
   );
 
   // Shared zoom/pan handlers
@@ -916,28 +1000,68 @@ function Align2DBulk() {
   };
 
   // Export
-  const handleExportPNG = () => {
-    const canvas = afterRef.current;
-    if (!canvas || lockExport) return;
-    canvas.toBlob((b) => { if (b) downloadBlob(b, "align2d_bulk.png"); }, "image/png");
+  const [exportAnchor, setExportAnchor] = React.useState<HTMLElement | null>(null);
+  const composeSideBySide = () => {
+    const bCanvas = beforeRef.current;
+    const aCanvas = afterRef.current;
+    if (!bCanvas || !aCanvas) return null;
+    const gap = 16;
+    const labelH = 24;
+    const cw = bCanvas.width + aCanvas.width + gap;
+    let ch = Math.max(bCanvas.height, aCanvas.height) + labelH;
+    // Include FFT row if visible
+    const fftBCanvas = showFFT ? fftBeforeRef.current : null;
+    const fftACanvas = showFFT ? fftAfterRef.current : null;
+    if (fftBCanvas && fftACanvas) ch += gap + Math.max(fftBCanvas.height, fftACanvas.height) + labelH;
+    const composite = document.createElement("canvas");
+    composite.width = cw;
+    composite.height = ch;
+    const ctx = composite.getContext("2d");
+    if (!ctx) return null;
+    ctx.fillStyle = "#000";
+    ctx.fillRect(0, 0, cw, ch);
+    ctx.fillStyle = "#aaa";
+    ctx.font = `${14 * DPR}px monospace`;
+    ctx.fillText(avgWindow > 1 ? `Before (avg ${avgWindow})` : "Before", 4, 16 * DPR);
+    ctx.fillText("After (aligned)", bCanvas.width + gap + 4, 16 * DPR);
+    ctx.drawImage(bCanvas, 0, labelH);
+    ctx.drawImage(aCanvas, bCanvas.width + gap, labelH);
+    if (fftBCanvas && fftACanvas) {
+      const fftY = labelH + Math.max(bCanvas.height, aCanvas.height) + gap;
+      ctx.fillText("FFT (before)", 4, fftY + 16 * DPR);
+      ctx.fillText("FFT (aligned)", fftBCanvas.width + gap + 4, fftY + 16 * DPR);
+      ctx.drawImage(fftBCanvas, 0, fftY + labelH);
+      ctx.drawImage(fftACanvas, fftBCanvas.width + gap, fftY + labelH);
+    }
+    return composite;
+  };
+  const handleExportFigure = async () => {
+    if (lockExport) return;
+    setExportAnchor(null);
+    const composite = composeSideBySide();
+    if (!composite) return;
+    const blob = await canvasToPDF(composite);
+    downloadBlob(blob, "align2d_bulk.pdf");
   };
   const handleCopy = async () => {
-    const canvas = afterRef.current;
-    if (!canvas || lockExport) return;
+    if (lockExport) return;
+    const composite = composeSideBySide();
+    if (!composite) return;
     try {
-      const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, "image/png"));
+      const blob = await new Promise<Blob | null>(resolve => composite.toBlob(resolve, "image/png"));
       if (blob) await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
     } catch {
-      handleExportPNG();
+      composite.toBlob((b) => { if (b) downloadBlob(b, "align2d_bulk.png"); }, "image/png");
     }
   };
 
   const canvasStyle = { cursor: "move", display: "block" } as const;
   const panelLabel = { ...typography.labelSmall, color: themeColors.textMuted, mb: 0.25 };
-  const chartH = 90;
-  const driftXYSize = chartH;
-  const nccW = Math.round((totalW - driftXYSize - SPACING.XS * 2) * 0.4);
-  const driftTimeW = totalW - nccW - driftXYSize - SPACING.XS * 2;
+  const chartH = 140;
+  const driftXYSize = chartH + 28; // bigger square for DriftXY (sits next to frame slider)
+  const sliderW = panelW;
+  const nccW = Math.round((totalW - SPACING.XS) * 0.4);
+  const driftTimeW = totalW - nccW - SPACING.XS;
 
   return (
     <Box
@@ -947,10 +1071,11 @@ function Align2DBulk() {
       onKeyDown={handleKeyDown}
     >
       {/* Title + settings */}
-      <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 0.5, width: totalW }}>
+      <Typography sx={{ mb: 0.5, width: totalW }}>
         {title && (
-          <Typography sx={{ ...typography.label, fontWeight: "bold" }}>{title}</Typography>
+          <Typography component="span" sx={{ ...typography.label, fontWeight: "bold" }}>{title}</Typography>
         )}
+        {" "}
         <ControlCustomizer
           widgetName="Align2DBulk"
           hiddenTools={hiddenTools}
@@ -959,7 +1084,27 @@ function Align2DBulk() {
           setDisabledTools={setDisabledTools}
           themeColors={themeColors}
         />
-      </Stack>
+      </Typography>
+
+      {/* Controls row: toggles on left, Export/Copy on right */}
+      <Box sx={{ display: "flex", alignItems: "center", gap: "4px", mb: `${SPACING.XS}px`, height: 28, width: totalW }}>
+        {!hideDisplay && (
+          <>
+            <Typography sx={{ ...typography.label, fontSize: 10 }}>FFT:</Typography>
+            <Switch checked={showFFT} onChange={(e) => setShowFFT(e.target.checked)} disabled={lockDisplay} size="small" sx={switchStyles.small} />
+          </>
+        )}
+        <Box sx={{ flex: 1 }} />
+        {!hideExport && (
+          <>
+            <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} disabled={lockExport} onClick={(e) => { if (!lockExport) setExportAnchor(e.currentTarget); }}>Export</Button>
+            <Menu anchorEl={exportAnchor} open={Boolean(exportAnchor)} onClose={() => setExportAnchor(null)} anchorOrigin={{ vertical: "bottom", horizontal: "left" }} transformOrigin={{ vertical: "top", horizontal: "left" }} sx={{ zIndex: 9999 }}>
+              <MenuItem disabled={lockExport} onClick={handleExportFigure} sx={{ fontSize: 12 }}>Figure (PDF)</MenuItem>
+            </Menu>
+            <Button size="small" sx={compactButton} disabled={lockExport} onClick={handleCopy}>Copy</Button>
+          </>
+        )}
+      </Box>
 
       {/* ═══ Side-by-side panels ═══ */}
       <Box
@@ -981,14 +1126,9 @@ function Align2DBulk() {
 
         {/* After panel */}
         <Box>
-          <Typography sx={panelLabel}>
-            {showFFT ? "FFT (aligned)" : "After (aligned)"}
-          </Typography>
+          <Typography sx={panelLabel}>After (aligned)</Typography>
           <Box sx={{ bgcolor: "#000", border: "1px solid #444", overflow: "hidden", position: "relative" }}>
-            <canvas
-              ref={showFFT ? fftRef : afterRef}
-              style={{ ...canvasStyle, width: panelW, height: panelH }}
-            />
+            <canvas ref={afterRef} style={{ ...canvasStyle, width: panelW, height: panelH }} />
             {/* Resize handle */}
             {!hideView && (
               <Box
@@ -1011,68 +1151,139 @@ function Align2DBulk() {
         </Box>
       </Box>
 
+      {/* ═══ FFT row (below main panels) ═══ */}
+      {showFFT && (
+        <>
+          <Box
+            sx={{ display: "flex", gap: `${SPACING.SM}px`, mt: `${SPACING.XS}px` }}
+            onWheel={handleWheel}
+            onMouseDown={handleMouseDown}
+            onDoubleClick={handleDoubleClick}
+          >
+            <Box>
+              <Typography sx={panelLabel}>FFT (before)</Typography>
+              <Box sx={{ bgcolor: "#000", border: "1px solid #444", overflow: "hidden" }}>
+                <canvas ref={fftBeforeRef} style={{ ...canvasStyle, width: panelW, height: panelH }} />
+              </Box>
+            </Box>
+            <Box>
+              <Typography sx={panelLabel}>FFT (aligned)</Typography>
+              <Box sx={{ bgcolor: "#000", border: "1px solid #444", overflow: "hidden" }}>
+                <canvas ref={fftAfterRef} style={{ ...canvasStyle, width: panelW, height: panelH }} />
+              </Box>
+            </Box>
+          </Box>
+          {/* FFT controls */}
+          <Box sx={{ ...controlRow, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, mt: `${SPACING.XS}px`, opacity: lockDisplay ? 0.5 : 1, pointerEvents: lockDisplay ? "none" : "auto" }}>
+            <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted }}>Scale:</Typography>
+            <Select
+              value={fftScaleMode}
+              onChange={(e) => { if (!lockDisplay) setFftScaleMode(e.target.value as "linear" | "log" | "power"); }}
+              size="small" disabled={lockDisplay}
+              sx={{ ...themedSelect, minWidth: 50, fontSize: 10 }}
+              MenuProps={themedMenuProps}
+            >
+              <MenuItem value="linear">Lin</MenuItem>
+              <MenuItem value="log">Log</MenuItem>
+              <MenuItem value="power">Pow</MenuItem>
+            </Select>
+            <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted }}>Color:</Typography>
+            <Select
+              value={fftColormap}
+              onChange={(e) => { if (!lockDisplay) setFftColormap(String(e.target.value)); }}
+              size="small" disabled={lockDisplay}
+              sx={{ ...themedSelect, minWidth: 65, fontSize: 10 }}
+              MenuProps={themedMenuProps}
+            >
+              {COLORMAP_NAMES.map((name) => (
+                <MenuItem key={name} value={name}>{name.charAt(0).toUpperCase() + name.slice(1)}</MenuItem>
+              ))}
+            </Select>
+            <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted }}>Auto:</Typography>
+            <Switch checked={fftAuto} onChange={(e) => { if (!lockDisplay) setFftAuto(e.target.checked); }} disabled={lockDisplay} size="small" sx={switchStyles.small} />
+          </Box>
+        </>
+      )}
+
       {/* ═══ Controls below ═══ */}
       <Box sx={{ width: totalW, mt: 1 }}>
-        {/* Frame slider */}
-        {!hideNavigation && (
-          <Box sx={{ ...controlRow, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, width: totalW, boxSizing: "border-box", opacity: lockNavigation ? 0.5 : 1, pointerEvents: lockNavigation ? "none" : "auto" }}>
-            <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted, flexShrink: 0 }}>Frame</Typography>
-            <Slider
-              value={currentIdx}
-              onChange={(_, v) => { if (!lockNavigation) setCurrentIdx(v as number); }}
-              min={0} max={Math.max(0, nImages - 1)} step={frameStep}
-              size="small" valueLabelDisplay="auto" disabled={lockNavigation}
-              sx={{ ...sliderStyles.small, flex: 1 }}
-            />
-            <Typography sx={{ ...typography.value, color: themeColors.textMuted, flexShrink: 0 }}>
-              {currentIdx}/{nImages - 1}
-            </Typography>
+        {/* Top row: Frame slider + stats on left, Drift XY on right */}
+        <Box sx={{ display: "flex", gap: `${SPACING.SM}px` }}>
+          {/* Left column: slider + stats */}
+          <Box sx={{ width: sliderW }}>
+            {!hideNavigation && (
+              <Box sx={{ ...controlRow, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, width: sliderW, boxSizing: "border-box", opacity: lockNavigation ? 0.5 : 1, pointerEvents: lockNavigation ? "none" : "auto" }}>
+                <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted, flexShrink: 0 }}>Frame</Typography>
+                <Slider
+                  value={currentIdx}
+                  onChange={(_, v) => { if (!lockNavigation) setCurrentIdx(v as number); }}
+                  min={0} max={Math.max(0, nImages - 1)} step={frameStep}
+                  size="small" valueLabelDisplay="auto" disabled={lockNavigation}
+                  sx={{ ...sliderStyles.small, flex: 1 }}
+                />
+                <Typography sx={{ ...typography.value, color: themeColors.textMuted, flexShrink: 0 }}>
+                  {currentIdx}/{nImages - 1}
+                </Typography>
+              </Box>
+            )}
+            {!hideStats && (
+              <Box sx={{ ...controlRow, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, width: sliderW, boxSizing: "border-box", mt: `${SPACING.XS}px` }}>
+                <Typography sx={{ ...typography.value, color: themeColors.textMuted }}>
+                  dx={currentOffset.dx.toFixed(2)} dy={currentOffset.dy.toFixed(2)}
+                </Typography>
+                <Typography sx={{ ...typography.value, color: themeColors.accentBlue }}>
+                  NCC={currentOffset.ncc.toFixed(4)}
+                </Typography>
+                {currentIdx === referenceIdx && (
+                  <Typography sx={{ ...typography.value, color: themeColors.accentGreen }}>(ref)</Typography>
+                )}
+                <InfoTooltip
+                  theme={themeInfo.theme}
+                  text={
+                    <Box sx={{ fontSize: 11, lineHeight: 1.5 }}>
+                      <b>Drift (dx, dy)</b> — sub-pixel shift measured via FFT phase correlation with Tukey windowing, refined by DFT upsampling (Guizar-Sicairos et al. 2008). Values are in pixels relative to the reference frame.<br /><br />
+                      <b>NCC</b> — normalized cross-correlation between aligned frame and reference. Values near 1.0 indicate good alignment.<br /><br />
+                      <b>Moving avg</b> — the "Before" panel averages N consecutive raw frames to reveal drift as blur. Sharp features on the right confirm successful alignment.
+                    </Box>
+                  }
+                />
+              </Box>
+            )}
           </Box>
-        )}
+          {/* Right: Drift XY (bigger square) */}
+          {!hideStats && (
+            <DriftXY
+              offsets={offsets}
+              currentIdx={currentIdx}
+              referenceIdx={referenceIdx}
+              size={driftXYSize}
+              theme={themeInfo.theme}
+              onSelect={(idx) => { if (!lockNavigation) setCurrentIdx(idx); }}
+            />
+          )}
+        </Box>
 
-        {/* Stats + charts row */}
+        {/* Bottom charts row: NCC | Drift over time (full width, no DriftXY) */}
         {!hideStats && (
-          <Box sx={{ mt: `${SPACING.XS}px` }}>
-            <Box sx={{ ...controlRow, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, width: totalW, boxSizing: "border-box" }}>
-              <Typography sx={{ ...typography.value, color: themeColors.textMuted }}>
-                dx={currentOffset.dx.toFixed(2)} dy={currentOffset.dy.toFixed(2)}
-              </Typography>
-              <Typography sx={{ ...typography.value, color: themeColors.accentBlue }}>
-                NCC={currentOffset.ncc.toFixed(4)}
-              </Typography>
-              {currentIdx === referenceIdx && (
-                <Typography sx={{ ...typography.value, color: themeColors.accentGreen }}>(ref)</Typography>
-              )}
-            </Box>
-            {/* Three charts in a row: NCC | Drift XY | Drift over time */}
-            <Box sx={{ display: "flex", gap: `${SPACING.XS}px`, mt: `${SPACING.XS}px` }}>
-              <NCCChart
-                offsets={offsets}
-                currentIdx={currentIdx}
-                referenceIdx={referenceIdx}
-                onSelect={(idx) => { if (!lockNavigation) setCurrentIdx(idx); }}
-                width={nccW}
-                height={chartH}
-                theme={themeInfo.theme}
-              />
-              <DriftXY
-                offsets={offsets}
-                currentIdx={currentIdx}
-                referenceIdx={referenceIdx}
-                size={driftXYSize}
-                theme={themeInfo.theme}
-                onSelect={(idx) => { if (!lockNavigation) setCurrentIdx(idx); }}
-              />
-              <DriftTime
-                offsets={offsets}
-                currentIdx={currentIdx}
-                referenceIdx={referenceIdx}
-                width={driftTimeW}
-                height={chartH}
-                theme={themeInfo.theme}
-                onSelect={(idx) => { if (!lockNavigation) setCurrentIdx(idx); }}
-              />
-            </Box>
+          <Box sx={{ display: "flex", gap: `${SPACING.XS}px`, mt: `${SPACING.XS}px` }}>
+            <NCCChart
+              offsets={offsets}
+              currentIdx={currentIdx}
+              referenceIdx={referenceIdx}
+              onSelect={(idx) => { if (!lockNavigation) setCurrentIdx(idx); }}
+              width={nccW}
+              height={chartH}
+              theme={themeInfo.theme}
+            />
+            <DriftTime
+              offsets={offsets}
+              currentIdx={currentIdx}
+              referenceIdx={referenceIdx}
+              width={driftTimeW}
+              height={chartH}
+              theme={themeInfo.theme}
+              onSelect={(idx) => { if (!lockNavigation) setCurrentIdx(idx); }}
+            />
           </Box>
         )}
 
@@ -1109,8 +1320,6 @@ function Align2DBulk() {
                       <MenuItem key={name} value={name}>{name.charAt(0).toUpperCase() + name.slice(1)}</MenuItem>
                     ))}
                   </Select>
-                  <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted }}>FFT:</Typography>
-                  <Switch checked={showFFT} onChange={(e) => setShowFFT(e.target.checked)} size="small" sx={switchStyles.small} />
                   {zoom !== 1 && (
                     <Typography sx={{ ...typography.value, color: themeColors.accent }}>{zoom.toFixed(1)}×</Typography>
                   )}
@@ -1156,13 +1365,6 @@ function Align2DBulk() {
           </Box>
         )}
 
-        {/* Export */}
-        {!hideExport && (
-          <Stack direction="row" spacing={0.5} sx={{ mt: `${SPACING.XS}px` }}>
-            <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} disabled={lockExport} onClick={handleCopy}>COPY</Button>
-            <Button size="small" sx={compactButton} disabled={lockExport} onClick={handleExportPNG}>PNG</Button>
-          </Stack>
-        )}
       </Box>
     </Box>
   );

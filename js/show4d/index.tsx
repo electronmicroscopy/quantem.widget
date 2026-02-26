@@ -2257,8 +2257,8 @@ function Show4D() {
               )}
               {!hideExport && (
                 <Menu anchorEl={navExportAnchor} open={Boolean(navExportAnchor)} onClose={() => setNavExportAnchor(null)} anchorOrigin={{ vertical: "bottom", horizontal: "left" }} transformOrigin={{ vertical: "top", horizontal: "left" }} sx={{ zIndex: 9999 }}>
-                  <MenuItem disabled={lockExport} onClick={() => handleNavExportFigure(true)} sx={{ fontSize: 12 }}>Figure + colorbar</MenuItem>
-                  <MenuItem disabled={lockExport} onClick={() => handleNavExportFigure(false)} sx={{ fontSize: 12 }}>Figure</MenuItem>
+                  <MenuItem disabled={lockExport} onClick={() => handleNavExportFigure(true)} sx={{ fontSize: 12 }}>PDF + colorbar</MenuItem>
+                  <MenuItem disabled={lockExport} onClick={() => handleNavExportFigure(false)} sx={{ fontSize: 12 }}>PDF</MenuItem>
                   <MenuItem disabled={lockExport} onClick={handleNavExportPng} sx={{ fontSize: 12 }}>PNG</MenuItem>
                 </Menu>
               )}
@@ -2449,8 +2449,8 @@ function Show4D() {
               )}
               {!hideExport && (
                 <Menu anchorEl={sigExportAnchor} open={Boolean(sigExportAnchor)} onClose={() => setSigExportAnchor(null)} anchorOrigin={{ vertical: "bottom", horizontal: "left" }} transformOrigin={{ vertical: "top", horizontal: "left" }} sx={{ zIndex: 9999 }}>
-                  <MenuItem disabled={lockExport} onClick={() => handleSigExportFigure(true)} sx={{ fontSize: 12 }}>Figure + colorbar</MenuItem>
-                  <MenuItem disabled={lockExport} onClick={() => handleSigExportFigure(false)} sx={{ fontSize: 12 }}>Figure</MenuItem>
+                  <MenuItem disabled={lockExport} onClick={() => handleSigExportFigure(true)} sx={{ fontSize: 12 }}>PDF + colorbar</MenuItem>
+                  <MenuItem disabled={lockExport} onClick={() => handleSigExportFigure(false)} sx={{ fontSize: 12 }}>PDF</MenuItem>
                   <MenuItem disabled={lockExport} onClick={handleSigExportPng} sx={{ fontSize: 12 }}>PNG (current frame)</MenuItem>
                   {pathLength > 0 && <MenuItem disabled={lockExport} onClick={handleSigExportGif} sx={{ fontSize: 12 }}>GIF (path animation)</MenuItem>}
                 </Menu>

@@ -420,10 +420,14 @@ class Align2DBulk(anywidget.AnyWidget):
             c0 = c - w // 2
             frames = frames[:, r0:r0 + h, c0:c0 + w].copy()
         self._raw_frames = frames
+        # Pre-cache raw frame bytes (avoids .tobytes() on every slider tick)
+        self._raw_bytes_cache = [f.tobytes() for f in frames]
         # Run alignment (always crop to common overlap)
         self._aligned, self._offsets, self._nccs, self._crop_box = _align_stack(
             self._raw_frames, reference, max_shift, bin, device,
         )
+        # Pre-cache aligned frame bytes
+        self._aligned_bytes_cache = [f.tobytes() for f in self._aligned]
         # Set traits
         n, ah, aw = self._aligned.shape
         _, rh, rw = self._raw_frames.shape
@@ -461,6 +465,7 @@ class Align2DBulk(anywidget.AnyWidget):
             hide_all=hide_all,
         )
         self._update_offsets_json()
+        self._send_ref()
         self._send_frame(0)
         self.observe(self._on_idx_change, names=["current_idx"])
         self.observe(self._on_realign, names=["_realign_requested"])
@@ -472,12 +477,12 @@ class Align2DBulk(anywidget.AnyWidget):
             entries.append({"idx": i, "dx": round(dx, 2), "dy": round(dy, 2), "ncc": round(ncc, 4)})
         self.offsets_json = json.dumps(entries)
 
+    def _send_ref(self):
+        self.ref_bytes = self._aligned_bytes_cache[self.reference_idx]
+
     def _send_frame(self, idx):
         with self.hold_sync():
-            # "After" panel: aligned reference + current frame
-            self.ref_bytes = self._aligned[self.reference_idx].tobytes()
-            self.frame_bytes = self._aligned[idx].tobytes()
-            # "Before" panel: raw frame with moving average
+            self.frame_bytes = self._aligned_bytes_cache[idx]
             self._send_raw_frame(idx)
 
     def _send_raw_frame(self, idx):
@@ -487,10 +492,9 @@ class Align2DBulk(anywidget.AnyWidget):
             start = max(0, idx - half)
             end = min(self.n_images, start + w)
             start = max(0, end - w)
-            frame = self._raw_frames[start:end].mean(axis=0)
+            self.raw_frame_bytes = self._raw_frames[start:end].mean(axis=0).astype(np.float32).tobytes()
         else:
-            frame = self._raw_frames[idx]
-        self.raw_frame_bytes = frame.astype(np.float32).tobytes()
+            self.raw_frame_bytes = self._raw_bytes_cache[idx]
 
     def _on_idx_change(self, change):
         self._send_frame(change["new"])
@@ -506,11 +510,13 @@ class Align2DBulk(anywidget.AnyWidget):
             self.bin_factor,
             self._device_str,
         )
+        self._aligned_bytes_cache = [f.tobytes() for f in self._aligned]
         n, ah, aw = self._aligned.shape
         self.n_images = n
         self.height = ah
         self.width = aw
         self._update_offsets_json()
+        self._send_ref()
         self._send_frame(self.current_idx)
 
     @property
