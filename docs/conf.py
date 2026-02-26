@@ -29,8 +29,6 @@ exclude_patterns = [
     ".DS_Store",
     # Extra notebooks kept for internal use but excluded from published docs.
     # Only simple + all_features notebooks are published per widget.
-    "examples/show2d/show2d_load_*.ipynb",
-    "examples/show3d/show3d_load_*.ipynb",
     "examples/show4dstem/show4dstem_export_reproducibility.ipynb",
     "examples/show4dstem/show4dstem_sparse_*.ipynb",
     "examples/show4dstem/show4dstem_batch_*.ipynb",

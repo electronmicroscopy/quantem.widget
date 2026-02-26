@@ -32,9 +32,3 @@ Show2D
 .. automethod:: quantem.widget.Show2D.load_state_dict
 .. automethod:: quantem.widget.Show2D.summary
 
-.. rubric:: Class Methods (File Loaders)
-
-.. automethod:: quantem.widget.Show2D.from_png
-.. automethod:: quantem.widget.Show2D.from_tiff
-.. automethod:: quantem.widget.Show2D.from_emd
-.. automethod:: quantem.widget.Show2D.from_folder

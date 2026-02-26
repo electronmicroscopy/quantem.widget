@@ -36,8 +36,21 @@ Features
 - **Histogram** — Live intensity histogram
 - **Scale bar** — Calibrated scale bar when ``pixel_size`` is set
 - **Export** — Figure/frame PNG, GIF, PNG ZIP, and one-click bundle export (PNG + ROI CSV + state JSON)
-- **File/folder loading** — Build stacks from EMD/PNG/TIFF files with explicit loader functions
+- **File/folder loading** — Use ``IO.file()`` / ``IO.folder()`` for any EM format
 - **Tool customization** — Disable or hide control groups (including playback)
+
+File Loading
+------------
+
+.. code-block:: python
+
+   from quantem.widget import IO, Show3D
+
+   # Single file (any format: PNG, TIFF, EMD, DM3/DM4, MRC, SER, NPY)
+   Show3D(IO.file("data/focal_series.tiff"))
+
+   # Folder of images
+   Show3D(IO.folder("data/png_stack", file_type="png"))
 
 Methods
 -------
@@ -45,14 +58,6 @@ Methods
 .. code-block:: python
 
    w = Show3D(stack)
-
-   # Build from explicit loaders (recommended)
-   w = Show3D.from_emd("data/scan.emd", dataset_path="/data/signal")
-   w = Show3D.from_tiff("data/focal_series.tiff")
-   w = Show3D.from_png("data/frame_0000.png")
-   w = Show3D.from_folder("data/png_stack", file_type="png")
-   w = Show3D.from_folder("data/tiff_stack", file_type="tiff")
-   w = Show3D.from_folder("data/emd_stack", file_type="emd", dataset_path="/data/signal")
 
    # Playback
    w.play()

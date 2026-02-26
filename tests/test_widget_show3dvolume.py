@@ -389,3 +389,147 @@ def test_show3dvolume_widget_version_is_set():
     w = Show3DVolume(vol)
     assert w.widget_version != "unknown"
 
+
+# ── Dual-Volume Comparison Mode ──────────────────────────────────────────
+
+def test_show3dvolume_dual_mode_basic():
+    """Two volumes: dual_mode True, both volume_bytes populated."""
+    a = np.random.rand(16, 16, 16).astype(np.float32)
+    b = np.random.rand(16, 16, 16).astype(np.float32)
+    w = Show3DVolume(a, data_b=b, title="A", title_b="B")
+    assert w.dual_mode is True
+    assert w.title == "A"
+    assert w.title_b == "B"
+    assert len(w.volume_bytes) == 16 * 16 * 16 * 4
+    assert len(w.volume_bytes_b) == 16 * 16 * 16 * 4
+
+
+def test_show3dvolume_dual_mode_shape_mismatch():
+    """ValueError when data_b shape differs from data."""
+    a = np.random.rand(16, 16, 16).astype(np.float32)
+    b = np.random.rand(8, 8, 8).astype(np.float32)
+    with pytest.raises(ValueError, match="must match"):
+        Show3DVolume(a, data_b=b)
+
+
+def test_show3dvolume_dual_mode_b_must_be_3d():
+    """ValueError when data_b is 2D."""
+    a = np.random.rand(16, 16, 16).astype(np.float32)
+    b = np.random.rand(16, 16).astype(np.float32)
+    with pytest.raises(ValueError, match="3D"):
+        Show3DVolume(a, data_b=b)
+
+
+def test_show3dvolume_single_mode_unchanged():
+    """Backward compat: single volume → dual_mode False, volume_bytes_b empty."""
+    a = np.random.rand(8, 8, 8).astype(np.float32)
+    w = Show3DVolume(a)
+    assert w.dual_mode is False
+    assert w.volume_bytes_b == b""
+    assert w.title_b == ""
+
+
+def test_show3dvolume_dual_mode_stats_b():
+    """Independent stats for volume B."""
+    a = np.ones((8, 8, 8), dtype=np.float32) * 5.0
+    b = np.ones((8, 8, 8), dtype=np.float32) * 10.0
+    w = Show3DVolume(a, data_b=b)
+    for mean_a in w.stats_mean:
+        assert mean_a == pytest.approx(5.0)
+    for mean_b in w.stats_mean_b:
+        assert mean_b == pytest.approx(10.0)
+
+
+def test_show3dvolume_dual_mode_stats_update_on_slice_change():
+    """Both A and B stats update when slice changes."""
+    a = np.zeros((16, 16, 16), dtype=np.float32)
+    b = np.zeros((16, 16, 16), dtype=np.float32)
+    a[0, :, :] = 1.0
+    b[0, :, :] = 99.0
+    w = Show3DVolume(a, data_b=b)
+    w.slice_z = 0
+    assert w.stats_mean[0] == pytest.approx(1.0)
+    assert w.stats_mean_b[0] == pytest.approx(99.0)
+
+
+def test_show3dvolume_dual_mode_torch():
+    """PyTorch tensor input for both volumes."""
+    a = torch.rand(8, 8, 8)
+    b = torch.rand(8, 8, 8)
+    w = Show3DVolume(a, data_b=b)
+    assert w.dual_mode is True
+    assert w.nz == 8
+
+
+def test_show3dvolume_dual_mode_ioresult():
+    """IOResult duck-typing for data_b."""
+    from quantem.widget.io import IOResult
+    a = np.random.rand(8, 8, 8).astype(np.float32)
+    b_result = IOResult(
+        data=np.random.rand(8, 8, 8).astype(np.float32),
+        pixel_size=2.5,
+        units="Å",
+        title="Ground Truth",
+    )
+    w = Show3DVolume(a, data_b=b_result)
+    assert w.dual_mode is True
+    assert w.title_b == "Ground Truth"
+
+
+def test_show3dvolume_dual_mode_state_dict():
+    """state_dict includes dual_mode, title_b."""
+    a = np.random.rand(8, 8, 8).astype(np.float32)
+    b = np.random.rand(8, 8, 8).astype(np.float32)
+    w = Show3DVolume(a, data_b=b, title_b="GT")
+    sd = w.state_dict()
+    assert sd["dual_mode"] is True
+    assert sd["title_b"] == "GT"
+
+
+def test_show3dvolume_dual_mode_summary(capsys):
+    """summary shows Volume B info."""
+    a = np.random.rand(8, 8, 8).astype(np.float32)
+    b = np.random.rand(8, 8, 8).astype(np.float32)
+    w = Show3DVolume(a, data_b=b, title="Phantom", title_b="Ground Truth")
+    w.summary()
+    out = capsys.readouterr().out
+    assert "Volume B" in out or "Ground Truth" in out
+
+
+def test_show3dvolume_dual_mode_repr():
+    """repr contains dual=True."""
+    a = np.random.rand(8, 8, 8).astype(np.float32)
+    b = np.random.rand(8, 8, 8).astype(np.float32)
+    w = Show3DVolume(a, data_b=b)
+    assert "dual=True" in repr(w)
+
+
+def test_show3dvolume_set_image_dual():
+    """set_image(a2, b2) updates both volumes."""
+    a = np.random.rand(8, 8, 8).astype(np.float32)
+    b = np.random.rand(8, 8, 8).astype(np.float32)
+    w = Show3DVolume(a, data_b=b)
+    a2 = np.ones((10, 10, 10), dtype=np.float32) * 2.0
+    b2 = np.ones((10, 10, 10), dtype=np.float32) * 3.0
+    w.set_image(a2, data_b=b2)
+    assert w.nz == 10
+    assert w.dual_mode is True
+    assert len(w.volume_bytes_b) == 10 * 10 * 10 * 4
+    for m in w.stats_mean:
+        assert m == pytest.approx(2.0)
+    for m in w.stats_mean_b:
+        assert m == pytest.approx(3.0)
+
+
+def test_show3dvolume_set_image_drops_b_on_shape_mismatch():
+    """set_image(larger_a) drops old B when shapes no longer match."""
+    a = np.random.rand(8, 8, 8).astype(np.float32)
+    b = np.random.rand(8, 8, 8).astype(np.float32)
+    w = Show3DVolume(a, data_b=b)
+    assert w.dual_mode is True
+    # New A has different shape → B should be dropped
+    a2 = np.random.rand(10, 10, 10).astype(np.float32)
+    w.set_image(a2)
+    assert w.dual_mode is False
+    assert w.volume_bytes_b == b""
+

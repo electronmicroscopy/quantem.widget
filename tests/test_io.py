@@ -693,3 +693,120 @@ def test_describe_no_matching_keys(capsys):
     out = capsys.readouterr().out
     assert "No matching" in out
     assert "Available" in out
+
+
+# =========================================================================
+# CPU arina backend
+# =========================================================================
+
+
+def _make_arina_files(tmp_path, n_frames=16, det_rows=64, det_cols=64, dtype="uint16"):
+    """Create synthetic arina master + chunk files with bitshuffle+LZ4 compression."""
+    if not _HAS_H5PY:
+        pytest.skip("h5py not available")
+    try:
+        import hdf5plugin  # noqa: F401
+    except ImportError:
+        pytest.skip("hdf5plugin not available")
+    rng = np.random.default_rng(42)
+    data = rng.integers(0, 1000, (n_frames, det_rows, det_cols), dtype=dtype)
+    prefix = "test_scan"
+    # Write chunk file
+    chunk_path = tmp_path / f"{prefix}_data_000001.h5"
+    with h5py.File(chunk_path, "w") as f:
+        f.create_dataset(
+            "entry/data/data",
+            data=data,
+            chunks=(1, det_rows, det_cols),
+            **hdf5plugin.Bitshuffle(nelems=0, cname="lz4"),
+        )
+    # Write master file
+    master_path = tmp_path / f"{prefix}_master.h5"
+    with h5py.File(master_path, "w") as f:
+        f["entry/data/data_000001"] = h5py.ExternalLink(
+            chunk_path.name, "entry/data/data"
+        )
+        spec = f.create_group("entry/instrument/detector/detectorSpecific")
+        spec.create_dataset("ntrigger", data=n_frames)
+        spec.create_dataset("x_pixels_in_detector", data=det_cols)
+        spec.create_dataset("y_pixels_in_detector", data=det_rows)
+    return str(master_path), data
+
+
+@pytest.mark.skipif(not _HAS_H5PY, reason="h5py not available")
+def test_cpu_arina_load_no_binning(tmp_path):
+    """CPU backend loads arina data without binning, matching raw data."""
+    master_path, expected = _make_arina_files(tmp_path)
+    from quantem.widget.io import _load_arina_cpu
+    result = _load_arina_cpu(master_path, det_bin=1)
+    assert result.shape == expected.shape
+    np.testing.assert_array_equal(result, expected)
+
+
+@pytest.mark.skipif(not _HAS_H5PY, reason="h5py not available")
+def test_cpu_arina_load_with_binning(tmp_path):
+    """CPU backend bins correctly — matches numpy reference."""
+    det_rows, det_cols = 64, 64
+    n_frames = 16  # 4x4 → auto scan_shape inferred
+    master_path, raw_data = _make_arina_files(
+        tmp_path, n_frames=n_frames, det_rows=det_rows, det_cols=det_cols
+    )
+    bin_factor = 2
+    from quantem.widget.io import _load_arina_cpu
+    result = _load_arina_cpu(master_path, det_bin=bin_factor)
+    # Auto scan_shape: 16 frames → (4, 4), so result is (4, 4, 32, 32)
+    assert result.shape == (4, 4, 32, 32)
+    # Compute reference with numpy and compare flattened
+    raw_f32 = raw_data.astype(np.float32)
+    ref = (
+        raw_f32.reshape(n_frames, det_rows // bin_factor, bin_factor, det_cols // bin_factor, bin_factor)
+        .mean(axis=(2, 4))
+    )
+    np.testing.assert_allclose(result.reshape(ref.shape), ref, rtol=1e-5)
+
+
+@pytest.mark.skipif(not _HAS_H5PY, reason="h5py not available")
+def test_cpu_arina_load_with_scan_shape(tmp_path):
+    """CPU backend reshapes to 4D when scan_shape is given."""
+    n_frames = 16  # 4x4 scan
+    master_path, _ = _make_arina_files(tmp_path, n_frames=n_frames)
+    from quantem.widget.io import _load_arina_cpu
+    result = _load_arina_cpu(master_path, det_bin=2, scan_shape=(4, 4))
+    assert result.ndim == 4
+    assert result.shape[0] == 4
+    assert result.shape[1] == 4
+
+
+@pytest.mark.skipif(not _HAS_H5PY, reason="h5py not available")
+def test_cpu_arina_via_io_class(tmp_path):
+    """IO.arina_file with backend='cpu' uses CPU fallback end-to-end."""
+    master_path, expected = _make_arina_files(tmp_path)
+    result = IO.arina_file(master_path, det_bin=1, backend="cpu")
+    assert isinstance(result, IOResult)
+    assert result.data.shape == expected.shape
+    np.testing.assert_array_equal(result.data, expected)
+
+
+@pytest.mark.skipif(not _HAS_H5PY, reason="h5py not available")
+def test_cpu_arina_auto_fallback(tmp_path, monkeypatch):
+    """backend='auto' falls back to CPU when no GPU is available."""
+    monkeypatch.setattr("quantem.widget.io._detect_gpu_backend", lambda: None)
+    master_path, expected = _make_arina_files(tmp_path)
+    result = IO.arina_file(master_path, det_bin=1, backend="auto")
+    assert isinstance(result, IOResult)
+    np.testing.assert_array_equal(result.data, expected)
+
+
+@pytest.mark.skipif(not _HAS_H5PY, reason="h5py not available")
+def test_cpu_bin_mean_correctness():
+    """_cpu_bin_mean matches numpy reference binning."""
+    from quantem.widget.io import _cpu_bin_mean
+    rng = np.random.default_rng(123)
+    src = rng.random((8, 64, 64)).astype(np.float32)
+    for bf in [2, 4, 8]:
+        result = _cpu_bin_mean(src, bf)
+        ref = (
+            src.reshape(8, 64 // bf, bf, 64 // bf, bf)
+            .mean(axis=(2, 4))
+        )
+        np.testing.assert_allclose(result, ref, rtol=1e-6)

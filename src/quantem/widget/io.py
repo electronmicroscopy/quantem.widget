@@ -595,6 +595,120 @@ def _detect_gpu_backend() -> str | None:
     return None
 
 
+# =========================================================================
+# CPU fallback for arina loading
+# =========================================================================
+
+
+def _cpu_bin_mean(src: np.ndarray, bin_factor: int) -> np.ndarray:
+    """Bin detector axes of a 3D array (n, rows, cols) by averaging.
+
+    Uses numpy reshape+mean — no numba needed, fast enough for CPU path.
+    """
+    n, rows, cols = src.shape
+    out_rows = rows // bin_factor
+    out_cols = cols // bin_factor
+    trimmed = src[:, : out_rows * bin_factor, : out_cols * bin_factor]
+    return (
+        trimmed.reshape(n, out_rows, bin_factor, out_cols, bin_factor)
+        .mean(axis=(2, 4))
+        .astype(np.float32)
+    )
+
+
+def _load_arina_cpu(
+    master_path: str,
+    det_bin: int = 1,
+    scan_shape: tuple[int, int] | None = None,
+) -> np.ndarray:
+    """Load arina 4D-STEM data using CPU (h5py + hdf5plugin transparent decompression).
+
+    hdf5plugin registers the bitshuffle+LZ4 HDF5 filter at import time,
+    so h5py decompresses chunks transparently — no custom kernels needed.
+    Slower than MPS/CUDA but works on any platform.
+    """
+    import time
+
+    if not _HAS_H5PY:
+        raise RuntimeError("h5py is required for arina loading")
+
+    t0 = time.perf_counter()
+
+    # Parse master file structure
+    master_dir = os.path.dirname(os.path.abspath(master_path))
+    with h5py.File(master_path, "r") as f:
+        chunk_keys = sorted(f["entry/data"].keys())
+        ds0 = f[f"entry/data/{chunk_keys[0]}"]
+        det_shape = ds0.shape[1:]
+        dtype = ds0.dtype
+
+    det_row, det_col = det_shape
+    prefix = os.path.basename(master_path).replace("_master.h5", "")
+
+    # Discover chunk files and frame counts
+    chunk_files = []
+    chunk_n_frames = []
+    for k in chunk_keys:
+        suffix = k.split("_")[-1]
+        cf = os.path.join(master_dir, f"{prefix}_data_{suffix}.h5")
+        if not os.path.exists(cf):
+            raise FileNotFoundError(f"Missing chunk file: {os.path.basename(cf)}")
+        chunk_files.append(cf)
+        with h5py.File(cf, "r") as f:
+            chunk_n_frames.append(f["entry/data/data"].shape[0])
+
+    total_frames = sum(chunk_n_frames)
+
+    # Compute output shape
+    if det_bin > 1:
+        out_det_row = det_row // det_bin
+        out_det_col = det_col // det_bin
+        output = np.empty((total_frames, out_det_row, out_det_col), dtype=np.float32)
+    else:
+        out_det_row, out_det_col = det_row, det_col
+        output = np.empty((total_frames, out_det_row, out_det_col), dtype=dtype)
+
+    # Read and decompress chunk by chunk (hdf5plugin handles bitshuffle+LZ4)
+    frame_offset = 0
+    for ci, cf in enumerate(chunk_files):
+        nf = chunk_n_frames[ci]
+        with h5py.File(cf, "r") as f:
+            raw = f["entry/data/data"][:nf]  # hdf5plugin decompresses here
+
+        if det_bin > 1:
+            output[frame_offset : frame_offset + nf] = _cpu_bin_mean(
+                raw.astype(np.float32) if raw.dtype != np.float32 else raw,
+                det_bin,
+            )
+        else:
+            output[frame_offset : frame_offset + nf] = raw
+
+        frame_offset += nf
+        if len(chunk_files) > 1:
+            elapsed = time.perf_counter() - t0
+            print(
+                f"  chunk {ci + 1}/{len(chunk_files)}: "
+                f"{nf} frames, {elapsed:.1f}s elapsed"
+            )
+
+    t_total = time.perf_counter() - t0
+
+    # Infer scan shape
+    if scan_shape is None and det_bin > 1:
+        side = int(total_frames**0.5)
+        if side * side == total_frames:
+            scan_shape = (side, side)
+    if scan_shape is not None:
+        output = output.reshape(*scan_shape, out_det_row, out_det_col)
+
+    print(
+        f"load_arina (cpu): {total_frames} frames, "
+        f"det ({det_row},{det_col}) → ({out_det_row},{out_det_col}), "
+        f"{t_total:.2f}s"
+    )
+    return output
+
+
 def _get_available_memory() -> int:
     try:
         import psutil
@@ -947,9 +1061,8 @@ class IO:
         elif backend == "intel":
             raise NotImplementedError("Intel GPU backend not yet implemented.")
         elif backend == "cpu":
-            raise NotImplementedError(
-                "CPU-only fallback not yet implemented. "
-                "Use IO.file() for CPU-based HDF5 loading."
+            output = _load_arina_cpu(
+                master_path, det_bin=det_bin, scan_shape=scan_shape
             )
         else:
             raise ValueError(f"Unknown backend: {backend!r}")
@@ -977,12 +1090,12 @@ class IO:
         if backend == "auto":
             backend = _detect_gpu_backend()
             if backend is None:
-                raise RuntimeError(
-                    "No GPU backend available for arina loader. "
-                    "Supported backends:\n"
+                backend = "cpu"
+                print(
+                    "No GPU backend found, using CPU fallback. "
+                    "For faster loading install a GPU backend:\n"
                     "  - MPS (macOS): pip install pyobjc-framework-Metal\n"
-                    "  - CUDA (Linux/Windows): coming soon\n"
-                    "  - Intel (oneAPI): coming soon"
+                    "  - CUDA (Linux/Windows): coming soon"
                 )
         return det_bin, backend
 

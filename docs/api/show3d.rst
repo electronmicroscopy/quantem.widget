@@ -43,9 +43,3 @@ Show3D
 .. automethod:: quantem.widget.Show3D.load_state_dict
 .. automethod:: quantem.widget.Show3D.summary
 
-.. rubric:: Class Methods (File Loaders)
-
-.. automethod:: quantem.widget.Show3D.from_png
-.. automethod:: quantem.widget.Show3D.from_tiff
-.. automethod:: quantem.widget.Show3D.from_emd
-.. automethod:: quantem.widget.Show3D.from_folder

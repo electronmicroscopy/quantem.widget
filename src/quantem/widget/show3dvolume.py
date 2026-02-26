@@ -71,6 +71,15 @@ class Show3DVolume(anywidget.AnyWidget):
     slice_z = traitlets.Int(0).tag(sync=True)
     # Raw volume data (sent once)
     volume_bytes = traitlets.Bytes(b"").tag(sync=True)
+    # Dual-volume comparison mode
+    volume_bytes_b = traitlets.Bytes(b"").tag(sync=True)
+    title_b = traitlets.Unicode("").tag(sync=True)
+    dual_mode = traitlets.Bool(False).tag(sync=True)
+    # Stats for volume B (3 values: xy, xz, yz)
+    stats_mean_b = traitlets.List(traitlets.Float()).tag(sync=True)
+    stats_min_b = traitlets.List(traitlets.Float()).tag(sync=True)
+    stats_max_b = traitlets.List(traitlets.Float()).tag(sync=True)
+    stats_std_b = traitlets.List(traitlets.Float()).tag(sync=True)
     # Display
     title = traitlets.Unicode("").tag(sync=True)
     cmap = traitlets.Unicode("inferno").tag(sync=True)
@@ -187,7 +196,9 @@ class Show3DVolume(anywidget.AnyWidget):
     def __init__(
         self,
         data: Union[np.ndarray, "torch.Tensor"],
+        data_b: Union[np.ndarray, "torch.Tensor", None] = None,
         title: str = "",
+        title_b: str = "",
         cmap: str = "inferno",
         pixel_size: float = 0.0,
         scale_bar_visible: bool = True,
@@ -296,6 +307,29 @@ class Show3DVolume(anywidget.AnyWidget):
             hide_volume=hide_volume,
             hide_all=hide_all,
         )
+        # Volume B (dual comparison mode)
+        self._data_b: np.ndarray | None = None
+        if data_b is not None:
+            if isinstance(data_b, IOResult):
+                if not title_b and data_b.title:
+                    title_b = data_b.title
+                data_b = data_b.data
+            if hasattr(data_b, "array") and hasattr(data_b, "name") and hasattr(data_b, "sampling"):
+                if not title_b and data_b.name:
+                    title_b = data_b.name
+                data_b = data_b.array
+            data_b = to_numpy(data_b)
+            if data_b.ndim != 3:
+                raise ValueError(f"data_b must be 3D, got {data_b.ndim}D")
+            if data_b.shape != self._data.shape:
+                raise ValueError(
+                    f"data_b shape {data_b.shape} must match data shape {self._data.shape}"
+                )
+            self._data_b = data_b.astype(np.float32)
+            self.dual_mode = True
+            self.title_b = title_b
+            self.volume_bytes_b = self._data_b.tobytes()
+
         self._compute_stats()
         self.volume_bytes = self._data.tobytes()
         self.observe(self._on_slice_change, names=["slice_x", "slice_y", "slice_z"])
@@ -312,8 +346,18 @@ class Show3DVolume(anywidget.AnyWidget):
                 state = unwrap_state_payload(state)
             self.load_state_dict(state)
 
-    def set_image(self, data):
-        """Replace the volume data. Preserves all display settings."""
+    def set_image(self, data, data_b=None):
+        """Replace the volume data. Preserves all display settings.
+
+        Parameters
+        ----------
+        data : array_like
+            New 3D volume for volume A.
+        data_b : array_like, optional
+            New 3D volume for volume B. Must match data shape. If not
+            provided and dual mode is active, volume B is dropped when
+            the new data shape differs from the old B shape.
+        """
         if hasattr(data, "array") and hasattr(data, "name") and hasattr(data, "sampling"):
             data = data.array
         data = to_numpy(data)
@@ -324,14 +368,34 @@ class Show3DVolume(anywidget.AnyWidget):
         self.slice_z = min(self.slice_z, self.nz - 1)
         self.slice_y = min(self.slice_y, self.ny - 1)
         self.slice_x = min(self.slice_x, self.nx - 1)
+        if data_b is not None:
+            if hasattr(data_b, "array") and hasattr(data_b, "name") and hasattr(data_b, "sampling"):
+                data_b = data_b.array
+            data_b = to_numpy(data_b)
+            if data_b.ndim != 3:
+                raise ValueError(f"data_b must be 3D, got {data_b.ndim}D")
+            if data_b.shape != self._data.shape:
+                raise ValueError(
+                    f"data_b shape {data_b.shape} must match data shape {self._data.shape}"
+                )
+            self._data_b = data_b.astype(np.float32)
+            self.dual_mode = True
+            self.volume_bytes_b = self._data_b.tobytes()
+        elif self._data_b is not None and self._data_b.shape != self._data.shape:
+            self._data_b = None
+            self.dual_mode = False
+            self.volume_bytes_b = b""
         self._compute_stats()
         self.volume_bytes = self._data.tobytes()
 
     def __repr__(self) -> str:
-        return f"Show3DVolume({self.nz}×{self.ny}×{self.nx}, slices=({self.slice_z},{self.slice_y},{self.slice_x}), cmap={self.cmap})"
+        base = f"Show3DVolume({self.nz}×{self.ny}×{self.nx}, slices=({self.slice_z},{self.slice_y},{self.slice_x}), cmap={self.cmap}"
+        if self.dual_mode:
+            base += ", dual=True"
+        return base + ")"
 
     def state_dict(self):
-        return {
+        d = {
             "title": self.title,
             "cmap": self.cmap,
             "log_scale": self.log_scale,
@@ -353,7 +417,10 @@ class Show3DVolume(anywidget.AnyWidget):
             "boomerang": self.boomerang,
             "play_axis": self.play_axis,
             "dim_labels": self.dim_labels,
+            "dual_mode": self.dual_mode,
+            "title_b": self.title_b,
         }
+        return d
 
     def save(self, path: str):
         save_state_file(path, "Show3DVolume", self.state_dict())
@@ -379,6 +446,10 @@ class Show3DVolume(anywidget.AnyWidget):
         if hasattr(self, "_data") and self._data is not None:
             arr = self._data
             lines.append(f"Data:     min={float(arr.min()):.4g}  max={float(arr.max()):.4g}  mean={float(arr.mean()):.4g}")
+        if self.dual_mode and self._data_b is not None:
+            lines.append(f"Volume B: {self.title_b or 'Volume B'}")
+            arr_b = self._data_b
+            lines.append(f"Data B:   min={float(arr_b.min()):.4g}  max={float(arr_b.max()):.4g}  mean={float(arr_b.mean()):.4g}")
         cmap = self.cmap
         scale = "log" if self.log_scale else "linear"
         contrast = "auto contrast" if self.auto_contrast else "manual contrast"
@@ -404,6 +475,16 @@ class Show3DVolume(anywidget.AnyWidget):
             self.stats_min = [float(np.min(s)) for s in slices]
             self.stats_max = [float(np.max(s)) for s in slices]
             self.stats_std = [float(np.std(s)) for s in slices]
+            if self._data_b is not None:
+                slices_b = [
+                    self._data_b[self.slice_z, :, :],
+                    self._data_b[:, self.slice_y, :],
+                    self._data_b[:, :, self.slice_x],
+                ]
+                self.stats_mean_b = [float(np.mean(s)) for s in slices_b]
+                self.stats_min_b = [float(np.min(s)) for s in slices_b]
+                self.stats_max_b = [float(np.max(s)) for s in slices_b]
+                self.stats_std_b = [float(np.std(s)) for s in slices_b]
 
     def _on_slice_change(self, change):
         self._compute_stats()

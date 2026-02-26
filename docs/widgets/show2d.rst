@@ -28,56 +28,24 @@ Features
 - **Scale bar** — Calibrated scale bar when ``pixel_size`` is set
 - **Log scale** — Logarithmic intensity scaling with ``log_scale=True``
 - **Auto contrast** — Percentile-based contrast with ``auto_contrast=True``
-- **File/folder loading** — Explicit loaders for PNG/TIFF/EMD files and folders
+- **File/folder loading** — Use ``IO.file()`` / ``IO.folder()`` for any EM format
 - **Tool lock/hide** — ``disable_*`` / ``hide_*`` API for shared read-only workflows
 
-Methods
--------
+File Loading
+------------
 
 .. code-block:: python
 
-   # Explicit file loaders
-   w = Show2D.from_png("data/frame.png")
-   w = Show2D.from_tiff("data/stack.tiff")                       # gallery for multi-page TIFF
-   w = Show2D.from_emd("data/scan.emd", dataset_path="/data/signal")
+   from quantem.widget import IO, Show2D
 
-   # Folder loaders (explicit file_type required)
-   w = Show2D.from_folder("data/png_stack", file_type="png")
-   w = Show2D.from_folder("data/tiff_stack", file_type="tiff")
-   w = Show2D.from_folder("data/emd_stack", file_type="emd", dataset_path="/data/signal")
+   # Single file (any format: PNG, TIFF, EMD, DM3/DM4, MRC, SER, NPY)
+   Show2D(IO.file("data/frame.dm4"))
 
-   # Optional stack reduction to single 2D image
-   w = Show2D.from_tiff("data/stack.tiff", mode="mean")
-   w = Show2D.from_emd("data/scan.emd", dataset_path="/data/signal", mode="index", index=3)
+   # Folder of images
+   Show2D(IO.folder("data/png_stack", file_type="png"))
 
-Loader Decision Table
----------------------
-
-.. list-table::
-   :header-rows: 1
-   :widths: 22 32 46
-
-   * - If your input is...
-     - Use this API
-     - Why this is the safest choice
-   * - One PNG image
-     - ``Show2D.from_png("frame.png")``
-     - Fastest explicit path for a single 2D frame.
-   * - Folder of PNG slices
-     - ``Show2D.from_folder("png_stack/", file_type="png")``
-     - Keeps slice order explicit and avoids format ambiguity.
-   * - One TIFF / multi-page TIFF
-     - ``Show2D.from_tiff("stack.tiff")``
-     - Handles both single-page and stacked TIFF inputs directly.
-   * - EMD file where dataset location is known
-     - ``Show2D.from_emd("scan.emd", dataset_path="/data/signal")``
-     - Prevents loading the wrong dataset in complex EMD containers.
-   * - Mixed-type folder where you want one type only
-     - ``Show2D.from_folder("mixed_stack/", file_type="png")``
-     - Forces one file family and prevents accidental cross-format merges.
-   * - Stack source but you want one 2D view
-     - ``Show2D.from_tiff(..., mode="mean")`` or ``mode="index"``
-     - Creates a deterministic 2D reduction for quick QC snapshots.
+   # Multiple files
+   Show2D(IO.file(["frame1.tiff", "frame2.tiff"]))
 
 Control Groups
 --------------
@@ -118,14 +86,10 @@ State Persistence
 Loader Troubleshooting
 ----------------------
 
-- **Error: ``file_type is required for folder loading``**
-  Use ``from_folder(path, file_type="png" | "tiff" | "emd")``.
 - **Error: ``h5py is required to read .emd files``**
-  Install `h5py` in your environment, then retry the same `from_emd(...)` call.
-- **Error: ``dataset_path ... not found in EMD file``**
-  Verify the exact HDF dataset path and pass it to ``dataset_path=...``; this is recommended for complex EMD files.
+  Install `h5py` in your environment, then retry.
 - **Mixed folder with different formats**
-  Use ``from_folder(..., file_type="png")`` or ``file_type="tiff"`` to force one file family and avoid accidental mixing.
+  Use ``IO.folder(..., file_type="png")`` or ``file_type="tiff"`` to force one file family and avoid accidental mixing.
 
 Examples
 --------

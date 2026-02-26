@@ -21,7 +21,6 @@
 - **per-frame metadata** — `IO.arina_file(list)` and `IO.arina_folder()` extract full HDF5 metadata from each source file into `IOResult.frame_metadata` (schema-agnostic — stores every scalar dataset as-is)
 - **`IOResult.describe()`** — print a per-frame metadata table; `describe()` (default `diff=True`) shows only columns where values differ across frames; `describe(diff=False)` shows all; `describe(keys=["count_time"])` for custom columns
 - all widgets now accept `IOResult` directly — `Show2D(IO.file("image.dm4"))` passes data, pixel_size, title, and labels automatically
-- Show2D and Show3D gain `from_dm4()`, `from_dm3()`, `from_mrc()` convenience classmethods; `from_path()` now supports any format (not just PNG/TIFF/EMD)
 
 ### Show4DSTEM
 - 5D IOResult from `IO.arina_folder()` now passes frame labels and title through automatically — `Show4DSTEM(result, frame_dim_label="Scan")` shows frame slider with file names
@@ -51,7 +50,6 @@
 - legend click to focus/unfocus traces
 
 ### Show2D
-- file loaders: `from_png`, `from_tiff`, `from_emd`, `from_path`, `from_folder(file_type=...)`
 - stack reduction modes (`first`, `index`, `mean`, `max`, `sum`) for collapsing stacks to 2D
 - real-time ROI FFT updates during drag (no longer deferred to mouseup)
 - layout: stats bar and controls now match canvas width
@@ -61,7 +59,6 @@
 - `profile_all_frames()`: extract the same line profile from every frame
 - multi-ROI: place, resize, duplicate, and delete multiple ROIs with per-ROI color and stats
 - one-click export bundle (`.zip` with PNG + ROI timeseries CSV + state JSON)
-- file loaders: `from_emd`, `from_tiff`, `from_png`, `from_folder(file_type=...)`
 
 ### Edit2D
 - **breaking:** mask mode now uses rectangle tool only (brush, ellipse, threshold removed for stability)
