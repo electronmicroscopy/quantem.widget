@@ -1,0 +1,6 @@
+.align2d-bulk-root {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+.align2d-bulk-root canvas {
+  display: block;
+}

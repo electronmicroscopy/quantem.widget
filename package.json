@@ -1,7 +1,7 @@
 {
   "scripts": {
     "dev": "npm run build -- --sourcemap=inline --watch",
-    "build": "esbuild js/mark2d/index.tsx js/edit2d/index.tsx js/show1d/index.tsx js/show2d/index.tsx js/show3d/index.tsx js/show3dvolume/index.tsx js/show4d/index.tsx js/show4dstem/index.tsx js/align2d/index.tsx js/showcomplex/index.tsx js/bin/index.tsx --minify --format=esm --bundle --outdir=src/quantem/widget/static --outbase=js --entry-names=[dir]",
+    "build": "esbuild js/mark2d/index.tsx js/edit2d/index.tsx js/show1d/index.tsx js/show2d/index.tsx js/show3d/index.tsx js/show3dvolume/index.tsx js/show4d/index.tsx js/show4dstem/index.tsx js/align2d/index.tsx js/align2d_bulk/index.tsx js/showcomplex/index.tsx js/bin/index.tsx --minify --format=esm --bundle --outdir=src/quantem/widget/static --outbase=js --entry-names=[dir]",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

@@ -533,3 +533,30 @@ def test_show3dvolume_set_image_drops_b_on_shape_mismatch():
     assert w.dual_mode is False
     assert w.volume_bytes_b == b""
 
+
+# ── Diff View ─────────────────────────────────────────────────────────────
+
+def test_show3dvolume_show_diff_default():
+    """show_diff defaults to False."""
+    a = np.random.rand(8, 8, 8).astype(np.float32)
+    w = Show3DVolume(a)
+    assert w.show_diff is False
+
+def test_show3dvolume_show_diff_state_dict():
+    """show_diff is included in state_dict and restored via state param."""
+    a = np.random.rand(8, 8, 8).astype(np.float32)
+    b = np.random.rand(8, 8, 8).astype(np.float32)
+    w = Show3DVolume(a, data_b=b, show_diff=True)
+    assert w.show_diff is True
+    sd = w.state_dict()
+    assert sd["show_diff"] is True
+    w2 = Show3DVolume(a, data_b=b, state=sd)
+    assert w2.show_diff is True
+
+def test_show3dvolume_show_diff_single_mode():
+    """show_diff has no effect in single-volume mode (trait still stored)."""
+    a = np.random.rand(8, 8, 8).astype(np.float32)
+    w = Show3DVolume(a, show_diff=True)
+    assert w.show_diff is True
+    assert w.dual_mode is False
+

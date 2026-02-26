@@ -75,6 +75,7 @@ class Show3DVolume(anywidget.AnyWidget):
     volume_bytes_b = traitlets.Bytes(b"").tag(sync=True)
     title_b = traitlets.Unicode("").tag(sync=True)
     dual_mode = traitlets.Bool(False).tag(sync=True)
+    show_diff = traitlets.Bool(False).tag(sync=True)
     # Stats for volume B (3 values: xy, xz, yz)
     stats_mean_b = traitlets.List(traitlets.Float()).tag(sync=True)
     stats_min_b = traitlets.List(traitlets.Float()).tag(sync=True)
@@ -95,8 +96,8 @@ class Show3DVolume(anywidget.AnyWidget):
     show_fft = traitlets.Bool(False).tag(sync=True)
     disabled_tools = traitlets.List(traitlets.Unicode()).tag(sync=True)
     hidden_tools = traitlets.List(traitlets.Unicode()).tag(sync=True)
-    # Axis labels (dim 0, 1, 2 → default "Z", "Y", "X")
-    dim_labels = traitlets.List(traitlets.Unicode(), default_value=["Z", "Y", "X"]).tag(sync=True)
+    # Axis labels (dim 0, 1, 2 — default XYZ gives standard slice names YZ/XZ/XY)
+    dim_labels = traitlets.List(traitlets.Unicode(), default_value=["X", "Y", "Z"]).tag(sync=True)
     # Stats (3 values: xy, xz, yz)
     stats_mean = traitlets.List(traitlets.Float()).tag(sync=True)
     stats_min = traitlets.List(traitlets.Float()).tag(sync=True)
@@ -206,6 +207,7 @@ class Show3DVolume(anywidget.AnyWidget):
         show_stats: bool = True,
         show_crosshair: bool = True,
         show_fft: bool = False,
+        show_diff: bool = False,
         log_scale: bool = False,
         auto_contrast: bool = False,
         disabled_tools: list[str] | None = None,
@@ -279,6 +281,7 @@ class Show3DVolume(anywidget.AnyWidget):
         self.show_stats = show_stats
         self.show_crosshair = show_crosshair
         self.show_fft = show_fft
+        self.show_diff = show_diff
         self.log_scale = log_scale
         self.auto_contrast = auto_contrast
         self.disabled_tools = self._build_disabled_tools(
@@ -333,6 +336,7 @@ class Show3DVolume(anywidget.AnyWidget):
         self._compute_stats()
         self.volume_bytes = self._data.tobytes()
         self.observe(self._on_slice_change, names=["slice_x", "slice_y", "slice_z"])
+        self.observe(self._on_playing_change, names=["playing"])
         self.observe(self._on_gif_export, names=["_gif_export_requested"])
         self.observe(self._on_zip_export, names=["_zip_export_requested"])
 
@@ -419,6 +423,7 @@ class Show3DVolume(anywidget.AnyWidget):
             "dim_labels": self.dim_labels,
             "dual_mode": self.dual_mode,
             "title_b": self.title_b,
+            "show_diff": self.show_diff,
         }
         return d
 
@@ -456,6 +461,8 @@ class Show3DVolume(anywidget.AnyWidget):
         display = f"{cmap} | {contrast} | {scale}"
         if self.show_fft:
             display += " | FFT"
+        if self.show_diff and self.dual_mode:
+            display += " | diff"
         lines.append(f"Display:  {display}")
         if self.disabled_tools:
             lines.append(f"Locked:   {', '.join(self.disabled_tools)}")
@@ -487,7 +494,13 @@ class Show3DVolume(anywidget.AnyWidget):
                 self.stats_std_b = [float(np.std(s)) for s in slices_b]
 
     def _on_slice_change(self, change):
+        if self.playing:
+            return
         self._compute_stats()
+
+    def _on_playing_change(self, change):
+        if not self.playing:
+            self._compute_stats()
 
     def play(self):
         self.playing = True

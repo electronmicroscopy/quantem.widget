@@ -11,7 +11,7 @@ import anywidget
 import numpy as np
 import traitlets
 
-from quantem.widget.array_utils import to_numpy, _resize_image
+from quantem.widget.array_utils import to_numpy, _resize_image, apply_shift
 from quantem.widget.io import IOResult
 from quantem.widget.json_state import resolve_widget_version, save_state_file, unwrap_state_payload
 from quantem.widget.tool_parity import (
@@ -381,6 +381,8 @@ class Align2D(anywidget.AnyWidget):
         if b.shape != (target_h, target_w):
             b = _resize_image(b, target_h, target_w)
 
+        self._a = a
+        self._b = b
         self.height = target_h
         self.width = target_w
         self.padding = padding
@@ -475,6 +477,8 @@ class Align2D(anywidget.AnyWidget):
             a = _resize_image(a, target_h, target_w)
         if b.shape != (target_h, target_w):
             b = _resize_image(b, target_h, target_w)
+        self._a = a
+        self._b = b
         self.height = target_h
         self.width = target_w
         self.median_a = float(np.median(a))
@@ -553,6 +557,34 @@ class Align2D(anywidget.AnyWidget):
     def offset(self) -> tuple[float, float]:
         """Return (dx, dy) alignment offset."""
         return (self.dx, self.dy)
+
+    @property
+    def crop_box(self) -> tuple[int, int, int, int]:
+        """``(y0, y1, x0, x1)`` overlap region after alignment."""
+        h, w = self._a.shape
+        y0 = int(np.ceil(max(0, -self.dy)))
+        y1 = int(np.floor(h - max(0, self.dy)))
+        x0 = int(np.ceil(max(0, -self.dx)))
+        x1 = int(np.floor(w - max(0, self.dx)))
+        return (y0, y1, x0, x1)
+
+    @property
+    def cropped_a(self) -> np.ndarray:
+        """Reference image cropped to overlap region, float32."""
+        y0, y1, x0, x1 = self.crop_box
+        return self._a[y0:y1, x0:x1]
+
+    @property
+    def cropped_b(self) -> np.ndarray:
+        """Aligned image B cropped to overlap region, float32."""
+        y0, y1, x0, x1 = self.crop_box
+        shifted = apply_shift(self._b, self.dy, self.dx)
+        return shifted[y0:y1, x0:x1]
+
+    @property
+    def padded_b(self) -> np.ndarray:
+        """Image B shifted to match A, same dimensions, zero-padded, float32."""
+        return apply_shift(self._b, self.dy, self.dx)
 
 
 bind_tool_runtime_api(Align2D, "Align2D")

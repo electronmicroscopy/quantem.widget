@@ -263,12 +263,12 @@ let gpuFFT: WebGPUFFT | null = null;
 let gpuDevice: GPUDevice | null = null;
 let gpuInfo = "GPU";
 
-export async function getWebGPUFFT(): Promise<WebGPUFFT | null> {
-  if (gpuFFT) return gpuFFT;
-  if (!navigator.gpu) { console.warn('WebGPU not supported, falling back to CPU FFT'); return null; }
+export async function getGPUDevice(): Promise<GPUDevice | null> {
+  if (gpuDevice) return gpuDevice;
+  if (!navigator.gpu) return null;
   try {
     const adapter = await navigator.gpu.requestAdapter();
-    if (!adapter) { console.warn('No GPU adapter found'); return null; }
+    if (!adapter) return null;
     try {
       // @ts-ignore - requestAdapterInfo is not yet in all type definitions
       const info = await adapter.requestAdapterInfo?.();
@@ -277,7 +277,16 @@ export async function getWebGPUFFT(): Promise<WebGPUFFT | null> {
       }
     } catch (_e) { /* adapter info not available */ }
     gpuDevice = await adapter.requestDevice();
-    gpuFFT = new WebGPUFFT(gpuDevice);
+    return gpuDevice;
+  } catch { return null; }
+}
+
+export async function getWebGPUFFT(): Promise<WebGPUFFT | null> {
+  if (gpuFFT) return gpuFFT;
+  const device = await getGPUDevice();
+  if (!device) { console.warn('WebGPU not supported, falling back to CPU FFT'); return null; }
+  try {
+    gpuFFT = new WebGPUFFT(device);
     await gpuFFT.init();
     return gpuFFT;
   } catch (e) { console.warn('WebGPU init failed:', e); return null; }

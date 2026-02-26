@@ -67,6 +67,7 @@ ensured-targets = [
     "src/quantem/widget/static/mark2d.js",
     "src/quantem/widget/static/edit2d.js",
     "src/quantem/widget/static/align2d.js",
+    "src/quantem/widget/static/align2d_bulk.js",
     "src/quantem/widget/static/showcomplex.js",
 ]
 skip-if-exists = ["src/quantem/widget/static/show2d.js"]

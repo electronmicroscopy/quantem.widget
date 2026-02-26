@@ -38,6 +38,10 @@
       "tool_groups": ["alignment", "overlay", "display", "histogram", "stats", "export", "view", "all"],
       "aliases": {}
     },
+    "Align2DBulk": {
+      "tool_groups": ["display", "histogram", "navigation", "stats", "view", "export", "all"],
+      "aliases": {}
+    },
     "Bin": {
       "tool_groups": ["display", "binning", "mask", "preview", "stats", "export", "all"],
       "aliases": {}

@@ -952,6 +952,16 @@ class Show3D(anywidget.AnyWidget):
         self.roi_list = rois
         self.roi_active = True
 
+    @property
+    def roi(self) -> dict:
+        """The selected ROI dict (or the first ROI if none is selected)."""
+        idx = self.roi_selected_idx
+        if 0 <= idx < len(self.roi_list):
+            return self.roi_list[idx]
+        if self.roi_list:
+            return self.roi_list[0]
+        return {}
+
     def add_roi(self, row: int | None = None, col: int | None = None, shape: str = "square") -> Self:
         with self.hold_sync():
             self._upsert_selected_roi({

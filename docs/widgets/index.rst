@@ -30,5 +30,6 @@ Workflow widgets:
    mark2d
    edit2d
    align2d
+   align2d_bulk
    bin
    parity_matrix
