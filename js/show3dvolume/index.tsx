@@ -712,6 +712,10 @@ function Show3DVolume() {
 
   // Any zoom active?
   const needsReset = zooms.some(z => z.zoom !== 1 || z.panX !== 0 || z.panY !== 0) || fftZooms.some(z => z.zoom !== 1 || z.panX !== 0 || z.panY !== 0) || cameraChanged;
+  const needsResetAxis = (a: number) => {
+    const z = zooms[a]; const fz = fftZooms[a];
+    return z.zoom !== 1 || z.panX !== 0 || z.panY !== 0 || fz.zoom !== 1 || fz.panX !== 0 || fz.panY !== 0;
+  };
 
   // -------------------------------------------------------------------------
   // Build colormapped offscreen canvases (expensive: log scale, percentile, colormap LUT)
@@ -1340,6 +1344,12 @@ function Show3DVolume() {
     }
   };
 
+  const handleResetAxis = (a: number) => {
+    if (lockView) return;
+    setZooms(prev => { const next = [...prev]; next[a] = DEFAULT_ZOOM; return next; });
+    setFftZooms(prev => { const next = [...prev]; next[a] = DEFAULT_ZOOM; return next; });
+  };
+
   // -------------------------------------------------------------------------
   // Keyboard shortcuts
   // -------------------------------------------------------------------------
@@ -1567,8 +1577,13 @@ function Show3DVolume() {
   };
 
   const handleFftResetAll = () => { setFftZooms([DEFAULT_ZOOM, DEFAULT_ZOOM, DEFAULT_ZOOM]); setFftClickInfo(null); };
+  const handleFftResetAxis = (a: number) => {
+    setFftZooms(prev => { const next = [...prev]; next[a] = DEFAULT_ZOOM; return next; });
+    if (fftClickInfo && fftClickInfo.axis === a) setFftClickInfo(null);
+  };
 
   const fftNeedsReset = fftZooms.some(z => z.zoom !== 1 || z.panX !== 0 || z.panY !== 0);
+  const fftNeedsResetAxis = (a: number) => { const z = fftZooms[a]; return z.zoom !== 1 || z.panX !== 0 || z.panY !== 0; };
 
   // -------------------------------------------------------------------------
   // Canvas resize (matching Show2D)
@@ -1818,9 +1833,7 @@ function Show3DVolume() {
               {/* Header row matching Show3D */}
               <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: `${SPACING.XS}px`, height: 28 }}>
                 <Typography variant="caption" sx={{ ...typography.label }}>{a === 0 && title && !isDual ? title : axisLabels[a]}</Typography>
-                {a === 0 && (
-                  <Button size="small" sx={compactButton} disabled={lockView || !needsReset} onClick={() => { if (!lockView) handleResetAll(); }}>Reset</Button>
-                )}
+                <Button size="small" sx={compactButton} disabled={lockView || !needsResetAxis(a)} onClick={() => handleResetAxis(a)}>Reset</Button>
               </Stack>
               {/* Canvas with plane-colored border */}
               <Box
@@ -1902,9 +1915,7 @@ function Show3DVolume() {
                         </Typography>
                       )}
                     </Stack>
-                    {a === 0 && fftNeedsReset && (
-                      <Button size="small" sx={compactButton} disabled={lockView} onClick={() => { if (!lockView) handleFftResetAll(); }}>Reset</Button>
-                    )}
+                    <Button size="small" sx={compactButton} disabled={lockView || !fftNeedsResetAxis(a)} onClick={() => handleFftResetAxis(a)}>Reset</Button>
                   </Stack>
                   <Box
                     sx={{ ...container.imageBox, width: cw, height: ch, cursor: "grab", borderColor: ["#4d80ff", "#4dff66", "#ff4d4d"][a] }}
@@ -2001,9 +2012,7 @@ function Show3DVolume() {
                 <Box key={`b${a}`} sx={{ minWidth: cw }}>
                   <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: `${SPACING.XS}px`, height: 28 }}>
                     <Typography variant="caption" sx={{ ...typography.label }}>{axisLabels[a]}</Typography>
-                    {a === 0 && (
-                      <Button size="small" sx={compactButton} disabled={lockView || !needsReset} onClick={() => { if (!lockView) handleResetAll(); }}>Reset</Button>
-                    )}
+                    <Button size="small" sx={compactButton} disabled={lockView || !needsResetAxis(a)} onClick={() => handleResetAxis(a)}>Reset</Button>
                   </Stack>
                   <Box
                     sx={{ ...container.imageBox, width: cw, height: ch, cursor: "grab", borderColor: ["#4d80ff", "#4dff66", "#ff4d4d"][a] }}
