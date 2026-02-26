@@ -1,5 +1,10 @@
 # changelog
 
+## v0.0.12 (2026-02-25)
+
+### Show3DVolume
+- **dual-volume comparison** — `Show3DVolume(data, data_b=ground_truth, title="Recon", title_b="GT")` displays two volumes side by side with shared slice navigation, zoom/pan, camera, and colormap; stats and cursor readout are independent per volume; `set_image(a, data_b=b)` replaces both volumes without recreating the widget
+
 ## v0.0.11 (2026-02-25)
 
 ### Shared

@@ -23,7 +23,32 @@ Features
 - **3D volume rendering** — WebGL ray-casting for 3D visualization
 - **Per-axis playback** — Animate through slices along any axis
 - **FFT** — Toggle Fourier transform for each slice plane
+- **Dual-volume comparison** — Side-by-side comparison with shared navigation
 - **Tool customization** — Disable or hide control groups (including playback and 3D volume controls)
+
+Dual-Volume Comparison
+----------------------
+
+Compare two volumes side by side with shared slice positions, zoom/pan, camera,
+and colormap. Stats and cursor readout are independent per volume.
+
+.. code-block:: python
+
+   Show3DVolume(
+       reconstruction,
+       data_b=ground_truth,
+       title="Reconstruction",
+       title_b="Ground Truth",
+       cmap="inferno",
+   )
+
+Both volumes must have the same shape. Pass any supported input type (NumPy,
+PyTorch, IOResult, Dataset3d) for either volume.
+
+.. code-block:: python
+
+   # Replace both volumes (preserves display settings)
+   w.set_image(new_recon, data_b=new_gt)
 
 Methods
 -------
@@ -34,6 +59,9 @@ Methods
 
    # Replace data (preserves display settings)
    w.set_image(new_volume)
+
+   # Dual mode: replace both volumes
+   w.set_image(volume_a, data_b=volume_b)
 
    # Playback (animate through slices)
    w.play()
