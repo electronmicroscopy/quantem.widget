@@ -859,6 +859,12 @@ class Show4DSTEM(anywidget.AnyWidget):
                 torch.mps.empty_cache()
             except Exception:
                 pass
+        elif device.startswith("cuda"):
+            try:
+                import torch
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
         if nbytes > 0:
             print(f"freed {_format_memory(nbytes)} ({device})")
 

@@ -721,7 +721,7 @@ def _get_available_memory() -> int:
         page_size = os.sysconf("SC_PAGE_SIZE")
         total = pages * page_size
         return int(total * 0.5)
-    except (ValueError, OSError):
+    except (ValueError, OSError, AttributeError):
         return 16 * 1024**3
 
 
@@ -1056,16 +1056,14 @@ class IO:
             from quantem.widget.metal_decompress import load_arina
 
             output = load_arina(master_path, det_bin=det_bin, scan_shape=scan_shape)
-        elif backend == "cuda":
-            raise NotImplementedError("CUDA backend not yet implemented.")
-        elif backend == "intel":
-            raise NotImplementedError("Intel GPU backend not yet implemented.")
         elif backend == "cpu":
             output = _load_arina_cpu(
                 master_path, det_bin=det_bin, scan_shape=scan_shape
             )
         else:
-            raise ValueError(f"Unknown backend: {backend!r}")
+            raise ValueError(
+                f"Unknown backend: {backend!r}. Use 'auto', 'mps', or 'cpu'."
+            )
         if hot_pixel_filter:
             output = _filter_hot_pixels(output)
         if scan_bin > 1:
@@ -1091,12 +1089,6 @@ class IO:
             backend = _detect_gpu_backend()
             if backend is None:
                 backend = "cpu"
-                print(
-                    "No GPU backend found, using CPU fallback. "
-                    "For faster loading install a GPU backend:\n"
-                    "  - MPS (macOS): pip install pyobjc-framework-Metal\n"
-                    "  - CUDA (Linux/Windows): coming soon"
-                )
         return det_bin, backend
 
     @staticmethod
@@ -1132,8 +1124,8 @@ class IO:
             Zero out hot pixels on the detector (pixels > 5σ above median
             in the mean diffraction pattern). Default True.
         backend : str, optional
-            GPU backend: ``"auto"`` (detect best available), ``"mps"`` (Apple
-            Metal), ``"cuda"``, ``"intel"``, ``"cpu"``. Default ``"auto"``.
+            ``"auto"`` (MPS on macOS, CPU elsewhere), ``"mps"`` (Apple Metal),
+            or ``"cpu"`` (h5py, works on all platforms). Default ``"auto"``.
 
         Returns
         -------

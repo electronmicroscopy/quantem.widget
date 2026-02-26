@@ -1,3 +1,5 @@
+import os
+
 import numpy as np
 import pytest
 
@@ -810,3 +812,64 @@ def test_cpu_bin_mean_correctness():
             .mean(axis=(2, 4))
         )
         np.testing.assert_allclose(result, ref, rtol=1e-6)
+
+
+def test_arina_to_show4dstem_pipeline(tmp_path):
+    """IO.arina_file → Show4DSTEM end-to-end: data, title, and stats survive the handoff."""
+    from quantem.widget import Show4DSTEM
+    master_path, raw_data = _make_arina_files(tmp_path, n_frames=16, det_rows=32, det_cols=32)
+    result = IO.arina_file(master_path, det_bin=1, backend="cpu")
+    w = Show4DSTEM(result)
+    assert w.shape_rows * w.shape_cols == 16
+    assert w.det_rows == 32
+    assert w.det_cols == 32
+    assert w.title == "test_scan"
+    assert len(w.dp_stats) == 4
+    assert w.dp_stats[1] >= 0  # min >= 0 for uint16 source
+
+
+# =========================================================================
+# Real arina fixture (binned from Korean Sample C1, committed to repo)
+# =========================================================================
+
+ARINA_FIXTURE = os.path.join(
+    os.path.dirname(__file__), "data", "arina_fixture", "test_arina_master.h5"
+)
+
+
+def test_real_arina_cpu_load():
+    """CPU backend loads real arina data (binned fixture) without error."""
+    from quantem.widget.io import _load_arina_cpu
+    result = _load_arina_cpu(ARINA_FIXTURE, det_bin=1)
+    assert result.shape == (16, 24, 24)
+    assert result.dtype == np.uint32
+
+
+def test_real_arina_io_class():
+    """IO.arina_file loads real arina fixture end-to-end."""
+    result = IO.arina_file(ARINA_FIXTURE, det_bin=1, backend="cpu")
+    assert isinstance(result, IOResult)
+    assert result.data.shape == (16, 24, 24)
+    assert result.title == "test_arina"
+    assert isinstance(result.metadata, dict)
+    assert len(result.metadata) > 0  # real metadata from detector
+
+
+def test_real_arina_to_show4dstem():
+    """Real arina fixture → Show4DSTEM: full pipeline with real detector metadata."""
+    from quantem.widget import Show4DSTEM
+    result = IO.arina_file(ARINA_FIXTURE, det_bin=1, backend="cpu")
+    w = Show4DSTEM(result, scan_shape=(4, 4))
+    assert w.shape_rows == 4
+    assert w.shape_cols == 4
+    assert w.det_rows == 24
+    assert w.det_cols == 24
+    assert w.title == "test_arina"
+    assert len(w.dp_stats) == 4
+    # Virtual image should be computable
+    w.roi_circle(radius=5)
+    w.roi_center_row = 12
+    w.roi_center_col = 12
+    vi_stats = w.vi_stats
+    assert len(vi_stats) == 4
+    assert vi_stats[2] >= vi_stats[1]  # max >= min
