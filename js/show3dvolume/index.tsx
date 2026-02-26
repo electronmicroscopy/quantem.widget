@@ -411,8 +411,6 @@ function Show3DVolume() {
   } | null>(null);
   const [webgpuSupported, setWebgpuSupported] = React.useState(true);
   const [rendererReady, setRendererReady] = React.useState(0);
-  const [volumeOpacity, setVolumeOpacity] = React.useState(0.5);
-  const [volumeBrightness, setVolumeBrightness] = React.useState(1.0);
   const [volumeCanvasSize, setVolumeCanvasSize] = React.useState(300);
   const [volumeResizing, setVolumeResizing] = React.useState(false);
   const volumeResizeStartRef = React.useRef<{ x: number; y: number; size: number } | null>(null);
@@ -664,12 +662,12 @@ function Show3DVolume() {
   // Keep render params in ref for direct rAF rendering (bypasses React during drag)
   const volumeRenderParamsRef = React.useRef({
     sliceX, sliceY, sliceZ, nx, ny, nz,
-    opacity: volumeOpacity, brightness: volumeBrightness, showSlicePlanes,
+    opacity: 0.5, brightness: 1.0, showSlicePlanes,
     vmin: imageVminPct / 100, vmax: imageVmaxPct / 100,
   });
   volumeRenderParamsRef.current = {
     sliceX, sliceY, sliceZ, nx, ny, nz,
-    opacity: volumeOpacity, brightness: volumeBrightness, showSlicePlanes,
+    opacity: 0.5, brightness: 1.0, showSlicePlanes,
     vmin: imageVminPct / 100, vmax: imageVmaxPct / 100,
   };
   const bgColorRef = React.useRef<[number, number, number]>([0, 0, 0]);
@@ -686,7 +684,7 @@ function Show3DVolume() {
     const renderer = volumeRendererRef.current;
     if (!renderer || !allFloats || allFloats.length === 0) return;
     renderer.render(volumeRenderParamsRef.current, camera, bgColorRef.current);
-  }, [allFloats, sliceX, sliceY, sliceZ, nx, ny, nz, cmap, camera, volumeOpacity, volumeBrightness, volumeCanvasSize, tc.bg, showSlicePlanes, volumeDrag, rendererReady, imageVminPct, imageVmaxPct]);
+  }, [allFloats, sliceX, sliceY, sliceZ, nx, ny, nz, cmap, camera, volumeCanvasSize, tc.bg, showSlicePlanes, volumeDrag, rendererReady, imageVminPct, imageVmaxPct]);
 
   // Prevent scroll on volume canvas
   React.useEffect(() => {
@@ -731,7 +729,7 @@ function Show3DVolume() {
     const renderer = volumeRendererRefB.current;
     if (!renderer || !allFloatsB || allFloatsB.length === 0) return;
     renderer.render(volumeRenderParamsRef.current, camera, bgColorRef.current);
-  }, [allFloatsB, sliceX, sliceY, sliceZ, nx, ny, nz, cmap, camera, volumeOpacity, volumeBrightness, volumeCanvasSize, tc.bg, showSlicePlanes, volumeDrag, rendererReady, imageVminPct, imageVmaxPct]);
+  }, [allFloatsB, sliceX, sliceY, sliceZ, nx, ny, nz, cmap, camera, volumeCanvasSize, tc.bg, showSlicePlanes, volumeDrag, rendererReady, imageVminPct, imageVmaxPct]);
 
   React.useEffect(() => {
     const canvas = volumeCanvasRefB.current;
@@ -2095,7 +2093,7 @@ function Show3DVolume() {
             <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>Colorbar: Display colorbar overlay on each slice canvas.</Typography>
             <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>Loop: Loop playback. Drag end markers on slider for loop range.</Typography>
             <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>Bounce: Ping-pong playback — alternates forward and reverse.</Typography>
-            <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>Opacity/Bright/Planes: 3D volume renderer controls.</Typography>
+            <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>Planes: Show/hide slice planes in 3D volume view.</Typography>
             <Typography sx={{ fontSize: 11, fontWeight: "bold", mt: 0.5 }}>Keyboard</Typography>
             <KeyboardShortcuts items={[["Space", "Play / Pause"], ["← / →", "Prev / Next slice"], ["Home / End", "First / Last slice"], ["R", "Reset zoom"], ["Scroll", "Zoom"], ["Dbl-click", "Reset view"]]} />
           </Box>} theme={themeInfo.theme} />
@@ -2120,6 +2118,12 @@ function Show3DVolume() {
                 size="small"
                 sx={switchStyles.small}
               />
+            </>
+          )}
+          {!hideVolume && webgpuSupported && (
+            <>
+              <Typography sx={{ ...typography.label, fontSize: 10 }}>Planes:</Typography>
+              <Switch checked={showSlicePlanes} onChange={(e) => setShowSlicePlanes(e.target.checked)} disabled={lockVolume} size="small" sx={switchStyles.small} />
             </>
           )}
           <Box sx={{ flex: 1 }} />
@@ -2225,29 +2229,6 @@ function Show3DVolume() {
             </Typography>
           </Box>
         )}
-        {/* Volume rendering controls */}
-        {webgpuSupported && (
-          <Box sx={{ ...controlRow, mt: `${SPACING.SM}px`, border: `1px solid ${tc.border}`, bgcolor: tc.controlBg }}>
-            <Typography sx={{ ...typography.label, fontSize: 10, color: tc.textMuted }}>Opacity:</Typography>
-            <Slider
-              value={volumeOpacity} min={0} max={1} step={0.01}
-              onChange={(_, v) => setVolumeOpacity(v as number)}
-              disabled={lockVolume}
-              size="small" sx={{ ...sliderStyles.small, width: 60 }}
-            />
-            <Typography sx={{ ...typography.value, color: tc.textMuted, minWidth: 24 }}>{volumeOpacity.toFixed(2)}</Typography>
-            <Typography sx={{ ...typography.label, fontSize: 10, color: tc.textMuted }}>Bright:</Typography>
-            <Slider
-              value={volumeBrightness} min={0.1} max={3} step={0.1}
-              onChange={(_, v) => setVolumeBrightness(v as number)}
-              disabled={lockVolume}
-              size="small" sx={{ ...sliderStyles.small, width: 60 }}
-            />
-            <Typography sx={{ ...typography.value, color: tc.textMuted, minWidth: 24 }}>{volumeBrightness.toFixed(1)}</Typography>
-            <Typography sx={{ ...typography.label, fontSize: 10, color: tc.textMuted }}>Planes:</Typography>
-            <Switch checked={showSlicePlanes} onChange={(e) => setShowSlicePlanes(e.target.checked)} disabled={lockVolume} size="small" sx={switchStyles.small} />
-          </Box>
-        )}
       </Box>
       )}
       {/* Slice canvases row — Volume A */}
@@ -2264,7 +2245,7 @@ function Show3DVolume() {
               {/* Header row matching Show3D */}
               {!compactDual && (
                 <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: `${SPACING.XS}px`, height: 28 }}>
-                  <Typography variant="caption" sx={{ ...typography.label }}>{a === 0 && title && !isDual ? title : axisLabels[a]}</Typography>
+                  <Typography variant="caption" sx={{ ...typography.label }}>{axisLabels[a]}</Typography>
                   <Button size="small" sx={compactButton} disabled={lockView || !needsResetAxis(a)} onClick={() => handleResetAxis(a)}>Reset</Button>
                 </Stack>
               )}
