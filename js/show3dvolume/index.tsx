@@ -1935,8 +1935,8 @@ function Show3DVolume() {
                   )}
                 </Box>
               )}
-              {/* Slider row (always at bottom) — 3-thumb when loop on, single when off */}
-              {!hidePlayback && (
+              {/* Slider row — only in single mode; dual mode renders sliders below Volume B */}
+              {!isDual && !hidePlayback && (
               <Box sx={{ ...controlRow, mt: `${SPACING.SM}px`, border: `1px solid ${tc.border}`, bgcolor: tc.controlBg, width: cw, maxWidth: cw, boxSizing: "border-box" }}>
                 <Typography sx={{ ...typography.labelSmall, color: tc.textMuted, flexShrink: 0 }}>{dl[a]}</Typography>
                 {loop ? (
@@ -2001,6 +2001,9 @@ function Show3DVolume() {
                 <Box key={`b${a}`} sx={{ minWidth: cw }}>
                   <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: `${SPACING.XS}px`, height: 28 }}>
                     <Typography variant="caption" sx={{ ...typography.label }}>{axisLabels[a]}</Typography>
+                    {a === 0 && (
+                      <Button size="small" sx={compactButton} disabled={lockView || !needsReset} onClick={() => { if (!lockView) handleResetAll(); }}>Reset</Button>
+                    )}
                   </Stack>
                   <Box
                     sx={{ ...container.imageBox, width: cw, height: ch, cursor: "grab", borderColor: ["#4d80ff", "#4dff66", "#ff4d4d"][a] }}
@@ -2091,6 +2094,64 @@ function Show3DVolume() {
               );
             })}
           </Stack>
+          {/* Shared slider row — below Volume B in dual mode */}
+          {!hidePlayback && (
+            <Stack direction="row" spacing={`${SPACING.LG}px`} sx={{ mt: `${SPACING.SM}px` }}>
+              {AXES.map((_, a) => {
+                const { w: cw } = canvasSizes[a];
+                return (
+                  <Box key={`slider${a}`} sx={{ minWidth: cw }}>
+                    <Box sx={{ ...controlRow, border: `1px solid ${tc.border}`, bgcolor: tc.controlBg, width: cw, maxWidth: cw, boxSizing: "border-box" }}>
+                      <Typography sx={{ ...typography.labelSmall, color: tc.textMuted, flexShrink: 0 }}>{dl[a]}</Typography>
+                      {loop ? (
+                        <Slider
+                          value={[loopStarts[a], sliceValues[a], effectiveLoopEnds[a]]}
+                          onChange={(_, v) => {
+                            const vals = v as number[];
+                            setLoopStarts(prev => { const next = [...prev]; next[a] = vals[0]; return next; });
+                            [setSliceZ, setSliceY, setSliceX][a](vals[1]);
+                            setLoopEnds(prev => { const next = [...prev]; next[a] = vals[2]; return next; });
+                          }}
+                          disableSwap
+                          min={0}
+                          max={sliceMaxes[a]}
+                          disabled={lockPlayback}
+                          size="small"
+                          valueLabelDisplay="auto"
+                          valueLabelFormat={(v) => `${v}`}
+                          sx={{
+                            ...sliderStyles.small,
+                            flex: 1,
+                            minWidth: 40,
+                            "& .MuiSlider-thumb[data-index='0']": { width: 8, height: 8, bgcolor: tc.textMuted },
+                            "& .MuiSlider-thumb[data-index='1']": { width: 12, height: 12 },
+                            "& .MuiSlider-thumb[data-index='2']": { width: 8, height: 8, bgcolor: tc.textMuted },
+                            "& .MuiSlider-valueLabel": { fontSize: 10, padding: "2px 4px" },
+                          }}
+                        />
+                      ) : (
+                        <Slider
+                          value={sliceValues[a]}
+                          min={0}
+                          max={sliceMaxes[a]}
+                          onChange={sliceSetters[a]}
+                          disabled={lockPlayback}
+                          size="small"
+                          sx={{ ...sliderStyles.small, flex: 1, minWidth: 40 }}
+                        />
+                      )}
+                      <Typography sx={{ ...typography.value, color: tc.textMuted, minWidth: 28, textAlign: "right", flexShrink: 0 }}>
+                        {sliceValues[a]}/{sliceMaxes[a]}
+                      </Typography>
+                      {zooms[a].zoom !== 1 && (
+                        <Typography sx={{ ...typography.label, fontSize: 10, color: tc.accent, fontWeight: "bold" }}>{zooms[a].zoom.toFixed(1)}x</Typography>
+                      )}
+                    </Box>
+                  </Box>
+                );
+              })}
+            </Stack>
+          )}
         </>
       )}
       {/* FFT controls row */}
