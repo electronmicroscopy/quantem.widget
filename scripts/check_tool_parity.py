@@ -64,7 +64,7 @@ def run_checks(repo_root: pathlib.Path | None = None) -> list[str]:
         if not path.exists():
             errors.append(f"{widget_name}: missing frontend file {rel_path}")
             continue
-        text = path.read_text()
+        text = path.read_text(encoding="utf-8")
         if 'useModelState<string[]>("disabled_tools")' not in text:
             errors.append(f'{widget_name}: frontend missing useModelState("disabled_tools")')
         if 'useModelState<string[]>("hidden_tools")' not in text:
