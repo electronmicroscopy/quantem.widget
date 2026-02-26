@@ -97,7 +97,7 @@ Examples
 - :doc:`Simple demo </examples/show2d/show2d_simple>`
 - :doc:`All features </examples/show2d/show2d_all_features>`
 
-API Reference
--------------
+API
+---
 
 See :class:`quantem.widget.Show2D` for full documentation.

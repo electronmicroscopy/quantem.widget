@@ -229,7 +229,7 @@ Examples
 - :doc:`Simple demo </examples/show4dstem/show4dstem_simple>`
 - :doc:`All features </examples/show4dstem/show4dstem_all_features>`
 
-API Reference
--------------
+API
+---
 
 See :class:`quantem.widget.Show4DSTEM` for full documentation.

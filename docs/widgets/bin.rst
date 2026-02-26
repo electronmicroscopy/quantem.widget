@@ -83,7 +83,7 @@ Examples
 - :doc:`Simple demo </examples/bin/bin_simple>`
 - :doc:`All features </examples/bin/bin_all_features>`
 
-API Reference
--------------
+API
+---
 
 See :class:`quantem.widget.Bin` for full documentation.

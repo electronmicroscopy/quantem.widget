@@ -131,7 +131,7 @@ Examples
 - :doc:`Simple demo </examples/show3d/show3d_simple>`
 - :doc:`All features </examples/show3d/show3d_all_features>`
 
-API Reference
--------------
+API
+---
 
 See :class:`quantem.widget.Show3D` for full documentation.

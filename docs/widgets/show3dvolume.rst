@@ -115,7 +115,7 @@ Examples
 - :doc:`Simple demo </examples/show3dvolume/show3dvolume_simple>`
 - :doc:`All features </examples/show3dvolume/show3dvolume_all_features>`
 
-API Reference
--------------
+API
+---
 
 See :class:`quantem.widget.Show3DVolume` for full documentation.

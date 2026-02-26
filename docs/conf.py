@@ -15,12 +15,15 @@ extensions = [
     "sphinx.ext.napoleon",
     "sphinx.ext.intersphinx",
     "sphinx.ext.viewcode",
+    "sphinx.ext.mathjax",
     "numpydoc",
     "nbsphinx",
     "sphinx_copybutton",
     "sphinx_design",
     "myst_parser",
 ]
+
+myst_enable_extensions = ["dollarmath", "amsmath"]
 
 templates_path = ["_templates"]
 exclude_patterns = [
@@ -48,8 +51,8 @@ html_theme_options = {
     "navbar_align": "left",
     "icon_links": [
         {
-            "name": "PyPI",
-            "url": "https://pypi.org/project/quantem-widget/",
+            "name": "TestPyPI",
+            "url": "https://test.pypi.org/project/quantem-widget/",
             "icon": "fa-solid fa-box",
         },
     ],

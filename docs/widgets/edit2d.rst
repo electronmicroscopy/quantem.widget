@@ -109,7 +109,7 @@ Examples
 - :doc:`Simple demo </examples/edit2d/edit2d_simple>`
 - :doc:`All features </examples/edit2d/edit2d_all_features>`
 
-API Reference
--------------
+API
+---
 
 See :class:`quantem.widget.Edit2D` for full documentation.

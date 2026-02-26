@@ -107,7 +107,7 @@ Examples
 - :doc:`Simple demo </examples/show1d/show1d_simple>`
 - :doc:`All features </examples/show1d/show1d_all_features>`
 
-API Reference
--------------
+API
+---
 
 See :class:`quantem.widget.Show1D` for full documentation.

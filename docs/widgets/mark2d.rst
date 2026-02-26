@@ -103,7 +103,7 @@ Examples
 - :doc:`Simple demo </examples/mark2d/mark2d_simple>`
 - :doc:`All features </examples/mark2d/mark2d_all_features>`
 
-API Reference
--------------
+API
+---
 
 See :class:`quantem.widget.Mark2D` for full documentation.

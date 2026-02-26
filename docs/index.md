@@ -49,7 +49,7 @@ result = IO.folder("scans/")          # folder → stack
 data   = IO.arina_file("master.h5", det_bin=2)  # GPU-accelerated arina 4D-STEM
 ```
 
-See the [IO API reference](api/io) for full documentation and examples.
+See the [IO API](api/io) for full documentation and examples.
 
 ## widgets
 
@@ -65,16 +65,18 @@ See the [IO API reference](api/io) for full documentation and examples.
 | [Mark2D](examples/mark2d/mark2d_simple) | interactive point picker for 2D images |
 | [Edit2D](examples/edit2d/edit2d_simple) | interactive crop/pad/mask editor |
 | [Align2D](examples/align2d/align2d_simple) | image alignment overlay with phase correlation |
+| [Align2DBulk](examples/align2d_bulk/align2d_bulk_simple) | GPU-accelerated bulk alignment of N frames |
 | [Bin](examples/bin/bin_simple) | calibration-aware binning + BF/ADF quality control |
 
 ```{toctree}
-:maxdepth: 2
+:maxdepth: 1
 :hidden:
 
 widgets/index
 examples/index
 api/index
 dev/index
+math
 optimization
 changelog
 ```

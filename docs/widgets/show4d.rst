@@ -111,7 +111,7 @@ Examples
 - :doc:`Simple demo </examples/show4d/show4d_simple>`
 - :doc:`All features </examples/show4d/show4d_all_features>`
 
-API Reference
--------------
+API
+---
 
 See :class:`quantem.widget.Show4D` for full documentation.

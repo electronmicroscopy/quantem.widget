@@ -1,4 +1,4 @@
-# Performance & Optimization
+# Optimization
 
 Performance documentation for the quantem.widget data pipeline, focused on 4D-STEM and 5D-STEM workflows on Apple Silicon.
 

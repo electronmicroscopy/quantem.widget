@@ -112,7 +112,7 @@ Examples
 - :doc:`Simple demo </examples/showcomplex2d/showcomplex2d_simple>`
 - :doc:`All features </examples/showcomplex2d/showcomplex2d_all_features>`
 
-API Reference
--------------
+API
+---
 
 See :class:`quantem.widget.ShowComplex2D` for full documentation.

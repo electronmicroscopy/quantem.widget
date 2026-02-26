@@ -2,6 +2,14 @@
 
 Each widget has two notebooks: a **simple** quickstart and a comprehensive **all features** demo.
 
+## Math reference demos
+
+| Topic | Notebook |
+|-------|----------|
+| Window functions | [Hann vs Tukey](math/windowing) |
+
+## Widget examples
+
 | Module | Simple | All Features |
 |--------|--------|--------------|
 | IO | [simple](io/io_simple) | [all features](io/io_all_features) |
@@ -21,6 +29,7 @@ Each widget has two notebooks: a **simple** quickstart and a comprehensive **all
 ```{toctree}
 :hidden:
 
+math/windowing
 io/io_simple
 io/io_all_features
 show1d/show1d_simple

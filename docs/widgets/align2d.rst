@@ -85,7 +85,7 @@ Examples
 - :doc:`Simple demo </examples/align2d/align2d_simple>`
 - :doc:`All features </examples/align2d/align2d_all_features>`
 
-API Reference
--------------
+API
+---
 
 See :class:`quantem.widget.Align2D` for full documentation.

@@ -1,4 +1,4 @@
-# Developer Guide
+# Guide
 
 Everything you need to set up, understand, and contribute to `quantem.widget`.
 

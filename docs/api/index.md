@@ -1,4 +1,4 @@
-# API reference
+# API
 
 ```{toctree}
 :maxdepth: 1
@@ -14,6 +14,7 @@ showcomplex
 mark2d
 edit2d
 align2d
+align2d_bulk
 bin
 array_utils
 ```
