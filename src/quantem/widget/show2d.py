@@ -160,6 +160,11 @@ class Show2D(anywidget.AnyWidget):
     # =========================================================================
     profile_line = traitlets.List(traitlets.Dict()).tag(sync=True)
 
+    # =========================================================================
+    # Per-Image Rotation
+    # =========================================================================
+    image_rotations = traitlets.List(traitlets.Int(), []).tag(sync=True)
+
     @classmethod
     def _normalize_tool_groups(cls, tool_groups) -> List[str]:
         return normalize_tool_groups("Show2D", tool_groups)
@@ -318,9 +323,11 @@ class Show2D(anywidget.AnyWidget):
             data = data[np.newaxis, ...]
 
         self._data = data.astype(np.float32)
+        self._data_original = [self._data[i].copy() for i in range(self._data.shape[0])]
         self.n_images = int(data.shape[0])
         self.height = int(data.shape[1])
         self.width = int(data.shape[2])
+        self.image_rotations = [0] * self.n_images
 
         # Labels
         if labels is None:
@@ -401,9 +408,11 @@ class Show2D(anywidget.AnyWidget):
         if data.ndim == 2:
             data = data[np.newaxis, ...]
         self._data = data.astype(np.float32)
+        self._data_original = [self._data[i].copy() for i in range(self._data.shape[0])]
         self.n_images = int(data.shape[0])
         self.height = int(data.shape[1])
         self.width = int(data.shape[2])
+        self.image_rotations = [0] * self.n_images
         if labels is not None:
             self.labels = list(labels)
         else:
@@ -536,6 +545,7 @@ class Show2D(anywidget.AnyWidget):
             "roi_list": self.roi_list,
             "roi_selected_idx": self.roi_selected_idx,
             "profile_line": self.profile_line,
+            "image_rotations": list(self.image_rotations),
         }
 
     def save(self, path: str):
@@ -581,6 +591,10 @@ class Show2D(anywidget.AnyWidget):
         if self.profile_line:
             p0, p1 = self.profile_line[0], self.profile_line[1]
             lines.append(f"Profile:  ({p0['row']:.0f}, {p0['col']:.0f}) → ({p1['row']:.0f}, {p1['col']:.0f})")
+        non_zero = [(i, r * 90) for i, r in enumerate(self.image_rotations) if r % 4 != 0]
+        if non_zero:
+            parts = [f"#{i}={deg}°" for i, deg in non_zero]
+            lines.append(f"Rotated:  {', '.join(parts)}")
         print("\n".join(lines))
 
     def _compute_all_stats(self):
@@ -600,6 +614,76 @@ class Show2D(anywidget.AnyWidget):
     def _update_all_frames(self):
         """Send raw float32 data to JS (normalization happens in JS for speed)."""
         self.frame_bytes = self._data.tobytes()
+
+    def _apply_rotations(self):
+        rotated = []
+        for i, orig in enumerate(self._data_original):
+            k = self.image_rotations[i] if i < len(self.image_rotations) else 0
+            k = k % 4
+            if k == 0:
+                rotated.append(orig)
+            else:
+                rotated.append(np.rot90(orig, k=k))
+        # If shapes differ after rotation, center-pad all to max dims
+        shapes = [img.shape for img in rotated]
+        if len(set(shapes)) > 1:
+            max_h = max(s[0] for s in shapes)
+            max_w = max(s[1] for s in shapes)
+            padded = []
+            for img in rotated:
+                h, w = img.shape
+                pad_top = (max_h - h) // 2
+                pad_bot = max_h - h - pad_top
+                pad_left = (max_w - w) // 2
+                pad_right = max_w - w - pad_left
+                padded.append(np.pad(img, ((pad_top, pad_bot), (pad_left, pad_right)), mode="constant", constant_values=0))
+            rotated = padded
+        self._data = np.stack(rotated).astype(np.float32)
+        self.height = int(self._data.shape[1])
+        self.width = int(self._data.shape[2])
+        self._compute_all_stats()
+        self._update_all_frames()
+
+    @traitlets.observe("image_rotations")
+    def _on_image_rotations_changed(self, change):
+        if hasattr(self, "_data_original"):
+            self._apply_rotations()
+
+    def rotate(self, idx: int, angle: int) -> Self:
+        """Rotate image ``idx`` by ``angle`` degrees (CCW-positive, matches np.rot90).
+
+        Rotation convention follows ``np.rot90``::
+
+            angle | image_rotations | np.rot90 k | direction
+            ------+-----------------+------------+----------
+              90  |        1        |     1      | 90° CCW
+             180  |        2        |     2      | 180°
+             -90  |        3        |     3      | 90° CW
+             360  |        0        |     0      | identity
+
+        Parameters
+        ----------
+        idx : int
+            Image index in the gallery (0-based).
+        angle : int
+            Rotation angle in degrees (must be a multiple of 90).
+            Positive = counter-clockwise, negative = clockwise.
+
+        Returns
+        -------
+        Self
+        """
+        if angle % 90 != 0:
+            raise ValueError(f"Rotation angle must be a multiple of 90°, got {angle}")
+        if idx < 0 or idx >= self.n_images:
+            raise IndexError(f"Image index {idx} out of range [0, {self.n_images})")
+        k = (angle // 90) % 4
+        rots = list(self.image_rotations)
+        while len(rots) < self.n_images:
+            rots.append(0)
+        rots[idx] = (rots[idx] + k) % 4
+        self.image_rotations = rots
+        return self
 
     def _sample_profile(self, row0, col0, row1, col1):
         img = self._data[self.selected_idx]

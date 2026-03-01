@@ -412,6 +412,7 @@ def test_show2d_state_dict_keys():
     assert "hidden_tools" in keys
     assert "show_stats" in keys
     assert "show_fft" in keys
+    assert "image_rotations" in keys
 
 def test_show2d_save_load_file(tmp_path):
     import json
@@ -539,3 +540,74 @@ def test_show2d_widget_version_is_set():
     data = np.random.rand(16, 16).astype(np.float32)
     w = Show2D(data)
     assert w.widget_version != "unknown"
+
+# ── Per-Image Rotation ──────────────────────────────────────────────────
+
+def test_show2d_rotation_basic():
+    data = np.arange(6, dtype=np.float32).reshape(2, 3)
+    w = Show2D(data)
+    assert w.height == 2
+    assert w.width == 3
+    w.rotate(0, 90)
+    assert w.height == 3
+    assert w.width == 2
+    expected = np.rot90(data, k=1)  # 90° CCW, matches np.rot90 convention
+    np.testing.assert_array_equal(w._data[0], expected)
+
+def test_show2d_rotation_gallery_padding():
+    img1 = np.ones((2, 3), dtype=np.float32)
+    img2 = np.ones((2, 3), dtype=np.float32) * 2
+    w = Show2D([img1, img2])
+    assert w.height == 2
+    assert w.width == 3
+    w.rotate(0, 90)
+    # img1 rotated: 3×2, img2 unrotated: 2×3 → padded to 3×3
+    assert w.height == 3
+    assert w.width == 3
+
+def test_show2d_rotation_state_roundtrip():
+    data = np.random.rand(3, 16, 16).astype(np.float32)
+    w = Show2D(data)
+    w.rotate(1, 90)
+    w.rotate(2, 180)
+    sd = w.state_dict()
+    assert sd["image_rotations"] == [0, 1, 2]
+    w2 = Show2D(data, state=sd)
+    assert w2.image_rotations == [0, 1, 2]
+
+def test_show2d_rotation_validation():
+    data = np.random.rand(16, 16).astype(np.float32)
+    w = Show2D(data)
+    with pytest.raises(ValueError, match="multiple of 90"):
+        w.rotate(0, 45)
+    with pytest.raises(IndexError, match="out of range"):
+        w.rotate(5, 90)
+
+def test_show2d_rotation_ccw():
+    data = np.arange(6, dtype=np.float32).reshape(2, 3)
+    w = Show2D(data)
+    w.rotate(0, -90)
+    assert w.image_rotations == [3]
+    expected = np.rot90(data, k=3)  # -90° = 90° CW = np.rot90 k=3
+    np.testing.assert_array_equal(w._data[0], expected)
+
+def test_show2d_rotation_360_identity():
+    data = np.random.rand(16, 16).astype(np.float32)
+    w = Show2D(data)
+    original = w._data[0].copy()
+    w.rotate(0, 360)
+    np.testing.assert_array_equal(w._data[0], original)
+
+def test_show2d_rotation_set_image_resets():
+    data = np.random.rand(16, 16).astype(np.float32)
+    w = Show2D(data)
+    w.rotate(0, 90)
+    assert w.image_rotations == [1]
+    w.set_image(np.random.rand(20, 20).astype(np.float32))
+    assert w.image_rotations == [0]
+
+def test_show2d_rotation_chaining():
+    data = np.random.rand(16, 16).astype(np.float32)
+    w = Show2D(data)
+    result = w.rotate(0, 90)
+    assert result is w

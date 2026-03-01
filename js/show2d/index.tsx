@@ -410,6 +410,7 @@ function Show2D() {
   const [roiActive, setRoiActive] = useModelState<boolean>("roi_active");
   const [roiList, setRoiList] = useModelState<ROIItem[]>("roi_list");
   const [roiSelectedIdx, setRoiSelectedIdx] = useModelState<number>("roi_selected_idx");
+  const [imageRotations, setImageRotations] = useModelState<number[]>("image_rotations");
   const [isDraggingROI, setIsDraggingROI] = React.useState(false);
   const [isDraggingResize, setIsDraggingResize] = React.useState(false);
   const [isDraggingResizeInner, setIsDraggingResizeInner] = React.useState(false);
@@ -676,7 +677,7 @@ function Show2D() {
     });
   }, []);
 
-  const [dataReady, setDataReady] = React.useState(false);
+  const [dataVersion, setDataVersion] = React.useState(0);
 
   // Keep inline FFT ref arrays in sync with nImages
   React.useEffect(() => {
@@ -694,7 +695,7 @@ function Show2D() {
       dataArrays.push(new Float32Array(imageData));
     }
     rawDataRef.current = dataArrays;
-    setDataReady(true);
+    setDataVersion(v => v + 1);
 
   }, [allFloats, nImages, floatsPerImage]);
 
@@ -756,7 +757,7 @@ function Show2D() {
   // (does NOT depend on zoom/pan — avoids recomputing 16M pixels on every pan/zoom)
   // -------------------------------------------------------------------------
   React.useEffect(() => {
-    if (!dataReady || !rawDataRef.current || rawDataRef.current.length === 0) return;
+    if (!dataVersion || !rawDataRef.current || rawDataRef.current.length === 0) return;
     if (mainOffscreensRef.current.length === 0 || mainImgDatasRef.current.length === 0) return;
 
     const lut = COLORMAPS[cmap] || COLORMAPS.inferno;
@@ -797,7 +798,7 @@ function Show2D() {
       renderToOffscreenReuse(processed, lut, vmin, vmax, offscreen, imgData);
     }
     setOffscreenVersion(v => v + 1);
-  }, [dataReady, nImages, width, height, cmap, logScale, autoContrast, linkedContrast, linkedContrastState, contrastStates]);
+  }, [dataVersion, nImages, width, height, cmap, logScale, autoContrast, linkedContrast, linkedContrastState, contrastStates]);
 
   // -------------------------------------------------------------------------
   // Draw effect: zoom/pan changes — cheap, just drawImage from cached offscreens
@@ -1047,7 +1048,7 @@ function Show2D() {
         ctx.restore();
       }
     }
-  }, [nImages, pixelSize, scaleBarVisible, selectedIdx, isGallery, canvasW, canvasH, width, displayScale, linkedZoom, linkedZoomState, zoomStates, dataReady, showColorbar, cmap, offscreenVersion, logScale, profileActive, profilePoints, roiActive, roiList, roiSelectedIdx, isDraggingROI, themeColors, hideDisplay, hideRoi, hideProfile, measureActive, measurePoints]);
+  }, [nImages, pixelSize, scaleBarVisible, selectedIdx, isGallery, canvasW, canvasH, width, displayScale, linkedZoom, linkedZoomState, zoomStates, dataVersion, showColorbar, cmap, offscreenVersion, logScale, profileActive, profilePoints, roiActive, roiList, roiSelectedIdx, isDraggingROI, themeColors, hideDisplay, hideRoi, hideProfile, measureActive, measurePoints]);
 
   // -------------------------------------------------------------------------
   // Inset magnifier (lens) — renders magnified region at cursor in bottom-left
@@ -1145,7 +1146,7 @@ function Show2D() {
       setProfileDataAll(allProfiles);
       if (!profileActive) setProfileActive(true);
     }
-  }, [profilePoints, dataReady, hideProfile, profileActive]);
+  }, [profilePoints, dataVersion, hideProfile, profileActive]);
 
   // -------------------------------------------------------------------------
   // Render sparkline for line profile
@@ -1472,7 +1473,7 @@ function Show2D() {
     doCompute();
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [effectiveShowFft, isGallery, selectedIdx, width, height, gpuReady, dataReady, roiFftKey, fftWindow]);
+  }, [effectiveShowFft, isGallery, selectedIdx, width, height, gpuReady, dataVersion, roiFftKey, fftWindow]);
 
   // Clear FFT measurement when image, FFT state, or ROI changes
   React.useEffect(() => { setFftClickInfo(null); }, [selectedIdx, effectiveShowFft, roiFftActive, roiSelectedIdx]);
@@ -1717,7 +1718,7 @@ function Show2D() {
 
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [effectiveShowFft, isGallery, nImages, width, height, gpuReady, dataReady, roiFftKey, fftWindow]);
+  }, [effectiveShowFft, isGallery, nImages, width, height, gpuReady, dataVersion, roiFftKey, fftWindow]);
 
   // Gallery FFT data effect: normalize + colormap → cached offscreen canvases
   // (does NOT depend on gallery zoom/pan states)
@@ -2843,6 +2844,26 @@ function Show2D() {
           setMeasurePoints([]);
         }
         break;
+      case "]":
+        if (!lockNavigation && !lockDisplay) {
+          e.preventDefault();
+          const rIdx = isGallery ? selectedIdx : 0;
+          const rots = [...(imageRotations || [])];
+          while (rots.length <= rIdx) rots.push(0);
+          rots[rIdx] = (rots[rIdx] + 3) % 4;
+          setImageRotations(rots);
+        }
+        break;
+      case "[":
+        if (!lockNavigation && !lockDisplay) {
+          e.preventDefault();
+          const rIdx2 = isGallery ? selectedIdx : 0;
+          const rots2 = [...(imageRotations || [])];
+          while (rots2.length <= rIdx2) rots2.push(0);
+          rots2[rIdx2] = (rots2[rIdx2] + 1) % 4;
+          setImageRotations(rots2);
+        }
+        break;
       case "Delete":
       case "Backspace":
         if (!lockRoi && roiActive && roiSelectedIdx >= 0 && roiList && roiSelectedIdx < roiList.length) {
@@ -2873,6 +2894,22 @@ function Show2D() {
           {/* Title row */}
           <Typography variant="caption" sx={{ ...typography.label, color: themeColors.accent, mb: `${SPACING.XS}px`, display: "block", height: 16, lineHeight: "16px", overflow: "hidden" }}>
             {title || (isGallery ? "Gallery" : "Image")}
+            {(() => { const rk = (imageRotations?.[isGallery ? selectedIdx : 0] ?? 0) % 4; return rk !== 0 ? (
+              <Box
+                component="span"
+                onClick={() => {
+                  if (lockDisplay) return;
+                  const ri = isGallery ? selectedIdx : 0;
+                  const rots = [...(imageRotations || [])];
+                  while (rots.length <= ri) rots.push(0);
+                  rots[ri] = (rots[ri] + 3) % 4;
+                  setImageRotations(rots);
+                }}
+                sx={{ ml: 0.5, color: themeColors.accent, cursor: lockDisplay ? "default" : "pointer", fontSize: "inherit", "&:hover": { opacity: lockDisplay ? 1 : 0.7 } }}
+              >
+                ({rk * 90}°)
+              </Box>
+            ) : null; })()}
             <InfoTooltip text={<Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
               <Typography sx={{ fontSize: 11, fontWeight: "bold" }}>Controls</Typography>
               <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>FFT: Show power spectrum (Fourier transform) alongside image.</Typography>
@@ -2882,7 +2919,7 @@ function Show2D() {
               <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>Auto: Percentile-based contrast (2nd–98th percentile). FFT Auto masks DC + clips to 99.9th.</Typography>
               {isGallery && <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>Link Zoom / Contrast: Sync zoom or histogram range across all gallery images.</Typography>}
               <Typography sx={{ fontSize: 11, fontWeight: "bold", mt: 0.5 }}>Keyboard</Typography>
-              <KeyboardShortcuts items={isGallery ? [["← / →", "Prev / Next image"], ["1 – 9", "Select image"], ["Del / ⌫", "Delete selected ROI"], ["M", "Measure distance"], ["Esc", "Exit measure"], ["R", "Reset zoom"], ["Scroll", "Zoom"], ["Dbl-click", "Reset view"]] : [["Del / ⌫", "Delete selected ROI"], ["M", "Measure distance"], ["Esc", "Exit measure"], ["R", "Reset zoom"], ["Scroll", "Zoom"], ["Dbl-click", "Reset view"]]} />
+              <KeyboardShortcuts items={isGallery ? [["← / →", "Prev / Next image"], ["1 – 9", "Select image"], ["] / [", "Rotate CW / CCW 90°"], ["Del / ⌫", "Delete selected ROI"], ["M", "Measure distance"], ["Esc", "Exit measure"], ["R", "Reset zoom"], ["Scroll", "Zoom"], ["Dbl-click", "Reset view"]] : [["] / [", "Rotate CW / CCW 90°"], ["Del / ⌫", "Delete selected ROI"], ["M", "Measure distance"], ["Esc", "Exit measure"], ["R", "Reset zoom"], ["Scroll", "Zoom"], ["Dbl-click", "Reset view"]]} />
             </Box>} theme={themeInfo.theme} />
             <ControlCustomizer
               widgetName="Show2D"
@@ -3026,6 +3063,22 @@ function Show2D() {
                   </Box>
                   <Typography sx={{ fontSize: 10, color: themeColors.textMuted, textAlign: "center", mt: 0.25 }}>
                     {labels?.[i] || `Image ${i + 1}`}
+                    {(imageRotations?.[i] ?? 0) % 4 !== 0 && (
+                      <Box
+                        component="span"
+                        onClick={(e: React.MouseEvent) => {
+                          e.stopPropagation();
+                          if (lockDisplay) return;
+                          const rots = [...(imageRotations || [])];
+                          while (rots.length <= i) rots.push(0);
+                          rots[i] = (rots[i] + 3) % 4;
+                          setImageRotations(rots);
+                        }}
+                        sx={{ ml: 0.5, color: themeColors.accent, cursor: lockDisplay ? "default" : "pointer", "&:hover": { opacity: lockDisplay ? 1 : 0.7 } }}
+                      >
+                        ({(imageRotations[i] % 4) * 90}°)
+                      </Box>
+                    )}
                   </Typography>
                   {effectiveShowFft && (
                     <Box
