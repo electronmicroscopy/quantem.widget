@@ -1346,6 +1346,7 @@ class IO:
         scan_shape: tuple[int, int] | None = None,
         hot_pixel_filter: bool = True,
         backend: str = "auto",
+        shape: "tuple[int, int] | None" = None,
     ) -> IOResult:
         """Load arina 4D-STEM data with GPU-accelerated decompression.
 
@@ -1373,6 +1374,10 @@ class IO:
         backend : str, optional
             ``"auto"`` (MPS on macOS, CPU elsewhere), ``"mps"`` (Apple Metal),
             or ``"cpu"`` (h5py, works on all platforms). Default ``"auto"``.
+        shape : tuple of (int, int), optional
+            Only include scans whose scan dimensions match
+            ``(scan_rows, scan_cols)``. Files with different scan resolutions
+            are skipped with a message. Only applies to list input.
 
         Returns
         -------
@@ -1402,6 +1407,14 @@ class IO:
         >>> result.data.shape
         (3, 256, 256, 48, 48)
 
+        Filter by scan resolution when files have different sizes:
+
+        >>> result = IO.arina_file([
+        ...     "overview_512x512_master.h5",
+        ...     "detail_256x256_a_master.h5",
+        ...     "detail_256x256_b_master.h5",
+        ... ], det_bin=4, shape=(256, 256))
+
         Free GPU memory when done (important for large datasets):
 
         >>> del widget           # free MPS tensor held by Show4DSTEM
@@ -1422,8 +1435,10 @@ class IO:
                 )
                 labels: list[str] = []
                 frame_meta: list[dict] = []
+                files_by_shape: dict[tuple, list[str]] = {}
                 stack: np.ndarray | None = None
                 expected_shape: tuple | None = None
+                slot = 0
                 mp_iter = enumerate(master_path)
                 if len(master_path) > 1:
                     mp_iter = tqdm(
@@ -1438,24 +1453,71 @@ class IO:
                         hot_pixel_filter=hot_pixel_filter,
                         backend=backend,
                     )
+                    name = pathlib.Path(mp).name
+                    scan_dims = r.data.shape[:2]
+                    files_by_shape.setdefault(scan_dims, []).append(name)
+                    if shape is not None and scan_dims != tuple(shape):
+                        tqdm.write(
+                            f"  SKIPPED {name}: scan shape {scan_dims} "
+                            f"!= shape={shape}"
+                        )
+                        continue
                     if stack is None:
                         expected_shape = r.data.shape
                         stack = np.empty(
                             (len(master_path), *expected_shape), dtype=r.data.dtype
                         )
                     elif r.data.shape != expected_shape:
-                        raise ValueError(
-                            f"Cannot stack files with different shapes into a "
-                            f"5D array.\n"
-                            f"  File 0: {expected_shape}\n"
-                            f"  File {i} ({pathlib.Path(mp).name}): {r.data.shape}\n"
-                            f"All files must have the same scan and detector "
-                            f"dimensions. Load them separately with "
-                            f"IO.arina_file() instead."
+                        if shape is None:
+                            # No shape= filter — collect all shapes for error
+                            for j, mp2 in enumerate(master_path):
+                                if j > i:
+                                    break
+                            clean = {
+                                s: [n.replace("_master.h5", "") for n in names]
+                                for s, names in files_by_shape.items()
+                            }
+                            most_common = max(
+                                clean, key=lambda s: len(clean[s])
+                            )
+                            raise ValueError(
+                                f"Scans have different shapes:\n"
+                                f"{_format_shape_summary(clean)}\n\n"
+                                f"Use shape= to select one size, e.g. "
+                                f"shape={most_common}"
+                            )
+                        tqdm.write(
+                            f"  SKIPPED {name}: shape {r.data.shape} "
+                            f"!= expected {expected_shape}"
                         )
-                    stack[i] = r.data
+                        continue
+                    stack[slot] = r.data
+                    slot += 1
                     labels.append(pathlib.Path(mp).stem.replace("_master", ""))
                     frame_meta.append(r.metadata)
+                if shape is not None and slot < len(master_path):
+                    print(
+                        f"Filtered: kept {slot}/{len(master_path)} files "
+                        f"matching shape={shape}"
+                    )
+                if stack is None:
+                    if shape is not None and files_by_shape:
+                        clean = {
+                            s: [n.replace("_master.h5", "") for n in names]
+                            for s, names in files_by_shape.items()
+                        }
+                        most_common = max(clean, key=lambda s: len(clean[s]))
+                        raise ValueError(
+                            f"No scans match shape={shape}. "
+                            f"Available scan shapes:\n"
+                            f"{_format_shape_summary(clean)}\n\n"
+                            f"Suggestion: shape={most_common}"
+                        )
+                    raise ValueError(
+                        f"All {len(master_path)} files failed to load"
+                    )
+                if slot < stack.shape[0]:
+                    stack = stack[:slot]
                 return IOResult(
                     data=stack, labels=labels, title=labels[0],
                     frame_metadata=frame_meta,

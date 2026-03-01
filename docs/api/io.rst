@@ -171,6 +171,13 @@ and optionally bins detector and/or scan axes on the fly.
    # Disable hot pixel filtering (on by default)
    data = IO.arina_file("master.h5", det_bin=2, hot_pixel_filter=False)
 
+   # Load multiple files with mixed scan resolutions — filter by shape
+   data = IO.arina_file([
+       "overview_512x512_master.h5",
+       "detail_256x256_a_master.h5",
+       "detail_256x256_b_master.h5",
+   ], det_bin=4, shape=(256, 256))
+
 Performance benchmarks
 ^^^^^^^^^^^^^^^^^^^^^^
 

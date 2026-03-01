@@ -1036,3 +1036,48 @@ def test_io_folder_bin_factor(tmp_path):
         img.save(str(tmp_path / f"img_{i:02d}.png"))
     result = IO.folder(tmp_path, file_type="png", bin_factor=2)
     assert result.data.shape == (3, 16, 16)
+
+
+@pytest.mark.skipif(not _HAS_H5PY, reason="h5py not available")
+def test_arina_file_list_shape_mismatch_error(tmp_path):
+    """IO.arina_file([...]) raises with shape info when scans differ."""
+    # 4 frames → 2x2 scan, 9 frames → 3x3 scan (det_bin=2 triggers 4D reshape)
+    dir_a = tmp_path / "a"
+    dir_b = tmp_path / "b"
+    dir_a.mkdir()
+    dir_b.mkdir()
+    path_a, _ = _make_arina_files(dir_a, n_frames=4, det_rows=32, det_cols=32)
+    path_b, _ = _make_arina_files(dir_b, n_frames=9, det_rows=32, det_cols=32)
+    with pytest.raises(ValueError, match="shape="):
+        IO.arina_file([path_a, path_b], det_bin=2, backend="cpu")
+
+
+@pytest.mark.skipif(not _HAS_H5PY, reason="h5py not available")
+def test_arina_file_list_shape_filter(tmp_path):
+    """IO.arina_file([...], shape=) keeps only matching scan shapes."""
+    # Two files with 9 frames (3x3 scan) + one with 4 frames (2x2 scan)
+    dir_a = tmp_path / "a"
+    dir_b = tmp_path / "b"
+    dir_c = tmp_path / "c"
+    dir_a.mkdir()
+    dir_b.mkdir()
+    dir_c.mkdir()
+    path_a, _ = _make_arina_files(dir_a, n_frames=9, det_rows=32, det_cols=32)
+    path_b, _ = _make_arina_files(dir_b, n_frames=4, det_rows=32, det_cols=32)
+    path_c, _ = _make_arina_files(dir_c, n_frames=9, det_rows=32, det_cols=32)
+    result = IO.arina_file(
+        [path_a, path_b, path_c], det_bin=2, backend="cpu", shape=(3, 3)
+    )
+    # Should keep 2 files (a, c) and skip b (det 32→16 with det_bin=2)
+    assert result.data.shape == (2, 3, 3, 16, 16)
+    assert len(result.labels) == 2
+
+
+@pytest.mark.skipif(not _HAS_H5PY, reason="h5py not available")
+def test_arina_file_list_shape_no_match(tmp_path):
+    """IO.arina_file([...], shape=) raises with suggestions when none match."""
+    dir_a = tmp_path / "a"
+    dir_a.mkdir()
+    path_a, _ = _make_arina_files(dir_a, n_frames=4, det_rows=32, det_cols=32)
+    with pytest.raises(ValueError, match="No scans match"):
+        IO.arina_file([path_a, path_a], det_bin=2, backend="cpu", shape=(10, 10))
