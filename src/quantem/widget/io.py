@@ -591,7 +591,12 @@ def _detect_gpu_backend() -> str | None:
         return "mps"
     except ImportError:
         pass
-    # Future: CUDA (cupy/pycuda), Intel (dpctl/oneAPI)
+    try:
+        import cupy  # noqa: F401
+
+        return "cuda"
+    except ImportError:
+        pass
     return None
 
 
@@ -1052,18 +1057,37 @@ class IO:
         backend: str,
     ) -> IOResult:
         """Load a single arina master file (internal)."""
-        if backend == "mps":
-            from quantem.widget.metal_decompress import load_arina
-
-            output = load_arina(master_path, det_bin=det_bin, scan_shape=scan_shape)
+        if backend in ("mps", "cuda"):
+            try:
+                if backend == "mps":
+                    from quantem.widget.kernels.arina_mps import load_arina
+                else:
+                    from quantem.widget.kernels.arina_cuda import load_arina
+                output = load_arina(
+                    master_path, det_bin=det_bin, scan_shape=scan_shape
+                )
+            except Exception as exc:
+                print(
+                    f"WARNING: {backend.upper()} backend failed: {exc}\n"
+                    f"Falling back to CPU backend. This is slower but produces "
+                    f"identical results."
+                )
+                output = _load_arina_cpu(
+                    master_path, det_bin=det_bin, scan_shape=scan_shape
+                )
         elif backend == "cpu":
             output = _load_arina_cpu(
                 master_path, det_bin=det_bin, scan_shape=scan_shape
             )
         else:
             raise ValueError(
-                f"Unknown backend: {backend!r}. Use 'auto', 'mps', or 'cpu'."
+                f"Unknown backend: {backend!r}. Use 'auto', 'mps', 'cuda', or 'cpu'."
             )
+        # hot_pixel_filter and scan_bin require numpy arrays
+        if hot_pixel_filter or scan_bin > 1:
+            from quantem.widget.array_utils import to_numpy
+
+            output = to_numpy(output)
         if hot_pixel_filter:
             output = _filter_hot_pixels(output)
         if scan_bin > 1:
@@ -1194,9 +1218,13 @@ class IO:
                         )
                     elif r.data.shape != expected_shape:
                         raise ValueError(
-                            f"Shape mismatch: file 0 has shape {expected_shape}, "
-                            f"but file {i} ({pathlib.Path(mp).name}) has shape "
-                            f"{r.data.shape}. All files must have the same shape."
+                            f"Cannot stack files with different shapes into a "
+                            f"5D array.\n"
+                            f"  File 0: {expected_shape}\n"
+                            f"  File {i} ({pathlib.Path(mp).name}): {r.data.shape}\n"
+                            f"All files must have the same scan and detector "
+                            f"dimensions. Load them separately with "
+                            f"IO.arina_file() instead."
                         )
                     stack[i] = r.data
                     labels.append(pathlib.Path(mp).stem.replace("_master", ""))
@@ -1365,7 +1393,9 @@ class IO:
             elif r.data.shape != expected_shape:
                 skipped.append(mp.name)
                 print(
-                    f"  SKIPPED: shape {r.data.shape} != expected {expected_shape}"
+                    f"  SKIPPED: {mp.name} has shape {r.data.shape}, "
+                    f"expected {expected_shape}. "
+                    f"All files must have the same scan and detector dimensions."
                 )
                 continue
             stack[slot] = r.data
@@ -1380,6 +1410,9 @@ class IO:
             )
         if slot < stack.shape[0]:
             stack = stack[:slot]
+        # Single file → squeeze to 4D (consistent with arina_file behaviour)
+        if stack.shape[0] == 1:
+            stack = stack[0]
         return IOResult(
             data=stack, title=title, labels=labels, frame_metadata=frame_meta,
         )
