@@ -25,6 +25,7 @@ import h5py
 import hdf5plugin  # noqa: F401 - registers bitshuffle filter
 import numpy as np
 from numba import njit, prange
+from tqdm.auto import tqdm
 
 __all__ = ["load_arina", "free_gpu"]
 
@@ -580,7 +581,10 @@ def _load_master_gpu(
         # Read ALL chunks into pinned memory in one pass
         offset = 0
         frame_idx = 0
-        for chunk_name in chunk_names:
+        chunk_iter = chunk_names
+        if len(chunk_names) > 1:
+            chunk_iter = tqdm(chunk_names, desc="reading chunks", leave=False)
+        for chunk_name in chunk_iter:
             ds = data_group[chunk_name]
             n_chunk_frames = ds.shape[0]
             for i in range(n_chunk_frames):

@@ -12,6 +12,7 @@ import pathlib
 from dataclasses import dataclass, field
 
 import numpy as np
+from tqdm.auto import tqdm
 
 try:
     import h5py  # type: ignore
@@ -531,10 +532,60 @@ def _detect_folder_type(files: list[pathlib.Path]) -> str | None:
     return None
 
 
+def _apply_bin_factor(result: IOResult, bin_factor: int) -> IOResult:
+    from quantem.widget.array_utils import bin2d
+    binned = bin2d(result.data, factor=bin_factor)
+    pixel_size = result.pixel_size * bin_factor if result.pixel_size else None
+    return IOResult(
+        data=binned,
+        pixel_size=pixel_size,
+        units=result.units,
+        title=result.title,
+        labels=result.labels,
+        metadata=result.metadata,
+        frame_metadata=result.frame_metadata,
+    )
+
+
+def _format_shape_summary(files_by_shape: dict[tuple, list[str]]) -> str:
+    """Format a shape→filenames mapping into a human-readable summary."""
+    lines = []
+    for s, names in sorted(files_by_shape.items(), key=lambda x: -len(x[1])):
+        preview = ", ".join(names[:3])
+        if len(names) > 3:
+            preview += f", ... ({len(names)} total)"
+        lines.append(f"  {s[0]}×{s[1]}: {preview}")
+    return "\n".join(lines)
+
+
+def _filter_by_shape(
+    loaded: list[tuple[pathlib.Path, IOResult]],
+    shape: tuple[int, int],
+) -> list[tuple[pathlib.Path, IOResult]]:
+    """Filter loaded results by image shape, with informative errors."""
+    filtered = [(p, r) for p, r in loaded if r.data.shape[-2:] == tuple(shape)]
+    if not filtered:
+        files_by_shape: dict[tuple, list[str]] = {}
+        for p, r in loaded:
+            s = r.data.shape[-2:]
+            files_by_shape.setdefault(s, []).append(p.name)
+        most_common = max(files_by_shape, key=lambda s: len(files_by_shape[s]))
+        raise ValueError(
+            f"No files match shape={shape}. Available sizes:\n"
+            f"{_format_shape_summary(files_by_shape)}\n\n"
+            f"Suggestion: shape={most_common}"
+        )
+    n_dropped = len(loaded) - len(filtered)
+    if n_dropped:
+        print(f"Filtered: kept {len(filtered)}/{len(loaded)} files matching shape={shape}")
+    return filtered
+
+
 def _stack_results(
     results: list[IOResult],
     *,
     title: str = "",
+    paths: list[pathlib.Path] | None = None,
 ) -> IOResult:
     """Stack multiple IOResults into a single (N,H,W) IOResult."""
     frames: list[np.ndarray] = []
@@ -542,32 +593,43 @@ def _stack_results(
     pixel_size = None
     units = None
     metadata: dict = {}
-    for r in results:
+    for idx, r in enumerate(results):
         if pixel_size is None and r.pixel_size is not None:
             pixel_size = r.pixel_size
             units = r.units
         if not metadata and r.metadata:
             metadata = r.metadata
+        name = paths[idx].name if paths and idx < len(paths) else None
         arr = r.data
         if arr.ndim == 2:
             frames.append(arr)
-            labels.append(r.title or f"frame_{len(frames) - 1}")
+            labels.append(name or r.title or f"frame_{len(frames) - 1}")
         elif arr.ndim == 3:
             for i in range(arr.shape[0]):
                 frames.append(arr[i])
-                lbl = r.labels[i] if i < len(r.labels) else f"{r.title}[{i}]"
-                labels.append(lbl)
+                if name and arr.shape[0] > 1:
+                    labels.append(f"{name}[{i}]")
+                elif name:
+                    labels.append(name)
+                elif i < len(r.labels):
+                    labels.append(r.labels[i])
+                else:
+                    labels.append(f"{r.title}[{i}]")
         else:
             raise ValueError(f"Unexpected array shape: {arr.shape}")
     if not frames:
         raise ValueError("No frames to stack.")
     shape0 = frames[0].shape
-    for i, frame in enumerate(frames[1:], start=1):
-        if frame.shape != shape0:
-            raise ValueError(
-                f"Inconsistent image shapes: "
-                f"frame 0={shape0}, frame {i}={frame.shape}"
-            )
+    if any(f.shape != shape0 for f in frames[1:]):
+        files_by_shape: dict[tuple, list[str]] = {}
+        for i, frame in enumerate(frames):
+            files_by_shape.setdefault(frame.shape, []).append(labels[i])
+        most_common = max(files_by_shape, key=lambda s: len(files_by_shape[s]))
+        raise ValueError(
+            f"Images have different sizes:\n"
+            f"{_format_shape_summary(files_by_shape)}\n\n"
+            f"Use shape= to select one size, e.g. shape={most_common}"
+        )
     stack = np.stack(frames, axis=0).astype(np.float32)
     return IOResult(
         data=stack,
@@ -675,26 +737,46 @@ def _load_arina_cpu(
 
     # Read and decompress chunk by chunk (hdf5plugin handles bitshuffle+LZ4)
     frame_offset = 0
-    for ci, cf in enumerate(chunk_files):
-        nf = chunk_n_frames[ci]
+    # Large single-chunk files: read in batches with per-frame progress
+    if len(chunk_files) == 1 and total_frames > 1000:
+        cf = chunk_files[0]
+        batch = 256
         with h5py.File(cf, "r") as f:
-            raw = f["entry/data/data"][:nf]  # hdf5plugin decompresses here
-
-        if det_bin > 1:
-            output[frame_offset : frame_offset + nf] = _cpu_bin_mean(
-                raw.astype(np.float32) if raw.dtype != np.float32 else raw,
-                det_bin,
-            )
-        else:
-            output[frame_offset : frame_offset + nf] = raw
-
-        frame_offset += nf
+            ds = f["entry/data/data"]
+            for start in tqdm(
+                range(0, total_frames, batch),
+                desc="frames",
+                total=(total_frames + batch - 1) // batch,
+            ):
+                end = min(start + batch, total_frames)
+                raw = ds[start:end]
+                if det_bin > 1:
+                    output[start:end] = _cpu_bin_mean(
+                        raw.astype(np.float32) if raw.dtype != np.float32 else raw,
+                        det_bin,
+                    )
+                else:
+                    output[start:end] = raw
+    else:
+        chunk_iter = enumerate(chunk_files)
         if len(chunk_files) > 1:
-            elapsed = time.perf_counter() - t0
-            print(
-                f"  chunk {ci + 1}/{len(chunk_files)}: "
-                f"{nf} frames, {elapsed:.1f}s elapsed"
+            chunk_iter = tqdm(
+                chunk_iter, total=len(chunk_files), desc="chunks", leave=False,
             )
+        for ci, cf in chunk_iter:
+            nf = chunk_n_frames[ci]
+            with h5py.File(cf, "r") as f:
+                raw = f["entry/data/data"][:nf]  # hdf5plugin decompresses here
+
+            if det_bin > 1:
+                output[frame_offset : frame_offset + nf] = _cpu_bin_mean(
+                    raw.astype(np.float32) if raw.dtype != np.float32 else raw,
+                    det_bin,
+                )
+            else:
+                output[frame_offset : frame_offset + nf] = raw
+
+            frame_offset += nf
 
     t_total = time.perf_counter() - t0
 
@@ -706,7 +788,7 @@ def _load_arina_cpu(
     if scan_shape is not None:
         output = output.reshape(*scan_shape, out_det_row, out_det_col)
 
-    print(
+    tqdm.write(
         f"load_arina (cpu): {total_frames} frames, "
         f"det ({det_row},{det_col}) → ({out_det_row},{out_det_col}), "
         f"{t_total:.2f}s"
@@ -918,6 +1000,8 @@ class IO:
         dataset_path: str | None = None,
         file_type: str | None = None,
         recursive: bool = False,
+        bin_factor: int | None = None,
+        shape: "tuple[int, int] | None" = None,
     ) -> IOResult:
         """Read one or more files.
 
@@ -931,16 +1015,36 @@ class IO:
             Filter for folders in a list (passed to ``IO.folder()``).
         recursive : bool, default False
             For folders in a list (passed to ``IO.folder()``).
+        bin_factor : int, optional
+            Spatial bin factor applied after loading (mean pooling).
+            Pixel size is scaled accordingly.
+        shape : tuple of (int, int), optional
+            Only include images matching this (height, width). When the
+            file list contains images of different sizes, the error
+            message shows available shapes and suggests the ``shape=`` fix.
 
         Returns
         -------
         IOResult
+
+        Examples
+        --------
+        >>> result = IO.file("gold.dm4")
+
+        >>> result = IO.file(["a.emd", "b.emd", "c.emd"])
+
+        Filter mixed-size files:
+
+        >>> result = IO.file(["overview.emd", "detail.emd"], shape=(1024, 1024))
         """
         if isinstance(source, list):
             if not source:
                 raise ValueError("Empty path list.")
-            results = []
-            for p in source:
+            loaded: list[tuple[pathlib.Path, IOResult]] = []
+            items = source
+            if len(source) > 1:
+                items = tqdm(source, desc="files", leave=False)
+            for p in items:
                 p = pathlib.Path(p)
                 if p.is_dir():
                     folder_result = IO.folder(
@@ -949,20 +1053,31 @@ class IO:
                         recursive=recursive,
                         dataset_path=dataset_path,
                     )
-                    results.append(folder_result)
+                    loaded.append((p, folder_result))
                 elif p.is_file():
-                    results.append(IO._read_single_file(p, dataset_path=dataset_path))
+                    loaded.append((p, IO._read_single_file(p, dataset_path=dataset_path)))
                 else:
                     raise ValueError(f"Path does not exist: {p}")
-            if len(results) == 1:
-                return results[0]
-            title = pathlib.Path(source[0]).parent.name or "files"
-            return _stack_results(results, title=title)
+            if shape is not None:
+                loaded = _filter_by_shape(loaded, shape)
+            if len(loaded) == 1:
+                result = loaded[0][1]
+            else:
+                results = [r for _, r in loaded]
+                paths = [p for p, _ in loaded]
+                title = pathlib.Path(source[0]).parent.name or "files"
+                result = _stack_results(results, title=title, paths=paths)
+            if bin_factor is not None and bin_factor > 1:
+                result = _apply_bin_factor(result, bin_factor)
+            return result
 
         path = pathlib.Path(source)
         if not path.is_file():
             raise ValueError(f"Path does not exist: {path}")
-        return IO._read_single_file(path, dataset_path=dataset_path)
+        result = IO._read_single_file(path, dataset_path=dataset_path)
+        if bin_factor is not None and bin_factor > 1:
+            result = _apply_bin_factor(result, bin_factor)
+        return result
 
     @staticmethod
     def folder(
@@ -971,6 +1086,8 @@ class IO:
         file_type: str | None = None,
         recursive: bool = False,
         dataset_path: str | None = None,
+        bin_factor: int | None = None,
+        shape: tuple[int, int] | None = None,
     ) -> IOResult:
         """Read a folder of files into a stacked IOResult.
 
@@ -985,17 +1102,52 @@ class IO:
             Include files in subdirectories.
         dataset_path : str, optional
             Explicit HDF dataset path for ``.emd`` files.
+        bin_factor : int, optional
+            Spatial bin factor applied after loading (mean pooling).
+            Pixel size is scaled accordingly.
+        shape : tuple of (int, int), optional
+            Only include images matching this (height, width). When a
+            folder contains images of different sizes, the error message
+            shows available shapes and suggests the ``shape=`` fix.
 
         Returns
         -------
         IOResult
+
+        Examples
+        --------
+        >>> result = IO.folder("/data/session/", file_type="dm4")
+
+        >>> result = IO.folder("/data/session/")  # auto-detect type
+
+        Filter mixed-size images:
+
+        >>> result = IO.folder("/data/", file_type="emd", shape=(1024, 1024))
+
+        Merge multiple folders:
+
+        >>> result = IO.folder(["/session1/", "/session2/"], file_type="dm3")
         """
         if isinstance(folder, list):
-            results = [
-                IO.folder(f, file_type=file_type, recursive=recursive, dataset_path=dataset_path)
-                for f in folder
+            folder_iter = folder
+            if len(folder) > 1:
+                folder_iter = tqdm(folder, desc="folders", leave=False)
+            loaded = [
+                (pathlib.Path(f), IO.folder(
+                    f,
+                    file_type=file_type,
+                    recursive=recursive,
+                    dataset_path=dataset_path,
+                    shape=shape,
+                ))
+                for f in folder_iter
             ]
-            return _stack_results(results)
+            results = [r for _, r in loaded]
+            paths = [p for p, _ in loaded]
+            result = _stack_results(results, paths=paths)
+            if bin_factor is not None and bin_factor > 1:
+                result = _apply_bin_factor(result, bin_factor)
+            return result
 
         folder = pathlib.Path(folder)
         if not folder.is_dir():
@@ -1033,8 +1185,21 @@ class IO:
             if detected_exts is not None:
                 files = [f for f in files if f.suffix.lower() in detected_exts]
 
-        results = [IO._read_single_file(p, dataset_path=dataset_path) for p in files]
-        return _stack_results(results, title=folder.name)
+        file_iter = files
+        if len(files) > 1:
+            file_iter = tqdm(files, desc="files", leave=False)
+        loaded = [
+            (p, IO._read_single_file(p, dataset_path=dataset_path))
+            for p in file_iter
+        ]
+        if shape is not None:
+            loaded = _filter_by_shape(loaded, shape)
+        results = [r for _, r in loaded]
+        paths = [p for p, _ in loaded]
+        result = _stack_results(results, title=folder.name, paths=paths)
+        if bin_factor is not None and bin_factor > 1:
+            result = _apply_bin_factor(result, bin_factor)
+        return result
 
     @staticmethod
     def supported_formats() -> list[str]:
@@ -1045,6 +1210,64 @@ class IO:
         for ext in ext_map:
             rsciio_exts.add(ext.lstrip("."))
         return sorted(native | rsciio_exts)
+
+    @staticmethod
+    def benchmark(path: str | pathlib.Path, *, sample_mb: int = 64) -> None:
+        """Measure filesystem read throughput for a file or folder.
+
+        Useful for checking if a network mount (e.g. HPC server) is fast
+        enough before starting a long load.
+
+        Parameters
+        ----------
+        path : str or pathlib.Path
+            File or folder to benchmark. For folders, auto-discovers the
+            first supported file. For arina masters, targets the first
+            data chunk file.
+        sample_mb : int, default 64
+            Maximum megabytes to read for the speed test.
+        """
+        import time
+
+        p = pathlib.Path(path)
+        if not p.exists():
+            raise ValueError(f"Path does not exist: {p}")
+        # Folder → find first supported file
+        if p.is_dir():
+            target = None
+            # Try arina masters first
+            masters = sorted(p.glob("*_master.h5"))
+            if masters:
+                target = masters[0]
+            else:
+                all_exts = _all_supported_exts()
+                candidates = _collect_files(p, exts=all_exts, recursive=False)
+                if candidates:
+                    target = candidates[0]
+            if target is None:
+                raise ValueError(f"No supported files found in {p}")
+            p = target
+        # Arina master → resolve to first data chunk
+        if p.name.endswith("_master.h5"):
+            prefix = p.name.replace("_master.h5", "")
+            chunk = p.parent / f"{prefix}_data_000001.h5"
+            if chunk.is_file():
+                p = chunk
+        file_size = p.stat().st_size
+        sample_bytes = min(file_size, sample_mb * 1024 * 1024)
+        t0 = time.perf_counter()
+        with open(p, "rb") as f:
+            f.read(sample_bytes)
+        elapsed = time.perf_counter() - t0
+        throughput = (sample_bytes / (1024 * 1024)) / elapsed if elapsed > 0 else float("inf")
+        estimated_full = (file_size / (1024 * 1024)) / throughput if throughput > 0 else float("inf")
+        print(
+            f"Benchmark: {p.name}\n"
+            f"  File size:  {_format_memory(file_size)}\n"
+            f"  Sampled:    {_format_memory(sample_bytes)} in {elapsed:.3f}s\n"
+            f"  Throughput: {throughput:.1f} MB/s\n"
+            f"  Est. full:  {estimated_full:.2f}s"
+        )
 
     @staticmethod
     def _arina_single(
@@ -1201,8 +1424,12 @@ class IO:
                 frame_meta: list[dict] = []
                 stack: np.ndarray | None = None
                 expected_shape: tuple | None = None
-                for i, mp in enumerate(master_path):
-                    print(f"[{i + 1}/{len(master_path)}] {pathlib.Path(mp).name}")
+                mp_iter = enumerate(master_path)
+                if len(master_path) > 1:
+                    mp_iter = tqdm(
+                        mp_iter, total=len(master_path), desc="arina files",
+                    )
+                for i, mp in mp_iter:
                     r = IO._arina_single(
                         str(mp),
                         det_bin=det_bin,
@@ -1275,6 +1502,7 @@ class IO:
         max_files: int = 50,
         recursive: bool = False,
         pattern: str | None = None,
+        shape: "tuple[int, int] | None" = None,
     ) -> IOResult:
         """Load arina master files from one or more folders into a 5D stack.
 
@@ -1295,6 +1523,9 @@ class IO:
         pattern : str, optional
             Only load files whose stem contains this string (case-insensitive).
             E.g. ``pattern="SnMoS2"`` loads only files with "SnMoS2" in the name.
+        shape : tuple of (int, int), optional
+            Only include scans whose scan dimensions match ``(scan_rows, scan_cols)``.
+            Scans with different scan resolutions are skipped with a message.
 
         Returns
         -------
@@ -1318,6 +1549,10 @@ class IO:
         Merge scans from multiple session folders:
 
         >>> result = IO.arina_folder(["/data/day1/", "/data/day2/"], det_bin=8)
+
+        Filter by scan resolution (keep only 256x256 scans):
+
+        >>> result = IO.arina_folder("/data/", det_bin=8, shape=(256, 256))
 
         Search subdirectories:
 
@@ -1368,11 +1603,16 @@ class IO:
         labels: list[str] = []
         frame_meta: list[dict] = []
         skipped: list[str] = []
+        files_by_shape: dict[tuple, list[str]] = {}
         stack: np.ndarray | None = None
         expected_shape: tuple | None = None
         slot = 0
-        for i, mp in enumerate(masters):
-            print(f"[{i + 1}/{len(masters)}] {mp.name}")
+        master_iter = enumerate(masters)
+        if len(masters) > 1:
+            master_iter = tqdm(
+                master_iter, total=len(masters), desc="arina files",
+            )
+        for i, mp in master_iter:
             try:
                 r = IO._arina_single(
                     str(mp),
@@ -1384,7 +1624,16 @@ class IO:
                 )
             except (FileNotFoundError, ValueError, OSError) as exc:
                 skipped.append(mp.name)
-                print(f"  SKIPPED: {exc}")
+                tqdm.write(f"  SKIPPED {mp.name}: {exc}")
+                continue
+            scan_dims = r.data.shape[:2]
+            files_by_shape.setdefault(scan_dims, []).append(mp.name)
+            if shape is not None and scan_dims != tuple(shape):
+                skipped.append(mp.name)
+                tqdm.write(
+                    f"  SKIPPED {mp.name}: scan shape {scan_dims} "
+                    f"!= shape={shape}"
+                )
                 continue
             if stack is None:
                 expected_shape = r.data.shape
@@ -1392,19 +1641,33 @@ class IO:
                 stack = np.empty((n_good, *expected_shape), dtype=r.data.dtype)
             elif r.data.shape != expected_shape:
                 skipped.append(mp.name)
-                print(
-                    f"  SKIPPED: {mp.name} has shape {r.data.shape}, "
-                    f"expected {expected_shape}. "
-                    f"All files must have the same scan and detector dimensions."
+                tqdm.write(
+                    f"  SKIPPED {mp.name}: shape {r.data.shape} != expected "
+                    f"{expected_shape}. All files must have the same scan and "
+                    f"detector dimensions."
                 )
                 continue
             stack[slot] = r.data
             slot += 1
             labels.append(mp.stem.replace("_master", ""))
             frame_meta.append(r.metadata)
-        if skipped:
-            print(f"Skipped {len(skipped)}/{len(masters)} files: {skipped}")
+        if skipped and shape is not None:
+            print(f"Filtered: kept {slot}/{len(masters)} files matching shape={shape}")
+        elif skipped:
+            tqdm.write(f"Skipped {len(skipped)}/{len(masters)} files: {skipped}")
         if stack is None:
+            if shape is not None and files_by_shape:
+                # Strip _master.h5 from names for readability
+                clean = {
+                    s: [n.replace("_master.h5", "") for n in names]
+                    for s, names in files_by_shape.items()
+                }
+                most_common = max(clean, key=lambda s: len(clean[s]))
+                raise ValueError(
+                    f"No scans match shape={shape}. Available scan shapes:\n"
+                    f"{_format_shape_summary(clean)}\n\n"
+                    f"Suggestion: shape={most_common}"
+                )
             raise ValueError(
                 f"All {len(masters)} master files failed to load"
             )

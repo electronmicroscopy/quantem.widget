@@ -228,13 +228,49 @@ def test_io_read_folder_nonexistent():
         IO.folder("/nonexistent/folder", file_type="png")
 
 
-def test_io_read_folder_shape_mismatch(tmp_path):
+def test_io_read_folder_shape_mismatch_error(tmp_path):
+    """Mismatched shapes raise ValueError with shape= suggestion."""
     from PIL import Image
 
     Image.fromarray(np.zeros((10, 10), dtype=np.uint8)).save(str(tmp_path / "a.png"))
     Image.fromarray(np.zeros((20, 20), dtype=np.uint8)).save(str(tmp_path / "b.png"))
-    with pytest.raises(ValueError, match="Inconsistent"):
+    with pytest.raises(ValueError, match="shape="):
         IO.folder(tmp_path, file_type="png")
+
+
+def test_io_read_folder_shape_filter(tmp_path):
+    """shape= parameter filters to matching images only."""
+    from PIL import Image
+
+    Image.fromarray(np.zeros((10, 10), dtype=np.uint8)).save(str(tmp_path / "a.png"))
+    Image.fromarray(np.zeros((20, 20), dtype=np.uint8)).save(str(tmp_path / "b.png"))
+    Image.fromarray(np.zeros((10, 10), dtype=np.uint8)).save(str(tmp_path / "c.png"))
+    result = IO.folder(tmp_path, file_type="png", shape=(10, 10))
+    assert result.data.shape == (2, 10, 10)
+
+
+def test_io_file_list_shape_mismatch_error(tmp_path):
+    """IO.file() with mixed-size list raises ValueError with shape= suggestion."""
+    from PIL import Image
+
+    Image.fromarray(np.zeros((10, 10), dtype=np.uint8)).save(str(tmp_path / "a.png"))
+    Image.fromarray(np.zeros((20, 20), dtype=np.uint8)).save(str(tmp_path / "b.png"))
+    with pytest.raises(ValueError, match="shape="):
+        IO.file([tmp_path / "a.png", tmp_path / "b.png"])
+
+
+def test_io_file_list_shape_filter(tmp_path):
+    """IO.file() shape= parameter filters to matching images only."""
+    from PIL import Image
+
+    Image.fromarray(np.zeros((10, 10), dtype=np.uint8)).save(str(tmp_path / "a.png"))
+    Image.fromarray(np.zeros((20, 20), dtype=np.uint8)).save(str(tmp_path / "b.png"))
+    Image.fromarray(np.zeros((10, 10), dtype=np.uint8)).save(str(tmp_path / "c.png"))
+    result = IO.file(
+        [tmp_path / "a.png", tmp_path / "b.png", tmp_path / "c.png"],
+        shape=(10, 10),
+    )
+    assert result.data.shape == (2, 10, 10)
 
 
 # =========================================================================
@@ -873,3 +909,130 @@ def test_real_arina_to_show4dstem():
     vi_stats = w.vi_stats
     assert len(vi_stats) == 4
     assert vi_stats[2] >= vi_stats[1]  # max >= min
+
+
+# =========================================================================
+# IO.benchmark()
+# =========================================================================
+
+
+def test_benchmark_single_file(tmp_path, capsys):
+    arr = np.random.rand(64, 64).astype(np.float32)
+    p = tmp_path / "data.npy"
+    np.save(p, arr)
+    result = IO.benchmark(p)
+    assert result is None
+    out = capsys.readouterr().out
+    assert "Benchmark:" in out
+    assert "Throughput:" in out
+
+
+def test_benchmark_folder(tmp_path, capsys):
+    arr = np.random.rand(16, 16).astype(np.float32)
+    np.save(tmp_path / "data.npy", arr)
+    IO.benchmark(tmp_path)
+    out = capsys.readouterr().out
+    assert "data.npy" in out
+    assert "Throughput:" in out
+
+
+@pytest.mark.skipif(not _HAS_H5PY, reason="h5py not available")
+def test_benchmark_arina_master(tmp_path, capsys):
+    master_path, _ = _make_arina_files(tmp_path)
+    IO.benchmark(master_path)
+    out = capsys.readouterr().out
+    assert "Throughput:" in out
+
+
+def test_benchmark_nonexistent():
+    with pytest.raises(ValueError, match="does not exist"):
+        IO.benchmark("/nonexistent/path")
+
+
+def test_benchmark_empty_folder(tmp_path):
+    with pytest.raises(ValueError, match="No supported files"):
+        IO.benchmark(tmp_path)
+
+
+@pytest.mark.skipif(not _HAS_H5PY, reason="h5py not available")
+def test_cpu_arina_large_file_batched_read(tmp_path):
+    """CPU backend reads >1000 frames in batches, matching reference bulk read."""
+    n_frames = 1200  # triggers the batched path (>1000)
+    det_rows, det_cols = 16, 16  # small detector to keep test fast
+    master_path, expected = _make_arina_files(
+        tmp_path, n_frames=n_frames, det_rows=det_rows, det_cols=det_cols,
+    )
+    from quantem.widget.io import _load_arina_cpu
+    result = _load_arina_cpu(master_path, det_bin=1)
+    assert result.shape == expected.shape
+    np.testing.assert_array_equal(result, expected)
+
+
+@pytest.mark.skipif(not _HAS_H5PY, reason="h5py not available")
+def test_cpu_arina_large_file_batched_with_binning(tmp_path):
+    """Batched CPU path with binning matches numpy reference."""
+    n_frames = 1200
+    det_rows, det_cols = 32, 32
+    master_path, raw_data = _make_arina_files(
+        tmp_path, n_frames=n_frames, det_rows=det_rows, det_cols=det_cols,
+    )
+    from quantem.widget.io import _load_arina_cpu
+    result = _load_arina_cpu(master_path, det_bin=2)
+    raw_f32 = raw_data.astype(np.float32)
+    ref = raw_f32.reshape(n_frames, det_rows // 2, 2, det_cols // 2, 2).mean(axis=(2, 4))
+    np.testing.assert_allclose(result.reshape(ref.shape), ref, rtol=1e-5)
+
+
+def test_folder_load_with_progress(tmp_path):
+    """Loading a folder with multiple files still works correctly with tqdm."""
+    from PIL import Image
+
+    for i in range(3):
+        img = Image.fromarray(np.random.randint(0, 255, (8, 8), dtype=np.uint8))
+        img.save(str(tmp_path / f"img_{i:02d}.png"))
+    result = IO.folder(tmp_path, file_type="png")
+    assert result.data.shape == (3, 8, 8)
+    assert len(result.labels) == 3
+
+
+# =========================================================================
+# bin_factor parameter
+# =========================================================================
+
+def test_io_file_bin_factor(tmp_path):
+    arr = np.random.rand(64, 64).astype(np.float32)
+    path = tmp_path / "test.npy"
+    np.save(str(path), arr)
+    result = IO.file(str(path), bin_factor=4)
+    assert result.data.shape == (16, 16)
+    assert result.data.dtype == np.float32
+
+def test_io_file_bin_factor_preserves_pixel_size(tmp_path):
+    arr = np.random.rand(64, 64).astype(np.float32)
+    path = tmp_path / "test.npy"
+    np.save(str(path), arr)
+    result = IO.file(str(path), bin_factor=2)
+    assert result.data.shape == (32, 32)
+
+def test_io_file_bin_factor_none_is_noop(tmp_path):
+    arr = np.random.rand(64, 64).astype(np.float32)
+    path = tmp_path / "test.npy"
+    np.save(str(path), arr)
+    result = IO.file(str(path), bin_factor=None)
+    assert result.data.shape == (64, 64)
+
+def test_io_file_bin_factor_1_is_noop(tmp_path):
+    arr = np.random.rand(64, 64).astype(np.float32)
+    path = tmp_path / "test.npy"
+    np.save(str(path), arr)
+    result = IO.file(str(path), bin_factor=1)
+    assert result.data.shape == (64, 64)
+
+def test_io_folder_bin_factor(tmp_path):
+    pytest.importorskip("PIL")
+    from PIL import Image
+    for i in range(3):
+        img = Image.fromarray(np.random.randint(0, 255, (32, 32), dtype=np.uint8))
+        img.save(str(tmp_path / f"img_{i:02d}.png"))
+    result = IO.folder(tmp_path, file_type="png", bin_factor=2)
+    assert result.data.shape == (3, 16, 16)

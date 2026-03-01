@@ -1,5 +1,18 @@
 # changelog
 
+## v0.0.14 (2026-02-28)
+
+### New widgets
+- **Bin2D** — interactive 2D image binning with side-by-side original/binned comparison, mean/sum modes, crop/pad edge handling, gallery support, calibration tracking, and export
+
+### Shared
+- **breaking:** `Bin` renamed to `Bin4D` — `from quantem.widget import Bin` still works as a backwards-compatible alias
+- **`bin2d()` modes** — `bin2d(data, factor=2, mode="sum", edge_mode="pad")` now supports sum reduction and zero-pad edge handling (previously mean-only with crop)
+- **`IO.file()` / `IO.folder()` + `bin_factor`** — `IO.file("image.tiff", bin_factor=4)` applies spatial binning at load time with automatic pixel size scaling
+- **IO progress bars** — `tqdm` progress bars for all multi-file loads (`IO.file`, `IO.folder`, `IO.arina_file`, `IO.arina_folder`, GPU chunk loops)
+- **`IO.benchmark(path)`** — measure filesystem throughput before loading large datasets over network mounts
+- **`shape=` parameter** — `IO.file()`, `IO.folder()`, and `IO.arina_folder()` accept `shape=` to filter mixed-size datasets; mismatch errors now list all sizes with filenames and suggest a fix
+
 ## v0.0.12 (2026-02-25)
 
 ### Show3DVolume

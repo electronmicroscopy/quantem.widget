@@ -13,6 +13,7 @@ IO
 .. automethod:: quantem.widget.io.IO.file
 .. automethod:: quantem.widget.io.IO.folder
 .. automethod:: quantem.widget.io.IO.supported_formats
+.. automethod:: quantem.widget.io.IO.benchmark
 
 .. rubric:: GPU-Accelerated Loading
 
@@ -50,6 +51,23 @@ Auto-detect file type (omit ``file_type``):
    # Auto-detects from folder contents (raises if mixed types)
    result = IO.folder("/path/to/tiff_scans/")
 
+Handle folders with mixed image sizes:
+
+.. code-block:: python
+
+   # Folder has 2048×2048 and 1024×1024 images — raises ValueError showing
+   # each size and which files have it, then suggests the shape= fix
+   result = IO.folder("/path/to/stem_session/", file_type="emd")
+   # ValueError: Images have different sizes:
+   #   1024×1024: scan_005.emd, scan_006.emd, scan_007.emd
+   #   2048×2048: scan_004.emd
+   #
+   # Use shape= to select one size, e.g. shape=(1024, 1024)
+
+   # Fix: keep only 1024×1024 images
+   result = IO.folder("/path/to/stem_session/", file_type="emd", shape=(1024, 1024))
+   # Filtered: kept 3/4 files matching shape=(1024, 1024)
+
 Read multiple files into a stack:
 
 .. code-block:: python
@@ -61,6 +79,13 @@ Read multiple files into a stack:
    ])
    Show3D(result)
 
+   # If files have different sizes, use shape= to filter
+   result = IO.file([
+       "overview_2048x2048.dm4",
+       "detail_1024x1024.dm4",
+       "detail_1024x1024_b.dm4",
+   ], shape=(1024, 1024))
+
 Merge multiple folders into one stack:
 
 .. code-block:: python
@@ -70,6 +95,18 @@ Merge multiple folders into one stack:
        "/path/to/session_2/",
    ], file_type="dm3")
    # All images across both folders stacked into one (N, H, W) array
+
+Check read speed before loading large datasets over a network mount:
+
+.. code-block:: python
+
+   # Reads a 64 MB sample and reports throughput
+   IO.benchmark("/mnt/hpc/arina_data/")
+   # Benchmark: scan_001_data_000001.h5
+   #   File size:  1.7 GB
+   #   Sampled:    64 MB in 0.032s
+   #   Throughput: 2000.0 MB/s
+   #   Est. full:  0.87s
 
 Read 4D-STEM data:
 
@@ -195,6 +232,9 @@ with ``IO.arina_file()``, and stacks them into a 5D dataset (time/tilt series).
 
    # Incomplete files are auto-skipped with a warning
    # "SKIPPED: [Errno 2] ... data_000003.h5 ... No such file or directory"
+
+   # Filter by scan resolution (e.g. keep only 256×256 scans)
+   result = IO.arina_folder("/path/to/session/", det_bin=8, shape=(256, 256))
 
    # View as 5D-STEM time series with frame slider
    from quantem.widget import Show4DSTEM

@@ -21,6 +21,7 @@ import h5py
 import hdf5plugin  # noqa: F401 - registers bitshuffle filter
 import numpy as np
 from numba import njit, prange
+from tqdm.auto import tqdm
 
 __all__ = ["load_arina"]
 
@@ -817,7 +818,10 @@ class MPSDecompressor:
         max_blk = int(bc_np[:chunk_n_frames[0]].max())
         frame_offset = 0
         n_chunks = len(chunk_files)
-        for ci in range(n_chunks):
+        chunk_range = range(n_chunks)
+        if n_chunks > 1:
+            chunk_range = tqdm(chunk_range, desc="GPU chunks", leave=False)
+        for ci in chunk_range:
             cur = bufs[ci % 2]
             comp_np, co_np, bs_np, bc_np, bo_np, csizes, \
                 comp_mtl, co_mtl, bs_mtl, bc_mtl, bo_mtl = cur
@@ -1178,7 +1182,10 @@ def load_arina(
         max_blk = int(bc_np[:chunk_n_frames[0]].max())
         frame_offset = 0
         n_chunks = len(chunk_files)
-        for ci in range(n_chunks):
+        chunk_range = range(n_chunks)
+        if n_chunks > 1:
+            chunk_range = tqdm(chunk_range, desc="GPU chunks", leave=False)
+        for ci in chunk_range:
             cur = bufs[ci % 2]
             comp_np, co_np, bs_np, bc_np, bo_np, csizes, \
                 comp_mtl, co_mtl, bs_mtl, bc_mtl, bo_mtl = cur
