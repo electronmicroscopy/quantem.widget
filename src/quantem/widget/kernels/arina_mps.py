@@ -32,6 +32,11 @@ _METAL_SOURCE = r'''
 #include <metal_stdlib>
 using namespace metal;
 
+// IMPORTANT: All frame-indexed address calculations use ulong casts to
+// prevent uint32 overflow. Without this, frame_id * frame_bytes overflows
+// at frame ~58K for 73,728-byte frames (58255 × 73728 = 4,295,024,640 > 2^32),
+// causing all subsequent frames to read/write address 0 and produce zeros.
+
 // ---- LZ4 decompression constants ----
 constant uint DECOMP_THREADS_PER_CHUNK = 32;
 constant uint DECOMP_INPUT_BUFFER_SIZE = 256;  // 32 * sizeof(ulong)
@@ -212,7 +217,7 @@ inline uint read32be(const device uchar* p) {
 
 // =====================================================================
 // Kernel 1: Batched LZ4 decompression
-// Grid:  ((max_blocks+1)/2, 1, n_frames)
+// Grid:  (n_frames, 1, (max_blocks+1)/2)
 // Block: (32, 2, 1)
 // =====================================================================
 kernel void h5lz4dc_batched(
@@ -228,8 +233,8 @@ kernel void h5lz4dc_batched(
     uint3 tpit  [[thread_position_in_threadgroup]],
     uint3 tptg  [[threads_per_threadgroup]]
 ) {
-    uint frame_id       = tpig.z;
-    uint block_in_frame = tpig.x * tptg.y + tpit.y;
+    uint frame_id       = tpig.x;
+    uint block_in_frame = tpig.z * tptg.y + tpit.y;
     uint chunk_offset   = chunk_offsets[frame_id];
     uint block_offset   = block_offsets[frame_id];
     uint num_blocks     = block_counts[frame_id];
@@ -238,7 +243,7 @@ kernel void h5lz4dc_batched(
         uint blk_start = block_starts[block_offset + block_in_frame];
         const device uchar* input = compressed + chunk_offset + blk_start + 4;
         uint comp_size = read32be(compressed + chunk_offset + blk_start);
-        device uchar* output = decompressed + frame_id * frame_bytes
+        device uchar* output = decompressed + ulong(frame_id) * ulong(frame_bytes)
                                + block_in_frame * blocksize;
         decompressStream(tg_buffer + tpit.y * 256, output, input, comp_size, tpit.x);
     }
@@ -250,7 +255,7 @@ kernel void h5lz4dc_batched(
 // Optimized: 32 SIMD groups per threadgroup (1024 threads), each group
 // unshuffles 32 elements using shared memory to cache bit planes.
 //
-// Grid:  (ceil(total_groups / 32), 1, n_frames)
+// Grid:  (n_frames, 1, ceil(total_groups / 32))
 // Block: (32, 32, 1)  →  32 SIMD groups of 32 threads
 // =====================================================================
 kernel void shuf_8192_32_batched(
@@ -263,12 +268,12 @@ kernel void shuf_8192_32_batched(
     uint  lane       [[thread_index_in_simdgroup]],
     uint  sg_id      [[simdgroup_index_in_threadgroup]]
 ) {
-    uint frame_id  = tpig.z;
-    uint group_id  = tpig.x * 32 + sg_id;
+    uint frame_id  = tpig.x;
+    uint group_id  = tpig.z * 32 + sg_id;
     if (group_id >= total_groups) return;
     uint block_id       = group_id / groups_per_block;
     uint group_in_block = group_id % groups_per_block;
-    const device uint* block_in = in + frame_id * frame_u32s
+    const device uint* block_in = in + ulong(frame_id) * ulong(frame_u32s)
                                      + block_id * 2048;
     // Cache 32 bit planes in shared memory (one set per SIMD group)
     threadgroup uint planes[32][32];
@@ -278,7 +283,7 @@ kernel void shuf_8192_32_batched(
     for (int j = 0; j < 32; j++)
         if (planes[sg_id][j] & (1U << lane))
             result |= (1U << j);
-    out[frame_id * frame_u32s + group_id * 32 + lane] = result;
+    out[ulong(frame_id) * ulong(frame_u32s) + group_id * 32 + lane] = result;
 }
 
 // =====================================================================
@@ -288,7 +293,7 @@ kernel void shuf_8192_32_batched(
 // unshuffles 32 elements using shared memory to cache bit planes.
 // 32x fewer threadgroup launches vs one-group-per-threadgroup version.
 //
-// Grid:  (ceil(groups_per_frame / 32), 1, n_frames)
+// Grid:  (n_frames, 1, ceil(groups_per_frame / 32))
 // Block: (32, 32, 1)  →  32 SIMD groups of 32 threads
 // =====================================================================
 kernel void shuf_8192_16_batched(
@@ -301,15 +306,15 @@ kernel void shuf_8192_16_batched(
     uint  lane       [[thread_index_in_simdgroup]],
     uint  sg_id      [[simdgroup_index_in_threadgroup]]
 ) {
-    uint frame_id  = tpig.z;
-    uint group_id  = tpig.x * 32 + sg_id;
+    uint frame_id  = tpig.x;
+    uint group_id  = tpig.z * 32 + sg_id;
 
     if (group_id >= total_groups) return;
 
     uint block_id       = group_id / groups_per_block;
     uint group_in_block = group_id % groups_per_block;
 
-    const device uint* block_in = in + frame_id * (frame_u16s / 2)
+    const device uint* block_in = in + ulong(frame_id) * ulong(frame_u16s / 2)
                                      + block_id * 2048;
 
     // Cache 16 bit planes in shared memory (one set per SIMD group)
@@ -323,14 +328,14 @@ kernel void shuf_8192_16_batched(
         if (planes[sg_id][j] & (1U << lane))
             result |= ushort(1U << j);
 
-    out[frame_id * frame_u16s + group_id * 32 + lane] = result;
+    out[ulong(frame_id) * ulong(frame_u16s) + group_id * 32 + lane] = result;
 }
 
 // =====================================================================
 // Kernel 3: Detector binning (mean, any bin factor)
 // Reads from bitshuffle output, writes float32 binned result.
-// Grid:  (ceil(out_cols/16), ceil(out_rows/16), n_frames)
-// Block: (16, 16, 1)
+// Grid:  (n_frames, ceil(out_rows/16), ceil(out_cols/16))
+// Block: (1, 16, 16)
 // =====================================================================
 kernel void bin_mean_u16(
     const device ushort* in  [[buffer(0)]],
@@ -342,18 +347,18 @@ kernel void bin_mean_u16(
     constant uint& bin_factor     [[buffer(6)]],
     uint3 pos [[thread_position_in_grid]]
 ) {
-    uint out_c = pos.x;
+    uint frame = pos.x;
     uint out_r = pos.y;
+    uint out_c = pos.z;
     if (out_c >= out_cols || out_r >= out_cols) return;
-    uint frame = pos.z;
     uint in_r = out_r * bin_factor;
     uint in_c = out_c * bin_factor;
-    uint in_base = frame * in_frame_elems;
+    ulong in_base = ulong(frame) * ulong(in_frame_elems);
     float sum = 0.0f;
     for (uint br = 0; br < bin_factor; br++)
         for (uint bc = 0; bc < bin_factor; bc++)
             sum += float(in[in_base + (in_r + br) * in_row_stride + in_c + bc]);
-    out[frame * out_frame_elems + out_r * out_cols + out_c] =
+    out[ulong(frame) * ulong(out_frame_elems) + out_r * out_cols + out_c] =
         sum / float(bin_factor * bin_factor);
 }
 
@@ -367,18 +372,18 @@ kernel void bin_mean_u32(
     constant uint& bin_factor     [[buffer(6)]],
     uint3 pos [[thread_position_in_grid]]
 ) {
-    uint out_c = pos.x;
+    uint frame = pos.x;
     uint out_r = pos.y;
+    uint out_c = pos.z;
     if (out_c >= out_cols || out_r >= out_cols) return;
-    uint frame = pos.z;
     uint in_r = out_r * bin_factor;
     uint in_c = out_c * bin_factor;
-    uint in_base = frame * in_frame_elems;
+    ulong in_base = ulong(frame) * ulong(in_frame_elems);
     float sum = 0.0f;
     for (uint br = 0; br < bin_factor; br++)
         for (uint bc = 0; bc < bin_factor; bc++)
             sum += float(in[in_base + (in_r + br) * in_row_stride + in_c + bc]);
-    out[frame * out_frame_elems + out_r * out_cols + out_c] =
+    out[ulong(frame) * ulong(out_frame_elems) + out_r * out_cols + out_c] =
         sum / float(bin_factor * bin_factor);
 }
 '''
@@ -507,17 +512,20 @@ class MPSDecompressor:
         max_frames: int = 11_000,
         frame_bytes: int = 192 * 192 * 2,
         n_blocks_per_frame: int = 9,
+        gpu_batch: int | None = None,
     ):
         self.max_frames = max_frames
         self.frame_bytes = frame_bytes
         self.n_blocks_per_frame = n_blocks_per_frame
+        # gpu_batch controls _lz4/_shuf sizing (smaller = less GPU memory)
+        self.gpu_batch = gpu_batch or max_frames
         # Pre-allocate Metal buffers with numpy views (unified memory)
         self._comp_mtl = _metal_buffer_alloc(max_compressed_bytes)
         self._comp_np = _numpy_view(self._comp_mtl, np.uint8, max_compressed_bytes)
-        total_output = max_frames * frame_bytes
-        self._lz4_mtl = _metal_buffer_alloc(total_output)
-        self._shuf_mtl = _metal_buffer_alloc(total_output)
-        self._result_np = _numpy_view(self._shuf_mtl, np.uint8, total_output)
+        gpu_output = self.gpu_batch * frame_bytes
+        self._lz4_mtl = _metal_buffer_alloc(gpu_output)
+        self._shuf_mtl = _metal_buffer_alloc(gpu_output)
+        self._result_np = _numpy_view(self._shuf_mtl, np.uint8, gpu_output)
         # Pre-allocate metadata Metal buffers with numpy views
         self._co_mtl = _metal_buffer_alloc(max_frames * 4)
         self._co_np = _numpy_view(self._co_mtl, np.uint32, max_frames)
@@ -579,7 +587,7 @@ class MPSDecompressor:
         """Submit LZ4 + bitshuffle GPU work, return uncommitted command buffer."""
         cmd = _queue.commandBuffer()
         enc = cmd.computeCommandEncoder()
-        # LZ4
+        # LZ4 — n_frames in X (unlimited), per-frame blocks in Z (small)
         enc.setComputePipelineState_(_h5lz4dc_pipeline)
         enc.setBuffer_offset_atIndex_(comp_mtl, 0, 0)
         enc.setBuffer_offset_atIndex_(co_mtl, 0, 1)
@@ -594,11 +602,11 @@ class MPSDecompressor:
         )
         enc.setBuffer_offset_atIndex_(self._lz4_mtl, 0, 7)
         enc.dispatchThreadgroups_threadsPerThreadgroup_(
-            Metal.MTLSizeMake((max_blocks + 1) // 2, 1, n_frames),
+            Metal.MTLSizeMake(n_frames, 1, (max_blocks + 1) // 2),
             Metal.MTLSizeMake(32, 2, 1),
         )
         enc.memoryBarrierWithScope_(Metal.MTLBarrierScopeBuffers)
-        # Bitshuffle
+        # Bitshuffle — n_frames in X, tg_count in Z
         n_8kb = frame_bytes // 8192
         if elem_size == 2:
             groups_per_block = 8192 // (elem_size * 32)
@@ -618,7 +626,7 @@ class MPSDecompressor:
             )
             tg_count = (groups_per_frame + 31) // 32
             enc.dispatchThreadgroups_threadsPerThreadgroup_(
-                Metal.MTLSizeMake(tg_count, 1, n_frames),
+                Metal.MTLSizeMake(n_frames, 1, tg_count),
                 Metal.MTLSizeMake(32, 32, 1),
             )
         else:
@@ -639,7 +647,7 @@ class MPSDecompressor:
             )
             tg_count = (groups_per_frame + 31) // 32
             enc.dispatchThreadgroups_threadsPerThreadgroup_(
-                Metal.MTLSizeMake(tg_count, 1, n_frames),
+                Metal.MTLSizeMake(n_frames, 1, tg_count),
                 Metal.MTLSizeMake(32, 32, 1),
             )
         enc.endEncoding()
@@ -649,17 +657,22 @@ class MPSDecompressor:
     def _submit_gpu_binned(self, n_frames, frame_bytes, elem_size,
                            out_byte_offset, det_row, det_col, bin_factor,
                            comp_mtl, co_mtl, bs_mtl, bc_mtl, bo_mtl,
-                           max_blocks):
-        """Submit LZ4 + bitshuffle + bin GPU work. Returns command buffer."""
+                           max_blocks, meta_frame_offset=0):
+        """Submit LZ4 + bitshuffle + bin GPU work. Returns command buffer.
+
+        meta_frame_offset: offset into metadata buffers (co, bc, bo) for
+        sub-batch processing. bs (block_starts) uses absolute indexing.
+        """
+        meta_off = meta_frame_offset * 4  # bytes (uint32 arrays)
         cmd = _queue.commandBuffer()
         enc = cmd.computeCommandEncoder()
-        # LZ4
+        # LZ4 — n_frames in X
         enc.setComputePipelineState_(_h5lz4dc_pipeline)
         enc.setBuffer_offset_atIndex_(comp_mtl, 0, 0)
-        enc.setBuffer_offset_atIndex_(co_mtl, 0, 1)
+        enc.setBuffer_offset_atIndex_(co_mtl, meta_off, 1)
         enc.setBuffer_offset_atIndex_(bs_mtl, 0, 2)
-        enc.setBuffer_offset_atIndex_(bc_mtl, 0, 3)
-        enc.setBuffer_offset_atIndex_(bo_mtl, 0, 4)
+        enc.setBuffer_offset_atIndex_(bc_mtl, meta_off, 3)
+        enc.setBuffer_offset_atIndex_(bo_mtl, meta_off, 4)
         enc.setBytes_length_atIndex_(
             np.array([8192], dtype=np.uint32).tobytes(), 4, 5
         )
@@ -668,11 +681,11 @@ class MPSDecompressor:
         )
         enc.setBuffer_offset_atIndex_(self._lz4_mtl, 0, 7)
         enc.dispatchThreadgroups_threadsPerThreadgroup_(
-            Metal.MTLSizeMake((max_blocks + 1) // 2, 1, n_frames),
+            Metal.MTLSizeMake(n_frames, 1, (max_blocks + 1) // 2),
             Metal.MTLSizeMake(32, 2, 1),
         )
         enc.memoryBarrierWithScope_(Metal.MTLBarrierScopeBuffers)
-        # Bitshuffle → _shuf_mtl (temporary)
+        # Bitshuffle → _shuf_mtl (temporary) — n_frames in X
         n_8kb = frame_bytes // 8192
         if elem_size == 2:
             groups_per_block = 8192 // (elem_size * 32)
@@ -692,7 +705,7 @@ class MPSDecompressor:
             )
             tg_count = (groups_per_frame + 31) // 32
             enc.dispatchThreadgroups_threadsPerThreadgroup_(
-                Metal.MTLSizeMake(tg_count, 1, n_frames),
+                Metal.MTLSizeMake(n_frames, 1, tg_count),
                 Metal.MTLSizeMake(32, 32, 1),
             )
         else:
@@ -713,11 +726,11 @@ class MPSDecompressor:
             )
             tg_count = (groups_per_frame + 31) // 32
             enc.dispatchThreadgroups_threadsPerThreadgroup_(
-                Metal.MTLSizeMake(tg_count, 1, n_frames),
+                Metal.MTLSizeMake(n_frames, 1, tg_count),
                 Metal.MTLSizeMake(32, 32, 1),
             )
         enc.memoryBarrierWithScope_(Metal.MTLBarrierScopeBuffers)
-        # Bin: _shuf_mtl → _out_mtl at offset
+        # Bin: _shuf_mtl → _out_mtl at offset — n_frames in X
         out_det_row = det_row // bin_factor
         out_det_col = det_col // bin_factor
         out_frame_elems = out_det_row * out_det_col
@@ -744,8 +757,8 @@ class MPSDecompressor:
         grid_x = (out_det_col + 15) // 16
         grid_y = (out_det_row + 15) // 16
         enc.dispatchThreadgroups_threadsPerThreadgroup_(
-            Metal.MTLSizeMake(grid_x, grid_y, n_frames),
-            Metal.MTLSizeMake(16, 16, 1),
+            Metal.MTLSizeMake(n_frames, grid_y, grid_x),
+            Metal.MTLSizeMake(1, 16, 16),
         )
         enc.endEncoding()
         cmd.commit()
@@ -940,14 +953,14 @@ class MPSDecompressor:
         )
         enc.setBuffer_offset_atIndex_(self._lz4_mtl, 0, 7)
         enc.dispatchThreadgroups_threadsPerThreadgroup_(
-            Metal.MTLSizeMake((max_blocks_per_frame + 1) // 2, 1, n_frames),
+            Metal.MTLSizeMake(n_frames, 1, (max_blocks_per_frame + 1) // 2),
             Metal.MTLSizeMake(32, 2, 1),
         )
 
         # Memory barrier between LZ4 output and bitshuffle input
         enc.memoryBarrierWithScope_(Metal.MTLBarrierScopeBuffers)
 
-        # Bitshuffle unshuffle
+        # Bitshuffle unshuffle — n_frames in X
         elem_size = np.dtype(dtype).itemsize
         n_8kb = frame_bytes // 8192
         if elem_size == 2:
@@ -969,7 +982,7 @@ class MPSDecompressor:
             # 32 SIMD groups per threadgroup → 32x fewer launches
             tg_count = (groups_per_frame + 31) // 32
             enc.dispatchThreadgroups_threadsPerThreadgroup_(
-                Metal.MTLSizeMake(tg_count, 1, n_frames),
+                Metal.MTLSizeMake(n_frames, 1, tg_count),
                 Metal.MTLSizeMake(32, 32, 1),
             )
         else:
@@ -990,7 +1003,7 @@ class MPSDecompressor:
             )
             tg_count = (groups_per_frame + 31) // 32
             enc.dispatchThreadgroups_threadsPerThreadgroup_(
-                Metal.MTLSizeMake(tg_count, 1, n_frames),
+                Metal.MTLSizeMake(n_frames, 1, tg_count),
                 Metal.MTLSizeMake(32, 32, 1),
             )
 
@@ -1026,6 +1039,27 @@ class MPSDecompressor:
 # ---------------------------------------------------------------------------
 _decompressor_cache: dict[int, MPSDecompressor] = {}
 
+# GPU sub-batch sizing.
+#
+# Each chunk may contain 100K+ frames (e.g. partner MAPED_2: 100,352 frames
+# × 73,728 bytes/frame = 7.4 GB per chunk). Allocating full-chunk _lz4 +
+# _shuf intermediate buffers (2 × 7.4 GB = 14.8 GB) plus the output buffer
+# exceeds 24 GB, causing Metal to swap to SSD and GPU time to spike from
+# ~3s to 30s+.
+#
+# Solution: process each chunk in sub-batches of ~7K frames (0.5 GB target
+# per intermediate buffer, ~2 GB total Metal). Benchmarked on M5 24 GB:
+#   batch=5000  → 4.9s total  (optimal — fits L2/SLC well)
+#   batch=10000 → 5.5s        (slight pressure)
+#   batch=20000 → 6.5s
+#   batch=40000 → 9.3s        (memory pressure begins)
+#   batch=100K  → 13.1s       (significant GPU stalls)
+#
+# After loading, _out_mtl is freed but the decompressor is cached (keeps
+# _lz4/_shuf + metadata buffers ≈ 1.5 GB). Warm loads skip shader
+# compilation and buffer allocation: ~0.7s for 65K frames on local NVMe.
+_GPU_BATCH_TARGET_GB = 0.5
+
 
 def _get_decompressor(frame_bytes, max_frames=11_000):
     """Get or create a decompressor sized for the given frame byte size."""
@@ -1035,11 +1069,15 @@ def _get_decompressor(frame_bytes, max_frames=11_000):
         # Scale compressed buffer: worst observed bitshuffle+LZ4 ratio ~7:1,
         # use //4 for headroom (386 MB for uint32, 256 MB for uint16)
         max_comp = max(256 * 1024 * 1024, max_frames * frame_bytes // 4)
+        # Cap _lz4/_shuf buffers to ~3 GB each to avoid Metal memory pressure
+        gpu_batch = min(max_frames,
+                        int(_GPU_BATCH_TARGET_GB * 1e9 / frame_bytes))
         _decompressor_cache[cache_key] = MPSDecompressor(
             max_compressed_bytes=max_comp,
             max_frames=max_frames,
             frame_bytes=frame_bytes,
             n_blocks_per_frame=n_blocks,
+            gpu_batch=gpu_batch,
         )
     return _decompressor_cache[cache_key]
 
@@ -1123,6 +1161,7 @@ def load_arina(
     n_blocks_per_frame = (frame_bytes + 8191) // 8192
     max_chunk_frames = max(chunk_n_frames)
     dec = _get_decompressor(frame_bytes, max_frames=max_chunk_frames)
+    gpu_batch = dec.gpu_batch
     # Compute output shape
     if det_bin > 1:
         out_det_row = det_row // det_bin
@@ -1136,10 +1175,14 @@ def load_arina(
         dec.load(chunk_files[0], n_frames=1, verbose=False)
         dec._jit_warm = True
     if det_bin > 1:
-        # GPU pipeline: LZ4 → bitshuffle → bin, with double-buffered reads
+        # GPU pipeline: LZ4 → bitshuffle → bin, sub-batched to fit in GPU mem
         out_frame_bytes = out_det_row * out_det_col * 4  # float32
-        total_out_bytes = total_frames * out_frame_bytes
-        dec._ensure_output_buffer(total_out_bytes)
+        # Batch-sized Metal output buffer (not total — copy to numpy per batch)
+        batch_out_bytes = gpu_batch * out_frame_bytes
+        dec._ensure_output_buffer(batch_out_bytes)
+        # Allocate numpy output array
+        output = np.empty((total_frames, out_det_row, out_det_col),
+                          dtype=np.float32)
         # Warmup binned GPU pipeline (triggers Metal lazy buffer mapping)
         if not getattr(dec, '_bin_warm', False):
             bufs_0 = (dec._comp_np, dec._co_np, dec._bs_np, dec._bc_np,
@@ -1179,47 +1222,61 @@ def load_arina(
                        chunk_n_frames[0], n_blocks_per_frame)
         bo_np[0] = 0
         bo_np[1 : chunk_n_frames[0] + 1] = np.cumsum(bc_np[:chunk_n_frames[0]])
-        max_blk = int(bc_np[:chunk_n_frames[0]].max())
         frame_offset = 0
         n_chunks = len(chunk_files)
-        chunk_range = range(n_chunks)
-        if n_chunks > 1:
-            chunk_range = tqdm(chunk_range, desc="GPU chunks", leave=False)
-        for ci in chunk_range:
+        total_batches = sum((nf + gpu_batch - 1) // gpu_batch
+                            for nf in chunk_n_frames)
+        pbar = tqdm(total=total_batches, desc="GPU", leave=False) \
+            if total_batches > 1 else None
+        for ci in range(n_chunks):
             cur = bufs[ci % 2]
             comp_np, co_np, bs_np, bc_np, bo_np, csizes, \
                 comp_mtl, co_mtl, bs_mtl, bc_mtl, bo_mtl = cur
             nf = chunk_n_frames[ci]
-            out_byte_offset = frame_offset * out_frame_bytes
-            cmd = dec._submit_gpu_binned(
-                nf, frame_bytes, elem_size, out_byte_offset,
-                det_row, det_col, det_bin,
-                comp_mtl, co_mtl, bs_mtl, bc_mtl, bo_mtl, max_blk,
-            )
-            # Read + parse next chunk while GPU runs
-            if ci + 1 < n_chunks:
-                nxt = bufs[(ci + 1) % 2]
-                comp_np_n, co_np_n, bs_np_n, bc_np_n, bo_np_n, csizes_n, \
-                    *_ = nxt
-                dec._read_chunk(chunk_files[ci + 1], comp_np_n, co_np_n,
-                                csizes_n)
-                nf_next = chunk_n_frames[ci + 1]
-                _parse_headers(comp_np_n, csizes_n, co_np_n, bs_np_n,
-                               bc_np_n, nf_next, n_blocks_per_frame)
-                bo_np_n = nxt[4]
-                bo_np_n[0] = 0
-                bo_np_n[1 : nf_next + 1] = np.cumsum(bc_np_n[:nf_next])
-                max_blk = int(bc_np_n[:nf_next].max())
-            cmd.waitUntilCompleted()
-            frame_offset += nf
-        output = dec._out_np[:total_out_bytes].view(np.float32).reshape(
-            total_frames, out_det_row, out_det_col
-        )
+            max_blk = int(bc_np[:nf].max())
+            # Process chunk in sub-batches of gpu_batch
+            for b_start in range(0, nf, gpu_batch):
+                b_end = min(b_start + gpu_batch, nf)
+                nb = b_end - b_start
+                cmd = dec._submit_gpu_binned(
+                    nb, frame_bytes, elem_size, 0,
+                    det_row, det_col, det_bin,
+                    comp_mtl, co_mtl, bs_mtl, bc_mtl, bo_mtl,
+                    max_blk, meta_frame_offset=b_start,
+                )
+                # Overlap: read next chunk while last batch of current runs
+                if b_start + gpu_batch >= nf and ci + 1 < n_chunks:
+                    nxt = bufs[(ci + 1) % 2]
+                    comp_np_n, co_np_n, bs_np_n, bc_np_n, bo_np_n, \
+                        csizes_n, *_ = nxt
+                    dec._read_chunk(chunk_files[ci + 1], comp_np_n, co_np_n,
+                                    csizes_n)
+                    nf_next = chunk_n_frames[ci + 1]
+                    _parse_headers(comp_np_n, csizes_n, co_np_n, bs_np_n,
+                                   bc_np_n, nf_next, n_blocks_per_frame)
+                    bo_np_n = nxt[4]
+                    bo_np_n[0] = 0
+                    bo_np_n[1 : nf_next + 1] = np.cumsum(bc_np_n[:nf_next])
+                cmd.waitUntilCompleted()
+                # Copy batch result from Metal buffer to numpy output
+                src = dec._out_np[:nb * out_frame_bytes]
+                output[frame_offset:frame_offset + nb] = (
+                    src.view(np.float32).reshape(nb, out_det_row, out_det_col)
+                )
+                frame_offset += nb
+                if pbar:
+                    pbar.update(1)
+        if pbar:
+            pbar.close()
     else:
         # No binning — use load_master for double-buffered raw decompression
         output = dec.load_master(chunk_files[0].replace(
             "_data_000001.h5", "_master.h5"
         ))
+    # Free the batch output Metal buffer (kept buffers are small: ~1.5 GB)
+    dec._out_mtl = None
+    dec._out_np = None
+    dec._out_nbytes = 0
     t_total = time.perf_counter()
     # Infer scan shape
     if scan_shape is None and det_bin > 1:
