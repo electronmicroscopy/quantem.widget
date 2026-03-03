@@ -66,7 +66,7 @@ const upwardMenuProps = {
   transformOrigin: { vertical: "bottom" as const, horizontal: "left" as const },
   sx: { zIndex: 9999 },
 };
-import { getWebGPUFFT, WebGPUFFT, fft2d, fftshift, computeMagnitude, autoEnhanceFFT, nextPow2, applyHannWindow2D } from "../webgpu-fft";
+import { getWebGPUFFT, WebGPUFFT, fft2d, fft2dAsync, fftshift, computeMagnitude, autoEnhanceFFT, nextPow2, applyHannWindow2D } from "../webgpu-fft";
 import { COLORMAPS, COLORMAP_NAMES, renderToOffscreen, renderToOffscreenReuse } from "../colormaps";
 import "./show2d.css";
 
@@ -633,6 +633,8 @@ function Show2D() {
   // Cached FFT magnitude for single image mode (avoids recomputing on zoom/pan)
   const fftMagCacheRef = React.useRef<Float32Array | null>(null);
   const [fftMagVersion, setFftMagVersion] = React.useState(0);
+  // Generation counter for FFT — coalesces rapid ROI drag events to ≤1 FFT/frame
+  const fftGenRef = React.useRef(0);
 
   // Cached FFT offscreen canvas for single mode (avoids reprocessing on zoom/pan)
   const fftOffscreenRef = React.useRef<HTMLCanvasElement | null>(null);
@@ -673,6 +675,9 @@ function Show2D() {
       if (fft) {
         gpuFFTRef.current = fft;
         setGpuReady(true);
+        console.log("[Show2D] WebGPU FFT initialized — using GPU path");
+      } else {
+        console.log("[Show2D] WebGPU unavailable — using CPU Worker path");
       }
     });
   }, []);
@@ -1390,9 +1395,18 @@ function Show2D() {
   React.useEffect(() => {
     if (!effectiveShowFft || isGallery || !rawDataRef.current) return;
     if (!rawDataRef.current[selectedIdx]) return;
-    let cancelled = false;
+    // Generation counter: coalesces rapid ROI drag events so at most one
+    // FFT runs per animation frame. The rAF yield lets the browser paint
+    // the ROI position update before the (potentially blocking) FFT runs.
+    const gen = ++fftGenRef.current;
 
     const doCompute = async () => {
+      // Yield to next animation frame — browser paints updated ROI first,
+      // and stale requests (from earlier drag events) are discarded below.
+      await new Promise<void>(r => requestAnimationFrame(() => r()));
+      if (gen !== fftGenRef.current) return;
+
+      const t0 = performance.now();
       const data = rawDataRef.current![selectedIdx];
       let fftW = width;
       let fftH = height;
@@ -1440,25 +1454,25 @@ function Show2D() {
         }
       }
 
+      const tCrop = performance.now();
       const real = inputData.slice();
       const imag = new Float32Array(inputData.length);
 
-      let fReal: Float32Array;
-      let fImag: Float32Array;
       if (gpuFFTRef.current && gpuReady) {
         const result = await gpuFFTRef.current.fft2D(real, imag, fftW, fftH, false);
-        fReal = result.real;
-        fImag = result.imag;
+        if (gen !== fftGenRef.current) return;
+        const tGpu = performance.now();
+        fftshift(result.real, fftW, fftH);
+        fftshift(result.imag, fftW, fftH);
+        fftMagCacheRef.current = computeMagnitude(result.real, result.imag);
+        console.log(`[Show2D FFT] GPU ${fftW}×${fftH}: crop=${(tCrop-t0).toFixed(1)}ms gpu=${(tGpu-tCrop).toFixed(1)}ms post=${(performance.now()-tGpu).toFixed(1)}ms`);
       } else {
-        fft2d(real, imag, fftW, fftH, false);
-        fReal = real;
-        fImag = imag;
+        // CPU fallback: run in Web Worker to avoid blocking the main thread
+        const result = await fft2dAsync(real, imag, fftW, fftH, false);
+        if (gen !== fftGenRef.current) return;
+        fftMagCacheRef.current = result.magnitude;
+        console.log(`[Show2D FFT] Worker ${fftW}×${fftH}: crop=${(tCrop-t0).toFixed(1)}ms worker=${(performance.now()-tCrop).toFixed(1)}ms`);
       }
-      if (cancelled) return;
-      fftshift(fReal, fftW, fftH);
-      fftshift(fImag, fftW, fftH);
-
-      fftMagCacheRef.current = computeMagnitude(fReal, fImag);
       // Track FFT dimensions when they differ from image dimensions (ROI crop or non-pow2 padding)
       if (origCropW > 0) {
         setFftCropDims({ cropWidth: origCropW, cropHeight: origCropH, fftWidth: fftW, fftHeight: fftH });
@@ -1471,7 +1485,6 @@ function Show2D() {
     };
 
     doCompute();
-    return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [effectiveShowFft, isGallery, selectedIdx, width, height, gpuReady, dataVersion, roiFftKey, fftWindow]);
 
@@ -3007,11 +3020,21 @@ function Show2D() {
                 <Typography sx={{ ...typography.label, fontSize: 10 }}>FFT:</Typography>
                 <Switch
                   checked={showFft}
-                  onChange={(e) => { if (!lockDisplay) setShowFft(e.target.checked); }}
+                  onChange={(e) => {
+                    if (lockDisplay) return;
+                    const on = e.target.checked;
+                    if (on && width * height > 2048 * 2048) {
+                      console.warn(`Show2D: FFT on ${width}×${height} image (${(width * height / 1e6).toFixed(1)}M pixels) may be slow`);
+                    }
+                    setShowFft(on);
+                  }}
                   disabled={lockDisplay}
                   size="small"
                   sx={switchStyles.small}
                 />
+                {showFft && width * height > 2048 * 2048 && (
+                  <Typography sx={{ fontSize: 9, color: "#f59e0b", ml: 0.5 }}>slow ({width}×{height})</Typography>
+                )}
               </>
             )}
             <Box sx={{ flex: 1 }} />

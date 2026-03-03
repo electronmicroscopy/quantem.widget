@@ -82,6 +82,110 @@ export function fftshift(data: Float32Array, width: number, height: number): voi
 }
 
 // ============================================================================
+// CPU FFT Web Worker — runs fft2d + fftshift + computeMagnitude off main thread
+// ============================================================================
+
+const FFT_WORKER_CODE = `
+function nextPow2(n) { return Math.pow(2, Math.ceil(Math.log2(n))); }
+function fft1d(real, imag, inverse) {
+  var n = real.length; if (n <= 1) return;
+  var j = 0;
+  for (var i = 0; i < n - 1; i++) {
+    if (i < j) { var t = real[i]; real[i] = real[j]; real[j] = t; t = imag[i]; imag[i] = imag[j]; imag[j] = t; }
+    var k = n >> 1; while (k <= j) { j -= k; k >>= 1; } j += k;
+  }
+  var sign = inverse ? 1 : -1;
+  for (var len = 2; len <= n; len <<= 1) {
+    var halfLen = len >> 1, angle = (sign * 2 * Math.PI) / len;
+    var wR = Math.cos(angle), wI = Math.sin(angle);
+    for (var i = 0; i < n; i += len) {
+      var cR = 1, cI = 0;
+      for (var k = 0; k < halfLen; k++) {
+        var eI = i + k, oI = i + k + halfLen;
+        var tR = cR * real[oI] - cI * imag[oI], tI = cR * imag[oI] + cI * real[oI];
+        real[oI] = real[eI] - tR; imag[oI] = imag[eI] - tI;
+        real[eI] += tR; imag[eI] += tI;
+        var nR = cR * wR - cI * wI; cI = cR * wI + cI * wR; cR = nR;
+      }
+    }
+  }
+  if (inverse) { for (var i = 0; i < n; i++) { real[i] /= n; imag[i] /= n; } }
+}
+function fft2d(real, imag, width, height, inverse) {
+  var pW = nextPow2(width), pH = nextPow2(height), pad = pW !== width || pH !== height;
+  var wR, wI;
+  if (pad) {
+    wR = new Float32Array(pW * pH); wI = new Float32Array(pW * pH);
+    for (var y = 0; y < height; y++) for (var x = 0; x < width; x++) { wR[y*pW+x] = real[y*width+x]; wI[y*pW+x] = imag[y*width+x]; }
+  } else { wR = real; wI = imag; }
+  var rR = new Float32Array(pW), rI = new Float32Array(pW);
+  for (var y = 0; y < pH; y++) {
+    var o = y * pW; for (var x = 0; x < pW; x++) { rR[x] = wR[o+x]; rI[x] = wI[o+x]; }
+    fft1d(rR, rI, inverse); for (var x = 0; x < pW; x++) { wR[o+x] = rR[x]; wI[o+x] = rI[x]; }
+  }
+  var cR = new Float32Array(pH), cI = new Float32Array(pH);
+  for (var x = 0; x < pW; x++) {
+    for (var y = 0; y < pH; y++) { cR[y] = wR[y*pW+x]; cI[y] = wI[y*pW+x]; }
+    fft1d(cR, cI, inverse); for (var y = 0; y < pH; y++) { wR[y*pW+x] = cR[y]; wI[y*pW+x] = cI[y]; }
+  }
+  if (pad) { for (var y = 0; y < height; y++) for (var x = 0; x < width; x++) { real[y*width+x] = wR[y*pW+x]; imag[y*width+x] = wI[y*pW+x]; } }
+}
+function fftshift(data, width, height) {
+  var hW = width >> 1, hH = height >> 1, temp = new Float32Array(width * height);
+  for (var y = 0; y < height; y++) for (var x = 0; x < width; x++) temp[((y+hH)%height)*width+((x+hW)%width)] = data[y*width+x];
+  data.set(temp);
+}
+self.onmessage = function(e) {
+  var d = e.data, real = d.real, imag = d.imag, w = d.width, h = d.height;
+  fft2d(real, imag, w, h, d.inverse);
+  fftshift(real, w, h); fftshift(imag, w, h);
+  var n = real.length, mag = new Float32Array(n);
+  for (var i = 0; i < n; i++) mag[i] = Math.sqrt(real[i]*real[i] + imag[i]*imag[i]);
+  self.postMessage({ id: d.id, magnitude: mag, real: real, imag: imag }, [mag.buffer, real.buffer, imag.buffer]);
+};
+`;
+
+let _fftWorker: Worker | null = null;
+const _fftCallbacks = new Map<number, (data: { magnitude: Float32Array; real: Float32Array; imag: Float32Array }) => void>();
+let _fftWorkerId = 0;
+
+function getFFTWorker(): Worker {
+  if (!_fftWorker) {
+    const blob = new Blob([FFT_WORKER_CODE], { type: 'application/javascript' });
+    _fftWorker = new Worker(URL.createObjectURL(blob));
+    _fftWorker.onmessage = (e: MessageEvent) => {
+      const cb = _fftCallbacks.get(e.data.id);
+      if (cb) {
+        _fftCallbacks.delete(e.data.id);
+        cb(e.data);
+      }
+    };
+  }
+  return _fftWorker;
+}
+
+/**
+ * CPU FFT in a Web Worker — does fft2d + fftshift + computeMagnitude off main thread.
+ * Transfers Float32Arrays to the worker (zero-copy) so the main thread is never blocked.
+ * The input arrays become detached after this call — pass copies if you need to keep them.
+ */
+export function fft2dAsync(
+  real: Float32Array, imag: Float32Array,
+  width: number, height: number,
+  inverse: boolean = false,
+): Promise<{ magnitude: Float32Array; real: Float32Array; imag: Float32Array }> {
+  const worker = getFFTWorker();
+  const id = ++_fftWorkerId;
+  return new Promise((resolve) => {
+    _fftCallbacks.set(id, resolve);
+    worker.postMessage(
+      { id, real, imag, width, height, inverse },
+      [real.buffer, imag.buffer],
+    );
+  });
+}
+
+// ============================================================================
 // WebGPU FFT — GPU-accelerated 2D FFT
 // ============================================================================
 
