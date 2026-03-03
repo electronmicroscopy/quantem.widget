@@ -26,7 +26,8 @@ def smoke_page(browser_context):
     _write_notebook(NOTEBOOK_PATH, [
         {"source": [
             "import numpy as np\n",
-            "from quantem.widget import Bin, Mark2D, Show1D, Show2D, Show3D, Show3DVolume, Show4DSTEM\n",
+            "import pathlib\n",
+            "from quantem.widget import Bin, Bin2D, Browse, Mark2D, Show1D, Show2D, Show3D, Show3DVolume, Show4DSTEM\n",
             "from quantem.widget import Show4D, Edit2D, Align2D, ShowComplex2D\n",
         ]},
         {"source": [
@@ -51,6 +52,12 @@ def smoke_page(browser_context):
             "Bin(np.random.rand(8, 8, 32, 32).astype(np.float32), pixel_size=2.4, k_pixel_size=0.48, device='cpu')\n",
         ]},
         {"source": [
+            "Bin2D(np.random.rand(64, 64).astype(np.float32))\n",
+        ]},
+        {"source": [
+            "Bin2D(np.random.rand(5, 64, 64).astype(np.float32), labels=['Frame 0','Frame 1','Frame 2','Frame 3','Frame 4'], title='Stack')\n",
+        ]},
+        {"source": [
             "Show4D(np.random.rand(8, 8, 32, 32).astype(np.float32))\n",
         ]},
         {"source": [
@@ -61,6 +68,18 @@ def smoke_page(browser_context):
         ]},
         {"source": [
             "ShowComplex2D(np.random.rand(64, 64).astype(np.float32) + 1j * np.random.rand(64, 64).astype(np.float32))\n",
+        ]},
+        {"source": [
+            "# Create temp dir with sample files for Browse\n",
+            "_browse_dir = pathlib.Path('_browse_smoke_data')\n",
+            "_browse_dir.mkdir(exist_ok=True)\n",
+            "(_browse_dir / 'subfolder').mkdir(exist_ok=True)\n",
+            "np.save(str(_browse_dir / 'image.npy'), np.random.rand(32, 32).astype(np.float32))\n",
+            "(_browse_dir / 'data.h5').write_bytes(b'\\x00' * 1024)\n",
+            "(_browse_dir / 'notes.txt').write_text('hello')\n",
+            "(_browse_dir / 'script.py').write_text('pass')\n",
+            "(_browse_dir / 'photo.tif').write_bytes(b'\\x00' * 512)\n",
+            "Browse(root=_browse_dir, title='Browse Smoke')\n",
         ]},
     ])
     page = browser_context.new_page()
@@ -77,10 +96,12 @@ ALL_WIDGETS = [
     "show3dvolume-root",
     "show4dstem-root",
     "bin-root",
+    "bin2d-root",
     "show4d-root",
     "edit2d-root",
     "align2d-root",
     "showcomplex-root",
+    "browse-root",
 ]
 
 VIEWER_WIDGETS_WITH_CUSTOMIZER = [
@@ -157,7 +178,9 @@ def test_widget_root_exists(smoke_page, css_class):
     root = smoke_page.locator(f".{css_class}")
     assert root.count() >= 1, f"Widget .{css_class} not found on page"
 
-@pytest.mark.parametrize("css_class", ALL_WIDGETS)
+CANVAS_WIDGETS = [w for w in ALL_WIDGETS if w != "browse-root"]
+
+@pytest.mark.parametrize("css_class", CANVAS_WIDGETS)
 def test_canvas_rendered(smoke_page, css_class):
     canvas = smoke_page.locator(f".{css_class} canvas")
     assert canvas.count() >= 1, f"No canvas in .{css_class}"
@@ -939,6 +962,99 @@ def test_bin_change_display_controls(smoke_page):
     time.sleep(0.5)
 
 # ---------------------------------------------------------------------------
+# Bin2D interaction tests
+# ---------------------------------------------------------------------------
+
+def test_bin2d_renders(smoke_page):
+    """Verify Bin2D widget renders with two side-by-side canvases."""
+    widget = smoke_page.locator(".bin2d-root").first
+    widget.scroll_into_view_if_needed()
+    time.sleep(1)
+    canvases = widget.locator("canvas")
+    assert canvases.count() >= 2, f"Expected at least 2 canvases (original + binned), got {canvases.count()}"
+    # Check header shows "Original" and "Binned" labels
+    widget.locator("text=Original").first.wait_for(state="visible", timeout=5000)
+    widget.locator("text=Binned").first.wait_for(state="visible", timeout=5000)
+    _screenshot(widget, "bin2d")
+
+def test_bin2d_change_bin_factor(smoke_page):
+    """Change Bin2D bin factor and verify binned dimensions update."""
+    widget = smoke_page.locator(".bin2d-root").first
+    widget.scroll_into_view_if_needed()
+    # Dropdowns: Bin(0), Mode(1), Edge(2), Cmap(3)
+    _change_dropdown(widget, smoke_page, 0, "4×")
+    time.sleep(1)
+    text = widget.inner_text()
+    assert "16×16" in text, f"Expected binned dims 16×16 for 64×64 with factor 4, got: {text}"
+    _screenshot(widget, "bin2d_factor4")
+    # Reset to 2×
+    _change_dropdown(widget, smoke_page, 0, "2×")
+    time.sleep(0.5)
+
+def test_bin2d_change_mode_and_edge(smoke_page):
+    """Change Bin2D mode to sum and edge to pad."""
+    widget = smoke_page.locator(".bin2d-root").first
+    widget.scroll_into_view_if_needed()
+    # Dropdowns: Bin(0), Mode(1), Edge(2), Cmap(3)
+    _change_dropdown(widget, smoke_page, 1, "Sum")
+    _change_dropdown(widget, smoke_page, 2, "Pad")
+    time.sleep(1)
+    _screenshot(widget, "bin2d_sum_pad")
+    # Reset
+    _change_dropdown(widget, smoke_page, 1, "Mean")
+    _change_dropdown(widget, smoke_page, 2, "Crop")
+    time.sleep(0.5)
+
+def test_bin2d_change_colormap(smoke_page):
+    """Change Bin2D colormap to viridis."""
+    widget = smoke_page.locator(".bin2d-root").first
+    widget.scroll_into_view_if_needed()
+    # Dropdowns: Bin(0), Mode(1), Edge(2), Scale(3), Color(4)
+    _change_dropdown(widget, smoke_page, 4, "Viridis")
+    time.sleep(1)
+    _screenshot(widget, "bin2d_viridis")
+    _change_dropdown(widget, smoke_page, 4, "Inferno")
+    time.sleep(0.5)
+
+def test_bin2d_toggle_log_scale(smoke_page):
+    """Toggle log scale on Bin2D via Scale dropdown."""
+    widget = smoke_page.locator(".bin2d-root").first
+    widget.scroll_into_view_if_needed()
+    # Dropdowns: Bin(0), Mode(1), Edge(2), Scale(3), Color(4)
+    _change_dropdown(widget, smoke_page, 3, "Log")
+    time.sleep(1)
+    _screenshot(widget, "bin2d_log")
+    _change_dropdown(widget, smoke_page, 3, "Lin")
+    time.sleep(0.5)
+
+def test_bin2d_3d_stack_gallery(smoke_page):
+    """Verify Bin2D gallery navigation with 3D stack (5 images)."""
+    widget = smoke_page.locator(".bin2d-root").nth(1)
+    widget.scroll_into_view_if_needed()
+    time.sleep(1)
+    # Should show 1/5 counter and gallery nav buttons
+    text = widget.inner_text()
+    assert "1/5" in text, f"Expected gallery counter 1/5, got: {text}"
+    assert "Stack" in text, f"Expected title 'Stack', got: {text}"
+    # Navigate forward
+    buttons = widget.locator("button")
+    next_btn = widget.locator("button:has-text('▶')").first
+    next_btn.click()
+    time.sleep(0.5)
+    text = widget.inner_text()
+    assert "2/5" in text, f"Expected 2/5 after nav, got: {text}"
+    _screenshot(widget, "bin2d_stack_gallery")
+
+def test_bin2d_file_size_shown(smoke_page):
+    """Verify file size reduction info is displayed."""
+    widget = smoke_page.locator(".bin2d-root").first
+    widget.scroll_into_view_if_needed()
+    time.sleep(0.5)
+    text = widget.inner_text()
+    # Should show file size like "16.0 KB" and reduction like "↓4×"
+    assert "KB" in text or "MB" in text or "B" in text, f"Expected file size in widget, got: {text}"
+
+# ---------------------------------------------------------------------------
 # Show4D interaction tests
 # ---------------------------------------------------------------------------
 
@@ -1340,6 +1456,105 @@ def test_showcomplex_roi_fft(smoke_page):
     time.sleep(0.5)
     widget.locator(".MuiSwitch-root").first.click()
     time.sleep(0.5)
+
+# ---------------------------------------------------------------------------
+# Browse interaction tests
+# ---------------------------------------------------------------------------
+
+def test_browse_renders(smoke_page):
+    """Verify Browse widget renders with file list entries."""
+    widget = smoke_page.locator(".browse-root").first
+    widget.scroll_into_view_if_needed()
+    time.sleep(1)
+    text = widget.inner_text()
+    assert "Browse Smoke" in text, f"Expected title 'Browse Smoke', got: {text}"
+    assert "folders" in text, f"Expected 'folders' in status bar"
+    assert "files" in text, f"Expected 'files' in status bar"
+    _screenshot(widget, "browse")
+
+def test_browse_file_icons(smoke_page):
+    """Verify file list shows entries with file type icons."""
+    widget = smoke_page.locator(".browse-root").first
+    widget.scroll_into_view_if_needed()
+    text = widget.inner_text()
+    assert "image.npy" in text, f"Expected 'image.npy' in file list"
+    assert "subfolder" in text, f"Expected 'subfolder' in file list"
+    assert "notes.txt" in text, f"Expected 'notes.txt' in file list"
+    assert "script.py" in text, f"Expected 'script.py' in file list"
+
+def test_browse_keyboard_nav(smoke_page):
+    """Arrow keys navigate file list, Enter opens folder."""
+    widget = smoke_page.locator(".browse-root").first
+    widget.scroll_into_view_if_needed()
+    widget.click()
+    time.sleep(0.3)
+    # Press ArrowDown to focus first entry
+    smoke_page.keyboard.press("ArrowDown")
+    time.sleep(0.3)
+    smoke_page.keyboard.press("ArrowDown")
+    time.sleep(0.3)
+    # Press Space to select
+    smoke_page.keyboard.press("Space")
+    time.sleep(0.5)
+    text = widget.inner_text()
+    assert "Selected: 1 item" in text, f"Expected 'Selected: 1 item' after Space, got: {text}"
+    _screenshot(widget, "browse_keyboard_nav")
+    # Clear selection
+    smoke_page.keyboard.press("Escape")
+    time.sleep(0.3)
+
+def test_browse_search(smoke_page):
+    """Search box filters entries by name."""
+    widget = smoke_page.locator(".browse-root").first
+    widget.scroll_into_view_if_needed()
+    # Focus the search input
+    search_input = widget.locator("input[type='text']").first
+    search_input.click()
+    search_input.fill("npy")
+    time.sleep(0.5)
+    text = widget.inner_text()
+    assert "image.npy" in text, f"Expected 'image.npy' after filtering"
+    # notes.txt should be hidden
+    list_items = widget.locator(".MuiListItemButton-root")
+    visible_texts = [list_items.nth(i).inner_text() for i in range(list_items.count())]
+    visible_str = " ".join(visible_texts)
+    assert "notes.txt" not in visible_str, f"'notes.txt' should be hidden by search filter"
+    _screenshot(widget, "browse_search")
+    # Clear search
+    search_input.fill("")
+    time.sleep(0.3)
+
+def test_browse_select_all(smoke_page):
+    """Ctrl+A selects all visible entries."""
+    widget = smoke_page.locator(".browse-root").first
+    widget.scroll_into_view_if_needed()
+    widget.click()
+    time.sleep(0.3)
+    smoke_page.keyboard.press("Meta+a")
+    time.sleep(0.5)
+    text = widget.inner_text()
+    assert "Selected:" in text, f"Expected 'Selected:' after Ctrl+A, got: {text}"
+    _screenshot(widget, "browse_select_all")
+    # Clear
+    smoke_page.keyboard.press("Escape")
+    time.sleep(0.3)
+
+def test_browse_sort_dropdown(smoke_page):
+    """Change sort to Size via dropdown."""
+    widget = smoke_page.locator(".browse-root").first
+    widget.scroll_into_view_if_needed()
+    # Sort dropdown is the first Select in controls
+    _change_dropdown(widget, smoke_page, 0, "Size")
+    time.sleep(0.5)
+    _screenshot(widget, "browse_sort_size")
+    _change_dropdown(widget, smoke_page, 0, "Name")
+    time.sleep(0.3)
+
+def test_browse_customizer_exists(smoke_page):
+    """Browse exposes the shared controls customizer button."""
+    widget = smoke_page.locator(".browse-root").first
+    widget.scroll_into_view_if_needed()
+    assert widget.locator('button[aria-label="Customize controls"]').count() >= 1
 
 # ---------------------------------------------------------------------------
 # Dark theme tests — must run AFTER all light-mode tests

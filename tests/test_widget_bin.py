@@ -4,11 +4,11 @@ import zipfile
 import numpy as np
 import pytest
 
-from quantem.widget import Bin
+from quantem.widget import Bin4D
 
 def test_bin_widget_loads_from_4d_array():
     data = np.random.rand(8, 10, 16, 18).astype(np.float32)
-    widget = Bin(data)
+    widget = Bin4D(data)
 
     assert widget is not None
     assert (widget.scan_rows, widget.scan_cols, widget.det_rows, widget.det_cols) == (8, 10, 16, 18)
@@ -19,7 +19,7 @@ def test_bin_widget_loads_from_4d_array():
 
 def test_bin_widget_updates_shape_and_calibration():
     data = np.random.rand(12, 8, 20, 24).astype(np.float32)
-    widget = Bin(data, pixel_size=(0.5, 0.25), k_pixel_size=(1.0, 2.0))
+    widget = Bin4D(data, pixel_size=(0.5, 0.25), k_pixel_size=(1.0, 2.0))
 
     widget.scan_bin_row = 3
     widget.scan_bin_col = 2
@@ -36,7 +36,7 @@ def test_bin_widget_updates_shape_and_calibration():
 
 def test_bin_widget_crop_vs_pad_behavior():
     data = np.ones((9, 9, 9, 9), dtype=np.float32)
-    widget = Bin(data, edge_mode="crop")
+    widget = Bin4D(data, edge_mode="crop")
 
     widget.scan_bin_row = 4
     widget.scan_bin_col = 4
@@ -52,7 +52,7 @@ def test_bin_widget_flattened_3d_input_with_scan_shape():
     for i in range(6):
         data[i] = i
 
-    widget = Bin(data, scan_shape=(2, 3))
+    widget = Bin4D(data, scan_shape=(2, 3))
     assert (widget.scan_rows, widget.scan_cols, widget.det_rows, widget.det_cols) == (2, 3, 4, 4)
 
     widget.scan_bin_row = 2
@@ -62,7 +62,7 @@ def test_bin_widget_flattened_3d_input_with_scan_shape():
 
 def test_bin_widget_error_mode_reports_status():
     data = np.random.rand(7, 7, 7, 7).astype(np.float32)
-    widget = Bin(data, edge_mode="crop")
+    widget = Bin4D(data, edge_mode="crop")
     original_shape = widget.get_binned_data().shape
 
     widget.edge_mode = "error"
@@ -78,7 +78,7 @@ def test_bin_widget_exports_image_with_metadata(tmp_path):
     pytest.importorskip("matplotlib")
 
     data = np.random.rand(8, 8, 16, 16).astype(np.float32)
-    widget = Bin(data, device="cpu")
+    widget = Bin4D(data, device="cpu")
 
     image_path = tmp_path / "bin_grid.png"
     meta_path = tmp_path / "bin_grid_meta.json"
@@ -89,7 +89,7 @@ def test_bin_widget_exports_image_with_metadata(tmp_path):
     assert meta_path.exists()
     payload = json.loads(meta_path.read_text())
     assert payload["metadata_version"] == "1.0"
-    assert payload["widget_name"] == "Bin"
+    assert payload["widget_name"] == "Bin4D"
     assert isinstance(payload["widget_version"], str)
     assert payload["format"] == "png"
     assert payload["export_kind"] == "single_view_image"
@@ -100,7 +100,7 @@ def test_bin_widget_exports_zip_bundle(tmp_path):
     pytest.importorskip("matplotlib")
 
     data = np.random.rand(8, 8, 16, 16).astype(np.float32)
-    widget = Bin(data, device="cpu")
+    widget = Bin4D(data, device="cpu")
 
     zip_path = tmp_path / "bin_bundle.zip"
     out = widget.save_zip(zip_path, include_arrays=True)
@@ -127,7 +127,7 @@ def test_bin_widget_exports_zip_bundle(tmp_path):
     with zipfile.ZipFile(zip_path, "r") as zf:
         metadata = json.loads(zf.read("metadata.json").decode("utf-8"))
     assert metadata["metadata_version"] == "1.0"
-    assert metadata["widget_name"] == "Bin"
+    assert metadata["widget_name"] == "Bin4D"
     assert isinstance(metadata["widget_version"], str)
     assert metadata["format"] == "zip"
     assert metadata["export_kind"] == "multi_panel_bundle"
@@ -137,7 +137,7 @@ def test_bin_widget_exports_gif(tmp_path):
     pytest.importorskip("matplotlib")
 
     data = np.random.rand(8, 8, 16, 16).astype(np.float32)
-    widget = Bin(data, device="cpu")
+    widget = Bin4D(data, device="cpu")
 
     gif_path = tmp_path / "bin_compare.gif"
     out = widget.save_gif(gif_path, channel="bf")
@@ -150,47 +150,47 @@ def test_bin_widget_exports_gif(tmp_path):
     assert meta.exists()
     payload = json.loads(meta.read_text())
     assert payload["metadata_version"] == "1.0"
-    assert payload["widget_name"] == "Bin"
+    assert payload["widget_name"] == "Bin4D"
     assert isinstance(payload["widget_version"], str)
     assert payload["format"] == "gif"
     assert payload["export_kind"] == "before_after_animation"
 
 def test_bin_widget_version_is_set():
     data = np.random.rand(8, 10, 16, 18).astype(np.float32)
-    w = Bin(data)
+    w = Bin4D(data)
     assert w.widget_version != "unknown"
 
 # --- Title tests ---
 
 def test_bin_title_default():
     data = np.random.rand(4, 4, 8, 8).astype(np.float32)
-    w = Bin(data)
+    w = Bin4D(data)
     assert w.title == ""
 
 def test_bin_title_set():
     data = np.random.rand(4, 4, 8, 8).astype(np.float32)
-    w = Bin(data, title="My Binning")
+    w = Bin4D(data, title="My Binning")
     assert w.title == "My Binning"
 
 def test_bin_title_in_state_dict():
     data = np.random.rand(4, 4, 8, 8).astype(np.float32)
-    w = Bin(data, title="Test Title")
+    w = Bin4D(data, title="Test Title")
     sd = w.state_dict()
     assert sd["title"] == "Test Title"
-    w2 = Bin(np.random.rand(4, 4, 8, 8).astype(np.float32))
+    w2 = Bin4D(np.random.rand(4, 4, 8, 8).astype(np.float32))
     w2.load_state_dict(sd)
     assert w2.title == "Test Title"
 
 def test_bin_title_in_summary(capsys):
     data = np.random.rand(4, 4, 8, 8).astype(np.float32)
-    w = Bin(data, title="Custom Bin Name")
+    w = Bin4D(data, title="Custom Bin Name")
     w.summary()
     out = capsys.readouterr().out
     assert "Custom Bin Name" in out
 
 def test_bin_title_in_repr():
     data = np.random.rand(4, 4, 8, 8).astype(np.float32)
-    w = Bin(data, title="My Title")
+    w = Bin4D(data, title="My Title")
     r = repr(w)
     assert "My Title" in r
 
@@ -198,14 +198,14 @@ def test_bin_title_in_repr():
 
 def test_bin_state_dict_includes_display_traits():
     data = np.random.rand(4, 4, 8, 8).astype(np.float32)
-    w = Bin(data, cmap="viridis", log_scale=True, show_controls=False)
+    w = Bin4D(data, cmap="viridis", log_scale=True, show_controls=False)
 
     sd = w.state_dict()
     assert sd["cmap"] == "viridis"
     assert sd["log_scale"] is True
     assert sd["show_controls"] is False
 
-    w2 = Bin(np.random.rand(4, 4, 8, 8).astype(np.float32))
+    w2 = Bin4D(np.random.rand(4, 4, 8, 8).astype(np.float32))
     w2.load_state_dict(sd)
     assert w2.cmap == "viridis"
     assert w2.log_scale is True
@@ -213,7 +213,7 @@ def test_bin_state_dict_includes_display_traits():
 
 def test_bin_set_data_replaces_array():
     data1 = np.random.rand(4, 4, 8, 8).astype(np.float32)
-    w = Bin(data1, cmap="viridis", log_scale=True)
+    w = Bin4D(data1, cmap="viridis", log_scale=True)
 
     assert (w.scan_rows, w.scan_cols, w.det_rows, w.det_cols) == (4, 4, 8, 8)
 
@@ -230,7 +230,7 @@ def test_bin_set_data_replaces_array():
 @pytest.mark.parametrize("trait_name", ["disabled_tools", "hidden_tools"])
 def test_bin_tool_default_empty(trait_name):
     data = np.random.rand(4, 4, 8, 8).astype(np.float32)
-    w = Bin(data)
+    w = Bin4D(data)
     assert getattr(w, trait_name) == []
 
 @pytest.mark.parametrize(
@@ -246,25 +246,25 @@ def test_bin_tool_default_empty(trait_name):
 )
 def test_bin_tool_lock_hide(trait_name, kwargs, expected):
     data = np.random.rand(4, 4, 8, 8).astype(np.float32)
-    w = Bin(data, **kwargs)
+    w = Bin4D(data, **kwargs)
     assert getattr(w, trait_name) == expected
 
 @pytest.mark.parametrize("kwargs", [{"disabled_tools": ["not_real"]}, {"hidden_tools": ["not_real"]}])
 def test_bin_tool_invalid_key_raises(kwargs):
     data = np.random.rand(4, 4, 8, 8).astype(np.float32)
     with pytest.raises(ValueError):
-        Bin(data, **kwargs)
+        Bin4D(data, **kwargs)
 
 @pytest.mark.parametrize("trait_name", ["disabled_tools", "hidden_tools"])
 def test_bin_tool_trait_assignment_normalizes(trait_name):
     data = np.random.rand(4, 4, 8, 8).astype(np.float32)
-    w = Bin(data)
+    w = Bin4D(data)
     setattr(w, trait_name, ["DISPLAY", "display", "binning"])
     assert getattr(w, trait_name) == ["display", "binning"]
 
 def test_bin_tool_runtime_api():
     data = np.random.rand(4, 4, 8, 8).astype(np.float32)
-    w = Bin(data)
+    w = Bin4D(data)
 
     assert w.lock_tool("display") is w
     assert "display" in w.disabled_tools
@@ -278,20 +278,20 @@ def test_bin_tool_runtime_api():
 
 def test_bin_state_dict_roundtrip_with_tools():
     data = np.random.rand(4, 4, 8, 8).astype(np.float32)
-    w = Bin(data, disabled_tools=["display"], hidden_tools=["stats"])
+    w = Bin4D(data, disabled_tools=["display"], hidden_tools=["stats"])
 
     sd = w.state_dict()
     assert sd["disabled_tools"] == ["display"]
     assert sd["hidden_tools"] == ["stats"]
 
-    w2 = Bin(np.random.rand(4, 4, 8, 8).astype(np.float32))
+    w2 = Bin4D(np.random.rand(4, 4, 8, 8).astype(np.float32))
     w2.load_state_dict(sd)
     assert w2.disabled_tools == ["display"]
     assert w2.hidden_tools == ["stats"]
 
 def test_bin_summary_includes_locked_hidden(capsys):
     data = np.random.rand(4, 4, 8, 8).astype(np.float32)
-    w = Bin(data, disabled_tools=["display"], hidden_tools=["binning"])
+    w = Bin4D(data, disabled_tools=["display"], hidden_tools=["binning"])
     w.summary()
     output = capsys.readouterr().out
     assert "Locked" in output
@@ -303,13 +303,13 @@ def test_bin_summary_includes_locked_hidden(capsys):
 
 def test_bin_mean_dp_bytes_populated():
     data = np.random.rand(4, 6, 16, 20).astype(np.float32)
-    w = Bin(data)
+    w = Bin4D(data)
     assert len(w.original_mean_dp_bytes) == 16 * 20 * 4
     assert len(w.binned_mean_dp_bytes) == 16 * 20 * 4
 
 def test_bin_mean_dp_updates_after_binning():
     data = np.random.rand(8, 8, 16, 16).astype(np.float32)
-    w = Bin(data)
+    w = Bin4D(data)
     assert len(w.original_mean_dp_bytes) == 16 * 16 * 4
 
     w.det_bin_row = 2
@@ -321,7 +321,7 @@ def test_bin_mean_dp_updates_after_binning():
 
 def test_bin_binned_center_traits():
     data = np.random.rand(4, 4, 16, 16).astype(np.float32)
-    w = Bin(data, center=(8.0, 8.0))
+    w = Bin4D(data, center=(8.0, 8.0))
     assert w.center_row == 8.0
     assert w.center_col == 8.0
 
@@ -332,7 +332,7 @@ def test_bin_binned_center_traits():
 
 def test_bin_position_dp_bytes():
     data = np.random.rand(4, 4, 8, 8).astype(np.float32)
-    w = Bin(data)
+    w = Bin4D(data)
     assert w._position_dp_bytes == b""
     assert w._binned_position_dp_bytes == b""
     w._scan_position = [2, 3]
@@ -343,7 +343,7 @@ def test_bin_position_dp_bytes():
 
 def test_bin_position_dp_clears_on_negative():
     data = np.random.rand(4, 4, 8, 8).astype(np.float32)
-    w = Bin(data)
+    w = Bin4D(data)
     w._scan_position = [1, 1]
     assert len(w._position_dp_bytes) > 0
     w._scan_position = [-1, -1]
@@ -352,9 +352,13 @@ def test_bin_position_dp_clears_on_negative():
 
 def test_bin_position_dp_updates_on_rebin():
     data = np.random.rand(4, 4, 8, 8).astype(np.float32)
-    w = Bin(data)
+    w = Bin4D(data)
     w._scan_position = [0, 0]
     dp_before = w._binned_position_dp_bytes
     w.scan_bin_row = 2
     dp_after = w._binned_position_dp_bytes
     assert dp_after != dp_before or len(dp_after) != len(dp_before)
+
+def test_bin_deprecated_alias():
+    from quantem.widget import Bin
+    assert Bin is Bin4D

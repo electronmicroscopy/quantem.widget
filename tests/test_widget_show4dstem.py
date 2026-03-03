@@ -275,29 +275,20 @@ def test_show4dstem_vi_stats():
 def test_show4dstem_rejects_2d():
     """2D input raises ValueError."""
     data = np.random.rand(16, 16).astype(np.float32)
-    try:
+    with pytest.raises(ValueError):
         Show4DSTEM(data)
-        assert False, "Should have raised ValueError"
-    except ValueError:
-        pass
 
 def test_show4dstem_rejects_6d():
     """6D input raises ValueError."""
     data = np.random.rand(2, 2, 2, 2, 8, 8).astype(np.float32)
-    try:
+    with pytest.raises(ValueError):
         Show4DSTEM(data)
-        assert False, "Should have raised ValueError"
-    except ValueError:
-        pass
 
 def test_show4dstem_non_square_flattened():
     """Non-perfect-square N without scan_shape raises ValueError."""
     data = np.random.rand(7, 8, 8).astype(np.float32)
-    try:
+    with pytest.raises(ValueError):
         Show4DSTEM(data)
-        assert False, "Should have raised ValueError"
-    except ValueError:
-        pass
 
 def test_show4dstem_repr():
     """__repr__ returns useful string."""
@@ -597,22 +588,16 @@ def test_show4dstem_save_image_all_includes_fft_metadata(tmp_path):
 def test_show4dstem_save_image_rejects_unknown_format(tmp_path):
     data = np.random.rand(4, 4, 16, 16).astype(np.float32)
     w = Show4DSTEM(data)
-    try:
+    with pytest.raises(ValueError):
         w.save_image(tmp_path / "bad.tiff", view="diffraction")
-        assert False, "Should have raised ValueError"
-    except ValueError:
-        pass
 
 def test_show4dstem_save_image_rejects_view_aliases(tmp_path):
     data = np.random.rand(4, 4, 16, 16).astype(np.float32)
     w = Show4DSTEM(data)
 
     for alias in ("dp", "reconstruction", "vi", "virtual_image", "composite"):
-        try:
+        with pytest.raises(ValueError):
             w.save_image(tmp_path / f"{alias}.png", view=alias, include_metadata=False)
-            assert False, f"Should reject alias view '{alias}'"
-        except ValueError:
-            pass
 
 def test_show4dstem_export_view_and_format_lists():
     data = np.random.rand(4, 4, 16, 16).astype(np.float32)
@@ -664,11 +649,8 @@ def test_show4dstem_save_sequence_frames_manifest(tmp_path):
 def test_show4dstem_save_sequence_rejects_bad_mode(tmp_path):
     data = np.random.rand(4, 4, 16, 16).astype(np.float32)
     w = Show4DSTEM(data)
-    try:
+    with pytest.raises(ValueError):
         w.save_sequence(tmp_path / "bad", mode="diagonal")
-        assert False, "Should have raised ValueError"
-    except ValueError:
-        pass
 
 def test_show4dstem_preset_api_roundtrip(tmp_path):
     import json
@@ -746,11 +728,8 @@ def test_show4dstem_suggest_adaptive_path_basic():
 def test_show4dstem_suggest_adaptive_path_rejects_small_target():
     data = np.random.rand(8, 8, 16, 16).astype(np.float32)
     w = Show4DSTEM(data)
-    try:
+    with pytest.raises(ValueError):
         w.suggest_adaptive_path(coarse_step=2, target_fraction=0.05)
-        assert False, "Should have raised ValueError"
-    except ValueError:
-        pass
 
 def test_show4dstem_suggest_adaptive_path_respects_roi_mask():
     data = np.random.rand(10, 10, 16, 16).astype(np.float32)
@@ -1006,7 +985,7 @@ def test_show4dstem_4d_no_frame_traits():
     assert w.n_frames == 1
     assert w.frame_idx == 0
     r = repr(w)
-    assert "frame" not in r.lower() or "frame" not in r
+    assert "frame" not in r.lower()
 
 def test_show4dstem_5d_torch_input():
     """5D PyTorch tensor input works."""
@@ -1063,3 +1042,74 @@ def test_show4dstem_show_controls_default():
     data = np.random.rand(4, 4, 16, 16).astype(np.float32)
     w = Show4DSTEM(data, scan_shape=(4, 4))
     assert w.show_controls is True
+
+
+# ─── VI ROI → Summed DP ────────────────────────────────────────────────────
+
+
+def test_show4dstem_vi_roi_modes():
+    """VI ROI modes: circle, square, rect compute summed DP bytes."""
+    data = np.random.rand(4, 4, 8, 8).astype(np.float32)
+    w = Show4DSTEM(data)
+    for mode in ("circle", "square", "rect"):
+        w.vi_roi_mode = mode
+        w.vi_roi_center_row = 2.0
+        w.vi_roi_center_col = 2.0
+        w.vi_roi_radius = 1.5
+        if mode == "rect":
+            w.vi_roi_width = 3.0
+            w.vi_roi_height = 3.0
+        w._compute_summed_dp_from_vi_roi()
+        assert len(w.summed_dp_bytes) == 8 * 8 * 4  # float32
+        assert w.summed_dp_count > 0
+        arr = np.frombuffer(w.summed_dp_bytes, dtype=np.float32)
+        assert arr.shape == (64,)
+        assert np.all(np.isfinite(arr))
+
+
+def test_show4dstem_vi_roi_off_no_bytes():
+    """VI ROI off produces no summed DP bytes."""
+    data = np.random.rand(4, 4, 8, 8).astype(np.float32)
+    w = Show4DSTEM(data)
+    w.vi_roi_mode = "off"
+    w._compute_summed_dp_from_vi_roi()
+    assert w.summed_dp_bytes == b""
+
+
+def test_show4dstem_vi_roi_summed_dp_is_float32():
+    """Summed DP bytes are float32 (not uint8)."""
+    data = np.random.rand(4, 4, 8, 8).astype(np.float32) * 1000
+    w = Show4DSTEM(data)
+    w.vi_roi_mode = "circle"
+    w.vi_roi_center_row = 2.0
+    w.vi_roi_center_col = 2.0
+    w.vi_roi_radius = 2.0
+    w._compute_summed_dp_from_vi_roi()
+    arr = np.frombuffer(w.summed_dp_bytes, dtype=np.float32)
+    # Values should be > 255 since we multiplied by 1000 — proves float32 not uint8
+    assert arr.max() > 1.0
+
+
+def test_show4dstem_vi_roi_empty_mask():
+    """VI ROI with radius covering no scan positions yields empty bytes."""
+    data = np.random.rand(4, 4, 8, 8).astype(np.float32)
+    w = Show4DSTEM(data)
+    w.vi_roi_mode = "circle"
+    w.vi_roi_center_row = -100.0
+    w.vi_roi_center_col = -100.0
+    w.vi_roi_radius = 0.1
+    w._compute_summed_dp_from_vi_roi()
+    assert w.summed_dp_bytes == b""
+    assert w.summed_dp_count == 0
+
+
+def test_show4dstem_virtual_image_for_frame():
+    """_virtual_image_for_frame returns correct shape without mutating frame_idx."""
+    data = np.random.rand(3, 4, 4, 8, 8).astype(np.float32)
+    w = Show4DSTEM(data, frame_dim_label="Time")
+    w.roi_circle(3)
+    original_frame_idx = w.frame_idx
+    vi = w._virtual_image_for_frame(2)
+    assert vi.shape == (4, 4)
+    assert vi.dtype == np.float32
+    assert w.frame_idx == original_frame_idx

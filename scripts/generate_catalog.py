@@ -129,6 +129,22 @@ WIDGET_CELLS: list[tuple[str, list[str]]] = [
         "from quantem.widget import Bin\n",
         "Bin(data_4d_small, pixel_size=2.39, k_pixel_size=0.46, device='cpu')\n",
     ]),
+    # ── Browse ────────────────────────────────────────────────────────────
+    ("Browse Default", [
+        "import pathlib\n",
+        "from quantem.widget import Browse\n",
+        "_bd = pathlib.Path('_catalog_browse_data')\n",
+        "_bd.mkdir(exist_ok=True)\n",
+        "(_bd / 'raw').mkdir(exist_ok=True)\n",
+        "np.save(str(_bd / 'lattice.npy'), image_128)\n",
+        "np.save(str(_bd / 'stack.npy'), stack_50[0])\n",
+        "(_bd / 'notes.txt').write_text('Sample notes')\n",
+        "(_bd / 'config.json').write_text('{}')\n",
+        "Browse(root=_bd, title='Browse Default')\n",
+    ]),
+    ("Browse Filtered", [
+        "Browse(root='_catalog_browse_data', filter_exts=['.npy'], title='Browse Filtered')\n",
+    ]),
     # ── Tool lock / hide demos ────────────────────────────────────────────
     ("Show2D Locked Display", [
         "Show2D(image_128, title='Show2D Locked Display', disable_display=True, disable_export=True)\n",
@@ -150,6 +166,7 @@ WIDGET_CSS_CLASS = {
     "Edit2D": ".edit2d-root",
     "Align2D": ".align2d-root",
     "Bin": ".bin-root",
+    "Browse": ".browse-root",
 }
 
 

@@ -5,7 +5,7 @@ import zipfile
 import numpy as np
 import pytest
 
-from quantem.widget import Bin, Show3D, Show3DVolume, Show4D, Show4DSTEM
+from quantem.widget import Bin4D, Show3D, Show3DVolume, Show4D, Show4DSTEM
 
 REQUIRED_EXPORT_KEYS = {
     "metadata_version",
@@ -150,13 +150,13 @@ def test_show4dstem_save_image_sidecar_contract(tmp_path):
 def test_bin_save_image_sidecar_contract(tmp_path):
     _require_image_deps()
     data = np.random.rand(8, 8, 16, 16).astype(np.float32)
-    w = Bin(data, device="cpu")
+    w = Bin4D(data, device="cpu")
     out = tmp_path / "bin_grid.png"
     w.save_image(out, view="grid", include_metadata=True)
     metadata = json.loads(out.with_suffix(".json").read_text())
     _assert_export_contract(
         metadata,
-        widget_name="Bin",
+        widget_name="Bin4D",
         format_name="png",
         export_kind="single_view_image",
     )
@@ -164,14 +164,14 @@ def test_bin_save_image_sidecar_contract(tmp_path):
 def test_bin_save_zip_and_gif_contract(tmp_path):
     _require_image_deps()
     data = np.random.rand(8, 8, 16, 16).astype(np.float32)
-    w = Bin(data, device="cpu")
+    w = Bin4D(data, device="cpu")
 
     zip_path = tmp_path / "bin_bundle.zip"
     w.save_zip(zip_path, include_arrays=True)
     zip_meta = _read_metadata_from_zip_path(zip_path)
     _assert_export_contract(
         zip_meta,
-        widget_name="Bin",
+        widget_name="Bin4D",
         format_name="zip",
         export_kind="multi_panel_bundle",
     )
@@ -181,7 +181,7 @@ def test_bin_save_zip_and_gif_contract(tmp_path):
     gif_meta = json.loads(gif_path.with_suffix(".json").read_text())
     _assert_export_contract(
         gif_meta,
-        widget_name="Bin",
+        widget_name="Bin4D",
         format_name="gif",
         export_kind="before_after_animation",
     )

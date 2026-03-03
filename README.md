@@ -109,14 +109,28 @@ w.save_image("virtual.pdf", view="virtual", frame_idx=3)
 w.save_image("all_panels.png", view="all")
 ```
 
-### Bin - Interactive Binning + BF/ADF QC
+### Bin2D - Interactive 2D Image Binning
 
 ```python
 import numpy as np
-from quantem.widget import Bin
+from quantem.widget import Bin2D
+
+image = np.random.rand(2048, 2048).astype(np.float32)
+w = Bin2D(image, bin_factor=4, pixel_size=1.5, title="HAADF")
+w  # side-by-side original/binned with contrast controls
+
+# get binned array
+binned = w.get_binned_data()
+```
+
+### Bin4D - Interactive 4D-STEM Binning + BF/ADF QC
+
+```python
+import numpy as np
+from quantem.widget import Bin4D
 
 data = np.random.rand(64, 64, 128, 128).astype(np.float32)
-w = Bin(data, pixel_size=2.39, k_pixel_size=0.46, device="cpu")
+w = Bin4D(data, pixel_size=2.39, k_pixel_size=0.46, device="cpu")
 w  # adjust scan/detector binning and inspect BF/ADF quality panels
 
 # export current binning preset
@@ -182,7 +196,8 @@ All widgets accept NumPy arrays, PyTorch tensors, CuPy arrays, and quantem Datas
 | Mark2D | yes | yes | yes | `Dataset2d` |
 | Edit2D | yes | yes | yes | `Dataset2d` |
 | Align2D | yes | yes | yes | `Dataset2d` |
-| Bin | yes | yes | yes | `Dataset4dstem` |
+| Bin2D | yes | yes | yes | `Dataset2d` |
+| Bin4D | yes | yes | yes | `Dataset4dstem` |
 
 When a quantem Dataset is passed, metadata (title, pixel size, units) is extracted automatically. Explicit parameters always override auto-extracted values.
 

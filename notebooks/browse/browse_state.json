@@ -1,0 +1,18 @@
+{
+  "metadata_version": "1.0",
+  "widget_name": "Browse",
+  "widget_version": "0.0.13",
+  "state": {
+    "selection_mode": "files",
+    "filter_exts": [
+      ".npy"
+    ],
+    "show_hidden": false,
+    "sort_key": "size",
+    "sort_asc": true,
+    "title": "Browse",
+    "show_controls": true,
+    "disabled_tools": [],
+    "hidden_tools": []
+  }
+}

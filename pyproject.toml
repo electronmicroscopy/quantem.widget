@@ -23,10 +23,12 @@ dependencies = [
     "anywidget>=0.9.0",
     "numpy>=2.0.0",
     "traitlets>=5.0.0",
+    "tqdm>=4.60.0",
     "h5py>=3.0.0",
     "hdf5plugin>=4.0.0",
     "numba>=0.59.0; sys_platform == 'darwin'",
     "pyobjc-framework-Metal>=10.0; sys_platform == 'darwin'",
+    "psutil>=5.9.0",
 ]
 
 [project.optional-dependencies]
@@ -57,7 +59,8 @@ packages = ["src/quantem"]
 [tool.hatch.build.hooks.jupyter-builder]
 build-function = "hatch_jupyter_builder.npm_builder"
 ensured-targets = [
-    "src/quantem/widget/static/bin.js",
+    "src/quantem/widget/static/bin4d.js",
+    "src/quantem/widget/static/bin2d.js",
     "src/quantem/widget/static/show1d.js",
     "src/quantem/widget/static/show2d.js",
     "src/quantem/widget/static/show3d.js",
@@ -69,6 +72,7 @@ ensured-targets = [
     "src/quantem/widget/static/align2d.js",
     "src/quantem/widget/static/align2d_bulk.js",
     "src/quantem/widget/static/showcomplex.js",
+    "src/quantem/widget/static/browse.js",
 ]
 skip-if-exists = ["src/quantem/widget/static/show2d.js"]
 dependencies = ["hatch-jupyter-builder>=0.5.0"]
