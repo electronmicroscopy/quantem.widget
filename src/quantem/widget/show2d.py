@@ -10,6 +10,7 @@ import pathlib
 import io
 import base64
 import math
+import warnings
 from enum import StrEnum
 from typing import Optional, Union, List, Self
 
@@ -341,6 +342,12 @@ class Show2D(anywidget.AnyWidget):
         self.pixel_size = pixel_size
         self.scale_bar_visible = scale_bar_visible
         self.canvas_size = canvas_size
+        if show_fft and self.height * self.width > 2048 * 2048:
+            warnings.warn(
+                f"FFT on {self.height}×{self.width} image ({self.height * self.width / 1e6:.1f}M pixels) "
+                f"may be slow. Consider using ROI FFT for a sub-region.",
+                stacklevel=2,
+            )
         self.show_fft = show_fft
         self.fft_window = fft_window
         self.show_controls = show_controls
@@ -432,6 +439,7 @@ class Show2D(anywidget.AnyWidget):
 
         Live Jupyter renders the interactive widget. Static contexts
         (nbsphinx, GitHub, nbviewer) fall back to the embedded PNG.
+        Images are downsampled to at most 256px per side for fast rendering.
         """
         bundle = super()._repr_mimebundle_(**kwargs)
         data_dict = bundle[0] if isinstance(bundle, tuple) else bundle
@@ -444,11 +452,17 @@ class Show2D(anywidget.AnyWidget):
             figsize=(cell * ncols, cell * nrows),
             squeeze=False,
         )
+        max_preview = 256
         for i in range(nrows * ncols):
             r, c = divmod(i, ncols)
             ax = axes[r][c]
             if i < n:
-                ax.imshow(self._data[i], cmap=self.cmap, origin="upper")
+                img = self._data[i]
+                h, w = img.shape
+                if h > max_preview or w > max_preview:
+                    step = max(h // max_preview, w // max_preview, 1)
+                    img = img[::step, ::step]
+                ax.imshow(img, cmap=self.cmap, origin="upper")
                 ax.set_title(self.labels[i], fontsize=10)
             ax.axis("off")
         if self.title:
