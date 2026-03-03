@@ -14,10 +14,13 @@ if TYPE_CHECKING:  # pragma: no cover
     from quantem.widget.align2d import Align2D
     from quantem.widget.align2d_bulk import Align2DBulk
     from quantem.widget.array_utils import bin2d
-    from quantem.widget.bin import Bin
+    from quantem.widget.bin import Bin, Bin4D
+    from quantem.widget.bin2d import Bin2D
+    from quantem.widget.browse import Browse
     from quantem.widget.edit2d import Edit2D
     from quantem.widget.io import IO, IOResult
     from quantem.widget.mark2d import Mark2D
+    from quantem.widget.profile import profile
     from quantem.widget.show1d import Show1D
     from quantem.widget.show2d import Show2D
     from quantem.widget.show3d import Show3D
@@ -32,6 +35,9 @@ _EXPORTS = {
     "Align2DBulk": ("quantem.widget.align2d_bulk", "Align2DBulk"),
     "bin2d": ("quantem.widget.array_utils", "bin2d"),
     "Bin": ("quantem.widget.bin", "Bin"),
+    "Bin4D": ("quantem.widget.bin", "Bin4D"),
+    "Bin2D": ("quantem.widget.bin2d", "Bin2D"),
+    "Browse": ("quantem.widget.browse", "Browse"),
     "Edit2D": ("quantem.widget.edit2d", "Edit2D"),
     "IO": ("quantem.widget.io", "IO"),
     "IOResult": ("quantem.widget.io", "IOResult"),
@@ -43,6 +49,7 @@ _EXPORTS = {
     "Show4D": ("quantem.widget.show4d", "Show4D"),
     "Show4DSTEM": ("quantem.widget.show4dstem", "Show4DSTEM"),
     "ShowComplex2D": ("quantem.widget.showcomplex", "ShowComplex2D"),
+    "profile": ("quantem.widget.profile", "profile"),
 }
 
 
@@ -64,10 +71,14 @@ __all__ = [
     "Align2DBulk",
     "bin2d",
     "Bin",
+    "Bin2D",
+    "Bin4D",
+    "Browse",
     "Edit2D",
     "IO",
     "IOResult",
     "Mark2D",
+    "profile",
     "Show1D",
     "Show2D",
     "Show3D",

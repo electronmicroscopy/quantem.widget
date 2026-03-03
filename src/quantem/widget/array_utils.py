@@ -116,34 +116,66 @@ def to_numpy(data: Any, dtype: np.dtype | None = None) -> np.ndarray:
     return result
 
 
-def bin2d(data, factor: int = 2) -> np.ndarray:
+def bin2d(data, factor: int = 2, mode: str = "mean", edge_mode: str = "crop") -> np.ndarray:
     """
-    Spatial mean-pooling (binning) for 2D or 3D arrays.
+    Spatial binning for 2D or 3D arrays.
 
     Parameters
     ----------
     data : array-like
         Input array with shape ``(H, W)`` or ``(N, H, W)``.
     factor : int, default 2
-        Bin factor. Pixels that don't fit complete blocks are trimmed.
+        Bin factor.
+    mode : str, default "mean"
+        Reduction mode: ``"mean"`` or ``"sum"``.
+    edge_mode : str, default "crop"
+        How to handle dimensions not divisible by *factor*:
+        ``"crop"`` trims extra pixels, ``"pad"`` zero-pads to the next
+        multiple (output shape uses ``ceil(dim / factor)``).
 
     Returns
     -------
     np.ndarray
-        Binned array with shape ``(H//factor, W//factor)`` or
-        ``(N, H//factor, W//factor)``, dtype float32.
+        Binned array, dtype float32.
     """
     arr = to_numpy(data).astype(np.float32)
+    reduce = np.ndarray.sum if mode == "sum" else np.ndarray.mean
     if arr.ndim == 2:
+        arr = _pad_or_crop_2d(arr, factor, edge_mode)
         h, w = arr.shape
         oh, ow = h // factor, w // factor
-        trimmed = arr[:oh * factor, :ow * factor]
-        return trimmed.reshape(oh, factor, ow, factor).mean(axis=(1, 3))
+        return reduce(arr.reshape(oh, factor, ow, factor), axis=(1, 3)).astype(np.float32)
     # 3D: (N, H, W)
+    arr = _pad_or_crop_3d(arr, factor, edge_mode)
     n, h, w = arr.shape
     oh, ow = h // factor, w // factor
-    trimmed = arr[:, :oh * factor, :ow * factor]
-    return trimmed.reshape(n, oh, factor, ow, factor).mean(axis=(2, 4)).astype(np.float32)
+    return reduce(arr.reshape(n, oh, factor, ow, factor), axis=(2, 4)).astype(np.float32)
+
+
+def _pad_or_crop_2d(arr: np.ndarray, factor: int, edge_mode: str) -> np.ndarray:
+    h, w = arr.shape
+    if edge_mode == "pad":
+        pad_h = (factor - h % factor) % factor
+        pad_w = (factor - w % factor) % factor
+        if pad_h or pad_w:
+            arr = np.pad(arr, ((0, pad_h), (0, pad_w)), mode="constant")
+    else:
+        oh, ow = h // factor, w // factor
+        arr = arr[:oh * factor, :ow * factor]
+    return arr
+
+
+def _pad_or_crop_3d(arr: np.ndarray, factor: int, edge_mode: str) -> np.ndarray:
+    _, h, w = arr.shape
+    if edge_mode == "pad":
+        pad_h = (factor - h % factor) % factor
+        pad_w = (factor - w % factor) % factor
+        if pad_h or pad_w:
+            arr = np.pad(arr, ((0, 0), (0, pad_h), (0, pad_w)), mode="constant")
+    else:
+        oh, ow = h // factor, w // factor
+        arr = arr[:, :oh * factor, :ow * factor]
+    return arr
 
 
 def apply_shift(img: np.ndarray, dy: float, dx: float) -> np.ndarray:

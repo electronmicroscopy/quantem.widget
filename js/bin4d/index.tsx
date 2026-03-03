@@ -19,7 +19,7 @@ import { roundToNiceValue, formatScaleLabel, canvasToPDF } from "../scalebar";
 import { getWebGPUFFT, WebGPUFFT, fft2d, fftshift, computeMagnitude, autoEnhanceFFT } from "../webgpu-fft";
 import { computeToolVisibility } from "../tool-parity";
 import { ControlCustomizer } from "../control-customizer";
-import "./bin.css";
+import "./bin4d.css";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -876,7 +876,7 @@ function BinWidget() {
 
   // Tool visibility
   const toolVisibility = React.useMemo(
-    () => computeToolVisibility("Bin", disabledTools, hiddenTools),
+    () => computeToolVisibility("Bin4D", disabledTools, hiddenTools),
     [disabledTools, hiddenTools],
   );
   const hideDisplay = toolVisibility.isHidden("display");
@@ -1471,7 +1471,7 @@ function BinWidget() {
             theme={themeInfo.theme === "dark" ? "dark" : "light"}
           />
           <ControlCustomizer
-            widgetName="Bin"
+            widgetName="Bin4D"
             hiddenTools={hiddenTools}
             setHiddenTools={setHiddenTools}
             disabledTools={disabledTools}

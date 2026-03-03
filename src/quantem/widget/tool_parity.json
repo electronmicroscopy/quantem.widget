@@ -42,8 +42,16 @@
       "tool_groups": ["display", "histogram", "navigation", "stats", "view", "export", "all"],
       "aliases": {}
     },
-    "Bin": {
+    "Bin4D": {
       "tool_groups": ["display", "binning", "mask", "preview", "stats", "export", "all"],
+      "aliases": {}
+    },
+    "Browse": {
+      "tool_groups": ["navigation", "filter", "preview", "all"],
+      "aliases": {}
+    },
+    "Bin2D": {
+      "tool_groups": ["display", "binning", "histogram", "stats", "navigation", "export", "all"],
       "aliases": {}
     },
     "Show1D": {

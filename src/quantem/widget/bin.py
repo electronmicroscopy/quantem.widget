@@ -61,8 +61,8 @@ except Exception:
 # Supported units for calibration extraction from quantem Dataset objects
 _REAL_UNITS = {"Å", "angstrom", "A", "nm"}
 _K_UNITS = {"mrad", "1/Å", "1/A"}
-_BIN_ESM = pathlib.Path(__file__).parent / "static" / "bin.js"
-_BIN_CSS = pathlib.Path(__file__).parent / "static" / "bin.css"
+_BIN_ESM = pathlib.Path(__file__).parent / "static" / "bin4d.js"
+_BIN_CSS = pathlib.Path(__file__).parent / "static" / "bin4d.css"
 
 
 def _as_pair(value: float | tuple[float, float] | list[float] | None, default: float) -> tuple[float, float]:
@@ -171,7 +171,7 @@ def _is_arina_master(h5f):
     return False
 
 
-class Bin(anywidget.AnyWidget):
+class Bin4D(anywidget.AnyWidget):
     """
     Interactive 4D-STEM binning widget with calibration tracking and BF/ADF QC.
 
@@ -312,7 +312,7 @@ class Bin(anywidget.AnyWidget):
 
     @classmethod
     def _normalize_tool_groups(cls, tool_groups):
-        return normalize_tool_groups("Bin", tool_groups)
+        return normalize_tool_groups("Bin4D", tool_groups)
 
     @classmethod
     def _build_disabled_tools(
@@ -327,7 +327,7 @@ class Bin(anywidget.AnyWidget):
         disable_all: bool = False,
     ):
         return build_tool_groups(
-            "Bin",
+            "Bin4D",
             tool_groups=disabled_tools,
             all_flag=disable_all,
             flag_map={
@@ -353,7 +353,7 @@ class Bin(anywidget.AnyWidget):
         hide_all: bool = False,
     ):
         return build_tool_groups(
-            "Bin",
+            "Bin4D",
             tool_groups=hidden_tools,
             all_flag=hide_all,
             flag_map={
@@ -1130,7 +1130,7 @@ class Bin(anywidget.AnyWidget):
         }
 
     def save(self, path: str | pathlib.Path) -> None:
-        save_state_file(path, "Bin", self.state_dict())
+        save_state_file(path, "Bin4D", self.state_dict())
 
     def save_h5(
         self,
@@ -1394,7 +1394,7 @@ class Bin(anywidget.AnyWidget):
                 else output_path.with_suffix(".json")
             )
             metadata = {
-                **build_json_header("Bin"),
+                **build_json_header("Bin4D"),
                 "view": view,
                 "format": fmt,
                 "export_kind": "single_view_image",
@@ -1450,7 +1450,7 @@ class Bin(anywidget.AnyWidget):
 
         panels = ["original_bf", "original_adf", "binned_bf", "binned_adf", "grid"]
         metadata = {
-            **build_json_header("Bin"),
+            **build_json_header("Bin4D"),
             "format": "zip",
             "export_kind": "multi_panel_bundle",
             "include_arrays": bool(include_arrays),
@@ -1524,7 +1524,7 @@ class Bin(anywidget.AnyWidget):
         if include_metadata:
             meta_path = pathlib.Path(metadata_path) if metadata_path is not None else gif_path.with_suffix(".json")
             metadata = {
-                **build_json_header("Bin"),
+                **build_json_header("Bin4D"),
                 "format": "gif",
                 "export_kind": "before_after_animation",
                 "path": str(gif_path),
@@ -1919,7 +1919,7 @@ class Bin(anywidget.AnyWidget):
     def __repr__(self) -> str:
         title_info = f", title='{self.title}'" if self.title else ""
         return (
-            "Bin("
+            "Bin4D("
             f"shape=({self.scan_rows}, {self.scan_cols}, {self.det_rows}, {self.det_cols}), "
             f"bin=({self.scan_bin_row}, {self.scan_bin_col}, {self.det_bin_row}, {self.det_bin_col}), "
             f"binned_shape=({self.binned_scan_rows}, {self.binned_scan_cols}, {self.binned_det_rows}, {self.binned_det_cols}), "
@@ -1928,4 +1928,7 @@ class Bin(anywidget.AnyWidget):
         )
 
 
-bind_tool_runtime_api(Bin, "Bin")
+bind_tool_runtime_api(Bin4D, "Bin4D")
+
+# Backwards-compatible alias
+Bin = Bin4D
