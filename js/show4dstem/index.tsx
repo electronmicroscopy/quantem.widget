@@ -120,9 +120,6 @@ const LIGHT_ROI_COLORS: RoiColors = {
 // Interaction constants
 const RESIZE_HIT_AREA_PX = 10;
 const CIRCLE_HANDLE_ANGLE = 0.707;  // cos(45°)
-type StemScaleMode = "linear" | "log" | "power";
-type StemRoiMode = "point" | "circle" | "square" | "rect" | "annular";
-type StemViRoiMode = "off" | "circle" | "rect";
 // Compact button style for Reset/Export
 const compactButton = {
   fontSize: 10,
@@ -1003,6 +1000,7 @@ function Show4DSTEM() {
   const [frameIdx, setFrameIdx] = useModelState<number>("frame_idx");
   const [nFrames] = useModelState<number>("n_frames");
   const [frameDimLabel] = useModelState<string>("frame_dim_label");
+  const [frameLabels] = useModelState<string[]>("frame_labels");
   const [framePlaying, setFramePlaying] = useModelState<boolean>("frame_playing");
   const [frameLoop, setFrameLoop] = useModelState<boolean>("frame_loop");
   const [frameFps, setFrameFps] = useModelState<number>("frame_fps");
@@ -1547,31 +1545,21 @@ function Show4DSTEM() {
 
     const lut = COLORMAPS[dpColormap] || COLORMAPS.inferno;
 
-    // Parse data based on source (summedDp is still uint8, frame is now float32)
+    // Parse raw float32 data and apply scale transformation
+    const rawData = new Float32Array(sourceBytes.buffer, sourceBytes.byteOffset, sourceBytes.byteLength / 4);
     let scaled: Float32Array;
-    if (usesSummedDp) {
-      // Summed DP is still uint8 from Python
-      const bytes = new Uint8Array(sourceBytes.buffer, sourceBytes.byteOffset, sourceBytes.byteLength);
-      scaled = new Float32Array(bytes.length);
-      for (let i = 0; i < bytes.length; i++) {
-        scaled[i] = bytes[i];
+    if (dpScaleMode === "log") {
+      scaled = new Float32Array(rawData.length);
+      for (let i = 0; i < rawData.length; i++) {
+        scaled[i] = Math.log1p(Math.max(0, rawData[i]));
+      }
+    } else if (dpScaleMode === "power") {
+      scaled = new Float32Array(rawData.length);
+      for (let i = 0; i < rawData.length; i++) {
+        scaled[i] = Math.pow(Math.max(0, rawData[i]), dpPowerExp);
       }
     } else {
-      // Frame is now float32 from Python - parse and apply scale transformation
-      const rawData = new Float32Array(sourceBytes.buffer, sourceBytes.byteOffset, sourceBytes.byteLength / 4);
-      scaled = new Float32Array(rawData.length);
-
-      if (dpScaleMode === "log") {
-        for (let i = 0; i < rawData.length; i++) {
-          scaled[i] = Math.log1p(Math.max(0, rawData[i]));
-        }
-      } else if (dpScaleMode === "power") {
-        for (let i = 0; i < rawData.length; i++) {
-          scaled[i] = Math.pow(Math.max(0, rawData[i]), dpPowerExp);
-        }
-      } else {
-        scaled.set(rawData);
-      }
+      scaled = rawData;
     }
 
     // Compute actual min/max of scaled data for normalization
@@ -1870,7 +1858,8 @@ function Show4DSTEM() {
     }
     setFftDataMin(displayMin);
     setFftDataMax(displayMax);
-    setFftStats([computeStats(magnitude).mean, displayMin, displayMax, computeStats(magnitude).std]);
+    const magStats = computeStats(magnitude);
+    setFftStats([magStats.mean, displayMin, displayMax, magStats.std]);
     setFftHistogramData(magnitude.slice());
 
     // Render to offscreen canvas
@@ -2773,13 +2762,8 @@ function Show4DSTEM() {
       if (pxCol >= 0 && pxCol < detCols && pxRow >= 0 && pxRow < detRows && frameBytes) {
         const usesSummedDp = viRoiMode && viRoiMode !== "off" && summedDpBytes && summedDpBytes.byteLength > 0;
         const sourceBytes = usesSummedDp ? summedDpBytes : frameBytes;
-        if (usesSummedDp) {
-          const bytes = new Uint8Array(sourceBytes.buffer, sourceBytes.byteOffset, sourceBytes.byteLength);
-          setCursorInfo({ row: pxRow, col: pxCol, value: bytes[pxRow * detCols + pxCol], panel: "DP" });
-        } else {
-          const raw = new Float32Array(sourceBytes.buffer, sourceBytes.byteOffset, sourceBytes.byteLength / 4);
-          setCursorInfo({ row: pxRow, col: pxCol, value: raw[pxRow * detCols + pxCol], panel: "DP" });
-        }
+        const raw = new Float32Array(sourceBytes.buffer, sourceBytes.byteOffset, sourceBytes.byteLength / 4);
+        setCursorInfo({ row: pxRow, col: pxCol, value: raw[pxRow * detCols + pxCol], panel: "DP" });
       } else {
         setCursorInfo(null);
       }
@@ -3528,7 +3512,7 @@ function Show4DSTEM() {
       showColorbar: withColorbar,
       showScaleBar: kPxAngstrom > 0,
     });
-    canvasToPDF(figCanvas).then((blob) => downloadBlob(blob, "show4dstem_dp_figure.pdf"));
+    canvasToPDF(figCanvas).then((blob) => downloadBlob(blob, "show4dstem_dp_figure.pdf")).catch(console.error);
   };
 
   const handleDpExportPng = () => {
@@ -3559,7 +3543,7 @@ function Show4DSTEM() {
       showScaleBar: pixelSizeAngstrom > 0,
       pixelSize: pixelSizeAngstrom > 0 ? pixelSizeAngstrom : undefined,
     });
-    canvasToPDF(figCanvas).then((blob) => downloadBlob(blob, "show4dstem_vi_figure.pdf"));
+    canvasToPDF(figCanvas).then((blob) => downloadBlob(blob, "show4dstem_vi_figure.pdf")).catch(console.error);
   };
 
   const handleViExportPng = () => {
@@ -3620,7 +3604,7 @@ function Show4DSTEM() {
       {/* HEADER */}
       <Typography variant="h6" sx={{ ...typo.title, mb: `${SPACING.SM}px` }}>
         {title || "4D-STEM Explorer"}
-        {nFrames > 1 && <span style={{ fontWeight: "normal", fontSize: 13, marginLeft: 8, opacity: 0.7 }}>({frameDimLabel} {frameIdx + 1}/{nFrames})</span>}
+        {nFrames > 1 && <span style={{ fontWeight: "normal", fontSize: 13, marginLeft: 8, opacity: 0.7 }}>({frameLabels && frameLabels.length > frameIdx ? frameLabels[frameIdx] : `${frameDimLabel} ${frameIdx + 1}/${nFrames}`})</span>}
         <InfoTooltip text={<Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
           <Typography sx={{ fontSize: 11, fontWeight: "bold" }}>Controls</Typography>
           <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>DP: Diffraction pattern I(kx,ky) at scan position. Drag to move ROI center.</Typography>
@@ -4191,7 +4175,7 @@ function Show4DSTEM() {
             </IconButton>
           </Stack>
           <Slider disabled={lockFrame || lockPlayback} value={frameIdx} onChange={(_, v) => { if (!lockFrame && !lockPlayback) { setFramePlaying(false); setFrameIdx(v as number); } }} min={0} max={Math.max(0, nFrames - 1)} size="small" sx={{ flex: 1, minWidth: 60, "& .MuiSlider-thumb": { width: 10, height: 10 } }} />
-          <Typography sx={{ ...typo.value, minWidth: 50, textAlign: "right", flexShrink: 0 }}>{frameIdx + 1}/{nFrames}</Typography>
+          <Typography sx={{ ...typo.value, minWidth: 50, textAlign: "right", flexShrink: 0 }}>{frameLabels && frameLabels.length > frameIdx ? frameLabels[frameIdx] : `${frameIdx + 1}/${nFrames}`}</Typography>
         </Box>
         <Box sx={{ ...controlRow, mt: `${SPACING.XS}px`, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>
           <Typography sx={{ ...typo.label, fontSize: 10, color: themeColors.textMuted, flexShrink: 0 }}>fps</Typography>

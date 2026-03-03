@@ -265,6 +265,7 @@ class Show4DSTEM(anywidget.AnyWidget):
     frame_idx = traitlets.Int(0).tag(sync=True)
     n_frames = traitlets.Int(1).tag(sync=True)
     frame_dim_label = traitlets.Unicode("Frame").tag(sync=True)
+    frame_labels = traitlets.List(traitlets.Unicode(), []).tag(sync=True)
     frame_playing = traitlets.Bool(False).tag(sync=True)
     frame_loop = traitlets.Bool(True).tag(sync=True)
     frame_fps = traitlets.Float(5.0).tag(sync=True)
@@ -384,6 +385,7 @@ class Show4DSTEM(anywidget.AnyWidget):
         bf_radius: float | None = None,
         precompute_virtual_images: bool = False,
         frame_dim_label: str | None = None,
+        frame_labels: list[str] | None = None,
         title: str = "",
         disabled_tools: list[str] | None = None,
         disable_display: bool = False,
@@ -566,8 +568,11 @@ class Show4DSTEM(anywidget.AnyWidget):
         self.pos_col = self.shape_cols // 2
         # Frame dimension label (for 5D time/tilt series UI)
         self.frame_dim_label = frame_dim_label if frame_dim_label is not None else "Frame"
-        # Store per-frame labels from IOResult (e.g. master file stems)
-        self._frame_labels = _io_labels if _io_labels else []
+        # Per-frame labels: explicit param > IOResult labels > empty
+        resolved_labels = frame_labels or _io_labels or []
+        self._frame_labels = resolved_labels
+        if resolved_labels:
+            self.frame_labels = list(resolved_labels)
         # Histogram axis range — first frame is enough (JS does per-frame percentile clipping)
         first_frame = self._data[0] if self._data.ndim == 5 else self._data
         self.dp_global_min = max(float(first_frame.min()), MIN_LOG_VALUE)
@@ -623,14 +628,15 @@ class Show4DSTEM(anywidget.AnyWidget):
         # Observe compound roi_center for batched updates from JS
         self.observe(self._on_roi_center_change, names=["roi_center"])
 
-        # Initialize default ROI at BF center
-        self.roi_center_col = self.center_col
-        self.roi_center_row = self.center_row
-        self.roi_center = [self.center_row, self.center_col]
-        self.roi_radius = self.bf_radius * 0.5  # Start with half BF radius
-        self.roi_active = True
-        
-        # Compute initial virtual image and frame
+        # Initialize default ROI at BF center — batch to avoid redundant observer callbacks
+        with self.hold_trait_notifications():
+            self.roi_center_col = self.center_col
+            self.roi_center_row = self.center_row
+            self.roi_center = [self.center_row, self.center_col]
+            self.roi_radius = self.bf_radius * 0.5  # Start with half BF radius
+            self.roi_active = True
+
+        # Compute initial virtual image and frame (once, after all ROI traits are set)
         _tc = time.perf_counter()
         self._compute_virtual_image_from_roi()
         self._update_frame()
@@ -730,8 +736,9 @@ class Show4DSTEM(anywidget.AnyWidget):
         self._cached_bf_virtual = None
         self._cached_abf_virtual = None
         self._cached_adf_virtual = None
-        self.pos_row = min(self.pos_row, self.shape_rows - 1)
-        self.pos_col = min(self.pos_col, self.shape_cols - 1)
+        with self.hold_trait_notifications():
+            self.pos_row = min(self.pos_row, self.shape_rows - 1)
+            self.pos_col = min(self.pos_col, self.shape_cols - 1)
         self._compute_virtual_image_from_roi()
         self._update_frame()
 
@@ -807,6 +814,7 @@ class Show4DSTEM(anywidget.AnyWidget):
             "profile_width": self.profile_width,
             "frame_idx": self.frame_idx,
             "frame_dim_label": self.frame_dim_label,
+            "frame_labels": list(self.frame_labels),
             "frame_loop": self.frame_loop,
             "frame_fps": self.frame_fps,
             "frame_reverse": self.frame_reverse,
@@ -819,13 +827,14 @@ class Show4DSTEM(anywidget.AnyWidget):
         save_state_file(path, "Show4DSTEM", self.state_dict())
 
     def load_state_dict(self, state):
+        allowed_keys = set(self.state_dict().keys())
         pending_pos_row = state.get("pos_row", None)
         pending_pos_col = state.get("pos_col", None)
         pending_frame_idx = state.get("frame_idx", None)
         for key, val in state.items():
             if key in {"pos_row", "pos_col", "frame_idx"}:
                 continue
-            if hasattr(self, key):
+            if key in allowed_keys:
                 setattr(self, key, val)
         if pending_frame_idx is not None:
             self.frame_idx = int(max(0, min(int(pending_frame_idx), self.n_frames - 1)))
@@ -998,24 +1007,23 @@ class Show4DSTEM(anywidget.AnyWidget):
         dr = row1 - row0
         length = np.sqrt(dc * dc + dr * dr)
         n = max(2, int(np.ceil(length)))
-        out = np.empty(n, dtype=np.float32)
-        for i in range(n):
-            t = i / (n - 1)
-            c = col0 + t * dc
-            r = row0 + t * dr
-            ci, ri = int(np.floor(c)), int(np.floor(r))
-            cf, rf = c - ci, r - ri
-            c0c = max(0, min(w - 1, ci))
-            c1c = max(0, min(w - 1, ci + 1))
-            r0c = max(0, min(h - 1, ri))
-            r1c = max(0, min(h - 1, ri + 1))
-            out[i] = (
-                frame[r0c, c0c] * (1 - cf) * (1 - rf)
-                + frame[r0c, c1c] * cf * (1 - rf)
-                + frame[r1c, c0c] * (1 - cf) * rf
-                + frame[r1c, c1c] * cf * rf
-            )
-        return out
+        t = np.linspace(0.0, 1.0, n)
+        c = col0 + t * dc
+        r = row0 + t * dr
+        ci = np.floor(c).astype(np.intp)
+        ri = np.floor(r).astype(np.intp)
+        cf = c - ci
+        rf = r - ri
+        c0 = np.clip(ci, 0, w - 1)
+        c1 = np.clip(ci + 1, 0, w - 1)
+        r0 = np.clip(ri, 0, h - 1)
+        r1 = np.clip(ri + 1, 0, h - 1)
+        return (
+            frame[r0, c0] * (1 - cf) * (1 - rf)
+            + frame[r0, c1] * cf * (1 - rf)
+            + frame[r1, c0] * (1 - cf) * rf
+            + frame[r1, c1] * cf * rf
+        ).astype(np.float32)
 
     # =========================================================================
     # Path Animation Methods
@@ -1362,6 +1370,8 @@ class Show4DSTEM(anywidget.AnyWidget):
 
     def _get_frame(self, row: int, col: int) -> np.ndarray:
         """Get single diffraction frame at position (row, col) as numpy array."""
+        if self._data is None:
+            return np.zeros((self.det_rows, self.det_cols), dtype=np.float32)
         data = self._frame_data
         if data.ndim == 3:
             idx = row * self.shape_cols + col
@@ -2516,20 +2526,13 @@ class Show4DSTEM(anywidget.AnyWidget):
                 raise ValueError("At least one adaptive weight must be > 0")
             weights = {k: max(0.0, float(v)) / weight_sum for k, v in merged_weights.items()}
 
-            prev_frame = int(self.frame_idx)
-            if frame_idx != prev_frame:
-                self.frame_idx = frame_idx
-            try:
-                vi = self._get_virtual_image_array().astype(np.float32, copy=False)
-                grad_row, grad_col = np.gradient(vi)
-                vi_gradient = np.hypot(grad_row, grad_col).astype(np.float32)
-                mean_local = self._box_mean_map(vi, local_window)
-                mean_sq_local = self._box_mean_map(vi * vi, local_window)
-                vi_local_std = np.sqrt(np.maximum(mean_sq_local - mean_local * mean_local, 0.0)).astype(np.float32)
-                dp_variance = self._dp_variance_map(frame_idx=frame_idx)
-            finally:
-                if frame_idx != prev_frame:
-                    self.frame_idx = prev_frame
+            vi = self._virtual_image_for_frame(frame_idx)
+            grad_row, grad_col = np.gradient(vi)
+            vi_gradient = np.hypot(grad_row, grad_col).astype(np.float32)
+            mean_local = self._box_mean_map(vi, local_window)
+            mean_sq_local = self._box_mean_map(vi * vi, local_window)
+            vi_local_std = np.sqrt(np.maximum(mean_sq_local - mean_local * mean_local, 0.0)).astype(np.float32)
+            dp_variance = self._dp_variance_map(frame_idx=frame_idx)
 
             utility = (
                 weights["vi_gradient"] * self._normalize_score_map(vi_gradient)
@@ -3140,8 +3143,17 @@ class Show4DSTEM(anywidget.AnyWidget):
             if key in vi_roi and hasattr(self, trait_name):
                 setattr(self, trait_name, vi_roi[key])
 
+        _display_keys = {
+            "dp_colormap", "vi_colormap", "fft_colormap",
+            "dp_scale_mode", "vi_scale_mode", "fft_scale_mode",
+            "dp_power_exp", "vi_power_exp", "fft_power_exp",
+            "dp_vmin_pct", "dp_vmax_pct", "vi_vmin_pct", "vi_vmax_pct",
+            "fft_vmin_pct", "fft_vmax_pct", "fft_auto",
+            "mask_dc", "dp_show_colorbar", "show_fft", "fft_window",
+            "show_controls",
+        }
         for key, value in display.items():
-            if hasattr(self, key):
+            if key in _display_keys:
                 setattr(self, key, value)
 
         export_map = {
@@ -3949,16 +3961,7 @@ class Show4DSTEM(anywidget.AnyWidget):
             "n_frames_total": int(self.n_frames),
             "scan_shape": {"rows": int(self.shape_rows), "cols": int(self.shape_cols)},
             "detector_shape": {"rows": int(self.det_rows), "cols": int(self.det_cols)},
-            "calibration": {
-                "pixel_size_angstrom": float(self.pixel_size),
-                "pixel_size_unit": "Å/px",
-                "k_pixel_size": float(self.k_pixel_size),
-                "k_pixel_size_unit": "mrad/px" if self.k_calibrated else "px/px",
-                "k_calibrated": bool(self.k_calibrated),
-                "center_row": float(self.center_row),
-                "center_col": float(self.center_col),
-                "bf_radius": float(self.bf_radius),
-            },
+            "calibration": self._calibration_metadata(),
             "display": {
                 "diffraction": {
                     "colormap": self.dp_colormap,
@@ -3974,6 +3977,8 @@ class Show4DSTEM(anywidget.AnyWidget):
 
     def _update_frame(self, change=None):
         """Send raw float32 frame to frontend (JS handles scale/colormap)."""
+        if self._data is None:
+            return
         # Get frame as tensor (stays on device)
         data = self._frame_data
         if data.ndim == 3:
@@ -4007,7 +4012,7 @@ class Show4DSTEM(anywidget.AnyWidget):
             ]
 
         # Convert to numpy only for sending bytes to frontend
-        self.frame_bytes = frame.cpu().numpy().astype(np.float32).tobytes()
+        self.frame_bytes = frame.cpu().numpy().tobytes()
 
     def _on_roi_change(self, change=None):
         """Recompute virtual image when individual ROI params change.
@@ -4045,6 +4050,8 @@ class Show4DSTEM(anywidget.AnyWidget):
 
     def _compute_summed_dp_from_vi_roi(self):
         """Sum diffraction patterns from positions inside VI ROI (PyTorch)."""
+        if self._data is None:
+            return
         # Create mask in scan space using cached coordinates
         if self.vi_roi_mode == "circle":
             mask = (self._scan_row_coords - self.vi_roi_center_row) ** 2 + (self._scan_col_coords - self.vi_roi_center_col) ** 2 <= self.vi_roi_radius ** 2
@@ -4078,7 +4085,7 @@ class Show4DSTEM(anywidget.AnyWidget):
             avg_dp = data[flat_indices].mean(dim=0)
 
         # Send raw float32 (consistent with other data paths — JS handles normalization)
-        self.summed_dp_bytes = avg_dp.cpu().numpy().astype(np.float32).tobytes()
+        self.summed_dp_bytes = avg_dp.cpu().numpy().tobytes()
 
     def _create_circular_mask(self, cx: float, cy: float, radius: float):
         """Create circular mask (boolean tensor on device)."""
@@ -4153,6 +4160,43 @@ class Show4DSTEM(anywidget.AnyWidget):
 
         return None
 
+    def _virtual_image_for_frame(self, frame_idx: int) -> np.ndarray:
+        """Compute virtual image array for a specific frame without mutating traits."""
+        data = self._data[frame_idx] if self.n_frames > 1 else self._data
+        cx, cy = self.roi_center_col, self.roi_center_row
+        if self.roi_mode == "circle" and self.roi_radius > 0:
+            mask = self._create_circular_mask(cx, cy, self.roi_radius)
+        elif self.roi_mode == "square" and self.roi_radius > 0:
+            mask = self._create_square_mask(cx, cy, self.roi_radius)
+        elif self.roi_mode == "annular" and self.roi_radius > 0:
+            mask = self._create_annular_mask(cx, cy, self.roi_radius_inner, self.roi_radius)
+        elif self.roi_mode == "rect" and self.roi_width > 0 and self.roi_height > 0:
+            mask = self._create_rect_mask(cx, cy, self.roi_width / 2, self.roi_height / 2)
+        else:
+            row = int(max(0, min(round(cy), self._det_shape[0] - 1)))
+            col = int(max(0, min(round(cx), self._det_shape[1] - 1)))
+            if data.ndim == 4:
+                vi = data[:, :, row, col]
+            else:
+                vi = data[:, row, col].reshape(self._scan_shape)
+            return vi.cpu().numpy().astype(np.float32, copy=False)
+        mask_float = mask.float()
+        n_det = self._det_shape[0] * self._det_shape[1]
+        n_nonzero = int(mask.sum())
+        coverage = n_nonzero / n_det
+        if coverage < SPARSE_MASK_THRESHOLD:
+            indices = torch.nonzero(mask_float.flatten(), as_tuple=True)[0]
+            n_scan = self._scan_shape[0] * self._scan_shape[1]
+            data_flat = data.reshape(n_scan, n_det)
+            result = data_flat[:, indices].sum(dim=1).reshape(self._scan_shape)
+        else:
+            if data.ndim == 3:
+                data_4d = data.reshape(self._scan_shape[0], self._scan_shape[1], *self._det_shape)
+            else:
+                data_4d = data
+            result = torch.tensordot(data_4d, mask_float, dims=([2, 3], [0, 1]))
+        return result.cpu().numpy().astype(np.float32, copy=False)
+
     def _fast_masked_sum(self, mask: torch.Tensor) -> torch.Tensor:
         """Compute masked sum using PyTorch.
 
@@ -4198,10 +4242,12 @@ class Show4DSTEM(anywidget.AnyWidget):
             self.vi_data_max = vmax
             self.vi_stats = [float(arr.mean()), vmin, vmax, float(arr.std())]
 
-        return arr.cpu().numpy().astype(np.float32).tobytes()
+        return arr.cpu().numpy().tobytes()
 
     def _compute_virtual_image_from_roi(self):
         """Compute virtual image based on ROI mode."""
+        if self._data is None:
+            return
         cached = self._get_cached_preset()
         if cached is not None:
             # Cached preset returns (bytes, stats, min, max) tuple
