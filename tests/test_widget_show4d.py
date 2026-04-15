@@ -536,3 +536,48 @@ def test_show4d_show_controls_default():
     data = np.random.rand(4, 4, 8, 8).astype(np.float32)
     w = Show4D(data)
     assert w.show_controls is True
+
+
+def test_show4d_vmin_vmax_default_none():
+    data = np.random.rand(4, 4, 8, 8).astype(np.float32)
+    w = Show4D(data)
+    assert w.vmin is None
+    assert w.vmax is None
+
+
+def test_show4d_vmin_vmax_constructor():
+    data = np.random.rand(4, 4, 8, 8).astype(np.float32)
+    w = Show4D(data, vmin=0.0, vmax=1000.0)
+    assert w.vmin == pytest.approx(0.0)
+    assert w.vmax == pytest.approx(1000.0)
+
+
+def test_show4d_vmin_vmax_normalize_clips():
+    data = np.random.rand(4, 4, 8, 8).astype(np.float32)
+    w = Show4D(data, vmin=2.0, vmax=6.0, auto_contrast=False)
+    frame = np.arange(10, dtype=np.float32).reshape(2, 5)
+    out = w._normalize_frame(frame)
+    assert out[0, 0] == 0  # val 0 < vmin
+    assert out[0, 2] == 0  # val 2 == vmin
+    assert out[1, 1] == 255  # val 6 == vmax
+    assert out[1, 4] == 255  # val 9 > vmax
+
+
+def test_show4d_vmin_vmax_state_dict_roundtrip():
+    data = np.random.rand(4, 4, 8, 8).astype(np.float32)
+    w = Show4D(data, vmin=0.25, vmax=0.75)
+    state = w.state_dict()
+    assert state["vmin"] == pytest.approx(0.25)
+    assert state["vmax"] == pytest.approx(0.75)
+    w2 = Show4D(data, state=state)
+    assert w2.vmin == pytest.approx(0.25)
+    assert w2.vmax == pytest.approx(0.75)
+
+
+def test_show4d_vmin_vmax_summary(capsys):
+    data = np.random.rand(4, 4, 8, 8).astype(np.float32)
+    w = Show4D(data, vmin=0.1, vmax=0.9)
+    w.summary()
+    out = capsys.readouterr().out
+    assert "vmin=0.1" in out
+    assert "vmax=0.9" in out

@@ -725,6 +725,8 @@ function Show3D() {
   const [loopStart, setLoopStart] = useModelState<number>("loop_start");
   const [loopEnd, setLoopEnd] = useModelState<number>("loop_end");
   const [bookmarkedFrames, setBookmarkedFrames] = useModelState<number[]>("bookmarked_frames");
+  // Frame exclusion: mark frames as bad without removing them from the stack.
+  const [excludedFrames, setExcludedFrames] = useModelState<number[]>("excluded_frames");
   const [playbackPath, setPlaybackPath] = useModelState<number[]>("playback_path");
 
   // Boomerang direction ref (avoids stale closure in setInterval)
@@ -3597,10 +3599,11 @@ function Show3D() {
                 sx={{ ...sliderStyles.small, flex: 1, minWidth: 40, "& .MuiSlider-mark": { bgcolor: themeColors.accent, width: 4, height: 4, borderRadius: "50%", top: "50%", transform: "translate(-50%, -50%)" } }}
               />
             )}
-            <Typography sx={{ ...typography.value, color: themeColors.textMuted, minWidth: `${String(nSlices).length * 2 + 2}ch`, maxWidth: "50%", textAlign: "right", flexShrink: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            <Typography sx={{ ...typography.value, color: excludedFrames.includes(activeIdx) ? "#e53935" : themeColors.textMuted, minWidth: `${String(nSlices).length * 2 + 2}ch`, maxWidth: "50%", textAlign: "right", flexShrink: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
               {activeIdx + 1}/{nSlices}
               {labels && labels.length > activeIdx && ` ${labels[activeIdx]}`}
               {timestamps && timestamps.length > 0 && activeIdx < timestamps.length && ` (${formatNumber(timestamps[activeIdx])} ${timestampUnit})`}
+              {excludedFrames.includes(activeIdx) && " \u2717"}
             </Typography>
           </Box>
           {/* Row 2: FPS, Loop, Bounce, Bookmark */}
@@ -3622,6 +3625,35 @@ function Show3D() {
                 <Typography sx={{ fontSize: 14, lineHeight: 1 }}>{bookmarkedFrames.includes(activeIdx) ? "\u2605" : "\u2606"}</Typography>
               </IconButton>
             </Tooltip>
+            <Tooltip
+              title={excludedFrames.includes(activeIdx) ? "Include current frame (re-enable)" : "Exclude current frame (mark bad)"}
+              arrow
+            >
+              <IconButton
+                size="small"
+                disabled={lockPlayback}
+                onClick={() => {
+                  if (lockPlayback) return;
+                  const set = new Set(excludedFrames);
+                  if (set.has(activeIdx)) { set.delete(activeIdx); } else { set.add(activeIdx); }
+                  setExcludedFrames(Array.from(set).sort((a, b) => a - b));
+                }}
+                sx={{
+                  color: excludedFrames.includes(activeIdx) ? "#e53935" : themeColors.textMuted,
+                  p: 0.25,
+                  flexShrink: 0,
+                }}
+              >
+                <Typography sx={{ fontSize: 14, lineHeight: 1, fontFamily: "monospace" }}>
+                  {excludedFrames.includes(activeIdx) ? "\u2717" : "\u00B7"}
+                </Typography>
+              </IconButton>
+            </Tooltip>
+            {excludedFrames.length > 0 && (
+              <Typography sx={{ ...typography.label, color: "#e53935", flexShrink: 0 }}>
+                {excludedFrames.length} excluded
+              </Typography>
+            )}
             {loop && (loopStart > 0 || (loopEnd >= 0 && loopEnd < nSlices - 1)) && (
               <IconButton size="small" disabled={lockPlayback} onClick={() => { if (!lockPlayback) { setLoopStart(0); setLoopEnd(-1); } }} sx={{ color: themeColors.textMuted, p: 0.25, flexShrink: 0 }} title="Reset loop range">
                 <Typography sx={{ fontSize: 10, lineHeight: 1 }}>Reset</Typography>

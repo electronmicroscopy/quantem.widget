@@ -141,6 +141,9 @@ class Show4D(anywidget.AnyWidget):
     hidden_tools = traitlets.List(traitlets.Unicode()).tag(sync=True)
     percentile_low = traitlets.Float(0.5).tag(sync=True)
     percentile_high = traitlets.Float(99.5).tag(sync=True)
+    # Absolute intensity bounds
+    vmin = traitlets.Float(None, allow_none=True).tag(sync=True)
+    vmax = traitlets.Float(None, allow_none=True).tag(sync=True)
     # Scale bars
     nav_pixel_size = traitlets.Float(0.0).tag(sync=True)
     sig_pixel_size = traitlets.Float(0.0).tag(sync=True)
@@ -268,6 +271,8 @@ class Show4D(anywidget.AnyWidget):
         sig_pixel_unit="px",
         percentile_low=0.5,
         percentile_high=99.5,
+        vmin: float | None = None,
+        vmax: float | None = None,
         snap_enabled=False,
         snap_radius=5,
         disabled_tools=None,
@@ -353,6 +358,8 @@ class Show4D(anywidget.AnyWidget):
         self.fft_window = fft_window
         self.percentile_low = percentile_low
         self.percentile_high = percentile_high
+        self.vmin = vmin
+        self.vmax = vmax
         self.snap_enabled = snap_enabled
         self.snap_radius = snap_radius
         self.disabled_tools = self._build_disabled_tools(
@@ -554,6 +561,8 @@ class Show4D(anywidget.AnyWidget):
             "hidden_tools": self.hidden_tools,
             "percentile_low": self.percentile_low,
             "percentile_high": self.percentile_high,
+            "vmin": self.vmin,
+            "vmax": self.vmax,
             "nav_pixel_size": self.nav_pixel_size,
             "sig_pixel_size": self.sig_pixel_size,
             "nav_pixel_unit": self.nav_pixel_unit,
@@ -593,7 +602,10 @@ class Show4D(anywidget.AnyWidget):
         lines.append(f"Position: ({self.pos_row}, {self.pos_col})")
         cmap = self.cmap
         scale = "log" if self.log_scale else "linear"
-        contrast = "auto contrast" if self.auto_contrast else "manual contrast"
+        if self.vmin is not None and self.vmax is not None:
+            contrast = f"vmin={self.vmin:.4g}, vmax={self.vmax:.4g}"
+        else:
+            contrast = "auto contrast" if self.auto_contrast else "manual contrast"
         display = f"{cmap} | {contrast} | {scale}"
         if self.show_fft:
             display += " | FFT"
@@ -755,10 +767,17 @@ class Show4D(anywidget.AnyWidget):
     def _normalize_frame(self, frame: np.ndarray) -> np.ndarray:
         if self.log_scale:
             frame = np.log1p(np.maximum(frame, 0))
-        fmin, fmax = float(frame.min()), float(frame.max())
-        if self.auto_contrast:
+        if self.vmin is not None and self.vmax is not None:
+            fmin = float(self.vmin)
+            fmax = float(self.vmax)
+            if self.log_scale:
+                fmin = float(np.log1p(max(fmin, 0)))
+                fmax = float(np.log1p(max(fmax, 0)))
+        elif self.auto_contrast:
             fmin = float(np.percentile(frame, self.percentile_low))
             fmax = float(np.percentile(frame, self.percentile_high))
+        else:
+            fmin, fmax = float(frame.min()), float(frame.max())
         if fmax > fmin:
             return np.clip((frame - fmin) / (fmax - fmin) * 255, 0, 255).astype(np.uint8)
         return np.zeros(frame.shape, dtype=np.uint8)

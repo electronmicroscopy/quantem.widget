@@ -1157,3 +1157,170 @@ def test_show3d_vmin_vmax_summary(capsys):
     out = capsys.readouterr().out
     assert "vmin=10" in out
     assert "vmax=500" in out
+
+# ── Time-series stack editing ─────────────────────────────────────────
+
+
+def test_show3d_exclude_frame_marks_index():
+    """exclude_frame() flags a single index in excluded_frames."""
+    data = np.random.rand(6, 8, 8).astype(np.float32)
+    w = Show3D(data)
+    w.exclude_frame(2)
+    assert w.excluded_frames == [2]
+    assert w.frame_is_excluded(2)
+    assert not w.frame_is_excluded(0)
+
+
+def test_show3d_exclude_frame_sorted_unique():
+    """Repeated exclude_frame() calls produce a sorted, deduped list."""
+    data = np.random.rand(5, 8, 8).astype(np.float32)
+    w = Show3D(data)
+    w.exclude_frame(4).exclude_frame(1).exclude_frame(1)
+    assert w.excluded_frames == [1, 4]
+
+
+def test_show3d_exclude_frame_out_of_range():
+    """Out-of-range indices raise IndexError."""
+    data = np.random.rand(3, 8, 8).astype(np.float32)
+    w = Show3D(data)
+    with pytest.raises(IndexError):
+        w.exclude_frame(5)
+
+
+def test_show3d_include_and_toggle():
+    """include_frame() removes a flag and toggle_excluded() flips it."""
+    data = np.random.rand(4, 8, 8).astype(np.float32)
+    w = Show3D(data)
+    w.exclude_frame(2)
+    w.include_frame(2)
+    assert w.excluded_frames == []
+    w.toggle_excluded(1)
+    assert w.excluded_frames == [1]
+    w.toggle_excluded(1)
+    assert w.excluded_frames == []
+
+
+def test_show3d_active_frames_skips_excluded():
+    """active_frames property returns only non-excluded indices."""
+    data = np.random.rand(5, 8, 8).astype(np.float32)
+    w = Show3D(data)
+    w.exclude_frame(1)
+    w.exclude_frame(3)
+    assert w.active_frames == [0, 2, 4]
+
+
+def test_show3d_delete_frame_shrinks_stack():
+    """delete_frame() rebuilds the stack and remaps labels."""
+    data = np.arange(5 * 2 * 2, dtype=np.float32).reshape(5, 2, 2)
+    w = Show3D(data, labels=["a", "b", "c", "d", "e"])
+    w.delete_frame(1)
+    assert w.n_slices == 4
+    assert w.labels == ["a", "c", "d", "e"]
+    np.testing.assert_allclose(w._data[0], data[0])
+    np.testing.assert_allclose(w._data[1], data[2])
+
+
+def test_show3d_delete_frames_remaps_bookmarks():
+    """delete_frames() remaps bookmarked_frames and excluded_frames."""
+    data = np.arange(6 * 2 * 2, dtype=np.float32).reshape(6, 2, 2)
+    w = Show3D(data)
+    w.bookmarked_frames = [0, 2, 4]
+    w.exclude_frame(5)
+    w.delete_frames([1, 3])
+    assert w.n_slices == 4
+    assert w.bookmarked_frames == [0, 1, 2]
+    assert w.excluded_frames == [3]
+
+
+def test_show3d_delete_all_raises():
+    """Deleting every frame is not allowed."""
+    data = np.random.rand(3, 4, 4).astype(np.float32)
+    w = Show3D(data)
+    with pytest.raises(ValueError, match="at least one must remain"):
+        w.delete_frames([0, 1, 2])
+
+
+def test_show3d_reorder_frames_permutes_data():
+    """reorder_frames() applies a permutation to data and labels."""
+    data = np.arange(4 * 2 * 2, dtype=np.float32).reshape(4, 2, 2)
+    w = Show3D(data, labels=["a", "b", "c", "d"])
+    w.reorder_frames([3, 1, 0, 2])
+    assert w.labels == ["d", "b", "a", "c"]
+    np.testing.assert_allclose(w._data[0], data[3])
+    np.testing.assert_allclose(w._data[2], data[0])
+
+
+def test_show3d_reorder_invalid_permutation_raises():
+    """reorder_frames() rejects non-permutations."""
+    data = np.random.rand(4, 4, 4).astype(np.float32)
+    w = Show3D(data)
+    with pytest.raises(ValueError, match="permutation"):
+        w.reorder_frames([0, 1, 2])
+    with pytest.raises(ValueError, match="permutation"):
+        w.reorder_frames([0, 1, 2, 2])
+
+
+def test_show3d_batch_exclude_by_mean_lt():
+    """batch_exclude_by(metric='mean', lt=...) flags low-intensity frames."""
+    data = np.zeros((5, 4, 4), dtype=np.float32)
+    data[0] = 1.0
+    data[1] = 10.0
+    data[2] = 5.0
+    data[3] = 0.5
+    data[4] = 20.0
+    w = Show3D(data)
+    w.batch_exclude_by(metric="mean", lt=3.0)
+    assert w.excluded_frames == [0, 3]
+
+
+def test_show3d_batch_exclude_by_max_gt():
+    """batch_exclude_by(metric='max', gt=...) flags hot-pixel frames."""
+    data = np.zeros((4, 4, 4), dtype=np.float32)
+    data[0] = 1.0
+    data[1, 0, 0] = 100.0
+    data[2] = 2.0
+    data[3, 1, 1] = 50.0
+    w = Show3D(data)
+    w.batch_exclude_by(metric="max", gt=30.0)
+    assert w.excluded_frames == [1, 3]
+
+
+def test_show3d_batch_exclude_by_predicate():
+    """batch_exclude_by(predicate=...) accepts a callable."""
+    data = np.arange(5 * 4 * 4, dtype=np.float32).reshape(5, 4, 4)
+    w = Show3D(data)
+    w.batch_exclude_by(predicate=lambda idx, frame: idx % 2 == 1)
+    assert w.excluded_frames == [1, 3]
+
+
+def test_show3d_batch_exclude_by_requires_args():
+    """Calling batch_exclude_by() with no criteria raises."""
+    data = np.random.rand(3, 4, 4).astype(np.float32)
+    w = Show3D(data)
+    with pytest.raises(ValueError, match="predicate or"):
+        w.batch_exclude_by()
+
+
+def test_show3d_excluded_in_state_dict_roundtrip():
+    """excluded_frames persists through state_dict round-trip."""
+    data = np.random.rand(5, 8, 8).astype(np.float32)
+    w = Show3D(data)
+    w.exclude_frame(1)
+    w.exclude_frame(3)
+    state = w.state_dict()
+    assert state["excluded_frames"] == [1, 3]
+
+    w2 = Show3D(data)
+    w2.load_state_dict(state)
+    assert w2.excluded_frames == [1, 3]
+
+
+def test_show3d_summary_reports_excluded(capsys):
+    """summary() shows an 'Excluded:' line when frames are flagged."""
+    data = np.random.rand(6, 8, 8).astype(np.float32)
+    w = Show3D(data)
+    w.exclude_frame(0)
+    w.exclude_frame(3)
+    w.summary()
+    out = capsys.readouterr().out
+    assert "Excluded: 2/6" in out

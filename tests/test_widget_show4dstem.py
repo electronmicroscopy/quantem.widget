@@ -1113,3 +1113,77 @@ def test_show4dstem_virtual_image_for_frame():
     assert vi.shape == (4, 4)
     assert vi.dtype == np.float32
     assert w.frame_idx == original_frame_idx
+def test_show4dstem_vmin_vmax_default_none():
+    """vmin/vmax/vi_vmin/vi_vmax default to None."""
+    data = np.random.rand(4, 4, 8, 8).astype(np.float32)
+    w = Show4DSTEM(data, verbose=False)
+    assert w.vmin is None
+    assert w.vmax is None
+    assert w.vi_vmin is None
+    assert w.vi_vmax is None
+
+
+def test_show4dstem_vmin_vmax_constructor():
+    """vmin/vmax/vi_vmin/vi_vmax can be set via constructor."""
+    data = np.random.rand(4, 4, 8, 8).astype(np.float32)
+    w = Show4DSTEM(data, vmin=0.0, vmax=5000.0, vi_vmin=1.0, vi_vmax=2.0, verbose=False)
+    assert w.vmin == pytest.approx(0.0)
+    assert w.vmax == pytest.approx(5000.0)
+    assert w.vi_vmin == pytest.approx(1.0)
+    assert w.vi_vmax == pytest.approx(2.0)
+
+
+def test_show4dstem_vmin_vmax_normalize_clips():
+    """DP _normalize_frame uses absolute bounds when vmin/vmax both set."""
+    data = np.random.rand(4, 4, 8, 8).astype(np.float32)
+    w = Show4DSTEM(data, vmin=2.0, vmax=6.0, verbose=False)
+    frame = np.arange(10, dtype=np.float32).reshape(2, 5)
+    out = w._normalize_frame(frame)
+    assert out[0, 0] == 0
+    assert out[0, 2] == 0
+    assert out[1, 1] == 255
+    assert out[1, 4] == 255
+
+
+def test_show4dstem_vmin_vmax_overrides_slider_pct():
+    """Absolute DP bounds bypass dp_vmin_pct/dp_vmax_pct in render metadata."""
+    data = np.random.rand(4, 4, 8, 8).astype(np.float32) * 100
+    w = Show4DSTEM(data, vmin=10.0, vmax=90.0, verbose=False)
+    _rgb, meta = w._render_dp_rgb()
+    assert meta["vmin"] == pytest.approx(10.0)
+    assert meta["vmax"] == pytest.approx(90.0)
+
+
+def test_show4dstem_vi_vmin_vmax_overrides_slider_pct():
+    """Absolute VI bounds bypass vi_vmin_pct/vi_vmax_pct in render metadata."""
+    data = np.random.rand(4, 4, 8, 8).astype(np.float32) * 100
+    w = Show4DSTEM(data, vi_vmin=5.0, vi_vmax=50.0, verbose=False)
+    _rgb, meta = w._render_virtual_rgb()
+    assert meta["vmin"] == pytest.approx(5.0)
+    assert meta["vmax"] == pytest.approx(50.0)
+
+
+def test_show4dstem_vmin_vmax_state_dict_roundtrip():
+    """vmin/vmax and vi_vmin/vi_vmax persist through state_dict round-trip."""
+    data = np.random.rand(4, 4, 8, 8).astype(np.float32)
+    w = Show4DSTEM(data, vmin=0.1, vmax=0.9, vi_vmin=0.2, vi_vmax=0.8, verbose=False)
+    state = w.state_dict()
+    assert state["vmin"] == pytest.approx(0.1)
+    assert state["vmax"] == pytest.approx(0.9)
+    assert state["vi_vmin"] == pytest.approx(0.2)
+    assert state["vi_vmax"] == pytest.approx(0.8)
+    w2 = Show4DSTEM(data, state=state, verbose=False)
+    assert w2.vmin == pytest.approx(0.1)
+    assert w2.vmax == pytest.approx(0.9)
+    assert w2.vi_vmin == pytest.approx(0.2)
+    assert w2.vi_vmax == pytest.approx(0.8)
+
+
+def test_show4dstem_vmin_vmax_summary(capsys):
+    """summary() reports both DP and VI absolute bounds when set."""
+    data = np.random.rand(4, 4, 8, 8).astype(np.float32)
+    w = Show4DSTEM(data, vmin=1.0, vmax=9.0, vi_vmin=2.0, vi_vmax=8.0, verbose=False)
+    w.summary()
+    out = capsys.readouterr().out
+    assert "DP view" in out and "vmin=1" in out and "vmax=9" in out
+    assert "VI view" in out and "vmin=2" in out and "vmax=8" in out

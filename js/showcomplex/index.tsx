@@ -385,6 +385,10 @@ function ShowComplex2D() {
   const [autoContrast, setAutoContrast] = useModelState<boolean>("auto_contrast");
   const [percentileLow] = useModelState<number>("percentile_low");
   const [percentileHigh] = useModelState<number>("percentile_high");
+  // Absolute intensity bounds for amplitude/real/imag/HSV. Phase mode is always
+  // [-pi, pi] and ignores these.
+  const [traitVmin] = useModelState<number | null>("vmin");
+  const [traitVmax] = useModelState<number | null>("vmax");
 
   // Scale bar
   const [pixelSize] = useModelState<number>("pixel_size");
@@ -619,13 +623,16 @@ function ShowComplex2D() {
       if (!dispData) return;
       const lut = COLORMAPS[mode === "phase" ? "hsv" : cmap] || COLORMAPS.inferno;
       let vmin: number, vmax: number;
-      if (autoContrast && mode !== "phase") {
+      if (mode === "phase") {
+        vmin = -Math.PI;
+        vmax = Math.PI;
+      } else if (traitVmin != null && traitVmax != null) {
+        vmin = logScale ? Math.log1p(Math.max(traitVmin, 0)) : traitVmin;
+        vmax = logScale ? Math.log1p(Math.max(traitVmax, 0)) : traitVmax;
+      } else if (autoContrast) {
         const pc = percentileClip(dispData, percentileLow, percentileHigh);
         vmin = pc.vmin;
         vmax = pc.vmax;
-      } else if (mode === "phase") {
-        vmin = -Math.PI;
-        vmax = Math.PI;
       } else {
         ({ vmin, vmax } = sliderRange(histRange.min, histRange.max, vminPct, vmaxPct));
       }
@@ -635,7 +642,7 @@ function ShowComplex2D() {
     offCtx.putImageData(imgData, 0, 0);
     offscreenCacheRef.current = offscreen;
   }, [realBytes, imagBytes, displayMode, cmap, logScale, autoContrast, percentileLow, percentileHigh,
-      vminPct, vmaxPct, width, height, histRange]);
+      vminPct, vmaxPct, width, height, histRange, traitVmin, traitVmax]);
 
   // ============================================================================
   // Redraw with zoom/pan (cheap: just drawImage from cached offscreen)
@@ -712,13 +719,16 @@ function ShowComplex2D() {
       const dispData = displayDataRef.current;
       const lut = COLORMAPS[mode === "phase" ? "hsv" : cmap] || COLORMAPS.inferno;
       let vmin: number, vmax: number;
-      if (autoContrast && mode !== "phase") {
+      if (mode === "phase") {
+        vmin = -Math.PI;
+        vmax = Math.PI;
+      } else if (traitVmin != null && traitVmax != null) {
+        vmin = logScale ? Math.log1p(Math.max(traitVmin, 0)) : traitVmin;
+        vmax = logScale ? Math.log1p(Math.max(traitVmax, 0)) : traitVmax;
+      } else if (autoContrast) {
         const pc = percentileClip(dispData, percentileLow, percentileHigh);
         vmin = pc.vmin;
         vmax = pc.vmax;
-      } else if (mode === "phase") {
-        vmin = -Math.PI;
-        vmax = Math.PI;
       } else {
         ({ vmin, vmax } = sliderRange(histRange.min, histRange.max, vminPct, vmaxPct));
       }
@@ -781,7 +791,8 @@ function ShowComplex2D() {
     ctx.restore();
   }, [displayMode, cmap, zoom, canvasW, canvasH, width, height, pixelSize, scaleBarVisible,
       logScale, autoContrast, vminPct, vmaxPct, histRange, percentileLow, percentileHigh,
-      roiMode, roiCenterRow, roiCenterCol, roiRadius, roiWidth, roiHeight, panX, panY, themeInfo.theme]);
+      roiMode, roiCenterRow, roiCenterCol, roiRadius, roiWidth, roiHeight, panX, panY, themeInfo.theme,
+      traitVmin, traitVmax]);
 
   // ============================================================================
   // FFT computation (async) — crops to ROI when roiFftActive
@@ -1391,13 +1402,16 @@ function ShowComplex2D() {
     } else {
       if (!dispData) return;
       lut = COLORMAPS[mode === "phase" ? "hsv" : cmap] || COLORMAPS.inferno;
-      if (autoContrast && mode !== "phase") {
+      if (mode === "phase") {
+        vmin = -Math.PI;
+        vmax = Math.PI;
+      } else if (traitVmin != null && traitVmax != null) {
+        vmin = logScale ? Math.log1p(Math.max(traitVmin, 0)) : traitVmin;
+        vmax = logScale ? Math.log1p(Math.max(traitVmax, 0)) : traitVmax;
+      } else if (autoContrast) {
         const pc = percentileClip(dispData, percentileLow, percentileHigh);
         vmin = pc.vmin;
         vmax = pc.vmax;
-      } else if (mode === "phase") {
-        vmin = -Math.PI;
-        vmax = Math.PI;
       } else {
         ({ vmin, vmax } = sliderRange(histRange.min, histRange.max, vminPct, vmaxPct));
       }

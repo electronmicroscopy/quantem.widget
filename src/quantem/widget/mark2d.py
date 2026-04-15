@@ -528,6 +528,10 @@ class Mark2D(anywidget.AnyWidget):
     percentile_low = traitlets.Float(2.0).tag(sync=True)
     percentile_high = traitlets.Float(98.0).tag(sync=True)
 
+    # Absolute intensity bounds (override percentile/auto-contrast when both set)
+    vmin = traitlets.Float(None, allow_none=True).tag(sync=True)
+    vmax = traitlets.Float(None, allow_none=True).tag(sync=True)
+
     # Per-image statistics
     stats_mean = traitlets.List(traitlets.Float()).tag(sync=True)
     stats_min = traitlets.List(traitlets.Float()).tag(sync=True)
@@ -585,6 +589,8 @@ class Mark2D(anywidget.AnyWidget):
         hide_all: bool = False,
         percentile_low: float = 2.0,
         percentile_high: float = 98.0,
+        vmin: float | None = None,
+        vmax: float | None = None,
         state=None,
         **kwargs,
     ):
@@ -638,6 +644,8 @@ class Mark2D(anywidget.AnyWidget):
         )
         self.percentile_low = percentile_low
         self.percentile_high = percentile_high
+        self.vmin = vmin
+        self.vmax = vmax
         # Check if data is an IOResult and extract metadata
         if isinstance(data, IOResult):
             if not title and data.title:
@@ -1167,7 +1175,10 @@ class Mark2D(anywidget.AnyWidget):
         # Display settings
         cmap = self.cmap
         scale = "log" if self.log_scale else "linear"
-        contrast = "auto contrast" if self.auto_contrast else "manual contrast"
+        if self.vmin is not None and self.vmax is not None:
+            contrast = f"vmin={self.vmin:.4g}, vmax={self.vmax:.4g}"
+        else:
+            contrast = "auto contrast" if self.auto_contrast else "manual contrast"
         display = f"{cmap} | {contrast} | {scale}"
         if self.show_fft:
             display += " | FFT"
@@ -1344,7 +1355,13 @@ class Mark2D(anywidget.AnyWidget):
     def _normalize_frame(self, frame: np.ndarray) -> np.ndarray:
         if self.log_scale:
             frame = np.log1p(np.maximum(frame, 0))
-        if self.auto_contrast:
+        if self.vmin is not None and self.vmax is not None:
+            vmin = float(self.vmin)
+            vmax = float(self.vmax)
+            if self.log_scale:
+                vmin = float(np.log1p(max(vmin, 0)))
+                vmax = float(np.log1p(max(vmax, 0)))
+        elif self.auto_contrast:
             vmin = float(np.percentile(frame, self.percentile_low))
             vmax = float(np.percentile(frame, self.percentile_high))
         else:
@@ -1468,6 +1485,8 @@ class Mark2D(anywidget.AnyWidget):
             "hidden_tools": self.hidden_tools,
             "percentile_low": self.percentile_low,
             "percentile_high": self.percentile_high,
+            "vmin": self.vmin,
+            "vmax": self.vmax,
             "title": self.title,
             "pixel_size": self.pixel_size,
             "scale": self.scale,

@@ -515,7 +515,7 @@ def test_showcomplex_state_dict_completeness():
     state = widget.state_dict()
     expected_keys = {
         "display_mode", "title", "cmap", "log_scale", "auto_contrast",
-        "percentile_low", "percentile_high", "pixel_size",
+        "percentile_low", "percentile_high", "vmin", "vmax", "pixel_size",
         "scale_bar_visible", "show_fft", "fft_window", "show_stats", "show_controls",
         "image_width_px", "disabled_tools", "hidden_tools",
         "roi_mode", "roi_center_row", "roi_center_col",
@@ -935,3 +935,61 @@ def test_showcomplex_roi_tool_visibility():
     assert "roi" in w.hidden_tools
     w2 = ShowComplex2D(data, disable_roi=True)
     assert "roi" in w2.disabled_tools
+
+
+def test_showcomplex_vmin_vmax_default_none():
+    """vmin/vmax default to None (fall back to auto/manual contrast)."""
+    data = (np.random.rand(16, 16) + 1j * np.random.rand(16, 16)).astype(np.complex64)
+    w = ShowComplex2D(data)
+    assert w.vmin is None
+    assert w.vmax is None
+
+
+def test_showcomplex_vmin_vmax_constructor():
+    """vmin/vmax can be set via constructor."""
+    data = (np.random.rand(16, 16) + 1j * np.random.rand(16, 16)).astype(np.complex64)
+    w = ShowComplex2D(data, vmin=0.0, vmax=100.0)
+    assert w.vmin == pytest.approx(0.0)
+    assert w.vmax == pytest.approx(100.0)
+
+
+def test_showcomplex_vmin_vmax_normalize_clips():
+    """_normalize_frame uses absolute bounds when vmin/vmax both set."""
+    data = (np.random.rand(16, 16) + 1j * np.random.rand(16, 16)).astype(np.complex64)
+    w = ShowComplex2D(data, vmin=2.0, vmax=6.0, auto_contrast=False)
+    frame = np.arange(10, dtype=np.float32).reshape(2, 5)
+    out = w._normalize_frame(frame)
+    assert out[0, 0] == 0  # below vmin
+    assert out[0, 2] == 0  # at vmin
+    assert out[1, 1] == 255  # at vmax
+    assert out[1, 4] == 255  # above vmax
+
+
+def test_showcomplex_vmin_vmax_state_dict_roundtrip():
+    """vmin/vmax persist through state_dict round-trip."""
+    data = (np.random.rand(16, 16) + 1j * np.random.rand(16, 16)).astype(np.complex64)
+    w = ShowComplex2D(data, vmin=0.25, vmax=0.75)
+    state = w.state_dict()
+    assert state["vmin"] == pytest.approx(0.25)
+    assert state["vmax"] == pytest.approx(0.75)
+    w2 = ShowComplex2D(data, state=state)
+    assert w2.vmin == pytest.approx(0.25)
+    assert w2.vmax == pytest.approx(0.75)
+
+
+def test_showcomplex_vmin_vmax_summary(capsys):
+    """summary() reports vmin/vmax when they are set."""
+    data = (np.random.rand(16, 16) + 1j * np.random.rand(16, 16)).astype(np.complex64)
+    w = ShowComplex2D(data, vmin=0.1, vmax=0.9)
+    w.summary()
+    out = capsys.readouterr().out
+    assert "vmin=0.1" in out
+    assert "vmax=0.9" in out
+
+
+def test_showcomplex_phase_mode_ignores_vmin_vmax(tmp_path):
+    """Phase mode is always [-pi, pi] and must not honor vmin/vmax."""
+    data = (np.random.rand(16, 16) + 1j * np.random.rand(16, 16)).astype(np.complex64)
+    w = ShowComplex2D(data, display_mode="phase", vmin=0.0, vmax=0.01)
+    out = w.save_image(tmp_path / "phase.png", display_mode="phase")
+    assert out.exists()

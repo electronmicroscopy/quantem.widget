@@ -152,6 +152,8 @@ class Show3D(anywidget.AnyWidget):
     loop_end = traitlets.Int(-1).tag(sync=True)  # End frame for loop (-1 = last)
     bookmarked_frames = traitlets.List(traitlets.Int()).tag(sync=True)
     playback_path = traitlets.List(traitlets.Int()).tag(sync=True)
+    # Frames marked bad but kept in the stack (downstream skips them)
+    excluded_frames = traitlets.List(traitlets.Int()).tag(sync=True)
 
     # =========================================================================
     # Statistics Panel
@@ -770,8 +772,192 @@ class Show3D(anywidget.AnyWidget):
         parts = f"Show3D({self.n_slices}×{self.height}×{self.width}, frame={self.slice_idx}, cmap={self.cmap}"
         if self.diff_mode != "off":
             parts += f", diff={self.diff_mode}"
+        if self.excluded_frames:
+            parts += f", excluded={len(self.excluded_frames)}"
         parts += ")"
         return parts
+
+    # =========================================================================
+    # Time-series stack editing
+    # =========================================================================
+
+    def _valid_frame_idx(self, idx: int) -> int:
+        idx = int(idx)
+        if idx < 0 or idx >= self.n_slices:
+            raise IndexError(
+                f"Frame index {idx} out of range [0, {self.n_slices})"
+            )
+        return idx
+
+    def exclude_frame(self, idx: int) -> Self:
+        """Mark a frame as bad. Kept in the stack, flagged for downstream skip."""
+        idx = self._valid_frame_idx(idx)
+        if idx not in self.excluded_frames:
+            self.excluded_frames = sorted([*self.excluded_frames, idx])
+        return self
+
+    def include_frame(self, idx: int) -> Self:
+        idx = self._valid_frame_idx(idx)
+        if idx in self.excluded_frames:
+            self.excluded_frames = [i for i in self.excluded_frames if i != idx]
+        return self
+
+    def toggle_excluded(self, idx: int) -> Self:
+        idx = self._valid_frame_idx(idx)
+        if idx in self.excluded_frames:
+            return self.include_frame(idx)
+        return self.exclude_frame(idx)
+
+    def clear_excluded(self) -> Self:
+        self.excluded_frames = []
+        return self
+
+    def frame_is_excluded(self, idx: int) -> bool:
+        return int(idx) in self.excluded_frames
+
+    @property
+    def active_frames(self) -> list[int]:
+        """Indices of frames that are not marked excluded."""
+        excluded = set(self.excluded_frames)
+        return [i for i in range(self.n_slices) if i not in excluded]
+
+    def delete_frame(self, idx: int) -> Self:
+        """Remove a single frame from the stack.
+
+        This rebuilds the internal array and relabels remaining frames.
+        Labels, bookmarks, playback path, and exclusion marks are remapped
+        to the new indices; indices pointing at the deleted frame are dropped.
+        """
+        return self.delete_frames([self._valid_frame_idx(idx)])
+
+    def delete_frames(self, indices) -> Self:
+        """Remove multiple frames from the stack.
+
+        Parameters
+        ----------
+        indices : iterable of int
+            Frame indices to remove. Duplicates are ignored.
+        """
+        to_drop = sorted({self._valid_frame_idx(i) for i in indices})
+        if not to_drop:
+            return self
+        if len(to_drop) >= self.n_slices:
+            raise ValueError("Cannot delete every frame — at least one must remain.")
+
+        keep = [i for i in range(self.n_slices) if i not in set(to_drop)]
+        remap = {old: new for new, old in enumerate(keep)}
+
+        new_data = self._data[keep]
+        new_labels = (
+            [self.labels[i] for i in keep]
+            if self.labels and len(self.labels) == self.n_slices
+            else None
+        )
+        new_bookmarks = [remap[i] for i in self.bookmarked_frames if i in remap]
+        new_path = [remap[i] for i in self.playback_path if i in remap]
+        new_excluded = [remap[i] for i in self.excluded_frames if i in remap]
+
+        # Try to keep the current frame visible — fall back to nearest surviving.
+        if self.slice_idx in remap:
+            next_idx = remap[self.slice_idx]
+        else:
+            # pick the nearest surviving neighbor
+            candidates = [remap[i] for i in keep if i >= self.slice_idx]
+            next_idx = candidates[0] if candidates else (len(keep) - 1)
+
+        self.set_image(new_data, labels=new_labels)
+        self.slice_idx = int(max(0, min(next_idx, self.n_slices - 1)))
+        self.bookmarked_frames = new_bookmarks
+        self.playback_path = new_path
+        self.excluded_frames = new_excluded
+        return self
+
+    def reorder_frames(self, order) -> Self:
+        """Reorder the stack using a permutation of frame indices.
+
+        Parameters
+        ----------
+        order : sequence of int
+            A permutation of ``range(n_slices)`` giving the new order. Each
+            index must appear exactly once.
+        """
+        order = [int(i) for i in order]
+        if sorted(order) != list(range(self.n_slices)):
+            raise ValueError(
+                f"order must be a permutation of range({self.n_slices}); got {order}"
+            )
+        if order == list(range(self.n_slices)):
+            return self
+
+        remap = {old: new for new, old in enumerate(order)}
+        new_data = self._data[order]
+        new_labels = (
+            [self.labels[i] for i in order]
+            if self.labels and len(self.labels) == self.n_slices
+            else None
+        )
+        new_bookmarks = [remap[i] for i in self.bookmarked_frames if i in remap]
+        new_path = [remap[i] for i in self.playback_path if i in remap]
+        new_excluded = sorted(remap[i] for i in self.excluded_frames if i in remap)
+        next_idx = remap.get(self.slice_idx, self.slice_idx)
+
+        self.set_image(new_data, labels=new_labels)
+        self.slice_idx = int(max(0, min(next_idx, self.n_slices - 1)))
+        self.bookmarked_frames = new_bookmarks
+        self.playback_path = new_path
+        self.excluded_frames = new_excluded
+        return self
+
+    def batch_exclude_by(
+        self,
+        predicate=None,
+        *,
+        metric: str = "mean",
+        lt: float | None = None,
+        gt: float | None = None,
+    ) -> Self:
+        """Mark frames as excluded based on a per-frame statistic.
+
+        Either supply ``predicate`` — a callable ``(idx, frame) -> bool`` that
+        returns True for frames to exclude — or use the convenience ``metric``
+        + ``lt``/``gt`` form to exclude frames whose per-frame statistic is
+        below ``lt`` and/or above ``gt``.
+
+        Parameters
+        ----------
+        predicate : callable, optional
+            ``predicate(idx, frame_array) -> bool``. Overrides the threshold API.
+        metric : {"mean", "min", "max", "std"}
+            Per-frame reduction used when ``predicate`` is None.
+        lt : float, optional
+            Exclude frames where ``metric < lt``.
+        gt : float, optional
+            Exclude frames where ``metric > gt``.
+        """
+        if predicate is None and lt is None and gt is None:
+            raise ValueError("Provide predicate or at least one of lt/gt.")
+
+        if predicate is None:
+            if metric not in ("mean", "min", "max", "std"):
+                raise ValueError(
+                    f"metric must be mean/min/max/std, got {metric!r}"
+                )
+            reducer = getattr(np, metric)
+
+            def predicate(idx, frame):
+                value = float(reducer(frame))
+                if lt is not None and value < lt:
+                    return True
+                if gt is not None and value > gt:
+                    return True
+                return False
+
+        new_excluded = set(self.excluded_frames)
+        for i in range(self.n_slices):
+            if predicate(i, self._data[i]):
+                new_excluded.add(i)
+        self.excluded_frames = sorted(new_excluded)
+        return self
 
     def state_dict(self):
         return {
@@ -801,6 +987,7 @@ class Show3D(anywidget.AnyWidget):
             "loop_end": self.loop_end,
             "bookmarked_frames": self.bookmarked_frames,
             "playback_path": self.playback_path,
+            "excluded_frames": list(self.excluded_frames),
             "roi_active": self.roi_active,
             "roi_list": self.roi_list,
             "roi_selected_idx": self.roi_selected_idx,
@@ -862,6 +1049,11 @@ class Show3D(anywidget.AnyWidget):
         if self.loop_start > 0 or self.loop_end >= 0:
             end = self.loop_end if self.loop_end >= 0 else self.n_slices - 1
             lines.append(f"Range:    {self.loop_start}–{end}")
+        if self.excluded_frames:
+            sample = ", ".join(str(i) for i in self.excluded_frames[:10])
+            if len(self.excluded_frames) > 10:
+                sample += ", …"
+            lines.append(f"Excluded: {len(self.excluded_frames)}/{self.n_slices} [{sample}]")
         if self.roi_active and self.roi_list:
             lines.append(f"ROI:      {len(self.roi_list)} region(s)")
         if len(self.profile_line) >= 2:

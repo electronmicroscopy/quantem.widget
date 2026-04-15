@@ -599,6 +599,9 @@ const render = createRender(() => {
   const [hiddenTools] = useModelState<string[]>("hidden_tools");
   const [percentileLow] = useModelState<number>("percentile_low");
   const [percentileHigh] = useModelState<number>("percentile_high");
+  // Absolute intensity bounds — when both set, override percentile/auto-contrast.
+  const [traitVmin] = useModelState<number | null>("vmin");
+  const [traitVmax] = useModelState<number | null>("vmax");
 
   const disabledToolSet = React.useMemo(
     () =>
@@ -883,7 +886,10 @@ const render = createRender(() => {
       if (!f32) continue;
       const data = logScale ? applyLogScale(f32) : f32;
       let vmin: number, vmax: number;
-      if (autoContrast) {
+      if (traitVmin != null && traitVmax != null) {
+        vmin = logScale ? Math.log1p(Math.max(traitVmin, 0)) : traitVmin;
+        vmax = logScale ? Math.log1p(Math.max(traitVmax, 0)) : traitVmax;
+      } else if (autoContrast) {
         ({ vmin, vmax } = percentileClip(data, percentileLow, percentileHigh));
       } else {
         const { min: dMin, max: dMax } = findDataRange(data);
@@ -898,7 +904,7 @@ const render = createRender(() => {
       }
     }
     setOffscreenVersion(v => v + 1);
-  }, [perImageData, nImages, width, height, cmap, autoContrast, logScale, vminPct, vmaxPct, percentileLow, percentileHigh, isGallery, selectedIdx]);
+  }, [perImageData, nImages, width, height, cmap, autoContrast, logScale, vminPct, vmaxPct, percentileLow, percentileHigh, isGallery, selectedIdx, traitVmin, traitVmax]);
 
   // Histogram data for current image
   const histogramData = React.useMemo(() => {
@@ -2086,7 +2092,10 @@ const render = createRender(() => {
     const lut = COLORMAPS[cmap || "gray"] || COLORMAPS.gray;
 
     let vmin: number, vmax: number;
-    if (autoContrast) {
+    if (traitVmin != null && traitVmax != null) {
+      vmin = logScale ? Math.log1p(Math.max(traitVmin, 0)) : traitVmin;
+      vmax = logScale ? Math.log1p(Math.max(traitVmax, 0)) : traitVmax;
+    } else if (autoContrast) {
       ({ vmin, vmax } = percentileClip(processed, percentileLow, percentileHigh));
     } else {
       const { min: dMin, max: dMax } = findDataRange(processed);

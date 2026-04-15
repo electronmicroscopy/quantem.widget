@@ -761,6 +761,9 @@ function Show4D() {
   const [navVmaxPct, setNavVmaxPct] = React.useState(100);
   const [sigVminPct, setSigVminPct] = React.useState(0);
   const [sigVmaxPct, setSigVmaxPct] = React.useState(100);
+  // Absolute intensity bounds — when both set, override the percentile slider.
+  const [traitVmin] = useModelState<number | null>("vmin");
+  const [traitVmax] = useModelState<number | null>("vmax");
 
   // Zoom state
   const [navZoom, setNavZoom] = React.useState(1);
@@ -1060,7 +1063,22 @@ function Show4D() {
     }
 
     const { min: dataMin, max: dataMax } = findDataRange(scaled);
-    const { vmin, vmax } = sliderRange(dataMin, dataMax, sigVminPct, sigVmaxPct);
+    let vmin: number;
+    let vmax: number;
+    if (traitVmin != null && traitVmax != null) {
+      if (sigScaleMode === "log") {
+        vmin = Math.log1p(Math.max(traitVmin, 0));
+        vmax = Math.log1p(Math.max(traitVmax, 0));
+      } else if (sigScaleMode === "power") {
+        vmin = Math.pow(Math.max(traitVmin, 0), sigPowerExp);
+        vmax = Math.pow(Math.max(traitVmax, 0), sigPowerExp);
+      } else {
+        vmin = traitVmin;
+        vmax = traitVmax;
+      }
+    } else {
+      ({ vmin, vmax } = sliderRange(dataMin, dataMax, sigVminPct, sigVmaxPct));
+    }
 
     const width = sigCols;
     const height = sigRows;
@@ -1087,7 +1105,7 @@ function Show4D() {
     applyColormap(scaled, imgData.data, lut, vmin, vmax);
     offCtx.putImageData(imgData, 0, 0);
     setSigOffscreenVersion(v => v + 1);
-  }, [frameBytes, sigColormap, sigVminPct, sigVmaxPct, sigScaleMode, sigPowerExp, sigRows, sigCols]);
+  }, [frameBytes, sigColormap, sigVminPct, sigVmaxPct, sigScaleMode, sigPowerExp, sigRows, sigCols, traitVmin, traitVmax]);
 
   // ── Signal zoom/pan redraw (lightweight — just drawImage with transform) ──
   React.useLayoutEffect(() => {
@@ -2049,7 +2067,22 @@ function Show4D() {
     }
     const lut = COLORMAPS[sigColormap] || COLORMAPS.inferno;
     const { min: pMin, max: pMax } = findDataRange(processed);
-    const { vmin, vmax } = sliderRange(pMin, pMax, sigVminPct, sigVmaxPct);
+    let vmin: number;
+    let vmax: number;
+    if (traitVmin != null && traitVmax != null) {
+      if (sigScaleMode === "log") {
+        vmin = Math.log1p(Math.max(traitVmin, 0));
+        vmax = Math.log1p(Math.max(traitVmax, 0));
+      } else if (sigScaleMode === "power") {
+        vmin = Math.pow(Math.max(traitVmin, 0), sigPowerExp);
+        vmax = Math.pow(Math.max(traitVmax, 0), sigPowerExp);
+      } else {
+        vmin = traitVmin;
+        vmax = traitVmax;
+      }
+    } else {
+      ({ vmin, vmax } = sliderRange(pMin, pMax, sigVminPct, sigVmaxPct));
+    }
     const offscreen = renderToOffscreen(processed, sigCols, sigRows, lut, vmin, vmax);
     if (!offscreen) return;
     const pixelSizeAngstrom = sigPixelSize > 0 && sigPixelUnit === "\u00C5" ? sigPixelSize : sigPixelSize > 0 && sigPixelUnit === "nm" ? sigPixelSize * 10 : 0;

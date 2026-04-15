@@ -881,7 +881,7 @@ def test_mark2d_state_dict_keys():
         "log_scale", "show_fft", "fft_window", "show_stats", "show_controls",
         "disabled_tools",
         "hidden_tools",
-        "percentile_low", "percentile_high", "title",
+        "percentile_low", "percentile_high", "vmin", "vmax", "title",
         "pixel_size", "scale", "canvas_size",
     }
     assert set(sd.keys()) == expected
@@ -1086,3 +1086,65 @@ def test_mark2d_widget_version_is_set():
     data = np.random.rand(16, 16).astype(np.float32)
     w = Mark2D(data)
     assert w.widget_version != "unknown"
+
+
+def test_mark2d_vmin_vmax_default_none():
+    """vmin/vmax default to None (fall back to auto/manual contrast)."""
+    data = np.random.rand(16, 16).astype(np.float32)
+    w = Mark2D(data)
+    assert w.vmin is None
+    assert w.vmax is None
+
+
+def test_mark2d_vmin_vmax_constructor():
+    """vmin/vmax can be set via constructor."""
+    data = np.random.rand(16, 16).astype(np.float32)
+    w = Mark2D(data, vmin=0.1, vmax=0.9)
+    assert w.vmin == pytest.approx(0.1)
+    assert w.vmax == pytest.approx(0.9)
+
+
+def test_mark2d_vmin_vmax_normalize_clips():
+    """_normalize_frame uses absolute bounds when vmin/vmax both set."""
+    # Pixel values 0,1,2,...,9
+    frame = np.arange(10, dtype=np.float32).reshape(2, 5)
+    w = Mark2D(frame, vmin=2.0, vmax=6.0, auto_contrast=False)
+    out = w._normalize_frame(frame)
+    # Below vmin clamps to 0; above vmax clamps to 255.
+    assert out[0, 0] == 0  # val 0 → below vmin
+    assert out[0, 1] == 0  # val 1 → below vmin
+    assert out[0, 2] == 0  # val 2 → at vmin
+    assert out[1, 1] == 255  # val 6 → at vmax
+    assert out[1, 4] == 255  # val 9 → above vmax
+
+
+def test_mark2d_vmin_vmax_overrides_auto_contrast():
+    """When vmin/vmax set, auto_contrast is bypassed."""
+    frame = np.arange(10, dtype=np.float32).reshape(2, 5)
+    w = Mark2D(frame, vmin=0.0, vmax=9.0, auto_contrast=True)
+    out = w._normalize_frame(frame)
+    # With vmin=0, vmax=9: val 0 → 0, val 9 → 255 (full linear range).
+    assert out[0, 0] == 0
+    assert out[1, 4] == 255
+
+
+def test_mark2d_vmin_vmax_state_dict_roundtrip():
+    """vmin/vmax persist through state_dict round-trip."""
+    data = np.random.rand(16, 16).astype(np.float32)
+    w = Mark2D(data, vmin=0.25, vmax=0.75)
+    state = w.state_dict()
+    assert state["vmin"] == pytest.approx(0.25)
+    assert state["vmax"] == pytest.approx(0.75)
+    w2 = Mark2D(data, state=state)
+    assert w2.vmin == pytest.approx(0.25)
+    assert w2.vmax == pytest.approx(0.75)
+
+
+def test_mark2d_vmin_vmax_summary(capsys):
+    """summary() reports vmin/vmax when they are set."""
+    data = np.random.rand(16, 16).astype(np.float32)
+    w = Mark2D(data, vmin=0.1, vmax=0.9)
+    w.summary()
+    out = capsys.readouterr().out
+    assert "vmin=0.1" in out
+    assert "vmax=0.9" in out
