@@ -390,6 +390,8 @@ function Show2D() {
 
   // Customization
   const [canvasSizeTrait] = useModelState<number>("size");
+  const [smooth, setSmooth] = useModelState<boolean>("smooth");
+  const imageRenderingStyle = smooth ? "auto" : "pixelated";
 
   // Scale bar
   const [pixelSize] = useModelState<number>("pixel_size");
@@ -3429,7 +3431,7 @@ function Show2D() {
                     <canvas
                       ref={(el) => { if (el && canvasRefs.current[i] !== el) { canvasRefs.current[i] = el; setCanvasReady(c => c + 1); } }}
                       width={canvasW} height={canvasH}
-                      style={{ width: canvasW, height: canvasH, imageRendering: "pixelated" }}
+                      style={{ width: canvasW, height: canvasH, imageRendering: imageRenderingStyle }}
                     />
                     <canvas
                       ref={(el) => { overlayRefs.current[i] = el; }}
@@ -3473,7 +3475,7 @@ function Show2D() {
                       <canvas
                         ref={(el) => { fftCanvasRefs.current[i] = el; }}
                         width={canvasW} height={canvasH}
-                        style={{ width: canvasW, height: canvasH, imageRendering: "pixelated", display: "block" }}
+                        style={{ width: canvasW, height: canvasH, imageRendering: imageRenderingStyle, display: "block" }}
                       />
                       {fftComputing && !fftMagCacheGalleryRef.current[i] && (
                         <Box sx={{ position: "absolute", top: 0, left: 0, width: canvasW, height: canvasH, display: "flex", alignItems: "center", justifyContent: "center", bgcolor: "rgba(0,0,0,0.6)", pointerEvents: "none" }}>
@@ -3500,7 +3502,7 @@ function Show2D() {
               <canvas
                 ref={(el) => { if (el && canvasRefs.current[0] !== el) { canvasRefs.current[0] = el; setCanvasReady(c => c + 1); } }}
                 width={canvasW} height={canvasH}
-                style={{ width: canvasW, height: canvasH, imageRendering: "pixelated" }}
+                style={{ width: canvasW, height: canvasH, imageRendering: imageRenderingStyle }}
               />
               <canvas
                 ref={(el) => { overlayRefs.current[0] = el; }}
@@ -3631,6 +3633,8 @@ function Show2D() {
                     <Box sx={{ ...controlRow, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, opacity: lockDisplay ? 0.5 : 1, pointerEvents: lockDisplay ? "none" : "auto" }}>
                       <Typography sx={{ ...typography.label, fontSize: 10 }}>Auto:</Typography>
                       <Switch checked={autoContrast} onChange={() => { if (!lockDisplay) setAutoContrast(!autoContrast); }} disabled={lockDisplay} size="small" sx={switchStyles.small} />
+                      <Typography sx={{ ...typography.label, fontSize: 10 }} title="CSS bilinear interpolation. Same data, browser smooths visually — useful when upscaling small images on a large canvas.">Smooth:</Typography>
+                      <Switch checked={smooth} onChange={() => { if (!lockDisplay) setSmooth(!smooth); }} disabled={lockDisplay} size="small" sx={switchStyles.small} />
                       {!isGallery && showLens && (
                         <>
                           <Typography sx={{ ...typography.label, fontSize: 10 }}>Lens {lensMag}×</Typography>
@@ -3801,7 +3805,7 @@ function Show2D() {
               onMouseUp={lockView ? undefined : handleFftMouseUp}
               onMouseLeave={handleFftMouseLeave}
             >
-              <canvas ref={fftCanvasRef} width={canvasW} height={canvasH} style={{ width: canvasW, height: canvasH, imageRendering: "pixelated" }} />
+              <canvas ref={fftCanvasRef} width={canvasW} height={canvasH} style={{ width: canvasW, height: canvasH, imageRendering: imageRenderingStyle }} />
               <canvas ref={fftOverlayRef} width={Math.round(canvasW * DPR)} height={Math.round(canvasH * DPR)} style={{ position: "absolute", top: 0, left: 0, width: canvasW, height: canvasH, pointerEvents: "none" }} />
               {fftComputing && (
                 <Box sx={{ position: "absolute", top: 0, left: 0, width: canvasW, height: canvasH, display: "flex", alignItems: "center", justifyContent: "center", bgcolor: "rgba(0,0,0,0.6)", pointerEvents: "none" }}>
