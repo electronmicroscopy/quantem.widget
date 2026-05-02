@@ -587,7 +587,11 @@ function Show2D() {
         const ranges: { vmin: number; vmax: number }[] = [];
         for (let i = 0; i < nImages; i++) {
           const cs = linkedContrast ? contrastRef.current.linked : (contrastRef.current.perImage.get(i) || { vminPct: 0, vmaxPct: 100 });
-          const cr = cachedRanges[i] || { min: 0, max: 1 };
+          let cr = cachedRanges[i];
+          if (!cr || cr.min === cr.max) {
+            if (rawDataRef.current && rawDataRef.current[i]) cr = findDataRange(rawDataRef.current[i]);
+          }
+          cr = cr || { min: 0, max: 1 };
           if (cs.vminPct > 0 || cs.vmaxPct < 100) {
             ranges.push(sliderRange(cr.min, cr.max, cs.vminPct, cs.vmaxPct));
           } else {
@@ -1273,10 +1277,13 @@ function Show2D() {
         rangeMin = logScale ? Math.log1p(Math.max(traitVmin!, 0)) : traitVmin!;
         rangeMax = logScale ? Math.log1p(Math.max(traitVmax!, 0)) : traitVmax!;
       } else {
-        // GPU range compute is async; fall back to sync findDataRange when cache missing.
+        // GPU range compute is async — when cache missing OR collapsed (min==max from race),
+        // sync findDataRange on raw data to ensure non-degenerate range.
         let cached = cachedRanges[i];
-        if (!cached && rawDataRef.current && rawDataRef.current[i]) {
-          cached = findDataRange(rawDataRef.current[i]);
+        if (!cached || cached.min === cached.max) {
+          if (rawDataRef.current && rawDataRef.current[i]) {
+            cached = findDataRange(rawDataRef.current[i]);
+          }
         }
         cached = cached || { min: 0, max: 1 };
         rangeMin = cached.min;
