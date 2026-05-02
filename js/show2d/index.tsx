@@ -2719,7 +2719,8 @@ function Show2D() {
     if (isGallery && idx !== selectedIdx) {
       if (lockNavigation) return;
       setSelectedIdx(idx);
-      return;
+      // Continue to pan setup so click-drag on unselected panel pans immediately
+      // (no double-click required to select first then drag).
     }
     // Check if click is on the lens inset — edge = resize, interior = drag
     if (!lockDisplay && showLens && !isGallery && idx === 0) {
