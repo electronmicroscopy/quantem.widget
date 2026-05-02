@@ -201,7 +201,6 @@ class Show2D(anywidget.AnyWidget):
     pixel_size = traitlets.Float(0.0).tag(sync=True)
     scale_bar_visible = traitlets.Bool(True).tag(sync=True)
     size = traitlets.Int(0).tag(sync=True)  # Canvas rendering size in CSS pixels; 0 = frontend default
-    smooth = traitlets.Bool(False).tag(sync=True)  # CSS image-rendering: auto (smooth) vs pixelated
 
     # =========================================================================
     # UI Visibility
