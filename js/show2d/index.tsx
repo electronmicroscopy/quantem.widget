@@ -26,7 +26,7 @@ import { drawScaleBarHiDPI, drawFFTScaleBarHiDPI, drawColorbar, roundToNiceValue
 import JSZip from "jszip";
 import { extractFloat32, formatNumber, downloadBlob } from "../format";
 import { computeHistogramFromBytes } from "../histogram";
-import { findDataRange, applyLogScale, applyLogScaleInPlace, percentileClip, sliderRange, computeStats } from "../stats";
+import { findDataRange, applyLogScale, percentileClip, sliderRange, computeStats } from "../stats";
 import { ControlCustomizer } from "../control-customizer";
 import { computeToolVisibility } from "../tool-parity";
 
@@ -71,7 +71,7 @@ import { COLORMAPS, COLORMAP_NAMES, renderToOffscreen, renderToOffscreenReuse, G
 import "./show2d.css";
 
 const MIN_ZOOM = 0.5;
-const MAX_ZOOM = 10;
+const MAX_ZOOM = 20;
 
 const DPR = window.devicePixelRatio || 1;
 
@@ -222,7 +222,6 @@ type ZoomState = { zoom: number; panX: number; panY: number };
 const SINGLE_IMAGE_TARGET = 500;
 const GALLERY_IMAGE_TARGET = 300;
 const DEFAULT_FFT_ZOOM = 3;
-const DEFAULT_ZOOM_STATE: ZoomState = { zoom: 1, panX: 0, panY: 0 };
 const PROFILE_COLORS = ["#4fc3f7", "#81c784", "#ffb74d", "#ce93d8", "#ef5350", "#ffd54f", "#90a4ae", "#a1887f"];
 type ROIItem = { row: number; col: number; shape: string; radius: number; radius_inner: number; width: number; height: number; color: string; line_width: number; highlight: boolean };
 const ROI_COLORS = ["#4fc3f7", "#81c784", "#ffb74d", "#ce93d8", "#ef5350", "#ffd54f", "#90a4ae", "#a1887f"];
@@ -387,9 +386,29 @@ function Show2D() {
   const [autoContrast, setAutoContrast] = useModelState<boolean>("auto_contrast");
   const [traitVmin] = useModelState<number | null>("vmin");
   const [traitVmax] = useModelState<number | null>("vmax");
+  const [traitVmins] = useModelState<(number | null)[] | null>("vmins");
+  const [traitVmaxs] = useModelState<(number | null)[] | null>("vmaxs");
+  const [zoomRowTrait] = useModelState<number | null>("zoom_row");
+  const [zoomColTrait] = useModelState<number | null>("zoom_col");
+  const [diffMode, setDiffMode] = useModelState<boolean>("diff_mode");
+  const [alignDy] = useModelState<number>("align_dy");
+  const [alignDx] = useModelState<number>("align_dx");
+  const [diffBytes] = useModelState<DataView>("diff_bytes");
+  const [diffDataMin] = useModelState<number>("diff_data_min");
+  const [diffDataMax] = useModelState<number>("diff_data_max");
+  const [alignRequest, setAlignRequest] = useModelState<number>("align_request");
+  const [alignMethod] = useModelState<string>("align_method"); void alignMethod;
+  const [, setAlignViewRow0] = useModelState<number>("align_view_row0");
+  const [, setAlignViewRow1] = useModelState<number>("align_view_row1");
+  const [, setAlignViewCol0] = useModelState<number>("align_view_col0");
+  const [, setAlignViewCol1] = useModelState<number>("align_view_col1");
+  const [diffReference] = useModelState<number>("diff_reference");
+  void diffBytes; void diffDataMin; void diffDataMax; void alignDy; void alignDx;  // referenced below
 
   // Customization
   const [canvasSizeTrait] = useModelState<number>("size");
+  const [smooth, setSmooth] = useModelState<boolean>("smooth");
+  const imageRenderingStyle = smooth ? "auto" : "pixelated";
 
   // Scale bar
   const [pixelSize] = useModelState<number>("pixel_size");
@@ -474,26 +493,59 @@ function Show2D() {
   const [canvasReady, setCanvasReady] = React.useState(0);  // Trigger re-render when refs attached
 
   // Zoom/Pan state - per-image when not linked, shared when linked
+  const [initialZoom] = useModelState<number>("initial_zoom");
+  const [linkPan, setLinkPan] = useModelState<boolean>("link_pan");
+  const [imgHeight] = useModelState<number>("height");
+  const [imgWidth] = useModelState<number>("width");
+  // Note: pan derived from zoom_row/zoom_col is applied via a useEffect AFTER canvasW/canvasH
+  // are computed (see "Initial pan from zoom_row/zoom_col" effect below).
+  const initialZoomState: ZoomState = React.useMemo(
+    () => ({ zoom: Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, initialZoom || 1)), panX: 0, panY: 0 }),
+    [initialZoom]
+  );
+  void linkPan; void setLinkPan; void imgWidth; void imgHeight;
   const [zoomStates, setZoomStates] = React.useState<Map<number, ZoomState>>(new Map());
-  const [linkedZoomState, setLinkedZoomState] = React.useState<ZoomState>(DEFAULT_ZOOM_STATE);
-  const [linkedZoom, setLinkedZoom] = React.useState(false);  // Link zoom across gallery images
+  const [linkedZoomState, setLinkedZoomState] = React.useState<ZoomState>(initialZoomState);
+  const [linkedZoom, setLinkedZoom] = useModelState<boolean>("link_zoom");
   const [isDraggingPan, setIsDraggingPan] = React.useState(false);
   const [panStart, setPanStart] = React.useState<{ x: number, y: number, pX: number, pY: number } | null>(null);
 
-  // Helper to get zoom state for an image
+  // Helper to get zoom state for an image. zoom and pan link independently:
+  //   zoom from linkedZoomState if linkedZoom else per-image
+  //   pan  from linkedZoomState if linkPan  else per-image
   const getZoomState = React.useCallback((idx: number): ZoomState => {
-    if (linkedZoom) return linkedZoomState;
-    return zoomStates.get(idx) || DEFAULT_ZOOM_STATE;
-  }, [linkedZoom, linkedZoomState, zoomStates]);
+    const per = zoomStates.get(idx) || initialZoomState;
+    return {
+      zoom: linkedZoom ? linkedZoomState.zoom : per.zoom,
+      panX: linkPan ? linkedZoomState.panX : per.panX,
+      panY: linkPan ? linkedZoomState.panY : per.panY,
+    };
+  }, [linkedZoom, linkPan, linkedZoomState, zoomStates, initialZoomState]);
 
-  // Helper to set zoom state for an image
+  // Helper to set zoom state for an image. zoom and pan honored independently:
+  //   zoom: writes to linkedZoomState if linkedZoom, else per-image
+  //   pan:  writes to linkedZoomState if linkPan, else per-image
   const setZoomState = React.useCallback((idx: number, state: ZoomState) => {
-    if (linkedZoom) {
-      setLinkedZoomState(state);
-    } else {
-      setZoomStates(prev => new Map(prev).set(idx, state));
+    if (linkedZoom || linkPan) {
+      setLinkedZoomState(prev => ({
+        zoom: linkedZoom ? state.zoom : prev.zoom,
+        panX: linkPan ? state.panX : prev.panX,
+        panY: linkPan ? state.panY : prev.panY,
+      }));
     }
-  }, [linkedZoom]);
+    if (!linkedZoom || !linkPan) {
+      setZoomStates(prev => {
+        const m = new Map(prev);
+        const cur = m.get(idx) || initialZoomState;
+        m.set(idx, {
+          zoom: linkedZoom ? cur.zoom : state.zoom,
+          panX: linkPan ? cur.panX : state.panX,
+          panY: linkPan ? cur.panY : state.panY,
+        });
+        return m;
+      });
+    }
+  }, [linkedZoom, linkPan, initialZoomState]);
 
   // FFT zoom/pan state (single mode)
   const [fftZoom, setFftZoom] = React.useState(DEFAULT_FFT_ZOOM);
@@ -503,7 +555,7 @@ function Show2D() {
   const [fftPanStart, setFftPanStart] = React.useState<{ x: number, y: number, pX: number, pY: number } | null>(null);
 
   // Histogram state — per-image contrast ranges (gallery) or single (one image)
-  const [linkedContrast, setLinkedContrast] = React.useState(true);
+  const [linkedContrast, setLinkedContrast] = useModelState<boolean>("link_contrast");
   const [linkedContrastState, setLinkedContrastState] = React.useState<{ vminPct: number; vmaxPct: number }>({ vminPct: 0, vmaxPct: 100 });
   const [contrastStates, setContrastStates] = React.useState<Map<number, { vminPct: number; vmaxPct: number }>>(new Map());
   // Ref mirror for fast slider path (bypass React effect batching)
@@ -662,6 +714,9 @@ function Show2D() {
   const gpuFFTRef = React.useRef<WebGPUFFT | null>(null);
   const gpuReadyRef = React.useRef(false);
   const rawDataRef = React.useRef<Float32Array[] | null>(null);
+  const diffCanvasRefs = React.useRef<(HTMLCanvasElement | null)[]>([]);
+  const diffFftCanvasRef = React.useRef<HTMLCanvasElement | null>(null);
+  const diffFftMagRef = React.useRef<Float32Array | null>(null);
 
   // WebGPU colormap engine — uses refs (not state) to avoid re-triggering
   // effects when GPU initializes. Effects check refs opportunistically:
@@ -713,10 +768,38 @@ function Show2D() {
 
   // Layout calculations
   const isGallery = nImages > 1;
-  const effectiveNcols = Math.min(ncols, nImages);
+  const showDiffPanel = diffMode && nImages >= 2;
+  const diffPanelCount = showDiffPanel ? Math.max(0, nImages - 1) : 0;
+  const effectiveNcols = Math.min(ncols, nImages) + diffPanelCount;
+  const diffOtherIndices = React.useMemo(
+    () => Array.from({ length: nImages }, (_, i) => i).filter(i => i !== diffReference),
+    [nImages, diffReference]
+  );
   const displayScale = canvasSize / Math.max(width, height);
   const canvasW = Math.round(width * displayScale);
   const canvasH = Math.round(height * displayScale);
+
+  // Initial pan from zoom_row/zoom_col — runs once after first render with valid canvas dims.
+  // panX/panY computed so target image (zoomRow, zoomCol) lands at canvas center after transform:
+  //   ctx.translate(cx+panX, cy+panY) ⋅ scale(zoom) ⋅ translate(-cx,-cy)
+  //   target screen = cx + panX + zoom * (target_canvas - cx) = cx
+  //   ⟹ panX = zoom * (cx - target_canvas) = zoom * canvasW * (0.5 - col/width)
+  const initialPanAppliedRef = React.useRef(false);
+  React.useEffect(() => {
+    if (initialPanAppliedRef.current) return;
+    if (zoomRowTrait == null && zoomColTrait == null) return;
+    if (canvasW <= 0 || canvasH <= 0 || width <= 0 || height <= 0) return;
+    const z = initialZoomState.zoom;
+    const panX = zoomColTrait != null ? z * canvasW * (0.5 - zoomColTrait / width) : 0;
+    const panY = zoomRowTrait != null ? z * canvasH * (0.5 - zoomRowTrait / height) : 0;
+    setLinkedZoomState({ zoom: z, panX, panY });
+    setZoomStates(prev => {
+      const m = new Map(prev);
+      for (let i = 0; i < nImages; i++) m.set(i, { zoom: z, panX, panY });
+      return m;
+    });
+    initialPanAppliedRef.current = true;
+  }, [zoomRowTrait, zoomColTrait, canvasW, canvasH, width, height, nImages, initialZoomState.zoom]);
   const floatsPerImage = width * height;
   const galleryGridWidth = isGallery ? effectiveNcols * canvasW + (effectiveNcols - 1) * 8 : canvasW;
   const profileCanvasWidth = galleryGridWidth;
@@ -804,6 +887,158 @@ function Show2D() {
   }, [nImages]);
 
   // Parse frame data, store raw floats for FFT, and upload to GPU if ready
+  const diffFloatsMemo = React.useMemo(() => {
+    if (!diffMode || nImages !== 2) return null;
+    const buf = extractFloat32(diffBytes);
+    if (!buf || buf.length === 0) return null;
+    return new Float32Array(buf);
+  }, [diffMode, nImages, diffBytes]);
+
+  // FFT of diff (n=2 only, uses Python diff_bytes — static; recomputes only on align/data change)
+  React.useEffect(() => {
+    if (!effectiveShowFft || !showDiffPanel || nImages !== 2) return;
+    const bytes = extractFloat32(diffBytes);
+    if (!bytes || bytes.length !== width * height) return;
+    const canvas = diffFftCanvasRef.current;
+    if (!canvas) return;
+    const fftW = nextPow2(width), fftH = nextPow2(height);
+    const real = new Float32Array(fftW * fftH);
+    const imag = new Float32Array(fftW * fftH);
+    const src = new Float32Array(bytes);
+    if (fftWindow) applyHannWindow2D(src, width, height);
+    const padR = Math.floor((fftH - height) / 2), padC = Math.floor((fftW - width) / 2);
+    for (let r = 0; r < height; r++) {
+      for (let c = 0; c < width; c++) real[(r + padR) * fftW + c + padC] = src[r * width + c];
+    }
+    let cancelled = false;
+    (async () => {
+      const result = await fft2dAsync(real, imag, fftW, fftH, false);
+      if (cancelled) return;
+      const mag = computeMagnitude(result.real, result.imag);
+      fftshift(mag, fftW, fftH);
+      diffFftMagRef.current = mag;
+      const { min, max } = autoEnhanceFFT(mag, fftW, fftH);
+      const off = renderToOffscreen(mag, fftW, fftH, COLORMAPS[fftColormap] || COLORMAPS.inferno, min, max);
+      if (!off) return;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
+      ctx.imageSmoothingEnabled = fftW < canvasW || fftH < canvasH;
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(off, 0, 0, fftW, fftH, 0, 0, canvasW, canvasH);
+    })();
+    return () => { cancelled = true; };
+  }, [effectiveShowFft, showDiffPanel, nImages, diffBytes, width, height, fftWindow, fftColormap, canvasW, canvasH]);
+
+  // Diff panels render — DYNAMIC. One per non-reference image: image[ref] − image[i].
+  // Computed at canvas resolution from raw float data, re-running on zoom/pan/align change.
+  // For n=2: alignDy/dx applied to non-ref image. For n>2: no align (per-pair align not yet supported).
+  React.useEffect(() => {
+    if (!showDiffPanel) return;
+    const raw = rawDataRef.current;
+    if (!raw || raw.length < 2) return;
+    const ref = diffReference;
+    const a = raw[ref];
+    if (!a) return;
+    diffOtherIndices.forEach((otherIdx, slot) => {
+      renderDiffPanel(slot, a, raw[otherIdx], otherIdx);
+    });
+    // forEach inlines below — extracted as effect helper.
+    function renderDiffPanel(slot: number, refData: Float32Array, otherData: Float32Array | undefined, otherIdx: number) {
+    if (!otherData) return;
+    const canvas = diffCanvasRefs.current[slot];
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    const zs0 = getZoomState(ref);
+    const zs1 = getZoomState(otherIdx);
+    const useAlign = nImages === 2;
+    const adY = useAlign ? alignDy : 0;
+    const adX = useAlign ? alignDx : 0;
+    const a = refData, b = otherData;
+    const cw = canvasW, ch = canvasH;
+    const cx = cw / 2, cy = ch / 2;
+    const sx = width / cw, sy = height / ch;
+    const diff = new Float32Array(cw * ch);
+    let mn = Infinity, mx = -Infinity;
+    // Smooth: bilinear (slower, sub-pixel correct). !Smooth: nearest neighbor (faster, pixelated).
+    const Hm1 = height - 1, Wm1 = width - 1;
+    const a_panX = zs0.panX, a_panY = zs0.panY, a_zoom = zs0.zoom;
+    const b_panX = zs1.panX, b_panY = zs1.panY, b_zoom = zs1.zoom;
+    if (smooth) {
+      for (let y = 0; y < ch; y++) {
+        const ayu = (y - cy - a_panY) / a_zoom + cy;
+        const byu = (y - cy - b_panY) / b_zoom + cy;
+        const aRowF = ayu * sy;
+        const bRowF = byu * sy - adY;
+        const aR0 = aRowF | 0, bR0 = bRowF | 0;
+        const aFr = aRowF - aR0, bFr = bRowF - bR0;
+        const aRowOOB = aR0 < 0 || aR0 >= Hm1;
+        const bRowOOB = bR0 < 0 || bR0 >= Hm1;
+        const aRowOff = aR0 * width;
+        const bRowOff = bR0 * width;
+        const rowOff = y * cw;
+        for (let x = 0; x < cw; x++) {
+          const axu = (x - cx - a_panX) / a_zoom + cx;
+          const bxu = (x - cx - b_panX) / b_zoom + cx;
+          const aColF = axu * sx;
+          const bColF = bxu * sx - adX;
+          const aC0 = aColF | 0, bC0 = bColF | 0;
+          let v = 0;
+          if (!aRowOOB && !bRowOOB && aC0 >= 0 && aC0 < Wm1 && bC0 >= 0 && bC0 < Wm1) {
+            const aFc = aColF - aC0, bFc = bColF - bC0;
+            const ai = aRowOff + aC0;
+            const bi = bRowOff + bC0;
+            const aV = (a[ai] * (1 - aFc) + a[ai + 1] * aFc) * (1 - aFr) +
+                       (a[ai + width] * (1 - aFc) + a[ai + width + 1] * aFc) * aFr;
+            const bV = (b[bi] * (1 - bFc) + b[bi + 1] * bFc) * (1 - bFr) +
+                       (b[bi + width] * (1 - bFc) + b[bi + width + 1] * bFc) * bFr;
+            v = aV - bV;
+          }
+          diff[rowOff + x] = v;
+          if (v < mn) mn = v;
+          if (v > mx) mx = v;
+        }
+      }
+    } else {
+      for (let y = 0; y < ch; y++) {
+        const ayu = (y - cy - a_panY) / a_zoom + cy;
+        const byu = (y - cy - b_panY) / b_zoom + cy;
+        const aRow = (ayu * sy + 0.5) | 0;
+        const bRow = (byu * sy - adY + 0.5) | 0;
+        const aRowOK = aRow >= 0 && aRow < height;
+        const bRowOK = bRow >= 0 && bRow < height;
+        const aRowOff = aRow * width;
+        const bRowOff = bRow * width;
+        const rowOff = y * cw;
+        for (let x = 0; x < cw; x++) {
+          const axu = (x - cx - a_panX) / a_zoom + cx;
+          const bxu = (x - cx - b_panX) / b_zoom + cx;
+          const aCol = (axu * sx + 0.5) | 0;
+          const bCol = (bxu * sx - adX + 0.5) | 0;
+          let v = 0;
+          if (aRowOK && bRowOK && aCol >= 0 && aCol < width && bCol >= 0 && bCol < width) {
+            v = a[aRowOff + aCol] - b[bRowOff + bCol];
+          }
+          diff[rowOff + x] = v;
+          if (v < mn) mn = v;
+          if (v > mx) mx = v;
+        }
+      }
+    }
+    const sym = Math.max(Math.abs(mn), Math.abs(mx));
+    // Diff is signed-around-zero — use diverging cmap (RdBu) if user picked a sequential one.
+    const sequentialCmaps = new Set(["inferno", "viridis", "plasma", "magma", "hot", "gray", "turbo"]);
+    const diffCmap = sequentialCmaps.has(cmap) ? "RdBu" : cmap;
+    const off = renderToOffscreen(diff, cw, ch, COLORMAPS[diffCmap] || COLORMAPS.RdBu, -sym, sym);
+    if (!off) return;
+    ctx.imageSmoothingEnabled = smooth;
+    if (smooth) ctx.imageSmoothingQuality = "high";
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(off, 0, 0);
+    }
+  }, [showDiffPanel, diffOtherIndices, diffReference, nImages, dataVersion, width, height, cmap, smooth, canvasW, canvasH,
+      alignDy, alignDx, getZoomState, linkedZoom, linkPan, linkedZoomState, zoomStates]);
+
   React.useEffect(() => {
     if (!allFloats || allFloats.length === 0) return;
     const dataArrays: Float32Array[] = [];
@@ -820,7 +1055,7 @@ function Show2D() {
       gpuDataVersionRef.current++;
     }
     setDataVersion(v => v + 1);
-  }, [allFloats, nImages, floatsPerImage]);
+  }, [allFloats, nImages, floatsPerImage, diffFloatsMemo]);
 
   // Initialize reusable offscreen canvases (one per image, resized when dimensions change)
   React.useEffect(() => {
@@ -895,7 +1130,6 @@ function Show2D() {
 
   const gpuDataVersionRef = React.useRef(0);
   // Generation counter for colormap — coalesces rapid slider events to ≤1 render per frame
-  const cmapGenRef = React.useRef(0);
   // Cached per-image data ranges — only recomputed when data or logScale changes, NOT on slider drag
   const dataRangesRef = React.useRef<{ min: number; max: number }[]>([]);
   // Cached log-transformed data — avoids 12×16M log1p calls per slider tick
@@ -1014,7 +1248,6 @@ function Show2D() {
 
     // Compute per-image vmin/vmax from CACHED data ranges (no findDataRange per tick).
     // dataRangesRef is precomputed when data or logScale changes.
-    const useGPUCmap = !!(gpuCmapRef.current && gpuCmapReadyRef.current && gpuCmapRef.current.slotCount >= nImages);
     const cachedRanges = dataRangesRef.current;
     const hasAbsoluteRange = traitVmin != null && traitVmax != null;
     const ranges: { vmin: number; vmax: number }[] = [];
@@ -1022,17 +1255,35 @@ function Show2D() {
       let vmin: number, vmax: number;
       const cs = linkedContrast ? linkedContrastState : (contrastStates.get(i) || { vminPct: 0, vmaxPct: 100 });
 
+      // Per-image absolute range (vmins/vmaxs) takes precedence over scalar (vmin/vmax)
+      const perI_min = traitVmins && traitVmins[i] != null ? traitVmins[i] : null;
+      const perI_max = traitVmaxs && traitVmaxs[i] != null ? traitVmaxs[i] : null;
+      const hasPerImage = perI_min != null && perI_max != null;
+      const isDiffSlot = false;
+      const diffSym = 0;
+
       let rangeMin: number, rangeMax: number;
-      if (hasAbsoluteRange) {
+      if (isDiffSlot) {
+        rangeMin = -diffSym;
+        rangeMax = diffSym;
+      } else if (hasPerImage) {
+        rangeMin = logScale ? Math.log1p(Math.max(perI_min!, 0)) : perI_min!;
+        rangeMax = logScale ? Math.log1p(Math.max(perI_max!, 0)) : perI_max!;
+      } else if (hasAbsoluteRange) {
         rangeMin = logScale ? Math.log1p(Math.max(traitVmin!, 0)) : traitVmin!;
         rangeMax = logScale ? Math.log1p(Math.max(traitVmax!, 0)) : traitVmax!;
       } else {
-        const cached = cachedRanges[i] || { min: 0, max: 1 };
+        // GPU range compute is async; fall back to sync findDataRange when cache missing.
+        let cached = cachedRanges[i];
+        if (!cached && rawDataRef.current && rawDataRef.current[i]) {
+          cached = findDataRange(rawDataRef.current[i]);
+        }
+        cached = cached || { min: 0, max: 1 };
         rangeMin = cached.min;
         rangeMax = cached.max;
       }
 
-      if (!hasAbsoluteRange && autoContrast) {
+      if (!hasAbsoluteRange && !hasPerImage && autoContrast) {
         // Auto-contrast: use GPU-precomputed percentile ranges.
         // If GPU cache not ready yet, use full data range as placeholder
         // (GPU auto-contrast effect will fire async and trigger re-render).
@@ -1113,7 +1364,7 @@ function Show2D() {
       }
       setOffscreenVersion(v => v + 1);
     }
-  }, [dataVersion, nImages, width, height, cmap, logScale, autoContrast, linkedContrast, linkedContrastState, contrastStates, traitVmin, traitVmax]);
+  }, [dataVersion, nImages, width, height, cmap, logScale, autoContrast, linkedContrast, linkedContrastState, contrastStates, traitVmin, traitVmax, traitVmins, traitVmaxs, diffMode, diffDataMin, diffDataMax]);
 
   // -------------------------------------------------------------------------
   // Draw effect: zoom/pan changes — cheap, just drawImage from cached offscreens
@@ -1129,10 +1380,11 @@ function Show2D() {
       const ctx = canvas.getContext("2d");
       if (!ctx) continue;
 
-      ctx.imageSmoothingEnabled = false;
+      ctx.imageSmoothingEnabled = smooth;
+      if (smooth) ctx.imageSmoothingQuality = "high";
       ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-      const zs = linkedZoom ? linkedZoomState : (zoomStates.get(i) || DEFAULT_ZOOM_STATE);
+      const zs = getZoomState(i);
       const { zoom, panX, panY } = zs;
 
       if (zoom !== 1 || panX !== 0 || panY !== 0) {
@@ -1148,7 +1400,7 @@ function Show2D() {
         ctx.drawImage(offscreen, 0, 0, width, height, 0, 0, canvasW, canvasH);
       }
     }
-  }, [offscreenVersion, nImages, width, height, displayScale, canvasW, canvasH, canvasReady, linkedZoom, linkedZoomState, zoomStates]);
+  }, [offscreenVersion, nImages, width, height, displayScale, canvasW, canvasH, canvasReady, linkedZoom, linkedZoomState, zoomStates, smooth]);
 
   // -------------------------------------------------------------------------
   // Render Overlays (scale bar, colorbar, zoom indicator)
@@ -1161,7 +1413,7 @@ function Show2D() {
       if (!ctx) continue;
 
       if (scaleBarVisible) {
-        const zs = linkedZoom ? linkedZoomState : (zoomStates.get(i) || DEFAULT_ZOOM_STATE);
+        const zs = getZoomState(i);
         const unit = pixelSize > 0 ? "Å" as const : "px" as const;
         const pxSize = pixelSize > 0 ? pixelSize : 1;
         drawScaleBarHiDPI(overlay, DPR, zs.zoom, pxSize, unit, width);
@@ -1185,7 +1437,7 @@ function Show2D() {
 
       // ROI overlay — draw all ROIs
       if (!hideRoi && roiActive && roiList && roiList.length > 0) {
-        const zs = linkedZoom ? linkedZoomState : (zoomStates.get(i) || DEFAULT_ZOOM_STATE);
+        const zs = getZoomState(i);
         const { zoom, panX, panY } = zs;
         const cx = canvasW / 2;
         const cy = canvasH / 2;
@@ -1258,7 +1510,7 @@ function Show2D() {
 
       // Line profile overlay
       if (!hideProfile && profileActive && profilePoints.length > 0) {
-        const zs = linkedZoom ? linkedZoomState : (zoomStates.get(i) || DEFAULT_ZOOM_STATE);
+        const zs = getZoomState(i);
         const { zoom, panX, panY } = zs;
         ctx.save();
         ctx.scale(DPR, DPR);
@@ -1301,7 +1553,7 @@ function Show2D() {
 
       // Distance measurement overlay
       if (measureActive && measurePoints.length >= 1) {
-        const zs = linkedZoom ? linkedZoomState : (zoomStates.get(i) || DEFAULT_ZOOM_STATE);
+        const zs = getZoomState(i);
         const { zoom, panX, panY } = zs;
         ctx.save();
         ctx.scale(DPR, DPR);
@@ -2204,14 +2456,14 @@ function Show2D() {
 
   const handleDoubleClick = (idx: number) => {
     if (lockView) return;
-    setZoomState(idx, DEFAULT_ZOOM_STATE);
+    setZoomState(idx, initialZoomState);
   };
 
   // Reset view (zoom/pan only — preserves profile, FFT state, etc.)
   const handleResetAll = () => {
     if (lockView) return;
     setZoomStates(new Map());
-    setLinkedZoomState(DEFAULT_ZOOM_STATE);
+    setLinkedZoomState(initialZoomState);
     setGalleryFftStates(new Map());
     setLinkedFftZoomState({ zoom: DEFAULT_FFT_ZOOM, panX: 0, panY: 0 });
     setFftZoom(DEFAULT_FFT_ZOOM);
@@ -2376,7 +2628,7 @@ function Show2D() {
     const rect = canvas.getBoundingClientRect();
     const mouseCanvasX = (e.clientX - rect.left) * (canvas.width / rect.width);
     const mouseCanvasY = (e.clientY - rect.top) * (canvas.height / rect.height);
-    const zs = linkedZoom ? linkedZoomState : (zoomStates.get(idx) || DEFAULT_ZOOM_STATE);
+    const zs = getZoomState(idx);
     const cx = canvasW / 2;
     const cy = canvasH / 2;
     return {
@@ -2417,7 +2669,7 @@ function Show2D() {
   };
 
   const getHitArea = () => {
-    const zoom = (linkedZoom ? linkedZoomState : (zoomStates.get(selectedIdx) || DEFAULT_ZOOM_STATE)).zoom;
+    const zoom = (getZoomState(selectedIdx)).zoom;
     return RESIZE_HIT_AREA_PX / (displayScale * zoom);
   };
 
@@ -2604,7 +2856,7 @@ function Show2D() {
       const rect = canvas.getBoundingClientRect();
       const mouseCanvasX = (e.clientX - rect.left) * (canvas.width / rect.width);
       const mouseCanvasY = (e.clientY - rect.top) * (canvas.height / rect.height);
-      const zs = linkedZoom ? linkedZoomState : (zoomStates.get(idx) || DEFAULT_ZOOM_STATE);
+      const zs = getZoomState(idx);
       const cx = canvasW / 2;
       const cy = canvasH / 2;
       const imageCanvasX = (mouseCanvasX - cx - zs.panX) / zs.zoom + cx;
@@ -2639,7 +2891,7 @@ function Show2D() {
       const { imgCol, imgRow } = screenToImg(e, idx);
       const p0 = profilePoints[0];
       const p1 = profilePoints[1];
-      const activeZoom = linkedZoom ? linkedZoomState.zoom : (zoomStates.get(idx) || DEFAULT_ZOOM_STATE).zoom;
+      const activeZoom = linkedZoom ? linkedZoomState.zoom : (zoomStates.get(idx) || initialZoomState).zoom;
       const hitRadius = 10 / (displayScale * activeZoom);
       const d0 = Math.sqrt((imgCol - p0.col) ** 2 + (imgRow - p0.row) ** 2);
       const d1 = Math.sqrt((imgCol - p1.col) ** 2 + (imgRow - p1.row) ** 2);
@@ -2789,7 +3041,7 @@ function Show2D() {
           const rect = canvas.getBoundingClientRect();
           const mouseCanvasX = (e.clientX - rect.left) * (canvas.width / rect.width);
           const mouseCanvasY = (e.clientY - rect.top) * (canvas.height / rect.height);
-          const zs = linkedZoom ? linkedZoomState : (zoomStates.get(idx) || DEFAULT_ZOOM_STATE);
+          const zs = getZoomState(idx);
           const cx = canvasW / 2;
           const cy = canvasH / 2;
           const imgX = ((mouseCanvasX - cx - zs.panX) / zs.zoom + cx) / displayScale;
@@ -2820,7 +3072,7 @@ function Show2D() {
           const rect = canvas.getBoundingClientRect();
           const mouseCanvasX = (e.clientX - rect.left) * (canvas.width / rect.width);
           const mouseCanvasY = (e.clientY - rect.top) * (canvas.height / rect.height);
-          const zs = linkedZoom ? linkedZoomState : (zoomStates.get(idx) || DEFAULT_ZOOM_STATE);
+          const zs = getZoomState(idx);
           const cx = canvasW / 2;
           const cy = canvasH / 2;
           const imgX = ((mouseCanvasX - cx - zs.panX) / zs.zoom + cx) / displayScale;
@@ -3391,11 +3643,39 @@ function Show2D() {
                 {showFft && width * height > 2048 * 2048 && (
                   <Typography sx={{ fontSize: 9, color: "#f59e0b", ml: 0.5 }}>slow ({width}×{height})</Typography>
                 )}
+                {nImages === 2 && (
+                  <>
+                    <Typography sx={{ ...typography.label, fontSize: 10 }} title="Show A − B as a third panel. Use w.align() first to cancel drift.">Diff:</Typography>
+                    <Switch checked={diffMode} onChange={() => { if (!lockDisplay) setDiffMode(!diffMode); }} disabled={lockDisplay} size="small" sx={switchStyles.small} />
+                  </>
+                )}
               </>
             )}
             <Box sx={{ flex: 1 }} />
             {!hideView && (
               <Button size="small" sx={compactButton} disabled={lockView || !needsReset} onClick={handleResetAll}>Reset</Button>
+            )}
+            {nImages === 2 && (
+              <>
+                <Button size="small" sx={compactButton} title="Auto-align on visible region with phase cross-correlation (DFT upsample=10, sub-pixel). Sets align_dy/dx so diff cancels drift." onClick={() => {
+                  // Compute current visible image region from image[0]'s zoom/pan.
+                  // Inverse transform: image_y at canvas y = ((y - cy - panY) / zoom + cy) * height/canvasH.
+                  const zs = getZoomState(0);
+                  const r0 = Math.max(0, Math.floor(((0 - canvasH / 2 - zs.panY) / zs.zoom + canvasH / 2) * height / canvasH));
+                  const r1 = Math.min(height, Math.ceil(((canvasH - canvasH / 2 - zs.panY) / zs.zoom + canvasH / 2) * height / canvasH));
+                  const c0 = Math.max(0, Math.floor(((0 - canvasW / 2 - zs.panX) / zs.zoom + canvasW / 2) * width / canvasW));
+                  const c1 = Math.min(width, Math.ceil(((canvasW - canvasW / 2 - zs.panX) / zs.zoom + canvasW / 2) * width / canvasW));
+                  // Send only when meaningfully cropped (zoom > ~1.05). Else full image.
+                  if (zs.zoom > 1.05 && r1 - r0 >= 8 && c1 - c0 >= 8) {
+                    setAlignViewRow0(r0); setAlignViewRow1(r1);
+                    setAlignViewCol0(c0); setAlignViewCol1(c1);
+                  } else {
+                    setAlignViewRow0(-1); setAlignViewRow1(-1);
+                    setAlignViewCol0(-1); setAlignViewCol1(-1);
+                  }
+                  setAlignRequest(alignRequest + 1);
+                }}>Align</Button>
+              </>
             )}
             {!hideExport && (
               <>
@@ -3429,7 +3709,7 @@ function Show2D() {
                     <canvas
                       ref={(el) => { if (el && canvasRefs.current[i] !== el) { canvasRefs.current[i] = el; setCanvasReady(c => c + 1); } }}
                       width={canvasW} height={canvasH}
-                      style={{ width: canvasW, height: canvasH, imageRendering: "pixelated" }}
+                      style={{ width: canvasW, height: canvasH, imageRendering: imageRenderingStyle }}
                     />
                     <canvas
                       ref={(el) => { overlayRefs.current[i] = el; }}
@@ -3473,13 +3753,37 @@ function Show2D() {
                       <canvas
                         ref={(el) => { fftCanvasRefs.current[i] = el; }}
                         width={canvasW} height={canvasH}
-                        style={{ width: canvasW, height: canvasH, imageRendering: "pixelated", display: "block" }}
+                        style={{ width: canvasW, height: canvasH, imageRendering: imageRenderingStyle, display: "block" }}
                       />
                       {fftComputing && !fftMagCacheGalleryRef.current[i] && (
                         <Box sx={{ position: "absolute", top: 0, left: 0, width: canvasW, height: canvasH, display: "flex", alignItems: "center", justifyContent: "center", bgcolor: "rgba(0,0,0,0.6)", pointerEvents: "none" }}>
                           <Typography sx={{ fontSize: 10, color: "#aaa", fontFamily: "monospace", "@keyframes pulse": { "0%,100%": { opacity: 0.4 }, "50%": { opacity: 1 } }, animation: "pulse 1.2s ease-in-out infinite" }}>FFT…</Typography>
                         </Box>
                       )}
+                    </Box>
+                  )}
+                </Box>
+              ))}
+              {showDiffPanel && diffOtherIndices.map((otherIdx, slot) => (
+                <Box key={`diff_${slot}`}>
+                  <Box sx={{ position: "relative", bgcolor: "#000", border: `2px solid ${themeColors.border}`, borderRadius: 0, width: canvasW, height: canvasH }}>
+                    <canvas
+                      ref={(el) => { diffCanvasRefs.current[slot] = el; }}
+                      width={canvasW} height={canvasH}
+                      style={{ width: canvasW, height: canvasH, imageRendering: imageRenderingStyle }}
+                    />
+                  </Box>
+                  <Typography sx={{ fontSize: 10, color: themeColors.textMuted, textAlign: "center", mt: 0.25 }}>
+                    {nImages === 2 ? "Diff (A − B)" : `Diff (#${diffReference + 1} − #${otherIdx + 1})`}
+                  </Typography>
+                  {/* FFT of diff (n=2 only) */}
+                  {effectiveShowFft && nImages === 2 && slot === 0 && (
+                    <Box sx={{ mt: 0.5, position: "relative", border: `2px solid ${themeColors.border}`, borderRadius: 0, bgcolor: "#000" }}>
+                      <canvas
+                        ref={(el) => { diffFftCanvasRef.current = el; }}
+                        width={canvasW} height={canvasH}
+                        style={{ width: canvasW, height: canvasH, imageRendering: imageRenderingStyle, display: "block" }}
+                      />
                     </Box>
                   )}
                 </Box>
@@ -3500,7 +3804,7 @@ function Show2D() {
               <canvas
                 ref={(el) => { if (el && canvasRefs.current[0] !== el) { canvasRefs.current[0] = el; setCanvasReady(c => c + 1); } }}
                 width={canvasW} height={canvasH}
-                style={{ width: canvasW, height: canvasH, imageRendering: "pixelated" }}
+                style={{ width: canvasW, height: canvasH, imageRendering: imageRenderingStyle }}
               />
               <canvas
                 ref={(el) => { overlayRefs.current[0] = el; }}
@@ -3631,6 +3935,8 @@ function Show2D() {
                     <Box sx={{ ...controlRow, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, opacity: lockDisplay ? 0.5 : 1, pointerEvents: lockDisplay ? "none" : "auto" }}>
                       <Typography sx={{ ...typography.label, fontSize: 10 }}>Auto:</Typography>
                       <Switch checked={autoContrast} onChange={() => { if (!lockDisplay) setAutoContrast(!autoContrast); }} disabled={lockDisplay} size="small" sx={switchStyles.small} />
+                      <Typography sx={{ ...typography.label, fontSize: 10 }} title="CSS bilinear interpolation. Same data, browser smooths visually — useful when upscaling small images on a large canvas.">Smooth:</Typography>
+                      <Switch checked={smooth} onChange={() => { if (!lockDisplay) setSmooth(!smooth); }} disabled={lockDisplay} size="small" sx={switchStyles.small} />
                       {!isGallery && showLens && (
                         <>
                           <Typography sx={{ ...typography.label, fontSize: 10 }}>Lens {lensMag}×</Typography>
@@ -3641,9 +3947,12 @@ function Show2D() {
                       )}
                       {isGallery && (
                         <>
-                          <Typography sx={{ ...typography.label, fontSize: 10 }}>Link Zoom</Typography>
+                          <Typography sx={{ ...typography.label, fontSize: 10 }}>Link:</Typography>
+                          <Typography sx={{ ...typography.label, fontSize: 10 }} title="Zoom together across panels.">Zoom</Typography>
                           <Switch checked={linkedZoom} onChange={() => { if (!lockDisplay) setLinkedZoom(!linkedZoom); }} disabled={lockDisplay} size="small" sx={switchStyles.small} />
-                          <Typography sx={{ ...typography.label, fontSize: 10 }}>Link Contrast</Typography>
+                          <Typography sx={{ ...typography.label, fontSize: 10 }} title="Pan together (independent of zoom).">Pan</Typography>
+                          <Switch checked={linkPan} onChange={() => { if (!lockDisplay) setLinkPan(!linkPan); }} disabled={lockDisplay} size="small" sx={switchStyles.small} />
+                          <Typography sx={{ ...typography.label, fontSize: 10 }} title="Share contrast slider across panels.">Contrast</Typography>
                           <Switch checked={linkedContrast} onChange={() => { if (!lockDisplay) setLinkedContrast(!linkedContrast); }} disabled={lockDisplay} size="small" sx={switchStyles.small} />
                         </>
                       )}
@@ -3653,10 +3962,24 @@ function Show2D() {
                     </Box>
                   )}
                 </Box>
-                {/* Right: Histogram aligned to the two rows */}
+                {/* Right: Histogram aligned to the two rows. When unlinked + gallery: stack one per image. */}
                 {!hideHistogram && (imageHistogramData || imageHistogramBins) && (
-                  <Box sx={{ display: "flex", flexDirection: "column", alignItems: "flex-end", justifyContent: "center", opacity: lockHistogram ? 0.5 : 1, pointerEvents: lockHistogram ? "none" : "auto" }}>
-                    <Histogram data={imageHistogramData} precomputedBins={imageHistogramBins} vminPct={imageVminPct} vmaxPct={imageVmaxPct} onRangeChange={(min, max) => { if (!lockHistogram) setContrastState(activeContrastIdx, { vminPct: min, vmaxPct: max }); }} width={110} height={58} theme={themeInfo.theme === "dark" ? "dark" : "light"} dataMin={traitVmin != null && traitVmax != null ? (logScale ? Math.log1p(Math.max(traitVmin, 0)) : traitVmin) : imageDataRange.min} dataMax={traitVmin != null && traitVmax != null ? (logScale ? Math.log1p(Math.max(traitVmax, 0)) : traitVmax) : imageDataRange.max} />
+                  <Box sx={{ display: "flex", flexDirection: "column", alignItems: "flex-end", justifyContent: "center", gap: 0.5, opacity: lockHistogram ? 0.5 : 1, pointerEvents: lockHistogram ? "none" : "auto" }}>
+                    {(!linkedContrast && isGallery && rawDataRef.current) ? (
+                      Array.from({ length: nImages }).map((_, i) => {
+                        const cs = contrastStates.get(i) || { vminPct: 0, vmaxPct: 100 };
+                        const raw = rawDataRef.current?.[i] || null;
+                        return (
+                          <Histogram key={i} data={raw} vminPct={cs.vminPct} vmaxPct={cs.vmaxPct}
+                            onRangeChange={(min, max) => { if (!lockHistogram) setContrastState(i, { vminPct: min, vmaxPct: max }); }}
+                            width={110} height={36} theme={themeInfo.theme === "dark" ? "dark" : "light"}
+                            dataMin={dataRangesRef.current[i]?.min ?? imageDataRange.min}
+                            dataMax={dataRangesRef.current[i]?.max ?? imageDataRange.max} />
+                        );
+                      })
+                    ) : (
+                      <Histogram data={imageHistogramData} precomputedBins={imageHistogramBins} vminPct={imageVminPct} vmaxPct={imageVmaxPct} onRangeChange={(min, max) => { if (!lockHistogram) setContrastState(activeContrastIdx, { vminPct: min, vmaxPct: max }); }} width={110} height={58} theme={themeInfo.theme === "dark" ? "dark" : "light"} dataMin={traitVmin != null && traitVmax != null ? (logScale ? Math.log1p(Math.max(traitVmin, 0)) : traitVmin) : imageDataRange.min} dataMax={traitVmin != null && traitVmax != null ? (logScale ? Math.log1p(Math.max(traitVmax, 0)) : traitVmax) : imageDataRange.max} />
+                    )}
                   </Box>
                 )}
               </Box>
@@ -3801,7 +4124,7 @@ function Show2D() {
               onMouseUp={lockView ? undefined : handleFftMouseUp}
               onMouseLeave={handleFftMouseLeave}
             >
-              <canvas ref={fftCanvasRef} width={canvasW} height={canvasH} style={{ width: canvasW, height: canvasH, imageRendering: "pixelated" }} />
+              <canvas ref={fftCanvasRef} width={canvasW} height={canvasH} style={{ width: canvasW, height: canvasH, imageRendering: imageRenderingStyle }} />
               <canvas ref={fftOverlayRef} width={Math.round(canvasW * DPR)} height={Math.round(canvasH * DPR)} style={{ position: "absolute", top: 0, left: 0, width: canvasW, height: canvasH, pointerEvents: "none" }} />
               {fftComputing && (
                 <Box sx={{ position: "absolute", top: 0, left: 0, width: canvasW, height: canvasH, display: "flex", alignItems: "center", justifyContent: "center", bgcolor: "rgba(0,0,0,0.6)", pointerEvents: "none" }}>

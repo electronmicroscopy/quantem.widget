@@ -739,7 +739,7 @@ function Show3D() {
   const [loopStart, setLoopStart] = useModelState<number>("loop_start");
   const [loopEnd, setLoopEnd] = useModelState<number>("loop_end");
   const [bookmarkedFrames, setBookmarkedFrames] = useModelState<number[]>("bookmarked_frames");
-  const [playbackPath, setPlaybackPath] = useModelState<number[]>("playback_path");
+  const [playbackPath] = useModelState<number[]>("playback_path");
 
   // Boomerang direction ref (avoids stale closure in setInterval)
   const bounceDirRef = React.useRef<1 | -1>(1);
@@ -775,7 +775,7 @@ function Show3D() {
   const [roiActive, setRoiActive] = useModelState<boolean>("roi_active");
   const [roiList, setRoiList] = useModelState<ROIItem[]>("roi_list");
   const [roiSelectedIdx, setRoiSelectedIdx] = useModelState<number>("roi_selected_idx");
-  const [roiStats] = useModelState<Record<string, number>>("roi_stats");
+  const [_roiStats] = useModelState<Record<string, number>>("roi_stats");
   const [roiPlotData] = useModelState<DataView>("roi_plot_data");
   const [newRoiShape, setNewRoiShape] = React.useState<"circle" | "square" | "rectangle" | "annular">("square");
 
@@ -2344,10 +2344,14 @@ function Show3D() {
       ...selectedRoi,
       row: Math.max(0, Math.min(height - 1, Math.round(selectedRoi.row + 3))),
       col: Math.max(0, Math.min(width - 1, Math.round(selectedRoi.col + 3))),
+      shape: selectedRoi.shape,
+      radius: selectedRoi.radius,
+      radius_inner: selectedRoi.radius_inner,
+      width: selectedRoi.width,
+      height: selectedRoi.height,
       color: ROI_COLORS[roiItems.length % ROI_COLORS.length],
-      locked: false,
+      line_width: selectedRoi.line_width,
       highlight: false,
-      visible: true,
     };
     const next = [...roiItems, duplicated];
     setRoiList(next);

@@ -194,6 +194,8 @@ class Show2D(anywidget.AnyWidget):
     auto_contrast = traitlets.Bool(False).tag(sync=True)
     vmin = traitlets.Float(None, allow_none=True).tag(sync=True)
     vmax = traitlets.Float(None, allow_none=True).tag(sync=True)
+    vmins = traitlets.List(trait=traitlets.Float(allow_none=True), allow_none=True, default_value=None).tag(sync=True)
+    vmaxs = traitlets.List(trait=traitlets.Float(allow_none=True), allow_none=True, default_value=None).tag(sync=True)
 
     # =========================================================================
     # Scale Bar
@@ -201,6 +203,26 @@ class Show2D(anywidget.AnyWidget):
     pixel_size = traitlets.Float(0.0).tag(sync=True)
     scale_bar_visible = traitlets.Bool(True).tag(sync=True)
     size = traitlets.Int(0).tag(sync=True)  # Canvas rendering size in CSS pixels; 0 = frontend default
+    smooth = traitlets.Bool(False).tag(sync=True)
+    initial_zoom = traitlets.Float(1.0).tag(sync=True)
+    zoom_row = traitlets.Float(None, allow_none=True).tag(sync=True)
+    zoom_col = traitlets.Float(None, allow_none=True).tag(sync=True)
+    link_zoom = traitlets.Bool(False).tag(sync=True)
+    link_pan = traitlets.Bool(False).tag(sync=True)
+    link_contrast = traitlets.Bool(True).tag(sync=True)
+    diff_mode = traitlets.Bool(False).tag(sync=True)
+    align_dy = traitlets.Float(0.0).tag(sync=True)
+    align_dx = traitlets.Float(0.0).tag(sync=True)
+    align_request = traitlets.Int(0).tag(sync=True)
+    align_method = traitlets.Unicode("phase").tag(sync=True)
+    align_view_row0 = traitlets.Int(-1).tag(sync=True)  # set by JS before align; -1 = full image
+    align_view_row1 = traitlets.Int(-1).tag(sync=True)
+    align_view_col0 = traitlets.Int(-1).tag(sync=True)
+    align_view_col1 = traitlets.Int(-1).tag(sync=True)
+    diff_reference = traitlets.Int(0).tag(sync=True)
+    diff_bytes = traitlets.Bytes(b"").tag(sync=True)
+    diff_data_min = traitlets.Float(0.0).tag(sync=True)
+    diff_data_max = traitlets.Float(0.0).tag(sync=True)
 
     # =========================================================================
     # UI Visibility
@@ -328,8 +350,8 @@ class Show2D(anywidget.AnyWidget):
         show_stats: bool = True,
         log_scale: bool = False,
         auto_contrast: bool = False,
-        vmin: float | None = None,
-        vmax: float | None = None,
+        vmin: float | list | None = None,
+        vmax: float | list | None = None,
         disabled_tools: Optional[List[str]] = None,
         disable_display: bool = False,
         disable_histogram: bool = False,
@@ -352,6 +374,15 @@ class Show2D(anywidget.AnyWidget):
         hide_all: bool = False,
         ncols: int = 3,
         size: int = 0,
+        smooth: bool = False,
+        zoom: float = 1.0,
+        zoom_row: float | None = None,
+        zoom_col: float | None = None,
+        link_zoom: bool = False,
+        link_pan: bool = False,
+        link_contrast: bool = True,
+        diff_mode: bool = False,
+        view_box: tuple | list | None = None,
         display_bin: Union[int, str] = "auto",
         state=None,
         **kwargs,
@@ -395,7 +426,10 @@ class Show2D(anywidget.AnyWidget):
                 hide_roi=hide_roi,
                 hide_profile=hide_profile,
                 hide_all=hide_all,
-                ncols=ncols, size=size,
+                ncols=ncols, size=size, smooth=smooth, zoom=zoom,
+                zoom_row=zoom_row, zoom_col=zoom_col,
+                link_zoom=link_zoom, link_pan=link_pan, link_contrast=link_contrast,
+                diff_mode=diff_mode, view_box=view_box,
                 display_bin=display_bin, state=state, _t0=_t0)
 
     def _init_sync(self, *, data, labels, title, cmap, pixel_size,
@@ -408,7 +442,9 @@ class Show2D(anywidget.AnyWidget):
                    hidden_tools, hide_display, hide_histogram, hide_stats,
                    hide_navigation, hide_view, hide_export, hide_roi,
                    hide_profile, hide_all,
-                   ncols, size, display_bin, state, _t0):
+                   ncols, size, smooth, zoom, zoom_row, zoom_col,
+                   link_zoom, link_pan, link_contrast, diff_mode, view_box,
+                   display_bin, state, _t0):
         import time as _time
         self.widget_version = resolve_widget_version()
         self._display_data = None  # initialized after data setup
@@ -483,6 +519,26 @@ class Show2D(anywidget.AnyWidget):
         self.pixel_size = pixel_size
         self.scale_bar_visible = scale_bar_visible
         self.size = size
+        self.smooth = smooth
+        # view_box sugar: sets zoom + zoom_row/col to center on box
+        if view_box is not None:
+            r0, r1, c0, c1 = [float(v) for v in view_box]
+            box_h = max(1.0, r1 - r0)
+            box_w = max(1.0, c1 - c0)
+            zoom = float(min(self.height / box_h, self.width / box_w))
+            zoom_row = (r0 + r1) / 2
+            zoom_col = (c0 + c1) / 2
+        self.initial_zoom = zoom
+        self.zoom_row = zoom_row
+        self.zoom_col = zoom_col
+        self.link_zoom = link_zoom
+        self.link_pan = link_pan
+        self.link_contrast = link_contrast
+        self.diff_mode = diff_mode if self.n_images >= 2 else False
+        if self.diff_mode:
+            self._update_diff()
+        self.observe(self._on_diff_recompute, names=["diff_mode", "align_dy", "align_dx"])
+        self.observe(self._on_align_request, names=["align_request"])
         if show_fft and self.height * self.width > 2048 * 2048:
             warnings.warn(
                 f"FFT on {self.height}×{self.width} image ({self.height * self.width / 1e6:.1f}M pixels) "
@@ -495,8 +551,23 @@ class Show2D(anywidget.AnyWidget):
         self.show_stats = show_stats
         self.log_scale = log_scale
         self.auto_contrast = auto_contrast
-        self.vmin = vmin
-        self.vmax = vmax
+        # Accept scalar OR list for vmin/vmax. List → per-image (vmins/vmaxs).
+        if isinstance(vmin, (list, tuple)) or isinstance(vmax, (list, tuple)):
+            n = self.n_images
+            def _expand(v):
+                if v is None: return [None] * n
+                if isinstance(v, (list, tuple)):
+                    if len(v) != n:
+                        raise ValueError(f"vmin/vmax list length {len(v)} != n_images {n}")
+                    return [None if x is None else float(x) for x in v]
+                return [float(v)] * n
+            self.vmins = _expand(vmin)
+            self.vmaxs = _expand(vmax)
+            self.vmin = None
+            self.vmax = None
+        else:
+            self.vmin = vmin
+            self.vmax = vmax
         self.disabled_tools = self._build_disabled_tools(
             disabled_tools=disabled_tools,
             disable_display=disable_display,
@@ -671,6 +742,127 @@ class Show2D(anywidget.AnyWidget):
         self.selected_idx = 0
         self._compute_all_stats()
         self._update_all_frames()
+
+    def _shifted_b(self):
+        """Sub-pixel shift of image[1] via FFT phase ramp (Fourier-shift theorem).
+
+        Integer-only fallback to np.roll when shifts happen to be integer.
+        """
+        b = self._data[1]
+        dy = float(self.align_dy)
+        dx = float(self.align_dx)
+        if dy == 0.0 and dx == 0.0:
+            return b
+        if dy == int(dy) and dx == int(dx):
+            return np.roll(b, (int(dy), int(dx)), axis=(0, 1))
+        # FFT phase ramp: B_shifted = ifft2(fft2(B) * exp(-2πi (u·dy/H + v·dx/W)))
+        H, W = b.shape
+        ky = np.fft.fftfreq(H).reshape(-1, 1)
+        kx = np.fft.fftfreq(W).reshape(1, -1)
+        ramp = np.exp(-2j * np.pi * (ky * dy + kx * dx))
+        return np.fft.ifft2(np.fft.fft2(b.astype(np.float32)) * ramp).real.astype(np.float32)
+
+    def _update_diff(self):
+        if self.n_images != 2 or not self.diff_mode:
+            self.diff_bytes = b""
+            return
+        a = self._data[0].astype(np.float32, copy=False)
+        diff = (a - self._shifted_b().astype(np.float32, copy=False)).astype(np.float32)
+        self.diff_data_min = float(diff.min())
+        self.diff_data_max = float(diff.max())
+        self.diff_bytes = diff.tobytes()
+
+    def _on_diff_recompute(self, change=None):
+        self._update_diff()
+
+    def _on_align_request(self, change):
+        if self.n_images != 2 or change["new"] <= 0:
+            return
+        # If JS sent a visible-region crop, align on just that.
+        r0, r1 = self.align_view_row0, self.align_view_row1
+        c0, c1 = self.align_view_col0, self.align_view_col1
+        crop = (r0 >= 0 and r1 > r0 and c0 >= 0 and c1 > c0
+                and r1 <= self.height and c1 <= self.width)
+        if crop:
+            self.align(method=self.align_method, view_box=(r0, r1, c0, c1))
+        else:
+            self.align(method=self.align_method)
+
+    def align(self, method: str = "phase", upsample: int = 10, view_box=None):
+        """Estimate translation between image 0 and image 1.
+
+        Parameters
+        ----------
+        method : {"phase", "ncc"}
+            "phase" — phase cross-correlation (default; robust to intensity differences).
+            "ncc"   — normalized cross-correlation (FFT-based; better when illumination differs strongly).
+        upsample : int, default 10
+            Sub-pixel refinement factor via Guizar-Sicairos DFT upsampling.
+            Accuracy = 1/upsample px. ``upsample=1`` = integer only.
+            ``upsample=10`` = 0.1 px, ``upsample=100`` = 0.01 px.
+        view_box : (r0, r1, c0, c1) or None
+            Crop both images to this region before correlating. Passed by the UI
+            so user can zoom into a feature and align on that region only.
+
+        Sets ``align_dy``, ``align_dx`` so diff cancels drift. Returns ``(dy, dx)``.
+        """
+        if self.n_images != 2:
+            raise ValueError("align() requires exactly 2 images")
+        a = self._data[0].astype(np.float32, copy=False)
+        b = self._data[1].astype(np.float32, copy=False)
+        if view_box is not None:
+            r0, r1, c0, c1 = [int(v) for v in view_box]
+            a = a[r0:r1, c0:c1]
+            b = b[r0:r1, c0:c1]
+        H, W = a.shape
+
+        Fa = np.fft.fft2(a)
+        Fb = np.fft.fft2(b)
+        if method == "phase":
+            cross_freq = Fa * np.conj(Fb)
+            cross_freq /= np.abs(cross_freq) + 1e-10
+        elif method == "ncc":
+            am = a - a.mean()
+            bm = b - b.mean()
+            cross_freq = np.fft.fft2(am) * np.conj(np.fft.fft2(bm))
+            cross_freq /= np.sqrt((am * am).sum() * (bm * bm).sum()) + 1e-12
+        else:
+            raise ValueError(f"unknown method '{method}'; expected 'phase' or 'ncc'")
+
+        cmap_int = np.fft.ifft2(cross_freq).real
+        py, px = np.unravel_index(int(np.argmax(cmap_int)), cmap_int.shape)
+        dy_int = py if py < H / 2 else py - H
+        dx_int = px if px < W / 2 else px - W
+
+        if upsample <= 1:
+            self.align_dy = float(dy_int)
+            self.align_dx = float(dx_int)
+            return self.align_dy, self.align_dx
+
+        # Guizar-Sicairos DFT upsampling: refine peak in upsampled neighborhood
+        # by direct DFT, avoiding full upsample of the FFT (memory + speed).
+        usf = int(upsample)
+        # 1.5px window around integer peak, sampled at 1/usf resolution.
+        region = 1.5
+        nor = int(np.ceil(region * usf * 2))
+        noc = nor
+        # Frequency grids
+        ky = np.fft.fftfreq(H).reshape(-1, 1)
+        kx = np.fft.fftfreq(W).reshape(1, -1)
+        # Sample positions in shift-space (centered on dy_int, dx_int)
+        dy_grid = (np.arange(nor) - nor // 2)[:, None] / usf + dy_int
+        dx_grid = (np.arange(noc) - noc // 2)[None, :] / usf + dx_int
+        # Upsampled correlation matrix:
+        #   M[i,j] = sum_uv cross_freq[u,v] * exp(2πi (u·dy_grid[i] + v·dx_grid[j]))
+        # Use matrix-form DFT:
+        kernel_y = np.exp(2j * np.pi * ky.flatten()[None, :] * dy_grid)  # (nor, H)
+        kernel_x = np.exp(2j * np.pi * kx.flatten()[None, :] * dx_grid.T)  # (noc, W)
+        upsampled = (kernel_y @ cross_freq @ kernel_x.T).real  # (nor, noc)
+
+        ipy, ipx = np.unravel_index(int(np.argmax(upsampled)), upsampled.shape)
+        self.align_dy = float(dy_int + (ipy - nor // 2) / usf)
+        self.align_dx = float(dx_int + (ipx - noc // 2) / usf)
+        return self.align_dy, self.align_dx
 
     def __repr__(self) -> str:
         if self.n_images > 1:
@@ -897,6 +1089,18 @@ class Show2D(anywidget.AnyWidget):
             "pixel_size": self.pixel_size,
             "scale_bar_visible": self.scale_bar_visible,
             "size": self.size,
+            "smooth": self.smooth,
+            "initial_zoom": self.initial_zoom,
+            "vmins": self.vmins,
+            "vmaxs": self.vmaxs,
+            "link_zoom": self.link_zoom,
+            "link_pan": self.link_pan,
+            "link_contrast": self.link_contrast,
+            "zoom_row": self.zoom_row,
+            "zoom_col": self.zoom_col,
+            "diff_mode": self.diff_mode,
+            "align_dy": self.align_dy,
+            "align_dx": self.align_dx,
             "ncols": self.ncols,
             "selected_idx": self.selected_idx,
             "roi_active": self.roi_active,

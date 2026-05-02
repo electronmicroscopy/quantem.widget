@@ -186,22 +186,24 @@ struct VSOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f };
  * GPU-accelerated colormap engine. Holds persistent data buffers on GPU;
  * histogram slider changes only update a small uniform — no data re-upload.
  */
+type GPUSlot = {
+  dataBuffer: GPUBuffer;
+  rgbaBuffer: GPUBuffer;
+  readBuffer: GPUBuffer;
+  paramsBuffer: GPUBuffer;
+  histBinsBuffer: GPUBuffer;
+  histReadBuffer: GPUBuffer;
+  count: number;
+  width: number;
+  height: number;
+};
+
 export class GPUColormapEngine {
   private device: GPUDevice;
   private pipeline: GPUComputePipeline | null = null;
   private blitPipeline: GPURenderPipeline | null = null;
   // Per-image GPU state: persistent buffers (data, rgba, read, params, histogram)
-  private slots: {
-    dataBuffer: GPUBuffer;
-    rgbaBuffer: GPUBuffer;
-    readBuffer: GPUBuffer;
-    paramsBuffer: GPUBuffer;
-    histBinsBuffer: GPUBuffer;
-    histReadBuffer: GPUBuffer;
-    count: number;
-    width: number;
-    height: number;
-  }[] = [];
+  private slots: GPUSlot[] = [];
   private lutBuffer: GPUBuffer | null = null;
   private currentLutName: string = "";
 
@@ -234,8 +236,6 @@ export class GPUColormapEngine {
     this.currentLutName = lutName;
   }
 
-  // Generation counter — stale apply() results are discarded
-  private _applyGen = 0;
 
   /** Upload float32 image data for slot `idx`. Only call when data changes. */
   uploadData(idx: number, data: Float32Array, width?: number, height?: number): void {
@@ -260,7 +260,7 @@ export class GPUColormapEngine {
       size: byteSize,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     });
-    this.device.queue.writeBuffer(dataBuffer, 0, data);
+    this.device.queue.writeBuffer(dataBuffer, 0, data.buffer as ArrayBuffer, data.byteOffset, data.byteLength);
     const rgbaBuffer = this.device.createBuffer({
       size: rgbaSize,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
@@ -310,9 +310,8 @@ export class GPUColormapEngine {
     logScale: boolean = false,
   ): Promise<{ idx: number; rgba: Uint8ClampedArray }[]> {
     if (!this.pipeline || !this.lutBuffer || indices.length === 0) return [];
-    const t0 = performance.now();
 
-    const activeSlots: { idx: number; slot: typeof this.slots[0]; count: number }[] = [];
+    const activeSlots: { idx: number; slot: GPUSlot; count: number }[] = [];
     const encoder = this.device.createCommandEncoder();
     const params = new ArrayBuffer(24);
 
@@ -346,11 +345,8 @@ export class GPUColormapEngine {
       encoder.copyBufferToBuffer(slot.rgbaBuffer, 0, slot.readBuffer, 0, slot.count * 4);
       activeSlots.push({ idx: i, slot, count: slot.count });
     }
-
-    const tSubmit = performance.now();
     this.device.queue.submit([encoder.finish()]);
     await Promise.all(activeSlots.map(s => s.slot.readBuffer.mapAsync(GPUMapMode.READ)));
-    const tMap = performance.now();
 
     const results: { idx: number; rgba: Uint8ClampedArray }[] = [];
     for (const s of activeSlots) {
@@ -360,7 +356,6 @@ export class GPUColormapEngine {
       s.slot.readBuffer.unmap();
       results.push({ idx: s.idx, rgba });
     }
-    const tCopy = performance.now();
 
     // applySlots is for callers that need raw RGBA arrays (not rendering to canvas)
     // For rendering, use renderSlots which avoids the intermediate copy
@@ -407,9 +402,8 @@ export class GPUColormapEngine {
     logScale: boolean = false,
   ): Promise<number> {
     if (!this.pipeline || !this.lutBuffer || indices.length === 0) return 0;
-    const t0 = performance.now();
 
-    const activeSlots: { k: number; idx: number; slot: typeof this.slots[0] }[] = [];
+    const activeSlots: { k: number; idx: number; slot: GPUSlot }[] = [];
     const encoder = this.device.createCommandEncoder();
     const params = new ArrayBuffer(24);
 
@@ -440,11 +434,8 @@ export class GPUColormapEngine {
       encoder.copyBufferToBuffer(slot.rgbaBuffer, 0, slot.readBuffer, 0, slot.count * 4);
       activeSlots.push({ k, idx: i, slot });
     }
-
-    const tSubmit = performance.now();
     this.device.queue.submit([encoder.finish()]);
     await Promise.all(activeSlots.map(s => s.slot.readBuffer.mapAsync(GPUMapMode.READ)));
-    const tMap = performance.now();
 
     // Write directly from GPU mapped memory → ImageData → offscreen canvas
     let rendered = 0;
@@ -456,9 +447,6 @@ export class GPUColormapEngine {
       offscreens[s.k]!.getContext("2d")!.putImageData(imgData, 0, 0);
       rendered++;
     }
-    const tRender = performance.now();
-
-    console.log(`[Show2D] GPU colormap: ${rendered}×${activeSlots[0]?.slot.width ?? 0}×${activeSlots[0]?.slot.height ?? 0} in ${(tRender-t0).toFixed(0)}ms (gpu=${(tMap-tSubmit).toFixed(0)}ms copy=${(tRender-tMap).toFixed(0)}ms)`);
     return rendered;
   }
 
@@ -490,7 +478,6 @@ export class GPUColormapEngine {
     logScale: boolean = false,
   ): number {
     if (!this.pipeline || !this.lutBuffer || indices.length === 0) return 0;
-    const t0 = performance.now();
 
     // Get texture format from first valid context
     const fmt = navigator.gpu.getPreferredCanvasFormat();
@@ -562,9 +549,7 @@ export class GPUColormapEngine {
     }
 
     this.device.queue.submit([encoder.finish()]);
-    const elapsed = performance.now() - t0;
     if (rendered > 0) {
-      console.log(`[Show2D] GPU zero-copy: ${rendered}×${this.slots[indices[0]]?.width ?? 0}×${this.slots[indices[0]]?.height ?? 0} in ${elapsed.toFixed(0)}ms`);
     }
     return rendered;
   }
@@ -581,7 +566,6 @@ export class GPUColormapEngine {
     logScale: boolean = false,
   ): ImageBitmap[] | null {
     if (!this.pipeline || !this.lutBuffer || indices.length === 0) return null;
-    const t0 = performance.now();
     const fmt = navigator.gpu.getPreferredCanvasFormat();
     this.ensureBlitPipeline(fmt);
     if (!this.blitPipeline) return null;
@@ -657,9 +641,6 @@ export class GPUColormapEngine {
       if (oc) bitmaps.push(oc.transferToImageBitmap());
       else bitmaps.push(null as never);
     }
-
-    const elapsed = performance.now() - t0;
-    console.log(`[GPU] zeroCopy→ImageBitmap: ${bitmaps.length}×${this.slots[indices[0]]?.width ?? 0}×${this.slots[indices[0]]?.height ?? 0} in ${elapsed.toFixed(0)}ms`);
     return bitmaps;
   }
 
@@ -763,7 +744,6 @@ fn reduce(@builtin(global_invocation_id) gid: vec3u, @builtin(local_invocation_i
   async computeRangeBatch(indices: number[]): Promise<{ min: number; max: number }[]> {
     this.ensureRangePipeline();
     if (!this.rangePipeline || indices.length === 0) return [];
-    const t0 = performance.now();
     const WG = this.RANGE_WG_SIZE;
 
     const encoder = this.device.createCommandEncoder();
@@ -813,7 +793,6 @@ fn reduce(@builtin(global_invocation_id) gid: vec3u, @builtin(local_invocation_i
       }
       results.push({ min: dmin, max: dmax });
     }
-    console.log(`[GPU] rangeBatch: ${results.length} images in ${(performance.now()-t0).toFixed(0)}ms`);
     return results;
   }
 
@@ -869,7 +848,7 @@ fn clear_bins(@builtin(global_invocation_id) gid: vec3u) {
    * Compute a 256-bin histogram for slot `idx` on GPU.
    * Returns normalized bins (0–1) matching `computeHistogramFromBytes`.
    */
-  async computeHistogram(idx: number, logScale: boolean = false): Promise<number[]> {
+  async computeHistogram(idx: number, _logScale: boolean = false): Promise<number[]> {
     this.ensureHistPipeline();
     const slot = this.slots[idx];
     if (!slot || !this.histPipeline || !this.histClearPipeline) return new Array(256).fill(0);
@@ -918,10 +897,9 @@ fn clear_bins(@builtin(global_invocation_id) gid: vec3u) {
   ): Promise<number[][]> {
     this.ensureHistPipeline();
     if (!this.histPipeline || !this.histClearPipeline || indices.length === 0) return [];
-    const t0 = performance.now();
 
     const encoder = this.device.createCommandEncoder();
-    const activeSlots: { k: number; slot: typeof this.slots[0] }[] = [];
+    const activeSlots: { k: number; slot: GPUSlot }[] = [];
     const params = new ArrayBuffer(24);
 
     for (let k = 0; k < indices.length; k++) {
@@ -987,8 +965,6 @@ fn clear_bins(@builtin(global_invocation_id) gid: vec3u) {
       for (let j = 0; j < 256; j++) norm[j] = maxCount > 0 ? rawBins[j] / maxCount : 0;
       results.push(norm);
     }
-
-    console.log(`[GPU] histogramBatch: ${results.length} images in ${(performance.now()-t0).toFixed(0)}ms`);
     return results;
   }
 

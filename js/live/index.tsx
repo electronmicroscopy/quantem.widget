@@ -396,9 +396,9 @@ const render = createRender(() => {
   const [showControls] = useModelState<boolean>("show_controls");
   const [pixelSize] = useModelState<number>("pixel_size");
   const [showStats] = useModelState<boolean>("show_stats");
-  const [scaleBarVisible] = useModelState<boolean>("scale_bar_visible");
+  const [_scaleBarVisible] = useModelState<boolean>("scale_bar_visible");
   const [showFft, setShowFft] = useModelState<boolean>("show_fft");
-  const [fftWindow, setFftWindow] = useModelState<boolean>("fft_window");
+  const [fftWindow] = useModelState<boolean>("fft_window");
   const [roiActive, setRoiActive] = useModelState<boolean>("roi_active");
   const [roiList, setRoiList] = useModelState<{ [key: string]: unknown }[]>("roi_list");
   const [roiSelectedIdx, setRoiSelectedIdx] = useModelState<number>("roi_selected_idx");
@@ -453,16 +453,16 @@ const render = createRender(() => {
   const fftImgDataRef = React.useRef<ImageData | null>(null);
   const fftMagRef = React.useRef<Float32Array | null>(null);
   const [fftComputing, setFftComputing] = React.useState(false);
-  const [fftDataRange, setFftDataRange] = React.useState<{ min: number; max: number }>({ min: 0, max: 1 });
+  const [_fftDataRange, setFftDataRange] = React.useState<{ min: number; max: number }>({ min: 0, max: 1 });
   const fftCanvasRef = React.useRef<HTMLCanvasElement>(null);
-  const [fftVminPct, setFftVminPct] = React.useState(0);
-  const [fftVmaxPct, setFftVmaxPct] = React.useState(100);
+  const [fftVminPct] = React.useState(0);
+  const [fftVmaxPct] = React.useState(100);
   const [profileActive, setProfileActive] = React.useState(false);
   const [profileData, setProfileData] = React.useState<Float32Array | null>(null);
   const profileCanvasRef = React.useRef<HTMLCanvasElement>(null);
   const profileBaseImageRef = React.useRef<ImageData | null>(null);
   const profileLayoutRef = React.useRef<{ padLeft: number; plotW: number; padTop: number; plotH: number; gMin: number; gMax: number; totalDist: number; xUnit: string } | null>(null);
-  const [profileHeight, setProfileHeight] = React.useState(60);
+  const [profileHeight] = React.useState(60);
 
   // Colorbar
   const [showColorbar, setShowColorbar] = React.useState(false);

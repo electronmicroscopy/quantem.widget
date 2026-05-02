@@ -332,7 +332,6 @@ function InteractivePanel({
   canvasSize: size,
   borderColor,
   textColor,
-  mutedColor,
   accentColor,
   lockView,
   stats,
@@ -1133,7 +1132,7 @@ function BinWidget() {
   // Download .npy when data arrives
   React.useEffect(() => {
     if (!npyExporting || !npyExportData || npyExportData.byteLength === 0) return;
-    downloadDataView(npyExportData, "binned_4d.npy");
+    downloadDataView(npyExportData, "binned_4d.npy", "application/octet-stream");
     setNpyExporting(false);
   }, [npyExportData, npyExporting]);
 

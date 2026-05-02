@@ -348,16 +348,17 @@ function Bin2DWidget() {
       canvas.height = cssH * DPR;
       ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
 
-      ctx.fillStyle = themeColors.canvasBg;
+      ctx.fillStyle = themeColors.bg;
       ctx.fillRect(0, 0, cssW, cssH);
 
-      let processed = new Float32Array(data);
-      if (logScale) processed = applyLogScale(processed);
+      let processed = new Float32Array(data) as Float32Array<ArrayBuffer>;
+      if (logScale) processed = applyLogScale(processed) as Float32Array<ArrayBuffer>;
       const { min: dataMin, max: dataMax } = findDataRange(processed);
       const { vmin, vmax } = sliderRange(dataMin, dataMax, imageVminPct, imageVmaxPct);
 
       const lut = COLORMAPS[cmap] || COLORMAPS["inferno"];
       const offscreen = renderToOffscreen(processed, imgW, imgH, lut, vmin, vmax);
+      if (!offscreen) return;
 
       const scaleX = cssW / imgW;
       const scaleY = cssH / imgH;

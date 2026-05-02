@@ -24,7 +24,7 @@ import Select from "@mui/material/Select";
 import MenuItem from "@mui/material/MenuItem";
 import Switch from "@mui/material/Switch";
 import Slider from "@mui/material/Slider";
-import Button from "@mui/material/Button";
+// import Button removed (unused)
 import Stack from "@mui/material/Stack";
 import IconButton from "@mui/material/IconButton";
 import PlayArrowIcon from "@mui/icons-material/PlayArrow";
@@ -55,9 +55,7 @@ const switchStyles = {
   small: { "& .MuiSwitch-thumb": { width: 12, height: 12 }, "& .MuiSwitch-switchBase": { padding: "4px" } },
 };
 
-const compactButton = {
-  fontSize: 10, py: 0.25, px: 1, minWidth: 0,
-};
+
 
 const SPACING = {
   XS: 4,
@@ -86,7 +84,7 @@ const DPR = window.devicePixelRatio || 1;
 // ============================================================================
 const DEFAULT_CHART_W = 340;
 const DEFAULT_CHART_H = 200;
-const DEFAULT_IMG_SIZE = 320;
+
 const MARGIN = { top: 24, right: 12, bottom: 34, left: 52 };
 const FONT = "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
 const AXIS_TICK_PX = 4;
@@ -290,7 +288,7 @@ function MetricExplorer() {
   const [showFft, setShowFft] = React.useState(false);
   const [logScale, setLogScale] = React.useState(false);
   const [hiddenGroups, setHiddenGroups] = React.useState<Set<string>>(new Set());
-  const [hiddenMetrics, setHiddenMetrics] = React.useState<Set<string>>(new Set());
+  const [, setHiddenMetrics] = React.useState<Set<string>>(new Set());
   const [playing, setPlaying] = React.useState(false);
   const [playReverse, setPlayReverse] = React.useState(false);
   const [playFps, setPlayFps] = React.useState(3);
@@ -298,7 +296,7 @@ function MetricExplorer() {
   const [copyFeedback, setCopyFeedback] = React.useState(false);
   // FFT contrast: one pair per slot (0 = selected, 1..N = refs)
   const [fftContrast, setFftContrast] = React.useState<{ vmin: number; vmax: number }[]>([]);
-  const [fftLinked, setFftLinked] = React.useState(true);
+  const [fftLinked] = React.useState(true);
   // D-spacing measurements (multiple spots)
   interface DSpacingMark {
     fftIdx: number; col: number; row: number;
@@ -1137,7 +1135,7 @@ function MetricExplorer() {
   // ========================================================================
   // JSX
   // ========================================================================
-  const nMetrics = metricNames.length;
+  // nMetrics removed (unused)
   const displayPt = displayIndex >= 0 && displayIndex < allPoints.length ? allPoints[displayIndex] : null;
 
   const themedSelect = React.useMemo(() => ({

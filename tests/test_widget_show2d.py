@@ -721,3 +721,72 @@ def test_show2d_save_image_vmin_vmax(tmp_path):
     w = Show2D(data, vmin=0, vmax=1000)
     p = w.save_image(tmp_path / "test.png")
     assert p.exists()
+
+
+def test_show2d_align_integer():
+    rng = np.random.default_rng(42)
+    a = rng.standard_normal((64, 64)).astype(np.float32)
+    b = np.roll(a, (4, -3), axis=(0, 1))
+    w = Show2D([a, b])
+    dy, dx = w.align()
+    # Integer shift recovered exactly (peak at integer index, parabolic refinement → 0).
+    assert abs(dy - (-4)) < 0.05, f"dy={dy}"
+    assert abs(dx - 3) < 0.05, f"dx={dx}"
+
+
+def test_show2d_align_subpixel():
+    rng = np.random.default_rng(7)
+    a = rng.standard_normal((128, 128)).astype(np.float32)
+    H, W = a.shape
+    ky = np.fft.fftfreq(H).reshape(-1, 1)
+    kx = np.fft.fftfreq(W).reshape(1, -1)
+    # Sub-pixel shift via FFT phase ramp: B = shift(A, dy=2.7, dx=-1.4)
+    b = np.fft.ifft2(np.fft.fft2(a) * np.exp(-2j * np.pi * (ky * 2.7 + kx * -1.4))).real.astype(np.float32)
+    w = Show2D([a, b])
+    dy, dx = w.align()
+    # Sub-pixel parabolic fit: ~0.1 px accuracy on noise.
+    assert abs(dy - (-2.7)) < 0.2, f"dy={dy}"
+    assert abs(dx - 1.4) < 0.2, f"dx={dx}"
+
+
+def test_show2d_diff_after_align():
+    rng = np.random.default_rng(0)
+    a = rng.standard_normal((64, 64)).astype(np.float32)
+    H, W = a.shape
+    # Integer shift — diff after align should be exactly zero
+    b = np.roll(a, (5, -2), axis=(0, 1))
+    w = Show2D([a, b], diff_mode=True)
+    w.align()
+    diff = np.frombuffer(w.diff_bytes, dtype=np.float32).reshape(H, W)
+    rms = float(np.sqrt((diff ** 2).mean()))
+    assert rms < 1e-5, f"diff RMS after integer align should be ~0, got {rms}"
+
+
+def test_show2d_view_box():
+    a = np.zeros((100, 100), dtype=np.float32)
+    w = Show2D(a, view_box=(20, 60, 30, 70))
+    # box: rows 20-60 (h=40), cols 30-70 (w=40); zoom = 100 / max(40, 40) = 2.5
+    assert abs(w.initial_zoom - 2.5) < 1e-6
+    assert w.zoom_row == 40.0  # midpoint
+    assert w.zoom_col == 50.0
+
+
+def test_show2d_per_image_vmin_vmax():
+    a = np.array([[0.0, 1.0], [2.0, 3.0]], dtype=np.float32)
+    b = np.array([[10.0, 20.0], [30.0, 40.0]], dtype=np.float32)
+    w = Show2D([a, b], vmin=[0, 10], vmax=[3, 40])
+    assert w.vmins == [0.0, 10.0]
+    assert w.vmaxs == [3.0, 40.0]
+    assert w.vmin is None
+    # State roundtrip
+    s = w.state_dict()
+    assert s["vmins"] == [0.0, 10.0]
+    assert s["vmaxs"] == [3.0, 40.0]
+
+
+def test_show2d_link_zoom_pan_contrast_traits():
+    a = np.zeros((8, 8), dtype=np.float32)
+    w = Show2D([a, a], link_zoom=True, link_pan=True, link_contrast=False)
+    assert w.link_zoom is True
+    assert w.link_pan is True
+    assert w.link_contrast is False

@@ -491,8 +491,8 @@ function ShowComplex2D() {
 
   // ROI state (single-mode, same pattern as Show4D)
   const [roiMode, setRoiMode] = useModelState<string>("roi_mode");
-  const [roiCenterRow, setRoiCenterRow] = useModelState<number>("roi_center_row");
-  const [roiCenterCol, setRoiCenterCol] = useModelState<number>("roi_center_col");
+  const [roiCenterRow] = useModelState<number>("roi_center_row");
+  const [roiCenterCol] = useModelState<number>("roi_center_col");
   const [, setRoiCenter] = useModelState<number[]>("roi_center");
   const [roiRadius, setRoiRadius] = useModelState<number>("roi_radius");
   const [roiWidth, setRoiWidth] = useModelState<number>("roi_width");

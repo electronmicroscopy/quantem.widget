@@ -910,7 +910,8 @@ function Show3DVolume() {
     allFloats: Float32Array | null; allFloatsB: Float32Array | null;
     allFloatsDiff: Float32Array | null;
     nx: number; ny: number; nz: number;
-  }>({ sliceX: -1, sliceY: -1, sliceZ: -1, cmap: "", logScale: false, autoContrast: false, imageVminPct: -1, imageVmaxPct: -1, imageVminPctB: -1, imageVmaxPctB: -1, linkedContrast: true, diffVminPct: -1, diffVmaxPct: -1, allFloats: null, allFloatsB: null, allFloatsDiff: null, nx: 0, ny: 0, nz: 0 });
+    traitVmin: number | null; traitVmax: number | null;
+  }>({ sliceX: -1, sliceY: -1, sliceZ: -1, cmap: "", logScale: false, autoContrast: false, imageVminPct: -1, imageVmaxPct: -1, imageVminPctB: -1, imageVmaxPctB: -1, linkedContrast: true, diffVminPct: -1, diffVmaxPct: -1, allFloats: null, allFloatsB: null, allFloatsDiff: null, nx: 0, ny: 0, nz: 0, traitVmin: null, traitVmax: null });
 
   React.useLayoutEffect(() => {
     if (!allFloats || allFloats.length === 0) return;
@@ -1801,8 +1802,7 @@ function Show3DVolume() {
     }
     if (!lockVolume) {
       setCamera(DEFAULT_CAMERA);
-      setVolumeOpacity(0.5);
-      setVolumeBrightness(1.0);
+      // setVolumeOpacity/Brightness removed in volume rendering refactor
     }
     if (!lockPlayback) {
       setLoopStarts([0, 0, 0]);

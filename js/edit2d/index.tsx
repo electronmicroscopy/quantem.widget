@@ -427,14 +427,6 @@ function Edit2D() {
     },
   };
 
-  // Themed typography (matching Show4DSTEM pattern)
-  const typo = React.useMemo(() => ({
-    label: { ...typography.label, color: themeColors.textMuted },
-    labelSmall: { ...typography.labelSmall, color: themeColors.textMuted },
-    value: { ...typography.value, color: themeColors.textMuted },
-    title: { ...typography.title, color: themeColors.accent },
-  }), [themeColors]);
-
   // ── Model state ──────────────────────────────────────────────────────
   const [nImages] = useModelState<number>("n_images");
   const [height] = useModelState<number>("height");
@@ -453,7 +445,7 @@ function Edit2D() {
 
   const [logScale, setLogScale] = useModelState<boolean>("log_scale");
   const [autoContrast, setAutoContrast] = useModelState<boolean>("auto_contrast");
-  const [showStats, setShowStats] = useModelState<boolean>("show_stats");
+  const [showStats] = useModelState<boolean>("show_stats");
   const [showControls] = useModelState<boolean>("show_controls");
   const [showDisplayControlsGroup] = useModelState<boolean>("show_display_controls");
   const [showEditControlsGroup] = useModelState<boolean>("show_edit_controls");
@@ -558,7 +550,7 @@ function Edit2D() {
   const lockEdit = toolVisibility.isLocked("edit");
   const lockDisplay = toolVisibility.isLocked("display");
   const lockHistogram = toolVisibility.isLocked("histogram");
-  const lockStats = toolVisibility.isLocked("stats");
+  const _lockStats = toolVisibility.isLocked("stats"); void _lockStats; void _lockStats;
   const lockNavigation = toolVisibility.isLocked("navigation");
   const lockExport = toolVisibility.isLocked("export");
   const lockView = toolVisibility.isLocked("view");

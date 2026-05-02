@@ -34,7 +34,7 @@ import { ControlCustomizer } from "../control-customizer";
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
-const SPACING = { XS: 4, SM: 8, MD: 12, LG: 16 };
+// SPACING constants removed (unused after _controlRow drop)
 const DEFAULT_LIST_HEIGHT = 400;
 const MIN_LIST_HEIGHT = 150;
 const MAX_LIST_HEIGHT = 800;
@@ -46,14 +46,6 @@ const typography = {
   labelSmall: { fontSize: 10 },
   value: { fontSize: 10, fontFamily: "monospace" },
   section: { fontSize: 11, fontWeight: "bold" as const },
-};
-
-const controlRow: React.CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  gap: SPACING.SM,
-  flexWrap: "wrap",
-  padding: `${SPACING.XS}px ${SPACING.SM}px`,
 };
 
 const switchStyles = {
@@ -230,6 +222,7 @@ function PreviewPanel({ previewBytes, previewWidth, previewHeight, previewTitle,
     const { vmin, vmax } = sliderRange(dMin, dMax, 0, 100);
     const lut = COLORMAPS[previewCmap] || COLORMAPS["inferno"];
     const offscreen = renderToOffscreen(data, previewWidth, previewHeight, lut, vmin, vmax);
+    if (!offscreen) return;
     const cssW = PREVIEW_CANVAS_W;
     const aspect = previewHeight / previewWidth;
     const cssH = Math.round(cssW * aspect);

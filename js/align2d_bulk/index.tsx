@@ -8,7 +8,6 @@ import * as React from "react";
 import { createRender, useModelState } from "@anywidget/react";
 import Box from "@mui/material/Box";
 import Typography from "@mui/material/Typography";
-import Stack from "@mui/material/Stack";
 import Slider from "@mui/material/Slider";
 import Select from "@mui/material/Select";
 import MenuItem from "@mui/material/MenuItem";
@@ -22,7 +21,7 @@ import { COLORMAPS, COLORMAP_NAMES, renderToOffscreen } from "../colormaps";
 import { extractFloat32, downloadBlob } from "../format";
 import { canvasToPDF } from "../scalebar";
 import { computeHistogramFromBytes } from "../histogram";
-import { findDataRange, sliderRange, applyLogScale } from "../stats";
+import { findDataRange, sliderRange } from "../stats";
 import { fft2d, fftshift, computeMagnitude, autoEnhanceFFT, getWebGPUFFT, WebGPUFFT } from "../webgpu-fft";
 import { computeToolVisibility } from "../tool-parity";
 import { ControlCustomizer } from "../control-customizer";
@@ -562,6 +561,7 @@ function useImagePanel(
   const [version, setVersion] = React.useState(0);
 
   React.useEffect(() => {
+    if (!bytes) return;
     const parsed = extractFloat32(bytes);
     if (!parsed) return;
     rawDataRef.current = parsed;
@@ -677,6 +677,7 @@ function useFFTPanel(
 
   // Step 1: Compute FFT magnitude (expensive, only when image data changes)
   React.useEffect(() => {
+    if (!bytes) return;
     const parsed = extractFloat32(bytes);
     if (!parsed || !imgW || !imgH) return;
     let cancelled = false;

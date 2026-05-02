@@ -2,6 +2,17 @@
 
 ## v0.0.16 (unreleased)
 
+### Show2D (drift comparison + framing)
+- **`smooth=True`** toggle — bilinear vs pixelated. Wires `ctx.imageSmoothingEnabled` (CSS `image-rendering` alone is a no-op when canvas buffer == display size).
+- **MAX_ZOOM 10× → 20×** for tighter inspection.
+- **`zoom=N`** constructor param — initial zoom; `R`/double-click reset returns to this home view.
+- **`zoom_row`, `zoom_col`** — initial pan target; image (row, col) lands at canvas center on mount.
+- **`view_box=(r0, r1, c0, c1)`** — sugar that fits a row/col rectangle to the canvas.
+- **`vmin=[a, b], vmax=[c, d]`** — per-image absolute contrast (scalar still applies to all).
+- **`link_zoom`, `link_pan`, `link_contrast`** constructor params + UI toggles. `Link Pan` is now independent of `Link Zoom` (same magnification, different ROI per panel).
+- **`diff_mode=True`** when `n_images == 2` — single panel showing A − B with symmetric vmin/vmax around 0; `Diff:` UI switch.
+- **`w.align()`** method — phase cross-correlation between image 0 and 1; sets `align_dy/dx` so diff is drift-cancelled.
+
 ### Show2D
 - **WebGPU-accelerated colormap** — histogram slider drag on 12 × 4096×4096 gallery now runs a WGSL compute shader instead of a CPU pixel loop; ~300× faster (1450ms → <5ms for 201M pixels); auto-detects WebGPU, falls back to CPU seamlessly
 - **batched gallery FFT** — gallery mode submits all FFTs to WebGPU with batched readback instead of 12 sequential GPU↔CPU round-trips; pulsing loading overlay shows `"FFT 12× batched (WebGPU)"` while computing
