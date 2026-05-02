@@ -391,13 +391,10 @@ function Show2D() {
   const [zoomRowTrait] = useModelState<number | null>("zoom_row");
   const [zoomColTrait] = useModelState<number | null>("zoom_col");
   const [diffMode, setDiffMode] = useModelState<boolean>("diff_mode");
-  const [alignDy] = useModelState<number>("align_dy");
-  const [alignDx] = useModelState<number>("align_dx");
-  const [diffBytes] = useModelState<DataView>("diff_bytes");
-  const [diffDataMin] = useModelState<number>("diff_data_min");
-  const [diffDataMax] = useModelState<number>("diff_data_max");
   const [diffReference] = useModelState<number>("diff_reference");
-  void diffBytes; void diffDataMin; void diffDataMax; void alignDy; void alignDx;  // referenced below
+  // Align removed — diff = A − B (no shift). Drift correction happens upstream.
+  const alignDy = 0;
+  const alignDx = 0;
 
   // Customization
   const [canvasSizeTrait] = useModelState<number>("size");
@@ -884,19 +881,15 @@ function Show2D() {
     fftOffscreensRef.current = fftOffscreensRef.current.slice(0, nImages);
   }, [nImages]);
 
-  // Parse frame data, store raw floats for FFT, and upload to GPU if ready
-  const diffFloatsMemo = React.useMemo(() => {
-    if (!diffMode || nImages !== 2) return null;
-    const buf = extractFloat32(diffBytes);
-    if (!buf || buf.length === 0) return null;
-    return new Float32Array(buf);
-  }, [diffMode, nImages, diffBytes]);
-
-  // FFT of diff (n=2 only, uses Python diff_bytes — static; recomputes only on align/data change)
+  // FFT of diff (n=2 only). Computes A − B in JS at full image resolution from rawDataRef,
+  // feeds to FFT pipeline. Recomputes when raw data changes.
   React.useEffect(() => {
     if (!effectiveShowFft || !showDiffPanel || nImages !== 2) return;
-    const bytes = extractFloat32(diffBytes);
-    if (!bytes || bytes.length !== width * height) return;
+    const raw = rawDataRef.current;
+    if (!raw || raw.length < 2 || !raw[0] || !raw[1]) return;
+    const a = raw[0], b = raw[1];
+    const bytes = new Float32Array(width * height);
+    for (let i = 0; i < bytes.length; i++) bytes[i] = a[i] - b[i];
     const canvas = diffFftCanvasRef.current;
     if (!canvas) return;
     const fftW = nextPow2(width), fftH = nextPow2(height);
@@ -925,7 +918,7 @@ function Show2D() {
       ctx.drawImage(off, 0, 0, fftW, fftH, 0, 0, canvasW, canvasH);
     })();
     return () => { cancelled = true; };
-  }, [effectiveShowFft, showDiffPanel, nImages, diffBytes, width, height, fftWindow, fftColormap, canvasW, canvasH]);
+  }, [effectiveShowFft, showDiffPanel, nImages, dataVersion, width, height, fftWindow, fftColormap, canvasW, canvasH]);
 
   // Diff panels render — DYNAMIC. One per non-reference image: image[ref] − image[i].
   // Computed at canvas resolution from raw float data, re-running on zoom/pan/align change.
@@ -1053,7 +1046,7 @@ function Show2D() {
       gpuDataVersionRef.current++;
     }
     setDataVersion(v => v + 1);
-  }, [allFloats, nImages, floatsPerImage, diffFloatsMemo]);
+  }, [allFloats, nImages, floatsPerImage]);
 
   // Initialize reusable offscreen canvases (one per image, resized when dimensions change)
   React.useEffect(() => {
@@ -1365,7 +1358,7 @@ function Show2D() {
       }
       setOffscreenVersion(v => v + 1);
     }
-  }, [dataVersion, nImages, width, height, cmap, logScale, autoContrast, linkedContrast, linkedContrastState, contrastStates, traitVmin, traitVmax, traitVmins, traitVmaxs, diffMode, diffDataMin, diffDataMax]);
+  }, [dataVersion, nImages, width, height, cmap, logScale, autoContrast, linkedContrast, linkedContrastState, contrastStates, traitVmin, traitVmax, traitVmins, traitVmaxs, diffMode]);
 
   // -------------------------------------------------------------------------
   // Draw effect: zoom/pan changes — cheap, just drawImage from cached offscreens

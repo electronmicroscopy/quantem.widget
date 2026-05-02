@@ -218,7 +218,6 @@ def test_show2d_gallery_stats_per_image():
     assert widget.stats_mean[0] == pytest.approx(10.0)
     assert widget.stats_mean[1] == pytest.approx(20.0)
 
-
 def test_show2d_add_roi():
     """add_roi() creates an ROI and activates ROI mode."""
     data = np.ones((32, 32), dtype=np.float32) * 5.0
@@ -545,13 +544,11 @@ def test_show2d_save_image_with_title(tmp_path):
     img = Image.open(out)
     assert img.size[0] > 32  # figure is larger than raw pixels
 
-
 def test_show2d_save_image_custom_title(tmp_path):
     data = np.random.rand(32, 32).astype(np.float32)
     w = Show2D(data)
     out = w.save_image(tmp_path / "fig.png", title="Custom Title")
     assert out.exists()
-
 
 def test_show2d_save_image_with_colorbar(tmp_path):
     data = np.random.rand(32, 32).astype(np.float32)
@@ -562,13 +559,11 @@ def test_show2d_save_image_with_colorbar(tmp_path):
     img = Image.open(out)
     assert img.size[0] > 32
 
-
 def test_show2d_save_image_with_scalebar(tmp_path):
     data = np.random.rand(64, 64).astype(np.float32)
     w = Show2D(data, pixel_size=2.0)
     out = w.save_image(tmp_path / "fig.png", scalebar=True)
     assert out.exists()
-
 
 def test_show2d_save_image_all_features(tmp_path):
     data = np.random.rand(64, 64).astype(np.float32)
@@ -577,13 +572,11 @@ def test_show2d_save_image_all_features(tmp_path):
     assert out.exists()
     assert out.stat().st_size > 0
 
-
 def test_show2d_save_image_colorbar_vmin_vmax(tmp_path):
     data = np.random.rand(32, 32).astype(np.float32) * 1000
     w = Show2D(data, vmin=100, vmax=800, cmap="inferno")
     out = w.save_image(tmp_path / "fig.png", colorbar=True)
     assert out.exists()
-
 
 def test_show2d_widget_version_is_set():
     data = np.random.rand(16, 16).astype(np.float32)
@@ -661,20 +654,17 @@ def test_show2d_rotation_chaining():
     result = w.rotate(0, 90)
     assert result is w
 
-
 def test_show2d_vmin_vmax_default_none():
     data = np.random.rand(16, 16).astype(np.float32)
     w = Show2D(data)
     assert w.vmin is None
     assert w.vmax is None
 
-
 def test_show2d_vmin_vmax_constructor():
     data = np.random.rand(16, 16).astype(np.float32) * 1000
     w = Show2D(data, vmin=100, vmax=500)
     assert w.vmin == pytest.approx(100)
     assert w.vmax == pytest.approx(500)
-
 
 def test_show2d_vmin_vmax_state_dict_roundtrip():
     data = np.random.rand(16, 16).astype(np.float32) * 1000
@@ -686,14 +676,12 @@ def test_show2d_vmin_vmax_state_dict_roundtrip():
     assert w2.vmin == pytest.approx(50)
     assert w2.vmax == pytest.approx(900)
 
-
 def test_show2d_vmin_vmax_none_in_state_dict():
     data = np.random.rand(16, 16).astype(np.float32)
     w = Show2D(data)
     sd = w.state_dict()
     assert sd["vmin"] is None
     assert sd["vmax"] is None
-
 
 def test_show2d_vmin_vmax_normalize_frame():
     data = np.array([[0, 500], [1000, 1500]], dtype=np.float32)
@@ -705,7 +693,6 @@ def test_show2d_vmin_vmax_normalize_frame():
     assert frame[1, 1] == 255
     assert 120 <= frame[0, 1] <= 135  # ~127
 
-
 def test_show2d_vmin_vmax_normalize_frame_log():
     data = np.array([[0, 100], [1000, 10000]], dtype=np.float32)
     w = Show2D(data, vmin=0, vmax=10000, log_scale=True)
@@ -715,52 +702,11 @@ def test_show2d_vmin_vmax_normalize_frame_log():
     assert frame[0, 0] == 0
     assert frame[1, 1] == 255
 
-
 def test_show2d_save_image_vmin_vmax(tmp_path):
     data = np.array([[0, 500], [1000, 1500]], dtype=np.float32)
     w = Show2D(data, vmin=0, vmax=1000)
     p = w.save_image(tmp_path / "test.png")
     assert p.exists()
-
-
-def test_show2d_align_integer():
-    rng = np.random.default_rng(42)
-    a = rng.standard_normal((64, 64)).astype(np.float32)
-    b = np.roll(a, (4, -3), axis=(0, 1))
-    w = Show2D([a, b])
-    dy, dx = w.align()
-    # Integer shift recovered exactly (peak at integer index, parabolic refinement → 0).
-    assert abs(dy - (-4)) < 0.05, f"dy={dy}"
-    assert abs(dx - 3) < 0.05, f"dx={dx}"
-
-
-def test_show2d_align_subpixel():
-    rng = np.random.default_rng(7)
-    a = rng.standard_normal((128, 128)).astype(np.float32)
-    H, W = a.shape
-    ky = np.fft.fftfreq(H).reshape(-1, 1)
-    kx = np.fft.fftfreq(W).reshape(1, -1)
-    # Sub-pixel shift via FFT phase ramp: B = shift(A, dy=2.7, dx=-1.4)
-    b = np.fft.ifft2(np.fft.fft2(a) * np.exp(-2j * np.pi * (ky * 2.7 + kx * -1.4))).real.astype(np.float32)
-    w = Show2D([a, b])
-    dy, dx = w.align()
-    # Sub-pixel parabolic fit: ~0.1 px accuracy on noise.
-    assert abs(dy - (-2.7)) < 0.2, f"dy={dy}"
-    assert abs(dx - 1.4) < 0.2, f"dx={dx}"
-
-
-def test_show2d_diff_after_align():
-    rng = np.random.default_rng(0)
-    a = rng.standard_normal((64, 64)).astype(np.float32)
-    H, W = a.shape
-    # Integer shift — diff after align should be exactly zero
-    b = np.roll(a, (5, -2), axis=(0, 1))
-    w = Show2D([a, b], diff_mode=True)
-    w.align()
-    diff = np.frombuffer(w.diff_bytes, dtype=np.float32).reshape(H, W)
-    rms = float(np.sqrt((diff ** 2).mean()))
-    assert rms < 1e-5, f"diff RMS after integer align should be ~0, got {rms}"
-
 
 def test_show2d_view_box():
     a = np.zeros((100, 100), dtype=np.float32)
@@ -769,7 +715,6 @@ def test_show2d_view_box():
     assert abs(w.initial_zoom - 2.5) < 1e-6
     assert w.zoom_row == 40.0  # midpoint
     assert w.zoom_col == 50.0
-
 
 def test_show2d_per_image_vmin_vmax():
     a = np.array([[0.0, 1.0], [2.0, 3.0]], dtype=np.float32)
@@ -782,7 +727,6 @@ def test_show2d_per_image_vmin_vmax():
     s = w.state_dict()
     assert s["vmins"] == [0.0, 10.0]
     assert s["vmaxs"] == [3.0, 40.0]
-
 
 def test_show2d_link_zoom_pan_contrast_traits():
     a = np.zeros((8, 8), dtype=np.float32)

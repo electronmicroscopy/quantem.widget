@@ -211,18 +211,7 @@ class Show2D(anywidget.AnyWidget):
     link_pan = traitlets.Bool(False).tag(sync=True)
     link_contrast = traitlets.Bool(True).tag(sync=True)
     diff_mode = traitlets.Bool(False).tag(sync=True)
-    align_dy = traitlets.Float(0.0).tag(sync=True)
-    align_dx = traitlets.Float(0.0).tag(sync=True)
-    align_request = traitlets.Int(0).tag(sync=True)
-    align_method = traitlets.Unicode("phase").tag(sync=True)
-    align_view_row0 = traitlets.Int(-1).tag(sync=True)  # set by JS before align; -1 = full image
-    align_view_row1 = traitlets.Int(-1).tag(sync=True)
-    align_view_col0 = traitlets.Int(-1).tag(sync=True)
-    align_view_col1 = traitlets.Int(-1).tag(sync=True)
     diff_reference = traitlets.Int(0).tag(sync=True)
-    diff_bytes = traitlets.Bytes(b"").tag(sync=True)
-    diff_data_min = traitlets.Float(0.0).tag(sync=True)
-    diff_data_max = traitlets.Float(0.0).tag(sync=True)
 
     # =========================================================================
     # UI Visibility
@@ -535,10 +524,6 @@ class Show2D(anywidget.AnyWidget):
         self.link_pan = link_pan
         self.link_contrast = link_contrast
         self.diff_mode = diff_mode if self.n_images >= 2 else False
-        if self.diff_mode:
-            self._update_diff()
-        self.observe(self._on_diff_recompute, names=["diff_mode", "align_dy", "align_dx"])
-        self.observe(self._on_align_request, names=["align_request"])
         if show_fft and self.height * self.width > 2048 * 2048:
             warnings.warn(
                 f"FFT on {self.height}×{self.width} image ({self.height * self.width / 1e6:.1f}M pixels) "
@@ -742,127 +727,6 @@ class Show2D(anywidget.AnyWidget):
         self.selected_idx = 0
         self._compute_all_stats()
         self._update_all_frames()
-
-    def _shifted_b(self):
-        """Sub-pixel shift of image[1] via FFT phase ramp (Fourier-shift theorem).
-
-        Integer-only fallback to np.roll when shifts happen to be integer.
-        """
-        b = self._data[1]
-        dy = float(self.align_dy)
-        dx = float(self.align_dx)
-        if dy == 0.0 and dx == 0.0:
-            return b
-        if dy == int(dy) and dx == int(dx):
-            return np.roll(b, (int(dy), int(dx)), axis=(0, 1))
-        # FFT phase ramp: B_shifted = ifft2(fft2(B) * exp(-2πi (u·dy/H + v·dx/W)))
-        H, W = b.shape
-        ky = np.fft.fftfreq(H).reshape(-1, 1)
-        kx = np.fft.fftfreq(W).reshape(1, -1)
-        ramp = np.exp(-2j * np.pi * (ky * dy + kx * dx))
-        return np.fft.ifft2(np.fft.fft2(b.astype(np.float32)) * ramp).real.astype(np.float32)
-
-    def _update_diff(self):
-        if self.n_images != 2 or not self.diff_mode:
-            self.diff_bytes = b""
-            return
-        a = self._data[0].astype(np.float32, copy=False)
-        diff = (a - self._shifted_b().astype(np.float32, copy=False)).astype(np.float32)
-        self.diff_data_min = float(diff.min())
-        self.diff_data_max = float(diff.max())
-        self.diff_bytes = diff.tobytes()
-
-    def _on_diff_recompute(self, change=None):
-        self._update_diff()
-
-    def _on_align_request(self, change):
-        if self.n_images != 2 or change["new"] <= 0:
-            return
-        # If JS sent a visible-region crop, align on just that.
-        r0, r1 = self.align_view_row0, self.align_view_row1
-        c0, c1 = self.align_view_col0, self.align_view_col1
-        crop = (r0 >= 0 and r1 > r0 and c0 >= 0 and c1 > c0
-                and r1 <= self.height and c1 <= self.width)
-        if crop:
-            self.align(method=self.align_method, view_box=(r0, r1, c0, c1))
-        else:
-            self.align(method=self.align_method)
-
-    def align(self, method: str = "phase", upsample: int = 10, view_box=None):
-        """Estimate translation between image 0 and image 1.
-
-        Parameters
-        ----------
-        method : {"phase", "ncc"}
-            "phase" — phase cross-correlation (default; robust to intensity differences).
-            "ncc"   — normalized cross-correlation (FFT-based; better when illumination differs strongly).
-        upsample : int, default 10
-            Sub-pixel refinement factor via Guizar-Sicairos DFT upsampling.
-            Accuracy = 1/upsample px. ``upsample=1`` = integer only.
-            ``upsample=10`` = 0.1 px, ``upsample=100`` = 0.01 px.
-        view_box : (r0, r1, c0, c1) or None
-            Crop both images to this region before correlating. Passed by the UI
-            so user can zoom into a feature and align on that region only.
-
-        Sets ``align_dy``, ``align_dx`` so diff cancels drift. Returns ``(dy, dx)``.
-        """
-        if self.n_images != 2:
-            raise ValueError("align() requires exactly 2 images")
-        a = self._data[0].astype(np.float32, copy=False)
-        b = self._data[1].astype(np.float32, copy=False)
-        if view_box is not None:
-            r0, r1, c0, c1 = [int(v) for v in view_box]
-            a = a[r0:r1, c0:c1]
-            b = b[r0:r1, c0:c1]
-        H, W = a.shape
-
-        Fa = np.fft.fft2(a)
-        Fb = np.fft.fft2(b)
-        if method == "phase":
-            cross_freq = Fa * np.conj(Fb)
-            cross_freq /= np.abs(cross_freq) + 1e-10
-        elif method == "ncc":
-            am = a - a.mean()
-            bm = b - b.mean()
-            cross_freq = np.fft.fft2(am) * np.conj(np.fft.fft2(bm))
-            cross_freq /= np.sqrt((am * am).sum() * (bm * bm).sum()) + 1e-12
-        else:
-            raise ValueError(f"unknown method '{method}'; expected 'phase' or 'ncc'")
-
-        cmap_int = np.fft.ifft2(cross_freq).real
-        py, px = np.unravel_index(int(np.argmax(cmap_int)), cmap_int.shape)
-        dy_int = py if py < H / 2 else py - H
-        dx_int = px if px < W / 2 else px - W
-
-        if upsample <= 1:
-            self.align_dy = float(dy_int)
-            self.align_dx = float(dx_int)
-            return self.align_dy, self.align_dx
-
-        # Guizar-Sicairos DFT upsampling: refine peak in upsampled neighborhood
-        # by direct DFT, avoiding full upsample of the FFT (memory + speed).
-        usf = int(upsample)
-        # 1.5px window around integer peak, sampled at 1/usf resolution.
-        region = 1.5
-        nor = int(np.ceil(region * usf * 2))
-        noc = nor
-        # Frequency grids
-        ky = np.fft.fftfreq(H).reshape(-1, 1)
-        kx = np.fft.fftfreq(W).reshape(1, -1)
-        # Sample positions in shift-space (centered on dy_int, dx_int)
-        dy_grid = (np.arange(nor) - nor // 2)[:, None] / usf + dy_int
-        dx_grid = (np.arange(noc) - noc // 2)[None, :] / usf + dx_int
-        # Upsampled correlation matrix:
-        #   M[i,j] = sum_uv cross_freq[u,v] * exp(2πi (u·dy_grid[i] + v·dx_grid[j]))
-        # Use matrix-form DFT:
-        kernel_y = np.exp(2j * np.pi * ky.flatten()[None, :] * dy_grid)  # (nor, H)
-        kernel_x = np.exp(2j * np.pi * kx.flatten()[None, :] * dx_grid.T)  # (noc, W)
-        upsampled = (kernel_y @ cross_freq @ kernel_x.T).real  # (nor, noc)
-
-        ipy, ipx = np.unravel_index(int(np.argmax(upsampled)), upsampled.shape)
-        self.align_dy = float(dy_int + (ipy - nor // 2) / usf)
-        self.align_dx = float(dx_int + (ipx - noc // 2) / usf)
-        return self.align_dy, self.align_dx
 
     def __repr__(self) -> str:
         if self.n_images > 1:
@@ -1099,8 +963,6 @@ class Show2D(anywidget.AnyWidget):
             "zoom_row": self.zoom_row,
             "zoom_col": self.zoom_col,
             "diff_mode": self.diff_mode,
-            "align_dy": self.align_dy,
-            "align_dx": self.align_dx,
             "ncols": self.ncols,
             "selected_idx": self.selected_idx,
             "roi_active": self.roi_active,
