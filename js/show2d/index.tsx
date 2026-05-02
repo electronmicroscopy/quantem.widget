@@ -3663,26 +3663,12 @@ function Show2D() {
               <Button size="small" sx={compactButton} disabled={lockView || !needsReset} onClick={handleResetAll}>Reset</Button>
             )}
             {nImages === 2 && (
-              <>
-                <Button size="small" sx={compactButton} title="Auto-align on visible region with phase cross-correlation (DFT upsample=10, sub-pixel). Sets align_dy/dx so diff cancels drift." onClick={() => {
-                  // Compute current visible image region from image[0]'s zoom/pan.
-                  // Inverse transform: image_y at canvas y = ((y - cy - panY) / zoom + cy) * height/canvasH.
-                  const zs = getZoomState(0);
-                  const r0 = Math.max(0, Math.floor(((0 - canvasH / 2 - zs.panY) / zs.zoom + canvasH / 2) * height / canvasH));
-                  const r1 = Math.min(height, Math.ceil(((canvasH - canvasH / 2 - zs.panY) / zs.zoom + canvasH / 2) * height / canvasH));
-                  const c0 = Math.max(0, Math.floor(((0 - canvasW / 2 - zs.panX) / zs.zoom + canvasW / 2) * width / canvasW));
-                  const c1 = Math.min(width, Math.ceil(((canvasW - canvasW / 2 - zs.panX) / zs.zoom + canvasW / 2) * width / canvasW));
-                  // Send only when meaningfully cropped (zoom > ~1.05). Else full image.
-                  if (zs.zoom > 1.05 && r1 - r0 >= 8 && c1 - c0 >= 8) {
-                    setAlignViewRow0(r0); setAlignViewRow1(r1);
-                    setAlignViewCol0(c0); setAlignViewCol1(c1);
-                  } else {
-                    setAlignViewRow0(-1); setAlignViewRow1(-1);
-                    setAlignViewCol0(-1); setAlignViewCol1(-1);
-                  }
-                  setAlignRequest(alignRequest + 1);
-                }}>Align</Button>
-              </>
+              <Button size="small" sx={compactButton} title="Auto-align on full image with phase cross-correlation (DFT upsample=10, sub-pixel). Sets align_dy/dx so diff cancels drift." onClick={() => {
+                // Always full image. Reset view-bounds traits so Python ignores any prior crop.
+                setAlignViewRow0(-1); setAlignViewRow1(-1);
+                setAlignViewCol0(-1); setAlignViewCol1(-1);
+                setAlignRequest(alignRequest + 1);
+              }}>Align</Button>
             )}
             {!hideExport && (
               <>
