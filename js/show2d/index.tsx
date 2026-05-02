@@ -396,12 +396,6 @@ function Show2D() {
   const [diffBytes] = useModelState<DataView>("diff_bytes");
   const [diffDataMin] = useModelState<number>("diff_data_min");
   const [diffDataMax] = useModelState<number>("diff_data_max");
-  const [alignRequest, setAlignRequest] = useModelState<number>("align_request");
-  const [alignMethod] = useModelState<string>("align_method"); void alignMethod;
-  const [, setAlignViewRow0] = useModelState<number>("align_view_row0");
-  const [, setAlignViewRow1] = useModelState<number>("align_view_row1");
-  const [, setAlignViewCol0] = useModelState<number>("align_view_col0");
-  const [, setAlignViewCol1] = useModelState<number>("align_view_col1");
   const [diffReference] = useModelState<number>("diff_reference");
   void diffBytes; void diffDataMin; void diffDataMax; void alignDy; void alignDx;  // referenced below
 
@@ -3661,14 +3655,6 @@ function Show2D() {
             <Box sx={{ flex: 1 }} />
             {!hideView && (
               <Button size="small" sx={compactButton} disabled={lockView || !needsReset} onClick={handleResetAll}>Reset</Button>
-            )}
-            {nImages === 2 && (
-              <Button size="small" sx={compactButton} title="Auto-align on full image with phase cross-correlation (DFT upsample=10, sub-pixel). Sets align_dy/dx so diff cancels drift." onClick={() => {
-                // Always full image. Reset view-bounds traits so Python ignores any prior crop.
-                setAlignViewRow0(-1); setAlignViewRow1(-1);
-                setAlignViewCol0(-1); setAlignViewCol1(-1);
-                setAlignRequest(alignRequest + 1);
-              }}>Align</Button>
             )}
             {!hideExport && (
               <>
