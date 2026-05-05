@@ -173,4 +173,34 @@ def profile() -> dict:
     for label, value in rows:
         print(f"{label:<{width}}  {value}")
 
+    # Browser-side WebGPU probe — logs to the browser DevTools console (F12).
+    # Tells you whether your current Firefox/Chrome session actually has WebGPU
+    # available, which neither Python nor `Compute:` above can detect.
+    try:
+        from IPython.display import Javascript, display
+        display(Javascript("""
+            (async () => {
+                const tag = '[quantem.widget]';
+                if (!navigator.gpu) {
+                    console.warn(tag, 'WebGPU: NOT AVAILABLE');
+                    return;
+                }
+                try {
+                    const adapter = await navigator.gpu.requestAdapter();
+                    if (!adapter) {
+                        console.warn(tag, 'WebGPU: NOT AVAILABLE');
+                        return;
+                    }
+                    const info = adapter.info || {};
+                    const detail = [info.vendor, info.architecture, info.device]
+                        .filter(Boolean).join(' ').trim();
+                    console.log(tag, 'WebGPU: AVAILABLE' + (detail ? ' (' + detail + ')' : ''));
+                } catch (err) {
+                    console.warn(tag, 'WebGPU: NOT AVAILABLE');
+                }
+            })();
+        """))
+    except Exception:
+        pass
+
     return _ProfileResult(info)

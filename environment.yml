@@ -1,0 +1,28 @@
+name: widget-env
+channels:
+  - conda-forge
+dependencies:
+  - python=3.13
+  - pip
+  - nodejs
+  # core scientific stack
+  - numpy>=2.0
+  - h5py>=3.0
+  - hdf5plugin>=4.0
+  - numba>=0.59
+  - pytorch>=2.0
+  # widget runtime
+  - anywidget>=0.9
+  - traitlets>=5.0
+  - tqdm>=4.60
+  - psutil>=5.9
+  # dev tools
+  - jupyterlab
+  - pytest
+  - ipython
+  - watchfiles
+  # then run from the repo root:
+  #   conda env create -f environment.yml
+  #   conda activate widget-env
+  #   npm install && npm run build
+  #   pip install -e .
