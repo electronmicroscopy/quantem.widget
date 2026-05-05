@@ -72,6 +72,20 @@ def profile() -> dict:
     info["compute_device"] = device_str
     info["gpu_name"] = gpu_name
 
+    # WebGPU (native, via wgpu-py — works headlessly, no browser needed)
+    try:
+        import wgpu
+        try:
+            adapter = wgpu.gpu.request_adapter_sync(power_preference="high-performance")
+            if adapter is None:
+                info["webgpu"] = "not available (no adapter)"
+            else:
+                info["webgpu"] = f"available — {adapter.summary}"
+        except Exception as exc:
+            info["webgpu"] = f"not available ({exc})"
+    except ImportError:
+        info["webgpu"] = "unknown (install `wgpu` for native check)"
+
     # System RAM
     import psutil
     vm = psutil.virtual_memory()
@@ -162,6 +176,7 @@ def profile() -> dict:
         ("NumPy", info["numpy_version"]),
         ("PyTorch", info["pytorch_version"]),
         ("Compute", compute_label),
+        ("WebGPU", info["webgpu"]),
         ("System RAM", ram_label),
         ("VRAM", vram_label),
         ("Disk", disk_label),
@@ -173,34 +188,43 @@ def profile() -> dict:
     for label, value in rows:
         print(f"{label:<{width}}  {value}")
 
-    # Browser-side WebGPU probe — logs to the browser DevTools console (F12).
-    # Tells you whether your current Firefox/Chrome session actually has WebGPU
-    # available, which neither Python nor `Compute:` above can detect.
+    # Browser-side WebGPU probe — only fire inside a real Jupyter kernel.
+    # In a plain CLI/REPL `display(Javascript(...))` would print an ugly repr;
+    # the native `WebGPU` row above already gives the terminal answer.
+    in_jupyter = False
     try:
-        from IPython.display import Javascript, display
-        display(Javascript("""
-            (async () => {
-                const tag = '[quantem.widget]';
-                if (!navigator.gpu) {
-                    console.warn(tag, 'WebGPU: NOT AVAILABLE');
-                    return;
-                }
-                try {
-                    const adapter = await navigator.gpu.requestAdapter();
-                    if (!adapter) {
+        from IPython import get_ipython
+        ipy = get_ipython()
+        in_jupyter = ipy is not None and "Kernel" in type(ipy).__name__
+    except Exception:
+        pass
+
+    if in_jupyter:
+        try:
+            from IPython.display import Javascript, display
+            display(Javascript("""
+                (async () => {
+                    const tag = '[quantem.widget]';
+                    if (!navigator.gpu) {
                         console.warn(tag, 'WebGPU: NOT AVAILABLE');
                         return;
                     }
-                    const info = adapter.info || {};
-                    const detail = [info.vendor, info.architecture, info.device]
-                        .filter(Boolean).join(' ').trim();
-                    console.log(tag, 'WebGPU: AVAILABLE' + (detail ? ' (' + detail + ')' : ''));
-                } catch (err) {
-                    console.warn(tag, 'WebGPU: NOT AVAILABLE');
-                }
-            })();
-        """))
-    except Exception:
-        pass
+                    try {
+                        const adapter = await navigator.gpu.requestAdapter();
+                        if (!adapter) {
+                            console.warn(tag, 'WebGPU: NOT AVAILABLE');
+                            return;
+                        }
+                        const info = adapter.info || {};
+                        const detail = [info.vendor, info.architecture, info.device]
+                            .filter(Boolean).join(' ').trim();
+                        console.log(tag, 'WebGPU: AVAILABLE' + (detail ? ' (' + detail + ')' : ''));
+                    } catch (err) {
+                        console.warn(tag, 'WebGPU: NOT AVAILABLE');
+                    }
+                })();
+            """))
+        except Exception:
+            pass
 
     return _ProfileResult(info)

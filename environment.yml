@@ -13,6 +13,7 @@ dependencies:
   - pytorch>=2.0
   # widget runtime
   - anywidget>=0.9
+  - wgpu>=0.18
   - traitlets>=5.0
   - tqdm>=4.60
   - psutil>=5.9
