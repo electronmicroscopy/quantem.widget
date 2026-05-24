@@ -127,10 +127,14 @@ def test_kernel_integer_center_moves_peak_to_origin():
     cr, cc = 31, 28  # integer center
     probe = build_soft_disk_probe(det, det, cr, cc, radius=4.0)
     kernel = vacuum_probe_kernel(probe, cr, cc)
-    # The kernel peak should be at the origin (0, 0).
-    peak = np.unravel_index(int(np.argmax(kernel)), kernel.shape)
-    assert peak[0] in (0, det - 1)
-    assert peak[1] in (0, det - 1)
+    # The disk center moves to the FFT origin. The flat-topped disk has a
+    # plateau of equal maxima, so argmax ties break differently per platform;
+    # assert the value at the origin instead of which tied pixel wins.
+    kmax = float(kernel.max())
+    assert kernel[0, 0] == pytest.approx(kmax, rel=1e-4)
+    # A sign error would shift the disk to +center, not the origin: the old
+    # center location must now be far outside the disk (~0).
+    assert abs(float(kernel[cr, cc])) < 0.05 * kmax
 
 
 def test_kernel_subpixel_center_no_quantize():
