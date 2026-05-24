@@ -993,12 +993,10 @@ def test_showcomplex_vmin_vmax_summary(capsys):
     assert "vmax=100" in out
 
 
-def test_showcomplex_vmin_vmax_phase_mode_ignores():
+def test_showcomplex_vmin_vmax_phase_mode_ignores(tmp_path):
     """Phase mode always uses [-pi, pi], ignoring vmin/vmax."""
     data = (np.random.rand(16, 16) + 1j * np.random.rand(16, 16)).astype(np.complex64)
     w = ShowComplex2D(data, vmin=0, vmax=100, display_mode="phase")
     # save_image in phase mode should still work (uses [-pi, pi])
-    import tempfile
-    with tempfile.NamedTemporaryFile(suffix=".png") as f:
-        path = w.save_image(f.name, display_mode="phase")
-        assert path.exists()
+    path = w.save_image(tmp_path / "phase.png", display_mode="phase")
+    assert path.exists()
