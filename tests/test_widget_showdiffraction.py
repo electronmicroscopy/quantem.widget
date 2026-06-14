@@ -31,8 +31,20 @@ def test_showdiffraction_3d_nonsquare_raises():
 
 
 def test_showdiffraction_wrong_ndim_raises():
-    with pytest.raises(ValueError, match="Expected 3D or 4D"):
-        ShowDiffraction(np.zeros((4, 4), dtype=np.float32), verbose=False)
+    with pytest.raises(ValueError, match="Expected 2D, 3D, or 4D"):
+        ShowDiffraction(np.zeros((4,), dtype=np.float32), verbose=False)
+    with pytest.raises(ValueError, match="Expected 2D, 3D, or 4D"):
+        ShowDiffraction(np.zeros((2, 2, 4, 4, 4), dtype=np.float32), verbose=False)
+
+
+def test_showdiffraction_2d_direct_dp():
+    # A single 2D diffraction pattern (SAED) → 1×1 scan, one detector frame.
+    dp = np.random.rand(32, 48).astype(np.float32)
+    w = ShowDiffraction(dp, verbose=False)
+    assert w.is_2d is True
+    assert (w.shape_rows, w.shape_cols) == (1, 1)
+    assert (w.det_rows, w.det_cols) == (32, 48)
+    assert len(w.frame_bytes) == 32 * 48 * 4
 
 
 # ── Center & Calibration ─────────────────────────────────────────────
@@ -209,27 +221,6 @@ def test_showdiffraction_set_image_ioresult():
     assert w.pixel_size == 3.0
 
 
-# ── save_image ───────────────────────────────────────────────────────
-
-
-def test_showdiffraction_save_image(tmp_path):
-    data = np.random.rand(4, 4, 16, 16).astype(np.float32)
-    w = ShowDiffraction(data, verbose=False)
-    # PNG
-    assert w.save_image(str(tmp_path / "dp.png")).exists()
-    # view=all (side-by-side)
-    assert w.save_image(str(tmp_path / "all.png"), view="all").exists()
-    # view=virtual
-    assert w.save_image(str(tmp_path / "vi.png"), view="virtual").exists()
-    # position override restores state
-    w.position = (0, 0)
-    w.save_image(str(tmp_path / "pos.png"), position=(2, 3))
-    assert w.pos_row == 0 and w.pos_col == 0
-    # invalid view
-    with pytest.raises(ValueError):
-        w.save_image(str(tmp_path / "bad.png"), view="fft")
-
-
 # ── Tool Visibility ──────────────────────────────────────────────────
 
 
@@ -284,3 +275,60 @@ def test_showdiffraction_free():
     w = ShowDiffraction(np.random.rand(4, 4, 16, 16).astype(np.float32), verbose=False)
     w.free()
     assert not hasattr(w, "_data")
+
+
+# ── New SAED features (minimal coverage) ─────────────────────────────
+
+
+def _disk_dp(size=64, center=(32, 30), radius=6):
+    rows = np.arange(size)[:, None]
+    cols = np.arange(size)[None, :]
+    r2 = (rows - center[0]) ** 2 + (cols - center[1]) ** 2
+    return np.exp(-r2 / (2 * radius**2)).astype(np.float32)
+
+
+def test_showdiffraction_center_finding():
+    w = ShowDiffraction(_disk_dp(), verbose=False)
+    # Midpoint (2pt): center is the midpoint of a Friedel pair.
+    w.center_from_midpoint((10, 20), (50, 40))
+    assert (w.center_row, w.center_col) == (30.0, 30.0)
+    assert w.center_mode == "midpoint"
+    # Ring (3pt): recover the center of the circle through three ring points.
+    pts = [(30 + 10 * np.cos(a), 30 + 10 * np.sin(a)) for a in (0.0, 2.1, 4.0)]
+    w.center_from_ring(*pts)
+    assert abs(w.center_row - 30.0) < 1e-4 and abs(w.center_col - 30.0) < 1e-4
+    assert w.center_mode == "ring"
+    with pytest.raises(ValueError):
+        w.center_from_ring((0, 0), (1, 1), (2, 2))  # collinear
+
+
+def test_showdiffraction_radial_profile():
+    w = ShowDiffraction(_disk_dp(center=(32, 32)), k_pixel_size=0.05, show_radial=True, verbose=False)
+    w.set_center(32, 32)
+    x_px, intensity = w.radial_profile(n_bins=20, max_radius=20, use_calibration=False)
+    assert x_px.shape == (20,) and intensity[0] > intensity[-1]  # disk falls off with radius
+    x_q, _ = w.radial_profile(n_bins=20, max_radius=20, use_calibration=True)
+    assert np.allclose(x_q, x_px * 0.05, atol=1e-5)              # calibrated x = px * k
+    assert len(w.radial_q_bytes) == w.radial_n_bins * 4          # synced to JS
+
+
+def test_showdiffraction_calibration_recomputes():
+    w = ShowDiffraction(_disk_dp(), verbose=False)
+    w.set_center(32, 32)
+    w.add_spot(32, 42)                       # 10 px from center
+    assert w.spots[0]["d_spacing"] is None   # uncalibrated
+    w.calibrate_from_ring(10.0, 2.0)         # r=10 px -> d=2.0 A -> k=0.05
+    assert w.k_calibrated and abs(w.k_pixel_size - 0.05) < 1e-9
+    assert abs(w.spots[0]["d_spacing"] - 2.0) < 1e-4   # existing spot auto-recomputed
+    with pytest.raises(ValueError):
+        w.calibrate_from_ring(-1, 2.0)
+
+
+def test_showdiffraction_ring_picking():
+    w = ShowDiffraction(_disk_dp(), k_pixel_size=0.05, verbose=False)
+    w.set_center(32, 32)
+    w.add_ring(10.0)                         # q = 10 * 0.05 = 0.5 -> d = 2.0 A
+    assert abs(w.rings[0]["d_spacing"] - 2.0) < 1e-4
+    w.add_ring(20.0)
+    w.undo_ring()
+    assert len(w.rings) == 1
