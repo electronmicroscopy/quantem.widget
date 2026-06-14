@@ -8,9 +8,6 @@ from quantem.widget import ShowDiffraction
 from quantem.widget.io import IOResult
 
 
-# ── Construction ──────────────────────────────────────────────────────
-
-
 def test_showdiffraction_4d():
     data = np.random.rand(8, 8, 16, 16).astype(np.float32)
     w = ShowDiffraction(data, verbose=False)
@@ -38,16 +35,12 @@ def test_showdiffraction_wrong_ndim_raises():
 
 
 def test_showdiffraction_2d_direct_dp():
-    # A single 2D diffraction pattern (SAED) → 1×1 scan, one detector frame.
     dp = np.random.rand(32, 48).astype(np.float32)
     w = ShowDiffraction(dp, verbose=False)
     assert w.is_2d is True
     assert (w.shape_rows, w.shape_cols) == (1, 1)
     assert (w.det_rows, w.det_cols) == (32, 48)
     assert len(w.frame_bytes) == 32 * 48 * 4
-
-
-# ── Center & Calibration ─────────────────────────────────────────────
 
 
 def test_showdiffraction_auto_detect_center():
@@ -60,7 +53,7 @@ def test_showdiffraction_auto_detect_center():
     assert abs(w.center_row - 3.0) < 0.5
     assert abs(w.center_col - 3.0) < 0.5
     assert w.bf_radius > 0
-    assert w.auto_detect_center() is w  # returns Self
+    assert w.auto_detect_center() is w
 
 
 def test_showdiffraction_manual_center():
@@ -71,13 +64,12 @@ def test_showdiffraction_manual_center():
     assert w.bf_radius == 3.0
 
 
-# ── Spots & d-spacing ────────────────────────────────────────────────
-
-
 def test_showdiffraction_add_spot_calibrated():
     data = np.random.rand(4, 4, 32, 32).astype(np.float32)
-    w = ShowDiffraction(data, k_pixel_size=0.1, center=(16, 16), bf_radius=5, verbose=False)
-    w.add_spot(16, 26)  # 10 pixels from center
+    w = ShowDiffraction(
+        data, k_pixel_size=0.1, spot_refine=False, center=(16, 16), bf_radius=5, verbose=False
+    )
+    w.add_spot(16, 26)
     spot = w.spots[0]
     assert spot["id"] == 1
     assert abs(spot["r_pixels"] - 10.0) < 0.01
@@ -95,35 +87,38 @@ def test_showdiffraction_add_spot_uncalibrated():
 
 def test_showdiffraction_spot_at_center():
     data = np.random.rand(4, 4, 16, 16).astype(np.float32)
-    w = ShowDiffraction(data, k_pixel_size=0.1, center=(8, 8), bf_radius=3, verbose=False)
+    w = ShowDiffraction(
+        data, k_pixel_size=0.1, spot_refine=False, center=(8, 8), bf_radius=3, verbose=False
+    )
     w.add_spot(8, 8)
     assert w.spots[0]["r_pixels"] == pytest.approx(0.0)
-    assert w.spots[0]["d_spacing"] is None  # g=0
+    assert w.spots[0]["d_spacing"] is None
 
 
 def test_showdiffraction_snap_to_peak():
     data = np.zeros((4, 4, 16, 16), dtype=np.float32)
     data[:, :, 5, 8] = 100.0
-    w = ShowDiffraction(data, snap_enabled=True, snap_radius=3, center=(8, 8), bf_radius=3, verbose=False)
-    w.add_spot(6, 7)  # near peak
+    w = ShowDiffraction(
+        data, snap_enabled=True, spot_refine=False, snap_radius=3,
+        center=(8, 8), bf_radius=3, verbose=False,
+    )
+    w.add_spot(6, 7)
     assert w.spots[0]["row"] == 5.0
     assert w.spots[0]["col"] == 8.0
+    assert w.spots[0]["raw_row"] == 6.0
 
 
 def test_showdiffraction_undo_clear():
     data = np.random.rand(4, 4, 16, 16).astype(np.float32)
     w = ShowDiffraction(data, center=(8, 8), bf_radius=3, verbose=False)
-    w.add_spot(5, 5).add_spot(10, 10)  # chaining
+    w.add_spot(5, 5).add_spot(10, 10)
     assert len(w.spots) == 2
     w.undo_spot()
     assert len(w.spots) == 1
     w.clear_spots()
     assert len(w.spots) == 0
-    w.undo_spot()  # noop on empty
+    w.undo_spot()
     assert len(w.spots) == 0
-
-
-# ── Virtual Image & Position ─────────────────────────────────────────
 
 
 def test_showdiffraction_virtual_image():
@@ -138,12 +133,9 @@ def test_showdiffraction_position():
     w = ShowDiffraction(data, verbose=False)
     w.position = (3, 5)
     assert w.position == (3, 5)
-    w.position = (100, 100)  # clamped
+    w.position = (100, 100)
     assert w.pos_row == 7
     assert w.pos_col == 7
-
-
-# ── State Persistence (3 required per CLAUDE.md) ─────────────────────
 
 
 def test_showdiffraction_state_dict_roundtrip():
@@ -194,9 +186,6 @@ def test_showdiffraction_summary(capsys):
     assert "Spots:" in out
 
 
-# ── set_image ────────────────────────────────────────────────────────
-
-
 def test_showdiffraction_set_image():
     data = np.random.rand(4, 4, 32, 32).astype(np.float32)
     w = ShowDiffraction(data, verbose=False)
@@ -205,7 +194,7 @@ def test_showdiffraction_set_image():
     w.set_image(new_data)
     assert w.shape_rows == 8
     assert w.det_rows == 64
-    assert len(w.spots) == 0  # cleared
+    assert len(w.spots) == 0
 
 
 def test_showdiffraction_set_image_ioresult():
@@ -221,9 +210,6 @@ def test_showdiffraction_set_image_ioresult():
     assert w.pixel_size == 3.0
 
 
-# ── Tool Visibility ──────────────────────────────────────────────────
-
-
 def test_showdiffraction_tool_visibility():
     data = np.random.rand(4, 4, 16, 16).astype(np.float32)
     w = ShowDiffraction(data, verbose=False)
@@ -233,9 +219,6 @@ def test_showdiffraction_tool_visibility():
     assert "histogram" in w.hidden_tools
     with pytest.raises(ValueError):
         w.disabled_tools = ["fake_tool"]
-
-
-# ── Array Compatibility ──────────────────────────────────────────────
 
 
 def test_showdiffraction_accepts_torch():
@@ -261,9 +244,6 @@ def test_showdiffraction_hot_pixel_removal():
     assert w._get_frame(0, 0)[3, 5] == 0
 
 
-# ── repr & free ──────────────────────────────────────────────────────
-
-
 def test_showdiffraction_repr():
     w = ShowDiffraction(np.random.rand(4, 4, 16, 16).astype(np.float32), k_pixel_size=0.1, verbose=False)
     r = repr(w)
@@ -277,9 +257,6 @@ def test_showdiffraction_free():
     assert not hasattr(w, "_data")
 
 
-# ── New SAED features (minimal coverage) ─────────────────────────────
-
-
 def _disk_dp(size=64, center=(32, 30), radius=6):
     rows = np.arange(size)[:, None]
     cols = np.arange(size)[None, :]
@@ -289,17 +266,15 @@ def _disk_dp(size=64, center=(32, 30), radius=6):
 
 def test_showdiffraction_center_finding():
     w = ShowDiffraction(_disk_dp(), verbose=False)
-    # Midpoint (2pt): center is the midpoint of a Friedel pair.
     w.center_from_midpoint((10, 20), (50, 40))
     assert (w.center_row, w.center_col) == (30.0, 30.0)
     assert w.center_mode == "midpoint"
-    # Ring (3pt): recover the center of the circle through three ring points.
     pts = [(30 + 10 * np.cos(a), 30 + 10 * np.sin(a)) for a in (0.0, 2.1, 4.0)]
     w.center_from_ring(*pts)
     assert abs(w.center_row - 30.0) < 1e-4 and abs(w.center_col - 30.0) < 1e-4
     assert w.center_mode == "ring"
     with pytest.raises(ValueError):
-        w.center_from_ring((0, 0), (1, 1), (2, 2))  # collinear
+        w.center_from_ring((0, 0), (1, 1), (2, 2))  # collinear -> raises
 
 
 def test_showdiffraction_radial_profile():
@@ -308,18 +283,18 @@ def test_showdiffraction_radial_profile():
     x_px, intensity = w.radial_profile(n_bins=20, max_radius=20, use_calibration=False)
     assert x_px.shape == (20,) and intensity[0] > intensity[-1]  # disk falls off with radius
     x_q, _ = w.radial_profile(n_bins=20, max_radius=20, use_calibration=True)
-    assert np.allclose(x_q, x_px * 0.05, atol=1e-5)              # calibrated x = px * k
-    assert len(w.radial_q_bytes) == w.radial_n_bins * 4          # synced to JS
+    assert np.allclose(x_q, x_px * 0.05, atol=1e-5)  # calibrated x = px*k
+    assert len(w.radial_g_bytes) == w.radial_n_bins * 4  # g-profile bytes synced to JS
 
 
 def test_showdiffraction_calibration_recomputes():
-    w = ShowDiffraction(_disk_dp(), verbose=False)
+    w = ShowDiffraction(_disk_dp(), spot_refine=False, verbose=False)
     w.set_center(32, 32)
-    w.add_spot(32, 42)                       # 10 px from center
-    assert w.spots[0]["d_spacing"] is None   # uncalibrated
-    w.calibrate_from_ring(10.0, 2.0)         # r=10 px -> d=2.0 A -> k=0.05
+    w.add_spot(32, 42)
+    assert w.spots[0]["d_spacing"] is None
+    w.calibrate_from_ring(10.0, 2.0)  # r=10 px -> d=2.0 A -> k=0.05
     assert w.k_calibrated and abs(w.k_pixel_size - 0.05) < 1e-9
-    assert abs(w.spots[0]["d_spacing"] - 2.0) < 1e-4   # existing spot auto-recomputed
+    assert abs(w.spots[0]["d_spacing"] - 2.0) < 1e-4
     with pytest.raises(ValueError):
         w.calibrate_from_ring(-1, 2.0)
 
@@ -327,8 +302,106 @@ def test_showdiffraction_calibration_recomputes():
 def test_showdiffraction_ring_picking():
     w = ShowDiffraction(_disk_dp(), k_pixel_size=0.05, verbose=False)
     w.set_center(32, 32)
-    w.add_ring(10.0)                         # q = 10 * 0.05 = 0.5 -> d = 2.0 A
+    w.add_ring(10.0)  # g = 10*0.05 -> d = 2.0 A
     assert abs(w.rings[0]["d_spacing"] - 2.0) < 1e-4
     w.add_ring(20.0)
     w.undo_ring()
     assert len(w.rings) == 1
+
+
+def _two_spot_dp(size=64, center=(32, 32), spot=(28, 44), sigma=2.0):
+    rows = np.arange(size)[:, None]
+    cols = np.arange(size)[None, :]
+    beam = np.exp(-((rows - center[0]) ** 2 + (cols - center[1]) ** 2) / (2 * 2.0**2))
+    blob = np.exp(-((rows - spot[0]) ** 2 + (cols - spot[1]) ** 2) / (2 * sigma**2))
+    return (50.0 * beam + 40.0 * blob).astype(np.float32)
+
+
+def test_showdiffraction_gaussian_spot_refine():
+    spot = (28, 44)
+    w = ShowDiffraction(
+        _two_spot_dp(spot=spot), k_pixel_size=0.05, center=(32, 32), bf_radius=3, verbose=False
+    )
+    w.add_spot(spot[0] + 1.4, spot[1] - 1.2)  # click ~2 px off the true spot
+    s = w.spots[0]
+    assert abs(s["row"] - spot[0]) < 0.5 and abs(s["col"] - spot[1]) < 0.5  # refined to the centroid
+    assert s["raw_row"] == pytest.approx(spot[0] + 1.4)
+    assert s["fit_quality"] > 0.9
+    assert s["row_err"] is not None and s["d_spacing_err"] is not None and s["d_spacing_err"] >= 0
+
+
+def test_showdiffraction_interplanar_angle():
+    w = ShowDiffraction(_disk_dp(), spot_refine=False, center=(32, 32), bf_radius=3, verbose=False)
+    w.set_center(32, 32)
+    w.add_spot(32, 42)
+    w.add_spot(42, 32)
+    assert w.spots[0]["angle_deg"] == pytest.approx(0.0, abs=1e-6)
+    assert w.spots[1]["angle_deg"] == pytest.approx(90.0, abs=1e-6)
+    w.reference_spot_id = w.spots[1]["id"]  # re-reference to spot #2
+    assert w.spots[0]["angle_deg"] == pytest.approx(90.0, abs=1e-6)
+    assert w.spots[1]["angle_deg"] == pytest.approx(0.0, abs=1e-6)
+
+
+def test_showdiffraction_calibration_provenance():
+    w = ShowDiffraction(_disk_dp(), spot_refine=False, center=(32, 32), bf_radius=3, verbose=False)
+    w.set_center(32, 32)
+    assert w.calibration_source == "none"
+    w.calibrate_from_spot(32, 42, 2.0)  # r=10 px, d=2 A -> k=0.05
+    assert w.calibration_source == "from_spot"
+    assert w.calibration_ref_d == pytest.approx(2.0)
+    assert w.calibration_ref_radius == pytest.approx(10.0)
+
+
+def test_showdiffraction_labels_and_export(tmp_path):
+    w = ShowDiffraction(
+        _disk_dp(), k_pixel_size=0.05, spot_refine=False, center=(32, 32), bf_radius=3, verbose=False
+    )
+    w.set_center(32, 32)
+    w.add_spot(32, 42)
+    w.label_spot(w.spots[0]["id"], hkl="(111)", note="strong")
+    assert w.spots[0]["hkl"] == "(111)" and w.spots[0]["note"] == "strong"
+    w.add_ring(20.0)
+
+    csv_text = w.export_measurements(tmp_path / "m.csv").read_text()
+    assert "g_inv_angstrom" in csv_text and "(111)" in csv_text
+    assert csv_text.strip().count("\n") >= 2
+
+    payload = json.loads(w.export_measurements(tmp_path / "m.json").read_text())
+    assert payload["metadata"]["calibration_source"] == "manual"
+    assert len(payload["measurements"]) == 2
+
+
+def test_showdiffraction_detect_spots():
+    M, cen, G = 128, (64, 64), 24.0
+    rows = np.arange(M)[:, None]
+    cols = np.arange(M)[None, :]
+    def blob(r, c, a, s):
+        return a * np.exp(-(((rows - r) ** 2 + (cols - c) ** 2) / (2 * s * s)))
+    dp = blob(*cen, 300, 4)
+    truth = [(cen[0], cen[1] + G), (cen[0], cen[1] - G), (cen[0] + G, cen[1]), (cen[0] - G, cen[1])]
+    for r, c in truth:
+        dp = dp + blob(r, c, 40, 2.0)
+    dp = dp.astype(np.float32)
+    w = ShowDiffraction(dp, center=cen, bf_radius=6, k_pixel_size=1 / (2.099 * G), verbose=False)
+    w.detect_spots(max_spots=6)
+    assert 4 <= len(w.spots) <= 6  # found the spots, beam excluded
+    on_spot = sum(any(abs(s["row"] - r) < 2 and abs(s["col"] - c) < 2 for r, c in truth) for s in w.spots)
+    assert on_spot >= 4
+
+
+def test_showdiffraction_detect_rings():
+    M, cen = 256, (128, 128)
+    rows = np.arange(M)[:, None]
+    cols = np.arange(M)[None, :]
+    r = np.hypot(rows - cen[0], cols - cen[1])
+    dp = 200.0 * np.exp(-(r**2) / (2 * 5.0**2))
+    ring_radii = [40.0, 70.0, 100.0]
+    for rr in ring_radii:
+        dp = dp + 30.0 * np.exp(-((r - rr) ** 2) / (2 * 2.5**2))
+    dp = dp.astype(np.float32)
+    w = ShowDiffraction(dp, center=cen, bf_radius=15, k_pixel_size=0.02, verbose=False)
+    w.detect_rings(max_rings=6)
+    found = sorted(rng["radius_px"] for rng in w.rings)
+    assert len(found) >= 3
+    for target in ring_radii:
+        assert any(abs(f - target) < 3 for f in found)

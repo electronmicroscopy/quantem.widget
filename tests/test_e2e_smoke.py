@@ -28,8 +28,11 @@ def smoke_page(browser_context):
             "import numpy as np\n",
             "import pathlib\n",
             "from quantem.widget import Bin, Bin2D, Browse, Mark2D, Show1D, Show2D, Show3D, Show3DVolume, Show4DSTEM\n",
-            "from quantem.widget import Show4D, Edit2D, Align2D, ShowComplex2D\n",
+            "from quantem.widget import Show4D, Edit2D, Align2D, ShowComplex2D, ShowDiffraction\n",
             "from quantem.widget import MetricExplorer\n",
+        ]},
+        {"source": [
+            "ShowDiffraction(np.random.rand(32, 32).astype(np.float32), show_radial=True)\n",
         ]},
         {"source": [
             "Show1D(np.random.rand(256).astype(np.float32), title='Show1D Smoke')\n",
@@ -100,6 +103,7 @@ def smoke_page(browser_context):
 
 ALL_WIDGETS = [
     "show1d-root",
+    "showdiffraction-root",
     "mark2d-root",
     "show2d-root",
     "show3d-root",

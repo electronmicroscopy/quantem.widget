@@ -1,5 +1,6 @@
 """showdiffraction: Interactive d-spacing analysis for 2D/3D/4D diffraction patterns."""
 
+import csv
 import json
 import math
 import pathlib
@@ -22,7 +23,6 @@ from quantem.widget.tool_parity import (
 
 DEFAULT_BF_RATIO = 0.125
 
-
 def circle_center_from_3pts(p1, p2, p3, eps: float = 1e-9) -> tuple[float, float]:
     """Center (row, col) of the circle through three (row, col) points; used for ring centering."""
     r1, c1 = float(p1[0]), float(p1[1])
@@ -38,50 +38,12 @@ def circle_center_from_3pts(p1, p2, p3, eps: float = 1e-9) -> tuple[float, float
     center_col = (s1 * (r3 - r2) + s2 * (r1 - r3) + s3 * (r2 - r1)) / d
     return float(center_row), float(center_col)
 
-
 class ShowDiffraction(anywidget.AnyWidget):
-    """
-    Interactive d-spacing measurement for 2D/3D/4D diffraction patterns.
-
-    Click spots on the pattern to measure d-spacing, find the center (midpoint or
-    ring), and pick rings off the radial I(q) profile.
-
-    Parameters
-    ----------
-    data : array_like
-        2D array (det_rows, det_cols) for a single diffraction pattern / SAED,
-        3D array (N, det_rows, det_cols) with scan_shape, or 4D array
-        (scan_rows, scan_cols, det_rows, det_cols).
-    scan_shape : tuple of int, optional
-        Reshape 3D input into (scan_rows, scan_cols).
-    k_pixel_size : float, optional
-        Reciprocal-space pixel size in 1/angstrom per pixel.
-    pixel_size : float, optional
-        Real-space pixel size in angstrom per pixel.
-    center : tuple of float, optional
-        BF disk center as (row, col). Auto-detected if not provided.
-    bf_radius : float, optional
-        BF disk radius in pixels. Auto-detected if not provided.
-    title : str, default ""
-        Title displayed in the widget header.
-    snap_enabled : bool, default False
-        Enable snap-to-peak when clicking to add spots.
-    snap_radius : int, default 5
-        Radius in pixels for snap-to-peak search.
-
-    Examples
-    --------
-    >>> from quantem.widget import ShowDiffraction
-    >>> widget = ShowDiffraction(data_4d, k_pixel_size=0.025)
-    >>> widget.add_spot(row=89, col=64)
-    >>> for spot in widget.spots:
-    ...     print(f"d = {spot['d_spacing']:.2f} Å")
-    """
+    """Interactive d-spacing analysis for 2D/3D/4D diffraction patterns."""
 
     _esm = pathlib.Path(__file__).parent / "static" / "showdiffraction.js"
     _css = pathlib.Path(__file__).parent / "static" / "showdiffraction.css"
 
-    # ── Core state ───────────────────────────────────────────────────────
     widget_version = traitlets.Unicode("unknown").tag(sync=True)
     title = traitlets.Unicode("").tag(sync=True)
     pos_row = traitlets.Int(0).tag(sync=True)
@@ -92,11 +54,9 @@ class ShowDiffraction(anywidget.AnyWidget):
     det_cols = traitlets.Int(1).tag(sync=True)
     is_2d = traitlets.Bool(False).tag(sync=True)
 
-    # ── Data bytes (raw float32, JS handles colormap) ────────────────────
     frame_bytes = traitlets.Bytes(b"").tag(sync=True)
     virtual_image_bytes = traitlets.Bytes(b"").tag(sync=True)
 
-    # ── Calibration ──────────────────────────────────────────────────────
     center_row = traitlets.Float(0.0).tag(sync=True)
     center_col = traitlets.Float(0.0).tag(sync=True)
     bf_radius = traitlets.Float(0.0).tag(sync=True)
@@ -104,29 +64,30 @@ class ShowDiffraction(anywidget.AnyWidget):
     k_pixel_size = traitlets.Float(0.0).tag(sync=True)
     k_calibrated = traitlets.Bool(False).tag(sync=True)
 
-    # ── Global min/max for DP normalization ──────────────────────────────
     dp_global_min = traitlets.Float(0.0).tag(sync=True)
     dp_global_max = traitlets.Float(1.0).tag(sync=True)
 
-    # ── Spots ────────────────────────────────────────────────────────────
     spots = traitlets.List(traitlets.Dict()).tag(sync=True)
     snap_enabled = traitlets.Bool(False).tag(sync=True)
     snap_radius = traitlets.Int(5).tag(sync=True)
 
-    # ── Rings (picked on the radial I(q) profile) ────────────────────────
     rings = traitlets.List(traitlets.Dict()).tag(sync=True)
 
-    # ── Center finding ───────────────────────────────────────────────────
+    spot_refine = traitlets.Bool(True).tag(sync=True)
+    reference_spot_id = traitlets.Int(-1).tag(sync=True)  # -1 → first spot
+
     center_mode = traitlets.Unicode("auto").tag(sync=True)
 
-    # ── Radial I(q) profile ──────────────────────────────────────────────
+    calibration_source = traitlets.Unicode("none").tag(sync=True)
+    calibration_ref_d = traitlets.Float(0.0).tag(sync=True)
+    calibration_ref_radius = traitlets.Float(0.0).tag(sync=True)
+
     show_radial = traitlets.Bool(False).tag(sync=True)
-    radial_q_bytes = traitlets.Bytes(b"").tag(sync=True)
+    radial_g_bytes = traitlets.Bytes(b"").tag(sync=True)
     radial_i_bytes = traitlets.Bytes(b"").tag(sync=True)
     radial_n_bins = traitlets.Int(0).tag(sync=True)
     radial_calibrated = traitlets.Bool(False).tag(sync=True)
 
-    # ── Spot triggers (JS → Python) ──────────────────────────────────────
     _spot_add_request = traitlets.List(traitlets.Float(), default_value=[]).tag(sync=True)
     _spot_undo_request = traitlets.Bool(False).tag(sync=True)
     _spot_clear_request = traitlets.Bool(False).tag(sync=True)
@@ -142,17 +103,21 @@ class ShowDiffraction(anywidget.AnyWidget):
     _calibrate_from_spot_request = traitlets.List(traitlets.Float(), default_value=[]).tag(
         sync=True
     )
+    _detect_spots_request = traitlets.Int(0).tag(sync=True)  # carries max_spots
+    _detect_rings_request = traitlets.Int(0).tag(sync=True)  # carries max_rings
+    _spot_remove_request = traitlets.Int(0).tag(sync=True)  # carries spot id (0 = none)
+    _ring_remove_request = traitlets.Int(0).tag(sync=True)  # carries ring id (0 = none)
 
-    # ── Display ──────────────────────────────────────────────────────────
     dp_colormap = traitlets.Unicode("inferno").tag(sync=True)
     dp_scale_mode = traitlets.Unicode("log").tag(sync=True)
+    dp_invert = traitlets.Bool(False).tag(sync=True)
+    dp_rotation = traitlets.Int(0).tag(sync=True)  # display-only, degrees CCW
     dp_vmin_pct = traitlets.Float(0.0).tag(sync=True)
     dp_vmax_pct = traitlets.Float(100.0).tag(sync=True)
     vi_colormap = traitlets.Unicode("inferno").tag(sync=True)
     vi_vmin_pct = traitlets.Float(0.0).tag(sync=True)
     vi_vmax_pct = traitlets.Float(100.0).tag(sync=True)
 
-    # ── Statistics ───────────────────────────────────────────────────────
     dp_stats = traitlets.List(traitlets.Float(), default_value=[0.0, 0.0, 0.0, 0.0]).tag(
         sync=True
     )
@@ -160,11 +125,9 @@ class ShowDiffraction(anywidget.AnyWidget):
         sync=True
     )
 
-    # ── UI ───────────────────────────────────────────────────────────────
     show_stats = traitlets.Bool(True).tag(sync=True)
     show_controls = traitlets.Bool(True).tag(sync=True)
 
-    # ── Tool visibility ──────────────────────────────────────────────────
     disabled_tools = traitlets.List(traitlets.Unicode()).tag(sync=True)
     hidden_tools = traitlets.List(traitlets.Unicode()).tag(sync=True)
 
@@ -244,6 +207,21 @@ class ShowDiffraction(anywidget.AnyWidget):
             raise ValueError(f"center_mode must be one of {allowed}, got {val!r}")
         return val
 
+    @traitlets.validate("dp_scale_mode")
+    def _validate_dp_scale_mode(self, proposal):
+        val = proposal["value"]
+        allowed = ("linear", "log", "sqrt", "power")
+        if val not in allowed:
+            raise ValueError(f"dp_scale_mode must be one of {allowed}, got {val!r}")
+        return val
+
+    @traitlets.validate("dp_rotation")
+    def _validate_dp_rotation(self, proposal):
+        val = int(proposal["value"]) % 360
+        if val not in (0, 90, 180, 270):
+            raise ValueError(f"dp_rotation must be one of 0/90/180/270, got {val}")
+        return val
+
     def __init__(
         self,
         data,
@@ -255,6 +233,7 @@ class ShowDiffraction(anywidget.AnyWidget):
         title: str = "",
         snap_enabled: bool = False,
         snap_radius: int = 5,
+        spot_refine: bool = True,
         show_radial: bool = False,
         dp_scale_mode: str = "log",
         show_stats: bool = True,
@@ -285,7 +264,6 @@ class ShowDiffraction(anywidget.AnyWidget):
         t_start = time.perf_counter()
         self.widget_version = resolve_widget_version()
 
-        # ── Extract metadata from IOResult ───────────────────────────────
         if isinstance(data, IOResult):
             if not title and data.title:
                 title = data.title
@@ -293,7 +271,6 @@ class ShowDiffraction(anywidget.AnyWidget):
                 pixel_size = data.pixel_size
             data = data.data
 
-        # ── Dataset duck typing ──────────────────────────────────────────
         k_calibrated = False
         if hasattr(data, "sampling") and hasattr(data, "array"):
             if not title and hasattr(data, "name") and data.name:
@@ -308,7 +285,6 @@ class ShowDiffraction(anywidget.AnyWidget):
                 k_calibrated = True
             data = data.array
 
-        # ── Parse and store data ─────────────────────────────────────────
         self._device = torch.device(
             "mps"
             if torch.backends.mps.is_available()
@@ -318,19 +294,21 @@ class ShowDiffraction(anywidget.AnyWidget):
         )
         self._ingest_data(data, scan_shape)
 
-        # ── Calibration ──────────────────────────────────────────────────
         if pixel_size is not None:
             self.pixel_size = float(pixel_size)
         if k_pixel_size is not None and k_pixel_size > 0:
             self.k_pixel_size = float(k_pixel_size)
             self.k_calibrated = True
+            self.calibration_source = "manual"
         elif k_calibrated:
             self.k_calibrated = True
+            self.calibration_source = "metadata"
 
         self.title = title
         self.dp_scale_mode = dp_scale_mode
         self.snap_enabled = snap_enabled
         self.snap_radius = snap_radius
+        self.spot_refine = spot_refine
         self.show_radial = show_radial
         self.show_stats = show_stats
         self.show_controls = show_controls
@@ -358,7 +336,6 @@ class ShowDiffraction(anywidget.AnyWidget):
             hide_all=hide_all,
         )
 
-        # ── Center & BF radius ───────────────────────────────────────────
         det_size = min(self.det_rows, self.det_cols)
         if center is not None:
             self.center_row = float(center[0])
@@ -375,18 +352,14 @@ class ShowDiffraction(anywidget.AnyWidget):
         if center is None and bf_radius is None:
             self.auto_detect_center()
 
-        # ── Initial position ─────────────────────────────────────────────
         self.pos_row = self._scan_shape[0] // 2
         self.pos_col = self._scan_shape[1] // 2
 
-        # ── Compute virtual image (BF) ───────────────────────────────────
         self._compute_virtual_image()
 
-        # ── Initial frame & radial profile ───────────────────────────────
         self._update_frame()
         self._update_radial()
 
-        # ── Observers ────────────────────────────────────────────────────
         self.observe(self._on_position_change, names=["pos_row", "pos_col"])
         self.observe(self._on_spot_add_request, names=["_spot_add_request"])
         self.observe(self._on_spot_undo_request, names=["_spot_undo_request"])
@@ -408,12 +381,16 @@ class ShowDiffraction(anywidget.AnyWidget):
             self._on_geometry_change,
             names=["center_row", "center_col", "k_pixel_size", "k_calibrated", "show_radial"],
         )
+        self.observe(self._on_reference_spot_change, names=["reference_spot_id"])
+        self.observe(self._on_detect_spots_request, names=["_detect_spots_request"])
+        self.observe(self._on_detect_rings_request, names=["_detect_rings_request"])
+        self.observe(self._on_spot_remove_request, names=["_spot_remove_request"])
+        self.observe(self._on_ring_remove_request, names=["_ring_remove_request"])
 
         if verbose:
             mem_mb = self._data.nelement() * 4 / 1e6
             print(f"  to {self._device}: {time.perf_counter() - t_start:.2f}s ({mem_mb:.1f} MB)")
 
-        # ── State restoration ────────────────────────────────────────────
         if state is not None:
             if isinstance(state, (str, pathlib.Path)):
                 state = unwrap_state_payload(
@@ -423,10 +400,6 @@ class ShowDiffraction(anywidget.AnyWidget):
             else:
                 state = unwrap_state_payload(state)
             self.load_state_dict(state)
-
-    # =====================================================================
-    # Data ingestion (shared by __init__ and set_image)
-    # =====================================================================
 
     def _ingest_data(self, data, scan_shape=None):
         data_np = to_numpy(data)
@@ -474,10 +447,6 @@ class ShowDiffraction(anywidget.AnyWidget):
         self.dp_global_min = float(self._data.min().item())
         self.dp_global_max = float(self._data.max().item())
 
-    # =====================================================================
-    # Position
-    # =====================================================================
-
     @property
     def position(self) -> tuple[int, int]:
         return (self.pos_row, self.pos_col)
@@ -494,10 +463,6 @@ class ShowDiffraction(anywidget.AnyWidget):
     @property
     def detector_shape(self) -> tuple[int, int]:
         return self._det_shape
-
-    # =====================================================================
-    # Auto-detect center
-    # =====================================================================
 
     def auto_detect_center(self) -> Self:
         """Auto-detect BF disk center and radius from summed diffraction pattern."""
@@ -523,7 +488,6 @@ class ShowDiffraction(anywidget.AnyWidget):
         return self
 
     def set_center(self, row: float, col: float) -> Self:
-        """Set the diffraction center directly in detector pixels (row, col)."""
         self.center_row = float(row)
         self.center_col = float(col)
         self.center_mode = "manual"
@@ -572,10 +536,6 @@ class ShowDiffraction(anywidget.AnyWidget):
             pass
         self._center_from_points_request = []
 
-    # =====================================================================
-    # Frame update
-    # =====================================================================
-
     def _get_frame(self, row: int, col: int) -> np.ndarray:
         row = max(0, min(row, self._scan_shape[0] - 1))
         col = max(0, min(col, self._scan_shape[1] - 1))
@@ -594,10 +554,6 @@ class ShowDiffraction(anywidget.AnyWidget):
     def _on_position_change(self, change=None):
         self._update_frame()
         self._update_radial()
-
-    # =====================================================================
-    # Virtual image (BF)
-    # =====================================================================
 
     def _compute_virtual_image(self):
         row_coords = torch.arange(self.det_rows, device=self._device, dtype=torch.float32)[
@@ -621,31 +577,236 @@ class ShowDiffraction(anywidget.AnyWidget):
         ]
         self.virtual_image_bytes = vi_np.tobytes()
 
-    # =====================================================================
-    # Spots
-    # =====================================================================
+    def _compute_spot_info(
+        self, row: float, col: float, row_err: float = 0.0, col_err: float = 0.0
+    ) -> dict:
+        d_row = row - self.center_row
+        d_col = col - self.center_col
+        r_pixels = math.hypot(d_row, d_col)
 
-    def _compute_spot_info(self, row: float, col: float) -> dict:
-        r_pixels = math.sqrt((row - self.center_row) ** 2 + (col - self.center_col) ** 2)
+        # Project the centroid uncertainty onto the radial direction.
+        if r_pixels > 0:
+            r_err = math.hypot((d_row / r_pixels) * row_err, (d_col / r_pixels) * col_err)
+        else:
+            r_err = math.hypot(row_err, col_err)
 
         frame = self._get_frame(self.pos_row, self.pos_col)
         r_int = max(0, min(self.det_rows - 1, int(round(row))))
         c_int = max(0, min(self.det_cols - 1, int(round(col))))
         intensity = float(frame[r_int, c_int])
 
-        if self.k_calibrated and self.k_pixel_size > 0:
+        if self.k_calibrated and self.k_pixel_size > 0 and r_pixels > 0:
             g_magnitude = r_pixels * self.k_pixel_size
-            d_spacing = 1.0 / g_magnitude if g_magnitude > 0 else None
+            d_spacing = 1.0 / g_magnitude
+            # d = 1/(k r) ⇒ σ_d/d = σ_g/g = σ_r/r (calibration treated as exact).
+            frac = r_err / r_pixels
+            g_err = g_magnitude * frac
+            d_err = d_spacing * frac
         else:
             g_magnitude = None
             d_spacing = None
+            g_err = None
+            d_err = None
 
         return {
             "d_spacing": d_spacing,
+            "d_spacing_err": d_err,
             "g_magnitude": g_magnitude,
+            "g_magnitude_err": g_err,
             "r_pixels": r_pixels,
+            "r_pixels_err": r_err,
             "intensity": intensity,
         }
+
+    def _fit_gaussian_2d(self, row: float, col: float) -> Optional[dict]:
+        frame = self._get_frame(self.pos_row, self.pos_col)
+        half = max(4, int(self.snap_radius))
+        r0, c0 = int(round(row)), int(round(col))
+        r_lo, r_hi = max(0, r0 - half), min(self.det_rows, r0 + half + 1)
+        c_lo, c_hi = max(0, c0 - half), min(self.det_cols, c0 + half + 1)
+        patch = frame[r_lo:r_hi, c_lo:c_hi].astype(np.float64)
+        if patch.shape[0] < 5 or patch.shape[1] < 5:
+            return None
+        try:
+            from scipy.optimize import OptimizeWarning, curve_fit
+        except Exception:
+            return None
+
+        ny, nx = patch.shape
+        rr, cc = np.meshgrid(np.arange(ny), np.arange(nx), indexing="ij")
+
+        def gauss2d(coords, amp, fr, fc, sr, sc, off):
+            r, c = coords
+            return (amp * np.exp(-0.5 * (((r - fr) / sr) ** 2 + ((c - fc) / sc) ** 2)) + off).ravel()
+
+        peak = np.unravel_index(int(np.argmax(patch)), patch.shape)
+        p0 = (
+            float(patch.max() - patch.min()),
+            float(peak[0]),
+            float(peak[1]),
+            2.0,
+            2.0,
+            float(patch.min()),
+        )
+        try:
+            import warnings
+
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", OptimizeWarning)
+                popt, pcov = curve_fit(gauss2d, (rr, cc), patch.ravel(), p0=p0, maxfev=5000)
+        except Exception:
+            return None
+        amp, fr, fc, sigma_row, sigma_col, off = popt
+        if not (0 <= fr < ny and 0 <= fc < nx):
+            return None
+
+        perr = np.sqrt(np.abs(np.diag(pcov)))
+        residual = patch.ravel() - gauss2d((rr, cc), *popt)
+        ss_res = float(np.sum(residual**2))
+        ss_tot = float(np.sum((patch.ravel() - patch.mean()) ** 2))
+        r_squared = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
+
+        return {
+            "row": float(r_lo + fr),
+            "col": float(c_lo + fc),
+            "row_err": float(perr[1]) if np.isfinite(perr[1]) else 0.0,
+            "col_err": float(perr[2]) if np.isfinite(perr[2]) else 0.0,
+            "sigma_row": float(abs(sigma_row)),
+            "sigma_col": float(abs(sigma_col)),
+            "fit_quality": float(r_squared),
+        }
+
+    def _reference_spot(self, spots) -> Optional[dict]:
+        if not spots:
+            return None
+        for s in spots:
+            if s["id"] == self.reference_spot_id:
+                return s
+        return spots[0]
+
+    def _with_angles(self, spots) -> list:
+        ref = self._reference_spot(spots)
+        if ref is None:
+            return spots
+        cr, cc = self.center_row, self.center_col
+        ref_dr, ref_dc = ref["row"] - cr, ref["col"] - cc
+        ref_r = math.hypot(ref_dr, ref_dc)
+        ref_perp = math.hypot(ref.get("row_err", 0.0), ref.get("col_err", 0.0))
+        out = []
+        for s in spots:
+            d_row, d_col = s["row"] - cr, s["col"] - cc
+            r = math.hypot(d_row, d_col)
+            if ref_r > 0 and r > 0:
+                cos_a = max(-1.0, min(1.0, (ref_dr * d_row + ref_dc * d_col) / (ref_r * r)))
+                angle = math.degrees(math.acos(cos_a))
+                perp = math.hypot(s.get("row_err", 0.0), s.get("col_err", 0.0))
+                angle_err = math.degrees(math.hypot(perp / r, ref_perp / ref_r))
+            else:
+                angle = None
+                angle_err = None
+            out.append({**s, "angle_deg": angle, "angle_deg_err": angle_err})
+        return out
+
+    def detect_spots(
+        self,
+        max_spots: int = 20,
+        min_distance: int = 6,
+        threshold_rel: float = 0.15,
+        exclude_radius: Optional[float] = None,
+        replace: bool = True,
+    ) -> Self:
+        """Auto-detect spots (local maxima) in the current frame, excluding the central beam."""
+        frame = self._get_frame(self.pos_row, self.pos_col).astype(np.float64)
+        n_rows, n_cols = frame.shape
+        if exclude_radius is None:
+            exclude_radius = max(self.bf_radius, 2.0 * float(min_distance))
+        try:
+            from scipy.ndimage import gaussian_filter, maximum_filter
+        except Exception:
+            return self
+        # Log-compress the saturated beam, then high-pass to flatten its halo so spots stand out.
+        work = np.log1p(np.clip(frame - frame.min(), 0.0, None))
+        work = work - gaussian_filter(work, sigma=max(2.0, float(min_distance)))
+
+        size = max(3, int(min_distance) | 1)  # odd window enforces a min separation
+        local_max = maximum_filter(work, size=size) == work
+        rows = np.arange(n_rows)[:, None]
+        cols = np.arange(n_cols)[None, :]
+        radius = np.hypot(rows - self.center_row, cols - self.center_col)
+        local_max &= radius > float(exclude_radius)
+        local_max[0, :] = local_max[-1, :] = False
+        local_max[:, 0] = local_max[:, -1] = False
+        coords = np.argwhere(local_max)
+        if replace:
+            self.clear_spots()
+        if coords.size == 0:
+            return self
+        # Threshold on prominence (high-passed value), robust to the saturated beam.
+        prominence = work[coords[:, 0], coords[:, 1]]
+        positive = prominence[prominence > 0]
+        if positive.size:
+            level = float(positive.mean() + (threshold_rel / 0.15) * positive.std())
+            keep = prominence >= level
+            coords, prominence = coords[keep], prominence[keep]
+        order = np.argsort(-prominence)[: int(max_spots)]
+        for r0, c0 in coords[order]:
+            self.add_spot(float(r0), float(c0))
+        return self
+
+    def detect_rings(
+        self,
+        max_rings: int = 10,
+        prominence_rel: float = 0.05,
+        min_separation: int = 5,
+        exclude_radius: Optional[float] = None,
+        replace: bool = True,
+    ) -> Self:
+        """Auto-detect rings as peaks in the radial profile (use instead of detect_spots for rings)."""
+        try:
+            radii_px, intensity = self.radial_profile(use_calibration=False)
+        except Exception:
+            return self
+        y = np.asarray(intensity, dtype=np.float64)
+        if replace:
+            self.clear_rings()
+        if y.size < 5:
+            return self
+        try:
+            from scipy.ndimage import gaussian_filter1d
+            from scipy.signal import find_peaks
+        except Exception:
+            return self
+        if exclude_radius is None:
+            exclude_radius = self.bf_radius
+        # Log-compress the steep central-beam falloff, then detrend so rings read as peaks.
+        y_log = np.log1p(np.clip(y - y.min(), 0.0, None))
+        detrended = y_log - gaussian_filter1d(y_log, sigma=max(3.0, y_log.size / 20.0))
+        span = float(detrended.max() - detrended.min())
+        prominence = prominence_rel * span if span > 0 else None
+        peaks, props = find_peaks(
+            detrended, prominence=prominence, distance=max(1, int(min_separation))
+        )
+        if peaks.size == 0:
+            return self
+        peaks = peaks[radii_px[peaks] > float(exclude_radius)]  # drop the beam region
+        if peaks.size == 0:
+            return self
+        # find_peaks already filtered by prominence; keep the innermost (strong low-order) rings.
+        for p in sorted(peaks)[: int(max_rings)]:
+            self.add_ring(float(radii_px[p]))
+        return self
+
+    def _on_detect_spots_request(self, change=None):
+        n = self._detect_spots_request
+        if n and n > 0:
+            self.detect_spots(max_spots=int(n))
+            self._detect_spots_request = 0
+
+    def _on_detect_rings_request(self, change=None):
+        n = self._detect_rings_request
+        if n and n > 0:
+            self.detect_rings(max_rings=int(n))
+            self._detect_rings_request = 0
 
     def _snap_to_peak(self, row: float, col: float) -> tuple[float, float]:
         frame = self._get_frame(self.pos_row, self.pos_col)
@@ -662,28 +823,67 @@ class ShowDiffraction(anywidget.AnyWidget):
         return float(r0 + idx[0]), float(c0 + idx[1])
 
     def add_spot(self, row: float, col: float) -> Self:
-        """Add a spot at (row, col). Snaps to local peak if snap_enabled."""
-        if self.snap_enabled:
-            row, col = self._snap_to_peak(row, col)
-        info = self._compute_spot_info(row, col)
+        """Add a spot at (row, col). Sub-pixel Gaussian refine if spot_refine, else snap if enabled."""
+        raw_row, raw_col = float(row), float(col)
+        row_err = col_err = 0.0
+        fit_quality = None
+        if self.spot_refine:
+            fit = self._fit_gaussian_2d(raw_row, raw_col)
+            if fit is not None:
+                row, col = fit["row"], fit["col"]
+                row_err, col_err = fit["row_err"], fit["col_err"]
+                fit_quality = fit["fit_quality"]
+        elif self.snap_enabled:
+            row, col = self._snap_to_peak(raw_row, raw_col)
+        info = self._compute_spot_info(row, col, row_err=row_err, col_err=col_err)
         spot = {
-            "id": len(self.spots) + 1,
+            "id": (max(s["id"] for s in self.spots) + 1) if self.spots else 1,
             "row": float(row),
             "col": float(col),
+            "raw_row": raw_row,
+            "raw_col": raw_col,
+            "row_err": float(row_err),
+            "col_err": float(col_err),
+            "fit_quality": fit_quality,
+            "angle_deg": None,
+            "angle_deg_err": None,
+            "hkl": "",
+            "note": "",
             **info,
         }
-        self.spots = list(self.spots) + [spot]
+        self.spots = self._with_angles(list(self.spots) + [spot])
+        return self
+
+    def label_spot(self, spot_id: int, hkl: str | None = None, note: str | None = None) -> Self:
+        spots = []
+        for s in self.spots:
+            if s["id"] == spot_id:
+                s = {**s}
+                if hkl is not None:
+                    s["hkl"] = str(hkl)
+                if note is not None:
+                    s["note"] = str(note)
+            spots.append(s)
+        self.spots = spots
+        return self
+
+    def set_reference_spot(self, spot_id: int) -> Self:
+        self.reference_spot_id = int(spot_id)
         return self
 
     def clear_spots(self) -> Self:
-        """Remove all spots."""
         self.spots = []
         return self
 
     def undo_spot(self) -> Self:
-        """Remove the last added spot."""
         if self.spots:
             self.spots = list(self.spots[:-1])
+        return self
+
+    def remove_spot(self, spot_id: int) -> Self:
+        remaining = [s for s in self.spots if s["id"] != spot_id]
+        if len(remaining) != len(self.spots):
+            self.spots = self._with_angles(remaining)
         return self
 
     def _on_spot_add_request(self, change=None):
@@ -702,22 +902,34 @@ class ShowDiffraction(anywidget.AnyWidget):
             self.clear_spots()
             self._spot_clear_request = False
 
+    def _on_spot_remove_request(self, change=None):
+        if self._spot_remove_request:
+            self.remove_spot(int(self._spot_remove_request))
+            self._spot_remove_request = 0
+
     def _recompute_spots(self):
         if not self.spots:
             return
-        self.spots = [
-            {**s, **self._compute_spot_info(s["row"], s["col"])} for s in self.spots
+        spots = [
+            {
+                **s,
+                **self._compute_spot_info(
+                    s["row"], s["col"], s.get("row_err", 0.0), s.get("col_err", 0.0)
+                ),
+            }
+            for s in self.spots
         ]
+        self.spots = self._with_angles(spots)
+
+    def _on_reference_spot_change(self, change=None):
+        if self.spots:
+            self.spots = self._with_angles(list(self.spots))
 
     def _on_geometry_change(self, change=None):
         # Center/calibration moved → existing spot and ring d-spacings are stale.
         self._recompute_spots()
         self._recompute_rings()
         self._update_radial()
-
-    # =====================================================================
-    # Rings — picked on the radial I(q) profile (polycrystal workflow)
-    # =====================================================================
 
     def _compute_ring_info(self, radius_px: float) -> dict:
         if self.k_calibrated and self.k_pixel_size > 0:
@@ -743,20 +955,26 @@ class ShowDiffraction(anywidget.AnyWidget):
         """Add a ring at radius_px from the center (polycrystalline d-spacing pick)."""
         ring = {
             "id": (max(r["id"] for r in self.rings) + 1) if self.rings else 1,
+            "hkl": "",
+            "note": "",
             **self._compute_ring_info(radius_px),
         }
         self.rings = list(self.rings) + [ring]
         return self
 
     def clear_rings(self) -> Self:
-        """Remove all rings."""
         self.rings = []
         return self
 
     def undo_ring(self) -> Self:
-        """Remove the last added ring."""
         if self.rings:
             self.rings = list(self.rings[:-1])
+        return self
+
+    def remove_ring(self, ring_id: int) -> Self:
+        remaining = [r for r in self.rings if r["id"] != ring_id]
+        if len(remaining) != len(self.rings):
+            self.rings = remaining
         return self
 
     def _recompute_rings(self):
@@ -782,9 +1000,10 @@ class ShowDiffraction(anywidget.AnyWidget):
             self.clear_rings()
             self._ring_clear_request = False
 
-    # =====================================================================
-    # Radial I(q) profile
-    # =====================================================================
+    def _on_ring_remove_request(self, change=None):
+        if self._ring_remove_request:
+            self.remove_ring(int(self._ring_remove_request))
+            self._ring_remove_request = 0
 
     def radial_profile(
         self,
@@ -840,14 +1059,10 @@ class ShowDiffraction(anywidget.AnyWidget):
             x, intensity = self.radial_profile()
         except Exception:
             return
-        self.radial_q_bytes = np.ascontiguousarray(x, dtype=np.float32).tobytes()
+        self.radial_g_bytes = np.ascontiguousarray(x, dtype=np.float32).tobytes()
         self.radial_i_bytes = np.ascontiguousarray(intensity, dtype=np.float32).tobytes()
         self.radial_n_bins = int(x.size)
         self.radial_calibrated = bool(self.k_calibrated and self.k_pixel_size > 0)
-
-    # =====================================================================
-    # Reciprocal-space calibration
-    # =====================================================================
 
     def calibrate_from_spot(self, row: float, col: float, d_known: float) -> Self:
         """Calibrate k_pixel_size so the spot at (row, col) has d-spacing d_known (Å)."""
@@ -858,6 +1073,9 @@ class ShowDiffraction(anywidget.AnyWidget):
             raise ValueError("calibration point is at the center; no g-vector")
         self.k_pixel_size = 1.0 / (d_known * r_pixels)
         self.k_calibrated = True
+        self.calibration_source = "from_spot"
+        self.calibration_ref_d = float(d_known)
+        self.calibration_ref_radius = float(r_pixels)
         return self
 
     def calibrate_from_ring(self, radius_px: float, d_known: float) -> Self:
@@ -868,6 +1086,9 @@ class ShowDiffraction(anywidget.AnyWidget):
             raise ValueError(f"radius_px must be positive, got {radius_px}")
         self.k_pixel_size = 1.0 / (d_known * radius_px)
         self.k_calibrated = True
+        self.calibration_source = "from_ring"
+        self.calibration_ref_d = float(d_known)
+        self.calibration_ref_radius = float(radius_px)
         return self
 
     def _on_calibrate_from_ring_request(self, change=None):
@@ -888,9 +1109,66 @@ class ShowDiffraction(anywidget.AnyWidget):
                 pass
             self._calibrate_from_spot_request = []
 
-    # =====================================================================
-    # set_image
-    # =====================================================================
+    _MEASUREMENT_COLUMNS = [
+        "id", "kind", "raw_row", "raw_col", "row", "col", "row_err", "col_err",
+        "r_pixels", "r_pixels_err", "g_inv_angstrom", "g_inv_angstrom_err",
+        "d_angstrom", "d_angstrom_err", "angle_deg", "angle_deg_err",
+        "intensity", "fit_quality", "hkl", "note",
+    ]
+
+    def _measurement_records(self) -> list:
+        records = []
+        for s in self.spots:
+            records.append({
+                "id": s.get("id"), "kind": "spot",
+                "raw_row": s.get("raw_row"), "raw_col": s.get("raw_col"),
+                "row": s.get("row"), "col": s.get("col"),
+                "row_err": s.get("row_err"), "col_err": s.get("col_err"),
+                "r_pixels": s.get("r_pixels"), "r_pixels_err": s.get("r_pixels_err"),
+                "g_inv_angstrom": s.get("g_magnitude"), "g_inv_angstrom_err": s.get("g_magnitude_err"),
+                "d_angstrom": s.get("d_spacing"), "d_angstrom_err": s.get("d_spacing_err"),
+                "angle_deg": s.get("angle_deg"), "angle_deg_err": s.get("angle_deg_err"),
+                "intensity": s.get("intensity"), "fit_quality": s.get("fit_quality"),
+                "hkl": s.get("hkl", ""), "note": s.get("note", ""),
+            })
+        for r in self.rings:
+            records.append({
+                "id": r.get("id"), "kind": "ring",
+                "raw_row": None, "raw_col": None, "row": None, "col": None,
+                "row_err": None, "col_err": None,
+                "r_pixels": r.get("radius_px"), "r_pixels_err": None,
+                "g_inv_angstrom": r.get("g_magnitude"), "g_inv_angstrom_err": None,
+                "d_angstrom": r.get("d_spacing"), "d_angstrom_err": None,
+                "angle_deg": None, "angle_deg_err": None,
+                "intensity": r.get("intensity"), "fit_quality": None,
+                "hkl": r.get("hkl", ""), "note": r.get("note", ""),
+            })
+        return records
+
+    def export_measurements(self, path: str) -> pathlib.Path:
+        """Export spots + rings to CSV or JSON (format inferred from extension)."""
+        p = pathlib.Path(path)
+        records = self._measurement_records()
+        meta = {
+            "widget_name": "ShowDiffraction",
+            "widget_version": self.widget_version,
+            "center_row": self.center_row,
+            "center_col": self.center_col,
+            "k_pixel_size_inv_angstrom_per_px": self.k_pixel_size,
+            "calibrated": bool(self.k_calibrated),
+            "calibration_source": self.calibration_source,
+            "calibration_ref_d_angstrom": self.calibration_ref_d,
+            "calibration_ref_radius_px": self.calibration_ref_radius,
+            "reference_spot_id": self.reference_spot_id,
+        }
+        if p.suffix.lower() == ".json":
+            p.write_text(json.dumps({"metadata": meta, "measurements": records}, indent=2))
+        else:
+            with open(p, "w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=self._MEASUREMENT_COLUMNS)
+                writer.writeheader()
+                writer.writerows(records)
+        return p
 
     def set_image(self, data, scan_shape: tuple[int, int] | None = None) -> Self:
         """Replace data. Preserves display settings, clears spots."""
@@ -924,10 +1202,6 @@ class ShowDiffraction(anywidget.AnyWidget):
         self._update_radial()
         return self
 
-    # =====================================================================
-    # State protocol
-    # =====================================================================
-
     def state_dict(self):
         return {
             "title": self.title,
@@ -943,10 +1217,17 @@ class ShowDiffraction(anywidget.AnyWidget):
             "rings": list(self.rings),
             "snap_enabled": self.snap_enabled,
             "snap_radius": self.snap_radius,
+            "spot_refine": self.spot_refine,
+            "reference_spot_id": self.reference_spot_id,
             "center_mode": self.center_mode,
+            "calibration_source": self.calibration_source,
+            "calibration_ref_d": self.calibration_ref_d,
+            "calibration_ref_radius": self.calibration_ref_radius,
             "show_radial": self.show_radial,
             "dp_colormap": self.dp_colormap,
             "dp_scale_mode": self.dp_scale_mode,
+            "dp_invert": self.dp_invert,
+            "dp_rotation": self.dp_rotation,
             "dp_vmin_pct": self.dp_vmin_pct,
             "dp_vmax_pct": self.dp_vmax_pct,
             "vi_colormap": self.vi_colormap,
@@ -959,11 +1240,9 @@ class ShowDiffraction(anywidget.AnyWidget):
         }
 
     def save(self, path: str):
-        """Save widget state to a JSON file."""
         save_state_file(path, "ShowDiffraction", self.state_dict())
 
     def load_state_dict(self, state):
-        """Restore widget state from a dict."""
         allowed_keys = set(self.state_dict().keys())
         pending_pos_row = state.get("pos_row", None)
         pending_pos_col = state.get("pos_col", None)
@@ -979,13 +1258,17 @@ class ShowDiffraction(anywidget.AnyWidget):
             self.pos_col = int(max(0, min(col, self.shape_cols - 1)))
 
     def summary(self):
-        """Print a human-readable summary of the widget state."""
         name = self.title if self.title else "ShowDiffraction"
         lines = [name, "═" * 32]
         lines.append(f"Scan:     {self.shape_rows}×{self.shape_cols} ({self.pixel_size:.2f} Å/px)")
         k_unit = "1/Å" if self.k_calibrated else "px"
         k_val = f"{self.k_pixel_size:.4f}" if self.k_calibrated else "uncalibrated"
         lines.append(f"Detector: {self.det_rows}×{self.det_cols} ({k_val} {k_unit}/px)")
+        if self.k_calibrated:
+            cal = f"Calib:    {self.calibration_source}"
+            if self.calibration_ref_d > 0:
+                cal += f" (d={self.calibration_ref_d:.3f} Å @ r={self.calibration_ref_radius:.1f} px)"
+            lines.append(cal)
         lines.append(f"Position: ({self.pos_row}, {self.pos_col})")
         lines.append(
             f"Center:   ({self.center_row:.1f}, {self.center_col:.1f})  BF r={self.bf_radius:.1f} px"
@@ -993,8 +1276,14 @@ class ShowDiffraction(anywidget.AnyWidget):
         lines.append(f"Spots:    {len(self.spots)}")
         if self.spots:
             for s in self.spots[:5]:
-                d = f"{s['d_spacing']:.3f} Å" if s.get("d_spacing") else f"{s['r_pixels']:.1f} px"
-                lines.append(f"  #{s['id']} ({s['row']:.1f}, {s['col']:.1f}) d={d}")
+                if s.get("d_spacing"):
+                    derr = s.get("d_spacing_err")
+                    d = f"{s['d_spacing']:.3f}±{derr:.3f} Å" if derr else f"{s['d_spacing']:.3f} Å"
+                else:
+                    d = f"{s['r_pixels']:.1f} px"
+                ang = f"  ∠={s['angle_deg']:.1f}°" if s.get("angle_deg") is not None else ""
+                hkl = f"  {s['hkl']}" if s.get("hkl") else ""
+                lines.append(f"  #{s['id']} ({s['row']:.1f}, {s['col']:.1f}) d={d}{ang}{hkl}")
             if len(self.spots) > 5:
                 lines.append(f"  ... +{len(self.spots) - 5} more")
         lines.append(f"Display:  {self.dp_colormap} | {self.dp_scale_mode}")
@@ -1014,7 +1303,6 @@ class ShowDiffraction(anywidget.AnyWidget):
         )
 
     def free(self):
-        """Free GPU memory."""
         if hasattr(self, "_data"):
             del self._data
         import gc
@@ -1024,6 +1312,5 @@ class ShowDiffraction(anywidget.AnyWidget):
             torch.mps.empty_cache()
         elif torch.cuda.is_available():
             torch.cuda.empty_cache()
-
 
 bind_tool_runtime_api(ShowDiffraction, "ShowDiffraction")
