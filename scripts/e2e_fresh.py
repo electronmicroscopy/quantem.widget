@@ -13,9 +13,10 @@ any failure raises and exits non-zero.
 """
 import glob
 import os
+import os
 import sys
 
-DATA = sys.argv[1] if len(sys.argv) > 1 else "/data/sample/series"
+DATA = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("WIDGET_E2E_DATA", "")  # pass a path arg or set WIDGET_E2E_DATA
 
 
 def main():
