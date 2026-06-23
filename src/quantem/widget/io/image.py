@@ -22,31 +22,93 @@ from pathlib import Path
 
 import numpy as np
 
-from quantem.core.datastructures import Dataset3d
-from quantem.widget.datastructures import Dataset2d
+from quantem.core.datastructures import Dataset2d, Dataset3d
+
+
+_IMAGE_SUFFIXES = (".npy", ".emd", ".tif", ".tiff", ".png",
+                   ".jpg", ".jpeg", ".bmp", ".dm3", ".dm4")
+
+
+def read_images(folder: str | Path) -> list[Dataset2d]:
+    """Read every image in a folder into a list of :class:`Dataset2d`.
+
+    The folder analog of :func:`read_image` for a *mixed* set of survey images -
+    different formats and different sizes that cannot stack into one cube (use
+    :func:`read_image_stack` for a folder of same-size frames). Files are sorted
+    by name; every supported extension is read, anything else is skipped. Lets a
+    gallery be one line: ``Show2D([d.array for d in io.read_images(folder)])``.
+    """
+    folder = Path(folder)
+    if not folder.is_dir():
+        raise FileNotFoundError(f"Not a directory: {folder}")
+    files = sorted(p for p in folder.iterdir()
+                   if p.is_file() and p.suffix.lower() in _IMAGE_SUFFIXES
+                   and not p.name.startswith("."))
+    if not files:
+        raise FileNotFoundError(f"No supported images in {folder}")
+    return [read_image(p) for p in files]
 
 
 def read_image(path: str | Path) -> Dataset2d:
-    """Return a :class:`Dataset2d` from a Velox ``.emd`` HAADF or a ``.npy`` file.
+    """Return a :class:`Dataset2d` from a single 2D image, any common format.
 
-    Velox stores the image under ``Data/Image/<hash>/Data`` shaped (H, W, N) and
-    a JSON metadata blob alongside; we take the first frame and pull the pixel
-    size into ``sampling`` (nm) + keep the full metadata dict. ``.npy`` loads the
-    array with no calibration (sampling defaults to pixels).
+    One reader for every survey-image format the lab produces, so loading is
+    always ``ds = io.read_image(path)`` and the result is a calibrated
+    :class:`Dataset2d` you carry around (``ds.array``, ``ds.sampling``):
+
+    - ``.npy`` - raw array, no calibration.
+    - ``.emd`` - Velox HAADF (image under ``Data/Image/<hash>/Data`` with a JSON
+      metadata blob carrying the pixel size); falls back to the largest 2D
+      dataset for non-Velox EMD layouts (e.g. a ``data/drift/data`` series).
+    - ``.tif`` / ``.tiff`` / ``.png`` / ``.jpg`` / ``.bmp`` - via Pillow.
+    - ``.dm3`` / ``.dm4`` - Gatan, via ncempy.
+
+    A 3D result (a multi-frame container) is reduced to its first frame so the
+    return is always a single 2D image.
     """
     p = Path(path)
-    if p.suffix == ".npy":
-        return Dataset2d(np.load(p), name=p.stem)
-    if p.suffix == ".emd":
-        import h5py  # noqa: PLC0415  (lazy: keep importing quantem.widget.io cheap)
-        with h5py.File(p, "r") as f:
-            group = next(iter(f["Data/Image"]))  # one image signal per HAADF emd
+    ext = p.suffix.lower()
+    if ext == ".npy":
+        return Dataset2d.from_array(_first_frame(np.load(p)), name=p.stem)
+    if ext == ".emd":
+        return _read_emd(p)
+    if ext in (".tif", ".tiff", ".png", ".jpg", ".jpeg", ".bmp"):
+        from PIL import Image  # noqa: PLC0415  (lazy: keep io import cheap)
+        with Image.open(p) as img:
+            arr = np.asarray(img)
+        return Dataset2d.from_array(_first_frame(arr), name=p.stem)
+    if ext in (".dm3", ".dm4"):
+        from ncempy.io import dm  # noqa: PLC0415
+        arr = np.asarray(dm.dmReader(str(p))["data"])
+        return Dataset2d.from_array(_first_frame(arr), name=p.stem)
+    raise ValueError(
+        f"read_image: unsupported extension {ext!r} "
+        "(use .npy, .emd, .tif/.tiff, .png, .jpg, .bmp, .dm3/.dm4)")
+
+
+def _first_frame(arr: np.ndarray) -> np.ndarray:
+    """Reduce a 3D stack to its first frame; pass a 2D array through unchanged."""
+    return arr[0] if arr.ndim == 3 else arr
+
+
+def _read_emd(p: Path) -> Dataset2d:
+    """Read an EMD image: Velox HAADF layout if present, else the largest 2D dataset."""
+    import h5py  # noqa: PLC0415
+    with h5py.File(p, "r") as f:
+        if "Data/Image" in f:                       # Velox HAADF
+            group = next(iter(f["Data/Image"]))
             arr = f[f"Data/Image/{group}/Data"][...]
             meta = _read_velox_metadata(f, group)
-        image = arr[:, :, 0] if arr.ndim == 3 else arr
-        sampling, units = _velox_sampling(meta)
-        return Dataset2d(image, sampling=sampling, units=units, name=p.stem, metadata=meta)
-    raise ValueError(f"read_image: unsupported extension {p.suffix!r} (use .emd or .npy)")
+            image = arr[:, :, 0] if arr.ndim == 3 else arr
+            sampling, units = _velox_sampling(meta)
+            ds = Dataset2d.from_array(image, sampling=sampling, units=units, name=p.stem)
+            ds._metadata = meta
+            return ds
+        biggest = []                                 # non-Velox: largest >=2D dataset
+        f.visititems(lambda name, obj: biggest.append(obj)
+                     if isinstance(obj, h5py.Dataset) and obj.ndim >= 2 else None)
+        arr = max(biggest, key=lambda obj: obj.size)[()]
+    return Dataset2d.from_array(_first_frame(arr).astype(np.float32), name=p.stem)
 
 
 def _read_velox_metadata(f, group) -> dict:
