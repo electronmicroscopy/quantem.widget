@@ -11,6 +11,7 @@ import json
 import math
 import os
 import pathlib
+import tempfile
 import warnings
 from enum import StrEnum
 from typing import Self
@@ -21,8 +22,8 @@ import matplotlib.patheffects
 import matplotlib.pyplot as plt
 import numpy as np
 import traitlets
-from quantem.widget.array_utils import _resize_image, to_numpy
-from quantem.widget.state import resolve_widget_version, save_state_file, unwrap_state_payload
+from quantem.widget.utils.array import _resize_image, to_numpy
+from quantem.widget.utils.state_io import resolve_widget_version, save_state_file, unwrap_state_payload
 
 from quantem.core.datastructures import Dataset2d, Dataset3d
 
@@ -218,6 +219,12 @@ class Show2D(anywidget.AnyWidget):
     _export_light = traitlets.Bool(False).tag(sync=True)
     _offline_min = traitlets.Float(0.0).tag(sync=True)
     _offline_max = traitlets.Float(1.0).tag(sync=True)
+    export_request = traitlets.Unicode("").tag(sync=True)
+    export_status = traitlets.Unicode("").tag(sync=True)
+    export_enabled = traitlets.Bool(True).tag(sync=True)
+    export_payload = traitlets.Bytes(b"").tag(sync=True)
+    export_payload_id = traitlets.Unicode("").tag(sync=True)
+    export_filename = traitlets.Unicode("").tag(sync=True)
     labels = traitlets.List(traitlets.Unicode()).tag(sync=True)
     title = traitlets.Unicode("").tag(sync=True)
     cmap = traitlets.Unicode("inferno").tag(sync=True)
@@ -517,7 +524,7 @@ class Show2D(anywidget.AnyWidget):
             self._display_bin = display_bin
 
         if self._display_bin > 1:
-            from quantem.widget.array_utils import bin2d
+            from quantem.widget.utils.array import bin2d
             orig_h, orig_w = self._data.shape[1], self._data.shape[2]
             self._display_data = bin2d(self._data, factor=self._display_bin, mode="mean")
             self.height = int(self._display_data.shape[1])
@@ -556,6 +563,7 @@ class Show2D(anywidget.AnyWidget):
         self._init_t0 = _t0
         self._init_py_elapsed_ms = (_time.perf_counter() - _t0) * 1000
         self.observe(self._on_first_render, names=["_js_rendered"])
+        self.observe(self._on_export_request_change, names=["export_request"])
 
     def _on_first_render(self, change):
         import time as _time
@@ -605,7 +613,7 @@ class Show2D(anywidget.AnyWidget):
         if os.environ.get("QUANTEM_WIDGET_NO_SNAPSHOT"):
             return bundle
         try:
-            from quantem.widget._snapshot import render_image_png, render_panels_png
+            from quantem.widget.render.snapshot import render_image_png, render_panels_png
             cmap = self.cmap if isinstance(self.cmap, str) else str(self.cmap)
             log = bool(getattr(self, "log_scale", False))
             vmin = getattr(self, "vmin", None)
@@ -839,8 +847,10 @@ class Show2D(anywidget.AnyWidget):
     def save(self, path: str):
         save_state_file(path, "Show2D", self.state_dict())
 
-    def export_html(self, path: str | pathlib.Path,
-                    *, title: str | None = None) -> pathlib.Path:
+    def export_html(self, path: str | pathlib.Path | None = None,
+                    *,
+                    quantized: bool = False,
+                    title: str | None = None) -> pathlib.Path:
         """Write a standalone HTML viewer for this widget.
 
         The exported file mounts the live anywidget JS bundle with the current
@@ -849,25 +859,144 @@ class Show2D(anywidget.AnyWidget):
 
         Parameters
         ----------
-        path : str or pathlib.Path
+        path : str or pathlib.Path, optional
             Destination HTML path.
+        quantized : bool, default False
+            Store the displayed image stack as uint8 with min/max metadata.
+            This is smaller and visually equivalent after colormapping. The
+            default stores exact float32 display values.
         title : str, optional
             Browser page title. Defaults to widget ``title`` or "Show2D".
         """
+        if self._data is None:
+            raise ValueError("Cannot export HTML after free(); rebuild the widget first.")
+
+        export_path = pathlib.Path(path) if path is not None else self._default_html_export_path(quantized)
+        self._write_html_export(export_path, quantized=quantized, title=title)
+        size_mb = export_path.stat().st_size / (1024 * 1024)
+        mode = "quantized" if quantized else "exact float32"
+        self.export_status = f"Exported {export_path.name} ({size_mb:.1f} MB, {mode})"
+        return export_path
+
+    def _on_export_request_change(self, change: dict) -> None:
+        raw = str(change.get("new") or "")
+        if not raw:
+            return
+        try:
+            payload = json.loads(raw)
+            mode = str(payload.get("mode", "exact"))
+            if mode == "clear":
+                self.export_payload = b""
+                self.export_payload_id = ""
+                self.export_filename = ""
+                return
+            if mode not in ("exact", "quantized"):
+                raise ValueError(f"unknown export mode {mode!r}")
+            quantized = mode == "quantized"
+            if payload.get("download"):
+                filename = str(payload.get("filename") or self._default_html_export_path(quantized).name)
+                request_id = str(payload.get("id") or "")
+                self.export_status = f"Preparing {filename}..."
+                html = self._html_export_bytes(quantized=quantized)
+                self.export_filename = filename
+                self.export_payload = html
+                self.export_payload_id = request_id
+                size_mb = len(html) / (1024 * 1024)
+                label = "quantized" if quantized else "exact float32"
+                self.export_status = f"Ready {filename} ({size_mb:.1f} MB, {label})"
+            else:
+                self.export_status = f"Exporting {mode} HTML..."
+                self.export_html(quantized=quantized)
+        except Exception as exc:
+            self.export_status = f"Export failed: {exc}"
+
+    def _default_html_export_path(self, quantized: bool) -> pathlib.Path:
+        label = self.title.strip() or "show2d"
+        slug = "".join(ch.lower() if ch.isalnum() else "_" for ch in label).strip("_")
+        while "__" in slug:
+            slug = slug.replace("__", "_")
+        if not slug:
+            slug = "show2d"
+        mode = "quantized" if quantized else "exact"
+        shape = f"{self.n_images}x{self.height}x{self.width}" if self.n_images > 1 else f"{self.height}x{self.width}"
+        return pathlib.Path.cwd() / f"{slug}_{shape}_{mode}.html"
+
+    def _write_html_export(
+        self,
+        path: str | pathlib.Path,
+        *,
+        quantized: bool,
+        title: str | None = None,
+    ) -> pathlib.Path:
         from ipywidgets.embed import dependency_state, embed_minimal_html
 
         export_path = pathlib.Path(path)
         export_path.parent.mkdir(parents=True, exist_ok=True)
         page_title = title or self.title or "Show2D"
-        state = dependency_state([self], drop_defaults=False)
-        embed_minimal_html(
-            str(export_path),
-            views=[self],
-            title=page_title,
-            drop_defaults=False,
-            state=state,
-        )
+        export_widget = self._clone_for_html_export(quantized=quantized)
+        try:
+            state = dependency_state([export_widget], drop_defaults=False)
+            embed_minimal_html(
+                str(export_path),
+                views=[export_widget],
+                title=page_title,
+                drop_defaults=False,
+                state=state,
+            )
+        finally:
+            export_widget.close()
         return export_path
+
+    def _html_export_bytes(self, *, quantized: bool) -> bytes:
+        with tempfile.TemporaryDirectory(prefix="show2d-export-") as tmp:
+            path = pathlib.Path(tmp) / self._default_html_export_path(quantized).name
+            self._write_html_export(path, quantized=quantized)
+            return path.read_bytes()
+
+    def _clone_for_html_export(self, *, quantized: bool) -> Self:
+        data = self._display_data if self._display_data is not None else self._data
+        if data is None:
+            raise ValueError("Cannot export HTML after free(); rebuild the widget first.")
+        clone = type(self)(
+            np.ascontiguousarray(data, dtype=np.float32),
+            labels=list(self.labels),
+            title=self.title,
+            cmap=self.cmap,
+            sampling=self.pixel_size if self.pixel_size > 0 else None,
+            units=self.pixel_unit,
+            scale_bar_visible=self.scale_bar_visible,
+            show_fft=self.show_fft,
+            fft_window=self.fft_window,
+            show_controls=self.show_controls,
+            show_stats=self.show_stats,
+            verbose=False,
+            log_scale=self.log_scale,
+            auto_contrast=self.auto_contrast,
+            offline=quantized,
+            vmin=self.vmin if self.vmin is not None else self.vmins,
+            vmax=self.vmax if self.vmax is not None else self.vmaxs,
+            ncols=self.ncols,
+            size=self.size,
+            smooth=self.smooth,
+            zoom=self.initial_zoom,
+            zoom_row=self.zoom_row,
+            zoom_col=self.zoom_col,
+            link_zoom=self.link_zoom,
+            link_pan=self.link_pan,
+            link_contrast=self.link_contrast,
+            diff_mode=self.diff_mode,
+            display_bin=1,
+        )
+        clone.load_state_dict(self.state_dict())
+        clone.offline = quantized
+        clone._export_light = True
+        clone.export_enabled = False
+        clone.export_status = ""
+        clone.export_payload = b""
+        clone.export_payload_id = ""
+        clone.export_filename = ""
+        clone._update_all_frames()
+        return clone
 
     def load_state_dict(self, state):
         for key, val in state.items():
@@ -1017,7 +1146,7 @@ class Show2D(anywidget.AnyWidget):
         self._data = np.stack(rotated).astype(np.float32)
         # Recompute display data if binning is active
         if self._display_bin > 1:
-            from quantem.widget.array_utils import bin2d
+            from quantem.widget.utils.array import bin2d
             self._display_data = bin2d(self._data, factor=self._display_bin, mode="mean")
         else:
             self._display_data = self._data
@@ -1236,4 +1365,3 @@ class Show2D(anywidget.AnyWidget):
         if self.pixel_size > 0:
             return dist_px * self.pixel_size
         return dist_px
-

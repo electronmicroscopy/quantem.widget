@@ -28,8 +28,8 @@ import anywidget
 import numpy as np
 import traitlets
 
-from quantem.widget.array_utils import to_numpy
-from quantem.widget.config_utils import (
+from quantem.widget.utils.array import to_numpy
+from quantem.widget.utils.recon_config import (
     _config_float,
     _load_quantem_config,
     _normalize_rotation_deg,
@@ -38,7 +38,7 @@ from quantem.widget.config_utils import (
     _rotate_stack_inplane,
 )
 from quantem.widget.show2d import _reject_unknown_kwargs
-from quantem.widget.state import (
+from quantem.widget.utils.state_io import (
     resolve_widget_version,
     save_state_file,
     unwrap_state_payload,
@@ -1240,7 +1240,7 @@ class Show3D(anywidget.AnyWidget):
                     # 604 MB frame. The full source panels remain referenced here.
                     panel_bin = display_bin if isinstance(display_bin, int) and display_bin > 1 else 1
                     if panel_bin > 1:
-                        from quantem.widget.array_utils import bin2d
+                        from quantem.widget.utils.array import bin2d
 
                         self._source_panels = panels
                         panels = [
@@ -1320,7 +1320,7 @@ class Show3D(anywidget.AnyWidget):
             self.height = orig_h
             self.width = int(self.panel_width_px) * int(self.n_panels)
         elif self._display_bin > 1:
-            from quantem.widget.array_utils import bin2d
+            from quantem.widget.utils.array import bin2d
             self._display_data = bin2d(self._data, factor=self._display_bin, mode="mean")
             self.height = int(self._display_data.shape[1])
             self.width = int(self._display_data.shape[2])
@@ -2599,7 +2599,7 @@ class Show3D(anywidget.AnyWidget):
         Single-panel Show3D only; multi-panel raises. Browser zoom/pan is a
         view-only transform and is not reflected (the full frame is exported).
         """
-        from quantem.widget import gif_utils
+        from quantem.widget.render import gif as gif_utils
         if getattr(self, "n_panels", 1) > 1:
             raise ValueError("save_gif supports single-panel Show3D only.")
         if quality not in gif_utils.QUALITY_SCALE:
@@ -3509,7 +3509,7 @@ class Show3D(anywidget.AnyWidget):
         if os.environ.get("QUANTEM_WIDGET_NO_SNAPSHOT"):
             return bundle
         try:
-            from quantem.widget._snapshot import render_image_png, render_panels_png
+            from quantem.widget.render.snapshot import render_image_png, render_panels_png
             mid = int(self.n_slices) // 2 if self.n_slices > 1 else 0
             frame = self._get_display_frame(mid)
             n_pan = int(self.n_panels) if int(self.n_panels) > 1 else 1

@@ -17,6 +17,7 @@ import json
 import math
 import os
 import pathlib
+import tempfile
 import time
 from typing import TYPE_CHECKING, Any, Self
 
@@ -27,8 +28,8 @@ import anywidget
 import numpy as np
 import torch
 import traitlets
-from quantem.widget.array_utils import to_numpy
-from quantem.widget.state import (
+from quantem.widget.utils.array import to_numpy
+from quantem.widget.utils.state_io import (
     build_json_header,
     resolve_widget_version,
     save_state_file,
@@ -227,6 +228,16 @@ class Show4DSTEM(anywidget.AnyWidget):
     # compute - mirrors CUDA load(apply_mask=True) so the browser data is filtered
     # automatically (no saturated pixel dominating the VI/DP).
     _offline_bad_px = traitlets.Unicode("").tag(sync=True)
+
+    # Frontend-triggered standalone HTML export. Show4DSTEM exports package the
+    # current loaded dataset representation; optional detector binning is applied
+    # to that in-memory tensor instead of reloading from the original file.
+    export_request = traitlets.Unicode("").tag(sync=True)
+    export_status = traitlets.Unicode("").tag(sync=True)
+    export_enabled = traitlets.Bool(True).tag(sync=True)
+    export_payload = traitlets.Bytes(b"").tag(sync=True)
+    export_payload_id = traitlets.Unicode("").tag(sync=True)
+    export_filename = traitlets.Unicode("").tag(sync=True)
 
     # =========================================================================
     # VI ROI (real-space region selection for summed DP)
@@ -634,6 +645,7 @@ class Show4DSTEM(anywidget.AnyWidget):
         # Path animation: observe index changes from frontend
         self.observe(self._on_path_index_change, names=["path_index"])
         self.observe(self._on_gif_export, names=["_gif_export_requested"])
+        self.observe(self._on_export_request_change, names=["export_request"])
 
         # Frame animation (5D): observe frame_idx changes from frontend
         self.observe(self._on_frame_idx_change, names=["frame_idx"])
@@ -818,17 +830,257 @@ class Show4DSTEM(anywidget.AnyWidget):
             else:
                 self._offline_stack = gz  # inline single self-contained file
 
-    def export_html(self, path: str, *, title: str | None = None) -> str:
-        """Write a standalone HTML viewer (anywidget embed). The widget must already
-        be offline (e.g. offline_codec='bslz4', data_url=...); the bslz4/gzip
-        companion file is fetched at view time, so serve the HTML + companion over
-        HTTP from the same directory. Returns the written path."""
-        import pathlib
+    def export_html(
+        self,
+        path: str | pathlib.Path | None = None,
+        *,
+        title: str | None = None,
+        dtype: str = "uint8",
+        det_bin: int = 1,
+    ) -> pathlib.Path:
+        """Write a standalone HTML viewer.
+
+        The export packages the currently loaded dataset representation into
+        offline browser-compute mode. ``det_bin`` bins detector pixels by summing
+        over ``det_bin x det_bin`` blocks, and ``dtype`` may be ``"uint8"`` or
+        ``"uint16"``. This does not reload the original file; it operates on the
+        tensor already held by the widget.
+        """
+        if self._data is None:
+            raise ValueError("Cannot export HTML after free(); rebuild the widget first.")
+        export_path = pathlib.Path(path) if path is not None else self._default_html_export_path(dtype, det_bin)
+        self._write_html_export(export_path, dtype=dtype, det_bin=det_bin, title=title)
+        size_mb = export_path.stat().st_size / (1024 * 1024)
+        self.export_status = f"Exported {export_path.name} ({size_mb:.1f} MB, {self._export_mode_label(dtype, det_bin)})"
+        return export_path
+
+    def _on_export_request_change(self, change: dict) -> None:
+        raw = str(change.get("new") or "")
+        if not raw:
+            return
+        try:
+            payload = json.loads(raw)
+            mode = str(payload.get("mode", "uint8-bin1"))
+            if mode == "clear":
+                self.export_payload = b""
+                self.export_payload_id = ""
+                self.export_filename = ""
+                return
+            dtype, det_bin = self._parse_export_mode(mode)
+            if payload.get("download"):
+                filename = str(payload.get("filename") or self._default_html_export_path(dtype, det_bin).name)
+                request_id = str(payload.get("id") or "")
+                self.export_status = f"Preparing {filename}..."
+                html = self._html_export_bytes(dtype=dtype, det_bin=det_bin)
+                self.export_filename = filename
+                self.export_payload = html
+                self.export_payload_id = request_id
+                size_mb = len(html) / (1024 * 1024)
+                self.export_status = f"Ready {filename} ({size_mb:.1f} MB, {self._export_mode_label(dtype, det_bin)})"
+            else:
+                self.export_status = f"Exporting {mode} HTML..."
+                self.export_html(dtype=dtype, det_bin=det_bin)
+        except Exception as exc:
+            self.export_status = f"Export failed: {exc}"
+
+    def _parse_export_mode(self, mode: str) -> tuple[str, int]:
+        parts = mode.split("-bin")
+        dtype = parts[0].lower()
+        if dtype in ("u8", "uint8"):
+            dtype = "uint8"
+        elif dtype in ("u16", "uint16"):
+            dtype = "uint16"
+        else:
+            raise ValueError(f"unknown export dtype {dtype!r}")
+        det_bin = int(parts[1]) if len(parts) == 2 and parts[1] else 1
+        if det_bin not in (1, 2, 4, 8):
+            raise ValueError(f"det_bin must be 1, 2, 4, or 8, got {det_bin}")
+        return dtype, det_bin
+
+    def _export_mode_label(self, dtype: str, det_bin: int) -> str:
+        label = "uint8" if dtype == "uint8" else "uint16"
+        return f"{label}, bin {det_bin}x" if det_bin > 1 else label
+
+    def _default_html_export_path(self, dtype: str, det_bin: int) -> pathlib.Path:
+        label = self.title.strip() or "show4dstem"
+        slug = "".join(ch.lower() if ch.isalnum() else "_" for ch in label).strip("_")
+        while "__" in slug:
+            slug = slug.replace("__", "_")
+        if not slug:
+            slug = "show4dstem"
+        shape = (
+            f"{self.n_frames}x{self.shape_rows}x{self.shape_cols}x{self.det_rows // det_bin}x{self.det_cols // det_bin}"
+            if self.n_frames > 1
+            else f"{self.shape_rows}x{self.shape_cols}x{self.det_rows // det_bin}x{self.det_cols // det_bin}"
+        )
+        suffix = f"{dtype}_bin{det_bin}"
+        return pathlib.Path.cwd() / f"{slug}_{shape}_{suffix}.html"
+
+    def _write_html_export(
+        self,
+        path: str | pathlib.Path,
+        *,
+        dtype: str,
+        det_bin: int,
+        title: str | None = None,
+    ) -> pathlib.Path:
         from ipywidgets.embed import dependency_state, embed_minimal_html
-        out = pathlib.Path(path); out.parent.mkdir(parents=True, exist_ok=True)
-        embed_minimal_html(str(out), views=[self], title=title or self.title or "Show4DSTEM",
-                            drop_defaults=False, state=dependency_state([self], drop_defaults=False))
-        return str(out)
+
+        out = pathlib.Path(path)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        if self._offline_bslz4:
+            # Already packed to a bslz4 companion (the multi-volume / large path):
+            # the data lives in the companion dir, so re-packing via a clone would
+            # try to reshape one volume into the full 5D stack and fail. Embed this
+            # widget as-is - it already references the companion via data_url - and
+            # only disable its export button in the standalone copy.
+            prev_enabled = self.export_enabled
+            self.export_enabled = False
+            try:
+                embed_minimal_html(
+                    str(out),
+                    views=[self],
+                    title=title or self.title or "Show4DSTEM",
+                    drop_defaults=False,
+                    state=dependency_state([self], drop_defaults=False),
+                )
+            finally:
+                self.export_enabled = prev_enabled
+            return out
+        export_widget = self._clone_for_html_export(dtype=dtype, det_bin=det_bin)
+        try:
+            embed_minimal_html(
+                str(out),
+                views=[export_widget],
+                title=title or self.title or "Show4DSTEM",
+                drop_defaults=False,
+                state=dependency_state([export_widget], drop_defaults=False),
+            )
+        finally:
+            export_widget.close()
+        return out
+
+    def _html_export_bytes(self, *, dtype: str, det_bin: int) -> bytes:
+        with tempfile.TemporaryDirectory(prefix="show4dstem-export-") as tmp:
+            path = pathlib.Path(tmp) / self._default_html_export_path(dtype, det_bin).name
+            self._write_html_export(path, dtype=dtype, det_bin=det_bin)
+            return path.read_bytes()
+
+    def _clone_for_html_export(self, *, dtype: str, det_bin: int) -> Self:
+        data = self._export_data_array(dtype=dtype, det_bin=det_bin)
+        scale = float(det_bin)
+        sampling = (
+            self.pixel_size,
+            self.pixel_size,
+            self.k_pixel_size * scale,
+            self.k_pixel_size * scale,
+        )
+        units = [self.pixel_unit, self.pixel_unit, self.k_pixel_unit, self.k_pixel_unit]
+        center = (self.center_row / scale, self.center_col / scale)
+        clone = type(self)(
+            data,
+            sampling=sampling,
+            units=units,
+            center=center,
+            bf_radius=max(1.0, self.bf_radius / scale),
+            precompute_virtual_images=False,
+            frame_dim_label=self.frame_dim_label,
+            frame_labels=list(self.frame_labels),
+            title=self.title,
+            offline=False,
+            show_fft=self.show_fft,
+            fft_window=self.fft_window,
+            show_controls=self.show_controls,
+            verbose=False,
+        )
+        clone.load_state_dict(self._export_state_for_bin(det_bin))
+        clone._pack_export_inline(dtype=dtype)
+        clone.export_enabled = False
+        clone.export_status = ""
+        clone.export_payload = b""
+        clone.export_payload_id = ""
+        clone.export_filename = ""
+        return clone
+
+    def _export_data_array(self, *, dtype: str, det_bin: int) -> np.ndarray:
+        if self.det_rows % det_bin != 0 or self.det_cols % det_bin != 0:
+            raise ValueError(f"Detector shape {self.det_rows}x{self.det_cols} is not divisible by det_bin={det_bin}")
+        data = self._data
+        if isinstance(data, torch.Tensor):
+            arr = data.detach().to("cpu").numpy()
+        elif hasattr(data, "chunks"):
+            # MacBook MPS path: data is a zero-copy ChunkedFrames (numpy views over
+            # Metal buffers), not a tensor. Materialize the flat stack by concatenating
+            # the chunks; the reshape below restores the scan grid.
+            arr = np.concatenate([np.asarray(chunk) for chunk in data.chunks], axis=0)
+        else:
+            arr = np.asarray(data)
+        target_shape = (
+            (self.n_frames, self.shape_rows, self.shape_cols, self.det_rows, self.det_cols)
+            if self.n_frames > 1
+            else (self.shape_rows, self.shape_cols, self.det_rows, self.det_cols)
+        )
+        arr = np.ascontiguousarray(arr.reshape(target_shape))
+        if det_bin > 1:
+            # MEAN, not sum: a sum over det_bin^2 pixels (64 at bin 8) overflows the
+            # uint8 export ceiling on any real-count detector and the BF disk clips
+            # flat. Mean keeps each binned pixel within the raw per-pixel range, so
+            # it always fits uint8. Round so the average count is the nearest integer.
+            if arr.ndim == 5:
+                nf, sr, sc, dr, dc = arr.shape
+                arr = arr.reshape(nf, sr, sc, dr // det_bin, det_bin, dc // det_bin, det_bin).mean(axis=(4, 6))
+            else:
+                sr, sc, dr, dc = arr.shape
+                arr = arr.reshape(sr, sc, dr // det_bin, det_bin, dc // det_bin, det_bin).mean(axis=(3, 5))
+            arr = np.round(arr)
+        if dtype == "uint8":
+            arr = np.clip(arr, 0, 255).astype(np.uint8, copy=False)
+        elif dtype == "uint16":
+            arr = np.clip(arr, 0, 65535).astype(np.uint16, copy=False)
+        else:
+            raise ValueError(f"unknown export dtype {dtype!r}")
+        return np.ascontiguousarray(arr)
+
+    def _export_state_for_bin(self, det_bin: int) -> dict:
+        state = self.state_dict()
+        if det_bin <= 1:
+            return state
+        scale_keys = [
+            "center_row", "center_col", "bf_radius",
+            "roi_center_row", "roi_center_col", "roi_radius",
+            "roi_radius_inner", "roi_width", "roi_height",
+        ]
+        for key in scale_keys:
+            if state.get(key) is not None:
+                state[key] = float(state[key]) / det_bin
+        state["k_pixel_size"] = float(state["k_pixel_size"]) * det_bin
+        state["dp_vmin"] = None
+        state["dp_vmax"] = None
+        return state
+
+    def _pack_export_inline(self, *, dtype: str) -> None:
+        import gzip
+
+        arr = self._data.detach().to("cpu").numpy()
+        target_shape = (
+            (self.n_frames, self.shape_rows, self.shape_cols, self.det_rows, self.det_cols)
+            if self.n_frames > 1
+            else (self.shape_rows, self.shape_cols, self.det_rows, self.det_cols)
+        )
+        arr = np.ascontiguousarray(arr.reshape(target_shape))
+        if dtype == "uint8":
+            packed = np.clip(arr, 0, 255).astype(np.uint8, copy=False)
+        elif dtype == "uint16":
+            packed = np.clip(arr, 0, 65535).astype(np.uint16, copy=False)
+        else:
+            raise ValueError(f"unknown export dtype {dtype!r}")
+        self._offline_stack = gzip.compress(np.ascontiguousarray(packed).tobytes(), compresslevel=6)
+        self._offline_gzip = True
+        self._offline_url = ""
+        self._offline_chunks = ""
+        self._offline_bslz4 = ""
+        self._offline_bad_px = ""
+        self.offline = True
 
     def _pack_offline_bslz4_volume(self, data, data_url: str) -> tuple[list[dict], list[int], int, int]:
         """One-call bslz4 offline pack: encode the 4D stack to native bitshuffle+LZ4
@@ -941,7 +1193,11 @@ class Show4DSTEM(anywidget.AnyWidget):
             index, bad, nbytes, blocks = self._pack_offline_bslz4_volume(
                 self._data[idx], str(vdir)
             )
-            volumes.append({"base": f"{vdir.name}/", "chunks": index, "badPx": bad})
+            # base must be relative to the HTML (the data_url's PARENT), so include the
+            # data_url dir name: "widget-data/vol0/", not "vol0/". Without the parent
+            # prefix the browser fetches vol0/chunk_*.bin (404) -> decode returns null
+            # -> the offline compute backend bails -> presets and dataset-flip go dead.
+            volumes.append({"base": f"{out.name}/{vdir.name}/", "chunks": index, "badPx": bad})
             total += nbytes
             n_blocks = blocks
             if getattr(self, "_verbose", True):
@@ -2706,7 +2962,7 @@ class Show4DSTEM(anywidget.AnyWidget):
         if os.environ.get("QUANTEM_WIDGET_NO_SNAPSHOT"):
             return bundle
         try:
-            from quantem.widget._snapshot import render_panels_png
+            from quantem.widget.render.snapshot import render_panels_png
             panels: list[np.ndarray] = []
             cmaps: list[str] = []
             labels: list[str] = []

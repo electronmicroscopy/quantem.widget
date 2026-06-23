@@ -24,7 +24,7 @@ import anywidget
 import numpy as np
 import traitlets
 
-from quantem.widget.array_utils import to_numpy
+from quantem.widget.utils.array import to_numpy
 from quantem.widget.show3d import (
     _crop_stack,
     _normalize_crop,
@@ -34,7 +34,7 @@ from quantem.widget.show3d import (
 # Config helpers live in a widget-free module so Show3D can share them without a
 # circular import. Re-exported here for back-compat (notebooks import them from
 # this module).
-from quantem.widget.config_utils import (
+from quantem.widget.utils.recon_config import (
     _centered_crop_for_shape,
     _config_float,
     _config_get,
@@ -46,7 +46,7 @@ from quantem.widget.config_utils import (
     _rotate_stack_inplane,
 )
 from quantem.widget.show2d import _reject_unknown_kwargs
-from quantem.widget.state import (
+from quantem.widget.utils.state_io import (
     resolve_widget_version,
     save_state_file,
     unwrap_state_payload,
@@ -1543,7 +1543,7 @@ class Show3DSlices(anywidget.AnyWidget):
         if self._data is None:
             return bundle
         try:
-            from quantem.widget._snapshot import render_panels_png
+            from quantem.widget.render.snapshot import render_panels_png
             vol = self._data  # (Z, Y, X)
             Z, Y, X = vol.shape
             cmap = self.cmap if isinstance(self.cmap, str) else str(self.cmap)

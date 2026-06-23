@@ -22,9 +22,8 @@ import Slider from "@mui/material/Slider";
 import Button from "@mui/material/Button";
 import Tooltip from "@mui/material/Tooltip";
 import { useTheme } from "../theme";
-import { drawScaleBarHiDPI, drawColorbar, roundToNiceValue, exportFigure, canvasToPDF } from "../figure";
-import JSZip from "jszip";
-import { extractFloat32, formatNumber, downloadBlob } from "../format";
+import { drawScaleBarHiDPI, drawColorbar, roundToNiceValue } from "../figure";
+import { extractBytes, extractFloat32, formatNumber, downloadBlob } from "../format";
 import { computeHistogramFromBytes, findDataRange, applyLogScale, percentileClip, sliderRange, computeStats } from "../stats";
 
 function InfoTooltip({ text, theme = "dark" }: { text: React.ReactNode; theme?: "light" | "dark" }) {
@@ -68,8 +67,58 @@ import { COLORMAPS, COLORMAP_NAMES, renderToOffscreen, renderToOffscreenReuse, G
 
 const MIN_ZOOM = 0.5;
 const MAX_ZOOM = 20;
+const HTML_EXPORT_OVERHEAD_BYTES = 700_000;
 
 const DPR = window.devicePixelRatio || 1;
+
+type Show2DWritableFile = {
+  write: (data: BlobPart) => Promise<void>;
+  close: () => Promise<void>;
+};
+
+type Show2DFileHandle = {
+  createWritable: () => Promise<Show2DWritableFile>;
+};
+
+type Show2DSavePickerOptions = {
+  suggestedName?: string;
+  types?: { description: string; accept: Record<string, string[]> }[];
+};
+
+type Show2DWindow = Window & typeof globalThis & {
+  showSaveFilePicker?: (options?: Show2DSavePickerOptions) => Promise<Show2DFileHandle>;
+};
+
+function makeHtmlExportFilename(title: string, nImages: number, height: number, width: number, mode: string): string {
+  let slug = (title || "show2d")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  while (slug.includes("__")) slug = slug.replace(/__/g, "_");
+  if (!slug) slug = "show2d";
+  const shape = nImages > 1 ? `${nImages}x${height}x${width}` : `${height}x${width}`;
+  const suffix = mode === "quantized" ? "quantized" : "exact";
+  return `${slug}_${shape}_${suffix}.html`;
+}
+
+function formatSavedBytes(bytes: number): string {
+  const mb = Math.max(0, bytes) / (1024 * 1024);
+  if (mb >= 100) return `${Math.round(mb)} MB`;
+  if (mb >= 10) return `${mb.toFixed(1)} MB`;
+  return `${mb.toFixed(2)} MB`;
+}
+
+function formatEstimatedHtmlSize(payloadBytes: number): string {
+  const htmlBytes = Math.max(0, payloadBytes) * 4 / 3 + HTML_EXPORT_OVERHEAD_BYTES;
+  const mb = htmlBytes / (1024 * 1024);
+  if (mb >= 100) return `~${Math.round(mb)} MB`;
+  if (mb >= 10) return `~${mb.toFixed(1)} MB`;
+  return `~${mb.toFixed(2)} MB`;
+}
+
+function isAbortLikeError(err: unknown): boolean {
+  return err instanceof DOMException && err.name === "AbortError";
+}
 
 interface HistogramProps {
   data: Float32Array | null;
@@ -427,7 +476,6 @@ function Show2D() {
   const [title] = useModelState<string>("title");
   const [displayBinFactor] = useModelState<number>("_display_bin_factor");
   const [, setGpuMaxBufferMB] = useModelState<number>("_gpu_max_buffer_mb");
-  const [widgetVersion] = useModelState<string>("widget_version");
   const [cmap, setCmap] = useModelState<string>("cmap");
   const [ncols] = useModelState<number>("ncols");
 
@@ -484,9 +532,104 @@ function Show2D() {
   const resizeAspectRef = React.useRef<number | null>(null);
   const [newRoiShape, setNewRoiShape] = React.useState<"circle" | "square" | "rectangle" | "annular">("square");
   const [exportAnchor, setExportAnchor] = React.useState<HTMLElement | null>(null);
+  const [, setExportRequest] = useModelState<string>("export_request");
+  const [exportStatus] = useModelState<string>("export_status");
+  const [exportEnabled] = useModelState<boolean>("export_enabled");
+  const [exportPayload] = useModelState<DataView>("export_payload");
+  const [exportPayloadId] = useModelState<string>("export_payload_id");
+  const [exportPayloadFilename] = useModelState<string>("export_filename");
+  const [exportBusy, setExportBusy] = React.useState(false);
+  const [localExportStatus, setLocalExportStatus] = React.useState("");
+  const pendingHtmlExportRef = React.useRef<{
+    id: string;
+    filename: string;
+    mode: string;
+    handle: Show2DFileHandle | null;
+  } | null>(null);
   const selectedRoi = roiSelectedIdx >= 0 && roiSelectedIdx < (roiList?.length ?? 0) ? roiList[roiSelectedIdx] : null;
 
   const effectiveShowFft = showFft;
+  React.useEffect(() => {
+    if (!exportStatus) return;
+    const preparing = exportStatus.startsWith("Preparing ") || exportStatus.startsWith("Exporting ");
+    if (preparing) {
+      setExportBusy(true);
+    } else if (!pendingHtmlExportRef.current) {
+      setExportBusy(false);
+    }
+  }, [exportStatus]);
+  const htmlPixelCount = Math.max(0, Math.floor(nImages) * Math.floor(height) * Math.floor(width));
+  const exactHtmlSize = formatEstimatedHtmlSize(htmlPixelCount * 4);
+  const quantizedHtmlSize = formatEstimatedHtmlSize(htmlPixelCount);
+
+  const handleHtmlExportSelect = async (mode: string) => {
+    setExportAnchor(null);
+    if (mode !== "exact" && mode !== "quantized") return;
+    const filename = makeHtmlExportFilename(title, nImages, height, width, mode);
+    const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    setExportBusy(true);
+    setLocalExportStatus("Choose export location...");
+    const picker = (window as Show2DWindow).showSaveFilePicker;
+    let handle: Show2DFileHandle | null = null;
+    if (picker) {
+      try {
+        handle = await picker({
+          suggestedName: filename,
+          types: [{ description: "Standalone HTML", accept: { "text/html": [".html"] } }],
+        });
+      } catch (err) {
+        if (isAbortLikeError(err)) {
+          setExportBusy(false);
+          setLocalExportStatus("Export canceled");
+          return;
+        }
+        setExportBusy(false);
+        setLocalExportStatus(`Export failed: ${err instanceof Error ? err.message : String(err)}`);
+        return;
+      }
+    }
+    pendingHtmlExportRef.current = { id, filename, mode, handle };
+    setLocalExportStatus(`Preparing ${filename}...`);
+    setExportRequest(JSON.stringify({ mode, id, filename, download: true }));
+  };
+
+  React.useEffect(() => {
+    const pending = pendingHtmlExportRef.current;
+    if (!pending || exportPayloadId !== pending.id) return;
+    const bytes = extractBytes(exportPayload);
+    if (bytes.length === 0) return;
+    let canceled = false;
+    const save = async () => {
+      const payload = bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength
+        ? bytes
+        : bytes.slice();
+      const filename = exportPayloadFilename || pending.filename;
+      const blob = new Blob([payload as BlobPart], { type: "text/html;charset=utf-8" });
+      try {
+        if (pending.handle) {
+          setLocalExportStatus(`Saving ${filename}...`);
+          const writable = await pending.handle.createWritable();
+          await writable.write(blob);
+          await writable.close();
+        } else {
+          downloadBlob(blob, filename);
+        }
+        if (canceled) return;
+        pendingHtmlExportRef.current = null;
+        setExportBusy(false);
+        setLocalExportStatus(`Saved ${filename} (${formatSavedBytes(bytes.byteLength)})`);
+        setExportRequest(JSON.stringify({ mode: "clear", id: `${pending.id}-clear` }));
+      } catch (err) {
+        if (canceled) return;
+        pendingHtmlExportRef.current = null;
+        setExportBusy(false);
+        setLocalExportStatus(`Export failed: ${err instanceof Error ? err.message : String(err)}`);
+        setExportRequest(JSON.stringify({ mode: "clear", id: `${pending.id}-clear` }));
+      }
+    };
+    void save();
+    return () => { canceled = true; };
+  }, [exportPayload, exportPayloadId, exportPayloadFilename, setExportRequest]);
 
   const updateSelectedRoi = (updates: Partial<ROIItem>) => {
     if (roiSelectedIdx < 0 || !roiList) return;
@@ -3386,221 +3529,6 @@ function Show2D() {
     }
   }, [isGallery, selectedIdx, labels]);
 
-  // Export publication-quality figure with scale bar, colorbar, annotations
-  const handleExportFigure = React.useCallback((withScaleBar: boolean, withColorbar: boolean) => {
-    setExportAnchor(null);
-    const idx = isGallery ? selectedIdx : 0;
-    const rawData = rawDataRef.current?.[idx];
-    if (!rawData) return;
-
-    const processed = logScale ? applyLogScale(rawData) : rawData;
-    const lut = COLORMAPS[cmap] || COLORMAPS.inferno;
-
-    let vmin: number, vmax: number;
-    const hasAbsRange = traitVmin != null && traitVmax != null;
-    const rMin = hasAbsRange ? displayValue(traitVmin!, logScale) : imageDataRange.min;
-    const rMax = hasAbsRange ? displayValue(traitVmax!, logScale) : imageDataRange.max;
-    if (rMin !== rMax && (imageVminPct > 0 || imageVmaxPct < 100)) {
-      ({ vmin, vmax } = sliderRange(rMin, rMax, imageVminPct, imageVmaxPct));
-    } else if (!hasAbsRange && autoContrast) {
-      ({ vmin, vmax } = percentileClip(processed, 2, 98));
-    } else {
-      vmin = rMin;
-      vmax = rMax;
-    }
-
-    const offscreen = renderToOffscreen(processed, width, height, lut, vmin, vmax);
-    if (!offscreen) return;
-
-    const figCanvas = exportFigure({
-      imageCanvas: offscreen,
-      title: title || undefined,
-      lut,
-      vmin,
-      vmax,
-      logScale,
-      pixelSize: pixelSize > 0 ? pixelSize : undefined,
-      showColorbar: withColorbar,
-      showScaleBar: withScaleBar && pixelSize > 0,
-      drawAnnotations: (ctx) => {
-        // ROI highlight mask
-        if (roiActive && roiList) {
-          const hlRois = roiList.filter(r => r.highlight);
-          if (hlRois.length > 0) {
-            ctx.save();
-            ctx.fillStyle = "rgba(0,0,0,0.6)";
-            ctx.fillRect(0, 0, width, height);
-            ctx.globalCompositeOperation = "destination-out";
-            for (const roi of hlRois) {
-              ctx.fillStyle = "rgba(0,0,0,1)";
-              const shape = roi.shape || "circle";
-              if (shape === "circle") { ctx.beginPath(); ctx.arc(roi.col, roi.row, roi.radius, 0, Math.PI * 2); ctx.fill(); }
-              else if (shape === "square") { ctx.fillRect(roi.col - roi.radius, roi.row - roi.radius, roi.radius * 2, roi.radius * 2); }
-              else if (shape === "rectangle") { ctx.fillRect(roi.col - roi.width / 2, roi.row - roi.height / 2, roi.width, roi.height); }
-              else if (shape === "annular") {
-                ctx.beginPath(); ctx.arc(roi.col, roi.row, roi.radius, 0, Math.PI * 2); ctx.fill();
-                ctx.globalCompositeOperation = "source-over";
-                ctx.fillStyle = "rgba(0,0,0,0.6)";
-                ctx.beginPath(); ctx.arc(roi.col, roi.row, roi.radius_inner, 0, Math.PI * 2); ctx.fill();
-                ctx.globalCompositeOperation = "destination-out";
-              }
-            }
-            ctx.restore();
-          }
-          // ROI outlines
-          for (const roi of roiList) {
-            const shape = (roi.shape || "circle") as "circle" | "square" | "rectangle" | "annular";
-            ctx.lineWidth = roi.line_width || 2;
-            drawROI(ctx, roi.col, roi.row, shape, roi.radius, roi.width, roi.height, roi.color, roi.color, false, roi.radius_inner);
-          }
-        }
-        // Profile line
-        if (profileActive && profilePoints.length === 2) {
-          ctx.strokeStyle = "#4fc3f7";
-          ctx.lineWidth = 2;
-          ctx.setLineDash([4, 3]);
-          ctx.beginPath();
-          ctx.moveTo(profilePoints[0].col, profilePoints[0].row);
-          ctx.lineTo(profilePoints[1].col, profilePoints[1].row);
-          ctx.stroke();
-          ctx.setLineDash([]);
-          ctx.fillStyle = "#4fc3f7";
-          ctx.beginPath();
-          ctx.arc(profilePoints[0].col, profilePoints[0].row, 3, 0, Math.PI * 2);
-          ctx.fill();
-          ctx.beginPath();
-          ctx.arc(profilePoints[1].col, profilePoints[1].row, 3, 0, Math.PI * 2);
-          ctx.fill();
-        }
-      },
-    });
-
-    canvasToPDF(figCanvas).then((blob) => downloadBlob(blob, `show2d_figure_${labels?.[selectedIdx] || "image"}.pdf`));
-  }, [isGallery, selectedIdx, labels, width, height, cmap, logScale, autoContrast, imageDataRange, imageVminPct, imageVmaxPct, pixelSize, title, roiActive, roiList, profileActive, profilePoints]);
-
-  // Export all variants (PNG + PDF) as zip
-  const handleExportAll = React.useCallback(async () => {
-    setExportAnchor(null);
-    const idx = isGallery ? selectedIdx : 0;
-    const rawData = rawDataRef.current?.[idx];
-    if (!rawData) return;
-
-    const processed = logScale ? applyLogScale(rawData) : rawData;
-    const lut = COLORMAPS[cmap] || COLORMAPS.inferno;
-
-    let vmin: number, vmax: number;
-    const hasAbsRange2 = traitVmin != null && traitVmax != null;
-    const rMin2 = hasAbsRange2 ? displayValue(traitVmin!, logScale) : imageDataRange.min;
-    const rMax2 = hasAbsRange2 ? displayValue(traitVmax!, logScale) : imageDataRange.max;
-    if (rMin2 !== rMax2 && (imageVminPct > 0 || imageVmaxPct < 100)) {
-      ({ vmin, vmax } = sliderRange(rMin2, rMax2, imageVminPct, imageVmaxPct));
-    } else if (!hasAbsRange2 && autoContrast) {
-      ({ vmin, vmax } = percentileClip(processed, 2, 98));
-    } else {
-      vmin = rMin2;
-      vmax = rMax2;
-    }
-
-    const offscreen = renderToOffscreen(processed, width, height, lut, vmin, vmax);
-    if (!offscreen) return;
-
-    const drawAnnotations = (ctx: CanvasRenderingContext2D) => {
-      if (roiActive && roiList) {
-        const hlRois = roiList.filter(r => r.highlight);
-        if (hlRois.length > 0) {
-          ctx.save();
-          ctx.fillStyle = "rgba(0,0,0,0.6)";
-          ctx.fillRect(0, 0, width, height);
-          ctx.globalCompositeOperation = "destination-out";
-          for (const roi of hlRois) {
-            ctx.fillStyle = "rgba(0,0,0,1)";
-            const shape = roi.shape || "circle";
-            if (shape === "circle") { ctx.beginPath(); ctx.arc(roi.col, roi.row, roi.radius, 0, Math.PI * 2); ctx.fill(); }
-            else if (shape === "square") { ctx.fillRect(roi.col - roi.radius, roi.row - roi.radius, roi.radius * 2, roi.radius * 2); }
-            else if (shape === "rectangle") { ctx.fillRect(roi.col - roi.width / 2, roi.row - roi.height / 2, roi.width, roi.height); }
-            else if (shape === "annular") {
-              ctx.beginPath(); ctx.arc(roi.col, roi.row, roi.radius, 0, Math.PI * 2); ctx.fill();
-              ctx.globalCompositeOperation = "source-over";
-              ctx.fillStyle = "rgba(0,0,0,0.6)";
-              ctx.beginPath(); ctx.arc(roi.col, roi.row, roi.radius_inner, 0, Math.PI * 2); ctx.fill();
-              ctx.globalCompositeOperation = "destination-out";
-            }
-          }
-          ctx.restore();
-          for (const roi of roiList) {
-            const shape = (roi.shape || "circle") as "circle" | "square" | "rectangle" | "annular";
-            ctx.lineWidth = roi.line_width || 2;
-            drawROI(ctx, roi.col, roi.row, shape, roi.radius, roi.width, roi.height, roi.color, roi.color, false, roi.radius_inner);
-          }
-        }
-      }
-      if (profileActive && profilePoints.length === 2) {
-        ctx.strokeStyle = "#4fc3f7";
-        ctx.lineWidth = 2;
-        ctx.setLineDash([4, 3]);
-        ctx.beginPath();
-        ctx.moveTo(profilePoints[0].col, profilePoints[0].row);
-        ctx.lineTo(profilePoints[1].col, profilePoints[1].row);
-        ctx.stroke();
-        ctx.setLineDash([]);
-        ctx.fillStyle = "#4fc3f7";
-        ctx.beginPath(); ctx.arc(profilePoints[0].col, profilePoints[0].row, 3, 0, Math.PI * 2); ctx.fill();
-        ctx.beginPath(); ctx.arc(profilePoints[1].col, profilePoints[1].row, 3, 0, Math.PI * 2); ctx.fill();
-      }
-    };
-
-    const hasScale = pixelSize > 0;
-    const baseOpts = {
-      imageCanvas: offscreen,
-      title: title || undefined,
-      lut,
-      vmin,
-      vmax,
-      logScale,
-      pixelSize: hasScale ? pixelSize : undefined,
-      drawAnnotations,
-    };
-
-    const variants: { name: string; showScaleBar: boolean; showColorbar: boolean }[] = [
-      { name: "figure", showScaleBar: false, showColorbar: false },
-      { name: "figure_scalebar", showScaleBar: true, showColorbar: false },
-      { name: "figure_scalebar_colorbar", showScaleBar: true, showColorbar: true },
-    ];
-
-    const zip = new JSZip();
-    const prefix = `show2d_${labels?.[selectedIdx] || "image"}`;
-    const metadata = {
-      metadata_version: "1.0",
-      widget_name: "Show2D",
-      widget_version: widgetVersion || "unknown",
-      exported_at: new Date().toISOString(),
-      format: "zip",
-      export_kind: "figure_variants",
-      selected_idx: idx,
-      image_shape: { rows: height, cols: width },
-      display: {
-        cmap,
-        log_scale: logScale,
-        auto_contrast: autoContrast,
-        vmin_pct: imageVminPct,
-        vmax_pct: imageVmaxPct,
-      },
-      variants,
-    };
-    zip.file("metadata.json", JSON.stringify(metadata, null, 2));
-
-    for (const v of variants) {
-      const figCanvas = exportFigure({ ...baseOpts, showScaleBar: v.showScaleBar && hasScale, showColorbar: v.showColorbar });
-      const pngBlob = await new Promise<Blob>((resolve) => figCanvas.toBlob((b) => resolve(b!), "image/png"));
-      zip.file(`${prefix}_${v.name}.png`, pngBlob);
-      const pdfBlob = await canvasToPDF(figCanvas);
-      zip.file(`${prefix}_${v.name}.pdf`, pdfBlob);
-    }
-
-    const blob = await zip.generateAsync({ type: "blob" });
-    downloadBlob(blob, `${prefix}_all.zip`);
-  }, [isGallery, selectedIdx, labels, width, height, cmap, logScale, autoContrast, imageDataRange, imageVminPct, imageVmaxPct, pixelSize, title, roiActive, roiList, profileActive, profilePoints, widgetVersion]);
-
   // Resize Handlers
   // -------------------------------------------------------------------------
   const handleCanvasResizeStart = (e: React.MouseEvent) => {
@@ -3881,13 +3809,34 @@ function Show2D() {
             )}
             {(
               <>
-                <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} onClick={(e) => { setExportAnchor(e.currentTarget); }}>Export</Button>
+                <Button
+                  size="small"
+                  sx={{ ...compactButton, color: themeColors.accent }}
+                  disabled={exportBusy}
+                  onClick={(e) => { setExportAnchor(e.currentTarget); }}
+                  title={localExportStatus || exportStatus || "Export figures or standalone HTML"}
+                >
+                  {exportBusy ? "Exporting" : "Export"}
+                </Button>
                 <Menu anchorEl={exportAnchor} open={Boolean(exportAnchor)} onClose={() => setExportAnchor(null)} anchorOrigin={{ vertical: "bottom", horizontal: "left" }} transformOrigin={{ vertical: "top", horizontal: "left" }} sx={{ zIndex: 9999 }}>
-                  <MenuItem onClick={() => handleExportFigure(true, true)} sx={{ fontSize: 12 }}>PDF + scalebar + colorbar</MenuItem>
-                  <MenuItem onClick={() => handleExportFigure(true, false)} sx={{ fontSize: 12 }}>PDF + scalebar</MenuItem>
-                  <MenuItem onClick={() => handleExportFigure(false, false)} sx={{ fontSize: 12 }}>PDF</MenuItem>
-                  <MenuItem onClick={handleExportAll} sx={{ fontSize: 12 }}>All (PNG + PDF)</MenuItem>
+                  {exportEnabled && <MenuItem onClick={() => handleHtmlExportSelect("exact")} sx={{ fontSize: 12 }}>HTML exact float32 ({exactHtmlSize})</MenuItem>}
+                  {exportEnabled && <MenuItem onClick={() => handleHtmlExportSelect("quantized")} sx={{ fontSize: 12 }}>HTML quantized uint8 ({quantizedHtmlSize})</MenuItem>}
                 </Menu>
+                {exportEnabled && (localExportStatus || exportStatus) && (
+                  <Typography
+                    sx={{
+                      ...typography.label,
+                      maxWidth: 120,
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                      color: (localExportStatus || exportStatus).startsWith("Export failed") ? "#d32f2f" : themeColors.textMuted,
+                    }}
+                    title={localExportStatus || exportStatus}
+                  >
+                    {localExportStatus || exportStatus}
+                  </Typography>
+                )}
                 <Button size="small" sx={compactButton} onClick={handleCopy}>Copy</Button>
               </>
             )}

@@ -17,14 +17,13 @@ import PauseIcon from "@mui/icons-material/Pause";
 import StopIcon from "@mui/icons-material/Stop";
 import FastRewindIcon from "@mui/icons-material/FastRewind";
 import FastForwardIcon from "@mui/icons-material/FastForward";
-import JSZip from "jszip";
 import { useTheme } from "../theme";
-import { COLORMAPS, applyColormap, renderToOffscreen } from "../colormaps";
+import { COLORMAPS, applyColormap } from "../colormaps";
 import { WebGPUFFT, getWebGPUFFT, fft2d, fftshift, autoEnhanceFFT, nextPow2, applyHannWindow2D } from "../fft";
 import { Show4DSTEMCompute } from "../engine/compute";
-import { drawScaleBarHiDPI, drawColorbar, roundToNiceValue, exportFigure, canvasToPDF } from "../figure";
-import { findDataRange, sliderRange, computeStats, applyLogScale, computeHistogramFromBytes, percentileClip } from "../stats";
-import { downloadBlob, formatNumber, downloadDataView } from "../format";
+import { drawScaleBarHiDPI, drawColorbar, roundToNiceValue } from "../figure";
+import { findDataRange, sliderRange, computeStats, computeHistogramFromBytes, percentileClip } from "../stats";
+import { downloadBlob, extractBytes, formatNumber, downloadDataView } from "../format";
 
 // Detector mask for the offline WebGPU virtual-image sum. Mirrors the Python
 // mask geometry exactly (show4dstem.py _create_*_mask): cx pairs with column,
@@ -128,6 +127,60 @@ const SPACING = {
 };
 
 const CANVAS_SIZE = 450;  // Both DP and VI canvases
+const HTML_EXPORT_OVERHEAD_BYTES = 700_000;
+
+type Show4DSTEMWritableFile = {
+  write: (data: BlobPart) => Promise<void>;
+  close: () => Promise<void>;
+};
+
+type Show4DSTEMFileHandle = {
+  createWritable: () => Promise<Show4DSTEMWritableFile>;
+};
+
+type Show4DSTEMSavePickerOptions = {
+  suggestedName?: string;
+  types?: { description: string; accept: Record<string, string[]> }[];
+};
+
+type Show4DSTEMWindow = Window & typeof globalThis & {
+  showSaveFilePicker?: (options?: Show4DSTEMSavePickerOptions) => Promise<Show4DSTEMFileHandle>;
+};
+
+function makeHtmlExportFilename(title: string, nFrames: number, scanRows: number, scanCols: number, detRows: number, detCols: number, dtype: string, detBin: number): string {
+  let slug = (title || "show4dstem")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  while (slug.includes("__")) slug = slug.replace(/__/g, "_");
+  if (!slug) slug = "show4dstem";
+  const binnedRows = Math.max(1, Math.floor(detRows / detBin));
+  const binnedCols = Math.max(1, Math.floor(detCols / detBin));
+  const shape = nFrames > 1
+    ? `${nFrames}x${scanRows}x${scanCols}x${binnedRows}x${binnedCols}`
+    : `${scanRows}x${scanCols}x${binnedRows}x${binnedCols}`;
+  return `${slug}_${shape}_${dtype}_bin${detBin}.html`;
+}
+
+function formatSavedBytes(bytes: number): string {
+  const mb = Math.max(0, bytes) / (1024 * 1024);
+  if (mb >= 100) return `${Math.round(mb)} MB`;
+  if (mb >= 10) return `${mb.toFixed(1)} MB`;
+  return `${mb.toFixed(2)} MB`;
+}
+
+function formatEstimatedHtmlSize(payloadBytes: number): string {
+  const htmlBytes = Math.max(0, payloadBytes) * 4 / 3 + HTML_EXPORT_OVERHEAD_BYTES;
+  const mb = htmlBytes / (1024 * 1024);
+  if (mb >= 1000) return `~${(mb / 1024).toFixed(1)} GB`;
+  if (mb >= 100) return `~${Math.round(mb)} MB`;
+  if (mb >= 10) return `~${mb.toFixed(1)} MB`;
+  return `~${mb.toFixed(2)} MB`;
+}
+
+function isAbortLikeError(err: unknown): boolean {
+  return err instanceof DOMException && err.name === "AbortError";
+}
 
 // Theme-aware ROI colors for DP detector overlay
 interface RoiColors {
@@ -1033,7 +1086,6 @@ function Show4DSTEM() {
   const [kPixelSize] = useModelState<number>("k_pixel_size");
   const [kPixelUnit] = useModelState<string>("k_pixel_unit");
   const [kCalibrated] = useModelState<boolean>("k_calibrated");
-  const [widgetVersion] = useModelState<string>("widget_version");
   const [title] = useModelState<string>("title");
 
   const [frameBytes] = useModelState<DataView>("frame_bytes");
@@ -1056,7 +1108,6 @@ function Show4DSTEM() {
   // bytes from click N arrive with min/max from click N-1.
 
   // Detector calibration (for presets)
-  const [bfRadius] = useModelState<number>("bf_radius");
   const [centerCol] = useModelState<number>("center_col");
   const [centerRow] = useModelState<number>("center_row");
 
@@ -1237,7 +1288,9 @@ function Show4DSTEM() {
       let computes: Show4DSTEMCompute[] = [];   // resident set for single / non-lazy paths
       let volMetas: any[] = [];                  // multi-volume descriptors (lazy)
       const volCache = new Map<number, Show4DSTEMCompute>();   // LRU: idx -> decoded volume
+      const inlineVolCache = new Map<number, Show4DSTEMCompute>(); // LRU for inline gzip 5D exports
       const MAX_RESIDENT = 3;                    // recent volumes kept hot for instant back-scrub
+      let volumeCount = 0;
       let getVol: ((idx: number) => Promise<Show4DSTEMCompute | null>) | null = null;
       if (bslz4Meta) {
         // bslz4 mode: ship native HDF5 bitshuffle+LZ4 bytes (~6x smaller than uint16),
@@ -1258,6 +1311,7 @@ function Show4DSTEM() {
         };
         if (Array.isArray(m.volumes)) {
           volMetas = m.volumes;
+          volumeCount = volMetas.length;
           getVol = async (idx: number) => {
             if (volCache.has(idx)) return volCache.get(idx)!;
             const cc = await decodeVol(volMetas[idx]);
@@ -1302,8 +1356,36 @@ function Show4DSTEM() {
           stack = new Uint8Array(stackView.buffer, stackView.byteOffset, stackView.byteLength);
         }
         if (model.get("_offline_gzip")) stack = await gunzip(stack);
-        cpuStack = stack;  // keep for the per-frame probe (single-chunk only)
-        compute = await Show4DSTEMCompute.create(stack, scanRows * scanCols, detR * detC);
+        const widgetFrames = Math.max(1, model.get("n_frames") | 0);
+        const scanCount = scanRows * scanCols;
+        const detSize = detR * detC;
+        const expectedU8 = widgetFrames * scanCount * detSize;
+        const expectedU16 = expectedU8 * 2;
+        if (widgetFrames > 1 && (stack.byteLength === expectedU8 || stack.byteLength === expectedU16)) {
+          const volumeBytes = stack.byteLength / widgetFrames;
+          volumeCount = widgetFrames;
+          const MAX_INLINE_RESIDENT = 3;
+          getVol = async (idx: number) => {
+            if (inlineVolCache.has(idx)) return inlineVolCache.get(idx)!;
+            const start = idx * volumeBytes;
+            const bytes = stack.subarray(start, start + volumeBytes);
+            const cc = await Show4DSTEMCompute.create(bytes, scanCount, detSize);
+            if (cc) {
+              inlineVolCache.set(idx, cc);
+              while (inlineVolCache.size > MAX_INLINE_RESIDENT) {
+                const old = [...inlineVolCache.keys()].find((k) => k !== idx);
+                if (old === undefined) break;
+                inlineVolCache.get(old)!.dispose();
+                inlineVolCache.delete(old);
+              }
+            }
+            return cc;
+          };
+          compute = await getVol(Math.max(0, Math.min(widgetFrames - 1, model.get("frame_idx") | 0)));
+        } else {
+          cpuStack = stack;  // keep for the per-frame probe (single-chunk only)
+          compute = await Show4DSTEMCompute.create(stack, scanRows * scanCols, detR * detC);
+        }
       }
       if (!compute || disposed) { compute?.dispose(); return; }
       // Auto-filter hot/dead detector pixels (from the HDF5 pixel_mask) so the
@@ -1342,7 +1424,8 @@ function Show4DSTEM() {
       let frameGen = 0;
       const onFrame = async () => {
         if (!getVol) return;
-        const v = Math.max(0, Math.min(volMetas.length - 1, model.get("frame_idx") | 0));
+        const nVolumes = volumeCount || volMetas.length || 1;
+        const v = Math.max(0, Math.min(nVolumes - 1, model.get("frame_idx") | 0));
         const gen = ++frameGen;                  // ignore a stale decode if the user keeps scrubbing
         const cc = await getVol(v);
         if (gen !== frameGen || !cc) return;      // a newer scroll superseded this one
@@ -1403,8 +1486,15 @@ function Show4DSTEM() {
         model.off("change:frame_idx", onFrame);
         computes.forEach((c) => c.dispose());          // single / non-lazy resident set
         volCache.forEach((c) => c.dispose()); volCache.clear();  // every cached lazy volume
+        inlineVolCache.forEach((c) => c.dispose()); inlineVolCache.clear();
       };
       await recomputeVI();  // initial virtual image, no interaction needed
+      // Safety re-run: at first mount the offline stack / roi-detector traits can
+      // still be settling, so the very first maskedSum can return an empty (zero)
+      // virtual image - leaving the panel blank until the user nudges the detector.
+      // A deferred recompute guarantees the BF image appears with no interaction.
+      requestAnimationFrame(() => { if (!disposed) void recomputeVI(); });
+      setTimeout(() => { if (!disposed) void recomputeVI(); }, 200);
     })();
     return () => { disposed = true; detach?.(); };
   }, [offline]);
@@ -1434,7 +1524,106 @@ function Show4DSTEM() {
   const [gifMetadataJson] = useModelState<string>("_gif_metadata_json");
   const [exporting, setExporting] = React.useState(false);
   const [dpExportAnchor, setDpExportAnchor] = React.useState<HTMLElement | null>(null);
-  const [viExportAnchor, setViExportAnchor] = React.useState<HTMLElement | null>(null);
+  const [, setExportRequest] = useModelState<string>("export_request");
+  const [exportStatus] = useModelState<string>("export_status");
+  const [exportEnabled] = useModelState<boolean>("export_enabled");
+  const [exportPayload] = useModelState<DataView>("export_payload");
+  const [exportPayloadId] = useModelState<string>("export_payload_id");
+  const [exportPayloadFilename] = useModelState<string>("export_filename");
+  const [htmlExportBusy, setHtmlExportBusy] = React.useState(false);
+  const [localHtmlExportStatus, setLocalHtmlExportStatus] = React.useState("");
+  const pendingHtmlExportRef = React.useRef<{
+    id: string;
+    filename: string;
+    mode: string;
+    handle: Show4DSTEMFileHandle | null;
+  } | null>(null);
+  React.useEffect(() => {
+    if (!exportStatus) return;
+    const preparing = exportStatus.startsWith("Preparing ") || exportStatus.startsWith("Exporting ");
+    if (preparing) {
+      setHtmlExportBusy(true);
+    } else if (!pendingHtmlExportRef.current) {
+      setHtmlExportBusy(false);
+    }
+  }, [exportStatus]);
+  const estimateHtmlExportSize = React.useCallback((dtype: string, detBin: number) => {
+    const binnedRows = Math.max(1, Math.floor(detRows / detBin));
+    const binnedCols = Math.max(1, Math.floor(detCols / detBin));
+    const bytesPerPixel = dtype === "uint16" ? 2 : 1;
+    const payloadBytes = Math.max(0, nFrames) * Math.max(0, shapeRows) * Math.max(0, shapeCols) * binnedRows * binnedCols * bytesPerPixel;
+    return formatEstimatedHtmlSize(payloadBytes);
+  }, [detCols, detRows, nFrames, shapeCols, shapeRows]);
+
+  const handleHtmlExportSelect = async (dtype: string, detBin: number) => {
+    setDpExportAnchor(null);
+    if (!["uint8", "uint16"].includes(dtype) || ![1, 2, 4, 8].includes(detBin)) return;
+    const mode = `${dtype}-bin${detBin}`;
+    const filename = makeHtmlExportFilename(title, nFrames, shapeRows, shapeCols, detRows, detCols, dtype, detBin);
+    const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    setHtmlExportBusy(true);
+    setLocalHtmlExportStatus("Choose export location...");
+    const picker = (window as Show4DSTEMWindow).showSaveFilePicker;
+    let handle: Show4DSTEMFileHandle | null = null;
+    if (picker) {
+      try {
+        handle = await picker({
+          suggestedName: filename,
+          types: [{ description: "Standalone HTML", accept: { "text/html": [".html"] } }],
+        });
+      } catch (err) {
+        if (isAbortLikeError(err)) {
+          setHtmlExportBusy(false);
+          setLocalHtmlExportStatus("Export canceled");
+          return;
+        }
+        setHtmlExportBusy(false);
+        setLocalHtmlExportStatus(`Export failed: ${err instanceof Error ? err.message : String(err)}`);
+        return;
+      }
+    }
+    pendingHtmlExportRef.current = { id, filename, mode, handle };
+    setLocalHtmlExportStatus(`Preparing ${filename}...`);
+    setExportRequest(JSON.stringify({ mode, id, filename, download: true }));
+  };
+
+  React.useEffect(() => {
+    const pending = pendingHtmlExportRef.current;
+    if (!pending || exportPayloadId !== pending.id) return;
+    const bytes = extractBytes(exportPayload);
+    if (bytes.length === 0) return;
+    let canceled = false;
+    const save = async () => {
+      const payload = bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength
+        ? bytes
+        : bytes.slice();
+      const filename = exportPayloadFilename || pending.filename;
+      const blob = new Blob([payload as BlobPart], { type: "text/html;charset=utf-8" });
+      try {
+        if (pending.handle) {
+          setLocalHtmlExportStatus(`Saving ${filename}...`);
+          const writable = await pending.handle.createWritable();
+          await writable.write(blob);
+          await writable.close();
+        } else {
+          downloadBlob(blob, filename);
+        }
+        if (canceled) return;
+        pendingHtmlExportRef.current = null;
+        setHtmlExportBusy(false);
+        setLocalHtmlExportStatus(`Saved ${filename} (${formatSavedBytes(bytes.byteLength)})`);
+        setExportRequest(JSON.stringify({ mode: "clear", id: `${pending.id}-clear` }));
+      } catch (err) {
+        if (canceled) return;
+        pendingHtmlExportRef.current = null;
+        setHtmlExportBusy(false);
+        setLocalHtmlExportStatus(`Export failed: ${err instanceof Error ? err.message : String(err)}`);
+        setExportRequest(JSON.stringify({ mode: "clear", id: `${pending.id}-clear` }));
+      }
+    };
+    void save();
+    return () => { canceled = true; };
+  }, [exportPayload, exportPayloadId, exportPayloadFilename, setExportRequest]);
 
   // Cursor readout state
   const [cursorInfo, setCursorInfo] = React.useState<{ row: number; col: number; value: number; panel: string } | null>(null);
@@ -3727,212 +3916,10 @@ function Show4DSTEM() {
   // Render
   // ─────────────────────────────────────────────────────────────────────────
 
-  // Export DP handler
-  const handleExportDP = async () => {
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-    const zip = new JSZip();
-    const metadata = {
-      metadata_version: "1.0",
-      widget_name: "Show4DSTEM",
-      widget_version: widgetVersion || "unknown",
-      exported_at: new Date().toISOString(),
-      view: "diffraction",
-      format: "zip",
-      export_kind: "single_view_png_zip",
-      position: { row: posRow, col: posCol },
-      frame_idx: frameIdx,
-      n_frames: nFrames,
-      scan_shape: { rows: shapeRows, cols: shapeCols },
-      detector_shape: { rows: detRows, cols: detCols },
-      roi: {
-        active: roiMode !== "off",
-        mode: roiMode,
-        center_row: roiCenterRow,
-        center_col: roiCenterCol,
-        radius: roiRadius,
-        radius_inner: roiRadiusInner,
-        width: roiWidth,
-        height: roiHeight,
-      },
-      vi_roi: {
-        mode: viRoiMode,
-        center_row: viRoiCenterRow,
-        center_col: viRoiCenterCol,
-        radius: viRoiRadius,
-        width: viRoiWidth,
-        height: viRoiHeight,
-      },
-      calibration: {
-        pixel_size_angstrom: pixelSize,
-        pixel_size_unit: "Å/px",
-        k_pixel_size: kPixelSize,
-        k_pixel_size_unit: kCalibrated ? "mrad/px" : "px/px",
-        k_calibrated: kCalibrated,
-        center_row: centerRow,
-        center_col: centerCol,
-        bf_radius: bfRadius,
-      },
-      display: {
-        diffraction: {
-          colormap: dpColormap,
-          scale_mode: dpScaleMode,
-          vmin_pct: dpVminPct,
-          vmax_pct: dpVmaxPct,
-        },
-      },
-    };
-    zip.file("metadata.json", JSON.stringify(metadata, null, 2));
-    const canvasToBlob = (canvas: HTMLCanvasElement): Promise<Blob> => new Promise((resolve) => canvas.toBlob((blob) => resolve(blob!), 'image/png'));
-    if (dpCanvasRef.current) zip.file("diffraction_pattern.png", await canvasToBlob(dpCanvasRef.current));
-    const zipBlob = await zip.generateAsync({ type: "blob" });
-    downloadBlob(zipBlob, `dp_export_${timestamp}.zip`);
-  };
-
-  // Export VI handler
-  const handleExportVI = async () => {
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-    const zip = new JSZip();
-    const metadata = {
-      metadata_version: "1.0",
-      widget_name: "Show4DSTEM",
-      widget_version: widgetVersion || "unknown",
-      exported_at: new Date().toISOString(),
-      view: "all",
-      format: "zip",
-      export_kind: "multi_panel_png_zip",
-      position: { row: posRow, col: posCol },
-      frame_idx: frameIdx,
-      n_frames: nFrames,
-      scan_shape: { rows: shapeRows, cols: shapeCols },
-      detector_shape: { rows: detRows, cols: detCols },
-      roi: {
-        active: roiMode !== "off",
-        mode: roiMode,
-        center_row: roiCenterRow,
-        center_col: roiCenterCol,
-        radius: roiRadius,
-        radius_inner: roiRadiusInner,
-        width: roiWidth,
-        height: roiHeight,
-      },
-      vi_roi: {
-        mode: viRoiMode,
-        center_row: viRoiCenterRow,
-        center_col: viRoiCenterCol,
-        radius: viRoiRadius,
-        width: viRoiWidth,
-        height: viRoiHeight,
-      },
-      calibration: {
-        pixel_size_angstrom: pixelSize,
-        pixel_size_unit: "Å/px",
-        k_pixel_size: kPixelSize,
-        k_pixel_size_unit: kCalibrated ? "mrad/px" : "px/px",
-        k_calibrated: kCalibrated,
-        center_row: centerRow,
-        center_col: centerCol,
-        bf_radius: bfRadius,
-      },
-      display: {
-        diffraction: {
-          colormap: dpColormap,
-          scale_mode: dpScaleMode,
-          vmin_pct: dpVminPct,
-          vmax_pct: dpVmaxPct,
-        },
-        virtual: {
-          colormap: viColormap,
-          scale_mode: viScaleMode,
-          vmin_pct: viVminPct,
-          vmax_pct: viVmaxPct,
-        },
-        fft: {
-          colormap: fftColormap,
-          scale_mode: fftScaleMode,
-          auto: fftAuto,
-          vmin_pct: fftVminPct,
-          vmax_pct: fftVmaxPct,
-        },
-      },
-    };
-    zip.file("metadata.json", JSON.stringify(metadata, null, 2));
-    const canvasToBlob = (canvas: HTMLCanvasElement): Promise<Blob> => new Promise((resolve) => canvas.toBlob((blob) => resolve(blob!), 'image/png'));
-    if (virtualCanvasRef.current) zip.file("virtual_image.png", await canvasToBlob(virtualCanvasRef.current));
-    if (dpCanvasRef.current) zip.file("diffraction_pattern.png", await canvasToBlob(dpCanvasRef.current));
-    if (fftCanvasRef.current) zip.file("fft.png", await canvasToBlob(fftCanvasRef.current));
-    const zipBlob = await zip.generateAsync({ type: "blob" });
-    downloadBlob(zipBlob, `4dstem_export_${timestamp}.zip`);
-  };
-
-  // ── DP Figure Export ──
-  const handleDpExportFigure = (withColorbar: boolean) => {
-    setDpExportAnchor(null);
-    const frameData = rawDpDataRef.current;
-    if (!frameData) return;
-    const processed = dpScaleMode === "log" ? applyLogScale(frameData) : frameData;
-    const lut = COLORMAPS[dpColormap] || COLORMAPS.inferno;
-    const { min: dMin, max: dMax } = findDataRange(processed);
-    let vmin: number, vmax: number;
-    if (traitDpVmin != null && traitDpVmax != null) {
-      if (dpScaleMode === "log") {
-        vmin = Math.log1p(Math.max(traitDpVmin, 0));
-        vmax = Math.log1p(Math.max(traitDpVmax, 0));
-      } else {
-        vmin = traitDpVmin;
-        vmax = traitDpVmax;
-      }
-    } else {
-      ({ vmin, vmax } = sliderRange(dMin, dMax, dpVminPct, dpVmaxPct));
-    }
-    const offscreen = renderToOffscreen(processed, detCols, detRows, lut, vmin, vmax);
-    if (!offscreen) return;
-    const kPxAngstrom = kPixelSize > 0 && kCalibrated ? kPixelSize : 0;
-    const figCanvas = exportFigure({
-      imageCanvas: offscreen,
-      title: `DP at (${posRow}, ${posCol})`,
-      lut,
-      vmin,
-      vmax,
-      logScale: dpScaleMode === "log",
-      pixelSize: kPxAngstrom > 0 ? kPxAngstrom : undefined,
-      showColorbar: withColorbar,
-      showScaleBar: kPxAngstrom > 0,
-    });
-    canvasToPDF(figCanvas).then((blob) => downloadBlob(blob, "show4dstem_dp_figure.pdf")).catch(console.error);
-  };
-
-  const handleDpExportPng = () => {
-    setDpExportAnchor(null);
-    if (!dpCanvasRef.current) return;
-    dpCanvasRef.current.toBlob((b) => { if (b) downloadBlob(b, "show4dstem_dp.png"); }, "image/png");
-  };
-
   const handleDpExportGif = () => {
     setDpExportAnchor(null);
     setExporting(true);
     setGifExportRequested(true);
-  };
-
-  // ── VI Figure Export ──
-  const handleViExportFigure = (withColorbar: boolean) => {
-    setViExportAnchor(null);
-    if (!virtualCanvasRef.current) return;
-    const viCanvas = virtualCanvasRef.current;
-    const pixelSizeAngstrom = pixelSize > 0 ? pixelSize : 0;
-    const figCanvas = exportFigure({
-      imageCanvas: viCanvas,
-      title: "Virtual Image",
-      showColorbar: withColorbar,
-      showScaleBar: pixelSizeAngstrom > 0,
-      pixelSize: pixelSizeAngstrom > 0 ? pixelSizeAngstrom : undefined,
-    });
-    canvasToPDF(figCanvas).then((blob) => downloadBlob(blob, "show4dstem_vi_figure.pdf")).catch(console.error);
-  };
-
-  const handleViExportPng = () => {
-    setViExportAnchor(null);
-    if (!virtualCanvasRef.current) return;
-    virtualCanvasRef.current.toBlob((b) => { if (b) downloadBlob(b, "show4dstem_vi.png"); }, "image/png");
   };
 
   // Download GIF when data arrives from Python
@@ -4040,14 +4027,41 @@ function Show4DSTEM() {
                   dpCanvasRef.current.toBlob((b) => { if (b) downloadBlob(b, "show4dstem_dp.png"); }, "image/png");
                 }
               }}>COPY</Button>
-              <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} onClick={(e) => setDpExportAnchor(e.currentTarget)} disabled={exporting}>{exporting ? "..." : "Export"}</Button>
-              <Menu anchorEl={dpExportAnchor} open={Boolean(dpExportAnchor)} onClose={() => setDpExportAnchor(null)} anchorOrigin={{ vertical: "bottom", horizontal: "left" }} transformOrigin={{ vertical: "top", horizontal: "left" }} sx={{ zIndex: 9999 }}>
-                <MenuItem onClick={() => handleDpExportFigure(true)} sx={{ fontSize: 12 }}>PDF + colorbar</MenuItem>
-                <MenuItem onClick={() => handleDpExportFigure(false)} sx={{ fontSize: 12 }}>PDF</MenuItem>
-                <MenuItem onClick={handleDpExportPng} sx={{ fontSize: 12 }}>PNG</MenuItem>
-                <MenuItem onClick={() => { setDpExportAnchor(null); handleExportDP(); }} sx={{ fontSize: 12 }}>ZIP (PNG + metadata)</MenuItem>
+              {exportEnabled && <Button
+                size="small"
+                sx={{ ...compactButton, color: themeColors.accent }}
+                onClick={(e) => setDpExportAnchor(e.currentTarget)}
+                disabled={exporting || htmlExportBusy}
+                title={localHtmlExportStatus || exportStatus || "Export images or standalone HTML"}
+              >
+                {exporting || htmlExportBusy ? "..." : "Export"}
+              </Button>}
+              {exportEnabled && <Menu anchorEl={dpExportAnchor} open={Boolean(dpExportAnchor)} onClose={() => setDpExportAnchor(null)} anchorOrigin={{ vertical: "bottom", horizontal: "left" }} transformOrigin={{ vertical: "top", horizontal: "left" }} sx={{ zIndex: 9999 }}>
+                <MenuItem onClick={() => handleHtmlExportSelect("uint8", 1)} sx={{ fontSize: 12 }}>HTML uint8 · {detRows}×{detCols} ({estimateHtmlExportSize("uint8", 1)})</MenuItem>
+                {detRows % 2 === 0 && detCols % 2 === 0 && <MenuItem onClick={() => handleHtmlExportSelect("uint8", 2)} sx={{ fontSize: 12 }}>HTML uint8 · {detRows / 2}×{detCols / 2} ({estimateHtmlExportSize("uint8", 2)})</MenuItem>}
+                {detRows % 4 === 0 && detCols % 4 === 0 && <MenuItem onClick={() => handleHtmlExportSelect("uint8", 4)} sx={{ fontSize: 12 }}>HTML uint8 · {detRows / 4}×{detCols / 4} ({estimateHtmlExportSize("uint8", 4)})</MenuItem>}
+                {detRows % 8 === 0 && detCols % 8 === 0 && <MenuItem onClick={() => handleHtmlExportSelect("uint8", 8)} sx={{ fontSize: 12 }}>HTML uint8 · {detRows / 8}×{detCols / 8} ({estimateHtmlExportSize("uint8", 8)})</MenuItem>}
+                <MenuItem onClick={() => handleHtmlExportSelect("uint16", 1)} sx={{ fontSize: 12 }}>HTML uint16 · {detRows}×{detCols} ({estimateHtmlExportSize("uint16", 1)})</MenuItem>
+                {detRows % 2 === 0 && detCols % 2 === 0 && <MenuItem onClick={() => handleHtmlExportSelect("uint16", 2)} sx={{ fontSize: 12 }}>HTML uint16 · {detRows / 2}×{detCols / 2} ({estimateHtmlExportSize("uint16", 2)})</MenuItem>}
+                {detRows % 4 === 0 && detCols % 4 === 0 && <MenuItem onClick={() => handleHtmlExportSelect("uint16", 4)} sx={{ fontSize: 12 }}>HTML uint16 · {detRows / 4}×{detCols / 4} ({estimateHtmlExportSize("uint16", 4)})</MenuItem>}
+                {detRows % 8 === 0 && detCols % 8 === 0 && <MenuItem onClick={() => handleHtmlExportSelect("uint16", 8)} sx={{ fontSize: 12 }}>HTML uint16 · {detRows / 8}×{detCols / 8} ({estimateHtmlExportSize("uint16", 8)})</MenuItem>}
                 {pathLength > 0 && <MenuItem onClick={handleDpExportGif} sx={{ fontSize: 12 }}>GIF (path animation)</MenuItem>}
-              </Menu>
+              </Menu>}
+              {exportEnabled && (localHtmlExportStatus || exportStatus) && (
+                <Typography
+                  sx={{
+                    ...typo.label,
+                    maxWidth: 120,
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                    color: (localHtmlExportStatus || exportStatus).startsWith("Export failed") ? "#d32f2f" : themeColors.textMuted,
+                  }}
+                  title={localHtmlExportStatus || exportStatus}
+                >
+                  {localHtmlExportStatus || exportStatus}
+                </Typography>
+              )}
             </Stack>
           </Stack>
 
@@ -4217,13 +4231,6 @@ function Show4DSTEM() {
                   virtualCanvasRef.current.toBlob((b) => { if (b) downloadBlob(b, "show4dstem_vi.png"); }, "image/png");
                 }
               }}>COPY</Button>
-              <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} onClick={(e) => setViExportAnchor(e.currentTarget)}>Export</Button>
-              <Menu anchorEl={viExportAnchor} open={Boolean(viExportAnchor)} onClose={() => setViExportAnchor(null)} anchorOrigin={{ vertical: "bottom", horizontal: "left" }} transformOrigin={{ vertical: "top", horizontal: "left" }} sx={{ zIndex: 9999 }}>
-                <MenuItem onClick={() => handleViExportFigure(true)} sx={{ fontSize: 12 }}>PDF + colorbar</MenuItem>
-                <MenuItem onClick={() => handleViExportFigure(false)} sx={{ fontSize: 12 }}>PDF</MenuItem>
-                <MenuItem onClick={handleViExportPng} sx={{ fontSize: 12 }}>PNG</MenuItem>
-                <MenuItem onClick={() => { setViExportAnchor(null); handleExportVI(); }} sx={{ fontSize: 12 }}>ZIP (all panels + metadata)</MenuItem>
-              </Menu>
             </Stack>
           </Stack>
 
