@@ -25,3 +25,6 @@ cufile.log
 
 # Local cross-session agent plans (never pushed)
 .plans/
+
+# local agent config / plans
+.claude/
