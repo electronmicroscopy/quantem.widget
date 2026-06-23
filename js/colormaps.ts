@@ -162,6 +162,26 @@ export function renderToOffscreenReuse(
 // WebGPU colormap engine (compute shader, ~300x faster than CPU loop on 4K data)
 // ============================================================================
 
+// Temporal mean of N window frames -> one output frame, on the GPU. One thread
+// per output pixel sums that pixel across the N frames (loop on the GPU, parallel
+// over pixels) and divides. Replaces a CPU per-pixel double-loop on the UI thread.
+const AVERAGE_SHADER = /* wgsl */ `
+struct AvgParams { n: u32, frameSize: u32 };
+@group(0) @binding(0) var<storage, read> src: array<f32>;
+@group(0) @binding(1) var<storage, read_write> dst: array<f32>;
+@group(0) @binding(2) var<uniform> p: AvgParams;
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x;
+  if (i >= p.frameSize) { return; }
+  var s = 0.0;
+  for (var j = 0u; j < p.n; j = j + 1u) {
+    s = s + src[j * p.frameSize + i];
+  }
+  dst[i] = s / f32(p.n);
+}
+`;
+
 const COLORMAP_SHADER = /* wgsl */ `
 struct Params {
   width: u32,
@@ -830,6 +850,12 @@ export class GPUColormapEngine {
   private directGridRangesPipeline: GPURenderPipeline | null = null;
   private directSlotPipeline: GPURenderPipeline | null = null;
   private blitPipeline: GPURenderPipeline | null = null;
+  // GPU temporal-average state: a compute pipeline that means N window frames
+  // into a slot's dataBuffer, plus a reused scratch buffer for the window frames.
+  private avgPipeline: GPUComputePipeline | null = null;
+  private avgScratch: GPUBuffer | null = null;
+  private avgScratchSize = 0;
+  private avgParamsBuffer: GPUBuffer | null = null;
   // Per-image GPU state: persistent buffers (data, rgba, read, params, histogram)
   private slots: GPUSlot[] = [];
   private lutBuffer: GPUBuffer | null = null;
@@ -899,6 +925,69 @@ export class GPUColormapEngine {
       layout: "auto",
       compute: { module, entryPoint: "main" },
     });
+  }
+
+  private ensureAveragePipeline(): void {
+    if (this.avgPipeline) return;
+    const module = this.device.createShaderModule({ code: AVERAGE_SHADER });
+    this.avgPipeline = this.device.createComputePipeline({
+      layout: "auto",
+      compute: { module, entryPoint: "main" },
+    });
+  }
+
+  /**
+   * Temporal mean of `frames` (the avg_window slice) computed ON THE GPU, written
+   * straight into slot `idx`'s dataBuffer so the existing colormap/render path
+   * picks it up unchanged. Replaces the old CPU `for j { for k { out[k]+=... } }`
+   * double-loop that ran on the UI thread per scrub - the per-pixel sum is now a
+   * parallel compute shader, so avg=15 scrubs as fast as avg=1.
+   */
+  averageFramesInto(idx: number, frames: Float32Array[], width: number, height: number): void {
+    if (frames.length === 0) return;
+    if (frames.length === 1) { this.uploadData(idx, frames[0], width, height); return; }
+    // Allocate the slot (dataBuffer + rgba/params/hist) by uploading the first
+    // frame, then overwrite its dataBuffer with the GPU-computed average.
+    this.uploadData(idx, frames[0], width, height);
+    const slot = this.slots[idx];
+    const frameSize = slot.count;
+    const n = frames.length;
+    this.ensureAveragePipeline();
+    const need = n * frameSize * 4;
+    if (!this.avgScratch || this.avgScratchSize < need) {
+      this.avgScratch?.destroy();
+      this.avgScratch = this.device.createBuffer({
+        size: need, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+      });
+      this.avgScratchSize = need;
+    }
+    for (let j = 0; j < n; j++) {
+      const f = frames[j];
+      if (f.length < frameSize) continue;
+      this.device.queue.writeBuffer(this.avgScratch, j * frameSize * 4,
+        f.buffer as ArrayBuffer, f.byteOffset, frameSize * 4);
+    }
+    if (!this.avgParamsBuffer) {
+      this.avgParamsBuffer = this.device.createBuffer({
+        size: 8, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+      });
+    }
+    this.device.queue.writeBuffer(this.avgParamsBuffer, 0, new Uint32Array([n, frameSize]));
+    const bind = this.device.createBindGroup({
+      layout: this.avgPipeline!.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: this.avgScratch } },
+        { binding: 1, resource: { buffer: slot.dataBuffer } },
+        { binding: 2, resource: { buffer: this.avgParamsBuffer } },
+      ],
+    });
+    const enc = this.device.createCommandEncoder();
+    const pass = enc.beginComputePass();
+    pass.setPipeline(this.avgPipeline!);
+    pass.setBindGroup(0, bind);
+    pass.dispatchWorkgroups(Math.ceil(frameSize / 64));
+    pass.end();
+    this.device.queue.submit([enc.finish()]);
   }
 
   private ensureSharedGridPipeline(): void {
