@@ -22,3 +22,6 @@ docs/_build/
 # OS / scratch
 .DS_Store
 cufile.log
+
+# Local cross-session agent plans (never pushed)
+.plans/
