@@ -22,7 +22,4 @@ parts:
       - file: api/show3dslices
       - file: api/show4dstem
       - file: api/load
-  - caption: Performance
-    chapters:
-      - file: perf/index
-      - file: perf/offline-embedding
+      - file: api/io
