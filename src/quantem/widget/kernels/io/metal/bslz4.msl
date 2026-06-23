@@ -1,0 +1,490 @@
+#include <metal_stdlib>
+using namespace metal;
+
+// IMPORTANT: All frame-indexed address calculations use ulong casts to
+// prevent uint32 overflow. Without this, frame_id * frame_bytes overflows
+// at frame ~58K for 73,728-byte frames (58255 × 73728 = 4,295,024,640 > 2^32),
+// causing all subsequent frames to read/write address 0 and produce zeros.
+
+// ---- LZ4 decompression constants ----
+constant uint DECOMP_THREADS_PER_CHUNK = 32;
+constant uint DECOMP_INPUT_BUFFER_SIZE = 256;  // 32 * sizeof(ulong)
+constant uint DECOMP_BUFFER_PREFETCH_DIST = 128;
+
+inline void syncCTA() {
+    simdgroup_barrier(mem_flags::mem_threadgroup);
+}
+
+inline ushort readWordDevice(const device uchar* address) {
+    return ushort(address[0]) | (ushort(address[1]) << 8);
+}
+inline ushort readWordTG(threadgroup const uchar* address) {
+    return ushort(address[0]) | (ushort(address[1]) << 8);
+}
+
+struct token_type { uint num_literals; uint num_matches; };
+
+inline token_type decodePair(uchar num) {
+    return token_type{uint((num & 0xf0) >> 4), uint(num & 0x0f)};
+}
+
+// ---- Cooperative copy functions ----
+inline void coopCopyNoOverlap(
+    device uchar* dest, const device uchar* source,
+    uint length, uint tid, uint stride
+) {
+    for (uint i = tid; i < length; i += stride)
+        dest[i] = source[i];
+}
+inline void coopCopyNoOverlapFromTG(
+    device uchar* dest, threadgroup const uchar* source,
+    uint length, uint tid, uint stride
+) {
+    for (uint i = tid; i < length; i += stride)
+        dest[i] = source[i];
+}
+inline void coopCopyRepeat(
+    device uchar* dest, const device uchar* source,
+    uint dist, uint length, uint tid, uint stride
+) {
+    for (uint i = tid; i < length; i += stride)
+        dest[i] = source[i % dist];
+}
+inline void coopCopyRepeatFromTG(
+    device uchar* dest, threadgroup const uchar* source,
+    uint dist, uint length, uint tid, uint stride
+) {
+    for (uint i = tid; i < length; i += stride)
+        dest[i] = source[i % dist];
+}
+inline void coopCopyOverlap(
+    device uchar* dest, const device uchar* source,
+    uint dist, uint length, uint tid, uint stride
+) {
+    if (dist < length) coopCopyRepeat(dest, source, dist, length, tid, stride);
+    else               coopCopyNoOverlap(dest, source, length, tid, stride);
+}
+inline void coopCopyOverlapFromTG(
+    device uchar* dest, threadgroup const uchar* source,
+    uint dist, uint length, uint tid, uint stride
+) {
+    if (dist < length) coopCopyRepeatFromTG(dest, source, dist, length, tid, stride);
+    else               coopCopyNoOverlapFromTG(dest, source, length, tid, stride);
+}
+
+// ---- Buffer load: fill threadgroup cache from device memory ----
+inline void bufferLoadAt(
+    threadgroup uchar* buffer,
+    const device uchar* compData,
+    uint comp_length,
+    thread long& buf_offset,
+    uint tid
+) {
+    ulong addr = ulong(compData) + ulong(buf_offset);
+    ulong aligned = (addr / 8) * 8;
+    buf_offset = long(aligned - ulong(compData));
+    if (uint(buf_offset) + DECOMP_INPUT_BUFFER_SIZE <= comp_length) {
+        const device ulong* src = (const device ulong*)(compData + buf_offset);
+        threadgroup ulong* dst = (threadgroup ulong*)buffer;
+        dst[tid] = src[tid];
+    } else {
+        for (uint i = tid; i < DECOMP_INPUT_BUFFER_SIZE; i += DECOMP_THREADS_PER_CHUNK) {
+            if (uint(buf_offset) + i < comp_length)
+                buffer[i] = compData[buf_offset + i];
+        }
+    }
+    syncCTA();
+}
+
+inline uint readLSIC(
+    threadgroup const uchar* buffer,
+    const device uchar* compData,
+    long buf_offset, uint buf_end,
+    thread uint& idx
+) {
+    uint num = 0;
+    uchar next = 0xff;
+    while (next == 0xff && idx < buf_end) {
+        next = buffer[idx - uint(buf_offset)];
+        idx++;
+        num += next;
+    }
+    while (next == 0xff) {
+        next = compData[idx];
+        idx++;
+        num += next;
+    }
+    return num;
+}
+
+inline void decompressStream(
+    threadgroup uchar* buffer,
+    device uchar* decompData,
+    const device uchar* compData,
+    uint comp_end,
+    uint tid
+) {
+    long buf_offset = 0;
+    bufferLoadAt(buffer, compData, comp_end, buf_offset, tid);
+    uint decomp_idx = 0;
+    uint comp_idx = 0;
+    while (comp_idx < comp_end) {
+        uint buf_end = uint(buf_offset) + DECOMP_INPUT_BUFFER_SIZE;
+        if (comp_idx + DECOMP_BUFFER_PREFETCH_DIST > buf_end) {
+            buf_offset = long(comp_idx);
+            bufferLoadAt(buffer, compData, comp_end, buf_offset, tid);
+        }
+        buf_end = uint(buf_offset) + DECOMP_INPUT_BUFFER_SIZE;
+        token_type tok = decodePair(buffer[comp_idx - uint(buf_offset)]);
+        comp_idx++;
+        uint num_literals = tok.num_literals;
+        if (tok.num_literals == 15)
+            num_literals += readLSIC(buffer, compData, buf_offset, buf_end, comp_idx);
+        uint literalStart = comp_idx;
+        if (num_literals + comp_idx > buf_end)
+            coopCopyNoOverlap(decompData + decomp_idx, compData + comp_idx,
+                              num_literals, tid, DECOMP_THREADS_PER_CHUNK);
+        else
+            coopCopyNoOverlapFromTG(decompData + decomp_idx,
+                                    buffer + (comp_idx - uint(buf_offset)),
+                                    num_literals, tid, DECOMP_THREADS_PER_CHUNK);
+        comp_idx += num_literals;
+        decomp_idx += num_literals;
+        if (comp_idx < comp_end) {
+            ushort match_offset;
+            if (comp_idx + 2 > buf_end)
+                match_offset = readWordDevice(compData + comp_idx);
+            else
+                match_offset = readWordTG(buffer + (comp_idx - uint(buf_offset)));
+            comp_idx += 2;
+            uint match_len = 4 + tok.num_matches;
+            if (tok.num_matches == 15)
+                match_len += readLSIC(buffer, compData, buf_offset, buf_end, comp_idx);
+            if (match_offset <= num_literals
+                && (long(literalStart) >= buf_offset
+                    && literalStart + num_literals <= buf_end)) {
+                coopCopyOverlapFromTG(
+                    decompData + decomp_idx,
+                    buffer + (literalStart + (num_literals - match_offset) - uint(buf_offset)),
+                    match_offset, match_len, tid, DECOMP_THREADS_PER_CHUNK);
+                syncCTA();
+            } else {
+                syncCTA();
+                coopCopyOverlap(
+                    decompData + decomp_idx,
+                    decompData + decomp_idx - match_offset,
+                    match_offset, match_len, tid, DECOMP_THREADS_PER_CHUNK);
+            }
+            decomp_idx += match_len;
+        }
+    }
+}
+
+inline uint read32be(const device uchar* p) {
+    return (uint(p[0]) << 24) | (uint(p[1]) << 16) | (uint(p[2]) << 8) | uint(p[3]);
+}
+
+// =====================================================================
+// Kernel 1: Batched LZ4 decompression
+// Grid:  (n_frames, 1, (max_blocks+1)/2)
+// Block: (32, 2, 1)
+// =====================================================================
+kernel void h5lz4dc_batched(
+    const device uchar* compressed          [[buffer(0)]],
+    const device uint*  chunk_offsets        [[buffer(1)]],
+    const device uint*  block_starts         [[buffer(2)]],
+    const device uint*  block_counts         [[buffer(3)]],
+    const device uint*  block_offsets        [[buffer(4)]],
+    constant uint&      blocksize            [[buffer(5)]],
+    constant uint&      frame_bytes          [[buffer(6)]],
+    device uchar*       decompressed         [[buffer(7)]],
+    uint3 tpig  [[threadgroup_position_in_grid]],
+    uint3 tpit  [[thread_position_in_threadgroup]],
+    uint3 tptg  [[threads_per_threadgroup]]
+) {
+    uint frame_id       = tpig.x;
+    uint block_in_frame = tpig.z * tptg.y + tpit.y;
+    uint chunk_offset   = chunk_offsets[frame_id];
+    uint block_offset   = block_offsets[frame_id];
+    uint num_blocks     = block_counts[frame_id];
+    threadgroup uchar tg_buffer[256 * LZ4_BLOCKS_PER_TG];
+    if (block_in_frame < num_blocks) {
+        uint blk_start = block_starts[block_offset + block_in_frame];
+        const device uchar* input = compressed + chunk_offset + blk_start + 4;
+        uint comp_size = read32be(compressed + chunk_offset + blk_start);
+        device uchar* output = decompressed + ulong(frame_id) * ulong(frame_bytes)
+                               + block_in_frame * blocksize;
+        decompressStream(tg_buffer + tpit.y * 256, output, input, comp_size, tpit.x);
+    }
+}
+
+// =====================================================================
+// Kernel 2a: Batched bitshuffle unshuffle (8192-byte blocks, 32-bit elems)
+//
+// Optimized: 32 SIMD groups per threadgroup (1024 threads), each group
+// unshuffles 32 elements using shared memory to cache bit planes.
+//
+// Grid:  (n_frames, 1, ceil(total_groups / 32))
+// Block: (32, 32, 1)  →  32 SIMD groups of 32 threads
+// =====================================================================
+kernel void shuf_8192_32_batched(
+    const device uint*  in   [[buffer(0)]],
+    device uint*        out  [[buffer(1)]],
+    constant uint&      frame_u32s        [[buffer(2)]],
+    constant uint&      groups_per_block  [[buffer(3)]],
+    constant uint&      total_groups      [[buffer(4)]],
+    uint3 tpig       [[threadgroup_position_in_grid]],
+    uint  lane       [[thread_index_in_simdgroup]],
+    uint  sg_id      [[simdgroup_index_in_threadgroup]]
+) {
+    uint frame_id  = tpig.x;
+    uint group_id  = tpig.z * 32 + sg_id;
+    if (group_id >= total_groups) return;
+    uint block_id       = group_id / groups_per_block;
+    uint group_in_block = group_id % groups_per_block;
+    const device uint* block_in = in + ulong(frame_id) * ulong(frame_u32s)
+                                     + block_id * 2048;
+    // Cache 32 bit planes in shared memory (one set per SIMD group)
+    threadgroup uint planes[32][32];
+    planes[sg_id][lane] = block_in[lane * groups_per_block + group_in_block];
+    simdgroup_barrier(mem_flags::mem_threadgroup);
+    uint result = 0;
+    for (int j = 0; j < 32; j++)
+        if (planes[sg_id][j] & (1U << lane))
+            result |= (1U << j);
+    out[ulong(frame_id) * ulong(frame_u32s) + group_id * 32 + lane] = result;
+}
+
+// =====================================================================
+// Kernel 2b: Batched bitshuffle unshuffle (8192-byte blocks, 16-bit elems)
+//
+// Optimized: 32 SIMD groups per threadgroup (1024 threads), each group
+// unshuffles 32 elements using shared memory to cache bit planes.
+// 32x fewer threadgroup launches vs one-group-per-threadgroup version.
+//
+// Grid:  (n_frames, 1, ceil(groups_per_frame / 32))
+// Block: (32, 32, 1)  →  32 SIMD groups of 32 threads
+// =====================================================================
+kernel void shuf_8192_16_batched(
+    const device uint*  in   [[buffer(0)]],
+    device ushort*      out  [[buffer(1)]],
+    constant uint&      frame_u16s        [[buffer(2)]],
+    constant uint&      groups_per_block  [[buffer(3)]],
+    constant uint&      total_groups      [[buffer(4)]],
+    uint3 tpig       [[threadgroup_position_in_grid]],
+    uint  lane       [[thread_index_in_simdgroup]],
+    uint  sg_id      [[simdgroup_index_in_threadgroup]]
+) {
+    uint frame_id  = tpig.x;
+    uint group_id  = tpig.z * 32 + sg_id;
+
+    if (group_id >= total_groups) return;
+
+    uint block_id       = group_id / groups_per_block;
+    uint group_in_block = group_id % groups_per_block;
+
+    const device uint* block_in = in + ulong(frame_id) * ulong(frame_u16s / 2)
+                                     + block_id * 2048;
+
+    // Cache 16 bit planes in shared memory (one set per SIMD group)
+    threadgroup uint planes[32][16];
+    if (lane < 16)
+        planes[sg_id][lane] = block_in[lane * groups_per_block + group_in_block];
+    simdgroup_barrier(mem_flags::mem_threadgroup);
+
+    ushort result = 0;
+    for (int j = 0; j < 16; j++)
+        if (planes[sg_id][j] & (1U << lane))
+            result |= ushort(1U << j);
+
+    out[ulong(frame_id) * ulong(frame_u16s) + group_id * 32 + lane] = result;
+}
+
+// =====================================================================
+// Kernel 3: Detector binning — integer SUM, mask-aware, native uint16 out.
+// quantem.live diverges from the widget here: it sums (not means) and keeps
+// the native uint16 dtype, and zeroes dead pixels BEFORE summing (mask, nonzero
+// = dead), so a binned MPS load is bit-identical to a cuda integer-sum bin.
+// The mask buffer is one detector frame (det_row*det_col uchar), shared by all
+// frames. Reads from bitshuffle output.
+// Grid:  (n_frames, ceil(out_rows/16), ceil(out_cols/16))
+// Block: (1, 16, 16)
+// =====================================================================
+kernel void bin_sum_u16(
+    const device ushort* in  [[buffer(0)]],
+    device ushort*       out [[buffer(1)]],
+    constant uint& in_row_stride  [[buffer(2)]],
+    constant uint& in_frame_elems [[buffer(3)]],
+    constant uint& out_cols       [[buffer(4)]],
+    constant uint& out_frame_elems [[buffer(5)]],
+    constant uint& bin_factor     [[buffer(6)]],
+    const device uchar* mask [[buffer(7)]],
+    uint3 pos [[thread_position_in_grid]]
+) {
+    uint frame = pos.x;
+    uint out_r = pos.y;
+    uint out_c = pos.z;
+    if (out_c >= out_cols || out_r >= out_cols) return;
+    uint in_r = out_r * bin_factor;
+    uint in_c = out_c * bin_factor;
+    ulong in_base = ulong(frame) * ulong(in_frame_elems);
+    uint sum = 0u;
+    for (uint br = 0; br < bin_factor; br++)
+        for (uint bc = 0; bc < bin_factor; bc++) {
+            uint pix = (in_r + br) * in_row_stride + in_c + bc;
+            if (mask[pix] == 0)  // skip dead pixels (treat as 0)
+                sum += uint(in[in_base + pix]);
+        }
+    out[ulong(frame) * ulong(out_frame_elems) + out_r * out_cols + out_c] =
+        ushort(min(sum, 65535u));
+}
+
+kernel void bin_sum_u32(
+    const device uint* in    [[buffer(0)]],
+    device uint*       out   [[buffer(1)]],
+    constant uint& in_row_stride  [[buffer(2)]],
+    constant uint& in_frame_elems [[buffer(3)]],
+    constant uint& out_cols       [[buffer(4)]],
+    constant uint& out_frame_elems [[buffer(5)]],
+    constant uint& bin_factor     [[buffer(6)]],
+    const device uchar* mask [[buffer(7)]],
+    uint3 pos [[thread_position_in_grid]]
+) {
+    uint frame = pos.x;
+    uint out_r = pos.y;
+    uint out_c = pos.z;
+    if (out_c >= out_cols || out_r >= out_cols) return;
+    uint in_r = out_r * bin_factor;
+    uint in_c = out_c * bin_factor;
+    ulong in_base = ulong(frame) * ulong(in_frame_elems);
+    uint sum = 0u;
+    for (uint br = 0; br < bin_factor; br++)
+        for (uint bc = 0; bc < bin_factor; bc++) {
+            uint pix = (in_r + br) * in_row_stride + in_c + bc;
+            if (mask[pix] == 0)
+                sum += in[in_base + pix];
+        }
+    out[ulong(frame) * ulong(out_frame_elems) + out_r * out_cols + out_c] = sum;
+}
+
+// =====================================================================
+// Tiled bin (uint16): each 16x16-thread group bins one 16x16 output tile.
+// The threads first COOPERATIVELY + COALESCED load the (16*bin)x(16*bin)
+// input region into threadgroup memory (consecutive threads read consecutive
+// detector columns), then each thread sums its bin_factor^2 block from fast
+// threadgroup memory. The old per-thread strided global gather ran at ~2% of
+// M5 bandwidth; this is memory-coalesced. Supports bin_factor up to 4
+// (tile <= 64x64 ushort = 8 KB threadgroup). Dead pixels (mask) zeroed at load.
+// Grid:  (n_frames, ceil(out_rows/16), ceil(out_cols/16)), Block: (1,16,16)
+// =====================================================================
+kernel void bin_sum_tiled_u16(
+    const device ushort* in  [[buffer(0)]],
+    device ushort*       out [[buffer(1)]],
+    constant uint& in_row_stride  [[buffer(2)]],
+    constant uint& in_frame_elems [[buffer(3)]],
+    constant uint& out_cols       [[buffer(4)]],
+    constant uint& out_frame_elems [[buffer(5)]],
+    constant uint& bin_factor     [[buffer(6)]],
+    const device uchar* mask [[buffer(7)]],
+    constant uint& out_rows       [[buffer(8)]],
+    uint3 tg  [[threadgroup_position_in_grid]],
+    uint3 lid [[thread_position_in_threadgroup]]
+) {
+    threadgroup ushort tile[64 * 64];  // bin_factor <= 4
+    uint B = bin_factor;
+    uint ts = 16u * B;                 // input tile side
+    uint tile_or = tg.y * 16u;         // output tile origin
+    uint tile_oc = tg.z * 16u;
+    uint in_or = tile_or * B;          // input tile origin
+    uint in_oc = tile_oc * B;
+    ulong in_base = ulong(tg.x) * ulong(in_frame_elems);
+    uint lin = lid.y * 16u + lid.z;    // 0..255
+    // Coalesced cooperative load of the ts*ts input region (+ mask zero).
+    for (uint i = lin; i < ts * ts; i += 256u) {
+        uint rr = i / ts, cc = i % ts;
+        uint gr = in_or + rr, gc = in_oc + cc;
+        uint pix = gr * in_row_stride + gc;
+        tile[i] = (mask[pix] == 0) ? in[in_base + pix] : ushort(0);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    uint out_r = tile_or + lid.y;
+    uint out_c = tile_oc + lid.z;
+    if (out_r >= out_rows || out_c >= out_cols) return;
+    uint sum = 0u;
+    uint base_r = lid.y * B, base_c = lid.z * B;
+    for (uint br = 0; br < B; br++)
+        for (uint bc = 0; bc < B; bc++)
+            sum += uint(tile[(base_r + br) * ts + base_c + bc]);
+    out[ulong(tg.x) * ulong(out_frame_elems) + out_r * out_cols + out_c] =
+        ushort(min(sum, 65535u));
+}
+
+// Zero detector pixels marked bad after raw no-bin decode. The common Arina
+// masks contain only a few pixels; doing this on CPU with arr[:, bad] creates
+// a slow strided write over all frames. This tiny Metal pass keeps raw-load
+// masking inside the command buffer that produced the chunk.
+kernel void zero_bad_pixels_u16(
+    device ushort*      data    [[buffer(0)]],  // (nframes, ndet) uint16
+    device const uint*  bad_pix [[buffer(1)]],  // flat detector indices
+    constant uint&      ndet    [[buffer(2)]],
+    constant uint&      nbad    [[buffer(3)]],
+    constant uint&      nframes [[buffer(4)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    uint total = nframes * nbad;
+    if (gid >= total) return;
+    uint frame = gid / nbad;
+    uint bad_i = gid - frame * nbad;
+    uint pix = bad_pix[bad_i];
+    if (pix < ndet) {
+        data[(ulong)frame * ndet + pix] = 0;
+    }
+}
+kernel void row_prefix_masked_u16(
+    device ushort*      data     [[buffer(0)]],  // (nframes, rows, cols)
+    device const uchar* mask     [[buffer(1)]],  // detector mask, nonzero = dead
+    device atomic_uint* overflow [[buffer(2)]],
+    constant uint&      detcols  [[buffer(3)]],
+    constant uint&      detrows  [[buffer(4)]],
+    constant uint&      nframes  [[buffer(5)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    uint total_rows = nframes * detrows;
+    if (gid >= total_rows) return;
+    uint frame = gid / detrows;
+    uint row = gid - frame * detrows;
+    ulong base = (ulong)frame * detrows * detcols + (ulong)row * detcols;
+    uint acc = 0;
+    for (uint col = 0; col < detcols; col++) {
+        uint pix = row * detcols + col;
+        ushort raw = (mask[pix] == 0) ? data[base + col] : ushort(0);
+        acc += uint(raw);
+        if (acc > 65535u) {
+            atomic_fetch_or_explicit(&overflow[0], 1u, memory_order_relaxed);
+        }
+        data[base + col] = ushort(acc);
+    }
+}
+
+kernel void row_prefix_u16(
+    device ushort*      data     [[buffer(0)]],  // (nframes, rows, cols)
+    device atomic_uint* overflow [[buffer(1)]],
+    constant uint&      detcols  [[buffer(2)]],
+    constant uint&      detrows  [[buffer(3)]],
+    constant uint&      nframes  [[buffer(4)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    uint total_rows = nframes * detrows;
+    if (gid >= total_rows) return;
+    uint frame = gid / detrows;
+    uint row = gid - frame * detrows;
+    ulong base = (ulong)frame * detrows * detcols + (ulong)row * detcols;
+    uint acc = 0;
+    for (uint col = 0; col < detcols; col++) {
+        acc += uint(data[base + col]);
+        if (acc > 65535u) {
+            atomic_fetch_or_explicit(&overflow[0], 1u, memory_order_relaxed);
+        }
+        data[base + col] = ushort(acc);
+    }
+}

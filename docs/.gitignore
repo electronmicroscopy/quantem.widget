@@ -1,0 +1,11 @@
+# Re-include the pre-baked tutorial notebooks (the repo root ignores *.ipynb).
+!*.ipynb
+
+# Jupyter Book build output + autodoc2 generated API stubs (regenerated per build).
+_build/
+apidocs/
+
+# Local dev scratch, not part of the published site.
+user-stories/
+show2d-test-spec.md
+2026-05-23-offline-html-v8-parse-limit.md

@@ -1,0 +1,28 @@
+# Table of contents. Only the four widgets migrated onto this branch are
+# documented. Two sections: hands-on Tutorials, and an exhaustive API Reference
+# that doubles as a UI-test spec for automated agents.
+format: jb-book
+root: intro
+parts:
+  - caption: Getting started
+    chapters:
+      - file: install
+  - caption: Tutorials
+    chapters:
+      - file: tutorials/show2d
+      - file: tutorials/show3d
+      - file: tutorials/show3dslices
+      - file: tutorials/show4dstem
+      - file: tutorials/saving
+  - caption: API reference
+    chapters:
+      - file: api/index
+      - file: api/show2d
+      - file: api/show3d
+      - file: api/show3dslices
+      - file: api/show4dstem
+      - file: api/load
+  - caption: Performance
+    chapters:
+      - file: perf/index
+      - file: perf/offline-embedding

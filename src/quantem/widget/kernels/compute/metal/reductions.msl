@@ -1,0 +1,448 @@
+#include <metal_stdlib>
+using namespace metal;
+kernel void masked_sum_u16(
+    device const ushort* data    [[buffer(0)]],  // (nframes, ndet) uint16, flat
+    device const uchar*  mask    [[buffer(1)]],  // (ndet,) 0/1
+    device int*          out     [[buffer(2)]],  // (nframes,) int32
+    constant uint&       ndet    [[buffer(3)]],
+    constant uint&       nframes [[buffer(4)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid >= nframes) return;
+    device const ushort* frame = data + (ulong)gid * ndet;
+    int s = 0;
+    for (uint i = 0; i < ndet; i++) s += mask[i] ? (int)frame[i] : 0;
+    out[gid] = s;
+}
+kernel void detector_sum_u16(
+    device const ushort* data    [[buffer(0)]],   // (nframes, ndet) uint16
+    device atomic_int*   out     [[buffer(1)]],   // (ndet,) int32, accumulated
+    constant uint&       ndet    [[buffer(2)]],
+    constant uint&       nframes [[buffer(3)]],
+    uint pix [[thread_position_in_grid]]
+) {
+    if (pix >= ndet) return;
+    int s = 0;
+    for (uint fr = 0; fr < nframes; fr++) s += (int)data[(ulong)fr * ndet + pix];
+    atomic_fetch_add_explicit(&out[pix], s, memory_order_relaxed);
+}
+kernel void detector_sum_prefix_u16(
+    device const ushort* data    [[buffer(0)]],   // row-prefix (nframes, ndet)
+    device atomic_int*   out     [[buffer(1)]],   // (ndet,) int32, accumulated
+    constant uint&       ndet    [[buffer(2)]],
+    constant uint&       detcols [[buffer(3)]],
+    constant uint&       nframes [[buffer(4)]],
+    uint pix [[thread_position_in_grid]]
+) {
+    if (pix >= ndet) return;
+    uint col = pix % detcols;
+    int s = 0;
+    for (uint fr = 0; fr < nframes; fr++) {
+        device const ushort* frame = data + (ulong)fr * ndet;
+        uint right = (uint)frame[pix];
+        uint left = (col == 0) ? 0u : (uint)frame[pix - 1];
+        s += (int)(right - left);
+    }
+    atomic_fetch_add_explicit(&out[pix], s, memory_order_relaxed);
+}
+kernel void row_sum_overflow_u16(
+    device const ushort* data      [[buffer(0)]],  // raw (nframes, rows, cols)
+    device atomic_uint*  overflow  [[buffer(1)]],  // set to 1 if any row > 65535
+    constant uint&       detcols   [[buffer(2)]],
+    constant uint&       detrows   [[buffer(3)]],
+    constant uint&       nframes   [[buffer(4)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    uint total_rows = nframes * detrows;
+    if (gid >= total_rows) return;
+    uint fr = gid / detrows;
+    uint row = gid - fr * detrows;
+    device const ushort* src = data + (ulong)fr * detrows * detcols + (ulong)row * detcols;
+    uint acc = 0;
+    for (uint c = 0; c < detcols; c++) acc += (uint)src[c];
+    if (acc > 65535u) {
+        atomic_fetch_or_explicit(&overflow[0], 1u, memory_order_relaxed);
+    }
+}
+kernel void row_prefix_u16_inplace(
+    device ushort* data          [[buffer(0)]],  // raw -> row-prefix in place
+    constant uint& detcols       [[buffer(1)]],
+    constant uint& detrows       [[buffer(2)]],
+    constant uint& nframes       [[buffer(3)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    uint total_rows = nframes * detrows;
+    if (gid >= total_rows) return;
+    uint fr = gid / detrows;
+    uint row = gid - fr * detrows;
+    device ushort* dst = data + (ulong)fr * detrows * detcols + (ulong)row * detcols;
+    uint acc = 0;
+    for (uint c = 0; c < detcols; c++) {
+        acc += (uint)dst[c];
+        dst[c] = (ushort)acc;
+    }
+}
+kernel void bin_detector_u16(
+    device const ushort* data    [[buffer(0)]],  // raw (nframes, detrows, detcols)
+    device ushort*       out     [[buffer(1)]],  // binned (nframes, detrows/f, detcols/f)
+    constant uint&       detcols [[buffer(2)]],
+    constant uint&       outcols [[buffer(3)]],
+    constant uint&       outndet [[buffer(4)]],
+    constant uint&       nframes [[buffer(5)]],
+    constant uint&       binf    [[buffer(6)]],  // bin factor f (2, 4, ...)
+    uint gid [[thread_position_in_grid]]
+) {
+    // General f x f detector bin. One thread per output pixel sums the f*f raw
+    // pixels under it (clamped to uint16),
+    // so any even-divisor sidecar (bin2, bin4) reuses one kernel. bin4 keeps the
+    // scrub sidecar small enough to fit a 24 GB Mac (1.2 GB vs bin2's 4.8 GB).
+    uint total = nframes * outndet;
+    if (gid >= total) return;
+    uint fr = gid / outndet;
+    uint opix = gid - fr * outndet;
+    uint orow = opix / outcols;
+    uint ocol = opix - orow * outcols;
+    ulong base = (ulong)fr * (outndet * binf * binf)
+               + (ulong)(orow * binf) * detcols + (ocol * binf);
+    uint s = 0;
+    for (uint dr = 0; dr < binf; dr++) {
+        ulong rowbase = base + (ulong)dr * detcols;
+        for (uint dc = 0; dc < binf; dc++) {
+            s += (uint)data[rowbase + dc];
+        }
+    }
+    out[gid] = (ushort)min(s, 65535u);
+}
+kernel void mean_dp_sum_u16(
+    device const ushort* data          [[buffer(0)]],  // raw (nframes, ndet)
+    device const uint*   frame_indices [[buffer(1)]],  // local frame indices
+    device uint*         out           [[buffer(2)]],  // (ndet,) uint32 sum
+    constant uint&       ndet          [[buffer(3)]],
+    constant uint&       nindices      [[buffer(4)]],
+    uint pix [[thread_position_in_grid]]
+) {
+    if (pix >= ndet) return;
+    uint s = 0;
+    for (uint i = 0; i < nindices; i++) {
+        s += (uint)data[(ulong)frame_indices[i] * ndet + pix];
+    }
+    out[pix] = s;
+}
+kernel void mean_dp_sum_prefix_u16(
+    device const ushort* data          [[buffer(0)]],  // row-prefix (nframes, ndet)
+    device const uint*   frame_indices [[buffer(1)]],  // local frame indices
+    device uint*         out           [[buffer(2)]],  // (ndet,) uint32 sum
+    constant uint&       ndet          [[buffer(3)]],
+    constant uint&       nindices      [[buffer(4)]],
+    constant uint&       detcols       [[buffer(5)]],
+    uint pix [[thread_position_in_grid]]
+) {
+    if (pix >= ndet) return;
+    uint col = pix % detcols;
+    uint s = 0;
+    for (uint i = 0; i < nindices; i++) {
+        device const ushort* frame = data + (ulong)frame_indices[i] * ndet;
+        uint right = (uint)frame[pix];
+        uint left = (col == 0) ? 0u : (uint)frame[pix - 1];
+        s += right - left;
+    }
+    out[pix] = s;
+}
+kernel void rowspan_sum_u16(
+    device const ushort* data    [[buffer(0)]],  // raw (nframes, ndet)
+    device const uint*   starts  [[buffer(1)]],  // inclusive flat span starts
+    device const uint*   ends    [[buffer(2)]],  // inclusive flat span ends
+    device int*          out     [[buffer(3)]],  // (nframes,) int32
+    constant uint&       nspans  [[buffer(4)]],
+    constant uint&       ndet    [[buffer(5)]],
+    constant uint&       nframes [[buffer(6)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid >= nframes) return;
+    device const ushort* frame = data + (ulong)gid * ndet;
+    int s = 0;
+    for (uint sp = 0; sp < nspans; sp++) {
+        uint start = starts[sp];
+        uint end = ends[sp];
+        for (uint pix = start; pix <= end; pix++) {
+            s += (int)frame[pix];
+        }
+    }
+    out[gid] = s;
+}
+kernel void rowspan_sum_prefix_u16(
+    device const ushort* data    [[buffer(0)]],  // row-prefix (nframes, ndet)
+    device const uint*   lefts   [[buffer(1)]],  // start-1, or 0xffffffff at row start
+    device const uint*   rights  [[buffer(2)]],  // inclusive flat span ends
+    device int*          out     [[buffer(3)]],  // (nframes,) int32
+    constant uint&       nspans  [[buffer(4)]],
+    constant uint&       ndet    [[buffer(5)]],
+    constant uint&       detcols [[buffer(6)]],
+    constant uint&       nframes [[buffer(7)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid >= nframes) return;
+    device const ushort* frame = data + (ulong)gid * ndet;
+    int s = 0;
+    for (uint sp = 0; sp < nspans; sp++) {
+        uint left_idx = lefts[sp];
+        uint right = (uint)frame[rights[sp]];
+        uint left = (left_idx == 0xffffffffu) ? 0u : (uint)frame[left_idx];
+        s += (int)(right - left);
+    }
+    out[gid] = s;
+}
+kernel void rowspan_sum_prefix_tg_u16(
+    device const ushort* data    [[buffer(0)]],  // row-prefix (nframes, ndet)
+    device const uint*   lefts   [[buffer(1)]],  // start-1, or 0xffffffff at row start
+    device const uint*   rights  [[buffer(2)]],  // inclusive flat span ends
+    device int*          out     [[buffer(3)]],  // (nframes,) int32
+    constant uint&       nspans  [[buffer(4)]],
+    constant uint&       ndet    [[buffer(5)]],
+    constant uint&       detcols [[buffer(6)]],
+    constant uint&       nframes [[buffer(7)]],
+    uint lane [[thread_position_in_threadgroup]],
+    uint frame_id [[threadgroup_position_in_grid]]
+) {
+    if (frame_id >= nframes) return;
+    threadgroup int scratch[128];
+    device const ushort* frame = data + (ulong)frame_id * ndet;
+    int s = 0;
+    for (uint sp = lane; sp < nspans; sp += 128) {
+        uint left_idx = lefts[sp];
+        uint right = (uint)frame[rights[sp]];
+        uint left = (left_idx == 0xffffffffu) ? 0u : (uint)frame[left_idx];
+        s += (int)(right - left);
+    }
+    scratch[lane] = s;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint stride = 64; stride > 0; stride >>= 1) {
+        if (lane < stride) scratch[lane] += scratch[lane + stride];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (lane == 0) out[frame_id] = scratch[0];
+}
+kernel void rowspan_sum_prefix_tile_u16(
+    device const ushort* data    [[buffer(0)]],  // row-prefix (nframes, ndet)
+    device const uint*   lefts   [[buffer(1)]],  // start-1, or 0xffffffff at row start
+    device const uint*   rights  [[buffer(2)]],  // inclusive flat span ends
+    device int*          out     [[buffer(3)]],  // (nframes,) int32
+    constant uint&       nspans  [[buffer(4)]],
+    constant uint&       ndet    [[buffer(5)]],
+    constant uint&       detcols [[buffer(6)]],
+    constant uint&       nframes [[buffer(7)]],
+    uint lane [[thread_position_in_threadgroup]],
+    uint group_id [[threadgroup_position_in_grid]]
+) {
+    threadgroup int scratch[256];
+    uint local_frame = lane >> 5;  // 8 frames per 256-thread group
+    uint sublane = lane & 31;
+    uint frame_id = group_id * 8 + local_frame;
+    int s = 0;
+    if (frame_id < nframes) {
+        device const ushort* frame = data + (ulong)frame_id * ndet;
+        for (uint sp = sublane; sp < nspans; sp += 32) {
+            uint left_idx = lefts[sp];
+            uint right = (uint)frame[rights[sp]];
+            uint left = (left_idx == 0xffffffffu) ? 0u : (uint)frame[left_idx];
+            s += (int)(right - left);
+        }
+    }
+    scratch[lane] = s;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint stride = 16; stride > 0; stride >>= 1) {
+        if (sublane < stride) scratch[lane] += scratch[lane + stride];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (sublane == 0 && frame_id < nframes) out[frame_id] = scratch[lane];
+}
+kernel void rowspan_sum_prefix_simd8_u16(
+    device const ushort* data    [[buffer(0)]],  // row-prefix (nframes, ndet)
+    device const uint*   lefts   [[buffer(1)]],  // start-1, or 0xffffffff at row start
+    device const uint*   rights  [[buffer(2)]],  // inclusive flat span ends
+    device int*          out     [[buffer(3)]],  // (nframes,) int32
+    constant uint&       nspans  [[buffer(4)]],
+    constant uint&       ndet    [[buffer(5)]],
+    constant uint&       detcols [[buffer(6)]],
+    constant uint&       nframes [[buffer(7)]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_id [[simdgroup_index_in_threadgroup]],
+    uint group_id [[threadgroup_position_in_grid]]
+) {
+    uint frame_id = group_id * 8 + simd_id;
+    int s = 0;
+    if (frame_id < nframes) {
+        device const ushort* frame = data + (ulong)frame_id * ndet;
+        for (uint sp = simd_lane; sp < nspans; sp += 32) {
+            uint left_idx = lefts[sp];
+            uint right = (uint)frame[rights[sp]];
+            uint left = (left_idx == 0xffffffffu) ? 0u : (uint)frame[left_idx];
+            s += (int)(right - left);
+        }
+    }
+    s = simd_sum(s);
+    if (simd_lane == 0 && frame_id < nframes) out[frame_id] = s;
+}
+kernel void radial_cumsum_u16(
+    device const ushort* data    [[buffer(0)]],   // (nframes, ndet) uint16
+    device const int*    radbin  [[buffer(1)]],   // (ndet,) radial bin per pixel
+    device int*          out     [[buffer(2)]],   // (nframes, nbins) int32 cumsum
+    constant uint&       ndet    [[buffer(3)]],
+    constant uint&       nbins   [[buffer(4)]],
+    constant uint&       nframes [[buffer(5)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    // Per scan position: integrate detector intensity by radius, then prefix-sum
+    // so out[gid, R] = total intensity within radius R. A BF disk of radius R is
+    // then out[:, R]; an ADF annulus (r1, r2) is out[:, r2] - out[:, r1] — both a
+    // single instant slice, no detector re-read. Built once at the BF center.
+    if (gid >= nframes) return;
+    device const ushort* frame = data + (ulong)gid * ndet;
+    device int* o = out + (ulong)gid * nbins;
+    for (uint b = 0; b < nbins; b++) o[b] = 0;
+    for (uint i = 0; i < ndet; i++) o[radbin[i]] += (int)frame[i];
+    int acc = 0;
+    for (uint b = 0; b < nbins; b++) { acc += o[b]; o[b] = acc; }
+}
+kernel void radial_cumsum_prefix_u16(
+    device const ushort* data    [[buffer(0)]],   // row-prefix (nframes, ndet)
+    device const int*    radbin  [[buffer(1)]],   // (ndet,) ceil(radius) bin
+    device int*          out     [[buffer(2)]],   // (nframes, nbins) int32 cumsum
+    constant uint&       ndet    [[buffer(3)]],
+    constant uint&       detcols [[buffer(4)]],
+    constant uint&       nbins   [[buffer(5)]],
+    constant uint&       nframes [[buffer(6)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid >= nframes) return;
+    device const ushort* frame = data + (ulong)gid * ndet;
+    device int* o = out + (ulong)gid * nbins;
+    for (uint b = 0; b < nbins; b++) o[b] = 0;
+    for (uint pix = 0; pix < ndet; pix++) {
+        uint col = pix % detcols;
+        uint right = (uint)frame[pix];
+        uint left = (col == 0) ? 0u : (uint)frame[pix - 1];
+        o[radbin[pix]] += (int)(right - left);
+    }
+    int acc = 0;
+    for (uint b = 0; b < nbins; b++) { acc += o[b]; o[b] = acc; }
+}
+kernel void radial_cumsum_dual_prefix_u16(
+    device const ushort* data      [[buffer(0)]],  // row-prefix (nframes, ndet)
+    device const int*    ceilbin   [[buffer(1)]],  // ceil(radius), exact for <= R
+    device const int*    floorbin  [[buffer(2)]],  // floor(radius), exact for < R
+    device int*          out_ceil  [[buffer(3)]],  // (nframes, nbins)
+    device int*          out_floor [[buffer(4)]],  // (nframes, nbins)
+    constant uint&       ndet      [[buffer(5)]],
+    constant uint&       detcols   [[buffer(6)]],
+    constant uint&       nbins     [[buffer(7)]],
+    constant uint&       nframes   [[buffer(8)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid >= nframes) return;
+    device const ushort* frame = data + (ulong)gid * ndet;
+    device int* oc = out_ceil + (ulong)gid * nbins;
+    device int* of = out_floor + (ulong)gid * nbins;
+    for (uint b = 0; b < nbins; b++) {
+        oc[b] = 0;
+        of[b] = 0;
+    }
+    for (uint pix = 0; pix < ndet; pix++) {
+        uint col = pix % detcols;
+        uint right = (uint)frame[pix];
+        uint left = (col == 0) ? 0u : (uint)frame[pix - 1];
+        int raw = (int)(right - left);
+        oc[ceilbin[pix]] += raw;
+        of[floorbin[pix]] += raw;
+    }
+    int acc_ceil = 0;
+    int acc_floor = 0;
+    for (uint b = 0; b < nbins; b++) {
+        acc_ceil += oc[b];
+        acc_floor += of[b];
+        oc[b] = acc_ceil;
+        of[b] = acc_floor;
+    }
+}
+kernel void radial_cumsum_dual_prefix_tg_u16(
+    device const ushort* data      [[buffer(0)]],  // row-prefix (nframes, ndet)
+    device const int*    ceilbin   [[buffer(1)]],  // ceil(radius), exact for <= R
+    device const int*    floorbin  [[buffer(2)]],  // floor(radius), exact for < R
+    device int*          out_ceil  [[buffer(3)]],  // (nframes, nbins)
+    device int*          out_floor [[buffer(4)]],  // (nframes, nbins)
+    constant uint&       ndet      [[buffer(5)]],
+    constant uint&       detcols   [[buffer(6)]],
+    constant uint&       nbins     [[buffer(7)]],
+    constant uint&       nframes   [[buffer(8)]],
+    uint tid [[thread_position_in_threadgroup]],
+    uint frame_id [[threadgroup_position_in_grid]]
+) {
+    constexpr uint MAX_BINS = 384u;
+    threadgroup atomic_int ceil_counts[MAX_BINS];
+    threadgroup atomic_int floor_counts[MAX_BINS];
+    if (frame_id >= nframes || nbins > MAX_BINS) return;
+    for (uint b = tid; b < nbins; b += 256u) {
+        atomic_store_explicit(&ceil_counts[b], 0, memory_order_relaxed);
+        atomic_store_explicit(&floor_counts[b], 0, memory_order_relaxed);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    device const ushort* frame = data + (ulong)frame_id * ndet;
+    for (uint pix = tid; pix < ndet; pix += 256u) {
+        uint col = pix % detcols;
+        uint right = (uint)frame[pix];
+        uint left = (col == 0) ? 0u : (uint)frame[pix - 1];
+        int raw = (int)(right - left);
+        uint cb = (uint)ceilbin[pix];
+        uint fb = (uint)floorbin[pix];
+        if (cb < nbins) {
+            atomic_fetch_add_explicit(&ceil_counts[cb], raw, memory_order_relaxed);
+        }
+        if (fb < nbins) {
+            atomic_fetch_add_explicit(&floor_counts[fb], raw, memory_order_relaxed);
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (tid == 0) {
+        device int* oc = out_ceil + (ulong)frame_id * nbins;
+        device int* of = out_floor + (ulong)frame_id * nbins;
+        int acc_ceil = 0;
+        int acc_floor = 0;
+        for (uint b = 0; b < nbins; b++) {
+            acc_ceil += atomic_load_explicit(&ceil_counts[b], memory_order_relaxed);
+            acc_floor += atomic_load_explicit(&floor_counts[b], memory_order_relaxed);
+            oc[b] = acc_ceil;
+            of[b] = acc_floor;
+        }
+    }
+}
+
+// Center-of-mass per scan position: CoMx, CoMy = (Sum col*I, Sum row*I) / Sum I,
+// over masked detector pixels. uint16 read in place (no float cast of the data),
+// long accumulators (Sum I ~2.4e9 and Sum col*I ~4.6e11 overflow int32), one
+// float2 per frame out. Powers DPC / iCoM / iDPC without binning. col/row come
+// from the linear detector index (col = i % detcols, row = i / detcols).
+kernel void com_u16(
+    device const ushort* data    [[buffer(0)]],   // (nframes, ndet) uint16, flat
+    device const uchar*  mask    [[buffer(1)]],   // (ndet,) 0/1
+    device float2*       out     [[buffer(2)]],   // (nframes,) (CoMx, CoMy)
+    constant uint&       ndet    [[buffer(3)]],
+    constant uint&       detcols [[buffer(4)]],   // detector width
+    constant uint&       nframes [[buffer(5)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid >= nframes) return;
+    device const ushort* frame = data + (ulong)gid * ndet;
+    long sI = 0, sx = 0, sy = 0;
+    for (uint i = 0; i < ndet; i++) {
+        if (mask[i]) {
+            long v = (long)frame[i];
+            sI += v;
+            sx += v * (long)(i % detcols);
+            sy += v * (long)(i / detcols);
+        }
+    }
+    float invI = sI > 0 ? 1.0f / (float)sI : 0.0f;
+    out[gid] = float2((float)sx * invI, (float)sy * invI);
+}

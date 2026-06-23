@@ -1,0 +1,62 @@
+# quantem.widget
+
+Interactive, GPU-aware Python widgets for electron microscopy, built on
+[anywidget](https://anywidget.dev). Each widget renders a real-time canvas in
+JupyterLab, VS Code, or Colab.
+
+```python
+from quantem.widget import Show2D, Show3D, Show3DSlices, Show4DSTEM, load
+```
+
+## Built for two platforms
+
+We serve two audiences first:
+
+- **macOS on Apple M-chips** - the Metal (MPS) GPU.
+- **Linux with NVIDIA CUDA** - workstations and HPC.
+
+**CUDA and MPS are the primary backends.** Work stays on the GPU as PyTorch
+tensors; we avoid NumPy on the hot path. CPU is a fallback, not a target - it
+runs through the same PyTorch path, just slower. See [Performance](perf/index)
+for how to go fast on large datasets.
+
+## Widgets
+
+| Widget | Use it for | Tutorial · API |
+|---|---|---|
+| `Show2D` | One or many 2D images: contrast, FFT, ROIs, line profiles, scale bars | [tutorial](tutorials/show2d) · [API](api/show2d) |
+| `Show3D` | A 3D volume scrubbed slice-by-slice (e.g. a ptychographic object) | [tutorial](tutorials/show3d) · [API](api/show3d) |
+| `Show3DSlices` | Side-by-side slices of a 3D volume across an axis | [tutorial](tutorials/show3dslices) · [API](api/show3dslices) |
+| `Show4DSTEM` | 4D-STEM: live virtual detectors over the diffraction stack | [tutorial](tutorials/show4dstem) · [API](api/show4dstem) |
+
+The [Tutorials](tutorials/show2d) walk through each widget on synthetic data and
+show how to [save and export](tutorials/saving). The [API reference](api/index)
+documents every parameter, method, and interactive control (and doubles as a
+UI-test spec for automated agents). All example data here is synthetic or pulled
+from a public Hugging Face dataset - no private data ships in the docs.
+
+Every widget accepts a NumPy array, a PyTorch tensor (CPU or GPU), or a quantem
+`Dataset` (`Dataset2d` / `Dataset3d` / `Dataset4dstem`), pulling calibration and
+units automatically from the dataset when present.
+
+## Offline by default in these docs
+
+The Show2D, Show3D, and Show3DSlices examples on this site were exported with
+`offline=True`, which bakes the display data into the widget as a **uint8
+quantized** stack (4x smaller than float32, and the colormap clamps to 256
+levels anyway so it looks identical). The canvas below each example stays fully
+interactive in this static page with no running kernel: scrub, zoom, change
+contrast, toggle the FFT - all in the browser. Show4DSTEM goes further: for a
+small dataset its virtual-detector math runs in **WebGPU**, so dragging the
+aperture recomputes the virtual image in the browser. The browser stack is
+uint8-clipped for transport, so it is exact for detector counts `<=255`; use the
+CUDA/MPS kernel path when full uint16 count fidelity matters.
+
+See [Installation](install) to get started.
+
+## Getting help
+
+- **Questions or bugs:** open an issue at
+  [github.com/bobleesj/quantem/issues](https://github.com/bobleesj/quantem/issues).
+- **Maintained by** the Ophus group. Contributions and feedback are welcome via
+  pull request or issue.

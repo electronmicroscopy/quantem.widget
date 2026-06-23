@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Node / frontend
+node_modules/
+.vite/
+*.tsbuildinfo
+
+# Built JS bundles (CI rebuilds via `npm run build`; shipped in the wheel, not git)
+src/quantem/widget/static/*.js
+src/quantem/widget/static/browser/
+
+# Docs build
+docs/_build/
+
+# OS / scratch
+.DS_Store
+cufile.log

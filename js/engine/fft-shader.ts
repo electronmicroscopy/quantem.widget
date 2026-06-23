@@ -1,0 +1,17 @@
+/// <reference types="@webgpu/types" />
+// Shared 2D-FFT WGSL compute shader (bit-reverse + butterfly + normalize, row & col
+// passes). ONE source for BOTH the widget FFT (js/fft.ts) and the web-app FFT
+// (web/src/utils/webgpu-fft.ts) - they were byte-identical 3120-char copies.
+export const FFT_2D_SHADER = /* wgsl */`
+fn cmul(a: vec2<f32>, b: vec2<f32>) -> vec2<f32> { return vec2<f32>(a.x*b.x-a.y*b.y, a.x*b.y+a.y*b.x); }
+fn twiddle(k: u32, N: u32, inverse: f32) -> vec2<f32> { let angle = inverse * 2.0 * 3.14159265359 * f32(k) / f32(N); return vec2<f32>(cos(angle), sin(angle)); }
+fn bitReverse(x: u32, log2N: u32) -> u32 { var result: u32 = 0u; var val = x; for (var i: u32 = 0u; i < log2N; i = i + 1u) { result = (result << 1u) | (val & 1u); val = val >> 1u; } return result; }
+struct FFT2DParams { width: u32, height: u32, log2Size: u32, stage: u32, inverse: f32, isRowWise: u32, }
+@group(0) @binding(0) var<uniform> params: FFT2DParams;
+@group(0) @binding(1) var<storage, read_write> data: array<vec2<f32>>;
+fn getIndex(row: u32, col: u32) -> u32 { return row * params.width + col; }
+@compute @workgroup_size(16, 16) fn bitReverseRows(@builtin(global_invocation_id) gid: vec3<u32>) { let row = gid.y; let col = gid.x; if (row >= params.height || col >= params.width) { return; } let rev = bitReverse(col, params.log2Size); if (col < rev) { let idx1 = getIndex(row, col); let idx2 = getIndex(row, rev); let temp = data[idx1]; data[idx1] = data[idx2]; data[idx2] = temp; } }
+@compute @workgroup_size(16, 16) fn bitReverseCols(@builtin(global_invocation_id) gid: vec3<u32>) { let row = gid.y; let col = gid.x; if (row >= params.height || col >= params.width) { return; } let rev = bitReverse(row, params.log2Size); if (row < rev) { let idx1 = getIndex(row, col); let idx2 = getIndex(rev, col); let temp = data[idx1]; data[idx1] = data[idx2]; data[idx2] = temp; } }
+@compute @workgroup_size(16, 16) fn butterflyRows(@builtin(global_invocation_id) gid: vec3<u32>) { let row = gid.y; let idx = gid.x; if (row >= params.height || idx >= params.width / 2u) { return; } let stage = params.stage; let halfSize = 1u << stage; let fullSize = halfSize << 1u; let group = idx / halfSize; let pos = idx % halfSize; let col_i = group * fullSize + pos; let col_j = col_i + halfSize; if (col_j >= params.width) { return; } let w = twiddle(pos, fullSize, params.inverse); let i = getIndex(row, col_i); let j = getIndex(row, col_j); let u = data[i]; let t = cmul(w, data[j]); data[i] = u + t; data[j] = u - t; }
+@compute @workgroup_size(16, 16) fn butterflyCols(@builtin(global_invocation_id) gid: vec3<u32>) { let col = gid.x; let idx = gid.y; if (col >= params.width || idx >= params.height / 2u) { return; } let stage = params.stage; let halfSize = 1u << stage; let fullSize = halfSize << 1u; let group = idx / halfSize; let pos = idx % halfSize; let row_i = group * fullSize + pos; let row_j = row_i + halfSize; if (row_j >= params.height) { return; } let w = twiddle(pos, fullSize, params.inverse); let i = getIndex(row_i, col); let j = getIndex(row_j, col); let u = data[i]; let t = cmul(w, data[j]); data[i] = u + t; data[j] = u - t; }
+@compute @workgroup_size(16, 16) fn normalize2D(@builtin(global_invocation_id) gid: vec3<u32>) { let row = gid.y; let col = gid.x; if (row >= params.height || col >= params.width) { return; } let idx = getIndex(row, col); let scale = 1.0 / f32(params.width * params.height); data[idx] = data[idx] * scale; }`;

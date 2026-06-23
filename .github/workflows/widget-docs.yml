@@ -1,0 +1,55 @@
+# Build the quantem.widget Jupyter Book and publish it to GitHub Pages on the
+# bobleesj fork. The runner is CPU-only and never executes the notebooks: they
+# are pre-baked with GPU outputs + widget state and committed, so the offline
+# widgets stay interactive in the published static HTML.
+name: widget docs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - ".github/workflows/widget-docs.yml"
+  workflow_dispatch:
+
+# Origin-only. Builds + DEPLOYS the docs to GitHub Pages from this widget branch
+# (it holds the live docs). The `github-pages` environment allowlist on
+# bobleesj/quantem includes this branch, so the deploy is accepted; `main` is kept
+# for when the work merges. Published at https://bobleesj.github.io/quantem/.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: widget-docs-pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    if: github.repository == 'bobleesj/quantem.widget'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/configure-pages@v5
+      - run: pip install -r docs/requirements.txt
+      - run: jupyter-book build docs
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs/_build/html
+
+  deploy:
+    # Publish from the active widget branch (its docs are the live ones); main kept for when it merges.
+    # The github-pages environment allowlist includes this branch, so the deploy is accepted.
+    if: github.repository == 'bobleesj/quantem.widget' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
