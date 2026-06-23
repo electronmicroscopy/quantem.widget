@@ -27,6 +27,9 @@ dependencies = [
     "pyobjc-framework-Metal>=10.0 ; sys_platform == 'darwin'",
 ]
 
+[project.scripts]
+quantem = "quantem.widget.cli:main"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/quantem"]
 artifacts = ["src/quantem/widget/static/**"]

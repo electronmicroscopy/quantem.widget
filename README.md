@@ -2,8 +2,9 @@
 
 [![TestPyPI](https://img.shields.io/pypi/v/quantem-widget?pypiBaseUrl=https://test.pypi.org&label=TestPyPI)](https://test.pypi.org/project/quantem-widget/)
 
-Interactive WebGPU visualization widgets for 4D-STEM and electron microscopy, in
-Jupyter. Works with NumPy, PyTorch, or CuPy arrays.
+Interactive WebGPU visualization widgets for 4D-STEM and electron microscopy - in
+Jupyter, or straight from the [command line](#command-line). Works with NumPy, PyTorch,
+or CuPy arrays.
 
 > Prototype on [TestPyPI](https://test.pypi.org/project/quantem-widget/). Built on
 > [`quantem`](https://github.com/electronmicroscopy/quantem) core.
@@ -48,6 +49,51 @@ Show4DSTEM(data)
 
 `quantem.widget.io` also provides `survey`, `read_image`, `bin`, `download`, and
 more - see the docs.
+
+## Command line
+
+Point `quantem` at a file or folder and it renders the right viewer - no notebook, no
+Python. Installing the package adds the `quantem` command.
+
+```bash
+quantem show ./anything/                     # auto-detect content, pick the viewer
+quantem show2d scan.png                      # an image            -> Show2D
+quantem show3d ./frames/                     # a folder of frames  -> Show3D scrub
+quantem show4dstem ./masters/                # *_master.h5         -> live Show4DSTEM
+quantem show4dstem a_master.h5 b_master.h5   # several masters     -> one 5D multi-tilt viewer
+quantem show4dstem ./masters/ --html         # 4D-STEM             -> shareable offline HTML
+```
+
+| Command | Input | Output |
+|---|---|---|
+| `quantem show <path>` | anything | auto-detects and dispatches to one of the below |
+| `quantem show2d <img / folder>` | one image, or a folder | Show2D HTML (a folder becomes a gallery) |
+| `quantem show3d <folder>` | a folder of same-size frames | Show3D scrub HTML |
+| `quantem show4dstem <master(s) / folder>` | one or more `*_master.h5` | live Show4DSTEM notebook (or `--html`) |
+
+**Images** save a standalone HTML and open in your browser. **4D-STEM** opens a live,
+kernel-backed notebook by default (full real-time interaction); `--html` instead bakes a
+**self-contained offline viewer that runs entirely on WebGPU** - drag detectors, switch
+BF/ABF/ADF, pan diffraction, all with no kernel. The detector is **mean-binned** (`--bin`,
+default 8) so the packed stack stays small and fits a laptop's browser - you can browse
+data that never fit full resolution. Several masters (a folder, or listed explicitly)
+stack into one 5D viewer with a dataset slider (the multi-tilt case).
+
+Everything lands in `~/Downloads` and opens automatically.
+
+| Option | Effect |
+|---|---|
+| `--bin N` | detector mean-bin factor for 4D-STEM (default 8) |
+| `--html` | 4D-STEM: write the offline-WebGPU HTML instead of a notebook |
+| `--combined` | many masters -> one 5D HTML viewer (served locally) |
+| `--widget {2d,3d,4dstem}` | force a widget instead of auto-detect |
+| `--out PATH` | output file or directory (default `~/Downloads`) |
+| `--no-open` | write the file(s) without launching a browser or Jupyter |
+| `--title`, `-v/--verbose` | page title; verbose progress |
+
+Runs on CUDA, Apple Silicon (MPS), or CPU - the loader picks the backend. On a MacBook,
+`quantem show4dstem ./masters/ --html --bin 8` loads on Metal, bins, and writes a
+double-clickable HTML in seconds.
 
 ## Docs
 
