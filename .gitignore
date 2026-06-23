@@ -28,3 +28,13 @@ cufile.log
 
 # local agent config / plans
 .claude/
+
+# heavy / non-repo content (notebooks are 1.1GB + person/proprietary)
+notebooks/
+img/
+docs/examples/
+
+# test artifacts / debugging
+tests/screenshots/
+tests/_browse_smoke_data/
+tests/_debug_before_click.png
