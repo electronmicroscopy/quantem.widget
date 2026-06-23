@@ -31,7 +31,7 @@ export interface MasterFile {
   size: string;
   size_bytes?: number;
   /** Server-side check: all external _data_*.h5 chunks resolve. False for
-   *  half-copied masters (e.g. caitlyn/Au_TiO2_028 with 35/105 chunks).
+   *  half-copied masters (e.g. operator/sample_028 with 35/105 chunks).
    *  Used by defaultSelection to avoid showing a broken cold-load. */
   loadable?: boolean;
   /** Rich probe of the missing-chunks state for the error banner. */

@@ -1,4 +1,4 @@
-"""4D-STEM compute backends — Phil's MacBook (raw Metal) + universal torch.
+"""4D-STEM compute backends — an Apple Silicon MacBook (raw Metal) + universal torch.
 
 ONE compute layer consumed by BOTH the Jupyter widget (``show4dstem``) AND the
 web Browse (``server/routers/browse.py``). The same masked-sum math is
@@ -8,8 +8,8 @@ RawKernel); this module is the single interface they collapse into.
 Backends conform to the ``ComputeBackend`` protocol (see ``backend.py``):
 
     TorchBackend       — torch tensor on CUDA / MPS / CPU — universal default
-    MetalRawBackend    — ChunkedFrames + MetalVirtualImage — Phil's 19.3 GB
-                         Sample-class no-bin path where torch.MPS overflows.
+    MetalRawBackend    — ChunkedFrames + MetalVirtualImage — a 19.3 GB
+                         large-no-bin-class no-bin path where torch.MPS overflows.
                          Owns fast_vi sidecar, radial cache, multi-dataset
                          proxy lifecycle (see capabilities tuple).
     CudaKernelCompute  — placeholder; web Browse RawKernel will collapse here.

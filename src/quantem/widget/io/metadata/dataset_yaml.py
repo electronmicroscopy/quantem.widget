@@ -10,7 +10,7 @@ Schema (additive, schema_version=1):
     session:
       name: mos2
       date: 2026-03-06
-      operator: pari
+      operator: alice
 
     conditions:                        # NEW: condition labels
       light:    {description: "..."}
@@ -116,7 +116,7 @@ def _files_entry_for(files_block: dict, file_num: int) -> dict | None:
 def _folder_for_master(master_path: Path, session_dir: Path) -> str | None:
     """Return the first-level folder name under session_dir, or None.
 
-    Example: session_dir=``/data/pari/20260306_mos2``, master at
+    Example: session_dir=``/data/alice/20260101_session``, master at
     ``light3/MoS2_007_master.h5`` → returns ``"light3"``. A master sitting
     in the session root returns None.
     """

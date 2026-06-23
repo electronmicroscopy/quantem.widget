@@ -734,7 +734,7 @@ def save(
     ``cp.clip`` to the dtype range, NOT truncation. Max error is exactly half
     a count for any value in range; truncation would double it.
 
-    Performance — Sample 512²×192² float32 bilinear-merged (38.7 GB raw)
+    Performance — a 512²×192² float32 bilinear-merged (38.7 GB raw)
     --------------------------------------------------------------------
     Measured on RTX PRO 6000 Blackwell (workstation), real bilinear-merged data:
 

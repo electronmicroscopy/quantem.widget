@@ -265,7 +265,7 @@ _METAL_SOURCE = (_pathlib.Path(__file__).parent / 'metal' / 'bslz4.msl').read_te
 # ---------------------------------------------------------------------------
 # LZ4 occupancy knob: compressed 8 KB bitshuffle blocks packed per threadgroup
 # (more SIMD groups → better latency hiding on the M5). 8 is the most stable
-# Sample no-bin setting; larger groups can be tested with QT_MPS_LZ4_Y. The
+# no-bin setting; larger groups can be tested with QT_MPS_LZ4_Y. The
 # threadgroup input cache is sized to exactly _LZ4_Y via compile-time token
 # substitution — an oversized fixed buffer hurts occupancy and erases the win.
 _LZ4_Y = int(os.environ.get("QT_MPS_LZ4_Y", "8"))
@@ -527,7 +527,7 @@ class MPSDecompressor:
         ``read_direct_chunk`` loop costs 10000 calls/file (262144 total). The
         data chunks in an Arina file are nearly contiguous, with small HDF5
         metadata gaps every few dozen frames. Reading the whole byte span once
-        cuts the Sample 512² file from 176 syscalls/data-file to 1 while still
+        cuts the a 512² file from 176 syscalls/data-file to 1 while still
         avoiding a Python copy: chunk offsets point into the span, and the Metal
         LZ4 kernel ignores the tiny gaps.
         """
@@ -1699,7 +1699,7 @@ _decompressor_cache: dict[int, MPSDecompressor] = {}
 
 # GPU sub-batch sizing.
 #
-# Each chunk may contain 100K+ frames (e.g. Sample MAPED_2: 100,352 frames
+# Each chunk may contain 100K+ frames (e.g. a 100K-frame dataset: 100,352 frames
 # × 73,728 bytes/frame = 7.4 GB per chunk). Allocating full-chunk _lz4 +
 # _shuf intermediate buffers (2 × 7.4 GB = 14.8 GB) plus the output buffer
 # exceeds 24 GB, causing Metal to swap to SSD and GPU time to spike from
@@ -1992,7 +1992,7 @@ def load_arina(
 # full no-bin stack is 19.3 GB, so a single tensor is impossible — the list is
 # the contract). Bit-identical to h5py ground truth.
 #
-# Performance (Sample device, 262144x192x192 uint16 = 19.3 GB, warm cache,
+# Performance (a 512²×192² logic dataset, 262144x192x192 uint16 = 19.3 GB, warm cache,
 # M5 24 GB): ~2.6 s end-to-end vs ~4.6 s for the serial PyObjC path. The win
 # comes from two structural changes mirrored from the CUDA _load_master_pipelined:
 #   1. disk read ‖ GPU decode — ONE producer thread reads + header-parses chunk

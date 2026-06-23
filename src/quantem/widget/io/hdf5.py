@@ -2559,7 +2559,7 @@ def _load_impl(
             #   2. self-contained master where the data lives inline (rare;
             #      seen in some Velox-exported sets) or where the sibling
             #      files are missing entirely (common for half-copied
-            #      datasets, e.g. Au_TiO2_002_master.h5 in caitlyn's share)
+            #      datasets, e.g. sample_master.h5)
             # If chunk_names exist AND every external link resolves, take the
             # bulk-loader path. Otherwise drop to the inline `entry/data/data`
             # path and raise a clean error if neither layout has any data.

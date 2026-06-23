@@ -13,8 +13,8 @@ arithmetic; only the budget line differs by backend.
 Usage::
 
     from quantem.widget.io import survey
-    survey("~/data/sample")            # prints a table
-    info = survey("~/data/sample", show=False)   # returns the dict
+    survey("~/data/session")            # prints a table
+    info = survey("~/data/session", show=False)   # returns the dict
 """
 from __future__ import annotations
 

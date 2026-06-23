@@ -6,7 +6,7 @@ owns the 4D-STEM data on the Python side and exposes a fixed set of compute
 primitives the widget calls. Backends today:
 
   TorchBackend       — universal: CUDA / MPS-binned / CPU via torch
-  MetalRawBackend    — raw Metal for Phil's 19.3 GB Sample-class no-bin stack
+  MetalRawBackend    — raw Metal for a 19.3 GB large-no-bin-class no-bin stack
                        where torch.MPS hits the >2^31-element buffer limit.
                        Also owns MPS lifecycle: fast_vi (bin2 sidecar), radial
                        cache, multi-dataset proxy.

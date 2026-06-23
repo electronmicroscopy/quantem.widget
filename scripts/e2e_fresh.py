@@ -8,7 +8,7 @@ the documented API on real 4D-STEM data:
     Show4DSTEM(load(master, det_bin=4))            # single
     Show4DSTEM(load([m0, m1, m2], det_bin=4))      # many
 
-Pass the data dir as argv[1] (default host path). Prints ALL PASS on success;
+Pass the data dir as argv[1] (default data path (set WIDGET_E2E_DATA)). Prints ALL PASS on success;
 any failure raises and exits non-zero.
 """
 import glob

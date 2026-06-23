@@ -27,8 +27,8 @@ import anywidget
 import numpy as np
 import torch
 import traitlets
-from quantem.widget._show4dstem_array_utils import to_numpy
-from quantem.widget._show4dstem_state import (
+from quantem.widget.array_utils import to_numpy
+from quantem.widget.state import (
     build_json_header,
     resolve_widget_version,
     save_state_file,
@@ -732,7 +732,7 @@ class Show4DSTEM(anywidget.AnyWidget):
     # Soft guide on the uint8 pack (1 byte/pixel), NOT a hard limit. The true
     # constraints are client RAM (decoded stack + GPU buffer ~= 2x this) and, for
     # the inline path, the browser's ~500 MB JS-string parse cap (gzip keeps the
-    # embedded base64 under that). TESTED on phil: full 512x512x48x48 (604 MB)
+    # embedded base64 under that). TESTED on Apple Silicon: full 512x512x48x48 (604 MB)
     # opens in 3 s; 512x512x96x96 (2.4 GB) inline opens in ~23 s. Bump if the
     # target machine has the RAM; use companion-fetch for the fast path on big data.
     _OFFLINE_BUDGET_BYTES = 2000 * 1024 * 1024
@@ -1173,7 +1173,7 @@ class Show4DSTEM(anywidget.AnyWidget):
         rebuilt when the frame changes. Two families:
 
         * ``TorchBackend`` — torch tensor on CUDA / MPS / CPU (universal default).
-        * ``MetalRawBackend`` — chunk-backed Metal frames (Phil's 19 GB no-bin
+        * ``MetalRawBackend`` — chunk-backed Metal frames (a 19 GB no-bin
           stack where torch.MPS overflows).
 
         ``backend='web'`` does NOT install a third Python backend; it sets
