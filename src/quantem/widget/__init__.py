@@ -23,7 +23,6 @@ from quantem.widget.io import load
 from quantem.widget.dpc import idpc, com
 from quantem.widget.info import device_info
 from quantem.widget.detector import bf, adf, df
-from quantem.widget.dataset import Dataset4dstemGPU
 
 
 def Show4DSTEM(data, **kwargs):
@@ -56,9 +55,6 @@ def Show4DSTEM(data, **kwargs):
     should use ``offline_codec="bslz4"`` plus a ``data_url`` companion directory
     instead of embedding the full stack in the HTML.
     """
-    # Dataset4dstemGPU -> open the raw viewer on its underlying tensor / Metal chunks.
-    if getattr(data, "_qw_dataset", False):
-        data = data._raw
     # MacBook lazy multi-dataset handle -> build the viewer + start background fill.
     from quantem.widget.multidataset_mps import LazyMacbookDatasets
     if isinstance(data, LazyMacbookDatasets):
@@ -68,7 +64,14 @@ def Show4DSTEM(data, **kwargs):
     # pulled from metadata. CUDA/CPU loads fall through to the universal viewer.
     is_loadresult = hasattr(data, "_fields") and "data" in getattr(data, "_fields", ())
     payload = data.data if is_loadresult else data
-    if getattr(payload, "_is_gpu_frames", False) or hasattr(payload, "chunks"):
+    # Route to the raw-Metal viewer only for MPS data: an MPSChunked4DSTEM (has
+    # ``chunks``) is always MPS, and an ``_is_gpu_frames`` stack goes to Metal only
+    # when its frames live on MPS. A CUDA ``_is_gpu_frames`` stack (e.g. a sharded
+    # multi-GPU Dataset5dstem - 7 tilts across 2 cards) is NOT MPS and falls through
+    # to the universal torch viewer, which has its own no-gather frame path.
+    _payload_dev = str(getattr(payload, "device", ""))
+    _is_mps_frames = getattr(payload, "_is_gpu_frames", False) and "mps" in _payload_dev
+    if hasattr(payload, "chunks") or _is_mps_frames:
         # Show4DSTEM_MACBOOK = sampling-aware MPS viewer factory. The factory
         # itself doesn't warn (it's the natural API for Mac users); only direct
         # imports of show_4dstem_mps / load_4dstem_mps warn.
@@ -92,4 +95,4 @@ except PackageNotFoundError:
     # Source-tree imports (e.g. `PYTHONPATH=src pytest`) skip pip install.
     __version__ = "0.0.0+local"
 
-__all__ = ["Show2D", "Show3D", "Show3DSlices", "Show4DSTEM", "load", "idpc", "com", "device_info", "bf", "adf", "df", "Dataset4dstemGPU"]
+__all__ = ["Show2D", "Show3D", "Show3DSlices", "Show4DSTEM", "load", "idpc", "com", "device_info", "bf", "adf", "df"]

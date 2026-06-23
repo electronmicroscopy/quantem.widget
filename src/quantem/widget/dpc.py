@@ -26,6 +26,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from quantem.widget.utils.array import unwrap_core_4dstem
+
 
 @dataclass
 class DPCResult:
@@ -131,9 +133,7 @@ def center_of_mass(data, scan_shape=None, mask=None):
     MPS chunked input -> raw-Metal ``com_u16`` (no-bin, no float cast). Array input
     (numpy/cupy/torch) -> chunked numpy/cupy CoM. Same formula either way.
     """
-    # Dataset4dstemGPU -> compute on its underlying tensor / Metal chunks
-    if getattr(data, "_qw_dataset", False):
-        return center_of_mass(data._raw, scan_shape=data.scan_shape, mask=mask)
+    data = unwrap_core_4dstem(data)
     # Unwrap a LoadResult
     if hasattr(data, "_fields") and "data" in getattr(data, "_fields", ()):
         data = data.data

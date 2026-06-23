@@ -1771,7 +1771,7 @@ def _load_as_dataset5dstem(
         import torch
         # Dataset5dstem is vendored in quantem.live for now (self-contained torch
         # container; migrates to quantem core once #228/#231 land there).
-        from quantem.widget.datastructures import Dataset5dstem
+        from quantem.widget.data import Dataset5dstem
     except ImportError as exc:
         raise ImportError("series_type= needs torch installed.") from exc
 

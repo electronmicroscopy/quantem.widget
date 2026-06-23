@@ -56,43 +56,41 @@ def test_virtual_matches_manual_masked_sum(gold):
                                    err_msg=f"virtual({mode}) != manual masked-sum")
 
 
-def test_dataset_container_roundtrip(gold):
-    """Dataset4dstemGPU.virtual/.dpc == the standalone functions."""
-    from quantem.widget import Dataset4dstemGPU
-    from quantem.widget.detector import virtual
-    from quantem.widget.dpc import dpc
-    ds = Dataset4dstemGPU(gold)
+def test_core_dataset4dstem_roundtrip(gold):
+    """Core Dataset4dstem follows the same detector/DPC paths as raw arrays."""
+    import torch
+    from quantem.core.datastructures import Dataset4dstem
+    from quantem.widget.detector import adf, bf
+    from quantem.widget.dpc import com, dpc, idpc
+
+    ds = Dataset4dstem.from_tensor(torch.as_tensor(gold))
     assert ds.shape == (512, 512, 48, 48)
-    # ds.adf() defaults to the r..2r band == standalone virtual("ADF")
-    np.testing.assert_array_equal(ds.adf(), virtual(gold, "ADF"))
-    # stateless: each call recomputes the same result (no cache, no identity)
-    np.testing.assert_array_equal(ds.bf(), ds.bf())
-    # ds.idpc() == standalone dpc().phase; ds.com().row/col == standalone CoM
+    np.testing.assert_array_equal(adf(ds), adf(gold))
+    np.testing.assert_array_equal(bf(ds), bf(gold))
     ref = dpc(gold, verbose=False)
-    np.testing.assert_array_equal(ds.idpc(), ref.phase)
-    np.testing.assert_array_equal(ds.com().col, ref.com_col)  # horizontal == com_col
-    np.testing.assert_array_equal(ds.com().row, ref.com_row)  # vertical == com_row
+    np.testing.assert_array_equal(idpc(ds), ref.phase)
+    np.testing.assert_array_equal(com(ds).col, ref.com_col)
+    np.testing.assert_array_equal(com(ds).row, ref.com_row)
 
 
 def test_uint8_browse_parity(gold):
     """uint8 browse block == uint16 for screening: bit-identical when counts fit
     255 (the common case), and = clip255(uint16) by construction always. Locks
     the dtype='u8' path so virtual images stay faithful (#757)."""
-    from quantem.widget import Dataset4dstemGPU
+    from quantem.widget.detector import adf, bf, df
+    from quantem.widget.dpc import com
+
     u8 = np.minimum(gold, 255).astype(np.uint8)
     # the uint8 browse representation IS clip-at-255 (linear, so sums stay correct)
     np.testing.assert_array_equal(u8, np.minimum(gold, 255).astype(np.uint8))
-    ds16 = Dataset4dstemGPU(gold)
-    ds8 = Dataset4dstemGPU(u8)
     if int(gold.max()) <= 255:  # lossless regime → virtual images bit-identical
-        for det in ("bf", "adf", "df"):
-            np.testing.assert_array_equal(
-                getattr(ds8, det)(), getattr(ds16, det)(),
-                err_msg=f"uint8 {det} != uint16 (data fits uint8, must be lossless)")
-        np.testing.assert_array_equal(ds8.com().row, ds16.com().row)
-        np.testing.assert_array_equal(ds8.com().col, ds16.com().col)
+        for name, fn in (("bf", bf), ("adf", adf), ("df", df)):
+            np.testing.assert_array_equal(fn(u8), fn(gold),
+                                          err_msg=f"uint8 {name} != uint16 (data fits uint8, must be lossless)")
+        np.testing.assert_array_equal(com(u8).row, com(gold).row)
+        np.testing.assert_array_equal(com(u8).col, com(gold).col)
     else:  # clipped: BF/ADF still faithful for screening (normalized rmse small)
         def nrmse(a, b):
             a = (a - a.min()) / (np.ptp(a) + 1e-9); b = (b - b.min()) / (np.ptp(b) + 1e-9)
             return float(np.sqrt(np.mean((a - b) ** 2)))
-        assert nrmse(ds8.adf(), ds16.adf()) < 0.05, "uint8 ADF diverges from uint16"
+        assert nrmse(adf(u8), adf(gold)) < 0.05, "uint8 ADF diverges from uint16"
