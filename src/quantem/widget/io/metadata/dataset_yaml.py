@@ -1,6 +1,6 @@
 """dataset.yaml schema helpers — single source of truth per session.
 
-A session lives at ``/data/<source>/<YYYYMMDD_sample>/`` and
+A session lives at ``<data-root>/<source>/<YYYYMMDD_sample>/`` and
 owns ONE ``dataset.yaml`` file. Multi-condition sessions (e.g. light
 on/off, dose-series, dark references) encode their tagging inside that
 single yaml — never split into per-condition yamls.
