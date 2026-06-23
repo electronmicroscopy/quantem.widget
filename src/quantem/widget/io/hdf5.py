@@ -1209,6 +1209,13 @@ def _decompress_prepared(
     else:
         _has_mask = False
 
+    # uint8 saturates counts above 255 (cp.minimum below). Count how many pixels
+    # are lost so we can warn the caller: data loss must never be silent. Counter
+    # lives on-device and is summed per batch (no host sync inside the loop), then
+    # read once after the loop.
+    _clip_warn = final_dtype == np.uint8
+    _clipped = cp.zeros((), dtype=cp.uint64) if _clip_warn else None
+
     t_decomp0 = time.perf_counter()
     n_batches = (total_frames + max_batch - 1) // max_batch
     for batch_idx, start in enumerate(range(0, total_frames, max_batch)):
@@ -1367,6 +1374,7 @@ def _decompress_prepared(
                 # browse uint8: clip@255 per batch into the uint8 output, so the
                 # full uint16 block is never materialized (peak = uint8 out + one
                 # batch + scratch). clip keeps it linear -> virtual-image sums correct.
+                _clipped += (binned_batch > 255).sum(dtype=cp.uint64)
                 result[start:end] = cp.minimum(binned_batch, 255).astype(cp.uint8)
             else:
                 result[start:end] = binned_batch.astype(final_dtype)
@@ -1374,12 +1382,23 @@ def _decompress_prepared(
         elif final_dtype == source_dtype:
             result[start:end] = batch_view
         elif final_dtype == np.uint8:
+            _clipped += (batch_view > 255).sum(dtype=cp.uint64)
             result[start:end] = cp.minimum(batch_view, 255).astype(cp.uint8)
         else:
             result[start:end] = batch_view.astype(final_dtype)
 
     cp.cuda.Device().synchronize()
     t_decomp = time.perf_counter() - t_decomp0
+    # Data loss is never silent: warn if uint8 saturated any pixels above 255.
+    if _clip_warn:
+        n_clipped = int(_clipped)
+        if n_clipped:
+            pct = 100.0 * n_clipped / result.size
+            print(
+                f"  Warning: dtype='u8' saturated {n_clipped:,} pixels "
+                f"({pct:.4f}%) above 255 to 255. Pass dtype='u16' or 'auto' "
+                f"to keep full counts."
+            )
 
     # --- Release scratches + compressed; keep only result ------------------
     del lz4_scratch, shuf_scratch
