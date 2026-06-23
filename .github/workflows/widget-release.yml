@@ -62,7 +62,6 @@ jobs:
           PY
 
       - name: Build frontend assets
-        working-directory: widget
         run: |
           npm ci
           npm run typecheck
