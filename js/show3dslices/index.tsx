@@ -712,7 +712,7 @@ const MAX_ZOOM = 30;
 type ZoomState = { zoom: number; panX: number; panY: number };
 const DEFAULT_ZOOM: ZoomState = { zoom: 1, panX: 0, panY: 0 };
 const DEFAULT_FFT_ZOOM: ZoomState = { zoom: 2, panX: 0, panY: 0 };
-const CANVAS_TARGET = 480;
+const CANVAS_TARGET = 340;
 const AXES = ["xy", "oblique"] as const;
 const PANEL_NAMES = ["XY", "Oblique"] as const;
 // Show3DSlices opens in the same orientation as the main top slice panel:
@@ -1081,6 +1081,7 @@ function Show3DSlices() {
     button: number; x: number; y: number; yaw: number; pitch: number; panX: number; panY: number;
   } | null>(null);
   const [webgpuSupported, setWebgpuSupported] = React.useState(true);
+  const [volumeInitError, setVolumeInitError] = React.useState<string>("");
   const [rendererReady, setRendererReady] = React.useState(0);
   const [volumeCanvasSize, setVolumeCanvasSize] = React.useState(initialCanvasTarget);
   React.useEffect(() => {
@@ -1435,13 +1436,20 @@ function Show3DSlices() {
   React.useEffect(() => {
     const canvas = volumeCanvasRef.current;
     if (!canvas) return;
-    if (!VolumeRenderer.isSupported()) { setWebgpuSupported(false); return; }
+    if (!VolumeRenderer.isSupported()) { setVolumeInitError("navigator.gpu missing"); setWebgpuSupported(false); return; }
     let disposed = false;
     VolumeRenderer.create(canvas).then(renderer => {
       if (disposed) { renderer.dispose(); return; }
       volumeRendererRef.current = renderer;
       setRendererReady(n => n + 1);
-    }).catch(() => { setWebgpuSupported(false); });
+    }).catch((err) => {
+      // Surface the REAL reason - a swallowed error here used to show a generic
+      // "WebGPU not available" even when the adapter was fine but the volume
+      // pipeline/3D-texture init failed, making the bug undebuggable.
+      console.error("[Show3DSlices] 3D volume renderer init failed:", err);
+      setVolumeInitError(String(err?.message || err));
+      setWebgpuSupported(false);
+    });
     return () => { disposed = true; volumeRendererRef.current?.dispose(); volumeRendererRef.current = null; };
   }, []);
 
@@ -3926,12 +3934,21 @@ function Show3DSlices() {
           </Stack>
         ) : (
           <Box sx={{
-            ...container.imageBox, width: volumeCanvasSize, height: 80,
-            display: "flex", alignItems: "center", justifyContent: "center",
+            width: 220, py: 1.5, px: 1.5, alignSelf: "flex-start",
+            display: "flex", flexDirection: "column", gap: 0.5,
           }}>
-            <Typography sx={{ ...typography.label, color: tc.textMuted, px: 2, textAlign: "center" }}>
-              WebGPU not available. 3D volume rendering requires a WebGPU capable browser.
+            <Typography sx={{ ...typography.label, color: tc.text, fontWeight: "bold", fontSize: 11 }}>
+              3D volume needs WebGPU
             </Typography>
+            <Typography sx={{ ...typography.label, color: tc.textMuted, fontSize: 11, lineHeight: 1.4 }}>
+              The slice panels work without it. To enable the 3D view, turn on hardware
+              acceleration in your browser (Settings - System) and reload.
+            </Typography>
+            {volumeInitError && (
+              <Typography sx={{ ...typography.label, color: tc.textMuted, fontSize: 9, opacity: 0.7, mt: 0.5, wordBreak: "break-word" }}>
+                {volumeInitError}
+              </Typography>
+            )}
           </Box>
         )}
       </Box>
