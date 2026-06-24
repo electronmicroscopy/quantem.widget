@@ -102,7 +102,7 @@ jobs:
           PY
 
       - name: Build widget distributions
-        run: python -m build . --no-isolation --outdir dist/widget
+        run: python -m build . --wheel --no-isolation --outdir dist/widget
 
       - name: Check widget distributions
         run: python -m twine check dist/widget/*
