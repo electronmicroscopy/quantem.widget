@@ -8,6 +8,20 @@ JupyterLab, VS Code, or Colab.
 from quantem.widget import Show2D, Show3D, Show3DSlices, Show4DSTEM, load
 ```
 
+## Quickest start: no notebook needed
+
+After [installing](install), point the `quantem` command at a file or folder and
+it renders the right viewer in your browser:
+
+```bash
+quantem show2d image.tif         # an image            -> Show2D
+quantem show3d ./frames/         # a folder of frames  -> Show3D scrub
+quantem show4dstem ./masters/    # 4D-STEM master(s)   -> live viewer (or --html)
+```
+
+It saves to `~/Downloads`, opens automatically, and picks the GPU (CUDA / Apple
+Metal) for you. Full details on [the command line](cli) page.
+
 ## Built for two platforms
 
 We serve two audiences first:
@@ -17,8 +31,9 @@ We serve two audiences first:
 
 **CUDA and MPS are the primary backends.** Work stays on the GPU as PyTorch
 tensors; we avoid NumPy on the hot path. CPU is a fallback, not a target - it
-runs through the same PyTorch path, just slower. See [Performance](perf/index)
-for how to go fast on large datasets.
+runs through the same PyTorch path, just slower. For large datasets, bin the
+detector at load (`det_bin`) to cut memory and speed first paint - see
+[load](api/load).
 
 ## Widgets
 
@@ -57,6 +72,6 @@ See [Installation](install) to get started.
 ## Getting help
 
 - **Questions or bugs:** open an issue at
-  [github.com/bobleesj/quantem/issues](https://github.com/bobleesj/quantem/issues).
+  [github.com/bobleesj/quantem.widget/issues](https://github.com/bobleesj/quantem.widget/issues).
 - **Maintained by** the Ophus group. Contributions and feedback are welcome via
   pull request or issue.
