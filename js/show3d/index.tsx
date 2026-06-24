@@ -5441,38 +5441,63 @@ function Show3D() {
     const fftH = fftCropDims?.fftHeight ?? height;
 
     let displayMin: number, displayMax: number;
-    if (fftAuto) {
-      const grid = fftPanelGridRef.current;
-      if (grid) {
-        for (let panel = 0; panel < grid.count; panel++) {
-          const col = panel % grid.cols;
-          const row = Math.floor(panel / grid.cols);
-          const cx = col * grid.panelWidth + Math.floor(grid.panelWidth / 2);
-          const cy = row * grid.panelHeight + Math.floor(grid.panelHeight / 2);
-          const centerIdx = cy * fftW + cx;
-          const neighbors = [
-            mag[Math.max(0, centerIdx - 1)],
-            mag[Math.min(mag.length - 1, centerIdx + 1)],
-            mag[Math.max(0, centerIdx - fftW)],
-            mag[Math.min(mag.length - 1, centerIdx + fftW)],
-          ];
-          mag[centerIdx] = neighbors.reduce((a, b) => a + b, 0) / 4;
+    let displayData: Float32Array;
+    const grid = fftPanelGridRef.current;
+    if (fftAuto && grid) {
+      // Multi-panel FFTs can differ by orders of magnitude (BF/DF vs SSB).
+      // Auto mode should reveal each panel, so normalize every FFT tile before
+      // composing the shared canvas. Manual mode below intentionally stays global.
+      displayData = new Float32Array(mag.length);
+      for (let panel = 0; panel < grid.count; panel++) {
+        const col = panel % grid.cols;
+        const row = Math.floor(panel / grid.cols);
+        const srcX = col * grid.panelWidth;
+        const srcY = row * grid.panelHeight;
+        const panelValues = new Float32Array(grid.panelWidth * grid.panelHeight);
+        for (let y = 0; y < grid.panelHeight; y++) {
+          const srcOffset = (srcY + y) * fftW + srcX;
+          panelValues.set(mag.subarray(srcOffset, srcOffset + grid.panelWidth), y * grid.panelWidth);
         }
-        const range = findDataRange(mag);
-        const clipped = percentileClip(mag, 0, 99.9);
-        displayMin = range.min;
-        displayMax = clipped.vmax > range.min ? clipped.vmax : range.max;
-      } else {
-        ({ min: displayMin, max: displayMax } = autoEnhanceFFT(mag, fftW, fftH));
-      }
-    } else {
-      ({ min: displayMin, max: displayMax } = findDataRange(mag));
-    }
 
-    const displayData = fftLogScale ? applyLogScale(mag) : mag;
-    if (fftLogScale) {
-      displayMin = Math.log1p(displayMin);
-      displayMax = Math.log1p(displayMax);
+        const cx = Math.floor(grid.panelWidth / 2);
+        const cy = Math.floor(grid.panelHeight / 2);
+        const centerIdx = cy * grid.panelWidth + cx;
+        const neighbors = [
+          panelValues[Math.max(0, centerIdx - 1)],
+          panelValues[Math.min(panelValues.length - 1, centerIdx + 1)],
+          panelValues[Math.max(0, centerIdx - grid.panelWidth)],
+          panelValues[Math.min(panelValues.length - 1, centerIdx + grid.panelWidth)],
+        ];
+        panelValues[centerIdx] = neighbors.reduce((a, b) => a + b, 0) / 4;
+
+        const panelDisplay = fftLogScale ? applyLogScale(panelValues) : panelValues;
+        const range = findDataRange(panelDisplay);
+        const clipped = percentileClip(panelDisplay, 0, 99.9);
+        const pMin = range.min;
+        const pMax = clipped.vmax > pMin ? clipped.vmax : range.max;
+        const denom = pMax > pMin ? pMax - pMin : 1;
+        for (let y = 0; y < grid.panelHeight; y++) {
+          const dstOffset = (srcY + y) * fftW + srcX;
+          const srcOffset = y * grid.panelWidth;
+          for (let x = 0; x < grid.panelWidth; x++) {
+            const normalized = (panelDisplay[srcOffset + x] - pMin) / denom;
+            displayData[dstOffset + x] = Math.max(0, Math.min(1, normalized));
+          }
+        }
+      }
+      displayMin = 0;
+      displayMax = 1;
+    } else {
+      if (fftAuto) {
+        ({ min: displayMin, max: displayMax } = autoEnhanceFFT(mag, fftW, fftH));
+      } else {
+        ({ min: displayMin, max: displayMax } = findDataRange(mag));
+      }
+      displayData = fftLogScale ? applyLogScale(mag) : mag;
+      if (fftLogScale) {
+        displayMin = Math.log1p(displayMin);
+        displayMax = Math.log1p(displayMax);
+      }
     }
 
     setFftHistogramData(displayData);
