@@ -1214,7 +1214,6 @@ function Show3D() {
   // FFT
   const [showFft, setShowFft] = useModelState<boolean>("show_fft");
   const [fftWindow, setFftWindow] = useModelState<boolean>("fft_window");
-  const effectiveShowFft = showFft;
 
 
   // Playback buffer (sliding prefetch)
@@ -2425,6 +2424,8 @@ function Show3D() {
   const _nPanelsLocal = Math.max(1, nPanels || 1);
   const _colsLocal = (maxCols && maxCols > 0) ? Math.min(maxCols, _nPanelsLocal) : _nPanelsLocal;
   const _rowsLocal = Math.ceil(_nPanelsLocal / _colsLocal);
+  const fftAllowed = _rowsLocal === 1;
+  const effectiveShowFft = showFft && fftAllowed;
   const sourcePanelWidth = _nPanelsLocal > 1
     ? Math.max(1, panelWidthPx || Math.round(width / _nPanelsLocal))
     : Math.max(1, width);
@@ -7124,12 +7125,11 @@ function Show3D() {
           </Typography>
           {/* Controls row */}
           <Box sx={{ display: "flex", alignItems: "center", gap: "4px", mb: `${SPACING.XS}px`, height: 28 }}>
-            {/* Multi-panel FFT computes each panel independently and lays the
-                spectra out in the same grid, so BF/DF/SSB fringes stay physical. */}
-            <>
+            {/* Multi-panel FFT is available only while the image grid is a single row. */}
+            {fftAllowed && <>
               <Typography sx={{ ...typography.label, fontSize: 10 }}>FFT</Typography>
               <Switch checked={showFft} onChange={(e) => { const on = e.target.checked; setShowFft(on); if (on) setShowKymograph(false); }} size="small" sx={switchStyles.small} slotProps={{ input: { "aria-label": "Toggle FFT power spectrum panel" } }} />
-            </>
+            </>}
             {/* Kymograph toggle: HIDDEN until a profile line exists (not shown-
                 but-disabled). Kymograph is a line-profile sub-feature, so the
                 control only appears once there's a line to build it from. */}
