@@ -10,42 +10,42 @@ from quantem.widget.io import survey, read_image, get_metadata, bin, download
 
 ## Discover & inspect
 
-```{autodoc2-object} quantem.widget.io.survey.survey
-render_plugin = "myst"
+```{eval-rst}
+.. autofunction:: quantem.widget.io.survey.survey
 ```
-```{autodoc2-object} quantem.widget.io.hdf5.discover_masters
-render_plugin = "myst"
+```{eval-rst}
+.. autofunction:: quantem.widget.io.hdf5.discover_masters
 ```
-```{autodoc2-object} quantem.widget.io.hdf5.get_metadata
-render_plugin = "myst"
+```{eval-rst}
+.. autofunction:: quantem.widget.io.hdf5.get_metadata
 ```
 
 ## Images (2D / 3D)
 
-```{autodoc2-object} quantem.widget.io.image.read_image
-render_plugin = "myst"
+```{eval-rst}
+.. autofunction:: quantem.widget.io.image.read_image
 ```
-```{autodoc2-object} quantem.widget.io.image.read_image_stack
-render_plugin = "myst"
+```{eval-rst}
+.. autofunction:: quantem.widget.io.image.read_image_stack
 ```
 
 ## Detector binning
 
-```{autodoc2-object} quantem.widget.io.hdf5.bin
-render_plugin = "myst"
+```{eval-rst}
+.. autofunction:: quantem.widget.io.hdf5.bin
 ```
 
 ## Hugging Face datasets
 
-```{autodoc2-object} quantem.widget.io.hub.list_datasets
-render_plugin = "myst"
+```{eval-rst}
+.. autofunction:: quantem.widget.io.hub.list_datasets
 ```
-```{autodoc2-object} quantem.widget.io.hub.download
-render_plugin = "myst"
+```{eval-rst}
+.. autofunction:: quantem.widget.io.hub.download
 ```
 
 ## Save
 
-```{autodoc2-object} quantem.widget.io.save.save
-render_plugin = "myst"
+```{eval-rst}
+.. autofunction:: quantem.widget.io.save.save
 ```

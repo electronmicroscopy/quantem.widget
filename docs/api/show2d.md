@@ -6,8 +6,10 @@ worked example.
 
 ## Reference
 
-```{autodoc2-object} quantem.widget.show2d.Show2D
-render_plugin = "myst"
+```{eval-rst}
+.. autoclass:: quantem.widget.show2d.Show2D
+   :members:
+   :show-inheritance:
 ```
 
 ## Interactive controls

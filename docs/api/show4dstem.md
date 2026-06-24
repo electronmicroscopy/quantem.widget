@@ -37,8 +37,10 @@ aliases for `backend="web"`.
 
 ## Reference
 
-```{autodoc2-object} quantem.widget.show4dstem.Show4DSTEM
-render_plugin = "myst"
+```{eval-rst}
+.. autoclass:: quantem.widget.show4dstem.Show4DSTEM
+   :members:
+   :show-inheritance:
 ```
 
 ```{note}

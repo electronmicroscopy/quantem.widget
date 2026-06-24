@@ -1,7 +1,5 @@
-# Docs-build dependencies for CI. The runner is CPU-only and does NOT execute
-# notebooks (execute_notebooks: "off" in _config.yml) - the .ipynb files are
-# pre-baked with GPU outputs + widget state and committed. So the build needs
-# only Jupyter Book, never quantem.widget / torch / cupy.
+# Docs-build dependencies. autodoc + napoleon import the package (installed in the
+# build step) to render the NumPy-style docstrings as proper field lists; heavy /
+# native deps (cupy, Mac Metal, lazy io extras) are mocked in _config.yml.
 jupyter-book>=1.0,<2
-# API reference via static analysis (astroid) - never imports the package.
-sphinx-autodoc2>=0.5
+ipywidgets
