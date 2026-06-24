@@ -1049,6 +1049,12 @@ function Show3D() {
   const [offlineFloatStack] = useModelState<DataView>("_offline_float_stack");
   const [offlineMin] = useModelState<number>("_offline_min");
   const [offlineMax] = useModelState<number>("_offline_max");
+  const [offlineMins] = useModelState<number[]>("_offline_mins");
+  const [offlineMaxs] = useModelState<number[]>("_offline_maxs");
+  const [nPanels] = useModelState<number>("n_panels");
+  const [panelWidthPx] = useModelState<number>("panel_width_px");
+  const [sharedPanelSource] = useModelState<boolean>("shared_panel_source");
+  const [separatePanelFrames] = useModelState<boolean>("separate_panel_frames");
   // Reused scratch Float32Array sized to one frame so per-scrub dequant
   // doesn't re-allocate. Indexed by (width, height) since reshape resets it.
   const offlineScratch = React.useRef<Float32Array | null>(null);
@@ -1078,13 +1084,28 @@ function Show3D() {
           offlineScratchKey.current = key;
         }
         const f32 = offlineScratch.current;
-        const scale = (offlineMax - offlineMin) / 255.0;
-        for (let i = 0; i < pixelCount; i++) f32[i] = u8[i] * scale + offlineMin;
+        const panelCount = Math.max(1, nPanels || 1);
+        const panelRanges = panelCount > 1 && offlineMins?.length >= panelCount && offlineMaxs?.length >= panelCount;
+        const panelW = Math.max(1, panelWidthPx || Math.floor(width / panelCount) || width);
+        if (panelRanges) {
+          for (let r = 0; r < height; r++) {
+            const rowOffset = r * width;
+            for (let c = 0; c < width; c++) {
+              const panel = Math.max(0, Math.min(panelCount - 1, Math.floor(c / panelW)));
+              const lo = offlineMins[panel] ?? offlineMin;
+              const hi = offlineMaxs[panel] ?? offlineMax;
+              f32[rowOffset + c] = u8[rowOffset + c] * ((hi - lo) / 255.0) + lo;
+            }
+          }
+        } else {
+          const scale = (offlineMax - offlineMin) / 255.0;
+          for (let i = 0; i < pixelCount; i++) f32[i] = u8[i] * scale + offlineMin;
+        }
         return new DataView(f32.buffer);
       }
     }
     return rawFrameBytes;
-  }, [offline, offlineStack, offlineFloatStack, offlineMin, offlineMax, rawFrameBytes, liveSliceIdx, width, height]);
+  }, [offline, offlineStack, offlineFloatStack, offlineMin, offlineMax, offlineMins, offlineMaxs, rawFrameBytes, liveSliceIdx, width, height, nPanels, panelWidthPx]);
   const getOfflineFrame = (idx: number): Float32Array | null => {
     // Allocate a FRESH Float32Array per call so the GPU upload path's
     // pointer-equality cache can't short-circuit the upload and leave
@@ -1102,8 +1123,23 @@ function Show3D() {
     if (start < 0 || start + pixelCount > offlineStack.byteLength) return null;
     const u8 = new Uint8Array(offlineStack.buffer, offlineStack.byteOffset + start, pixelCount);
     const f32 = new Float32Array(pixelCount);
-    const scale = (offlineMax - offlineMin) / 255.0;
-    for (let i = 0; i < pixelCount; i++) f32[i] = u8[i] * scale + offlineMin;
+    const panelCount = Math.max(1, nPanels || 1);
+    const panelRanges = panelCount > 1 && offlineMins?.length >= panelCount && offlineMaxs?.length >= panelCount;
+    const panelW = Math.max(1, panelWidthPx || Math.floor(width / panelCount) || width);
+    if (panelRanges) {
+      for (let r = 0; r < height; r++) {
+        const rowOffset = r * width;
+        for (let c = 0; c < width; c++) {
+          const panel = Math.max(0, Math.min(panelCount - 1, Math.floor(c / panelW)));
+          const lo = offlineMins[panel] ?? offlineMin;
+          const hi = offlineMaxs[panel] ?? offlineMax;
+          f32[rowOffset + c] = u8[rowOffset + c] * ((hi - lo) / 255.0) + lo;
+        }
+      }
+    } else {
+      const scale = (offlineMax - offlineMin) / 255.0;
+      for (let i = 0; i < pixelCount; i++) f32[i] = u8[i] * scale + offlineMin;
+    }
     return f32;
   };
 
@@ -1124,11 +1160,7 @@ function Show3D() {
   const [dimLabel] = useModelState<string>("dim_label");
   const [dimSampling] = useModelState<number>("dim_sampling");
   const [dimUnit] = useModelState<string>("dim_unit");
-  const [nPanels] = useModelState<number>("n_panels");
   const [panelTitles] = useModelState<string[]>("panel_titles");
-  const [panelWidthPx] = useModelState<number>("panel_width_px");
-  const [sharedPanelSource] = useModelState<boolean>("shared_panel_source");
-  const [separatePanelFrames] = useModelState<boolean>("separate_panel_frames");
   const [panelRealFrames] = useModelState<number[]>("panel_real_frames");
   const [starred, setStarred] = useModelState<number[]>("starred");
   const [hiddenIndices] = useModelState<number[]>("hidden_indices");
@@ -2797,15 +2829,14 @@ function Show3D() {
       const out = new Float32Array(frameSize);
       let count = 0;
       for (let j = start; j <= end; j++) {
-        const offset = j * frameSize;
-        if (offset < 0 || offset + frameSize > offlineStack.byteLength) continue;
-        const u8 = new Uint8Array(offlineStack.buffer, offlineStack.byteOffset + offset, frameSize);
-        for (let k = 0; k < frameSize; k++) out[k] += u8[k];
+        const frame = getOfflineFrame(j);
+        if (!frame || frame.length < frameSize) continue;
+        for (let k = 0; k < frameSize; k++) out[k] += frame[k];
         count++;
       }
       if (count > 0) {
-        const scale = (offlineMax - offlineMin) / (255 * count);
-        for (let k = 0; k < frameSize; k++) out[k] = out[k] * scale + offlineMin;
+        const inv = 1 / count;
+        for (let k = 0; k < frameSize; k++) out[k] *= inv;
         return out;
       }
     }
