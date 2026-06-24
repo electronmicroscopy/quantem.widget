@@ -354,7 +354,7 @@ function InfoTooltip({ text, theme = "dark" }: { text: React.ReactNode; theme?: 
     <Tooltip
       title={content} arrow placement="bottom"
       componentsProps={{
-        tooltip: { sx: { bgcolor: isDark ? "#333" : "#fff", color: isDark ? "#ddd" : "#333", border: `1px solid ${isDark ? "#555" : "#ccc"}`, maxWidth: 280, p: 1 } },
+        tooltip: { sx: { bgcolor: isDark ? "#333" : "#fff", color: isDark ? "#ddd" : "#333", border: `1px solid ${isDark ? "#555" : "#ccc"}`, maxWidth: 360, p: 1 } },
         arrow: { sx: { color: isDark ? "#333" : "#fff", "&::before": { border: `1px solid ${isDark ? "#555" : "#ccc"}` } } },
       }}
     >
@@ -7228,6 +7228,9 @@ function Show3D() {
             <InfoTooltip text={<Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
               <Typography sx={{ fontSize: 11, fontWeight: "bold" }}>Controls</Typography>
               <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>FFT: Show power spectrum (Fourier transform) alongside image.</Typography>
+              <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>
+                FFT d-spacing uses the provided real-space sampling: Δk = 1 / (N × pixel_size), |g| = √(kx² + ky²), d = 1 / |g|. Current pixel_size: {pixelSize > 0 ? `${formatNumber(pixelSize)} ${unitSymbol(pixelUnit || "px")}/px` : "not set, so only pixel distances are shown"}.
+              </Typography>
               <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>Profile: Click two points on image to draw a line intensity profile.</Typography>
               <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>Lens: Magnifier inset that follows the cursor.</Typography>
               <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>Scale: Linear or logarithmic intensity mapping.</Typography>
