@@ -1180,6 +1180,14 @@ function Show3D() {
   const manualImageRangeBeforeAutoRef = React.useRef<{ min: number; max: number } | null>(null);
   const [vminPerPanel, setVminPerPanel] = useModelState<(number | null)[]>("vmin_per_panel");
   const [vmaxPerPanel, setVmaxPerPanel] = useModelState<(number | null)[]>("vmax_per_panel");
+  const vminPerPanelLiveRef = React.useRef<(number | null)[]>(vminPerPanel);
+  const vmaxPerPanelLiveRef = React.useRef<(number | null)[]>(vmaxPerPanel);
+  React.useEffect(() => {
+    vminPerPanelLiveRef.current = vminPerPanel;
+  }, [vminPerPanel]);
+  React.useEffect(() => {
+    vmaxPerPanelLiveRef.current = vmaxPerPanel;
+  }, [vmaxPerPanel]);
   const [dataMin] = useModelState<number>("data_min");
   const [dataMax] = useModelState<number>("data_max");
   const [autoVmins] = useModelState<number[]>("auto_vmins");
@@ -1978,15 +1986,16 @@ function Show3D() {
   const updatePanelState = (panel: number, patch: Partial<PanelState>) => {
     setPanelStates(prev => prev.map((state, i) => i === panel ? { ...state, ...patch } : state));
   };
-  const setPanelListValue = <T,>(values: T[], setter: (next: T[]) => void, panel: number, value: T, fallback: T) => {
-    const n = Math.max(1, nPanels || 1);
-    const next = Array.from({ length: n }, (_, i) => values[i] ?? fallback);
-    next[panel] = value;
-    setter(next);
-  };
   const setPanelRangeValues = (panel: number, minValue: number | null, maxValue: number | null) => {
-    setPanelListValue<number | null>(vminPerPanel, setVminPerPanel, panel, minValue, null);
-    setPanelListValue<number | null>(vmaxPerPanel, setVmaxPerPanel, panel, maxValue, null);
+    const n = Math.max(1, nPanels || 1);
+    const nextMins = Array.from({ length: n }, (_, i) => vminPerPanelLiveRef.current[i] ?? null);
+    const nextMaxs = Array.from({ length: n }, (_, i) => vmaxPerPanelLiveRef.current[i] ?? null);
+    nextMins[panel] = minValue;
+    nextMaxs[panel] = maxValue;
+    vminPerPanelLiveRef.current = nextMins;
+    vmaxPerPanelLiveRef.current = nextMaxs;
+    setVminPerPanel(nextMins);
+    setVmaxPerPanel(nextMaxs);
   };
   const extractPanelSlice = (
     raw: Float32Array,
@@ -2023,10 +2032,10 @@ function Show3D() {
     const effectiveRange = (perPanelHistogramEnabled && pdr && pdr.max > pdr.min)
       ? pdr
       : range;
-    const useStoredManual = !perPanelHistogramEnabled;
+    const useStoredManual = !autoContrast;
     if (useStoredManual) {
-      const storedMin = vminPerPanel[panel];
-      const storedMax = vmaxPerPanel[panel];
+      const storedMin = vminPerPanelLiveRef.current[panel];
+      const storedMax = vmaxPerPanelLiveRef.current[panel];
       if (storedMin != null || storedMax != null) {
         const lo = storedMin ?? effectiveRange.min;
         const hi = storedMax ?? effectiveRange.max;
@@ -2059,7 +2068,7 @@ function Show3D() {
     panel: number,
     state: PanelState,
     stackBounds: { min: number; max: number },
-  ): Pick<PanelState, "imageVminPct" | "imageVmaxPct"> | null => {
+  ): (Pick<PanelState, "imageVminPct" | "imageVmaxPct"> & { vmin: number; vmax: number }) | null => {
     const panelRaw = panelHistogramData[panel];
     if (!panelRaw || panelRaw.length === 0) return null;
     // panelHistogramData is already in the active display domain; in log mode
@@ -2078,22 +2087,33 @@ function Show3D() {
       clipped = { vmin: range.min, vmax: range.max };
     }
     return {
+      vmin: clipped.vmin,
+      vmax: Math.max(clipped.vmin, clipped.vmax),
       imageVminPct: valueToPct(clipped.vmin, range.min, range.max, state.imageVminPct),
       imageVmaxPct: valueToPct(clipped.vmax, range.min, range.max, state.imageVmaxPct),
     };
   };
 
-  const freezePanelAutoClipPcts = () => {
+  const freezePanelAutoClips = () => {
     const stackBounds = resolveDisplayBounds(dataMin, dataMax, traitVmin, traitVmax, logScale);
     if (stackBounds.max <= stackBounds.min) return;
-    setPanelStates(prev => {
-      const n = Math.max(1, nPanels || 1);
-      return Array.from({ length: n }, (_, i) => {
-        const state = prev[i] || initialState;
-        const clip = panelAutoClipPcts(i, state, stackBounds);
-        return clip ? { ...state, ...clip } : state;
-      });
+    const n = Math.max(1, nPanels || 1);
+    const liveStates = panelStatesLiveRef.current.length === n ? panelStatesLiveRef.current : panelStates;
+    const nextMins = Array.from({ length: n }, (_, i) => vminPerPanel[i] ?? null);
+    const nextMaxs = Array.from({ length: n }, (_, i) => vmaxPerPanel[i] ?? null);
+    const nextStates = Array.from({ length: n }, (_, i) => {
+      const state = liveStates[i] || initialState;
+      const clip = panelAutoClipPcts(i, state, stackBounds);
+      if (!clip) return state;
+      nextMins[i] = clip.vmin;
+      nextMaxs[i] = clip.vmax;
+      return { ...state, imageVminPct: clip.imageVminPct, imageVmaxPct: clip.imageVmaxPct };
     });
+    vminPerPanelLiveRef.current = nextMins;
+    vmaxPerPanelLiveRef.current = nextMaxs;
+    setPanelStates(nextStates);
+    setVminPerPanel(nextMins);
+    setVmaxPerPanel(nextMaxs);
   };
 
   const resolvePanelRenderRange = (
@@ -2119,20 +2139,23 @@ function Show3D() {
     setAutoContrast(on);
     if (perPanelHistogramEnabled) {
       if (on) {
+        const n = Math.max(1, nPanels || 1);
+        const empty = Array.from({ length: n }, () => null);
+        vminPerPanelLiveRef.current = empty;
+        vmaxPerPanelLiveRef.current = empty;
+        setVminPerPanel(empty);
+        setVmaxPerPanel(empty);
         // Per-panel snap fires automatically via the [autoContrast,
         // panelHistogramData, ...] useEffect below. Calling the legacy
         // stack-wide snap here would race-write 0/100 to every panel
         // before the effect overrode with the correct per-panel clip,
         // causing a 1-frame flash to washed contrast on every toggle.
       } else {
-        // OFF freezes the currently-rendered per-panel auto clip as slider
-        // percentages in each panel's own data range. Scrubbing can then keep
-        // the same manual window shape without carrying BF/DF/SSB absolute
-        // values across mixed-unit panels.
-        freezePanelAutoClipPcts();
-        const n = Math.max(1, nPanels || 1);
-        setVminPerPanel(Array.from({ length: n }, () => null));
-        setVmaxPerPanel(Array.from({ length: n }, () => null));
+        // OFF freezes the currently-rendered per-panel auto clip as absolute
+        // values per panel. Scrubbing then reuses the same BF/DF/SSB windows
+        // instead of re-decoding fixed percentages against each new frame's
+        // changing min/max, which caused visible brightness jitter.
+        freezePanelAutoClips();
         manualImageRangeBeforeAutoRef.current = null;
       }
       return;
@@ -4026,11 +4049,36 @@ function Show3D() {
         // vs SSB radians) span many orders of magnitude — using stack
         // range squashes tight panels to pct ≈ 0.
         const clip = panelAutoClipPcts(i, state, stackBounds);
-        return clip ? { ...state, ...clip } : state;
+        return clip ? { ...state, imageVminPct: clip.imageVminPct, imageVmaxPct: clip.imageVmaxPct } : state;
       });
       return out;
     });
   }, [perPanelHistogramEnabled, autoContrast, panelHistogramData, panelDataRanges, dataMin, dataMax, traitVmin, traitVmax, logScale, percentileLow, percentileHigh]);
+
+  React.useEffect(() => {
+    if (!perPanelHistogramEnabled || autoContrast || panelDataRanges.length === 0) return;
+    setPanelStates(prev => {
+      let changed = false;
+      const out = prev.map((state, i) => {
+        const storedMin = vminPerPanel[i];
+        const storedMax = vmaxPerPanel[i];
+        if (storedMin == null && storedMax == null) return state;
+        const panelRange = panelDataRanges[i];
+        const range = (panelRange && panelRange.max > panelRange.min)
+          ? panelRange
+          : resolveDisplayBounds(dataMin, dataMax, traitVmin, traitVmax, logScale);
+        if (range.max <= range.min) return state;
+        const lo = storedMin ?? range.min;
+        const hi = Math.max(lo, storedMax ?? range.max);
+        const nextMinPct = valueToPct(lo, range.min, range.max, state.imageVminPct);
+        const nextMaxPct = valueToPct(hi, range.min, range.max, state.imageVmaxPct);
+        if (Math.abs(nextMinPct - state.imageVminPct) < 0.01 && Math.abs(nextMaxPct - state.imageVmaxPct) < 0.01) return state;
+        changed = true;
+        return { ...state, imageVminPct: nextMinPct, imageVmaxPct: nextMaxPct };
+      });
+      return changed ? out : prev;
+    });
+  }, [perPanelHistogramEnabled, autoContrast, panelDataRanges, vminPerPanel, vmaxPerPanel, dataMin, dataMax, traitVmin, traitVmax, logScale]);
 
   React.useEffect(() => {
     if (!effectiveRoiActive || roiItems.length === 0 || !showRoiResizeHint) return;
