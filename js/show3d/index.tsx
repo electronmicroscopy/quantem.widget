@@ -565,7 +565,7 @@ function drawROI(
   }
 }
 
-import { WebGPUFFT, getWebGPUFFT, fft2d, fftshift, computeMagnitude, autoEnhanceFFT, nextPow2, applyHannWindow2D } from "../fft";
+import { WebGPUFFT, getWebGPUFFT, fft2dAsync, fftshift, computeMagnitude, autoEnhanceFFT, nextPow2, applyHannWindow2D } from "../fft";
 
 const FFT_SNAP_RADIUS = 5;
 
@@ -2359,6 +2359,7 @@ function Show3D() {
 
   // ROI FFT state: when ROI + FFT are both active, compute FFT of cropped ROI region
   const [fftCropDims, setFftCropDims] = React.useState<{ cropWidth: number; cropHeight: number; fftWidth: number; fftHeight: number } | null>(null);
+  const fftPanelGridRef = React.useRef<{ panelWidth: number; panelHeight: number; cols: number; rows: number; count: number } | null>(null);
 
   // FFT zoom/pan state
   const [fftZoom, setFftZoom] = React.useState(1);
@@ -5224,7 +5225,82 @@ function Show3D() {
     let cancelled = false;
 
     const doCompute = async () => {
+      const fftStartMs = performance.now();
       const data = rawFrameDataRef.current!;
+      const panelCount = Math.max(1, nPanels || 1);
+      const multiPanelFft = panelCount > 1 && !roiFftActive;
+
+      if (multiPanelFft) {
+        const panelW = Math.max(1, sourcePanelWidth);
+        const panelH = height;
+        const fftW = nextPow2(panelW);
+        const fftH = nextPow2(panelH);
+        const panels: { real: Float32Array; imag: Float32Array }[] = [];
+        for (let panel = 0; panel < panelCount; panel++) {
+          const panelData = extractPanelSlice(data, panel, false);
+          if (!panelData || panelData.length === 0) continue;
+          const real = new Float32Array(fftW * fftH);
+          for (let y = 0; y < panelH; y++) {
+            real.set(panelData.subarray(y * panelW, y * panelW + panelW), y * fftW);
+          }
+          if (fftWindow) applyHannWindow2D(real, fftW, fftH);
+          panels.push({ real, imag: new Float32Array(real.length) });
+        }
+        if (panels.length === 0) return;
+
+        let results: { real: Float32Array; imag: Float32Array }[];
+        let fftSource = "worker-batch";
+        if (gpuReady && gpuFFTRef.current && panels.length > 1) {
+          results = await gpuFFTRef.current.fft2DBatch(panels, fftW, fftH);
+          fftSource = "webgpu-batch";
+        } else if (gpuReady && gpuFFTRef.current) {
+          results = [await gpuFFTRef.current.fft2D(panels[0].real, panels[0].imag, fftW, fftH, false)];
+          fftSource = "webgpu";
+        } else {
+          results = (await Promise.all(panels.map(({ real, imag }) => fft2dAsync(real, imag, fftW, fftH, false))))
+            .map(({ real, imag }) => ({ real, imag }));
+        }
+        if (cancelled) return;
+
+        const cols = (maxCols && maxCols > 0) ? Math.min(maxCols, panels.length) : panels.length;
+        const rows = Math.ceil(panels.length / cols);
+        const gridW = cols * fftW;
+        const gridH = rows * fftH;
+        const gridMag = new Float32Array(gridW * gridH);
+        const resultsAlreadyShifted = fftSource === "worker-batch";
+        for (let panel = 0; panel < results.length; panel++) {
+          const { real, imag } = results[panel];
+          if (!resultsAlreadyShifted) {
+            fftshift(real, fftW, fftH);
+            fftshift(imag, fftW, fftH);
+          }
+          const mag = computeMagnitude(real, imag);
+          const col = panel % cols;
+          const row = Math.floor(panel / cols);
+          const dstX = col * fftW;
+          const dstY = row * fftH;
+          for (let y = 0; y < fftH; y++) {
+            gridMag.set(mag.subarray(y * fftW, y * fftW + fftW), (dstY + y) * gridW + dstX);
+          }
+        }
+
+        fftMagRef.current = gridMag;
+        fftMagCacheRef.current = gridMag;
+        fftPanelGridRef.current = { panelWidth: fftW, panelHeight: fftH, cols, rows, count: panels.length };
+        setFftCropDims({ cropWidth: panelW, cropHeight: panelH, fftWidth: gridW, fftHeight: gridH });
+        setFftMagVersion(v => v + 1);
+        const dbg = show3dPerfDebug();
+        if (dbg) {
+          dbg.lastFftMs = Number((performance.now() - fftStartMs).toFixed(2));
+          dbg.lastFftSource = fftSource;
+          dbg.lastFftPanels = panels.length;
+          dbg.lastFftSize = `${fftW}x${fftH}`;
+          dbg.lastFftGrid = `${gridW}x${gridH}`;
+        }
+        return;
+      }
+
+      fftPanelGridRef.current = null;
       let fftW = width;
       let fftH = height;
       let inputData = data;
@@ -5273,21 +5349,26 @@ function Show3D() {
 
       let real: Float32Array, imag: Float32Array;
 
+      let fftSource = "cpu";
       if (gpuReady && gpuFFTRef.current) {
         const gpuReal = inputData.slice();
         const gpuImag = new Float32Array(inputData.length);
         const result = await gpuFFTRef.current.fft2D(gpuReal, gpuImag, fftW, fftH, false);
         real = result.real;
         imag = result.imag;
+        fftSource = "webgpu";
       } else {
-        real = inputData.slice();
-        imag = new Float32Array(inputData.length);
-        fft2d(real, imag, fftW, fftH, false);
+        const result = await fft2dAsync(inputData.slice(), new Float32Array(inputData.length), fftW, fftH, false);
+        real = result.real;
+        imag = result.imag;
+        fftSource = "worker";
       }
 
       if (cancelled) return;
-      fftshift(real, fftW, fftH);
-      fftshift(imag, fftW, fftH);
+      if (fftSource !== "worker") {
+        fftshift(real, fftW, fftH);
+        fftshift(imag, fftW, fftH);
+      }
 
       fftMagRef.current = computeMagnitude(real, imag);
       fftMagCacheRef.current = fftMagRef.current;
@@ -5300,12 +5381,20 @@ function Show3D() {
         setFftCropDims(null);
       }
       setFftMagVersion(v => v + 1);
+      const dbg = show3dPerfDebug();
+      if (dbg) {
+        dbg.lastFftMs = Number((performance.now() - fftStartMs).toFixed(2));
+        dbg.lastFftSource = fftSource;
+        dbg.lastFftPanels = 1;
+        dbg.lastFftSize = `${fftW}x${fftH}`;
+        dbg.lastFftGrid = null;
+      }
     };
 
     doCompute();
 
     return () => { cancelled = true; };
-  }, [effectiveShowFft, frameBytes, displaySliceIdx, width, height, gpuReady, roiFftActive, roiList, roiSelectedIdx, fftWindow]);
+  }, [effectiveShowFft, frameBytes, displaySliceIdx, width, height, gpuReady, roiFftActive, roiList, roiSelectedIdx, fftWindow, nPanels, sourcePanelWidth, maxCols, extractPanelSlice]);
 
   // Clear FFT measurement when ROI FFT state changes
   React.useEffect(() => { setFftClickInfo(null); }, [roiFftActive, roiSelectedIdx]);
@@ -5321,7 +5410,29 @@ function Show3D() {
 
     let displayMin: number, displayMax: number;
     if (fftAuto) {
-      ({ min: displayMin, max: displayMax } = autoEnhanceFFT(mag, fftW, fftH));
+      const grid = fftPanelGridRef.current;
+      if (grid) {
+        for (let panel = 0; panel < grid.count; panel++) {
+          const col = panel % grid.cols;
+          const row = Math.floor(panel / grid.cols);
+          const cx = col * grid.panelWidth + Math.floor(grid.panelWidth / 2);
+          const cy = row * grid.panelHeight + Math.floor(grid.panelHeight / 2);
+          const centerIdx = cy * fftW + cx;
+          const neighbors = [
+            mag[Math.max(0, centerIdx - 1)],
+            mag[Math.min(mag.length - 1, centerIdx + 1)],
+            mag[Math.max(0, centerIdx - fftW)],
+            mag[Math.min(mag.length - 1, centerIdx + fftW)],
+          ];
+          mag[centerIdx] = neighbors.reduce((a, b) => a + b, 0) / 4;
+        }
+        const range = findDataRange(mag);
+        const clipped = percentileClip(mag, 0, 99.9);
+        displayMin = range.min;
+        displayMax = clipped.vmax > range.min ? clipped.vmax : range.max;
+      } else {
+        ({ min: displayMin, max: displayMax } = autoEnhanceFFT(mag, fftW, fftH));
+      }
     } else {
       ({ min: displayMin, max: displayMax } = findDataRange(mag));
     }
@@ -7018,13 +7129,12 @@ function Show3D() {
           </Typography>
           {/* Controls row */}
           <Box sx={{ display: "flex", alignItems: "center", gap: "4px", mb: `${SPACING.XS}px`, height: 28 }}>
-            {/* FFT toggle hidden in multi-panel — FFT compute across multiple
-                concatenated panels doesn't represent a physical quantity any
-                microscope user cares about. Single-panel only. */}
-            {(nPanels || 1) === 1 && <>
+            {/* Multi-panel FFT computes each panel independently and lays the
+                spectra out in the same grid, so BF/DF/SSB fringes stay physical. */}
+            <>
               <Typography sx={{ ...typography.label, fontSize: 10 }}>FFT</Typography>
               <Switch checked={showFft} onChange={(e) => { const on = e.target.checked; setShowFft(on); if (on) setShowKymograph(false); }} size="small" sx={switchStyles.small} slotProps={{ input: { "aria-label": "Toggle FFT power spectrum panel" } }} />
-            </>}
+            </>
             {/* Kymograph toggle: HIDDEN until a profile line exists (not shown-
                 but-disabled). Kymograph is a line-profile sub-feature, so the
                 control only appears once there's a line to build it from. */}
