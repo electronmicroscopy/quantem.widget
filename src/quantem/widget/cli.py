@@ -228,14 +228,25 @@ def _launch_jupyter(args: argparse.Namespace) -> int:
         f'ssh -fN -L {port}:127.0.0.1:{port} {target} && '
         f'(open "{url}" 2>/dev/null || xdg-open "{url}" 2>/dev/null || echo "{url}")'
     )
-    print(f"starting JupyterLab on this box (port {port}).")
+    # Stand out from the JupyterLab log spam that follows. ANSI bold + bright
+    # cyan reads on every common terminal (Apple Terminal, iTerm, VS Code's
+    # integrated terminal, Linux gnome-terminal). The box border anchors the
+    # eye even when terminal width wraps the one-liner.
+    B = "\033[1m"; CY = "\033[1;36m"; YL = "\033[1;33m"; RST = "\033[0m"
+    bar = "#" * 72
     print()
-    print("paste this ONE line on your laptop — opens the tunnel + launches the browser:")
-    print(f"  {one_line}")
+    print(f"{YL}{bar}{RST}")
+    print(f"{YL}### COPY-PASTE THIS ONE LINE INTO YOUR LAPTOP TERMINAL ###{RST}")
+    print(f"{YL}{bar}{RST}")
     print()
-    print(f"  (URL alone, if needed):  {url}")
-    print(f"  (tunnel alone, if needed): ssh -L {port}:127.0.0.1:{port} {target}")
-    print("  Ctrl-C here to stop JupyterLab.")
+    print(f"{CY}{one_line}{RST}")
+    print()
+    print(f"{YL}{bar}{RST}")
+    print()
+    print(f"  JupyterLab running on this box, port {port}. Ctrl-C here to stop.")
+    print(f"  (URL alone): {url}")
+    print(f"  (tunnel alone): ssh -L {port}:127.0.0.1:{port} {target}")
+    print()
     # Flush now: the foreground server below never returns, so block-buffered stdout
     # (when redirected to a file/pipe, not a TTY) would otherwise hide the URL forever.
     sys.stdout.flush()
