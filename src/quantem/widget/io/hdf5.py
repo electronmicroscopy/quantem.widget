@@ -147,15 +147,13 @@ class LoadResult(NamedTuple):
 
     Examples
     --------
-    >>> data, meta = load('gold_master.h5')
-    >>> data.shape
-    (512, 512, 192, 192)
-    >>> meta['scan_shape']
-    (512, 512)
-    >>> meta['dwell_time_us']
-    99.6
-    >>> meta['detector_name']
-    'Dectris ARINA Si'
+    ```python
+    data, meta = load("scan_master.h5")
+    data.shape             # (512, 512, 192, 192)
+    meta["scan_shape"]     # (512, 512)
+    meta["dwell_time_us"]  # 99.6
+    meta["detector_name"]  # detector model string
+    ```
     """
 
     data: cp.ndarray
@@ -235,16 +233,14 @@ def get_metadata(filepath: str) -> dict:
 
     Examples
     --------
-    >>> m = get_metadata('gold_master.h5')
-    >>> m['scan_shape']
-    (512, 512)
-    >>> m['dwell_time_us']
-    49.8
-    >>> m['detector_name']
-    'Dectris ARINA Si'
-    >>> # Raw path also available for anything not in the derived layer
-    >>> m['entry/instrument/detector/count_time']
-    9.95e-05
+    ```python
+    m = get_metadata("scan_master.h5")
+    m["scan_shape"]       # (512, 512)
+    m["dwell_time_us"]    # 49.8
+    m["detector_name"]    # detector model string
+    # any raw HDF5 scalar is also available by its full path:
+    m["entry/instrument/detector/count_time"]   # 9.95e-05
+    ```
     """
     metadata: dict = {}
     with h5py.File(filepath, "r") as f:
@@ -3006,15 +3002,17 @@ def bin(
 
     Examples
     --------
-    >>> # Bin detector (k_row, k_col)
-    >>> data_4d = data.reshape(256, 256, 192, 192)  # (scan_row, scan_col, k_row, k_col)
-    >>> binned = bin(data_4d, factor=2, axes='detector')  # (256, 256, 96, 96)
+    ```python
+    # bin the detector (k_row, k_col)
+    data_4d = data.reshape(256, 256, 192, 192)         # (scan_row, scan_col, k_row, k_col)
+    binned = bin(data_4d, factor=2, axes="detector")   # (256, 256, 96, 96)
 
-    >>> # Bin scan (scan_row, scan_col)
-    >>> binned = bin(data_4d, factor=2, axes='scan')  # (128, 128, 192, 192)
+    # bin the scan (scan_row, scan_col)
+    binned = bin(data_4d, factor=2, axes="scan")       # (128, 128, 192, 192)
 
-    >>> # 3D data (flattened scan) - bins detector by default
-    >>> binned = bin(data_3d, factor=2)  # (65536, 96, 96)
+    # 3D data (flattened scan) - bins the detector by default
+    binned = bin(data_3d, factor=2)                    # (65536, 96, 96)
+    ```
     """
     if reduction not in ("sum", "mean"):
         raise ValueError(f"reduction must be 'sum' or 'mean', got '{reduction}'")
