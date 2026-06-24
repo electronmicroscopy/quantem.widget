@@ -10,6 +10,8 @@ quantem show3d ./frames/                       # a folder of frames -> Show3D sc
 quantem show4dstem ./masters/                  # *_master.h5        -> live Show4DSTEM
 quantem show4dstem a_master.h5 b_master.h5     # several masters    -> one 5D multi-tilt viewer
 quantem show4dstem ./masters/ --html           # 4D-STEM            -> shareable offline HTML
+quantem html tutorial.ipynb                    # a notebook         -> standalone offline HTML
+quantem jupyter --host buffle nb.ipynb         # run on a GPU box   -> JupyterLab in your browser
 ```
 
 ## Subcommands
@@ -20,6 +22,13 @@ quantem show4dstem ./masters/ --html           # 4D-STEM            -> shareable
 | `quantem show2d <image / folder>` | one image, or a folder | a Show2D HTML (a folder becomes a gallery) |
 | `quantem show3d <folder>` | a folder of same-size frames | a Show3D scrub HTML |
 | `quantem show4dstem <master(s) / folder>` | one or more `*_master.h5` | a live Show4DSTEM notebook (or `--html`) |
+| `quantem html <notebook.ipynb>` | a notebook you wrote | runs it, bakes outputs into one offline HTML |
+| `quantem jupyter --host <box> [nb]` | an SSH-reachable GPU box | JupyterLab on the box, opened in your local browser via an SSH tunnel |
+
+`quantem jupyter` is the **run-on-a-GPU-box-from-your-laptop** workflow: kernel + GPU stay
+on the compute box, the UI is your browser, every widget works over one SSH tunnel. Full
+setup (SSH config, one-time checks, troubleshooting) is in
+[Remote JupyterLab](remote-jupyter.md).
 
 **Images** save a standalone HTML and open in your browser. **4D-STEM** opens a
 live, kernel-backed notebook by default (full real-time interaction); `--html`
