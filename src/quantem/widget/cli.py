@@ -223,6 +223,9 @@ def _launch_jupyter(args: argparse.Namespace) -> int:
     print(f"  {url}")
     print(f"  if your laptop can't reach it, tunnel first:  ssh -L {port}:127.0.0.1:{port} {target}")
     print("  Ctrl-C to stop JupyterLab.")
+    # Flush now: the foreground server below never returns, so block-buffered stdout
+    # (when redirected to a file/pipe, not a TTY) would otherwise hide the URL forever.
+    sys.stdout.flush()
     if not args.no_open:
         # If a browser is reachable (rare on a headless box), open it after the server
         # has had a moment to come up. The foreground process below keeps it alive.
