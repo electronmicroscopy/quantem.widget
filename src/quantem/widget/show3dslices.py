@@ -127,11 +127,14 @@ class Show3DSlices(anywidget.AnyWidget):
     cmap : str, default "plasma"
         Colormap name. One of the project's valid colormaps (``"inferno"``,
         ``"viridis"``, ``"magma"``, ``"gray"``, ``"plasma"``, ...).
-    pixel_size : float or sequence of 3 floats, optional
-        Voxel sampling in angstroms. Pass a scalar for isotropic data, or a
-        3-tuple `(pz, py, px)` for anisotropic data (e.g. multislice ptycho
-        with z-thickness >> xy-sampling). Per-axis values flow to JS via the
-        `pixel_size_axes` trait for correct scale bars on each panel.
+    sampling : float or sequence of 3 floats, optional
+        Voxel sampling for the scale bars. Pass a scalar for isotropic data, or a
+        3-tuple `(pz, py, px)` for anisotropic data (e.g. multislice ptycho with
+        z-thickness >> xy-sampling). Pairs with ``units``; ``nm`` is converted to
+        Å. Matches the quantem ``Dataset`` / ``Show2D`` / ``Show4DSTEM`` convention.
+    units : str or sequence of str, optional
+        Unit(s) for ``sampling`` (e.g. ``"A"``, ``"nm"``). One value applies to
+        all axes; a sequence sets each axis.
     config : mapping or path-like, optional
         Parsed QuantEM reconstruction ``config.json`` data, or a path to it.
         This is only used for the keys listed in "Config Contract" above.
@@ -210,7 +213,7 @@ class Show3DSlices(anywidget.AnyWidget):
     >>> from quantem.widget import Show3DSlices
     >>> volume = np.random.rand(14, 256, 256).astype(np.float32)
     >>> w = Show3DSlices(volume, title="multislice object", cmap="viridis",
-    ...                  pixel_size=(2.0, 0.2, 0.2), z_stretch=8)
+    ...                  sampling=(2.0, 0.2, 0.2), units="A", z_stretch=8)
     >>> w.play()  # doctest: +SKIP
     >>> w.save_image("xy_slice7.png", plane="xy", slice_idx=7)  # doctest: +SKIP
 
@@ -536,7 +539,6 @@ class Show3DSlices(anywidget.AnyWidget):
         cmap: str = "plasma",
         sampling: float | Sequence[float] | None = None,
         units: str | Sequence[str] | None = None,
-        pixel_size: float | Sequence[float] | None = 0.0,  # legacy alias for sampling
         config: Mapping | str | pathlib.Path | None = None,
         apply_config_transforms: bool = True,
         crop: int | tuple[int, int] | tuple[int, int, int, int] = 0,
@@ -607,7 +609,8 @@ class Show3DSlices(anywidget.AnyWidget):
 
         # `sampling` + `units` is the canonical quantem convention (Dataset.sampling
         # /.units, Show2D, Show4DSTEM). Convert a user-provided sampling to the
-        # internal Å pixel_size (nm -> 10x); `pixel_size` is the legacy alias.
+        # internal Å `pixel_size` trait the scale bar reads (nm -> 10x).
+        pixel_size: float | Sequence[float] | None = 0.0
         if sampling is not None:
             _unit_scale = {"": 1.0, "nm": 10.0, "a": 1.0, "å": 1.0, "angstrom": 1.0, "angstroms": 1.0}
             def _scale(unit):
@@ -957,7 +960,7 @@ class Show3DSlices(anywidget.AnyWidget):
         Example
         -------
         >>> from quantem.widget import Show3DSlices
-        >>> w = Show3DSlices(volume, cmap="viridis", pixel_size=(2.0, 0.2, 0.2))  # doctest: +SKIP
+        >>> w = Show3DSlices(volume, cmap="viridis", sampling=(2.0, 0.2, 0.2), units="A")  # doctest: +SKIP
         >>> w.save("slices_state.json")  # doctest: +SKIP
 
         Notes
