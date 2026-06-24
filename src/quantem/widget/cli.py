@@ -4,6 +4,7 @@ masters becomes a rendered, standalone HTML viewer in one command, no notebook.
     quantem show ./frames/                # PNG/TIFF folder -> Show3D scrub HTML
     quantem show scan.png                 # single image    -> Show2D HTML
     quantem show ./masters/ --bin 8       # *_master.h5     -> offline WebGPU Show4DSTEM
+    quantem html tutorial.ipynb           # run a notebook  -> standalone shareable HTML
 
 The CLI only orchestrates existing pieces: ``io.read_image`` / ``read_image_stack``
 for images, ``io.discover_masters`` + ``io.load(det_bin=...)`` for 4D-STEM, the
@@ -46,16 +47,71 @@ def main(argv: list[str] | None = None) -> int:
     }
     for name in forced:
         _add_show_args(sub.add_parser(name, help=helps[name]))
+    # `html` is a different shape (one .ipynb in, one HTML out), so it gets its own
+    # parser rather than the shared show* options.
+    _add_html_args(sub.add_parser(
+        "html", help="Execute a notebook and export it to a standalone, offline shareable HTML."))
     args = parser.parse_args(argv)
-    if args.command not in forced:
-        parser.print_help()
-        return 0
-    args.widget = forced[args.command]
     try:
+        if args.command == "html":
+            return _render_html(args)
+        if args.command not in forced:
+            parser.print_help()
+            return 0
+        args.widget = forced[args.command]
         return _show(args)
     except (FileNotFoundError, ValueError) as err:
         print(f"quantem: {err}", file=sys.stderr)
         return 1
+
+
+def _add_html_args(parser: argparse.ArgumentParser) -> None:
+    """Attach options for the ``html`` subcommand."""
+    parser.add_argument("path", help="The .ipynb to render.")
+    parser.add_argument("--out", default=None,
+                        help="Output path or directory for the HTML. Default: ~/Downloads.")
+    parser.add_argument("--no-execute", action="store_true",
+                        help="Export the notebook's already-saved outputs without re-running it.")
+    parser.add_argument("--timeout", type=int, default=600,
+                        help="Per-cell execution timeout in seconds (default 600).")
+    parser.add_argument("--no-open", action="store_true", help="Write the HTML but do not open it.")
+
+
+def _render_html(args: argparse.Namespace) -> int:
+    """Execute a notebook and export it to a standalone, shareable HTML.
+
+    Wraps ``jupyter nbconvert --to html [--execute]``: a finished notebook becomes a
+    kernel-less HTML (interactive widgets such as Show2D bake in as static images) that
+    opens in any browser with no Python. The live ``.ipynb`` stays the editable surface;
+    this is the share artifact. ``--no-execute`` exports the saved outputs as-is, which
+    is what a notebook's own in-cell ``!jupyter nbconvert`` does after a run."""
+    import shutil
+    import subprocess
+    notebook = pathlib.Path(args.path).expanduser().resolve()
+    if not notebook.exists():
+        raise FileNotFoundError(f"notebook not found: {notebook}")
+    if notebook.suffix.lower() != ".ipynb":
+        raise ValueError(f"expected a .ipynb, got {notebook.suffix!r}")
+    if shutil.which("jupyter") is None:
+        raise ValueError("jupyter not found; install jupyter to render a notebook")
+    out_dir = _out_dir(args.out)
+    cmd = ["jupyter", "nbconvert", "--to", "html", str(notebook),
+           "--output-dir", str(out_dir), "--output", notebook.stem]
+    if not args.no_execute:
+        cmd += ["--execute", f"--ExecutePreprocessor.timeout={args.timeout}"]
+    print(f"{'rendering' if args.no_execute else 'executing + rendering'} {notebook.name} -> HTML")
+    if subprocess.run(cmd).returncode != 0:
+        raise ValueError("nbconvert failed (see output above)")
+    out = out_dir / f"{notebook.stem}.html"
+    # Report the file size so the audience knows how heavy the share artifact is: baked
+    # widget images make these big (a Show2D gallery can be >100 MB), which matters for
+    # email limits and browser open time.
+    size_mb = out.stat().st_size / 1e6
+    note = "large - widget images baked in; trim panels if emailing" if size_mb > 50 else "self-contained, offline"
+    print(f"HTML: {size_mb:.1f} MB ({note})")
+    print(f"  {out}")
+    _open_html(out, serve=False, no_open=args.no_open)
+    return 0
 
 
 def _add_show_args(parser: argparse.ArgumentParser) -> None:
