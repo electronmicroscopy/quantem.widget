@@ -2,7 +2,7 @@
 # Notebooks are PRE-BAKED on a GPU box (outputs + widget state committed); the
 # CI runner is CPU-only and just assembles HTML, so execution stays off here.
 title: quantem.widget
-author: Sangjoon Bob Lee
+author: Sangjoon Bob Lee, et al
 logo: ""
 only_build_toc_files: true
 

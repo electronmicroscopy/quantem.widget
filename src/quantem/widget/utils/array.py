@@ -72,3 +72,18 @@ def bin2d(img: np.ndarray, factor: int, mode: str = "mean") -> np.ndarray:
     if mode == "sum":
         return blocks.sum(axis=(-3, -1))
     return blocks.mean(axis=(-3, -1))
+
+
+def _b64_safe(raw: bytes) -> bytes:
+    """Pad a bytes buffer to a multiple of 3 so its base64 encoding never needs
+    `=` padding. The jupyter-book / nbconvert static-HTML embed emits UNPADDED
+    base64 for widget binary buffers, and the jupyter-widgets html-manager
+    decoder is strict ("Invalid string. Length must be a multiple of 4"). A
+    buffer whose length is a multiple of 3 base64-encodes to a multiple of 4
+    chars with no padding, so it survives the embed. The JS reads frame_bytes by
+    explicit n_images x height x width, so the <=2 trailing zero bytes are
+    ignored. Without this, any Show2D/Show3D/Show4DSTEM offline export whose
+    buffer length isn't a multiple of 3 fails to mount in the static docs.
+    """
+    pad = (-len(raw)) % 3
+    return raw + b"\x00" * pad if pad else raw
