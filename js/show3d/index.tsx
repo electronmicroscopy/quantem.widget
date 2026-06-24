@@ -1994,6 +1994,27 @@ function Show3D() {
     setVminPerPanel(nextMins);
     setVmaxPerPanel(nextMaxs);
   };
+  const latchMissingPanelManualRanges = () => {
+    const n = Math.max(1, nPanels || 1);
+    const stackBounds = resolveDisplayBounds(dataMin, dataMax, traitVmin, traitVmax, logScale);
+    const nextMins = Array.from({ length: n }, (_, i) => vminPerPanelLiveRef.current[i] ?? null);
+    const nextMaxs = Array.from({ length: n }, (_, i) => vmaxPerPanelLiveRef.current[i] ?? null);
+    let changed = false;
+    for (let panel = 0; panel < n; panel++) {
+      if (nextMins[panel] != null || nextMaxs[panel] != null) continue;
+      const pdr = panelDataRanges[panel];
+      const range = (pdr && pdr.max > pdr.min) ? pdr : stackBounds;
+      if (range.max <= range.min) continue;
+      nextMins[panel] = range.min;
+      nextMaxs[panel] = range.max;
+      changed = true;
+    }
+    if (!changed) return;
+    vminPerPanelLiveRef.current = nextMins;
+    vmaxPerPanelLiveRef.current = nextMaxs;
+    setVminPerPanel(nextMins);
+    setVmaxPerPanel(nextMaxs);
+  };
   const extractPanelSlice = (
     raw: Float32Array,
     panel: number,
@@ -2151,6 +2172,7 @@ function Show3D() {
       } else {
         // OFF restores manual contrast. If the user never set a manual range,
         // default to each panel's full local histogram range.
+        latchMissingPanelManualRanges();
         restorePanelManualClipPcts();
         manualImageRangeBeforeAutoRef.current = null;
       }
@@ -3688,7 +3710,7 @@ function Show3D() {
                 : resolveDisplayBounds(c.dataMin, c.dataMax, c.traitVmin, c.traitVmax, c.logScale));
             }
             setPanelHistogramData(nextData);
-            setPanelDataRanges(nextRanges);
+            setPanelDataRanges(prev => (!c.autoContrast && prev.length === n) ? prev : nextRanges);
           } else {
             // GPU histogram for the current frame (honors WebGPU-first-class):
             // refreshHistogram computes bins on the GPU (live slot or offline
@@ -3872,7 +3894,7 @@ function Show3D() {
             : resolveDisplayBounds(dataMin, dataMax, null, null, logScale));
         }
         setPanelHistogramData(nextData);
-        setPanelDataRanges(nextRanges);
+        setPanelDataRanges(prev => (!autoContrast && prev.length === n) ? prev : nextRanges);
         setImageHistogramBins(null);
         return;
       }
@@ -3982,6 +4004,7 @@ function Show3D() {
 
   React.useEffect(() => {
     if (!perPanelHistogramEnabled || autoContrast || panelDataRanges.length === 0) return;
+    latchMissingPanelManualRanges();
     setPanelStates(prev => {
       let changed = false;
       const out = prev.map((state, i) => {
