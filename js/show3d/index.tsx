@@ -2094,26 +2094,30 @@ function Show3D() {
     };
   };
 
-  const freezePanelAutoClips = () => {
+  const restorePanelManualClipPcts = () => {
     const stackBounds = resolveDisplayBounds(dataMin, dataMax, traitVmin, traitVmax, logScale);
     if (stackBounds.max <= stackBounds.min) return;
     const n = Math.max(1, nPanels || 1);
     const liveStates = panelStatesLiveRef.current.length === n ? panelStatesLiveRef.current : panelStates;
-    const nextMins = Array.from({ length: n }, (_, i) => vminPerPanel[i] ?? null);
-    const nextMaxs = Array.from({ length: n }, (_, i) => vmaxPerPanel[i] ?? null);
     const nextStates = Array.from({ length: n }, (_, i) => {
       const state = liveStates[i] || initialState;
-      const clip = panelAutoClipPcts(i, state, stackBounds);
-      if (!clip) return state;
-      nextMins[i] = clip.vmin;
-      nextMaxs[i] = clip.vmax;
-      return { ...state, imageVminPct: clip.imageVminPct, imageVmaxPct: clip.imageVmaxPct };
+      const storedMin = vminPerPanelLiveRef.current[i];
+      const storedMax = vmaxPerPanelLiveRef.current[i];
+      if (storedMin == null && storedMax == null) {
+        return { ...state, imageVminPct: 0, imageVmaxPct: 100 };
+      }
+      const panelRange = panelDataRanges[i];
+      const range = (panelRange && panelRange.max > panelRange.min) ? panelRange : stackBounds;
+      if (range.max <= range.min) return { ...state, imageVminPct: 0, imageVmaxPct: 100 };
+      const lo = storedMin ?? range.min;
+      const hi = Math.max(lo, storedMax ?? range.max);
+      return {
+        ...state,
+        imageVminPct: valueToPct(lo, range.min, range.max, state.imageVminPct),
+        imageVmaxPct: valueToPct(hi, range.min, range.max, state.imageVmaxPct),
+      };
     });
-    vminPerPanelLiveRef.current = nextMins;
-    vmaxPerPanelLiveRef.current = nextMaxs;
     setPanelStates(nextStates);
-    setVminPerPanel(nextMins);
-    setVmaxPerPanel(nextMaxs);
   };
 
   const resolvePanelRenderRange = (
@@ -2139,23 +2143,17 @@ function Show3D() {
     setAutoContrast(on);
     if (perPanelHistogramEnabled) {
       if (on) {
-        const n = Math.max(1, nPanels || 1);
-        const empty = Array.from({ length: n }, () => null);
-        vminPerPanelLiveRef.current = empty;
-        vmaxPerPanelLiveRef.current = empty;
-        setVminPerPanel(empty);
-        setVmaxPerPanel(empty);
+        // Keep remembered manual per-panel clips. Auto rendering ignores them,
+        // and toggling Auto back off should restore the user's manual window.
         // Per-panel snap fires automatically via the [autoContrast,
         // panelHistogramData, ...] useEffect below. Calling the legacy
         // stack-wide snap here would race-write 0/100 to every panel
         // before the effect overrode with the correct per-panel clip,
         // causing a 1-frame flash to washed contrast on every toggle.
       } else {
-        // OFF freezes the currently-rendered per-panel auto clip as absolute
-        // values per panel. Scrubbing then reuses the same BF/DF/SSB windows
-        // instead of re-decoding fixed percentages against each new frame's
-        // changing min/max, which caused visible brightness jitter.
-        freezePanelAutoClips();
+        // OFF restores manual contrast. If the user never set a manual range,
+        // default to each panel's full local histogram range.
+        restorePanelManualClipPcts();
         manualImageRangeBeforeAutoRef.current = null;
       }
       return;
@@ -7460,13 +7458,10 @@ function Show3D() {
                             vmaxPct={vmaxPct}
                             onRangeChange={(min, max) => {
                               updatePanelState(panel, { imageVminPct: min, imageVmaxPct: max });
+                              setPanelRangeValues(panel, pctToValue(min, panelRange.min, panelRange.max), pctToValue(max, panelRange.min, panelRange.max));
                               if (autoContrast) {
-                                setVminPerPanel(Array.from({ length: n }, () => null));
-                                setVmaxPerPanel(Array.from({ length: n }, () => null));
                                 manualImageRangeBeforeAutoRef.current = null;
                                 setAutoContrast(false);
-                              } else {
-                                setPanelRangeValues(panel, pctToValue(min, panelRange.min, panelRange.max), pctToValue(max, panelRange.min, panelRange.max));
                               }
                             }}
                             width={110}
