@@ -129,8 +129,9 @@ def _add_jupyter_args(parser: argparse.ArgumentParser) -> None:
                              "remote home, or absolute). A .ipynb opens directly.")
     parser.add_argument("--host", required=True,
                         help="SSH alias/host of the GPU box (from your ~/.ssh/config).")
-    parser.add_argument("--env", default=None,
-                        help="Conda/mamba env to activate on the remote before launching JupyterLab.")
+    parser.add_argument("--env", default="live-env",
+                        help="Conda/mamba env to activate on the remote before launching JupyterLab "
+                             "(default: live-env). Pass --env '' to skip activation.")
     parser.add_argument("--port", type=int, default=None,
                         help="Port to use on both ends (default: auto-pick a free port on the remote).")
     parser.add_argument("--no-open", action="store_true",
@@ -177,7 +178,12 @@ def _launch_jupyter(args: argparse.Namespace) -> int:
     launch = (f"jupyter lab --no-browser --ip=127.0.0.1 --port={port} "
               f"--IdentityProvider.token={token} --ServerApp.token={token}")
     if args.env:
-        launch = f"conda activate {shlex.quote(args.env)} && {launch}"
+        # `conda` is usually NOT on a non-interactive login shell's PATH, so a bare
+        # `conda activate` fails (verified on buffle). Source conda.sh from the common
+        # install locations first, then activate. Covers miniforge/miniconda/anaconda.
+        src = ("for c in ~/miniforge3 ~/miniconda3 ~/anaconda3 ~/mambaforge; do "
+               "[ -f \"$c/etc/profile.d/conda.sh\" ] && . \"$c/etc/profile.d/conda.sh\" && break; done")
+        launch = f"{src} && conda activate {shlex.quote(args.env)} && {launch}"
     if args.path and not args.path.endswith(".ipynb"):
         launch = f"cd {shlex.quote(args.path)} && {launch}"
     remote = f"bash -lc {shlex.quote(launch)}"
