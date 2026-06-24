@@ -19,6 +19,32 @@ paint; pass a list of file paths to stack several datasets behind a single
 "Dataset" slider.
 ```
 
+## Backend (CUDA / Apple Silicon / CPU)
+
+`load` detects the device automatically: an NVIDIA box loads onto **CUDA**, a Mac
+loads onto **Apple Metal (MPS)**, and anything else falls back to **CPU**. No flag
+is required - the same call works everywhere:
+
+```python
+from quantem.widget import load, Show4DSTEM
+
+data = load("scan_master.h5")   # CUDA on a workstation, MPS on a MacBook
+Show4DSTEM(data)
+```
+
+On a MacBook the read uses a zero-copy Metal path, so a laptop can browse 4D-STEM
+data that does not fit in RAM **if you bin at load**: `det_bin` reduces the
+detector on the way in (mean reduction), so the full multi-gigabyte stack never
+has to materialize. A typical laptop session:
+
+```python
+data = load("scan_master.h5", det_bin=8)   # MPS, detector binned 8x -> small
+Show4DSTEM(data)
+```
+
+The same is one shell command - see [the CLI](../cli): `quantem show4dstem
+scan_master.h5 --bin 8`.
+
 ## Multi-File / 5D Browsing
 
 Use one public entry point for a time-series or tilt-series stack:
