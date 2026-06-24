@@ -2818,6 +2818,7 @@ function Show3D() {
     const cols = (maxCols && maxCols > 0) ? Math.min(maxCols, n) : n;
     const rows = Math.ceil(n / cols);
     const gap = n > 1 ? (panelGapTrait ?? 10) : 0;
+    if (n > 1 && !c.linkContrast) return false;
 
     const lut = COLORMAPS[c.cmap] || COLORMAPS.inferno;
     engine.uploadLUT(c.cmap, lut);
@@ -2975,53 +2976,7 @@ function Show3D() {
     const rows = Math.ceil(n / cols);
     const gap = n > 1 ? (panelGapTrait ?? 10) : 0;
     const renderStartMs = performance.now();
-    if (n > 1 && !c.linkContrast && !sharedPanelSource) {
-      const panelW = Math.max(1, panelWidthPx || Math.round(c.width / n));
-      const regions = Array.from({ length: n }, (_, panel) => ({
-        x: panel * panelW, y: 0, width: panelW, height: c.height,
-      }));
-      const sharedAutoRange = c.autoContrast ? { vmin, vmax } : null;
-      const transformActive = c.diffMode !== "off" || Math.max(1, Math.round(c.avgWindow || 1)) > 1;
-      const rawForRanges = rawFrameForIndex(normalized, normalized, rawFrameDataRef.current);
-      const frameForRanges = rawForRanges && transformActive
-        ? (displayFrameForIndex(normalized, rawForRanges) ?? rawForRanges)
-        : rawForRanges;
-      const ranges = Array.from({ length: n }, (_, panel) => {
-        const stack = resolveDisplayBounds(c.dataMin, c.dataMax, c.traitVmin, c.traitVmax, c.logScale);
-        const panelData = frameForRanges ? extractPanelSlice(frameForRanges, panel, c.logScale) : null;
-        const pdr = panelDataRanges[panel];
-        const bounds = (panelData && panelData.length > 0)
-          ? findDataRange(panelData)
-          : ((perPanelHistogramEnabled && pdr && pdr.max > pdr.min) ? pdr : stack);
-        return resolvePanelRenderRange(panel, bounds, sharedAutoRange, panelData, c.autoContrast, c.percentileLow, c.percentileHigh);
-      });
-      const logs = c.logScale;
-      const bitmaps = engine.renderPerPanelGpuExplicit(normalized, regions, ranges, logs);
-      const offCtx = mainOffscreenRef.current?.getContext("2d");
-      const canvas = canvasRef.current;
-      const ctx = canvas?.getContext("2d");
-      if (!bitmaps || !offCtx || !ctx || !mainOffscreenRef.current) return false;
-      offCtx.clearRect(0, 0, c.width, c.height);
-      for (let panel = 0; panel < n; panel++) {
-        if (bitmaps[panel]) {
-          offCtx.drawImage(bitmaps[panel], panel * panelW, 0);
-          bitmaps[panel].close();
-        }
-      }
-      setGpuDisplayVisible(false);
-      drawMain(ctx, mainOffscreenRef.current);
-      playbackIdxRef.current = normalized;
-      if (updateDisplayState) setDisplaySliceIdx(normalized);
-      const dbg = show3dPerfDebug();
-      if (dbg) {
-        dbg.missingFrame = null;
-        dbg.lastFrame = normalized;
-        dbg.lastFrameSource = "gpu-cache";
-        dbg.lastRenderPath = "webgpu-grid-panels-explicit-ranges";
-        dbg.lastRenderMs = Number((performance.now() - renderStartMs).toFixed(2));
-      }
-      return true;
-    }
+    if (n > 1 && !c.linkContrast && !sharedPanelSource) return false;
     const sourcePanelWidthForGrid = sharedPanelSource
       ? Math.max(1, panelWidthPx || c.width)
       : Math.max(1, panelWidthPx || Math.round(c.width / n));
@@ -3530,6 +3485,11 @@ function Show3D() {
             if (dbg) dbg.lastRenderPath = "scaled-cpu";
           }
         }
+        if (!rendered && frame && panelCountForGrid > 1 && !c.linkContrast && !sharedPanelSource) {
+          rendered = renderPerPanelFrameToOffscreen(frame, c, lut);
+          drewDisplayDirect = false;
+          if (rendered) setGpuDisplayVisible(false);
+        }
         if (!rendered && engine && gpuCmapReadyRef.current) {
           try {
             engine.uploadLUT(c.cmap, lut);
@@ -3580,41 +3540,7 @@ function Show3D() {
                 };
                 const usedExplicitPanelRanges = n > 1 && !c.linkContrast && !sharedPanelSource;
                 if (usedExplicitPanelRanges) {
-                  const panelW = sourcePanelWidthForGrid;
-                  const regions = Array.from({ length: n }, (_, p) => ({
-                    x: p * panelW, y: 0, width: panelW, height: c.height,
-                  }));
-                  const sharedAutoRange = c.autoContrast ? { vmin, vmax } : null;
-                  const ranges = Array.from({ length: n }, (_, p) => {
-                    const panelData = frame ? extractPanelSlice(frame, p, c.logScale) : null;
-                    // In per-panel mode, ALWAYS prefer this panel's stored
-                    // data range so slider pct decodes in panel space (not
-                    // stack space). Without this SSB phase [±0.04] gets
-                    // decoded against stack range [≈-0.04, ≈30000] → vmin
-                    // and vmax both land in DF-count territory → all SSB
-                    // pixels render black.
-                    const pdr = panelDataRanges[p];
-                    const panelRange = panelData && panelData.length > 0
-                      ? findDataRange(panelData)
-                      : ((perPanelHistogramEnabled && pdr && pdr.max > pdr.min)
-                          ? pdr
-                          : resolveDisplayBounds(c.dataMin, c.dataMax, c.traitVmin, c.traitVmax, c.logScale));
-                    return resolvePanelRenderRange(p, panelRange, sharedAutoRange, panelData, c.autoContrast, c.percentileLow, c.percentileHigh);
-                  });
-                  const logs = c.logScale;
-                  const bitmaps = engine.renderPerPanelGpuExplicit(slotIdx, regions, ranges, logs);
-                  const offCtx = mainOffscreenRef.current.getContext("2d");
-                  if (bitmaps && offCtx) {
-                    offCtx.clearRect(0, 0, c.width, c.height);
-                    for (let p = 0; p < n; p++) {
-                      if (bitmaps[p]) {
-                        offCtx.drawImage(bitmaps[p], p * panelW, 0);
-                        bitmaps[p].close();
-                      }
-                    }
-                    rendered = true;
-                    if (dbg) dbg.lastRenderPath = "webgpu-grid-panels-explicit-ranges";
-                  }
+                  rendered = false;
                 } else {
                   const renderedDirect = engine.renderSharedGridDirectToCanvas(slotIdx, { vmin, vmax }, c.logScale, gpuCtx, gridOpts);
                   rendered = renderedDirect || engine.renderSharedGridToCanvas(slotIdx, { vmin, vmax }, c.logScale, gpuCtx, gridOpts);
@@ -4161,44 +4087,10 @@ function Show3D() {
       };
       const renderSerial = ++gpuRenderSerialRef.current;
       if (perPanelContrast) {
-        const pw = width / nP;
-        ensureGpuUpload();
-        const regions = Array.from({ length: nP }, (_, p) => ({
-          x: p * pw, y: 0, width: pw, height,
-        }));
-        const sharedAutoRange = autoContrast ? { vmin, vmax } : null;
-        const panelRanges = Array.from({ length: nP }, (_, p) => {
-          const panelData = extractPanelSlice(frameData, p, logScale);
-          const pdr = panelDataRanges[p];
-          const panelRange = panelData && panelData.length > 0
-            ? findDataRange(panelData)
-            : ((perPanelHistogramEnabled && pdr && pdr.max > pdr.min)
-                ? pdr
-                : resolveDisplayBounds(dataMin, dataMax, traitVmin, traitVmax, logScale));
-          return resolvePanelRenderRange(p, panelRange, sharedAutoRange, panelData, autoContrast, percentileLow, percentileHigh);
-        });
-        const panelLogs = logScale;
-        requestAnimationFrame(() => {
-          if (renderSerial !== gpuRenderSerialRef.current) return;
-          if (!mainOffscreenRef.current) return;
-          const bitmaps = engine.renderPerPanelGpuExplicit(0, regions, panelRanges, panelLogs);
-          if (bitmaps) {
-            const ctx = mainOffscreenRef.current.getContext("2d");
-            if (ctx) {
-              for (let p = 0; p < nP; p++) {
-                if (bitmaps[p]) {
-                  ctx.drawImage(bitmaps[p], p * pw, 0);
-                  bitmaps[p].close();
-                }
-              }
-            }
-          }
-          const canvas = canvasRef.current;
-          if (!canvas) return;
-          const ctx2 = canvas.getContext("2d");
-          if (renderSerial !== gpuRenderSerialRef.current) return;
-          if (ctx2 && mainOffscreenRef.current) drawMain(ctx2, mainOffscreenRef.current);
-        });
+        const renderedManualPanels = renderPerPanelFrameToOffscreen(frameData, playRef.current, lut);
+        const canvas = canvasRef.current;
+        const ctx = canvas?.getContext("2d");
+        if (renderedManualPanels && ctx && mainOffscreenRef.current) drawMain(ctx, mainOffscreenRef.current);
         return;
       }
       ensureGpuUpload();
@@ -4353,6 +4245,40 @@ function Show3D() {
     }
   };
 
+  const renderPerPanelFrameToOffscreen = (
+    frame: Float32Array,
+    c: typeof playRef.current,
+    lut: Uint8ClampedArray,
+  ): boolean => {
+    const n = Math.max(1, nPanels || 1);
+    if (n <= 1 || c.linkContrast || sharedPanelSource) return false;
+    if (!mainOffscreenRef.current) return false;
+    const offCtx = mainOffscreenRef.current.getContext("2d");
+    if (!offCtx) return false;
+    const panelW = Math.max(1, panelWidthPx || Math.round(c.width / n));
+    offCtx.clearRect(0, 0, c.width, c.height);
+    const sharedAutoRange = c.autoContrast ? resolveDisplayRange(
+      c.dataMin,
+      c.dataMax,
+      c.traitVmin,
+      c.traitVmax,
+      c.logScale,
+      c.imageVminPct,
+      c.imageVmaxPct,
+    ) : null;
+    for (let panel = 0; panel < n; panel++) {
+      const panelData = extractPanelSlice(frame, panel, c.logScale);
+      if (!panelData || panelData.length === 0) continue;
+      const bounds = findDataRange(panelData);
+      const range = resolvePanelRenderRange(panel, bounds, sharedAutoRange, panelData, c.autoContrast, c.percentileLow, c.percentileHigh);
+      const panelOffscreen = renderToOffscreen(panelData, panelW, c.height, lut, range.vmin, range.vmax);
+      if (panelOffscreen) offCtx.drawImage(panelOffscreen, panel * panelW, 0);
+    }
+    const dbg = show3dPerfDebug();
+    if (dbg) dbg.lastRenderPath = c.autoContrast ? "cpu-auto-panel-ranges" : "cpu-manual-panel-ranges";
+    return true;
+  };
+
   const renderFloatFrameSlice = (inputFrame: Float32Array, idx: number): boolean => {
     const c = playRef.current;
     if (!mainOffscreenRef.current || !mainImgDataRef.current) return false;
@@ -4365,6 +4291,18 @@ function Show3D() {
     setDisplaySliceIdx(idx);
 
     const lut = COLORMAPS[c.cmap] || COLORMAPS.inferno;
+    const panelRendered = renderPerPanelFrameToOffscreen(frame, c, lut);
+    if (panelRendered) {
+      const canvas = canvasRef.current;
+      const ctx = canvas?.getContext("2d");
+      if (ctx && mainOffscreenRef.current) drawMain(ctx, mainOffscreenRef.current);
+      if (c.showStats) setLocalStats(computeStats(frame));
+      if (c.profileActive && c.profilePoints.length === 2) {
+        const p0 = c.profilePoints[0], p1 = c.profilePoints[1];
+        setProfileData(sampleLineProfile(frame, c.width, c.height, p0.row, p0.col, p1.row, p1.col, c.profileWidth));
+      }
+      return true;
+    }
     let vmin: number, vmax: number;
     let cpuData: Float32Array = frame;
     let cpuDataAlreadyLogged = false;
