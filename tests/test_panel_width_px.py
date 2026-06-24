@@ -29,6 +29,24 @@ def test_show3d_panel_width_px_sets_display_size_not_source_width():
     assert widget.panel_width_px == 8
 
 
+def test_show3d_quantized_offline_uses_per_panel_ranges():
+    panels = [
+        np.linspace(10, 1000, 2 * 4 * 4, dtype=np.float32).reshape(2, 4, 4),
+        np.linspace(0, 100, 2 * 4 * 4, dtype=np.float32).reshape(2, 4, 4),
+        np.linspace(-0.3, 0.7, 2 * 4 * 4, dtype=np.float32).reshape(2, 4, 4),
+    ]
+
+    widget = Show3D(*panels, offline=True, show_controls=False)
+    packed = np.frombuffer(widget._offline_stack, dtype=np.uint8).reshape(2, 4, 12)
+
+    assert widget._offline_mins == [10.0, 0.0, np.float32(-0.3)]
+    assert widget._offline_maxs == [1000.0, 100.0, np.float32(0.7)]
+    assert [
+        (int(packed[:, :, i * 4 : (i + 1) * 4].min()), int(packed[:, :, i * 4 : (i + 1) * 4].max()))
+        for i in range(3)
+    ] == [(0, 255), (0, 255), (0, 255)]
+
+
 def test_show3dslices_panel_width_px_syncs_to_frontend_state():
     data = np.zeros((4, 8, 8), dtype=np.float32)
 
