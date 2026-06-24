@@ -185,6 +185,35 @@ function findFFTPeak(
   return { row: bestRow, col: bestCol };
 }
 
+function findFFTPeakInBounds(
+  mag: Float32Array, width: number, height: number,
+  col: number, row: number, radius: number,
+  minCol: number, maxCol: number, minRow: number, maxRow: number,
+): { row: number; col: number } {
+  const c0 = Math.max(0, minCol, Math.floor(col) - radius);
+  const r0 = Math.max(0, minRow, Math.floor(row) - radius);
+  const c1 = Math.min(width - 1, maxCol, Math.floor(col) + radius);
+  const r1 = Math.min(height - 1, maxRow, Math.floor(row) + radius);
+  let bestCol = Math.round(col), bestRow = Math.round(row), bestVal = -Infinity;
+  for (let ir = r0; ir <= r1; ir++) {
+    for (let ic = c0; ic <= c1; ic++) {
+      const val = mag[ir * width + ic];
+      if (val > bestVal) { bestVal = val; bestCol = ic; bestRow = ir; }
+    }
+  }
+  const wc0 = Math.max(0, minCol, bestCol - 1), wc1 = Math.min(width - 1, maxCol, bestCol + 1);
+  const wr0 = Math.max(0, minRow, bestRow - 1), wr1 = Math.min(height - 1, maxRow, bestRow + 1);
+  let sumW = 0, sumWC = 0, sumWR = 0;
+  for (let ir = wr0; ir <= wr1; ir++) {
+    for (let ic = wc0; ic <= wc1; ic++) {
+      const w = mag[ir * width + ic];
+      sumW += w; sumWC += w * ic; sumWR += w * ir;
+    }
+  }
+  if (sumW > 0) return { row: sumWR / sumW, col: sumWC / sumW };
+  return { row: bestRow, col: bestCol };
+}
+
 function resolveDisplayRange(
   dataMin: number, dataMax: number,
   traitVmin: number | null | undefined, traitVmax: number | null | undefined,
@@ -5831,7 +5860,9 @@ function Show3D() {
 
     // Reciprocal-space scale bar (pixelSize is in Å)
     if (pixelSize > 0) {
-      const fftPixelSize = 1 / (fftW * pixelSize);
+      const panelGrid = fftPanelGridRef.current;
+      const reciprocalWidth = panelGrid ? panelGrid.panelWidth : fftW;
+      const fftPixelSize = 1 / (reciprocalWidth * pixelSize);
       drawFFTScaleBarHiDPI(overlay, DPR, fftZoom, fftPixelSize, fftW, `${unitSymbol(pixelUnit || "px")}⁻¹`);
     }
 
@@ -6739,17 +6770,40 @@ function Show3D() {
           // Use crop dimensions when ROI FFT is active
           const fftW = fftCropDims?.fftWidth ?? width;
           const fftH = fftCropDims?.fftHeight ?? height;
+          const panelGrid = fftPanelGridRef.current;
           let imgCol = pos.col;
           let imgRow = pos.row;
           if (fftMagCacheRef.current) {
-            const snapped = findFFTPeak(fftMagCacheRef.current, fftW, fftH, imgCol, imgRow, FFT_SNAP_RADIUS);
+            const bounds = panelGrid ? (() => {
+              const panelCol = Math.max(0, Math.min(panelGrid.cols - 1, Math.floor(imgCol / panelGrid.panelWidth)));
+              const panelRow = Math.max(0, Math.min(panelGrid.rows - 1, Math.floor(imgRow / panelGrid.panelHeight)));
+              return {
+                minCol: panelCol * panelGrid.panelWidth,
+                maxCol: Math.min(fftW - 1, (panelCol + 1) * panelGrid.panelWidth - 1),
+                minRow: panelRow * panelGrid.panelHeight,
+                maxRow: Math.min(fftH - 1, (panelRow + 1) * panelGrid.panelHeight - 1),
+              };
+            })() : null;
+            const snapped = bounds
+              ? findFFTPeakInBounds(fftMagCacheRef.current, fftW, fftH, imgCol, imgRow, FFT_SNAP_RADIUS, bounds.minCol, bounds.maxCol, bounds.minRow, bounds.maxRow)
+              : findFFTPeak(fftMagCacheRef.current, fftW, fftH, imgCol, imgRow, FFT_SNAP_RADIUS);
             imgCol = snapped.col;
             imgRow = snapped.row;
           }
-          const halfW = Math.floor(fftW / 2);
-          const halfH = Math.floor(fftH / 2);
-          const dcol = imgCol - halfW;
-          const drow = imgRow - halfH;
+          const local = panelGrid ? (() => {
+            const panelCol = Math.max(0, Math.min(panelGrid.cols - 1, Math.floor(imgCol / panelGrid.panelWidth)));
+            const panelRow = Math.max(0, Math.min(panelGrid.rows - 1, Math.floor(imgRow / panelGrid.panelHeight)));
+            return {
+              col: imgCol - panelCol * panelGrid.panelWidth,
+              row: imgRow - panelRow * panelGrid.panelHeight,
+              width: panelGrid.panelWidth,
+              height: panelGrid.panelHeight,
+            };
+          })() : { col: imgCol, row: imgRow, width: fftW, height: fftH };
+          const halfW = Math.floor(local.width / 2);
+          const halfH = Math.floor(local.height / 2);
+          const dcol = local.col - halfW;
+          const drow = local.row - halfH;
           const distPx = Math.sqrt(dcol * dcol + drow * drow);
           if (distPx < 1) {
             setFftClickInfo(null);
@@ -6757,10 +6811,10 @@ function Show3D() {
             let spatialFreq: number | null = null;
             let dSpacing: number | null = null;
             if (pixelSize > 0) {
-              const paddedW = nextPow2(fftW);
-              const paddedH = nextPow2(fftH);
-              const binC = ((Math.round(imgCol) - halfW) % fftW + fftW) % fftW;
-              const binR = ((Math.round(imgRow) - halfH) % fftH + fftH) % fftH;
+              const paddedW = nextPow2(local.width);
+              const paddedH = nextPow2(local.height);
+              const binC = ((Math.round(local.col) - halfW) % local.width + local.width) % local.width;
+              const binR = ((Math.round(local.row) - halfH) % local.height + local.height) % local.height;
               const freqC = binC <= paddedW / 2 ? binC / (paddedW * pixelSize) : (binC - paddedW) / (paddedW * pixelSize);
               const freqR = binR <= paddedH / 2 ? binR / (paddedH * pixelSize) : (binR - paddedH) / (paddedH * pixelSize);
               spatialFreq = Math.sqrt(freqC * freqC + freqR * freqR);
