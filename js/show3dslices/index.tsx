@@ -1539,6 +1539,22 @@ function Show3DSlices() {
     renderer.render(volumeRenderParamsRef.current, camera, bgColorRef.current, undefined, undefined, zStretch, orthographic);
   }, [volumeFloats, sliceX, sliceY, sliceZ, obliqueAngle, obliqueSegment, nx, ny, nz, cmap, camera, volumeCanvasSize, tc.bg, slicePlaneMask, slicePlaneOpacity, volumeDrag, rendererReady, volTexRange, opacityA, zStretch, orthographic, flip]);
 
+  // First-frame paint guard: the very first synchronous render after the renderer
+  // mounts can land before the canvas swapchain is ready (flush race) and commit a
+  // BLACK frame - the volume then stayed blank until the user dragged. Re-render on
+  // the next animation frame (once the context is configured + data uploaded) so the
+  // volume is visible on mount, no interaction needed.
+  React.useEffect(() => {
+    if (!rendererReady) return;
+    const id = requestAnimationFrame(() => {
+      const renderer = volumeRendererRef.current;
+      if (renderer && volumeFloats && volumeFloats.length > 0) {
+        renderer.render(volumeRenderParamsRef.current, camera, bgColorRef.current, undefined, undefined, zStretch, orthographic);
+      }
+    });
+    return () => cancelAnimationFrame(id);
+  }, [rendererReady, volumeFloats]);
+
   // Prevent scroll on volume canvas
   React.useEffect(() => {
     const canvas = volumeCanvasRef.current;
