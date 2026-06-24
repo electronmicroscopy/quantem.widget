@@ -1,138 +1,65 @@
 # Run on a GPU box from your laptop browser
 
-The way to use quantem widgets (Show2D / Show3D / Show4DSTEM, SSB, any tutorial)
-on real data is: **the kernel + GPU run on a compute box, and you drive everything
-from JupyterLab in your laptop browser.** One SSH tunnel makes every widget work -
-anywidget talks to the kernel over the Jupyter Comm channel, so there is nothing to
-configure per widget.
+The way to use quantem widgets (Show2D / Show3D / Show4DSTEM, SSB, any tutorial) on real
+data is: **the kernel + GPU run on the compute box, and you drive everything from
+JupyterLab in your laptop browser.** anywidget talks to the kernel over the Jupyter Comm
+channel, so one server serves every widget with nothing to configure per widget.
 
-`quantem jupyter` automates the whole thing:
+## Launch
 
-```bash
-quantem jupyter --host buffle drift_tutorial.ipynb
-```
-
-That starts JupyterLab on `buffle` in the `live-env` conda env (the default), opens an SSH
-tunnel, and pops the notebook up in your local browser. `Ctrl-C` stops the server and
-closes the tunnel. It sources conda for you, so `conda` does **not** need to be on the
-box's login PATH. Override the env with `--env <name>` (or `--env ''` to skip activation).
-
-> Setup is the part that wastes people's time. The command helps: if `--host` isn't
-> reachable yet, `quantem jupyter` **offers to set it up for you** (make an SSH key, add
-> the `~/.ssh/config` entry, print the public key to send the admin, re-test). Run it
-> directly anytime with:
->
-> ```bash
-> quantem jupyter --host buffle --setup
-> ```
->
-> The manual version of those same steps is below - do them **once** and every future
-> session is a single command.
-
----
-
-## 0. What you need from whoever runs the box
-
-Ask the box admin (the person sharing buffle / mallard) for:
-
-- **An account** on the box, and which host: `buffle.stanford.edu` or `mallard.stanford.edu`.
-- **Your username** on that box.
-- **How auth works**: your SSH public key added to the box (preferred), and whether
-  you must hop through a **login/bastion node** or use **2FA**. Stanford HPC often does.
-- **The conda env name** that has `quantem` + `quantem.widget` installed (e.g. `quantem-env`),
-  or permission to create your own.
-
-Don't guess these - one wrong hostname or a missing key is the #1 time sink.
-
----
-
-## 1. SSH config on your laptop (one time)
-
-Add an entry to `~/.ssh/config` so you can type `--host buffle` instead of a long string.
-Replace `YOUR_USERNAME` with the username from step 0:
-
-```sshconfig
-Host buffle
-    HostName buffle.stanford.edu
-    User YOUR_USERNAME
-    IdentityFile ~/.ssh/id_ed25519
-    ServerAliveInterval 30
-
-Host mallard
-    HostName mallard.stanford.edu
-    User YOUR_USERNAME
-    IdentityFile ~/.ssh/id_ed25519
-    ServerAliveInterval 30
-```
-
-If the box is only reachable through a login node, add `ProxyJump LOGINNODE` (and define
-that `Host` too). The admin tells you whether this is needed.
-
-No SSH key yet? Make one and send the **public** half to the admin:
+Run this **on the GPU box** (over SSH, or in its terminal):
 
 ```bash
-ssh-keygen -t ed25519           # press enter through the prompts
-cat ~/.ssh/id_ed25519.pub       # give this line to the admin
+quantem jupyter drift_tutorial.ipynb
 ```
 
-## 2. Prove SSH works before anything else
+It starts JupyterLab in the `live-env` conda env (the default) and prints a URL:
+
+```
+  http://localhost:8901/lab/tree/drift_tutorial.ipynb?token=...
+```
+
+Copy that URL into your laptop browser. `Ctrl-C` stops the server. conda is auto-sourced,
+so `conda` need not be on the box's login PATH.
+
+- `path` - a notebook to open directly (omit to land in the file browser), or a directory.
+- `--env <name>` - conda env on the box (default `live-env`; `--env ''` skips activation).
+- `--port <n>` - serve on a fixed port (default: auto-pick a free one).
+- `--no-open` - don't try to open a local browser (the usual case on a headless box).
+
+## Reaching it from your laptop
+
+If your laptop can already open `http://localhost:<port>` on the box (you SSH'd in with a
+forwarded port, or use VS Code Remote-SSH which forwards automatically), just paste the
+URL. Otherwise open the tunnel the command printed, then paste the URL:
 
 ```bash
-ssh buffle echo ok
+ssh -L 8901:127.0.0.1:8901 you@your-box.stanford.edu
 ```
 
-You must see `ok` with **no password prompt** (key auth) and no errors. If this fails,
-`quantem jupyter` cannot work - fix SSH first (wrong host, key not installed, or a
-login-node jump is needed). This 10-second check saves an hour of confusion.
-
-## 3. quantem on both ends
-
-- **On the box** (where the kernel runs): a conda env with `quantem` + `quantem.widget`.
-  A tutorial notebook's first cell usually `pip install`s these for you; otherwise:
-  ```bash
-  ssh buffle
-  conda activate quantem-env
-  pip install quantem.widget
-  ```
-- **On your laptop** (where the `quantem jupyter` command runs): just the launcher.
-  ```bash
-  pip install quantem.widget
-  ```
-
-## 4. Launch
-
-```bash
-quantem jupyter --host buffle drift_tutorial.ipynb
-```
-
-- `--host` - the SSH alias from step 1 (`buffle` or `mallard`).
-- `--env` - conda env on the box. **Defaults to `live-env`**; pass `--env <name>` to change
-  it, or `--env ''` to skip activation. (conda is auto-sourced, so it need not be on PATH.)
-- last argument - a notebook to open directly (omit to land in JupyterLab's file browser).
-
-The command prints a `http://localhost:<port>/lab?token=...` URL and opens it. If your
-browser didn't pop up (headless laptop, remote desktop), paste that URL yourself.
-Leave the terminal running - it holds the tunnel. `Ctrl-C` ends the session.
+The `you@your-box` part is filled in for you. On the first launch the command auto-detects
+`whoami@<fqdn>` and asks you to confirm or correct it, then saves it to
+`~/.config/quantem/jupyter.json`; every later launch prints a ready-to-paste line. Edit
+that file anytime to change it. This is the same bring-your-own-tunnel model as
+`quantem.live` - the command itself does no SSH or tunnel work.
 
 ---
 
 ## Why this, and not a downloaded HTML?
 
 - **`quantem jupyter`** = live kernel on the GPU box. Full interaction, full data, every
-  widget. This is the real working surface.
+  widget. The real working surface.
 - **`quantem html notebook.ipynb`** = a static, self-contained HTML snapshot (widgets
-  baked as images). No kernel, no GPU, opens anywhere - good for *sharing a result* or
-  for someone with no box access. It cannot recompute.
+  baked as images). No kernel, no GPU, opens anywhere - good for *sharing a result*. It
+  cannot recompute.
 
 Use `jupyter` to *work*; use `html` to *share*.
 
-## Troubleshooting (the usual time-wasters)
+## Troubleshooting
 
 | Symptom | Cause / fix |
 |---|---|
-| password prompt on `ssh buffle` | key not installed on the box - send your `.pub` to the admin |
-| `Permission denied (publickey)` | wrong `User` or `IdentityFile` in `~/.ssh/config` |
-| hangs, then times out | box needs a login-node `ProxyJump`, or you're off the campus VPN |
-| `EnvironmentNameNotFound` on launch | the box's env isn't named `live-env`; pass the real name with `--env <name>` |
-| browser opens but "can't connect" | rare port clash - rerun (it auto-picks a fresh remote port), or pass `--port` |
-| widget renders but feels laggy | expected for huge frames over a slow link; the compute is remote, only pixels cross the wire |
+| laptop browser "can't connect" | open the tunnel above (or use VS Code Remote-SSH), then paste the URL |
+| `EnvironmentNameNotFound` on launch | the box's env isn't `live-env`; pass the real name with `--env <name>` |
+| port clash | rerun (it auto-picks a fresh port) or pass `--port <n>` |
+| widget renders but feels laggy | expected for huge frames over a slow link; only pixels cross the wire |
