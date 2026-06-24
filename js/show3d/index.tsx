@@ -1566,6 +1566,7 @@ function Show3D() {
 
   // WebGPU FFT state
   const gpuFFTRef = React.useRef<WebGPUFFT | null>(null);
+  const offlineFftGpuDisabledRef = React.useRef(false);
   const [gpuReady, setGpuReady] = React.useState(false);
   const fftOffscreenRef = React.useRef<HTMLCanvasElement | null>(null);
   const kymoOffscreenRef = React.useRef<HTMLCanvasElement | null>(null);
@@ -5332,17 +5333,21 @@ function Show3D() {
       const multiPanelFft = panelCount > 1 && !roiFftActive;
 
       if (multiPanelFft) {
-        const panelW = Math.max(1, sourcePanelWidth);
+        const panelW = sharedPanelSource
+          ? Math.max(1, sourcePanelWidth)
+          : Math.max(1, Math.floor(width / panelCount));
         const panelH = height;
         const fftW = nextPow2(panelW);
         const fftH = nextPow2(panelH);
         const panels: { real: Float32Array; imag: Float32Array }[] = [];
+        const fullW = data.length === height * panelW ? panelW : width;
         for (let panel = 0; panel < panelCount; panel++) {
-          const panelData = extractPanelSlice(data, panel, false);
-          if (!panelData || panelData.length === 0) continue;
+          const srcPanel = sharedPanelSource ? 0 : panel;
+          const x0 = Math.min(Math.max(0, srcPanel * panelW), Math.max(0, fullW - panelW));
+          if (data.length < height * fullW || x0 + panelW > fullW) continue;
           const real = new Float32Array(fftW * fftH);
           for (let y = 0; y < panelH; y++) {
-            real.set(panelData.subarray(y * panelW, y * panelW + panelW), y * fftW);
+            real.set(data.subarray(y * fullW + x0, y * fullW + x0 + panelW), y * fftW);
           }
           if (fftWindow) applyHannWindow2D(real, fftW, fftH);
           panels.push({ real, imag: new Float32Array(real.length) });
@@ -5351,7 +5356,57 @@ function Show3D() {
 
         let results: { real: Float32Array; imag: Float32Array }[];
         let fftSource = "worker-batch";
-        if (offline) {
+        const offlineGpuTimeoutMs = 5000;
+        const withOfflineTimeout = <T,>(promise: Promise<T>): Promise<T> => {
+          if (!offline) return promise;
+          return Promise.race([
+            promise,
+            new Promise<T>((_, reject) => window.setTimeout(() => reject(new Error("offline WebGPU FFT timed out")), offlineGpuTimeoutMs)),
+          ]);
+        };
+        const offlineGpuDisabled = () => offlineFftGpuDisabledRef.current || !!((window as any).__show3dOfflineFftGpuDisabled);
+        const disableOfflineGpu = () => {
+          offlineFftGpuDisabledRef.current = true;
+          (window as any).__show3dOfflineFftGpuDisabled = true;
+        };
+        const offlineGpuInFlight = () => !!((window as any).__show3dOfflineFftGpuInFlight);
+        const skipOfflineWebGpu = offline && /HeadlessChrome/i.test(navigator.userAgent);
+        if (gpuReady && gpuFFTRef.current && panels.length > 1 && !skipOfflineWebGpu && !offlineGpuDisabled() && !offlineGpuInFlight()) {
+          let startedOfflineGpu = false;
+          try {
+            if (offline) {
+              (window as any).__show3dOfflineFftGpuInFlight = true;
+              startedOfflineGpu = true;
+            }
+            results = await withOfflineTimeout(
+              gpuFFTRef.current.fft2DBatch(
+                panels.map(({ real, imag }) => ({ real: real.slice(), imag: imag.slice() })),
+                fftW,
+                fftH,
+              )
+            );
+            fftSource = "webgpu-batch";
+          } catch (err) {
+            console.warn("Show3D WebGPU FFT failed; falling back to worker FFT.", err);
+            if (offline) {
+              disableOfflineGpu();
+              results = panels.map(({ real, imag }) => {
+                const r = real.slice();
+                const im = imag.slice();
+                fft2d(r, im, fftW, fftH, false);
+                fftshift(r, fftW, fftH);
+                fftshift(im, fftW, fftH);
+                return { real: r, imag: im };
+              });
+              fftSource = "cpu-sync-shifted";
+            } else {
+              results = (await Promise.all(panels.map(({ real, imag }) => fft2dAsync(real.slice(), imag.slice(), fftW, fftH, false))))
+                .map(({ real, imag }) => ({ real, imag }));
+            }
+          } finally {
+            if (startedOfflineGpu) (window as any).__show3dOfflineFftGpuInFlight = false;
+          }
+        } else if (offline) {
           results = panels.map(({ real, imag }) => {
             const r = real.slice();
             const im = imag.slice();
@@ -5361,29 +5416,6 @@ function Show3D() {
             return { real: r, imag: im };
           });
           fftSource = "cpu-sync-shifted";
-        } else if (gpuReady && gpuFFTRef.current && panels.length > 1) {
-          try {
-            results = await gpuFFTRef.current.fft2DBatch(
-              panels.map(({ real, imag }) => ({ real: real.slice(), imag: imag.slice() })),
-              fftW,
-              fftH,
-            );
-            fftSource = "webgpu-batch";
-          } catch (err) {
-            console.warn("Show3D WebGPU FFT failed; falling back to worker FFT.", err);
-            results = (await Promise.all(panels.map(({ real, imag }) => fft2dAsync(real.slice(), imag.slice(), fftW, fftH, false))))
-              .map(({ real, imag }) => ({ real, imag }));
-          }
-        } else if (gpuReady && gpuFFTRef.current) {
-          try {
-            results = [await gpuFFTRef.current.fft2D(panels[0].real.slice(), panels[0].imag.slice(), fftW, fftH, false)];
-            fftSource = "webgpu";
-          } catch (err) {
-            console.warn("Show3D WebGPU FFT failed; falling back to worker FFT.", err);
-            results = [await fft2dAsync(panels[0].real.slice(), panels[0].imag.slice(), fftW, fftH, false)]
-              .map(({ real, imag }) => ({ real, imag }));
-            fftSource = "worker-batch";
-          }
         } else {
           results = (await Promise.all(panels.map(({ real, imag }) => fft2dAsync(real, imag, fftW, fftH, false))))
             .map(({ real, imag }) => ({ real, imag }));
@@ -5573,9 +5605,22 @@ function Show3D() {
         const cx = Math.floor(grid.panelWidth / 2);
         const cy = Math.floor(grid.panelHeight / 2);
         const dcRadius = Math.max(2, Math.round(Math.min(grid.panelWidth, grid.panelHeight) * 0.01));
+        const ringRadius = dcRadius + 2;
+        let ringSum = 0;
+        let ringCount = 0;
+        for (let yy = Math.max(0, cy - ringRadius); yy <= Math.min(grid.panelHeight - 1, cy + ringRadius); yy++) {
+          for (let xx = Math.max(0, cx - ringRadius); xx <= Math.min(grid.panelWidth - 1, cx + ringRadius); xx++) {
+            const dist = Math.hypot(xx - cx, yy - cy);
+            if (dist > dcRadius && dist <= ringRadius) {
+              ringSum += panelDisplay[yy * grid.panelWidth + xx];
+              ringCount++;
+            }
+          }
+        }
+        const dcFill = ringCount > 0 ? ringSum / ringCount : 0;
         for (let yy = Math.max(0, cy - dcRadius); yy <= Math.min(grid.panelHeight - 1, cy + dcRadius); yy++) {
           for (let xx = Math.max(0, cx - dcRadius); xx <= Math.min(grid.panelWidth - 1, cx + dcRadius); xx++) {
-            panelDisplay[yy * grid.panelWidth + xx] = 0;
+            panelDisplay[yy * grid.panelWidth + xx] = dcFill;
           }
         }
 
