@@ -5,8 +5,10 @@ export. See the [Show3D tutorial](../tutorials/show3d).
 
 ## Reference
 
-```{autodoc2-object} quantem.widget.show3d.Show3D
-render_plugin = "myst"
+```{eval-rst}
+.. autoclass:: quantem.widget.show3d.Show3D
+   :members:
+   :show-inheritance:
 ```
 
 ## Interactive controls
