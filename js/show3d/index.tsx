@@ -1994,6 +1994,41 @@ function Show3D() {
     setVminPerPanel(nextMins);
     setVmaxPerPanel(nextMaxs);
   };
+  const setAllPanelRangeValues = (minValue: number | null, maxValue: number | null) => {
+    const n = Math.max(1, nPanels || 1);
+    const nextMins = Array.from({ length: n }, () => minValue);
+    const nextMaxs = Array.from({ length: n }, () => maxValue);
+    vminPerPanelLiveRef.current = nextMins;
+    vmaxPerPanelLiveRef.current = nextMaxs;
+    setVminPerPanel(nextMins);
+    setVmaxPerPanel(nextMaxs);
+  };
+  const storedPanelRange = (
+    panel: number,
+    fallback: { min: number; max: number },
+  ): { vmin: number; vmax: number } | null => {
+    const storedMin = vminPerPanelLiveRef.current[panel];
+    const storedMax = vmaxPerPanelLiveRef.current[panel];
+    if (storedMin == null && storedMax == null) return null;
+    const lo = storedMin ?? fallback.min;
+    const hi = Math.max(lo, storedMax ?? fallback.max);
+    return Number.isFinite(lo) && Number.isFinite(hi) && hi >= lo ? { vmin: lo, vmax: hi } : null;
+  };
+  const storedLinkedRange = (
+    fallback: { min: number; max: number },
+  ): { vmin: number; vmax: number } | null => {
+    const n = Math.max(1, nPanels || 1);
+    const ranges: { vmin: number; vmax: number }[] = [];
+    for (let panel = 0; panel < n; panel++) {
+      const range = storedPanelRange(panel, fallback);
+      if (range) ranges.push(range);
+    }
+    if (!ranges.length) return null;
+    return {
+      vmin: Math.min(...ranges.map(r => r.vmin)),
+      vmax: Math.max(...ranges.map(r => r.vmax)),
+    };
+  };
   const extractPanelSlice = (
     raw: Float32Array,
     panel: number,
@@ -2029,15 +2064,9 @@ function Show3D() {
     const effectiveRange = (perPanelHistogramEnabled && pdr && pdr.max > pdr.min)
       ? pdr
       : range;
-    const useStoredManual = !autoContrast;
-    if (useStoredManual) {
-      const storedMin = vminPerPanelLiveRef.current[panel];
-      const storedMax = vmaxPerPanelLiveRef.current[panel];
-      if (storedMin != null || storedMax != null) {
-        const lo = storedMin ?? effectiveRange.min;
-        const hi = storedMax ?? effectiveRange.max;
-        return { vmin: lo, vmax: Math.max(lo, hi), logScale };
-      }
+    const stored = storedPanelRange(panel, effectiveRange);
+    if (stored) {
+      return { ...stored, logScale };
     }
     const slider = sliderRange(effectiveRange.min, effectiveRange.max, state.imageVminPct, state.imageVmaxPct);
     return { ...slider, logScale };
@@ -2127,6 +2156,8 @@ function Show3D() {
     low: number,
     high: number,
   ): { vmin: number; vmax: number; logScale: boolean } => {
+    const stored = storedPanelRange(panel, range);
+    if (stored) return { ...stored, logScale };
     if (perPanelHistogramEnabled && autoOn) {
       const autoRange = autoPanelRangeFromData(panelData, range, low, high);
       if (autoRange) return autoRange;
@@ -2851,8 +2882,12 @@ function Show3D() {
     } else {
       let vmin: number, vmax: number;
       if (c.autoContrast) {
-        const cached = cachedAutoDisplayRange(c.autoVmins, c.autoVmaxs, normalized, c.logScale)
-          || cachedAutoDisplayRange(localAutoVminsRef.current, localAutoVmaxsRef.current, normalized, c.logScale);
+        const stackBounds = resolveDisplayBounds(c.dataMin, c.dataMax, c.traitVmin, c.traitVmax, c.logScale);
+        const stored = storedLinkedRange(stackBounds);
+        const cached = stored ?? (
+          cachedAutoDisplayRange(c.autoVmins, c.autoVmaxs, normalized, c.logScale)
+          || cachedAutoDisplayRange(localAutoVminsRef.current, localAutoVmaxsRef.current, normalized, c.logScale)
+        );
         if (cached) {
           ({ vmin, vmax } = cached);
         } else {
@@ -2944,8 +2979,12 @@ function Show3D() {
     engine.uploadLUT(c.cmap, lut);
     let vmin: number, vmax: number;
     if (c.autoContrast) {
-      const cached = cachedAutoDisplayRange(c.autoVmins, c.autoVmaxs, normalized, c.logScale)
-        || cachedAutoDisplayRange(localAutoVminsRef.current, localAutoVmaxsRef.current, normalized, c.logScale);
+      const stackBounds = resolveDisplayBounds(c.dataMin, c.dataMax, c.traitVmin, c.traitVmax, c.logScale);
+      const stored = storedLinkedRange(stackBounds);
+      const cached = stored ?? (
+        cachedAutoDisplayRange(c.autoVmins, c.autoVmaxs, normalized, c.logScale)
+        || cachedAutoDisplayRange(localAutoVminsRef.current, localAutoVmaxsRef.current, normalized, c.logScale)
+      );
       if (cached) {
         ({ vmin, vmax } = cached);
       } else {
@@ -4013,6 +4052,14 @@ function Show3D() {
     lastAutoContrastRef.current = autoContrast;
     if (perPanelHistogramEnabled) return;
     if (!autoContrast || !imageHistogramData || imageHistogramData.length === 0) return;
+    const { min: autoMin, max: autoMax } = resolveDisplayBounds(dataMin, dataMax, traitVmin, traitVmax, logScale);
+    const stored = storedLinkedRange({ min: autoMin, max: autoMax });
+    if (stored && autoMax > autoMin) {
+      setImageVminPct(valueToPct(stored.vmin, autoMin, autoMax, imageVminPct));
+      setImageVmaxPct(valueToPct(stored.vmax, autoMin, autoMax, imageVmaxPct));
+      initialAutoSnappedRef.current = true;
+      return;
+    }
     // Skip initial snap if user already moved thumbs (e.g. loaded from saved state).
     if (!initialAutoSnappedRef.current && (imageVminPct !== 0 || imageVmaxPct !== 100)) {
       initialAutoSnappedRef.current = true;
@@ -4020,7 +4067,6 @@ function Show3D() {
     }
     // After first snap, re-snap only on logScale OR Auto-toggle-on transitions.
     if (initialAutoSnappedRef.current && !logScaleChanged && !autoToggledOn) return;
-    const { min: autoMin, max: autoMax } = resolveDisplayBounds(dataMin, dataMax, traitVmin, traitVmax, logScale);
     const span = autoMax - autoMin;
     if (span <= 0) return;
     const cached = frameTransformActive() ? null : (
@@ -4043,6 +4089,16 @@ function Show3D() {
     if (stackBounds.max <= stackBounds.min) return;
     setPanelStates(prev => {
       const out = prev.map((state, i) => {
+        const panelRange = panelDataRanges[i];
+        const range = (panelRange && panelRange.max > panelRange.min) ? panelRange : stackBounds;
+        const stored = storedPanelRange(i, range);
+        if (stored) {
+          return {
+            ...state,
+            imageVminPct: valueToPct(stored.vmin, range.min, range.max, state.imageVminPct),
+            imageVmaxPct: valueToPct(stored.vmax, range.min, range.max, state.imageVmaxPct),
+          };
+        }
         // PER-PANEL auto: percentile-clip THIS panel's own data, then map
         // pct in THIS panel's data range. Mixed-unit stacks (BF/DF counts
         // vs SSB radians) span many orders of magnitude — using stack
@@ -4114,10 +4170,12 @@ function Show3D() {
       ));
     } else if (autoContrast) {
       const renderIdx = offline ? liveSliceIdx : sliceIdx;
-      const cached = transformActive ? null : (
+      const stackBounds = resolveDisplayBounds(dataMin, dataMax, traitVmin, traitVmax, logScale);
+      const stored = storedLinkedRange(stackBounds);
+      const cached = stored ?? (transformActive ? null : (
         cachedAutoDisplayRange(autoVmins, autoVmaxs, renderIdx, logScale)
         || cachedAutoDisplayRange(localAutoVminsRef.current, localAutoVmaxsRef.current, renderIdx, logScale)
-      );
+      ));
       if (cached) {
         ({ vmin, vmax } = cached);
       } else {
@@ -7627,11 +7685,6 @@ function Show3D() {
                             onRangeChange={(min, max) => {
                               updatePanelState(panel, { imageVminPct: min, imageVmaxPct: max });
                               setPanelRangeValues(panel, pctToValue(min, panelRange.min, panelRange.max), pctToValue(max, panelRange.min, panelRange.max));
-                              if (autoContrast) {
-                                restorePanelManualClipPcts();
-                                manualImageRangeBeforeAutoRef.current = null;
-                                setAutoContrast(false);
-                              }
                             }}
                             width={110}
                             height={58}
@@ -7661,10 +7714,14 @@ function Show3D() {
                     onRangeChange={(min, max) => {
                       setImageVminPct(min);
                       setImageVmaxPct(max);
-                      if (autoContrast) {
-                        manualImageRangeBeforeAutoRef.current = null;
-                        setAutoContrast(false);
+                      const minValue = pctToValue(min, histMin, histMax);
+                      const maxValue = pctToValue(max, histMin, histMax);
+                      if ((nPanels || 1) > 1 && linkContrast) {
+                        setAllPanelRangeValues(minValue, maxValue);
+                      } else {
+                        setPanelRangeValues(0, minValue, maxValue);
                       }
+                      manualImageRangeBeforeAutoRef.current = null;
                     }}
                     width={110}
                     height={58}
