@@ -2117,6 +2117,7 @@ function Show3D() {
         imageVmaxPct: valueToPct(hi, range.min, range.max, state.imageVmaxPct),
       };
     });
+    panelStatesLiveRef.current = nextStates;
     setPanelStates(nextStates);
   };
 
@@ -7460,6 +7461,7 @@ function Show3D() {
                               updatePanelState(panel, { imageVminPct: min, imageVmaxPct: max });
                               setPanelRangeValues(panel, pctToValue(min, panelRange.min, panelRange.max), pctToValue(max, panelRange.min, panelRange.max));
                               if (autoContrast) {
+                                restorePanelManualClipPcts();
                                 manualImageRangeBeforeAutoRef.current = null;
                                 setAutoContrast(false);
                               }
