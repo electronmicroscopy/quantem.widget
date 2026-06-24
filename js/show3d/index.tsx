@@ -592,7 +592,7 @@ function drawROI(
   }
 }
 
-import { WebGPUFFT, getWebGPUFFT, fft2d, fft2dAsync, fftshift, computeMagnitude, autoEnhanceFFT, nextPow2, applyHannWindow2D } from "../fft";
+import { WebGPUFFT, getWebGPUFFT, getGPUInfo, fft2d, fft2dAsync, fftshift, computeMagnitude, autoEnhanceFFT, nextPow2, applyHannWindow2D } from "../fft";
 
 const FFT_SNAP_RADIUS = 5;
 
@@ -1566,6 +1566,7 @@ function Show3D() {
 
   // WebGPU FFT state
   const gpuFFTRef = React.useRef<WebGPUFFT | null>(null);
+  const gpuFftInitPromiseRef = React.useRef<Promise<WebGPUFFT | null> | null>(null);
   const offlineFftGpuDisabledRef = React.useRef(false);
   const [gpuReady, setGpuReady] = React.useState(false);
   const fftOffscreenRef = React.useRef<HTMLCanvasElement | null>(null);
@@ -1584,6 +1585,31 @@ function Show3D() {
   const gpuRenderSerialRef = React.useRef(0);
   const gpuDisplayVisibleRef = React.useRef<boolean | null>(null);
   const [gpuDisplayVisible, setGpuDisplayVisibleState] = React.useState(false);
+
+  const ensureFftGpu = React.useCallback(async (): Promise<WebGPUFFT | null> => {
+    if (gpuFFTRef.current) return gpuFFTRef.current;
+    if (!gpuFftInitPromiseRef.current) {
+      gpuFftInitPromiseRef.current = getWebGPUFFT().then(fft => {
+        if (fft) {
+          const info = getGPUInfo();
+          if (/swiftshader|software/i.test(info)) {
+            console.log(`[Show3D] Software WebGPU adapter detected (${info}); using CPU FFT fallback`);
+            return null;
+          }
+          gpuFFTRef.current = fft;
+          setGpuReady(true);
+          console.log(`[Show3D] WebGPU FFT initialized - ${info || "GPU"}`);
+        } else {
+          console.log("[Show3D] WebGPU FFT unavailable - CPU fallback will be used");
+        }
+        return fft;
+      }).catch(err => {
+        console.warn("[Show3D] WebGPU FFT init failed; CPU fallback will be used.", err);
+        return null;
+      });
+    }
+    return gpuFftInitPromiseRef.current;
+  }, []);
 
   const setGpuDisplayVisible = React.useCallback((visible: boolean) => {
     if (gpuDisplayVisibleRef.current === visible) return;
@@ -1647,8 +1673,10 @@ function Show3D() {
   const [gpuCmapReady, setGpuCmapReady] = React.useState(false);
   React.useEffect(() => {
     let disposed = false;
-    getWebGPUFFT().then(fft => {
-      if (!disposed && fft) { gpuFFTRef.current = fft; setGpuReady(true); }
+    ensureFftGpu().then(fft => {
+      if (disposed || !fft) return;
+      gpuFFTRef.current = fft;
+      setGpuReady(true);
     });
     createGPUColormapEngine().then(engine => {
       if (disposed) {
@@ -5371,7 +5399,12 @@ function Show3D() {
         };
         const offlineGpuInFlight = () => !!((window as any).__show3dOfflineFftGpuInFlight);
         const skipOfflineWebGpu = offline && /HeadlessChrome/i.test(navigator.userAgent);
-        if (gpuReady && gpuFFTRef.current && panels.length > 1 && !skipOfflineWebGpu && !offlineGpuDisabled() && !offlineGpuInFlight()) {
+        if (offlineGpuInFlight()) return;
+        const fftGpu = (!skipOfflineWebGpu && !offlineGpuDisabled() && !offlineGpuInFlight())
+          ? await withOfflineTimeout(ensureFftGpu())
+          : null;
+        if (cancelled) return;
+        if (fftGpu && panels.length > 1) {
           let startedOfflineGpu = false;
           try {
             if (offline) {
@@ -5379,7 +5412,7 @@ function Show3D() {
               startedOfflineGpu = true;
             }
             results = await withOfflineTimeout(
-              gpuFFTRef.current.fft2DBatch(
+              fftGpu.fft2DBatch(
                 panels.map(({ real, imag }) => ({ real: real.slice(), imag: imag.slice() })),
                 fftW,
                 fftH,
@@ -5510,11 +5543,13 @@ function Show3D() {
       let real: Float32Array, imag: Float32Array;
 
       let fftSource = "cpu";
-      if (gpuReady && gpuFFTRef.current) {
+      const fftGpu = await ensureFftGpu();
+      if (cancelled) return;
+      if (fftGpu) {
         try {
           const gpuReal = inputData.slice();
           const gpuImag = new Float32Array(inputData.length);
-          const result = await gpuFFTRef.current.fft2D(gpuReal, gpuImag, fftW, fftH, false);
+          const result = await fftGpu.fft2D(gpuReal, gpuImag, fftW, fftH, false);
           real = result.real;
           imag = result.imag;
           fftSource = "webgpu";
@@ -5562,7 +5597,7 @@ function Show3D() {
     doCompute();
 
     return () => { cancelled = true; };
-  }, [effectiveShowFft, frameBytes, offline, liveSliceIdx, displaySliceIdx, width, height, gpuReady, roiFftActive, roiList, roiSelectedIdx, fftWindow, nPanels, sourcePanelWidth, maxCols, extractPanelSlice]);
+  }, [effectiveShowFft, frameBytes, offline, liveSliceIdx, displaySliceIdx, width, height, roiFftActive, roiList, roiSelectedIdx, fftWindow, nPanels, sourcePanelWidth, maxCols, extractPanelSlice, ensureFftGpu]);
 
   // Clear FFT measurement when ROI FFT state changes
   React.useEffect(() => { setFftClickInfo(null); }, [roiFftActive, roiSelectedIdx]);
