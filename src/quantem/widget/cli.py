@@ -51,11 +51,11 @@ def main(argv: list[str] | None = None) -> int:
     # parser rather than the shared show* options.
     _add_html_args(sub.add_parser(
         "html", help="Execute a notebook and export it to a standalone, offline shareable HTML."))
-    # `jupyter` launches JupyterLab on a remote GPU box and opens it in the local
-    # browser over an SSH tunnel - the "kernel on the compute box, UI on my laptop"
-    # workflow, so a collaborator drives every widget from their browser.
+    # `jupyter` starts JupyterLab here on the GPU box and prints a URL to paste into the
+    # laptop browser - kernel + GPU here, UI in your browser. You bring your own tunnel
+    # (SSH -L / VS Code) the same way quantem.live does.
     _add_jupyter_args(sub.add_parser(
-        "jupyter", help="Launch JupyterLab on a remote GPU box (SSH tunnel + local browser)."))
+        "jupyter", help="Start JupyterLab on this GPU box and print a URL to open from your laptop."))
     args = parser.parse_args(argv)
     try:
         if args.command == "html":
@@ -125,173 +125,109 @@ def _render_html(args: argparse.Namespace) -> int:
 def _add_jupyter_args(parser: argparse.ArgumentParser) -> None:
     """Attach options for the ``jupyter`` subcommand."""
     parser.add_argument("path", nargs="?", default=None,
-                        help="Notebook or directory to open on the remote (relative to the "
-                             "remote home, or absolute). A .ipynb opens directly.")
-    parser.add_argument("--host", required=True,
-                        help="SSH alias/host of the GPU box (from your ~/.ssh/config).")
+                        help="Notebook or directory to open (relative to where you run this, or "
+                             "absolute). A .ipynb opens directly.")
     parser.add_argument("--env", default="live-env",
-                        help="Conda/mamba env to activate on the remote before launching JupyterLab "
+                        help="Conda/mamba env to activate before launching JupyterLab "
                              "(default: live-env). Pass --env '' to skip activation.")
     parser.add_argument("--port", type=int, default=None,
-                        help="Port to use on both ends (default: auto-pick a free port on the remote).")
+                        help="Port to serve on (default: auto-pick a free port).")
     parser.add_argument("--no-open", action="store_true",
-                        help="Open the tunnel + start JupyterLab but do not launch a browser.")
-    parser.add_argument("--setup", action="store_true",
-                        help="Configure SSH for --host (make a key if needed, add a ~/.ssh/config "
-                             "entry, verify the connection) and exit. Run this once for a new box.")
+                        help="Start JupyterLab but do not open a browser (the box is usually "
+                             "headless - copy the printed URL into your laptop browser).")
 
 
-def _ssh_reachable(host: str) -> bool:
-    """True if `ssh <host>` connects passwordless (key auth) right now. BatchMode means
-    a missing key fails fast instead of hanging on a password prompt."""
-    import subprocess
-    try:
-        r = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host, "true"],
-                           capture_output=True, text=True, timeout=20)
-        return r.returncode == 0
-    except subprocess.SubprocessError:
-        return False
+def _free_port() -> int:
+    """Pick a free local TCP port by binding to port 0 and reading back what the OS chose.
+    Runs on the same box JupyterLab will, so the port is guaranteed free for the server."""
+    import socket
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
 
 
-def _ssh_config_has_host(host: str) -> bool:
-    """Whether ~/.ssh/config already defines `host` as a Host alias (token-exact, so
-    `Host mallard buffle` counts for either)."""
-    cfg = pathlib.Path.home() / ".ssh" / "config"
-    if not cfg.exists():
-        return False
-    for line in cfg.read_text().splitlines():
-        parts = line.split()
-        if parts and parts[0].lower() == "host" and host in parts[1:]:
-            return True
-    return False
+def _config_path() -> pathlib.Path:
+    """Where the per-user jupyter config lives. Honors XDG_CONFIG_HOME, else ~/.config."""
+    base = os.environ.get("XDG_CONFIG_HOME")
+    root = pathlib.Path(base) if base else pathlib.Path.home() / ".config"
+    return root / "quantem" / "jupyter.json"
 
 
-def _setup_ssh_host(host: str) -> bool:
-    """Walk a new user through SSH access to `host`: make an ed25519 key if absent, add a
-    ~/.ssh/config entry (HostName `<host>.stanford.edu` when `host` has no dot), print the
-    public key to hand to the box admin, then re-test. Returns True if reachable after.
+def _ssh_target() -> str:
+    """The `user@host` a laptop uses to SSH into this box, for the copy-paste tunnel line.
 
-    This is the 'I typed --host buffle and nothing is set up' on-ramp - the same job as
-    `live setup`, kept minimal so a collaborator gets connected without reading a manual."""
-    import subprocess
-    ssh_dir = pathlib.Path.home() / ".ssh"
-    ssh_dir.mkdir(mode=0o700, exist_ok=True)
-    key = ssh_dir / "id_ed25519"
-    if not key.exists():
-        print(f"No SSH key found - creating {key} ...")
-        subprocess.run(["ssh-keygen", "-t", "ed25519", "-N", "", "-f", str(key)], check=False)
-    cfg = ssh_dir / "config"
-    if _ssh_config_has_host(host):
-        print(f"~/.ssh/config already has a Host entry for {host}.")
-    else:
-        user = input(f"Your login username on {host} (Stanford SUNet, etc.): ").strip()
-        if not user:
-            print("quantem: no username given; cannot write the config entry.", file=sys.stderr)
-            return False
-        hostname = f"{host}.stanford.edu" if "." not in host else host
-        block = (f"\nHost {host}\n"
-                 f"    HostName {hostname}\n"
-                 f"    User {user}\n"
-                 f"    IdentityFile ~/.ssh/id_ed25519\n"
-                 f"    ServerAliveInterval 30\n")
-        with cfg.open("a") as fh:
-            fh.write(block)
-        cfg.chmod(0o600)
-        print(f"Added Host {host} -> {hostname} (user {user}) to {cfg}.")
-    pub = key.with_suffix(".pub")
-    if pub.exists():
-        print("\nGive this PUBLIC key to whoever runs the box (they add it to your "
-              f"~/.ssh/authorized_keys there):\n\n{pub.read_text().strip()}\n")
-    input("Press Enter once the admin has added your key (or your account is ready) to re-test...")
-    if _ssh_reachable(host):
-        print(f"SSH to {host} works. You're set.")
-        return True
-    print(f"Still cannot reach {host} passwordless. Check with the admin (key installed? "
-          "login-node/2FA? on the VPN?), then rerun. See the Remote JupyterLab doc.")
-    return False
-
-
-def _remote_free_port(host: str) -> int:
-    """Ask the remote for a free TCP port. Probing the REMOTE (not the local box) is
-    essential: the two have independent port spaces, so a local-only pick can leave
-    JupyterLab on one port while the SSH ``-L`` tunnel is bound to another - the tunnel
-    then goes nowhere and the browser silently fails to connect. Falls back to 8888."""
-    import subprocess
-    probe = ("python3 -c \"import socket; s=socket.socket(); s.bind(('127.0.0.1',0)); "
-             "print(s.getsockname()[1]); s.close()\"")
-    try:
-        out = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", host, probe],
-                             capture_output=True, text=True, timeout=20)
-        port = int(out.stdout.strip())
-        if port > 0:
-            return port
-    except (subprocess.SubprocessError, ValueError):
-        pass
-    return 8888
+    Saved once in the per-user config so the printed `ssh -L` command is ready to paste
+    with no placeholder to edit. On first interactive launch we auto-detect `whoami@fqdn`,
+    show it, and let the user accept (Enter) or correct it, then persist it. Later launches
+    read it silently. Non-interactive launches (no TTY) fall back to the auto-detected guess
+    without prompting or saving, so a headless run still prints a usable command."""
+    import getpass
+    import json
+    import socket
+    cfg = _config_path()
+    if cfg.exists():
+        try:
+            saved = json.loads(cfg.read_text()).get("ssh_target")
+            if saved:
+                return saved
+        except (OSError, ValueError):
+            pass
+    default = f"{getpass.getuser()}@{socket.getfqdn()}"
+    if not sys.stdin.isatty():
+        return default
+    answer = input(f"SSH target your laptop uses to reach this box [{default}]: ").strip()
+    target = answer or default
+    cfg.parent.mkdir(parents=True, exist_ok=True)
+    cfg.write_text(json.dumps({"ssh_target": target}, indent=2))
+    print(f"  saved to {cfg} (edit it anytime to change)")
+    return target
 
 
 def _launch_jupyter(args: argparse.Namespace) -> int:
-    """Run JupyterLab on a remote GPU box and open it in the local browser over an SSH
-    tunnel - kernel + GPU on the compute box, UI in the laptop browser. This is what lets
-    a collaborator drive every quantem widget (Show2D/3D/4DSTEM, SSB, any tutorial) from
-    their own browser: anywidget rides the Jupyter Comm channel, so one remote kernel +
-    tunnel serves all widgets with no per-widget setup.
+    """Start JupyterLab here on the GPU box and print a URL to paste into the laptop
+    browser - kernel + GPU run here, UI in your browser. anywidget rides the Jupyter Comm
+    channel, so one server serves every quantem widget (Show2D/3D/4DSTEM, SSB, any
+    tutorial) with no per-widget setup. You bring your own laptop->box hop (SSH ``-L`` or
+    VS Code Remote-SSH), same as quantem.live; this command does no SSH or tunnel work.
 
-    The remote command runs under a login shell so the user's conda init is sourced; the
-    SSH session stays in the foreground so the tunnel lives as long as JupyterLab does
-    (Ctrl-C stops both)."""
+    Runs under a login shell so conda init is sourced, in the foreground so JupyterLab
+    lives as long as the command does (Ctrl-C stops it)."""
     import secrets
     import shlex
     import subprocess
     import threading
     import webbrowser
-    host = args.host
-    # `--setup`: configure SSH and stop. Otherwise preflight the connection so a new user
-    # gets a guided fix instead of a raw ssh error when --host isn't set up yet.
-    if args.setup:
-        return 0 if _setup_ssh_host(host) else 1
-    if not _ssh_reachable(host):
-        print(f"quantem: can't reach '{host}' over SSH (no passwordless connection).")
-        if sys.stdin.isatty():
-            answer = input(f"Set up SSH for '{host}' now? [Y/n] ").strip().lower()
-            if answer in ("", "y", "yes"):
-                if not _setup_ssh_host(host):
-                    return 1
-            else:
-                print(f"Run `quantem jupyter --host {host} --setup` when ready. "
-                      "See the Remote JupyterLab doc for details.")
-                return 1
-        else:
-            print(f"Run `quantem jupyter --host {host} --setup` to configure it "
-                  "(make a key, add ~/.ssh/config, verify). See the Remote JupyterLab doc.")
-            return 1
-    port = args.port or _remote_free_port(host)
+    port = args.port or _free_port()
     token = secrets.token_hex(16)
     launch = (f"jupyter lab --no-browser --ip=127.0.0.1 --port={port} "
               f"--IdentityProvider.token={token} --ServerApp.token={token}")
     if args.env:
         # `conda` is usually NOT on a non-interactive login shell's PATH, so a bare
-        # `conda activate` fails (verified on buffle). Source conda.sh from the common
-        # install locations first, then activate. Covers miniforge/miniconda/anaconda.
+        # `conda activate` fails. Source conda.sh from the common install locations
+        # first, then activate. Covers miniforge/miniconda/anaconda/mambaforge.
         src = ("for c in ~/miniforge3 ~/miniconda3 ~/anaconda3 ~/mambaforge; do "
                "[ -f \"$c/etc/profile.d/conda.sh\" ] && . \"$c/etc/profile.d/conda.sh\" && break; done")
         launch = f"{src} && conda activate {shlex.quote(args.env)} && {launch}"
     if args.path and not args.path.endswith(".ipynb"):
         launch = f"cd {shlex.quote(args.path)} && {launch}"
-    remote = f"bash -lc {shlex.quote(launch)}"
     sub = ""
     if args.path and args.path.endswith(".ipynb"):
         sub = "/tree/" + args.path.lstrip("/")
     url = f"http://localhost:{port}/lab{sub}?token={token}"
-    print(f"starting JupyterLab on {host} (port {port}) - kernel runs there, UI opens here")
+    # Resolve (and on first run, save) the SSH target BEFORE printing, so its one-time
+    # prompt doesn't interrupt the URL block.
+    target = _ssh_target()
+    print(f"starting JupyterLab on this box (port {port}) - copy this URL into your laptop browser")
     print(f"  {url}")
-    print("  Ctrl-C to stop JupyterLab and close the tunnel.")
+    print(f"  if your laptop can't reach it, tunnel first:  ssh -L {port}:127.0.0.1:{port} {target}")
+    print("  Ctrl-C to stop JupyterLab.")
     if not args.no_open:
-        # Open the browser a few seconds after the server has had time to come up; the
-        # foreground SSH below keeps the tunnel alive while the user works.
-        threading.Timer(5.0, lambda: webbrowser.open(url)).start()
-    ssh_cmd = ["ssh", "-t", "-L", f"{port}:127.0.0.1:{port}", host, remote]
-    return subprocess.run(ssh_cmd).returncode
+        # If a browser is reachable (rare on a headless box), open it after the server
+        # has had a moment to come up. The foreground process below keeps it alive.
+        threading.Timer(3.0, lambda: webbrowser.open(url)).start()
+    return subprocess.run(["bash", "-lc", launch]).returncode
 
 
 def _add_show_args(parser: argparse.ArgumentParser) -> None:
