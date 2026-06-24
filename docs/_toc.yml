@@ -8,6 +8,7 @@ parts:
     chapters:
       - file: install
       - file: cli
+      - file: changelog
   - caption: Tutorials
     chapters:
       - file: tutorials/show2d
