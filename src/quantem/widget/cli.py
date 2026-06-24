@@ -221,37 +221,42 @@ def _launch_jupyter(args: argparse.Namespace) -> int:
     # Resolve (and on first run, save) the SSH target BEFORE printing, so its one-time
     # prompt doesn't interrupt the URL block.
     target = _ssh_target()
-    # One-shot copy-paste: open the SSH tunnel in the background then open the URL
-    # in the default browser. `ssh -fN` forks to background and keeps the tunnel
-    # alive; `open` (macOS) / `xdg-open` (Linux) launches the browser. Cross-platform
-    # via the shell's `||` fallback. User pastes this one line on their laptop and
-    # the lab tab appears — no manual URL copy, no second terminal.
-    one_line = (
+    # Two one-liners — same tunnel command, OS-specific browser launcher. macOS
+    # uses `open`; Linux uses `xdg-open`. Windows (PowerShell / Git Bash / cmd)
+    # uses `start` (PowerShell alias for Start-Process; Git Bash forwards to
+    # Windows start; in cmd the empty-title arg is needed but `start "" "URL"`
+    # works in all three Windows shells).
+    line_unix = (
         f'ssh -fN -L {port}:127.0.0.1:{port} {target} && '
         f'(open "{url}" 2>/dev/null || xdg-open "{url}" 2>/dev/null || echo "{url}")'
     )
-    # Multi-color so the eye lands on the paste-line first: yellow banner
-    # frames it, bright cyan is the command itself, green status follows,
-    # gray for the alternates. Reads on Apple Terminal, iTerm, VS Code,
-    # gnome-terminal — every common terminal.
+    line_win = (
+        f'ssh -fN -L {port}:127.0.0.1:{port} {target} ; start "" "{url}"'
+    )
     YL = "\033[1;33m"      # bold yellow — frame
-    CY = "\033[1;96m"      # bold bright cyan — the paste command (loudest)
+    CY = "\033[1;96m"      # bold bright cyan — the paste command
     GN = "\033[1;32m"      # bold green — status
     DM = "\033[2;37m"      # dim white — alternates
     AR = "\033[1;31m"      # bold red — arrows
+    LB = "\033[1;35m"      # bold magenta — OS labels
     RST = "\033[0m"
     bar = "═" * 72
     arrow = "↓ ↓ ↓"
     print()
     print(f"{YL}╔{bar}╗{RST}")
-    print(f"{YL}║{RST}    {AR}{arrow}{RST}  {YL}COPY-PASTE THIS ONE LINE INTO YOUR LAPTOP TERMINAL{RST}  {AR}{arrow}{RST}    {YL}║{RST}")
+    print(f"{YL}║{RST}    {AR}{arrow}{RST}  {YL}COPY-PASTE ONE LINE INTO YOUR LAPTOP TERMINAL{RST}  {AR}{arrow}{RST}        {YL}║{RST}")
     print(f"{YL}╚{bar}╝{RST}")
     print()
-    print(f"  {CY}{one_line}{RST}")
+    print(f"  {LB}macOS / Linux:{RST}")
+    print(f"    {CY}{line_unix}{RST}")
+    print()
+    print(f"  {LB}Windows (PowerShell or Git Bash):{RST}")
+    print(f"    {CY}{line_win}{RST}")
     print()
     print(f"  {GN}✓ JupyterLab running on this box, port {port}. Ctrl-C here to stop.{RST}")
     print(f"  {DM}(URL alone): {url}{RST}")
     print(f"  {DM}(tunnel alone): ssh -L {port}:127.0.0.1:{port} {target}{RST}")
+    print(f"  {DM}(no SSH key yet? https://github.com/ophusgroup/dev#appendix-c-ssh-for-github-and-gpu-servers){RST}")
     print()
     # Flush now: the foreground server below never returns, so block-buffered stdout
     # (when redirected to a file/pipe, not a TTY) would otherwise hide the URL forever.
