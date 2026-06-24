@@ -1506,6 +1506,7 @@ function Show4DSTEM() {
   const [showFft, setShowFft] = useModelState<boolean>("show_fft");
   const [fftWindow, setFftWindow] = useModelState<boolean>("fft_window");
   const [showControls] = useModelState<boolean>("show_controls");
+  const [panelWidthPx] = useModelState<number>("panel_width_px");
 
   const effectiveShowFft = showFft;
 
@@ -1514,7 +1515,11 @@ function Show4DSTEM() {
   const roiFftActive = effectiveShowFft && viRoiMode !== "off";
 
   // Canvas resize state
-  const [canvasSize, setCanvasSize] = React.useState(CANVAS_SIZE);
+  const initialCanvasSize = panelWidthPx > 0 ? panelWidthPx : CANVAS_SIZE;
+  const [canvasSize, setCanvasSize] = React.useState(initialCanvasSize);
+  React.useEffect(() => {
+    if (panelWidthPx > 0) setCanvasSize(panelWidthPx);
+  }, [panelWidthPx]);
   const [isResizingCanvas, setIsResizingCanvas] = React.useState(false);
   const [resizeCanvasStart, setResizeCanvasStart] = React.useState<{ x: number; y: number; size: number } | null>(null);
 
@@ -3889,7 +3894,8 @@ function Show4DSTEM() {
     const handleMouseMove = (e: MouseEvent) => {
       if (!resizeCanvasStart) return;
       const delta = Math.max(e.clientX - resizeCanvasStart.x, e.clientY - resizeCanvasStart.y);
-      latestSize = Math.max(CANVAS_SIZE, resizeCanvasStart.size + delta);
+      const minCanvasSize = Math.max(1, panelWidthPx > 0 ? panelWidthPx : CANVAS_SIZE);
+      latestSize = Math.max(minCanvasSize, resizeCanvasStart.size + delta);
       if (!rafId) {
         rafId = requestAnimationFrame(() => {
           rafId = 0;
@@ -3910,7 +3916,7 @@ function Show4DSTEM() {
       document.removeEventListener("mousemove", handleMouseMove);
       document.removeEventListener("mouseup", handleMouseUp);
     };
-  }, [isResizingCanvas, resizeCanvasStart]);
+  }, [isResizingCanvas, resizeCanvasStart, panelWidthPx]);
 
   // ─────────────────────────────────────────────────────────────────────────
   // Render
