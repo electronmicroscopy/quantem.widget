@@ -83,7 +83,10 @@ def test_bslz4_offline_multi_volume_roundtrip(tmp_path):
     assert len(meta["volumes"]) == 2
     det = 32 * 32
     for idx, vol in enumerate(meta["volumes"]):
-        assert vol["base"] == f"vol{idx}/"
+        # base is prefixed with the data dir name so a served HTML resolves
+        # `<data_dir>/vol{idx}/...` (the fix that made combined multi-volume HTML
+        # actually fetch its companions instead of 404ing).
+        assert vol["base"] == f"{out_dir.name}/vol{idx}/"
         decoded = _decode_bslz4_volume(out_dir / f"vol{idx}", vol["chunks"], 16, det)
         expected = np.clip(data[idx].reshape(16, -1), 0, 255).astype(np.uint16)
         np.testing.assert_array_equal(np.clip(decoded, 0, 255), expected)
