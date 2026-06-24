@@ -201,7 +201,9 @@ def _launch_jupyter(args: argparse.Namespace) -> int:
     import webbrowser
     port = args.port or _free_port()
     token = secrets.token_hex(16)
-    launch = (f"jupyter lab --no-browser --ip=127.0.0.1 --port={port} "
+    # --log-level=WARN silences the ~20 INFO log lines that otherwise scroll the
+    # paste-line banner off-screen. Errors + warnings still surface.
+    launch = (f"jupyter lab --no-browser --ip=127.0.0.1 --port={port} --log-level=WARN "
               f"--IdentityProvider.token={token} --ServerApp.token={token}")
     if args.env:
         # `conda` is usually NOT on a non-interactive login shell's PATH, so a bare
@@ -228,24 +230,28 @@ def _launch_jupyter(args: argparse.Namespace) -> int:
         f'ssh -fN -L {port}:127.0.0.1:{port} {target} && '
         f'(open "{url}" 2>/dev/null || xdg-open "{url}" 2>/dev/null || echo "{url}")'
     )
-    # Stand out from the JupyterLab log spam that follows. ANSI bold + bright
-    # cyan reads on every common terminal (Apple Terminal, iTerm, VS Code's
-    # integrated terminal, Linux gnome-terminal). The box border anchors the
-    # eye even when terminal width wraps the one-liner.
-    B = "\033[1m"; CY = "\033[1;36m"; YL = "\033[1;33m"; RST = "\033[0m"
-    bar = "#" * 72
+    # Multi-color so the eye lands on the paste-line first: yellow banner
+    # frames it, bright cyan is the command itself, green status follows,
+    # gray for the alternates. Reads on Apple Terminal, iTerm, VS Code,
+    # gnome-terminal — every common terminal.
+    YL = "\033[1;33m"      # bold yellow — frame
+    CY = "\033[1;96m"      # bold bright cyan — the paste command (loudest)
+    GN = "\033[1;32m"      # bold green — status
+    DM = "\033[2;37m"      # dim white — alternates
+    AR = "\033[1;31m"      # bold red — arrows
+    RST = "\033[0m"
+    bar = "═" * 72
+    arrow = "↓ ↓ ↓"
     print()
-    print(f"{YL}{bar}{RST}")
-    print(f"{YL}### COPY-PASTE THIS ONE LINE INTO YOUR LAPTOP TERMINAL ###{RST}")
-    print(f"{YL}{bar}{RST}")
+    print(f"{YL}╔{bar}╗{RST}")
+    print(f"{YL}║{RST}    {AR}{arrow}{RST}  {YL}COPY-PASTE THIS ONE LINE INTO YOUR LAPTOP TERMINAL{RST}  {AR}{arrow}{RST}    {YL}║{RST}")
+    print(f"{YL}╚{bar}╝{RST}")
     print()
-    print(f"{CY}{one_line}{RST}")
+    print(f"  {CY}{one_line}{RST}")
     print()
-    print(f"{YL}{bar}{RST}")
-    print()
-    print(f"  JupyterLab running on this box, port {port}. Ctrl-C here to stop.")
-    print(f"  (URL alone): {url}")
-    print(f"  (tunnel alone): ssh -L {port}:127.0.0.1:{port} {target}")
+    print(f"  {GN}✓ JupyterLab running on this box, port {port}. Ctrl-C here to stop.{RST}")
+    print(f"  {DM}(URL alone): {url}{RST}")
+    print(f"  {DM}(tunnel alone): ssh -L {port}:127.0.0.1:{port} {target}{RST}")
     print()
     # Flush now: the foreground server below never returns, so block-buffered stdout
     # (when redirected to a file/pipe, not a TTY) would otherwise hide the URL forever.
