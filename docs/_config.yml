@@ -29,6 +29,7 @@ sphinx:
     # mock the heavy + native deps. The pure-python deps (anywidget, traitlets,
     # numpy, quantem core) are installed in the docs build step.
     autodoc_mock_imports:
+      - anywidget
       - cupy
       - cupyx
       - h5py
