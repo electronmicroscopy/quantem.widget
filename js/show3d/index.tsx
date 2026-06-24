@@ -592,7 +592,7 @@ function drawROI(
   }
 }
 
-import { WebGPUFFT, getWebGPUFFT, fft2dAsync, fftshift, computeMagnitude, autoEnhanceFFT, nextPow2, applyHannWindow2D } from "../fft";
+import { WebGPUFFT, getWebGPUFFT, fft2d, fft2dAsync, fftshift, computeMagnitude, autoEnhanceFFT, nextPow2, applyHannWindow2D } from "../fft";
 
 const FFT_SNAP_RADIUS = 5;
 
@@ -2252,6 +2252,7 @@ function Show3D() {
   const [fftLogScale, setFftLogScale] = React.useState(false);
   const [fftAuto, setFftAuto] = React.useState(true);  // Auto: mask DC + 99.9% clipping
   const [fftShowColorbar, setFftShowColorbar] = React.useState(false);
+  const [fftOffscreenVersion, setFftOffscreenVersion] = React.useState(0);
   const [showColorbar, setShowColorbar] = React.useState(false);
 
   // Histogram state for kymograph (mirrors FFT contrast/colormap controls)
@@ -5350,7 +5351,17 @@ function Show3D() {
 
         let results: { real: Float32Array; imag: Float32Array }[];
         let fftSource = "worker-batch";
-        if (gpuReady && gpuFFTRef.current && panels.length > 1) {
+        if (offline) {
+          results = panels.map(({ real, imag }) => {
+            const r = real.slice();
+            const im = imag.slice();
+            fft2d(r, im, fftW, fftH, false);
+            fftshift(r, fftW, fftH);
+            fftshift(im, fftW, fftH);
+            return { real: r, imag: im };
+          });
+          fftSource = "cpu-sync-shifted";
+        } else if (gpuReady && gpuFFTRef.current && panels.length > 1) {
           try {
             results = await gpuFFTRef.current.fft2DBatch(
               panels.map(({ real, imag }) => ({ real: real.slice(), imag: imag.slice() })),
@@ -5384,7 +5395,7 @@ function Show3D() {
         const gridW = cols * fftW;
         const gridH = rows * fftH;
         const gridMag = new Float32Array(gridW * gridH);
-        const resultsAlreadyShifted = fftSource === "worker-batch";
+        const resultsAlreadyShifted = fftSource === "worker-batch" || fftSource === "cpu-sync-shifted";
         for (let panel = 0; panel < results.length; panel++) {
           const { real, imag } = results[panel];
           if (!resultsAlreadyShifted) {
@@ -5552,21 +5563,25 @@ function Show3D() {
           panelValues.set(mag.subarray(srcOffset, srcOffset + grid.panelWidth), y * grid.panelWidth);
         }
 
+        const panelDisplay = new Float32Array(panelValues.length);
+        for (let i = 0; i < panelValues.length; i++) {
+          // FFT magnitudes are extremely heavy-tailed; even in "Lin" UI mode,
+          // auto contrast should reveal Bragg/fringe peaks instead of letting
+          // the DC/low-frequency pedestal flatten the tile.
+          panelDisplay[i] = Math.log1p(Math.max(0, panelValues[i]));
+        }
         const cx = Math.floor(grid.panelWidth / 2);
         const cy = Math.floor(grid.panelHeight / 2);
-        const centerIdx = cy * grid.panelWidth + cx;
-        const neighbors = [
-          panelValues[Math.max(0, centerIdx - 1)],
-          panelValues[Math.min(panelValues.length - 1, centerIdx + 1)],
-          panelValues[Math.max(0, centerIdx - grid.panelWidth)],
-          panelValues[Math.min(panelValues.length - 1, centerIdx + grid.panelWidth)],
-        ];
-        panelValues[centerIdx] = neighbors.reduce((a, b) => a + b, 0) / 4;
+        const dcRadius = Math.max(2, Math.round(Math.min(grid.panelWidth, grid.panelHeight) * 0.01));
+        for (let yy = Math.max(0, cy - dcRadius); yy <= Math.min(grid.panelHeight - 1, cy + dcRadius); yy++) {
+          for (let xx = Math.max(0, cx - dcRadius); xx <= Math.min(grid.panelWidth - 1, cx + dcRadius); xx++) {
+            panelDisplay[yy * grid.panelWidth + xx] = 0;
+          }
+        }
 
-        const panelDisplay = fftLogScale ? applyLogScale(panelValues) : panelValues;
         const range = findDataRange(panelDisplay);
-        const clipped = percentileClip(panelDisplay, 0, 99.9);
-        const pMin = range.min;
+        const clipped = percentileClip(panelDisplay, 5, 99.99);
+        const pMin = clipped.vmin < clipped.vmax ? clipped.vmin : range.min;
         const pMax = clipped.vmax > pMin ? clipped.vmax : range.max;
         const denom = pMax > pMin ? pMax - pMin : 1;
         for (let y = 0; y < grid.panelHeight; y++) {
@@ -5603,6 +5618,7 @@ function Show3D() {
     if (!offscreen) return;
 
     fftOffscreenRef.current = offscreen;
+    setFftOffscreenVersion(v => v + 1);
 
     if (fftCanvasRef.current) {
       const ctx = fftCanvasRef.current.getContext("2d");
@@ -5637,7 +5653,7 @@ function Show3D() {
     ctx.scale(fftZoom, fftZoom);
     ctx.drawImage(fftOffscreenRef.current, 0, 0, canvasW, canvasH);
     ctx.restore();
-  }, [effectiveShowFft, fftZoom, fftPanX, fftPanY, canvasW, canvasH]);
+  }, [effectiveShowFft, fftOffscreenVersion, fftZoom, fftPanX, fftPanY, canvasW, canvasH]);
 
   // === Kymograph (space-time) ===
   // A sub-feature of the line profile (Henry: "the profile feature created a 2D
