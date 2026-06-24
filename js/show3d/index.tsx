@@ -436,7 +436,7 @@ const Histogram = React.memo(function Histogram({
   }, [bins, vminPct, vmaxPct, width, height, colors]);
   const formatValue = (pct: number) => {
     const val = dataMin + (pct / 100) * (dataMax - dataMin);
-    return val >= 1000 ? val.toExponential(1) : val.toFixed(1);
+    return val >= 1000 ? val.toExponential(2) : val.toFixed(2);
   };
   return (
     <Box sx={{ display: "flex", flexDirection: "column", gap: 0.25 }}>
@@ -1577,6 +1577,7 @@ function Show3D() {
     autoRangeComputeTokenRef.current++;
   }, [percentileLow, percentileHigh, nSlices, width, height]);
 
+  const [gpuCmapReady, setGpuCmapReady] = React.useState(false);
   React.useEffect(() => {
     let disposed = false;
     getWebGPUFFT().then(fft => {
@@ -1590,6 +1591,11 @@ function Show3D() {
       if (engine) {
         gpuCmapRef.current = engine;
         gpuCmapReadyRef.current = true;
+        // State counterpart of the ref so downstream useEffects re-fire
+        // when the GPU engine becomes available. Without this, the data
+        // effect that fires at mount paints via the CPU fallback BEFORE
+        // the engine is ready and never re-paints when it IS ready.
+        setGpuCmapReady(true);
       }
     });
     return () => {
@@ -1597,6 +1603,7 @@ function Show3D() {
       gpuCmapRef.current?.destroy();
       gpuCmapRef.current = null;
       gpuCmapReadyRef.current = false;
+      setGpuCmapReady(false);
       gpuCanvasCtxRef.current = null;
       gpuCanvasSizeRef.current = null;
       frameFetchSerialRef.current++;
@@ -1966,7 +1973,7 @@ function Show3D() {
   const [imageDataRange, setImageDataRange] = React.useState<{ min: number; max: number }>({ min: 0, max: 1 });
   const [panelHistogramData, setPanelHistogramData] = React.useState<(Float32Array | null)[]>([]);
   const [panelDataRanges, setPanelDataRanges] = React.useState<{ min: number; max: number }[]>([]);
-  const perPanelHistogramEnabled = false;
+  const perPanelHistogramEnabled = (nPanels || 1) > 1 && !linkContrast;
 
   const updatePanelState = (panel: number, patch: Partial<PanelState>) => {
     setPanelStates(prev => prev.map((state, i) => i === panel ? { ...state, ...patch } : state));
@@ -1981,23 +1988,6 @@ function Show3D() {
     setPanelListValue<number | null>(vminPerPanel, setVminPerPanel, panel, minValue, null);
     setPanelListValue<number | null>(vmaxPerPanel, setVmaxPerPanel, panel, maxValue, null);
   };
-  const setAllPanelClipPcts = (minPct: number, maxPct: number) => {
-    const n = Math.max(1, nPanels || 1);
-    setPanelStates(prev => Array.from({ length: n }, (_, i) => ({
-      ...(prev[i] || initialState),
-      imageVminPct: minPct,
-      imageVmaxPct: maxPct,
-    })));
-  };
-  const resetPerPanelClips = () => {
-    const n = Math.max(1, nPanels || 1);
-    setAllPanelClipPcts(0, 100);
-    setImageVminPct(0);
-    setImageVmaxPct(100);
-    setVminPerPanel(Array.from({ length: n }, () => null));
-    setVmaxPerPanel(Array.from({ length: n }, () => null));
-  };
-
   const extractPanelSlice = (
     raw: Float32Array,
     panel: number,
@@ -2023,43 +2013,105 @@ function Show3D() {
     sharedAutoRange?: { vmin: number; vmax: number } | null,
   ): { vmin: number; vmax: number; logScale: boolean } => {
     const state = panelStates[panel] || initialState;
-    if (sharedAutoRange) {
+    if (sharedAutoRange && !perPanelHistogramEnabled) {
       return { ...sharedAutoRange, logScale };
     }
-    const storedMin = vminPerPanel[panel];
-    const storedMax = vmaxPerPanel[panel];
-    if (storedMin != null || storedMax != null) {
-      const lo = storedMin ?? range.min;
-      const hi = storedMax ?? range.max;
-      return { vmin: lo, vmax: Math.max(lo, hi), logScale };
+    // Per-panel mode: always interpret slider pct in THIS panel's data
+    // range. Stack-wide bounds (for mixed BF/DF counts vs SSB radians)
+    // would decode SSB sliders to count-territory values → black image.
+    const pdr = panelDataRanges[panel];
+    const effectiveRange = (perPanelHistogramEnabled && pdr && pdr.max > pdr.min)
+      ? pdr
+      : range;
+    const useStoredManual = !perPanelHistogramEnabled;
+    if (useStoredManual) {
+      const storedMin = vminPerPanel[panel];
+      const storedMax = vmaxPerPanel[panel];
+      if (storedMin != null || storedMax != null) {
+        const lo = storedMin ?? effectiveRange.min;
+        const hi = storedMax ?? effectiveRange.max;
+        return { vmin: lo, vmax: Math.max(lo, hi), logScale };
+      }
     }
-    const slider = sliderRange(range.min, range.max, state.imageVminPct, state.imageVmaxPct);
+    const slider = sliderRange(effectiveRange.min, effectiveRange.max, state.imageVminPct, state.imageVmaxPct);
     return { ...slider, logScale };
   };
 
-  const resolveCurrentSharedAutoRange = (requireAuto = true): { vmin: number; vmax: number } | null => {
-    if (requireAuto && !autoContrast) return null;
-    const raw = rawFrameDataRef.current;
-    if (raw && raw.length > 0) {
-      const cached = cachedAutoDisplayRange(autoVmins, autoVmaxs, displaySliceIdx, logScale)
-        || cachedAutoDisplayRange(localAutoVminsRef.current, localAutoVmaxsRef.current, displaySliceIdx, logScale);
-      if (cached) return cached;
-      const processed = logScale ? applyLogScale(raw) : raw;
-      return percentileClip(processed, percentileLow, percentileHigh);
+  const autoPanelRangeFromData = (
+    panelData: Float32Array | null,
+    fallbackRange: { min: number; max: number },
+    low: number,
+    high: number,
+  ): { vmin: number; vmax: number; logScale: boolean } | null => {
+    if (!panelData || panelData.length === 0) return null;
+    const dataRange = findDataRange(panelData);
+    const range = dataRange.max > dataRange.min ? dataRange : fallbackRange;
+    if (range.max <= range.min) return null;
+    let clipped: { vmin: number; vmax: number } = percentileClip(panelData, low, high);
+    const span = range.max - range.min;
+    if (!Number.isFinite(clipped.vmin) || !Number.isFinite(clipped.vmax) || clipped.vmax <= clipped.vmin || clipped.vmax - clipped.vmin < span * 1e-4) {
+      clipped = { vmin: range.min, vmax: range.max };
     }
-    return resolveDisplayRange(dataMin, dataMax, traitVmin, traitVmax, logScale, imageVminPct, imageVmaxPct);
+    return { vmin: clipped.vmin, vmax: Math.max(clipped.vmin, clipped.vmax), logScale };
   };
-  const snapPerPanelClipsToStackAuto = () => {
-    const bounds = resolveDisplayBounds(dataMin, dataMax, traitVmin, traitVmax, logScale);
-    if (bounds.max <= bounds.min) return;
-    const clipped = resolveCurrentSharedAutoRange(false);
-    if (!clipped) return;
-    const minPct = valueToPct(clipped.vmin, bounds.min, bounds.max, 0);
-    const maxPct = valueToPct(clipped.vmax, bounds.min, bounds.max, 100);
-    setAllPanelClipPcts(minPct, maxPct);
-    setImageVminPct(minPct);
-    setImageVmaxPct(maxPct);
+
+  const panelAutoClipPcts = (
+    panel: number,
+    state: PanelState,
+    stackBounds: { min: number; max: number },
+  ): Pick<PanelState, "imageVminPct" | "imageVmaxPct"> | null => {
+    const panelRaw = panelHistogramData[panel];
+    if (!panelRaw || panelRaw.length === 0) return null;
+    // panelHistogramData is already in the active display domain; in log mode
+    // refreshHistogram populated it from extractPanelSlice(..., logScale).
+    const panelRange = panelDataRanges[panel];
+    const range = (panelRange && panelRange.max > panelRange.min) ? panelRange : stackBounds;
+    const span = range.max - range.min;
+    if (span <= 0) return null;
+    let clipped: { vmin: number; vmax: number } = percentileClip(panelRaw, percentileLow, percentileHigh);
+    if (
+      !Number.isFinite(clipped.vmin) ||
+      !Number.isFinite(clipped.vmax) ||
+      clipped.vmax <= clipped.vmin ||
+      clipped.vmax - clipped.vmin < span * 1e-4
+    ) {
+      clipped = { vmin: range.min, vmax: range.max };
+    }
+    return {
+      imageVminPct: valueToPct(clipped.vmin, range.min, range.max, state.imageVminPct),
+      imageVmaxPct: valueToPct(clipped.vmax, range.min, range.max, state.imageVmaxPct),
+    };
   };
+
+  const freezePanelAutoClipPcts = () => {
+    const stackBounds = resolveDisplayBounds(dataMin, dataMax, traitVmin, traitVmax, logScale);
+    if (stackBounds.max <= stackBounds.min) return;
+    setPanelStates(prev => {
+      const n = Math.max(1, nPanels || 1);
+      return Array.from({ length: n }, (_, i) => {
+        const state = prev[i] || initialState;
+        const clip = panelAutoClipPcts(i, state, stackBounds);
+        return clip ? { ...state, ...clip } : state;
+      });
+    });
+  };
+
+  const resolvePanelRenderRange = (
+    panel: number,
+    range: { min: number; max: number },
+    sharedAutoRange: { vmin: number; vmax: number } | null,
+    panelData: Float32Array | null,
+    autoOn: boolean,
+    low: number,
+    high: number,
+  ): { vmin: number; vmax: number; logScale: boolean } => {
+    if (perPanelHistogramEnabled && autoOn) {
+      const autoRange = autoPanelRangeFromData(panelData, range, low, high);
+      if (autoRange) return autoRange;
+    }
+    return resolvePanelRange(panel, range, sharedAutoRange);
+  };
+
   const handleAutoContrastChange = (on: boolean) => {
     if (on) {
       manualImageRangeBeforeAutoRef.current = { min: imageVminPct, max: imageVmaxPct };
@@ -2067,15 +2119,21 @@ function Show3D() {
     setAutoContrast(on);
     if (perPanelHistogramEnabled) {
       if (on) {
-        snapPerPanelClipsToStackAuto();
+        // Per-panel snap fires automatically via the [autoContrast,
+        // panelHistogramData, ...] useEffect below. Calling the legacy
+        // stack-wide snap here would race-write 0/100 to every panel
+        // before the effect overrode with the correct per-panel clip,
+        // causing a 1-frame flash to washed contrast on every toggle.
       } else {
-        const restore = manualImageRangeBeforeAutoRef.current;
-        if (restore) {
-          setAllPanelClipPcts(restore.min, restore.max);
-          manualImageRangeBeforeAutoRef.current = null;
-        } else {
-          resetPerPanelClips();
-        }
+        // OFF freezes the currently-rendered per-panel auto clip as slider
+        // percentages in each panel's own data range. Scrubbing can then keep
+        // the same manual window shape without carrying BF/DF/SSB absolute
+        // values across mixed-unit panels.
+        freezePanelAutoClipPcts();
+        const n = Math.max(1, nPanels || 1);
+        setVminPerPanel(Array.from({ length: n }, () => null));
+        setVmaxPerPanel(Array.from({ length: n }, () => null));
+        manualImageRangeBeforeAutoRef.current = null;
       }
       return;
     }
@@ -2762,7 +2820,9 @@ function Show3D() {
         }
       }
       renderRanges = Array.from({ length: n }, (_, panel) => {
-        const bounds = resolveDisplayBounds(c.dataMin, c.dataMax, c.traitVmin, c.traitVmax, c.logScale);
+        const stack = resolveDisplayBounds(c.dataMin, c.dataMax, c.traitVmin, c.traitVmax, c.logScale);
+        const pdr = panelDataRanges[panel];
+        const bounds = (perPanelHistogramEnabled && pdr && pdr.max > pdr.min) ? pdr : stack;
         return resolvePanelRange(panel, bounds, sharedAutoRange);
       });
       renderLogScale = c.logScale;
@@ -2900,9 +2960,19 @@ function Show3D() {
         x: panel * panelW, y: 0, width: panelW, height: c.height,
       }));
       const sharedAutoRange = c.autoContrast ? { vmin, vmax } : null;
+      const transformActive = c.diffMode !== "off" || Math.max(1, Math.round(c.avgWindow || 1)) > 1;
+      const rawForRanges = rawFrameForIndex(normalized, normalized, rawFrameDataRef.current);
+      const frameForRanges = rawForRanges && transformActive
+        ? (displayFrameForIndex(normalized, rawForRanges) ?? rawForRanges)
+        : rawForRanges;
       const ranges = Array.from({ length: n }, (_, panel) => {
-        const bounds = resolveDisplayBounds(c.dataMin, c.dataMax, c.traitVmin, c.traitVmax, c.logScale);
-        return resolvePanelRange(panel, bounds, sharedAutoRange);
+        const stack = resolveDisplayBounds(c.dataMin, c.dataMax, c.traitVmin, c.traitVmax, c.logScale);
+        const panelData = frameForRanges ? extractPanelSlice(frameForRanges, panel, c.logScale) : null;
+        const pdr = panelDataRanges[panel];
+        const bounds = (panelData && panelData.length > 0)
+          ? findDataRange(panelData)
+          : ((perPanelHistogramEnabled && pdr && pdr.max > pdr.min) ? pdr : stack);
+        return resolvePanelRenderRange(panel, bounds, sharedAutoRange, panelData, c.autoContrast, c.percentileLow, c.percentileHigh);
       });
       const logs = c.logScale;
       const bitmaps = engine.renderPerPanelGpuExplicit(normalized, regions, ranges, logs);
@@ -3495,11 +3565,20 @@ function Show3D() {
                   }));
                   const sharedAutoRange = c.autoContrast ? { vmin, vmax } : null;
                   const ranges = Array.from({ length: n }, (_, p) => {
-                    const panelData = sharedAutoRange ? null : (frame ? extractPanelSlice(frame, p, c.logScale) : null);
+                    const panelData = frame ? extractPanelSlice(frame, p, c.logScale) : null;
+                    // In per-panel mode, ALWAYS prefer this panel's stored
+                    // data range so slider pct decodes in panel space (not
+                    // stack space). Without this SSB phase [±0.04] gets
+                    // decoded against stack range [≈-0.04, ≈30000] → vmin
+                    // and vmax both land in DF-count territory → all SSB
+                    // pixels render black.
+                    const pdr = panelDataRanges[p];
                     const panelRange = panelData && panelData.length > 0
                       ? findDataRange(panelData)
-                      : resolveDisplayBounds(c.dataMin, c.dataMax, c.traitVmin, c.traitVmax, c.logScale);
-                    return resolvePanelRange(p, panelRange, sharedAutoRange);
+                      : ((perPanelHistogramEnabled && pdr && pdr.max > pdr.min)
+                          ? pdr
+                          : resolveDisplayBounds(c.dataMin, c.dataMax, c.traitVmin, c.traitVmax, c.logScale));
+                    return resolvePanelRenderRange(p, panelRange, sharedAutoRange, panelData, c.autoContrast, c.percentileLow, c.percentileHigh);
                   });
                   const logs = c.logScale;
                   const bitmaps = engine.renderPerPanelGpuExplicit(slotIdx, regions, ranges, logs);
@@ -3932,27 +4011,26 @@ function Show3D() {
     initialAutoSnappedRef.current = true;
   }, [autoContrast, imageHistogramData, dataMin, dataMax, traitVmin, traitVmax, autoVmins, autoVmaxs, sliceIdx, percentileLow, percentileHigh, logScale, imageVminPct, imageVmaxPct, perPanelHistogramEnabled]);
 
+  // useEffect (not useLayoutEffect) so the per-panel auto-snap runs AFTER
+  // the data effect populates panelHistogramData for the new frame.
+  // useLayoutEffect fires BEFORE useEffects → rawFrameDataRef would be
+  // stale and the snap would bail at mount.
   React.useEffect(() => {
     if (!perPanelHistogramEnabled || !autoContrast || panelHistogramData.length === 0) return;
-    const { min: autoMin, max: autoMax } = resolveDisplayBounds(dataMin, dataMax, traitVmin, traitVmax, logScale);
-    if (autoMax <= autoMin) return;
-    // Compute auto range PER PANEL — each panel has different data, so each
-    // needs its own percentile clip. Previously a single range from
-    // rawFrameDataRef was written to every panel, producing identical thumbs.
-    setPanelStates(prev => prev.map((state, i) => {
-      const panelRaw = panelHistogramData[i];
-      if (!panelRaw || panelRaw.length === 0) return state;
-      const processed = logScale ? applyLogScale(panelRaw) : panelRaw;
-      const cached = cachedAutoDisplayRange(autoVmins, autoVmaxs, sliceIdx, logScale)
-        || cachedAutoDisplayRange(localAutoVminsRef.current, localAutoVmaxsRef.current, sliceIdx, logScale);
-      const clipped = cached ?? percentileClip(processed, percentileLow, percentileHigh);
-      return {
-        ...state,
-        imageVminPct: valueToPct(clipped.vmin, autoMin, autoMax, state.imageVminPct),
-        imageVmaxPct: valueToPct(clipped.vmax, autoMin, autoMax, state.imageVmaxPct),
-      };
-    }));
-  }, [perPanelHistogramEnabled, autoContrast, panelHistogramData, dataMin, dataMax, traitVmin, traitVmax, logScale, sliceIdx, percentileLow, percentileHigh, autoVmins, autoVmaxs]);
+    const stackBounds = resolveDisplayBounds(dataMin, dataMax, traitVmin, traitVmax, logScale);
+    if (stackBounds.max <= stackBounds.min) return;
+    setPanelStates(prev => {
+      const out = prev.map((state, i) => {
+        // PER-PANEL auto: percentile-clip THIS panel's own data, then map
+        // pct in THIS panel's data range. Mixed-unit stacks (BF/DF counts
+        // vs SSB radians) span many orders of magnitude — using stack
+        // range squashes tight panels to pct ≈ 0.
+        const clip = panelAutoClipPcts(i, state, stackBounds);
+        return clip ? { ...state, ...clip } : state;
+      });
+      return out;
+    });
+  }, [perPanelHistogramEnabled, autoContrast, panelHistogramData, panelDataRanges, dataMin, dataMax, traitVmin, traitVmax, logScale, percentileLow, percentileHigh]);
 
   React.useEffect(() => {
     if (!effectiveRoiActive || roiItems.length === 0 || !showRoiResizeHint) return;
@@ -4044,11 +4122,14 @@ function Show3D() {
         }));
         const sharedAutoRange = autoContrast ? { vmin, vmax } : null;
         const panelRanges = Array.from({ length: nP }, (_, p) => {
-          const panelData = sharedAutoRange ? null : extractPanelSlice(frameData, p, logScale);
+          const panelData = extractPanelSlice(frameData, p, logScale);
+          const pdr = panelDataRanges[p];
           const panelRange = panelData && panelData.length > 0
             ? findDataRange(panelData)
-            : resolveDisplayBounds(dataMin, dataMax, traitVmin, traitVmax, logScale);
-          return resolvePanelRange(p, panelRange, sharedAutoRange);
+            : ((perPanelHistogramEnabled && pdr && pdr.max > pdr.min)
+                ? pdr
+                : resolveDisplayBounds(dataMin, dataMax, traitVmin, traitVmax, logScale));
+          return resolvePanelRenderRange(p, panelRange, sharedAutoRange, panelData, autoContrast, percentileLow, percentileHigh);
         });
         const panelLogs = logScale;
         requestAnimationFrame(() => {
@@ -4119,9 +4200,11 @@ function Show3D() {
         if (ok && !playing) requestAnimationFrame(() => { void blitAndDraw(); });
       });
     } else {
+      // WebGPU-only per CLAUDE.md "WebGPU is THE pipeline" rule.
+      // setGpuCmapReady(true) upstream triggers this effect to re-fire as
+      // soon as the engine resolves. Skip painting until then (canvas
+      // briefly blank for ~50-200 ms on phil/mjgoat, never CPU-rendered).
       gpuRenderSerialRef.current++;
-      // CPU fallback
-      renderToOffscreenReuse(processed, lut, vmin, vmax, mainOffscreenRef.current, mainImgDataRef.current);
     }
 
     // Draw to main canvas (CPU path only - GPU path draws in its own rAF above)
@@ -4131,7 +4214,7 @@ function Show3D() {
       const ctx = canvas.getContext("2d");
       if (ctx && mainOffscreenRef.current) drawMain(ctx, mainOffscreenRef.current);
     }
-  }, [frameBytes, frameSeq, width, height, cmap, displayScale, canvasW, canvasH, imageVminPct, imageVmaxPct, logScale, autoContrast, percentileLow, percentileHigh, traitVmin, traitVmax, dataMin, dataMax, autoVmins, autoVmaxs, smooth, imageRotation, nPanels, linkContrast, panelStates, vminPerPanel, vmaxPerPanel, offline, liveSliceIdx, sliceIdx, diffMode, avgWindow, playing]);
+  }, [frameBytes, frameSeq, width, height, cmap, displayScale, canvasW, canvasH, imageVminPct, imageVmaxPct, logScale, autoContrast, percentileLow, percentileHigh, traitVmin, traitVmax, dataMin, dataMax, autoVmins, autoVmaxs, smooth, imageRotation, nPanels, linkContrast, panelStates, panelDataRanges, vminPerPanel, vmaxPerPanel, offline, liveSliceIdx, sliceIdx, diffMode, avgWindow, playing, gpuCmapReady]);
 
   // Per-panel render: each slot gets its own zoom/pan transform. 2px gap
   // between slots painted as the canvas bg (transparent through clearRect).
@@ -5631,9 +5714,12 @@ function Show3D() {
       const panelW = width / nP;
       const panel = Math.max(0, Math.min(nP - 1, Math.floor((Number(roi.col) || 0) / panelW)));
       const panelData = extractPanelSlice(raw, panel, logScale);
-      const panelRange = panelData && panelData.length > 0
-        ? findDataRange(panelData)
-        : resolveDisplayBounds(dataMin, dataMax, traitVmin, traitVmax, logScale);
+      const pdr = panelDataRanges[panel];
+      const panelRange = (perPanelHistogramEnabled && pdr && pdr.max > pdr.min)
+        ? pdr
+        : (panelData && panelData.length > 0
+            ? findDataRange(panelData)
+            : resolveDisplayBounds(dataMin, dataMax, traitVmin, traitVmax, logScale));
       const resolved = resolvePanelRange(panel, panelRange, null);
       vmin = resolved.vmin;
       vmax = resolved.vmax;
@@ -7300,30 +7386,23 @@ function Show3D() {
                 if (perPanelHistogramEnabled) {
                   const n = Math.max(1, nPanels || 1);
                   const cols = (maxCols && maxCols > 0) ? Math.min(maxCols, n) : n;
-                  const panelHistWidth = 132;
-                  const panelHistGap = 12;
-                  const panelHistGridWidth = cols * panelHistWidth + Math.max(0, cols - 1) * panelHistGap;
+                  // Match Show2D shell exactly (width=110, height=58, gap=15px)
+                  // so the per-panel histogram strip is visually consistent
+                  // across widgets.
+                  const panelHistWidth = 110;
                   return (
-                    <Box sx={{
-                      display: "flex",
-                      flexDirection: "column",
-                      alignItems: "flex-end",
-                      justifyContent: "flex-start",
-                      gap: 0.5,
-                      flex: `0 0 ${Math.min(panelHistGridWidth, canvasW)}px`,
-                      width: Math.min(panelHistGridWidth, canvasW),
-                      minWidth: Math.min(panelHistGridWidth, canvasW),
-                      maxWidth: canvasW,
-                      overflowX: "auto",
-                      overflowY: "visible",
-                      pb: 0.5,
-                    }}>
-                      <Box sx={{ display: "grid", gridTemplateColumns: `repeat(${cols}, ${panelHistWidth}px)`, columnGap: `${panelHistGap}px`, rowGap: "8px", width: panelHistGridWidth, overflow: "visible" }}>
+                    <Box sx={{ display: "flex", flexDirection: "column", alignItems: "flex-end", justifyContent: "flex-start", gap: 0.5, opacity: 1, pointerEvents: "auto" }}>
+                      <Box sx={{ display: "grid", gridTemplateColumns: `repeat(${cols}, ${panelHistWidth}px)`, gap: "15px" }}>
                       {Array.from({ length: n }, (_, panel) => {
                         const state = panelStates[panel] || initialState;
-                        const panelRange = { min: histMin, max: histMax };
-                        const vminPct = autoContrast ? state.imageVminPct : valueToPct(vminPerPanel[panel], histMin, histMax, state.imageVminPct);
-                        const vmaxPct = autoContrast ? state.imageVmaxPct : valueToPct(vmaxPerPanel[panel], histMin, histMax, state.imageVmaxPct);
+                        // Per-panel histogram uses THIS panel's data range
+                        // (not stack-wide histMin/histMax). Tight-range
+                        // modalities (SSB phase) get a sensible slider
+                        // space instead of being squashed by DF counts.
+                        const pdr = panelDataRanges[panel];
+                        const panelRange = (pdr && pdr.max > pdr.min) ? pdr : { min: histMin, max: histMax };
+                        const vminPct = state.imageVminPct;
+                        const vmaxPct = state.imageVmaxPct;
                         return (
                           <Histogram
                             key={`panel-hist-${panel}`}
@@ -7334,27 +7413,16 @@ function Show3D() {
                             onRangeChange={(min, max) => {
                               updatePanelState(panel, { imageVminPct: min, imageVmaxPct: max });
                               if (autoContrast) {
-                                const sharedAutoRange = resolveCurrentSharedAutoRange();
-                                const nextVmins = Array.from({ length: n }, (_, i) => {
-                                  if (i === panel) return pctToValue(min, panelRange.min, panelRange.max);
-                                  const range = panelDataRanges[i] ?? resolveDisplayBounds(dataMin, dataMax, traitVmin, traitVmax, logScale);
-                                  return sharedAutoRange?.vmin ?? pctToValue((panelStates[i] || initialState).imageVminPct, range.min, range.max);
-                                });
-                                const nextVmaxs = Array.from({ length: n }, (_, i) => {
-                                  if (i === panel) return pctToValue(max, panelRange.min, panelRange.max);
-                                  const range = panelDataRanges[i] ?? resolveDisplayBounds(dataMin, dataMax, traitVmin, traitVmax, logScale);
-                                  return sharedAutoRange?.vmax ?? pctToValue((panelStates[i] || initialState).imageVmaxPct, range.min, range.max);
-                                });
-                                setVminPerPanel(nextVmins);
-                                setVmaxPerPanel(nextVmaxs);
+                                setVminPerPanel(Array.from({ length: n }, () => null));
+                                setVmaxPerPanel(Array.from({ length: n }, () => null));
                                 manualImageRangeBeforeAutoRef.current = null;
                                 setAutoContrast(false);
                               } else {
                                 setPanelRangeValues(panel, pctToValue(min, panelRange.min, panelRange.max), pctToValue(max, panelRange.min, panelRange.max));
                               }
                             }}
-                            width={panelHistWidth}
-                            height={46}
+                            width={110}
+                            height={58}
                             theme={themeInfo.theme === "dark" ? "dark" : "light"}
                             dataMin={panelRange.min}
                             dataMax={panelRange.max}
