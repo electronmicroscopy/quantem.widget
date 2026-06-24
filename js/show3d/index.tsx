@@ -5221,7 +5221,16 @@ function Show3D() {
   const [fftMagVersion, setFftMagVersion] = React.useState(0);
 
   React.useEffect(() => {
-    if (!effectiveShowFft || !rawFrameDataRef.current) return;
+    if (!effectiveShowFft) return;
+    if (!rawFrameDataRef.current) {
+      const parsed = extractFloat32(frameBytes);
+      const idx = offline ? liveSliceIdx : displaySliceIdx;
+      const frame = parsed
+        ? (displayFrameForIndex(idx, parsed) ?? parsed)
+        : getOfflineFrame(idx);
+      if (frame) rawFrameDataRef.current = frame;
+    }
+    if (!rawFrameDataRef.current) return;
     let cancelled = false;
 
     const doCompute = async () => {
@@ -5251,11 +5260,28 @@ function Show3D() {
         let results: { real: Float32Array; imag: Float32Array }[];
         let fftSource = "worker-batch";
         if (gpuReady && gpuFFTRef.current && panels.length > 1) {
-          results = await gpuFFTRef.current.fft2DBatch(panels, fftW, fftH);
-          fftSource = "webgpu-batch";
+          try {
+            results = await gpuFFTRef.current.fft2DBatch(
+              panels.map(({ real, imag }) => ({ real: real.slice(), imag: imag.slice() })),
+              fftW,
+              fftH,
+            );
+            fftSource = "webgpu-batch";
+          } catch (err) {
+            console.warn("Show3D WebGPU FFT failed; falling back to worker FFT.", err);
+            results = (await Promise.all(panels.map(({ real, imag }) => fft2dAsync(real.slice(), imag.slice(), fftW, fftH, false))))
+              .map(({ real, imag }) => ({ real, imag }));
+          }
         } else if (gpuReady && gpuFFTRef.current) {
-          results = [await gpuFFTRef.current.fft2D(panels[0].real, panels[0].imag, fftW, fftH, false)];
-          fftSource = "webgpu";
+          try {
+            results = [await gpuFFTRef.current.fft2D(panels[0].real.slice(), panels[0].imag.slice(), fftW, fftH, false)];
+            fftSource = "webgpu";
+          } catch (err) {
+            console.warn("Show3D WebGPU FFT failed; falling back to worker FFT.", err);
+            results = [await fft2dAsync(panels[0].real.slice(), panels[0].imag.slice(), fftW, fftH, false)]
+              .map(({ real, imag }) => ({ real, imag }));
+            fftSource = "worker-batch";
+          }
         } else {
           results = (await Promise.all(panels.map(({ real, imag }) => fft2dAsync(real, imag, fftW, fftH, false))))
             .map(({ real, imag }) => ({ real, imag }));
@@ -5351,12 +5377,20 @@ function Show3D() {
 
       let fftSource = "cpu";
       if (gpuReady && gpuFFTRef.current) {
-        const gpuReal = inputData.slice();
-        const gpuImag = new Float32Array(inputData.length);
-        const result = await gpuFFTRef.current.fft2D(gpuReal, gpuImag, fftW, fftH, false);
-        real = result.real;
-        imag = result.imag;
-        fftSource = "webgpu";
+        try {
+          const gpuReal = inputData.slice();
+          const gpuImag = new Float32Array(inputData.length);
+          const result = await gpuFFTRef.current.fft2D(gpuReal, gpuImag, fftW, fftH, false);
+          real = result.real;
+          imag = result.imag;
+          fftSource = "webgpu";
+        } catch (err) {
+          console.warn("Show3D WebGPU FFT failed; falling back to worker FFT.", err);
+          const result = await fft2dAsync(inputData.slice(), new Float32Array(inputData.length), fftW, fftH, false);
+          real = result.real;
+          imag = result.imag;
+          fftSource = "worker";
+        }
       } else {
         const result = await fft2dAsync(inputData.slice(), new Float32Array(inputData.length), fftW, fftH, false);
         real = result.real;
@@ -5394,7 +5428,7 @@ function Show3D() {
     doCompute();
 
     return () => { cancelled = true; };
-  }, [effectiveShowFft, frameBytes, displaySliceIdx, width, height, gpuReady, roiFftActive, roiList, roiSelectedIdx, fftWindow, nPanels, sourcePanelWidth, maxCols, extractPanelSlice]);
+  }, [effectiveShowFft, frameBytes, offline, liveSliceIdx, displaySliceIdx, width, height, gpuReady, roiFftActive, roiList, roiSelectedIdx, fftWindow, nPanels, sourcePanelWidth, maxCols, extractPanelSlice]);
 
   // Clear FFT measurement when ROI FFT state changes
   React.useEffect(() => { setFftClickInfo(null); }, [roiFftActive, roiSelectedIdx]);
@@ -7103,7 +7137,7 @@ function Show3D() {
       onMouseDownCapture={handleRootMouseDownCapture}
       sx={{ ...container.root, bgcolor: themeColors.bg, color: themeColors.text, outline: "none", "&:focus": { outline: "2px solid #0af", outlineOffset: 2 }, "& canvas": { display: "block" } }}
     >
-      <Stack direction="row" spacing={`${SPACING.SM}px`}>
+      <Stack direction="row" spacing={`${SPACING.SM}px`} alignItems="flex-start" sx={{ flexWrap: "wrap" }}>
         <Box>
           {/* Title row */}
           <Typography variant="caption" sx={{ ...typography.label, color: themeColors.accent, mb: `${SPACING.XS}px`, display: "block", height: 16, lineHeight: "16px", overflow: "hidden" }}>
@@ -7785,11 +7819,15 @@ function Show3D() {
           </Box>
         )}
 
-        {/* FFT Panel - same size as main image, canvas-aligned with spacer */}
+        {/* FFT Panel - same size as main image. Multi-panel FFT stacks below the image grid. */}
         {effectiveShowFft && (
-          <Box sx={{ width: canvasW }}>
+          <Box sx={{
+            width: canvasW,
+            flexBasis: (nPanels || 1) > 1 ? "100%" : canvasW,
+            ml: (nPanels || 1) > 1 ? "0 !important" : undefined,
+          }}>
             {/* Spacer - matches main panel title row height for canvas alignment */}
-            <Box sx={{ mb: `${SPACING.XS}px`, height: 16 }} />
+            {(nPanels || 1) === 1 && <Box sx={{ mb: `${SPACING.XS}px`, height: 16 }} />}
             {/* Controls row - matches main panel controls row height */}
             <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: `${SPACING.XS}px`, height: 28 }}>
               {roiFftActive && fftCropDims ? (
