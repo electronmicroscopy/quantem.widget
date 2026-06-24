@@ -9,11 +9,13 @@ configure per widget.
 `quantem jupyter` automates the whole thing:
 
 ```bash
-quantem jupyter --host buffle --env quantem-env drift_tutorial.ipynb
+quantem jupyter --host buffle drift_tutorial.ipynb
 ```
 
-That starts JupyterLab on `buffle`, opens an SSH tunnel, and pops the notebook up in
-your local browser. `Ctrl-C` stops the server and closes the tunnel.
+That starts JupyterLab on `buffle` in the `live-env` conda env (the default), opens an SSH
+tunnel, and pops the notebook up in your local browser. `Ctrl-C` stops the server and
+closes the tunnel. It sources conda for you, so `conda` does **not** need to be on the
+box's login PATH. Override the env with `--env <name>` (or `--env ''` to skip activation).
 
 > Setup is the part that wastes people's time. Do the four steps below **once** and
 > every future session is a single command.
@@ -91,11 +93,12 @@ login-node jump is needed). This 10-second check saves an hour of confusion.
 ## 4. Launch
 
 ```bash
-quantem jupyter --host buffle --env quantem-env drift_tutorial.ipynb
+quantem jupyter --host buffle drift_tutorial.ipynb
 ```
 
 - `--host` - the SSH alias from step 1 (`buffle` or `mallard`).
-- `--env` - the conda env on the box (omit if quantem is in the box's base env).
+- `--env` - conda env on the box. **Defaults to `live-env`**; pass `--env <name>` to change
+  it, or `--env ''` to skip activation. (conda is auto-sourced, so it need not be on PATH.)
 - last argument - a notebook to open directly (omit to land in JupyterLab's file browser).
 
 The command prints a `http://localhost:<port>/lab?token=...` URL and opens it. If your
@@ -121,6 +124,6 @@ Use `jupyter` to *work*; use `html` to *share*.
 | password prompt on `ssh buffle` | key not installed on the box - send your `.pub` to the admin |
 | `Permission denied (publickey)` | wrong `User` or `IdentityFile` in `~/.ssh/config` |
 | hangs, then times out | box needs a login-node `ProxyJump`, or you're off the campus VPN |
-| `conda: command not found` on launch | the env isn't on the box's login-shell PATH; ask the admin for the right `--env` or activation |
+| `EnvironmentNameNotFound` on launch | the box's env isn't named `live-env`; pass the real name with `--env <name>` |
 | browser opens but "can't connect" | rare port clash - rerun (it auto-picks a fresh remote port), or pass `--port` |
 | widget renders but feels laggy | expected for huge frames over a slow link; the compute is remote, only pixels cross the wire |
