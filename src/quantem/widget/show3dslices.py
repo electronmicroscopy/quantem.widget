@@ -534,7 +534,9 @@ class Show3DSlices(anywidget.AnyWidget):
         title: str = "",
         title_b: str = "",
         cmap: str = "plasma",
-        pixel_size: float | Sequence[float] | None = 0.0,
+        sampling: float | Sequence[float] | None = None,
+        units: str | Sequence[str] | None = None,
+        pixel_size: float | Sequence[float] | None = 0.0,  # legacy alias for sampling
         config: Mapping | str | pathlib.Path | None = None,
         apply_config_transforms: bool = True,
         crop: int | tuple[int, int] | tuple[int, int, int, int] = 0,
@@ -602,6 +604,23 @@ class Show3DSlices(anywidget.AnyWidget):
         config_data = _load_quantem_config(config)
         rotation_deg_was_set = rotation_deg is not None
         post_crop_was_set = post_crop is not None
+
+        # `sampling` + `units` is the canonical quantem convention (Dataset.sampling
+        # /.units, Show2D, Show4DSTEM). Convert a user-provided sampling to the
+        # internal Å pixel_size (nm -> 10x); `pixel_size` is the legacy alias.
+        if sampling is not None:
+            _unit_scale = {"": 1.0, "nm": 10.0, "a": 1.0, "å": 1.0, "angstrom": 1.0, "angstroms": 1.0}
+            def _scale(unit):
+                key = str(unit).strip().lower() if unit else ""
+                if key not in _unit_scale:
+                    raise ValueError(f"unsupported unit: {unit!r}")
+                return _unit_scale[key]
+            if isinstance(sampling, (tuple, list)):
+                unit_list = list(units) if isinstance(units, (tuple, list)) else [units] * len(sampling)
+                pixel_size = [float(s) * _scale(unit_list[min(i, len(unit_list) - 1)]) for i, s in enumerate(sampling)]
+            else:
+                unit0 = units[0] if isinstance(units, (tuple, list)) else units
+                pixel_size = float(sampling) * _scale(unit0)
 
         # Duck-typed Dataset3d extraction (matches Show2D / Show3D pattern).
         # `array` is the required payload; title/sampling/units are optional
