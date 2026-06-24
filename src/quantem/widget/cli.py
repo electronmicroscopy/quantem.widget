@@ -51,10 +51,17 @@ def main(argv: list[str] | None = None) -> int:
     # parser rather than the shared show* options.
     _add_html_args(sub.add_parser(
         "html", help="Execute a notebook and export it to a standalone, offline shareable HTML."))
+    # `jupyter` launches JupyterLab on a remote GPU box and opens it in the local
+    # browser over an SSH tunnel - the "kernel on the compute box, UI on my laptop"
+    # workflow, so a collaborator drives every widget from their browser.
+    _add_jupyter_args(sub.add_parser(
+        "jupyter", help="Launch JupyterLab on a remote GPU box (SSH tunnel + local browser)."))
     args = parser.parse_args(argv)
     try:
         if args.command == "html":
             return _render_html(args)
+        if args.command == "jupyter":
+            return _launch_jupyter(args)
         if args.command not in forced:
             parser.print_help()
             return 0
@@ -112,6 +119,81 @@ def _render_html(args: argparse.Namespace) -> int:
     print(f"  {out}")
     _open_html(out, serve=False, no_open=args.no_open)
     return 0
+
+
+# ---------------------------------------------------------------------------
+def _add_jupyter_args(parser: argparse.ArgumentParser) -> None:
+    """Attach options for the ``jupyter`` subcommand."""
+    parser.add_argument("path", nargs="?", default=None,
+                        help="Notebook or directory to open on the remote (relative to the "
+                             "remote home, or absolute). A .ipynb opens directly.")
+    parser.add_argument("--host", required=True,
+                        help="SSH alias/host of the GPU box (from your ~/.ssh/config).")
+    parser.add_argument("--env", default=None,
+                        help="Conda/mamba env to activate on the remote before launching JupyterLab.")
+    parser.add_argument("--port", type=int, default=None,
+                        help="Port to use on both ends (default: auto-pick a free port on the remote).")
+    parser.add_argument("--no-open", action="store_true",
+                        help="Open the tunnel + start JupyterLab but do not launch a browser.")
+
+
+def _remote_free_port(host: str) -> int:
+    """Ask the remote for a free TCP port. Probing the REMOTE (not the local box) is
+    essential: the two have independent port spaces, so a local-only pick can leave
+    JupyterLab on one port while the SSH ``-L`` tunnel is bound to another - the tunnel
+    then goes nowhere and the browser silently fails to connect. Falls back to 8888."""
+    import subprocess
+    probe = ("python3 -c \"import socket; s=socket.socket(); s.bind(('127.0.0.1',0)); "
+             "print(s.getsockname()[1]); s.close()\"")
+    try:
+        out = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", host, probe],
+                             capture_output=True, text=True, timeout=20)
+        port = int(out.stdout.strip())
+        if port > 0:
+            return port
+    except (subprocess.SubprocessError, ValueError):
+        pass
+    return 8888
+
+
+def _launch_jupyter(args: argparse.Namespace) -> int:
+    """Run JupyterLab on a remote GPU box and open it in the local browser over an SSH
+    tunnel - kernel + GPU on the compute box, UI in the laptop browser. This is what lets
+    a collaborator drive every quantem widget (Show2D/3D/4DSTEM, SSB, any tutorial) from
+    their own browser: anywidget rides the Jupyter Comm channel, so one remote kernel +
+    tunnel serves all widgets with no per-widget setup.
+
+    The remote command runs under a login shell so the user's conda init is sourced; the
+    SSH session stays in the foreground so the tunnel lives as long as JupyterLab does
+    (Ctrl-C stops both)."""
+    import secrets
+    import shlex
+    import subprocess
+    import threading
+    import webbrowser
+    host = args.host
+    port = args.port or _remote_free_port(host)
+    token = secrets.token_hex(16)
+    launch = (f"jupyter lab --no-browser --ip=127.0.0.1 --port={port} "
+              f"--IdentityProvider.token={token} --ServerApp.token={token}")
+    if args.env:
+        launch = f"conda activate {shlex.quote(args.env)} && {launch}"
+    if args.path and not args.path.endswith(".ipynb"):
+        launch = f"cd {shlex.quote(args.path)} && {launch}"
+    remote = f"bash -lc {shlex.quote(launch)}"
+    sub = ""
+    if args.path and args.path.endswith(".ipynb"):
+        sub = "/tree/" + args.path.lstrip("/")
+    url = f"http://localhost:{port}/lab{sub}?token={token}"
+    print(f"starting JupyterLab on {host} (port {port}) - kernel runs there, UI opens here")
+    print(f"  {url}")
+    print("  Ctrl-C to stop JupyterLab and close the tunnel.")
+    if not args.no_open:
+        # Open the browser a few seconds after the server has had time to come up; the
+        # foreground SSH below keeps the tunnel alive while the user works.
+        threading.Timer(5.0, lambda: webbrowser.open(url)).start()
+    ssh_cmd = ["ssh", "-t", "-L", f"{port}:127.0.0.1:{port}", host, remote]
+    return subprocess.run(ssh_cmd).returncode
 
 
 def _add_show_args(parser: argparse.ArgumentParser) -> None:
