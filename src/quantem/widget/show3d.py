@@ -381,6 +381,8 @@ class Show3D(anywidget.AnyWidget):
     _offline_float_stack = traitlets.Bytes(b"").tag(sync=True)
     _offline_min = traitlets.Float(0.0).tag(sync=True)
     _offline_max = traitlets.Float(1.0).tag(sync=True)
+    _offline_mins = traitlets.List(traitlets.Float(), default_value=[]).tag(sync=True)
+    _offline_maxs = traitlets.List(traitlets.Float(), default_value=[]).tag(sync=True)
     # Frontend-triggered standalone HTML export. The request is JSON so repeated
     # exports of the same mode can include a unique id and still sync.
     export_request = traitlets.Unicode("").tag(sync=True)
@@ -1477,9 +1479,33 @@ class Show3D(anywidget.AnyWidget):
                 lo = float(finite.min())
                 hi = float(finite.max())
             rng = hi - lo if hi > lo else 1.0
-            quantized = np.clip((arr - lo) * (255.0 / rng), 0, 255).astype(np.uint8)
             self._offline_min = lo
             self._offline_max = hi
+            self._offline_mins = []
+            self._offline_maxs = []
+            panel_count = int(self.n_panels)
+            panel_w = int(self.panel_width_px) if int(self.panel_width_px) > 0 else 0
+            if panel_count > 1 and panel_w > 0 and arr.ndim == 3 and arr.shape[2] == panel_w * panel_count:
+                q_panels = []
+                mins: list[float] = []
+                maxs: list[float] = []
+                for panel in range(panel_count):
+                    panel_arr = arr[:, :, panel * panel_w : (panel + 1) * panel_w]
+                    panel_finite = panel_arr[np.isfinite(panel_arr)]
+                    if panel_finite.size == 0:
+                        p_lo, p_hi = 0.0, 1.0
+                    else:
+                        p_lo = float(panel_finite.min())
+                        p_hi = float(panel_finite.max())
+                    p_rng = p_hi - p_lo if p_hi > p_lo else 1.0
+                    q_panels.append(np.clip((panel_arr - p_lo) * (255.0 / p_rng), 0, 255).astype(np.uint8))
+                    mins.append(p_lo)
+                    maxs.append(p_hi)
+                quantized = np.concatenate(q_panels, axis=2)
+                self._offline_mins = mins
+                self._offline_maxs = maxs
+            else:
+                quantized = np.clip((arr - lo) * (255.0 / rng), 0, 255).astype(np.uint8)
             self._offline_stack = quantized.tobytes()
 
         # Observers
@@ -2950,6 +2976,8 @@ class Show3D(anywidget.AnyWidget):
         self.offline = True
         self._offline_min = lo
         self._offline_max = hi
+        self._offline_mins = []
+        self._offline_maxs = []
         self._offline_stack = b""
         self._offline_float_stack = arr.tobytes()
         self.frame_bytes = b""
