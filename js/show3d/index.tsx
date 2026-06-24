@@ -1569,6 +1569,14 @@ function Show3D() {
   const gpuFftInitPromiseRef = React.useRef<Promise<WebGPUFFT | null> | null>(null);
   const offlineFftGpuDisabledRef = React.useRef(false);
   const [gpuReady, setGpuReady] = React.useState(false);
+  const [fftBackendInfo, setFftBackendInfo] = React.useState<{
+    webgpu: "unknown" | "ready" | "software" | "unavailable";
+    adapter: string;
+    source: string;
+    ms: number | null;
+    panels: number | null;
+    grid: string;
+  }>({ webgpu: "unknown", adapter: "", source: "", ms: null, panels: null, grid: "" });
   const fftOffscreenRef = React.useRef<HTMLCanvasElement | null>(null);
   const kymoOffscreenRef = React.useRef<HTMLCanvasElement | null>(null);
   // WebGPU colormap engine (GPU-accelerated colormap for 4K frames)
@@ -1594,17 +1602,21 @@ function Show3D() {
           const info = getGPUInfo();
           if (/swiftshader|software/i.test(info)) {
             console.log(`[Show3D] Software WebGPU adapter detected (${info}); using CPU FFT fallback`);
+            setFftBackendInfo(prev => ({ ...prev, webgpu: "software", adapter: info || "software adapter" }));
             return null;
           }
           gpuFFTRef.current = fft;
           setGpuReady(true);
+          setFftBackendInfo(prev => ({ ...prev, webgpu: "ready", adapter: info || "GPU" }));
           console.log(`[Show3D] WebGPU FFT initialized - ${info || "GPU"}`);
         } else {
+          setFftBackendInfo(prev => ({ ...prev, webgpu: "unavailable", adapter: "" }));
           console.log("[Show3D] WebGPU FFT unavailable - CPU fallback will be used");
         }
         return fft;
       }).catch(err => {
         console.warn("[Show3D] WebGPU FFT init failed; CPU fallback will be used.", err);
+        setFftBackendInfo(prev => ({ ...prev, webgpu: "unavailable", adapter: "" }));
         return null;
       });
     }
@@ -5483,8 +5495,16 @@ function Show3D() {
         setFftCropDims({ cropWidth: panelW, cropHeight: panelH, fftWidth: gridW, fftHeight: gridH });
         setFftMagVersion(v => v + 1);
         const dbg = show3dPerfDebug();
+        const elapsedMs = Number((performance.now() - fftStartMs).toFixed(2));
+        setFftBackendInfo(prev => ({
+          ...prev,
+          source: fftSource,
+          ms: elapsedMs,
+          panels: panels.length,
+          grid: `${gridW}x${gridH}`,
+        }));
         if (dbg) {
-          dbg.lastFftMs = Number((performance.now() - fftStartMs).toFixed(2));
+          dbg.lastFftMs = elapsedMs;
           dbg.lastFftSource = fftSource;
           dbg.lastFftPanels = panels.length;
           dbg.lastFftSize = `${fftW}x${fftH}`;
@@ -5585,8 +5605,16 @@ function Show3D() {
       }
       setFftMagVersion(v => v + 1);
       const dbg = show3dPerfDebug();
+      const elapsedMs = Number((performance.now() - fftStartMs).toFixed(2));
+      setFftBackendInfo(prev => ({
+        ...prev,
+        source: fftSource,
+        ms: elapsedMs,
+        panels: 1,
+        grid: `${fftW}x${fftH}`,
+      }));
       if (dbg) {
-        dbg.lastFftMs = Number((performance.now() - fftStartMs).toFixed(2));
+        dbg.lastFftMs = elapsedMs;
         dbg.lastFftSource = fftSource;
         dbg.lastFftPanels = 1;
         dbg.lastFftSize = `${fftW}x${fftH}`;
@@ -7364,6 +7392,19 @@ function Show3D() {
     ["Scroll", "Zoom"],
     ["Dbl-click", "Reset view"],
   ];
+  const webgpuStatusLabel =
+    fftBackendInfo.webgpu === "ready" ? "available"
+      : fftBackendInfo.webgpu === "software" ? "software adapter ignored"
+        : fftBackendInfo.webgpu === "unavailable" ? "unavailable"
+          : "checking";
+  const fftSourceLabel =
+    fftBackendInfo.source === "webgpu-batch" || fftBackendInfo.source === "webgpu" ? "WebGPU"
+      : fftBackendInfo.source ? "CPU fallback"
+        : "not run yet";
+  const fftSourceDetail =
+    fftBackendInfo.source === "cpu-sync-shifted" ? "offline CPU"
+      : fftBackendInfo.source === "worker-batch" || fftBackendInfo.source === "worker" ? "CPU worker"
+        : fftBackendInfo.source || "";
 
   return (
     <Box
@@ -7390,6 +7431,19 @@ function Show3D() {
               <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>
                 FFT d-spacing uses the provided real-space sampling: Δk = 1 / (N × pixel_size), |g| = √(kx² + ky²), d = 1 / |g|. Current pixel_size: {pixelSize > 0 ? `${formatNumber(pixelSize)} ${unitSymbol(pixelUnit || "px")}/px` : "not set, so only pixel distances are shown"}.
               </Typography>
+              <Typography sx={{ fontSize: 11, fontWeight: "bold", mt: 0.5 }}>Backend</Typography>
+              <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>
+                WebGPU: {webgpuStatusLabel}{fftBackendInfo.adapter ? ` (${fftBackendInfo.adapter})` : ""}.
+              </Typography>
+              <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>
+                FFT compute: {fftSourceLabel}{fftSourceDetail && fftSourceDetail !== fftSourceLabel ? ` (${fftSourceDetail})` : ""}
+                {fftBackendInfo.ms != null ? `, ${fftBackendInfo.ms.toFixed(1)} ms` : ""}.
+              </Typography>
+              {fftBackendInfo.panels != null && (
+                <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>
+                  FFT panels: {fftBackendInfo.panels}{fftBackendInfo.grid ? `, grid ${fftBackendInfo.grid}` : ""}.
+                </Typography>
+              )}
               <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>Profile: Click two points on image to draw a line intensity profile.</Typography>
               <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>Lens: Magnifier inset that follows the cursor.</Typography>
               <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>Scale: Linear or logarithmic intensity mapping.</Typography>
