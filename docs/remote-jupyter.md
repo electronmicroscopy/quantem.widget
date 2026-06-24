@@ -17,8 +17,17 @@ tunnel, and pops the notebook up in your local browser. `Ctrl-C` stops the serve
 closes the tunnel. It sources conda for you, so `conda` does **not** need to be on the
 box's login PATH. Override the env with `--env <name>` (or `--env ''` to skip activation).
 
-> Setup is the part that wastes people's time. Do the four steps below **once** and
-> every future session is a single command.
+> Setup is the part that wastes people's time. The command helps: if `--host` isn't
+> reachable yet, `quantem jupyter` **offers to set it up for you** (make an SSH key, add
+> the `~/.ssh/config` entry, print the public key to send the admin, re-test). Run it
+> directly anytime with:
+>
+> ```bash
+> quantem jupyter --host buffle --setup
+> ```
+>
+> The manual version of those same steps is below - do them **once** and every future
+> session is a single command.
 
 ---
 

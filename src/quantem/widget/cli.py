@@ -136,6 +136,79 @@ def _add_jupyter_args(parser: argparse.ArgumentParser) -> None:
                         help="Port to use on both ends (default: auto-pick a free port on the remote).")
     parser.add_argument("--no-open", action="store_true",
                         help="Open the tunnel + start JupyterLab but do not launch a browser.")
+    parser.add_argument("--setup", action="store_true",
+                        help="Configure SSH for --host (make a key if needed, add a ~/.ssh/config "
+                             "entry, verify the connection) and exit. Run this once for a new box.")
+
+
+def _ssh_reachable(host: str) -> bool:
+    """True if `ssh <host>` connects passwordless (key auth) right now. BatchMode means
+    a missing key fails fast instead of hanging on a password prompt."""
+    import subprocess
+    try:
+        r = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host, "true"],
+                           capture_output=True, text=True, timeout=20)
+        return r.returncode == 0
+    except subprocess.SubprocessError:
+        return False
+
+
+def _ssh_config_has_host(host: str) -> bool:
+    """Whether ~/.ssh/config already defines `host` as a Host alias (token-exact, so
+    `Host mallard buffle` counts for either)."""
+    cfg = pathlib.Path.home() / ".ssh" / "config"
+    if not cfg.exists():
+        return False
+    for line in cfg.read_text().splitlines():
+        parts = line.split()
+        if parts and parts[0].lower() == "host" and host in parts[1:]:
+            return True
+    return False
+
+
+def _setup_ssh_host(host: str) -> bool:
+    """Walk a new user through SSH access to `host`: make an ed25519 key if absent, add a
+    ~/.ssh/config entry (HostName `<host>.stanford.edu` when `host` has no dot), print the
+    public key to hand to the box admin, then re-test. Returns True if reachable after.
+
+    This is the 'I typed --host buffle and nothing is set up' on-ramp - the same job as
+    `live setup`, kept minimal so a collaborator gets connected without reading a manual."""
+    import subprocess
+    ssh_dir = pathlib.Path.home() / ".ssh"
+    ssh_dir.mkdir(mode=0o700, exist_ok=True)
+    key = ssh_dir / "id_ed25519"
+    if not key.exists():
+        print(f"No SSH key found - creating {key} ...")
+        subprocess.run(["ssh-keygen", "-t", "ed25519", "-N", "", "-f", str(key)], check=False)
+    cfg = ssh_dir / "config"
+    if _ssh_config_has_host(host):
+        print(f"~/.ssh/config already has a Host entry for {host}.")
+    else:
+        user = input(f"Your login username on {host} (Stanford SUNet, etc.): ").strip()
+        if not user:
+            print("quantem: no username given; cannot write the config entry.", file=sys.stderr)
+            return False
+        hostname = f"{host}.stanford.edu" if "." not in host else host
+        block = (f"\nHost {host}\n"
+                 f"    HostName {hostname}\n"
+                 f"    User {user}\n"
+                 f"    IdentityFile ~/.ssh/id_ed25519\n"
+                 f"    ServerAliveInterval 30\n")
+        with cfg.open("a") as fh:
+            fh.write(block)
+        cfg.chmod(0o600)
+        print(f"Added Host {host} -> {hostname} (user {user}) to {cfg}.")
+    pub = key.with_suffix(".pub")
+    if pub.exists():
+        print("\nGive this PUBLIC key to whoever runs the box (they add it to your "
+              f"~/.ssh/authorized_keys there):\n\n{pub.read_text().strip()}\n")
+    input("Press Enter once the admin has added your key (or your account is ready) to re-test...")
+    if _ssh_reachable(host):
+        print(f"SSH to {host} works. You're set.")
+        return True
+    print(f"Still cannot reach {host} passwordless. Check with the admin (key installed? "
+          "login-node/2FA? on the VPN?), then rerun. See the Remote JupyterLab doc.")
+    return False
 
 
 def _remote_free_port(host: str) -> int:
@@ -173,6 +246,25 @@ def _launch_jupyter(args: argparse.Namespace) -> int:
     import threading
     import webbrowser
     host = args.host
+    # `--setup`: configure SSH and stop. Otherwise preflight the connection so a new user
+    # gets a guided fix instead of a raw ssh error when --host isn't set up yet.
+    if args.setup:
+        return 0 if _setup_ssh_host(host) else 1
+    if not _ssh_reachable(host):
+        print(f"quantem: can't reach '{host}' over SSH (no passwordless connection).")
+        if sys.stdin.isatty():
+            answer = input(f"Set up SSH for '{host}' now? [Y/n] ").strip().lower()
+            if answer in ("", "y", "yes"):
+                if not _setup_ssh_host(host):
+                    return 1
+            else:
+                print(f"Run `quantem jupyter --host {host} --setup` when ready. "
+                      "See the Remote JupyterLab doc for details.")
+                return 1
+        else:
+            print(f"Run `quantem jupyter --host {host} --setup` to configure it "
+                  "(make a key, add ~/.ssh/config, verify). See the Remote JupyterLab doc.")
+            return 1
     port = args.port or _remote_free_port(host)
     token = secrets.token_hex(16)
     launch = (f"jupyter lab --no-browser --ip=127.0.0.1 --port={port} "
