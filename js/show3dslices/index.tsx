@@ -712,7 +712,7 @@ const MAX_ZOOM = 30;
 type ZoomState = { zoom: number; panX: number; panY: number };
 const DEFAULT_ZOOM: ZoomState = { zoom: 1, panX: 0, panY: 0 };
 const DEFAULT_FFT_ZOOM: ZoomState = { zoom: 2, panX: 0, panY: 0 };
-const CANVAS_TARGET = 340;
+const CANVAS_TARGET = 260;
 const AXES = ["xy", "oblique"] as const;
 const PANEL_NAMES = ["XY", "Oblique"] as const;
 // Show3DSlices opens in the same orientation as the main top slice panel:

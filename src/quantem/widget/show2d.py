@@ -22,7 +22,7 @@ import matplotlib.patheffects
 import matplotlib.pyplot as plt
 import numpy as np
 import traitlets
-from quantem.widget.utils.array import _resize_image, to_numpy
+from quantem.widget.utils.array import _b64_safe, _resize_image, to_numpy
 from quantem.widget.utils.state_io import resolve_widget_version, save_state_file, unwrap_state_payload
 
 from quantem.core.datastructures import Dataset2d, Dataset3d
@@ -1115,9 +1115,9 @@ class Show2D(anywidget.AnyWidget):
             self._offline_maxs = maxs
             self._offline_min = mins[0]  # back-compat scalars (single-image readers)
             self._offline_max = maxs[0]
-            self.frame_bytes = out.tobytes()
+            self.frame_bytes = _b64_safe(out.tobytes())
         else:
-            self.frame_bytes = data.tobytes()
+            self.frame_bytes = _b64_safe(data.tobytes())
 
     def _apply_rotations(self):
         """Re-rotate each displayed image from its original by ``image_rotations[i] * 90°``.
