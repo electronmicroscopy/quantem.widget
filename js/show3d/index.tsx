@@ -1978,6 +1978,7 @@ function Show3D() {
   const [imageDataRange, setImageDataRange] = React.useState<{ min: number; max: number }>({ min: 0, max: 1 });
   const [panelHistogramData, setPanelHistogramData] = React.useState<(Float32Array | null)[]>([]);
   const [panelDataRanges, setPanelDataRanges] = React.useState<{ min: number; max: number }[]>([]);
+  const panelStackRangesRef = React.useRef<{ key: string; ranges: { min: number; max: number }[] } | null>(null);
   const perPanelHistogramEnabled = (nPanels || 1) > 1 && !linkContrast;
 
   const updatePanelState = (panel: number, patch: Partial<PanelState>) => {
@@ -1994,15 +1995,80 @@ function Show3D() {
     setVminPerPanel(nextMins);
     setVmaxPerPanel(nextMaxs);
   };
+  const computePanelStackRanges = (): { min: number; max: number }[] | null => {
+    const n = Math.max(1, nPanels || 1);
+    const panelW = Math.max(1, sourcePanelWidth);
+    const fullW = width;
+    const frameSize = width * height;
+    if (!offline || n <= 1 || frameSize <= 0 || height <= 0 || nSlices <= 0) return null;
+    const hasFloat = !!offlineFloatStack && offlineFloatStack.byteLength >= nSlices * frameSize * 4;
+    const hasU8 = !!offlineStack && offlineStack.byteLength >= nSlices * frameSize;
+    if (!hasFloat && !hasU8) return null;
+    const key = [
+      hasFloat ? "f32" : "u8",
+      hasFloat ? offlineFloatStack.byteLength : offlineStack.byteLength,
+      nSlices,
+      width,
+      height,
+      n,
+      panelW,
+      sharedPanelSource ? 1 : 0,
+      logScale ? 1 : 0,
+      offlineMin,
+      offlineMax,
+    ].join(":");
+    const cached = panelStackRangesRef.current;
+    if (cached?.key === key) return cached.ranges;
+    const ranges = Array.from({ length: n }, () => ({ min: Number.POSITIVE_INFINITY, max: Number.NEGATIVE_INFINITY }));
+    const f32 = hasFloat
+      ? new Float32Array(offlineFloatStack.buffer, offlineFloatStack.byteOffset, Math.floor(offlineFloatStack.byteLength / 4))
+      : null;
+    const u8 = !hasFloat && hasU8
+      ? new Uint8Array(offlineStack.buffer, offlineStack.byteOffset, offlineStack.byteLength)
+      : null;
+    const u8Scale = (offlineMax - offlineMin) / 255.0;
+    for (let frameIdx = 0; frameIdx < nSlices; frameIdx++) {
+      const frameBase = frameIdx * frameSize;
+      for (let panel = 0; panel < n; panel++) {
+        const srcPanel = sharedPanelSource ? 0 : panel;
+        const x0 = Math.min(Math.max(0, srcPanel * panelW), Math.max(0, fullW - panelW));
+        if (x0 + panelW > fullW) continue;
+        const range = ranges[panel];
+        for (let row = 0; row < height; row++) {
+          const rowBase = frameBase + row * fullW + x0;
+          for (let col = 0; col < panelW; col++) {
+            const idx = rowBase + col;
+            let value = f32 ? f32[idx] : ((u8?.[idx] ?? 0) * u8Scale + offlineMin);
+            if (!Number.isFinite(value)) continue;
+            if (logScale) value = signedLog1p(value);
+            if (value < range.min) range.min = value;
+            if (value > range.max) range.max = value;
+          }
+        }
+      }
+    }
+    const stackBounds = resolveDisplayBounds(dataMin, dataMax, traitVmin, traitVmax, logScale);
+    const resolved = ranges.map(range => (
+      Number.isFinite(range.min) && Number.isFinite(range.max) && range.max > range.min
+        ? range
+        : stackBounds
+    ));
+    panelStackRangesRef.current = { key, ranges: resolved };
+    return resolved;
+  };
   const latchMissingPanelManualRanges = () => {
     const n = Math.max(1, nPanels || 1);
     const stackBounds = resolveDisplayBounds(dataMin, dataMax, traitVmin, traitVmax, logScale);
+    const panelStackRanges = computePanelStackRanges();
     const nextMins = Array.from({ length: n }, (_, i) => vminPerPanelLiveRef.current[i] ?? null);
     const nextMaxs = Array.from({ length: n }, (_, i) => vmaxPerPanelLiveRef.current[i] ?? null);
+    const liveStates = panelStatesLiveRef.current.length === n ? panelStatesLiveRef.current : panelStates;
     let changed = false;
     for (let panel = 0; panel < n; panel++) {
-      if (nextMins[panel] != null || nextMaxs[panel] != null) continue;
-      const pdr = panelDataRanges[panel];
+      const state = liveStates[panel] || initialState;
+      const untouchedFullRange = Math.abs(state.imageVminPct) < 0.01 && Math.abs(state.imageVmaxPct - 100) < 0.01;
+      if (!untouchedFullRange && (nextMins[panel] != null || nextMaxs[panel] != null)) continue;
+      const pdr = panelStackRanges?.[panel] ?? panelDataRanges[panel];
       const range = (pdr && pdr.max > pdr.min) ? pdr : stackBounds;
       if (range.max <= range.min) continue;
       nextMins[panel] = range.min;
@@ -2014,6 +2080,7 @@ function Show3D() {
     vmaxPerPanelLiveRef.current = nextMaxs;
     setVminPerPanel(nextMins);
     setVmaxPerPanel(nextMaxs);
+    if (panelStackRanges?.length === n) setPanelDataRanges(panelStackRanges);
   };
   const extractPanelSlice = (
     raw: Float32Array,
