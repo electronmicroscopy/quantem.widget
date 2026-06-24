@@ -873,8 +873,10 @@ class Show3D(anywidget.AnyWidget):
         cmap: str | Colormap = Colormap.PLASMA,
         vmin: float | None = None,
         vmax: float | None = None,
-        pixel_size: float = 0.0,
-        pixel_unit: str | None = None,
+        sampling: float | tuple[float, float] | list[float] | None = None,
+        units: str | list[str] | None = None,
+        pixel_size: float = 0.0,  # legacy alias for sampling
+        pixel_unit: str | None = None,  # legacy alias for units
         smooth: bool = True,
         image_rotation: int = 0,
         log_scale: bool = False,
@@ -950,6 +952,14 @@ class Show3D(anywidget.AnyWidget):
                 kwargs["link_panels"] = bool(legacy_link_zoom)
             elif legacy_link_pan is not None:
                 kwargs["link_panels"] = bool(legacy_link_pan)
+        # `sampling` + `units` is the canonical quantem convention (matches
+        # Dataset.sampling/.units, Show2D, Show4DSTEM). `pixel_size`/`pixel_unit`
+        # are kept as legacy aliases; `sampling`/`units` win when both are given.
+        if sampling is not None:
+            samp = sampling[0] if isinstance(sampling, (tuple, list)) else sampling
+            pixel_size = float(samp)
+        if units is not None:
+            pixel_unit = units[0] if isinstance(units, (tuple, list)) else units
         _t0 = time.perf_counter()
         # Reject unknown kwargs so typos raise instead of being silently ignored.
         _reject_unknown_kwargs(type(self), kwargs)
