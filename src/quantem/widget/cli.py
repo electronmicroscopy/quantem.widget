@@ -221,18 +221,14 @@ def _launch_jupyter(args: argparse.Namespace) -> int:
     # Resolve (and on first run, save) the SSH target BEFORE printing, so its one-time
     # prompt doesn't interrupt the URL block.
     target = _ssh_target()
-    # Two one-liners — same tunnel command, OS-specific browser launcher. macOS
-    # uses `open`; Linux uses `xdg-open`. Windows (PowerShell / Git Bash / cmd)
-    # uses `start` (PowerShell alias for Start-Process; Git Bash forwards to
-    # Windows start; in cmd the empty-title arg is needed but `start "" "URL"`
-    # works in all three Windows shells).
-    line_unix = (
-        f'ssh -fN -L {port}:127.0.0.1:{port} {target} && '
-        f'(open "{url}" 2>/dev/null || xdg-open "{url}" 2>/dev/null || echo "{url}")'
-    )
-    line_win = (
-        f'ssh -fN -L {port}:127.0.0.1:{port} {target} ; start "" "{url}"'
-    )
+    # Three short one-liners — one launcher per OS, no URL repetition. macOS
+    # uses `open`, Linux uses `xdg-open`, Windows (PowerShell / Git Bash / cmd)
+    # uses `start ""` (PowerShell alias for Start-Process; Git Bash forwards to
+    # Windows start; the empty-title arg works in all three Windows shells).
+    tunnel = f"ssh -fN -L {port}:127.0.0.1:{port} {target}"
+    line_mac = f'{tunnel} && open "{url}"'
+    line_lnx = f'{tunnel} && xdg-open "{url}"'
+    line_win = f'{tunnel} ; start "" "{url}"'
     YL = "\033[1;33m"      # bold yellow — frame
     CY = "\033[1;96m"      # bold bright cyan — the paste command
     GN = "\033[1;32m"      # bold green — status
@@ -247,11 +243,9 @@ def _launch_jupyter(args: argparse.Namespace) -> int:
     print(f"{YL}║{RST}    {AR}{arrow}{RST}  {YL}COPY-PASTE ONE LINE INTO YOUR LAPTOP TERMINAL{RST}  {AR}{arrow}{RST}        {YL}║{RST}")
     print(f"{YL}╚{bar}╝{RST}")
     print()
-    print(f"  {LB}macOS / Linux:{RST}")
-    print(f"    {CY}{line_unix}{RST}")
-    print()
-    print(f"  {LB}Windows (PowerShell or Git Bash):{RST}")
-    print(f"    {CY}{line_win}{RST}")
+    print(f"  {LB}macOS:{RST}    {CY}{line_mac}{RST}")
+    print(f"  {LB}Linux:{RST}    {CY}{line_lnx}{RST}")
+    print(f"  {LB}Windows:{RST}  {CY}{line_win}{RST}")
     print()
     print(f"  {GN}✓ JupyterLab running on this box, port {port}. Ctrl-C here to stop.{RST}")
     print(f"  {DM}(URL alone): {url}{RST}")
