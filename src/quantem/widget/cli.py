@@ -219,10 +219,23 @@ def _launch_jupyter(args: argparse.Namespace) -> int:
     # Resolve (and on first run, save) the SSH target BEFORE printing, so its one-time
     # prompt doesn't interrupt the URL block.
     target = _ssh_target()
-    print(f"starting JupyterLab on this box (port {port}) - copy this URL into your laptop browser")
-    print(f"  {url}")
-    print(f"  if your laptop can't reach it, tunnel first:  ssh -L {port}:127.0.0.1:{port} {target}")
-    print("  Ctrl-C to stop JupyterLab.")
+    # One-shot copy-paste: open the SSH tunnel in the background then open the URL
+    # in the default browser. `ssh -fN` forks to background and keeps the tunnel
+    # alive; `open` (macOS) / `xdg-open` (Linux) launches the browser. Cross-platform
+    # via the shell's `||` fallback. User pastes this one line on their laptop and
+    # the lab tab appears — no manual URL copy, no second terminal.
+    one_line = (
+        f'ssh -fN -L {port}:127.0.0.1:{port} {target} && '
+        f'(open "{url}" 2>/dev/null || xdg-open "{url}" 2>/dev/null || echo "{url}")'
+    )
+    print(f"starting JupyterLab on this box (port {port}).")
+    print()
+    print("paste this ONE line on your laptop — opens the tunnel + launches the browser:")
+    print(f"  {one_line}")
+    print()
+    print(f"  (URL alone, if needed):  {url}")
+    print(f"  (tunnel alone, if needed): ssh -L {port}:127.0.0.1:{port} {target}")
+    print("  Ctrl-C here to stop JupyterLab.")
     # Flush now: the foreground server below never returns, so block-buffered stdout
     # (when redirected to a file/pipe, not a TTY) would otherwise hide the URL forever.
     sys.stdout.flush()
