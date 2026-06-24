@@ -84,6 +84,7 @@ class Show3DSlices(anywidget.AnyWidget):
     - Per-plane statistics (opt-in via ``show_stats``)
     - Anisotropic scale bars via ``pixel_size_axes`` (e.g. nz << nxy multislice)
     - Depth-axis ``z_stretch`` for non-cubic volumes (CSS scaling, zero memory)
+    - ``panel_width_px`` constructor sizing for compact or wide panel layouts
     - FFT panel with optional Hann window for the active plane
     - PNG / PDF / TIFF single-slice export with plane and index selection
     - JSON state save/load via ``state_dict`` / ``load_state_dict`` / ``save``
@@ -278,6 +279,7 @@ class Show3DSlices(anywidget.AnyWidget):
     # Scales the oblique panel display height. Useful when nz << nxy (e.g. multislice
     # ptycho with nz=14, nxy=730 -> set z_stretch high to make depth panels readable).
     z_stretch = traitlets.Float(30.0).tag(sync=True)
+    panel_width_px = traitlets.Int(0).tag(sync=True)
     # UI
     show_controls = traitlets.Bool(True).tag(sync=True)
     show_stats = traitlets.Bool(False)  # Python-only: gates _compute_stats reductions, no JS bar
@@ -450,6 +452,13 @@ class Show3DSlices(anywidget.AnyWidget):
             raise traitlets.TraitError(f"z_stretch must be finite, got {val}")
         return max(1.0, min(val, 50.0))
 
+    @traitlets.validate("panel_width_px")
+    def _validate_panel_width_px(self, proposal: dict) -> int:
+        val = int(proposal["value"])
+        if val < 0:
+            raise traitlets.TraitError(f"panel_width_px must be >= 0, got {val}")
+        return val
+
     @traitlets.validate("dim_labels")
     def _validate_dim_labels(self, proposal: dict) -> list[str]:
         """Enforce exactly 3 axis labels for Z/Y/X. Reject bare strings up
@@ -535,6 +544,7 @@ class Show3DSlices(anywidget.AnyWidget):
         post_crop: int | tuple[int, int] | tuple[int, int, int, int] | None = None,
         scale_bar_visible: bool = True,
         z_stretch: float | None = None,
+        panel_width_px: int = 0,
         show_controls: bool = True,
         show_stats: bool = False,
         show_crosshair: bool = True,
@@ -724,6 +734,7 @@ class Show3DSlices(anywidget.AnyWidget):
         if z_stretch is None:
             z_stretch = 30.0
         self.z_stretch = float(z_stretch)
+        self.panel_width_px = int(panel_width_px)
         self.show_controls = show_controls
         self.show_stats = show_stats
         self.show_crosshair = show_crosshair
@@ -893,6 +904,7 @@ class Show3DSlices(anywidget.AnyWidget):
             "pixel_size_axes": list(self.pixel_size_axes),
             "scale_bar_visible": self.scale_bar_visible,
             "z_stretch": self.z_stretch,
+            "panel_width_px": self.panel_width_px,
             "slice_x": self.slice_x,
             "slice_y": self.slice_y,
             "slice_z": self.slice_z,

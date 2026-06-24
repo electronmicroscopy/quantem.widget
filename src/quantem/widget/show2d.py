@@ -184,6 +184,10 @@ class Show2D(anywidget.AnyWidget):
 
     >>> Show2D(np.random.rand(4096, 4096), size=800)
 
+    Per-panel display width for galleries:
+
+    >>> Show2D(np.random.rand(13, 128, 128), ncols=13, panel_width_px=70)
+
     Static export to PDF or PNG (vector PDF for publication figures):
 
     >>> w = Show2D(np.random.rand(512, 512), sampling=0.5, units="nm")
@@ -316,6 +320,7 @@ class Show2D(anywidget.AnyWidget):
         vmax: float | list | None = None,
         ncols: int = 3,
         size: int = 0,
+        panel_width_px: int = 0,
         smooth: bool = False,
         zoom: float = 1.0,
         zoom_row: float | None = None,
@@ -335,6 +340,11 @@ class Show2D(anywidget.AnyWidget):
         # anywidget/traitlets silently ignores unknown keys, which hid the
         # pixel_size_angstrom bug in show2d_all_features.ipynb for months.
         _reject_unknown_kwargs(type(self), kwargs)
+        panel_width_px = int(panel_width_px)
+        if panel_width_px < 0:
+            raise ValueError(f"panel_width_px must be >= 0, got {panel_width_px}")
+        if panel_width_px > 0:
+            size = panel_width_px
         super().__init__(**kwargs)
         # hold_sync() batches ALL traitlet assignments into a single comm message
         # sent when the context manager exits.  Without this, each self.x = y
