@@ -1049,19 +1049,29 @@ function Show2D() {
   const [offline] = useModelState<boolean>("offline");
   const [offlineMin] = useModelState<number>("_offline_min");
   const [offlineMax] = useModelState<number>("_offline_max");
+  const [offlineMins] = useModelState<number[]>("_offline_mins");
+  const [offlineMaxs] = useModelState<number[]>("_offline_maxs");
   const allFloats = React.useMemo(() => {
     if (offline && frameBytes && frameBytes.byteLength > 0) {
-      // Offline mode: bytes are uint8-quantized. Dequantize back to float32
-      // using global (lo, hi) scale-bias. Same trick Show3D uses for HTML
-      // export to keep stack size under V8 / browser memory limits.
+      // Offline mode: bytes are uint8-quantized PER IMAGE. Dequantize each panel
+      // with its own (lo, hi) so a gallery of differently-scaled panels stays
+      // exact - a single global scale combs the narrow panels' histograms.
       const u8 = new Uint8Array(frameBytes.buffer, frameBytes.byteOffset, frameBytes.byteLength);
       const f32 = new Float32Array(u8.length);
-      const scale = (offlineMax - offlineMin) / 255.0;
-      for (let i = 0; i < u8.length; i++) f32[i] = u8[i] * scale + offlineMin;
+      const per = width * height;
+      const n = (offlineMins && offlineMins.length > 0) ? offlineMins.length : 1;
+      for (let img = 0; img < n; img++) {
+        // Fall back to the legacy global scalars if the per-image lists are absent.
+        const lo = (offlineMins && offlineMins.length > img) ? offlineMins[img] : offlineMin;
+        const hi = (offlineMaxs && offlineMaxs.length > img) ? offlineMaxs[img] : offlineMax;
+        const scale = (hi - lo) / 255.0;
+        const base = img * per;
+        for (let k = 0; k < per && base + k < u8.length; k++) f32[base + k] = u8[base + k] * scale + lo;
+      }
       return f32;
     }
     return extractFloat32(frameBytes);
-  }, [frameBytes, offline, offlineMin, offlineMax]);
+  }, [frameBytes, offline, offlineMin, offlineMax, offlineMins, offlineMaxs, width, height]);
 
   const [dataVersion, setDataVersion] = React.useState(0);
   const [gpuCmapVersion, setGpuCmapVersion] = React.useState(0);
