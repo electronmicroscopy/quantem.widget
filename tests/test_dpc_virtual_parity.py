@@ -63,7 +63,7 @@ def test_core_dataset4dstem_roundtrip(gold):
     from quantem.widget.detector import adf, bf
     from quantem.widget.dpc import com, dpc, idpc
 
-    ds = Dataset4dstem.from_tensor(torch.as_tensor(gold))
+    ds = Dataset4dstem.from_array(torch.as_tensor(gold))
     assert ds.shape == (512, 512, 48, 48)
     np.testing.assert_array_equal(adf(ds), adf(gold))
     np.testing.assert_array_equal(bf(ds), bf(gold))
