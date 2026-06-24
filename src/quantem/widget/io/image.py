@@ -103,12 +103,15 @@ def _read_emd(p: Path) -> Dataset2d:
             sampling, units = _velox_sampling(meta)
             ds = Dataset2d.from_array(image, sampling=sampling, units=units, name=p.stem)
             ds._metadata = meta
+            ds.scan_rotation_deg = _velox_scan_rotation_deg(meta)
             return ds
         biggest = []                                 # non-Velox: largest >=2D dataset
         f.visititems(lambda name, obj: biggest.append(obj)
                      if isinstance(obj, h5py.Dataset) and obj.ndim >= 2 else None)
         arr = max(biggest, key=lambda obj: obj.size)[()]
-    return Dataset2d.from_array(_first_frame(arr).astype(np.float32), name=p.stem)
+    ds = Dataset2d.from_array(_first_frame(arr).astype(np.float32), name=p.stem)
+    ds.scan_rotation_deg = None                       # no Velox metadata to read the angle from
+    return ds
 
 
 def _read_velox_metadata(f, group) -> dict:
@@ -130,6 +133,19 @@ def _velox_sampling(meta: dict):
     height_nm = float(px["height"]) * 1e9
     width_nm = float(px["width"]) * 1e9
     return (height_nm, width_nm), ["nm", "nm"]
+
+
+def _velox_scan_rotation_deg(meta: dict):
+    """Scan rotation in degrees from Velox ``Scan.ScanRotation`` (stored in radians).
+
+    Returns ``None`` when the field is absent so callers can tell a genuine 0°
+    scan from a file that simply carries no rotation metadata. Drift correction
+    needs this angle to orient a 0°/90° pair; without it the merge is blind.
+    """
+    sr = meta.get("Scan", {}).get("ScanRotation")
+    if sr is None:
+        return None
+    return float(sr) * 180.0 / np.pi
 
 
 # --- folder-of-frames stack reader (parallel decode) ----------------------
