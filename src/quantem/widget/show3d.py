@@ -241,8 +241,11 @@ class Show3D(anywidget.AnyWidget):
         Minimum value for colormap. If None, uses data min.
     vmax : float, optional
         Maximum value for colormap. If None, uses data max.
-    pixel_size : float, optional
-        Pixel size in Å for scale bar display.
+    sampling : float or tuple of float, optional
+        Real-space sampling for the scale bar (lateral). Pairs with ``units``.
+    units : str or list of str, optional
+        Unit for ``sampling`` (e.g. ``"A"`` for Angstrom, ``"nm"``). Matches the
+        quantem ``Dataset`` / ``Show2D`` / ``Show4DSTEM`` convention.
     log_scale : bool, default False
         Use log scale for intensity mapping.
     auto_contrast : bool, default True
@@ -331,7 +334,7 @@ class Show3D(anywidget.AnyWidget):
     >>> from quantem.widget import Show3D
     >>> stack = np.random.rand(12, 256, 256).astype(np.float32)
     >>> labels = [f"C10={c:.0f}nm" for c in np.linspace(-500, -200, 12)]
-    >>> w = Show3D(stack, labels=labels, title="Defocus Sweep", pixel_size=0.5)
+    >>> w = Show3D(stack, labels=labels, title="Defocus Sweep", sampling=0.5, units="A")
     >>> w.play()  # doctest: +SKIP
     >>> w.goto(3)  # doctest: +SKIP
     >>> w.save("show3d_state.json")  # doctest: +SKIP
@@ -875,8 +878,6 @@ class Show3D(anywidget.AnyWidget):
         vmax: float | None = None,
         sampling: float | tuple[float, float] | list[float] | None = None,
         units: str | list[str] | None = None,
-        pixel_size: float = 0.0,  # legacy alias for sampling
-        pixel_unit: str | None = None,  # legacy alias for units
         smooth: bool = True,
         image_rotation: int = 0,
         log_scale: bool = False,
@@ -953,8 +954,10 @@ class Show3D(anywidget.AnyWidget):
             elif legacy_link_pan is not None:
                 kwargs["link_panels"] = bool(legacy_link_pan)
         # `sampling` + `units` is the canonical quantem convention (matches
-        # Dataset.sampling/.units, Show2D, Show4DSTEM). `pixel_size`/`pixel_unit`
-        # are kept as legacy aliases; `sampling`/`units` win when both are given.
+        # Dataset.sampling/.units, Show2D, Show4DSTEM). They feed the internal
+        # `pixel_size`/`pixel_unit` traits the scale bar reads.
+        pixel_size = 0.0
+        pixel_unit = None
         if sampling is not None:
             samp = sampling[0] if isinstance(sampling, (tuple, list)) else sampling
             pixel_size = float(samp)
@@ -1827,7 +1830,7 @@ class Show3D(anywidget.AnyWidget):
         Example
         -------
         >>> from quantem.widget import Show3D
-        >>> w = Show3D(stack, cmap="viridis", pixel_size=0.5)  # doctest: +SKIP
+        >>> w = Show3D(stack, cmap="viridis", sampling=0.5, units="A")  # doctest: +SKIP
         >>> w.save("show3d_state.json")  # doctest: +SKIP
 
         Notes
