@@ -524,7 +524,7 @@ const upwardMenuProps = {
   sx: { zIndex: 9999 },
 };
 
-import { COLORMAPS, COLORMAP_NAMES, renderToOffscreen, renderToOffscreenReuse, createGPUColormapEngine, GPUColormapEngine } from "../colormaps";
+import { COLORMAPS, COLORMAP_NAMES, applyColormap, renderToOffscreen, renderToOffscreenReuse, createGPUColormapEngine, GPUColormapEngine } from "../colormaps";
 
 const DPR = window.devicePixelRatio || 1;
 const RESIZE_HIT_AREA_PX = 10;
@@ -4194,6 +4194,38 @@ function Show3D() {
     }
 
     const lut = COLORMAPS[cmap] || COLORMAPS.inferno;
+
+    if (offline) {
+      const canvas = canvasRef.current;
+      const offscreen = mainOffscreenRef.current;
+      const imgData = mainImgDataRef.current;
+      const ctx = canvas?.getContext("2d");
+      const offCtx = offscreen?.getContext("2d");
+      if (!canvas || !offscreen || !imgData || !ctx || !offCtx) return;
+      if (perPanelContrast) {
+        offCtx.clearRect(0, 0, offscreen.width, offscreen.height);
+        const panelW = Math.max(1, Math.floor(width / nP));
+        const panelImg = offCtx.createImageData(panelW, height);
+        const sharedAutoRange = autoContrast ? { vmin, vmax } : null;
+        for (let p = 0; p < nP; p++) {
+          const panelData = extractPanelSlice(frameData, p, logScale);
+          if (!panelData) continue;
+          const pdr = panelDataRanges[p];
+          const panelRange = panelData.length > 0
+            ? findDataRange(panelData)
+            : ((perPanelHistogramEnabled && pdr && pdr.max > pdr.min)
+                ? pdr
+                : resolveDisplayBounds(dataMin, dataMax, traitVmin, traitVmax, logScale));
+          const range = resolvePanelRenderRange(p, panelRange, sharedAutoRange, panelData, autoContrast, percentileLow, percentileHigh);
+          applyColormap(panelData, panelImg.data, lut, range.vmin, range.vmax);
+          offCtx.putImageData(panelImg, p * panelW, 0);
+        }
+      } else {
+        renderToOffscreenReuse(processed, lut, vmin, vmax, offscreen, imgData);
+      }
+      drawMain(ctx, offscreen);
+      return;
+    }
 
     // GPU colormap path (single frame) - zero-copy via OffscreenCanvas→ImageBitmap
     const engine = gpuCmapRef.current;
