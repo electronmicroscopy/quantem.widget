@@ -9,8 +9,8 @@ from quantem.widget import load
 
 ## Reference
 
-```{autodoc2-object} quantem.widget.io.hdf5.load
-render_plugin = "myst"
+```{eval-rst}
+.. autofunction:: quantem.widget.io.hdf5.load
 ```
 
 ```{tip}

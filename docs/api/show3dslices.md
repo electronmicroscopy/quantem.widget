@@ -5,8 +5,10 @@ Orthogonal slices of a 3D volume side by side with a synced crosshair. See the
 
 ## Reference
 
-```{autodoc2-object} quantem.widget.show3dslices.Show3DSlices
-render_plugin = "myst"
+```{eval-rst}
+.. autoclass:: quantem.widget.show3dslices.Show3DSlices
+   :members:
+   :show-inheritance:
 ```
 
 ## Interactive controls
