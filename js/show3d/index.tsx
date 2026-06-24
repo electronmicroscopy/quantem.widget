@@ -37,6 +37,7 @@ import { findDataRange, applyLogScale, applyLogScaleInPlace, percentileClip, sli
 // Style tokens (inlined - matches Show2D/Show4DSTEM single-file convention)
 // ============================================================================
 const SPACING = { XS: 4, SM: 8, MD: 12, LG: 16 } as const;
+const UI_FONT = "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
 const controlRow = {
   display: "flex",
   alignItems: "center",
@@ -72,7 +73,7 @@ const sliderStyles = {
 const typography = {
   label: { fontSize: 11 },
   labelSmall: { fontSize: 10 },
-  value: { fontSize: 10, fontFamily: "monospace" },
+  value: { fontSize: 10, fontFamily: UI_FONT },
   title: { fontWeight: "bold" as const },
 };
 
@@ -464,8 +465,8 @@ const Histogram = React.memo(function Histogram({
         }}
       />
       <Box sx={{ display: "flex", justifyContent: "space-between", width }}>
-        <Typography sx={{ fontSize: 8, fontFamily: "monospace", opacity: 0.6, lineHeight: 1 }}>{formatValue(vminPct)}</Typography>
-        <Typography sx={{ fontSize: 8, fontFamily: "monospace", opacity: 0.6, lineHeight: 1 }}>{formatValue(vmaxPct)}</Typography>
+        <Typography sx={{ fontSize: 8, fontFamily: UI_FONT, opacity: 0.6, lineHeight: 1 }}>{formatValue(vminPct)}</Typography>
+        <Typography sx={{ fontSize: 8, fontFamily: UI_FONT, opacity: 0.6, lineHeight: 1 }}>{formatValue(vmaxPct)}</Typography>
       </Box>
     </Box>
   );
@@ -476,13 +477,12 @@ const controlPanel = {
 };
 
 const container = {
-  // Match Show4DSTEM root typography so Show3D controls, buttons, and menus
-  // use the same compact monospace UI.
+  // Match the shared canvas scale-bar typography for a clean microscope-viewer UI.
   root: {
     p: 2,
     bgcolor: "transparent",
     color: "inherit",
-    fontFamily: "monospace",
+    fontFamily: UI_FONT,
     overflow: "visible",
     "& .MuiTypography-root, & .MuiButton-root, & .MuiInputBase-root": { fontFamily: "inherit" },
   },
@@ -999,7 +999,7 @@ function Show3D() {
 
   const themedMenuProps = {
     ...upwardMenuProps,
-    PaperProps: { sx: { bgcolor: themeColors.controlBg, color: themeColors.text, border: `1px solid ${themeColors.border}`, fontFamily: "monospace", "& .MuiMenuItem-root": { fontFamily: "inherit" } } },
+    PaperProps: { sx: { bgcolor: themeColors.controlBg, color: themeColors.text, border: `1px solid ${themeColors.border}`, fontFamily: UI_FONT, "& .MuiMenuItem-root": { fontFamily: "inherit" } } },
   };
 
   // Model state (synced with Python)
@@ -4338,7 +4338,7 @@ function Show3D() {
         ctx.beginPath();
         ctx.rect(slotX, slotY, outPanelW, outPanelH);
         ctx.clip();
-        ctx.font = `bold ${Math.max(8, panelTitleFontSize || 11)}px ui-monospace, monospace`;
+        ctx.font = `bold ${Math.max(8, panelTitleFontSize || 11)}px ${UI_FONT}`;
         const tw = ctx.measureText(label).width;
         const lx = slotX + (outPanelW - tw) / 2;
         const ly = slotY + 14;
