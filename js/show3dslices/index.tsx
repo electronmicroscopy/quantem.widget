@@ -820,6 +820,7 @@ function Show3DSlices() {
   const [traitVmax] = useModelState<number | null>("vmax");
   const [showControls] = useModelState<boolean>("show_controls");
   const [showCrosshair] = useModelState<boolean>("show_crosshair");
+  const [panelWidthPx] = useModelState<number>("panel_width_px");
   const [showFft, setShowFft] = useModelState<boolean>("show_fft");
   const [orthographic, setOrthographic] = useModelState<boolean>("orthographic");
   const [smooth, setSmooth] = useModelState<boolean>("smooth");
@@ -1015,8 +1016,15 @@ function Show3DSlices() {
   }, []);
 
   // Canvas resize (matching Show2D pattern)
-  const [canvasTarget, setCanvasTarget] = React.useState(CANVAS_TARGET);
-  const [sideCanvasTarget, setSideCanvasTarget] = React.useState(CANVAS_TARGET);
+  const initialCanvasTarget = panelWidthPx > 0 ? panelWidthPx : CANVAS_TARGET;
+  const [canvasTarget, setCanvasTarget] = React.useState(initialCanvasTarget);
+  const [sideCanvasTarget, setSideCanvasTarget] = React.useState(initialCanvasTarget);
+  React.useEffect(() => {
+    if (panelWidthPx > 0) {
+      setCanvasTarget(panelWidthPx);
+      setSideCanvasTarget(panelWidthPx);
+    }
+  }, [panelWidthPx]);
   const [isResizing, setIsResizing] = React.useState(false);
   const [resizeStart, setResizeStart] = React.useState<{ x: number; y: number; size: number; target: "primary" | "side" } | null>(null);
 
@@ -1074,7 +1082,10 @@ function Show3DSlices() {
   } | null>(null);
   const [webgpuSupported, setWebgpuSupported] = React.useState(true);
   const [rendererReady, setRendererReady] = React.useState(0);
-  const [volumeCanvasSize, setVolumeCanvasSize] = React.useState(CANVAS_TARGET);
+  const [volumeCanvasSize, setVolumeCanvasSize] = React.useState(initialCanvasTarget);
+  React.useEffect(() => {
+    if (panelWidthPx > 0) setVolumeCanvasSize(panelWidthPx);
+  }, [panelWidthPx]);
   const [volumeResizing, setVolumeResizing] = React.useState(false);
   const volumeResizeStartRef = React.useRef<{ x: number; y: number; size: number } | null>(null);
   const [showSlicePlanes, setShowSlicePlanes] = useModelState<boolean | undefined>("show_slice_planes");
