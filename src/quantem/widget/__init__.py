@@ -95,4 +95,32 @@ except PackageNotFoundError:
     # Source-tree imports (e.g. `PYTHONPATH=src pytest`) skip pip install.
     __version__ = "0.0.0+local"
 
-__all__ = ["Show2D", "Show3D", "Show3DSlices", "Show4DSTEM", "load", "idpc", "com", "device_info", "bf", "adf", "df"]
+
+def profile() -> None:
+    """Print the runtime environment: quantem + quantem.widget versions, where quantem is
+    imported from, the torch device, and Python. Call it at the top of a notebook so the
+    reader (and any bug report or shared HTML) records exactly what produced the results -
+    versions drift, and "which build / which branch" is the first question every time."""
+    import platform
+    print(f"quantem.widget  {__version__}")
+    try:
+        import quantem
+        print(f"quantem         {getattr(quantem, '__version__', '?')}")
+        print(f"  loaded from   {quantem.__file__}")
+    except ImportError:
+        print("quantem         (not importable)")
+    try:
+        import torch
+        if torch.cuda.is_available():
+            dev = f"cuda ({torch.cuda.get_device_name(0)})"
+        elif getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+            dev = "mps (Apple)"
+        else:
+            dev = "cpu"
+        print(f"torch           {torch.__version__}  device={dev}")
+    except ImportError:
+        print("torch           (not importable)")
+    print(f"python          {platform.python_version()}")
+
+
+__all__ = ["Show2D", "Show3D", "Show3DSlices", "Show4DSTEM", "load", "idpc", "com", "device_info", "bf", "adf", "df", "profile"]

@@ -223,6 +223,13 @@ class Show2D(anywidget.AnyWidget):
     _export_light = traitlets.Bool(False).tag(sync=True)
     _offline_min = traitlets.Float(0.0).tag(sync=True)
     _offline_max = traitlets.Float(1.0).tag(sync=True)
+    # Per-image quantization ranges. A gallery's panels can span very different
+    # intensities; one GLOBAL (min, max) then wastes most of the 256 uint8 codes
+    # on whichever panel is widest, so a narrow panel keeps only a handful of
+    # levels and its histogram shows a coarse comb. Quantizing each panel against
+    # its OWN (min, max) gives every panel the full 256 codes -> clean histogram.
+    _offline_mins = traitlets.List(trait=traitlets.Float(), default_value=[]).tag(sync=True)
+    _offline_maxs = traitlets.List(trait=traitlets.Float(), default_value=[]).tag(sync=True)
     export_request = traitlets.Unicode("").tag(sync=True)
     export_status = traitlets.Unicode("").tag(sync=True)
     export_enabled = traitlets.Bool(True).tag(sync=True)
@@ -1088,21 +1095,27 @@ class Show2D(anywidget.AnyWidget):
         """Send display data to JS (possibly binned for large galleries)."""
         data = self._display_data if self._display_data is not None else self._data
         if self.offline:
-            # Quantize to uint8 against global (min, max). Drops standalone-HTML
-            # bytes by 4x. Display-only mode — colormap reduces to 256 levels
-            # anyway, eye can't tell the difference.
-            arr = np.ascontiguousarray(data, dtype=np.float32)
-            finite = arr[np.isfinite(arr)]
-            if finite.size == 0:
-                lo, hi = 0.0, 1.0
-            else:
-                lo = float(finite.min())
-                hi = float(finite.max())
-            rng = hi - lo if hi > lo else 1.0
-            quantized = np.clip((arr - lo) * (255.0 / rng), 0, 255).astype(np.uint8)
-            self._offline_min = lo
-            self._offline_max = hi
-            self.frame_bytes = quantized.tobytes()
+            # Quantize to uint8 PER IMAGE (4x smaller than float32). Each panel uses
+            # its own (min, max) so every panel gets the full 256 codes - a global
+            # range would starve narrow-range panels and comb their histograms.
+            # Display-only: the colormap reduces to 256 levels anyway.
+            arr = np.ascontiguousarray(data, dtype=np.float32)  # (n, H, W)
+            flat = arr.reshape(arr.shape[0], -1)
+            out = np.empty(flat.shape, dtype=np.uint8)
+            mins, maxs = [], []
+            for i in range(flat.shape[0]):
+                finite = flat[i][np.isfinite(flat[i])]
+                lo = float(finite.min()) if finite.size else 0.0
+                hi = float(finite.max()) if finite.size else 1.0
+                rng = hi - lo if hi > lo else 1.0
+                out[i] = np.clip((flat[i] - lo) * (255.0 / rng), 0, 255).astype(np.uint8)
+                mins.append(lo)
+                maxs.append(hi)
+            self._offline_mins = mins
+            self._offline_maxs = maxs
+            self._offline_min = mins[0]  # back-compat scalars (single-image readers)
+            self._offline_max = maxs[0]
+            self.frame_bytes = out.tobytes()
         else:
             self.frame_bytes = data.tobytes()
 
