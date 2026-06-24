@@ -18,6 +18,7 @@ dependencies = [
     "matplotlib>=3.7.0",
     "Pillow>=10.0.0",
     "numba>=0.60",
+    "imagecodecs>=2024.1.1",  # decode compressed (e.g. LZW) TIFF frames for show3d / read_image_stack
     # Apple Metal backend on macOS (tiny wheel, no system toolkit). On Linux the CUDA
     # decode uses cupy, but we do NOT pin a cupy wheel: a fixed cuda13x/cuda12x would
     # collide with a cupy the environment already ships (Colab pre-installs cupy-cuda12x ->
