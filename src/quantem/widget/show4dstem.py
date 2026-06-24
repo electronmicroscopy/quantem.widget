@@ -318,6 +318,7 @@ class Show4DSTEM(anywidget.AnyWidget):
     _preset_request = traitlets.Unicode("").tag(sync=True)
     fft_window = traitlets.Bool(True).tag(sync=True)
     show_controls = traitlets.Bool(True).tag(sync=True)
+    panel_width_px = traitlets.Int(0).tag(sync=True)
     dp_show_colorbar = traitlets.Bool(False).tag(sync=True)
     # VI panel auto-contrast (1st/99th percentile clip) and CSS smoothing.
     # DP panel doesn't need either — Bragg spots are best read with nearest-
@@ -366,6 +367,7 @@ class Show4DSTEM(anywidget.AnyWidget):
         show_fft: bool = False,
         fft_window: bool = True,
         show_controls: bool = True,
+        panel_width_px: int = 0,
         dp_vmin: float | None = None,
         dp_vmax: float | None = None,
         vi_vmin: float | None = None,
@@ -377,6 +379,10 @@ class Show4DSTEM(anywidget.AnyWidget):
     ):
         super().__init__(**kwargs)
         self.widget_version = resolve_widget_version()
+        panel_width_px = int(panel_width_px)
+        if panel_width_px < 0:
+            raise ValueError(f"panel_width_px must be >= 0, got {panel_width_px}")
+        self.panel_width_px = panel_width_px
         # Backend selector. ONLY two values:
         #   None  -> auto-pick Python compute (TorchBackend on torch
         #            tensors, MetalRawBackend on ChunkedFrames). Default.
@@ -1279,6 +1285,7 @@ class Show4DSTEM(anywidget.AnyWidget):
             "show_fft": self.show_fft,
             "fft_window": self.fft_window,
             "show_controls": self.show_controls,
+            "panel_width_px": self.panel_width_px,
             "dp_show_colorbar": self.dp_show_colorbar,
             "vi_auto_contrast": self.vi_auto_contrast,
             "vi_smooth": self.vi_smooth,

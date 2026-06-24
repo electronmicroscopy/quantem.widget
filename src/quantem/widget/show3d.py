@@ -264,6 +264,11 @@ class Show3D(anywidget.AnyWidget):
         alongside a control panel.  This controls **display only** - the
         underlying stack resolution is never resampled; scrubbing and zoom
         still see every pixel of the full-resolution frame.
+    panel_width_px : int, default 0
+        Display width for each panel in CSS pixels. When ``>0``, this wins over
+        ``size`` and the frontend derives the total grid canvas from the active
+        column count. This is display-only; the synced ``panel_width_px`` trait
+        still records source panel geometry for multi-panel frame slicing.
     padding : int or tuple[int, int], default 0
         Zero-valued spatial border added to every frame before display. Use
         this when aligned movies need extra field of view so shifted frames do
@@ -885,6 +890,7 @@ class Show3D(anywidget.AnyWidget):
         show_stats: bool | None = None,
         show_controls: bool = True,
         size: int = 0,
+        panel_width_px: int = 0,
         crop: int | tuple[int, int] | tuple[int, int, int, int] = 0,
         padding: int | tuple[int, int] = 0,
         pad_mode: str = "median",
@@ -927,6 +933,11 @@ class Show3D(anywidget.AnyWidget):
             kwargs["show_zoom_indicator"] = bool(show_zoom_indicator)
         if show_scale_bar is not None:
             kwargs["scale_bar_visible"] = bool(show_scale_bar)
+        panel_width_px = int(panel_width_px)
+        if panel_width_px < 0:
+            raise ValueError(f"panel_width_px must be >= 0, got {panel_width_px}")
+        if panel_width_px > 0:
+            size = panel_width_px
         kwargs.pop("show_playback", None)
         legacy_link_zoom = kwargs.pop("link_zoom", None)
         legacy_link_pan = kwargs.pop("link_pan", None)
