@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "quantem.widget"
-version = "0.0.1rc25"
+version = "0.0.1rc26"
 description = "Interactive custom Python widgets for electron microscopy"
 license = "MIT"
 license-files = ["LICENSE"]
