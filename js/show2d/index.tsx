@@ -3977,8 +3977,8 @@ function Show2D() {
                 style={{ position: "absolute", top: 0, left: 0, width: canvasW, height: canvasH, pointerEvents: "none" }}
               />
               {cursorInfo && (
-                <Box sx={{ position: "absolute", top: 3, right: 3, bgcolor: "rgba(0,0,0,0.35)", px: 0.5, py: 0.15, pointerEvents: "none", minWidth: 100, textAlign: "right" }}>
-                  <Typography sx={{ fontSize: 9, fontFamily: "monospace", color: "rgba(255,255,255,0.7)", whiteSpace: "nowrap", lineHeight: 1.2 }}>
+                <Box sx={{ position: "absolute", top: 6, right: 6, bgcolor: "rgba(0,0,0,0.72)", px: 0.75, py: 0.35, borderRadius: 1, pointerEvents: "none", minWidth: 100, textAlign: "right" }}>
+                  <Typography sx={{ fontSize: 12, fontWeight: 600, fontFamily: "monospace", color: "#fff", whiteSpace: "nowrap", lineHeight: 1.25 }}>
                     ({cursorInfo.row}, {cursorInfo.col}){pixelSize > 0 ? ` = (${(cursorInfo.row * calibratedFactor).toFixed(1)}, ${(cursorInfo.col * calibratedFactor).toFixed(1)} ${calibratedUnit})` : ""} {formatNumber(cursorInfo.value)}
                   </Typography>
                 </Box>
