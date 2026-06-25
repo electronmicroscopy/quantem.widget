@@ -50,7 +50,10 @@ def to_numpy(data, dtype: np.dtype | None = None) -> np.ndarray:
 
 
 def _resize_image(img: np.ndarray, target_h: int, target_w: int) -> np.ndarray:
-    """Center-pad image to (target_h, target_w) with zeros. For gallery alignment."""
+    """Center-pad image to (target_h, target_w) with the image MEDIAN. For gallery
+    alignment when panels (or a 0/90 pair vs its larger corrected merge) differ in size.
+    Median, not zero: a black border skews percentile/auto contrast and reads as data;
+    the median matches the image brightness so ``auto`` works without manual vmin/vmax."""
     h, w = img.shape[-2:]
     if h == target_h and w == target_w:
         return img
@@ -58,7 +61,8 @@ def _resize_image(img: np.ndarray, target_h: int, target_w: int) -> np.ndarray:
     pad_bot = target_h - h - pad_top
     pad_left = (target_w - w) // 2
     pad_right = target_w - w - pad_left
-    return np.pad(img, ((pad_top, pad_bot), (pad_left, pad_right)), mode="constant", constant_values=0)
+    fill = float(np.median(img)) if img.size else 0.0
+    return np.pad(img, ((pad_top, pad_bot), (pad_left, pad_right)), mode="constant", constant_values=fill)
 
 
 def bin2d(img: np.ndarray, factor: int, mode: str = "mean") -> np.ndarray:
