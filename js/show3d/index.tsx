@@ -1568,7 +1568,7 @@ function Show3D() {
   const gpuFFTRef = React.useRef<WebGPUFFT | null>(null);
   const gpuFftInitPromiseRef = React.useRef<Promise<WebGPUFFT | null> | null>(null);
   const offlineFftGpuDisabledRef = React.useRef(false);
-  const [gpuReady, setGpuReady] = React.useState(false);
+  const [, setGpuReady] = React.useState(false);  // value unused; setter gates FFT-ready re-renders
   const [fftBackendInfo, setFftBackendInfo] = React.useState<{
     webgpu: "unknown" | "ready" | "software" | "unavailable";
     adapter: string;
