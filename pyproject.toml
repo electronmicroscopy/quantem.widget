@@ -11,7 +11,7 @@ license-files = ["LICENSE"]
 requires-python = ">=3.11"
 dependencies = [
     "quantem>=0.1.8",
-    "quantem-data @ https://test-files.pythonhosted.org/packages/3e/93/bdadcaaf96b6c43580b0db7e822b697acadbe500402a384cf5bbea95c26b/quantem_data-0.0.1rc1-py3-none-any.whl",   # shared HF dataset hub (upload/download), re-exported by io.hub
+    "quantem.data>=0.0.1rc1",   # shared HF dataset hub (upload/download), re-exported by io.hub
     "anywidget>=0.9.0",
     "numpy>=2.0.0",
     "traitlets>=5.0.0",
