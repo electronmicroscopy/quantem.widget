@@ -118,9 +118,70 @@ def profile() -> None:
         else:
             dev = "cpu"
         print(f"torch           {torch.__version__}  device={dev}")
+        if torch.cuda.is_available():
+            # Used vs total decides whether the next merge / recon fits; torch live-vs-
+            # reserved is the leak signal - if "live" climbs across repeated calls, refs
+            # are still pinned (del them, then free_gpu() returns the reserved pool).
+            free, total = torch.cuda.mem_get_info()
+            print(f"VRAM            {(total - free) / 1e9:.1f} used / {total / 1e9:.0f} GB  ({free / 1e9:.0f} free)")
+            print(f"  torch pool    {torch.cuda.memory_allocated() / 1e9:.1f} live / {torch.cuda.memory_reserved() / 1e9:.1f} reserved GB")
+        elif getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+            cur = torch.mps.current_allocated_memory() / 1e9 if hasattr(torch.mps, "current_allocated_memory") else 0.0
+            drv = torch.mps.driver_allocated_memory() / 1e9 if hasattr(torch.mps, "driver_allocated_memory") else 0.0
+            print(f"VRAM (MPS)      {cur:.1f} live / {drv:.1f} driver GB")
     except ImportError:
         print("torch           (not importable)")
     print(f"python          {platform.python_version()}")
 
 
-__all__ = ["Show2D", "Show3D", "Show3DSlices", "Show4DSTEM", "load", "idpc", "com", "device_info", "bf", "adf", "df", "profile"]
+def free_gpu(verbose: bool = True) -> float:
+    """Release cached GPU memory back to the driver, on CUDA (torch + cupy pools) or Apple
+    MPS. Call AFTER ``del``-ing your big objects (the merged 4D stack, the widget): this
+    hands the allocator's cached-but-unused blocks back to the device - it cannot drop
+    references you still hold, so ``del`` first. Returns GB released.
+
+    Why it is needed: torch (and cupy) keep a caching allocator. After ``del`` of a 38 GB
+    merge the pool still PINS those blocks - ``nvidia-smi`` shows them used and the next
+    load OOMs. ``empty_cache`` + cupy ``free_all_blocks`` return them. MPS caches the same
+    way; ``torch.mps.empty_cache`` is the equivalent. Backend is auto-detected.
+
+    >>> del widget, merged          # drop every reference first
+    >>> free_gpu()
+    freed 38.6 GB  (40.5 -> 1.8)
+    """
+    import gc
+    gc.collect()
+    try:
+        import torch
+    except ImportError:
+        if verbose:
+            print("torch not importable - nothing to free")
+        return 0.0
+    mps = bool(getattr(torch.backends, "mps", None) and torch.backends.mps.is_available())
+
+    def _used_gb() -> float:
+        if torch.cuda.is_available():
+            free, total = torch.cuda.mem_get_info()
+            return (total - free) / 1e9
+        if mps and hasattr(torch.mps, "current_allocated_memory"):
+            return torch.mps.current_allocated_memory() / 1e9
+        return 0.0
+
+    before = _used_gb()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        try:
+            import cupy as cp
+            cp.get_default_memory_pool().free_all_blocks()
+            cp.get_default_pinned_memory_pool().free_all_blocks()
+        except ImportError:
+            pass
+    elif mps:
+        torch.mps.empty_cache()
+    after = _used_gb()
+    if verbose:
+        print(f"freed {before - after:.1f} GB  ({before:.1f} -> {after:.1f})")
+    return before - after
+
+
+__all__ = ["Show2D", "Show3D", "Show3DSlices", "Show4DSTEM", "load", "idpc", "com", "device_info", "bf", "adf", "df", "profile", "free_gpu"]
