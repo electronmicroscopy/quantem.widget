@@ -224,6 +224,15 @@ class Show4DSTEM(anywidget.AnyWidget):
     # multi-volume {volumes:[{base,chunks,badPx}], ...}. The browser decode is
     # bit-exact to the uint8-clipped reference (verified).
     _offline_bslz4 = traitlets.Unicode("").tag(sync=True)
+    # H5-source mode: the HTML points at a sibling float32 .h5 file (the merged data); the
+    # JS reads it straight off disk via WebGPU (jsfive parse + GPU bitshuffle+LZ4 decode) -
+    # NOTHING embedded, the data stays a file. Needs HTTP (fetch CORS-blocked under file://).
+    # The "click HTML, GPU decompresses the merged H5, real Show4DSTEM renders it" path.
+    _h5_url = traitlets.Unicode("").tag(sync=True)
+    # Lazy mode: a sidecar bundle URL (radial profile + CoM + frame index + data files). The JS
+    # derives the virtual image from the ~100 MB profile in VRAM and lazy-fetches CBED frames from
+    # disk - nothing bulk-loads. Real-time scrub + detector with no 38 GB resident.
+    _lazy_url = traitlets.Unicode("").tag(sync=True)
     # Hot/dead detector pixel indices (JSON list) auto-applied by the offline WebGPU
     # compute - mirrors CUDA load(apply_mask=True) so the browser data is filtered
     # automatically (no saturated pixel dominating the VI/DP).
@@ -769,6 +778,11 @@ class Show4DSTEM(anywidget.AnyWidget):
         only for bslz4 companion directories.
         """
         if self._data.ndim not in (4, 5):
+            return
+        # H5-source / lazy mode: the merged data stays files on disk, read by WebGPU at runtime.
+        # No uint8 pack, nothing embedded - the JS fetches the sidecars/frames and decodes on GPU.
+        if getattr(self, "_h5_url", "") or getattr(self, "_lazy_url", ""):
+            self.offline = True
             return
         n_bytes = self._data.numel()  # uint8 pack = 1 byte/pixel
         # Companion mode bypasses the V8 string wall (data is fetched binary, never
@@ -1326,20 +1340,34 @@ class Show4DSTEM(anywidget.AnyWidget):
     def free(self):
         """Free GPU memory held by this widget.
 
-        Deletes the internal data tensor, runs garbage collection, and
-        flushes the MPS allocator cache. Call this before loading a new
-        dataset to avoid running out of GPU memory.
+        Drops EVERY reference to the data tensor and flushes the allocator pools,
+        so the stack actually leaves VRAM (no kernel restart needed). The data is
+        held in FOUR places, not one: ``self._data`` plus the compute backend's
+        cached ``_t`` / ``_4d`` / ``_flat`` views (``self._compute_backend``) plus
+        the per-op ``self._compute_for`` cache - missing any one keeps the whole
+        stack pinned. And the storage is cupy-owned (``io.load`` decompresses with
+        cupy; the widget wraps it via ``from_dlpack``), so when the torch refs die
+        the memory returns to the CUPY pool, which ``torch.empty_cache`` cannot
+        release - the cupy pool is freed too. Call before loading a new dataset.
 
         Examples
         --------
-        >>> w.free()          # release ~9 GB of MPS memory
-        >>> del result        # free the source numpy array
+        >>> w.free()          # release the full stack from VRAM
+        >>> del result        # free the source array
         """
         import gc
 
         device = str(self._device) if hasattr(self, "_device") else ""
-        nbytes = self._data.nbytes if hasattr(self._data, "nbytes") else 0
+        nbytes = (
+            self._data.nbytes
+            if self._data is not None and hasattr(self._data, "nbytes")
+            else 0
+        )
+        # Every holder of the data storage (verified via a gc storage scan):
+        # the widget's own ref, the compute backend's view cache, and the per-op cache.
         self._data = None
+        self._compute_backend = None
+        self._compute_for = None
         gc.collect()
         if device == "mps":
             try:
@@ -1348,6 +1376,15 @@ class Show4DSTEM(anywidget.AnyWidget):
                 pass
         elif device.startswith("cuda"):
             torch.cuda.empty_cache()
+            # Storage is cupy-owned via dlpack; the freed memory sits in the cupy pool
+            # until its blocks are returned to the driver.
+            try:
+                import cupy as cp
+
+                cp.get_default_memory_pool().free_all_blocks()
+                cp.get_default_pinned_memory_pool().free_all_blocks()
+            except ImportError:
+                pass
         if nbytes > 0:
             print(f"freed {_format_memory(nbytes)} ({device})")
 
@@ -2957,49 +2994,3 @@ class Show4DSTEM(anywidget.AnyWidget):
             return
 
         self.virtual_image_bytes = self._to_float32_bytes(self._fast_masked_sum(mask))
-
-    def _repr_mimebundle_(self, **kwargs):
-        """Return widget view + widget-faithful virtual-image + CBED PNG.
-
-        Static PNG mirrors the WebGPU canvas: virtual image (gray, real space)
-        + CBED (inferno, diffraction) at the widget's current scan position.
-        Image-only (no axes/titles). Opt out with ``QUANTEM_WIDGET_NO_SNAPSHOT=1``.
-        """
-        bundle = super()._repr_mimebundle_(**kwargs)
-        if os.environ.get("QUANTEM_WIDGET_NO_SNAPSHOT"):
-            return bundle
-        try:
-            from quantem.widget.render.snapshot import render_panels_png
-            panels: list[np.ndarray] = []
-            cmaps: list[str] = []
-            labels: list[str] = []
-            if self.virtual_image_bytes:
-                vi = np.frombuffer(self.virtual_image_bytes, dtype=np.float32)
-                panels.append(vi.reshape(self.shape_rows, self.shape_cols))
-                cmaps.append("gray")
-                labels.append("virtual image (real)")
-            if self.frame_bytes:
-                fr = np.frombuffer(self.frame_bytes, dtype=np.float32)
-                panels.append(fr.reshape(self.det_rows, self.det_cols))
-                cmaps.append("inferno")
-                labels.append(f"CBED @ scan ({self.pos_row},{self.pos_col})")
-            if not panels:
-                return bundle
-            title = (self.title or None) if self.title else None
-            # pixel_size in A by widget convention; only the real-space panel uses it.
-            # render_panels_png applies sampling per-panel via native widths; mixing
-            # real-space + diffraction means we'd add a misleading bar on CBED.
-            # Skip sampling bar in 4DSTEM compose to avoid this; real-space scale bar
-            # is best shown in the dedicated Show2D virtual-image cell.
-            png = render_panels_png(
-                panels, cmaps=cmaps, ncols=len(panels),
-                max_px_per_panel=256, log=False,
-                labels=labels, title=title,
-            )
-            data_dict = bundle[0] if isinstance(bundle, tuple) else bundle
-            data_dict["image/png"] = base64.b64encode(png).decode("ascii")
-            if isinstance(bundle, tuple):
-                return (data_dict, bundle[1])
-            return data_dict
-        except Exception:
-            return bundle
