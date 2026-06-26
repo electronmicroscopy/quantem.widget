@@ -14,6 +14,49 @@ def _png(path, shape=(32, 32)):
     Image.fromarray((np.random.rand(*shape) * 255).astype("uint8")).save(path)
 
 
+def test_jupyter_launch_enables_widget_state_save(tmp_path, monkeypatch):
+    monkeypatch.setenv("JUPYTERLAB_SETTINGS_DIR", str(tmp_path / "lab-settings"))
+    settings_path = cli._enable_jupyterlab_widget_state_save()
+
+    assert settings_path == (
+        tmp_path
+        / "lab-settings"
+        / "@jupyter-widgets"
+        / "jupyterlab-manager"
+        / "plugin.jupyterlab-settings"
+    )
+    assert '"saveState": true' in settings_path.read_text()
+
+    settings_path.write_text('// comment from JupyterLab\n{"other": 3, "saveState": false}\n')
+    cli._enable_jupyterlab_widget_state_save()
+    assert '"other": 3' in settings_path.read_text()
+    assert '"saveState": true' in settings_path.read_text()
+
+
+def test_embed_jpeg_adds_image_to_widget_only_output(tmp_path):
+    png = tmp_path / "shot.png"
+    _png(png, (24, 24))
+    cell = {
+        "cell_type": "code",
+        "outputs": [{
+            "output_type": "display_data",
+            "metadata": {},
+            "data": {
+                "application/vnd.jupyter.widget-view+json": {
+                    "model_id": "abc",
+                    "version_major": 2,
+                    "version_minor": 1,
+                }
+            },
+        }],
+    }
+
+    assert cli._embed_jpeg(cell, png.read_bytes(), quality=80)
+    data = cell["outputs"][0]["data"]
+    assert "image/jpeg" in data
+    assert "application/vnd.jupyter.widget-view+json" in data
+
+
 # ---------------------------------------------------------------------------
 def test_detect_single_image(tmp_path):
     p = tmp_path / "a.png"
