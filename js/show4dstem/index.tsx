@@ -21,9 +21,12 @@ import { useTheme } from "../theme";
 import { COLORMAPS, applyColormap } from "../colormaps";
 import { WebGPUFFT, getWebGPUFFT, fft2d, fftshift, autoEnhanceFFT, nextPow2, applyHannWindow2D } from "../fft";
 import { Show4DSTEMCompute } from "../engine/compute";
+import { readH5Volume } from "../engine/h5reader";
+import { decodeBslz4ToStack } from "../engine/bslz4";
+import { LazyShow4DSTEM } from "../engine/lazy";
 import { drawScaleBarHiDPI, drawColorbar, roundToNiceValue } from "../figure";
 import { findDataRange, sliderRange, computeStats, computeHistogramFromBytes, percentileClip } from "../stats";
-import { downloadBlob, extractBytes, formatNumber, downloadDataView } from "../format";
+import { downloadBlob, extractBytes, formatNumber, downloadDataView, preserveRestoredWidgetModelsOnSave } from "../format";
 
 // Detector mask for the offline WebGPU virtual-image sum. Mirrors the Python
 // mask geometry exactly (show4dstem.py _create_*_mask): cx pairs with column,
@@ -1068,6 +1071,7 @@ function cropSingleROI(
 function Show4DSTEM() {
   // Direct model access for batched updates
   const model = useModel();
+  React.useEffect(() => preserveRestoredWidgetModelsOnSave(model), [model]);
 
   // ─────────────────────────────────────────────────────────────────────────
   // Model State (synced with Python)
@@ -1292,7 +1296,81 @@ function Show4DSTEM() {
       const MAX_RESIDENT = 3;                    // recent volumes kept hot for instant back-scrub
       let volumeCount = 0;
       let getVol: ((idx: number) => Promise<Show4DSTEMCompute | null>) | null = null;
-      if (bslz4Meta) {
+      // H5 source: read the merged float32 .h5 file straight off disk via WebGPU
+      // (jsfive parse + GPU bitshuffle+LZ4 decode). Nothing embedded - the data stays a
+      // file; the HTML just points at it. This is the "click HTML, GPU decompresses the
+      // merged H5, real Show4DSTEM renders it" path.
+      // Lazy mode: a sidecar bundle (radial profile + CoM + frame index) at _lazy_url lets the
+      // virtual image derive from a ~100 MB profile in VRAM and the CBED lazy-fetch one frame from
+      // disk - NOTHING bulk-loads. LazyShow4DSTEM has the same interface as Show4DSTEMCompute, so
+      // the render below (recomputeVI / recomputeFrame / recomputeCoM) works unchanged.
+      const lazyUrl = model.get("_lazy_url") as string | undefined;
+      const h5Url = model.get("_h5_url") as string | undefined;
+      if (lazyUrl) {
+        const lz = await LazyShow4DSTEM.create(lazyUrl);
+        compute = lz as unknown as Show4DSTEMCompute;
+        if (compute) computes.push(compute);
+      } else if (h5Url) {
+        if (/_master\.h5$/.test(h5Url)) {
+          // Full no-bin merged = N external data files (each <2 GB, the browser ArrayBuffer cap).
+          // The browser's fetch->arrayBuffer runs ~0.7 GB/s on ONE connection, so a sequential
+          // read is fetch-bound (~47 s for 33 GB). Instead keep a WINDOW of W parallel fetches in
+          // flight (8 connections saturate the disk) feeding an IN-ORDER GPU decode. Wall-clock
+          // becomes max(parallel fetch, total decode) not their sum -> decode-bound ~15 s. Each
+          // file's ArrayBuffer is freed right after its decode; CPU heap peak ~W files.
+          const base = h5Url.replace(/_master\.h5$/, "");
+          const W = 8;
+          const fetchOne = async (n: number): Promise<ArrayBuffer | null> => {
+            const resp = await fetch(`${base}_data_${String(n).padStart(6, "0")}.h5`);
+            return resp.ok ? resp.arrayBuffer() : null;
+          };
+          const inflight = new Map<number, Promise<ArrayBuffer | null>>();
+          let next = 1;
+          for (; next <= W; next++) inflight.set(next, fetchOne(next));
+          const gpuChunks: { buffer: GPUBuffer; startScan: number; nScan: number }[] = [];
+          let startScan = 0, ds = 0;
+          let dev: GPUDevice | null = null;
+          const __t0 = performance.now(); let __decMs = 0, __parseMs = 0, __fetchBytes = 0, __waitMs = 0;
+          try {
+            for (let n = 1; !disposed; n++) {
+              const p = inflight.get(n);
+              if (!p) break;
+              inflight.delete(n);
+              const __wt = performance.now();
+              const buf = await p;
+              __waitMs += performance.now() - __wt;
+              if (!buf) break;
+              __fetchBytes += buf.byteLength;
+              const __pt = performance.now();
+              const vol = readH5Volume(buf, "merged");
+              __parseMs += performance.now() - __pt;
+              ds = vol.detSize;
+              const __dt = performance.now();
+              const dec = await decodeBslz4ToStack({ ...vol.chunks[0], startScan, nScan: vol.nFrames }, "float32", "float32");
+              __decMs += performance.now() - __dt;
+              if (!dec) break;
+              dev = dec.device;
+              gpuChunks.push({ buffer: dec.buffer, startScan, nScan: vol.nFrames });
+              startScan += vol.nFrames;
+              inflight.set(next, fetchOne(next));
+              next++;
+            }
+          } catch (e) {
+            gpuChunks.forEach((c) => c.buffer.destroy());   // no mid-stream VRAM leak on fetch/parse error
+            throw e;
+          }
+          const __decGB = startScan * ds * 4 / 1e9;
+          (window as unknown as { __loadprof: unknown }).__loadprof = { totalMs: Math.round(performance.now() - __t0),
+            fetchedCompressedGB: +(__fetchBytes / 1e9).toFixed(1), decodedFloat32GB: +__decGB.toFixed(1),
+            fetchWaitMs: Math.round(__waitMs), decompressMs: Math.round(__decMs), parseMs: Math.round(__parseMs),
+            decompressGBps: +(__decGB / (__decMs / 1000)).toFixed(2) };
+          if (dev) compute = Show4DSTEMCompute.fromGpuChunks(dev, gpuChunks, scanRows * scanCols, ds, 2);
+        } else {
+          const vol = readH5Volume(await (await fetch(h5Url)).arrayBuffer(), "merged");
+          compute = await Show4DSTEMCompute.createFromBslz4Chunked([{ ...vol.chunks[0], startScan: 0, nScan: vol.nFrames } as never], scanRows * scanCols, vol.detSize, "float32", "float32");
+        }
+        if (compute) computes.push(compute);
+      } else if (bslz4Meta) {
         // bslz4 mode: ship native HDF5 bitshuffle+LZ4 bytes (~6x smaller than uint16),
         // decompress on the GPU into a uint8 stack. The meta JSON is single
         // (chunked: {base, chunks}), or multi-volume ({volumes:[{base,chunks,badPx}]}).
@@ -1396,6 +1474,12 @@ function Show4DSTEM() {
         const vi = await compute!.maskedSum(buildDetectorMask(model, detR, detC));
         model.set("virtual_image_bytes", new DataView(vi.buffer));
       };
+      (window as unknown as { __sh4d: unknown }).__sh4d = { model, recomputeVI,
+        detMask: () => buildDetectorMask(model, detR, detC),
+        deriveOnly: async () => { const vi = await compute!.maskedSum(buildDetectorMask(model, detR, detC)); return vi.length; },
+        comLen: () => { const c = compute as unknown as { com?: Float32Array | null }; return c && c.com ? c.com.length : -1; },
+        rd: () => ({ mode: model.get("roi_mode"), r: model.get("roi_radius"), ri: model.get("roi_radius_inner"),
+          cr: model.get("roi_center_row"), cc: model.get("roi_center_col"), active: model.get("roi_active") }) };
       const recomputeDP = async () => {
         const mode = model.get("vi_roi_mode");
         if (!mode || mode === "off") { model.set("vi_roi_dp_bytes", new DataView(new ArrayBuffer(0))); return; }
@@ -1506,7 +1590,7 @@ function Show4DSTEM() {
   const [showFft, setShowFft] = useModelState<boolean>("show_fft");
   const [fftWindow, setFftWindow] = useModelState<boolean>("fft_window");
   const [showControls] = useModelState<boolean>("show_controls");
-  const [panelWidthPx] = useModelState<number>("panel_width_px");
+  const [panelWidthPx, setPanelWidthPx] = useModelState<number>("panel_width_px");
 
   const effectiveShowFft = showFft;
 
@@ -2159,10 +2243,6 @@ function Show4DSTEM() {
       }
     } else if (viAutoContrast) {
       ({ vmin, vmax } = percentileClip(scaled, 1, 99));
-      // Reflect the auto-chosen clip on the histogram slider so the user sees
-      // where Auto landed (and can grab it from there). Map the absolute
-      // vmin/vmax back to slider percent; guard against a redundant write that
-      // would loop this effect.
       const span = dataMax - dataMin;
       if (span > 0) {
         const lo = Math.max(0, Math.min(100, ((vmin - dataMin) / span) * 100));
@@ -3906,6 +3986,7 @@ function Show4DSTEM() {
     const handleMouseUp = () => {
       cancelAnimationFrame(rafId);
       setCanvasSize(latestSize);
+      setPanelWidthPx(Math.round(latestSize));
       setIsResizingCanvas(false);
       setResizeCanvasStart(null);
     };
@@ -3916,7 +3997,7 @@ function Show4DSTEM() {
       document.removeEventListener("mousemove", handleMouseMove);
       document.removeEventListener("mouseup", handleMouseUp);
     };
-  }, [isResizingCanvas, resizeCanvasStart, panelWidthPx]);
+  }, [isResizingCanvas, resizeCanvasStart, panelWidthPx, setPanelWidthPx]);
 
   // ─────────────────────────────────────────────────────────────────────────
   // Render

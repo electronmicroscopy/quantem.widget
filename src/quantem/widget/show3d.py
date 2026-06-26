@@ -421,6 +421,7 @@ class Show3D(anywidget.AnyWidget):
     # Single Link toggle controls both zoom and pan (independent axes proved confusing).
     link_panels = traitlets.Bool(True).tag(sync=True)
     link_contrast = traitlets.Bool(True).tag(sync=True)  # share vmin/vmax across panels
+    view_state = traitlets.Dict(default_value={}).tag(sync=True)
     # 0 = single row (no wrap). N > 0 = wrap into rows of at most N panels.
     max_cols = traitlets.Int(4).tag(sync=True)
     # Per-widget customization for multi-panel display.
@@ -1768,6 +1769,7 @@ class Show3D(anywidget.AnyWidget):
             "vmax": self.vmax,
             "link_contrast": self.link_contrast,
             "link_panels": self.link_panels,
+            "view_state": dict(self.view_state),
             "vmin_per_panel": list(self.vmin_per_panel),
             "vmax_per_panel": list(self.vmax_per_panel),
             "show_stats": self.show_stats,
@@ -3549,48 +3551,3 @@ class Show3D(anywidget.AnyWidget):
         """Sample the line profile on the current display frame (binned, diff-aware)
         so the returned profile matches what the user sees."""
         return self._sample_profile_on(self._get_display_frame(), row0, col0, row1, col1)
-
-    def _repr_mimebundle_(self, **kwargs):
-        """Return widget view + widget-faithful PNG snapshot.
-
-        Static PNG mirrors the WebGPU canvas mid-slice: same cmap, same
-        log/contrast, same per-panel normalize. Image-only (no axes/titles).
-        Opt out with ``QUANTEM_WIDGET_NO_SNAPSHOT=1``.
-        """
-        bundle = super()._repr_mimebundle_(**kwargs)
-        if os.environ.get("QUANTEM_WIDGET_NO_SNAPSHOT"):
-            return bundle
-        try:
-            from quantem.widget.render.snapshot import render_image_png, render_panels_png
-            mid = int(self.n_slices) // 2 if self.n_slices > 1 else 0
-            frame = self._get_display_frame(mid)
-            n_pan = int(self.n_panels) if int(self.n_panels) > 1 else 1
-            cmap = self.cmap if isinstance(self.cmap, str) else str(self.cmap)
-            log = bool(getattr(self, "log_scale", False))
-            title = (self.title or None) if hasattr(self, "title") else None
-            slice_lbl = f"slice {mid+1}/{self.n_slices}" if self.n_slices > 1 else ""
-            sampling_A = float(self.pixel_size) if getattr(self, "pixel_size", 0) else None
-            if n_pan > 1:
-                w_pan = frame.shape[1] // n_pan
-                panels = [frame[:, i * w_pan:(i + 1) * w_pan] for i in range(n_pan)]
-                panel_titles = list(self.panel_titles) if self.panel_titles else [
-                    f"Panel {i+1}" for i in range(n_pan)
-                ]
-                labels = [f"{pt} — {slice_lbl}" if slice_lbl else pt for pt in panel_titles]
-                png = render_panels_png(
-                    panels, cmaps=cmap, ncols=min(n_pan, 3),
-                    max_px_per_panel=256, log=log,
-                    labels=labels, title=title, sampling_A_per_px=sampling_A,
-                )
-            else:
-                png = render_image_png(
-                    frame, cmap=cmap, log=log, max_px=512,
-                    title=title, label=slice_lbl, sampling_A_per_px=sampling_A,
-                )
-            data_dict = bundle[0] if isinstance(bundle, tuple) else bundle
-            data_dict["image/png"] = base64.b64encode(png).decode("ascii")
-            if isinstance(bundle, tuple):
-                return (data_dict, bundle[1])
-            return data_dict
-        except Exception:
-            return bundle

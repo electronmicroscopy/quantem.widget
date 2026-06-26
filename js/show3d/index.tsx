@@ -12,7 +12,7 @@
  */
 
 import * as React from "react";
-import { createRender, useModelState } from "@anywidget/react";
+import { createRender, useModel, useModelState } from "@anywidget/react";
 import Box from "@mui/material/Box";
 import Typography from "@mui/material/Typography";
 import Stack from "@mui/material/Stack";
@@ -31,7 +31,7 @@ import FastForwardIcon from "@mui/icons-material/FastForward";
 import StopIcon from "@mui/icons-material/Stop";
 import { useTheme } from "../theme";
 import { drawScaleBarHiDPI, drawFFTScaleBarHiDPI, drawColorbar, roundToNiceValue, unitSymbol, formatScaleLabel } from "../figure";
-import { downloadBlob, extractBytes, extractFloat32, formatNumber } from "../format";
+import { downloadBlob, extractBytes, extractFloat32, formatNumber, preserveRestoredWidgetModelsOnSave } from "../format";
 import { findDataRange, applyLogScale, applyLogScaleInPlace, percentileClip, sliderRange, computeStats, computeHistogramFromBytes } from "../stats";
 // ============================================================================
 // Style tokens (inlined - matches Show2D/Show4DSTEM single-file convention)
@@ -1005,6 +1005,9 @@ function computeROIPixelStats(
 // Main Component
 // ============================================================================
 function Show3D() {
+  const model = useModel();
+  React.useEffect(() => preserveRestoredWidgetModelsOnSave(model), [model]);
+
   // Theme detection (offline HTML exports force a light/white background)
   const [offlineForTheme] = useModelState<boolean>("_export_light");
   const { themeInfo, colors: baseColors } = useTheme(offlineForTheme);
@@ -1259,7 +1262,7 @@ function Show3D() {
   const [imageRotation] = useModelState<number>("image_rotation");
 
   // Customization
-  const [canvasSizeTrait] = useModelState<number>("size");
+  const [canvasSizeTrait, setCanvasSizeTrait] = useModelState<number>("size");
 
   // ROI
   const [roiActive, setRoiActive] = useModelState<boolean>("roi_active");
@@ -1447,8 +1450,26 @@ function Show3D() {
     imageVminPct: 0,
     imageVmaxPct: 100,
   };
-  const [linkedState, setLinkedState] = React.useState<PanelState>(initialState);
-  const [panelStates, setPanelStates] = React.useState<PanelState[]>([initialState]);
+  type Show3DViewState = {
+    linked_state?: Partial<PanelState>;
+    panel_states?: Partial<PanelState>[];
+  };
+  const [viewState, setViewState] = useModelState<Show3DViewState>("view_state");
+  const readNumber = (value: unknown, fallback: number): number => (
+    typeof value === "number" && Number.isFinite(value) ? value : fallback
+  );
+  const normalizePanelState = (value: Partial<PanelState> | undefined, fallback: PanelState): PanelState => ({
+    zoom: Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, readNumber(value?.zoom, fallback.zoom))),
+    panX: readNumber(value?.panX, readNumber((value as { pan_x?: unknown } | undefined)?.pan_x, fallback.panX)),
+    panY: readNumber(value?.panY, readNumber((value as { pan_y?: unknown } | undefined)?.pan_y, fallback.panY)),
+    imageVminPct: readNumber(value?.imageVminPct, readNumber((value as { image_vmin_pct?: unknown } | undefined)?.image_vmin_pct, fallback.imageVminPct)),
+    imageVmaxPct: readNumber(value?.imageVmaxPct, readNumber((value as { image_vmax_pct?: unknown } | undefined)?.image_vmax_pct, fallback.imageVmaxPct)),
+  });
+  const savedPanelStates = Array.isArray(viewState?.panel_states)
+    ? viewState.panel_states.map(v => normalizePanelState(v, initialState))
+    : [initialState];
+  const [linkedState, setLinkedState] = React.useState<PanelState>(() => normalizePanelState(viewState?.linked_state, savedPanelStates[0] || initialState));
+  const [panelStates, setPanelStates] = React.useState<PanelState[]>(() => savedPanelStates.length ? savedPanelStates : [initialState]);
   const linkedStateLiveRef = React.useRef<PanelState>(linkedState);
   const panelStatesLiveRef = React.useRef<PanelState[]>(panelStates);
   const transformRenderRafRef = React.useRef<number | null>(null);
@@ -1470,11 +1491,16 @@ function Show3D() {
     if (prevLinkRef.current && !linkPanels) {
       // Linked → unlinked: distribute linkedState to all panels
       const s = linkedState;
-      setPanelStates(arr => arr.map(() => ({ ...s })));
+      setPanelStates(arr => {
+        const next = arr.map(() => ({ ...s }));
+        setViewState({ linked_state: { ...s }, panel_states: next.map(v => ({ ...v })) });
+        return next;
+      });
     } else if (!prevLinkRef.current && linkPanels) {
       // Unlinked → linked: adopt panel 0's state as the shared linked state
       const s0 = panelStates[0] || initialState;
       setLinkedState({ ...s0 });
+      setViewState({ linked_state: { ...s0 }, panel_states: panelStates.map(v => ({ ...v })) });
     }
     prevLinkRef.current = linkPanels;
   }, [linkPanels]);
@@ -2013,7 +2039,7 @@ function Show3D() {
   // Parse incoming playback buffer (double-buffer to avoid overwrite stalls)
   React.useEffect(() => {
     if (!bufferBytes || bufferBytes.byteLength === 0) return;
-    const parsed = extractFloat32(bufferBytes);
+    const parsed = extractFloat32(bufferBytes, Math.max(0, bufferCount) * width * height);
     if (!parsed) return;
     const dbg = show3dPerfDebug();
     if (dbg) {
@@ -3908,7 +3934,7 @@ function Show3D() {
 
   // Update frame ref when frame changes
   React.useEffect(() => {
-    const parsed = extractFloat32(frameBytes);
+    const parsed = extractFloat32(frameBytes, width * height);
     if (!parsed || parsed.length === 0) return;
     const displayFrame = displayFrameForIndex(offline ? liveSliceIdx : sliceIdx, parsed) ?? parsed;
     rawFrameDataRef.current = displayFrame;
@@ -4610,6 +4636,7 @@ function Show3D() {
     }
     const nextLinked = linkedStateLiveRef.current;
     const nextPanels = panelStatesLiveRef.current;
+    setViewState({ linked_state: { ...nextLinked }, panel_states: nextPanels.map(v => ({ ...v })) });
     setLinkedState(prev => (
       prev.zoom === nextLinked.zoom &&
       prev.panX === nextLinked.panX &&
@@ -5356,7 +5383,7 @@ function Show3D() {
   React.useEffect(() => {
     if (!effectiveShowFft) return;
     if (!rawFrameDataRef.current) {
-      const parsed = extractFloat32(frameBytes);
+      const parsed = extractFloat32(frameBytes, width * height);
       const idx = offline ? liveSliceIdx : displaySliceIdx;
       const frame = parsed
         ? (displayFrameForIndex(idx, parsed) ?? parsed)
@@ -6344,6 +6371,7 @@ function Show3D() {
     panelStatesLiveRef.current = resetPanels;
     setLinkedState(s => ({ ...s, zoom: 1, panX: 0, panY: 0 }));
     setPanelStates(arr => arr.map(s => ({ ...s, zoom: 1, panX: 0, panY: 0 })));
+    setViewState({ linked_state: { ...resetLinked }, panel_states: resetPanels.map(v => ({ ...v })) });
     scheduleTransformRender();
   };
 
@@ -7192,6 +7220,8 @@ function Show3D() {
     const handleMouseUp = () => {
       cancelAnimationFrame(rafId);
       setMainCanvasSize(latestSize);
+      const colsLocal = (maxCols && maxCols > 0) ? Math.min(maxCols, Math.max(1, nPanels || 1)) : Math.max(1, nPanels || 1);
+      setCanvasSizeTrait(Math.round(latestSize / colsLocal));
       setIsResizingMain(false);
       setResizeStart(null);
     };
@@ -7202,7 +7232,7 @@ function Show3D() {
       document.removeEventListener("mousemove", handleMouseMove);
       document.removeEventListener("mouseup", handleMouseUp);
     };
-  }, [isResizingMain, resizeStart]);
+  }, [isResizingMain, resizeStart, maxCols, nPanels, setCanvasSizeTrait]);
 
   const clampSlice = (idx: number) => Math.max(0, Math.min(nSlices - 1, Math.round(idx)));
   const currentPlaybackIndex = () => (

@@ -48,12 +48,27 @@ that file anytime to change it. This is the same bring-your-own-tunnel model as
 ## Why this, and not a downloaded HTML?
 
 - **`quantem jupyter`** = live kernel on the GPU box. Full interaction, full data, every
-  widget. The real working surface.
-- **`quantem html notebook.ipynb`** = a static, self-contained HTML snapshot (widgets
-  baked as images). No kernel, no GPU, opens anywhere - good for *sharing a result*. It
-  cannot recompute.
+  widget. The real working surface. Cmd+S saves the notebook outputs and
+  `metadata.widgets`, so a compatible JupyterLab can reopen the widget from the saved
+  file without rerunning cells.
+- **`quantem html notebook.ipynb --no-execute`** = a standalone, self-contained HTML page
+  using the ipywidgets HTML manager. It hydrates the notebook's saved widget state and
+  keeps Show2D / Show3D / Show3DSlices controls interactive in the browser with no
+  kernel. Interactions in the HTML page are browser-local: changing contrast, zoom,
+  frame, or toggles does not write back to the `.ipynb` or the `.html` file.
+- **`quantem github notebook_github.ipynb --no-execute`** = a GitHub-preview notebook.
+  It strips the heavy widget state and widget MIME refs, then inserts JPEG snapshots of
+  the widget UIs. Use this for GitHub's native `.ipynb` renderer, which does not run
+  widget JavaScript.
 
-Use `jupyter` to *work*; use `html` to *share*.
+Use `jupyter` to *work*, `html` to share an interactive web artifact, and `github` to
+share a lightweight notebook preview on GitHub.
+
+```{warning}
+GitHub does not execute widget JavaScript in notebook previews, and GitHub blob/raw URLs
+do not serve exported HTML as a runnable web page. Put `quantem html` output on GitHub
+Pages or another static web host when you want the interactive HTML to run.
+```
 
 ## Troubleshooting
 
@@ -63,3 +78,4 @@ Use `jupyter` to *work*; use `html` to *share*.
 | `EnvironmentNameNotFound` on launch | the box's env isn't `live-env`; pass the real name with `--env <name>` |
 | port clash | rerun (it auto-picks a fresh port) or pass `--port <n>` |
 | widget renders but feels laggy | expected for huge frames over a slow link; only pixels cross the wire |
+| reopening a saved notebook shows `Error displaying widget: model not found` or `Failed to load model class 'AnyModel'` | upgrade the JupyterLab environment to `anywidget>=0.11.0` and `jupyterlab_widgets>=3.0.10`; `quantem jupyter` enables widget-state saving for Cmd+S, but manually launched Lab still needs **Save Widget State Automatically** enabled |

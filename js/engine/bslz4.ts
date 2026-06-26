@@ -133,6 +133,36 @@ fn byteAt(o:u32)->u32{return (inter[o>>2u]>>((o&3u)*8u))&0xffu;}
   stack[o]=v0|(v1<<8u)|(v2<<16u)|(v3<<24u); stack[o+1u]=v4|(v5<<8u)|(v6<<16u)|(v7<<24u);
 }`;
 
+// Pass2 (float32 SOURCE): 4-byte elements -> 32 bit-planes. Same 8-pixel-group inverse
+// bitshuffle as PASS2_WGSL but loops all 32 planes and reconstructs the FULL 32-bit value
+// per pixel, stored as one u32/pixel. The decoded 4 bytes ARE the IEEE-754 float32 bit
+// pattern; the reduce/frame shaders bitcast<f32> them. No clip, no pack - full precision.
+// cfg = nGroups, strideX, blockElems, planeBytes. blockBytes = blockElems*4 (4-byte elem).
+const PASS2_F32_WGSL = `
+@group(0) @binding(0) var<storage,read> inter: array<u32>;
+@group(0) @binding(1) var<storage,read_write> stack: array<u32>;  // float32 bit-pattern, 1/pixel
+@group(0) @binding(2) var<uniform> cfg: vec4<u32>;  // nGroups, strideX, blockElems, planeBytes
+fn byteAt(o:u32)->u32{return (inter[o>>2u]>>((o&3u)*8u))&0xffu;}
+@compute @workgroup_size(64) fn main(@builtin(global_invocation_id) gid: vec3<u32>){
+  let grp=gid.y*cfg.y + gid.x; if(grp>=cfg.x){return;}
+  let blockElems=cfg.z; let planeBytes=cfg.w; let blockBytes=blockElems*4u;
+  let nBlk=__NBLK__; let framePix=__FRAMEPIX__;
+  let e0=grp*8u; let frm=e0/framePix; let inFrame=e0%framePix;
+  let blk=inFrame/blockElems; let groupByte=(inFrame%blockElems)>>3u;
+  let pb=(frm*nBlk+blk)*blockBytes + groupByte;
+  var v0:u32=0u; var v1:u32=0u; var v2:u32=0u; var v3:u32=0u; var v4:u32=0u; var v5:u32=0u; var v6:u32=0u; var v7:u32=0u;
+  for(var b:u32=0u;b<32u;b=b+1u){
+    let byte=byteAt(pb+b*planeBytes); let bit=1u<<b;
+    if((byte&1u)!=0u){v0=v0|bit;} if((byte&2u)!=0u){v1=v1|bit;}
+    if((byte&4u)!=0u){v2=v2|bit;} if((byte&8u)!=0u){v3=v3|bit;}
+    if((byte&16u)!=0u){v4=v4|bit;} if((byte&32u)!=0u){v5=v5|bit;}
+    if((byte&64u)!=0u){v6=v6|bit;} if((byte&128u)!=0u){v7=v7|bit;}
+  }
+  let o=grp*8u;
+  stack[o]=v0; stack[o+1u]=v1; stack[o+2u]=v2; stack[o+3u]=v3;
+  stack[o+4u]=v4; stack[o+5u]=v5; stack[o+6u]=v6; stack[o+7u]=v7;
+}`;
+
 const MAX_WG = 65535;
 
 // Copy bytes into a mapped GPU range using the widest aligned element view. V8's
@@ -209,6 +239,94 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
     stack[o+1u]=select(v4,255u,(hi&16u)!=0u)|(select(v5,255u,(hi&32u)!=0u)<<8u)|(select(v6,255u,(hi&64u)!=0u)<<16u)|(select(v7,255u,(hi&128u)!=0u)<<24u);
   }
 }`;
+
+// FUSED decode (float32 source -> float32 output, full precision): ONE WORKGROUP per block.
+// Thread 0 LZ4-decodes the block into workgroup-SHARED sh (the fast path, no interBuf global
+// round-trip), barrier, then all 64 threads inverse-bitshuffle the blockElems/8 eight-pixel
+// groups over ALL 32 planes, reconstruct the full 32-bit value and write it as 1 u32/pixel
+// (the IEEE-754 bit pattern - reduce/frame shaders bitcast<f32>). __NPB__ = blockElems/8 =
+// planeBytes = groups/block; __BE__ = blockElems.
+const FUSED_F32_WGSL = `
+@group(0) @binding(0) var<storage,read> raw: array<u32>;
+@group(0) @binding(1) var<storage,read> blkMeta: array<u32>;   // coff,clen per block
+@group(0) @binding(2) var<storage,read_write> stack: array<u32>;  // float32 bit pattern (1/pixel)
+@group(0) @binding(3) var<uniform> cfg: vec4<u32>;   // totalBlocks, gridX, nBlk, framePix
+var<workgroup> sh: array<u32, 2048>;   // up to 8192 decoded (bitshuffled) bytes / block
+fn rraw(i:u32)->u32{return (raw[i>>2u]>>((i&3u)*8u))&0xffu;}
+fn rsh(i:u32)->u32{return (sh[i>>2u]>>((i&3u)*8u))&0xffu;}
+fn wsh(i:u32,v:u32){let w=i>>2u;let s=(i&3u)*8u;sh[w]=(sh[w]&(~(0xffu<<s)))|((v&0xffu)<<s);}
+@compute @workgroup_size(64)
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>){
+  let g = wid.y*cfg.y + wid.x; let lx = lid.x;
+  if(lx==0u && g<cfg.x){
+    let coff=blkMeta[g*2u]; let cend=coff+blkMeta[g*2u+1u];
+    var ci=coff; var di=0u;
+    loop{ if(ci>=cend){break;}
+      let tok=rraw(ci); ci=ci+1u; var nlit=tok>>4u;
+      if(nlit==15u){loop{let bb=rraw(ci);ci=ci+1u;nlit=nlit+bb;if(bb!=255u){break;}}}
+      var k=0u; loop{if(k>=nlit){break;} wsh(di+k,rraw(ci+k)); k=k+1u;} ci=ci+nlit; di=di+nlit;
+      if(ci>=cend){break;}
+      let off=rraw(ci)|(rraw(ci+1u)<<8u); ci=ci+2u; var ml=4u+(tok&0xfu);
+      if((tok&0xfu)==15u){loop{let bb=rraw(ci);ci=ci+1u;ml=ml+bb;if(bb!=255u){break;}}}
+      var j=0u; loop{if(j>=ml){break;} wsh(di+j,rsh(di+j-off)); j=j+1u;} di=di+ml;
+    }
+  }
+  workgroupBarrier();
+  if(g>=cfg.x){return;}
+  let frm = g/cfg.z; let blk = g%cfg.z;
+  let pixBase = frm*cfg.w + blk*__BE__;
+  let oBase = pixBase;   // 1 u32 per pixel
+  for(var lg=lx; lg<__NPB__; lg=lg+64u){
+    var v0:u32=0u; var v1:u32=0u; var v2:u32=0u; var v3:u32=0u; var v4:u32=0u; var v5:u32=0u; var v6:u32=0u; var v7:u32=0u;
+    for(var b:u32=0u;b<32u;b=b+1u){
+      let byte=rsh(lg + b*__NPB__); let bit=1u<<b;
+      if((byte&1u)!=0u){v0=v0|bit;} if((byte&2u)!=0u){v1=v1|bit;}
+      if((byte&4u)!=0u){v2=v2|bit;} if((byte&8u)!=0u){v3=v3|bit;}
+      if((byte&16u)!=0u){v4=v4|bit;} if((byte&32u)!=0u){v5=v5|bit;}
+      if((byte&64u)!=0u){v6=v6|bit;} if((byte&128u)!=0u){v7=v7|bit;}
+    }
+    let o=oBase + lg*8u;
+    stack[o]=v0; stack[o+1u]=v1; stack[o+2u]=v2; stack[o+3u]=v3;
+    stack[o+4u]=v4; stack[o+5u]=v5; stack[o+6u]=v6; stack[o+7u]=v7;
+  }
+}`;
+
+const FUSED_F32_PIPE_CACHE = new Map<string, GPUComputePipeline>();
+function getFusedF32Pipe(device: GPUDevice, blockElems: number): GPUComputePipeline {
+  const code = FUSED_F32_WGSL.replace(/__NPB__/g, `${blockElems / 8}u`).replace(/__BE__/g, `${blockElems}u`);
+  let p = FUSED_F32_PIPE_CACHE.get(code);
+  if (!p) { p = device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code }), entryPoint: "main" } }); FUSED_F32_PIPE_CACHE.set(code, p); }
+  return p;
+}
+
+// Fused float32 decode job: one workgroup/block, float32 stack out (1 u32/pixel, mode 2).
+function buildFusedJobF32(device: GPUDevice, spec: Bslz4Spec, preRaw?: GPUBuffer): DecodeJob {
+  const { compressed, blockMeta, nFrames, nBlocksPerFrame, blockElems, detSize } = spec;
+  const totalBlocks = nFrames * nBlocksPerFrame;
+  const stackWords = nFrames * detSize;   // 1 u32/pixel
+  let rawBuf: GPUBuffer;
+  if (preRaw) { rawBuf = preRaw; }
+  else {
+    const rawSize = Math.ceil(compressed.byteLength / 4) * 4;
+    rawBuf = device.createBuffer({ size: rawSize, usage: GPUBufferUsage.STORAGE, mappedAtCreation: true });
+    copyWide(rawBuf.getMappedRange(), compressed);
+    rawBuf.unmap();
+  }
+  const metaBuf = device.createBuffer({ size: blockMeta.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+  device.queue.writeBuffer(metaBuf, 0, blockMeta.buffer as ArrayBuffer, blockMeta.byteOffset, blockMeta.byteLength);
+  const stack = device.createBuffer({ size: stackWords * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+  const gx = Math.min(totalBlocks, MAX_WG), gy = Math.ceil(totalBlocks / MAX_WG);
+  const cfg = uniform(device, [totalBlocks, gx, nBlocksPerFrame, detSize]);
+  const pipe = getFusedF32Pipe(device, blockElems);
+  const bg = device.createBindGroup({ layout: pipe.getBindGroupLayout(0), entries: [
+    { binding: 0, resource: { buffer: rawBuf } }, { binding: 1, resource: { buffer: metaBuf } },
+    { binding: 2, resource: { buffer: stack } }, { binding: 3, resource: { buffer: cfg } } ] });
+  return {
+    stack, mode: 2,
+    record(enc) { const pass = enc.beginComputePass(); pass.setPipeline(pipe); pass.setBindGroup(0, bg); pass.dispatchWorkgroups(gx, gy); pass.end(); },
+    releaseTemps() { rawBuf.destroy(); metaBuf.destroy(); cfg.destroy(); },
+  };
+}
 
 // STRATEGY D (parallel LZ4 via round-based dataflow). PARITY-VERIFIED bit-exact vs the serial
 // fused kernel (uint16 AND uint32, nDiff=0 on real gold04/gold06 via verifyFusedD) but it is a
@@ -481,8 +599,8 @@ export interface Bslz4Spec {
 // Compute pipelines are independent of the data (only of the pass2 template), so compile
 // them ONCE and reuse across every chunk + dataset - recompiling per chunk was wasteful.
 const PIPE_CACHE = new Map<string, { p1: GPUComputePipeline; p2: GPUComputePipeline }>();
-function getPipes(device: GPUDevice, srcDtype: "uint8" | "uint16", u8: boolean, nBlocksPerFrame: number, detSize: number) {
-  const pass2tpl = srcDtype === "uint8" ? PASS2_U8SRC_WGSL : (u8 ? PASS2_U8_WGSL : PASS2_WGSL);
+function getPipes(device: GPUDevice, srcDtype: "uint8" | "uint16" | "float32", u8: boolean, nBlocksPerFrame: number, detSize: number) {
+  const pass2tpl = srcDtype === "float32" ? PASS2_F32_WGSL : srcDtype === "uint8" ? PASS2_U8SRC_WGSL : (u8 ? PASS2_U8_WGSL : PASS2_WGSL);
   const pass2 = pass2tpl.replace("__NBLK__", `${nBlocksPerFrame}u`).replace("__FRAMEPIX__", `${detSize}u`);
   let pipes = PIPE_CACHE.get(pass2);
   if (!pipes) {
@@ -535,15 +653,17 @@ async function uploadViaStaging(device: GPUDevice, specs: Bslz4Spec[]): Promise<
 // bytes + block table, and returns a recorder that appends the two compute passes to a
 // shared encoder. Batching N jobs into ONE submit + ONE await lets the GPU pipeline the
 // chunks instead of draining between each (the per-chunk await was the decode bottleneck).
-function buildDecodeJob(device: GPUDevice, spec: Bslz4Spec, dtype: "uint8" | "uint16", srcDtype: "uint8" | "uint16"): DecodeJob {
+function buildDecodeJob(device: GPUDevice, spec: Bslz4Spec, dtype: "uint8" | "uint16" | "float32", srcDtype: "uint8" | "uint16" | "float32"): DecodeJob {
   const { compressed, blockMeta, nFrames, nBlocksPerFrame, blockElems, detSize } = spec;
-  const srcBytes = srcDtype === "uint8" ? 1 : 2;
+  const f32 = srcDtype === "float32";
+  const srcBytes = srcDtype === "uint8" ? 1 : f32 ? 4 : 2;
   const blockBytes = blockElems * srcBytes;
   const planeBytes = blockElems / 8;
   const totalBlocks = nFrames * nBlocksPerFrame;
   const totalElems = nFrames * detSize;
-  const u8 = dtype === "uint8" || srcDtype === "uint8";
-  const stackWords = u8 ? Math.ceil(totalElems / 4) : totalElems / 2;
+  const u8 = !f32 && (dtype === "uint8" || srcDtype === "uint8");
+  // float32: 1 u32/pixel (the IEEE-754 bit pattern). uint16: 2 px/u32. uint8: 4 px/u32.
+  const stackWords = f32 ? totalElems : u8 ? Math.ceil(totalElems / 4) : totalElems / 2;
   // Upload the compressed bytes via a mapped-at-creation buffer: writing straight into the
   // GPU-visible mapped range is a single copy, vs writeBuffer's internal CPU staging copy -
   // roughly 2x the host->device throughput, and uploading 7.5 GB/dataset is the decode floor.
@@ -567,7 +687,7 @@ function buildDecodeJob(device: GPUDevice, spec: Bslz4Spec, dtype: "uint8" | "ui
     { binding: 0, resource: { buffer: interBuf } }, { binding: 1, resource: { buffer: stack } },
     { binding: 2, resource: { buffer: cfg2 } } ] });
   return {
-    stack, mode: u8 ? 1 : 0,
+    stack, mode: f32 ? 2 : u8 ? 1 : 0,
     record(enc) {
       const pa = enc.beginComputePass(); pa.setPipeline(p1); pa.setBindGroup(0, bg1); pa.dispatchWorkgroups(Math.ceil(totalBlocks / 64)); pa.end();
       const pb = enc.beginComputePass(); pb.setPipeline(p2); pb.setBindGroup(0, bg2); pb.dispatchWorkgroups(gx, gy); pb.end();
@@ -579,18 +699,19 @@ function buildDecodeJob(device: GPUDevice, spec: Bslz4Spec, dtype: "uint8" | "ui
 // Decode N bslz4 specs into N packed GPU stack buffers, batching the GPU work in groups so
 // at most `groupSize` chunks' transient buffers (raw + intermediate) are live at once - one
 // submit + one await per group lets the GPU overlap upload and compute across chunks.
-export async function decodeBslz4Batch(specs: Bslz4Spec[], dtype: "uint8" | "uint16" = "uint8", srcDtype: "uint8" | "uint16" | "uint32" = "uint16", groupSize = 14): Promise<{ device: GPUDevice; buffers: GPUBuffer[]; mode: number } | null> {
+export async function decodeBslz4Batch(specs: Bslz4Spec[], dtype: "uint8" | "uint16" | "float32" = "uint8", srcDtype: "uint8" | "uint16" | "uint32" | "float32" = "uint16", groupSize = 14): Promise<{ device: GPUDevice; buffers: GPUBuffer[]; mode: number } | null> {
   const device = await getGPUDevice();
   if (!device) return null;
+  const f32 = srcDtype === "float32";
   const fused = dtype === "uint8" && (srcDtype === "uint16" || srcDtype === "uint32");   // uint16/uint32 -> uint8 fast path
   const buffers: GPUBuffer[] = []; let mode = 0;
   for (let g = 0; g < specs.length; g += groupSize) {
     const groupSpecs = specs.slice(g, g + groupSize);
-    // Fused path uploads through the reused staging pool (no per-load mappedAtCreation alloc);
-    // the non-fused path keeps its own mappedAtCreation upload.
-    const raws = fused ? await uploadViaStaging(device, groupSpecs) : null;
+    // Fused paths (uint8 + float32) upload through the reused staging pool (no per-load
+    // mappedAtCreation alloc); the non-fused path keeps its own mappedAtCreation upload.
+    const raws = (fused || f32) ? await uploadViaStaging(device, groupSpecs) : null;
     const fusedBuild = BSLZ4_PARALLEL ? buildFusedJobD : buildFusedJob;
-    const jobs = groupSpecs.map((s, i) => fused ? fusedBuild(device, s, srcDtype as "uint16"|"uint32", raws![i]) : buildDecodeJob(device, s, dtype, srcDtype as "uint8"|"uint16"));
+    const jobs = groupSpecs.map((s, i) => f32 ? buildFusedJobF32(device, s, raws![i]) : fused ? fusedBuild(device, s, srcDtype as "uint16"|"uint32", raws![i]) : buildDecodeJob(device, s, dtype, srcDtype as "uint8"|"uint16"|"float32"));
     const enc = device.createCommandEncoder();
     for (const j of jobs) j.record(enc);
     device.queue.submit([enc.finish()]);
@@ -604,13 +725,15 @@ export async function decodeBslz4Batch(specs: Bslz4Spec[], dtype: "uint8" | "uin
 // (clip 0-255, 4 px/u32, offline default - half the memory) or "uint16" (lossless,
 // 2 px/u32). Layout matches Show4DSTEMCompute.sample() for that mode exactly.
 // Returns null if WebGPU is unavailable. Throws (validation) only on misuse.
-export async function decodeBslz4ToStack(spec: Bslz4Spec, dtype: "uint8" | "uint16" = "uint8", srcDtype: "uint8" | "uint16" | "uint32" = "uint16"): Promise<{ device: GPUDevice; buffer: GPUBuffer; mode: number } | null> {
+export async function decodeBslz4ToStack(spec: Bslz4Spec, dtype: "uint8" | "uint16" | "float32" = "uint8", srcDtype: "uint8" | "uint16" | "uint32" | "float32" = "uint16"): Promise<{ device: GPUDevice; buffer: GPUBuffer; mode: number } | null> {
   const device = await getGPUDevice();
   if (!device) return null;
   const fusedOk = dtype === "uint8" && (srcDtype === "uint16" || srcDtype === "uint32");
-  const job = fusedOk
+  const job = srcDtype === "float32"
+    ? buildFusedJobF32(device, spec)
+    : fusedOk
     ? (BSLZ4_PARALLEL ? buildFusedJobD(device, spec, srcDtype as "uint16"|"uint32", undefined) : buildFusedJob(device, spec, srcDtype as "uint16"|"uint32"))
-    : buildDecodeJob(device, spec, dtype, srcDtype as "uint8"|"uint16");
+    : buildDecodeJob(device, spec, dtype, srcDtype as "uint8"|"uint16"|"float32");
   const enc = device.createCommandEncoder();
   job.record(enc);
   device.queue.submit([enc.finish()]);

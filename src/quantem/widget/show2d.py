@@ -618,59 +618,6 @@ class Show2D(anywidget.AnyWidget):
             return f"Show2D({shape}, idx={self.selected_idx}, cmap={self.cmap})"
         return f"Show2D({self.height}×{self.width}, cmap={self.cmap})"
 
-    def _repr_mimebundle_(self, **kwargs):
-        """Return widget view + widget-faithful PNG snapshot.
-
-        Static PNG mirrors the WebGPU canvas: same cmap, same log/auto-contrast,
-        same per-image normalize. Image-only output (no axes/titles). Consumed
-        by GitHub / nbviewer when JS is blocked; live Jupyter mounts the
-        interactive widget instead. Opt out with ``QUANTEM_WIDGET_NO_SNAPSHOT=1``.
-        """
-        bundle = super()._repr_mimebundle_(**kwargs)
-        if os.environ.get("QUANTEM_WIDGET_NO_SNAPSHOT"):
-            return bundle
-        try:
-            from quantem.widget.render.snapshot import render_image_png, render_panels_png
-            cmap = self.cmap if isinstance(self.cmap, str) else str(self.cmap)
-            log = bool(getattr(self, "log_scale", False))
-            vmin = getattr(self, "vmin", None)
-            vmax = getattr(self, "vmax", None)
-            title = self.title or None
-            # Convert pixel_size + unit to A/px for the scale bar overlay.
-            sampling_A: float | None = None
-            if self.pixel_size and self.pixel_unit not in ("pixels", ""):
-                u = self.pixel_unit.lower()
-                if u in ("a", "Å", "ang", "ångström", "angstrom"):
-                    sampling_A = float(self.pixel_size)
-                elif u == "nm":
-                    sampling_A = float(self.pixel_size) * 10.0
-                elif u in ("um", "µm", "micron"):
-                    sampling_A = float(self.pixel_size) * 10_000.0
-            if self.n_images == 1:
-                png = render_image_png(
-                    self._data[0], cmap=cmap, vmin=vmin, vmax=vmax,
-                    log=log, max_px=512, title=title,
-                    sampling_A_per_px=sampling_A,
-                )
-            else:
-                n = min(self.n_images, 12)
-                ncols = max(1, min(int(self.ncols), n))
-                panels = [self._data[i] for i in range(n)]
-                labels = list(self.labels)[:n] if self.labels else None
-                png = render_panels_png(
-                    panels, cmaps=cmap, ncols=ncols,
-                    max_px_per_panel=192, vmin=vmin, vmax=vmax, log=log,
-                    labels=labels, title=title,
-                    sampling_A_per_px=sampling_A,
-                )
-            data_dict = bundle[0] if isinstance(bundle, tuple) else bundle
-            data_dict["image/png"] = base64.b64encode(png).decode("ascii")
-            if isinstance(bundle, tuple):
-                return (data_dict, bundle[1])
-            return data_dict
-        except Exception:
-            return bundle
-
     def _normalize_frame(self, frame: np.ndarray) -> np.ndarray:
         if self.log_scale:
             frame = np.log1p(np.maximum(frame, 0))

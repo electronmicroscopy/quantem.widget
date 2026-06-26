@@ -10,7 +10,7 @@
  */
 
 import * as React from "react";
-import { createRender, useModelState } from "@anywidget/react";
+import { createRender, useModel, useModelState } from "@anywidget/react";
 import Box from "@mui/material/Box";
 import Typography from "@mui/material/Typography";
 import Stack from "@mui/material/Stack";
@@ -23,7 +23,7 @@ import Button from "@mui/material/Button";
 import Tooltip from "@mui/material/Tooltip";
 import { useTheme } from "../theme";
 import { drawScaleBarHiDPI, drawColorbar, roundToNiceValue } from "../figure";
-import { extractBytes, extractFloat32, formatNumber, downloadBlob } from "../format";
+import { extractBytes, extractFloat32, formatNumber, downloadBlob, preserveRestoredWidgetModelsOnSave } from "../format";
 import { computeHistogramFromBytes, findDataRange, applyLogScale, percentileClip, sliderRange, computeStats } from "../stats";
 
 function InfoTooltip({ text, theme = "dark" }: { text: React.ReactNode; theme?: "light" | "dark" }) {
@@ -444,6 +444,9 @@ const sliderStyles = {
 };
 
 function Show2D() {
+  const model = useModel();
+  React.useEffect(() => preserveRestoredWidgetModelsOnSave(model), [model]);
+
   // Theme (offline HTML exports force a light/white background)
   const [offlineForTheme] = useModelState<boolean>("_export_light");
   const { themeInfo, colors: tc } = useTheme(offlineForTheme);
@@ -486,8 +489,8 @@ function Show2D() {
   const [traitVmax] = useModelState<number | null>("vmax");
   const [traitVmins] = useModelState<(number | null)[] | null>("vmins");
   const [traitVmaxs] = useModelState<(number | null)[] | null>("vmaxs");
-  const [zoomRowTrait] = useModelState<number | null>("zoom_row");
-  const [zoomColTrait] = useModelState<number | null>("zoom_col");
+  const [zoomRowTrait, setZoomRowTrait] = useModelState<number | null>("zoom_row");
+  const [zoomColTrait, setZoomColTrait] = useModelState<number | null>("zoom_col");
   const [diffMode, setDiffMode] = useModelState<boolean>("diff_mode");
   const [diffReference] = useModelState<number>("diff_reference");
   // Align removed — diff = A − B (no shift). Drift correction happens upstream.
@@ -495,7 +498,7 @@ function Show2D() {
   const alignDx = 0;
 
   // Customization
-  const [canvasSizeTrait] = useModelState<number>("size");
+  const [canvasSizeTrait, setCanvasSizeTrait] = useModelState<number>("size");
   const [smooth, setSmooth] = useModelState<boolean>("smooth");
   const imageRenderingStyle = smooth ? "auto" : "pixelated";
 
@@ -648,7 +651,7 @@ function Show2D() {
   const [canvasReady, setCanvasReady] = React.useState(0);  // Trigger re-render when refs attached
 
   // Zoom/Pan state - per-image when not linked, shared when linked
-  const [initialZoom] = useModelState<number>("initial_zoom");
+  const [initialZoom, setInitialZoom] = useModelState<number>("initial_zoom");
   const [linkPan, setLinkPan] = useModelState<boolean>("link_pan");
   const [imgHeight] = useModelState<number>("height");
   const [imgWidth] = useModelState<number>("width");
@@ -1006,6 +1009,14 @@ function Show2D() {
   const displayScale = canvasSize / Math.max(width, height);
   const canvasW = Math.round(width * displayScale);
   const canvasH = Math.round(height * displayScale);
+  const persistZoomState = React.useCallback((state: ZoomState) => {
+    if (canvasW <= 0 || canvasH <= 0 || width <= 0 || height <= 0 || state.zoom <= 0) return;
+    const row = height * (0.5 - state.panY / (state.zoom * canvasH));
+    const col = width * (0.5 - state.panX / (state.zoom * canvasW));
+    setInitialZoom(state.zoom);
+    setZoomRowTrait(Math.max(0, Math.min(height - 1, row)));
+    setZoomColTrait(Math.max(0, Math.min(width - 1, col)));
+  }, [canvasW, canvasH, width, height, setInitialZoom, setZoomRowTrait, setZoomColTrait]);
 
   // Initial pan from zoom_row/zoom_col — runs once after first render with valid canvas dims.
   // panX/panY computed so target image (zoomRow, zoomCol) lands at canvas center after transform:
@@ -1070,8 +1081,8 @@ function Show2D() {
       }
       return f32;
     }
-    return extractFloat32(frameBytes);
-  }, [frameBytes, offline, offlineMin, offlineMax, offlineMins, offlineMaxs, width, height]);
+    return extractFloat32(frameBytes, nImages * width * height);
+  }, [frameBytes, offline, offlineMin, offlineMax, offlineMins, offlineMaxs, nImages, width, height]);
 
   const [dataVersion, setDataVersion] = React.useState(0);
   const [gpuCmapVersion, setGpuCmapVersion] = React.useState(0);
@@ -2843,17 +2854,21 @@ function Show2D() {
     const newPanX = mouseCanvasX - (mouseImageX - cx) * newZoom - cx;
     const newPanY = mouseCanvasY - (mouseImageY - cy) * newZoom - cy;
 
-    setZoomState(idx, { zoom: newZoom, panX: newPanX, panY: newPanY });
+    const nextState = { zoom: newZoom, panX: newPanX, panY: newPanY };
+    setZoomState(idx, nextState);
+    persistZoomState(nextState);
   };
 
   const handleDoubleClick = (idx: number) => {
     setZoomState(idx, initialZoomState);
+    persistZoomState(initialZoomState);
   };
 
   // Reset view (zoom/pan only — preserves profile, FFT state, etc.)
   const handleResetAll = () => {
     setZoomStates(new Map());
     setLinkedZoomState(initialZoomState);
+    persistZoomState(initialZoomState);
     setGalleryFftStates(new Map());
     setLinkedFftZoomState({ zoom: DEFAULT_FFT_ZOOM, panX: 0, panY: 0 });
     setFftZoom(DEFAULT_FFT_ZOOM);
@@ -3486,6 +3501,7 @@ function Show2D() {
       }
     }
     clickStartRef.current = null;
+    if (isDraggingPan) persistZoomState(getZoomState(idx));
     setDraggingProfileEndpoint(null);
     setIsDraggingProfileLine(false);
     profileDragStartRef.current = null;
@@ -3518,6 +3534,7 @@ function Show2D() {
     setIsHoveringResize(false);
     setIsHoveringResizeInner(false);
     if (panningIdx === idx) {
+      persistZoomState(getZoomState(idx));
       setIsDraggingPan(false);
       setPanStart(null);
       setPanningIdx(null);
@@ -3568,6 +3585,7 @@ function Show2D() {
     const handleMouseUp = () => {
       cancelAnimationFrame(rafId);
       setCanvasSize(latestSize);
+      setCanvasSizeTrait(Math.round(latestSize));
       setIsResizingCanvas(false);
       setResizeStart(null);
     };
@@ -3579,7 +3597,7 @@ function Show2D() {
       document.removeEventListener("mousemove", handleMouseMove);
       document.removeEventListener("mouseup", handleMouseUp);
     };
-  }, [isResizingCanvas, resizeStart]);
+  }, [isResizingCanvas, resizeStart, setCanvasSizeTrait]);
 
   // Profile height resize
   React.useEffect(() => {
