@@ -14,6 +14,7 @@ lets a laptop browse data that never fit full resolution (bin the detector first
 """
 import argparse
 import http.server
+import json
 import os
 import pathlib
 import socketserver
@@ -56,12 +57,18 @@ def main(argv: list[str] | None = None) -> int:
     # (SSH -L / VS Code) the same way quantem.live does.
     _add_jupyter_args(sub.add_parser(
         "jupyter", help="Start JupyterLab on this GPU box and print a URL to open from your laptop."))
+    # `github` shrinks a widget notebook to a form GitHub can display: drop the heavy offline
+    # widget-state, keep the auto-snapshot widget render (re-encoded JPEG) + print outputs.
+    _add_github_args(sub.add_parser(
+        "github", help="Make a widget notebook GitHub-displayable (strip offline state, snapshots to JPEG)."))
     args = parser.parse_args(argv)
     try:
         if args.command == "html":
             return _render_html(args)
         if args.command == "jupyter":
             return _launch_jupyter(args)
+        if args.command == "github":
+            return _prepare_github(args)
         if args.command not in forced:
             parser.print_help()
             return 0
@@ -118,6 +125,157 @@ def _render_html(args: argparse.Namespace) -> int:
     print(f"HTML: {size_mb:.1f} MB ({note})")
     print(f"  {out}")
     _open_html(out, serve=False, no_open=args.no_open)
+    return 0
+
+
+# ---------------------------------------------------------------------------
+_WIDGET_CELL = ("Show2D(", "Show3D(", "Show4DSTEM(", "Show3DSlices(")
+
+
+def _add_github_args(parser: argparse.ArgumentParser) -> None:
+    """Attach options for the ``github`` subcommand."""
+    parser.add_argument("path", help="The .ipynb to make GitHub-displayable (edited in place).")
+    parser.add_argument("--no-execute", action="store_true",
+                        help="Use the notebook's existing outputs instead of re-running it.")
+    parser.add_argument("--quality", type=int, default=92,
+                        help="JPEG quality for the embedded renders (default 92).")
+    parser.add_argument("--timeout", type=int, default=600,
+                        help="Per-cell execution timeout in seconds (default 600).")
+
+
+def _strip_state(nb: dict) -> None:
+    """Drop the heavy offline live-widget manager-state + the dead widget-view output refs."""
+    nb.get("metadata", {}).pop("widgets", None)
+    for cell in nb.get("cells", []):
+        for out in cell.get("outputs", []):
+            (out.get("data") or {}).pop("application/vnd.jupyter.widget-view+json", None)
+
+
+def _embed_jpeg(cell: dict, png_or_jpeg: bytes, quality: int) -> bool:
+    """Replace a cell's visual output with one JPEG.
+
+    Widget outputs usually have only ``application/vnd.jupyter.widget-view+json``,
+    not an existing ``image/*`` slot.  For GitHub display we must add a normal
+    image output before stripping the widget MIME bundle.
+    """
+    import base64
+    from io import BytesIO
+    from PIL import Image
+    img = Image.open(BytesIO(png_or_jpeg)).convert("RGB")
+    buf = BytesIO()
+    img.save(buf, format="JPEG", quality=quality, optimize=True)
+    b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+    done = False
+    for out in cell.get("outputs", []):
+        data = out.get("data")
+        if data and (
+            any(k.startswith("image/") for k in data)
+            or "application/vnd.jupyter.widget-view+json" in data
+        ):
+            for k in [k for k in data if k.startswith("image/")]:
+                del data[k]
+            data["image/jpeg"] = b64
+            out.setdefault("metadata", {})
+            done = True
+            break
+    if not done:
+        cell.setdefault("outputs", []).append({
+            "output_type": "display_data",
+            "metadata": {},
+            "data": {"image/jpeg": b64},
+        })
+        done = True
+    return done
+
+
+def _capture_full_ui(html: pathlib.Path, n_expected: int) -> list[bytes]:
+    """Screenshot each widget's FULL UI (toolbar + toggles + panels + histograms) from the
+    rendered live-widget HTML, deterministically, via Playwright on the real GPU. The widget
+    UI is React+MUI+WebGPU, so a browser engine is required; Playwright manages the lifecycle
+    (waits for mount + paint) and ``locator.screenshot`` grabs each widget element exactly."""
+    os.environ.setdefault("VK_ICD_FILENAMES", "/usr/share/vulkan/icd.d/nvidia_icd.json")
+    os.environ.setdefault("DISPLAY", ":1")
+    from playwright.sync_api import sync_playwright
+    shots: list[bytes] = []
+    with sync_playwright() as play:
+        browser = play.chromium.launch(headless=False, args=[
+            "--enable-unsafe-webgpu", "--use-angle=vulkan", "--enable-features=Vulkan",
+            "--ignore-gpu-blocklist", "--disable-gpu-sandbox", "--no-sandbox"])
+        page = browser.new_page(viewport={"width": 1300, "height": 2400}, device_scale_factor=2)
+        page.goto(html.as_uri(), wait_until="load", timeout=90000)
+        page.wait_for_timeout(13000)  # anywidget mount + WebGPU paint
+        arch = page.evaluate("async()=>{const a=await navigator.gpu?.requestAdapter();"
+                             "return a?(a.info?.architecture||'?'):'none';}")
+        print(f"  GPU adapter: {arch}")
+        if arch == "swiftshader":
+            print("  warning: WebGPU reported SwiftShader; continuing because GitHub snapshots only need pixels")
+        outs = page.locator(".jp-OutputArea-output")
+        for i in range(outs.count()):
+            el = outs.nth(i)
+            if el.locator("canvas").count() > 0:
+                el.scroll_into_view_if_needed()
+                page.wait_for_timeout(700)
+                shots.append(el.screenshot())
+        browser.close()
+    if len(shots) != n_expected:
+        print(f"  warning: captured {len(shots)} widget UIs for {n_expected} widget cells")
+    return shots
+
+
+def _prepare_github(args: argparse.Namespace) -> int:
+    """Make a widget notebook GitHub/VS-Code-displayable: embed a screenshot of each widget's
+    FULL live UI (toolbar+toggles+panels) - because the whole reason to use the widget over
+    ``show_2d`` is the UI, so the static render shows it (captured deterministically via
+    Playwright on the real GPU). Drops the offline ``metadata.widgets`` state (tens of MB;
+    GitHub won't render it and can't run widgets anyway) and JPEG-encodes each render (noisy
+    science images compress ~10x). Keeps every other output (matplotlib PNGs, prints).
+
+    The interactive widget still comes from re-running the notebook or ``quantem html``. Needs
+    Playwright + a real GPU (NVIDIA Vulkan ICD + a display); errors clearly if unavailable."""
+    import json
+    import shutil
+    import subprocess
+    notebook = pathlib.Path(args.path).expanduser().resolve()
+    if not notebook.exists():
+        raise FileNotFoundError(f"notebook not found: {notebook}")
+    if notebook.suffix.lower() != ".ipynb":
+        raise ValueError(f"expected a .ipynb, got {notebook.suffix!r}")
+    if shutil.which("jupyter") is None:
+        raise ValueError("jupyter not found; install jupyter")
+    before = notebook.stat().st_size
+    if not args.no_execute:
+        print(f"executing {notebook.name} ...")
+        if subprocess.run(["jupyter", "nbconvert", "--to", "notebook", "--execute", "--inplace",
+                           str(notebook), f"--ExecutePreprocessor.timeout={args.timeout}"]).returncode != 0:
+            raise ValueError("nbconvert --execute failed (see output above)")
+    nb = json.loads(notebook.read_text())
+    widget_cells = [c for c in nb["cells"]
+                    if c["cell_type"] == "code" and any(w in "".join(c["source"]) for w in _WIDGET_CELL)]
+    if widget_cells:
+        try:
+            html = notebook.with_suffix(".fullui.html")
+            subprocess.run(["jupyter", "nbconvert", "--to", "html", str(notebook),
+                            "--output-dir", str(notebook.parent), "--output", notebook.stem + ".fullui"],
+                           check=True)
+            print(f"capturing {len(widget_cells)} widget UI(s) on the GPU ...")
+            shots = _capture_full_ui(html, len(widget_cells))
+            html.unlink(missing_ok=True)
+            for cell, png in zip(widget_cells, shots):
+                _embed_jpeg(cell, png, args.quality)
+            mode = f"{len(shots)} full-UI screenshots"
+        except (ImportError, RuntimeError) as err:
+            raise ValueError(
+                "full-UI capture needs Playwright + a real GPU (NVIDIA Vulkan ICD + a display): "
+                f"{err}") from err
+    else:
+        mode = "no widget cells - state stripped only"
+    _strip_state(nb)
+    notebook.write_text(json.dumps(nb, indent=1))
+    after = notebook.stat().st_size
+    print(f"github-ready: {notebook.name}  {before / 1e6:.1f} MB -> {after / 1e6:.1f} MB"
+          f"  ({mode}, JPEG q{args.quality}, offline state stripped)")
+    if after > 5e6:
+        print("  warning: still > 5 MB - GitHub may not render. Lower --quality or the widget's size=.")
     return 0
 
 
@@ -185,6 +343,55 @@ def _ssh_target() -> str:
     return target
 
 
+def _strip_json_line_comments(text: str) -> str:
+    """Remove the line comments JupyterLab may put in .jupyterlab-settings files."""
+    return "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("//"))
+
+
+def _jupyterlab_user_settings_dir() -> pathlib.Path:
+    """Return the JupyterLab user-settings dir for this process.
+
+    JupyterLab stores per-plugin settings under
+    ``<jupyter-config>/lab/user-settings`` unless ``JUPYTERLAB_SETTINGS_DIR`` is
+    set.  We write the widgets-manager setting there before launching Lab so a
+    normal notebook save also saves widget state.
+    """
+    override = os.environ.get("JUPYTERLAB_SETTINGS_DIR")
+    if override:
+        return pathlib.Path(override)
+    config = os.environ.get("JUPYTER_CONFIG_DIR")
+    root = pathlib.Path(config) if config else pathlib.Path.home() / ".jupyter"
+    return root / "lab" / "user-settings"
+
+
+def _enable_jupyterlab_widget_state_save() -> pathlib.Path:
+    """Enable JupyterLab's automatic widget-state save setting.
+
+    Without this setting, Cmd+S saves code/output but may omit ``metadata.widgets``.
+    Then reopening a notebook later has no frontend model state to hydrate.  The
+    fixed Lab manager can restore saved widgets, but only if the state is saved.
+    """
+    path = (
+        _jupyterlab_user_settings_dir()
+        / "@jupyter-widgets"
+        / "jupyterlab-manager"
+        / "plugin.jupyterlab-settings"
+    )
+    settings: dict[str, object] = {}
+    if path.exists():
+        raw = path.read_text()
+        try:
+            settings = json.loads(_strip_json_line_comments(raw) or "{}")
+        except ValueError:
+            backup = path.with_suffix(path.suffix + ".bak")
+            backup.write_text(raw)
+            settings = {}
+    settings["saveState"] = True
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(settings, indent=2, sort_keys=True) + "\n")
+    return path
+
+
 def _launch_jupyter(args: argparse.Namespace) -> int:
     """Start JupyterLab here on the GPU box and print a URL to paste into the laptop
     browser - kernel + GPU run here, UI in your browser. anywidget rides the Jupyter Comm
@@ -199,6 +406,7 @@ def _launch_jupyter(args: argparse.Namespace) -> int:
     import subprocess
     import threading
     import webbrowser
+    settings_path = _enable_jupyterlab_widget_state_save()
     port = args.port or _free_port()
     token = secrets.token_hex(16)
     # --log-level=WARN silences the ~20 INFO log lines that otherwise scroll the
@@ -248,6 +456,7 @@ def _launch_jupyter(args: argparse.Namespace) -> int:
     print(f"  {LB}Windows:{RST}  {CY}{line_win}{RST}")
     print()
     print(f"  {GN}✓ JupyterLab running on this box, port {port}. Ctrl-C here to stop.{RST}")
+    print(f"  {GN}✓ Widget state auto-save enabled for Cmd+S.{RST} {DM}({settings_path}){RST}")
     print(f"  {DM}(URL alone): {url}{RST}")
     print(f"  {DM}(tunnel alone): ssh -L {port}:127.0.0.1:{port} {target}{RST}")
     print(f"  {DM}(no SSH key yet? https://github.com/ophusgroup/dev#appendix-c-ssh-for-github-and-gpu-servers){RST}")
