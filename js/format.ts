@@ -8,17 +8,25 @@ export function extractBytes(dataView: DataView | ArrayBuffer | Uint8Array): Uin
   return new Uint8Array(0);
 }
 
-/** Extract Float32Array from anywidget DataView. Returns null if empty. */
-export function extractFloat32(dataView: DataView | ArrayBuffer | Uint8Array): Float32Array | null {
+/** Extract Float32Array from anywidget DataView. Returns null if empty.
+ *
+ * `expectedFloats` lets callers ignore trailing pad bytes. Some widget buffers
+ * are padded to a multiple of three bytes so notebook/html base64 embeds do not
+ * need `=` padding; the logical float payload still has a known element count.
+ */
+export function extractFloat32(dataView: DataView | ArrayBuffer | Uint8Array, expectedFloats?: number): Float32Array | null {
   const bytes = extractBytes(dataView);
   if (bytes.length === 0) return null;
-  if (bytes.byteLength % 4 !== 0) return null;
-  if (bytes.byteOffset % 4 !== 0) {
-    const aligned = new Uint8Array(bytes.byteLength);
-    aligned.set(bytes);
+  const usableBytes = expectedFloats !== undefined
+    ? Math.max(0, Math.min(bytes.byteLength, Math.floor(expectedFloats) * 4))
+    : bytes.byteLength;
+  if (usableBytes === 0 || usableBytes % 4 !== 0) return null;
+  if (bytes.byteOffset % 4 !== 0 || usableBytes !== bytes.byteLength) {
+    const aligned = new Uint8Array(usableBytes);
+    aligned.set(bytes.subarray(0, usableBytes));
     return new Float32Array(aligned.buffer);
   }
-  return new Float32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 4);
+  return new Float32Array(bytes.buffer, bytes.byteOffset, usableBytes / 4);
 }
 
 /** Download a Blob as a file. */
@@ -43,4 +51,45 @@ export function formatNumber(val: number, decimals: number = 2): string {
   if (val === 0) return "0";
   if (Math.abs(val) >= 1000 || Math.abs(val) < 0.01) return val.toExponential(decimals);
   return val.toFixed(decimals);
+}
+
+type AnyWidgetModelWithManager = {
+  model_id?: string;
+  id?: string;
+  widget_manager?: {
+    get_state_sync?: (options?: Record<string, unknown>) => unknown;
+    _modelsSync?: Map<string, { _comm_live?: boolean; comm_live?: boolean }>;
+    __quantemSaveRestoredModelsPatch?: boolean;
+  };
+};
+
+/**
+ * JupyterLab's widget manager can restore notebook-embedded widget models without
+ * a kernel, but its Cmd+S path only serializes models whose comm is live. That
+ * drops restored no-kernel models from metadata.widgets. Temporarily treating
+ * those restored models as live during serialization preserves their current
+ * frontend state when the notebook is saved.
+ */
+export function preserveRestoredWidgetModelsOnSave(model: unknown): void {
+  const widgetModel = model as AnyWidgetModelWithManager | null;
+  const manager = widgetModel?.widget_manager;
+  if (!manager || typeof manager.get_state_sync !== "function") return;
+  const modelId = widgetModel?.model_id ?? widgetModel?.id;
+  if (modelId && manager._modelsSync) {
+    manager._modelsSync.set(modelId, widgetModel as { _comm_live?: boolean; comm_live?: boolean });
+  }
+  if (manager.__quantemSaveRestoredModelsPatch) return;
+
+  const originalGetStateSync = manager.get_state_sync.bind(manager);
+  manager.get_state_sync = (options?: Record<string, unknown>) => {
+    const models = Array.from(manager._modelsSync?.values?.() ?? []);
+    const restoredModels = models.filter((widgetModel) => !widgetModel.comm_live);
+    for (const widgetModel of restoredModels) widgetModel._comm_live = true;
+    try {
+      return originalGetStateSync(options);
+    } finally {
+      for (const widgetModel of restoredModels) widgetModel._comm_live = false;
+    }
+  };
+  manager.__quantemSaveRestoredModelsPatch = true;
 }

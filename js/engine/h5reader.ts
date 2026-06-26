@@ -19,7 +19,7 @@ export interface H5Volume {
   detSize: number;
   blockElems: number;          // elements per bitshuffle block (read from the chunk header)
   nBlocksPerFrame: number;
-  srcDtype: "uint8" | "uint16" | "uint32";
+  srcDtype: "uint8" | "uint16" | "uint32" | "float32";
   nFrames: number;             // frames in THIS file (one Arina data file is a scan slab)
   chunks: Bslz4Spec[];         // scan-frame chunked so each decoded buffer <= the GPU cap
   chunkScanCounts: number[];   // frame count per chunk (== spec.nFrames)
@@ -103,10 +103,13 @@ export function readH5Volume(buffer: ArrayBuffer, name: string, _framesPerChunk?
   const [nFrames, detRows, detCols] = ds.shape;
   const detSize = detRows * detCols;
   // Arina writes uint8/uint16/uint32 detector data depending on bit-depth; jsfive reports
-  // "|u1"/"<u2"/"<u4". The element byte width drives the bitshuffle plane count (8/16/32).
+  // "|u1"/"<u2"/"<u4". A MAPED-merged stack is float32 ("<f4"). The element byte width drives
+  // the bitshuffle plane count (8/16/32) - float32 is 4-byte, so it de-bitshuffles exactly
+  // like uint32 (32 planes); only the display reinterprets the decoded 4 bytes as f32.
   const dt = String(ds.dtype);
-  const srcDtype: "uint8" | "uint16" | "uint32" = /u1|int8/.test(dt) ? "uint8" : /u4|int32/.test(dt) ? "uint32" : "uint16";
-  const srcBytes = srcDtype === "uint8" ? 1 : srcDtype === "uint32" ? 4 : 2;
+  const srcDtype: "uint8" | "uint16" | "uint32" | "float32" =
+    /f4|float32/.test(dt) ? "float32" : /u1|int8/.test(dt) ? "uint8" : /u4|int32/.test(dt) ? "uint32" : "uint16";
+  const srcBytes = srcDtype === "uint8" ? 1 : (srcDtype === "uint32" || srcDtype === "float32") ? 4 : 2;
   // Zero-copy: one GPU buffer = the WHOLE file (a view, no copy), one spec for the dataset.
   // blockMeta holds ABSOLUTE byte offsets into the file, so the decoder reads each block's
   // LZ4 stream straight from the uploaded file - no per-chunk slice, no concatenation blob.

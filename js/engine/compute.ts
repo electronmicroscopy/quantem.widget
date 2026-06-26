@@ -22,6 +22,12 @@ fn sample(gp: u32, mode: u32) -> u32 {
   if (mode == 1u) { let w = data[gp >> 2u]; return (w >> ((gp & 3u) * 8u)) & 0xffu; }
   let w = data[gp >> 1u];
   return select(w >> 16u, w & 0xffffu, (gp & 1u) == 0u);
+}
+// Float value of a pixel. mode 2 = float32 (1 u32/pixel = IEEE-754 bit pattern -> bitcast,
+// full precision); modes 0/1 return the integer count as f32.
+fn sampleF(gp: u32, mode: u32) -> f32 {
+  if (mode == 2u) { return bitcast<f32>(data[gp]); }
+  return f32(sample(gp, mode));
 }`;
 
 // One WORKGROUP per scan position; its 64 threads COOPERATIVELY sum the aperture pixels, then
@@ -50,23 +56,25 @@ ${sg ? "enable subgroups;" : ""}
 @group(0) @binding(3) var<uniform> u: vec4<u32>;   // startScan, nScanInChunk, detSize, mode
 @group(0) @binding(4) var<uniform> u2: vec4<u32>;  // gridX, 0, 0, 0
 ${SAMPLE}
-var<workgroup> part: array<u32, ${WGSZ}>;
+var<workgroup> part: array<f32, ${WGSZ}>;
 @compute @workgroup_size(${WGSZ})
 fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
   let sl = wid.y * u2.x + wid.x; let tid = lid.x;
-  let n = arrayLength(&idx); let base = sl * u.z; var sum: u32 = 0u;
-  if (sl < u.y) { for (var j = tid; j < n; j = j + ${WGSZ}u) { sum = sum + sample(base + idx[j], u.w); } }
+  // f32 accumulate via sampleF: exact for uint8/uint16 counts (sum << 2^24 for a screening
+  // aperture), and the only correct path for float32 (mode 2) values.
+  let n = arrayLength(&idx); let base = sl * u.z; var sum: f32 = 0.0;
+  if (sl < u.y) { for (var j = tid; j < n; j = j + ${WGSZ}u) { sum = sum + sampleF(base + idx[j], u.w); } }
 ${sg
   ? `  sum = subgroupAdd(sum);                       // per-warp partial
   if (subgroupElect()) { part[tid / ${SGSZ}u] = sum; }   // one slot per warp
   workgroupBarrier();
   if (tid == 0u && sl < u.y) {
-    var total = 0u; for (var w = 0u; w < ${WGSZ / SGSZ}u; w = w + 1u) { total = total + part[w]; }
-    vi[u.x + sl] = f32(total);
+    var total = 0.0; for (var w = 0u; w < ${WGSZ / SGSZ}u; w = w + 1u) { total = total + part[w]; }
+    vi[u.x + sl] = total;
   }`
   : `  part[tid] = sum; workgroupBarrier();
   for (var s: u32 = ${WGSZ / 2}u; s > 0u; s = s >> 1u) { if (tid < s) { part[tid] = part[tid] + part[tid + s]; } workgroupBarrier(); }
-  if (tid == 0u && sl < u.y) { vi[u.x + sl] = f32(part[0]); }`}
+  if (tid == 0u && sl < u.y) { vi[u.x + sl] = part[0]; }`}
 }`;
 
 // One thread per detector pixel; ACCUMULATES this chunk's in-ROI scan positions
@@ -107,7 +115,7 @@ ${SAMPLE}
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let k = gid.x; if (k >= u.y) { return; }
-  frame[k] = f32(sample(u.x + k, u.z));
+  frame[k] = sampleF(u.x + k, u.z);
 }`;
 
 // One thread per scan position: intensity-weighted centroid (center of mass) of the
@@ -133,7 +141,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
   let base = sl * u.z; let n = arrayLength(&idx); let detCols = u2.x;
   var wsum: f32 = 0.0; var ysum: f32 = 0.0; var xsum: f32 = 0.0;
   if (sl < u.y) { for (var j: u32 = tid; j < n; j = j + ${WGSZ}u) {
-    let p = idx[j]; let v = f32(sample(base + p, u.w));
+    let p = idx[j]; let v = sampleF(base + p, u.w);
     wsum = wsum + v; ysum = ysum + f32(p / detCols) * v; xsum = xsum + f32(p % detCols) * v;
   } }
 ${sg
@@ -251,7 +259,7 @@ export class Show4DSTEMCompute {
   // 0-255, half memory) or "uint16" (lossless). The decoded buffer is packed in
   // [scanPos][detPixel] order matching sample() for that mode, so masked_sum /
   // reduceFrames run on it unchanged.
-  static async createFromBslz4(spec: Bslz4Spec, dtype: "uint8" | "uint16" = "uint8", srcDtype: "uint8" | "uint16" = "uint16"): Promise<Show4DSTEMCompute | null> {
+  static async createFromBslz4(spec: Bslz4Spec, dtype: "uint8" | "uint16" | "float32" = "uint8", srcDtype: "uint8" | "uint16" | "float32" = "uint16"): Promise<Show4DSTEMCompute | null> {
     const decoded = await decodeBslz4ToStack(spec, dtype, srcDtype);
     if (!decoded) return null;
     const chunks: Chunk[] = [{ buffer: decoded.buffer, startScan: 0, nScan: spec.nFrames }];
@@ -271,8 +279,8 @@ export class Show4DSTEMCompute {
   // reduceFrames reduce across them. Each decode reuses a ~1 GB scratch internally.
   static async createFromBslz4Chunked(
     chunkSpecs: (Bslz4Spec & { startScan: number; nScan: number })[],
-    scanCount: number, detSize: number, dtype: "uint8" | "uint16" = "uint8",
-    srcDtype: "uint8" | "uint16" = "uint16",
+    scanCount: number, detSize: number, dtype: "uint8" | "uint16" | "float32" = "uint8",
+    srcDtype: "uint8" | "uint16" | "float32" = "uint16",
   ): Promise<Show4DSTEMCompute | null> {
     // Batch the per-chunk decodes (one submit + await per group) so the GPU overlaps
     // upload and compute instead of draining after every chunk.
