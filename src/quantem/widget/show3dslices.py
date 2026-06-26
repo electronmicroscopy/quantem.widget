@@ -283,6 +283,7 @@ class Show3DSlices(anywidget.AnyWidget):
     # ptycho with nz=14, nxy=730 -> set z_stretch high to make depth panels readable).
     z_stretch = traitlets.Float(30.0).tag(sync=True)
     panel_width_px = traitlets.Int(0).tag(sync=True)
+    view_state = traitlets.Dict(default_value={}).tag(sync=True)
     # UI
     show_controls = traitlets.Bool(True).tag(sync=True)
     show_stats = traitlets.Bool(False)  # Python-only: gates _compute_stats reductions, no JS bar
@@ -927,6 +928,7 @@ class Show3DSlices(anywidget.AnyWidget):
             "scale_bar_visible": self.scale_bar_visible,
             "z_stretch": self.z_stretch,
             "panel_width_px": self.panel_width_px,
+            "view_state": dict(self.view_state),
             "slice_x": self.slice_x,
             "slice_y": self.slice_y,
             "slice_z": self.slice_z,
@@ -1560,53 +1562,3 @@ class Show3DSlices(anywidget.AnyWidget):
         if vmax > vmin:
             return np.clip((slc - vmin) / (vmax - vmin) * 255, 0, 255).astype(np.uint8)
         return np.zeros(slc.shape, dtype=np.uint8)
-
-    def _repr_mimebundle_(self, **kwargs):
-        """Return widget view + widget-faithful PNG snapshot.
-
-        Layout adapts to volume shape:
-        * Thin Z (Z <= 16, e.g. ptycho phase): grid of ALL Z slices through
-          depth — what the operator scrolls through in the widget.
-        * Cubic Z (Z > 16): 3-axis orthogonal mid views (Z/Y/X).
-        Same cmap, log, per-panel normalize as widget. Image-only. Opt out
-        with ``QUANTEM_WIDGET_NO_SNAPSHOT=1``.
-        """
-        bundle = super()._repr_mimebundle_(**kwargs)
-        if os.environ.get("QUANTEM_WIDGET_NO_SNAPSHOT"):
-            return bundle
-        if self._data is None:
-            return bundle
-        try:
-            from quantem.widget.render.snapshot import render_panels_png
-            vol = self._data  # (Z, Y, X)
-            Z, Y, X = vol.shape
-            cmap = self.cmap if isinstance(self.cmap, str) else str(self.cmap)
-            log = bool(getattr(self, "log_scale", False))
-            title = (self.title or None) if getattr(self, "title", "") else None
-            sampling_A = float(self.pixel_size) if getattr(self, "pixel_size", 0) else None
-            if Z <= 16:
-                panels = [vol[z, :, :] for z in range(Z)]
-                ncols = min(Z, 4)
-                max_px = 256 if Z <= 4 else 192 if Z <= 9 else 160
-                labels = [f"slice {z+1}/{Z}" for z in range(Z)]
-                png = render_panels_png(
-                    panels, cmaps=cmap, ncols=ncols,
-                    max_px_per_panel=max_px, log=log,
-                    labels=labels, title=title, sampling_A_per_px=sampling_A,
-                )
-            else:
-                zc, yc, xc = Z // 2, Y // 2, X // 2
-                panels = [vol[zc, :, :], vol[:, yc, :], vol[:, :, xc]]
-                labels = [f"Z mid ({zc+1}/{Z})", f"Y mid ({yc+1}/{Y})", f"X mid ({xc+1}/{X})"]
-                png = render_panels_png(
-                    panels, cmaps=cmap, ncols=3,
-                    max_px_per_panel=256, log=log,
-                    labels=labels, title=title, sampling_A_per_px=sampling_A,
-                )
-            data_dict = bundle[0] if isinstance(bundle, tuple) else bundle
-            data_dict["image/png"] = base64.b64encode(png).decode("ascii")
-            if isinstance(bundle, tuple):
-                return (data_dict, bundle[1])
-            return data_dict
-        except Exception:
-            return bundle

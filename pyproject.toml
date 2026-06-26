@@ -12,7 +12,9 @@ requires-python = ">=3.11"
 dependencies = [
     "quantem>=0.1.8",
     "quantem.data>=0.0.1rc1",   # shared HF dataset hub (upload/download), re-exported by io.hub
-    "anywidget>=0.9.0",
+    "anywidget>=0.11.0",
+    # JupyterLab widget manager 5.0.10 restores saved metadata.widgets state on reopen.
+    "jupyterlab_widgets>=3.0.10",
     "numpy>=2.0.0",
     "traitlets>=5.0.0",
     "torch>=2.0.0",

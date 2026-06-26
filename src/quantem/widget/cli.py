@@ -95,10 +95,12 @@ def _render_html(args: argparse.Namespace) -> int:
     """Execute a notebook and export it to a standalone, shareable HTML.
 
     Wraps ``jupyter nbconvert --to html [--execute]``: a finished notebook becomes a
-    kernel-less HTML (interactive widgets such as Show2D bake in as static images) that
-    opens in any browser with no Python. The live ``.ipynb`` stays the editable surface;
-    this is the share artifact. ``--no-execute`` exports the saved outputs as-is, which
-    is what a notebook's own in-cell ``!jupyter nbconvert`` does after a run."""
+    kernel-less HTML page whose saved widget state is hydrated by the ipywidgets HTML
+    manager. Show2D / Show3D / Show3DSlices controls remain interactive in the browser,
+    but changes are browser-local and do not write back to the notebook or HTML file.
+    The live ``.ipynb`` stays the editable surface; this is the share artifact.
+    ``--no-execute`` exports the saved outputs as-is, which is what a notebook's own
+    in-cell ``!jupyter nbconvert`` does after a run."""
     import shutil
     import subprocess
     notebook = pathlib.Path(args.path).expanduser().resolve()

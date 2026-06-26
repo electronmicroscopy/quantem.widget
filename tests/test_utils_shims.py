@@ -26,11 +26,9 @@ def test_array_utils_compatibility_shim():
 
 
 def test_render_compatibility_shims():
-    from quantem.widget import _snapshot, gif_utils
-    from quantem.widget.render import gif, snapshot
+    from quantem.widget import gif_utils
+    from quantem.widget.render import gif
 
-    assert _snapshot.render_image_png is snapshot.render_image_png
-    assert _snapshot.render_panels_png is snapshot.render_panels_png
     assert gif_utils.write_gif is gif.write_gif
 
 
