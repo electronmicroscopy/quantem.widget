@@ -30,7 +30,8 @@ cufile.log
 .claude/
 
 # heavy / non-repo content (notebooks are 1.1GB + person/proprietary)
-notebooks/
+notebooks/*
+!notebooks/all_widgets_reopen.ipynb
 img/
 docs/examples/
 
