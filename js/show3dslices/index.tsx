@@ -9,7 +9,7 @@
  * Show3DVolume.
  */
 import * as React from "react";
-import { createRender, useModelState } from "@anywidget/react";
+import { createRender, useModel, useModelState } from "@anywidget/react";
 import Box from "@mui/material/Box";
 import Typography from "@mui/material/Typography";
 import Stack from "@mui/material/Stack";
@@ -30,7 +30,7 @@ import StopIcon from "@mui/icons-material/Stop";
 import { useTheme } from "../theme";
 import { VolumeRenderer, CameraState, DEFAULT_CAMERA } from "../webgpu-volume";
 import { drawScaleBarHiDPI, drawFFTScaleBarHiDPI, drawColorbar } from "../figure";
-import { downloadBlob, extractBytes, extractFloat32, formatNumber } from "../format";
+import { downloadBlob, extractBytes, extractFloat32, formatNumber, preserveRestoredWidgetModelsOnSave } from "../format";
 import { findDataRange, applyLogScale, percentileClip, sliderRange, computeHistogramFromBytes } from "../stats";
 
 const MAX_PLAYBACK_FPS = 30;
@@ -349,9 +349,9 @@ function extractVolumeFloat32(
   ny: number,
   nz: number,
 ): Float32Array | null {
-  if (!offline) return extractFloat32(dataView);
-  const bytes = extractBytes(dataView);
   const count = Math.max(0, Math.floor(nx) * Math.floor(ny) * Math.floor(nz));
+  if (!offline) return extractFloat32(dataView, count);
+  const bytes = extractBytes(dataView);
   if (bytes.length === 0 || count === 0) return null;
   const out = new Float32Array(count);
   const usable = Math.min(count, bytes.length);
@@ -770,6 +770,9 @@ declare global {
 const FFT_SNAP_RADIUS = 5;
 
 function Show3DSlices() {
+  const model = useModel();
+  React.useEffect(() => preserveRestoredWidgetModelsOnSave(model), [model]);
+
   // Theme detection (offline HTML exports force a light/white background)
   const [offlineForTheme] = useModelState<boolean>("_export_light");
   const { themeInfo, colors: baseColors } = useTheme(offlineForTheme);
@@ -820,7 +823,30 @@ function Show3DSlices() {
   const [traitVmax] = useModelState<number | null>("vmax");
   const [showControls] = useModelState<boolean>("show_controls");
   const [showCrosshair] = useModelState<boolean>("show_crosshair");
-  const [panelWidthPx] = useModelState<number>("panel_width_px");
+  const [panelWidthPx, setPanelWidthPx] = useModelState<number>("panel_width_px");
+  type Show3DSlicesViewState = {
+    zooms?: Partial<ZoomState>[];
+    fft_zooms?: Partial<ZoomState>[];
+    camera?: Partial<CameraState>;
+  };
+  const [viewState, setViewState] = useModelState<Show3DSlicesViewState>("view_state");
+  const readNumber = (value: unknown, fallback: number): number => (
+    typeof value === "number" && Number.isFinite(value) ? value : fallback
+  );
+  const normalizeZoomState = (value: Partial<ZoomState> | undefined, fallback: ZoomState): ZoomState => ({
+    zoom: Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, readNumber(value?.zoom, fallback.zoom))),
+    panX: readNumber(value?.panX, readNumber((value as { pan_x?: unknown } | undefined)?.pan_x, fallback.panX)),
+    panY: readNumber(value?.panY, readNumber((value as { pan_y?: unknown } | undefined)?.pan_y, fallback.panY)),
+  });
+  const normalizeCameraState = (value: Partial<CameraState> | undefined): CameraState => ({
+    ...SHOW3DSLICES_DEFAULT_CAMERA,
+    yaw: readNumber(value?.yaw, SHOW3DSLICES_DEFAULT_CAMERA.yaw),
+    pitch: Math.max(-Math.PI * 0.49, Math.min(Math.PI * 0.49, readNumber(value?.pitch, SHOW3DSLICES_DEFAULT_CAMERA.pitch))),
+    roll: readNumber(value?.roll, SHOW3DSLICES_DEFAULT_CAMERA.roll ?? 0),
+    distance: Math.max(0.5, Math.min(10, readNumber(value?.distance, SHOW3DSLICES_DEFAULT_CAMERA.distance))),
+    panX: readNumber(value?.panX, readNumber((value as { pan_x?: unknown } | undefined)?.pan_x, SHOW3DSLICES_DEFAULT_CAMERA.panX)),
+    panY: readNumber(value?.panY, readNumber((value as { pan_y?: unknown } | undefined)?.pan_y, SHOW3DSLICES_DEFAULT_CAMERA.panY)),
+  });
   const [showFft, setShowFft] = useModelState<boolean>("show_fft");
   const [orthographic, setOrthographic] = useModelState<boolean>("orthographic");
   const [smooth, setSmooth] = useModelState<boolean>("smooth");
@@ -872,7 +898,9 @@ function Show3DSlices() {
   const [fftLogScale, setFftLogScale] = useModelState<boolean>("fft_log_scale");
   const [fftAuto, setFftAuto] = useModelState<boolean>("fft_auto");
   const [fftWindow, setFftWindow] = useModelState<boolean>("fft_window");
-  const [fftZooms, setFftZooms] = React.useState<ZoomState[]>([DEFAULT_FFT_ZOOM, DEFAULT_FFT_ZOOM, DEFAULT_FFT_ZOOM]);
+  const savedSliceZooms = Array.from({ length: 3 }, (_, i) => normalizeZoomState(viewState?.zooms?.[i], DEFAULT_ZOOM));
+  const savedFftZooms = Array.from({ length: 3 }, (_, i) => normalizeZoomState(viewState?.fft_zooms?.[i], DEFAULT_FFT_ZOOM));
+  const [fftZooms, setFftZooms] = React.useState<ZoomState[]>(() => savedFftZooms);
   const [fftDragAxis, setFftDragAxis] = React.useState<number | null>(null);
   const [fftDragStart, setFftDragStart] = React.useState<{ x: number; y: number; pX: number; pY: number } | null>(null);
 
@@ -992,18 +1020,18 @@ function Show3DSlices() {
   const [fftVersion, setFftVersion] = React.useState(0);
 
   // Zoom/pan per axis
-  const [zooms, setZooms] = React.useState<ZoomState[]>([DEFAULT_ZOOM, DEFAULT_ZOOM, DEFAULT_ZOOM]);
+  const [zooms, setZooms] = React.useState<ZoomState[]>(() => savedSliceZooms);
   const [dragAxis, setDragAxis] = React.useState<number | null>(null);
   const [dragStart, setDragStart] = React.useState<{ x: number; y: number; pX: number; pY: number } | null>(null);
   // rAF bypass: keep live zoom in ref during drag, sync to React state on mouseup.
   // Only sync ref from state when NOT dragging - otherwise an unrelated re-render
   // (playback tick, cursor update) would clobber in-flight pan values.
-  const liveZoomsRef = React.useRef<ZoomState[]>([DEFAULT_ZOOM, DEFAULT_ZOOM, DEFAULT_ZOOM]);
+  const liveZoomsRef = React.useRef<ZoomState[]>(savedSliceZooms);
   const liveZoomDirtyRef = React.useRef(false);
   if (dragAxis === null && !liveZoomDirtyRef.current) liveZoomsRef.current = zooms;
   const zoomRafRef = React.useRef<number>(0);
   const zoomCommitTimeoutRef = React.useRef<number | null>(null);
-  const liveFftZoomsRef = React.useRef<ZoomState[]>([DEFAULT_FFT_ZOOM, DEFAULT_FFT_ZOOM, DEFAULT_FFT_ZOOM]);
+  const liveFftZoomsRef = React.useRef<ZoomState[]>(savedFftZooms);
   const liveFftZoomDirtyRef = React.useRef(false);
   if (fftDragAxis === null && !liveFftZoomDirtyRef.current) liveFftZoomsRef.current = fftZooms;
   const fftZoomRafRef = React.useRef<number>(0);
@@ -1076,7 +1104,7 @@ function Show3DSlices() {
   // 3D volume renderer state
   const volumeCanvasRef = React.useRef<HTMLCanvasElement | null>(null);
   const volumeRendererRef = React.useRef<VolumeRenderer | null>(null);
-  const [camera, setCamera] = React.useState<CameraState>(SHOW3DSLICES_DEFAULT_CAMERA);
+  const [camera, setCamera] = React.useState<CameraState>(() => normalizeCameraState(viewState?.camera));
   const [volumeDrag, setVolumeDrag] = React.useState<{
     button: number; x: number; y: number; yaw: number; pitch: number; panX: number; panY: number;
   } | null>(null);
@@ -1569,6 +1597,17 @@ function Show3DSlices() {
   // -------------------------------------------------------------------------
   const volumeRafRef = React.useRef<number>(0);
   const liveCameraRef = React.useRef<CameraState>(camera);
+  const persistViewState = React.useCallback((
+    nextZooms: ZoomState[] = liveZoomsRef.current,
+    nextFftZooms: ZoomState[] = liveFftZoomsRef.current,
+    nextCamera: CameraState = liveCameraRef.current,
+  ) => {
+    setViewState({
+      zooms: nextZooms.map(v => ({ ...v })),
+      fft_zooms: nextFftZooms.map(v => ({ ...v })),
+      camera: { ...nextCamera },
+    });
+  }, [setViewState]);
   // Live z_stretch ref for rAF drag path - keeps latest value without re-binding closure.
   const zStretchRef = React.useRef(zStretch);
   if (!zStretchLiveDirtyRef.current) zStretchRef.current = zStretch;
@@ -1777,7 +1816,9 @@ function Show3DSlices() {
       }
     };
     const onUp = () => {
-      setCamera(liveCameraRef.current);
+      const nextCamera = liveCameraRef.current;
+      setCamera(nextCamera);
+      persistViewState(undefined, undefined, nextCamera);
       setVolumeDrag(null);
       volumeDragDataRef.current = null;
     };
@@ -1797,9 +1838,14 @@ function Show3DSlices() {
       recordPerfRef.current("volumeWheel", performance.now() - t0, -1, -1, true);
     }
     setCamera(next);
+    persistViewState(undefined, undefined, next);
   };
 
-  const handleVolumeDoubleClick = () => setCamera(SHOW3DSLICES_DEFAULT_CAMERA);
+  const handleVolumeDoubleClick = () => {
+    liveCameraRef.current = SHOW3DSLICES_DEFAULT_CAMERA;
+    setCamera(SHOW3DSLICES_DEFAULT_CAMERA);
+    persistViewState(undefined, undefined, SHOW3DSLICES_DEFAULT_CAMERA);
+  };
 
   const setVolumeView = (view: "xy" | "side") => {
     const distance = liveCameraRef.current.distance || camera.distance || SHOW3DSLICES_DEFAULT_CAMERA.distance;
@@ -1812,6 +1858,7 @@ function Show3DSlices() {
     const next = { ...SHOW3DSLICES_DEFAULT_CAMERA, ...presets[view], distance, panX: 0, panY: 0 };
     liveCameraRef.current = next;
     setCamera(next);
+    persistViewState(undefined, undefined, next);
   };
 
   const rollVolumeView = (direction: -1 | 1) => {
@@ -1819,6 +1866,7 @@ function Show3DSlices() {
     const next = { ...current, roll: (current.roll ?? 0) + direction * Math.PI / 2 };
     liveCameraRef.current = next;
     setCamera(next);
+    persistViewState(undefined, undefined, next);
   };
 
   // -------------------------------------------------------------------------
@@ -1834,28 +1882,36 @@ function Show3DSlices() {
 
   React.useEffect(() => {
     if (!volumeResizing) return;
+    let latestSize = volumeCanvasSize;
     const onMove = (e: MouseEvent) => {
       const start = volumeResizeStartRef.current;
       if (!start) return;
       const delta = Math.max(e.clientX - start.x, e.clientY - start.y);
       const newSize = Math.max(300, Math.min(800, start.size + delta));
+      latestSize = newSize;
       // Throttle canvas resize to rAF for smooth drag
       if (!volumeResizeRafRef.current) {
         volumeResizeRafRef.current = requestAnimationFrame(() => {
           volumeResizeRafRef.current = 0;
-          setVolumeCanvasSize(newSize);
+          setVolumeCanvasSize(latestSize);
         });
       }
     };
     const onUp = () => {
       if (volumeResizeRafRef.current) { cancelAnimationFrame(volumeResizeRafRef.current); volumeResizeRafRef.current = 0; }
+      const start = volumeResizeStartRef.current;
+      if (start) {
+        const nextSize = Math.max(300, Math.min(800, latestSize));
+        setVolumeCanvasSize(nextSize);
+        setPanelWidthPx(Math.round(nextSize));
+      }
       setVolumeResizing(false);
       volumeResizeStartRef.current = null;
     };
     document.addEventListener("mousemove", onMove);
     document.addEventListener("mouseup", onUp);
     return () => { document.removeEventListener("mousemove", onMove); document.removeEventListener("mouseup", onUp); };
-  }, [volumeResizing]);
+  }, [volumeResizing, volumeCanvasSize, setPanelWidthPx]);
 
   const cameraChanged = camera.yaw !== SHOW3DSLICES_DEFAULT_CAMERA.yaw || camera.pitch !== SHOW3DSLICES_DEFAULT_CAMERA.pitch || (camera.roll ?? 0) !== (SHOW3DSLICES_DEFAULT_CAMERA.roll ?? 0) || camera.distance !== SHOW3DSLICES_DEFAULT_CAMERA.distance || camera.panX !== SHOW3DSLICES_DEFAULT_CAMERA.panX || camera.panY !== SHOW3DSLICES_DEFAULT_CAMERA.panY;
 
@@ -2642,6 +2698,7 @@ function Show3DSlices() {
     liveZoomDirtyRef.current = false;
     const next = liveZoomsRef.current;
     setZooms(next);
+    persistViewState(next, undefined, undefined);
   };
   const commitLiveZoomsSoon = () => {
     liveZoomDirtyRef.current = true;
@@ -2654,7 +2711,9 @@ function Show3DSlices() {
       fftZoomCommitTimeoutRef.current = null;
     }
     liveFftZoomDirtyRef.current = false;
-    setFftZooms(liveFftZoomsRef.current);
+    const next = liveFftZoomsRef.current;
+    setFftZooms(next);
+    persistViewState(undefined, next, undefined);
   };
   const commitLiveFftZoomsSoon = () => {
     liveFftZoomDirtyRef.current = true;
@@ -3142,6 +3201,7 @@ function Show3DSlices() {
     liveFftZoomDirtyRef.current = false;
     setZooms(resetZooms);
     setFftZooms(resetFftZooms);
+    persistViewState(resetZooms, resetFftZooms, undefined);
     setFftClickInfo(null);
   };
 
@@ -3386,6 +3446,7 @@ function Show3DSlices() {
       if (rafId) { cancelAnimationFrame(rafId); rafId = 0; }
       if (resizeStart?.target === "side") setSideCanvasTarget(latestSize);
       else setCanvasTarget(latestSize);
+      setPanelWidthPx(Math.round(latestSize));
       setIsResizing(false);
       setResizeStart(null);
     };
@@ -3396,7 +3457,7 @@ function Show3DSlices() {
       document.removeEventListener("mousemove", handleMouseMove);
       document.removeEventListener("mouseup", handleMouseUp);
     };
-  }, [isResizing, resizeStart]);
+  }, [isResizing, resizeStart, setPanelWidthPx]);
 
   // -------------------------------------------------------------------------
   // Labels and setters
@@ -3896,7 +3957,7 @@ function Show3DSlices() {
                   <Button
                     size="small"
                     sx={{ ...compactButton, position: "absolute", top: 4, right: 4, minWidth: 0, px: 0.75, bgcolor: "rgba(255,255,255,0.75)", "&:hover": { bgcolor: "rgba(255,255,255,0.9)" } }}
-                    onClick={(e) => { e.stopPropagation(); setCamera(SHOW3DSLICES_DEFAULT_CAMERA); }}
+                    onClick={(e) => { e.stopPropagation(); liveCameraRef.current = SHOW3DSLICES_DEFAULT_CAMERA; setCamera(SHOW3DSLICES_DEFAULT_CAMERA); persistViewState(undefined, undefined, SHOW3DSLICES_DEFAULT_CAMERA); }}
                     aria-label="Reset 3D camera view"
                     title="Reset 3D camera view"
                   >
