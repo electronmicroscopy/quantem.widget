@@ -70,7 +70,7 @@ need a Python round trip.
 |---|---|---|
 | Energy band on spectrum | `band_start`, `band_end` | Real-space element map recomputes from the selected energy window |
 | Band center drag | `band_start`, `band_end` | The selected energy window translates without changing width |
-| Real-space rectangular ROI | `roi_row`, `roi_col`, `roi_height`, `roi_width` | Spectrum recomputes from the selected real-space region |
+| Real-space ROI | `roi_row`, `roi_col`, `roi_height`, `roi_width`, `roi_shape` | Rectangular or circular ROI recomputes the summed spectrum from the selected real-space region |
 | Spectrum log toggle | `log_spectrum` | Spectrum switches between linear and log display |
 | Scroll zoom / pan | `map_zoom`, `map_view_row`, `map_view_col`, `spectrum_view_start`, `spectrum_view_end` | Real-space and spectrum views zoom around the cursor and reopen at the saved view |
 | Overlay slider | `overlay_opacity` | Element-map overlay fades against the base image |
