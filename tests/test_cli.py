@@ -57,6 +57,10 @@ def test_embed_jpeg_adds_image_to_widget_only_output(tmp_path):
     assert "application/vnd.jupyter.widget-view+json" in data
 
 
+def test_github_widget_cell_detector_includes_showeds():
+    assert "ShowEDS(" in cli._WIDGET_CELL
+
+
 # ---------------------------------------------------------------------------
 def test_detect_single_image(tmp_path):
     p = tmp_path / "a.png"

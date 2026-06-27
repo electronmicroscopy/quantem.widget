@@ -32,10 +32,12 @@ export function applyLogScaleInPlace(data: Float32Array, out: Float32Array): Flo
   return out;
 }
 
+type NumericArray = ArrayLike<number>;
+
 /** Percentile-based clipping using O(n) histogram approach.
  *  Also returns data min/max so callers can skip a redundant findDataRange scan. */
 export function percentileClip(
-  data: Float32Array, pLow: number, pHigh: number,
+  data: NumericArray, pLow: number, pHigh: number,
 ): { vmin: number; vmax: number; min: number; max: number } {
   const len = data.length;
   if (len === 0) return { vmin: 0, vmax: 0, min: 0, max: 0 };
@@ -121,7 +123,7 @@ export function sliderRange(
  *  fixedMin/fixedMax pin bin edges to a global range (so scrubbing through
  *  a stack doesn't rescale per-frame). Defaults to per-array min/max. */
 export function computeHistogramFromBytes(
-  data: Float32Array | null,
+  data: NumericArray | null,
   numBins = 256,
   fixedMin?: number,
   fixedMax?: number,

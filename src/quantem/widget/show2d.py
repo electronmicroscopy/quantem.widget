@@ -813,13 +813,19 @@ class Show2D(anywidget.AnyWidget):
 
     def export_html(self, path: str | pathlib.Path | None = None,
                     *,
-                    quantized: bool = False,
-                    title: str | None = None) -> pathlib.Path:
+                    title: str | None = None,
+                    mode: str = "single",
+                    encoding: str = "full",
+                    downsample: int | None = None,
+                    quantized: bool | None = None) -> pathlib.Path:
         """Write a standalone HTML viewer for this widget.
 
         The exported file mounts the live anywidget JS bundle with the current
         widget state (data, labels, cmap, vmin/vmax, log_scale, sampling, ...).
         Opens in any browser without a Jupyter kernel.
+        Preferred export options are ``mode="single"``, ``encoding="full"`` or
+        ``encoding="uint8"``, and ``downsample=None``. ``quantized`` is kept as
+        a compatibility alias for ``encoding="uint8"``.
 
         Parameters
         ----------
@@ -835,12 +841,48 @@ class Show2D(anywidget.AnyWidget):
         if self._data is None:
             raise ValueError("Cannot export HTML after free(); rebuild the widget first.")
 
+        quantized = self._normalise_html_export_options(
+            mode=mode,
+            encoding=encoding,
+            downsample=downsample,
+            quantized=quantized,
+        )
         export_path = pathlib.Path(path) if path is not None else self._default_html_export_path(quantized)
         self._write_html_export(export_path, quantized=quantized, title=title)
         size_mb = export_path.stat().st_size / (1024 * 1024)
-        mode = "quantized" if quantized else "exact float32"
-        self.export_status = f"Exported {export_path.name} ({size_mb:.1f} MB, {mode})"
+        label = self._export_mode_label(quantized)
+        self.export_status = f"Exported {export_path.name} ({size_mb:.1f} MB, {label})"
         return export_path
+
+    def _normalise_html_export_options(
+        self,
+        *,
+        mode: str = "single",
+        encoding: str = "full",
+        downsample: int | None = None,
+        quantized: bool | None = None,
+    ) -> bool:
+        raw_mode = str(mode or "single").strip().lower().replace("_", "-")
+        if raw_mode in {"exact", "full"}:
+            raw_mode = "single"
+            encoding = "full"
+        elif raw_mode in {"quantized", "uint8", "u8"}:
+            raw_mode = "single"
+            encoding = "uint8"
+        if raw_mode != "single":
+            raise ValueError("Show2D HTML export supports mode='single'")
+        if downsample not in (None, 1, "1", "", 0, "0"):
+            raise NotImplementedError("Show2D HTML export does not support downsample yet")
+        raw_encoding = str(encoding or "full").strip().lower().replace("_", "-")
+        if quantized is True:
+            raw_encoding = "uint8"
+        elif quantized is False and raw_encoding in {"quantized", "uint8", "u8"}:
+            raw_encoding = "uint8"
+        if raw_encoding in {"full", "exact", "float32", "f32"}:
+            return False
+        if raw_encoding in {"uint8", "u8", "quantized"}:
+            return True
+        raise ValueError(f"unknown Show2D export encoding {encoding!r}; expected 'full' or 'uint8'")
 
     def _on_export_request_change(self, change: dict) -> None:
         raw = str(change.get("new") or "")
@@ -854,9 +896,12 @@ class Show2D(anywidget.AnyWidget):
                 self.export_payload_id = ""
                 self.export_filename = ""
                 return
-            if mode not in ("exact", "quantized"):
-                raise ValueError(f"unknown export mode {mode!r}")
-            quantized = mode == "quantized"
+            quantized = self._normalise_html_export_options(
+                mode=mode,
+                encoding=str(payload.get("encoding", "full")),
+                downsample=payload.get("downsample"),
+                quantized=None,
+            )
             if payload.get("download"):
                 filename = str(payload.get("filename") or self._default_html_export_path(quantized).name)
                 request_id = str(payload.get("id") or "")
@@ -866,7 +911,7 @@ class Show2D(anywidget.AnyWidget):
                 self.export_payload = html
                 self.export_payload_id = request_id
                 size_mb = len(html) / (1024 * 1024)
-                label = "quantized" if quantized else "exact float32"
+                label = self._export_mode_label(quantized)
                 self.export_status = f"Ready {filename} ({size_mb:.1f} MB, {label})"
             else:
                 self.export_status = f"Exporting {mode} HTML..."
@@ -884,6 +929,9 @@ class Show2D(anywidget.AnyWidget):
         mode = "quantized" if quantized else "exact"
         shape = f"{self.n_images}x{self.height}x{self.width}" if self.n_images > 1 else f"{self.height}x{self.width}"
         return pathlib.Path.cwd() / f"{slug}_{shape}_{mode}.html"
+
+    def _export_mode_label(self, quantized: bool) -> str:
+        return "uint8" if quantized else "full float32"
 
     def _write_html_export(
         self,
