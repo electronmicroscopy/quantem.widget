@@ -11,7 +11,7 @@ quantem show4dstem ./masters/                  # *_master.h5        -> live Show
 quantem show4dstem a_master.h5 b_master.h5     # several masters    -> one 5D multi-tilt viewer
 quantem show4dstem ./masters/ --html           # 4D-STEM            -> shareable offline HTML
 quantem html tutorial.ipynb                    # a notebook         -> standalone interactive HTML
-quantem github tutorial_github.ipynb --no-execute # a notebook copy -> GitHub-preview JPEG outputs
+quantem github tutorial_github.ipynb --no-execute # a notebook copy -> GitHub preview JPEG outputs
 quantem jupyter nb.ipynb                        # on the GPU box     -> prints a URL for your browser
 ```
 

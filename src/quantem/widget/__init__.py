@@ -18,8 +18,15 @@ _warnings.filterwarnings("ignore", message=r"(?s).*HF_TOKEN.*")
 from quantem.widget.show2d import Show2D
 from quantem.widget.show3d import Show3D
 from quantem.widget.show3dslices import Show3DSlices
+from quantem.widget.showeds import ShowEDS, bin_spectrum_image, load_emd_spectrum_image
 from quantem.widget.show4dstem import Show4DSTEM as _Show4DSTEMBase
 from quantem.widget.io import load
+from quantem.widget.export import (
+    HTML_EXPORT_TRAITS,
+    SupportsFrontendHtmlExport,
+    SupportsHtmlExport,
+    supports_html_export,
+)
 from quantem.widget.dpc import idpc, com
 from quantem.widget.info import device_info
 from quantem.widget.detector import bf, adf, df
@@ -157,31 +164,61 @@ def free_gpu(verbose: bool = True) -> float:
         if verbose:
             print("torch not importable - nothing to free")
         return 0.0
-    mps = bool(getattr(torch.backends, "mps", None) and torch.backends.mps.is_available())
-
-    def _used_gb() -> float:
-        if torch.cuda.is_available():
-            free, total = torch.cuda.mem_get_info()
-            return (total - free) / 1e9
-        if mps and hasattr(torch.mps, "current_allocated_memory"):
-            return torch.mps.current_allocated_memory() / 1e9
-        return 0.0
-
-    before = _used_gb()
     if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+        n = torch.cuda.device_count()
+        used = lambda: sum(total - free for free, total in (torch.cuda.mem_get_info(i) for i in range(n))) / 1e9
+        before = used()
         try:
             import cupy as cp
-            cp.get_default_memory_pool().free_all_blocks()
-            cp.get_default_pinned_memory_pool().free_all_blocks()
         except ImportError:
-            pass
-    elif mps:
+            cp = None
+        for i in range(n):
+            with torch.cuda.device(i):
+                torch.cuda.empty_cache()
+            if cp is not None:
+                cp.cuda.Device(i).use()
+                cp.get_default_memory_pool().free_all_blocks()
+                cp.get_default_pinned_memory_pool().free_all_blocks()
+        if cp is not None:
+            cp.cuda.Device(0).use()   # leave the default device on GPU0 so the next load lands where it expects
+        after = used()
+        if verbose:
+            for i in range(n):
+                free, total = torch.cuda.mem_get_info(i)
+                print(f"GPU{i}: {(total - free) / 1e9:5.1f} GB used  ({free / 1e9:.0f} GB free)")
+        return before - after
+    mps = bool(getattr(torch.backends, "mps", None) and torch.backends.mps.is_available())
+    if mps:
+        cur = torch.mps.current_allocated_memory() if hasattr(torch.mps, "current_allocated_memory") else 0
         torch.mps.empty_cache()
-    after = _used_gb()
+        post = torch.mps.current_allocated_memory() if hasattr(torch.mps, "current_allocated_memory") else 0
+        if verbose:
+            print(f"freed {(cur - post) / 1e9:.1f} GB (MPS)")
+        return (cur - post) / 1e9
     if verbose:
-        print(f"freed {before - after:.1f} GB  ({before:.1f} -> {after:.1f})")
-    return before - after
+        print("no GPU - nothing to free")
+    return 0.0
 
 
-__all__ = ["Show2D", "Show3D", "Show3DSlices", "Show4DSTEM", "load", "idpc", "com", "device_info", "bf", "adf", "df", "profile", "free_gpu"]
+__all__ = [
+    "Show2D",
+    "Show3D",
+    "Show3DSlices",
+    "Show4DSTEM",
+    "ShowEDS",
+    "bin_spectrum_image",
+    "load_emd_spectrum_image",
+    "load",
+    "HTML_EXPORT_TRAITS",
+    "SupportsFrontendHtmlExport",
+    "SupportsHtmlExport",
+    "supports_html_export",
+    "idpc",
+    "com",
+    "device_info",
+    "bf",
+    "adf",
+    "df",
+    "profile",
+    "free_gpu",
+]
