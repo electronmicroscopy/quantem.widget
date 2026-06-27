@@ -1,0 +1,332 @@
+import json
+
+import numpy as np
+import pytest
+
+from quantem.widget import ShowEDS
+from quantem.widget.showeds import bin_spectrum_image, eds_line_hints, prepare_spectrum_image_sidecar
+
+
+def test_showeds_constructor_sets_shape_and_state():
+    cube = np.zeros((5, 6, 7), dtype=np.float32)
+    energy = np.linspace(0, 6, 7, dtype=np.float32)
+
+    widget = ShowEDS(
+        cube,
+        energy,
+        title="EDS",
+        band=(1.0, 2.5),
+        roi=(1, 2, 3, 4),
+        panel_width_px=240,
+        spectrum_width_px=520,
+        spectrum_height_px=180,
+        map_vmin_pct=5,
+        map_vmax_pct=95,
+        show_debug=True,
+        saved_rois=[{"name": "particle", "row": 1, "col": 2, "height": 3, "width": 4}],
+        saved_bands=[{"name": "Au M", "start": 1, "end": 3}],
+        export_presets=[{"label": "Small demo", "mode": "single", "binning": 4}],
+    )
+
+    assert widget.n_rows == 5
+    assert widget.n_cols == 6
+    assert widget.n_energy == 7
+    assert widget.band_start == 1
+    assert widget.band_end == 3
+    assert widget.roi_row == 1
+    assert widget.roi_col == 2
+    assert widget.roi_height == 3
+    assert widget.roi_width == 4
+    assert widget.panel_width_px == 240
+    assert widget.spectrum_width_px == 520
+    assert widget.spectrum_height_px == 180
+    assert widget.map_vmin_pct == 5
+    assert widget.map_vmax_pct == 95
+    assert widget.show_debug is True
+    assert widget.saved_rois == [{"name": "particle", "row": 1, "col": 2, "height": 3, "width": 4}]
+    assert widget.saved_bands == [{"name": "Au M", "start": 1, "end": 3}]
+    assert widget.export_presets == [{"label": "Small demo", "mode": "single", "binning": 4}]
+    assert widget.show_line_hints is True
+    assert any(line["element"] == "Si" for line in widget.line_hints)
+    assert len(widget.cube_bytes) == cube.size * 4
+    assert len(widget.base_image_bytes) == cube.shape[0] * cube.shape[1] * 4
+
+
+def test_showeds_preserves_uint16_counts_for_browser_backend():
+    cube = np.arange(5 * 6 * 7, dtype=np.uint16).reshape(5, 6, 7)
+
+    widget = ShowEDS(cube)
+
+    assert widget.compute_backend == "browser"
+    assert widget.cube_dtype == "uint16"
+    assert len(widget.cube_bytes) == cube.size * 2
+    assert np.frombuffer(widget.cube_bytes, dtype=np.uint16).reshape(cube.shape).tolist() == cube.tolist()
+
+
+def test_showeds_preserves_uint32_counts_for_browser_backend():
+    cube = (np.arange(3 * 4 * 5, dtype=np.uint32).reshape(3, 4, 5) + np.iinfo(np.uint16).max + 1)
+
+    widget = ShowEDS(cube)
+
+    assert widget.compute_backend == "browser"
+    assert widget.cube_dtype == "uint32"
+    assert len(widget.cube_bytes) == cube.size * 4
+    assert np.frombuffer(widget.cube_bytes, dtype=np.uint32).reshape(cube.shape).tolist() == cube.tolist()
+
+
+def test_showeds_state_roundtrip():
+    cube = np.ones((8, 9, 10), dtype=np.float32)
+    widget = ShowEDS(
+        cube,
+        band=(2, 5),
+        roi=(2, 3, 4, 5),
+        log_spectrum=True,
+        element_label="Au",
+        spectrum_width_px=500,
+        spectrum_height_px=260,
+        map_vmin_pct=4,
+        map_vmax_pct=99,
+        show_debug=True,
+        saved_rois=[{"name": "A", "row": 2, "col": 3, "height": 4, "width": 5}],
+        saved_bands=[{"name": "B", "start": 2, "end": 5}],
+        export_presets=[{"label": "Portable", "mode": "single", "binning": 2}],
+    )
+    state = widget.state_dict()
+
+    restored = ShowEDS(cube, state=state)
+
+    assert restored.state_dict() == state
+
+
+def test_showeds_export_html_writes_standalone_state(tmp_path):
+    cube = np.ones((4, 5, 6), dtype=np.float32)
+    widget = ShowEDS(cube, title="EDS Export", band=(1, 4), roi=(1, 1, 2, 3), log_spectrum=True)
+
+    out = widget.export_html(tmp_path / "showeds.html")
+
+    html = out.read_text()
+    assert "EDS Export" in html
+    assert "application/vnd.jupyter.widget-state+json" in html
+    assert "ShowEDS" in html
+
+
+def test_showeds_frontend_export_request_prepares_payload():
+    cube = np.ones((3, 4, 5), dtype=np.uint16)
+    widget = ShowEDS(cube, title="EDS GUI Export")
+
+    widget.export_request = json.dumps(
+        {"mode": "single", "id": "req-1", "filename": "eds_gui.html", "download": True}
+    )
+
+    assert widget.export_payload_id == "req-1"
+    assert widget.export_filename == "eds_gui.html"
+    assert b"EDS GUI Export" in widget.export_payload
+    assert widget.export_status.startswith("Ready eds_gui.html")
+
+    widget.export_request = json.dumps({"mode": "clear", "id": "clear"})
+
+    assert widget.export_payload == b""
+    assert widget.export_payload_id == ""
+    assert widget.export_filename == ""
+
+
+def test_showeds_sidecar_binned_export_request_prepares_portable_payload(tmp_path):
+    cube = np.arange(4 * 6 * 8, dtype=np.uint16).reshape(4, 6, 8)
+    energy = np.linspace(0, 7, 8, dtype=np.float32)
+    sidecar = prepare_spectrum_image_sidecar(cube, energy, tmp_path / "eds")
+    widget = ShowEDS.from_sidecar(
+        "/files/eds/",
+        sidecar_dir=sidecar,
+        title="EDS Binned Export",
+        band=(2, 4),
+        roi=(0, 0, 4, 4),
+    )
+
+    widget.export_request = json.dumps(
+        {"mode": "single", "downsample": 2, "id": "req-binned", "filename": "eds_binned.html", "download": True}
+    )
+
+    assert widget.export_sidecar_bytes > 0
+    assert widget.export_payload_id == "req-binned"
+    assert widget.export_filename == "eds_binned.html"
+    assert b"EDS Binned Export sum-binned 2x/2x" in widget.export_payload
+    assert widget.export_status.startswith("Ready eds_binned.html")
+    assert "single sum-binned 2x" in widget.export_status
+
+
+def test_showeds_binned_export_scales_saved_rois_and_bands(tmp_path):
+    cube = np.arange(4 * 6 * 8, dtype=np.uint16).reshape(4, 6, 8)
+    energy = np.linspace(0, 7, 8, dtype=np.float32)
+    sidecar = prepare_spectrum_image_sidecar(cube, energy, tmp_path / "eds")
+    widget = ShowEDS.from_sidecar(
+        "/files/eds/",
+        sidecar_dir=sidecar,
+        title="EDS Binned Presets",
+        band=(2, 4),
+        roi=(0, 0, 4, 4),
+        saved_rois=[{"name": "corner", "row": 2, "col": 2, "height": 2, "width": 4}],
+        saved_bands=[{"name": "peak", "start": 2, "end": 6}],
+    )
+
+    binned, _label = widget._export_widget_for_mode("single", binning=2)
+
+    assert binned.saved_rois == [{"name": "corner", "row": 1, "col": 1, "height": 1, "width": 2}]
+    assert binned.saved_bands == [{"name": "peak", "start": 1, "end": 3}]
+
+
+def test_showeds_export_html_keeps_legacy_mode_aliases(tmp_path):
+    cube = np.ones((4, 5, 6), dtype=np.float32)
+    widget = ShowEDS(cube, title="EDS Legacy Export")
+
+    out = widget.export_html(tmp_path / "legacy.html", mode="embedded")
+
+    assert out.exists()
+    assert widget.export_status.startswith("Exported legacy.html")
+
+    binned = widget.export_html(tmp_path / "legacy_binned.html", mode="binned-2")
+
+    assert binned.exists()
+    assert "single sum-binned 2x" in widget.export_status
+
+    downsampled = widget.export_html(tmp_path / "downsampled.html", downsample=2)
+
+    assert downsampled.exists()
+    assert "single sum-binned 2x" in widget.export_status
+
+
+def test_showeds_accepts_custom_line_hints_and_candidate_filter():
+    cube = np.ones((4, 4, 16), dtype=np.float32)
+    energy = np.linspace(0, 4, 16, dtype=np.float32)
+    widget = ShowEDS(
+        cube,
+        energy,
+        line_hints=[{"element": "Xx", "line": "Ka1", "energy_keV": 1.23, "intensity": 1.0}],
+        show_line_hints=False,
+    )
+
+    assert widget.show_line_hints is False
+    assert widget.line_hints == [{"element": "Xx", "line": "Ka1", "energy_keV": 1.23, "intensity": 1.0}]
+
+    filtered = ShowEDS(cube, energy, candidate_elements=["Au"])
+    assert filtered.line_hints
+    assert {line["element"] for line in filtered.line_hints} == {"Au"}
+
+
+def test_eds_line_hints_include_common_synthetic_peaks():
+    lines = eds_line_hints(0.0, 4.0, elements=["O", "Si", "Ca", "Au"])
+    labels = {(line["element"], line["line"]) for line in lines}
+
+    assert ("O", "Ka1") in labels
+    assert ("Si", "Ka1") in labels
+    assert ("Ca", "Ka1") in labels
+    assert ("Au", "Ma") in labels
+
+
+def test_bin_spectrum_image_preserves_counts_and_bins_axes():
+    cube = np.arange(4 * 6 * 8, dtype=np.float32).reshape(4, 6, 8)
+    energy = np.linspace(0, 7, 8, dtype=np.float32)
+    base = np.ones((4, 6), dtype=np.float32)
+
+    binned, binned_energy, binned_base = bin_spectrum_image(
+        cube,
+        energy,
+        base_image=base,
+        spatial_bin=2,
+        energy_bin=4,
+    )
+
+    assert binned.shape == (2, 3, 2)
+    assert np.isclose(binned.sum(), cube.sum())
+    assert binned_energy.tolist() == [1.5, 5.5]
+    assert binned_base.shape == (2, 3)
+    assert np.isclose(binned_base.sum(), base.sum())
+
+
+def test_showeds_rejects_non_cube():
+    with pytest.raises(ValueError, match="3D cube"):
+        ShowEDS(np.zeros((4, 5), dtype=np.float32))
+
+
+def test_showeds_rejects_oversized_dense_widget_state():
+    cube = np.zeros((4, 5, 6), dtype=np.uint16)
+
+    with pytest.raises(ValueError, match="full spectrum-image cube.*widget state"):
+        ShowEDS(cube, max_state_bytes=32)
+
+
+def test_showeds_kernel_backend_uses_initial_buffers_without_cube_bytes():
+    initial_map = np.ones((4, 5), dtype=np.float32)
+    initial_spectrum = np.arange(6, dtype=np.float32)
+
+    widget = ShowEDS(None, initial_map=initial_map, initial_spectrum=initial_spectrum)
+
+    assert widget.compute_backend == "kernel"
+    assert widget.n_rows == 4
+    assert widget.n_cols == 5
+    assert widget.n_energy == 6
+    assert widget.cube_bytes == b""
+    assert len(widget.initial_map_bytes) == initial_map.size * 4
+    assert len(widget.initial_spectrum_bytes) == initial_spectrum.size * 4
+
+
+def test_prepare_spectrum_image_sidecar_writes_exact_prefix_and_integrals(tmp_path):
+    cube = np.arange(3 * 4 * 5, dtype=np.uint16).reshape(3, 4, 5)
+    energy = np.linspace(0, 1, 5, dtype=np.float32)
+
+    out = prepare_spectrum_image_sidecar(cube, energy, tmp_path / "eds", energy_chunk=2)
+
+    meta = __import__("json").loads((out / "meta.json").read_text())
+    assert meta["rows"] == 3
+    assert meta["cols"] == 4
+    assert meta["n_energy"] == 5
+
+    prefix = np.memmap(out / "energy_prefix_u32.bin", dtype="<u4", mode="r", shape=(6, 3, 4))
+    assert np.array_equal(prefix[0], np.zeros((3, 4), dtype=np.uint32))
+    assert np.array_equal(prefix[3] - prefix[1], cube[:, :, 1:3].sum(axis=2, dtype=np.uint32))
+
+    sat = np.memmap(out / meta["spatial_prefix"], dtype="<u4", mode="r", shape=(4, 5, 5))
+    plane = cube[:, :, 1].astype(np.uint32)
+    assert int(sat[3, 4, 1]) == int(plane.sum())
+    assert int(sat[3, 4, 1] - sat[1, 4, 1] - sat[3, 2, 1] + sat[1, 2, 1]) == int(plane[1:3, 2:4].sum())
+
+
+def test_showeds_sidecar_backend_uses_initial_buffers_without_cube_bytes():
+    initial_map = np.ones((4, 5), dtype=np.float32)
+    initial_spectrum = np.arange(6, dtype=np.float32)
+
+    widget = ShowEDS.from_sidecar(
+        "files/eds_sidecar",
+        initial_map=initial_map,
+        initial_spectrum=initial_spectrum,
+        energy_keV=np.arange(6, dtype=np.float32),
+    )
+
+    assert widget.compute_backend == "sidecar"
+    assert widget.sidecar_url == "files/eds_sidecar/"
+    assert widget.cube_bytes == b""
+
+
+def test_showeds_from_sidecar_can_load_startup_state_from_sidecar_dir(tmp_path):
+    cube = np.arange(3 * 4 * 8, dtype=np.uint16).reshape(3, 4, 8)
+    energy = np.linspace(0, 7, 8, dtype=np.float32)
+    sidecar = prepare_spectrum_image_sidecar(cube, energy, tmp_path / "eds")
+
+    widget = ShowEDS.from_sidecar(
+        "/files/eds/",
+        sidecar_dir=sidecar,
+        energy=2.5,
+        width=2.0,
+        roi=(1, 1, 2, 2),
+    )
+
+    assert widget.compute_backend == "sidecar"
+    assert widget.band_start == 2
+    assert widget.band_end == 4
+    assert widget.roi_row == 1
+    assert widget.roi_col == 1
+    assert widget.roi_height == 2
+    assert widget.roi_width == 2
+    expected_map = cube[:, :, 2:4].sum(axis=2).astype(np.float32)
+    expected_spectrum = cube[1:3, 1:3, :].sum(axis=(0, 1)).astype(np.float32)
+    assert np.frombuffer(widget.initial_map_bytes, dtype=np.float32).reshape(3, 4).tolist() == expected_map.tolist()
+    assert np.frombuffer(widget.initial_spectrum_bytes, dtype=np.float32).tolist() == expected_spectrum.tolist()

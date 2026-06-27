@@ -56,7 +56,7 @@ that file anytime to change it. This is the same bring-your-own-tunnel model as
   keeps Show2D / Show3D / Show3DSlices controls interactive in the browser with no
   kernel. Interactions in the HTML page are browser-local: changing contrast, zoom,
   frame, or toggles does not write back to the `.ipynb` or the `.html` file.
-- **`quantem github notebook_github.ipynb --no-execute`** = a GitHub-preview notebook.
+- **`quantem github notebook_github.ipynb --no-execute`** = a GitHub preview notebook.
   It strips the heavy widget state and widget MIME refs, then inserts JPEG snapshots of
   the widget UIs. Use this for GitHub's native `.ipynb` renderer, which does not run
   widget JavaScript.

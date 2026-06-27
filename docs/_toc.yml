@@ -1,4 +1,4 @@
-# Table of contents. Only the four widgets migrated onto this branch are
+# Table of contents. Only the five widgets migrated onto this branch are
 # documented. Two sections: hands-on Tutorials, and an exhaustive API Reference
 # that doubles as a UI-test spec for automated agents.
 format: jb-book
@@ -15,6 +15,7 @@ parts:
       - file: tutorials/show3d
       - file: tutorials/show3dslices
       - file: tutorials/show4dstem
+      - file: tutorials/showeds
       - file: tutorials/saving
   - caption: API reference
     chapters:
@@ -23,5 +24,7 @@ parts:
       - file: api/show3d
       - file: api/show3dslices
       - file: api/show4dstem
+      - file: api/showeds
+      - file: api/html-export
       - file: api/load
       - file: api/io

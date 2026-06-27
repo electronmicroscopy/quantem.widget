@@ -96,7 +96,7 @@ def _render_html(args: argparse.Namespace) -> int:
 
     Wraps ``jupyter nbconvert --to html [--execute]``: a finished notebook becomes a
     kernel-less HTML page whose saved widget state is hydrated by the ipywidgets HTML
-    manager. Show2D / Show3D / Show3DSlices controls remain interactive in the browser,
+    manager. Show2D / Show3D / Show3DSlices / ShowEDS controls remain interactive in the browser,
     but changes are browser-local and do not write back to the notebook or HTML file.
     The live ``.ipynb`` stays the editable surface; this is the share artifact.
     ``--no-execute`` exports the saved outputs as-is, which is what a notebook's own
@@ -131,7 +131,7 @@ def _render_html(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
-_WIDGET_CELL = ("Show2D(", "Show3D(", "Show4DSTEM(", "Show3DSlices(")
+_WIDGET_CELL = ("Show2D(", "Show3D(", "Show4DSTEM(", "Show3DSlices(", "ShowEDS(")
 
 
 def _add_github_args(parser: argparse.ArgumentParser) -> None:
