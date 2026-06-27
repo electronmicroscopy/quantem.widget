@@ -56,12 +56,42 @@ export function formatNumber(val: number, decimals: number = 2): string {
 type AnyWidgetModelWithManager = {
   model_id?: string;
   id?: string;
+  save_changes?: (...args: unknown[]) => unknown;
+  __quantemMarkDirtyPatch?: boolean;
   widget_manager?: {
     get_state_sync?: (options?: Record<string, unknown>) => unknown;
     _modelsSync?: Map<string, { _comm_live?: boolean; comm_live?: boolean }>;
     __quantemSaveRestoredModelsPatch?: boolean;
+    setDirty?: () => void;
+    context?: NotebookContextLike;
+    _context?: NotebookContextLike;
   };
 };
+
+type NotebookContextLike = {
+  model?: {
+    dirty?: boolean;
+  };
+};
+
+function markNotebookDirty(manager: AnyWidgetModelWithManager["widget_manager"]): void {
+  if (typeof manager?.setDirty === "function") {
+    manager.setDirty();
+    return;
+  }
+  for (const context of [manager?.context, manager?._context]) {
+    const model = context?.model;
+    if (model) {
+      model.dirty = true;
+      return;
+    }
+  }
+}
+
+export function markWidgetNotebookDirty(model: unknown): void {
+  const widgetModel = model as AnyWidgetModelWithManager | null;
+  markNotebookDirty(widgetModel?.widget_manager);
+}
 
 /**
  * JupyterLab's widget manager can restore notebook-embedded widget models without
@@ -77,6 +107,15 @@ export function preserveRestoredWidgetModelsOnSave(model: unknown): void {
   const modelId = widgetModel?.model_id ?? widgetModel?.id;
   if (modelId && manager._modelsSync) {
     manager._modelsSync.set(modelId, widgetModel as { _comm_live?: boolean; comm_live?: boolean });
+  }
+  if (!widgetModel.__quantemMarkDirtyPatch && typeof widgetModel.save_changes === "function") {
+    const originalSaveChanges = widgetModel.save_changes.bind(widgetModel);
+    widgetModel.save_changes = (...args: unknown[]) => {
+      const result = originalSaveChanges(...args);
+      markNotebookDirty(manager);
+      return result;
+    };
+    widgetModel.__quantemMarkDirtyPatch = true;
   }
   if (manager.__quantemSaveRestoredModelsPatch) return;
 
