@@ -13,7 +13,7 @@ import { drawScaleBarHiDPI } from "../figure";
 import { downloadBlob, extractBytes, extractFloat32, formatNumber, markWidgetNotebookDirty, preserveRestoredWidgetModelsOnSave } from "../format";
 import { computeHistogramFromBytes, percentileClip, sliderRange } from "../stats";
 
-type RoiShape = "rect" | "circle";
+type RoiShape = "rect" | "circle" | "ellipse";
 type Roi = { row: number; col: number; height: number; width: number; shape?: RoiShape };
 type DragMode = "roi-move" | "roi-resize" | "map-pan" | "band-move" | "band-left" | "band-right" | null;
 type EdsLineHint = { element: string; line: string; family?: string; energy_keV: number; intensity?: number };
@@ -81,7 +81,7 @@ const MIN_SPECTRUM_SPAN = 8;
 const UI_FONT = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
 const HISTOGRAM_LIGHT_COLORS = { bg: "#f0f0f0", barActive: "#666", barInactive: "#bbb", border: "#ccc" };
 const HTML_EXPORT_OVERHEAD_BYTES = 700_000;
-const ROI_SHAPE_LABELS: Record<RoiShape, string> = { rect: "Rect", circle: "Circle" };
+const ROI_SHAPE_LABELS: Record<RoiShape, string> = { rect: "Rect", circle: "Circle", ellipse: "Ellipse" };
 const MAP_WGSL = `
 @group(0) @binding(0) var<storage,read> cube: array<u32>;
 @group(0) @binding(1) var<storage,read_write> out: array<f32>;
@@ -116,7 +116,7 @@ const SPEC_WGSL = `
 @group(0) @binding(0) var<storage,read> cube: array<u32>;
 @group(0) @binding(1) var<storage,read_write> out: array<f32>;
 @group(0) @binding(2) var<uniform> p: vec4<u32>; // rows, cols, n_energy, r0
-@group(0) @binding(3) var<uniform> q: vec4<u32>; // c0, r1, c1, mode | shape<<4; shape 0=rect, 1=circle
+@group(0) @binding(3) var<uniform> q: vec4<u32>; // c0, r1, c1, mode | shape<<4; shape 0=rect, 1=round/ellipse
 
 fn sample(idx: u32, mode: u32) -> f32 {
   if (mode == 1u) {
@@ -139,14 +139,15 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let shape = packed >> 4u;
   let cy = (f32(p.w) + f32(q.y)) * 0.5;
   let cx = (f32(q.x) + f32(q.z)) * 0.5;
-  let radius = max(f32(q.y - p.w), f32(q.z - q.x)) * 0.5;
+  let ry = max(0.5, f32(q.y - p.w) * 0.5);
+  let rx = max(0.5, f32(q.z - q.x) * 0.5);
   var sum = 0.0;
   for (var r = p.w; r < q.y; r = r + 1u) {
     for (var c = q.x; c < q.z; c = c + 1u) {
       if (shape == 1u) {
         let dy = f32(r) + 0.5 - cy;
         let dx = f32(c) + 0.5 - cx;
-        if (dx * dx + dy * dy > radius * radius) { continue; }
+        if ((dx * dx) / (rx * rx) + (dy * dy) / (ry * ry) > 1.0) { continue; }
       }
       sum = sum + sample((r * p.y + c) * p.z + e, mode);
     }
@@ -357,7 +358,10 @@ function clampNumber(value: number, lo: number, hi: number): number {
 }
 
 function normalizeRoiShape(value: unknown): RoiShape {
-  return value === "circle" ? "circle" : "rect";
+  const shape = String(value || "").trim().toLowerCase();
+  if (shape === "circle") return "circle";
+  if (shape === "ellipse" || shape === "oval") return "ellipse";
+  return "rect";
 }
 
 function normalizeRoi(input: Roi, rows: number, cols: number): Roi {
@@ -548,16 +552,27 @@ async function fetchSpatialPrefixSpectrum(row, col, signal) {
 }
 
 function normaliseRoiShape(shape) {
-  return shape === "circle" ? "circle" : "rect";
+  if (shape === "circle") return "circle";
+  if (shape === "ellipse" || shape === "oval") return "ellipse";
+  return "rect";
 }
 
-function circleSegmentForRow(row, r0, c0, r1, c1) {
+function roundSegmentForRow(row, r0, c0, r1, c1, shape) {
   const cx = (c0 + c1) * 0.5;
   const cy = (r0 + r1) * 0.5;
-  const radius = Math.max(r1 - r0, c1 - c0) * 0.5;
   const dy = row + 0.5 - cy;
-  if (Math.abs(dy) > radius) return null;
-  const half = Math.sqrt(Math.max(0, radius * radius - dy * dy));
+  let half = 0;
+  if (shape === "circle") {
+    const radius = Math.max(r1 - r0, c1 - c0) * 0.5;
+    if (Math.abs(dy) > radius) return null;
+    half = Math.sqrt(Math.max(0, radius * radius - dy * dy));
+  } else {
+    const ry = Math.max(0.5, (r1 - r0) * 0.5);
+    const rx = Math.max(0.5, (c1 - c0) * 0.5);
+    const normY = dy / ry;
+    if (Math.abs(normY) > 1) return null;
+    half = rx * Math.sqrt(Math.max(0, 1 - normY * normY));
+  }
   const start = Math.max(c0, Math.ceil(cx - half - 0.5));
   const end = Math.min(c1, Math.floor(cx + half - 0.5) + 1);
   return end > start ? [start, end] : null;
@@ -633,21 +648,32 @@ self.onmessage = async (event) => {
         const r1 = Math.max(r0 + 1, Math.min(meta.rows, r0 + Math.round(msg.height)));
         const c1 = Math.max(c0 + 1, Math.min(meta.cols, c0 + Math.round(msg.width)));
         const shape = normaliseRoiShape(msg.shape);
-        if (shape === "circle") {
+        if (shape !== "rect") {
           const out = new Uint32Array(meta.n_energy);
+          const segments = [];
           for (let r = r0; r < r1; r++) {
             if (controller.signal.aborted) throw abortError();
-            const segment = circleSegmentForRow(r, r0, c0, r1, c1);
+            const segment = roundSegmentForRow(r, r0, c0, r1, c1, shape);
             if (!segment) continue;
             const [s0, s1] = segment;
-            const [br, tr, bl, tl] = await Promise.all([
-              fetchSpatialPrefixSpectrum(r + 1, s1, controller.signal),
-              fetchSpatialPrefixSpectrum(r, s1, controller.signal),
-              fetchSpatialPrefixSpectrum(r + 1, s0, controller.signal),
-              fetchSpatialPrefixSpectrum(r, s0, controller.signal),
-            ]);
+            segments.push({ r, s0, s1 });
+          }
+          const batchSize = 32;
+          for (let i = 0; i < segments.length; i += batchSize) {
             if (controller.signal.aborted) throw abortError();
-            for (let e = 0; e < meta.n_energy; e++) out[e] += br[e] - tr[e] - bl[e] + tl[e];
+            const rows = await Promise.all(segments.slice(i, i + batchSize).map(async ({ r, s0, s1 }) => {
+              const [br, tr, bl, tl] = await Promise.all([
+                fetchSpatialPrefixSpectrum(r + 1, s1, controller.signal),
+                fetchSpatialPrefixSpectrum(r, s1, controller.signal),
+                fetchSpatialPrefixSpectrum(r + 1, s0, controller.signal),
+                fetchSpatialPrefixSpectrum(r, s0, controller.signal),
+              ]);
+              return [br, tr, bl, tl];
+            }));
+            if (controller.signal.aborted) throw abortError();
+            for (const [br, tr, bl, tl] of rows) {
+              for (let e = 0; e < meta.n_energy; e++) out[e] += br[e] - tr[e] - bl[e] + tl[e];
+            }
           }
           if (controller.signal.aborted) throw abortError();
           self.postMessage({ id: msg.id, type: "spectrum", buffer: out.buffer, ms: performance.now() - t0 }, [out.buffer]);
@@ -799,6 +825,7 @@ function ShowEDS() {
   const [bandSliderDrag, setBandSliderDrag] = React.useState<BandSliderDrag>(null);
   const [exportMenuAnchor, setExportMenuAnchor] = React.useState<HTMLElement | null>(null);
   const [roiMenuAnchor, setRoiMenuAnchor] = React.useState<HTMLElement | null>(null);
+  const [roiShapeMenuAnchor, setRoiShapeMenuAnchor] = React.useState<HTMLElement | null>(null);
   const [bandMenuAnchor, setBandMenuAnchor] = React.useState<HTMLElement | null>(null);
   const [exportBusy, setExportBusy] = React.useState(false);
   const [localExportStatus, setLocalExportStatus] = React.useState("");
@@ -1515,7 +1542,7 @@ function ShowEDS() {
     const r1 = Math.max(r0 + 1, Math.min(rows, r0 + Math.round(nextRoi.height)));
     const c1 = Math.max(c0 + 1, Math.min(cols, c0 + Math.round(nextRoi.width)));
     const mode = cubeDtype === "uint16" ? 1 : cubeDtype === "uint32" ? 2 : 0;
-    const shape = normalizeRoiShape(nextRoi.shape) === "circle" ? 1 : 0;
+    const shape = normalizeRoiShape(nextRoi.shape) === "rect" ? 0 : 1;
     gpu.device.queue.writeBuffer(gpu.specParamsA, 0, new Uint32Array([rows, cols, nEnergy, r0]));
     gpu.device.queue.writeBuffer(gpu.specParamsB, 0, new Uint32Array([c0, r1, c1, mode | (shape << 4)]));
     const enc = gpu.device.createCommandEncoder();
@@ -1891,6 +1918,11 @@ function ShowEDS() {
     setRoiMenuAnchor(null);
   };
 
+  const applyRoiShape = (shape: RoiShape) => {
+    updateRoi({ ...roi, shape }, true);
+    setRoiShapeMenuAnchor(null);
+  };
+
   const applySavedBand = (saved: SavedBand) => {
     updateBand(saved.start, saved.end, true);
     setBandMenuAnchor(null);
@@ -1939,9 +1971,13 @@ function ShowEDS() {
     const img = mapScreenToImage(p.x, p.y);
     const hitCol = (14 / Math.max(1, size)) * mapView.cols;
     const hitRow = (14 / Math.max(1, size)) * mapView.rows;
-    const nearCorner = Math.abs(img.col - (roi.col + roi.width)) < hitCol && Math.abs(img.row - (roi.row + roi.height)) < hitRow;
+    const roiShapeNow = normalizeRoiShape(roi.shape);
+    const roiIsRound = roiShapeNow !== "rect";
+    const handleCol = roiIsRound ? roi.col + roi.width / 2 + roi.width / (2 * Math.SQRT2) : roi.col + roi.width;
+    const handleRow = roiIsRound ? roi.row + roi.height / 2 + roi.height / (2 * Math.SQRT2) : roi.row + roi.height;
+    const nearCorner = Math.abs(img.col - handleCol) < hitCol && Math.abs(img.row - handleRow) < hitRow;
     const insideBox = img.col >= roi.col && img.col <= roi.col + roi.width && img.row >= roi.row && img.row <= roi.row + roi.height;
-    const inside = normalizeRoiShape(roi.shape) === "circle"
+    const inside = roiIsRound
       ? insideBox && (((img.col - (roi.col + roi.width / 2)) / Math.max(1e-9, roi.width / 2)) ** 2
         + ((img.row - (roi.row + roi.height / 2)) / Math.max(1e-9, roi.height / 2)) ** 2 <= 1)
       : insideBox;
@@ -2058,6 +2094,8 @@ function ShowEDS() {
         else if (normalizeRoiShape(drag.roi.shape) === "circle") {
           const delta = Math.max(dx, dy);
           updateRoi({ ...drag.roi, width: drag.roi.width + delta, height: drag.roi.height + delta }, true, true);
+        } else if (normalizeRoiShape(drag.roi.shape) === "ellipse") {
+          updateRoi({ ...drag.roi, width: drag.roi.width + dx, height: drag.roi.height + dy }, true, true);
         } else {
           updateRoi({ ...drag.roi, width: drag.roi.width + dx, height: drag.roi.height + dy }, true, true);
         }
@@ -2346,15 +2384,20 @@ function ShowEDS() {
                   width: `${roiOverlayStyle.width}px`,
                   height: `${roiOverlayStyle.height}px`,
                   border: "2px dashed #00ff7f",
-                  borderRadius: normalizeRoiShape(roi.shape) === "circle" ? "50%" : 0,
+                  borderRadius: normalizeRoiShape(roi.shape) === "rect" ? 0 : "50%",
                   zIndex: 3,
                 }}
               >
                 <Box
                   sx={{
                     position: "absolute",
-                    right: -9,
-                    bottom: -9,
+                    ...(normalizeRoiShape(roi.shape) !== "rect"
+                      ? {
+                        left: `${50 + 50 / Math.SQRT2}%`,
+                        top: `${50 + 50 / Math.SQRT2}%`,
+                        transform: "translate(-50%, -50%)",
+                      }
+                      : { right: -9, bottom: -9 }),
                     width: 18,
                     height: 18,
                     bgcolor: "#00ff7f",
@@ -2384,7 +2427,9 @@ function ShowEDS() {
             <Typography sx={{ mt: 0.5, fontSize: 11 }}>
               Overlay ROI: {normalizeRoiShape(roi.shape) === "circle"
                 ? `circle row ${roi.row}, col ${roi.col}, d ${roi.width}`
-                : `row ${roi.row}, col ${roi.col}, ${roi.height}x${roi.width}`}
+                : normalizeRoiShape(roi.shape) === "ellipse"
+                  ? `ellipse row ${roi.row}, col ${roi.col}, ${roi.height}x${roi.width}`
+                  : `row ${roi.row}, col ${roi.col}, ${roi.height}x${roi.width}`}
             </Typography>
           </Box>
           <Box>
@@ -2535,47 +2580,6 @@ function ShowEDS() {
                   size="small"
                   sx={{ flexShrink: 0, my: 0 }}
                 />
-                <Button
-                  size="small"
-                  sx={compactButtonSx}
-                  variant="outlined"
-                  onClick={() => updateRoi({ ...roi, shape: normalizeRoiShape(roi.shape) === "circle" ? "rect" : "circle" }, true)}
-                  aria-label="Toggle ROI shape"
-                  title="Toggle rectangular or circular ROI"
-                >
-                  ROI {ROI_SHAPE_LABELS[normalizeRoiShape(roi.shape)]}
-                </Button>
-                <Button size="small" sx={compactButtonSx} variant="outlined" onClick={saveCurrentRoi}>Save ROI</Button>
-                <Button
-                  size="small"
-                  sx={compactButtonSx}
-                  variant="outlined"
-                  disabled={safeSavedRois.length === 0}
-                  onClick={(e) => setRoiMenuAnchor(e.currentTarget)}
-                  aria-label="Saved ROI presets"
-                  aria-controls={roiMenuAnchor ? "showeds-roi-menu" : undefined}
-                  aria-expanded={roiMenuAnchor ? "true" : undefined}
-                  aria-haspopup="menu"
-                >
-                  ROIs {safeSavedRois.length}
-                </Button>
-                <Menu
-                  id="showeds-roi-menu"
-                  anchorEl={roiMenuAnchor}
-                  open={Boolean(roiMenuAnchor)}
-                  onClose={() => setRoiMenuAnchor(null)}
-                  MenuListProps={{ "aria-label": "ShowEDS saved ROI presets" }}
-                  anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
-                  transformOrigin={{ vertical: "top", horizontal: "right" }}
-                  sx={{ zIndex: 9999 }}
-                >
-                  {safeSavedRois.map((saved, index) => (
-                    <MenuItem key={`${saved.name}-${index}`} onClick={() => applySavedRoi(saved)} sx={{ fontSize: 12 }}>
-                      {saved.name}: {ROI_SHAPE_LABELS[normalizeRoiShape(saved.shape)]} row {saved.row}, col {saved.col}, {saved.height}x{saved.width}
-                    </MenuItem>
-                  ))}
-                  <MenuItem onClick={clearSavedRois} sx={{ fontSize: 12, color: "text.secondary" }}>Clear saved ROIs</MenuItem>
-                </Menu>
                 <Button size="small" sx={compactButtonSx} variant="outlined" onClick={saveCurrentBand}>Save Band</Button>
                 <Button
                   size="small"
@@ -2606,6 +2610,67 @@ function ShowEDS() {
                     </MenuItem>
                   ))}
                   <MenuItem onClick={clearSavedBands} sx={{ fontSize: 12, color: "text.secondary" }}>Clear saved bands</MenuItem>
+                </Menu>
+              </Box>
+              <Box sx={controlRowSx}>
+                <Typography sx={controlLabelSx}>ROI:</Typography>
+                <Button
+                  size="small"
+                  sx={compactButtonSx}
+                  variant="outlined"
+                  onClick={(e) => setRoiShapeMenuAnchor(e.currentTarget)}
+                  aria-label="ROI shape"
+                  aria-controls={roiShapeMenuAnchor ? "showeds-roi-shape-menu" : undefined}
+                  aria-expanded={roiShapeMenuAnchor ? "true" : undefined}
+                  aria-haspopup="menu"
+                  title="Choose ROI shape"
+                >
+                  {ROI_SHAPE_LABELS[normalizeRoiShape(roi.shape)]}
+                </Button>
+                <Menu
+                  id="showeds-roi-shape-menu"
+                  anchorEl={roiShapeMenuAnchor}
+                  open={Boolean(roiShapeMenuAnchor)}
+                  onClose={() => setRoiShapeMenuAnchor(null)}
+                  MenuListProps={{ "aria-label": "ShowEDS ROI shape options" }}
+                  anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
+                  transformOrigin={{ vertical: "top", horizontal: "right" }}
+                  sx={{ zIndex: 9999 }}
+                >
+                  <MenuItem onClick={() => applyRoiShape("rect")} sx={{ fontSize: 12 }}>Rect</MenuItem>
+                  <MenuItem onClick={() => applyRoiShape("circle")} sx={{ fontSize: 12 }}>Circle</MenuItem>
+                  <MenuItem onClick={() => applyRoiShape("ellipse")} sx={{ fontSize: 12 }}>Ellipse</MenuItem>
+                </Menu>
+                <Button size="small" sx={compactButtonSx} variant="outlined" onClick={saveCurrentRoi}>Save ROI</Button>
+                <Button
+                  size="small"
+                  sx={compactButtonSx}
+                  variant="outlined"
+                  disabled={safeSavedRois.length === 0}
+                  onClick={(e) => setRoiMenuAnchor(e.currentTarget)}
+                  aria-label="Saved ROI presets"
+                  aria-controls={roiMenuAnchor ? "showeds-roi-menu" : undefined}
+                  aria-expanded={roiMenuAnchor ? "true" : undefined}
+                  aria-haspopup="menu"
+                >
+                  ROIs {safeSavedRois.length}
+                </Button>
+                <Menu
+                  id="showeds-roi-menu"
+                  anchorEl={roiMenuAnchor}
+                  open={Boolean(roiMenuAnchor)}
+                  onClose={() => setRoiMenuAnchor(null)}
+                  MenuListProps={{ "aria-label": "ShowEDS saved ROI presets" }}
+                  anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
+                  transformOrigin={{ vertical: "top", horizontal: "right" }}
+                  sx={{ zIndex: 9999 }}
+                >
+                  {safeSavedRois.map((saved, index) => (
+                    <MenuItem key={`${saved.name}-${index}`} onClick={() => applySavedRoi(saved)} sx={{ fontSize: 12 }}>
+                      {saved.name}: {ROI_SHAPE_LABELS[normalizeRoiShape(saved.shape)]} row {saved.row}, col {saved.col}, {saved.height}x{saved.width}
+                    </MenuItem>
+                  ))}
+                  <MenuItem onClick={clearSavedRois} sx={{ fontSize: 12, color: "text.secondary" }}>Clear saved ROIs</MenuItem>
                 </Menu>
               </Box>
             </Box>

@@ -114,6 +114,24 @@ def test_showeds_state_roundtrip():
     assert restored.state_dict() == state
 
 
+def test_showeds_accepts_ellipse_roi_shape():
+    cube = np.ones((8, 9, 10), dtype=np.uint16)
+
+    widget = ShowEDS(
+        cube,
+        roi=(2, 3, 4, 5),
+        roi_shape="oval",
+        saved_rois=[{"name": "ellipse", "row": 2, "col": 3, "height": 4, "width": 5, "shape": "oval"}],
+    )
+
+    assert widget.roi_shape == "ellipse"
+    assert widget.roi_row == 2
+    assert widget.roi_col == 3
+    assert widget.roi_height == 4
+    assert widget.roi_width == 5
+    assert widget.saved_rois == [{"name": "ellipse", "row": 2, "col": 3, "height": 4, "width": 5, "shape": "ellipse"}]
+
+
 def test_showeds_export_html_writes_standalone_state(tmp_path):
     cube = np.ones((4, 5, 6), dtype=np.float32)
     widget = ShowEDS(cube, title="EDS Export", band=(1, 4), roi=(1, 1, 2, 3), log_spectrum=True)
@@ -373,4 +391,20 @@ def test_showeds_sidecar_circle_roi_uses_exact_pixel_mask(tmp_path):
     mask = ((yy + 0.5 - 1.5) ** 2 + (xx + 0.5 - 1.5) ** 2) <= 1.5**2
     expected = (cube[1:4, 1:4, :] * mask[:, :, None]).sum(axis=(0, 1)).astype(np.float32)
     assert loaded["roi"] == (1, 1, 3, 3)
+    assert loaded["initial_spectrum"].tolist() == expected.tolist()
+
+
+def test_showeds_sidecar_ellipse_roi_uses_exact_pixel_mask(tmp_path):
+    cube = np.arange(5 * 6 * 4, dtype=np.uint16).reshape(5, 6, 4)
+    energy = np.arange(4, dtype=np.float32)
+    sidecar = prepare_spectrum_image_sidecar(cube, energy, tmp_path / "eds")
+
+    loaded = load_spectrum_image_sidecar(sidecar, roi=(1, 1, 3, 4), roi_shape="ellipse")
+
+    yy, xx = np.ogrid[:3, :4]
+    cy = 1.5
+    cx = 2.0
+    mask = (((yy + 0.5 - cy) / 1.5) ** 2 + ((xx + 0.5 - cx) / 2.0) ** 2) <= 1.0
+    expected = (cube[1:4, 1:5, :] * mask[:, :, None]).sum(axis=(0, 1)).astype(np.float32)
+    assert loaded["roi"] == (1, 1, 3, 4)
     assert loaded["initial_spectrum"].tolist() == expected.tolist()
