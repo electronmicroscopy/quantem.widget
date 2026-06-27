@@ -855,6 +855,9 @@ class Show4DSTEM(anywidget.AnyWidget):
         path: str | pathlib.Path | None = None,
         *,
         title: str | None = None,
+        mode: str = "single",
+        encoding: str | None = None,
+        downsample: int | None = None,
         dtype: str = "uint8",
         det_bin: int = 1,
     ) -> pathlib.Path:
@@ -863,11 +866,21 @@ class Show4DSTEM(anywidget.AnyWidget):
         The export packages the currently loaded dataset representation into
         offline browser-compute mode. ``det_bin`` bins detector pixels by summing
         over ``det_bin x det_bin`` blocks, and ``dtype`` may be ``"uint8"`` or
-        ``"uint16"``. This does not reload the original file; it operates on the
-        tensor already held by the widget.
+        ``"uint16"``. Preferred export options are ``mode="single"``,
+        ``encoding="uint8"`` or ``encoding="full"``, and ``downsample=1``, 2,
+        4, or 8. ``dtype`` and ``det_bin`` are kept as compatibility aliases.
+        This does not reload the original file; it operates on the tensor
+        already held by the widget.
         """
         if self._data is None:
             raise ValueError("Cannot export HTML after free(); rebuild the widget first.")
+        dtype, det_bin = self._normalise_html_export_options(
+            mode=mode,
+            encoding=encoding,
+            downsample=downsample,
+            dtype=dtype,
+            det_bin=det_bin,
+        )
         export_path = pathlib.Path(path) if path is not None else self._default_html_export_path(dtype, det_bin)
         self._write_html_export(export_path, dtype=dtype, det_bin=det_bin, title=title)
         size_mb = export_path.stat().st_size / (1024 * 1024)
@@ -886,7 +899,13 @@ class Show4DSTEM(anywidget.AnyWidget):
                 self.export_payload_id = ""
                 self.export_filename = ""
                 return
-            dtype, det_bin = self._parse_export_mode(mode)
+            dtype, det_bin = self._normalise_html_export_options(
+                mode=mode,
+                encoding=payload.get("encoding"),
+                downsample=payload.get("downsample"),
+                dtype=str(payload.get("dtype", "uint8")),
+                det_bin=int(payload.get("det_bin", 1)),
+            )
             if payload.get("download"):
                 filename = str(payload.get("filename") or self._default_html_export_path(dtype, det_bin).name)
                 request_id = str(payload.get("id") or "")
@@ -902,6 +921,44 @@ class Show4DSTEM(anywidget.AnyWidget):
                 self.export_html(dtype=dtype, det_bin=det_bin)
         except Exception as exc:
             self.export_status = f"Export failed: {exc}"
+
+    def _normalise_html_export_options(
+        self,
+        *,
+        mode: str = "single",
+        encoding: str | None = None,
+        downsample: int | str | None = None,
+        dtype: str = "uint8",
+        det_bin: int = 1,
+    ) -> tuple[str, int]:
+        raw_mode = str(mode or "single").strip().lower().replace("_", "-")
+        if "-bin" in raw_mode:
+            parsed_dtype, parsed_bin = self._parse_export_mode(raw_mode)
+            raw_mode = "single"
+            dtype = parsed_dtype
+            det_bin = parsed_bin
+        if raw_mode not in {"single", "folder"}:
+            raise ValueError("Show4DSTEM HTML export supports mode='single' or mode='folder'")
+        if raw_mode == "folder" and not self._offline_bslz4:
+            raise ValueError("folder export is only available for Show4DSTEM widgets with a companion data folder")
+
+        if encoding is not None:
+            raw_encoding = str(encoding or "uint8").strip().lower().replace("_", "-")
+            if raw_encoding in {"full", "exact", "uint16", "u16"}:
+                dtype = "uint16"
+            elif raw_encoding in {"uint8", "u8"}:
+                dtype = "uint8"
+            elif raw_encoding == "auto":
+                dtype = str(dtype or "uint8")
+            else:
+                raise ValueError(f"unknown Show4DSTEM export encoding {encoding!r}; expected 'full', 'uint8', or 'auto'")
+
+        if downsample not in (None, "", 0, "0"):
+            requested_bin = int(downsample)
+            if det_bin not in (1, requested_bin):
+                raise ValueError("Specify either downsample or det_bin, not conflicting values")
+            det_bin = requested_bin
+        return self._parse_export_mode(f"{dtype}-bin{det_bin}")
 
     def _parse_export_mode(self, mode: str) -> tuple[str, int]:
         parts = mode.split("-bin")

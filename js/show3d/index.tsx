@@ -7588,8 +7588,8 @@ function Show3D() {
                     MenuListProps={{ "aria-label": "Export standalone HTML options" }}
                     {...themedMenuProps}
                   >
-                    <MenuItem onClick={() => handleExportSelect("exact")}>HTML exact float32 ({exactExportSize})</MenuItem>
-                    <MenuItem onClick={() => handleExportSelect("quantized")}>HTML quantized uint8 ({quantizedExportSize})</MenuItem>
+                    <MenuItem onClick={() => handleExportSelect("exact")}>Exact float32 ({exactExportSize})</MenuItem>
+                    <MenuItem onClick={() => handleExportSelect("quantized")}>Quantized uint8 ({quantizedExportSize})</MenuItem>
                   </Menu>
                 </>
               )}

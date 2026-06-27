@@ -4124,14 +4124,14 @@ function Show4DSTEM() {
                 {exporting || htmlExportBusy ? "..." : "Export"}
               </Button>}
               {exportEnabled && <Menu anchorEl={dpExportAnchor} open={Boolean(dpExportAnchor)} onClose={() => setDpExportAnchor(null)} anchorOrigin={{ vertical: "bottom", horizontal: "left" }} transformOrigin={{ vertical: "top", horizontal: "left" }} sx={{ zIndex: 9999 }}>
-                <MenuItem onClick={() => handleHtmlExportSelect("uint8", 1)} sx={{ fontSize: 12 }}>HTML uint8 · {detRows}×{detCols} ({estimateHtmlExportSize("uint8", 1)})</MenuItem>
-                {detRows % 2 === 0 && detCols % 2 === 0 && <MenuItem onClick={() => handleHtmlExportSelect("uint8", 2)} sx={{ fontSize: 12 }}>HTML uint8 · {detRows / 2}×{detCols / 2} ({estimateHtmlExportSize("uint8", 2)})</MenuItem>}
-                {detRows % 4 === 0 && detCols % 4 === 0 && <MenuItem onClick={() => handleHtmlExportSelect("uint8", 4)} sx={{ fontSize: 12 }}>HTML uint8 · {detRows / 4}×{detCols / 4} ({estimateHtmlExportSize("uint8", 4)})</MenuItem>}
-                {detRows % 8 === 0 && detCols % 8 === 0 && <MenuItem onClick={() => handleHtmlExportSelect("uint8", 8)} sx={{ fontSize: 12 }}>HTML uint8 · {detRows / 8}×{detCols / 8} ({estimateHtmlExportSize("uint8", 8)})</MenuItem>}
-                <MenuItem onClick={() => handleHtmlExportSelect("uint16", 1)} sx={{ fontSize: 12 }}>HTML uint16 · {detRows}×{detCols} ({estimateHtmlExportSize("uint16", 1)})</MenuItem>
-                {detRows % 2 === 0 && detCols % 2 === 0 && <MenuItem onClick={() => handleHtmlExportSelect("uint16", 2)} sx={{ fontSize: 12 }}>HTML uint16 · {detRows / 2}×{detCols / 2} ({estimateHtmlExportSize("uint16", 2)})</MenuItem>}
-                {detRows % 4 === 0 && detCols % 4 === 0 && <MenuItem onClick={() => handleHtmlExportSelect("uint16", 4)} sx={{ fontSize: 12 }}>HTML uint16 · {detRows / 4}×{detCols / 4} ({estimateHtmlExportSize("uint16", 4)})</MenuItem>}
-                {detRows % 8 === 0 && detCols % 8 === 0 && <MenuItem onClick={() => handleHtmlExportSelect("uint16", 8)} sx={{ fontSize: 12 }}>HTML uint16 · {detRows / 8}×{detCols / 8} ({estimateHtmlExportSize("uint16", 8)})</MenuItem>}
+                <MenuItem onClick={() => handleHtmlExportSelect("uint8", 1)} sx={{ fontSize: 12 }}>Quantized uint8 ({estimateHtmlExportSize("uint8", 1)})</MenuItem>
+                {detRows % 2 === 0 && detCols % 2 === 0 && <MenuItem onClick={() => handleHtmlExportSelect("uint8", 2)} sx={{ fontSize: 12 }}>Binned 2x uint8 ({estimateHtmlExportSize("uint8", 2)})</MenuItem>}
+                {detRows % 4 === 0 && detCols % 4 === 0 && <MenuItem onClick={() => handleHtmlExportSelect("uint8", 4)} sx={{ fontSize: 12 }}>Binned 4x uint8 ({estimateHtmlExportSize("uint8", 4)})</MenuItem>}
+                {detRows % 8 === 0 && detCols % 8 === 0 && <MenuItem onClick={() => handleHtmlExportSelect("uint8", 8)} sx={{ fontSize: 12 }}>Binned 8x uint8 ({estimateHtmlExportSize("uint8", 8)})</MenuItem>}
+                <MenuItem onClick={() => handleHtmlExportSelect("uint16", 1)} sx={{ fontSize: 12 }}>Exact uint16 ({estimateHtmlExportSize("uint16", 1)})</MenuItem>
+                {detRows % 2 === 0 && detCols % 2 === 0 && <MenuItem onClick={() => handleHtmlExportSelect("uint16", 2)} sx={{ fontSize: 12 }}>Binned 2x uint16 ({estimateHtmlExportSize("uint16", 2)})</MenuItem>}
+                {detRows % 4 === 0 && detCols % 4 === 0 && <MenuItem onClick={() => handleHtmlExportSelect("uint16", 4)} sx={{ fontSize: 12 }}>Binned 4x uint16 ({estimateHtmlExportSize("uint16", 4)})</MenuItem>}
+                {detRows % 8 === 0 && detCols % 8 === 0 && <MenuItem onClick={() => handleHtmlExportSelect("uint16", 8)} sx={{ fontSize: 12 }}>Binned 8x uint16 ({estimateHtmlExportSize("uint16", 8)})</MenuItem>}
                 {pathLength > 0 && <MenuItem onClick={handleDpExportGif} sx={{ fontSize: 12 }}>GIF (path animation)</MenuItem>}
               </Menu>}
               {exportEnabled && (localHtmlExportStatus || exportStatus) && (
