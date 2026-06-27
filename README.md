@@ -114,6 +114,11 @@ double-clickable HTML in seconds.
 
 https://bobleesj.github.io/quantem.widget/
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, checks, widget export
+expectations, and release-candidate guidance.
+
 ## Issues
 
 https://github.com/bobleesj/quantem.widget/issues

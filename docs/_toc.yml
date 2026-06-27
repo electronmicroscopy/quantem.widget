@@ -28,3 +28,6 @@ parts:
       - file: api/html-export
       - file: api/load
       - file: api/io
+  - caption: Maintainers
+    chapters:
+      - file: maintainer/widget-release
