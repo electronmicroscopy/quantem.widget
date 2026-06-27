@@ -39,8 +39,16 @@ migration.
 ## Release Workflow
 
 For any `quantem.widget` release or release-candidate work, follow
-`docs/llm/widget-release.md`.
+`docs/maintainer/widget-release.md`.
 
 Do not create or push a `widget-v*` tag until the required local gates in that
 runbook pass. For RCs intended for TestPyPI, also run the real browser/Jupyter
 user-path checks called out in the runbook before tagging.
+
+## Repository Hygiene
+
+Keep public documentation in durable paths such as `README.md`,
+`CONTRIBUTING.md`, `docs/api/`, `docs/tutorials/`, and `docs/maintainer/`.
+Do not commit local session notes, one-off benchmark scripts, AppleDouble
+`._*` files, generated docs builds, screenshots, or scratch files unless they
+have been promoted into a documented test, example, or maintainer runbook.
