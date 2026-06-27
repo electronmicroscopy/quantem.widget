@@ -29,8 +29,9 @@ Fix:
 - During center drag, move lightweight DOM preview overlays with imperative
   `transform` and `width` updates.
 - Store the pending band in refs while dragging.
-- Commit `band_start`, `band_end`, notebook state, and the map recompute once on
-  mouseup.
+- Feed the pending band into the throttled map scheduler during drag, because
+  the element-map overlay is part of the expected live feedback.
+- Commit `band_start`, `band_end`, and notebook state once on mouseup.
 - Keep endpoint drags on the normal precise state path.
 
 Rule for future high-FPS widget selectors:
@@ -42,6 +43,9 @@ Rule for future high-FPS widget selectors:
 - Avoid Python/kernel round trips and notebook model saves during drag.
 - Recompute expensive data on a throttle or on commit unless the computation is
   genuinely required for the next visual frame.
+- If the user expects a derived overlay, map, or spectrum to move while dragging,
+  that derived view is part of the preview and must be updated live through the
+  fastest available scheduler.
 
 This applies to ShowEDS energy bands and ROI drags, Show4DSTEM detector masks,
 Show2D contrast controls, and any future draggable selector that needs to feel

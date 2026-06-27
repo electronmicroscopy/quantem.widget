@@ -686,6 +686,7 @@ function ShowEDS() {
   const [perfTick, setPerfTick] = React.useState(0);
   const [fps, setFps] = React.useState(0);
   const mapRequestRef = React.useRef<{ start: number; end: number; interactive: boolean } | null>(null);
+  const scheduleMapRef = React.useRef<((start: number, end: number, interactive?: boolean) => void) | null>(null);
   const mapRafRef = React.useRef<number | null>(null);
   const mapThrottleTimerRef = React.useRef<number | null>(null);
   const lastMapFlushRef = React.useRef(0);
@@ -857,6 +858,7 @@ function ShowEDS() {
     pendingLocalBandRef.current = [s, e];
     pendingBandPersistRef.current = [s, e];
     mapRequestRef.current = { start: s, end: e, interactive: true };
+    scheduleMapRef.current?.(s, e, true);
   }, [positionBandPreview]);
   React.useLayoutEffect(() => {
     positionBandPreview(bandLo, bandHi);
@@ -1340,6 +1342,7 @@ function ShowEDS() {
     }
     scheduleFrame();
   }, [flushMapRequest]);
+  scheduleMapRef.current = scheduleMap;
 
   const flushSpectrumRequest = React.useCallback(() => {
     specRafRef.current = null;
