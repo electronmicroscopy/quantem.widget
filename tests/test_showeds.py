@@ -20,6 +20,9 @@ def test_showeds_constructor_sets_shape_and_state():
         panel_width_px=240,
         spectrum_width_px=520,
         spectrum_height_px=180,
+        pixel_size=0.25,
+        pixel_unit="nm",
+        scale_bar_visible=False,
         map_vmin_pct=5,
         map_vmax_pct=95,
         show_debug=True,
@@ -41,6 +44,9 @@ def test_showeds_constructor_sets_shape_and_state():
     assert widget.panel_width_px == 240
     assert widget.spectrum_width_px == 520
     assert widget.spectrum_height_px == 180
+    assert widget.pixel_size == 0.25
+    assert widget.pixel_unit == "nm"
+    assert widget.scale_bar_visible is False
     assert widget.map_vmin_pct == 5
     assert widget.map_vmax_pct == 95
     assert widget.show_debug is True
@@ -86,6 +92,9 @@ def test_showeds_state_roundtrip():
         element_label="Au",
         spectrum_width_px=500,
         spectrum_height_px=260,
+        sampling=(0.2, 0.4),
+        units=["nm", "nm"],
+        scale_bar_visible=True,
         map_vmin_pct=4,
         map_vmax_pct=99,
         show_debug=True,
@@ -173,6 +182,8 @@ def test_showeds_binned_export_scales_saved_rois_and_bands(tmp_path):
         roi=(0, 0, 4, 4),
         saved_rois=[{"name": "corner", "row": 2, "col": 2, "height": 2, "width": 4, "shape": "circle"}],
         saved_bands=[{"name": "peak", "start": 2, "end": 6}],
+        pixel_size=0.5,
+        pixel_unit="nm",
     )
     widget.map_zoom = 2.0
     widget.map_view_row = 2.0
@@ -184,6 +195,8 @@ def test_showeds_binned_export_scales_saved_rois_and_bands(tmp_path):
 
     assert binned.saved_rois == [{"name": "corner", "row": 1, "col": 1, "height": 1, "width": 1, "shape": "circle"}]
     assert binned.saved_bands == [{"name": "peak", "start": 1, "end": 3}]
+    assert binned.pixel_size == 1.0
+    assert binned.pixel_unit == "nm"
     assert binned.map_zoom == 2.0
     assert binned.map_view_row == 1.0
     assert binned.map_view_col == 1.5

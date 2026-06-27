@@ -9,6 +9,7 @@ import Slider from "@mui/material/Slider";
 import Stack from "@mui/material/Stack";
 import Switch from "@mui/material/Switch";
 import Typography from "@mui/material/Typography";
+import { drawScaleBarHiDPI } from "../figure";
 import { downloadBlob, extractBytes, extractFloat32, formatNumber, markWidgetNotebookDirty, preserveRestoredWidgetModelsOnSave } from "../format";
 import { computeHistogramFromBytes, percentileClip, sliderRange } from "../stats";
 
@@ -728,6 +729,9 @@ function ShowEDS() {
   const [spectrumHeight, setSpectrumHeight] = useModelState<number>("spectrum_height_px");
   const [showControls] = useModelState<boolean>("show_controls");
   const [logSpectrum, setLogSpectrum] = useModelState<boolean>("log_spectrum");
+  const [pixelSize] = useModelState<number>("pixel_size");
+  const [pixelUnit] = useModelState<string>("pixel_unit");
+  const [scaleBarVisible, setScaleBarVisible] = useModelState<boolean>("scale_bar_visible");
   const [mapVminPct, setMapVminPct] = useModelState<number>("map_vmin_pct");
   const [mapVmaxPct, setMapVmaxPct] = useModelState<number>("map_vmax_pct");
   const [overlayOpacity, setOverlayOpacity] = useModelState<number>("overlay_opacity");
@@ -754,6 +758,7 @@ function ShowEDS() {
   const mapCanvasRef = React.useRef<HTMLCanvasElement | null>(null);
   const mapViewportRef = React.useRef<HTMLDivElement | null>(null);
   const mapOverlayCanvasRef = React.useRef<HTMLCanvasElement | null>(null);
+  const mapUiOverlayCanvasRef = React.useRef<HTMLCanvasElement | null>(null);
   const specCanvasRef = React.useRef<HTMLCanvasElement | null>(null);
   const specBandOverlayRef = React.useRef<HTMLDivElement | null>(null);
   const bandSliderRef = React.useRef<HTMLDivElement | null>(null);
@@ -918,6 +923,11 @@ function ShowEDS() {
     setShowDebug(value);
     saveWidgetChanges();
   }, [saveWidgetChanges, setShowDebug]);
+
+  const commitScaleBarVisible = React.useCallback((value: boolean) => {
+    setScaleBarVisible(value);
+    saveWidgetChanges();
+  }, [saveWidgetChanges, setScaleBarVisible]);
 
   const cube = React.useMemo(() => {
     const count = rows * cols * nEnergy;
@@ -1689,6 +1699,22 @@ function ShowEDS() {
   }, [cols, elementMap, mapDisplayRange, recordWidgetPerf, rows]);
 
   React.useEffect(() => {
+    const canvas = mapUiOverlayCanvasRef.current;
+    if (!canvas) return;
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = Math.max(1, Math.round(size * dpr));
+    canvas.height = Math.max(1, Math.round(size * dpr));
+    if (scaleBarVisible) {
+      const pxSize = pixelSize > 0 ? pixelSize : 1;
+      const unit = pixelSize > 0 ? pixelUnit : "px";
+      drawScaleBarHiDPI(canvas, dpr, mapView.zoom, pxSize, unit, cols);
+      return;
+    }
+    const ctx = canvas.getContext("2d");
+    ctx?.clearRect(0, 0, canvas.width, canvas.height);
+  }, [cols, mapView.zoom, pixelSize, pixelUnit, scaleBarVisible, size]);
+
+  React.useEffect(() => {
     const canvas = specCanvasRef.current;
     if (!canvas || !roiSpectrum) return;
     const t0 = performance.now();
@@ -2187,6 +2213,8 @@ function ShowEDS() {
             <Stack direction="row" spacing={1} alignItems="center">
               <Typography sx={{ fontSize: 11 }}>Log</Typography>
               <Switch checked={logSpectrum} onChange={(e) => setLogSpectrum(e.target.checked)} size="small" />
+              <Typography sx={{ fontSize: 11 }}>Scale</Typography>
+              <Switch checked={scaleBarVisible} onChange={(e) => commitScaleBarVisible(e.target.checked)} size="small" />
               <Typography sx={{ fontSize: 11 }}>Debug</Typography>
               <Switch checked={showDebug} onChange={(e) => commitDebug(e.target.checked)} size="small" />
               {exportEnabled && (
@@ -2295,6 +2323,19 @@ function ShowEDS() {
                 }}
                 aria-hidden="true"
               />
+              <canvas
+                ref={mapUiOverlayCanvasRef}
+                style={{
+                  position: "absolute",
+                  left: 0,
+                  top: 0,
+                  width: size,
+                  height: size,
+                  pointerEvents: "none",
+                  zIndex: 2,
+                }}
+                aria-hidden="true"
+              />
               <Box
                 sx={{
                   position: "absolute",
@@ -2306,6 +2347,7 @@ function ShowEDS() {
                   height: `${roiOverlayStyle.height}px`,
                   border: "2px dashed #00ff7f",
                   borderRadius: normalizeRoiShape(roi.shape) === "circle" ? "50%" : 0,
+                  zIndex: 3,
                 }}
               >
                 <Box
@@ -2333,6 +2375,7 @@ function ShowEDS() {
                   height: 16,
                   cursor: "nwse-resize",
                   opacity: 0.65,
+                  zIndex: 4,
                   background: "linear-gradient(135deg, transparent 50%, #5af 50%)",
                   "&:hover": { opacity: 1 },
                 }}
