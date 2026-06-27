@@ -1113,9 +1113,9 @@ class ShowEDS(anywidget.AnyWidget):
 
         ``mode="single"`` writes one HTML file. ``mode="folder"`` writes an
         HTML file that references an existing exact data folder. Use
-        ``binning=2`` or ``binning=4`` for a smaller one-file export that
-        sum-bins rows, columns, and energy channels. ``downsample`` is kept as
-        a compatibility alias for ``binning``.
+        ``downsample=2`` or ``downsample=4`` for a smaller one-file export that
+        sum-bins rows, columns, and energy channels. ``binning`` is kept as a
+        compatibility alias for older notebooks.
         """
         export_path = pathlib.Path(path) if path is not None else self._default_html_export_path()
         widget, mode_label = self._export_widget_for_mode(
@@ -1203,7 +1203,10 @@ class ShowEDS(anywidget.AnyWidget):
         if normalised_mode not in {"single", "folder"}:
             raise ValueError(f"unknown export mode {mode!r}; expected 'single' or 'folder'")
         if requested_binning is not None and requested_binning not in (2, 4):
-            raise ValueError(f"binning/downsample must be 2 or 4 for ShowEDS, got {requested_binning}")
+            raise ValueError(
+                f"downsample must be 2 or 4 for ShowEDS, got {requested_binning} "
+                "(binning is a compatibility alias)"
+            )
         return normalised_mode, requested_binning
 
     def _export_widget_for_mode(
@@ -1233,7 +1236,7 @@ class ShowEDS(anywidget.AnyWidget):
             if self.compute_backend == "sidecar":
                 raise ValueError(
                     "single exact export is not available for this folder-backed ShowEDS widget; "
-                    "use mode='folder' or set binning=2/4"
+                    "use mode='folder' or set downsample=2/4"
                 )
             label = "single exact"
             return self, label

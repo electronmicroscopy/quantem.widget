@@ -169,6 +169,11 @@ function MapHistogram({
   height?: number;
 }) {
   const canvasRef = React.useRef<HTMLCanvasElement>(null);
+  const sliderRef = React.useRef<HTMLDivElement | null>(null);
+  const onRangeChangeRef = React.useRef(onRangeChange);
+  const [rangeDrag, setRangeDrag] = React.useState<{ x: number; width: number; lo: number; hi: number } | null>(null);
+  const pendingRangeRef = React.useRef<[number, number] | null>(null);
+  const rangeRafRef = React.useRef<number | null>(null);
   const bins = React.useMemo(
     () => computeHistogramFromBytes(data, 256, dataMin, dataMax),
     [data, dataMin, dataMax],
@@ -207,6 +212,48 @@ function MapHistogram({
     const val = dataMin + (pct / 100) * (dataMax - dataMin);
     return Math.abs(val) >= 1000 ? val.toExponential(1) : val.toFixed(1);
   };
+  React.useEffect(() => {
+    onRangeChangeRef.current = onRangeChange;
+  }, [onRangeChange]);
+  const flushRangePreview = React.useCallback(() => {
+    if (rangeRafRef.current != null) {
+      window.cancelAnimationFrame(rangeRafRef.current);
+      rangeRafRef.current = null;
+    }
+    const pending = pendingRangeRef.current;
+    pendingRangeRef.current = null;
+    if (pending) onRangeChangeRef.current(pending[0], pending[1]);
+  }, []);
+  React.useEffect(() => () => {
+    if (rangeRafRef.current != null) window.cancelAnimationFrame(rangeRafRef.current);
+  }, []);
+  React.useEffect(() => {
+    if (!rangeDrag) return;
+    const onMove = (e: MouseEvent) => {
+      const span = Math.max(1, rangeDrag.hi - rangeDrag.lo);
+      const deltaPct = ((e.clientX - rangeDrag.x) / Math.max(1, rangeDrag.width)) * 100;
+      const lo = Math.max(0, Math.min(100 - span, rangeDrag.lo + deltaPct));
+      pendingRangeRef.current = [lo, lo + span];
+      if (rangeRafRef.current == null) {
+        rangeRafRef.current = window.requestAnimationFrame(() => {
+          rangeRafRef.current = null;
+          const pending = pendingRangeRef.current;
+          pendingRangeRef.current = null;
+          if (pending) onRangeChangeRef.current(pending[0], pending[1]);
+        });
+      }
+    };
+    const onUp = () => {
+      flushRangePreview();
+      setRangeDrag(null);
+    };
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+    return () => {
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+    };
+  }, [flushRangePreview, rangeDrag]);
   return (
     <Box sx={{ display: "flex", flexDirection: "column", gap: 0.25, width, flexShrink: 0 }}>
       <canvas
@@ -214,28 +261,45 @@ function MapHistogram({
         style={{ width, height, border: `1px solid ${colors.border}`, display: "block" }}
         aria-label="EDS map histogram"
       />
-      <Slider
-        value={clampPercentPair(vminPct, vmaxPct)}
-        min={0}
-        max={100}
-        step={0.5}
-        size="small"
-        valueLabelDisplay="auto"
-        valueLabelFormat={valueLabel}
-        onChange={(_, v) => {
-          if (!Array.isArray(v)) return;
-          const [newMin, newMax] = v.map(Number);
-          onRangeChange(Math.min(newMin, newMax - 1), Math.max(newMax, newMin + 1));
+      <Box
+        ref={sliderRef}
+        onMouseDownCapture={(e) => {
+          if ((e.target as HTMLElement).closest(".MuiSlider-thumb")) return;
+          const rect = sliderRef.current?.getBoundingClientRect();
+          if (!rect) return;
+          const [lo, hi] = clampPercentPair(vminPct, vmaxPct);
+          const pct = ((e.clientX - rect.left) / Math.max(1, rect.width)) * 100;
+          if (pct < lo || pct > hi) return;
+          setRangeDrag({ x: e.clientX, width: rect.width, lo, hi });
+          e.preventDefault();
+          e.stopPropagation();
+          e.nativeEvent.stopImmediatePropagation();
         }}
-        sx={{
-          width,
-          py: 0,
-          "& .MuiSlider-thumb": { width: 8, height: 8 },
-          "& .MuiSlider-rail": { height: 2 },
-          "& .MuiSlider-track": { height: 2 },
-          "& .MuiSlider-valueLabel": { fontSize: 10, px: 0.5, py: 0.25 },
-        }}
-      />
+        sx={{ width, height: 14, display: "flex", alignItems: "center", cursor: rangeDrag ? "grabbing" : "grab" }}
+      >
+        <Slider
+          value={clampPercentPair(vminPct, vmaxPct)}
+          min={0}
+          max={100}
+          step={0.5}
+          size="small"
+          valueLabelDisplay="auto"
+          valueLabelFormat={valueLabel}
+          onChange={(_, v) => {
+            if (!Array.isArray(v)) return;
+            const [newMin, newMax] = v.map(Number);
+            onRangeChange(Math.min(newMin, newMax - 1), Math.max(newMax, newMin + 1));
+          }}
+          sx={{
+            width,
+            py: 0,
+            "& .MuiSlider-thumb": { width: 8, height: 8 },
+            "& .MuiSlider-rail": { height: 2 },
+            "& .MuiSlider-track": { height: 2, cursor: rangeDrag ? "grabbing" : "grab" },
+            "& .MuiSlider-valueLabel": { fontSize: 10, px: 0.5, py: 0.25 },
+          }}
+        />
+      </Box>
       <Box sx={{ display: "flex", justifyContent: "space-between", width }}>
         <Typography sx={{ fontSize: 8, fontFamily: "monospace", opacity: 0.6, lineHeight: 1 }}>{valueLabel(vminPct)}</Typography>
         <Typography sx={{ fontSize: 8, fontFamily: "monospace", opacity: 0.6, lineHeight: 1 }}>{valueLabel(vmaxPct)}</Typography>
@@ -256,8 +320,6 @@ function recordPerf(kind: PerfKind, ms: number) {
   perf[kind] ||= [];
   perf[kind].push(ms);
   if (perf[kind].length > 120) perf[kind].splice(0, perf[kind].length - 120);
-  // Browser-side logs are the least invasive way to verify interaction timing.
-  console.debug(`[ShowEDS perf] ${kind} ${ms.toFixed(2)} ms`);
 }
 
 function colorize(t: number): [number, number, number] {
@@ -589,7 +651,9 @@ function ShowEDS() {
   const mapCanvasRef = React.useRef<HTMLCanvasElement | null>(null);
   const mapOverlayCanvasRef = React.useRef<HTMLCanvasElement | null>(null);
   const specCanvasRef = React.useRef<HTMLCanvasElement | null>(null);
+  const specBandOverlayRef = React.useRef<HTMLDivElement | null>(null);
   const bandSliderRef = React.useRef<HTMLDivElement | null>(null);
+  const bandSliderPreviewRef = React.useRef<HTMLDivElement | null>(null);
   const gpuRef = React.useRef<{
     device: GPUDevice;
     cube: GPUBuffer;
@@ -641,6 +705,8 @@ function ShowEDS() {
   const spectrumComputeSeqRef = React.useRef(0);
   const bandPersistTimerRef = React.useRef<number | null>(null);
   const roiPersistTimerRef = React.useRef<number | null>(null);
+  const pendingLocalBandRef = React.useRef<[number, number] | null>(null);
+  const localBandRafRef = React.useRef<number | null>(null);
   const pendingBandPersistRef = React.useRef<[number, number] | null>(null);
   const pendingRoiPersistRef = React.useRef<Roi | null>(null);
   const pendingExportRef = React.useRef<{
@@ -660,6 +726,37 @@ function ShowEDS() {
       markWidgetNotebookDirty(model);
     }, 0);
   }, [model]);
+
+  const flushLocalBandPreview = React.useCallback(() => {
+    if (localBandRafRef.current != null) {
+      window.cancelAnimationFrame(localBandRafRef.current);
+      localBandRafRef.current = null;
+    }
+    const pending = pendingLocalBandRef.current;
+    pendingLocalBandRef.current = null;
+    if (pending) setLocalBand(pending);
+  }, [setLocalBand]);
+
+  const setLocalBandPreview = React.useCallback((value: [number, number], immediate = true) => {
+    if (immediate) {
+      if (localBandRafRef.current != null) {
+        window.cancelAnimationFrame(localBandRafRef.current);
+        localBandRafRef.current = null;
+      }
+      pendingLocalBandRef.current = null;
+      setLocalBand(value);
+      return;
+    }
+    pendingLocalBandRef.current = value;
+    if (localBandRafRef.current == null) {
+      localBandRafRef.current = window.requestAnimationFrame(() => {
+        localBandRafRef.current = null;
+        const pending = pendingLocalBandRef.current;
+        pendingLocalBandRef.current = null;
+        if (pending) setLocalBand(pending);
+      });
+    }
+  }, [setLocalBand]);
 
   const recordWidgetPerf = React.useCallback((kind: PerfKind, ms: number) => {
     recordPerf(kind, ms);
@@ -732,6 +829,38 @@ function ShowEDS() {
   const displayOverlayOpacity = Math.max(0, Math.min(1, localOverlayOpacity ?? overlayOpacity));
   const bandEnergyLo = Math.min(energy[bandLo] ?? 0, energy[Math.max(bandLo, bandHi - 1)] ?? 0);
   const bandEnergyHi = Math.max(energy[bandLo] ?? 0, energy[Math.max(bandLo, bandHi - 1)] ?? 0);
+  const positionBandPreview = React.useCallback((start: number, end: number, sliderWidth?: number): [number, number] => {
+    const s = Math.max(0, Math.min(nEnergy - 1, Math.round(start)));
+    const e = Math.max(s + 1, Math.min(nEnergy, Math.round(end)));
+    const specEl = specBandOverlayRef.current;
+    if (specEl) {
+      const padL = 54;
+      const padR = 14;
+      const plotW = Math.max(1, specW - padL - padR);
+      const x0 = padL + (s / Math.max(1, nEnergy - 1)) * plotW;
+      const x1 = padL + ((e - 1) / Math.max(1, nEnergy - 1)) * plotW;
+      specEl.style.transform = `translateX(${x0}px)`;
+      specEl.style.width = `${Math.max(2, x1 - x0)}px`;
+    }
+    const sliderEl = bandSliderPreviewRef.current;
+    if (sliderEl) {
+      const width = Math.max(1, sliderWidth ?? bandSliderRef.current?.clientWidth ?? 260);
+      const x0 = (s / Math.max(1, nEnergy)) * width;
+      const x1 = (e / Math.max(1, nEnergy)) * width;
+      sliderEl.style.transform = `translate(${x0}px, -50%)`;
+      sliderEl.style.width = `${Math.max(2, x1 - x0)}px`;
+    }
+    return [s, e];
+  }, [nEnergy, specW]);
+  const previewCenterBand = React.useCallback((start: number, end: number, sliderWidth?: number) => {
+    const [s, e] = positionBandPreview(start, end, sliderWidth);
+    pendingLocalBandRef.current = [s, e];
+    pendingBandPersistRef.current = [s, e];
+    mapRequestRef.current = { start: s, end: e, interactive: true };
+  }, [positionBandPreview]);
+  React.useLayoutEffect(() => {
+    positionBandPreview(bandLo, bandHi);
+  }, [bandHi, bandLo, positionBandPreview]);
   const mapDataRange = React.useMemo(() => elementMap ? finiteRange(elementMap) : [0, 1] as [number, number], [elementMap]);
   const mapDisplayRange = React.useMemo(() => {
     const range = sliderRange(mapDataRange[0], mapDataRange[1], mapVminPct, mapVmaxPct);
@@ -1065,6 +1194,7 @@ function ShowEDS() {
       if (specThrottleTimerRef.current != null) window.clearTimeout(specThrottleTimerRef.current);
       if (bandPersistTimerRef.current != null) window.clearTimeout(bandPersistTimerRef.current);
       if (roiPersistTimerRef.current != null) window.clearTimeout(roiPersistTimerRef.current);
+      if (localBandRafRef.current != null) window.cancelAnimationFrame(localBandRafRef.current);
     };
   }, []);
 
@@ -1259,21 +1389,21 @@ function ShowEDS() {
 
   React.useEffect(() => {
     if (!gpuRef.current && !isSidecarBackend) return;
-    scheduleMap(bandLo, bandHi);
-  }, [bandLo, bandHi, isSidecarBackend, scheduleMap, gpuRef.current]);
+    scheduleMap(bandStart, bandEnd);
+  }, [bandEnd, bandStart, isSidecarBackend, scheduleMap, gpuRef.current]);
   React.useEffect(() => {
     if (!gpuRef.current && !isSidecarBackend) return;
-    scheduleSpectrum(roi);
-  }, [roi.row, roi.col, roi.height, roi.width, isSidecarBackend, scheduleSpectrum, gpuRef.current]);
+    scheduleSpectrum(modelRoi);
+  }, [isSidecarBackend, roiCol, roiHeight, roiRow, roiWidth, scheduleSpectrum, gpuRef.current]);
   React.useEffect(() => {
     const id = window.setTimeout(() => {
       if (gpuRef.current || isSidecarBackend) {
-        scheduleMap(bandLo, bandHi);
-        scheduleSpectrum(roi);
+        scheduleMap(bandStart, bandEnd);
+        scheduleSpectrum(modelRoi);
       }
     }, 100);
     return () => window.clearTimeout(id);
-  }, [bandHi, bandLo, isSidecarBackend, roi, scheduleMap, scheduleSpectrum, gpuRef.current]);
+  }, [bandEnd, bandStart, isSidecarBackend, roiCol, roiHeight, roiRow, roiWidth, scheduleMap, scheduleSpectrum, gpuRef.current]);
 
   React.useEffect(() => {
     const canvas = mapCanvasRef.current;
@@ -1354,8 +1484,6 @@ function ShowEDS() {
       const y = padT + (i / 4) * plotH;
       ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(padL + plotW, y); ctx.stroke();
     }
-    const x0 = padL + (bandLo / Math.max(1, nEnergy - 1)) * plotW;
-    const x1 = padL + ((bandHi - 1) / Math.max(1, nEnergy - 1)) * plotW;
     if (showLineHints && Array.isArray(lineHints) && energy.length > 1) {
       const e0 = energy[0];
       const e1 = energy[energy.length - 1];
@@ -1386,8 +1514,6 @@ function ShowEDS() {
         ctx.restore();
       }
     }
-    ctx.fillStyle = "rgba(255, 215, 0, 0.22)";
-    ctx.fillRect(x0, padT, Math.max(2 * dpr, x1 - x0), plotH);
     ctx.strokeStyle = "#ffd54f";
     ctx.lineWidth = 2 * dpr;
     ctx.beginPath();
@@ -1473,14 +1599,18 @@ function ShowEDS() {
     scheduleSpectrum(normalized, interactive);
   };
 
-  const updateBand = (start: number, end: number, sync = true, interactive = false) => {
+  const updateBand = (start: number, end: number, sync = true, interactive = false, compute = true) => {
     const s = Math.max(0, Math.min(nEnergy - 1, Math.round(start)));
     const e = Math.max(s + 1, Math.min(nEnergy, Math.round(end)));
-    setLocalBand([s, e]);
+    setLocalBandPreview([s, e], compute);
     if (sync) {
       queueBandPersist(s, e, false, interactive);
     }
-    scheduleMap(s, e, interactive);
+    if (compute) {
+      scheduleMap(s, e, interactive);
+    } else {
+      mapRequestRef.current = { start: s, end: e, interactive };
+    }
   };
 
   const saveCurrentRoi = () => {
@@ -1623,7 +1753,7 @@ function ShowEDS() {
         const di = ((e.clientX - rect.left - drag.x) / plotW) * Math.max(1, nEnergy - 1);
         if (drag.mode === "band-left") updateBand(drag.bandStart + di, drag.bandEnd, true, true);
         else if (drag.mode === "band-right") updateBand(drag.bandStart, drag.bandEnd + di, true, true);
-        else updateBand(drag.bandStart + di, drag.bandEnd + di, true, true);
+        else previewCenterBand(drag.bandStart + di, drag.bandEnd + di);
       }
     };
     const onUp = () => {
@@ -1633,6 +1763,7 @@ function ShowEDS() {
         if (latest) scheduleSpectrum(latest);
       }
       if (drag.mode?.startsWith("band")) {
+        flushLocalBandPreview();
         flushBandPersist();
         const latest = mapRequestRef.current;
         if (latest) scheduleMap(latest.start, latest.end);
@@ -1642,15 +1773,16 @@ function ShowEDS() {
     document.addEventListener("mousemove", onMove);
     document.addEventListener("mouseup", onUp);
     return () => { document.removeEventListener("mousemove", onMove); document.removeEventListener("mouseup", onUp); };
-  }, [cols, drag, flushBandPersist, flushRoiPersist, nEnergy, rows, size, specW]);
+  }, [cols, drag, flushBandPersist, flushLocalBandPreview, flushRoiPersist, nEnergy, previewCenterBand, rows, size, specW]);
 
   React.useEffect(() => {
     if (!bandSliderDrag) return;
     const onMove = (e: MouseEvent) => {
       const di = ((e.clientX - bandSliderDrag.x) / Math.max(1, bandSliderDrag.width)) * Math.max(1, nEnergy);
-      updateBand(bandSliderDrag.bandStart + di, bandSliderDrag.bandEnd + di, true, true);
+      previewCenterBand(bandSliderDrag.bandStart + di, bandSliderDrag.bandEnd + di, bandSliderDrag.width);
     };
     const onUp = () => {
+      flushLocalBandPreview();
       flushBandPersist();
       const latest = mapRequestRef.current;
       if (latest) scheduleMap(latest.start, latest.end);
@@ -1659,7 +1791,7 @@ function ShowEDS() {
     document.addEventListener("mousemove", onMove);
     document.addEventListener("mouseup", onUp);
     return () => { document.removeEventListener("mousemove", onMove); document.removeEventListener("mouseup", onUp); };
-  }, [bandSliderDrag, flushBandPersist, nEnergy]);
+  }, [bandSliderDrag, flushBandPersist, flushLocalBandPreview, nEnergy, previewCenterBand]);
 
   const bandCounts = React.useMemo(() => {
     if (!roiSpectrum) return 0;
@@ -1917,6 +2049,20 @@ function ShowEDS() {
                 aria-label={`EDS spectrum${title ? `: ${title}` : ""}`}
               />
               <Box
+                ref={specBandOverlayRef}
+                sx={{
+                  position: "absolute",
+                  top: 16,
+                  left: 0,
+                  height: Math.max(1, specH - 50),
+                  width: 2,
+                  transform: "translateX(54px)",
+                  bgcolor: "rgba(255, 215, 0, 0.22)",
+                  pointerEvents: "none",
+                  willChange: "transform, width",
+                }}
+              />
+              <Box
                 onMouseDown={(e) => {
                   setPanelResize({ mode: "spectrum", x: e.clientX, y: e.clientY, width: specW, height: specH });
                   e.preventDefault();
@@ -1956,13 +2102,43 @@ function ShowEDS() {
                     const x0 = (bandLo / Math.max(1, nEnergy)) * rect.width;
                     const x1 = (bandHi / Math.max(1, nEnergy)) * rect.width;
                     if (x < x0 || x > x1) return;
+                    previewCenterBand(bandLo, bandHi, rect.width);
                     setBandSliderDrag({ x: e.clientX, width: rect.width, bandStart: bandLo, bandEnd: bandHi });
                     e.preventDefault();
                     e.stopPropagation();
                     e.nativeEvent.stopImmediatePropagation();
                   }}
-                  sx={{ width: 260, flexShrink: 0, display: "flex", alignItems: "center", height: 20 }}
+                  sx={{ width: 260, flexShrink: 0, display: "flex", alignItems: "center", height: 20, position: "relative" }}
                 >
+                  <Box
+                    ref={bandSliderPreviewRef}
+                    sx={{
+                      position: "absolute",
+                      left: 0,
+                      top: "50%",
+                      width: 2,
+                      height: 2,
+                      transform: "translate(0, -50%)",
+                      bgcolor: "#1976d2",
+                      borderRadius: 1,
+                      opacity: bandSliderDrag ? 1 : 0,
+                      pointerEvents: "none",
+                      zIndex: 2,
+                      willChange: "transform, width",
+                      "&::before, &::after": {
+                        content: '""',
+                        position: "absolute",
+                        top: -5,
+                        width: 12,
+                        height: 12,
+                        borderRadius: "50%",
+                        bgcolor: "#1976d2",
+                        boxShadow: "0 0 0 2px #fff",
+                      },
+                      "&::before": { left: -6 },
+                      "&::after": { right: -6 },
+                    }}
+                  />
                   <Slider
                     value={[bandLo, bandHi]}
                     min={0}
@@ -1981,6 +2157,9 @@ function ShowEDS() {
                     sx={{
                       width: "100%",
                       ...compactSliderSx,
+                      ...(bandSliderDrag ? {
+                        "& .MuiSlider-track, & .MuiSlider-thumb": { opacity: 0 },
+                      } : {}),
                       "& .MuiSlider-track": { height: 2, cursor: bandSliderDrag ? "grabbing" : "grab" },
                     }}
                   />
