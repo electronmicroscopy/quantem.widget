@@ -654,6 +654,7 @@ function ShowEDS() {
   const specBandOverlayRef = React.useRef<HTMLDivElement | null>(null);
   const bandSliderRef = React.useRef<HTMLDivElement | null>(null);
   const bandSliderPreviewRef = React.useRef<HTMLDivElement | null>(null);
+  const bandStatusRef = React.useRef<HTMLParagraphElement | null>(null);
   const gpuRef = React.useRef<{
     device: GPUDevice;
     cube: GPUBuffer;
@@ -851,8 +852,30 @@ function ShowEDS() {
       sliderEl.style.transform = `translate(${x0}px, -50%)`;
       sliderEl.style.width = `${Math.max(2, x1 - x0)}px`;
     }
+    const statusEl = bandStatusRef.current;
+    if (statusEl) {
+      const e0 = energy[s] ?? 0;
+      const e1 = energy[Math.max(s, e - 1)] ?? 0;
+      let sum = 0;
+      if (roiSpectrum) {
+        for (let i = s; i < e; i++) sum += roiSpectrum[i] || 0;
+      }
+      let candidates = "";
+      if (showLineHints && Array.isArray(lineHints)) {
+        const step = Math.abs((energy[Math.min(nEnergy - 1, s + 1)] ?? e1) - (energy[s] ?? e0)) || 0.02;
+        const lo = Math.min(e0, e1) - step * 0.65;
+        const hi = Math.max(e0, e1) + step * 0.65;
+        candidates = lineHints
+          .filter((line) => Number.isFinite(line.energy_keV) && line.energy_keV >= lo && line.energy_keV <= hi)
+          .sort((a, b) => (b.intensity ?? 0) - (a.intensity ?? 0))
+          .slice(0, 4)
+          .map(lineLabel)
+          .join(", ");
+      }
+      statusEl.textContent = `Band ${s}-${e - 1}: ${formatEnergy(e0)} - ${formatEnergy(e1)}; ROI band counts ${formatNumber(sum, 2)}${candidates ? `; candidates ${candidates}` : ""}`;
+    }
     return [s, e];
-  }, [nEnergy, specW]);
+  }, [energy, lineHints, nEnergy, roiSpectrum, showLineHints, specW]);
   const previewCenterBand = React.useCallback((start: number, end: number, sliderWidth?: number) => {
     const [s, e] = positionBandPreview(start, end, sliderWidth);
     pendingLocalBandRef.current = [s, e];
@@ -880,6 +903,7 @@ function ShowEDS() {
       .slice(0, 4);
   }, [bandEnergyHi, bandEnergyLo, bandLo, energy, lineHints, nEnergy, showLineHints]);
   const candidateText = candidateLines.map(lineLabel).join(", ");
+  const isBandCenterPreviewing = Boolean(bandSliderDrag || drag?.mode === "band-move");
   React.useEffect(() => {
     if (localOverlayOpacity === null) return;
     if (Math.abs(localOverlayOpacity - overlayOpacity) <= 1e-6) setLocalOverlayOpacity(null);
@@ -2084,7 +2108,7 @@ function ShowEDS() {
                 }}
               />
             </Box>
-            <Typography sx={{ mt: 0.5, fontSize: 11 }}>
+            <Typography ref={bandStatusRef} sx={{ mt: 0.5, fontSize: 11 }}>
               Band {bandLo}-{bandHi - 1}: {formatEnergy(energy[bandLo])} - {formatEnergy(energy[Math.max(bandLo, bandHi - 1)])}; ROI band counts {formatNumber(bandCounts, 2)}
               {candidateText ? `; candidates ${candidateText}` : ""}
             </Typography>
@@ -2124,7 +2148,7 @@ function ShowEDS() {
                       transform: "translate(0, -50%)",
                       bgcolor: "#1976d2",
                       borderRadius: 1,
-                      opacity: bandSliderDrag ? 1 : 0,
+                      opacity: isBandCenterPreviewing ? 1 : 0,
                       pointerEvents: "none",
                       zIndex: 2,
                       willChange: "transform, width",
@@ -2160,10 +2184,10 @@ function ShowEDS() {
                     sx={{
                       width: "100%",
                       ...compactSliderSx,
-                      ...(bandSliderDrag ? {
+                      ...(isBandCenterPreviewing ? {
                         "& .MuiSlider-track, & .MuiSlider-thumb": { opacity: 0 },
                       } : {}),
-                      "& .MuiSlider-track": { height: 2, cursor: bandSliderDrag ? "grabbing" : "grab" },
+                      "& .MuiSlider-track": { height: 2, cursor: isBandCenterPreviewing ? "grabbing" : "grab" },
                     }}
                   />
                 </Box>
