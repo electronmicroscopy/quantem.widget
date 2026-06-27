@@ -364,7 +364,17 @@ def _resolve_band_indices(
     return start, end
 
 
-def _normalise_roi(rows: int, cols: int, roi: tuple[int, int, int, int] | None = None) -> tuple[int, int, int, int]:
+def _normalise_roi_shape(value: Any) -> str:
+    return "circle" if str(value).strip().lower() == "circle" else "rect"
+
+
+def _normalise_roi(
+    rows: int,
+    cols: int,
+    roi: tuple[int, int, int, int] | None = None,
+    *,
+    roi_shape: str = "rect",
+) -> tuple[int, int, int, int]:
     if roi is None:
         height = max(8, rows // 4)
         width = max(8, cols // 4)
@@ -374,9 +384,66 @@ def _normalise_roi(rows: int, cols: int, roi: tuple[int, int, int, int] | None =
         row, col, height, width = (int(v) for v in roi)
     row = int(max(0, min(rows - 1, row)))
     col = int(max(0, min(cols - 1, col)))
+    if _normalise_roi_shape(roi_shape) == "circle":
+        diameter = int(max(1, max(height, width)))
+        diameter = int(min(diameter, rows, cols))
+        row = int(max(0, min(rows - diameter, row)))
+        col = int(max(0, min(cols - diameter, col)))
+        return row, col, diameter, diameter
     height = int(max(1, min(rows - row, height)))
     width = int(max(1, min(cols - col, width)))
     return row, col, height, width
+
+
+def _circle_col_segment(row: int, roi_row: int, roi_col: int, height: int, width: int) -> tuple[int, int] | None:
+    r0 = roi_row
+    r1 = roi_row + height
+    c0 = roi_col
+    c1 = roi_col + width
+    cx = (c0 + c1) * 0.5
+    cy = (r0 + r1) * 0.5
+    radius = max(height, width) * 0.5
+    dy = row + 0.5 - cy
+    if abs(dy) > radius:
+        return None
+    half = float(np.sqrt(max(0.0, radius * radius - dy * dy)))
+    start = max(c0, int(np.ceil(cx - half - 0.5)))
+    end = min(c1, int(np.floor(cx + half - 0.5)) + 1)
+    return (start, end) if end > start else None
+
+
+def _spectrum_from_spatial_prefix(
+    spatial: np.ndarray,
+    row: int,
+    col: int,
+    height: int,
+    width: int,
+    *,
+    roi_shape: str = "rect",
+) -> np.ndarray:
+    if _normalise_roi_shape(roi_shape) != "circle":
+        r1 = row + height
+        c1 = col + width
+        return (
+            spatial[r1, c1, :]
+            - spatial[row, c1, :]
+            - spatial[r1, col, :]
+            + spatial[row, col, :]
+        ).astype(np.float32)
+
+    out = np.zeros(int(spatial.shape[2]), dtype=np.int64)
+    for r in range(row, row + height):
+        segment = _circle_col_segment(r, row, col, height, width)
+        if segment is None:
+            continue
+        c0, c1 = segment
+        out += (
+            spatial[r + 1, c1, :].astype(np.int64)
+            - spatial[r, c1, :].astype(np.int64)
+            - spatial[r + 1, c0, :].astype(np.int64)
+            + spatial[r, c0, :].astype(np.int64)
+        )
+    return out.astype(np.float32)
 
 
 def load_spectrum_image_sidecar(
@@ -386,6 +453,7 @@ def load_spectrum_image_sidecar(
     width: float | None = None,
     band: tuple[float, float] | tuple[int, int] | None = None,
     roi: tuple[int, int, int, int] | None = None,
+    roi_shape: str = "rect",
 ) -> dict[str, Any]:
     """Load the tiny startup state needed by a browser-only EDS data-folder widget."""
 
@@ -402,20 +470,20 @@ def load_spectrum_image_sidecar(
         raise ValueError(f"data-folder energy axis must be length {n_energy}, got shape {axis.shape}")
 
     band_start, band_end = _resolve_band_indices(axis, energy=energy, width=width, band=band)
-    row, col, height, roi_width = _normalise_roi(rows, cols, roi)
-    r1 = row + height
-    c1 = col + roi_width
+    row, col, height, roi_width = _normalise_roi(rows, cols, roi, roi_shape=roi_shape)
 
     prefix = np.memmap(sidecar / meta["energy_prefix"], dtype="<u4", mode="r", shape=(n_energy + 1, rows, cols))
     initial_map = (prefix[band_end] - prefix[band_start]).astype(np.float32)
 
     spatial = np.memmap(sidecar / meta["spatial_prefix"], dtype="<u4", mode="r", shape=(rows + 1, cols + 1, n_energy))
-    initial_spectrum = (
-        spatial[r1, c1, :]
-        - spatial[row, c1, :]
-        - spatial[r1, col, :]
-        + spatial[row, col, :]
-    ).astype(np.float32)
+    initial_spectrum = _spectrum_from_spatial_prefix(
+        spatial,
+        row,
+        col,
+        height,
+        roi_width,
+        roi_shape=roi_shape,
+    )
 
     base_name = str(meta.get("base_image", "") or "")
     if base_name:
@@ -650,6 +718,7 @@ class ShowEDS(anywidget.AnyWidget):
     roi_col = traitlets.Int(0).tag(sync=True)
     roi_height = traitlets.Int(1).tag(sync=True)
     roi_width = traitlets.Int(1).tag(sync=True)
+    roi_shape = traitlets.Unicode("rect").tag(sync=True)
 
     panel_width_px = traitlets.Int(420).tag(sync=True)
     spectrum_width_px = traitlets.Int(640).tag(sync=True)
@@ -690,6 +759,7 @@ class ShowEDS(anywidget.AnyWidget):
         width: float | None = None,
         band: tuple[float, float] | tuple[int, int] | None = None,
         roi: tuple[int, int, int, int] | None = None,
+        roi_shape: str = "rect",
         panel_width_px: int = 420,
         spectrum_width_px: int | None = None,
         spectrum_height_px: int | None = None,
@@ -780,7 +850,8 @@ class ShowEDS(anywidget.AnyWidget):
         self.element_label = str(element_label)
         self.show_line_hints = bool(show_line_hints)
         self.show_debug = bool(show_debug)
-        self.saved_rois = [dict(item) for item in (saved_rois or [])]
+        self.roi_shape = _normalise_roi_shape(roi_shape)
+        self.saved_rois = [{**dict(item), "shape": _normalise_roi_shape(dict(item).get("shape", "rect"))} for item in (saved_rois or [])]
         self.saved_bands = [dict(item) for item in (saved_bands or [])]
         self.export_presets = [dict(item) for item in (export_presets or [])]
 
@@ -855,10 +926,12 @@ class ShowEDS(anywidget.AnyWidget):
             c = max(0, cols // 2 - w // 2)
         else:
             r, c, h, w = (int(v) for v in roi)
-        self.roi_row = int(max(0, min(rows - 1, r)))
-        self.roi_col = int(max(0, min(cols - 1, c)))
-        self.roi_height = int(max(1, min(rows - self.roi_row, h)))
-        self.roi_width = int(max(1, min(cols - self.roi_col, w)))
+        self.roi_row, self.roi_col, self.roi_height, self.roi_width = _normalise_roi(
+            rows,
+            cols,
+            (r, c, h, w),
+            roi_shape=self.roi_shape,
+        )
 
         if state is not None:
             if isinstance(state, (str, pathlib.Path)):
@@ -904,6 +977,7 @@ class ShowEDS(anywidget.AnyWidget):
                 width=width,
                 band=kwargs.get("band"),
                 roi=kwargs.get("roi"),
+                roi_shape=kwargs.get("roi_shape", "rect"),
             )
             if initial_map is None:
                 initial_map = startup["initial_map"]
@@ -1051,7 +1125,20 @@ class ShowEDS(anywidget.AnyWidget):
                 col = int(max(0, min(self.n_cols - 1, round(float(content.get("col", self.roi_col))))))
                 height = int(max(1, min(self.n_rows - row, round(float(content.get("height", self.roi_height))))))
                 width = int(max(1, min(self.n_cols - col, round(float(content.get("width", self.roi_width))))))
-                arr = np.asarray(cube[row : row + height, col : col + width, :].sum(axis=(0, 1)).compute(), dtype=np.float32)
+                roi_shape = _normalise_roi_shape(content.get("shape", self.roi_shape))
+                subset = cube[row : row + height, col : col + width, :]
+                if roi_shape == "circle":
+                    yy, xx = np.ogrid[:height, :width]
+                    cy = height * 0.5
+                    cx = width * 0.5
+                    radius = max(height, width) * 0.5
+                    mask = ((yy + 0.5 - cy) ** 2 + (xx + 0.5 - cx) ** 2) <= radius**2
+                    reduced = (subset * mask[:, :, None]).sum(axis=(0, 1))
+                else:
+                    reduced = subset.sum(axis=(0, 1))
+                if hasattr(reduced, "compute"):
+                    reduced = reduced.compute()
+                arr = np.asarray(reduced, dtype=np.float32)
                 payload_type = "spectrum"
             else:
                 return
@@ -1073,6 +1160,7 @@ class ShowEDS(anywidget.AnyWidget):
             "roi_col": self.roi_col,
             "roi_height": self.roi_height,
             "roi_width": self.roi_width,
+            "roi_shape": self.roi_shape,
             "panel_width_px": self.panel_width_px,
             "spectrum_width_px": self.spectrum_width_px,
             "spectrum_height_px": self.spectrum_height_px,
@@ -1103,10 +1191,13 @@ class ShowEDS(anywidget.AnyWidget):
                 setattr(self, key, value)
         self.band_start = int(max(0, min(self.n_energy - 1, self.band_start)))
         self.band_end = int(max(self.band_start + 1, min(self.n_energy, self.band_end)))
-        self.roi_row = int(max(0, min(self.n_rows - 1, self.roi_row)))
-        self.roi_col = int(max(0, min(self.n_cols - 1, self.roi_col)))
-        self.roi_height = int(max(1, min(self.n_rows - self.roi_row, self.roi_height)))
-        self.roi_width = int(max(1, min(self.n_cols - self.roi_col, self.roi_width)))
+        self.roi_shape = _normalise_roi_shape(self.roi_shape)
+        self.roi_row, self.roi_col, self.roi_height, self.roi_width = _normalise_roi(
+            self.n_rows,
+            self.n_cols,
+            (self.roi_row, self.roi_col, self.roi_height, self.roi_width),
+            roi_shape=self.roi_shape,
+        )
         self.map_zoom = float(max(1.0, min(32.0, self.map_zoom)))
         view_rows = self.n_rows / self.map_zoom
         view_cols = self.n_cols / self.map_zoom
@@ -1115,7 +1206,7 @@ class ShowEDS(anywidget.AnyWidget):
         min_span = min(8.0, float(max(1, self.n_energy)))
         self.spectrum_view_start = float(max(0.0, min(max(0.0, self.n_energy - min_span), self.spectrum_view_start)))
         self.spectrum_view_end = float(max(self.spectrum_view_start + min_span, min(float(self.n_energy), self.spectrum_view_end)))
-        self.saved_rois = [dict(item) for item in self.saved_rois]
+        self.saved_rois = [{**dict(item), "shape": _normalise_roi_shape(dict(item).get("shape", "rect"))} for item in self.saved_rois]
         self.saved_bands = [dict(item) for item in self.saved_bands]
         self.export_presets = [dict(item) for item in self.export_presets]
 
@@ -1293,15 +1384,25 @@ class ShowEDS(anywidget.AnyWidget):
         band_end = max(band_start + 1, int(np.ceil(self.band_end / energy_bin)))
         saved_rois = []
         for item in self.saved_rois:
+            shape = _normalise_roi_shape(item.get("shape", "rect"))
             row = int(item.get("row", 0)) // spatial_bin
             col = int(item.get("col", 0)) // spatial_bin
             height = max(1, int(np.ceil(int(item.get("height", 1)) / spatial_bin)))
             width = max(1, int(np.ceil(int(item.get("width", 1)) / spatial_bin)))
             row_clamped = max(0, min(int(cube.shape[0]) - 1, row))
             col_clamped = max(0, min(int(cube.shape[1]) - 1, col))
+            if shape == "circle":
+                diameter = min(
+                    max(height, width),
+                    int(cube.shape[0]) - row_clamped,
+                    int(cube.shape[1]) - col_clamped,
+                )
+                height = diameter
+                width = diameter
             saved_rois.append(
                 {
                     **dict(item),
+                    "shape": shape,
                     "row": row_clamped,
                     "col": col_clamped,
                     "height": max(1, min(int(cube.shape[0]) - row_clamped, height)),
@@ -1332,6 +1433,7 @@ class ShowEDS(anywidget.AnyWidget):
                 max(1, min(int(cube.shape[0]) - row0, row1 - row0)),
                 max(1, min(int(cube.shape[1]) - col0, col1 - col0)),
             ),
+            roi_shape=self.roi_shape,
             panel_width_px=self.panel_width_px,
             spectrum_width_px=self.spectrum_width_px,
             spectrum_height_px=self.spectrum_height_px,
