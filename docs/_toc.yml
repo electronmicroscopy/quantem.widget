@@ -31,3 +31,4 @@ parts:
   - caption: Maintainers
     chapters:
       - file: maintainer/widget-release
+      - file: maintainer/widget-performance
