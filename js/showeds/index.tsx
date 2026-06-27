@@ -175,7 +175,7 @@ function MapHistogram({
   dataMin,
   dataMax,
   width = 128,
-  height = 58,
+  height = 40,
 }: {
   data: NumericArray | null;
   vminPct: number;
@@ -208,7 +208,7 @@ function MapHistogram({
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.fillStyle = colors.bg;
     ctx.fillRect(0, 0, width, height);
-    const displayBins = 64;
+    const displayBins = 36;
     const binRatio = Math.max(1, Math.floor(bins.length / displayBins));
     const reducedBins: number[] = [];
     for (let i = 0; i < displayBins; i++) {
@@ -216,14 +216,19 @@ function MapHistogram({
       for (let j = 0; j < binRatio; j++) sum += bins[i * binRatio + j] || 0;
       reducedBins.push(sum / binRatio);
     }
-    const maxVal = Math.max(...reducedBins, 0.001);
+    const displayHeights = reducedBins.map((value) => Math.log1p(value));
+    const sortedHeights = displayHeights.filter((value) => Number.isFinite(value) && value > 0).sort((a, b) => a - b);
+    const robustIndex = Math.max(0, Math.min(sortedHeights.length - 1, Math.floor(sortedHeights.length * 0.9)));
+    const robustMax = sortedHeights.length ? sortedHeights[robustIndex] : 0;
+    const maxVal = Math.max(robustMax, 0.001);
     const barWidth = width / displayBins;
     const vminBin = Math.floor((Math.max(0, Math.min(100, vminPct)) / 100) * displayBins);
     const vmaxBin = Math.floor((Math.max(0, Math.min(100, vmaxPct)) / 100) * displayBins);
     for (let i = 0; i < displayBins; i++) {
-      const barHeight = (reducedBins[i] / maxVal) * (height - 2);
+      const scaledHeight = Math.min(1, displayHeights[i] / maxVal) * (height - 2);
+      const barHeight = displayHeights[i] > 0 ? Math.max(2, scaledHeight) : 0;
       ctx.fillStyle = i >= vminBin && i <= vmaxBin ? colors.barActive : colors.barInactive;
-      ctx.fillRect(i * barWidth + 0.5, height - barHeight, Math.max(1, barWidth - 1), barHeight);
+      ctx.fillRect(i * barWidth + 0.5, height - barHeight, Math.max(1.5, barWidth - 0.5), barHeight);
     }
   }, [bins, colors, height, vmaxPct, vminPct, width]);
   const valueLabel = (pct: number) => {
@@ -2207,11 +2212,12 @@ function ShowEDS() {
     display: "flex",
     alignItems: "center",
     gap: 1,
-    minHeight: 34,
     border: "1px solid rgba(128,128,128,0.35)",
     bgcolor: "rgba(128,128,128,0.08)",
     px: 1,
-    py: 0,
+    py: 0.5,
+    width: "fit-content",
+    maxWidth: "100%",
     boxSizing: "border-box",
   } as const;
   const controlLabelSx = { fontSize: 10, color: "text.secondary", flexShrink: 0, lineHeight: "20px" } as const;
@@ -2483,8 +2489,8 @@ function ShowEDS() {
           </Box>
         </Stack>
         {showControls && (
-          <Box sx={{ mt: 0.25, display: "flex", gap: 1, maxWidth: specW + size, boxSizing: "border-box", alignItems: "flex-start", overflowX: "auto", pb: 0.5 }}>
-            <Box sx={{ display: "flex", flexDirection: "column", gap: 0.5, flex: "0 0 auto", minWidth: 0 }}>
+          <Box sx={{ mt: 0.25, display: "flex", gap: 1, width: "fit-content", maxWidth: "100%", boxSizing: "border-box", alignItems: "flex-start", overflowX: "auto", pb: 0.5 }}>
+            <Box sx={{ display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 0.5, flex: "0 0 auto", minWidth: 0 }}>
               <Box sx={controlRowSx}>
                 <Typography sx={controlLabelSx}>Band:</Typography>
                 <Box
@@ -2682,7 +2688,7 @@ function ShowEDS() {
                 dataMin={mapDataRange[0]}
                 dataMax={mapDataRange[1]}
                 width={110}
-                height={58}
+                height={40}
                 onRangeChange={(lo, hi) => {
                   if (autoMapContrastOn) setAutoMapContrastOn(false);
                   setMapVminPct(lo);
