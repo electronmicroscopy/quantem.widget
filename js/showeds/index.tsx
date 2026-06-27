@@ -12,7 +12,8 @@ import Typography from "@mui/material/Typography";
 import { downloadBlob, extractBytes, extractFloat32, formatNumber, markWidgetNotebookDirty, preserveRestoredWidgetModelsOnSave } from "../format";
 import { computeHistogramFromBytes, percentileClip, sliderRange } from "../stats";
 
-type Roi = { row: number; col: number; height: number; width: number };
+type RoiShape = "rect" | "circle";
+type Roi = { row: number; col: number; height: number; width: number; shape?: RoiShape };
 type DragMode = "roi-move" | "roi-resize" | "map-pan" | "band-move" | "band-left" | "band-right" | null;
 type EdsLineHint = { element: string; line: string; family?: string; energy_keV: number; intensity?: number };
 type SavedRoi = Roi & { name?: string };
@@ -79,6 +80,7 @@ const MIN_SPECTRUM_SPAN = 8;
 const UI_FONT = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
 const HISTOGRAM_LIGHT_COLORS = { bg: "#f0f0f0", barActive: "#666", barInactive: "#bbb", border: "#ccc" };
 const HTML_EXPORT_OVERHEAD_BYTES = 700_000;
+const ROI_SHAPE_LABELS: Record<RoiShape, string> = { rect: "Rect", circle: "Circle" };
 const MAP_WGSL = `
 @group(0) @binding(0) var<storage,read> cube: array<u32>;
 @group(0) @binding(1) var<storage,read_write> out: array<f32>;
@@ -113,7 +115,7 @@ const SPEC_WGSL = `
 @group(0) @binding(0) var<storage,read> cube: array<u32>;
 @group(0) @binding(1) var<storage,read_write> out: array<f32>;
 @group(0) @binding(2) var<uniform> p: vec4<u32>; // rows, cols, n_energy, r0
-@group(0) @binding(3) var<uniform> q: vec4<u32>; // c0, r1, c1, mode: 0=f32 bits, 1=uint16 counts, 2=uint32 counts
+@group(0) @binding(3) var<uniform> q: vec4<u32>; // c0, r1, c1, mode | shape<<4; shape 0=rect, 1=circle
 
 fn sample(idx: u32, mode: u32) -> f32 {
   if (mode == 1u) {
@@ -131,10 +133,21 @@ fn sample(idx: u32, mode: u32) -> f32 {
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let e = gid.x;
   if (e >= p.z) { return; }
+  let packed = q.w;
+  let mode = packed & 15u;
+  let shape = packed >> 4u;
+  let cy = (f32(p.w) + f32(q.y)) * 0.5;
+  let cx = (f32(q.x) + f32(q.z)) * 0.5;
+  let radius = max(f32(q.y - p.w), f32(q.z - q.x)) * 0.5;
   var sum = 0.0;
   for (var r = p.w; r < q.y; r = r + 1u) {
     for (var c = q.x; c < q.z; c = c + 1u) {
-      sum = sum + sample((r * p.y + c) * p.z + e, q.w);
+      if (shape == 1u) {
+        let dy = f32(r) + 0.5 - cy;
+        let dx = f32(c) + 0.5 - cx;
+        if (dx * dx + dy * dy > radius * radius) { continue; }
+      }
+      sum = sum + sample((r * p.y + c) * p.z + e, mode);
     }
   }
   out[e] = sum;
@@ -342,6 +355,28 @@ function clampNumber(value: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, value));
 }
 
+function normalizeRoiShape(value: unknown): RoiShape {
+  return value === "circle" ? "circle" : "rect";
+}
+
+function normalizeRoi(input: Roi, rows: number, cols: number): Roi {
+  const shape = normalizeRoiShape(input.shape);
+  let row = Math.max(0, Math.min(rows - 1, Math.round(input.row)));
+  let col = Math.max(0, Math.min(cols - 1, Math.round(input.col)));
+  let height = Math.max(1, Math.round(input.height));
+  let width = Math.max(1, Math.round(input.width));
+  if (shape === "circle") {
+    let diameter = Math.max(1, Math.max(height, width));
+    diameter = Math.min(diameter, rows, cols);
+    row = Math.max(0, Math.min(rows - diameter, row));
+    col = Math.max(0, Math.min(cols - diameter, col));
+    return { row, col, height: diameter, width: diameter, shape };
+  }
+  height = Math.max(1, Math.min(rows - row, height));
+  width = Math.max(1, Math.min(cols - col, width));
+  return { row, col, height, width, shape };
+}
+
 function energyToIndex(axis: number[], value: number): number {
   if (!axis.length || !Number.isFinite(value)) return 0;
   if (axis.length === 1 || value <= axis[0]) return 0;
@@ -511,6 +546,22 @@ async function fetchSpatialPrefixSpectrum(row, col, signal) {
   return arr;
 }
 
+function normaliseRoiShape(shape) {
+  return shape === "circle" ? "circle" : "rect";
+}
+
+function circleSegmentForRow(row, r0, c0, r1, c1) {
+  const cx = (c0 + c1) * 0.5;
+  const cy = (r0 + r1) * 0.5;
+  const radius = Math.max(r1 - r0, c1 - c0) * 0.5;
+  const dy = row + 0.5 - cy;
+  if (Math.abs(dy) > radius) return null;
+  const half = Math.sqrt(Math.max(0, radius * radius - dy * dy));
+  const start = Math.max(c0, Math.ceil(cx - half - 0.5));
+  const end = Math.min(c1, Math.floor(cx + half - 0.5) + 1);
+  return end > start ? [start, end] : null;
+}
+
 self.onmessage = async (event) => {
   const msg = event.data || {};
   try {
@@ -580,6 +631,27 @@ self.onmessage = async (event) => {
         const c0 = Math.max(0, Math.min(meta.cols - 1, Math.round(msg.col)));
         const r1 = Math.max(r0 + 1, Math.min(meta.rows, r0 + Math.round(msg.height)));
         const c1 = Math.max(c0 + 1, Math.min(meta.cols, c0 + Math.round(msg.width)));
+        const shape = normaliseRoiShape(msg.shape);
+        if (shape === "circle") {
+          const out = new Uint32Array(meta.n_energy);
+          for (let r = r0; r < r1; r++) {
+            if (controller.signal.aborted) throw abortError();
+            const segment = circleSegmentForRow(r, r0, c0, r1, c1);
+            if (!segment) continue;
+            const [s0, s1] = segment;
+            const [br, tr, bl, tl] = await Promise.all([
+              fetchSpatialPrefixSpectrum(r + 1, s1, controller.signal),
+              fetchSpatialPrefixSpectrum(r, s1, controller.signal),
+              fetchSpatialPrefixSpectrum(r + 1, s0, controller.signal),
+              fetchSpatialPrefixSpectrum(r, s0, controller.signal),
+            ]);
+            if (controller.signal.aborted) throw abortError();
+            for (let e = 0; e < meta.n_energy; e++) out[e] += br[e] - tr[e] - bl[e] + tl[e];
+          }
+          if (controller.signal.aborted) throw abortError();
+          self.postMessage({ id: msg.id, type: "spectrum", buffer: out.buffer, ms: performance.now() - t0 }, [out.buffer]);
+          return;
+        }
         const [br, tr, bl, tl] = await Promise.all([
           fetchSpatialPrefixSpectrum(r1, c1, controller.signal),
           fetchSpatialPrefixSpectrum(r0, c1, controller.signal),
@@ -650,6 +722,7 @@ function ShowEDS() {
   const [roiCol, setRoiCol] = useModelState<number>("roi_col");
   const [roiHeight, setRoiHeight] = useModelState<number>("roi_height");
   const [roiWidth, setRoiWidth] = useModelState<number>("roi_width");
+  const [roiShape, setRoiShape] = useModelState<RoiShape>("roi_shape");
   const [panelWidth, setPanelWidth] = useModelState<number>("panel_width_px");
   const [spectrumWidth, setSpectrumWidth] = useModelState<number>("spectrum_width_px");
   const [spectrumHeight, setSpectrumHeight] = useModelState<number>("spectrum_height_px");
@@ -856,10 +929,13 @@ function ShowEDS() {
   const safeSavedRois = React.useMemo(() => (Array.isArray(savedRois) ? savedRois : [])
     .map((item, index) => ({
       name: String(item?.name || `ROI ${index + 1}`),
-      row: Math.max(0, Math.min(rows - 1, Math.round(Number(item?.row ?? 0)))),
-      col: Math.max(0, Math.min(cols - 1, Math.round(Number(item?.col ?? 0)))),
-      height: Math.max(1, Math.min(rows, Math.round(Number(item?.height ?? 1)))),
-      width: Math.max(1, Math.min(cols, Math.round(Number(item?.width ?? 1)))),
+      ...normalizeRoi({
+        row: Number(item?.row ?? 0),
+        col: Number(item?.col ?? 0),
+        height: Number(item?.height ?? 1),
+        width: Number(item?.width ?? 1),
+        shape: normalizeRoiShape(item?.shape),
+      }, rows, cols),
     })), [cols, rows, savedRois]);
   const safeSavedBands = React.useMemo(() => (Array.isArray(savedBands) ? savedBands : [])
     .map((item, index) => {
@@ -872,7 +948,7 @@ function ShowEDS() {
   const size = Math.max(180, Math.round(panelWidth || 420));
   const specW = Math.max(320, Math.round(spectrumWidth || size + 220));
   const specH = Math.max(140, Math.round(spectrumHeight || Math.round(size * 0.58)));
-  const modelRoi: Roi = { row: roiRow, col: roiCol, height: roiHeight, width: roiWidth };
+  const modelRoi: Roi = normalizeRoi({ row: roiRow, col: roiCol, height: roiHeight, width: roiWidth, shape: normalizeRoiShape(roiShape) }, rows, cols);
   const roi: Roi = localRoi ?? modelRoi;
   const rawBandStart = localBand?.[0] ?? bandStart;
   const rawBandEnd = localBand?.[1] ?? bandEnd;
@@ -1400,7 +1476,14 @@ function ShowEDS() {
       const c0 = Math.max(0, Math.min(cols - 1, Math.round(nextRoi.col)));
       const r1 = Math.max(r0 + 1, Math.min(rows, r0 + Math.round(nextRoi.height)));
       const c1 = Math.max(c0 + 1, Math.min(cols, c0 + Math.round(nextRoi.width)));
-      const response = await requestSidecarWorker({ type: "spectrum", row: r0, col: c0, height: r1 - r0, width: c1 - c0 });
+      const response = await requestSidecarWorker({
+        type: "spectrum",
+        row: r0,
+        col: c0,
+        height: r1 - r0,
+        width: c1 - c0,
+        shape: normalizeRoiShape(nextRoi.shape),
+      });
       if (response.aborted) return;
       if (seq !== spectrumComputeSeqRef.current) return;
       if (!response.buffer) throw new Error("EDS folder data worker returned an empty spectrum");
@@ -1421,8 +1504,10 @@ function ShowEDS() {
     const c0 = Math.max(0, Math.min(cols - 1, Math.round(nextRoi.col)));
     const r1 = Math.max(r0 + 1, Math.min(rows, r0 + Math.round(nextRoi.height)));
     const c1 = Math.max(c0 + 1, Math.min(cols, c0 + Math.round(nextRoi.width)));
+    const mode = cubeDtype === "uint16" ? 1 : cubeDtype === "uint32" ? 2 : 0;
+    const shape = normalizeRoiShape(nextRoi.shape) === "circle" ? 1 : 0;
     gpu.device.queue.writeBuffer(gpu.specParamsA, 0, new Uint32Array([rows, cols, nEnergy, r0]));
-    gpu.device.queue.writeBuffer(gpu.specParamsB, 0, new Uint32Array([c0, r1, c1, cubeDtype === "uint16" ? 1 : cubeDtype === "uint32" ? 2 : 0]));
+    gpu.device.queue.writeBuffer(gpu.specParamsB, 0, new Uint32Array([c0, r1, c1, mode | (shape << 4)]));
     const enc = gpu.device.createCommandEncoder();
     const pass = enc.beginComputePass();
     pass.setPipeline(gpu.specPipeline);
@@ -1538,7 +1623,7 @@ function ShowEDS() {
   React.useEffect(() => {
     if (!gpuRef.current && !isSidecarBackend) return;
     scheduleSpectrum(modelRoi);
-  }, [isSidecarBackend, roiCol, roiHeight, roiRow, roiWidth, scheduleSpectrum, gpuRef.current]);
+  }, [isSidecarBackend, roiCol, roiHeight, roiRow, roiShape, roiWidth, scheduleSpectrum, gpuRef.current]);
   React.useEffect(() => {
     const id = window.setTimeout(() => {
       if (gpuRef.current || isSidecarBackend) {
@@ -1547,7 +1632,7 @@ function ShowEDS() {
       }
     }, 100);
     return () => window.clearTimeout(id);
-  }, [bandEnd, bandStart, isSidecarBackend, roiCol, roiHeight, roiRow, roiWidth, scheduleMap, scheduleSpectrum, gpuRef.current]);
+  }, [bandEnd, bandStart, isSidecarBackend, roiCol, roiHeight, roiRow, roiShape, roiWidth, scheduleMap, scheduleSpectrum, gpuRef.current]);
 
   React.useEffect(() => {
     const canvas = mapCanvasRef.current;
@@ -1713,8 +1798,9 @@ function ShowEDS() {
     setRoiCol(pending.col);
     setRoiHeight(pending.height);
     setRoiWidth(pending.width);
+    setRoiShape(normalizeRoiShape(pending.shape));
     saveWidgetChanges();
-  }, [saveWidgetChanges, setRoiCol, setRoiHeight, setRoiRow, setRoiWidth]);
+  }, [saveWidgetChanges, setRoiCol, setRoiHeight, setRoiRow, setRoiShape, setRoiWidth]);
 
   const queueRoiPersist = React.useCallback((next: Roi, immediate = false, defer = false) => {
     pendingRoiPersistRef.current = next;
@@ -1731,14 +1817,11 @@ function ShowEDS() {
   }, [flushRoiPersist]);
 
   const updateRoi = (next: Roi, sync = true, interactive = false) => {
-    const r = Math.max(0, Math.min(rows - 1, Math.round(next.row)));
-    const c = Math.max(0, Math.min(cols - 1, Math.round(next.col)));
-    const h = Math.max(1, Math.min(rows - r, Math.round(next.height)));
-    const w = Math.max(1, Math.min(cols - c, Math.round(next.width)));
-    const normalized = { row: r, col: c, height: h, width: w };
+    const normalized = normalizeRoi({ ...next, shape: normalizeRoiShape(next.shape ?? roi.shape) }, rows, cols);
+    const shapeChanged = normalizeRoiShape(normalized.shape) !== normalizeRoiShape(roi.shape);
     setLocalRoi(normalized);
     if (sync) {
-      queueRoiPersist(normalized, false, interactive);
+      queueRoiPersist(normalized, shapeChanged, interactive && !shapeChanged);
     }
     scheduleSpectrum(normalized, interactive);
   };
@@ -1761,7 +1844,7 @@ function ShowEDS() {
     const name = `ROI ${safeSavedRois.length + 1}`;
     const next = [
       ...safeSavedRois.filter((item) => item.name !== name),
-      { name, row: roi.row, col: roi.col, height: roi.height, width: roi.width },
+      { name, row: roi.row, col: roi.col, height: roi.height, width: roi.width, shape: normalizeRoiShape(roi.shape) },
     ];
     setSavedRois(next);
     saveWidgetChanges();
@@ -1831,7 +1914,11 @@ function ShowEDS() {
     const hitCol = (14 / Math.max(1, size)) * mapView.cols;
     const hitRow = (14 / Math.max(1, size)) * mapView.rows;
     const nearCorner = Math.abs(img.col - (roi.col + roi.width)) < hitCol && Math.abs(img.row - (roi.row + roi.height)) < hitRow;
-    const inside = img.col >= roi.col && img.col <= roi.col + roi.width && img.row >= roi.row && img.row <= roi.row + roi.height;
+    const insideBox = img.col >= roi.col && img.col <= roi.col + roi.width && img.row >= roi.row && img.row <= roi.row + roi.height;
+    const inside = normalizeRoiShape(roi.shape) === "circle"
+      ? insideBox && (((img.col - (roi.col + roi.width / 2)) / Math.max(1e-9, roi.width / 2)) ** 2
+        + ((img.row - (roi.row + roi.height / 2)) / Math.max(1e-9, roi.height / 2)) ** 2 <= 1)
+      : insideBox;
     if (nearCorner || inside) {
       setDrag({ mode: nearCorner ? "roi-resize" : "roi-move", x: p.x, y: p.y, roi, bandStart: bandLo, bandEnd: bandHi });
       e.preventDefault();
@@ -1942,7 +2029,12 @@ function ShowEDS() {
         const dx = (e.clientX - rect.left - drag.x) / size * mapView.cols;
         const dy = (e.clientY - rect.top - drag.y) / size * mapView.rows;
         if (drag.mode === "roi-move") updateRoi({ ...drag.roi, row: drag.roi.row + dy, col: drag.roi.col + dx }, true, true);
-        else updateRoi({ ...drag.roi, width: drag.roi.width + dx, height: drag.roi.height + dy }, true, true);
+        else if (normalizeRoiShape(drag.roi.shape) === "circle") {
+          const delta = Math.max(dx, dy);
+          updateRoi({ ...drag.roi, width: drag.roi.width + delta, height: drag.roi.height + delta }, true, true);
+        } else {
+          updateRoi({ ...drag.roi, width: drag.roi.width + dx, height: drag.roi.height + dy }, true, true);
+        }
       } else if (drag.mode === "map-pan") {
         const rect = mapViewportRef.current?.getBoundingClientRect();
         if (!rect) return;
@@ -2017,6 +2109,7 @@ function ShowEDS() {
       col: Math.max(0, cols / 2 - cols / 8),
       height: Math.max(8, rows / 4),
       width: Math.max(8, cols / 4),
+      shape: "rect",
     });
   };
 
@@ -2212,6 +2305,7 @@ function ShowEDS() {
                   width: `${roiOverlayStyle.width}px`,
                   height: `${roiOverlayStyle.height}px`,
                   border: "2px dashed #00ff7f",
+                  borderRadius: normalizeRoiShape(roi.shape) === "circle" ? "50%" : 0,
                 }}
               >
                 <Box
@@ -2245,7 +2339,9 @@ function ShowEDS() {
               />
             </Box>
             <Typography sx={{ mt: 0.5, fontSize: 11 }}>
-              Overlay ROI: row {roi.row}, col {roi.col}, {roi.height}x{roi.width}
+              Overlay ROI: {normalizeRoiShape(roi.shape) === "circle"
+                ? `circle row ${roi.row}, col ${roi.col}, d ${roi.width}`
+                : `row ${roi.row}, col ${roi.col}, ${roi.height}x${roi.width}`}
             </Typography>
           </Box>
           <Box>
@@ -2396,6 +2492,16 @@ function ShowEDS() {
                   size="small"
                   sx={{ flexShrink: 0, my: 0 }}
                 />
+                <Button
+                  size="small"
+                  sx={compactButtonSx}
+                  variant="outlined"
+                  onClick={() => updateRoi({ ...roi, shape: normalizeRoiShape(roi.shape) === "circle" ? "rect" : "circle" }, true)}
+                  aria-label="Toggle ROI shape"
+                  title="Toggle rectangular or circular ROI"
+                >
+                  ROI {ROI_SHAPE_LABELS[normalizeRoiShape(roi.shape)]}
+                </Button>
                 <Button size="small" sx={compactButtonSx} variant="outlined" onClick={saveCurrentRoi}>Save ROI</Button>
                 <Button
                   size="small"
@@ -2422,7 +2528,7 @@ function ShowEDS() {
                 >
                   {safeSavedRois.map((saved, index) => (
                     <MenuItem key={`${saved.name}-${index}`} onClick={() => applySavedRoi(saved)} sx={{ fontSize: 12 }}>
-                      {saved.name}: row {saved.row}, col {saved.col}, {saved.height}x{saved.width}
+                      {saved.name}: {ROI_SHAPE_LABELS[normalizeRoiShape(saved.shape)]} row {saved.row}, col {saved.col}, {saved.height}x{saved.width}
                     </MenuItem>
                   ))}
                   <MenuItem onClick={clearSavedRois} sx={{ fontSize: 12, color: "text.secondary" }}>Clear saved ROIs</MenuItem>

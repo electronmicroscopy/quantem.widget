@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from quantem.widget import ShowEDS
-from quantem.widget.showeds import bin_spectrum_image, eds_line_hints, prepare_spectrum_image_sidecar
+from quantem.widget.showeds import bin_spectrum_image, eds_line_hints, load_spectrum_image_sidecar, prepare_spectrum_image_sidecar
 
 
 def test_showeds_constructor_sets_shape_and_state():
@@ -37,13 +37,14 @@ def test_showeds_constructor_sets_shape_and_state():
     assert widget.roi_col == 2
     assert widget.roi_height == 3
     assert widget.roi_width == 4
+    assert widget.roi_shape == "rect"
     assert widget.panel_width_px == 240
     assert widget.spectrum_width_px == 520
     assert widget.spectrum_height_px == 180
     assert widget.map_vmin_pct == 5
     assert widget.map_vmax_pct == 95
     assert widget.show_debug is True
-    assert widget.saved_rois == [{"name": "particle", "row": 1, "col": 2, "height": 3, "width": 4}]
+    assert widget.saved_rois == [{"name": "particle", "row": 1, "col": 2, "height": 3, "width": 4, "shape": "rect"}]
     assert widget.saved_bands == [{"name": "Au M", "start": 1, "end": 3}]
     assert widget.export_presets == [{"label": "Small demo", "mode": "single", "binning": 4}]
     assert widget.show_line_hints is True
@@ -80,6 +81,7 @@ def test_showeds_state_roundtrip():
         cube,
         band=(2, 5),
         roi=(2, 3, 4, 5),
+        roi_shape="circle",
         log_spectrum=True,
         element_label="Au",
         spectrum_width_px=500,
@@ -87,7 +89,7 @@ def test_showeds_state_roundtrip():
         map_vmin_pct=4,
         map_vmax_pct=99,
         show_debug=True,
-        saved_rois=[{"name": "A", "row": 2, "col": 3, "height": 4, "width": 5}],
+        saved_rois=[{"name": "A", "row": 2, "col": 3, "height": 4, "width": 5, "shape": "circle"}],
         saved_bands=[{"name": "B", "start": 2, "end": 5}],
         export_presets=[{"label": "Portable", "mode": "single", "binning": 2}],
     )
@@ -169,7 +171,7 @@ def test_showeds_binned_export_scales_saved_rois_and_bands(tmp_path):
         title="EDS Binned Presets",
         band=(2, 4),
         roi=(0, 0, 4, 4),
-        saved_rois=[{"name": "corner", "row": 2, "col": 2, "height": 2, "width": 4}],
+        saved_rois=[{"name": "corner", "row": 2, "col": 2, "height": 2, "width": 4, "shape": "circle"}],
         saved_bands=[{"name": "peak", "start": 2, "end": 6}],
     )
     widget.map_zoom = 2.0
@@ -180,7 +182,7 @@ def test_showeds_binned_export_scales_saved_rois_and_bands(tmp_path):
 
     binned, _label = widget._export_widget_for_mode("single", binning=2)
 
-    assert binned.saved_rois == [{"name": "corner", "row": 1, "col": 1, "height": 1, "width": 2}]
+    assert binned.saved_rois == [{"name": "corner", "row": 1, "col": 1, "height": 1, "width": 1, "shape": "circle"}]
     assert binned.saved_bands == [{"name": "peak", "start": 1, "end": 3}]
     assert binned.map_zoom == 2.0
     assert binned.map_view_row == 1.0
@@ -345,3 +347,17 @@ def test_showeds_from_sidecar_can_load_startup_state_from_sidecar_dir(tmp_path):
     expected_spectrum = cube[1:3, 1:3, :].sum(axis=(0, 1)).astype(np.float32)
     assert np.frombuffer(widget.initial_map_bytes, dtype=np.float32).reshape(3, 4).tolist() == expected_map.tolist()
     assert np.frombuffer(widget.initial_spectrum_bytes, dtype=np.float32).tolist() == expected_spectrum.tolist()
+
+
+def test_showeds_sidecar_circle_roi_uses_exact_pixel_mask(tmp_path):
+    cube = np.arange(5 * 5 * 4, dtype=np.uint16).reshape(5, 5, 4)
+    energy = np.arange(4, dtype=np.float32)
+    sidecar = prepare_spectrum_image_sidecar(cube, energy, tmp_path / "eds")
+
+    loaded = load_spectrum_image_sidecar(sidecar, roi=(1, 1, 3, 3), roi_shape="circle")
+
+    yy, xx = np.ogrid[:3, :3]
+    mask = ((yy + 0.5 - 1.5) ** 2 + (xx + 0.5 - 1.5) ** 2) <= 1.5**2
+    expected = (cube[1:4, 1:4, :] * mask[:, :, None]).sum(axis=(0, 1)).astype(np.float32)
+    assert loaded["roi"] == (1, 1, 3, 3)
+    assert loaded["initial_spectrum"].tolist() == expected.tolist()
