@@ -365,7 +365,12 @@ def _resolve_band_indices(
 
 
 def _normalise_roi_shape(value: Any) -> str:
-    return "circle" if str(value).strip().lower() == "circle" else "rect"
+    shape = str(value).strip().lower()
+    if shape == "circle":
+        return "circle"
+    if shape in {"ellipse", "oval"}:
+        return "ellipse"
+    return "rect"
 
 
 def _normalise_roi(
@@ -395,18 +400,34 @@ def _normalise_roi(
     return row, col, height, width
 
 
-def _circle_col_segment(row: int, roi_row: int, roi_col: int, height: int, width: int) -> tuple[int, int] | None:
+def _round_col_segment(
+    row: int,
+    roi_row: int,
+    roi_col: int,
+    height: int,
+    width: int,
+    *,
+    roi_shape: str = "circle",
+) -> tuple[int, int] | None:
     r0 = roi_row
     r1 = roi_row + height
     c0 = roi_col
     c1 = roi_col + width
     cx = (c0 + c1) * 0.5
     cy = (r0 + r1) * 0.5
-    radius = max(height, width) * 0.5
     dy = row + 0.5 - cy
-    if abs(dy) > radius:
-        return None
-    half = float(np.sqrt(max(0.0, radius * radius - dy * dy)))
+    if _normalise_roi_shape(roi_shape) == "circle":
+        radius = max(height, width) * 0.5
+        if abs(dy) > radius:
+            return None
+        half = float(np.sqrt(max(0.0, radius * radius - dy * dy)))
+    else:
+        ry = max(0.5, height * 0.5)
+        rx = max(0.5, width * 0.5)
+        norm_y = dy / ry
+        if abs(norm_y) > 1:
+            return None
+        half = float(rx * np.sqrt(max(0.0, 1.0 - norm_y * norm_y)))
     start = max(c0, int(np.ceil(cx - half - 0.5)))
     end = min(c1, int(np.floor(cx + half - 0.5)) + 1)
     return (start, end) if end > start else None
@@ -421,7 +442,8 @@ def _spectrum_from_spatial_prefix(
     *,
     roi_shape: str = "rect",
 ) -> np.ndarray:
-    if _normalise_roi_shape(roi_shape) != "circle":
+    shape = _normalise_roi_shape(roi_shape)
+    if shape == "rect":
         r1 = row + height
         c1 = col + width
         return (
@@ -433,7 +455,7 @@ def _spectrum_from_spatial_prefix(
 
     out = np.zeros(int(spatial.shape[2]), dtype=np.int64)
     for r in range(row, row + height):
-        segment = _circle_col_segment(r, row, col, height, width)
+        segment = _round_col_segment(r, row, col, height, width, roi_shape=shape)
         if segment is None:
             continue
         c0, c1 = segment
@@ -1149,12 +1171,17 @@ class ShowEDS(anywidget.AnyWidget):
                 width = int(max(1, min(self.n_cols - col, round(float(content.get("width", self.roi_width))))))
                 roi_shape = _normalise_roi_shape(content.get("shape", self.roi_shape))
                 subset = cube[row : row + height, col : col + width, :]
-                if roi_shape == "circle":
+                if roi_shape != "rect":
                     yy, xx = np.ogrid[:height, :width]
                     cy = height * 0.5
                     cx = width * 0.5
-                    radius = max(height, width) * 0.5
-                    mask = ((yy + 0.5 - cy) ** 2 + (xx + 0.5 - cx) ** 2) <= radius**2
+                    if roi_shape == "circle":
+                        radius = max(height, width) * 0.5
+                        mask = ((yy + 0.5 - cy) ** 2 + (xx + 0.5 - cx) ** 2) <= radius**2
+                    else:
+                        ry = max(0.5, height * 0.5)
+                        rx = max(0.5, width * 0.5)
+                        mask = (((yy + 0.5 - cy) / ry) ** 2 + ((xx + 0.5 - cx) / rx) ** 2) <= 1.0
                     reduced = (subset * mask[:, :, None]).sum(axis=(0, 1))
                 else:
                     reduced = subset.sum(axis=(0, 1))
