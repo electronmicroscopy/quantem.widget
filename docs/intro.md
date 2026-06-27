@@ -5,7 +5,7 @@ Interactive, GPU-aware Python widgets for electron microscopy, built on
 JupyterLab, VS Code, or Colab.
 
 ```python
-from quantem.widget import Show2D, Show3D, Show3DSlices, Show4DSTEM, load
+from quantem.widget import Show2D, Show3D, Show3DSlices, Show4DSTEM, ShowEDS, load
 ```
 
 ## Quickest start: no notebook needed
@@ -43,6 +43,7 @@ detector at load (`det_bin`) to cut memory and speed first paint - see
 | `Show3D` | A 3D volume scrubbed slice-by-slice (e.g. a ptychographic object) | [tutorial](tutorials/show3d) · [API](api/show3d) |
 | `Show3DSlices` | Side-by-side slices of a 3D volume across an axis | [tutorial](tutorials/show3dslices) · [API](api/show3dslices) |
 | `Show4DSTEM` | 4D-STEM: live virtual detectors over the diffraction stack | [tutorial](tutorials/show4dstem) · [API](api/show4dstem) |
+| `ShowEDS` | EDS/EELS spectrum image: linked element map, spectrum, energy band, and ROI | [tutorial](tutorials/showeds) · [API](api/showeds) |
 
 The [Tutorials](tutorials/show2d) walk through each widget on synthetic data and
 show how to [save and export](tutorials/saving). The [API reference](api/index)
@@ -57,15 +58,21 @@ units automatically from the dataset when present.
 ## Offline by default in these docs
 
 The Show2D, Show3D, and Show3DSlices examples on this site were exported with
-`offline=True`, which bakes the display data into the widget as a **uint8
-quantized** stack (4x smaller than float32, and the colormap clamps to 256
-levels anyway so it looks identical). The canvas below each example stays fully
+`encoding="uint8"`, which bakes the display data into the widget as a **uint8**
+stack (4x smaller than float32, and the colormap clamps to 256 levels anyway so
+it looks identical). The canvas below each example stays fully
 interactive in this static page with no running kernel: scrub, zoom, change
 contrast, toggle the FFT - all in the browser. Show4DSTEM goes further: for a
 small dataset its virtual-detector math runs in **WebGPU**, so dragging the
 aperture recomputes the virtual image in the browser. The browser stack is
 uint8-clipped for transport, so it is exact for detector counts `<=255`; use the
 CUDA/MPS kernel path when full uint16 count fidelity matters.
+
+ShowEDS uses the same saved-widget model for synthetic and small cubes in single
+mode with exact data. For large native EDS/EELS files, the notebook keeps the
+interactive state while the exact count data stays in a data folder. Portable
+HTML demos can be exported with count-preserving sum downsampling when
+full-resolution data would be too large for public sharing.
 
 See [Installation](install) to get started.
 

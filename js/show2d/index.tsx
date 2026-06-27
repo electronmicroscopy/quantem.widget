@@ -3738,7 +3738,7 @@ function Show2D() {
               <KeyboardShortcuts items={isGallery ? [["← / →", "Prev / Next image"], ["1 – 9", "Select image"], ["] / [", "Rotate CW / CCW 90°"], ["Del / ⌫", "Delete selected ROI"], ["M", "Measure distance"], ["Esc", "Exit measure"], ["R", "Reset zoom"], ["Scroll", "Zoom"], ["Dbl-click", "Reset view"]] : [["] / [", "Rotate CW / CCW 90°"], ["Del / ⌫", "Delete selected ROI"], ["M", "Measure distance"], ["Esc", "Exit measure"], ["R", "Reset zoom"], ["Scroll", "Zoom"], ["Dbl-click", "Reset view"]]} />
             </Box>} theme={themeInfo.theme} />
           </Typography>
-          {/* Controls row: Profile, ROI, Lens, FFT, Export, Reset, Copy */}
+          {/* Controls row: Profile, ROI, Lens, FFT, Export, status, Reset, Copy */}
           <Stack direction="row" alignItems="center" spacing={`${SPACING.SM}px`} sx={{ mb: `${SPACING.XS}px`, height: 28 }}>
             {(
               <>
@@ -3833,9 +3833,6 @@ function Show2D() {
             )}
             <Box sx={{ flex: 1 }} />
             {(
-              <Button size="small" sx={compactButton} disabled={!needsReset} onClick={handleResetAll}>Reset</Button>
-            )}
-            {(
               <>
                 <Button
                   size="small"
@@ -3847,8 +3844,8 @@ function Show2D() {
                   {exportBusy ? "Exporting" : "Export"}
                 </Button>
                 <Menu anchorEl={exportAnchor} open={Boolean(exportAnchor)} onClose={() => setExportAnchor(null)} anchorOrigin={{ vertical: "bottom", horizontal: "left" }} transformOrigin={{ vertical: "top", horizontal: "left" }} sx={{ zIndex: 9999 }}>
-                  {exportEnabled && <MenuItem onClick={() => handleHtmlExportSelect("exact")} sx={{ fontSize: 12 }}>HTML exact float32 ({exactHtmlSize})</MenuItem>}
-                  {exportEnabled && <MenuItem onClick={() => handleHtmlExportSelect("quantized")} sx={{ fontSize: 12 }}>HTML quantized uint8 ({quantizedHtmlSize})</MenuItem>}
+                  {exportEnabled && <MenuItem onClick={() => handleHtmlExportSelect("exact")} sx={{ fontSize: 12 }}>Exact float32 ({exactHtmlSize})</MenuItem>}
+                  {exportEnabled && <MenuItem onClick={() => handleHtmlExportSelect("quantized")} sx={{ fontSize: 12 }}>Quantized uint8 ({quantizedHtmlSize})</MenuItem>}
                 </Menu>
                 {exportEnabled && (localExportStatus || exportStatus) && (
                   <Typography
@@ -3865,6 +3862,7 @@ function Show2D() {
                     {localExportStatus || exportStatus}
                   </Typography>
                 )}
+                <Button size="small" sx={compactButton} disabled={!needsReset} onClick={handleResetAll}>Reset</Button>
                 <Button size="small" sx={compactButton} onClick={handleCopy}>Copy</Button>
               </>
             )}

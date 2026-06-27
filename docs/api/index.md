@@ -1,7 +1,7 @@
 # API reference
 
-Complete reference for the four widgets and the `load` helper. Each page has two
-halves:
+Complete reference for the five widgets, the HTML export protocol, and the
+`load` helper. Widget pages have two halves:
 
 1. **Reference** - the constructor signature, every parameter, and every public
    method, generated directly from the source by static analysis (so it never
@@ -25,6 +25,8 @@ show2d
 show3d
 show3dslices
 show4dstem
+showeds
+html-export
 load
 ```
 
@@ -32,7 +34,10 @@ load
 
 | Widget | Class | Offline export |
 |---|---|---|
-| [Show2D](show2d) | `quantem.widget.show2d.Show2D` | state JSON, PNG |
-| [Show3D](show3d) | `quantem.widget.show3d.Show3D` | state JSON, PNG, interactive HTML (exact / quantized) |
-| [Show3DSlices](show3dslices) | `quantem.widget.show3dslices.Show3DSlices` | state JSON, PNG, interactive HTML (exact / quantized) |
+| [Show2D](show2d) | `quantem.widget.show2d.Show2D` | state JSON, PNG, interactive HTML (`encoding="full"` / `encoding="uint8"`) |
+| [Show3D](show3d) | `quantem.widget.show3d.Show3D` | state JSON, PNG, interactive HTML (`encoding="full"` / `encoding="uint8"`) |
+| [Show3DSlices](show3dslices) | `quantem.widget.show3dslices.Show3DSlices` | state JSON, PNG, interactive HTML (`encoding="full"` / `encoding="uint8"`) |
 | [Show4DSTEM](show4dstem) | `quantem.widget.Show4DSTEM` dispatcher | state JSON, PNG, interactive WebGPU HTML; large exports use a companion data directory |
+| [ShowEDS](showeds) | `quantem.widget.showeds.ShowEDS` | state JSON, interactive HTML; large exact data use folder export, portable demos use downsampled HTML |
+
+All widget-level HTML exports follow the [HTML export protocol](html-export).
