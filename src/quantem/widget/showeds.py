@@ -725,6 +725,9 @@ class ShowEDS(anywidget.AnyWidget):
     spectrum_height_px = traitlets.Int(250).tag(sync=True)
     show_controls = traitlets.Bool(True).tag(sync=True)
     log_spectrum = traitlets.Bool(False).tag(sync=True)
+    pixel_size = traitlets.Float(0.0).tag(sync=True)
+    pixel_unit = traitlets.Unicode("px").tag(sync=True)
+    scale_bar_visible = traitlets.Bool(True).tag(sync=True)
     map_vmin_pct = traitlets.Float(2.0).tag(sync=True)
     map_vmax_pct = traitlets.Float(98.0).tag(sync=True)
     overlay_opacity = traitlets.Float(0.65).tag(sync=True)
@@ -765,6 +768,11 @@ class ShowEDS(anywidget.AnyWidget):
         spectrum_height_px: int | None = None,
         show_controls: bool = True,
         log_spectrum: bool = False,
+        pixel_size: float | None = None,
+        pixel_unit: str = "px",
+        sampling: float | tuple[float, float] | list[float] | None = None,
+        units: str | list[str] | None = None,
+        scale_bar_visible: bool = True,
         map_vmin_pct: float = 2.0,
         map_vmax_pct: float = 98.0,
         overlay_opacity: float = 0.65,
@@ -844,6 +852,20 @@ class ShowEDS(anywidget.AnyWidget):
         self.title = title
         self.show_controls = bool(show_controls)
         self.log_spectrum = bool(log_spectrum)
+        if pixel_size is None:
+            if sampling is None:
+                self.pixel_size = 0.0
+            elif isinstance(sampling, (int, float)):
+                self.pixel_size = float(sampling)
+            else:
+                self.pixel_size = float(sampling[-1])
+        else:
+            self.pixel_size = float(max(0.0, pixel_size))
+        if units is not None:
+            self.pixel_unit = units if isinstance(units, str) else str(units[-1])
+        else:
+            self.pixel_unit = str(pixel_unit)
+        self.scale_bar_visible = bool(scale_bar_visible)
         self.map_vmin_pct = float(max(0.0, min(100.0, map_vmin_pct)))
         self.map_vmax_pct = float(max(self.map_vmin_pct, min(100.0, map_vmax_pct)))
         self.overlay_opacity = float(max(0.0, min(1.0, overlay_opacity)))
@@ -1166,6 +1188,9 @@ class ShowEDS(anywidget.AnyWidget):
             "spectrum_height_px": self.spectrum_height_px,
             "show_controls": self.show_controls,
             "log_spectrum": self.log_spectrum,
+            "pixel_size": self.pixel_size,
+            "pixel_unit": self.pixel_unit,
+            "scale_bar_visible": self.scale_bar_visible,
             "map_vmin_pct": self.map_vmin_pct,
             "map_vmax_pct": self.map_vmax_pct,
             "overlay_opacity": self.overlay_opacity,
@@ -1198,6 +1223,9 @@ class ShowEDS(anywidget.AnyWidget):
             (self.roi_row, self.roi_col, self.roi_height, self.roi_width),
             roi_shape=self.roi_shape,
         )
+        self.pixel_size = float(max(0.0, self.pixel_size))
+        self.pixel_unit = str(self.pixel_unit or "px")
+        self.scale_bar_visible = bool(self.scale_bar_visible)
         self.map_zoom = float(max(1.0, min(32.0, self.map_zoom)))
         view_rows = self.n_rows / self.map_zoom
         view_cols = self.n_cols / self.map_zoom
@@ -1439,6 +1467,9 @@ class ShowEDS(anywidget.AnyWidget):
             spectrum_height_px=self.spectrum_height_px,
             show_controls=self.show_controls,
             log_spectrum=self.log_spectrum,
+            pixel_size=self.pixel_size * spatial_bin if self.pixel_size > 0 else 0.0,
+            pixel_unit=self.pixel_unit,
+            scale_bar_visible=self.scale_bar_visible,
             map_vmin_pct=self.map_vmin_pct,
             map_vmax_pct=self.map_vmax_pct,
             overlay_opacity=self.overlay_opacity,
