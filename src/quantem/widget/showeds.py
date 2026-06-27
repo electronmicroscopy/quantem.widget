@@ -659,6 +659,11 @@ class ShowEDS(anywidget.AnyWidget):
     map_vmin_pct = traitlets.Float(2.0).tag(sync=True)
     map_vmax_pct = traitlets.Float(98.0).tag(sync=True)
     overlay_opacity = traitlets.Float(0.65).tag(sync=True)
+    map_zoom = traitlets.Float(1.0).tag(sync=True)
+    map_view_row = traitlets.Float(0.0).tag(sync=True)
+    map_view_col = traitlets.Float(0.0).tag(sync=True)
+    spectrum_view_start = traitlets.Float(0.0).tag(sync=True)
+    spectrum_view_end = traitlets.Float(1.0).tag(sync=True)
     element_label = traitlets.Unicode("").tag(sync=True)
     show_line_hints = traitlets.Bool(True).tag(sync=True)
     line_hints = traitlets.List(traitlets.Dict(), default_value=[]).tag(sync=True)
@@ -826,6 +831,11 @@ class ShowEDS(anywidget.AnyWidget):
         if spectrum_height_px is None:
             spectrum_height_px = int(round(self.panel_width_px * 0.58))
         self.spectrum_height_px = int(max(140, spectrum_height_px))
+        self.map_zoom = 1.0
+        self.map_view_row = 0.0
+        self.map_view_col = 0.0
+        self.spectrum_view_start = 0.0
+        self.spectrum_view_end = float(n_energy)
         if band is not None:
             start, end = self._resolve_band(axis, band)
         elif energy is not None:
@@ -1071,6 +1081,11 @@ class ShowEDS(anywidget.AnyWidget):
             "map_vmin_pct": self.map_vmin_pct,
             "map_vmax_pct": self.map_vmax_pct,
             "overlay_opacity": self.overlay_opacity,
+            "map_zoom": self.map_zoom,
+            "map_view_row": self.map_view_row,
+            "map_view_col": self.map_view_col,
+            "spectrum_view_start": self.spectrum_view_start,
+            "spectrum_view_end": self.spectrum_view_end,
             "element_label": self.element_label,
             "show_line_hints": self.show_line_hints,
             "show_debug": self.show_debug,
@@ -1092,6 +1107,14 @@ class ShowEDS(anywidget.AnyWidget):
         self.roi_col = int(max(0, min(self.n_cols - 1, self.roi_col)))
         self.roi_height = int(max(1, min(self.n_rows - self.roi_row, self.roi_height)))
         self.roi_width = int(max(1, min(self.n_cols - self.roi_col, self.roi_width)))
+        self.map_zoom = float(max(1.0, min(32.0, self.map_zoom)))
+        view_rows = self.n_rows / self.map_zoom
+        view_cols = self.n_cols / self.map_zoom
+        self.map_view_row = float(max(0.0, min(max(0.0, self.n_rows - view_rows), self.map_view_row)))
+        self.map_view_col = float(max(0.0, min(max(0.0, self.n_cols - view_cols), self.map_view_col)))
+        min_span = min(8.0, float(max(1, self.n_energy)))
+        self.spectrum_view_start = float(max(0.0, min(max(0.0, self.n_energy - min_span), self.spectrum_view_start)))
+        self.spectrum_view_end = float(max(self.spectrum_view_start + min_span, min(float(self.n_energy), self.spectrum_view_end)))
         self.saved_rois = [dict(item) for item in self.saved_rois]
         self.saved_bands = [dict(item) for item in self.saved_bands]
         self.export_presets = [dict(item) for item in self.export_presets]
@@ -1297,7 +1320,7 @@ class ShowEDS(anywidget.AnyWidget):
                 }
             )
         title = self.title or "ShowEDS"
-        return ShowEDS(
+        widget = ShowEDS(
             cube,
             axis,
             title=f"{title} sum-binned {spatial_bin}x/{energy_bin}x",
@@ -1326,6 +1349,13 @@ class ShowEDS(anywidget.AnyWidget):
             export_presets=[dict(item) for item in self.export_presets],
             max_state_bytes=None,
         )
+        widget.map_zoom = self.map_zoom
+        widget.map_view_row = self.map_view_row / spatial_bin
+        widget.map_view_col = self.map_view_col / spatial_bin
+        widget.spectrum_view_start = self.spectrum_view_start / energy_bin
+        widget.spectrum_view_end = max(widget.spectrum_view_start + 1, self.spectrum_view_end / energy_bin)
+        widget.load_state_dict(widget.state_dict())
+        return widget
 
     def _on_export_request_change(self, change: dict) -> None:
         raw = str(change.get("new") or "")
