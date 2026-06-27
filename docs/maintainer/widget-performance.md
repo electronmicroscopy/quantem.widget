@@ -46,6 +46,9 @@ Rule for future high-FPS widget selectors:
 - If the user expects a derived overlay, map, or spectrum to move while dragging,
   that derived view is part of the preview and must be updated live through the
   fastest available scheduler.
+- Keep all redundant views of the same selection synchronized during preview:
+  the plot band, bottom slider handles, text readout, and derived overlay should
+  move as one interaction.
 
 This applies to ShowEDS energy bands and ROI drags, Show4DSTEM detector masks,
 Show2D contrast controls, and any future draggable selector that needs to feel
