@@ -72,6 +72,7 @@ need a Python round trip.
 | Band center drag | `band_start`, `band_end` | The selected energy window translates without changing width |
 | Real-space rectangular ROI | `roi_row`, `roi_col`, `roi_height`, `roi_width` | Spectrum recomputes from the selected real-space region |
 | Spectrum log toggle | `log_spectrum` | Spectrum switches between linear and log display |
+| Scroll zoom / pan | `map_zoom`, `map_view_row`, `map_view_col`, `spectrum_view_start`, `spectrum_view_end` | Real-space and spectrum views zoom around the cursor and reopen at the saved view |
 | Overlay slider | `overlay_opacity` | Element-map overlay fades against the base image |
 | Auto / contrast range | `map_vmin_pct`, `map_vmax_pct` | Element-map display range updates without changing counts |
 | Panel resize handles | `panel_width_px`, `spectrum_width_px`, `spectrum_height_px` | Real-space and spectrum panels resize independently |
@@ -80,8 +81,8 @@ need a Python round trip.
 
 ## State and sharing
 
-Saving a notebook stores the interactive widget state: current band, ROI, log
-toggle, overlay opacity, contrast limits, panel sizes, and export metadata. For
+Saving a notebook stores the interactive widget state: current band, ROI, scroll
+zoom, log toggle, overlay opacity, contrast limits, panel sizes, and export metadata. For
 small cubes stored with exact data, the saved notebook also contains the exact cube bytes. For
 large `from_emd(...)` widgets, the saved notebook contains only startup arrays
 and the data folder URL, so reopening stays lightweight and the data folder must

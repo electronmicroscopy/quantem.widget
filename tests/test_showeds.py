@@ -91,6 +91,11 @@ def test_showeds_state_roundtrip():
         saved_bands=[{"name": "B", "start": 2, "end": 5}],
         export_presets=[{"label": "Portable", "mode": "single", "binning": 2}],
     )
+    widget.map_zoom = 2.0
+    widget.map_view_row = 1.5
+    widget.map_view_col = 2.5
+    widget.spectrum_view_start = 1.0
+    widget.spectrum_view_end = 9.0
     state = widget.state_dict()
 
     restored = ShowEDS(cube, state=state)
@@ -167,11 +172,21 @@ def test_showeds_binned_export_scales_saved_rois_and_bands(tmp_path):
         saved_rois=[{"name": "corner", "row": 2, "col": 2, "height": 2, "width": 4}],
         saved_bands=[{"name": "peak", "start": 2, "end": 6}],
     )
+    widget.map_zoom = 2.0
+    widget.map_view_row = 2.0
+    widget.map_view_col = 4.0
+    widget.spectrum_view_start = 2.0
+    widget.spectrum_view_end = 6.0
 
     binned, _label = widget._export_widget_for_mode("single", binning=2)
 
     assert binned.saved_rois == [{"name": "corner", "row": 1, "col": 1, "height": 1, "width": 2}]
     assert binned.saved_bands == [{"name": "peak", "start": 1, "end": 3}]
+    assert binned.map_zoom == 2.0
+    assert binned.map_view_row == 1.0
+    assert binned.map_view_col == 1.5
+    assert binned.spectrum_view_start == 0.0
+    assert binned.spectrum_view_end == 4.0
 
 
 def test_showeds_export_html_keeps_legacy_mode_aliases(tmp_path):

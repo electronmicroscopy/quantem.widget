@@ -13,7 +13,7 @@ import { downloadBlob, extractBytes, extractFloat32, formatNumber, markWidgetNot
 import { computeHistogramFromBytes, percentileClip, sliderRange } from "../stats";
 
 type Roi = { row: number; col: number; height: number; width: number };
-type DragMode = "roi-move" | "roi-resize" | "band-move" | "band-left" | "band-right" | null;
+type DragMode = "roi-move" | "roi-resize" | "map-pan" | "band-move" | "band-left" | "band-right" | null;
 type EdsLineHint = { element: string; line: string; family?: string; energy_keV: number; intensity?: number };
 type SavedRoi = Roi & { name?: string };
 type SavedBand = { name?: string; start: number; end: number };
@@ -73,6 +73,9 @@ type ShowEDSPerfWindow = Window & typeof globalThis & {
 
 const WORKGROUP = 64;
 const INTERACTION_COMPUTE_INTERVAL_MS = 32;
+const MIN_MAP_ZOOM = 1;
+const MAX_MAP_ZOOM = 32;
+const MIN_SPECTRUM_SPAN = 8;
 const UI_FONT = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
 const HISTOGRAM_LIGHT_COLORS = { bg: "#f0f0f0", barActive: "#666", barInactive: "#bbb", border: "#ccc" };
 const HTML_EXPORT_OVERHEAD_BYTES = 700_000;
@@ -332,6 +335,28 @@ function colorize(t: number): [number, number, number] {
 
 function formatEnergy(v: number): string {
   return Number.isFinite(v) ? `${v.toFixed(2)} keV` : "";
+}
+
+function clampNumber(value: number, lo: number, hi: number): number {
+  if (!Number.isFinite(value)) return lo;
+  return Math.max(lo, Math.min(hi, value));
+}
+
+function energyToIndex(axis: number[], value: number): number {
+  if (!axis.length || !Number.isFinite(value)) return 0;
+  if (axis.length === 1 || value <= axis[0]) return 0;
+  const last = axis.length - 1;
+  if (value >= axis[last]) return last;
+  let lo = 0;
+  let hi = last;
+  while (hi - lo > 1) {
+    const mid = (lo + hi) >> 1;
+    if (axis[mid] <= value) lo = mid;
+    else hi = mid;
+  }
+  const span = axis[hi] - axis[lo];
+  if (!Number.isFinite(span) || span === 0) return lo;
+  return lo + (value - axis[lo]) / span;
 }
 
 function makeExportFilename(title: string, rows: number, cols: number, nEnergy: number, mode: string, downsample?: number): string {
@@ -633,6 +658,11 @@ function ShowEDS() {
   const [mapVminPct, setMapVminPct] = useModelState<number>("map_vmin_pct");
   const [mapVmaxPct, setMapVmaxPct] = useModelState<number>("map_vmax_pct");
   const [overlayOpacity, setOverlayOpacity] = useModelState<number>("overlay_opacity");
+  const [mapZoom, setMapZoom] = useModelState<number>("map_zoom");
+  const [mapViewRow, setMapViewRow] = useModelState<number>("map_view_row");
+  const [mapViewCol, setMapViewCol] = useModelState<number>("map_view_col");
+  const [spectrumViewStart, setSpectrumViewStart] = useModelState<number>("spectrum_view_start");
+  const [spectrumViewEnd, setSpectrumViewEnd] = useModelState<number>("spectrum_view_end");
   const [elementLabel] = useModelState<string>("element_label");
   const [showLineHints] = useModelState<boolean>("show_line_hints");
   const [lineHints] = useModelState<EdsLineHint[]>("line_hints");
@@ -649,6 +679,7 @@ function ShowEDS() {
   const [exportSidecarBytes] = useModelState<number>("export_sidecar_bytes");
 
   const mapCanvasRef = React.useRef<HTMLCanvasElement | null>(null);
+  const mapViewportRef = React.useRef<HTMLDivElement | null>(null);
   const mapOverlayCanvasRef = React.useRef<HTMLCanvasElement | null>(null);
   const specCanvasRef = React.useRef<HTMLCanvasElement | null>(null);
   const specBandOverlayRef = React.useRef<HTMLDivElement | null>(null);
@@ -676,7 +707,16 @@ function ShowEDS() {
   const [localBand, setLocalBand] = React.useState<[number, number] | null>(null);
   const [localRoi, setLocalRoi] = React.useState<Roi | null>(null);
   const [localOverlayOpacity, setLocalOverlayOpacity] = React.useState<number | null>(null);
-  const [drag, setDrag] = React.useState<{ mode: DragMode; x: number; y: number; roi: Roi; bandStart: number; bandEnd: number } | null>(null);
+  const [drag, setDrag] = React.useState<{
+    mode: DragMode;
+    x: number;
+    y: number;
+    roi: Roi;
+    bandStart: number;
+    bandEnd: number;
+    mapViewRow?: number;
+    mapViewCol?: number;
+  } | null>(null);
   const [panelResize, setPanelResize] = React.useState<PanelResize>(null);
   const [bandSliderDrag, setBandSliderDrag] = React.useState<BandSliderDrag>(null);
   const [exportMenuAnchor, setExportMenuAnchor] = React.useState<HTMLElement | null>(null);
@@ -707,6 +747,7 @@ function ShowEDS() {
   const spectrumComputeSeqRef = React.useRef(0);
   const bandPersistTimerRef = React.useRef<number | null>(null);
   const roiPersistTimerRef = React.useRef<number | null>(null);
+  const viewPersistTimerRef = React.useRef<number | null>(null);
   const pendingLocalBandRef = React.useRef<[number, number] | null>(null);
   const localBandRafRef = React.useRef<number | null>(null);
   const pendingBandPersistRef = React.useRef<[number, number] | null>(null);
@@ -728,6 +769,15 @@ function ShowEDS() {
       markWidgetNotebookDirty(model);
     }, 0);
   }, [model]);
+
+  const queueViewPersist = React.useCallback(() => {
+    markWidgetNotebookDirty(model);
+    if (viewPersistTimerRef.current != null) window.clearTimeout(viewPersistTimerRef.current);
+    viewPersistTimerRef.current = window.setTimeout(() => {
+      viewPersistTimerRef.current = null;
+      saveWidgetChanges();
+    }, 180);
+  }, [model, saveWidgetChanges]);
 
   const flushLocalBandPreview = React.useCallback(() => {
     if (localBandRafRef.current != null) {
@@ -831,16 +881,80 @@ function ShowEDS() {
   const displayOverlayOpacity = Math.max(0, Math.min(1, localOverlayOpacity ?? overlayOpacity));
   const bandEnergyLo = Math.min(energy[bandLo] ?? 0, energy[Math.max(bandLo, bandHi - 1)] ?? 0);
   const bandEnergyHi = Math.max(energy[bandLo] ?? 0, energy[Math.max(bandLo, bandHi - 1)] ?? 0);
+  const mapView = React.useMemo(() => {
+    const zoom = clampNumber(mapZoom || 1, MIN_MAP_ZOOM, MAX_MAP_ZOOM);
+    const viewRows = rows / zoom;
+    const viewCols = cols / zoom;
+    const row = clampNumber(mapViewRow || 0, 0, Math.max(0, rows - viewRows));
+    const col = clampNumber(mapViewCol || 0, 0, Math.max(0, cols - viewCols));
+    return { zoom, row, col, rows: viewRows, cols: viewCols };
+  }, [cols, mapViewCol, mapViewRow, mapZoom, rows]);
+  const setMapView = React.useCallback((zoom: number, row: number, col: number, persist = true) => {
+    const nextZoom = clampNumber(zoom, MIN_MAP_ZOOM, MAX_MAP_ZOOM);
+    const nextRows = rows / nextZoom;
+    const nextCols = cols / nextZoom;
+    const nextRow = clampNumber(row, 0, Math.max(0, rows - nextRows));
+    const nextCol = clampNumber(col, 0, Math.max(0, cols - nextCols));
+    setMapZoom(nextZoom);
+    setMapViewRow(nextRow);
+    setMapViewCol(nextCol);
+    if (persist) queueViewPersist();
+  }, [cols, queueViewPersist, rows, setMapViewCol, setMapViewRow, setMapZoom]);
+  const mapScreenToImage = React.useCallback((x: number, y: number) => ({
+    row: mapView.row + (y / Math.max(1, size)) * mapView.rows,
+    col: mapView.col + (x / Math.max(1, size)) * mapView.cols,
+  }), [mapView, size]);
+  const mapImageToScreen = React.useCallback((row: number, col: number) => ({
+    x: ((col - mapView.col) / Math.max(1e-9, mapView.cols)) * size,
+    y: ((row - mapView.row) / Math.max(1e-9, mapView.rows)) * size,
+  }), [mapView, size]);
+  const mapLayerStyle = React.useMemo(() => ({
+    position: "absolute" as const,
+    left: `${-(mapView.col / Math.max(1, cols)) * size * mapView.zoom}px`,
+    top: `${-(mapView.row / Math.max(1, rows)) * size * mapView.zoom}px`,
+    width: `${size * mapView.zoom}px`,
+    height: `${size * mapView.zoom}px`,
+    display: "block",
+    willChange: "left, top, width, height",
+  }), [cols, mapView, rows, size]);
+  const spectrumView = React.useMemo(() => {
+    let start = Number.isFinite(spectrumViewStart) ? Number(spectrumViewStart) : 0;
+    let end = Number.isFinite(spectrumViewEnd) && Number(spectrumViewEnd) > start
+      ? Number(spectrumViewEnd)
+      : nEnergy;
+    const minSpan = Math.min(MIN_SPECTRUM_SPAN, Math.max(1, nEnergy));
+    start = clampNumber(start, 0, Math.max(0, nEnergy - minSpan));
+    end = clampNumber(end, start + minSpan, nEnergy);
+    return { start, end, span: Math.max(minSpan, end - start) };
+  }, [nEnergy, spectrumViewEnd, spectrumViewStart]);
+  const setSpectrumView = React.useCallback((start: number, end: number, persist = true) => {
+    const minSpan = Math.min(MIN_SPECTRUM_SPAN, Math.max(1, nEnergy));
+    const span = clampNumber(end - start, minSpan, Math.max(minSpan, nEnergy));
+    const nextStart = clampNumber(start, 0, Math.max(0, nEnergy - span));
+    const nextEnd = clampNumber(nextStart + span, nextStart + minSpan, nEnergy);
+    setSpectrumViewStart(nextStart);
+    setSpectrumViewEnd(nextEnd);
+    if (persist) queueViewPersist();
+  }, [nEnergy, queueViewPersist, setSpectrumViewEnd, setSpectrumViewStart]);
+  const indexToSpecX = React.useCallback((index: number, width = specW) => {
+    const padL = 54;
+    const padR = 14;
+    const plotW = Math.max(1, width - padL - padR);
+    return padL + ((index - spectrumView.start) / Math.max(1e-9, spectrumView.span)) * plotW;
+  }, [specW, spectrumView]);
+  const specXToIndex = React.useCallback((x: number, width = specW) => {
+    const padL = 54;
+    const padR = 14;
+    const plotW = Math.max(1, width - padL - padR);
+    return spectrumView.start + ((x - padL) / plotW) * spectrumView.span;
+  }, [specW, spectrumView]);
   const positionBandPreview = React.useCallback((start: number, end: number, sliderWidth?: number): [number, number] => {
     const s = Math.max(0, Math.min(nEnergy - 1, Math.round(start)));
     const e = Math.max(s + 1, Math.min(nEnergy, Math.round(end)));
     const specEl = specBandOverlayRef.current;
     if (specEl) {
-      const padL = 54;
-      const padR = 14;
-      const plotW = Math.max(1, specW - padL - padR);
-      const x0 = padL + (s / Math.max(1, nEnergy - 1)) * plotW;
-      const x1 = padL + ((e - 1) / Math.max(1, nEnergy - 1)) * plotW;
+      const x0 = indexToSpecX(s);
+      const x1 = indexToSpecX(e - 1);
       specEl.style.transform = `translateX(${x0}px)`;
       specEl.style.width = `${Math.max(2, x1 - x0)}px`;
     }
@@ -875,7 +989,7 @@ function ShowEDS() {
       statusEl.textContent = `Band ${s}-${e - 1}: ${formatEnergy(e0)} - ${formatEnergy(e1)}; ROI band counts ${formatNumber(sum, 2)}${candidates ? `; candidates ${candidates}` : ""}`;
     }
     return [s, e];
-  }, [energy, lineHints, nEnergy, roiSpectrum, showLineHints, specW]);
+  }, [energy, indexToSpecX, lineHints, nEnergy, roiSpectrum, showLineHints]);
   const previewCenterBand = React.useCallback((start: number, end: number, sliderWidth?: number) => {
     const [s, e] = positionBandPreview(start, end, sliderWidth);
     pendingLocalBandRef.current = [s, e];
@@ -909,12 +1023,14 @@ function ShowEDS() {
     if (Math.abs(localOverlayOpacity - overlayOpacity) <= 1e-6) setLocalOverlayOpacity(null);
   }, [localOverlayOpacity, overlayOpacity]);
   const roiOverlayStyle = React.useMemo(() => {
-    const left = (roi.col / Math.max(1, cols)) * size;
-    const top = (roi.row / Math.max(1, rows)) * size;
-    const width = (roi.width / Math.max(1, cols)) * size;
-    const height = (roi.height / Math.max(1, rows)) * size;
+    const topLeft = mapImageToScreen(roi.row, roi.col);
+    const bottomRight = mapImageToScreen(roi.row + roi.height, roi.col + roi.width);
+    const left = topLeft.x;
+    const top = topLeft.y;
+    const width = bottomRight.x - topLeft.x;
+    const height = bottomRight.y - topLeft.y;
     return { left, top, width, height };
-  }, [cols, roi.col, roi.height, roi.row, roi.width, rows, size]);
+  }, [mapImageToScreen, roi.col, roi.height, roi.row, roi.width]);
   const backendLabel = isSidecarBackend ? "Data folder" : isKernelBackend ? "Kernel exact" : "WebGPU";
   const embeddedPayloadBytes =
     (cube?.byteLength ?? 0)
@@ -1220,6 +1336,7 @@ function ShowEDS() {
       if (specThrottleTimerRef.current != null) window.clearTimeout(specThrottleTimerRef.current);
       if (bandPersistTimerRef.current != null) window.clearTimeout(bandPersistTimerRef.current);
       if (roiPersistTimerRef.current != null) window.clearTimeout(roiPersistTimerRef.current);
+      if (viewPersistTimerRef.current != null) window.clearTimeout(viewPersistTimerRef.current);
       if (localBandRafRef.current != null) window.cancelAnimationFrame(localBandRafRef.current);
     };
   }, []);
@@ -1502,9 +1619,12 @@ function ShowEDS() {
     const plotW = canvas.width - padL - padR;
     const plotH = canvas.height - padT - padB;
     const values = roiSpectrum;
-    const transformed = new Float32Array(values.length);
-    for (let i = 0; i < values.length; i++) transformed[i] = logSpectrum ? Math.log10(Math.max(1, values[i])) : values[i];
+    const viewStart = Math.max(0, Math.min(values.length - 1, Math.floor(spectrumView.start)));
+    const viewEnd = Math.max(viewStart + 1, Math.min(values.length, Math.ceil(spectrumView.end)));
+    const transformed = new Float32Array(viewEnd - viewStart);
+    for (let i = viewStart; i < viewEnd; i++) transformed[i - viewStart] = logSpectrum ? Math.log10(Math.max(1, values[i])) : values[i];
     const [lo, hi] = finiteRange(transformed);
+    const ySpan = Math.max(1e-12, hi - lo);
     ctx.strokeStyle = "#333";
     ctx.lineWidth = dpr;
     for (let i = 0; i <= 4; i++) {
@@ -1512,42 +1632,39 @@ function ShowEDS() {
       ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(padL + plotW, y); ctx.stroke();
     }
     if (showLineHints && Array.isArray(lineHints) && energy.length > 1) {
-      const e0 = energy[0];
-      const e1 = energy[energy.length - 1];
-      const span = e1 - e0;
-      if (Number.isFinite(span) && span !== 0) {
-        const visibleLines = lineHints
-          .filter((line) => line.intensity === undefined || line.intensity >= 0.04 || (line.energy_keV >= bandEnergyLo && line.energy_keV <= bandEnergyHi));
-        ctx.save();
-        ctx.font = `${10 * dpr}px ${UI_FONT}`;
-        for (const line of visibleLines) {
-          const x = padL + ((line.energy_keV - e0) / span) * plotW;
-          if (x < padL || x > padL + plotW) continue;
-          const inBand = line.energy_keV >= bandEnergyLo && line.energy_keV <= bandEnergyHi;
-          ctx.strokeStyle = inBand ? "rgba(129, 212, 250, 0.72)" : "rgba(129, 212, 250, 0.22)";
-          ctx.lineWidth = inBand ? 1.5 * dpr : dpr;
-          ctx.beginPath();
-          ctx.moveTo(x, padT);
-          ctx.lineTo(x, padT + plotH);
-          ctx.stroke();
-        }
-        const labelLines = candidateLines.slice(0, 3);
-        labelLines.forEach((line, index) => {
-          const x = padL + ((line.energy_keV - e0) / span) * plotW;
-          if (x < padL || x > padL + plotW) return;
-          ctx.fillStyle = "rgba(129, 212, 250, 0.92)";
-          ctx.fillText(lineLabel(line), Math.min(x + 3 * dpr, padL + plotW - 48 * dpr), padT + (13 + index * 12) * dpr);
-        });
-        ctx.restore();
+      const visibleLines = lineHints
+        .filter((line) => line.intensity === undefined || line.intensity >= 0.04 || (line.energy_keV >= bandEnergyLo && line.energy_keV <= bandEnergyHi));
+      ctx.save();
+      ctx.font = `${10 * dpr}px ${UI_FONT}`;
+      for (const line of visibleLines) {
+        const lineIndex = energyToIndex(energy, line.energy_keV);
+        const x = padL + ((lineIndex - spectrumView.start) / Math.max(1e-9, spectrumView.span)) * plotW;
+        if (x < padL || x > padL + plotW) continue;
+        const inBand = line.energy_keV >= bandEnergyLo && line.energy_keV <= bandEnergyHi;
+        ctx.strokeStyle = inBand ? "rgba(129, 212, 250, 0.72)" : "rgba(129, 212, 250, 0.22)";
+        ctx.lineWidth = inBand ? 1.5 * dpr : dpr;
+        ctx.beginPath();
+        ctx.moveTo(x, padT);
+        ctx.lineTo(x, padT + plotH);
+        ctx.stroke();
       }
+      const labelLines = candidateLines.slice(0, 3);
+      labelLines.forEach((line, index) => {
+        const lineIndex = energyToIndex(energy, line.energy_keV);
+        const x = padL + ((lineIndex - spectrumView.start) / Math.max(1e-9, spectrumView.span)) * plotW;
+        if (x < padL || x > padL + plotW) return;
+        ctx.fillStyle = "rgba(129, 212, 250, 0.92)";
+        ctx.fillText(lineLabel(line), Math.min(x + 3 * dpr, padL + plotW - 48 * dpr), padT + (13 + index * 12) * dpr);
+      });
+      ctx.restore();
     }
     ctx.strokeStyle = "#ffd54f";
     ctx.lineWidth = 2 * dpr;
     ctx.beginPath();
-    for (let i = 0; i < values.length; i++) {
-      const x = padL + (i / Math.max(1, values.length - 1)) * plotW;
-      const y = padT + plotH - ((transformed[i] - lo) / (hi - lo)) * plotH;
-      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    for (let i = viewStart; i < viewEnd; i++) {
+      const x = padL + ((i - spectrumView.start) / Math.max(1e-9, spectrumView.span)) * plotW;
+      const y = padT + plotH - ((transformed[i - viewStart] - lo) / ySpan) * plotH;
+      if (i === viewStart) ctx.moveTo(x, y); else ctx.lineTo(x, y);
     }
     ctx.stroke();
     ctx.fillStyle = "#ddd";
@@ -1555,7 +1672,7 @@ function ShowEDS() {
     ctx.fillText(`${formatEnergy(energy[bandLo])} - ${formatEnergy(energy[Math.max(bandLo, bandHi - 1)])}`, padL, canvas.height - 10 * dpr);
     ctx.fillText(logSpectrum ? "log counts" : "counts", 8 * dpr, 16 * dpr);
     recordWidgetPerf("spectrumDrawMs", performance.now() - t0);
-  }, [bandEnergyHi, bandEnergyLo, bandHi, bandLo, candidateLines, energy, lineHints, logSpectrum, nEnergy, recordWidgetPerf, roiSpectrum, showLineHints, specH, specW]);
+  }, [bandEnergyHi, bandEnergyLo, bandHi, bandLo, candidateLines, energy, lineHints, logSpectrum, recordWidgetPerf, roiSpectrum, showLineHints, specH, specW, spectrumView]);
 
   const flushBandPersist = React.useCallback(() => {
     if (bandPersistTimerRef.current != null) {
@@ -1704,29 +1821,47 @@ function ShowEDS() {
   }, [fps, perfTick, summarizePerf]);
 
   const mapPoint = (e: React.MouseEvent) => {
-    const r = mapCanvasRef.current!.getBoundingClientRect();
+    const r = mapViewportRef.current!.getBoundingClientRect();
     return { x: e.clientX - r.left, y: e.clientY - r.top };
   };
 
   const onMapDown = (e: React.MouseEvent) => {
     const p = mapPoint(e);
-    const sx = size / cols, sy = size / rows;
-    const x = roi.col * sx, y = roi.row * sy, w = roi.width * sx, h = roi.height * sy;
-    const nearCorner = Math.abs(p.x - (x + w)) < 14 && Math.abs(p.y - (y + h)) < 14;
-    const inside = p.x >= x && p.x <= x + w && p.y >= y && p.y <= y + h;
+    const img = mapScreenToImage(p.x, p.y);
+    const hitCol = (14 / Math.max(1, size)) * mapView.cols;
+    const hitRow = (14 / Math.max(1, size)) * mapView.rows;
+    const nearCorner = Math.abs(img.col - (roi.col + roi.width)) < hitCol && Math.abs(img.row - (roi.row + roi.height)) < hitRow;
+    const inside = img.col >= roi.col && img.col <= roi.col + roi.width && img.row >= roi.row && img.row <= roi.row + roi.height;
     if (nearCorner || inside) {
       setDrag({ mode: nearCorner ? "roi-resize" : "roi-move", x: p.x, y: p.y, roi, bandStart: bandLo, bandEnd: bandHi });
+      e.preventDefault();
+    } else if (mapView.zoom > 1.001) {
+      setDrag({ mode: "map-pan", x: p.x, y: p.y, roi, bandStart: bandLo, bandEnd: bandHi, mapViewRow: mapView.row, mapViewCol: mapView.col });
       e.preventDefault();
     }
   };
 
+  const zoomMapAt = React.useCallback((clientX: number, clientY: number, deltaY: number) => {
+    const rect = mapViewportRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const x = clientX - rect.left;
+    const y = clientY - rect.top;
+    const cursor = mapScreenToImage(x, y);
+    const nextZoom = clampNumber(mapView.zoom * (deltaY > 0 ? 0.9 : 1.1), MIN_MAP_ZOOM, MAX_MAP_ZOOM);
+    const nextRows = rows / nextZoom;
+    const nextCols = cols / nextZoom;
+    setMapView(
+      nextZoom,
+      cursor.row - (y / Math.max(1, size)) * nextRows,
+      cursor.col - (x / Math.max(1, size)) * nextCols,
+    );
+  }, [cols, mapScreenToImage, mapView.zoom, rows, setMapView, size]);
+
   const onSpecDown = (e: React.MouseEvent) => {
     const rect = specCanvasRef.current!.getBoundingClientRect();
     const x = e.clientX - rect.left;
-    const padL = 54, padR = 14;
-    const plotW = specW - padL - padR;
-    const x0 = padL + (bandLo / Math.max(1, nEnergy - 1)) * plotW;
-    const x1 = padL + ((bandHi - 1) / Math.max(1, nEnergy - 1)) * plotW;
+    const x0 = indexToSpecX(bandLo);
+    const x1 = indexToSpecX(bandHi - 1);
     let mode: DragMode = null;
     const insideBand = x >= x0 && x <= x1;
     const bandPx = Math.abs(x1 - x0);
@@ -1739,6 +1874,42 @@ function ShowEDS() {
       e.preventDefault();
     }
   };
+
+  const zoomSpectrumAt = React.useCallback((clientX: number, deltaY: number) => {
+    const rect = specCanvasRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const x = clientX - rect.left;
+    const cursor = specXToIndex(x);
+    const factor = deltaY > 0 ? 1.12 : 0.88;
+    const nextSpan = clampNumber(spectrumView.span * factor, Math.min(MIN_SPECTRUM_SPAN, nEnergy), Math.max(1, nEnergy));
+    const padL = 54;
+    const padR = 14;
+    const plotW = Math.max(1, specW - padL - padR);
+    const frac = clampNumber((x - padL) / plotW, 0, 1);
+    setSpectrumView(cursor - frac * nextSpan, cursor + (1 - frac) * nextSpan);
+  }, [nEnergy, setSpectrumView, specW, specXToIndex, spectrumView.span]);
+
+  React.useEffect(() => {
+    const el = mapViewportRef.current;
+    if (!el) return;
+    const onWheel = (event: WheelEvent) => {
+      event.preventDefault();
+      zoomMapAt(event.clientX, event.clientY, event.deltaY);
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, [zoomMapAt]);
+
+  React.useEffect(() => {
+    const el = specCanvasRef.current;
+    if (!el) return;
+    const onWheel = (event: WheelEvent) => {
+      event.preventDefault();
+      zoomSpectrumAt(event.clientX, event.deltaY);
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, [zoomSpectrumAt]);
 
   React.useEffect(() => {
     if (!panelResize) return;
@@ -1766,18 +1937,22 @@ function ShowEDS() {
     if (!drag) return;
     const onMove = (e: MouseEvent) => {
       if (drag.mode?.startsWith("roi")) {
-        const rect = mapCanvasRef.current?.getBoundingClientRect();
+        const rect = mapViewportRef.current?.getBoundingClientRect();
         if (!rect) return;
-        const dx = (e.clientX - rect.left - drag.x) / size * cols;
-        const dy = (e.clientY - rect.top - drag.y) / size * rows;
+        const dx = (e.clientX - rect.left - drag.x) / size * mapView.cols;
+        const dy = (e.clientY - rect.top - drag.y) / size * mapView.rows;
         if (drag.mode === "roi-move") updateRoi({ ...drag.roi, row: drag.roi.row + dy, col: drag.roi.col + dx }, true, true);
         else updateRoi({ ...drag.roi, width: drag.roi.width + dx, height: drag.roi.height + dy }, true, true);
+      } else if (drag.mode === "map-pan") {
+        const rect = mapViewportRef.current?.getBoundingClientRect();
+        if (!rect) return;
+        const dx = (e.clientX - rect.left - drag.x) / size * mapView.cols;
+        const dy = (e.clientY - rect.top - drag.y) / size * mapView.rows;
+        setMapView(mapView.zoom, (drag.mapViewRow ?? mapView.row) - dy, (drag.mapViewCol ?? mapView.col) - dx);
       } else if (drag.mode?.startsWith("band")) {
         const rect = specCanvasRef.current?.getBoundingClientRect();
         if (!rect) return;
-        const padL = 54, padR = 14;
-        const plotW = specW - padL - padR;
-        const di = ((e.clientX - rect.left - drag.x) / plotW) * Math.max(1, nEnergy - 1);
+        const di = specXToIndex(e.clientX - rect.left) - specXToIndex(drag.x);
         if (drag.mode === "band-left") updateBand(drag.bandStart + di, drag.bandEnd, true, true);
         else if (drag.mode === "band-right") updateBand(drag.bandStart, drag.bandEnd + di, true, true);
         else previewCenterBand(drag.bandStart + di, drag.bandEnd + di);
@@ -1800,7 +1975,7 @@ function ShowEDS() {
     document.addEventListener("mousemove", onMove);
     document.addEventListener("mouseup", onUp);
     return () => { document.removeEventListener("mousemove", onMove); document.removeEventListener("mouseup", onUp); };
-  }, [cols, drag, flushBandPersist, flushLocalBandPreview, flushRoiPersist, nEnergy, previewCenterBand, rows, size, specW]);
+  }, [drag, flushBandPersist, flushLocalBandPreview, flushRoiPersist, mapView, previewCenterBand, setMapView, size, specXToIndex]);
 
   React.useEffect(() => {
     if (!bandSliderDrag) return;
@@ -1834,6 +2009,8 @@ function ShowEDS() {
     setSpectrumHeight(250);
     setMapVminPct(2);
     setMapVmaxPct(98);
+    setMapView(1, 0, 0);
+    setSpectrumView(0, nEnergy);
     updateBand(bandLo, bandHi);
     updateRoi({
       row: Math.max(0, rows / 2 - rows / 8),
@@ -2002,20 +2179,24 @@ function ShowEDS() {
         )}
         <Stack direction="row" spacing={2} alignItems="flex-start">
           <Box>
-            <Box sx={{ position: "relative", width: size, height: size, bgcolor: "#000", border: "1px solid #444" }}>
+            <Box
+              ref={mapViewportRef}
+              onDoubleClick={() => setMapView(1, 0, 0)}
+              sx={{ position: "relative", width: size, height: size, bgcolor: "#000", border: "1px solid #444", overflow: "hidden" }}
+            >
               <canvas
                 ref={mapCanvasRef}
                 onMouseDown={onMapDown}
-                style={{ width: size, height: size, display: "block", cursor: drag?.mode?.startsWith("roi") ? "grabbing" : "grab" }}
+                style={{
+                  ...mapLayerStyle,
+                  cursor: drag?.mode === "map-pan" || drag?.mode?.startsWith("roi") ? "grabbing" : mapView.zoom > 1.001 ? "grab" : "crosshair",
+                }}
                 aria-label={`EDS real-space map${title ? `: ${title}` : ""}`}
               />
               <canvas
                 ref={mapOverlayCanvasRef}
                 style={{
-                  position: "absolute",
-                  inset: 0,
-                  width: size,
-                  height: size,
+                  ...mapLayerStyle,
                   pointerEvents: "none",
                   opacity: displayOverlayOpacity,
                 }}
@@ -2068,7 +2249,10 @@ function ShowEDS() {
             </Typography>
           </Box>
           <Box>
-            <Box sx={{ position: "relative", width: specW }}>
+            <Box
+              onDoubleClick={() => setSpectrumView(0, nEnergy)}
+              sx={{ position: "relative", width: specW, overflow: "hidden" }}
+            >
               <canvas
                 ref={specCanvasRef}
                 onMouseDown={onSpecDown}
