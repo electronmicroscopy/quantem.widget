@@ -73,5 +73,5 @@ quantem show4dstem ./masters/ --html --bin 8
 loads on Metal, mean-bins the detector to fit the laptop, and writes a
 double-clickable HTML in seconds. The detector is **mean-binned** (not summed) so
 the bright field never clips at uint8, and binning happens at load so the full
-multi-gigabyte stack never has to fit in memory. See [`load`](api/load) for the
-backend + binning details.
+multi-gigabyte stack never has to fit in memory. See [Load and I/O](api/io) for
+the backend + binning details.

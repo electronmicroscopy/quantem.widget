@@ -1,4 +1,4 @@
-# HTML export protocol
+# HTML export
 
 `quantem.widget` has three sharing paths:
 

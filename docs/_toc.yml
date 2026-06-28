@@ -8,7 +8,6 @@ parts:
     chapters:
       - file: install
       - file: cli
-      - file: changelog
   - caption: Tutorials
     chapters:
       - file: tutorials/download_data
@@ -28,9 +27,9 @@ parts:
       - file: api/show4dstem
       - file: api/showeds
       - file: api/html-export
-      - file: api/load
       - file: api/io
   - caption: Maintainers
     chapters:
+      - file: changelog
       - file: maintainer/widget-release
       - file: maintainer/widget-performance
