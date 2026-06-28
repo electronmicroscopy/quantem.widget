@@ -819,7 +819,7 @@ const DEFAULT_FFT_ZOOM: ZoomState = { zoom: 2, panX: 0, panY: 0 };
 const CANVAS_TARGET = 480;
 const MIN_CANVAS_TARGET = 300;
 const MAX_CANVAS_TARGET = 800;
-const SLICE_PANEL_TOP_ALIGN_PX = 4;
+const SLICE_PANEL_TOP_ALIGN_PX = 20;
 const AXES = ["xy", "oblique"] as const;
 const PANEL_NAMES = ["XY", "Oblique"] as const;
 // Show3DSlices opens in the same orientation as the main top slice panel:
@@ -4018,9 +4018,6 @@ function Show3DSlices() {
   const topRightActions = (
     <Box sx={{
       ...controlRow,
-      position: "absolute",
-      top: SPACING.SM,
-      right: SPACING.SM,
       mb: 0,
       py: 0,
       minHeight: 24,
@@ -4028,7 +4025,6 @@ function Show3DSlices() {
       width: "fit-content",
       maxWidth: "none",
       flexWrap: "nowrap" as const,
-      zIndex: 4,
     }}>
       <Typography sx={{ ...controlLabel }}>FFT</Typography>
       <Switch checked={showFft} onChange={(e) => setShowFft(e.target.checked)} size="small" sx={switchStyles.small} inputProps={{ "aria-label": "Toggle FFT power spectrum panels" }} />
@@ -4093,7 +4089,6 @@ function Show3DSlices() {
   // -------------------------------------------------------------------------
   return (
     <Box className="show3dslices-root" tabIndex={0} onKeyDown={handleKeyDown} sx={{ ...container.root, position: "relative", bgcolor: tc.bg, color: tc.text, outline: "none", "&:focus": { outline: "2px solid #0af", outlineOffset: 2 }, "& canvas": { display: "block" } }}>
-      {topRightActions}
       {/* 3D volume on the LEFT, slice toolbar + projected slice panels on the RIGHT.
           Side-by-side layout keeps the whole widget within a 13" laptop viewport. */}
       <Box sx={{ display: "flex", flexDirection: "row", alignItems: "flex-start", gap: `${SPACING.SM}px` }}>
@@ -4247,6 +4242,9 @@ function Show3DSlices() {
       {/* Right column: slice toolbar + projected slice panels (grouped so they
           sit beside the 3D volume rather than below it). */}
       <Box sx={{ display: "flex", flexDirection: "column", flex: 1, minWidth: 0 }}>
+      <Box sx={{ display: "flex", justifyContent: "flex-end", alignItems: "center", width: panelTotalW, maxWidth: "100%", minHeight: 24, mb: `${SPACING.XS}px` }}>
+        {topRightActions}
+      </Box>
       {(() => {
         const panels = AXES.map((_, a) => {
           const { w: cw, h: ch, displayH: dh } = canvasSizes[a];
