@@ -126,6 +126,8 @@ interface HistogramProps {
   vminPct: number;
   vmaxPct: number;
   onRangeChange: (min: number, max: number) => void;
+  onRangePreview?: (min: number, max: number) => void;
+  onRangeCommit?: (min: number, max: number) => void;
   width?: number;
   height?: number;
   theme?: "light" | "dark";
@@ -133,12 +135,14 @@ interface HistogramProps {
   dataMax?: number;
 }
 
-function Histogram({ data, precomputedBins, vminPct, vmaxPct, onRangeChange, width = 110, height = 40, theme = "dark", dataMin = 0, dataMax = 1, binMin, binMax }: HistogramProps & { binMin?: number; binMax?: number }) {
+function Histogram({ data, precomputedBins, vminPct, vmaxPct, onRangeChange, onRangePreview, onRangeCommit, width = 110, height = 40, theme = "dark", dataMin = 0, dataMax = 1, binMin, binMax }: HistogramProps & { binMin?: number; binMax?: number }) {
   const canvasRef = React.useRef<HTMLCanvasElement>(null);
   const sliderRef = React.useRef<HTMLDivElement | null>(null);
   const minLabelRef = React.useRef<HTMLElement | null>(null);
   const maxLabelRef = React.useRef<HTMLElement | null>(null);
   const onRangeChangeRef = React.useRef(onRangeChange);
+  const onRangePreviewRef = React.useRef(onRangePreview);
+  const onRangeCommitRef = React.useRef(onRangeCommit);
   const pendingRangeRef = React.useRef<[number, number] | null>(null);
   const rangeRafRef = React.useRef<number | null>(null);
   const [liveRange, setLiveRange] = React.useState<[number, number]>([vminPct, vmaxPct]);
@@ -215,9 +219,14 @@ function Histogram({ data, precomputedBins, vminPct, vmaxPct, onRangeChange, wid
 
   React.useEffect(() => {
     onRangeChangeRef.current = onRangeChange;
-  }, [onRangeChange]);
-  const emitRangeChange = React.useCallback((min: number, max: number) => {
-    onRangeChangeRef.current(min, max);
+    onRangePreviewRef.current = onRangePreview;
+    onRangeCommitRef.current = onRangeCommit;
+  }, [onRangeChange, onRangeCommit, onRangePreview]);
+  const emitRangePreview = React.useCallback((min: number, max: number) => {
+    (onRangePreviewRef.current || onRangeChangeRef.current)(min, max);
+  }, []);
+  const emitRangeCommit = React.useCallback((min: number, max: number) => {
+    (onRangeCommitRef.current || onRangeChangeRef.current)(min, max);
   }, []);
   const flushRangePreview = React.useCallback(() => {
     if (rangeRafRef.current != null) {
@@ -229,9 +238,9 @@ function Histogram({ data, precomputedBins, vminPct, vmaxPct, onRangeChange, wid
     if (pending) {
       setLiveRange(pending);
       applyRangePreview(pending);
-      emitRangeChange(pending[0], pending[1]);
+      emitRangeCommit(pending[0], pending[1]);
     }
-  }, [applyRangePreview, emitRangeChange]);
+  }, [applyRangePreview, emitRangeCommit]);
   React.useEffect(() => () => {
     if (rangeRafRef.current != null) window.cancelAnimationFrame(rangeRafRef.current);
   }, []);
@@ -253,7 +262,7 @@ function Histogram({ data, precomputedBins, vminPct, vmaxPct, onRangeChange, wid
           if (pending) {
             setLiveRange(pending);
             applyRangePreview(pending);
-            emitRangeChange(pending[0], pending[1]);
+            emitRangePreview(pending[0], pending[1]);
           }
         });
       }
@@ -266,7 +275,7 @@ function Histogram({ data, precomputedBins, vminPct, vmaxPct, onRangeChange, wid
     };
     document.addEventListener("mousemove", onMove);
     document.addEventListener("mouseup", onUp);
-  }, [applyRangePreview, flushRangePreview]);
+  }, [applyRangePreview, emitRangePreview, flushRangePreview]);
   return (
       <Box
         sx={{ display: "flex", flexDirection: "column", gap: 0, width }}
@@ -298,7 +307,13 @@ function Histogram({ data, precomputedBins, vminPct, vmaxPct, onRangeChange, wid
               const [newMin, newMax] = v as number[];
               const next: [number, number] = [Math.min(newMin, newMax - 1), Math.max(newMax, newMin + 1)];
               setLiveRange(next);
-              emitRangeChange(next[0], next[1]);
+              emitRangePreview(next[0], next[1]);
+            }}
+            onChangeCommitted={(_, v) => {
+              const [newMin, newMax] = v as number[];
+              const next: [number, number] = [Math.min(newMin, newMax - 1), Math.max(newMax, newMin + 1)];
+              setLiveRange(next);
+              emitRangeCommit(next[0], next[1]);
             }}
             min={0} max={100} size="small" valueLabelDisplay="auto"
             valueLabelFormat={formatValue}
@@ -844,14 +859,14 @@ function Show2D() {
     if (linkedContrast) return linkedContrastState;
     return contrastStates.get(idx) || { vminPct: 0, vmaxPct: 100 };
   }, [linkedContrast, linkedContrastState, contrastStates]);
-  const setContrastState = React.useCallback((idx: number, state: { vminPct: number; vmaxPct: number }) => {
+  const setContrastState = React.useCallback((idx: number, state: { vminPct: number; vmaxPct: number }, commit = true) => {
     // Update ref immediately (for fast rAF render)
     if (linkedContrast) {
       contrastRef.current.linked = state;
-      setLinkedContrastState(state);
+      if (commit) setLinkedContrastState(state);
     } else {
       contrastRef.current.perImage.set(idx, state);
-      setContrastStates(prev => new Map(prev).set(idx, state));
+      if (commit) setContrastStates(prev => new Map(prev).set(idx, state));
     }
     // Fast path: direct GPU render via rAF, bypassing React effect batching
     const engine = gpuCmapRef.current;
@@ -4292,6 +4307,8 @@ function Show2D() {
                           return (
                             <Histogram key={i} data={histData} vminPct={cs.vminPct} vmaxPct={cs.vmaxPct}
                               onRangeChange={(min, max) => { if (autoContrast) setAutoContrast(false); setContrastState(i, { vminPct: min, vmaxPct: max }); }}
+                              onRangePreview={(min, max) => { if (autoContrast) setAutoContrast(false); setContrastState(i, { vminPct: min, vmaxPct: max }, false); }}
+                              onRangeCommit={(min, max) => { if (autoContrast) setAutoContrast(false); setContrastState(i, { vminPct: min, vmaxPct: max }, true); }}
                               width={110} height={58} theme={themeInfo.theme === "dark" ? "dark" : "light"}
                               dataMin={histRange?.min ?? imageDataRange.min}
                               dataMax={histRange?.max ?? imageDataRange.max} />
@@ -4299,7 +4316,7 @@ function Show2D() {
                         })}
                       </Box>
                     ) : (
-                      <Histogram data={imageHistogramData} precomputedBins={imageHistogramBins} vminPct={imageVminPct} vmaxPct={imageVmaxPct} onRangeChange={(min, max) => { if (autoContrast) setAutoContrast(false); setContrastState(activeContrastIdx, { vminPct: min, vmaxPct: max }); }} width={110} height={58} theme={themeInfo.theme === "dark" ? "dark" : "light"} dataMin={traitVmin != null && traitVmax != null ? displayValue(traitVmin, logScale) : imageDataRange.min} dataMax={traitVmin != null && traitVmax != null ? displayValue(traitVmax, logScale) : imageDataRange.max} binMin={imageDataRange.min} binMax={imageDataRange.max} />
+                      <Histogram data={imageHistogramData} precomputedBins={imageHistogramBins} vminPct={imageVminPct} vmaxPct={imageVmaxPct} onRangeChange={(min, max) => { if (autoContrast) setAutoContrast(false); setContrastState(activeContrastIdx, { vminPct: min, vmaxPct: max }); }} onRangePreview={(min, max) => { if (autoContrast) setAutoContrast(false); setContrastState(activeContrastIdx, { vminPct: min, vmaxPct: max }, false); }} onRangeCommit={(min, max) => { if (autoContrast) setAutoContrast(false); setContrastState(activeContrastIdx, { vminPct: min, vmaxPct: max }, true); }} width={110} height={58} theme={themeInfo.theme === "dark" ? "dark" : "light"} dataMin={traitVmin != null && traitVmax != null ? displayValue(traitVmin, logScale) : imageDataRange.min} dataMax={traitVmin != null && traitVmax != null ? displayValue(traitVmax, logScale) : imageDataRange.max} binMin={imageDataRange.min} binMax={imageDataRange.max} />
                     )}
                   </Box>
                 )}
