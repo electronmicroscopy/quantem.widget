@@ -4176,7 +4176,7 @@ function Show3DSlices() {
           sit beside the 3D volume rather than below it). */}
       <Box sx={{ display: "flex", flexDirection: "column", flex: 1, minWidth: 0 }}>
       {/* Slice toolbar: compact row above the side column. */}
-      <Box sx={{ ...controlRow, mt: `${RIGHT_TOOLBAR_TOP_ALIGN_PX}px`, mb: 0, py: 0, minHeight: 24, boxSizing: "border-box", width: "fit-content", maxWidth: "none", flexWrap: "nowrap", alignSelf: "flex-start" }}>
+      <Box sx={{ ...controlRow, mt: `${RIGHT_TOOLBAR_TOP_ALIGN_PX}px`, mb: 0, py: 0, minHeight: 24, boxSizing: "border-box", width: "fit-content", maxWidth: "none", flexWrap: "nowrap", alignSelf: "flex-end" }}>
         <Typography sx={{ ...controlLabel }}>FFT</Typography>
         <Switch checked={showFft} onChange={(e) => setShowFft(e.target.checked)} size="small" sx={switchStyles.small} inputProps={{ "aria-label": "Toggle FFT power spectrum panels" }} />
         {exportEnabled && (
