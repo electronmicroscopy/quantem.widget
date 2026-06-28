@@ -117,6 +117,25 @@ def eds_line_hints(
     return out[:max_lines]
 
 
+def _normalise_element_symbols(elements: Any) -> list[str]:
+    """Return unique element symbols with user-friendly capitalization."""
+
+    if elements is None:
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in elements:
+        symbol = str(raw).strip()
+        if not symbol:
+            continue
+        symbol = symbol[:1].upper() + symbol[1:].lower()
+        if symbol in seen:
+            continue
+        seen.add(symbol)
+        out.append(symbol)
+    return out
+
+
 def _format_bytes(n_bytes: int) -> str:
     value = float(n_bytes)
     for unit in ("B", "KB", "MB", "GB", "TB"):
@@ -762,6 +781,8 @@ class ShowEDS(anywidget.AnyWidget):
     element_label = traitlets.Unicode("").tag(sync=True)
     show_line_hints = traitlets.Bool(True).tag(sync=True)
     line_hints = traitlets.List(traitlets.Dict(), default_value=[]).tag(sync=True)
+    selected_elements = traitlets.List(traitlets.Unicode(), default_value=[]).tag(sync=True)
+    auto_identify = traitlets.Bool(True).tag(sync=True)
     show_debug = traitlets.Bool(False).tag(sync=True)
     saved_rois = traitlets.List(traitlets.Dict(), default_value=[]).tag(sync=True)
     saved_bands = traitlets.List(traitlets.Dict(), default_value=[]).tag(sync=True)
@@ -806,6 +827,8 @@ class ShowEDS(anywidget.AnyWidget):
         element_label: str = "",
         show_line_hints: bool = True,
         line_hints: list[dict[str, Any]] | None = None,
+        selected_elements: list[str] | tuple[str, ...] | None = None,
+        auto_identify: bool = True,
         show_debug: bool = False,
         saved_rois: list[dict[str, Any]] | None = None,
         saved_bands: list[dict[str, Any]] | None = None,
@@ -899,6 +922,8 @@ class ShowEDS(anywidget.AnyWidget):
         self.overlay_opacity = float(max(0.0, min(1.0, overlay_opacity)))
         self.element_label = str(element_label)
         self.show_line_hints = bool(show_line_hints)
+        self.selected_elements = _normalise_element_symbols(selected_elements or candidate_elements or [])
+        self.auto_identify = bool(auto_identify)
         self.show_debug = bool(show_debug)
         self.roi_shape = _normalise_roi_shape(roi_shape)
         self.saved_rois = [{**dict(item), "shape": _normalise_roi_shape(dict(item).get("shape", "rect"))} for item in (saved_rois or [])]
@@ -1235,6 +1260,8 @@ class ShowEDS(anywidget.AnyWidget):
             "spectrum_view_end": self.spectrum_view_end,
             "element_label": self.element_label,
             "show_line_hints": self.show_line_hints,
+            "selected_elements": list(self.selected_elements),
+            "auto_identify": self.auto_identify,
             "show_debug": self.show_debug,
             "saved_rois": [dict(item) for item in self.saved_rois],
             "saved_bands": [dict(item) for item in self.saved_bands],
@@ -1272,6 +1299,8 @@ class ShowEDS(anywidget.AnyWidget):
         self.saved_rois = [{**dict(item), "shape": _normalise_roi_shape(dict(item).get("shape", "rect"))} for item in self.saved_rois]
         self.saved_bands = [dict(item) for item in self.saved_bands]
         self.export_presets = [dict(item) for item in self.export_presets]
+        self.selected_elements = _normalise_element_symbols(self.selected_elements)
+        self.auto_identify = bool(self.auto_identify)
 
     def save(self, path: str) -> None:
         save_state_file(path, "ShowEDS", self.state_dict())
@@ -1517,6 +1546,8 @@ class ShowEDS(anywidget.AnyWidget):
             element_label=self.element_label,
             show_line_hints=self.show_line_hints,
             line_hints=[dict(item) for item in self.line_hints],
+            selected_elements=list(self.selected_elements),
+            auto_identify=self.auto_identify,
             show_debug=self.show_debug,
             saved_rois=saved_rois,
             saved_bands=saved_bands,
