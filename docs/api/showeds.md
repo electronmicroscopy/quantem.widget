@@ -29,6 +29,7 @@ w = ShowEDS.from_emd(
     pixel_unit="nm",
     element_label="Cu K",
     candidate_elements=["O", "Si", "Ca", "Cu", "Au"],
+    selected_elements=["Cu", "Au"],
 )
 
 # Shareable HTML. Small cubes can use single HTML with exact data. Large folder-backed
@@ -72,6 +73,7 @@ need a Python round trip.
 |---|---|---|
 | Energy band on spectrum | `band_start`, `band_end` | Real-space element map recomputes from the selected energy window |
 | Band center drag | `band_start`, `band_end` | The selected energy window translates without changing width |
+| Elements periodic table | `selected_elements`, `auto_identify`, `line_hints` | Select candidate elements, emphasize their line markers, rank current-band candidates, and snap the band to characteristic X-ray lines |
 | Real-space ROI | `roi_row`, `roi_col`, `roi_height`, `roi_width`, `roi_shape` | Rectangular or circular ROI recomputes the summed spectrum from the selected real-space region |
 | Spectrum log toggle | `log_spectrum` | Spectrum switches between linear and log display |
 | Scroll zoom / pan | `map_zoom`, `map_view_row`, `map_view_col`, `spectrum_view_start`, `spectrum_view_end` | Real-space and spectrum views zoom around the cursor and reopen at the saved view |
