@@ -197,6 +197,9 @@ function MapHistogram({
   const onRangeChangeRef = React.useRef(onRangeChange);
   const pendingRangeRef = React.useRef<[number, number] | null>(null);
   const rangeRafRef = React.useRef<number | null>(null);
+  const [liveRange, setLiveRange] = React.useState<[number, number]>(clampPercentPair(vminPct, vmaxPct));
+  React.useEffect(() => { setLiveRange(clampPercentPair(vminPct, vmaxPct)); }, [vminPct, vmaxPct]);
+  const [liveVminPct, liveVmaxPct] = liveRange;
   const bins = React.useMemo(
     () => computeHistogramFromBytes(data, 256, dataMin, dataMax),
     [data, dataMin, dataMax],
@@ -217,7 +220,7 @@ function MapHistogram({
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.fillStyle = colors.bg;
     ctx.fillRect(0, 0, width, height);
-    const displayBins = 36;
+    const displayBins = 64;
     const binRatio = Math.max(1, Math.floor(bins.length / displayBins));
     const reducedBins: number[] = [];
     for (let i = 0; i < displayBins; i++) {
@@ -225,19 +228,14 @@ function MapHistogram({
       for (let j = 0; j < binRatio; j++) sum += bins[i * binRatio + j] || 0;
       reducedBins.push(sum / binRatio);
     }
-    const displayHeights = reducedBins.map((value) => Math.log1p(value));
-    const sortedHeights = displayHeights.filter((value) => Number.isFinite(value) && value > 0).sort((a, b) => a - b);
-    const robustIndex = Math.max(0, Math.min(sortedHeights.length - 1, Math.floor(sortedHeights.length * 0.9)));
-    const robustMax = sortedHeights.length ? sortedHeights[robustIndex] : 0;
-    const maxVal = Math.max(robustMax, 0.001);
+    const maxVal = Math.max(...reducedBins, 0.001);
     const barWidth = width / displayBins;
     const vminBin = Math.floor((Math.max(0, Math.min(100, loPct)) / 100) * displayBins);
     const vmaxBin = Math.floor((Math.max(0, Math.min(100, hiPct)) / 100) * displayBins);
     for (let i = 0; i < displayBins; i++) {
-      const scaledHeight = Math.min(1, displayHeights[i] / maxVal) * (height - 2);
-      const barHeight = displayHeights[i] > 0 ? Math.max(2, scaledHeight) : 0;
+      const barHeight = (reducedBins[i] / maxVal) * (height - 2);
       ctx.fillStyle = i >= vminBin && i <= vmaxBin ? colors.barActive : colors.barInactive;
-      ctx.fillRect(i * barWidth + 0.5, height - barHeight, Math.max(1.5, barWidth - 0.5), barHeight);
+      ctx.fillRect(i * barWidth + 0.5, height - barHeight, Math.max(1, barWidth - 1), barHeight);
     }
   }, [bins, colors, height, width]);
   const applyRangePreview = React.useCallback((next: [number, number]) => {
@@ -258,8 +256,8 @@ function MapHistogram({
     drawHistogram(lo, hi);
   }, [drawHistogram, valueLabel]);
   React.useEffect(() => {
-    drawHistogram(vminPct, vmaxPct);
-  }, [drawHistogram, vmaxPct, vminPct]);
+    drawHistogram(liveVminPct, liveVmaxPct);
+  }, [drawHistogram, liveVmaxPct, liveVminPct]);
   React.useEffect(() => {
     onRangeChangeRef.current = onRangeChange;
   }, [onRangeChange]);
@@ -271,6 +269,7 @@ function MapHistogram({
     const pending = pendingRangeRef.current;
     pendingRangeRef.current = null;
     if (pending) {
+      setLiveRange(pending);
       applyRangePreview(pending);
       onRangeChangeRef.current(pending[0], pending[1]);
     }
@@ -293,7 +292,11 @@ function MapHistogram({
         rangeRafRef.current = window.requestAnimationFrame(() => {
           rangeRafRef.current = null;
           const pending = pendingRangeRef.current;
-          if (pending) applyRangePreview(pending);
+          if (pending) {
+            setLiveRange(pending);
+            applyRangePreview(pending);
+            onRangeChangeRef.current(pending[0], pending[1]);
+          }
         });
       }
     };
@@ -320,7 +323,7 @@ function MapHistogram({
           if ((e.target as HTMLElement).closest(".MuiSlider-thumb")) return;
           const rect = sliderRef.current?.getBoundingClientRect();
           if (!rect) return;
-          const [lo, hi] = clampPercentPair(vminPct, vmaxPct);
+          const [lo, hi] = clampPercentPair(liveVminPct, liveVmaxPct);
           const pct = ((e.clientX - rect.left) / Math.max(1, rect.width)) * 100;
           if (pct < lo || pct > hi) return;
           const thumbGuardPct = Math.max(4, (10 / Math.max(1, rect.width)) * 100);
@@ -333,7 +336,7 @@ function MapHistogram({
         sx={{ position: "absolute", left: 0, top: height - 1, width, height: 8, display: "flex", alignItems: "flex-start", cursor: "grab" }}
       >
         <Slider
-          value={clampPercentPair(vminPct, vmaxPct)}
+          value={liveRange}
           min={0}
           max={100}
           step={0.5}
@@ -343,7 +346,9 @@ function MapHistogram({
           onChange={(_, v) => {
             if (!Array.isArray(v)) return;
             const [newMin, newMax] = v.map(Number);
-            onRangeChange(Math.min(newMin, newMax - 1), Math.max(newMax, newMin + 1));
+            const next: [number, number] = [Math.min(newMin, newMax - 1), Math.max(newMax, newMin + 1)];
+            setLiveRange(next);
+            onRangeChangeRef.current(next[0], next[1]);
           }}
           sx={{
             width,
@@ -357,8 +362,8 @@ function MapHistogram({
       </Box>
       </Box>
       <Box sx={{ display: "flex", justifyContent: "space-between", width }}>
-        <Typography ref={minLabelRef} sx={{ fontSize: 8, fontFamily: "monospace", color: colors.label, lineHeight: 1 }}>{valueLabel(vminPct)}</Typography>
-        <Typography ref={maxLabelRef} sx={{ fontSize: 8, fontFamily: "monospace", color: colors.label, lineHeight: 1 }}>{valueLabel(vmaxPct)}</Typography>
+        <Typography ref={minLabelRef} sx={{ fontSize: 8, fontFamily: "monospace", color: colors.label, lineHeight: 1 }}>{valueLabel(liveVminPct)}</Typography>
+        <Typography ref={maxLabelRef} sx={{ fontSize: 8, fontFamily: "monospace", color: colors.label, lineHeight: 1 }}>{valueLabel(liveVmaxPct)}</Typography>
       </Box>
     </Box>
   );
