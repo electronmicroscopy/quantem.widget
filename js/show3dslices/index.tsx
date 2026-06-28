@@ -50,11 +50,13 @@ const controlRow = {
   px: 1,
   py: 0.5,
   width: "fit-content",
+  whiteSpace: "nowrap" as const,
 };
 const compactButton = {
   fontSize: 10,
   textTransform: "none" as const,
   letterSpacing: 0,
+  whiteSpace: "nowrap" as const,
   py: 0.25,
   px: 1,
   minWidth: 0,
@@ -4241,9 +4243,11 @@ function Show3DSlices() {
       </Box>
       {/* Right column: slice toolbar + projected slice panels (grouped so they
           sit beside the 3D volume rather than below it). */}
-      <Box sx={{ display: "flex", flexDirection: "column", flex: 1, minWidth: 0 }}>
-      <Box sx={{ display: "flex", justifyContent: "flex-end", alignItems: "center", width: panelTotalW, maxWidth: "100%", minHeight: 24, mb: `${SPACING.XS}px` }}>
+      <Box sx={{ display: "flex", flexDirection: "column", flex: 1, minWidth: 0, alignItems: "flex-start" }}>
+      <Box sx={{ display: "flex", justifyContent: "flex-end", alignItems: "center", width: panelTotalW, maxWidth: "100%", minHeight: 24, mb: `${SPACING.XS}px`, pointerEvents: "none" }}>
+        <Box sx={{ pointerEvents: "auto" }}>
         {topRightActions}
+        </Box>
       </Box>
       {(() => {
         const panels = AXES.map((_, a) => {
