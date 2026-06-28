@@ -31,5 +31,8 @@ parts:
   - caption: Maintainers
     chapters:
       - file: changelog
+        title: Changelog
       - file: maintainer/widget-release
+        title: Release
       - file: maintainer/widget-performance
+        title: Performance
