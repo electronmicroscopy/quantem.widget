@@ -56,6 +56,10 @@ const compactButton = {
   py: 0.25,
   px: 1,
   minWidth: 0,
+  "&.Mui-disabled": {
+    color: "#666",
+    borderColor: "#444",
+  },
 };
 
 const upwardMenuProps = {
@@ -217,10 +221,6 @@ interface SpotDict {
   id: number;
   row: number;
   col: number;
-  raw_row?: number;
-  raw_col?: number;
-  row_err?: number;
-  col_err?: number;
   d_spacing: number | null;
   d_spacing_err?: number | null;
   g_magnitude: number | null;
@@ -241,7 +241,6 @@ interface RingDict {
   g_magnitude: number | null;
   d_spacing: number | null;
   intensity: number;
-  hkl?: string;
 }
 
 // Shared spot color palette — table rows and canvas overlay stay in sync by index.
@@ -308,13 +307,13 @@ function ShowDiffraction() {
   const [showStats] = useModelState<boolean>("show_stats");
   const [showControls] = useModelState<boolean>("show_controls");
 
-  // Standalone HTML export bridge (mirror of Show2D).
+  // Standalone HTML export bridge (simplified port of Show2D; no uint8/quantized modes).
   const [, setExportRequest] = useModelState<string>("export_request");
   const [exportStatus] = useModelState<string>("export_status");
   const [exportEnabled] = useModelState<boolean>("export_enabled");
   const [exportPayload] = useModelState<DataView>("export_payload");
   const [exportPayloadId] = useModelState<string>("export_payload_id");
-  const [exportFilename] = useModelState<string>("export_filename");
+  const [exportPayloadFilename] = useModelState<string>("export_filename");
   const exportCounterRef = React.useRef(0);
   const pendingExportRef = React.useRef<string>("");
 
@@ -703,11 +702,11 @@ function ShowDiffraction() {
     const payload = bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength
       ? bytes
       : bytes.slice();
-    const filename = exportFilename || "showdiffraction.html";
+    const filename = exportPayloadFilename || "showdiffraction.html";
     downloadBlob(new Blob([payload as BlobPart], { type: "text/html;charset=utf-8" }), filename);
     pendingExportRef.current = "";
     setExportRequest(JSON.stringify({ mode: "clear" }));
-  }, [exportPayload, exportPayloadId, exportFilename, setExportRequest]);
+  }, [exportPayload, exportPayloadId, exportPayloadFilename, setExportRequest]);
 
   // Keyboard
   const isTypingTarget = React.useCallback((target: EventTarget | null): boolean => {

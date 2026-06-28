@@ -68,7 +68,7 @@ class ShowDiffraction(anywidget.AnyWidget):
     spot_refine : bool, default True
         Sub-pixel refine spots with a 2D Gaussian fit on add.
     dp_scale_mode : str, default "log"
-        Diffraction display scaling ("linear", "log", "sqrt", "power").
+        Diffraction display scaling ("linear", "log", "sqrt").
     show_stats : bool, default True
         Show statistics (mean, min, max, std).
     show_controls : bool, default True
@@ -108,7 +108,8 @@ class ShowDiffraction(anywidget.AnyWidget):
 
     # Offline/export render flag. The frontend forces a light/white background
     # when set so standalone HTML exports read on any OS theme. No quantization
-    # happens here -- frames are always embedded as exact float32.
+    # happens here -- frames are always embedded as exact float32. (Show2D/3D use
+    # a separate `_export_light` for this; here `offline` alone drives it.)
     offline = traitlets.Bool(False).tag(sync=True)
 
     # =========================================================================
@@ -174,7 +175,6 @@ class ShowDiffraction(anywidget.AnyWidget):
     dp_colormap = traitlets.Unicode("inferno").tag(sync=True)
     dp_scale_mode = traitlets.Unicode("log").tag(sync=True)
     dp_invert = traitlets.Bool(False).tag(sync=True)
-    dp_rotation = traitlets.Int(0).tag(sync=True)  # display-only, degrees CCW
     dp_vmin_pct = traitlets.Float(0.0).tag(sync=True)
     dp_vmax_pct = traitlets.Float(100.0).tag(sync=True)
 
@@ -209,16 +209,9 @@ class ShowDiffraction(anywidget.AnyWidget):
     @traitlets.validate("dp_scale_mode")
     def _validate_dp_scale_mode(self, proposal):
         val = proposal["value"]
-        allowed = ("linear", "log", "sqrt", "power")
+        allowed = ("linear", "log", "sqrt")
         if val not in allowed:
             raise ValueError(f"dp_scale_mode must be one of {allowed}, got {val!r}")
-        return val
-
-    @traitlets.validate("dp_rotation")
-    def _validate_dp_rotation(self, proposal):
-        val = int(proposal["value"]) % 360
-        if val not in (0, 90, 180, 270):
-            raise ValueError(f"dp_rotation must be one of 0/90/180/270, got {val}")
         return val
 
     def __init__(
@@ -1285,7 +1278,6 @@ class ShowDiffraction(anywidget.AnyWidget):
             "dp_colormap": self.dp_colormap,
             "dp_scale_mode": self.dp_scale_mode,
             "dp_invert": self.dp_invert,
-            "dp_rotation": self.dp_rotation,
             "dp_vmin_pct": self.dp_vmin_pct,
             "dp_vmax_pct": self.dp_vmax_pct,
             "show_stats": self.show_stats,
