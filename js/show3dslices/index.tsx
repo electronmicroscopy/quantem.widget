@@ -414,6 +414,10 @@ function makeHistogramSample(data: Float32Array | null, target = 1_000_000): Flo
   return out;
 }
 
+function clampCanvasTarget(value: number): number {
+  return Math.max(MIN_CANVAS_TARGET, Math.min(MAX_CANVAS_TARGET, Math.round(value)));
+}
+
 function transformDisplaySample(data: Float32Array | null, logScale: boolean, flip: boolean): Float32Array | null {
   if (!data) return null;
   if (!logScale && !flip) return data;
@@ -527,6 +531,13 @@ function Histogram({
   dataMin = 0, dataMax = 1, pinBinsToRange = true, ariaHidden = false,
 }: HistogramProps) {
   const canvasRef = React.useRef<HTMLCanvasElement>(null);
+  const sliderRef = React.useRef<HTMLDivElement | null>(null);
+  const minLabelRef = React.useRef<HTMLElement | null>(null);
+  const maxLabelRef = React.useRef<HTMLElement | null>(null);
+  const onRangeChangeRef = React.useRef(onRangeChange);
+  const onRangeCommitRef = React.useRef(onRangeCommit);
+  const pendingRangeRef = React.useRef<[number, number] | null>(null);
+  const rangeRafRef = React.useRef<number | null>(null);
   const bins = React.useMemo(
     () => pinBinsToRange
       ? computeHistogramFromBytes(data, 256, dataMin, dataMax)
@@ -544,7 +555,11 @@ function Histogram({
     const [newMin, newMax] = value;
     return [Math.min(newMin, newMax - 1), Math.max(newMax, newMin + 1)];
   };
-  React.useEffect(() => {
+  const formatValue = React.useCallback((pct: number) => {
+    const val = dataMin + (pct / 100) * (dataMax - dataMin);
+    return val >= 1000 ? val.toExponential(1) : val.toFixed(1);
+  }, [dataMax, dataMin]);
+  const drawHistogram = React.useCallback((loPct: number, hiPct: number) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
@@ -565,54 +580,139 @@ function Histogram({
     }
     const maxVal = Math.max(...reducedBins, 0.001);
     const barWidth = width / displayBins;
-    const vminBin = Math.floor((liveVminPct / 100) * displayBins);
-    const vmaxBin = Math.floor((liveVmaxPct / 100) * displayBins);
+    const vminBin = Math.floor((loPct / 100) * displayBins);
+    const vmaxBin = Math.floor((hiPct / 100) * displayBins);
     for (let i = 0; i < displayBins; i++) {
       const barHeight = (reducedBins[i] / maxVal) * (height - 2);
       const x = i * barWidth;
       ctx.fillStyle = i >= vminBin && i <= vmaxBin ? colors.barActive : colors.barInactive;
       ctx.fillRect(x + 0.5, height - barHeight, Math.max(1, barWidth - 1), barHeight);
     }
-  }, [bins, liveVminPct, liveVmaxPct, width, height, colors]);
-  const formatValue = (pct: number) => {
-    const val = dataMin + (pct / 100) * (dataMax - dataMin);
-    return val >= 1000 ? val.toExponential(1) : val.toFixed(1);
-  };
+  }, [bins, colors, height, width]);
+  const applyRangePreview = React.useCallback((next: [number, number]) => {
+    const [lo, hi] = next;
+    const slider = sliderRef.current?.querySelector(".MuiSlider-root") as HTMLElement | null;
+    const thumbs = slider?.querySelectorAll(".MuiSlider-thumb");
+    const track = slider?.querySelector(".MuiSlider-track") as HTMLElement | null;
+    if (thumbs && thumbs.length >= 2) {
+      (thumbs[0] as HTMLElement).style.left = `${lo}%`;
+      (thumbs[1] as HTMLElement).style.left = `${hi}%`;
+    }
+    if (track) {
+      track.style.left = `${lo}%`;
+      track.style.width = `${Math.max(0, hi - lo)}%`;
+    }
+    if (minLabelRef.current) minLabelRef.current.textContent = formatValue(lo);
+    if (maxLabelRef.current) maxLabelRef.current.textContent = formatValue(hi);
+    drawHistogram(lo, hi);
+  }, [drawHistogram, formatValue]);
+  React.useEffect(() => {
+    drawHistogram(liveVminPct, liveVmaxPct);
+  }, [drawHistogram, liveVmaxPct, liveVminPct]);
+  React.useEffect(() => {
+    onRangeChangeRef.current = onRangeChange;
+    onRangeCommitRef.current = onRangeCommit;
+  }, [onRangeChange, onRangeCommit]);
+  const flushRangePreview = React.useCallback((commit: boolean) => {
+    if (rangeRafRef.current != null) {
+      window.cancelAnimationFrame(rangeRafRef.current);
+      rangeRafRef.current = null;
+    }
+    const pending = pendingRangeRef.current;
+    pendingRangeRef.current = null;
+    if (!pending) return;
+    setLiveRange(pending);
+    applyRangePreview(pending);
+    if (commit) (onRangeCommitRef.current ?? onRangeChangeRef.current)(pending[0], pending[1]);
+    else onRangeChangeRef.current(pending[0], pending[1]);
+  }, [applyRangePreview]);
+  React.useEffect(() => () => {
+    if (rangeRafRef.current != null) window.cancelAnimationFrame(rangeRafRef.current);
+  }, []);
+  const beginRangeDrag = React.useCallback((event: React.MouseEvent, dragWidth: number, lo0: number, hi0: number) => {
+    const startX = event.clientX;
+    const span = Math.max(1, hi0 - lo0);
+    const previousCursor = document.body.style.cursor;
+    document.body.style.cursor = "grabbing";
+    const onMove = (moveEvent: MouseEvent) => {
+      moveEvent.preventDefault();
+      const deltaPct = ((moveEvent.clientX - startX) / Math.max(1, dragWidth)) * 100;
+      const lo = Math.max(0, Math.min(100 - span, lo0 + deltaPct));
+      const next: [number, number] = [lo, lo + span];
+      pendingRangeRef.current = next;
+      if (rangeRafRef.current == null) {
+        rangeRafRef.current = window.requestAnimationFrame(() => {
+          rangeRafRef.current = null;
+          const pending = pendingRangeRef.current;
+          if (pending) applyRangePreview(pending);
+        });
+      }
+    };
+    const onUp = () => {
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+      document.body.style.cursor = previousCursor;
+      flushRangePreview(true);
+    };
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  }, [applyRangePreview, flushRangePreview]);
   return (
-    <Box sx={{ display: "flex", flexDirection: "column", gap: 0.25 }}>
+    <Box sx={{ display: "flex", flexDirection: "column", gap: 0, width }}>
+      <Box sx={{ position: "relative", width, height: height + 6 }}>
       <canvas
         ref={canvasRef}
-        style={{ width, height, border: `1px solid ${colors.border}` }}
+        style={{ width, height, border: `1px solid ${colors.border}`, display: "block" }}
         role={ariaHidden ? undefined : "img"}
         aria-hidden={ariaHidden ? "true" : undefined}
         aria-label={ariaHidden ? undefined : "Histogram of intensity values with min and max clip handles"}
       />
-      <Slider
-        value={liveRange}
-        onChange={(_, v) => {
-          const next = normalizeRange(v as number[]);
-          setLiveRange(next);
-          onRangeChange(next[0], next[1]);
+      <Box
+        ref={sliderRef}
+        onMouseDownCapture={(e) => {
+          if ((e.target as HTMLElement).closest(".MuiSlider-thumb")) return;
+          const rect = sliderRef.current?.getBoundingClientRect();
+          if (!rect) return;
+          const [lo, hi] = normalizeRange(liveRange);
+          const pct = ((e.clientX - rect.left) / Math.max(1, rect.width)) * 100;
+          if (pct < lo || pct > hi) return;
+          const thumbGuardPct = Math.max(4, (10 / Math.max(1, rect.width)) * 100);
+          if (Math.abs(pct - lo) <= thumbGuardPct || Math.abs(pct - hi) <= thumbGuardPct) return;
+          beginRangeDrag(e, rect.width, lo, hi);
+          e.preventDefault();
+          e.stopPropagation();
+          e.nativeEvent.stopImmediatePropagation();
         }}
-        onChangeCommitted={(_, v) => {
-          const next = normalizeRange(v as number[]);
-          setLiveRange(next);
-          (onRangeCommit ?? onRangeChange)(next[0], next[1]);
-        }}
-        min={0} max={100} size="small"
-        valueLabelDisplay="auto" valueLabelFormat={formatValue}
-        aria-label="Histogram intensity clip range"
-        sx={{
-          width, py: 0,
-          "& .MuiSlider-thumb": { width: 8, height: 8 },
-          "& .MuiSlider-rail": { height: 2 },
-          "& .MuiSlider-track": { height: 2 },
-          "& .MuiSlider-valueLabel": { fontSize: 10, padding: "2px 4px" },
-        }}
-      />
+        sx={{ position: "absolute", left: 0, top: height - 1, width, height: 8, display: "flex", alignItems: "flex-start", cursor: "grab" }}
+      >
+        <Slider
+          value={liveRange}
+          onChange={(_, v) => {
+            const next = normalizeRange(v as number[]);
+            setLiveRange(next);
+            onRangeChange(next[0], next[1]);
+          }}
+          onChangeCommitted={(_, v) => {
+            const next = normalizeRange(v as number[]);
+            setLiveRange(next);
+            (onRangeCommit ?? onRangeChange)(next[0], next[1]);
+          }}
+          min={0} max={100} size="small"
+          valueLabelDisplay="auto" valueLabelFormat={formatValue}
+          aria-label="Histogram intensity clip range"
+          sx={{
+            width, py: 0,
+            "& .MuiSlider-thumb": { width: 8, height: 8 },
+            "& .MuiSlider-rail": { height: 2 },
+            "& .MuiSlider-track": { height: 2, cursor: "grab" },
+            "& .MuiSlider-valueLabel": { fontSize: 10, padding: "2px 4px" },
+          }}
+        />
+      </Box>
+      </Box>
       <Box sx={{ display: "flex", justifyContent: "space-between", width }}>
-        <Typography sx={{ fontSize: 8, fontFamily: "monospace", opacity: 0.6, lineHeight: 1 }}>{formatValue(liveVminPct)}</Typography>
-        <Typography sx={{ fontSize: 8, fontFamily: "monospace", opacity: 0.6, lineHeight: 1 }}>{formatValue(liveVmaxPct)}</Typography>
+        <Typography ref={minLabelRef} sx={{ fontSize: 8, fontFamily: "monospace", opacity: 0.6, lineHeight: 1 }}>{formatValue(liveVminPct)}</Typography>
+        <Typography ref={maxLabelRef} sx={{ fontSize: 8, fontFamily: "monospace", opacity: 0.6, lineHeight: 1 }}>{formatValue(liveVmaxPct)}</Typography>
       </Box>
     </Box>
   );
@@ -713,6 +813,9 @@ type ZoomState = { zoom: number; panX: number; panY: number };
 const DEFAULT_ZOOM: ZoomState = { zoom: 1, panX: 0, panY: 0 };
 const DEFAULT_FFT_ZOOM: ZoomState = { zoom: 2, panX: 0, panY: 0 };
 const CANVAS_TARGET = 480;
+const MIN_CANVAS_TARGET = 300;
+const MAX_CANVAS_TARGET = 800;
+const SLICE_PANEL_TOP_ALIGN_PX = 24;
 const AXES = ["xy", "oblique"] as const;
 const PANEL_NAMES = ["XY", "Oblique"] as const;
 // Show3DSlices opens in the same orientation as the main top slice panel:
@@ -823,16 +926,25 @@ function Show3DSlices() {
   const [traitVmax] = useModelState<number | null>("vmax");
   const [showControls] = useModelState<boolean>("show_controls");
   const [showCrosshair] = useModelState<boolean>("show_crosshair");
-  const [panelWidthPx, setPanelWidthPx] = useModelState<number>("panel_width_px");
+  const [panelWidthPx] = useModelState<number>("panel_width_px");
   type Show3DSlicesViewState = {
     zooms?: Partial<ZoomState>[];
     fft_zooms?: Partial<ZoomState>[];
     camera?: Partial<CameraState>;
+    canvas_target?: number;
+    side_canvas_target?: number;
+    volume_canvas_size?: number;
+  };
+  type Show3DSlicesViewSizes = {
+    canvasTarget: number;
+    sideCanvasTarget: number;
+    volumeCanvasSize: number;
   };
   const [viewState, setViewState] = useModelState<Show3DSlicesViewState>("view_state");
   const readNumber = (value: unknown, fallback: number): number => (
     typeof value === "number" && Number.isFinite(value) ? value : fallback
   );
+  const readCanvasTarget = (value: unknown, fallback: number): number => clampCanvasTarget(readNumber(value, fallback));
   const normalizeZoomState = (value: Partial<ZoomState> | undefined, fallback: ZoomState): ZoomState => ({
     zoom: Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, readNumber(value?.zoom, fallback.zoom))),
     panX: readNumber(value?.panX, readNumber((value as { pan_x?: unknown } | undefined)?.pan_x, fallback.panX)),
@@ -1044,15 +1156,22 @@ function Show3DSlices() {
   }, []);
 
   // Canvas resize (matching Show2D pattern)
-  const initialCanvasTarget = panelWidthPx > 0 ? panelWidthPx : CANVAS_TARGET;
+  const initialPanelDefault = panelWidthPx > 0 ? panelWidthPx : CANVAS_TARGET;
+  const initialCanvasTarget = readCanvasTarget(viewState?.canvas_target, initialPanelDefault);
+  const initialSideCanvasTarget = readCanvasTarget(viewState?.side_canvas_target, initialPanelDefault);
+  const initialVolumeCanvasSize = readCanvasTarget(viewState?.volume_canvas_size, initialPanelDefault);
   const [canvasTarget, setCanvasTarget] = React.useState(initialCanvasTarget);
-  const [sideCanvasTarget, setSideCanvasTarget] = React.useState(initialCanvasTarget);
+  const [sideCanvasTarget, setSideCanvasTarget] = React.useState(initialSideCanvasTarget);
+  const canvasTargetRef = React.useRef(initialCanvasTarget);
+  const sideCanvasTargetRef = React.useRef(initialSideCanvasTarget);
+  canvasTargetRef.current = canvasTarget;
+  sideCanvasTargetRef.current = sideCanvasTarget;
   React.useEffect(() => {
     if (panelWidthPx > 0) {
-      setCanvasTarget(panelWidthPx);
-      setSideCanvasTarget(panelWidthPx);
+      if (viewState?.canvas_target == null) setCanvasTarget(clampCanvasTarget(panelWidthPx));
+      if (viewState?.side_canvas_target == null) setSideCanvasTarget(clampCanvasTarget(panelWidthPx));
     }
-  }, [panelWidthPx]);
+  }, [panelWidthPx, viewState?.canvas_target, viewState?.side_canvas_target]);
   const [isResizing, setIsResizing] = React.useState(false);
   const [resizeStart, setResizeStart] = React.useState<{ x: number; y: number; size: number; target: "primary" | "side" } | null>(null);
 
@@ -1111,10 +1230,12 @@ function Show3DSlices() {
   const [webgpuSupported, setWebgpuSupported] = React.useState(true);
   const [volumeInitError, setVolumeInitError] = React.useState<string>("");
   const [rendererReady, setRendererReady] = React.useState(0);
-  const [volumeCanvasSize, setVolumeCanvasSize] = React.useState(initialCanvasTarget);
+  const [volumeCanvasSize, setVolumeCanvasSize] = React.useState(initialVolumeCanvasSize);
+  const volumeCanvasSizeRef = React.useRef(initialVolumeCanvasSize);
+  volumeCanvasSizeRef.current = volumeCanvasSize;
   React.useEffect(() => {
-    if (panelWidthPx > 0) setVolumeCanvasSize(panelWidthPx);
-  }, [panelWidthPx]);
+    if (panelWidthPx > 0 && viewState?.volume_canvas_size == null) setVolumeCanvasSize(clampCanvasTarget(panelWidthPx));
+  }, [panelWidthPx, viewState?.volume_canvas_size]);
   const [volumeResizing, setVolumeResizing] = React.useState(false);
   const volumeResizeStartRef = React.useRef<{ x: number; y: number; size: number } | null>(null);
   const [showSlicePlanes, setShowSlicePlanes] = useModelState<boolean | undefined>("show_slice_planes");
@@ -1601,11 +1722,15 @@ function Show3DSlices() {
     nextZooms: ZoomState[] = liveZoomsRef.current,
     nextFftZooms: ZoomState[] = liveFftZoomsRef.current,
     nextCamera: CameraState = liveCameraRef.current,
+    nextSizes: Partial<Show3DSlicesViewSizes> = {},
   ) => {
     setViewState({
       zooms: nextZooms.map(v => ({ ...v })),
       fft_zooms: nextFftZooms.map(v => ({ ...v })),
       camera: { ...nextCamera },
+      canvas_target: clampCanvasTarget(nextSizes.canvasTarget ?? canvasTargetRef.current),
+      side_canvas_target: clampCanvasTarget(nextSizes.sideCanvasTarget ?? sideCanvasTargetRef.current),
+      volume_canvas_size: clampCanvasTarget(nextSizes.volumeCanvasSize ?? volumeCanvasSizeRef.current),
     });
   }, [setViewState]);
   // Live z_stretch ref for rAF drag path - keeps latest value without re-binding closure.
@@ -1887,7 +2012,7 @@ function Show3DSlices() {
       const start = volumeResizeStartRef.current;
       if (!start) return;
       const delta = Math.max(e.clientX - start.x, e.clientY - start.y);
-      const newSize = Math.max(300, Math.min(800, start.size + delta));
+      const newSize = clampCanvasTarget(start.size + delta);
       latestSize = newSize;
       // Throttle canvas resize to rAF for smooth drag
       if (!volumeResizeRafRef.current) {
@@ -1901,9 +2026,9 @@ function Show3DSlices() {
       if (volumeResizeRafRef.current) { cancelAnimationFrame(volumeResizeRafRef.current); volumeResizeRafRef.current = 0; }
       const start = volumeResizeStartRef.current;
       if (start) {
-        const nextSize = Math.max(300, Math.min(800, latestSize));
+        const nextSize = clampCanvasTarget(latestSize);
         setVolumeCanvasSize(nextSize);
-        setPanelWidthPx(Math.round(nextSize));
+        persistViewState(undefined, undefined, undefined, { volumeCanvasSize: nextSize });
       }
       setVolumeResizing(false);
       volumeResizeStartRef.current = null;
@@ -1911,7 +2036,7 @@ function Show3DSlices() {
     document.addEventListener("mousemove", onMove);
     document.addEventListener("mouseup", onUp);
     return () => { document.removeEventListener("mousemove", onMove); document.removeEventListener("mouseup", onUp); };
-  }, [volumeResizing, volumeCanvasSize, setPanelWidthPx]);
+  }, [persistViewState, volumeCanvasSize, volumeResizing]);
 
   const cameraChanged = camera.yaw !== SHOW3DSLICES_DEFAULT_CAMERA.yaw || camera.pitch !== SHOW3DSLICES_DEFAULT_CAMERA.pitch || (camera.roll ?? 0) !== (SHOW3DSLICES_DEFAULT_CAMERA.roll ?? 0) || camera.distance !== SHOW3DSLICES_DEFAULT_CAMERA.distance || camera.panX !== SHOW3DSLICES_DEFAULT_CAMERA.panX || camera.panY !== SHOW3DSLICES_DEFAULT_CAMERA.panY;
 
@@ -3433,7 +3558,7 @@ function Show3DSlices() {
     let latestSize = resizeStart.size;
     const handleMouseMove = (e: MouseEvent) => {
       const delta = Math.max(e.clientX - resizeStart.x, e.clientY - resizeStart.y);
-      latestSize = Math.max(300, resizeStart.size + delta);
+      latestSize = clampCanvasTarget(resizeStart.size + delta);
       if (!rafId) {
         rafId = requestAnimationFrame(() => {
           rafId = 0;
@@ -3444,9 +3569,14 @@ function Show3DSlices() {
     };
     const handleMouseUp = () => {
       if (rafId) { cancelAnimationFrame(rafId); rafId = 0; }
-      if (resizeStart?.target === "side") setSideCanvasTarget(latestSize);
-      else setCanvasTarget(latestSize);
-      setPanelWidthPx(Math.round(latestSize));
+      const nextSize = clampCanvasTarget(latestSize);
+      if (resizeStart?.target === "side") {
+        setSideCanvasTarget(nextSize);
+        persistViewState(undefined, undefined, undefined, { sideCanvasTarget: nextSize });
+      } else {
+        setCanvasTarget(nextSize);
+        persistViewState(undefined, undefined, undefined, { canvasTarget: nextSize });
+      }
       setIsResizing(false);
       setResizeStart(null);
     };
@@ -3457,7 +3587,7 @@ function Show3DSlices() {
       document.removeEventListener("mousemove", handleMouseMove);
       document.removeEventListener("mouseup", handleMouseUp);
     };
-  }, [isResizing, resizeStart, setPanelWidthPx]);
+  }, [isResizing, persistViewState, resizeStart]);
 
   // -------------------------------------------------------------------------
   // Labels and setters
@@ -3690,6 +3820,7 @@ function Show3DSlices() {
   const panelTotalW = (canvasSizes[0]?.w ?? CANVAS_TARGET) + (canvasSizes[1]?.w ?? 0) + SPACING.SM;
   const primaryPanelW = canvasSizes[0]?.w ?? CANVAS_TARGET;
   const compactControlsW = Math.min(primaryPanelW, CANVAS_TARGET);
+  const sliceColumnOffsetPx = (webgpuSupported ? volumeCanvasSize : 220) + SPACING.SM;
   const obliqueAngleSliderMin = 0;
   const obliqueAngleSliderMax = 179;
   const [rawObliqueAngleMinBound, rawObliqueAngleMaxBound] = obliqueAngleBounds ?? [
@@ -3862,16 +3993,23 @@ function Show3DSlices() {
     px: 0,
     py: 0,
     minHeight: 22,
-    width: volumeCanvasSize,
-    maxWidth: volumeCanvasSize,
+    width: "fit-content",
+    maxWidth: "none",
     flexWrap: "nowrap" as const,
-    overflow: "hidden",
+    alignSelf: "flex-start",
   };
   const denseSelect = {
     ...themedSelect,
     height: 22,
     fontSize: 10,
     "& .MuiSelect-select": { py: 0.25, px: 1 },
+  };
+  const contentControlRow = {
+    ...panelControlRow,
+    width: "fit-content",
+    maxWidth: "none",
+    flexWrap: "wrap" as const,
+    alignSelf: "flex-start",
   };
 
   // -------------------------------------------------------------------------
@@ -4033,7 +4171,7 @@ function Show3DSlices() {
           sit beside the 3D volume rather than below it). */}
       <Box sx={{ display: "flex", flexDirection: "column", flex: 1, minWidth: 0 }}>
       {/* Slice toolbar: compact row above the side column. */}
-      <Box sx={{ display: "flex", alignItems: "center", gap: `${SPACING.SM}px`, mt: 0, mb: 0, minHeight: 18, justifyContent: "flex-end", width: panelTotalW, maxWidth: panelTotalW, boxSizing: "border-box" }}>
+      <Box sx={{ ...controlRow, mt: 0, mb: 0, py: 0, minHeight: 24, boxSizing: "border-box", width: "fit-content", maxWidth: "none", flexWrap: "nowrap", alignSelf: "flex-start" }}>
         <Typography sx={{ ...controlLabel }}>FFT</Typography>
         <Switch checked={showFft} onChange={(e) => setShowFft(e.target.checked)} size="small" sx={switchStyles.small} inputProps={{ "aria-label": "Toggle FFT power spectrum panels" }} />
         {exportEnabled && (
@@ -4324,7 +4462,7 @@ function Show3DSlices() {
           );
         });
         return (
-          <Box sx={{ display: "flex", alignItems: "flex-start", gap: `${SPACING.SM}px`, justifyContent: "flex-start" }}>
+          <Box sx={{ display: "flex", alignItems: "flex-start", gap: `${SPACING.SM}px`, justifyContent: "flex-start", mt: `${SLICE_PANEL_TOP_ALIGN_PX}px` }}>
             {panels}
           </Box>
         );
@@ -4333,7 +4471,14 @@ function Show3DSlices() {
       </Box> {/* end side-by-side row (3D volume + slices) */}
       {/* FFT controls row */}
       {effectiveShowFft && (
-        <Box sx={{ ...panelControlRow, mt: `${SPACING.SM}px`, width: primaryPanelW, maxWidth: primaryPanelW, flexWrap: "wrap" }}>
+        <Box sx={{
+          ...panelControlRow,
+          mt: `${SPACING.SM}px`,
+          ml: `${sliceColumnOffsetPx}px`,
+          width: "fit-content",
+          maxWidth: panelTotalW,
+          flexWrap: "wrap",
+        }}>
           <Typography sx={{ ...controlLabel }}>FFT Scale</Typography>
           <Select value={fftLogScale ? "log" : "linear"} onChange={(e) => setFftLogScale(e.target.value === "log")} size="small" sx={{ ...denseSelect, minWidth: 45 }} MenuProps={themedMenuProps} inputProps={{ "aria-label": "FFT intensity scale (linear or logarithmic)" }}>
             <MenuItem value="linear">Lin</MenuItem>
@@ -4364,7 +4509,7 @@ function Show3DSlices() {
           boxSizing: "border-box",
         }}>
           <Box sx={{ display: "flex", flexDirection: "column", gap: `${SPACING.XS}px`, justifyContent: "flex-start", minWidth: 0 }}>
-            <Box sx={{ ...panelControlRow, width: compactControlsW, maxWidth: compactControlsW, flexWrap: "wrap" }}>
+            <Box sx={contentControlRow}>
               <Typography sx={{ ...controlLabel }}>Color</Typography>
               <Select size="small" value={cmap} onChange={(e) => setCmap(e.target.value)} MenuProps={themedMenuProps} sx={{ ...denseSelect, minWidth: 60 }} inputProps={{ "aria-label": "Image colormap" }}>
                 {COLORMAP_NAMES.map((name) => (<MenuItem key={name} value={name}>{name.charAt(0).toUpperCase() + name.slice(1)}</MenuItem>))}
@@ -4374,7 +4519,7 @@ function Show3DSlices() {
               <Typography sx={{ ...controlLabel }} title="CSS bilinear interpolation on image canvas. Off = pixelated.">Smooth</Typography>
               <Switch checked={smooth} onChange={(e) => setSmooth(e.target.checked)} size="small" sx={switchStyles.small} inputProps={{ "aria-label": "Toggle bilinear smoothing" }} />
             </Box>
-            <Box sx={{ ...panelControlRow, width: compactControlsW, maxWidth: compactControlsW, flexWrap: "wrap" }}>
+            <Box sx={contentControlRow}>
               <Typography sx={{ ...controlLabel }} title="Depth-axis display height multiplier (1-50x). CSS-only stretch; data unchanged. Useful when nz << nxy (e.g. multislice ptycho).">Z stretch</Typography>
               <LiveNumberSlider value={zStretch} min={1} max={50} step={0.5} onLiveChange={handleZStretchChange} onCommit={handleZStretchCommit} sx={{ ...sliderStyles.small, width: 80, mr: 1, "& .MuiSlider-valueLabel": { fontSize: 10, padding: "2px 4px" } }} ariaLabel="Depth axis display stretch multiplier" />
               <Typography sx={clickableControlLabel} title="Negate displayed values. Useful when phase sign is inverted." onClick={() => setFlip(!flip)}>Flip</Typography>
@@ -4417,7 +4562,7 @@ function Show3DSlices() {
         );
       })()}
       {/* Playback: transport + axis selector + fps + loop + bounce */}
-      <Box sx={{ ...panelControlRow, mt: `${SPACING.SM}px`, width: compactControlsW, maxWidth: compactControlsW, flexWrap: "nowrap" }}>
+      <Box sx={{ ...contentControlRow, mt: `${SPACING.SM}px`, flexWrap: "nowrap" }}>
         <Select
           value={playbackAxis}
           onChange={(e) => { setPlaying(false); setPlayAxis(Number(e.target.value)); }}

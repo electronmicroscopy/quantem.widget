@@ -55,6 +55,18 @@ For a quick visual smoke before a broad widget PR:
 scripts/widget_visual_signoff.sh --quick
 ```
 
+## Performance Expectations
+
+For interactive widget changes, verify performance in the actual user path, not
+only with unit tests. Open the affected notebook or exported HTML, drive the
+changed controls, and check the widget debug HUD or another direct timing signal
+when available.
+
+Report FPS/latency in the PR or handoff. Any loss of real-time interaction is a
+bug to fix or explicitly document. For ShowEDS real-data workflows, band, ROI,
+zoom, contrast, and smooth/auto display interactions should remain at 30 FPS or
+better.
+
 ## HTML Export Expectations
 
 All export-capable widgets should follow the public shape:

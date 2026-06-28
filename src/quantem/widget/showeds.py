@@ -747,6 +747,7 @@ class ShowEDS(anywidget.AnyWidget):
     spectrum_height_px = traitlets.Int(250).tag(sync=True)
     show_controls = traitlets.Bool(True).tag(sync=True)
     log_spectrum = traitlets.Bool(False).tag(sync=True)
+    smooth = traitlets.Bool(False).tag(sync=True)
     pixel_size = traitlets.Float(0.0).tag(sync=True)
     pixel_unit = traitlets.Unicode("px").tag(sync=True)
     scale_bar_visible = traitlets.Bool(True).tag(sync=True)
@@ -772,6 +773,9 @@ class ShowEDS(anywidget.AnyWidget):
     export_payload_id = traitlets.Unicode("").tag(sync=True)
     export_filename = traitlets.Unicode("").tag(sync=True)
     export_sidecar_bytes = traitlets.Int(0).tag(sync=True)
+    # True only while writing standalone HTML: exported files have no host
+    # notebook theme, so match Show2D/Show3D and force readable light chrome.
+    _export_light = traitlets.Bool(False).tag(sync=True)
 
     def __init__(
         self,
@@ -790,6 +794,7 @@ class ShowEDS(anywidget.AnyWidget):
         spectrum_height_px: int | None = None,
         show_controls: bool = True,
         log_spectrum: bool = False,
+        smooth: bool = False,
         pixel_size: float | None = None,
         pixel_unit: str = "px",
         sampling: float | tuple[float, float] | list[float] | None = None,
@@ -874,6 +879,7 @@ class ShowEDS(anywidget.AnyWidget):
         self.title = title
         self.show_controls = bool(show_controls)
         self.log_spectrum = bool(log_spectrum)
+        self.smooth = bool(smooth)
         if pixel_size is None:
             if sampling is None:
                 self.pixel_size = 0.0
@@ -1215,6 +1221,7 @@ class ShowEDS(anywidget.AnyWidget):
             "spectrum_height_px": self.spectrum_height_px,
             "show_controls": self.show_controls,
             "log_spectrum": self.log_spectrum,
+            "smooth": self.smooth,
             "pixel_size": self.pixel_size,
             "pixel_unit": self.pixel_unit,
             "scale_bar_visible": self.scale_bar_visible,
@@ -1253,6 +1260,7 @@ class ShowEDS(anywidget.AnyWidget):
         self.pixel_size = float(max(0.0, self.pixel_size))
         self.pixel_unit = str(self.pixel_unit or "px")
         self.scale_bar_visible = bool(self.scale_bar_visible)
+        self.smooth = bool(self.smooth)
         self.map_zoom = float(max(1.0, min(32.0, self.map_zoom)))
         view_rows = self.n_rows / self.map_zoom
         view_cols = self.n_cols / self.map_zoom
@@ -1310,13 +1318,18 @@ class ShowEDS(anywidget.AnyWidget):
         export_widget = widget or self
         export_path = pathlib.Path(path)
         export_path.parent.mkdir(parents=True, exist_ok=True)
-        embed_minimal_html(
-            str(export_path),
-            views=[export_widget],
-            title=title or export_widget.title or self.title or "ShowEDS",
-            drop_defaults=False,
-            state=dependency_state([export_widget], drop_defaults=False),
-        )
+        previous_export_light = export_widget._export_light
+        export_widget._export_light = True
+        try:
+            embed_minimal_html(
+                str(export_path),
+                views=[export_widget],
+                title=title or export_widget.title or self.title or "ShowEDS",
+                drop_defaults=False,
+                state=dependency_state([export_widget], drop_defaults=False),
+            )
+        finally:
+            export_widget._export_light = previous_export_light
         return export_path
 
     def _html_export_bytes(
@@ -1494,6 +1507,7 @@ class ShowEDS(anywidget.AnyWidget):
             spectrum_height_px=self.spectrum_height_px,
             show_controls=self.show_controls,
             log_spectrum=self.log_spectrum,
+            smooth=self.smooth,
             pixel_size=self.pixel_size * spatial_bin if self.pixel_size > 0 else 0.0,
             pixel_unit=self.pixel_unit,
             scale_bar_visible=self.scale_bar_visible,
@@ -1515,6 +1529,7 @@ class ShowEDS(anywidget.AnyWidget):
         widget.spectrum_view_start = self.spectrum_view_start / energy_bin
         widget.spectrum_view_end = max(widget.spectrum_view_start + 1, self.spectrum_view_end / energy_bin)
         widget.load_state_dict(widget.state_dict())
+        widget._export_light = True
         return widget
 
     def _on_export_request_change(self, change: dict) -> None:

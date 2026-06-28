@@ -45,6 +45,20 @@ Do not create or push a `widget-v*` tag until the required local gates in that
 runbook pass. For RCs intended for TestPyPI, also run the real browser/Jupyter
 user-path checks called out in the runbook before tagging.
 
+## Performance Verification
+
+Interactive speed is a required part of widget correctness. For any frontend,
+WebGPU, notebook-state, or export change that can affect a widget interaction,
+drive the affected widget in JupyterLab or standalone HTML and verify that the
+change did not regress responsiveness. Use the widget's debug HUD or another
+direct timing signal when available, and report the measured FPS/latency in the
+handoff or final summary. Do not rely only on unit tests for interaction-heavy
+changes.
+
+For ShowEDS real-data work, keep band, ROI, zoom, contrast, and smooth/auto
+display interactions at real-time speed. Treat loss of 30 FPS interaction as a
+bug unless the limitation is explicitly documented and accepted.
+
 ## Repository Hygiene
 
 Keep public documentation in durable paths such as `README.md`,

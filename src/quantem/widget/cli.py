@@ -190,6 +190,24 @@ def _embed_jpeg(cell: dict, png_or_jpeg: bytes, quality: int) -> bool:
     return done
 
 
+def _cell_has_image_output(cell: dict) -> bool:
+    """Return true when a notebook cell already has a GitHub-renderable image."""
+    for out in cell.get("outputs", []):
+        data = out.get("data") or {}
+        if any(key.startswith("image/") for key in data):
+            return True
+    return False
+
+
+def _cell_has_widget_view_output(cell: dict) -> bool:
+    """Return true when a notebook cell still depends on live widget MIME output."""
+    for out in cell.get("outputs", []):
+        data = out.get("data") or {}
+        if "application/vnd.jupyter.widget-view+json" in data:
+            return True
+    return False
+
+
 def _capture_full_ui(html: pathlib.Path, n_expected: int) -> list[bytes]:
     """Screenshot each widget's FULL UI (toolbar + toggles + panels + histograms) from the
     rendered live-widget HTML, deterministically, via Playwright on the real GPU. The widget
@@ -253,22 +271,32 @@ def _prepare_github(args: argparse.Namespace) -> int:
     nb = json.loads(notebook.read_text())
     widget_cells = [c for c in nb["cells"]
                     if c["cell_type"] == "code" and any(w in "".join(c["source"]) for w in _WIDGET_CELL)]
-    if widget_cells:
+    capture_cells = [
+        c for c in widget_cells
+        if _cell_has_widget_view_output(c) or not _cell_has_image_output(c)
+    ]
+    if capture_cells:
         try:
             html = notebook.with_suffix(".fullui.html")
             subprocess.run(["jupyter", "nbconvert", "--to", "html", str(notebook),
                             "--output-dir", str(notebook.parent), "--output", notebook.stem + ".fullui"],
                            check=True)
-            print(f"capturing {len(widget_cells)} widget UI(s) on the GPU ...")
-            shots = _capture_full_ui(html, len(widget_cells))
+            print(f"capturing {len(capture_cells)} widget UI(s) on the GPU ...")
+            shots = _capture_full_ui(html, len(capture_cells))
             html.unlink(missing_ok=True)
-            for cell, png in zip(widget_cells, shots):
+            if len(shots) != len(capture_cells):
+                raise ValueError(
+                    f"captured {len(shots)} widget UI screenshot(s) for {len(capture_cells)} widget cell(s)"
+                )
+            for cell, png in zip(capture_cells, shots):
                 _embed_jpeg(cell, png, args.quality)
             mode = f"{len(shots)} full-UI screenshots"
-        except (ImportError, RuntimeError) as err:
+        except (ImportError, RuntimeError, OSError) as err:
             raise ValueError(
                 "full-UI capture needs Playwright + a real GPU (NVIDIA Vulkan ICD + a display): "
                 f"{err}") from err
+    elif widget_cells:
+        mode = f"{len(widget_cells)} existing image output(s)"
     else:
         mode = "no widget cells - state stripped only"
     _strip_state(nb)
