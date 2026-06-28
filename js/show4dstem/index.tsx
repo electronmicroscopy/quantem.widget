@@ -988,7 +988,10 @@ function Histogram({
         rangeRafRef.current = window.requestAnimationFrame(() => {
           rangeRafRef.current = null;
           const pending = pendingRangeRef.current;
-          if (pending) applyRangePreview(pending);
+          if (pending) {
+            applyRangePreview(pending);
+            onRangeChangeRef.current(pending[0], pending[1]);
+          }
         });
       }
     };
