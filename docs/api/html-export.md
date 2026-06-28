@@ -171,12 +171,12 @@ HTML export and GitHub preview solve different problems:
 |---|---|---:|---|
 | normal `.ipynb` saved from Jupyter | notebook with widget state | yes, in Jupyter | continuing work |
 | `quantem html notebook.ipynb --no-execute` | standalone HTML page | yes, in a browser | sharing an interactive report |
-| `quantem github notebook.ipynb --no-execute` | notebook with compressed widget pictures | no | GitHub notebook preview |
+| `quantem github notebook.ipynb --no-execute` | optional notebook copy with compressed widget pictures | no | GitHub notebook preview |
 
-GitHub does not run widget JavaScript. The `quantem github` command renders each
-widget in a browser, captures the full widget UI as an image, compresses it, and
-removes heavy widget state that GitHub cannot use. Make this GitHub copy from a
-separate notebook so the full working notebook keeps its state.
+GitHub does not run widget JavaScript. Use the hosted documentation, Colab,
+Jupyter, or `quantem html` for real interaction. The `quantem github` command is
+only for a separate non-interactive notebook copy for GitHub's native renderer;
+never run it in place on the canonical tutorial notebooks.
 
 ## Implementation checklist
 

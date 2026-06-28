@@ -135,6 +135,15 @@ interface HistogramProps {
 
 function Histogram({ data, precomputedBins, vminPct, vmaxPct, onRangeChange, width = 110, height = 40, theme = "dark", dataMin = 0, dataMax = 1, binMin, binMax }: HistogramProps & { binMin?: number; binMax?: number }) {
   const canvasRef = React.useRef<HTMLCanvasElement>(null);
+  const sliderRef = React.useRef<HTMLDivElement | null>(null);
+  const minLabelRef = React.useRef<HTMLElement | null>(null);
+  const maxLabelRef = React.useRef<HTMLElement | null>(null);
+  const onRangeChangeRef = React.useRef(onRangeChange);
+  const pendingRangeRef = React.useRef<[number, number] | null>(null);
+  const rangeRafRef = React.useRef<number | null>(null);
+  const [liveRange, setLiveRange] = React.useState<[number, number]>([vminPct, vmaxPct]);
+  React.useEffect(() => { setLiveRange([vminPct, vmaxPct]); }, [vminPct, vmaxPct]);
+  const [liveVminPct, liveVmaxPct] = liveRange;
   // binMin/binMax: range used to compute the histogram BARS. Falls back to
   // dataMin/dataMax. Trait-anchored displays (vmin/vmax clip the image to a
   // sub-range of the data) should set binMin/binMax to the FULL data range
@@ -147,7 +156,12 @@ function Histogram({ data, precomputedBins, vminPct, vmaxPct, onRangeChange, wid
   const isDark = theme === "dark";
   const colors = isDark ? { bg: "#1a1a1a", barActive: "#888", barInactive: "#444", border: "#333" } : { bg: "#f0f0f0", barActive: "#666", barInactive: "#bbb", border: "#ccc" };
 
-  React.useEffect(() => {
+  const formatValue = React.useCallback((pct: number) => {
+    const val = dataMin + (pct / 100) * (dataMax - dataMin);
+    return val >= 1000 ? val.toExponential(1) : val.toFixed(1);
+  }, [dataMax, dataMin]);
+
+  const drawHistogram = React.useCallback((loPct: number, hiPct: number) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
@@ -168,26 +182,127 @@ function Histogram({ data, precomputedBins, vminPct, vmaxPct, onRangeChange, wid
     }
     const maxVal = Math.max(...reducedBins, 0.001);
     const barWidth = width / displayBins;
-    const vminBin = Math.floor((vminPct / 100) * displayBins);
-    const vmaxBin = Math.floor((vmaxPct / 100) * displayBins);
+    const vminBin = Math.floor((loPct / 100) * displayBins);
+    const vmaxBin = Math.floor((hiPct / 100) * displayBins);
     for (let i = 0; i < displayBins; i++) {
       const barHeight = (reducedBins[i] / maxVal) * (height - 2);
       ctx.fillStyle = (i >= vminBin && i <= vmaxBin) ? colors.barActive : colors.barInactive;
       ctx.fillRect(i * barWidth + 0.5, height - barHeight, Math.max(1, barWidth - 1), barHeight);
     }
-  }, [bins, vminPct, vmaxPct, width, height, colors]);
+  }, [bins, colors, height, width]);
 
+  const applyRangePreview = React.useCallback((next: [number, number]) => {
+    const [lo, hi] = next;
+    const slider = sliderRef.current?.querySelector(".MuiSlider-root") as HTMLElement | null;
+    const thumbs = slider?.querySelectorAll(".MuiSlider-thumb");
+    const track = slider?.querySelector(".MuiSlider-track") as HTMLElement | null;
+    if (thumbs && thumbs.length >= 2) {
+      (thumbs[0] as HTMLElement).style.left = `${lo}%`;
+      (thumbs[1] as HTMLElement).style.left = `${hi}%`;
+    }
+    if (track) {
+      track.style.left = `${lo}%`;
+      track.style.width = `${Math.max(0, hi - lo)}%`;
+    }
+    if (minLabelRef.current) minLabelRef.current.textContent = formatValue(lo);
+    if (maxLabelRef.current) maxLabelRef.current.textContent = formatValue(hi);
+    drawHistogram(lo, hi);
+  }, [drawHistogram, formatValue]);
+
+  React.useEffect(() => {
+    drawHistogram(liveVminPct, liveVmaxPct);
+  }, [drawHistogram, liveVmaxPct, liveVminPct]);
+
+  React.useEffect(() => {
+    onRangeChangeRef.current = onRangeChange;
+  }, [onRangeChange]);
+  const emitRangeChange = React.useCallback((min: number, max: number) => {
+    React.startTransition(() => onRangeChangeRef.current(min, max));
+  }, []);
+  const flushRangePreview = React.useCallback(() => {
+    if (rangeRafRef.current != null) {
+      window.cancelAnimationFrame(rangeRafRef.current);
+      rangeRafRef.current = null;
+    }
+    const pending = pendingRangeRef.current;
+    pendingRangeRef.current = null;
+    if (pending) {
+      setLiveRange(pending);
+      applyRangePreview(pending);
+      emitRangeChange(pending[0], pending[1]);
+    }
+  }, [applyRangePreview, emitRangeChange]);
+  React.useEffect(() => () => {
+    if (rangeRafRef.current != null) window.cancelAnimationFrame(rangeRafRef.current);
+  }, []);
+  const beginRangeDrag = React.useCallback((event: React.MouseEvent, dragWidth: number, lo0: number, hi0: number) => {
+    const startX = event.clientX;
+    const span = Math.max(1, hi0 - lo0);
+    const previousCursor = document.body.style.cursor;
+    document.body.style.cursor = "grabbing";
+    const onMove = (moveEvent: MouseEvent) => {
+      moveEvent.preventDefault();
+      const deltaPct = ((moveEvent.clientX - startX) / Math.max(1, dragWidth)) * 100;
+      const lo = Math.max(0, Math.min(100 - span, lo0 + deltaPct));
+      const next: [number, number] = [lo, lo + span];
+      pendingRangeRef.current = next;
+      if (rangeRafRef.current == null) {
+        rangeRafRef.current = window.requestAnimationFrame(() => {
+          rangeRafRef.current = null;
+          const pending = pendingRangeRef.current;
+          if (pending) applyRangePreview(pending);
+        });
+      }
+    };
+    const onUp = () => {
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+      document.body.style.cursor = previousCursor;
+      flushRangePreview();
+    };
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  }, [applyRangePreview, flushRangePreview]);
   return (
-    <Box sx={{ display: "flex", flexDirection: "column", gap: 0.25 }}>
-      <canvas ref={canvasRef} style={{ width, height, border: `1px solid ${colors.border}` }} />
-      <Slider
-        value={[vminPct, vmaxPct]}
-        onChange={(_, v) => { const [newMin, newMax] = v as number[]; onRangeChange(Math.min(newMin, newMax - 1), Math.max(newMax, newMin + 1)); }}
-        min={0} max={100} size="small" valueLabelDisplay="auto"
-        valueLabelFormat={(pct) => { const val = dataMin + (pct / 100) * (dataMax - dataMin); return val >= 1000 ? val.toExponential(1) : val.toFixed(1); }}
-        sx={{ width, py: 0, "& .MuiSlider-thumb": { width: 8, height: 8 }, "& .MuiSlider-rail": { height: 2 }, "& .MuiSlider-track": { height: 2 }, "& .MuiSlider-valueLabel": { fontSize: 10, padding: "2px 4px" } }}
-      />
-      <Box sx={{ display: "flex", justifyContent: "space-between", width }}><Typography sx={{ fontSize: 8, fontFamily: "monospace", opacity: 0.6, lineHeight: 1 }}>{(() => { const v = dataMin + (vminPct / 100) * (dataMax - dataMin); return v >= 1000 ? v.toExponential(1) : v.toFixed(1); })()}</Typography><Typography sx={{ fontSize: 8, fontFamily: "monospace", opacity: 0.6, lineHeight: 1 }}>{(() => { const v = dataMin + (vmaxPct / 100) * (dataMax - dataMin); return v >= 1000 ? v.toExponential(1) : v.toFixed(1); })()}</Typography></Box>
+      <Box
+        sx={{ display: "flex", flexDirection: "column", gap: 0, width }}
+      >
+      <Box sx={{ position: "relative", width, height: height + 6 }}>
+        <canvas ref={canvasRef} style={{ width, height, border: `1px solid ${colors.border}`, display: "block" }} />
+        <Box
+          ref={sliderRef}
+          onMouseDownCapture={(e) => {
+            if ((e.target as HTMLElement).closest(".MuiSlider-thumb")) return;
+            const rect = sliderRef.current?.getBoundingClientRect();
+            if (!rect) return;
+            const lo = Math.max(0, Math.min(100, Math.min(liveVminPct, liveVmaxPct)));
+            const hi = Math.max(0, Math.min(100, Math.max(liveVminPct, liveVmaxPct)));
+            const pct = ((e.clientX - rect.left) / Math.max(1, rect.width)) * 100;
+            if (pct < lo || pct > hi) return;
+            const thumbGuardPct = Math.max(4, (10 / Math.max(1, rect.width)) * 100);
+            if (Math.abs(pct - lo) <= thumbGuardPct || Math.abs(pct - hi) <= thumbGuardPct) return;
+            beginRangeDrag(e, rect.width, lo, hi);
+            e.preventDefault();
+            e.stopPropagation();
+            e.nativeEvent.stopImmediatePropagation();
+          }}
+          sx={{ position: "absolute", left: 0, top: height - 1, width, height: 8, display: "flex", alignItems: "flex-start", cursor: "grab" }}
+        >
+          <Slider
+            value={liveRange}
+            onChange={(_, v) => {
+              const [newMin, newMax] = v as number[];
+              const next: [number, number] = [Math.min(newMin, newMax - 1), Math.max(newMax, newMin + 1)];
+              setLiveRange(next);
+              emitRangeChange(next[0], next[1]);
+            }}
+            min={0} max={100} size="small" valueLabelDisplay="auto"
+            valueLabelFormat={formatValue}
+            sx={{ width, py: 0, "& .MuiSlider-thumb": { width: 8, height: 8 }, "& .MuiSlider-rail": { height: 2 }, "& .MuiSlider-track": { height: 2, cursor: "grab" }, "& .MuiSlider-valueLabel": { fontSize: 10, padding: "2px 4px" } }}
+          />
+        </Box>
+      </Box>
+      <Box sx={{ display: "flex", justifyContent: "space-between", width }}><Typography ref={minLabelRef} sx={{ fontSize: 8, fontFamily: "monospace", opacity: 0.6, lineHeight: 1 }}>{formatValue(liveVminPct)}</Typography><Typography ref={maxLabelRef} sx={{ fontSize: 8, fontFamily: "monospace", opacity: 0.6, lineHeight: 1 }}>{formatValue(liveVmaxPct)}</Typography></Box>
     </Box>
   );
 }
@@ -442,6 +557,7 @@ const switchStyles = {
 const sliderStyles = {
   small: { py: 0, "& .MuiSlider-thumb": { width: 10, height: 10 }, "& .MuiSlider-rail": { height: 2 }, "& .MuiSlider-track": { height: 2 } },
 };
+const imagePanelRadius = 0;
 
 function Show2D() {
   const model = useModel();
@@ -661,6 +777,7 @@ function Show2D() {
     () => ({ zoom: Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, initialZoom || 1)), panX: 0, panY: 0 }),
     [initialZoom]
   );
+  const resetZoomStateRef = React.useRef<ZoomState | null>(null);
   void linkPan; void setLinkPan; void imgWidth; void imgHeight;
   const [zoomStates, setZoomStates] = React.useState<Map<number, ZoomState>>(new Map());
   const [linkedZoomState, setLinkedZoomState] = React.useState<ZoomState>(initialZoomState);
@@ -1037,8 +1154,15 @@ function Show2D() {
       for (let i = 0; i < nImages; i++) m.set(i, { zoom: z, panX, panY });
       return m;
     });
+    if (resetZoomStateRef.current === null) resetZoomStateRef.current = { zoom: z, panX, panY };
     initialPanAppliedRef.current = true;
   }, [zoomRowTrait, zoomColTrait, canvasW, canvasH, width, height, nImages, initialZoomState.zoom]);
+  React.useEffect(() => {
+    if (resetZoomStateRef.current !== null) return;
+    if (zoomRowTrait != null || zoomColTrait != null) return;
+    if (canvasW <= 0 || canvasH <= 0 || width <= 0 || height <= 0) return;
+    resetZoomStateRef.current = initialZoomState;
+  }, [zoomRowTrait, zoomColTrait, canvasW, canvasH, width, height, initialZoomState]);
   const floatsPerImage = width * height;
   const galleryGridWidth = isGallery ? effectiveNcols * canvasW + (effectiveNcols - 1) * 8 : canvasW;
   const profileCanvasWidth = galleryGridWidth;
@@ -2859,16 +2983,26 @@ function Show2D() {
     persistZoomState(nextState);
   };
 
-  const handleDoubleClick = (idx: number) => {
-    setZoomState(idx, initialZoomState);
-    persistZoomState(initialZoomState);
+  const resetViewState = React.useCallback((): ZoomState => resetZoomStateRef.current || { zoom: 1, panX: 0, panY: 0 }, []);
+
+  const handleDoubleClick = (e: React.MouseEvent, idx: number) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const resetState = resetViewState();
+    setZoomState(idx, resetState);
+    persistZoomState(resetState);
+    clickStartRef.current = null;
+    setIsDraggingPan(false);
+    setPanStart(null);
+    setPanningIdx(null);
   };
 
   // Reset view (zoom/pan only — preserves profile, FFT state, etc.)
   const handleResetAll = () => {
-    setZoomStates(new Map());
-    setLinkedZoomState(initialZoomState);
-    persistZoomState(initialZoomState);
+    const resetState = resetViewState();
+    setZoomStates(new Map(Array.from({ length: nImages }, (_, i) => [i, resetState])));
+    setLinkedZoomState(resetState);
+    persistZoomState(resetState);
     setGalleryFftStates(new Map());
     setLinkedFftZoomState({ zoom: DEFAULT_FFT_ZOOM, panX: 0, panY: 0 });
     setFftZoom(DEFAULT_FFT_ZOOM);
@@ -3138,6 +3272,10 @@ function Show2D() {
   };
 
   const handleMouseDown = (e: React.MouseEvent, idx: number) => {
+    if (e.detail >= 2) {
+      handleDoubleClick(e, idx);
+      return;
+    }
     const zs = getZoomState(idx);
     if (isGallery && idx !== selectedIdx) {
       setSelectedIdx(idx);
@@ -3875,13 +4013,22 @@ function Show2D() {
                 <Box key={i} sx={{ cursor: i === selectedIdx ? ((isDraggingResize || isDraggingResizeInner || isHoveringResize || isHoveringResizeInner) ? "nwse-resize" : isDraggingROI ? "move" : (draggingProfileEndpoint !== null || isDraggingProfileLine) ? "grabbing" : (profileActive && (hoveredProfileEndpoint !== null || isHoveringProfileLine)) ? "grab" : (profileActive || roiActive || measureActive) ? "crosshair" : "grab") : ("pointer") }}>
                   <Box
                     ref={(el: HTMLDivElement | null) => { imageContainerRefs.current[i] = el; }}
-                    sx={{ position: "relative", bgcolor: "#000", border: `2px solid ${i === selectedIdx ? themeColors.accent : themeColors.border}`, borderRadius: 0, width: canvasW, height: canvasH }}
+                    sx={{
+                      position: "relative",
+                      bgcolor: "#000",
+                      border: `2px solid ${i === selectedIdx ? themeColors.accent : themeColors.border}`,
+                      borderRadius: imagePanelRadius,
+                      boxSizing: "border-box",
+                      overflow: "hidden",
+                      width: canvasW,
+                      height: canvasH,
+                    }}
                     onMouseDown={(e) => handleMouseDown(e, i)}
                     onMouseMove={(e) => handleMouseMove(e, i)}
                     onMouseUp={(e) => handleMouseUp(e, i)}
                     onMouseLeave={() => handleMouseLeave(i)}
                     onWheel={(i === selectedIdx || linkedZoom) ? (e) => handleWheel(e, i) : undefined}
-                    onDoubleClick={() => handleDoubleClick(i)}
+                    onDoubleClick={(e) => handleDoubleClick(e, i)}
                   >
                     <canvas
                       ref={(el) => { if (el && canvasRefs.current[i] !== el) { canvasRefs.current[i] = el; setCanvasReady(c => c + 1); } }}
@@ -3894,7 +4041,23 @@ function Show2D() {
                       style={{ position: "absolute", top: 0, left: 0, width: canvasW, height: canvasH, pointerEvents: "none" }}
                     />
                     {(
-                      <Box onMouseDown={handleCanvasResizeStart} sx={{ position: "absolute", bottom: 0, right: 0, width: 16, height: 16, cursor: "nwse-resize", opacity: 0.6, pointerEvents: "auto", background: `linear-gradient(135deg, transparent 50%, ${themeColors.accent} 50%)`, borderRadius: "0 0 4px 0", "&:hover": { opacity: 1 } }} />
+                      <Box
+                        onMouseDown={handleCanvasResizeStart}
+                        title="Resize panels"
+                        sx={{
+                          position: "absolute",
+                          bottom: 0,
+                          right: 0,
+                          width: 16,
+                          height: 16,
+                          cursor: "nwse-resize",
+                          opacity: 0.6,
+                          pointerEvents: "auto",
+                          background: `linear-gradient(135deg, transparent 50%, ${themeColors.accent} 50%)`,
+                          borderRadius: "0 0 4px 0",
+                          "&:hover": { opacity: 1 },
+                        }}
+                      />
                     )}
                   </Box>
                   <Typography sx={{ fontSize: 10, color: themeColors.textMuted, textAlign: "center", mt: 0.25 }}>
@@ -3918,7 +4081,16 @@ function Show2D() {
                   {effectiveShowFft && (
                     <Box
                       ref={(el: HTMLDivElement | null) => { fftContainerRefs.current[i] = el; }}
-                      sx={{ mt: 0.5, position: "relative", border: `2px solid ${i === selectedIdx ? themeColors.accent : themeColors.border}`, borderRadius: 0, bgcolor: "#000", cursor: "grab" }}
+                      sx={{
+                        mt: 0.5,
+                        position: "relative",
+                        bgcolor: "#000",
+                        border: `2px solid ${i === selectedIdx ? themeColors.accent : themeColors.border}`,
+                        borderRadius: imagePanelRadius,
+                        boxSizing: "border-box",
+                        overflow: "hidden",
+                        cursor: "grab",
+                      }}
                       onWheel={(i === selectedIdx || fftLinkedZoom) ? (e) => handleGalleryFftWheel(e, i) : undefined}
                       onDoubleClick={() => setGalleryFftState(i, { zoom: DEFAULT_FFT_ZOOM, panX: 0, panY: 0 })}
                       onMouseDown={(e) => handleGalleryFftMouseDown(e, i)}
@@ -3969,13 +4141,13 @@ function Show2D() {
             /* Single image mode */
             <Box
               ref={(el: HTMLDivElement | null) => { imageContainerRefs.current[0] = el; }}
-              sx={{ position: "relative", bgcolor: "#000", border: `1px solid ${themeColors.border}`, width: canvasW, height: canvasH, cursor: isHoveringLensEdge ? "nwse-resize" : isDraggingROI ? "move" : (isDraggingResize || isDraggingResizeInner || isHoveringResize || isHoveringResizeInner) ? "nwse-resize" : (draggingProfileEndpoint !== null || isDraggingProfileLine) ? "grabbing" : (profileActive && (hoveredProfileEndpoint !== null || isHoveringProfileLine)) ? "grab" : (profileActive || roiActive || measureActive) ? "crosshair" : "grab" }}
+              sx={{ position: "relative", bgcolor: "#000", border: `1px solid ${themeColors.border}`, borderRadius: imagePanelRadius, boxSizing: "border-box", overflow: "hidden", width: canvasW, height: canvasH, cursor: isHoveringLensEdge ? "nwse-resize" : isDraggingROI ? "move" : (isDraggingResize || isDraggingResizeInner || isHoveringResize || isHoveringResizeInner) ? "nwse-resize" : (draggingProfileEndpoint !== null || isDraggingProfileLine) ? "grabbing" : (profileActive && (hoveredProfileEndpoint !== null || isHoveringProfileLine)) ? "grab" : (profileActive || roiActive || measureActive) ? "crosshair" : "grab" }}
               onMouseDown={(e) => handleMouseDown(e, 0)}
               onMouseMove={(e) => handleMouseMove(e, 0)}
               onMouseUp={(e) => handleMouseUp(e, 0)}
               onMouseLeave={() => handleMouseLeave(0)}
               onWheel={(e) => handleWheel(e, 0)}
-              onDoubleClick={() => handleDoubleClick(0)}
+              onDoubleClick={(e) => handleDoubleClick(e, 0)}
             >
               <canvas
                 ref={(el) => { if (el && canvasRefs.current[0] !== el) { canvasRefs.current[0] = el; setCanvasReady(c => c + 1); } }}
@@ -4000,7 +4172,7 @@ function Show2D() {
                 </Box>
               )}
               {(
-                <Box onMouseDown={handleCanvasResizeStart} sx={{ position: "absolute", bottom: 0, right: 0, width: 16, height: 16, cursor: "nwse-resize", opacity: 0.6, pointerEvents: "auto", background: `linear-gradient(135deg, transparent 50%, ${themeColors.accent} 50%)`, borderRadius: "0 0 4px 0", "&:hover": { opacity: 1 } }} />
+                <Box onMouseDown={handleCanvasResizeStart} title="Resize image" sx={{ position: "absolute", bottom: 0, right: 0, width: 16, height: 16, cursor: "nwse-resize", opacity: 0.6, pointerEvents: "auto", background: `linear-gradient(135deg, transparent 50%, ${themeColors.accent} 50%)`, borderRadius: "0 0 4px 0", "&:hover": { opacity: 1 } }} />
               )}
             </Box>
           )}
@@ -4020,96 +4192,6 @@ function Show2D() {
                   <Box sx={{ borderLeft: `1px solid ${themeColors.border}`, height: 14 }} />
                   <Typography sx={{ fontSize: 11, color: "#fff", fontWeight: "bold" }}>Measuring</Typography>
                 </>
-              )}
-            </Box>
-          )}
-
-          {/* Gallery FFT Controls - below gallery grid */}
-          {effectiveShowFft && isGallery && (
-            <Box sx={{ mt: `${SPACING.SM}px`, display: "flex", gap: `${SPACING.SM}px`, boxSizing: "border-box" }}>
-              <Box sx={{ display: "flex", flexDirection: "column", gap: `${SPACING.XS}px`, flex: 1, justifyContent: "flex-start" }}>
-                <Box sx={{ ...controlRow, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, opacity: 1, pointerEvents: "auto" }}>
-                  <Typography sx={{ ...typography.label, fontSize: 10 }}>FFT Scale:</Typography>
-                  <Select value={fftScaleMode} onChange={(e) => setFftScaleMode(e.target.value as "linear" | "log")} size="small" sx={{ ...themedSelect, minWidth: 50, fontSize: 10 }} MenuProps={themedMenuProps}>
-                    <MenuItem value="linear">Lin</MenuItem>
-                    <MenuItem value="log">Log</MenuItem>
-                  </Select>
-                  {roiFftActive && fftCropDims && (
-                    <>
-                      <Typography sx={{ ...typography.label, fontSize: 10 }}>Win:</Typography>
-                      <Switch checked={fftWindow} onChange={(e) => { setFftWindow(e.target.checked); }} size="small" sx={switchStyles.small} />
-                    </>
-                  )}
-                  <Typography sx={{ ...typography.label, fontSize: 10 }}>Color:</Typography>
-                  <Select value={fftColormap} onChange={(e) => setFftColormap(String(e.target.value))} size="small" sx={{ ...themedSelect, minWidth: 65, fontSize: 10 }} MenuProps={themedMenuProps}>
-                    {COLORMAP_NAMES.map((name) => (<MenuItem key={name} value={name}>{name.charAt(0).toUpperCase() + name.slice(1)}</MenuItem>))}
-                  </Select>
-                </Box>
-                {/* FFT Row 2: Auto + Smooth + Link Zoom/Pan/Contrast (mirrors main image Row 2) */}
-                <Box sx={{ ...controlRow, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, opacity: 1, pointerEvents: "auto" }}>
-                  <Typography sx={{ ...typography.label, fontSize: 10 }}>Auto:</Typography>
-                  <Switch checked={fftAuto} onChange={(e) => { setFftAuto(e.target.checked); }} size="small" sx={switchStyles.small} />
-                  <Typography sx={{ ...typography.label, fontSize: 10 }} title="CSS bilinear interpolation on the FFT canvas.">Smooth:</Typography>
-                  <Switch checked={fftSmooth} onChange={(e) => { setFftSmooth(e.target.checked); }} size="small" sx={switchStyles.small} />
-                  {isGallery && (
-                    <>
-                      <Typography sx={{ ...typography.label, fontSize: 10 }}>Link:</Typography>
-                      <Typography sx={{ ...typography.label, fontSize: 10 }} title="Zoom together across FFT panels (FFT-only, independent of main image link).">Zoom</Typography>
-                      <Switch checked={fftLinkedZoom} onChange={() => { setFftLinkedZoom(!fftLinkedZoom); }} size="small" sx={switchStyles.small} />
-                      <Typography sx={{ ...typography.label, fontSize: 10 }} title="Pan FFT panels together (FFT-only).">Pan</Typography>
-                      <Switch checked={fftLinkPan} onChange={() => { setFftLinkPan(!fftLinkPan); }} size="small" sx={switchStyles.small} />
-                      <Typography sx={{ ...typography.label, fontSize: 10 }} title="Share FFT contrast slider across panels (FFT-only).">Contrast</Typography>
-                      <Switch checked={fftLinkedContrast} onChange={() => { setFftLinkedContrast(!fftLinkedContrast); }} size="small" sx={switchStyles.small} />
-                    </>
-                  )}
-                </Box>
-              </Box>
-              {(
-                <Box sx={{ display: "flex", flexDirection: "column", alignItems: "flex-end", justifyContent: "center", opacity: 1, pointerEvents: "auto" }}>
-                  {fftHistogramData && (
-                    !fftLinkedContrast && isGallery ? (
-                      <Box sx={{ display: "grid", gridTemplateColumns: `repeat(${effectiveNcols}, 110px)`, gap: "15px" }}>
-                        {Array.from({ length: nImages }).map((_, i) => {
-                          const fc = fftContrastFor(i);
-                          const mag = fftMagCacheGalleryRef.current[i];
-                          let perData: Float32Array | null = null;
-                          if (mag) {
-                            if (fftScaleMode === "log") perData = applyLogScale(mag);
-                            else if (fftScaleMode === "power") {
-                              perData = new Float32Array(mag.length);
-                              for (let j = 0; j < mag.length; j++) perData[j] = Math.sqrt(mag[j]);
-                            } else perData = mag;
-                          }
-                          const dr = perData ? findDataRange(perData) : fftDataRange;
-                          return (
-                            <Histogram
-                              key={i}
-                              data={perData || fftHistogramData}
-                              vminPct={fc.vminPct} vmaxPct={fc.vmaxPct}
-                              onRangeChange={(min, max) => { setFftContrastFor(i, { vminPct: min, vmaxPct: max }); }}
-                              width={110} height={58}
-                              theme={themeInfo.theme === "dark" ? "dark" : "light"}
-                              dataMin={dr.min} dataMax={dr.max}
-                            />
-                          );
-                        })}
-                      </Box>
-                    ) : (() => {
-                      const fc = fftContrastFor(selectedIdx);
-                      return (
-                        <Histogram
-                          data={fftHistogramData}
-                          vminPct={fc.vminPct}
-                          vmaxPct={fc.vmaxPct}
-                          onRangeChange={(min, max) => { setFftContrastFor(selectedIdx, { vminPct: min, vmaxPct: max }); }}
-                          width={110} height={58}
-                          theme={themeInfo.theme === "dark" ? "dark" : "light"}
-                          dataMin={fftDataRange.min} dataMax={fftDataRange.max}
-                        />
-                      );
-                    })()
-                  )}
-                </Box>
               )}
             </Box>
           )}
@@ -4323,6 +4405,96 @@ function Show2D() {
                         );
                       })}
                     </Box>
+                  )}
+                </Box>
+              )}
+            </Box>
+          )}
+
+          {/* Gallery FFT Controls - below regular image controls */}
+          {effectiveShowFft && isGallery && (
+            <Box sx={{ mt: `${SPACING.XS}px`, display: "flex", gap: `${SPACING.SM}px`, boxSizing: "border-box" }}>
+              <Box sx={{ display: "flex", flexDirection: "column", gap: `${SPACING.XS}px`, flex: 1, justifyContent: "flex-start" }}>
+                <Box sx={{ ...controlRow, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, opacity: 1, pointerEvents: "auto" }}>
+                  <Typography sx={{ ...typography.label, fontSize: 10 }}>FFT Scale:</Typography>
+                  <Select value={fftScaleMode} onChange={(e) => setFftScaleMode(e.target.value as "linear" | "log")} size="small" sx={{ ...themedSelect, minWidth: 50, fontSize: 10 }} MenuProps={themedMenuProps}>
+                    <MenuItem value="linear">Lin</MenuItem>
+                    <MenuItem value="log">Log</MenuItem>
+                  </Select>
+                  {roiFftActive && fftCropDims && (
+                    <>
+                      <Typography sx={{ ...typography.label, fontSize: 10 }}>Win:</Typography>
+                      <Switch checked={fftWindow} onChange={(e) => { setFftWindow(e.target.checked); }} size="small" sx={switchStyles.small} />
+                    </>
+                  )}
+                  <Typography sx={{ ...typography.label, fontSize: 10 }}>Color:</Typography>
+                  <Select value={fftColormap} onChange={(e) => setFftColormap(String(e.target.value))} size="small" sx={{ ...themedSelect, minWidth: 65, fontSize: 10 }} MenuProps={themedMenuProps}>
+                    {COLORMAP_NAMES.map((name) => (<MenuItem key={name} value={name}>{name.charAt(0).toUpperCase() + name.slice(1)}</MenuItem>))}
+                  </Select>
+                </Box>
+                {/* FFT Row 2: Auto + Smooth + Link Zoom/Pan/Contrast (mirrors main image Row 2) */}
+                <Box sx={{ ...controlRow, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, opacity: 1, pointerEvents: "auto" }}>
+                  <Typography sx={{ ...typography.label, fontSize: 10 }}>Auto:</Typography>
+                  <Switch checked={fftAuto} onChange={(e) => { setFftAuto(e.target.checked); }} size="small" sx={switchStyles.small} />
+                  <Typography sx={{ ...typography.label, fontSize: 10 }} title="CSS bilinear interpolation on the FFT canvas.">Smooth:</Typography>
+                  <Switch checked={fftSmooth} onChange={(e) => { setFftSmooth(e.target.checked); }} size="small" sx={switchStyles.small} />
+                  {isGallery && (
+                    <>
+                      <Typography sx={{ ...typography.label, fontSize: 10 }}>Link:</Typography>
+                      <Typography sx={{ ...typography.label, fontSize: 10 }} title="Zoom together across FFT panels (FFT-only, independent of main image link).">Zoom</Typography>
+                      <Switch checked={fftLinkedZoom} onChange={() => { setFftLinkedZoom(!fftLinkedZoom); }} size="small" sx={switchStyles.small} />
+                      <Typography sx={{ ...typography.label, fontSize: 10 }} title="Pan FFT panels together (FFT-only).">Pan</Typography>
+                      <Switch checked={fftLinkPan} onChange={() => { setFftLinkPan(!fftLinkPan); }} size="small" sx={switchStyles.small} />
+                      <Typography sx={{ ...typography.label, fontSize: 10 }} title="Share FFT contrast slider across panels (FFT-only).">Contrast</Typography>
+                      <Switch checked={fftLinkedContrast} onChange={() => { setFftLinkedContrast(!fftLinkedContrast); }} size="small" sx={switchStyles.small} />
+                    </>
+                  )}
+                </Box>
+              </Box>
+              {(
+                <Box sx={{ display: "flex", flexDirection: "column", alignItems: "flex-end", justifyContent: "center", opacity: 1, pointerEvents: "auto" }}>
+                  {fftHistogramData && (
+                    !fftLinkedContrast && isGallery ? (
+                      <Box sx={{ display: "grid", gridTemplateColumns: `repeat(${effectiveNcols}, 110px)`, gap: "15px" }}>
+                        {Array.from({ length: nImages }).map((_, i) => {
+                          const fc = fftContrastFor(i);
+                          const mag = fftMagCacheGalleryRef.current[i];
+                          let perData: Float32Array | null = null;
+                          if (mag) {
+                            if (fftScaleMode === "log") perData = applyLogScale(mag);
+                            else if (fftScaleMode === "power") {
+                              perData = new Float32Array(mag.length);
+                              for (let j = 0; j < mag.length; j++) perData[j] = Math.sqrt(mag[j]);
+                            } else perData = mag;
+                          }
+                          const dr = perData ? findDataRange(perData) : fftDataRange;
+                          return (
+                            <Histogram
+                              key={i}
+                              data={perData || fftHistogramData}
+                              vminPct={fc.vminPct} vmaxPct={fc.vmaxPct}
+                              onRangeChange={(min, max) => { setFftContrastFor(i, { vminPct: min, vmaxPct: max }); }}
+                              width={110} height={58}
+                              theme={themeInfo.theme === "dark" ? "dark" : "light"}
+                              dataMin={dr.min} dataMax={dr.max}
+                            />
+                          );
+                        })}
+                      </Box>
+                    ) : (() => {
+                      const fc = fftContrastFor(selectedIdx);
+                      return (
+                        <Histogram
+                          data={fftHistogramData}
+                          vminPct={fc.vminPct}
+                          vmaxPct={fc.vmaxPct}
+                          onRangeChange={(min, max) => { setFftContrastFor(selectedIdx, { vminPct: min, vmaxPct: max }); }}
+                          width={110} height={58}
+                          theme={themeInfo.theme === "dark" ? "dark" : "light"}
+                          dataMin={fftDataRange.min} dataMax={fftDataRange.max}
+                        />
+                      );
+                    })()
                   )}
                 </Box>
               )}
