@@ -217,7 +217,7 @@ function Histogram({ data, precomputedBins, vminPct, vmaxPct, onRangeChange, wid
     onRangeChangeRef.current = onRangeChange;
   }, [onRangeChange]);
   const emitRangeChange = React.useCallback((min: number, max: number) => {
-    React.startTransition(() => onRangeChangeRef.current(min, max));
+    onRangeChangeRef.current(min, max);
   }, []);
   const flushRangePreview = React.useCallback(() => {
     if (rangeRafRef.current != null) {
@@ -250,7 +250,11 @@ function Histogram({ data, precomputedBins, vminPct, vmaxPct, onRangeChange, wid
         rangeRafRef.current = window.requestAnimationFrame(() => {
           rangeRafRef.current = null;
           const pending = pendingRangeRef.current;
-          if (pending) applyRangePreview(pending);
+          if (pending) {
+            setLiveRange(pending);
+            applyRangePreview(pending);
+            emitRangeChange(pending[0], pending[1]);
+          }
         });
       }
     };
