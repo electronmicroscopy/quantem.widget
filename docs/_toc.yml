@@ -11,6 +11,7 @@ parts:
       - file: changelog
   - caption: Tutorials
     chapters:
+      - file: tutorials/download_data
       - file: tutorials/show2d
       - file: tutorials/show3d
       - file: tutorials/show3dslices

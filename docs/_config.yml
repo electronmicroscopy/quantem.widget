@@ -5,6 +5,8 @@ title: quantem.widget
 author: Sangjoon Bob Lee, et al
 logo: ""
 only_build_toc_files: true
+exclude_patterns:
+  - "**/._*"
 
 execute:
   execute_notebooks: "off"
