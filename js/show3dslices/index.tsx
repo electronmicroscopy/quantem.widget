@@ -819,7 +819,8 @@ const DEFAULT_FFT_ZOOM: ZoomState = { zoom: 2, panX: 0, panY: 0 };
 const CANVAS_TARGET = 480;
 const MIN_CANVAS_TARGET = 300;
 const MAX_CANVAS_TARGET = 800;
-const SLICE_PANEL_TOP_ALIGN_PX = 24;
+const RIGHT_TOOLBAR_TOP_ALIGN_PX = 20;
+const SLICE_PANEL_TOP_ALIGN_PX = 4;
 const AXES = ["xy", "oblique"] as const;
 const PANEL_NAMES = ["XY", "Oblique"] as const;
 // Show3DSlices opens in the same orientation as the main top slice panel:
@@ -4025,7 +4026,7 @@ function Show3DSlices() {
           Side-by-side layout keeps the whole widget within a 13" laptop viewport. */}
       <Box sx={{ display: "flex", flexDirection: "row", alignItems: "flex-start", gap: `${SPACING.SM}px` }}>
       {/* 3D Volume Renderer (left column) */}
-      <Box sx={{ mb: 0, flexShrink: 0 }}>
+      <Box sx={{ mb: 0, flexShrink: 0, width: webgpuSupported ? volumeCanvasSize : 220, overflow: "visible" }}>
         {/* Title row */}
         <Typography variant="caption" sx={{ ...typography.label, color: tc.accent, mb: `${SPACING.XS}px`, display: "block", height: 16, lineHeight: "16px", overflow: "hidden" }}>
           {title || "Volume 3D"}<InfoTooltip text={<Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
@@ -4175,7 +4176,7 @@ function Show3DSlices() {
           sit beside the 3D volume rather than below it). */}
       <Box sx={{ display: "flex", flexDirection: "column", flex: 1, minWidth: 0 }}>
       {/* Slice toolbar: compact row above the side column. */}
-      <Box sx={{ ...controlRow, mt: 0, mb: 0, py: 0, minHeight: 24, boxSizing: "border-box", width: "fit-content", maxWidth: "none", flexWrap: "nowrap", alignSelf: "flex-start" }}>
+      <Box sx={{ ...controlRow, mt: `${RIGHT_TOOLBAR_TOP_ALIGN_PX}px`, mb: 0, py: 0, minHeight: 24, boxSizing: "border-box", width: "fit-content", maxWidth: "none", flexWrap: "nowrap", alignSelf: "flex-start" }}>
         <Typography sx={{ ...controlLabel }}>FFT</Typography>
         <Switch checked={showFft} onChange={(e) => setShowFft(e.target.checked)} size="small" sx={switchStyles.small} inputProps={{ "aria-label": "Toggle FFT power spectrum panels" }} />
         {exportEnabled && (
