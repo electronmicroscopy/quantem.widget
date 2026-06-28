@@ -129,7 +129,7 @@ const SPACING = {
   LG: 16,   // Large gap (between major sections)
 };
 
-const CANVAS_SIZE = 450;  // Both DP and VI canvases
+const CANVAS_SIZE = 480;  // Both DP and VI canvases
 const HTML_EXPORT_OVERHEAD_BYTES = 700_000;
 
 type Show4DSTEMWritableFile = {
@@ -857,6 +857,12 @@ function Histogram({
   dataMax = 1,
 }: HistogramProps) {
   const canvasRef = React.useRef<HTMLCanvasElement>(null);
+  const sliderRef = React.useRef<HTMLDivElement | null>(null);
+  const minLabelRef = React.useRef<HTMLElement | null>(null);
+  const maxLabelRef = React.useRef<HTMLElement | null>(null);
+  const onRangeChangeRef = React.useRef(onRangeChange);
+  const pendingRangeRef = React.useRef<[number, number] | null>(null);
+  const rangeRafRef = React.useRef<number | null>(null);
   const bins = React.useMemo(() => computeHistogramFromBytes(data), [data]);
 
   // Theme-aware colors
@@ -872,8 +878,13 @@ function Histogram({
     border: "#ccc",
   };
 
+  const formatValue = React.useCallback((pct: number) => {
+    const val = dataMin + (pct / 100) * (dataMax - dataMin);
+    return val >= 1000 ? val.toExponential(1) : val.toFixed(1);
+  }, [dataMax, dataMin]);
+
   // Draw histogram (vertical gray bars)
-  React.useEffect(() => {
+  const drawHistogram = React.useCallback((loPct: number, hiPct: number) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
@@ -906,8 +917,8 @@ function Histogram({
     const barWidth = width / displayBins;
 
     // Calculate which bins are in the clipped range
-    const vminBin = Math.floor((vminPct / 100) * displayBins);
-    const vmaxBin = Math.floor((vmaxPct / 100) * displayBins);
+    const vminBin = Math.floor((loPct / 100) * displayBins);
+    const vmaxBin = Math.floor((hiPct / 100) * displayBins);
 
     // Draw histogram bars
     for (let i = 0; i < displayBins; i++) {
@@ -920,38 +931,126 @@ function Histogram({
       ctx.fillRect(x + 0.5, height - barHeight, Math.max(1, barWidth - 1), barHeight);
     }
 
-  }, [bins, vminPct, vmaxPct, width, height, colors]);
+  }, [bins, colors, height, width]);
+
+  const applyRangePreview = React.useCallback((next: [number, number]) => {
+    const [lo, hi] = next;
+    const slider = sliderRef.current?.querySelector(".MuiSlider-root") as HTMLElement | null;
+    const thumbs = slider?.querySelectorAll(".MuiSlider-thumb");
+    const track = slider?.querySelector(".MuiSlider-track") as HTMLElement | null;
+    if (thumbs && thumbs.length >= 2) {
+      (thumbs[0] as HTMLElement).style.left = `${lo}%`;
+      (thumbs[1] as HTMLElement).style.left = `${hi}%`;
+    }
+    if (track) {
+      track.style.left = `${lo}%`;
+      track.style.width = `${Math.max(0, hi - lo)}%`;
+    }
+    if (minLabelRef.current) minLabelRef.current.textContent = formatValue(lo);
+    if (maxLabelRef.current) maxLabelRef.current.textContent = formatValue(hi);
+    drawHistogram(lo, hi);
+  }, [drawHistogram, formatValue]);
+
+  React.useEffect(() => {
+    drawHistogram(vminPct, vmaxPct);
+  }, [drawHistogram, vmaxPct, vminPct]);
+
+  React.useEffect(() => {
+    onRangeChangeRef.current = onRangeChange;
+  }, [onRangeChange]);
+  const flushRangePreview = React.useCallback(() => {
+    if (rangeRafRef.current != null) {
+      window.cancelAnimationFrame(rangeRafRef.current);
+      rangeRafRef.current = null;
+    }
+    const pending = pendingRangeRef.current;
+    pendingRangeRef.current = null;
+    if (pending) {
+      applyRangePreview(pending);
+      onRangeChangeRef.current(pending[0], pending[1]);
+    }
+  }, [applyRangePreview]);
+  React.useEffect(() => () => {
+    if (rangeRafRef.current != null) window.cancelAnimationFrame(rangeRafRef.current);
+  }, []);
+  const beginRangeDrag = React.useCallback((event: React.MouseEvent, dragWidth: number, lo0: number, hi0: number) => {
+    const startX = event.clientX;
+    const span = Math.max(1, hi0 - lo0);
+    const previousCursor = document.body.style.cursor;
+    document.body.style.cursor = "grabbing";
+    const onMove = (moveEvent: MouseEvent) => {
+      moveEvent.preventDefault();
+      const deltaPct = ((moveEvent.clientX - startX) / Math.max(1, dragWidth)) * 100;
+      const lo = Math.max(0, Math.min(100 - span, lo0 + deltaPct));
+      const next: [number, number] = [lo, lo + span];
+      pendingRangeRef.current = next;
+      if (rangeRafRef.current == null) {
+        rangeRafRef.current = window.requestAnimationFrame(() => {
+          rangeRafRef.current = null;
+          const pending = pendingRangeRef.current;
+          if (pending) applyRangePreview(pending);
+        });
+      }
+    };
+    const onUp = () => {
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+      document.body.style.cursor = previousCursor;
+      flushRangePreview();
+    };
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  }, [applyRangePreview, flushRangePreview]);
 
   return (
-    <Box sx={{ display: "flex", flexDirection: "column", gap: 0.25 }}>
+    <Box sx={{ display: "flex", flexDirection: "column", gap: 0, width }}>
+      <Box sx={{ position: "relative", width, height: height + 6 }}>
       <canvas
         ref={canvasRef}
-        style={{ width, height, border: `1px solid ${colors.border}` }}
+        style={{ width, height, border: `1px solid ${colors.border}`, display: "block" }}
       />
-      <Slider
-        value={[vminPct, vmaxPct]}
-        onChange={(_, v) => {
-          const [newMin, newMax] = v as number[];
-          onRangeChange(Math.min(newMin, newMax - 1), Math.max(newMax, newMin + 1));
+      <Box
+        ref={sliderRef}
+        onMouseDownCapture={(e) => {
+          if ((e.target as HTMLElement).closest(".MuiSlider-thumb")) return;
+          const rect = sliderRef.current?.getBoundingClientRect();
+          if (!rect) return;
+          const lo = Math.max(0, Math.min(100, Math.min(vminPct, vmaxPct)));
+          const hi = Math.max(0, Math.min(100, Math.max(vminPct, vmaxPct)));
+          const pct = ((e.clientX - rect.left) / Math.max(1, rect.width)) * 100;
+          if (pct < lo || pct > hi) return;
+          const thumbGuardPct = Math.max(4, (10 / Math.max(1, rect.width)) * 100);
+          if (Math.abs(pct - lo) <= thumbGuardPct || Math.abs(pct - hi) <= thumbGuardPct) return;
+          beginRangeDrag(e, rect.width, lo, hi);
+          e.preventDefault();
+          e.stopPropagation();
+          e.nativeEvent.stopImmediatePropagation();
         }}
-        min={0}
-        max={100}
-        size="small"
-        valueLabelDisplay="auto"
-        valueLabelFormat={(pct) => {
-          const val = dataMin + (pct / 100) * (dataMax - dataMin);
-          return val >= 1000 ? val.toExponential(1) : val.toFixed(1);
-        }}
-        sx={{
-          width,
-          py: 0,
-          "& .MuiSlider-thumb": { width: 8, height: 8 },
-          "& .MuiSlider-rail": { height: 2 },
-          "& .MuiSlider-track": { height: 2 },
-          "& .MuiSlider-valueLabel": { fontSize: 10, padding: "2px 4px" },
-        }}
-      />
-      <Box sx={{ display: "flex", justifyContent: "space-between", width }}><Typography sx={{ fontSize: 8, fontFamily: "monospace", opacity: 0.6, lineHeight: 1 }}>{(() => { const v = dataMin + (vminPct / 100) * (dataMax - dataMin); return v >= 1000 ? v.toExponential(1) : v.toFixed(1); })()}</Typography><Typography sx={{ fontSize: 8, fontFamily: "monospace", opacity: 0.6, lineHeight: 1 }}>{(() => { const v = dataMin + (vmaxPct / 100) * (dataMax - dataMin); return v >= 1000 ? v.toExponential(1) : v.toFixed(1); })()}</Typography></Box>
+        sx={{ position: "absolute", left: 0, top: height - 1, width, height: 8, display: "flex", alignItems: "flex-start", cursor: "grab" }}
+      >
+        <Slider
+          value={[vminPct, vmaxPct]}
+          onChange={(_, v) => {
+            const [newMin, newMax] = v as number[];
+            onRangeChange(Math.min(newMin, newMax - 1), Math.max(newMax, newMin + 1));
+          }}
+          min={0}
+          max={100}
+          size="small"
+          valueLabelDisplay="auto"
+          valueLabelFormat={formatValue}
+          sx={{
+            width,
+            py: 0,
+            "& .MuiSlider-thumb": { width: 8, height: 8 },
+            "& .MuiSlider-rail": { height: 2 },
+            "& .MuiSlider-track": { height: 2, cursor: "grab" },
+            "& .MuiSlider-valueLabel": { fontSize: 10, padding: "2px 4px" },
+          }}
+        />
+      </Box>
+      </Box>
+      <Box sx={{ display: "flex", justifyContent: "space-between", width }}><Typography ref={minLabelRef} sx={{ fontSize: 8, fontFamily: "monospace", opacity: 0.6, lineHeight: 1 }}>{formatValue(vminPct)}</Typography><Typography ref={maxLabelRef} sx={{ fontSize: 8, fontFamily: "monospace", opacity: 0.6, lineHeight: 1 }}>{formatValue(vmaxPct)}</Typography></Box>
     </Box>
   );
 }

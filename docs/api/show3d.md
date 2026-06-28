@@ -28,5 +28,5 @@ export. See the [Show3D tutorial](../tutorials/show3d).
 
 ```{note}
 `export_html(quantized=True)` writes the smaller uint8 pack; the default writes
-exact float32. See the [saving tutorial](../tutorials/saving).
+exact float32. See the [widget export tutorial](../tutorials/widget_export).
 ```

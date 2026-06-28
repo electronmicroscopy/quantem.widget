@@ -408,6 +408,12 @@ const Histogram = React.memo(function Histogram({
   bins: precomputedBins = null,
 }: HistogramProps) {
   const canvasRef = React.useRef<HTMLCanvasElement>(null);
+  const sliderRef = React.useRef<HTMLDivElement | null>(null);
+  const minLabelRef = React.useRef<HTMLElement | null>(null);
+  const maxLabelRef = React.useRef<HTMLElement | null>(null);
+  const onRangeChangeRef = React.useRef(onRangeChange);
+  const pendingRangeRef = React.useRef<[number, number] | null>(null);
+  const rangeRafRef = React.useRef<number | null>(null);
   // Bins source priority: GPU-precomputed > CPU memoized scan. The CPU path
   // is an O(N) pass over 16.8 M Float32 at 4k (89% of scrub cost in profiling)
   // so we only run it when the GPU path didn't produce bins.
@@ -432,7 +438,11 @@ const Histogram = React.memo(function Histogram({
   const colors = theme === "dark"
     ? { bg: "#1a1a1a", barActive: "#888", barInactive: "#444", border: "#333" }
     : { bg: "#f0f0f0", barActive: "#666", barInactive: "#bbb", border: "#ccc" };
-  React.useEffect(() => {
+  const formatValue = React.useCallback((pct: number) => {
+    const val = dataMin + (pct / 100) * (dataMax - dataMin);
+    return val >= 1000 ? val.toExponential(2) : val.toFixed(2);
+  }, [dataMax, dataMin]);
+  const drawHistogram = React.useCallback((loPct: number, hiPct: number) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
@@ -454,48 +464,132 @@ const Histogram = React.memo(function Histogram({
     }
     const maxVal = Math.max(...reducedBins, 0.001);
     const barWidth = width / displayBins;
-    const vminBin = Math.floor((vminPct / 100) * displayBins);
-    const vmaxBin = Math.floor((vmaxPct / 100) * displayBins);
+    const vminBin = Math.floor((loPct / 100) * displayBins);
+    const vmaxBin = Math.floor((hiPct / 100) * displayBins);
     for (let i = 0; i < displayBins; i++) {
       const barHeight = (reducedBins[i] / maxVal) * (height - 2);
       const x = i * barWidth;
       ctx.fillStyle = i >= vminBin && i <= vmaxBin ? colors.barActive : colors.barInactive;
       ctx.fillRect(x + 0.5, height - barHeight, Math.max(1, barWidth - 1), barHeight);
     }
-  }, [bins, vminPct, vmaxPct, width, height, colors]);
-  const formatValue = (pct: number) => {
-    const val = dataMin + (pct / 100) * (dataMax - dataMin);
-    return val >= 1000 ? val.toExponential(2) : val.toFixed(2);
-  };
+  }, [bins, colors, height, width]);
+  const applyRangePreview = React.useCallback((next: [number, number]) => {
+    const [lo, hi] = next;
+    const slider = sliderRef.current?.querySelector(".MuiSlider-root") as HTMLElement | null;
+    const thumbs = slider?.querySelectorAll(".MuiSlider-thumb");
+    const track = slider?.querySelector(".MuiSlider-track") as HTMLElement | null;
+    if (thumbs && thumbs.length >= 2) {
+      (thumbs[0] as HTMLElement).style.left = `${lo}%`;
+      (thumbs[1] as HTMLElement).style.left = `${hi}%`;
+    }
+    if (track) {
+      track.style.left = `${lo}%`;
+      track.style.width = `${Math.max(0, hi - lo)}%`;
+    }
+    if (minLabelRef.current) minLabelRef.current.textContent = formatValue(lo);
+    if (maxLabelRef.current) maxLabelRef.current.textContent = formatValue(hi);
+    drawHistogram(lo, hi);
+  }, [drawHistogram, formatValue]);
+  React.useEffect(() => {
+    drawHistogram(vminPct, vmaxPct);
+  }, [drawHistogram, vmaxPct, vminPct]);
+  React.useEffect(() => {
+    onRangeChangeRef.current = onRangeChange;
+  }, [onRangeChange]);
+  const flushRangePreview = React.useCallback(() => {
+    if (rangeRafRef.current != null) {
+      window.cancelAnimationFrame(rangeRafRef.current);
+      rangeRafRef.current = null;
+    }
+    const pending = pendingRangeRef.current;
+    pendingRangeRef.current = null;
+    if (pending) {
+      applyRangePreview(pending);
+      onRangeChangeRef.current(pending[0], pending[1]);
+    }
+  }, [applyRangePreview]);
+  React.useEffect(() => () => {
+    if (rangeRafRef.current != null) window.cancelAnimationFrame(rangeRafRef.current);
+  }, []);
+  const beginRangeDrag = React.useCallback((event: React.MouseEvent, dragWidth: number, lo0: number, hi0: number) => {
+    const startX = event.clientX;
+    const span = Math.max(1, hi0 - lo0);
+    const previousCursor = document.body.style.cursor;
+    document.body.style.cursor = "grabbing";
+    const onMove = (moveEvent: MouseEvent) => {
+      moveEvent.preventDefault();
+      const deltaPct = ((moveEvent.clientX - startX) / Math.max(1, dragWidth)) * 100;
+      const lo = Math.max(0, Math.min(100 - span, lo0 + deltaPct));
+      const next: [number, number] = [lo, lo + span];
+      pendingRangeRef.current = next;
+      if (rangeRafRef.current == null) {
+        rangeRafRef.current = window.requestAnimationFrame(() => {
+          rangeRafRef.current = null;
+          const pending = pendingRangeRef.current;
+          if (pending) applyRangePreview(pending);
+        });
+      }
+    };
+    const onUp = () => {
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+      document.body.style.cursor = previousCursor;
+      flushRangePreview();
+    };
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  }, [applyRangePreview, flushRangePreview]);
   return (
-    <Box sx={{ display: "flex", flexDirection: "column", gap: 0.25 }}>
+    <Box sx={{ display: "flex", flexDirection: "column", gap: 0, width }}>
+      <Box sx={{ position: "relative", width, height: height + 6 }}>
       <canvas
         ref={canvasRef}
-        style={{ width, height, border: `1px solid ${colors.border}` }}
+        style={{ width, height, border: `1px solid ${colors.border}`, display: "block" }}
         role={ariaHidden ? undefined : "img"}
         aria-hidden={ariaHidden ? "true" : undefined}
         aria-label={ariaHidden ? undefined : "Histogram of intensity values with min and max clip handles"}
       />
-      <Slider
-        value={[vminPct, vmaxPct]}
-        onChange={(_, v) => {
-          const [newMin, newMax] = v as number[];
-          onRangeChange(Math.min(newMin, newMax - 1), Math.max(newMax, newMin + 1));
+      <Box
+        ref={sliderRef}
+        onMouseDownCapture={(e) => {
+          if ((e.target as HTMLElement).closest(".MuiSlider-thumb")) return;
+          const rect = sliderRef.current?.getBoundingClientRect();
+          if (!rect) return;
+          const lo = Math.max(0, Math.min(100, Math.min(vminPct, vmaxPct)));
+          const hi = Math.max(0, Math.min(100, Math.max(vminPct, vmaxPct)));
+          const pct = ((e.clientX - rect.left) / Math.max(1, rect.width)) * 100;
+          if (pct < lo || pct > hi) return;
+            const thumbGuardPct = Math.max(4, (10 / Math.max(1, rect.width)) * 100);
+            if (Math.abs(pct - lo) <= thumbGuardPct || Math.abs(pct - hi) <= thumbGuardPct) return;
+            beginRangeDrag(e, rect.width, lo, hi);
+            e.preventDefault();
+            e.stopPropagation();
+          e.nativeEvent.stopImmediatePropagation();
         }}
-        min={0} max={100} size="small"
-        valueLabelDisplay="auto" valueLabelFormat={formatValue}
-        aria-label="Histogram intensity clip range"
-        sx={{
-          width, py: 0,
-          "& .MuiSlider-thumb": { width: 8, height: 8 },
-          "& .MuiSlider-rail": { height: 2 },
-          "& .MuiSlider-track": { height: 2 },
-          "& .MuiSlider-valueLabel": { fontSize: 10, padding: "2px 4px" },
-        }}
-      />
+        sx={{ position: "absolute", left: 0, top: height - 1, width, height: 8, display: "flex", alignItems: "flex-start", cursor: "grab" }}
+      >
+        <Slider
+          value={[vminPct, vmaxPct]}
+          onChange={(_, v) => {
+            const [newMin, newMax] = v as number[];
+            onRangeChange(Math.min(newMin, newMax - 1), Math.max(newMax, newMin + 1));
+          }}
+          min={0} max={100} size="small"
+          valueLabelDisplay="auto" valueLabelFormat={formatValue}
+          aria-label="Histogram intensity clip range"
+          sx={{
+            width, py: 0,
+            "& .MuiSlider-thumb": { width: 8, height: 8 },
+            "& .MuiSlider-rail": { height: 2 },
+            "& .MuiSlider-track": { height: 2, cursor: "grab" },
+            "& .MuiSlider-valueLabel": { fontSize: 10, padding: "2px 4px" },
+          }}
+        />
+      </Box>
+      </Box>
       <Box sx={{ display: "flex", justifyContent: "space-between", width }}>
-        <Typography sx={{ fontSize: 8, fontFamily: UI_FONT, opacity: 0.6, lineHeight: 1 }}>{formatValue(vminPct)}</Typography>
-        <Typography sx={{ fontSize: 8, fontFamily: UI_FONT, opacity: 0.6, lineHeight: 1 }}>{formatValue(vmaxPct)}</Typography>
+        <Typography ref={minLabelRef} sx={{ fontSize: 8, fontFamily: UI_FONT, opacity: 0.6, lineHeight: 1 }}>{formatValue(vminPct)}</Typography>
+        <Typography ref={maxLabelRef} sx={{ fontSize: 8, fontFamily: UI_FONT, opacity: 0.6, lineHeight: 1 }}>{formatValue(vmaxPct)}</Typography>
       </Box>
     </Box>
   );
@@ -7855,8 +7949,8 @@ function Show3D() {
               </Box>
               {/* Playback: 2 rows side-by-side with Display + Histogram. */}
               {(() => { const activeIdx = displaySliceIdx; return (
-                <Box sx={{ display: "flex", flexDirection: "column", gap: `${SPACING.XS}px`, flex: 1, minWidth: 320, justifyContent: "center" }}>
-                  <Box sx={{ ...controlRow, width: 360, maxWidth: 360, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>
+                <Box sx={{ display: "flex", flexDirection: "column", alignItems: "flex-start", gap: `${SPACING.XS}px`, flex: "0 1 auto", minWidth: 0, maxWidth: "100%", justifyContent: "center" }}>
+                  <Box sx={{ ...controlRow, width: "min(360px, 100%)", maxWidth: "100%", border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, boxSizing: "border-box" }}>
                     <Stack direction="row" spacing={0} sx={{ flexShrink: 0, mr: 0.5 }}>
                       <IconButton size="small" onClick={() => playFromCurrentFrame(-1)} sx={{ color: reverse && playing ? themeColors.accent : themeColors.textMuted, p: 0.25 }} aria-label="Play in reverse" title="Play reverse">
                         <FastRewindIcon sx={{ fontSize: 18 }} />
@@ -7878,7 +7972,7 @@ function Show3D() {
                     )}
                     <Typography sx={{ ...typography.value, color: themeColors.textMuted, minWidth: hiddenSet.size ? `${String(nSlices).length * 2 + String(visibleCount).length + 5}ch` : `${String(nSlices).length * 2 + 1}ch`, fontVariantNumeric: "tabular-nums", textAlign: "right", flexShrink: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{hiddenSet.size ? `${activeIdx + 1}/${visibleCount} (${nSlices})` : `${activeIdx + 1}/${nSlices}`}</Typography>
                   </Box>
-                  <Box sx={{ ...controlRow, width: 372, maxWidth: 372, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>
+                  <Box sx={{ ...controlRow, width: "fit-content", maxWidth: "100%", flexWrap: "wrap", border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, boxSizing: "border-box" }}>
                     <Typography sx={{ ...typography.label, color: themeColors.textMuted, flexShrink: 0 }}>fps</Typography>
                     <Slider value={playbackFps} min={1} max={MAX_PLAYBACK_FPS} step={1} onChange={(_, v) => setPlaybackFps(v as number)} size="small" sx={{ ...sliderStyles.small, width: 44, flexShrink: 0 }} aria-label="Playback frames per second" valueLabelDisplay="auto" />
                     <Typography sx={{ ...typography.label, color: themeColors.textMuted, minWidth: 20, flexShrink: 0 }}>{Math.round(playbackFps)}</Typography>
@@ -7889,7 +7983,6 @@ function Show3D() {
                     <Switch size="small" checked={loop} onChange={() => setLoop(!loop)} sx={{ ...switchStyles.small, flexShrink: 0 }} slotProps={{ input: { "aria-label": "Toggle loop playback" } }} />
                     <Typography sx={{ ...typography.label, color: themeColors.textMuted, flexShrink: 0 }}>Bounce</Typography>
                     <Switch size="small" checked={boomerang} onChange={() => setBoomerang(!boomerang)} sx={{ ...switchStyles.small, flexShrink: 0 }} slotProps={{ input: { "aria-label": "Toggle bounce playback" } }} />
-                    <Box sx={{ flex: 1 }} />
                   </Box>
                 </Box>
               ); })()}

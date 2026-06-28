@@ -126,11 +126,16 @@ def profile() -> None:
             dev = "cpu"
         print(f"torch           {torch.__version__}  device={dev}")
         if torch.cuda.is_available():
-            # Used vs total decides whether the next merge / recon fits; torch live-vs-
-            # reserved is the leak signal - if "live" climbs across repeated calls, refs
-            # are still pinned (del them, then free_gpu() returns the reserved pool).
-            free, total = torch.cuda.mem_get_info()
-            print(f"VRAM            {(total - free) / 1e9:.1f} used / {total / 1e9:.0f} GB  ({free / 1e9:.0f} free)")
+            # Show EVERY visible GPU + how many are visible, so the reader knows up front
+            # whether the next merge / recon fits and on WHICH card - no surprise mid-run.
+            # torch live-vs-reserved is the leak signal: if "live" climbs across repeated
+            # calls, refs are still pinned (del them, then free_gpu() returns the pool).
+            import os
+            n = torch.cuda.device_count()
+            print(f"GPUs            {n} visible (CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES', 'all')})")
+            for i in range(n):
+                free, total = torch.cuda.mem_get_info(i)
+                print(f"  GPU{i}          {(total - free) / 1e9:5.1f} used / {total / 1e9:.0f} GB  ({free / 1e9:.0f} free)  <- run free_gpu() if low")
             print(f"  torch pool    {torch.cuda.memory_allocated() / 1e9:.1f} live / {torch.cuda.memory_reserved() / 1e9:.1f} reserved GB")
         elif getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
             cur = torch.mps.current_allocated_memory() / 1e9 if hasattr(torch.mps, "current_allocated_memory") else 0.0
