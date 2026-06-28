@@ -174,6 +174,8 @@ function MapHistogram({
   vminPct,
   vmaxPct,
   onRangeChange,
+  onRangePreview,
+  onRangeCommit,
   dataMin,
   dataMax,
   theme,
@@ -184,6 +186,8 @@ function MapHistogram({
   vminPct: number;
   vmaxPct: number;
   onRangeChange: (min: number, max: number) => void;
+  onRangePreview?: (min: number, max: number) => void;
+  onRangeCommit?: (min: number, max: number) => void;
   dataMin: number;
   dataMax: number;
   theme: "light" | "dark";
@@ -195,6 +199,8 @@ function MapHistogram({
   const minLabelRef = React.useRef<HTMLElement | null>(null);
   const maxLabelRef = React.useRef<HTMLElement | null>(null);
   const onRangeChangeRef = React.useRef(onRangeChange);
+  const onRangePreviewRef = React.useRef(onRangePreview);
+  const onRangeCommitRef = React.useRef(onRangeCommit);
   const pendingRangeRef = React.useRef<[number, number] | null>(null);
   const rangeRafRef = React.useRef<number | null>(null);
   const [liveRange, setLiveRange] = React.useState<[number, number]>(clampPercentPair(vminPct, vmaxPct));
@@ -260,7 +266,15 @@ function MapHistogram({
   }, [drawHistogram, liveVmaxPct, liveVminPct]);
   React.useEffect(() => {
     onRangeChangeRef.current = onRangeChange;
-  }, [onRangeChange]);
+    onRangePreviewRef.current = onRangePreview;
+    onRangeCommitRef.current = onRangeCommit;
+  }, [onRangeChange, onRangeCommit, onRangePreview]);
+  const emitRangePreview = React.useCallback((min: number, max: number) => {
+    (onRangePreviewRef.current || onRangeChangeRef.current)(min, max);
+  }, []);
+  const emitRangeCommit = React.useCallback((min: number, max: number) => {
+    (onRangeCommitRef.current || onRangeChangeRef.current)(min, max);
+  }, []);
   const flushRangePreview = React.useCallback(() => {
     if (rangeRafRef.current != null) {
       window.cancelAnimationFrame(rangeRafRef.current);
@@ -271,9 +285,9 @@ function MapHistogram({
     if (pending) {
       setLiveRange(pending);
       applyRangePreview(pending);
-      onRangeChangeRef.current(pending[0], pending[1]);
+      emitRangeCommit(pending[0], pending[1]);
     }
-  }, [applyRangePreview]);
+  }, [applyRangePreview, emitRangeCommit]);
   React.useEffect(() => () => {
     if (rangeRafRef.current != null) window.cancelAnimationFrame(rangeRafRef.current);
   }, []);
@@ -295,7 +309,7 @@ function MapHistogram({
           if (pending) {
             setLiveRange(pending);
             applyRangePreview(pending);
-            onRangeChangeRef.current(pending[0], pending[1]);
+            emitRangePreview(pending[0], pending[1]);
           }
         });
       }
@@ -308,7 +322,7 @@ function MapHistogram({
     };
     document.addEventListener("mousemove", onMove);
     document.addEventListener("mouseup", onUp);
-  }, [applyRangePreview, flushRangePreview]);
+  }, [applyRangePreview, emitRangePreview, flushRangePreview]);
   return (
     <Box sx={{ display: "flex", flexDirection: "column", gap: 0, width, flexShrink: 0 }}>
       <Box sx={{ position: "relative", width, height: height + 6 }}>
@@ -348,7 +362,14 @@ function MapHistogram({
             const [newMin, newMax] = v.map(Number);
             const next: [number, number] = [Math.min(newMin, newMax - 1), Math.max(newMax, newMin + 1)];
             setLiveRange(next);
-            onRangeChangeRef.current(next[0], next[1]);
+            emitRangePreview(next[0], next[1]);
+          }}
+          onChangeCommitted={(_, v) => {
+            if (!Array.isArray(v)) return;
+            const [newMin, newMax] = v.map(Number);
+            const next: [number, number] = [Math.min(newMin, newMax - 1), Math.max(newMax, newMin + 1)];
+            setLiveRange(next);
+            emitRangeCommit(next[0], next[1]);
           }}
           sx={{
             width,
@@ -1190,6 +1211,11 @@ function ShowEDS() {
     if (!Number.isFinite(range.vmin) || !Number.isFinite(range.vmax) || range.vmax <= range.vmin) return mapDataRange;
     return [range.vmin, range.vmax] as [number, number];
   }, [mapDataRange, mapVmaxPct, mapVminPct]);
+  const mapPercentRange = React.useCallback((loPct: number, hiPct: number): [number, number] => {
+    const range = sliderRange(mapDataRange[0], mapDataRange[1], loPct, hiPct);
+    if (!Number.isFinite(range.vmin) || !Number.isFinite(range.vmax) || range.vmax <= range.vmin) return mapDataRange;
+    return [range.vmin, range.vmax];
+  }, [mapDataRange]);
   const candidateLines = React.useMemo(() => {
     if (!showLineHints || !Array.isArray(lineHints)) return [];
     const step = Math.abs((energy[Math.min(nEnergy - 1, bandLo + 1)] ?? bandEnergyHi) - (energy[bandLo] ?? bandEnergyLo)) || 0.02;
@@ -1767,7 +1793,7 @@ function ShowEDS() {
     recordWidgetPerf("mapDrawMs", performance.now() - t0);
   }, [base, cols, recordWidgetPerf, rows]);
 
-  React.useEffect(() => {
+  const drawMapOverlay = React.useCallback((displayRange: [number, number]) => {
     const canvas = mapOverlayCanvasRef.current;
     if (!canvas) return;
     canvas.width = Math.max(1, cols);
@@ -1778,7 +1804,7 @@ function ShowEDS() {
     if (!elementMap) return;
     const t0 = performance.now();
     const image = ctx.createImageData(canvas.width, canvas.height);
-    const [mapLo, mapHi] = mapDisplayRange;
+    const [mapLo, mapHi] = displayRange;
     const mapSpan = Math.max(1e-12, mapHi - mapLo);
     for (let py = 0; py < canvas.height; py++) {
       const r = Math.min(rows - 1, py);
@@ -1794,7 +1820,11 @@ function ShowEDS() {
     }
     ctx.putImageData(image, 0, 0);
     recordWidgetPerf("mapDrawMs", performance.now() - t0);
-  }, [cols, elementMap, mapDisplayRange, recordWidgetPerf, rows]);
+  }, [cols, elementMap, recordWidgetPerf, rows]);
+
+  React.useEffect(() => {
+    drawMapOverlay(mapDisplayRange);
+  }, [drawMapOverlay, mapDisplayRange]);
 
   React.useEffect(() => {
     const canvas = mapUiOverlayCanvasRef.current;
@@ -2816,6 +2846,15 @@ function ShowEDS() {
                 height={58}
                 onRangeChange={(lo, hi) => {
                   if (autoMapContrastOn) setAutoMapContrastOn(false);
+                  setMapVminPct(lo);
+                  setMapVmaxPct(hi);
+                }}
+                onRangePreview={(lo, hi) => {
+                  drawMapOverlay(mapPercentRange(lo, hi));
+                }}
+                onRangeCommit={(lo, hi) => {
+                  if (autoMapContrastOn) setAutoMapContrastOn(false);
+                  drawMapOverlay(mapPercentRange(lo, hi));
                   setMapVminPct(lo);
                   setMapVmaxPct(hi);
                 }}
