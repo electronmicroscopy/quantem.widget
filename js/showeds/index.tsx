@@ -21,6 +21,7 @@ type EdsLineHint = { element: string; line: string; family?: string; energy_keV:
 type SavedRoi = Roi & { name?: string };
 type SavedBand = { name?: string; start: number; end: number };
 type ExportPreset = { label?: string; mode?: string; downsample?: number; binning?: number; description?: string };
+type PeriodicElement = { z: number; symbol: string; name: string; group: number; period: number };
 type PanelResize = { mode: "map" | "spectrum"; x: number; y: number; width: number; height: number } | null;
 type BandSliderDrag = { x: number; width: number; bandStart: number; bandEnd: number } | null;
 type NumericArray = Float32Array | Float64Array | Uint32Array;
@@ -84,6 +85,115 @@ const HISTOGRAM_LIGHT_COLORS = { bg: "#f0f0f0", barActive: "#666", barInactive: 
 const HISTOGRAM_DARK_COLORS = { bg: "#1b1b1b", barActive: "#aaa", barInactive: "#555", border: "#3a3a3a", label: "#aaa", slider: "#5af" };
 const HTML_EXPORT_OVERHEAD_BYTES = 700_000;
 const ROI_SHAPE_LABELS: Record<RoiShape, string> = { rect: "Rect", circle: "Circle", ellipse: "Ellipse" };
+const PERIODIC_ELEMENTS: PeriodicElement[] = [
+  { z: 1, symbol: "H", name: "Hydrogen", group: 1, period: 1 },
+  { z: 2, symbol: "He", name: "Helium", group: 18, period: 1 },
+  { z: 3, symbol: "Li", name: "Lithium", group: 1, period: 2 },
+  { z: 4, symbol: "Be", name: "Beryllium", group: 2, period: 2 },
+  { z: 5, symbol: "B", name: "Boron", group: 13, period: 2 },
+  { z: 6, symbol: "C", name: "Carbon", group: 14, period: 2 },
+  { z: 7, symbol: "N", name: "Nitrogen", group: 15, period: 2 },
+  { z: 8, symbol: "O", name: "Oxygen", group: 16, period: 2 },
+  { z: 9, symbol: "F", name: "Fluorine", group: 17, period: 2 },
+  { z: 10, symbol: "Ne", name: "Neon", group: 18, period: 2 },
+  { z: 11, symbol: "Na", name: "Sodium", group: 1, period: 3 },
+  { z: 12, symbol: "Mg", name: "Magnesium", group: 2, period: 3 },
+  { z: 13, symbol: "Al", name: "Aluminium", group: 13, period: 3 },
+  { z: 14, symbol: "Si", name: "Silicon", group: 14, period: 3 },
+  { z: 15, symbol: "P", name: "Phosphorus", group: 15, period: 3 },
+  { z: 16, symbol: "S", name: "Sulfur", group: 16, period: 3 },
+  { z: 17, symbol: "Cl", name: "Chlorine", group: 17, period: 3 },
+  { z: 18, symbol: "Ar", name: "Argon", group: 18, period: 3 },
+  { z: 19, symbol: "K", name: "Potassium", group: 1, period: 4 },
+  { z: 20, symbol: "Ca", name: "Calcium", group: 2, period: 4 },
+  { z: 21, symbol: "Sc", name: "Scandium", group: 3, period: 4 },
+  { z: 22, symbol: "Ti", name: "Titanium", group: 4, period: 4 },
+  { z: 23, symbol: "V", name: "Vanadium", group: 5, period: 4 },
+  { z: 24, symbol: "Cr", name: "Chromium", group: 6, period: 4 },
+  { z: 25, symbol: "Mn", name: "Manganese", group: 7, period: 4 },
+  { z: 26, symbol: "Fe", name: "Iron", group: 8, period: 4 },
+  { z: 27, symbol: "Co", name: "Cobalt", group: 9, period: 4 },
+  { z: 28, symbol: "Ni", name: "Nickel", group: 10, period: 4 },
+  { z: 29, symbol: "Cu", name: "Copper", group: 11, period: 4 },
+  { z: 30, symbol: "Zn", name: "Zinc", group: 12, period: 4 },
+  { z: 31, symbol: "Ga", name: "Gallium", group: 13, period: 4 },
+  { z: 32, symbol: "Ge", name: "Germanium", group: 14, period: 4 },
+  { z: 33, symbol: "As", name: "Arsenic", group: 15, period: 4 },
+  { z: 34, symbol: "Se", name: "Selenium", group: 16, period: 4 },
+  { z: 35, symbol: "Br", name: "Bromine", group: 17, period: 4 },
+  { z: 36, symbol: "Kr", name: "Krypton", group: 18, period: 4 },
+  { z: 37, symbol: "Rb", name: "Rubidium", group: 1, period: 5 },
+  { z: 38, symbol: "Sr", name: "Strontium", group: 2, period: 5 },
+  { z: 39, symbol: "Y", name: "Yttrium", group: 3, period: 5 },
+  { z: 40, symbol: "Zr", name: "Zirconium", group: 4, period: 5 },
+  { z: 41, symbol: "Nb", name: "Niobium", group: 5, period: 5 },
+  { z: 42, symbol: "Mo", name: "Molybdenum", group: 6, period: 5 },
+  { z: 43, symbol: "Tc", name: "Technetium", group: 7, period: 5 },
+  { z: 44, symbol: "Ru", name: "Ruthenium", group: 8, period: 5 },
+  { z: 45, symbol: "Rh", name: "Rhodium", group: 9, period: 5 },
+  { z: 46, symbol: "Pd", name: "Palladium", group: 10, period: 5 },
+  { z: 47, symbol: "Ag", name: "Silver", group: 11, period: 5 },
+  { z: 48, symbol: "Cd", name: "Cadmium", group: 12, period: 5 },
+  { z: 49, symbol: "In", name: "Indium", group: 13, period: 5 },
+  { z: 50, symbol: "Sn", name: "Tin", group: 14, period: 5 },
+  { z: 51, symbol: "Sb", name: "Antimony", group: 15, period: 5 },
+  { z: 52, symbol: "Te", name: "Tellurium", group: 16, period: 5 },
+  { z: 53, symbol: "I", name: "Iodine", group: 17, period: 5 },
+  { z: 54, symbol: "Xe", name: "Xenon", group: 18, period: 5 },
+  { z: 55, symbol: "Cs", name: "Caesium", group: 1, period: 6 },
+  { z: 56, symbol: "Ba", name: "Barium", group: 2, period: 6 },
+  { z: 57, symbol: "La", name: "Lanthanum", group: 3, period: 6 },
+  { z: 72, symbol: "Hf", name: "Hafnium", group: 4, period: 6 },
+  { z: 73, symbol: "Ta", name: "Tantalum", group: 5, period: 6 },
+  { z: 74, symbol: "W", name: "Tungsten", group: 6, period: 6 },
+  { z: 75, symbol: "Re", name: "Rhenium", group: 7, period: 6 },
+  { z: 76, symbol: "Os", name: "Osmium", group: 8, period: 6 },
+  { z: 77, symbol: "Ir", name: "Iridium", group: 9, period: 6 },
+  { z: 78, symbol: "Pt", name: "Platinum", group: 10, period: 6 },
+  { z: 79, symbol: "Au", name: "Gold", group: 11, period: 6 },
+  { z: 80, symbol: "Hg", name: "Mercury", group: 12, period: 6 },
+  { z: 81, symbol: "Tl", name: "Thallium", group: 13, period: 6 },
+  { z: 82, symbol: "Pb", name: "Lead", group: 14, period: 6 },
+  { z: 83, symbol: "Bi", name: "Bismuth", group: 15, period: 6 },
+  { z: 84, symbol: "Po", name: "Polonium", group: 16, period: 6 },
+  { z: 85, symbol: "At", name: "Astatine", group: 17, period: 6 },
+  { z: 86, symbol: "Rn", name: "Radon", group: 18, period: 6 },
+  { z: 87, symbol: "Fr", name: "Francium", group: 1, period: 7 },
+  { z: 88, symbol: "Ra", name: "Radium", group: 2, period: 7 },
+  { z: 89, symbol: "Ac", name: "Actinium", group: 3, period: 7 },
+  { z: 104, symbol: "Rf", name: "Rutherfordium", group: 4, period: 7 },
+  { z: 105, symbol: "Db", name: "Dubnium", group: 5, period: 7 },
+  { z: 106, symbol: "Sg", name: "Seaborgium", group: 6, period: 7 },
+  { z: 107, symbol: "Bh", name: "Bohrium", group: 7, period: 7 },
+  { z: 108, symbol: "Hs", name: "Hassium", group: 8, period: 7 },
+  { z: 109, symbol: "Mt", name: "Meitnerium", group: 9, period: 7 },
+  { z: 110, symbol: "Ds", name: "Darmstadtium", group: 10, period: 7 },
+  { z: 111, symbol: "Rg", name: "Roentgenium", group: 11, period: 7 },
+  { z: 112, symbol: "Cn", name: "Copernicium", group: 12, period: 7 },
+  { z: 113, symbol: "Nh", name: "Nihonium", group: 13, period: 7 },
+  { z: 114, symbol: "Fl", name: "Flerovium", group: 14, period: 7 },
+  { z: 115, symbol: "Mc", name: "Moscovium", group: 15, period: 7 },
+  { z: 116, symbol: "Lv", name: "Livermorium", group: 16, period: 7 },
+  { z: 117, symbol: "Ts", name: "Tennessine", group: 17, period: 7 },
+  { z: 118, symbol: "Og", name: "Oganesson", group: 18, period: 7 },
+  { z: 58, symbol: "Ce", name: "Cerium", group: 4, period: 8 },
+  { z: 59, symbol: "Pr", name: "Praseodymium", group: 5, period: 8 },
+  { z: 60, symbol: "Nd", name: "Neodymium", group: 6, period: 8 },
+  { z: 61, symbol: "Pm", name: "Promethium", group: 7, period: 8 },
+  { z: 62, symbol: "Sm", name: "Samarium", group: 8, period: 8 },
+  { z: 63, symbol: "Eu", name: "Europium", group: 9, period: 8 },
+  { z: 64, symbol: "Gd", name: "Gadolinium", group: 10, period: 8 },
+  { z: 65, symbol: "Tb", name: "Terbium", group: 11, period: 8 },
+  { z: 66, symbol: "Dy", name: "Dysprosium", group: 12, period: 8 },
+  { z: 67, symbol: "Ho", name: "Holmium", group: 13, period: 8 },
+  { z: 68, symbol: "Er", name: "Erbium", group: 14, period: 8 },
+  { z: 69, symbol: "Tm", name: "Thulium", group: 15, period: 8 },
+  { z: 70, symbol: "Yb", name: "Ytterbium", group: 16, period: 8 },
+  { z: 71, symbol: "Lu", name: "Lutetium", group: 17, period: 8 },
+  { z: 90, symbol: "Th", name: "Thorium", group: 4, period: 9 },
+  { z: 91, symbol: "Pa", name: "Protactinium", group: 5, period: 9 },
+  { z: 92, symbol: "U", name: "Uranium", group: 6, period: 9 },
+];
 const MAP_WGSL = `
 @group(0) @binding(0) var<storage,read> cube: array<u32>;
 @group(0) @binding(1) var<storage,read_write> out: array<f32>;
@@ -525,6 +635,24 @@ function lineLabel(line: EdsLineHint): string {
   return `${line.element} ${symbol}`;
 }
 
+function normalizeElementSymbol(value: unknown): string {
+  const raw = String(value ?? "").trim();
+  if (!raw) return "";
+  return `${raw.slice(0, 1).toUpperCase()}${raw.slice(1).toLowerCase()}`;
+}
+
+function uniqueSymbols(values: unknown[]): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const value of values) {
+    const symbol = normalizeElementSymbol(value);
+    if (!symbol || seen.has(symbol)) continue;
+    seen.add(symbol);
+    out.push(symbol);
+  }
+  return out;
+}
+
 function extractStorageBytes(dataView: DataView | ArrayBuffer | Uint8Array, logicalBytes: number): Uint8Array | null {
   const bytes = extractBytes(dataView);
   if (bytes.length === 0) return null;
@@ -817,6 +945,8 @@ function ShowEDS() {
       hudText: isDark ? "#d8f6ff" : "#1e4a5f",
       error: "#d32f2f",
       sliderPreview: "#1976d2",
+      buttonText: isDark ? "#001018" : "#ffffff",
+      hoverBg: isDark ? "#303030" : "#e8f2ff",
     };
   }, [tc, themeInfo.theme]);
 
@@ -859,6 +989,8 @@ function ShowEDS() {
   const [elementLabel] = useModelState<string>("element_label");
   const [showLineHints] = useModelState<boolean>("show_line_hints");
   const [lineHints] = useModelState<EdsLineHint[]>("line_hints");
+  const [selectedElements, setSelectedElements] = useModelState<string[]>("selected_elements");
+  const [autoIdentify, setAutoIdentify] = useModelState<boolean>("auto_identify");
   const [showDebug, setShowDebug] = useModelState<boolean>("show_debug");
   const [savedRois, setSavedRois] = useModelState<SavedRoi[]>("saved_rois");
   const [savedBands, setSavedBands] = useModelState<SavedBand[]>("saved_bands");
@@ -914,6 +1046,7 @@ function ShowEDS() {
   const [panelResize, setPanelResize] = React.useState<PanelResize>(null);
   const [bandSliderDrag, setBandSliderDrag] = React.useState<BandSliderDrag>(null);
   const [exportMenuAnchor, setExportMenuAnchor] = React.useState<HTMLElement | null>(null);
+  const [elementMenuAnchor, setElementMenuAnchor] = React.useState<HTMLElement | null>(null);
   const [roiMenuAnchor, setRoiMenuAnchor] = React.useState<HTMLElement | null>(null);
   const [roiShapeMenuAnchor, setRoiShapeMenuAnchor] = React.useState<HTMLElement | null>(null);
   const [bandMenuAnchor, setBandMenuAnchor] = React.useState<HTMLElement | null>(null);
@@ -1180,7 +1313,7 @@ function ShowEDS() {
         for (let i = s; i < e; i++) sum += roiSpectrum[i] || 0;
       }
       let candidates = "";
-      if (showLineHints && Array.isArray(lineHints)) {
+      if (showLineHints && autoIdentify && Array.isArray(lineHints)) {
         const step = Math.abs((energy[Math.min(nEnergy - 1, s + 1)] ?? e1) - (energy[s] ?? e0)) || 0.02;
         const lo = Math.min(e0, e1) - step * 0.65;
         const hi = Math.max(e0, e1) + step * 0.65;
@@ -1194,7 +1327,7 @@ function ShowEDS() {
       statusEl.textContent = `Band ${s}-${e - 1}: ${formatEnergy(e0)} - ${formatEnergy(e1)}; ROI band counts ${formatNumber(sum, 2)}${candidates ? `; candidates ${candidates}` : ""}`;
     }
     return [s, e];
-  }, [energy, indexToSpecX, lineHints, nEnergy, roiSpectrum, showLineHints]);
+  }, [autoIdentify, energy, indexToSpecX, lineHints, nEnergy, roiSpectrum, showLineHints]);
   const previewCenterBand = React.useCallback((start: number, end: number, sliderWidth?: number) => {
     const [s, e] = positionBandPreview(start, end, sliderWidth);
     pendingLocalBandRef.current = [s, e];
@@ -1217,7 +1350,7 @@ function ShowEDS() {
     return [range.vmin, range.vmax];
   }, [mapDataRange]);
   const candidateLines = React.useMemo(() => {
-    if (!showLineHints || !Array.isArray(lineHints)) return [];
+    if (!showLineHints || !autoIdentify || !Array.isArray(lineHints)) return [];
     const step = Math.abs((energy[Math.min(nEnergy - 1, bandLo + 1)] ?? bandEnergyHi) - (energy[bandLo] ?? bandEnergyLo)) || 0.02;
     const lo = bandEnergyLo - step * 0.65;
     const hi = bandEnergyHi + step * 0.65;
@@ -1225,8 +1358,66 @@ function ShowEDS() {
       .filter((line) => Number.isFinite(line.energy_keV) && line.energy_keV >= lo && line.energy_keV <= hi)
       .sort((a, b) => (b.intensity ?? 0) - (a.intensity ?? 0))
       .slice(0, 4);
-  }, [bandEnergyHi, bandEnergyLo, bandLo, energy, lineHints, nEnergy, showLineHints]);
+  }, [autoIdentify, bandEnergyHi, bandEnergyLo, bandLo, energy, lineHints, nEnergy, showLineHints]);
   const candidateText = candidateLines.map(lineLabel).join(", ");
+  const safeSelectedElements = React.useMemo(() => uniqueSymbols(Array.isArray(selectedElements) ? selectedElements : []), [selectedElements]);
+  const selectedElementSet = React.useMemo(() => new Set(safeSelectedElements), [safeSelectedElements]);
+  const elementsWithLines = React.useMemo(() => {
+    const out = new Set<string>();
+    if (Array.isArray(lineHints)) {
+      for (const line of lineHints) out.add(normalizeElementSymbol(line.element));
+    }
+    return out;
+  }, [lineHints]);
+  const selectedLineHints = React.useMemo(() => {
+    if (!Array.isArray(lineHints) || selectedElementSet.size === 0) return [];
+    return lineHints
+      .filter((line) => selectedElementSet.has(normalizeElementSymbol(line.element)))
+      .sort((a, b) => (a.energy_keV - b.energy_keV) || ((b.intensity ?? 0) - (a.intensity ?? 0)));
+  }, [lineHints, selectedElementSet]);
+  const suggestedLines = React.useMemo(() => {
+    const source = selectedLineHints.length > 0 ? selectedLineHints : candidateLines;
+    const visibleLo = energy[Math.max(0, Math.floor(spectrumView.start))] ?? bandEnergyLo;
+    const visibleHi = energy[Math.min(nEnergy - 1, Math.ceil(spectrumView.end) - 1)] ?? bandEnergyHi;
+    return source
+      .filter((line) => Number.isFinite(line.energy_keV) && line.energy_keV >= visibleLo && line.energy_keV <= visibleHi)
+      .sort((a, b) => (b.intensity ?? 0) - (a.intensity ?? 0))
+      .slice(0, 10);
+  }, [bandEnergyHi, bandEnergyLo, candidateLines, energy, nEnergy, selectedLineHints, spectrumView.end, spectrumView.start]);
+  const autoElementScores = React.useMemo(() => {
+    if (!autoIdentify || !roiSpectrum || !Array.isArray(lineHints) || energy.length < 2) return [];
+    const lo = Math.min(bandEnergyLo, bandEnergyHi);
+    const hi = Math.max(bandEnergyLo, bandEnergyHi);
+    const byElement = new Map<string, { symbol: string; score: number; lines: EdsLineHint[] }>();
+    for (const line of lineHints) {
+      if (!Number.isFinite(line.energy_keV) || line.energy_keV < lo || line.energy_keV > hi) continue;
+      const idx = Math.max(0, Math.min(nEnergy - 1, Math.round(energyToIndex(energy, line.energy_keV))));
+      const value = Math.max(0, Number(roiSpectrum[idx] ?? 0));
+      const score = value * Math.max(0.05, line.intensity ?? 0.1);
+      const symbol = normalizeElementSymbol(line.element);
+      const prev = byElement.get(symbol) || { symbol, score: 0, lines: [] };
+      prev.score += score;
+      prev.lines.push(line);
+      byElement.set(symbol, prev);
+    }
+    return [...byElement.values()]
+      .filter((item) => item.score > 0)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 6);
+  }, [autoIdentify, bandEnergyHi, bandEnergyLo, energy, lineHints, nEnergy, roiSpectrum]);
+  const toggleSelectedElement = React.useCallback((symbol: string) => {
+    const clean = normalizeElementSymbol(symbol);
+    if (!clean || !elementsWithLines.has(clean)) return;
+    const next = selectedElementSet.has(clean)
+      ? safeSelectedElements.filter((item) => item !== clean)
+      : [...safeSelectedElements, clean];
+    setSelectedElements(next);
+  }, [elementsWithLines, safeSelectedElements, selectedElementSet, setSelectedElements]);
+  const selectOnlyElement = React.useCallback((symbol: string) => {
+    const clean = normalizeElementSymbol(symbol);
+    if (!clean || !elementsWithLines.has(clean)) return;
+    setSelectedElements([clean]);
+  }, [elementsWithLines, setSelectedElements]);
   const isBandCenterPreviewing = Boolean(bandSliderDrag || drag?.mode === "band-move");
   React.useEffect(() => {
     if (localOverlayOpacity === null) return;
@@ -1872,7 +2063,10 @@ function ShowEDS() {
     }
     if (showLineHints && Array.isArray(lineHints) && energy.length > 1) {
       const visibleLines = lineHints
-        .filter((line) => line.intensity === undefined || line.intensity >= 0.04 || (line.energy_keV >= bandEnergyLo && line.energy_keV <= bandEnergyHi));
+        .filter((line) => {
+          const selected = selectedElementSet.has(normalizeElementSymbol(line.element));
+          return selected || line.intensity === undefined || line.intensity >= 0.04 || (line.energy_keV >= bandEnergyLo && line.energy_keV <= bandEnergyHi);
+        });
       ctx.save();
       ctx.font = `${10 * dpr}px ${UI_FONT}`;
       for (const line of visibleLines) {
@@ -1880,14 +2074,15 @@ function ShowEDS() {
         const x = padL + ((lineIndex - spectrumView.start) / Math.max(1e-9, spectrumView.span)) * plotW;
         if (x < padL || x > padL + plotW) continue;
         const inBand = line.energy_keV >= bandEnergyLo && line.energy_keV <= bandEnergyHi;
-        ctx.strokeStyle = inBand ? themeColors.lineHint : themeColors.lineHintMuted;
-        ctx.lineWidth = inBand ? 1.5 * dpr : dpr;
+        const selected = selectedElementSet.has(normalizeElementSymbol(line.element));
+        ctx.strokeStyle = selected || inBand ? themeColors.lineHint : themeColors.lineHintMuted;
+        ctx.lineWidth = selected ? 2.25 * dpr : inBand ? 1.5 * dpr : dpr;
         ctx.beginPath();
         ctx.moveTo(x, padT);
         ctx.lineTo(x, padT + plotH);
         ctx.stroke();
       }
-      const labelLines = candidateLines.slice(0, 3);
+      const labelLines = (selectedLineHints.length > 0 ? selectedLineHints : candidateLines).slice(0, 5);
       labelLines.forEach((line, index) => {
         const lineIndex = energyToIndex(energy, line.energy_keV);
         const x = padL + ((lineIndex - spectrumView.start) / Math.max(1e-9, spectrumView.span)) * plotW;
@@ -1922,6 +2117,8 @@ function ShowEDS() {
     logSpectrum,
     recordWidgetPerf,
     roiSpectrum,
+    selectedElementSet,
+    selectedLineHints,
     showLineHints,
     specH,
     specW,
@@ -2019,6 +2216,14 @@ function ShowEDS() {
     } else {
       mapRequestRef.current = { start: s, end: e, interactive };
     }
+  };
+
+  const snapBandToLine = (line: EdsLineHint) => {
+    const center = energyToIndex(energy, line.energy_keV);
+    const span = Math.max(3, bandHi - bandLo);
+    const start = Math.round(center - span / 2);
+    updateBand(start, start + span, true);
+    setElementMenuAnchor(null);
   };
 
   const saveCurrentRoi = () => {
@@ -2391,6 +2596,159 @@ function ShowEDS() {
           </Stack>
           {showControls && (
             <Stack direction="row" spacing={1} alignItems="center">
+              <Button
+                size="small"
+                variant={safeSelectedElements.length > 0 ? "contained" : "outlined"}
+                sx={{
+                  ...compactButtonSx,
+                  bgcolor: safeSelectedElements.length > 0 ? themeColors.accent : "transparent",
+                  color: safeSelectedElements.length > 0 ? themeColors.buttonText : themeColors.accent,
+                  "&:hover": {
+                    bgcolor: safeSelectedElements.length > 0 ? themeColors.accent : themeColors.hoverBg,
+                  },
+                }}
+                onClick={(e) => setElementMenuAnchor(e.currentTarget)}
+                aria-label="Open EDS periodic table"
+                aria-controls={elementMenuAnchor ? "showeds-elements-menu" : undefined}
+                aria-expanded={elementMenuAnchor ? "true" : undefined}
+                aria-haspopup="menu"
+                title="Pick elements and characteristic lines"
+              >
+                Elements {safeSelectedElements.length || ""}
+              </Button>
+              <Menu
+                id="showeds-elements-menu"
+                anchorEl={elementMenuAnchor}
+                open={Boolean(elementMenuAnchor)}
+                onClose={() => setElementMenuAnchor(null)}
+                MenuListProps={{ "aria-label": "ShowEDS periodic table and line picker" }}
+                anchorOrigin={{ vertical: "bottom", horizontal: "left" }}
+                transformOrigin={{ vertical: "top", horizontal: "left" }}
+                {...themedMenuProps}
+                sx={{ zIndex: 9999 }}
+              >
+                <Box sx={{ p: 1.25, width: 680, maxWidth: "calc(100vw - 48px)" }}>
+                  <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1 }}>
+                    <Typography sx={{ fontWeight: 700, fontSize: 13, color: themeColors.text, flex: 1 }}>
+                      Periodic table
+                    </Typography>
+                    <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Auto ID</Typography>
+                    <Switch checked={autoIdentify} onChange={(e) => setAutoIdentify(e.target.checked)} size="small" />
+                    <Button
+                      size="small"
+                      variant="outlined"
+                      sx={compactButtonSx}
+                      onClick={() => setSelectedElements([])}
+                      disabled={safeSelectedElements.length === 0}
+                    >
+                      Clear
+                    </Button>
+                  </Stack>
+                  <Box
+                    sx={{
+                      display: "grid",
+                      gridTemplateColumns: "repeat(18, 30px)",
+                      gridTemplateRows: "repeat(9, 30px)",
+                      gap: 0.35,
+                      alignItems: "stretch",
+                    }}
+                  >
+                    {PERIODIC_ELEMENTS.map((el) => {
+                      const enabled = elementsWithLines.has(el.symbol);
+                      const selected = selectedElementSet.has(el.symbol);
+                      const scored = autoElementScores.some((item) => item.symbol === el.symbol);
+                      return (
+                        <Button
+                          key={el.symbol}
+                          size="small"
+                          disabled={!enabled}
+                          onClick={() => toggleSelectedElement(el.symbol)}
+                          onDoubleClick={() => selectOnlyElement(el.symbol)}
+                          title={`${el.name}${enabled ? ": click to toggle, double-click to isolate" : ": no line in current table"}`}
+                          sx={{
+                            gridColumn: el.group,
+                            gridRow: el.period,
+                            minWidth: 0,
+                            width: 30,
+                            height: 30,
+                            p: 0,
+                            borderRadius: "4px",
+                            border: `1px solid ${selected ? themeColors.accent : scored ? themeColors.lineHintText : themeColors.border}`,
+                            bgcolor: selected
+                              ? themeColors.accent
+                              : scored
+                                ? themeColors.bandFill
+                                : themeColors.controlBg,
+                            color: selected ? themeColors.buttonText : themeColors.text,
+                            fontSize: 10,
+                            fontWeight: selected || scored ? 800 : 600,
+                            opacity: enabled ? 1 : 0.28,
+                            textTransform: "none",
+                            "&.Mui-disabled": {
+                              color: themeColors.textMuted,
+                              borderColor: themeColors.border,
+                            },
+                            "&:hover": {
+                              bgcolor: selected ? themeColors.accent : themeColors.hoverBg,
+                              borderColor: themeColors.accent,
+                            },
+                          }}
+                        >
+                          {el.symbol}
+                        </Button>
+                      );
+                    })}
+                  </Box>
+                  <Stack direction="row" spacing={1} sx={{ mt: 1 }} alignItems="flex-start">
+                    <Box sx={{ flex: 1, minWidth: 0 }}>
+                      <Typography sx={{ fontSize: 11, fontWeight: 700, color: themeColors.text, mb: 0.5 }}>
+                        Auto-ID candidates
+                      </Typography>
+                      <Stack direction="row" spacing={0.5} useFlexGap flexWrap="wrap">
+                        {autoElementScores.length === 0 ? (
+                          <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>
+                            Move the band over peaks to rank likely elements.
+                          </Typography>
+                        ) : autoElementScores.map((item) => (
+                          <Button
+                            key={item.symbol}
+                            size="small"
+                            variant={selectedElementSet.has(item.symbol) ? "contained" : "outlined"}
+                            sx={compactButtonSx}
+                            onClick={() => toggleSelectedElement(item.symbol)}
+                            title={`${item.symbol}: ${item.lines.slice(0, 3).map(lineLabel).join(", ")}`}
+                          >
+                            {item.symbol}
+                          </Button>
+                        ))}
+                      </Stack>
+                    </Box>
+                    <Box sx={{ flex: 1.2, minWidth: 0 }}>
+                      <Typography sx={{ fontSize: 11, fontWeight: 700, color: themeColors.text, mb: 0.5 }}>
+                        Lines
+                      </Typography>
+                      <Stack direction="row" spacing={0.5} useFlexGap flexWrap="wrap">
+                        {suggestedLines.length === 0 ? (
+                          <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>
+                            Select elements to show their lines.
+                          </Typography>
+                        ) : suggestedLines.map((line) => (
+                          <Button
+                            key={`${line.element}-${line.line}-${line.energy_keV}`}
+                            size="small"
+                            variant="outlined"
+                            sx={compactButtonSx}
+                            onClick={() => snapBandToLine(line)}
+                            title={`Center band on ${lineLabel(line)} at ${formatEnergy(line.energy_keV)}`}
+                          >
+                            {lineLabel(line)} {formatEnergy(line.energy_keV)}
+                          </Button>
+                        ))}
+                      </Stack>
+                    </Box>
+                  </Stack>
+                </Box>
+              </Menu>
               <Typography sx={{ fontSize: 11, color: themeColors.text }}>Log</Typography>
               <Switch checked={logSpectrum} onChange={(e) => setLogSpectrum(e.target.checked)} size="small" />
               <Typography sx={{ fontSize: 11, color: themeColors.text }}>Scale</Typography>
