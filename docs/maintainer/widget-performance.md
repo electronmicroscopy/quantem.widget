@@ -1,4 +1,4 @@
-# Widget performance notes
+# Performance notes
 
 These notes capture interaction bugs that were easy to misread while building
 the widgets. Keep this page short and practical: it should explain what went

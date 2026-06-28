@@ -33,7 +33,7 @@ We serve two audiences first:
 tensors; we avoid NumPy on the hot path. CPU is a fallback, not a target - it
 runs through the same PyTorch path, just slower. For large datasets, bin the
 detector at load (`det_bin`) to cut memory and speed first paint - see
-[load](api/load).
+[Load and I/O](api/io).
 
 ## Widgets
 
