@@ -20,6 +20,7 @@ def test_showeds_constructor_sets_shape_and_state():
         panel_width_px=240,
         spectrum_width_px=520,
         spectrum_height_px=180,
+        smooth=True,
         pixel_size=0.25,
         pixel_unit="nm",
         scale_bar_visible=False,
@@ -44,6 +45,7 @@ def test_showeds_constructor_sets_shape_and_state():
     assert widget.panel_width_px == 240
     assert widget.spectrum_width_px == 520
     assert widget.spectrum_height_px == 180
+    assert widget.smooth is True
     assert widget.pixel_size == 0.25
     assert widget.pixel_unit == "nm"
     assert widget.scale_bar_visible is False
@@ -89,6 +91,7 @@ def test_showeds_state_roundtrip():
         roi=(2, 3, 4, 5),
         roi_shape="circle",
         log_spectrum=True,
+        smooth=True,
         element_label="Au",
         spectrum_width_px=500,
         spectrum_height_px=260,
@@ -202,6 +205,7 @@ def test_showeds_binned_export_scales_saved_rois_and_bands(tmp_path):
         saved_bands=[{"name": "peak", "start": 2, "end": 6}],
         pixel_size=0.5,
         pixel_unit="nm",
+        smooth=True,
     )
     widget.map_zoom = 2.0
     widget.map_view_row = 2.0
@@ -215,6 +219,7 @@ def test_showeds_binned_export_scales_saved_rois_and_bands(tmp_path):
     assert binned.saved_bands == [{"name": "peak", "start": 1, "end": 3}]
     assert binned.pixel_size == 1.0
     assert binned.pixel_unit == "nm"
+    assert binned.smooth is widget.smooth
     assert binned.map_zoom == 2.0
     assert binned.map_view_row == 1.0
     assert binned.map_view_col == 1.5

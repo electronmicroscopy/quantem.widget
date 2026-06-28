@@ -114,6 +114,10 @@ double-clickable HTML in seconds.
 
 https://bobleesj.github.io/quantem.widget/
 
+The source tutorial notebooks live in [`docs/tutorials`](docs/tutorials). They
+can be opened directly in Colab. To make a GitHub-readable preview copy, see
+[`docs/github-preview.md`](docs/github-preview.md).
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, checks, widget export
