@@ -1,4 +1,4 @@
-# quantem.widget release runbook
+# Release
 
 Use this runbook for every `quantem.widget` release candidate or TestPyPI
 release. Do not push a `widget-v*` tag until the local gates below pass.
