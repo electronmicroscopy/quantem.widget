@@ -3,7 +3,7 @@
 Public import:
 
 ```python
-from quantem.widget import ShowEDS
+from quantem.widget import ShowEDS, load_eds
 ```
 
 `ShowEDS` explores EDS/EELS spectrum images with shape
@@ -14,12 +14,25 @@ ROI updates the summed spectrum.
 Canonical forms:
 
 ```python
+# Native EDS/EELS file: parse metadata and keep exact no-bin EMD data lazy.
+# The returned SpectrumImage uses (row, col, energy) and feeds ShowEDS directly.
+eds = load_eds("0031-CaSIO3_...EDS_HAADF_Diffraction_Nano.emd")
+w = ShowEDS(
+    eds,
+    energy=8.04,
+    width=0.24,
+    pixel_size=0.138,
+    pixel_unit="nm",
+    element_label="Cu K",
+    candidate_elements=["O", "Si", "Ca", "Cu", "Au"],
+)
+
 # Small or already-reduced cube: embeds the exact uint16/uint32/float32 cube in
 # widget state, so notebook save/reopen and HTML export are self-contained.
 w = ShowEDS(cube, energy_keV, base_image=haadf)
 
-# Native large EMD: builds or reuses a data folder. The notebook stores
-# startup state and a data-folder URL, not the multi-GB cube.
+# Large EMD as a reusable data folder. The notebook stores startup state and a
+# data-folder URL, not the multi-GB cube.
 w = ShowEDS.from_emd(
     "0031-CaSIO3_...EDS_HAADF_Diffraction_Nano.emd",
     sidecar_dir="sidecars/eds_real_0031",
@@ -52,6 +65,11 @@ tutorial and Hugging Face demo path.
 .. autoclass:: quantem.widget.showeds.ShowEDS
    :members:
    :show-inheritance:
+
+.. autoclass:: quantem.widget.showeds.SpectrumImage
+   :members:
+
+.. autofunction:: quantem.widget.showeds.load_eds
 
 .. autofunction:: quantem.widget.showeds.bin_spectrum_image
 

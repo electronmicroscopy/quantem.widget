@@ -43,10 +43,13 @@ ShowEDS(np.random.poisson(2, (64, 64, 256)).astype("uint16"))
 ## Load data
 
 ```python
-from quantem.widget import load
+from quantem.widget import ShowEDS, Show4DSTEM, load, load_eds
 
 data = load("scan_master.h5")   # Arina 4D-STEM .h5 -> GPU
 Show4DSTEM(data)
+
+eds = load_eds("spectrum_image.emd")  # Velox/RSCIIO EDS/EELS -> energy-last SpectrumImage
+ShowEDS(eds, energy=8.04, width=0.24)
 ```
 
 `quantem.widget.io` also provides `survey`, `read_image`, `bin`, `download`, and

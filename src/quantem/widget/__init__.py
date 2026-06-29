@@ -18,7 +18,7 @@ _warnings.filterwarnings("ignore", message=r"(?s).*HF_TOKEN.*")
 from quantem.widget.show2d import Show2D
 from quantem.widget.show3d import Show3D
 from quantem.widget.show3dslices import Show3DSlices
-from quantem.widget.showeds import ShowEDS, bin_spectrum_image, load_emd_spectrum_image
+from quantem.widget.showeds import ShowEDS, SpectrumImage, bin_spectrum_image, load_eds, load_emd_spectrum_image
 from quantem.widget.show4dstem import Show4DSTEM as _Show4DSTEMBase
 from quantem.widget.showdiffraction import ShowDiffraction
 from quantem.widget.io import load
@@ -213,7 +213,9 @@ __all__ = [
     "Show4DSTEM",
     "ShowDiffraction",
     "ShowEDS",
+    "SpectrumImage",
     "bin_spectrum_image",
+    "load_eds",
     "load_emd_spectrum_image",
     "load",
     "HTML_EXPORT_TRAITS",

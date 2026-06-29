@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 import quantem.widget.showeds as showeds_module
-from quantem.widget import ShowEDS
+from quantem.widget import ShowEDS, SpectrumImage, load_eds
 from quantem.widget.showeds import (
     _estimate_spectrum_image_sidecar_bytes,
     _sum_bin_spectrum_image_lazy,
@@ -72,6 +72,38 @@ def test_showeds_constructor_sets_shape_and_state():
     assert any(line["element"] == "Si" for line in widget.line_hints)
     assert len(widget.cube_bytes) == cube.size * 4
     assert len(widget.base_image_bytes) == cube.shape[0] * cube.shape[1] * 4
+
+
+def test_showeds_accepts_spectrum_image_container():
+    cube = np.arange(4 * 5 * 6, dtype=np.uint16).reshape(4, 5, 6)
+    energy = np.linspace(0, 5, 6, dtype=np.float32)
+    base = cube.sum(axis=2).astype(np.float32)
+    spectrum_image = SpectrumImage(
+        cube,
+        energy,
+        base_image=base,
+        title="Parsed EDS",
+        candidate_elements=["cu", "Au"],
+        sampling=(0.3, 0.4),
+        units=["nm", "nm"],
+    )
+
+    widget = ShowEDS(spectrum_image, band=(1, 3), roi=(1, 1, 2, 2))
+
+    assert spectrum_image.shape == cube.shape
+    assert spectrum_image.array is cube
+    assert widget.title == "Parsed EDS"
+    assert widget.compute_backend == "browser"
+    assert widget.cube_dtype == "uint16"
+    assert widget.band_start == 1
+    assert widget.band_end == 3
+    assert widget.roi_row == 1
+    assert widget.roi_col == 1
+    assert widget.roi_height == 2
+    assert widget.roi_width == 2
+    assert widget.pixel_size == 0.4
+    assert widget.pixel_unit == "nm"
+    assert widget.selected_elements == ["Cu", "Au"]
 
 
 def test_showeds_preserves_uint16_counts_for_browser_backend():
@@ -350,6 +382,71 @@ def test_showeds_kernel_backend_uses_initial_buffers_without_cube_bytes():
     assert widget.cube_bytes == b""
     assert len(widget.initial_map_bytes) == initial_map.size * 4
     assert len(widget.initial_spectrum_bytes) == initial_spectrum.size * 4
+
+
+def test_load_eds_returns_lazy_native_emd_that_feeds_showeds(monkeypatch, tmp_path):
+    cube = np.arange(4 * 5 * 6, dtype=np.uint16).reshape(4, 5, 6)
+    energy = np.linspace(0, 5, 6, dtype=np.float32)
+    base = cube.sum(axis=2).astype(np.float32)
+
+    monkeypatch.setattr(
+        showeds_module,
+        "_read_emd_spectrum_image",
+        lambda *args, **kwargs: {
+            "cube": cube,
+            "energy_keV": energy,
+            "base_image": base,
+            "title": "Native EMD",
+            "candidate_elements": ["Cu"],
+            "source_shape": cube.shape,
+            "path": str(tmp_path / "scan.emd"),
+        },
+    )
+
+    loaded = load_eds(tmp_path / "scan.emd", candidate_elements=["Cu"])
+    widget = ShowEDS(loaded, energy=2.5, width=2.0, roi=(1, 1, 2, 3))
+
+    assert loaded.backend == "kernel"
+    assert loaded.shape == cube.shape
+    assert loaded.path == tmp_path / "scan.emd"
+    assert loaded.candidate_elements == ["Cu"]
+    assert widget.title == "Native EMD"
+    assert widget.compute_backend == "kernel"
+    assert widget.cube_bytes == b""
+    assert widget.band_start == 2
+    assert widget.band_end == 4
+    assert widget.roi_row == 1
+    assert widget.roi_col == 1
+    assert widget.roi_height == 2
+    assert widget.roi_width == 3
+    expected_map = cube[:, :, 2:4].sum(axis=2).astype(np.float32)
+    expected_spectrum = cube[1:3, 1:4, :].sum(axis=(0, 1)).astype(np.float32)
+    assert np.frombuffer(widget.initial_map_bytes, dtype=np.float32).reshape(4, 5).tolist() == expected_map.tolist()
+    assert np.frombuffer(widget.initial_spectrum_bytes, dtype=np.float32).tolist() == expected_spectrum.tolist()
+
+
+def test_load_eds_sidecar_folder_feeds_showeds_with_requested_startup(tmp_path):
+    cube = np.arange(3 * 4 * 8, dtype=np.uint16).reshape(3, 4, 8)
+    energy = np.linspace(0, 7, 8, dtype=np.float32)
+    sidecar = prepare_spectrum_image_sidecar(cube, energy, tmp_path / "eds")
+
+    loaded = load_eds(sidecar, sidecar_url="/files/eds/")
+    widget = ShowEDS(loaded, energy=2.5, width=2.0, roi=(1, 1, 2, 2))
+
+    assert loaded.backend == "sidecar"
+    assert loaded.sidecar_dir == sidecar
+    assert loaded.sidecar_url == "/files/eds/"
+    assert loaded.shape == (3, 4, 8)
+    assert widget.compute_backend == "sidecar"
+    assert widget.sidecar_url == "/files/eds/"
+    assert widget.band_start == 2
+    assert widget.band_end == 4
+    assert widget.roi_row == 1
+    assert widget.roi_col == 1
+    expected_map = cube[:, :, 2:4].sum(axis=2).astype(np.float32)
+    expected_spectrum = cube[1:3, 1:3, :].sum(axis=(0, 1)).astype(np.float32)
+    assert np.frombuffer(widget.initial_map_bytes, dtype=np.float32).reshape(3, 4).tolist() == expected_map.tolist()
+    assert np.frombuffer(widget.initial_spectrum_bytes, dtype=np.float32).tolist() == expected_spectrum.tolist()
 
 
 def test_prepare_spectrum_image_sidecar_writes_exact_prefix_and_integrals(tmp_path):
