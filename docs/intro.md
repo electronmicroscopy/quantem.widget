@@ -5,7 +5,7 @@ Interactive, GPU-aware Python widgets for electron microscopy, built on
 JupyterLab, VS Code, or Colab.
 
 ```python
-from quantem.widget import Show2D, Show3D, Show3DSlices, Show4DSTEM, ShowEDS, load
+from quantem.widget import Show2D, Show3D, Show3DSlices, Show4DSTEM, ShowEDS, ShowDiffraction, load
 ```
 
 ## Quickest start: no notebook needed
@@ -44,6 +44,7 @@ detector at load (`det_bin`) to cut memory and speed first paint - see
 | `Show3DSlices` | Side-by-side slices of a 3D volume across an axis | [tutorial](tutorials/show3dslices) · [API](api/show3dslices) |
 | `Show4DSTEM` | 4D-STEM: live virtual detectors over the diffraction stack | [tutorial](tutorials/show4dstem) · [API](api/show4dstem) |
 | `ShowEDS` | EDS/EELS spectrum image: linked element map, spectrum, energy band, and ROI | [tutorial](tutorials/showeds) · [API](api/showeds) |
+| `ShowDiffraction` | 2D/3D diffraction d-spacing: Bragg spots, rings, center finding, k calibration | [tutorial](tutorials/showdiffraction) · [API](api/showdiffraction) |
 
 The [Tutorials](tutorials/show2d) walk through each widget on synthetic data and
 show how to [save and share widget exports](tutorials/widget_export). The [API reference](api/index)
