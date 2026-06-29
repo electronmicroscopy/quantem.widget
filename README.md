@@ -151,6 +151,10 @@ through it line by line.
 - [ ] Any draggable selector has live preview separate from committed widget
   state; use refs/CSS transforms or an equivalent fast path during drag. See
   [performance notes](docs/maintainer/widget-performance.md).
+- [ ] Use [Show4DSTEM](docs/tutorials/show4dstem.ipynb) detector dragging and
+  [ShowEDS](docs/tutorials/showeds.ipynb) energy-band dragging as the real-time
+  UX benchmark: aim for 60 FPS when feasible and keep live controls at 30 FPS
+  or better.
 - [ ] Real-time interactions are browser-driven and verified by actually
   dragging controls in JupyterLab or exported HTML, not only by reading code or
   unit tests.
