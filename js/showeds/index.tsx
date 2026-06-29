@@ -28,11 +28,17 @@ type NumericArray = Float32Array | Float64Array | Uint32Array;
 type PerfKind = "mapMs" | "spectrumMs" | "mapDrawMs" | "spectrumDrawMs";
 type PerfStat = { last: number; avg: number; max: number };
 type SidecarMeta = {
+  format?: string;
   rows: number;
   cols: number;
   n_energy: number;
-  energy_prefix: string;
-  spatial_prefix: string;
+  n_events?: number;
+  energy_prefix?: string;
+  spatial_prefix?: string;
+  channel_offsets?: string;
+  channel_pixels?: string;
+  pixel_offsets?: string;
+  pixel_channels?: string;
 };
 type SidecarState = {
   meta: SidecarMeta;
@@ -76,7 +82,7 @@ type ShowEDSPerfWindow = Window & typeof globalThis & {
 };
 
 const WORKGROUP = 64;
-const INTERACTION_COMPUTE_INTERVAL_MS = 32;
+const INTERACTION_COMPUTE_INTERVAL_MS = 16;
 const MIN_MAP_ZOOM = 1;
 const MAX_MAP_ZOOM = 32;
 const MIN_SPECTRUM_SPAN = 8;
@@ -670,6 +676,11 @@ let meta = null;
 let baseUrl = "";
 let prefixCache = new Map();
 let spectrumCache = new Map();
+let streamIndexPromise = null;
+let channelOffsets = null;
+let channelPixels = null;
+let pixelOffsets = null;
+let pixelChannels = null;
 let fetchRequestId = 0;
 let fetchPending = new Map();
 let activeMapController = null;
@@ -703,14 +714,21 @@ async function proxyFetchRange(name, start, end) {
 
 async function fetchRange(name, start, end, signal) {
   if (signal && signal.aborted) throw abortError();
+  const expectedByteLength = end - start + 1;
   try {
     const resp = await fetch(sidecarFileUrl(name), {
       credentials: "include",
       headers: { Range: "bytes=" + start + "-" + end },
       signal,
     });
-    if (resp.status !== 206) throw new Error("range fetch failed: " + resp.status);
-    return await resp.arrayBuffer();
+    if (resp.status === 206) return await resp.arrayBuffer();
+    if (resp.status === 200) {
+      const buffer = await resp.arrayBuffer();
+      if (buffer.byteLength === expectedByteLength && start === 0) return buffer;
+      if (buffer.byteLength >= end + 1) return buffer.slice(start, end + 1);
+      throw new Error("range fetch returned " + buffer.byteLength + " bytes for a " + expectedByteLength + " byte request");
+    }
+    throw new Error("range fetch failed: " + resp.status);
   } catch (error) {
     if (isAbortError(error)) throw error;
     return await proxyFetchRange(name, start, end);
@@ -742,6 +760,33 @@ async function fetchSpatialPrefixSpectrum(row, col, signal) {
   spectrumCache.set(key, arr);
   if (spectrumCache.size > MAX_SPECTRUM_CACHE) spectrumCache.delete(spectrumCache.keys().next().value);
   return arr;
+}
+
+function isStreamSidecar() {
+  return meta && meta.format === "quantem.widget.showeds.stream-sidecar.v1";
+}
+
+async function ensureStreamIndexes() {
+  if (channelOffsets && channelPixels && pixelOffsets && pixelChannels) return;
+  if (streamIndexPromise) return await streamIndexPromise;
+  streamIndexPromise = (async () => {
+    const nEvents = Math.max(0, Math.round(meta.n_events || 0));
+    const [channelOffsetsBuffer, channelPixelsBuffer, pixelOffsetsBuffer, pixelChannelsBuffer] = await Promise.all([
+      fetchRange(meta.channel_offsets, 0, (meta.n_energy + 1) * 4 - 1),
+      fetchRange(meta.channel_pixels, 0, nEvents * 4 - 1),
+      fetchRange(meta.pixel_offsets, 0, (meta.rows * meta.cols + 1) * 4 - 1),
+      fetchRange(meta.pixel_channels, 0, nEvents * 2 - 1),
+    ]);
+    channelOffsets = new Uint32Array(channelOffsetsBuffer);
+    channelPixels = new Uint32Array(channelPixelsBuffer);
+    pixelOffsets = new Uint32Array(pixelOffsetsBuffer);
+    pixelChannels = new Uint16Array(pixelChannelsBuffer);
+  })();
+  try {
+    await streamIndexPromise;
+  } finally {
+    streamIndexPromise = null;
+  }
 }
 
 function normaliseRoiShape(shape) {
@@ -795,6 +840,11 @@ self.onmessage = async (event) => {
       baseUrl = msg.baseUrl || "";
       prefixCache = new Map();
       spectrumCache = new Map();
+      streamIndexPromise = null;
+      channelOffsets = null;
+      channelPixels = null;
+      pixelOffsets = null;
+      pixelChannels = null;
       fetchPending = new Map();
       activeMapController?.abort();
       activeSpectrumController?.abort();
@@ -811,6 +861,17 @@ self.onmessage = async (event) => {
       try {
         const s = Math.max(0, Math.min(meta.n_energy - 1, Math.round(msg.start)));
         const e = Math.max(s + 1, Math.min(meta.n_energy, Math.round(msg.end)));
+        if (isStreamSidecar()) {
+          await ensureStreamIndexes();
+          if (controller.signal.aborted) throw abortError();
+          const out = new Uint32Array(meta.rows * meta.cols);
+          const p0 = channelOffsets[s];
+          const p1 = channelOffsets[e];
+          for (let i = p0; i < p1; i++) out[channelPixels[i]]++;
+          if (controller.signal.aborted) throw abortError();
+          self.postMessage({ id: msg.id, type: "map", buffer: out.buffer, ms: performance.now() - t0 }, [out.buffer]);
+          return;
+        }
         const [lo, hi] = await Promise.all([
           fetchPrefixPlane(s, controller.signal),
           fetchPrefixPlane(e, controller.signal),
@@ -841,6 +902,33 @@ self.onmessage = async (event) => {
         const r1 = Math.max(r0 + 1, Math.min(meta.rows, r0 + Math.round(msg.height)));
         const c1 = Math.max(c0 + 1, Math.min(meta.cols, c0 + Math.round(msg.width)));
         const shape = normaliseRoiShape(msg.shape);
+        if (isStreamSidecar()) {
+          await ensureStreamIndexes();
+          if (controller.signal.aborted) throw abortError();
+          const out = new Uint32Array(meta.n_energy);
+          for (let r = r0; r < r1; r++) {
+            if (controller.signal.aborted) throw abortError();
+            let segments;
+            if (shape === "rect") {
+              segments = [[c0, c1]];
+            } else {
+              const segment = roundSegmentForRow(r, r0, c0, r1, c1, shape);
+              segments = segment ? [segment] : [];
+            }
+            for (const [s0, s1] of segments) {
+              const pixelStart = r * meta.cols + s0;
+              const pixelEnd = r * meta.cols + s1;
+              for (let pixel = pixelStart; pixel < pixelEnd; pixel++) {
+                const o0 = pixelOffsets[pixel];
+                const o1 = pixelOffsets[pixel + 1];
+                for (let k = o0; k < o1; k++) out[pixelChannels[k]]++;
+              }
+            }
+          }
+          if (controller.signal.aborted) throw abortError();
+          self.postMessage({ id: msg.id, type: "spectrum", buffer: out.buffer, ms: performance.now() - t0 }, [out.buffer]);
+          return;
+        }
         if (shape !== "rect") {
           const out = new Uint32Array(meta.n_energy);
           const segments = [];
@@ -1602,14 +1690,28 @@ function ShowEDS() {
             const name = response.name || "";
             const start = Math.max(0, Math.floor(response.start ?? 0));
             const end = Math.max(start, Math.floor(response.end ?? start));
+            const expectedByteLength = end - start + 1;
             (async () => {
               try {
                 const resp = await fetch(sidecarFileUrl(name), {
                   credentials: "include",
                   headers: { Range: `bytes=${start}-${end}` },
                 });
-                if (resp.status !== 206) throw new Error(`range fetch failed: ${resp.status}`);
-                const buffer = await resp.arrayBuffer();
+                let buffer: ArrayBuffer;
+                if (resp.status === 206) {
+                  buffer = await resp.arrayBuffer();
+                } else if (resp.status === 200) {
+                  buffer = await resp.arrayBuffer();
+                  if (buffer.byteLength === expectedByteLength && start === 0) {
+                    // Use the full response below.
+                  } else if (buffer.byteLength >= end + 1) {
+                    buffer = buffer.slice(start, end + 1);
+                  } else {
+                    throw new Error(`range fetch returned ${buffer.byteLength} bytes for a ${expectedByteLength} byte request`);
+                  }
+                } else {
+                  throw new Error(`range fetch failed: ${resp.status}`);
+                }
                 worker.postMessage({ type: "range-result", fetchId, buffer }, [buffer]);
               } catch (err) {
                 worker.postMessage({
@@ -1764,6 +1866,7 @@ function ShowEDS() {
       if (seq !== mapComputeSeqRef.current) return;
       if (!response.buffer) throw new Error("EDS folder data worker returned an empty map");
       const buffer = response.buffer;
+      setGpuError("");
       React.startTransition(() => setElementMap(new Uint32Array(buffer)));
       recordWidgetPerf("mapMs", response.ms ?? performance.now() - t0);
       return;
@@ -1813,6 +1916,7 @@ function ShowEDS() {
       if (seq !== spectrumComputeSeqRef.current) return;
       if (!response.buffer) throw new Error("EDS folder data worker returned an empty spectrum");
       const buffer = response.buffer;
+      setGpuError("");
       React.startTransition(() => setRoiSpectrum(new Uint32Array(buffer)));
       recordWidgetPerf("spectrumMs", response.ms ?? performance.now() - t0);
       return;

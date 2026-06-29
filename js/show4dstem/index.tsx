@@ -2144,6 +2144,22 @@ function Show4DSTEM() {
   const fftOffscreenRef = React.useRef<HTMLCanvasElement | null>(null);
   const fftImageDataRef = React.useRef<ImageData | null>(null);
 
+  type TouchPanelKind = "dp" | "vi" | "fft";
+  type TouchTransformState = {
+    kind: TouchPanelKind;
+    mode: "pan" | "pinch";
+    startX: number;
+    startY: number;
+    startDistance: number;
+    startMidX: number;
+    startMidY: number;
+    startZoom: number;
+    startPanX: number;
+    startPanY: number;
+  };
+  const touchTransformRef = React.useRef<TouchTransformState | null>(null);
+  const lastTapRef = React.useRef<{ kind: TouchPanelKind; time: number } | null>(null);
+
   // Offscreen version counters — bump when colormap/data changes, cheap draw effects depend on these
   const [dpOffscreenVersion, setDpOffscreenVersion] = React.useState(0);
   const [viOffscreenVersion, setViOffscreenVersion] = React.useState(0);
@@ -3707,6 +3723,9 @@ function Show4DSTEM() {
     setCursorInfo(prev => prev?.panel === "DP" ? null : prev);
   };
   const handleDpDoubleClick = () => {
+    dpViewRef.current.zoom = 1;
+    dpViewRef.current.panX = 0;
+    dpViewRef.current.panY = 0;
     setDpZoom(1);
     setDpPanX(0);
     setDpPanY(0);
@@ -3969,15 +3988,202 @@ function Show4DSTEM() {
     setCursorInfo(prev => prev?.panel === "VI" ? null : prev);
   };
   const handleViDoubleClick = () => {
+    viViewRef.current.zoom = 1;
+    viViewRef.current.panX = 0;
+    viViewRef.current.panY = 0;
     setViZoom(1);
     setViPanX(0);
     setViPanY(0);
   };
   const handleFftDoubleClick = () => {
+    fftViewRef.current.zoom = 1;
+    fftViewRef.current.panX = 0;
+    fftViewRef.current.panY = 0;
     setFftZoom(1);
     setFftPanX(0);
     setFftPanY(0);
     setFftClickInfo(null);
+  };
+
+  const touchDistance = (a: React.Touch, b: React.Touch): number => {
+    return Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+  };
+
+  const touchMidpoint = (a: React.Touch, b: React.Touch): { x: number; y: number } => {
+    return { x: (a.clientX + b.clientX) / 2, y: (a.clientY + b.clientY) / 2 };
+  };
+
+  const canvasPointFromClient = (
+    canvas: HTMLCanvasElement,
+    clientX: number,
+    clientY: number,
+  ): { x: number; y: number } => {
+    const rect = canvas.getBoundingClientRect();
+    return {
+      x: (clientX - rect.left) * (canvas.width / rect.width),
+      y: (clientY - rect.top) * (canvas.height / rect.height),
+    };
+  };
+
+  const getTouchPanelRefs = (kind: TouchPanelKind) => {
+    if (kind === "dp") {
+      return {
+        canvasRef: dpOverlayRef,
+        viewRef: dpViewRef,
+        setZoom: setDpZoom,
+        setPanX: setDpPanX,
+        setPanY: setDpPanY,
+        reset: handleDpDoubleClick,
+      };
+    }
+    if (kind === "vi") {
+      return {
+        canvasRef: virtualOverlayRef,
+        viewRef: viViewRef,
+        setZoom: setViZoom,
+        setPanX: setViPanX,
+        setPanY: setViPanY,
+        reset: handleViDoubleClick,
+      };
+    }
+    return {
+      canvasRef: fftOverlayRef,
+      viewRef: fftViewRef,
+      setZoom: setFftZoom,
+      setPanX: setFftPanX,
+      setPanY: setFftPanY,
+      reset: handleFftDoubleClick,
+    };
+  };
+
+  const setTouchView = (
+    viewRef: React.RefObject<{ zoom: number; panX: number; panY: number; raf: number }>,
+    setZoom: React.Dispatch<React.SetStateAction<number>>,
+    setPanX: React.Dispatch<React.SetStateAction<number>>,
+    setPanY: React.Dispatch<React.SetStateAction<number>>,
+    zoom: number,
+    panX: number,
+    panY: number,
+  ) => {
+    const view = viewRef.current;
+    view.zoom = zoom;
+    view.panX = panX;
+    view.panY = panY;
+    setZoom(zoom);
+    setPanX(panX);
+    setPanY(panY);
+  };
+
+  const handlePanelTouchStart = (kind: TouchPanelKind) => (e: React.TouchEvent<HTMLCanvasElement>) => {
+    const refs = getTouchPanelRefs(kind);
+    const canvas = refs.canvasRef.current;
+    if (!canvas) return;
+
+    if (e.touches.length === 1) {
+      const now = window.performance.now();
+      const previousTap = lastTapRef.current;
+      lastTapRef.current = { kind, time: now };
+      if (previousTap && previousTap.kind === kind && now - previousTap.time < 320) {
+        e.preventDefault();
+        refs.reset();
+        touchTransformRef.current = null;
+        return;
+      }
+
+      if (kind !== "fft" && refs.viewRef.current.zoom <= 1) {
+        touchTransformRef.current = null;
+        return;
+      }
+
+      const touch = e.touches[0];
+      touchTransformRef.current = {
+        kind,
+        mode: "pan",
+        startX: touch.clientX,
+        startY: touch.clientY,
+        startDistance: 0,
+        startMidX: touch.clientX,
+        startMidY: touch.clientY,
+        startZoom: refs.viewRef.current.zoom,
+        startPanX: refs.viewRef.current.panX,
+        startPanY: refs.viewRef.current.panY,
+      };
+      e.preventDefault();
+      return;
+    }
+
+    if (e.touches.length >= 2) {
+      const first = e.touches[0];
+      const second = e.touches[1];
+      const midpoint = touchMidpoint(first, second);
+      touchTransformRef.current = {
+        kind,
+        mode: "pinch",
+        startX: midpoint.x,
+        startY: midpoint.y,
+        startDistance: touchDistance(first, second),
+        startMidX: midpoint.x,
+        startMidY: midpoint.y,
+        startZoom: refs.viewRef.current.zoom,
+        startPanX: refs.viewRef.current.panX,
+        startPanY: refs.viewRef.current.panY,
+      };
+      e.preventDefault();
+    }
+  };
+
+  const handlePanelTouchMove = (kind: TouchPanelKind) => (e: React.TouchEvent<HTMLCanvasElement>) => {
+    const state = touchTransformRef.current;
+    if (!state || state.kind !== kind) return;
+    const refs = getTouchPanelRefs(kind);
+    const canvas = refs.canvasRef.current;
+    if (!canvas) return;
+
+    if (state.mode === "pan" && e.touches.length === 1) {
+      const touch = e.touches[0];
+      const rect = canvas.getBoundingClientRect();
+      const dx = (touch.clientX - state.startX) * (canvas.width / rect.width);
+      const dy = (touch.clientY - state.startY) * (canvas.height / rect.height);
+      setTouchView(
+        refs.viewRef,
+        refs.setZoom,
+        refs.setPanX,
+        refs.setPanY,
+        state.startZoom,
+        state.startPanX + dx,
+        state.startPanY + dy,
+      );
+      e.preventDefault();
+      return;
+    }
+
+    if (state.mode === "pinch" && e.touches.length >= 2) {
+      const first = e.touches[0];
+      const second = e.touches[1];
+      const midpoint = touchMidpoint(first, second);
+      const startCanvasPoint = canvasPointFromClient(canvas, state.startMidX, state.startMidY);
+      const currentCanvasPoint = canvasPointFromClient(canvas, midpoint.x, midpoint.y);
+      const ratio = state.startDistance > 0 ? touchDistance(first, second) / state.startDistance : 1;
+      const newZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, state.startZoom * ratio));
+      const imageX = (startCanvasPoint.x - state.startPanX) / state.startZoom;
+      const imageY = (startCanvasPoint.y - state.startPanY) / state.startZoom;
+      setTouchView(
+        refs.viewRef,
+        refs.setZoom,
+        refs.setPanX,
+        refs.setPanY,
+        newZoom,
+        currentCanvasPoint.x - imageX * newZoom,
+        currentCanvasPoint.y - imageY * newZoom,
+      );
+      e.preventDefault();
+    }
+  };
+
+  const handlePanelTouchEnd = (e: React.TouchEvent<HTMLCanvasElement>) => {
+    if (e.touches.length === 0) {
+      touchTransformRef.current = null;
+    }
   };
 
   // FFT drag-to-pan handlers
@@ -4149,6 +4355,8 @@ function Show4DSTEM() {
     ["Scroll", "Zoom"],
     ["Dbl-click", "Reset view"],
   ];
+  const squarePanelWidth = `min(${canvasSize}px, 100%)`;
+  const viPanelWidth = `min(${viCanvasWidth}px, 100%)`;
 
   return (
     <Box
@@ -4157,7 +4365,7 @@ function Show4DSTEM() {
       tabIndex={0}
       onKeyDown={handleKeyDown}
       onMouseDownCapture={handleRootMouseDownCapture}
-      sx={{ p: 2, bgcolor: themeColors.bg, color: themeColors.text, outline: "none", borderRadius: "2px" }}
+      sx={{ p: 2, bgcolor: themeColors.bg, color: themeColors.text, outline: "none", borderRadius: "2px", width: "100%", maxWidth: "100%", boxSizing: "border-box", "@media (max-width: 700px)": { ".jp-OutputArea-output &, .jp-OutputArea-child &": { width: "calc(100vw - 96px)", maxWidth: "calc(100vw - 96px)" } } }}
     >
       {/* HEADER */}
       <Typography variant="h6" sx={{ ...typo.title, mb: `${SPACING.SM}px` }}>
@@ -4184,9 +4392,9 @@ function Show4DSTEM() {
       </Typography>
 
       {/* MAIN CONTENT: DP | VI | FFT (three columns when FFT shown) */}
-      <Stack direction="row" spacing={`${SPACING.LG}px`}>
+      <Stack direction="row" sx={{ gap: `${SPACING.LG}px`, flexWrap: "wrap", alignItems: "flex-start", maxWidth: "100%", overflowX: "hidden" }}>
         {/* LEFT COLUMN: DP Panel */}
-        <Box sx={{ width: canvasSize }}>
+        <Box sx={{ width: squarePanelWidth, maxWidth: "100%" }}>
           {/* DP Header */}
           <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: `${SPACING.XS}px`, height: 28 }}>
             <Typography variant="caption" sx={{ ...typo.label }}>
@@ -4255,7 +4463,7 @@ function Show4DSTEM() {
           </Stack>
 
           {/* DP Canvas */}
-          <Box sx={{ ...container.imageBox, width: canvasSize, height: canvasSize }}>
+          <Box sx={{ ...container.imageBox, width: "100%", maxWidth: canvasSize, aspectRatio: "1 / 1", height: "auto", touchAction: "none" }}>
             <canvas ref={dpCanvasRef} width={detCols} height={detRows} style={{ position: "absolute", width: "100%", height: "100%", imageRendering: "pixelated" }} />
             <canvas
               ref={dpOverlayRef} width={detCols} height={detRows}
@@ -4263,10 +4471,15 @@ function Show4DSTEM() {
               onMouseUp={handleDpMouseUp} onMouseLeave={handleDpMouseLeave}
               onWheel={createZoomHandler(setDpZoom, setDpPanX, setDpPanY, dpViewRef, dpOverlayRef)}
               onDoubleClick={handleDpDoubleClick}
+              onTouchStart={handlePanelTouchStart("dp")}
+              onTouchMove={handlePanelTouchMove("dp")}
+              onTouchEnd={handlePanelTouchEnd}
+              onTouchCancel={handlePanelTouchEnd}
               style={{
                 position: "absolute",
                 width: "100%",
                 height: "100%",
+                touchAction: "none",
                 cursor: (draggingDpProfileEndpoint !== null || isDraggingDpProfileLine)
                   ? "grabbing"
                   : (profileActive && (hoveredDpProfileEndpoint !== null || isHoveringDpProfileLine))
@@ -4289,7 +4502,7 @@ function Show4DSTEM() {
 
           {/* DP Stats Bar */}
           {dpStats && dpStats.length === 4 && (
-            <Box sx={{ mt: `${SPACING.XS}px`, px: 1, py: 0.5, bgcolor: themeColors.bgAlt, display: "flex", gap: 2, alignItems: "center" }}>
+            <Box sx={{ mt: `${SPACING.XS}px`, px: 1, py: 0.5, bgcolor: themeColors.bgAlt, display: "flex", gap: 2, alignItems: "center", flexWrap: "wrap", maxWidth: "100%", boxSizing: "border-box" }}>
               <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Mean <Box component="span" sx={{ color: themeColors.accent }}>{formatStat(dpStats[0])}</Box></Typography>
               <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Min <Box component="span" sx={{ color: themeColors.accent }}>{formatStat(dpStats[1])}</Box></Typography>
               <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Max <Box component="span" sx={{ color: themeColors.accent }}>{formatStat(dpStats[2])}</Box></Typography>
@@ -4322,9 +4535,9 @@ function Show4DSTEM() {
 
           {/* DP Controls - two rows with histogram on right */}
           {showControls && (
-            <Box sx={{ mt: `${SPACING.SM}px`, display: "flex", gap: `${SPACING.SM}px`, width: "100%", boxSizing: "border-box" }}>
+            <Box sx={{ mt: `${SPACING.SM}px`, display: "flex", gap: `${SPACING.SM}px`, width: "100%", maxWidth: "100%", boxSizing: "border-box", flexWrap: "wrap" }}>
               {/* Left: two rows of controls */}
-              <Box sx={{ display: "flex", flexDirection: "column", gap: `${SPACING.XS}px`, flex: 1, justifyContent: "center" }}>
+              <Box sx={{ display: "flex", flexDirection: "column", gap: `${SPACING.XS}px`, flex: "1 1 220px", minWidth: 0, justifyContent: "center" }}>
                 {/* Row 1: Detector + slider */}
                 <Box sx={{ ...controlRow, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>
                   <Typography sx={{ ...typo.label, fontSize: 10 }}>Detector:</Typography>
@@ -4382,7 +4595,7 @@ function Show4DSTEM() {
                 </Box>
               </Box>
               {/* Right: Histogram spanning both rows */}
-              <Box sx={{ display: "flex", flexDirection: "column", alignItems: "flex-end", justifyContent: "center" }}>
+              <Box sx={{ display: "flex", flexDirection: "column", alignItems: "flex-start", justifyContent: "center", flex: "0 0 auto", maxWidth: "100%" }}>
                 <Histogram data={dpHistogramData} vminPct={dpVminPct} vmaxPct={dpVmaxPct} onRangeChange={(min, max) => { setDpVminPct(min); setDpVmaxPct(max); }} width={110} height={58} theme={themeInfo.theme} dataMin={dpGlobalMin} dataMax={dpGlobalMax} />
               </Box>
             </Box>
@@ -4390,7 +4603,7 @@ function Show4DSTEM() {
         </Box>
 
         {/* SECOND COLUMN: VI Panel */}
-        <Box sx={{ width: viCanvasWidth }}>
+        <Box sx={{ width: viPanelWidth, maxWidth: "100%" }}>
           {/* VI Header */}
           <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: `${SPACING.XS}px`, height: 28 }}>
             <Typography sx={{ ...typo.label, color: themeColors.textMuted }}>
@@ -4424,7 +4637,7 @@ function Show4DSTEM() {
           </Stack>
 
           {/* VI Canvas */}
-          <Box sx={{ ...container.imageBox, width: viCanvasWidth, height: viCanvasHeight }}>
+          <Box sx={{ ...container.imageBox, width: "100%", maxWidth: viCanvasWidth, aspectRatio: `${shapeCols} / ${shapeRows}`, height: "auto", touchAction: "none" }}>
             <canvas ref={virtualCanvasRef} width={shapeCols} height={shapeRows} style={{ position: "absolute", width: "100%", height: "100%", imageRendering: "pixelated" }} />
             <canvas
               ref={virtualOverlayRef} width={shapeCols} height={shapeRows}
@@ -4432,10 +4645,15 @@ function Show4DSTEM() {
               onMouseUp={handleViMouseUp} onMouseLeave={handleViMouseLeave}
               onWheel={createZoomHandler(setViZoom, setViPanX, setViPanY, viViewRef, virtualOverlayRef)}
               onDoubleClick={handleViDoubleClick}
+              onTouchStart={handlePanelTouchStart("vi")}
+              onTouchMove={handlePanelTouchMove("vi")}
+              onTouchEnd={handlePanelTouchEnd}
+              onTouchCancel={handlePanelTouchEnd}
               style={{
                 position: "absolute",
                 width: "100%",
                 height: "100%",
+                touchAction: "none",
                 cursor: (draggingViProfileEndpoint !== null || isDraggingViProfileLine)
                   ? "grabbing"
                   : (viProfileActive && (hoveredViProfileEndpoint !== null || isHoveringViProfileLine))
@@ -4456,12 +4674,12 @@ function Show4DSTEM() {
 
           {/* VI Stats Bar — stats on left, Auto/Smooth toggles on right edge */}
           {viStats && viStats.length === 4 && (
-            <Box sx={{ mt: `${SPACING.XS}px`, px: 1, py: 0.5, bgcolor: themeColors.bgAlt, display: "flex", gap: 2, alignItems: "center" }}>
+            <Box sx={{ mt: `${SPACING.XS}px`, px: 1, py: 0.5, bgcolor: themeColors.bgAlt, display: "flex", gap: 2, alignItems: "center", flexWrap: "wrap", maxWidth: "100%", boxSizing: "border-box" }}>
               <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Mean <Box component="span" sx={{ color: themeColors.accent }}>{formatStat(viStats[0])}</Box></Typography>
               <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Min <Box component="span" sx={{ color: themeColors.accent }}>{formatStat(viStats[1])}</Box></Typography>
               <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Max <Box component="span" sx={{ color: themeColors.accent }}>{formatStat(viStats[2])}</Box></Typography>
               <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Std <Box component="span" sx={{ color: themeColors.accent }}>{formatStat(viStats[3])}</Box></Typography>
-              <Box sx={{ ml: "auto", display: "flex", alignItems: "center", gap: "2px" }}>
+              <Box sx={{ ml: "auto", display: "flex", alignItems: "center", gap: "2px", flexWrap: "wrap" }}>
                 <Typography sx={{ ...typo.label, fontSize: 10 }}>Auto:</Typography>
                 <Switch checked={viAutoContrast} onChange={(e) => toggleViAutoContrast(e.target.checked)} size="small" sx={switchStyles.small} />
                 <Typography sx={{ ...typo.label, fontSize: 10 }} title="CSS bilinear interpolation. Same data, browser smooths visually.">Smooth:</Typography>
@@ -4491,9 +4709,9 @@ function Show4DSTEM() {
 
           {/* VI Controls - Two rows with histogram on right */}
           {showControls && (
-            <Box sx={{ mt: `${SPACING.SM}px`, display: "flex", gap: `${SPACING.SM}px`, width: "100%", boxSizing: "border-box" }}>
+            <Box sx={{ mt: `${SPACING.SM}px`, display: "flex", gap: `${SPACING.SM}px`, width: "100%", maxWidth: "100%", boxSizing: "border-box", flexWrap: "wrap" }}>
               {/* Left: Two rows of controls */}
-              <Box sx={{ display: "flex", flexDirection: "column", gap: `${SPACING.XS}px`, flex: 1, justifyContent: "center" }}>
+              <Box sx={{ display: "flex", flexDirection: "column", gap: `${SPACING.XS}px`, flex: "1 1 220px", minWidth: 0, justifyContent: "center" }}>
                 {/* Row 1: ROI selector */}
                 <Box sx={{ ...controlRow, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>
                   <Typography sx={{ ...typo.label, fontSize: 10 }}>ROI:</Typography>
@@ -4547,7 +4765,7 @@ function Show4DSTEM() {
                 </Box>
               </Box>
               {/* Right: Histogram spanning both rows */}
-              <Box sx={{ display: "flex", flexDirection: "column", alignItems: "flex-end", justifyContent: "center" }}>
+              <Box sx={{ display: "flex", flexDirection: "column", alignItems: "flex-start", justifyContent: "center", flex: "0 0 auto", maxWidth: "100%" }}>
                 <Histogram data={viHistogramData} vminPct={viVminPct} vmaxPct={viVmaxPct} onRangeChange={(min, max) => { if (viAutoContrast) { viPreAutoPctRef.current = null; setViAutoContrast(false); } setViVminPct(min); setViVmaxPct(max); }} width={110} height={58} theme={themeInfo.theme} dataMin={viDataMin} dataMax={viDataMax} />
               </Box>
             </Box>
@@ -4556,7 +4774,7 @@ function Show4DSTEM() {
 
         {/* THIRD COLUMN: FFT Panel (conditionally shown) */}
         {effectiveShowFft && (
-          <Box sx={{ width: viCanvasWidth }}>
+          <Box sx={{ width: viPanelWidth, maxWidth: "100%" }}>
             {/* FFT Header */}
             <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: `${SPACING.XS}px`, height: 28 }}>
               <Typography variant="caption" sx={{ ...typo.label, color: roiFftActive && fftCropDims ? accentGreen : themeColors.textMuted }}>{roiFftActive && fftCropDims ? `ROI FFT (${fftCropDims.cropWidth}\u00D7${fftCropDims.cropHeight})` : "FFT"}</Typography>
@@ -4566,7 +4784,7 @@ function Show4DSTEM() {
             </Stack>
 
             {/* FFT Canvas */}
-            <Box sx={{ ...container.imageBox, width: viCanvasWidth, height: viCanvasHeight }}>
+            <Box sx={{ ...container.imageBox, width: "100%", maxWidth: viCanvasWidth, aspectRatio: `${shapeCols} / ${shapeRows}`, height: "auto", touchAction: "none" }}>
               <canvas ref={fftCanvasRef} width={shapeCols} height={shapeRows} style={{ position: "absolute", width: "100%", height: "100%", imageRendering: "pixelated" }} />
               <canvas
                 ref={fftOverlayRef} width={shapeCols} height={shapeRows}
@@ -4574,14 +4792,18 @@ function Show4DSTEM() {
                 onMouseUp={handleFftMouseUp} onMouseLeave={handleFftMouseLeave}
                 onWheel={createZoomHandler(setFftZoom, setFftPanX, setFftPanY, fftViewRef, fftOverlayRef)}
                 onDoubleClick={handleFftDoubleClick}
-                style={{ position: "absolute", width: "100%", height: "100%", cursor: isDraggingFFT ? "grabbing" : "grab" }}
+                onTouchStart={handlePanelTouchStart("fft")}
+                onTouchMove={handlePanelTouchMove("fft")}
+                onTouchEnd={handlePanelTouchEnd}
+                onTouchCancel={handlePanelTouchEnd}
+                style={{ position: "absolute", width: "100%", height: "100%", touchAction: "none", cursor: isDraggingFFT ? "grabbing" : "grab" }}
               />
               <Box onMouseDown={handleCanvasResizeStart} sx={{ position: "absolute", bottom: 0, right: 0, width: 16, height: 16, cursor: "nwse-resize", opacity: 0.6, background: `linear-gradient(135deg, transparent 50%, ${themeColors.accent} 50%)`, "&:hover": { opacity: 1 } }} />
             </Box>
 
             {/* FFT Stats Bar */}
             {fftStats && fftStats.length === 4 && (
-              <Box sx={{ mt: `${SPACING.XS}px`, px: 1, py: 0.5, bgcolor: themeColors.bgAlt, display: "flex", gap: 2 }}>
+              <Box sx={{ mt: `${SPACING.XS}px`, px: 1, py: 0.5, bgcolor: themeColors.bgAlt, display: "flex", gap: 2, flexWrap: "wrap", maxWidth: "100%", boxSizing: "border-box" }}>
                 <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Mean <Box component="span" sx={{ color: themeColors.accent }}>{formatStat(fftStats[0])}</Box></Typography>
                 <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Min <Box component="span" sx={{ color: themeColors.accent }}>{formatStat(fftStats[1])}</Box></Typography>
                 <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Max <Box component="span" sx={{ color: themeColors.accent }}>{formatStat(fftStats[2])}</Box></Typography>
@@ -4591,7 +4813,7 @@ function Show4DSTEM() {
 
             {/* FFT D-spacing readout */}
             {fftClickInfo && (
-              <Box sx={{ mt: `${SPACING.XS}px`, px: 1, py: 0.5, bgcolor: themeColors.bgAlt, display: "flex", gap: 2, alignItems: "center" }}>
+              <Box sx={{ mt: `${SPACING.XS}px`, px: 1, py: 0.5, bgcolor: themeColors.bgAlt, display: "flex", gap: 2, alignItems: "center", flexWrap: "wrap", maxWidth: "100%", boxSizing: "border-box" }}>
                 <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>
                   Spot <Box component="span" sx={{ color: themeColors.accent }}>({fftClickInfo.row.toFixed(1)}, {fftClickInfo.col.toFixed(1)})</Box>
                 </Typography>
@@ -4613,9 +4835,9 @@ function Show4DSTEM() {
 
             {/* FFT Controls - Two rows with histogram on right */}
             {showControls && (
-              <Box sx={{ mt: `${SPACING.SM}px`, display: "flex", gap: `${SPACING.SM}px`, width: "100%", boxSizing: "border-box" }}>
+              <Box sx={{ mt: `${SPACING.SM}px`, display: "flex", gap: `${SPACING.SM}px`, width: "100%", maxWidth: "100%", boxSizing: "border-box", flexWrap: "wrap" }}>
                 {/* Left: Two rows of controls */}
-                <Box sx={{ display: "flex", flexDirection: "column", gap: `${SPACING.XS}px`, flex: 1, justifyContent: "center" }}>
+                <Box sx={{ display: "flex", flexDirection: "column", gap: `${SPACING.XS}px`, flex: "1 1 220px", minWidth: 0, justifyContent: "center" }}>
                   {/* Row 1: Scale + Clip */}
                   <Box sx={{ ...controlRow, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>
                     <Typography sx={{ ...typo.label, fontSize: 10 }}>Scale:</Typography>
@@ -4647,7 +4869,7 @@ function Show4DSTEM() {
                   </Box>
                 </Box>
                 {/* Right: Histogram spanning both rows */}
-                <Box sx={{ display: "flex", flexDirection: "column", alignItems: "flex-end", justifyContent: "center" }}>
+                <Box sx={{ display: "flex", flexDirection: "column", alignItems: "flex-start", justifyContent: "center", flex: "0 0 auto", maxWidth: "100%" }}>
                   {fftHistogramData && (
                     <Histogram data={fftHistogramData} vminPct={fftVminPct} vmaxPct={fftVmaxPct} onRangeChange={(min, max) => { setFftVminPct(min); setFftVmaxPct(max); }} width={110} height={58} theme={themeInfo.theme} dataMin={fftDataMin} dataMax={fftDataMax} />
                   )}

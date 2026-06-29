@@ -1540,6 +1540,16 @@ function Show3D() {
     imageVminPct: number;
     imageVmaxPct: number;
   };
+  type TouchTransformState = {
+    panelIdx: number;
+    mode: "pan" | "pinch";
+    startX: number;
+    startY: number;
+    startDistance: number;
+    startMidX: number;
+    startMidY: number;
+    startState: PanelState;
+  };
   const initialState: PanelState = {
     zoom: 1,
     panX: 0,
@@ -2672,6 +2682,8 @@ function Show3D() {
   const canvasH = _nPanelsLocal > 1
     ? Math.round(_slotHForLayout * _rowsLocal + _gapForLayout * (_rowsLocal - 1))
     : _canvasHSingleRow;
+  const mainPanelWidth = `min(100%, ${canvasW}px)`;
+  const mainPanelAspectRatio = `${Math.max(canvasW, 1)} / ${Math.max(canvasH, 1)}`;
   const effectiveLoopEnd = loopEnd < 0 ? nSlices - 1 : loopEnd;
   // ROI hidden while the kymograph is shown - both are line/region analysis on
   // the same side slot, and showing them together confuses which panel is which.
@@ -6378,6 +6390,20 @@ function Show3D() {
     const cssY = (e.clientY - rect.top) * (canvas.height / rect.height);
     return panelIdxFromXY(cssX, cssY);
   };
+  const canvasPointFromClient = (clientX: number, clientY: number): { x: number; y: number } | null => {
+    const canvas = canvasRef.current;
+    if (!canvas) return null;
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return null;
+    return {
+      x: (clientX - rect.left) * (canvas.width / rect.width),
+      y: (clientY - rect.top) * (canvas.height / rect.height),
+    };
+  };
+  const panelIdxFromClient = (clientX: number, clientY: number): number => {
+    const pt = canvasPointFromClient(clientX, clientY);
+    return pt ? panelIdxFromXY(pt.x, pt.y) : -1;
+  };
   const beginPan = (e: React.MouseEvent) => {
     const idx = panelIdxFromEvent(e);
     if (idx < 0) return;
@@ -6521,6 +6547,8 @@ function Show3D() {
   };
 
   const clickStartRef = React.useRef<{ x: number; y: number } | null>(null);
+  const touchTransformRef = React.useRef<TouchTransformState | null>(null);
+  const lastTapRef = React.useRef<{ time: number; panelIdx: number } | null>(null);
   const [draggingProfileEndpoint, setDraggingProfileEndpoint] = React.useState<0 | 1 | null>(null);
   const [isDraggingProfileLine, setIsDraggingProfileLine] = React.useState(false);
   const [hoveredProfileEndpoint, setHoveredProfileEndpoint] = React.useState<0 | 1 | null>(null);
@@ -6724,6 +6752,119 @@ function Show3D() {
       return;
     }
     beginPan(e);
+  };
+
+  const touchDistance = (a: Touch, b: Touch) => Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+  const touchMidpoint = (a: Touch, b: Touch) => ({ x: (a.clientX + b.clientX) / 2, y: (a.clientY + b.clientY) / 2 });
+
+  const handleCanvasTouchStart = (e: React.TouchEvent) => {
+    if (profileActive || effectiveRoiActive) return;
+    if (e.touches.length === 1) {
+      const t = e.touches[0];
+      const panelIdx = panelIdxFromClient(t.clientX, t.clientY);
+      if (panelIdx < 0) return;
+      const now = Date.now();
+      const lastTap = lastTapRef.current;
+      if (lastTap && lastTap.panelIdx === panelIdx && now - lastTap.time < 320) {
+        e.preventDefault();
+        handleDoubleClick();
+        lastTapRef.current = null;
+        touchTransformRef.current = null;
+        return;
+      }
+      lastTapRef.current = { time: now, panelIdx };
+      if (showLens) return;
+      const live = playRef.current;
+      const base = live.panelStates[panelIdx] || stateFor(panelIdx);
+      touchTransformRef.current = {
+        panelIdx,
+        mode: "pan",
+        startX: t.clientX,
+        startY: t.clientY,
+        startDistance: 0,
+        startMidX: t.clientX,
+        startMidY: t.clientY,
+        startState: {
+          ...base,
+          zoom: live.linkPanels ? live.linkedState.zoom : base.zoom,
+          panX: live.linkPanels ? live.linkedState.panX : base.panX,
+          panY: live.linkPanels ? live.linkedState.panY : base.panY,
+        },
+      };
+      e.preventDefault();
+      return;
+    }
+    if (e.touches.length >= 2) {
+      const a = e.touches[0];
+      const b = e.touches[1];
+      const mid = touchMidpoint(a, b);
+      const panelIdx = panelIdxFromClient(mid.x, mid.y);
+      if (panelIdx < 0) return;
+      const live = playRef.current;
+      const base = live.panelStates[panelIdx] || stateFor(panelIdx);
+      touchTransformRef.current = {
+        panelIdx,
+        mode: "pinch",
+        startX: mid.x,
+        startY: mid.y,
+        startDistance: Math.max(1, touchDistance(a, b)),
+        startMidX: mid.x,
+        startMidY: mid.y,
+        startState: {
+          ...base,
+          zoom: live.linkPanels ? live.linkedState.zoom : base.zoom,
+          panX: live.linkPanels ? live.linkedState.panX : base.panX,
+          panY: live.linkPanels ? live.linkedState.panY : base.panY,
+        },
+      };
+      e.preventDefault();
+    }
+  };
+
+  const handleCanvasTouchMove = (e: React.TouchEvent) => {
+    const start = touchTransformRef.current;
+    if (!start) return;
+    const canvas = canvasRef.current;
+    const geom = getPanelGeometry(start.panelIdx);
+    if (!canvas || !geom) return;
+    e.preventDefault();
+    const base = start.startState;
+    if (start.mode === "pinch" && e.touches.length >= 2) {
+      const a = e.touches[0];
+      const b = e.touches[1];
+      const mid = touchMidpoint(a, b);
+      const startPoint = canvasPointFromClient(start.startMidX, start.startMidY);
+      const currentPoint = canvasPointFromClient(mid.x, mid.y);
+      if (!startPoint || !currentPoint) return;
+      const startLocalX = startPoint.x - geom.slotX;
+      const startLocalY = startPoint.y - geom.slotY;
+      const currentLocalX = currentPoint.x - geom.slotX;
+      const currentLocalY = currentPoint.y - geom.slotY;
+      const imageX = (startLocalX - base.panX) / base.zoom;
+      const imageY = (startLocalY - base.panY) / base.zoom;
+      const newZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, base.zoom * (touchDistance(a, b) / start.startDistance)));
+      syncPlaybackPanelTransform(start.panelIdx, newZoom, currentLocalX - imageX * newZoom, currentLocalY - imageY * newZoom);
+    } else if (start.mode === "pan" && e.touches.length === 1) {
+      const t = e.touches[0];
+      const rect = canvas.getBoundingClientRect();
+      const scaleX = canvas.width / Math.max(1, rect.width);
+      const scaleY = canvas.height / Math.max(1, rect.height);
+      syncPlaybackPanelTransform(
+        start.panelIdx,
+        base.zoom,
+        base.panX + (t.clientX - start.startX) * scaleX,
+        base.panY + (t.clientY - start.startY) * scaleY,
+      );
+    }
+    transformInputAtRef.current = performance.now();
+    if (scheduleTransformRender()) scheduleTransformStateCommit();
+    else commitLivePanelTransforms();
+  };
+
+  const handleCanvasTouchEnd = (e: React.TouchEvent) => {
+    if (e.touches.length > 0 || !touchTransformRef.current) return;
+    commitLivePanelTransforms();
+    touchTransformRef.current = null;
   };
 
   const handleCanvasMouseMove = (e: React.MouseEvent) => {
@@ -7540,10 +7681,10 @@ function Show3D() {
       tabIndex={0}
       onKeyDown={handleKeyDown}
       onMouseDownCapture={handleRootMouseDownCapture}
-      sx={{ ...container.root, bgcolor: themeColors.bg, color: themeColors.text, outline: "none", "&:focus": { outline: "2px solid #0af", outlineOffset: 2 }, "& canvas": { display: "block" } }}
+      sx={{ ...container.root, width: "100%", maxWidth: "100%", boxSizing: "border-box", bgcolor: themeColors.bg, color: themeColors.text, outline: "none", "&:focus": { outline: "2px solid #0af", outlineOffset: 2 }, "& canvas": { display: "block" }, "@media (max-width: 700px)": { ".jp-OutputArea-output &, .jp-OutputArea-child &": { width: "calc(100vw - 96px)", maxWidth: "calc(100vw - 96px)" } } }}
     >
-      <Stack direction="row" spacing={`${SPACING.SM}px`} alignItems="flex-start" sx={{ flexWrap: "wrap" }}>
-        <Box>
+      <Stack direction="row" spacing={`${SPACING.SM}px`} alignItems="flex-start" sx={{ flexWrap: "wrap", width: "100%", maxWidth: "100%", minWidth: 0, boxSizing: "border-box" }}>
+        <Box sx={{ width: mainPanelWidth, maxWidth: "100%", boxSizing: "border-box" }}>
           {/* Title row */}
           <Typography variant="caption" sx={{ ...typography.label, color: themeColors.accent, mb: `${SPACING.XS}px`, display: "block", height: 16, lineHeight: "16px", overflow: "hidden" }}>
             {title || "Image"}
@@ -7713,8 +7854,10 @@ function Show3D() {
             ref={canvasContainerRef}
             sx={{
               ...container.imageBox,
-              width: canvasW,
-              height: canvasH,
+              width: "100%",
+              maxWidth: canvasW,
+              aspectRatio: mainPanelAspectRatio,
+              height: "auto",
               overscrollBehavior: "contain",
               touchAction: "none",
               cursor: isHoveringLensEdge
@@ -7735,11 +7878,22 @@ function Show3D() {
             onMouseLeave={handleCanvasMouseLeave}
             onDoubleClick={handleDoubleClick}
           >
-            <canvas ref={canvasRef} width={canvasW} height={canvasH} style={{ width: canvasW, height: canvasH, imageRendering: smooth ? "auto" : "pixelated", opacity: gpuDisplayVisible ? 0 : 1, display: "block" }} role="img" aria-label={`Slice image ${displaySliceIdx + 1} of ${nSlices}${title ? `: ${title}` : ""} (${width} by ${height} pixels). Use arrow keys to scrub frames.`} />
-            <canvas ref={gpuCanvasRef} width={canvasW} height={canvasH} style={{ position: "absolute", top: 0, left: 0, width: canvasW, height: canvasH, imageRendering: smooth ? "auto" : "pixelated", pointerEvents: "none", opacity: gpuDisplayVisible ? 1 : 0 }} aria-hidden="true" />
-            <canvas ref={overlayRef} width={Math.round(canvasW * DPR)} height={Math.round(canvasH * DPR)} style={{ position: "absolute", top: 0, left: 0, width: canvasW, height: canvasH, pointerEvents: "none", display: overlayCanvasVisible ? "block" : "none" }} aria-hidden="true" />
-            <canvas ref={uiRef} width={Math.round(canvasW * DPR)} height={Math.round(canvasH * DPR)} style={{ position: "absolute", top: 0, left: 0, width: canvasW, height: canvasH, pointerEvents: "none" }} aria-hidden="true" />
-            <canvas ref={lensCanvasRef} width={Math.round(canvasW * DPR)} height={Math.round(canvasH * DPR)} style={{ position: "absolute", top: 0, left: 0, width: canvasW, height: canvasH, pointerEvents: "none", display: lensCanvasVisible ? "block" : "none" }} aria-hidden="true" />
+            <canvas
+              ref={canvasRef}
+              width={canvasW}
+              height={canvasH}
+              onTouchStart={handleCanvasTouchStart}
+              onTouchMove={handleCanvasTouchMove}
+              onTouchEnd={handleCanvasTouchEnd}
+              onTouchCancel={handleCanvasTouchEnd}
+              style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", imageRendering: smooth ? "auto" : "pixelated", opacity: gpuDisplayVisible ? 0 : 1, display: "block", touchAction: "none" }}
+              role="img"
+              aria-label={`Slice image ${displaySliceIdx + 1} of ${nSlices}${title ? `: ${title}` : ""} (${width} by ${height} pixels). Use arrow keys to scrub frames.`}
+            />
+            <canvas ref={gpuCanvasRef} width={canvasW} height={canvasH} style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", imageRendering: smooth ? "auto" : "pixelated", pointerEvents: "none", opacity: gpuDisplayVisible ? 1 : 0 }} aria-hidden="true" />
+            <canvas ref={overlayRef} width={Math.round(canvasW * DPR)} height={Math.round(canvasH * DPR)} style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", pointerEvents: "none", display: overlayCanvasVisible ? "block" : "none" }} aria-hidden="true" />
+            <canvas ref={uiRef} width={Math.round(canvasW * DPR)} height={Math.round(canvasH * DPR)} style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", pointerEvents: "none" }} aria-hidden="true" />
+            <canvas ref={lensCanvasRef} width={Math.round(canvasW * DPR)} height={Math.round(canvasH * DPR)} style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", pointerEvents: "none", display: lensCanvasVisible ? "block" : "none" }} aria-hidden="true" />
             {/* Per-panel "best frame" stars. One gold ★ button top-right of
                 each panel. Click toggles the star on the currently displayed
                 slice for THAT panel. Programmatic API: widget.star_panel(i). */}
@@ -7771,8 +7925,8 @@ function Show3D() {
                   aria-label={tooltip}
                   style={{
                     position: "absolute",
-                    top: panelTop + 6,
-                    left: panelLeft + panelW - 26,
+                    top: `${((panelTop + 6) / Math.max(1, canvasH)) * 100}%`,
+                    left: `calc(${((panelLeft + panelW) / Math.max(1, canvasW)) * 100}% - 26px)`,
                     width: 20, height: 20,
                     padding: 0,
                     border: "none",
@@ -7811,7 +7965,17 @@ function Show3D() {
               const panelLeft = col * (panelW + gap);
               const panelTop = row * (panelH + gap);
               return (
-                <Box sx={{ position: "absolute", top: panelTop + 3, right: canvasW - (panelLeft + panelW) + 3, bgcolor: "rgba(0,0,0,0.35)", px: 0.5, py: 0.15, pointerEvents: "none", maxWidth: Math.max(80, panelW - 6), textAlign: "right" }}>
+                <Box sx={{
+                  position: "absolute",
+                  top: `${((panelTop + 3) / Math.max(1, canvasH)) * 100}%`,
+                  right: `calc(${((canvasW - (panelLeft + panelW)) / Math.max(1, canvasW)) * 100}% + 3px)`,
+                  bgcolor: "rgba(0,0,0,0.35)",
+                  px: 0.5,
+                  py: 0.15,
+                  pointerEvents: "none",
+                  maxWidth: `calc(${(panelW / Math.max(1, canvasW)) * 100}% - 6px)`,
+                  textAlign: "right",
+                }}>
                   <Typography sx={{ fontSize: 9, fontFamily: "monospace", color: "rgba(255,255,255,0.7)", whiteSpace: "nowrap", lineHeight: 1.2, overflow: "hidden", textOverflow: "ellipsis" }}>
                     ({cursorInfo.row}, {cursorInfo.col}) {formatNumber(cursorInfo.value)}
                   </Typography>
@@ -7847,8 +8011,8 @@ function Show3D() {
                     onMouseDown={handleMainResizeStart}
                     sx={{
                       position: "absolute",
-                      left: slotX + outPanelW - 16,
-                      top: slotY + outPanelH - 16,
+                      left: `calc(${((slotX + outPanelW) / Math.max(1, canvasW)) * 100}% - 16px)`,
+                      top: `calc(${((slotY + outPanelH) / Math.max(1, canvasH)) * 100}% - 16px)`,
                       width: 16,
                       height: 16,
                       cursor: "nwse-resize",
@@ -7893,13 +8057,13 @@ function Show3D() {
                 ref={profileCanvasRef}
                 onMouseMove={handleProfileMouseMove}
                 onMouseLeave={handleProfileMouseLeave}
-                style={{ width: canvasW, height: profileHeight, display: "block", border: `1px solid ${themeColors.border}`, borderBottom: "none", cursor: "crosshair" }}
+                style={{ width: "100%", height: profileHeight, display: "block", border: `1px solid ${themeColors.border}`, borderBottom: "none", cursor: "crosshair" }}
                 role="img"
                 aria-label="Line intensity profile along the drawn line"
               />
               <div
                 onMouseDown={(e) => { e.preventDefault(); setIsResizingProfile(true); setProfileResizeStart({ y: e.clientY, height: profileHeight }); }}
-                style={{ width: canvasW, height: 4, cursor: "ns-resize", borderLeft: `1px solid ${themeColors.border}`, borderRight: `1px solid ${themeColors.border}`, borderBottom: `1px solid ${themeColors.border}`, background: `linear-gradient(to bottom, ${themeColors.border}, transparent)` }}
+                style={{ width: "100%", height: 4, cursor: "ns-resize", borderLeft: `1px solid ${themeColors.border}`, borderRight: `1px solid ${themeColors.border}`, borderBottom: `1px solid ${themeColors.border}`, background: `linear-gradient(to bottom, ${themeColors.border}, transparent)` }}
               />
             </Box>
           )}
@@ -7908,7 +8072,7 @@ function Show3D() {
             <Box sx={{ mt: `${SPACING.XS}px`, boxSizing: "border-box" }}>
               <canvas
                 ref={roiPlotCanvasRef}
-                style={{ width: canvasW, height: 76, display: "block", border: `1px solid ${themeColors.border}` }}
+                style={{ width: "100%", height: 76, display: "block", border: `1px solid ${themeColors.border}` }}
                 role="img"
                 aria-label="ROI mean intensity over frames"
               />
@@ -7917,7 +8081,7 @@ function Show3D() {
           {/* Image Controls - Display / Histogram / Playback in one row, each
               spanning two control-row heights so the three blocks line up. */}
           {showControls && (
-            <Box sx={{ mt: `${SPACING.SM}px`, display: "flex", gap: `${SPACING.SM}px`, alignItems: "stretch", width: canvasW, boxSizing: "border-box", flexWrap: "wrap" }}>
+            <Box sx={{ mt: `${SPACING.SM}px`, display: "flex", gap: `${SPACING.SM}px`, alignItems: "stretch", width: "100%", maxWidth: "100%", boxSizing: "border-box", flexWrap: "wrap" }}>
               <Box sx={{ display: "flex", flexDirection: "column", gap: `${SPACING.XS}px`, flex: "0 0 auto", justifyContent: "center" }}>
                 {/* Row 1: Scale + Auto + Color */}
                 <Box sx={{ ...controlRow, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>
