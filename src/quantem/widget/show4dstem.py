@@ -1003,6 +1003,8 @@ class Show4DSTEM(anywidget.AnyWidget):
     ) -> pathlib.Path:
         from ipywidgets.embed import dependency_state, embed_minimal_html
 
+        from .export import ensure_mobile_viewport
+
         out = pathlib.Path(path)
         out.parent.mkdir(parents=True, exist_ok=True)
         if self._offline_bslz4:
@@ -1023,6 +1025,7 @@ class Show4DSTEM(anywidget.AnyWidget):
                 )
             finally:
                 self.export_enabled = prev_enabled
+            ensure_mobile_viewport(out)
             return out
         export_widget = self._clone_for_html_export(dtype=dtype, det_bin=det_bin)
         try:
@@ -1035,6 +1038,7 @@ class Show4DSTEM(anywidget.AnyWidget):
             )
         finally:
             export_widget.close()
+        ensure_mobile_viewport(out)
         return out
 
     def _html_export_bytes(self, *, dtype: str, det_bin: int) -> bytes:
