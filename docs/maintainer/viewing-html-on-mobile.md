@@ -27,23 +27,71 @@ Why this fools everyone:
   is withheld. People conclude "the phone has no GPU" or "the widget is broken"
   when the real cause is the insecure origin.
 
-## The fix: serve over HTTPS
+## The fix: serve over HTTPS (pick one)
 
-Recommended on a Tailscale tailnet (valid cert, no warnings):
+An exported widget is a single self-contained `.html` file, so any of these
+gives it the secure context WebGPU needs. Ordered by audience.
+
+### Option 1: a static HTTPS host (simplest; best for sharing a finished file)
+
+No server, no tunnel. Upload the `.html` to anything that serves HTTPS and open
+the link on the phone:
+
+- **Netlify Drop** (`app.netlify.com/drop`): drag the file in, get an instant
+  `https://...netlify.app/...` URL.
+- **GitHub Pages**: commit the `.html` to a Pages-enabled repo ->
+  `https://<user>.github.io/<repo>/<file>.html`.
+- Cloudflare Pages, Vercel, S3 + CloudFront, etc.
+
+A large `Show4DSTEM` export can be tens of MB; that is fine for these hosts. This
+is the right choice for most people who just want to send someone a working link.
+
+### Option 2: Tailscale (best for private/local, nothing public)
+
+One-time setup:
+
+1. Install Tailscale on the serving machine
+   (`curl -fsSL https://tailscale.com/install.sh | sh` then `tailscale up`) and
+   the **Tailscale app on the phone** (App Store / Play Store), both signed into
+   the **same account** (same tailnet).
+2. In the admin console (`login.tailscale.com`): enable **MagicDNS** and
+   **HTTPS Certificates** (one toggle each).
+
+Serve the local port over HTTPS:
 
 ```bash
-# proxy the local dashboard/file server (here :8780) as HTTPS on the tailnet
-tailscale serve --bg --https=443 http://127.0.0.1:8780
+tailscale serve --bg --https=443 http://127.0.0.1:<port>
 # -> https://<machine>.<tailnet>.ts.net/...   (real Let's Encrypt cert)
-# turn off later with:  tailscale serve --https=443 off
+# stop with:  tailscale serve --https=443 off
 ```
 
-Requires MagicDNS + HTTPS certificates enabled in the tailnet admin console
-(`tailscale cert <machine>.<tailnet>.ts.net` succeeding confirms it). Open the
-**`https://`** URL on the phone; the secure context unlocks `navigator.gpu`.
+`tailscale cert <machine>.<tailnet>.ts.net` succeeding confirms HTTPS is enabled.
+Open the `https://` URL on the phone with **Tailscale ON**. It is reachable only
+on your tailnet; nothing is exposed to the public internet.
 
-Other valid secure-context options: any real HTTPS host, an `ngrok`/Cloudflare
-tunnel, or `localhost` (only useful on the same machine, not a phone).
+### Option 3: a quick public tunnel (one-off checks)
+
+```bash
+cloudflared tunnel --url http://localhost:<port>   # prints a https://...trycloudflare.com URL
+# or
+ngrok http <port>                                  # prints a https URL (free account)
+```
+
+Open the printed `https://` URL on the phone. Anyone with the URL can reach it
+while the tunnel runs, so use it for quick tests, not sensitive data.
+
+### Option 4: localhost (same machine only)
+
+On the serving machine itself, `http://localhost:<port>` is already a secure
+context, so WebGPU works there. This does **not** help a phone (a phone is not
+localhost).
+
+### What does NOT work
+
+- Plain `http://<LAN-IP>` or `http://<tailscale-IP>` opened on a phone: insecure
+  origin, `navigator.gpu` withheld.
+- Self-signed HTTPS on iOS Safari: the certificate warning prevents a trusted
+  secure context, so WebGPU stays hidden. Use a real cert (Options 1-3).
 
 ## Browser notes (iOS)
 
