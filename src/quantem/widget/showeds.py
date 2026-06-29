@@ -117,6 +117,25 @@ def eds_line_hints(
     return out[:max_lines]
 
 
+def _normalise_element_symbols(elements: Any) -> list[str]:
+    """Return unique element symbols with user-friendly capitalization."""
+
+    if elements is None:
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in elements:
+        symbol = str(raw).strip()
+        if not symbol:
+            continue
+        symbol = symbol[:1].upper() + symbol[1:].lower()
+        if symbol in seen:
+            continue
+        seen.add(symbol)
+        out.append(symbol)
+    return out
+
+
 def _format_bytes(n_bytes: int) -> str:
     value = float(n_bytes)
     for unit in ("B", "KB", "MB", "GB", "TB"):
@@ -747,6 +766,7 @@ class ShowEDS(anywidget.AnyWidget):
     spectrum_height_px = traitlets.Int(250).tag(sync=True)
     show_controls = traitlets.Bool(True).tag(sync=True)
     log_spectrum = traitlets.Bool(False).tag(sync=True)
+    smooth = traitlets.Bool(False).tag(sync=True)
     pixel_size = traitlets.Float(0.0).tag(sync=True)
     pixel_unit = traitlets.Unicode("px").tag(sync=True)
     scale_bar_visible = traitlets.Bool(True).tag(sync=True)
@@ -761,6 +781,8 @@ class ShowEDS(anywidget.AnyWidget):
     element_label = traitlets.Unicode("").tag(sync=True)
     show_line_hints = traitlets.Bool(True).tag(sync=True)
     line_hints = traitlets.List(traitlets.Dict(), default_value=[]).tag(sync=True)
+    selected_elements = traitlets.List(traitlets.Unicode(), default_value=[]).tag(sync=True)
+    auto_identify = traitlets.Bool(True).tag(sync=True)
     show_debug = traitlets.Bool(False).tag(sync=True)
     saved_rois = traitlets.List(traitlets.Dict(), default_value=[]).tag(sync=True)
     saved_bands = traitlets.List(traitlets.Dict(), default_value=[]).tag(sync=True)
@@ -772,6 +794,9 @@ class ShowEDS(anywidget.AnyWidget):
     export_payload_id = traitlets.Unicode("").tag(sync=True)
     export_filename = traitlets.Unicode("").tag(sync=True)
     export_sidecar_bytes = traitlets.Int(0).tag(sync=True)
+    # True only while writing standalone HTML: exported files have no host
+    # notebook theme, so match Show2D/Show3D and force readable light chrome.
+    _export_light = traitlets.Bool(False).tag(sync=True)
 
     def __init__(
         self,
@@ -790,6 +815,7 @@ class ShowEDS(anywidget.AnyWidget):
         spectrum_height_px: int | None = None,
         show_controls: bool = True,
         log_spectrum: bool = False,
+        smooth: bool = False,
         pixel_size: float | None = None,
         pixel_unit: str = "px",
         sampling: float | tuple[float, float] | list[float] | None = None,
@@ -801,6 +827,8 @@ class ShowEDS(anywidget.AnyWidget):
         element_label: str = "",
         show_line_hints: bool = True,
         line_hints: list[dict[str, Any]] | None = None,
+        selected_elements: list[str] | tuple[str, ...] | None = None,
+        auto_identify: bool = True,
         show_debug: bool = False,
         saved_rois: list[dict[str, Any]] | None = None,
         saved_bands: list[dict[str, Any]] | None = None,
@@ -874,6 +902,7 @@ class ShowEDS(anywidget.AnyWidget):
         self.title = title
         self.show_controls = bool(show_controls)
         self.log_spectrum = bool(log_spectrum)
+        self.smooth = bool(smooth)
         if pixel_size is None:
             if sampling is None:
                 self.pixel_size = 0.0
@@ -893,6 +922,8 @@ class ShowEDS(anywidget.AnyWidget):
         self.overlay_opacity = float(max(0.0, min(1.0, overlay_opacity)))
         self.element_label = str(element_label)
         self.show_line_hints = bool(show_line_hints)
+        self.selected_elements = _normalise_element_symbols(selected_elements or candidate_elements or [])
+        self.auto_identify = bool(auto_identify)
         self.show_debug = bool(show_debug)
         self.roi_shape = _normalise_roi_shape(roi_shape)
         self.saved_rois = [{**dict(item), "shape": _normalise_roi_shape(dict(item).get("shape", "rect"))} for item in (saved_rois or [])]
@@ -1215,6 +1246,7 @@ class ShowEDS(anywidget.AnyWidget):
             "spectrum_height_px": self.spectrum_height_px,
             "show_controls": self.show_controls,
             "log_spectrum": self.log_spectrum,
+            "smooth": self.smooth,
             "pixel_size": self.pixel_size,
             "pixel_unit": self.pixel_unit,
             "scale_bar_visible": self.scale_bar_visible,
@@ -1228,6 +1260,8 @@ class ShowEDS(anywidget.AnyWidget):
             "spectrum_view_end": self.spectrum_view_end,
             "element_label": self.element_label,
             "show_line_hints": self.show_line_hints,
+            "selected_elements": list(self.selected_elements),
+            "auto_identify": self.auto_identify,
             "show_debug": self.show_debug,
             "saved_rois": [dict(item) for item in self.saved_rois],
             "saved_bands": [dict(item) for item in self.saved_bands],
@@ -1253,6 +1287,7 @@ class ShowEDS(anywidget.AnyWidget):
         self.pixel_size = float(max(0.0, self.pixel_size))
         self.pixel_unit = str(self.pixel_unit or "px")
         self.scale_bar_visible = bool(self.scale_bar_visible)
+        self.smooth = bool(self.smooth)
         self.map_zoom = float(max(1.0, min(32.0, self.map_zoom)))
         view_rows = self.n_rows / self.map_zoom
         view_cols = self.n_cols / self.map_zoom
@@ -1264,6 +1299,8 @@ class ShowEDS(anywidget.AnyWidget):
         self.saved_rois = [{**dict(item), "shape": _normalise_roi_shape(dict(item).get("shape", "rect"))} for item in self.saved_rois]
         self.saved_bands = [dict(item) for item in self.saved_bands]
         self.export_presets = [dict(item) for item in self.export_presets]
+        self.selected_elements = _normalise_element_symbols(self.selected_elements)
+        self.auto_identify = bool(self.auto_identify)
 
     def save(self, path: str) -> None:
         save_state_file(path, "ShowEDS", self.state_dict())
@@ -1310,13 +1347,18 @@ class ShowEDS(anywidget.AnyWidget):
         export_widget = widget or self
         export_path = pathlib.Path(path)
         export_path.parent.mkdir(parents=True, exist_ok=True)
-        embed_minimal_html(
-            str(export_path),
-            views=[export_widget],
-            title=title or export_widget.title or self.title or "ShowEDS",
-            drop_defaults=False,
-            state=dependency_state([export_widget], drop_defaults=False),
-        )
+        previous_export_light = export_widget._export_light
+        export_widget._export_light = True
+        try:
+            embed_minimal_html(
+                str(export_path),
+                views=[export_widget],
+                title=title or export_widget.title or self.title or "ShowEDS",
+                drop_defaults=False,
+                state=dependency_state([export_widget], drop_defaults=False),
+            )
+        finally:
+            export_widget._export_light = previous_export_light
         return export_path
 
     def _html_export_bytes(
@@ -1494,6 +1536,7 @@ class ShowEDS(anywidget.AnyWidget):
             spectrum_height_px=self.spectrum_height_px,
             show_controls=self.show_controls,
             log_spectrum=self.log_spectrum,
+            smooth=self.smooth,
             pixel_size=self.pixel_size * spatial_bin if self.pixel_size > 0 else 0.0,
             pixel_unit=self.pixel_unit,
             scale_bar_visible=self.scale_bar_visible,
@@ -1503,6 +1546,8 @@ class ShowEDS(anywidget.AnyWidget):
             element_label=self.element_label,
             show_line_hints=self.show_line_hints,
             line_hints=[dict(item) for item in self.line_hints],
+            selected_elements=list(self.selected_elements),
+            auto_identify=self.auto_identify,
             show_debug=self.show_debug,
             saved_rois=saved_rois,
             saved_bands=saved_bands,
@@ -1515,6 +1560,7 @@ class ShowEDS(anywidget.AnyWidget):
         widget.spectrum_view_start = self.spectrum_view_start / energy_bin
         widget.spectrum_view_end = max(widget.spectrum_view_start + 1, self.spectrum_view_end / energy_bin)
         widget.load_state_dict(widget.state_dict())
+        widget._export_light = True
         return widget
 
     def _on_export_request_change(self, change: dict) -> None:

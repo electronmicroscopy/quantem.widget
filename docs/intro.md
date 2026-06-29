@@ -33,7 +33,7 @@ We serve two audiences first:
 tensors; we avoid NumPy on the hot path. CPU is a fallback, not a target - it
 runs through the same PyTorch path, just slower. For large datasets, bin the
 detector at load (`det_bin`) to cut memory and speed first paint - see
-[load](api/load).
+[Load and I/O](api/io).
 
 ## Widgets
 
@@ -47,7 +47,7 @@ detector at load (`det_bin`) to cut memory and speed first paint - see
 | `ShowDiffraction` | 2D/3D diffraction d-spacing: Bragg spots, rings, center finding, k calibration | [tutorial](tutorials/showdiffraction) · [API](api/showdiffraction) |
 
 The [Tutorials](tutorials/show2d) walk through each widget on synthetic data and
-show how to [save and export](tutorials/saving). The [API reference](api/index)
+show how to [save and share widget exports](tutorials/widget_export). The [API reference](api/index)
 documents every parameter, method, and interactive control (and doubles as a
 UI-test spec for automated agents). All example data here is synthetic or pulled
 from a public Hugging Face dataset - no private data ships in the docs.

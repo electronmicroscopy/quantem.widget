@@ -61,6 +61,60 @@ def test_github_widget_cell_detector_includes_showeds():
     assert "ShowEDS(" in cli._WIDGET_CELL
 
 
+def test_github_prepare_reuses_existing_image_outputs(tmp_path, monkeypatch):
+    notebook = tmp_path / "show2d_github.ipynb"
+    notebook.write_text(
+        """{
+ "cells": [
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {},
+   "outputs": [
+    {
+     "output_type": "display_data",
+     "metadata": {},
+     "data": {
+      "text/plain": "<quantem.widget.show2d.Show2D>",
+      "image/jpeg": "/9j/4AAQSkZJRgABAQAAAQABAAD/2w=="
+     }
+    }
+   ],
+   "source": [
+    "from quantem.widget import Show2D\\n",
+    "Show2D(data)"
+   ]
+  }
+ ],
+ "metadata": {
+  "widgets": {
+   "application/vnd.jupyter.widget-state+json": {}
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 5
+}
+""",
+        encoding="utf-8",
+    )
+
+    def fail_capture(*args, **kwargs):
+        raise AssertionError("existing image outputs should not trigger browser capture")
+
+    monkeypatch.setattr(cli, "_capture_full_ui", fail_capture)
+    args = type("Args", (), {
+        "path": str(notebook),
+        "no_execute": True,
+        "quality": 90,
+        "timeout": 600,
+    })()
+
+    assert cli._prepare_github(args) == 0
+    text = notebook.read_text(encoding="utf-8")
+    assert "image/jpeg" in text
+    assert "application/vnd.jupyter.widget-state+json" not in text
+
+
 # ---------------------------------------------------------------------------
 def test_detect_single_image(tmp_path):
     p = tmp_path / "a.png"

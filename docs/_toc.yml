@@ -8,16 +8,16 @@ parts:
     chapters:
       - file: install
       - file: cli
-      - file: changelog
   - caption: Tutorials
     chapters:
+      - file: tutorials/download_data
       - file: tutorials/show2d
       - file: tutorials/show3d
       - file: tutorials/show3dslices
       - file: tutorials/show4dstem
       - file: tutorials/showeds
-      - file: tutorials/showdiffraction
-      - file: tutorials/saving
+      - file: tutorials/widget_export
+      - file: github-preview
   - caption: API reference
     chapters:
       - file: api/index
@@ -28,9 +28,12 @@ parts:
       - file: api/showeds
       - file: api/showdiffraction
       - file: api/html-export
-      - file: api/load
       - file: api/io
   - caption: Maintainers
     chapters:
+      - file: changelog
+        title: Changelog
       - file: maintainer/widget-release
+        title: Release
       - file: maintainer/widget-performance
+        title: Performance

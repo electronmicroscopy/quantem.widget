@@ -1,7 +1,7 @@
 # API reference
 
-Complete reference for the five widgets, the HTML export protocol, and the
-`load` helper. Widget pages have two halves:
+Complete reference for the five widgets, HTML export, and data loading / I/O.
+Widget pages have two halves:
 
 1. **Reference** - the constructor signature, every parameter, and every public
    method, generated directly from the source by static analysis (so it never
@@ -19,17 +19,6 @@ no console error, no NaN frame). When a control changes, update the table here i
 the same commit; the published page is the source of truth for both human
 readers and test agents.
 
-```{toctree}
-:hidden:
-show2d
-show3d
-show3dslices
-show4dstem
-showeds
-html-export
-load
-```
-
 ## At a glance
 
 | Widget | Class | Offline export |
@@ -41,4 +30,4 @@ load
 | [ShowEDS](showeds) | `quantem.widget.showeds.ShowEDS` | state JSON, interactive HTML; large exact data use folder export, portable demos use downsampled HTML |
 | [ShowDiffraction](showdiffraction) | `quantem.widget.showdiffraction.ShowDiffraction` | state JSON, PNG, interactive HTML |
 
-All widget-level HTML exports follow the [HTML export protocol](html-export).
+All widget-level HTML exports follow the [HTML export](html-export) protocol.

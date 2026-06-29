@@ -12,6 +12,7 @@ import Typography from "@mui/material/Typography";
 import { drawScaleBarHiDPI } from "../figure";
 import { downloadBlob, extractBytes, extractFloat32, formatNumber, markWidgetNotebookDirty, preserveRestoredWidgetModelsOnSave } from "../format";
 import { computeHistogramFromBytes, percentileClip, sliderRange } from "../stats";
+import { useTheme } from "../theme";
 
 type RoiShape = "rect" | "circle" | "ellipse";
 type Roi = { row: number; col: number; height: number; width: number; shape?: RoiShape };
@@ -20,6 +21,7 @@ type EdsLineHint = { element: string; line: string; family?: string; energy_keV:
 type SavedRoi = Roi & { name?: string };
 type SavedBand = { name?: string; start: number; end: number };
 type ExportPreset = { label?: string; mode?: string; downsample?: number; binning?: number; description?: string };
+type PeriodicElement = { z: number; symbol: string; name: string; group: number; period: number };
 type PanelResize = { mode: "map" | "spectrum"; x: number; y: number; width: number; height: number } | null;
 type BandSliderDrag = { x: number; width: number; bandStart: number; bandEnd: number } | null;
 type NumericArray = Float32Array | Float64Array | Uint32Array;
@@ -79,9 +81,119 @@ const MIN_MAP_ZOOM = 1;
 const MAX_MAP_ZOOM = 32;
 const MIN_SPECTRUM_SPAN = 8;
 const UI_FONT = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
-const HISTOGRAM_LIGHT_COLORS = { bg: "#f0f0f0", barActive: "#666", barInactive: "#bbb", border: "#ccc" };
+const HISTOGRAM_LIGHT_COLORS = { bg: "#f0f0f0", barActive: "#666", barInactive: "#bbb", border: "#ccc", label: "#666", slider: "#1976d2" };
+const HISTOGRAM_DARK_COLORS = { bg: "#1b1b1b", barActive: "#aaa", barInactive: "#555", border: "#3a3a3a", label: "#aaa", slider: "#5af" };
 const HTML_EXPORT_OVERHEAD_BYTES = 700_000;
 const ROI_SHAPE_LABELS: Record<RoiShape, string> = { rect: "Rect", circle: "Circle", ellipse: "Ellipse" };
+const PERIODIC_ELEMENTS: PeriodicElement[] = [
+  { z: 1, symbol: "H", name: "Hydrogen", group: 1, period: 1 },
+  { z: 2, symbol: "He", name: "Helium", group: 18, period: 1 },
+  { z: 3, symbol: "Li", name: "Lithium", group: 1, period: 2 },
+  { z: 4, symbol: "Be", name: "Beryllium", group: 2, period: 2 },
+  { z: 5, symbol: "B", name: "Boron", group: 13, period: 2 },
+  { z: 6, symbol: "C", name: "Carbon", group: 14, period: 2 },
+  { z: 7, symbol: "N", name: "Nitrogen", group: 15, period: 2 },
+  { z: 8, symbol: "O", name: "Oxygen", group: 16, period: 2 },
+  { z: 9, symbol: "F", name: "Fluorine", group: 17, period: 2 },
+  { z: 10, symbol: "Ne", name: "Neon", group: 18, period: 2 },
+  { z: 11, symbol: "Na", name: "Sodium", group: 1, period: 3 },
+  { z: 12, symbol: "Mg", name: "Magnesium", group: 2, period: 3 },
+  { z: 13, symbol: "Al", name: "Aluminium", group: 13, period: 3 },
+  { z: 14, symbol: "Si", name: "Silicon", group: 14, period: 3 },
+  { z: 15, symbol: "P", name: "Phosphorus", group: 15, period: 3 },
+  { z: 16, symbol: "S", name: "Sulfur", group: 16, period: 3 },
+  { z: 17, symbol: "Cl", name: "Chlorine", group: 17, period: 3 },
+  { z: 18, symbol: "Ar", name: "Argon", group: 18, period: 3 },
+  { z: 19, symbol: "K", name: "Potassium", group: 1, period: 4 },
+  { z: 20, symbol: "Ca", name: "Calcium", group: 2, period: 4 },
+  { z: 21, symbol: "Sc", name: "Scandium", group: 3, period: 4 },
+  { z: 22, symbol: "Ti", name: "Titanium", group: 4, period: 4 },
+  { z: 23, symbol: "V", name: "Vanadium", group: 5, period: 4 },
+  { z: 24, symbol: "Cr", name: "Chromium", group: 6, period: 4 },
+  { z: 25, symbol: "Mn", name: "Manganese", group: 7, period: 4 },
+  { z: 26, symbol: "Fe", name: "Iron", group: 8, period: 4 },
+  { z: 27, symbol: "Co", name: "Cobalt", group: 9, period: 4 },
+  { z: 28, symbol: "Ni", name: "Nickel", group: 10, period: 4 },
+  { z: 29, symbol: "Cu", name: "Copper", group: 11, period: 4 },
+  { z: 30, symbol: "Zn", name: "Zinc", group: 12, period: 4 },
+  { z: 31, symbol: "Ga", name: "Gallium", group: 13, period: 4 },
+  { z: 32, symbol: "Ge", name: "Germanium", group: 14, period: 4 },
+  { z: 33, symbol: "As", name: "Arsenic", group: 15, period: 4 },
+  { z: 34, symbol: "Se", name: "Selenium", group: 16, period: 4 },
+  { z: 35, symbol: "Br", name: "Bromine", group: 17, period: 4 },
+  { z: 36, symbol: "Kr", name: "Krypton", group: 18, period: 4 },
+  { z: 37, symbol: "Rb", name: "Rubidium", group: 1, period: 5 },
+  { z: 38, symbol: "Sr", name: "Strontium", group: 2, period: 5 },
+  { z: 39, symbol: "Y", name: "Yttrium", group: 3, period: 5 },
+  { z: 40, symbol: "Zr", name: "Zirconium", group: 4, period: 5 },
+  { z: 41, symbol: "Nb", name: "Niobium", group: 5, period: 5 },
+  { z: 42, symbol: "Mo", name: "Molybdenum", group: 6, period: 5 },
+  { z: 43, symbol: "Tc", name: "Technetium", group: 7, period: 5 },
+  { z: 44, symbol: "Ru", name: "Ruthenium", group: 8, period: 5 },
+  { z: 45, symbol: "Rh", name: "Rhodium", group: 9, period: 5 },
+  { z: 46, symbol: "Pd", name: "Palladium", group: 10, period: 5 },
+  { z: 47, symbol: "Ag", name: "Silver", group: 11, period: 5 },
+  { z: 48, symbol: "Cd", name: "Cadmium", group: 12, period: 5 },
+  { z: 49, symbol: "In", name: "Indium", group: 13, period: 5 },
+  { z: 50, symbol: "Sn", name: "Tin", group: 14, period: 5 },
+  { z: 51, symbol: "Sb", name: "Antimony", group: 15, period: 5 },
+  { z: 52, symbol: "Te", name: "Tellurium", group: 16, period: 5 },
+  { z: 53, symbol: "I", name: "Iodine", group: 17, period: 5 },
+  { z: 54, symbol: "Xe", name: "Xenon", group: 18, period: 5 },
+  { z: 55, symbol: "Cs", name: "Caesium", group: 1, period: 6 },
+  { z: 56, symbol: "Ba", name: "Barium", group: 2, period: 6 },
+  { z: 57, symbol: "La", name: "Lanthanum", group: 3, period: 6 },
+  { z: 72, symbol: "Hf", name: "Hafnium", group: 4, period: 6 },
+  { z: 73, symbol: "Ta", name: "Tantalum", group: 5, period: 6 },
+  { z: 74, symbol: "W", name: "Tungsten", group: 6, period: 6 },
+  { z: 75, symbol: "Re", name: "Rhenium", group: 7, period: 6 },
+  { z: 76, symbol: "Os", name: "Osmium", group: 8, period: 6 },
+  { z: 77, symbol: "Ir", name: "Iridium", group: 9, period: 6 },
+  { z: 78, symbol: "Pt", name: "Platinum", group: 10, period: 6 },
+  { z: 79, symbol: "Au", name: "Gold", group: 11, period: 6 },
+  { z: 80, symbol: "Hg", name: "Mercury", group: 12, period: 6 },
+  { z: 81, symbol: "Tl", name: "Thallium", group: 13, period: 6 },
+  { z: 82, symbol: "Pb", name: "Lead", group: 14, period: 6 },
+  { z: 83, symbol: "Bi", name: "Bismuth", group: 15, period: 6 },
+  { z: 84, symbol: "Po", name: "Polonium", group: 16, period: 6 },
+  { z: 85, symbol: "At", name: "Astatine", group: 17, period: 6 },
+  { z: 86, symbol: "Rn", name: "Radon", group: 18, period: 6 },
+  { z: 87, symbol: "Fr", name: "Francium", group: 1, period: 7 },
+  { z: 88, symbol: "Ra", name: "Radium", group: 2, period: 7 },
+  { z: 89, symbol: "Ac", name: "Actinium", group: 3, period: 7 },
+  { z: 104, symbol: "Rf", name: "Rutherfordium", group: 4, period: 7 },
+  { z: 105, symbol: "Db", name: "Dubnium", group: 5, period: 7 },
+  { z: 106, symbol: "Sg", name: "Seaborgium", group: 6, period: 7 },
+  { z: 107, symbol: "Bh", name: "Bohrium", group: 7, period: 7 },
+  { z: 108, symbol: "Hs", name: "Hassium", group: 8, period: 7 },
+  { z: 109, symbol: "Mt", name: "Meitnerium", group: 9, period: 7 },
+  { z: 110, symbol: "Ds", name: "Darmstadtium", group: 10, period: 7 },
+  { z: 111, symbol: "Rg", name: "Roentgenium", group: 11, period: 7 },
+  { z: 112, symbol: "Cn", name: "Copernicium", group: 12, period: 7 },
+  { z: 113, symbol: "Nh", name: "Nihonium", group: 13, period: 7 },
+  { z: 114, symbol: "Fl", name: "Flerovium", group: 14, period: 7 },
+  { z: 115, symbol: "Mc", name: "Moscovium", group: 15, period: 7 },
+  { z: 116, symbol: "Lv", name: "Livermorium", group: 16, period: 7 },
+  { z: 117, symbol: "Ts", name: "Tennessine", group: 17, period: 7 },
+  { z: 118, symbol: "Og", name: "Oganesson", group: 18, period: 7 },
+  { z: 58, symbol: "Ce", name: "Cerium", group: 4, period: 8 },
+  { z: 59, symbol: "Pr", name: "Praseodymium", group: 5, period: 8 },
+  { z: 60, symbol: "Nd", name: "Neodymium", group: 6, period: 8 },
+  { z: 61, symbol: "Pm", name: "Promethium", group: 7, period: 8 },
+  { z: 62, symbol: "Sm", name: "Samarium", group: 8, period: 8 },
+  { z: 63, symbol: "Eu", name: "Europium", group: 9, period: 8 },
+  { z: 64, symbol: "Gd", name: "Gadolinium", group: 10, period: 8 },
+  { z: 65, symbol: "Tb", name: "Terbium", group: 11, period: 8 },
+  { z: 66, symbol: "Dy", name: "Dysprosium", group: 12, period: 8 },
+  { z: 67, symbol: "Ho", name: "Holmium", group: 13, period: 8 },
+  { z: 68, symbol: "Er", name: "Erbium", group: 14, period: 8 },
+  { z: 69, symbol: "Tm", name: "Thulium", group: 15, period: 8 },
+  { z: 70, symbol: "Yb", name: "Ytterbium", group: 16, period: 8 },
+  { z: 71, symbol: "Lu", name: "Lutetium", group: 17, period: 8 },
+  { z: 90, symbol: "Th", name: "Thorium", group: 4, period: 9 },
+  { z: 91, symbol: "Pa", name: "Protactinium", group: 5, period: 9 },
+  { z: 92, symbol: "U", name: "Uranium", group: 6, period: 9 },
+];
 const MAP_WGSL = `
 @group(0) @binding(0) var<storage,read> cube: array<u32>;
 @group(0) @binding(1) var<storage,read_write> out: array<f32>;
@@ -172,32 +284,48 @@ function MapHistogram({
   vminPct,
   vmaxPct,
   onRangeChange,
+  onRangePreview,
+  onRangeCommit,
   dataMin,
   dataMax,
+  theme,
   width = 128,
-  height = 40,
+  height = 58,
 }: {
   data: NumericArray | null;
   vminPct: number;
   vmaxPct: number;
   onRangeChange: (min: number, max: number) => void;
+  onRangePreview?: (min: number, max: number) => void;
+  onRangeCommit?: (min: number, max: number) => void;
   dataMin: number;
   dataMax: number;
+  theme: "light" | "dark";
   width?: number;
   height?: number;
 }) {
   const canvasRef = React.useRef<HTMLCanvasElement>(null);
   const sliderRef = React.useRef<HTMLDivElement | null>(null);
+  const minLabelRef = React.useRef<HTMLElement | null>(null);
+  const maxLabelRef = React.useRef<HTMLElement | null>(null);
   const onRangeChangeRef = React.useRef(onRangeChange);
-  const [rangeDrag, setRangeDrag] = React.useState<{ x: number; width: number; lo: number; hi: number } | null>(null);
+  const onRangePreviewRef = React.useRef(onRangePreview);
+  const onRangeCommitRef = React.useRef(onRangeCommit);
   const pendingRangeRef = React.useRef<[number, number] | null>(null);
   const rangeRafRef = React.useRef<number | null>(null);
+  const [liveRange, setLiveRange] = React.useState<[number, number]>(clampPercentPair(vminPct, vmaxPct));
+  React.useEffect(() => { setLiveRange(clampPercentPair(vminPct, vmaxPct)); }, [vminPct, vmaxPct]);
+  const [liveVminPct, liveVmaxPct] = liveRange;
   const bins = React.useMemo(
     () => computeHistogramFromBytes(data, 256, dataMin, dataMax),
     [data, dataMin, dataMax],
   );
-  const colors = HISTOGRAM_LIGHT_COLORS;
-  React.useEffect(() => {
+  const colors = theme === "dark" ? HISTOGRAM_DARK_COLORS : HISTOGRAM_LIGHT_COLORS;
+  const valueLabel = React.useCallback((pct: number) => {
+    const val = dataMin + (pct / 100) * (dataMax - dataMin);
+    return Math.abs(val) >= 1000 ? val.toExponential(1) : val.toFixed(1);
+  }, [dataMax, dataMin]);
+  const drawHistogram = React.useCallback((loPct: number, hiPct: number) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const dpr = window.devicePixelRatio || 1;
@@ -208,7 +336,7 @@ function MapHistogram({
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.fillStyle = colors.bg;
     ctx.fillRect(0, 0, width, height);
-    const displayBins = 36;
+    const displayBins = 64;
     const binRatio = Math.max(1, Math.floor(bins.length / displayBins));
     const reducedBins: number[] = [];
     for (let i = 0; i < displayBins; i++) {
@@ -216,28 +344,47 @@ function MapHistogram({
       for (let j = 0; j < binRatio; j++) sum += bins[i * binRatio + j] || 0;
       reducedBins.push(sum / binRatio);
     }
-    const displayHeights = reducedBins.map((value) => Math.log1p(value));
-    const sortedHeights = displayHeights.filter((value) => Number.isFinite(value) && value > 0).sort((a, b) => a - b);
-    const robustIndex = Math.max(0, Math.min(sortedHeights.length - 1, Math.floor(sortedHeights.length * 0.9)));
-    const robustMax = sortedHeights.length ? sortedHeights[robustIndex] : 0;
-    const maxVal = Math.max(robustMax, 0.001);
+    const maxVal = Math.max(...reducedBins, 0.001);
     const barWidth = width / displayBins;
-    const vminBin = Math.floor((Math.max(0, Math.min(100, vminPct)) / 100) * displayBins);
-    const vmaxBin = Math.floor((Math.max(0, Math.min(100, vmaxPct)) / 100) * displayBins);
+    const vminBin = Math.floor((Math.max(0, Math.min(100, loPct)) / 100) * displayBins);
+    const vmaxBin = Math.floor((Math.max(0, Math.min(100, hiPct)) / 100) * displayBins);
     for (let i = 0; i < displayBins; i++) {
-      const scaledHeight = Math.min(1, displayHeights[i] / maxVal) * (height - 2);
-      const barHeight = displayHeights[i] > 0 ? Math.max(2, scaledHeight) : 0;
+      const barHeight = (reducedBins[i] / maxVal) * (height - 2);
       ctx.fillStyle = i >= vminBin && i <= vmaxBin ? colors.barActive : colors.barInactive;
-      ctx.fillRect(i * barWidth + 0.5, height - barHeight, Math.max(1.5, barWidth - 0.5), barHeight);
+      ctx.fillRect(i * barWidth + 0.5, height - barHeight, Math.max(1, barWidth - 1), barHeight);
     }
-  }, [bins, colors, height, vmaxPct, vminPct, width]);
-  const valueLabel = (pct: number) => {
-    const val = dataMin + (pct / 100) * (dataMax - dataMin);
-    return Math.abs(val) >= 1000 ? val.toExponential(1) : val.toFixed(1);
-  };
+  }, [bins, colors, height, width]);
+  const applyRangePreview = React.useCallback((next: [number, number]) => {
+    const [lo, hi] = next;
+    const slider = sliderRef.current?.querySelector(".MuiSlider-root") as HTMLElement | null;
+    const thumbs = slider?.querySelectorAll(".MuiSlider-thumb");
+    const track = slider?.querySelector(".MuiSlider-track") as HTMLElement | null;
+    if (thumbs && thumbs.length >= 2) {
+      (thumbs[0] as HTMLElement).style.left = `${lo}%`;
+      (thumbs[1] as HTMLElement).style.left = `${hi}%`;
+    }
+    if (track) {
+      track.style.left = `${lo}%`;
+      track.style.width = `${Math.max(0, hi - lo)}%`;
+    }
+    if (minLabelRef.current) minLabelRef.current.textContent = valueLabel(lo);
+    if (maxLabelRef.current) maxLabelRef.current.textContent = valueLabel(hi);
+    drawHistogram(lo, hi);
+  }, [drawHistogram, valueLabel]);
+  React.useEffect(() => {
+    drawHistogram(liveVminPct, liveVmaxPct);
+  }, [drawHistogram, liveVmaxPct, liveVminPct]);
   React.useEffect(() => {
     onRangeChangeRef.current = onRangeChange;
-  }, [onRangeChange]);
+    onRangePreviewRef.current = onRangePreview;
+    onRangeCommitRef.current = onRangeCommit;
+  }, [onRangeChange, onRangeCommit, onRangePreview]);
+  const emitRangePreview = React.useCallback((min: number, max: number) => {
+    (onRangePreviewRef.current || onRangeChangeRef.current)(min, max);
+  }, []);
+  const emitRangeCommit = React.useCallback((min: number, max: number) => {
+    (onRangeCommitRef.current || onRangeChangeRef.current)(min, max);
+  }, []);
   const flushRangePreview = React.useCallback(() => {
     if (rangeRafRef.current != null) {
       window.cancelAnimationFrame(rangeRafRef.current);
@@ -245,40 +392,50 @@ function MapHistogram({
     }
     const pending = pendingRangeRef.current;
     pendingRangeRef.current = null;
-    if (pending) onRangeChangeRef.current(pending[0], pending[1]);
-  }, []);
+    if (pending) {
+      setLiveRange(pending);
+      applyRangePreview(pending);
+      emitRangeCommit(pending[0], pending[1]);
+    }
+  }, [applyRangePreview, emitRangeCommit]);
   React.useEffect(() => () => {
     if (rangeRafRef.current != null) window.cancelAnimationFrame(rangeRafRef.current);
   }, []);
-  React.useEffect(() => {
-    if (!rangeDrag) return;
-    const onMove = (e: MouseEvent) => {
-      const span = Math.max(1, rangeDrag.hi - rangeDrag.lo);
-      const deltaPct = ((e.clientX - rangeDrag.x) / Math.max(1, rangeDrag.width)) * 100;
-      const lo = Math.max(0, Math.min(100 - span, rangeDrag.lo + deltaPct));
-      pendingRangeRef.current = [lo, lo + span];
+  const beginRangeDrag = React.useCallback((event: React.MouseEvent, dragWidth: number, lo0: number, hi0: number) => {
+    const startX = event.clientX;
+    const span = Math.max(1, hi0 - lo0);
+    const previousCursor = document.body.style.cursor;
+    document.body.style.cursor = "grabbing";
+    const onMove = (moveEvent: MouseEvent) => {
+      moveEvent.preventDefault();
+      const deltaPct = ((moveEvent.clientX - startX) / Math.max(1, dragWidth)) * 100;
+      const lo = Math.max(0, Math.min(100 - span, lo0 + deltaPct));
+      const next: [number, number] = [lo, lo + span];
+      pendingRangeRef.current = next;
       if (rangeRafRef.current == null) {
         rangeRafRef.current = window.requestAnimationFrame(() => {
           rangeRafRef.current = null;
           const pending = pendingRangeRef.current;
-          pendingRangeRef.current = null;
-          if (pending) onRangeChangeRef.current(pending[0], pending[1]);
+          if (pending) {
+            setLiveRange(pending);
+            applyRangePreview(pending);
+            emitRangePreview(pending[0], pending[1]);
+          }
         });
       }
     };
     const onUp = () => {
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+      document.body.style.cursor = previousCursor;
       flushRangePreview();
-      setRangeDrag(null);
     };
     document.addEventListener("mousemove", onMove);
     document.addEventListener("mouseup", onUp);
-    return () => {
-      document.removeEventListener("mousemove", onMove);
-      document.removeEventListener("mouseup", onUp);
-    };
-  }, [flushRangePreview, rangeDrag]);
+  }, [applyRangePreview, emitRangePreview, flushRangePreview]);
   return (
-    <Box sx={{ display: "flex", flexDirection: "column", gap: 0.25, width, flexShrink: 0 }}>
+    <Box sx={{ display: "flex", flexDirection: "column", gap: 0, width, flexShrink: 0 }}>
+      <Box sx={{ position: "relative", width, height: height + 6 }}>
       <canvas
         ref={canvasRef}
         style={{ width, height, border: `1px solid ${colors.border}`, display: "block" }}
@@ -290,18 +447,20 @@ function MapHistogram({
           if ((e.target as HTMLElement).closest(".MuiSlider-thumb")) return;
           const rect = sliderRef.current?.getBoundingClientRect();
           if (!rect) return;
-          const [lo, hi] = clampPercentPair(vminPct, vmaxPct);
+          const [lo, hi] = clampPercentPair(liveVminPct, liveVmaxPct);
           const pct = ((e.clientX - rect.left) / Math.max(1, rect.width)) * 100;
           if (pct < lo || pct > hi) return;
-          setRangeDrag({ x: e.clientX, width: rect.width, lo, hi });
+          const thumbGuardPct = Math.max(4, (10 / Math.max(1, rect.width)) * 100);
+          if (Math.abs(pct - lo) <= thumbGuardPct || Math.abs(pct - hi) <= thumbGuardPct) return;
+          beginRangeDrag(e, rect.width, lo, hi);
           e.preventDefault();
           e.stopPropagation();
           e.nativeEvent.stopImmediatePropagation();
         }}
-        sx={{ width, height: 14, display: "flex", alignItems: "center", cursor: rangeDrag ? "grabbing" : "grab" }}
+        sx={{ position: "absolute", left: 0, top: height - 1, width, height: 8, display: "flex", alignItems: "flex-start", cursor: "grab" }}
       >
         <Slider
-          value={clampPercentPair(vminPct, vmaxPct)}
+          value={liveRange}
           min={0}
           max={100}
           step={0.5}
@@ -311,21 +470,31 @@ function MapHistogram({
           onChange={(_, v) => {
             if (!Array.isArray(v)) return;
             const [newMin, newMax] = v.map(Number);
-            onRangeChange(Math.min(newMin, newMax - 1), Math.max(newMax, newMin + 1));
+            const next: [number, number] = [Math.min(newMin, newMax - 1), Math.max(newMax, newMin + 1)];
+            setLiveRange(next);
+            emitRangePreview(next[0], next[1]);
+          }}
+          onChangeCommitted={(_, v) => {
+            if (!Array.isArray(v)) return;
+            const [newMin, newMax] = v.map(Number);
+            const next: [number, number] = [Math.min(newMin, newMax - 1), Math.max(newMax, newMin + 1)];
+            setLiveRange(next);
+            emitRangeCommit(next[0], next[1]);
           }}
           sx={{
             width,
             py: 0,
-            "& .MuiSlider-thumb": { width: 8, height: 8 },
-            "& .MuiSlider-rail": { height: 2 },
-            "& .MuiSlider-track": { height: 2, cursor: rangeDrag ? "grabbing" : "grab" },
+            "& .MuiSlider-thumb": { width: 8, height: 8, bgcolor: colors.slider },
+            "& .MuiSlider-rail": { height: 2, bgcolor: colors.barInactive },
+            "& .MuiSlider-track": { height: 2, cursor: "grab", bgcolor: colors.slider },
             "& .MuiSlider-valueLabel": { fontSize: 10, px: 0.5, py: 0.25 },
           }}
         />
       </Box>
+      </Box>
       <Box sx={{ display: "flex", justifyContent: "space-between", width }}>
-        <Typography sx={{ fontSize: 8, fontFamily: "monospace", opacity: 0.6, lineHeight: 1 }}>{valueLabel(vminPct)}</Typography>
-        <Typography sx={{ fontSize: 8, fontFamily: "monospace", opacity: 0.6, lineHeight: 1 }}>{valueLabel(vmaxPct)}</Typography>
+        <Typography ref={minLabelRef} sx={{ fontSize: 8, fontFamily: "monospace", color: colors.label, lineHeight: 1 }}>{valueLabel(liveVminPct)}</Typography>
+        <Typography ref={maxLabelRef} sx={{ fontSize: 8, fontFamily: "monospace", color: colors.label, lineHeight: 1 }}>{valueLabel(liveVmaxPct)}</Typography>
       </Box>
     </Box>
   );
@@ -466,6 +635,24 @@ function lineLabel(line: EdsLineHint): string {
   return `${line.element} ${symbol}`;
 }
 
+function normalizeElementSymbol(value: unknown): string {
+  const raw = String(value ?? "").trim();
+  if (!raw) return "";
+  return `${raw.slice(0, 1).toUpperCase()}${raw.slice(1).toLowerCase()}`;
+}
+
+function uniqueSymbols(values: unknown[]): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const value of values) {
+    const symbol = normalizeElementSymbol(value);
+    if (!symbol || seen.has(symbol)) continue;
+    seen.add(symbol);
+    out.push(symbol);
+  }
+  return out;
+}
+
 function extractStorageBytes(dataView: DataView | ArrayBuffer | Uint8Array, logicalBytes: number): Uint8Array | null {
   const bytes = extractBytes(dataView);
   if (bytes.length === 0) return null;
@@ -487,6 +674,7 @@ let fetchRequestId = 0;
 let fetchPending = new Map();
 let activeMapController = null;
 let activeSpectrumController = null;
+const MAX_SPECTRUM_CACHE = 8192;
 
 function isAbortError(error) {
   return error && (error.name === "AbortError" || error.message === "aborted");
@@ -552,7 +740,7 @@ async function fetchSpatialPrefixSpectrum(row, col, signal) {
   const end = start + meta.n_energy * 4 - 1;
   const arr = new Uint32Array(await fetchRange(meta.spatial_prefix, start, end, signal));
   spectrumCache.set(key, arr);
-  if (spectrumCache.size > 512) spectrumCache.delete(spectrumCache.keys().next().value);
+  if (spectrumCache.size > MAX_SPECTRUM_CACHE) spectrumCache.delete(spectrumCache.keys().next().value);
   return arr;
 }
 
@@ -663,7 +851,7 @@ self.onmessage = async (event) => {
             const [s0, s1] = segment;
             segments.push({ r, s0, s1 });
           }
-          const batchSize = 32;
+          const batchSize = 128;
           for (let i = 0; i < segments.length; i += batchSize) {
             if (controller.signal.aborted) throw abortError();
             const rows = await Promise.all(segments.slice(i, i + batchSize).map(async ({ r, s0, s1 }) => {
@@ -736,6 +924,32 @@ function ShowEDS() {
   const model = useModel();
   React.useEffect(() => preserveRestoredWidgetModelsOnSave(model), [model]);
 
+  const [offlineForTheme] = useModelState<boolean>("_export_light");
+  const { themeInfo, colors: tc } = useTheme(offlineForTheme);
+  const themeColors = React.useMemo(() => {
+    const isDark = themeInfo.theme === "dark";
+    return {
+      ...tc,
+      mapBg: "#000",
+      plotBg: isDark ? "#050505" : "#ffffff",
+      plotGrid: isDark ? "#333" : "#d8d8d8",
+      plotText: isDark ? "#ddd" : "#222",
+      spectrumLine: isDark ? "#ffd54f" : "#8a5a00",
+      lineHint: isDark ? "rgba(129, 212, 250, 0.72)" : "rgba(0, 102, 204, 0.66)",
+      lineHintMuted: isDark ? "rgba(129, 212, 250, 0.22)" : "rgba(0, 102, 204, 0.20)",
+      lineHintText: isDark ? "rgba(129, 212, 250, 0.92)" : "rgba(0, 80, 160, 0.92)",
+      bandFill: isDark ? "rgba(255, 215, 0, 0.22)" : "rgba(255, 193, 7, 0.26)",
+      roi: isDark ? "#00ff7f" : "#00b866",
+      resize: isDark ? "#5af" : "#0066cc",
+      hudBg: isDark ? "rgba(0,0,0,0.78)" : "rgba(245,245,245,0.96)",
+      hudText: isDark ? "#d8f6ff" : "#1e4a5f",
+      error: "#d32f2f",
+      sliderPreview: "#1976d2",
+      buttonText: isDark ? "#001018" : "#ffffff",
+      hoverBg: isDark ? "#303030" : "#e8f2ff",
+    };
+  }, [tc, themeInfo.theme]);
+
   const [title] = useModelState<string>("title");
   const [rows] = useModelState<number>("n_rows");
   const [cols] = useModelState<number>("n_cols");
@@ -760,6 +974,7 @@ function ShowEDS() {
   const [spectrumHeight, setSpectrumHeight] = useModelState<number>("spectrum_height_px");
   const [showControls] = useModelState<boolean>("show_controls");
   const [logSpectrum, setLogSpectrum] = useModelState<boolean>("log_spectrum");
+  const [smooth, setSmooth] = useModelState<boolean>("smooth");
   const [pixelSize] = useModelState<number>("pixel_size");
   const [pixelUnit] = useModelState<string>("pixel_unit");
   const [scaleBarVisible, setScaleBarVisible] = useModelState<boolean>("scale_bar_visible");
@@ -774,6 +989,8 @@ function ShowEDS() {
   const [elementLabel] = useModelState<string>("element_label");
   const [showLineHints] = useModelState<boolean>("show_line_hints");
   const [lineHints] = useModelState<EdsLineHint[]>("line_hints");
+  const [selectedElements, setSelectedElements] = useModelState<string[]>("selected_elements");
+  const [autoIdentify, setAutoIdentify] = useModelState<boolean>("auto_identify");
   const [showDebug, setShowDebug] = useModelState<boolean>("show_debug");
   const [savedRois, setSavedRois] = useModelState<SavedRoi[]>("saved_rois");
   const [savedBands, setSavedBands] = useModelState<SavedBand[]>("saved_bands");
@@ -829,9 +1046,11 @@ function ShowEDS() {
   const [panelResize, setPanelResize] = React.useState<PanelResize>(null);
   const [bandSliderDrag, setBandSliderDrag] = React.useState<BandSliderDrag>(null);
   const [exportMenuAnchor, setExportMenuAnchor] = React.useState<HTMLElement | null>(null);
+  const [elementMenuAnchor, setElementMenuAnchor] = React.useState<HTMLElement | null>(null);
   const [roiMenuAnchor, setRoiMenuAnchor] = React.useState<HTMLElement | null>(null);
   const [roiShapeMenuAnchor, setRoiShapeMenuAnchor] = React.useState<HTMLElement | null>(null);
   const [bandMenuAnchor, setBandMenuAnchor] = React.useState<HTMLElement | null>(null);
+  const imageRenderingStyle = smooth ? "auto" : "pixelated";
   const [exportBusy, setExportBusy] = React.useState(false);
   const [localExportStatus, setLocalExportStatus] = React.useState("");
   const [perfTick, setPerfTick] = React.useState(0);
@@ -1033,8 +1252,9 @@ function ShowEDS() {
     width: `${size * mapView.zoom}px`,
     height: `${size * mapView.zoom}px`,
     display: "block",
+    imageRendering: imageRenderingStyle,
     willChange: "left, top, width, height",
-  }), [cols, mapView, rows, size]);
+  }), [cols, imageRenderingStyle, mapView, rows, size]);
   const spectrumView = React.useMemo(() => {
     let start = Number.isFinite(spectrumViewStart) ? Number(spectrumViewStart) : 0;
     let end = Number.isFinite(spectrumViewEnd) && Number(spectrumViewEnd) > start
@@ -1093,7 +1313,7 @@ function ShowEDS() {
         for (let i = s; i < e; i++) sum += roiSpectrum[i] || 0;
       }
       let candidates = "";
-      if (showLineHints && Array.isArray(lineHints)) {
+      if (showLineHints && autoIdentify && Array.isArray(lineHints)) {
         const step = Math.abs((energy[Math.min(nEnergy - 1, s + 1)] ?? e1) - (energy[s] ?? e0)) || 0.02;
         const lo = Math.min(e0, e1) - step * 0.65;
         const hi = Math.max(e0, e1) + step * 0.65;
@@ -1107,7 +1327,7 @@ function ShowEDS() {
       statusEl.textContent = `Band ${s}-${e - 1}: ${formatEnergy(e0)} - ${formatEnergy(e1)}; ROI band counts ${formatNumber(sum, 2)}${candidates ? `; candidates ${candidates}` : ""}`;
     }
     return [s, e];
-  }, [energy, indexToSpecX, lineHints, nEnergy, roiSpectrum, showLineHints]);
+  }, [autoIdentify, energy, indexToSpecX, lineHints, nEnergy, roiSpectrum, showLineHints]);
   const previewCenterBand = React.useCallback((start: number, end: number, sliderWidth?: number) => {
     const [s, e] = positionBandPreview(start, end, sliderWidth);
     pendingLocalBandRef.current = [s, e];
@@ -1124,8 +1344,13 @@ function ShowEDS() {
     if (!Number.isFinite(range.vmin) || !Number.isFinite(range.vmax) || range.vmax <= range.vmin) return mapDataRange;
     return [range.vmin, range.vmax] as [number, number];
   }, [mapDataRange, mapVmaxPct, mapVminPct]);
+  const mapPercentRange = React.useCallback((loPct: number, hiPct: number): [number, number] => {
+    const range = sliderRange(mapDataRange[0], mapDataRange[1], loPct, hiPct);
+    if (!Number.isFinite(range.vmin) || !Number.isFinite(range.vmax) || range.vmax <= range.vmin) return mapDataRange;
+    return [range.vmin, range.vmax];
+  }, [mapDataRange]);
   const candidateLines = React.useMemo(() => {
-    if (!showLineHints || !Array.isArray(lineHints)) return [];
+    if (!showLineHints || !autoIdentify || !Array.isArray(lineHints)) return [];
     const step = Math.abs((energy[Math.min(nEnergy - 1, bandLo + 1)] ?? bandEnergyHi) - (energy[bandLo] ?? bandEnergyLo)) || 0.02;
     const lo = bandEnergyLo - step * 0.65;
     const hi = bandEnergyHi + step * 0.65;
@@ -1133,8 +1358,66 @@ function ShowEDS() {
       .filter((line) => Number.isFinite(line.energy_keV) && line.energy_keV >= lo && line.energy_keV <= hi)
       .sort((a, b) => (b.intensity ?? 0) - (a.intensity ?? 0))
       .slice(0, 4);
-  }, [bandEnergyHi, bandEnergyLo, bandLo, energy, lineHints, nEnergy, showLineHints]);
+  }, [autoIdentify, bandEnergyHi, bandEnergyLo, bandLo, energy, lineHints, nEnergy, showLineHints]);
   const candidateText = candidateLines.map(lineLabel).join(", ");
+  const safeSelectedElements = React.useMemo(() => uniqueSymbols(Array.isArray(selectedElements) ? selectedElements : []), [selectedElements]);
+  const selectedElementSet = React.useMemo(() => new Set(safeSelectedElements), [safeSelectedElements]);
+  const elementsWithLines = React.useMemo(() => {
+    const out = new Set<string>();
+    if (Array.isArray(lineHints)) {
+      for (const line of lineHints) out.add(normalizeElementSymbol(line.element));
+    }
+    return out;
+  }, [lineHints]);
+  const selectedLineHints = React.useMemo(() => {
+    if (!Array.isArray(lineHints) || selectedElementSet.size === 0) return [];
+    return lineHints
+      .filter((line) => selectedElementSet.has(normalizeElementSymbol(line.element)))
+      .sort((a, b) => (a.energy_keV - b.energy_keV) || ((b.intensity ?? 0) - (a.intensity ?? 0)));
+  }, [lineHints, selectedElementSet]);
+  const suggestedLines = React.useMemo(() => {
+    const source = selectedLineHints.length > 0 ? selectedLineHints : candidateLines;
+    const visibleLo = energy[Math.max(0, Math.floor(spectrumView.start))] ?? bandEnergyLo;
+    const visibleHi = energy[Math.min(nEnergy - 1, Math.ceil(spectrumView.end) - 1)] ?? bandEnergyHi;
+    return source
+      .filter((line) => Number.isFinite(line.energy_keV) && line.energy_keV >= visibleLo && line.energy_keV <= visibleHi)
+      .sort((a, b) => (b.intensity ?? 0) - (a.intensity ?? 0))
+      .slice(0, 10);
+  }, [bandEnergyHi, bandEnergyLo, candidateLines, energy, nEnergy, selectedLineHints, spectrumView.end, spectrumView.start]);
+  const autoElementScores = React.useMemo(() => {
+    if (!autoIdentify || !roiSpectrum || !Array.isArray(lineHints) || energy.length < 2) return [];
+    const lo = Math.min(bandEnergyLo, bandEnergyHi);
+    const hi = Math.max(bandEnergyLo, bandEnergyHi);
+    const byElement = new Map<string, { symbol: string; score: number; lines: EdsLineHint[] }>();
+    for (const line of lineHints) {
+      if (!Number.isFinite(line.energy_keV) || line.energy_keV < lo || line.energy_keV > hi) continue;
+      const idx = Math.max(0, Math.min(nEnergy - 1, Math.round(energyToIndex(energy, line.energy_keV))));
+      const value = Math.max(0, Number(roiSpectrum[idx] ?? 0));
+      const score = value * Math.max(0.05, line.intensity ?? 0.1);
+      const symbol = normalizeElementSymbol(line.element);
+      const prev = byElement.get(symbol) || { symbol, score: 0, lines: [] };
+      prev.score += score;
+      prev.lines.push(line);
+      byElement.set(symbol, prev);
+    }
+    return [...byElement.values()]
+      .filter((item) => item.score > 0)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 6);
+  }, [autoIdentify, bandEnergyHi, bandEnergyLo, energy, lineHints, nEnergy, roiSpectrum]);
+  const toggleSelectedElement = React.useCallback((symbol: string) => {
+    const clean = normalizeElementSymbol(symbol);
+    if (!clean || !elementsWithLines.has(clean)) return;
+    const next = selectedElementSet.has(clean)
+      ? safeSelectedElements.filter((item) => item !== clean)
+      : [...safeSelectedElements, clean];
+    setSelectedElements(next);
+  }, [elementsWithLines, safeSelectedElements, selectedElementSet, setSelectedElements]);
+  const selectOnlyElement = React.useCallback((symbol: string) => {
+    const clean = normalizeElementSymbol(symbol);
+    if (!clean || !elementsWithLines.has(clean)) return;
+    setSelectedElements([clean]);
+  }, [elementsWithLines, setSelectedElements]);
   const isBandCenterPreviewing = Boolean(bandSliderDrag || drag?.mode === "band-move");
   React.useEffect(() => {
     if (localOverlayOpacity === null) return;
@@ -1701,7 +1984,7 @@ function ShowEDS() {
     recordWidgetPerf("mapDrawMs", performance.now() - t0);
   }, [base, cols, recordWidgetPerf, rows]);
 
-  React.useEffect(() => {
+  const drawMapOverlay = React.useCallback((displayRange: [number, number]) => {
     const canvas = mapOverlayCanvasRef.current;
     if (!canvas) return;
     canvas.width = Math.max(1, cols);
@@ -1712,7 +1995,7 @@ function ShowEDS() {
     if (!elementMap) return;
     const t0 = performance.now();
     const image = ctx.createImageData(canvas.width, canvas.height);
-    const [mapLo, mapHi] = mapDisplayRange;
+    const [mapLo, mapHi] = displayRange;
     const mapSpan = Math.max(1e-12, mapHi - mapLo);
     for (let py = 0; py < canvas.height; py++) {
       const r = Math.min(rows - 1, py);
@@ -1728,7 +2011,11 @@ function ShowEDS() {
     }
     ctx.putImageData(image, 0, 0);
     recordWidgetPerf("mapDrawMs", performance.now() - t0);
-  }, [cols, elementMap, mapDisplayRange, recordWidgetPerf, rows]);
+  }, [cols, elementMap, recordWidgetPerf, rows]);
+
+  React.useEffect(() => {
+    drawMapOverlay(mapDisplayRange);
+  }, [drawMapOverlay, mapDisplayRange]);
 
   React.useEffect(() => {
     const canvas = mapUiOverlayCanvasRef.current;
@@ -1756,7 +2043,7 @@ function ShowEDS() {
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.fillStyle = "#050505";
+    ctx.fillStyle = themeColors.plotBg;
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     const padL = 54 * dpr, padR = 14 * dpr, padT = 16 * dpr, padB = 34 * dpr;
     const plotW = canvas.width - padL - padR;
@@ -1768,7 +2055,7 @@ function ShowEDS() {
     for (let i = viewStart; i < viewEnd; i++) transformed[i - viewStart] = logSpectrum ? Math.log10(Math.max(1, values[i])) : values[i];
     const [lo, hi] = finiteRange(transformed);
     const ySpan = Math.max(1e-12, hi - lo);
-    ctx.strokeStyle = "#333";
+    ctx.strokeStyle = themeColors.plotGrid;
     ctx.lineWidth = dpr;
     for (let i = 0; i <= 4; i++) {
       const y = padT + (i / 4) * plotH;
@@ -1776,7 +2063,10 @@ function ShowEDS() {
     }
     if (showLineHints && Array.isArray(lineHints) && energy.length > 1) {
       const visibleLines = lineHints
-        .filter((line) => line.intensity === undefined || line.intensity >= 0.04 || (line.energy_keV >= bandEnergyLo && line.energy_keV <= bandEnergyHi));
+        .filter((line) => {
+          const selected = selectedElementSet.has(normalizeElementSymbol(line.element));
+          return selected || line.intensity === undefined || line.intensity >= 0.04 || (line.energy_keV >= bandEnergyLo && line.energy_keV <= bandEnergyHi);
+        });
       ctx.save();
       ctx.font = `${10 * dpr}px ${UI_FONT}`;
       for (const line of visibleLines) {
@@ -1784,24 +2074,25 @@ function ShowEDS() {
         const x = padL + ((lineIndex - spectrumView.start) / Math.max(1e-9, spectrumView.span)) * plotW;
         if (x < padL || x > padL + plotW) continue;
         const inBand = line.energy_keV >= bandEnergyLo && line.energy_keV <= bandEnergyHi;
-        ctx.strokeStyle = inBand ? "rgba(129, 212, 250, 0.72)" : "rgba(129, 212, 250, 0.22)";
-        ctx.lineWidth = inBand ? 1.5 * dpr : dpr;
+        const selected = selectedElementSet.has(normalizeElementSymbol(line.element));
+        ctx.strokeStyle = selected || inBand ? themeColors.lineHint : themeColors.lineHintMuted;
+        ctx.lineWidth = selected ? 2.25 * dpr : inBand ? 1.5 * dpr : dpr;
         ctx.beginPath();
         ctx.moveTo(x, padT);
         ctx.lineTo(x, padT + plotH);
         ctx.stroke();
       }
-      const labelLines = candidateLines.slice(0, 3);
+      const labelLines = (selectedLineHints.length > 0 ? selectedLineHints : candidateLines).slice(0, 5);
       labelLines.forEach((line, index) => {
         const lineIndex = energyToIndex(energy, line.energy_keV);
         const x = padL + ((lineIndex - spectrumView.start) / Math.max(1e-9, spectrumView.span)) * plotW;
         if (x < padL || x > padL + plotW) return;
-        ctx.fillStyle = "rgba(129, 212, 250, 0.92)";
+        ctx.fillStyle = themeColors.lineHintText;
         ctx.fillText(lineLabel(line), Math.min(x + 3 * dpr, padL + plotW - 48 * dpr), padT + (13 + index * 12) * dpr);
       });
       ctx.restore();
     }
-    ctx.strokeStyle = "#ffd54f";
+    ctx.strokeStyle = themeColors.spectrumLine;
     ctx.lineWidth = 2 * dpr;
     ctx.beginPath();
     for (let i = viewStart; i < viewEnd; i++) {
@@ -1810,12 +2101,36 @@ function ShowEDS() {
       if (i === viewStart) ctx.moveTo(x, y); else ctx.lineTo(x, y);
     }
     ctx.stroke();
-    ctx.fillStyle = "#ddd";
+    ctx.fillStyle = themeColors.plotText;
     ctx.font = `${11 * dpr}px ${UI_FONT}`;
     ctx.fillText(`${formatEnergy(energy[bandLo])} - ${formatEnergy(energy[Math.max(bandLo, bandHi - 1)])}`, padL, canvas.height - 10 * dpr);
     ctx.fillText(logSpectrum ? "log counts" : "counts", 8 * dpr, 16 * dpr);
     recordWidgetPerf("spectrumDrawMs", performance.now() - t0);
-  }, [bandEnergyHi, bandEnergyLo, bandHi, bandLo, candidateLines, energy, lineHints, logSpectrum, recordWidgetPerf, roiSpectrum, showLineHints, specH, specW, spectrumView]);
+  }, [
+    bandEnergyHi,
+    bandEnergyLo,
+    bandHi,
+    bandLo,
+    candidateLines,
+    energy,
+    lineHints,
+    logSpectrum,
+    recordWidgetPerf,
+    roiSpectrum,
+    selectedElementSet,
+    selectedLineHints,
+    showLineHints,
+    specH,
+    specW,
+    spectrumView,
+    themeColors.lineHint,
+    themeColors.lineHintMuted,
+    themeColors.lineHintText,
+    themeColors.plotBg,
+    themeColors.plotGrid,
+    themeColors.plotText,
+    themeColors.spectrumLine,
+  ]);
 
   const flushBandPersist = React.useCallback(() => {
     if (bandPersistTimerRef.current != null) {
@@ -1877,11 +2192,16 @@ function ShowEDS() {
   const updateRoi = (next: Roi, sync = true, interactive = false) => {
     const normalized = normalizeRoi({ ...next, shape: normalizeRoiShape(next.shape ?? roi.shape) }, rows, cols);
     const shapeChanged = normalizeRoiShape(normalized.shape) !== normalizeRoiShape(roi.shape);
+    const deferCurvedSidecarSpectrum = interactive && isSidecarBackend && normalizeRoiShape(normalized.shape) !== "rect";
     setLocalRoi(normalized);
     if (sync) {
       queueRoiPersist(normalized, shapeChanged, interactive && !shapeChanged);
     }
-    scheduleSpectrum(normalized, interactive);
+    if (deferCurvedSidecarSpectrum) {
+      specRequestRef.current = normalized;
+    } else {
+      scheduleSpectrum(normalized, interactive);
+    }
   };
 
   const updateBand = (start: number, end: number, sync = true, interactive = false, compute = true) => {
@@ -1896,6 +2216,14 @@ function ShowEDS() {
     } else {
       mapRequestRef.current = { start: s, end: e, interactive };
     }
+  };
+
+  const snapBandToLine = (line: EdsLineHint) => {
+    const center = energyToIndex(energy, line.energy_keV);
+    const span = Math.max(3, bandHi - bandLo);
+    const start = Math.round(center - span / 2);
+    updateBand(start, start + span, true);
+    setElementMenuAnchor(null);
   };
 
   const saveCurrentRoi = () => {
@@ -2212,15 +2540,15 @@ function ShowEDS() {
     display: "flex",
     alignItems: "center",
     gap: 1,
-    border: "1px solid rgba(128,128,128,0.35)",
-    bgcolor: "rgba(128,128,128,0.08)",
+    border: `1px solid ${themeColors.border}`,
+    bgcolor: themeColors.controlBg,
     px: 1,
     py: 0.5,
     width: "fit-content",
     maxWidth: "100%",
     boxSizing: "border-box",
   } as const;
-  const controlLabelSx = { fontSize: 10, color: "text.secondary", flexShrink: 0, lineHeight: "20px" } as const;
+  const controlLabelSx = { fontSize: 10, color: themeColors.textMuted, flexShrink: 0, lineHeight: "20px" } as const;
   const compactSliderSx = {
     py: 0,
     height: 20,
@@ -2237,29 +2565,195 @@ function ShowEDS() {
     px: 1,
     minWidth: 0,
     textTransform: "none",
+    color: themeColors.accent,
+    borderColor: themeColors.border,
     "&.Mui-disabled": {
-      color: "text.disabled",
-      borderColor: "divider",
+      color: themeColors.textMuted,
+      borderColor: themeColors.border,
+      opacity: 0.55,
     },
   } as const;
+  const themedMenuProps = {
+    PaperProps: {
+      sx: {
+        bgcolor: themeColors.controlBg,
+        color: themeColors.text,
+        border: `1px solid ${themeColors.border}`,
+        "& .MuiMenuItem-root": { fontSize: 12 },
+      },
+    },
+  };
 
   return (
-    <Box sx={{ p: 2, fontFamily: UI_FONT, color: "inherit", overflowX: "auto" }}>
+    <Box sx={{ p: 2, fontFamily: UI_FONT, bgcolor: themeColors.bg, color: themeColors.text, overflowX: "auto" }}>
       <Stack spacing={1.2}>
         <Stack direction="row" spacing={1} alignItems="center" sx={{ width: specW + size + 16 }}>
           <Stack direction="row" spacing={1} alignItems="center" sx={{ flex: 1, minWidth: 0 }}>
             <Typography sx={{ fontWeight: 700, fontSize: 14 }}>{title || "EDS spectrum image"}</Typography>
-            <Typography sx={{ fontSize: 11, color: "text.secondary" }}>
+            <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>
               {rows}x{cols}x{nEnergy} | {backendLabel} {elementLabel ? `| ${elementLabel}` : ""} {busy ? "| computing" : ""}
             </Typography>
           </Stack>
           {showControls && (
             <Stack direction="row" spacing={1} alignItems="center">
-              <Typography sx={{ fontSize: 11 }}>Log</Typography>
+              <Button
+                size="small"
+                variant={safeSelectedElements.length > 0 ? "contained" : "outlined"}
+                sx={{
+                  ...compactButtonSx,
+                  bgcolor: safeSelectedElements.length > 0 ? themeColors.accent : "transparent",
+                  color: safeSelectedElements.length > 0 ? themeColors.buttonText : themeColors.accent,
+                  "&:hover": {
+                    bgcolor: safeSelectedElements.length > 0 ? themeColors.accent : themeColors.hoverBg,
+                  },
+                }}
+                onClick={(e) => setElementMenuAnchor(e.currentTarget)}
+                aria-label="Open EDS periodic table"
+                aria-controls={elementMenuAnchor ? "showeds-elements-menu" : undefined}
+                aria-expanded={elementMenuAnchor ? "true" : undefined}
+                aria-haspopup="menu"
+                title="Pick elements and characteristic lines"
+              >
+                Elements {safeSelectedElements.length || ""}
+              </Button>
+              <Menu
+                id="showeds-elements-menu"
+                anchorEl={elementMenuAnchor}
+                open={Boolean(elementMenuAnchor)}
+                onClose={() => setElementMenuAnchor(null)}
+                MenuListProps={{ "aria-label": "ShowEDS periodic table and line picker" }}
+                anchorOrigin={{ vertical: "bottom", horizontal: "left" }}
+                transformOrigin={{ vertical: "top", horizontal: "left" }}
+                {...themedMenuProps}
+                sx={{ zIndex: 9999 }}
+              >
+                <Box sx={{ p: 1.25, width: 680, maxWidth: "calc(100vw - 48px)" }}>
+                  <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1 }}>
+                    <Typography sx={{ fontWeight: 700, fontSize: 13, color: themeColors.text, flex: 1 }}>
+                      Periodic table
+                    </Typography>
+                    <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Auto ID</Typography>
+                    <Switch checked={autoIdentify} onChange={(e) => setAutoIdentify(e.target.checked)} size="small" />
+                    <Button
+                      size="small"
+                      variant="outlined"
+                      sx={compactButtonSx}
+                      onClick={() => setSelectedElements([])}
+                      disabled={safeSelectedElements.length === 0}
+                    >
+                      Clear
+                    </Button>
+                  </Stack>
+                  <Box
+                    sx={{
+                      display: "grid",
+                      gridTemplateColumns: "repeat(18, 30px)",
+                      gridTemplateRows: "repeat(9, 30px)",
+                      gap: 0.35,
+                      alignItems: "stretch",
+                    }}
+                  >
+                    {PERIODIC_ELEMENTS.map((el) => {
+                      const enabled = elementsWithLines.has(el.symbol);
+                      const selected = selectedElementSet.has(el.symbol);
+                      const scored = autoElementScores.some((item) => item.symbol === el.symbol);
+                      return (
+                        <Button
+                          key={el.symbol}
+                          size="small"
+                          disabled={!enabled}
+                          onClick={() => toggleSelectedElement(el.symbol)}
+                          onDoubleClick={() => selectOnlyElement(el.symbol)}
+                          title={`${el.name}${enabled ? ": click to toggle, double-click to isolate" : ": no line in current table"}`}
+                          sx={{
+                            gridColumn: el.group,
+                            gridRow: el.period,
+                            minWidth: 0,
+                            width: 30,
+                            height: 30,
+                            p: 0,
+                            borderRadius: "4px",
+                            border: `1px solid ${selected ? themeColors.accent : scored ? themeColors.lineHintText : themeColors.border}`,
+                            bgcolor: selected
+                              ? themeColors.accent
+                              : scored
+                                ? themeColors.bandFill
+                                : themeColors.controlBg,
+                            color: selected ? themeColors.buttonText : themeColors.text,
+                            fontSize: 10,
+                            fontWeight: selected || scored ? 800 : 600,
+                            opacity: enabled ? 1 : 0.28,
+                            textTransform: "none",
+                            "&.Mui-disabled": {
+                              color: themeColors.textMuted,
+                              borderColor: themeColors.border,
+                            },
+                            "&:hover": {
+                              bgcolor: selected ? themeColors.accent : themeColors.hoverBg,
+                              borderColor: themeColors.accent,
+                            },
+                          }}
+                        >
+                          {el.symbol}
+                        </Button>
+                      );
+                    })}
+                  </Box>
+                  <Stack direction="row" spacing={1} sx={{ mt: 1 }} alignItems="flex-start">
+                    <Box sx={{ flex: 1, minWidth: 0 }}>
+                      <Typography sx={{ fontSize: 11, fontWeight: 700, color: themeColors.text, mb: 0.5 }}>
+                        Auto-ID candidates
+                      </Typography>
+                      <Stack direction="row" spacing={0.5} useFlexGap flexWrap="wrap">
+                        {autoElementScores.length === 0 ? (
+                          <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>
+                            Move the band over peaks to rank likely elements.
+                          </Typography>
+                        ) : autoElementScores.map((item) => (
+                          <Button
+                            key={item.symbol}
+                            size="small"
+                            variant={selectedElementSet.has(item.symbol) ? "contained" : "outlined"}
+                            sx={compactButtonSx}
+                            onClick={() => toggleSelectedElement(item.symbol)}
+                            title={`${item.symbol}: ${item.lines.slice(0, 3).map(lineLabel).join(", ")}`}
+                          >
+                            {item.symbol}
+                          </Button>
+                        ))}
+                      </Stack>
+                    </Box>
+                    <Box sx={{ flex: 1.2, minWidth: 0 }}>
+                      <Typography sx={{ fontSize: 11, fontWeight: 700, color: themeColors.text, mb: 0.5 }}>
+                        Lines
+                      </Typography>
+                      <Stack direction="row" spacing={0.5} useFlexGap flexWrap="wrap">
+                        {suggestedLines.length === 0 ? (
+                          <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>
+                            Select elements to show their lines.
+                          </Typography>
+                        ) : suggestedLines.map((line) => (
+                          <Button
+                            key={`${line.element}-${line.line}-${line.energy_keV}`}
+                            size="small"
+                            variant="outlined"
+                            sx={compactButtonSx}
+                            onClick={() => snapBandToLine(line)}
+                            title={`Center band on ${lineLabel(line)} at ${formatEnergy(line.energy_keV)}`}
+                          >
+                            {lineLabel(line)} {formatEnergy(line.energy_keV)}
+                          </Button>
+                        ))}
+                      </Stack>
+                    </Box>
+                  </Stack>
+                </Box>
+              </Menu>
+              <Typography sx={{ fontSize: 11, color: themeColors.text }}>Log</Typography>
               <Switch checked={logSpectrum} onChange={(e) => setLogSpectrum(e.target.checked)} size="small" />
-              <Typography sx={{ fontSize: 11 }}>Scale</Typography>
+              <Typography sx={{ fontSize: 11, color: themeColors.text }}>Scale</Typography>
               <Switch checked={scaleBarVisible} onChange={(e) => commitScaleBarVisible(e.target.checked)} size="small" />
-              <Typography sx={{ fontSize: 11 }}>Debug</Typography>
+              <Typography sx={{ fontSize: 11, color: themeColors.text }}>Debug</Typography>
               <Switch checked={showDebug} onChange={(e) => commitDebug(e.target.checked)} size="small" />
               {exportEnabled && (
                 <>
@@ -2285,6 +2779,7 @@ function ShowEDS() {
                     MenuListProps={{ "aria-label": "ShowEDS HTML export options" }}
                     anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
                     transformOrigin={{ vertical: "top", horizontal: "right" }}
+                    {...themedMenuProps}
                     sx={{ zIndex: 9999 }}
                   >
                     {exportOptions.map((option, index) => (
@@ -2304,7 +2799,7 @@ function ShowEDS() {
                     overflow: "hidden",
                     textOverflow: "ellipsis",
                     whiteSpace: "nowrap",
-                    color: (localExportStatus || exportStatus).startsWith("Export failed") ? "#d32f2f" : "text.secondary",
+                    color: (localExportStatus || exportStatus).startsWith("Export failed") ? themeColors.error : themeColors.textMuted,
                   }}
                   title={localExportStatus || exportStatus}
                 >
@@ -2314,7 +2809,7 @@ function ShowEDS() {
             </Stack>
           )}
         </Stack>
-        {gpuError && <Typography sx={{ color: "#d32f2f", fontSize: 12 }}>{gpuError}</Typography>}
+        {gpuError && <Typography sx={{ color: themeColors.error, fontSize: 12 }}>{gpuError}</Typography>}
         {showDebug && (
           <Box
             data-testid="showeds-perf-hud"
@@ -2325,8 +2820,9 @@ function ShowEDS() {
               width: specW + size + 16,
               px: 1,
               py: 0.5,
-              bgcolor: "rgba(0,0,0,0.78)",
-              color: "#d8f6ff",
+              bgcolor: themeColors.hudBg,
+              color: themeColors.hudText,
+              border: `1px solid ${themeColors.border}`,
               fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
               fontSize: 10,
               lineHeight: 1.2,
@@ -2347,7 +2843,7 @@ function ShowEDS() {
             <Box
               ref={mapViewportRef}
               onDoubleClick={() => setMapView(1, 0, 0)}
-              sx={{ position: "relative", width: size, height: size, bgcolor: "#000", border: "1px solid #444", overflow: "hidden" }}
+              sx={{ position: "relative", width: size, height: size, bgcolor: themeColors.mapBg, border: `1px solid ${themeColors.border}`, overflow: "hidden" }}
             >
               <canvas
                 ref={mapCanvasRef}
@@ -2389,7 +2885,7 @@ function ShowEDS() {
                   top: `${roiOverlayStyle.top}px`,
                   width: `${roiOverlayStyle.width}px`,
                   height: `${roiOverlayStyle.height}px`,
-                  border: "2px dashed #00ff7f",
+                  border: `2px dashed ${themeColors.roi}`,
                   borderRadius: normalizeRoiShape(roi.shape) === "rect" ? 0 : "50%",
                   zIndex: 3,
                 }}
@@ -2406,7 +2902,8 @@ function ShowEDS() {
                       : { right: -9, bottom: -9 }),
                     width: 18,
                     height: 18,
-                    bgcolor: "#00ff7f",
+                    borderRadius: normalizeRoiShape(roi.shape) === "rect" ? 0 : "50%",
+                    bgcolor: themeColors.roi,
                   }}
                 />
               </Box>
@@ -2425,12 +2922,12 @@ function ShowEDS() {
                   cursor: "nwse-resize",
                   opacity: 0.65,
                   zIndex: 4,
-                  background: "linear-gradient(135deg, transparent 50%, #5af 50%)",
+                  background: `linear-gradient(135deg, transparent 50%, ${themeColors.resize} 50%)`,
                   "&:hover": { opacity: 1 },
                 }}
               />
             </Box>
-            <Typography sx={{ mt: 0.5, fontSize: 11 }}>
+            <Typography sx={{ mt: 0.5, fontSize: 11, color: themeColors.text }}>
               Overlay ROI: {normalizeRoiShape(roi.shape) === "circle"
                 ? `circle row ${roi.row}, col ${roi.col}, d ${roi.width}`
                 : normalizeRoiShape(roi.shape) === "ellipse"
@@ -2446,7 +2943,7 @@ function ShowEDS() {
               <canvas
                 ref={specCanvasRef}
                 onMouseDown={onSpecDown}
-                style={{ width: specW, height: specH, display: "block", cursor: drag?.mode?.startsWith("band") ? "grabbing" : "ew-resize", background: "#050505", border: "1px solid #444" }}
+                style={{ width: specW, height: specH, display: "block", cursor: drag?.mode?.startsWith("band") ? "grabbing" : "ew-resize", background: themeColors.plotBg, border: `1px solid ${themeColors.border}` }}
                 aria-label={`EDS spectrum${title ? `: ${title}` : ""}`}
               />
               <Box
@@ -2458,7 +2955,7 @@ function ShowEDS() {
                   height: Math.max(1, specH - 50),
                   width: 2,
                   transform: "translateX(54px)",
-                  bgcolor: "rgba(255, 215, 0, 0.22)",
+                  bgcolor: themeColors.bandFill,
                   pointerEvents: "none",
                   willChange: "transform, width",
                 }}
@@ -2477,12 +2974,12 @@ function ShowEDS() {
                   height: 16,
                   cursor: "nwse-resize",
                   opacity: 0.65,
-                  background: "linear-gradient(135deg, transparent 50%, #5af 50%)",
+                  background: `linear-gradient(135deg, transparent 50%, ${themeColors.resize} 50%)`,
                   "&:hover": { opacity: 1 },
                 }}
               />
             </Box>
-            <Typography ref={bandStatusRef} sx={{ mt: 0.5, fontSize: 11 }}>
+            <Typography ref={bandStatusRef} sx={{ mt: 0.5, fontSize: 11, color: themeColors.text }}>
               Band {bandLo}-{bandHi - 1}: {formatEnergy(energy[bandLo])} - {formatEnergy(energy[Math.max(bandLo, bandHi - 1)])}; ROI band counts {formatNumber(bandCounts, 2)}
               {candidateText ? `; candidates ${candidateText}` : ""}
             </Typography>
@@ -2520,7 +3017,7 @@ function ShowEDS() {
                       width: 2,
                       height: 2,
                       transform: "translate(0, -50%)",
-                      bgcolor: "#1976d2",
+                      bgcolor: themeColors.sliderPreview,
                       borderRadius: 1,
                       opacity: isBandCenterPreviewing ? 1 : 0,
                       pointerEvents: "none",
@@ -2533,8 +3030,8 @@ function ShowEDS() {
                         width: 12,
                         height: 12,
                         borderRadius: "50%",
-                        bgcolor: "#1976d2",
-                        boxShadow: "0 0 0 2px #fff",
+                        bgcolor: themeColors.sliderPreview,
+                        boxShadow: `0 0 0 2px ${themeColors.bg}`,
                       },
                       "&::before": { left: -6 },
                       "&::after": { right: -6 },
@@ -2576,16 +3073,6 @@ function ShowEDS() {
                   size="small"
                   sx={{ width: 100, flexShrink: 0, ...compactSliderSx }}
                 />
-                <Typography sx={controlLabelSx}>Auto:</Typography>
-                <Switch
-                  checked={autoMapContrastOn}
-                  onChange={(e) => {
-                    setAutoMapContrastOn(e.target.checked);
-                    if (e.target.checked) autoMapContrast();
-                  }}
-                  size="small"
-                  sx={{ flexShrink: 0, my: 0 }}
-                />
                 <Button size="small" sx={compactButtonSx} variant="outlined" onClick={saveCurrentBand}>Save Band</Button>
                 <Button
                   size="small"
@@ -2608,6 +3095,7 @@ function ShowEDS() {
                   MenuListProps={{ "aria-label": "ShowEDS saved energy band presets" }}
                   anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
                   transformOrigin={{ vertical: "top", horizontal: "right" }}
+                  {...themedMenuProps}
                   sx={{ zIndex: 9999 }}
                 >
                   {safeSavedBands.map((saved, index) => (
@@ -2615,7 +3103,7 @@ function ShowEDS() {
                       {saved.name}: {formatEnergy(energy[saved.start])} - {formatEnergy(energy[Math.max(saved.start, saved.end - 1)])}
                     </MenuItem>
                   ))}
-                  <MenuItem onClick={clearSavedBands} sx={{ fontSize: 12, color: "text.secondary" }}>Clear saved bands</MenuItem>
+                  <MenuItem onClick={clearSavedBands} sx={{ fontSize: 12, color: themeColors.textMuted }}>Clear saved bands</MenuItem>
                 </Menu>
               </Box>
               <Box sx={controlRowSx}>
@@ -2633,6 +3121,28 @@ function ShowEDS() {
                 >
                   {ROI_SHAPE_LABELS[normalizeRoiShape(roi.shape)]}
                 </Button>
+                <Typography sx={controlLabelSx}>Auto:</Typography>
+                <Switch
+                  checked={autoMapContrastOn}
+                  onChange={(e) => {
+                    setAutoMapContrastOn(e.target.checked);
+                    if (e.target.checked) autoMapContrast();
+                  }}
+                  size="small"
+                  sx={{ flexShrink: 0, my: 0 }}
+                />
+                <Typography
+                  sx={controlLabelSx}
+                  title="CSS bilinear interpolation. Same data, browser smooths visually when upscaling."
+                >
+                  Smooth:
+                </Typography>
+                <Switch
+                  checked={Boolean(smooth)}
+                  onChange={(e) => setSmooth(e.target.checked)}
+                  size="small"
+                  sx={{ flexShrink: 0, my: 0 }}
+                />
                 <Menu
                   id="showeds-roi-shape-menu"
                   anchorEl={roiShapeMenuAnchor}
@@ -2641,6 +3151,7 @@ function ShowEDS() {
                   MenuListProps={{ "aria-label": "ShowEDS ROI shape options" }}
                   anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
                   transformOrigin={{ vertical: "top", horizontal: "right" }}
+                  {...themedMenuProps}
                   sx={{ zIndex: 9999 }}
                 >
                   <MenuItem onClick={() => applyRoiShape("rect")} sx={{ fontSize: 12 }}>Rect</MenuItem>
@@ -2669,6 +3180,7 @@ function ShowEDS() {
                   MenuListProps={{ "aria-label": "ShowEDS saved ROI presets" }}
                   anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
                   transformOrigin={{ vertical: "top", horizontal: "right" }}
+                  {...themedMenuProps}
                   sx={{ zIndex: 9999 }}
                 >
                   {safeSavedRois.map((saved, index) => (
@@ -2676,7 +3188,7 @@ function ShowEDS() {
                       {saved.name}: {ROI_SHAPE_LABELS[normalizeRoiShape(saved.shape)]} row {saved.row}, col {saved.col}, {saved.height}x{saved.width}
                     </MenuItem>
                   ))}
-                  <MenuItem onClick={clearSavedRois} sx={{ fontSize: 12, color: "text.secondary" }}>Clear saved ROIs</MenuItem>
+                  <MenuItem onClick={clearSavedRois} sx={{ fontSize: 12, color: themeColors.textMuted }}>Clear saved ROIs</MenuItem>
                 </Menu>
               </Box>
             </Box>
@@ -2687,10 +3199,20 @@ function ShowEDS() {
                 vmaxPct={mapVmaxPct}
                 dataMin={mapDataRange[0]}
                 dataMax={mapDataRange[1]}
+                theme={themeInfo.theme === "dark" ? "dark" : "light"}
                 width={110}
-                height={40}
+                height={58}
                 onRangeChange={(lo, hi) => {
                   if (autoMapContrastOn) setAutoMapContrastOn(false);
+                  setMapVminPct(lo);
+                  setMapVmaxPct(hi);
+                }}
+                onRangePreview={(lo, hi) => {
+                  drawMapOverlay(mapPercentRange(lo, hi));
+                }}
+                onRangeCommit={(lo, hi) => {
+                  if (autoMapContrastOn) setAutoMapContrastOn(false);
+                  drawMapOverlay(mapPercentRange(lo, hi));
                   setMapVminPct(lo);
                   setMapVmaxPct(hi);
                 }}
