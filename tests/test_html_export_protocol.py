@@ -12,10 +12,11 @@ from quantem.widget.show2d import Show2D
 from quantem.widget.show3d import Show3D
 from quantem.widget.show3dslices import Show3DSlices
 from quantem.widget.show4dstem import Show4DSTEM
+from quantem.widget.showdiffraction import ShowDiffraction
 from quantem.widget.showeds import ShowEDS
 
 
-EXPORT_WIDGET_CLASSES = (Show2D, Show3D, Show3DSlices, Show4DSTEM, ShowEDS)
+EXPORT_WIDGET_CLASSES = (Show2D, Show3D, Show3DSlices, Show4DSTEM, ShowEDS, ShowDiffraction)
 
 
 def _show2d() -> Show2D:
@@ -43,12 +44,18 @@ def _showeds() -> ShowEDS:
     return ShowEDS(data, title="Protocol ShowEDS", band=(1, 4), roi=(0, 1, 2, 2))
 
 
+def _showdiffraction() -> ShowDiffraction:
+    data = np.random.rand(48, 48).astype(np.float32)
+    return ShowDiffraction(data, title="Protocol ShowDiffraction", verbose=False)
+
+
 EXPORT_WIDGET_CASES = (
     pytest.param(_show2d, {"encoding": "full"}, {"mode": "single", "encoding": "full"}, "Protocol Show2D", id="show2d"),
     pytest.param(_show3d, {"encoding": "full"}, {"mode": "single", "encoding": "full"}, "Protocol Show3D", id="show3d"),
     pytest.param(_show3dslices, {"encoding": "full"}, {"mode": "single", "encoding": "full"}, "Protocol Show3DSlices", id="show3dslices"),
     pytest.param(_show4dstem, {"encoding": "uint8", "downsample": 1}, {"mode": "single", "encoding": "uint8", "downsample": 1}, "Protocol Show4DSTEM", id="show4dstem"),
     pytest.param(_showeds, {"mode": "single", "encoding": "full"}, {"mode": "single", "encoding": "full"}, "Protocol ShowEDS", id="showeds"),
+    pytest.param(_showdiffraction, {"encoding": "full"}, {"mode": "single", "encoding": "full"}, "Protocol ShowDiffraction", id="showdiffraction"),
 )
 
 

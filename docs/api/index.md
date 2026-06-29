@@ -28,5 +28,6 @@ readers and test agents.
 | [Show3DSlices](show3dslices) | `quantem.widget.show3dslices.Show3DSlices` | state JSON, PNG, interactive HTML (`encoding="full"` / `encoding="uint8"`) |
 | [Show4DSTEM](show4dstem) | `quantem.widget.Show4DSTEM` dispatcher | state JSON, PNG, interactive WebGPU HTML; large exports use a companion data directory |
 | [ShowEDS](showeds) | `quantem.widget.showeds.ShowEDS` | state JSON, interactive HTML; large exact data use folder export, portable demos use downsampled HTML |
+| [ShowDiffraction](showdiffraction) | `quantem.widget.showdiffraction.ShowDiffraction` | state JSON, PNG, interactive HTML |
 
 All widget-level HTML exports follow the [HTML export](html-export) protocol.
