@@ -28,6 +28,12 @@ cufile.log
 
 # Local cross-session agent plans (never pushed)
 .plans/
+docs/dev/
+
+# Standalone widget HTML exports are generated artifacts; keep source notebooks
+# and docs tracked instead.
+show*.html
+docs/tutorials/*.html
 
 # local agent config / plans
 .claude/
