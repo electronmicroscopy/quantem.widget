@@ -572,7 +572,7 @@ const Histogram = React.memo(function Histogram({
             e.stopPropagation();
           e.nativeEvent.stopImmediatePropagation();
         }}
-        sx={{ position: "absolute", left: 0, top: height - 1, width, height: 8, display: "flex", alignItems: "flex-start", cursor: "grab" }}
+        sx={{ position: "absolute", left: 0, top: height - 1, width, height: 8, display: "flex", alignItems: "flex-start", cursor: "grab", zIndex: 2, overflow: "visible" }}
       >
         <Slider
           value={[vminPct, vmaxPct]}
@@ -585,10 +585,13 @@ const Histogram = React.memo(function Histogram({
           aria-label="Histogram intensity clip range"
           sx={{
             width, py: 0,
-            "& .MuiSlider-thumb": { width: 8, height: 8 },
-            "& .MuiSlider-rail": { height: 2 },
-            "& .MuiSlider-track": { height: 2, cursor: "grab" },
-            "& .MuiSlider-valueLabel": { fontSize: 10, padding: "2px 4px" },
+            position: "relative",
+            zIndex: 3,
+            overflow: "visible",
+            "& .MuiSlider-rail": { height: 2, zIndex: 1 },
+            "& .MuiSlider-track": { height: 2, cursor: "grab", zIndex: 2 },
+            "& .MuiSlider-thumb": { width: 8, height: 8, zIndex: 4 },
+            "& .MuiSlider-valueLabel": { fontSize: 10, padding: "2px 4px", zIndex: 5 },
           }}
         />
       </Box>
