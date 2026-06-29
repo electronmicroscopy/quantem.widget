@@ -20,6 +20,7 @@ from quantem.widget.show3d import Show3D
 from quantem.widget.show3dslices import Show3DSlices
 from quantem.widget.showeds import ShowEDS, bin_spectrum_image, load_emd_spectrum_image
 from quantem.widget.show4dstem import Show4DSTEM as _Show4DSTEMBase
+from quantem.widget.showdiffraction import ShowDiffraction
 from quantem.widget.io import load
 from quantem.widget.export import (
     HTML_EXPORT_TRAITS,
@@ -210,6 +211,7 @@ __all__ = [
     "Show3D",
     "Show3DSlices",
     "Show4DSTEM",
+    "ShowDiffraction",
     "ShowEDS",
     "bin_spectrum_image",
     "load_emd_spectrum_image",
