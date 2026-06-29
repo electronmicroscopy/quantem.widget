@@ -163,6 +163,9 @@ through it line by line.
   where the widget interaction requires live feedback.
 - [ ] Large scientific data stays honest about precision and size: do not
   silently crop, bin, downsample, quantize, or materialize sparse zeros.
+- [ ] Real tutorial data is hosted through public `quantem.data` pages instead
+  of committed to this repo; coordinate with Bob Lee if a new dataset needs
+  online hosting.
 - [ ] Any binning/downsampling is explicit in the API and documentation, with
   the reducer named clearly, for example mean, sum, or display-scaled `uint8`.
 - [ ] The widget exposes `export_html(path=None, title=None, mode="single",
