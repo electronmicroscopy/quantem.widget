@@ -64,6 +64,7 @@ def test_showeds_constructor_sets_shape_and_state():
     assert widget.selected_elements == ["Au", "Si"]
     assert widget.auto_identify is False
     assert widget.show_debug is True
+    assert widget.debug_control_visible is True
     assert widget.saved_rois == [{"name": "particle", "row": 1, "col": 2, "height": 3, "width": 4, "shape": "rect"}]
     assert widget.saved_bands == [{"name": "Au M", "start": 1, "end": 3}]
     assert widget.export_presets == [{"label": "Small demo", "mode": "single", "binning": 4}]
@@ -80,6 +81,8 @@ def test_showeds_preserves_uint16_counts_for_browser_backend():
 
     assert widget.compute_backend == "browser"
     assert widget.cube_dtype == "uint16"
+    assert widget.show_debug is False
+    assert widget.debug_control_visible is False
     assert len(widget.cube_bytes) == cube.size * 2
     assert np.frombuffer(widget.cube_bytes, dtype=np.uint16).reshape(cube.shape).tolist() == cube.tolist()
 
@@ -93,6 +96,15 @@ def test_showeds_preserves_uint32_counts_for_browser_backend():
     assert widget.cube_dtype == "uint32"
     assert len(widget.cube_bytes) == cube.size * 4
     assert np.frombuffer(widget.cube_bytes, dtype=np.uint32).reshape(cube.shape).tolist() == cube.tolist()
+
+
+def test_showeds_can_hide_debug_control_when_debug_hud_is_enabled():
+    cube = np.zeros((3, 4, 5), dtype=np.uint16)
+
+    widget = ShowEDS(cube, show_debug=True, debug_control_visible=False)
+
+    assert widget.show_debug is True
+    assert widget.debug_control_visible is False
 
 
 def test_showeds_state_roundtrip():
@@ -553,3 +565,67 @@ def test_showeds_sidecar_ellipse_roi_uses_exact_pixel_mask(tmp_path):
     expected = (cube[1:4, 1:5, :] * mask[:, :, None]).sum(axis=(0, 1)).astype(np.float32)
     assert loaded["roi"] == (1, 1, 3, 4)
     assert loaded["initial_spectrum"].tolist() == expected.tolist()
+
+
+def test_showeds_stream_sidecar_startup_spectrum_matches_sparse_events(tmp_path):
+    rows, cols, n_energy = 4, 5, 6
+    events_by_pixel: list[list[int]] = []
+    for pixel in range(rows * cols):
+        row, col = divmod(pixel, cols)
+        events_by_pixel.append([row % n_energy, (col + 1) % n_energy, (row + col) % n_energy])
+
+    pixel_offsets = np.zeros(rows * cols + 1, dtype=np.uint32)
+    pixel_channels_list: list[int] = []
+    for pixel, channels in enumerate(events_by_pixel):
+        pixel_channels_list.extend(channels)
+        pixel_offsets[pixel + 1] = len(pixel_channels_list)
+    pixel_channels = np.asarray(pixel_channels_list, dtype=np.uint16)
+
+    channel_pixels_list: list[int] = []
+    channel_offsets = np.zeros(n_energy + 1, dtype=np.uint32)
+    for channel in range(n_energy):
+        channel_offsets[channel] = len(channel_pixels_list)
+        for pixel, channels in enumerate(events_by_pixel):
+            channel_pixels_list.extend([pixel] * channels.count(channel))
+    channel_offsets[n_energy] = len(channel_pixels_list)
+    channel_pixels = np.asarray(channel_pixels_list, dtype=np.uint32)
+
+    sidecar = tmp_path / "stream"
+    sidecar.mkdir()
+    (sidecar / "pixel_offsets_u32.bin").write_bytes(pixel_offsets.astype("<u4", copy=False).tobytes())
+    (sidecar / "pixel_channels_u16.bin").write_bytes(pixel_channels.astype("<u2", copy=False).tobytes())
+    (sidecar / "channel_offsets_u32.bin").write_bytes(channel_offsets.astype("<u4", copy=False).tobytes())
+    (sidecar / "channel_pixels_u32.bin").write_bytes(channel_pixels.astype("<u4", copy=False).tobytes())
+    (sidecar / "base_f32.bin").write_bytes(np.ones((rows, cols), dtype="<f4").tobytes())
+    (sidecar / "meta.json").write_text(
+        json.dumps(
+            {
+                "format": "quantem.widget.showeds.stream-sidecar.v1",
+                "rows": rows,
+                "cols": cols,
+                "n_energy": n_energy,
+                "n_events": int(pixel_channels.size),
+                "energy_keV": np.arange(n_energy, dtype=np.float32).tolist(),
+                "channel_offsets": "channel_offsets_u32.bin",
+                "channel_pixels": "channel_pixels_u32.bin",
+                "pixel_offsets": "pixel_offsets_u32.bin",
+                "pixel_channels": "pixel_channels_u16.bin",
+                "base_image": "base_f32.bin",
+            }
+        )
+    )
+
+    loaded = load_spectrum_image_sidecar(sidecar, band=(2, 4), roi=(1, 1, 2, 3))
+
+    expected_channels: list[int] = []
+    for row in range(1, 3):
+        for col in range(1, 4):
+            expected_channels.extend(events_by_pixel[row * cols + col])
+    expected_spectrum = np.bincount(expected_channels, minlength=n_energy).astype(np.float32)
+    expected_map = np.zeros(rows * cols, dtype=np.float32)
+    for pixel, channels in enumerate(events_by_pixel):
+        expected_map[pixel] = sum(1 for channel in channels if 2 <= channel < 4)
+
+    assert loaded["roi"] == (1, 1, 2, 3)
+    assert loaded["initial_spectrum"].tolist() == expected_spectrum.tolist()
+    assert loaded["initial_map"].reshape(-1).tolist() == expected_map.tolist()

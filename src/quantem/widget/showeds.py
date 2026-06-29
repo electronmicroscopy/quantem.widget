@@ -23,6 +23,7 @@ from quantem.widget.utils.state_io import (
 
 
 DEFAULT_MAX_SHOWEDS_SIDECAR_BYTES = 12 * 1024**3
+DEFAULT_STARTUP_ROI_MAX_PX = 512
 
 
 _FALLBACK_LINES: tuple[dict[str, Any], ...] = (
@@ -779,8 +780,8 @@ def _normalise_roi(
     roi_shape: str = "rect",
 ) -> tuple[int, int, int, int]:
     if roi is None:
-        height = max(8, rows // 4)
-        width = max(8, cols // 4)
+        height = max(8, min(rows // 4, DEFAULT_STARTUP_ROI_MAX_PX))
+        width = max(8, min(cols // 4, DEFAULT_STARTUP_ROI_MAX_PX))
         row = max(0, rows // 2 - height // 2)
         col = max(0, cols // 2 - width // 2)
     else:
@@ -864,6 +865,52 @@ def _spectrum_from_spatial_prefix(
             + spatial[r, c0, :].astype(np.int64)
         )
     return out.astype(np.float32)
+
+
+def _spectrum_from_stream_offsets(
+    pixel_offsets: np.ndarray,
+    pixel_channels: np.ndarray,
+    *,
+    rows: int,
+    cols: int,
+    n_energy: int,
+    row: int,
+    col: int,
+    height: int,
+    width: int,
+    roi_shape: str = "rect",
+) -> np.ndarray:
+    """Build a sparse-stream ROI spectrum without per-pixel Python loops."""
+
+    shape = _normalise_roi_shape(roi_shape)
+    ranges: list[tuple[int, int]] = []
+    total = 0
+    for r in range(row, row + height):
+        if shape == "rect":
+            segments = [(col, col + width)]
+        else:
+            segment = _round_col_segment(r, row, col, height, width, roi_shape=shape)
+            segments = [] if segment is None else [segment]
+        for c0, c1 in segments:
+            pixel_start = r * cols + c0
+            pixel_end = r * cols + c1
+            start = int(pixel_offsets[pixel_start])
+            end = int(pixel_offsets[pixel_end])
+            if end <= start:
+                continue
+            ranges.append((start, end))
+            total += end - start
+
+    if total <= 0:
+        return np.zeros(n_energy, dtype=np.float32)
+
+    channels = np.empty(total, dtype=np.uint16)
+    offset = 0
+    for start, end in ranges:
+        length = end - start
+        channels[offset : offset + length] = pixel_channels[start:end]
+        offset += length
+    return np.bincount(channels, minlength=n_energy).astype(np.float32, copy=False)
 
 
 def load_spectrum_image_sidecar(
@@ -972,19 +1019,18 @@ def load_spectrum_stream_sidecar(
     np.add.at(initial_map_flat, np.asarray(channel_pixels[p0:p1], dtype=np.intp), 1)
     initial_map = initial_map_flat.reshape(rows, cols)
 
-    initial_spectrum = np.zeros(n_energy, dtype=np.float32)
-    for r in range(row, row + height):
-        if normalised_shape == "rect":
-            segments = [(col, col + roi_width)]
-        else:
-            segment = _round_col_segment(r, row, col, height, roi_width, roi_shape=normalised_shape)
-            segments = [] if segment is None else [segment]
-        for c0, c1 in segments:
-            for c in range(c0, c1):
-                pixel = r * cols + c
-                s0 = int(pixel_offsets[pixel])
-                s1 = int(pixel_offsets[pixel + 1])
-                np.add.at(initial_spectrum, np.asarray(pixel_channels[s0:s1], dtype=np.intp), 1)
+    initial_spectrum = _spectrum_from_stream_offsets(
+        pixel_offsets,
+        pixel_channels,
+        rows=rows,
+        cols=cols,
+        n_energy=n_energy,
+        row=row,
+        col=col,
+        height=height,
+        width=roi_width,
+        roi_shape=normalised_shape,
+    )
 
     return {
         "sidecar_dir": sidecar,
@@ -1331,6 +1377,7 @@ class ShowEDS(anywidget.AnyWidget):
     selected_elements = traitlets.List(traitlets.Unicode(), default_value=[]).tag(sync=True)
     auto_identify = traitlets.Bool(True).tag(sync=True)
     show_debug = traitlets.Bool(False).tag(sync=True)
+    debug_control_visible = traitlets.Bool(False).tag(sync=True)
     saved_rois = traitlets.List(traitlets.Dict(), default_value=[]).tag(sync=True)
     saved_bands = traitlets.List(traitlets.Dict(), default_value=[]).tag(sync=True)
     export_presets = traitlets.List(traitlets.Dict(), default_value=[]).tag(sync=True)
@@ -1377,6 +1424,7 @@ class ShowEDS(anywidget.AnyWidget):
         selected_elements: list[str] | tuple[str, ...] | None = None,
         auto_identify: bool = True,
         show_debug: bool = False,
+        debug_control_visible: bool | None = None,
         saved_rois: list[dict[str, Any]] | None = None,
         saved_bands: list[dict[str, Any]] | None = None,
         export_presets: list[dict[str, Any]] | None = None,
@@ -1471,6 +1519,7 @@ class ShowEDS(anywidget.AnyWidget):
         self.selected_elements = _normalise_element_symbols(selected_elements or candidate_elements or [])
         self.auto_identify = bool(auto_identify)
         self.show_debug = bool(show_debug)
+        self.debug_control_visible = bool(show_debug if debug_control_visible is None else debug_control_visible)
         self.roi_shape = _normalise_roi_shape(roi_shape)
         self.saved_rois = [{**dict(item), "shape": _normalise_roi_shape(dict(item).get("shape", "rect"))} for item in (saved_rois or [])]
         self.saved_bands = [dict(item) for item in (saved_bands or [])]
@@ -1873,6 +1922,7 @@ class ShowEDS(anywidget.AnyWidget):
             "selected_elements": list(self.selected_elements),
             "auto_identify": self.auto_identify,
             "show_debug": self.show_debug,
+            "debug_control_visible": self.debug_control_visible,
             "saved_rois": [dict(item) for item in self.saved_rois],
             "saved_bands": [dict(item) for item in self.saved_bands],
             "export_presets": [dict(item) for item in self.export_presets],
@@ -2169,6 +2219,7 @@ class ShowEDS(anywidget.AnyWidget):
             selected_elements=list(self.selected_elements),
             auto_identify=self.auto_identify,
             show_debug=self.show_debug,
+            debug_control_visible=self.debug_control_visible,
             saved_rois=saved_rois,
             saved_bands=saved_bands,
             export_presets=[dict(item) for item in self.export_presets],

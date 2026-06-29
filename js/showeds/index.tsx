@@ -1080,6 +1080,7 @@ function ShowEDS() {
   const [selectedElements, setSelectedElements] = useModelState<string[]>("selected_elements");
   const [autoIdentify, setAutoIdentify] = useModelState<boolean>("auto_identify");
   const [showDebug, setShowDebug] = useModelState<boolean>("show_debug");
+  const [debugControlVisible] = useModelState<boolean>("debug_control_visible");
   const [savedRois, setSavedRois] = useModelState<SavedRoi[]>("saved_rois");
   const [savedBands, setSavedBands] = useModelState<SavedBand[]>("saved_bands");
   const [exportPresets] = useModelState<ExportPreset[]>("export_presets");
@@ -2857,8 +2858,12 @@ function ShowEDS() {
               <Switch checked={logSpectrum} onChange={(e) => setLogSpectrum(e.target.checked)} size="small" />
               <Typography sx={{ fontSize: 11, color: themeColors.text }}>Scale</Typography>
               <Switch checked={scaleBarVisible} onChange={(e) => commitScaleBarVisible(e.target.checked)} size="small" />
-              <Typography sx={{ fontSize: 11, color: themeColors.text }}>Debug</Typography>
-              <Switch checked={showDebug} onChange={(e) => commitDebug(e.target.checked)} size="small" />
+              {debugControlVisible && (
+                <>
+                  <Typography sx={{ fontSize: 11, color: themeColors.text }}>Debug</Typography>
+                  <Switch checked={showDebug} onChange={(e) => commitDebug(e.target.checked)} size="small" />
+                </>
+              )}
               {exportEnabled && (
                 <>
                   <Button
