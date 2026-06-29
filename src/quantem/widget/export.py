@@ -21,6 +21,23 @@ HTML_EXPORT_TRAITS = (
     "export_filename",
 )
 
+_MOBILE_VIEWPORT_META = '<meta name="viewport" content="width=device-width, initial-scale=1">'
+
+
+def ensure_mobile_viewport(path: str | pathlib.Path) -> pathlib.Path:
+    """Add a mobile viewport meta tag to a standalone HTML export if needed."""
+
+    html_path = pathlib.Path(path)
+    html = html_path.read_text(encoding="utf-8")
+    if 'name="viewport"' in html or "name='viewport'" in html:
+        return html_path
+    if "<head>" in html:
+        html = html.replace("<head>", f"<head>\n    {_MOBILE_VIEWPORT_META}", 1)
+    else:
+        html = f"{_MOBILE_VIEWPORT_META}\n{html}"
+    html_path.write_text(html, encoding="utf-8")
+    return html_path
+
 
 @runtime_checkable
 class SupportsHtmlExport(Protocol):
@@ -67,5 +84,6 @@ __all__ = [
     "HtmlExportPath",
     "SupportsFrontendHtmlExport",
     "SupportsHtmlExport",
+    "ensure_mobile_viewport",
     "supports_html_export",
 ]
