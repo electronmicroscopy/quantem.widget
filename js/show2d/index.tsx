@@ -1162,7 +1162,7 @@ function Show2D() {
   const histogramWidthPx = 110;
   const histogramGapPx = 15;
   const galleryGridMaxWidth = isGallery ? effectiveNcols * canvasW + (effectiveNcols - 1) * galleryGapPx : canvasW;
-  const galleryGridColumns = `repeat(auto-fit, minmax(min(100%, ${canvasW}px), 1fr))`;
+  const galleryGridColumns = `repeat(${Math.max(1, effectiveNcols)}, minmax(0, ${canvasW}px))`;
   const histogramGridMaxWidth = effectiveNcols * histogramWidthPx + (effectiveNcols - 1) * histogramGapPx;
   const histogramGridColumns = `repeat(auto-fit, minmax(min(100%, ${histogramWidthPx}px), ${histogramWidthPx}px))`;
   const responsivePanelSx = {
@@ -1192,6 +1192,11 @@ function Show2D() {
     width: "100%",
     height: "100%",
     pointerEvents: "none",
+  };
+  const responsivePanelWidthSx = {
+    width: "100%",
+    maxWidth: canvasW,
+    boxSizing: "border-box",
   };
   const persistZoomState = React.useCallback((state: ZoomState) => {
     if (canvasW <= 0 || canvasH <= 0 || width <= 0 || height <= 0 || state.zoom <= 0) return;
@@ -3345,11 +3350,138 @@ function Show2D() {
     setFftPanningIdx(null);
   };
 
+  const resetFftView = React.useCallback((idx: number) => {
+    if (idx < 0) {
+      handleFftDoubleClick();
+      return;
+    }
+    setGalleryFftState(idx, { zoom: DEFAULT_FFT_ZOOM, panX: 0, panY: 0 });
+  }, [handleFftDoubleClick, setGalleryFftState]);
+
+  const setSingleFftState = React.useCallback((state: ZoomState) => {
+    setFftZoom(state.zoom);
+    setFftPanX(state.panX);
+    setFftPanY(state.panY);
+  }, []);
+
+  const handleFftTouchStart = (e: React.TouchEvent, idx: number) => {
+    const canvas = idx < 0 ? fftCanvasRef.current : fftCanvasRefs.current[idx];
+    if (!canvas) return;
+    if (isGallery && idx >= 0 && idx !== selectedIdx) setSelectedIdx(idx);
+    const now = Date.now();
+    const base = idx < 0 ? { zoom: fftZoom, panX: fftPanX, panY: fftPanY } : getGalleryFftState(idx);
+    if (e.touches.length === 1) {
+      const lastTap = lastFftTapRef.current;
+      if (lastTap && lastTap.idx === idx && now - lastTap.time < 320) {
+        e.preventDefault();
+        resetFftView(idx);
+        lastFftTapRef.current = null;
+        fftTouchStartRef.current = null;
+        return;
+      }
+      lastFftTapRef.current = { time: now, idx };
+      const t = e.touches[0];
+      fftTouchStartRef.current = {
+        idx,
+        mode: "pan",
+        startX: t.clientX,
+        startY: t.clientY,
+        startDistance: 0,
+        startMidX: t.clientX,
+        startMidY: t.clientY,
+        startState: base,
+      };
+      e.preventDefault();
+      return;
+    }
+    if (e.touches.length >= 2) {
+      const a = e.touches[0];
+      const b = e.touches[1];
+      const mid = touchMidpoint(a, b);
+      fftTouchStartRef.current = {
+        idx,
+        mode: "pinch",
+        startX: mid.x,
+        startY: mid.y,
+        startDistance: Math.max(1, touchDistance(a, b)),
+        startMidX: mid.x,
+        startMidY: mid.y,
+        startState: base,
+      };
+      e.preventDefault();
+    }
+  };
+
+  const handleFftTouchMove = (e: React.TouchEvent, idx: number) => {
+    const start = fftTouchStartRef.current;
+    if (!start || start.idx !== idx) return;
+    const canvas = idx < 0 ? fftCanvasRef.current : fftCanvasRefs.current[idx];
+    if (!canvas) return;
+    e.preventDefault();
+    const base = start.startState;
+    const applyState = (state: ZoomState) => {
+      if (idx < 0) setSingleFftState(state);
+      else setGalleryFftState(idx, state);
+    };
+    if (start.mode === "pinch" && e.touches.length >= 2) {
+      const a = e.touches[0];
+      const b = e.touches[1];
+      const mid = touchMidpoint(a, b);
+      const startCanvas = touchToCanvas(start.startMidX, start.startMidY, canvas);
+      const currentCanvas = touchToCanvas(mid.x, mid.y, canvas);
+      const newZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, base.zoom * (touchDistance(a, b) / start.startDistance)));
+      if (idx < 0) {
+        const cw = canvas.width;
+        const ch = canvas.height;
+        const cOffX = (cw - cw * base.zoom) / 2 + base.panX;
+        const cOffY = (ch - ch * base.zoom) / 2 + base.panY;
+        const u = (startCanvas.x - cOffX) / (base.zoom * cw);
+        const v = (startCanvas.y - cOffY) / (base.zoom * ch);
+        applyState({
+          zoom: newZoom,
+          panX: currentCanvas.x - (cw - cw * newZoom) / 2 - newZoom * u * cw,
+          panY: currentCanvas.y - (ch - ch * newZoom) / 2 - newZoom * v * ch,
+        });
+      } else {
+        const cx = canvas.width / 2;
+        const cy = canvas.height / 2;
+        const imageX = (startCanvas.x - cx - base.panX) / base.zoom + cx;
+        const imageY = (startCanvas.y - cy - base.panY) / base.zoom + cy;
+        applyState({
+          zoom: newZoom,
+          panX: currentCanvas.x - (imageX - cx) * newZoom - cx,
+          panY: currentCanvas.y - (imageY - cy) * newZoom - cy,
+        });
+      }
+      return;
+    }
+    if (start.mode === "pan" && e.touches.length === 1) {
+      const t = e.touches[0];
+      const rect = canvas.getBoundingClientRect();
+      const scaleX = canvas.width / Math.max(1, rect.width);
+      const scaleY = canvas.height / Math.max(1, rect.height);
+      applyState({
+        ...base,
+        panX: base.panX + (t.clientX - start.startX) * scaleX,
+        panY: base.panY + (t.clientY - start.startY) * scaleY,
+      });
+    }
+  };
+
+  const handleFftTouchEnd = (e: React.TouchEvent, idx: number) => {
+    const start = fftTouchStartRef.current;
+    if (!start || start.idx !== idx) return;
+    if (e.touches.length > 0) return;
+    fftTouchStartRef.current = null;
+  };
+
   // Track which image is being panned
   const [panningIdx, setPanningIdx] = React.useState<number | null>(null);
   const clickStartRef = React.useRef<{ x: number; y: number } | null>(null);
   const touchStartRef = React.useRef<TouchZoomState | null>(null);
+  const fftTouchStartRef = React.useRef<TouchZoomState | null>(null);
   const lastTapRef = React.useRef<{ time: number; idx: number } | null>(null);
+  const lastFftTapRef = React.useRef<{ time: number; idx: number } | null>(null);
   const [draggingProfileEndpoint, setDraggingProfileEndpoint] = React.useState<0 | 1 | null>(null);
   const [isDraggingProfileLine, setIsDraggingProfileLine] = React.useState(false);
   const [hoveredProfileEndpoint, setHoveredProfileEndpoint] = React.useState<0 | 1 | null>(null);
@@ -4013,8 +4145,26 @@ function Show2D() {
   const calibratedFactor = pixelSize;
 
   return (
-    <Box className="show2d-root" tabIndex={0} onKeyDown={handleKeyDown} sx={{ p: 2, bgcolor: themeColors.bg, color: themeColors.text, width: "100%", maxWidth: "100%", boxSizing: "border-box", fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif", "& canvas": { display: "block" }, "@media (max-width: 700px)": { ".jp-OutputArea-output &, .jp-OutputArea-child &": { width: "calc(100vw - 96px)", maxWidth: "calc(100vw - 96px)" } } }}>
-      <Stack direction="row" spacing={`${SPACING.LG}px`} alignItems="flex-start" sx={{ width: "100%", maxWidth: "100%", minWidth: 0, boxSizing: "border-box" }}>
+    <Box className="show2d-root" tabIndex={0} onKeyDown={handleKeyDown} sx={{ p: 2, bgcolor: themeColors.bg, color: themeColors.text, width: "100%", maxWidth: "100%", boxSizing: "border-box", fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif", "& canvas": { display: "block" }, "@media (max-width: 700px)": { p: 0, ".jp-OutputArea-output &, .jp-OutputArea-child &": { width: "calc(100vw - 96px)", maxWidth: "calc(100vw - 96px)" } } }}>
+      <Stack
+        direction="row"
+        spacing={`${SPACING.LG}px`}
+        alignItems="flex-start"
+        sx={{
+          width: "100%",
+          maxWidth: "100%",
+          minWidth: 0,
+          boxSizing: "border-box",
+          "@media (max-width: 700px)": {
+            flexDirection: "column",
+            alignItems: "stretch",
+            "& > :not(style) + :not(style)": {
+              marginLeft: "0 !important",
+              marginTop: `${SPACING.LG}px`,
+            },
+          },
+        }}
+      >
         {/* Main panel */}
         <Box sx={{ width: "100%", maxWidth: galleryGridWidth, boxSizing: "border-box" }}>
           {/* Title row */}
@@ -4183,7 +4333,7 @@ function Show2D() {
 
           {isGallery ? (
             /* Gallery mode */
-            <Box sx={{ display: "grid", gridTemplateColumns: galleryGridColumns, gap: `${galleryGapPx}px`, maxWidth: galleryGridWidth, width: "100%", boxSizing: "border-box", justifyContent: "start" }}>
+            <Box sx={{ display: "grid", gridTemplateColumns: galleryGridColumns, gap: `${galleryGapPx}px`, maxWidth: galleryGridWidth, width: "100%", boxSizing: "border-box", justifyContent: "start", "@media (max-width: 900px)": { gridTemplateColumns: "minmax(0, 1fr)", maxWidth: "100%" } }}>
               {Array.from({ length: nImages }).map((_, i) => (
                 <Box key={i} sx={{ minWidth: 0, cursor: i === selectedIdx ? ((isDraggingResize || isDraggingResizeInner || isHoveringResize || isHoveringResizeInner) ? "nwse-resize" : isDraggingROI ? "move" : (draggingProfileEndpoint !== null || isDraggingProfileLine) ? "grabbing" : (profileActive && (hoveredProfileEndpoint !== null || isHoveringProfileLine)) ? "grab" : (profileActive || roiActive || measureActive) ? "crosshair" : "grab") : ("pointer") }}>
                   <Box
@@ -4266,6 +4416,10 @@ function Show2D() {
                       onMouseMove={(e) => handleGalleryFftMouseMove(e, i)}
                       onMouseUp={handleGalleryFftMouseUp}
                       onMouseLeave={handleGalleryFftMouseUp}
+                      onTouchStart={(e) => handleFftTouchStart(e, i)}
+                      onTouchMove={(e) => handleFftTouchMove(e, i)}
+                      onTouchEnd={(e) => handleFftTouchEnd(e, i)}
+                      onTouchCancel={(e) => handleFftTouchEnd(e, i)}
                     >
                       <canvas
                         ref={(el) => { fftCanvasRefs.current[i] = el; }}
@@ -4352,7 +4506,7 @@ function Show2D() {
 
           {/* Stats bar - right below canvas (Show3D style) */}
           {showStats && (
-            <Box sx={{ mt: `${SPACING.XS}px`, px: 1, py: 0.5, bgcolor: themeColors.bgAlt, display: "flex", gap: 2, alignItems: "center", boxSizing: "border-box", overflow: "hidden", whiteSpace: "nowrap", opacity: 1 }}>
+            <Box sx={{ mt: `${SPACING.XS}px`, px: 1, py: 0.5, bgcolor: themeColors.bgAlt, display: "flex", gap: 2, alignItems: "center", flexWrap: "wrap", maxWidth: "100%", boxSizing: "border-box", opacity: 1 }}>
               {isGallery && (
                 <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>{labels?.[statsIdx] || `#${statsIdx + 1}`}</Typography>
               )}
@@ -4371,12 +4525,12 @@ function Show2D() {
 
           {/* Line profile sparkline — always reserve space when profile is active */}
           {profileActive && (
-            <Box sx={{ mt: `${SPACING.XS}px`, maxWidth: profileCanvasWidth, boxSizing: "border-box" }}>
+            <Box sx={{ mt: `${SPACING.XS}px`, width: "100%", maxWidth: profileCanvasWidth, boxSizing: "border-box" }}>
               <canvas
                 ref={profileCanvasRef}
                 onMouseMove={handleProfileMouseMove}
                 onMouseLeave={handleProfileMouseLeave}
-                style={{ width: profileCanvasWidth, height: profileHeight, display: "block", border: `1px solid ${themeColors.border}`, borderBottom: "none", cursor: "crosshair" }}
+                style={{ width: "100%", height: profileHeight, display: "block", border: `1px solid ${themeColors.border}`, borderBottom: "none", cursor: "crosshair" }}
               />
               <div
                 onMouseDown={(e) => {
@@ -4384,7 +4538,7 @@ function Show2D() {
                   setIsResizingProfile(true);
                   setProfileResizeStart({ y: e.clientY, height: profileHeight });
                 }}
-                style={{ width: profileCanvasWidth, height: 4, cursor: "ns-resize", borderLeft: `1px solid ${themeColors.border}`, borderRight: `1px solid ${themeColors.border}`, borderBottom: `1px solid ${themeColors.border}`, background: `linear-gradient(to bottom, ${themeColors.border}, transparent)`, opacity: 1, pointerEvents: "auto" }}
+                style={{ width: "100%", height: 4, cursor: "ns-resize", borderLeft: `1px solid ${themeColors.border}`, borderRight: `1px solid ${themeColors.border}`, borderBottom: `1px solid ${themeColors.border}`, background: `linear-gradient(to bottom, ${themeColors.border}, transparent)`, opacity: 1, pointerEvents: "auto" }}
               />
             </Box>
           )}
@@ -4679,11 +4833,11 @@ function Show2D() {
 
         {/* FFT Panel - canvas + stats (single mode only) */}
         {effectiveShowFft && !isGallery && (
-          <Box sx={{ width: canvasW }}>
+          <Box sx={{ ...responsivePanelWidthSx }}>
             {/* Spacer — matches main panel title row height for canvas alignment */}
             <Box sx={{ mb: `${SPACING.XS}px`, height: 16 }} />
             {/* Controls row — matches main panel controls row height */}
-            <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: `${SPACING.XS}px`, height: 28 }}>
+            <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: `${SPACING.XS}px`, minHeight: 28, height: "auto", flexWrap: "wrap", gap: `${SPACING.XS}px` }}>
               {fftComputing ? (
                 <Typography sx={{ fontSize: 10, fontFamily: "monospace", color: themeColors.textMuted, "@keyframes pulse": { "0%,100%": { opacity: 0.4 }, "50%": { opacity: 1 } }, animation: "pulse 1.2s ease-in-out infinite" }}>
                   {fftProgress || "Computing FFT…"}</Typography>
@@ -4698,18 +4852,22 @@ function Show2D() {
             </Stack>
             <Box
               ref={singleFftContainerRef}
-              sx={{ position: "relative", bgcolor: "#000", border: `1px solid ${themeColors.border}`, cursor: "crosshair", width: canvasW, height: canvasH }}
+              sx={{ ...responsivePanelSx, border: `1px solid ${themeColors.border}`, cursor: "crosshair" }}
               onWheel={handleFftWheel}
               onDoubleClick={handleFftDoubleClick}
               onMouseDown={handleFftMouseDown}
               onMouseMove={handleFftMouseMove}
               onMouseUp={handleFftMouseUp}
               onMouseLeave={handleFftMouseLeave}
+              onTouchStart={(e) => handleFftTouchStart(e, -1)}
+              onTouchMove={(e) => handleFftTouchMove(e, -1)}
+              onTouchEnd={(e) => handleFftTouchEnd(e, -1)}
+              onTouchCancel={(e) => handleFftTouchEnd(e, -1)}
             >
-              <canvas ref={fftCanvasRef} width={canvasW} height={canvasH} style={{ width: canvasW, height: canvasH, imageRendering: imageRenderingStyle }} />
-              <canvas ref={fftOverlayRef} width={Math.round(canvasW * DPR)} height={Math.round(canvasH * DPR)} style={{ position: "absolute", top: 0, left: 0, width: canvasW, height: canvasH, pointerEvents: "none" }} />
+              <canvas ref={fftCanvasRef} width={canvasW} height={canvasH} style={responsiveCanvasStyle} />
+              <canvas ref={fftOverlayRef} width={Math.round(canvasW * DPR)} height={Math.round(canvasH * DPR)} style={responsiveOverlayStyle} />
               {fftComputing && (
-                <Box sx={{ position: "absolute", top: 0, left: 0, width: canvasW, height: canvasH, display: "flex", alignItems: "center", justifyContent: "center", bgcolor: "rgba(0,0,0,0.6)", pointerEvents: "none" }}>
+                <Box sx={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", bgcolor: "rgba(0,0,0,0.6)", pointerEvents: "none" }}>
                   <Typography sx={{ fontSize: 11, color: "#aaa", fontFamily: "monospace", "@keyframes pulse": { "0%,100%": { opacity: 0.4 }, "50%": { opacity: 1 } }, animation: "pulse 1.2s ease-in-out infinite" }}>
                     {fftProgress || "Computing FFT…"}
                   </Typography>
@@ -4721,7 +4879,7 @@ function Show2D() {
             </Box>
             {/* FFT Stats Bar */}
             {fftStats && fftStats.length === 4 && (
-              <Box sx={{ mt: `${SPACING.XS}px`, px: 1, py: 0.5, bgcolor: themeColors.bgAlt, display: "flex", gap: 2 }}>
+              <Box sx={{ mt: `${SPACING.XS}px`, px: 1, py: 0.5, bgcolor: themeColors.bgAlt, display: "flex", gap: 2, flexWrap: "wrap", maxWidth: "100%", boxSizing: "border-box" }}>
                 <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Mean <Box component="span" sx={{ color: themeColors.accent }}>{formatNumber(fftStats[0])}</Box></Typography>
                 <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Min <Box component="span" sx={{ color: themeColors.accent }}>{formatNumber(fftStats[1])}</Box></Typography>
                 <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Max <Box component="span" sx={{ color: themeColors.accent }}>{formatNumber(fftStats[2])}</Box></Typography>
@@ -4741,7 +4899,7 @@ function Show2D() {
               </Box>
             )}
             {/* FFT Controls - two rows + histogram (matching main panel layout) */}
-            <Box sx={{ mt: `${SPACING.SM}px`, display: "flex", flexDirection: "column", gap: `${SPACING.XS}px`, width: canvasW, boxSizing: "border-box" }}>
+            <Box sx={{ mt: `${SPACING.SM}px`, display: "flex", flexDirection: "column", gap: `${SPACING.XS}px`, ...responsivePanelWidthSx }}>
               <Box sx={{ display: "flex", gap: `${SPACING.SM}px` }}>
                 <Box sx={{ display: "flex", flexDirection: "column", gap: `${SPACING.XS}px`, flex: 1, justifyContent: "flex-start" }}>
                   {/* Row 1: Scale + Color + Colorbar */}

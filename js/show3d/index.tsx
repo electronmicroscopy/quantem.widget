@@ -41,10 +41,13 @@ const UI_FONT = "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
 const controlRow = {
   display: "flex",
   alignItems: "center",
+  flexWrap: "wrap",
   gap: `${SPACING.SM}px`,
   px: 1,
   py: 0.5,
   width: "fit-content",
+  maxWidth: "100%",
+  boxSizing: "border-box",
 };
 const compactButton = {
   fontSize: 10,
@@ -1549,6 +1552,15 @@ function Show3D() {
     startMidX: number;
     startMidY: number;
     startState: PanelState;
+  };
+  type FftTouchTransformState = {
+    mode: "pan" | "pinch";
+    startX: number;
+    startY: number;
+    startDistance: number;
+    startMidX: number;
+    startMidY: number;
+    startState: { zoom: number; panX: number; panY: number };
   };
   const initialState: PanelState = {
     zoom: 1,
@@ -6548,7 +6560,11 @@ function Show3D() {
 
   const clickStartRef = React.useRef<{ x: number; y: number } | null>(null);
   const touchTransformRef = React.useRef<TouchTransformState | null>(null);
+  const fftTouchTransformRef = React.useRef<FftTouchTransformState | null>(null);
+  const kymoTouchTransformRef = React.useRef<FftTouchTransformState | null>(null);
   const lastTapRef = React.useRef<{ time: number; panelIdx: number } | null>(null);
+  const lastFftTapRef = React.useRef<{ time: number } | null>(null);
+  const lastKymoTapRef = React.useRef<{ time: number } | null>(null);
   const [draggingProfileEndpoint, setDraggingProfileEndpoint] = React.useState<0 | 1 | null>(null);
   const [isDraggingProfileLine, setIsDraggingProfileLine] = React.useState(false);
   const [hoveredProfileEndpoint, setHoveredProfileEndpoint] = React.useState<0 | 1 | null>(null);
@@ -7283,6 +7299,90 @@ function Show3D() {
     setFftPanStart(null);
   };
 
+  const handleFftTouchStart = (e: React.TouchEvent) => {
+    const canvas = fftCanvasRef.current;
+    if (!canvas) return;
+    const now = Date.now();
+    const base = { zoom: fftZoom, panX: fftPanX, panY: fftPanY };
+    if (e.touches.length === 1) {
+      const lastTap = lastFftTapRef.current;
+      if (lastTap && now - lastTap.time < 320) {
+        e.preventDefault();
+        handleFftReset();
+        lastFftTapRef.current = null;
+        fftTouchTransformRef.current = null;
+        return;
+      }
+      lastFftTapRef.current = { time: now };
+      const t = e.touches[0];
+      fftTouchTransformRef.current = {
+        mode: "pan",
+        startX: t.clientX,
+        startY: t.clientY,
+        startDistance: 0,
+        startMidX: t.clientX,
+        startMidY: t.clientY,
+        startState: base,
+      };
+      e.preventDefault();
+      return;
+    }
+    if (e.touches.length >= 2) {
+      const a = e.touches[0];
+      const b = e.touches[1];
+      const mid = touchMidpoint(a, b);
+      fftTouchTransformRef.current = {
+        mode: "pinch",
+        startX: mid.x,
+        startY: mid.y,
+        startDistance: Math.max(1, touchDistance(a, b)),
+        startMidX: mid.x,
+        startMidY: mid.y,
+        startState: base,
+      };
+      e.preventDefault();
+    }
+  };
+
+  const handleFftTouchMove = (e: React.TouchEvent) => {
+    const start = fftTouchTransformRef.current;
+    const canvas = fftCanvasRef.current;
+    if (!start || !canvas) return;
+    e.preventDefault();
+    const rect = canvas.getBoundingClientRect();
+    const toCanvas = (clientX: number, clientY: number) => ({
+      x: (clientX - rect.left) * (canvas.width / Math.max(1, rect.width)),
+      y: (clientY - rect.top) * (canvas.height / Math.max(1, rect.height)),
+    });
+    const base = start.startState;
+    if (start.mode === "pinch" && e.touches.length >= 2) {
+      const a = e.touches[0];
+      const b = e.touches[1];
+      const mid = touchMidpoint(a, b);
+      const startCanvas = toCanvas(start.startMidX, start.startMidY);
+      const currentCanvas = toCanvas(mid.x, mid.y);
+      const imageX = (startCanvas.x - base.panX) / base.zoom;
+      const imageY = (startCanvas.y - base.panY) / base.zoom;
+      const newZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, base.zoom * (touchDistance(a, b) / start.startDistance)));
+      setFftZoom(newZoom);
+      setFftPanX(currentCanvas.x - imageX * newZoom);
+      setFftPanY(currentCanvas.y - imageY * newZoom);
+      return;
+    }
+    if (start.mode === "pan" && e.touches.length === 1) {
+      const t = e.touches[0];
+      const scaleX = canvas.width / Math.max(1, rect.width);
+      const scaleY = canvas.height / Math.max(1, rect.height);
+      setFftPanX(base.panX + (t.clientX - start.startX) * scaleX);
+      setFftPanY(base.panY + (t.clientY - start.startY) * scaleY);
+    }
+  };
+
+  const handleFftTouchEnd = (e: React.TouchEvent) => {
+    if (e.touches.length > 0 || !fftTouchTransformRef.current) return;
+    fftTouchTransformRef.current = null;
+  };
+
   const handleFftReset = () => {
     setFftZoom(1);
     setFftPanX(0);
@@ -7376,6 +7476,90 @@ function Show3D() {
     setKymoPanStart(null);
   };
 
+  const handleKymoTouchStart = (e: React.TouchEvent) => {
+    const canvas = kymoCanvasRef.current;
+    if (!canvas) return;
+    const now = Date.now();
+    const base = { zoom: kymoZoom, panX: kymoPanX, panY: kymoPanY };
+    if (e.touches.length === 1) {
+      const lastTap = lastKymoTapRef.current;
+      if (lastTap && now - lastTap.time < 320) {
+        e.preventDefault();
+        handleKymoReset();
+        lastKymoTapRef.current = null;
+        kymoTouchTransformRef.current = null;
+        return;
+      }
+      lastKymoTapRef.current = { time: now };
+      const t = e.touches[0];
+      kymoTouchTransformRef.current = {
+        mode: "pan",
+        startX: t.clientX,
+        startY: t.clientY,
+        startDistance: 0,
+        startMidX: t.clientX,
+        startMidY: t.clientY,
+        startState: base,
+      };
+      e.preventDefault();
+      return;
+    }
+    if (e.touches.length >= 2) {
+      const a = e.touches[0];
+      const b = e.touches[1];
+      const mid = touchMidpoint(a, b);
+      kymoTouchTransformRef.current = {
+        mode: "pinch",
+        startX: mid.x,
+        startY: mid.y,
+        startDistance: Math.max(1, touchDistance(a, b)),
+        startMidX: mid.x,
+        startMidY: mid.y,
+        startState: base,
+      };
+      e.preventDefault();
+    }
+  };
+
+  const handleKymoTouchMove = (e: React.TouchEvent) => {
+    const start = kymoTouchTransformRef.current;
+    const canvas = kymoCanvasRef.current;
+    if (!start || !canvas) return;
+    e.preventDefault();
+    const rect = canvas.getBoundingClientRect();
+    const toCanvas = (clientX: number, clientY: number) => ({
+      x: (clientX - rect.left) * (canvas.width / Math.max(1, rect.width)),
+      y: (clientY - rect.top) * (canvas.height / Math.max(1, rect.height)),
+    });
+    const base = start.startState;
+    if (start.mode === "pinch" && e.touches.length >= 2) {
+      const a = e.touches[0];
+      const b = e.touches[1];
+      const mid = touchMidpoint(a, b);
+      const startCanvas = toCanvas(start.startMidX, start.startMidY);
+      const currentCanvas = toCanvas(mid.x, mid.y);
+      const imageX = (startCanvas.x - base.panX) / base.zoom;
+      const imageY = (startCanvas.y - base.panY) / base.zoom;
+      const newZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, base.zoom * (touchDistance(a, b) / start.startDistance)));
+      setKymoZoom(newZoom);
+      setKymoPanX(currentCanvas.x - imageX * newZoom);
+      setKymoPanY(currentCanvas.y - imageY * newZoom);
+      return;
+    }
+    if (start.mode === "pan" && e.touches.length === 1) {
+      const t = e.touches[0];
+      const scaleX = canvas.width / Math.max(1, rect.width);
+      const scaleY = canvas.height / Math.max(1, rect.height);
+      setKymoPanX(base.panX + (t.clientX - start.startX) * scaleX);
+      setKymoPanY(base.panY + (t.clientY - start.startY) * scaleY);
+    }
+  };
+
+  const handleKymoTouchEnd = (e: React.TouchEvent) => {
+    if (e.touches.length > 0 || !kymoTouchTransformRef.current) return;
+    kymoTouchTransformRef.current = null;
+  };
+
   const handleKymoReset = () => {
     setKymoZoom(1);
     setKymoPanX(0);
@@ -7413,8 +7597,12 @@ function Show3D() {
 
   const handlePreviewMouseMove = (e: React.MouseEvent) => {
     if (!isDraggingPreviewPan || !previewPanStart) return;
-    const dx = e.clientX - previewPanStart.x;
-    const dy = e.clientY - previewPanStart.y;
+    const canvas = previewCanvasRef.current;
+    const rect = canvas?.getBoundingClientRect();
+    const scaleX = canvas && rect ? canvas.width / Math.max(1, rect.width) : 1;
+    const scaleY = canvas && rect ? canvas.height / Math.max(1, rect.height) : 1;
+    const dx = (e.clientX - previewPanStart.x) * scaleX;
+    const dy = (e.clientY - previewPanStart.y) * scaleY;
     setPreviewZoom(prev => ({ ...prev, panX: previewPanStart.pX + dx, panY: previewPanStart.pY + dy }));
   };
 
@@ -7681,9 +7869,29 @@ function Show3D() {
       tabIndex={0}
       onKeyDown={handleKeyDown}
       onMouseDownCapture={handleRootMouseDownCapture}
-      sx={{ ...container.root, width: "100%", maxWidth: "100%", boxSizing: "border-box", bgcolor: themeColors.bg, color: themeColors.text, outline: "none", "&:focus": { outline: "2px solid #0af", outlineOffset: 2 }, "& canvas": { display: "block" }, "@media (max-width: 700px)": { ".jp-OutputArea-output &, .jp-OutputArea-child &": { width: "calc(100vw - 96px)", maxWidth: "calc(100vw - 96px)" } } }}
+      sx={{ ...container.root, width: "100%", maxWidth: "100%", boxSizing: "border-box", bgcolor: themeColors.bg, color: themeColors.text, outline: "none", "&:focus": { outline: "2px solid #0af", outlineOffset: 2 }, "& canvas": { display: "block" }, "@media (max-width: 700px)": { p: 0, ".jp-OutputArea-output &, .jp-OutputArea-child &": { width: "calc(100vw - 96px)", maxWidth: "calc(100vw - 96px)" } } }}
     >
-      <Stack direction="row" spacing={`${SPACING.SM}px`} alignItems="flex-start" sx={{ flexWrap: "wrap", width: "100%", maxWidth: "100%", minWidth: 0, boxSizing: "border-box" }}>
+      <Stack
+        direction="row"
+        spacing={`${SPACING.SM}px`}
+        alignItems="flex-start"
+        sx={{
+          flexWrap: "nowrap",
+          width: "100%",
+          maxWidth: "100%",
+          minWidth: 0,
+          boxSizing: "border-box",
+          "@media (max-width: 900px)": {
+            flexDirection: "column",
+            alignItems: "stretch",
+            flexWrap: "nowrap",
+            "& > :not(style) + :not(style)": {
+              marginLeft: "0 !important",
+              marginTop: `${SPACING.SM}px`,
+            },
+          },
+        }}
+      >
         <Box sx={{ width: mainPanelWidth, maxWidth: "100%", boxSizing: "border-box" }}>
           {/* Title row */}
           <Typography variant="caption" sx={{ ...typography.label, color: themeColors.accent, mb: `${SPACING.XS}px`, display: "block", height: 16, lineHeight: "16px", overflow: "hidden" }}>
@@ -7724,7 +7932,7 @@ function Show3D() {
             </Box>} theme={themeInfo.theme} />
           </Typography>
           {/* Controls row */}
-          <Box sx={{ display: "flex", alignItems: "center", gap: "4px", mb: `${SPACING.XS}px`, height: 28 }}>
+          <Box sx={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: "4px", mb: `${SPACING.XS}px`, minHeight: 28 }}>
             {/* Multi-panel FFT is available only while the image grid is a single row. */}
             {fftAllowed && <>
               <Typography sx={{ ...typography.label, fontSize: 10 }}>FFT</Typography>
@@ -8030,9 +8238,9 @@ function Show3D() {
           {/* Statistics bar - right below the image. Multi-panel = one row per panel. */}
           {showStats && (
             (localPanelStats && (nPanels || 1) > 1) ? (
-              <Box sx={{ mt: 0.5, px: 1, py: 0.5, bgcolor: themeColors.bgAlt, display: "flex", flexDirection: "column", gap: 0.25, width: "fit-content", boxSizing: "border-box", fontFamily: "ui-monospace, monospace" }}>
+              <Box sx={{ mt: 0.5, px: 1, py: 0.5, bgcolor: themeColors.bgAlt, display: "flex", flexDirection: "column", gap: 0.25, width: "100%", maxWidth: canvasW, boxSizing: "border-box", fontFamily: "ui-monospace, monospace" }}>
                 {localPanelStats.map((st, i) => (
-                  <Box key={i} sx={{ display: "flex", gap: 2, alignItems: "center" }}>
+                  <Box key={i} sx={{ display: "flex", gap: 2, alignItems: "center", flexWrap: "wrap", maxWidth: "100%" }}>
                     <Typography sx={{ fontSize: 11, color: themeColors.textMuted, minWidth: 80, fontFamily: "ui-monospace, monospace" }}>{(panelTitles && panelTitles[i]) || `Panel ${i + 1}`}</Typography>
                     <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Mean <Box component="span" sx={{ color: themeColors.accent }}>{formatNumber(st.mean)}</Box></Typography>
                     <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Min <Box component="span" sx={{ color: themeColors.accent }}>{formatNumber(st.min)}</Box></Typography>
@@ -8042,7 +8250,7 @@ function Show3D() {
                 ))}
               </Box>
             ) : (
-              <Box sx={{ mt: 0.5, px: 1, py: 0.5, bgcolor: themeColors.bgAlt, display: "flex", gap: 2, alignItems: "center", width: "fit-content", boxSizing: "border-box" }}>
+              <Box sx={{ mt: 0.5, px: 1, py: 0.5, bgcolor: themeColors.bgAlt, display: "flex", gap: 2, alignItems: "center", flexWrap: "wrap", width: "100%", maxWidth: canvasW, boxSizing: "border-box" }}>
                 <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Mean <Box component="span" sx={{ color: themeColors.accent }}>{formatNumber(localStats ? localStats.mean : statsMean)}</Box></Typography>
                 <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Min <Box component="span" sx={{ color: themeColors.accent }}>{formatNumber(localStats ? localStats.min : statsMin)}</Box></Typography>
                 <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Max <Box component="span" sx={{ color: themeColors.accent }}>{formatNumber(localStats ? localStats.max : statsMax)}</Box></Typography>
@@ -8164,9 +8372,11 @@ function Show3D() {
                   // so the per-panel histogram strip is visually consistent
                   // across widgets.
                   const panelHistWidth = 110;
+                  const panelHistGap = 15;
+                  const panelHistMaxWidth = cols * panelHistWidth + Math.max(0, cols - 1) * panelHistGap;
                   return (
-                    <Box sx={{ display: "flex", flexDirection: "column", alignItems: "flex-end", justifyContent: "flex-start", gap: 0.5, opacity: 1, pointerEvents: "auto" }}>
-                      <Box sx={{ display: "grid", gridTemplateColumns: `repeat(${cols}, ${panelHistWidth}px)`, gap: "15px" }}>
+                    <Box sx={{ display: "flex", flexDirection: "column", alignItems: "flex-end", justifyContent: "flex-start", gap: 0.5, opacity: 1, pointerEvents: "auto", maxWidth: "100%" }}>
+                      <Box sx={{ display: "grid", gridTemplateColumns: `repeat(auto-fit, minmax(min(100%, ${panelHistWidth}px), ${panelHistWidth}px))`, gap: `${panelHistGap}px`, width: "100%", maxWidth: panelHistMaxWidth, justifyContent: "start" }}>
                       {Array.from({ length: n }, (_, panel) => {
                         const state = panelStates[panel] || initialState;
                         // Per-panel histogram uses THIS panel's data range
@@ -8356,11 +8566,11 @@ function Show3D() {
 
         {/* Preview Panel - ROI crop at full resolution with aspect ratio */}
         {previewVisible && (
-          <Box sx={{ width: canvasW }}>
+          <Box sx={{ width: "100%", maxWidth: canvasW, boxSizing: "border-box" }}>
             {/* Spacer - matches main panel title row height for canvas alignment */}
             <Box sx={{ mb: `${SPACING.XS}px`, height: 16 }} />
             {/* Header row - matches main panel controls row height */}
-            <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: `${SPACING.XS}px`, height: 28 }}>
+            <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: `${SPACING.XS}px`, minHeight: 28, height: "auto", flexWrap: "wrap", gap: `${SPACING.XS}px` }}>
               <Typography sx={{ ...typography.label, color: themeColors.accentGreen }}>
                 Preview{previewCropDims ? ` (${previewCropDims.w}\u00d7${previewCropDims.h})` : ""}
               </Typography>
@@ -8368,7 +8578,16 @@ function Show3D() {
             </Stack>
             <Box
               ref={previewContainerRef}
-              sx={{ position: "relative", bgcolor: "#000", border: `1px solid ${themeColors.border}`, cursor: "grab", width: previewCanvasDims.w, height: previewCanvasDims.h }}
+              sx={{
+                position: "relative",
+                bgcolor: "#000",
+                border: `1px solid ${themeColors.border}`,
+                cursor: "grab",
+                width: "100%",
+                maxWidth: previewCanvasDims.w,
+                aspectRatio: `${Math.max(previewCanvasDims.w, 1)} / ${Math.max(previewCanvasDims.h, 1)}`,
+                height: "auto",
+              }}
               onWheel={handlePreviewWheel}
               onDoubleClick={handlePreviewDoubleClick}
               onMouseDown={handlePreviewMouseDown}
@@ -8376,19 +8595,19 @@ function Show3D() {
               onMouseUp={handlePreviewMouseUp}
               onMouseLeave={handlePreviewMouseUp}
             >
-              <canvas ref={previewCanvasRef} width={previewCanvasDims.w} height={previewCanvasDims.h} style={{ width: previewCanvasDims.w, height: previewCanvasDims.h, imageRendering: "pixelated" }} role="img" aria-label={`ROI preview crop${previewCropDims ? ` (${previewCropDims.w} by ${previewCropDims.h} pixels)` : ""}`} />
-              <canvas ref={previewOverlayRef} width={Math.round(previewCanvasDims.w * DPR)} height={Math.round(previewCanvasDims.h * DPR)} style={{ position: "absolute", top: 0, left: 0, width: previewCanvasDims.w, height: previewCanvasDims.h, pointerEvents: "none" }} aria-hidden="true" />
+              <canvas ref={previewCanvasRef} width={previewCanvasDims.w} height={previewCanvasDims.h} style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", imageRendering: "pixelated" }} role="img" aria-label={`ROI preview crop${previewCropDims ? ` (${previewCropDims.w} by ${previewCropDims.h} pixels)` : ""}`} />
+              <canvas ref={previewOverlayRef} width={Math.round(previewCanvasDims.w * DPR)} height={Math.round(previewCanvasDims.h * DPR)} style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", pointerEvents: "none" }} aria-hidden="true" />
               <Box onMouseDown={handleMainResizeStart} sx={{ position: "absolute", bottom: 0, right: 0, width: 28, height: 28, cursor: "nwse-resize", opacity: 0.95, background: `linear-gradient(135deg, transparent 50%, ${themeColors.border} 50%)`, "&:hover": { opacity: 1 } }} />
             </Box>
             {/* All-ROI Stats - one row per ROI, same style as main stats bar */}
             {showStats && allRoiStats.length > 0 && (
-              <Box sx={{ mt: `${SPACING.XS}px`, display: "flex", flexDirection: "column", gap: 0.5, width: previewCanvasDims.w }}>
+              <Box sx={{ mt: `${SPACING.XS}px`, display: "flex", flexDirection: "column", gap: 0.5, width: "100%", maxWidth: previewCanvasDims.w, boxSizing: "border-box" }}>
                 {allRoiStats.map((stats, i) => {
                   if (!stats) return null;
                   const color = roiItems[i]?.color || ROI_COLORS[i % ROI_COLORS.length];
                   const isSelected = i === roiSelectedIdx;
                   return (
-                    <Box key={i} sx={{ px: 1, py: 0.5, bgcolor: themeColors.bgAlt, display: "flex", gap: 2, alignItems: "center", border: isSelected ? `1px solid ${color}` : `1px solid transparent` }}>
+                    <Box key={i} sx={{ px: 1, py: 0.5, bgcolor: themeColors.bgAlt, display: "flex", gap: 2, alignItems: "center", flexWrap: "wrap", border: isSelected ? `1px solid ${color}` : `1px solid transparent` }}>
                       <Box sx={{ width: 8, height: 8, bgcolor: color, borderRadius: "50%", flexShrink: 0 }} />
                       <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Mean <Box component="span" sx={{ color }}>{formatNumber(stats.mean)}</Box></Typography>
                       <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Min <Box component="span" sx={{ color }}>{formatNumber(stats.min)}</Box></Typography>
@@ -8405,14 +8624,16 @@ function Show3D() {
         {/* FFT Panel - same size as main image. Multi-panel FFT stacks below the image grid. */}
         {effectiveShowFft && (
           <Box sx={{
-            width: canvasW,
-            flexBasis: (nPanels || 1) > 1 ? "100%" : canvasW,
+            width: "100%",
+            maxWidth: canvasW,
+            flexBasis: (nPanels || 1) > 1 ? "100%" : `min(100%, ${canvasW}px)`,
             ml: (nPanels || 1) > 1 ? "0 !important" : undefined,
+            boxSizing: "border-box",
           }}>
             {/* Spacer - matches main panel title row height for canvas alignment */}
             {(nPanels || 1) === 1 && <Box sx={{ mb: `${SPACING.XS}px`, height: 16 }} />}
             {/* Controls row - matches main panel controls row height */}
-            <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: `${SPACING.XS}px`, height: 28 }}>
+            <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: `${SPACING.XS}px`, minHeight: 28, height: "auto", flexWrap: "wrap", gap: `${SPACING.XS}px` }}>
               {roiFftActive && fftCropDims ? (
                 <Typography sx={{ ...typography.label, color: themeColors.accentGreen }}>
                   ROI FFT ({fftCropDims.cropWidth}&times;{fftCropDims.cropHeight})
@@ -8423,16 +8644,28 @@ function Show3D() {
             {/* FFT Canvas - same size as main image */}
             <Box
               ref={fftContainerRef}
-              sx={{ ...container.imageBox, width: canvasW, height: canvasH, cursor: "grab" }}
+              sx={{
+                ...container.imageBox,
+                width: "100%",
+                maxWidth: canvasW,
+                aspectRatio: mainPanelAspectRatio,
+                height: "auto",
+                cursor: "grab",
+                touchAction: "none",
+              }}
               onMouseDown={handleFftMouseDown}
               onMouseMove={handleFftMouseMove}
               onMouseUp={handleFftMouseUp}
               onMouseLeave={() => { fftClickStartRef.current = null; setIsFftDragging(false); setFftPanStart(null); }}
               onWheel={handleFftWheel}
               onDoubleClick={handleFftReset}
+              onTouchStart={handleFftTouchStart}
+              onTouchMove={handleFftTouchMove}
+              onTouchEnd={handleFftTouchEnd}
+              onTouchCancel={handleFftTouchEnd}
             >
-              <canvas ref={fftCanvasRef} width={canvasW} height={canvasH} style={{ width: canvasW, height: canvasH, imageRendering: smooth ? "auto" : "pixelated" }} role="img" aria-label={roiFftActive && fftCropDims ? `FFT power spectrum of ROI crop (${fftCropDims.cropWidth} by ${fftCropDims.cropHeight} pixels)` : "FFT power spectrum of current frame"} />
-              <canvas ref={fftOverlayRef} width={Math.round(canvasW * DPR)} height={Math.round(canvasH * DPR)} style={{ position: "absolute", top: 0, left: 0, width: canvasW, height: canvasH, pointerEvents: "none" }} aria-hidden="true" />
+              <canvas ref={fftCanvasRef} width={canvasW} height={canvasH} style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", imageRendering: smooth ? "auto" : "pixelated", touchAction: "none" }} role="img" aria-label={roiFftActive && fftCropDims ? `FFT power spectrum of ROI crop (${fftCropDims.cropWidth} by ${fftCropDims.cropHeight} pixels)` : "FFT power spectrum of current frame"} />
+              <canvas ref={fftOverlayRef} width={Math.round(canvasW * DPR)} height={Math.round(canvasH * DPR)} style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", pointerEvents: "none" }} aria-hidden="true" />
             </Box>
             {/* FFT Statistics bar */}
             {showStats && (
@@ -8456,7 +8689,7 @@ function Show3D() {
               </Box>
             )}
             {/* FFT Controls - two rows with histogram on right (like Show4DSTEM) */}
-            {showControls && <Box sx={{ mt: `${SPACING.SM}px`, display: "flex", gap: `${SPACING.SM}px`, width: canvasW, boxSizing: "border-box" }}>
+            {showControls && <Box sx={{ mt: `${SPACING.SM}px`, display: "flex", gap: `${SPACING.SM}px`, width: "100%", maxWidth: canvasW, boxSizing: "border-box", flexWrap: "wrap" }}>
               {/* Left: two rows of controls */}
               <Box sx={{ display: "flex", flexDirection: "column", gap: `${SPACING.XS}px`, flex: 1, justifyContent: "center" }}>
                 {/* Row 1: Scale + Auto */}
@@ -8507,11 +8740,11 @@ function Show3D() {
             Y = frame/time). Shares the side slot with FFT (mutually exclusive).
             Mirrors the FFT panel's adjustability (contrast, zoom/pan, colormap). */}
         {kymoReady && (
-          <Box sx={{ width: canvasW }}>
+          <Box sx={{ width: "100%", maxWidth: canvasW, boxSizing: "border-box" }}>
             {/* Spacer - matches main panel title row height for canvas alignment */}
             <Box sx={{ mb: `${SPACING.XS}px`, height: 16 }} />
             {/* Controls row - title on left, Reset on right */}
-            <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: `${SPACING.XS}px`, height: 28 }}>
+            <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: `${SPACING.XS}px`, minHeight: 28, height: "auto", flexWrap: "wrap", gap: `${SPACING.XS}px` }}>
               <Typography sx={{ ...typography.label, color: themeColors.accentGreen }}>
                 Kymograph ({kymoDataRef.current?.nFrames ?? nSlices} {dimUnit ? unitSymbol(dimUnit) : "frames"} &times; {kymoDataRef.current?.lineLen ?? 0} px)
               </Typography>
@@ -8520,16 +8753,29 @@ function Show3D() {
             {/* Kymograph canvas - same size as main image */}
             <Box
               ref={kymoContainerRef}
-              sx={{ ...container.imageBox, width: canvasW, height: canvasH, cursor: "grab", position: "relative" }}
+              sx={{
+                ...container.imageBox,
+                width: "100%",
+                maxWidth: canvasW,
+                aspectRatio: mainPanelAspectRatio,
+                height: "auto",
+                cursor: "grab",
+                position: "relative",
+                touchAction: "none",
+              }}
               onMouseDown={handleKymoMouseDown}
               onMouseMove={handleKymoMouseMove}
               onMouseUp={handleKymoMouseUp}
               onMouseLeave={() => { kymoClickStartRef.current = null; setIsKymoDragging(false); setKymoPanStart(null); }}
               onWheel={handleKymoWheel}
               onDoubleClick={handleKymoReset}
+              onTouchStart={handleKymoTouchStart}
+              onTouchMove={handleKymoTouchMove}
+              onTouchEnd={handleKymoTouchEnd}
+              onTouchCancel={handleKymoTouchEnd}
             >
-              <canvas ref={kymoCanvasRef} width={canvasW} height={canvasH} style={{ width: canvasW, height: canvasH, imageRendering: "pixelated" }} role="img" aria-label="Kymograph space-time image: distance along profile line versus frame index" />
-              <canvas ref={kymoOverlayRef} width={Math.round(canvasW * DPR)} height={Math.round(canvasH * DPR)} style={{ position: "absolute", top: 0, left: 0, width: canvasW, height: canvasH, pointerEvents: "none" }} aria-hidden="true" />
+              <canvas ref={kymoCanvasRef} width={canvasW} height={canvasH} style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", imageRendering: "pixelated", touchAction: "none" }} role="img" aria-label="Kymograph space-time image: distance along profile line versus frame index" />
+              <canvas ref={kymoOverlayRef} width={Math.round(canvasW * DPR)} height={Math.round(canvasH * DPR)} style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", pointerEvents: "none" }} aria-hidden="true" />
             </Box>
             {/* Axis labels - kymograph-specific footer */}
             <Box sx={{ display: "flex", justifyContent: "space-between", mt: 0.5, px: 0.5 }}>
@@ -8556,7 +8802,7 @@ function Show3D() {
               </Box>
             )}
             {/* Kymograph Controls - two rows with histogram on right (mirror FFT) */}
-            {showControls && <Box sx={{ mt: `${SPACING.SM}px`, display: "flex", gap: `${SPACING.SM}px`, width: canvasW, boxSizing: "border-box" }}>
+            {showControls && <Box sx={{ mt: `${SPACING.SM}px`, display: "flex", gap: `${SPACING.SM}px`, width: "100%", maxWidth: canvasW, boxSizing: "border-box", flexWrap: "wrap" }}>
               {/* Left: two rows of controls */}
               <Box sx={{ display: "flex", flexDirection: "column", gap: `${SPACING.XS}px`, flex: 1, justifyContent: "center" }}>
                 {/* Row 1: Scale + Auto */}

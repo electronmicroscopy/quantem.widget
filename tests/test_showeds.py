@@ -249,6 +249,31 @@ def test_showeds_sidecar_binned_export_request_prepares_portable_payload(tmp_pat
     assert "single sum-binned 2x" in widget.export_status
 
 
+def test_showeds_sidecar_exact_single_export_embeds_dense_widget(tmp_path):
+    cube = np.arange(4 * 6 * 8, dtype=np.uint16).reshape(4, 6, 8)
+    energy = np.linspace(0, 7, 8, dtype=np.float32)
+    sidecar = prepare_spectrum_image_sidecar(cube, energy, tmp_path / "eds")
+    widget = ShowEDS.from_sidecar(
+        "/files/eds/",
+        sidecar_dir=sidecar,
+        title="EDS Exact Export",
+        band=(2, 4),
+        roi=(0, 0, 4, 4),
+    )
+
+    exported, label = widget._export_widget_for_mode("single", encoding="full")
+
+    assert label == "single exact"
+    assert exported.title == "EDS Exact Export"
+    assert exported.compute_backend == "browser"
+    assert exported.sidecar_url == ""
+    assert (exported.n_rows, exported.n_cols, exported.n_energy) == (4, 6, 8)
+    np.testing.assert_array_equal(
+        np.frombuffer(exported.cube_bytes, dtype=np.uint16).reshape(4, 6, 8),
+        cube,
+    )
+
+
 def test_showeds_binned_export_scales_saved_rois_and_bands(tmp_path):
     cube = np.arange(4 * 6 * 8, dtype=np.uint16).reshape(4, 6, 8)
     energy = np.linspace(0, 7, 8, dtype=np.float32)
@@ -664,7 +689,7 @@ def test_showeds_sidecar_ellipse_roi_uses_exact_pixel_mask(tmp_path):
     assert loaded["initial_spectrum"].tolist() == expected.tolist()
 
 
-def test_showeds_stream_sidecar_startup_spectrum_matches_sparse_events(tmp_path):
+def _write_tiny_stream_sidecar(tmp_path):
     rows, cols, n_energy = 4, 5, 6
     events_by_pixel: list[list[int]] = []
     for pixel in range(rows * cols):
@@ -711,6 +736,11 @@ def test_showeds_stream_sidecar_startup_spectrum_matches_sparse_events(tmp_path)
             }
         )
     )
+    return sidecar, rows, cols, n_energy, events_by_pixel
+
+
+def test_showeds_stream_sidecar_startup_spectrum_matches_sparse_events(tmp_path):
+    sidecar, rows, cols, n_energy, events_by_pixel = _write_tiny_stream_sidecar(tmp_path)
 
     loaded = load_spectrum_image_sidecar(sidecar, band=(2, 4), roi=(1, 1, 2, 3))
 
@@ -726,3 +756,35 @@ def test_showeds_stream_sidecar_startup_spectrum_matches_sparse_events(tmp_path)
     assert loaded["roi"] == (1, 1, 2, 3)
     assert loaded["initial_spectrum"].tolist() == expected_spectrum.tolist()
     assert loaded["initial_map"].reshape(-1).tolist() == expected_map.tolist()
+
+
+def test_showeds_stream_sidecar_exact_single_export_embeds_sparse_buffers(tmp_path):
+    sidecar, rows, cols, n_energy, _events_by_pixel = _write_tiny_stream_sidecar(tmp_path)
+    widget = ShowEDS.from_sidecar(
+        "/files/stream/",
+        sidecar_dir=sidecar,
+        title="EDS Stream Export",
+        band=(2, 4),
+        roi=(1, 1, 2, 3),
+    )
+
+    exported, label = widget._export_widget_for_mode("single", encoding="full")
+
+    assert label == "single exact sparse"
+    assert exported.title == "EDS Stream Export"
+    assert exported.compute_backend == "sidecar"
+    assert exported.sidecar_url == ""
+    assert exported.sidecar_meta_json
+    assert len(exported.cube_bytes) == 0
+    assert len(exported.stream_channel_offsets_bytes) == (n_energy + 1) * 4
+    assert len(exported.stream_pixel_offsets_bytes) == (rows * cols + 1) * 4
+    assert len(exported.stream_channel_pixels_bytes) > 0
+    assert len(exported.stream_pixel_channels_bytes) > 0
+
+    out = widget.export_html(tmp_path / "stream_exact.html", mode="single", encoding="full")
+    html = out.read_text()
+    assert "EDS Stream Export" in html
+    assert "quantem.widget.showeds.stream-sidecar.v1" in html
+    assert "/files/stream/" not in html
+    assert "energy_prefix_u32.bin" not in html
+    assert "spatial_prefix_u32.bin" not in html
