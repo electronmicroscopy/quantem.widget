@@ -1556,6 +1556,11 @@ class ShowEDS(anywidget.AnyWidget):
     energy_keV = traitlets.List(traitlets.Float(), default_value=[]).tag(sync=True)
     compute_backend = traitlets.Unicode("browser").tag(sync=True)
     sidecar_url = traitlets.Unicode("").tag(sync=True)
+    sidecar_meta_json = traitlets.Unicode("").tag(sync=True)
+    stream_channel_offsets_bytes = traitlets.Bytes(b"").tag(sync=True)
+    stream_channel_pixels_bytes = traitlets.Bytes(b"").tag(sync=True)
+    stream_pixel_offsets_bytes = traitlets.Bytes(b"").tag(sync=True)
+    stream_pixel_channels_bytes = traitlets.Bytes(b"").tag(sync=True)
 
     band_start = traitlets.Int(0).tag(sync=True)
     band_end = traitlets.Int(1).tag(sync=True)
@@ -2421,13 +2426,85 @@ class ShowEDS(anywidget.AnyWidget):
                     "an explicit spatial_bin for a shareable data-folder cache."
                 )
             if self.compute_backend == "sidecar":
-                raise ValueError(
-                    "single exact export is not available for this folder-backed ShowEDS widget; "
-                    "use mode='folder' or set downsample=2/4"
-                )
+                sidecar = self._sidecar_dir or _sidecar_path_from_url(self.sidecar_url)
+                if sidecar is not None and sidecar.exists():
+                    meta = json.loads((sidecar / "meta.json").read_text())
+                    if meta.get("format") == "quantem.widget.showeds.stream-sidecar.v1":
+                        return self._make_sparse_stream_export_widget(sidecar, meta), "single exact sparse"
+                return self._make_binned_export_widget(spatial_bin=1, energy_bin=1), "single exact"
             label = "single exact"
             return self, label
         raise AssertionError(f"unhandled export mode {mode!r}")
+
+    def _make_sparse_stream_export_widget(self, sidecar: pathlib.Path, meta: dict[str, Any]) -> "ShowEDS":
+        startup = load_spectrum_image_sidecar(
+            sidecar,
+            band=(self.band_start, self.band_end),
+            roi=(self.roi_row, self.roi_col, self.roi_height, self.roi_width),
+            roi_shape=self.roi_shape,
+        )
+        export_meta = {
+            "format": meta["format"],
+            "rows": int(meta["rows"]),
+            "cols": int(meta["cols"]),
+            "n_energy": int(meta["n_energy"]),
+            "n_events": int(meta.get("n_events", 0)),
+        }
+        channel_offsets = (sidecar / meta["channel_offsets"]).read_bytes()
+        channel_pixels = (sidecar / meta["channel_pixels"]).read_bytes()
+        pixel_offsets = (sidecar / meta["pixel_offsets"]).read_bytes()
+        pixel_channels = (sidecar / meta["pixel_channels"]).read_bytes()
+        widget = ShowEDS(
+            None,
+            startup["energy_keV"],
+            title=self.title or "ShowEDS",
+            base_image=startup["base_image"],
+            band=startup["band"],
+            roi=startup["roi"],
+            roi_shape=startup.get("roi_shape", self.roi_shape),
+            initial_map=startup["initial_map"],
+            initial_spectrum=startup["initial_spectrum"],
+            panel_width_px=self.panel_width_px,
+            spectrum_width_px=self.spectrum_width_px,
+            spectrum_height_px=self.spectrum_height_px,
+            show_controls=self.show_controls,
+            log_spectrum=self.log_spectrum,
+            smooth=self.smooth,
+            pixel_size=self.pixel_size,
+            pixel_unit=self.pixel_unit,
+            scale_bar_visible=self.scale_bar_visible,
+            map_vmin_pct=self.map_vmin_pct,
+            map_vmax_pct=self.map_vmax_pct,
+            overlay_opacity=self.overlay_opacity,
+            element_label=self.element_label,
+            show_line_hints=self.show_line_hints,
+            line_hints=[dict(item) for item in self.line_hints],
+            selected_elements=list(self.selected_elements),
+            auto_identify=self.auto_identify,
+            show_debug=self.show_debug,
+            debug_control_visible=self.debug_control_visible,
+            saved_rois=[dict(item) for item in self.saved_rois],
+            saved_bands=[dict(item) for item in self.saved_bands],
+            export_presets=[dict(item) for item in self.export_presets],
+            max_state_bytes=None,
+        )
+        widget.compute_backend = "sidecar"
+        widget.sidecar_url = ""
+        widget.sidecar_meta_json = json.dumps(export_meta, separators=(",", ":"))
+        widget.stream_channel_offsets_bytes = channel_offsets
+        widget.stream_channel_pixels_bytes = channel_pixels
+        widget.stream_pixel_offsets_bytes = pixel_offsets
+        widget.stream_pixel_channels_bytes = pixel_channels
+        widget.export_sidecar_bytes = (
+            len(channel_offsets) + len(channel_pixels) + len(pixel_offsets) + len(pixel_channels)
+        )
+        widget.map_zoom = self.map_zoom
+        widget.map_view_row = self.map_view_row
+        widget.map_view_col = self.map_view_col
+        widget.spectrum_view_start = self.spectrum_view_start
+        widget.spectrum_view_end = self.spectrum_view_end
+        widget._export_light = True
+        return widget
 
     def _make_binned_export_widget(self, *, spatial_bin: int, energy_bin: int) -> "ShowEDS":
         if self.compute_backend == "sidecar":
@@ -2494,10 +2571,15 @@ class ShowEDS(anywidget.AnyWidget):
                 }
             )
         title = self.title or "ShowEDS"
+        export_title = (
+            title
+            if spatial_bin == 1 and energy_bin == 1
+            else f"{title} sum-binned {spatial_bin}x/{energy_bin}x"
+        )
         widget = ShowEDS(
             cube,
             axis,
-            title=f"{title} sum-binned {spatial_bin}x/{energy_bin}x",
+            title=export_title,
             base_image=base,
             band=(band_start, min(int(axis.size), band_end)),
             roi=(

@@ -17,6 +17,8 @@ import PauseIcon from "@mui/icons-material/Pause";
 import StopIcon from "@mui/icons-material/Stop";
 import FastRewindIcon from "@mui/icons-material/FastRewind";
 import FastForwardIcon from "@mui/icons-material/FastForward";
+import KeyboardArrowDownIcon from "@mui/icons-material/KeyboardArrowDown";
+import KeyboardArrowUpIcon from "@mui/icons-material/KeyboardArrowUp";
 import { useTheme } from "../theme";
 import { COLORMAPS, applyColormap } from "../colormaps";
 import { WebGPUFFT, getWebGPUFFT, fft2d, fftshift, autoEnhanceFFT, nextPow2, applyHannWindow2D } from "../fft";
@@ -239,10 +241,13 @@ const compactButton = {
 const controlRow = {
   display: "flex",
   alignItems: "center",
+  flexWrap: "wrap",
   gap: `${SPACING.SM}px`,
   px: 1,
   py: 0.5,
   width: "fit-content",
+  maxWidth: "100%",
+  boxSizing: "border-box",
 };
 
 /** Format stat value for display (compact scientific notation for small values) */
@@ -1692,6 +1697,9 @@ function Show4DSTEM() {
   const [showFft, setShowFft] = useModelState<boolean>("show_fft");
   const [fftWindow, setFftWindow] = useModelState<boolean>("fft_window");
   const [showControls] = useModelState<boolean>("show_controls");
+  const [mobileDpOptionsOpen, setMobileDpOptionsOpen] = React.useState(false);
+  const [mobileViOptionsOpen, setMobileViOptionsOpen] = React.useState(false);
+  const [mobileFftOptionsOpen, setMobileFftOptionsOpen] = React.useState(false);
   const [panelWidthPx, setPanelWidthPx] = useModelState<number>("panel_width_px");
 
   const effectiveShowFft = showFft;
@@ -3659,7 +3667,7 @@ function Show4DSTEM() {
     queueRoiCenter(newRow, newCol);
   };
 
-  const handleDpMouseUp = (e: React.MouseEvent<HTMLCanvasElement>) => {
+  const handleDpMouseUp = (e: React.MouseEvent<HTMLCanvasElement> | React.PointerEvent<HTMLCanvasElement>) => {
     if (draggingDpProfileEndpoint !== null || isDraggingDpProfileLine) {
       setDraggingDpProfileEndpoint(null);
       setIsDraggingDpProfileLine(false);
@@ -3731,7 +3739,13 @@ function Show4DSTEM() {
     setDpPanY(0);
   };
 
-  const handleViMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
+  const handleViMouseDown = (e: React.MouseEvent<HTMLCanvasElement> | React.PointerEvent<HTMLCanvasElement>) => {
+    // Capture the pointer so a touch/mouse probe-drag keeps receiving move/up
+    // events even when the finger leaves the small canvas. Needed for mobile
+    // parity: touchscreens deliver these as pointer events (mirrors DP #751).
+    if ("pointerId" in e) {
+      try { e.currentTarget.setPointerCapture(e.pointerId); } catch {}
+    }
     const canvas = virtualOverlayRef.current;
     if (!canvas) return;
     const rect = canvas.getBoundingClientRect();
@@ -3803,7 +3817,7 @@ function Show4DSTEM() {
     model.save_changes();
   };
 
-  const handleViMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
+  const handleViMouseMove = (e: React.MouseEvent<HTMLCanvasElement> | React.PointerEvent<HTMLCanvasElement>) => {
     const canvas = virtualOverlayRef.current;
     if (!canvas) return;
     const rect = canvas.getBoundingClientRect();
@@ -3925,7 +3939,7 @@ function Show4DSTEM() {
     model.save_changes();
   };
 
-  const handleViMouseUp = (e: React.MouseEvent<HTMLCanvasElement>) => {
+  const handleViMouseUp = (e: React.MouseEvent<HTMLCanvasElement> | React.PointerEvent<HTMLCanvasElement>) => {
     if (draggingViProfileEndpoint !== null || isDraggingViProfileLine) {
       setDraggingViProfileEndpoint(null);
       setIsDraggingViProfileLine(false);
@@ -4019,6 +4033,7 @@ function Show4DSTEM() {
     clientY: number,
   ): { x: number; y: number } => {
     const rect = canvas.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return { x: 0, y: 0 };
     return {
       x: (clientX - rect.left) * (canvas.width / rect.width),
       y: (clientY - rect.top) * (canvas.height / rect.height),
@@ -4357,6 +4372,68 @@ function Show4DSTEM() {
   ];
   const squarePanelWidth = `min(${canvasSize}px, 100%)`;
   const viPanelWidth = `min(${viCanvasWidth}px, 100%)`;
+  const optionLabel = (value: string | undefined | null): string => {
+    if (!value) return "";
+    return value.charAt(0).toUpperCase() + value.slice(1);
+  };
+  const mobileOptionToggleSx = {
+    ...compactButton,
+    display: "none",
+    mt: `${SPACING.XS}px`,
+    width: "100%",
+    justifyContent: "space-between",
+    border: `1px solid ${themeColors.border}`,
+    bgcolor: themeColors.controlBg,
+    color: themeColors.text,
+    textTransform: "none",
+    "@media (max-width: 700px)": {
+      display: "flex",
+      mt: "2px",
+      minHeight: 22,
+      px: 0.5,
+      py: 0,
+      fontSize: 10,
+      lineHeight: "18px",
+      "& .MuiButton-endIcon": { ml: 0.25, mr: 0 },
+      "& .MuiSvgIcon-root": { fontSize: 16 },
+    },
+  };
+  const mobileOptionSummarySx = {
+    ml: 1,
+    color: themeColors.textMuted,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+    minWidth: 0,
+    flex: 1,
+    textAlign: "right",
+  };
+  const mobileOptionsPanelSx = (open: boolean) => ({
+    mt: `${SPACING.SM}px`,
+    display: "grid",
+    gridTemplateRows: "1fr",
+    opacity: 1,
+    transition: "grid-template-rows 180ms ease, opacity 160ms ease",
+    "@media (max-width: 700px)": {
+      mt: open ? "2px" : 0,
+      gridTemplateRows: open ? "1fr" : "0fr",
+      opacity: open ? 1 : 0,
+      pointerEvents: open ? "auto" : "none",
+    },
+  });
+  const mobileOptionsContentSx = {
+    minHeight: 0,
+    overflow: "hidden",
+    display: "flex",
+    gap: `${SPACING.SM}px`,
+    width: "100%",
+    maxWidth: "100%",
+    boxSizing: "border-box",
+    flexWrap: "wrap",
+  };
+  const dpOptionSummary = `${optionLabel(roiMode)}${roiMode === "annular" ? ` ${Math.round(roiRadiusInner)}-${Math.round(roiRadius)}px` : roiMode !== "point" ? ` ${Math.round(roiRadius)}px` : ""} | ${optionLabel(dpColormap)} | ${dpScaleMode === "log" ? "Log" : "Lin"}`;
+  const viOptionSummary = `${viRoiMode === "off" ? "ROI off" : `${optionLabel(viRoiMode)} ${Math.round(viRoiRadius || 5)}px`} | ${optionLabel(viColormap)} | ${viScaleMode === "log" ? "Log" : "Lin"}`;
+  const fftOptionSummary = `${fftScaleMode === "log" ? "Log" : "Lin"} | ${optionLabel(fftColormap)}${fftAuto ? " | Auto" : ""}`;
 
   return (
     <Box
@@ -4365,7 +4442,7 @@ function Show4DSTEM() {
       tabIndex={0}
       onKeyDown={handleKeyDown}
       onMouseDownCapture={handleRootMouseDownCapture}
-      sx={{ p: 2, bgcolor: themeColors.bg, color: themeColors.text, outline: "none", borderRadius: "2px", width: "100%", maxWidth: "100%", boxSizing: "border-box", "@media (max-width: 700px)": { ".jp-OutputArea-output &, .jp-OutputArea-child &": { width: "calc(100vw - 96px)", maxWidth: "calc(100vw - 96px)" } } }}
+      sx={{ p: 2, bgcolor: themeColors.bg, color: themeColors.text, outline: "none", borderRadius: "2px", width: "100%", maxWidth: "100%", boxSizing: "border-box", "@media (max-width: 700px)": { p: 0, ".jp-OutputArea-output &, .jp-OutputArea-child &": { width: "calc(100vw - 96px)", maxWidth: "calc(100vw - 96px)" } } }}
     >
       {/* HEADER */}
       <Typography variant="h6" sx={{ ...typo.title, mb: `${SPACING.SM}px` }}>
@@ -4392,11 +4469,29 @@ function Show4DSTEM() {
       </Typography>
 
       {/* MAIN CONTENT: DP | VI | FFT (three columns when FFT shown) */}
-      <Stack direction="row" sx={{ gap: `${SPACING.LG}px`, flexWrap: "wrap", alignItems: "flex-start", maxWidth: "100%", overflowX: "hidden" }}>
+      <Stack
+        direction="row"
+        sx={{
+          gap: `${SPACING.LG}px`,
+          flexWrap: "wrap",
+          alignItems: "flex-start",
+          maxWidth: "100%",
+          overflowX: "hidden",
+          "@media (max-width: 700px)": {
+            flexDirection: "column",
+            alignItems: "stretch",
+            gap: "4px",
+            "& > :not(style) + :not(style)": {
+              marginLeft: "0 !important",
+              marginTop: 0,
+            },
+          },
+        }}
+      >
         {/* LEFT COLUMN: DP Panel */}
         <Box sx={{ width: squarePanelWidth, maxWidth: "100%" }}>
           {/* DP Header */}
-          <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: `${SPACING.XS}px`, height: 28 }}>
+          <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: `${SPACING.XS}px`, minHeight: 28, height: "auto", flexWrap: "wrap", gap: `${SPACING.XS}px`, "@media (max-width: 700px)": { mb: "1px", minHeight: 22, rowGap: "1px" } }}>
             <Typography variant="caption" sx={{ ...typo.label }}>
               DP at ({Math.round(localPosRow)}, {Math.round(localPosCol)})
               <span style={{ color: roiColors.textColor, marginLeft: SPACING.SM }}>k: ({Math.round(localKRow)}, {Math.round(localKCol)})</span>
@@ -4468,7 +4563,7 @@ function Show4DSTEM() {
             <canvas
               ref={dpOverlayRef} width={detCols} height={detRows}
               onPointerDown={handleDpMouseDown} onPointerMove={handleDpMouseMove}
-              onMouseUp={handleDpMouseUp} onMouseLeave={handleDpMouseLeave}
+              onPointerUp={handleDpMouseUp} onPointerCancel={handleDpMouseUp} onMouseLeave={handleDpMouseLeave}
               onWheel={createZoomHandler(setDpZoom, setDpPanX, setDpPanY, dpViewRef, dpOverlayRef)}
               onDoubleClick={handleDpDoubleClick}
               onTouchStart={handlePanelTouchStart("dp")}
@@ -4502,12 +4597,12 @@ function Show4DSTEM() {
 
           {/* DP Stats Bar */}
           {dpStats && dpStats.length === 4 && (
-            <Box sx={{ mt: `${SPACING.XS}px`, px: 1, py: 0.5, bgcolor: themeColors.bgAlt, display: "flex", gap: 2, alignItems: "center", flexWrap: "wrap", maxWidth: "100%", boxSizing: "border-box" }}>
+            <Box sx={{ mt: `${SPACING.XS}px`, px: 1, py: 0.5, bgcolor: themeColors.bgAlt, display: "flex", columnGap: 1.25, rowGap: 0.25, alignItems: "center", flexWrap: "wrap", maxWidth: "100%", boxSizing: "border-box", "@media (max-width: 700px)": { mt: "2px", px: 0.5, py: 0.25, columnGap: "6px" } }}>
               <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Mean <Box component="span" sx={{ color: themeColors.accent }}>{formatStat(dpStats[0])}</Box></Typography>
               <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Min <Box component="span" sx={{ color: themeColors.accent }}>{formatStat(dpStats[1])}</Box></Typography>
               <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Max <Box component="span" sx={{ color: themeColors.accent }}>{formatStat(dpStats[2])}</Box></Typography>
               <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Std <Box component="span" sx={{ color: themeColors.accent }}>{formatStat(dpStats[3])}</Box></Typography>
-              <Box sx={{ flex: 1 }} />
+              <Box sx={{ flex: 1, "@media (max-width: 700px)": { display: "none" } }} />
               <Typography component="span" onClick={() => { model.set("_preset_request", "bf"); model.save_changes(); }} sx={{ color: roiColors.textColor, fontSize: 11, fontWeight: "bold", cursor: "pointer", "&:hover": { textDecoration: "underline" } }}>BF</Typography>
               <Typography component="span" onClick={() => { model.set("_preset_request", "abf"); model.save_changes(); }} sx={{ color: "#4af", fontSize: 11, fontWeight: "bold", cursor: "pointer", "&:hover": { textDecoration: "underline" } }}>ABF</Typography>
               <Typography component="span" onClick={() => { model.set("_preset_request", "adf"); model.save_changes(); }} sx={{ color: "#fa4", fontSize: 11, fontWeight: "bold", cursor: "pointer", "&:hover": { textDecoration: "underline" } }}>ADF</Typography>
@@ -4516,96 +4611,109 @@ function Show4DSTEM() {
 
           {/* Profile sparkline */}
           {profileActive && (
-            <Box sx={{ mt: `${SPACING.XS}px`, maxWidth: canvasSize, boxSizing: "border-box" }}>
+            <Box sx={{ mt: `${SPACING.XS}px`, width: "100%", maxWidth: canvasSize, boxSizing: "border-box" }}>
               <canvas
                 ref={profileCanvasRef}
                 onMouseMove={handleProfileMouseMove}
                 onMouseLeave={handleProfileMouseLeave}
-                style={{ width: canvasSize, height: profileHeight, display: "block", border: `1px solid ${themeColors.border}`, borderBottom: "none", cursor: "crosshair" }}
+                style={{ width: "100%", height: profileHeight, display: "block", border: `1px solid ${themeColors.border}`, borderBottom: "none", cursor: "crosshair" }}
               />
               <Box
                 onMouseDown={(e) => {
                   setIsResizingProfile(true);
                   profileResizeStart.current = { startY: e.clientY, startHeight: profileHeight };
                 }}
-                sx={{ width: canvasSize, height: 4, cursor: "ns-resize", borderTop: `1px solid ${themeColors.border}`, borderLeft: `1px solid ${themeColors.border}`, borderRight: `1px solid ${themeColors.border}`, borderBottom: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, "&:hover": { bgcolor: themeColors.accent } }}
+                sx={{ width: "100%", height: 4, cursor: "ns-resize", borderTop: `1px solid ${themeColors.border}`, borderLeft: `1px solid ${themeColors.border}`, borderRight: `1px solid ${themeColors.border}`, borderBottom: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, "&:hover": { bgcolor: themeColors.accent } }}
               />
             </Box>
           )}
 
           {/* DP Controls - two rows with histogram on right */}
           {showControls && (
-            <Box sx={{ mt: `${SPACING.SM}px`, display: "flex", gap: `${SPACING.SM}px`, width: "100%", maxWidth: "100%", boxSizing: "border-box", flexWrap: "wrap" }}>
-              {/* Left: two rows of controls */}
-              <Box sx={{ display: "flex", flexDirection: "column", gap: `${SPACING.XS}px`, flex: "1 1 220px", minWidth: 0, justifyContent: "center" }}>
-                {/* Row 1: Detector + slider */}
-                <Box sx={{ ...controlRow, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>
-                  <Typography sx={{ ...typo.label, fontSize: 10 }}>Detector:</Typography>
-                  <Select value={roiMode || "point"} onChange={(e) => setRoiMode(e.target.value)} size="small" sx={{ ...themedSelect, minWidth: 65, fontSize: 10 }} MenuProps={themedMenuProps}>
-                    <MenuItem value="point">Point</MenuItem>
-                    <MenuItem value="circle">Circle</MenuItem>
-                    <MenuItem value="square">Square</MenuItem>
-                    <MenuItem value="rect">Rect</MenuItem>
-                    <MenuItem value="annular">Annular</MenuItem>
-                  </Select>
-                  {(roiMode === "circle" || roiMode === "square" || roiMode === "annular") && (
-                    <>
-                      <Slider
-                        value={roiMode === "annular" ? [roiRadiusInner, roiRadius] : [roiRadius]}
-                        onChange={(_, v) => {
-                          if (roiMode === "annular") {
-                            const [inner, outer] = v as number[];
-                            setRoiRadiusInner(Math.min(inner, outer - 1));
-                            setRoiRadius(Math.max(outer, inner + 1));
-                          } else {
-                            const next = Array.isArray(v) ? v[0] : v;
-                            setRoiRadius(next);
-                          }
-                        }}
-                        min={1}
-                        max={Math.min(detRows, detCols) / 2}
-                        size="small"
-                        sx={{ ...sliderStyles.small, width: roiMode === "annular" ? 67 : 47, mx: 1 }}
-                      />
-                      <Typography sx={{ ...typo.label, fontSize: 10 }}>
-                        {roiMode === "annular" ? `${Math.round(roiRadiusInner)}-${Math.round(roiRadius)}px` : `${Math.round(roiRadius)}px`}
-                      </Typography>
-                    </>
-                  )}
-                </Box>
-                {/* Row 2: Color + Scale + Colorbar */}
-                <Box sx={{ ...controlRow, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>
-                  <Typography sx={{ ...typo.label, fontSize: 10 }}>Color:</Typography>
-                  <Select value={dpColormap} onChange={(e) => setDpColormap(String(e.target.value))} size="small" sx={{ ...themedSelect, minWidth: 65, fontSize: 10 }} MenuProps={themedMenuProps}>
-                    <MenuItem value="inferno">Inferno</MenuItem>
-                    <MenuItem value="viridis">Viridis</MenuItem>
-                    <MenuItem value="plasma">Plasma</MenuItem>
-                    <MenuItem value="magma">Magma</MenuItem>
-                    <MenuItem value="hot">Hot</MenuItem>
-                    <MenuItem value="gray">Gray</MenuItem>
-                  </Select>
-                  <Typography sx={{ ...typo.label, fontSize: 10 }}>Scale:</Typography>
-                  <Select value={dpScaleMode} onChange={(e) => setDpScaleMode(e.target.value as "linear" | "log")} size="small" sx={{ ...themedSelect, minWidth: 50, fontSize: 10 }} MenuProps={themedMenuProps}>
-                    <MenuItem value="linear">Lin</MenuItem>
-                    <MenuItem value="log">Log</MenuItem>
+            <>
+              <Button
+                size="small"
+                onClick={() => setMobileDpOptionsOpen(v => !v)}
+                sx={mobileOptionToggleSx}
+                endIcon={mobileDpOptionsOpen ? <KeyboardArrowUpIcon fontSize="small" /> : <KeyboardArrowDownIcon fontSize="small" />}
+              >
+                <Box component="span">Detector options</Box>
+                <Box component="span" sx={mobileOptionSummarySx}>{dpOptionSummary}</Box>
+              </Button>
+              <Box sx={mobileOptionsPanelSx(mobileDpOptionsOpen)}>
+                <Box sx={mobileOptionsContentSx}>
+                  {/* Left: two rows of controls */}
+                  <Box sx={{ display: "flex", flexDirection: "column", gap: `${SPACING.XS}px`, flex: "1 1 220px", minWidth: 0, justifyContent: "center" }}>
+                    {/* Row 1: Detector + slider */}
+                    <Box sx={{ ...controlRow, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>
+                      <Typography sx={{ ...typo.label, fontSize: 10 }}>Detector:</Typography>
+                      <Select value={roiMode || "point"} onChange={(e) => setRoiMode(e.target.value)} size="small" sx={{ ...themedSelect, minWidth: 65, fontSize: 10 }} MenuProps={themedMenuProps}>
+                        <MenuItem value="point">Point</MenuItem>
+                        <MenuItem value="circle">Circle</MenuItem>
+                        <MenuItem value="square">Square</MenuItem>
+                        <MenuItem value="rect">Rect</MenuItem>
+                        <MenuItem value="annular">Annular</MenuItem>
+                      </Select>
+                      {(roiMode === "circle" || roiMode === "square" || roiMode === "annular") && (
+                        <>
+                          <Slider
+                            value={roiMode === "annular" ? [roiRadiusInner, roiRadius] : [roiRadius]}
+                            onChange={(_, v) => {
+                              if (roiMode === "annular") {
+                                const [inner, outer] = v as number[];
+                                setRoiRadiusInner(Math.min(inner, outer - 1));
+                                setRoiRadius(Math.max(outer, inner + 1));
+                              } else {
+                                const next = Array.isArray(v) ? v[0] : v;
+                                setRoiRadius(next);
+                              }
+                            }}
+                            min={1}
+                            max={Math.min(detRows, detCols) / 2}
+                            size="small"
+                            sx={{ ...sliderStyles.small, width: roiMode === "annular" ? 67 : 47, mx: 1 }}
+                          />
+                          <Typography sx={{ ...typo.label, fontSize: 10 }}>
+                            {roiMode === "annular" ? `${Math.round(roiRadiusInner)}-${Math.round(roiRadius)}px` : `${Math.round(roiRadius)}px`}
+                          </Typography>
+                        </>
+                      )}
+                    </Box>
+                    {/* Row 2: Color + Scale + Colorbar */}
+                    <Box sx={{ ...controlRow, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>
+                      <Typography sx={{ ...typo.label, fontSize: 10 }}>Color:</Typography>
+                      <Select value={dpColormap} onChange={(e) => setDpColormap(String(e.target.value))} size="small" sx={{ ...themedSelect, minWidth: 65, fontSize: 10 }} MenuProps={themedMenuProps}>
+                        <MenuItem value="inferno">Inferno</MenuItem>
+                        <MenuItem value="viridis">Viridis</MenuItem>
+                        <MenuItem value="plasma">Plasma</MenuItem>
+                        <MenuItem value="magma">Magma</MenuItem>
+                        <MenuItem value="hot">Hot</MenuItem>
+                        <MenuItem value="gray">Gray</MenuItem>
+                      </Select>
+                      <Typography sx={{ ...typo.label, fontSize: 10 }}>Scale:</Typography>
+                      <Select value={dpScaleMode} onChange={(e) => setDpScaleMode(e.target.value as "linear" | "log")} size="small" sx={{ ...themedSelect, minWidth: 50, fontSize: 10 }} MenuProps={themedMenuProps}>
+                        <MenuItem value="linear">Lin</MenuItem>
+                        <MenuItem value="log">Log</MenuItem>
 
-                  </Select>
-                  <Typography sx={{ ...typo.label, fontSize: 10 }}>Colorbar:</Typography>
-                  <Switch checked={showDpColorbar} onChange={(e) => setShowDpColorbar(e.target.checked)} size="small" sx={switchStyles.small} />
+                      </Select>
+                      <Typography sx={{ ...typo.label, fontSize: 10 }}>Colorbar:</Typography>
+                      <Switch checked={showDpColorbar} onChange={(e) => setShowDpColorbar(e.target.checked)} size="small" sx={switchStyles.small} />
+                    </Box>
+                  </Box>
+                  {/* Right: Histogram spanning both rows */}
+                  <Box sx={{ display: "flex", flexDirection: "column", alignItems: "flex-start", justifyContent: "center", flex: "0 0 auto", maxWidth: "100%" }}>
+                    <Histogram data={dpHistogramData} vminPct={dpVminPct} vmaxPct={dpVmaxPct} onRangeChange={(min, max) => { setDpVminPct(min); setDpVmaxPct(max); }} width={110} height={58} theme={themeInfo.theme} dataMin={dpGlobalMin} dataMax={dpGlobalMax} />
+                  </Box>
                 </Box>
               </Box>
-              {/* Right: Histogram spanning both rows */}
-              <Box sx={{ display: "flex", flexDirection: "column", alignItems: "flex-start", justifyContent: "center", flex: "0 0 auto", maxWidth: "100%" }}>
-                <Histogram data={dpHistogramData} vminPct={dpVminPct} vmaxPct={dpVmaxPct} onRangeChange={(min, max) => { setDpVminPct(min); setDpVmaxPct(max); }} width={110} height={58} theme={themeInfo.theme} dataMin={dpGlobalMin} dataMax={dpGlobalMax} />
-              </Box>
-            </Box>
+            </>
           )}
         </Box>
 
         {/* SECOND COLUMN: VI Panel */}
         <Box sx={{ width: viPanelWidth, maxWidth: "100%" }}>
           {/* VI Header */}
-          <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: `${SPACING.XS}px`, height: 28 }}>
+          <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: `${SPACING.XS}px`, minHeight: 28, height: "auto", flexWrap: "wrap", gap: `${SPACING.XS}px`, "@media (max-width: 700px)": { mb: "1px", minHeight: 22, rowGap: "1px" } }}>
             <Typography sx={{ ...typo.label, color: themeColors.textMuted }}>
               {shapeRows}×{shapeCols} | {detRows}×{detCols}
             </Typography>
@@ -4641,8 +4749,8 @@ function Show4DSTEM() {
             <canvas ref={virtualCanvasRef} width={shapeCols} height={shapeRows} style={{ position: "absolute", width: "100%", height: "100%", imageRendering: "pixelated" }} />
             <canvas
               ref={virtualOverlayRef} width={shapeCols} height={shapeRows}
-              onMouseDown={handleViMouseDown} onMouseMove={handleViMouseMove}
-              onMouseUp={handleViMouseUp} onMouseLeave={handleViMouseLeave}
+              onPointerDown={handleViMouseDown} onPointerMove={handleViMouseMove}
+              onPointerUp={handleViMouseUp} onPointerCancel={handleViMouseUp} onMouseLeave={handleViMouseLeave}
               onWheel={createZoomHandler(setViZoom, setViPanX, setViPanY, viViewRef, virtualOverlayRef)}
               onDoubleClick={handleViDoubleClick}
               onTouchStart={handlePanelTouchStart("vi")}
@@ -4674,7 +4782,7 @@ function Show4DSTEM() {
 
           {/* VI Stats Bar — stats on left, Auto/Smooth toggles on right edge */}
           {viStats && viStats.length === 4 && (
-            <Box sx={{ mt: `${SPACING.XS}px`, px: 1, py: 0.5, bgcolor: themeColors.bgAlt, display: "flex", gap: 2, alignItems: "center", flexWrap: "wrap", maxWidth: "100%", boxSizing: "border-box" }}>
+            <Box sx={{ mt: `${SPACING.XS}px`, px: 1, py: 0.5, bgcolor: themeColors.bgAlt, display: "flex", columnGap: 1.25, rowGap: 0.25, alignItems: "center", flexWrap: "wrap", maxWidth: "100%", boxSizing: "border-box", "@media (max-width: 700px)": { mt: "2px", px: 0.5, py: 0.25, columnGap: "6px" } }}>
               <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Mean <Box component="span" sx={{ color: themeColors.accent }}>{formatStat(viStats[0])}</Box></Typography>
               <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Min <Box component="span" sx={{ color: themeColors.accent }}>{formatStat(viStats[1])}</Box></Typography>
               <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Max <Box component="span" sx={{ color: themeColors.accent }}>{formatStat(viStats[2])}</Box></Typography>
@@ -4690,85 +4798,98 @@ function Show4DSTEM() {
 
           {/* VI Profile sparkline */}
           {viProfileActive && (
-            <Box sx={{ mt: `${SPACING.XS}px`, maxWidth: viCanvasWidth, boxSizing: "border-box" }}>
+            <Box sx={{ mt: `${SPACING.XS}px`, width: "100%", maxWidth: viCanvasWidth, boxSizing: "border-box" }}>
               <canvas
                 ref={viProfileCanvasRef}
                 onMouseMove={handleViProfileMouseMove}
                 onMouseLeave={handleViProfileMouseLeave}
-                style={{ width: viCanvasWidth, height: viProfileHeight, display: "block", border: `1px solid ${themeColors.border}`, borderBottom: "none", cursor: "crosshair" }}
+                style={{ width: "100%", height: viProfileHeight, display: "block", border: `1px solid ${themeColors.border}`, borderBottom: "none", cursor: "crosshair" }}
               />
               <Box
                 onMouseDown={(e) => {
                   setIsResizingViProfile(true);
                   viProfileResizeStart.current = { startY: e.clientY, startHeight: viProfileHeight };
                 }}
-                sx={{ width: viCanvasWidth, height: 4, cursor: "ns-resize", borderTop: `1px solid ${themeColors.border}`, borderLeft: `1px solid ${themeColors.border}`, borderRight: `1px solid ${themeColors.border}`, borderBottom: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, "&:hover": { bgcolor: themeColors.accent } }}
+                sx={{ width: "100%", height: 4, cursor: "ns-resize", borderTop: `1px solid ${themeColors.border}`, borderLeft: `1px solid ${themeColors.border}`, borderRight: `1px solid ${themeColors.border}`, borderBottom: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, "&:hover": { bgcolor: themeColors.accent } }}
               />
             </Box>
           )}
 
           {/* VI Controls - Two rows with histogram on right */}
           {showControls && (
-            <Box sx={{ mt: `${SPACING.SM}px`, display: "flex", gap: `${SPACING.SM}px`, width: "100%", maxWidth: "100%", boxSizing: "border-box", flexWrap: "wrap" }}>
-              {/* Left: Two rows of controls */}
-              <Box sx={{ display: "flex", flexDirection: "column", gap: `${SPACING.XS}px`, flex: "1 1 220px", minWidth: 0, justifyContent: "center" }}>
-                {/* Row 1: ROI selector */}
-                <Box sx={{ ...controlRow, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>
-                  <Typography sx={{ ...typo.label, fontSize: 10 }}>ROI:</Typography>
-                  <Select value={viRoiMode || "off"} onChange={(e) => setViRoiMode(e.target.value)} size="small" sx={{ ...themedSelect, minWidth: 60, fontSize: 10 }} MenuProps={themedMenuProps}>
-                    <MenuItem value="off">Off</MenuItem>
-                    <MenuItem value="circle">Circle</MenuItem>
-                    <MenuItem value="square">Square</MenuItem>
-                    <MenuItem value="rect">Rect</MenuItem>
-                  </Select>
-                  {viRoiMode && viRoiMode !== "off" && (
-                    <>
-                      {(viRoiMode === "circle" || viRoiMode === "square") && (
+            <>
+              <Button
+                size="small"
+                onClick={() => setMobileViOptionsOpen(v => !v)}
+                sx={mobileOptionToggleSx}
+                endIcon={mobileViOptionsOpen ? <KeyboardArrowUpIcon fontSize="small" /> : <KeyboardArrowDownIcon fontSize="small" />}
+              >
+                <Box component="span">Image options</Box>
+                <Box component="span" sx={mobileOptionSummarySx}>{viOptionSummary}</Box>
+              </Button>
+              <Box sx={mobileOptionsPanelSx(mobileViOptionsOpen)}>
+                <Box sx={mobileOptionsContentSx}>
+                  {/* Left: Two rows of controls */}
+                  <Box sx={{ display: "flex", flexDirection: "column", gap: `${SPACING.XS}px`, flex: "1 1 220px", minWidth: 0, justifyContent: "center" }}>
+                    {/* Row 1: ROI selector */}
+                    <Box sx={{ ...controlRow, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>
+                      <Typography sx={{ ...typo.label, fontSize: 10 }}>ROI:</Typography>
+                      <Select value={viRoiMode || "off"} onChange={(e) => setViRoiMode(e.target.value)} size="small" sx={{ ...themedSelect, minWidth: 60, fontSize: 10 }} MenuProps={themedMenuProps}>
+                        <MenuItem value="off">Off</MenuItem>
+                        <MenuItem value="circle">Circle</MenuItem>
+                        <MenuItem value="square">Square</MenuItem>
+                        <MenuItem value="rect">Rect</MenuItem>
+                      </Select>
+                      {viRoiMode && viRoiMode !== "off" && (
                         <>
-                          <Slider
-                            value={viRoiRadius || 5}
-                            onChange={(_, v) => setViRoiRadius(v as number)}
-                            min={1}
-                            max={Math.min(shapeRows, shapeCols) / 2}
-                            size="small"
-                            sx={{ ...sliderStyles.small, width: 53, mx: 1 }}
-                          />
-                          <Typography sx={{ ...typo.value, fontSize: 10, minWidth: 30 }}>
-                            {Math.round(viRoiRadius || 5)}px
-                          </Typography>
+                          {(viRoiMode === "circle" || viRoiMode === "square") && (
+                            <>
+                              <Slider
+                                value={viRoiRadius || 5}
+                                onChange={(_, v) => setViRoiRadius(v as number)}
+                                min={1}
+                                max={Math.min(shapeRows, shapeCols) / 2}
+                                size="small"
+                                sx={{ ...sliderStyles.small, width: 53, mx: 1 }}
+                              />
+                              <Typography sx={{ ...typo.value, fontSize: 10, minWidth: 30 }}>
+                                {Math.round(viRoiRadius || 5)}px
+                              </Typography>
+                            </>
+                          )}
+                          <Select value={viRoiReduce || "mean"} onChange={(e) => setViRoiReduce(e.target.value)} size="small" sx={{ ...themedSelect, minWidth: 60, fontSize: 10 }} MenuProps={themedMenuProps}>
+                            <MenuItem value="mean">Mean</MenuItem>
+                            <MenuItem value="sum">Sum</MenuItem>
+                            <MenuItem value="max">Max</MenuItem>
+                          </Select>
                         </>
                       )}
-                      <Select value={viRoiReduce || "mean"} onChange={(e) => setViRoiReduce(e.target.value)} size="small" sx={{ ...themedSelect, minWidth: 60, fontSize: 10 }} MenuProps={themedMenuProps}>
-                        <MenuItem value="mean">Mean</MenuItem>
-                        <MenuItem value="sum">Sum</MenuItem>
-                        <MenuItem value="max">Max</MenuItem>
+                    </Box>
+                    {/* Row 2: Color + Scale */}
+                    <Box sx={{ ...controlRow, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>
+                      <Typography sx={{ ...typo.label, fontSize: 10 }}>Color:</Typography>
+                      <Select value={viColormap} onChange={(e) => setViColormap(String(e.target.value))} size="small" sx={{ ...themedSelect, minWidth: 65, fontSize: 10 }} MenuProps={themedMenuProps}>
+                        <MenuItem value="inferno">Inferno</MenuItem>
+                        <MenuItem value="viridis">Viridis</MenuItem>
+                        <MenuItem value="plasma">Plasma</MenuItem>
+                        <MenuItem value="magma">Magma</MenuItem>
+                        <MenuItem value="hot">Hot</MenuItem>
+                        <MenuItem value="gray">Gray</MenuItem>
                       </Select>
-                    </>
-                  )}
-                </Box>
-                {/* Row 2: Color + Scale */}
-                <Box sx={{ ...controlRow, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>
-                  <Typography sx={{ ...typo.label, fontSize: 10 }}>Color:</Typography>
-                  <Select value={viColormap} onChange={(e) => setViColormap(String(e.target.value))} size="small" sx={{ ...themedSelect, minWidth: 65, fontSize: 10 }} MenuProps={themedMenuProps}>
-                    <MenuItem value="inferno">Inferno</MenuItem>
-                    <MenuItem value="viridis">Viridis</MenuItem>
-                    <MenuItem value="plasma">Plasma</MenuItem>
-                    <MenuItem value="magma">Magma</MenuItem>
-                    <MenuItem value="hot">Hot</MenuItem>
-                    <MenuItem value="gray">Gray</MenuItem>
-                  </Select>
-                  <Typography sx={{ ...typo.label, fontSize: 10 }}>Scale:</Typography>
-                  <Select value={viScaleMode} onChange={(e) => setViScaleMode(e.target.value as "linear" | "log")} size="small" sx={{ ...themedSelect, minWidth: 50, fontSize: 10 }} MenuProps={themedMenuProps}>
-                    <MenuItem value="linear">Lin</MenuItem>
-                    <MenuItem value="log">Log</MenuItem>
-                  </Select>
+                      <Typography sx={{ ...typo.label, fontSize: 10 }}>Scale:</Typography>
+                      <Select value={viScaleMode} onChange={(e) => setViScaleMode(e.target.value as "linear" | "log")} size="small" sx={{ ...themedSelect, minWidth: 50, fontSize: 10 }} MenuProps={themedMenuProps}>
+                        <MenuItem value="linear">Lin</MenuItem>
+                        <MenuItem value="log">Log</MenuItem>
+                      </Select>
+                    </Box>
+                  </Box>
+                  {/* Right: Histogram spanning both rows */}
+                  <Box sx={{ display: "flex", flexDirection: "column", alignItems: "flex-start", justifyContent: "center", flex: "0 0 auto", maxWidth: "100%" }}>
+                    <Histogram data={viHistogramData} vminPct={viVminPct} vmaxPct={viVmaxPct} onRangeChange={(min, max) => { if (viAutoContrast) { viPreAutoPctRef.current = null; setViAutoContrast(false); } setViVminPct(min); setViVmaxPct(max); }} width={110} height={58} theme={themeInfo.theme} dataMin={viDataMin} dataMax={viDataMax} />
+                  </Box>
                 </Box>
               </Box>
-              {/* Right: Histogram spanning both rows */}
-              <Box sx={{ display: "flex", flexDirection: "column", alignItems: "flex-start", justifyContent: "center", flex: "0 0 auto", maxWidth: "100%" }}>
-                <Histogram data={viHistogramData} vminPct={viVminPct} vmaxPct={viVmaxPct} onRangeChange={(min, max) => { if (viAutoContrast) { viPreAutoPctRef.current = null; setViAutoContrast(false); } setViVminPct(min); setViVmaxPct(max); }} width={110} height={58} theme={themeInfo.theme} dataMin={viDataMin} dataMax={viDataMax} />
-              </Box>
-            </Box>
+            </>
           )}
         </Box>
 
@@ -4776,7 +4897,7 @@ function Show4DSTEM() {
         {effectiveShowFft && (
           <Box sx={{ width: viPanelWidth, maxWidth: "100%" }}>
             {/* FFT Header */}
-            <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: `${SPACING.XS}px`, height: 28 }}>
+            <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: `${SPACING.XS}px`, minHeight: 28, height: "auto", flexWrap: "wrap", gap: `${SPACING.XS}px`, "@media (max-width: 700px)": { mb: "1px", minHeight: 22, rowGap: "1px" } }}>
               <Typography variant="caption" sx={{ ...typo.label, color: roiFftActive && fftCropDims ? accentGreen : themeColors.textMuted }}>{roiFftActive && fftCropDims ? `ROI FFT (${fftCropDims.cropWidth}\u00D7${fftCropDims.cropHeight})` : "FFT"}</Typography>
               <Stack direction="row" spacing={`${SPACING.SM}px`} alignItems="center">
                 <Button size="small" sx={compactButton} disabled={fftZoom === 1 && fftPanX === 0 && fftPanY === 0} onClick={() => { setFftZoom(1); setFftPanX(0); setFftPanY(0); }}>Reset</Button>
@@ -4803,7 +4924,7 @@ function Show4DSTEM() {
 
             {/* FFT Stats Bar */}
             {fftStats && fftStats.length === 4 && (
-              <Box sx={{ mt: `${SPACING.XS}px`, px: 1, py: 0.5, bgcolor: themeColors.bgAlt, display: "flex", gap: 2, flexWrap: "wrap", maxWidth: "100%", boxSizing: "border-box" }}>
+              <Box sx={{ mt: `${SPACING.XS}px`, px: 1, py: 0.5, bgcolor: themeColors.bgAlt, display: "flex", columnGap: 1.25, rowGap: 0.25, flexWrap: "wrap", maxWidth: "100%", boxSizing: "border-box", "@media (max-width: 700px)": { mt: "2px", px: 0.5, py: 0.25, columnGap: "6px" } }}>
                 <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Mean <Box component="span" sx={{ color: themeColors.accent }}>{formatStat(fftStats[0])}</Box></Typography>
                 <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Min <Box component="span" sx={{ color: themeColors.accent }}>{formatStat(fftStats[1])}</Box></Typography>
                 <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Max <Box component="span" sx={{ color: themeColors.accent }}>{formatStat(fftStats[2])}</Box></Typography>
@@ -4835,46 +4956,59 @@ function Show4DSTEM() {
 
             {/* FFT Controls - Two rows with histogram on right */}
             {showControls && (
-              <Box sx={{ mt: `${SPACING.SM}px`, display: "flex", gap: `${SPACING.SM}px`, width: "100%", maxWidth: "100%", boxSizing: "border-box", flexWrap: "wrap" }}>
-                {/* Left: Two rows of controls */}
-                <Box sx={{ display: "flex", flexDirection: "column", gap: `${SPACING.XS}px`, flex: "1 1 220px", minWidth: 0, justifyContent: "center" }}>
-                  {/* Row 1: Scale + Clip */}
-                  <Box sx={{ ...controlRow, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>
-                    <Typography sx={{ ...typo.label, fontSize: 10 }}>Scale:</Typography>
-                    <Select value={fftScaleMode} onChange={(e) => setFftScaleMode(e.target.value as "linear" | "log")} size="small" sx={{ ...themedSelect, minWidth: 50, fontSize: 10 }} MenuProps={themedMenuProps}>
-                      <MenuItem value="linear">Lin</MenuItem>
-                      <MenuItem value="log">Log</MenuItem>
+              <>
+                <Button
+                  size="small"
+                  onClick={() => setMobileFftOptionsOpen(v => !v)}
+                  sx={mobileOptionToggleSx}
+                  endIcon={mobileFftOptionsOpen ? <KeyboardArrowUpIcon fontSize="small" /> : <KeyboardArrowDownIcon fontSize="small" />}
+                >
+                  <Box component="span">FFT options</Box>
+                  <Box component="span" sx={mobileOptionSummarySx}>{fftOptionSummary}</Box>
+                </Button>
+                <Box sx={mobileOptionsPanelSx(mobileFftOptionsOpen)}>
+                  <Box sx={mobileOptionsContentSx}>
+                    {/* Left: Two rows of controls */}
+                    <Box sx={{ display: "flex", flexDirection: "column", gap: `${SPACING.XS}px`, flex: "1 1 220px", minWidth: 0, justifyContent: "center" }}>
+                      {/* Row 1: Scale + Clip */}
+                      <Box sx={{ ...controlRow, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>
+                        <Typography sx={{ ...typo.label, fontSize: 10 }}>Scale:</Typography>
+                        <Select value={fftScaleMode} onChange={(e) => setFftScaleMode(e.target.value as "linear" | "log")} size="small" sx={{ ...themedSelect, minWidth: 50, fontSize: 10 }} MenuProps={themedMenuProps}>
+                          <MenuItem value="linear">Lin</MenuItem>
+                          <MenuItem value="log">Log</MenuItem>
 
-                    </Select>
-                    <Typography sx={{ ...typo.label, fontSize: 10 }}>Auto:</Typography>
-                    <Switch checked={fftAuto} onChange={(e) => toggleFftAuto(e.target.checked)} size="small" sx={switchStyles.small} />
-                    {fftCropDims && (
-                      <>
-                        <Typography sx={{ ...typo.label, fontSize: 10 }}>Win:</Typography>
-                        <Switch checked={fftWindow} onChange={(e) => setFftWindow(e.target.checked)} size="small" sx={switchStyles.small} />
-                      </>
-                    )}
-                  </Box>
-                  {/* Row 2: Color */}
-                  <Box sx={{ ...controlRow, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>
-                    <Typography sx={{ ...typo.label, fontSize: 10 }}>Color:</Typography>
-                    <Select value={fftColormap} onChange={(e) => setFftColormap(String(e.target.value))} size="small" sx={{ ...themedSelect, minWidth: 65, fontSize: 10 }} MenuProps={themedMenuProps}>
-                      <MenuItem value="inferno">Inferno</MenuItem>
-                      <MenuItem value="viridis">Viridis</MenuItem>
-                      <MenuItem value="plasma">Plasma</MenuItem>
-                      <MenuItem value="magma">Magma</MenuItem>
-                      <MenuItem value="hot">Hot</MenuItem>
-                      <MenuItem value="gray">Gray</MenuItem>
-                    </Select>
+                        </Select>
+                        <Typography sx={{ ...typo.label, fontSize: 10 }}>Auto:</Typography>
+                        <Switch checked={fftAuto} onChange={(e) => toggleFftAuto(e.target.checked)} size="small" sx={switchStyles.small} />
+                        {fftCropDims && (
+                          <>
+                            <Typography sx={{ ...typo.label, fontSize: 10 }}>Win:</Typography>
+                            <Switch checked={fftWindow} onChange={(e) => setFftWindow(e.target.checked)} size="small" sx={switchStyles.small} />
+                          </>
+                        )}
+                      </Box>
+                      {/* Row 2: Color */}
+                      <Box sx={{ ...controlRow, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>
+                        <Typography sx={{ ...typo.label, fontSize: 10 }}>Color:</Typography>
+                        <Select value={fftColormap} onChange={(e) => setFftColormap(String(e.target.value))} size="small" sx={{ ...themedSelect, minWidth: 65, fontSize: 10 }} MenuProps={themedMenuProps}>
+                          <MenuItem value="inferno">Inferno</MenuItem>
+                          <MenuItem value="viridis">Viridis</MenuItem>
+                          <MenuItem value="plasma">Plasma</MenuItem>
+                          <MenuItem value="magma">Magma</MenuItem>
+                          <MenuItem value="hot">Hot</MenuItem>
+                          <MenuItem value="gray">Gray</MenuItem>
+                        </Select>
+                      </Box>
+                    </Box>
+                    {/* Right: Histogram spanning both rows */}
+                    <Box sx={{ display: "flex", flexDirection: "column", alignItems: "flex-start", justifyContent: "center", flex: "0 0 auto", maxWidth: "100%" }}>
+                      {fftHistogramData && (
+                        <Histogram data={fftHistogramData} vminPct={fftVminPct} vmaxPct={fftVmaxPct} onRangeChange={(min, max) => { setFftVminPct(min); setFftVmaxPct(max); }} width={110} height={58} theme={themeInfo.theme} dataMin={fftDataMin} dataMax={fftDataMax} />
+                      )}
+                    </Box>
                   </Box>
                 </Box>
-                {/* Right: Histogram spanning both rows */}
-                <Box sx={{ display: "flex", flexDirection: "column", alignItems: "flex-start", justifyContent: "center", flex: "0 0 auto", maxWidth: "100%" }}>
-                  {fftHistogramData && (
-                    <Histogram data={fftHistogramData} vminPct={fftVminPct} vmaxPct={fftVmaxPct} onRangeChange={(min, max) => { setFftVminPct(min); setFftVmaxPct(max); }} width={110} height={58} theme={themeInfo.theme} dataMin={fftDataMin} dataMax={fftDataMax} />
-                  )}
-                </Box>
-              </Box>
+              </>
             )}
           </Box>
         )}
