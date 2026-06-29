@@ -123,6 +123,71 @@ can be opened directly in Colab. To make a GitHub-readable preview copy, see
 See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, checks, widget export
 expectations, and release-candidate guidance.
 
+### Widget PR checklist
+
+Use this before opening a widget PR. It is intentionally explicit so human
+contributors and coding agents can both copy it into a PR description and work
+through it line by line.
+
+- [ ] The widget has a small, stable Python API with NumPy-style docs, helpful
+  errors, and `(row, col)` coordinate wording where positions are shown.
+- [ ] The frontend follows the local viewer patterns instead of inventing a new
+  design system; compare against [Show2D](docs/tutorials/show2d.ipynb),
+  [Show3D](docs/tutorials/show3d.ipynb),
+  [Show3DSlices](docs/tutorials/show3dslices.ipynb),
+  [Show4DSTEM](docs/tutorials/show4dstem.ipynb), and
+  [ShowEDS](docs/tutorials/showeds.ipynb).
+- [ ] Controls are compact and content-sized: use icon/text buttons for
+  commands, switches for binary options, sliders for numeric values, menus for
+  option sets, and avoid stretched empty control bars.
+- [ ] The widget supports both light and dark notebook/docs themes: all labels,
+  borders, controls, plots, histograms, ROI handles, status text, and export UI
+  remain readable.
+- [ ] The widget has no hardcoded dark-only or light-only assumptions in plots,
+  canvas backgrounds, tooltips, menus, or exported HTML.
+- [ ] Histogram UI matches the existing Show2D-style interaction: compact panel,
+  no extra whitespace, draggable min/max handles, fast center drag, and no
+  visible lag.
+- [ ] Any draggable selector has live preview separate from committed widget
+  state; use refs/CSS transforms or an equivalent fast path during drag. See
+  [performance notes](docs/maintainer/widget-performance.md).
+- [ ] Real-time interactions are browser-driven and verified by actually
+  dragging controls in JupyterLab or exported HTML, not only by reading code or
+  unit tests.
+- [ ] Expensive work avoids Python/kernel round trips during pointer movement;
+  use WebGPU, typed arrays, cached indexes, workers, or throttled schedulers
+  where the widget interaction requires live feedback.
+- [ ] Large scientific data stays honest about precision and size: do not
+  silently crop, bin, downsample, quantize, or materialize sparse zeros.
+- [ ] Any binning/downsampling is explicit in the API and documentation, with
+  the reducer named clearly, for example mean, sum, or display-scaled `uint8`.
+- [ ] The widget exposes `export_html(path=None, title=None, mode="single",
+  encoding="full", downsample=None)` when it can be exported. Follow the
+  [HTML export protocol](docs/api/html-export.md).
+- [ ] If the widget has an in-widget **Export** button, it uses the standard
+  export traits and reports filename, mode, encoding/downsample choice, and
+  output size.
+- [ ] Saved Jupyter widget state works: after interacting, Cmd+S, close/reopen
+  in JupyterLab, and confirm the view restores without rerunning cells when the
+  environment supports saved widget state.
+- [ ] Standalone HTML works without a live Python kernel, and the exported page
+  preserves the intended theme, viewport, interaction state, and scale/contrast
+  state.
+- [ ] GitHub sharing is treated separately from live HTML: GitHub notebook
+  previews should use static compressed widget pictures, never heavy live widget
+  state. See [GitHub preview](docs/github-preview.md).
+- [ ] Documentation includes a minimal tutorial notebook under
+  [docs/tutorials](docs/tutorials) and an API page under [docs/api](docs/api)
+  when a public widget or loader is added.
+- [ ] Tutorial notebooks avoid unnecessary `display(...)` and extra display
+  imports; let the returned widget render naturally.
+- [ ] The change includes focused tests for Python state/export behavior and
+  frontend build coverage where possible; start with `PYTHONPATH=src pytest -q`
+  and `npm run build`.
+- [ ] Before committing, inspect `git status --short` and `git diff --stat`;
+  do not commit generated HTML, docs builds, screenshots, local notebooks,
+  private data, or machine-specific notes.
+
 ## Issues
 
 https://github.com/bobleesj/quantem.widget/issues
