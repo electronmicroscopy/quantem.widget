@@ -6,6 +6,7 @@ import json
 import pathlib
 import tempfile
 import time
+from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Any
 from urllib.parse import quote, unquote
@@ -24,6 +25,57 @@ from quantem.widget.utils.state_io import (
 
 DEFAULT_MAX_SHOWEDS_SIDECAR_BYTES = 12 * 1024**3
 DEFAULT_STARTUP_ROI_MAX_PX = 512
+
+
+@dataclass(slots=True)
+class SpectrumImage:
+    """Parsed EDS/EELS spectrum image with energy on the last axis.
+
+    This is the small public handoff object returned by :func:`load_eds`. It is
+    intentionally widget-local for now: users can pass it directly to
+    :class:`ShowEDS`, while large native EMD files stay lazy and exact instead
+    of forcing a dense cube into notebook state.
+    """
+
+    cube: Any | None
+    energy_keV: np.ndarray | list[float]
+    base_image: Any | None = None
+    title: str = ""
+    candidate_elements: list[str] = field(default_factory=list)
+    path: pathlib.Path | None = None
+    source_shape: tuple[int, int, int] | None = None
+    spatial_bin: int = 1
+    energy_bin: int = 1
+    backend: str = "browser"
+    sidecar_dir: pathlib.Path | None = None
+    sidecar_url: str | None = None
+    initial_map: np.ndarray | None = None
+    initial_spectrum: np.ndarray | None = None
+    sampling: float | tuple[float, float] | list[float] | None = None
+    units: str | list[str] | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def array(self) -> Any | None:
+        """Return the dense or lazy `(row, col, energy)` cube, when available."""
+
+        return self.cube
+
+    @property
+    def shape(self) -> tuple[int, int, int] | None:
+        """Return the spectrum-image shape `(row, col, energy)` when known."""
+
+        if self.cube is not None and hasattr(self.cube, "shape"):
+            return tuple(int(v) for v in self.cube.shape)
+        if self.initial_map is not None and self.energy_keV is not None:
+            rows, cols = np.asarray(self.initial_map).shape
+            return int(rows), int(cols), int(np.asarray(self.energy_keV).size)
+        return self.source_shape
+
+    def show(self, **kwargs: Any) -> "ShowEDS":
+        """Create a :class:`ShowEDS` widget from this parsed spectrum image."""
+
+        return ShowEDS(self, **kwargs)
 
 
 _FALLBACK_LINES: tuple[dict[str, Any], ...] = (
@@ -1178,7 +1230,7 @@ def _read_emd_spectrum_image(
         "energy_keV": energy_axis,
         "base_image": base,
         "title": _dataset_title(cube_ds) or source.stem,
-        "candidate_elements": list(candidate_elements or ["O", "Si", "Ca", "Au"]),
+        "candidate_elements": list(candidate_elements or ["O", "Si", "Ca", "Cu", "Au"]),
         "source_shape": source_shape,
         "path": str(source),
     }
@@ -1223,6 +1275,165 @@ def load_emd_spectrum_image(
         "energy_bin": int(max(1, energy_bin)),
         "path": loaded["path"],
     }
+
+
+def load_eds(
+    path: str | pathlib.Path,
+    *,
+    backend: str = "auto",
+    sidecar_dir: str | pathlib.Path | None = None,
+    sidecar_url: str | None = None,
+    rebuild_sidecar: bool = False,
+    energy_chunk: int = 256,
+    spatial_bin: int = 1,
+    energy_bin: int = 1,
+    max_sidecar_bytes: int | None = DEFAULT_MAX_SHOWEDS_SIDECAR_BYTES,
+    candidate_elements: list[str] | tuple[str, ...] | None = None,
+) -> SpectrumImage:
+    """Parse an EDS/EELS spectrum image into a :class:`SpectrumImage`.
+
+    The returned object always uses the ``(row, col, energy)`` convention and can
+    be passed directly to :class:`ShowEDS`::
+
+        from quantem.widget import ShowEDS, load_eds
+
+        eds = load_eds("scan.emd")
+        ShowEDS(eds)
+
+    For native Velox/RSCIIO ``.emd`` files, ``backend="auto"`` keeps exact
+    no-bin data lazy by default: it parses metadata and the energy axis, but it
+    does not materialize the full dense cube. If a data folder is requested, or
+    if ``spatial_bin`` / ``energy_bin`` are larger than one, the existing exact
+    ShowEDS sidecar path is used.
+    """
+
+    source = pathlib.Path(path).expanduser()
+    if source.is_dir():
+        meta_path = source / "meta.json"
+        if not meta_path.exists():
+            raise FileNotFoundError(f"ShowEDS data-folder metadata was not found: {meta_path}")
+        startup = load_spectrum_image_sidecar(source)
+        meta = dict(startup.get("meta", {}))
+        url = _normalise_sidecar_url(sidecar_url) if sidecar_url is not None else None
+        if url is None:
+            try:
+                url = _sidecar_url_from_path(source)
+            except ValueError:
+                url = ""
+        title = str(meta.get("title") or pathlib.Path(str(meta.get("source", source))).stem or source.name)
+        elements = candidate_elements or meta.get("candidate_elements") or ["O", "Si", "Ca", "Cu", "Au"]
+        return SpectrumImage(
+            cube=None,
+            energy_keV=startup["energy_keV"],
+            base_image=startup["base_image"],
+            title=title,
+            candidate_elements=_normalise_element_symbols(elements),
+            path=pathlib.Path(str(meta.get("source"))) if meta.get("source") else None,
+            source_shape=(int(meta["rows"]), int(meta["cols"]), int(meta["n_energy"])),
+            spatial_bin=int(meta.get("spatial_bin", 1)),
+            energy_bin=int(meta.get("energy_bin", 1)),
+            backend="sidecar",
+            sidecar_dir=source,
+            sidecar_url=url,
+            initial_map=startup["initial_map"],
+            initial_spectrum=startup["initial_spectrum"],
+            metadata=meta,
+        )
+
+    suffix = source.suffix.lower()
+    if suffix != ".emd":
+        raise ValueError(
+            f"load_eds currently parses Velox/RSCIIO .emd files or ShowEDS data folders, got {source.name!r}"
+        )
+
+    backend_mode = _normalise_emd_backend(backend)
+    spatial_bin_value = int(max(1, spatial_bin))
+    energy_bin_value = int(max(1, energy_bin))
+    wants_binned_cache = spatial_bin_value > 1 or energy_bin_value > 1
+    sidecar_path = (
+        pathlib.Path(sidecar_dir).expanduser()
+        if sidecar_dir is not None
+        else pathlib.Path.cwd() / "sidecars" / source.stem
+    )
+    meta_path = sidecar_path / "meta.json"
+    has_existing_cache = (not rebuild_sidecar) and meta_path.exists()
+    use_native_query = backend_mode == "kernel" or (
+        backend_mode == "auto" and not has_existing_cache and not wants_binned_cache
+    )
+
+    if backend_mode == "kernel" and wants_binned_cache:
+        raise ValueError(
+            "load_eds(..., backend='kernel') keeps the native EMD exact and does not "
+            "apply spatial_bin or energy_bin. Use backend='sidecar' for a portable "
+            "sum-binned data folder."
+        )
+
+    if use_native_query:
+        loaded = _read_emd_spectrum_image(source, lazy=True, candidate_elements=candidate_elements)
+        cube = loaded["cube"]
+        axis = np.asarray(loaded["energy_keV"], dtype=np.float32)
+        return SpectrumImage(
+            cube=cube,
+            energy_keV=axis,
+            base_image=loaded["base_image"],
+            title=str(loaded["title"] or source.stem),
+            candidate_elements=_normalise_element_symbols(loaded.get("candidate_elements") or candidate_elements or []),
+            path=source,
+            source_shape=tuple(int(v) for v in getattr(cube, "shape", loaded["source_shape"])),
+            spatial_bin=1,
+            energy_bin=1,
+            backend="kernel",
+            metadata={"source_shape": loaded["source_shape"], "path": loaded["path"]},
+        )
+
+    if rebuild_sidecar or not meta_path.exists():
+        loaded = _read_emd_spectrum_image(source, lazy=True, candidate_elements=candidate_elements)
+        cube = loaded["cube"]
+        axis = np.asarray(loaded["energy_keV"], dtype=np.float32)
+        base = loaded["base_image"]
+        sidecar_shape = _binned_spectrum_image_shape(
+            tuple(int(v) for v in cube.shape),
+            spatial_bin=spatial_bin_value,
+            energy_bin=energy_bin_value,
+        )
+        estimated_bytes = _estimate_spectrum_image_sidecar_bytes(
+            sidecar_shape,
+            include_base_image=base is not None,
+        )
+        if max_sidecar_bytes is not None and estimated_bytes > int(max_sidecar_bytes):
+            raise ValueError(
+                "load_eds cannot create the requested exact ShowEDS data folder within "
+                "the configured safety limit. "
+                f"Source shape {tuple(int(v) for v in cube.shape)} with spatial_bin={spatial_bin_value} "
+                f"and energy_bin={energy_bin_value} would create cache shape {sidecar_shape}, estimated at "
+                f"{_format_bytes(estimated_bytes)}, above the {_format_bytes(int(max_sidecar_bytes))} safety limit. "
+                "Use the native lazy backend for exact no-bin analysis, increase spatial_bin for a smaller "
+                "portable cache, or pass max_sidecar_bytes=None only for an intentional local experiment."
+            )
+        if wants_binned_cache:
+            cube, axis, base = _sum_bin_spectrum_image_lazy(
+                cube,
+                axis,
+                base_image=base,
+                spatial_bin=spatial_bin_value,
+                energy_bin=energy_bin_value,
+            )
+        prepare_spectrum_image_sidecar(
+            cube,
+            axis,
+            sidecar_path,
+            base_image=None if base is None else base,
+            energy_chunk=energy_chunk,
+            max_sidecar_bytes=max_sidecar_bytes,
+        )
+
+    url = _normalise_sidecar_url(sidecar_url) if sidecar_url is not None else _sidecar_url_from_path(sidecar_path)
+    loaded = load_eds(sidecar_path, sidecar_url=url, candidate_elements=candidate_elements)
+    loaded.path = source
+    loaded.spatial_bin = spatial_bin_value
+    loaded.energy_bin = energy_bin_value
+    loaded.metadata.setdefault("source", str(source))
+    return loaded
 
 
 def _normalise_emd_backend(value: str | None) -> str:
@@ -1394,7 +1605,7 @@ class ShowEDS(anywidget.AnyWidget):
 
     def __init__(
         self,
-        cube: np.ndarray | None,
+        cube: np.ndarray | SpectrumImage | None,
         energy_keV: np.ndarray | list[float] | None = None,
         *,
         title: str = "",
@@ -1439,10 +1650,105 @@ class ShowEDS(anywidget.AnyWidget):
     ):
         super().__init__(**kwargs)
         self.widget_version = resolve_widget_version()
+        spectrum_image_sidecar_dir: pathlib.Path | None = None
+        if isinstance(cube, SpectrumImage):
+            spectrum_image = cube
+            if title == "":
+                title = spectrum_image.title
+            if candidate_elements is None:
+                candidate_elements = spectrum_image.candidate_elements
+            if sampling is None:
+                sampling = spectrum_image.sampling
+            if units is None:
+                units = spectrum_image.units
+            if energy_keV is None:
+                energy_keV = spectrum_image.energy_keV
+            axis = np.asarray(energy_keV, dtype=np.float32)
+            backend = str(spectrum_image.backend or "browser").strip().lower()
+
+            if backend == "sidecar":
+                spectrum_image_sidecar_dir = spectrum_image.sidecar_dir
+                if sidecar_url == "":
+                    if spectrum_image.sidecar_url:
+                        sidecar_url = spectrum_image.sidecar_url
+                    elif spectrum_image_sidecar_dir is not None:
+                        sidecar_url = _sidecar_url_from_path(spectrum_image_sidecar_dir)
+                custom_startup = (
+                    energy is not None
+                    or width is not None
+                    or band is not None
+                    or roi is not None
+                    or _normalise_roi_shape(roi_shape) != "rect"
+                )
+                if not custom_startup and initial_map is None:
+                    initial_map = spectrum_image.initial_map
+                if not custom_startup and initial_spectrum is None:
+                    initial_spectrum = spectrum_image.initial_spectrum
+                if not custom_startup and base_image is None:
+                    base_image = spectrum_image.base_image
+                if (
+                    initial_map is None
+                    or initial_spectrum is None
+                    or base_image is None
+                    or energy_keV is None
+                ):
+                    if spectrum_image_sidecar_dir is None:
+                        raise ValueError("ShowEDS sidecar SpectrumImage requires sidecar_dir")
+                    startup = load_spectrum_image_sidecar(
+                        spectrum_image_sidecar_dir,
+                        energy=energy,
+                        width=width,
+                        band=band,
+                        roi=roi,
+                        roi_shape=roi_shape,
+                    )
+                    if initial_map is None:
+                        initial_map = startup["initial_map"]
+                    if initial_spectrum is None:
+                        initial_spectrum = startup["initial_spectrum"]
+                    if base_image is None:
+                        base_image = startup["base_image"]
+                    if energy_keV is None:
+                        energy_keV = startup["energy_keV"]
+                    band = startup["band"]
+                    roi = startup["roi"]
+                    roi_shape = startup.get("roi_shape", roi_shape)
+                cube = None
+            elif backend in {"kernel", "emd", "lazy", "native"}:
+                if spectrum_image.cube is None:
+                    raise ValueError("ShowEDS lazy SpectrumImage requires a native cube handle")
+                startup = _initial_lazy_emd_state(
+                    spectrum_image.cube,
+                    axis,
+                    spectrum_image.base_image,
+                    energy=energy,
+                    width=width,
+                    band=band,
+                    roi=roi,
+                    roi_shape=roi_shape,
+                )
+                initial_map = startup["initial_map"]
+                initial_spectrum = startup["initial_spectrum"]
+                base_image = startup["base_image"]
+                band = startup["band"]
+                roi = startup["roi"]
+                roi_shape = startup["roi_shape"]
+                lazy_path = spectrum_image.path
+                cube = None
+            else:
+                if spectrum_image.cube is None:
+                    raise ValueError("ShowEDS browser SpectrumImage requires a dense cube")
+                if base_image is None:
+                    base_image = spectrum_image.base_image
+                cube = spectrum_image.cube
+
         self._lazy_path = pathlib.Path(lazy_path).expanduser() if lazy_path is not None else None
         self._lazy_cube: Any | None = None
         self._lazy_loading = False
-        self._sidecar_dir: pathlib.Path | None = _sidecar_path_from_url(sidecar_url) if sidecar_url else None
+        self._sidecar_dir: pathlib.Path | None = (
+            spectrum_image_sidecar_dir
+            or (_sidecar_path_from_url(sidecar_url) if sidecar_url else None)
+        )
 
         data: np.ndarray | None = None
         if cube is None:
