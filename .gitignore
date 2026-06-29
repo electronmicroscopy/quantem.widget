@@ -14,6 +14,7 @@ node_modules/
 
 # Built JS bundles (CI rebuilds via `npm run build`; shipped in the wheel, not git)
 src/quantem/widget/static/*.js
+src/quantem/widget/static/*.css
 src/quantem/widget/static/browser/
 
 # Docs build
