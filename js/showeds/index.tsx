@@ -466,7 +466,7 @@ function MapHistogram({
           e.stopPropagation();
           e.nativeEvent.stopImmediatePropagation();
         }}
-        sx={{ position: "absolute", left: 0, top: height - 1, width, height: 8, display: "flex", alignItems: "flex-start", cursor: "grab" }}
+        sx={{ position: "absolute", left: 0, top: height - 1, width, height: 8, display: "flex", alignItems: "flex-start", cursor: "grab", zIndex: 2, overflow: "visible" }}
       >
         <Slider
           value={liveRange}
@@ -493,10 +493,13 @@ function MapHistogram({
           sx={{
             width,
             py: 0,
-            "& .MuiSlider-thumb": { width: 8, height: 8, bgcolor: colors.slider },
-            "& .MuiSlider-rail": { height: 2, bgcolor: colors.barInactive },
-            "& .MuiSlider-track": { height: 2, cursor: "grab", bgcolor: colors.slider },
-            "& .MuiSlider-valueLabel": { fontSize: 10, px: 0.5, py: 0.25 },
+            position: "relative",
+            zIndex: 3,
+            overflow: "visible",
+            "& .MuiSlider-rail": { height: 2, bgcolor: colors.barInactive, zIndex: 1 },
+            "& .MuiSlider-track": { height: 2, cursor: "grab", bgcolor: colors.slider, zIndex: 2 },
+            "& .MuiSlider-thumb": { width: 8, height: 8, bgcolor: colors.slider, zIndex: 4 },
+            "& .MuiSlider-valueLabel": { fontSize: 10, px: 0.5, py: 0.25, zIndex: 5 },
           }}
         />
       </Box>
