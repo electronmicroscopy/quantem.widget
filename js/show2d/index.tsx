@@ -401,6 +401,16 @@ const FFT_SNAP_RADIUS = 5;
 // Types
 // ============================================================================
 type ZoomState = { zoom: number; panX: number; panY: number };
+type TouchZoomState = {
+  idx: number;
+  mode: "pan" | "pinch";
+  startX: number;
+  startY: number;
+  startDistance: number;
+  startMidX: number;
+  startMidY: number;
+  startState: ZoomState;
+};
 
 // ============================================================================
 // Constants
@@ -555,10 +565,13 @@ const SPACING = { XS: 4, SM: 8, MD: 12, LG: 16 };
 const controlRow = {
   display: "flex",
   alignItems: "center",
+  flexWrap: "wrap",
   gap: `${SPACING.SM}px`,
   px: 1,
   py: 0.5,
   width: "fit-content",
+  maxWidth: "100%",
+  boxSizing: "border-box",
 };
 const compactButton = {
   fontSize: 10,
@@ -1145,6 +1158,41 @@ function Show2D() {
   const displayScale = canvasSize / Math.max(width, height);
   const canvasW = Math.round(width * displayScale);
   const canvasH = Math.round(height * displayScale);
+  const galleryGapPx = 8;
+  const histogramWidthPx = 110;
+  const histogramGapPx = 15;
+  const galleryGridMaxWidth = isGallery ? effectiveNcols * canvasW + (effectiveNcols - 1) * galleryGapPx : canvasW;
+  const galleryGridColumns = `repeat(auto-fit, minmax(min(100%, ${canvasW}px), 1fr))`;
+  const histogramGridMaxWidth = effectiveNcols * histogramWidthPx + (effectiveNcols - 1) * histogramGapPx;
+  const histogramGridColumns = `repeat(auto-fit, minmax(min(100%, ${histogramWidthPx}px), ${histogramWidthPx}px))`;
+  const responsivePanelSx = {
+    position: "relative",
+    bgcolor: "#000",
+    borderRadius: imagePanelRadius,
+    boxSizing: "border-box",
+    overflow: "hidden",
+    width: "100%",
+    maxWidth: "100%",
+    aspectRatio: `${Math.max(canvasW, 1)} / ${Math.max(canvasH, 1)}`,
+    touchAction: "none",
+  };
+  const responsiveCanvasStyle: React.CSSProperties = {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    width: "100%",
+    height: "100%",
+    imageRendering: imageRenderingStyle,
+    display: "block",
+  };
+  const responsiveOverlayStyle: React.CSSProperties = {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    width: "100%",
+    height: "100%",
+    pointerEvents: "none",
+  };
   const persistZoomState = React.useCallback((state: ZoomState) => {
     if (canvasW <= 0 || canvasH <= 0 || width <= 0 || height <= 0 || state.zoom <= 0) return;
     const row = height * (0.5 - state.panY / (state.zoom * canvasH));
@@ -1183,7 +1231,7 @@ function Show2D() {
     resetZoomStateRef.current = initialZoomState;
   }, [zoomRowTrait, zoomColTrait, canvasW, canvasH, width, height, initialZoomState]);
   const floatsPerImage = width * height;
-  const galleryGridWidth = isGallery ? effectiveNcols * canvasW + (effectiveNcols - 1) * 8 : canvasW;
+  const galleryGridWidth = galleryGridMaxWidth;
   const profileCanvasWidth = galleryGridWidth;
 
   // ROI FFT active: both ROI and FFT on, with a selected ROI
@@ -3004,9 +3052,7 @@ function Show2D() {
 
   const resetViewState = React.useCallback((): ZoomState => resetZoomStateRef.current || { zoom: 1, panX: 0, panY: 0 }, []);
 
-  const handleDoubleClick = (e: React.MouseEvent, idx: number) => {
-    e.preventDefault();
-    e.stopPropagation();
+  const resetImageView = React.useCallback((idx: number) => {
     const resetState = resetViewState();
     setZoomState(idx, resetState);
     persistZoomState(resetState);
@@ -3014,6 +3060,115 @@ function Show2D() {
     setIsDraggingPan(false);
     setPanStart(null);
     setPanningIdx(null);
+  }, [persistZoomState, resetViewState, setZoomState]);
+
+  const handleDoubleClick = (e: React.MouseEvent, idx: number) => {
+    e.preventDefault();
+    e.stopPropagation();
+    resetImageView(idx);
+  };
+
+  const touchDistance = (a: Touch, b: Touch) => Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+  const touchMidpoint = (a: Touch, b: Touch) => ({ x: (a.clientX + b.clientX) / 2, y: (a.clientY + b.clientY) / 2 });
+  const touchToCanvas = (clientX: number, clientY: number, canvas: HTMLCanvasElement) => {
+    const rect = canvas.getBoundingClientRect();
+    return {
+      x: (clientX - rect.left) * (canvas.width / Math.max(1, rect.width)),
+      y: (clientY - rect.top) * (canvas.height / Math.max(1, rect.height)),
+    };
+  };
+
+  const handleTouchStart = (e: React.TouchEvent, idx: number) => {
+    if (profileActive || roiActive || measureActive) return;
+    if (isGallery && idx !== selectedIdx) setSelectedIdx(idx);
+    const now = Date.now();
+    if (e.touches.length === 1) {
+      const lastTap = lastTapRef.current;
+      if (lastTap && lastTap.idx === idx && now - lastTap.time < 320) {
+        e.preventDefault();
+        resetImageView(idx);
+        lastTapRef.current = null;
+        touchStartRef.current = null;
+        return;
+      }
+      lastTapRef.current = { time: now, idx };
+      const t = e.touches[0];
+      touchStartRef.current = {
+        idx,
+        mode: "pan",
+        startX: t.clientX,
+        startY: t.clientY,
+        startDistance: 0,
+        startMidX: t.clientX,
+        startMidY: t.clientY,
+        startState: getZoomState(idx),
+      };
+      e.preventDefault();
+      return;
+    }
+    if (e.touches.length >= 2) {
+      const a = e.touches[0];
+      const b = e.touches[1];
+      const mid = touchMidpoint(a, b);
+      touchStartRef.current = {
+        idx,
+        mode: "pinch",
+        startX: mid.x,
+        startY: mid.y,
+        startDistance: Math.max(1, touchDistance(a, b)),
+        startMidX: mid.x,
+        startMidY: mid.y,
+        startState: getZoomState(idx),
+      };
+      e.preventDefault();
+    }
+  };
+
+  const handleTouchMove = (e: React.TouchEvent, idx: number) => {
+    const start = touchStartRef.current;
+    if (!start || start.idx !== idx) return;
+    const canvas = canvasRefs.current[idx];
+    if (!canvas) return;
+    e.preventDefault();
+    const base = start.startState;
+    if (start.mode === "pinch" && e.touches.length >= 2) {
+      const a = e.touches[0];
+      const b = e.touches[1];
+      const mid = touchMidpoint(a, b);
+      const startCanvas = touchToCanvas(start.startMidX, start.startMidY, canvas);
+      const currentCanvas = touchToCanvas(mid.x, mid.y, canvas);
+      const cx = canvas.width / 2;
+      const cy = canvas.height / 2;
+      const imageX = (startCanvas.x - cx - base.panX) / base.zoom + cx;
+      const imageY = (startCanvas.y - cy - base.panY) / base.zoom + cy;
+      const newZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, base.zoom * (touchDistance(a, b) / start.startDistance)));
+      const nextState = {
+        zoom: newZoom,
+        panX: currentCanvas.x - (imageX - cx) * newZoom - cx,
+        panY: currentCanvas.y - (imageY - cy) * newZoom - cy,
+      };
+      setZoomState(idx, nextState);
+      return;
+    }
+    if (start.mode === "pan" && e.touches.length === 1) {
+      const t = e.touches[0];
+      const rect = canvas.getBoundingClientRect();
+      const scaleX = canvas.width / Math.max(1, rect.width);
+      const scaleY = canvas.height / Math.max(1, rect.height);
+      setZoomState(idx, {
+        ...base,
+        panX: base.panX + (t.clientX - start.startX) * scaleX,
+        panY: base.panY + (t.clientY - start.startY) * scaleY,
+      });
+    }
+  };
+
+  const handleTouchEnd = (e: React.TouchEvent, idx: number) => {
+    const start = touchStartRef.current;
+    if (!start || start.idx !== idx) return;
+    if (e.touches.length > 0) return;
+    persistZoomState(getZoomState(idx));
+    touchStartRef.current = null;
   };
 
   // Reset view (zoom/pan only — preserves profile, FFT state, etc.)
@@ -3193,6 +3348,8 @@ function Show2D() {
   // Track which image is being panned
   const [panningIdx, setPanningIdx] = React.useState<number | null>(null);
   const clickStartRef = React.useRef<{ x: number; y: number } | null>(null);
+  const touchStartRef = React.useRef<TouchZoomState | null>(null);
+  const lastTapRef = React.useRef<{ time: number; idx: number } | null>(null);
   const [draggingProfileEndpoint, setDraggingProfileEndpoint] = React.useState<0 | 1 | null>(null);
   const [isDraggingProfileLine, setIsDraggingProfileLine] = React.useState(false);
   const [hoveredProfileEndpoint, setHoveredProfileEndpoint] = React.useState<0 | 1 | null>(null);
@@ -3856,10 +4013,10 @@ function Show2D() {
   const calibratedFactor = pixelSize;
 
   return (
-    <Box className="show2d-root" tabIndex={0} onKeyDown={handleKeyDown} sx={{ p: 2, bgcolor: themeColors.bg, color: themeColors.text, width: "fit-content", fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif", "& canvas": { display: "block" } }}>
-      <Stack direction="row" spacing={`${SPACING.LG}px`} alignItems="flex-start">
+    <Box className="show2d-root" tabIndex={0} onKeyDown={handleKeyDown} sx={{ p: 2, bgcolor: themeColors.bg, color: themeColors.text, width: "100%", maxWidth: "100%", boxSizing: "border-box", fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif", "& canvas": { display: "block" }, "@media (max-width: 700px)": { ".jp-OutputArea-output &, .jp-OutputArea-child &": { width: "calc(100vw - 96px)", maxWidth: "calc(100vw - 96px)" } } }}>
+      <Stack direction="row" spacing={`${SPACING.LG}px`} alignItems="flex-start" sx={{ width: "100%", maxWidth: "100%", minWidth: 0, boxSizing: "border-box" }}>
         {/* Main panel */}
-        <Box sx={{ width: galleryGridWidth, maxWidth: galleryGridWidth }}>
+        <Box sx={{ width: "100%", maxWidth: galleryGridWidth, boxSizing: "border-box" }}>
           {/* Title row */}
           <Typography variant="caption" sx={{ ...typography.label, color: themeColors.accent, mb: `${SPACING.XS}px`, display: "block", height: 16, lineHeight: "16px", overflow: "hidden" }}>
             {title || (isGallery ? "Gallery" : "Image")}
@@ -3896,7 +4053,7 @@ function Show2D() {
             </Box>} theme={themeInfo.theme} />
           </Typography>
           {/* Controls row: Profile, ROI, Lens, FFT, Export, status, Reset, Copy */}
-          <Stack direction="row" alignItems="center" spacing={`${SPACING.SM}px`} sx={{ mb: `${SPACING.XS}px`, height: 28 }}>
+          <Stack direction="row" alignItems="center" spacing={`${SPACING.SM}px`} useFlexGap sx={{ mb: `${SPACING.XS}px`, minHeight: 28, flexWrap: "wrap", rowGap: `${SPACING.XS}px`, maxWidth: "100%", boxSizing: "border-box" }}>
             {(
               <>
                 <Typography sx={{ ...typography.label, fontSize: 10 }}>Profile:</Typography>
@@ -3988,7 +4145,6 @@ function Show2D() {
                 )}
               </>
             )}
-            <Box sx={{ flex: 1 }} />
             {(
               <>
                 <Button
@@ -4027,20 +4183,14 @@ function Show2D() {
 
           {isGallery ? (
             /* Gallery mode */
-            <Box sx={{ display: "grid", gridTemplateColumns: `repeat(${effectiveNcols}, ${canvasW}px)`, gap: 1 }}>
+            <Box sx={{ display: "grid", gridTemplateColumns: galleryGridColumns, gap: `${galleryGapPx}px`, maxWidth: galleryGridWidth, width: "100%", boxSizing: "border-box", justifyContent: "start" }}>
               {Array.from({ length: nImages }).map((_, i) => (
-                <Box key={i} sx={{ cursor: i === selectedIdx ? ((isDraggingResize || isDraggingResizeInner || isHoveringResize || isHoveringResizeInner) ? "nwse-resize" : isDraggingROI ? "move" : (draggingProfileEndpoint !== null || isDraggingProfileLine) ? "grabbing" : (profileActive && (hoveredProfileEndpoint !== null || isHoveringProfileLine)) ? "grab" : (profileActive || roiActive || measureActive) ? "crosshair" : "grab") : ("pointer") }}>
+                <Box key={i} sx={{ minWidth: 0, cursor: i === selectedIdx ? ((isDraggingResize || isDraggingResizeInner || isHoveringResize || isHoveringResizeInner) ? "nwse-resize" : isDraggingROI ? "move" : (draggingProfileEndpoint !== null || isDraggingProfileLine) ? "grabbing" : (profileActive && (hoveredProfileEndpoint !== null || isHoveringProfileLine)) ? "grab" : (profileActive || roiActive || measureActive) ? "crosshair" : "grab") : ("pointer") }}>
                   <Box
                     ref={(el: HTMLDivElement | null) => { imageContainerRefs.current[i] = el; }}
                     sx={{
-                      position: "relative",
-                      bgcolor: "#000",
+                      ...responsivePanelSx,
                       border: `2px solid ${i === selectedIdx ? themeColors.accent : themeColors.border}`,
-                      borderRadius: imagePanelRadius,
-                      boxSizing: "border-box",
-                      overflow: "hidden",
-                      width: canvasW,
-                      height: canvasH,
                     }}
                     onMouseDown={(e) => handleMouseDown(e, i)}
                     onMouseMove={(e) => handleMouseMove(e, i)}
@@ -4048,16 +4198,20 @@ function Show2D() {
                     onMouseLeave={() => handleMouseLeave(i)}
                     onWheel={(i === selectedIdx || linkedZoom) ? (e) => handleWheel(e, i) : undefined}
                     onDoubleClick={(e) => handleDoubleClick(e, i)}
+                    onTouchStart={(e) => handleTouchStart(e, i)}
+                    onTouchMove={(e) => handleTouchMove(e, i)}
+                    onTouchEnd={(e) => handleTouchEnd(e, i)}
+                    onTouchCancel={(e) => handleTouchEnd(e, i)}
                   >
                     <canvas
                       ref={(el) => { if (el && canvasRefs.current[i] !== el) { canvasRefs.current[i] = el; setCanvasReady(c => c + 1); } }}
                       width={canvasW} height={canvasH}
-                      style={{ width: canvasW, height: canvasH, imageRendering: imageRenderingStyle }}
+                      style={responsiveCanvasStyle}
                     />
                     <canvas
                       ref={(el) => { overlayRefs.current[i] = el; }}
                       width={Math.round(canvasW * DPR)} height={Math.round(canvasH * DPR)}
-                      style={{ position: "absolute", top: 0, left: 0, width: canvasW, height: canvasH, pointerEvents: "none" }}
+                      style={responsiveOverlayStyle}
                     />
                     {(
                       <Box
@@ -4102,12 +4256,8 @@ function Show2D() {
                       ref={(el: HTMLDivElement | null) => { fftContainerRefs.current[i] = el; }}
                       sx={{
                         mt: 0.5,
-                        position: "relative",
-                        bgcolor: "#000",
+                        ...responsivePanelSx,
                         border: `2px solid ${i === selectedIdx ? themeColors.accent : themeColors.border}`,
-                        borderRadius: imagePanelRadius,
-                        boxSizing: "border-box",
-                        overflow: "hidden",
                         cursor: "grab",
                       }}
                       onWheel={(i === selectedIdx || fftLinkedZoom) ? (e) => handleGalleryFftWheel(e, i) : undefined}
@@ -4120,10 +4270,10 @@ function Show2D() {
                       <canvas
                         ref={(el) => { fftCanvasRefs.current[i] = el; }}
                         width={canvasW} height={canvasH}
-                        style={{ width: canvasW, height: canvasH, imageRendering: imageRenderingStyle, display: "block" }}
+                        style={responsiveCanvasStyle}
                       />
                       {fftComputing && !fftMagCacheGalleryRef.current[i] && (
-                        <Box sx={{ position: "absolute", top: 0, left: 0, width: canvasW, height: canvasH, display: "flex", alignItems: "center", justifyContent: "center", bgcolor: "rgba(0,0,0,0.6)", pointerEvents: "none" }}>
+                        <Box sx={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", bgcolor: "rgba(0,0,0,0.6)", pointerEvents: "none" }}>
                           <Typography sx={{ fontSize: 10, color: "#aaa", fontFamily: "monospace", "@keyframes pulse": { "0%,100%": { opacity: 0.4 }, "50%": { opacity: 1 } }, animation: "pulse 1.2s ease-in-out infinite" }}>FFT…</Typography>
                         </Box>
                       )}
@@ -4132,12 +4282,12 @@ function Show2D() {
                 </Box>
               ))}
               {showDiffPanel && diffOtherIndices.map((otherIdx, slot) => (
-                <Box key={`diff_${slot}`}>
-                  <Box sx={{ position: "relative", bgcolor: "#000", border: `2px solid ${themeColors.border}`, borderRadius: 0, width: canvasW, height: canvasH }}>
+                <Box key={`diff_${slot}`} sx={{ minWidth: 0 }}>
+                  <Box sx={{ ...responsivePanelSx, border: `2px solid ${themeColors.border}` }}>
                     <canvas
                       ref={(el) => { diffCanvasRefs.current[slot] = el; }}
                       width={canvasW} height={canvasH}
-                      style={{ width: canvasW, height: canvasH, imageRendering: imageRenderingStyle }}
+                      style={responsiveCanvasStyle}
                     />
                   </Box>
                   <Typography sx={{ fontSize: 10, color: themeColors.textMuted, textAlign: "center", mt: 0.25 }}>
@@ -4145,11 +4295,11 @@ function Show2D() {
                   </Typography>
                   {/* FFT of diff (n=2 only) */}
                   {effectiveShowFft && nImages === 2 && slot === 0 && (
-                    <Box sx={{ mt: 0.5, position: "relative", border: `2px solid ${themeColors.border}`, borderRadius: 0, bgcolor: "#000" }}>
+                    <Box sx={{ mt: 0.5, ...responsivePanelSx, border: `2px solid ${themeColors.border}` }}>
                       <canvas
                         ref={(el) => { diffFftCanvasRef.current = el; }}
                         width={canvasW} height={canvasH}
-                        style={{ width: canvasW, height: canvasH, imageRendering: imageRenderingStyle, display: "block" }}
+                        style={responsiveCanvasStyle}
                       />
                     </Box>
                   )}
@@ -4160,28 +4310,32 @@ function Show2D() {
             /* Single image mode */
             <Box
               ref={(el: HTMLDivElement | null) => { imageContainerRefs.current[0] = el; }}
-              sx={{ position: "relative", bgcolor: "#000", border: `1px solid ${themeColors.border}`, borderRadius: imagePanelRadius, boxSizing: "border-box", overflow: "hidden", width: canvasW, height: canvasH, cursor: isHoveringLensEdge ? "nwse-resize" : isDraggingROI ? "move" : (isDraggingResize || isDraggingResizeInner || isHoveringResize || isHoveringResizeInner) ? "nwse-resize" : (draggingProfileEndpoint !== null || isDraggingProfileLine) ? "grabbing" : (profileActive && (hoveredProfileEndpoint !== null || isHoveringProfileLine)) ? "grab" : (profileActive || roiActive || measureActive) ? "crosshair" : "grab" }}
+              sx={{ ...responsivePanelSx, border: `1px solid ${themeColors.border}`, cursor: isHoveringLensEdge ? "nwse-resize" : isDraggingROI ? "move" : (isDraggingResize || isDraggingResizeInner || isHoveringResize || isHoveringResizeInner) ? "nwse-resize" : (draggingProfileEndpoint !== null || isDraggingProfileLine) ? "grabbing" : (profileActive && (hoveredProfileEndpoint !== null || isHoveringProfileLine)) ? "grab" : (profileActive || roiActive || measureActive) ? "crosshair" : "grab" }}
               onMouseDown={(e) => handleMouseDown(e, 0)}
               onMouseMove={(e) => handleMouseMove(e, 0)}
               onMouseUp={(e) => handleMouseUp(e, 0)}
               onMouseLeave={() => handleMouseLeave(0)}
               onWheel={(e) => handleWheel(e, 0)}
               onDoubleClick={(e) => handleDoubleClick(e, 0)}
+              onTouchStart={(e) => handleTouchStart(e, 0)}
+              onTouchMove={(e) => handleTouchMove(e, 0)}
+              onTouchEnd={(e) => handleTouchEnd(e, 0)}
+              onTouchCancel={(e) => handleTouchEnd(e, 0)}
             >
               <canvas
                 ref={(el) => { if (el && canvasRefs.current[0] !== el) { canvasRefs.current[0] = el; setCanvasReady(c => c + 1); } }}
                 width={canvasW} height={canvasH}
-                style={{ width: canvasW, height: canvasH, imageRendering: imageRenderingStyle }}
+                style={responsiveCanvasStyle}
               />
               <canvas
                 ref={(el) => { overlayRefs.current[0] = el; }}
                 width={Math.round(canvasW * DPR)} height={Math.round(canvasH * DPR)}
-                style={{ position: "absolute", top: 0, left: 0, width: canvasW, height: canvasH, pointerEvents: "none" }}
+                style={responsiveOverlayStyle}
               />
               <canvas
                 ref={lensCanvasRef}
                 width={Math.round(canvasW * DPR)} height={Math.round(canvasH * DPR)}
-                style={{ position: "absolute", top: 0, left: 0, width: canvasW, height: canvasH, pointerEvents: "none" }}
+                style={responsiveOverlayStyle}
               />
               {cursorInfo && (
                 <Box sx={{ position: "absolute", top: 6, right: 6, bgcolor: "rgba(0,0,0,0.72)", px: 0.75, py: 0.35, borderRadius: 1, pointerEvents: "none", minWidth: 100, textAlign: "right" }}>
@@ -4239,8 +4393,8 @@ function Show2D() {
           {showControls && (
             <Box sx={{ mt: (effectiveShowFft && isGallery) ? `${SPACING.XS}px` : `${SPACING.SM}px`, display: "flex", flexDirection: "column", gap: `${SPACING.XS}px`, boxSizing: "border-box" }}>
               {/* Top: control rows + histogram side by side */}
-              <Box sx={{ display: "flex", gap: `${SPACING.SM}px` }}>
-                <Box sx={{ display: "flex", flexDirection: "column", gap: `${SPACING.XS}px`, flex: 1, justifyContent: "flex-start" }}>
+              <Box sx={{ display: "flex", flexWrap: "wrap", gap: `${SPACING.SM}px`, width: "100%", maxWidth: galleryGridWidth, minWidth: 0, boxSizing: "border-box" }}>
+                <Box sx={{ display: "flex", flexDirection: "column", gap: `${SPACING.XS}px`, flex: "1 1 260px", minWidth: 0, justifyContent: "flex-start" }}>
                   {/* Row 1: Scale + Color */}
                   {(
                     <Box sx={{ ...controlRow, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, opacity: 1, pointerEvents: "auto" }}>
@@ -4296,9 +4450,9 @@ function Show2D() {
                 {/* Right: histograms. Unlinked + gallery → grid matching gallery layout
                     (same effectiveNcols × rows). Linked or single image → one histogram. */}
                 {(imageHistogramData || imageHistogramBins || (isGallery && !linkedContrast && rawDataRef.current)) && (
-                  <Box sx={{ display: "flex", flexDirection: "column", alignItems: "flex-end", justifyContent: "flex-start", gap: 0.5, opacity: 1, pointerEvents: "auto" }}>
+                  <Box sx={{ display: "flex", flexDirection: "column", alignItems: "flex-start", justifyContent: "flex-start", gap: 0.5, flex: "0 1 auto", maxWidth: "100%", opacity: 1, pointerEvents: "auto" }}>
                     {(!linkedContrast && isGallery && rawDataRef.current) ? (
-                      <Box sx={{ display: "grid", gridTemplateColumns: `repeat(${effectiveNcols}, 110px)`, gap: "15px" }}>
+                      <Box sx={{ display: "grid", gridTemplateColumns: histogramGridColumns, gap: `${histogramGapPx}px`, width: "100%", maxWidth: histogramGridMaxWidth, justifyContent: "start" }}>
                         {Array.from({ length: nImages }).map((_, i) => {
                           const cs = contrastStates.get(i) || { vminPct: 0, vmaxPct: 100 };
                           const raw = rawDataRef.current?.[i] || null;
@@ -4434,8 +4588,8 @@ function Show2D() {
 
           {/* Gallery FFT Controls - below regular image controls */}
           {effectiveShowFft && isGallery && (
-            <Box sx={{ mt: `${SPACING.XS}px`, display: "flex", gap: `${SPACING.SM}px`, boxSizing: "border-box" }}>
-              <Box sx={{ display: "flex", flexDirection: "column", gap: `${SPACING.XS}px`, flex: 1, justifyContent: "flex-start" }}>
+            <Box sx={{ mt: `${SPACING.XS}px`, display: "flex", flexWrap: "wrap", gap: `${SPACING.SM}px`, width: "100%", maxWidth: galleryGridWidth, minWidth: 0, boxSizing: "border-box" }}>
+              <Box sx={{ display: "flex", flexDirection: "column", gap: `${SPACING.XS}px`, flex: "1 1 260px", minWidth: 0, justifyContent: "flex-start" }}>
                 <Box sx={{ ...controlRow, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, opacity: 1, pointerEvents: "auto" }}>
                   <Typography sx={{ ...typography.label, fontSize: 10 }}>FFT Scale:</Typography>
                   <Select value={fftScaleMode} onChange={(e) => setFftScaleMode(e.target.value as "linear" | "log")} size="small" sx={{ ...themedSelect, minWidth: 50, fontSize: 10 }} MenuProps={themedMenuProps}>
@@ -4473,10 +4627,10 @@ function Show2D() {
                 </Box>
               </Box>
               {(
-                <Box sx={{ display: "flex", flexDirection: "column", alignItems: "flex-end", justifyContent: "center", opacity: 1, pointerEvents: "auto" }}>
+                <Box sx={{ display: "flex", flexDirection: "column", alignItems: "flex-start", justifyContent: "center", flex: "0 1 auto", maxWidth: "100%", opacity: 1, pointerEvents: "auto" }}>
                   {fftHistogramData && (
                     !fftLinkedContrast && isGallery ? (
-                      <Box sx={{ display: "grid", gridTemplateColumns: `repeat(${effectiveNcols}, 110px)`, gap: "15px" }}>
+                      <Box sx={{ display: "grid", gridTemplateColumns: histogramGridColumns, gap: `${histogramGapPx}px`, width: "100%", maxWidth: histogramGridMaxWidth, justifyContent: "start" }}>
                         {Array.from({ length: nImages }).map((_, i) => {
                           const fc = fftContrastFor(i);
                           const mag = fftMagCacheGalleryRef.current[i];

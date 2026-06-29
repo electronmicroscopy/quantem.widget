@@ -26,6 +26,7 @@ import torch
 import traitlets
 
 from quantem.widget.utils.array import to_numpy
+from quantem.widget.export import ensure_mobile_viewport
 from quantem.widget.utils.state_io import resolve_widget_version, save_state_file, unwrap_state_payload
 
 # ============================================================================
@@ -1142,6 +1143,7 @@ class ShowDiffraction(anywidget.AnyWidget):
             raise ValueError("Cannot export HTML after free(); rebuild the widget first.")
         export_path = pathlib.Path(path) if path is not None else self._default_html_export_path()
         self._write_html_export(export_path, title=title)
+        ensure_mobile_viewport(export_path)
         size_mb = export_path.stat().st_size / (1024 * 1024)
         self.export_status = f"Exported {export_path.name} ({size_mb:.1f} MB, full float32)"
         return export_path
@@ -1213,6 +1215,7 @@ class ShowDiffraction(anywidget.AnyWidget):
         with tempfile.TemporaryDirectory(prefix="showdiffraction-export-") as tmp:
             path = pathlib.Path(tmp) / self._default_html_export_path().name
             self._write_html_export(path)
+            ensure_mobile_viewport(path)
             return path.read_bytes()
 
     def _clone_for_html_export(self) -> Self:

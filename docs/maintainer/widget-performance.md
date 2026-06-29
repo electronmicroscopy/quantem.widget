@@ -53,3 +53,60 @@ Rule for future high-FPS widget selectors:
 This applies to ShowEDS energy bands and ROI drags, Show4DSTEM detector masks,
 Show2D contrast controls, and any future draggable selector that needs to feel
 attached to the pointer.
+
+## Mistake log: EDS is a query source, not a spreadsheet
+
+Date: 2026-06-28
+
+Symptom: a real Velox EDS EMD file opened quickly in vendor tools, but the
+prototype treated the spectrum image like a dense ``(row, col, energy)`` table
+that had to be expanded before interaction. That was the wrong model. The user
+usually asks for a current energy window, an ROI spectrum, or a visible preview,
+not every empty channel in every pixel.
+
+What was wrong:
+
+- Native EDS files should be treated as query backends. Keep the file/chunks as
+  the source and ask for only the data needed by the current view.
+- A ShowEDS data folder is a prefix-cache export format. It is useful for small
+  or deliberately spatial-binned portable demos, but it is not the default model
+  for native no-bin analysis.
+- Calling ``cube.compute()`` before a targeted query or explicit spatial binning
+  defeats lazy I/O.
+- Browser widget state is for small embedded demos, not native EMD storage.
+
+Rule for future EDS work:
+
+- Never expand a native EDS file just to prove a widget can open it.
+- Default no-bin EMD loading to native/lazy queries.
+- Build prefix-cache data folders only for existing caches, explicit sidecar
+  requests, or intentional binned sharing/export workflows.
+- Guard prefix-cache and widget-state sizes before reading data.
+- Use lazy chunked sum-binning only for explicit portable demos and exports.
+- Treat spatial binning as count-preserving; make energy binning explicit.
+- The best long-term path is a sparse/tiled frontend backend: energy-window
+  queries produce maps, spatial-window queries produce spectra, and WebGPU does
+  the visible accumulation/drawing without Python round trips during drag.
+
+Current ShowEDS policy:
+
+- Small embedded cubes stay browser/WebGPU backed.
+- ``ShowEDS.from_emd(..., backend="auto")`` uses an existing data folder when
+  present; otherwise exact no-bin EMD uses the native lazy query path.
+- Portable real-data demos can use an explicitly spatial-binned data folder.
+- Exact one-file HTML export is not available for native lazy EMD because the
+  exported page has no local query backend; use binned single-file export or a
+  data-folder export when sharing outside Jupyter.
+
+Update from the 0016 Velox stream test:
+
+- Velox EDS ``SpectrumStream`` data is sparse event data. The logical dense
+  shape can be tens of GB, but the actual useful stream can be a few hundred MB.
+- Do not materialize zeros. Index the stream directly by channel and by pixel.
+- A sparse stream data folder for the 2048 x 2048 x 4096 0016 file stores about
+  26.9 million events in about 186 MB and keeps the full field of view exact.
+- Full-field interaction should be validated with no crop and no binning before
+  offering binned/export presets.
+- If Jupyter ignores HTTP ``Range`` and returns ``200 OK`` with a whole file,
+  slice the returned buffer when it contains the requested byte window instead
+  of failing the sidecar worker.

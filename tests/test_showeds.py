@@ -3,8 +3,16 @@ import json
 import numpy as np
 import pytest
 
+import quantem.widget.showeds as showeds_module
 from quantem.widget import ShowEDS
-from quantem.widget.showeds import bin_spectrum_image, eds_line_hints, load_spectrum_image_sidecar, prepare_spectrum_image_sidecar
+from quantem.widget.showeds import (
+    _estimate_spectrum_image_sidecar_bytes,
+    _sum_bin_spectrum_image_lazy,
+    bin_spectrum_image,
+    eds_line_hints,
+    load_spectrum_image_sidecar,
+    prepare_spectrum_image_sidecar,
+)
 
 
 def test_showeds_constructor_sets_shape_and_state():
@@ -310,10 +318,10 @@ def test_showeds_rejects_non_cube():
         ShowEDS(np.zeros((4, 5), dtype=np.float32))
 
 
-def test_showeds_rejects_oversized_dense_widget_state():
+def test_showeds_rejects_oversized_embedded_widget_state():
     cube = np.zeros((4, 5, 6), dtype=np.uint16)
 
-    with pytest.raises(ValueError, match="full spectrum-image cube.*widget state"):
+    with pytest.raises(ValueError, match="in-browser copy.*widget buffer"):
         ShowEDS(cube, max_state_bytes=32)
 
 
@@ -351,6 +359,128 @@ def test_prepare_spectrum_image_sidecar_writes_exact_prefix_and_integrals(tmp_pa
     plane = cube[:, :, 1].astype(np.uint32)
     assert int(sat[3, 4, 1]) == int(plane.sum())
     assert int(sat[3, 4, 1] - sat[1, 4, 1] - sat[3, 2, 1] + sat[1, 2, 1]) == int(plane[1:3, 2:4].sum())
+
+
+def test_prepare_spectrum_image_sidecar_refuses_oversized_prefix_cache(tmp_path):
+    class SparseVendorCube:
+        ndim = 3
+        shape = (2048, 2048, 4096)
+        dtype = np.dtype(np.uint16)
+
+    energy = np.arange(4096, dtype=np.float32)
+
+    with pytest.raises(ValueError, match="prefix-cache data folder would be too large"):
+        prepare_spectrum_image_sidecar(SparseVendorCube(), energy, tmp_path / "eds", max_sidecar_bytes=1024)
+
+    estimated = _estimate_spectrum_image_sidecar_bytes(SparseVendorCube.shape, include_base_image=False)
+    assert estimated > 100 * 1024**3
+
+
+def test_lazy_spatial_binning_matches_eager_binning_without_materializing_first():
+    da = pytest.importorskip("dask.array")
+    cube = np.arange(4 * 6 * 8, dtype=np.uint16).reshape(4, 6, 8)
+    base = cube.sum(axis=2)
+    energy = np.linspace(0, 7, 8, dtype=np.float32)
+    lazy_cube = da.from_array(cube, chunks=(2, 3, 4))
+    lazy_base = da.from_array(base, chunks=(2, 3))
+
+    binned, axis, binned_base = _sum_bin_spectrum_image_lazy(
+        lazy_cube,
+        energy,
+        base_image=lazy_base,
+        spatial_bin=2,
+        energy_bin=2,
+    )
+    expected, expected_axis, expected_base = bin_spectrum_image(cube, energy, base_image=base, spatial_bin=2, energy_bin=2)
+
+    assert hasattr(binned, "compute")
+    assert np.array_equal(binned.compute(), expected)
+    assert np.allclose(axis, expected_axis)
+    assert np.array_equal(binned_base.compute(), expected_base)
+
+
+def test_showeds_from_emd_auto_uses_native_lazy_for_no_bin_emd(monkeypatch, tmp_path):
+    cube = np.arange(4 * 5 * 6, dtype=np.uint16).reshape(4, 5, 6)
+    energy = np.linspace(0, 5, 6, dtype=np.float32)
+    base = cube.sum(axis=2)
+    sidecar_dir = tmp_path / "sidecar"
+
+    monkeypatch.setattr(
+        showeds_module,
+        "_read_emd_spectrum_image",
+        lambda *args, **kwargs: {
+            "cube": cube,
+            "energy_keV": energy,
+            "base_image": base,
+            "title": "Sparse EMD",
+            "candidate_elements": ["Cu"],
+            "source_shape": cube.shape,
+            "path": str(tmp_path / "sparse.emd"),
+        },
+    )
+
+    widget = ShowEDS.from_emd(
+        tmp_path / "sparse.emd",
+        sidecar_dir=sidecar_dir,
+        max_sidecar_bytes=1024,
+        energy=2.0,
+        width=2.0,
+    )
+
+    assert widget.compute_backend == "kernel"
+    assert widget.cube_bytes == b""
+    assert not sidecar_dir.exists()
+    assert widget.n_rows == 4
+    assert widget.n_cols == 5
+    assert widget.n_energy == 6
+    assert np.frombuffer(widget.initial_map_bytes, dtype=np.float32).reshape(4, 5).sum() > 0
+
+
+def test_showeds_kernel_emd_export_refuses_misleading_exact_html():
+    initial_map = np.ones((4, 5), dtype=np.float32)
+    initial_spectrum = np.arange(6, dtype=np.float32)
+    widget = ShowEDS(
+        None,
+        np.arange(6, dtype=np.float32),
+        initial_map=initial_map,
+        initial_spectrum=initial_spectrum,
+        lazy_path="sparse.emd",
+    )
+
+    with pytest.raises(ValueError, match="no Python kernel"):
+        widget._export_widget_for_mode("single")
+
+
+def test_showeds_from_emd_explicit_sidecar_refuses_oversized_prefix_cache(monkeypatch, tmp_path):
+    cube = np.arange(4 * 5 * 6, dtype=np.uint16).reshape(4, 5, 6)
+    energy = np.linspace(0, 5, 6, dtype=np.float32)
+
+    monkeypatch.setattr(
+        showeds_module,
+        "_read_emd_spectrum_image",
+        lambda *args, **kwargs: {
+            "cube": cube,
+            "energy_keV": energy,
+            "base_image": None,
+            "title": "Sparse EMD",
+            "candidate_elements": ["Cu"],
+            "source_shape": cube.shape,
+            "path": str(tmp_path / "sparse.emd"),
+        },
+    )
+    monkeypatch.setattr(
+        showeds_module,
+        "_estimate_spectrum_image_sidecar_bytes",
+        lambda *args, **kwargs: 100 * 1024**3,
+    )
+
+    with pytest.raises(ValueError, match="exact prefix-cache data folder"):
+        ShowEDS.from_emd(
+            tmp_path / "sparse.emd",
+            backend="sidecar",
+            sidecar_dir=tmp_path / "sidecar",
+            max_sidecar_bytes=1024,
+        )
 
 
 def test_showeds_sidecar_backend_uses_initial_buffers_without_cube_bytes():

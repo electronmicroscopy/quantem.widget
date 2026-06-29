@@ -22,6 +22,9 @@ from quantem.widget.utils.state_io import (
 )
 
 
+DEFAULT_MAX_SHOWEDS_SIDECAR_BYTES = 12 * 1024**3
+
+
 _FALLBACK_LINES: tuple[dict[str, Any], ...] = (
     {"element": "C", "line": "Ka1", "energy_keV": 0.277, "intensity": 1.0},
     {"element": "N", "line": "Ka1", "energy_keV": 0.392, "intensity": 1.0},
@@ -156,6 +159,46 @@ def _directory_size(path: pathlib.Path) -> int:
     return total
 
 
+def _estimate_spectrum_image_sidecar_bytes(
+    shape: tuple[int, int, int],
+    *,
+    include_base_image: bool = True,
+) -> int:
+    """Estimate bytes written by the exact ShowEDS prefix-cache data folder."""
+
+    rows, cols, n_energy = (int(v) for v in shape)
+    energy_prefix = (n_energy + 1) * rows * cols * np.dtype("<u4").itemsize
+    spatial_prefix = (rows + 1) * (cols + 1) * n_energy * np.dtype("<u4").itemsize
+    base = rows * cols * np.dtype("<f4").itemsize if include_base_image else 0
+    return int(energy_prefix + spatial_prefix + base)
+
+
+def _estimate_spectrum_stream_sidecar_bytes(n_events: int, rows: int, cols: int, n_energy: int) -> int:
+    """Estimate bytes written by the sparse Velox stream data folder."""
+
+    return int(
+        (n_energy + 1) * np.dtype("<u4").itemsize
+        + n_events * np.dtype("<u4").itemsize
+        + (rows * cols + 1) * np.dtype("<u4").itemsize
+        + n_events * np.dtype("<u2").itemsize
+        + rows * cols * np.dtype("<f4").itemsize
+    )
+
+
+def _binned_spectrum_image_shape(
+    shape: tuple[int, int, int],
+    *,
+    spatial_bin: int = 1,
+    energy_bin: int = 1,
+) -> tuple[int, int, int]:
+    """Return the sum-binned cube shape after trimming incomplete edge bins."""
+
+    rows, cols, n_energy = (int(v) for v in shape)
+    sb = int(max(1, spatial_bin))
+    eb = int(max(1, energy_bin))
+    return rows // sb, cols // sb, n_energy // eb
+
+
 def _bin_axis_sum(data: np.ndarray, axis: int, factor: int) -> np.ndarray:
     factor = int(factor)
     if factor <= 1:
@@ -216,6 +259,95 @@ def bin_spectrum_image(
     return np.asarray(out, dtype=np.float32), axis_out, None if base_out is None else np.asarray(base_out, dtype=np.float32)
 
 
+def _sum_bin_spectrum_image_lazy(
+    cube: Any,
+    energy_keV: np.ndarray | list[float] | None = None,
+    *,
+    base_image: Any | None = None,
+    spatial_bin: int = 1,
+    energy_bin: int = 1,
+) -> tuple[Any, np.ndarray | None, Any | None]:
+    """Sum-bin a lazy spectrum image without materializing the raw cube."""
+
+    spatial_bin = int(max(1, spatial_bin))
+    energy_bin = int(max(1, energy_bin))
+    if spatial_bin <= 1 and energy_bin <= 1:
+        axis = None if energy_keV is None else np.asarray(energy_keV, dtype=np.float32)
+        return cube, axis, base_image
+    try:
+        import dask.array as da
+    except ImportError:
+        if hasattr(cube, "compute"):
+            raise ImportError(
+                "Lazy ShowEDS binning requires dask. Install dask, choose a smaller eager array, "
+                "or keep native EMD data in the exact lazy query backend."
+            )
+        return bin_spectrum_image(
+            np.asarray(cube),
+            energy_keV,
+            base_image=None if base_image is None else np.asarray(base_image),
+            spatial_bin=spatial_bin,
+            energy_bin=energy_bin,
+        )
+
+    if not isinstance(cube, da.Array):
+        if hasattr(cube, "compute"):
+            raise TypeError(
+                "Lazy ShowEDS binning expected a dask.array.Array. Refusing to materialize a lazy "
+                "native EDS source before binning."
+            )
+        return bin_spectrum_image(
+            np.asarray(cube),
+            energy_keV,
+            base_image=None if base_image is None else np.asarray(base_image),
+            spatial_bin=spatial_bin,
+            energy_bin=energy_bin,
+        )
+
+    rows, cols, n_energy = (int(v) for v in cube.shape)
+    out_rows, out_cols, out_energy = _binned_spectrum_image_shape(
+        (rows, cols, n_energy),
+        spatial_bin=spatial_bin,
+        energy_bin=energy_bin,
+    )
+    if min(out_rows, out_cols, out_energy) <= 0:
+        raise ValueError(
+            f"bin factors spatial_bin={spatial_bin}, energy_bin={energy_bin} are larger than cube shape {cube.shape}"
+        )
+    cropped = cube[: out_rows * spatial_bin, : out_cols * spatial_bin, : out_energy * energy_bin]
+    factors: dict[int, int] = {}
+    if spatial_bin > 1:
+        factors[0] = spatial_bin
+        factors[1] = spatial_bin
+    if energy_bin > 1:
+        factors[2] = energy_bin
+    binned = da.coarsen(np.sum, cropped, factors, trim_excess=False)
+
+    axis_out = None
+    if energy_keV is not None:
+        axis = np.asarray(energy_keV, dtype=np.float32)
+        if axis.ndim != 1 or axis.size != n_energy:
+            raise ValueError(f"energy_keV must be length {n_energy}, got shape {axis.shape}")
+        if energy_bin > 1:
+            axis = axis[: out_energy * energy_bin].reshape(out_energy, energy_bin).mean(axis=1)
+        else:
+            axis = axis[:out_energy]
+        axis_out = axis.astype(np.float32, copy=False)
+
+    base_out = None
+    if base_image is not None:
+        base = base_image if isinstance(base_image, da.Array) else da.from_array(base_image)
+        if tuple(int(v) for v in base.shape) != (rows, cols):
+            raise ValueError(f"base_image must have shape {(rows, cols)}, got {base.shape}")
+        base_crop = base[: out_rows * spatial_bin, : out_cols * spatial_bin]
+        if spatial_bin > 1:
+            base_out = da.coarsen(np.sum, base_crop, {0: spatial_bin, 1: spatial_bin}, trim_excess=False)
+        else:
+            base_out = base_crop
+
+    return binned, axis_out, base_out
+
+
 def prepare_spectrum_image_sidecar(
     cube: np.ndarray,
     energy_keV: np.ndarray | list[float],
@@ -223,6 +355,7 @@ def prepare_spectrum_image_sidecar(
     *,
     base_image: np.ndarray | None = None,
     energy_chunk: int = 256,
+    max_sidecar_bytes: int | None = DEFAULT_MAX_SHOWEDS_SIDECAR_BYTES,
 ) -> pathlib.Path:
     """Write an exact ShowEDS data folder for fast EDS/EELS interaction.
 
@@ -239,6 +372,13 @@ def prepare_spectrum_image_sidecar(
 
     This is intentionally a preprocessing step. Once the files exist, the live
     widget can fetch them from the frontend without Python round trips.
+
+    This prefix-cache format is meant for small or deliberately spatial-binned
+    portable viewers. Native vendor EDS files should usually remain the query
+    source for no-bin work: the widget only needs the current energy window,
+    ROI spectrum, or visible preview, not a fully expanded browser artifact.
+    ``max_sidecar_bytes`` protects against accidentally creating a portable
+    cache that is not appropriate for the source.
     """
 
     data = cube
@@ -246,24 +386,28 @@ def prepare_spectrum_image_sidecar(
         data = np.asarray(to_numpy(cube))
     if int(data.ndim) != 3:
         raise ValueError(f"prepare_spectrum_image_sidecar expects a 3D cube, got {data.ndim}D")
-    if not np.issubdtype(np.dtype(data.dtype), np.integer):
-        raise ValueError("prepare_spectrum_image_sidecar currently expects integer count data")
-    if not np.issubdtype(np.dtype(data.dtype), np.unsignedinteger):
-        min_value = data.min().compute() if hasattr(data.min(), "compute") else np.nanmin(data)
-        if min_value < 0:
-            raise ValueError("prepare_spectrum_image_sidecar expects non-negative counts")
-    if np.issubdtype(np.dtype(data.dtype), np.unsignedinteger) and np.dtype(data.dtype).itemsize > 2:
-        max_value = data.max().compute() if hasattr(data.max(), "compute") else np.nanmax(data)
-        if max_value > np.iinfo(np.uint16).max:
-            raise ValueError("prepare_spectrum_image_sidecar currently expects uint16-range counts")
-    elif not np.issubdtype(np.dtype(data.dtype), np.unsignedinteger):
-        max_value = data.max().compute() if hasattr(data.max(), "compute") else np.nanmax(data)
-        if max_value > np.iinfo(np.uint16).max:
-            raise ValueError("prepare_spectrum_image_sidecar currently expects uint16-range counts")
     axis = np.asarray(energy_keV, dtype=np.float32)
     rows, cols, n_energy = (int(v) for v in data.shape)
     if axis.ndim != 1 or axis.size != n_energy:
         raise ValueError(f"energy_keV must be length {n_energy}, got shape {axis.shape}")
+    if not np.issubdtype(np.dtype(data.dtype), np.integer):
+        raise ValueError("prepare_spectrum_image_sidecar currently expects integer count data")
+    estimated_bytes = _estimate_spectrum_image_sidecar_bytes(
+        (rows, cols, n_energy),
+        include_base_image=base_image is not None,
+    )
+    if max_sidecar_bytes is not None and estimated_bytes > int(max_sidecar_bytes):
+        raise ValueError(
+            "ShowEDS exact prefix-cache data folder would be too large for this source. "
+            f"The requested cache shape {(rows, cols, n_energy)} is estimated to write "
+            f"{_format_bytes(estimated_bytes)}, above the {_format_bytes(int(max_sidecar_bytes))} "
+            "safety limit. Keep the native EMD file as the exact query source for no-bin work, "
+            "or choose an explicit spatial_bin for a portable sharing cache."
+        )
+    if not np.issubdtype(np.dtype(data.dtype), np.unsignedinteger):
+        min_value = data.min().compute() if hasattr(data.min(), "compute") else np.nanmin(data)
+        if min_value < 0:
+            raise ValueError("prepare_spectrum_image_sidecar expects non-negative counts")
 
     out = pathlib.Path(out_dir).expanduser()
     out.mkdir(parents=True, exist_ok=True)
@@ -320,6 +464,241 @@ def prepare_spectrum_image_sidecar(
         "build_seconds": round(time.perf_counter() - t0, 3),
     }
     (out / "meta.json").write_text(json.dumps(meta))
+    return out
+
+
+def _stream_index_kernels():
+    try:
+        from numba import njit
+    except Exception:  # pragma: no cover - fallback used only without numba
+        return None, None
+
+    @njit(cache=True)
+    def count_stream_events(streams, rows, cols, n_energy):  # type: ignore[no-untyped-def]
+        n_pixels = rows * cols
+        channel_counts = np.zeros(n_energy, np.uint32)
+        pixel_counts = np.zeros(n_pixels, np.uint32)
+        total = 0
+        for si in range(len(streams)):
+            nav = 0
+            stream = streams[si]
+            for value in stream:
+                if value == 65535:
+                    nav += 1
+                    if nav >= n_pixels:
+                        break
+                elif value < n_energy:
+                    channel_counts[value] += 1
+                    pixel_counts[nav] += 1
+                    total += 1
+        return channel_counts, pixel_counts, total
+
+    @njit(cache=True)
+    def fill_stream_indexes(  # type: ignore[no-untyped-def]
+        streams,
+        rows,
+        cols,
+        n_energy,
+        channel_offsets,
+        pixel_offsets,
+        channel_pixels,
+        pixel_channels,
+    ):
+        n_pixels = rows * cols
+        channel_pos = channel_offsets[:-1].copy()
+        pixel_pos = pixel_offsets[:-1].copy()
+        for si in range(len(streams)):
+            nav = 0
+            stream = streams[si]
+            for value in stream:
+                if value == 65535:
+                    nav += 1
+                    if nav >= n_pixels:
+                        break
+                elif value < n_energy:
+                    cp = channel_pos[value]
+                    channel_pixels[cp] = nav
+                    channel_pos[value] = cp + 1
+                    pp = pixel_pos[nav]
+                    pixel_channels[pp] = value
+                    pixel_pos[nav] = pp + 1
+
+    return count_stream_events, fill_stream_indexes
+
+
+def _stream_index_fallback(streams: list[np.ndarray], rows: int, cols: int, n_energy: int):
+    n_pixels = rows * cols
+    channel_counts = np.zeros(n_energy, dtype=np.uint32)
+    pixel_counts = np.zeros(n_pixels, dtype=np.uint32)
+    total = 0
+    for stream in streams:
+        nav = 0
+        for value in stream:
+            v = int(value)
+            if v == 65535:
+                nav += 1
+                if nav >= n_pixels:
+                    break
+            elif v < n_energy:
+                channel_counts[v] += 1
+                pixel_counts[nav] += 1
+                total += 1
+    return channel_counts, pixel_counts, total
+
+
+def _fill_stream_index_fallback(
+    streams: list[np.ndarray],
+    rows: int,
+    cols: int,
+    n_energy: int,
+    channel_offsets: np.ndarray,
+    pixel_offsets: np.ndarray,
+    channel_pixels: np.ndarray,
+    pixel_channels: np.ndarray,
+) -> None:
+    n_pixels = rows * cols
+    channel_pos = channel_offsets[:-1].copy()
+    pixel_pos = pixel_offsets[:-1].copy()
+    for stream in streams:
+        nav = 0
+        for value in stream:
+            v = int(value)
+            if v == 65535:
+                nav += 1
+                if nav >= n_pixels:
+                    break
+            elif v < n_energy:
+                cp = int(channel_pos[v])
+                channel_pixels[cp] = nav
+                channel_pos[v] = cp + 1
+                pp = int(pixel_pos[nav])
+                pixel_channels[pp] = v
+                pixel_pos[nav] = pp + 1
+
+
+def _velox_stream_groups(path: pathlib.Path) -> tuple[list[np.ndarray], int, int, int]:
+    import h5py
+
+    with h5py.File(path, "r") as handle:
+        stream_root = handle.get("Data/SpectrumStream")
+        if stream_root is None:
+            raise ValueError(f"No Velox SpectrumStream group found in {path}")
+        keys = sorted(stream_root.keys())
+        if not keys:
+            raise ValueError(f"Velox SpectrumStream group in {path} is empty")
+        streams: list[np.ndarray] = []
+        rows = cols = n_energy = 0
+        for key in keys:
+            group = stream_root[key]
+            settings = json.loads(group["AcquisitionSettings"][0].decode("utf-8"))
+            raster = settings.get("RasterScanDefinition", {})
+            cols = int(raster.get("Width", cols))
+            rows = int(raster.get("Height", rows))
+            n_energy = int(settings.get("bincount", n_energy))
+            streams.append(np.asarray(group["Data"][:, 0], dtype=np.uint16))
+    if rows <= 0 or cols <= 0 or n_energy <= 0:
+        raise ValueError(f"Could not read Velox SpectrumStream dimensions from {path}")
+    return streams, rows, cols, n_energy
+
+
+def prepare_spectrum_stream_sidecar(
+    path: str | pathlib.Path,
+    out_dir: str | pathlib.Path,
+    *,
+    base_image: np.ndarray | None = None,
+    energy_keV: np.ndarray | None = None,
+    max_sidecar_bytes: int | None = DEFAULT_MAX_SHOWEDS_SIDECAR_BYTES,
+) -> pathlib.Path:
+    """Build an exact sparse data folder from a Velox EDS spectrum stream.
+
+    The folder is optimized for interactive exploration: band maps use a
+    channel-sorted pixel index, and ROI spectra use a pixel-sorted channel
+    index. No dense ``(row, col, energy)`` cube is materialized.
+    """
+
+    source = pathlib.Path(path).expanduser()
+    out = pathlib.Path(out_dir).expanduser()
+    streams, rows, cols, n_energy = _velox_stream_groups(source)
+    if energy_keV is None or base_image is None:
+        loaded = _read_emd_spectrum_image(source, lazy=True)
+        energy_keV = np.asarray(loaded["energy_keV"], dtype=np.float32) if energy_keV is None else energy_keV
+        if base_image is None and loaded.get("base_image") is not None:
+            base_image = _compute_numpy(loaded["base_image"], dtype=np.float32)
+    axis = np.asarray(energy_keV if energy_keV is not None else np.arange(n_energy), dtype=np.float32)
+    if axis.shape != (n_energy,):
+        raise ValueError(f"energy_keV must have length {n_energy}, got shape {axis.shape}")
+    base = np.zeros((rows, cols), dtype=np.float32) if base_image is None else np.asarray(to_numpy(base_image), dtype=np.float32)
+    if base.shape != (rows, cols):
+        raise ValueError(f"base_image must have shape {(rows, cols)}, got {base.shape}")
+
+    try:
+        from numba.typed import List as NumbaList
+
+        typed_streams = NumbaList()
+        for stream in streams:
+            typed_streams.append(stream)
+        count_kernel, fill_kernel = _stream_index_kernels()
+    except Exception:
+        typed_streams = None
+        count_kernel = fill_kernel = None
+
+    if count_kernel is not None and fill_kernel is not None and typed_streams is not None:
+        channel_counts, pixel_counts, total_events = count_kernel(typed_streams, rows, cols, n_energy)
+    else:  # pragma: no cover - numba is expected in development
+        channel_counts, pixel_counts, total_events = _stream_index_fallback(streams, rows, cols, n_energy)
+
+    estimated_bytes = _estimate_spectrum_stream_sidecar_bytes(int(total_events), rows, cols, n_energy)
+    if max_sidecar_bytes is not None and estimated_bytes > int(max_sidecar_bytes):
+        raise ValueError(
+            "ShowEDS sparse stream folder would be "
+            f"{_format_bytes(estimated_bytes)}, above the {_format_bytes(int(max_sidecar_bytes))} safety limit."
+        )
+
+    channel_offsets = np.empty(n_energy + 1, dtype=np.uint32)
+    channel_offsets[0] = 0
+    channel_offsets[1:] = np.cumsum(channel_counts, dtype=np.uint64).astype(np.uint32)
+    pixel_offsets = np.empty(rows * cols + 1, dtype=np.uint32)
+    pixel_offsets[0] = 0
+    pixel_offsets[1:] = np.cumsum(pixel_counts, dtype=np.uint64).astype(np.uint32)
+    channel_pixels = np.empty(int(total_events), dtype=np.uint32)
+    pixel_channels = np.empty(int(total_events), dtype=np.uint16)
+
+    if fill_kernel is not None and typed_streams is not None:
+        fill_kernel(typed_streams, rows, cols, n_energy, channel_offsets, pixel_offsets, channel_pixels, pixel_channels)
+    else:  # pragma: no cover
+        _fill_stream_index_fallback(
+            streams,
+            rows,
+            cols,
+            n_energy,
+            channel_offsets,
+            pixel_offsets,
+            channel_pixels,
+            pixel_channels,
+        )
+
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "channel_offsets_u32.bin").write_bytes(channel_offsets.astype("<u4", copy=False).tobytes())
+    (out / "channel_pixels_u32.bin").write_bytes(channel_pixels.astype("<u4", copy=False).tobytes())
+    (out / "pixel_offsets_u32.bin").write_bytes(pixel_offsets.astype("<u4", copy=False).tobytes())
+    (out / "pixel_channels_u16.bin").write_bytes(pixel_channels.astype("<u2", copy=False).tobytes())
+    (out / "base_f32.bin").write_bytes(base.astype("<f4", copy=False).tobytes())
+    meta = {
+        "format": "quantem.widget.showeds.stream-sidecar.v1",
+        "source": str(source),
+        "rows": int(rows),
+        "cols": int(cols),
+        "n_energy": int(n_energy),
+        "n_events": int(total_events),
+        "energy_keV": axis.astype(float).tolist(),
+        "channel_offsets": "channel_offsets_u32.bin",
+        "channel_pixels": "channel_pixels_u32.bin",
+        "pixel_offsets": "pixel_offsets_u32.bin",
+        "pixel_channels": "pixel_channels_u16.bin",
+        "base_image": "base_f32.bin",
+        "sidecar_bytes": int(estimated_bytes),
+    }
+    (out / "meta.json").write_text(json.dumps(meta, indent=2))
     return out
 
 
@@ -503,6 +882,15 @@ def load_spectrum_image_sidecar(
     if not meta_path.exists():
         raise FileNotFoundError(f"ShowEDS data-folder metadata was not found: {meta_path}")
     meta = json.loads(meta_path.read_text())
+    if meta.get("format") == "quantem.widget.showeds.stream-sidecar.v1":
+        return load_spectrum_stream_sidecar(
+            sidecar,
+            energy=energy,
+            width=width,
+            band=band,
+            roi=roi,
+            roi_shape=roi_shape,
+        )
     rows = int(meta["rows"])
     cols = int(meta["cols"])
     n_energy = int(meta["n_energy"])
@@ -543,6 +931,70 @@ def load_spectrum_image_sidecar(
         "initial_spectrum": initial_spectrum,
         "base_image": base_image,
         "roi": (row, col, height, roi_width),
+        "band": (band_start, band_end),
+    }
+
+
+def load_spectrum_stream_sidecar(
+    sidecar_dir: str | pathlib.Path,
+    *,
+    energy: float | None = None,
+    width: float | None = None,
+    band: tuple[float, float] | tuple[int, int] | None = None,
+    roi: tuple[int, int, int, int] | None = None,
+    roi_shape: str = "rect",
+) -> dict[str, Any]:
+    """Load startup state from an exact sparse Velox stream data folder."""
+
+    sidecar = pathlib.Path(sidecar_dir).expanduser()
+    meta = json.loads((sidecar / "meta.json").read_text())
+    rows = int(meta["rows"])
+    cols = int(meta["cols"])
+    n_energy = int(meta["n_energy"])
+    n_events = int(meta["n_events"])
+    axis = np.asarray(meta["energy_keV"], dtype=np.float32)
+    if axis.ndim != 1 or axis.size != n_energy:
+        raise ValueError(f"stream data-folder energy axis must be length {n_energy}, got shape {axis.shape}")
+
+    band_start, band_end = _resolve_band_indices(axis, energy=energy, width=width, band=band)
+    normalised_shape = _normalise_roi_shape(roi_shape)
+    row, col, height, roi_width = _normalise_roi(rows, cols, roi, roi_shape=normalised_shape)
+
+    channel_offsets = np.memmap(sidecar / meta["channel_offsets"], dtype="<u4", mode="r", shape=(n_energy + 1,))
+    channel_pixels = np.memmap(sidecar / meta["channel_pixels"], dtype="<u4", mode="r", shape=(n_events,))
+    pixel_offsets = np.memmap(sidecar / meta["pixel_offsets"], dtype="<u4", mode="r", shape=(rows * cols + 1,))
+    pixel_channels = np.memmap(sidecar / meta["pixel_channels"], dtype="<u2", mode="r", shape=(n_events,))
+    base_image = np.asarray(np.memmap(sidecar / meta["base_image"], dtype="<f4", mode="r", shape=(rows, cols)), dtype=np.float32)
+
+    initial_map_flat = np.zeros(rows * cols, dtype=np.float32)
+    p0 = int(channel_offsets[band_start])
+    p1 = int(channel_offsets[band_end])
+    np.add.at(initial_map_flat, np.asarray(channel_pixels[p0:p1], dtype=np.intp), 1)
+    initial_map = initial_map_flat.reshape(rows, cols)
+
+    initial_spectrum = np.zeros(n_energy, dtype=np.float32)
+    for r in range(row, row + height):
+        if normalised_shape == "rect":
+            segments = [(col, col + roi_width)]
+        else:
+            segment = _round_col_segment(r, row, col, height, roi_width, roi_shape=normalised_shape)
+            segments = [] if segment is None else [segment]
+        for c0, c1 in segments:
+            for c in range(c0, c1):
+                pixel = r * cols + c
+                s0 = int(pixel_offsets[pixel])
+                s1 = int(pixel_offsets[pixel + 1])
+                np.add.at(initial_spectrum, np.asarray(pixel_channels[s0:s1], dtype=np.intp), 1)
+
+    return {
+        "sidecar_dir": sidecar,
+        "meta": meta,
+        "energy_keV": axis,
+        "initial_map": initial_map,
+        "initial_spectrum": initial_spectrum,
+        "base_image": base_image,
+        "roi": (row, col, height, roi_width),
+        "roi_shape": normalised_shape,
         "band": (band_start, band_end),
     }
 
@@ -727,12 +1179,107 @@ def load_emd_spectrum_image(
     }
 
 
+def _normalise_emd_backend(value: str | None) -> str:
+    raw = str(value or "auto").strip().lower().replace("_", "-")
+    aliases = {
+        "": "auto",
+        "data-folder": "sidecar",
+        "folder": "sidecar",
+        "linked-folder": "sidecar",
+        "lazy": "kernel",
+        "native": "kernel",
+    }
+    backend = aliases.get(raw, raw)
+    if backend not in {"auto", "sidecar", "kernel"}:
+        raise ValueError("ShowEDS.from_emd backend must be 'auto', 'sidecar', or 'kernel'")
+    return backend
+
+
+def _compute_numpy(value: Any, *, dtype: np.dtype | type | None = None) -> np.ndarray:
+    if hasattr(value, "compute"):
+        value = value.compute()
+    return np.asarray(to_numpy(value), dtype=dtype)
+
+
+def _masked_lazy_spectrum(
+    cube: Any,
+    row: int,
+    col: int,
+    height: int,
+    width: int,
+    *,
+    roi_shape: str,
+) -> Any:
+    shape = _normalise_roi_shape(roi_shape)
+    subset = cube[row : row + height, col : col + width, :]
+    if shape == "rect":
+        return subset.sum(axis=(0, 1))
+
+    mask = np.zeros((height, width), dtype=np.float32)
+    for rr in range(height):
+        segment = _round_col_segment(rr + row, row, col, height, width, roi_shape=shape)
+        if segment is None:
+            continue
+        c0, c1 = segment
+        mask[rr, c0 - col : c1 - col] = 1
+    return (subset * mask[:, :, None]).sum(axis=(0, 1))
+
+
+def _initial_lazy_emd_state(
+    cube: Any,
+    energy_keV: np.ndarray,
+    base_image: Any | None,
+    *,
+    energy: float | None,
+    width: float | None,
+    band: tuple[float, float] | tuple[int, int] | None,
+    roi: tuple[int, int, int, int] | None,
+    roi_shape: str,
+) -> dict[str, Any]:
+    rows, cols, n_energy = (int(v) for v in cube.shape)
+    axis = np.asarray(energy_keV, dtype=np.float32)
+    if axis.ndim != 1 or axis.size != n_energy:
+        raise ValueError(f"energy_keV must be length {n_energy}, got shape {axis.shape}")
+
+    band_start, band_end = _resolve_band_indices(axis, energy=energy, width=width, band=band)
+    normalised_shape = _normalise_roi_shape(roi_shape)
+    row, col, roi_height, roi_width = _normalise_roi(rows, cols, roi, roi_shape=normalised_shape)
+
+    initial_map = _compute_numpy(cube[:, :, band_start:band_end].sum(axis=2), dtype=np.float32)
+    spectrum = _masked_lazy_spectrum(
+        cube,
+        row,
+        col,
+        roi_height,
+        roi_width,
+        roi_shape=normalised_shape,
+    )
+    initial_spectrum = _compute_numpy(spectrum, dtype=np.float32)
+
+    if base_image is None:
+        base = initial_map
+    else:
+        base = _compute_numpy(base_image, dtype=np.float32)
+        if base.shape != (rows, cols):
+            base = initial_map
+
+    return {
+        "initial_map": initial_map,
+        "initial_spectrum": initial_spectrum,
+        "base_image": base,
+        "band": (band_start, band_end),
+        "roi": (row, col, roi_height, roi_width),
+        "roi_shape": normalised_shape,
+    }
+
+
 class ShowEDS(anywidget.AnyWidget):
     """Explore an EDS/EELS spectrum image ``(row, col, energy)``.
 
     For browser-backed widgets, the frontend keeps the spectrum cube resident in
-    WebGPU. ``ShowEDS.from_emd(...)`` uses an exact kernel-backed lazy path for
-    large native EMD files so notebooks do not embed multi-GB widget state.
+    WebGPU. ``ShowEDS.from_emd(...)`` keeps native EMD files lazy by default for
+    exact no-bin work: the source file remains the query backend, and only the
+    current map or ROI spectrum is read.
     """
 
     _esm = pathlib.Path(__file__).parent / "static" / "showeds.js"
@@ -882,14 +1429,13 @@ class ShowEDS(anywidget.AnyWidget):
             outgoing_cube_bytes = int(raw_data.size * cube_storage_dtype.itemsize)
             if max_state_bytes is not None and outgoing_cube_bytes > int(max_state_bytes):
                 raise ValueError(
-                    "ShowEDS currently embeds the full spectrum-image cube in notebook/widget state. "
+                    "ShowEDS browser mode embeds an in-browser copy of the spectrum image. "
                     f"The requested cube shape {tuple(int(v) for v in raw_data.shape)} would send "
                     f"{_format_bytes(outgoing_cube_bytes)} as a widget buffer, above the "
-                    f"{_format_bytes(int(max_state_bytes))} safety limit. This is why the no-bin real "
-                    "EDS notebook appears to load forever: JupyterLab is trying to serialize and send "
-                    "a multi-GB widget payload. Use ShowEDS.from_emd(...) for live kernel-backed "
-                    "exploration of native no-bin EDS data, or pass max_state_bytes=None only to "
-                    "bypass this guard for debugging."
+                    f"{_format_bytes(int(max_state_bytes))} safety limit. Use ShowEDS.from_emd(...) "
+                    "for native EMD data so the file stays as the exact lazy query source. Use an "
+                    "explicit spatial_bin only when you intentionally want a portable sharing cache, "
+                    "or pass max_state_bytes=None only to bypass this guard for debugging."
                 )
             data = np.asarray(raw_data, dtype=cube_storage_dtype)
             rows, cols, n_energy = data.shape
@@ -1063,6 +1609,7 @@ class ShowEDS(anywidget.AnyWidget):
             if base_image is None:
                 base_image = startup["base_image"]
             kwargs.setdefault("roi", startup["roi"])
+            kwargs.setdefault("roi_shape", startup.get("roi_shape", kwargs.get("roi_shape", "rect")))
         widget = cls(
             None,
             energy_keV,
@@ -1087,12 +1634,14 @@ class ShowEDS(anywidget.AnyWidget):
         cls,
         path: str | pathlib.Path,
         *,
+        backend: str = "auto",
         sidecar_dir: str | pathlib.Path | None = None,
         sidecar_url: str | None = None,
         rebuild_sidecar: bool = False,
         energy_chunk: int = 256,
         spatial_bin: int = 1,
         energy_bin: int = 1,
+        max_sidecar_bytes: int | None = DEFAULT_MAX_SHOWEDS_SIDECAR_BYTES,
         title: str | None = None,
         energy: float = 8.04,
         width: float = 0.24,
@@ -1100,32 +1649,102 @@ class ShowEDS(anywidget.AnyWidget):
         candidate_elements: list[str] | tuple[str, ...] | None = None,
         **kwargs: Any,
     ) -> "ShowEDS":
-        """Open a Velox/RSCIIO EMD spectrum image through an exact data folder.
+        """Open a Velox/RSCIIO EMD spectrum image.
 
-        If ``sidecar_dir`` already contains a ShowEDS data folder, startup only reads
-        ``meta.json`` plus a few small slices for the initial view. If it does
-        not exist, the data folder is built once from the native EMD file.
+        ``backend="auto"`` uses an existing data folder if one is present.
+        Otherwise exact no-bin EMD stays native/lazy: the EMD file remains the
+        query source, and the widget reads only the current band map or ROI
+        spectrum. A prefix-cache data folder is built only when the caller asks
+        for ``backend="sidecar"`` or explicit binning for a portable viewer.
         """
 
         source = pathlib.Path(path).expanduser()
+        backend_mode = _normalise_emd_backend(backend)
+        spatial_bin_value = int(max(1, spatial_bin))
+        energy_bin_value = int(max(1, energy_bin))
+        wants_binned_cache = spatial_bin_value > 1 or energy_bin_value > 1
         sidecar_path = (
             pathlib.Path(sidecar_dir).expanduser()
             if sidecar_dir is not None
             else pathlib.Path.cwd() / "sidecars" / source.stem
         )
         meta_path = sidecar_path / "meta.json"
+        has_existing_cache = (not rebuild_sidecar) and meta_path.exists()
+        use_native_query = backend_mode == "kernel" or (
+            backend_mode == "auto" and not has_existing_cache and not wants_binned_cache
+        )
+
+        if backend_mode == "kernel" and wants_binned_cache:
+            raise ValueError(
+                "ShowEDS.from_emd backend='kernel' keeps the native EMD exact and currently "
+                "does not apply spatial_bin or energy_bin. Use backend='sidecar' for a portable "
+                "sum-binned data folder."
+            )
+
+        if use_native_query:
+            loaded = _read_emd_spectrum_image(source, lazy=True, candidate_elements=candidate_elements)
+            cube = loaded["cube"]
+            axis = loaded["energy_keV"]
+            base = loaded["base_image"]
+            startup = _initial_lazy_emd_state(
+                cube,
+                axis,
+                base,
+                energy=energy,
+                width=width,
+                band=kwargs.get("band"),
+                roi=kwargs.get("roi"),
+                roi_shape=kwargs.get("roi_shape", "rect"),
+            )
+            widget_kwargs = dict(kwargs)
+            widget_kwargs["band"] = startup["band"]
+            widget_kwargs["roi"] = startup["roi"]
+            widget_kwargs["roi_shape"] = startup["roi_shape"]
+            return cls(
+                None,
+                axis,
+                title=title or loaded["title"] or source.stem,
+                base_image=startup["base_image"],
+                initial_map=startup["initial_map"],
+                initial_spectrum=startup["initial_spectrum"],
+                lazy_path=source,
+                element_label=element_label,
+                candidate_elements=list(candidate_elements or ["O", "Si", "Ca", "Cu", "Au"]),
+                **widget_kwargs,
+            )
+
         if rebuild_sidecar or not meta_path.exists():
             loaded = _read_emd_spectrum_image(source, lazy=True, candidate_elements=candidate_elements)
             cube = loaded["cube"]
             axis = loaded["energy_keV"]
             base = loaded["base_image"]
-            if int(max(1, spatial_bin)) > 1 or int(max(1, energy_bin)) > 1:
-                binned_cube, binned_axis, binned_base = bin_spectrum_image(
-                    np.asarray(cube.compute() if hasattr(cube, "compute") else cube),
+            sidecar_shape = _binned_spectrum_image_shape(
+                tuple(int(v) for v in cube.shape),
+                spatial_bin=spatial_bin_value,
+                energy_bin=energy_bin_value,
+            )
+            estimated_bytes = _estimate_spectrum_image_sidecar_bytes(
+                sidecar_shape,
+                include_base_image=base is not None,
+            )
+            sidecar_too_large = max_sidecar_bytes is not None and estimated_bytes > int(max_sidecar_bytes)
+            if sidecar_too_large:
+                raise ValueError(
+                    "ShowEDS.from_emd cannot create the requested exact prefix-cache data folder within "
+                    "the configured safety limit. "
+                    f"Source shape {tuple(int(v) for v in cube.shape)} with spatial_bin={spatial_bin_value} "
+                    f"and energy_bin={energy_bin_value} would create cache shape {sidecar_shape}, estimated at "
+                    f"{_format_bytes(estimated_bytes)}, above the {_format_bytes(int(max_sidecar_bytes))} safety limit. "
+                    "Use the native lazy backend for exact no-bin analysis, increase spatial_bin for a smaller "
+                    "portable cache, or pass max_sidecar_bytes=None only for an intentional local experiment."
+                )
+            if wants_binned_cache:
+                binned_cube, binned_axis, binned_base = _sum_bin_spectrum_image_lazy(
+                    cube,
                     axis,
-                    base_image=None if base is None else np.asarray(base.compute() if hasattr(base, "compute") else base),
-                    spatial_bin=spatial_bin,
-                    energy_bin=energy_bin,
+                    base_image=base,
+                    spatial_bin=spatial_bin_value,
+                    energy_bin=energy_bin_value,
                 )
                 cube = binned_cube
                 axis = binned_axis
@@ -1136,6 +1755,7 @@ class ShowEDS(anywidget.AnyWidget):
                 sidecar_path,
                 base_image=None if base is None else base,
                 energy_chunk=energy_chunk,
+                max_sidecar_bytes=max_sidecar_bytes,
             )
 
         url = _normalise_sidecar_url(sidecar_url) if sidecar_url is not None else _sidecar_url_from_path(sidecar_path)
@@ -1170,18 +1790,8 @@ class ShowEDS(anywidget.AnyWidget):
             raise RuntimeError("Lazy EDS source is already loading")
         self._lazy_loading = True
         try:
-            from rsciio.emd import file_reader
-
-            datasets = file_reader(str(self._lazy_path), lazy=True)
-            cube = None
-            for dataset in datasets:
-                data = dataset.get("data")
-                if getattr(data, "ndim", None) == 3 and (cube is None or data.size > cube.size):
-                    cube = data
-            if cube is None:
-                raise ValueError(f"No 3D EDS cube found in {self._lazy_path}")
-            self._lazy_cube = cube
-            return cube
+            self._lazy_cube = _read_emd_spectrum_image(self._lazy_path, lazy=True)["cube"]
+            return self._lazy_cube
         finally:
             self._lazy_loading = False
 
@@ -1344,6 +1954,8 @@ class ShowEDS(anywidget.AnyWidget):
     ) -> pathlib.Path:
         from ipywidgets.embed import dependency_state, embed_minimal_html
 
+        from .export import ensure_mobile_viewport
+
         export_widget = widget or self
         export_path = pathlib.Path(path)
         export_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1359,6 +1971,7 @@ class ShowEDS(anywidget.AnyWidget):
             )
         finally:
             export_widget._export_light = previous_export_light
+        ensure_mobile_viewport(export_path)
         return export_path
 
     def _html_export_bytes(
@@ -1444,6 +2057,13 @@ class ShowEDS(anywidget.AnyWidget):
                 raise ValueError("folder export is only available for ShowEDS widgets with a data folder")
             return self, "folder exact"
         if mode == "single":
+            if self.compute_backend == "kernel" and not self.cube_bytes:
+                raise ValueError(
+                    "single exact HTML export is not available for native lazy EMD widgets because "
+                    "the exported page has no Python kernel or local EMD query backend. Use "
+                    "downsample=2/4 for a portable single-file preview, or backend='sidecar' with "
+                    "an explicit spatial_bin for a shareable data-folder cache."
+                )
             if self.compute_backend == "sidecar":
                 raise ValueError(
                     "single exact export is not available for this folder-backed ShowEDS widget; "

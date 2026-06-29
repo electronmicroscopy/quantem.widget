@@ -942,6 +942,8 @@ class Show2D(anywidget.AnyWidget):
     ) -> pathlib.Path:
         from ipywidgets.embed import dependency_state, embed_minimal_html
 
+        from .export import ensure_mobile_viewport
+
         export_path = pathlib.Path(path)
         export_path.parent.mkdir(parents=True, exist_ok=True)
         page_title = title or self.title or "Show2D"
@@ -957,6 +959,7 @@ class Show2D(anywidget.AnyWidget):
             )
         finally:
             export_widget.close()
+        ensure_mobile_viewport(export_path)
         return export_path
 
     def _html_export_bytes(self, *, quantized: bool) -> bytes:
