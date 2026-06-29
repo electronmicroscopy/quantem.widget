@@ -16,6 +16,7 @@ parts:
       - file: tutorials/show3dslices
       - file: tutorials/show4dstem
       - file: tutorials/showeds
+      - file: tutorials/showdiffraction
       - file: tutorials/widget_export
       - file: github-preview
   - caption: API reference
