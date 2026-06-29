@@ -69,6 +69,27 @@ tailscale serve --bg --https=443 http://127.0.0.1:<port>
 Open the `https://` URL on the phone with **Tailscale ON**. It is reachable only
 on your tailnet; nothing is exposed to the public internet.
 
+**Verified worked example** (this lab's Linux compute box, Tailscale 1.98.4, file
+server on `:8780`). Find your own machine name with `tailscale status` (the
+`DNSName` field):
+
+```console
+$ tailscale serve --bg --https=443 http://127.0.0.1:8780
+Available within your tailnet:
+https://owner-ms-7e34.tail9632de.ts.net/
+|-- proxy http://127.0.0.1:8780
+Serve started and running in the background.
+
+$ tailscale serve status
+https://owner-ms-7e34.tail9632de.ts.net (tailnet only)
+|-- / proxy http://127.0.0.1:8780
+```
+
+The widget then opens on the phone at
+`https://owner-ms-7e34.tail9632de.ts.net/agent-show/<file>.html` (HTTP 200, valid
+cert, secure context, so `navigator.gpu` is exposed). Substitute your own
+`DNSName` and the local port your server listens on.
+
 ### Option 3: a quick public tunnel (one-off checks)
 
 ```bash
