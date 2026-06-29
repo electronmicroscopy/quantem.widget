@@ -94,6 +94,7 @@ def test_widget_export_html_writes_standalone_state(
     assert out.exists()
     html = out.read_text()
     assert '<meta name="viewport" content="width=device-width, initial-scale=1">' in html
+    assert 'id="quantem-widget-export-layout"' in html
     assert "application/vnd.jupyter.widget-state+json" in html
     assert state_marker in html
     assert widget.export_status.startswith(f"Exported {out.name}")
