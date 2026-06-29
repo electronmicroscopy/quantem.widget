@@ -22,20 +22,47 @@ HTML_EXPORT_TRAITS = (
 )
 
 _MOBILE_VIEWPORT_META = '<meta name="viewport" content="width=device-width, initial-scale=1">'
+_STANDALONE_EXPORT_STYLE = """<style id="quantem-widget-export-layout">
+html, body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  max-width: 100%;
+  overflow-x: hidden;
+}
+body {
+  box-sizing: border-box;
+}
+*, *::before, *::after {
+  box-sizing: inherit;
+}
+</style>"""
 
 
 def ensure_mobile_viewport(path: str | pathlib.Path) -> pathlib.Path:
-    """Add a mobile viewport meta tag to a standalone HTML export if needed."""
+    """Add mobile-friendly standalone HTML shell tags if needed."""
 
     html_path = pathlib.Path(path)
     html = html_path.read_text(encoding="utf-8")
-    if 'name="viewport"' in html or "name='viewport'" in html:
-        return html_path
+    changed = False
     if "<head>" in html:
-        html = html.replace("<head>", f"<head>\n    {_MOBILE_VIEWPORT_META}", 1)
+        if 'name="viewport"' not in html and "name='viewport'" not in html:
+            html = html.replace("<head>", f"<head>\n    {_MOBILE_VIEWPORT_META}", 1)
+            changed = True
+        if 'id="quantem-widget-export-layout"' not in html:
+            html = html.replace("</head>", f"    {_STANDALONE_EXPORT_STYLE}\n</head>", 1)
+            changed = True
     else:
-        html = f"{_MOBILE_VIEWPORT_META}\n{html}"
-    html_path.write_text(html, encoding="utf-8")
+        prefix = ""
+        if 'name="viewport"' not in html and "name='viewport'" not in html:
+            prefix += f"{_MOBILE_VIEWPORT_META}\n"
+        if 'id="quantem-widget-export-layout"' not in html:
+            prefix += f"{_STANDALONE_EXPORT_STYLE}\n"
+        if prefix:
+            html = f"{prefix}{html}"
+            changed = True
+    if changed:
+        html_path.write_text(html, encoding="utf-8")
     return html_path
 
 

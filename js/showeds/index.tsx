@@ -53,6 +53,7 @@ type SidecarWorkerResponse = {
   end?: number;
   buffer?: ArrayBuffer;
   ms?: number;
+  backend?: string;
   aborted?: boolean;
   message?: string;
 };
@@ -79,10 +80,12 @@ type ShowEDSWindow = Window & typeof globalThis & {
 };
 type ShowEDSPerfWindow = Window & typeof globalThis & {
   __quantemShowEDSPerf?: Record<PerfKind, number[]>;
+  __quantemShowEDSBackend?: { map?: string; spectrum?: string };
 };
 
 const WORKGROUP = 64;
 const INTERACTION_COMPUTE_INTERVAL_MS = 16;
+const MAP_RASTER_DPR = 1;
 const MIN_MAP_ZOOM = 1;
 const MAX_MAP_ZOOM = 32;
 const MIN_SPECTRUM_SPAN = 8;
@@ -520,6 +523,12 @@ function recordPerf(kind: PerfKind, ms: number) {
   if (perf[kind].length > 120) perf[kind].splice(0, perf[kind].length - 120);
 }
 
+function recordBackend(kind: "map" | "spectrum", backend: string | undefined) {
+  const w = window as ShowEDSPerfWindow;
+  const state = w.__quantemShowEDSBackend || (w.__quantemShowEDSBackend = {});
+  state[kind] = backend || "unknown";
+}
+
 function colorize(t: number): [number, number, number] {
   const x = Math.max(0, Math.min(1, t));
   const r = Math.round(255 * Math.min(1, Math.max(0, 1.8 * x - 0.25)));
@@ -670,6 +679,12 @@ function extractStorageBytes(dataView: DataView | ArrayBuffer | Uint8Array, logi
   return out;
 }
 
+function copyExtractedBuffer(dataView: DataView | ArrayBuffer | Uint8Array): ArrayBuffer | null {
+  const bytes = extractBytes(dataView);
+  if (bytes.length === 0) return null;
+  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+}
+
 function createSidecarWorker(): Worker {
   const source = `
 let meta = null;
@@ -681,11 +696,71 @@ let channelOffsets = null;
 let channelPixels = null;
 let pixelOffsets = null;
 let pixelChannels = null;
+let streamGpu = null;
+let streamGpuPromise = null;
 let fetchRequestId = 0;
 let fetchPending = new Map();
 let activeMapController = null;
 let activeSpectrumController = null;
 const MAX_SPECTRUM_CACHE = 8192;
+const WORKGROUP = 64;
+const CLEAR_WGSL = [
+  "@group(0) @binding(0) var<storage,read_write> out: array<atomic<u32>>;",
+  "@group(0) @binding(1) var<uniform> p: vec4<u32>;",
+  "@compute @workgroup_size(64)",
+  "fn main(@builtin(global_invocation_id) gid: vec3<u32>) {",
+  "  let i = gid.x;",
+  "  if (i >= p.x) { return; }",
+  "  atomicStore(&out[i], 0u);",
+  "}",
+].join("\\n");
+const STREAM_MAP_WGSL = [
+  "@group(0) @binding(0) var<storage,read> channelPixels: array<u32>;",
+  "@group(0) @binding(1) var<storage,read_write> out: array<atomic<u32>>;",
+  "@group(0) @binding(2) var<uniform> p: vec4<u32>;",
+  "@compute @workgroup_size(64)",
+  "fn main(@builtin(global_invocation_id) gid: vec3<u32>) {",
+  "  let i = gid.x;",
+  "  if (i >= p.y) { return; }",
+  "  let pixel = channelPixels[p.x + i];",
+  "  atomicAdd(&out[pixel], 1u);",
+  "}",
+].join("\\n");
+const STREAM_SPECTRUM_WGSL = [
+  "struct Params { rows: u32, cols: u32, nEnergy: u32, r0: u32, c0: u32, r1: u32, c1: u32, shape: u32 };",
+  "@group(0) @binding(0) var<storage,read> pixelOffsets: array<u32>;",
+  "@group(0) @binding(1) var<storage,read> pixelChannelWords: array<u32>;",
+  "@group(0) @binding(2) var<storage,read_write> out: array<atomic<u32>>;",
+  "@group(0) @binding(3) var<uniform> p: Params;",
+  "fn channelAt(index: u32) -> u32 {",
+  "  let word = pixelChannelWords[index >> 1u];",
+  "  return select(word >> 16u, word & 0xffffu, (index & 1u) == 0u);",
+  "}",
+  "@compute @workgroup_size(64)",
+  "fn main(@builtin(global_invocation_id) gid: vec3<u32>) {",
+  "  let width = p.c1 - p.c0;",
+  "  let height = p.r1 - p.r0;",
+  "  let local = gid.x;",
+  "  if (local >= width * height) { return; }",
+  "  let r = p.r0 + local / width;",
+  "  let c = p.c0 + local - (local / width) * width;",
+  "  if (p.shape > 0u) {",
+  "    let cx = (f32(p.c0) + f32(p.c1)) * 0.5;",
+  "    let cy = (f32(p.r0) + f32(p.r1)) * 0.5;",
+  "    let rx = max(0.5, f32(width) * 0.5);",
+  "    let ry = max(0.5, f32(height) * 0.5);",
+  "    let dx = f32(c) + 0.5 - cx;",
+  "    let dy = f32(r) + 0.5 - cy;",
+  "    if ((dx * dx) / (rx * rx) + (dy * dy) / (ry * ry) > 1.0) { return; }",
+  "  }",
+  "  let pixel = r * p.cols + c;",
+  "  let start = pixelOffsets[pixel];",
+  "  let end = pixelOffsets[pixel + 1u];",
+  "  for (var k = start; k < end; k = k + 1u) {",
+  "    atomicAdd(&out[channelAt(k)], 1u);",
+  "  }",
+  "}",
+].join("\\n");
 
 function isAbortError(error) {
   return error && (error.name === "AbortError" || error.message === "aborted");
@@ -766,6 +841,38 @@ function isStreamSidecar() {
   return meta && meta.format === "quantem.widget.showeds.stream-sidecar.v1";
 }
 
+function roundUp4(value) {
+  return Math.ceil(value / 4) * 4;
+}
+
+function paddedBytes(view) {
+  const raw = new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
+  if (raw.byteLength % 4 === 0) return raw;
+  const out = new Uint8Array(roundUp4(raw.byteLength));
+  out.set(raw);
+  return out;
+}
+
+function destroyStreamGpu() {
+  if (!streamGpu || streamGpu.disabled) {
+    streamGpu = null;
+    return;
+  }
+  for (const key of [
+    "channelPixels",
+    "pixelOffsets",
+    "pixelChannels",
+    "mapOut",
+    "spectrumOut",
+    "clearParams",
+    "mapParams",
+    "spectrumParams",
+  ]) {
+    try { streamGpu[key]?.destroy?.(); } catch {}
+  }
+  streamGpu = null;
+}
+
 async function ensureStreamIndexes() {
   if (channelOffsets && channelPixels && pixelOffsets && pixelChannels) return;
   if (streamIndexPromise) return await streamIndexPromise;
@@ -787,6 +894,156 @@ async function ensureStreamIndexes() {
   } finally {
     streamIndexPromise = null;
   }
+}
+
+async function makeStreamGpuBuffer(device, view, usage) {
+  const bytes = paddedBytes(view);
+  const buffer = device.createBuffer({ size: bytes.byteLength, usage: usage | GPUBufferUsage.COPY_DST });
+  device.queue.writeBuffer(buffer, 0, bytes);
+  return buffer;
+}
+
+async function readGpuUint32(device, source, count) {
+  const byteLength = count * 4;
+  const read = device.createBuffer({ size: byteLength, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+  const encoder = device.createCommandEncoder();
+  encoder.copyBufferToBuffer(source, 0, read, 0, byteLength);
+  device.queue.submit([encoder.finish()]);
+  await device.queue.onSubmittedWorkDone();
+  await read.mapAsync(GPUMapMode.READ);
+  const out = new Uint32Array(read.getMappedRange().slice(0));
+  read.unmap();
+  read.destroy();
+  return out;
+}
+
+async function ensureStreamGpu() {
+  if (streamGpu) return streamGpu.disabled ? null : streamGpu;
+  if (streamGpuPromise) return await streamGpuPromise;
+  streamGpuPromise = (async () => {
+    try {
+      await ensureStreamIndexes();
+      if (!self.navigator?.gpu) throw new Error("WebGPU is not available in this worker");
+      const adapter = await self.navigator.gpu.requestAdapter();
+      if (!adapter) throw new Error("No WebGPU adapter found for sparse EDS data");
+      const device = await adapter.requestDevice();
+      const rows = Math.max(1, Math.round(meta.rows));
+      const cols = Math.max(1, Math.round(meta.cols));
+      const nEnergy = Math.max(1, Math.round(meta.n_energy));
+      const channelPixelsBuffer = await makeStreamGpuBuffer(device, channelPixels, GPUBufferUsage.STORAGE);
+      const pixelOffsetsBuffer = await makeStreamGpuBuffer(device, pixelOffsets, GPUBufferUsage.STORAGE);
+      const pixelChannelsBuffer = await makeStreamGpuBuffer(device, pixelChannels, GPUBufferUsage.STORAGE);
+      const mapOut = device.createBuffer({ size: rows * cols * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+      const spectrumOut = device.createBuffer({ size: nEnergy * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+      const clearParams = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+      const mapParams = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+      const spectrumParams = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+      const clearPipeline = device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code: CLEAR_WGSL }), entryPoint: "main" } });
+      const mapPipeline = device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code: STREAM_MAP_WGSL }), entryPoint: "main" } });
+      const spectrumPipeline = device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code: STREAM_SPECTRUM_WGSL }), entryPoint: "main" } });
+      streamGpu = {
+        device,
+        channelPixels: channelPixelsBuffer,
+        pixelOffsets: pixelOffsetsBuffer,
+        pixelChannels: pixelChannelsBuffer,
+        mapOut,
+        spectrumOut,
+        clearParams,
+        mapParams,
+        spectrumParams,
+        clearPipeline,
+        mapPipeline,
+        spectrumPipeline,
+        mapClearBindGroup: device.createBindGroup({
+          layout: clearPipeline.getBindGroupLayout(0),
+          entries: [
+            { binding: 0, resource: { buffer: mapOut } },
+            { binding: 1, resource: { buffer: clearParams } },
+          ],
+        }),
+        spectrumClearBindGroup: device.createBindGroup({
+          layout: clearPipeline.getBindGroupLayout(0),
+          entries: [
+            { binding: 0, resource: { buffer: spectrumOut } },
+            { binding: 1, resource: { buffer: clearParams } },
+          ],
+        }),
+        mapBindGroup: device.createBindGroup({
+          layout: mapPipeline.getBindGroupLayout(0),
+          entries: [
+            { binding: 0, resource: { buffer: channelPixelsBuffer } },
+            { binding: 1, resource: { buffer: mapOut } },
+            { binding: 2, resource: { buffer: mapParams } },
+          ],
+        }),
+        spectrumBindGroup: device.createBindGroup({
+          layout: spectrumPipeline.getBindGroupLayout(0),
+          entries: [
+            { binding: 0, resource: { buffer: pixelOffsetsBuffer } },
+            { binding: 1, resource: { buffer: pixelChannelsBuffer } },
+            { binding: 2, resource: { buffer: spectrumOut } },
+            { binding: 3, resource: { buffer: spectrumParams } },
+          ],
+        }),
+      };
+      return streamGpu;
+    } catch (error) {
+      streamGpu = { disabled: true, error: error instanceof Error ? error.message : String(error) };
+      return null;
+    } finally {
+      streamGpuPromise = null;
+    }
+  })();
+  return await streamGpuPromise;
+}
+
+async function computeStreamMapGpu(start, end) {
+  const gpu = await ensureStreamGpu();
+  if (!gpu) return null;
+  const rows = Math.max(1, Math.round(meta.rows));
+  const cols = Math.max(1, Math.round(meta.cols));
+  const p0 = channelOffsets[start];
+  const p1 = channelOffsets[end];
+  const count = Math.max(0, p1 - p0);
+  gpu.device.queue.writeBuffer(gpu.clearParams, 0, new Uint32Array([rows * cols, 0, 0, 0]));
+  gpu.device.queue.writeBuffer(gpu.mapParams, 0, new Uint32Array([p0, count, 0, 0]));
+  const encoder = gpu.device.createCommandEncoder();
+  const pass = encoder.beginComputePass();
+  pass.setPipeline(gpu.clearPipeline);
+  pass.setBindGroup(0, gpu.mapClearBindGroup);
+  pass.dispatchWorkgroups(Math.ceil((rows * cols) / WORKGROUP));
+  if (count > 0) {
+    pass.setPipeline(gpu.mapPipeline);
+    pass.setBindGroup(0, gpu.mapBindGroup);
+    pass.dispatchWorkgroups(Math.ceil(count / WORKGROUP));
+  }
+  pass.end();
+  gpu.device.queue.submit([encoder.finish()]);
+  return await readGpuUint32(gpu.device, gpu.mapOut, rows * cols);
+}
+
+async function computeStreamSpectrumGpu(r0, c0, r1, c1, shape) {
+  const gpu = await ensureStreamGpu();
+  if (!gpu) return null;
+  const rows = Math.max(1, Math.round(meta.rows));
+  const cols = Math.max(1, Math.round(meta.cols));
+  const nEnergy = Math.max(1, Math.round(meta.n_energy));
+  const width = Math.max(1, c1 - c0);
+  const height = Math.max(1, r1 - r0);
+  const shapeFlag = shape === "rect" ? 0 : 1;
+  gpu.device.queue.writeBuffer(gpu.clearParams, 0, new Uint32Array([nEnergy, 0, 0, 0]));
+  gpu.device.queue.writeBuffer(gpu.spectrumParams, 0, new Uint32Array([rows, cols, nEnergy, r0, c0, r1, c1, shapeFlag]));
+  const encoder = gpu.device.createCommandEncoder();
+  const pass = encoder.beginComputePass();
+  pass.setPipeline(gpu.clearPipeline);
+  pass.setBindGroup(0, gpu.spectrumClearBindGroup);
+  pass.dispatchWorkgroups(Math.ceil(nEnergy / WORKGROUP));
+  pass.setPipeline(gpu.spectrumPipeline);
+  pass.setBindGroup(0, gpu.spectrumBindGroup);
+  pass.dispatchWorkgroups(Math.ceil((width * height) / WORKGROUP));
+  pass.end();
+  gpu.device.queue.submit([encoder.finish()]);
+  return await readGpuUint32(gpu.device, gpu.spectrumOut, nEnergy);
 }
 
 function normaliseRoiShape(shape) {
@@ -841,6 +1098,8 @@ self.onmessage = async (event) => {
       prefixCache = new Map();
       spectrumCache = new Map();
       streamIndexPromise = null;
+      destroyStreamGpu();
+      streamGpuPromise = null;
       channelOffsets = null;
       channelPixels = null;
       pixelOffsets = null;
@@ -850,6 +1109,12 @@ self.onmessage = async (event) => {
       activeSpectrumController?.abort();
       activeMapController = null;
       activeSpectrumController = null;
+      if (msg.streamBuffers) {
+        channelOffsets = new Uint32Array(msg.streamBuffers.channelOffsets);
+        channelPixels = new Uint32Array(msg.streamBuffers.channelPixels);
+        pixelOffsets = new Uint32Array(msg.streamBuffers.pixelOffsets);
+        pixelChannels = new Uint16Array(msg.streamBuffers.pixelChannels);
+      }
       return;
     }
     if (!meta) throw new Error("folder data worker is not initialized");
@@ -864,12 +1129,18 @@ self.onmessage = async (event) => {
         if (isStreamSidecar()) {
           await ensureStreamIndexes();
           if (controller.signal.aborted) throw abortError();
+          const gpuOut = await computeStreamMapGpu(s, e);
+          if (gpuOut) {
+            if (controller.signal.aborted) throw abortError();
+            self.postMessage({ id: msg.id, type: "map", buffer: gpuOut.buffer, ms: performance.now() - t0, backend: "webgpu-sparse" }, [gpuOut.buffer]);
+            return;
+          }
           const out = new Uint32Array(meta.rows * meta.cols);
           const p0 = channelOffsets[s];
           const p1 = channelOffsets[e];
           for (let i = p0; i < p1; i++) out[channelPixels[i]]++;
           if (controller.signal.aborted) throw abortError();
-          self.postMessage({ id: msg.id, type: "map", buffer: out.buffer, ms: performance.now() - t0 }, [out.buffer]);
+          self.postMessage({ id: msg.id, type: "map", buffer: out.buffer, ms: performance.now() - t0, backend: "worker-sparse" }, [out.buffer]);
           return;
         }
         const [lo, hi] = await Promise.all([
@@ -905,6 +1176,12 @@ self.onmessage = async (event) => {
         if (isStreamSidecar()) {
           await ensureStreamIndexes();
           if (controller.signal.aborted) throw abortError();
+          const gpuOut = await computeStreamSpectrumGpu(r0, c0, r1, c1, shape);
+          if (gpuOut) {
+            if (controller.signal.aborted) throw abortError();
+            self.postMessage({ id: msg.id, type: "spectrum", buffer: gpuOut.buffer, ms: performance.now() - t0, backend: "webgpu-sparse" }, [gpuOut.buffer]);
+            return;
+          }
           const out = new Uint32Array(meta.n_energy);
           for (let r = r0; r < r1; r++) {
             if (controller.signal.aborted) throw abortError();
@@ -926,7 +1203,7 @@ self.onmessage = async (event) => {
             }
           }
           if (controller.signal.aborted) throw abortError();
-          self.postMessage({ id: msg.id, type: "spectrum", buffer: out.buffer, ms: performance.now() - t0 }, [out.buffer]);
+          self.postMessage({ id: msg.id, type: "spectrum", buffer: out.buffer, ms: performance.now() - t0, backend: "worker-sparse" }, [out.buffer]);
           return;
         }
         if (shape !== "rect") {
@@ -1049,6 +1326,11 @@ function ShowEDS() {
   const [initialSpectrumBytes] = useModelState<DataView>("initial_spectrum_bytes");
   const [computeBackend] = useModelState<string>("compute_backend");
   const [sidecarUrl] = useModelState<string>("sidecar_url");
+  const [sidecarMetaJson] = useModelState<string>("sidecar_meta_json");
+  const [streamChannelOffsetsBytes] = useModelState<DataView>("stream_channel_offsets_bytes");
+  const [streamChannelPixelsBytes] = useModelState<DataView>("stream_channel_pixels_bytes");
+  const [streamPixelOffsetsBytes] = useModelState<DataView>("stream_pixel_offsets_bytes");
+  const [streamPixelChannelsBytes] = useModelState<DataView>("stream_pixel_channels_bytes");
   const [energy] = useModelState<number[]>("energy_keV");
   const [bandStart, setBandStart] = useModelState<number>("band_start");
   const [bandEnd, setBandEnd] = useModelState<number>("band_end");
@@ -1080,6 +1362,7 @@ function ShowEDS() {
   const [selectedElements, setSelectedElements] = useModelState<string[]>("selected_elements");
   const [autoIdentify, setAutoIdentify] = useModelState<boolean>("auto_identify");
   const [showDebug, setShowDebug] = useModelState<boolean>("show_debug");
+  const [backendSummary, setBackendSummary] = React.useState<{ map?: string; spectrum?: string }>({});
   const [debugControlVisible] = useModelState<boolean>("debug_control_visible");
   const [savedRois, setSavedRois] = useModelState<SavedRoi[]>("saved_rois");
   const [savedBands, setSavedBands] = useModelState<SavedBand[]>("saved_bands");
@@ -1233,6 +1516,14 @@ function ShowEDS() {
     if (showDebug) setPerfTick((value) => (value + 1) % 100000);
   }, [showDebug]);
 
+  const recordComputeBackend = React.useCallback((kind: "map" | "spectrum", backend: string | undefined) => {
+    recordBackend(kind, backend);
+    if (!backend) return;
+    setBackendSummary((current) => (
+      current[kind] === backend ? current : { ...current, [kind]: backend }
+    ));
+  }, []);
+
   React.useEffect(() => {
     if (!showDebug) return;
     let raf = 0;
@@ -1336,14 +1627,14 @@ function ShowEDS() {
   }), [mapView, size]);
   const mapLayerStyle = React.useMemo(() => ({
     position: "absolute" as const,
-    left: `${-(mapView.col / Math.max(1, cols)) * size * mapView.zoom}px`,
-    top: `${-(mapView.row / Math.max(1, rows)) * size * mapView.zoom}px`,
-    width: `${size * mapView.zoom}px`,
-    height: `${size * mapView.zoom}px`,
+    left: 0,
+    top: 0,
+    width: size,
+    height: size,
     display: "block",
     imageRendering: imageRenderingStyle,
-    willChange: "left, top, width, height",
-  }), [cols, imageRenderingStyle, mapView, rows, size]);
+    willChange: "contents",
+  }), [imageRenderingStyle, size]);
   const spectrumView = React.useMemo(() => {
     let start = Number.isFinite(spectrumViewStart) ? Number(spectrumViewStart) : 0;
     let end = Number.isFinite(spectrumViewEnd) && Number(spectrumViewEnd) > start
@@ -1664,7 +1955,16 @@ function ShowEDS() {
   }, [initialSpectrum, nEnergy]);
 
   React.useEffect(() => {
-    if (!isSidecarBackend || !sidecarUrl) return;
+    if (!isSidecarBackend) return;
+    const hasEmbeddedStream = (
+      !sidecarUrl
+      && sidecarMetaJson
+      && extractBytes(streamChannelOffsetsBytes).length > 0
+      && extractBytes(streamChannelPixelsBytes).length > 0
+      && extractBytes(streamPixelOffsetsBytes).length > 0
+      && extractBytes(streamPixelChannelsBytes).length > 0
+    );
+    if (!sidecarUrl && !hasEmbeddedStream) return;
     let disposed = false;
     const rejectPending = (message: string) => {
       for (const pending of sidecarPendingRef.current.values()) pending.reject(new Error(message));
@@ -1672,8 +1972,28 @@ function ShowEDS() {
     };
     (async () => {
       try {
-        const absoluteSidecarUrl = new URL(sidecarUrl, window.location.href).href;
-        const meta = await (await fetch(new URL("meta.json", absoluteSidecarUrl), { credentials: "include" })).json() as SidecarMeta;
+        let absoluteSidecarUrl = "";
+        let meta: SidecarMeta;
+        let streamBuffers: {
+          channelOffsets: ArrayBuffer;
+          channelPixels: ArrayBuffer;
+          pixelOffsets: ArrayBuffer;
+          pixelChannels: ArrayBuffer;
+        } | null = null;
+        if (sidecarUrl) {
+          absoluteSidecarUrl = new URL(sidecarUrl, window.location.href).href;
+          meta = await (await fetch(new URL("meta.json", absoluteSidecarUrl), { credentials: "include" })).json() as SidecarMeta;
+        } else {
+          meta = JSON.parse(sidecarMetaJson) as SidecarMeta;
+          const channelOffsets = copyExtractedBuffer(streamChannelOffsetsBytes);
+          const channelPixels = copyExtractedBuffer(streamChannelPixelsBytes);
+          const pixelOffsets = copyExtractedBuffer(streamPixelOffsetsBytes);
+          const pixelChannels = copyExtractedBuffer(streamPixelChannelsBytes);
+          if (!channelOffsets || !channelPixels || !pixelOffsets || !pixelChannels) {
+            throw new Error("embedded EDS stream buffers are incomplete");
+          }
+          streamBuffers = { channelOffsets, channelPixels, pixelOffsets, pixelChannels };
+        }
         if (disposed) return;
         sidecarRef.current?.worker.terminate();
         rejectPending("EDS folder data worker was replaced");
@@ -1689,6 +2009,14 @@ function ShowEDS() {
           if (response.type === "fetch-range") {
             const fetchId = response.fetchId;
             const name = response.name || "";
+            if (!sidecarUrl) {
+              worker.postMessage({
+                type: "range-error",
+                fetchId,
+                message: "embedded EDS stream has no external data folder",
+              });
+              return;
+            }
             const start = Math.max(0, Math.floor(response.start ?? 0));
             const end = Math.max(start, Math.floor(response.end ?? start));
             const expectedByteLength = end - start + 1;
@@ -1734,7 +2062,14 @@ function ShowEDS() {
         worker.onerror = (event) => {
           rejectPending(event.message || "EDS folder data worker failed");
         };
-        worker.postMessage({ type: "init", meta, baseUrl: absoluteSidecarUrl });
+        if (streamBuffers) {
+          worker.postMessage(
+            { type: "init", meta, baseUrl: "", streamBuffers },
+            [streamBuffers.channelOffsets, streamBuffers.channelPixels, streamBuffers.pixelOffsets, streamBuffers.pixelChannels],
+          );
+        } else {
+          worker.postMessage({ type: "init", meta, baseUrl: absoluteSidecarUrl });
+        }
         sidecarRef.current = { meta, worker };
         setGpuError("");
       } catch (err) {
@@ -1747,7 +2082,15 @@ function ShowEDS() {
       sidecarRef.current = null;
       rejectPending("EDS folder data worker was disposed");
     };
-  }, [isSidecarBackend, sidecarUrl]);
+  }, [
+    isSidecarBackend,
+    sidecarUrl,
+    sidecarMetaJson,
+    streamChannelOffsetsBytes,
+    streamChannelPixelsBytes,
+    streamPixelOffsetsBytes,
+    streamPixelChannelsBytes,
+  ]);
 
   React.useEffect(() => {
     const handler = (content: { type?: string; message?: string }, buffers?: DataView[]) => {
@@ -1857,7 +2200,7 @@ function ShowEDS() {
 
   const computeMap = React.useCallback(async (start: number, end: number) => {
     if (isSidecarBackend) {
-      if (!sidecarRef.current || !sidecarUrl) return;
+      if (!sidecarRef.current) return;
       const seq = ++mapComputeSeqRef.current;
       const t0 = performance.now();
       const s = Math.max(0, Math.min(nEnergy - 1, Math.round(start)));
@@ -1869,6 +2212,7 @@ function ShowEDS() {
       const buffer = response.buffer;
       setGpuError("");
       React.startTransition(() => setElementMap(new Uint32Array(buffer)));
+      recordComputeBackend("map", response.backend);
       recordWidgetPerf("mapMs", response.ms ?? performance.now() - t0);
       return;
     }
@@ -1894,11 +2238,11 @@ function ShowEDS() {
     const out = await readBuffer(gpu.device, gpu.map, rows * cols * 4);
     React.startTransition(() => setElementMap(out));
     recordWidgetPerf("mapMs", performance.now() - t0);
-  }, [cols, cubeDtype, isKernelBackend, isSidecarBackend, model, nEnergy, recordWidgetPerf, rows, requestSidecarWorker, sidecarUrl]);
+  }, [cols, cubeDtype, isKernelBackend, isSidecarBackend, model, nEnergy, recordComputeBackend, recordWidgetPerf, rows, requestSidecarWorker, sidecarUrl]);
 
   const computeSpectrum = React.useCallback(async (nextRoi: Roi) => {
     if (isSidecarBackend) {
-      if (!sidecarRef.current || !sidecarUrl) return;
+      if (!sidecarRef.current) return;
       const seq = ++spectrumComputeSeqRef.current;
       const t0 = performance.now();
       const r0 = Math.max(0, Math.min(rows - 1, Math.round(nextRoi.row)));
@@ -1919,6 +2263,7 @@ function ShowEDS() {
       const buffer = response.buffer;
       setGpuError("");
       React.startTransition(() => setRoiSpectrum(new Uint32Array(buffer)));
+      recordComputeBackend("spectrum", response.backend);
       recordWidgetPerf("spectrumMs", response.ms ?? performance.now() - t0);
       return;
     }
@@ -1948,7 +2293,7 @@ function ShowEDS() {
     const out = await readBuffer(gpu.device, gpu.spectrum, nEnergy * 4);
     React.startTransition(() => setRoiSpectrum(out));
     recordWidgetPerf("spectrumMs", performance.now() - t0);
-  }, [cols, cubeDtype, isKernelBackend, isSidecarBackend, model, nEnergy, recordWidgetPerf, rows, requestSidecarWorker, sidecarUrl]);
+  }, [cols, cubeDtype, isKernelBackend, isSidecarBackend, model, nEnergy, recordComputeBackend, recordWidgetPerf, rows, requestSidecarWorker, sidecarUrl]);
 
   const flushMapRequest = React.useCallback(() => {
     mapRafRef.current = null;
@@ -2068,17 +2413,20 @@ function ShowEDS() {
     const canvas = mapCanvasRef.current;
     if (!canvas || !base) return;
     const t0 = performance.now();
-    canvas.width = Math.max(1, cols);
-    canvas.height = Math.max(1, rows);
+    const dpr = MAP_RASTER_DPR;
+    canvas.width = Math.max(1, Math.round(size * dpr));
+    canvas.height = Math.max(1, Math.round(size * dpr));
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
     const image = ctx.createImageData(canvas.width, canvas.height);
     const [baseLo, baseHi] = finiteRange(base);
     const baseSpan = Math.max(1e-12, baseHi - baseLo);
+    const rowStep = mapView.rows / Math.max(1, canvas.height);
+    const colStep = mapView.cols / Math.max(1, canvas.width);
     for (let py = 0; py < canvas.height; py++) {
-      const r = Math.min(rows - 1, py);
+      const r = Math.max(0, Math.min(rows - 1, Math.floor(mapView.row + (py + 0.5) * rowStep)));
       for (let px = 0; px < canvas.width; px++) {
-        const c = Math.min(cols - 1, px);
+        const c = Math.max(0, Math.min(cols - 1, Math.floor(mapView.col + (px + 0.5) * colStep)));
         const idx = r * cols + c;
         const off = (py * canvas.width + px) * 4;
         const g = Math.round(255 * Math.max(0, Math.min(1, (base[idx] - baseLo) / baseSpan)));
@@ -2087,13 +2435,14 @@ function ShowEDS() {
     }
     ctx.putImageData(image, 0, 0);
     recordWidgetPerf("mapDrawMs", performance.now() - t0);
-  }, [base, cols, recordWidgetPerf, rows]);
+  }, [base, cols, mapView, recordWidgetPerf, rows, size]);
 
   const drawMapOverlay = React.useCallback((displayRange: [number, number]) => {
     const canvas = mapOverlayCanvasRef.current;
     if (!canvas) return;
-    canvas.width = Math.max(1, cols);
-    canvas.height = Math.max(1, rows);
+    const dpr = MAP_RASTER_DPR;
+    canvas.width = Math.max(1, Math.round(size * dpr));
+    canvas.height = Math.max(1, Math.round(size * dpr));
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -2102,10 +2451,12 @@ function ShowEDS() {
     const image = ctx.createImageData(canvas.width, canvas.height);
     const [mapLo, mapHi] = displayRange;
     const mapSpan = Math.max(1e-12, mapHi - mapLo);
+    const rowStep = mapView.rows / Math.max(1, canvas.height);
+    const colStep = mapView.cols / Math.max(1, canvas.width);
     for (let py = 0; py < canvas.height; py++) {
-      const r = Math.min(rows - 1, py);
+      const r = Math.max(0, Math.min(rows - 1, Math.floor(mapView.row + (py + 0.5) * rowStep)));
       for (let px = 0; px < canvas.width; px++) {
-        const c = Math.min(cols - 1, px);
+        const c = Math.max(0, Math.min(cols - 1, Math.floor(mapView.col + (px + 0.5) * colStep)));
         const idx = r * cols + c;
         const off = (py * canvas.width + px) * 4;
         const value = elementMap[idx];
@@ -2116,7 +2467,7 @@ function ShowEDS() {
     }
     ctx.putImageData(image, 0, 0);
     recordWidgetPerf("mapDrawMs", performance.now() - t0);
-  }, [cols, elementMap, recordWidgetPerf, rows]);
+  }, [cols, elementMap, mapView, recordWidgetPerf, rows, size]);
 
   React.useEffect(() => {
     drawMapOverlay(mapDisplayRange);
@@ -2945,6 +3296,8 @@ function ShowEDS() {
             <span>spectrum {perfSummary.spectrum.last.toFixed(1)} / {perfSummary.spectrum.avg.toFixed(1)} ms</span>
             <span>draw map {perfSummary.mapDraw.last.toFixed(1)} ms</span>
             <span>draw spec {perfSummary.spectrumDraw.last.toFixed(1)} ms</span>
+            <span>backend map {backendSummary.map ?? "pending"}</span>
+            <span>backend spectrum {backendSummary.spectrum ?? "pending"}</span>
           </Box>
         )}
         <Stack direction="row" spacing={2} alignItems="flex-start">
@@ -3101,20 +3454,6 @@ function ShowEDS() {
                 <Typography sx={controlLabelSx}>Band:</Typography>
                 <Box
                   ref={bandSliderRef}
-                  onMouseDownCapture={(e) => {
-                    if ((e.target as HTMLElement).closest(".MuiSlider-thumb")) return;
-                    const rect = bandSliderRef.current?.getBoundingClientRect();
-                    if (!rect) return;
-                    const x = e.clientX - rect.left;
-                    const x0 = (bandLo / Math.max(1, nEnergy)) * rect.width;
-                    const x1 = (bandHi / Math.max(1, nEnergy)) * rect.width;
-                    if (x < x0 || x > x1) return;
-                    previewCenterBand(bandLo, bandHi, rect.width);
-                    setBandSliderDrag({ x: e.clientX, width: rect.width, bandStart: bandLo, bandEnd: bandHi });
-                    e.preventDefault();
-                    e.stopPropagation();
-                    e.nativeEvent.stopImmediatePropagation();
-                  }}
                   sx={{ width: 260, flexShrink: 0, display: "flex", alignItems: "center", height: 20, position: "relative" }}
                 >
                   <Box
@@ -3145,6 +3484,29 @@ function ShowEDS() {
                       "&::before": { left: -6 },
                       "&::after": { right: -6 },
                     }}
+                  />
+                  <Box
+                    onMouseDown={(e) => {
+                      const rect = bandSliderRef.current?.getBoundingClientRect();
+                      if (!rect) return;
+                      previewCenterBand(bandLo, bandHi, rect.width);
+                      setBandSliderDrag({ x: e.clientX, width: rect.width, bandStart: bandLo, bandEnd: bandHi });
+                      e.preventDefault();
+                      e.stopPropagation();
+                      e.nativeEvent.stopImmediatePropagation();
+                    }}
+                    sx={{
+                      position: "absolute",
+                      top: 0,
+                      bottom: 0,
+                      left: `calc(${(bandLo / Math.max(1, nEnergy)) * 100}% + 8px)`,
+                      width: `max(0px, calc(${((bandHi - bandLo) / Math.max(1, nEnergy)) * 100}% - 16px))`,
+                      minWidth: bandHi - bandLo > 24 ? 4 : 0,
+                      cursor: isBandCenterPreviewing ? "grabbing" : "grab",
+                      zIndex: 3,
+                      pointerEvents: bandHi - bandLo > 24 ? "auto" : "none",
+                    }}
+                    aria-label="Drag selected energy band"
                   />
                   <Slider
                     value={[bandLo, bandHi]}
