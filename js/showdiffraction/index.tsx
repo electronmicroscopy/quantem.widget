@@ -280,6 +280,7 @@ function ShowDiffraction() {
   const [detRows] = useModelState<number>("det_rows");
   const [detCols] = useModelState<number>("det_cols");
   const [frameBytes] = useModelState<DataView>("frame_bytes");
+  const [offlineFrames] = useModelState<DataView>("offline_frames");
   const [frameIdx, setFrameIdx] = useModelState<number>("frame_idx");
   const [nFrames] = useModelState<number>("n_frames");
   const [centerRow, setCenterRow] = useModelState<number>("center_row");
@@ -444,9 +445,24 @@ function ShowDiffraction() {
     return inv;
   }, [dpColormap, dpInvert]);
 
+  // Offline HTML has the whole stack baked in (offline_frames) so the slider scrubs
+  // client-side; live, the kernel streams the current frame through frame_bytes.
+  const activeFrame = React.useMemo<Float32Array | null>(() => {
+    const frameLen = detRows * detCols;
+    if (offline && offlineFrames && frameLen > 0
+        && offlineFrames.byteLength >= frameLen * 4 * nFrames) {
+      const stack = extractFloat32(offlineFrames);
+      const idx = Math.max(0, Math.min(frameIdx, nFrames - 1));
+      if (stack && stack.length >= frameLen * (idx + 1)) {
+        return stack.subarray(idx * frameLen, (idx + 1) * frameLen);
+      }
+    }
+    return extractFloat32(frameBytes, frameLen);
+  }, [offline, offlineFrames, frameBytes, frameIdx, nFrames, detRows, detCols]);
+
   // DP rendering (expensive: colormap)
   React.useEffect(() => {
-    const raw = extractFloat32(frameBytes, detRows * detCols);
+    const raw = activeFrame;
     if (!raw || raw.length === 0) return;
     let scaled: Float32Array;
     if (dpScaleMode === "log") {
@@ -475,7 +491,7 @@ function ShowDiffraction() {
     ctx.putImageData(imgData, 0, 0);
     setDpHistData(scaled);
     setDpVersion(v => v + 1);
-  }, [frameBytes, dpLut, dpScaleMode, dpVminPct, dpVmaxPct, detRows, detCols]);
+  }, [activeFrame, dpLut, dpScaleMode, dpVminPct, dpVmaxPct, detRows, detCols]);
 
   // DP draw (cheap: zoom/pan)
   React.useLayoutEffect(() => {
@@ -628,12 +644,11 @@ function ShowDiffraction() {
       return;
     }
     // Cursor readout
-    if (!frameBytes || !frameBytes.byteLength) return;
+    if (!activeFrame) return;
     const { row, col } = dpToImage(e);
     const ri = Math.round(row), ci = Math.round(col);
     if (ri >= 0 && ri < detRows && ci >= 0 && ci < detCols) {
-      const raw = extractFloat32(frameBytes, detRows * detCols);
-      if (!raw) return;
+      const raw = activeFrame;
       setCursorInfo({ row: ri, col: ci, value: raw[ri * detCols + ci] });
     } else {
       setCursorInfo(null);
