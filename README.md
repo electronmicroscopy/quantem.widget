@@ -124,7 +124,7 @@ can be opened directly in Colab. To make a GitHub-readable preview copy, see
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, checks, widget export
-expectations, and release-candidate guidance.
+expectations, agent signoff, and release-candidate guidance.
 
 ### Widget PR checklist
 
@@ -161,6 +161,10 @@ through it line by line.
 - [ ] Real-time interactions are browser-driven and verified by actually
   dragging controls in JupyterLab or exported HTML, not only by reading code or
   unit tests.
+- [ ] For interaction-sensitive changes, run
+  `scripts/widget_agent_signoff.sh --quick`, fix issues immediately, rebuild,
+  refresh, and redrive before claiming the widget is ready. See
+  [Agent signoff](docs/maintainer/widget-agent-signoff.md).
 - [ ] Expensive work avoids Python/kernel round trips during pointer movement;
   use WebGPU, typed arrays, cached indexes, workers, or throttled schedulers
   where the widget interaction requires live feedback.
