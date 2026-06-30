@@ -106,6 +106,9 @@ class ShowDiffraction(anywidget.AnyWidget):
     det_cols = traitlets.Int(1).tag(sync=True)
 
     frame_bytes = traitlets.Bytes(b"").tag(sync=True)
+    # whole stack as float32, baked only when offline so the kernel-less HTML can scrub
+    # frames client-side (live widgets stay empty and stream frame_bytes per frame).
+    offline_frames = traitlets.Bytes(b"").tag(sync=True)
 
     # Offline/export render flag. The frontend forces a light/white background
     # when set so standalone HTML exports read on any OS theme. No quantization
@@ -302,8 +305,10 @@ class ShowDiffraction(anywidget.AnyWidget):
             self.auto_detect_center()
 
         self._update_frame()
+        self._bake_offline_frames()
 
         self.observe(self._update_frame, names=["frame_idx"])
+        self.observe(self._bake_offline_frames, names=["offline"])
         self.observe(self._on_spot_add_request, names=["_spot_add_request"])
         self.observe(self._on_spot_undo_request, names=["_spot_undo_request"])
         self.observe(self._on_spot_clear_request, names=["_spot_clear_request"])
@@ -395,9 +400,31 @@ class ShowDiffraction(anywidget.AnyWidget):
         ]
         self.center_row = float((row_coords * mask).sum() / total)
         self.center_col = float((col_coords * mask).sum() / total)
-        self.bf_radius = float(torch.sqrt(total / torch.pi))
+        # central beam only: rings are also above threshold, so whole-mask area would
+        # overestimate the radius and later mask out the inner rings in detect_rings.
+        self.bf_radius = self._central_beam_radius(mask, self.center_row, self.center_col)
         self.center_mode = "auto"
         return self
+
+    def _central_beam_radius(self, mask, center_row: float, center_col: float) -> float:
+        mask_np = mask.detach().cpu().numpy()
+        try:
+            from scipy.ndimage import label
+        except Exception:
+            return float(np.sqrt(float(mask_np.sum()) / np.pi))
+        labels, n_labels = label(mask_np)
+        if n_labels == 0:
+            return 0.0
+        row_idx = int(min(max(round(center_row), 0), mask_np.shape[0] - 1))
+        col_idx = int(min(max(round(center_col), 0), mask_np.shape[1] - 1))
+        central_label = int(labels[row_idx, col_idx])
+        if central_label == 0:
+            # center is dark (beam stop): use the nearest bright component
+            comp_rows, comp_cols = np.nonzero(labels)
+            nearest = int(np.argmin((comp_rows - center_row) ** 2 + (comp_cols - center_col) ** 2))
+            central_label = int(labels[comp_rows[nearest], comp_cols[nearest]])
+        area = float((labels == central_label).sum())
+        return float(np.sqrt(area / np.pi))
 
     def set_center(self, row: float, col: float) -> Self:
         """Set the diffraction center to (row, col) and mark the mode manual."""
@@ -422,6 +449,14 @@ class ShowDiffraction(anywidget.AnyWidget):
             float(frame.std()),
         ]
         self.frame_bytes = frame.tobytes()
+
+    def _bake_offline_frames(self, change=None) -> None:
+        # skip single frames and live widgets (which stream per frame) to avoid bloat
+        if self.offline and self.n_frames > 1 and getattr(self, "_data", None) is not None:
+            frames = self._data.cpu().numpy().astype(np.float32)
+            self.offline_frames = np.ascontiguousarray(frames).tobytes()
+        else:
+            self.offline_frames = b""
 
     def _compute_spot_info(
         self, row: float, col: float, row_err: float = 0.0, col_err: float = 0.0
@@ -667,16 +702,20 @@ class ShowDiffraction(anywidget.AnyWidget):
         detrended = y_log - gaussian_filter1d(y_log, sigma=max(3.0, y_log.size / 20.0))
         span = float(detrended.max() - detrended.min())
         prominence = prominence_rel * span if span > 0 else None
-        peaks, _ = find_peaks(
+        peaks, props = find_peaks(
             detrended, prominence=prominence, distance=max(1, int(min_separation))
         )
         if peaks.size == 0:
             return self
-        peaks = peaks[radii_px[peaks] > float(exclude_radius)]  # drop the beam region
+        outside_beam = radii_px[peaks] > float(exclude_radius)
+        peaks = peaks[outside_beam]
+        prominences = props["prominences"][outside_beam]
         if peaks.size == 0:
             return self
-        # find_peaks already filtered by prominence; keep the innermost (strong low-order) rings.
-        for p in sorted(peaks)[: int(max_rings)]:
+        # strongest, not innermost: a noise bump in a dark gap can sit inside a real ring
+        # but has far lower prominence. Keep the top max_rings, then order inner -> outer.
+        strongest = np.argsort(prominences)[::-1][: int(max_rings)]
+        for p in sorted(peaks[strongest]):
             self.add_ring(float(radii_px[p]))
         return self
 
@@ -1257,6 +1296,7 @@ class ShowDiffraction(anywidget.AnyWidget):
         self.rings = []
         self.auto_detect_center()
         self._update_frame()
+        self._bake_offline_frames()
         return self
 
     def state_dict(self):
