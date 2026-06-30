@@ -685,7 +685,9 @@ function extractStorageBytes(dataView: DataView | ArrayBuffer | Uint8Array, logi
 function copyExtractedBuffer(dataView: DataView | ArrayBuffer | Uint8Array): ArrayBuffer | null {
   const bytes = extractBytes(dataView);
   if (bytes.length === 0) return null;
-  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+  const out = new Uint8Array(bytes.byteLength);
+  out.set(bytes);
+  return out.buffer;
 }
 
 function createSidecarWorker(): Worker {
@@ -1425,7 +1427,7 @@ function ShowEDS() {
   const [roiMenuAnchor, setRoiMenuAnchor] = React.useState<HTMLElement | null>(null);
   const [roiShapeMenuAnchor, setRoiShapeMenuAnchor] = React.useState<HTMLElement | null>(null);
   const [bandMenuAnchor, setBandMenuAnchor] = React.useState<HTMLElement | null>(null);
-  const imageRenderingStyle = smooth ? "auto" : "pixelated";
+  const imageRenderingStyle: React.CSSProperties["imageRendering"] = smooth ? "auto" : "pixelated";
   const [exportBusy, setExportBusy] = React.useState(false);
   const [localExportStatus, setLocalExportStatus] = React.useState("");
   const [perfTick, setPerfTick] = React.useState(0);
@@ -1628,7 +1630,7 @@ function ShowEDS() {
     x: ((col - mapView.col) / Math.max(1e-9, mapView.cols)) * size,
     y: ((row - mapView.row) / Math.max(1e-9, mapView.rows)) * size,
   }), [mapView, size]);
-  const mapLayerStyle = React.useMemo(() => ({
+  const mapLayerStyle = React.useMemo<React.CSSProperties>(() => ({
     position: "absolute" as const,
     left: 0,
     top: 0,

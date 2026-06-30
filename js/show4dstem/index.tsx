@@ -24,7 +24,7 @@ import { COLORMAPS, applyColormap } from "../colormaps";
 import { WebGPUFFT, getWebGPUFFT, fft2d, fftshift, autoEnhanceFFT, nextPow2, applyHannWindow2D } from "../fft";
 import { Show4DSTEMCompute } from "../engine/compute";
 import { readH5Volume } from "../engine/h5reader";
-import { decodeBslz4ToStack } from "../engine/bslz4";
+import { decodeBslz4ToStack, type Bslz4Spec } from "../engine/bslz4";
 import { LazyShow4DSTEM } from "../engine/lazy";
 import { drawScaleBarHiDPI, drawColorbar, roundToNiceValue } from "../figure";
 import { findDataRange, sliderRange, computeStats, computeHistogramFromBytes, percentileClip } from "../stats";
@@ -1393,7 +1393,7 @@ function Show4DSTEM() {
       const chunksMeta = model.get("_offline_chunks") as string | undefined;
       const bslz4Meta = model.get("_offline_bslz4") as string | undefined;
       const gunzip = async (b: Uint8Array) => new Uint8Array(await new Response(new Blob([b as BlobPart]).stream().pipeThrough(new DecompressionStream("gzip"))).arrayBuffer());
-      let compute: Show4DSTEMCompute | null;
+      let compute: Show4DSTEMCompute | null = null;
       let cpuStack: Uint8Array | null = null;  // full decompressed stack for the per-frame probe (single-chunk only)
       // Multi-VOLUME (5D): several datasets, decoded LAZILY (decode-on-scrub) with a
       // small LRU of resident volumes. Only the viewed dataset (plus a few recent)
@@ -1456,7 +1456,7 @@ function Show4DSTEM() {
               __parseMs += performance.now() - __pt;
               ds = vol.detSize;
               const __dt = performance.now();
-              const dec = await decodeBslz4ToStack({ ...vol.chunks[0], startScan, nScan: vol.nFrames }, "float32", "float32");
+              const dec = await decodeBslz4ToStack(vol.chunks[0], "float32", "float32");
               __decMs += performance.now() - __dt;
               if (!dec) break;
               dev = dec.device;
@@ -1477,7 +1477,7 @@ function Show4DSTEM() {
           if (dev) compute = Show4DSTEMCompute.fromGpuChunks(dev, gpuChunks, scanRows * scanCols, ds, 2);
         } else {
           const vol = readH5Volume(await (await fetch(h5Url)).arrayBuffer(), "merged");
-          compute = await Show4DSTEMCompute.createFromBslz4Chunked([{ ...vol.chunks[0], startScan: 0, nScan: vol.nFrames } as never], scanRows * scanCols, vol.detSize, "float32", "float32");
+          compute = await Show4DSTEMCompute.createFromBslz4Chunked([{ ...vol.chunks[0], startScan: 0, nScan: vol.nFrames }], scanRows * scanCols, vol.detSize, "float32", "float32");
         }
         if (compute) computes.push(compute);
       } else if (bslz4Meta) {
@@ -1489,7 +1489,7 @@ function Show4DSTEM() {
         const fetchU8 = async (u: string) => new Uint8Array(await (await fetch(u)).arrayBuffer());
         const fetchU32 = async (u: string) => new Uint32Array(await (await fetch(u)).arrayBuffer());
         const decodeVol = async (v: any) => {
-          const specs = [];
+          const specs: (Bslz4Spec & { startScan: number; nScan: number })[] = [];
           for (const c of v.chunks) specs.push({ compressed: await fetchU8(v.base + c.bin), blockMeta: await fetchU32(v.base + c.meta),
             nFrames: c.nScan, nBlocksPerFrame: c.nBlocksPerFrame, blockElems: c.blockElems,
             detSize: detR * detC, startScan: c.startScan, nScan: c.nScan });
