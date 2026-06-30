@@ -42,6 +42,29 @@ def test_showdiffraction_frame_idx_changes_frame():
     assert w.frame_idx == 3
 
 
+def test_showdiffraction_offline_frames_baked():
+    data = np.zeros((4, 8, 8), dtype=np.float32)
+    for i in range(4):
+        data[i] = float(i + 1)
+    frame_len = 8 * 8
+    # offline multi-frame: whole stack baked so the kernel-less HTML can scrub it
+    w = ShowDiffraction(data, offline=True, verbose=False)
+    assert len(w.offline_frames) == 4 * frame_len * 4
+    baked = np.frombuffer(w.offline_frames, dtype=np.float32).reshape(4, 8, 8)
+    assert np.allclose(baked[2], 3.0)
+    # live widget stays empty (frames stream through frame_bytes per frame)
+    live = ShowDiffraction(data, offline=False, verbose=False)
+    assert live.offline_frames == b""
+    # toggling offline bakes / clears
+    live.offline = True
+    assert len(live.offline_frames) == 4 * frame_len * 4
+    live.offline = False
+    assert live.offline_frames == b""
+    # single pattern never bakes: nothing to scrub
+    single = ShowDiffraction(np.ones((8, 8), dtype=np.float32), offline=True, verbose=False)
+    assert single.offline_frames == b""
+
+
 def test_showdiffraction_4d_raises():
     with pytest.raises(ValueError, match="Show4DSTEM"):
         ShowDiffraction(np.random.rand(4, 4, 16, 16).astype(np.float32), verbose=False)
