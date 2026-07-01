@@ -1456,7 +1456,7 @@ function Show4DSTEM() {
               __parseMs += performance.now() - __pt;
               ds = vol.detSize;
               const __dt = performance.now();
-              const dec = await decodeBslz4ToStack(vol.chunks[0], "float32", "float32");
+              const dec = await decodeBslz4ToStack({ ...vol.chunks[0], startScan, nScan: vol.nFrames } as never, "float32", "float32");
               __decMs += performance.now() - __dt;
               if (!dec) break;
               dev = dec.device;
