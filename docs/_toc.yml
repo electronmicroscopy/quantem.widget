@@ -36,5 +36,7 @@ parts:
         title: Changelog
       - file: maintainer/widget-release
         title: Release
+      - file: maintainer/widget-agent-signoff
+        title: Agent signoff
       - file: maintainer/widget-performance
         title: Performance

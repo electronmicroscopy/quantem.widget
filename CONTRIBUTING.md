@@ -55,6 +55,13 @@ For a quick visual smoke before a broad widget PR:
 scripts/widget_visual_signoff.sh --quick
 ```
 
+For interaction-sensitive changes, run an agent signoff packet and drive the
+widgets in the browser:
+
+```bash
+scripts/widget_agent_signoff.sh --quick
+```
+
 ## Performance Expectations
 
 For interactive widget changes, verify performance in the actual user path, not
@@ -66,6 +73,12 @@ Report FPS/latency in the PR or handoff. Any loss of real-time interaction is a
 bug to fix or explicitly document. For ShowEDS real-data workflows, band, ROI,
 zoom, contrast, and smooth/auto display interactions should remain at 30 FPS or
 better.
+
+Use `scripts/widget_agent_signoff.sh` for a fix-and-redrive session: the agent
+opens the real notebook, docs page, or exported HTML, drives the controls like a
+human, patches issues immediately, rebuilds, refreshes, and records screenshots
+or short videos after the final code change. The full protocol is in
+`docs/maintainer/widget-agent-signoff.md`.
 
 ## HTML Export Expectations
 

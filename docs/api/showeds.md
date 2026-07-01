@@ -11,6 +11,11 @@ from quantem.widget import ShowEDS, load_eds
 the energy band updates the element map, and dragging the rectangular real-space
 ROI updates the summed spectrum.
 
+`ShowEDS` is still experimental. The merged baseline supports synthetic/small
+cubes and the documented data-folder workflow. Direct native EMD sparse-stream
+loading is under active real-data testing and should not be treated as finalized
+release behavior yet.
+
 Canonical forms:
 
 ```python

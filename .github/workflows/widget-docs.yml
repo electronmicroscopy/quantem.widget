@@ -37,7 +37,7 @@ jobs:
           python-version: "3.12"
       - uses: actions/configure-pages@v5
       - run: pip install -r docs/requirements.txt
-      - run: pip install -e .
+      - run: pip install --extra-index-url https://test.pypi.org/simple/ -e .
       - run: jupyter-book build docs
       - uses: actions/upload-pages-artifact@v3
         with:
