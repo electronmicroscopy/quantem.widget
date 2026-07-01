@@ -35,6 +35,7 @@ dependencies = [
 
 [project.scripts]
 quantem = "quantem.widget.cli:main"
+qw = "quantem.widget.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/quantem"]
