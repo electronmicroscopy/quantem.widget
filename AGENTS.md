@@ -55,6 +55,13 @@ direct timing signal when available, and report the measured FPS/latency in the
 handoff or final summary. Do not rely only on unit tests for interaction-heavy
 changes.
 
+For UI performance patterns and known interaction mistakes, read
+`docs/maintainer/widget-performance.md`. In particular, cursor labels, hover
+readouts, drag hints, and other high-frequency pointer overlays should avoid raw
+React state updates on every `mousemove`/touchmove; use animation-frame
+scheduling, stable overlay DOM, and opacity/transform transitions where
+possible.
+
 For ShowEDS real-data work, keep band, ROI, zoom, contrast, and smooth/auto
 display interactions at real-time speed. Treat loss of 30 FPS interaction as a
 bug unless the limitation is explicitly documented and accepted.
