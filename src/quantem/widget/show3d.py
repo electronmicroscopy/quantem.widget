@@ -645,6 +645,7 @@ class Show3D(anywidget.AnyWidget):
     # Analysis Panels (FFT + Histogram shown together)
     # =========================================================================
     show_fft = traitlets.Bool(False).tag(sync=True)
+    fft_layout = traitlets.Unicode("bottom").tag(sync=True)
     fft_window = traitlets.Bool(True).tag(sync=True)
     widget_version = traitlets.Unicode("unknown")  # Python-only: telemetry readout
     # =========================================================================
@@ -1143,6 +1144,7 @@ class Show3D(anywidget.AnyWidget):
         timestamps: list[float] | None = None,
         timestamp_unit: str = "s",
         show_fft: bool = False,
+        fft_layout: str = "bottom",
         fft_window: bool = True,
         show_stats: bool | None = None,
         show_controls: bool = True,
@@ -1188,6 +1190,12 @@ class Show3D(anywidget.AnyWidget):
             kwargs["show_resize_handles"] = bool(show_resize_handles)
         if show_zoom_indicator is not None:
             kwargs["show_zoom_indicator"] = bool(show_zoom_indicator)
+        fft_layout = str(fft_layout).lower()
+        if fft_layout not in {"bottom", "right", "overlay"}:
+            raise ValueError(
+                "fft_layout must be one of 'bottom', 'right', or 'overlay', "
+                f"got {fft_layout!r}"
+            )
         if show_scale_bar is not None:
             kwargs["scale_bar_visible"] = bool(show_scale_bar)
         panel_width_px = int(panel_width_px)
@@ -1242,6 +1250,7 @@ class Show3D(anywidget.AnyWidget):
                             percentile_high=percentile_high, fps=fps, avg_window=avg_window,
                             timestamps=timestamps,
                             timestamp_unit=timestamp_unit, show_fft=show_fft,
+                            fft_layout=fft_layout,
                             fft_window=fft_window,
                             show_stats=show_stats, show_controls=show_controls,
                             size=size, crop=crop, padding=padding, pad_mode=pad_mode,
@@ -1270,7 +1279,7 @@ class Show3D(anywidget.AnyWidget):
                    percentile_low: float, percentile_high: float,
                    fps: float, avg_window: int,
                    timestamps: list[float] | None,
-                   timestamp_unit: str, show_fft: bool, fft_window: bool,
+                   timestamp_unit: str, show_fft: bool, fft_layout: str, fft_window: bool,
                    show_stats: bool | None, show_controls: bool,
                    size: int, crop: int | tuple[int, int] | tuple[int, int, int, int],
                    padding: int | tuple[int, int], pad_mode: str,
@@ -1736,6 +1745,7 @@ class Show3D(anywidget.AnyWidget):
         self.diff_mode = diff_mode
         self._refresh_auto_contrast_ranges()
         self.show_fft = show_fft
+        self.fft_layout = fft_layout
         self.fft_window = fft_window
         # Statistics are opt-in because they occupy vertical space in notebooks
         # and exported HTML, especially on phones.
@@ -2065,6 +2075,7 @@ class Show3D(anywidget.AnyWidget):
             "show_stats": self.show_stats,
             "show_controls": self.show_controls,
             "show_fft": self.show_fft,
+            "fft_layout": self.fft_layout,
             "show_kymograph": self.show_kymograph,
             "fft_window": self.fft_window,
             "pixel_size": self.pixel_size,
@@ -3494,6 +3505,7 @@ class Show3D(anywidget.AnyWidget):
             timestamps=list(self.timestamps) if self.timestamps else None,
             timestamp_unit=self.timestamp_unit,
             show_fft=self.show_fft,
+            fft_layout=self.fft_layout,
             fft_window=self.fft_window,
             show_stats=self.show_stats,
             show_controls=self.show_controls,

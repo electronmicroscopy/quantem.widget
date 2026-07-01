@@ -1442,6 +1442,7 @@ function Show3D() {
 
   // FFT
   const [showFft, setShowFft] = useModelState<boolean>("show_fft");
+  const [fftLayout, setFftLayout] = useModelState<string>("fft_layout");
   const [fftWindow, setFftWindow] = useModelState<boolean>("fft_window");
 
 
@@ -8306,6 +8307,9 @@ function Show3D() {
     fftBackendInfo.source === "cpu-sync-shifted" ? "offline CPU"
       : fftBackendInfo.source === "worker-batch" || fftBackendInfo.source === "worker" ? "CPU worker"
         : fftBackendInfo.source || "";
+  const resolvedFftLayout = (["bottom", "right", "overlay"].includes(String(fftLayout)) ? String(fftLayout) : "bottom") as "bottom" | "right" | "overlay";
+  const fftLayoutBottom = resolvedFftLayout === "bottom";
+  const fftLayoutOverlay = resolvedFftLayout === "overlay";
 
   return (
     <Box
@@ -8321,7 +8325,7 @@ function Show3D() {
         spacing={`${SPACING.SM}px`}
         alignItems="flex-start"
         sx={{
-          flexWrap: effectiveShowFft && (nPanels || 1) > 1 ? "wrap" : "nowrap",
+          flexWrap: effectiveShowFft && fftLayoutBottom && (nPanels || 1) > 1 ? "wrap" : "nowrap",
           width: "100%",
           maxWidth: "100%",
           minWidth: 0,
@@ -8337,7 +8341,7 @@ function Show3D() {
           },
         }}
       >
-        <Box sx={{ width: mainPanelWidth, maxWidth: "100%", flexShrink: effectiveShowFft && (nPanels || 1) > 1 ? 0 : 1, boxSizing: "border-box" }}>
+        <Box sx={{ width: mainPanelWidth, maxWidth: "100%", flexShrink: effectiveShowFft && fftLayoutBottom && (nPanels || 1) > 1 ? 0 : 1, boxSizing: "border-box" }}>
           {/* Title row */}
           <Typography variant="caption" sx={{ ...typography.label, color: themeColors.accent, mb: `${SPACING.XS}px`, display: "block", height: 16, lineHeight: "16px", overflow: "hidden" }}>
             {title || "Image"}
@@ -8378,10 +8382,37 @@ function Show3D() {
           </Typography>
           {/* Controls row */}
           <Box sx={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: "4px", mb: `${SPACING.XS}px`, minHeight: 28 }}>
-            {/* Multi-panel FFT is available only while the image grid is a single row. */}
+            {/* FFT can be shown below, beside, or as an inset over the image grid. */}
             {fftAllowed && <>
               <Typography sx={{ ...typography.label, fontSize: 10 }}>FFT</Typography>
               <Switch checked={showFft} onChange={(e) => { const on = e.target.checked; setShowFft(on); if (on) setShowKymograph(false); }} size="small" sx={switchStyles.small} slotProps={{ input: { "aria-label": "Toggle FFT power spectrum panel" } }} />
+              {showFft && (
+                <Box
+                  component="select"
+                  value={resolvedFftLayout}
+                  onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setFftLayout(e.target.value)}
+                  aria-label="FFT panel layout"
+                  sx={{
+                    minWidth: 78,
+                    height: 24,
+                    ml: "2px",
+                    px: "8px",
+                    borderRadius: "4px",
+                    border: `1px solid ${themeColors.border}`,
+                    bgcolor: themeColors.controlBg,
+                    color: themeColors.text,
+                    fontFamily: UI_FONT,
+                    fontSize: 10,
+                    flexShrink: 0,
+                    cursor: "pointer",
+                    "&:hover": { borderColor: themeColors.accent },
+                  }}
+                >
+                  <option value="bottom">Bottom</option>
+                  <option value="right">Right</option>
+                  <option value="overlay">Overlay</option>
+                </Box>
+              )}
             </>}
             {/* Kymograph toggle: HIDDEN until a profile line exists (not shown-
                 but-disabled). Kymograph is a line-profile sub-feature, so the
@@ -8843,6 +8874,45 @@ function Show3D() {
                 );
               });
             })()}
+            {effectiveShowFft && fftLayoutOverlay && (
+              <Box
+                ref={fftContainerRef}
+                sx={{
+                  position: "absolute",
+                  right: 8,
+                  bottom: 8,
+                  width: "min(42%, 320px)",
+                  minWidth: "min(220px, 56%)",
+                  aspectRatio: mainPanelAspectRatio,
+                  bgcolor: "#000",
+                  border: `1px solid ${themeColors.border}`,
+                  boxShadow: "0 2px 10px rgba(0,0,0,0.45)",
+                  cursor: "grab",
+                  zIndex: 8,
+                  touchAction: "none",
+                  overflow: "hidden",
+                }}
+                onMouseDown={(event) => { event.stopPropagation(); handleFftMouseDown(event); }}
+                onMouseMove={handleFftMouseMove}
+                onMouseUp={handleFftMouseUp}
+                onMouseLeave={() => { fftClickStartRef.current = null; setIsFftDragging(false); setFftPanStart(null); }}
+                onWheel={handleFftWheel}
+                onDoubleClick={handleFftReset}
+                onTouchStart={handleFftTouchStart}
+                onTouchMove={handleFftTouchMove}
+                onTouchEnd={handleFftTouchEnd}
+                onTouchCancel={handleFftTouchEnd}
+              >
+                <canvas ref={fftCanvasRef} width={canvasW} height={canvasH} style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", imageRendering: smooth ? "auto" : "pixelated", touchAction: "none" }} role="img" aria-label={roiFftActive && fftCropDims ? `FFT power spectrum of ROI crop (${fftCropDims.cropWidth} by ${fftCropDims.cropHeight} pixels)` : "FFT power spectrum of current frame"} />
+                <canvas ref={fftOverlayRef} width={Math.round(canvasW * DPR)} height={Math.round(canvasH * DPR)} style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", pointerEvents: "none" }} aria-hidden="true" />
+                <Box sx={{ position: "absolute", top: 4, left: 6, right: 6, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 1, pointerEvents: "none" }}>
+                  <Typography sx={{ fontSize: 10, color: "rgba(255,255,255,0.9)", fontWeight: 700, textShadow: "1px 1px 0 rgba(0,0,0,0.8)", lineHeight: 1 }}>
+                    FFT
+                  </Typography>
+                  <Button size="small" sx={{ ...compactButton, minHeight: 16, height: 16, fontSize: 9, px: 0.5, pointerEvents: "auto", bgcolor: "rgba(0,0,0,0.35)" }} disabled={!fftNeedsReset} onMouseDown={(event) => event.stopPropagation()} onClick={handleFftReset} aria-label="Reset FFT zoom and pan">Reset</Button>
+                </Box>
+              </Box>
+            )}
           </Box>
           {/* Panel titles render ON canvas inside drawMain - follows grid layout. */}
           {/* Statistics bar - right below the image. Multi-panel = one row per panel. */}
@@ -9231,15 +9301,15 @@ function Show3D() {
           </Box>
         )}
 
-        {/* FFT Panel - same size as main image. Multi-panel FFT stacks below the image grid. */}
-        {effectiveShowFft && (
+        {/* FFT Panel - same size as main image. Bottom stacks below; Right uses the side slot. */}
+        {effectiveShowFft && !fftLayoutOverlay && (
           <Box sx={{
             width: "100%",
-            maxWidth: (nPanels || 1) > 1 ? "100%" : canvasW,
-            flex: (nPanels || 1) > 1 ? "1 0 100%" : `0 1 min(100%, ${canvasW}px)`,
-            minWidth: (nPanels || 1) > 1 ? "100%" : undefined,
-            ml: (nPanels || 1) > 1 ? "0 !important" : undefined,
-            mt: (nPanels || 1) > 1 ? `${SPACING.SM}px !important` : undefined,
+            maxWidth: fftLayoutBottom && (nPanels || 1) > 1 ? "100%" : canvasW,
+            flex: fftLayoutBottom && (nPanels || 1) > 1 ? "1 0 100%" : `0 1 min(100%, ${canvasW}px)`,
+            minWidth: fftLayoutBottom && (nPanels || 1) > 1 ? "100%" : undefined,
+            ml: fftLayoutBottom && (nPanels || 1) > 1 ? "0 !important" : undefined,
+            mt: fftLayoutBottom && (nPanels || 1) > 1 ? `${SPACING.SM}px !important` : undefined,
             boxSizing: "border-box",
           }}>
             {/* Spacer - matches main panel title row height for canvas alignment */}
