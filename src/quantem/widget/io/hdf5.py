@@ -2979,17 +2979,19 @@ def bin(
     Parameters
     ----------
     data : cp.ndarray
-        CuPy array with shape:
-        - 4D: (scan_row, scan_col, k_row, k_col) - full 4D-STEM
-        - 3D: (n_frames, k_row, k_col) - flattened scan
-        - 2D: (k_row, k_col) - single diffraction pattern
+        CuPy array with one of these shapes:
+
+        - 4D: ``(scan_row, scan_col, k_row, k_col)`` for full 4D-STEM.
+        - 3D: ``(n_frames, k_row, k_col)`` for flattened scan data.
+        - 2D: ``(k_row, k_col)`` for a single diffraction pattern.
     factor : int, optional
         Binning factor (2 for 2x2, 4 for 4x4, etc.), by default 2.
     axes : str, optional
         Which axes to bin:
-        - 'detector' or 'k': bin k_row, k_col (last 2 dims) - default
-        - 'scan' or 'r': bin scan_row, scan_col (first 2 dims of 4D data)
-        - 'all': bin all 4 dimensions (4D data only)
+
+        - ``"detector"`` or ``"k"``: bin ``k_row`` and ``k_col``.
+        - ``"scan"`` or ``"r"``: bin ``scan_row`` and ``scan_col``.
+        - ``"all"``: bin all four dimensions (4D data only).
     dtype : type or np.dtype, optional
         Output dtype. If None, uses uint32 for int input (sum), float32 for mean.
     reduction : str, optional
@@ -3002,17 +3004,10 @@ def bin(
 
     Examples
     --------
-    ```python
-    # bin the detector (k_row, k_col)
-    data_4d = data.reshape(256, 256, 192, 192)         # (scan_row, scan_col, k_row, k_col)
-    binned = bin(data_4d, factor=2, axes="detector")   # (256, 256, 96, 96)
-
-    # bin the scan (scan_row, scan_col)
-    binned = bin(data_4d, factor=2, axes="scan")       # (128, 128, 192, 192)
-
-    # 3D data (flattened scan) - bins the detector by default
-    binned = bin(data_3d, factor=2)                    # (65536, 96, 96)
-    ```
+    >>> data_4d = data.reshape(256, 256, 192, 192)
+    >>> binned = bin(data_4d, factor=2, axes="detector")
+    >>> binned = bin(data_4d, factor=2, axes="scan")
+    >>> binned = bin(data_3d, factor=2)
     """
     if reduction not in ("sum", "mean"):
         raise ValueError(f"reduction must be 'sum' or 'mean', got '{reduction}'")

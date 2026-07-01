@@ -734,16 +734,16 @@ def save(
     ``cp.clip`` to the dtype range, NOT truncation. Max error is exactly half
     a count for any value in range; truncation would double it.
 
-    Performance — a 512²×192² float32 bilinear-merged (38.7 GB raw)
-    --------------------------------------------------------------------
+    Performance - a 512^2 x 192^2 float32 bilinear-merged stack
+    -----------------------------------------------------------
     Measured on RTX PRO 6000 Blackwell (workstation), real bilinear-merged data:
 
-        ============================ ============= ============= ====== ========
-        dtype                         wall          file size     ratio  GB/s in
-        ============================ ============= ============= ====== ========
-        ``float32`` (lossless)        ~49 s         19.5 GB        1.98×   0.78
-        ``uint16``  (round-quantize)  ~41 s          3.4 GB       11.24×   0.94
-        ============================ ============= ============= ====== ========
+        =========================== ============= ============= ====== ========
+        dtype                       wall          file size     ratio  GB/s in
+        =========================== ============= ============= ====== ========
+        ``float32`` (lossless)      ~49 s         19.5 GB       1.98x  0.78
+        ``uint16`` (round-quantize) ~41 s         3.4 GB        11.24x 0.94
+        =========================== ============= ============= ====== ========
 
     For smaller (256²) scans the wall scales linearly. Pure synthetic data
     compresses 22× rather than 2× because random integer counts have heavy
