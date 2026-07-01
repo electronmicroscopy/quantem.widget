@@ -47,9 +47,10 @@ detector at load (`det_bin`) to cut memory and speed first paint - see
 | `ShowDiffraction` | 2D/3D diffraction d-spacing: Bragg spots, rings, center finding, k calibration | [tutorial](tutorials/showdiffraction) · [API](api/showdiffraction) |
 | `survey` | Folder-level microscopy survey: HAADF/STEM thumbnails, EDS launchers, FOV grouping, and curation state | [tutorial](tutorials/survey) · [FOV tutorial](tutorials/survey_fov) |
 
-The [Tutorials](tutorials/survey) start with folder survey workflows and then walk through each widget on real public data
+The [Tutorials](tutorials/download_data) walk through each widget on real public data
 where practical, with compact synthetic data only where it keeps an example
-portable. They also show how to [save and share widget exports](tutorials/widget_export). The [API reference](api/index)
+portable. The [advanced tutorials](tutorials/survey) cover folder survey workflows
+and how to [save and share widget exports](tutorials/widget_export). The [API reference](api/index)
 documents every parameter, method, and interactive control (and doubles as a
 UI-test spec for automated agents). All example data here is synthetic or pulled
 from a public Hugging Face dataset - no private data ships in the docs.
