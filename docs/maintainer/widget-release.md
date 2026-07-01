@@ -65,7 +65,20 @@ checks.
 ## Visual signoff
 
 Widgets can import successfully while still rendering blank canvases. Before a
-release candidate, run at least the quick visual smoke:
+release candidate, create an agent signoff packet and drive the affected widgets
+in the browser:
+
+```bash
+scripts/widget_agent_signoff.sh --quick
+```
+
+The agent signoff is a fix-and-redrive loop: open the docs page, notebook, or
+exported HTML; click, drag, zoom, scrub, resize, and export; patch anything that
+feels wrong; rebuild; refresh; and redrive the same interaction. Save final
+screenshots or short videos in the packet before tagging. See
+[Agent signoff](widget-agent-signoff).
+
+Also run at least the quick visual smoke:
 
 ```bash
 scripts/widget_visual_signoff.sh --quick
@@ -81,6 +94,12 @@ For a release-candidate tag, prefer the full signoff:
 
 ```bash
 scripts/widget_visual_signoff.sh --full
+```
+
+For broad UI releases, pair it with:
+
+```bash
+scripts/widget_agent_signoff.sh --full
 ```
 
 The full signoff includes generic widget visual tests, Show4DSTEM WebGPU browser

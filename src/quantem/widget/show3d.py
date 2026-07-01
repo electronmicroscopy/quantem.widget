@@ -21,6 +21,7 @@ import tempfile
 import urllib.parse
 import warnings
 import weakref
+from collections.abc import Sequence
 from enum import Enum
 from typing import Self
 
@@ -217,6 +218,7 @@ class Show3D(anywidget.AnyWidget):
     - Line profiles sampled across the full stack
     - FFT panel with optional Hann window
     - Side-by-side multi-panel mode with linked or independent zoom / pan / contrast
+    - Panel visibility controls by index or title without removing data
     - Frame hiding (``hide``, ``show``, ``set_hidden``, ``show_all``) without rebuilding
     - Python-side PNG / PDF / TIFF single-frame save via ``save_image``
     - JSON state save/load via ``state_dict`` / ``load_state_dict`` / ``save``
@@ -295,6 +297,11 @@ class Show3D(anywidget.AnyWidget):
         Font size in CSS pixels for the per-panel title drawn at the top of
         each multi-panel slot.  Bump to ``14–16`` for slide-projection clarity;
         drop to ``9`` to fit titles inside narrow panels on a small screen.
+    hidden_panels : sequence of int or str, optional
+        Multi-panel entries to collapse from the initial view. Integers are
+        zero-based panel indices; strings match ``panel_titles`` exactly. Hidden
+        panels stay in the widget state and exported HTML, and can be restored
+        later with ``show_panel`` or ``show_all_panels``.
     show_panel_titles : bool, default True
         Draw the top-center per-panel title and frame counter on multi-panel
         canvases. Set ``False`` for clean GIF/video exports.
@@ -343,6 +350,11 @@ class Show3D(anywidget.AnyWidget):
     -----
     - The stack is loaded once into ``self._data`` (``float32``); ``set_image``
       replaces the data without rebuilding the widget.
+    - For live acquisitions or reconstruction loops where the stack grows over
+      time, construct the widget with ``offline=False`` before calling
+      ``set_image``. Small initial stacks can otherwise use the saved/offline
+      notebook representation, which is meant for static notebook state and
+      standalone exports rather than streaming new frames.
     - When the stack is large (>32 MB per frame), an internal display copy is
       binned for faster scrubbing; full-resolution data is kept for stats,
       ROIs, FFT, profiles, and direct image saving.
@@ -414,6 +426,9 @@ class Show3D(anywidget.AnyWidget):
     # the user's preferred iteration / trial / focal slice without losing the
     # full stack. JS draws a gold star top-right of each panel when set.
     starred = traitlets.List(traitlets.Int()).tag(sync=True)
+    # Per-panel visibility. Hidden panels stay in state/export but are collapsed
+    # from the canvas grid and skipped by panel-scoped frontend computations.
+    hidden_panels = traitlets.List(traitlets.Int(), default_value=[]).tag(sync=True)
     # Real frame count per panel for stack comparison: stacks of different
     # lengths get auto-padded to the longest; this trait lets JS mark
     # "end-of-stack" frames (frame idx >= real[panel]). Empty = all real.
@@ -735,6 +750,76 @@ class Show3D(anywidget.AnyWidget):
                 )
         return val
 
+    @traitlets.validate("hidden_panels")
+    def _validate_hidden_panels(self, proposal: dict) -> list:
+        """Normalize hidden panel indices and keep at least one panel visible."""
+        n_pan = int(self.n_panels)
+        clean: list[int] = []
+        seen: set[int] = set()
+        for value in proposal["value"]:
+            idx = int(value)
+            if 0 <= idx < n_pan and idx not in seen:
+                clean.append(idx)
+                seen.add(idx)
+        clean.sort()
+        if len(clean) >= n_pan:
+            raise traitlets.TraitError(
+                "hidden_panels cannot hide every panel; at least one panel must remain visible"
+            )
+        return clean
+
+    def _panel_title_for_index(self, panel: int) -> str:
+        """Return the user-facing title for a panel index."""
+        if 0 <= panel < len(self.panel_titles) and self.panel_titles[panel]:
+            return str(self.panel_titles[panel])
+        return f"Panel {panel + 1}"
+
+    def _resolve_panel_ref(self, panel: int | str) -> int:
+        """Resolve a panel index or exact title into a zero-based panel index."""
+        if isinstance(panel, bool):
+            raise TypeError("panel must be an integer index or exact panel title, not bool")
+        if isinstance(panel, int):
+            idx = int(panel)
+            if 0 <= idx < int(self.n_panels):
+                return idx
+            raise ValueError(f"panel index {idx} out of range [0, {self.n_panels})")
+        if isinstance(panel, str):
+            titles = [self._panel_title_for_index(i) for i in range(int(self.n_panels))]
+            matches = [i for i, title in enumerate(titles) if title == panel]
+            if len(matches) == 1:
+                return matches[0]
+            if len(matches) > 1:
+                raise ValueError(
+                    f"panel title {panel!r} is not unique; use a zero-based panel index instead"
+                )
+            available = ", ".join(repr(title) for title in titles)
+            raise ValueError(f"unknown panel title {panel!r}; available titles: {available}")
+        raise TypeError(
+            f"panel must be an integer index or exact panel title, got {type(panel).__name__}"
+        )
+
+    def _normalize_panel_refs(
+        self,
+        panels: Sequence[int | str] | int | str,
+        *,
+        allow_empty: bool = False,
+    ) -> list[int]:
+        """Resolve and de-duplicate panel references while preserving order."""
+        if isinstance(panels, (str, int)) and not isinstance(panels, bool):
+            values: Sequence[int | str] = [panels]
+        else:
+            values = panels  # type: ignore[assignment]
+        out: list[int] = []
+        seen: set[int] = set()
+        for panel in values:
+            idx = self._resolve_panel_ref(panel)
+            if idx not in seen:
+                out.append(idx)
+                seen.add(idx)
+        if not out and not allow_empty:
+            raise ValueError("at least one panel index or title is required")
+        return out
+
     def _validate_panel_list_length(self, name: str, value: list) -> list:
         """Require per-panel list traits to have exactly one entry per panel."""
         n_pan = int(self.n_panels)
@@ -873,6 +958,7 @@ class Show3D(anywidget.AnyWidget):
         labels: list[str] | None = None,
         panel_titles: list[str] | None = None,
         panel_real_frames: list[int] | None = None,
+        hidden_panels: Sequence[int | str] | int | str | None = None,
         title: str = "",
         cmap: str | Colormap = Colormap.PLASMA,
         vmin: float | None = None,
@@ -998,6 +1084,8 @@ class Show3D(anywidget.AnyWidget):
                             display_bin=display_bin, offline=offline,
                             state=state, dedupe_identical_panels=dedupe_identical_panels,
                             _t0=_t0)
+            if hidden_panels is not None:
+                self.set_hidden_panels(hidden_panels)
 
     def _init_sync(self, data_args: tuple, *, labels: list[str] | None,
                    panel_titles: list[str] | None, title: str,
@@ -1450,10 +1538,9 @@ class Show3D(anywidget.AnyWidget):
         self._refresh_auto_contrast_ranges()
         self.show_fft = show_fft
         self.fft_window = fft_window
-        # Stats panel on by default for single-panel (cheap, useful readout);
-        # off for multi-panel where N stat blocks would crowd the layout.
-        # Explicit True/False from the caller always wins.
-        self.show_stats = (int(self.n_panels) == 1) if show_stats is None else show_stats
+        # Statistics are opt-in because they occupy vertical space in notebooks
+        # and exported HTML, especially on phones.
+        self.show_stats = False if show_stats is None else bool(show_stats)
         self.show_controls = show_controls
         self.size = size
         frame_bytes = self.height * self.width * 4  # float32
@@ -1598,6 +1685,10 @@ class Show3D(anywidget.AnyWidget):
         - Prefer ``set_image`` over constructing a new ``Show3D`` when iterating
           through datasets in the same cell: it avoids re-creating the canvas
           and preserves the operator's contrast / zoom / cmap state.
+        - For live stack growth, instantiate the widget with ``offline=False``:
+          ``w = Show3D(first_frame[None], offline=False)``. Then append frames
+          with ``w.set_image(np.stack(frames))`` and set
+          ``w.slice_idx = len(frames) - 1`` to jump to the newest frame.
         - The new stack is cast to ``float32``. If float64 input contains values
           outside ``float32`` range, an error is raised (silent overflow to
           ``inf`` would corrupt stats).
@@ -1795,6 +1886,7 @@ class Show3D(anywidget.AnyWidget):
             "loop_start": self.loop_start,
             "bookmarked_frames": self.bookmarked_frames,
             "starred": list(self.starred),
+            "hidden_panels": list(self.hidden_panels),
             "playback_path": self.playback_path,
             "slice_idx": self.slice_idx,
             "roi_active": self.roi_active,
@@ -2003,6 +2095,22 @@ class Show3D(anywidget.AnyWidget):
         # saved from a 4-panel widget, loading into a single-panel one).
         if "starred" in state and isinstance(state["starred"], list) and len(state["starred"]) != int(self.n_panels):
             state.pop("starred")
+        if "hidden_panels" in state and isinstance(state["hidden_panels"], list):
+            n_pan = int(self.n_panels)
+            clean_set: set[int] = set()
+            for value in state["hidden_panels"]:
+                if isinstance(value, bool):
+                    continue
+                try:
+                    idx = int(value)
+                except (TypeError, ValueError):
+                    continue
+                if 0 <= idx < n_pan:
+                    clean_set.add(idx)
+            clean = sorted(clean_set)
+            if len(clean) >= n_pan:
+                clean = clean[:-1]
+            state["hidden_panels"] = clean
         # These were briefly present in the development branch. Contrast auto,
         # percentile, and log scale now stay global to match Show2D.
         for key in (
@@ -2321,6 +2429,66 @@ class Show3D(anywidget.AnyWidget):
         have a star set. Returns ``{}`` if no panel is starred. Useful for
         downstream code like ``best_iters = {trial: w.starred_frames.get(i)}``."""
         return {i: f for i, f in enumerate(self.starred) if f >= 0}
+
+    @property
+    def visible_panels(self) -> list[int]:
+        """Zero-based panel indices currently visible in the canvas grid."""
+        hidden = set(self.hidden_panels)
+        return [i for i in range(int(self.n_panels)) if i not in hidden]
+
+    def set_hidden_panels(self, panels: Sequence[int | str] | int | str) -> Self:
+        """Replace the hidden panel set by index or exact panel title.
+
+        Hidden panels are collapsed from the canvas grid and skipped by
+        panel-scoped frontend computations, but remain available in state and
+        standalone HTML export. At least one panel must stay visible.
+
+        Parameters
+        ----------
+        panels : sequence of int or str, int, or str
+            Panels to hide. Integers are zero-based panel indices; strings must
+            match a panel title exactly.
+
+        Returns
+        -------
+        Show3D
+            The widget, for chaining.
+
+        Examples
+        --------
+        >>> w = Show3D(a, b, panel_titles=["SSB", "Mean DP"])  # doctest: +SKIP
+        >>> w.set_hidden_panels(["Mean DP"])  # doctest: +SKIP
+        >>> w.set_hidden_panels([1])  # doctest: +SKIP
+        """
+        hidden = self._normalize_panel_refs(panels, allow_empty=True)
+        if len(hidden) >= int(self.n_panels):
+            raise ValueError("set_hidden_panels would hide every panel; leave at least one visible")
+        self.hidden_panels = sorted(hidden)
+        return self
+
+    def hide_panel(self, *panels: int | str) -> Self:
+        """Hide one or more panels by zero-based index or exact title.
+
+        Hidden panels are not removed from the widget; they can be restored with
+        ``show_panel`` or ``show_all_panels`` and are preserved in HTML export.
+        """
+        to_hide = set(self.hidden_panels)
+        to_hide.update(self._normalize_panel_refs(list(panels)))
+        if len(to_hide) >= int(self.n_panels):
+            raise ValueError("hide_panel would hide every panel; leave at least one visible")
+        self.hidden_panels = sorted(to_hide)
+        return self
+
+    def show_panel(self, *panels: int | str) -> Self:
+        """Restore one or more hidden panels by zero-based index or exact title."""
+        to_show = set(self._normalize_panel_refs(list(panels)))
+        self.hidden_panels = sorted(set(self.hidden_panels) - to_show)
+        return self
+
+    def show_all_panels(self) -> Self:
+        """Restore every panel in the canvas grid."""
+        self.hidden_panels = []
+        return self
 
     @property
     def visible_indices(self) -> list[int]:

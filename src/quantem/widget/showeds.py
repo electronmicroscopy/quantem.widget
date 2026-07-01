@@ -654,23 +654,16 @@ def _velox_stream_groups(path: pathlib.Path) -> tuple[list[np.ndarray], int, int
     return streams, rows, cols, n_energy
 
 
-def prepare_spectrum_stream_sidecar(
+def _build_spectrum_stream_index(
     path: str | pathlib.Path,
-    out_dir: str | pathlib.Path,
     *,
     base_image: np.ndarray | None = None,
     energy_keV: np.ndarray | None = None,
-    max_sidecar_bytes: int | None = DEFAULT_MAX_SHOWEDS_SIDECAR_BYTES,
-) -> pathlib.Path:
-    """Build an exact sparse data folder from a Velox EDS spectrum stream.
-
-    The folder is optimized for interactive exploration: band maps use a
-    channel-sorted pixel index, and ROI spectra use a pixel-sorted channel
-    index. No dense ``(row, col, energy)`` cube is materialized.
-    """
+    max_stream_bytes: int | None = DEFAULT_MAX_SHOWEDS_SIDECAR_BYTES,
+) -> dict[str, Any]:
+    """Build exact sparse Velox stream indexes without writing a data folder."""
 
     source = pathlib.Path(path).expanduser()
-    out = pathlib.Path(out_dir).expanduser()
     streams, rows, cols, n_energy = _velox_stream_groups(source)
     if energy_keV is None or base_image is None:
         loaded = _read_emd_spectrum_image(source, lazy=True)
@@ -700,11 +693,12 @@ def prepare_spectrum_stream_sidecar(
     else:  # pragma: no cover - numba is expected in development
         channel_counts, pixel_counts, total_events = _stream_index_fallback(streams, rows, cols, n_energy)
 
-    estimated_bytes = _estimate_spectrum_stream_sidecar_bytes(int(total_events), rows, cols, n_energy)
-    if max_sidecar_bytes is not None and estimated_bytes > int(max_sidecar_bytes):
+    total_events = int(total_events)
+    estimated_bytes = _estimate_spectrum_stream_sidecar_bytes(total_events, rows, cols, n_energy)
+    if max_stream_bytes is not None and estimated_bytes > int(max_stream_bytes):
         raise ValueError(
-            "ShowEDS sparse stream folder would be "
-            f"{_format_bytes(estimated_bytes)}, above the {_format_bytes(int(max_sidecar_bytes))} safety limit."
+            "ShowEDS sparse stream buffers would be "
+            f"{_format_bytes(estimated_bytes)}, above the {_format_bytes(int(max_stream_bytes))} safety limit."
         )
 
     channel_offsets = np.empty(n_energy + 1, dtype=np.uint32)
@@ -713,8 +707,8 @@ def prepare_spectrum_stream_sidecar(
     pixel_offsets = np.empty(rows * cols + 1, dtype=np.uint32)
     pixel_offsets[0] = 0
     pixel_offsets[1:] = np.cumsum(pixel_counts, dtype=np.uint64).astype(np.uint32)
-    channel_pixels = np.empty(int(total_events), dtype=np.uint32)
-    pixel_channels = np.empty(int(total_events), dtype=np.uint16)
+    channel_pixels = np.empty(total_events, dtype=np.uint32)
+    pixel_channels = np.empty(total_events, dtype=np.uint16)
 
     if fill_kernel is not None and typed_streams is not None:
         fill_kernel(typed_streams, rows, cols, n_energy, channel_offsets, pixel_offsets, channel_pixels, pixel_channels)
@@ -729,6 +723,57 @@ def prepare_spectrum_stream_sidecar(
             channel_pixels,
             pixel_channels,
         )
+
+    return {
+        "source": source,
+        "rows": int(rows),
+        "cols": int(cols),
+        "n_energy": int(n_energy),
+        "n_events": int(total_events),
+        "energy_keV": axis,
+        "base_image": base,
+        "channel_offsets": channel_offsets,
+        "channel_pixels": channel_pixels,
+        "pixel_offsets": pixel_offsets,
+        "pixel_channels": pixel_channels,
+        "stream_bytes": int(estimated_bytes),
+    }
+
+
+def prepare_spectrum_stream_sidecar(
+    path: str | pathlib.Path,
+    out_dir: str | pathlib.Path,
+    *,
+    base_image: np.ndarray | None = None,
+    energy_keV: np.ndarray | None = None,
+    max_sidecar_bytes: int | None = DEFAULT_MAX_SHOWEDS_SIDECAR_BYTES,
+) -> pathlib.Path:
+    """Build an exact sparse data folder from a Velox EDS spectrum stream.
+
+    The folder is optimized for interactive exploration: band maps use a
+    channel-sorted pixel index, and ROI spectra use a pixel-sorted channel
+    index. No dense ``(row, col, energy)`` cube is materialized.
+    """
+
+    source = pathlib.Path(path).expanduser()
+    out = pathlib.Path(out_dir).expanduser()
+    index = _build_spectrum_stream_index(
+        source,
+        base_image=base_image,
+        energy_keV=energy_keV,
+        max_stream_bytes=max_sidecar_bytes,
+    )
+    rows = int(index["rows"])
+    cols = int(index["cols"])
+    n_energy = int(index["n_energy"])
+    total_events = int(index["n_events"])
+    estimated_bytes = int(index["stream_bytes"])
+    axis = np.asarray(index["energy_keV"], dtype=np.float32)
+    base = np.asarray(index["base_image"], dtype=np.float32)
+    channel_offsets = np.asarray(index["channel_offsets"], dtype=np.uint32)
+    channel_pixels = np.asarray(index["channel_pixels"], dtype=np.uint32)
+    pixel_offsets = np.asarray(index["pixel_offsets"], dtype=np.uint32)
+    pixel_channels = np.asarray(index["pixel_channels"], dtype=np.uint16)
 
     out.mkdir(parents=True, exist_ok=True)
     (out / "channel_offsets_u32.bin").write_bytes(channel_offsets.astype("<u4", copy=False).tobytes())
@@ -1097,6 +1142,72 @@ def load_spectrum_stream_sidecar(
     }
 
 
+def _startup_from_spectrum_stream_index(
+    index: dict[str, Any],
+    *,
+    energy: float | None = None,
+    width: float | None = None,
+    band: tuple[float, float] | tuple[int, int] | None = None,
+    roi: tuple[int, int, int, int] | None = None,
+    roi_shape: str = "rect",
+) -> dict[str, Any]:
+    """Create ShowEDS startup arrays from exact sparse stream indexes."""
+
+    rows = int(index["rows"])
+    cols = int(index["cols"])
+    n_energy = int(index["n_energy"])
+    axis = np.asarray(index["energy_keV"], dtype=np.float32)
+    if axis.ndim != 1 or axis.size != n_energy:
+        raise ValueError(f"sparse stream energy axis must be length {n_energy}, got shape {axis.shape}")
+
+    band_start, band_end = _resolve_band_indices(axis, energy=energy, width=width, band=band)
+    normalised_shape = _normalise_roi_shape(roi_shape)
+    row, col, height, roi_width = _normalise_roi(rows, cols, roi, roi_shape=normalised_shape)
+
+    channel_offsets = np.asarray(index["channel_offsets"], dtype=np.uint32)
+    channel_pixels = np.asarray(index["channel_pixels"], dtype=np.uint32)
+    pixel_offsets = np.asarray(index["pixel_offsets"], dtype=np.uint32)
+    pixel_channels = np.asarray(index["pixel_channels"], dtype=np.uint16)
+
+    initial_map_flat = np.zeros(rows * cols, dtype=np.float32)
+    p0 = int(channel_offsets[band_start])
+    p1 = int(channel_offsets[band_end])
+    np.add.at(initial_map_flat, np.asarray(channel_pixels[p0:p1], dtype=np.intp), 1)
+    initial_map = initial_map_flat.reshape(rows, cols)
+
+    initial_spectrum = _spectrum_from_stream_offsets(
+        pixel_offsets,
+        pixel_channels,
+        rows=rows,
+        cols=cols,
+        n_energy=n_energy,
+        row=row,
+        col=col,
+        height=height,
+        width=roi_width,
+        roi_shape=normalised_shape,
+    )
+
+    return {
+        "meta": {
+            "format": "quantem.widget.showeds.stream-sidecar.v1",
+            "source": str(index.get("source", "")),
+            "rows": rows,
+            "cols": cols,
+            "n_energy": n_energy,
+            "n_events": int(index["n_events"]),
+            "sidecar_bytes": int(index.get("stream_bytes", 0)),
+        },
+        "energy_keV": axis,
+        "initial_map": initial_map,
+        "initial_spectrum": initial_spectrum,
+        "base_image": np.asarray(index["base_image"], dtype=np.float32),
+        "roi": (row, col, height, roi_width),
+        "roi_shape": normalised_shape,
+        "band": (band_start, band_end),
+    }
+
+
 def _sum_bin_sidecar_cube(
     sidecar_dir: str | pathlib.Path,
     *,
@@ -1361,6 +1472,13 @@ def load_eds(
         backend_mode == "auto" and not has_existing_cache and not wants_binned_cache
     )
 
+    if backend_mode == "stream":
+        raise ValueError(
+            "load_eds(..., backend='stream') creates browser-resident sparse buffers. "
+            "Use ShowEDS.from_emd(..., backend='stream') to open the exact EMD stream "
+            "without a sidecar folder."
+        )
+
     if backend_mode == "kernel" and wants_binned_cache:
         raise ValueError(
             "load_eds(..., backend='kernel') keeps the native EMD exact and does not "
@@ -1443,12 +1561,16 @@ def _normalise_emd_backend(value: str | None) -> str:
         "data-folder": "sidecar",
         "folder": "sidecar",
         "linked-folder": "sidecar",
+        "browser-sparse": "stream",
+        "embedded": "stream",
         "lazy": "kernel",
         "native": "kernel",
+        "sparse": "stream",
+        "sparse-stream": "stream",
     }
     backend = aliases.get(raw, raw)
-    if backend not in {"auto", "sidecar", "kernel"}:
-        raise ValueError("ShowEDS.from_emd backend must be 'auto', 'sidecar', or 'kernel'")
+    if backend not in {"auto", "sidecar", "kernel", "stream"}:
+        raise ValueError("ShowEDS.from_emd backend must be 'auto', 'sidecar', 'kernel', or 'stream'")
     return backend
 
 
@@ -1990,6 +2112,59 @@ class ShowEDS(anywidget.AnyWidget):
         return widget
 
     @classmethod
+    def _from_sparse_stream_index(
+        cls,
+        index: dict[str, Any],
+        *,
+        title: str,
+        energy: float | None,
+        width: float | None,
+        element_label: str,
+        candidate_elements: list[str] | tuple[str, ...] | None,
+        **kwargs: Any,
+    ) -> "ShowEDS":
+        startup = _startup_from_spectrum_stream_index(
+            index,
+            energy=energy,
+            width=width,
+            band=kwargs.get("band"),
+            roi=kwargs.get("roi"),
+            roi_shape=kwargs.get("roi_shape", "rect"),
+        )
+        widget_kwargs = dict(kwargs)
+        widget_kwargs["band"] = startup["band"]
+        widget_kwargs["roi"] = startup["roi"]
+        widget_kwargs["roi_shape"] = startup["roi_shape"]
+        widget = cls(
+            None,
+            startup["energy_keV"],
+            title=title,
+            base_image=startup["base_image"],
+            initial_map=startup["initial_map"],
+            initial_spectrum=startup["initial_spectrum"],
+            energy=energy,
+            width=width,
+            element_label=element_label,
+            candidate_elements=candidate_elements,
+            max_state_bytes=None,
+            **widget_kwargs,
+        )
+        widget.compute_backend = "stream"
+        widget.sidecar_url = ""
+        widget.sidecar_meta_json = json.dumps(startup["meta"], separators=(",", ":"))
+        widget.stream_channel_offsets_bytes = np.asarray(index["channel_offsets"], dtype="<u4").tobytes()
+        widget.stream_channel_pixels_bytes = np.asarray(index["channel_pixels"], dtype="<u4").tobytes()
+        widget.stream_pixel_offsets_bytes = np.asarray(index["pixel_offsets"], dtype="<u4").tobytes()
+        widget.stream_pixel_channels_bytes = np.asarray(index["pixel_channels"], dtype="<u2").tobytes()
+        widget.export_sidecar_bytes = (
+            len(widget.stream_channel_offsets_bytes)
+            + len(widget.stream_channel_pixels_bytes)
+            + len(widget.stream_pixel_offsets_bytes)
+            + len(widget.stream_pixel_channels_bytes)
+        )
+        return widget
+
+    @classmethod
     def from_emd(
         cls,
         path: str | pathlib.Path,
@@ -2039,6 +2214,27 @@ class ShowEDS(anywidget.AnyWidget):
                 "ShowEDS.from_emd backend='kernel' keeps the native EMD exact and currently "
                 "does not apply spatial_bin or energy_bin. Use backend='sidecar' for a portable "
                 "sum-binned data folder."
+            )
+
+        if backend_mode == "stream":
+            if wants_binned_cache:
+                raise ValueError(
+                    "ShowEDS.from_emd backend='stream' keeps the exact sparse EMD stream and does not "
+                    "apply spatial_bin or energy_bin. Use backend='sidecar' when you intentionally want "
+                    "a sum-binned data folder."
+                )
+            index = _build_spectrum_stream_index(
+                source,
+                max_stream_bytes=max_sidecar_bytes,
+            )
+            return cls._from_sparse_stream_index(
+                index,
+                title=title or source.stem,
+                energy=energy,
+                width=width,
+                element_label=element_label,
+                candidate_elements=list(candidate_elements or ["O", "Si", "Ca", "Cu", "Au"]),
+                **kwargs,
             )
 
         if use_native_query:
@@ -2425,6 +2621,8 @@ class ShowEDS(anywidget.AnyWidget):
                     "downsample=2/4 for a portable single-file preview, or backend='sidecar' with "
                     "an explicit spatial_bin for a shareable data-folder cache."
                 )
+            if self.compute_backend == "stream":
+                return self, "single exact sparse"
             if self.compute_backend == "sidecar":
                 sidecar = self._sidecar_dir or _sidecar_path_from_url(self.sidecar_url)
                 if sidecar is not None and sidecar.exists():
@@ -2488,7 +2686,7 @@ class ShowEDS(anywidget.AnyWidget):
             export_presets=[dict(item) for item in self.export_presets],
             max_state_bytes=None,
         )
-        widget.compute_backend = "sidecar"
+        widget.compute_backend = "stream"
         widget.sidecar_url = ""
         widget.sidecar_meta_json = json.dumps(export_meta, separators=(",", ":"))
         widget.stream_channel_offsets_bytes = channel_offsets
@@ -2507,6 +2705,12 @@ class ShowEDS(anywidget.AnyWidget):
         return widget
 
     def _make_binned_export_widget(self, *, spatial_bin: int, energy_bin: int) -> "ShowEDS":
+        if self.compute_backend == "stream":
+            raise ValueError(
+                "downsampled ShowEDS export is not available from an embedded sparse-stream widget yet. "
+                "Use export_html(mode='single') for the exact portable sparse viewer, or create a "
+                "data-folder backend when you intentionally need a downsampled preview."
+            )
         if self.compute_backend == "sidecar":
             sidecar = self._sidecar_dir or _sidecar_path_from_url(self.sidecar_url)
             if sidecar is None or not sidecar.exists():
