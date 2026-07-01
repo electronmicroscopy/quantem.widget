@@ -51,6 +51,12 @@ type SidecarWorkerResponse = {
   name?: string;
   start?: number;
   end?: number;
+  width?: number;
+  height?: number;
+  viewRow?: number;
+  viewCol?: number;
+  viewRows?: number;
+  viewCols?: number;
   buffer?: ArrayBuffer;
   ms?: number;
   backend?: string;
@@ -81,6 +87,15 @@ type ShowEDSWindow = Window & typeof globalThis & {
 type ShowEDSPerfWindow = Window & typeof globalThis & {
   __quantemShowEDSPerf?: Record<PerfKind, number[]>;
   __quantemShowEDSBackend?: { map?: string; spectrum?: string };
+};
+type PreviewMap = {
+  data: NumericArray;
+  width: number;
+  height: number;
+  viewRow: number;
+  viewCol: number;
+  viewRows: number;
+  viewCols: number;
 };
 
 const WORKGROUP = 64;
@@ -685,7 +700,9 @@ function extractStorageBytes(dataView: DataView | ArrayBuffer | Uint8Array, logi
 function copyExtractedBuffer(dataView: DataView | ArrayBuffer | Uint8Array): ArrayBuffer | null {
   const bytes = extractBytes(dataView);
   if (bytes.length === 0) return null;
-  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+  const out = new Uint8Array(bytes.byteLength);
+  out.set(bytes);
+  return out.buffer as ArrayBuffer;
 }
 
 function createSidecarWorker(): Worker {
@@ -727,6 +744,30 @@ const STREAM_MAP_WGSL = [
   "  if (i >= p.y) { return; }",
   "  let pixel = channelPixels[p.x + i];",
   "  atomicAdd(&out[pixel], 1u);",
+  "}",
+].join("\\n");
+const STREAM_MAP_PREVIEW_WGSL = [
+  "struct Params {",
+  "  p0: u32, count: u32, rows: u32, cols: u32,",
+  "  outW: u32, outH: u32, pad0: u32, pad1: u32,",
+  "  viewRow: f32, viewCol: f32, viewRows: f32, viewCols: f32,",
+  "};",
+  "@group(0) @binding(0) var<storage,read> channelPixels: array<u32>;",
+  "@group(0) @binding(1) var<storage,read_write> out: array<atomic<u32>>;",
+  "@group(0) @binding(2) var<uniform> p: Params;",
+  "@compute @workgroup_size(64)",
+  "fn main(@builtin(global_invocation_id) gid: vec3<u32>) {",
+  "  let i = gid.x;",
+  "  if (i >= p.count) { return; }",
+  "  let pixel = channelPixels[p.p0 + i];",
+  "  let row = pixel / p.cols;",
+  "  let col = pixel - row * p.cols;",
+  "  let yf = (f32(row) + 0.5 - p.viewRow) / max(1e-6, p.viewRows);",
+  "  let xf = (f32(col) + 0.5 - p.viewCol) / max(1e-6, p.viewCols);",
+  "  if (xf < 0.0 || xf >= 1.0 || yf < 0.0 || yf >= 1.0) { return; }",
+  "  let x = min(p.outW - 1u, u32(floor(xf * f32(p.outW))));",
+  "  let y = min(p.outH - 1u, u32(floor(yf * f32(p.outH))));",
+  "  atomicAdd(&out[y * p.outW + x], 1u);",
   "}",
 ].join("\\n");
 const STREAM_SPECTRUM_WGSL = [
@@ -866,9 +907,11 @@ function destroyStreamGpu() {
     "pixelOffsets",
     "pixelChannels",
     "mapOut",
+    "mapPreviewOut",
     "spectrumOut",
     "clearParams",
     "mapParams",
+    "mapPreviewParams",
     "spectrumParams",
   ]) {
     try { streamGpu[key]?.destroy?.(); } catch {}
@@ -940,9 +983,11 @@ async function ensureStreamGpu() {
       const spectrumOut = device.createBuffer({ size: nEnergy * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
       const clearParams = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
       const mapParams = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+      const mapPreviewParams = device.createBuffer({ size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
       const spectrumParams = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
       const clearPipeline = device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code: CLEAR_WGSL }), entryPoint: "main" } });
       const mapPipeline = device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code: STREAM_MAP_WGSL }), entryPoint: "main" } });
+      const mapPreviewPipeline = device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code: STREAM_MAP_PREVIEW_WGSL }), entryPoint: "main" } });
       const spectrumPipeline = device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code: STREAM_SPECTRUM_WGSL }), entryPoint: "main" } });
       streamGpu = {
         device,
@@ -950,12 +995,16 @@ async function ensureStreamGpu() {
         pixelOffsets: pixelOffsetsBuffer,
         pixelChannels: pixelChannelsBuffer,
         mapOut,
+        mapPreviewOut: null,
+        mapPreviewCount: 0,
         spectrumOut,
         clearParams,
         mapParams,
+        mapPreviewParams,
         spectrumParams,
         clearPipeline,
         mapPipeline,
+        mapPreviewPipeline,
         spectrumPipeline,
         mapClearBindGroup: device.createBindGroup({
           layout: clearPipeline.getBindGroupLayout(0),
@@ -979,6 +1028,8 @@ async function ensureStreamGpu() {
             { binding: 2, resource: { buffer: mapParams } },
           ],
         }),
+        mapPreviewBindGroup: null,
+        mapPreviewClearBindGroup: null,
         spectrumBindGroup: device.createBindGroup({
           layout: spectrumPipeline.getBindGroupLayout(0),
           entries: [
@@ -1023,6 +1074,71 @@ async function computeStreamMapGpu(start, end) {
   pass.end();
   gpu.device.queue.submit([encoder.finish()]);
   return await readGpuUint32(gpu.device, gpu.mapOut, rows * cols);
+}
+
+function ensureStreamMapPreviewBuffers(gpu, outCount) {
+  const needed = Math.max(1, Math.round(outCount));
+  if (gpu.mapPreviewOut && gpu.mapPreviewCount >= needed) return;
+  try { gpu.mapPreviewOut?.destroy?.(); } catch {}
+  gpu.mapPreviewOut = gpu.device.createBuffer({ size: needed * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+  gpu.mapPreviewCount = needed;
+  gpu.mapPreviewClearBindGroup = gpu.device.createBindGroup({
+    layout: gpu.clearPipeline.getBindGroupLayout(0),
+    entries: [
+      { binding: 0, resource: { buffer: gpu.mapPreviewOut } },
+      { binding: 1, resource: { buffer: gpu.clearParams } },
+    ],
+  });
+  gpu.mapPreviewBindGroup = gpu.device.createBindGroup({
+    layout: gpu.mapPreviewPipeline.getBindGroupLayout(0),
+    entries: [
+      { binding: 0, resource: { buffer: gpu.channelPixels } },
+      { binding: 1, resource: { buffer: gpu.mapPreviewOut } },
+      { binding: 2, resource: { buffer: gpu.mapPreviewParams } },
+    ],
+  });
+}
+
+async function computeStreamMapPreviewGpu(start, end, viewRow, viewCol, viewRows, viewCols, outW, outH) {
+  const gpu = await ensureStreamGpu();
+  if (!gpu) return null;
+  const rows = Math.max(1, Math.round(meta.rows));
+  const cols = Math.max(1, Math.round(meta.cols));
+  const width = Math.max(1, Math.round(outW));
+  const height = Math.max(1, Math.round(outH));
+  const outCount = width * height;
+  ensureStreamMapPreviewBuffers(gpu, outCount);
+  const p0 = channelOffsets[start];
+  const p1 = channelOffsets[end];
+  const count = Math.max(0, p1 - p0);
+  const params = new ArrayBuffer(48);
+  const u32 = new Uint32Array(params);
+  const f32 = new Float32Array(params);
+  u32[0] = p0;
+  u32[1] = count;
+  u32[2] = rows;
+  u32[3] = cols;
+  u32[4] = width;
+  u32[5] = height;
+  f32[8] = Number.isFinite(viewRow) ? viewRow : 0;
+  f32[9] = Number.isFinite(viewCol) ? viewCol : 0;
+  f32[10] = Math.max(1e-6, Number.isFinite(viewRows) ? viewRows : rows);
+  f32[11] = Math.max(1e-6, Number.isFinite(viewCols) ? viewCols : cols);
+  gpu.device.queue.writeBuffer(gpu.clearParams, 0, new Uint32Array([outCount, 0, 0, 0]));
+  gpu.device.queue.writeBuffer(gpu.mapPreviewParams, 0, params);
+  const encoder = gpu.device.createCommandEncoder();
+  const pass = encoder.beginComputePass();
+  pass.setPipeline(gpu.clearPipeline);
+  pass.setBindGroup(0, gpu.mapPreviewClearBindGroup);
+  pass.dispatchWorkgroups(Math.ceil(outCount / WORKGROUP));
+  if (count > 0) {
+    pass.setPipeline(gpu.mapPreviewPipeline);
+    pass.setBindGroup(0, gpu.mapPreviewBindGroup);
+    pass.dispatchWorkgroups(Math.ceil(count / WORKGROUP));
+  }
+  pass.end();
+  gpu.device.queue.submit([encoder.finish()]);
+  return await readGpuUint32(gpu.device, gpu.mapPreviewOut, outCount);
 }
 
 async function computeStreamSpectrumGpu(r0, c0, r1, c1, shape) {
@@ -1155,6 +1271,88 @@ self.onmessage = async (event) => {
         for (let i = 0; i < out.length; i++) out[i] = hi[i] - lo[i];
         if (controller.signal.aborted) throw abortError();
         self.postMessage({ id: msg.id, type: "map", buffer: out.buffer, ms: performance.now() - t0 }, [out.buffer]);
+      } catch (error) {
+        if (isAbortError(error)) {
+          self.postMessage({ id: msg.id, type: "map", aborted: true });
+          return;
+        }
+        throw error;
+      } finally {
+        if (activeMapController === controller) activeMapController = null;
+      }
+      return;
+    }
+    if (msg.type === "map-preview") {
+      activeMapController?.abort();
+      const controller = new AbortController();
+      activeMapController = controller;
+      try {
+        const s = Math.max(0, Math.min(meta.n_energy - 1, Math.round(msg.start)));
+        const e = Math.max(s + 1, Math.min(meta.n_energy, Math.round(msg.end)));
+        if (!isStreamSidecar()) throw new Error("map preview requires sparse stream data");
+        await ensureStreamIndexes();
+        if (controller.signal.aborted) throw abortError();
+        const width = Math.max(1, Math.round(msg.width || 1));
+        const height = Math.max(1, Math.round(msg.height || 1));
+        const gpuOut = await computeStreamMapPreviewGpu(
+          s,
+          e,
+          Number(msg.viewRow || 0),
+          Number(msg.viewCol || 0),
+          Number(msg.viewRows || meta.rows),
+          Number(msg.viewCols || meta.cols),
+          width,
+          height,
+        );
+        if (gpuOut) {
+          if (controller.signal.aborted) throw abortError();
+          self.postMessage({
+            id: msg.id,
+            type: "map",
+            buffer: gpuOut.buffer,
+            width,
+            height,
+            viewRow: Number(msg.viewRow || 0),
+            viewCol: Number(msg.viewCol || 0),
+            viewRows: Number(msg.viewRows || meta.rows),
+            viewCols: Number(msg.viewCols || meta.cols),
+            ms: performance.now() - t0,
+            backend: "webgpu-sparse-preview",
+          }, [gpuOut.buffer]);
+          return;
+        }
+        const out = new Uint32Array(width * height);
+        const viewRow = Number(msg.viewRow || 0);
+        const viewCol = Number(msg.viewCol || 0);
+        const viewRows = Math.max(1e-6, Number(msg.viewRows || meta.rows));
+        const viewCols = Math.max(1e-6, Number(msg.viewCols || meta.cols));
+        const p0 = channelOffsets[s];
+        const p1 = channelOffsets[e];
+        for (let i = p0; i < p1; i++) {
+          const pixel = channelPixels[i];
+          const row = Math.floor(pixel / meta.cols);
+          const col = pixel - row * meta.cols;
+          const xf = (col + 0.5 - viewCol) / viewCols;
+          const yf = (row + 0.5 - viewRow) / viewRows;
+          if (xf < 0 || xf >= 1 || yf < 0 || yf >= 1) continue;
+          const x = Math.min(width - 1, Math.floor(xf * width));
+          const y = Math.min(height - 1, Math.floor(yf * height));
+          out[y * width + x]++;
+        }
+        if (controller.signal.aborted) throw abortError();
+        self.postMessage({
+          id: msg.id,
+          type: "map",
+          buffer: out.buffer,
+          width,
+          height,
+          viewRow,
+          viewCol,
+          viewRows,
+          viewCols,
+          ms: performance.now() - t0,
+          backend: "worker-sparse-preview",
+        }, [out.buffer]);
       } catch (error) {
         if (isAbortError(error)) {
           self.postMessage({ id: msg.id, type: "map", aborted: true });
@@ -1403,6 +1601,7 @@ function ShowEDS() {
   } | null>(null);
   const [gpuError, setGpuError] = React.useState("");
   const [elementMap, setElementMap] = React.useState<NumericArray | null>(null);
+  const [elementMapPreview, setElementMapPreview] = React.useState<PreviewMap | null>(null);
   const [roiSpectrum, setRoiSpectrum] = React.useState<NumericArray | null>(null);
   const [busy, setBusy] = React.useState(false);
   const [localBand, setLocalBand] = React.useState<[number, number] | null>(null);
@@ -1425,7 +1624,7 @@ function ShowEDS() {
   const [roiMenuAnchor, setRoiMenuAnchor] = React.useState<HTMLElement | null>(null);
   const [roiShapeMenuAnchor, setRoiShapeMenuAnchor] = React.useState<HTMLElement | null>(null);
   const [bandMenuAnchor, setBandMenuAnchor] = React.useState<HTMLElement | null>(null);
-  const imageRenderingStyle = smooth ? "auto" : "pixelated";
+  const imageRenderingStyle: React.CSSProperties["imageRendering"] = smooth ? "auto" : "pixelated";
   const [exportBusy, setExportBusy] = React.useState(false);
   const [localExportStatus, setLocalExportStatus] = React.useState("");
   const [perfTick, setPerfTick] = React.useState(0);
@@ -1589,6 +1788,8 @@ function ShowEDS() {
     }), [nEnergy, savedBands]);
   const isKernelBackend = computeBackend === "kernel";
   const isSidecarBackend = computeBackend === "sidecar";
+  const isStreamBackend = computeBackend === "stream";
+  const isSparseWorkerBackend = isSidecarBackend || isStreamBackend;
   const size = Math.max(180, Math.round(panelWidth || 420));
   const specW = Math.max(320, Math.round(spectrumWidth || size + 220));
   const specH = Math.max(140, Math.round(spectrumHeight || Math.round(size * 0.58)));
@@ -1628,7 +1829,7 @@ function ShowEDS() {
     x: ((col - mapView.col) / Math.max(1e-9, mapView.cols)) * size,
     y: ((row - mapView.row) / Math.max(1e-9, mapView.rows)) * size,
   }), [mapView, size]);
-  const mapLayerStyle = React.useMemo(() => ({
+  const mapLayerStyle = React.useMemo<React.CSSProperties>(() => ({
     position: "absolute" as const,
     left: 0,
     top: 0,
@@ -1745,6 +1946,14 @@ function ShowEDS() {
   const candidateText = candidateLines.map(lineLabel).join(", ");
   const safeSelectedElements = React.useMemo(() => uniqueSymbols(Array.isArray(selectedElements) ? selectedElements : []), [selectedElements]);
   const selectedElementSet = React.useMemo(() => new Set(safeSelectedElements), [safeSelectedElements]);
+  const hasEmbeddedStream = Boolean(
+    !sidecarUrl
+    && sidecarMetaJson
+    && extractBytes(streamChannelOffsetsBytes).length > 0
+    && extractBytes(streamChannelPixelsBytes).length > 0
+    && extractBytes(streamPixelOffsetsBytes).length > 0
+    && extractBytes(streamPixelChannelsBytes).length > 0,
+  );
   const elementsWithLines = React.useMemo(() => {
     const out = new Set<string>();
     if (Array.isArray(lineHints)) {
@@ -1802,6 +2011,11 @@ function ShowEDS() {
     setSelectedElements([clean]);
   }, [elementsWithLines, setSelectedElements]);
   const isBandCenterPreviewing = Boolean(bandSliderDrag || drag?.mode === "band-move");
+  const bandMoveHitWidthPx = Math.max(
+    32,
+    Math.min(96, ((bandHi - bandLo) / Math.max(1, nEnergy)) * 260 + 20),
+  );
+  const bandMoveCenterPct = ((bandLo + bandHi) / 2 / Math.max(1, nEnergy)) * 100;
   React.useEffect(() => {
     if (localOverlayOpacity === null) return;
     if (Math.abs(localOverlayOpacity - overlayOpacity) <= 1e-6) setLocalOverlayOpacity(null);
@@ -1815,22 +2029,32 @@ function ShowEDS() {
     const height = bottomRight.y - topLeft.y;
     return { left, top, width, height };
   }, [mapImageToScreen, roi.col, roi.height, roi.row, roi.width]);
-  const backendLabel = isSidecarBackend ? "Data folder" : isKernelBackend ? "Kernel exact" : "WebGPU";
+  const backendLabel = isSparseWorkerBackend
+    ? (hasEmbeddedStream || isStreamBackend ? "Sparse stream" : "Data folder")
+    : isKernelBackend ? "Kernel exact" : "WebGPU";
   const embeddedPayloadBytes =
     (cube?.byteLength ?? 0)
     + (base?.byteLength ?? rows * cols * 4)
     + (initialMap?.byteLength ?? 0)
     + (initialSpectrum?.byteLength ?? 0)
+    + (hasEmbeddedStream ? (
+      extractBytes(streamChannelOffsetsBytes).length
+      + extractBytes(streamChannelPixelsBytes).length
+      + extractBytes(streamPixelOffsetsBytes).length
+      + extractBytes(streamPixelChannelsBytes).length
+    ) : 0)
     + nEnergy * 4;
   const embeddedExportSize = formatEstimatedHtmlSize(embeddedPayloadBytes);
-  const exactExportLabel = isSidecarBackend
+  const prefersFolderExport = isSidecarBackend && !hasEmbeddedStream;
+  const exactExportLabel = prefersFolderExport
     ? `Exact linked folder (${embeddedExportSize} HTML + ${exportSidecarBytes > 0 ? formatBytes(exportSidecarBytes) : "data folder"})`
+    : isSparseWorkerBackend ? `Exact single sparse (${embeddedExportSize})`
     : `Exact single file (${embeddedExportSize})`;
   const exportOptions = React.useMemo(() => {
     const custom = Array.isArray(exportPresets)
       ? exportPresets
           .map((preset) => ({
-            mode: String(preset.mode || (isSidecarBackend ? "folder" : "single")),
+            mode: String(preset.mode || (prefersFolderExport ? "folder" : "single")),
             downsample: preset.downsample === undefined
               ? (preset.binning === undefined ? undefined : Number(preset.binning))
               : Number(preset.downsample),
@@ -1840,7 +2064,7 @@ function ShowEDS() {
       : [];
     if (custom.length > 0) return custom;
     const options: { mode: string; downsample?: number; label: string }[] = [
-      { mode: isSidecarBackend ? "folder" : "single", label: exactExportLabel },
+      { mode: prefersFolderExport ? "folder" : "single", label: exactExportLabel },
     ];
     for (const factor of [2, 4]) {
       if (rows >= factor && cols >= factor && nEnergy >= factor) {
@@ -1853,7 +2077,7 @@ function ShowEDS() {
       }
     }
     return options;
-  }, [cols, exactExportLabel, exportPresets, isSidecarBackend, nEnergy, rows]);
+  }, [cols, exactExportLabel, exportPresets, prefersFolderExport, nEnergy, rows]);
 
   React.useEffect(() => {
     if (!exportStatus) return;
@@ -1958,15 +2182,7 @@ function ShowEDS() {
   }, [initialSpectrum, nEnergy]);
 
   React.useEffect(() => {
-    if (!isSidecarBackend) return;
-    const hasEmbeddedStream = (
-      !sidecarUrl
-      && sidecarMetaJson
-      && extractBytes(streamChannelOffsetsBytes).length > 0
-      && extractBytes(streamChannelPixelsBytes).length > 0
-      && extractBytes(streamPixelOffsetsBytes).length > 0
-      && extractBytes(streamPixelChannelsBytes).length > 0
-    );
+    if (!isSparseWorkerBackend) return;
     if (!sidecarUrl && !hasEmbeddedStream) return;
     let disposed = false;
     const rejectPending = (message: string) => {
@@ -1999,7 +2215,7 @@ function ShowEDS() {
         }
         if (disposed) return;
         sidecarRef.current?.worker.terminate();
-        rejectPending("EDS folder data worker was replaced");
+        rejectPending("EDS sparse data worker was replaced");
         const worker = createSidecarWorker();
         const sidecarFileUrl = (name: string) => {
           const base = new URL(absoluteSidecarUrl);
@@ -2063,7 +2279,7 @@ function ShowEDS() {
           else pending.resolve(response);
         };
         worker.onerror = (event) => {
-          rejectPending(event.message || "EDS folder data worker failed");
+          rejectPending(event.message || "EDS sparse data worker failed");
         };
         if (streamBuffers) {
           worker.postMessage(
@@ -2076,17 +2292,17 @@ function ShowEDS() {
         sidecarRef.current = { meta, worker };
         setGpuError("");
       } catch (err) {
-        if (!disposed) setGpuError(`Could not load EDS data folder: ${err instanceof Error ? err.message : String(err)}`);
+        if (!disposed) setGpuError(`Could not load EDS sparse data: ${err instanceof Error ? err.message : String(err)}`);
       }
     })();
     return () => {
       disposed = true;
       sidecarRef.current?.worker.terminate();
       sidecarRef.current = null;
-      rejectPending("EDS folder data worker was disposed");
+      rejectPending("EDS sparse data worker was disposed");
     };
   }, [
-    isSidecarBackend,
+    isSparseWorkerBackend,
     sidecarUrl,
     sidecarMetaJson,
     streamChannelOffsetsBytes,
@@ -2100,6 +2316,7 @@ function ShowEDS() {
       const first = buffers?.[0];
       if (content.type === "map" && first) {
         setElementMap(extractFloat32(first, rows * cols));
+        setElementMapPreview(null);
         setBusy(false);
       } else if (content.type === "spectrum" && first) {
         setRoiSpectrum(extractFloat32(first, nEnergy));
@@ -2117,7 +2334,7 @@ function ShowEDS() {
     let disposed = false;
     const init = async () => {
       setGpuError("");
-      if (isKernelBackend || isSidecarBackend || !cube || cube.length === 0 || rows <= 0 || cols <= 0 || nEnergy <= 0) return;
+      if (isKernelBackend || isSparseWorkerBackend || !cube || cube.length === 0 || rows <= 0 || cols <= 0 || nEnergy <= 0) return;
       if (!navigator.gpu) {
         setGpuError("WebGPU is not available in this browser.");
         return;
@@ -2176,7 +2393,7 @@ function ShowEDS() {
     };
     void init();
     return () => { disposed = true; };
-  }, [cube, rows, cols, nEnergy, isKernelBackend, isSidecarBackend]);
+  }, [cube, rows, cols, nEnergy, isKernelBackend, isSparseWorkerBackend]);
 
   React.useEffect(() => {
     return () => {
@@ -2193,7 +2410,7 @@ function ShowEDS() {
 
   const requestSidecarWorker = React.useCallback((request: Record<string, number | string>) => {
     const worker = sidecarRef.current?.worker;
-    if (!worker) return Promise.reject(new Error("EDS folder data worker is not ready"));
+    if (!worker) return Promise.reject(new Error("EDS sparse data worker is not ready"));
     const id = ++sidecarWorkerRequestIdRef.current;
     return new Promise<SidecarWorkerResponse>((resolve, reject) => {
       sidecarPendingRef.current.set(id, { resolve, reject });
@@ -2201,20 +2418,51 @@ function ShowEDS() {
     });
   }, []);
 
-  const computeMap = React.useCallback(async (start: number, end: number) => {
-    if (isSidecarBackend) {
+  const computeMap = React.useCallback(async (start: number, end: number, interactive = false) => {
+    if (isSparseWorkerBackend) {
       if (!sidecarRef.current) return;
       const seq = ++mapComputeSeqRef.current;
       const t0 = performance.now();
       const s = Math.max(0, Math.min(nEnergy - 1, Math.round(start)));
       const e = Math.max(s + 1, Math.min(nEnergy, Math.round(end)));
-      const response = await requestSidecarWorker({ type: "map", start: s, end: e });
+      const previewWidth = Math.max(1, Math.round(size * MAP_RASTER_DPR));
+      const previewHeight = Math.max(1, Math.round(size * MAP_RASTER_DPR));
+      const response = await requestSidecarWorker(interactive && isStreamBackend ? {
+        type: "map-preview",
+        start: s,
+        end: e,
+        width: previewWidth,
+        height: previewHeight,
+        viewRow: mapView.row,
+        viewCol: mapView.col,
+        viewRows: mapView.rows,
+        viewCols: mapView.cols,
+      } : { type: "map", start: s, end: e });
       if (response.aborted) return;
       if (seq !== mapComputeSeqRef.current) return;
-      if (!response.buffer) throw new Error("EDS folder data worker returned an empty map");
+      if (!response.buffer) throw new Error("EDS sparse data worker returned an empty map");
       const buffer = response.buffer;
       setGpuError("");
-      React.startTransition(() => setElementMap(new Uint32Array(buffer)));
+      const previewResponseWidth = typeof response.width === "number" ? response.width : 0;
+      const previewResponseHeight = typeof response.height === "number" ? response.height : 0;
+      if (interactive && isStreamBackend && previewResponseWidth > 0 && previewResponseHeight > 0) {
+        const viewRow = Number(response.viewRow ?? mapView.row);
+        const viewCol = Number(response.viewCol ?? mapView.col);
+        const viewRows = Number(response.viewRows ?? mapView.rows);
+        const viewCols = Number(response.viewCols ?? mapView.cols);
+        React.startTransition(() => setElementMapPreview({
+          data: new Uint32Array(buffer),
+          width: Math.max(1, Math.round(previewResponseWidth)),
+          height: Math.max(1, Math.round(previewResponseHeight)),
+          viewRow,
+          viewCol,
+          viewRows,
+          viewCols,
+        }));
+      } else {
+        React.startTransition(() => setElementMap(new Uint32Array(buffer)));
+        setElementMapPreview(null);
+      }
       recordComputeBackend("map", response.backend);
       recordWidgetPerf("mapMs", response.ms ?? performance.now() - t0);
       return;
@@ -2240,11 +2488,12 @@ function ShowEDS() {
     gpu.device.queue.submit([enc.finish()]);
     const out = await readBuffer(gpu.device, gpu.map, rows * cols * 4);
     React.startTransition(() => setElementMap(out));
+    setElementMapPreview(null);
     recordWidgetPerf("mapMs", performance.now() - t0);
-  }, [cols, cubeDtype, isKernelBackend, isSidecarBackend, model, nEnergy, recordComputeBackend, recordWidgetPerf, rows, requestSidecarWorker, sidecarUrl]);
+  }, [cols, cubeDtype, isKernelBackend, isSparseWorkerBackend, isStreamBackend, mapView, model, nEnergy, recordComputeBackend, recordWidgetPerf, rows, requestSidecarWorker, sidecarUrl, size]);
 
   const computeSpectrum = React.useCallback(async (nextRoi: Roi) => {
-    if (isSidecarBackend) {
+    if (isSparseWorkerBackend) {
       if (!sidecarRef.current) return;
       const seq = ++spectrumComputeSeqRef.current;
       const t0 = performance.now();
@@ -2262,7 +2511,7 @@ function ShowEDS() {
       });
       if (response.aborted) return;
       if (seq !== spectrumComputeSeqRef.current) return;
-      if (!response.buffer) throw new Error("EDS folder data worker returned an empty spectrum");
+      if (!response.buffer) throw new Error("EDS sparse data worker returned an empty spectrum");
       const buffer = response.buffer;
       setGpuError("");
       React.startTransition(() => setRoiSpectrum(new Uint32Array(buffer)));
@@ -2296,7 +2545,7 @@ function ShowEDS() {
     const out = await readBuffer(gpu.device, gpu.spectrum, nEnergy * 4);
     React.startTransition(() => setRoiSpectrum(out));
     recordWidgetPerf("spectrumMs", performance.now() - t0);
-  }, [cols, cubeDtype, isKernelBackend, isSidecarBackend, model, nEnergy, recordComputeBackend, recordWidgetPerf, rows, requestSidecarWorker, sidecarUrl]);
+  }, [cols, cubeDtype, isKernelBackend, isSparseWorkerBackend, model, nEnergy, recordComputeBackend, recordWidgetPerf, rows, requestSidecarWorker, sidecarUrl]);
 
   const flushMapRequest = React.useCallback(() => {
     mapRafRef.current = null;
@@ -2309,8 +2558,8 @@ function ShowEDS() {
     if (!req) return;
     lastMapFlushRef.current = performance.now();
     if (!allowConcurrent) mapRunningRef.current = true;
-    if (!isSidecarBackend) setBusy(true);
-    void computeMap(req.start, req.end).catch((err) => {
+    if (!isSparseWorkerBackend) setBusy(true);
+    void computeMap(req.start, req.end, req.interactive).catch((err) => {
       setGpuError(err instanceof Error ? err.message : String(err));
     }).finally(() => {
       if (allowConcurrent) return;
@@ -2319,11 +2568,11 @@ function ShowEDS() {
         mapRerunRef.current = false;
         const latest = mapRequestRef.current;
         if (latest) scheduleMap(latest.start, latest.end, latest.interactive);
-      } else if (!isSidecarBackend) {
+      } else if (!isSparseWorkerBackend) {
         setBusy(false);
       }
     });
-  }, [computeMap, isSidecarBackend]);
+  }, [computeMap, isSparseWorkerBackend]);
 
   const scheduleMap = React.useCallback((start: number, end: number, interactive = false) => {
     mapRequestRef.current = { start, end, interactive };
@@ -2370,7 +2619,7 @@ function ShowEDS() {
         if (latest) scheduleSpectrum(latest, true);
       }
     });
-  }, [computeSpectrum, isSidecarBackend]);
+  }, [computeSpectrum, isSparseWorkerBackend]);
 
   const scheduleSpectrum = React.useCallback((nextRoi: Roi, interactive = false) => {
     specRequestRef.current = nextRoi;
@@ -2395,22 +2644,22 @@ function ShowEDS() {
   }, [flushSpectrumRequest]);
 
   React.useEffect(() => {
-    if (!gpuRef.current && !isSidecarBackend) return;
+    if (!gpuRef.current && !isSparseWorkerBackend) return;
     scheduleMap(bandStart, bandEnd);
-  }, [bandEnd, bandStart, isSidecarBackend, scheduleMap, gpuRef.current]);
+  }, [bandEnd, bandStart, isSparseWorkerBackend, scheduleMap, gpuRef.current]);
   React.useEffect(() => {
-    if (!gpuRef.current && !isSidecarBackend) return;
+    if (!gpuRef.current && !isSparseWorkerBackend) return;
     scheduleSpectrum(modelRoi);
-  }, [isSidecarBackend, roiCol, roiHeight, roiRow, roiShape, roiWidth, scheduleSpectrum, gpuRef.current]);
+  }, [isSparseWorkerBackend, roiCol, roiHeight, roiRow, roiShape, roiWidth, scheduleSpectrum, gpuRef.current]);
   React.useEffect(() => {
     const id = window.setTimeout(() => {
-      if (gpuRef.current || isSidecarBackend) {
+      if (gpuRef.current || isSparseWorkerBackend) {
         scheduleMap(bandStart, bandEnd);
         scheduleSpectrum(modelRoi);
       }
     }, 100);
     return () => window.clearTimeout(id);
-  }, [bandEnd, bandStart, isSidecarBackend, roiCol, roiHeight, roiRow, roiShape, roiWidth, scheduleMap, scheduleSpectrum, gpuRef.current]);
+  }, [bandEnd, bandStart, isSparseWorkerBackend, roiCol, roiHeight, roiRow, roiShape, roiWidth, scheduleMap, scheduleSpectrum, gpuRef.current]);
 
   React.useEffect(() => {
     const canvas = mapCanvasRef.current;
@@ -2449,28 +2698,70 @@ function ShowEDS() {
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-    if (!elementMap) return;
+    const preview = elementMapPreview;
+    const previewMatches = preview
+      && preview.width === canvas.width
+      && preview.height === canvas.height
+      && Math.abs(preview.viewRow - mapView.row) < 1e-3
+      && Math.abs(preview.viewCol - mapView.col) < 1e-3
+      && Math.abs(preview.viewRows - mapView.rows) < 1e-3
+      && Math.abs(preview.viewCols - mapView.cols) < 1e-3;
+    if (!elementMap && !previewMatches) return;
     const t0 = performance.now();
     const image = ctx.createImageData(canvas.width, canvas.height);
-    const [mapLo, mapHi] = displayRange;
+    const [mapLo, mapHi] = previewMatches
+      ? (() => {
+        const previewRange = finiteRange(preview.data);
+        const range = sliderRange(previewRange[0], previewRange[1], mapVminPct, mapVmaxPct);
+        return Number.isFinite(range.vmin) && Number.isFinite(range.vmax) && range.vmax > range.vmin
+          ? [range.vmin, range.vmax] as [number, number]
+          : previewRange;
+      })()
+      : displayRange;
     const mapSpan = Math.max(1e-12, mapHi - mapLo);
-    const rowStep = mapView.rows / Math.max(1, canvas.height);
-    const colStep = mapView.cols / Math.max(1, canvas.width);
-    for (let py = 0; py < canvas.height; py++) {
-      const r = Math.max(0, Math.min(rows - 1, Math.floor(mapView.row + (py + 0.5) * rowStep)));
-      for (let px = 0; px < canvas.width; px++) {
-        const c = Math.max(0, Math.min(cols - 1, Math.floor(mapView.col + (px + 0.5) * colStep)));
-        const idx = r * cols + c;
-        const off = (py * canvas.width + px) * 4;
-        const value = elementMap[idx];
-        if (!Number.isFinite(value)) continue;
-        const [cr, cg, cb] = colorize((value - mapLo) / mapSpan);
-        image.data[off] = cr; image.data[off + 1] = cg; image.data[off + 2] = cb; image.data[off + 3] = 255;
+    if (previewMatches) {
+      const data = preview.data;
+      for (let py = 0; py < canvas.height; py++) {
+        for (let px = 0; px < canvas.width; px++) {
+          const idx = py * canvas.width + px;
+          const off = idx * 4;
+          const value = data[idx];
+          if (!Number.isFinite(value)) continue;
+          const [cr, cg, cb] = colorize((value - mapLo) / mapSpan);
+          image.data[off] = cr; image.data[off + 1] = cg; image.data[off + 2] = cb; image.data[off + 3] = 255;
+        }
+      }
+    } else if (elementMap) {
+      const rowStep = mapView.rows / Math.max(1, canvas.height);
+      const colStep = mapView.cols / Math.max(1, canvas.width);
+      for (let py = 0; py < canvas.height; py++) {
+        const r = Math.max(0, Math.min(rows - 1, Math.floor(mapView.row + (py + 0.5) * rowStep)));
+        for (let px = 0; px < canvas.width; px++) {
+          const c = Math.max(0, Math.min(cols - 1, Math.floor(mapView.col + (px + 0.5) * colStep)));
+          const idx = r * cols + c;
+          const off = (py * canvas.width + px) * 4;
+          const value = elementMap[idx];
+          if (!Number.isFinite(value)) continue;
+          const [cr, cg, cb] = colorize((value - mapLo) / mapSpan);
+          image.data[off] = cr; image.data[off + 1] = cg; image.data[off + 2] = cb; image.data[off + 3] = 255;
+        }
       }
     }
     ctx.putImageData(image, 0, 0);
     recordWidgetPerf("mapDrawMs", performance.now() - t0);
-  }, [cols, elementMap, mapView, recordWidgetPerf, rows, size]);
+  }, [cols, elementMap, elementMapPreview, mapView, mapVmaxPct, mapVminPct, recordWidgetPerf, rows, size]);
+
+  React.useEffect(() => {
+    if (!elementMapPreview) return;
+    if (
+      Math.abs(elementMapPreview.viewRow - mapView.row) > 1e-3
+      || Math.abs(elementMapPreview.viewCol - mapView.col) > 1e-3
+      || Math.abs(elementMapPreview.viewRows - mapView.rows) > 1e-3
+      || Math.abs(elementMapPreview.viewCols - mapView.cols) > 1e-3
+    ) {
+      setElementMapPreview(null);
+    }
+  }, [elementMapPreview, mapView]);
 
   React.useEffect(() => {
     drawMapOverlay(mapDisplayRange);
@@ -2651,7 +2942,7 @@ function ShowEDS() {
   const updateRoi = (next: Roi, sync = true, interactive = false) => {
     const normalized = normalizeRoi({ ...next, shape: normalizeRoiShape(next.shape ?? roi.shape) }, rows, cols);
     const shapeChanged = normalizeRoiShape(normalized.shape) !== normalizeRoiShape(roi.shape);
-    const deferCurvedSidecarSpectrum = interactive && isSidecarBackend && normalizeRoiShape(normalized.shape) !== "rect";
+    const deferCurvedSidecarSpectrum = interactive && isSparseWorkerBackend && normalizeRoiShape(normalized.shape) !== "rect";
     setLocalRoi(normalized);
     if (sync) {
       queueRoiPersist(normalized, shapeChanged, interactive && !shapeChanged);
@@ -3502,12 +3793,11 @@ function ShowEDS() {
                       position: "absolute",
                       top: 0,
                       bottom: 0,
-                      left: `calc(${(bandLo / Math.max(1, nEnergy)) * 100}% + 8px)`,
-                      width: `max(0px, calc(${((bandHi - bandLo) / Math.max(1, nEnergy)) * 100}% - 16px))`,
-                      minWidth: bandHi - bandLo > 24 ? 4 : 0,
+                      left: `clamp(0px, calc(${bandMoveCenterPct}% - ${bandMoveHitWidthPx / 2}px), calc(100% - ${bandMoveHitWidthPx}px))`,
+                      width: `${bandMoveHitWidthPx}px`,
                       cursor: isBandCenterPreviewing ? "grabbing" : "grab",
                       zIndex: 3,
-                      pointerEvents: bandHi - bandLo > 24 ? "auto" : "none",
+                      pointerEvents: "auto",
                     }}
                     aria-label="Drag selected energy band"
                   />

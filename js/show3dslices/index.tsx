@@ -3827,8 +3827,6 @@ function Show3DSlices() {
   // Thin-Z layout: depth axis much smaller than lateral. Show the top panel
   // beside the single oblique depth panel.
   const panelTotalW = (canvasSizes[0]?.w ?? CANVAS_TARGET) + (canvasSizes[1]?.w ?? 0) + SPACING.SM;
-  const primaryPanelW = canvasSizes[0]?.w ?? CANVAS_TARGET;
-  const compactControlsW = Math.min(primaryPanelW, CANVAS_TARGET);
   const sliceColumnOffsetPx = (webgpuSupported ? volumeCanvasSize : 220) + SPACING.SM;
   const obliqueAngleSliderMin = 0;
   const obliqueAngleSliderMax = 179;

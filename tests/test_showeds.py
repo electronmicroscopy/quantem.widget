@@ -739,6 +739,26 @@ def _write_tiny_stream_sidecar(tmp_path):
     return sidecar, rows, cols, n_energy, events_by_pixel
 
 
+def _tiny_stream_index(tmp_path):
+    sidecar, rows, cols, n_energy, events_by_pixel = _write_tiny_stream_sidecar(tmp_path)
+    meta = json.loads((sidecar / "meta.json").read_text())
+    n_events = int(meta["n_events"])
+    return {
+        "source": tmp_path / "scan.emd",
+        "rows": rows,
+        "cols": cols,
+        "n_energy": n_energy,
+        "n_events": n_events,
+        "energy_keV": np.arange(n_energy, dtype=np.float32),
+        "base_image": np.ones((rows, cols), dtype=np.float32),
+        "channel_offsets": np.frombuffer((sidecar / meta["channel_offsets"]).read_bytes(), dtype="<u4").copy(),
+        "channel_pixels": np.frombuffer((sidecar / meta["channel_pixels"]).read_bytes(), dtype="<u4").copy(),
+        "pixel_offsets": np.frombuffer((sidecar / meta["pixel_offsets"]).read_bytes(), dtype="<u4").copy(),
+        "pixel_channels": np.frombuffer((sidecar / meta["pixel_channels"]).read_bytes(), dtype="<u2").copy(),
+        "stream_bytes": 0,
+    }, events_by_pixel
+
+
 def test_showeds_stream_sidecar_startup_spectrum_matches_sparse_events(tmp_path):
     sidecar, rows, cols, n_energy, events_by_pixel = _write_tiny_stream_sidecar(tmp_path)
 
@@ -758,6 +778,37 @@ def test_showeds_stream_sidecar_startup_spectrum_matches_sparse_events(tmp_path)
     assert loaded["initial_map"].reshape(-1).tolist() == expected_map.tolist()
 
 
+def test_showeds_from_emd_stream_embeds_sparse_buffers_without_sidecar(monkeypatch, tmp_path):
+    index, events_by_pixel = _tiny_stream_index(tmp_path)
+    rows = int(index["rows"])
+    cols = int(index["cols"])
+    n_energy = int(index["n_energy"])
+    source = tmp_path / "scan.emd"
+
+    monkeypatch.setattr(showeds_module, "_build_spectrum_stream_index", lambda *args, **kwargs: index)
+
+    widget = ShowEDS.from_emd(source, backend="stream", band=(2, 4), roi=(1, 1, 2, 3), title="Sparse Stream")
+
+    expected_channels: list[int] = []
+    for row in range(1, 3):
+        for col in range(1, 4):
+            expected_channels.extend(events_by_pixel[row * cols + col])
+    expected_spectrum = np.bincount(expected_channels, minlength=n_energy).astype(np.float32)
+    expected_map = np.zeros(rows * cols, dtype=np.float32)
+    for pixel, channels in enumerate(events_by_pixel):
+        expected_map[pixel] = sum(1 for channel in channels if 2 <= channel < 4)
+
+    assert widget.title == "Sparse Stream"
+    assert widget.compute_backend == "stream"
+    assert widget.sidecar_url == ""
+    assert widget.sidecar_meta_json
+    assert widget.cube_bytes == b""
+    assert len(widget.stream_channel_offsets_bytes) == (n_energy + 1) * 4
+    assert len(widget.stream_pixel_offsets_bytes) == (rows * cols + 1) * 4
+    assert np.frombuffer(widget.initial_map_bytes, dtype=np.float32).reshape(rows, cols).reshape(-1).tolist() == expected_map.tolist()
+    assert np.frombuffer(widget.initial_spectrum_bytes, dtype=np.float32).tolist() == expected_spectrum.tolist()
+
+
 def test_showeds_stream_sidecar_exact_single_export_embeds_sparse_buffers(tmp_path):
     sidecar, rows, cols, n_energy, _events_by_pixel = _write_tiny_stream_sidecar(tmp_path)
     widget = ShowEDS.from_sidecar(
@@ -772,7 +823,7 @@ def test_showeds_stream_sidecar_exact_single_export_embeds_sparse_buffers(tmp_pa
 
     assert label == "single exact sparse"
     assert exported.title == "EDS Stream Export"
-    assert exported.compute_backend == "sidecar"
+    assert exported.compute_backend == "stream"
     assert exported.sidecar_url == ""
     assert exported.sidecar_meta_json
     assert len(exported.cube_bytes) == 0
