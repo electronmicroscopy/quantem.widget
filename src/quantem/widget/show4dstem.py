@@ -385,8 +385,17 @@ class Show4DSTEM(anywidget.AnyWidget):
         verbose: bool = True,
         state=None,
         backend: str | None = None,
+        save_state: bool = False,
         **kwargs,
     ):
+        # save_state controls whether the heavy pixel buffers (the packed 4D
+        # offline stack, export payload, gif) are persisted into the notebook's
+        # metadata.widgets on save. Default False: a plain display embeds only
+        # light traits + a static PNG of the virtual image, so a browse widget
+        # does not bake a multi-hundred-MB stack into the .ipynb. Set True to
+        # persist full interactive state so a reopened notebook restores the
+        # widget (offline WebGPU browse) without a kernel.
+        self._save_state = bool(save_state)
         super().__init__(**kwargs)
         self.widget_version = resolve_widget_version()
         panel_width_px = int(panel_width_px)
@@ -1326,6 +1335,79 @@ class Show4DSTEM(anywidget.AnyWidget):
             f"sampling=({self.pixel_size} {self.pixel_unit}, {self.k_pixel_size} {self.k_pixel_unit}), "
             f"pos=({self.pos_row}, {self.pos_col}){frame_info}{title_info})"
         )
+
+    # Traits that carry the bulk pixel payload. Dropped from the saved-notebook
+    # snapshot when save_state is False so a plain display stays a few MB, not
+    # the multi-hundred-MB packed 4D stack. frame_bytes / virtual_image_bytes
+    # are single 2D slices (small) and are kept so a cold reopen still has a
+    # first paint; _offline_stack / export_payload / _gif_data are the bulk ones.
+    _UNSAVED_HEAVY_KEYS = ("_offline_stack", "export_payload", "_gif_data")
+
+    def get_state(self, key=None, drop_defaults=False):
+        """Trait state for comm sync and notebook embedding.
+
+        ipywidgets calls this with ``key=None`` to snapshot the FULL state that
+        gets written into the saved notebook's ``metadata.widgets``. When
+        ``save_state`` is False we drop the heavy buffers from that snapshot so a
+        plain Show4DSTEM does not bake the packed 4D stack into the .ipynb.
+        Targeted syncs (``key`` is a name or set, used by hold_sync / send_state
+        during live rendering - e.g. the deferred virtual_image_bytes / frame_bytes
+        re-send on mount) are untouched, so the frontend still receives every
+        buffer normally. ``save_state=True`` embeds everything so a reopened
+        notebook restores the interactive offline widget without a kernel.
+        """
+        state = super().get_state(key=key, drop_defaults=drop_defaults)
+        if key is None and not getattr(self, "_save_state", False):
+            for heavy_key in self._UNSAVED_HEAVY_KEYS:
+                state.pop(heavy_key, None)
+        return state
+
+    def _static_png_b64(self, *, max_px: int = 320, dpi: int = 96) -> str | None:
+        """Base64 PNG of the current virtual image, attached to the cell output.
+
+        With ``save_state`` False the heavy interactive stack is not embedded, so
+        a reopened notebook (GitHub, nbviewer, cold Lab) would show nothing.
+        Attaching a static render of the virtual image (BF/ADF) - the widget's
+        primary 2D view, using its own colormap/scale via ``_render_virtual_rgb``
+        - means the reader still sees the sample. Returns None when no virtual
+        image is available yet (nothing to draw).
+        """
+        raw = self._get_virtual_image_array()
+        if raw is None or raw.size == 0 or not np.any(raw):
+            return None
+        import matplotlib
+        matplotlib.use("Agg", force=False)
+        import matplotlib.pyplot as plt
+        rgb, _ = self._render_virtual_rgb()
+        step = max(1, int(max(rgb.shape[0], rgb.shape[1]) // max_px))
+        rgb = rgb[::step, ::step]
+        fig, ax = plt.subplots(figsize=(3.2, 3.2))
+        ax.axis("off")
+        ax.imshow(rgb)
+        if self.title:
+            ax.set_title(self.title, fontsize=8)
+        fig.tight_layout(pad=0.2)
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", dpi=dpi, facecolor="white", bbox_inches="tight")
+        plt.close(fig)
+        return base64.b64encode(buf.getvalue()).decode("ascii")
+
+    def _repr_mimebundle_(self, **kwargs):
+        """Display bundle: interactive widget live, static PNG for cold reopen.
+
+        When ``save_state`` is False we add an ``image/png`` fallback to the
+        widget-view bundle. Live Jupyter renders the interactive widget (richest
+        mime); a kernel-less reopen falls back to the PNG. When ``save_state`` is
+        True the full state is embedded, so no static fallback is needed.
+        """
+        bundle = super()._repr_mimebundle_(**kwargs)
+        if getattr(self, "_save_state", False) or bundle is None:
+            return bundle
+        png = self._static_png_b64()
+        if png:
+            data = bundle[0] if isinstance(bundle, tuple) else bundle
+            data["image/png"] = png
+        return bundle
 
     def state_dict(self):
         return {
