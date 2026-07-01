@@ -650,7 +650,7 @@ function Show2D() {
   const [displayBinFactor] = useModelState<number>("_display_bin_factor");
   const [, setGpuMaxBufferMB] = useModelState<number>("_gpu_max_buffer_mb");
   const [cmap, setCmap] = useModelState<string>("cmap");
-  const [ncols] = useModelState<number>("ncols");
+  const [ncols, setNcols] = useModelState<number>("ncols");
 
   // Display options
   const [logScale, setLogScale] = useModelState<boolean>("log_scale");
@@ -724,6 +724,10 @@ function Show2D() {
   const selectedRoi = roiSelectedIdx >= 0 && roiSelectedIdx < (roiList?.length ?? 0) ? roiList[roiSelectedIdx] : null;
 
   const effectiveShowFft = showFft;
+  const galleryColumnOptions = React.useMemo(() => {
+    const maxCols = Math.max(1, nImages);
+    return Array.from({ length: maxCols }, (_, i) => i + 1);
+  }, [nImages]);
   React.useEffect(() => {
     if (!exportStatus) return;
     const preparing = exportStatus.startsWith("Preparing ") || exportStatus.startsWith("Exporting ");
@@ -1215,7 +1219,8 @@ function Show2D() {
     if (!hiddenPanelSet.has(selectedIdx)) return;
     setSelectedIdx(visibleImageIndices[0] ?? 0);
   }, [hiddenPanelSet, isGallery, selectedIdx, setSelectedIdx, visibleImageIndices]);
-  const effectiveNcols = Math.min(ncols, visibleImageCount) + diffPanelCount;
+  const clampedNcols = Math.max(1, Math.min(ncols || 1, visibleImageCount));
+  const effectiveNcols = clampedNcols + diffPanelCount;
   const diffOtherIndices = React.useMemo(
     () => Array.from({ length: nImages }, (_, i) => i).filter(i => i !== diffReference),
     [nImages, diffReference]
@@ -4286,6 +4291,35 @@ function Show2D() {
           <Stack direction="row" alignItems="center" spacing={`${SPACING.SM}px`} useFlexGap sx={{ mb: `${SPACING.XS}px`, minHeight: 28, flexWrap: "wrap", rowGap: `${SPACING.XS}px`, maxWidth: "100%", boxSizing: "border-box" }}>
             {(
               <>
+                {isGallery && (
+                  <>
+                    <Typography sx={{ ...typography.label, fontSize: 10 }}>Cols:</Typography>
+                    <Box
+                      component="select"
+                      value={clampedNcols}
+                      onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setNcols(Math.max(1, Math.min(Number(e.target.value) || 1, nImages)))}
+                      aria-label="Gallery columns"
+                      title="Number of gallery columns"
+                      sx={{
+                        minWidth: 48,
+                        height: 24,
+                        px: "6px",
+                        borderRadius: "4px",
+                        border: `1px solid ${themeColors.border}`,
+                        bgcolor: themeColors.controlBg,
+                        color: themeColors.text,
+                        fontSize: 10,
+                        flexShrink: 0,
+                        cursor: "pointer",
+                        "&:hover": { borderColor: themeColors.accent },
+                      }}
+                    >
+                      {galleryColumnOptions.map((cols) => (
+                        <option key={cols} value={cols}>{cols}</option>
+                      ))}
+                    </Box>
+                  </>
+                )}
                 <Typography sx={{ ...typography.label, fontSize: 10 }}>Profile:</Typography>
                 <Switch
                   checked={profileActive}

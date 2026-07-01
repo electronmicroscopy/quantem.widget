@@ -1,6 +1,7 @@
 import gzip
 
 import numpy as np
+import pytest
 
 from quantem.widget import Show2D, Show3D, Show3DSlices, Show4DSTEM
 
@@ -11,6 +12,20 @@ def test_show2d_panel_width_px_wins_over_size():
     widget = Show2D(data, ncols=13, panel_width_px=70, size=999, verbose=False)
 
     assert widget.size == 70
+
+
+def test_show2d_ncols_validates_and_roundtrips(tmp_path):
+    data = np.zeros((4, 8, 8), dtype=np.float32)
+
+    widget = Show2D(data, ncols=2, verbose=False)
+
+    assert widget.ncols == 2
+    assert widget.state_dict()["ncols"] == 2
+    out = widget.export_html(tmp_path / "show2d_ncols.html", encoding="full")
+    assert '"ncols": 2' in out.read_text()
+
+    with pytest.raises(ValueError, match="ncols"):
+        Show2D(data, ncols=0, verbose=False)
 
 
 def test_show3d_panel_width_px_sets_display_size_not_source_width():

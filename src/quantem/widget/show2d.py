@@ -184,7 +184,9 @@ class Show2D(anywidget.AnyWidget):
 
     >>> Show2D(np.random.rand(4096, 4096), size=800)
 
-    Per-panel display width for galleries:
+    Per-panel display width for galleries. Use ``ncols`` to choose an
+    intentional gallery shape, for example ``ncols=2`` for a 2×2 comparison
+    of four images or ``ncols=4`` for a single row:
 
     >>> Show2D(np.random.rand(13, 128, 128), ncols=13, panel_width_px=70)
 
@@ -364,6 +366,9 @@ class Show2D(anywidget.AnyWidget):
             raise ValueError(f"panel_width_px must be >= 0, got {panel_width_px}")
         if panel_width_px > 0:
             size = panel_width_px
+        ncols = int(ncols)
+        if ncols < 1:
+            raise ValueError(f"ncols must be >= 1, got {ncols}")
         gallery_gap_px = int(gallery_gap_px)
         if gallery_gap_px < 0:
             raise ValueError(f"gallery_gap_px must be >= 0, got {gallery_gap_px}")
