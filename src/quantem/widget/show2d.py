@@ -14,7 +14,7 @@ import pathlib
 import tempfile
 import warnings
 from enum import StrEnum
-from typing import Self
+from typing import Self, Sequence
 
 import anywidget
 import matplotlib
@@ -237,6 +237,11 @@ class Show2D(anywidget.AnyWidget):
     export_payload_id = traitlets.Unicode("").tag(sync=True)
     export_filename = traitlets.Unicode("").tag(sync=True)
     labels = traitlets.List(traitlets.Unicode()).tag(sync=True)
+    starred = traitlets.List(traitlets.Int()).tag(sync=True)
+    hidden_panels = traitlets.List(traitlets.Int(), default_value=[]).tag(sync=True)
+    show_panel_titles = traitlets.Bool(True).tag(sync=True)
+    panel_title_font_size = traitlets.Int(11).tag(sync=True)
+    gallery_gap_px = traitlets.Int(8).tag(sync=True)
     title = traitlets.Unicode("").tag(sync=True)
     cmap = traitlets.Unicode("inferno").tag(sync=True)
     ncols = traitlets.Int(3).tag(sync=True)
@@ -255,6 +260,7 @@ class Show2D(anywidget.AnyWidget):
     # Scale Bar
     # =========================================================================
     pixel_size = traitlets.Float(0.0).tag(sync=True)
+    pixel_sizes = traitlets.List(trait=traitlets.Float(), default_value=[]).tag(sync=True)
     pixel_unit = traitlets.Unicode("pixels").tag(sync=True)
     scale_bar_visible = traitlets.Bool(True).tag(sync=True)
     size = traitlets.Int(0).tag(sync=True)  # Canvas rendering size in CSS pixels; 0 = frontend default
@@ -338,7 +344,13 @@ class Show2D(anywidget.AnyWidget):
         diff_mode: bool = False,
         view_box: tuple | list | None = None,
         display_bin: int | str = "auto",
+        hidden_panels: Sequence[int | str] | int | str | None = None,
+        starred: Sequence[int | str] | int | str | None = None,
+        show_panel_titles: bool = True,
+        panel_title_font_size: int = 11,
+        gallery_gap_px: int = 8,
         state=None,
+        save_state: bool = False,
         **kwargs,
     ):
         import time as _time
@@ -352,6 +364,15 @@ class Show2D(anywidget.AnyWidget):
             raise ValueError(f"panel_width_px must be >= 0, got {panel_width_px}")
         if panel_width_px > 0:
             size = panel_width_px
+        gallery_gap_px = int(gallery_gap_px)
+        if gallery_gap_px < 0:
+            raise ValueError(f"gallery_gap_px must be >= 0, got {gallery_gap_px}")
+        # save_state controls whether the heavy pixel buffers are persisted into
+        # the notebook's metadata.widgets on save. Default False: a plain display
+        # embeds only light traits + a static PNG, so a 5-panel 4k gallery does
+        # not bake ~1 GB into the .ipynb. Set True to persist full interactive
+        # state so a reopened notebook restores the widget without a kernel.
+        self._save_state = bool(save_state)
         super().__init__(**kwargs)
         # hold_sync() batches ALL traitlet assignments into a single comm message
         # sent when the context manager exits.  Without this, each self.x = y
@@ -369,7 +390,10 @@ class Show2D(anywidget.AnyWidget):
                 zoom_row=zoom_row, zoom_col=zoom_col,
                 link_zoom=link_zoom, link_pan=link_pan, link_contrast=link_contrast,
                 diff_mode=diff_mode, view_box=view_box,
-                display_bin=display_bin, verbose=verbose, state=state, _t0=_t0)
+                display_bin=display_bin, hidden_panels=hidden_panels, starred=starred,
+                show_panel_titles=show_panel_titles, panel_title_font_size=panel_title_font_size,
+                gallery_gap_px=gallery_gap_px,
+                verbose=verbose, state=state, _t0=_t0)
 
     def _init_sync(self, *, data, labels, title, cmap, sampling, units,
                    scale_bar_visible, show_fft, fft_window,
@@ -377,7 +401,8 @@ class Show2D(anywidget.AnyWidget):
                    vmin, vmax,
                    ncols, size, smooth, zoom, zoom_row, zoom_col,
                    link_zoom, link_pan, link_contrast, diff_mode, view_box,
-                   display_bin, verbose, state, _t0):
+                   display_bin, hidden_panels, starred, show_panel_titles,
+                   panel_title_font_size, gallery_gap_px, verbose, state, _t0):
         import time as _time
         self._verbose = verbose
         self.widget_version = resolve_widget_version()
@@ -447,6 +472,15 @@ class Show2D(anywidget.AnyWidget):
             self.labels = [f"Image {i+1}" for i in range(self.n_images)]
         else:
             self.labels = list(labels)
+        self.starred = [0] * self.n_images
+        self.hidden_panels = []
+        self.show_panel_titles = bool(show_panel_titles)
+        self.panel_title_font_size = int(panel_title_font_size)
+        self.gallery_gap_px = int(gallery_gap_px)
+        if starred is not None:
+            self.set_starred_panels(starred)
+        if hidden_panels is not None:
+            self.set_hidden_panels(hidden_panels)
 
         # Options
         self.title = title
@@ -466,6 +500,7 @@ class Show2D(anywidget.AnyWidget):
         else:
             self.pixel_unit = str(units[-1])
         self.scale_bar_visible = scale_bar_visible
+        self.pixel_sizes = []
         self.size = size
         self.smooth = smooth
         # view_box sugar: sets zoom + zoom_row/col to center on box
@@ -581,6 +616,89 @@ class Show2D(anywidget.AnyWidget):
         self._init_py_elapsed_ms = (_time.perf_counter() - _t0) * 1000
         self.observe(self._on_first_render, names=["_js_rendered"])
         self.observe(self._on_export_request_change, names=["export_request"])
+
+    @traitlets.validate("starred")
+    def _validate_starred(self, proposal: dict) -> list[int]:
+        """Normalize per-image star flags."""
+        val = list(proposal["value"])
+        n_img = int(self.n_images)
+        if not val:
+            return [0] * n_img
+        if len(val) != n_img:
+            raise traitlets.TraitError(
+                f"starred length ({len(val)}) must equal n_images ({n_img})"
+            )
+        return [1 if int(v) else 0 for v in val]
+
+    @traitlets.validate("hidden_panels")
+    def _validate_hidden_panels(self, proposal: dict) -> list[int]:
+        """Normalize hidden image indices and keep at least one image visible."""
+        n_img = int(self.n_images)
+        clean: list[int] = []
+        seen: set[int] = set()
+        for value in proposal["value"]:
+            idx = int(value)
+            if 0 <= idx < n_img and idx not in seen:
+                clean.append(idx)
+                seen.add(idx)
+        clean.sort()
+        if len(clean) >= n_img:
+            raise traitlets.TraitError(
+                "hidden_panels cannot hide every panel; at least one panel must remain visible"
+            )
+        return clean
+
+    def _panel_title_for_index(self, panel: int) -> str:
+        """Return the user-facing label for a Show2D image panel."""
+        if 0 <= panel < len(self.labels) and self.labels[panel]:
+            return str(self.labels[panel])
+        return f"Image {panel + 1}"
+
+    def _resolve_panel_ref(self, panel: int | str) -> int:
+        """Resolve a panel index or exact label into a zero-based image index."""
+        if isinstance(panel, bool):
+            raise TypeError("panel must be an integer index or exact label, not bool")
+        if isinstance(panel, int):
+            idx = int(panel)
+            if 0 <= idx < int(self.n_images):
+                return idx
+            raise ValueError(f"panel index {idx} out of range [0, {self.n_images})")
+        if isinstance(panel, str):
+            titles = [self._panel_title_for_index(i) for i in range(int(self.n_images))]
+            matches = [i for i, title in enumerate(titles) if title == panel]
+            if len(matches) == 1:
+                return matches[0]
+            if len(matches) > 1:
+                raise ValueError(
+                    f"panel label {panel!r} is not unique; use a zero-based panel index instead"
+                )
+            available = ", ".join(repr(title) for title in titles)
+            raise ValueError(f"unknown panel label {panel!r}; available labels: {available}")
+        raise TypeError(
+            f"panel must be an integer index or exact label, got {type(panel).__name__}"
+        )
+
+    def _normalize_panel_refs(
+        self,
+        panels: Sequence[int | str] | int | str,
+        *,
+        allow_empty: bool = False,
+    ) -> list[int]:
+        """Resolve and de-duplicate image panel references."""
+        if isinstance(panels, (str, int)) and not isinstance(panels, bool):
+            values: Sequence[int | str] = [panels]
+        else:
+            values = panels  # type: ignore[assignment]
+        out: list[int] = []
+        seen: set[int] = set()
+        for panel in values:
+            idx = self._resolve_panel_ref(panel)
+            if idx not in seen:
+                out.append(idx)
+                seen.add(idx)
+        if not out and not allow_empty:
+            raise ValueError("at least one panel index or label is required")
+        return out
 
     def _on_first_render(self, change):
         import time as _time
@@ -772,6 +890,83 @@ class Show2D(anywidget.AnyWidget):
         plt.close(fig)
         return path
 
+    # Traits that carry the bulk pixel payload. Dropped from the saved-notebook
+    # snapshot when save_state is False so a plain display stays a few MB, not GB.
+    _UNSAVED_HEAVY_KEYS = ("frame_bytes", "export_payload")
+
+    def get_state(self, key=None, drop_defaults=False):
+        """Trait state for comm sync and notebook embedding.
+
+        ipywidgets calls this with ``key=None`` to snapshot the FULL state that
+        gets written into the saved notebook's ``metadata.widgets``. When
+        ``save_state`` is False we drop the heavy image buffers from that
+        snapshot, so a plain Show2D does not bake ~1 GB of pixels into the
+        .ipynb. Targeted syncs (``key`` is a name or set, used by hold_sync /
+        send_state during live rendering) are untouched, so the frontend still
+        receives ``frame_bytes`` normally. ``save_state=True`` embeds everything
+        so a reopened notebook restores the interactive widget without a kernel.
+        """
+        state = super().get_state(key=key, drop_defaults=drop_defaults)
+        if key is None and not getattr(self, "_save_state", False):
+            for heavy_key in self._UNSAVED_HEAVY_KEYS:
+                state.pop(heavy_key, None)
+        return state
+
+    def _static_png_b64(self, *, max_px: int = 320, dpi: int = 96) -> str | None:
+        """Base64 PNG grid of all panels, attached to the cell output.
+
+        With ``save_state`` False the interactive widget state is not embedded,
+        so a reopened notebook (GitHub, nbviewer, cold Lab) would show nothing.
+        Attaching a downsampled static render means the reader still sees how the
+        panels looked. Panels are stride-downsampled so this stays cheap on every
+        display (the cost of rendering full 4k here would dominate display time).
+        """
+        import base64
+        import io as _io
+        from matplotlib import colormaps
+        frames = getattr(self, "_data", None)
+        if frames is None or len(frames) == 0:
+            return None
+        cmap_fn = colormaps.get_cmap(self.cmap)
+        num = len(frames)
+        ncols = max(1, min(self.ncols, num))
+        nrows = (num + ncols - 1) // ncols
+        fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 2.4, nrows * 2.4),
+                                 squeeze=False)
+        for panel in range(nrows * ncols):
+            ax = axes[panel // ncols][panel % ncols]
+            ax.axis("off")
+            if panel >= num:
+                continue
+            frame = frames[panel]
+            step = max(1, int(max(frame.shape) // max_px))
+            normalized = self._normalize_frame(frame[::step, ::step])
+            ax.imshow(normalized, cmap=cmap_fn, vmin=0, vmax=255)
+            if self.labels and panel < len(self.labels) and self.labels[panel]:
+                ax.set_title(self.labels[panel], fontsize=8)
+        fig.tight_layout(pad=0.3)
+        buf = _io.BytesIO()
+        fig.savefig(buf, format="png", dpi=dpi, facecolor="white", bbox_inches="tight")
+        plt.close(fig)
+        return base64.b64encode(buf.getvalue()).decode("ascii")
+
+    def _repr_mimebundle_(self, **kwargs):
+        """Display bundle: interactive widget live, static PNG for cold reopen.
+
+        When ``save_state`` is False we add an ``image/png`` fallback to the
+        widget-view bundle. Live Jupyter renders the interactive widget (richest
+        mime); a kernel-less reopen falls back to the PNG. When ``save_state`` is
+        True the full state is embedded, so no static fallback is needed.
+        """
+        bundle = super()._repr_mimebundle_(**kwargs)
+        if getattr(self, "_save_state", False) or bundle is None:
+            return bundle
+        png = self._static_png_b64()
+        if png:
+            data = bundle[0] if isinstance(bundle, tuple) else bundle
+            data["image/png"] = png
+        return bundle
+
     def state_dict(self):
         return {
             "title": self.title,
@@ -780,11 +975,17 @@ class Show2D(anywidget.AnyWidget):
             "auto_contrast": self.auto_contrast,
             "vmin": self.vmin,
             "vmax": self.vmax,
+            "labels": list(self.labels),
+            "starred": list(self.starred),
+            "hidden_panels": list(self.hidden_panels),
+            "show_panel_titles": self.show_panel_titles,
+            "panel_title_font_size": self.panel_title_font_size,
             "show_stats": self.show_stats,
             "show_fft": self.show_fft,
             "fft_window": self.fft_window,
             "show_controls": self.show_controls,
             "pixel_size": self.pixel_size,
+            "pixel_sizes": list(self.pixel_sizes),
             "pixel_unit": self.pixel_unit,
             "scale_bar_visible": self.scale_bar_visible,
             "size": self.size,
@@ -1000,8 +1201,13 @@ class Show2D(anywidget.AnyWidget):
             link_pan=self.link_pan,
             link_contrast=self.link_contrast,
             diff_mode=self.diff_mode,
+            hidden_panels=list(self.hidden_panels),
+            starred=[i for i, value in enumerate(self.starred) if value],
+            show_panel_titles=self.show_panel_titles,
+            panel_title_font_size=self.panel_title_font_size,
             display_bin=1,
         )
+        clone.pixel_sizes = list(self.pixel_sizes)
         clone.load_state_dict(self.state_dict())
         clone.offline = quantized
         clone._export_light = True
@@ -1014,6 +1220,25 @@ class Show2D(anywidget.AnyWidget):
         return clone
 
     def load_state_dict(self, state):
+        state = dict(state)
+        if "starred" in state and isinstance(state["starred"], list) and len(state["starred"]) != int(self.n_images):
+            state.pop("starred")
+        if "hidden_panels" in state and isinstance(state["hidden_panels"], list):
+            n_img = int(self.n_images)
+            clean_set: set[int] = set()
+            for value in state["hidden_panels"]:
+                if isinstance(value, bool):
+                    continue
+                try:
+                    idx = int(value)
+                except (TypeError, ValueError):
+                    continue
+                if 0 <= idx < n_img:
+                    clean_set.add(idx)
+            clean = sorted(clean_set)
+            if len(clean) >= n_img:
+                clean = clean[:-1]
+            state["hidden_panels"] = clean
         for key, val in state.items():
             # Silent migrations for renamed keys in older saved state files.
             if key == "pixel_size_angstrom":
@@ -1025,6 +1250,78 @@ class Show2D(anywidget.AnyWidget):
                 continue
             if hasattr(self, key):
                 setattr(self, key, val)
+
+    @property
+    def visible_panels(self) -> list[int]:
+        """Zero-based image panel indices currently visible in the gallery."""
+        hidden = set(self.hidden_panels)
+        return [i for i in range(int(self.n_images)) if i not in hidden]
+
+    @property
+    def starred_panels(self) -> list[int]:
+        """Zero-based image panel indices marked with a star."""
+        return [i for i, value in enumerate(self.starred) if value]
+
+    def set_hidden_panels(self, panels: Sequence[int | str] | int | str) -> Self:
+        """Replace the hidden panel set by index or exact label.
+
+        Hidden panels remain in the widget state and standalone HTML export, but
+        they are collapsed from the gallery until restored. At least one panel
+        must stay visible.
+        """
+        hidden = self._normalize_panel_refs(panels, allow_empty=True)
+        if len(hidden) >= int(self.n_images):
+            raise ValueError("set_hidden_panels would hide every panel; leave at least one visible")
+        self.hidden_panels = sorted(hidden)
+        return self
+
+    def hide_panel(self, *panels: int | str) -> Self:
+        """Hide one or more image panels by zero-based index or exact label."""
+        to_hide = set(self.hidden_panels)
+        to_hide.update(self._normalize_panel_refs(list(panels)))
+        if len(to_hide) >= int(self.n_images):
+            raise ValueError("hide_panel would hide every panel; leave at least one visible")
+        self.hidden_panels = sorted(to_hide)
+        return self
+
+    def show_panel(self, *panels: int | str) -> Self:
+        """Restore one or more hidden image panels by zero-based index or exact label."""
+        to_show = set(self._normalize_panel_refs(list(panels)))
+        self.hidden_panels = sorted(set(self.hidden_panels) - to_show)
+        return self
+
+    def show_all_panels(self) -> Self:
+        """Restore every image panel in the gallery."""
+        self.hidden_panels = []
+        return self
+
+    def set_starred_panels(self, panels: Sequence[int | str] | int | str) -> Self:
+        """Replace the set of starred image panels by index or exact label."""
+        starred = [0] * int(self.n_images)
+        for idx in self._normalize_panel_refs(panels, allow_empty=True):
+            starred[idx] = 1
+        self.starred = starred
+        return self
+
+    def star_panel(self, panel: int | str) -> Self:
+        """Mark an image panel with a star."""
+        idx = self._resolve_panel_ref(panel)
+        starred = list(self.starred)
+        if len(starred) != int(self.n_images):
+            starred = [0] * int(self.n_images)
+        starred[idx] = 1
+        self.starred = starred
+        return self
+
+    def unstar_panel(self, panel: int | str) -> Self:
+        """Clear the star on an image panel."""
+        idx = self._resolve_panel_ref(panel)
+        starred = list(self.starred)
+        if len(starred) != int(self.n_images):
+            starred = [0] * int(self.n_images)
+        starred[idx] = 0
+        self.starred = starred
+        return self
 
     def summary(self):
         """Print a human-readable snapshot of the widget's current state.

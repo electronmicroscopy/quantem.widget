@@ -1166,6 +1166,7 @@ class Show3D(anywidget.AnyWidget):
         hideable: bool = False,
         offline: bool | None = None,
         state=None,
+        save_state: bool = False,
         max_cols: int | None = None,
         panel_gap: int | None = None,
         panel_title_font_size: int | None = None,
@@ -1226,6 +1227,13 @@ class Show3D(anywidget.AnyWidget):
         _t0 = time.perf_counter()
         # Reject unknown kwargs so typos raise instead of being silently ignored.
         _reject_unknown_kwargs(type(self), kwargs)
+        # save_state controls whether the heavy pixel buffers are persisted into
+        # the notebook's metadata.widgets on save. Default False: a plain display
+        # embeds only light traits + a static PNG, so a large z-stack does not
+        # bake hundreds of MB into the .ipynb. Set True to persist full
+        # interactive state so a reopened notebook restores the widget without a
+        # kernel.
+        self._save_state = bool(save_state)
         super().__init__(**kwargs)
         # hold_sync() batches ALL traitlet assignments into a single comm message
         # sent when the context manager exits.  Without this, each self.x = y
@@ -3797,6 +3805,98 @@ class Show3D(anywidget.AnyWidget):
         with self.hold_sync():
             self.auto_vmins = vmins
             self.auto_vmaxs = vmaxs
+
+    # Traits that carry the bulk pixel payload. Dropped from the saved-notebook
+    # snapshot when save_state is False so a plain display stays a few MB, not GB.
+    _UNSAVED_HEAVY_KEYS = (
+        "frame_bytes",
+        "_buffer_bytes",
+        "_offline_stack",
+        "_offline_float_stack",
+        "export_payload",
+    )
+
+    def get_state(self, key=None, drop_defaults=False):
+        """Trait state for comm sync and notebook embedding.
+
+        ipywidgets calls this with ``key=None`` to snapshot the FULL state that
+        gets written into the saved notebook's ``metadata.widgets``. When
+        ``save_state`` is False we drop the heavy frame buffers from that
+        snapshot, so a plain Show3D does not bake a hundreds-of-MB z-stack into
+        the .ipynb. Targeted syncs (``key`` is a name or set, used by hold_sync /
+        send_state during live streaming) are untouched, so the frontend still
+        receives ``frame_bytes`` / ``_buffer_bytes`` normally. ``save_state=True``
+        embeds everything so a reopened notebook restores the interactive widget
+        without a kernel.
+        """
+        state = super().get_state(key=key, drop_defaults=drop_defaults)
+        if key is None and not getattr(self, "_save_state", False):
+            for heavy_key in self._UNSAVED_HEAVY_KEYS:
+                state.pop(heavy_key, None)
+        return state
+
+    def _static_png_b64(self, *, max_px: int = 320, dpi: int = 96) -> str | None:
+        """Base64 PNG of a few evenly-spaced slices, attached to the cell output.
+
+        With ``save_state`` False the interactive widget state is not embedded,
+        so a reopened notebook (GitHub, nbviewer, cold Lab) would show nothing.
+        Attaching a downsampled static render of a handful of slices means the
+        reader still sees the stack. Slices are stride-downsampled so this stays
+        cheap on every display (rendering the full-res stack here would dominate
+        display time).
+        """
+        import base64
+        import io as _io
+        import matplotlib.pyplot as plt
+        from matplotlib import colormaps
+        frames = getattr(self, "_data", None)
+        if frames is None or len(frames) == 0:
+            return None
+        cmap_fn = colormaps.get_cmap(self.cmap)
+        num = int(frames.shape[0])
+        # Show up to 6 evenly-spaced slices so a scrubbed stack reads as a stack,
+        # not a single frame. A 1-slice stack just shows that slice.
+        count = min(6, num)
+        slice_indices = np.unique(np.linspace(0, num - 1, count).round().astype(int))
+        count = len(slice_indices)
+        ncols = min(3, count)
+        nrows = (count + ncols - 1) // ncols
+        fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 2.4, nrows * 2.4),
+                                 squeeze=False)
+        for cell in range(nrows * ncols):
+            ax = axes[cell // ncols][cell % ncols]
+            ax.axis("off")
+            if cell >= count:
+                continue
+            idx = int(slice_indices[cell])
+            frame = frames[idx]
+            step = max(1, int(max(frame.shape) // max_px))
+            normalized = self._normalize_frame(frame[::step, ::step])
+            ax.imshow(normalized, cmap=cmap_fn, vmin=0, vmax=255)
+            if count > 1:
+                ax.set_title(f"{self.dim_label} {idx}", fontsize=8)
+        fig.tight_layout(pad=0.3)
+        buf = _io.BytesIO()
+        fig.savefig(buf, format="png", dpi=dpi, facecolor="white", bbox_inches="tight")
+        plt.close(fig)
+        return base64.b64encode(buf.getvalue()).decode("ascii")
+
+    def _repr_mimebundle_(self, **kwargs):
+        """Display bundle: interactive widget live, static PNG for cold reopen.
+
+        When ``save_state`` is False we add an ``image/png`` fallback to the
+        widget-view bundle. Live Jupyter renders the interactive widget (richest
+        mime); a kernel-less reopen falls back to the PNG. When ``save_state`` is
+        True the full state is embedded, so no static fallback is needed.
+        """
+        bundle = super()._repr_mimebundle_(**kwargs)
+        if getattr(self, "_save_state", False) or bundle is None:
+            return bundle
+        png = self._static_png_b64()
+        if png:
+            data = bundle[0] if isinstance(bundle, tuple) else bundle
+            data["image/png"] = png
+        return bundle
 
     def _get_color_range(self, frame: np.ndarray) -> tuple[float, float]:
         """Get vmin/vmax based on current settings."""
