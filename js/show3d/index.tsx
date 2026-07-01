@@ -1521,6 +1521,14 @@ function Show3D() {
       setExportBusy(false);
     }
   }, [exportStatus]);
+  React.useEffect(() => {
+    if (!localExportStatus || exportBusy) return;
+    if (localExportStatus.startsWith("Preparing ") || localExportStatus.startsWith("Saving ")) return;
+    const id = window.setTimeout(() => {
+      setLocalExportStatus((current) => current === localExportStatus ? "" : current);
+    }, 5000);
+    return () => window.clearTimeout(id);
+  }, [localExportStatus, exportBusy]);
   const voxelCount = Math.max(0, Math.floor(nSlices) * Math.floor(height) * Math.floor(width));
   const exactExportSize = formatEstimatedHtmlSize(voxelCount * 4);
   const quantizedExportSize = formatEstimatedHtmlSize(voxelCount);
