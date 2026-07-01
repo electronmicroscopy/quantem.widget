@@ -4,6 +4,51 @@ These notes capture interaction bugs that were easy to misread while building
 the widgets. Keep this page short and practical: it should explain what went
 wrong, how to recognize the pattern, and what to do instead.
 
+## Mistake log: Show3D cursor readout pop
+
+Date: 2026-06-30
+
+Symptom: the Show3D cursor readout showed correct row, column, and value text,
+but it felt "poppy" during fast mouse movement over multi-panel images. The
+label appeared to flash or jump even though the image interaction itself was
+working.
+
+What was wrong:
+
+- Mousemove events updated React state directly for every pointer event.
+- The cursor readout mounted and unmounted as the pointer crossed valid and
+  invalid image regions.
+- The label width changed with each row, column, and formatted value, making
+  the overlay feel unstable even when the coordinates were correct.
+- The bug is a visual performance problem, not a numerical correctness problem,
+  so unit tests alone would not catch it.
+
+Fix:
+
+- Route cursor readout updates through `requestAnimationFrame` so rapid pointer
+  events collapse to at most one visual update per frame.
+- Keep the overlay DOM stable while the cursor is active, and fade it with
+  `opacity` / `transform` transitions instead of relying on mount/unmount.
+- Use tabular numeric text and a minimum label width so value changes do not
+  resize the label every frame.
+- Keep pointer overlays `pointer-events: none` unless the user is deliberately
+  interacting with the overlay control.
+- Drive the widget in standalone HTML or Jupyter and move quickly across the
+  canvas before calling the interaction smooth.
+
+Rule for future cursor and hover UI:
+
+- Treat cursor labels, value readouts, drag hints, hover controls, and ROI
+  handles as high-frequency UI.
+- Do not update React state on every raw `mousemove` or `touchmove` when the
+  update is only for a visual overlay.
+- Prefer refs plus `requestAnimationFrame` for the preview path, then commit
+  stable widget state only when needed.
+- Avoid popping overlays in and out of the DOM. Keep one stable element when
+  possible and animate opacity or transform.
+- If an overlay is hidden, make sure it does not steal pointer events from the
+  scientific image underneath.
+
 ## Mistake log: ShowEDS band center drag
 
 Date: 2026-06-27
