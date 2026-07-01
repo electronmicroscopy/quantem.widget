@@ -32,6 +32,8 @@ Common entry points:
 | Tutorial | Colab | Source notebook |
 |---|---|---|
 | Example Data | [Open in Colab](https://colab.research.google.com/github/bobleesj/quantem.widget/blob/main/docs/tutorials/download_data.ipynb) | [GitHub](https://github.com/bobleesj/quantem.widget/blob/main/docs/tutorials/download_data.ipynb) |
+| Folder survey | [Open in Colab](https://colab.research.google.com/github/bobleesj/quantem.widget/blob/main/docs/tutorials/survey.ipynb) | [GitHub](https://github.com/bobleesj/quantem.widget/blob/main/docs/tutorials/survey.ipynb) |
+| FOV survey | [Open in Colab](https://colab.research.google.com/github/bobleesj/quantem.widget/blob/main/docs/tutorials/survey_fov.ipynb) | [GitHub](https://github.com/bobleesj/quantem.widget/blob/main/docs/tutorials/survey_fov.ipynb) |
 | Show2D | [Open in Colab](https://colab.research.google.com/github/bobleesj/quantem.widget/blob/main/docs/tutorials/show2d.ipynb) | [GitHub](https://github.com/bobleesj/quantem.widget/blob/main/docs/tutorials/show2d.ipynb) |
 | Show3D | [Open in Colab](https://colab.research.google.com/github/bobleesj/quantem.widget/blob/main/docs/tutorials/show3d.ipynb) | [GitHub](https://github.com/bobleesj/quantem.widget/blob/main/docs/tutorials/show3d.ipynb) |
 | Show3DSlices | [Open in Colab](https://colab.research.google.com/github/bobleesj/quantem.widget/blob/main/docs/tutorials/show3dslices.ipynb) | [GitHub](https://github.com/bobleesj/quantem.widget/blob/main/docs/tutorials/show3dslices.ipynb) |

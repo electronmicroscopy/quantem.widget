@@ -5,7 +5,7 @@ Interactive, GPU-aware Python widgets for electron microscopy, built on
 JupyterLab, VS Code, or Colab.
 
 ```python
-from quantem.widget import Show2D, Show3D, Show3DSlices, Show4DSTEM, ShowEDS, ShowDiffraction, load
+from quantem.widget import Show2D, Show3D, Show3DSlices, Show4DSTEM, ShowEDS, ShowDiffraction, load, survey
 ```
 
 ## Quickest start: no notebook needed
@@ -45,8 +45,9 @@ detector at load (`det_bin`) to cut memory and speed first paint - see
 | `Show4DSTEM` | 4D-STEM: live virtual detectors over the diffraction stack | [tutorial](tutorials/show4dstem) · [API](api/show4dstem) |
 | `ShowEDS` | Experimental EDS/EELS spectrum image: linked element map, spectrum, energy band, and ROI | [tutorial](tutorials/showeds) · [API](api/showeds) |
 | `ShowDiffraction` | 2D/3D diffraction d-spacing: Bragg spots, rings, center finding, k calibration | [tutorial](tutorials/showdiffraction) · [API](api/showdiffraction) |
+| `survey` | Folder-level microscopy survey: HAADF/STEM thumbnails, EDS launchers, FOV grouping, and curation state | [tutorial](tutorials/survey) · [FOV tutorial](tutorials/survey_fov) |
 
-The [Tutorials](tutorials/show2d) walk through each widget on real public data
+The [Tutorials](tutorials/survey) start with folder survey workflows and then walk through each widget on real public data
 where practical, with compact synthetic data only where it keeps an example
 portable. They also show how to [save and share widget exports](tutorials/widget_export). The [API reference](api/index)
 documents every parameter, method, and interactive control (and doubles as a
