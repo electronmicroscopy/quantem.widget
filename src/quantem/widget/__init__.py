@@ -21,6 +21,7 @@ from quantem.widget.show3dslices import Show3DSlices
 from quantem.widget.showeds import ShowEDS, SpectrumImage, bin_spectrum_image, load_eds, load_emd_spectrum_image
 from quantem.widget.show4dstem import Show4DSTEM as _Show4DSTEMBase
 from quantem.widget.showdiffraction import ShowDiffraction
+from quantem.widget.survey import FolderSurvey, survey
 from quantem.widget.io import load
 from quantem.widget.export import (
     HTML_EXPORT_TRAITS,
@@ -213,11 +214,13 @@ __all__ = [
     "Show4DSTEM",
     "ShowDiffraction",
     "ShowEDS",
+    "FolderSurvey",
     "SpectrumImage",
     "bin_spectrum_image",
     "load_eds",
     "load_emd_spectrum_image",
     "load",
+    "survey",
     "HTML_EXPORT_TRAITS",
     "SupportsFrontendHtmlExport",
     "SupportsHtmlExport",
