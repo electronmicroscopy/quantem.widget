@@ -350,6 +350,11 @@ class Show3D(anywidget.AnyWidget):
     -----
     - The stack is loaded once into ``self._data`` (``float32``); ``set_image``
       replaces the data without rebuilding the widget.
+    - For live acquisitions or reconstruction loops where the stack grows over
+      time, construct the widget with ``offline=False`` before calling
+      ``set_image``. Small initial stacks can otherwise use the saved/offline
+      notebook representation, which is meant for static notebook state and
+      standalone exports rather than streaming new frames.
     - When the stack is large (>32 MB per frame), an internal display copy is
       binned for faster scrubbing; full-resolution data is kept for stats,
       ROIs, FFT, profiles, and direct image saving.
@@ -1680,6 +1685,10 @@ class Show3D(anywidget.AnyWidget):
         - Prefer ``set_image`` over constructing a new ``Show3D`` when iterating
           through datasets in the same cell: it avoids re-creating the canvas
           and preserves the operator's contrast / zoom / cmap state.
+        - For live stack growth, instantiate the widget with ``offline=False``:
+          ``w = Show3D(first_frame[None], offline=False)``. Then append frames
+          with ``w.set_image(np.stack(frames))`` and set
+          ``w.slice_idx = len(frames) - 1`` to jump to the newest frame.
         - The new stack is cast to ``float32``. If float64 input contains values
           outside ``float32`` range, an error is raised (silent overflow to
           ``inf`` would corrupt stats).
