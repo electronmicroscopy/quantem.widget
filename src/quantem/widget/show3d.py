@@ -3547,6 +3547,8 @@ class Show3D(anywidget.AnyWidget):
         clone.frame_server_url = ""
         clone._buffer_bytes = b""
         clone._export_light = True
+        clone._save_state = True  # export clones must embed the offline stack;
+        # get_state() drops _offline_*_stack when _save_state is False (notebook-metadata guard).
         return clone
 
     def _start_frame_server(self) -> None:
