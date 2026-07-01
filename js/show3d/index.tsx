@@ -7514,7 +7514,7 @@ function Show3D() {
     const rect = canvas.getBoundingClientRect();
     const mouseX = (e.clientX - rect.left) * (canvas.width / rect.width);
     const mouseY = (e.clientY - rect.top) * (canvas.height / rect.height);
-    const zoomFactor = e.deltaY > 0 ? 0.9 : 1.1;
+    const zoomFactor = Math.max(0.75, Math.min(1.35, Math.exp(-e.deltaY * 0.002)));
     const newZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, fftZoom * zoomFactor));
     const zoomRatio = newZoom / fftZoom;
     const panelGrid = fftPanelGridRef.current;
