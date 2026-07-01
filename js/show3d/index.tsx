@@ -81,13 +81,7 @@ const typography = {
   value: { fontSize: 10, fontFamily: UI_FONT },
   title: { fontWeight: "bold" as const },
 };
-const FFT_OVERLAY_POSITION_LABELS = {
-  "top-left": "Top left",
-  "top-right": "Top right",
-  "bottom-left": "Bottom left",
-  "bottom-right": "Bottom right",
-} as const;
-type FftOverlayPosition = keyof typeof FFT_OVERLAY_POSITION_LABELS;
+type FftOverlayPosition = "top-left" | "top-right" | "bottom-left" | "bottom-right";
 
 // ============================================================================
 // Inlined utilities (matches Show2D/Show4DSTEM single-file convention)
@@ -8780,21 +8774,6 @@ function Show3D() {
               )}
               {showFft && fftLayoutOverlay && (
                 <>
-                  <Typography sx={{ ...typography.label, fontSize: 10, ml: "2px" }}>Pos</Typography>
-                  <Select
-                    value={resolvedFftOverlayPosition}
-                    onChange={(e) => setFftOverlayPosition(String(e.target.value))}
-                    size="small"
-                    sx={{ ...themedSelect, minWidth: 82, fontSize: 10, ml: "2px" }}
-                    MenuProps={themedMenuProps}
-                    inputProps={{ "aria-label": "FFT overlay position" }}
-                    renderValue={(value) => FFT_OVERLAY_POSITION_LABELS[value as FftOverlayPosition]}
-                  >
-                    <MenuItem value="top-left">Top left</MenuItem>
-                    <MenuItem value="top-right">Top right</MenuItem>
-                    <MenuItem value="bottom-left">Bottom left</MenuItem>
-                    <MenuItem value="bottom-right">Bottom right</MenuItem>
-                  </Select>
                   <Typography sx={{ ...typography.label, fontSize: 10, ml: "2px" }}>Size</Typography>
                   <Select
                     value={String(Math.round(resolvedFftOverlaySize * 100))}
