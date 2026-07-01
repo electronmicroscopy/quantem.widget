@@ -361,6 +361,27 @@ def test_showdiffraction_export(tmp_path):
     assert len(payload["measurements"]) == 2
 
 
+def test_showdiffraction_measurements_from_state(tmp_path):
+    # The saved state holds every spot and ring, so the measurement table is
+    # rebuildable from it alone -- no separate export file needs to be kept.
+    w = ShowDiffraction(
+        _disk_dp(), k_pixel_size=0.05, spot_refine=False, center=(32, 32), bf_radius=3, verbose=False
+    )
+    w.set_center(32, 32)
+    w.add_spot(32, 42)
+    w.add_ring(20.0)
+
+    state_path = tmp_path / "state.json"
+    w.save(state_path)
+
+    records = ShowDiffraction.measurements_from_state(state_path)
+    assert [r["kind"] for r in records] == ["spot", "ring"]
+    assert records == w._measurement_records()
+
+    csv_path = ShowDiffraction.measurements_from_state(state_path, tmp_path / "from_state.csv")
+    assert csv_path.read_text() == w.export_measurements(tmp_path / "live.csv").read_text()
+
+
 def test_showdiffraction_center_mode_validator():
     w = ShowDiffraction(_disk_dp(), verbose=False)
     w.center_mode = "manual"
