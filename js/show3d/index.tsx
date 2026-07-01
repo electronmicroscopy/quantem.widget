@@ -2958,9 +2958,6 @@ function Show3D() {
   }, [canvasW, canvasH, panelGapTrait]);
   const drawFftOffscreen = React.useCallback((ctx: CanvasRenderingContext2D, offscreen: HTMLCanvasElement) => {
     ctx.clearRect(0, 0, canvasW, canvasH);
-    ctx.save();
-    ctx.translate(fftPanX, fftPanY);
-    ctx.scale(fftZoom, fftZoom);
     const grid = fftPanelGridRef.current;
     if (grid) {
       ctx.fillStyle = themeColors.bg;
@@ -2972,23 +2969,33 @@ function Show3D() {
         const srcY = srcRow * grid.panelHeight;
         const dst = getFftSlot(slot, grid.count, grid.cols, grid.rows);
         ctx.imageSmoothingEnabled = grid.panelWidth < dst.w || grid.panelHeight < dst.h;
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(dst.x, dst.y, dst.w, dst.h);
+        ctx.clip();
+        ctx.translate(dst.x + fftPanX, dst.y + fftPanY);
+        ctx.scale(fftZoom, fftZoom);
         ctx.drawImage(
           offscreen,
           srcX,
           srcY,
           grid.panelWidth,
           grid.panelHeight,
-          dst.x,
-          dst.y,
+          0,
+          0,
           dst.w,
           dst.h,
         );
+        ctx.restore();
       }
     } else {
+      ctx.save();
+      ctx.translate(fftPanX, fftPanY);
+      ctx.scale(fftZoom, fftZoom);
       ctx.imageSmoothingEnabled = offscreen.width < canvasW || offscreen.height < canvasH;
       ctx.drawImage(offscreen, 0, 0, canvasW, canvasH);
+      ctx.restore();
     }
-    ctx.restore();
   }, [canvasW, canvasH, fftPanX, fftPanY, fftZoom, getFftSlot, themeColors.bg]);
   const panelGlobalColOffset = (panelIdx: number) => (totalPanelCount > 1 && !sharedPanelSource) ? panelIdx * sourcePanelWidth : 0;
   const panelLocalCol = (globalCol: number, panelIdx: number) => globalCol - panelGlobalColOffset(panelIdx);
@@ -6535,8 +6542,8 @@ function Show3D() {
         const dst = getFftSlot(slot, panelGrid.count, panelGrid.cols, panelGrid.rows);
         const localCol = fftClickInfo.col - (slot % panelGrid.cols) * panelGrid.panelWidth;
         const localRow = fftClickInfo.row - Math.floor(slot / panelGrid.cols) * panelGrid.panelHeight;
-        screenX = fftPanX + fftZoom * (dst.x + (localCol / panelGrid.panelWidth) * dst.w);
-        screenY = fftPanY + fftZoom * (dst.y + (localRow / panelGrid.panelHeight) * dst.h);
+        screenX = dst.x + fftPanX + fftZoom * ((localCol / panelGrid.panelWidth) * dst.w);
+        screenY = dst.y + fftPanY + fftZoom * ((localRow / panelGrid.panelHeight) * dst.h);
       }
       ctx.strokeStyle = "rgba(255, 255, 255, 0.9)";
       ctx.shadowColor = "rgba(0, 0, 0, 0.6)";
@@ -7500,6 +7507,8 @@ function Show3D() {
   const [fftPanStart, setFftPanStart] = React.useState<{ x: number, y: number, pX: number, pY: number } | null>(null);
 
   const handleFftWheel = (e: React.WheelEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
     const canvas = fftCanvasRef.current;
     if (!canvas) return;
     const rect = canvas.getBoundingClientRect();
@@ -7508,6 +7517,19 @@ function Show3D() {
     const zoomFactor = e.deltaY > 0 ? 0.9 : 1.1;
     const newZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, fftZoom * zoomFactor));
     const zoomRatio = newZoom / fftZoom;
+    const panelGrid = fftPanelGridRef.current;
+    if (panelGrid) {
+      for (let slot = 0; slot < panelGrid.count; slot++) {
+        const dst = getFftSlot(slot, panelGrid.count, panelGrid.cols, panelGrid.rows);
+        if (mouseX < dst.x || mouseX >= dst.x + dst.w || mouseY < dst.y || mouseY >= dst.y + dst.h) continue;
+        const localX = mouseX - dst.x;
+        const localY = mouseY - dst.y;
+        setFftZoom(newZoom);
+        setFftPanX(localX - (localX - fftPanX) * zoomRatio);
+        setFftPanY(localY - (localY - fftPanY) * zoomRatio);
+        return;
+      }
+    }
     setFftZoom(newZoom);
     setFftPanX(mouseX - (mouseX - fftPanX) * zoomRatio);
     setFftPanY(mouseY - (mouseY - fftPanY) * zoomRatio);
@@ -7524,17 +7546,18 @@ function Show3D() {
     const mouseY = (e.clientY - rect.top) * scaleY;
     const fftW = fftCropDims?.fftWidth ?? width;
     const fftH = fftCropDims?.fftHeight ?? height;
-    const localX = (mouseX - fftPanX) / fftZoom;
-    const localY = (mouseY - fftPanY) / fftZoom;
     const panelGrid = fftPanelGridRef.current;
     if (panelGrid) {
       for (let slot = 0; slot < panelGrid.count; slot++) {
         const dst = getFftSlot(slot, panelGrid.count, panelGrid.cols, panelGrid.rows);
-        if (localX < dst.x || localX >= dst.x + dst.w || localY < dst.y || localY >= dst.y + dst.h) continue;
+        if (mouseX < dst.x || mouseX >= dst.x + dst.w || mouseY < dst.y || mouseY >= dst.y + dst.h) continue;
+        const localX = (mouseX - dst.x - fftPanX) / fftZoom;
+        const localY = (mouseY - dst.y - fftPanY) / fftZoom;
+        if (localX < 0 || localX >= dst.w || localY < 0 || localY >= dst.h) return null;
         const srcCol = slot % panelGrid.cols;
         const srcRow = Math.floor(slot / panelGrid.cols);
-        const tileX = ((localX - dst.x) / Math.max(1, dst.w)) * panelGrid.panelWidth;
-        const tileY = ((localY - dst.y) / Math.max(1, dst.h)) * panelGrid.panelHeight;
+        const tileX = (localX / Math.max(1, dst.w)) * panelGrid.panelWidth;
+        const tileY = (localY / Math.max(1, dst.h)) * panelGrid.panelHeight;
         return {
           col: srcCol * panelGrid.panelWidth + Math.max(0, Math.min(panelGrid.panelWidth - 1, tileX)),
           row: srcRow * panelGrid.panelHeight + Math.max(0, Math.min(panelGrid.panelHeight - 1, tileY)),
@@ -7542,6 +7565,8 @@ function Show3D() {
       }
       return null;
     }
+    const localX = (mouseX - fftPanX) / fftZoom;
+    const localY = (mouseY - fftPanY) / fftZoom;
     const imgCol = localX / canvasW * fftW;
     const imgRow = localY / canvasH * fftH;
     if (imgCol >= 0 && imgCol < fftW && imgRow >= 0 && imgRow < fftH) {
