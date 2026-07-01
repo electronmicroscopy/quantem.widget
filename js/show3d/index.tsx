@@ -8534,88 +8534,49 @@ function Show3D() {
               <Typography sx={{ ...typography.label, fontSize: 10 }}>FFT</Typography>
               <Switch checked={showFft} onChange={(e) => { const on = e.target.checked; setShowFft(on); if (on) setShowKymograph(false); }} size="small" sx={switchStyles.small} slotProps={{ input: { "aria-label": "Toggle FFT power spectrum panel" } }} />
               {showFft && (
-                <Box
-                  component="select"
+                <Select
                   value={resolvedFftLayout}
-                  onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setFftLayout(e.target.value)}
-                  aria-label="FFT panel layout"
-                  sx={{
-                    minWidth: 78,
-                    height: 24,
-                    ml: "2px",
-                    px: "8px",
-                    borderRadius: "4px",
-                    border: `1px solid ${themeColors.border}`,
-                    bgcolor: themeColors.controlBg,
-                    color: themeColors.text,
-                    fontFamily: UI_FONT,
-                    fontSize: 10,
-                    flexShrink: 0,
-                    cursor: "pointer",
-                    "&:hover": { borderColor: themeColors.accent },
-                  }}
+                  onChange={(e) => setFftLayout(String(e.target.value))}
+                  size="small"
+                  sx={{ ...themedSelect, minWidth: 78, fontSize: 10, ml: "2px" }}
+                  MenuProps={themedMenuProps}
+                  inputProps={{ "aria-label": "FFT panel layout" }}
                 >
-                  <option value="bottom">Bottom</option>
-                  <option value="right">Right</option>
-                  <option value="overlay">Overlay</option>
-                </Box>
+                  <MenuItem value="bottom">Bottom</MenuItem>
+                  <MenuItem value="right">Right</MenuItem>
+                  <MenuItem value="overlay">Overlay</MenuItem>
+                </Select>
               )}
               {showFft && fftLayoutOverlay && (
                 <>
                   <Typography sx={{ ...typography.label, fontSize: 10, ml: "2px" }}>Pos</Typography>
-                  <Box
-                    component="select"
+                  <Select
                     value={resolvedFftOverlayPosition}
-                    onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setFftOverlayPosition(e.target.value)}
-                    aria-label="FFT overlay position"
-                    sx={{
-                      minWidth: 48,
-                      height: 24,
-                      ml: "2px",
-                      px: "6px",
-                      borderRadius: "4px",
-                      border: `1px solid ${themeColors.border}`,
-                      bgcolor: themeColors.controlBg,
-                      color: themeColors.text,
-                      fontFamily: UI_FONT,
-                      fontSize: 10,
-                      flexShrink: 0,
-                      cursor: "pointer",
-                      "&:hover": { borderColor: themeColors.accent },
-                    }}
+                    onChange={(e) => setFftOverlayPosition(String(e.target.value))}
+                    size="small"
+                    sx={{ ...themedSelect, minWidth: 48, fontSize: 10, ml: "2px" }}
+                    MenuProps={themedMenuProps}
+                    inputProps={{ "aria-label": "FFT overlay position" }}
                   >
-                    <option value="top-left">TL</option>
-                    <option value="top-right">TR</option>
-                    <option value="bottom-left">BL</option>
-                    <option value="bottom-right">BR</option>
-                  </Box>
+                    <MenuItem value="top-left">TL</MenuItem>
+                    <MenuItem value="top-right">TR</MenuItem>
+                    <MenuItem value="bottom-left">BL</MenuItem>
+                    <MenuItem value="bottom-right">BR</MenuItem>
+                  </Select>
                   <Typography sx={{ ...typography.label, fontSize: 10, ml: "2px" }}>Size</Typography>
-                  <Box
-                    component="select"
+                  <Select
                     value={String(Math.round(resolvedFftOverlaySize * 100))}
-                    onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setFftOverlaySize(Number(e.target.value) / 100)}
-                    aria-label="FFT overlay size"
-                    sx={{
-                      minWidth: 52,
-                      height: 24,
-                      ml: "2px",
-                      px: "6px",
-                      borderRadius: "4px",
-                      border: `1px solid ${themeColors.border}`,
-                      bgcolor: themeColors.controlBg,
-                      color: themeColors.text,
-                      fontFamily: UI_FONT,
-                      fontSize: 10,
-                      flexShrink: 0,
-                      cursor: "pointer",
-                      "&:hover": { borderColor: themeColors.accent },
-                    }}
+                    onChange={(e) => setFftOverlaySize(Number(e.target.value) / 100)}
+                    size="small"
+                    sx={{ ...themedSelect, minWidth: 52, fontSize: 10, ml: "2px" }}
+                    MenuProps={themedMenuProps}
+                    inputProps={{ "aria-label": "FFT overlay size" }}
                   >
-                    <option value="25">25%</option>
-                    <option value="35">35%</option>
-                    <option value="50">50%</option>
-                    <option value="65">65%</option>
-                  </Box>
+                    <MenuItem value="25">25%</MenuItem>
+                    <MenuItem value="35">35%</MenuItem>
+                    <MenuItem value="50">50%</MenuItem>
+                    <MenuItem value="65">65%</MenuItem>
+                  </Select>
                 </>
               )}
             </>}
