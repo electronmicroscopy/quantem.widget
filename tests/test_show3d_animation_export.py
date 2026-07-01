@@ -249,3 +249,36 @@ def test_show3d_animation_export_rejects_unknown_quality() -> None:
 
     assert widget.export_status.startswith("Export failed:")
     assert "animation quality" in widget.export_status
+
+
+def test_show3d_save_animation_preview_writes_media_and_repr(
+    tmp_path: pathlib.Path,
+    monkeypatch,
+) -> None:
+    def fake_write_mp4(frames, path, fps, *, crf=18):
+        path = pathlib.Path(path)
+        path.write_bytes(b"mp4")
+        return path
+
+    monkeypatch.setattr(gif_utils, "write_mp4", fake_write_mp4)
+    widget = Show3D(
+        _stack(),
+        show_controls=False,
+        show_scale_bar=False,
+        show_panel_titles=False,
+    )
+
+    preview = widget.save_animation_preview(
+        tmp_path,
+        stem="native_preview",
+        quality="low",
+    )
+
+    assert set(preview.paths) == {"GIF low", "MP4 low"}
+    assert (tmp_path / "native_preview.gif").exists()
+    assert (tmp_path / "native_preview.mp4").read_bytes() == b"mp4"
+    html = preview._repr_html_()
+    assert "native_preview.gif" in html
+    assert "native_preview.mp4" in html
+    assert "<img" in html
+    assert "<video" in html

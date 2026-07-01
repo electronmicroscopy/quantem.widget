@@ -7,6 +7,7 @@ Includes playback controls, statistics, ROI selection, FFT, and more.
 
 import base64
 import gc
+import html
 import http.server
 import io
 import json
@@ -52,6 +53,72 @@ try:
 except ImportError:
     torch = None  # type: ignore[assignment]
     _HAS_TORCH = False
+
+
+class AnimationExportPreview:
+    """Notebook-displayable result from Show3D animation exports."""
+
+    def __init__(self, paths: Mapping[str, pathlib.Path]):
+        self.paths = {str(label): pathlib.Path(path) for label, path in paths.items()}
+
+    def __repr__(self) -> str:
+        entries = ", ".join(f"{label}={path}" for label, path in self.paths.items())
+        return f"AnimationExportPreview({entries})"
+
+    def _repr_html_(self) -> str:
+        cards: list[str] = []
+        for label, path in self.paths.items():
+            suffix = path.suffix.lower()
+            src = self._html_src(path)
+            escaped_label = html.escape(label)
+            escaped_src = html.escape(src, quote=True)
+            size = self._format_size(path)
+            if suffix == ".gif":
+                media = (
+                    f'<img src="{escaped_src}" alt="{escaped_label}" '
+                    'style="display:block;max-width:100%;border:1px solid #444;background:#111">'
+                )
+            elif suffix == ".mp4":
+                media = (
+                    f'<video src="{escaped_src}" controls muted loop '
+                    'style="display:block;max-width:100%;border:1px solid #444;background:#111"></video>'
+                )
+            else:
+                media = f'<a href="{escaped_src}">{html.escape(path.name)}</a>'
+            cards.append(
+                "<section>"
+                f'<h4 style="margin:0 0 4px;font:600 13px system-ui,sans-serif">{escaped_label}</h4>'
+                f"{media}"
+                f'<div style="margin-top:4px;color:#555;font:12px system-ui,sans-serif">{html.escape(size)}</div>'
+                "</section>"
+            )
+        return (
+            '<div class="show3d-animation-export-preview" '
+            'style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,max-content));'
+            'gap:16px;align-items:start">'
+            + "".join(cards)
+            + "</div>"
+        )
+
+    @staticmethod
+    def _format_size(path: pathlib.Path) -> str:
+        size = path.stat().st_size
+        mb = size / (1024 * 1024)
+        if mb >= 10:
+            return f"{mb:.1f} MB"
+        if mb >= 1:
+            return f"{mb:.2f} MB"
+        return f"{size / 1024:.1f} KB"
+
+    @staticmethod
+    def _html_src(path: pathlib.Path) -> str:
+        try:
+            rel = os.path.relpath(path, pathlib.Path.cwd())
+            if not rel.startswith(".."):
+                return pathlib.Path(rel).as_posix()
+        except ValueError:
+            pass
+        return path.resolve().as_uri()
 
 
 def _all_finite(arr: np.ndarray, *, chunk_size: int = 1_000_000) -> bool:
@@ -3298,6 +3365,83 @@ class Show3D(anywidget.AnyWidget):
             background=background,
         )
         return gif_utils.write_mp4(frames, path, fps, crf=crf)
+
+    def save_animation_preview(
+        self,
+        directory: str | pathlib.Path,
+        *,
+        stem: str | None = None,
+        formats: Sequence[str] = ("gif", "mp4"),
+        quality: str = "medium",
+        fps: float | None = None,
+        playback: str = "forward",
+        show_frame_labels: bool = False,
+        background: str | tuple[int, int, int] = "dark",
+    ) -> AnimationExportPreview:
+        """Save GIF/MP4 animation exports and return a notebook preview.
+
+        This is a convenience wrapper around :meth:`save_gif` and
+        :meth:`save_mp4` for notebooks. It writes one or more animation files
+        and returns an object with a rich HTML representation showing the media
+        previews and file sizes.
+
+        Parameters
+        ----------
+        directory : str or pathlib.Path
+            Output directory. Created if missing.
+        stem : str, optional
+            Filename stem. Defaults to a slug derived from ``title``.
+        formats : sequence of {"gif", "mp4"}, default ("gif", "mp4")
+            Animation formats to write.
+        quality : {"low", "medium", "high"}, default "medium"
+            Export quality. MP4 also maps this to the same CRF values used by
+            the GUI export menu.
+        fps : float, optional
+            Playback rate. Defaults to the widget's ``fps``.
+        playback : {"forward", "bounce"}, default "forward"
+            Frame order.
+        show_frame_labels : bool, default False
+            Draw per-panel dynamic frame labels from ``panel_frame_labels``.
+        background : {"dark", "black", "white"} or RGB tuple, default "dark"
+            Grid gutter/background color for multi-panel exports.
+
+        Returns
+        -------
+        AnimationExportPreview
+            Notebook-displayable preview object keyed by format label.
+        """
+        quality = self._normalise_animation_quality(quality)
+        directory = pathlib.Path(directory)
+        directory.mkdir(parents=True, exist_ok=True)
+        if stem is None:
+            stem = self._default_animation_export_path("gif", quality).stem
+        paths: dict[str, pathlib.Path] = {}
+        for fmt in formats:
+            mode = str(fmt).lower().lstrip(".")
+            if mode == "gif":
+                path = directory / f"{stem}.gif"
+                paths[f"GIF {quality}"] = self.save_gif(
+                    path,
+                    quality=quality,
+                    fps=fps,
+                    playback=playback,
+                    show_frame_labels=show_frame_labels,
+                    background=background,
+                )
+            elif mode == "mp4":
+                path = directory / f"{stem}.mp4"
+                paths[f"MP4 {quality}"] = self.save_mp4(
+                    path,
+                    quality=quality,
+                    fps=fps,
+                    playback=playback,
+                    crf=self._mp4_crf_for_quality(quality),
+                    show_frame_labels=show_frame_labels,
+                    background=background,
+                )
+            else:
+                raise ValueError("formats must contain only 'gif' and/or 'mp4'")
+        return AnimationExportPreview(paths)
 
     def free(self) -> None:
         """Release VRAM and RAM held by this widget.
