@@ -113,3 +113,30 @@ def test_show3d_save_mp4_uses_panel_only_renderer(
         "fps": 12.0,
         "crf": 21,
     }
+
+
+def test_show3d_animation_frame_labels_are_opt_in(monkeypatch) -> None:
+    captured: list[list[str] | None] = []
+
+    def fake_compose_panel_grid(images, **kwargs):
+        captured.append(kwargs["frame_labels"])
+        return images[0]
+
+    monkeypatch.setattr(gif_utils, "compose_panel_grid", fake_compose_panel_grid)
+    widget = Show3D(
+        _stack(),
+        _stack(1000),
+        panel_titles=["raw", "denoised"],
+        panel_frame_labels=[
+            ["raw frame 1", "raw frame 2", "raw frame 3", "raw frame 4"],
+            ["den frame 1", "den frame 2", "den frame 3", "den frame 4"],
+        ],
+        show_controls=False,
+        show_scale_bar=False,
+    )
+
+    widget._render_animation_frames(quality="high", playback="forward", show_frame_labels=False)
+    assert captured[-1] is None
+
+    widget._render_animation_frames(quality="high", playback="forward", show_frame_labels=True)
+    assert captured[-1] == ["raw frame 4", "den frame 4"]

@@ -3160,7 +3160,13 @@ class Show3D(anywidget.AnyWidget):
                 out.append(f"{frame_idx + 1}/{self.n_slices}")
         return out
 
-    def _render_animation_frames(self, *, quality: str, playback: str) -> list[Any]:
+    def _render_animation_frames(
+        self,
+        *,
+        quality: str,
+        playback: str,
+        show_frame_labels: bool,
+    ) -> list[Any]:
         """Render panel-only animation frames as RGB PIL images."""
         from quantem.widget.render import gif as gif_utils
 
@@ -3184,7 +3190,11 @@ class Show3D(anywidget.AnyWidget):
                 gif_utils.compose_panel_grid(
                     panel_images,
                     panel_titles=panel_titles,
-                    frame_labels=self._animation_frame_labels(panel_indices, frame_idx),
+                    frame_labels=(
+                        self._animation_frame_labels(panel_indices, frame_idx)
+                        if show_frame_labels
+                        else None
+                    ),
                     show_panel_titles=bool(self.show_panel_titles),
                     title_font_size=title_font_size,
                     max_cols=int(self.max_cols),
@@ -3194,7 +3204,8 @@ class Show3D(anywidget.AnyWidget):
         return frames
 
     def save_gif(self, path: str | pathlib.Path, *, quality: str = "high",
-                 fps: float | None = None, playback: str = "forward") -> pathlib.Path:
+                 fps: float | None = None, playback: str = "forward",
+                 show_frame_labels: bool = False) -> pathlib.Path:
         """Save the z-stack panels as an animated GIF matching the live image view.
 
         Each frame is colorized with the current ``cmap`` and contrast
@@ -3214,6 +3225,9 @@ class Show3D(anywidget.AnyWidget):
         playback : {"forward", "bounce"}, default "forward"
             Frame order. ``"forward"`` is best for time series; ``"bounce"``
             plays forward then backward without duplicating endpoint frames.
+        show_frame_labels : bool, default False
+            Draw per-panel dynamic frame labels from ``panel_frame_labels``.
+            When enabled and no labels were provided, draw ``"i/n"``.
 
         Returns
         -------
@@ -3228,12 +3242,16 @@ class Show3D(anywidget.AnyWidget):
         """
         from quantem.widget.render import gif as gif_utils
         fps = float(self.fps) if fps is None else float(fps)
-        frames = self._render_animation_frames(quality=quality, playback=playback)
+        frames = self._render_animation_frames(
+            quality=quality,
+            playback=playback,
+            show_frame_labels=bool(show_frame_labels),
+        )
         return gif_utils.write_gif(frames, path, fps)
 
     def save_mp4(self, path: str | pathlib.Path, *, quality: str = "high",
                  fps: float | None = None, playback: str = "forward",
-                 crf: int = 18) -> pathlib.Path:
+                 crf: int = 18, show_frame_labels: bool = False) -> pathlib.Path:
         """Save the z-stack panels as an H.264 MP4.
 
         The rendered content matches :meth:`save_gif`: image panels only, with
@@ -3253,6 +3271,9 @@ class Show3D(anywidget.AnyWidget):
         crf : int, default 18
             x264 constant-rate-factor. Lower values are larger and higher
             quality; 18 is visually high quality.
+        show_frame_labels : bool, default False
+            Draw per-panel dynamic frame labels from ``panel_frame_labels``.
+            When enabled and no labels were provided, draw ``"i/n"``.
 
         Returns
         -------
@@ -3261,7 +3282,11 @@ class Show3D(anywidget.AnyWidget):
         """
         from quantem.widget.render import gif as gif_utils
         fps = float(self.fps) if fps is None else float(fps)
-        frames = self._render_animation_frames(quality=quality, playback=playback)
+        frames = self._render_animation_frames(
+            quality=quality,
+            playback=playback,
+            show_frame_labels=bool(show_frame_labels),
+        )
         return gif_utils.write_mp4(frames, path, fps, crf=crf)
 
     def free(self) -> None:
