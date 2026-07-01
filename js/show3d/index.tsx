@@ -7732,16 +7732,32 @@ function Show3D() {
     moved: boolean;
   } | null>(null);
 
-  const zoomFftAtPoint = React.useCallback((anchorX: number, anchorY: number, deltaY: number) => {
+  const clampFftPan = React.useCallback((panX: number, panY: number, zoom: number, viewportW: number, viewportH: number) => {
+    const clampAxis = (pan: number, viewport: number) => {
+      if (zoom <= 1 || viewport <= 0) return 0;
+      return Math.max(viewport * (1 - zoom), Math.min(0, pan));
+    };
+    return {
+      panX: clampAxis(panX, viewportW),
+      panY: clampAxis(panY, viewportH),
+    };
+  }, []);
+
+  const zoomFftAtPoint = React.useCallback((anchorX: number, anchorY: number, deltaY: number, viewportW?: number, viewportH?: number) => {
     const zoomFactor = Math.max(0.75, Math.min(1.35, Math.exp(-deltaY * 0.002)));
     const newZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, fftZoom * zoomFactor));
     const zoomRatio = newZoom / Math.max(1e-6, fftZoom);
+    const nextPanX = anchorX - (anchorX - fftPanX) * zoomRatio;
+    const nextPanY = anchorY - (anchorY - fftPanY) * zoomRatio;
+    const clamped = viewportW != null && viewportH != null
+      ? clampFftPan(nextPanX, nextPanY, newZoom, viewportW, viewportH)
+      : { panX: nextPanX, panY: nextPanY };
     setFftZoom(newZoom);
     internalFftZoomSyncRef.current = true;
     setFftOverlayZoomTrait(Number(newZoom.toFixed(3)));
-    setFftPanX(anchorX - (anchorX - fftPanX) * zoomRatio);
-    setFftPanY(anchorY - (anchorY - fftPanY) * zoomRatio);
-  }, [fftPanX, fftPanY, fftZoom, setFftOverlayZoomTrait]);
+    setFftPanX(clamped.panX);
+    setFftPanY(clamped.panY);
+  }, [clampFftPan, fftPanX, fftPanY, fftZoom, setFftOverlayZoomTrait]);
 
   fftInsetNativeWheelHandlerRef.current = (event: WheelEvent) => {
     const target = event.target;
@@ -7752,7 +7768,7 @@ function Show3D() {
     event.stopPropagation();
     event.stopImmediatePropagation();
     const rect = inset.getBoundingClientRect();
-    zoomFftAtPoint(event.clientX - rect.left, event.clientY - rect.top, event.deltaY);
+    zoomFftAtPoint(event.clientX - rect.left, event.clientY - rect.top, event.deltaY, rect.width, rect.height);
     return true;
   };
 
@@ -7771,11 +7787,11 @@ function Show3D() {
         if (mouseX < dst.x || mouseX >= dst.x + dst.w || mouseY < dst.y || mouseY >= dst.y + dst.h) continue;
         const localX = mouseX - dst.x;
         const localY = mouseY - dst.y;
-        zoomFftAtPoint(localX, localY, e.deltaY);
+        zoomFftAtPoint(localX, localY, e.deltaY, dst.w, dst.h);
         return;
       }
     }
-    zoomFftAtPoint(mouseX, mouseY, e.deltaY);
+    zoomFftAtPoint(mouseX, mouseY, e.deltaY, canvas.width, canvas.height);
   };
 
   const handleFftInsetWheel = (e: React.WheelEvent<HTMLElement>) => {
@@ -7784,7 +7800,7 @@ function Show3D() {
     const rect = e.currentTarget.getBoundingClientRect();
     const localX = e.clientX - rect.left;
     const localY = e.clientY - rect.top;
-    zoomFftAtPoint(localX, localY, e.deltaY);
+    zoomFftAtPoint(localX, localY, e.deltaY, rect.width, rect.height);
   };
 
   const handleFftInsetPointerDown = (
@@ -7895,8 +7911,15 @@ function Show3D() {
     const startPanY = fftPanY;
     const onMove = (ev: MouseEvent) => {
       ev.preventDefault();
-      setFftPanX(startPanX + (ev.clientX - startX) * scaleX);
-      setFftPanY(startPanY + (ev.clientY - startY) * scaleY);
+      const clamped = clampFftPan(
+        startPanX + (ev.clientX - startX) * scaleX,
+        startPanY + (ev.clientY - startY) * scaleY,
+        fftZoom,
+        canvas.width,
+        canvas.height,
+      );
+      setFftPanX(clamped.panX);
+      setFftPanY(clamped.panY);
     };
     const onUp = () => {
       window.removeEventListener("mousemove", onMove, true);
@@ -7905,6 +7928,24 @@ function Show3D() {
     window.addEventListener("mousemove", onMove, true);
     window.addEventListener("mouseup", onUp, true);
   };
+
+  React.useEffect(() => {
+    if (!effectiveShowFft) return;
+    const overlayCanvas = fftLayoutOverlay ? fftInsetCanvasRefs.current.find((canvas): canvas is HTMLCanvasElement => !!canvas) : null;
+    const fftCanvas = fftCanvasRef.current;
+    const panelGrid = fftPanelGridRef.current;
+    const viewport = overlayCanvas
+      ? { w: overlayCanvas.width, h: overlayCanvas.height }
+      : fftCanvas
+        ? panelGrid
+          ? getFftSlot(0, panelGrid.count, panelGrid.cols, panelGrid.rows)
+          : { w: fftCanvas.width, h: fftCanvas.height }
+        : null;
+    if (!viewport) return;
+    const clamped = clampFftPan(fftPanX, fftPanY, fftZoom, viewport.w, viewport.h);
+    if (Math.abs(clamped.panX - fftPanX) > 0.5) setFftPanX(clamped.panX);
+    if (Math.abs(clamped.panY - fftPanY) > 0.5) setFftPanY(clamped.panY);
+  }, [clampFftPan, effectiveShowFft, fftLayoutOverlay, fftZoom, fftPanX, fftPanY, canvasW, canvasH, resolvedFftOverlaySize, visiblePanelCount]);
 
   // Convert FFT canvas mouse position to FFT image pixel coordinates
   const fftScreenToImg = (e: React.MouseEvent): { col: number; row: number } | null => {
@@ -7961,8 +8002,11 @@ function Show3D() {
       const scaleY = canvas.height / rect.height;
       const dx = (e.clientX - fftPanStart.x) * scaleX;
       const dy = (e.clientY - fftPanStart.y) * scaleY;
-      setFftPanX(fftPanStart.pX + dx);
-      setFftPanY(fftPanStart.pY + dy);
+      const panelGrid = fftPanelGridRef.current;
+      const viewport = panelGrid ? getFftSlot(0, panelGrid.count, panelGrid.cols, panelGrid.rows) : { w: canvas.width, h: canvas.height };
+      const clamped = clampFftPan(fftPanStart.pX + dx, fftPanStart.pY + dy, fftZoom, viewport.w, viewport.h);
+      setFftPanX(clamped.panX);
+      setFftPanY(clamped.panY);
     }
   };
 
