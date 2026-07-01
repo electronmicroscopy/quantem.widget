@@ -1808,8 +1808,7 @@ function Show3D() {
   // of the playback effect syncs this ref back onto slice_idx in offline mode,
   // and a stale 0 would clobber a baked middle-slice start.
   const playbackIdxRef = React.useRef(Number.isFinite(sliceIdx) ? sliceIdx : 0);
-  const playbackLiveTrackRef = React.useRef<HTMLDivElement>(null);
-  const playbackLiveThumbRef = React.useRef<HTMLDivElement>(null);
+  const playbackSliderRef = React.useRef<HTMLSpanElement>(null);
   const playbackLiveCountRef = React.useRef<HTMLElement>(null);
   const frameFetchCacheRef = React.useRef<Map<number, Float32Array>>(new Map());
   const frameFetchPendingRef = React.useRef<Map<number, Promise<Float32Array | null>>>(new Map());
@@ -3229,14 +3228,23 @@ function Show3D() {
     const rangeStart = c.loop ? Math.max(0, Math.min(c.loopStart, total - 1)) : 0;
     const rangeEnd = c.loop ? Math.max(rangeStart, Math.min(c.loopEnd, total - 1)) : total - 1;
     const clamped = Math.max(rangeStart, Math.min(rangeEnd, Math.round(idx)));
-    const pct = rangeEnd > rangeStart ? ((clamped - rangeStart) / (rangeEnd - rangeStart)) * 100 : 0;
-    const track = playbackLiveTrackRef.current;
-    const thumb = playbackLiveThumbRef.current;
+    const pct = total > 1 ? (clamped / (total - 1)) * 100 : 0;
+    const slider = playbackSliderRef.current;
+    const activeThumb = slider?.querySelector(c.loop ? ".MuiSlider-thumb[data-index='1']" : ".MuiSlider-thumb") as HTMLElement | null;
+    const track = slider?.querySelector(".MuiSlider-track") as HTMLElement | null;
+    const input = activeThumb?.querySelector("input") as HTMLInputElement | null;
     const count = playbackLiveCountRef.current;
-    if (track) track.style.setProperty("--show3d-playback-pct", `${pct}%`);
-    if (thumb) thumb.style.left = `${pct}%`;
-    if (count) count.textContent = `${clamped + 1}/${total}`;
-  }, [nSlices]);
+    if (activeThumb) {
+      activeThumb.style.left = `${pct}%`;
+      activeThumb.setAttribute("aria-valuenow", String(clamped));
+    }
+    if (input) input.value = String(clamped);
+    if (track && !c.loop) {
+      track.style.left = "0%";
+      track.style.width = `${pct}%`;
+    }
+    if (count) count.textContent = hiddenSet.size ? `${clamped + 1}/${visibleCount} (${total})` : `${clamped + 1}/${total}`;
+  }, [hiddenSet.size, nSlices, visibleCount]);
 
   const frameTransformActive = () => diffMode !== "off" || Math.max(1, Math.round(avgWindow || 1)) > 1;
 
@@ -8867,54 +8875,10 @@ function Show3D() {
                         <StopIcon sx={{ fontSize: 16 }} />
                       </IconButton>
                     </Stack>
-                    {playing ? (
-                      <Box
-                        ref={playbackLiveTrackRef}
-                        role="progressbar"
-                        aria-label={`Live playback position (${activeIdx + 1} of ${nSlices})`}
-                        aria-valuemin={1}
-                        aria-valuemax={nSlices}
-                        aria-valuenow={activeIdx + 1}
-                        sx={{
-                          "--show3d-playback-pct": `${nSlices > 1 ? (activeIdx / (nSlices - 1)) * 100 : 0}%`,
-                          position: "relative",
-                          width: 150,
-                          flex: "0 1 150px",
-                          minWidth: 90,
-                          height: 14,
-                          borderRadius: 999,
-                          bgcolor: themeInfo.theme === "dark" ? "rgba(255,255,255,0.16)" : "rgba(0,0,0,0.16)",
-                          overflow: "hidden",
-                          "&::before": {
-                            content: '""',
-                            position: "absolute",
-                            left: 0,
-                            top: 6,
-                            height: 2,
-                            width: "var(--show3d-playback-pct)",
-                            bgcolor: themeColors.accent,
-                          },
-                        }}
-                      >
-                        <Box
-                          ref={playbackLiveThumbRef}
-                          sx={{
-                            position: "absolute",
-                            left: "var(--show3d-playback-pct)",
-                            top: 2,
-                            width: 10,
-                            height: 10,
-                            borderRadius: "50%",
-                            bgcolor: themeColors.accent,
-                            transform: "translateX(-50%)",
-                            boxShadow: "0 0 0 2px rgba(255,255,255,0.55)",
-                          }}
-                        />
-                      </Box>
-                    ) : loop ? (
-                      <Slider value={[loopStart, activeIdx, effectiveLoopEnd]} onMouseDown={handleLoopSliderMouseDown} onPointerDownCapture={handleLoopSliderPointerDownCapture} onChange={(_, v) => { const vals = v as number[]; setLoopStart(vals[0]); scrubToSlice(vals[1]); setLoopEnd(vals[2]); }} onChangeCommitted={(_, v) => { const vals = v as number[]; setLoopStart(vals[0]); commitSlice(vals[1]); setLoopEnd(vals[2]); }} disableSwap min={0} max={nSlices - 1} size="small" valueLabelDisplay="auto" valueLabelFormat={(v) => formatFrameValueLabel(v)} marks={bookmarkedFrames.map(f => ({ value: f }))} aria-label={`Loop range and current ${dimLabel.toLowerCase()} (frame ${activeIdx + 1} of ${nSlices}, loop ${loopStart + 1} to ${effectiveLoopEnd + 1})`} sx={{ ...sliderStyles.small, width: 150, flex: "0 1 150px", minWidth: 90, "& .MuiSlider-thumb[data-index='0']": { width: 8, height: 8, bgcolor: themeColors.textMuted }, "& .MuiSlider-thumb[data-index='1']": { width: 12, height: 12 }, "& .MuiSlider-thumb[data-index='2']": { width: 8, height: 8, bgcolor: themeColors.textMuted }, "& .MuiSlider-mark": { bgcolor: themeColors.accent, width: 4, height: 4, borderRadius: "50%", top: "50%", transform: "translate(-50%, -50%)" }, "& .MuiSlider-valueLabel": { fontSize: 10, padding: "2px 4px", maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }} />
+                    {loop ? (
+                      <Slider ref={playbackSliderRef} value={[loopStart, activeIdx, effectiveLoopEnd]} onMouseDown={handleLoopSliderMouseDown} onPointerDownCapture={handleLoopSliderPointerDownCapture} onChange={(_, v) => { const vals = v as number[]; setLoopStart(vals[0]); scrubToSlice(vals[1]); setLoopEnd(vals[2]); }} onChangeCommitted={(_, v) => { const vals = v as number[]; setLoopStart(vals[0]); commitSlice(vals[1]); setLoopEnd(vals[2]); }} disableSwap min={0} max={nSlices - 1} size="small" valueLabelDisplay="auto" valueLabelFormat={(v) => formatFrameValueLabel(v)} marks={bookmarkedFrames.map(f => ({ value: f }))} aria-label={`Loop range and current ${dimLabel.toLowerCase()} (frame ${activeIdx + 1} of ${nSlices}, loop ${loopStart + 1} to ${effectiveLoopEnd + 1})`} sx={{ ...sliderStyles.small, width: 150, flex: "0 1 150px", minWidth: 90, "& .MuiSlider-thumb[data-index='0']": { width: 8, height: 8, bgcolor: themeColors.textMuted }, "& .MuiSlider-thumb[data-index='1']": { width: 12, height: 12 }, "& .MuiSlider-thumb[data-index='2']": { width: 8, height: 8, bgcolor: themeColors.textMuted }, "& .MuiSlider-mark": { bgcolor: themeColors.accent, width: 4, height: 4, borderRadius: "50%", top: "50%", transform: "translate(-50%, -50%)" }, "& .MuiSlider-valueLabel": { fontSize: 10, padding: "2px 4px", maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }} />
                     ) : (
-                      <Slider value={activeIdx} onChange={(_, v) => scrubToSlice(v as number)} onChangeCommitted={(_, v) => commitSlice(v as number)} min={0} max={nSlices - 1} size="small" valueLabelDisplay="auto" valueLabelFormat={(v) => formatFrameValueLabel(v)} marks={bookmarkedFrames.map(f => ({ value: f }))} aria-label={`Current ${dimLabel.toLowerCase()} (${activeIdx + 1} of ${nSlices})`} sx={{ ...sliderStyles.small, width: 150, flex: "0 1 150px", minWidth: 90, "& .MuiSlider-mark": { bgcolor: themeColors.accent, width: 4, height: 4, borderRadius: "50%", top: "50%", transform: "translate(-50%, -50%)" }, "& .MuiSlider-valueLabel": { maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }} />
+                      <Slider ref={playbackSliderRef} value={activeIdx} onChange={(_, v) => scrubToSlice(v as number)} onChangeCommitted={(_, v) => commitSlice(v as number)} min={0} max={nSlices - 1} size="small" valueLabelDisplay="auto" valueLabelFormat={(v) => formatFrameValueLabel(v)} marks={bookmarkedFrames.map(f => ({ value: f }))} aria-label={`Current ${dimLabel.toLowerCase()} (${activeIdx + 1} of ${nSlices})`} sx={{ ...sliderStyles.small, width: 150, flex: "0 1 150px", minWidth: 90, "& .MuiSlider-mark": { bgcolor: themeColors.accent, width: 4, height: 4, borderRadius: "50%", top: "50%", transform: "translate(-50%, -50%)" }, "& .MuiSlider-valueLabel": { maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }} />
                     )}
                     <Typography ref={playbackLiveCountRef} sx={{ ...typography.value, color: themeColors.textMuted, minWidth: hiddenSet.size ? `${String(nSlices).length * 2 + String(visibleCount).length + 5}ch` : `${String(nSlices).length * 2 + 1}ch`, fontVariantNumeric: "tabular-nums", textAlign: "right", flexShrink: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{hiddenSet.size ? `${activeIdx + 1}/${visibleCount} (${nSlices})` : `${activeIdx + 1}/${nSlices}`}</Typography>
                   </Box>
