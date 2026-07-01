@@ -7808,8 +7808,6 @@ function Show3D() {
     setFftClickInfo(null);
   };
 
-  const fftNeedsReset = fftZoom !== 1 || fftPanX !== 0 || fftPanY !== 0;
-
   // Kymograph mouse handlers (mirror FFT: wheel-zoom + pan-drag). Click readout
   // replaces the FFT d-spacing measurement (domain adaptation).
   const [isKymoDragging, setIsKymoDragging] = React.useState(false);
@@ -8905,11 +8903,10 @@ function Show3D() {
               >
                 <canvas ref={fftCanvasRef} width={canvasW} height={canvasH} style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", imageRendering: smooth ? "auto" : "pixelated", touchAction: "none" }} role="img" aria-label={roiFftActive && fftCropDims ? `FFT power spectrum of ROI crop (${fftCropDims.cropWidth} by ${fftCropDims.cropHeight} pixels)` : "FFT power spectrum of current frame"} />
                 <canvas ref={fftOverlayRef} width={Math.round(canvasW * DPR)} height={Math.round(canvasH * DPR)} style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", pointerEvents: "none" }} aria-hidden="true" />
-                <Box sx={{ position: "absolute", top: 4, left: 6, right: 6, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 1, pointerEvents: "none" }}>
+                <Box sx={{ position: "absolute", top: 4, left: 6, right: 6, display: "flex", alignItems: "center", gap: 1, pointerEvents: "none" }}>
                   <Typography sx={{ fontSize: 10, color: "rgba(255,255,255,0.9)", fontWeight: 700, textShadow: "1px 1px 0 rgba(0,0,0,0.8)", lineHeight: 1 }}>
                     FFT
                   </Typography>
-                  <Button size="small" sx={{ ...compactButton, minHeight: 16, height: 16, fontSize: 9, px: 0.5, pointerEvents: "auto", bgcolor: "rgba(0,0,0,0.35)" }} disabled={!fftNeedsReset} onMouseDown={(event) => event.stopPropagation()} onClick={handleFftReset} aria-label="Reset FFT zoom and pan">Reset</Button>
                 </Box>
               </Box>
             )}
@@ -9321,7 +9318,6 @@ function Show3D() {
                   ROI FFT ({fftCropDims.cropWidth}&times;{fftCropDims.cropHeight})
                 </Typography>
               ) : <Box />}
-              <Button size="small" sx={compactButton} disabled={!fftNeedsReset} onClick={handleFftReset} aria-label="Reset FFT zoom and pan">Reset</Button>
             </Stack>
             {/* FFT Canvas - same size as main image */}
             <Box
