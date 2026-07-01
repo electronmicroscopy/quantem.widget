@@ -76,6 +76,30 @@ def test_show3d_statistics_are_opt_in() -> None:
     assert explicit.show_stats is True
 
 
+def test_show3d_fft_layout_validates_and_roundtrips(tmp_path: pathlib.Path) -> None:
+    widget = Show3D(
+        *_panels()[:2],
+        panel_titles=["SSB", "Mean DP"],
+        show_fft=True,
+        fft_layout="right",
+        show_controls=False,
+    )
+
+    assert widget.fft_layout == "right"
+    state = widget.state_dict()
+    assert state["fft_layout"] == "right"
+
+    restored = Show3D(*_panels()[:2], panel_titles=["SSB", "Mean DP"], show_controls=False)
+    restored.load_state_dict(state)
+    assert restored.fft_layout == "right"
+
+    out = widget.export_html(tmp_path / "show3d_fft_layout.html", encoding="full")
+    assert "fft_layout" in out.read_text()
+
+    with pytest.raises(ValueError, match="fft_layout"):
+        Show3D(np.zeros((3, 4, 5), dtype=np.float32), fft_layout="floating")
+
+
 def test_show3d_hidden_panels_roundtrip_in_state_and_html(tmp_path: pathlib.Path) -> None:
     widget = Show3D(
         *_panels()[:2],
