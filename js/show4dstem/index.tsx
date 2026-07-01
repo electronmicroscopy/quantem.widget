@@ -4361,6 +4361,36 @@ function Show4DSTEM() {
     ...upwardMenuProps,
     PaperProps: { sx: { bgcolor: themeColors.controlBg, color: themeColors.text, border: `1px solid ${themeColors.border}` } },
   };
+  const statsBarSx = {
+    mt: `${SPACING.XS}px`,
+    px: 1,
+    py: 0,
+    height: 24,
+    minHeight: 24,
+    bgcolor: themeColors.bgAlt,
+    display: "flex",
+    columnGap: 1.25,
+    alignItems: "center",
+    flexWrap: "nowrap",
+    maxWidth: "100%",
+    overflow: "hidden",
+    boxSizing: "border-box",
+    "@media (max-width: 700px)": {
+      mt: "2px",
+      px: 0.5,
+      height: 22,
+      minHeight: 22,
+      columnGap: "6px",
+    },
+  };
+  const statsTextSx = {
+    fontSize: 11,
+    lineHeight: "20px",
+    color: themeColors.textMuted,
+    whiteSpace: "nowrap",
+    flexShrink: 0,
+  };
+  const statsValueSx = { color: themeColors.accent };
 
   const keyboardShortcutItems: [string, string][] = [
     ["↑ / ↓", "Move scan row"],
@@ -4600,15 +4630,15 @@ function Show4DSTEM() {
 
           {/* DP Stats Bar */}
           {dpStats && dpStats.length === 4 && (
-            <Box sx={{ mt: `${SPACING.XS}px`, px: 1, py: 0.5, bgcolor: themeColors.bgAlt, display: "flex", columnGap: 1.25, rowGap: 0.25, alignItems: "center", flexWrap: "wrap", maxWidth: "100%", boxSizing: "border-box", "@media (max-width: 700px)": { mt: "2px", px: 0.5, py: 0.25, columnGap: "6px" } }}>
-              <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Mean <Box component="span" sx={{ color: themeColors.accent }}>{formatStat(dpStats[0])}</Box></Typography>
-              <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Min <Box component="span" sx={{ color: themeColors.accent }}>{formatStat(dpStats[1])}</Box></Typography>
-              <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Max <Box component="span" sx={{ color: themeColors.accent }}>{formatStat(dpStats[2])}</Box></Typography>
-              <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Std <Box component="span" sx={{ color: themeColors.accent }}>{formatStat(dpStats[3])}</Box></Typography>
-              <Box sx={{ flex: 1, "@media (max-width: 700px)": { display: "none" } }} />
-              <Typography component="span" onClick={() => { model.set("_preset_request", "bf"); model.save_changes(); }} sx={{ color: roiColors.textColor, fontSize: 11, fontWeight: "bold", cursor: "pointer", "&:hover": { textDecoration: "underline" } }}>BF</Typography>
-              <Typography component="span" onClick={() => { model.set("_preset_request", "abf"); model.save_changes(); }} sx={{ color: "#4af", fontSize: 11, fontWeight: "bold", cursor: "pointer", "&:hover": { textDecoration: "underline" } }}>ABF</Typography>
-              <Typography component="span" onClick={() => { model.set("_preset_request", "adf"); model.save_changes(); }} sx={{ color: "#fa4", fontSize: 11, fontWeight: "bold", cursor: "pointer", "&:hover": { textDecoration: "underline" } }}>ADF</Typography>
+            <Box sx={statsBarSx}>
+              <Typography sx={statsTextSx}>Mean <Box component="span" sx={statsValueSx}>{formatStat(dpStats[0])}</Box></Typography>
+              <Typography sx={statsTextSx}>Min <Box component="span" sx={statsValueSx}>{formatStat(dpStats[1])}</Box></Typography>
+              <Typography sx={statsTextSx}>Max <Box component="span" sx={statsValueSx}>{formatStat(dpStats[2])}</Box></Typography>
+              <Typography sx={statsTextSx}>Std <Box component="span" sx={statsValueSx}>{formatStat(dpStats[3])}</Box></Typography>
+              <Box sx={{ flex: 1, minWidth: 4, "@media (max-width: 700px)": { display: "none" } }} />
+              <Typography component="span" onClick={() => { model.set("_preset_request", "bf"); model.save_changes(); }} sx={{ ...statsTextSx, color: roiColors.textColor, fontWeight: "bold", cursor: "pointer", "&:hover": { textDecoration: "underline" } }}>BF</Typography>
+              <Typography component="span" onClick={() => { model.set("_preset_request", "abf"); model.save_changes(); }} sx={{ ...statsTextSx, color: "#4af", fontWeight: "bold", cursor: "pointer", "&:hover": { textDecoration: "underline" } }}>ABF</Typography>
+              <Typography component="span" onClick={() => { model.set("_preset_request", "adf"); model.save_changes(); }} sx={{ ...statsTextSx, color: "#fa4", fontWeight: "bold", cursor: "pointer", "&:hover": { textDecoration: "underline" } }}>ADF</Typography>
             </Box>
           )}
 
@@ -4785,15 +4815,15 @@ function Show4DSTEM() {
 
           {/* VI Stats Bar — stats on left, Auto/Smooth toggles on right edge */}
           {viStats && viStats.length === 4 && (
-            <Box sx={{ mt: `${SPACING.XS}px`, px: 1, py: 0.5, bgcolor: themeColors.bgAlt, display: "flex", columnGap: 1.25, rowGap: 0.25, alignItems: "center", flexWrap: "wrap", maxWidth: "100%", boxSizing: "border-box", "@media (max-width: 700px)": { mt: "2px", px: 0.5, py: 0.25, columnGap: "6px" } }}>
-              <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Mean <Box component="span" sx={{ color: themeColors.accent }}>{formatStat(viStats[0])}</Box></Typography>
-              <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Min <Box component="span" sx={{ color: themeColors.accent }}>{formatStat(viStats[1])}</Box></Typography>
-              <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Max <Box component="span" sx={{ color: themeColors.accent }}>{formatStat(viStats[2])}</Box></Typography>
-              <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Std <Box component="span" sx={{ color: themeColors.accent }}>{formatStat(viStats[3])}</Box></Typography>
-              <Box sx={{ ml: "auto", display: "flex", alignItems: "center", gap: "2px", flexWrap: "wrap" }}>
-                <Typography sx={{ ...typo.label, fontSize: 10 }}>Auto:</Typography>
+            <Box sx={statsBarSx}>
+              <Typography sx={statsTextSx}>Mean <Box component="span" sx={statsValueSx}>{formatStat(viStats[0])}</Box></Typography>
+              <Typography sx={statsTextSx}>Min <Box component="span" sx={statsValueSx}>{formatStat(viStats[1])}</Box></Typography>
+              <Typography sx={statsTextSx}>Max <Box component="span" sx={statsValueSx}>{formatStat(viStats[2])}</Box></Typography>
+              <Typography sx={statsTextSx}>Std <Box component="span" sx={statsValueSx}>{formatStat(viStats[3])}</Box></Typography>
+              <Box sx={{ ml: "auto", display: "flex", alignItems: "center", gap: "2px", flexWrap: "nowrap", whiteSpace: "nowrap", flexShrink: 0 }}>
+                <Typography sx={{ ...typo.label, fontSize: 10, lineHeight: "20px" }}>Auto:</Typography>
                 <Switch checked={viAutoContrast} onChange={(e) => toggleViAutoContrast(e.target.checked)} size="small" sx={switchStyles.small} />
-                <Typography sx={{ ...typo.label, fontSize: 10 }} title="CSS bilinear interpolation. Same data, browser smooths visually.">Smooth:</Typography>
+                <Typography sx={{ ...typo.label, fontSize: 10, lineHeight: "20px" }} title="CSS bilinear interpolation. Same data, browser smooths visually.">Smooth:</Typography>
                 <Switch checked={viSmooth} onChange={(e) => setViSmooth(e.target.checked)} size="small" sx={switchStyles.small} />
               </Box>
             </Box>
@@ -4927,11 +4957,11 @@ function Show4DSTEM() {
 
             {/* FFT Stats Bar */}
             {fftStats && fftStats.length === 4 && (
-              <Box sx={{ mt: `${SPACING.XS}px`, px: 1, py: 0.5, bgcolor: themeColors.bgAlt, display: "flex", columnGap: 1.25, rowGap: 0.25, flexWrap: "wrap", maxWidth: "100%", boxSizing: "border-box", "@media (max-width: 700px)": { mt: "2px", px: 0.5, py: 0.25, columnGap: "6px" } }}>
-                <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Mean <Box component="span" sx={{ color: themeColors.accent }}>{formatStat(fftStats[0])}</Box></Typography>
-                <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Min <Box component="span" sx={{ color: themeColors.accent }}>{formatStat(fftStats[1])}</Box></Typography>
-                <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Max <Box component="span" sx={{ color: themeColors.accent }}>{formatStat(fftStats[2])}</Box></Typography>
-                <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Std <Box component="span" sx={{ color: themeColors.accent }}>{formatStat(fftStats[3])}</Box></Typography>
+              <Box sx={statsBarSx}>
+                <Typography sx={statsTextSx}>Mean <Box component="span" sx={statsValueSx}>{formatStat(fftStats[0])}</Box></Typography>
+                <Typography sx={statsTextSx}>Min <Box component="span" sx={statsValueSx}>{formatStat(fftStats[1])}</Box></Typography>
+                <Typography sx={statsTextSx}>Max <Box component="span" sx={statsValueSx}>{formatStat(fftStats[2])}</Box></Typography>
+                <Typography sx={statsTextSx}>Std <Box component="span" sx={statsValueSx}>{formatStat(fftStats[3])}</Box></Typography>
               </Box>
             )}
 
