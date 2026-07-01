@@ -18,6 +18,12 @@ import numpy as np
 # Resolution multiplier per quality tier. GIF is a 256-colour palette format
 # regardless, so quality here means spatial resolution (and therefore file size).
 QUALITY_SCALE = {"high": 1.0, "medium": 0.6, "low": 0.35}
+BACKGROUND_COLORS = {
+    "dark": (12, 12, 12),
+    "black": (0, 0, 0),
+    "white": (255, 255, 255),
+    "transparent": (0, 0, 0),
+}
 
 
 def _round_to_nice_value(value: float) -> float:
@@ -119,6 +125,25 @@ def finalize_frame(img, quality: str, pixel_size: float, unit: str):
     return _draw_scalebar(img, pixel_size / scale if scale > 0 else pixel_size, unit)
 
 
+def normalize_background(background: str | tuple[int, int, int]) -> tuple[int, int, int]:
+    """Normalize a named or RGB animation-grid background color."""
+    if isinstance(background, str):
+        key = background.strip().lower()
+        if key in BACKGROUND_COLORS:
+            return BACKGROUND_COLORS[key]
+        if key.startswith("#") and len(key) == 7:
+            try:
+                return tuple(int(key[i : i + 2], 16) for i in (1, 3, 5))  # type: ignore[return-value]
+            except ValueError:
+                pass
+        raise ValueError(
+            "background must be 'dark', 'black', 'white', or a '#RRGGBB' color"
+        )
+    if len(background) != 3:
+        raise ValueError("background RGB tuple must contain exactly three values")
+    return tuple(max(0, min(255, int(v))) for v in background)
+
+
 def _font(size: int, *, bold: bool = False):
     from PIL import ImageFont
     names = ["DejaVuSans-Bold.ttf"] if bold else ["DejaVuSans.ttf", "DejaVuSans-Bold.ttf"]
@@ -155,7 +180,7 @@ def compose_panel_grid(
     title_font_size: int = 11,
     max_cols: int = 4,
     panel_gap: int = 10,
-    background: tuple[int, int, int] = (255, 255, 255),
+    background: str | tuple[int, int, int] = "dark",
 ):
     """Compose per-panel PIL images into the widget-style panel grid."""
     if not images:
@@ -172,7 +197,7 @@ def compose_panel_grid(
     canvas = Image.new(
         "RGB",
         (cols * cell_w + gap * (cols - 1), rows * cell_h + gap * (rows - 1)),
-        background,
+        normalize_background(background),
     )
     for i, src in enumerate(images):
         panel = src.convert("RGB").copy()

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import pathlib
 
 import numpy as np
@@ -60,6 +61,27 @@ def test_show3d_save_gif_multi_panel_grid_respects_hidden_panels(tmp_path: pathl
         assert img.n_frames == 4
         # Two visible 14x12 panels in one row with a 3 px gap.
         assert img.size == (14 * 2 + 3, 12)
+
+
+def test_show3d_animation_grid_uses_dark_background_by_default() -> None:
+    widget = Show3D(
+        np.zeros((2, 4, 4), dtype=np.float32),
+        np.ones((2, 4, 4), dtype=np.float32),
+        max_cols=2,
+        panel_gap=2,
+        show_controls=False,
+        show_scale_bar=False,
+        show_panel_titles=False,
+    )
+
+    frame = widget._render_animation_frames(
+        quality="high",
+        playback="forward",
+        show_frame_labels=False,
+        background="dark",
+    )[0]
+
+    assert frame.getpixel((4, 0)) == (12, 12, 12)
 
 
 def test_show3d_save_gif_bounce_order_omits_duplicate_endpoints(tmp_path: pathlib.Path) -> None:
@@ -135,8 +157,68 @@ def test_show3d_animation_frame_labels_are_opt_in(monkeypatch) -> None:
         show_scale_bar=False,
     )
 
-    widget._render_animation_frames(quality="high", playback="forward", show_frame_labels=False)
+    widget._render_animation_frames(
+        quality="high",
+        playback="forward",
+        show_frame_labels=False,
+        background="dark",
+    )
     assert captured[-1] is None
 
-    widget._render_animation_frames(quality="high", playback="forward", show_frame_labels=True)
+    widget._render_animation_frames(
+        quality="high",
+        playback="forward",
+        show_frame_labels=True,
+        background="dark",
+    )
     assert captured[-1] == ["raw frame 4", "den frame 4"]
+
+
+def test_show3d_frontend_gif_export_request_creates_payload() -> None:
+    widget = Show3D(
+        _stack(),
+        show_controls=False,
+        show_scale_bar=False,
+        show_panel_titles=False,
+    )
+    filename = "frontend.gif"
+
+    widget.export_request = json.dumps({
+        "id": "gif-request",
+        "mode": "gif",
+        "filename": filename,
+        "download": True,
+    })
+
+    assert widget.export_payload_id == "gif-request"
+    assert widget.export_filename == filename
+    assert widget.export_payload.startswith(b"GIF")
+    assert widget.export_status.startswith(f"Ready {filename}")
+
+
+def test_show3d_frontend_mp4_export_request_creates_payload(monkeypatch) -> None:
+    def fake_save_mp4(self, path, **_kwargs):
+        path = pathlib.Path(path)
+        path.write_bytes(b"fake mp4")
+        return path
+
+    monkeypatch.setattr(Show3D, "save_mp4", fake_save_mp4)
+    widget = Show3D(
+        _stack(),
+        show_controls=False,
+        show_scale_bar=False,
+        show_panel_titles=False,
+    )
+    filename = "frontend.mp4"
+
+    widget.export_request = json.dumps({
+        "id": "mp4-request",
+        "mode": "mp4",
+        "filename": filename,
+        "download": True,
+    })
+
+    assert widget.export_payload_id == "mp4-request"
+    assert widget.export_filename == filename
+    assert widget.export_payload == b"fake mp4"
+    assert widget.export_status.startswith(f"Ready {filename}")
