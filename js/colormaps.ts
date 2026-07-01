@@ -1437,6 +1437,44 @@ export class GPUColormapEngine {
     ranges: { vmin: number; vmax: number }[],
     logScale: boolean = false,
   ): ImageBitmap[] | null {
+    const canvases = this._encodeSlotsToOffscreen(indices, ranges, logScale);
+    if (!canvases) return null;
+    return this._transferOffscreens(canvases);
+  }
+
+  /**
+   * Async twin of renderSlotsToImageBitmap: waits for the submitted GPU work to
+   * complete BEFORE snapshotting each OffscreenCanvas. Without the wait,
+   * transferToImageBitmap() can snapshot the render pass's clear color (black)
+   * before the blit executes, which is what produces the flaky black canvas
+   * when the GPU queue is backed up (e.g. a 128 MB frame still draining over a
+   * slow SSH tunnel keeps writeBuffer work ahead of the colormap pass).
+   */
+  async renderSlotsToImageBitmapAsync(
+    indices: number[],
+    ranges: { vmin: number; vmax: number }[],
+    logScale: boolean = false,
+  ): Promise<ImageBitmap[] | null> {
+    const canvases = this._encodeSlotsToOffscreen(indices, ranges, logScale);
+    if (!canvases) return null;
+    await this.device.queue.onSubmittedWorkDone();
+    return this._transferOffscreens(canvases);
+  }
+
+  private _transferOffscreens(canvases: (OffscreenCanvas | null)[]): ImageBitmap[] {
+    const bitmaps: ImageBitmap[] = [];
+    for (const oc of canvases) {
+      if (oc) bitmaps.push(oc.transferToImageBitmap());
+      else bitmaps.push(null as never);
+    }
+    return bitmaps;
+  }
+
+  private _encodeSlotsToOffscreen(
+    indices: number[],
+    ranges: { vmin: number; vmax: number }[],
+    logScale: boolean = false,
+  ): (OffscreenCanvas | null)[] | null {
     if (!this.pipeline || !this.lutBuffer || indices.length === 0) return null;
     const fmt = navigator.gpu.getPreferredCanvasFormat();
     this.ensureBlitPipeline(fmt);
@@ -1444,7 +1482,7 @@ export class GPUColormapEngine {
 
     const encoder = this.device.createCommandEncoder();
     const params = new ArrayBuffer(24);
-    const canvases: OffscreenCanvas[] = [];
+    const canvases: (OffscreenCanvas | null)[] = [];
     const tempBuffers: GPUBuffer[] = [];
 
     for (let k = 0; k < indices.length; k++) {
@@ -1509,14 +1547,7 @@ export class GPUColormapEngine {
 
     this.device.queue.submit([encoder.finish()]);
     for (const b of tempBuffers) b.destroy();
-
-    // transferToImageBitmap after GPU finishes (synchronous, no mapAsync)
-    const bitmaps: ImageBitmap[] = [];
-    for (const oc of canvases) {
-      if (oc) bitmaps.push(oc.transferToImageBitmap());
-      else bitmaps.push(null as never);
-    }
-    return bitmaps;
+    return canvases;
   }
 
   private ensureVolumePipeline(): void {
