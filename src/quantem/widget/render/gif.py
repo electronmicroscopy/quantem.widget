@@ -1,5 +1,5 @@
 """
-Shared animated-GIF export helper for Show3D.
+Shared animation export helpers for Show3D.
 
 A widget produces per-frame contrast-normalized uint8 arrays (so the GIF matches
 the histogram range / log scale the operator set); these helpers colorize with
@@ -10,6 +10,8 @@ only numpy / matplotlib / PIL.
 """
 import math
 import pathlib
+import subprocess
+import tempfile
 
 import numpy as np
 
@@ -117,6 +119,96 @@ def finalize_frame(img, quality: str, pixel_size: float, unit: str):
     return _draw_scalebar(img, pixel_size / scale if scale > 0 else pixel_size, unit)
 
 
+def _font(size: int, *, bold: bool = False):
+    from PIL import ImageFont
+    names = ["DejaVuSans-Bold.ttf"] if bold else ["DejaVuSans.ttf", "DejaVuSans-Bold.ttf"]
+    for name in names:
+        try:
+            return ImageFont.truetype(name, size)
+        except OSError:
+            continue
+    return ImageFont.load_default()
+
+
+def _draw_panel_title(img, text: str, font_size: int) -> None:
+    """Draw a compact centered panel title over the image."""
+    if not text:
+        return
+    from PIL import ImageDraw
+    width, _height = img.size
+    font = _font(max(8, int(font_size)), bold=True)
+    draw = ImageDraw.Draw(img)
+    bbox = draw.textbbox((0, 0), text, font=font)
+    tw = bbox[2] - bbox[0]
+    x = max(2, (width - tw) / 2)
+    y = 3
+    draw.text((x + 1, y + 1), text, fill=(0, 0, 0), font=font)
+    draw.text((x, y), text, fill=(255, 255, 255), font=font)
+
+
+def compose_panel_grid(
+    images: list,
+    *,
+    panel_titles: list[str] | None = None,
+    frame_labels: list[str] | None = None,
+    show_panel_titles: bool = True,
+    title_font_size: int = 11,
+    max_cols: int = 4,
+    panel_gap: int = 10,
+    background: tuple[int, int, int] = (255, 255, 255),
+):
+    """Compose per-panel PIL images into the widget-style panel grid."""
+    if not images:
+        raise ValueError("compose_panel_grid requires at least one image")
+    from PIL import Image
+    n_panels = len(images)
+    cols = n_panels if max_cols <= 0 else min(max(1, int(max_cols)), n_panels)
+    rows = int(math.ceil(n_panels / cols))
+    widths = [img.size[0] for img in images]
+    heights = [img.size[1] for img in images]
+    cell_w = max(widths)
+    cell_h = max(heights)
+    gap = max(0, int(panel_gap))
+    canvas = Image.new(
+        "RGB",
+        (cols * cell_w + gap * (cols - 1), rows * cell_h + gap * (rows - 1)),
+        background,
+    )
+    for i, src in enumerate(images):
+        panel = src.convert("RGB").copy()
+        if show_panel_titles:
+            title_parts: list[str] = []
+            if panel_titles and i < len(panel_titles):
+                title_parts.append(str(panel_titles[i]))
+            if frame_labels and i < len(frame_labels) and frame_labels[i]:
+                title_parts.append(str(frame_labels[i]))
+            _draw_panel_title(panel, " - ".join(title_parts), title_font_size)
+        row, col = divmod(i, cols)
+        x = col * (cell_w + gap) + (cell_w - panel.size[0]) // 2
+        y = row * (cell_h + gap) + (cell_h - panel.size[1]) // 2
+        canvas.paste(panel, (x, y))
+    return canvas
+
+
+def _even_rgb_array(frame) -> np.ndarray:
+    """Return an RGB uint8 array padded to even dimensions for H.264."""
+    arr = np.asarray(frame.convert("RGB"), dtype=np.uint8)
+    h, w = arr.shape[:2]
+    pad_h = h % 2
+    pad_w = w % 2
+    if pad_h or pad_w:
+        padded = np.zeros((h + pad_h, w + pad_w, 3), dtype=np.uint8)
+        padded[:h, :w] = arr
+        if pad_h:
+            padded[h:, :w] = arr[h - 1 : h]
+        if pad_w:
+            padded[:h, w:] = arr[:, w - 1 : w]
+        if pad_h and pad_w:
+            padded[h:, w:] = arr[h - 1, w - 1]
+        arr = padded
+    return arr
+
+
 def write_gif(frames: list, path: str | pathlib.Path, fps: float) -> pathlib.Path:
     """Assemble RGB PIL frames into a looping GIF at the given fps."""
     path = pathlib.Path(path)
@@ -126,4 +218,53 @@ def write_gif(frames: list, path: str | pathlib.Path, fps: float) -> pathlib.Pat
         str(path), save_all=True, append_images=frames[1:],
         duration=duration, loop=0, optimize=True, disposal=2,
     )
+    return path
+
+
+def write_mp4(frames: list, path: str | pathlib.Path, fps: float, *, crf: int = 18) -> pathlib.Path:
+    """Assemble RGB PIL frames into an H.264 MP4 using the local ffmpeg binary."""
+    if not frames:
+        raise ValueError("write_mp4 requires at least one frame")
+    path = pathlib.Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    ffmpeg = "ffmpeg"
+    arrays = [_even_rgb_array(frame) for frame in frames]
+    height, width = arrays[0].shape[:2]
+    for i, arr in enumerate(arrays[1:], start=1):
+        if arr.shape[:2] != (height, width):
+            raise ValueError(
+                f"all MP4 frames must have the same size; frame 0 is {(height, width)}, "
+                f"frame {i} is {arr.shape[:2]}"
+            )
+    with tempfile.TemporaryDirectory(prefix="quantem-show3d-mp4-") as tmp:
+        tmp_path = pathlib.Path(tmp)
+        for i, arr in enumerate(arrays):
+            from PIL import Image
+            Image.fromarray(arr, mode="RGB").save(tmp_path / f"frame_{i:06d}.png")
+        cmd = [
+            ffmpeg,
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-framerate",
+            f"{max(0.1, float(fps))}",
+            "-i",
+            str(tmp_path / "frame_%06d.png"),
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-crf",
+            str(int(crf)),
+            str(path),
+        ]
+        try:
+            subprocess.run(cmd, check=True)
+        except FileNotFoundError as exc:
+            raise RuntimeError(
+                "save_mp4 requires ffmpeg on PATH. Install ffmpeg or use save_gif instead."
+            ) from exc
+        except subprocess.CalledProcessError as exc:
+            raise RuntimeError(f"ffmpeg failed while writing MP4: {exc}") from exc
     return path

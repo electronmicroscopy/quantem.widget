@@ -3128,14 +3128,79 @@ class Show3D(anywidget.AnyWidget):
         img.save(str(path), dpi=(dpi, dpi))
         return path
 
+    def _animation_frame_order(self, playback: str) -> list[int]:
+        """Return visible frame indices in the requested animation order."""
+        visible = list(self.visible_indices)
+        if not visible:
+            visible = list(range(int(self.n_slices)))
+        mode = str(playback).lower()
+        if mode == "forward":
+            return visible
+        if mode in {"bounce", "boomerang"}:
+            if len(visible) <= 1:
+                return visible
+            return visible + visible[-2:0:-1]
+        raise ValueError("playback must be 'forward' or 'bounce'")
+
+    def _animation_panel_indices(self) -> list[int]:
+        """Return visible panel indices for panel-only animation export."""
+        hidden = set(int(i) for i in getattr(self, "hidden_panels", []))
+        panels = [i for i in range(int(self.n_panels)) if i not in hidden]
+        if not panels:
+            raise ValueError("cannot export animation with every panel hidden")
+        return panels
+
+    def _animation_frame_labels(self, panel_indices: list[int], frame_idx: int) -> list[str]:
+        labels = getattr(self, "panel_frame_labels", [])
+        out: list[str] = []
+        for panel in panel_indices:
+            if panel < len(labels) and frame_idx < len(labels[panel]):
+                out.append(str(labels[panel][frame_idx]))
+            else:
+                out.append(f"{frame_idx + 1}/{self.n_slices}")
+        return out
+
+    def _render_animation_frames(self, *, quality: str, playback: str) -> list[Any]:
+        """Render panel-only animation frames as RGB PIL images."""
+        from quantem.widget.render import gif as gif_utils
+
+        if quality not in gif_utils.QUALITY_SCALE:
+            raise ValueError(f"quality must be one of {list(gif_utils.QUALITY_SCALE)}, got {quality!r}.")
+        scale = gif_utils.QUALITY_SCALE[quality]
+        panel_gap = max(0, int(round(float(self.panel_gap) * scale)))
+        title_font_size = max(8, int(round(float(self.panel_title_font_size) * scale)))
+        pixel_size = float(self.pixel_size) if bool(self.scale_bar_visible) else 0.0
+        unit = self.pixel_unit or "A"
+        panel_indices = self._animation_panel_indices()
+        panel_titles = [self._panel_title_for_index(panel) for panel in panel_indices]
+        frames = []
+        for frame_idx in self._animation_frame_order(playback):
+            panel_images = []
+            for panel in panel_indices:
+                data = self._get_display_panel_frame(panel, frame_idx)
+                img = gif_utils.colorize(self._normalize_frame(data), self.cmap)
+                panel_images.append(gif_utils.finalize_frame(img, quality, pixel_size, unit))
+            frames.append(
+                gif_utils.compose_panel_grid(
+                    panel_images,
+                    panel_titles=panel_titles,
+                    frame_labels=self._animation_frame_labels(panel_indices, frame_idx),
+                    show_panel_titles=bool(self.show_panel_titles),
+                    title_font_size=title_font_size,
+                    max_cols=int(self.max_cols),
+                    panel_gap=panel_gap,
+                )
+            )
+        return frames
+
     def save_gif(self, path: str | pathlib.Path, *, quality: str = "high",
-                 fps: float | None = None) -> pathlib.Path:
-        """Save the z-stack as an animated GIF matching the live view.
+                 fps: float | None = None, playback: str = "forward") -> pathlib.Path:
+        """Save the z-stack panels as an animated GIF matching the live image view.
 
         Each frame is colorized with the current ``cmap`` and contrast
         (``vmin`` / ``vmax`` or percentile auto-contrast, ``log_scale`` honored),
-        carries a burnt-in scale bar when ``pixel_size`` is set, and plays at the
-        widget's ``fps`` so the shared file looks like what the operator scrubs.
+        carries per-panel scale bars when enabled, respects hidden panels and
+        panel titles, and excludes FFT/profiles/controls from the export.
 
         Parameters
         ----------
@@ -3146,6 +3211,9 @@ class Show3D(anywidget.AnyWidget):
             palette, so quality trades resolution for file size.
         fps : float, optional
             Playback rate. Defaults to the widget's ``fps``.
+        playback : {"forward", "bounce"}, default "forward"
+            Frame order. ``"forward"`` is best for time series; ``"bounce"``
+            plays forward then backward without duplicating endpoint frames.
 
         Returns
         -------
@@ -3154,34 +3222,47 @@ class Show3D(anywidget.AnyWidget):
 
         Notes
         -----
-        Single-panel Show3D only; multi-panel raises. Browser zoom/pan is a
-        view-only transform and is not reflected (the full frame is exported).
+        Browser zoom/pan is a view-only transform and is not reflected (the full
+        frame is exported). FFT overlays and analysis panels are intentionally
+        omitted so the GIF contains only the scientific image panels.
         """
         from quantem.widget.render import gif as gif_utils
-        if getattr(self, "n_panels", 1) > 1:
-            raise ValueError("save_gif supports single-panel Show3D only.")
-        if quality not in gif_utils.QUALITY_SCALE:
-            raise ValueError(f"quality must be one of {list(gif_utils.QUALITY_SCALE)}, got {quality!r}.")
         fps = float(self.fps) if fps is None else float(fps)
-        unit = self.pixel_unit or "A"
-        rendered = []
-        for idx in range(self.n_slices):
-            frame = self._data[idx]
-            if self.diff_mode == "previous":
-                frame = frame - self._data[idx - 1] if idx > 0 else np.zeros_like(frame)
-            elif self.diff_mode == "first":
-                frame = frame - self._data[0]
-            img = gif_utils.colorize(self._normalize_frame(frame), self.cmap)
-            rendered.append(gif_utils.finalize_frame(img, quality, self.pixel_size, unit))
-        # Boomerang from the middle: open on the centre slice, sweep up to the
-        # top, down to the bottom, back to the centre - so the GIF starts and
-        # ends on the same middle frame the live widget opens on.
-        mid = self.n_slices // 2
-        order = (list(range(mid, self.n_slices))
-                 + list(range(self.n_slices - 2, -1, -1))
-                 + list(range(1, mid + 1)))
-        frames = [rendered[i] for i in order]
+        frames = self._render_animation_frames(quality=quality, playback=playback)
         return gif_utils.write_gif(frames, path, fps)
+
+    def save_mp4(self, path: str | pathlib.Path, *, quality: str = "high",
+                 fps: float | None = None, playback: str = "forward",
+                 crf: int = 18) -> pathlib.Path:
+        """Save the z-stack panels as an H.264 MP4.
+
+        The rendered content matches :meth:`save_gif`: image panels only, with
+        current colormap/contrast, panel titles, frame labels, hidden panels,
+        and scale bars. FFT/profiles/controls are omitted.
+
+        Parameters
+        ----------
+        path : str or pathlib.Path
+            Output ``.mp4`` path. Parent directories are created.
+        quality : {"high", "medium", "low"}, default "high"
+            Spatial resolution tier (1.0 / 0.6 / 0.35).
+        fps : float, optional
+            Playback rate. Defaults to the widget's ``fps``.
+        playback : {"forward", "bounce"}, default "forward"
+            Frame order.
+        crf : int, default 18
+            x264 constant-rate-factor. Lower values are larger and higher
+            quality; 18 is visually high quality.
+
+        Returns
+        -------
+        pathlib.Path
+            The written MP4 path.
+        """
+        from quantem.widget.render import gif as gif_utils
+        fps = float(self.fps) if fps is None else float(fps)
+        frames = self._render_animation_frames(quality=quality, playback=playback)
+        return gif_utils.write_mp4(frames, path, fps, crf=crf)
 
     def free(self) -> None:
         """Release VRAM and RAM held by this widget.
