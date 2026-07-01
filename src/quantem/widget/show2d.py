@@ -314,6 +314,42 @@ class Show2D(anywidget.AnyWidget):
     # =========================================================================
     image_rotations = traitlets.List(traitlets.Int(), []).tag(sync=True)
 
+    @classmethod
+    def from_gif(
+        cls,
+        path: str | pathlib.Path,
+        *,
+        ncols: int | None = None,
+        labels: list[str | None] | bool | None = None,
+        title: str | None = None,
+        **kwargs,
+    ) -> Self:
+        """Open a GIF as a static frame gallery.
+
+        Animated GIFs become an ``(N, H, W)`` stack displayed as a contact sheet.
+        Use ``ncols`` to choose an intentional layout, for example ``ncols=2``
+        for a 2x2 denoising comparison or ``ncols=1`` for a vertical strip.
+        """
+        from quantem.widget.io import read_gif  # noqa: PLC0415
+
+        ds = read_gif(path)
+        frame_count = int(ds.array.shape[0])
+        if ncols is None:
+            ncols = max(1, math.ceil(math.sqrt(frame_count)))
+        if labels is True:
+            resolved_labels = [f"Frame {i + 1}" for i in range(frame_count)]
+        elif labels:
+            resolved_labels = list(labels)
+        else:
+            resolved_labels = None
+        return cls(
+            ds,
+            labels=resolved_labels,
+            title=ds.name if title is None else title,
+            ncols=ncols,
+            **kwargs,
+        )
+
     def __init__(
         self,
         data: np.ndarray | list[np.ndarray],

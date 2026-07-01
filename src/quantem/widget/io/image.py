@@ -26,7 +26,7 @@ from quantem.core.datastructures import Dataset2d, Dataset3d
 
 
 _IMAGE_SUFFIXES = (".npy", ".emd", ".tif", ".tiff", ".png",
-                   ".jpg", ".jpeg", ".bmp", ".dm3", ".dm4")
+                   ".jpg", ".jpeg", ".bmp", ".gif", ".dm3", ".dm4")
 
 
 def read_images(folder: str | Path) -> list[Dataset2d]:
@@ -60,7 +60,7 @@ def read_image(path: str | Path) -> Dataset2d:
     - ``.emd`` - Velox HAADF (image under ``Data/Image/<hash>/Data`` with a JSON
       metadata blob carrying the pixel size); falls back to the largest 2D
       dataset for non-Velox EMD layouts (e.g. a ``data/drift/data`` series).
-    - ``.tif`` / ``.tiff`` / ``.png`` / ``.jpg`` / ``.bmp`` - via Pillow.
+    - ``.tif`` / ``.tiff`` / ``.png`` / ``.jpg`` / ``.bmp`` / ``.gif`` - via Pillow.
     - ``.dm3`` / ``.dm4`` - Gatan, via ncempy.
 
     A 3D result (a multi-frame container) is reduced to its first frame so the
@@ -72,6 +72,9 @@ def read_image(path: str | Path) -> Dataset2d:
         return Dataset2d.from_array(_first_frame(np.load(p)), name=p.stem)
     if ext == ".emd":
         return _read_emd(p)
+    if ext == ".gif":
+        ds = read_gif(p)
+        return Dataset2d.from_array(ds.array[0], name=p.stem)
     if ext in (".tif", ".tiff", ".png", ".jpg", ".jpeg", ".bmp"):
         from PIL import Image  # noqa: PLC0415  (lazy: keep io import cheap)
         with Image.open(p) as img:
@@ -83,7 +86,50 @@ def read_image(path: str | Path) -> Dataset2d:
         return Dataset2d.from_array(_first_frame(arr), name=p.stem)
     raise ValueError(
         f"read_image: unsupported extension {ext!r} "
-        "(use .npy, .emd, .tif/.tiff, .png, .jpg, .bmp, .dm3/.dm4)")
+        "(use .npy, .emd, .tif/.tiff, .png, .jpg, .bmp, .gif, .dm3/.dm4)")
+
+
+def read_gif(path: str | Path) -> Dataset3d:
+    """Read a static or animated GIF as a grayscale :class:`Dataset3d`.
+
+    GIF is useful as a lightweight interchange format for time-series previews
+    and denoising comparisons. The reader always returns an ``(N, H, W)``
+    float32 stack so the same object works with ``Show3D`` for playback and
+    ``Show2D`` for a flat contact sheet. Static GIFs become a one-frame stack.
+
+    Parameters
+    ----------
+    path : str or Path
+        GIF file to read.
+
+    Returns
+    -------
+    Dataset3d
+        Grayscale frame stack named from the file stem.
+    """
+    p = Path(path)
+    if not p.is_file():
+        raise FileNotFoundError(f"GIF file not found: {p}")
+    if p.suffix.lower() != ".gif":
+        raise ValueError(f"read_gif expects a .gif file, got {p.suffix!r}")
+
+    from PIL import Image, ImageSequence  # noqa: PLC0415
+
+    frames: list[np.ndarray] = []
+    with Image.open(p) as img:
+        for frame in ImageSequence.Iterator(img):
+            frames.append(np.asarray(frame.convert("L"), dtype=np.float32))
+    if not frames:
+        raise ValueError(f"GIF contains no frames: {p}")
+
+    shape = frames[0].shape
+    for idx, frame in enumerate(frames[1:], 1):
+        if frame.shape != shape:
+            raise ValueError(
+                f"GIF frame {idx} has shape {frame.shape}, expected {shape}. "
+                "Use a GIF with same-size frames."
+            )
+    return Dataset3d.from_array(np.stack(frames, axis=0), name=p.stem)
 
 
 def _first_frame(arr: np.ndarray) -> np.ndarray:

@@ -22,7 +22,7 @@ from quantem.widget.showeds import ShowEDS, SpectrumImage, bin_spectrum_image, l
 from quantem.widget.show4dstem import Show4DSTEM as _Show4DSTEMBase
 from quantem.widget.showdiffraction import ShowDiffraction
 from quantem.widget.survey import FolderSurvey, survey
-from quantem.widget.io import load
+from quantem.widget.io import load, read_gif
 from quantem.widget.export import (
     HTML_EXPORT_TRAITS,
     SupportsFrontendHtmlExport,
@@ -221,6 +221,7 @@ __all__ = [
     "load_emd_spectrum_image",
     "load",
     "survey",
+    "read_gif",
     "HTML_EXPORT_TRAITS",
     "SupportsFrontendHtmlExport",
     "SupportsHtmlExport",
