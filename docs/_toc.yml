@@ -8,6 +8,7 @@ parts:
     chapters:
       - file: install
       - file: cli
+      - file: remote-jupyter
   - caption: Tutorials
     chapters:
       - file: tutorials/download_data
@@ -16,8 +17,8 @@ parts:
       - file: tutorials/show3dslices
       - file: tutorials/show4dstem
       - file: tutorials/showeds
+      - file: tutorials/showdiffraction
       - file: tutorials/widget_export
-      - file: github-preview
   - caption: API reference
     chapters:
       - file: api/index
@@ -35,6 +36,8 @@ parts:
         title: Changelog
       - file: maintainer/widget-release
         title: Release
+      - file: maintainer/viewing-html-on-mobile
+        title: Mobile HTML
       - file: maintainer/widget-agent-signoff
         title: Agent signoff
       - file: maintainer/widget-performance

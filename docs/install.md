@@ -12,6 +12,34 @@ pip install -i https://test.pypi.org/simple/ \
 
 That works on every backend; the widget picks the fastest path it finds at runtime.
 
+## Google Colab
+
+Each tutorial notebook can open directly in Colab from the badge at the top of
+the notebook. Colab uses the same files that build these docs, so there is no
+separate Colab copy to maintain.
+
+If the package is not already available in the Colab runtime, run this once near
+the top of the notebook:
+
+```bash
+%pip install -i https://test.pypi.org/simple/ \
+    --extra-index-url https://pypi.org/simple/ \
+    quantem.widget
+```
+
+Common entry points:
+
+| Tutorial | Colab | Source notebook |
+|---|---|---|
+| Example Data | [Open in Colab](https://colab.research.google.com/github/bobleesj/quantem.widget/blob/main/docs/tutorials/download_data.ipynb) | [GitHub](https://github.com/bobleesj/quantem.widget/blob/main/docs/tutorials/download_data.ipynb) |
+| Show2D | [Open in Colab](https://colab.research.google.com/github/bobleesj/quantem.widget/blob/main/docs/tutorials/show2d.ipynb) | [GitHub](https://github.com/bobleesj/quantem.widget/blob/main/docs/tutorials/show2d.ipynb) |
+| Show3D | [Open in Colab](https://colab.research.google.com/github/bobleesj/quantem.widget/blob/main/docs/tutorials/show3d.ipynb) | [GitHub](https://github.com/bobleesj/quantem.widget/blob/main/docs/tutorials/show3d.ipynb) |
+| Show3DSlices | [Open in Colab](https://colab.research.google.com/github/bobleesj/quantem.widget/blob/main/docs/tutorials/show3dslices.ipynb) | [GitHub](https://github.com/bobleesj/quantem.widget/blob/main/docs/tutorials/show3dslices.ipynb) |
+| Show4DSTEM | [Open in Colab](https://colab.research.google.com/github/bobleesj/quantem.widget/blob/main/docs/tutorials/show4dstem.ipynb) | [GitHub](https://github.com/bobleesj/quantem.widget/blob/main/docs/tutorials/show4dstem.ipynb) |
+| ShowEDS | [Open in Colab](https://colab.research.google.com/github/bobleesj/quantem.widget/blob/main/docs/tutorials/showeds.ipynb) | [GitHub](https://github.com/bobleesj/quantem.widget/blob/main/docs/tutorials/showeds.ipynb) |
+| ShowDiffraction | [Open in Colab](https://colab.research.google.com/github/bobleesj/quantem.widget/blob/main/docs/tutorials/showdiffraction.ipynb) | [GitHub](https://github.com/bobleesj/quantem.widget/blob/main/docs/tutorials/showdiffraction.ipynb) |
+| Saving and sharing | [Open in Colab](https://colab.research.google.com/github/bobleesj/quantem.widget/blob/main/docs/tutorials/widget_export.ipynb) | [GitHub](https://github.com/bobleesj/quantem.widget/blob/main/docs/tutorials/widget_export.ipynb) |
+
 ## Backends
 
 - **NVIDIA CUDA** - the universal Torch viewer runs on GPU. The integer-reduction

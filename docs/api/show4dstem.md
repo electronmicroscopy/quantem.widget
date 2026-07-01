@@ -54,7 +54,7 @@ options such as `backend="web"`, `offline_codec`, `data_url`, and
 
 With a running kernel these recompute on the GPU backend (CUDA / MPS / CPU). In
 `backend="web"` mode, the same controls run in the browser via WebGPU with no
-Python round trip - see [Performance](../perf/index).
+Python round trip - see [Performance](../maintainer/widget-performance).
 
 | Control | Trait | Expected effect |
 |---|---|---|
