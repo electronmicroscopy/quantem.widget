@@ -1443,10 +1443,14 @@ function Show3D() {
   // FFT
   const [showFft, setShowFft] = useModelState<boolean>("show_fft");
   const [fftLayout, setFftLayout] = useModelState<string>("fft_layout");
+  const [fftOverlayPosition, setFftOverlayPosition] = useModelState<string>("fft_overlay_position");
+  const [fftOverlaySize, setFftOverlaySize] = useModelState<number>("fft_overlay_size");
   const [fftWindow, setFftWindow] = useModelState<boolean>("fft_window");
   const resolvedFftLayout = (["bottom", "right", "overlay"].includes(String(fftLayout)) ? String(fftLayout) : "bottom") as "bottom" | "right" | "overlay";
   const fftLayoutBottom = resolvedFftLayout === "bottom";
   const fftLayoutOverlay = resolvedFftLayout === "overlay";
+  const resolvedFftOverlayPosition = (["top-left", "top-right", "bottom-left", "bottom-right"].includes(String(fftOverlayPosition)) ? String(fftOverlayPosition) : "top-left") as "top-left" | "top-right" | "bottom-left" | "bottom-right";
+  const resolvedFftOverlaySize = Math.max(0.2, Math.min(0.7, Number.isFinite(fftOverlaySize) ? fftOverlaySize : 0.35));
 
 
   // Playback buffer (sliding prefetch)
@@ -8556,6 +8560,64 @@ function Show3D() {
                   <option value="overlay">Overlay</option>
                 </Box>
               )}
+              {showFft && fftLayoutOverlay && (
+                <>
+                  <Typography sx={{ ...typography.label, fontSize: 10, ml: "2px" }}>Pos</Typography>
+                  <Box
+                    component="select"
+                    value={resolvedFftOverlayPosition}
+                    onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setFftOverlayPosition(e.target.value)}
+                    aria-label="FFT overlay position"
+                    sx={{
+                      minWidth: 48,
+                      height: 24,
+                      ml: "2px",
+                      px: "6px",
+                      borderRadius: "4px",
+                      border: `1px solid ${themeColors.border}`,
+                      bgcolor: themeColors.controlBg,
+                      color: themeColors.text,
+                      fontFamily: UI_FONT,
+                      fontSize: 10,
+                      flexShrink: 0,
+                      cursor: "pointer",
+                      "&:hover": { borderColor: themeColors.accent },
+                    }}
+                  >
+                    <option value="top-left">TL</option>
+                    <option value="top-right">TR</option>
+                    <option value="bottom-left">BL</option>
+                    <option value="bottom-right">BR</option>
+                  </Box>
+                  <Typography sx={{ ...typography.label, fontSize: 10, ml: "2px" }}>Size</Typography>
+                  <Box
+                    component="select"
+                    value={String(Math.round(resolvedFftOverlaySize * 100))}
+                    onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setFftOverlaySize(Number(e.target.value) / 100)}
+                    aria-label="FFT overlay size"
+                    sx={{
+                      minWidth: 52,
+                      height: 24,
+                      ml: "2px",
+                      px: "6px",
+                      borderRadius: "4px",
+                      border: `1px solid ${themeColors.border}`,
+                      bgcolor: themeColors.controlBg,
+                      color: themeColors.text,
+                      fontFamily: UI_FONT,
+                      fontSize: 10,
+                      flexShrink: 0,
+                      cursor: "pointer",
+                      "&:hover": { borderColor: themeColors.accent },
+                    }}
+                  >
+                    <option value="25">25%</option>
+                    <option value="35">35%</option>
+                    <option value="50">50%</option>
+                    <option value="65">65%</option>
+                  </Box>
+                </>
+              )}
             </>}
             {/* Kymograph toggle: HIDDEN until a profile line exists (not shown-
                 but-disabled). Kymograph is a line-profile sub-feature, so the
@@ -9028,10 +9090,17 @@ function Show3D() {
                 const panelLeft = (slot % cols) * (panelW + gap);
                 const panelTop = Math.floor(slot / cols) * (panelH + gap);
                 const insetPad = Math.min(8, Math.max(3, panelW * 0.025));
-                const insetW = Math.max(24, Math.min(panelW - insetPad * 2, panelW * 0.42, 180));
-                const insetH = Math.max(20, Math.min(panelH - insetPad * 2, panelH * 0.42, insetW * (panelH / Math.max(1, panelW))));
-                const insetX = Math.max(panelLeft + insetPad, panelLeft + panelW - insetW - insetPad);
-                const insetY = Math.max(panelTop + insetPad, panelTop + panelH - insetH - insetPad);
+                const insetMaxW = Math.max(24, panelW - insetPad * 2);
+                const insetMaxH = Math.max(20, panelH - insetPad * 2);
+                const insetBase = Math.min(insetMaxW, insetMaxH);
+                const insetW = Math.max(24, Math.min(insetMaxW, insetBase * resolvedFftOverlaySize));
+                const insetH = Math.max(20, Math.min(insetMaxH, insetBase * resolvedFftOverlaySize));
+                const insetX = resolvedFftOverlayPosition.endsWith("right")
+                  ? panelLeft + panelW - insetW - insetPad
+                  : panelLeft + insetPad;
+                const insetY = resolvedFftOverlayPosition.startsWith("bottom")
+                  ? panelTop + panelH - insetH - insetPad
+                  : panelTop + insetPad;
                 return (
                   <Box
                     key={`fft-overlay-inset-${panel}`}

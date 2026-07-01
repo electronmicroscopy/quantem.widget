@@ -646,6 +646,8 @@ class Show3D(anywidget.AnyWidget):
     # =========================================================================
     show_fft = traitlets.Bool(False).tag(sync=True)
     fft_layout = traitlets.Unicode("bottom").tag(sync=True)
+    fft_overlay_position = traitlets.Unicode("top-left").tag(sync=True)
+    fft_overlay_size = traitlets.Float(0.35).tag(sync=True)
     fft_window = traitlets.Bool(True).tag(sync=True)
     widget_version = traitlets.Unicode("unknown")  # Python-only: telemetry readout
     # =========================================================================
@@ -1145,6 +1147,8 @@ class Show3D(anywidget.AnyWidget):
         timestamp_unit: str = "s",
         show_fft: bool = False,
         fft_layout: str = "bottom",
+        fft_overlay_position: str = "top-left",
+        fft_overlay_size: float = 0.35,
         fft_window: bool = True,
         show_stats: bool | None = None,
         show_controls: bool = True,
@@ -1197,6 +1201,17 @@ class Show3D(anywidget.AnyWidget):
                 "fft_layout must be one of 'bottom', 'right', or 'overlay', "
                 f"got {fft_layout!r}"
             )
+        fft_overlay_position = str(fft_overlay_position).lower()
+        if fft_overlay_position not in {"top-left", "top-right", "bottom-left", "bottom-right"}:
+            raise ValueError(
+                "fft_overlay_position must be one of 'top-left', 'top-right', "
+                f"'bottom-left', or 'bottom-right', got {fft_overlay_position!r}"
+            )
+        fft_overlay_size = float(fft_overlay_size)
+        if not np.isfinite(fft_overlay_size):
+            raise ValueError(f"fft_overlay_size must be finite, got {fft_overlay_size}")
+        if not 0.2 <= fft_overlay_size <= 0.7:
+            raise ValueError(f"fft_overlay_size must be in [0.2, 0.7], got {fft_overlay_size}")
         if show_scale_bar is not None:
             kwargs["scale_bar_visible"] = bool(show_scale_bar)
         panel_width_px = int(panel_width_px)
@@ -1259,6 +1274,8 @@ class Show3D(anywidget.AnyWidget):
                             timestamps=timestamps,
                             timestamp_unit=timestamp_unit, show_fft=show_fft,
                             fft_layout=fft_layout,
+                            fft_overlay_position=fft_overlay_position,
+                            fft_overlay_size=fft_overlay_size,
                             fft_window=fft_window,
                             show_stats=show_stats, show_controls=show_controls,
                             size=size, crop=crop, padding=padding, pad_mode=pad_mode,
@@ -1287,7 +1304,8 @@ class Show3D(anywidget.AnyWidget):
                    percentile_low: float, percentile_high: float,
                    fps: float, avg_window: int,
                    timestamps: list[float] | None,
-                   timestamp_unit: str, show_fft: bool, fft_layout: str, fft_window: bool,
+                   timestamp_unit: str, show_fft: bool, fft_layout: str,
+                   fft_overlay_position: str, fft_overlay_size: float, fft_window: bool,
                    show_stats: bool | None, show_controls: bool,
                    size: int, crop: int | tuple[int, int] | tuple[int, int, int, int],
                    padding: int | tuple[int, int], pad_mode: str,
@@ -1754,6 +1772,8 @@ class Show3D(anywidget.AnyWidget):
         self._refresh_auto_contrast_ranges()
         self.show_fft = show_fft
         self.fft_layout = fft_layout
+        self.fft_overlay_position = fft_overlay_position
+        self.fft_overlay_size = fft_overlay_size
         self.fft_window = fft_window
         # Statistics are opt-in because they occupy vertical space in notebooks
         # and exported HTML, especially on phones.
@@ -2084,6 +2104,8 @@ class Show3D(anywidget.AnyWidget):
             "show_controls": self.show_controls,
             "show_fft": self.show_fft,
             "fft_layout": self.fft_layout,
+            "fft_overlay_position": self.fft_overlay_position,
+            "fft_overlay_size": self.fft_overlay_size,
             "show_kymograph": self.show_kymograph,
             "fft_window": self.fft_window,
             "pixel_size": self.pixel_size,
@@ -3514,6 +3536,8 @@ class Show3D(anywidget.AnyWidget):
             timestamp_unit=self.timestamp_unit,
             show_fft=self.show_fft,
             fft_layout=self.fft_layout,
+            fft_overlay_position=self.fft_overlay_position,
+            fft_overlay_size=self.fft_overlay_size,
             fft_window=self.fft_window,
             show_stats=self.show_stats,
             show_controls=self.show_controls,
