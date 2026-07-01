@@ -5835,7 +5835,18 @@ function Show3D() {
   // Compute FFT magnitude (expensive, async - only re-run on data/GPU changes)
   // Supports ROI-scoped FFT: when ROI is active with a selected ROI, compute
   // FFT of the cropped region instead of the full frame.
+  type FftMagnitudeCacheEntry = {
+    mag: Float32Array;
+    cropDims: { cropWidth: number; cropHeight: number; fftWidth: number; fftHeight: number } | null;
+    grid: { panelWidth: number; panelHeight: number; cols: number; rows: number; count: number } | null;
+    source: string;
+    panels: number;
+    gridLabel: string | null;
+    sizeLabel: string;
+  };
+  const fftMagnitudeCacheMaxBytes = 256 * 1024 * 1024;
   const fftMagRef = React.useRef<Float32Array | null>(null);
+  const fftMagnitudeCacheRef = React.useRef<Map<string, FftMagnitudeCacheEntry>>(new Map());
   const [fftMagVersion, setFftMagVersion] = React.useState(0);
 
   React.useEffect(() => {
@@ -5856,6 +5867,85 @@ function Show3D() {
       const data = rawFrameDataRef.current!;
       const panelCount = Math.max(1, nPanels || 1);
       const multiPanelFft = panelCount > 1 && !roiFftActive;
+      const fftFrameIdx = clampSlice(offline ? liveSliceIdx : displaySliceIdx);
+      const selectedRoi = roiFftActive && roiList && roiSelectedIdx >= 0 && roiSelectedIdx < roiList.length
+        ? roiList[roiSelectedIdx]
+        : null;
+      const roiKey = selectedRoi
+        ? JSON.stringify({
+          idx: roiSelectedIdx,
+          row: Math.round(Number(selectedRoi.row ?? 0) * 100) / 100,
+          col: Math.round(Number(selectedRoi.col ?? 0) * 100) / 100,
+          radius: Math.round(Number(selectedRoi.radius ?? 0) * 100) / 100,
+          radius_inner: Math.round(Number(selectedRoi.radius_inner ?? 0) * 100) / 100,
+          width: Math.round(Number(selectedRoi.width ?? 0) * 100) / 100,
+          height: Math.round(Number(selectedRoi.height ?? 0) * 100) / 100,
+          shape: selectedRoi.shape,
+        })
+        : "none";
+      const fftGridCols = multiPanelFft ? panelColsForCount(Math.max(1, visiblePanelIndices.length || 1)) : 1;
+      const fftCacheKey = [
+        offline ? "offline" : "live",
+        `frame=${fftFrameIdx}`,
+        `seq=${frameSeq || 0}`,
+        `server=${frameServerVersion || 0}`,
+        `dims=${width}x${height}`,
+        `panels=${panelCount}`,
+        `visible=${visiblePanelIndices.join(",")}`,
+        `cols=${fftGridCols}`,
+        `sourceW=${sourcePanelWidth}`,
+        `shared=${sharedPanelSource ? 1 : 0}`,
+        `roi=${roiFftActive ? roiKey : "none"}`,
+        `window=${fftWindow ? 1 : 0}`,
+      ].join("|");
+      const cache = fftMagnitudeCacheRef.current;
+      const cached = cache.get(fftCacheKey);
+      if (cached) {
+        cache.delete(fftCacheKey);
+        cache.set(fftCacheKey, cached);
+        fftMagRef.current = cached.mag;
+        fftMagCacheRef.current = cached.mag;
+        fftPanelGridRef.current = cached.grid;
+        setFftCropDims(cached.cropDims);
+        setFftMagVersion(v => v + 1);
+        const dbg = show3dPerfDebug();
+        setFftBackendInfo(prev => ({
+          ...prev,
+          source: `${cached.source}-cache`,
+          ms: 0,
+          panels: cached.panels,
+          grid: cached.gridLabel || "",
+        }));
+        if (dbg) {
+          dbg.lastFftMs = 0;
+          dbg.lastFftSource = `${cached.source}-cache`;
+          dbg.lastFftPanels = cached.panels;
+          dbg.lastFftSize = cached.sizeLabel;
+          dbg.lastFftGrid = cached.gridLabel;
+          dbg.fftCacheHits = Number(dbg.fftCacheHits || 0) + 1;
+          dbg.fftCacheSize = cache.size;
+          dbg.fftCacheBytes = Array.from(cache.values()).reduce((total, item) => total + item.mag.byteLength, 0);
+        }
+        return;
+      }
+      const rememberFft = (entry: FftMagnitudeCacheEntry) => {
+        cache.set(fftCacheKey, entry);
+        const maxEntries = Math.max(2, Math.min(24, nSlices || 12));
+        let totalBytes = Array.from(cache.values()).reduce((total, item) => total + item.mag.byteLength, 0);
+        while (cache.size > maxEntries || totalBytes > fftMagnitudeCacheMaxBytes) {
+          const oldest = cache.keys().next().value;
+          if (oldest === undefined) break;
+          const oldestEntry = cache.get(oldest);
+          cache.delete(oldest);
+          totalBytes -= oldestEntry?.mag.byteLength ?? 0;
+        }
+        const dbg = show3dPerfDebug();
+        if (dbg) {
+          dbg.fftCacheMisses = Number(dbg.fftCacheMisses || 0) + 1;
+          dbg.fftCacheSize = cache.size;
+          dbg.fftCacheBytes = totalBytes;
+        }
+      };
 
       if (multiPanelFft) {
         const panelW = sharedPanelSource
@@ -5976,8 +6066,19 @@ function Show3D() {
 
         fftMagRef.current = gridMag;
         fftMagCacheRef.current = gridMag;
-        fftPanelGridRef.current = { panelWidth: fftW, panelHeight: fftH, cols, rows, count: panels.length };
-        setFftCropDims({ cropWidth: panelW, cropHeight: panelH, fftWidth: gridW, fftHeight: gridH });
+        const gridInfo = { panelWidth: fftW, panelHeight: fftH, cols, rows, count: panels.length };
+        const cropDims = { cropWidth: panelW, cropHeight: panelH, fftWidth: gridW, fftHeight: gridH };
+        fftPanelGridRef.current = gridInfo;
+        setFftCropDims(cropDims);
+        rememberFft({
+          mag: gridMag,
+          cropDims,
+          grid: gridInfo,
+          source: fftSource,
+          panels: panels.length,
+          gridLabel: `${gridW}x${gridH}`,
+          sizeLabel: `${fftW}x${fftH}`,
+        });
         setFftMagVersion(v => v + 1);
         const dbg = show3dPerfDebug();
         const elapsedMs = Number((performance.now() - fftStartMs).toFixed(2));
@@ -6081,13 +6182,22 @@ function Show3D() {
       fftMagRef.current = computeMagnitude(real, imag);
       fftMagCacheRef.current = fftMagRef.current;
       // Track FFT dimensions when they differ from image dimensions (ROI crop or non-pow2 padding)
+      let cropDims: { cropWidth: number; cropHeight: number; fftWidth: number; fftHeight: number } | null = null;
       if (origCropW > 0) {
-        setFftCropDims({ cropWidth: origCropW, cropHeight: origCropH, fftWidth: fftW, fftHeight: fftH });
+        cropDims = { cropWidth: origCropW, cropHeight: origCropH, fftWidth: fftW, fftHeight: fftH };
       } else if (fftW !== width || fftH !== height) {
-        setFftCropDims({ cropWidth: width, cropHeight: height, fftWidth: fftW, fftHeight: fftH });
-      } else {
-        setFftCropDims(null);
+        cropDims = { cropWidth: width, cropHeight: height, fftWidth: fftW, fftHeight: fftH };
       }
+      setFftCropDims(cropDims);
+      rememberFft({
+        mag: fftMagRef.current,
+        cropDims,
+        grid: null,
+        source: fftSource,
+        panels: 1,
+        gridLabel: `${fftW}x${fftH}`,
+        sizeLabel: `${fftW}x${fftH}`,
+      });
       setFftMagVersion(v => v + 1);
       const dbg = show3dPerfDebug();
       const elapsedMs = Number((performance.now() - fftStartMs).toFixed(2));
@@ -6110,7 +6220,7 @@ function Show3D() {
     doCompute();
 
     return () => { cancelled = true; };
-  }, [effectiveShowFft, frameBytes, offline, liveSliceIdx, displaySliceIdx, width, height, roiFftActive, roiList, roiSelectedIdx, fftWindow, nPanels, visiblePanelIndices, sourcePanelWidth, maxCols, extractPanelSlice, ensureFftGpu]);
+  }, [effectiveShowFft, frameBytes, frameSeq, frameServerVersion, offline, liveSliceIdx, displaySliceIdx, width, height, roiFftActive, roiList, roiSelectedIdx, fftWindow, nPanels, nSlices, visiblePanelIndices, sourcePanelWidth, sharedPanelSource, maxCols, panelColsForCount, extractPanelSlice, ensureFftGpu]);
 
   // Clear FFT measurement when ROI FFT state changes
   React.useEffect(() => { setFftClickInfo(null); }, [roiFftActive, roiSelectedIdx]);
@@ -8332,14 +8442,18 @@ function Show3D() {
       : fftBackendInfo.webgpu === "software" ? "software adapter ignored"
         : fftBackendInfo.webgpu === "unavailable" ? "unavailable"
           : "checking";
+  const fftSourceRaw = fftBackendInfo.source || "";
+  const fftSourceCached = fftSourceRaw.endsWith("-cache");
+  const fftSourceBase = fftSourceCached ? fftSourceRaw.slice(0, -6) : fftSourceRaw;
   const fftSourceLabel =
-    fftBackendInfo.source === "webgpu-batch" || fftBackendInfo.source === "webgpu" ? "WebGPU"
-      : fftBackendInfo.source ? "CPU fallback"
+    fftSourceCached ? "Cached"
+      : fftSourceBase === "webgpu-batch" || fftSourceBase === "webgpu" ? "WebGPU"
+        : fftSourceBase ? "CPU fallback"
         : "not run yet";
   const fftSourceDetail =
-    fftBackendInfo.source === "cpu-sync-shifted" ? "offline CPU"
-      : fftBackendInfo.source === "worker-batch" || fftBackendInfo.source === "worker" ? "CPU worker"
-        : fftBackendInfo.source || "";
+    fftSourceBase === "cpu-sync-shifted" ? "offline CPU"
+      : fftSourceBase === "worker-batch" || fftSourceBase === "worker" ? "CPU worker"
+        : fftSourceBase || "";
   return (
     <Box
       ref={rootRef}
