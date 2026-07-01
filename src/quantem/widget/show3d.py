@@ -21,9 +21,9 @@ import tempfile
 import urllib.parse
 import warnings
 import weakref
-from collections.abc import Sequence
+from collections.abc import Callable, Mapping, Sequence
 from enum import Enum
-from typing import Self
+from typing import Any, Self
 
 import anywidget
 import numpy as np
@@ -156,6 +156,89 @@ def _crop_stack(data: np.ndarray, crop: tuple[int, int, int, int]) -> np.ndarray
     return data[:, top:row_stop, left:col_stop]
 
 
+def _json_safe_metadata_value(value: Any) -> Any:
+    """Convert common scientific scalar/container values to JSON-safe objects."""
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, np.ndarray):
+        return [_json_safe_metadata_value(item) for item in value.tolist()]
+    if isinstance(value, Mapping):
+        return {str(key): _json_safe_metadata_value(val) for key, val in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe_metadata_value(item) for item in value]
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
+
+
+def _normalize_frame_metadata(metadata: Sequence[Mapping[str, Any]] | None) -> list[dict[str, Any]]:
+    """Normalize one frame-metadata sequence to JSON-safe dictionaries."""
+    if metadata is None:
+        return []
+    out: list[dict[str, Any]] = []
+    for idx, item in enumerate(metadata):
+        if not isinstance(item, Mapping):
+            raise TypeError(f"frame_metadata[{idx}] must be a mapping, got {type(item).__name__}")
+        out.append(_json_safe_metadata_value(item))
+    return out
+
+
+def _normalize_panel_frame_metadata(
+    metadata: Sequence[Sequence[Mapping[str, Any]]] | None,
+) -> list[list[dict[str, Any]]]:
+    """Normalize per-panel frame metadata to JSON-safe dictionaries."""
+    if metadata is None:
+        return []
+    return [_normalize_frame_metadata(panel_metadata) for panel_metadata in metadata]
+
+
+class _FormatDict(dict):
+    """format_map helper that reports missing metadata keys clearly."""
+
+    def __missing__(self, key: str) -> str:
+        raise KeyError(key)
+
+
+def _format_metadata_default(metadata: Mapping[str, Any]) -> str:
+    """Compact, repository-neutral default metadata label."""
+    if "label" in metadata and metadata["label"] not in (None, ""):
+        return str(metadata["label"])
+    parts: list[str] = []
+    for key, value in metadata.items():
+        if value in (None, ""):
+            continue
+        parts.append(f"{key}={value}")
+    return " · ".join(parts)
+
+
+def _format_metadata_label(
+    metadata: Mapping[str, Any],
+    formatter: str | Callable[..., object] | None,
+    *,
+    frame_idx: int,
+    panel_idx: int | None,
+) -> str:
+    """Format one metadata dictionary as a display label."""
+    if not metadata:
+        return ""
+    if formatter is None:
+        return _format_metadata_default(metadata)
+    if isinstance(formatter, str):
+        try:
+            return formatter.format_map(_FormatDict(metadata))
+        except KeyError as exc:
+            key = exc.args[0]
+            raise KeyError(f"frame_label_format references missing metadata key {key!r}") from exc
+    try:
+        value = formatter(metadata, frame_idx, panel_idx)
+    except TypeError:
+        try:
+            value = formatter(metadata, frame_idx)
+        except TypeError:
+            value = formatter(metadata)
+    return "" if value is None else str(value)
+
+
 class Colormap(str, Enum):
     """Available colormaps for image display."""
 
@@ -234,6 +317,22 @@ class Show3D(anywidget.AnyWidget):
     labels : list[str] | None, optional
         Labels for each slice (e.g., ``["C10=-500nm", "C10=-400nm", ...]``).
         If ``None``, uses string slice indices.
+    frame_metadata : sequence of mapping, optional
+        Generic metadata for each frame. If ``labels`` is not provided, entries
+        are formatted into labels using ``frame_label_format`` or a compact
+        ``key=value`` default. This is repository-neutral: upstream packages can
+        pass fields such as ``iteration``, ``defocus_nm``, ``loss``, ``dose``,
+        or any other JSON-like values.
+    panel_frame_metadata : sequence of sequence of mapping, optional
+        Per-panel frame metadata, shaped ``[panel][frame]``. If
+        ``panel_frame_labels`` is not provided, entries are formatted into the
+        per-panel overlay labels using ``frame_label_format``.
+    frame_label_format : str or callable, optional
+        Formatter for metadata-derived labels. A string uses Python format
+        fields, for example ``"iter {iteration} · df={defocus_nm:.1f} nm"``.
+        A callable may accept ``(metadata)``, ``(metadata, frame_idx)``, or
+        ``(metadata, frame_idx, panel_idx)`` and is resolved to strings before
+        HTML export.
     title : str, optional
         Title to display above the image.
     cmap : str or Colormap, default Colormap.MAGMA
@@ -410,6 +509,10 @@ class Show3D(anywidget.AnyWidget):
     # Drives the truthful timing print (end-to-end, not __init__-only).
     _js_rendered = traitlets.Bool(False).tag(sync=True)
     labels = traitlets.List(traitlets.Unicode()).tag(sync=True)
+    panel_frame_labels = traitlets.List(default_value=[]).tag(sync=True)
+    frame_metadata = traitlets.List(default_value=[]).tag(sync=True)
+    panel_frame_metadata = traitlets.List(default_value=[]).tag(sync=True)
+    frame_label_format = traitlets.Unicode("").tag(sync=True)
     title = traitlets.Unicode("").tag(sync=True)
     cmap = traitlets.Unicode("plasma").tag(sync=True)
     dim_label = traitlets.Unicode("Frame").tag(sync=True)
@@ -708,6 +811,64 @@ class Show3D(anywidget.AnyWidget):
             )
         return val
 
+    @traitlets.validate("panel_frame_labels")
+    def _validate_panel_frame_labels(self, proposal: dict) -> list:
+        """Require optional per-panel frame labels to match panel/frame counts."""
+        val = [list(labels) for labels in proposal["value"]]
+        if not val:
+            return []
+        n_panels = int(self.n_panels)
+        if len(val) != n_panels:
+            raise traitlets.TraitError(
+                f"panel_frame_labels length ({len(val)}) must equal n_panels ({n_panels}) or be empty"
+            )
+        n_slices = int(self.n_slices)
+        real_frames = list(self.panel_real_frames)
+        for panel, labels in enumerate(val):
+            allowed = {n_slices}
+            if panel < len(real_frames):
+                allowed.add(int(real_frames[panel]))
+            if len(labels) not in allowed:
+                allowed_text = " or ".join(str(n) for n in sorted(allowed))
+                raise traitlets.TraitError(
+                    f"panel_frame_labels[{panel}] length ({len(labels)}) must equal {allowed_text}"
+                )
+        return val
+
+    @traitlets.validate("frame_metadata")
+    def _validate_frame_metadata(self, proposal: dict) -> list:
+        """Require optional common frame metadata to match n_slices."""
+        val = _normalize_frame_metadata(proposal["value"])
+        if val and len(val) != int(self.n_slices):
+            raise traitlets.TraitError(
+                f"frame_metadata length ({len(val)}) must equal n_slices ({self.n_slices}) or be empty"
+            )
+        return val
+
+    @traitlets.validate("panel_frame_metadata")
+    def _validate_panel_frame_metadata(self, proposal: dict) -> list:
+        """Require optional per-panel frame metadata to match panel/frame counts."""
+        val = _normalize_panel_frame_metadata(proposal["value"])
+        if not val:
+            return []
+        n_panels = int(self.n_panels)
+        if len(val) != n_panels:
+            raise traitlets.TraitError(
+                f"panel_frame_metadata length ({len(val)}) must equal n_panels ({n_panels}) or be empty"
+            )
+        n_slices = int(self.n_slices)
+        real_frames = list(self.panel_real_frames)
+        for panel, metadata in enumerate(val):
+            allowed = {n_slices}
+            if panel < len(real_frames):
+                allowed.add(int(real_frames[panel]))
+            if len(metadata) not in allowed:
+                allowed_text = " or ".join(str(n) for n in sorted(allowed))
+                raise traitlets.TraitError(
+                    f"panel_frame_metadata[{panel}] length ({len(metadata)}) must equal {allowed_text}"
+                )
+        return val
+
     @traitlets.validate("timestamps")
     def _validate_timestamps(self, proposal: dict) -> list:
         """Require timestamps length to match n_slices or be empty."""
@@ -957,6 +1118,10 @@ class Show3D(anywidget.AnyWidget):
         *data_args,
         labels: list[str] | None = None,
         panel_titles: list[str] | None = None,
+        panel_frame_labels: list[list[str]] | None = None,
+        frame_metadata: Sequence[Mapping[str, Any]] | None = None,
+        panel_frame_metadata: Sequence[Sequence[Mapping[str, Any]]] | None = None,
+        frame_label_format: str | Callable[..., object] | None = None,
         panel_real_frames: list[int] | None = None,
         hidden_panels: Sequence[int | str] | int | str | None = None,
         title: str = "",
@@ -1062,6 +1227,10 @@ class Show3D(anywidget.AnyWidget):
             self.panel_real_frames = list(panel_real_frames)
         with self.hold_sync():
             self._init_sync(data_args, labels=labels, panel_titles=panel_titles,
+                            panel_frame_labels=panel_frame_labels,
+                            frame_metadata=frame_metadata,
+                            panel_frame_metadata=panel_frame_metadata,
+                            frame_label_format=frame_label_format,
                             title=title, cmap=cmap, vmin=vmin, vmax=vmax,
                             pixel_size=pixel_size, pixel_unit=pixel_unit,
                             smooth=smooth, image_rotation=image_rotation,
@@ -1088,7 +1257,12 @@ class Show3D(anywidget.AnyWidget):
                 self.set_hidden_panels(hidden_panels)
 
     def _init_sync(self, data_args: tuple, *, labels: list[str] | None,
-                   panel_titles: list[str] | None, title: str,
+                   panel_titles: list[str] | None,
+                   panel_frame_labels: list[list[str]] | None,
+                   frame_metadata: Sequence[Mapping[str, Any]] | None,
+                   panel_frame_metadata: Sequence[Sequence[Mapping[str, Any]]] | None,
+                   frame_label_format: str | Callable[..., object] | None,
+                   title: str,
                    cmap: str | Colormap, vmin: float | None, vmax: float | None,
                    pixel_size: float, pixel_unit: str | None, smooth: bool, image_rotation: int,
                    log_scale: bool, auto_contrast: bool,
@@ -1472,11 +1646,36 @@ class Show3D(anywidget.AnyWidget):
         self._data_min_off = self.data_min
         self._data_max_off = self.data_max
 
-        # Labels
+        # Labels and frame metadata. Explicit string labels win; metadata is a
+        # generic input layer that any upstream repo can adapt into.
+        metadata_formatter = frame_label_format
+        if isinstance(metadata_formatter, str):
+            self.frame_label_format = metadata_formatter
+        else:
+            self.frame_label_format = ""
+        self.frame_metadata = _normalize_frame_metadata(frame_metadata)
+        self.panel_frame_metadata = _normalize_panel_frame_metadata(panel_frame_metadata)
         if labels is not None:
             self.labels = list(labels)
+        elif self.frame_metadata:
+            self.labels = [
+                _format_metadata_label(meta, metadata_formatter, frame_idx=i, panel_idx=None)
+                for i, meta in enumerate(self.frame_metadata)
+            ]
         else:
             self.labels = [str(i) for i in range(self.n_slices)]
+        if panel_frame_labels is not None:
+            self.panel_frame_labels = [list(panel_labels) for panel_labels in panel_frame_labels]
+        elif self.panel_frame_metadata:
+            self.panel_frame_labels = [
+                [
+                    _format_metadata_label(meta, metadata_formatter, frame_idx=i, panel_idx=panel)
+                    for i, meta in enumerate(panel_metadata)
+                ]
+                for panel, panel_metadata in enumerate(self.panel_frame_metadata)
+            ]
+        else:
+            self.panel_frame_labels = []
 
         # Title and colormap - use extracted title if not explicitly provided
         self.title = title if title else (_extracted_title or "")
@@ -1900,6 +2099,13 @@ class Show3D(anywidget.AnyWidget):
             "dim_unit": self.dim_unit,
             "labels": list(self.labels),
             "panel_titles": list(self.panel_titles),
+            "panel_frame_labels": [list(labels) for labels in self.panel_frame_labels],
+            "frame_metadata": [dict(metadata) for metadata in self.frame_metadata],
+            "panel_frame_metadata": [
+                [dict(metadata) for metadata in panel_metadata]
+                for panel_metadata in self.panel_frame_metadata
+            ],
+            "frame_label_format": self.frame_label_format,
             "timestamps": list(self.timestamps),
             "timestamp_unit": self.timestamp_unit,
         }
@@ -2091,6 +2297,44 @@ class Show3D(anywidget.AnyWidget):
         for key in ("labels", "timestamps"):
             if key in state and isinstance(state[key], list) and 0 < len(state[key]) != n_cur:
                 state.pop(key)
+        if "frame_metadata" in state and isinstance(state["frame_metadata"], list) and 0 < len(state["frame_metadata"]) != n_cur:
+            state.pop("frame_metadata")
+        if "panel_frame_labels" in state and isinstance(state["panel_frame_labels"], list):
+            n_pan = int(self.n_panels)
+            real_frames = list(self.panel_real_frames)
+            panel_labels = state["panel_frame_labels"]
+            labels_ok = len(panel_labels) == n_pan
+            if labels_ok:
+                for panel, labels in enumerate(panel_labels):
+                    if not isinstance(labels, list):
+                        labels_ok = False
+                        break
+                    allowed_lengths = {n_cur}
+                    if panel < len(real_frames):
+                        allowed_lengths.add(int(real_frames[panel]))
+                    if len(labels) not in allowed_lengths:
+                        labels_ok = False
+                        break
+            if not labels_ok:
+                state.pop("panel_frame_labels")
+        if "panel_frame_metadata" in state and isinstance(state["panel_frame_metadata"], list):
+            n_pan = int(self.n_panels)
+            real_frames = list(self.panel_real_frames)
+            panel_metadata = state["panel_frame_metadata"]
+            metadata_ok = len(panel_metadata) == n_pan
+            if metadata_ok:
+                for panel, metadata in enumerate(panel_metadata):
+                    if not isinstance(metadata, list):
+                        metadata_ok = False
+                        break
+                    allowed_lengths = {n_cur}
+                    if panel < len(real_frames):
+                        allowed_lengths.add(int(real_frames[panel]))
+                    if len(metadata) not in allowed_lengths:
+                        metadata_ok = False
+                        break
+            if not metadata_ok:
+                state.pop("panel_frame_metadata")
         # Drop `starred` if its length doesn't match current n_panels (e.g.
         # saved from a 4-panel widget, loading into a single-panel one).
         if "starred" in state and isinstance(state["starred"], list) and len(state["starred"]) != int(self.n_panels):
@@ -3223,6 +3467,13 @@ class Show3D(anywidget.AnyWidget):
             *self._export_data_args(),
             labels=list(self.labels) if self.labels else None,
             panel_titles=list(self.panel_titles) if self.panel_titles else None,
+            panel_frame_labels=[list(labels) for labels in self.panel_frame_labels] if self.panel_frame_labels else None,
+            frame_metadata=[dict(metadata) for metadata in self.frame_metadata] if self.frame_metadata else None,
+            panel_frame_metadata=[
+                [dict(metadata) for metadata in panel_metadata]
+                for panel_metadata in self.panel_frame_metadata
+            ] if self.panel_frame_metadata else None,
+            frame_label_format=self.frame_label_format or None,
             panel_real_frames=list(self.panel_real_frames) if self.panel_real_frames else None,
             title=self.title,
             cmap=self.cmap,
