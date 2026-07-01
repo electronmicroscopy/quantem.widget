@@ -1184,6 +1184,35 @@ class Show3D(anywidget.AnyWidget):
 
     # === Construction ===
 
+    @classmethod
+    def from_gif(
+        cls,
+        path: str | pathlib.Path,
+        *,
+        fps: float | None = None,
+        title: str | None = None,
+        frame_labels: list[str] | bool | None = None,
+        **kwargs,
+    ) -> Self:
+        """Open a static or animated GIF as a playable stack.
+
+        The GIF is decoded through ``quantem.widget.io.read_gif`` into a
+        grayscale ``Dataset3d``. Pass normal ``Show3D`` keyword arguments such as
+        ``cmap``, ``show_controls``, ``max_cols``, or ``panel_width_px``.
+        """
+        from quantem.widget.io import read_gif  # noqa: PLC0415
+
+        ds = read_gif(path)
+        frame_count = int(ds.array.shape[0])
+        kwargs.setdefault("title", ds.name if title is None else title)
+        if fps is not None:
+            kwargs.setdefault("fps", fps)
+        if frame_labels is True:
+            kwargs.setdefault("labels", [f"Frame {i + 1}" for i in range(frame_count)])
+        elif frame_labels:
+            kwargs.setdefault("labels", list(frame_labels))
+        return cls(ds, **kwargs)
+
     def __init__(
         self,
         *data_args,

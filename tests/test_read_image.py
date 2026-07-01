@@ -10,6 +10,7 @@ import json
 import numpy as np
 import pytest
 
+from quantem.widget import Show2D, Show3D, read_gif
 from quantem.widget.io.image import read_image, read_images
 from quantem.core.datastructures import Dataset2d
 
@@ -51,6 +52,55 @@ def test_three_dim_reduced_to_first_frame(tmp_path):
     ds = read_image(path)
     np.testing.assert_array_equal(ds.array, stack[0])      # first frame only
     assert ds.array.shape == (16, 16)
+
+
+def test_read_gif_returns_stack_and_widgets_open_it(tmp_path):
+    from PIL import Image
+
+    frames = [
+        np.full((7, 9), value, dtype=np.uint8)
+        for value in (10, 80, 160, 240)
+    ]
+    path = tmp_path / "denoise_preview.gif"
+    Image.fromarray(frames[0]).save(
+        path,
+        save_all=True,
+        append_images=[Image.fromarray(frame) for frame in frames[1:]],
+        duration=80,
+        loop=0,
+        optimize=False,
+    )
+
+    ds = read_gif(path)
+    assert ds.name == "denoise_preview"
+    assert ds.array.shape == (4, 7, 9)
+    assert ds.array.dtype == np.float32
+    np.testing.assert_array_equal(ds.array[:, 0, 0], [10, 80, 160, 240])
+
+    first = read_image(path)
+    np.testing.assert_array_equal(first.array, frames[0])
+
+    movie = Show3D.from_gif(
+        path,
+        fps=12,
+        frame_labels=True,
+        show_controls=False,
+        show_scale_bar=False,
+    )
+    assert movie.title == "denoise_preview"
+    assert movie.n_slices == 4
+    assert movie.height == 7
+    assert movie.width == 9
+    assert movie.fps == 12
+    assert movie.labels == ["Frame 1", "Frame 2", "Frame 3", "Frame 4"]
+
+    grid = Show2D.from_gif(path, ncols=2, labels=True, verbose=False)
+    assert grid.title == "denoise_preview"
+    assert grid.n_images == 4
+    assert grid.ncols == 2
+    assert grid.height == 7
+    assert grid.width == 9
+    assert grid.labels == ["Frame 1", "Frame 2", "Frame 3", "Frame 4"]
 
 
 # --- EMD: Velox layout + non-Velox fallback --------------------------------
