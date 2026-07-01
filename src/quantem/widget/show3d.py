@@ -648,6 +648,7 @@ class Show3D(anywidget.AnyWidget):
     fft_layout = traitlets.Unicode("bottom").tag(sync=True)
     fft_overlay_position = traitlets.Unicode("top-left").tag(sync=True)
     fft_overlay_size = traitlets.Float(0.35).tag(sync=True)
+    fft_overlay_zoom = traitlets.Float(1.0).tag(sync=True)
     fft_window = traitlets.Bool(True).tag(sync=True)
     widget_version = traitlets.Unicode("unknown")  # Python-only: telemetry readout
     # =========================================================================
@@ -1149,6 +1150,7 @@ class Show3D(anywidget.AnyWidget):
         fft_layout: str = "bottom",
         fft_overlay_position: str = "top-left",
         fft_overlay_size: float = 0.35,
+        fft_overlay_zoom: float = 1.0,
         fft_window: bool = True,
         show_stats: bool | None = None,
         show_controls: bool = True,
@@ -1212,6 +1214,11 @@ class Show3D(anywidget.AnyWidget):
             raise ValueError(f"fft_overlay_size must be finite, got {fft_overlay_size}")
         if not 0.2 <= fft_overlay_size <= 0.7:
             raise ValueError(f"fft_overlay_size must be in [0.2, 0.7], got {fft_overlay_size}")
+        fft_overlay_zoom = float(fft_overlay_zoom)
+        if not np.isfinite(fft_overlay_zoom):
+            raise ValueError(f"fft_overlay_zoom must be finite, got {fft_overlay_zoom}")
+        if not 1.0 <= fft_overlay_zoom <= 32.0:
+            raise ValueError(f"fft_overlay_zoom must be in [1.0, 32.0], got {fft_overlay_zoom}")
         if show_scale_bar is not None:
             kwargs["scale_bar_visible"] = bool(show_scale_bar)
         panel_width_px = int(panel_width_px)
@@ -1276,6 +1283,7 @@ class Show3D(anywidget.AnyWidget):
                             fft_layout=fft_layout,
                             fft_overlay_position=fft_overlay_position,
                             fft_overlay_size=fft_overlay_size,
+                            fft_overlay_zoom=fft_overlay_zoom,
                             fft_window=fft_window,
                             show_stats=show_stats, show_controls=show_controls,
                             size=size, crop=crop, padding=padding, pad_mode=pad_mode,
@@ -1305,7 +1313,8 @@ class Show3D(anywidget.AnyWidget):
                    fps: float, avg_window: int,
                    timestamps: list[float] | None,
                    timestamp_unit: str, show_fft: bool, fft_layout: str,
-                   fft_overlay_position: str, fft_overlay_size: float, fft_window: bool,
+                   fft_overlay_position: str, fft_overlay_size: float,
+                   fft_overlay_zoom: float, fft_window: bool,
                    show_stats: bool | None, show_controls: bool,
                    size: int, crop: int | tuple[int, int] | tuple[int, int, int, int],
                    padding: int | tuple[int, int], pad_mode: str,
@@ -1774,6 +1783,7 @@ class Show3D(anywidget.AnyWidget):
         self.fft_layout = fft_layout
         self.fft_overlay_position = fft_overlay_position
         self.fft_overlay_size = fft_overlay_size
+        self.fft_overlay_zoom = fft_overlay_zoom
         self.fft_window = fft_window
         # Statistics are opt-in because they occupy vertical space in notebooks
         # and exported HTML, especially on phones.
@@ -2106,6 +2116,7 @@ class Show3D(anywidget.AnyWidget):
             "fft_layout": self.fft_layout,
             "fft_overlay_position": self.fft_overlay_position,
             "fft_overlay_size": self.fft_overlay_size,
+            "fft_overlay_zoom": self.fft_overlay_zoom,
             "show_kymograph": self.show_kymograph,
             "fft_window": self.fft_window,
             "pixel_size": self.pixel_size,
@@ -3538,6 +3549,7 @@ class Show3D(anywidget.AnyWidget):
             fft_layout=self.fft_layout,
             fft_overlay_position=self.fft_overlay_position,
             fft_overlay_size=self.fft_overlay_size,
+            fft_overlay_zoom=self.fft_overlay_zoom,
             fft_window=self.fft_window,
             show_stats=self.show_stats,
             show_controls=self.show_controls,
