@@ -81,6 +81,13 @@ const typography = {
   value: { fontSize: 10, fontFamily: UI_FONT },
   title: { fontWeight: "bold" as const },
 };
+const FFT_OVERLAY_POSITION_LABELS = {
+  "top-left": "Top left",
+  "top-right": "Top right",
+  "bottom-left": "Bottom left",
+  "bottom-right": "Bottom right",
+} as const;
+type FftOverlayPosition = keyof typeof FFT_OVERLAY_POSITION_LABELS;
 
 // ============================================================================
 // Inlined utilities (matches Show2D/Show4DSTEM single-file convention)
@@ -1450,7 +1457,7 @@ function Show3D() {
   const resolvedFftLayout = (["bottom", "right", "overlay"].includes(String(fftLayout)) ? String(fftLayout) : "bottom") as "bottom" | "right" | "overlay";
   const fftLayoutBottom = resolvedFftLayout === "bottom";
   const fftLayoutOverlay = resolvedFftLayout === "overlay";
-  const resolvedFftOverlayPosition = (["top-left", "top-right", "bottom-left", "bottom-right"].includes(String(fftOverlayPosition)) ? String(fftOverlayPosition) : "top-left") as "top-left" | "top-right" | "bottom-left" | "bottom-right";
+  const resolvedFftOverlayPosition = (["top-left", "top-right", "bottom-left", "bottom-right"].includes(String(fftOverlayPosition)) ? String(fftOverlayPosition) : "top-left") as FftOverlayPosition;
   const resolvedFftOverlaySize = Math.max(0.2, Math.min(0.7, Number.isFinite(fftOverlaySize) ? fftOverlaySize : 0.35));
   const resolvedFftOverlayZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, Number.isFinite(fftOverlayZoomTrait) ? fftOverlayZoomTrait : 1));
 
@@ -7720,6 +7727,16 @@ function Show3D() {
   // FFT mouse handlers
   const [isFftDragging, setIsFftDragging] = React.useState(false);
   const [fftPanStart, setFftPanStart] = React.useState<{ x: number, y: number, pX: number, pY: number } | null>(null);
+  const fftOverlayDragRef = React.useRef<{
+    pointerId: number;
+    startClientX: number;
+    startClientY: number;
+    panelLeft: number;
+    panelTop: number;
+    panelW: number;
+    panelH: number;
+    moved: boolean;
+  } | null>(null);
 
   const zoomFftAtPoint = React.useCallback((anchorX: number, anchorY: number, deltaY: number) => {
     const zoomFactor = Math.max(0.75, Math.min(1.35, Math.exp(-deltaY * 0.002)));
@@ -7774,6 +7791,100 @@ function Show3D() {
     const localX = e.clientX - rect.left;
     const localY = e.clientY - rect.top;
     zoomFftAtPoint(localX, localY, e.deltaY);
+  };
+
+  const handleFftInsetPointerDown = (
+    e: React.PointerEvent<HTMLElement>,
+    panelLeft: number,
+    panelTop: number,
+    panelW: number,
+    panelH: number,
+  ) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    fftOverlayDragRef.current = {
+      pointerId: e.pointerId,
+      startClientX: e.clientX,
+      startClientY: e.clientY,
+      panelLeft,
+      panelTop,
+      panelW,
+      panelH,
+      moved: false,
+    };
+    e.currentTarget.setPointerCapture?.(e.pointerId);
+  };
+
+  const handleFftInsetPointerMove = (e: React.PointerEvent<HTMLElement>) => {
+    const drag = fftOverlayDragRef.current;
+    if (!drag || drag.pointerId !== e.pointerId) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (Math.hypot(e.clientX - drag.startClientX, e.clientY - drag.startClientY) > 4) {
+      drag.moved = true;
+    }
+  };
+
+  const handleFftInsetPointerUp = (e: React.PointerEvent<HTMLElement>) => {
+    const drag = fftOverlayDragRef.current;
+    if (!drag || drag.pointerId !== e.pointerId) return;
+    e.preventDefault();
+    e.stopPropagation();
+    fftOverlayDragRef.current = null;
+    e.currentTarget.releasePointerCapture?.(e.pointerId);
+    if (!drag.moved) return;
+    const containerRect = canvasContainerRef.current?.getBoundingClientRect();
+    if (!containerRect) return;
+    const localX = e.clientX - containerRect.left - drag.panelLeft;
+    const localY = e.clientY - containerRect.top - drag.panelTop;
+    const vertical = localY < drag.panelH / 2 ? "top" : "bottom";
+    const horizontal = localX < drag.panelW / 2 ? "left" : "right";
+    setFftOverlayPosition(`${vertical}-${horizontal}`);
+  };
+
+  const handleFftInsetMouseDown = (
+    e: React.MouseEvent<HTMLElement>,
+    panelLeft: number,
+    panelTop: number,
+    panelW: number,
+    panelH: number,
+  ) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const drag = {
+      pointerId: -1,
+      startClientX: e.clientX,
+      startClientY: e.clientY,
+      panelLeft,
+      panelTop,
+      panelW,
+      panelH,
+      moved: false,
+    };
+    fftOverlayDragRef.current = drag;
+    const onMove = (ev: MouseEvent) => {
+      ev.preventDefault();
+      if (Math.hypot(ev.clientX - drag.startClientX, ev.clientY - drag.startClientY) > 4) {
+        drag.moved = true;
+      }
+    };
+    const onUp = (ev: MouseEvent) => {
+      window.removeEventListener("mousemove", onMove, true);
+      window.removeEventListener("mouseup", onUp, true);
+      if (fftOverlayDragRef.current === drag) fftOverlayDragRef.current = null;
+      if (!drag.moved) return;
+      const containerRect = canvasContainerRef.current?.getBoundingClientRect();
+      if (!containerRect) return;
+      const localX = ev.clientX - containerRect.left - drag.panelLeft;
+      const localY = ev.clientY - containerRect.top - drag.panelTop;
+      const vertical = localY < drag.panelH / 2 ? "top" : "bottom";
+      const horizontal = localX < drag.panelW / 2 ? "left" : "right";
+      setFftOverlayPosition(`${vertical}-${horizontal}`);
+    };
+    window.addEventListener("mousemove", onMove, true);
+    window.addEventListener("mouseup", onUp, true);
   };
 
   // Convert FFT canvas mouse position to FFT image pixel coordinates
@@ -8674,14 +8785,15 @@ function Show3D() {
                     value={resolvedFftOverlayPosition}
                     onChange={(e) => setFftOverlayPosition(String(e.target.value))}
                     size="small"
-                    sx={{ ...themedSelect, minWidth: 48, fontSize: 10, ml: "2px" }}
+                    sx={{ ...themedSelect, minWidth: 82, fontSize: 10, ml: "2px" }}
                     MenuProps={themedMenuProps}
                     inputProps={{ "aria-label": "FFT overlay position" }}
+                    renderValue={(value) => FFT_OVERLAY_POSITION_LABELS[value as FftOverlayPosition]}
                   >
-                    <MenuItem value="top-left">TL</MenuItem>
-                    <MenuItem value="top-right">TR</MenuItem>
-                    <MenuItem value="bottom-left">BL</MenuItem>
-                    <MenuItem value="bottom-right">BR</MenuItem>
+                    <MenuItem value="top-left">Top left</MenuItem>
+                    <MenuItem value="top-right">Top right</MenuItem>
+                    <MenuItem value="bottom-left">Bottom left</MenuItem>
+                    <MenuItem value="bottom-right">Bottom right</MenuItem>
                   </Select>
                   <Typography sx={{ ...typography.label, fontSize: 10, ml: "2px" }}>Size</Typography>
                   <Select
@@ -9112,7 +9224,15 @@ function Show3D() {
                   <Box
                     key={`fft-overlay-inset-${panel}`}
                     data-show3d-fft-inset="true"
+                    title="Drag FFT overlay to another corner"
                     onWheel={handleFftInsetWheel}
+                    onMouseDown={(e) => handleFftInsetMouseDown(e, panelLeft, panelTop, panelW, panelH)}
+                    onPointerDown={(e) => handleFftInsetPointerDown(e, panelLeft, panelTop, panelW, panelH)}
+                    onPointerMove={handleFftInsetPointerMove}
+                    onPointerUp={handleFftInsetPointerUp}
+                    onPointerCancel={(e) => {
+                      if (fftOverlayDragRef.current?.pointerId === e.pointerId) fftOverlayDragRef.current = null;
+                    }}
                     onDoubleClick={(e) => { e.preventDefault(); e.stopPropagation(); handleFftReset(); }}
                     sx={{
                       position: "absolute",
@@ -9126,7 +9246,8 @@ function Show3D() {
                       zIndex: 8,
                       overflow: "hidden",
                       pointerEvents: "auto",
-                      cursor: fftZoom > 1 ? "grab" : "zoom-in",
+                      cursor: "grab",
+                      touchAction: "none",
                     }}
                   >
                     <canvas
