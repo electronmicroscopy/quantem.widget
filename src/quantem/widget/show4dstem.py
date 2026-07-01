@@ -1038,7 +1038,9 @@ class Show4DSTEM(anywidget.AnyWidget):
             # widget as-is - it already references the companion via data_url - and
             # only disable its export button in the standalone copy.
             prev_enabled = self.export_enabled
+            prev_save_state = self._save_state
             self.export_enabled = False
+            self._save_state = True
             try:
                 embed_minimal_html(
                     str(out),
@@ -1049,6 +1051,7 @@ class Show4DSTEM(anywidget.AnyWidget):
                 )
             finally:
                 self.export_enabled = prev_enabled
+                self._save_state = prev_save_state
             ensure_mobile_viewport(out)
             return out
         export_widget = self._clone_for_html_export(dtype=dtype, det_bin=det_bin)
@@ -1105,6 +1108,7 @@ class Show4DSTEM(anywidget.AnyWidget):
         clone.export_payload = b""
         clone.export_payload_id = ""
         clone.export_filename = ""
+        clone._save_state = True
         return clone
 
     def _export_data_array(self, *, dtype: str, det_bin: int) -> np.ndarray:

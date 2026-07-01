@@ -716,14 +716,21 @@ class Show2D(anywidget.AnyWidget):
         self.render_total_ms = int(total_ms)
         self.render_python_build_ms = int(py_ms)
         self.render_wire_js_ms = int(total_ms - py_ms)
+        if not getattr(self, "_save_state", False) and self.frame_bytes:
+            # The frontend has decoded and painted the pixels by the time it
+            # flips ``_js_rendered``. Clear the synced model buffer so a later
+            # notebook save stores the static PNG fallback, not the full 4k
+            # array, while targeted initial sync remains intact.
+            self.frame_bytes = b""
         if not getattr(self, "_verbose", True):
-            return
-        print(
-            f"Show2D: {shape} {mem_str}: "
-            f"rendered in {total_ms:.0f} ms (Python build {py_ms:.0f} ms, "
-            f"wire+JS {total_ms - py_ms:.0f} ms)",
-            flush=True,
-        )
+            pass
+        else:
+            print(
+                f"Show2D: {shape} {mem_str}: "
+                f"rendered in {total_ms:.0f} ms (Python build {py_ms:.0f} ms, "
+                f"wire+JS {total_ms - py_ms:.0f} ms)",
+                flush=True,
+            )
         # Detach observer: one-shot, we only care about the first paint.
         try:
             self.unobserve(self._on_first_render, names=["_js_rendered"])
@@ -755,6 +762,26 @@ class Show2D(anywidget.AnyWidget):
             normalized = np.clip((frame - vmin) / (vmax - vmin) * 255, 0, 255)
             return normalized.astype(np.uint8)
         return np.zeros(frame.shape, dtype=np.uint8)
+
+    @staticmethod
+    def _downsample_static_frame(frame: np.ndarray, max_px: int) -> np.ndarray:
+        """Area-downsample a frame for notebook PNG fallback rendering."""
+        if max_px <= 0:
+            return frame
+        h, w = frame.shape[-2:]
+        factor = max(1, int(math.ceil(max(h, w) / max_px)))
+        if factor == 1:
+            return frame
+
+        trimmed_h = max(1, h // factor) * factor
+        trimmed_w = max(1, w // factor) * factor
+        trimmed = frame[:trimmed_h, :trimmed_w]
+        return trimmed.reshape(
+            trimmed_h // factor,
+            factor,
+            trimmed_w // factor,
+            factor,
+        ).mean(axis=(1, 3))
 
     def save_image(
         self,
@@ -924,7 +951,9 @@ class Show2D(anywidget.AnyWidget):
         import base64
         import io as _io
         from matplotlib import colormaps
-        frames = getattr(self, "_data", None)
+        frames = getattr(self, "_display_data", None)
+        if frames is None:
+            frames = getattr(self, "_data", None)
         if frames is None or len(frames) == 0:
             return None
         cmap_fn = colormaps.get_cmap(self.cmap)
@@ -939,8 +968,8 @@ class Show2D(anywidget.AnyWidget):
             if panel >= num:
                 continue
             frame = frames[panel]
-            step = max(1, int(max(frame.shape) // max_px))
-            normalized = self._normalize_frame(frame[::step, ::step])
+            frame = self._downsample_static_frame(frame, max_px=max_px)
+            normalized = self._normalize_frame(frame)
             ax.imshow(normalized, cmap=cmap_fn, vmin=0, vmax=255)
             if self.labels and panel < len(self.labels) and self.labels[panel]:
                 ax.set_title(self.labels[panel], fontsize=8)
@@ -1211,6 +1240,7 @@ class Show2D(anywidget.AnyWidget):
         clone.load_state_dict(self.state_dict())
         clone.offline = quantized
         clone._export_light = True
+        clone._save_state = True
         clone.export_enabled = False
         clone.export_status = ""
         clone.export_payload = b""
