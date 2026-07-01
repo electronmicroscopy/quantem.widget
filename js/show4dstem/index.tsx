@@ -1010,9 +1010,12 @@ function Histogram({
     document.addEventListener("mouseup", onUp);
   }, [applyRangePreview, flushRangePreview]);
 
+  const sliderInset = 4;
+  const sliderWidth = Math.max(1, width - sliderInset * 2);
+
   return (
-    <Box sx={{ display: "flex", flexDirection: "column", gap: 0, width }}>
-      <Box sx={{ position: "relative", width, height: height + 6 }}>
+    <Box sx={{ display: "flex", flexDirection: "column", gap: 0, width, overflow: "visible" }}>
+      <Box sx={{ position: "relative", width, height: height + 6, overflow: "visible" }}>
       <canvas
         ref={canvasRef}
         style={{ width, height, border: `1px solid ${colors.border}`, display: "block" }}
@@ -1034,7 +1037,7 @@ function Histogram({
           e.stopPropagation();
           e.nativeEvent.stopImmediatePropagation();
         }}
-        sx={{ position: "absolute", left: 0, top: height - 1, width, height: 8, display: "flex", alignItems: "flex-start", cursor: "grab", zIndex: 2, overflow: "visible" }}
+        sx={{ position: "absolute", left: sliderInset, top: height - 1, width: sliderWidth, height: 8, display: "flex", alignItems: "flex-start", cursor: "grab", zIndex: 2, overflow: "visible" }}
       >
         <Slider
           value={[vminPct, vmaxPct]}
@@ -1048,7 +1051,7 @@ function Histogram({
           valueLabelDisplay="auto"
           valueLabelFormat={formatValue}
           sx={{
-            width,
+            width: sliderWidth,
             py: 0,
             position: "relative",
             zIndex: 3,

@@ -457,9 +457,13 @@ function MapHistogram({
     document.addEventListener("mousemove", onMove);
     document.addEventListener("mouseup", onUp);
   }, [applyRangePreview, emitRangePreview, flushRangePreview]);
+
+  const sliderInset = 4;
+  const sliderWidth = Math.max(1, width - sliderInset * 2);
+
   return (
-    <Box sx={{ display: "flex", flexDirection: "column", gap: 0, width, flexShrink: 0 }}>
-      <Box sx={{ position: "relative", width, height: height + 6 }}>
+    <Box sx={{ display: "flex", flexDirection: "column", gap: 0, width, flexShrink: 0, overflow: "visible" }}>
+      <Box sx={{ position: "relative", width, height: height + 6, overflow: "visible" }}>
       <canvas
         ref={canvasRef}
         style={{ width, height, border: `1px solid ${colors.border}`, display: "block" }}
@@ -481,7 +485,7 @@ function MapHistogram({
           e.stopPropagation();
           e.nativeEvent.stopImmediatePropagation();
         }}
-        sx={{ position: "absolute", left: 0, top: height - 1, width, height: 8, display: "flex", alignItems: "flex-start", cursor: "grab", zIndex: 2, overflow: "visible" }}
+        sx={{ position: "absolute", left: sliderInset, top: height - 1, width: sliderWidth, height: 8, display: "flex", alignItems: "flex-start", cursor: "grab", zIndex: 2, overflow: "visible" }}
       >
         <Slider
           value={liveRange}
@@ -506,7 +510,7 @@ function MapHistogram({
             emitRangeCommit(next[0], next[1]);
           }}
           sx={{
-            width,
+            width: sliderWidth,
             py: 0,
             position: "relative",
             zIndex: 3,
