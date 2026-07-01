@@ -78,3 +78,30 @@ def test_hub_adapter_maps_registry_facade_names(monkeypatch):
     assert hub.download("gold") == Path("/cache/raw/gold.emd")
     assert hub.read_meta("gold") == {"name": "gold", "technique": "eds"}
     assert hub.status()["total_mb"] == 2048.02
+
+
+def test_hub_adapter_downloads_folder_style_registry_dataset(monkeypatch, tmp_path):
+    source = _module(
+        "quantem.data",
+        list_files=lambda technique=None: [
+            {"path": "4dstem/gold_128_npy_bin8/data.npy", "size_mb": 18.0, "type": "data"},
+            {"path": "4dstem/gold_128_npy_bin8/meta.json", "size_mb": 0.01, "type": "metadata"},
+        ],
+    )
+    source.__path__ = []
+
+    calls = {}
+    def snapshot_download(**kwargs):
+        calls["snapshot"] = kwargs
+        return str(tmp_path)
+
+    hf = _module("huggingface_hub", snapshot_download=snapshot_download)
+
+    hub = _fresh_hub(monkeypatch, {"quantem.data": source, "huggingface_hub": hf})
+
+    result = hub.download("gold_128_npy_bin8", verbose=False)
+
+    assert result == tmp_path / "4dstem/gold_128_npy_bin8"
+    assert calls["snapshot"]["repo_id"] == "bobleesj/quantem-data"
+    assert calls["snapshot"]["repo_type"] == "dataset"
+    assert calls["snapshot"]["allow_patterns"] == "4dstem/gold_128_npy_bin8/*"
