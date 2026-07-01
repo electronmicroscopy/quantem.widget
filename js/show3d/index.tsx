@@ -1444,6 +1444,9 @@ function Show3D() {
   const [showFft, setShowFft] = useModelState<boolean>("show_fft");
   const [fftLayout, setFftLayout] = useModelState<string>("fft_layout");
   const [fftWindow, setFftWindow] = useModelState<boolean>("fft_window");
+  const resolvedFftLayout = (["bottom", "right", "overlay"].includes(String(fftLayout)) ? String(fftLayout) : "bottom") as "bottom" | "right" | "overlay";
+  const fftLayoutBottom = resolvedFftLayout === "bottom";
+  const fftLayoutOverlay = resolvedFftLayout === "overlay";
 
 
   // Playback buffer (sliding prefetch)
@@ -1474,6 +1477,7 @@ function Show3D() {
   const canvasWheelHandlerRef = React.useRef<((event: WheelEvent) => void) | null>(null);
   const fftCanvasRef = React.useRef<HTMLCanvasElement>(null);
   const fftOverlayRef = React.useRef<HTMLCanvasElement>(null);
+  const fftInsetCanvasRefs = React.useRef<(HTMLCanvasElement | null)[]>([]);
 
   const [exportMenuAnchor, setExportMenuAnchor] = React.useState<HTMLElement | null>(null);
   const [panelMenuAnchor, setPanelMenuAnchor] = React.useState<HTMLElement | null>(null);
@@ -6229,6 +6233,37 @@ function Show3D() {
     drawFftOffscreen(ctx, fftOffscreenRef.current);
   }, [effectiveShowFft, fftOffscreenVersion, fftZoom, fftPanX, fftPanY, canvasW, canvasH, drawFftOffscreen]);
 
+  React.useLayoutEffect(() => {
+    if (!effectiveShowFft || !fftLayoutOverlay || !fftOffscreenRef.current) return;
+    const offscreen = fftOffscreenRef.current;
+    const grid = fftPanelGridRef.current;
+    const count = grid ? grid.count : 1;
+    const fftW = fftCropDims?.fftWidth ?? width;
+    const fftH = fftCropDims?.fftHeight ?? height;
+    for (let slot = 0; slot < count; slot++) {
+      const canvas = fftInsetCanvasRefs.current[slot];
+      if (!canvas) continue;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) continue;
+      const srcW = grid ? grid.panelWidth : fftW;
+      const srcH = grid ? grid.panelHeight : fftH;
+      const srcX = grid ? (slot % grid.cols) * grid.panelWidth : 0;
+      const srcY = grid ? Math.floor(slot / grid.cols) * grid.panelHeight : 0;
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = "#000";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(0, 0, canvas.width, canvas.height);
+      ctx.clip();
+      ctx.translate(fftPanX, fftPanY);
+      ctx.scale(fftZoom, fftZoom);
+      ctx.imageSmoothingEnabled = srcW < canvas.width || srcH < canvas.height;
+      ctx.drawImage(offscreen, srcX, srcY, srcW, srcH, 0, 0, canvas.width, canvas.height);
+      ctx.restore();
+    }
+  }, [effectiveShowFft, fftLayoutOverlay, fftOffscreenVersion, fftZoom, fftPanX, fftPanY, fftCropDims, width, height]);
+
   // === Kymograph (space-time) ===
   // A sub-feature of the line profile (Henry: "the profile feature created a 2D
   // image ... distance along the line ... time axis"). Requires the profile tool
@@ -8305,10 +8340,6 @@ function Show3D() {
     fftBackendInfo.source === "cpu-sync-shifted" ? "offline CPU"
       : fftBackendInfo.source === "worker-batch" || fftBackendInfo.source === "worker" ? "CPU worker"
         : fftBackendInfo.source || "";
-  const resolvedFftLayout = (["bottom", "right", "overlay"].includes(String(fftLayout)) ? String(fftLayout) : "bottom") as "bottom" | "right" | "overlay";
-  const fftLayoutBottom = resolvedFftLayout === "bottom";
-  const fftLayoutOverlay = resolvedFftLayout === "overlay";
-
   return (
     <Box
       ref={rootRef}
@@ -8872,44 +8903,53 @@ function Show3D() {
                 );
               });
             })()}
-            {effectiveShowFft && fftLayoutOverlay && (
-              <Box
-                ref={fftContainerRef}
-                sx={{
-                  position: "absolute",
-                  right: 8,
-                  bottom: 8,
-                  width: "min(42%, 320px)",
-                  minWidth: "min(220px, 56%)",
-                  aspectRatio: mainPanelAspectRatio,
-                  bgcolor: "#000",
-                  border: `1px solid ${themeColors.border}`,
-                  boxShadow: "0 2px 10px rgba(0,0,0,0.45)",
-                  cursor: "grab",
-                  zIndex: 8,
-                  touchAction: "none",
-                  overflow: "hidden",
-                }}
-                onMouseDown={(event) => { event.stopPropagation(); handleFftMouseDown(event); }}
-                onMouseMove={handleFftMouseMove}
-                onMouseUp={handleFftMouseUp}
-                onMouseLeave={() => { fftClickStartRef.current = null; setIsFftDragging(false); setFftPanStart(null); }}
-                onWheel={handleFftWheel}
-                onDoubleClick={handleFftReset}
-                onTouchStart={handleFftTouchStart}
-                onTouchMove={handleFftTouchMove}
-                onTouchEnd={handleFftTouchEnd}
-                onTouchCancel={handleFftTouchEnd}
-              >
-                <canvas ref={fftCanvasRef} width={canvasW} height={canvasH} style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", imageRendering: smooth ? "auto" : "pixelated", touchAction: "none" }} role="img" aria-label={roiFftActive && fftCropDims ? `FFT power spectrum of ROI crop (${fftCropDims.cropWidth} by ${fftCropDims.cropHeight} pixels)` : "FFT power spectrum of current frame"} />
-                <canvas ref={fftOverlayRef} width={Math.round(canvasW * DPR)} height={Math.round(canvasH * DPR)} style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", pointerEvents: "none" }} aria-hidden="true" />
-                <Box sx={{ position: "absolute", top: 4, left: 6, right: 6, display: "flex", alignItems: "center", gap: 1, pointerEvents: "none" }}>
-                  <Typography sx={{ fontSize: 10, color: "rgba(255,255,255,0.9)", fontWeight: 700, textShadow: "1px 1px 0 rgba(0,0,0,0.8)", lineHeight: 1 }}>
-                    FFT
-                  </Typography>
-                </Box>
-              </Box>
-            )}
+            {effectiveShowFft && fftLayoutOverlay && (() => {
+              const n = Math.max(1, visiblePanelCount || 1);
+              const cols = panelColsForCount(n);
+              const rows = Math.ceil(n / cols);
+              const gap = n > 1 ? (panelGapTrait ?? 10) : 0;
+              const panelW = (canvasW - gap * (cols - 1)) / cols;
+              const panelH = (canvasH - gap * (rows - 1)) / rows;
+              return visiblePanelIndices.map((panel, slot) => {
+                const panelLeft = (slot % cols) * (panelW + gap);
+                const panelTop = Math.floor(slot / cols) * (panelH + gap);
+                const insetPad = Math.min(8, Math.max(3, panelW * 0.025));
+                const insetW = Math.max(24, Math.min(panelW - insetPad * 2, panelW * 0.42, 180));
+                const insetH = Math.max(20, Math.min(panelH - insetPad * 2, panelH * 0.42, insetW * (panelH / Math.max(1, panelW))));
+                const insetX = Math.max(panelLeft + insetPad, panelLeft + panelW - insetW - insetPad);
+                const insetY = Math.max(panelTop + insetPad, panelTop + panelH - insetH - insetPad);
+                return (
+                  <Box
+                    key={`fft-overlay-inset-${panel}`}
+                    sx={{
+                      position: "absolute",
+                      left: `${(insetX / Math.max(1, canvasW)) * 100}%`,
+                      top: `${(insetY / Math.max(1, canvasH)) * 100}%`,
+                      width: `${(insetW / Math.max(1, canvasW)) * 100}%`,
+                      height: `${(insetH / Math.max(1, canvasH)) * 100}%`,
+                      bgcolor: "#000",
+                      border: `1px solid rgba(255,255,255,0.48)`,
+                      boxShadow: "0 2px 8px rgba(0,0,0,0.5)",
+                      zIndex: 8,
+                      overflow: "hidden",
+                      pointerEvents: "none",
+                    }}
+                  >
+                    <canvas
+                      ref={(el) => { fftInsetCanvasRefs.current[slot] = el; }}
+                      width={Math.max(1, Math.round(insetW))}
+                      height={Math.max(1, Math.round(insetH))}
+                      style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", imageRendering: smooth ? "auto" : "pixelated" }}
+                      role="img"
+                      aria-label={`FFT power spectrum overlay for ${panelLabel(panel)}`}
+                    />
+                    <Typography sx={{ position: "absolute", top: 3, left: 5, fontSize: 9, color: "rgba(255,255,255,0.9)", fontWeight: 700, textShadow: "1px 1px 0 rgba(0,0,0,0.9)", lineHeight: 1, pointerEvents: "none" }}>
+                      FFT
+                    </Typography>
+                  </Box>
+                );
+              });
+            })()}
           </Box>
           {/* Panel titles render ON canvas inside drawMain - follows grid layout. */}
           {/* Statistics bar - right below the image. Multi-panel = one row per panel. */}
