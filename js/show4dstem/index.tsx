@@ -1010,7 +1010,7 @@ function Histogram({
     document.addEventListener("mouseup", onUp);
   }, [applyRangePreview, flushRangePreview]);
 
-  const sliderInset = 4;
+  const sliderInset = 6;
   const sliderWidth = Math.max(1, width - sliderInset * 2);
 
   return (
@@ -4367,9 +4367,9 @@ function Show4DSTEM() {
   const statsBarSx = {
     mt: `${SPACING.XS}px`,
     px: 1,
-    py: 0,
-    height: 24,
-    minHeight: 24,
+    py: 0.5,
+    height: 28,
+    minHeight: 28,
     bgcolor: themeColors.bgAlt,
     display: "flex",
     columnGap: 1.25,
@@ -4381,14 +4381,15 @@ function Show4DSTEM() {
     "@media (max-width: 700px)": {
       mt: "2px",
       px: 0.5,
-      height: 22,
-      minHeight: 22,
+      py: 0.25,
+      height: 24,
+      minHeight: 24,
       columnGap: "6px",
     },
   };
   const statsTextSx = {
     fontSize: 11,
-    lineHeight: "20px",
+    lineHeight: 1.4,
     color: themeColors.textMuted,
     whiteSpace: "nowrap",
     flexShrink: 0,
