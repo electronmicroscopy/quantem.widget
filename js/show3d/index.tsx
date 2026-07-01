@@ -1481,6 +1481,7 @@ function Show3D() {
   const uiRef = React.useRef<HTMLCanvasElement>(null);
   const canvasContainerRef = React.useRef<HTMLDivElement>(null);
   const canvasWheelHandlerRef = React.useRef<((event: WheelEvent) => void) | null>(null);
+  const fftInsetNativeWheelHandlerRef = React.useRef<((event: WheelEvent) => boolean) | null>(null);
   const fftCanvasRef = React.useRef<HTMLCanvasElement>(null);
   const fftOverlayRef = React.useRef<HTMLCanvasElement>(null);
   const fftInsetCanvasRefs = React.useRef<(HTMLCanvasElement | null)[]>([]);
@@ -7022,6 +7023,7 @@ function Show3D() {
   };
 
   canvasWheelHandlerRef.current = (event: WheelEvent) => {
+    if (fftInsetNativeWheelHandlerRef.current?.(event)) return;
     event.preventDefault();
     event.stopPropagation();
     applyCanvasWheelZoom(event.clientX, event.clientY, event.deltaY);
@@ -7729,6 +7731,19 @@ function Show3D() {
     setFftPanX(anchorX - (anchorX - fftPanX) * zoomRatio);
     setFftPanY(anchorY - (anchorY - fftPanY) * zoomRatio);
   }, [fftPanX, fftPanY, fftZoom, setFftOverlayZoomTrait]);
+
+  fftInsetNativeWheelHandlerRef.current = (event: WheelEvent) => {
+    const target = event.target;
+    if (!(target instanceof Element)) return false;
+    const inset = target.closest('[data-show3d-fft-inset="true"]');
+    if (!(inset instanceof HTMLElement)) return false;
+    event.preventDefault();
+    event.stopPropagation();
+    event.stopImmediatePropagation();
+    const rect = inset.getBoundingClientRect();
+    zoomFftAtPoint(event.clientX - rect.left, event.clientY - rect.top, event.deltaY);
+    return true;
+  };
 
   const handleFftWheel = (e: React.WheelEvent) => {
     e.preventDefault();
@@ -9096,6 +9111,7 @@ function Show3D() {
                 return (
                   <Box
                     key={`fft-overlay-inset-${panel}`}
+                    data-show3d-fft-inset="true"
                     onWheel={handleFftInsetWheel}
                     onDoubleClick={(e) => { e.preventDefault(); e.stopPropagation(); handleFftReset(); }}
                     sx={{
@@ -9117,6 +9133,7 @@ function Show3D() {
                       ref={(el) => { fftInsetCanvasRefs.current[slot] = el; }}
                       width={Math.max(1, Math.round(insetW))}
                       height={Math.max(1, Math.round(insetH))}
+                      data-show3d-fft-inset="true"
                       onWheel={handleFftInsetWheel}
                       onDoubleClick={(e) => { e.preventDefault(); e.stopPropagation(); handleFftReset(); }}
                       style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", imageRendering: smooth ? "auto" : "pixelated" }}
