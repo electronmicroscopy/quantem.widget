@@ -3458,8 +3458,8 @@ function Show3D() {
           bitmaps[panel].close();
         }
       }
-      setGpuDisplayVisible(false);
       drawMain(ctx, mainOffscreenRef.current);
+      setGpuDisplayVisible(false);
       playbackIdxRef.current = normalized;
       if (updateDisplayState) setDisplaySliceIdx(normalized);
       const dbg = show3dPerfDebug();
@@ -3999,9 +3999,9 @@ function Show3D() {
             }
             renderFrameScaledPlayback(frame, cached.imageData.data, map.xMap, map.yMap, dw, dh, lut, vmin, vmax, c.logScale);
             ctx.imageSmoothingEnabled = false;
-            setGpuDisplayVisible(false);
             ctx.clearRect(0, 0, c.canvasW, c.canvasH);
             ctx.putImageData(cached.imageData, 0, 0);
+            setGpuDisplayVisible(false);
             rendered = true;
             drewDisplayDirect = true;
             if (dbg) dbg.lastRenderPath = "scaled-cpu";
@@ -4127,7 +4127,6 @@ function Show3D() {
               const canvas = canvasRef.current;
               const ctx = canvas?.getContext("2d");
               if (bitmap && ctx) {
-                setGpuDisplayVisible(false);
                 if (canSharedPanelScaledDirect) {
                   drawSharedScaledBitmap(ctx, bitmap);
                 } else {
@@ -4135,6 +4134,7 @@ function Show3D() {
                   ctx.clearRect(0, 0, c.canvasW, c.canvasH);
                   ctx.drawImage(bitmap, 0, 0, dw, dh);
                 }
+                setGpuDisplayVisible(false);
                 bitmap.close();
                 rendered = true;
                 drewDisplayDirect = true;
@@ -4795,7 +4795,11 @@ function Show3D() {
 
   // Per-panel render: each slot gets its own zoom/pan transform. 2px gap
   // between slots painted as the canvas bg (transparent through clearRect).
-  const drawMain = (ctx: CanvasRenderingContext2D, offscreen: HTMLCanvasElement | OffscreenCanvas) => {
+  const drawMain = (
+    ctx: CanvasRenderingContext2D,
+    offscreen: HTMLCanvasElement | OffscreenCanvas,
+    options: { preserveGpuDisplay?: boolean } = {},
+  ) => {
     const drawSliceIdx = offline ? liveSliceIdx : displaySliceIdx;
     const keepDirectGpuVisible =
       !offline &&
@@ -4808,7 +4812,9 @@ function Show3D() {
         linkedState.panX === 0 &&
         linkedState.panY === 0
       ));
-    if (!keepDirectGpuVisible) setGpuDisplayVisible(false);
+    if (!keepDirectGpuVisible && !options.preserveGpuDisplay) {
+      setGpuDisplayVisible(false);
+    }
     ctx.imageSmoothingEnabled = smooth;
     // Clear entire canvas. Slot-level bg fill happens inside the per-panel
     // loop so empty grid cells (partial last row) stay transparent - the
@@ -4858,31 +4864,6 @@ function Show3D() {
       const srcX = sharedPanelSource ? 0 : i * srcPanelW;
       ctx.drawImage(offscreen as CanvasImageSource, srcX, 0, srcPanelW, srcH, 0, 0, w, h);
       ctx.restore();
-      // Per-panel title - drawn on canvas at top-center of each panel slot.
-      // Lives on the canvas (not below it) so it follows grid layout when
-      // panels wrap into multiple rows. Clipped to slot so long titles
-      // don't bleed into the next column.
-      if (showPanelTitles !== false && (nPanels || 1) > 1 && panelTitles && panelTitles[i]) {
-        const realN2 = panelRealFrames && panelRealFrames[i];
-        const cur = drawSliceIdx + 1;
-        const total = realN2 || nSlices;
-        const shown = realN2 ? Math.min(cur, realN2) : cur;
-        const label = `${panelTitles[i]}  ${shown}/${total}`;
-        ctx.save();
-        ctx.beginPath();
-        ctx.rect(slotX, slotY, outPanelW, outPanelH);
-        ctx.clip();
-        ctx.font = `bold ${Math.max(8, panelTitleFontSize || 11)}px ${UI_FONT}`;
-        const tw = ctx.measureText(label).width;
-        const lx = slotX + (outPanelW - tw) / 2;
-        const ly = slotY + 14;
-        // Offset shadow via two paints (cheaper than canvas shadowBlur):
-        ctx.fillStyle = "rgba(0, 0, 0, 0.85)";
-        ctx.fillText(label, lx + 1, ly + 1);
-        ctx.fillStyle = "rgba(255, 255, 255, 0.95)";
-        ctx.fillText(label, lx, ly);
-        ctx.restore();
-      }
       // No end badge - blur alone signals past-real-frame.
     }
   };
@@ -5092,9 +5073,10 @@ function Show3D() {
 
   React.useLayoutEffect(() => {
     if (!mainOffscreenRef.current || !canvasRef.current) return;
-    if (!offline && separatePanelFrames && gpuDisplayVisibleRef.current && imageRotation % 4 === 0) return;
+    const preserveGpuDisplay = playing && gpuDisplayVisibleRef.current === true && imageRotation % 4 === 0;
+    if (preserveGpuDisplay && separatePanelFrames) return;
     const ctx = canvasRef.current.getContext("2d");
-    if (ctx) drawMain(ctx, mainOffscreenRef.current);
+    if (ctx) drawMain(ctx, mainOffscreenRef.current, { preserveGpuDisplay });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [smooth, canvasW, canvasH, nPanels, maxCols, imageRotation, panelStates, linkedState, linkPanels, themeColors.bg, panelRealFrames, panelTitles, showPanelTitles, panelGapTrait, panelTitleFontSize, panelWidthPx, sharedPanelSource, sliceIdx, displaySliceIdx, liveSliceIdx, offline, playing, nSlices]);
 
@@ -8427,6 +8409,50 @@ function Show3D() {
             <canvas ref={overlayRef} width={Math.round(canvasW * DPR)} height={Math.round(canvasH * DPR)} style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", pointerEvents: "none", display: overlayCanvasVisible ? "block" : "none" }} aria-hidden="true" />
             <canvas ref={uiRef} width={Math.round(canvasW * DPR)} height={Math.round(canvasH * DPR)} style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", pointerEvents: "none" }} aria-hidden="true" />
             <canvas ref={lensCanvasRef} width={Math.round(canvasW * DPR)} height={Math.round(canvasH * DPR)} style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", pointerEvents: "none", display: lensCanvasVisible ? "block" : "none" }} aria-hidden="true" />
+            {showPanelTitles !== false && (nPanels || 1) > 1 && visiblePanelIndices.map((panel, slot) => {
+              const titleText = panelTitles?.[panel];
+              if (!titleText) return null;
+              const n = Math.max(1, visiblePanelCount || 1);
+              const cols = (maxCols && maxCols > 0) ? Math.min(maxCols, n) : n;
+              const rows = Math.ceil(n / cols);
+              const gap = n > 1 ? (panelGapTrait ?? 10) : 0;
+              const panelW = (canvasW - gap * (cols - 1)) / cols;
+              const panelH = (canvasH - gap * (rows - 1)) / rows;
+              const panelLeft = (slot % cols) * (panelW + gap);
+              const panelTop = Math.floor(slot / cols) * (panelH + gap);
+              const shownIdx = offline ? liveSliceIdx : displaySliceIdx;
+              const realN = panelRealFrames?.[panel];
+              const shown = realN ? Math.min(shownIdx + 1, realN) : shownIdx + 1;
+              const total = realN || nSlices;
+              return (
+                <Box
+                  key={`panel-title-${panel}`}
+                  sx={{
+                    position: "absolute",
+                    top: `${((panelTop + 6) / Math.max(1, canvasH)) * 100}%`,
+                    left: `${(panelLeft / Math.max(1, canvasW)) * 100}%`,
+                    width: `${(panelW / Math.max(1, canvasW)) * 100}%`,
+                    px: 1,
+                    boxSizing: "border-box",
+                    color: "rgba(255, 255, 255, 0.95)",
+                    fontFamily: UI_FONT,
+                    fontSize: Math.max(8, panelTitleFontSize || 11),
+                    fontWeight: 700,
+                    lineHeight: 1.2,
+                    textAlign: "center",
+                    textShadow: "1px 1px 0 rgba(0,0,0,0.85), 0 0 3px rgba(0,0,0,0.75)",
+                    pointerEvents: "none",
+                    userSelect: "none",
+                    zIndex: 2,
+                    whiteSpace: "nowrap",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                  }}
+                >
+                  {titleText} {shown}/{total}
+                </Box>
+              );
+            })}
             {/* Per-panel "best frame" stars. One gold ★ button top-right of
                 each panel. Click toggles the star on the currently displayed
                 slice for THAT panel. Programmatic API: widget.star_panel(i). */}
