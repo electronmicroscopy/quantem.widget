@@ -6536,6 +6536,11 @@ function Show3D() {
       ctx.scale(DPR, DPR);
       let screenX = fftPanX + fftZoom * (fftClickInfo.col / fftW * canvasW);
       let screenY = fftPanY + fftZoom * (fftClickInfo.row / fftH * canvasH);
+      let centerX = fftPanX + fftZoom * (canvasW / 2);
+      let centerY = fftPanY + fftZoom * (canvasH / 2);
+      let radiusX = fftZoom * (fftClickInfo.distPx / Math.max(1, fftW)) * canvasW;
+      let radiusY = fftZoom * (fftClickInfo.distPx / Math.max(1, fftH)) * canvasH;
+      let clipRect: { x: number; y: number; w: number; h: number } | null = null;
       const panelGrid = fftPanelGridRef.current;
       if (panelGrid) {
         const slot = Math.max(0, Math.min(panelGrid.count - 1, Math.floor(fftClickInfo.row / panelGrid.panelHeight) * panelGrid.cols + Math.floor(fftClickInfo.col / panelGrid.panelWidth)));
@@ -6544,30 +6549,75 @@ function Show3D() {
         const localRow = fftClickInfo.row - Math.floor(slot / panelGrid.cols) * panelGrid.panelHeight;
         screenX = dst.x + fftPanX + fftZoom * ((localCol / panelGrid.panelWidth) * dst.w);
         screenY = dst.y + fftPanY + fftZoom * ((localRow / panelGrid.panelHeight) * dst.h);
+        centerX = dst.x + fftPanX + fftZoom * (dst.w / 2);
+        centerY = dst.y + fftPanY + fftZoom * (dst.h / 2);
+        radiusX = fftZoom * (fftClickInfo.distPx / Math.max(1, panelGrid.panelWidth)) * dst.w;
+        radiusY = fftZoom * (fftClickInfo.distPx / Math.max(1, panelGrid.panelHeight)) * dst.h;
+        clipRect = dst;
       }
-      ctx.strokeStyle = "rgba(255, 255, 255, 0.9)";
-      ctx.shadowColor = "rgba(0, 0, 0, 0.6)";
-      ctx.shadowBlur = 2;
-      ctx.lineWidth = 1.5;
+      ctx.lineCap = "round";
+      ctx.shadowBlur = 0;
       const r = 8;
-      ctx.beginPath();
-      ctx.moveTo(screenX - r, screenY); ctx.lineTo(screenX - 3, screenY);
-      ctx.moveTo(screenX + 3, screenY); ctx.lineTo(screenX + r, screenY);
-      ctx.moveTo(screenX, screenY - r); ctx.lineTo(screenX, screenY - 3);
-      ctx.moveTo(screenX, screenY + 3); ctx.lineTo(screenX, screenY + r);
-      ctx.stroke();
-      ctx.beginPath();
-      ctx.arc(screenX, screenY, 4, 0, Math.PI * 2);
-      ctx.stroke();
-      if (fftClickInfo.dSpacing != null) {
-        const d = fftClickInfo.dSpacing;
-        const label = d >= 10 ? `d = ${(d / 10).toFixed(2)} nm` : `d = ${d.toFixed(2)} Å`;
-        ctx.font = "bold 11px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
-        ctx.fillStyle = "white";
-        ctx.textAlign = "left";
-        ctx.textBaseline = "bottom";
-        ctx.fillText(label, screenX + 10, screenY - 4);
+      const drawRing = () => {
+        ctx.beginPath();
+        ctx.ellipse(centerX, centerY, radiusX, radiusY, 0, 0, Math.PI * 2);
+        ctx.stroke();
+      };
+      const drawMarker = () => {
+        ctx.beginPath();
+        ctx.moveTo(screenX - r, screenY); ctx.lineTo(screenX - 3, screenY);
+        ctx.moveTo(screenX + 3, screenY); ctx.lineTo(screenX + r, screenY);
+        ctx.moveTo(screenX, screenY - r); ctx.lineTo(screenX, screenY - 3);
+        ctx.moveTo(screenX, screenY + 3); ctx.lineTo(screenX, screenY + r);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(screenX, screenY, 4, 0, Math.PI * 2);
+        ctx.stroke();
+      };
+      if (clipRect) {
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(clipRect.x, clipRect.y, clipRect.w, clipRect.h);
+        ctx.clip();
       }
+      ctx.strokeStyle = "rgba(0, 0, 0, 0.78)";
+      ctx.lineWidth = 4;
+      drawRing();
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.64)";
+      ctx.lineWidth = 1.25;
+      drawRing();
+      if (clipRect) ctx.restore();
+      ctx.strokeStyle = "rgba(0, 0, 0, 0.92)";
+      ctx.lineWidth = 4;
+      drawMarker();
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.96)";
+      ctx.lineWidth = 1.5;
+      drawMarker();
+      const label = fftClickInfo.dSpacing != null
+        ? (() => {
+          const d = fftClickInfo.dSpacing!;
+          return d >= 10 ? `d = ${(d / 10).toFixed(2)} nm` : `d = ${d.toFixed(2)} Å`;
+        })()
+        : `dist = ${fftClickInfo.distPx.toFixed(1)} px`;
+      ctx.font = "bold 11px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+      ctx.textAlign = "left";
+      ctx.textBaseline = "middle";
+      const padX = 5;
+      const labelW = Math.ceil(ctx.measureText(label).width + padX * 2);
+      const labelH = 18;
+      const cssW = overlay.width / DPR;
+      const cssH = overlay.height / DPR;
+      const labelX = Math.max(2, Math.min(cssW - labelW - 2, screenX + 10));
+      const labelY = Math.max(labelH / 2 + 2, Math.min(cssH - labelH / 2 - 2, screenY - 10));
+      ctx.fillStyle = "rgba(0, 0, 0, 0.74)";
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.82)";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.roundRect(labelX, labelY - labelH / 2, labelW, labelH, 4);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = "white";
+      ctx.fillText(label, labelX + padX, labelY);
       ctx.restore();
     }
   }, [effectiveShowFft, fftZoom, fftPanX, fftPanY, canvasW, canvasH, pixelSize, width, height, fftDataRange, fftVminPct, fftVmaxPct, fftColormap, fftLogScale, fftShowColorbar, fftClickInfo, fftCropDims, getFftSlot]);
@@ -9269,18 +9319,18 @@ function Show3D() {
                 <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Min <Box component="span" sx={{ color: themeColors.accent }}>{formatNumber(fftStats.min)}</Box></Typography>
                 <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Max <Box component="span" sx={{ color: themeColors.accent }}>{formatNumber(fftStats.max)}</Box></Typography>
                 <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Std <Box component="span" sx={{ color: themeColors.accent }}>{formatNumber(fftStats.std)}</Box></Typography>
-                {fftClickInfo && (
-                  <>
-                    <Box sx={{ borderLeft: `1px solid ${themeColors.border}`, height: 14 }} />
-                    <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>
-                      {fftClickInfo.dSpacing != null ? (
-                        <>d = <Box component="span" sx={{ color: themeColors.accent, fontWeight: "bold" }}>{fftClickInfo.dSpacing >= 10 ? `${(fftClickInfo.dSpacing / 10).toFixed(2)} nm` : `${fftClickInfo.dSpacing.toFixed(2)} Å`}</Box>{" | |g| = "}<Box component="span" sx={{ color: themeColors.accent }}>{fftClickInfo.spatialFreq!.toFixed(4)} Å⁻¹</Box></>
-                      ) : (
-                        <>dist = <Box component="span" sx={{ color: themeColors.accent }}>{fftClickInfo.distPx.toFixed(1)} px</Box></>
-                      )}
-                    </Typography>
-                  </>
-                )}
+              </Box>
+            )}
+            {fftClickInfo && (
+              <Box sx={{ mt: 0.5, px: 1, py: 0.5, bgcolor: themeColors.bgAlt, border: `1px solid ${themeColors.border}`, display: "flex", gap: 1.25, alignItems: "center", flexWrap: "wrap", width: "fit-content", maxWidth: canvasW, boxSizing: "border-box" }}>
+                <Typography sx={{ fontSize: 11, color: themeColors.textMuted, fontWeight: 600 }}>FFT mark</Typography>
+                <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>
+                  {fftClickInfo.dSpacing != null ? (
+                    <>d = <Box component="span" sx={{ color: themeColors.accent, fontWeight: "bold" }}>{fftClickInfo.dSpacing >= 10 ? `${(fftClickInfo.dSpacing / 10).toFixed(2)} nm` : `${fftClickInfo.dSpacing.toFixed(2)} Å`}</Box>{" | |g| = "}<Box component="span" sx={{ color: themeColors.accent }}>{fftClickInfo.spatialFreq!.toFixed(4)} Å⁻¹</Box></>
+                  ) : (
+                    <>dist = <Box component="span" sx={{ color: themeColors.accent }}>{fftClickInfo.distPx.toFixed(1)} px</Box></>
+                  )}
+                </Typography>
               </Box>
             )}
             {/* FFT Controls - two rows with histogram on right (like Show4DSTEM) */}
