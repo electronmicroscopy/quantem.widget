@@ -447,3 +447,75 @@ export class Show4DSTEMCompute {
     if (this.sumDimsCache) { for (const cd of this.sumDimsCache) { cd.dims.destroy(); cd.dims2.destroy(); } this.sumDimsCache = null; }
   }
 }
+
+export class Show4DSTEMCpuCompute {
+  readonly scanCount: number;
+  readonly detSize: number;
+  readonly mode: number;
+  badPx: Uint32Array = new Uint32Array(0);
+  private stack: Uint8Array;
+
+  private constructor(stack: Uint8Array, scanCount: number, detSize: number, mode: number) {
+    this.stack = stack;
+    this.scanCount = scanCount;
+    this.detSize = detSize;
+    this.mode = mode;
+  }
+
+  static create(stack: Uint8Array, scanCount: number, detSize: number): Show4DSTEMCpuCompute {
+    const expectedU8 = scanCount * detSize;
+    const mode = stack.byteLength <= expectedU8 ? 1 : 0;
+    return new Show4DSTEMCpuCompute(stack, scanCount, detSize, mode);
+  }
+
+  async frameAt(scanIdx: number): Promise<Float32Array> {
+    const out = new Float32Array(this.detSize);
+    const base = Math.max(0, Math.min(this.scanCount - 1, scanIdx | 0)) * this.detSize;
+    for (let k = 0; k < this.detSize; k++) out[k] = this.sample(base + k);
+    for (const bp of this.badPx) out[bp] = 0;
+    return out;
+  }
+
+  async maskedSum(mask: Uint32Array): Promise<Float32Array> {
+    const bad = this.badPx.length ? new Set(this.badPx) : null;
+    const idx: number[] = [];
+    for (let k = 0; k < this.detSize; k++) {
+      if (mask[k] !== 0 && !(bad && bad.has(k))) idx.push(k);
+    }
+    const out = new Float32Array(this.scanCount);
+    if (idx.length === 0) return out;
+    for (let scan = 0; scan < this.scanCount; scan++) {
+      const base = scan * this.detSize;
+      let sum = 0;
+      for (let j = 0; j < idx.length; j++) sum += this.sample(base + idx[j]);
+      out[scan] = sum;
+    }
+    return out;
+  }
+
+  async reduceFrames(scanMask: Uint32Array, mean = true): Promise<Float32Array> {
+    const out = new Float32Array(this.detSize);
+    let n = 0;
+    for (let scan = 0; scan < this.scanCount; scan++) {
+      if (!scanMask[scan]) continue;
+      n++;
+      const base = scan * this.detSize;
+      for (let k = 0; k < this.detSize; k++) out[k] += this.sample(base + k);
+    }
+    if (mean && n > 0) {
+      for (let k = 0; k < this.detSize; k++) out[k] /= n;
+    }
+    for (const bp of this.badPx) out[bp] = 0;
+    return out;
+  }
+
+  dispose() {
+    // CPU fallback owns no browser resources.
+  }
+
+  private sample(globalPixel: number): number {
+    if (this.mode === 1) return this.stack[globalPixel] ?? 0;
+    const i = globalPixel * 2;
+    return (this.stack[i] ?? 0) | ((this.stack[i + 1] ?? 0) << 8);
+  }
+}

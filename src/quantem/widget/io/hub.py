@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 
+DEFAULT_REPO = "bobleesj/quantem-data"
 _SOURCE_CANDIDATES = ("quantem.data.hub", "quantem.data.huggingface", "quantem.data")
 _SKIP_GLOBALS = {
     "__name__",
@@ -76,6 +77,9 @@ def download(name: str, *args: Any, **kwargs: Any) -> Path | str:
 
     if hasattr(_src, "download"):
         return _call("download", name, *args, **kwargs)
+    folder = _find_folder_style_dataset(name)
+    if folder is not None:
+        return _download_folder_style_dataset(folder, **kwargs)
     if hasattr(_src, "load_raw"):
         if args or kwargs:
             raise TypeError("registry-style quantem.data.load_raw accepts only the dataset name")
@@ -84,6 +88,59 @@ def download(name: str, *args: Any, **kwargs: Any) -> Path | str:
         f"{_SOURCE_NAME} does not provide download/load_raw; use quantem.data.load(...) "
         "for array datasets."
     )
+
+
+def _repo_id() -> str:
+    """Return the Hugging Face dataset repo used by folder-style datasets."""
+
+    return str(getattr(_src, "REPO_ID", None) or DEFAULT_REPO)
+
+
+def _find_folder_style_dataset(name: str) -> str | None:
+    """Return ``bucket/name`` for folder-style HF datasets, if present."""
+
+    if not hasattr(_src, "list_files"):
+        return None
+    try:
+        files = _call("list_files")
+    except Exception:
+        return None
+    folders: set[str] = set()
+    for item in files:
+        path = str(item.get("path", ""))
+        parts = path.split("/")
+        if len(parts) >= 3 and parts[1] == name:
+            folders.add(f"{parts[0]}/{name}")
+    if not folders:
+        return None
+    if len(folders) > 1:
+        raise ValueError(f"{name!r} is ambiguous in {_repo_id()}: {sorted(folders)}")
+    return folders.pop()
+
+
+def _download_folder_style_dataset(
+    folder: str,
+    *,
+    repo: str | None = None,
+    out: str | Path | None = None,
+    verbose: bool = True,
+    **kwargs: Any,
+) -> Path:
+    """Download ``bucket/name/*`` from the shared Hugging Face dataset repo."""
+
+    if kwargs:
+        names = ", ".join(sorted(kwargs))
+        raise TypeError(f"unsupported download option(s) for folder-style dataset: {names}")
+    hub = import_module("huggingface_hub")
+    root = hub.snapshot_download(
+        repo_id=repo or _repo_id(),
+        repo_type="dataset",
+        allow_patterns=f"{folder}/*",
+        local_dir=str(out) if out is not None else None,
+    )
+    if verbose:
+        print(f"Downloaded '{folder.split('/')[-1]}' to {Path(root) / folder}")
+    return Path(root) / folder
 
 
 def read_meta(name: str, *args: Any, **kwargs: Any) -> dict | None:
