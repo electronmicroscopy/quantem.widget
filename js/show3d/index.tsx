@@ -121,7 +121,7 @@ type CursorInfo = {
   panelIdx: number;
 };
 
-function makeExportFilename(title: string, nSlices: number, height: number, width: number, mode: string): string {
+function makeExportFilename(title: string, nSlices: number, height: number, width: number, mode: string, quality = "medium"): string {
   let slug = (title || "show3d")
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "_")
@@ -129,7 +129,7 @@ function makeExportFilename(title: string, nSlices: number, height: number, widt
   while (slug.includes("__")) slug = slug.replace(/__/g, "_");
   if (!slug) slug = "show3d";
   if (mode === "gif" || mode === "mp4") {
-    return `${slug}_${nSlices}x${height}x${width}.${mode}`;
+    return `${slug}_${nSlices}x${height}x${width}_${quality}.${mode}`;
   }
   const suffix = mode === "quantized" ? "quantized" : "exact";
   return `${slug}_${nSlices}x${height}x${width}_${suffix}.html`;
@@ -1538,10 +1538,10 @@ function Show3D() {
   const handleExportMenuClose = () => {
     setExportMenuAnchor(null);
   };
-  const handleExportSelect = async (mode: string) => {
+  const handleExportSelect = async (mode: string, quality = "medium") => {
     setExportMenuAnchor(null);
     if (mode !== "exact" && mode !== "quantized" && mode !== "gif" && mode !== "mp4") return;
-    const filename = makeExportFilename(title, nSlices, height, width, mode);
+    const filename = makeExportFilename(title, nSlices, height, width, mode, quality);
     const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
     setExportBusy(true);
     setLocalExportStatus("Choose export location...");
@@ -1566,7 +1566,7 @@ function Show3D() {
     }
     pendingExportRef.current = { id, filename, mode, handle };
     setLocalExportStatus(`Preparing ${filename}...`);
-    setExportRequest(JSON.stringify({ mode, id, filename, download: true }));
+    setExportRequest(JSON.stringify({ mode, quality, id, filename, download: true }));
   };
 
   React.useEffect(() => {
@@ -8964,8 +8964,12 @@ function Show3D() {
                   >
                     <MenuItem onClick={() => handleExportSelect("exact")}>HTML exact float32 ({exactExportSize})</MenuItem>
                     <MenuItem onClick={() => handleExportSelect("quantized")}>HTML quantized uint8 ({quantizedExportSize})</MenuItem>
-                    <MenuItem onClick={() => handleExportSelect("gif")}>GIF animation</MenuItem>
-                    <MenuItem onClick={() => handleExportSelect("mp4")}>MP4 animation</MenuItem>
+                    <MenuItem onClick={() => handleExportSelect("gif", "low")}>GIF low</MenuItem>
+                    <MenuItem onClick={() => handleExportSelect("gif", "medium")}>GIF medium</MenuItem>
+                    <MenuItem onClick={() => handleExportSelect("gif", "high")}>GIF high</MenuItem>
+                    <MenuItem onClick={() => handleExportSelect("mp4", "low")}>MP4 low</MenuItem>
+                    <MenuItem onClick={() => handleExportSelect("mp4", "medium")}>MP4 medium</MenuItem>
+                    <MenuItem onClick={() => handleExportSelect("mp4", "high")}>MP4 high</MenuItem>
                   </Menu>
                 </>
               )}
