@@ -25,6 +25,7 @@ export function roundToNiceValue(value: number): number {
 export function unitSymbol(unit: string): string {
   const u = (unit || "").trim();
   const lc = u.toLowerCase();
+  if (lc === "pixel" || lc === "pixels" || lc === "px") return "px";
   if (lc === "micron" || lc === "microns" || lc === "um" || u === "μm" || u === "µm") return "µm";
   if (lc === "angstrom" || lc === "angstroms" || lc === "ang" || u === "Å" || lc === "a") return "Å";
   if (lc === "nanometer" || lc === "nanometers" || lc === "nm") return "nm";
@@ -55,10 +56,11 @@ const BASE_UNIT_NM: Record<string, number> = {
  *  step is a power of 10, so the rescaled number is always exact. */
 export function formatScaleLabel(value: number, unit: string): string {
   const nice = roundToNiceValue(value);
+  const sym = unitSymbol(unit);
+  if (sym === "px") return `${Math.max(1, Math.round(nice))} px`;
   const baseNm = BASE_UNIT_NM[(unit || "").trim().toLowerCase()];
   if (baseNm === undefined) {
     // not a length unit - keep the unit, fall back to integer-or-decimal
-    const sym = unitSymbol(unit);
     return nice >= 1 ? `${Math.round(nice)} ${sym}` : `${nice.toFixed(2)} ${sym}`;
   }
   const valueNm = nice * baseNm;
@@ -99,7 +101,9 @@ export function drawScaleBarHiDPI(
   const margin = 12;
 
   const targetPhysical = (targetBarPx / effectiveZoom) * pixelSize;
-  const nicePhysical = roundToNiceValue(targetPhysical);
+  const nicePhysical = unitSymbol(unit) === "px"
+    ? Math.max(1, Math.round(roundToNiceValue(targetPhysical)))
+    : roundToNiceValue(targetPhysical);
   const barPx = (nicePhysical / pixelSize) * effectiveZoom;
 
   const barY = cssHeight - margin;
