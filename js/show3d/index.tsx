@@ -9350,7 +9350,7 @@ function Show3D() {
             boxSizing: "border-box",
           }}>
             {/* Spacer - matches main panel title row height for canvas alignment */}
-            {(nPanels || 1) === 1 && <Box sx={{ mb: `${SPACING.XS}px`, height: 16 }} />}
+            {(!fftLayoutBottom || (nPanels || 1) === 1) && <Box sx={{ mb: `${SPACING.XS}px`, height: 16 }} />}
             {/* Controls row - matches main panel controls row height */}
             <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: `${SPACING.XS}px`, minHeight: 28, height: "auto", flexWrap: "wrap", gap: `${SPACING.XS}px` }}>
               {roiFftActive && fftCropDims ? (
