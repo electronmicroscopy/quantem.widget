@@ -49,7 +49,7 @@ detector at load (`det_bin`) to cut memory and speed first paint - see
 
 The [Tutorials](tutorials/download_data) walk through each widget on real public data
 where practical, with compact synthetic data only where it keeps an example
-portable. The [advanced tutorials](tutorials/survey) cover folder survey workflows
+portable. The [advanced tutorials](tutorials/survey_workflows) cover folder survey workflows
 and how to [save and share widget exports](tutorials/widget_export). The [API reference](api/index)
 documents every parameter, method, and interactive control (and doubles as a
 UI-test spec for automated agents). All example data here is synthetic or pulled

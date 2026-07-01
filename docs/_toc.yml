@@ -20,8 +20,11 @@ parts:
       - file: tutorials/showdiffraction
   - caption: Advanced tutorials
     chapters:
-      - file: tutorials/survey
-      - file: tutorials/survey_fov
+      - file: tutorials/survey_workflows
+        title: Survey workflows
+        sections:
+          - file: tutorials/survey
+          - file: tutorials/survey_fov
       - file: tutorials/widget_export
   - caption: API reference
     chapters:
