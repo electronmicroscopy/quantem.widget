@@ -7881,6 +7881,31 @@ function Show3D() {
     window.addEventListener("mouseup", onUp, true);
   };
 
+  const handleFftInsetPanMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const canvas = e.currentTarget;
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / Math.max(1, rect.width);
+    const scaleY = canvas.height / Math.max(1, rect.height);
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const startPanX = fftPanX;
+    const startPanY = fftPanY;
+    const onMove = (ev: MouseEvent) => {
+      ev.preventDefault();
+      setFftPanX(startPanX + (ev.clientX - startX) * scaleX);
+      setFftPanY(startPanY + (ev.clientY - startY) * scaleY);
+    };
+    const onUp = () => {
+      window.removeEventListener("mousemove", onMove, true);
+      window.removeEventListener("mouseup", onUp, true);
+    };
+    window.addEventListener("mousemove", onMove, true);
+    window.addEventListener("mouseup", onUp, true);
+  };
+
   // Convert FFT canvas mouse position to FFT image pixel coordinates
   const fftScreenToImg = (e: React.MouseEvent): { col: number; row: number } | null => {
     const canvas = fftCanvasRef.current;
@@ -9203,7 +9228,7 @@ function Show3D() {
                   <Box
                     key={`fft-overlay-inset-${panel}`}
                     data-show3d-fft-inset="true"
-                    title="Drag FFT overlay to another corner"
+                    title="Drag FFT image to pan; drag inset edge to move overlay"
                     onWheel={handleFftInsetWheel}
                     onMouseDown={(e) => handleFftInsetMouseDown(e, panelLeft, panelTop, panelW, panelH)}
                     onPointerDown={(e) => handleFftInsetPointerDown(e, panelLeft, panelTop, panelW, panelH)}
@@ -9235,8 +9260,9 @@ function Show3D() {
                       height={Math.max(1, Math.round(insetH))}
                       data-show3d-fft-inset="true"
                       onWheel={handleFftInsetWheel}
+                      onMouseDown={handleFftInsetPanMouseDown}
                       onDoubleClick={(e) => { e.preventDefault(); e.stopPropagation(); handleFftReset(); }}
-                      style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", imageRendering: smooth ? "auto" : "pixelated" }}
+                      style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", imageRendering: smooth ? "auto" : "pixelated", cursor: "grab" }}
                       role="img"
                       aria-label={`FFT power spectrum overlay for ${panelLabel(panel)}`}
                     />
