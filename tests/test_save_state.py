@@ -14,6 +14,8 @@ receive the buffer and the widget would render blank - invisible to unit tests
 that only check output size. These tests lock both halves of the contract so a
 future edit can't silently reintroduce either the bloat or the blank render.
 """
+import pathlib
+
 import numpy as np
 import pytest
 
@@ -90,3 +92,163 @@ def test_default_is_save_state_false(widget):
     as save_state=False (static PNG present)."""
     w, _ = _make(widget, save_state=False)
     assert w._save_state is False
+
+
+def test_show2d_static_png_preserves_sparse_large_content():
+    """The fallback PNG must show real image content, not a blank dark tile.
+
+    A 4k-style sparse image is exactly where stride sampling fails: if the
+    bright feature lands between sampled rows/columns, the static fallback looks
+    nearly black even though the live widget rendered fine. The PNG path should
+    area-downsample instead, so thin/sparse features survive notebook save.
+    """
+    import base64
+    import io
+
+    from PIL import Image
+
+    image = np.zeros((1024, 1024), dtype=np.float32)
+    image[101:109, 611:619] = 1000
+    widget = Show2D(image, labels=["Sparse feature"], save_state=False, verbose=False)
+
+    bundle = widget._repr_mimebundle_()
+    data = bundle[0] if isinstance(bundle, tuple) else bundle
+    png = data["image/png"]
+    decoded = np.asarray(Image.open(io.BytesIO(base64.b64decode(png))).convert("RGB"))
+
+    nonwhite = ~np.all(decoded > 245, axis=-1)
+    warm_signal = (
+        (decoded[..., 0] > 140)
+        & (decoded[..., 1] > 80)
+        & (decoded[..., 2] < 230)
+        & nonwhite
+    )
+    assert int(warm_signal.sum()) > 20
+
+
+def test_show2d_first_render_clears_heavy_frame_buffer():
+    """After JS paints, later notebook saves should not keep pixel buffers."""
+    image = np.random.default_rng(0).random((128, 128), dtype=np.float32)
+    widget = Show2D(image, save_state=False, verbose=False)
+    assert widget.frame_bytes
+
+    widget._on_first_render({"new": True})
+
+    assert widget.frame_bytes == b""
+    assert "frame_bytes" not in widget.get_state()
+    assert not widget._get_embed_state().get("buffers")
+
+
+def _assert_export_state_keeps_buffer(widget, key: str) -> None:
+    """HTML export clones must opt into the full embedded state."""
+    state = widget.get_state()
+    assert widget._save_state is True
+    assert key in state
+    value = state[key]
+    if isinstance(value, (bytes, bytearray)):
+        assert len(value) > 0
+
+
+def test_html_export_clones_keep_bulk_buffers():
+    """Standalone HTML export must embed the data it needs to render offline.
+
+    ``export_html`` builds an export-only clone and then asks ipywidgets for a
+    full dependency state. That call hits ``get_state(key=None)``. If the clone
+    stays on the notebook-save default (``_save_state=False``), the heavy pixel
+    payload is trimmed and the exported HTML renders blank.
+    """
+    rng = np.random.default_rng(10)
+    show2d = Show2D(rng.random((64, 64), dtype=np.float32), save_state=False, verbose=False)
+    show2d_clone = show2d._clone_for_html_export(quantized=False)
+    try:
+        _assert_export_state_keeps_buffer(show2d_clone, "frame_bytes")
+    finally:
+        show2d_clone.close()
+        show2d.close()
+
+    show3d = Show3D(rng.random((3, 32, 32), dtype=np.float32), save_state=False)
+    show3d_clone = show3d._clone_for_html_export(quantized=False)
+    try:
+        _assert_export_state_keeps_buffer(show3d_clone, "_offline_float_stack")
+    finally:
+        show3d_clone.close()
+        show3d.close()
+
+    stem = Show4DSTEM(
+        rng.integers(0, 100, (4, 4, 8, 8), dtype=np.uint16),
+        save_state=False,
+        verbose=False,
+    )
+    stem_clone = stem._clone_for_html_export(dtype="uint16", det_bin=1)
+    try:
+        _assert_export_state_keeps_buffer(stem_clone, "_offline_stack")
+    finally:
+        stem_clone.close()
+        stem.close()
+
+
+def test_show4dstem_bslz4_html_export_embeds_self_with_bulk_state(monkeypatch, tmp_path):
+    """Show4DSTEM's bslz4 export branch embeds ``self``, not an export clone."""
+    widget = Show4DSTEM(
+        np.random.default_rng(11).integers(0, 100, (4, 4, 8, 8), dtype=np.uint16),
+        save_state=False,
+        verbose=False,
+    )
+    widget._offline_bslz4 = "{}"
+    widget._offline_stack = b"offline-stack"
+    captured = {}
+
+    def fake_dependency_state(views, drop_defaults=False):
+        view = views[0]
+        state = view.get_state()
+        captured["save_state"] = view._save_state
+        captured["has_stack"] = "_offline_stack" in state
+        captured["stack_size"] = len(state.get("_offline_stack", b""))
+        return {}
+
+    def fake_embed_minimal_html(filename, *, views, title, drop_defaults, state):
+        pathlib.Path(filename).write_text("<html><head></head><body></body></html>")
+
+    monkeypatch.setattr("ipywidgets.embed.dependency_state", fake_dependency_state)
+    monkeypatch.setattr("ipywidgets.embed.embed_minimal_html", fake_embed_minimal_html)
+
+    try:
+        widget._write_html_export(tmp_path / "show4dstem.html", dtype="uint16", det_bin=1)
+    finally:
+        widget.close()
+
+    assert captured == {"save_state": True, "has_stack": True, "stack_size": len(b"offline-stack")}
+    assert widget._save_state is False
+
+
+def test_export_html_size_scales_with_embedded_data(tmp_path):
+    """Public ``export_html`` must not collapse to a tiny empty widget shell.
+
+    Regression for the save_state opt-in bug: export clones used the notebook
+    default ``_save_state=False``, so ipywidgets stripped the heavy buffers and
+    wrote a small HTML file with no offline image stack.
+    """
+    rng = np.random.default_rng(12)
+    cases = []
+
+    data2d = rng.random((3, 512, 512), dtype=np.float32)
+    show2d = Show2D(data2d, save_state=False, verbose=False, title="size-show2d")
+    cases.append((show2d, data2d.nbytes, "frame_bytes", tmp_path / "show2d.html"))
+
+    data3d = rng.random((8, 256, 256), dtype=np.float32)
+    show3d = Show3D(data3d, save_state=False, title="size-show3d")
+    cases.append((show3d, data3d.nbytes, "_offline_float_stack", tmp_path / "show3d.html"))
+
+    stem_data = rng.integers(0, 1000, (32, 32, 32, 32), dtype=np.uint16)
+    stem = Show4DSTEM(stem_data, save_state=False, verbose=False, title="size-show4dstem")
+    cases.append((stem, stem_data.nbytes, "_offline_stack", tmp_path / "show4dstem.html"))
+
+    try:
+        for widget, raw_bytes, marker, path in cases:
+            exported = widget.export_html(path, encoding="full")
+            html = exported.read_text(errors="ignore")
+            assert exported.stat().st_size > raw_bytes / 2
+            assert marker in html
+    finally:
+        for widget, _, _, _ in cases:
+            widget.close()
