@@ -22,7 +22,7 @@ import KeyboardArrowUpIcon from "@mui/icons-material/KeyboardArrowUp";
 import { useTheme } from "../theme";
 import { COLORMAPS, applyColormap } from "../colormaps";
 import { WebGPUFFT, getWebGPUFFT, fft2d, fftshift, autoEnhanceFFT, nextPow2, applyHannWindow2D } from "../fft";
-import { Show4DSTEMCompute } from "../engine/compute";
+import { Show4DSTEMCompute, Show4DSTEMCpuCompute } from "../engine/compute";
 import { readH5Volume } from "../engine/h5reader";
 import { decodeBslz4ToStack, type Bslz4Spec } from "../engine/bslz4";
 import { LazyShow4DSTEM } from "../engine/lazy";
@@ -1396,19 +1396,19 @@ function Show4DSTEM() {
       const chunksMeta = model.get("_offline_chunks") as string | undefined;
       const bslz4Meta = model.get("_offline_bslz4") as string | undefined;
       const gunzip = async (b: Uint8Array) => new Uint8Array(await new Response(new Blob([b as BlobPart]).stream().pipeThrough(new DecompressionStream("gzip"))).arrayBuffer());
-      let compute: Show4DSTEMCompute | null = null;
+      let compute: Show4DSTEMCompute | Show4DSTEMCpuCompute | null = null;
       let cpuStack: Uint8Array | null = null;  // full decompressed stack for the per-frame probe (single-chunk only)
       // Multi-VOLUME (5D): several datasets, decoded LAZILY (decode-on-scrub) with a
       // small LRU of resident volumes. Only the viewed dataset (plus a few recent)
       // lives in VRAM, so it runs on a laptop regardless of how many h5 files - and
       // first paint is one decode, not N. The frame slider picks the active dataset.
-      let computes: Show4DSTEMCompute[] = [];   // resident set for single / non-lazy paths
+      let computes: (Show4DSTEMCompute | Show4DSTEMCpuCompute)[] = [];   // resident set for single / non-lazy paths
       let volMetas: any[] = [];                  // multi-volume descriptors (lazy)
       const volCache = new Map<number, Show4DSTEMCompute>();   // LRU: idx -> decoded volume
-      const inlineVolCache = new Map<number, Show4DSTEMCompute>(); // LRU for inline gzip 5D exports
+      const inlineVolCache = new Map<number, Show4DSTEMCompute | Show4DSTEMCpuCompute>(); // LRU for inline gzip 5D exports
       const MAX_RESIDENT = 3;                    // recent volumes kept hot for instant back-scrub
       let volumeCount = 0;
-      let getVol: ((idx: number) => Promise<Show4DSTEMCompute | null>) | null = null;
+      let getVol: ((idx: number) => Promise<Show4DSTEMCompute | Show4DSTEMCpuCompute | null>) | null = null;
       // H5 source: read the merged float32 .h5 file straight off disk via WebGPU
       // (jsfive parse + GPU bitshuffle+LZ4 decode). Nothing embedded - the data stays a
       // file; the HTML just points at it. This is the "click HTML, GPU decompresses the
@@ -1560,7 +1560,7 @@ function Show4DSTEM() {
             if (inlineVolCache.has(idx)) return inlineVolCache.get(idx)!;
             const start = idx * volumeBytes;
             const bytes = stack.subarray(start, start + volumeBytes);
-            const cc = await Show4DSTEMCompute.create(bytes, scanCount, detSize);
+            const cc = await Show4DSTEMCompute.create(bytes, scanCount, detSize) ?? Show4DSTEMCpuCompute.create(bytes, scanCount, detSize);
             if (cc) {
               inlineVolCache.set(idx, cc);
               while (inlineVolCache.size > MAX_INLINE_RESIDENT) {
@@ -1575,7 +1575,7 @@ function Show4DSTEM() {
           compute = await getVol(Math.max(0, Math.min(widgetFrames - 1, model.get("frame_idx") | 0)));
         } else {
           cpuStack = stack;  // keep for the per-frame probe (single-chunk only)
-          compute = await Show4DSTEMCompute.create(stack, scanRows * scanCols, detR * detC);
+          compute = await Show4DSTEMCompute.create(stack, scanRows * scanCols, detR * detC) ?? Show4DSTEMCpuCompute.create(stack, scanRows * scanCols, detR * detC);
         }
       }
       if (!compute || disposed) { compute?.dispose(); return; }

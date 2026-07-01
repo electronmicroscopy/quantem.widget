@@ -198,10 +198,10 @@ class Show4DSTEM(anywidget.AnyWidget):
     # =========================================================================
     virtual_image_bytes = traitlets.Bytes(b"").tag(sync=True)  # Raw float32 (JS computes stats + range)
 
-    # Offline / browser-compute mode: ship a uint8-clipped 4D stack so JS runs
-    # the virtual-image and DP-from-ROI reductions in WebGPU with no Python
-    # kernel. Inline gzip is only for small datasets; companion bslz4 supports
-    # full no-bin stacks and lazy multi-volume 5D stacks.
+    # Offline / browser-compute mode: ship a compact 4D stack so JS runs the
+    # virtual-image and DP-from-ROI reductions with no Python kernel. Inline gzip
+    # is only for small datasets; companion bslz4 supports full no-bin stacks and
+    # lazy multi-volume 5D stacks.
     offline = traitlets.Bool(False).tag(sync=True)
     _offline_stack = traitlets.Bytes(b"").tag(sync=True)
     # Companion-file mode: instead of inlining the stack (which blocks mount on a
@@ -373,6 +373,7 @@ class Show4DSTEM(anywidget.AnyWidget):
         offline: bool | None = False,
         data_url: str | None = None,
         offline_codec: str = "gzip",
+        offline_dtype: str = "uint8",
         show_fft: bool = False,
         fft_window: bool = True,
         show_controls: bool = True,
@@ -395,7 +396,7 @@ class Show4DSTEM(anywidget.AnyWidget):
         # Backend selector. ONLY two values:
         #   None  -> auto-pick Python compute (TorchBackend on torch
         #            tensors, MetalRawBackend on ChunkedFrames). Default.
-        #   'web' -> kernel ships uint8-packed stack via _offline_stack
+        #   'web' -> kernel ships a packed stack via _offline_stack
         #            trait; JS Show4DSTEMCompute does all reductions in
         #            browser WebGPU. Kernel stays alive. Universal GPU
         #            compute (any modern GPU).
@@ -411,6 +412,17 @@ class Show4DSTEM(anywidget.AnyWidget):
                 f"(torch tensor -> TorchBackend; ChunkedFrames -> MetalRawBackend)."
             )
         self._backend_choice = backend
+        offline_dtype = str(offline_dtype).strip().lower().replace("_", "")
+        if offline_dtype in {"u8", "uint8"}:
+            offline_dtype = "uint8"
+        elif offline_dtype in {"u16", "uint16", "full", "exact"}:
+            offline_dtype = "uint16"
+        else:
+            raise ValueError(
+                f"offline_dtype must be 'uint8' or 'uint16', got {offline_dtype!r}. "
+                "Use 'uint8' for compact browse data or 'uint16' to preserve detector counts."
+            )
+        self._offline_dtype = offline_dtype
         _t0 = time.perf_counter()
         _verbose = verbose
 
@@ -756,7 +768,7 @@ class Show4DSTEM(anywidget.AnyWidget):
             except Exception:
                 pass
 
-    # Soft guide on the uint8 pack (1 byte/pixel), NOT a hard limit. The true
+    # Soft guide on the packed stack, NOT a hard limit. The true
     # constraints are client RAM (decoded stack + GPU buffer ~= 2x this) and, for
     # the inline path, the browser's ~500 MB JS-string parse cap (gzip keeps the
     # embedded base64 under that). TESTED on Apple Silicon: full 512x512x48x48 (604 MB)
@@ -767,11 +779,11 @@ class Show4DSTEM(anywidget.AnyWidget):
     def _pack_offline(self, offline: bool | None, data_url: str | None = None) -> None:
         """Ship the 4D stack to the browser for kernel-less WebGPU compute.
 
-        JS runs the same masked-sum / DP-from-ROI reductions in WebGPU, so the
-        dataset stays interactive with no Python kernel (live docs, shared
-        offline HTML, Colab without a GPU). We pack the stack as **uint8** by
-        clipping detector counts to [0, 255]; common detector counts are exact,
-        and rare saturated/hot pixels are filtered separately.
+        JS runs the same masked-sum / DP-from-ROI reductions in the browser, so
+        the dataset stays interactive with no Python kernel (live docs, shared
+        offline HTML, Colab without a GPU). By default we pack the stack as
+        **uint8** by clipping detector counts to [0, 255] for compact browse
+        data. Use ``offline_dtype="uint16"`` to preserve detector counts.
 
         ``offline=None`` auto-enables under the byte budget; ``True`` forces it
         (and warns + skips if too big); ``False`` does nothing. 5D is supported
@@ -784,7 +796,9 @@ class Show4DSTEM(anywidget.AnyWidget):
         if getattr(self, "_h5_url", "") or getattr(self, "_lazy_url", ""):
             self.offline = True
             return
-        n_bytes = self._data.numel()  # uint8 pack = 1 byte/pixel
+        offline_dtype = getattr(self, "_offline_dtype", "uint8")
+        bytes_per_pixel = 2 if offline_dtype == "uint16" else 1
+        n_bytes = self._data.numel() * bytes_per_pixel
         # Companion mode bypasses the V8 string wall (data is fetched binary, never
         # a JS string), so its limit is client RAM (decoded + GPU ~= 2x), not the
         # ~500 MB inline parse cap. Give it a much higher budget.
@@ -811,23 +825,24 @@ class Show4DSTEM(anywidget.AnyWidget):
             print(f"  offline browser mode skipped: stack is {n_bytes / 1e6:.0f} MB > "
                   f"{budget / 1e6:.0f} MB budget; the kernel still works")
             return
-        # Direct clip to [0, 255] - NOT global-linear scaling. Detector counts are
-        # mostly 0-~100, so the uint8 value IS the raw count: pixels <=255 are
-        # EXACT (verified 99.989% on real gold), only rare saturated/dead pixels
-        # clip to 255. Global scaling instead is set by the brightest (often a
-        # dead 2^32-1 pixel) and crushes all real signal to ~0 - the trap we hit.
+        # Direct clip to the target integer range - NOT global-linear scaling.
+        # For uint8, pixels <=255 are exact and larger counts clip for compact
+        # browse data. For uint16, real detector counts are preserved.
         import gzip, json, pathlib
-        packed = np.clip(self._data.detach().to("cpu").numpy(), 0, 255).astype(np.uint8)
+        if offline_dtype == "uint16":
+            packed = np.clip(self._data.detach().to("cpu").numpy(), 0, 65535).astype(np.uint16)
+        else:
+            packed = np.clip(self._data.detach().to("cpu").numpy(), 0, 255).astype(np.uint8)
         packed = np.ascontiguousarray(packed.reshape(self.shape_rows, self.shape_cols, self.det_rows, self.det_cols))
         self._offline_gzip = True
         self.offline = True
         scan_cols, det_size = self.shape_cols, self.det_rows * self.det_cols
-        # Chunk by scan-row ranges so each chunk's uint8 stays under one GPU buffer
-        # (~1 GB cap). A stack bigger than one buffer (e.g. 512x512x192x192 = 9.7 GB)
+        # Chunk by scan-row ranges so each chunk stays under one GPU buffer
+        # (~1 GB cap). A stack bigger than one buffer (e.g. 512x512x192x192)
         # then streams chunk-by-chunk into N buffers. Small stacks = a single chunk.
         chunk_bytes = 768 * 1024 * 1024
-        rows_per = max(1, chunk_bytes // max(1, scan_cols * det_size))
-        if data_url and packed.size > chunk_bytes:
+        rows_per = max(1, chunk_bytes // max(1, scan_cols * det_size * bytes_per_pixel))
+        if data_url and packed.nbytes > chunk_bytes:
             out = pathlib.Path(data_url); out.parent.mkdir(parents=True, exist_ok=True)
             meta, blob, coff = [], bytearray(), 0
             for r0 in range(0, self.shape_rows, rows_per):

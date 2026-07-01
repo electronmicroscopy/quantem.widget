@@ -1,3 +1,5 @@
+import gzip
+
 import numpy as np
 
 from quantem.widget import Show2D, Show3D, Show3DSlices, Show4DSTEM
@@ -69,3 +71,18 @@ def test_show4dstem_panel_width_px_syncs_to_frontend_state():
 
     assert widget.panel_width_px == 70
     assert widget.state_dict()["panel_width_px"] == 70
+
+
+def test_show4dstem_offline_uint16_preserves_counts():
+    data = np.array([[[[0, 255], [256, 4096]]]], dtype=np.uint16)
+
+    widget = Show4DSTEM(
+        data,
+        offline=True,
+        offline_dtype="uint16",
+        precompute_virtual_images=False,
+        verbose=False,
+    )
+
+    packed = np.frombuffer(gzip.decompress(widget._offline_stack), dtype=np.uint16)
+    np.testing.assert_array_equal(packed, data.ravel())
