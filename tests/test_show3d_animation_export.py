@@ -186,6 +186,7 @@ def test_show3d_frontend_gif_export_request_creates_payload() -> None:
     widget.export_request = json.dumps({
         "id": "gif-request",
         "mode": "gif",
+        "quality": "low",
         "filename": filename,
         "download": True,
     })
@@ -197,7 +198,10 @@ def test_show3d_frontend_gif_export_request_creates_payload() -> None:
 
 
 def test_show3d_frontend_mp4_export_request_creates_payload(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
     def fake_save_mp4(self, path, **_kwargs):
+        captured.update(_kwargs)
         path = pathlib.Path(path)
         path.write_bytes(b"fake mp4")
         return path
@@ -214,6 +218,7 @@ def test_show3d_frontend_mp4_export_request_creates_payload(monkeypatch) -> None
     widget.export_request = json.dumps({
         "id": "mp4-request",
         "mode": "mp4",
+        "quality": "low",
         "filename": filename,
         "download": True,
     })
@@ -222,3 +227,25 @@ def test_show3d_frontend_mp4_export_request_creates_payload(monkeypatch) -> None
     assert widget.export_filename == filename
     assert widget.export_payload == b"fake mp4"
     assert widget.export_status.startswith(f"Ready {filename}")
+    assert captured["quality"] == "low"
+    assert captured["crf"] == 24
+
+
+def test_show3d_animation_export_rejects_unknown_quality() -> None:
+    widget = Show3D(
+        _stack(),
+        show_controls=False,
+        show_scale_bar=False,
+        show_panel_titles=False,
+    )
+
+    widget.export_request = json.dumps({
+        "id": "bad-quality",
+        "mode": "gif",
+        "quality": "giant",
+        "filename": "bad.gif",
+        "download": True,
+    })
+
+    assert widget.export_status.startswith("Export failed:")
+    assert "animation quality" in widget.export_status

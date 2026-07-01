@@ -3503,11 +3503,12 @@ class Show3D(anywidget.AnyWidget):
                 self.export_filename = ""
                 return
             if mode in {"gif", "mp4"}:
-                filename = str(payload.get("filename") or self._default_animation_export_path(mode).name)
+                quality = self._normalise_animation_quality(payload.get("quality", "medium"))
+                filename = str(payload.get("filename") or self._default_animation_export_path(mode, quality).name)
                 request_id = str(payload.get("id") or "")
                 if payload.get("download"):
                     self.export_status = f"Preparing {filename}..."
-                    media = self._animation_export_bytes(mode)
+                    media = self._animation_export_bytes(mode, quality=quality)
                     self.export_filename = filename
                     self.export_payload = media
                     self.export_payload_id = request_id
@@ -3515,11 +3516,11 @@ class Show3D(anywidget.AnyWidget):
                     self.export_status = f"Ready {filename} ({size_mb:.1f} MB)"
                 else:
                     self.export_status = f"Exporting {filename}..."
-                    path = self._default_animation_export_path(mode)
+                    path = self._default_animation_export_path(mode, quality)
                     if mode == "gif":
-                        self.save_gif(path)
+                        self.save_gif(path, quality=quality)
                     else:
-                        self.save_mp4(path)
+                        self.save_mp4(path, quality=quality, crf=self._mp4_crf_for_quality(quality))
                     size_mb = path.stat().st_size / (1024 * 1024)
                     self.export_status = f"Exported {path.name} ({size_mb:.1f} MB)"
                 return
@@ -3559,7 +3560,7 @@ class Show3D(anywidget.AnyWidget):
         mode = "quantized" if quantized else "exact"
         return pathlib.Path.cwd() / f"{slug}_{self.n_slices}x{self.height}x{self.width}_{mode}.html"
 
-    def _default_animation_export_path(self, mode: str) -> pathlib.Path:
+    def _default_animation_export_path(self, mode: str, quality: str = "medium") -> pathlib.Path:
         """Build a stable, human-readable GIF/MP4 export filename."""
         label = self.title.strip() or "show3d"
         slug = "".join(ch.lower() if ch.isalnum() else "_" for ch in label).strip("_")
@@ -3568,7 +3569,21 @@ class Show3D(anywidget.AnyWidget):
         if not slug:
             slug = "show3d"
         ext = "mp4" if mode == "mp4" else "gif"
-        return pathlib.Path.cwd() / f"{slug}_{self.n_slices}x{self.height}x{self.width}.{ext}"
+        return pathlib.Path.cwd() / f"{slug}_{self.n_slices}x{self.height}x{self.width}_{quality}.{ext}"
+
+    def _normalise_animation_quality(self, quality: object) -> str:
+        """Validate animation export quality from frontend requests."""
+        from quantem.widget.render import gif as gif_utils
+        value = str(quality or "medium").lower()
+        if value not in gif_utils.QUALITY_SCALE:
+            raise ValueError(
+                f"animation quality must be one of {list(gif_utils.QUALITY_SCALE)}, got {quality!r}"
+            )
+        return value
+
+    def _mp4_crf_for_quality(self, quality: str) -> int:
+        """Map UI quality labels to H.264 compression quality."""
+        return {"low": 24, "medium": 21, "high": 18}[self._normalise_animation_quality(quality)]
 
     def _export_mode_label(self, quantized: bool) -> str:
         return "uint8" if quantized else "full float32"
@@ -3610,14 +3625,15 @@ class Show3D(anywidget.AnyWidget):
             self._write_html_export(path, quantized=quantized)
             return path.read_bytes()
 
-    def _animation_export_bytes(self, mode: str) -> bytes:
+    def _animation_export_bytes(self, mode: str, *, quality: str = "medium") -> bytes:
         """Build a GIF or MP4 animation export in a temp directory and return bytes."""
+        quality = self._normalise_animation_quality(quality)
         with tempfile.TemporaryDirectory(prefix="show3d-animation-export-") as tmp:
-            path = pathlib.Path(tmp) / self._default_animation_export_path(mode).name
+            path = pathlib.Path(tmp) / self._default_animation_export_path(mode, quality).name
             if mode == "gif":
-                self.save_gif(path, quality="medium")
+                self.save_gif(path, quality=quality)
             elif mode == "mp4":
-                self.save_mp4(path, quality="medium")
+                self.save_mp4(path, quality=quality, crf=self._mp4_crf_for_quality(quality))
             else:
                 raise ValueError(f"unsupported animation export mode {mode!r}")
             return path.read_bytes()
