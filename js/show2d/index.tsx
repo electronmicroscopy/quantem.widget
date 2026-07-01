@@ -20,7 +20,10 @@ import Menu from "@mui/material/Menu";
 import Switch from "@mui/material/Switch";
 import Slider from "@mui/material/Slider";
 import Button from "@mui/material/Button";
+import IconButton from "@mui/material/IconButton";
 import Tooltip from "@mui/material/Tooltip";
+import VisibilityIcon from "@mui/icons-material/Visibility";
+import VisibilityOffIcon from "@mui/icons-material/VisibilityOff";
 import { useTheme } from "../theme";
 import { drawScaleBarHiDPI, drawColorbar, roundToNiceValue } from "../figure";
 import { extractBytes, extractFloat32, formatNumber, downloadBlob, preserveRestoredWidgetModelsOnSave } from "../format";
@@ -638,6 +641,11 @@ function Show2D() {
   const [height] = useModelState<number>("height");
   const [frameBytes] = useModelState<DataView>("frame_bytes");
   const [labels] = useModelState<string[]>("labels");
+  const [starred, setStarred] = useModelState<number[]>("starred");
+  const [hiddenPanels, setHiddenPanels] = useModelState<number[]>("hidden_panels");
+  const [showPanelTitles] = useModelState<boolean>("show_panel_titles");
+  const [panelTitleFontSize] = useModelState<number>("panel_title_font_size");
+  const [galleryGapPxState] = useModelState<number>("gallery_gap_px");
   const [title] = useModelState<string>("title");
   const [displayBinFactor] = useModelState<number>("_display_bin_factor");
   const [, setGpuMaxBufferMB] = useModelState<number>("_gpu_max_buffer_mb");
@@ -666,6 +674,7 @@ function Show2D() {
 
   // Scale bar
   const [pixelSize] = useModelState<number>("pixel_size");
+  const [pixelSizes] = useModelState<number[]>("pixel_sizes");
   const [pixelUnit] = useModelState<string>("pixel_unit");
   const [scaleBarVisible] = useModelState<boolean>("scale_bar_visible");
 
@@ -697,6 +706,7 @@ function Show2D() {
   const resizeAspectRef = React.useRef<number | null>(null);
   const [newRoiShape, setNewRoiShape] = React.useState<"circle" | "square" | "rectangle" | "annular">("square");
   const [exportAnchor, setExportAnchor] = React.useState<HTMLElement | null>(null);
+  const [panelMenuAnchor, setPanelMenuAnchor] = React.useState<HTMLElement | null>(null);
   const [, setExportRequest] = useModelState<string>("export_request");
   const [exportStatus] = useModelState<string>("export_status");
   const [exportEnabled] = useModelState<boolean>("export_enabled");
@@ -1164,7 +1174,48 @@ function Show2D() {
   // Layout calculations
   const showDiffPanel = diffMode && nImages >= 2;
   const diffPanelCount = showDiffPanel ? Math.max(0, nImages - 1) : 0;
-  const effectiveNcols = Math.min(ncols, nImages) + diffPanelCount;
+  const totalPanelCount = Math.max(1, nImages || 1);
+  const hiddenPanelSet = React.useMemo(() => {
+    const out = new Set<number>();
+    for (const value of hiddenPanels || []) {
+      const idx = Math.round(Number(value));
+      if (Number.isFinite(idx) && idx >= 0 && idx < totalPanelCount) out.add(idx);
+    }
+    if (out.size >= totalPanelCount) out.delete(totalPanelCount - 1);
+    return out;
+  }, [hiddenPanels, totalPanelCount]);
+  const visibleImageIndices = React.useMemo(
+    () => Array.from({ length: totalPanelCount }, (_, i) => i).filter(i => !hiddenPanelSet.has(i)),
+    [hiddenPanelSet, totalPanelCount]
+  );
+  const visibleImageCount = Math.max(1, visibleImageIndices.length);
+  const panelLabel = React.useCallback((idx: number) => labels?.[idx] || `Image ${idx + 1}`, [labels]);
+  const pixelSizeForPanel = React.useCallback((idx: number) => {
+    const perPanel = pixelSizes?.[idx];
+    return perPanel && perPanel > 0 ? perPanel : pixelSize;
+  }, [pixelSize, pixelSizes]);
+  const setPanelHidden = React.useCallback((panel: number, hidden: boolean) => {
+    const next = new Set<number>();
+    for (const value of hiddenPanels || []) {
+      const idx = Math.round(Number(value));
+      if (Number.isFinite(idx) && idx >= 0 && idx < totalPanelCount) next.add(idx);
+    }
+    if (hidden) next.add(panel);
+    else next.delete(panel);
+    if (next.size >= totalPanelCount) return;
+    setHiddenPanels(Array.from(next).sort((a, b) => a - b));
+  }, [hiddenPanels, totalPanelCount, setHiddenPanels]);
+  const togglePanelStar = React.useCallback((panel: number) => {
+    const next = Array.from({ length: totalPanelCount }, (_, idx) => starred?.[idx] ? 1 : 0);
+    next[panel] = next[panel] ? 0 : 1;
+    setStarred(next);
+  }, [starred, totalPanelCount, setStarred]);
+  React.useEffect(() => {
+    if (!isGallery) return;
+    if (!hiddenPanelSet.has(selectedIdx)) return;
+    setSelectedIdx(visibleImageIndices[0] ?? 0);
+  }, [hiddenPanelSet, isGallery, selectedIdx, setSelectedIdx, visibleImageIndices]);
+  const effectiveNcols = Math.min(ncols, visibleImageCount) + diffPanelCount;
   const diffOtherIndices = React.useMemo(
     () => Array.from({ length: nImages }, (_, i) => i).filter(i => i !== diffReference),
     [nImages, diffReference]
@@ -1172,7 +1223,7 @@ function Show2D() {
   const displayScale = canvasSize / Math.max(width, height);
   const canvasW = Math.round(width * displayScale);
   const canvasH = Math.round(height * displayScale);
-  const galleryGapPx = 8;
+  const galleryGapPx = Math.max(0, Number.isFinite(galleryGapPxState) ? galleryGapPxState : 8);
   const histogramWidthPx = 110;
   const histogramGapPx = 15;
   const galleryGridMaxWidth = isGallery ? effectiveNcols * canvasW + (effectiveNcols - 1) * galleryGapPx : canvasW;
@@ -1901,8 +1952,12 @@ function Show2D() {
       requestAnimationFrame(async () => {
         const indices = Array.from({ length: capturedNImages }, (_, i) => i);
 
-        // Zero-copy path: GPU → OffscreenCanvas → ImageBitmap → drawImage
-        const bitmaps = engine!.renderSlotsToImageBitmap(indices, capturedRanges, capturedLogScale);
+        // Zero-copy path: GPU → OffscreenCanvas → ImageBitmap → drawImage.
+        // Await GPU completion before snapshotting so the OffscreenCanvas holds
+        // the blitted colormap, not the render pass's black clear color. The
+        // non-awaited snapshot races the colormap pass and paints black when the
+        // queue is backed up (slow-tunnel 128 MB frame uploads).
+        const bitmaps = await engine!.renderSlotsToImageBitmapAsync(indices, capturedRanges, capturedLogScale);
         if (bitmaps && bitmaps.length > 0 && bitmaps[0]) {
           for (let i = 0; i < bitmaps.length; i++) {
             const offscreen = mainOffscreensRef.current[i];
@@ -1995,8 +2050,9 @@ function Show2D() {
 
       if (scaleBarVisible) {
         const zs = getZoomState(i);
-        const unit = pixelSize > 0 ? pixelUnit : "px";
-        const pxSize = pixelSize > 0 ? pixelSize : 1;
+        const panelPixelSize = pixelSizeForPanel(i);
+        const unit = panelPixelSize > 0 ? pixelUnit : "px";
+        const pxSize = panelPixelSize > 0 ? panelPixelSize : 1;
         drawScaleBarHiDPI(overlay, DPR, zs.zoom, pxSize, unit, width);
       } else {
         ctx.clearRect(0, 0, overlay.width, overlay.height);
@@ -2175,9 +2231,10 @@ function Show2D() {
           const dc = measurePoints[1].col - measurePoints[0].col;
           const dr = measurePoints[1].row - measurePoints[0].row;
           const distPx = Math.sqrt(dc * dc + dr * dr);
+          const measurePixelSize = pixelSizeForPanel(selectedIdx);
           let label: string;
-          if (pixelSize > 0) {
-            const distA = distPx * pixelSize;
+          if (measurePixelSize > 0) {
+            const distA = distPx * measurePixelSize;
             label = distA >= 10 ? `${(distA / 10).toFixed(2)} nm` : `${distA.toFixed(2)} Å`;
           } else {
             label = `${distPx.toFixed(1)} px`;
@@ -2196,7 +2253,7 @@ function Show2D() {
         ctx.restore();
       }
     }
-  }, [nImages, pixelSize, scaleBarVisible, selectedIdx, isGallery, canvasW, canvasH, width, displayScale, linkedZoom, linkedZoomState, zoomStates, dataVersion, showColorbar, cmap, offscreenVersion, logScale, profileActive, profilePoints, roiActive, roiList, roiSelectedIdx, isDraggingROI, themeColors, measureActive, measurePoints]);
+  }, [nImages, pixelSizeForPanel, pixelUnit, scaleBarVisible, selectedIdx, isGallery, canvasW, canvasH, width, displayScale, linkedZoom, linkedZoomState, zoomStates, dataVersion, showColorbar, cmap, offscreenVersion, logScale, profileActive, profilePoints, roiActive, roiList, roiSelectedIdx, isDraggingROI, themeColors, measureActive, measurePoints]);
 
   // -------------------------------------------------------------------------
   // Inset magnifier (lens) — renders magnified region at cursor in bottom-left
@@ -4092,10 +4149,18 @@ function Show2D() {
     }
     switch (e.key) {
       case "ArrowLeft":
-        if (isGallery) { e.preventDefault(); setSelectedIdx(Math.max(0, selectedIdx - 1)); }
+        if (isGallery) {
+          e.preventDefault();
+          const pos = visibleImageIndices.indexOf(selectedIdx);
+          setSelectedIdx(visibleImageIndices[Math.max(0, pos - 1)] ?? 0);
+        }
         break;
       case "ArrowRight":
-        if (isGallery) { e.preventDefault(); setSelectedIdx(Math.min(nImages - 1, selectedIdx + 1)); }
+        if (isGallery) {
+          e.preventDefault();
+          const pos = visibleImageIndices.indexOf(selectedIdx);
+          setSelectedIdx(visibleImageIndices[Math.min(visibleImageIndices.length - 1, pos + 1)] ?? 0);
+        }
         break;
       case "r":
       case "R":
@@ -4312,6 +4377,59 @@ function Show2D() {
             )}
             {(
               <>
+                {isGallery && (
+                  <>
+                    <Button
+                      size="small"
+                      sx={{ ...compactButton, "& .MuiButton-startIcon": { mr: 0.4 } }}
+                      startIcon={<VisibilityIcon sx={{ fontSize: 14 }} />}
+                      onClick={(e) => setPanelMenuAnchor(e.currentTarget)}
+                      aria-label="Choose visible panels"
+                      aria-controls={panelMenuAnchor ? "show2d-panels-menu" : undefined}
+                      aria-expanded={panelMenuAnchor ? "true" : undefined}
+                      aria-haspopup="menu"
+                    >
+                      {visibleImageCount === totalPanelCount ? "Panels" : `Panels ${visibleImageCount}/${totalPanelCount}`}
+                    </Button>
+                    <Menu
+                      id="show2d-panels-menu"
+                      anchorEl={panelMenuAnchor}
+                      open={Boolean(panelMenuAnchor)}
+                      onClose={() => setPanelMenuAnchor(null)}
+                      MenuListProps={{ "aria-label": "Panel visibility options" }}
+                      {...themedMenuProps}
+                    >
+                      {Array.from({ length: totalPanelCount }, (_, panel) => {
+                        const hidden = hiddenPanelSet.has(panel);
+                        const disabled = !hidden && visibleImageCount <= 1;
+                        return (
+                          <MenuItem
+                            key={`show2d-panel-menu-${panel}`}
+                            dense
+                            disabled={disabled}
+                            onClick={() => setPanelHidden(panel, !hidden)}
+                            title={disabled ? "At least one panel must remain visible" : undefined}
+                          >
+                            {hidden
+                              ? <VisibilityOffIcon sx={{ fontSize: 16, mr: 1, color: themeColors.textMuted }} />
+                              : <VisibilityIcon sx={{ fontSize: 16, mr: 1, color: themeColors.accent }} />}
+                            <Typography sx={{ fontSize: 11, color: disabled ? themeColors.textMuted : themeColors.text }}>
+                              {panelLabel(panel)}
+                            </Typography>
+                          </MenuItem>
+                        );
+                      })}
+                      <MenuItem
+                        dense
+                        disabled={hiddenPanelSet.size === 0}
+                        onClick={() => setHiddenPanels([])}
+                      >
+                        <VisibilityIcon sx={{ fontSize: 16, mr: 1, color: themeColors.accent }} />
+                        <Typography sx={{ fontSize: 11 }}>Show all panels</Typography>
+                      </MenuItem>
+                    </Menu>
+                  </>
+                )}
                 <Button
                   size="small"
                   sx={{ ...compactButton, color: themeColors.accent }}
@@ -4349,13 +4467,21 @@ function Show2D() {
           {isGallery ? (
             /* Gallery mode */
             <Box sx={{ display: "grid", gridTemplateColumns: galleryGridColumns, gap: `${galleryGapPx}px`, maxWidth: galleryGridWidth, width: "100%", boxSizing: "border-box", justifyContent: "start", "@media (max-width: 900px)": { gridTemplateColumns: "minmax(0, 1fr)", maxWidth: "100%" } }}>
-              {Array.from({ length: nImages }).map((_, i) => (
+              {visibleImageIndices.map((i) => (
                 <Box key={i} sx={{ minWidth: 0, cursor: i === selectedIdx ? ((isDraggingResize || isDraggingResizeInner || isHoveringResize || isHoveringResizeInner) ? "nwse-resize" : isDraggingROI ? "move" : (draggingProfileEndpoint !== null || isDraggingProfileLine) ? "grabbing" : (profileActive && (hoveredProfileEndpoint !== null || isHoveringProfileLine)) ? "grab" : (profileActive || roiActive || measureActive) ? "crosshair" : "grab") : ("pointer") }}>
                   <Box
                     ref={(el: HTMLDivElement | null) => { imageContainerRefs.current[i] = el; }}
                     sx={{
                       ...responsivePanelSx,
                       border: `2px solid ${i === selectedIdx ? themeColors.accent : themeColors.border}`,
+                      "&:hover .show2d-panel-hide-button, &:focus-within .show2d-panel-hide-button": {
+                        opacity: 1,
+                        pointerEvents: "auto",
+                        transform: "translateY(0)",
+                      },
+                      "@media (hover: none), (pointer: coarse)": {
+                        "& .show2d-panel-hide-button": { display: "none" },
+                      },
                     }}
                     onMouseDown={(e) => handleMouseDown(e, i)}
                     onMouseMove={(e) => handleMouseMove(e, i)}
@@ -4378,6 +4504,102 @@ function Show2D() {
                       width={Math.round(canvasW * DPR)} height={Math.round(canvasH * DPR)}
                       style={responsiveOverlayStyle}
                     />
+                    {showPanelTitles !== false && (
+                      <Box
+                        sx={{
+                          position: "absolute",
+                          top: 6,
+                          left: 28,
+                          right: 28,
+                          px: 0.5,
+                          color: "rgba(255,255,255,0.95)",
+                          fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+                          fontSize: Math.max(8, panelTitleFontSize || 11),
+                          fontWeight: 700,
+                          lineHeight: 1.2,
+                          textAlign: "center",
+                          textShadow: "1px 1px 0 rgba(0,0,0,0.85), 0 0 3px rgba(0,0,0,0.75)",
+                          pointerEvents: "none",
+                          userSelect: "none",
+                          whiteSpace: "nowrap",
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          zIndex: 2,
+                        }}
+                      >
+                        {panelLabel(i)}
+                      </Box>
+                    )}
+                    <IconButton
+                      size="small"
+                      onPointerDown={(event) => event.stopPropagation()}
+                      onMouseDown={(event) => event.stopPropagation()}
+                      onMouseUp={(event) => event.stopPropagation()}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        togglePanelStar(i);
+                      }}
+                      title={(starred?.[i] ? "Unstar " : "Star ") + panelLabel(i)}
+                      aria-label={(starred?.[i] ? "Unstar " : "Star ") + panelLabel(i)}
+                      sx={{
+                        position: "absolute",
+                        top: 5,
+                        right: 5,
+                        width: 22,
+                        height: 22,
+                        p: 0,
+                        border: "none",
+                        bgcolor: "transparent",
+                        cursor: "pointer",
+                        fontSize: 18,
+                        lineHeight: "20px",
+                        textAlign: "center",
+                        color: starred?.[i] ? "#ffc107" : "rgba(255,255,255,0.58)",
+                        textShadow: "0 0 3px rgba(0,0,0,0.8)",
+                        pointerEvents: "auto",
+                        userSelect: "none",
+                        zIndex: 3,
+                        "&:hover, &:focus-visible": {
+                          bgcolor: "rgba(0,0,0,0.22)",
+                          color: starred?.[i] ? "#ffc107" : "rgba(255,255,255,0.9)",
+                        },
+                      }}
+                    >
+                      {starred?.[i] ? "★" : "☆"}
+                    </IconButton>
+                    <IconButton
+                      className="show2d-panel-hide-button"
+                      size="small"
+                      disabled={visibleImageCount <= 1}
+                      onMouseDown={(event) => event.stopPropagation()}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        setPanelHidden(i, true);
+                      }}
+                      aria-label={visibleImageCount <= 1 ? "Cannot hide the last visible panel" : `Hide ${panelLabel(i)}`}
+                      title={visibleImageCount <= 1 ? "Cannot hide the last visible panel" : `Hide ${panelLabel(i)}`}
+                      sx={{
+                        position: "absolute",
+                        top: 5,
+                        left: 5,
+                        width: 22,
+                        height: 22,
+                        p: 0,
+                        opacity: 0,
+                        transform: "translateY(-3px)",
+                        transition: "opacity 120ms ease, transform 120ms ease, background-color 120ms ease, color 120ms ease",
+                        color: visibleImageCount <= 1 ? "rgba(255,255,255,0.25)" : "rgba(255,255,255,0.75)",
+                        bgcolor: "rgba(0,0,0,0.22)",
+                        pointerEvents: "none",
+                        zIndex: 3,
+                        "&:hover, &:focus-visible": {
+                          bgcolor: "rgba(0,0,0,0.42)",
+                          color: "rgba(255,255,255,0.95)",
+                        },
+                      }}
+                    >
+                      <VisibilityOffIcon sx={{ fontSize: 15 }} />
+                    </IconButton>
                     {(
                       <Box
                         onMouseDown={handleCanvasResizeStart}
@@ -4398,9 +4620,9 @@ function Show2D() {
                       />
                     )}
                   </Box>
-                  <Typography sx={{ fontSize: 10, color: themeColors.textMuted, textAlign: "center", mt: 0.25 }}>
-                    {labels?.[i] || `Image ${i + 1}`}
-                    {(imageRotations?.[i] ?? 0) % 4 !== 0 && (
+                  {(imageRotations?.[i] ?? 0) % 4 !== 0 && (
+                    <Typography sx={{ fontSize: 10, color: themeColors.textMuted, textAlign: "center", mt: 0.25 }}>
+                      {panelLabel(i)}
                       <Box
                         component="span"
                         onClick={(e: React.MouseEvent) => {
@@ -4414,8 +4636,8 @@ function Show2D() {
                       >
                         ({(imageRotations[i] % 4) * 90}°)
                       </Box>
-                    )}
-                  </Typography>
+                    </Typography>
+                  )}
                   {effectiveShowFft && (
                     <Box
                       ref={(el: HTMLDivElement | null) => { fftContainerRefs.current[i] = el; }}
@@ -4441,6 +4663,32 @@ function Show2D() {
                         width={canvasW} height={canvasH}
                         style={responsiveCanvasStyle}
                       />
+                      {showPanelTitles !== false && (
+                        <Box
+                          sx={{
+                            position: "absolute",
+                            top: 6,
+                            left: 8,
+                            right: 8,
+                            px: 0.5,
+                            color: "rgba(255,255,255,0.95)",
+                            fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+                            fontSize: Math.max(8, panelTitleFontSize || 11),
+                            fontWeight: 700,
+                            lineHeight: 1.2,
+                            textAlign: "center",
+                            textShadow: "1px 1px 0 rgba(0,0,0,0.85), 0 0 3px rgba(0,0,0,0.75)",
+                            pointerEvents: "none",
+                            userSelect: "none",
+                            whiteSpace: "nowrap",
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                            zIndex: 2,
+                          }}
+                        >
+                          FFT · {panelLabel(i)}
+                        </Box>
+                      )}
                       {fftComputing && !fftMagCacheGalleryRef.current[i] && (
                         <Box sx={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", bgcolor: "rgba(0,0,0,0.6)", pointerEvents: "none" }}>
                           <Typography sx={{ fontSize: 10, color: "#aaa", fontFamily: "monospace", "@keyframes pulse": { "0%,100%": { opacity: 0.4 }, "50%": { opacity: 1 } }, animation: "pulse 1.2s ease-in-out infinite" }}>FFT…</Typography>
