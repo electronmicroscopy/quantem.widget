@@ -81,23 +81,38 @@ def test_show3d_fft_layout_validates_and_roundtrips(tmp_path: pathlib.Path) -> N
         *_panels()[:2],
         panel_titles=["SSB", "Mean DP"],
         show_fft=True,
-        fft_layout="right",
+        fft_layout="overlay",
+        fft_overlay_position="bottom-left",
+        fft_overlay_size=0.5,
         show_controls=False,
     )
 
-    assert widget.fft_layout == "right"
+    assert widget.fft_layout == "overlay"
+    assert widget.fft_overlay_position == "bottom-left"
+    assert widget.fft_overlay_size == 0.5
     state = widget.state_dict()
-    assert state["fft_layout"] == "right"
+    assert state["fft_layout"] == "overlay"
+    assert state["fft_overlay_position"] == "bottom-left"
+    assert state["fft_overlay_size"] == 0.5
 
     restored = Show3D(*_panels()[:2], panel_titles=["SSB", "Mean DP"], show_controls=False)
     restored.load_state_dict(state)
-    assert restored.fft_layout == "right"
+    assert restored.fft_layout == "overlay"
+    assert restored.fft_overlay_position == "bottom-left"
+    assert restored.fft_overlay_size == 0.5
 
     out = widget.export_html(tmp_path / "show3d_fft_layout.html", encoding="full")
-    assert "fft_layout" in out.read_text()
+    exported = out.read_text()
+    assert "fft_layout" in exported
+    assert "fft_overlay_position" in exported
+    assert "fft_overlay_size" in exported
 
     with pytest.raises(ValueError, match="fft_layout"):
         Show3D(np.zeros((3, 4, 5), dtype=np.float32), fft_layout="floating")
+    with pytest.raises(ValueError, match="fft_overlay_position"):
+        Show3D(np.zeros((3, 4, 5), dtype=np.float32), fft_overlay_position="center")
+    with pytest.raises(ValueError, match="fft_overlay_size"):
+        Show3D(np.zeros((3, 4, 5), dtype=np.float32), fft_overlay_size=0.9)
 
 
 def test_show3d_hidden_panels_roundtrip_in_state_and_html(tmp_path: pathlib.Path) -> None:
