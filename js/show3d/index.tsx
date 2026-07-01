@@ -1445,12 +1445,14 @@ function Show3D() {
   const [fftLayout, setFftLayout] = useModelState<string>("fft_layout");
   const [fftOverlayPosition, setFftOverlayPosition] = useModelState<string>("fft_overlay_position");
   const [fftOverlaySize, setFftOverlaySize] = useModelState<number>("fft_overlay_size");
+  const [fftOverlayZoomTrait, setFftOverlayZoomTrait] = useModelState<number>("fft_overlay_zoom");
   const [fftWindow, setFftWindow] = useModelState<boolean>("fft_window");
   const resolvedFftLayout = (["bottom", "right", "overlay"].includes(String(fftLayout)) ? String(fftLayout) : "bottom") as "bottom" | "right" | "overlay";
   const fftLayoutBottom = resolvedFftLayout === "bottom";
   const fftLayoutOverlay = resolvedFftLayout === "overlay";
   const resolvedFftOverlayPosition = (["top-left", "top-right", "bottom-left", "bottom-right"].includes(String(fftOverlayPosition)) ? String(fftOverlayPosition) : "top-left") as "top-left" | "top-right" | "bottom-left" | "bottom-right";
   const resolvedFftOverlaySize = Math.max(0.2, Math.min(0.7, Number.isFinite(fftOverlaySize) ? fftOverlaySize : 0.35));
+  const resolvedFftOverlayZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, Number.isFinite(fftOverlayZoomTrait) ? fftOverlayZoomTrait : 1));
 
 
   // Playback buffer (sliding prefetch)
@@ -2821,6 +2823,17 @@ function Show3D() {
   const [fftZoom, setFftZoom] = React.useState(1);
   const [fftPanX, setFftPanX] = React.useState(0);
   const [fftPanY, setFftPanY] = React.useState(0);
+  const internalFftZoomSyncRef = React.useRef(false);
+
+  React.useEffect(() => {
+    if (internalFftZoomSyncRef.current) {
+      internalFftZoomSyncRef.current = false;
+      return;
+    }
+    setFftZoom(resolvedFftOverlayZoom);
+    setFftPanX(0);
+    setFftPanY(0);
+  }, [resolvedFftOverlayZoom]);
   const fftContainerRef = React.useRef<HTMLDivElement>(null);
 
   // Line profile state
@@ -7706,6 +7719,17 @@ function Show3D() {
   const [isFftDragging, setIsFftDragging] = React.useState(false);
   const [fftPanStart, setFftPanStart] = React.useState<{ x: number, y: number, pX: number, pY: number } | null>(null);
 
+  const zoomFftAtPoint = React.useCallback((anchorX: number, anchorY: number, deltaY: number) => {
+    const zoomFactor = Math.max(0.75, Math.min(1.35, Math.exp(-deltaY * 0.002)));
+    const newZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, fftZoom * zoomFactor));
+    const zoomRatio = newZoom / Math.max(1e-6, fftZoom);
+    setFftZoom(newZoom);
+    internalFftZoomSyncRef.current = true;
+    setFftOverlayZoomTrait(Number(newZoom.toFixed(3)));
+    setFftPanX(anchorX - (anchorX - fftPanX) * zoomRatio);
+    setFftPanY(anchorY - (anchorY - fftPanY) * zoomRatio);
+  }, [fftPanX, fftPanY, fftZoom, setFftOverlayZoomTrait]);
+
   const handleFftWheel = (e: React.WheelEvent) => {
     e.preventDefault();
     e.stopPropagation();
@@ -7714,9 +7738,6 @@ function Show3D() {
     const rect = canvas.getBoundingClientRect();
     const mouseX = (e.clientX - rect.left) * (canvas.width / rect.width);
     const mouseY = (e.clientY - rect.top) * (canvas.height / rect.height);
-    const zoomFactor = Math.max(0.75, Math.min(1.35, Math.exp(-e.deltaY * 0.002)));
-    const newZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, fftZoom * zoomFactor));
-    const zoomRatio = newZoom / fftZoom;
     const panelGrid = fftPanelGridRef.current;
     if (panelGrid) {
       for (let slot = 0; slot < panelGrid.count; slot++) {
@@ -7724,15 +7745,20 @@ function Show3D() {
         if (mouseX < dst.x || mouseX >= dst.x + dst.w || mouseY < dst.y || mouseY >= dst.y + dst.h) continue;
         const localX = mouseX - dst.x;
         const localY = mouseY - dst.y;
-        setFftZoom(newZoom);
-        setFftPanX(localX - (localX - fftPanX) * zoomRatio);
-        setFftPanY(localY - (localY - fftPanY) * zoomRatio);
+        zoomFftAtPoint(localX, localY, e.deltaY);
         return;
       }
     }
-    setFftZoom(newZoom);
-    setFftPanX(mouseX - (mouseX - fftPanX) * zoomRatio);
-    setFftPanY(mouseY - (mouseY - fftPanY) * zoomRatio);
+    zoomFftAtPoint(mouseX, mouseY, e.deltaY);
+  };
+
+  const handleFftInsetWheel = (e: React.WheelEvent<HTMLElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const rect = e.currentTarget.getBoundingClientRect();
+    const localX = e.clientX - rect.left;
+    const localY = e.clientY - rect.top;
+    zoomFftAtPoint(localX, localY, e.deltaY);
   };
 
   // Convert FFT canvas mouse position to FFT image pixel coordinates
@@ -7952,6 +7978,8 @@ function Show3D() {
 
   const handleFftReset = () => {
     setFftZoom(1);
+    internalFftZoomSyncRef.current = true;
+    setFftOverlayZoomTrait(1);
     setFftPanX(0);
     setFftPanY(0);
     setFftClickInfo(null);
@@ -8529,57 +8557,6 @@ function Show3D() {
           </Typography>
           {/* Controls row */}
           <Box sx={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: "4px", mb: `${SPACING.XS}px`, minHeight: 28 }}>
-            {/* FFT can be shown below, beside, or as an inset over the image grid. */}
-            {fftAllowed && <>
-              <Typography sx={{ ...typography.label, fontSize: 10 }}>FFT</Typography>
-              <Switch checked={showFft} onChange={(e) => { const on = e.target.checked; setShowFft(on); if (on) setShowKymograph(false); }} size="small" sx={switchStyles.small} slotProps={{ input: { "aria-label": "Toggle FFT power spectrum panel" } }} />
-              {showFft && (
-                <Select
-                  value={resolvedFftLayout}
-                  onChange={(e) => setFftLayout(String(e.target.value))}
-                  size="small"
-                  sx={{ ...themedSelect, minWidth: 78, fontSize: 10, ml: "2px" }}
-                  MenuProps={themedMenuProps}
-                  inputProps={{ "aria-label": "FFT panel layout" }}
-                >
-                  <MenuItem value="bottom">Bottom</MenuItem>
-                  <MenuItem value="right">Right</MenuItem>
-                  <MenuItem value="overlay">Overlay</MenuItem>
-                </Select>
-              )}
-              {showFft && fftLayoutOverlay && (
-                <>
-                  <Typography sx={{ ...typography.label, fontSize: 10, ml: "2px" }}>Pos</Typography>
-                  <Select
-                    value={resolvedFftOverlayPosition}
-                    onChange={(e) => setFftOverlayPosition(String(e.target.value))}
-                    size="small"
-                    sx={{ ...themedSelect, minWidth: 48, fontSize: 10, ml: "2px" }}
-                    MenuProps={themedMenuProps}
-                    inputProps={{ "aria-label": "FFT overlay position" }}
-                  >
-                    <MenuItem value="top-left">TL</MenuItem>
-                    <MenuItem value="top-right">TR</MenuItem>
-                    <MenuItem value="bottom-left">BL</MenuItem>
-                    <MenuItem value="bottom-right">BR</MenuItem>
-                  </Select>
-                  <Typography sx={{ ...typography.label, fontSize: 10, ml: "2px" }}>Size</Typography>
-                  <Select
-                    value={String(Math.round(resolvedFftOverlaySize * 100))}
-                    onChange={(e) => setFftOverlaySize(Number(e.target.value) / 100)}
-                    size="small"
-                    sx={{ ...themedSelect, minWidth: 52, fontSize: 10, ml: "2px" }}
-                    MenuProps={themedMenuProps}
-                    inputProps={{ "aria-label": "FFT overlay size" }}
-                  >
-                    <MenuItem value="25">25%</MenuItem>
-                    <MenuItem value="35">35%</MenuItem>
-                    <MenuItem value="50">50%</MenuItem>
-                    <MenuItem value="65">65%</MenuItem>
-                  </Select>
-                </>
-              )}
-            </>}
             {/* Kymograph toggle: HIDDEN until a profile line exists (not shown-
                 but-disabled). Kymograph is a line-profile sub-feature, so the
                 control only appears once there's a line to build it from. */}
@@ -8654,6 +8631,60 @@ function Show3D() {
                 <Switch checked={linkContrast} onChange={(e) => setLinkContrast(e.target.checked)} size="small" sx={switchStyles.small} slotProps={{ input: { "aria-label": "Link contrast across panels" } }} />
               </>
             )}
+            {fftAllowed && (
+              <Box aria-hidden="true" sx={{ width: "1px", height: 20, flex: "0 0 1px", alignSelf: "center", mx: "4px", bgcolor: themeColors.border, opacity: 0.8 }} />
+            )}
+            {/* FFT can be shown below, beside, or as an inset over the image grid. */}
+            {fftAllowed && <>
+              <Typography sx={{ ...typography.label, fontSize: 10 }}>FFT</Typography>
+              <Switch checked={showFft} onChange={(e) => { const on = e.target.checked; setShowFft(on); if (on) setShowKymograph(false); }} size="small" sx={switchStyles.small} slotProps={{ input: { "aria-label": "Toggle FFT power spectrum panel" } }} />
+              {showFft && (
+                <Select
+                  value={resolvedFftLayout}
+                  onChange={(e) => setFftLayout(String(e.target.value))}
+                  size="small"
+                  sx={{ ...themedSelect, minWidth: 78, fontSize: 10, ml: "2px" }}
+                  MenuProps={themedMenuProps}
+                  inputProps={{ "aria-label": "FFT panel layout" }}
+                >
+                  <MenuItem value="bottom">Bottom</MenuItem>
+                  <MenuItem value="right">Right</MenuItem>
+                  <MenuItem value="overlay">Overlay</MenuItem>
+                </Select>
+              )}
+              {showFft && fftLayoutOverlay && (
+                <>
+                  <Typography sx={{ ...typography.label, fontSize: 10, ml: "2px" }}>Pos</Typography>
+                  <Select
+                    value={resolvedFftOverlayPosition}
+                    onChange={(e) => setFftOverlayPosition(String(e.target.value))}
+                    size="small"
+                    sx={{ ...themedSelect, minWidth: 48, fontSize: 10, ml: "2px" }}
+                    MenuProps={themedMenuProps}
+                    inputProps={{ "aria-label": "FFT overlay position" }}
+                  >
+                    <MenuItem value="top-left">TL</MenuItem>
+                    <MenuItem value="top-right">TR</MenuItem>
+                    <MenuItem value="bottom-left">BL</MenuItem>
+                    <MenuItem value="bottom-right">BR</MenuItem>
+                  </Select>
+                  <Typography sx={{ ...typography.label, fontSize: 10, ml: "2px" }}>Size</Typography>
+                  <Select
+                    value={String(Math.round(resolvedFftOverlaySize * 100))}
+                    onChange={(e) => setFftOverlaySize(Number(e.target.value) / 100)}
+                    size="small"
+                    sx={{ ...themedSelect, minWidth: 52, fontSize: 10, ml: "2px" }}
+                    MenuProps={themedMenuProps}
+                    inputProps={{ "aria-label": "FFT overlay size" }}
+                  >
+                    <MenuItem value="25">25%</MenuItem>
+                    <MenuItem value="35">35%</MenuItem>
+                    <MenuItem value="50">50%</MenuItem>
+                    <MenuItem value="65">65%</MenuItem>
+                  </Select>
+                </>
+              )}
+            </>}
             <Box sx={{ flex: 1 }} />
             <Box sx={{ display: "flex", alignItems: "center", gap: "6px" }}>
               <Button size="small" sx={compactButton} onClick={handleCopy} aria-label="Copy current frame to clipboard as PNG">Copy</Button>
@@ -9065,6 +9096,8 @@ function Show3D() {
                 return (
                   <Box
                     key={`fft-overlay-inset-${panel}`}
+                    onWheel={handleFftInsetWheel}
+                    onDoubleClick={(e) => { e.preventDefault(); e.stopPropagation(); handleFftReset(); }}
                     sx={{
                       position: "absolute",
                       left: `${(insetX / Math.max(1, canvasW)) * 100}%`,
@@ -9076,13 +9109,16 @@ function Show3D() {
                       boxShadow: "0 2px 8px rgba(0,0,0,0.5)",
                       zIndex: 8,
                       overflow: "hidden",
-                      pointerEvents: "none",
+                      pointerEvents: "auto",
+                      cursor: fftZoom > 1 ? "grab" : "zoom-in",
                     }}
                   >
                     <canvas
                       ref={(el) => { fftInsetCanvasRefs.current[slot] = el; }}
                       width={Math.max(1, Math.round(insetW))}
                       height={Math.max(1, Math.round(insetH))}
+                      onWheel={handleFftInsetWheel}
+                      onDoubleClick={(e) => { e.preventDefault(); e.stopPropagation(); handleFftReset(); }}
                       style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", imageRendering: smooth ? "auto" : "pixelated" }}
                       role="img"
                       aria-label={`FFT power spectrum overlay for ${panelLabel(panel)}`}
