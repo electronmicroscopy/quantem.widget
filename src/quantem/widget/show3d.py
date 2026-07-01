@@ -3166,6 +3166,7 @@ class Show3D(anywidget.AnyWidget):
         quality: str,
         playback: str,
         show_frame_labels: bool,
+        background: str | tuple[int, int, int],
     ) -> list[Any]:
         """Render panel-only animation frames as RGB PIL images."""
         from quantem.widget.render import gif as gif_utils
@@ -3199,13 +3200,15 @@ class Show3D(anywidget.AnyWidget):
                     title_font_size=title_font_size,
                     max_cols=int(self.max_cols),
                     panel_gap=panel_gap,
+                    background=background,
                 )
             )
         return frames
 
     def save_gif(self, path: str | pathlib.Path, *, quality: str = "high",
                  fps: float | None = None, playback: str = "forward",
-                 show_frame_labels: bool = False) -> pathlib.Path:
+                 show_frame_labels: bool = False,
+                 background: str | tuple[int, int, int] = "dark") -> pathlib.Path:
         """Save the z-stack panels as an animated GIF matching the live image view.
 
         Each frame is colorized with the current ``cmap`` and contrast
@@ -3228,6 +3231,8 @@ class Show3D(anywidget.AnyWidget):
         show_frame_labels : bool, default False
             Draw per-panel dynamic frame labels from ``panel_frame_labels``.
             When enabled and no labels were provided, draw ``"i/n"``.
+        background : {"dark", "black", "white"} or RGB tuple, default "dark"
+            Grid gutter/background color for multi-panel exports.
 
         Returns
         -------
@@ -3246,12 +3251,14 @@ class Show3D(anywidget.AnyWidget):
             quality=quality,
             playback=playback,
             show_frame_labels=bool(show_frame_labels),
+            background=background,
         )
         return gif_utils.write_gif(frames, path, fps)
 
     def save_mp4(self, path: str | pathlib.Path, *, quality: str = "high",
                  fps: float | None = None, playback: str = "forward",
-                 crf: int = 18, show_frame_labels: bool = False) -> pathlib.Path:
+                 crf: int = 18, show_frame_labels: bool = False,
+                 background: str | tuple[int, int, int] = "dark") -> pathlib.Path:
         """Save the z-stack panels as an H.264 MP4.
 
         The rendered content matches :meth:`save_gif`: image panels only, with
@@ -3274,6 +3281,8 @@ class Show3D(anywidget.AnyWidget):
         show_frame_labels : bool, default False
             Draw per-panel dynamic frame labels from ``panel_frame_labels``.
             When enabled and no labels were provided, draw ``"i/n"``.
+        background : {"dark", "black", "white"} or RGB tuple, default "dark"
+            Grid gutter/background color for multi-panel exports.
 
         Returns
         -------
@@ -3286,6 +3295,7 @@ class Show3D(anywidget.AnyWidget):
             quality=quality,
             playback=playback,
             show_frame_labels=bool(show_frame_labels),
+            background=background,
         )
         return gif_utils.write_mp4(frames, path, fps, crf=crf)
 
@@ -3492,6 +3502,27 @@ class Show3D(anywidget.AnyWidget):
                 self.export_payload_id = ""
                 self.export_filename = ""
                 return
+            if mode in {"gif", "mp4"}:
+                filename = str(payload.get("filename") or self._default_animation_export_path(mode).name)
+                request_id = str(payload.get("id") or "")
+                if payload.get("download"):
+                    self.export_status = f"Preparing {filename}..."
+                    media = self._animation_export_bytes(mode)
+                    self.export_filename = filename
+                    self.export_payload = media
+                    self.export_payload_id = request_id
+                    size_mb = len(media) / (1024 * 1024)
+                    self.export_status = f"Ready {filename} ({size_mb:.1f} MB)"
+                else:
+                    self.export_status = f"Exporting {filename}..."
+                    path = self._default_animation_export_path(mode)
+                    if mode == "gif":
+                        self.save_gif(path)
+                    else:
+                        self.save_mp4(path)
+                    size_mb = path.stat().st_size / (1024 * 1024)
+                    self.export_status = f"Exported {path.name} ({size_mb:.1f} MB)"
+                return
             quantized = self._normalise_html_export_options(
                 mode=mode,
                 encoding=str(payload.get("encoding", "full")),
@@ -3527,6 +3558,17 @@ class Show3D(anywidget.AnyWidget):
             slug = "show3d"
         mode = "quantized" if quantized else "exact"
         return pathlib.Path.cwd() / f"{slug}_{self.n_slices}x{self.height}x{self.width}_{mode}.html"
+
+    def _default_animation_export_path(self, mode: str) -> pathlib.Path:
+        """Build a stable, human-readable GIF/MP4 export filename."""
+        label = self.title.strip() or "show3d"
+        slug = "".join(ch.lower() if ch.isalnum() else "_" for ch in label).strip("_")
+        while "__" in slug:
+            slug = slug.replace("__", "_")
+        if not slug:
+            slug = "show3d"
+        ext = "mp4" if mode == "mp4" else "gif"
+        return pathlib.Path.cwd() / f"{slug}_{self.n_slices}x{self.height}x{self.width}.{ext}"
 
     def _export_mode_label(self, quantized: bool) -> str:
         return "uint8" if quantized else "full float32"
@@ -3566,6 +3608,18 @@ class Show3D(anywidget.AnyWidget):
         with tempfile.TemporaryDirectory(prefix="show3d-export-") as tmp:
             path = pathlib.Path(tmp) / self._default_html_export_path(quantized).name
             self._write_html_export(path, quantized=quantized)
+            return path.read_bytes()
+
+    def _animation_export_bytes(self, mode: str) -> bytes:
+        """Build a GIF or MP4 animation export in a temp directory and return bytes."""
+        with tempfile.TemporaryDirectory(prefix="show3d-animation-export-") as tmp:
+            path = pathlib.Path(tmp) / self._default_animation_export_path(mode).name
+            if mode == "gif":
+                self.save_gif(path, quality="medium")
+            elif mode == "mp4":
+                self.save_mp4(path, quality="medium")
+            else:
+                raise ValueError(f"unsupported animation export mode {mode!r}")
             return path.read_bytes()
 
     def _export_data_args(self) -> tuple[np.ndarray, ...]:

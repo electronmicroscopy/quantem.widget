@@ -128,8 +128,23 @@ function makeExportFilename(title: string, nSlices: number, height: number, widt
     .replace(/^_+|_+$/g, "");
   while (slug.includes("__")) slug = slug.replace(/__/g, "_");
   if (!slug) slug = "show3d";
+  if (mode === "gif" || mode === "mp4") {
+    return `${slug}_${nSlices}x${height}x${width}.${mode}`;
+  }
   const suffix = mode === "quantized" ? "quantized" : "exact";
   return `${slug}_${nSlices}x${height}x${width}_${suffix}.html`;
+}
+
+function exportPickerType(mode: string): { description: string; accept: Record<string, string[]> } {
+  if (mode === "gif") return { description: "Animated GIF", accept: { "image/gif": [".gif"] } };
+  if (mode === "mp4") return { description: "MP4 video", accept: { "video/mp4": [".mp4"] } };
+  return { description: "Standalone HTML", accept: { "text/html": [".html"] } };
+}
+
+function exportBlobType(mode: string): string {
+  if (mode === "gif") return "image/gif";
+  if (mode === "mp4") return "video/mp4";
+  return "text/html;charset=utf-8";
 }
 
 function formatSavedBytes(bytes: number): string {
@@ -1517,7 +1532,7 @@ function Show3D() {
   };
   const handleExportSelect = async (mode: string) => {
     setExportMenuAnchor(null);
-    if (mode !== "exact" && mode !== "quantized") return;
+    if (mode !== "exact" && mode !== "quantized" && mode !== "gif" && mode !== "mp4") return;
     const filename = makeExportFilename(title, nSlices, height, width, mode);
     const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
     setExportBusy(true);
@@ -1528,7 +1543,7 @@ function Show3D() {
       try {
         handle = await picker({
           suggestedName: filename,
-          types: [{ description: "Standalone HTML", accept: { "text/html": [".html"] } }],
+          types: [exportPickerType(mode)],
         });
       } catch (err) {
         if (isAbortLikeError(err)) {
@@ -1557,7 +1572,7 @@ function Show3D() {
         ? bytes
         : bytes.slice();
       const filename = exportPayloadFilename || pending.filename;
-      const blob = new Blob([payload as BlobPart], { type: "text/html;charset=utf-8" });
+      const blob = new Blob([payload as BlobPart], { type: exportBlobType(pending.mode) });
       try {
         if (pending.handle) {
           setLocalExportStatus(`Saving ${filename}...`);
@@ -8923,11 +8938,11 @@ function Show3D() {
                     sx={compactButton}
                     disabled={exportBusy}
                     onClick={handleExportMenuOpen}
-                    aria-label="Export standalone HTML"
+                    aria-label="Export widget or animation"
                     aria-controls={exportMenuAnchor ? "show3d-export-menu" : undefined}
                     aria-expanded={exportMenuAnchor ? "true" : undefined}
                     aria-haspopup="menu"
-                    title={localExportStatus || exportStatus || "Export standalone HTML with a save dialog"}
+                    title={localExportStatus || exportStatus || "Export HTML, GIF, or MP4 with a save dialog"}
                   >
                     {exportBusy ? "Exporting" : "Export"}
                   </Button>
@@ -8936,11 +8951,13 @@ function Show3D() {
                     anchorEl={exportMenuAnchor}
                     open={Boolean(exportMenuAnchor)}
                     onClose={handleExportMenuClose}
-                    MenuListProps={{ "aria-label": "Export standalone HTML options" }}
+                    MenuListProps={{ "aria-label": "Export options" }}
                     {...themedMenuProps}
                   >
-                    <MenuItem onClick={() => handleExportSelect("exact")}>Exact float32 ({exactExportSize})</MenuItem>
-                    <MenuItem onClick={() => handleExportSelect("quantized")}>Quantized uint8 ({quantizedExportSize})</MenuItem>
+                    <MenuItem onClick={() => handleExportSelect("exact")}>HTML exact float32 ({exactExportSize})</MenuItem>
+                    <MenuItem onClick={() => handleExportSelect("quantized")}>HTML quantized uint8 ({quantizedExportSize})</MenuItem>
+                    <MenuItem onClick={() => handleExportSelect("gif")}>GIF animation</MenuItem>
+                    <MenuItem onClick={() => handleExportSelect("mp4")}>MP4 animation</MenuItem>
                   </Menu>
                 </>
               )}
