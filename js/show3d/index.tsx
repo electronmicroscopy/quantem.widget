@@ -840,6 +840,7 @@ function pointToSegmentDistance(col: number, row: number, col0: number, row0: nu
 // never clobbers a cached playback slot.
 const OFFLINE_HIST_SLOT = 1_000_000;
 const CANVAS_TARGET_SIZE = 600;
+const MIN_WRAPPED_PANEL_SIZE = 250;
 const MIN_ZOOM = 0.5;
 const MAX_ZOOM = 30;
 const MAX_PLAYBACK_FPS = 30;
@@ -1162,6 +1163,8 @@ function Show3D() {
   // Model state (synced with Python)
   const [sliceIdx, setSliceIdx] = useModelState<number>("slice_idx");
   const [nSlices] = useModelState<number>("n_slices");
+  const [labels] = useModelState<string[]>("labels");
+  const [panelFrameLabels] = useModelState<string[][]>("panel_frame_labels");
   const [width] = useModelState<number>("width");
   const [height] = useModelState<number>("height");
   const [rawFrameBytes] = useModelState<DataView>("frame_bytes");
@@ -1711,10 +1714,18 @@ function Show3D() {
   const [panStart, setPanStart] = React.useState<{ x: number, y: number, pX: number, pY: number } | null>(null);
   const panStartPanelRef = React.useRef<number>(0);
   const [mainCanvasSize, setMainCanvasSize] = React.useState(CANVAS_TARGET_SIZE);
-  const [isResizingMain, setIsResizingMain] = React.useState(false);
-  const [resizeStart, setResizeStart] = React.useState<{ x: number, y: number, size: number } | null>(null);
   const rawFrameDataRef = React.useRef<Float32Array | null>(null);
   const initialCanvasSizeRef = React.useRef<number>(canvasSizeTrait > 0 ? canvasSizeTrait : CANVAS_TARGET_SIZE);
+  const panelColsForSize = React.useCallback((count: number, size: number) => {
+    const n = Math.max(1, count || 1);
+    const requestedCols = (maxCols && maxCols > 0) ? Math.min(maxCols, n) : n;
+    if (n <= 1) return 1;
+    const colsThatFit = Math.max(1, Math.floor(Math.max(MIN_WRAPPED_PANEL_SIZE, size) / MIN_WRAPPED_PANEL_SIZE));
+    return Math.max(1, Math.min(requestedCols, colsThatFit));
+  }, [maxCols]);
+  const panelColsForCount = React.useCallback((count: number) => (
+    panelColsForSize(count, mainCanvasSize)
+  ), [mainCanvasSize, panelColsForSize]);
 
   // Cursor readout state
   const [cursorInfo, setCursorInfo] = React.useState<CursorInfo | null>(null);
@@ -1797,6 +1808,9 @@ function Show3D() {
   // of the playback effect syncs this ref back onto slice_idx in offline mode,
   // and a stale 0 would clobber a baked middle-slice start.
   const playbackIdxRef = React.useRef(Number.isFinite(sliceIdx) ? sliceIdx : 0);
+  const playbackLiveTrackRef = React.useRef<HTMLDivElement>(null);
+  const playbackLiveThumbRef = React.useRef<HTMLDivElement>(null);
+  const playbackLiveCountRef = React.useRef<HTMLElement>(null);
   const frameFetchCacheRef = React.useRef<Map<number, Float32Array>>(new Map());
   const frameFetchPendingRef = React.useRef<Map<number, Promise<Float32Array | null>>>(new Map());
   const panelGpuFramePendingRef = React.useRef<Map<number, Promise<boolean>>>(new Map());
@@ -1806,6 +1820,7 @@ function Show3D() {
   const autoRangeComputeTokenRef = React.useRef(0);
 
   const [displaySliceIdx, setDisplaySliceIdx] = React.useState(sliceIdx);
+  const [playbackUiSliceIdx, setPlaybackUiSliceIdx] = React.useState(sliceIdx);
   const [localStats, setLocalStats] = React.useState<{ mean: number; min: number; max: number; std: number } | null>(null);
   const [localPanelStats, setLocalPanelStats] = React.useState<PanelStats[] | null>(null);
 
@@ -2401,6 +2416,7 @@ function Show3D() {
     if (!playing) {
       setGpuDisplayVisible(false);
       setDisplaySliceIdx(sliceIdx);
+      setPlaybackUiSliceIdx(sliceIdx);
     }
   }, [sliceIdx, playing, setGpuDisplayVisible]);
 
@@ -2844,7 +2860,7 @@ function Show3D() {
     // gives 4 cols → 2000 px wide which fits a typical monitor; operator
     // drags the resize handle larger when they want pixel-1:1.
     const n = Math.max(1, visiblePanelCount || 1);
-    const cols = (maxCols && maxCols > 0) ? Math.min(maxCols, n) : n;
+    const cols = panelColsForCount(n);
     const perPanel = canvasSizeTrait > 0 ? canvasSizeTrait : (n > 1 ? 500 : CANVAS_TARGET_SIZE);
     const target = perPanel * cols;
     setMainCanvasSize(target);
@@ -2857,9 +2873,9 @@ function Show3D() {
   // concatenated source width or one shared source frame drawn into N slots.
   // `panel_width_px` keeps the per-panel source geometry explicit.
   const _nPanelsLocal = Math.max(1, visiblePanelCount || 1);
-  const _colsLocal = (maxCols && maxCols > 0) ? Math.min(maxCols, _nPanelsLocal) : _nPanelsLocal;
+  const _colsLocal = panelColsForCount(_nPanelsLocal);
   const _rowsLocal = Math.ceil(_nPanelsLocal / _colsLocal);
-  const fftAllowed = _rowsLocal === 1;
+  const fftAllowed = true;
   const effectiveShowFft = showFft && fftAllowed;
   const sourcePanelWidth = totalPanelCount > 1
     ? Math.max(1, panelWidthPx || Math.round(width / totalPanelCount))
@@ -2928,6 +2944,53 @@ function Show3D() {
       state: stateFor(panelIdx),
     };
   };
+  const getFftSlot = React.useCallback((slot: number, count: number, cols: number, rows: number) => {
+    const gap = count > 1 ? (panelGapTrait ?? 10) : 0;
+    const slotW = (canvasW - gap * (cols - 1)) / cols;
+    const slotH = (canvasH - gap * (rows - 1)) / rows;
+    const col = slot % cols;
+    const row = Math.floor(slot / cols);
+    return {
+      x: col * (slotW + gap),
+      y: row * (slotH + gap),
+      w: slotW,
+      h: slotH,
+    };
+  }, [canvasW, canvasH, panelGapTrait]);
+  const drawFftOffscreen = React.useCallback((ctx: CanvasRenderingContext2D, offscreen: HTMLCanvasElement) => {
+    ctx.clearRect(0, 0, canvasW, canvasH);
+    ctx.save();
+    ctx.translate(fftPanX, fftPanY);
+    ctx.scale(fftZoom, fftZoom);
+    const grid = fftPanelGridRef.current;
+    if (grid) {
+      ctx.fillStyle = themeColors.bg;
+      ctx.fillRect(0, 0, canvasW, canvasH);
+      for (let slot = 0; slot < grid.count; slot++) {
+        const srcCol = slot % grid.cols;
+        const srcRow = Math.floor(slot / grid.cols);
+        const srcX = srcCol * grid.panelWidth;
+        const srcY = srcRow * grid.panelHeight;
+        const dst = getFftSlot(slot, grid.count, grid.cols, grid.rows);
+        ctx.imageSmoothingEnabled = grid.panelWidth < dst.w || grid.panelHeight < dst.h;
+        ctx.drawImage(
+          offscreen,
+          srcX,
+          srcY,
+          grid.panelWidth,
+          grid.panelHeight,
+          dst.x,
+          dst.y,
+          dst.w,
+          dst.h,
+        );
+      }
+    } else {
+      ctx.imageSmoothingEnabled = offscreen.width < canvasW || offscreen.height < canvasH;
+      ctx.drawImage(offscreen, 0, 0, canvasW, canvasH);
+    }
+    ctx.restore();
+  }, [canvasW, canvasH, fftPanX, fftPanY, fftZoom, getFftSlot, themeColors.bg]);
   const panelGlobalColOffset = (panelIdx: number) => (totalPanelCount > 1 && !sharedPanelSource) ? panelIdx * sourcePanelWidth : 0;
   const panelLocalCol = (globalCol: number, panelIdx: number) => globalCol - panelGlobalColOffset(panelIdx);
   const panelGlobalCol = (localCol: number, panelIdx: number) => localCol + panelGlobalColOffset(panelIdx);
@@ -3160,6 +3223,21 @@ function Show3D() {
     profileActive, profilePoints, profileWidth,
     traitVmin, traitVmax, smooth, imageRotation, showStats, diffMode, avgWindow]);
 
+  const updatePlaybackLiveControls = React.useCallback((idx: number) => {
+    const c = playRef.current;
+    const total = Math.max(1, c.nSlices || nSlices || 1);
+    const rangeStart = c.loop ? Math.max(0, Math.min(c.loopStart, total - 1)) : 0;
+    const rangeEnd = c.loop ? Math.max(rangeStart, Math.min(c.loopEnd, total - 1)) : total - 1;
+    const clamped = Math.max(rangeStart, Math.min(rangeEnd, Math.round(idx)));
+    const pct = rangeEnd > rangeStart ? ((clamped - rangeStart) / (rangeEnd - rangeStart)) * 100 : 0;
+    const track = playbackLiveTrackRef.current;
+    const thumb = playbackLiveThumbRef.current;
+    const count = playbackLiveCountRef.current;
+    if (track) track.style.setProperty("--show3d-playback-pct", `${pct}%`);
+    if (thumb) thumb.style.left = `${pct}%`;
+    if (count) count.textContent = `${clamped + 1}/${total}`;
+  }, [nSlices]);
+
   const frameTransformActive = () => diffMode !== "off" || Math.max(1, Math.round(avgWindow || 1)) > 1;
 
   const rawFrameForIndex = (idx: number, currentIdx: number, currentFrame: Float32Array | null): Float32Array | null => {
@@ -3264,7 +3342,7 @@ function Show3D() {
     if (c.imageRotation % 4 !== 0) return false;
     const sourcePanelCount = Math.max(1, nPanels || 1);
     const n = Math.max(1, visiblePanelCount || 1);
-    const cols = (maxCols && maxCols > 0) ? Math.min(maxCols, n) : n;
+    const cols = panelColsForCount(n);
     const rows = Math.ceil(n / cols);
     const gap = n > 1 ? (panelGapTrait ?? 10) : 0;
 
@@ -3421,7 +3499,7 @@ function Show3D() {
 
     if (hiddenPanelSet.size > 0 && !separatePanelFrames) return false;
     const n = Math.max(1, nPanels || 1);
-    const cols = (maxCols && maxCols > 0) ? Math.min(maxCols, n) : n;
+    const cols = panelColsForCount(n);
     const rows = Math.ceil(n / cols);
     const gap = n > 1 ? (panelGapTrait ?? 10) : 0;
     const renderStartMs = performance.now();
@@ -3811,6 +3889,7 @@ function Show3D() {
       }
 
       playbackIdxRef.current = next;
+      updatePlaybackLiveControls(next);
       if (frame && transformActive) {
         frame = displayFrameForIndex(next, frame) ?? frame;
       }
@@ -3837,6 +3916,7 @@ function Show3D() {
         if (tickNow - lastUIUpdate > uiUpdateIntervalMs) {
           lastUIUpdate = tickNow;
           setDisplaySliceIdx(next);
+          setPlaybackUiSliceIdx(next);
           playbackHistogramCounterRef.current = (playbackHistogramCounterRef.current + 1) % 2;
           if (playbackHistogramCounterRef.current === 0) {
             void refreshHistogramRef.current?.(next);
@@ -3862,6 +3942,7 @@ function Show3D() {
         if (tickNow - lastUIUpdate > uiUpdateIntervalMs) {
           lastUIUpdate = tickNow;
           setDisplaySliceIdx(next);
+          setPlaybackUiSliceIdx(next);
           playbackHistogramCounterRef.current = (playbackHistogramCounterRef.current + 1) % 2;
           if (playbackHistogramCounterRef.current === 0) {
             void refreshHistogramRef.current?.(next);
@@ -3956,7 +4037,7 @@ function Show3D() {
           dh <= c.canvasH;
         const drawSharedScaledBitmap = (ctx: CanvasRenderingContext2D, bitmap: ImageBitmap) => {
           const n = Math.max(1, nPanels || 1);
-          const cols = (maxCols && maxCols > 0) ? Math.min(maxCols, n) : n;
+          const cols = panelColsForCount(n);
           const rows = Math.ceil(n / cols);
           const gap = n > 1 ? (panelGapTrait ?? 10) : 0;
           const outPanelW = (c.canvasW - gap * (cols - 1)) / cols;
@@ -4038,7 +4119,7 @@ function Show3D() {
               const gpuCtx = ensureGpuDisplayContext(engine, c.canvasW, c.canvasH);
               if (gpuCtx) {
                 const n = panelCountForGrid;
-                const cols = (maxCols && maxCols > 0) ? Math.min(maxCols, n) : n;
+                const cols = panelColsForCount(n);
                 const rows = Math.ceil(n / cols);
                 const gap = n > 1 ? (panelGapTrait ?? 10) : 0;
                 const sourcePanelWidthForGrid = sharedPanelSource
@@ -4225,6 +4306,7 @@ function Show3D() {
         lastUIUpdate = tickNow;
         if (offlineDirectRender) setLiveSliceIdx(next);
         setDisplaySliceIdx(next);
+        setPlaybackUiSliceIdx(next);
         if (frame && c.showStats) setLocalStats(computeStats(frame));
         if (frame && c.profileActive && c.profilePoints.length === 2) {
           const p0 = c.profilePoints[0], p1 = c.profilePoints[1];
@@ -4822,7 +4904,7 @@ function Show3D() {
     ctx.clearRect(0, 0, canvasW, canvasH);
     const n = Math.max(1, visiblePanelCount || 1);
     const sourcePanelCount = Math.max(1, nPanels || 1);
-    const cols = (maxCols && maxCols > 0) ? Math.min(maxCols, n) : n;
+    const cols = panelColsForCount(n);
     const rows = Math.ceil(n / cols);
     const srcPanelW = sharedPanelSource
       ? offscreen.width
@@ -5639,7 +5721,7 @@ function Show3D() {
       // own panelStates[i].zoom so panels at different zoom levels show
       // their own length bar.
       const n = Math.max(1, visiblePanelCount || 1);
-      const cols = (maxCols && maxCols > 0) ? Math.min(maxCols, n) : n;
+      const cols = panelColsForCount(n);
       const rows = Math.ceil(n / cols);
       const gap = n > 1 ? (panelGapTrait ?? 10) : 0;
       const cssW = uiRef.current.width / DPR;
@@ -5850,7 +5932,7 @@ function Show3D() {
         }
         if (cancelled) return;
 
-        const cols = (maxCols && maxCols > 0) ? Math.min(maxCols, panels.length) : panels.length;
+        const cols = panelColsForCount(panels.length);
         const rows = Math.ceil(panels.length / cols);
         const gridW = cols * fftW;
         const gridH = rows * fftH;
@@ -6114,37 +6196,22 @@ function Show3D() {
     if (fftCanvasRef.current) {
       const ctx = fftCanvasRef.current.getContext("2d");
       if (ctx) {
-        // Use bilinear smoothing when FFT is smaller than canvas (avoids blocky upscaling)
-        ctx.imageSmoothingEnabled = fftW < canvasW || fftH < canvasH;
-        ctx.clearRect(0, 0, canvasW, canvasH);
-        ctx.save();
-        ctx.translate(fftPanX, fftPanY);
-        ctx.scale(fftZoom, fftZoom);
-        // Stretch cropped FFT to fill the full canvas
-        ctx.drawImage(offscreen, 0, 0, canvasW, canvasH);
-        ctx.restore();
+        drawFftOffscreen(ctx, offscreen);
       }
     }
-  }, [effectiveShowFft, fftMagVersion, fftLogScale, fftAuto, fftVminPct, fftVmaxPct, fftColormap, width, height, canvasW, canvasH, fftCropDims]);
+  }, [effectiveShowFft, fftMagVersion, fftLogScale, fftAuto, fftVminPct, fftVmaxPct, fftColormap, width, height, canvasW, canvasH, fftCropDims, drawFftOffscreen]);
 
-  // Redraw cached FFT with zoom/pan (cheap - no recomputation)
-  React.useEffect(() => {
+  // Redraw cached FFT with zoom/pan/resize before paint. Changing a canvas
+  // width/height attribute clears its bitmap, so a normal effect can expose a
+  // one-frame blank flash during resize drags.
+  React.useLayoutEffect(() => {
     if (!effectiveShowFft || !fftCanvasRef.current || !fftOffscreenRef.current) return;
     const canvas = fftCanvasRef.current;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
-    const offW = fftOffscreenRef.current.width;
-    const offH = fftOffscreenRef.current.height;
-    // Use bilinear smoothing when FFT is smaller than canvas (avoids blocky upscaling)
-    ctx.imageSmoothingEnabled = offW < canvasW || offH < canvasH;
-    ctx.clearRect(0, 0, canvasW, canvasH);
-    ctx.save();
-    ctx.translate(fftPanX, fftPanY);
-    ctx.scale(fftZoom, fftZoom);
-    ctx.drawImage(fftOffscreenRef.current, 0, 0, canvasW, canvasH);
-    ctx.restore();
-  }, [effectiveShowFft, fftOffscreenVersion, fftZoom, fftPanX, fftPanY, canvasW, canvasH]);
+    drawFftOffscreen(ctx, fftOffscreenRef.current);
+  }, [effectiveShowFft, fftOffscreenVersion, fftZoom, fftPanX, fftPanY, canvasW, canvasH, drawFftOffscreen]);
 
   // === Kymograph (space-time) ===
   // A sub-feature of the line profile (Henry: "the profile feature created a 2D
@@ -6452,8 +6519,17 @@ function Show3D() {
     if (fftClickInfo) {
       ctx.save();
       ctx.scale(DPR, DPR);
-      const screenX = fftPanX + fftZoom * (fftClickInfo.col / fftW * canvasW);
-      const screenY = fftPanY + fftZoom * (fftClickInfo.row / fftH * canvasH);
+      let screenX = fftPanX + fftZoom * (fftClickInfo.col / fftW * canvasW);
+      let screenY = fftPanY + fftZoom * (fftClickInfo.row / fftH * canvasH);
+      const panelGrid = fftPanelGridRef.current;
+      if (panelGrid) {
+        const slot = Math.max(0, Math.min(panelGrid.count - 1, Math.floor(fftClickInfo.row / panelGrid.panelHeight) * panelGrid.cols + Math.floor(fftClickInfo.col / panelGrid.panelWidth)));
+        const dst = getFftSlot(slot, panelGrid.count, panelGrid.cols, panelGrid.rows);
+        const localCol = fftClickInfo.col - (slot % panelGrid.cols) * panelGrid.panelWidth;
+        const localRow = fftClickInfo.row - Math.floor(slot / panelGrid.cols) * panelGrid.panelHeight;
+        screenX = fftPanX + fftZoom * (dst.x + (localCol / panelGrid.panelWidth) * dst.w);
+        screenY = fftPanY + fftZoom * (dst.y + (localRow / panelGrid.panelHeight) * dst.h);
+      }
       ctx.strokeStyle = "rgba(255, 255, 255, 0.9)";
       ctx.shadowColor = "rgba(0, 0, 0, 0.6)";
       ctx.shadowBlur = 2;
@@ -6479,7 +6555,7 @@ function Show3D() {
       }
       ctx.restore();
     }
-  }, [effectiveShowFft, fftZoom, fftPanX, fftPanY, canvasW, canvasH, pixelSize, width, height, fftDataRange, fftVminPct, fftVmaxPct, fftColormap, fftLogScale, fftShowColorbar, fftClickInfo, fftCropDims]);
+  }, [effectiveShowFft, fftZoom, fftPanX, fftPanY, canvasW, canvasH, pixelSize, width, height, fftDataRange, fftVminPct, fftVmaxPct, fftColormap, fftLogScale, fftShowColorbar, fftClickInfo, fftCropDims, getFftSlot]);
 
   // -------------------------------------------------------------------------
   // Preview panel - cache colormapped offscreen (only recomputes when ROI
@@ -7440,8 +7516,26 @@ function Show3D() {
     const mouseY = (e.clientY - rect.top) * scaleY;
     const fftW = fftCropDims?.fftWidth ?? width;
     const fftH = fftCropDims?.fftHeight ?? height;
-    const imgCol = ((mouseX - fftPanX) / fftZoom) / canvasW * fftW;
-    const imgRow = ((mouseY - fftPanY) / fftZoom) / canvasH * fftH;
+    const localX = (mouseX - fftPanX) / fftZoom;
+    const localY = (mouseY - fftPanY) / fftZoom;
+    const panelGrid = fftPanelGridRef.current;
+    if (panelGrid) {
+      for (let slot = 0; slot < panelGrid.count; slot++) {
+        const dst = getFftSlot(slot, panelGrid.count, panelGrid.cols, panelGrid.rows);
+        if (localX < dst.x || localX >= dst.x + dst.w || localY < dst.y || localY >= dst.y + dst.h) continue;
+        const srcCol = slot % panelGrid.cols;
+        const srcRow = Math.floor(slot / panelGrid.cols);
+        const tileX = ((localX - dst.x) / Math.max(1, dst.w)) * panelGrid.panelWidth;
+        const tileY = ((localY - dst.y) / Math.max(1, dst.h)) * panelGrid.panelHeight;
+        return {
+          col: srcCol * panelGrid.panelWidth + Math.max(0, Math.min(panelGrid.panelWidth - 1, tileX)),
+          row: srcRow * panelGrid.panelHeight + Math.max(0, Math.min(panelGrid.panelHeight - 1, tileY)),
+        };
+      }
+      return null;
+    }
+    const imgCol = localX / canvasW * fftW;
+    const imgRow = localY / canvasH * fftH;
     if (imgCol >= 0 && imgCol < fftW && imgRow >= 0 && imgRow < fftH) {
       return { col: imgCol, row: imgRow };
     }
@@ -7859,23 +7953,22 @@ function Show3D() {
   const handleMainResizeStart = (e: React.MouseEvent) => {
     e.stopPropagation();
     e.preventDefault();
-    setIsResizingMain(true);
-    setResizeStart({ x: e.clientX, y: e.clientY, size: mainCanvasSize });
-  };
-
-  React.useEffect(() => {
-    if (!isResizingMain) return;
+    const rect = canvasContainerRef.current?.getBoundingClientRect();
+    const startSize = rect && rect.width > 0 ? rect.width : mainCanvasSize;
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const visiblePanels = Math.max(1, visiblePanelCount || 1);
     let rafId = 0;
-    let latestSize = resizeStart ? resizeStart.size : mainCanvasSize;
+    let latestSize = startSize;
     const handleMouseMove = (e: MouseEvent) => {
-      if (!resizeStart) return;
-      const delta = Math.max(e.clientX - resizeStart.x, e.clientY - resizeStart.y);
+      const delta = Math.max(e.clientX - startX, e.clientY - startY);
+      const nextSize = startSize + delta;
       // Absolute minimum: 200 px per panel column. Lets reader shrink BELOW
       // the initial `size=` value (preset / kwarg) when their screen is small,
       // without collapsing the canvas to an unreadable sliver.
-      const colsLocal = (maxCols && maxCols > 0) ? Math.min(maxCols, Math.max(1, visiblePanelCount || 1)) : Math.max(1, visiblePanelCount || 1);
+      const colsLocal = panelColsForSize(visiblePanels, nextSize);
       const minSize = 200 * colsLocal;
-      latestSize = Math.max(minSize, resizeStart.size + delta);
+      latestSize = Math.max(minSize, nextSize);
       if (!rafId) {
         rafId = requestAnimationFrame(() => {
           rafId = 0;
@@ -7886,21 +7979,43 @@ function Show3D() {
     const handleMouseUp = () => {
       cancelAnimationFrame(rafId);
       setMainCanvasSize(latestSize);
-      const colsLocal = (maxCols && maxCols > 0) ? Math.min(maxCols, Math.max(1, visiblePanelCount || 1)) : Math.max(1, visiblePanelCount || 1);
+      const colsLocal = panelColsForSize(visiblePanels, latestSize);
       setCanvasSizeTrait(Math.round(latestSize / colsLocal));
-      setIsResizingMain(false);
-      setResizeStart(null);
-    };
-    document.addEventListener("mousemove", handleMouseMove);
-    document.addEventListener("mouseup", handleMouseUp);
-    return () => {
-      cancelAnimationFrame(rafId);
       document.removeEventListener("mousemove", handleMouseMove);
       document.removeEventListener("mouseup", handleMouseUp);
     };
-  }, [isResizingMain, resizeStart, maxCols, visiblePanelCount, setCanvasSizeTrait]);
+    document.addEventListener("mousemove", handleMouseMove);
+    document.addEventListener("mouseup", handleMouseUp);
+  };
 
   const clampSlice = (idx: number) => Math.max(0, Math.min(nSlices - 1, Math.round(idx)));
+  const frameLabelForIndex = React.useCallback((idx: number): string => {
+    const label = labels?.[idx];
+    if (label == null) return "";
+    const text = String(label).trim();
+    if (!text || text === String(idx) || text === String(idx + 1)) return "";
+    return text;
+  }, [labels]);
+  const panelFrameLabelForIndex = React.useCallback((panel: number, idx: number): string => {
+    const panelLabels = panelFrameLabels?.[panel];
+    const panelRealN = panelRealFrames?.[panel];
+    const panelIdx = panelRealN ? Math.min(idx, Math.max(0, panelRealN - 1)) : idx;
+    const label = panelLabels?.[panelIdx];
+    if (label != null) {
+      const text = String(label).trim();
+      if (text && text !== String(panelIdx) && text !== String(panelIdx + 1)) return text;
+    }
+    return frameLabelForIndex(idx);
+  }, [frameLabelForIndex, panelFrameLabels, panelRealFrames]);
+  const formatFrameValueLabel = React.useCallback((idx: number) => {
+    const rounded = clampSlice(idx);
+    const label = frameLabelForIndex(rounded);
+    return label ? `${rounded + 1}: ${label}` : `${rounded + 1}`;
+  }, [frameLabelForIndex, nSlices]);
+  const visibleSliceIdx = clampSlice(playing ? playbackUiSliceIdx : (offline ? liveSliceIdx : displaySliceIdx));
+  React.useLayoutEffect(() => {
+    updatePlaybackLiveControls(visibleSliceIdx);
+  }, [updatePlaybackLiveControls, visibleSliceIdx]);
   const currentPlaybackIndex = () => (
     Number.isFinite(playbackIdxRef.current)
       ? playbackIdxRef.current
@@ -7917,6 +8032,7 @@ function Show3D() {
     }
     playbackIdxRef.current = start;
     setDisplaySliceIdx(start);
+    setPlaybackUiSliceIdx(start);
     setLiveSliceIdx(start);
     setSliceIdx(start);
     if (direction !== null) setReverse(nextReverse);
@@ -7926,6 +8042,7 @@ function Show3D() {
     const current = clampSlice(currentPlaybackIndex());
     playbackIdxRef.current = current;
     setDisplaySliceIdx(current);
+    setPlaybackUiSliceIdx(current);
     setLiveSliceIdx(current);
     setSliceIdx(current);
     setPlaying(false);
@@ -7934,6 +8051,7 @@ function Show3D() {
     const home = loop ? Math.max(0, Math.min(loopStart, nSlices - 1)) : 0;
     playbackIdxRef.current = home;
     setDisplaySliceIdx(home);
+    setPlaybackUiSliceIdx(home);
     setLiveSliceIdx(home);
     setSliceIdx(home);
     setPlaying(false);
@@ -8015,22 +8133,26 @@ function Show3D() {
   const scrubToSlice = (idx: number) => {
     const next = clampSlice(idx);
     if (playing) setPlaying(false);
+    setPlaybackUiSliceIdx(next);
     const transformActive = diffMode !== "off" || Math.max(1, Math.round(avgWindow || 1)) > 1;
     if (!transformActive && renderGpuCachedSliceDirect(next)) return;
     setLiveSliceIdx(next);
     if (renderBufferedSlice(next)) return;
     if (!offline && frameServerUrl) {
       setDisplaySliceIdx(next);
+      setPlaybackUiSliceIdx(next);
       void renderFetchedSlice(next);
       prefetchServerFrames(next, false, false);
       return;
     }
     setDisplaySliceIdx(next);
+    setPlaybackUiSliceIdx(next);
     setSliceIdx(next);
   };
   const commitSlice = (idx: number) => {
     const next = clampSlice(idx);
     setLiveSliceIdx(next);
+    setPlaybackUiSliceIdx(next);
     setSliceIdx(next);
   };
   const handleLoopSliderMouseDown = (e: React.MouseEvent<HTMLSpanElement>) => {
@@ -8116,7 +8238,7 @@ function Show3D() {
         spacing={`${SPACING.SM}px`}
         alignItems="flex-start"
         sx={{
-          flexWrap: "nowrap",
+          flexWrap: effectiveShowFft && (nPanels || 1) > 1 ? "wrap" : "nowrap",
           width: "100%",
           maxWidth: "100%",
           minWidth: 0,
@@ -8132,7 +8254,7 @@ function Show3D() {
           },
         }}
       >
-        <Box sx={{ width: mainPanelWidth, maxWidth: "100%", boxSizing: "border-box" }}>
+        <Box sx={{ width: mainPanelWidth, maxWidth: "100%", flexShrink: effectiveShowFft && (nPanels || 1) > 1 ? 0 : 1, boxSizing: "border-box" }}>
           {/* Title row */}
           <Typography variant="caption" sx={{ ...typography.label, color: themeColors.accent, mb: `${SPACING.XS}px`, display: "block", height: 16, lineHeight: "16px", overflow: "hidden" }}>
             {title || "Image"}
@@ -8403,7 +8525,7 @@ function Show3D() {
               onTouchCancel={handleCanvasTouchEnd}
               style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", imageRendering: smooth ? "auto" : "pixelated", opacity: gpuDisplayVisible ? 0 : 1, display: "block", touchAction: "none" }}
               role="img"
-              aria-label={`Slice image ${displaySliceIdx + 1} of ${nSlices}${title ? `: ${title}` : ""} (${width} by ${height} pixels). Use arrow keys to scrub frames.`}
+              aria-label={`Slice image ${visibleSliceIdx + 1} of ${nSlices}${title ? `: ${title}` : ""} (${width} by ${height} pixels). Use arrow keys to scrub frames.`}
             />
             <canvas ref={gpuCanvasRef} width={canvasW} height={canvasH} style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", imageRendering: smooth ? "auto" : "pixelated", pointerEvents: "none", opacity: gpuDisplayVisible ? 1 : 0 }} aria-hidden="true" />
             <canvas ref={overlayRef} width={Math.round(canvasW * DPR)} height={Math.round(canvasH * DPR)} style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", pointerEvents: "none", display: overlayCanvasVisible ? "block" : "none" }} aria-hidden="true" />
@@ -8413,17 +8535,18 @@ function Show3D() {
               const titleText = panelTitles?.[panel];
               if (!titleText) return null;
               const n = Math.max(1, visiblePanelCount || 1);
-              const cols = (maxCols && maxCols > 0) ? Math.min(maxCols, n) : n;
+              const cols = panelColsForCount(n);
               const rows = Math.ceil(n / cols);
               const gap = n > 1 ? (panelGapTrait ?? 10) : 0;
               const panelW = (canvasW - gap * (cols - 1)) / cols;
               const panelH = (canvasH - gap * (rows - 1)) / rows;
               const panelLeft = (slot % cols) * (panelW + gap);
               const panelTop = Math.floor(slot / cols) * (panelH + gap);
-              const shownIdx = offline ? liveSliceIdx : displaySliceIdx;
+              const shownIdx = visibleSliceIdx;
               const realN = panelRealFrames?.[panel];
               const shown = realN ? Math.min(shownIdx + 1, realN) : shownIdx + 1;
               const total = realN || nSlices;
+              const frameLabel = panelFrameLabelForIndex(panel, shownIdx);
               return (
                 <Box
                   key={`panel-title-${panel}`}
@@ -8449,7 +8572,7 @@ function Show3D() {
                     textOverflow: "ellipsis",
                   }}
                 >
-                  {titleText} {shown}/{total}
+                  {titleText}{frameLabel ? ` · ${frameLabel}` : ""} {shown}/{total}
                 </Box>
               );
             })}
@@ -8458,27 +8581,27 @@ function Show3D() {
                 slice for THAT panel. Programmatic API: widget.star_panel(i). */}
             {visiblePanelIndices.map((i, slot) => {
               const n = Math.max(1, visiblePanelCount || 1);
-              const cols = (maxCols && maxCols > 0) ? Math.min(maxCols, n) : n;
+              const cols = panelColsForCount(n);
               const gap = n > 1 ? (panelGapTrait ?? 10) : 0;
               const panelW = (canvasW - gap * (cols - 1)) / cols;
               const panelH = (canvasH - gap * (Math.ceil(n / cols) - 1)) / Math.ceil(n / cols);
               const panelLeft = (slot % cols) * (panelW + gap);
               const panelTop = Math.floor(slot / cols) * (panelH + gap);
               const starredFrame = starred?.[i] ?? -1;
-              const isStarredHere = starredFrame === displaySliceIdx;
+              const isStarredHere = starredFrame === visibleSliceIdx;
               const starElsewhere = starredFrame >= 0 && !isStarredHere;
               const tooltip = isStarredHere
-                ? `★ Starred. Click to unstar frame ${displaySliceIdx + 1}.`
+                ? `★ Starred. Click to unstar frame ${visibleSliceIdx + 1}.`
                 : starElsewhere
-                  ? `Star is on frame ${starredFrame + 1}. Click to move it to frame ${displaySliceIdx + 1}.`
-                  : `Click to mark frame ${displaySliceIdx + 1} as best for ${panelLabel(i)}.`;
+                  ? `Star is on frame ${starredFrame + 1}. Click to move it to frame ${visibleSliceIdx + 1}.`
+                  : `Click to mark frame ${visibleSliceIdx + 1} as best for ${panelLabel(i)}.`;
               return (
                 <button
                   key={`star-${i}`}
                   onMouseDown={(event) => event.stopPropagation()}
                   onClick={() => {
                     const cur = Array.from({ length: totalPanelCount }, (_, k) => starred?.[k] ?? -1);
-                    cur[i] = isStarredHere ? -1 : displaySliceIdx;
+                    cur[i] = isStarredHere ? -1 : visibleSliceIdx;
                     setStarred(cur);
                   }}
                   title={tooltip}
@@ -8511,7 +8634,7 @@ function Show3D() {
             })}
             {(nPanels || 1) > 1 && visiblePanelIndices.map((panel, slot) => {
               const n = Math.max(1, visiblePanelCount || 1);
-              const cols = (maxCols && maxCols > 0) ? Math.min(maxCols, n) : n;
+              const cols = panelColsForCount(n);
               const gap = n > 1 ? (panelGapTrait ?? 10) : 0;
               const panelW = (canvasW - gap * (cols - 1)) / cols;
               const panelH = (canvasH - gap * (Math.ceil(n / cols) - 1)) / Math.ceil(n / cols);
@@ -8560,7 +8683,7 @@ function Show3D() {
             {/* Cursor readout overlay */}
             {cursorInfo && (() => {
               const n = Math.max(1, visiblePanelCount || 1);
-              const cols = (maxCols && maxCols > 0) ? Math.min(maxCols, n) : n;
+              const cols = panelColsForCount(n);
               const rows = Math.ceil(n / cols);
               const gap = n > 1 ? (panelGapTrait ?? 10) : 0;
               const panelW = (canvasW - gap * (cols - 1)) / cols;
@@ -8607,7 +8730,7 @@ function Show3D() {
                 User trait `show_resize_handles` toggles visibility. */}
             {showResizeHandles !== false && (() => {
               const n = Math.max(1, visiblePanelCount || 1);
-              const cols = (maxCols && maxCols > 0) ? Math.min(maxCols, n) : n;
+              const cols = panelColsForCount(n);
               const rows = Math.ceil(n / cols);
               const gap = n > 1 ? (panelGapTrait ?? 10) : 0;
               const outPanelW = (canvasW - gap * (cols - 1)) / cols;
@@ -8727,7 +8850,7 @@ function Show3D() {
                 </Box>
               </Box>
               {/* Playback: 2 rows side-by-side with Display + Histogram. */}
-              {(() => { const activeIdx = displaySliceIdx; return (
+              {(() => { const activeIdx = visibleSliceIdx; return (
                 <Box sx={{ display: "flex", flexDirection: "column", alignItems: "flex-start", gap: `${SPACING.XS}px`, flex: "0 1 auto", minWidth: 0, maxWidth: "100%", justifyContent: "center" }}>
                   <Box sx={{ ...controlRow, width: "fit-content", maxWidth: "100%", flexWrap: "nowrap", border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, boxSizing: "border-box" }}>
                     <Stack direction="row" spacing={0} sx={{ flexShrink: 0, mr: 0.5 }}>
@@ -8744,12 +8867,56 @@ function Show3D() {
                         <StopIcon sx={{ fontSize: 16 }} />
                       </IconButton>
                     </Stack>
-                    {loop ? (
-                      <Slider value={[loopStart, activeIdx, effectiveLoopEnd]} onMouseDown={handleLoopSliderMouseDown} onPointerDownCapture={handleLoopSliderPointerDownCapture} onChange={(_, v) => { const vals = v as number[]; setLoopStart(vals[0]); scrubToSlice(vals[1]); setLoopEnd(vals[2]); }} onChangeCommitted={(_, v) => { const vals = v as number[]; setLoopStart(vals[0]); commitSlice(vals[1]); setLoopEnd(vals[2]); }} disableSwap min={0} max={nSlices - 1} size="small" valueLabelDisplay="auto" valueLabelFormat={(v) => `${v + 1}`} marks={bookmarkedFrames.map(f => ({ value: f }))} aria-label={`Loop range and current ${dimLabel.toLowerCase()} (frame ${activeIdx + 1} of ${nSlices}, loop ${loopStart + 1} to ${effectiveLoopEnd + 1})`} sx={{ ...sliderStyles.small, width: 150, flex: "0 1 150px", minWidth: 90, "& .MuiSlider-thumb[data-index='0']": { width: 8, height: 8, bgcolor: themeColors.textMuted }, "& .MuiSlider-thumb[data-index='1']": { width: 12, height: 12 }, "& .MuiSlider-thumb[data-index='2']": { width: 8, height: 8, bgcolor: themeColors.textMuted }, "& .MuiSlider-mark": { bgcolor: themeColors.accent, width: 4, height: 4, borderRadius: "50%", top: "50%", transform: "translate(-50%, -50%)" }, "& .MuiSlider-valueLabel": { fontSize: 10, padding: "2px 4px" } }} />
+                    {playing ? (
+                      <Box
+                        ref={playbackLiveTrackRef}
+                        role="progressbar"
+                        aria-label={`Live playback position (${activeIdx + 1} of ${nSlices})`}
+                        aria-valuemin={1}
+                        aria-valuemax={nSlices}
+                        aria-valuenow={activeIdx + 1}
+                        sx={{
+                          "--show3d-playback-pct": `${nSlices > 1 ? (activeIdx / (nSlices - 1)) * 100 : 0}%`,
+                          position: "relative",
+                          width: 150,
+                          flex: "0 1 150px",
+                          minWidth: 90,
+                          height: 14,
+                          borderRadius: 999,
+                          bgcolor: themeInfo.theme === "dark" ? "rgba(255,255,255,0.16)" : "rgba(0,0,0,0.16)",
+                          overflow: "hidden",
+                          "&::before": {
+                            content: '""',
+                            position: "absolute",
+                            left: 0,
+                            top: 6,
+                            height: 2,
+                            width: "var(--show3d-playback-pct)",
+                            bgcolor: themeColors.accent,
+                          },
+                        }}
+                      >
+                        <Box
+                          ref={playbackLiveThumbRef}
+                          sx={{
+                            position: "absolute",
+                            left: "var(--show3d-playback-pct)",
+                            top: 2,
+                            width: 10,
+                            height: 10,
+                            borderRadius: "50%",
+                            bgcolor: themeColors.accent,
+                            transform: "translateX(-50%)",
+                            boxShadow: "0 0 0 2px rgba(255,255,255,0.55)",
+                          }}
+                        />
+                      </Box>
+                    ) : loop ? (
+                      <Slider value={[loopStart, activeIdx, effectiveLoopEnd]} onMouseDown={handleLoopSliderMouseDown} onPointerDownCapture={handleLoopSliderPointerDownCapture} onChange={(_, v) => { const vals = v as number[]; setLoopStart(vals[0]); scrubToSlice(vals[1]); setLoopEnd(vals[2]); }} onChangeCommitted={(_, v) => { const vals = v as number[]; setLoopStart(vals[0]); commitSlice(vals[1]); setLoopEnd(vals[2]); }} disableSwap min={0} max={nSlices - 1} size="small" valueLabelDisplay="auto" valueLabelFormat={(v) => formatFrameValueLabel(v)} marks={bookmarkedFrames.map(f => ({ value: f }))} aria-label={`Loop range and current ${dimLabel.toLowerCase()} (frame ${activeIdx + 1} of ${nSlices}, loop ${loopStart + 1} to ${effectiveLoopEnd + 1})`} sx={{ ...sliderStyles.small, width: 150, flex: "0 1 150px", minWidth: 90, "& .MuiSlider-thumb[data-index='0']": { width: 8, height: 8, bgcolor: themeColors.textMuted }, "& .MuiSlider-thumb[data-index='1']": { width: 12, height: 12 }, "& .MuiSlider-thumb[data-index='2']": { width: 8, height: 8, bgcolor: themeColors.textMuted }, "& .MuiSlider-mark": { bgcolor: themeColors.accent, width: 4, height: 4, borderRadius: "50%", top: "50%", transform: "translate(-50%, -50%)" }, "& .MuiSlider-valueLabel": { fontSize: 10, padding: "2px 4px", maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }} />
                     ) : (
-                      <Slider value={activeIdx} onChange={(_, v) => scrubToSlice(v as number)} onChangeCommitted={(_, v) => commitSlice(v as number)} min={0} max={nSlices - 1} size="small" valueLabelDisplay="auto" valueLabelFormat={(v) => `${v + 1}`} marks={bookmarkedFrames.map(f => ({ value: f }))} aria-label={`Current ${dimLabel.toLowerCase()} (${activeIdx + 1} of ${nSlices})`} sx={{ ...sliderStyles.small, width: 150, flex: "0 1 150px", minWidth: 90, "& .MuiSlider-mark": { bgcolor: themeColors.accent, width: 4, height: 4, borderRadius: "50%", top: "50%", transform: "translate(-50%, -50%)" } }} />
+                      <Slider value={activeIdx} onChange={(_, v) => scrubToSlice(v as number)} onChangeCommitted={(_, v) => commitSlice(v as number)} min={0} max={nSlices - 1} size="small" valueLabelDisplay="auto" valueLabelFormat={(v) => formatFrameValueLabel(v)} marks={bookmarkedFrames.map(f => ({ value: f }))} aria-label={`Current ${dimLabel.toLowerCase()} (${activeIdx + 1} of ${nSlices})`} sx={{ ...sliderStyles.small, width: 150, flex: "0 1 150px", minWidth: 90, "& .MuiSlider-mark": { bgcolor: themeColors.accent, width: 4, height: 4, borderRadius: "50%", top: "50%", transform: "translate(-50%, -50%)" }, "& .MuiSlider-valueLabel": { maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }} />
                     )}
-                    <Typography sx={{ ...typography.value, color: themeColors.textMuted, minWidth: hiddenSet.size ? `${String(nSlices).length * 2 + String(visibleCount).length + 5}ch` : `${String(nSlices).length * 2 + 1}ch`, fontVariantNumeric: "tabular-nums", textAlign: "right", flexShrink: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{hiddenSet.size ? `${activeIdx + 1}/${visibleCount} (${nSlices})` : `${activeIdx + 1}/${nSlices}`}</Typography>
+                    <Typography ref={playbackLiveCountRef} sx={{ ...typography.value, color: themeColors.textMuted, minWidth: hiddenSet.size ? `${String(nSlices).length * 2 + String(visibleCount).length + 5}ch` : `${String(nSlices).length * 2 + 1}ch`, fontVariantNumeric: "tabular-nums", textAlign: "right", flexShrink: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{hiddenSet.size ? `${activeIdx + 1}/${visibleCount} (${nSlices})` : `${activeIdx + 1}/${nSlices}`}</Typography>
                   </Box>
                   <Box sx={{ ...controlRow, width: "fit-content", maxWidth: "100%", flexWrap: "wrap", border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, boxSizing: "border-box" }}>
                     <Typography sx={{ ...typography.label, color: themeColors.textMuted, flexShrink: 0 }}>fps</Typography>
@@ -8771,7 +8938,7 @@ function Show3D() {
                 const { min: histMin, max: histMax } = resolveDisplayBounds(dataMin, dataMax, traitVmin, traitVmax, logScale);
                 if (perPanelHistogramEnabled) {
                   const n = Math.max(1, visiblePanelCount || 1);
-                  const cols = (maxCols && maxCols > 0) ? Math.min(maxCols, n) : n;
+                  const cols = panelColsForCount(n);
                   // Match Show2D shell exactly (width=110, height=58, gap=15px)
                   // so the per-panel histogram strip is visually consistent
                   // across widgets.
@@ -9029,9 +9196,11 @@ function Show3D() {
         {effectiveShowFft && (
           <Box sx={{
             width: "100%",
-            maxWidth: canvasW,
-            flexBasis: (nPanels || 1) > 1 ? "100%" : `min(100%, ${canvasW}px)`,
+            maxWidth: (nPanels || 1) > 1 ? "100%" : canvasW,
+            flex: (nPanels || 1) > 1 ? "1 0 100%" : `0 1 min(100%, ${canvasW}px)`,
+            minWidth: (nPanels || 1) > 1 ? "100%" : undefined,
             ml: (nPanels || 1) > 1 ? "0 !important" : undefined,
+            mt: (nPanels || 1) > 1 ? `${SPACING.SM}px !important` : undefined,
             boxSizing: "border-box",
           }}>
             {/* Spacer - matches main panel title row height for canvas alignment */}
@@ -9070,6 +9239,39 @@ function Show3D() {
             >
               <canvas ref={fftCanvasRef} width={canvasW} height={canvasH} style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", imageRendering: smooth ? "auto" : "pixelated", touchAction: "none" }} role="img" aria-label={roiFftActive && fftCropDims ? `FFT power spectrum of ROI crop (${fftCropDims.cropWidth} by ${fftCropDims.cropHeight} pixels)` : "FFT power spectrum of current frame"} />
               <canvas ref={fftOverlayRef} width={Math.round(canvasW * DPR)} height={Math.round(canvasH * DPR)} style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", pointerEvents: "none" }} aria-hidden="true" />
+              {showResizeHandles !== false && (() => {
+                const n = Math.max(1, visiblePanelCount || 1);
+                const cols = panelColsForCount(n);
+                const rows = Math.ceil(n / cols);
+                const gap = n > 1 ? (panelGapTrait ?? 10) : 0;
+                const outPanelW = (canvasW - gap * (cols - 1)) / cols;
+                const outPanelH = (canvasH - gap * (rows - 1)) / rows;
+                return visiblePanelIndices.map((panel, slot) => {
+                  const col = slot % cols;
+                  const row = Math.floor(slot / cols);
+                  const slotX = col * (outPanelW + gap);
+                  const slotY = row * (outPanelH + gap);
+                  return (
+                    <Box
+                      key={`fft-resize-${panel}`}
+                      onMouseDown={handleMainResizeStart}
+                      sx={{
+                        position: "absolute",
+                        left: `calc(${((slotX + outPanelW) / Math.max(1, canvasW)) * 100}% - 16px)`,
+                        top: `calc(${((slotY + outPanelH) / Math.max(1, canvasH)) * 100}% - 16px)`,
+                        width: 16,
+                        height: 16,
+                        cursor: "nwse-resize",
+                        opacity: 0.6,
+                        background: `linear-gradient(135deg, transparent 50%, ${themeColors.border} 50%)`,
+                        borderRadius: "0 0 4px 0",
+                        zIndex: 3,
+                        "&:hover": { opacity: 1 },
+                      }}
+                    />
+                  );
+                });
+              })()}
             </Box>
             {/* FFT Statistics bar */}
             {showStats && (
