@@ -9261,9 +9261,6 @@ function Show3D() {
                       role="img"
                       aria-label={`FFT power spectrum overlay for ${panelLabel(panel)}`}
                     />
-                    <Typography sx={{ position: "absolute", top: 3, left: 5, fontSize: 9, color: "rgba(255,255,255,0.9)", fontWeight: 700, textShadow: "1px 1px 0 rgba(0,0,0,0.9)", lineHeight: 1, pointerEvents: "none" }}>
-                      FFT
-                    </Typography>
                   </Box>
                 );
               });
