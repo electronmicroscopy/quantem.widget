@@ -909,6 +909,13 @@ export class GPUColormapEngine {
     for (const buf of slot.directRegionParamsBuffers) buf?.destroy();
   }
 
+  releaseSlot(idx: number): void {
+    const slot = this.slots[idx];
+    if (!slot) return;
+    this.destroySlot(slot);
+    this.slots[idx] = null as never;
+  }
+
   private ensurePipeline(): void {
     if (this.pipeline) return;
     const module = this.device.createShaderModule({ code: COLORMAP_SHADER });
@@ -2266,6 +2273,7 @@ export class GPUColormapEngine {
       gap: number;
       bgRgb: number;
       sourcePanelWidth: number;
+      transforms?: { zoom: number; panX: number; panY: number }[];
     },
   ): boolean {
     if (!this.lutBuffer) return false;
@@ -2311,17 +2319,19 @@ export class GPUColormapEngine {
       pu[2] = srcX0;
       pu[3] = Math.max(1, Math.min(sourcePanelW, slot.width - srcX0));
       pu[4] = Math.max(1, Math.round(panelH));
-      pu[5] = 1;
+      pu[5] = Math.max(1, Math.round(panelW));
       pu[6] = 1;
       pu[7] = 1;
       pu[8] = panelLogScale ? 1 : 0;
       pu[9] = opts.bgRgb & 0xFFFFFF;
       pu[10] = 1;
       pu[11] = 0;
+      const transform = opts.transforms?.[panel];
+      pf[10] = Math.max(1e-6, transform?.zoom ?? 1);
       pf[12] = panelRange.vmin;
       pf[13] = panelRange.vmax;
-      pf[14] = 0;
-      pf[15] = 0;
+      pf[14] = transform?.panX ?? 0;
+      pf[15] = transform?.panY ?? 0;
       this.device.queue.writeBuffer(paramsBuffer, 0, params);
       if (!slot.directRegionBindGroups[panel]) {
         slot.directRegionBindGroups[panel] = this.device.createBindGroup({
