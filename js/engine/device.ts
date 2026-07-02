@@ -57,3 +57,7 @@ async function createGPUDevice(): Promise<GPUDevice | null> {
 }
 
 export function getGPUInfo(): string { return gpuInfo; }
+
+export function isSoftwareGPUAdapter(): boolean {
+  return /swiftshader|llvmpipe|software|subzero/i.test(gpuInfo);
+}

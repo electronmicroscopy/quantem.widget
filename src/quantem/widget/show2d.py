@@ -136,6 +136,56 @@ def _format_scale_label(value: float, unit: str) -> str:
     return f"{_js_round(value_nm / unit_nm)} {sym}"
 
 
+# Rec. 709 luma weights: the standard perceptual grayscale reduction of RGB.
+_RGB_LUMA = np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
+
+
+def _is_rgb_item(item: np.ndarray) -> bool:
+    """True when a gallery item is an ``(H, W, 3)`` / ``(H, W, 4)`` color image.
+
+    Detection rule (documented in the Show2D docstring): inside a LIST input,
+    any item with ``ndim == 3`` and a trailing dim of 3 or 4 is RGB(A). A bare
+    3-D ARRAY input keeps ``(N, H, W)`` stack semantics unless its trailing dim
+    is 3/4 AND its leading dim is > 4 (so a 3-frame stack of tiny images never
+    silently flips to RGB)."""
+    return item.ndim == 3 and item.shape[-1] in (3, 4)
+
+
+def _normalize_rgb(item: np.ndarray) -> np.ndarray:
+    """Display-ready ``(H, W, 3)`` float32 in [0, 1] from an RGB(A) item.
+
+    uint8 input scales by 1/255; float input is clipped to [0, 1] (overlays
+    like drift's green-magenta ``overlay_pair`` are already in that range).
+    An alpha channel is dropped: RGB panels bypass the contrast pipeline and
+    are composited on an opaque canvas, so alpha has nothing to blend with."""
+    rgb = np.asarray(item)[..., :3]
+    if rgb.dtype == np.uint8:
+        return rgb.astype(np.float32) / 255.0
+    return np.clip(rgb.astype(np.float32), 0.0, 1.0)
+
+
+def _compose_overlay_pair(reference: np.ndarray, moving: np.ndarray, mode: str) -> np.ndarray:
+    """Color overlay of two grayscale images for checking alignment.
+
+    Math parity with ``quantem.imaging.drift.plot.overlay_pair`` (replicated
+    locally: the widget must not depend on quantem's drift module). Both images
+    share ONE 1/99-percentile scale so the two colors match in brightness;
+    per-image scaling would unbalance them. ``green-magenta`` is the
+    colorblind-safe default: reference -> magenta, moving -> green, aligned ->
+    white. ``rgb`` gives classic red/green (aligned -> yellow) on request only.
+    """
+    ref = np.asarray(reference, dtype=np.float32)
+    mov = np.asarray(moving, dtype=np.float32)
+    lo = min(float(np.percentile(ref, 1)), float(np.percentile(mov, 1)))
+    hi = max(float(np.percentile(ref, 99)), float(np.percentile(mov, 99)))
+    def _norm(arr):
+        return np.clip((arr - lo) / (hi - lo + 1e-9), 0.0, 1.0)
+    ref, mov = _norm(ref), _norm(mov)
+    if mode == "rgb":
+        return np.stack([ref, mov, np.zeros_like(ref)], -1)  # reference red, moving green, aligned yellow
+    return np.stack([ref, mov, ref], -1)                     # reference magenta, moving green, aligned white
+
+
 _OVERLAY_FONT: list[str] | None = None
 
 
@@ -172,6 +222,17 @@ class Show2D(anywidget.AnyWidget):
     data : array_like
         2D array (height, width) for single image, or
         3D array (N, height, width) for multiple images displayed as gallery.
+        RGB images are first-class: inside a LIST input, any item shaped
+        ``(H, W, 3)`` / ``(H, W, 4)`` is treated as an RGB(A) color image
+        (uint8 or float in [0, 1]; alpha is dropped). A bare 3-D ARRAY keeps
+        the historical ``(N, H, W)`` stack semantics unless its trailing dim
+        is 3/4 AND its leading dim is > 4, in which case it is a single RGB
+        image. Mixed galleries (grayscale + RGB side by side) are supported:
+        RGB panels are display-ready and bypass the colormap, contrast,
+        auto/log pipeline; their stats row, histogram, FFT, and line profile
+        read the Rec. 709 luminance; the hover readout shows the (r, g, b)
+        triplet. ``offline=True``, ``export_html`` and ``rotate`` are not
+        supported when RGB panels are present.
     labels : list of str, optional
         Labels for each image in gallery mode.
     title : str, optional
@@ -198,6 +259,16 @@ class Show2D(anywidget.AnyWidget):
         for A/B visual comparison.
     vmax : float, optional
         Absolute maximum intensity for color mapping.
+    overlay : bool or str, default False
+        Compose an alignment overlay panel from a 2-image grayscale gallery
+        (mirrors ``diff_mode``): the gallery becomes ``[a, b, overlay]`` with
+        image 0 -> magenta, image 1 -> green, aligned -> white (the
+        colorblind-safe default; same math as quantem drift's
+        ``overlay_pair``: one shared 1/99-percentile scale across both
+        images). ``overlay="rgb"`` gives classic red/green (aligned ->
+        yellow). Requires exactly 2 grayscale images. Combine with
+        ``diff_mode=True`` for ``[a, b, overlay]`` plus the dynamic signed
+        diff panel of the pair.
     ncols : int, default 3
         Number of columns in gallery mode.
     size : int, default 0
@@ -269,6 +340,17 @@ class Show2D(anywidget.AnyWidget):
 
     >>> Show2D([a, b], diff_mode=True, link_zoom=True, link_pan=True)
 
+    Alignment overlay: append a composed green-magenta RGB panel
+    (gallery becomes ``[a, b, overlay]``; aligned regions read white):
+
+    >>> Show2D([a, b], overlay=True)
+
+    RGB images are first-class gallery items (e.g. drift's green-magenta
+    ``overlay_pair`` composite next to the grayscale merge):
+
+    >>> rgb_overlay = np.stack([a, b, a], axis=-1)  # (H, W, 3) in [0, 1]
+    >>> Show2D([a, rgb_overlay], labels=["merged", "overlay (RGB)"])
+
     Large image: display-only canvas size (full resolution preserved):
 
     >>> Show2D(np.random.rand(4096, 4096), size=800)
@@ -328,11 +410,14 @@ class Show2D(anywidget.AnyWidget):
     export_payload_id = traitlets.Unicode("").tag(sync=True)
     export_filename = traitlets.Unicode("").tag(sync=True)
     labels = traitlets.List(traitlets.Unicode()).tag(sync=True)
+    # Per-panel RGB flag. True panels carry display-ready (H, W, 3) pixels that
+    # bypass the colormap/contrast pipeline in JS; False panels are grayscale.
+    is_rgb = traitlets.List(traitlets.Bool(), default_value=[]).tag(sync=True)
     starred = traitlets.List(traitlets.Int()).tag(sync=True)
     hidden_panels = traitlets.List(traitlets.Int(), default_value=[]).tag(sync=True)
     show_panel_titles = traitlets.Bool(True).tag(sync=True)
     panel_title_font_size = traitlets.Int(11).tag(sync=True)
-    gallery_gap_px = traitlets.Int(8).tag(sync=True)
+    gallery_gap_px = traitlets.Int(0).tag(sync=True)
     title = traitlets.Unicode("").tag(sync=True)
     cmap = traitlets.Unicode("inferno").tag(sync=True)
     ncols = traitlets.Int(3).tag(sync=True)
@@ -475,13 +560,14 @@ class Show2D(anywidget.AnyWidget):
         link_pan: bool | None = None,
         link_contrast: bool = True,
         diff_mode: bool = False,
+        overlay: bool | str = False,
         view_box: tuple | list | None = None,
         display_bin: int | str = "auto",
         hidden_panels: Sequence[int | str] | int | str | None = None,
         starred: Sequence[int | str] | int | str | None = None,
         show_panel_titles: bool = True,
         panel_title_font_size: int = 11,
-        gallery_gap_px: int = 8,
+        gallery_gap_px: int = 0,
         state=None,
         save_state: bool = False,
         **kwargs,
@@ -525,7 +611,7 @@ class Show2D(anywidget.AnyWidget):
                 ncols=ncols, size=size, smooth=smooth, zoom=zoom,
                 zoom_row=zoom_row, zoom_col=zoom_col,
                 link_zoom=link_zoom, link_pan=link_pan, link_contrast=link_contrast,
-                diff_mode=diff_mode, view_box=view_box,
+                diff_mode=diff_mode, overlay=overlay, view_box=view_box,
                 display_bin=display_bin, hidden_panels=hidden_panels, starred=starred,
                 show_panel_titles=show_panel_titles, panel_title_font_size=panel_title_font_size,
                 gallery_gap_px=gallery_gap_px,
@@ -536,7 +622,7 @@ class Show2D(anywidget.AnyWidget):
                    show_controls, show_stats, log_scale, auto_contrast, offline,
                    vmin, vmax,
                    ncols, size, smooth, zoom, zoom_row, zoom_col,
-                   link_zoom, link_pan, link_contrast, diff_mode, view_box,
+                   link_zoom, link_pan, link_contrast, diff_mode, overlay, view_box,
                    display_bin, hidden_panels, starred, show_panel_titles,
                    panel_title_font_size, gallery_gap_px, verbose, state, _t0):
         import time as _time
@@ -570,9 +656,41 @@ class Show2D(anywidget.AnyWidget):
             data = [d.array for d in data]
 
         # Convert NumPy / PyTorch / list inputs to a NumPy array.
+        # RGB detection rule: per-ITEM in a list input, an item with ndim == 3
+        # and shape[-1] in (3, 4) is an RGB(A) image. A single non-list ndim==3
+        # input is RGB only when shape[-1] in (3, 4) AND shape[0] > 4;
+        # otherwise it keeps the historical (N, H, W) stack semantics.
+        rgb_flags: list[bool] = []
+        rgb_frames: list[np.ndarray | None] = []
         if isinstance(data, list):
             images = [to_numpy(d) for d in data]
-
+            rgb_flags = [_is_rgb_item(img) for img in images]
+        else:
+            arr = to_numpy(data)
+            if arr.ndim == 3 and arr.shape[-1] in (3, 4) and arr.shape[0] > 4:
+                images, rgb_flags = [arr], [True]
+            else:
+                images, rgb_flags = None, []
+                data = arr
+        if images is not None and any(rgb_flags):
+            # Mixed gallery: normalize RGB items to display-ready [0, 1] and
+            # reduce them to Rec. 709 luminance for the grayscale machinery
+            # (stats, histogram, FFT, profile all read the luminance plane).
+            normalized = [_normalize_rgb(img) if flag else np.asarray(img, dtype=np.float32)
+                          for img, flag in zip(images, rgb_flags)]
+            shapes = [img.shape[:2] for img in normalized]
+            if len(set(shapes)) > 1:
+                max_h = max(s[0] for s in shapes)
+                max_w = max(s[1] for s in shapes)
+                normalized = [
+                    np.stack([_resize_image(ch, max_h, max_w) for ch in img.transpose(2, 0, 1)], axis=-1)
+                    if flag else _resize_image(img, max_h, max_w)
+                    for img, flag in zip(normalized, rgb_flags)
+                ]
+            rgb_frames = [img if flag else None for img, flag in zip(normalized, rgb_flags)]
+            data = np.stack([img @ _RGB_LUMA if flag else img
+                             for img, flag in zip(normalized, rgb_flags)])
+        elif images is not None:
             # Check if all images have the same shape
             shapes = [img.shape for img in images]
             if len(set(shapes)) > 1:
@@ -580,10 +698,7 @@ class Show2D(anywidget.AnyWidget):
                 max_h = max(s[0] for s in shapes)
                 max_w = max(s[1] for s in shapes)
                 images = [_resize_image(img, max_h, max_w) for img in images]
-
             data = np.stack(images)
-        else:
-            data = to_numpy(data)
 
         # Ensure 3D shape (N, H, W)
         if data.ndim == 2:
@@ -594,6 +709,34 @@ class Show2D(anywidget.AnyWidget):
             self._data = np.array(data, dtype=np.float32, copy=True)
         else:
             self._data = np.asarray(data, dtype=np.float32)
+        self._rgb_frames = rgb_frames or [None] * int(data.shape[0])
+        self.is_rgb = [f is not None for f in self._rgb_frames]
+        # overlay sugar (mirrors diff_mode): compose an alignment overlay panel
+        # from the two grayscale inputs so users never hand-build (H, W, 3).
+        overlay_label = None
+        if overlay:
+            if overlay is not True and str(overlay) not in ("green-magenta", "rgb"):
+                raise ValueError(f"overlay must be True, 'green-magenta', or 'rgb', got {overlay!r}")
+            if self._data.shape[0] != 2 or any(self.is_rgb):
+                raise ValueError(
+                    f"overlay requires exactly 2 grayscale images, got "
+                    f"{self._data.shape[0]} image(s)"
+                    + (" including RGB panels" if any(self.is_rgb) else "")
+                )
+            mode = "rgb" if str(overlay) == "rgb" else "green-magenta"
+            composed = _compose_overlay_pair(self._data[0], self._data[1], mode)
+            # gallery becomes [a, b, overlay]; the overlay's luminance plane
+            # joins _data so stats/histogram/FFT machinery sees three panels
+            self._data = np.concatenate([self._data, (composed @ _RGB_LUMA)[None]], axis=0)
+            self._rgb_frames = [None, None, composed]
+            self.is_rgb = [False, False, True]
+            overlay_label = f"overlay ({mode})"
+            data = self._data  # n_images/height/width below read `data`
+        if offline and any(self.is_rgb):
+            raise NotImplementedError(
+                "offline=True is not supported for RGB panels; RGB frames are "
+                "sent as full float32 and bypass the uint8 quantization path."
+            )
         # Store originals for rotation reset: views into _data (no copy).
         # Only materialized as independent copies when a rotation is applied.
         self._data_original = [self._data[i] for i in range(self._data.shape[0])]
@@ -606,8 +749,14 @@ class Show2D(anywidget.AnyWidget):
         # Labels
         if labels is None:
             self.labels = [f"Image {i+1}" for i in range(self.n_images)]
+            if overlay_label:
+                self.labels = self.labels[:-1] + [overlay_label]
         else:
-            self.labels = list(labels)
+            resolved_labels = list(labels)
+            # user labeled the two inputs; the composed overlay names itself
+            if overlay_label and len(resolved_labels) == self.n_images - 1:
+                resolved_labels.append(overlay_label)
+            self.labels = resolved_labels
         self.starred = [0] * self.n_images
         self.hidden_panels = []
         self.show_panel_titles = bool(show_panel_titles)
@@ -639,9 +788,14 @@ class Show2D(anywidget.AnyWidget):
         self.pixel_sizes = []
         self.size = size
         self.smooth = smooth
-        # view_box sugar: sets zoom + zoom_row/col to center on box
+        # view_box sugar: sets zoom + zoom_row/col to center on box.
+        # Two forms: (r0, r1, c0, c1) explicit bounds, or the friendlier
+        # (row0, col0, size) = top-left corner + square size.
         if view_box is not None:
-            r0, r1, c0, c1 = [float(v) for v in view_box]
+            vb = [float(v) for v in view_box]
+            if len(vb) == 3:
+                vb = [vb[0], vb[0] + vb[2], vb[1], vb[1] + vb[2]]
+            r0, r1, c0, c1 = vb
             box_h = max(1.0, r1 - r0)
             box_w = max(1.0, c1 - c0)
             zoom = float(min(self.height / box_h, self.width / box_w))
@@ -670,6 +824,11 @@ class Show2D(anywidget.AnyWidget):
         self.log_scale = log_scale
         self.auto_contrast = auto_contrast
         self.offline = offline
+        # Standalone HTML export packs panels through the grayscale stack
+        # machinery, which cannot carry (H, W, 3) pixels: hide the export menu
+        # and reject programmatic export instead of corrupting RGB panels.
+        if any(self.is_rgb):
+            self.export_enabled = False
         # Accept scalar OR list for vmin/vmax. List → per-image (vmins/vmaxs).
         if isinstance(vmin, (list, tuple)) or isinstance(vmax, (list, tuple)):
             n = self.n_images
@@ -721,11 +880,19 @@ class Show2D(anywidget.AnyWidget):
             if self.pixel_size > 0:
                 self.pixel_size = self.pixel_size * self._display_bin
             self._display_bin_factor = self._display_bin
+            # RGB panels bin per channel so the display copy matches the
+            # luminance plane's resolution (JS derives offsets from one H×W).
+            self._display_rgb = [
+                None if f is None else
+                bin2d(f.transpose(2, 0, 1), factor=self._display_bin, mode="mean").transpose(1, 2, 0)
+                for f in self._rgb_frames
+            ]
             if verbose:
                 print(f"  Display bin {self._display_bin}×: {orig_h}×{orig_w} → {self.height}×{self.width} ({self._display_data.nbytes // 1024 // 1024} MB)")
         else:
             self._display_data = self._data
             self._display_bin_factor = 1
+            self._display_rgb = self._rgb_frames
 
         # Compute initial stats (from full-res data)
         self._compute_all_stats()
@@ -971,18 +1138,30 @@ class Show2D(anywidget.AnyWidget):
         if i < 0 or i >= self.n_images:
             raise IndexError(f"Image index {i} out of range [0, {self.n_images})")
 
+        panel_rgb = self._rgb_frames[i] if getattr(self, "_rgb_frames", None) else None
         frame = self._data[i]
-        normalized = self._normalize_frame(frame)
         cmap_fn = colormaps.get_cmap(self.cmap)
         path.parent.mkdir(parents=True, exist_ok=True)
+        if panel_rgb is not None:
+            # RGB panels are display-ready: save the color pixels directly,
+            # bypassing colormap and contrast. Colorbar is meaningless for an
+            # RGB composite, so it is skipped.
+            display_pixels = (np.clip(panel_rgb, 0.0, 1.0) * 255).astype(np.uint8)
+            colorbar = False
+        else:
+            normalized = self._normalize_frame(frame)
+            display_pixels = None
 
         use_figure = title or colorbar or scalebar
         if not use_figure:
-            rgba = (cmap_fn(normalized / 255.0) * 255).astype(np.uint8)
-            img = Image.fromarray(rgba)
-            if fmt == "pdf":
-                Image.init()
-                img = img.convert("RGB")
+            if panel_rgb is not None:
+                img = Image.fromarray(display_pixels, mode="RGB")
+            else:
+                rgba = (cmap_fn(normalized / 255.0) * 255).astype(np.uint8)
+                img = Image.fromarray(rgba)
+                if fmt == "pdf":
+                    Image.init()
+                    img = img.convert("RGB")
             img.save(str(path), dpi=(dpi, dpi))
             return path
 
@@ -991,7 +1170,10 @@ class Show2D(anywidget.AnyWidget):
         aspect = h / w
         fig_w = 6
         fig, ax = plt.subplots(figsize=(fig_w, fig_w * aspect))
-        im = ax.imshow(normalized, cmap=cmap_fn, vmin=0, vmax=255, origin="upper")
+        if panel_rgb is not None:
+            im = ax.imshow(display_pixels, origin="upper")
+        else:
+            im = ax.imshow(normalized, cmap=cmap_fn, vmin=0, vmax=255, origin="upper")
         ax.axis("off")
 
         if title:
@@ -1053,6 +1235,32 @@ class Show2D(anywidget.AnyWidget):
                     facecolor="white", pad_inches=0.1)
         plt.close(fig)
         return path
+
+    @property
+    def view_corner(self):
+        """Current view as ``(row0, col0, size)`` - paste straight into ``view_box=``.
+
+        ``view_box`` live-syncs from JS on every pan/zoom, so after interacting this
+        reads the region on screen. Restore next session with
+        ``Show2D(..., view_box=w.view_corner)``.
+        """
+        if not self.view_box:
+            return (0.0, 0.0, float(max(self.height, self.width)))
+        r0, r1, c0, c1 = self.view_box
+        return (round(r0, 1), round(c0, 1), round(max(r1 - r0, c1 - c0), 1))
+
+    @property
+    def view_center(self):
+        """Current view as ``dict(zoom=..., zoom_row=..., zoom_col=...)`` - paste as kwargs.
+
+        The center/zoom flavor of :attr:`view_corner`: restore with
+        ``Show2D(..., **w.view_center)``.
+        """
+        if not self.view_box:
+            return dict(zoom=1.0, zoom_row=None, zoom_col=None)
+        r0, r1, c0, c1 = self.view_box
+        zoom = float(min(self.height / max(1.0, r1 - r0), self.width / max(1.0, c1 - c0)))
+        return dict(zoom=round(zoom, 2), zoom_row=round((r0 + r1) / 2, 1), zoom_col=round((c0 + c1) / 2, 1))
 
     # Traits that carry the bulk pixel payload. Dropped from the saved-notebook
     # snapshot when save_state is False so a plain display stays a few MB, not GB.
@@ -1121,6 +1329,11 @@ class Show2D(anywidget.AnyWidget):
         the PNG pixels are later area-binned.
         """
         num = len(frames)
+        # RGB panels bypass the contrast pipeline entirely: their range is the
+        # fixed display-ready [0, 1], and they are excluded from linked-contrast
+        # merging so a [0, 1] overlay never drags a counts-scaled panel's window.
+        rgb = list(self.is_rgb) if any(self.is_rgb) else [False] * num
+        gray = [i for i in range(num) if not (i < len(rgb) and rgb[i])]
         def to_display(value: float) -> float:
             return float(self._signed_log1p(float(value))) if self.log_scale else float(value)
         has_absolute = self.vmin is not None and self.vmax is not None
@@ -1129,23 +1342,25 @@ class Show2D(anywidget.AnyWidget):
         has_per_image = [per_mins[i] is not None and per_maxs[i] is not None for i in range(num)]
         base_ranges: list[tuple[float, float]] = []
         for i, frame in enumerate(frames):
-            if has_per_image[i]:
+            if i < len(rgb) and rgb[i]:
+                base_ranges.append((0.0, 1.0))
+            elif has_per_image[i]:
                 base_ranges.append((to_display(per_mins[i]), to_display(per_maxs[i])))
             elif has_absolute:
                 base_ranges.append((to_display(self.vmin), to_display(self.vmax)))
             else:
                 base_ranges.append((to_display(frame.min()), to_display(frame.max())))
         linked_shared = (
-            self.link_contrast and num >= 2 and not has_absolute and not any(has_per_image)
+            self.link_contrast and len(gray) >= 2 and not has_absolute and not any(has_per_image)
         )
         shared_base = None
         if linked_shared:
-            shared_base = (min(r[0] for r in base_ranges), max(r[1] for r in base_ranges))
+            shared_base = (min(base_ranges[i][0] for i in gray), max(base_ranges[i][1] for i in gray))
         auto_ranges: list[tuple[float, float]] = []
         use_auto = self.auto_contrast and not has_absolute
         if use_auto:
             for i, frame in enumerate(frames):
-                if has_per_image[i]:
+                if has_per_image[i] or (i < len(rgb) and rgb[i]):
                     auto_ranges.append(base_ranges[i])
                     continue
                 processed = self._signed_log1p(frame) if self.log_scale else frame
@@ -1157,10 +1372,12 @@ class Show2D(anywidget.AnyWidget):
                     lo, hi = full_lo, full_hi
                 auto_ranges.append((lo, hi))
             if linked_shared:
-                shared_auto = (min(r[0] for r in auto_ranges), max(r[1] for r in auto_ranges))
+                shared_auto = (min(auto_ranges[i][0] for i in gray), max(auto_ranges[i][1] for i in gray))
         ranges: list[tuple[float, float]] = []
         for i in range(num):
-            if use_auto and not has_per_image[i]:
+            if i < len(rgb) and rgb[i]:
+                ranges.append((0.0, 1.0))
+            elif use_auto and not has_per_image[i]:
                 ranges.append(shared_auto if linked_shared else auto_ranges[i])
             else:
                 ranges.append(shared_base if linked_shared else base_ranges[i])
@@ -1214,14 +1431,19 @@ class Show2D(anywidget.AnyWidget):
             fmt = self._format_stat
             return f"Mean {fmt(mean)}   Min {fmt(lo)}   Max {fmt(hi)}   Std {fmt(std)}"
         specs: list[dict] = []
+        display_rgb = getattr(self, "_display_rgb", None) or [None] * len(frames)
         for i in self.visible_panels:
             label = self._panel_title_for_index(i) if self.show_panel_titles else ""
+            panel_rgb = display_rgb[i] if i < len(display_rgb) else None
             specs.append({
-                "frame": frames[i],
+                # RGB panels pass their display-ready pixels straight through:
+                # no colormap, no log, no contrast window (stats stay luminance).
+                "frame": panel_rgb if panel_rgb is not None else frames[i],
+                "rgb": panel_rgb is not None,
                 "vmin": ranges[i][0],
                 "vmax": ranges[i][1],
                 "cmap": self.cmap,
-                "apply_log": self.log_scale,
+                "apply_log": self.log_scale and panel_rgb is None,
                 "label": label,
                 "stats": stats_line(self.stats_mean[i], self.stats_min[i],
                                     self.stats_max[i], self.stats_std[i]),
@@ -1230,7 +1452,9 @@ class Show2D(anywidget.AnyWidget):
             ref = int(self.diff_reference)
             diff_cmap = "RdBu" if self.cmap in self._SEQUENTIAL_CMAPS else self.cmap
             for other in range(len(frames)):
-                if other == ref:
+                # RGB panels never get a diff panel: a signed residual against
+                # a display-ready color composite is meaningless.
+                if other == ref or (other < len(self.is_rgb) and self.is_rgb[other]):
                     continue
                 diff = frames[ref] - frames[other]
                 # Symmetric window centers zero on the diverging map's midpoint,
@@ -1347,7 +1571,7 @@ class Show2D(anywidget.AnyWidget):
         # cells sized to the panels' cropped aspect so every image fills its
         # cell exactly: a taller cell would pad panels with white and make the
         # horizontal gutters read wider than the vertical ones
-        h0, w0 = specs[0]["frame"].shape
+        h0, w0 = specs[0]["frame"].shape[:2]
         rows0, cols0 = self._center_crop_slices(h0, w0, zoom)
         aspect = (rows0.stop - rows0.start) / (cols0.stop - cols0.start)
         # inter-panel gutter is the widget's own gallery gap (CSS px of the
@@ -1372,9 +1596,17 @@ class Show2D(anywidget.AnyWidget):
             ax.axis("off")
             frame = spec["frame"]
             rows, cols = self._center_crop_slices(frame.shape[0], frame.shape[1], zoom)
-            binned = self._downsample_static_frame(frame[rows, cols], max_px=max_px)
-            rgb = self._static_panel_rgb(binned, spec["vmin"], spec["vmax"],
-                                         spec["cmap"], apply_log=spec["apply_log"])
+            if spec.get("rgb"):
+                # RGB panels bypass the colormap: bin each channel and pass the
+                # display-ready pixels straight through, matching the live view.
+                cropped = frame[rows, cols]
+                binned_channels = [self._downsample_static_frame(cropped[..., ch], max_px=max_px)
+                                   for ch in range(3)]
+                rgb = (np.clip(np.stack(binned_channels, axis=-1), 0.0, 1.0) * 255).astype(np.uint8)
+            else:
+                binned = self._downsample_static_frame(frame[rows, cols], max_px=max_px)
+                rgb = self._static_panel_rgb(binned, spec["vmin"], spec["vmax"],
+                                             spec["cmap"], apply_log=spec["apply_log"])
             ax.imshow(rgb, interpolation="nearest")
             bin_h, bin_w = rgb.shape[:2]
             ax.set(xlim=(-0.5, bin_w - 0.5), ylim=(bin_h - 0.5, -0.5))
@@ -1604,6 +1836,11 @@ class Show2D(anywidget.AnyWidget):
         """
         if self._data is None:
             raise ValueError("Cannot export HTML after free(); rebuild the widget first.")
+        if any(self.is_rgb):
+            raise NotImplementedError(
+                "export_html is not supported when the gallery contains RGB panels; "
+                "the export clone rebuilds from the grayscale stack and would drop the color channels."
+            )
 
         quantized = self._normalise_html_export_options(
             mode=mode,
@@ -1733,6 +1970,11 @@ class Show2D(anywidget.AnyWidget):
             return path.read_bytes()
 
     def _clone_for_html_export(self, *, quantized: bool) -> Self:
+        if any(self.is_rgb):
+            raise NotImplementedError(
+                "HTML export is not supported when the gallery contains RGB panels; "
+                "the export clone rebuilds from the grayscale stack and would drop the color channels."
+            )
         data = self._display_data if self._display_data is not None else self._data
         if data is None:
             raise ValueError("Cannot export HTML after free(); rebuild the widget first.")
@@ -1993,7 +2235,19 @@ class Show2D(anywidget.AnyWidget):
     def _update_all_frames(self):
         """Send display data to JS (possibly binned for large galleries)."""
         data = self._display_data if self._display_data is not None else self._data
-        if self.offline:
+        if any(self.is_rgb):
+            # Mixed packing: each panel is one contiguous float32 block, W*H
+            # floats for grayscale, 3*W*H interleaved floats for RGB. JS derives
+            # per-panel offsets from the synced is_rgb flags.
+            display_rgb = getattr(self, "_display_rgb", self._rgb_frames)
+            blocks = [
+                np.ascontiguousarray(display_rgb[i], dtype=np.float32).tobytes()
+                if self.is_rgb[i] else
+                np.ascontiguousarray(data[i], dtype=np.float32).tobytes()
+                for i in range(int(data.shape[0]))
+            ]
+            self.frame_bytes = _b64_safe(b"".join(blocks))
+        elif self.offline:
             # Quantize to uint8 PER IMAGE (4x smaller than float32). Each panel uses
             # its own (min, max) so every panel gets the full 256 codes - a global
             # range would starve narrow-range panels and comb their histograms.
@@ -2107,6 +2361,11 @@ class Show2D(anywidget.AnyWidget):
         -------
         Self
         """
+        if any(self.is_rgb):
+            raise NotImplementedError(
+                "rotate() is not supported when the gallery contains RGB panels; "
+                "rotation rebuilds panels from the grayscale stack and would desync the color pixels."
+            )
         if angle % 90 != 0:
             raise ValueError(f"Rotation angle must be a multiple of 90 (got {angle}). Use 0, 90, 180, 270, or -90, -180, -270.")
         if idx < 0 or idx >= self.n_images:
