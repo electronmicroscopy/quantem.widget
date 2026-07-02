@@ -372,6 +372,19 @@ class FolderSurvey:
         from IPython.display import display
 
         display(self.widget)
+        # The survey renders as a plain ipywidgets container, so the nested
+        # Show2D/Show3D galleries never display through their own
+        # _ipython_display_ and no static-fallback sibling would be saved: a
+        # cold notebook reopen showed nothing. Emit each gallery's deferred
+        # sibling here; live, every nested widget's frontend hide effect
+        # hides the sibling carrying its own model id, and on a kernel-less
+        # reopen the PNGs are what the reader sees.
+        galleries = self.image_galleries or (
+            [(self.gallery, None)] if self.gallery is not None else [])
+        for gallery_widget, _ in galleries:
+            emit_sibling = getattr(gallery_widget, "_display_static_sibling_deferred", None)
+            if emit_sibling is not None and not getattr(gallery_widget, "_save_state", False):
+                emit_sibling()
 
     def _make_eds_selection_observer(self, file_id: str):
         def _observe(change):
@@ -411,8 +424,9 @@ def survey(
     load_eds: bool = False,
     candidate_elements: list[str] | tuple[str, ...] | None = None,
     title: str | None = None,
-    group_by: str | None = "fov",
+    group_by: str | None = "session",
     group_view: str = "stack",
+    save_state: bool = False,
 ) -> FolderSurvey:
     """Survey a folder of microscopy files.
 
@@ -437,13 +451,18 @@ def survey(
     title
         Optional survey title.
     group_by
-        Layout grouping mode. Use ``"fov"`` to place files from the same
-        microscope field of view in one row, or ``None``/``"none"`` for a flat
-        gallery.
+        Layout grouping mode. Use ``"session"`` to place consecutive files with
+        the same magnification into small chronological rows, ``"fov"`` to place
+        files from the same microscope field of view in one row, or
+        ``None``/``"none"`` for a flat gallery.
     group_view
         How grouped image frames are displayed. ``"stack"`` uses ``Show3D`` to
         flip through frames from the same field of view. ``"gallery"`` uses a
         compact ``Show2D`` row gallery.
+    save_state
+        If True, embed image widget buffers into notebook widget state. Keep the
+        default False for real microscope folders; use True only for small demos
+        that should render interactively in static documentation.
     """
     from ipywidgets import Button, Checkbox, HBox, HTML, Output, VBox
 
@@ -460,9 +479,9 @@ def survey(
     thumb = int(thumb)
     if thumb <= 0:
         raise ValueError(f"thumb must be positive, got {thumb}")
-    if group_by is not None and group_by.lower() not in {"fov", "none"}:
-        raise ValueError("group_by must be 'fov', 'none', or None")
-    use_fov_groups = group_by is not None and group_by.lower() == "fov"
+    group_mode = "none" if group_by is None else str(group_by).lower()
+    if group_mode not in {"session", "fov", "none"}:
+        raise ValueError("group_by must be 'session', 'fov', 'none', or None")
     group_view = str(group_view).lower()
     if group_view not in {"stack", "gallery"}:
         raise ValueError("group_view must be 'stack' or 'gallery'")
@@ -514,8 +533,10 @@ def survey(
             if item.units is not None:
                 image_pixel_units[item.file_id] = str(item.units[-1])
         items.append(item)
-    if use_fov_groups:
+    if group_mode == "fov":
         items, fov_groups = _assign_fov_groups(items)
+    elif group_mode == "session":
+        items, fov_groups = _assign_session_groups(items)
     else:
         fov_groups = []
 
@@ -588,6 +609,7 @@ def survey(
             pixel_units=image_pixel_units,
             title=title,
             Show2D=Show2D,
+            save_state=save_state,
             ncols=ncols,
         )
 
@@ -599,15 +621,27 @@ def survey(
             pixel_units=image_pixel_units,
             title=title,
             Show3D=Show3D,
+            save_state=save_state,
         )
 
     grouped_ids: set[str] = set()
     if image_items and fov_groups:
+        if group_mode == "fov":
+            group_heading = "Field-of-view rows"
+            group_description = (
+                "Rows combine files with matching magnification, microscope field of view, "
+                "and nearby stage position."
+            )
+        else:
+            group_heading = "Session rows"
+            group_description = (
+                "Rows combine nearby files in acquisition order, grouped by magnification. "
+                "Use group_by='fov' when exact repeated-field metadata is the main question."
+            )
         children.append(HTML(
-            "<h3 style=\"margin:8px 0 4px 0\">Field-of-view rows</h3>"
+            f"<h3 style=\"margin:8px 0 4px 0\">{html.escape(group_heading)}</h3>"
             "<div style=\"color:#555;margin-bottom:6px\">"
-            "Rows combine files with matching magnification, microscope field of view, "
-            "and nearby stage position.</div>"
+            f"{html.escape(group_description)}</div>"
         ))
         for group in fov_groups:
             group_images = [item for item in group if not item.is_eds and item.file_id in image_thumbnails]
@@ -751,6 +785,7 @@ def _make_show2d_gallery(
     pixel_units: dict[str, str],
     title: str,
     Show2D,
+    save_state: bool,
     ncols: int | None = None,
 ):
     stack = np.stack([thumbnails[item.file_id] for item in image_items]).astype(np.float32, copy=False)
@@ -763,7 +798,7 @@ def _make_show2d_gallery(
         title=title,
         gallery_gap_px=2,
         panel_title_font_size=9,
-        save_state=False,
+        save_state=save_state,
         **kwargs,
     )
     sizes = [pixel_sizes.get(item.file_id) for item in image_items]
@@ -785,6 +820,7 @@ def _make_show3d_stack(
     pixel_units: dict[str, str],
     title: str,
     Show3D,
+    save_state: bool,
 ):
     stack = np.stack([thumbnails[item.file_id] for item in image_items]).astype(np.float32, copy=False)
     widget = Show3D(
@@ -801,7 +837,7 @@ def _make_show3d_stack(
         panel_title_font_size=10,
         panel_gap=4,
         show_panel_titles=True,
-        save_state=False,
+        save_state=save_state,
     )
     sizes = [pixel_sizes.get(item.file_id) for item in image_items]
     units = [pixel_units.get(item.file_id) for item in image_items]
@@ -866,6 +902,63 @@ def _assign_fov_groups(items: list[SurveyItem]) -> tuple[list[SurveyItem], list[
     return updated, updated_groups
 
 
+def _assign_session_groups(
+    items: list[SurveyItem],
+    *,
+    max_images_per_group: int = 4,
+) -> tuple[list[SurveyItem], list[list[SurveyItem]]]:
+    """Assign chronological session groups from file order and magnification."""
+    groups: list[list[SurveyItem]] = []
+    current: list[SurveyItem] = []
+    current_mag: str | None = None
+    current_image_count = 0
+
+    for item in items:
+        if item.error is not None:
+            continue
+        mag = item.magnification or "unknown magnification"
+        starts_new_mag = current and mag != current_mag
+        starts_new_chunk = (
+            current
+            and not item.is_eds
+            and current_image_count >= max_images_per_group
+        )
+        if starts_new_mag or starts_new_chunk:
+            groups.append(current)
+            current = []
+            current_image_count = 0
+        current.append(item)
+        current_mag = mag
+        if not item.is_eds:
+            current_image_count += 1
+    if current:
+        groups.append(current)
+
+    groups = [group for group in groups if len([item for item in group if not item.is_eds]) > 1]
+    if not groups:
+        return items, []
+
+    label_by_id: dict[str, str] = {}
+    labeled_groups: list[list[SurveyItem]] = []
+    for idx, group in enumerate(groups, start=1):
+        label = f"Session {idx}"
+        for item in group:
+            label_by_id[item.file_id] = label
+        labeled_groups.append([replace(item, fov_group=label) for item in group])
+
+    updated = [
+        replace(item, fov_group=label_by_id[item.file_id])
+        if item.file_id in label_by_id else item
+        for item in items
+    ]
+    group_lookup = {item.file_id: item for item in updated}
+    updated_groups = [
+        [group_lookup[item.file_id] for item in group if item.file_id in group_lookup]
+        for group in labeled_groups
+    ]
+    return updated, updated_groups
+
+
 def _same_field_of_view(a: SurveyItem, b: SurveyItem) -> bool:
     if a.stage_position_m is None or b.stage_position_m is None:
         return False
@@ -905,14 +998,17 @@ def _fov_group_title(group: list[SurveyItem]) -> str:
 
 def _fov_group_html(group: list[SurveyItem]) -> str:
     first = group[0]
-    fov = ""
-    if first.field_of_view_nm is not None:
-        fov = f" · FOV {first.field_of_view_nm[0]:.4g} x {first.field_of_view_nm[1]:.4g} nm"
     ids = ", ".join(item.file_id for item in group)
+    details = [f"files {ids}"]
+    mags = sorted({item.magnification for item in group if item.magnification})
+    if len(mags) == 1:
+        details.append(mags[0])
+    if (first.fov_group or "").startswith("FOV") and first.field_of_view_nm is not None:
+        details.append(f"FOV {first.field_of_view_nm[0]:.4g} x {first.field_of_view_nm[1]:.4g} nm")
     return (
         "<div style=\"margin:8px 0 2px 0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif\">"
         f"<b>{html.escape(first.fov_group or 'Same field of view')}</b>"
-        f"<span style=\"color:#555\"> · files {html.escape(ids)}{html.escape(fov)}</span>"
+        f"<span style=\"color:#555\"> · {html.escape(' · '.join(details))}</span>"
         "</div>"
     )
 
@@ -1045,7 +1141,7 @@ def write_survey_notebook(
     thumb: int = 512,
     eds_backend: str = "auto",
     title: str | None = None,
-    group_by: str | None = "fov",
+    group_by: str | None = "session",
     group_view: str = "stack",
 ) -> Path:
     """Write a simple survey notebook for the public survey workflow."""
@@ -1241,7 +1337,7 @@ def _inventory_html(items: list[SurveyItem]) -> str:
         <th style="text-align:left;padding:4px 8px;border-bottom:2px solid #444">file</th>
         <th style="text-align:left;padding:4px 8px;border-bottom:2px solid #444">kind</th>
         <th style="text-align:left;padding:4px 8px;border-bottom:2px solid #444">mag</th>
-        <th style="text-align:left;padding:4px 8px;border-bottom:2px solid #444">FOV</th>
+        <th style="text-align:left;padding:4px 8px;border-bottom:2px solid #444">group</th>
         <th style="text-align:left;padding:4px 8px;border-bottom:2px solid #444">shape</th>
         <th style="text-align:left;padding:4px 8px;border-bottom:2px solid #444">downsample</th>
         <th style="text-align:left;padding:4px 8px;border-bottom:2px solid #444">pixel size</th>

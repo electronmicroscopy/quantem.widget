@@ -27,6 +27,7 @@ import VisibilityOffIcon from "@mui/icons-material/VisibilityOff";
 import { useTheme } from "../theme";
 import { drawScaleBarHiDPI, drawColorbar, roundToNiceValue } from "../figure";
 import { extractBytes, extractFloat32, formatNumber, downloadBlob, preserveRestoredWidgetModelsOnSave } from "../format";
+import { useHideStaticFallback } from "../staticFallback";
 import { computeHistogramFromBytes, findDataRange, applyLogScale, percentileClip, sliderRange, computeStats } from "../stats";
 
 function InfoTooltip({ text, theme = "dark" }: { text: React.ReactNode; theme?: "light" | "dark" }) {
@@ -639,49 +640,8 @@ function Show2D() {
   const model = useModel();
   React.useEffect(() => preserveRestoredWidgetModelsOnSave(model), [model]);
 
-  // Hide the static-PNG sibling output while the live widget is mounted.
-  // Python's _ipython_display_ publishes a fallback <img> as a SEPARATE
-  // display_data output because JupyterLab never falls back to an in-bundle
-  // image/png when the widget renderer claims the output ("model not found"
-  // on cold reopen). Live, both would show; the img carries this widget's
-  // model id, so hide exactly ours. On a cold reopen this code never runs
-  // (no kernel, no widget mount) and the fallback stays visible.
   const staticFallbackRootRef = React.useRef<HTMLDivElement | null>(null);
-  React.useEffect(() => {
-    if (typeof document === "undefined") return;
-    // model_id can be undefined on some anywidget versions, so the primary
-    // scope is STRUCTURAL: any fallback img inside this widget's own cell
-    // belongs to this cell's display and must be hidden while live. The id
-    // match is only the fallback when the root ref hasn't attached yet.
-    const modelId = (model as { model_id?: string } | undefined)?.model_id;
-    let cancelled = false;
-    const hideFallback = () => {
-      if (cancelled) return;
-      const cell = staticFallbackRootRef.current?.closest(".jp-Cell") ?? null;
-      const scope: ParentNode = cell ?? document;
-      scope.querySelectorAll("img.quantem-static-fallback").forEach((img) => {
-        if (!cell) {
-          const imgId = img.getAttribute("data-quantem-model-id");
-          if (!modelId || imgId !== modelId) return;
-        }
-        const output = img.closest(".jp-OutputArea-child") ?? img;
-        (output as HTMLElement).style.display = "none";
-      });
-    };
-    hideFallback();
-    // The sibling output is filled DEFERRED (post_execute update_display_data)
-    // and Lab may recreate its DOM node on the update, so fixed-delay retries
-    // can miss it and the PNG would show under the live widget. Observe the
-    // document for the widget's lifetime and hide the marker whenever it
-    // (re)appears; disconnected on unmount, so a cold reopen (no widget JS)
-    // still shows the fallback.
-    const observer = new MutationObserver(hideFallback);
-    observer.observe(document.body, { childList: true, subtree: true });
-    return () => {
-      cancelled = true;
-      observer.disconnect();
-    };
-  }, [model]);
+  useHideStaticFallback(model, staticFallbackRootRef);
 
   // Theme (offline HTML exports force a light/white background)
   const [offlineForTheme] = useModelState<boolean>("_export_light");

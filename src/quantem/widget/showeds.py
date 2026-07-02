@@ -16,6 +16,7 @@ import numpy as np
 import traitlets
 
 from quantem.widget.utils.array import to_numpy
+from quantem.widget.utils.static_fallback import StaticFallbackMixin
 from quantem.widget.utils.state_io import (
     resolve_widget_version,
     save_state_file,
@@ -1652,7 +1653,7 @@ def _initial_lazy_emd_state(
     }
 
 
-class ShowEDS(anywidget.AnyWidget):
+class ShowEDS(StaticFallbackMixin, anywidget.AnyWidget):
     """Explore an EDS/EELS spectrum image ``(row, col, energy)``.
 
     For browser-backed widgets, the frontend keeps the spectrum cube resident in
@@ -1773,9 +1774,17 @@ class ShowEDS(anywidget.AnyWidget):
         initial_spectrum: np.ndarray | None = None,
         lazy_path: str | pathlib.Path | None = None,
         sidecar_url: str = "",
+        save_state: bool = False,
         **kwargs: Any,
     ):
         super().__init__(**kwargs)
+        # save_state controls whether the heavy buffers (the dense cube / sparse
+        # stream index) are persisted into the notebook's metadata.widgets on
+        # save. Default False: a plain display embeds only light traits + the
+        # first-paint map/spectrum + a static PNG sibling, so a lazy EMD survey
+        # does not bake hundreds of MB into the .ipynb. Set True to persist full
+        # interactive state so a reopened notebook restores without a kernel.
+        self._save_state = bool(save_state)
         self.widget_version = resolve_widget_version()
         spectrum_image_sidecar_dir: pathlib.Path | None = None
         if isinstance(cube, SpectrumImage):
@@ -2396,6 +2405,144 @@ class ShowEDS(anywidget.AnyWidget):
         except Exception as exc:
             self.send({"type": "error", "request_id": request_id, "message": str(exc)})
 
+    # Traits that carry the bulk payload. Dropped from the saved-notebook
+    # snapshot when save_state is False so a plain display stays a few MB, not
+    # the up-to-512MB dense cube or the sparse stream index. base_image_bytes /
+    # initial_map_bytes / initial_spectrum_bytes are single 2D maps + one
+    # spectrum (small) and are kept so a cold reopen still has a first paint.
+    _UNSAVED_HEAVY_KEYS = (
+        "cube_bytes",
+        "export_payload",
+        "stream_channel_offsets_bytes",
+        "stream_channel_pixels_bytes",
+        "stream_pixel_offsets_bytes",
+        "stream_pixel_channels_bytes",
+    )
+
+    def get_state(self, key=None, drop_defaults=False):
+        """Trait state for comm sync and notebook embedding.
+
+        ipywidgets calls this with ``key=None`` to snapshot the FULL state that
+        gets written into the saved notebook's ``metadata.widgets``. When
+        ``save_state`` is False we drop the heavy buffers from that snapshot so
+        a plain ShowEDS does not bake the dense cube / sparse stream index into
+        the .ipynb. Targeted syncs (``key`` is a name or set, used by hold_sync /
+        send_state during live rendering) are untouched, so the frontend still
+        receives every buffer normally. ``save_state=True`` embeds everything so
+        a reopened notebook restores the interactive widget without a kernel.
+        """
+        state = super().get_state(key=key, drop_defaults=drop_defaults)
+        if key is None and not getattr(self, "_save_state", False):
+            for heavy_key in self._UNSAVED_HEAVY_KEYS:
+                state.pop(heavy_key, None)
+        return state
+
+    def _static_map_and_spectrum(self) -> tuple[np.ndarray | None, np.ndarray | None]:
+        """The band map + ROI spectrum the live widget shows on mount.
+
+        Lazy/sidecar/stream widgets ship a precomputed first paint in
+        ``initial_map_bytes`` / ``initial_spectrum_bytes``; browser widgets ship
+        the dense cube instead, so the same band-sum / ROI-sum the frontend
+        computes is reproduced here.
+        """
+        band_map = spectrum = None
+        if self.initial_map_bytes:
+            band_map = np.frombuffer(self.initial_map_bytes, dtype=np.float32).reshape(self.n_rows, self.n_cols)
+        if self.initial_spectrum_bytes:
+            spectrum = np.frombuffer(self.initial_spectrum_bytes, dtype=np.float32)
+        if self.cube_bytes and (band_map is None or spectrum is None):
+            dtype = np.uint16 if self.cube_dtype == "uint16" else np.uint32 if self.cube_dtype == "uint32" else np.float32
+            cube = np.frombuffer(self.cube_bytes, dtype=dtype).reshape(self.n_rows, self.n_cols, self.n_energy)
+            if band_map is None:
+                band_map = cube[:, :, self.band_start:self.band_end].sum(axis=2, dtype=np.float64).astype(np.float32)
+            if spectrum is None:
+                roi = cube[self.roi_row:self.roi_row + self.roi_height,
+                           self.roi_col:self.roi_col + self.roi_width]
+                spectrum = roi.sum(axis=(0, 1), dtype=np.float64).astype(np.float32)
+        return band_map, spectrum
+
+    @staticmethod
+    def _static_colorize(normalized: np.ndarray) -> np.ndarray:
+        """Python port of the frontend's colorize() ramp (blue -> green -> red)
+        so the fallback map reads in the exact palette the live overlay uses."""
+        x = np.clip(normalized, 0.0, 1.0)
+        red = np.clip(1.8 * x - 0.25, 0.0, 1.0)
+        green = np.sin(np.pi * x) ** 0.65
+        blue = np.clip(1.4 * (1.0 - x), 0.0, 1.0)
+        return np.stack([red, green, blue], axis=-1)
+
+    @staticmethod
+    def _static_bin(frame: np.ndarray, max_px: int) -> np.ndarray:
+        """Area-mean bin a 2D frame to ~max_px so sparse counts average
+        instead of aliasing away (stride sampling loses thin features)."""
+        step = max(1, int(max(frame.shape) // max_px))
+        if step == 1:
+            return frame
+        h = (frame.shape[0] // step) * step
+        w = (frame.shape[1] // step) * step
+        return frame[:h, :w].reshape(h // step, step, w // step, step).mean(axis=(1, 3))
+
+    def _static_png_b64(self, *, max_px: int = 360, dpi: int = 110) -> str | None:
+        """Base64 PNG mirroring the live widget's first paint, for the sibling
+        fallback output.
+
+        With ``save_state`` False the interactive state is not embedded, so a
+        reopened notebook (GitHub, nbviewer, cold Lab) would show nothing. The
+        render shows the two things the widget shows on mount: the HAADF base
+        image with the colorized band map blended on top at ``overlay_opacity``
+        (element label / band energies in the corner), and the ROI spectrum
+        with the active energy band shaded.
+        """
+        import base64
+        import io as _io
+        import matplotlib.pyplot as plt
+        if not self.base_image_bytes:
+            return None
+        base = np.frombuffer(self.base_image_bytes, dtype=np.float32).reshape(self.n_rows, self.n_cols)
+        band_map, spectrum = self._static_map_and_spectrum()
+        base = self._static_bin(base, max_px)
+        lo, hi = float(np.nanmin(base)), float(np.nanmax(base))
+        gray = np.clip((base - lo) / max(hi - lo, 1e-12), 0.0, 1.0)
+        composite = np.repeat(gray[:, :, None], 3, axis=2)
+        if band_map is not None:
+            band_map = self._static_bin(band_map, max_px)
+            map_lo, map_hi = np.nanpercentile(band_map, (self.map_vmin_pct, self.map_vmax_pct))
+            overlay = self._static_colorize((band_map - map_lo) / max(float(map_hi - map_lo), 1e-12))
+            alpha = float(self.overlay_opacity)
+            composite = (1.0 - alpha) * composite + alpha * overlay
+        axis = np.asarray(self.energy_keV, dtype=np.float32)
+        band_lo = float(axis[min(self.band_start, axis.size - 1)]) if axis.size else 0.0
+        band_hi = float(axis[min(max(self.band_end - 1, 0), axis.size - 1)]) if axis.size else 0.0
+        band_label = self.element_label or f"{band_lo:.2f}-{band_hi:.2f} keV"
+        fig, (map_ax, spec_ax) = plt.subplots(
+            1, 2, figsize=(7.2, 3.0), width_ratios=[1.0, 1.4])
+        map_ax.imshow(np.clip(composite, 0.0, 1.0))
+        map_ax.axis("off")
+        map_ax.text(0.02, 0.98, band_label, transform=map_ax.transAxes,
+                    fontsize=9, va="top", ha="left", color="white",
+                    bbox=dict(boxstyle="round", facecolor="black", alpha=0.6))
+        if spectrum is not None and axis.size == spectrum.size:
+            spec_ax.plot(axis, spectrum, color="#2f7fd0", linewidth=0.9)
+            spec_ax.axvspan(band_lo, band_hi, color="#e07020", alpha=0.25)
+            if self.log_spectrum:
+                spec_ax.set_yscale("log")
+            spec_ax.set_xlabel("Energy (keV)", fontsize=8)
+            spec_ax.set_ylabel("Counts", fontsize=8)
+            spec_ax.tick_params(labelsize=7)
+        else:
+            spec_ax.axis("off")
+        if self.title:
+            fig.suptitle(self.title, fontsize=10)
+        fig.tight_layout(pad=0.4)
+        buf = _io.BytesIO()
+        fig.savefig(buf, format="png", dpi=dpi, facecolor="white", bbox_inches="tight")
+        plt.close(fig)
+        return base64.b64encode(buf.getvalue()).decode("ascii")
+
+    # _repr_mimebundle_ / _ipython_display_ / static-fallback sibling plumbing
+    # comes from StaticFallbackMixin (utils/static_fallback.py); this class only
+    # supplies _static_png_b64 above.
+
     def state_dict(self) -> dict[str, Any]:
         return {
             "_widget": "ShowEDS",
@@ -2518,6 +2665,11 @@ class ShowEDS(anywidget.AnyWidget):
         export_path.parent.mkdir(parents=True, exist_ok=True)
         previous_export_light = export_widget._export_light
         export_widget._export_light = True
+        # HTML export must embed the full state: dependency_state hits the
+        # key=None get_state path, which trims the cube / stream index when
+        # _save_state is False and the exported page would render blank.
+        previous_save_state = export_widget._save_state
+        export_widget._save_state = True
         try:
             embed_minimal_html(
                 str(export_path),
@@ -2528,6 +2680,7 @@ class ShowEDS(anywidget.AnyWidget):
             )
         finally:
             export_widget._export_light = previous_export_light
+            export_widget._save_state = previous_save_state
         ensure_mobile_viewport(export_path)
         return export_path
 

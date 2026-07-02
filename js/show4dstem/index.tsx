@@ -29,6 +29,7 @@ import { LazyShow4DSTEM } from "../engine/lazy";
 import { drawScaleBarHiDPI, drawColorbar, roundToNiceValue } from "../figure";
 import { findDataRange, sliderRange, computeStats, computeHistogramFromBytes, percentileClip } from "../stats";
 import { downloadBlob, extractBytes, formatNumber, downloadDataView, preserveRestoredWidgetModelsOnSave } from "../format";
+import { useHideStaticFallback } from "../staticFallback";
 
 // Detector mask for the offline WebGPU virtual-image sum. Mirrors the Python
 // mask geometry exactly (show4dstem.py _create_*_mask): cx pairs with column,
@@ -2001,6 +2002,7 @@ function Show4DSTEM() {
 
   // Root element ref (theme-aware styling handled via CSS variables)
   const rootRef = React.useRef<HTMLDivElement>(null);
+  useHideStaticFallback(model, rootRef);
 
   // Zoom state
   const [dpZoom, setDpZoom] = React.useState(1);

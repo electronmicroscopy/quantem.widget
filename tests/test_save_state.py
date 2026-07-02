@@ -19,7 +19,7 @@ import pathlib
 import numpy as np
 import pytest
 
-from quantem.widget import Show2D, Show3D, Show4DSTEM
+from quantem.widget import Show2D, Show3D, Show4DSTEM, ShowEDS
 
 
 def _make(widget, *, save_state):
@@ -31,11 +31,14 @@ def _make(widget, *, save_state):
     if widget is Show3D:
         return Show3D(np.random.rand(4, 128, 128).astype("float32"),
                       save_state=save_state), "frame_bytes"
+    if widget is ShowEDS:
+        return ShowEDS(np.random.rand(16, 16, 32).astype("float32"),
+                       np.linspace(0.1, 10.0, 32), save_state=save_state), "cube_bytes"
     return Show4DSTEM(np.random.rand(8, 8, 16, 16).astype("float32"),
                       save_state=save_state), "virtual_image_bytes"
 
 
-WIDGETS = [Show2D, Show3D, Show4DSTEM]
+WIDGETS = [Show2D, Show3D, Show4DSTEM, ShowEDS]
 
 
 @pytest.mark.parametrize("widget", WIDGETS)
@@ -533,7 +536,7 @@ def test_show2d_display_defers_static_png_render(monkeypatch):
     assert len(displayed) == 2
     placeholder_data, placeholder_meta, display_id = displayed[1]
     assert display_id is True
-    assert "image/png" not in placeholder_data
+    assert "image/jpeg" not in placeholder_data
     assert "quantem-static-fallback" in placeholder_data["text/html"]
     assert placeholder_meta == {"quantem.widget": {"static_fallback": True}}
     # cell finishes -> post_execute hook fills the placeholder with the PNG
@@ -542,7 +545,7 @@ def test_show2d_display_defers_static_png_render(monkeypatch):
     assert png_calls, "deferred fill never rendered the PNG"
     assert "post_execute" not in hooks, "one-shot hook did not unregister"
     fill_data, fill_meta = updated[-1]
-    assert isinstance(fill_data["image/png"], bytes) and len(fill_data["image/png"]) > 1000
+    assert isinstance(fill_data["image/jpeg"], bytes) and len(fill_data["image/jpeg"]) > 1000
     assert "quantem-static-fallback" in fill_data["text/html"]
     assert fill_meta == {"quantem.widget": {"static_fallback": True}}
 
@@ -579,8 +582,8 @@ def test_show2d_sibling_static_output_via_nbconvert(tmp_path):
     widget_output, sibling = display_outputs
     assert "application/vnd.jupyter.widget-view+json" in widget_output.data
     # the placeholder must have been updated in place with the deferred render
-    assert "image/png" in sibling.data
-    assert len(sibling.data["image/png"]) > 1000
+    assert "image/jpeg" in sibling.data
+    assert len(sibling.data["image/jpeg"]) > 1000
     assert "quantem-static-fallback" in sibling.data.get("text/html", "")
     assert sibling.metadata.get("quantem.widget", {}).get("static_fallback") is True
     # metadata.widgets guard. nbclient reconstructs widget state by replaying
@@ -598,3 +601,92 @@ def test_show2d_sibling_static_output_via_nbconvert(tmp_path):
     buffer_bytes = sum(len(b["data"]) for b in anymodel.get("buffers", []))
     assert buffer_bytes < 20_000
     assert len(json.dumps(body)) < 20_000
+
+
+# ---------------------------------------------------------------------------
+# Static-fallback sibling contract, shared by all four widgets via
+# StaticFallbackMixin: display publishes the widget bundle plus an EMPTY
+# placeholder sibling; the deferred post_execute fill swaps in the PNG with
+# the quantem-static-fallback marker; and the full get_state snapshot never
+# carries the heavy buffers. A regression in any widget reopens BLACK in
+# JupyterLab (the ShowEDS bug this suite was extended for).
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("widget", WIDGETS)
+def test_sibling_static_fallback_contract(widget, monkeypatch):
+    import IPython
+
+    w, _ = _make(widget, save_state=False)
+    png_calls = []
+    # patch on the instance's real class: the public Show4DSTEM name is a
+    # backend dispatcher function, not the widget class itself
+    widget_cls = type(w)
+    original_png = widget_cls._static_png_b64
+    monkeypatch.setattr(widget_cls, "_static_png_b64",
+                        lambda self, **kw: (png_calls.append(1), original_png(self, **kw))[1])
+    displayed, updated, hooks = [], [], {}
+
+    class FakeHandle:
+        def update(self, data, raw=False, metadata=None):
+            updated.append((data, metadata))
+
+    class FakeEvents:
+        def register(self, name, fn):
+            hooks[name] = fn
+
+        def unregister(self, name, fn):
+            hooks.pop(name, None)
+
+    class ZMQInteractiveShell:  # name is what the kernel check looks at
+        events = FakeEvents()
+
+    shell = ZMQInteractiveShell()
+
+    def fake_display(data, raw=False, metadata=None, display_id=None, **kw):
+        displayed.append((data, metadata, display_id))
+        return FakeHandle() if display_id else None
+
+    monkeypatch.setattr(IPython, "get_ipython", lambda: shell)
+    monkeypatch.setattr("IPython.display.display", fake_display)
+
+    w._ipython_display_()
+    assert not png_calls, f"{widget.__name__}: PNG rendered synchronously at display time"
+    # widget bundle + empty placeholder sibling with the hide marker
+    assert len(displayed) == 2, f"{widget.__name__}: expected widget + placeholder sibling"
+    placeholder_data, placeholder_meta, display_id = displayed[1]
+    assert display_id is True
+    assert "image/jpeg" not in placeholder_data
+    assert "quantem-static-fallback" in placeholder_data["text/html"]
+    assert placeholder_meta == {"quantem.widget": {"static_fallback": True}}
+    # cell finishes -> post_execute hook fills the placeholder with the PNG
+    assert "post_execute" in hooks
+    hooks["post_execute"]()
+    assert png_calls, f"{widget.__name__}: deferred fill never rendered the PNG"
+    assert "post_execute" not in hooks, "one-shot hook did not unregister"
+    fill_data, fill_meta = updated[-1]
+    assert isinstance(fill_data["image/jpeg"], bytes) and len(fill_data["image/jpeg"]) > 1000
+    assert "quantem-static-fallback" in fill_data["text/html"]
+    assert fill_meta == {"quantem.widget": {"static_fallback": True}}
+    # the saved-notebook snapshot must stay free of the bulk buffers
+    full = w.get_state()
+    leaked = [k for k in w._UNSAVED_HEAVY_KEYS if k in full]
+    assert not leaked, f"{widget.__name__}: heavy keys {leaked} leaked into full get_state"
+
+
+@pytest.mark.parametrize("widget", WIDGETS)
+def test_sibling_not_emitted_with_save_state_true(widget, monkeypatch):
+    """save_state=True embeds full interactive state; no sibling placeholder."""
+    import IPython
+
+    w, _ = _make(widget, save_state=True)
+    displayed = []
+
+    class ZMQInteractiveShell:
+        events = None
+
+    monkeypatch.setattr(IPython, "get_ipython", lambda: ZMQInteractiveShell())
+    monkeypatch.setattr("IPython.display.display",
+                        lambda data, **kw: displayed.append(data))
+
+    w._ipython_display_()
+    assert len(displayed) == 1, f"{widget.__name__}: sibling emitted despite save_state=True"
