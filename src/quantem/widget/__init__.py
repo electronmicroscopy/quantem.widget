@@ -23,6 +23,12 @@ from quantem.widget.show4dstem import Show4DSTEM as _Show4DSTEMBase
 from quantem.widget.showdiffraction import ShowDiffraction
 from quantem.widget.survey import FolderSurvey, survey
 from quantem.widget.io import load, read_gif
+from quantem.widget.paths import first_existing
+from quantem.widget.backend import detect_backend, resolve_backend
+from quantem.widget.gpu import gpu_info
+from quantem.widget.detector import detect_bf_radius, dp_mean, virtual_image
+from quantem.widget.folder_picker import FolderPicker, pick_folder
+from quantem.widget.multidataset_mps import load_4dstem_macbook
 from quantem.widget.export import (
     HTML_EXPORT_TRAITS,
     SupportsFrontendHtmlExport,
