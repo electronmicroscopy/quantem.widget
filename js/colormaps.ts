@@ -2491,8 +2491,8 @@ fn reduce(@builtin(global_invocation_id) gid: vec3u, @builtin(local_invocation_i
     sMin[lid.x] = data[i];
     sMax[lid.x] = data[i];
   } else {
-    sMin[lid.x] = 3.4028235e+38;
-    sMax[lid.x] = -3.4028235e+38;
+    sMin[lid.x] = 1.0e38;
+    sMax[lid.x] = -1.0e38;
   }
   workgroupBarrier();
 
@@ -2627,8 +2627,8 @@ var<workgroup> sMax: array<f32, 256>;
 
 @compute @workgroup_size(256)
 fn reduce(@builtin(local_invocation_index) lid: u32) {
-  var lmin = 3.4028235e+38;
-  var lmax = -3.4028235e+38;
+  var lmin = 1.0e38;
+  var lmax = -1.0e38;
   let rw = params.region.z;
   let rh = params.region.w;
   let n = rw * rh;

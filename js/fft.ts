@@ -4,7 +4,7 @@
  * WebGPU FFT — shared 2D FFT with GPU acceleration and CPU fallback.
  * Handles non-power-of-2 dimensions via zero-padding.
  */
-import { getGPUDevice as engineGetGPUDevice, getGPUInfo as engineGetGPUInfo, onGPULost } from "./engine/device";
+import { getGPUDevice as engineGetGPUDevice, getGPUInfo as engineGetGPUInfo, isSoftwareGPUAdapter, onGPULost } from "./engine/device";
 
 // ============================================================================
 // CPU FFT fallback
@@ -442,6 +442,10 @@ export async function getWebGPUFFT(): Promise<WebGPUFFT | null> {
   if (gpuFFT) return gpuFFT;
   const device = await getGPUDevice();
   if (!device) { console.warn('WebGPU not supported, falling back to CPU FFT'); return null; }
+  if (isSoftwareGPUAdapter()) {
+    console.warn(`WebGPU FFT disabled for software adapter (${engineGetGPUInfo()}); using CPU Worker fallback`);
+    return null;
+  }
   try {
     gpuFFT = new WebGPUFFT(device);
     await gpuFFT.init();

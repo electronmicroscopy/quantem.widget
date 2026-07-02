@@ -715,6 +715,10 @@ function Show2D() {
   const [width] = useModelState<number>("width");
   const [height] = useModelState<number>("height");
   const [frameBytes] = useModelState<DataView>("frame_bytes");
+  // Per-panel RGB flags: RGB panels carry display-ready (H, W, 3) float pixels
+  // that bypass the colormap LUT + contrast pipeline and paint directly.
+  const [isRgbFlags] = useModelState<boolean[]>("is_rgb");
+  const isRgbPanel = React.useCallback((i: number) => !!(isRgbFlags && isRgbFlags[i]), [isRgbFlags]);
   const [labels] = useModelState<string[]>("labels");
   const [starred, setStarred] = useModelState<number[]>("starred");
   const [hiddenPanels, setHiddenPanels] = useModelState<number[]>("hidden_panels");
@@ -1093,7 +1097,7 @@ function Show2D() {
   const [fftProgress, setFftProgress] = React.useState("");
 
   // Cursor readout state
-  const [cursorInfo, setCursorInfo] = React.useState<{ idx: number; row: number; col: number; value: number } | null>(null);
+  const [cursorInfo, setCursorInfo] = React.useState<{ idx: number; row: number; col: number; value: number; rgb?: [number, number, number] | null } | null>(null);
 
   // Colorbar state (single image mode only)
   const [showColorbar, setShowColorbar] = React.useState(false);
@@ -1189,6 +1193,10 @@ function Show2D() {
   const gpuFFTRef = React.useRef<WebGPUFFT | null>(null);
   const gpuReadyRef = React.useRef(false);
   const rawDataRef = React.useRef<Float32Array[] | null>(null);
+  // Interleaved (r, g, b) floats for RGB panels; null for grayscale panels.
+  // rawDataRef holds the Rec. 709 luminance of RGB panels so every grayscale
+  // consumer (FFT, histogram, profile, diff, stats) works unchanged.
+  const rgbDataRef = React.useRef<(Float32Array | null)[]>([]);
   const diffCanvasRefs = React.useRef<(HTMLCanvasElement | null)[]>([]);
   const diffFftCanvasRef = React.useRef<HTMLCanvasElement | null>(null);
   const diffFftMagRef = React.useRef<Float32Array | null>(null);
@@ -1264,7 +1272,9 @@ function Show2D() {
 
   // Layout calculations
   const showDiffPanel = diffMode && nImages >= 2;
-  const diffPanelCount = showDiffPanel ? Math.max(0, nImages - 1) : 0;
+  // RGB panels never get a diff panel (see diffOtherIndices below).
+  const rgbPanelCount = isRgbFlags ? isRgbFlags.filter(Boolean).length : 0;
+  const diffPanelCount = showDiffPanel ? Math.max(0, nImages - 1 - rgbPanelCount) : 0;
   const totalPanelCount = Math.max(1, nImages || 1);
   const hiddenPanelSet = React.useMemo(() => {
     const out = new Set<number>();
@@ -1309,8 +1319,10 @@ function Show2D() {
   const clampedNcols = Math.max(1, Math.min(ncols || 1, visibleImageCount));
   const effectiveNcols = clampedNcols + diffPanelCount;
   const diffOtherIndices = React.useMemo(
-    () => Array.from({ length: nImages }, (_, i) => i).filter(i => i !== diffReference),
-    [nImages, diffReference]
+    // RGB panels (e.g. the overlay sugar panel) are excluded: a signed diff
+    // against a display-ready color composite is meaningless.
+    () => Array.from({ length: nImages }, (_, i) => i).filter(i => i !== diffReference && !(isRgbFlags && isRgbFlags[i])),
+    [nImages, diffReference, isRgbFlags]
   );
   const displayScale = canvasSize / Math.max(width, height);
   const canvasW = Math.round(width * displayScale);
@@ -1406,6 +1418,18 @@ function Show2D() {
     resetZoomStateRef.current = initialZoomState;
   }, [zoomRowTrait, zoomColTrait, canvasW, canvasH, width, height, initialZoomState]);
   const floatsPerImage = width * height;
+  // Per-panel float offsets into frame_bytes: grayscale panels are W*H floats,
+  // RGB panels are 3*W*H interleaved floats. Last entry = total float count.
+  const panelFloatOffsets = React.useMemo(() => {
+    const offsets: number[] = [];
+    let acc = 0;
+    for (let i = 0; i < nImages; i++) {
+      offsets.push(acc);
+      acc += (isRgbFlags && isRgbFlags[i] ? 3 : 1) * width * height;
+    }
+    offsets.push(acc);
+    return offsets;
+  }, [nImages, width, height, isRgbFlags]);
   const galleryGridWidth = galleryGridMaxWidth;
   const profileCanvasWidth = galleryGridWidth;
 
@@ -1430,7 +1454,7 @@ function Show2D() {
   const [offlineMaxs] = useModelState<number[]>("_offline_maxs");
   const decodedFramesRef = React.useRef<Float32Array | null>(null);
   const allFloats = React.useMemo(() => {
-    const expectedLength = nImages * width * height;
+    const expectedLength = panelFloatOffsets[panelFloatOffsets.length - 1];
     if (!frameBytes || frameBytes.byteLength === 0) {
       const cached = decodedFramesRef.current;
       return cached !== null && cached.length === expectedLength ? cached : new Float32Array(expectedLength);
@@ -1458,7 +1482,7 @@ function Show2D() {
     }
     decodedFramesRef.current = decoded;
     return decoded;
-  }, [frameBytes, offline, offlineMin, offlineMax, offlineMins, offlineMaxs, nImages, width, height]);
+  }, [frameBytes, offline, offlineMin, offlineMax, offlineMins, offlineMaxs, nImages, width, height, panelFloatOffsets]);
 
   const [dataVersion, setDataVersion] = React.useState(0);
   const [gpuCmapVersion, setGpuCmapVersion] = React.useState(0);
@@ -1669,12 +1693,27 @@ function Show2D() {
   React.useEffect(() => {
     if (!allFloats || allFloats.length === 0) return;
     const dataArrays: Float32Array[] = [];
+    const rgbArrays: (Float32Array | null)[] = [];
+    const perImage = width * height;
     for (let i = 0; i < nImages; i++) {
-      const start = i * floatsPerImage;
-      const imageData = allFloats.subarray(start, start + floatsPerImage);
-      dataArrays.push(new Float32Array(imageData));
+      const start = panelFloatOffsets[i];
+      if (isRgbFlags && isRgbFlags[i]) {
+        // RGB panel: keep the interleaved color pixels for direct painting and
+        // reduce to luminance so the grayscale analysis paths stay valid.
+        const rgb = new Float32Array(allFloats.subarray(start, start + 3 * perImage));
+        rgbArrays.push(rgb);
+        const luminance = new Float32Array(perImage);
+        for (let k = 0; k < perImage; k++) {
+          luminance[k] = 0.2126 * rgb[3 * k] + 0.7152 * rgb[3 * k + 1] + 0.0722 * rgb[3 * k + 2];
+        }
+        dataArrays.push(luminance);
+      } else {
+        rgbArrays.push(null);
+        dataArrays.push(new Float32Array(allFloats.subarray(start, start + perImage)));
+      }
     }
     rawDataRef.current = dataArrays;
+    rgbDataRef.current = rgbArrays;
     // Upload to GPU colormap engine if available (ref check, no state trigger)
     const engine = gpuCmapRef.current;
     if (engine && gpuCmapReadyRef.current) {
@@ -1683,7 +1722,7 @@ function Show2D() {
       setGpuCmapVersion(v => v + 1);
     }
     setDataVersion(v => v + 1);
-  }, [allFloats, nImages, floatsPerImage]);
+  }, [allFloats, nImages, width, height, panelFloatOffsets, isRgbFlags]);
 
   // Initialize reusable offscreen canvases (one per image, resized when dimensions change)
   React.useEffect(() => {
@@ -1970,6 +2009,28 @@ function Show2D() {
 
     const lut = COLORMAPS[cmap] || COLORMAPS.inferno;
 
+    // RGB panels bypass the LUT + contrast pipeline entirely: paint their
+    // display-ready (r, g, b) floats straight into the offscreen once per data
+    // change. The colormap loops below skip these panels so cmap/contrast/log
+    // changes never overwrite the color pixels.
+    if (isRgbFlags && isRgbFlags.some(Boolean)) {
+      for (let i = 0; i < nImages; i++) {
+        if (!isRgbFlags[i]) continue;
+        const rgb = rgbDataRef.current[i];
+        const offscreen = mainOffscreensRef.current[i];
+        const imgData = mainImgDatasRef.current[i];
+        if (!rgb || !offscreen || !imgData) continue;
+        const px = imgData.data;
+        for (let k = 0, n = width * height; k < n; k++) {
+          px[4 * k] = Math.max(0, Math.min(255, Math.round(rgb[3 * k] * 255)));
+          px[4 * k + 1] = Math.max(0, Math.min(255, Math.round(rgb[3 * k + 1] * 255)));
+          px[4 * k + 2] = Math.max(0, Math.min(255, Math.round(rgb[3 * k + 2] * 255)));
+          px[4 * k + 3] = 255;
+        }
+        offscreen.getContext("2d")?.putImageData(imgData, 0, 0);
+      }
+    }
+
     // Compute per-image vmin/vmax from CACHED data ranges (no findDataRange per tick).
     // dataRangesRef is precomputed when data or logScale changes.
     const cachedRanges = dataRangesRef.current;
@@ -1998,16 +2059,22 @@ function Show2D() {
       }
     }
     const linkedSharedContrast = linkedContrast && isGallery && !hasAbsoluteRange && !hasPerImageRanges.some(Boolean);
-    const sharedBaseRange = linkedSharedContrast ? mergeDataRanges(baseRanges) : null;
+    // Linked contrast merges GRAYSCALE panels only: an RGB overlay's [0, 1]
+    // luminance range must never drag a counts-scaled panel's shared window.
+    const grayOnly = <T,>(items: T[]): T[] => {
+      const filtered = items.filter((_, i) => !(isRgbFlags && isRgbFlags[i]));
+      return filtered.length > 0 ? filtered : items;
+    };
+    const sharedBaseRange = linkedSharedContrast ? mergeDataRanges(grayOnly(baseRanges)) : null;
     let sharedAutoRange: { vmin: number; vmax: number } | null = null;
     if (linkedSharedContrast && autoContrast) {
       const cachedAutoRanges = autoContrastCacheRef.current.slice(0, nImages);
       if (cachedAutoRanges.length === nImages && cachedAutoRanges.every(r => r && Number.isFinite(r.vmin) && Number.isFinite(r.vmax) && r.vmax > r.vmin)) {
-        const merged = mergeDataRanges(cachedAutoRanges.map(r => ({ min: r.vmin, max: r.vmax })));
+        const merged = mergeDataRanges(grayOnly(cachedAutoRanges.map(r => ({ min: r.vmin, max: r.vmax }))));
         sharedAutoRange = { vmin: merged.min, vmax: merged.max };
       } else {
         const autoRanges = rawDataRef.current.slice(0, nImages).map(raw => computeAutoRange(raw, logScale));
-        const merged = mergeDataRanges(autoRanges.map(r => ({ min: r.vmin, max: r.vmax })));
+        const merged = mergeDataRanges(grayOnly(autoRanges.map(r => ({ min: r.vmin, max: r.vmax }))));
         sharedAutoRange = { vmin: merged.min, vmax: merged.max };
       }
     }
@@ -2064,6 +2131,7 @@ function Show2D() {
       const capturedRanges = ranges.slice();
       const capturedLogScale = logScale;
       const capturedNImages = nImages;
+      const capturedIsRgb = isRgbFlags ? isRgbFlags.slice() : [];
       requestAnimationFrame(async () => {
         const indices = Array.from({ length: capturedNImages }, (_, i) => i);
 
@@ -2075,6 +2143,7 @@ function Show2D() {
         const bitmaps = await engine!.renderSlotsToImageBitmapAsync(indices, capturedRanges, capturedLogScale);
         if (bitmaps && bitmaps.length > 0 && bitmaps[0]) {
           for (let i = 0; i < bitmaps.length; i++) {
+            if (capturedIsRgb[i]) continue; // RGB offscreen already holds true color pixels
             const offscreen = mainOffscreensRef.current[i];
             if (!offscreen || !bitmaps[i]) continue;
             const ctx = offscreen.getContext("2d");
@@ -2085,11 +2154,13 @@ function Show2D() {
         }
 
         // Fallback: renderSlots (mapAsync + copy to ImageData)
-        const offscreens = indices.map(i => mainOffscreensRef.current[i] || null);
-        const imgDatas = indices.map(i => mainImgDatasRef.current[i] || null);
+        // RGB panels get null targets so the engine cannot overwrite them.
+        const offscreens = indices.map(i => capturedIsRgb[i] ? null : (mainOffscreensRef.current[i] || null));
+        const imgDatas = indices.map(i => capturedIsRgb[i] ? null : (mainImgDatasRef.current[i] || null));
         const rendered = await engine!.renderSlots(indices, capturedRanges, offscreens, imgDatas, capturedLogScale);
         if (rendered === 0) {
           for (let i = 0; i < capturedNImages; i++) {
+            if (capturedIsRgb[i]) continue;
             const offscreen = mainOffscreensRef.current[i];
             const imgData = mainImgDatasRef.current[i];
             if (!offscreen || !imgData) continue;
@@ -2105,6 +2176,7 @@ function Show2D() {
       // CPU fallback: initial render or no WebGPU
       // CPU must do log transform itself (GPU shader would handle it)
       for (let i = 0; i < nImages; i++) {
+        if (isRgbFlags && isRgbFlags[i]) continue; // painted directly above
         const offscreen = mainOffscreensRef.current[i];
         const imgData = mainImgDatasRef.current[i];
         if (!offscreen || !imgData) continue;
@@ -2115,7 +2187,7 @@ function Show2D() {
       }
       setOffscreenVersion(v => v + 1);
     }
-  }, [dataVersion, gpuCmapVersion, autoContrastVersion, nImages, width, height, cmap, logScale, autoContrast, linkedContrast, linkedContrastState, contrastStates, traitVmin, traitVmax, traitVmins, traitVmaxs, diffMode]);
+  }, [dataVersion, gpuCmapVersion, autoContrastVersion, nImages, width, height, cmap, logScale, autoContrast, linkedContrast, linkedContrastState, contrastStates, traitVmin, traitVmax, traitVmins, traitVmaxs, diffMode, isRgbFlags]);
 
   // -------------------------------------------------------------------------
   // Draw effect: zoom/pan changes — cheap, just drawImage from cached offscreens
@@ -4003,7 +4075,15 @@ function Show2D() {
       const imgY = Math.floor(imageCanvasY / displayScale);
       if (imgX >= 0 && imgX < width && imgY >= 0 && imgY < height) {
         const rawData = rawDataRef.current[idx];
-        if (rawData) setCursorInfo({ idx, row: imgY, col: imgX, value: rawData[imgY * width + imgX] });
+        if (rawData) {
+          // RGB panels read out the (r, g, b) triplet instead of a scalar.
+          const rgbData = isRgbPanel(idx) ? rgbDataRef.current[idx] : null;
+          const rgbOffset = (imgY * width + imgX) * 3;
+          setCursorInfo({
+            idx, row: imgY, col: imgX, value: rawData[imgY * width + imgX],
+            rgb: rgbData ? [rgbData[rgbOffset], rgbData[rgbOffset + 1], rgbData[rgbOffset + 2]] : null,
+          });
+        }
         if (showLens && !isGallery) setLensPos({ row: imgY, col: imgX });
       } else {
         setCursorInfo(null);
@@ -4691,8 +4771,15 @@ function Show2D() {
                         pointerEvents: "auto",
                         transform: "translateY(0)",
                       },
+                      "&:hover .show2d-panel-star-button, &:focus-within .show2d-panel-star-button": {
+                        opacity: 1,
+                        pointerEvents: "auto",
+                        transform: "translateY(0)",
+                      },
                       "@media (hover: none), (pointer: coarse)": {
                         "& .show2d-panel-hide-button": { display: "none" },
+                        // no hover on touch: keep the star reachable at all times
+                        "& .show2d-panel-star-button": { opacity: 1, pointerEvents: "auto", transform: "translateY(0)" },
                       },
                     }}
                     onMouseDown={(e) => handleMouseDown(e, i)}
@@ -4717,9 +4804,10 @@ function Show2D() {
                       style={responsiveOverlayStyle}
                     />
                     {cursorInfo && cursorInfo.idx === i && (
-                      <Box sx={{ position: "absolute", bottom: 6, right: 6, bgcolor: "rgba(0,0,0,0.72)", px: 0.75, py: 0.35, borderRadius: 1, pointerEvents: "none", textAlign: "right", zIndex: 2 }}>
-                        <Typography sx={{ fontSize: 12, fontWeight: 600, fontFamily: "monospace", color: "#fff", whiteSpace: "nowrap", lineHeight: 1.25 }}>
-                          ({cursorInfo.row}, {cursorInfo.col}){pixelSizeForPanel(i) > 0 ? ` = (${(cursorInfo.row * pixelSizeForPanel(i)).toFixed(1)}, ${(cursorInfo.col * pixelSizeForPanel(i)).toFixed(1)} ${pixelUnit})` : ""} {formatNumber(cursorInfo.value)}
+                      /* Show4DSTEM readout spec; top-right, dropped 25px below the star button row */
+                      <Box sx={{ position: "absolute", top: 28, right: 3, bgcolor: "rgba(0,0,0,0.35)", px: 0.5, py: 0.15, pointerEvents: "none", minWidth: 100, textAlign: "right", zIndex: 2 }}>
+                        <Typography sx={{ fontSize: 9, fontFamily: "monospace", color: "rgba(255,255,255,0.7)", whiteSpace: "nowrap", lineHeight: 1.2 }}>
+                          ({cursorInfo.row}, {cursorInfo.col}){pixelSizeForPanel(i) > 0 ? ` = (${(cursorInfo.row * pixelSizeForPanel(i)).toFixed(1)}, ${(cursorInfo.col * pixelSizeForPanel(i)).toFixed(1)} ${pixelUnit})` : ""} {cursorInfo.rgb ? `(${cursorInfo.rgb[0].toFixed(2)}, ${cursorInfo.rgb[1].toFixed(2)}, ${cursorInfo.rgb[2].toFixed(2)})` : formatNumber(cursorInfo.value)}
                         </Typography>
                       </Box>
                     )}
@@ -4750,6 +4838,7 @@ function Show2D() {
                       </Box>
                     )}
                     <IconButton
+                      className="show2d-panel-star-button"
                       size="small"
                       onPointerDown={(event) => event.stopPropagation()}
                       onMouseDown={(event) => event.stopPropagation()}
@@ -4775,7 +4864,11 @@ function Show2D() {
                         textAlign: "center",
                         color: starred?.[i] ? "#ffc107" : "rgba(255,255,255,0.58)",
                         textShadow: "0 0 3px rgba(0,0,0,0.8)",
-                        pointerEvents: "auto",
+                        // hidden until the panel is hovered; starred panels stay visible
+                        opacity: starred?.[i] ? 1 : 0,
+                        pointerEvents: starred?.[i] ? "auto" : "none",
+                        transform: starred?.[i] ? "translateY(0)" : "translateY(-3px)",
+                        transition: "opacity 120ms ease, transform 120ms ease, background-color 120ms ease, color 120ms ease",
                         userSelect: "none",
                         zIndex: 3,
                         "&:hover, &:focus-visible": {
@@ -4974,9 +5067,10 @@ function Show2D() {
                 style={responsiveOverlayStyle}
               />
               {cursorInfo && (
-                <Box sx={{ position: "absolute", top: 6, right: 6, bgcolor: "rgba(0,0,0,0.72)", px: 0.75, py: 0.35, borderRadius: 1, pointerEvents: "none", minWidth: 100, textAlign: "right" }}>
-                  <Typography sx={{ fontSize: 12, fontWeight: 600, fontFamily: "monospace", color: "#fff", whiteSpace: "nowrap", lineHeight: 1.25 }}>
-                    ({cursorInfo.row}, {cursorInfo.col}){pixelSize > 0 ? ` = (${(cursorInfo.row * calibratedFactor).toFixed(1)}, ${(cursorInfo.col * calibratedFactor).toFixed(1)} ${calibratedUnit})` : ""} {formatNumber(cursorInfo.value)}
+                /* Show4DSTEM readout spec verbatim (single-image mode has no star button) */
+                <Box sx={{ position: "absolute", top: 3, right: 3, bgcolor: "rgba(0,0,0,0.35)", px: 0.5, py: 0.15, pointerEvents: "none", minWidth: 100, textAlign: "right" }}>
+                  <Typography sx={{ fontSize: 9, fontFamily: "monospace", color: "rgba(255,255,255,0.7)", whiteSpace: "nowrap", lineHeight: 1.2 }}>
+                    ({cursorInfo.row}, {cursorInfo.col}){pixelSize > 0 ? ` = (${(cursorInfo.row * calibratedFactor).toFixed(1)}, ${(cursorInfo.col * calibratedFactor).toFixed(1)} ${calibratedUnit})` : ""} {cursorInfo.rgb ? `(${cursorInfo.rgb[0].toFixed(2)}, ${cursorInfo.rgb[1].toFixed(2)}, ${cursorInfo.rgb[2].toFixed(2)})` : formatNumber(cursorInfo.value)}
                   </Typography>
                 </Box>
               )}
@@ -5095,13 +5189,17 @@ function Show2D() {
                           const histData = raw && logScale ? applyLogScale(raw) : raw;
                           const histRange = histData ? findDataRange(histData) : (dataRangesRef.current[i] || imageDataRange);
                           return (
-                            <Histogram key={i} data={histData} vminPct={cs.vminPct} vmaxPct={cs.vmaxPct}
-                              onRangeChange={(min, max) => { if (autoContrast) setAutoContrast(false); setContrastState(i, { vminPct: min, vmaxPct: max }); }}
-                              onRangePreview={(min, max) => { if (autoContrast) setAutoContrast(false); setContrastState(i, { vminPct: min, vmaxPct: max }, false); }}
-                              onRangeCommit={(min, max) => { if (autoContrast) setAutoContrast(false); setContrastState(i, { vminPct: min, vmaxPct: max }, true); }}
-                              width={110} height={58} theme={themeInfo.theme === "dark" ? "dark" : "light"}
-                              dataMin={histRange?.min ?? imageDataRange.min}
-                              dataMax={histRange?.max ?? imageDataRange.max} />
+                            /* RGB panels bypass the contrast pipeline: grey out their histogram */
+                            <Box key={i} sx={isRgbPanel(i) ? { opacity: 0.35, pointerEvents: "none" } : undefined}
+                              title={isRgbPanel(i) ? "RGB panel: contrast controls do not apply" : undefined}>
+                              <Histogram data={histData} vminPct={cs.vminPct} vmaxPct={cs.vmaxPct}
+                                onRangeChange={(min, max) => { if (autoContrast) setAutoContrast(false); setContrastState(i, { vminPct: min, vmaxPct: max }); }}
+                                onRangePreview={(min, max) => { if (autoContrast) setAutoContrast(false); setContrastState(i, { vminPct: min, vmaxPct: max }, false); }}
+                                onRangeCommit={(min, max) => { if (autoContrast) setAutoContrast(false); setContrastState(i, { vminPct: min, vmaxPct: max }, true); }}
+                                width={110} height={58} theme={themeInfo.theme === "dark" ? "dark" : "light"}
+                                dataMin={histRange?.min ?? imageDataRange.min}
+                                dataMax={histRange?.max ?? imageDataRange.max} />
+                            </Box>
                           );
                         })}
                       </Box>
