@@ -34,6 +34,7 @@ import VisibilityOffIcon from "@mui/icons-material/VisibilityOff";
 import { useTheme } from "../theme";
 import { drawScaleBarHiDPI, drawFFTScaleBarHiDPI, drawColorbar, roundToNiceValue, unitSymbol, formatScaleLabel } from "../figure";
 import { downloadBlob, extractBytes, extractFloat32, formatNumber, preserveRestoredWidgetModelsOnSave } from "../format";
+import { useHideStaticFallback } from "../staticFallback";
 import { findDataRange, applyLogScale, applyLogScaleInPlace, percentileClip, sliderRange, computeStats, computeHistogramFromBytes } from "../stats";
 // ============================================================================
 // Style tokens (inlined - matches Show2D/Show4DSTEM single-file convention)
@@ -1489,6 +1490,7 @@ function Show3D() {
 
   // Canvas refs
   const rootRef = React.useRef<HTMLDivElement>(null);
+  useHideStaticFallback(model, rootRef);
   const canvasRef = React.useRef<HTMLCanvasElement>(null);
   const gpuCanvasRef = React.useRef<HTMLCanvasElement>(null);
   const gpuCanvasCtxRef = React.useRef<GPUCanvasContext | null>(null);

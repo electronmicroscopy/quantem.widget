@@ -45,6 +45,7 @@ from quantem.widget.utils.state_io import (
     save_state_file,
     unwrap_state_payload,
 )
+from quantem.widget.utils.static_fallback import StaticFallbackMixin
 
 try:
     import torch
@@ -349,7 +350,7 @@ class _Show3DFrameHTTPServer(http.server.ThreadingHTTPServer):
     daemon_threads = True
 
 
-class Show3D(anywidget.AnyWidget):
+class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
     """
     Interactive 3D stack viewer for sequential 2D images.
 
@@ -4268,22 +4269,9 @@ class Show3D(anywidget.AnyWidget):
         plt.close(fig)
         return base64.b64encode(buf.getvalue()).decode("ascii")
 
-    def _repr_mimebundle_(self, **kwargs):
-        """Display bundle: interactive widget live, static PNG for cold reopen.
-
-        When ``save_state`` is False we add an ``image/png`` fallback to the
-        widget-view bundle. Live Jupyter renders the interactive widget (richest
-        mime); a kernel-less reopen falls back to the PNG. When ``save_state`` is
-        True the full state is embedded, so no static fallback is needed.
-        """
-        bundle = super()._repr_mimebundle_(**kwargs)
-        if getattr(self, "_save_state", False) or bundle is None:
-            return bundle
-        png = self._static_png_b64()
-        if png:
-            data = bundle[0] if isinstance(bundle, tuple) else bundle
-            data["image/png"] = png
-        return bundle
+    # _repr_mimebundle_ / _ipython_display_ / static-fallback sibling plumbing
+    # comes from StaticFallbackMixin (utils/static_fallback.py); this class only
+    # supplies _static_png_b64 above.
 
     def _get_color_range(self, frame: np.ndarray) -> tuple[float, float]:
         """Get vmin/vmax based on current settings."""

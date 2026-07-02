@@ -35,6 +35,7 @@ from quantem.widget.utils.state_io import (
     save_state_file,
     unwrap_state_payload,
 )
+from quantem.widget.utils.static_fallback import StaticFallbackMixin
 
 from quantem.core.config import validate_device
 
@@ -59,7 +60,7 @@ DEFAULT_BF_RATIO = 0.125  # BF disk radius as fraction of detector size (1/8)
 MIN_LOG_VALUE = 1e-10  # Minimum value for log scale to avoid log(0)
 DEFAULT_VI_ROI_RATIO = 0.15  # Default VI ROI size as fraction of scan dimension
 
-class Show4DSTEM(anywidget.AnyWidget):
+class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
     """
     Fast interactive 4D-STEM viewer with advanced features.
 
@@ -1396,22 +1397,9 @@ class Show4DSTEM(anywidget.AnyWidget):
         plt.close(fig)
         return base64.b64encode(buf.getvalue()).decode("ascii")
 
-    def _repr_mimebundle_(self, **kwargs):
-        """Display bundle: interactive widget live, static PNG for cold reopen.
-
-        When ``save_state`` is False we add an ``image/png`` fallback to the
-        widget-view bundle. Live Jupyter renders the interactive widget (richest
-        mime); a kernel-less reopen falls back to the PNG. When ``save_state`` is
-        True the full state is embedded, so no static fallback is needed.
-        """
-        bundle = super()._repr_mimebundle_(**kwargs)
-        if getattr(self, "_save_state", False) or bundle is None:
-            return bundle
-        png = self._static_png_b64()
-        if png:
-            data = bundle[0] if isinstance(bundle, tuple) else bundle
-            data["image/png"] = png
-        return bundle
+    # _repr_mimebundle_ / _ipython_display_ / static-fallback sibling plumbing
+    # comes from StaticFallbackMixin (utils/static_fallback.py); this class only
+    # supplies _static_png_b64 above.
 
     def state_dict(self):
         return {

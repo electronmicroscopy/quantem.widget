@@ -11,6 +11,7 @@ import Switch from "@mui/material/Switch";
 import Typography from "@mui/material/Typography";
 import { drawScaleBarHiDPI } from "../figure";
 import { downloadBlob, extractBytes, extractFloat32, formatNumber, markWidgetNotebookDirty, preserveRestoredWidgetModelsOnSave } from "../format";
+import { useHideStaticFallback } from "../staticFallback";
 import { computeHistogramFromBytes, percentileClip, sliderRange } from "../stats";
 import { useTheme } from "../theme";
 
@@ -1493,6 +1494,8 @@ async function readBuffer(device: GPUDevice, source: GPUBuffer, byteLength: numb
 function ShowEDS() {
   const model = useModel();
   React.useEffect(() => preserveRestoredWidgetModelsOnSave(model), [model]);
+  const staticFallbackRootRef = React.useRef<HTMLDivElement | null>(null);
+  useHideStaticFallback(model, staticFallbackRootRef);
 
   const [offlineForTheme] = useModelState<boolean>("_export_light");
   const { themeInfo, colors: tc } = useTheme(offlineForTheme);
@@ -3339,7 +3342,7 @@ function ShowEDS() {
   };
 
   return (
-    <Box sx={{ p: 2, fontFamily: UI_FONT, bgcolor: themeColors.bg, color: themeColors.text, overflowX: "auto" }}>
+    <Box ref={staticFallbackRootRef} sx={{ p: 2, fontFamily: UI_FONT, bgcolor: themeColors.bg, color: themeColors.text, overflowX: "auto" }}>
       <Stack spacing={1.2}>
         <Stack direction="row" spacing={1} alignItems="center" sx={{ width: specW + size + 16 }}>
           <Stack direction="row" spacing={1} alignItems="center" sx={{ flex: 1, minWidth: 0 }}>
