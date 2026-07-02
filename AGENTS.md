@@ -66,6 +66,14 @@ For ShowEDS real-data work, keep band, ROI, zoom, contrast, and smooth/auto
 display interactions at real-time speed. Treat loss of 30 FPS interaction as a
 bug unless the limitation is explicitly documented and accepted.
 
+## Widget UI Consistency
+
+For in-widget toolbar dropdowns, use the shared MUI `Select`/`MenuItem` pattern
+with the widget's `themedSelect` and `themedMenuProps` styling. Do not add
+native HTML `<select>` controls to widget toolbars. Match the Show4DSTEM and
+Show3D menu behavior so dropdown size, theme, z-order, and keyboard behavior
+stay consistent across viewers.
+
 ## Repository Hygiene
 
 Keep public documentation in durable paths such as `README.md`,

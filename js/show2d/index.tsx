@@ -612,6 +612,50 @@ function Show2D() {
   const model = useModel();
   React.useEffect(() => preserveRestoredWidgetModelsOnSave(model), [model]);
 
+  // Hide the static-PNG sibling output while the live widget is mounted.
+  // Python's _ipython_display_ publishes a fallback <img> as a SEPARATE
+  // display_data output because JupyterLab never falls back to an in-bundle
+  // image/png when the widget renderer claims the output ("model not found"
+  // on cold reopen). Live, both would show; the img carries this widget's
+  // model id, so hide exactly ours. On a cold reopen this code never runs
+  // (no kernel, no widget mount) and the fallback stays visible.
+  const staticFallbackRootRef = React.useRef<HTMLDivElement | null>(null);
+  React.useEffect(() => {
+    if (typeof document === "undefined") return;
+    // model_id can be undefined on some anywidget versions, so the primary
+    // scope is STRUCTURAL: any fallback img inside this widget's own cell
+    // belongs to this cell's display and must be hidden while live. The id
+    // match is only the fallback when the root ref hasn't attached yet.
+    const modelId = (model as { model_id?: string } | undefined)?.model_id;
+    let cancelled = false;
+    const hideFallback = () => {
+      if (cancelled) return;
+      const cell = staticFallbackRootRef.current?.closest(".jp-Cell") ?? null;
+      const scope: ParentNode = cell ?? document;
+      scope.querySelectorAll("img.quantem-static-fallback").forEach((img) => {
+        if (!cell) {
+          const imgId = img.getAttribute("data-quantem-model-id");
+          if (!modelId || imgId !== modelId) return;
+        }
+        const output = img.closest(".jp-OutputArea-child") ?? img;
+        (output as HTMLElement).style.display = "none";
+      });
+    };
+    hideFallback();
+    // The sibling output is filled DEFERRED (post_execute update_display_data)
+    // and Lab may recreate its DOM node on the update, so fixed-delay retries
+    // can miss it and the PNG would show under the live widget. Observe the
+    // document for the widget's lifetime and hide the marker whenever it
+    // (re)appears; disconnected on unmount, so a cold reopen (no widget JS)
+    // still shows the fallback.
+    const observer = new MutationObserver(hideFallback);
+    observer.observe(document.body, { childList: true, subtree: true });
+    return () => {
+      cancelled = true;
+      observer.disconnect();
+    };
+  }, [model]);
+
   // Theme (offline HTML exports force a light/white background)
   const [offlineForTheme] = useModelState<boolean>("_export_light");
   const { themeInfo, colors: tc } = useTheme(offlineForTheme);
@@ -632,6 +676,10 @@ function Show2D() {
   const themedMenuProps = {
     ...upwardMenuProps,
     PaperProps: { sx: { bgcolor: themeColors.controlBg, color: themeColors.text, border: `1px solid ${themeColors.border}` } },
+  };
+  const themedTopMenuProps = {
+    PaperProps: themedMenuProps.PaperProps,
+    sx: { zIndex: 9999 },
   };
 
   // Model state
@@ -1328,7 +1376,14 @@ function Show2D() {
   const [offlineMax] = useModelState<number>("_offline_max");
   const [offlineMins] = useModelState<number[]>("_offline_mins");
   const [offlineMaxs] = useModelState<number[]>("_offline_maxs");
+  const decodedFramesRef = React.useRef<Float32Array | null>(null);
   const allFloats = React.useMemo(() => {
+    const expectedLength = nImages * width * height;
+    if (!frameBytes || frameBytes.byteLength === 0) {
+      const cached = decodedFramesRef.current;
+      return cached !== null && cached.length === expectedLength ? cached : new Float32Array(expectedLength);
+    }
+    let decoded: Float32Array;
     if (offline && frameBytes && frameBytes.byteLength > 0) {
       // Offline mode: bytes are uint8-quantized PER IMAGE. Dequantize each panel
       // with its own (lo, hi) so a gallery of differently-scaled panels stays
@@ -1345,9 +1400,12 @@ function Show2D() {
         const base = img * per;
         for (let k = 0; k < per && base + k < u8.length; k++) f32[base + k] = u8[base + k] * scale + lo;
       }
-      return f32;
+      decoded = f32;
+    } else {
+      decoded = extractFloat32(frameBytes, expectedLength) ?? new Float32Array(expectedLength);
     }
-    return extractFloat32(frameBytes, nImages * width * height);
+    decodedFramesRef.current = decoded;
+    return decoded;
   }, [frameBytes, offline, offlineMin, offlineMax, offlineMins, offlineMaxs, nImages, width, height]);
 
   const [dataVersion, setDataVersion] = React.useState(0);
@@ -4230,7 +4288,7 @@ function Show2D() {
   const calibratedFactor = pixelSize;
 
   return (
-    <Box className="show2d-root" tabIndex={0} onKeyDown={handleKeyDown} sx={{ p: 2, bgcolor: themeColors.bg, color: themeColors.text, width: "100%", maxWidth: "100%", boxSizing: "border-box", fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif", "& canvas": { display: "block" }, "@media (max-width: 700px)": { p: 0, ".jp-OutputArea-output &, .jp-OutputArea-child &": { width: "calc(100vw - 96px)", maxWidth: "calc(100vw - 96px)" } } }}>
+    <Box className="show2d-root" ref={staticFallbackRootRef} tabIndex={0} onKeyDown={handleKeyDown} sx={{ p: 2, bgcolor: themeColors.bg, color: themeColors.text, width: "100%", maxWidth: "100%", boxSizing: "border-box", fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif", "& canvas": { display: "block" }, "@media (max-width: 700px)": { p: 0, ".jp-OutputArea-output &, .jp-OutputArea-child &": { width: "calc(100vw - 96px)", maxWidth: "calc(100vw - 96px)" } } }}>
       <Stack
         direction="row"
         spacing={`${SPACING.LG}px`}
@@ -4287,66 +4345,49 @@ function Show2D() {
               <KeyboardShortcuts items={isGallery ? [["← / →", "Prev / Next image"], ["1 – 9", "Select image"], ["] / [", "Rotate CW / CCW 90°"], ["Del / ⌫", "Delete selected ROI"], ["M", "Measure distance"], ["Esc", "Exit measure"], ["R", "Reset zoom"], ["Scroll", "Zoom"], ["Dbl-click", "Reset view"]] : [["] / [", "Rotate CW / CCW 90°"], ["Del / ⌫", "Delete selected ROI"], ["M", "Measure distance"], ["Esc", "Exit measure"], ["R", "Reset zoom"], ["Scroll", "Zoom"], ["Dbl-click", "Reset view"]]} />
             </Box>} theme={themeInfo.theme} />
           </Typography>
-          {/* Controls row: Profile, ROI, Lens, FFT, Export, status, Reset, Copy */}
-          <Stack direction="row" alignItems="center" spacing={`${SPACING.SM}px`} useFlexGap sx={{ mb: `${SPACING.XS}px`, minHeight: 28, flexWrap: "wrap", rowGap: `${SPACING.XS}px`, maxWidth: "100%", boxSizing: "border-box" }}>
-            {(
+          {/* Controls row: viewer toggles on the left, actions on the right */}
+          <Stack direction="row" alignItems="center" spacing={`${SPACING.SM}px`} useFlexGap sx={{ mb: `${SPACING.XS}px`, minHeight: 28, flexWrap: "wrap", rowGap: `${SPACING.XS}px`, width: "100%", maxWidth: "100%", boxSizing: "border-box" }}>
+            {isGallery && (
               <>
-                {isGallery && (
-                  <>
-                    <Typography sx={{ ...typography.label, fontSize: 10 }}>Cols:</Typography>
-                    <Box
-                      component="select"
-                      value={clampedNcols}
-                      onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setNcols(Math.max(1, Math.min(Number(e.target.value) || 1, nImages)))}
-                      aria-label="Gallery columns"
-                      title="Number of gallery columns"
-                      sx={{
-                        minWidth: 48,
-                        height: 24,
-                        px: "6px",
-                        borderRadius: "4px",
-                        border: `1px solid ${themeColors.border}`,
-                        bgcolor: themeColors.controlBg,
-                        color: themeColors.text,
-                        fontSize: 10,
-                        flexShrink: 0,
-                        cursor: "pointer",
-                        "&:hover": { borderColor: themeColors.accent },
-                      }}
-                    >
-                      {galleryColumnOptions.map((cols) => (
-                        <option key={cols} value={cols}>{cols}</option>
-                      ))}
-                    </Box>
-                  </>
-                )}
-                <Typography sx={{ ...typography.label, fontSize: 10 }}>Profile:</Typography>
-                <Switch
-                  checked={profileActive}
-                 
-                  onChange={(e) => {
-                    const on = e.target.checked;
-                    setProfileActive(on);
-                    if (on) {
-                      setRoiActive(false);
-                    } else {
-                      setProfilePoints([]);
-                      setProfileDataAll([]);
-                      setHoveredProfileEndpoint(null);
-                      setIsHoveringProfileLine(false);
-                    }
-                  }}
+                <Typography sx={{ ...typography.label, fontSize: 10 }}>Cols:</Typography>
+                <Select
+                  value={String(clampedNcols)}
+                  onChange={(e) => setNcols(Math.max(1, Math.min(Number(e.target.value) || 1, nImages)))}
                   size="small"
-                  sx={switchStyles.small}
-                />
+                  sx={{ ...themedSelect, minWidth: 48, fontSize: 10 }}
+                  MenuProps={themedTopMenuProps}
+                  inputProps={{ "aria-label": "Gallery columns" }}
+                  title="Number of gallery columns"
+                >
+                  {galleryColumnOptions.map((cols) => (
+                    <MenuItem key={cols} value={String(cols)}>{cols}</MenuItem>
+                  ))}
+                </Select>
               </>
             )}
+            <Typography sx={{ ...typography.label, fontSize: 10 }}>Profile:</Typography>
+            <Switch
+              checked={profileActive}
+              onChange={(e) => {
+                const on = e.target.checked;
+                setProfileActive(on);
+                if (on) {
+                  setRoiActive(false);
+                } else {
+                  setProfilePoints([]);
+                  setProfileDataAll([]);
+                  setHoveredProfileEndpoint(null);
+                  setIsHoveringProfileLine(false);
+                }
+              }}
+              size="small"
+              sx={switchStyles.small}
+            />
             {!isGallery && (
               <>
                 <Typography sx={{ ...typography.label, fontSize: 10 }}>ROI:</Typography>
                 <Switch
                   checked={roiActive}
-                 
                   onChange={(e) => {
                     const on = e.target.checked;
                     setRoiActive(on);
@@ -4365,137 +4406,130 @@ function Show2D() {
                 />
               </>
             )}
-            {(
+            {!isGallery && (
               <>
-                {!isGallery && (
-                  <>
-                    <Typography sx={{ ...typography.label, fontSize: 10 }}>Lens:</Typography>
-                    <Switch
-                      checked={showLens}
-                      onChange={() => {
-                        if (!showLens) {
-                          setShowLens(true);
-                          setLensPos({ row: Math.floor(height / 2), col: Math.floor(width / 2) });
-                        } else {
-                          setShowLens(false);
-                          setLensPos(null);
-                        }
-                      }}
-                     
-                      size="small"
-                      sx={switchStyles.small}
-                    />
-                  </>
-                )}
-                <Typography sx={{ ...typography.label, fontSize: 10 }}>FFT:</Typography>
+                <Typography sx={{ ...typography.label, fontSize: 10 }}>Lens:</Typography>
                 <Switch
-                  checked={showFft}
-                  onChange={(e) => {
-                    const on = e.target.checked;
-                    if (on && width * height > 2048 * 2048) {
-                      console.warn(`Show2D: FFT on ${width}×${height} image (${(width * height / 1e6).toFixed(1)}M pixels) may be slow`);
+                  checked={showLens}
+                  onChange={() => {
+                    if (!showLens) {
+                      setShowLens(true);
+                      setLensPos({ row: Math.floor(height / 2), col: Math.floor(width / 2) });
+                    } else {
+                      setShowLens(false);
+                      setLensPos(null);
                     }
-                    setShowFft(on);
                   }}
-                 
                   size="small"
                   sx={switchStyles.small}
                 />
-                {nImages === 2 && (
-                  <>
-                    <Typography sx={{ ...typography.label, fontSize: 10 }} title="Show A − B as a third panel. Use w.align() first to cancel drift.">Diff:</Typography>
-                    <Switch checked={diffMode} onChange={() => { setDiffMode(!diffMode); }} size="small" sx={switchStyles.small} />
-                  </>
-                )}
               </>
             )}
-            {(
+            <Typography sx={{ ...typography.label, fontSize: 10 }}>FFT:</Typography>
+            <Switch
+              checked={showFft}
+              onChange={(e) => {
+                const on = e.target.checked;
+                if (on && width * height > 2048 * 2048) {
+                  console.warn(`Show2D: FFT on ${width}×${height} image (${(width * height / 1e6).toFixed(1)}M pixels) may be slow`);
+                }
+                setShowFft(on);
+              }}
+              size="small"
+              sx={switchStyles.small}
+            />
+            {nImages === 2 && (
               <>
-                {isGallery && (
-                  <>
-                    <Button
-                      size="small"
-                      sx={{ ...compactButton, "& .MuiButton-startIcon": { mr: 0.4 } }}
-                      startIcon={<VisibilityIcon sx={{ fontSize: 14 }} />}
-                      onClick={(e) => setPanelMenuAnchor(e.currentTarget)}
-                      aria-label="Choose visible panels"
-                      aria-controls={panelMenuAnchor ? "show2d-panels-menu" : undefined}
-                      aria-expanded={panelMenuAnchor ? "true" : undefined}
-                      aria-haspopup="menu"
-                    >
-                      {visibleImageCount === totalPanelCount ? "Panels" : `Panels ${visibleImageCount}/${totalPanelCount}`}
-                    </Button>
-                    <Menu
-                      id="show2d-panels-menu"
-                      anchorEl={panelMenuAnchor}
-                      open={Boolean(panelMenuAnchor)}
-                      onClose={() => setPanelMenuAnchor(null)}
-                      MenuListProps={{ "aria-label": "Panel visibility options" }}
-                      {...themedMenuProps}
-                    >
-                      {Array.from({ length: totalPanelCount }, (_, panel) => {
-                        const hidden = hiddenPanelSet.has(panel);
-                        const disabled = !hidden && visibleImageCount <= 1;
-                        return (
-                          <MenuItem
-                            key={`show2d-panel-menu-${panel}`}
-                            dense
-                            disabled={disabled}
-                            onClick={() => setPanelHidden(panel, !hidden)}
-                            title={disabled ? "At least one panel must remain visible" : undefined}
-                          >
-                            {hidden
-                              ? <VisibilityOffIcon sx={{ fontSize: 16, mr: 1, color: themeColors.textMuted }} />
-                              : <VisibilityIcon sx={{ fontSize: 16, mr: 1, color: themeColors.accent }} />}
-                            <Typography sx={{ fontSize: 11, color: disabled ? themeColors.textMuted : themeColors.text }}>
-                              {panelLabel(panel)}
-                            </Typography>
-                          </MenuItem>
-                        );
-                      })}
-                      <MenuItem
-                        dense
-                        disabled={hiddenPanelSet.size === 0}
-                        onClick={() => setHiddenPanels([])}
-                      >
-                        <VisibilityIcon sx={{ fontSize: 16, mr: 1, color: themeColors.accent }} />
-                        <Typography sx={{ fontSize: 11 }}>Show all panels</Typography>
-                      </MenuItem>
-                    </Menu>
-                  </>
-                )}
-                <Button
-                  size="small"
-                  sx={{ ...compactButton, color: themeColors.accent }}
-                  disabled={exportBusy}
-                  onClick={(e) => { setExportAnchor(e.currentTarget); }}
-                  title={localExportStatus || exportStatus || "Export figures or standalone HTML"}
-                >
-                  {exportBusy ? "Exporting" : "Export"}
-                </Button>
-                <Menu anchorEl={exportAnchor} open={Boolean(exportAnchor)} onClose={() => setExportAnchor(null)} anchorOrigin={{ vertical: "bottom", horizontal: "left" }} transformOrigin={{ vertical: "top", horizontal: "left" }} sx={{ zIndex: 9999 }}>
-                  {exportEnabled && <MenuItem onClick={() => handleHtmlExportSelect("exact")} sx={{ fontSize: 12 }}>Exact float32 ({exactHtmlSize})</MenuItem>}
-                  {exportEnabled && <MenuItem onClick={() => handleHtmlExportSelect("quantized")} sx={{ fontSize: 12 }}>Quantized uint8 ({quantizedHtmlSize})</MenuItem>}
-                </Menu>
-                {exportEnabled && (localExportStatus || exportStatus) && (
-                  <Typography
-                    sx={{
-                      ...typography.label,
-                      maxWidth: 120,
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                      whiteSpace: "nowrap",
-                      color: (localExportStatus || exportStatus).startsWith("Export failed") ? "#d32f2f" : themeColors.textMuted,
-                    }}
-                    title={localExportStatus || exportStatus}
-                  >
-                    {localExportStatus || exportStatus}
-                  </Typography>
-                )}
-                <Button size="small" sx={compactButton} disabled={!needsReset} onClick={handleResetAll}>Reset</Button>
-                <Button size="small" sx={compactButton} onClick={handleCopy}>Copy</Button>
+                <Typography sx={{ ...typography.label, fontSize: 10 }} title="Show A − B as a third panel. Use w.align() first to cancel drift.">Diff:</Typography>
+                <Switch checked={diffMode} onChange={() => { setDiffMode(!diffMode); }} size="small" sx={switchStyles.small} />
               </>
             )}
+            <Box sx={{ flex: "1 1 24px", minWidth: 8 }} />
+            <Box sx={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: `${SPACING.SM}px`, flexWrap: "wrap", flex: "0 0 auto", ml: "auto" }}>
+              {isGallery && (
+                <>
+                  <Button
+                    size="small"
+                    sx={{ ...compactButton, "& .MuiButton-startIcon": { mr: 0.4 } }}
+                    startIcon={<VisibilityIcon sx={{ fontSize: 14 }} />}
+                    onClick={(e) => setPanelMenuAnchor(e.currentTarget)}
+                    aria-label="Choose visible panels"
+                    aria-controls={panelMenuAnchor ? "show2d-panels-menu" : undefined}
+                    aria-expanded={panelMenuAnchor ? "true" : undefined}
+                    aria-haspopup="menu"
+                  >
+                    {visibleImageCount === totalPanelCount ? "Panels" : `Panels ${visibleImageCount}/${totalPanelCount}`}
+                  </Button>
+                  <Menu
+                    id="show2d-panels-menu"
+                    anchorEl={panelMenuAnchor}
+                    open={Boolean(panelMenuAnchor)}
+                    onClose={() => setPanelMenuAnchor(null)}
+                    MenuListProps={{ "aria-label": "Panel visibility options" }}
+                    {...themedTopMenuProps}
+                  >
+                    {Array.from({ length: totalPanelCount }, (_, panel) => {
+                      const hidden = hiddenPanelSet.has(panel);
+                      const disabled = !hidden && visibleImageCount <= 1;
+                      return (
+                        <MenuItem
+                          key={`show2d-panel-menu-${panel}`}
+                          dense
+                          disabled={disabled}
+                          onClick={() => setPanelHidden(panel, !hidden)}
+                          title={disabled ? "At least one panel must remain visible" : undefined}
+                        >
+                          {hidden
+                            ? <VisibilityOffIcon sx={{ fontSize: 16, mr: 1, color: themeColors.textMuted }} />
+                            : <VisibilityIcon sx={{ fontSize: 16, mr: 1, color: themeColors.accent }} />}
+                          <Typography sx={{ fontSize: 11, color: disabled ? themeColors.textMuted : themeColors.text }}>
+                            {panelLabel(panel)}
+                          </Typography>
+                        </MenuItem>
+                      );
+                    })}
+                    <MenuItem
+                      dense
+                      disabled={hiddenPanelSet.size === 0}
+                      onClick={() => setHiddenPanels([])}
+                    >
+                      <VisibilityIcon sx={{ fontSize: 16, mr: 1, color: themeColors.accent }} />
+                      <Typography sx={{ fontSize: 11 }}>Show all panels</Typography>
+                    </MenuItem>
+                  </Menu>
+                </>
+              )}
+              <Button
+                size="small"
+                sx={{ ...compactButton, color: themeColors.accent }}
+                disabled={exportBusy}
+                onClick={(e) => { setExportAnchor(e.currentTarget); }}
+                title={localExportStatus || exportStatus || "Export figures or standalone HTML"}
+              >
+                {exportBusy ? "Exporting" : "Export"}
+              </Button>
+              <Menu anchorEl={exportAnchor} open={Boolean(exportAnchor)} onClose={() => setExportAnchor(null)} anchorOrigin={{ vertical: "bottom", horizontal: "right" }} transformOrigin={{ vertical: "top", horizontal: "right" }} {...themedTopMenuProps}>
+                {exportEnabled && <MenuItem onClick={() => handleHtmlExportSelect("exact")} sx={{ fontSize: 12 }}>Exact float32 ({exactHtmlSize})</MenuItem>}
+                {exportEnabled && <MenuItem onClick={() => handleHtmlExportSelect("quantized")} sx={{ fontSize: 12 }}>Quantized uint8 ({quantizedHtmlSize})</MenuItem>}
+              </Menu>
+              {exportEnabled && (localExportStatus || exportStatus) && (
+                <Typography
+                  sx={{
+                    ...typography.label,
+                    maxWidth: 120,
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                    color: (localExportStatus || exportStatus).startsWith("Export failed") ? "#d32f2f" : themeColors.textMuted,
+                  }}
+                  title={localExportStatus || exportStatus}
+                >
+                  {localExportStatus || exportStatus}
+                </Typography>
+              )}
+              <Button size="small" sx={compactButton} disabled={!needsReset} onClick={handleResetAll}>Reset</Button>
+              <Button size="small" sx={compactButton} onClick={handleCopy}>Copy</Button>
+            </Box>
           </Stack>
 
           {isGallery ? (
