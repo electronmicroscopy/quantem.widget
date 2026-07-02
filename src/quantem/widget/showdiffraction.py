@@ -106,11 +106,13 @@ class ShowDiffraction(anywidget.AnyWidget):
     det_cols = traitlets.Int(1).tag(sync=True)
 
     frame_bytes = traitlets.Bytes(b"").tag(sync=True)
+    # whole stack as float32, baked only when offline so the kernel-less HTML can scrub
+    # frames client-side (live widgets stay empty and stream frame_bytes per frame).
+    offline_frames = traitlets.Bytes(b"").tag(sync=True)
 
-    # Offline/export render flag. The frontend forces a light/white background
-    # when set so standalone HTML exports read on any OS theme. No quantization
-    # happens here -- frames are always embedded as exact float32. (Show2D/3D use
-    # a separate `_export_light` for this; here `offline` alone drives it.)
+    # Offline/export render flag. The frontend forces a light background when set
+    # so standalone HTML exports read on any OS theme. Frames are always embedded
+    # as exact float32.
     offline = traitlets.Bool(False).tag(sync=True)
 
     # =========================================================================
@@ -302,8 +304,10 @@ class ShowDiffraction(anywidget.AnyWidget):
             self.auto_detect_center()
 
         self._update_frame()
+        self._bake_offline_frames()
 
         self.observe(self._update_frame, names=["frame_idx"])
+        self.observe(self._bake_offline_frames, names=["offline"])
         self.observe(self._on_spot_add_request, names=["_spot_add_request"])
         self.observe(self._on_spot_undo_request, names=["_spot_undo_request"])
         self.observe(self._on_spot_clear_request, names=["_spot_clear_request"])
@@ -395,9 +399,31 @@ class ShowDiffraction(anywidget.AnyWidget):
         ]
         self.center_row = float((row_coords * mask).sum() / total)
         self.center_col = float((col_coords * mask).sum() / total)
-        self.bf_radius = float(torch.sqrt(total / torch.pi))
+        # central beam only: rings are also above threshold, so whole-mask area would
+        # overestimate the radius and later mask out the inner rings in detect_rings.
+        self.bf_radius = self._central_beam_radius(mask, self.center_row, self.center_col)
         self.center_mode = "auto"
         return self
+
+    def _central_beam_radius(self, mask, center_row: float, center_col: float) -> float:
+        mask_np = mask.detach().cpu().numpy()
+        try:
+            from scipy.ndimage import label
+        except Exception:
+            return float(np.sqrt(float(mask_np.sum()) / np.pi))
+        labels, n_labels = label(mask_np)
+        if n_labels == 0:
+            return 0.0
+        row_idx = int(min(max(round(center_row), 0), mask_np.shape[0] - 1))
+        col_idx = int(min(max(round(center_col), 0), mask_np.shape[1] - 1))
+        central_label = int(labels[row_idx, col_idx])
+        if central_label == 0:
+            # center is dark (beam stop): use the nearest bright component
+            comp_rows, comp_cols = np.nonzero(labels)
+            nearest = int(np.argmin((comp_rows - center_row) ** 2 + (comp_cols - center_col) ** 2))
+            central_label = int(labels[comp_rows[nearest], comp_cols[nearest]])
+        area = float((labels == central_label).sum())
+        return float(np.sqrt(area / np.pi))
 
     def set_center(self, row: float, col: float) -> Self:
         """Set the diffraction center to (row, col) and mark the mode manual."""
@@ -422,6 +448,14 @@ class ShowDiffraction(anywidget.AnyWidget):
             float(frame.std()),
         ]
         self.frame_bytes = frame.tobytes()
+
+    def _bake_offline_frames(self, change=None) -> None:
+        # skip single frames and live widgets (which stream per frame) to avoid bloat
+        if self.offline and self.n_frames > 1 and getattr(self, "_data", None) is not None:
+            frames = self._data.cpu().numpy().astype(np.float32)
+            self.offline_frames = np.ascontiguousarray(frames).tobytes()
+        else:
+            self.offline_frames = b""
 
     def _compute_spot_info(
         self, row: float, col: float, row_err: float = 0.0, col_err: float = 0.0
@@ -667,16 +701,20 @@ class ShowDiffraction(anywidget.AnyWidget):
         detrended = y_log - gaussian_filter1d(y_log, sigma=max(3.0, y_log.size / 20.0))
         span = float(detrended.max() - detrended.min())
         prominence = prominence_rel * span if span > 0 else None
-        peaks, _ = find_peaks(
+        peaks, props = find_peaks(
             detrended, prominence=prominence, distance=max(1, int(min_separation))
         )
         if peaks.size == 0:
             return self
-        peaks = peaks[radii_px[peaks] > float(exclude_radius)]  # drop the beam region
+        outside_beam = radii_px[peaks] > float(exclude_radius)
+        peaks = peaks[outside_beam]
+        prominences = props["prominences"][outside_beam]
         if peaks.size == 0:
             return self
-        # find_peaks already filtered by prominence; keep the innermost (strong low-order) rings.
-        for p in sorted(peaks)[: int(max_rings)]:
+        # strongest, not innermost: a noise bump in a dark gap can sit inside a real ring
+        # but has far lower prominence. Keep the top max_rings, then order inner -> outer.
+        strongest = np.argsort(prominences)[::-1][: int(max_rings)]
+        for p in sorted(peaks[strongest]):
             self.add_ring(float(radii_px[p]))
         return self
 
@@ -1017,9 +1055,11 @@ class ShowDiffraction(anywidget.AnyWidget):
         "intensity", "fit_quality", "hkl", "note",
     ]
 
-    def _measurement_records(self) -> list:
+    @staticmethod
+    def _build_measurement_records(spots, rings) -> list:
+        # Flatten spots and rings into unified measurement rows.
         records = []
-        for s in self.spots:
+        for s in spots:
             records.append({
                 "id": s.get("id"),
                 "kind": "spot",
@@ -1042,7 +1082,7 @@ class ShowDiffraction(anywidget.AnyWidget):
                 "hkl": s.get("hkl", ""),
                 "note": s.get("note", ""),
             })
-        for r in self.rings:
+        for r in rings:
             records.append({
                 "id": r.get("id"),
                 "kind": "ring",
@@ -1067,12 +1107,44 @@ class ShowDiffraction(anywidget.AnyWidget):
             })
         return records
 
+    def _measurement_records(self) -> list:
+        return self._build_measurement_records(self.spots, self.rings)
+
+    @staticmethod
+    def _measurement_metadata(state) -> dict:
+        # Provenance header for the measurement table.
+        return {
+            "widget_name": "ShowDiffraction",
+            "center_row": state.get("center_row"),
+            "center_col": state.get("center_col"),
+            "k_pixel_size_inv_angstrom_per_px": state.get("k_pixel_size"),
+            "calibrated": bool(state.get("k_calibrated")),
+            "calibration_source": state.get("calibration_source", "none"),
+            "calibration_ref_d_angstrom": state.get("calibration_ref_d", 0.0),
+            "calibration_ref_radius_px": state.get("calibration_ref_radius", 0.0),
+        }
+
+    @staticmethod
+    def _write_measurement_file(path, records, meta) -> pathlib.Path:
+        # .json writes a {"metadata", "measurements"} document; anything else CSV.
+        p = pathlib.Path(path)
+        if p.suffix.lower() == ".json":
+            p.write_text(json.dumps({"metadata": meta, "measurements": records}, indent=2))
+        else:
+            with open(p, "w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=ShowDiffraction._MEASUREMENT_COLUMNS)
+                writer.writeheader()
+                writer.writerows(records)
+        return p
+
     def export_measurements(self, path: str) -> pathlib.Path:
         """Export the spot and ring measurements to a CSV or JSON file.
 
         The format is inferred from the file extension: ``.json`` writes a
         ``{"metadata": ..., "measurements": ...}`` document, anything else
-        writes CSV with the columns in ``_MEASUREMENT_COLUMNS``.
+        writes CSV with the columns in ``_MEASUREMENT_COLUMNS``. This table is
+        fully contained in the saved state, so you do not need to keep it as a
+        separate file -- ``measurements_from_state`` rebuilds it on demand.
 
         Parameters
         ----------
@@ -1084,27 +1156,44 @@ class ShowDiffraction(anywidget.AnyWidget):
         pathlib.Path
             The written file path.
         """
-        p = pathlib.Path(path)
-        records = self._measurement_records()
-        meta = {
-            "widget_name": "ShowDiffraction",
-            "widget_version": self.widget_version,
-            "center_row": self.center_row,
-            "center_col": self.center_col,
-            "k_pixel_size_inv_angstrom_per_px": self.k_pixel_size,
-            "calibrated": bool(self.k_calibrated),
-            "calibration_source": self.calibration_source,
-            "calibration_ref_d_angstrom": self.calibration_ref_d,
-            "calibration_ref_radius_px": self.calibration_ref_radius,
-        }
-        if p.suffix.lower() == ".json":
-            p.write_text(json.dumps({"metadata": meta, "measurements": records}, indent=2))
+        return self._write_measurement_file(
+            path, self._measurement_records(), self._measurement_metadata(self.state_dict())
+        )
+
+    @classmethod
+    def measurements_from_state(cls, state, path=None):
+        """Rebuild the spot/ring measurement table from a saved state.
+
+        The saved state already holds every spot and ring, so the measurement
+        table is derived from it -- there is no need to keep a separate CSV/JSON
+        export next to the state file. Regenerate it whenever needed, without
+        loading the image data.
+
+        Parameters
+        ----------
+        state : dict, str, or pathlib.Path
+            A saved state file path, or an already-loaded state dict/envelope.
+        path : str or pathlib.Path, optional
+            Where to write the table (``.json`` selects JSON, otherwise CSV). If
+            omitted, the list of measurement records is returned instead.
+
+        Returns
+        -------
+        list[dict] or pathlib.Path
+            The measurement records, or the written file path when ``path`` is set.
+        """
+        if isinstance(state, (str, pathlib.Path)):
+            state = unwrap_state_payload(
+                json.loads(pathlib.Path(state).read_text()), require_envelope=True
+            )
         else:
-            with open(p, "w", newline="") as f:
-                writer = csv.DictWriter(f, fieldnames=self._MEASUREMENT_COLUMNS)
-                writer.writeheader()
-                writer.writerows(records)
-        return p
+            state = unwrap_state_payload(state)
+        records = cls._build_measurement_records(
+            state.get("spots", []), state.get("rings", [])
+        )
+        if path is None:
+            return records
+        return cls._write_measurement_file(path, records, cls._measurement_metadata(state))
 
     def export_html(
         self,
@@ -1119,9 +1208,9 @@ class ShowDiffraction(anywidget.AnyWidget):
         widget state (frames, center, calibration, spots, rings, display
         settings) and opens in any browser without a Jupyter kernel.
 
-        ShowDiffraction always embeds the exact float32 frames -- there is no
-        gallery and no quantization. The ``mode``/``encoding``/``downsample``/
-        ``quantized`` keys are accepted via ``**options`` for cross-widget API
+        ShowDiffraction always embeds the exact ``full`` float32 frames -- there
+        is no gallery and no reduced encoding. The ``mode``/``encoding``/
+        ``downsample`` keys are accepted via ``**options`` for cross-widget API
         compatibility but are treated as no-ops.
 
         Parameters
@@ -1257,6 +1346,7 @@ class ShowDiffraction(anywidget.AnyWidget):
         self.rings = []
         self.auto_detect_center()
         self._update_frame()
+        self._bake_offline_frames()
         return self
 
     def state_dict(self):
