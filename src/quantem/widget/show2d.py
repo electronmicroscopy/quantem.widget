@@ -18,6 +18,7 @@ from typing import Self, Sequence
 
 import anywidget
 import matplotlib
+import matplotlib.patches
 import matplotlib.patheffects
 import matplotlib.pyplot as plt
 import numpy as np
@@ -61,6 +62,94 @@ def _round_to_nice(value: float) -> float:
         return 5 * base
     else:
         return 10 * base
+
+
+def _js_round(value: float) -> int:
+    """JS ``Math.round`` (half away from zero for positives); Python's
+    banker's rounding would format 2.5 as "2" where the widget shows "3"."""
+    return math.floor(value + 0.5)
+
+
+# Ports of js/figure.ts unit tables so the static PNG's scale bar label is
+# character-identical to the live widget's canvas label.
+# Length-unit ladder, each as its size in nm: a sub-1 value in one unit
+# (e.g. 0.5 nm) displays as a clean integer in a smaller unit (5 Å), because
+# microscopists read "5 Å", not "0.50 nm".
+_LENGTH_UNITS_NM: tuple[tuple[str, float], ...] = (
+    ("mm", 1e6), ("µm", 1e3), ("nm", 1.0), ("Å", 0.1), ("pm", 1e-3),
+)
+# Base unit (the trait's unit) -> nm. Only length units rescale; anything else
+# (mrad, ps, px, ...) keeps its own unit and the decimal fallback.
+_BASE_UNIT_NM: dict[str, float] = {
+    "mm": 1e6, "µm": 1e3, "μm": 1e3, "micron": 1e3, "microns": 1e3, "um": 1e3,
+    "nm": 1.0, "nanometer": 1.0, "nanometers": 1.0,
+    "å": 0.1, "angstrom": 0.1, "angstroms": 0.1, "ang": 0.1, "a": 0.1,
+    "pm": 1e-3, "picometer": 1e-3, "picometers": 1e-3,
+}
+
+
+def _unit_symbol(unit: str) -> str:
+    """Display symbol for a unit string (port of js/figure.ts unitSymbol).
+
+    Users pass units like "micron"/"A" on a Dataset; the widget renders the
+    conventional glyph (µm, Å) so labels read like a journal figure. Unknown
+    strings pass through unchanged."""
+    u = (unit or "").strip()
+    lc = u.lower()
+    if lc in ("micron", "microns", "um") or u in ("μm", "µm"):
+        return "µm"
+    if lc in ("angstrom", "angstroms", "ang", "a") or u == "Å":
+        return "Å"
+    if lc in ("nanometer", "nanometers", "nm"):
+        return "nm"
+    if lc in ("picometer", "picometers", "pm"):
+        return "pm"
+    if lc in ("millimeter", "millimeters", "mm"):
+        return "mm"
+    if lc in ("picosecond", "picoseconds", "ps"):
+        return "ps"
+    if lc in ("femtosecond", "femtoseconds", "fs"):
+        return "fs"
+    if lc in ("nanosecond", "nanoseconds", "ns"):
+        return "ns"
+    return u
+
+
+def _format_scale_label(value: float, unit: str) -> str:
+    """Scale bar label (port of js/figure.ts formatScaleLabel).
+
+    Length values auto-pick the unit that reads as a clean integer:
+    0.5 nm -> "5 Å", 0.005 nm -> "5 pm". Non-length units (mrad, ps, px)
+    keep their unit. ``_round_to_nice`` gives n*10^k and every ladder step
+    is a power of 10, so the rescaled number is always exact."""
+    nice = _round_to_nice(value)
+    base_nm = _BASE_UNIT_NM.get((unit or "").strip().lower())
+    if base_nm is None:
+        sym = _unit_symbol(unit)
+        return f"{_js_round(nice)} {sym}" if nice >= 1 else f"{nice:.2f} {sym}"
+    value_nm = nice * base_nm
+    # largest ladder unit where the value is >= 1 -> the fewest-digit integer
+    for sym, unit_nm in _LENGTH_UNITS_NM:
+        if value_nm / unit_nm >= 1:
+            return f"{_js_round(value_nm / unit_nm)} {sym}"
+    sym, unit_nm = _LENGTH_UNITS_NM[-1]
+    return f"{_js_round(value_nm / unit_nm)} {sym}"
+
+
+_OVERLAY_FONT: list[str] | None = None
+
+
+def _static_overlay_font() -> list[str]:
+    """Closest installed match to the widget's ``-apple-system, BlinkMacSystemFont,
+    'Segoe UI', sans-serif`` stack, resolved once. Filtering to installed fonts
+    avoids matplotlib findfont warnings on machines without Helvetica/Arial."""
+    global _OVERLAY_FONT
+    if _OVERLAY_FONT is None:
+        from matplotlib import font_manager
+        installed = {f.name for f in font_manager.fontManager.ttflist}
+        preferred = ("Helvetica Neue", "Segoe UI", "Arial", "Liberation Sans")
+        _OVERLAY_FONT = [f for f in preferred if f in installed] + ["DejaVu Sans"]
+    return _OVERLAY_FONT
 
 
 class Colormap(StrEnum):
@@ -270,6 +359,12 @@ class Show2D(anywidget.AnyWidget):
     initial_zoom = traitlets.Float(1.0).tag(sync=True)
     zoom_row = traitlets.Float(None, allow_none=True).tag(sync=True)
     zoom_col = traitlets.Float(None, allow_none=True).tag(sync=True)
+    # Live viewport (row0, row1, col0, col1) in image pixel coordinates.
+    # Python -> JS at construction (the view_box= sugar below derives zoom +
+    # zoom_row/zoom_col from it); JS -> Python on every pan/zoom (debounced
+    # ~100 ms), so current_view always reflects what is on screen. The box is
+    # axis-aligned: two corners (row0, col0)/(row1, col1) define all four.
+    view_box = traitlets.List(trait=traitlets.Float(), default_value=[]).tag(sync=True)
     link_zoom = traitlets.Bool(False).tag(sync=True)
     link_pan = traitlets.Bool(False).tag(sync=True)
     link_contrast = traitlets.Bool(True).tag(sync=True)
@@ -552,6 +647,7 @@ class Show2D(anywidget.AnyWidget):
             zoom = float(min(self.height / box_h, self.width / box_w))
             zoom_row = (r0 + r1) / 2
             zoom_col = (c0 + c1) / 2
+            self.view_box = [r0, r1, c0, c1]
         self.initial_zoom = zoom
         self.zoom_row = zoom_row
         self.zoom_col = zoom_col
@@ -980,43 +1076,352 @@ class Show2D(anywidget.AnyWidget):
                 state.pop(heavy_key, None)
         return state
 
-    def _static_png_b64(self, *, max_px: int = 320, dpi: int = 96) -> str | None:
-        """Base64 PNG grid of all panels, attached to the cell output.
+    # Colormaps the frontend treats as sequential; a signed diff panel switches
+    # to a diverging map (RdBu) because zero must sit at the visual midpoint.
+    _SEQUENTIAL_CMAPS = frozenset(
+        {"inferno", "viridis", "plasma", "magma", "hot", "gray", "turbo"}
+    )
+
+    @staticmethod
+    def _signed_log1p(values: np.ndarray | float) -> np.ndarray | float:
+        """Signed log1p, matching the frontend's ``applyLogScale``.
+
+        The widget maps negative intensities to ``-log1p(-v)`` so diff-like
+        data keeps its sign under log scale; a plain ``log1p(clip(v, 0))``
+        would collapse everything below zero and diverge from the live render.
+        """
+        return np.sign(values) * np.log1p(np.abs(values))
+
+    @staticmethod
+    def _format_stat(value: float) -> str:
+        """Format a statistic like the widget's stats row (JS ``formatNumber``).
+
+        ``0`` stays ``"0"``; magnitudes >= 1000 or < 0.01 use two-decimal
+        scientific notation with an unpadded exponent (``5.85e+3``, matching
+        JS ``toExponential(2)``); everything else uses two fixed decimals.
+        """
+        if value == 0:
+            return "0"
+        if abs(value) >= 1000 or abs(value) < 0.01:
+            mantissa, exponent = f"{value:.2e}".split("e")
+            return f"{mantissa}e{int(exponent):+d}"
+        return f"{value:.2f}"
+
+    def _resolve_panel_display_ranges(self, frames: list[np.ndarray]) -> list[tuple[float, float]]:
+        """Per-panel ``(vmin, vmax)`` in display space, mirroring the frontend.
+
+        Precedence (same as the JS colormap effect in ``js/show2d/index.tsx``):
+        per-image ``vmins[i]/vmaxs[i]`` beat the scalar ``vmin/vmax``, which
+        beats ``auto_contrast`` (2/98 percentiles), which beats the frame's
+        min/max. With ``link_contrast`` on a gallery and no explicit ranges,
+        panels share one merged range so cross-panel intensities compare
+        directly. Under ``log_scale`` the limits live in signed-log1p space,
+        exactly like the shader. Ranges are computed on the FULL-resolution
+        display frames so the PNG's contrast matches the widget even though
+        the PNG pixels are later area-binned.
+        """
+        num = len(frames)
+        def to_display(value: float) -> float:
+            return float(self._signed_log1p(float(value))) if self.log_scale else float(value)
+        has_absolute = self.vmin is not None and self.vmax is not None
+        per_mins = list(self.vmins) if self.vmins else [None] * num
+        per_maxs = list(self.vmaxs) if self.vmaxs else [None] * num
+        has_per_image = [per_mins[i] is not None and per_maxs[i] is not None for i in range(num)]
+        base_ranges: list[tuple[float, float]] = []
+        for i, frame in enumerate(frames):
+            if has_per_image[i]:
+                base_ranges.append((to_display(per_mins[i]), to_display(per_maxs[i])))
+            elif has_absolute:
+                base_ranges.append((to_display(self.vmin), to_display(self.vmax)))
+            else:
+                base_ranges.append((to_display(frame.min()), to_display(frame.max())))
+        linked_shared = (
+            self.link_contrast and num >= 2 and not has_absolute and not any(has_per_image)
+        )
+        shared_base = None
+        if linked_shared:
+            shared_base = (min(r[0] for r in base_ranges), max(r[1] for r in base_ranges))
+        auto_ranges: list[tuple[float, float]] = []
+        use_auto = self.auto_contrast and not has_absolute
+        if use_auto:
+            for i, frame in enumerate(frames):
+                if has_per_image[i]:
+                    auto_ranges.append(base_ranges[i])
+                    continue
+                processed = self._signed_log1p(frame) if self.log_scale else frame
+                lo, hi = (float(v) for v in np.percentile(processed, (2, 98)))
+                # Sparse/clustered data can collapse the 2-98% window to a
+                # point; fall back to full extrema like computeAutoRange does.
+                full_lo, full_hi = float(processed.min()), float(processed.max())
+                if hi - lo <= max(1e-12, abs(full_hi - full_lo) * 1e-6):
+                    lo, hi = full_lo, full_hi
+                auto_ranges.append((lo, hi))
+            if linked_shared:
+                shared_auto = (min(r[0] for r in auto_ranges), max(r[1] for r in auto_ranges))
+        ranges: list[tuple[float, float]] = []
+        for i in range(num):
+            if use_auto and not has_per_image[i]:
+                ranges.append(shared_auto if linked_shared else auto_ranges[i])
+            else:
+                ranges.append(shared_base if linked_shared else base_ranges[i])
+        return ranges
+
+    def _static_panel_rgb(
+        self,
+        frame: np.ndarray,
+        vmin: float,
+        vmax: float,
+        cmap_name: str,
+        *,
+        apply_log: bool | None = None,
+    ) -> np.ndarray:
+        """Colormap one panel exactly as the live widget maps pixels to colors.
+
+        Pipeline: optional signed-log1p on the data, clip-normalize into the
+        display-space ``[vmin, vmax]`` window, then look up the matplotlib
+        colormap (the same LUT the JS mirrors). Returning explicit RGB uint8
+        keeps matplotlib's own norm machinery out of the loop, so the PNG's
+        pixel mapping is byte-identical to what tests can compute independently.
+        """
+        from matplotlib import colormaps
+        apply_log = self.log_scale if apply_log is None else apply_log
+        processed = self._signed_log1p(frame) if apply_log else frame
+        if vmax > vmin:
+            normalized = np.clip((processed - vmin) / (vmax - vmin), 0.0, 1.0)
+        else:
+            normalized = np.zeros(processed.shape, dtype=np.float64)
+        rgba = colormaps.get_cmap(cmap_name)(normalized)
+        return (rgba[..., :3] * 255).astype(np.uint8)
+
+    def _static_panel_specs(self) -> list[dict]:
+        """Panel plan for the static PNG, mirroring the live widget's layout.
+
+        One entry per visible image panel, plus one signed diff panel per
+        non-reference image when ``diff_mode`` is on (the widget renders
+        ``ref - other`` with a symmetric range around zero and a diverging
+        colormap). Each spec carries the full-resolution frame plus the
+        resolved display-space contrast window and a stats line, so the PNG
+        renderer only has to bin and colormap.
+        """
+        frames_source = getattr(self, "_display_data", None)
+        if frames_source is None:
+            frames_source = getattr(self, "_data", None)
+        if frames_source is None or len(frames_source) == 0:
+            return []
+        frames = [frames_source[i] for i in range(len(frames_source))]
+        ranges = self._resolve_panel_display_ranges(frames)
+        def stats_line(mean: float, lo: float, hi: float, std: float) -> str:
+            fmt = self._format_stat
+            return f"Mean {fmt(mean)}   Min {fmt(lo)}   Max {fmt(hi)}   Std {fmt(std)}"
+        specs: list[dict] = []
+        for i in self.visible_panels:
+            label = self._panel_title_for_index(i) if self.show_panel_titles else ""
+            specs.append({
+                "frame": frames[i],
+                "vmin": ranges[i][0],
+                "vmax": ranges[i][1],
+                "cmap": self.cmap,
+                "apply_log": self.log_scale,
+                "label": label,
+                "stats": stats_line(self.stats_mean[i], self.stats_min[i],
+                                    self.stats_max[i], self.stats_std[i]),
+            })
+        if self.diff_mode and len(frames) >= 2:
+            ref = int(self.diff_reference)
+            diff_cmap = "RdBu" if self.cmap in self._SEQUENTIAL_CMAPS else self.cmap
+            for other in range(len(frames)):
+                if other == ref:
+                    continue
+                diff = frames[ref] - frames[other]
+                # Symmetric window centers zero on the diverging map's midpoint,
+                # so positive and negative residuals read with equal weight.
+                sym = float(max(abs(float(diff.min())), abs(float(diff.max())))) or 1.0
+                label = ("Diff (A − B)" if len(frames) == 2
+                         else f"Diff (#{ref + 1} − #{other + 1})")
+                specs.append({
+                    "frame": diff,
+                    "vmin": -sym,
+                    "vmax": sym,
+                    "cmap": diff_cmap,
+                    "apply_log": False,  # widget diffs raw data, never log-scaled
+                    "label": label if self.show_panel_titles else "",
+                    "stats": stats_line(float(diff.mean()), float(diff.min()),
+                                        float(diff.max()), float(diff.std())),
+                })
+        return specs
+
+    @staticmethod
+    def _center_crop_slices(height: int, width: int, zoom: float) -> tuple[slice, slice]:
+        """Central 1/zoom crop, matching the live widget's zoomed viewport.
+
+        The widget at zoom z (pan 0) scales the full image about the canvas
+        center, so the visible region is the central ``height/z x width/z``
+        window. The static PNG must show the same pixels or the fallback
+        looks nothing like the screenshot the user saved."""
+        if zoom <= 1:
+            return slice(0, height), slice(0, width)
+        crop_h = max(1, _js_round(height / zoom))
+        crop_w = max(1, _js_round(width / zoom))
+        top = (height - crop_h) // 2
+        left = (width - crop_w) // 2
+        return slice(top, top + crop_h), slice(left, left + crop_w)
+
+    def _static_canvas_css_px(self) -> float:
+        """CSS width of the live panel canvas, the length every JS overlay
+        constant (16px font, 12px margin, 60px bar target) is relative to.
+
+        Port of js/show2d/index.tsx: the ``size`` trait when set, else
+        SINGLE_IMAGE_TARGET (500) for one image / GALLERY_IMAGE_TARGET (300)
+        for a gallery. Without this the static overlays would be drawn for a
+        fictitious canvas size and read visibly smaller than the widget's."""
+        if self.size > 0:
+            return float(self.size)
+        return 300.0 if self.n_images > 1 else 500.0
+
+    def _static_overlay_texts(self, specs: list[dict] | None = None,
+                              *, css_px: float | None = None) -> list[tuple[str, str, str, float]]:
+        """Per-panel overlay strings for the static PNG, one tuple
+        ``(label, zoom_text, bar_text, bar_px)`` per panel.
+
+        Pure port of js/figure.ts drawScaleBarHiDPI's math, evaluated on a
+        ``css_px``-wide canvas (default: the live widget's own canvas CSS
+        width from ``_static_canvas_css_px``): effectiveZoom =
+        zoom * cssWidth / imageWidth, target bar 60 CSS px rounded to a nice
+        physical length, label via formatScaleLabel. Uncalibrated data gets
+        pixelSize 1 and unit "px" exactly like the widget (show2d/index.tsx
+        overlay effect). ``bar_px`` is the bar length in panel CSS px;
+        ``bar_text``/``bar_px`` are ""/0.0 when the scale bar is hidden.
+        Exposed separately from the renderer so tests can assert the strings
+        without OCR-ing the PNG."""
+        if specs is None:
+            specs = self._static_panel_specs()
+        if css_px is None:
+            css_px = self._static_canvas_css_px()
+        # widget clamps initial_zoom to [MIN_ZOOM, MAX_ZOOM] (index.tsx)
+        zoom = min(max(float(self.initial_zoom) or 1.0, 0.5), 20.0)
+        zoom_text = f"{zoom:.1f}×"  # JS: `${zoom.toFixed(1)}×`
+        calibrated = self.pixel_size > 0
+        pixel_size = self.pixel_size if calibrated else 1.0
+        unit = self.pixel_unit if calibrated else "px"
+        texts: list[tuple[str, str, str, float]] = []
+        for spec in specs:
+            if not self.scale_bar_visible:
+                texts.append((spec["label"], zoom_text, "", 0.0))
+                continue
+            full_w = spec["frame"].shape[1]
+            effective_zoom = zoom * css_px / full_w
+            # 60 CSS px target bar, rounded to a nice physical length
+            nice = _round_to_nice(60.0 / effective_zoom * pixel_size)
+            bar_px = nice / pixel_size * effective_zoom
+            texts.append((spec["label"], zoom_text,
+                          _format_scale_label(nice, unit), bar_px))
+        return texts
+
+    def _static_png_b64(self, *, max_px: int = 512, dpi: int = 160) -> str | None:
+        """Base64 PNG of all panels, attached to the cell output.
 
         With ``save_state`` False the interactive widget state is not embedded,
         so a reopened notebook (GitHub, nbviewer, cold Lab) would show nothing.
-        Attaching a downsampled static render means the reader still sees how the
-        panels looked. Panels are stride-downsampled so this stays cheap on every
-        display (the cost of rendering full 4k here would dominate display time).
+        This render mirrors the live widget panel-for-panel: same colormap,
+        same per-panel or linked contrast window (resolved on the
+        full-resolution frame so percentile cuts match the widget, then
+        applied to the binned pixels), the same central 1/zoom viewport,
+        diff panel(s) when ``diff_mode`` is on, and the widget's own in-panel
+        overlays - label top-center, zoom badge bottom-left, scale bar with
+        its label bottom-right - at the exact CSS-pixel geometry the JS draws
+        on a panel of this size. Panels are area-mean binned to ~``max_px``
+        so atomic-lattice detail averages instead of aliasing, and the render
+        stays cheap on every display.
         """
         import base64
         import io as _io
-        from matplotlib import colormaps
-        frames = getattr(self, "_display_data", None)
-        if frames is None:
-            frames = getattr(self, "_data", None)
-        if frames is None or len(frames) == 0:
+        specs = self._static_panel_specs()
+        if not specs:
             return None
-        cmap_fn = colormaps.get_cmap(self.cmap)
-        num = len(frames)
+        css_w = self._static_canvas_css_px()
+        overlays = self._static_overlay_texts(specs, css_px=css_w)
+        zoom = min(max(float(self.initial_zoom) or 1.0, 0.5), 20.0)
+        num = len(specs)
         ncols = max(1, min(self.ncols, num))
         nrows = (num + ncols - 1) // ncols
-        fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 2.4, nrows * 2.4),
-                                 squeeze=False)
-        for panel in range(nrows * ncols):
-            ax = axes[panel // ncols][panel % ncols]
+        # cells sized to the panels' cropped aspect so every image fills its
+        # cell exactly: a taller cell would pad panels with white and make the
+        # horizontal gutters read wider than the vertical ones
+        h0, w0 = specs[0]["frame"].shape
+        rows0, cols0 = self._center_crop_slices(h0, w0, zoom)
+        aspect = (rows0.stop - rows0.start) / (cols0.stop - cols0.start)
+        # inter-panel gutter is the widget's own gallery gap (CSS px of the
+        # live canvas), identical horizontally and vertically
+        gap_frac = max(0, int(self.gallery_gap_px)) / css_w
+        cell_w_in = max_px / dpi  # cell width in inches so 1 panel = max_px device px
+        cell_h_in = cell_w_in * aspect
+        gap_in = gap_frac * cell_w_in
+        fig = plt.figure(figsize=(ncols * cell_w_in + (ncols - 1) * gap_in,
+                                  nrows * cell_h_in + (nrows - 1) * gap_in))
+        # wspace/hspace are fractions of cell width/height; both resolve to
+        # the same gap_in inches so the white gutters match to the pixel
+        grid = fig.add_gridspec(nrows, ncols, wspace=gap_frac,
+                                hspace=gap_frac / aspect,
+                                left=0, right=1, bottom=0, top=1)
+        font_family = _static_overlay_font()
+        # the live canvas is css_w CSS px wide but the PNG panel is max_px
+        # device px wide, so every CSS-px size renders scaled by max_px/css_w
+        point = (max_px / css_w) * 72.0 / dpi  # matplotlib points per CSS px
+        for idx, (spec, (label, zoom_text, bar_text, bar_css)) in enumerate(zip(specs, overlays)):
+            ax = fig.add_subplot(grid[idx // ncols, idx % ncols])
             ax.axis("off")
-            if panel >= num:
-                continue
-            frame = frames[panel]
-            frame = self._downsample_static_frame(frame, max_px=max_px)
-            normalized = self._normalize_frame(frame)
-            ax.imshow(normalized, cmap=cmap_fn, vmin=0, vmax=255)
-            if self.labels and panel < len(self.labels) and self.labels[panel]:
-                ax.set_title(self.labels[panel], fontsize=8)
-        fig.tight_layout(pad=0.3)
+            frame = spec["frame"]
+            rows, cols = self._center_crop_slices(frame.shape[0], frame.shape[1], zoom)
+            binned = self._downsample_static_frame(frame[rows, cols], max_px=max_px)
+            rgb = self._static_panel_rgb(binned, spec["vmin"], spec["vmax"],
+                                         spec["cmap"], apply_log=spec["apply_log"])
+            ax.imshow(rgb, interpolation="nearest")
+            bin_h, bin_w = rgb.shape[:2]
+            ax.set(xlim=(-0.5, bin_w - 0.5), ylim=(bin_h - 0.5, -0.5))
+            # CSS px -> data px: the panel canvas is css_w CSS px wide showing
+            # bin_w image pixels, so overlay geometry scales by bin_w / css_w
+            css_h = css_w * bin_h / bin_w
+            k = bin_w / css_w
+
+            def css_xy(x_css: float, y_css: float) -> tuple[float, float]:
+                return x_css * k - 0.5, y_css * k - 0.5
+            # widget textShadow "1px 1px 0 rgba(0,0,0,0.85), 0 0 3px ..." reads
+            # as a soft dark outline; a thin translucent black stroke is its
+            # closest matplotlib match (a full-opacity stroke looks stenciled)
+            stroke = [matplotlib.patheffects.withStroke(
+                linewidth=1.5 * point, foreground=(0, 0, 0, 0.8))]
+            if label:
+                # panel title Box (show2d/index.tsx): top 6px inside the image,
+                # centered, bold max(8, panel_title_font_size) px white @ 95%
+                title_px = max(8, int(self.panel_title_font_size or 11))
+                ax.text(*css_xy(css_w / 2, 6), label, color=(1, 1, 1, 0.95),
+                        fontsize=title_px * point, fontweight="bold",
+                        fontfamily=font_family, ha="center", va="top",
+                        path_effects=stroke)
+            if self.scale_bar_visible:
+                # drawScaleBarHiDPI (js/figure.ts): margin 12, bar 5 px thick
+                # bottom-right, 16px label centered 4px above the bar, zoom
+                # badge left-aligned at x=12 sharing the bar's bottom edge,
+                # all under a soft (1,1)-offset half-black shadow
+                bar_x = css_w - bar_css - 12
+                bar_y = css_h - 12
+                ax.add_patch(matplotlib.patches.Rectangle(
+                    css_xy(bar_x + 1, bar_y + 1), bar_css * k, 5 * k,
+                    facecolor=(0, 0, 0, 0.5), edgecolor="none"))
+                ax.add_patch(matplotlib.patches.Rectangle(
+                    css_xy(bar_x, bar_y), bar_css * k, 5 * k,
+                    facecolor="white", edgecolor="none"))
+                ax.text(*css_xy(bar_x + bar_css / 2, bar_y - 4), bar_text,
+                        color="white", fontsize=16 * point,
+                        fontfamily=font_family, ha="center", va="bottom",
+                        path_effects=stroke)
+                ax.text(*css_xy(12, css_h - 12 + 5), zoom_text,
+                        color="white", fontsize=16 * point,
+                        fontfamily=font_family, ha="left", va="bottom",
+                        path_effects=stroke)
         buf = _io.BytesIO()
-        fig.savefig(buf, format="png", dpi=dpi, facecolor="white", bbox_inches="tight")
+        fig.savefig(buf, format="png", dpi=dpi, facecolor="white",
+                    bbox_inches="tight", pad_inches=0.05)
         plt.close(fig)
         return base64.b64encode(buf.getvalue()).decode("ascii")
 
@@ -1036,6 +1441,93 @@ class Show2D(anywidget.AnyWidget):
             data = bundle[0] if isinstance(bundle, tuple) else bundle
             data["image/png"] = png
         return bundle
+
+    def _ipython_display_(self):
+        """Publish the widget view plus a SEPARATE static-PNG sibling output.
+
+        JupyterLab's widget renderer outranks ``image/png`` inside a single
+        bundle: on a cold reopen with ``save_state=False`` it shows "Error
+        displaying widget: model not found" and never falls back to the PNG
+        living in the same output. Publishing the render as its own
+        display_data output survives, because Lab only swallows the
+        widget-view output. ``save_state=True`` embeds full interactive
+        state, so no sibling is emitted. The sibling carries this widget's
+        model id so the live frontend can hide it while the interactive view
+        is mounted.
+
+        The sibling starts as an EMPTY placeholder and is filled with the
+        PNG only after the cell finishes: rendering at display time would
+        block the cell output on matplotlib for every widget shown, and the
+        PNG is only ever consumed by a notebook save that happens later.
+        """
+        from IPython.display import display
+        # super() bundle only: the in-bundle PNG _repr_mimebundle_ adds for
+        # direct consumers (nbsphinx, repr displays) would render here
+        # synchronously; the sibling fill below covers the notebook-save path
+        bundle = super()._repr_mimebundle_()
+        if bundle is None:
+            return
+        data, metadata = bundle if isinstance(bundle, tuple) else (bundle, {})
+        display(data, raw=True, metadata=metadata or None)
+        if not getattr(self, "_save_state", False):
+            self._display_static_sibling_deferred()
+
+    def _static_fallback_marker(self, png_b64: str | None = None) -> str:
+        """The sibling's HTML: an ``img.quantem-static-fallback`` tagged with
+        this widget's model id, which is exactly what the live frontend's
+        hide effect queries. The empty placeholder keeps the tag (hidden) so
+        the hide keeps working after ``update_display_data`` swaps in the
+        render."""
+        note = "Show2D static render (for saved-notebook viewing)"
+        src = f' src="data:image/png;base64,{png_b64}"' if png_b64 else ' style="display:none"'
+        return (f'<img class="quantem-static-fallback" '
+                f'data-quantem-model-id="{self.model_id}"{src} alt="{note}">')
+
+    def _display_static_sibling_deferred(self):
+        """Reserve the sibling output now, render the PNG after the cell ends.
+
+        The placeholder is published with a ``display_id``; a one-shot
+        ``post_execute`` hook renders the PNG once the current cell finishes
+        and rewrites the placeholder via ``update_display_data``. The widget
+        therefore appears instantly, the notebook file saved any time after
+        the cell carries the render, and the live view never shows a
+        duplicate (the placeholder is empty, then hidden by the frontend).
+        ``post_execute`` fires inside the same execute request, so headless
+        runners (nbconvert/nbclient) capture the update deterministically.
+        Terminal IPython has no notebook file to save, so outside a kernel
+        (no ZMQInteractiveShell) no sibling is emitted at all.
+        """
+        from IPython import get_ipython
+        from IPython.display import display
+        shell = get_ipython()
+        if shell is None or type(shell).__name__ != "ZMQInteractiveShell":
+            return
+        handle = display(
+            {"text/html": self._static_fallback_marker(), "text/plain": ""},
+            raw=True, display_id=True,
+            metadata={"quantem.widget": {"static_fallback": True}},
+        )
+
+        def fill():
+            png_b64 = self._static_png_b64()
+            if not png_b64 or handle is None:
+                return
+            handle.update(
+                {
+                    "image/png": base64.b64decode(png_b64),
+                    "text/html": self._static_fallback_marker(png_b64),
+                    "text/plain": "Show2D static render (for saved-notebook viewing)",
+                },
+                raw=True,
+                metadata={"quantem.widget": {"static_fallback": True}},
+            )
+
+        def fill_once():
+            shell.events.unregister("post_execute", fill_once)
+            fill()
+
+        shell.events.register("post_execute", fill_once)
+        self._static_fallback_fill = fill  # test hook: flush the deferred render
 
     def state_dict(self):
         return {
@@ -1068,6 +1560,7 @@ class Show2D(anywidget.AnyWidget):
             "link_contrast": self.link_contrast,
             "zoom_row": self.zoom_row,
             "zoom_col": self.zoom_col,
+            "view_box": list(self.view_box),
             "diff_mode": self.diff_mode,
             "ncols": self.ncols,
             "selected_idx": self.selected_idx,
@@ -1321,6 +1814,46 @@ class Show2D(anywidget.AnyWidget):
                 continue
             if hasattr(self, key):
                 setattr(self, key, val)
+
+    @property
+    def current_view(self) -> dict:
+        """The field of view currently on screen, in image and calibrated coordinates.
+
+        Every pan/zoom in the browser syncs the visible region back to Python
+        (debounced ~100 ms), so after zooming into a feature you can capture
+        exactly where you are for figure-making: ``view = w.current_view``.
+        Feed ``view["box"]`` back as ``Show2D(data, view_box=view["box"])`` to
+        reproduce the same crop later. The box is axis-aligned, so the two
+        corners (row0, col0) and (row1, col1) define all four.
+
+        Returns a dict with ``row0/col0/row1/col1`` (image pixel coordinates),
+        ``height/width`` (visible extent in pixels), ``zoom``, ``box`` (the
+        (row0, row1, col0, col1) tuple accepted by ``view_box=``), and when
+        ``pixel_size > 0`` the calibrated ``*_cal`` extents plus ``unit``.
+        """
+        if len(self.view_box) == 4:
+            row0, row1, col0, col1 = (float(v) for v in self.view_box)
+        else:
+            # No pan/zoom synced from the browser yet: derive the viewport
+            # from the construction-time zoom center so the property is
+            # usable immediately after Show2D(data, zoom=..., zoom_row=...).
+            zoom = float(self.initial_zoom) if self.initial_zoom else 1.0
+            center_row = float(self.zoom_row) if self.zoom_row is not None else self.height / 2
+            center_col = float(self.zoom_col) if self.zoom_col is not None else self.width / 2
+            half_h, half_w = self.height / (2 * zoom), self.width / (2 * zoom)
+            row0, row1 = max(0.0, center_row - half_h), min(float(self.height), center_row + half_h)
+            col0, col1 = max(0.0, center_col - half_w), min(float(self.width), center_col + half_w)
+        view = {"row0": row0, "col0": col0, "row1": row1, "col1": col1,
+                "height": row1 - row0, "width": col1 - col0,
+                "zoom": float(self.initial_zoom),
+                "box": (row0, row1, col0, col1)}
+        if self.pixel_size > 0:
+            scale = self.pixel_size
+            view.update({"row0_cal": row0 * scale, "col0_cal": col0 * scale,
+                         "row1_cal": row1 * scale, "col1_cal": col1 * scale,
+                         "height_cal": (row1 - row0) * scale, "width_cal": (col1 - col0) * scale,
+                         "unit": self.pixel_unit})
+        return view
 
     @property
     def visible_panels(self) -> list[int]:
