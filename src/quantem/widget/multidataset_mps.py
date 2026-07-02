@@ -117,3 +117,20 @@ def load_macbook_datasets(masters, *, det_bin: int = 4, scan_size: int | None = 
         print(f"[1/{n}] {names[0]} ready in {time.perf_counter() - t0:.1f}s", flush=True)
     multi = MultiChunkedFrames([ds0], n_total=n, names=names)
     return LazyMacbookDatasets(masters, det_bin, names, multi, _decode, verbose=verbose)
+
+
+def load_4dstem_macbook(masters, *, det_bin: int = 4, scan_size: int | None = None,
+                        verbose: bool = True, **viewer_kwargs):
+    """Convenience wrapper: build the MPS lazy handle AND return a mounted Show4DSTEM viewer.
+
+    Same discovery + decode behavior as :func:`load_macbook_datasets`, but
+    additionally hands the returned :class:`LazyMacbookDatasets` to
+    :func:`Show4DSTEM` so a caller who wants "one line, see it now" doesn't have
+    to construct the viewer separately. Extra keyword arguments are forwarded to
+    the viewer.
+    """
+    from quantem.widget import Show4DSTEM
+    lazy = load_macbook_datasets(
+        masters, det_bin=det_bin, scan_size=scan_size, verbose=verbose,
+    )
+    return Show4DSTEM(lazy, **viewer_kwargs)

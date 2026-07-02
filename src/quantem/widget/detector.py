@@ -232,3 +232,294 @@ def virtual(data, mode="BF", *, center=None, bf_radius=None, inner=None, outer=N
         bf_radius = bf_radius if bf_radius is not None else r_auto
     mask = _detector_mask(mode, center, bf_radius, dp.shape, inner, outer)
     return masked_sum(data, mask)
+
+
+# --- Migrated from quantem.live.engine.preprocess.brightfield ---
+def detect_bf_radius(
+    mean_dp: cp.ndarray,
+    threshold_ratio: float = 0.1
+) -> tuple[tuple[int, int], int]:
+    """
+    Detect BF disk center and radius from mean diffraction pattern.
+
+    Runs entirely on GPU. Uses intensity thresholding for center-of-mass
+    and radial profile analysis for the half-max radius.
+
+    Parameters
+    ----------
+    mean_dp : cp.ndarray
+        Mean diffraction pattern with shape (k_row, k_col).
+    threshold_ratio : float
+        Fraction of max intensity for thresholding (default: 0.1).
+
+    Returns
+    -------
+    tuple[tuple[int, int], int]
+        ((row_center, col_center), radius) - center coordinates and
+        radius in pixels.
+
+    Raises
+    ------
+    ValueError
+        If the diffraction pattern is empty, all-zero, or contains
+        only NaN/Inf values.
+    """
+    import cupy as cp
+    if mean_dp.ndim != 2:
+        raise ValueError(
+            f"Expected 2D diffraction pattern, got {mean_dp.ndim}D "
+            f"with shape {mean_dp.shape}"
+        )
+    n_k_row, n_k_col = mean_dp.shape
+    if n_k_row == 0 or n_k_col == 0:
+        raise ValueError(
+            f"Diffraction pattern has zero-size dimension: shape {mean_dp.shape}"
+        )
+    dp = mean_dp.astype(cp.float32)
+    dp_max = float(cp.nanmax(dp))
+    if not np.isfinite(dp_max) or dp_max <= 0:
+        raise ValueError(
+            "Diffraction pattern has no positive finite values - "
+            "cannot detect BF disk. Check that your data is loaded correctly."
+        )
+    # Threshold to find BF disk
+    threshold = threshold_ratio * dp_max
+    mask = dp > threshold
+    if not bool(cp.any(mask)):
+        raise ValueError(
+            f"No pixels above threshold ({threshold_ratio:.0%} of max intensity). "
+            f"The diffraction pattern may be too noisy or empty."
+        )
+    # Center of mass on GPU
+    mask_f = mask.astype(cp.float32)
+    total = float(mask_f.sum())
+    row_coords = cp.arange(n_k_row, dtype=cp.float32).reshape(-1, 1)
+    col_coords = cp.arange(n_k_col, dtype=cp.float32).reshape(1, -1)
+    row_center_f = float((row_coords * mask_f).sum() / total)
+    col_center_f = float((col_coords * mask_f).sum() / total)
+    if not (np.isfinite(row_center_f) and np.isfinite(col_center_f)):
+        raise ValueError(
+            "Center-of-mass calculation returned NaN - "
+            "diffraction pattern may be degenerate."
+        )
+    row_center = max(0, min(int(round(row_center_f)), n_k_row - 1))
+    col_center = max(0, min(int(round(col_center_f)), n_k_col - 1))
+    # Radial profile on GPU
+    dr = cp.arange(n_k_row, dtype=cp.float32) - row_center
+    dc = cp.arange(n_k_col, dtype=cp.float32) - col_center
+    DR, DC = cp.meshgrid(dr, dc, indexing='ij')
+    R = cp.sqrt(DR**2 + DC**2)
+    # Integer-binned radial profile (vectorized, no Python loop)
+    max_r = min(row_center, col_center, n_k_row - row_center, n_k_col - col_center)
+    if max_r < 2:
+        return (row_center, col_center), max(1, min(n_k_row, n_k_col) // 4)
+    R_int = cp.rint(R).astype(cp.int32).ravel()
+    dp_flat = dp.ravel()
+    profile = cp.zeros(max_r, dtype=cp.float32)
+    counts = cp.zeros(max_r, dtype=cp.float32)
+    valid = R_int < max_r
+    cp.add.at(profile, R_int[valid], dp_flat[valid])
+    cp.add.at(counts, R_int[valid], cp.ones_like(dp_flat[valid]))
+    nonzero = counts > 0
+    profile[nonzero] /= counts[nonzero]
+    # Gaussian smooth the profile on GPU (1D convolution)
+    if int(profile.size) > 5:
+        sigma = 2.0
+        ksize = int(6 * sigma + 1) | 1  # ensure odd
+        x = cp.arange(ksize, dtype=cp.float32) - ksize // 2
+        kernel = cp.exp(-0.5 * (x / sigma) ** 2)
+        kernel /= kernel.sum()
+        # Pad and convolve
+        padded = cp.pad(profile, ksize // 2, mode='edge')
+        profile_smooth = cp.convolve(padded, kernel, mode='valid')[:profile.size]
+        center_intensity = float(profile_smooth[:5].mean())
+        half_max = center_intensity * 0.5
+        below_half = cp.where(profile_smooth < half_max)[0]
+        if below_half.size > 0:
+            radius = int(below_half[0])
+        else:
+            radius = int(profile.size) // 2
+    else:
+        radius = min(n_k_row, n_k_col) // 4
+    radius = max(1, radius)
+    return (row_center, col_center), radius
+
+
+# --- Migrated from quantem.live.engine.preprocess (dp_mean + virtual_image) ---
+def dp_mean(data: cp.ndarray) -> cp.ndarray:
+    """
+    Compute mean diffraction pattern on GPU.
+
+    Uses integer reduction (``uint64`` accumulator) so there is no
+    intermediate float32 copy of the full 4D array. For 512x512 x 192x192
+    this saves ~38 GB of transient VRAM compared with
+    ``data.astype(float32).mean(axis=0)``.
+
+    Parameters
+    ----------
+    data : cp.ndarray
+        3D ``(N, det_row, det_col)`` or 4D ``(scan_row, scan_col, det_row, det_col)``.
+
+    Returns
+    -------
+    cp.ndarray
+        2D array (det_row, det_col), float32.
+    """
+    import cupy as cp
+    if data.ndim == 3:
+        n = data.shape[0]
+        return data.sum(axis=0, dtype=cp.uint64).astype(cp.float32) / n
+    scan_row, scan_col = data.shape[0], data.shape[1]
+    n = scan_row * scan_col
+    return data.reshape(n, *data.shape[2:]).sum(axis=0, dtype=cp.uint64).astype(cp.float32) / n
+
+
+
+
+def virtual_image(
+    data: cp.ndarray,
+    center_row: float,
+    center_col: float,
+    radius: float | None = None,
+    inner_radius: float | None = None,
+    outer_radius: float | None = None,
+    chunk_size: int | None = None,
+) -> cp.ndarray:
+    """
+    Compute a virtual image by summing masked detector pixels.
+
+    Uses fancy indexing + integer reduction so we only allocate a copy of
+    the masked pixels, not the entire detector. For a 512x512 scan with a
+    BF mask of ~9000 pixels, peak VRAM is ~5 GB instead of ~40 GB.
+
+    For large scans / wide annuli (e.g. DF outer=6.0 on 512², where the
+    masked-pixels copy can still be GB-scale), the scan dimension is
+    chunked. The chunk size is auto-tuned: an initial conservative
+    estimate runs chunk 0, the actual peak allocation is measured, then
+    remaining chunks are retuned. Uses the CLAUDE.md "Adaptive GPU
+    chunking" pattern (estimate → measure → retune → safety factor 0.5).
+
+    Parameters
+    ----------
+    data : cp.ndarray
+        3D ``(N, det_row, det_col)`` or 4D ``(scan_row, scan_col, det_row, det_col)``.
+        For 3D input, returns 2D ``(n, n)`` if the scan is square, else 1D.
+    center_row, center_col : float
+        Center of the detector mask in pixels.
+    radius : float, optional
+        Radius for circular (BF) mask.
+    inner_radius, outer_radius : float, optional
+        Radii for annular (DF) mask.
+    chunk_size : int, optional
+        Override the auto-tuned chunk size. ``None`` → auto. Pass a large
+        value (or ``data.shape[0]``) to disable chunking.
+
+    Returns
+    -------
+    cp.ndarray
+        2D ``(scan_row, scan_col)`` for 4D input, or 2D ``(n, n)`` for 3D
+        input (auto-detected square scan).
+    """
+    import cupy as cp
+    import math
+    import os
+
+    det_row, det_col = data.shape[-2], data.shape[-1]
+
+    # Single-source compute (DEFAULT): use the quantem.widget detector geometry +
+    # masked-sum that the Jupyter widget and any GUI share, instead of the local
+    # cupy path below. Proven bit-identical to the cupy path on real 512x512x192x192
+    # (docs/2026-06-03-quantem-live-widget-single-source-migration.md). The cupy path
+    # below is the fallback: any failure falls straight through to it, and
+    # QT_LIVE_WIDGET_COMPUTE=0 forces it (memory-tuned chunked reduction, useful on
+    # constrained GPUs). So the dashboard can never break - worst case it's cupy.
+    if os.environ.get("QT_LIVE_WIDGET_COMPUTE", "1") != "0":
+        try:
+            from quantem.widget import Dataset4dstemGPU
+            from quantem.widget.detector import detector_mask
+            lo = 0.0 if radius is not None else float(inner_radius)
+            hi = float(radius) if radius is not None else float(outer_radius)
+            wmask = detector_mask((float(center_row), float(center_col)), lo, hi,
+                                  (int(det_row), int(det_col)))
+            wvi = Dataset4dstemGPU(data).masked_sum(wmask)  # widget single source
+            wvi = cp.asarray(np.asarray(wvi), dtype=cp.float32)
+            if data.ndim == 4:
+                return wvi.reshape(data.shape[0], data.shape[1])
+            side = int(math.isqrt(int(wvi.size)))
+            return wvi.reshape(side, side) if side * side == wvi.size else wvi.ravel()
+        except Exception:  # noqa: BLE001 — fall through to the cupy path
+            pass
+
+    k_row = cp.arange(det_row, dtype=cp.float32)
+    k_col = cp.arange(det_col, dtype=cp.float32)
+    k_row, k_col = cp.meshgrid(k_row, k_col, indexing='ij')
+    dist = cp.sqrt((k_row - center_row) ** 2 + (k_col - center_col) ** 2)
+
+    if radius is not None:
+        mask = dist <= radius
+    elif inner_radius is not None and outer_radius is not None:
+        mask = (dist >= inner_radius) & (dist <= outer_radius)
+    else:
+        raise ValueError("Provide either radius (BF) or inner_radius + outer_radius (DF)")
+
+    # Grab only the masked pixels, sum them with an integer accumulator.
+    indices = cp.where(mask.ravel())[0]
+    data_2d = data.reshape(-1, det_row * det_col)  # view, no copy
+    n_total = int(data_2d.shape[0])
+    n_masked = int(indices.size)
+
+    # Initial chunk-size estimate. The transient on each chunk is the
+    # fancy-index copy: chunk × n_masked × dtype_bytes. Aim to use ~25%
+    # of free memory per chunk so a concurrent allocation (e.g. another
+    # tab loading data) doesn't push us over.
+    itemsize = int(data.dtype.itemsize)
+    if chunk_size is None:
+        try:
+            free_bytes, _ = cp.cuda.runtime.memGetInfo()
+            budget = max(64 * 1024 * 1024, int(free_bytes * 0.25))
+            est_per_pos = max(1, n_masked * itemsize)
+            chunk_size = max(1024, min(n_total, budget // est_per_pos))
+        except Exception:  # noqa: BLE001 — fall back to one shot
+            chunk_size = n_total
+    chunk_size = max(1, min(chunk_size, n_total))
+
+    # One-shot path when the whole scan fits in a single chunk.
+    if chunk_size >= n_total:
+        vi_1d = data_2d[:, indices].sum(axis=-1, dtype=cp.uint64).astype(cp.float32)
+    else:
+        # Pre-allocate output (small, just N_scan floats).
+        vi_1d = cp.empty(n_total, dtype=cp.float32)
+        i = 0
+        while i < n_total:
+            end = min(i + chunk_size, n_total)
+            if i == 0:
+                cp.cuda.runtime.deviceSynchronize()
+                cp.get_default_memory_pool().free_all_blocks()
+            chunk_acc = data_2d[i:end, indices].sum(axis=-1, dtype=cp.uint64)
+            vi_1d[i:end] = chunk_acc.astype(cp.float32)
+            del chunk_acc
+            # After the first chunk, measure actual per-position cost and
+            # retune subsequent chunks. The peak alloc divided by the chunk
+            # we just ran gives the realized cost; pick 0.5× free / cost
+            # for the next chunks (safety factor for fragmentation).
+            if i == 0:
+                try:
+                    pool = cp.get_default_memory_pool()
+                    free_bytes, _ = cp.cuda.runtime.memGetInfo()
+                    used_now = int(pool.used_bytes())
+                    realized_per_pos = max(1, used_now // max(1, end - i))
+                    new_chunk = max(1024, int(free_bytes * 0.5 / realized_per_pos))
+                    chunk_size = min(n_total, new_chunk)
+                except Exception:  # noqa: BLE001
+                    pass
+            i = end
+
+    if data.ndim == 4:
+        return vi_1d.reshape(data.shape[0], data.shape[1])
+    n = data.shape[0]
+    side = int(math.isqrt(n))
+    if side * side == n:
+        return vi_1d.reshape(side, side)
+    return vi_1d
+
+
