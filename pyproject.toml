@@ -11,7 +11,6 @@ license-files = ["LICENSE"]
 requires-python = ">=3.11"
 dependencies = [
     "quantem>=0.1.8",
-    "quantem.data>=0.0.1rc1",   # shared HF dataset hub (upload/download), re-exported by io.hub
     "anywidget>=0.11.0",
     # JupyterLab widget manager 5.0.10 restores saved metadata.widgets state on reopen.
     "jupyterlab_widgets>=3.0.10",
@@ -32,6 +31,12 @@ dependencies = [
     # a silent CPU fallback). So pip install stays one line without a cupy conflict.
     "pyobjc-framework-Metal>=10.0 ; sys_platform == 'darwin'",
 ]
+
+[project.optional-dependencies]
+# Shared HF dataset hub (upload/download), re-exported by quantem.widget.io.hub
+# Not published on PyPI yet so cannot be a hard depedency
+# pip install quantem.widget[hub] once available
+hub = ["quantem.data>=0.0.1rc1"]
 
 [project.scripts]
 quantem = "quantem.widget.cli:main"
