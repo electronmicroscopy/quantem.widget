@@ -42,6 +42,29 @@ def test_showdiffraction_frame_idx_changes_frame():
     assert w.frame_idx == 3
 
 
+def test_showdiffraction_offline_frames_baked():
+    data = np.zeros((4, 8, 8), dtype=np.float32)
+    for i in range(4):
+        data[i] = float(i + 1)
+    frame_len = 8 * 8
+    # offline multi-frame: whole stack baked so the kernel-less HTML can scrub it
+    w = ShowDiffraction(data, offline=True, verbose=False)
+    assert len(w.offline_frames) == 4 * frame_len * 4
+    baked = np.frombuffer(w.offline_frames, dtype=np.float32).reshape(4, 8, 8)
+    assert np.allclose(baked[2], 3.0)
+    # live widget stays empty (frames stream through frame_bytes per frame)
+    live = ShowDiffraction(data, offline=False, verbose=False)
+    assert live.offline_frames == b""
+    # toggling offline bakes / clears
+    live.offline = True
+    assert len(live.offline_frames) == 4 * frame_len * 4
+    live.offline = False
+    assert live.offline_frames == b""
+    # single pattern never bakes: nothing to scrub
+    single = ShowDiffraction(np.ones((8, 8), dtype=np.float32), offline=True, verbose=False)
+    assert single.offline_frames == b""
+
+
 def test_showdiffraction_4d_raises():
     with pytest.raises(ValueError, match="Show4DSTEM"):
         ShowDiffraction(np.random.rand(4, 4, 16, 16).astype(np.float32), verbose=False)
@@ -336,6 +359,27 @@ def test_showdiffraction_export(tmp_path):
     payload = json.loads(w.export_measurements(tmp_path / "m.json").read_text())
     assert payload["metadata"]["calibration_source"] == "manual"
     assert len(payload["measurements"]) == 2
+
+
+def test_showdiffraction_measurements_from_state(tmp_path):
+    # The saved state holds every spot and ring, so the measurement table is
+    # rebuildable from it alone -- no separate export file needs to be kept.
+    w = ShowDiffraction(
+        _disk_dp(), k_pixel_size=0.05, spot_refine=False, center=(32, 32), bf_radius=3, verbose=False
+    )
+    w.set_center(32, 32)
+    w.add_spot(32, 42)
+    w.add_ring(20.0)
+
+    state_path = tmp_path / "state.json"
+    w.save(state_path)
+
+    records = ShowDiffraction.measurements_from_state(state_path)
+    assert [r["kind"] for r in records] == ["spot", "ring"]
+    assert records == w._measurement_records()
+
+    csv_path = ShowDiffraction.measurements_from_state(state_path, tmp_path / "from_state.csv")
+    assert csv_path.read_text() == w.export_measurements(tmp_path / "live.csv").read_text()
 
 
 def test_showdiffraction_center_mode_validator():

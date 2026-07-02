@@ -25,7 +25,7 @@ import { computeHistogramFromBytes, findDataRange, sliderRange, applyLogScaleInP
 import { COLORMAPS, COLORMAP_NAMES, applyColormap } from "../colormaps";
 
 // ============================================================================
-// Style constants
+// Style tokens
 // ============================================================================
 
 const MIN_ZOOM = 0.5;
@@ -68,7 +68,7 @@ const upwardMenuProps = {
 };
 
 // ============================================================================
-// InfoTooltip + KeyboardShortcuts (same pattern as Show4DSTEM)
+// Info tooltip + keyboard shortcuts
 // ============================================================================
 
 function InfoTooltip({ text, theme = "dark" }: { text: React.ReactNode; theme?: "light" | "dark" }) {
@@ -128,7 +128,7 @@ function KeyboardShortcuts({ items }: { items: [string, string][] }) {
 }
 
 // ============================================================================
-// Helper: Histogram (inline, same pattern as other widgets)
+// Contrast histogram with draggable min/max handles
 // ============================================================================
 
 interface HistogramProps {
@@ -203,7 +203,7 @@ function Histogram({ data, vminPct, vmaxPct, onRangeChange, width = 110, height 
 }
 
 // ============================================================================
-// Helper: format stat value
+// Format a stat value for the readout
 // ============================================================================
 function formatStat(v: number): string {
   if (v === 0) return "0";
@@ -214,7 +214,7 @@ function formatStat(v: number): string {
 }
 
 // ============================================================================
-// Spot type
+// Spot and ring types
 // ============================================================================
 
 interface SpotDict {
@@ -243,7 +243,7 @@ interface RingDict {
   intensity: number;
 }
 
-// Shared spot color palette — table rows and canvas overlay stay in sync by index.
+// Spot colors, shared by table rows and canvas overlay.
 const PICK_COLORS = [
   "#ff4d4f", "#40a9ff", "#73d13d", "#ffa940",
   "#9254de", "#13c2c2", "#f759ab", "#bae637",
@@ -255,7 +255,7 @@ const spotColorAt = (index: number) => PICK_COLORS[((index % PICK_COLORS.length)
 // ============================================================================
 
 function ShowDiffraction() {
-  // Offline/export HTML renders force a light/white background regardless of OS theme.
+  // Force a light background for offline/export HTML renders.
   const [offline] = useModelState<boolean>("offline");
   const { themeInfo, colors: themeColors } = useTheme(offline);
   const rootRef = React.useRef<HTMLDivElement>(null);
@@ -274,12 +274,15 @@ function ShowDiffraction() {
     ...upwardMenuProps,
     PaperProps: { sx: { bgcolor: themeColors.controlBg, color: themeColors.text, border: `1px solid ${themeColors.border}` } },
   };
+  // Bordered control group.
+  const controlBox = { ...controlRow, border: `1px solid ${themeColors.border}`, borderRadius: "4px", bgcolor: themeColors.controlBg };
 
   // Model state
   const [title] = useModelState<string>("title");
   const [detRows] = useModelState<number>("det_rows");
   const [detCols] = useModelState<number>("det_cols");
   const [frameBytes] = useModelState<DataView>("frame_bytes");
+  const [offlineFrames] = useModelState<DataView>("offline_frames");
   const [frameIdx, setFrameIdx] = useModelState<number>("frame_idx");
   const [nFrames] = useModelState<number>("n_frames");
   const [centerRow, setCenterRow] = useModelState<number>("center_row");
@@ -307,7 +310,7 @@ function ShowDiffraction() {
   const [showStats] = useModelState<boolean>("show_stats");
   const [showControls] = useModelState<boolean>("show_controls");
 
-  // Standalone HTML export bridge (simplified port of Show2D; no uint8/quantized modes).
+  // Standalone HTML export bridge.
   const [, setExportRequest] = useModelState<string>("export_request");
   const [exportStatus] = useModelState<string>("export_status");
   const [exportEnabled] = useModelState<boolean>("export_enabled");
@@ -317,7 +320,7 @@ function ShowDiffraction() {
   const exportCounterRef = React.useRef(0);
   const pendingExportRef = React.useRef<string>("");
 
-  // ShowDiffraction core (center, rings, calib)
+  // Center, rings, calibration
   const [centerMode, setCenterMode] = useModelState<string>("center_mode");
   const [rings] = useModelState<RingDict[]>("rings");
   const [calibrationSource] = useModelState<string>("calibration_source");
@@ -328,7 +331,7 @@ function ShowDiffraction() {
   const [, setCalibrateFromRingRequest] = useModelState<number[]>("_calibrate_from_ring_request");
   const [, setCalibrateFromSpotRequest] = useModelState<number[]>("_calibrate_from_spot_request");
 
-  // Measurement export
+  // Export spots and rings as CSV or JSON.
   const exportMeasurements = React.useCallback((format: "csv" | "json") => {
     const cols = [
       "id", "kind", "row", "col", "r_pixels", "r_pixels_err",
@@ -372,11 +375,11 @@ function ShowDiffraction() {
   const [dpExportAnchor, setDpExportAnchor] = React.useState<HTMLElement | null>(null);
   const [dKnown, setDKnown] = React.useState("");
 
-  // Local frame index for smooth slider scrubbing; commit to Python on release.
+  // Local frame index for smooth scrubbing; commit on release.
   const [localFrame, setLocalFrame] = React.useState(frameIdx);
   React.useEffect(() => { setLocalFrame(frameIdx); }, [frameIdx]);
 
-  // center the diffraction center at 2.5x zoom
+  // Zoom to the diffraction center.
   const zoomToCenter = React.useCallback(() => {
     const Z = 2.5;
     setDpZoom(Z);
@@ -384,7 +387,6 @@ function ShowDiffraction() {
     setDpPanY(canvasSize * Z * (0.5 - centerRow / Math.max(detRows, 1)));
   }, [canvasSize, centerRow, centerCol, detRows, detCols]);
 
-  // Canvas refs
   const dpCanvasRef = React.useRef<HTMLCanvasElement>(null);
   const dpUiRef = React.useRef<HTMLCanvasElement>(null);
   const dpScaleRef = React.useRef<HTMLCanvasElement>(null);
@@ -393,7 +395,7 @@ function ShowDiffraction() {
   const dpVminRef = React.useRef(0);
   const dpVmaxRef = React.useRef(1);
 
-  // Canvas resize handle
+  // Drag the corner handle to resize the canvas.
   const handleCanvasResizeStart = (e: React.MouseEvent) => {
     e.stopPropagation();
     e.preventDefault();
@@ -431,7 +433,7 @@ function ShowDiffraction() {
     };
   }, [isResizingCanvas, resizeCanvasStart]);
 
-  // Colormap LUT, reversed when Invert is on (applyColormap can't take a reversed range).
+  // Colormap LUT, reversed when Invert is on.
   const dpLut = React.useMemo(() => {
     const base = COLORMAPS[dpColormap] || COLORMAPS.inferno;
     if (!dpInvert) return base;
@@ -444,9 +446,23 @@ function ShowDiffraction() {
     return inv;
   }, [dpColormap, dpInvert]);
 
-  // DP rendering (expensive: colormap)
+  // Offline bakes the whole stack for client-side scrubbing; live streams one frame.
+  const activeFrame = React.useMemo<Float32Array | null>(() => {
+    const frameLen = detRows * detCols;
+    if (offline && offlineFrames && frameLen > 0
+        && offlineFrames.byteLength >= frameLen * 4 * nFrames) {
+      const stack = extractFloat32(offlineFrames);
+      const idx = Math.max(0, Math.min(frameIdx, nFrames - 1));
+      if (stack && stack.length >= frameLen * (idx + 1)) {
+        return stack.subarray(idx * frameLen, (idx + 1) * frameLen);
+      }
+    }
+    return extractFloat32(frameBytes, frameLen);
+  }, [offline, offlineFrames, frameBytes, frameIdx, nFrames, detRows, detCols]);
+
+  // Render the frame: scale then colormap
   React.useEffect(() => {
-    const raw = extractFloat32(frameBytes, detRows * detCols);
+    const raw = activeFrame;
     if (!raw || raw.length === 0) return;
     let scaled: Float32Array;
     if (dpScaleMode === "log") {
@@ -475,9 +491,9 @@ function ShowDiffraction() {
     ctx.putImageData(imgData, 0, 0);
     setDpHistData(scaled);
     setDpVersion(v => v + 1);
-  }, [frameBytes, dpLut, dpScaleMode, dpVminPct, dpVmaxPct, detRows, detCols]);
+  }, [activeFrame, dpLut, dpScaleMode, dpVminPct, dpVmaxPct, detRows, detCols]);
 
-  // DP draw (cheap: zoom/pan)
+  // Draw the rendered frame with zoom and pan
   React.useLayoutEffect(() => {
     const canvas = dpCanvasRef.current;
     const offscreen = dpOffscreenRef.current;
@@ -493,7 +509,7 @@ function ShowDiffraction() {
     ctx.drawImage(offscreen, offX, offY, canvasSize * dpZoom, canvasSize * dpZoom);
   }, [dpVersion, dpZoom, dpPanX, dpPanY, canvasSize, detRows, detCols]);
 
-  // DP UI overlay (spots, center, rings, colorbar)
+  // Overlay: center, spots, rings, colorbar
   React.useLayoutEffect(() => {
     const canvas = dpUiRef.current;
     if (!canvas) return;
@@ -527,7 +543,7 @@ function ShowDiffraction() {
     ctx.stroke();
     ctx.setLineDash([]);
 
-    // Spot markers (per-spot color, id label)
+    // Spot markers
     if (spots && spots.length > 0) {
       spots.forEach((spot, i) => {
         const sx = offX + spot.col * scX;
@@ -546,7 +562,7 @@ function ShowDiffraction() {
       });
     }
 
-    // Picked rings (concentric circles about the center)
+    // Rings
     if (rings && rings.length > 0) {
       ctx.strokeStyle = themeInfo.theme === "dark" ? "#ffb74d" : "#e65100";
       ctx.lineWidth = 1.2;
@@ -557,10 +573,8 @@ function ShowDiffraction() {
       }
     }
 
-    // Colorbar
     drawColorbar(ctx, cssW, cssW, dpLut, dpVminRef.current, dpVmaxRef.current, dpScaleMode === "log");
 
-    // Zoom indicator
     if (dpZoom !== 1) {
       ctx.fillStyle = "rgba(255,255,255,0.7)";
       ctx.font = "11px -apple-system, sans-serif";
@@ -572,7 +586,7 @@ function ShowDiffraction() {
     ctx.setTransform(1, 0, 0, 1, 0, 0);
   }, [dpVersion, dpZoom, dpPanX, dpPanY, canvasSize, detRows, detCols, centerRow, centerCol, bfRadius, spots, rings, dpLut, dpScaleMode, themeInfo.theme]);
 
-  // K-space scale bar on its own canvas (drawScaleBarHiDPI clears the whole canvas).
+  // K-space scale bar on its own canvas.
   React.useLayoutEffect(() => {
     const canvas = dpScaleRef.current;
     if (!canvas) return;
@@ -586,10 +600,11 @@ function ShowDiffraction() {
     }
   }, [canvasSize, dpZoom, kCalibrated, kPixelSize, detCols]);
 
-  // DP mouse handlers
+  // Mouse handlers
   const dpIsDragging = React.useRef(false);
   const dpDragStart = React.useRef({ x: 0, y: 0, panX: 0, panY: 0 });
 
+  // Canvas pixel to image (row, col).
   const dpToImage = (e: React.MouseEvent) => {
     const canvas = dpCanvasRef.current;
     if (!canvas) return { row: 0, col: 0 };
@@ -611,13 +626,12 @@ function ShowDiffraction() {
     }
     const { row, col } = dpToImage(e);
     if (!(row >= 0 && row < detRows && col >= 0 && col < detCols)) return;
-    // Manual center mode: click sets the diffraction center instead of adding a spot.
+    // Manual mode: click sets the center instead of adding a spot.
     if (centerMode === "manual") {
       setCenterRow(row);
       setCenterCol(col);
       return;
     }
-    // Left click: add spot
     setSpotAddRequest([row, col]);
   };
 
@@ -627,13 +641,11 @@ function ShowDiffraction() {
       setDpPanY(dpDragStart.current.panY + (e.clientY - dpDragStart.current.y));
       return;
     }
-    // Cursor readout
-    if (!frameBytes || !frameBytes.byteLength) return;
+    if (!activeFrame) return;
     const { row, col } = dpToImage(e);
     const ri = Math.round(row), ci = Math.round(col);
     if (ri >= 0 && ri < detRows && ci >= 0 && ci < detCols) {
-      const raw = extractFloat32(frameBytes, detRows * detCols);
-      if (!raw) return;
+      const raw = activeFrame;
       setCursorInfo({ row: ri, col: ci, value: raw[ri * detCols + ci] });
     } else {
       setCursorInfo(null);
@@ -643,6 +655,7 @@ function ShowDiffraction() {
   const handleDpMouseUp = () => { dpIsDragging.current = false; };
   const handleDpMouseLeave = () => { dpIsDragging.current = false; setCursorInfo(null); };
 
+  // Scroll to zoom.
   const handleDpWheel = (e: React.WheelEvent) => {
     e.preventDefault();
     const delta = e.deltaY > 0 ? 0.9 : 1.1;
@@ -680,7 +693,7 @@ function ShowDiffraction() {
     dpCanvasRef.current.toBlob((b) => { if (b) downloadBlob(b, "showdiffraction_dp.png"); }, "image/png");
   };
 
-  // Request a standalone HTML export from Python; the payload effect below downloads it.
+  // Request an HTML export; the effect below downloads the payload.
   const handleExportHtml = () => {
     setDpExportAnchor(null);
     exportCounterRef.current += 1;
@@ -694,7 +707,7 @@ function ShowDiffraction() {
     setExportRequest(JSON.stringify({ mode: "single", download: true, id, filename }));
   };
 
-  // When a fresh HTML payload arrives for our pending request, download it and clear.
+  // Download the HTML payload once it arrives.
   React.useEffect(() => {
     if (!exportPayloadId || exportPayloadId !== pendingExportRef.current) return;
     const bytes = extractBytes(exportPayload);
@@ -709,6 +722,7 @@ function ShowDiffraction() {
   }, [exportPayload, exportPayloadId, exportPayloadFilename, setExportRequest]);
 
   // Keyboard
+  // Skip shortcuts while typing in a field.
   const isTypingTarget = React.useCallback((target: EventTarget | null): boolean => {
     if (!(target instanceof HTMLElement)) return false;
     if (target.isContentEditable) return true;
@@ -751,7 +765,6 @@ function ShowDiffraction() {
     }
   }, [isTypingTarget, frameIdx, nFrames, setFrameIdx, setSpotUndoRequest]);
 
-  // JSX
   const canvasBox = {
     position: "relative" as const,
     border: `1px solid ${themeColors.border}`,
@@ -820,9 +833,36 @@ function ShowDiffraction() {
         </Stack>
       </Stack>
 
-      {/* DP Panel (single, centered) */}
-      <Box sx={{ display: "flex", justifyContent: "center" }}>
+      {/* DP panel */}
+      <Box sx={{ display: "flex", justifyContent: "flex-start" }}>
         <Box>
+          {/* Toolbar: general controls above the display */}
+          {showControls && (
+            <Stack direction="row" alignItems="center" spacing={`${SPACING.SM}px`} useFlexGap sx={{ mb: `${SPACING.XS}px`, minHeight: 28, flexWrap: "wrap", rowGap: `${SPACING.XS}px`, maxWidth: canvasSize, px: 1, py: 0.5, border: `1px solid ${themeColors.border}`, borderRadius: "4px", bgcolor: themeColors.controlBg }}>
+              <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} onClick={() => setDetectRequest(20)} title="Auto-detect Bragg spots">SPOTS</Button>
+              <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} onClick={() => setDetectRingsRequest(8)} title="Auto-detect Debye–Scherrer rings">RINGS</Button>
+              <Typography sx={{ ...typography.label, fontSize: 10 }}>Center:</Typography>
+              <Select size="small" value={centerMode} onChange={(e) => setCenterMode(String(e.target.value))} sx={{ ...themedSelect, minWidth: 80 }} MenuProps={themedMenuProps}>
+                <MenuItem value="auto" sx={{ fontSize: 10 }}>Auto</MenuItem>
+                <MenuItem value="manual" sx={{ fontSize: 10 }}>Manual</MenuItem>
+              </Select>
+              <Typography sx={{ ...typography.label, fontSize: 10 }}>Cmap:</Typography>
+              <Select size="small" value={dpColormap} onChange={(e) => setDpColormap(e.target.value)} sx={themedSelect} MenuProps={themedMenuProps}>
+                {COLORMAP_NAMES.map(n => <MenuItem key={n} value={n} sx={{ fontSize: 10 }}>{n}</MenuItem>)}
+              </Select>
+              <Typography sx={{ ...typography.label, fontSize: 10 }}>Scale:</Typography>
+              <Select size="small" value={dpScaleMode} onChange={(e) => setDpScaleMode(e.target.value)} sx={{ ...themedSelect, minWidth: 60 }} MenuProps={themedMenuProps}>
+                <MenuItem value="linear" sx={{ fontSize: 10 }}>Linear</MenuItem>
+                <MenuItem value="log" sx={{ fontSize: 10 }}>Log</MenuItem>
+                <MenuItem value="sqrt" sx={{ fontSize: 10 }}>Sqrt</MenuItem>
+              </Select>
+              <Typography sx={{ ...typography.label, fontSize: 10 }}>Invert:</Typography>
+              <Switch size="small" checked={dpInvert} onChange={(_, v) => setDpInvert(v)} sx={switchStyles.small} />
+              {centerMode === "manual" && (
+                <Typography sx={{ ...typography.value, color: themeColors.accent }}>click to set</Typography>
+              )}
+            </Stack>
+          )}
           <Typography sx={{ fontSize: 10, color: themeColors.textMuted, mb: `${SPACING.XS}px` }}>
             {nFrames > 1 ? `Frame ${localFrame + 1} / ${nFrames}` : "Diffraction"}
             {cursorInfo && <span style={{ marginLeft: 8, color: themeColors.accent }}>
@@ -890,21 +930,7 @@ function ShowDiffraction() {
             <Typography sx={{ ...typography.label, color: themeColors.text }}>
               Spots ({spots ? spots.length : 0})
             </Typography>
-            <Stack direction="row" spacing={`${SPACING.XS}px`}>
-              <Button
-                size="small" sx={{ ...compactButton, color: themeColors.accent }}
-                onClick={() => setDetectRequest(20)}
-                title="Auto-detect spots"
-              >
-                SPOTS
-              </Button>
-              <Button
-                size="small" sx={{ ...compactButton, color: themeColors.accent }}
-                onClick={() => setDetectRingsRequest(8)}
-                title="Auto-detect rings"
-              >
-                RINGS
-              </Button>
+            <Stack direction="row" spacing={`${SPACING.XS}px`} sx={{ p: 0.25, border: `1px solid ${themeColors.border}`, borderRadius: "4px", bgcolor: themeColors.controlBg }}>
               <Button
                 size="small" sx={{ ...compactButton, color: themeColors.accent }}
                 disabled={!spots || spots.length === 0}
@@ -992,7 +1018,7 @@ function ShowDiffraction() {
             <Typography sx={{ ...typography.label, color: themeColors.text }}>
               Rings ({rings.length})
             </Typography>
-            <Stack direction="row" spacing={`${SPACING.XS}px`}>
+            <Stack direction="row" spacing={`${SPACING.XS}px`} sx={{ p: 0.25, border: `1px solid ${themeColors.border}`, borderRadius: "4px", bgcolor: themeColors.controlBg }}>
               <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} onClick={() => setRingUndoRequest(true)}>UNDO</Button>
               <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} onClick={() => setRingClearRequest(true)}>CLEAR</Button>
             </Stack>
@@ -1032,31 +1058,11 @@ function ShowDiffraction() {
         </Box>
       )}
 
-      {/* Controls */}
+      {/* Fine controls below the display */}
       {showControls && (
         <Box sx={{ mt: `${SPACING.MD}px`, maxWidth: canvasSize }}>
           <Stack direction="row" spacing={`${SPACING.LG}px`} sx={{ flexWrap: "wrap" }}>
-            {/* Center mode */}
-            <Box sx={controlRow}>
-              <Typography sx={typography.label}>Center:</Typography>
-              <Select
-                size="small" value={centerMode}
-                onChange={(e) => setCenterMode(String(e.target.value))}
-                sx={{ ...themedSelect, minWidth: 90 }}
-                MenuProps={themedMenuProps}
-              >
-                <MenuItem value="auto" sx={{ fontSize: 10 }}>Auto</MenuItem>
-                <MenuItem value="manual" sx={{ fontSize: 10 }}>Manual</MenuItem>
-              </Select>
-              {centerMode === "manual" && (
-                <Typography sx={{ ...typography.value, color: themeColors.accent }}>
-                  click to set
-                </Typography>
-              )}
-            </Box>
-
-            {/* Spot refine */}
-            <Box sx={controlRow}>
+            <Box sx={controlBox}>
               <Typography sx={typography.label}>Refine:</Typography>
               <Switch
                 size="small" checked={spotRefine}
@@ -1074,42 +1080,7 @@ function ShowDiffraction() {
               <Typography sx={typography.value}>{snapRadius}</Typography>
             </Box>
 
-            {/* DP Colormap */}
-            <Box sx={controlRow}>
-              <Typography sx={typography.label}>DP:</Typography>
-              <Select
-                size="small" value={dpColormap}
-                onChange={(e) => setDpColormap(e.target.value)}
-                sx={themedSelect}
-                MenuProps={themedMenuProps}
-              >
-                {COLORMAP_NAMES.map(n => <MenuItem key={n} value={n} sx={{ fontSize: 10 }}>{n}</MenuItem>)}
-              </Select>
-            </Box>
-
-            {/* Scale mode + invert */}
-            <Box sx={controlRow}>
-              <Typography sx={typography.label}>Scale:</Typography>
-              <Select
-                size="small" value={dpScaleMode}
-                onChange={(e) => setDpScaleMode(e.target.value)}
-                sx={{ ...themedSelect, minWidth: 60 }}
-                MenuProps={themedMenuProps}
-              >
-                <MenuItem value="linear" sx={{ fontSize: 10 }}>Linear</MenuItem>
-                <MenuItem value="log" sx={{ fontSize: 10 }}>Log</MenuItem>
-                <MenuItem value="sqrt" sx={{ fontSize: 10 }}>Sqrt</MenuItem>
-              </Select>
-              <Typography sx={{ ...typography.label, ml: 1 }}>Invert:</Typography>
-              <Switch
-                size="small" checked={dpInvert}
-                onChange={(_, v) => setDpInvert(v)}
-                sx={switchStyles.small}
-              />
-            </Box>
-
-            {/* DP contrast histogram */}
-            <Box sx={controlRow}>
+            <Box sx={controlBox}>
               <Histogram
                 data={dpHistData}
                 vminPct={dpVminPct}
@@ -1120,8 +1091,7 @@ function ShowDiffraction() {
             </Box>
           </Stack>
 
-          {/* Calibration */}
-          <Box sx={{ ...controlRow, mt: `${SPACING.XS}px` }}>
+          <Box sx={{ ...controlBox, mt: `${SPACING.XS}px` }}>
             <Typography sx={typography.label}>Calibrate d (Å):</Typography>
             <input
               type="number" value={dKnown}
@@ -1146,7 +1116,6 @@ function ShowDiffraction() {
             >CENTER VIEW</Button>
           </Box>
 
-          {/* Center info + calibration provenance */}
           <Box sx={{ ...controlRow, mt: `${SPACING.XS}px` }}>
             <Typography sx={{ ...typography.value, color: themeColors.textMuted }}>
               Center: ({centerRow.toFixed(1)}, {centerCol.toFixed(1)})  BF r={bfRadius.toFixed(1)}
