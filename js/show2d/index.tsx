@@ -435,6 +435,7 @@ type TouchZoomState = {
 const SINGLE_IMAGE_TARGET = 500;
 const GALLERY_IMAGE_TARGET = 300;
 const DEFAULT_FFT_ZOOM = 2;
+const GALLERY_FFT_OVERVIEW_MAX_DIM = 2048;
 const PROFILE_COLORS = ["#4fc3f7", "#81c784", "#ffb74d", "#ce93d8", "#ef5350", "#ffd54f", "#90a4ae", "#a1887f"];
 type ROIItem = { row: number; col: number; shape: string; radius: number; radius_inner: number; width: number; height: number; color: string; line_width: number; highlight: boolean };
 const ROI_COLORS = ["#4fc3f7", "#81c784", "#ffb74d", "#ce93d8", "#ef5350", "#ffd54f", "#90a4ae", "#a1887f"];
@@ -567,6 +568,32 @@ function mergeHistogramBins(histograms: number[][]): number[] {
   const maxCount = Math.max(...bins);
   if (maxCount > 0) for (let i = 0; i < bins.length; i++) bins[i] /= maxCount;
   return bins;
+}
+
+function meanDownsample2D(data: Float32Array, width: number, height: number, factor: number): { data: Float32Array; width: number; height: number } {
+  if (factor <= 1) return { data, width, height };
+  const outW = Math.max(1, Math.ceil(width / factor));
+  const outH = Math.max(1, Math.ceil(height / factor));
+  const out = new Float32Array(outW * outH);
+  for (let oy = 0; oy < outH; oy++) {
+    const y0 = oy * factor;
+    const y1 = Math.min(height, y0 + factor);
+    for (let ox = 0; ox < outW; ox++) {
+      const x0 = ox * factor;
+      const x1 = Math.min(width, x0 + factor);
+      let sum = 0;
+      let count = 0;
+      for (let y = y0; y < y1; y++) {
+        const row = y * width;
+        for (let x = x0; x < x1; x++) {
+          sum += data[row + x];
+          count++;
+        }
+      }
+      out[oy * outW + ox] = count > 0 ? sum / count : 0;
+    }
+  }
+  return { data: out, width: outW, height: outH };
 }
 
 // ============================================================================
@@ -709,6 +736,7 @@ function Show2D() {
   const [traitVmaxs] = useModelState<(number | null)[] | null>("vmaxs");
   const [zoomRowTrait, setZoomRowTrait] = useModelState<number | null>("zoom_row");
   const [zoomColTrait, setZoomColTrait] = useModelState<number | null>("zoom_col");
+  const [, setViewBoxTrait] = useModelState<number[]>("view_box");
   const [diffMode, setDiffMode] = useModelState<boolean>("diff_mode");
   const [diffReference] = useModelState<number>("diff_reference");
   // Align removed — diff = A − B (no shift). Drift correction happens upstream.
@@ -1065,7 +1093,7 @@ function Show2D() {
   const [fftProgress, setFftProgress] = React.useState("");
 
   // Cursor readout state
-  const [cursorInfo, setCursorInfo] = React.useState<{ row: number; col: number; value: number } | null>(null);
+  const [cursorInfo, setCursorInfo] = React.useState<{ idx: number; row: number; col: number; value: number } | null>(null);
 
   // Colorbar state (single image mode only)
   const [showColorbar, setShowColorbar] = React.useState(false);
@@ -1198,7 +1226,18 @@ function Show2D() {
   const fftOffscreensRef = React.useRef<(HTMLCanvasElement | null)[]>([]);
   const fftMagCacheGalleryRef = React.useRef<(Float32Array | null)[]>([]);
   const galleryFftDimsRef = React.useRef<{ w: number; h: number } | null>(null);
+  const galleryFftOverviewRef = React.useRef<{ downsample: number; sourceW: number; sourceH: number; fftW: number; fftH: number } | null>(null);
   const [galleryFftMagVersion, setGalleryFftMagVersion] = React.useState(0);
+  const galleryFftPipelineRef = React.useRef<({
+    displayData: Float32Array;
+    displayMin: number;
+    displayMax: number;
+    magVersion: number;
+    scaleMode: string;
+    fftAuto: boolean;
+    uploadedKey: string;
+  } | null)[]>([]);
+  const galleryFftColorGenRef = React.useRef(0);
 
   // Cached FFT magnitude for single image mode (avoids recomputing on zoom/pan)
   const fftMagCacheRef = React.useRef<Float32Array | null>(null);
@@ -1316,6 +1355,7 @@ function Show2D() {
     maxWidth: canvasW,
     boxSizing: "border-box",
   };
+  const viewBoxTimerRef = React.useRef(0);
   const persistZoomState = React.useCallback((state: ZoomState) => {
     if (canvasW <= 0 || canvasH <= 0 || width <= 0 || height <= 0 || state.zoom <= 0) return;
     const row = height * (0.5 - state.panY / (state.zoom * canvasH));
@@ -1323,7 +1363,19 @@ function Show2D() {
     setInitialZoom(state.zoom);
     setZoomRowTrait(Math.max(0, Math.min(height - 1, row)));
     setZoomColTrait(Math.max(0, Math.min(width - 1, col)));
-  }, [canvasW, canvasH, width, height, setInitialZoom, setZoomRowTrait, setZoomColTrait]);
+    // Sync the visible region (row0, row1, col0, col1) in image pixels so
+    // Python's current_view can capture the exact field of view for figures.
+    // Same inverse transform as the cursor readout: canvas -> image pixels.
+    // Debounced: wheel zoom calls persist per tick; one trait write per gesture.
+    const cx = canvasW / 2;
+    const cy = canvasH / 2;
+    const row0 = Math.max(0, ((0 - cy - state.panY) / state.zoom + cy) / displayScale);
+    const row1 = Math.min(height, ((canvasH - cy - state.panY) / state.zoom + cy) / displayScale);
+    const col0 = Math.max(0, ((0 - cx - state.panX) / state.zoom + cx) / displayScale);
+    const col1 = Math.min(width, ((canvasW - cx - state.panX) / state.zoom + cx) / displayScale);
+    window.clearTimeout(viewBoxTimerRef.current);
+    viewBoxTimerRef.current = window.setTimeout(() => setViewBoxTrait([row0, row1, col0, col1]), 100);
+  }, [canvasW, canvasH, width, height, displayScale, setInitialZoom, setZoomRowTrait, setZoomColTrait, setViewBoxTrait]);
 
   // Initial pan from zoom_row/zoom_col — runs once after first render with valid canvas dims.
   // panX/panY computed so target image (zoomRow, zoomCol) lands at canvas center after transform:
@@ -2958,6 +3010,7 @@ function Show2D() {
       const useRoiCrop = roiFftActive && roiList && roiSelectedIdx >= 0 && roiSelectedIdx < roiList.length;
       const roi = useRoiCrop ? roiList[roiSelectedIdx] : null;
       const t0 = performance.now();
+      const overviewDownsample = roi ? 1 : Math.max(1, Math.ceil(Math.max(width, height) / GALLERY_FFT_OVERVIEW_MAX_DIM));
 
       // Helper: prep one image for FFT (crop, pad, window)
       const prepOne = (idx: number): { real: Float32Array; imag: Float32Array; w: number; h: number } | null => {
@@ -2977,6 +3030,12 @@ function Show2D() {
             inputData = padded; curW = padW; curH = padH;
           }
         } else {
+          if (overviewDownsample > 1) {
+            const down = meanDownsample2D(inputData, curW, curH, overviewDownsample);
+            inputData = down.data;
+            curW = down.width;
+            curH = down.height;
+          }
           const padW = nextPow2(curW), padH = nextPow2(curH);
           if (padW !== curW || padH !== curH) {
             const padded = new Float32Array(padW * padH);
@@ -3002,6 +3061,9 @@ function Show2D() {
         }
       }
       galleryFftDimsRef.current = { w: fftW, h: fftH };
+      galleryFftOverviewRef.current = overviewDownsample > 1
+        ? { downsample: overviewDownsample, sourceW: width, sourceH: height, fftW, fftH }
+        : null;
       const tPrep = performance.now() - t0;
       if (cancelled) { setFftComputing(false); return; }
 
@@ -3053,7 +3115,8 @@ function Show2D() {
       const tFFT = performance.now() - tFFT0;
       const tTotal = performance.now() - t0;
       if (!cancelled) {
-        console.log(`[Show2D FFT] Gallery ${nImages}×${fftW}×${fftH}: prep=${tPrep.toFixed(0)}ms fft=${tFFT.toFixed(0)}ms total=${tTotal.toFixed(0)}ms (${backend} batch=${BATCH_SIZE})`);
+        const overview = overviewDownsample > 1 ? ` overview=${overviewDownsample}×` : "";
+        console.log(`[Show2D FFT] Gallery ${nImages}×${fftW}×${fftH}${overview}: prep=${tPrep.toFixed(0)}ms fft=${tFFT.toFixed(0)}ms total=${tTotal.toFixed(0)}ms (${backend} batch=${BATCH_SIZE})`);
       }
       setFftComputing(false);
       setFftProgress("");
@@ -3073,48 +3136,129 @@ function Show2D() {
     const lut = COLORMAPS[fftColormap] || COLORMAPS.inferno;
     const fftW = galleryFftDimsRef.current?.w ?? width;
     const fftH = galleryFftDimsRef.current?.h ?? height;
+    const gen = ++galleryFftColorGenRef.current;
+    let cancelled = false;
+
+    if (galleryFftPipelineRef.current.length !== nImages) {
+      galleryFftPipelineRef.current = new Array(nImages).fill(null);
+    }
+
+    const ranges: { vmin: number; vmax: number }[] = [];
+    const slots: number[] = [];
+    const uploadSlots: number[] = [];
 
     for (let idx = 0; idx < nImages; idx++) {
       const magnitude = fftMagCacheGalleryRef.current[idx];
       if (!magnitude) continue;
 
-      // Apply scale transform (same logic as single mode)
-      let displayData: Float32Array;
-      let displayMin: number, displayMax: number;
-      if (fftScaleMode === "log") {
-        displayData = applyLogScale(magnitude);
-      } else if (fftScaleMode === "power") {
-        displayData = new Float32Array(magnitude.length);
-        for (let j = 0; j < magnitude.length; j++) displayData[j] = Math.sqrt(magnitude[j]);
-      } else {
-        displayData = magnitude;
+      // Heavy work (log/sqrt transform + range) is cached per FFT source/config.
+      // Histogram/contrast drag below only changes vmin/vmax and does not touch
+      // this block, nor does it recompute FFT magnitudes.
+      let cache = galleryFftPipelineRef.current[idx];
+      const sourceChanged = (
+        !cache ||
+        cache.magVersion !== galleryFftMagVersion ||
+        cache.scaleMode !== fftScaleMode ||
+        cache.fftAuto !== fftAuto
+      );
+      if (sourceChanged) {
+        let displayData: Float32Array;
+        if (fftScaleMode === "log") {
+          displayData = applyLogScale(magnitude);
+        } else if (fftScaleMode === "power") {
+          displayData = new Float32Array(magnitude.length);
+          for (let j = 0; j < magnitude.length; j++) displayData[j] = Math.sqrt(magnitude[j]);
+        } else {
+          displayData = magnitude;
+        }
+        let displayMin: number, displayMax: number;
+        if (fftAuto) {
+          ({ min: displayMin, max: displayMax } = autoEnhanceFFT(magnitude, fftW, fftH));
+          if (fftScaleMode === "log") { displayMin = Math.log1p(displayMin); displayMax = Math.log1p(displayMax); }
+          else if (fftScaleMode === "power") { displayMin = Math.sqrt(displayMin); displayMax = Math.sqrt(displayMax); }
+        } else {
+          ({ min: displayMin, max: displayMax } = findDataRange(displayData));
+        }
+        cache = {
+          displayData,
+          displayMin,
+          displayMax,
+          magVersion: galleryFftMagVersion,
+          scaleMode: fftScaleMode,
+          fftAuto,
+          uploadedKey: "",
+        };
+        galleryFftPipelineRef.current[idx] = cache;
       }
-      if (fftAuto) {
-        ({ min: displayMin, max: displayMax } = autoEnhanceFFT(magnitude, fftW, fftH));
-        if (fftScaleMode === "log") { displayMin = Math.log1p(displayMin); displayMax = Math.log1p(displayMax); }
-        else if (fftScaleMode === "power") { displayMin = Math.sqrt(displayMin); displayMax = Math.sqrt(displayMax); }
-      } else {
-        ({ min: displayMin, max: displayMax } = findDataRange(displayData));
-      }
+      if (!cache) continue;
       const fc = fftContrastFor(idx);
-      const { vmin, vmax } = sliderRange(displayMin, displayMax, fc.vminPct, fc.vmaxPct);
-
-      const offscreen = renderToOffscreen(displayData, fftW, fftH, lut, vmin, vmax);
-      if (!offscreen) continue;
-      fftOffscreensRef.current[idx] = offscreen;
+      const { vmin, vmax } = sliderRange(cache.displayMin, cache.displayMax, fc.vminPct, fc.vmaxPct);
+      ranges.push({ vmin, vmax });
+      slots.push(nImages + idx);
+      if (sourceChanged || cache.uploadedKey !== `${fftW}x${fftH}:${galleryFftMagVersion}:${fftScaleMode}:${fftAuto}`) {
+        uploadSlots.push(idx);
+      }
     }
 
     // Update FFT histogram from selected image
-    const selMag = fftMagCacheGalleryRef.current[selectedIdx];
-    if (selMag) {
-      let histData: Float32Array;
-      if (fftScaleMode === "log") histData = applyLogScale(selMag);
-      else if (fftScaleMode === "power") { histData = new Float32Array(selMag.length); for (let j = 0; j < selMag.length; j++) histData[j] = Math.sqrt(selMag[j]); }
-      else histData = selMag;
-      setFftHistogramData(histData);
-      setFftDataRange(findDataRange(histData));
+    const selectedCache = galleryFftPipelineRef.current[selectedIdx];
+    if (selectedCache) {
+      setFftHistogramData(selectedCache.displayData);
+      setFftDataRange({ min: selectedCache.displayMin, max: selectedCache.displayMax });
     }
-    setGalleryFftOffscreenVersion(v => v + 1);
+
+    const renderGalleryFft = async () => {
+      await new Promise<void>(r => requestAnimationFrame(() => r()));
+      if (cancelled || gen !== galleryFftColorGenRef.current) return;
+
+      const engine = gpuCmapRef.current;
+      if (engine && gpuCmapReadyRef.current && slots.length > 0) {
+        try {
+          engine.uploadLUT(fftColormap, lut);
+          const uploadKey = `${fftW}x${fftH}:${galleryFftMagVersion}:${fftScaleMode}:${fftAuto}`;
+          for (const idx of uploadSlots) {
+            const cache = galleryFftPipelineRef.current[idx];
+            if (!cache) continue;
+            engine.uploadData(nImages + idx, cache.displayData, fftW, fftH);
+            cache.uploadedKey = uploadKey;
+          }
+          const bitmaps = await engine.renderSlotsToImageBitmapAsync(slots, ranges, false);
+          if (!cancelled && gen === galleryFftColorGenRef.current && bitmaps && bitmaps.length > 0) {
+            for (let k = 0; k < bitmaps.length; k++) {
+              const bitmap = bitmaps[k];
+              const idx = slots[k] - nImages;
+              if (!bitmap) continue;
+              const oc = fftOffscreensRef.current[idx] && fftOffscreensRef.current[idx]!.width === fftW && fftOffscreensRef.current[idx]!.height === fftH
+                ? fftOffscreensRef.current[idx]!
+                : Object.assign(document.createElement("canvas"), { width: fftW, height: fftH });
+              const ctx = oc.getContext("2d");
+              if (!ctx) continue;
+              ctx.drawImage(bitmap, 0, 0);
+              fftOffscreensRef.current[idx] = oc;
+            }
+            setGalleryFftOffscreenVersion(v => v + 1);
+            return;
+          }
+        } catch (err) {
+          console.warn("[Show2D FFT] Gallery WebGPU colormap failed; falling back to CPU", err);
+        }
+      }
+
+      // CPU fallback: still uses cached transformed data/ranges, so contrast
+      // drag never recomputes FFT magnitudes.
+      for (let idx = 0; idx < nImages; idx++) {
+        const cache = galleryFftPipelineRef.current[idx];
+        if (!cache) continue;
+        const fc = fftContrastFor(idx);
+        const { vmin, vmax } = sliderRange(cache.displayMin, cache.displayMax, fc.vminPct, fc.vmaxPct);
+        const offscreen = renderToOffscreen(cache.displayData, fftW, fftH, lut, vmin, vmax);
+        if (offscreen) fftOffscreensRef.current[idx] = offscreen;
+      }
+      if (!cancelled && gen === galleryFftColorGenRef.current) setGalleryFftOffscreenVersion(v => v + 1);
+    };
+
+    renderGalleryFft();
+    return () => { cancelled = true; };
   }, [effectiveShowFft, isGallery, nImages, width, height, galleryFftMagVersion, fftColormap, fftScaleMode, fftAuto, fftVminPct, fftVmaxPct, selectedIdx, fftLinkedContrast, fftContrastStates]);
 
   // Gallery FFT draw effect: cheap drawImage from cached offscreens (zoom/pan changes)
@@ -3859,7 +4003,7 @@ function Show2D() {
       const imgY = Math.floor(imageCanvasY / displayScale);
       if (imgX >= 0 && imgX < width && imgY >= 0 && imgY < height) {
         const rawData = rawDataRef.current[idx];
-        if (rawData) setCursorInfo({ row: imgY, col: imgX, value: rawData[imgY * width + imgX] });
+        if (rawData) setCursorInfo({ idx, row: imgY, col: imgX, value: rawData[imgY * width + imgX] });
         if (showLens && !isGallery) setLensPos({ row: imgY, col: imgX });
       } else {
         setCursorInfo(null);
@@ -4572,6 +4716,13 @@ function Show2D() {
                       width={Math.round(canvasW * DPR)} height={Math.round(canvasH * DPR)}
                       style={responsiveOverlayStyle}
                     />
+                    {cursorInfo && cursorInfo.idx === i && (
+                      <Box sx={{ position: "absolute", bottom: 6, right: 6, bgcolor: "rgba(0,0,0,0.72)", px: 0.75, py: 0.35, borderRadius: 1, pointerEvents: "none", textAlign: "right", zIndex: 2 }}>
+                        <Typography sx={{ fontSize: 12, fontWeight: 600, fontFamily: "monospace", color: "#fff", whiteSpace: "nowrap", lineHeight: 1.25 }}>
+                          ({cursorInfo.row}, {cursorInfo.col}){pixelSizeForPanel(i) > 0 ? ` = (${(cursorInfo.row * pixelSizeForPanel(i)).toFixed(1)}, ${(cursorInfo.col * pixelSizeForPanel(i)).toFixed(1)} ${pixelUnit})` : ""} {formatNumber(cursorInfo.value)}
+                        </Typography>
+                      </Box>
+                    )}
                     {showPanelTitles !== false && (
                       <Box
                         sx={{
@@ -5118,16 +5269,9 @@ function Show2D() {
                       <Box sx={{ display: "grid", gridTemplateColumns: histogramGridColumns, gap: `${histogramGapPx}px`, width: "100%", maxWidth: histogramGridMaxWidth, justifyContent: "start" }}>
                         {Array.from({ length: nImages }).map((_, i) => {
                           const fc = fftContrastFor(i);
-                          const mag = fftMagCacheGalleryRef.current[i];
-                          let perData: Float32Array | null = null;
-                          if (mag) {
-                            if (fftScaleMode === "log") perData = applyLogScale(mag);
-                            else if (fftScaleMode === "power") {
-                              perData = new Float32Array(mag.length);
-                              for (let j = 0; j < mag.length; j++) perData[j] = Math.sqrt(mag[j]);
-                            } else perData = mag;
-                          }
-                          const dr = perData ? findDataRange(perData) : fftDataRange;
+                          const cache = galleryFftPipelineRef.current[i];
+                          const perData = cache?.displayData || null;
+                          const dr = cache ? { min: cache.displayMin, max: cache.displayMax } : fftDataRange;
                           return (
                             <Histogram
                               key={i}

@@ -252,3 +252,349 @@ def test_export_html_size_scales_with_embedded_data(tmp_path):
     finally:
         for widget, _, _, _ in cases:
             widget.close()
+
+
+# ---------------------------------------------------------------------------
+# Show2D static-PNG fidelity: the fallback must map pixels to colors exactly
+# like the live widget (colormap, contrast window, log scale, linked/per-panel
+# ranges, diff panels), not merely "show something".
+# ---------------------------------------------------------------------------
+
+def _decode_png(widget) -> np.ndarray:
+    """Decode the widget's static fallback PNG to an (H, W, 3) uint8 array."""
+    import base64
+    import io
+
+    from PIL import Image
+
+    png_b64 = widget._static_png_b64()
+    assert png_b64
+    return np.asarray(Image.open(io.BytesIO(base64.b64decode(png_b64))).convert("RGB"))
+
+
+def test_show2d_format_stat_matches_widget_stats_row():
+    """Stats line must format like JS formatNumber: 5.85e+3, 0.42, 0."""
+    fmt = Show2D._format_stat
+    assert fmt(0) == "0"
+    assert fmt(5852.3) == "5.85e+3"
+    assert fmt(0.0042) == "4.20e-3"
+    assert fmt(0.42) == "0.42"
+    assert fmt(-12345.0) == "-1.23e+4"
+
+
+def test_show2d_static_panel_rgb_bit_matches_independent_cmap():
+    """The panel colormap path must equal an independently computed
+    cmap(clip((frame - vmin) / (vmax - vmin))) at bit level. This is the
+    parity anchor: the PNG renderer feeds imshow these exact RGB bytes."""
+    from matplotlib import colormaps
+
+    rng = np.random.default_rng(0)
+    frame = rng.random((64, 64)).astype(np.float32) * 100
+    for cmap_name in ("gray", "inferno", "viridis"):
+        widget = Show2D(frame, cmap=cmap_name, verbose=False)
+        (vmin, vmax), = widget._resolve_panel_display_ranges([frame])
+        got = widget._static_panel_rgb(frame, vmin, vmax, cmap_name)
+        expected_norm = np.clip((frame - vmin) / (vmax - vmin), 0.0, 1.0)
+        expected = (colormaps.get_cmap(cmap_name)(expected_norm)[..., :3] * 255).astype(np.uint8)
+        np.testing.assert_array_equal(got, expected)
+
+
+def test_show2d_png_gray_cmap_is_channel_equal_inferno_is_not():
+    """Wrong-colormap regression: gray must produce (almost) only R==G==B
+    pixels; inferno must produce a large channel-diverse fraction."""
+    rng = np.random.default_rng(1)
+    frame = rng.random((256, 256)).astype(np.float32)
+
+    gray_png = _decode_png(Show2D(frame, cmap="gray", verbose=False))
+    channel_spread = gray_png.max(axis=-1).astype(int) - gray_png.min(axis=-1).astype(int)
+    # Tolerance 3 for PNG quantization; the histogram contrast markers are the
+    # only intentionally colored pixels and they are a sliver of the figure.
+    assert (channel_spread <= 3).mean() > 0.99
+
+    inferno_png = _decode_png(Show2D(frame, cmap="inferno", verbose=False))
+    inferno_spread = inferno_png.max(axis=-1).astype(int) - inferno_png.min(axis=-1).astype(int)
+    assert (inferno_spread > 30).mean() > 0.05
+
+
+def test_show2d_png_log_scale_brightens_skewed_data():
+    """log1p on heavily skewed data lifts mid-tones: with a gray colormap the
+    panel's mean luminance must increase. Locks that log_scale actually feeds
+    the PNG's pixel mapping."""
+    rng = np.random.default_rng(2)
+    frame = (rng.random((256, 256)).astype(np.float32) ** 4) * 1000
+
+    def panel_mean(widget) -> float:
+        decoded = _decode_png(widget).astype(float)
+        luminance = decoded.mean(axis=-1)
+        panel = luminance[luminance < 240]  # exclude white figure background
+        return float(panel.mean())
+
+    linear_mean = panel_mean(Show2D(frame, cmap="gray", log_scale=False, verbose=False))
+    log_mean = panel_mean(Show2D(frame, cmap="gray", log_scale=True, verbose=False))
+    assert log_mean > linear_mean + 20
+
+
+def test_show2d_png_vmin_vmax_clipping_saturates():
+    """An explicit narrow [vmin, vmax] window must show up as large saturated
+    regions at the colormap endpoints; the unclipped render must not."""
+    from matplotlib import colormaps
+
+    gradient = np.tile(np.linspace(0, 1, 256, dtype=np.float32), (256, 1))
+    cmap = colormaps.get_cmap("inferno")
+    lo_color = np.array(cmap(0.0)[:3]) * 255
+    hi_color = np.array(cmap(1.0)[:3]) * 255
+
+    def saturated_fraction(widget) -> tuple[float, float]:
+        decoded = _decode_png(widget).astype(float)
+        near_lo = (np.abs(decoded - lo_color).max(axis=-1) < 10).mean()
+        near_hi = (np.abs(decoded - hi_color).max(axis=-1) < 10).mean()
+        return float(near_lo), float(near_hi)
+
+    clipped_lo, clipped_hi = saturated_fraction(
+        Show2D(gradient, cmap="inferno", vmin=0.4, vmax=0.6, verbose=False))
+    open_lo, open_hi = saturated_fraction(Show2D(gradient, cmap="inferno", verbose=False))
+    assert clipped_lo > 0.05 and clipped_hi > 0.05
+    assert clipped_lo > 5 * max(open_lo, 1e-4)
+    assert clipped_hi > 5 * max(open_hi, 1e-4)
+
+
+def test_show2d_auto_contrast_uses_full_res_percentiles():
+    """auto_contrast must resolve to the 2/98 percentiles of the FULL frame
+    (the same cut the widget computes), not of the binned PNG pixels."""
+    rng = np.random.default_rng(3)
+    frame = rng.normal(100, 25, (1024, 1024)).astype(np.float32)
+    widget = Show2D(frame, auto_contrast=True, verbose=False)
+    (vmin, vmax), = widget._resolve_panel_display_ranges([frame])
+    expected_lo, expected_hi = np.percentile(frame, (2, 98))
+    np.testing.assert_allclose([vmin, vmax], [expected_lo, expected_hi], rtol=1e-6)
+
+
+def test_show2d_linked_contrast_shares_one_range():
+    """Gallery + link_contrast=True (widget default): all panels share the
+    merged range. link_contrast=False: each panel uses its own extrema."""
+    dim_frame = np.linspace(0, 1, 64 * 64, dtype=np.float32).reshape(64, 64)
+    bright_frame = dim_frame * 100
+    linked = Show2D([dim_frame, bright_frame], link_contrast=True, verbose=False)
+    ranges = linked._resolve_panel_display_ranges([dim_frame, bright_frame])
+    assert ranges[0] == ranges[1] == (0.0, 100.0)
+    unlinked = Show2D([dim_frame, bright_frame], link_contrast=False, verbose=False)
+    ranges = unlinked._resolve_panel_display_ranges([dim_frame, bright_frame])
+    assert ranges[0] == (0.0, 1.0)
+    assert ranges[1] == (0.0, 100.0)
+
+
+def test_show2d_per_image_vmin_vmax_lists():
+    """List vmin/vmax must resolve per panel and beat linked contrast."""
+    frame_a = np.linspace(0, 1, 64 * 64, dtype=np.float32).reshape(64, 64)
+    frame_b = frame_a * 10
+    widget = Show2D([frame_a, frame_b], vmin=[0.1, 1.0], vmax=[0.9, 9.0], verbose=False)
+    ranges = widget._resolve_panel_display_ranges([frame_a, frame_b])
+    assert ranges[0] == (pytest.approx(0.1), pytest.approx(0.9))
+    assert ranges[1] == (pytest.approx(1.0), pytest.approx(9.0))
+
+
+def test_show2d_diff_mode_adds_signed_diff_panel():
+    """diff_mode with 2 images: 3 panels; the diff panel is ref - other with a
+    symmetric window and a diverging colormap, never log-scaled."""
+    rng = np.random.default_rng(4)
+    frame_a = rng.random((64, 64)).astype(np.float32)
+    frame_b = rng.random((64, 64)).astype(np.float32)
+    widget = Show2D([frame_a, frame_b], diff_mode=True, log_scale=True, verbose=False)
+    specs = widget._static_panel_specs()
+    assert len(specs) == 3
+    diff_spec = specs[2]
+    assert diff_spec["label"] == "Diff (A − B)"
+    assert diff_spec["cmap"] == "RdBu"
+    assert diff_spec["apply_log"] is False
+    np.testing.assert_array_equal(diff_spec["frame"], frame_a - frame_b)
+    assert diff_spec["vmin"] == -diff_spec["vmax"]
+    png = _decode_png(widget)
+    assert png.size > 0
+
+
+@pytest.mark.parametrize("cmap", ["gray", "inferno", "viridis"])
+@pytest.mark.parametrize("log_scale", [False, True])
+@pytest.mark.parametrize("auto_contrast", [False, True])
+def test_show2d_png_settings_sweep(cmap, log_scale, auto_contrast):
+    """Every contrast/colormap combination must render a decodable PNG with
+    the gallery + labels layout (3 panels, 3 labels in the specs)."""
+    rng = np.random.default_rng(5)
+    frames = [rng.random((96, 96)).astype(np.float32) * scale for scale in (1, 10, 100)]
+    widget = Show2D(frames, labels=["a", "b", "c"], cmap=cmap, log_scale=log_scale,
+                    auto_contrast=auto_contrast, verbose=False)
+    specs = widget._static_panel_specs()
+    assert [spec["label"] for spec in specs] == ["a", "b", "c"]
+    assert all(spec["vmax"] > spec["vmin"] for spec in specs)
+    assert all("Mean" in spec["stats"] for spec in specs)
+    decoded = _decode_png(widget)
+    assert decoded.shape[0] > 100 and decoded.shape[1] > 300  # 3-across gallery
+
+
+def test_show2d_static_scale_bar_label_matches_widget_format():
+    """The PNG's scale bar text must be character-identical to the live
+    widget's canvas label (js/figure.ts formatScaleLabel + drawScaleBarHiDPI):
+    60 CSS px target bar, nice 1/2/5 rounding, length units re-laddered to a
+    clean integer (10 A -> "1 nm"), uncalibrated data labeled in "px"."""
+    from quantem.widget.show2d import _format_scale_label
+
+    frame = np.zeros((512, 512), dtype=np.float32)
+    calibrated = Show2D(frame, sampling=0.23, units="A", labels=["cal"], verbose=False)
+    # single image -> live canvas is SINGLE_IMAGE_TARGET = 500 CSS px wide
+    effective_zoom = 500 / 512
+    (label, zoom_text, bar_text, bar_px), = calibrated._static_overlay_texts()
+    assert label == "cal"
+    assert zoom_text == "1.0×"
+    # 60 css px / effectiveZoom * 0.23 A = 14.1 A -> nice 10 A -> integer nm
+    assert bar_text == "1 nm"
+    assert bar_px == pytest.approx(10 / 0.23 * effective_zoom)
+
+    uncalibrated = Show2D(frame, verbose=False)
+    (_, _, bar_text, bar_px), = uncalibrated._static_overlay_texts()
+    assert bar_text == "50 px"  # 61.4 px -> nice 50, unit "px" when pixel_size == 0
+    assert bar_px == pytest.approx(50 * effective_zoom)
+
+    assert _format_scale_label(0.5, "nm") == "5 Å"     # sub-1 re-ladders down
+    assert _format_scale_label(13.8, "A") == "1 nm"    # 10 A reads as 1 nm
+    assert _format_scale_label(20, "mrad") == "20 mrad"  # non-length keeps unit
+
+
+def test_show2d_static_zoom_badge_and_center_crop():
+    """zoom=1.8 must produce the widget's badge text (JS zoom.toFixed(1) + x),
+    shorten the bar to the zoomed field of view, and crop the central 1/zoom
+    window exactly like the live canvas transform."""
+    frame = np.random.default_rng(7).random((512, 512)).astype(np.float32)
+    widget = Show2D(frame, zoom=1.8, verbose=False)
+    (_, zoom_text, bar_text, bar_px), = widget._static_overlay_texts()
+    assert zoom_text == "1.8×"
+    effective_zoom = 1.8 * 500 / 512
+    assert bar_text == "20 px"  # 60 / 1.76 = 34.1 -> nice 20
+    assert bar_px == pytest.approx(20 * effective_zoom)
+    rows, cols = Show2D._center_crop_slices(512, 512, 1.8)
+    assert cols.stop - cols.start == round(512 / 1.8) == 284
+    assert rows.start == (512 - 284) // 2
+    assert _decode_png(widget).size > 0  # zoomed render still produces a PNG
+
+
+def test_show2d_png_render_perf_two_4k_frames():
+    """The PNG path (area-bin first, then normalize) must stay cheap even on
+    2x 4096x4096 float32: under 1.5 s per display."""
+    import time
+
+    rng = np.random.default_rng(6)
+    frames = rng.random((2, 4096, 4096), dtype=np.float32)
+    widget = Show2D(frames, verbose=False)
+    start = time.perf_counter()
+    png_b64 = widget._static_png_b64()
+    elapsed = time.perf_counter() - start
+    assert png_b64
+    assert elapsed < 1.5, f"static PNG took {elapsed:.2f}s"
+
+
+def test_show2d_display_defers_static_png_render(monkeypatch):
+    """Displaying the widget must NOT render the PNG synchronously (matplotlib
+    would block every cell that shows a widget); the deferred post_execute
+    fill must then update the placeholder sibling with the real image/png."""
+    import IPython
+
+    frame = np.random.default_rng(8).random((64, 64)).astype(np.float32)
+    widget = Show2D(frame, verbose=False)
+    png_calls = []
+    original_png = Show2D._static_png_b64
+    monkeypatch.setattr(Show2D, "_static_png_b64",
+                        lambda self, **kw: (png_calls.append(1), original_png(self, **kw))[1])
+    displayed, updated, hooks = [], [], {}
+
+    class FakeHandle:
+        def update(self, data, raw=False, metadata=None):
+            updated.append((data, metadata))
+
+    class FakeEvents:
+        def register(self, name, fn):
+            hooks[name] = fn
+
+        def unregister(self, name, fn):
+            hooks.pop(name, None)
+
+    class ZMQInteractiveShell:  # name is what the kernel check looks at
+        events = FakeEvents()
+
+    shell = ZMQInteractiveShell()
+
+    def fake_display(data, raw=False, metadata=None, display_id=None, **kw):
+        displayed.append((data, metadata, display_id))
+        return FakeHandle() if display_id else None
+
+    monkeypatch.setattr(IPython, "get_ipython", lambda: shell)
+    monkeypatch.setattr("IPython.display.display", fake_display)
+
+    widget._ipython_display_()
+    assert not png_calls, "PNG was rendered synchronously at display time"
+    # widget bundle + empty placeholder sibling with the hide marker
+    assert len(displayed) == 2
+    placeholder_data, placeholder_meta, display_id = displayed[1]
+    assert display_id is True
+    assert "image/png" not in placeholder_data
+    assert "quantem-static-fallback" in placeholder_data["text/html"]
+    assert placeholder_meta == {"quantem.widget": {"static_fallback": True}}
+    # cell finishes -> post_execute hook fills the placeholder with the PNG
+    assert "post_execute" in hooks
+    hooks["post_execute"]()
+    assert png_calls, "deferred fill never rendered the PNG"
+    assert "post_execute" not in hooks, "one-shot hook did not unregister"
+    fill_data, fill_meta = updated[-1]
+    assert isinstance(fill_data["image/png"], bytes) and len(fill_data["image/png"]) > 1000
+    assert "quantem-static-fallback" in fill_data["text/html"]
+    assert fill_meta == {"quantem.widget": {"static_fallback": True}}
+
+
+def test_show2d_sibling_static_output_via_nbconvert(tmp_path):
+    """Executing a notebook must leave TWO outputs on the Show2D cell: the
+    widget-view bundle and a separate display_data sibling that started as an
+    empty placeholder and was filled with the PNG + static_fallback marker by
+    the deferred post_execute hook (so a cold JupyterLab reopen can render
+    it). metadata.widgets must stay tiny (no pixel buffers baked into the
+    .ipynb)."""
+    import json
+    import subprocess
+    import sys
+
+    import nbformat
+
+    nb = nbformat.v4.new_notebook()
+    nb.cells = [nbformat.v4.new_code_cell(
+        "import numpy as np\n"
+        "from quantem.widget import Show2D\n"
+        "Show2D(np.random.rand(48, 48).astype('float32'), verbose=False)\n"
+    )]
+    nb_path = tmp_path / "show2d_sibling.ipynb"
+    nbformat.write(nb, nb_path)
+    subprocess.run(
+        [sys.executable, "-m", "jupyter", "nbconvert", "--to", "notebook",
+         "--execute", "--inplace", str(nb_path)],
+        check=True, capture_output=True, timeout=180)
+    executed = nbformat.read(nb_path, as_version=4)
+    outputs = executed.cells[0].outputs
+    display_outputs = [o for o in outputs if o.output_type == "display_data"]
+    assert len(display_outputs) == 2, f"expected widget + sibling, got {outputs}"
+    widget_output, sibling = display_outputs
+    assert "application/vnd.jupyter.widget-view+json" in widget_output.data
+    # the placeholder must have been updated in place with the deferred render
+    assert "image/png" in sibling.data
+    assert len(sibling.data["image/png"]) > 1000
+    assert "quantem-static-fallback" in sibling.data.get("text/html", "")
+    assert sibling.metadata.get("quantem.widget", {}).get("static_fallback") is True
+    # metadata.widgets guard. nbclient reconstructs widget state by replaying
+    # comm traffic, so two known constants of headless execution appear here no
+    # matter what get_state() trims: the anywidget JS bundle (_esm) and the
+    # initial 48x48 frame upload (~12 KB, needed for live render; a real Lab
+    # save goes through the trimmed get_state(), covered by
+    # test_full_snapshot_trims_bulk_buffers). Everything else must stay tiny -
+    # this fails if e.g. the static PNG or a duplicate pixel buffer starts
+    # leaking into the synced state.
+    widget_states = executed.metadata["widgets"]["application/vnd.jupyter.widget-state+json"]["state"]
+    anymodel = next(s for s in widget_states.values() if s.get("model_name") == "AnyModel")
+    body = dict(anymodel["state"])
+    body.pop("_esm", None)
+    buffer_bytes = sum(len(b["data"]) for b in anymodel.get("buffers", []))
+    assert buffer_bytes < 20_000
+    assert len(json.dumps(body)) < 20_000
