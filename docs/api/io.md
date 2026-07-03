@@ -1,52 +1,76 @@
-# Load and I/O
+# Load and I/O — FAQ
 
-The `quantem.widget.io` module loads, saves, discovers, and inspects 4D-STEM and
-image data. For most workflows, start with `load` for 4D-STEM files or
-`read_image` / `read_image_stack` for images.
+Every question here comes from a real user session. Pick the one that matches
+what you're trying to do; each answer is a copy-pasteable snippet.
 
-## 4D-STEM loader
+For the full function reference, see [`load`](load) and the autodocs at the
+bottom of this page.
 
-`load` reads compressed 4D-STEM data straight onto the GPU (CUDA / Apple Metal)
-or CPU and returns a `LoadResult` you hand to [`Show4DSTEM`](show4dstem).
+---
+
+## I'm on a Linux workstation with an NVIDIA RTX GPU. How do I load a scan?
 
 ```python
 from quantem.widget import load, Show4DSTEM
 
-data = load("scan_master.h5")   # CUDA on a workstation, MPS on a MacBook
+data = load("scan_master.h5")
 Show4DSTEM(data)
 ```
 
-```{eval-rst}
-.. autofunction:: quantem.widget.io.hdf5.load
-```
+`load` auto-detects CUDA and decompresses straight onto the GPU (zero-copy
+`cupy` → torch via dlpack). No flag needed. Works on RTX PRO 6000 Blackwell
+(96 GB), RTX 4090 (24 GB), A100, H100, L40S, anything with cupy support.
 
-```{tip}
-`det_bin=2` or `det_bin=4` bins the detector on load to cut memory and speed
-first paint. Pass a list of file paths to stack several datasets behind a single
-"Dataset" slider.
-```
+## I'm on a MacBook (Apple Silicon). How do I load a scan?
 
-### Backend selection
-
-`load` detects the device automatically: an NVIDIA box loads onto **CUDA**, a Mac
-loads onto **Apple Metal (MPS)**, and anything else falls back to **CPU**. No flag
-is required. On a MacBook, the read uses a zero-copy Metal path, so a laptop can
-browse 4D-STEM data that does not fit in RAM **if you bin at load**:
+Same call:
 
 ```python
-data = load("scan_master.h5", det_bin=8)
+from quantem.widget import load, Show4DSTEM
+
+data = load("scan_master.h5")
 Show4DSTEM(data)
 ```
 
-The same workflow is available from the shell:
+`load` auto-detects Apple Metal (MPS) and uses a zero-copy raw-Metal path.
+On a 24 GB unified-memory MacBook you'll want to bin at load if the scan is
+large (see next question).
 
-```bash
-quantem show4dstem scan_master.h5 --bin 8
+## My GPU is 24 GB and the scan is 512×512×192×192 (~19 GB uint16). Does it fit?
+
+Yes, after the 2026-07-02 `mean_dp` fix. Full-res uint16 no-bin peak = ~21 GB
+(data + widget). Fits 24 GB with ~2.5 GB headroom.
+
+```python
+data = load("scan_master.h5")   # dtype defaults to uint16, no bin
+Show4DSTEM(data)                # ~21 GB VRAM peak
 ```
 
-### Multi-file browsing
+If you need more headroom for downstream compute (reconstruction, SSB), bin
+the detector on the way in:
 
-Use the same entry point for a time-series or tilt-series stack:
+```python
+data = load("scan_master.h5", det_bin=2)   # 512x512x96x96, ~5 GB
+Show4DSTEM(data)
+```
+
+## I want to browse fast without caring about full detector detail.
+
+Bin harder + drop to uint8. Great for scrolling through a session to find good
+scans; not for reconstruction.
+
+```python
+data = load("scan_master.h5", det_bin=4, dtype="u8")
+Show4DSTEM(data)
+```
+
+Resident size drops to roughly 5% of the no-bin uint16 baseline. Peak brightness
+below 255 counts is fine (the loader warns if you'd saturate).
+
+## I want to browse many scans as one dataset.
+
+Pass a list. The result stacks them behind a `Dataset` slider inside
+`Show4DSTEM`, so scrubbing = switching files:
 
 ```python
 masters = [
@@ -54,34 +78,110 @@ masters = [
     "/data/session/file_002_master.h5",
     "/data/session/file_003_master.h5",
 ]
-
 data = load(masters, det_bin=4, dtype="u8")
 Show4DSTEM(data)
 ```
 
-The returned data has shape `(n_files, scan_y, scan_x, det_y, det_x)`.
-`Show4DSTEM` labels the extra axis as `Dataset` and uses source filenames as
-slider labels when they are available.
+Result shape: `(n_files, scan_y, scan_x, det_y, det_x)`. Filenames become
+slider labels.
 
-Memory rule of thumb for Sample-scale `512x512x192x192` data:
-
-| mode | approximate resident size per file |
-|---|---:|
-| no bin, uint16 | 18-20 GiB |
-| `det_bin=2`, uint16 | 4.5-5 GiB |
-| `det_bin=4`, uint16 | 1.1-1.3 GiB |
-| `det_bin=4`, `dtype="u8"` | about half of uint16 |
-
-Use `det_bin=4, dtype="u8"` for first-pass browsing. Use uint16/no-bin only
-when exact diffraction intensities matter and the GPU memory budget is clean.
-
-## Other I/O helpers
+## I want to load every master file in a folder.
 
 ```python
-from quantem.widget.io import survey, read_image, get_metadata, bin, download
+from quantem.widget import load, discover_masters, Show4DSTEM
+
+masters = discover_masters("/data/session")   # sorted, filters to *_master.h5
+data = load(masters, det_bin=4)
+Show4DSTEM(data)
 ```
 
-## Discover & inspect
+`discover_masters` also accepts a `scan_shape=(512, 512)` filter to keep only
+matching acquisitions when a folder mixes scan sizes.
+
+## Before loading anything, how do I check what's in a folder?
+
+```python
+from quantem.widget import survey
+
+survey("/data/session")   # header-only walk: scan/det shapes + total size
+```
+
+Zero pixel reads. Reports each master's shape, dtype, chunks, and file size so
+you can plan the budget before allocating a byte.
+
+## How do I inspect a single master's calibration + metadata without loading it?
+
+```python
+from quantem.widget.io import get_metadata
+
+meta = get_metadata("scan_master.h5")
+print(meta)   # voltage_kV, semiangle_mrad, scan_sampling_A, det_shape, ...
+```
+
+## I have HAADF or a 2D image (Velox EMD, TIFF, PNG). How do I load that?
+
+```python
+from quantem.widget import read_image, Show2D
+
+img = read_image("haadf.emd")   # Dataset2d with sampling + units
+Show2D(img)
+```
+
+For a stack (multi-frame TIFF, sequence of PNGs):
+
+```python
+from quantem.widget.io import read_image_stack
+
+stack = read_image_stack(["a.png", "b.png", "c.png"])
+```
+
+## I want the reference gold or MoS2 dataset from Hugging Face.
+
+```python
+from quantem.widget.io import list_datasets, download
+
+list_datasets()                # what's shared
+path = download("gold_drift_0deg")   # returns local path
+data = load(path)
+```
+
+## I want to save a `LoadResult` back to disk (e.g. after binning).
+
+```python
+from quantem.widget.io import save
+
+save(data, "binned_out.h5")   # compressed, matches original chunk shape
+```
+
+## What's the difference between `det_bin`, `dtype`, and `no bin`?
+
+- `det_bin=1` (default): full-detector resolution. Every diffraction pixel
+  preserved. CBED at full angular resolution.
+- `det_bin=N > 1`: mean-reduces N×N detector blocks at load. `det_bin=2` on a
+  192² detector → 96² output. Faster virtual-image compute; less angular detail.
+- `dtype="u16"` (default): raw counts (0-65535). Exact for reconstruction.
+- `dtype="u8"`: 0-255. Halves memory. Fine when max counts <255 (loader warns
+  if you'd saturate).
+
+## Memory rule of thumb for a 512×512×192×192 scan
+
+| mode | resident VRAM per file |
+|---|---:|
+| no bin, uint16 | 18-20 GB |
+| `det_bin=2`, uint16 | 4.5-5 GB |
+| `det_bin=4`, uint16 | 1.1-1.3 GB |
+| `det_bin=4`, `dtype="u8"` | ~0.6 GB |
+
+`Show4DSTEM(data)` adds ~2-3 GB overhead (colormap, virtual-image cache, CBED
+buffer) on top of the load footprint. Budget accordingly.
+
+## Function reference
+
+```{eval-rst}
+.. autofunction:: quantem.widget.io.hdf5.load
+```
+
+### Discover + inspect
 
 ```{eval-rst}
 .. autofunction:: quantem.widget.io.survey.survey
@@ -93,7 +193,7 @@ from quantem.widget.io import survey, read_image, get_metadata, bin, download
 .. autofunction:: quantem.widget.io.hdf5.get_metadata
 ```
 
-## Images (2D / 3D)
+### Images (2D / 3D)
 
 ```{eval-rst}
 .. autofunction:: quantem.widget.io.image.read_image
@@ -102,13 +202,13 @@ from quantem.widget.io import survey, read_image, get_metadata, bin, download
 .. autofunction:: quantem.widget.io.image.read_image_stack
 ```
 
-## Detector binning
+### Detector binning
 
 ```{eval-rst}
 .. autofunction:: quantem.widget.io.hdf5.bin
 ```
 
-## Hugging Face datasets
+### Hugging Face datasets
 
 ```{eval-rst}
 .. autofunction:: quantem.widget.io.hub.list_datasets
@@ -117,7 +217,7 @@ from quantem.widget.io import survey, read_image, get_metadata, bin, download
 .. autofunction:: quantem.widget.io.hub.download
 ```
 
-## Save
+### Save
 
 ```{eval-rst}
 .. autofunction:: quantem.widget.io.save.save
