@@ -3,7 +3,7 @@
 Every question here comes from a real user session. Pick the one that matches
 what you're trying to do; each answer is a copy-pasteable snippet.
 
-For the full function reference, see [`load`](load) and the autodocs at the
+For the full function reference, see `load` and the autodocs at the
 bottom of this page.
 
 ---

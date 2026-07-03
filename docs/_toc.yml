@@ -30,6 +30,7 @@ parts:
       - file: api/show4dstem
       - file: api/showeds
       - file: api/showdiffraction
+      - file: api/showfolder
       - file: api/html-export
       - file: api/io
   - caption: Maintainers

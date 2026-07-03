@@ -1,6 +1,6 @@
 # API reference
 
-Complete reference for the five widgets, HTML export, and data loading / I/O.
+Complete reference for the widgets, HTML export, and data loading / I/O.
 Widget pages have two halves:
 
 1. **Reference** - the constructor signature, every parameter, and every public
@@ -29,5 +29,6 @@ readers and test agents.
 | [Show4DSTEM](show4dstem) | `quantem.widget.Show4DSTEM` dispatcher | state JSON, PNG, interactive WebGPU HTML; large exports use a companion data directory |
 | [ShowEDS](showeds) | `quantem.widget.showeds.ShowEDS` | state JSON, interactive HTML; large exact data use folder export, portable demos use downsampled HTML |
 | [ShowDiffraction](showdiffraction) | `quantem.widget.showdiffraction.ShowDiffraction` | state JSON, PNG, interactive HTML |
+| [ShowFolder](showfolder) | `quantem.widget.showfolder.ShowFolder` | selection JSON for selected microscopy files and folders |
 
 All widget-level HTML exports follow the [HTML export](html-export) protocol.
