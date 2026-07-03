@@ -5608,7 +5608,7 @@ function Show2D() {
               {/* ROI Section (own box, below control rows) */}
               {roiActive && (
                 <Box sx={{ border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, px: 1, py: 0.5, display: "flex", flexDirection: "column", gap: `${SPACING.XS}px`, opacity: 1, pointerEvents: "auto" }}>
-                  {/* ROI: shape + ADD + CLEAR */}
+                  {/* ROI shape and actions */}
                   <Box sx={{ display: "flex", alignItems: "center", gap: `${SPACING.SM}px` }}>
                     <Typography sx={{ ...typography.label, fontSize: 10 }}>ROI</Typography>
                     <Select
@@ -5625,9 +5625,9 @@ function Show2D() {
                       const newList = [...(roiList || []), newRoi];
                       setRoiList(newList);
                       setRoiSelectedIdx(newList.length - 1);
-                    }}>ADD</Button>
+                    }}>Add</Button>
                     <Box sx={{ flex: 1 }} />
-                    <Button size="small" sx={{ ...compactButton, fontSize: 9, minWidth: 24, color: "#ef5350" }} disabled={!roiList?.length} onClick={() => { setRoiList([]); setRoiSelectedIdx(-1); }}>CLEAR</Button>
+                    <Button size="small" sx={{ ...compactButton, fontSize: 9, minWidth: 24, color: "#ef5350" }} disabled={!roiList?.length} onClick={() => { setRoiList([]); setRoiSelectedIdx(-1); }}>Clear</Button>
                   </Box>
                   {/* Selected ROI details */}
                   {selectedRoi && (

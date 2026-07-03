@@ -4557,7 +4557,7 @@ function Show4DSTEM() {
                 } catch {
                   dpCanvasRef.current.toBlob((b) => { if (b) downloadBlob(b, "show4dstem_dp.png"); }, "image/png");
                 }
-              }}>COPY</Button>
+              }}>Copy</Button>
               {exportEnabled && <Button
                 size="small"
                 sx={{ ...compactButton, color: themeColors.accent }}
@@ -4779,7 +4779,7 @@ function Show4DSTEM() {
                 } catch {
                   virtualCanvasRef.current.toBlob((b) => { if (b) downloadBlob(b, "show4dstem_vi.png"); }, "image/png");
                 }
-              }}>COPY</Button>
+              }}>Copy</Button>
             </Stack>
           </Stack>
 

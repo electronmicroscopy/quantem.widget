@@ -150,6 +150,9 @@ through it line by line.
 - [ ] Compact widget control labels do not use decorative colons. Prefer
   `Scale`, `Color`, `Auto`, `Link`, `Zoom`, `Pan`, and `ROI` in dense toolbar
   rows; keep colons for explanatory prose and tooltips.
+- [ ] Command buttons use Title Case, for example `Copy`, `Export`, `Reset`,
+  `Add`, `Clear`, and `Undo`. Keep scientific acronyms and file formats
+  uppercase, for example `FFT`, `ROI`, `BF`, `ADF`, `HTML`, `PNG`, and `MP4`.
 - [ ] The widget supports both light and dark notebook/docs themes: all labels,
   borders, controls, plots, histograms, ROI handles, status text, and export UI
   remain readable.

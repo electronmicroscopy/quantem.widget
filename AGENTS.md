@@ -80,6 +80,12 @@ as `Scale`, `Color`, `Auto`, `Smooth`, `Link`, `Zoom`, `Pan`, `Contrast`,
 prose, tooltips, docs, and other full sentences where they improve readability,
 but avoid them in dense controls where they waste horizontal space.
 
+Use Title Case for command buttons and toolbar actions: `Copy`, `Export`,
+`Reset`, `Add`, `Clear`, `Undo`, `Save Band`, and similar actions. Keep
+scientific acronyms, detector labels, and file-format names uppercase when the
+uppercase form is the term users recognize, such as `FFT`, `ROI`, `BF`, `ABF`,
+`ADF`, `HTML`, `PNG`, `GIF`, and `MP4`.
+
 ## Repository Hygiene
 
 Keep public documentation in durable paths such as `README.md`,

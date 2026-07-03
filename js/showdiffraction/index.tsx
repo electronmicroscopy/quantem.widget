@@ -814,7 +814,7 @@ function ShowDiffraction() {
         </Stack>
         <Stack direction="row" spacing={`${SPACING.XS}px`}>
           <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} onClick={handleCopyDP}>
-            COPY
+            Copy
           </Button>
           <Button
             size="small"
@@ -822,7 +822,7 @@ function ShowDiffraction() {
             onClick={(e) => setDpExportAnchor(e.currentTarget)}
             title={exportStatus || "Export a PNG or a standalone HTML viewer"}
           >
-            EXPORT
+            Export
           </Button>
           <Menu anchorEl={dpExportAnchor} open={Boolean(dpExportAnchor)} onClose={() => setDpExportAnchor(null)} anchorOrigin={{ vertical: "bottom", horizontal: "left" }} transformOrigin={{ vertical: "top", horizontal: "left" }} sx={{ zIndex: 9999 }}>
             <MenuItem onClick={handleExportPng} sx={{ fontSize: 12 }}>PNG</MenuItem>
@@ -852,8 +852,8 @@ function ShowDiffraction() {
           {/* Toolbar: general controls above the display */}
           {showControls && (
             <Stack direction="row" alignItems="center" spacing={`${SPACING.SM}px`} useFlexGap sx={{ mb: `${SPACING.XS}px`, minHeight: 28, flexWrap: "wrap", rowGap: `${SPACING.XS}px`, maxWidth: canvasSize, px: 1, py: 0.5, border: `1px solid ${themeColors.border}`, borderRadius: "4px", bgcolor: themeColors.controlBg }}>
-              <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} onClick={() => setDetectRequest(20)} title="Auto-detect Bragg spots">SPOTS</Button>
-              <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} onClick={() => setDetectRingsRequest(8)} title="Auto-detect Debye–Scherrer rings">RINGS</Button>
+              <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} onClick={() => setDetectRequest(20)} title="Auto-detect Bragg spots">Spots</Button>
+              <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} onClick={() => setDetectRingsRequest(8)} title="Auto-detect Debye–Scherrer rings">Rings</Button>
               <Typography sx={{ ...typography.label, fontSize: 10 }}>Center:</Typography>
               <Select size="small" value={centerMode} onChange={(e) => setCenterMode(String(e.target.value))} sx={{ ...themedSelect, minWidth: 80 }} MenuProps={themedMenuProps}>
                 <MenuItem value="auto" sx={{ fontSize: 10 }}>Auto</MenuItem>
@@ -963,14 +963,14 @@ function ShowDiffraction() {
                 disabled={!spots || spots.length === 0}
                 onClick={() => setSpotUndoRequest(true)}
               >
-                UNDO
+                Undo
               </Button>
               <Button
                 size="small" sx={{ ...compactButton, color: themeColors.accent }}
                 disabled={!spots || spots.length === 0}
                 onClick={() => setSpotClearRequest(true)}
               >
-                CLEAR
+                Clear
               </Button>
             </Stack>
           </Stack>
@@ -1032,8 +1032,8 @@ function ShowDiffraction() {
               Rings ({rings.length})
             </Typography>
             <Stack direction="row" spacing={`${SPACING.XS}px`} sx={{ p: 0.25, border: `1px solid ${themeColors.border}`, borderRadius: "4px", bgcolor: themeColors.controlBg }}>
-              <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} onClick={() => setRingUndoRequest(true)}>UNDO</Button>
-              <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} onClick={() => setRingClearRequest(true)}>CLEAR</Button>
+              <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} onClick={() => setRingUndoRequest(true)}>Undo</Button>
+              <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} onClick={() => setRingClearRequest(true)}>Clear</Button>
             </Stack>
           </Stack>
           <Box sx={{ maxHeight: 160, overflow: "auto", border: `1px solid ${themeColors.border}` }}>
@@ -1116,17 +1116,17 @@ function ShowDiffraction() {
               size="small" sx={{ ...compactButton, color: themeColors.accent }}
               disabled={!spots || spots.length === 0 || !(parseFloat(dKnown) > 0)}
               onClick={() => { const d = parseFloat(dKnown); const s = spots[spots.length - 1]; if (d > 0 && s) setCalibrateFromSpotRequest([s.row, s.col, d]); }}
-            >FROM SPOT</Button>
+            >From Spot</Button>
             <Button
               size="small" sx={{ ...compactButton, color: themeColors.accent }}
               disabled={!rings || rings.length === 0 || !(parseFloat(dKnown) > 0)}
               onClick={() => { const d = parseFloat(dKnown); const r = rings[rings.length - 1]; if (d > 0 && r) setCalibrateFromRingRequest([r.radius_px, d]); }}
-            >FROM RING</Button>
+            >From Ring</Button>
             <Button
               size="small" sx={{ ...compactButton, color: themeColors.accent }}
               onClick={zoomToCenter}
               title="Zoom to the diffraction center"
-            >CENTER VIEW</Button>
+            >Center View</Button>
           </Box>
 
           <Box sx={{ ...controlRow, mt: `${SPACING.XS}px` }}>
