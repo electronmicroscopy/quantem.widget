@@ -128,10 +128,19 @@ class TorchBackend:
         return out.cpu().numpy()
 
     def mean_dp(self) -> np.ndarray:
-        """Mean DP over all scan positions - int64 accumulate, float only at output."""
+        """Mean DP over all scan positions - int64 accumulate, float only at output.
+
+        The chunk size accounts for the int64 dtype cast that ``.sum(dtype=int64)``
+        materializes internally. Otherwise a uint16 chunk expands 4× (to int64)
+        during the sum, holding an 8+ GB transient on 192² detectors that
+        oversubscribes 24 GB cards.
+        """
         torch = self.torch
         acc = torch.zeros(self.det_shape, dtype=torch.int64, device=self.device)
-        step = max(1, (1 << 30) // max(1, self.det_shape[0] * self.det_shape[1]))
+        # Budget 128 MB of int64 transient per chunk (was 1 GB base, but the
+        # int64 cast during sum() multiplies by 8/element vs uint16's 2).
+        det_pixels = max(1, self.det_shape[0] * self.det_shape[1])
+        step = max(1, (1 << 27) // (det_pixels * 8))
         for i in range(0, self.n_frames, step):
             acc += self._flat[i:i + step].sum(dim=0, dtype=torch.int64)
         return (acc.float() / self.n_frames).cpu().numpy()
