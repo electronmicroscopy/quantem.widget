@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import importlib.util
 from pathlib import Path
 
 import nbformat
@@ -18,12 +19,20 @@ import pytest
 pytest.importorskip("jupyterlab")
 pytest.importorskip("playwright.sync_api")
 
-from tests.test_widget_visual_jupyter import (  # noqa: E402
-    _chrome_executable,
-    _free_port,
-    _start_jupyter,
-    _wait_for_jupyter,
+_VISUAL_HELPERS_PATH = Path(__file__).with_name("test_widget_visual_jupyter.py")
+_VISUAL_HELPERS_SPEC = importlib.util.spec_from_file_location(
+    "quantem_widget_visual_helpers",
+    _VISUAL_HELPERS_PATH,
 )
+if _VISUAL_HELPERS_SPEC is None or _VISUAL_HELPERS_SPEC.loader is None:
+    raise ImportError(f"Cannot load visual test helpers from {_VISUAL_HELPERS_PATH}")
+_VISUAL_HELPERS = importlib.util.module_from_spec(_VISUAL_HELPERS_SPEC)
+_VISUAL_HELPERS_SPEC.loader.exec_module(_VISUAL_HELPERS)
+
+_chrome_executable = _VISUAL_HELPERS._chrome_executable
+_free_port = _VISUAL_HELPERS._free_port
+_start_jupyter = _VISUAL_HELPERS._start_jupyter
+_wait_for_jupyter = _VISUAL_HELPERS._wait_for_jupyter
 
 
 def _write_gallery_notebook(root: Path) -> Path:
