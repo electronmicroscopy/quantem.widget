@@ -15,7 +15,7 @@ datasets on Hugging Face — the whole flow is four lines:
 
 ```python
 from quantem.widget import load, Show4DSTEM
-from quantem.widget.io import list_datasets, download, discover_masters
+from quantem.widget.io import list_datasets, download, survey, discover_masters
 
 # 1. See what's available (returns names like '4dstem/gold_512' with prefix)
 list_datasets()
@@ -24,10 +24,11 @@ list_datasets()
 #    under ~/.cache/huggingface/... — cached after first call.
 path = download("gold_512")
 
-# 3. Discover the master.h5 files inside the downloaded folder
-masters = discover_masters(path)     # sorted list of Path
+# 3. Look before you load — header-only survey (memory budget + completeness)
+survey(path)
 
-# 4. Load the first master + open the viewer
+# 4. Discover the master.h5 files + load the first + open the viewer
+masters = discover_masters(path)     # sorted list of Path
 data = load(masters[0], det_bin=4)   # fast browse preset (see next section)
 Show4DSTEM(data)
 ```
@@ -44,17 +45,35 @@ downstream is identical.
 
 ## `survey(folder)` — what's in this folder before I load anything?
 
-Renders an interactive folder view: per-file shape, dtype, chunk layout,
-size. Zero pixel reads (HDF5 headers only). Safe to run on 500 GB folders.
-
-`survey`'s default glob is `*.emd` (Velox EDS folders). For a 4D-STEM folder
-of `*_master.h5`, pass the glob explicitly:
+Header-only walk of every `*_master.h5` in a folder — zero pixel reads,
+milliseconds even on a 500 GB folder. Reports each master's scan/detector
+shape, frame count, **chunk completeness** (catches a master whose data files
+are still writing or were truncated mid-copy), and **the resident memory at
+each bin level** so you can pick `det_bin` before you allocate a byte.
 
 ```python
-from quantem.widget import survey
+from quantem.widget.io import survey
 
-survey("/data/session", glob="*_master.h5")
+result = survey("/data/session")
 ```
+
+The result renders as a table in Jupyter (text in a console) and carries
+`.datasets` / `.summary` / `.df` for scripting. Each row includes:
+
+```text
+name        scan_shape  detector_shape  frames   complete  raw   bin2  bin4
+gold_004    (512, 512)  (192, 192)      262144   True      18 GB 4.5 GB 1.2 GB
+```
+
+Filter a mixed-scan folder to just the size you'll load:
+
+```python
+survey("/data/session", scan_size=512)   # keep only 512x512 acquisitions
+```
+
+> **Note:** this is `quantem.widget.io.survey` (4D-STEM masters). There is a
+> separate `quantem.widget.survey` for Velox EMD / EDS folders — different
+> tool, different default glob (`*.emd`). For 4D-STEM, always use the `io` one.
 
 Prefer `discover_masters` when you just want the sorted paths back for a
 scripted load:
