@@ -2,6 +2,12 @@
 
 Use with [Storyboard](storyboard).
 
+MacBook support is a first-class Show4DSTEM target, not an afterthought. For
+large real 4D-STEM data, agents should explicitly test Apple Silicon
+raw-Metal/MPS loading and detector-binned U8 browse workflows, then separately
+test browser/WebGPU exported HTML and any CUDA/Torch workstation path relevant
+to the release.
+
 ## Stories
 
 ### S4D-01: Open 4D-STEM Data Quickly
