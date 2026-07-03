@@ -8,6 +8,76 @@ bottom of this page.
 
 ---
 
+## First-time walkthrough (no data of your own required)
+
+If you don't have a 4D-STEM master.h5 on disk yet, use one of the reference
+datasets on Hugging Face — the whole flow is four lines:
+
+```python
+from quantem.widget import survey, load, Show4DSTEM
+from quantem.widget.io import list_datasets, download
+
+# 1. See what's available
+list_datasets()
+# ['4dstem/gold_128_npy_bin8', '4dstem/gold_30mrad1.3mx04',
+#  '4dstem/gold_30mrad1.3mx06', ..., '4dstem/gold_512']
+
+# 2. Pull one to a local path (cached after first call)
+path = download("4dstem/gold_512")   # returns a Path under ~/.cache/quantem/
+print(path)
+
+# 3. Look before you load — header-only walk of the folder
+survey(path)                         # scan/det shapes, dtype, chunks, size
+
+# 4. Load the master file and open the viewer
+master = next(path.glob("*_master.h5"))
+data = load(master, det_bin=4)       # fast browse preset (see next section)
+Show4DSTEM(data)
+```
+
+The gold reference scans (`4dstem/gold_512`, `4dstem/gold_128_npy_bin8`, etc.)
+load in seconds on any modern GPU or Mac. Once this works end-to-end, swap
+`download(...)` for your own `Path("/data/session/scan_master.h5")` and every
+downstream call is identical.
+
+## `survey(folder)` — what's in this folder before I load anything?
+
+Zero pixel reads. Walks a folder of `*_master.h5` files (or a single master)
+and reports each one's shape, dtype, chunk layout, and file size. Use this to
+budget your load call.
+
+```python
+from quantem.widget import survey
+
+survey("/data/session")
+# reads only HDF5 headers - safe to run on a 500 GB folder
+```
+
+Output example:
+
+```text
+/data/session/
+  ├─ scan_00_master.h5   (512, 512, 192, 192) uint16  chunks=(1, 1, 192, 192)  18.7 GB
+  ├─ scan_01_master.h5   (256, 256, 192, 192) uint16  chunks=(1, 1, 192, 192)   4.6 GB
+  └─ scan_02_master.h5   (512, 512,  96,  96) uint16  chunks=(1, 1, 96, 96)     4.6 GB
+```
+
+You can also point it at a single master:
+
+```python
+survey("/data/session/scan_00_master.h5")   # just this one file
+```
+
+Pair with `discover_masters` when you want the paths back sorted:
+
+```python
+from quantem.widget import discover_masters
+masters = discover_masters("/data/session", scan_shape=(512, 512))
+# returns only the 512x512 masters, sorted
+```
+
+---
+
 ## I'm on a Linux workstation with an NVIDIA RTX GPU. How do I load a scan?
 
 ```python
