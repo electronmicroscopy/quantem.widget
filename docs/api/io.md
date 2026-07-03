@@ -18,8 +18,18 @@ Show4DSTEM(data)
 ```
 
 `load` auto-detects CUDA and decompresses straight onto the GPU (zero-copy
-`cupy` → torch via dlpack). No flag needed. Works on RTX PRO 6000 Blackwell
-(96 GB), RTX 4090 (24 GB), A100, H100, L40S, anything with cupy support.
+`cupy` → torch via dlpack). No flag needed. Works on every common workstation
+GPU: RTX PRO 6000 Blackwell (96 GB), L40S / A100 (48 GB), RTX 4090 / A6000
+(24 GB), and anything else with a working cupy install.
+
+**Rough tier guidance for a 512×512×192×192 scan (~19 GB raw uint16):**
+
+| GPU tier | Full-res u16 no-bin | Best default |
+|---|---|---|
+| **96 GB** (Blackwell) | fits everything, 3x scans in flight | `load(path)` |
+| **48 GB** (L40S / A100) | fits with room for reconstruction | `load(path)` |
+| **24 GB** (RTX 4090 / A6000) | fits browse (~21 GB peak) but tight for recon | `load(path)` (browse) or `load(path, det_bin=2)` (recon) |
+| **16 GB** or less | bin at load | `load(path, det_bin=4, dtype="u8")` |
 
 ## I'm on a MacBook (Apple Silicon). How do I load a scan?
 
@@ -36,7 +46,7 @@ Show4DSTEM(data)
 On a 24 GB unified-memory MacBook you'll want to bin at load if the scan is
 large (see next question).
 
-## My GPU is 24 GB and the scan is 512×512×192×192 (~19 GB uint16). Does it fit?
+## My GPU is 24 GB (RTX 4090 / A6000) and the scan is 512×512×192×192 (~19 GB uint16). Does it fit?
 
 Yes, after the 2026-07-02 `mean_dp` fix. Full-res uint16 no-bin peak = ~21 GB
 (data + widget). Fits 24 GB with ~2.5 GB headroom.
@@ -51,6 +61,31 @@ the detector on the way in:
 
 ```python
 data = load("scan_master.h5", det_bin=2)   # 512x512x96x96, ~5 GB
+Show4DSTEM(data)
+```
+
+## My GPU is 48 GB (L40S / A100). Anything I need to know?
+
+No. Load full-res u16 no-bin — plenty of headroom for browse + downstream
+reconstruction in one process:
+
+```python
+data = load("scan_master.h5")   # ~21 GB peak, ~27 GB free after
+Show4DSTEM(data)
+```
+
+You can also load 2-3 scans simultaneously for cross-scan comparison
+without OOM. For time-series / tilt-series, `load([m1, m2, m3])` in one
+call keeps them behind a single `Dataset` slider.
+
+## My GPU is 96 GB (Blackwell). Anything I need to know?
+
+No. Full-res u16 no-bin peaks at ~21 GB per scan — you can hold 3-4 scans
+in VRAM at once, or one scan plus a full reconstruction workspace. Same
+one-liner:
+
+```python
+data = load("scan_master.h5")
 Show4DSTEM(data)
 ```
 
@@ -174,6 +209,15 @@ save(data, "binned_out.h5")   # compressed, matches original chunk shape
 
 `Show4DSTEM(data)` adds ~2-3 GB overhead (colormap, virtual-image cache, CBED
 buffer) on top of the load footprint. Budget accordingly.
+
+Which mode + your GPU tier at a glance:
+
+| your GPU | full u16 no-bin | `det_bin=2` u16 | `det_bin=4` u8 |
+|---|:---:|:---:|:---:|
+| 24 GB (RTX 4090 / A6000) | browse ✓ · recon tight | recon ✓ | ✓ |
+| 48 GB (L40S / A100) | browse + recon ✓ | ✓ | ✓ |
+| 96 GB (Blackwell) | multi-scan + recon ✓ | ✓ | ✓ |
+| Mac 16-24 GB MPS | via raw-Metal (chunked) | ✓ | ✓ |
 
 ## Function reference
 
