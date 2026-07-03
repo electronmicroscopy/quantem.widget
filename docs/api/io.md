@@ -33,7 +33,7 @@ GPU: RTX PRO 6000 Blackwell (96 GB), L40S / A100 (48 GB), RTX 4090 / A6000
 
 ## I'm on a MacBook (Apple Silicon). How do I load a scan?
 
-Same call:
+Same one-liner as CUDA:
 
 ```python
 from quantem.widget import load, Show4DSTEM
@@ -42,9 +42,27 @@ data = load("scan_master.h5")
 Show4DSTEM(data)
 ```
 
-`load` auto-detects Apple Metal (MPS) and uses a zero-copy raw-Metal path.
-On a 24 GB unified-memory MacBook you'll want to bin at load if the scan is
-large (see next question).
+`load` auto-detects Apple Metal (MPS) and uses a zero-copy **raw-Metal**
+chunked-frames path. Unified memory means "VRAM" = "RAM" — the same 24 GB
+covers both. So a 24 GB M-series MacBook has to share load footprint with
+macOS + browser + everything else running.
+
+**Rough tier guidance for Mac unified memory:**
+
+| MacBook Pro (unified) | Full-res u16 no-bin | Best default |
+|---|---|---|
+| **48-128 GB** (M2/M3/M4 Max, M3/M4 Ultra) | fits full-res comfortably | `load(path)` |
+| **24-36 GB** (M-series Pro) | fits browse via raw-Metal chunked path | `load(path)` (browse) or `load(path, det_bin=2)` |
+| **16-18 GB** (M-series base) | bin at load | `load(path, det_bin=4, dtype="u8")` |
+
+The raw-Metal path streams frames from a chunked buffer rather than requiring
+the whole 4D stack in one contiguous allocation, so a 24 GB Mac can browse
+19 GB u16 no-bin without OOM even though the block wouldn't fit as a single
+torch tensor on MPS.
+
+For multi-scan on Mac, use `load([m1, m2, m3])` — dataset 0 shows in ~2 s,
+and datasets 1..N-1 decode in a background worker behind the `Dataset` slider
+(so a 5-file series streams in without freezing the UI).
 
 ## My GPU is 24 GB (RTX 4090 / A6000) and the scan is 512×512×192×192 (~19 GB uint16). Does it fit?
 
@@ -210,14 +228,16 @@ save(data, "binned_out.h5")   # compressed, matches original chunk shape
 `Show4DSTEM(data)` adds ~2-3 GB overhead (colormap, virtual-image cache, CBED
 buffer) on top of the load footprint. Budget accordingly.
 
-Which mode + your GPU tier at a glance:
+Which mode + your GPU / Mac tier at a glance:
 
-| your GPU | full u16 no-bin | `det_bin=2` u16 | `det_bin=4` u8 |
+| your box | full u16 no-bin | `det_bin=2` u16 | `det_bin=4` u8 |
 |---|:---:|:---:|:---:|
-| 24 GB (RTX 4090 / A6000) | browse ✓ · recon tight | recon ✓ | ✓ |
-| 48 GB (L40S / A100) | browse + recon ✓ | ✓ | ✓ |
-| 96 GB (Blackwell) | multi-scan + recon ✓ | ✓ | ✓ |
-| Mac 16-24 GB MPS | via raw-Metal (chunked) | ✓ | ✓ |
+| **NVIDIA 24 GB** (RTX 4090 / A6000) | browse ✓ · recon tight | recon ✓ | ✓ |
+| **NVIDIA 48 GB** (L40S / A100) | browse + recon ✓ | ✓ | ✓ |
+| **NVIDIA 96 GB** (Blackwell) | multi-scan + recon ✓ | ✓ | ✓ |
+| **Mac 48+ GB** (M-series Max/Ultra) | browse + recon ✓ | ✓ | ✓ |
+| **Mac 24-36 GB** (M-series Pro) | browse ✓ via raw-Metal chunked | ✓ | ✓ |
+| **Mac 16-18 GB** (M-series base) | bin at load | ✓ | ✓ |
 
 ## Function reference
 
