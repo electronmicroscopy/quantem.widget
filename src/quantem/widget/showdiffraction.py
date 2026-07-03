@@ -74,6 +74,9 @@ class ShowDiffraction(anywidget.AnyWidget):
         Show statistics (mean, min, max, std).
     show_controls : bool, default True
         Show the control panel.
+    panel_width_px : int, optional
+        Initial diffraction canvas width in CSS pixels. The frontend still lets
+        users resize the panel interactively.
     verbose : bool, default True
         Print load timing on construction.
     state : str, pathlib.Path, or dict, optional
@@ -193,6 +196,7 @@ class ShowDiffraction(anywidget.AnyWidget):
     # =========================================================================
     show_stats = traitlets.Bool(True).tag(sync=True)
     show_controls = traitlets.Bool(True).tag(sync=True)
+    panel_width_px = traitlets.Int(384).tag(sync=True)
 
     @traitlets.validate("center_mode")
     def _validate_center_mode(self, proposal):
@@ -231,6 +235,7 @@ class ShowDiffraction(anywidget.AnyWidget):
         dp_scale_mode: str = "log",
         show_stats: bool = True,
         show_controls: bool = True,
+        panel_width_px: int | None = None,
         offline: bool = False,
         verbose: bool = True,
         state=None,
@@ -286,6 +291,8 @@ class ShowDiffraction(anywidget.AnyWidget):
         self.spot_refine = spot_refine
         self.show_stats = show_stats
         self.show_controls = show_controls
+        if panel_width_px is not None:
+            self.panel_width_px = int(panel_width_px)
         self.offline = offline
 
         if center is not None:

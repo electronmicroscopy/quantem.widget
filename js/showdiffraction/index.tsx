@@ -309,6 +309,7 @@ function ShowDiffraction() {
   const [dpStats] = useModelState<number[]>("dp_stats");
   const [showStats] = useModelState<boolean>("show_stats");
   const [showControls] = useModelState<boolean>("show_controls");
+  const [panelWidthPx] = useModelState<number>("panel_width_px");
 
   // Standalone HTML export bridge.
   const [, setExportRequest] = useModelState<string>("export_request");
@@ -364,7 +365,12 @@ function ShowDiffraction() {
   }, [spots, rings]);
 
   // Local UI state
-  const [canvasSize, setCanvasSize] = React.useState(CANVAS_MIN);
+  const initialCanvasSize = React.useMemo(() => {
+    const requested = Number(panelWidthPx);
+    return Number.isFinite(requested) && requested > 0 ? Math.max(CANVAS_MIN, Math.round(requested)) : CANVAS_MIN;
+  }, [panelWidthPx]);
+  const hasResizedCanvasRef = React.useRef(false);
+  const [canvasSize, setCanvasSize] = React.useState(initialCanvasSize);
   const [isResizingCanvas, setIsResizingCanvas] = React.useState(false);
   const [resizeCanvasStart, setResizeCanvasStart] = React.useState<{ x: number; y: number; size: number } | null>(null);
   const [dpZoom, setDpZoom] = React.useState(1);
@@ -374,6 +380,12 @@ function ShowDiffraction() {
   const [cursorInfo, setCursorInfo] = React.useState<{ row: number; col: number; value: number } | null>(null);
   const [dpExportAnchor, setDpExportAnchor] = React.useState<HTMLElement | null>(null);
   const [dKnown, setDKnown] = React.useState("");
+
+  React.useEffect(() => {
+    if (!hasResizedCanvasRef.current) {
+      setCanvasSize(initialCanvasSize);
+    }
+  }, [initialCanvasSize]);
 
   // Local frame index for smooth scrubbing; commit on release.
   const [localFrame, setLocalFrame] = React.useState(frameIdx);
@@ -399,6 +411,7 @@ function ShowDiffraction() {
   const handleCanvasResizeStart = (e: React.MouseEvent) => {
     e.stopPropagation();
     e.preventDefault();
+    hasResizedCanvasRef.current = true;
     setIsResizingCanvas(true);
     setResizeCanvasStart({ x: e.clientX, y: e.clientY, size: canvasSize });
   };

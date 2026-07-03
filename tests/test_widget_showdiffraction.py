@@ -17,6 +17,13 @@ def test_showdiffraction_2d_single_frame():
     assert w.detector_shape == (32, 48)
     assert len(w.frame_bytes) == 32 * 48 * 4
     assert w.dp_scale_mode == "log"
+    assert w.panel_width_px == 384
+
+
+def test_showdiffraction_panel_width_hint():
+    dp = np.random.rand(32, 48).astype(np.float32)
+    w = ShowDiffraction(dp, panel_width_px=480, verbose=False)
+    assert w.panel_width_px == 480
 
 
 def test_showdiffraction_3d_stack():
