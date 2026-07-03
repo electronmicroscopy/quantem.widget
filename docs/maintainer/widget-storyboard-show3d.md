@@ -17,9 +17,13 @@ movie such as 12 panels x 32 frames.
 
 **Acceptance checks**:
 
+- Load the stack from real backend files or arrays without requiring the laptop
+  to receive every native pixel before first paint.
 - Measure first visible paint, payload size, display bin, and native shape.
 - Verify first frame, current frame label, and histogram render correctly.
 - Confirm display binning is explicit when native pixels are not available.
+- Verify frame labels and per-panel metadata are available before playback, even
+  when higher-resolution detail arrives later.
 
 ### S3D-02: Match Show2D Visual Language
 
@@ -235,3 +239,87 @@ reachable.
   frame slider remains usable.
 - Test touch-style drag and scroll gestures.
 - For iPhone-specific claims, serve the page to a physical iPhone Safari test.
+
+### S3D-14: Review Many Denoising Or Time-Series Results
+
+**User story**: As a user reviewing denoising, drift, focal-series, or
+time-series outputs, I want many related stacks to open as movie panels quickly,
+so I can compare temporal behavior without waiting for every native frame to
+serialize into the browser.
+
+**Primary widgets**: Show3D.
+
+**Data to use**: real or real-derived stacks built from 4k x 4k source files.
+Use at least 12 panels x 32 frames for routine signoff; add 30, 45, or 85
+panel/file workflows when the scientific workflow produces that many outputs.
+
+**Acceptance checks**:
+
+- Load the stacks from backend file paths or prepared arrays and record backend
+  host, file count, panel count, frame count, native shape, dtype, native bytes,
+  display bin, first-paint time, and initial payload size.
+- Verify a useful binned first frame appears before full-resolution detail or
+  FFT work finishes.
+- Scrub immediately after first paint and verify the image, slider, labels, and
+  histogram stay synchronized.
+- Change columns through 2, 3, 4, 6, 8, and 12 while preserving frame index,
+  zoom anchor, labels, scale bars, and contrast state.
+- Hide and restore panels during playback and verify hidden panels do not keep
+  unnecessary frame or FFT work active.
+- Record whether playback, frame slider, histogram, and overlay interactions
+  remain near the target FPS, or document the limiting case.
+
+### S3D-15: Keep Movie Loading And Storage Lightweight
+
+**User story**: As a notebook user working with large stacks, I want Show3D to
+load a compact preview quickly, stream or reveal higher-resolution detail when I
+ask for it, and save/reopen without embedding huge frame buffers.
+
+**Primary widgets**: Show3D.
+
+**Data to use**: single-panel 4k-derived stack and multi-panel real-derived
+movie such as 12 panels x 32 frames or larger.
+
+**Acceptance checks**:
+
+- Compare live Jupyter loading, saved-notebook reopen, standalone HTML export,
+  GIF export, and MP4 export for the same stack.
+- Verify live Jupyter first paint is not blocked on all native frames, FFT
+  overlays, or animation encoders.
+- Press ``Cmd+S``, reload the notebook, and verify the saved fallback is visible
+  and compact.
+- Inspect widget state for heavy-buffer leaks when ``save_state=False``:
+  full frame stacks, FFT caches, detail buffers, and export payloads should not
+  be persisted.
+- Open Export and verify exact float32, quantized uint8, GIF, and MP4 choices
+  use the documented Show3D vocabulary and show approximate file sizes when
+  known.
+
+### S3D-16: Stress Playback, FFT, And Sliders On Heavy Movies
+
+**User story**: As a scientist inspecting heavy movie data, I want playback,
+scroll zoom, FFT overlay, histogram, and sliders to stay smooth because a slow
+movie viewer hides dynamic behavior and wastes analysis time.
+
+**Primary widgets**: Show3D.
+
+**Data to use**: 12+ panel real-derived 2k or 4k-source movies, including at
+least 32 frames. Use larger 30/45/85 file or panel workflows when available and
+record skipped maximum cases explicitly.
+
+**Acceptance checks**:
+
+- Measure first paint, frame scrub, play at selected FPS, high-FPS playback,
+  histogram drag, mousewheel zoom, pan, column reflow, FFT toggle, FFT overlay
+  drag/snap, FFT overlay zoom/pan, and reset.
+- Verify image, frame slider, frame labels, histogram, stats, and playback
+  controls remain synchronized under stress.
+- Verify FFT overlays use cached display-sized FFTs during playback and do not
+  recompute full-resolution transforms unless the user explicitly requests a
+  higher-fidelity FFT path.
+- Verify overlay FFT starts centered, remains readable on dark backgrounds, and
+  can be moved away from scale bars or important image features.
+- Confirm no stale frame, stale FFT, white/yellow flash, blank overlay, or
+  delayed slider state remains after rapid interaction.
+- Add timing and failure notes to the performance log with exact data path,
+  backend host, browser, adapter, shape, frame count, and panel count.

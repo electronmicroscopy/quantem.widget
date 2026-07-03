@@ -17,12 +17,15 @@ real-derived gallery for heavy signoff.
 
 **Acceptance checks**:
 
-- Load the image from Jupyter and from exported HTML when supported.
+- Load the image from a real file path on the backend, from an in-memory array,
+  and from exported HTML when supported.
 - Measure first visible paint and note display bin/native bytes.
 - Verify the title/info badge communicates preview/detail state when binning is
   active.
 - Verify the widget remains usable while the backend/kernel is idle after first
   paint.
+- Verify the notebook does not save the full 4k array unless the user explicitly
+  chooses an export path that embeds data.
 
 ### S2D-02: Arrange Panels For Comparison
 
@@ -199,3 +202,112 @@ controls to wrap and remain usable without covering the scientific image.
   horizontal scrolling is intentional.
 - Test touch-style zoom, pan, menu open, column selection, and panel visibility.
 - For iPhone-specific claims, serve the page to a physical iPhone Safari test.
+
+### S2D-12: Review A High-Throughput Denoising Batch
+
+**User story**: As a user reviewing denoising or drift-correction results, I
+want to open dozens of 4k images as a gallery, arrange them quickly, hide weak
+outputs, and keep interaction fast enough to screen the batch without exporting
+manual contact sheets.
+
+**Primary widgets**: Show2D.
+
+**Data to use**: real or real-derived 4k x 4k files from a denoising, drift, or
+ptychography workflow. Test at least 30 panels for routine signoff; use 45 and
+85 panels when backend storage and memory allow.
+
+**Acceptance checks**:
+
+- Load the gallery from file paths on the backend without copying files to the
+  laptop.
+- Record file count, native shape, dtype, total native bytes, first-paint time,
+  display bin, and browser memory if available.
+- Change columns through 2, 4, 6, 8, and 12; verify panel labels, scale bars,
+  stats, histograms, and hover readouts remain aligned.
+- Hide poor panels, restore them, and verify selection order and export state
+  stay correct.
+- Pan, zoom, histogram-drag, and resize repeatedly; record the interaction FPS
+  method and result.
+- Verify zooming into one panel streams or displays the highest-resolution
+  available tile for that panel, while the rest of the gallery remains
+  responsive.
+
+### S2D-13: Keep Loading And Storage Lightweight
+
+**User story**: As a notebook user working with large files, I want loading to
+show a useful view quickly and saving to keep the notebook small, so I can come
+back later without embedding gigabytes of image data.
+
+**Primary widgets**: Show2D.
+
+**Data to use**: one 4k or larger image and one 30+ panel 4k gallery from real
+backend files.
+
+**Acceptance checks**:
+
+- Compare live Jupyter loading, saved-notebook reopen, and standalone HTML
+  export paths.
+- Verify live Jupyter uses backend file/array access for detail streaming rather
+  than serializing every native pixel into widget state.
+- Press ``Cmd+S``, reload the notebook, and verify the saved output is visible,
+  compact, and labeled as preview/detail/offline as appropriate.
+- Open Export and verify exact float32 and quantized uint8 HTML labels follow
+  the Show3D wording and show approximate file sizes when known.
+- Confirm saved notebook state and exported HTML payload sizes are recorded in
+  the signoff report.
+
+### S2D-14: Stress Interactive Controls On Many 4k Panels
+
+**User story**: As a scientist screening high-throughput image results, I want
+all high-frequency controls to remain smooth even when many large panels are on
+screen, because slow hover, histogram, or zoom feedback makes the viewer
+unusable for triage.
+
+**Primary widgets**: Show2D.
+
+**Data to use**: 30, 45, and 85 real or real-derived 4k x 4k panels when
+available; otherwise record the largest real batch tested and why the larger
+case was skipped.
+
+**Acceptance checks**:
+
+- Measure first paint, column reflow, histogram drag, mousewheel zoom, pan,
+  hover readout, FFT toggle, and reset on the heavy gallery.
+- Verify target interaction remains near 30 FPS for the controls under test, or
+  record the limiting hardware/browser/data condition.
+- Confirm stale preview/detail tiles are not drawn after rapid zoom, pan,
+  resize, or contrast changes.
+- Verify controls remain keyboard and pointer reachable when the gallery is
+  taller than the viewport.
+- Add failures or near misses to the performance log with the data path and
+  exact shape so the case can be replayed.
+
+### S2D-15: Inspect Images Full Screen On A Large Monitor
+
+**User story**: As a microscopist using a workstation backend and a laptop or
+desktop browser as the frontend, I want Show2D to use the available screen
+cleanly so I can inspect the scientific image without fighting notebook chrome,
+oversized controls, or wasted whitespace.
+
+**Primary widgets**: Show2D.
+
+**Data to use**: one real 4k or larger image, plus a 4+ panel real or
+real-derived gallery.
+
+**Acceptance checks**:
+
+- Launch from a remote Jupyter backend path when possible: MJ-goat or buffle
+  owns the data and Python kernel; the browser drives the widget from the local
+  machine.
+- Open the notebook or exported HTML in a wide browser viewport and use browser
+  full-screen mode.
+- Verify the scientific image or gallery grows with the viewport while controls
+  remain compact, content-sized, and aligned to the same design language as
+  Show3D and Show4DSTEM.
+- Verify top-right actions such as Export, Reset, Copy, and panel controls sit
+  on the right edge of the widget header when there is available width.
+- Drive zoom, pan, histogram center drag, FFT, profile, ROI, and panel reflow in
+  the large view; record whether any interaction loses visible FPS compared with
+  the notebook-sized view.
+- Return to a normal notebook viewport and verify the layout contracts without
+  clipped controls, wrapped labels, or stale full-screen sizing.
