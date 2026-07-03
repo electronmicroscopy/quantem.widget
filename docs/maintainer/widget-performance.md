@@ -49,6 +49,32 @@ Rule for future cursor and hover UI:
 - If an overlay is hidden, make sure it does not steal pointer events from the
   scientific image underneath.
 
+## Policy: Show4DSTEM backend and memory ownership
+
+For Show4DSTEM performance reports, always separate three surfaces:
+
+- **Python backend work**: file loading, detector binning, virtual detector
+  computation, export packing, and any live kernel-backed recompute. Record
+  whether this used CUDA/Torch, raw Metal/MPS, Torch-MPS, or CPU.
+- **Browser interaction**: canvas rendering, pointer events, layout, and WebGPU
+  work in live Jupyter or exported HTML. Record the browser and WebGPU adapter.
+- **Saved/exported artifacts**: standalone HTML or HTML plus a data folder,
+  which should not require Python, Torch, CUDA, or MPS after export.
+
+On MacBook/Apple Silicon, the raw Metal/MPS path is preferred for large
+first-pass 4D-STEM browsing because it gives tighter control over chunking,
+detector binning, dtype, and transient memory than a generic Torch-MPS tensor
+path. Torch-MPS can still be valid for specific tensor workflows, but reports
+must say which path was used and whether any operation fell back to CPU.
+
+GPU memory belongs to the backend data object and Python session, not the
+visual widget alone. The viewer should avoid leaking buffers and should keep
+saved state compact, but freeing GPU memory should be handled by backend/session
+lifecycle: delete or replace the loaded data object, clear references, use a
+backend-specific cache cleanup utility if one exists, or restart the kernel. Do
+not add or test a misleading "free GPU" viewer button unless it explicitly
+reports backend ownership and delegates to a documented backend cleanup path.
+
 ## Heavy Show2D / Show3D audit
 
 Date: 2026-07-02

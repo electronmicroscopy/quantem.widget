@@ -35,6 +35,28 @@ w.export_html("show4dstem.html")
 `backend="browser"`, `backend="webgpu"`, and `offline=True` are compatibility
 aliases for `backend="web"`.
 
+## Backend ownership
+
+Show4DSTEM has two different acceleration surfaces:
+
+- **Live Python-backed viewers** use the data object returned by ``load(...)``.
+  Depending on hardware this may be CUDA/Torch, raw Metal/MPS on Apple Silicon,
+  Torch-MPS for specific paths, or CPU fallback.
+- **Exported/offline browser viewers** use the packed HTML/folder payload and
+  browser WebGPU when available. After export, interaction should not depend on
+  Python, Torch, CUDA, or MPS.
+
+On Apple Silicon, prefer the raw Metal/MPS loading path for large first-pass
+browsing because it can control chunking, detector binning, and dtype more
+tightly than a generic Torch-MPS tensor path. Torch-MPS remains useful for
+some tensor workflows, but reports should say which path was used.
+
+GPU memory is owned by the loaded data object and the Python session, not by the
+visual widget alone. To release GPU memory, remove or replace the backend data
+object, clear references, use backend-specific cleanup utilities when provided,
+or restart the kernel/session. Exported HTML has no live Python GPU allocation,
+so it should not expose a "free GPU memory" control.
+
 ## Reference
 
 ```{eval-rst}

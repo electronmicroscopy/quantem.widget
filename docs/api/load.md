@@ -42,6 +42,17 @@ data = load("scan_master.h5", det_bin=8)   # MPS, detector binned 8x -> small
 Show4DSTEM(data)
 ```
 
+For fastest browse workflows, combine detector binning with compact dtype:
+
+```python
+data = load("scan_master.h5", backend="mps", det_bin=8, dtype="u8")
+Show4DSTEM(data)
+```
+
+That path is intended for screening, layout, and export-to-browser review. Use
+uint16/full precision when detector counts are part of the scientific claim and
+the GPU memory budget is clean.
+
 The same is one shell command - see [the CLI](../cli): `quantem show4dstem
 scan_master.h5 --bin 8`.
 

@@ -78,21 +78,31 @@ inspect diffraction features without losing the linked scan context.
 
 ### S4D-05: Use WebGPU And Fallback Paths Correctly
 
-**User story**: As a user on different hardware, I want WebGPU acceleration
-when available and a clear fallback when it is not.
+**User story**: As a user on different hardware, I want the right compute path
+for the surface I am using: MPS/raw Metal or CUDA/Torch for live Python-backed
+work, WebGPU for browser/offline interaction, and a clear fallback when
+acceleration is not available.
 
 **Primary widgets**: Show4DSTEM.
 
-**Data to use**: WebGPU-capable Mac/browser plus a fallback browser or disabled
-WebGPU environment when possible.
+**Data to use**: WebGPU-capable Mac/browser, MacBook MPS load path, CUDA/Torch
+workstation path when available, plus a fallback browser or disabled WebGPU
+environment when possible.
 
 **Acceptance checks**:
 
 - Record WebGPU adapter availability in the report.
+- Record Python backend and data loader path: CUDA/Torch, raw Metal/MPS,
+  Torch-MPS, CPU, or browser/WebGPU.
 - Verify accelerated detector/virtual-image updates when WebGPU is available.
+- Verify MacBook live-Jupyter browsing can use MPS/raw Metal loading and
+  computation for first-pass review.
+- Verify backend="web" exported/offline pages use browser WebGPU and do not
+  need Python, Torch, or MPS after export.
 - Verify fallback path is usable and clearly communicated when WebGPU is not
   available.
 - Do not claim WebGPU performance from CPU fallback.
+- Do not claim MPS/raw-Metal performance from a Torch-MPS or CPU path.
 
 ### S4D-06: Save, Export, And Reopen 4D-STEM Views
 
@@ -219,3 +229,83 @@ reference parity.
   companion data folder is moved.
 - Add timings, reducer choice, dtype, downsample, browser, and backend host to
   the signoff report.
+
+### S4D-11: Use MacBook MPS For Live Loading And U8 Export
+
+**User story**: As a MacBook user opening large 4D-STEM data, I want first-pass
+browsing to use the fast Apple Silicon path, usually detector-binned U8, so the
+viewer opens quickly without exhausting unified memory.
+
+**Primary widgets**: Show4DSTEM.
+
+**Data to use**: a real 4D-STEM master file on a MacBook or a MacBook-connected
+Jupyter server, plus a smaller deterministic fixture for export parity.
+
+**Acceptance checks**:
+
+- Load with ``load(path, backend="mps", det_bin=4 or 8, dtype="u8")`` and
+  construct ``Show4DSTEM`` from that result.
+- Record load time, first paint, detector bin, dtype, resident memory, and
+  whether the path is raw Metal/MPS, Torch-MPS, or CPU.
+- Export compact HTML with ``encoding="uint8"`` and reopen it in the browser.
+- Verify reopened HTML uses browser/WebGPU for interaction when available, not
+  the Python MPS backend.
+- Compare one virtual detector and one diffraction frame against a Python
+  reference at the same binned/U8 precision, and separately document any
+  expected clipping from U8 browse data.
+- Repeat with ``encoding="full"`` or ``uint16`` when the data size allows, and
+  verify count-preserving expectations separately from the U8 browse path.
+
+### S4D-12: Explain Raw Metal MPS Versus Torch-MPS
+
+**User story**: As a developer or power user debugging MacBook performance, I
+want the report to say whether the viewer used raw Metal/MPS kernels or
+Torch-MPS, because those paths have different memory behavior and performance
+risks.
+
+**Primary widgets**: Show4DSTEM.
+
+**Data to use**: one MacBook MPS dataset large enough to expose memory pressure,
+plus a tiny deterministic comparison dataset.
+
+**Acceptance checks**:
+
+- State why the selected path is raw Metal/MPS or Torch-MPS for the test.
+- For the raw Metal/MPS path, verify loading and detector binning avoid
+  materializing an unnecessary full CPU copy.
+- For any Torch-MPS path, record tensor dtype, device, peak memory, and whether
+  the operation falls back to CPU for unsupported kernels.
+- Verify the same scientific operation is compared against a CPU/Python
+  reference: detector bin, BF/ADF virtual image, diffraction frame, and ROI
+  summed/mean diffraction when relevant.
+- Document in the signoff whether the raw Metal path is used because it offers
+  tighter control over chunking, dtype, and memory than generic Torch-MPS for
+  this workflow.
+
+### S4D-13: Keep GPU Memory Lifecycle Outside The Viewer UI
+
+**User story**: As a user running many heavy 4D-STEM notebooks, I want GPU memory
+to be released by backend/session lifecycle controls rather than by a
+scientific viewer button, so the viewer stays focused on inspecting data and
+does not hide ownership of GPU resources.
+
+**Primary widgets**: Show4DSTEM, plus backend loader/session tooling.
+
+**Data to use**: repeated open/close of a large MPS or CUDA-backed 4D-STEM
+dataset.
+
+**Acceptance checks**:
+
+- Verify closing/deleting a widget view does not imply the backend data object
+  or GPU allocation is freed unless the owning Python object/session is also
+  released.
+- Verify the documented cleanup path is backend/session level: delete or replace
+  the loaded data object, clear references, stop/restart the kernel, or use the
+  backend-specific cache cleanup utility when one exists.
+- Verify notebook save/reopen does not persist GPU buffers or export payloads
+  when ``save_state=False``.
+- Verify exported HTML has no live Python GPU allocation and therefore does not
+  need a "free GPU" control.
+- If a future GUI exposes memory status, verify it reports backend ownership and
+  links to cleanup instructions instead of pretending the viewer alone can free
+  all GPU memory.
