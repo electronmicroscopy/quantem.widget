@@ -6,7 +6,9 @@ microscopist would, fix anything that feels wrong, then show human-readable
 evidence before a release.
 
 This is deliberately not a fully automated smoke test. It is a fix-and-redrive
-loop.
+loop. Start from the scientific user stories in
+[Widget storyboard](widget-storyboard); use generated checklist packets only as
+evidence containers and prompts for concrete browser actions.
 
 ## When to run
 
@@ -75,10 +77,15 @@ For each widget, attach:
 Screenshots are enough for static layout and theme review. Use video when the
 question is whether the interaction feels attached to the pointer.
 
-## Per-widget drive checklist
+## Story-driven checks
 
-Use the generated `checklists/*.md` files from
-`scripts/widget_agent_signoff.sh`. They cover:
+Use [Widget storyboard](widget-storyboard) as the primary source of behavior to
+verify. The generated `checklists/*.md` files from
+`scripts/widget_agent_signoff.sh` are lower-level reminders for concrete
+interactions. A good report cites storyboard IDs, then lists the browser actions
+and evidence collected for each story.
+
+The generated packet checklists cover:
 
 - **Show2D**: histogram min/max and center drag, FFT/profile/lens/ROI toggles,
   pan, wheel zoom, scale bar, colormap, export, light/dark readability.
@@ -103,4 +110,3 @@ Before tagging a release candidate, the report should say one of:
 
 Do not hide a laggy or visually broken interaction behind a passing test suite.
 If the interaction is not real time, either fix it or mark the release blocked.
-

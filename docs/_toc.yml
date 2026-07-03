@@ -42,5 +42,7 @@ parts:
         title: Mobile HTML
       - file: maintainer/widget-agent-signoff
         title: Agent signoff
+      - file: maintainer/widget-storyboard
+        title: Widget storyboard
       - file: maintainer/widget-performance
         title: Performance

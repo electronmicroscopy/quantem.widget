@@ -72,10 +72,11 @@ in the browser:
 scripts/widget_agent_signoff.sh --quick
 ```
 
-The agent signoff is a fix-and-redrive loop: open the docs page, notebook, or
-exported HTML; click, drag, zoom, scrub, resize, and export; patch anything that
-feels wrong; rebuild; refresh; and redrive the same interaction. Save final
-screenshots or short videos in the packet before tagging. See
+The agent signoff is a fix-and-redrive loop: choose the relevant scientific
+stories from [Widget storyboard](widget-storyboard), open the docs page,
+notebook, or exported HTML; click, drag, zoom, scrub, resize, and export; patch
+anything that feels wrong; rebuild; refresh; and redrive the same story. Save
+final screenshots or short videos in the packet before tagging. See
 [Agent signoff](widget-agent-signoff).
 
 Also run at least the quick visual smoke:
@@ -103,8 +104,10 @@ scripts/widget_agent_signoff.sh --full
 ```
 
 The full signoff includes generic widget visual tests, Show4DSTEM WebGPU browser
-and Jupyter smokes, plus the local release build/check gate. Hardware-dependent
-real-data CUDA/MPS checks may still need a separate machine-specific runbook.
+and Jupyter smokes, plus the local release build/check gate. The human-readable
+report should cite storyboard IDs that were verified or skipped. Hardware-
+dependent real-data CUDA/MPS checks may still need a separate machine-specific
+runbook.
 
 ## Tag and publish to TestPyPI
 
