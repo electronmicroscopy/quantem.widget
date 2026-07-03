@@ -3,6 +3,9 @@
 Every question here comes from a real user session. Pick the one that matches
 what you're trying to do; each answer is a copy-pasteable snippet.
 
+For a beginner-friendly walkthrough of `uint8`/`uint16`, memory estimates,
+CUDA GPU selection, and cleanup, start with {doc}`IO/GPU <../tutorials/io_gpu>`.
+
 For the full function reference, see `load` and the autodocs at the
 bottom of this page.
 
@@ -320,6 +323,13 @@ save(data, "binned_out.h5")   # compressed, matches original chunk shape
 `Show4DSTEM(data)` adds ~2-3 GB overhead (colormap, virtual-image cache, CBED
 buffer) on top of the load footprint. Budget accordingly.
 
+Detector files are often integers, not floating-point images. If you are new to
+dtype choices: `uint16` (`u16`) stores exact raw detector counts from 0 to
+65535 in 2 bytes per pixel. `uint8` (`u8`) stores 0 to 255 in 1 byte per pixel,
+so it is smaller and faster for display, but it can saturate real count data.
+Use `uint16` for scientific loading and reconstruction; use `uint8` only for an
+explicit preview or browsing copy.
+
 Which mode + your GPU / Mac tier at a glance:
 
 | your box | full u16 no-bin | `det_bin=2` u16 | `det_bin=4` u8 |
@@ -330,6 +340,47 @@ Which mode + your GPU / Mac tier at a glance:
 | **Mac 48+ GB** (M-series Max/Ultra) | browse + recon ✓ | ✓ | ✓ |
 | **Mac 24-36 GB** (M-series Pro) | browse ✓ via raw-Metal chunked | ✓ | ✓ |
 | **Mac 16-18 GB** (M-series base) | bin at load | ✓ | ✓ |
+
+## How do I choose a specific NVIDIA GPU?
+
+Set `CUDA_VISIBLE_DEVICES` before launching Jupyter. This controls which
+NVIDIA GPU the Python kernel can see:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 jupyter lab --no-browser --ip=0.0.0.0
+```
+
+Use `1`, `2`, etc. for another physical GPU. This is a CUDA/NVIDIA control; it
+is not used for Apple Silicon or CPU-only machines.
+
+```bash
+CUDA_VISIBLE_DEVICES=1 jupyter lab --no-browser --ip=0.0.0.0
+```
+
+Inside the notebook:
+
+```python
+import torch
+
+print(torch.cuda.is_available())
+print(torch.cuda.get_device_name(0))
+print(torch.cuda.mem_get_info())
+```
+
+To release memory from the current Python kernel:
+
+```python
+del data
+
+import gc
+import torch
+
+gc.collect()
+torch.cuda.empty_cache()
+```
+
+If memory is still occupied, another object or another Jupyter kernel still
+owns it. Shut down that kernel from JupyterLab or stop the Python process.
 
 ## Function reference
 

@@ -17,6 +17,8 @@ parts:
       - file: tutorials/show4dstem
       - file: tutorials/showeds
       - file: tutorials/showdiffraction
+      - file: tutorials/io_gpu
+        title: IO/GPU
   - caption: Advanced tutorials
     chapters:
       - file: tutorials/showfolder
