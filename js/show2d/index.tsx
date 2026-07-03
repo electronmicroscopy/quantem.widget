@@ -4964,7 +4964,7 @@ function Show2D() {
           <Stack direction="row" alignItems="center" spacing={`${SPACING.SM}px`} useFlexGap sx={{ mb: `${SPACING.XS}px`, minHeight: 28, flexWrap: "wrap", rowGap: `${SPACING.XS}px`, width: "100%", maxWidth: "100%", boxSizing: "border-box" }}>
             {isGallery && (
               <>
-                <Typography sx={{ ...typography.label, fontSize: 10 }}>Cols:</Typography>
+                <Typography sx={{ ...typography.label, fontSize: 10 }}>Cols</Typography>
                 <Select
                   value={String(clampedNcols)}
                   onChange={(e) => setNcols(Math.max(1, Math.min(Number(e.target.value) || 1, nImages, MAX_PANEL_COLUMNS)))}
@@ -4980,7 +4980,7 @@ function Show2D() {
                 </Select>
               </>
             )}
-            <Typography sx={{ ...typography.label, fontSize: 10 }}>Profile:</Typography>
+            <Typography sx={{ ...typography.label, fontSize: 10 }}>Profile</Typography>
             <Switch
               checked={profileActive}
               onChange={(e) => {
@@ -5000,7 +5000,7 @@ function Show2D() {
             />
             {!isGallery && (
               <>
-                <Typography sx={{ ...typography.label, fontSize: 10 }}>ROI:</Typography>
+                <Typography sx={{ ...typography.label, fontSize: 10 }}>ROI</Typography>
                 <Switch
                   checked={roiActive}
                   onChange={(e) => {
@@ -5023,7 +5023,7 @@ function Show2D() {
             )}
             {!isGallery && (
               <>
-                <Typography sx={{ ...typography.label, fontSize: 10 }}>Lens:</Typography>
+                <Typography sx={{ ...typography.label, fontSize: 10 }}>Lens</Typography>
                 <Switch
                   checked={showLens}
                   onChange={() => {
@@ -5040,7 +5040,7 @@ function Show2D() {
                 />
               </>
             )}
-            <Typography sx={{ ...typography.label, fontSize: 10 }}>FFT:</Typography>
+            <Typography sx={{ ...typography.label, fontSize: 10 }}>FFT</Typography>
             <Switch
               checked={showFft}
               onChange={(e) => {
@@ -5055,7 +5055,7 @@ function Show2D() {
             />
             {nImages === 2 && (
               <>
-                <Typography sx={{ ...typography.label, fontSize: 10 }} title="Show A − B as a third panel. Use w.align() first to cancel drift.">Diff:</Typography>
+                <Typography sx={{ ...typography.label, fontSize: 10 }} title="Show A − B as a third panel. Use w.align() first to cancel drift.">Diff</Typography>
                 <Switch checked={diffMode} onChange={() => { setDiffMode(!diffMode); }} size="small" sx={switchStyles.small} />
               </>
             )}
@@ -5260,7 +5260,7 @@ function Show2D() {
                         textShadow: "0 0 3px rgba(0,0,0,0.8)",
                         // hidden until the panel is hovered; starred panels stay visible
                         opacity: starred?.[i] ? 1 : 0,
-                        pointerEvents: starred?.[i] ? "auto" : "none",
+                        pointerEvents: "auto",
                         transform: starred?.[i] ? "translateY(0)" : "translateY(-3px)",
                         transition: "opacity 120ms ease, transform 120ms ease, background-color 120ms ease, color 120ms ease",
                         userSelect: "none",
@@ -5524,18 +5524,18 @@ function Show2D() {
                   {/* Row 1: Scale + Color */}
                   {(
                     <Box sx={{ ...controlRow, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, opacity: 1, pointerEvents: "auto" }}>
-                      <Typography sx={{ ...typography.label, fontSize: 10 }}>Scale:</Typography>
+                      <Typography sx={{ ...typography.label, fontSize: 10 }}>Scale</Typography>
                       <Select value={logScale ? "log" : "linear"} onChange={(e) => setLogScale(e.target.value === "log")} size="small" sx={{ ...themedSelect, minWidth: 45 }} MenuProps={themedMenuProps}>
                         <MenuItem value="linear">Lin</MenuItem>
                         <MenuItem value="log">Log</MenuItem>
                       </Select>
-                      <Typography sx={{ ...typography.label, fontSize: 10 }}>Color:</Typography>
+                      <Typography sx={{ ...typography.label, fontSize: 10 }}>Color</Typography>
                       <Select size="small" value={cmap} onChange={(e) => setCmap(e.target.value)} MenuProps={themedMenuProps} sx={{ ...themedSelect, minWidth: 60 }}>
                         {COLORMAP_NAMES.map((name) => (<MenuItem key={name} value={name}>{name.charAt(0).toUpperCase() + name.slice(1)}</MenuItem>))}
                       </Select>
                       {!isGallery && (
                         <>
-                          <Typography sx={{ ...typography.label, fontSize: 10 }}>Colorbar:</Typography>
+                          <Typography sx={{ ...typography.label, fontSize: 10 }}>Colorbar</Typography>
                           <Switch checked={showColorbar} onChange={() => { setShowColorbar(!showColorbar); }} size="small" sx={switchStyles.small} />
                         </>
                       )}
@@ -5544,9 +5544,9 @@ function Show2D() {
                   {/* Row 2: Auto + Lens settings + Link Zoom (gallery) + zoom indicator */}
                   {(
                     <Box sx={{ ...controlRow, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, opacity: 1, pointerEvents: "auto" }}>
-                      <Typography sx={{ ...typography.label, fontSize: 10 }}>Auto:</Typography>
+                      <Typography sx={{ ...typography.label, fontSize: 10 }}>Auto</Typography>
                       <Switch checked={autoContrast} onChange={() => { setAutoContrast(!autoContrast); }} size="small" sx={switchStyles.small} />
-                      <Typography sx={{ ...typography.label, fontSize: 10 }} title="CSS bilinear interpolation. Same data, browser smooths visually — useful when upscaling small images on a large canvas.">Smooth:</Typography>
+                      <Typography sx={{ ...typography.label, fontSize: 10 }} title="CSS bilinear interpolation. Same data, browser smooths visually — useful when upscaling small images on a large canvas.">Smooth</Typography>
                       <Switch checked={smooth} onChange={() => { setSmooth(!smooth); }} size="small" sx={switchStyles.small} />
                       {!isGallery && showLens && (
                         <>
@@ -5558,7 +5558,7 @@ function Show2D() {
                       )}
                       {isGallery && (
                         <>
-                          <Typography sx={{ ...typography.label, fontSize: 10 }}>Link:</Typography>
+                          <Typography sx={{ ...typography.label, fontSize: 10 }}>Link</Typography>
                           <Typography sx={{ ...typography.label, fontSize: 10 }} title="Zoom together across panels.">Zoom</Typography>
                           <Switch checked={linkedZoom} onChange={() => { setLinkedZoom(!linkedZoom); }} size="small" sx={switchStyles.small} />
                           <Typography sx={{ ...typography.label, fontSize: 10 }} title="Pan together (independent of zoom).">Pan</Typography>
@@ -5610,7 +5610,7 @@ function Show2D() {
                 <Box sx={{ border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, px: 1, py: 0.5, display: "flex", flexDirection: "column", gap: `${SPACING.XS}px`, opacity: 1, pointerEvents: "auto" }}>
                   {/* ROI: shape + ADD + CLEAR */}
                   <Box sx={{ display: "flex", alignItems: "center", gap: `${SPACING.SM}px` }}>
-                    <Typography sx={{ ...typography.label, fontSize: 10 }}>ROI:</Typography>
+                    <Typography sx={{ ...typography.label, fontSize: 10 }}>ROI</Typography>
                     <Select
                       size="small"
                       value={newRoiShape}
@@ -5721,31 +5721,31 @@ function Show2D() {
             <Box sx={{ mt: `${SPACING.XS}px`, display: "flex", flexWrap: "wrap", gap: `${SPACING.SM}px`, width: "100%", maxWidth: galleryGridWidth, minWidth: 0, boxSizing: "border-box" }}>
               <Box sx={{ display: "flex", flexDirection: "column", gap: `${SPACING.XS}px`, flex: "1 1 260px", minWidth: 0, justifyContent: "flex-start" }}>
                 <Box sx={{ ...controlRow, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, opacity: 1, pointerEvents: "auto" }}>
-                  <Typography sx={{ ...typography.label, fontSize: 10 }}>FFT Scale:</Typography>
+                  <Typography sx={{ ...typography.label, fontSize: 10 }}>FFT Scale</Typography>
                   <Select value={fftScaleMode} onChange={(e) => setFftScaleMode(e.target.value as "linear" | "log")} size="small" sx={{ ...themedSelect, minWidth: 50, fontSize: 10 }} MenuProps={themedMenuProps}>
                     <MenuItem value="linear">Lin</MenuItem>
                     <MenuItem value="log">Log</MenuItem>
                   </Select>
                   {roiFftActive && fftCropDims && (
                     <>
-                      <Typography sx={{ ...typography.label, fontSize: 10 }}>Win:</Typography>
+                      <Typography sx={{ ...typography.label, fontSize: 10 }}>Win</Typography>
                       <Switch checked={fftWindow} onChange={(e) => { setFftWindow(e.target.checked); }} size="small" sx={switchStyles.small} />
                     </>
                   )}
-                  <Typography sx={{ ...typography.label, fontSize: 10 }}>Color:</Typography>
+                  <Typography sx={{ ...typography.label, fontSize: 10 }}>Color</Typography>
                   <Select value={fftColormap} onChange={(e) => setFftColormap(String(e.target.value))} size="small" sx={{ ...themedSelect, minWidth: 65, fontSize: 10 }} MenuProps={themedMenuProps}>
                     {COLORMAP_NAMES.map((name) => (<MenuItem key={name} value={name}>{name.charAt(0).toUpperCase() + name.slice(1)}</MenuItem>))}
                   </Select>
                 </Box>
                 {/* FFT Row 2: Auto + Smooth + Link Zoom/Pan/Contrast (mirrors main image Row 2) */}
                 <Box sx={{ ...controlRow, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, opacity: 1, pointerEvents: "auto" }}>
-                  <Typography sx={{ ...typography.label, fontSize: 10 }}>Auto:</Typography>
+                  <Typography sx={{ ...typography.label, fontSize: 10 }}>Auto</Typography>
                   <Switch checked={fftAuto} onChange={(e) => { setFftAuto(e.target.checked); }} size="small" sx={switchStyles.small} />
-                  <Typography sx={{ ...typography.label, fontSize: 10 }} title="CSS bilinear interpolation on the FFT canvas.">Smooth:</Typography>
+                  <Typography sx={{ ...typography.label, fontSize: 10 }} title="CSS bilinear interpolation on the FFT canvas.">Smooth</Typography>
                   <Switch checked={fftSmooth} onChange={(e) => { setFftSmooth(e.target.checked); }} size="small" sx={switchStyles.small} />
                   {isGallery && (
                     <>
-                      <Typography sx={{ ...typography.label, fontSize: 10 }}>Link:</Typography>
+                      <Typography sx={{ ...typography.label, fontSize: 10 }}>Link</Typography>
                       <Typography sx={{ ...typography.label, fontSize: 10 }} title="Zoom together across FFT panels (FFT-only, independent of main image link).">Zoom</Typography>
                       <Switch checked={fftLinkedZoom} onChange={() => { setFftLinkedZoom(!fftLinkedZoom); }} size="small" sx={switchStyles.small} />
                       <Typography sx={{ ...typography.label, fontSize: 10 }} title="Pan FFT panels together (FFT-only).">Pan</Typography>
@@ -5873,25 +5873,25 @@ function Show2D() {
                 <Box sx={{ display: "flex", flexDirection: "column", gap: `${SPACING.XS}px`, flex: 1, justifyContent: "flex-start" }}>
                   {/* Row 1: Scale + Color + Colorbar */}
                   <Box sx={{ ...controlRow, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, opacity: 1, pointerEvents: "auto" }}>
-                    <Typography sx={{ ...typography.label, fontSize: 10 }}>Scale:</Typography>
+                    <Typography sx={{ ...typography.label, fontSize: 10 }}>Scale</Typography>
                     <Select value={fftScaleMode} onChange={(e) => setFftScaleMode(e.target.value as "linear" | "log")} size="small" sx={{ ...themedSelect, minWidth: 50, fontSize: 10 }} MenuProps={themedMenuProps}>
                       <MenuItem value="linear">Lin</MenuItem>
                       <MenuItem value="log">Log</MenuItem>
                     </Select>
-                    <Typography sx={{ ...typography.label, fontSize: 10 }}>Color:</Typography>
+                    <Typography sx={{ ...typography.label, fontSize: 10 }}>Color</Typography>
                     <Select value={fftColormap} onChange={(e) => setFftColormap(String(e.target.value))} size="small" sx={{ ...themedSelect, minWidth: 65, fontSize: 10 }} MenuProps={themedMenuProps}>
                       {COLORMAP_NAMES.map((name) => (<MenuItem key={name} value={name}>{name.charAt(0).toUpperCase() + name.slice(1)}</MenuItem>))}
                     </Select>
-                    <Typography sx={{ ...typography.label, fontSize: 10 }}>Colorbar:</Typography>
+                    <Typography sx={{ ...typography.label, fontSize: 10 }}>Colorbar</Typography>
                     <Switch checked={fftShowColorbar} onChange={(e) => { setFftShowColorbar(e.target.checked); }} size="small" sx={switchStyles.small} />
                   </Box>
                   {/* Row 2: Auto + zoom indicator */}
                   <Box sx={{ ...controlRow, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, opacity: 1, pointerEvents: "auto" }}>
-                    <Typography sx={{ ...typography.label, fontSize: 10 }}>Auto:</Typography>
+                    <Typography sx={{ ...typography.label, fontSize: 10 }}>Auto</Typography>
                     <Switch checked={fftAuto} onChange={(e) => { setFftAuto(e.target.checked); }} size="small" sx={switchStyles.small} />
                     {fftCropDims && (
                       <>
-                        <Typography sx={{ ...typography.label, fontSize: 10 }}>Win:</Typography>
+                        <Typography sx={{ ...typography.label, fontSize: 10 }}>Win</Typography>
                         <Switch checked={fftWindow} onChange={(e) => { setFftWindow(e.target.checked); }} size="small" sx={switchStyles.small} />
                       </>
                     )}

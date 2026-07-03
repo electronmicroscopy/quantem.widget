@@ -74,6 +74,12 @@ native HTML `<select>` controls to widget toolbars. Match the Show4DSTEM and
 Show3D menu behavior so dropdown size, theme, z-order, and keyboard behavior
 stay consistent across viewers.
 
+Keep compact widget control labels free of decorative colons. Use labels such
+as `Scale`, `Color`, `Auto`, `Smooth`, `Link`, `Zoom`, `Pan`, `Contrast`,
+`FFT`, and `ROI` in toolbars and control rows. Colons are fine in explanatory
+prose, tooltips, docs, and other full sentences where they improve readability,
+but avoid them in dense controls where they waste horizontal space.
+
 ## Repository Hygiene
 
 Keep public documentation in durable paths such as `README.md`,

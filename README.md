@@ -143,6 +143,9 @@ through it line by line.
 - [ ] Controls are compact and content-sized: use icon/text buttons for
   commands, switches for binary options, sliders for numeric values, menus for
   option sets, and avoid stretched empty control bars.
+- [ ] Compact widget control labels do not use decorative colons. Prefer
+  `Scale`, `Color`, `Auto`, `Link`, `Zoom`, `Pan`, and `ROI` in dense toolbar
+  rows; keep colons for explanatory prose and tooltips.
 - [ ] The widget supports both light and dark notebook/docs themes: all labels,
   borders, controls, plots, histograms, ROI handles, status text, and export UI
   remain readable.
