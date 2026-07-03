@@ -44,5 +44,16 @@ parts:
         title: Agent signoff
       - file: maintainer/widget-storyboard
         title: Widget storyboard
+        sections:
+          - file: maintainer/widget-storyboard-show2d
+            title: Show2D
+          - file: maintainer/widget-storyboard-show3d
+            title: Show3D
+          - file: maintainer/widget-storyboard-show3dslices
+            title: Show3DSlices
+          - file: maintainer/widget-storyboard-show4dstem
+            title: Show4DSTEM
+          - file: maintainer/widget-storyboard-showeds
+            title: ShowEDS
       - file: maintainer/widget-performance
         title: Performance
