@@ -97,6 +97,9 @@ The generated packet checklists cover:
 - **ShowEDS**: energy-band center/edge drag, synchronized sliders/readouts,
   element-map update, ROI rectangle/ellipse drag, periodic-table/element UI,
   log/scale/smooth/export, real-data behavior.
+- **ShowFolder**: chooser or fallback path input, real folder survey,
+  thumbnail/cache reuse, file/folder selection, selection save/load, and compact
+  notebook state.
 - **ShowDiffraction**: center picking, spot/ring add/remove, d-spacing labels,
   contrast/histogram, frame scrub, export.
 

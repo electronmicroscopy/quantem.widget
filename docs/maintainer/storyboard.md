@@ -74,6 +74,7 @@ whether a canvas appears.
 - [Show3DSlices](storyboard-show3dslices)
 - [Show4DSTEM](storyboard-show4dstem)
 - [ShowEDS](storyboard-showeds)
+- [ShowFolder](storyboard-showfolder)
 
 ## Story Format
 

@@ -67,6 +67,16 @@ class ShowFolder:
         """JSON-serializable inventory rows."""
         return [] if self.survey is None else self.survey.inventory_rows
 
+    @property
+    def cache_info(self) -> dict[str, Any]:
+        """Thumbnail/index cache status for the latest survey run."""
+        return {"enabled": False} if self.survey is None else dict(self.survey.cache_info)
+
+    @property
+    def cache_path(self) -> Path | None:
+        """Folder containing the latest survey cache manifest and thumbnails."""
+        return None if self.survey is None else self.survey.cache_path
+
     def selected(self, kind: str | None = None) -> list[Any]:
         """Return selected survey items."""
         return [] if self.survey is None else self.survey.selected(kind)
@@ -107,6 +117,22 @@ class ShowFolder:
             raise ValueError("No folder has been surveyed yet.")
         return self.survey.load(path)
 
+    def clear_cache(self) -> None:
+        """Delete the current survey thumbnail/index cache, if present."""
+        if self.survey is not None:
+            self.survey.clear_cache()
+
+    def export_html(
+        self,
+        path: str | Path | None = None,
+        *,
+        title: str | None = None,
+    ) -> Path:
+        """Write a standalone HTML folder browser and return its path."""
+        if self.survey is None:
+            raise ValueError("No folder has been surveyed yet.")
+        return self.survey.export_html(path, title=title)
+
     def refresh(self, path: str | Path | None = None) -> "ShowFolder":
         """Run or rerun the microscopy folder survey."""
         from quantem.widget.survey import survey
@@ -132,8 +158,7 @@ class ShowFolder:
 
     def _init_chooser(self) -> None:
         from quantem.widget.folder_picker import _load_cache
-        from ipyfilechooser import FileChooser
-        from ipywidgets import Button, HTML, Output, VBox
+        from ipywidgets import Button, HTML, Output, Text, VBox
 
         cache = _load_cache()
         cached = cache.get(self.key)
@@ -143,24 +168,65 @@ class ShowFolder:
             start = self.default
         else:
             start = Path.home()
-        chooser = FileChooser(
-            str(start),
-            show_only_dirs=True,
-            title=f"Select folder ({self.key})",
-        )
         status = HTML("<b>Select a folder to survey.</b>")
         output = Output()
         refresh = Button(description="Survey folder", tooltip="Run ShowFolder on the selected folder")
+        children: list[Any]
+
+        try:
+            from ipyfilechooser import FileChooser
+        except ModuleNotFoundError:
+            path_preview = HTML(
+                "<div style='font-size:13px;color:#444;margin:6px 0 2px 0;'>"
+                "Folder path to survey</div>"
+                f"<div style='font-family:monospace;font-size:13px;line-height:1.35;"
+                f"padding:8px;border:1px solid #bbb;border-radius:6px;"
+                f"background:#f7f7f7;overflow-wrap:anywhere;'>{html.escape(str(start))}</div>"
+            )
+            chooser = Text(
+                value=str(start),
+                description="Path:",
+                placeholder="/path/to/microscopy/session",
+                layout={"width": "100%", "max_width": "900px"},
+                style={"description_width": "44px"},
+            )
+            help_text = HTML(
+                "<p style='margin:4px 0;color:#666'>"
+                "Install <code>ipyfilechooser</code> for a click-to-browse folder tree. "
+                "This fallback still runs the same ShowFolder survey from the typed path."
+                "</p>"
+            )
+            refresh.button_style = "primary"
+            refresh.layout.width = "180px"
+            children = [status, path_preview, chooser, help_text, refresh, output]
+        else:
+            chooser = FileChooser(
+                str(start),
+                show_only_dirs=True,
+                title=f"Select folder ({self.key})",
+            )
+            children = [status, chooser, refresh, output]
 
         def _selected_path() -> Path | None:
             selected = getattr(chooser, "selected", None)
-            return Path(selected).expanduser() if selected else None
+            if selected:
+                return Path(selected).expanduser()
+            value = getattr(chooser, "value", None)
+            return Path(value).expanduser() if value else None
 
         def _run(_=None) -> None:
             selected = _selected_path()
             if selected is None:
                 status.value = "<b>Select a folder first.</b>"
                 return
+            if "path_preview" in locals():
+                path_preview.value = (
+                    "<div style='font-size:13px;color:#444;margin:6px 0 2px 0;'>"
+                    "Folder path to survey</div>"
+                    f"<div style='font-family:monospace;font-size:13px;line-height:1.35;"
+                    f"padding:8px;border:1px solid #bbb;border-radius:6px;"
+                    f"background:#f7f7f7;overflow-wrap:anywhere;'>{html.escape(str(selected))}</div>"
+                )
             output.clear_output(wait=True)
             with output:
                 from IPython.display import display
@@ -168,12 +234,13 @@ class ShowFolder:
                 self.refresh(selected)
                 display(self.survey.widget)
 
-        chooser.register_callback(lambda _: _run())
+        if hasattr(chooser, "register_callback"):
+            chooser.register_callback(lambda _: _run())
         refresh.on_click(_run)
         self._chooser = chooser
         self._output = output
         self._status = status
-        self.widget = VBox([status, chooser, refresh, output])
+        self.widget = VBox(children)
 
     def _repr_mimebundle_(self, **kwargs):
         if self.widget is None:
@@ -195,3 +262,29 @@ def show_folder(
 ) -> ShowFolder:
     """Open a microscopy folder survey widget."""
     return ShowFolder(path, key=key, default=default, **survey_kwargs)
+
+
+def prebuild_showfolder_cache(
+    path: str | Path,
+    *,
+    cache_dir: str | Path | None = None,
+    thumb: int = 256,
+    glob: str = "*.emd",
+    rebuild_cache: bool = False,
+    **survey_kwargs: Any,
+) -> dict[str, Any]:
+    """Build or refresh a ShowFolder thumbnail/index cache without displaying UI.
+
+    This is useful on a workstation or SSD-backed scratch path before opening a
+    large microscopy session in a notebook. It runs the same survey pipeline as
+    :class:`ShowFolder`, then returns ``cache_info``.
+    """
+    widget = ShowFolder(
+        path,
+        thumb=thumb,
+        glob=glob,
+        cache_dir=cache_dir,
+        rebuild_cache=rebuild_cache,
+        **survey_kwargs,
+    )
+    return widget.cache_info

@@ -4,7 +4,7 @@ from pathlib import Path
 import h5py
 import numpy as np
 
-from quantem.widget import ShowFolder, show_folder
+from quantem.widget import ShowFolder, prebuild_showfolder_cache, show_folder
 
 
 def _metadata(rotation: float = 0.0) -> np.ndarray:
@@ -71,3 +71,113 @@ def test_show_folder_save_and_load_selection(tmp_path: Path) -> None:
 
     assert [item.file_id for item in restored.selected("image")] == ["0010"]
 
+
+def test_show_folder_reuses_thumbnail_cache(tmp_path: Path, monkeypatch) -> None:
+    _image_emd(tmp_path / "0010 - HAADF 15Mx Nano.emd")
+    _image_emd(tmp_path / "0011 - HAADF 15Mx Nano.emd")
+
+    import quantem.widget.io as widget_io
+
+    real_read_image = widget_io.read_image
+    calls = {"count": 0}
+
+    def counted_read_image(path):
+        calls["count"] += 1
+        return real_read_image(path)
+
+    monkeypatch.setattr(widget_io, "read_image", counted_read_image)
+
+    first = ShowFolder(
+        tmp_path,
+        thumb=8,
+        group_by="none",
+        cache_dir=tmp_path / "cache",
+    )
+    assert calls["count"] == 2
+    assert first.cache_info["misses"] == 2
+    assert first.cache_info["hits"] == 0
+    assert first.cache_path is not None
+    assert (first.cache_path / "manifest.json").exists()
+    assert (first.cache_path / "thumbnails.npz").exists()
+
+    calls["count"] = 0
+    second = ShowFolder(
+        tmp_path,
+        thumb=8,
+        group_by="none",
+        cache_dir=tmp_path / "cache",
+    )
+
+    assert calls["count"] == 0
+    assert second.cache_info["hits"] == 2
+    assert second.cache_info["misses"] == 0
+    assert len(second.items) == 2
+
+
+def test_show_folder_cache_invalidates_changed_file(tmp_path: Path, monkeypatch) -> None:
+    img0 = tmp_path / "0010 - HAADF 15Mx Nano.emd"
+    img1 = tmp_path / "0011 - HAADF 15Mx Nano.emd"
+    _image_emd(img0)
+    _image_emd(img1)
+    ShowFolder(tmp_path, thumb=8, group_by="none", cache_dir=tmp_path / "cache")
+
+    _image_emd(img1, shape=(20, 20))
+
+    import quantem.widget.io as widget_io
+
+    real_read_image = widget_io.read_image
+    read_names: list[str] = []
+
+    def counted_read_image(path):
+        read_names.append(Path(path).name)
+        return real_read_image(path)
+
+    monkeypatch.setattr(widget_io, "read_image", counted_read_image)
+
+    refreshed = ShowFolder(tmp_path, thumb=8, group_by="none", cache_dir=tmp_path / "cache")
+
+    assert read_names == [img1.name]
+    assert refreshed.cache_info["hits"] == 1
+    assert refreshed.cache_info["misses"] == 1
+
+
+def test_show_folder_cache_modes_and_clear_cache(tmp_path: Path) -> None:
+    _image_emd(tmp_path / "0010 - HAADF 15Mx Nano.emd")
+
+    disabled = ShowFolder(tmp_path, thumb=8, group_by="none", cache=False)
+    assert disabled.cache_info["enabled"] is False
+    assert disabled.cache_path is None
+
+    local = ShowFolder(tmp_path, thumb=8, group_by="none", cache="folder")
+    assert local.cache_path is not None
+    assert tmp_path / ".quantem" / "showfolder-cache" in local.cache_path.parents
+    assert (local.cache_path / "manifest.json").exists()
+
+    local.clear_cache()
+    assert not (local.cache_path / "manifest.json").exists()
+    assert not (local.cache_path / "thumbnails.npz").exists()
+
+
+def test_show_folder_export_html_writes_nested_widget_state(tmp_path: Path) -> None:
+    _image_emd(tmp_path / "0010 - HAADF 15Mx Nano.emd")
+    _image_emd(tmp_path / "0011 - HAADF 15Mx Nano.emd")
+
+    widget = ShowFolder(tmp_path, thumb=8, group_by="none", cache_dir=tmp_path / "cache")
+
+    out = widget.export_html(tmp_path / "survey.html", title="Survey export")
+
+    text = out.read_text(encoding="utf-8")
+    assert out.exists()
+    assert "Survey export" in text
+    assert "application/vnd.jupyter.widget-state+json" in text
+    assert "0010" in text
+
+
+def test_prebuild_showfolder_cache_returns_cache_info(tmp_path: Path) -> None:
+    _image_emd(tmp_path / "0010 - HAADF 15Mx Nano.emd")
+
+    info = prebuild_showfolder_cache(tmp_path, thumb=8, cache_dir=tmp_path / "cache")
+
+    assert info["enabled"] is True
+    assert info["misses"] == 1
+    assert Path(info["path"]).exists()

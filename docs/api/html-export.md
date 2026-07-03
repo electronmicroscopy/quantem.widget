@@ -135,6 +135,7 @@ The public Python calls are:
 | Show3DSlices | `export_html(path=None, title=None, mode="single", encoding="full", downsample=None)` |
 | Show4DSTEM | `export_html(path=None, title=None, mode="single", encoding="uint8", downsample=1)` |
 | ShowEDS | `export_html(path=None, title=None, mode="single", encoding="full", downsample=None)` |
+| ShowFolder | `export_html(path=None, title=None)` |
 
 Existing compatibility aliases remain supported:
 

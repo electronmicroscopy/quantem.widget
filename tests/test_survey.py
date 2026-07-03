@@ -185,8 +185,8 @@ def test_write_survey_notebook_uses_public_api(tmp_path):
 
     nb = json.loads(written.read_text())
     source = "\n".join("".join(cell.get("source", [])) for cell in nb["cells"])
-    assert "from quantem.widget import survey" in source
-    assert "survey(" in source
+    assert "from quantem.widget import ShowFolder" in source
+    assert "ShowFolder(" in source
     assert "group_view='stack'" in source
     assert "result =" not in source
     assert "print(" not in source
@@ -207,6 +207,6 @@ def test_cli_survey_writes_notebook(tmp_path):
     assert code == 0
     assert out.exists()
     source = "\n".join("".join(cell.get("source", [])) for cell in json.loads(out.read_text())["cells"])
-    assert "survey(" in source
+    assert "ShowFolder(" in source
     assert "result =" not in source
     assert "print(" not in source

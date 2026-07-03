@@ -56,5 +56,7 @@ parts:
             title: Show4DSTEM
           - file: maintainer/storyboard-showeds
             title: ShowEDS
+          - file: maintainer/storyboard-showfolder
+            title: ShowFolder
       - file: maintainer/widget-performance
         title: Performance

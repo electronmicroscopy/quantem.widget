@@ -7,11 +7,14 @@ one lazy ShowEDS explorer per EDS spectrum-image file.
 from __future__ import annotations
 
 import html
+import hashlib
 import json
 import math
+import os
 import re
 from dataclasses import dataclass, replace
 from pathlib import Path
+import time
 from typing import Any
 
 import numpy as np
@@ -77,6 +80,8 @@ class FolderSurvey:
         thumb: int,
         glob: str,
         group_view: str,
+        cache_info: dict[str, Any] | None = None,
+        cache_path: Path | None = None,
     ) -> None:
         self.folder = folder
         self.items = items
@@ -94,6 +99,8 @@ class FolderSurvey:
         self.thumb = thumb
         self.glob = glob
         self.group_view = group_view
+        self.cache_info = cache_info or {"enabled": False}
+        self.cache_path = cache_path
         self.selection_panel = None
 
         for file_id, control in eds_selection_controls.items():
@@ -244,6 +251,63 @@ class FolderSurvey:
     def load_selection(self, path: str | Path | None = None) -> dict[str, Any]:
         """Compatibility alias for ``load(path)``."""
         return self.load(path)
+
+    def clear_cache(self) -> None:
+        """Delete this survey's thumbnail/index cache, if one was used."""
+        if self.cache_path is None:
+            return
+        for name in ("manifest.json", "thumbnails.npz"):
+            target = self.cache_path / name
+            if target.exists():
+                target.unlink()
+
+    def export_html(
+        self,
+        path: str | Path | None = None,
+        *,
+        title: str | None = None,
+    ) -> Path:
+        """Write a standalone HTML folder browser and return its path.
+
+        The export embeds dependency state for nested Show2D/Show3D/ShowEDS
+        widgets. That is required for ShowFolder because a simple
+        ``embed_minimal_html(..., views=[widget])`` can restore the outer VBox
+        while dropping nested anywidget views.
+        """
+        from ipywidgets.embed import dependency_state, embed_minimal_html
+
+        from quantem.widget.export import ensure_mobile_viewport
+
+        export_path = Path(path).expanduser() if path is not None else self._default_html_export_path()
+        export_path.parent.mkdir(parents=True, exist_ok=True)
+        page_title = title or f"{self.folder.name} ShowFolder"
+        previous_save_state = []
+        try:
+            for gallery, _items in self.image_galleries:
+                if hasattr(gallery, "_save_state"):
+                    previous_save_state.append((gallery, getattr(gallery, "_save_state", False)))
+                    gallery._save_state = True
+            state = dependency_state([self.widget], drop_defaults=False)
+            embed_minimal_html(
+                str(export_path),
+                views=[self.widget],
+                title=page_title,
+                drop_defaults=False,
+                state=state,
+            )
+        finally:
+            for gallery, value in previous_save_state:
+                gallery._save_state = value
+        ensure_mobile_viewport(export_path)
+        return export_path
+
+    def _default_html_export_path(self) -> Path:
+        slug = "".join(ch.lower() if ch.isalnum() else "_" for ch in self.folder.name).strip("_")
+        while "__" in slug:
+            slug = slug.replace("__", "_")
+        if not slug:
+            slug = "showfolder"
+        return Path.cwd() / f"{slug}_showfolder.html"
 
     def hide_unselected(self) -> "FolderSurvey":
         """Collapse unstarred image panels in the current gallery."""
@@ -427,6 +491,9 @@ def survey(
     group_by: str | None = "session",
     group_view: str = "stack",
     save_state: bool = False,
+    cache: bool | str = "auto",
+    cache_dir: str | Path | None = None,
+    rebuild_cache: bool = False,
 ) -> FolderSurvey:
     """Survey a folder of microscopy files.
 
@@ -465,6 +532,15 @@ def survey(
         If True, embed image widget buffers into notebook widget state. Keep the
         default False for real microscope folders; use True only for small demos
         that should render interactively in static documentation.
+    cache
+        Thumbnail/index cache mode. ``"auto"``/``True`` stores cache files in a
+        user cache directory, ``"folder"`` stores them under ``.quantem`` inside
+        the surveyed folder, and ``False`` disables cache use.
+    cache_dir
+        Explicit cache root. Useful for tests, shared scratch disks, or project
+        caches managed outside the raw data folder.
+    rebuild_cache
+        If True, ignore any existing cache and regenerate thumbnails/index rows.
     """
     from ipywidgets import Button, Checkbox, HBox, HTML, Output, VBox
 
@@ -492,7 +568,55 @@ def survey(
     image_thumbnails: dict[str, np.ndarray] = {}
     image_pixel_sizes: dict[str, float] = {}
     image_pixel_units: dict[str, str] = {}
+    cache_started = time.perf_counter()
+    survey_cache = _load_survey_cache(
+        root,
+        files=files,
+        glob=glob,
+        thumb=thumb,
+        cache=cache,
+        cache_dir=cache_dir,
+        rebuild=rebuild_cache,
+    )
+    cache_entries = survey_cache.get("entries_by_rel", {})
+    cache_thumbnails = survey_cache.get("thumbnails", {})
+    cache_hits = 0
+    cache_misses = 0
+    next_cache_entries: list[dict[str, Any]] = []
+    next_cache_thumbnails: dict[str, np.ndarray] = {}
     for path in files:
+        rel = path.relative_to(root).as_posix()
+        signature = _file_signature(path, root)
+        cached_entry = cache_entries.get(rel)
+        cached_thumbnail = None
+        if cached_entry is not None and _cache_signature_matches(cached_entry, signature):
+            cached_thumbnail = cache_thumbnails.get(cached_entry.get("thumbnail_key", ""))
+        cached_needs_thumbnail = (
+            cached_entry is not None
+            and not bool(cached_entry.get("is_eds", False))
+            and cached_entry.get("error") is None
+        )
+        if (
+            cached_entry is not None
+            and _cache_signature_matches(cached_entry, signature)
+            and (not cached_needs_thumbnail or cached_thumbnail is not None)
+        ):
+            item = _survey_item_from_cache(path, cached_entry)
+            if cached_thumbnail is not None:
+                image_thumbnails[item.file_id] = np.asarray(cached_thumbnail, dtype=np.float32)
+                if item.sampling is not None:
+                    image_pixel_sizes[item.file_id] = float(item.sampling[-1]) * float(item.thumbnail_downsample or 1)
+                if item.units is not None:
+                    image_pixel_units[item.file_id] = str(item.units[-1])
+            items.append(item)
+            next_entry = dict(cached_entry)
+            next_entry["signature"] = signature
+            next_cache_entries.append(next_entry)
+            if cached_thumbnail is not None:
+                next_cache_thumbnails[str(next_entry.get("thumbnail_key"))] = np.asarray(cached_thumbnail, dtype=np.float32)
+            cache_hits += 1
+            continue
+        cache_misses += 1
         is_eds = has_eds(path)
         metadata = _file_metadata(path)
         shape = None
@@ -535,6 +659,37 @@ def survey(
             if item.units is not None:
                 image_pixel_units[item.file_id] = str(item.units[-1])
         items.append(item)
+        next_entry = _survey_item_to_cache(item, root=root, signature=signature)
+        next_cache_entries.append(next_entry)
+        if item.file_id in image_thumbnails:
+            key = str(next_entry.get("thumbnail_key"))
+            next_cache_thumbnails[key] = image_thumbnails[item.file_id]
+    cache_path = survey_cache.get("cache_path")
+    cache_enabled = cache_path is not None
+    cache_error = None
+    if cache_enabled:
+        try:
+            _write_survey_cache(
+                Path(cache_path),
+                folder=root,
+                glob=glob,
+                thumb=thumb,
+                entries=next_cache_entries,
+                thumbnails=next_cache_thumbnails,
+            )
+        except OSError as exc:
+            cache_error = str(exc)
+    cache_info = {
+        "enabled": bool(cache_enabled),
+        "path": None if cache_path is None else str(cache_path),
+        "hits": cache_hits,
+        "misses": cache_misses,
+        "entries": len(files),
+        "mode": survey_cache.get("mode", "off"),
+        "seconds": round(time.perf_counter() - cache_started, 3),
+    }
+    if cache_error is not None:
+        cache_info["error"] = cache_error
     if group_mode == "fov":
         items, fov_groups = _assign_fov_groups(items)
     elif group_mode == "session":
@@ -551,7 +706,8 @@ def survey(
             f"{html.escape(str(root))} · {len(items)} files matching {html.escape(glob)!r} · "
             f"{len([item for item in items if not item.is_eds and item.error is None])} image · "
             f"{len([item for item in items if item.is_eds and item.error is None])} EDS · "
-            f"thumbnail {thumb}px · scale bars use downsampled pixel size</div>"
+            f"thumbnail {thumb}px · scale bars use downsampled pixel size · "
+            f"{_cache_status_text(cache_info)}</div>"
         )
     ]
     gallery = None
@@ -711,6 +867,8 @@ def survey(
         thumb=thumb,
         glob=glob,
         group_view=group_view,
+        cache_info=cache_info,
+        cache_path=None if cache_path is None else Path(cache_path),
     )
     result.attach_selection_panel()
     return result
@@ -1173,9 +1331,9 @@ def write_survey_notebook(
                 "execution_count": None,
                 "outputs": [],
                 "source": [
-                    "from quantem.widget import survey\n",
+                    "from quantem.widget import ShowFolder\n",
                     "\n",
-                    "survey(\n",
+                    "ShowFolder(\n",
                     f"    {str(root)!r},\n",
                     f"    glob={glob!r},\n",
                     f"    thumb={int(thumb)!r},\n",
@@ -1291,6 +1449,225 @@ def _units_tuple(value: Any) -> tuple[str, str] | None:
     if len(values) < 2:
         return None
     return (str(values[-2]), str(values[-1]))
+
+
+def _cache_status_text(info: dict[str, Any]) -> str:
+    if not info.get("enabled"):
+        return "cache off"
+    if info.get("error"):
+        return "cache unavailable"
+    hits = int(info.get("hits", 0))
+    entries = int(info.get("entries", 0))
+    misses = int(info.get("misses", 0))
+    if entries == 0:
+        return "cache ready"
+    if misses == 0:
+        return f"cache warm {hits}/{entries}"
+    if hits:
+        return f"cache partial {hits}/{entries}"
+    return "cache rebuilt"
+
+
+def _load_survey_cache(
+    folder: Path,
+    *,
+    files: list[Path],
+    glob: str,
+    thumb: int,
+    cache: bool | str,
+    cache_dir: str | Path | None,
+    rebuild: bool,
+) -> dict[str, Any]:
+    cache_path, mode = _survey_cache_path(folder, glob=glob, thumb=thumb, cache=cache, cache_dir=cache_dir)
+    if cache_path is None:
+        return {"mode": "off", "cache_path": None, "entries_by_rel": {}, "thumbnails": {}}
+    if rebuild:
+        return {"mode": mode, "cache_path": cache_path, "entries_by_rel": {}, "thumbnails": {}}
+    manifest_path = cache_path / "manifest.json"
+    thumbnails_path = cache_path / "thumbnails.npz"
+    if not manifest_path.exists() or not thumbnails_path.exists():
+        return {"mode": mode, "cache_path": cache_path, "entries_by_rel": {}, "thumbnails": {}}
+    try:
+        manifest = json.loads(manifest_path.read_text())
+        if int(manifest.get("version", 0)) != 1:
+            raise ValueError("unsupported cache version")
+        if int(manifest.get("thumb", 0)) != int(thumb):
+            raise ValueError("cache thumbnail size mismatch")
+        if str(manifest.get("glob", "")) != str(glob):
+            raise ValueError("cache glob mismatch")
+        entries = {
+            str(entry.get("relative_path")): entry
+            for entry in manifest.get("entries", [])
+            if entry.get("relative_path")
+        }
+        valid_rels = {path.relative_to(folder).as_posix() for path in files}
+        entries = {rel: entry for rel, entry in entries.items() if rel in valid_rels}
+        with np.load(thumbnails_path, allow_pickle=False) as data:
+            thumbnails = {key: np.asarray(data[key], dtype=np.float32) for key in data.files}
+    except Exception:
+        return {"mode": mode, "cache_path": cache_path, "entries_by_rel": {}, "thumbnails": {}}
+    return {"mode": mode, "cache_path": cache_path, "entries_by_rel": entries, "thumbnails": thumbnails}
+
+
+def _write_survey_cache(
+    cache_path: Path,
+    *,
+    folder: Path,
+    glob: str,
+    thumb: int,
+    entries: list[dict[str, Any]],
+    thumbnails: dict[str, np.ndarray],
+) -> None:
+    cache_path.mkdir(parents=True, exist_ok=True)
+    manifest = {
+        "version": 1,
+        "kind": "quantem.widget.showfolder",
+        "folder": str(folder),
+        "glob": glob,
+        "thumb": int(thumb),
+        "created": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "entries": entries,
+    }
+    tmp_manifest = cache_path / "manifest.json.tmp"
+    tmp_manifest.write_text(json.dumps(manifest, indent=2) + "\n")
+    tmp_manifest.replace(cache_path / "manifest.json")
+    tmp_npz = cache_path / "thumbnails.npz.tmp.npz"
+    arrays = {key: np.asarray(value, dtype=np.float32) for key, value in thumbnails.items()}
+    np.savez_compressed(tmp_npz, **arrays)
+    tmp_npz.replace(cache_path / "thumbnails.npz")
+
+
+def _survey_cache_path(
+    folder: Path,
+    *,
+    glob: str,
+    thumb: int,
+    cache: bool | str,
+    cache_dir: str | Path | None,
+) -> tuple[Path | None, str]:
+    if cache is False or str(cache).lower() in {"false", "off", "none", "0"}:
+        return None, "off"
+    if cache_dir is not None:
+        root = Path(cache_dir).expanduser()
+        mode = "explicit"
+    else:
+        cache_mode = "auto" if cache is True else str(cache).lower()
+        if cache_mode in {"folder", "local", "project"}:
+            root = folder / ".quantem" / "showfolder-cache"
+            mode = "folder"
+        elif cache_mode in {"auto", "true", "user"}:
+            root = Path(os.environ.get("QUANTEM_WIDGET_CACHE", Path.home() / ".cache" / "quantem.widget")) / "showfolder"
+            mode = "user"
+        else:
+            raise ValueError("cache must be True, False, 'auto', 'user', 'folder', or a cache_dir")
+    key_payload = json.dumps(
+        {
+            "folder": str(folder),
+            "glob": glob,
+            "thumb": int(thumb),
+            "version": 1,
+        },
+        sort_keys=True,
+    ).encode()
+    key = hashlib.sha1(key_payload).hexdigest()[:20]
+    return root / key, mode
+
+
+def _file_signature(path: Path, root: Path) -> dict[str, Any]:
+    stat = path.stat()
+    return {
+        "relative_path": path.relative_to(root).as_posix(),
+        "size": int(stat.st_size),
+        "mtime_ns": int(stat.st_mtime_ns),
+    }
+
+
+def _cache_signature_matches(entry: dict[str, Any], signature: dict[str, Any]) -> bool:
+    cached = entry.get("signature", {})
+    return (
+        str(cached.get("relative_path")) == str(signature.get("relative_path"))
+        and int(cached.get("size", -1)) == int(signature.get("size", -2))
+        and int(cached.get("mtime_ns", -1)) == int(signature.get("mtime_ns", -2))
+    )
+
+
+def _survey_item_to_cache(item: SurveyItem, *, root: Path, signature: dict[str, Any]) -> dict[str, Any]:
+    rel = item.path.relative_to(root).as_posix()
+    return {
+        "relative_path": rel,
+        "signature": signature,
+        "file_id": item.file_id,
+        "magnification": item.magnification,
+        "shape": None if item.shape is None else list(item.shape),
+        "sampling": None if item.sampling is None else list(item.sampling),
+        "units": None if item.units is None else list(item.units),
+        "thumbnail_downsample": item.thumbnail_downsample,
+        "scan_rotation_deg": item.scan_rotation_deg,
+        "is_eds": item.is_eds,
+        "stage_position_m": None if item.stage_position_m is None else list(item.stage_position_m),
+        "field_of_view_nm": None if item.field_of_view_nm is None else list(item.field_of_view_nm),
+        "fov_group": item.fov_group,
+        "error": item.error,
+        "thumbnail_key": _thumbnail_cache_key(rel) if not item.is_eds and item.error is None else None,
+    }
+
+
+def _survey_item_from_cache(path: Path, entry: dict[str, Any]) -> SurveyItem:
+    return SurveyItem(
+        path=path,
+        file_id=str(entry["file_id"]),
+        magnification=entry.get("magnification"),
+        shape=_tuple2_int(entry.get("shape")),
+        sampling=_tuple2_float(entry.get("sampling")),
+        units=_tuple2_str(entry.get("units")),
+        thumbnail_downsample=entry.get("thumbnail_downsample"),
+        scan_rotation_deg=entry.get("scan_rotation_deg"),
+        is_eds=bool(entry.get("is_eds", False)),
+        stage_position_m=_tuple3_float(entry.get("stage_position_m")),
+        field_of_view_nm=_tuple2_float(entry.get("field_of_view_nm")),
+        fov_group=entry.get("fov_group"),
+        error=entry.get("error"),
+    )
+
+
+def _thumbnail_cache_key(relative_path: str) -> str:
+    return "thumb_" + hashlib.sha1(relative_path.encode()).hexdigest()[:20]
+
+
+def _tuple2_int(value: Any) -> tuple[int, int] | None:
+    if value is None:
+        return None
+    values = list(value)
+    if len(values) < 2:
+        return None
+    return (int(values[0]), int(values[1]))
+
+
+def _tuple2_float(value: Any) -> tuple[float, float] | None:
+    if value is None:
+        return None
+    values = list(value)
+    if len(values) < 2:
+        return None
+    return (float(values[0]), float(values[1]))
+
+
+def _tuple3_float(value: Any) -> tuple[float, float, float] | None:
+    if value is None:
+        return None
+    values = list(value)
+    if len(values) < 3:
+        return None
+    return (float(values[0]), float(values[1]), float(values[2]))
+
+
+def _tuple2_str(value: Any) -> tuple[str, str] | None:
+    if value is None:
+        return None
+    values = list(value)
+    if len(values) < 2:
+        return None
+    return (str(values[0]), str(values[1]))
 
 
 def _format_sampling(item: SurveyItem) -> str:
