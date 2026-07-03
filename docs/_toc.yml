@@ -19,7 +19,7 @@ parts:
       - file: tutorials/showdiffraction
   - caption: Advanced tutorials
     chapters:
-      - file: tutorials/survey
+      - file: tutorials/showfolder
       - file: tutorials/widget_export
   - caption: API reference
     chapters:

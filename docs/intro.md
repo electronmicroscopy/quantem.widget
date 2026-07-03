@@ -45,11 +45,11 @@ detector at load (`det_bin`) to cut memory and speed first paint - see
 | `Show4DSTEM` | 4D-STEM: live virtual detectors over the diffraction stack | [tutorial](tutorials/show4dstem) · [API](api/show4dstem) |
 | `ShowEDS` | Experimental EDS/EELS spectrum image: linked element map, spectrum, energy band, and ROI | [tutorial](tutorials/showeds) · [API](api/showeds) |
 | `ShowDiffraction` | 2D/3D diffraction d-spacing: Bragg spots, rings, center finding, k calibration | [tutorial](tutorials/showdiffraction) · [API](api/showdiffraction) |
-| `ShowFolder` | Folder-level microscopy survey: navigate a session, review thumbnails, select files/folders, and save curation state | [tutorial](tutorials/survey) · [API](api/showfolder) |
+| `ShowFolder` | Folder-level microscopy browser: navigate a session, review thumbnails, select files/folders, and save curation state | [tutorial](tutorials/showfolder) · [API](api/showfolder) |
 
 The [Tutorials](tutorials/download_data) walk through each widget on real public data
 where practical, with compact synthetic data only where it keeps an example
-portable. The [session survey tutorial](tutorials/survey) covers folder survey workflows
+portable. The [ShowFolder tutorial](tutorials/showfolder) covers folder browsing workflows
 and how to [save and share widget exports](tutorials/widget_export). The [API reference](api/index)
 documents every parameter, method, and interactive control (and doubles as a
 UI-test spec for automated agents). All example data here is synthetic or pulled

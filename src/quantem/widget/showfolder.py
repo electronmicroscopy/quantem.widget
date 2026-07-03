@@ -1,4 +1,4 @@
-"""User-facing folder survey widget."""
+"""User-facing microscopy folder browser widget."""
 from __future__ import annotations
 
 import html
@@ -9,22 +9,21 @@ from typing import Any
 class ShowFolder:
     """Inspect and curate a microscopy folder in a notebook.
 
-    ``ShowFolder`` is the user-facing wrapper around :func:`survey`. It keeps
-    the public API aligned with ``Show2D``/``Show3D`` while reusing the existing
-    microscopy folder scanner for thumbnails, metadata, EDS detection, and
-    selection state.
+    ``ShowFolder`` is the public folder-level API. It scans microscopy image
+    files, builds thumbnails, groups related acquisitions, and stores lightweight
+    image-selection state without embedding large raw arrays in the notebook.
 
     Parameters
     ----------
     path
-        Folder to survey. If omitted, display a folder chooser and run the
-        survey after the user selects a folder.
+        Folder to browse. If omitted, display a folder chooser and run the
+        browser after the user selects a folder.
     key
         Cache key for chooser mode. Reuses the last folder for that key.
     default
         Starting folder for chooser mode when no cached folder exists.
-    **survey_kwargs
-        Passed through to :func:`quantem.widget.survey.survey`.
+    **browser_kwargs
+        Passed through to the internal ShowFolder builder.
     """
 
     def __init__(
@@ -33,13 +32,13 @@ class ShowFolder:
         *,
         key: str = "show_folder",
         default: str | Path | None = None,
-        **survey_kwargs: Any,
+        **browser_kwargs: Any,
     ) -> None:
         self.path = Path(path).expanduser() if path is not None else None
         self.key = key
         self.default = Path(default).expanduser() if default is not None else None
-        self.survey_kwargs = dict(survey_kwargs)
-        self.survey = None
+        self.browser_kwargs = dict(browser_kwargs)
+        self.browser = None
         self.widget = None
         self._chooser = None
         self._output = None
@@ -52,38 +51,38 @@ class ShowFolder:
 
     @property
     def folder(self) -> Path | None:
-        """Current surveyed folder, if one has been selected."""
-        if self.survey is not None:
-            return self.survey.folder
+        """Current browsed folder, if one has been selected."""
+        if self.browser is not None:
+            return self.browser.folder
         return self.path
 
     @property
     def items(self) -> list[Any]:
-        """Surveyed file items."""
-        return [] if self.survey is None else self.survey.items
+        """Browsed file items."""
+        return [] if self.browser is None else self.browser.items
 
     @property
     def inventory_rows(self) -> list[dict[str, Any]]:
         """JSON-serializable inventory rows."""
-        return [] if self.survey is None else self.survey.inventory_rows
+        return [] if self.browser is None else self.browser.inventory_rows
 
     @property
     def cache_info(self) -> dict[str, Any]:
-        """Thumbnail/index cache status for the latest survey run."""
-        return {"enabled": False} if self.survey is None else dict(self.survey.cache_info)
+        """Thumbnail/index cache status for the latest folder-browser run."""
+        return {"enabled": False} if self.browser is None else dict(self.browser.cache_info)
 
     @property
     def cache_path(self) -> Path | None:
-        """Folder containing the latest survey cache manifest and thumbnails."""
-        return None if self.survey is None else self.survey.cache_path
+        """Folder containing the latest ShowFolder cache manifest and thumbnails."""
+        return None if self.browser is None else self.browser.cache_path
 
     def selected(self, kind: str | None = None) -> list[Any]:
-        """Return selected survey items."""
-        return [] if self.survey is None else self.survey.selected(kind)
+        """Return selected folder-browser items."""
+        return [] if self.browser is None else self.browser.selected(kind)
 
     def paths(self, kind: str | None = None) -> list[Path]:
         """Return selected file paths."""
-        return [] if self.survey is None else self.survey.paths(kind)
+        return [] if self.browser is None else self.browser.paths(kind)
 
     def selected_paths(self, kind: str | None = None) -> list[Path]:
         """Compatibility alias for :meth:`paths`."""
@@ -95,32 +94,32 @@ class ShowFolder:
 
     def selection(self) -> dict[str, Any]:
         """Return the current JSON-serializable selection snapshot."""
-        if self.survey is None:
+        if self.browser is None:
             return {
                 "folder": None if self.folder is None else str(self.folder),
                 "selected_files": [],
                 "selected_folders": [],
             }
-        data = dict(self.survey.selection())
+        data = dict(self.browser.selection())
         data["selected_folders"] = [str(path) for path in self.selected_folders()]
         return data
 
     def save(self, path: str | Path | None = None) -> Path:
         """Write the current selection JSON."""
-        if self.survey is None:
-            raise ValueError("No folder has been surveyed yet.")
-        return self.survey.save(path)
+        if self.browser is None:
+            raise ValueError("No folder has been browsed yet.")
+        return self.browser.save(path)
 
     def load(self, path: str | Path | None = None) -> dict[str, Any]:
-        """Load selection JSON into the current survey."""
-        if self.survey is None:
-            raise ValueError("No folder has been surveyed yet.")
-        return self.survey.load(path)
+        """Load selection JSON into the current folder browser."""
+        if self.browser is None:
+            raise ValueError("No folder has been browsed yet.")
+        return self.browser.load(path)
 
     def clear_cache(self) -> None:
-        """Delete the current survey thumbnail/index cache, if present."""
-        if self.survey is not None:
-            self.survey.clear_cache()
+        """Delete the current ShowFolder thumbnail/index cache, if present."""
+        if self.browser is not None:
+            self.browser.clear_cache()
 
     def export_html(
         self,
@@ -129,13 +128,13 @@ class ShowFolder:
         title: str | None = None,
     ) -> Path:
         """Write a standalone HTML folder browser and return its path."""
-        if self.survey is None:
-            raise ValueError("No folder has been surveyed yet.")
-        return self.survey.export_html(path, title=title)
+        if self.browser is None:
+            raise ValueError("No folder has been browsed yet.")
+        return self.browser.export_html(path, title=title)
 
     def refresh(self, path: str | Path | None = None) -> "ShowFolder":
-        """Run or rerun the microscopy folder survey."""
-        from quantem.widget.survey import survey
+        """Run or rerun the microscopy folder browser."""
+        from quantem.widget.showfolder_core import build_showfolder
 
         if path is not None:
             self.path = Path(path).expanduser()
@@ -147,12 +146,12 @@ class ShowFolder:
             cache = _load_cache()
             cache[self.key] = str(self.path)
             _save_cache(cache)
-        self.survey = survey(self.path, **self.survey_kwargs)
-        self.widget = self.survey.widget
+        self.browser = build_showfolder(self.path, **self.browser_kwargs)
+        self.widget = self.browser.widget
         if self._status is not None:
             self._status.value = (
                 "<b>Selected folder:</b> "
-                f"<code>{html.escape(str(self.survey.folder))}</code>"
+                f"<code>{html.escape(str(self.browser.folder))}</code>"
             )
         return self
 
@@ -168,9 +167,9 @@ class ShowFolder:
             start = self.default
         else:
             start = Path.home()
-        status = HTML("<b>Select a folder to survey.</b>")
+        status = HTML("<b>Select a folder to browse.</b>")
         output = Output()
-        refresh = Button(description="Survey folder", tooltip="Run ShowFolder on the selected folder")
+        refresh = Button(description="Open folder", tooltip="Run ShowFolder on the selected folder")
         children: list[Any]
 
         try:
@@ -178,7 +177,7 @@ class ShowFolder:
         except ModuleNotFoundError:
             path_preview = HTML(
                 "<div style='font-size:13px;color:#444;margin:6px 0 2px 0;'>"
-                "Folder path to survey</div>"
+                "Folder path to browse</div>"
                 f"<div style='font-family:monospace;font-size:13px;line-height:1.35;"
                 f"padding:8px;border:1px solid #bbb;border-radius:6px;"
                 f"background:#f7f7f7;overflow-wrap:anywhere;'>{html.escape(str(start))}</div>"
@@ -193,7 +192,7 @@ class ShowFolder:
             help_text = HTML(
                 "<p style='margin:4px 0;color:#666'>"
                 "Install <code>ipyfilechooser</code> for a click-to-browse folder tree. "
-                "This fallback still runs the same ShowFolder survey from the typed path."
+                "This fallback still runs the same ShowFolder browser from the typed path."
                 "</p>"
             )
             refresh.button_style = "primary"
@@ -222,7 +221,7 @@ class ShowFolder:
             if "path_preview" in locals():
                 path_preview.value = (
                     "<div style='font-size:13px;color:#444;margin:6px 0 2px 0;'>"
-                    "Folder path to survey</div>"
+                    "Folder path to browse</div>"
                     f"<div style='font-family:monospace;font-size:13px;line-height:1.35;"
                     f"padding:8px;border:1px solid #bbb;border-radius:6px;"
                     f"background:#f7f7f7;overflow-wrap:anywhere;'>{html.escape(str(selected))}</div>"
@@ -232,7 +231,7 @@ class ShowFolder:
                 from IPython.display import display
 
                 self.refresh(selected)
-                display(self.survey.widget)
+                display(self.browser.widget)
 
         if hasattr(chooser, "register_callback"):
             chooser.register_callback(lambda _: _run())
@@ -258,10 +257,10 @@ def show_folder(
     *,
     key: str = "show_folder",
     default: str | Path | None = None,
-    **survey_kwargs: Any,
+    **browser_kwargs: Any,
 ) -> ShowFolder:
-    """Open a microscopy folder survey widget."""
-    return ShowFolder(path, key=key, default=default, **survey_kwargs)
+    """Open a microscopy folder browser widget."""
+    return ShowFolder(path, key=key, default=default, **browser_kwargs)
 
 
 def prebuild_showfolder_cache(
@@ -271,12 +270,12 @@ def prebuild_showfolder_cache(
     thumb: int = 256,
     glob: str = "*.emd",
     rebuild_cache: bool = False,
-    **survey_kwargs: Any,
+    **browser_kwargs: Any,
 ) -> dict[str, Any]:
     """Build or refresh a ShowFolder thumbnail/index cache without displaying UI.
 
     This is useful on a workstation or SSD-backed scratch path before opening a
-    large microscopy session in a notebook. It runs the same survey pipeline as
+    large microscopy session in a notebook. It runs the same ShowFolder pipeline as
     :class:`ShowFolder`, then returns ``cache_info``.
     """
     widget = ShowFolder(
@@ -285,6 +284,6 @@ def prebuild_showfolder_cache(
         glob=glob,
         cache_dir=cache_dir,
         rebuild_cache=rebuild_cache,
-        **survey_kwargs,
+        **browser_kwargs,
     )
     return widget.cache_info

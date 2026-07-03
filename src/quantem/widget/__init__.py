@@ -22,7 +22,6 @@ from quantem.widget.showeds import ShowEDS, SpectrumImage, bin_spectrum_image, l
 from quantem.widget.show4dstem import Show4DSTEM as _Show4DSTEMBase
 from quantem.widget.showdiffraction import ShowDiffraction
 from quantem.widget.showfolder import ShowFolder, prebuild_showfolder_cache, show_folder
-from quantem.widget.survey import FolderSurvey, survey
 from quantem.widget.io import load, read_gif
 from quantem.widget.paths import first_existing
 from quantem.widget.backend import detect_backend, resolve_backend
@@ -223,14 +222,12 @@ __all__ = [
     "ShowEDS",
     "ShowFolder",
     "prebuild_showfolder_cache",
-    "FolderSurvey",
     "SpectrumImage",
     "bin_spectrum_image",
     "load_eds",
     "load_emd_spectrum_image",
     "load",
     "show_folder",
-    "survey",
     "read_gif",
     "HTML_EXPORT_TRAITS",
     "SupportsFrontendHtmlExport",

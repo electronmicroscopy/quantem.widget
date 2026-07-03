@@ -71,9 +71,9 @@ Filter a mixed-scan folder to just the size you'll load:
 survey("/data/session", scan_size=512)   # keep only 512x512 acquisitions
 ```
 
-> **Note:** this is `quantem.widget.io.survey` (4D-STEM masters). There is a
-> separate `quantem.widget.survey` for Velox EMD / EDS folders — different
-> tool, different default glob (`*.emd`). For 4D-STEM, always use the `io` one.
+> **Note:** this is `quantem.widget.io.survey` (4D-STEM masters). For Velox EMD
+> image-folder browsing, use `ShowFolder`; for 4D-STEM, always use the `io`
+> survey helper.
 
 Prefer `discover_masters` when you just want the sorted paths back for a
 scripted load:
@@ -246,7 +246,7 @@ matching acquisitions when a folder mixes scan sizes.
 ## Before loading anything, how do I check what's in a folder?
 
 ```python
-from quantem.widget import survey
+from quantem.widget.io import survey
 
 survey("/data/session")   # header-only walk: scan/det shapes + total size
 ```

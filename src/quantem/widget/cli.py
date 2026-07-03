@@ -61,8 +61,8 @@ def main(argv: list[str] | None = None) -> int:
     # widget-state, keep the auto-snapshot widget render (re-encoded JPEG) + print outputs.
     _add_github_args(sub.add_parser(
         "github", help="Make a widget notebook GitHub-displayable (strip offline state, snapshots to JPEG)."))
-    _add_survey_args(sub.add_parser(
-        "survey", help="Survey a microscopy folder: inventory, HAADF gallery, and EDS explorers."))
+    _add_showfolder_args(sub.add_parser(
+        "showfolder", help="Browse a microscopy folder with ShowFolder: inventory, thumbnails, and selection state."))
     args = parser.parse_args(argv)
     try:
         if args.command == "html":
@@ -71,8 +71,8 @@ def main(argv: list[str] | None = None) -> int:
             return _launch_jupyter(args)
         if args.command == "github":
             return _prepare_github(args)
-        if args.command == "survey":
-            return _survey_folder(args)
+        if args.command == "showfolder":
+            return _showfolder(args)
         if args.command not in forced:
             parser.print_help()
             return 0
@@ -95,27 +95,27 @@ def _add_html_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--no-open", action="store_true", help="Write the HTML but do not open it.")
 
 
-def _add_survey_args(parser: argparse.ArgumentParser) -> None:
-    """Attach options for the ``survey`` subcommand."""
-    parser.add_argument("folder", help="Folder of microscopy files to survey.")
-    parser.add_argument("--html", default=None, help="Execute the survey notebook and write this HTML file.")
-    parser.add_argument("--notebook", default=None, help="Write this survey notebook path.")
+def _add_showfolder_args(parser: argparse.ArgumentParser) -> None:
+    """Attach options for the ``showfolder`` subcommand."""
+    parser.add_argument("folder", help="Folder of microscopy files to browse.")
+    parser.add_argument("--html", default=None, help="Execute the ShowFolder notebook and write this HTML file.")
+    parser.add_argument("--notebook", default=None, help="Write this ShowFolder notebook path.")
     parser.add_argument("--thumb", type=int, default=512, help="Thumbnail size for the HAADF/STEM gallery.")
     parser.add_argument("--glob", default="*.emd", help="Glob within the folder (default '*.emd').")
-    parser.add_argument("--title", default=None, help="Survey title.")
+    parser.add_argument("--title", default=None, help="ShowFolder title.")
     parser.add_argument("--group-by", default="session", choices=("session", "fov", "none"),
-                        help="Survey layout grouping mode (default 'session').")
+                        help="ShowFolder layout grouping mode (default 'session').")
     parser.add_argument("--group-view", default="stack", choices=("stack", "gallery"),
                         help="Grouped image display mode (default 'stack').")
     parser.add_argument("--timeout", type=int, default=900, help="Notebook execution timeout in seconds.")
     parser.add_argument("--no-open", action="store_true", help="Write outputs but do not launch/open them.")
 
 
-def _survey_folder(args: argparse.Namespace) -> int:
-    """Generate a microscopy folder survey notebook, optionally render it to HTML."""
+def _showfolder(args: argparse.Namespace) -> int:
+    """Generate a microscopy folder browser notebook, optionally render it to HTML."""
     import shutil
     import subprocess
-    from quantem.widget.survey import write_survey_notebook
+    from quantem.widget.showfolder_core import write_showfolder_notebook
 
     folder = pathlib.Path(args.folder).expanduser().resolve()
     if not folder.is_dir():
@@ -129,15 +129,13 @@ def _survey_folder(args: argparse.Namespace) -> int:
     elif html_out is not None:
         notebook = html_out.with_suffix(".ipynb")
     else:
-        notebook = _default_out_dir() / f"{folder.name}_survey.ipynb"
+        notebook = _default_out_dir() / f"{folder.name}_showfolder.ipynb"
 
-    eds_backend = "stream" if html_out is not None else "auto"
-    write_survey_notebook(
+    write_showfolder_notebook(
         folder,
         notebook,
         glob=args.glob,
         thumb=args.thumb,
-        eds_backend=eds_backend,
         title=args.title,
         group_by=args.group_by,
         group_view=args.group_view,
@@ -162,9 +160,9 @@ def _survey_folder(args: argparse.Namespace) -> int:
         html_out.stem,
         f"--ExecutePreprocessor.timeout={args.timeout}",
     ]
-    print(f"executing + rendering survey -> {html_out}")
+    print(f"executing + rendering ShowFolder -> {html_out}")
     if subprocess.run(cmd).returncode != 0:
-        raise ValueError("survey nbconvert failed (see output above)")
+        raise ValueError("ShowFolder nbconvert failed (see output above)")
     size_mb = html_out.stat().st_size / 1e6
     print(f"HTML: {size_mb:.1f} MB")
     _open_html(html_out, serve=False, no_open=args.no_open)

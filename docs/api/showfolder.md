@@ -1,8 +1,8 @@
 # ShowFolder
 
 Use `ShowFolder` when you want a notebook widget for browsing an electron
-microscopy session folder before loading the heavy data. It wraps the existing
-folder survey workflow with a `Show2D` / `Show3D`-style public name.
+microscopy session folder before loading the heavy data. `ShowFolder` is the
+public folder-level API, matching the `Show2D` / `Show3D` naming style.
 
 ```python
 from quantem.widget import ShowFolder, prebuild_showfolder_cache, show_folder
@@ -26,7 +26,7 @@ w.cache_info
 Use `cache="folder"` when you want a project-local cache under
 `.quantem/showfolder-cache`, `cache_dir="/fast/ssd/cache"` for a shared SSD
 cache, `rebuild_cache=True` to force regeneration, or `cache=False` for a
-read-only/no-cache survey.
+read-only/no-cache browser.
 
 For large folders, warm the cache before opening the browser UI:
 
@@ -42,13 +42,13 @@ w = show_folder()
 w
 ```
 
-After users star image panels or select EDS entries, the Python object exposes
-the selected files and containing folders:
+After users star image panels, the Python object exposes the selected files and
+containing folders:
 
 ```python
 w.paths()
 w.selected_folders()
-w.save("session-selection.quantem-survey.json")
+w.save("session-selection.quantem-showfolder.json")
 w.clear_cache()
 ```
 
@@ -58,10 +58,7 @@ To share the folder browser without a live kernel, export standalone HTML:
 w.export_html("session-showfolder.html")
 ```
 
-The older `survey(path, ...)` function remains available for compatibility, but
-new notebooks should prefer `ShowFolder(path, ...)`.
-
-For the full visual workflow, see the [session survey tutorial](../tutorials/survey).
+For the full visual workflow, see the [ShowFolder tutorial](../tutorials/showfolder).
 
 ## Reference
 

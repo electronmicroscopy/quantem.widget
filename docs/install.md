@@ -38,7 +38,7 @@ Common entry points:
 | Show4DSTEM | [Open in Colab](https://colab.research.google.com/github/bobleesj/quantem.widget/blob/main/docs/tutorials/show4dstem.ipynb) | [GitHub](https://github.com/bobleesj/quantem.widget/blob/main/docs/tutorials/show4dstem.ipynb) |
 | ShowEDS | [Open in Colab](https://colab.research.google.com/github/bobleesj/quantem.widget/blob/main/docs/tutorials/showeds.ipynb) | [GitHub](https://github.com/bobleesj/quantem.widget/blob/main/docs/tutorials/showeds.ipynb) |
 | ShowDiffraction | [Open in Colab](https://colab.research.google.com/github/bobleesj/quantem.widget/blob/main/docs/tutorials/showdiffraction.ipynb) | [GitHub](https://github.com/bobleesj/quantem.widget/blob/main/docs/tutorials/showdiffraction.ipynb) |
-| Session survey | [Open in Colab](https://colab.research.google.com/github/bobleesj/quantem.widget/blob/main/docs/tutorials/survey.ipynb) | [GitHub](https://github.com/bobleesj/quantem.widget/blob/main/docs/tutorials/survey.ipynb) |
+| ShowFolder | [Open in Colab](https://colab.research.google.com/github/bobleesj/quantem.widget/blob/main/docs/tutorials/showfolder.ipynb) | [GitHub](https://github.com/bobleesj/quantem.widget/blob/main/docs/tutorials/showfolder.ipynb) |
 | Saving and sharing | [Open in Colab](https://colab.research.google.com/github/bobleesj/quantem.widget/blob/main/docs/tutorials/widget_export.ipynb) | [GitHub](https://github.com/bobleesj/quantem.widget/blob/main/docs/tutorials/widget_export.ipynb) |
 
 ## Backends

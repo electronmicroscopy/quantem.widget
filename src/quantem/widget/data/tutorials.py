@@ -12,7 +12,7 @@ from quantem.core.datastructures import Dataset2d, Dataset3d, Dataset4dstem
 
 download = None
 snapshot_download = None
-_SURVEY_HF_PATTERNS = (
+_SHOWFOLDER_HF_PATTERNS = (
     "survey/gold_haadf_session/*.emd",
 )
 
@@ -35,13 +35,13 @@ def _snapshot_download_dataset(**kwargs) -> Path:
     return Path(snapshot_download(**kwargs))
 
 
-def load_tutorial_survey_folder(*, verbose: bool = True, allow_fallback: bool = True) -> Path:
-    """Download the real HAADF EMD folder used by the survey tutorials.
+def load_tutorial_showfolder_folder(*, verbose: bool = True, allow_fallback: bool = True) -> Path:
+    """Download the real HAADF EMD folder used by the ShowFolder tutorial.
 
     Returns a folder containing a compact 26-file Velox ``.emd`` session from
     the public ``bobleesj/quantem-data`` Hugging Face dataset. The folder is
     small enough for documentation but still exercises the real
-    ``survey(folder)`` path: Velox EMD image loading, metadata parsing, labels,
+    ``ShowFolder(folder)`` path: Velox EMD image loading, metadata parsing, labels,
     repeated field-of-view grouping, thumbnails, scale bars, and the inventory
     table.
 
@@ -65,7 +65,7 @@ def load_tutorial_survey_folder(*, verbose: bool = True, allow_fallback: bool = 
         root = _snapshot_download_dataset(
             repo_id="bobleesj/quantem-data",
             repo_type="dataset",
-            allow_patterns=list(_SURVEY_HF_PATTERNS),
+            allow_patterns=list(_SHOWFOLDER_HF_PATTERNS),
         )
         folder = root / "survey" / "gold_haadf_session"
         if not folder.is_dir():
@@ -73,22 +73,22 @@ def load_tutorial_survey_folder(*, verbose: bool = True, allow_fallback: bool = 
     except Exception:
         if not allow_fallback:
             raise
-        folder = create_tutorial_survey_folder()
+        folder = create_tutorial_showfolder_folder()
 
     if verbose:
         files = sorted(path.name for path in folder.glob("*.emd"))
-        print(f"Tutorial survey folder: {folder}")
+        print(f"Tutorial ShowFolder folder: {folder}")
         print(f"Files: {len(files)} EMD")
     return folder
 
 
-def create_tutorial_survey_folder(path: str | Path | None = None) -> Path:
-    """Create a tiny Velox-like EMD folder for offline survey tests.
+def create_tutorial_showfolder_folder(path: str | Path | None = None) -> Path:
+    """Create a tiny Velox-like EMD folder for offline ShowFolder tests.
 
     The generated folder mimics a microscope session: two HAADF images from the
     same field of view, one matching EDS spectrum-image file, and one lower-mag
     overview image. Files are deliberately small so documentation notebooks can
-    embed the survey widgets without making the site heavy.
+    embed the ShowFolder widgets without making the site heavy.
 
     Parameters
     ----------
@@ -102,7 +102,7 @@ def create_tutorial_survey_folder(path: str | Path | None = None) -> Path:
         Folder containing the generated ``.emd`` files.
     """
 
-    root = Path(path) if path is not None else Path(tempfile.gettempdir()) / "quantem-widget-survey-demo"
+    root = Path(path) if path is not None else Path(tempfile.gettempdir()) / "quantem-widget-showfolder-demo"
     root.mkdir(parents=True, exist_ok=True)
     for old in root.glob("*.emd"):
         old.unlink()
@@ -120,7 +120,7 @@ def create_tutorial_survey_folder(path: str | Path | None = None) -> Path:
     return root
 
 
-def _tutorial_survey_metadata(
+def _tutorial_showfolder_metadata(
     rotation_deg: float,
     *,
     stage: tuple[float, float, float] = (1e-6, 2e-6, 3e-6),
@@ -147,7 +147,7 @@ def _tutorial_survey_metadata(
     return out
 
 
-def _tutorial_survey_image(shape: tuple[int, int] = (96, 96), *, seed: int = 0) -> np.ndarray:
+def _tutorial_showfolder_image(shape: tuple[int, int] = (96, 96), *, seed: int = 0) -> np.ndarray:
     rng = np.random.default_rng(seed)
     y, x = np.mgrid[-1:1:complex(shape[0]), -1:1:complex(shape[1])]
     particles = (
@@ -171,10 +171,10 @@ def _write_tutorial_image_emd(
 
     with h5py.File(path, "w") as h:
         group = h.create_group("Data/Image/uid")
-        group.create_dataset("Data", data=_tutorial_survey_image(seed=seed))
+        group.create_dataset("Data", data=_tutorial_showfolder_image(seed=seed))
         group.create_dataset(
             "Metadata",
-            data=_tutorial_survey_metadata(rotation_deg, stage=stage, fov_nm=fov_nm),
+            data=_tutorial_showfolder_metadata(rotation_deg, stage=stage, fov_nm=fov_nm),
         )
 
 
@@ -192,7 +192,7 @@ def _write_tutorial_eds_emd(
         group.create_dataset("Data", data=np.zeros((24, 24, 16), dtype=np.uint16))
         group.create_dataset(
             "Metadata",
-            data=_tutorial_survey_metadata(rotation_deg, stage=stage, fov_nm=fov_nm),
+            data=_tutorial_showfolder_metadata(rotation_deg, stage=stage, fov_nm=fov_nm),
         )
         h.create_group("Data/SpectrumStream")
 

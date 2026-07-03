@@ -23,9 +23,9 @@ files and one nested subfolder. Use real or real-derived files when available.
 
 - `ShowFolder()` renders a visible folder selection UI in JupyterLab.
 - If `ipyfilechooser` is installed, the chooser can select a directory and run
-  the survey.
+  the folder browser.
 - If `ipyfilechooser` is not installed, the fallback path field clearly shows
-  the selected path and the `Survey folder` button runs the same survey.
+  the selected path and the `Open folder` button runs the same browser.
 - Invalid paths show a useful error with the path that failed.
 - The selected folder is remembered by key for the next widget creation.
 
@@ -34,10 +34,11 @@ files and one nested subfolder. Use real or real-derived files when available.
 **User story**: A user opens a real microscopy session and needs fast thumbnails,
 file names, calibrated scale bars, and enough metadata to decide what to load.
 
-**Primary widgets**: ShowFolder, survey image gallery, EDS file entries.
+**Primary widgets**: ShowFolder and image gallery rows.
 
 **Data to use**: A real or real-derived session folder containing calibrated 2D
-images. Include EDS files when testing EDS routing.
+images. Include EDS files only to confirm ShowFolder inventories them without
+opening the EDS viewer.
 
 **Acceptance checks**:
 
@@ -45,8 +46,8 @@ images. Include EDS files when testing EDS routing.
   image thumbnails without loading full-resolution arrays into notebook state.
 - Scale bars use calibrated sampling when available.
 - File names, shapes, and errors are readable.
-- EDS files are listed and routed to the EDS workflow without forcing full EDS
-  cubes into the initial survey view.
+- EDS files are listed in the inventory when present, but ShowFolder does not
+  create ShowEDS launchers or EDS selection controls.
 - The UI remains usable when the folder contains many files.
 
 ## SF-3: Cache and Rerun
@@ -54,7 +55,7 @@ images. Include EDS files when testing EDS routing.
 **User story**: The first scan may spend time reading files, but the second scan
 should reuse thumbnails and metadata when files have not changed.
 
-**Primary widgets**: ShowFolder, survey cache.
+**Primary widgets**: ShowFolder cache.
 
 **Data to use**: A folder with multiple image files and a temporary cache
 directory.
@@ -75,14 +76,14 @@ directory.
 **User story**: A user reviews a session, marks useful files, and saves the
 selection so analysis code can use the exact file list later.
 
-**Primary widgets**: ShowFolder, survey selection controls.
+**Primary widgets**: ShowFolder selection controls.
 
 **Data to use**: A mixed folder with at least three images and one file that
 should not be selected.
 
 **Acceptance checks**:
 
-- Users can select individual files and folders from the rendered survey.
+- Users can select individual image files and folders from the rendered browser.
 - `selected()`, `paths()`, `selected_paths()`, and `selected_folders()` return
   stable path information.
 - `save(path)` writes a compact JSON selection.
@@ -113,7 +114,7 @@ creating giant notebook files.
 
 ## SF-6: Export a Shareable Folder Browser
 
-**User story**: A user finishes a folder survey and wants to send a lightweight
+**User story**: A user finishes browsing a folder and wants to send a lightweight
 interactive browser to a collaborator without asking them to run a live kernel.
 
 **Primary widgets**: ShowFolder, nested Show2D rows, HTML export.
@@ -163,7 +164,7 @@ only when the heavy data is unavailable.
 Run these before committing ShowFolder changes:
 
 ```bash
-PYTHONPATH=src pytest -q tests/test_showfolder.py tests/test_survey.py
+PYTHONPATH=src pytest -q tests/test_showfolder.py tests/test_showfolder_core.py
 ```
 
 When a change affects docs or examples, also run the docs build used by the

@@ -45,14 +45,15 @@ def test_show_folder_surveys_microscopy_folder_and_delegates_selection(tmp_path:
     assert widget.inventory_rows[0]["kind"] == "image"
     assert widget.inventory_rows[2]["kind"] == "EDS"
 
-    assert widget.survey is not None
-    assert widget.survey.gallery is not None
-    widget.survey.gallery.star_panel(1)
-    widget.survey.eds_selection_controls["0020"].value = True
+    assert widget.browser is not None
+    assert widget.browser.gallery is not None
+    widget.browser.gallery.star_panel(1)
+    assert widget.browser.eds_widgets == []
+    assert widget.browser.eds_selection_controls == {}
 
     selected = widget.selection()
     assert selected["selected_image_ids"] == ["0011"]
-    assert selected["selected_eds_ids"] == ["0020"]
+    assert "selected_eds_ids" not in selected
     assert [path.name for path in widget.selected_paths("image")] == ["0011 - HAADF 15Mx Nano 90deg.emd"]
     assert widget.selected_folders() == [tmp_path.resolve()]
 
@@ -62,8 +63,8 @@ def test_show_folder_save_and_load_selection(tmp_path: Path) -> None:
     _image_emd(tmp_path / "0011 - HAADF 15Mx Nano.emd")
 
     widget = ShowFolder(tmp_path, thumb=8, group_by="none")
-    assert widget.survey is not None
-    widget.survey.gallery.star_panel(0)
+    assert widget.browser is not None
+    widget.browser.gallery.star_panel(0)
 
     selection_path = widget.save(tmp_path / "selection.json")
     restored = ShowFolder(tmp_path, thumb=8, group_by="none")
@@ -164,11 +165,11 @@ def test_show_folder_export_html_writes_nested_widget_state(tmp_path: Path) -> N
 
     widget = ShowFolder(tmp_path, thumb=8, group_by="none", cache_dir=tmp_path / "cache")
 
-    out = widget.export_html(tmp_path / "survey.html", title="Survey export")
+    out = widget.export_html(tmp_path / "showfolder.html", title="ShowFolder export")
 
     text = out.read_text(encoding="utf-8")
     assert out.exists()
-    assert "Survey export" in text
+    assert "ShowFolder export" in text
     assert "application/vnd.jupyter.widget-state+json" in text
     assert "0010" in text
 

@@ -30,14 +30,16 @@ python -c "import quantem.widget; print(quantem.widget.__version__)"
 | `Show3DSlices` | 3D volume | orthogonal-slice viewer |
 | `Show4DSTEM` | 4D-STEM array | live virtual detectors (BF / ABF / ADF), CoM / iCoM / DPC |
 | `ShowEDS` | EDS/EELS spectrum image | experimental linked element map, spectrum, energy band, and real-space ROI |
+| `ShowFolder` | microscopy session folder | fast thumbnail browser, grouping, and file selection |
 
 ```python
 import numpy as np
-from quantem.widget import Show2D, Show3D, Show3DSlices, Show4DSTEM, ShowEDS
+from quantem.widget import Show2D, Show3D, Show3DSlices, Show4DSTEM, ShowEDS, ShowFolder
 
 Show2D(np.random.rand(512, 512))
 Show4DSTEM(np.random.rand(64, 64, 128, 128))
 ShowEDS(np.random.poisson(2, (64, 64, 256)).astype("uint16"))
+ShowFolder("/data/session")
 ```
 
 ## Load data
@@ -52,8 +54,8 @@ eds = load_eds("spectrum_image.emd")  # Velox/RSCIIO EDS/EELS -> energy-last Spe
 ShowEDS(eds, energy=8.04, width=0.24)
 ```
 
-`quantem.widget.io` also provides `survey`, `read_image`, `bin`, `download`, and
-more - see the docs.
+`quantem.widget.io` also provides `read_image`, `bin`, `download`, and more -
+see the docs.
 
 ## Command line
 
@@ -67,6 +69,7 @@ quantem show3d ./frames/                     # a folder of frames  -> Show3D scr
 quantem show4dstem ./masters/                # *_master.h5         -> live Show4DSTEM
 quantem show4dstem a_master.h5 b_master.h5   # several masters     -> one 5D multi-tilt viewer
 quantem show4dstem ./masters/ --html         # 4D-STEM             -> shareable offline HTML
+quantem showfolder ./session/                # microscopy folder   -> ShowFolder notebook/HTML
 quantem html tutorial.ipynb                  # a notebook          -> standalone offline HTML
 ```
 
@@ -76,6 +79,7 @@ quantem html tutorial.ipynb                  # a notebook          -> standalone
 | `quantem show2d <img / folder>` | one image, or a folder | Show2D HTML (a folder becomes a gallery) |
 | `quantem show3d <folder>` | a folder of same-size frames | Show3D scrub HTML |
 | `quantem show4dstem <master(s) / folder>` | one or more `*_master.h5` | live Show4DSTEM notebook (or `--html`) |
+| `quantem showfolder <folder>` | microscopy session folder | ShowFolder notebook (or `--html`) |
 | `quantem html <notebook.ipynb>` | a notebook you wrote | runs it, bakes outputs into one offline HTML |
 
 **Images** save a standalone HTML and open in your browser. **4D-STEM** opens a live,
