@@ -14,66 +14,69 @@ If you don't have a 4D-STEM master.h5 on disk yet, use one of the reference
 datasets on Hugging Face — the whole flow is four lines:
 
 ```python
-from quantem.widget import survey, load, Show4DSTEM
-from quantem.widget.io import list_datasets, download
+from quantem.widget import load, Show4DSTEM
+from quantem.widget.io import list_datasets, download, discover_masters
 
-# 1. See what's available
+# 1. See what's available (returns names like '4dstem/gold_512' with prefix)
 list_datasets()
-# ['4dstem/gold_128_npy_bin8', '4dstem/gold_30mrad1.3mx04',
-#  '4dstem/gold_30mrad1.3mx06', ..., '4dstem/gold_512']
 
-# 2. Pull one to a local path (cached after first call)
-path = download("4dstem/gold_512")   # returns a Path under ~/.cache/quantem/
-print(path)
+# 2. Download by SHORT name (drop the '4dstem/' prefix). Returns a Path
+#    under ~/.cache/huggingface/... — cached after first call.
+path = download("gold_512")
 
-# 3. Look before you load — header-only walk of the folder
-survey(path)                         # scan/det shapes, dtype, chunks, size
+# 3. Discover the master.h5 files inside the downloaded folder
+masters = discover_masters(path)     # sorted list of Path
 
-# 4. Load the master file and open the viewer
-master = next(path.glob("*_master.h5"))
-data = load(master, det_bin=4)       # fast browse preset (see next section)
+# 4. Load the first master + open the viewer
+data = load(masters[0], det_bin=4)   # fast browse preset (see next section)
 Show4DSTEM(data)
 ```
 
-The gold reference scans (`4dstem/gold_512`, `4dstem/gold_128_npy_bin8`, etc.)
-load in seconds on any modern GPU or Mac. Once this works end-to-end, swap
-`download(...)` for your own `Path("/data/session/scan_master.h5")` and every
-downstream call is identical.
+**Gotcha**: `list_datasets()` returns `4dstem/gold_512` (with prefix) but
+`download()` takes the SHORT name `gold_512` (no prefix). This is a quirk of
+the underlying `quantem.data` API and will be aligned in a future release —
+for now, drop the prefix.
+
+The gold reference scans (`gold_512`, `gold_128_npy_bin8`, etc.) are 1-5 GB
+compressed and load in seconds on any modern GPU or Mac. Once this works
+end-to-end, swap `download(...)` for `Path("/data/session")` and everything
+downstream is identical.
 
 ## `survey(folder)` — what's in this folder before I load anything?
 
-Zero pixel reads. Walks a folder of `*_master.h5` files (or a single master)
-and reports each one's shape, dtype, chunk layout, and file size. Use this to
-budget your load call.
+Renders an interactive folder view: per-file shape, dtype, chunk layout,
+size. Zero pixel reads (HDF5 headers only). Safe to run on 500 GB folders.
+
+`survey`'s default glob is `*.emd` (Velox EDS folders). For a 4D-STEM folder
+of `*_master.h5`, pass the glob explicitly:
 
 ```python
 from quantem.widget import survey
 
-survey("/data/session")
-# reads only HDF5 headers - safe to run on a 500 GB folder
+survey("/data/session", glob="*_master.h5")
 ```
 
-Output example:
-
-```text
-/data/session/
-  ├─ scan_00_master.h5   (512, 512, 192, 192) uint16  chunks=(1, 1, 192, 192)  18.7 GB
-  ├─ scan_01_master.h5   (256, 256, 192, 192) uint16  chunks=(1, 1, 192, 192)   4.6 GB
-  └─ scan_02_master.h5   (512, 512,  96,  96) uint16  chunks=(1, 1, 96, 96)     4.6 GB
-```
-
-You can also point it at a single master:
+Prefer `discover_masters` when you just want the sorted paths back for a
+scripted load:
 
 ```python
-survey("/data/session/scan_00_master.h5")   # just this one file
+from quantem.widget.io import discover_masters
+
+masters = discover_masters("/data/session")               # all
+masters = discover_masters("/data/session", scan_shape=(512, 512))  # filter by scan size
 ```
 
-Pair with `discover_masters` when you want the paths back sorted:
+Prefer `get_metadata` when you want raw HDF5 attributes of ONE file without
+loading it — returns a dict of HDF5 tree paths plus the widget-friendly keys
+`scan_shape`, `detector_shape`, `n_frames`, `dwell_time_us`, `saturation`,
+`detector_name`:
 
 ```python
-from quantem.widget import discover_masters
-masters = discover_masters("/data/session", scan_shape=(512, 512))
-# returns only the 512x512 masters, sorted
+from quantem.widget.io import get_metadata
+
+meta = get_metadata("/data/session/scan_00_master.h5")
+print(meta["scan_shape"], meta["detector_shape"])
+# e.g. (512, 512) (192, 192)
 ```
 
 ---
