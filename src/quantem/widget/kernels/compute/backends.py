@@ -18,6 +18,56 @@ Backends conform to the ``ComputeBackend`` protocol (see ``backend.py``):
 
 ``compute_backend(data)`` duck-types the data source and returns the right
 backend so callers (widget + web Browse) never branch on hardware themselves.
+
+Backend dispatch — which one runs on your box?
+
+    Ash's 24 GB RTX      → TorchBackend  (cupy → dlpack → torch CUDA, zero copy)
+    collaborator's 96 GB Blackwell → TorchBackend  (same)
+    torch tensor already on CUDA → TorchBackend
+    NumPy on CPU         → TorchBackend  (torch.as_tensor)
+    torch.mps binned     → TorchBackend  (device='mps')
+    Mac raw-Metal (ChunkedFrames, no-bin) → MetalRawBackend
+        (torch.mps can't hold >2^31 elements — 512²×192² is 2.5e9)
+
+MEMORY DISCIPLINE — the chunk-size trap (READ BEFORE TOUCHING CHUNK MATH)
+
+Every chunked reduction in TorchBackend (mean_dp, masked_sum, center_of_mass)
+picks a chunk size from ``_CHUNK_BYTE_BUDGET / (per-row bytes)``. When the sum
+uses a WIDER accumulator dtype than the input dtype, the chunk MUST budget for
+the accumulator's bytes, not the input's — else the internal cast during
+``.sum(dtype=T)`` materializes a chunk-sized transient in dtype T that
+oversubscribes VRAM.
+
+Concrete regression the guard rule prevents (fixed 2026-07-02):
+
+    # BAD: budget assumes input dtype (2 bytes/pixel for uint16)
+    step = (1 << 30) // (det_h * det_w)
+
+    for i in range(0, n_frames, step):
+        # sum(dtype=int64) materializes an int64-cast copy of the chunk
+        # internally = 4x memory expansion vs uint16 input
+        acc += self._flat[i:i+step].sum(dim=0, dtype=torch.int64)
+
+At 192² detector this budgeted for ~29K frames/chunk. Each chunk in uint16 was
+2.15 GB. The internal int64 cast blew it up to **8.6 GB transient per chunk**.
+CuPy pool cached the freed block. collaborator-scale (512²×192² u16 no-bin) peak
+Show4DSTEM VRAM went from ~21 GB (data + widget) to 29 GB — invisible on 96 GB
+Blackwell, but OOM on Ash's 24 GB RTX.
+
+The guard: chunk-size math MUST include the accumulator's element size:
+
+    # GOOD: budget in accumulator dtype (int64 = 8 bytes/pixel)
+    step = (1 << 27) // (det_h * det_w * 8)  # 128 MB int64 transient
+
+If you add a new reduction, or if you change ``dtype=`` on an existing
+``.sum()``, walk the chunk-size formula and pick element bytes for whichever
+dtype is WIDER: input or accumulator. Float32 sum of uint16 → budget for
+float32 (4 bytes). Int64 sum of uint16 → budget for int64 (8 bytes).
+
+Why unit tests don't catch this: outputs are bit-identical regardless of chunk
+size. Only VRAM peak changes. This is a **memory-only regression**, invisible
+to value-parity tests. See ``feedback_verify_memory_fit_with_capped_run.md``
+for the cap-a-dummy-tensor pattern that reproduces it.
 """
 from __future__ import annotations
 
