@@ -118,10 +118,51 @@ Show4DSTEM(data)
 This is a good middle ground for a 24 GB GPU: much smaller than full detector,
 but still count-preserving.
 
-### Use multiple NVIDIA GPUs
+### Can I choose the NVIDIA GPU inside the notebook?
 
-The simplest reliable pattern is one Jupyter process per GPU. Start each server
-with a different `CUDA_VISIBLE_DEVICES` value:
+Yes. Put this in the first notebook cell, before importing `torch`, `cupy`,
+`quantem.widget`, or any other GPU package:
+
+```python
+import os
+
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"  # use physical NVIDIA GPU 0
+```
+
+Then import and load normally:
+
+```python
+import torch
+from quantem.widget import load, Show4DSTEM
+
+print(torch.cuda.get_device_name(0))
+
+data = load("scan_001_master.h5")
+Show4DSTEM(data)
+```
+
+Inside that notebook, the selected GPU is called `cuda:0`. CUDA renumbers the
+visible device, so physical GPU 1 also appears as `cuda:0` if you selected it
+with `CUDA_VISIBLE_DEVICES="1"`.
+
+### How do I switch from GPU 0 to GPU 1?
+
+Change the first cell, restart the kernel, then run from the top:
+
+```python
+import os
+
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"  # switch to physical NVIDIA GPU 1
+```
+
+Restarting matters. Once CUDA is initialized in a Python process, changing
+`CUDA_VISIBLE_DEVICES` later in the notebook is not a reliable way to move the
+work to another GPU.
+
+### How do I use two NVIDIA GPUs at the same time?
+
+Run one Jupyter process per GPU. Start each server with a different
+`CUDA_VISIBLE_DEVICES` value:
 
 ```bash
 # terminal 1: GPU 0
@@ -132,8 +173,7 @@ CUDA_VISIBLE_DEVICES=1 jupyter lab --no-browser --ip=0.0.0.0 --port=8889
 ```
 
 Then open the printed URLs from your laptop. Each notebook sees its assigned
-GPU as `cuda:0`, because CUDA remaps the selected physical GPU inside that
-process.
+GPU as `cuda:0`.
 
 ### Check and free GPU memory
 
@@ -183,12 +223,16 @@ Good first choices:
 | 24 GB | `load(path)` for browsing, `load(path, det_bin=2)` if reconstruction also runs |
 | 16 GB or less | `load(path, det_bin=4, dtype="u8")` for browsing |
 
-Choose a specific NVIDIA GPU before launching Jupyter:
+Choose a specific NVIDIA GPU in the first notebook cell:
 
-```bash
-CUDA_VISIBLE_DEVICES=0 jupyter lab --no-browser --ip=0.0.0.0
-CUDA_VISIBLE_DEVICES=1 jupyter lab --no-browser --ip=0.0.0.0
+```python
+import os
+
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 ```
+
+If you change that value, restart the kernel before loading data. To use two
+GPUs at once, run two Jupyter servers as shown above.
 
 Check what the notebook sees:
 
