@@ -141,6 +141,15 @@ data = load("scan_001_master.h5")
 Show4DSTEM(data)
 ```
 
+Tested on MJGoat with `CUDA_VISIBLE_DEVICES="0"`:
+
+```text
+cuda available: True
+visible device count: 1
+notebook device 0: NVIDIA RTX PRO 6000 Blackwell Workstation Edition
+free 80.3 GiB / total 94.9 GiB
+```
+
 Inside that notebook, the selected GPU is called `cuda:0`. CUDA renumbers the
 visible device, so physical GPU 1 also appears as `cuda:0` if you selected it
 with `CUDA_VISIBLE_DEVICES="1"`.
@@ -153,6 +162,15 @@ Change the first cell, restart the kernel, then run from the top:
 import os
 
 os.environ["CUDA_VISIBLE_DEVICES"] = "1"  # switch to physical NVIDIA GPU 1
+```
+
+Tested on MJGoat after restarting the Python process:
+
+```text
+cuda available: True
+visible device count: 1
+notebook device 0: NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition
+free 94.4 GiB / total 95.0 GiB
 ```
 
 Restarting matters. Once CUDA is initialized in a Python process, changing
