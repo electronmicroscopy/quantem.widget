@@ -61,17 +61,11 @@ def gpu_info(device_id: int | None = None) -> None:
     with dev:
         # Physical VRAM
         vram_free, vram_total = cp.cuda.runtime.memGetInfo()
-        vram_used = vram_total - vram_free
-
         # CuPy device memory pool
         pool = cp.get_default_memory_pool()
         pool_total = pool.total_bytes()
         pool_used = pool.used_bytes()
         pool_cached = pool_total - pool_used
-
-        # CuPy pinned (host) memory pool
-        pinned = cp.get_default_pinned_memory_pool()
-        pinned_free_blocks = pinned.n_free_blocks()
 
         # GPU name
         props = cp.cuda.runtime.getDeviceProperties(dev.id)

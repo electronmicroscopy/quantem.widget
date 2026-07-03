@@ -522,9 +522,11 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
       ``set_image``. Small initial stacks can otherwise use the saved/offline
       notebook representation, which is meant for static notebook state and
       standalone exports rather than streaming new frames.
-    - When the stack is large (>32 MB per frame), an internal display copy is
-      binned for faster scrubbing; full-resolution data is kept for stats,
-      ROIs, FFT, profiles, and direct image saving.
+    - ``display_bin="auto"`` keeps Show3D source pixels unchanged. For heavy
+      multi-panel movies or standalone exports, pass an explicit
+      ``display_bin=N`` to build a smaller display stack. This is a display
+      tradeoff: it improves first load and playback, while native-pixel viewing
+      requires ``display_bin=1`` or a separate high-resolution workflow.
     - Multi-panel mode is auto-detected from input shape and configured via
       ``n_panels``, ``panel_titles``, and ``link_panels``.
     - Call ``free()`` before discarding the widget; ``del`` alone will not
@@ -559,6 +561,7 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
     # render on a light/white background regardless of the viewer's OS theme.
     # Decoupled from `offline` (which selects uint8 vs float data packing).
     _export_light = traitlets.Bool(False).tag(sync=True)
+    _static_fallback_jpeg = traitlets.Unicode("").tag(sync=True)
     _offline_stack = traitlets.Bytes(b"").tag(sync=True)
     _offline_float_stack = traitlets.Bytes(b"").tag(sync=True)
     _offline_min = traitlets.Float(0.0).tag(sync=True)
@@ -3564,6 +3567,13 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
         self.render_total_ms = int(total_ms)
         self.render_python_build_ms = int(py_ms)
         self.render_wire_js_ms = int(total_ms - py_ms)
+        if not getattr(self, "_save_state", False):
+            # The frontend has decoded and painted the initial frame/chunk by
+            # the time it flips `_js_rendered`. Clear synced bulk buffers so a
+            # later notebook save stores the compact static fallback, not the
+            # multi-frame transfer buffers. Targeted initial sync is untouched.
+            self.frame_bytes = b""
+            self._buffer_bytes = b""
         print(
             f"Show3D: {shape} {mem_str} - "
             f"rendered in {total_ms:.0f} ms (Python build {py_ms:.0f} ms, "
@@ -4219,59 +4229,151 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
         """
         state = super().get_state(key=key, drop_defaults=drop_defaults)
         if key is None and not getattr(self, "_save_state", False):
+            if not self._static_fallback_jpeg:
+                png = self._static_png_b64()
+                if png:
+                    self._store_static_fallback_preview(png)
+                    state["_static_fallback_jpeg"] = self._static_fallback_jpeg
             for heavy_key in self._UNSAVED_HEAVY_KEYS:
                 state.pop(heavy_key, None)
         return state
 
-    def _static_png_b64(self, *, max_px: int = 320, dpi: int = 96) -> str | None:
-        """Base64 PNG of a few evenly-spaced slices, attached to the cell output.
+    def _static_panel_frame_label(self, panel: int, idx: int) -> str:
+        """Return the dynamic frame label shown in the live panel title."""
+        panel_labels = self.panel_frame_labels[panel] if panel < len(self.panel_frame_labels) else []
+        panel_real = self.panel_real_frames[panel] if panel < len(self.panel_real_frames) else 0
+        panel_idx = min(idx, max(0, int(panel_real) - 1)) if panel_real else idx
+        if panel_idx < len(panel_labels):
+            text = str(panel_labels[panel_idx]).strip()
+            if text and text not in {str(panel_idx), str(panel_idx + 1)}:
+                return text
+        if idx < len(self.labels):
+            text = str(self.labels[idx]).strip()
+            if text and text not in {str(idx), str(idx + 1)}:
+                return text
+        return ""
 
-        With ``save_state`` False the interactive widget state is not embedded,
-        so a reopened notebook (GitHub, nbviewer, cold Lab) would show nothing.
-        Attaching a downsampled static render of a handful of slices means the
-        reader still sees the stack. Slices are stride-downsampled so this stays
-        cheap on every display (rendering the full-res stack here would dominate
-        display time).
-        """
-        import base64
-        import io as _io
-        import matplotlib.pyplot as plt
-        from matplotlib import colormaps
-        frames = getattr(self, "_data", None)
-        if frames is None or len(frames) == 0:
+    def _static_panel_title(self, panel: int, idx: int) -> str:
+        """Live-canvas panel title: title, optional frame label, and count."""
+        title_text = (
+            self._panel_title_for_index(panel)
+            if int(self.n_panels) > 1 or (panel < len(self.panel_titles) and self.panel_titles[panel])
+            else (self.title or self._panel_title_for_index(panel))
+        )
+        frame_label = self._static_panel_frame_label(panel, idx)
+        panel_real = self.panel_real_frames[panel] if panel < len(self.panel_real_frames) else 0
+        shown = min(idx + 1, int(panel_real)) if panel_real else idx + 1
+        total = int(panel_real) if panel_real else int(self.n_slices)
+        return f"{title_text}{f' · {frame_label}' if frame_label else ''} {shown}/{total}"
+
+    def _static_overlay_texts(
+        self,
+        panels: list[int],
+        idx: int,
+        *,
+        css_px: float | None = None,
+    ) -> list[tuple[str, str, str, float]]:
+        """Per-panel static overlays, delegated to Show2D for exact geometry."""
+        preview = self._static_show2d_preview(panels=panels, idx=idx)
+        if preview is None:
+            return []
+        return preview._static_overlay_texts(css_px=css_px)
+
+    def _static_show2d_preview(
+        self,
+        *,
+        panels: list[int] | None = None,
+        idx: int | None = None,
+    ):
+        """Build the Show2D static-render proxy for the current Show3D frame."""
+        if (
+            self.n_slices <= 0
+            or self.n_panels <= 0
+            or not hasattr(self, "_display_data")
+            or getattr(self, "_display_data", None) is None
+        ):
             return None
-        cmap_fn = colormaps.get_cmap(self.cmap)
-        num = int(frames.shape[0])
-        # Show up to 6 evenly-spaced slices so a scrubbed stack reads as a stack,
-        # not a single frame. A 1-slice stack just shows that slice.
-        count = min(6, num)
-        slice_indices = np.unique(np.linspace(0, num - 1, count).round().astype(int))
-        count = len(slice_indices)
-        ncols = min(3, count)
-        nrows = (count + ncols - 1) // ncols
-        fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 2.4, nrows * 2.4),
-                                 squeeze=False)
-        for cell in range(nrows * ncols):
-            ax = axes[cell // ncols][cell % ncols]
-            ax.axis("off")
-            if cell >= count:
-                continue
-            idx = int(slice_indices[cell])
-            frame = frames[idx]
-            step = max(1, int(max(frame.shape) // max_px))
-            normalized = self._normalize_frame(frame[::step, ::step])
-            ax.imshow(normalized, cmap=cmap_fn, vmin=0, vmax=255)
-            if count > 1:
-                ax.set_title(f"{self.dim_label} {idx}", fontsize=8)
-        fig.tight_layout(pad=0.3)
-        buf = _io.BytesIO()
-        fig.savefig(buf, format="png", dpi=dpi, facecolor="white", bbox_inches="tight")
-        plt.close(fig)
-        return base64.b64encode(buf.getvalue()).decode("ascii")
+        from quantem.widget.show2d import Show2D
+
+        hidden = {int(i) for i in getattr(self, "hidden_panels", [])}
+        if panels is None:
+            panels = [p for p in range(int(self.n_panels)) if p not in hidden]
+        else:
+            panels = [int(p) for p in panels if int(p) not in hidden]
+        if not panels:
+            panels = [0]
+        if idx is None:
+            idx = int(self.slice_idx)
+        idx = max(0, min(int(idx), int(self.n_slices) - 1))
+        frames = [np.asarray(self._get_display_panel_frame(panel, idx), dtype=np.float32) for panel in panels]
+        labels = [self._static_panel_title(panel, idx) for panel in panels]
+        if not frames:
+            return None
+
+        vmin = None
+        vmax = None
+        if any(v is not None for v in self.vmin_per_panel):
+            vmin = [
+                self.vmin_per_panel[p] if p < len(self.vmin_per_panel) else None
+                for p in panels
+            ]
+        elif self.vmin is not None:
+            vmin = self.vmin
+        if any(v is not None for v in self.vmax_per_panel):
+            vmax = [
+                self.vmax_per_panel[p] if p < len(self.vmax_per_panel) else None
+                for p in panels
+            ]
+        elif self.vmax is not None:
+            vmax = self.vmax
+
+        return Show2D(
+            frames,
+            labels=labels,
+            title=self.title,
+            cmap=self.cmap,
+            sampling=self.pixel_size if self.pixel_size > 0 else None,
+            units=self.pixel_unit,
+            scale_bar_visible=self.scale_bar_visible,
+            show_fft=False,
+            show_controls=False,
+            show_stats=False,
+            verbose=False,
+            log_scale=self.log_scale,
+            auto_contrast=self.auto_contrast,
+            vmin=vmin,
+            vmax=vmax,
+            ncols=max(1, min(int(self.max_cols) if int(self.max_cols) > 0 else len(frames), len(frames))),
+            size=int(self.size or 0),
+            smooth=self.smooth,
+            zoom=1.0,
+            link_contrast=self.link_contrast,
+            display_bin=1,
+            show_panel_titles=self.show_panel_titles,
+            panel_title_font_size=int(self.panel_title_font_size or 11),
+            gallery_gap_px=max(0, int(self.panel_gap)),
+            save_state=False,
+        )
+
+    def _static_png_b64(self, *, max_px: int = 512, dpi: int = 160) -> str | None:
+        """Base64 PNG of the current Show3D frame using Show2D's renderer.
+
+        Show3D's saved-notebook preview is a current-frame gallery. It delegates
+        to ``Show2D._static_png_b64`` so labels, gutters, fonts, colormap,
+        zoom text, and scale bars remain pixel-aligned with Show2D.
+        """
+        preview = self._static_show2d_preview()
+        return None if preview is None else preview._static_png_b64(max_px=max_px, dpi=dpi)
 
     # _repr_mimebundle_ / _ipython_display_ / static-fallback sibling plumbing
     # comes from StaticFallbackMixin (utils/static_fallback.py); this class only
     # supplies _static_png_b64 above.
+
+    def _store_static_fallback_preview(self, png_b64: str) -> None:
+        """Store a compact saved-notebook preview inside lightweight state."""
+        if getattr(self, "_save_state", False):
+            return
+        self._static_fallback_jpeg = self._png_to_jpeg_b64(png_b64)
 
     def _get_color_range(self, frame: np.ndarray) -> tuple[float, float]:
         """Get vmin/vmax based on current settings."""

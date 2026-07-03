@@ -12,7 +12,6 @@ quantem show4dstem a_master.h5 b_master.h5     # several masters    -> one 5D mu
 quantem show4dstem ./masters/ --html           # 4D-STEM            -> shareable offline HTML
 quantem html tutorial.ipynb                    # a notebook         -> standalone interactive HTML
 quantem github tutorial_github.ipynb --no-execute # optional static copy for GitHub preview
-quantem jupyter nb.ipynb                        # on the GPU box     -> prints a URL for your browser
 ```
 
 ## Subcommands
@@ -25,12 +24,6 @@ quantem jupyter nb.ipynb                        # on the GPU box     -> prints a
 | `quantem show4dstem <master(s) / folder>` | one or more `*_master.h5` | a live Show4DSTEM notebook (or `--html`) |
 | `quantem html <notebook.ipynb>` | a notebook you wrote | runs it, or with `--no-execute` exports saved outputs/state, into one standalone interactive HTML |
 | `quantem github <notebook.ipynb>` | an optional static copy of a notebook | strips widget state and embeds compressed pictures for GitHub's notebook preview |
-| `quantem jupyter [nb]` | run on the GPU box | starts JupyterLab there and prints a URL to open from your laptop browser |
-
-`quantem jupyter` is the **run-on-a-GPU-box-from-your-laptop** workflow: run it on the
-compute box, kernel + GPU stay there, and you open the printed URL in your browser (bring
-your own SSH tunnel or VS Code Remote-SSH, like quantem.live). Details and troubleshooting
-in [Remote JupyterLab](remote-jupyter.md).
 
 **Images** save a standalone HTML and open in your browser. **4D-STEM** opens a
 live, kernel-backed notebook by default (full real-time interaction); `--html`

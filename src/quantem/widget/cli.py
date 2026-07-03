@@ -103,10 +103,10 @@ def _add_survey_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--thumb", type=int, default=512, help="Thumbnail size for the HAADF/STEM gallery.")
     parser.add_argument("--glob", default="*.emd", help="Glob within the folder (default '*.emd').")
     parser.add_argument("--title", default=None, help="Survey title.")
-    parser.add_argument("--group-by", default="fov", choices=("fov", "none"),
-                        help="Survey layout grouping mode (default 'fov').")
+    parser.add_argument("--group-by", default="session", choices=("session", "fov", "none"),
+                        help="Survey layout grouping mode (default 'session').")
     parser.add_argument("--group-view", default="stack", choices=("stack", "gallery"),
-                        help="Grouped FOV image display mode (default 'stack').")
+                        help="Grouped image display mode (default 'stack').")
     parser.add_argument("--timeout", type=int, default=900, help="Notebook execution timeout in seconds.")
     parser.add_argument("--no-open", action="store_true", help="Write outputs but do not launch/open them.")
 
@@ -818,7 +818,7 @@ def _render_4dstem(masters: list[str], label: str, args: argparse.Namespace) -> 
     stacks every master into one 5D viewer (a bslz4 companion folder + a local
     serve, since file:// cannot fetch the companion)."""
     import numpy as np
-    from quantem.widget import Show4DSTEM, load
+    from quantem.widget import Show4DSTEM
     out_dir = _out_dir(args.out)
     if args.combined and len(masters) > 1:
         # Stack the masters into one 5D numpy array and pass THAT to the viewer. A

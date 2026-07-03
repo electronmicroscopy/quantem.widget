@@ -8,7 +8,6 @@ parts:
     chapters:
       - file: install
       - file: cli
-      - file: remote-jupyter
   - caption: Tutorials
     chapters:
       - file: tutorials/download_data
@@ -20,11 +19,7 @@ parts:
       - file: tutorials/showdiffraction
   - caption: Advanced tutorials
     chapters:
-      - file: tutorials/survey_workflows
-        title: Survey workflows
-        sections:
-          - file: tutorials/survey
-          - file: tutorials/survey_fov
+      - file: tutorials/survey
       - file: tutorials/widget_export
   - caption: API reference
     chapters:

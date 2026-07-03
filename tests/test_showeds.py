@@ -409,7 +409,7 @@ def test_showeds_kernel_backend_uses_initial_buffers_without_cube_bytes():
     assert len(widget.initial_spectrum_bytes) == initial_spectrum.size * 4
 
 
-def test_load_eds_returns_lazy_native_emd_that_feeds_showeds(monkeypatch, tmp_path):
+def test_load_eds_kernel_backend_returns_lazy_native_emd_that_feeds_showeds(monkeypatch, tmp_path):
     cube = np.arange(4 * 5 * 6, dtype=np.uint16).reshape(4, 5, 6)
     energy = np.linspace(0, 5, 6, dtype=np.float32)
     base = cube.sum(axis=2).astype(np.float32)
@@ -428,7 +428,7 @@ def test_load_eds_returns_lazy_native_emd_that_feeds_showeds(monkeypatch, tmp_pa
         },
     )
 
-    loaded = load_eds(tmp_path / "scan.emd", candidate_elements=["Cu"])
+    loaded = load_eds(tmp_path / "scan.emd", backend="kernel", candidate_elements=["Cu"])
     widget = ShowEDS(loaded, energy=2.5, width=2.0, roi=(1, 1, 2, 3))
 
     assert loaded.backend == "kernel"
@@ -533,7 +533,7 @@ def test_lazy_spatial_binning_matches_eager_binning_without_materializing_first(
     assert np.array_equal(binned_base.compute(), expected_base)
 
 
-def test_showeds_from_emd_auto_uses_native_lazy_for_no_bin_emd(monkeypatch, tmp_path):
+def test_showeds_from_emd_auto_falls_back_to_native_lazy_when_stream_unavailable(monkeypatch, tmp_path):
     cube = np.arange(4 * 5 * 6, dtype=np.uint16).reshape(4, 5, 6)
     energy = np.linspace(0, 5, 6, dtype=np.float32)
     base = cube.sum(axis=2)
@@ -759,6 +759,29 @@ def _tiny_stream_index(tmp_path):
     }, events_by_pixel
 
 
+def test_load_eds_auto_prefers_sparse_stream_that_feeds_showeds(monkeypatch, tmp_path):
+    index, _events_by_pixel = _tiny_stream_index(tmp_path)
+    source = tmp_path / "scan.emd"
+
+    monkeypatch.setattr(showeds_module, "_build_spectrum_stream_index", lambda *args, **kwargs: index)
+
+    loaded = load_eds(source, candidate_elements=["Cu"])
+    widget = ShowEDS(loaded, energy=2.5, width=2.0, roi=(1, 1, 2, 3))
+
+    assert loaded.backend == "stream"
+    assert loaded.stream_index is index
+    assert loaded.shape == (int(index["rows"]), int(index["cols"]), int(index["n_energy"]))
+    assert widget.compute_backend == "stream"
+    assert widget.sidecar_url == ""
+    assert widget.cube_bytes == b""
+    assert widget.stream_channel_offsets_bytes
+    assert widget.stream_pixel_offsets_bytes
+    assert widget.roi_row == 1
+    assert widget.roi_col == 1
+    assert widget.roi_height == 2
+    assert widget.roi_width == 3
+
+
 def test_showeds_stream_sidecar_startup_spectrum_matches_sparse_events(tmp_path):
     sidecar, rows, cols, n_energy, events_by_pixel = _write_tiny_stream_sidecar(tmp_path)
 
@@ -807,6 +830,22 @@ def test_showeds_from_emd_stream_embeds_sparse_buffers_without_sidecar(monkeypat
     assert len(widget.stream_pixel_offsets_bytes) == (rows * cols + 1) * 4
     assert np.frombuffer(widget.initial_map_bytes, dtype=np.float32).reshape(rows, cols).reshape(-1).tolist() == expected_map.tolist()
     assert np.frombuffer(widget.initial_spectrum_bytes, dtype=np.float32).tolist() == expected_spectrum.tolist()
+
+
+def test_showeds_from_emd_auto_prefers_sparse_stream(monkeypatch, tmp_path):
+    index, _events_by_pixel = _tiny_stream_index(tmp_path)
+    source = tmp_path / "scan.emd"
+
+    monkeypatch.setattr(showeds_module, "_build_spectrum_stream_index", lambda *args, **kwargs: index)
+
+    widget = ShowEDS.from_emd(source, band=(2, 4), roi=(1, 1, 2, 3), title="Auto Stream")
+
+    assert widget.title == "Auto Stream"
+    assert widget.compute_backend == "stream"
+    assert widget.sidecar_url == ""
+    assert widget.cube_bytes == b""
+    assert widget.stream_channel_offsets_bytes
+    assert widget.stream_pixel_offsets_bytes
 
 
 def test_showeds_stream_sidecar_exact_single_export_embeds_sparse_buffers(tmp_path):

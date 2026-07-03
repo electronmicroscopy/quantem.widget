@@ -32,19 +32,43 @@ import { computeHistogramFromBytes, findDataRange, applyLogScale, percentileClip
 
 function InfoTooltip({ text, theme = "dark" }: { text: React.ReactNode; theme?: "light" | "dark" }) {
   const isDark = theme === "dark";
+  const [open, setOpen] = React.useState(false);
   const content = typeof text === "string"
     ? <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>{text}</Typography>
     : text;
   return (
     <Tooltip
       title={content}
+      open={open}
+      onOpen={() => setOpen(true)}
+      onClose={() => setOpen(false)}
       arrow placement="bottom"
       componentsProps={{
         tooltip: { sx: { bgcolor: isDark ? "#333" : "#fff", color: isDark ? "#ddd" : "#333", border: `1px solid ${isDark ? "#555" : "#ccc"}`, maxWidth: 280, p: 1 } },
         arrow: { sx: { color: isDark ? "#333" : "#fff", "&::before": { border: `1px solid ${isDark ? "#555" : "#ccc"}` } } },
       }}
     >
-      <Typography component="span" sx={{ fontSize: 12, color: isDark ? "#888" : "#666", cursor: "help", ml: 0.5, "&:hover": { color: isDark ? "#aaa" : "#444" } }}>ⓘ</Typography>
+      <Typography
+        component="span"
+        role="button"
+        tabIndex={0}
+        aria-label="Show controls help"
+        aria-expanded={open ? "true" : "false"}
+        onClick={(event) => {
+          event.stopPropagation();
+          setOpen((value) => !value);
+        }}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            event.stopPropagation();
+            setOpen((value) => !value);
+          }
+        }}
+        sx={{ fontSize: 12, color: isDark ? "#888" : "#666", cursor: "help", ml: 0.5, "&:hover": { color: isDark ? "#aaa" : "#444" }, "&:focus-visible": { outline: `1px solid ${isDark ? "#aaa" : "#444"}`, outlineOffset: 1 } }}
+      >
+        ⓘ
+      </Typography>
     </Tooltip>
   );
 }
@@ -101,7 +125,7 @@ function makeHtmlExportFilename(title: string, nImages: number, height: number, 
   while (slug.includes("__")) slug = slug.replace(/__/g, "_");
   if (!slug) slug = "show2d";
   const shape = nImages > 1 ? `${nImages}x${height}x${width}` : `${height}x${width}`;
-  const suffix = mode === "quantized" ? "quantized" : "exact";
+  const suffix = mode === "quantized" ? "quantized" : mode === "current" ? "current" : "exact";
   return `${slug}_${shape}_${suffix}.html`;
 }
 
@@ -419,6 +443,24 @@ const FFT_SNAP_RADIUS = 5;
 // Types
 // ============================================================================
 type ZoomState = { zoom: number; panX: number; panY: number };
+type ZoomAnchor = { zoom: number; rowFrac: number; colFrac: number };
+
+// One fetched detail window per panel: raw floats plus the colormapped canvas
+// drawn over the binned preview. row0/col0 are FULL-resolution pixel
+// coordinates; each tile pixel covers `bin` full-res pixels.
+type DetailTile = {
+  row0: number;
+  col0: number;
+  rows: number;
+  cols: number;
+  bin: number;
+  floats: Float32Array;
+  canvas: HTMLCanvasElement | null;
+};
+// Cap on one detail reply (float32 bytes) so a zoom refetch stays sub-second
+// on a slow kernel->browser channel. Mirrors Show2D._DETAIL_BUDGET_BYTES.
+const DETAIL_BUDGET_BYTES = 8 * 1024 * 1024;
+const MAX_PANEL_COLUMNS = 12;
 type TouchZoomState = {
   idx: number;
   mode: "pan" | "pinch";
@@ -641,7 +683,6 @@ function Show2D() {
   React.useEffect(() => preserveRestoredWidgetModelsOnSave(model), [model]);
 
   const staticFallbackRootRef = React.useRef<HTMLDivElement | null>(null);
-  useHideStaticFallback(model, staticFallbackRootRef);
 
   // Theme (offline HTML exports force a light/white background)
   const [offlineForTheme] = useModelState<boolean>("_export_light");
@@ -675,6 +716,10 @@ function Show2D() {
   const [width] = useModelState<number>("width");
   const [height] = useModelState<number>("height");
   const [frameBytes] = useModelState<DataView>("frame_bytes");
+  const [staticFallbackJpeg] = useModelState<string>("_static_fallback_jpeg");
+  const hasLiveFrameBytes = !!frameBytes && frameBytes.byteLength > 0;
+  const staticFallbackUrl = staticFallbackJpeg ? `data:image/jpeg;base64,${staticFallbackJpeg}` : "";
+  const hasSavedStaticFallback = staticFallbackUrl.length > 0;
   // Per-panel RGB flags: RGB panels carry display-ready (H, W, 3) float pixels
   // that bypass the colormap LUT + contrast pipeline and paint directly.
   const [isRgbFlags] = useModelState<boolean[]>("is_rgb");
@@ -747,9 +792,17 @@ function Show2D() {
   const [newRoiShape, setNewRoiShape] = React.useState<"circle" | "square" | "rectangle" | "annular">("square");
   const [exportAnchor, setExportAnchor] = React.useState<HTMLElement | null>(null);
   const [panelMenuAnchor, setPanelMenuAnchor] = React.useState<HTMLElement | null>(null);
+  // Maps-style detail streaming: when the preview is binned
+  // (_display_bin_factor > 1), zooming past the preview's resolution requests
+  // a full-res crop of the visible window from Python instead of ever
+  // shipping the whole image over the wire.
+  const [, setDetailRequest] = useModelState<string>("_detail_request");
+  const [detailMeta] = useModelState<string>("_detail_meta");
+  const [detailBytes] = useModelState<DataView>("_detail_bytes");
   const [, setExportRequest] = useModelState<string>("export_request");
   const [exportStatus] = useModelState<string>("export_status");
   const [exportEnabled] = useModelState<boolean>("export_enabled");
+  const [offline] = useModelState<boolean>("offline");
   const [exportPayload] = useModelState<DataView>("export_payload");
   const [exportPayloadId] = useModelState<string>("export_payload_id");
   const [exportPayloadFilename] = useModelState<string>("export_filename");
@@ -765,7 +818,7 @@ function Show2D() {
 
   const effectiveShowFft = showFft;
   const galleryColumnOptions = React.useMemo(() => {
-    const maxCols = Math.max(1, nImages);
+    const maxCols = Math.max(1, Math.min(nImages, MAX_PANEL_COLUMNS));
     return Array.from({ length: maxCols }, (_, i) => i + 1);
   }, [nImages]);
   React.useEffect(() => {
@@ -780,6 +833,27 @@ function Show2D() {
   const htmlPixelCount = Math.max(0, Math.floor(nImages) * Math.floor(height) * Math.floor(width));
   const exactHtmlSize = formatEstimatedHtmlSize(htmlPixelCount * 4);
   const quantizedHtmlSize = formatEstimatedHtmlSize(htmlPixelCount);
+  const canDownloadCurrentHtml = !exportEnabled && offlineForTheme;
+  const standaloneHtmlMode = offline ? "quantized" : "exact";
+  const standaloneHtmlLabel = offline
+    ? `HTML quantized uint8 (${quantizedHtmlSize})`
+    : `HTML exact float32 (${exactHtmlSize})`;
+  const unavailableStandaloneHtmlLabel = offline
+    ? "HTML exact float32 (not embedded)"
+    : "HTML quantized uint8 (requires backend)";
+
+  const handleStandaloneHtmlDownload = () => {
+    setExportAnchor(null);
+    const filename = makeHtmlExportFilename(title, nImages, height, width, standaloneHtmlMode);
+    try {
+      const html = `<!doctype html>\n${document.documentElement.outerHTML}`;
+      const blob = new Blob([html], { type: "text/html;charset=utf-8" });
+      downloadBlob(blob, filename);
+      setLocalExportStatus(`Saved ${filename} (${formatSavedBytes(blob.size)})`);
+    } catch (err) {
+      setLocalExportStatus(`Export failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
 
   const handleHtmlExportSelect = async (mode: string) => {
     setExportAnchor(null);
@@ -865,6 +939,8 @@ function Show2D() {
   const singleFftContainerRef = React.useRef<HTMLDivElement>(null);
   const fftCanvasRef = React.useRef<HTMLCanvasElement>(null);
   const [canvasReady, setCanvasReady] = React.useState(0);  // Trigger re-render when refs attached
+  const canRenderLive = hasLiveFrameBytes || canvasReady > 0;
+  useHideStaticFallback(model, staticFallbackRootRef, canRenderLive || hasSavedStaticFallback);
 
   // Zoom/Pan state - per-image when not linked, shared when linked
   const [initialZoom, setInitialZoom] = useModelState<number>("initial_zoom");
@@ -878,12 +954,40 @@ function Show2D() {
     [initialZoom]
   );
   const resetZoomStateRef = React.useRef<ZoomState | null>(null);
+  const canvasResizeViewAnchorRef = React.useRef<{
+    linked: ZoomAnchor;
+    per: Map<number, ZoomAnchor>;
+    reset: ZoomAnchor | null;
+  } | null>(null);
   void linkPan; void setLinkPan; void imgWidth; void imgHeight;
   const [zoomStates, setZoomStates] = React.useState<Map<number, ZoomState>>(new Map());
   const [linkedZoomState, setLinkedZoomState] = React.useState<ZoomState>(initialZoomState);
   const [linkedZoom, setLinkedZoom] = useModelState<boolean>("link_zoom");
   const [isDraggingPan, setIsDraggingPan] = React.useState(false);
   const [panStart, setPanStart] = React.useState<{ x: number, y: number, pX: number, pY: number } | null>(null);
+
+  // Maps-style detail state. One tile per panel covering the last-fetched
+  // visible window; the binned preview stays the fallback wherever the tile
+  // doesn't cover (pan outside the window shows preview until the refetch).
+  const detailTilesRef = React.useRef<Map<number, DetailTile>>(new Map());
+  // Last requested window key per panel — suppresses duplicate requests while
+  // one is in flight or already satisfied.
+  const detailSentKeysRef = React.useRef<Map<number, string>>(new Map());
+  // Monotonic request id: replies carrying a superseded id are dropped.
+  const detailRequestIdRef = React.useRef(0);
+  const detailViewSignatureRef = React.useRef("");
+  const [detailVersion, setDetailVersion] = React.useState(0);
+  const [detailPaintVersion, setDetailPaintVersion] = React.useState(0);
+  const [detailStreamStatus, setDetailStreamStatus] = React.useState<"preview" | "streaming" | "ready">("preview");
+  // Per-panel display-space (vmin, vmax) actually used for the preview
+  // colormap — detail tiles must map through the exact same window or the
+  // tile would visibly "pop" against the preview around it.
+  const panelRangesRef = React.useRef<{ vmin: number; vmax: number }[]>([]);
+  const clearDetailTile = React.useCallback((panel: number) => {
+    const removed = detailTilesRef.current.delete(panel);
+    detailSentKeysRef.current.delete(panel);
+    return removed;
+  }, []);
 
   // Helper to get zoom state for an image. zoom and pan link independently:
   //   zoom from linkedZoomState if linkedZoom else per-image
@@ -998,6 +1102,7 @@ function Show2D() {
             ranges.push({ vmin: cr.min, vmax: cr.max });
           }
         }
+        panelRangesRef.current = ranges;  // keep detail tiles on the live contrast window
         const bitmaps = engine.renderSlotsToImageBitmap(indices, ranges, ls);
         if (bitmaps && bitmaps[0]) {
           for (let i = 0; i < bitmaps.length; i++) {
@@ -1057,7 +1162,7 @@ function Show2D() {
   const [fftProgress, setFftProgress] = React.useState("");
 
   // Cursor readout state
-  const [cursorInfo, setCursorInfo] = React.useState<{ idx: number; row: number; col: number; value: number; rgb?: [number, number, number] | null } | null>(null);
+  const [cursorInfo, setCursorInfo] = React.useState<{ idx: number; row: number; col: number; value: number; rgb?: [number, number, number] | null; valueSource?: "preview" | "detail" | "native" } | null>(null);
 
   // Colorbar state (single image mode only)
   const [showColorbar, setShowColorbar] = React.useState(false);
@@ -1276,7 +1381,7 @@ function Show2D() {
     if (!hiddenPanelSet.has(selectedIdx)) return;
     setSelectedIdx(visibleImageIndices[0] ?? 0);
   }, [hiddenPanelSet, isGallery, selectedIdx, setSelectedIdx, visibleImageIndices]);
-  const clampedNcols = Math.max(1, Math.min(ncols || 1, visibleImageCount));
+  const clampedNcols = Math.max(1, Math.min(ncols || 1, visibleImageCount, MAX_PANEL_COLUMNS));
   const effectiveNcols = clampedNcols + diffPanelCount;
   const diffOtherIndices = React.useMemo(
     // RGB panels (e.g. the overlay sugar panel) are excluded: a signed diff
@@ -1294,6 +1399,36 @@ function Show2D() {
   const galleryGridColumns = `repeat(${Math.max(1, effectiveNcols)}, minmax(0, ${canvasW}px))`;
   const histogramGridMaxWidth = effectiveNcols * histogramWidthPx + (effectiveNcols - 1) * histogramGapPx;
   const histogramGridColumns = `repeat(auto-fit, minmax(min(100%, ${histogramWidthPx}px), ${histogramWidthPx}px))`;
+  const zoomStateToAnchor = React.useCallback((state: ZoomState): ZoomAnchor => ({
+    zoom: state.zoom,
+    rowFrac: canvasH > 0 && state.zoom > 0 ? 0.5 - state.panY / (state.zoom * canvasH) : 0.5,
+    colFrac: canvasW > 0 && state.zoom > 0 ? 0.5 - state.panX / (state.zoom * canvasW) : 0.5,
+  }), [canvasW, canvasH]);
+  const zoomAnchorToState = React.useCallback((anchor: ZoomAnchor, nextCanvasW: number, nextCanvasH: number): ZoomState => ({
+    zoom: anchor.zoom,
+    panX: anchor.zoom * nextCanvasW * (0.5 - anchor.colFrac),
+    panY: anchor.zoom * nextCanvasH * (0.5 - anchor.rowFrac),
+  }), []);
+  const applyResizeViewAnchor = React.useCallback((nextSize: number) => {
+    const anchor = canvasResizeViewAnchorRef.current;
+    if (!anchor || width <= 0 || height <= 0) return;
+    const nextScale = nextSize / Math.max(width, height);
+    const nextCanvasW = Math.round(width * nextScale);
+    const nextCanvasH = Math.round(height * nextScale);
+    if (nextCanvasW <= 0 || nextCanvasH <= 0) return;
+    setLinkedZoomState(zoomAnchorToState(anchor.linked, nextCanvasW, nextCanvasH));
+    setZoomStates(prevStates => {
+      if (anchor.per.size === 0 && prevStates.size === 0) return prevStates;
+      const next = new Map<number, ZoomState>();
+      const keys = new Set<number>([...Array.from(prevStates.keys()), ...Array.from(anchor.per.keys())]);
+      keys.forEach(idx => {
+        const panelAnchor = anchor.per.get(idx) || zoomStateToAnchor(prevStates.get(idx) || initialZoomState);
+        next.set(idx, zoomAnchorToState(panelAnchor, nextCanvasW, nextCanvasH));
+      });
+      return next;
+    });
+    if (anchor.reset) resetZoomStateRef.current = zoomAnchorToState(anchor.reset, nextCanvasW, nextCanvasH);
+  }, [width, height, zoomAnchorToState, zoomStateToAnchor, initialZoomState]);
   const responsivePanelSx = {
     position: "relative",
     bgcolor: "#000",
@@ -1377,6 +1512,29 @@ function Show2D() {
     if (canvasW <= 0 || canvasH <= 0 || width <= 0 || height <= 0) return;
     resetZoomStateRef.current = initialZoomState;
   }, [zoomRowTrait, zoomColTrait, canvasW, canvasH, width, height, initialZoomState]);
+  const previousCanvasDimsRef = React.useRef<{ w: number; h: number } | null>(null);
+  React.useEffect(() => {
+    if (canvasW <= 0 || canvasH <= 0) return;
+    const prev = previousCanvasDimsRef.current;
+    previousCanvasDimsRef.current = { w: canvasW, h: canvasH };
+    if (canvasResizeViewAnchorRef.current) return;
+    if (!prev || prev.w <= 0 || prev.h <= 0 || (prev.w === canvasW && prev.h === canvasH)) return;
+    const sx = canvasW / prev.w;
+    const sy = canvasH / prev.h;
+    const scaleState = (state: ZoomState): ZoomState => ({
+      ...state,
+      panX: state.panX * sx,
+      panY: state.panY * sy,
+    });
+    setLinkedZoomState(prevState => scaleState(prevState));
+    setZoomStates(prevStates => {
+      if (prevStates.size === 0) return prevStates;
+      const next = new Map<number, ZoomState>();
+      prevStates.forEach((state, idx) => next.set(idx, scaleState(state)));
+      return next;
+    });
+    if (resetZoomStateRef.current) resetZoomStateRef.current = scaleState(resetZoomStateRef.current);
+  }, [canvasW, canvasH]);
   const floatsPerImage = width * height;
   // Per-panel float offsets into frame_bytes: grayscale panels are W*H floats,
   // RGB panels are 3*W*H interleaved floats. Last entry = total float count.
@@ -1407,7 +1565,6 @@ function Show2D() {
   const roiFftKey = roiFftActive ? selectedRoiKey : "";
 
   // Extract raw float32 bytes and parse into Float32Arrays
-  const [offline] = useModelState<boolean>("offline");
   const [offlineMin] = useModelState<number>("_offline_min");
   const [offlineMax] = useModelState<number>("_offline_max");
   const [offlineMins] = useModelState<number[]>("_offline_mins");
@@ -1674,6 +1831,11 @@ function Show2D() {
     }
     rawDataRef.current = dataArrays;
     rgbDataRef.current = rgbArrays;
+    // New pixels (fresh frame_bytes, rotation, ...) invalidate every fetched
+    // detail tile; the request effect refetches for the current view.
+    detailTilesRef.current.clear();
+    detailSentKeysRef.current.clear();
+    setDetailStreamStatus("preview");
     // Upload to GPU colormap engine if available (ref check, no state trigger)
     const engine = gpuCmapRef.current;
     if (engine && gpuCmapReadyRef.current) {
@@ -2080,6 +2242,7 @@ function Show2D() {
       colorbarVminRef.current = ranges[0].vmin;
       colorbarVmaxRef.current = ranges[0].vmax;
     }
+    panelRangesRef.current = ranges;  // keep detail tiles on the live contrast window
 
     // GPU colormap — first-class citizen.
     // Try zero-copy path (OffscreenCanvas → ImageBitmap, no mapAsync).
@@ -2150,6 +2313,151 @@ function Show2D() {
   }, [dataVersion, gpuCmapVersion, autoContrastVersion, nImages, width, height, cmap, logScale, autoContrast, linkedContrast, linkedContrastState, contrastStates, traitVmin, traitVmax, traitVmins, traitVmaxs, diffMode, isRgbFlags]);
 
   // -------------------------------------------------------------------------
+  // Maps-style detail fetch (preview binned only, _display_bin_factor > 1).
+  // Request: when the user zooms past the preview's resolution, ask Python for
+  // the VISIBLE window cropped from full-res and binned to ~canvas size.
+  // Debounced so wheel/drag streams settle into one request per gesture.
+  // -------------------------------------------------------------------------
+  const currentDetailWindow = React.useCallback((panel: number) => {
+    if (!displayBinFactor || displayBinFactor <= 1) return null;
+    if (canvasW <= 0 || canvasH <= 0 || width <= 0 || height <= 0) return null;
+    if (isRgbFlags && isRgbFlags[panel]) return null;
+    if (hiddenPanels && hiddenPanels.includes(panel)) return null;
+    const zs = getZoomState(panel);
+    // Canvas px painted per preview px: at or below 1 the preview already
+    // saturates the screen, so full-res detail adds nothing visible.
+    if (zs.zoom * displayScale <= 1.02) return null;
+    const cx = canvasW / 2;
+    const cy = canvasH / 2;
+    const row0 = Math.max(0, ((0 - cy - zs.panY) / zs.zoom + cy) / displayScale);
+    const row1 = Math.min(height, ((canvasH - cy - zs.panY) / zs.zoom + cy) / displayScale);
+    const col0 = Math.max(0, ((0 - cx - zs.panX) / zs.zoom + cx) / displayScale);
+    const col1 = Math.min(width, ((canvasW - cx - zs.panX) / zs.zoom + cx) / displayScale);
+    if (row1 <= row0 || col1 <= col0) return null;
+    const visFullW = (col1 - col0) * displayBinFactor;
+    const visFullH = (row1 - row0) * displayBinFactor;
+    let bin = Math.max(1, Math.floor(Math.min(visFullW / canvasW, visFullH / canvasH)));
+    while ((visFullW / bin) * (visFullH / bin) * 4 > DETAIL_BUDGET_BYTES) bin++;
+    if (bin >= displayBinFactor) return null;
+    return {
+      row0, row1, col0, col1, bin,
+      fullRow0: row0 * displayBinFactor,
+      fullRow1: row1 * displayBinFactor,
+      fullCol0: col0 * displayBinFactor,
+      fullCol1: col1 * displayBinFactor,
+    };
+  }, [displayBinFactor, canvasW, canvasH, width, height, isRgbFlags, hiddenPanels, getZoomState, displayScale]);
+
+  React.useEffect(() => {
+    if (!displayBinFactor || displayBinFactor <= 1) return;
+    const signature = Array.from({ length: nImages }, (_, i) => {
+      const win = currentDetailWindow(i);
+      if (!win) return `${i}:preview`;
+      return `${i}:${Math.round(win.fullRow0)},${Math.round(win.fullRow1)},${Math.round(win.fullCol0)},${Math.round(win.fullCol1)},${win.bin}`;
+    }).join("|");
+    if (signature === detailViewSignatureRef.current) return;
+    detailViewSignatureRef.current = signature;
+    // Drop any in-flight replies from the previous view before they can create
+    // a sharp rectangular tile over the new preview.
+    detailRequestIdRef.current++;
+    detailSentKeysRef.current.clear();
+  }, [displayBinFactor, nImages, currentDetailWindow, linkedZoomState, zoomStates, dataVersion]);
+
+  React.useEffect(() => {
+    if (!displayBinFactor || displayBinFactor <= 1 || detailTilesRef.current.size === 0) return;
+    const eps = 1e-3;
+    let removed = false;
+    detailTilesRef.current.forEach((tile, panel) => {
+      const win = currentDetailWindow(panel);
+      const tileRow1 = tile.row0 + tile.rows * tile.bin;
+      const tileCol1 = tile.col0 + tile.cols * tile.bin;
+      const coversCurrentView = win
+        && tile.row0 <= win.fullRow0 + eps
+        && tileRow1 >= win.fullRow1 - eps
+        && tile.col0 <= win.fullCol0 + eps
+        && tileCol1 >= win.fullCol1 - eps
+        && tile.bin <= win.bin;
+      if (!coversCurrentView) removed = clearDetailTile(panel) || removed;
+    });
+    if (removed) {
+      // Any in-flight reply was for a previous view; drop it and let the
+      // debounced request below ask for the current window. This prevents a
+      // sharp stale tile from flashing as a square over the binned preview.
+      detailRequestIdRef.current++;
+      setDetailStreamStatus(detailTilesRef.current.size > 0 ? "ready" : "preview");
+      setDetailPaintVersion(v => v + 1);
+    }
+  }, [displayBinFactor, currentDetailWindow, clearDetailTile, linkedZoomState, zoomStates, dataVersion]);
+
+  React.useEffect(() => {
+    if (!displayBinFactor || displayBinFactor <= 1) return;
+    if (canvasW <= 0 || canvasH <= 0 || width <= 0 || height <= 0) return;
+    const timer = window.setTimeout(() => {
+      const tiles: { panel: number; row0: number; row1: number; col0: number; col1: number; bin: number }[] = [];
+      for (let i = 0; i < nImages; i++) {
+        const win = currentDetailWindow(i);
+        if (!win) continue;
+        const key = `${Math.round(win.row0)},${Math.round(win.row1)},${Math.round(win.col0)},${Math.round(win.col1)},${win.bin}`;
+        if (detailSentKeysRef.current.get(i) === key) continue; // in flight or already shown
+        detailSentKeysRef.current.set(i, key);
+        tiles.push({ panel: i, row0: win.row0, row1: win.row1, col0: win.col0, col1: win.col1, bin: win.bin });
+      }
+      if (tiles.length === 0) {
+        if (detailTilesRef.current.size === 0) setDetailStreamStatus("preview");
+        return;
+      }
+      const id = ++detailRequestIdRef.current;
+      setDetailStreamStatus("streaming");
+      setDetailRequest(JSON.stringify({ id: String(id), tiles }));
+    }, 150);
+    return () => window.clearTimeout(timer);
+  }, [displayBinFactor, canvasW, canvasH, width, height, nImages,
+      currentDetailWindow, dataVersion, setDetailRequest]);
+
+  // Detail reply: decode the float32 tiles and stash per panel. Replies for
+  // superseded requests (user kept zooming) are dropped by id.
+  React.useEffect(() => {
+    if (!detailMeta || !detailBytes || detailBytes.byteLength === 0) return;
+    let meta: { id?: string; tiles?: { panel: number; row0: number; col0: number; rows: number; cols: number; bin: number; offset: number }[] };
+    try { meta = JSON.parse(detailMeta); } catch { return; }
+    if (String(meta.id) !== String(detailRequestIdRef.current)) return; // stale reply
+    const incoming = meta.tiles ?? [];
+    for (const t of incoming) {
+      const byteCount = t.rows * t.cols * 4;
+      if (t.offset + byteCount > detailBytes.byteLength) continue;
+      // Copy out: the comm buffer's byteOffset is not guaranteed 4-aligned,
+      // and Float32Array views require alignment.
+      const copied = new Uint8Array(detailBytes.buffer.slice(
+        detailBytes.byteOffset + t.offset, detailBytes.byteOffset + t.offset + byteCount));
+      detailTilesRef.current.set(t.panel, {
+        row0: t.row0, col0: t.col0, rows: t.rows, cols: t.cols, bin: t.bin,
+        floats: new Float32Array(copied.buffer), canvas: null,
+      });
+    }
+    if (incoming.length > 0) {
+      setDetailStreamStatus("ready");
+      setDetailVersion(v => v + 1);
+    }
+  }, [detailMeta, detailBytes]);
+
+  // Colormap detail tiles through the SAME display window as the preview
+  // (panelRangesRef, set by the data effect above and the slider fast path).
+  // CPU renderToOffscreen is fine: tiles are ≤ 2 M pixels.
+  React.useEffect(() => {
+    if (detailTilesRef.current.size === 0) return;
+    const lut = COLORMAPS[cmap] || COLORMAPS.inferno;
+    let painted = false;
+    detailTilesRef.current.forEach((tile, i) => {
+      const range = panelRangesRef.current[i];
+      if (!range) return;
+      const processed = logScale ? applyLogScale(tile.floats) : tile.floats;
+      tile.canvas = renderToOffscreen(processed, tile.cols, tile.rows, lut, range.vmin, range.vmax);
+      painted = true;
+    });
+    if (painted) setDetailPaintVersion(v => v + 1);
+  }, [detailVersion, offscreenVersion, cmap, logScale]);
+
+  // -------------------------------------------------------------------------
   // Draw effect: zoom/pan changes — cheap, just drawImage from cached offscreens
   // useLayoutEffect prevents black flash when canvas dimensions change (resize)
   // -------------------------------------------------------------------------
@@ -2170,20 +2478,43 @@ function Show2D() {
       const zs = getZoomState(i);
       const { zoom, panX, panY } = zs;
 
+      ctx.save();
       if (zoom !== 1 || panX !== 0 || panY !== 0) {
-        ctx.save();
         const cx = canvasW / 2;
         const cy = canvasH / 2;
         ctx.translate(cx + panX, cy + panY);
         ctx.scale(zoom, zoom);
         ctx.translate(-cx, -cy);
-        ctx.drawImage(offscreen, 0, 0, width, height, 0, 0, canvasW, canvasH);
-        ctx.restore();
-      } else {
-        ctx.drawImage(offscreen, 0, 0, width, height, 0, 0, canvasW, canvasH);
       }
+      ctx.drawImage(offscreen, 0, 0, width, height, 0, 0, canvasW, canvasH);
+      // Detail tile on top of the preview (same zoom/pan transform): tile
+      // coordinates are full-res pixels, so divide by the preview bin factor
+      // to land in the preview's coordinate space. Outside the tile the
+      // preview remains visible — the pan-away fallback.
+      const tile = displayBinFactor > 1 ? detailTilesRef.current.get(i) : undefined;
+      if (tile && tile.canvas) {
+        const win = currentDetailWindow(i);
+        const eps = 1e-3;
+        const tileRow1 = tile.row0 + tile.rows * tile.bin;
+        const tileCol1 = tile.col0 + tile.cols * tile.bin;
+        const coversCurrentView = win
+          && tile.row0 <= win.fullRow0 + eps
+          && tileRow1 >= win.fullRow1 - eps
+          && tile.col0 <= win.fullCol0 + eps
+          && tileCol1 >= win.fullCol1 - eps
+          && tile.bin <= win.bin;
+        if (coversCurrentView) {
+          const sx = canvasW / width;
+          const sy = canvasH / height;
+          const f = displayBinFactor;
+          ctx.drawImage(tile.canvas, 0, 0, tile.cols, tile.rows,
+            (tile.col0 / f) * sx, (tile.row0 / f) * sy,
+            (tile.cols * tile.bin / f) * sx, (tile.rows * tile.bin / f) * sy);
+        }
+      }
+      ctx.restore();
     }
-  }, [offscreenVersion, nImages, width, height, displayScale, canvasW, canvasH, canvasReady, linkedZoom, linkedZoomState, zoomStates, smooth]);
+  }, [offscreenVersion, detailPaintVersion, displayBinFactor, nImages, width, height, displayScale, canvasW, canvasH, canvasReady, linkedZoom, linkedZoomState, zoomStates, smooth, currentDetailWindow]);
 
   // -------------------------------------------------------------------------
   // Render Overlays (scale bar, colorbar, zoom indicator)
@@ -3326,7 +3657,6 @@ function Show2D() {
   const handleWheel = (e: React.WheelEvent, idx: number) => {
     // In gallery mode, only allow zoom on the selected image (unless linked)
     if (isGallery && idx !== selectedIdx && !linkedZoom) return;
-    e.preventDefault(); // Prevent page scroll when zooming
 
     const canvas = canvasRefs.current[idx];
     if (!canvas) return;
@@ -3508,7 +3838,6 @@ function Show2D() {
   // After zoom change, keep screenX of mouse at u:
   //   newPanX = mouseX - (canvasW - canvasW*newZoom)/2 - newZoom*u*canvasW
   const handleFftWheel = (e: React.WheelEvent) => {
-    e.preventDefault();
     const canvas = fftCanvasRef.current;
     if (!canvas) {
       const zoomFactor = e.deltaY > 0 ? 0.9 : 1.1;
@@ -3630,7 +3959,6 @@ function Show2D() {
   // Gallery FFT zoom/pan handlers (only selected image's FFT responds)
   const handleGalleryFftWheel = (e: React.WheelEvent, idx: number) => {
     if (isGallery && idx !== selectedIdx && !fftLinkedZoom) return;
-    e.preventDefault(); // Prevent page scroll when zooming FFT
     const zs = getGalleryFftState(idx);
     const zoomFactor = e.deltaY > 0 ? 0.9 : 1.1;
     setGalleryFftState(idx, { ...zs, zoom: Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, zs.zoom * zoomFactor)) });
@@ -4036,11 +4364,25 @@ function Show2D() {
       if (imgX >= 0 && imgX < width && imgY >= 0 && imgY < height) {
         const rawData = rawDataRef.current[idx];
         if (rawData) {
+          const binFactor = Math.max(1, displayBinFactor || 1);
+          const nativeRow = Math.floor(imgY * binFactor);
+          const nativeCol = Math.floor(imgX * binFactor);
+          let value = rawData[imgY * width + imgX];
+          let valueSource: "preview" | "detail" | "native" = binFactor > 1 ? "preview" : "native";
+          const detailTile = binFactor > 1 ? detailTilesRef.current.get(idx) : undefined;
+          if (detailTile) {
+            const tileRow = Math.floor((nativeRow - detailTile.row0) / detailTile.bin);
+            const tileCol = Math.floor((nativeCol - detailTile.col0) / detailTile.bin);
+            if (tileRow >= 0 && tileRow < detailTile.rows && tileCol >= 0 && tileCol < detailTile.cols) {
+              value = detailTile.floats[tileRow * detailTile.cols + tileCol];
+              valueSource = detailTile.bin === 1 ? "native" : "detail";
+            }
+          }
           // RGB panels read out the (r, g, b) triplet instead of a scalar.
           const rgbData = isRgbPanel(idx) ? rgbDataRef.current[idx] : null;
           const rgbOffset = (imgY * width + imgX) * 3;
           setCursorInfo({
-            idx, row: imgY, col: imgX, value: rawData[imgY * width + imgX],
+            idx, row: nativeRow, col: nativeCol, value, valueSource,
             rgb: rgbData ? [rgbData[rgbOffset], rgbData[rgbOffset + 1], rgbData[rgbOffset + 2]] : null,
           });
         }
@@ -4326,6 +4668,13 @@ function Show2D() {
   const handleCanvasResizeStart = (e: React.MouseEvent) => {
     e.stopPropagation();
     e.preventDefault();
+    const perAnchors = new Map<number, ZoomAnchor>();
+    zoomStates.forEach((state, idx) => perAnchors.set(idx, zoomStateToAnchor(state)));
+    canvasResizeViewAnchorRef.current = {
+      linked: zoomStateToAnchor(linkedZoomState),
+      per: perAnchors,
+      reset: resetZoomStateRef.current ? zoomStateToAnchor(resetZoomStateRef.current) : null,
+    };
     setIsResizingCanvas(true);
     setResizeStart({ x: e.clientX, y: e.clientY, size: canvasSize });
   };
@@ -4342,6 +4691,7 @@ function Show2D() {
       if (!rafId) {
         rafId = requestAnimationFrame(() => {
           rafId = 0;
+          applyResizeViewAnchor(latestSize);
           setCanvasSize(latestSize);
         });
       }
@@ -4349,10 +4699,12 @@ function Show2D() {
 
     const handleMouseUp = () => {
       cancelAnimationFrame(rafId);
+      applyResizeViewAnchor(latestSize);
       setCanvasSize(latestSize);
       setCanvasSizeTrait(Math.round(latestSize));
       setIsResizingCanvas(false);
       setResizeStart(null);
+      window.setTimeout(() => { canvasResizeViewAnchorRef.current = null; }, 0);
     };
 
     document.addEventListener("mousemove", handleMouseMove);
@@ -4362,7 +4714,7 @@ function Show2D() {
       document.removeEventListener("mousemove", handleMouseMove);
       document.removeEventListener("mouseup", handleMouseUp);
     };
-  }, [isResizingCanvas, resizeStart, setCanvasSizeTrait]);
+  }, [isResizingCanvas, resizeStart, setCanvasSizeTrait, applyResizeViewAnchor]);
 
   // Profile height resize
   React.useEffect(() => {
@@ -4469,10 +4821,39 @@ function Show2D() {
 
   // Calibrated cursor position - unit is whatever the user passed via sampling/units.
   const calibratedUnit = pixelSize > 0 ? pixelUnit : "";
-  const calibratedFactor = pixelSize;
+  const nativePixelSizeForPanel = (idx: number) => {
+    const panelPixelSize = pixelSizeForPanel(idx);
+    return panelPixelSize > 0 ? panelPixelSize / Math.max(1, displayBinFactor || 1) : 0;
+  };
+  const nativePixelSize = pixelSize > 0 ? pixelSize / Math.max(1, displayBinFactor || 1) : 0;
+  const cursorValueSuffix = cursorInfo?.valueSource === "native"
+    ? " native"
+    : cursorInfo?.valueSource === "detail"
+      ? " detail"
+      : displayBinFactor > 1
+        ? " preview"
+        : "";
 
   return (
     <Box className="show2d-root" ref={staticFallbackRootRef} tabIndex={0} onKeyDown={handleKeyDown} sx={{ p: 2, bgcolor: themeColors.bg, color: themeColors.text, width: "100%", maxWidth: "100%", boxSizing: "border-box", fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif", "& canvas": { display: "block" }, "@media (max-width: 700px)": { p: 0, ".jp-OutputArea-output &, .jp-OutputArea-child &": { width: "calc(100vw - 96px)", maxWidth: "calc(100vw - 96px)" } } }}>
+      {!canRenderLive && hasSavedStaticFallback && (
+        <Box sx={{ width: "100%", maxWidth: galleryGridWidth, boxSizing: "border-box" }}>
+          <Box
+            component="img"
+            src={staticFallbackUrl}
+            alt={`${title || "Show2D"} saved preview`}
+            sx={{
+              display: "block",
+              width: "100%",
+              maxWidth: galleryGridWidth,
+              height: "auto",
+              border: `1px solid ${themeColors.border}`,
+              boxSizing: "border-box",
+            }}
+          />
+        </Box>
+      )}
+      {(canRenderLive || !hasSavedStaticFallback) && (
       <Stack
         direction="row"
         spacing={`${SPACING.LG}px`}
@@ -4495,11 +4876,16 @@ function Show2D() {
         {/* Main panel */}
         <Box sx={{ width: "100%", maxWidth: galleryGridWidth, boxSizing: "border-box" }}>
           {/* Title row */}
-          <Typography variant="caption" sx={{ ...typography.label, color: themeColors.accent, mb: `${SPACING.XS}px`, display: "block", height: 16, lineHeight: "16px", overflow: "hidden" }}>
+          <Typography variant="caption" sx={{ ...typography.label, color: themeColors.accent, mb: `${SPACING.XS}px`, display: "block", minHeight: 16, lineHeight: "16px", overflow: "visible" }}>
             {title || (isGallery ? "Gallery" : "Image")}
             {displayBinFactor > 1 && (
               <Box component="span" sx={{ ml: 0.5, px: 0.5, py: 0, fontSize: 9, fontWeight: 600, borderRadius: "3px", backgroundColor: themeColors.accent + "22", color: themeColors.accent, border: `1px solid ${themeColors.accent}44` }}>
                 {displayBinFactor}× binned
+              </Box>
+            )}
+            {displayBinFactor > 1 && (
+              <Box component="span" sx={{ ml: 0.4, px: 0.5, py: 0, fontSize: 9, fontWeight: 500, borderRadius: "3px", backgroundColor: detailStreamStatus === "streaming" ? "rgba(255,193,7,0.18)" : themeColors.controlBg, color: detailStreamStatus === "streaming" ? "#b26a00" : themeColors.textMuted, border: `1px solid ${detailStreamStatus === "streaming" ? "rgba(255,193,7,0.45)" : themeColors.border}` }}>
+                {detailStreamStatus === "streaming" ? "streaming detail..." : detailStreamStatus === "ready" ? "detail ready" : "preview; streams on zoom"}
               </Box>
             )}
             {(() => { const rk = (imageRotations?.[isGallery ? selectedIdx : 0] ?? 0) % 4; return rk !== 0 ? (
@@ -4525,6 +4911,11 @@ function Show2D() {
               {!isGallery && <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>Lens: Magnifier inset that follows the cursor.</Typography>}
               <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>Auto: Percentile-based contrast (2nd–98th percentile). FFT Auto masks DC + clips to 99.9th.</Typography>
               {isGallery && <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>Link Zoom / Contrast: Sync zoom or histogram range across all gallery images.</Typography>}
+              {isGallery && <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>Cols / Panels: Change the gallery grid or hide panels without changing the source data.</Typography>}
+              {isGallery && <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>Pinning: Click a panel to select or pin it for keyboard actions, per-panel zoom, ROI edits, and delete shortcuts.</Typography>}
+              <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>Pan: With Pan enabled, drag the image to move the zoomed view. With Link Zoom on, pan and zoom move together across gallery panels.</Typography>
+              <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>Large data: A binned preview is shown first. When you zoom in, Show2D requests full-resolution detail only for the visible window; small high-zoom windows use native pixels, while larger windows stay lightly binned to keep each reply responsive. The title badge shows whether you are seeing preview, streaming detail, or detail-ready data. Cursor row/column are reported in native full-resolution coordinates; the value is tagged preview/detail/native. The full native stack is not sent to the browser at once. Reduce columns, hide panels, turn off FFT/Profile/Stats, or zoom less to keep interaction faster.</Typography>
+              <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>Export / Copy: Save or copy the current panel view using the toolbar actions.</Typography>
               <Typography sx={{ fontSize: 11, fontWeight: "bold", mt: 0.5 }}>Keyboard</Typography>
               <KeyboardShortcuts items={isGallery ? [["← / →", "Prev / Next image"], ["1 – 9", "Select image"], ["] / [", "Rotate CW / CCW 90°"], ["Del / ⌫", "Delete selected ROI"], ["M", "Measure distance"], ["Esc", "Exit measure"], ["R", "Reset zoom"], ["Scroll", "Zoom"], ["Dbl-click", "Reset view"]] : [["] / [", "Rotate CW / CCW 90°"], ["Del / ⌫", "Delete selected ROI"], ["M", "Measure distance"], ["Esc", "Exit measure"], ["R", "Reset zoom"], ["Scroll", "Zoom"], ["Dbl-click", "Reset view"]]} />
             </Box>} theme={themeInfo.theme} />
@@ -4536,7 +4927,7 @@ function Show2D() {
                 <Typography sx={{ ...typography.label, fontSize: 10 }}>Cols:</Typography>
                 <Select
                   value={String(clampedNcols)}
-                  onChange={(e) => setNcols(Math.max(1, Math.min(Number(e.target.value) || 1, nImages)))}
+                  onChange={(e) => setNcols(Math.max(1, Math.min(Number(e.target.value) || 1, nImages, MAX_PANEL_COLUMNS)))}
                   size="small"
                   sx={{ ...themedSelect, minWidth: 48, fontSize: 10 }}
                   MenuProps={themedTopMenuProps}
@@ -4686,17 +5077,20 @@ function Show2D() {
               <Button
                 size="small"
                 sx={{ ...compactButton, color: themeColors.accent }}
-                disabled={exportBusy}
+                disabled={exportBusy || (!exportEnabled && !canDownloadCurrentHtml)}
                 onClick={(e) => { setExportAnchor(e.currentTarget); }}
-                title={localExportStatus || exportStatus || "Export figures or standalone HTML"}
+                title={localExportStatus || exportStatus || (exportEnabled ? "Export standalone HTML" : canDownloadCurrentHtml ? "Export this standalone HTML" : "Export unavailable for this data")}
               >
                 {exportBusy ? "Exporting" : "Export"}
               </Button>
               <Menu anchorEl={exportAnchor} open={Boolean(exportAnchor)} onClose={() => setExportAnchor(null)} anchorOrigin={{ vertical: "bottom", horizontal: "right" }} transformOrigin={{ vertical: "top", horizontal: "right" }} {...themedTopMenuProps}>
-                {exportEnabled && <MenuItem onClick={() => handleHtmlExportSelect("exact")} sx={{ fontSize: 12 }}>Exact float32 ({exactHtmlSize})</MenuItem>}
-                {exportEnabled && <MenuItem onClick={() => handleHtmlExportSelect("quantized")} sx={{ fontSize: 12 }}>Quantized uint8 ({quantizedHtmlSize})</MenuItem>}
+                {exportEnabled && <MenuItem onClick={() => handleHtmlExportSelect("exact")} sx={{ fontSize: 12 }}>HTML exact float32 ({exactHtmlSize})</MenuItem>}
+                {exportEnabled && <MenuItem onClick={() => handleHtmlExportSelect("quantized")} sx={{ fontSize: 12 }}>HTML quantized uint8 ({quantizedHtmlSize})</MenuItem>}
+                {canDownloadCurrentHtml && offline && <MenuItem disabled sx={{ fontSize: 12 }} title="This standalone export contains quantized uint8 data, not the original float32 array. Open the live widget to export exact float32.">{unavailableStandaloneHtmlLabel}</MenuItem>}
+                {canDownloadCurrentHtml && <MenuItem onClick={handleStandaloneHtmlDownload} sx={{ fontSize: 12 }}>{standaloneHtmlLabel}</MenuItem>}
+                {canDownloadCurrentHtml && !offline && <MenuItem disabled sx={{ fontSize: 12 }} title="Quantized export requires the Python backend to repack the current float32 data.">{unavailableStandaloneHtmlLabel}</MenuItem>}
               </Menu>
-              {exportEnabled && (localExportStatus || exportStatus) && (
+              {(localExportStatus || exportStatus) && (
                 <Typography
                   sx={{
                     ...typography.label,
@@ -4767,7 +5161,7 @@ function Show2D() {
                       /* Show4DSTEM readout spec; top-right, dropped 25px below the star button row */
                       <Box sx={{ position: "absolute", top: 28, right: 3, bgcolor: "rgba(0,0,0,0.35)", px: 0.5, py: 0.15, pointerEvents: "none", minWidth: 100, textAlign: "right", zIndex: 2 }}>
                         <Typography sx={{ fontSize: 9, fontFamily: "monospace", color: "rgba(255,255,255,0.7)", whiteSpace: "nowrap", lineHeight: 1.2 }}>
-                          ({cursorInfo.row}, {cursorInfo.col}){pixelSizeForPanel(i) > 0 ? ` = (${(cursorInfo.row * pixelSizeForPanel(i)).toFixed(1)}, ${(cursorInfo.col * pixelSizeForPanel(i)).toFixed(1)} ${pixelUnit})` : ""} {cursorInfo.rgb ? `(${cursorInfo.rgb[0].toFixed(2)}, ${cursorInfo.rgb[1].toFixed(2)}, ${cursorInfo.rgb[2].toFixed(2)})` : formatNumber(cursorInfo.value)}
+                          ({cursorInfo.row}, {cursorInfo.col}){nativePixelSizeForPanel(i) > 0 ? ` = (${(cursorInfo.row * nativePixelSizeForPanel(i)).toFixed(1)}, ${(cursorInfo.col * nativePixelSizeForPanel(i)).toFixed(1)} ${pixelUnit})` : ""} {cursorInfo.rgb ? `(${cursorInfo.rgb[0].toFixed(2)}, ${cursorInfo.rgb[1].toFixed(2)}, ${cursorInfo.rgb[2].toFixed(2)})` : `${formatNumber(cursorInfo.value)}${cursorValueSuffix}`}
                         </Typography>
                       </Box>
                     )}
@@ -5030,7 +5424,7 @@ function Show2D() {
                 /* Show4DSTEM readout spec verbatim (single-image mode has no star button) */
                 <Box sx={{ position: "absolute", top: 3, right: 3, bgcolor: "rgba(0,0,0,0.35)", px: 0.5, py: 0.15, pointerEvents: "none", minWidth: 100, textAlign: "right" }}>
                   <Typography sx={{ fontSize: 9, fontFamily: "monospace", color: "rgba(255,255,255,0.7)", whiteSpace: "nowrap", lineHeight: 1.2 }}>
-                    ({cursorInfo.row}, {cursorInfo.col}){pixelSize > 0 ? ` = (${(cursorInfo.row * calibratedFactor).toFixed(1)}, ${(cursorInfo.col * calibratedFactor).toFixed(1)} ${calibratedUnit})` : ""} {cursorInfo.rgb ? `(${cursorInfo.rgb[0].toFixed(2)}, ${cursorInfo.rgb[1].toFixed(2)}, ${cursorInfo.rgb[2].toFixed(2)})` : formatNumber(cursorInfo.value)}
+                    ({cursorInfo.row}, {cursorInfo.col}){nativePixelSize > 0 ? ` = (${(cursorInfo.row * nativePixelSize).toFixed(1)}, ${(cursorInfo.col * nativePixelSize).toFixed(1)} ${calibratedUnit})` : ""} {cursorInfo.rgb ? `(${cursorInfo.rgb[0].toFixed(2)}, ${cursorInfo.rgb[1].toFixed(2)}, ${cursorInfo.rgb[2].toFixed(2)})` : `${formatNumber(cursorInfo.value)}${cursorValueSuffix}`}
                   </Typography>
                 </Box>
               )}
@@ -5477,6 +5871,7 @@ function Show2D() {
           </Box>
         )}
       </Stack>
+      )}
     </Box>
   );
 }

@@ -298,6 +298,8 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
     # =========================================================================
     # Display settings (synced for programmatic export parity)
     # =========================================================================
+    _static_fallback_jpeg = traitlets.Unicode("").tag(sync=True)
+
     dp_colormap = traitlets.Unicode("inferno").tag(sync=True)
     vi_colormap = traitlets.Unicode("inferno").tag(sync=True)
     fft_colormap = traitlets.Unicode("inferno").tag(sync=True)
@@ -1363,43 +1365,91 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         """
         state = super().get_state(key=key, drop_defaults=drop_defaults)
         if key is None and not getattr(self, "_save_state", False):
+            if not self._static_fallback_jpeg:
+                png = self._static_png_b64()
+                if png:
+                    self._store_static_fallback_preview(png)
+                    state["_static_fallback_jpeg"] = self._static_fallback_jpeg
             for heavy_key in self._UNSAVED_HEAVY_KEYS:
                 state.pop(heavy_key, None)
         return state
 
-    def _static_png_b64(self, *, max_px: int = 320, dpi: int = 96) -> str | None:
-        """Base64 PNG of the current virtual image, attached to the cell output.
+    @staticmethod
+    def _resize_static_panel(panel, panel_px: int):
+        """Resize one static preview panel to the common live-widget panel size."""
+        if panel.width == panel_px and panel.height == panel_px:
+            return panel
+        resampling = getattr(getattr(type(panel), "Resampling", None), "LANCZOS", None)
+        if resampling is None:
+            from PIL import Image
 
-        With ``save_state`` False the heavy interactive stack is not embedded, so
-        a reopened notebook (GitHub, nbviewer, cold Lab) would show nothing.
-        Attaching a static render of the virtual image (BF/ADF) - the widget's
-        primary 2D view, using its own colormap/scale via ``_render_virtual_rgb``
-        - means the reader still sees the sample. Returns None when no virtual
-        image is available yet (nothing to draw).
+            resampling = getattr(Image, "LANCZOS", Image.BICUBIC)
+        return panel.resize((panel_px, panel_px), resample=resampling)
+
+    def _render_static_panel_image(self, panel_key: str, panel_px: int):
+        """Render one saved-notebook preview panel with final-size overlays."""
+        from PIL import Image
+
+        if panel_key == "virtual":
+            rgb, _ = self._render_virtual_rgb()
+        elif panel_key == "diffraction":
+            rgb, _ = self._render_dp_rgb()
+        else:
+            raise ValueError(f"Unsupported static panel {panel_key!r}")
+        panel = Image.fromarray(rgb, mode="RGB")
+        panel = self._resize_static_panel(panel, panel_px)
+        return self._decorate_panel(panel, panel_key, include_overlays=True, include_scalebar=True)
+
+    def _static_png_b64(self, *, max_px: int = 384, dpi: int = 160) -> str | None:
+        """Base64 PNG of the current virtual-image + diffraction view.
+
+        Lightweight saved notebooks should still communicate the 4D-STEM state:
+        where the scan cursor is and what diffraction pattern/ROI produced the
+        virtual image. The fallback therefore mirrors the live two-panel layout
+        (virtual image + diffraction), while still omitting the heavy 4D stack
+        from notebook metadata when ``save_state`` is false.
         """
-        raw = self._get_virtual_image_array()
-        if raw is None or raw.size == 0 or not np.any(raw):
+        if not hasattr(self, "_data"):
             return None
-        import matplotlib
-        matplotlib.use("Agg", force=False)
-        import matplotlib.pyplot as plt
-        rgb, _ = self._render_virtual_rgb()
-        step = max(1, int(max(rgb.shape[0], rgb.shape[1]) // max_px))
-        rgb = rgb[::step, ::step]
-        fig, ax = plt.subplots(figsize=(3.2, 3.2))
-        ax.axis("off")
-        ax.imshow(rgb)
-        if self.title:
-            ax.set_title(self.title, fontsize=8)
-        fig.tight_layout(pad=0.2)
+        raw = self._get_virtual_image_array()
+        if raw is None or raw.size == 0:
+            return None
+        from PIL import Image, ImageDraw, ImageFont
+
+        panel_px = int(self.panel_width_px or max_px)
+        panel_px = max(64, min(panel_px, int(max_px)))
+        gap = max(2, int(panel_px * 0.015))
+        title_h = 0
+        title = str(self.title or "").strip()
+        font = ImageFont.load_default()
+        if title:
+            title_h = 18
+
+        virtual = self._render_static_panel_image("virtual", panel_px)
+        diffraction = self._render_static_panel_image("diffraction", panel_px)
+        width = panel_px * 2 + gap
+        height = panel_px + title_h
+        composite = Image.new("RGB", (width, height), color=(255, 255, 255))
+        draw = ImageDraw.Draw(composite)
+        if title:
+            draw.text((2, 2), title, fill=(0, 0, 0), font=font)
+        y0 = title_h
+        composite.paste(virtual, (0, y0))
+        composite.paste(diffraction, (panel_px + gap, y0))
+
         buf = io.BytesIO()
-        fig.savefig(buf, format="png", dpi=dpi, facecolor="white", bbox_inches="tight")
-        plt.close(fig)
+        composite.save(buf, format="PNG", dpi=(dpi, dpi))
         return base64.b64encode(buf.getvalue()).decode("ascii")
 
     # _repr_mimebundle_ / _ipython_display_ / static-fallback sibling plumbing
     # comes from StaticFallbackMixin (utils/static_fallback.py); this class only
     # supplies _static_png_b64 above.
+
+    def _store_static_fallback_preview(self, png_b64: str) -> None:
+        """Store a compact saved-notebook preview inside lightweight state."""
+        if getattr(self, "_save_state", False):
+            return
+        self._static_fallback_jpeg = self._png_to_jpeg_b64(png_b64)
 
     def state_dict(self):
         return {

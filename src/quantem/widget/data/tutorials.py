@@ -4,12 +4,197 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 from pathlib import Path
 
 import numpy as np
 from quantem.core.datastructures import Dataset2d, Dataset3d, Dataset4dstem
 
-from quantem.widget.io import download
+download = None
+snapshot_download = None
+_SURVEY_HF_PATTERNS = (
+    "survey/gold_haadf_session/*.emd",
+)
+
+
+def _download_dataset(name: str, *, verbose: bool = False) -> Path:
+    global download
+    if download is None:
+        from quantem.widget.io import download as _download  # noqa: PLC0415
+
+        download = _download
+    return Path(download(name, verbose=verbose))
+
+
+def _snapshot_download_dataset(**kwargs) -> Path:
+    global snapshot_download
+    if snapshot_download is None:
+        from huggingface_hub import snapshot_download as _snapshot_download  # noqa: PLC0415
+
+        snapshot_download = _snapshot_download
+    return Path(snapshot_download(**kwargs))
+
+
+def load_tutorial_survey_folder(*, verbose: bool = True, allow_fallback: bool = True) -> Path:
+    """Download the real HAADF EMD folder used by the survey tutorials.
+
+    Returns a folder containing a compact 26-file Velox ``.emd`` session from
+    the public ``bobleesj/quantem-data`` Hugging Face dataset. The folder is
+    small enough for documentation but still exercises the real
+    ``survey(folder)`` path: Velox EMD image loading, metadata parsing, labels,
+    repeated field-of-view grouping, thumbnails, scale bars, and the inventory
+    table.
+
+    Parameters
+    ----------
+    verbose
+        If ``True``, print a short folder summary.
+    allow_fallback
+        If ``True``, create a tiny offline EMD folder when the Hugging Face
+        download is unavailable. Documentation notebooks set this to ``False``
+        so rendered pages always use the real public dataset.
+
+    Returns
+    -------
+    Path
+        Folder containing tutorial ``.emd`` files.
+    """
+
+    os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+    try:
+        root = _snapshot_download_dataset(
+            repo_id="bobleesj/quantem-data",
+            repo_type="dataset",
+            allow_patterns=list(_SURVEY_HF_PATTERNS),
+        )
+        folder = root / "survey" / "gold_haadf_session"
+        if not folder.is_dir():
+            raise FileNotFoundError(f"downloaded tutorial folder is missing: {folder}")
+    except Exception:
+        if not allow_fallback:
+            raise
+        folder = create_tutorial_survey_folder()
+
+    if verbose:
+        files = sorted(path.name for path in folder.glob("*.emd"))
+        print(f"Tutorial survey folder: {folder}")
+        print(f"Files: {len(files)} EMD")
+    return folder
+
+
+def create_tutorial_survey_folder(path: str | Path | None = None) -> Path:
+    """Create a tiny Velox-like EMD folder for offline survey tests.
+
+    The generated folder mimics a microscope session: two HAADF images from the
+    same field of view, one matching EDS spectrum-image file, and one lower-mag
+    overview image. Files are deliberately small so documentation notebooks can
+    embed the survey widgets without making the site heavy.
+
+    Parameters
+    ----------
+    path
+        Optional destination folder. If omitted, a stable folder under the
+        system temporary directory is used.
+
+    Returns
+    -------
+    Path
+        Folder containing the generated ``.emd`` files.
+    """
+
+    root = Path(path) if path is not None else Path(tempfile.gettempdir()) / "quantem-widget-survey-demo"
+    root.mkdir(parents=True, exist_ok=True)
+    for old in root.glob("*.emd"):
+        old.unlink()
+
+    _write_tutorial_image_emd(root / "0010 - HAADF 15Mx Nano.emd", rotation_deg=0.0, seed=2)
+    _write_tutorial_image_emd(root / "0011 - HAADF 15Mx Nano 90deg.emd", rotation_deg=90.0, seed=3)
+    _write_tutorial_eds_emd(root / "0012 - HAADF 15Mx Nano EDS.emd")
+    _write_tutorial_image_emd(
+        root / "0020 - HAADF 3.7Mx Nano overview.emd",
+        rotation_deg=0.0,
+        seed=8,
+        stage=(1.4e-6, 2.4e-6, 3e-6),
+        fov_nm=(150.0, 150.0),
+    )
+    return root
+
+
+def _tutorial_survey_metadata(
+    rotation_deg: float,
+    *,
+    stage: tuple[float, float, float] = (1e-6, 2e-6, 3e-6),
+    fov_nm: tuple[float, float] = (36.0, 36.0),
+    pixel_nm: float = 0.28,
+) -> np.ndarray:
+    meta = {
+        "Scan": {
+            "ScanRotation": str(np.deg2rad(rotation_deg)),
+            "ScanSize": {"height": 96, "width": 96},
+        },
+        "BinaryResult": {"PixelSize": {"height": pixel_nm * 1e-9, "width": pixel_nm * 1e-9}},
+        "Stage": {"Position": {"x": stage[0], "y": stage[1], "z": stage[2]}},
+        "Optics": {
+            "FullScanFieldOfView": {
+                "height": fov_nm[0] * 1e-9,
+                "width": fov_nm[1] * 1e-9,
+            },
+        },
+    }
+    text = json.dumps(meta).encode("utf-8")
+    out = np.zeros((len(text) + 1, 1), dtype=np.uint8)
+    out[: len(text), 0] = np.frombuffer(text, dtype=np.uint8)
+    return out
+
+
+def _tutorial_survey_image(shape: tuple[int, int] = (96, 96), *, seed: int = 0) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+    y, x = np.mgrid[-1:1:complex(shape[0]), -1:1:complex(shape[1])]
+    particles = (
+        1.3 * np.exp(-((x + 0.32) ** 2 + (y - 0.18) ** 2) / 0.035)
+        + 0.9 * np.exp(-((x - 0.18) ** 2 + (y + 0.12) ** 2) / 0.018)
+        + 0.55 * np.exp(-((x - 0.42) ** 2 + (y - 0.38) ** 2) / 0.012)
+    )
+    scan_texture = 0.08 * np.sin(18 * x + 3 * y) + 0.04 * rng.normal(size=shape)
+    return (particles + scan_texture).astype(np.float32)
+
+
+def _write_tutorial_image_emd(
+    path: Path,
+    *,
+    rotation_deg: float,
+    seed: int,
+    stage: tuple[float, float, float] = (1e-6, 2e-6, 3e-6),
+    fov_nm: tuple[float, float] = (36.0, 36.0),
+) -> None:
+    import h5py  # noqa: PLC0415
+
+    with h5py.File(path, "w") as h:
+        group = h.create_group("Data/Image/uid")
+        group.create_dataset("Data", data=_tutorial_survey_image(seed=seed))
+        group.create_dataset(
+            "Metadata",
+            data=_tutorial_survey_metadata(rotation_deg, stage=stage, fov_nm=fov_nm),
+        )
+
+
+def _write_tutorial_eds_emd(
+    path: Path,
+    *,
+    rotation_deg: float = 90.0,
+    stage: tuple[float, float, float] = (1e-6, 2e-6, 3e-6),
+    fov_nm: tuple[float, float] = (36.0, 36.0),
+) -> None:
+    import h5py  # noqa: PLC0415
+
+    with h5py.File(path, "w") as h:
+        group = h.create_group("Data/SpectrumImage/uid")
+        group.create_dataset("Data", data=np.zeros((24, 24, 16), dtype=np.uint16))
+        group.create_dataset(
+            "Metadata",
+            data=_tutorial_survey_metadata(rotation_deg, stage=stage, fov_nm=fov_nm),
+        )
+        h.create_group("Data/SpectrumStream")
 
 
 def load_tutorial_show2d(*, stride: int = 8, verbose: bool = True) -> Dataset2d:
@@ -32,7 +217,7 @@ def load_tutorial_show2d(*, stride: int = 8, verbose: bool = True) -> Dataset2d:
     if stride < 1:
         raise ValueError(f"stride must be >= 1, got {stride}")
     os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
-    data_dir = Path(download("gold_haadf_npy", verbose=False))
+    data_dir = _download_dataset("gold_haadf_npy", verbose=False)
     meta = json.loads((data_dir / "meta.json").read_text())
     full_image = np.load(data_dir / "data.npy", mmap_mode="r")
 
@@ -91,7 +276,7 @@ def load_tutorial_show3d(
         raise ValueError(f"crop_size must be >= 16, got {crop_size}")
 
     os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
-    data_dir = Path(download("gold_haadf_npy", verbose=False))
+    data_dir = _download_dataset("gold_haadf_npy", verbose=False)
     meta = json.loads((data_dir / "meta.json").read_text())
     full_image = np.load(data_dir / "data.npy", mmap_mode="r")
     preview = np.asarray(full_image[::stride, ::stride], dtype=np.float32)
@@ -145,7 +330,7 @@ def load_tutorial_show4dstem(*, scan_stride: int = 2, verbose: bool = True) -> D
     if scan_stride < 1:
         raise ValueError(f"scan_stride must be >= 1, got {scan_stride}")
     os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
-    data_dir = Path(download("gold_128_npy_bin8", verbose=False))
+    data_dir = _download_dataset("gold_128_npy_bin8", verbose=False)
     meta = json.loads((data_dir / "meta.json").read_text())
     full_stack = np.load(data_dir / "data.npy", mmap_mode="r")
     stack = np.asarray(full_stack[::scan_stride, ::scan_stride], dtype=np.uint16)

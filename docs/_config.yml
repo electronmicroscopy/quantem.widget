@@ -1,5 +1,5 @@
 # Jupyter Book 1.x config for the quantem.widget docs site.
-# Notebooks are PRE-BAKED on a GPU box (outputs + widget state committed); the
+# Notebooks are PRE-BAKED before the docs build (outputs + widget state committed); the
 # CI runner is CPU-only and just assembles HTML, so execution stays off here.
 title: quantem.widget
 author: Sangjoon Bob Lee, et al
@@ -56,6 +56,8 @@ sphinx:
       secondary_sidebar_items: []
     html_static_path:
       - "_static"
+    html_extra_path:
+      - "_extra"
     html_css_files:
       - custom.css
     # Jupyter Book already injects the ipywidgets html-manager that rehydrates the

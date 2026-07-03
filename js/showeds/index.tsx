@@ -1950,7 +1950,6 @@ function ShowEDS() {
       .sort((a, b) => (b.intensity ?? 0) - (a.intensity ?? 0))
       .slice(0, 4);
   }, [autoIdentify, bandEnergyHi, bandEnergyLo, bandLo, energy, lineHints, nEnergy, showLineHints]);
-  const candidateText = candidateLines.map(lineLabel).join(", ");
   const safeSelectedElements = React.useMemo(() => uniqueSymbols(Array.isArray(selectedElements) ? selectedElements : []), [selectedElements]);
   const selectedElementSet = React.useMemo(() => new Set(safeSelectedElements), [safeSelectedElements]);
   const hasEmbeddedStream = Boolean(
@@ -2950,11 +2949,12 @@ function ShowEDS() {
     const normalized = normalizeRoi({ ...next, shape: normalizeRoiShape(next.shape ?? roi.shape) }, rows, cols);
     const shapeChanged = normalizeRoiShape(normalized.shape) !== normalizeRoiShape(roi.shape);
     const deferCurvedSidecarSpectrum = interactive && isSparseWorkerBackend && normalizeRoiShape(normalized.shape) !== "rect";
+    const deferKernelSpectrum = interactive && isKernelBackend;
     setLocalRoi(normalized);
     if (sync) {
       queueRoiPersist(normalized, shapeChanged, interactive && !shapeChanged);
     }
-    if (deferCurvedSidecarSpectrum) {
+    if (deferCurvedSidecarSpectrum || deferKernelSpectrum) {
       specRequestRef.current = normalized;
     } else {
       scheduleSpectrum(normalized, interactive);
@@ -2968,7 +2968,7 @@ function ShowEDS() {
     if (sync) {
       queueBandPersist(s, e, false, interactive);
     }
-    if (compute) {
+    if (compute && !(interactive && isKernelBackend)) {
       scheduleMap(s, e, interactive);
     } else {
       mapRequestRef.current = { start: s, end: e, interactive };
@@ -3241,12 +3241,6 @@ function ShowEDS() {
     return () => { document.removeEventListener("mousemove", onMove); document.removeEventListener("mouseup", onUp); };
   }, [bandSliderDrag, flushBandPersist, flushLocalBandPreview, nEnergy, previewCenterBand]);
 
-  const bandCounts = React.useMemo(() => {
-    if (!roiSpectrum) return 0;
-    let sum = 0;
-    for (let i = bandLo; i < bandHi; i++) sum += roiSpectrum[i] || 0;
-    return sum;
-  }, [bandHi, bandLo, roiSpectrum]);
   const [autoMapContrastOn, setAutoMapContrastOn] = React.useState(false);
 
   const resetView = () => {
@@ -3742,9 +3736,8 @@ function ShowEDS() {
                 }}
               />
             </Box>
-            <Typography ref={bandStatusRef} sx={{ mt: 0.5, fontSize: 11, color: themeColors.text }}>
-              Band {bandLo}-{bandHi - 1}: {formatEnergy(energy[bandLo])} - {formatEnergy(energy[Math.max(bandLo, bandHi - 1)])}; ROI band counts {formatNumber(bandCounts, 2)}
-              {candidateText ? `; candidates ${candidateText}` : ""}
+            <Typography sx={{ mt: 0.5, fontSize: 11, color: themeColors.text }}>
+              <span ref={bandStatusRef} />
             </Typography>
           </Box>
         </Stack>

@@ -142,6 +142,25 @@ def test_show2d_first_render_clears_heavy_frame_buffer():
     assert not widget._get_embed_state().get("buffers")
 
 
+def test_show3d_first_render_clears_heavy_transfer_buffers():
+    """After JS paints, later notebook saves should not keep transfer buffers."""
+    stack = np.random.default_rng(1).random((6, 128, 128), dtype=np.float32)
+    widget = Show3D(stack, save_state=False)
+    widget.frame_bytes = b"frame-transfer"
+    widget._buffer_bytes = b"chunk-transfer"
+
+    widget._on_first_render({"new": True})
+
+    assert widget.frame_bytes == b""
+    assert widget._buffer_bytes == b""
+    full = widget.get_state()
+    assert "frame_bytes" not in full
+    assert "_buffer_bytes" not in full
+    buffers = widget._get_embed_state().get("buffers", [])
+    assert not [b for b in buffers if b.get("path") in (["frame_bytes"], ["_buffer_bytes"])]
+    assert not [b for b in buffers if b.get("data")]
+
+
 def _assert_export_state_keeps_buffer(widget, key: str) -> None:
     """HTML export clones must opt into the full embedded state."""
     state = widget.get_state()
@@ -551,12 +570,13 @@ def test_show2d_display_defers_static_png_render(monkeypatch):
 
 
 def test_show2d_sibling_static_output_via_nbconvert(tmp_path):
-    """Executing a notebook must leave TWO outputs on the Show2D cell: the
-    widget-view bundle and a separate display_data sibling that started as an
-    empty placeholder and was filled with the PNG + static_fallback marker by
-    the deferred post_execute hook (so a cold JupyterLab reopen can render
-    it). metadata.widgets must stay tiny (no pixel buffers baked into the
-    .ipynb)."""
+    """Executing a notebook must leave a saved preview on the Show2D cell.
+
+    Depending on the frontend that calls ``display()``, the fallback may be a
+    separate sibling output or an image fallback inside the widget mime bundle.
+    Both are acceptable as long as the output can render statically and widget
+    metadata stays tiny.
+    """
     import json
     import subprocess
     import sys
@@ -566,8 +586,9 @@ def test_show2d_sibling_static_output_via_nbconvert(tmp_path):
     nb = nbformat.v4.new_notebook()
     nb.cells = [nbformat.v4.new_code_cell(
         "import numpy as np\n"
+        "from IPython.display import display\n"
         "from quantem.widget import Show2D\n"
-        "Show2D(np.random.rand(48, 48).astype('float32'), verbose=False)\n"
+        "display(Show2D(np.random.rand(48, 48).astype('float32'), verbose=False))\n"
     )]
     nb_path = tmp_path / "show2d_sibling.ipynb"
     nbformat.write(nb, nb_path)
@@ -578,14 +599,25 @@ def test_show2d_sibling_static_output_via_nbconvert(tmp_path):
     executed = nbformat.read(nb_path, as_version=4)
     outputs = executed.cells[0].outputs
     display_outputs = [o for o in outputs if o.output_type == "display_data"]
-    assert len(display_outputs) == 2, f"expected widget + sibling, got {outputs}"
-    widget_output, sibling = display_outputs
-    assert "application/vnd.jupyter.widget-view+json" in widget_output.data
-    # the placeholder must have been updated in place with the deferred render
-    assert "image/jpeg" in sibling.data
-    assert len(sibling.data["image/jpeg"]) > 1000
-    assert "quantem-static-fallback" in sibling.data.get("text/html", "")
-    assert sibling.metadata.get("quantem.widget", {}).get("static_fallback") is True
+    assert display_outputs, f"expected display output, got {outputs}"
+    widget_outputs = [
+        output
+        for output in display_outputs
+        if "application/vnd.jupyter.widget-view+json" in output.data
+    ]
+    assert widget_outputs, f"expected widget-view bundle, got {outputs}"
+    fallback_outputs = [
+        output
+        for output in display_outputs
+        if "image/jpeg" in output.data or "image/png" in output.data
+    ]
+    assert fallback_outputs, f"expected static image fallback, got {outputs}"
+    fallback = fallback_outputs[-1]
+    image_key = "image/jpeg" if "image/jpeg" in fallback.data else "image/png"
+    assert len(fallback.data[image_key]) > 1000
+    if "text/html" in fallback.data:
+        assert "quantem-static-fallback" in fallback.data["text/html"]
+        assert fallback.metadata.get("quantem.widget", {}).get("static_fallback") is True
     # metadata.widgets guard. nbclient reconstructs widget state by replaying
     # comm traffic, so two known constants of headless execution appear here no
     # matter what get_state() trims: the anywidget JS bundle (_esm) and the
@@ -598,9 +630,233 @@ def test_show2d_sibling_static_output_via_nbconvert(tmp_path):
     anymodel = next(s for s in widget_states.values() if s.get("model_name") == "AnyModel")
     body = dict(anymodel["state"])
     body.pop("_esm", None)
+    body.pop("_static_fallback_jpeg", None)
     buffer_bytes = sum(len(b["data"]) for b in anymodel.get("buffers", []))
     assert buffer_bytes < 20_000
     assert len(json.dumps(body)) < 20_000
+
+
+def test_show2d_cmd_s_snapshot_keeps_static_preview_without_heavy_pixels():
+    """JupyterLab Cmd+S uses the full widget-state snapshot.
+
+    A lightweight Show2D save must not embed ``frame_bytes``/detail/export
+    buffers, but it still needs a compact preview in the model state. Otherwise
+    a saved notebook can rehydrate a live widget with no pixels and show a
+    blank output after reopen.
+    """
+    widget = Show2D(
+        np.random.default_rng(14).random((3, 256, 256), dtype=np.float32),
+        display_bin=2,
+        save_state=False,
+        verbose=False,
+    )
+    state = widget.get_state()
+
+    assert "_static_fallback_jpeg" in state
+    assert len(state["_static_fallback_jpeg"]) > 1000
+    assert "frame_bytes" not in state
+    assert "_detail_bytes" not in state
+    assert "export_payload" not in state
+
+
+def test_show3d_cmd_s_snapshot_keeps_static_preview_without_heavy_pixels():
+    """Show3D lightweight notebook saves must reopen with a compact preview."""
+    widget = Show3D(
+        np.random.default_rng(15).random((5, 64, 64), dtype=np.float32),
+        save_state=False,
+        title="save-state show3d",
+    )
+    state = widget.get_state()
+
+    assert "_static_fallback_jpeg" in state
+    assert len(state["_static_fallback_jpeg"]) > 1000
+    assert "frame_bytes" not in state
+    assert "_buffer_bytes" not in state
+    assert "_offline_stack" not in state
+    assert "_offline_float_stack" not in state
+    assert "export_payload" not in state
+
+
+def test_show4dstem_cmd_s_snapshot_keeps_two_panel_static_preview():
+    """Show4DSTEM saved preview should show virtual image and diffraction."""
+    import base64
+    import io
+
+    from PIL import Image
+
+    rng = np.random.default_rng(19)
+    data = rng.integers(0, 1000, (10, 12, 24, 24), dtype=np.uint16)
+    widget = Show4DSTEM(
+        data,
+        sampling=(0.2, 0.2, 0.8, 0.8),
+        units=["nm", "nm", "mrad", "mrad"],
+        panel_width_px=128,
+        save_state=False,
+        verbose=False,
+        title="save-state 4dstem",
+    )
+
+    state = widget.get_state()
+    png_b64 = widget._static_png_b64(max_px=128, dpi=160)
+    assert png_b64
+    decoded = Image.open(io.BytesIO(base64.b64decode(png_b64))).convert("RGB")
+
+    assert decoded.width > decoded.height
+    assert decoded.width >= (decoded.height - 24) * 2 - 8
+    assert "_static_fallback_jpeg" in state
+    assert len(state["_static_fallback_jpeg"]) > 1000
+    assert "_offline_stack" not in state
+    assert "export_payload" not in state
+    assert "_gif_data" not in state
+    widget.close()
+
+
+def test_show3d_static_overlay_matches_show2d_style_metadata():
+    """Show3D saved previews should carry the same context as Show2D."""
+    widget = Show3D(
+        np.random.default_rng(16).random((3, 128, 128), dtype=np.float32),
+        labels=["zero", "one", "two"],
+        panel_titles=["ADF"],
+        sampling=(0.23, 0.23),
+        units=("A", "A"),
+        save_state=False,
+    )
+    widget.slice_idx = 1
+
+    (label, zoom_text, bar_text, bar_px), = widget._static_overlay_texts([0], 1)
+
+    assert label == "ADF · one 2/3"
+    assert zoom_text == "1.0×"
+    assert bar_text == "5 Å"
+    assert bar_px == pytest.approx(5 / 0.23 * 500 / 128)
+    assert widget._static_png_b64()
+
+
+def test_show3d_static_png_pixel_matches_show2d_current_frame_gallery():
+    """Show3D saved previews must be pixel-identical to Show2D galleries."""
+    import base64
+    import io
+
+    from PIL import Image
+
+    rng = np.random.default_rng(17)
+    panels = []
+    for panel in range(6):
+        frames = rng.random((5, 192, 192), dtype=np.float32)
+        panels.append(frames + panel * 0.2)
+    widget = Show3D(
+        *panels,
+        panel_titles=[f"P{panel + 1:02d}" for panel in range(len(panels))],
+        panel_frame_labels=[
+            [f"defocus {frame - 2:+.1f} nm" for frame in range(5)]
+            for _ in panels
+        ],
+        max_cols=3,
+        panel_gap=3,
+        size=180,
+        sampling=0.05,
+        units="nm",
+        auto_contrast=True,
+        save_state=False,
+    )
+    widget.slice_idx = 3
+
+    show3d_png = widget._static_png_b64(max_px=256, dpi=160)
+    reference = Show2D(
+        [widget._get_display_panel_frame(panel, widget.slice_idx) for panel in range(6)],
+        labels=[widget._static_panel_title(panel, widget.slice_idx) for panel in range(6)],
+        ncols=3,
+        gallery_gap_px=3,
+        size=180,
+        sampling=0.05,
+        units="nm",
+        cmap=widget.cmap,
+        auto_contrast=widget.auto_contrast,
+        link_contrast=widget.link_contrast,
+        show_stats=False,
+        show_controls=False,
+        verbose=False,
+        save_state=False,
+    )
+    show2d_png = reference._static_png_b64(max_px=256, dpi=160)
+
+    show3d_rgb = np.asarray(Image.open(io.BytesIO(base64.b64decode(show3d_png))).convert("RGB"))
+    show2d_rgb = np.asarray(Image.open(io.BytesIO(base64.b64decode(show2d_png))).convert("RGB"))
+    np.testing.assert_array_equal(show3d_rgb, show2d_rgb)
+
+
+@pytest.mark.parametrize(
+    ("n_panels", "max_cols", "size", "panel_gap", "hidden", "scale_bar"),
+    [
+        (1, 1, 0, 0, [], True),
+        (2, 2, 0, 0, [], True),
+        (4, 2, 180, 3, [], True),
+        (6, 3, 160, 4, [1, 4], True),
+        (9, 3, 0, 2, [], False),
+    ],
+)
+def test_show3d_static_png_pixel_matches_show2d_layout_matrix(
+    n_panels,
+    max_cols,
+    size,
+    panel_gap,
+    hidden,
+    scale_bar,
+):
+    """Show3D static fallback must stay pixel-perfect across panel layouts."""
+    import base64
+    import io
+
+    from PIL import Image
+
+    rng = np.random.default_rng(18 + n_panels)
+    stacks = []
+    for panel in range(n_panels):
+        frame_stack = rng.random((4, 96, 112), dtype=np.float32)
+        stacks.append(frame_stack + panel * 0.1)
+    widget = Show3D(
+        *stacks,
+        panel_titles=[f"P{panel + 1:02d}" for panel in range(n_panels)],
+        panel_frame_labels=[
+            [f"frame-label-{frame + 1}" for frame in range(4)]
+            for _ in range(n_panels)
+        ],
+        max_cols=max_cols,
+        panel_gap=panel_gap,
+        size=size,
+        sampling=0.12,
+        units="nm",
+        auto_contrast=True,
+        show_scale_bar=scale_bar,
+        hidden_panels=hidden,
+        save_state=False,
+    )
+    widget.slice_idx = 2
+    visible = [panel for panel in range(n_panels) if panel not in set(hidden)] or [0]
+    reference = Show2D(
+        [widget._get_display_panel_frame(panel, widget.slice_idx) for panel in visible],
+        labels=[widget._static_panel_title(panel, widget.slice_idx) for panel in visible],
+        ncols=max(1, min(max_cols, len(visible))),
+        gallery_gap_px=panel_gap,
+        size=size,
+        sampling=0.12,
+        units="nm",
+        scale_bar_visible=scale_bar,
+        cmap=widget.cmap,
+        auto_contrast=widget.auto_contrast,
+        link_contrast=widget.link_contrast,
+        show_stats=False,
+        show_controls=False,
+        verbose=False,
+        save_state=False,
+    )
+
+    show3d_png = widget._static_png_b64(max_px=220, dpi=160)
+    show2d_png = reference._static_png_b64(max_px=220, dpi=160)
+    show3d_rgb = np.asarray(Image.open(io.BytesIO(base64.b64decode(show3d_png))).convert("RGB"))
+    show2d_rgb = np.asarray(Image.open(io.BytesIO(base64.b64decode(show2d_png))).convert("RGB"))
+
+    np.testing.assert_array_equal(show3d_rgb, show2d_rgb)
 
 
 # ---------------------------------------------------------------------------

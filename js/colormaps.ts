@@ -3212,7 +3212,7 @@ fn clear_bins(@builtin(global_invocation_id) gid: vec3u) {
     if (!this.histPipeline || !this.histClearPipeline || indices.length === 0) return [];
 
     const encoder = this.device.createCommandEncoder();
-    const activeSlots: { k: number; slot: GPUSlot }[] = [];
+    const activeSlots: { k: number; slot: GPUSlot; readBuffer: GPUBuffer }[] = [];
     const params = new ArrayBuffer(24);
 
     for (let k = 0; k < indices.length; k++) {
@@ -3258,23 +3258,38 @@ fn clear_bins(@builtin(global_invocation_id) gid: vec3u) {
       histPass.dispatchWorkgroups(Math.ceil(slot.width / 16), Math.ceil(slot.height / 16));
       histPass.end();
 
-      encoder.copyBufferToBuffer(slot.histBinsBuffer, 0, slot.histReadBuffer, 0, 256 * 4);
-      activeSlots.push({ k, slot });
+      // Use a per-call readback buffer. `slot.histReadBuffer` was persistent,
+      // which made overlapping histogram requests fail with "outstanding map
+      // pending" when Show2D refreshed auto-contrast and the visible histogram
+      // during fast interaction.
+      const readBuffer = this.device.createBuffer({
+        size: 256 * 4,
+        usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+      });
+      encoder.copyBufferToBuffer(slot.histBinsBuffer, 0, readBuffer, 0, 256 * 4);
+      activeSlots.push({ k, slot, readBuffer });
     }
 
     this.device.queue.submit([encoder.finish()]);
-    await Promise.all(activeSlots.map(s => s.slot.histReadBuffer.mapAsync(GPUMapMode.READ)));
 
     const results: number[][] = [];
-    for (const s of activeSlots) {
-      const rawBins = new Uint32Array(s.slot.histReadBuffer.getMappedRange().slice(0));
-      s.slot.histReadBuffer.unmap();
+    try {
+      await Promise.all(activeSlots.map(s => s.readBuffer.mapAsync(GPUMapMode.READ)));
 
-      let maxCount = 0;
-      for (let j = 0; j < 256; j++) if (rawBins[j] > maxCount) maxCount = rawBins[j];
-      const norm = new Array(256);
-      for (let j = 0; j < 256; j++) norm[j] = maxCount > 0 ? rawBins[j] / maxCount : 0;
-      results.push(norm);
+      for (const s of activeSlots) {
+        const rawBins = new Uint32Array(s.readBuffer.getMappedRange().slice(0));
+        s.readBuffer.unmap();
+
+        let maxCount = 0;
+        for (let j = 0; j < 256; j++) if (rawBins[j] > maxCount) maxCount = rawBins[j];
+        const norm = new Array(256);
+        for (let j = 0; j < 256; j++) norm[j] = maxCount > 0 ? rawBins[j] / maxCount : 0;
+        results.push(norm);
+      }
+    } finally {
+      for (const s of activeSlots) {
+        s.readBuffer.destroy();
+      }
     }
     return results;
   }
