@@ -42,18 +42,18 @@ parts:
         title: Mobile HTML
       - file: maintainer/widget-agent-signoff
         title: Agent signoff
-      - file: maintainer/widget-storyboard
-        title: Widget storyboard
+      - file: maintainer/storyboard
+        title: Storyboard
         sections:
-          - file: maintainer/widget-storyboard-show2d
+          - file: maintainer/storyboard-show2d
             title: Show2D
-          - file: maintainer/widget-storyboard-show3d
+          - file: maintainer/storyboard-show3d
             title: Show3D
-          - file: maintainer/widget-storyboard-show3dslices
+          - file: maintainer/storyboard-show3dslices
             title: Show3DSlices
-          - file: maintainer/widget-storyboard-show4dstem
+          - file: maintainer/storyboard-show4dstem
             title: Show4DSTEM
-          - file: maintainer/widget-storyboard-showeds
+          - file: maintainer/storyboard-showeds
             title: ShowEDS
       - file: maintainer/widget-performance
         title: Performance

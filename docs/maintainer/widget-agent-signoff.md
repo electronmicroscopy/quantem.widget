@@ -7,7 +7,7 @@ evidence before a release.
 
 This is deliberately not a fully automated smoke test. It is a fix-and-redrive
 loop. Start from the scientific user stories in
-[Widget storyboard](widget-storyboard); use generated checklist packets only as
+[Storyboard](storyboard); use generated checklist packets only as
 evidence containers and prompts for concrete browser actions.
 
 ## When to run
@@ -79,7 +79,7 @@ question is whether the interaction feels attached to the pointer.
 
 ## Story-driven checks
 
-Use [Widget storyboard](widget-storyboard) as the primary source of behavior to
+Use [Storyboard](storyboard) as the primary source of behavior to
 verify. The generated `checklists/*.md` files from
 `scripts/widget_agent_signoff.sh` are lower-level reminders for concrete
 interactions. A good report cites storyboard IDs, then lists the browser actions

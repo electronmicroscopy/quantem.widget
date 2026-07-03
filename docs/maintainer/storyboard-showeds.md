@@ -1,6 +1,6 @@
 # ShowEDS Storyboard
 
-Use with [Widget Storyboard](widget-storyboard).
+Use with [Storyboard](storyboard).
 
 ## Stories
 

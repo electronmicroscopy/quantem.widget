@@ -73,7 +73,7 @@ scripts/widget_agent_signoff.sh --quick
 ```
 
 The agent signoff is a fix-and-redrive loop: choose the relevant scientific
-stories from [Widget storyboard](widget-storyboard), open the docs page,
+stories from [Storyboard](storyboard), open the docs page,
 notebook, or exported HTML; click, drag, zoom, scrub, resize, and export; patch
 anything that feels wrong; rebuild; refresh; and redrive the same story. Save
 final screenshots or short videos in the packet before tagging. See

@@ -1,8 +1,8 @@
-# Widget Storyboard
+# Storyboard
 
 This is the maintainer index for recurring AI/browser drive plans. Storyboards
-are split by widget so agents can load only the relevant file and avoid editing
-unrelated widget guidance.
+are split by viewer so agents can load only the relevant file and avoid editing
+unrelated guidance.
 
 Storyboards are written as scientific user stories, not fixed button scripts.
 The order of stories can change for a release, bug, dataset, or widget, but the
@@ -12,7 +12,7 @@ Use these files for UI behavior, real-data workflows, browser testing, and
 release signoff. Keep performance lessons, timing observations, and
 implementation policy in [Performance](widget-performance).
 
-Every widget storyboard should cover four scientific workflow classes:
+Every storyboard should cover four scientific workflow classes:
 
 - **Loading and storage**: opening files quickly, avoiding huge saved-notebook
   state, and making export payload choices explicit.
@@ -67,13 +67,13 @@ collaborator, and have an AI or human reviewer reproduce the same interaction
 path. Storyboards should therefore test the full scientific loop, not just
 whether a canvas appears.
 
-## Widget Files
+## Storyboard Files
 
-- [Show2D storyboard](widget-storyboard-show2d)
-- [Show3D storyboard](widget-storyboard-show3d)
-- [Show3DSlices storyboard](widget-storyboard-show3dslices)
-- [Show4DSTEM storyboard](widget-storyboard-show4dstem)
-- [ShowEDS storyboard](widget-storyboard-showeds)
+- [Show2D](storyboard-show2d)
+- [Show3D](storyboard-show3d)
+- [Show3DSlices](storyboard-show3dslices)
+- [Show4DSTEM](storyboard-show4dstem)
+- [ShowEDS](storyboard-showeds)
 
 ## Story Format
 
