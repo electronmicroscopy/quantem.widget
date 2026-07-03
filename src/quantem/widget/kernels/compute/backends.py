@@ -21,8 +21,8 @@ backend so callers (widget + web Browse) never branch on hardware themselves.
 
 Backend dispatch — which one runs on your box?
 
-    Ash's 24 GB RTX      → TorchBackend  (cupy → dlpack → torch CUDA, zero copy)
-    collaborator's 96 GB Blackwell → TorchBackend  (same)
+    24 GB RTX            → TorchBackend  (cupy → dlpack → torch CUDA, zero copy)
+    96 GB Blackwell      → TorchBackend  (same)
     torch tensor already on CUDA → TorchBackend
     NumPy on CPU         → TorchBackend  (torch.as_tensor)
     torch.mps binned     → TorchBackend  (device='mps')
@@ -50,9 +50,9 @@ Concrete regression the guard rule prevents (fixed 2026-07-02):
 
 At 192² detector this budgeted for ~29K frames/chunk. Each chunk in uint16 was
 2.15 GB. The internal int64 cast blew it up to **8.6 GB transient per chunk**.
-CuPy pool cached the freed block. collaborator-scale (512²×192² u16 no-bin) peak
-Show4DSTEM VRAM went from ~21 GB (data + widget) to 29 GB — invisible on 96 GB
-Blackwell, but OOM on Ash's 24 GB RTX.
+CuPy pool cached the freed block. 512²×192² u16 no-bin Show4DSTEM peak VRAM
+went from ~21 GB (data + widget) to 29 GB — invisible on 96 GB Blackwell, but
+OOM on 24 GB RTX.
 
 The guard: chunk-size math MUST include the accumulator's element size:
 
