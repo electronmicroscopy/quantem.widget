@@ -97,7 +97,8 @@ WebGPU environment when possible.
 ### S4D-06: Save, Export, And Reopen 4D-STEM Views
 
 **User story**: As a notebook or sharing user, I want a compact two-panel saved
-preview and shareable export that preserve the scientific context.
+preview and shareable export that preserve the scientific context and make the
+export precision obvious.
 
 **Primary widgets**: Show4DSTEM.
 
@@ -107,10 +108,16 @@ preview and shareable export that preserve the scientific context.
 
 - Press ``Cmd+S`` and reload/reopen the notebook.
 - Verify the static two-panel fallback is visible.
-- Export HTML where supported and reopen it.
+- Open Export and verify the menu follows the same vocabulary as the other
+  storyboards: ``HTML uint8`` for compact browse export, ``HTML full`` or
+  ``HTML uint16`` for count-preserving export, with approximate size when known.
+- Export compact uint8 HTML and reopen it.
+- Export full/uint16 HTML or folder HTML when supported and reopen it.
 - Drive scan position, diffraction pan/zoom, detector controls, and contrast in
   the exported page.
 - Check lightweight save state for heavy-buffer leaks.
+- Verify export status clears after completion/cancel in the same way as Show2D
+  and Show3D.
 
 ### S4D-07: Use 4D-STEM On A Phone Or Narrow View
 
@@ -128,3 +135,87 @@ I want virtual image, diffraction, and detector controls to remain reachable.
 - Test touch-style scan-position movement, diffraction pan/zoom, detector
   control, and menu access.
 - For iPhone-specific claims, serve the page to physical iPhone Safari.
+
+### S4D-08: Export U8 And Full Data With Honest Reducers
+
+**User story**: As a 4D-STEM user sharing data, I want compact U8 HTML for
+quick browser inspection and full/count-preserving export when quantitative
+detector counts matter, so collaborators know when a view is browse-quality and
+when it can be used for quantitative checks.
+
+**Primary widgets**: Show4DSTEM.
+
+**Data to use**: real or real-derived 4D-STEM data with detector counts above
+255 and a smaller count-limited control dataset where U8 should be nearly
+lossless.
+
+**Acceptance checks**:
+
+- Export ``encoding="uint8"`` with ``downsample=1`` and with detector
+  downsample values such as 2, 4, and 8; verify the UI and status text identify
+  it as compact/browse U8 data.
+- Verify U8 detector downsample uses the documented reducer, currently
+  mean/average, so detector blocks do not immediately clip and wash out the
+  bright-field disk.
+- Export ``encoding="full"`` or ``uint16`` where supported and verify detector
+  counts are preserved.
+- When full/uint16 export is downsampled, verify the reducer is scientifically
+  explicit. Prefer sum for count-preserving detector binning when the exported
+  dtype can hold the result; use mean only when the goal is browse/display
+  stability and label it that way.
+- Compare at least one compact U8 export and one full/uint16 export against a
+  Python reference for detector pixel values, virtual BF/ADF sums, and a custom
+  mask.
+- Confirm exported HTML opens without a Python kernel and that scan-position
+  movement, detector masks, diffraction contrast, and virtual images remain
+  interactive.
+
+### S4D-09: Match The Shared Viewer GUI
+
+**User story**: As a user moving between Show2D, Show3D, and Show4DSTEM, I want
+the GUI layout and labels to feel consistent so I do not have to relearn export,
+contrast, scale, reset, copy, and panel controls for each viewer.
+
+**Primary widgets**: Show4DSTEM, with Show2D and Show3D as visual references.
+
+**Data to use**: one Show4DSTEM export plus one Show2D and one Show3D reference
+page using comparable colors, labels, scale bars, and top toolbar actions.
+
+**Acceptance checks**:
+
+- Compare top toolbar order, compact switch/menu styling, export button labels,
+  reset/copy placement, histogram/color controls, scale bars, and status text
+  against Show2D and Show3D.
+- Verify the two-panel 4D-STEM layout keeps the virtual image and diffraction
+  panel visually balanced on desktop, notebook, and narrow viewports.
+- Verify labels and readouts use the same row/column convention and units as the
+  other storyboards.
+- Verify Export GUI choices match the Python API terms: ``mode``, ``encoding``,
+  and ``downsample`` rather than older ambiguous names.
+- Drive the same user path in live Jupyter and exported HTML; document any GUI
+  difference that is intentional.
+
+### S4D-10: Stress Export And WebGPU Reopen
+
+**User story**: As a user sharing large 4D-STEM screening results, I want export
+to finish in a practical time and the reopened artifact to stay responsive, so
+large browser-shareable views do not become dead files.
+
+**Primary widgets**: Show4DSTEM.
+
+**Data to use**: the largest real or real-derived 4D-STEM dataset available on
+MJ-goat or buffle for routine testing, plus a smaller deterministic dataset for
+reference parity.
+
+**Acceptance checks**:
+
+- Measure export time, exported file/folder size, first paint after reopen, and
+  WebGPU adapter availability.
+- Reopen U8 HTML and full/folder HTML where supported; verify no Python kernel
+  is required for the expected interactions.
+- Drag scan position, detector ring, detector mask, diffraction pan/zoom, and
+  contrast controls; record FPS or latency.
+- Verify folder export clearly fails or explains what is missing if the
+  companion data folder is moved.
+- Add timings, reducer choice, dtype, downsample, browser, and backend host to
+  the signoff report.

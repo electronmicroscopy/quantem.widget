@@ -112,7 +112,9 @@ Use the same three option names across widgets:
 `mode` is packaging. It should not imply lower precision or a smaller shape.
 `encoding` is storage representation. It replaces vague API names like
 `quantized`. `downsample` is shape reduction. Each widget must document whether
-the reducer is mean, sum, or another operation.
+the reducer is mean, sum, min/max, or another operation, and the export UI must
+label the choice clearly enough that users know whether the file is
+browse-quality or count-preserving.
 
 ## Widget capability table
 
@@ -121,7 +123,7 @@ the reducer is mean, sum, or another operation.
 | Show2D | yes | `single` | `full`, `uint8` | planned | no | `uint8` stores display-scaled image data |
 | Show3D | yes | `single` | `full`, `uint8` | planned | no | `uint8` stores display-scaled volume data |
 | Show3DSlices | yes | `single` | `full`, `uint8` | planned | no | `uint8` stores display-scaled volume data |
-| Show4DSTEM | yes | `single`, `folder` when data already uses a companion folder | `uint8`, `full` | `1`, `2`, `4`, `8` | sometimes | detector downsample uses mean for HTML export |
+| Show4DSTEM | yes | `single`, `folder` when data already uses a companion folder | `uint8`, `full` | `1`, `2`, `4`, `8` | sometimes | `uint8` detector downsample uses mean for compact browse export; full/uint16 export should document whether downsample is count-preserving sum or display-stable mean |
 | ShowEDS | yes | `single`, `folder` | `full` | `2`, `4` | yes | count-preserving sum downsample across spatial and energy axes |
 
 The public Python calls are:
@@ -171,6 +173,14 @@ the exact dataset is too large. Downsampling makes a smaller one-file HTML
 export by combining nearby pixels, voxels, detector pixels, or energy channels.
 For lab sharing, `mode="folder"` is useful because it keeps exact data without
 making the HTML enormous.
+
+Reducer choice is part of the scientific contract. Compact `uint8` 4D-STEM
+exports should avoid immediate clipping, so detector downsample may use a
+mean/average reducer and should be labeled as browse-quality. Count-preserving
+exports such as `full`/uint16 should preserve detector counts; if they
+downsample, sum is usually the scientifically expected reducer when the stored
+dtype can hold the result. If a widget chooses mean for a full export, the UI
+and docs must say so.
 
 ## Notebook sharing
 
