@@ -93,6 +93,44 @@ const upwardMenuProps = {
 import { getWebGPUFFT, WebGPUFFT, fft2d, fft2dAsync, fftshift, computeMagnitude, autoEnhanceFFT, nextPow2, applyHannWindow2D, getGPUInfo } from "../fft";
 import { COLORMAPS, COLORMAP_NAMES, renderToOffscreen, renderToOffscreenReuse, GPUColormapEngine, getGPUColormapEngine, getGPUMaxBufferSize } from "../colormaps";
 
+function useMobileViewport(): boolean {
+  const getIsMobile = React.useCallback(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
+      return false;
+    }
+    return window.matchMedia("(pointer: coarse)").matches || window.matchMedia("(max-width: 768px)").matches;
+  }, []);
+  const [isMobile, setIsMobile] = React.useState(getIsMobile);
+
+  React.useEffect(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
+      return;
+    }
+    const coarsePointer = window.matchMedia("(pointer: coarse)");
+    const narrowViewport = window.matchMedia("(max-width: 768px)");
+    const update = () => setIsMobile(getIsMobile());
+    const addQueryListener = (query: MediaQueryList) => {
+      if (typeof query.addEventListener === "function") query.addEventListener("change", update);
+      else query.addListener(update);
+    };
+    const removeQueryListener = (query: MediaQueryList) => {
+      if (typeof query.removeEventListener === "function") query.removeEventListener("change", update);
+      else query.removeListener(update);
+    };
+    update();
+    addQueryListener(coarsePointer);
+    addQueryListener(narrowViewport);
+    window.addEventListener("resize", update);
+    return () => {
+      removeQueryListener(coarsePointer);
+      removeQueryListener(narrowViewport);
+      window.removeEventListener("resize", update);
+    };
+  }, [getIsMobile]);
+
+  return isMobile;
+}
+
 const MIN_ZOOM = 0.5;
 const MAX_ZOOM = 20;
 const HTML_EXPORT_OVERHEAD_BYTES = 700_000;
@@ -679,6 +717,8 @@ const sliderStyles = {
 const imagePanelRadius = 0;
 
 function Show2D() {
+  const isMobileViewport = useMobileViewport();
+  const showResizeControls = !isMobileViewport;
   const model = useModel();
   React.useEffect(() => preserveRestoredWidgetModelsOnSave(model), [model]);
 
@@ -5266,7 +5306,7 @@ function Show2D() {
                     >
                       <VisibilityOffIcon sx={{ fontSize: 15 }} />
                     </IconButton>
-                    {(
+                    {showResizeControls && (
                       <Box
                         onMouseDown={handleCanvasResizeStart}
                         title="Resize panels"
@@ -5428,7 +5468,7 @@ function Show2D() {
                   </Typography>
                 </Box>
               )}
-              {(
+              {showResizeControls && (
                 <Box onMouseDown={handleCanvasResizeStart} title="Resize image" sx={{ position: "absolute", bottom: 0, right: 0, width: 16, height: 16, cursor: "nwse-resize", opacity: 0.6, pointerEvents: "auto", background: `linear-gradient(135deg, transparent 50%, ${themeColors.accent} 50%)`, borderRadius: "0 0 4px 0", "&:hover": { opacity: 1 } }} />
               )}
             </Box>
@@ -5462,14 +5502,16 @@ function Show2D() {
                 onMouseLeave={handleProfileMouseLeave}
                 style={{ width: "100%", height: profileHeight, display: "block", border: `1px solid ${themeColors.border}`, borderBottom: "none", cursor: "crosshair" }}
               />
-              <div
-                onMouseDown={(e) => {
-                  e.preventDefault();
-                  setIsResizingProfile(true);
-                  setProfileResizeStart({ y: e.clientY, height: profileHeight });
-                }}
-                style={{ width: "100%", height: 4, cursor: "ns-resize", borderLeft: `1px solid ${themeColors.border}`, borderRight: `1px solid ${themeColors.border}`, borderBottom: `1px solid ${themeColors.border}`, background: `linear-gradient(to bottom, ${themeColors.border}, transparent)`, opacity: 1, pointerEvents: "auto" }}
-              />
+              {showResizeControls && (
+                <div
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    setIsResizingProfile(true);
+                    setProfileResizeStart({ y: e.clientY, height: profileHeight });
+                  }}
+                  style={{ width: "100%", height: 4, cursor: "ns-resize", borderLeft: `1px solid ${themeColors.border}`, borderRight: `1px solid ${themeColors.border}`, borderBottom: `1px solid ${themeColors.border}`, background: `linear-gradient(to bottom, ${themeColors.border}, transparent)`, opacity: 1, pointerEvents: "auto" }}
+                />
+              )}
             </Box>
           )}
 
@@ -5800,7 +5842,7 @@ function Show2D() {
                   </Typography>
                 </Box>
               )}
-              {(
+              {showResizeControls && (
                 <Box onMouseDown={handleCanvasResizeStart} sx={{ position: "absolute", bottom: 0, right: 0, width: 16, height: 16, cursor: "nwse-resize", opacity: 0.6, pointerEvents: "auto", background: `linear-gradient(135deg, transparent 50%, ${themeColors.accent} 50%)`, borderRadius: "0 0 4px 0", "&:hover": { opacity: 1 } }} />
               )}
             </Box>

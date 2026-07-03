@@ -84,6 +84,44 @@ const typography = {
 };
 type FftOverlayPosition = "top-left" | "top-right" | "bottom-left" | "bottom-right";
 
+function useMobileViewport(): boolean {
+  const getIsMobile = React.useCallback(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
+      return false;
+    }
+    return window.matchMedia("(pointer: coarse)").matches || window.matchMedia("(max-width: 768px)").matches;
+  }, []);
+  const [isMobile, setIsMobile] = React.useState(getIsMobile);
+
+  React.useEffect(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
+      return;
+    }
+    const coarsePointer = window.matchMedia("(pointer: coarse)");
+    const narrowViewport = window.matchMedia("(max-width: 768px)");
+    const update = () => setIsMobile(getIsMobile());
+    const addQueryListener = (query: MediaQueryList) => {
+      if (typeof query.addEventListener === "function") query.addEventListener("change", update);
+      else query.addListener(update);
+    };
+    const removeQueryListener = (query: MediaQueryList) => {
+      if (typeof query.removeEventListener === "function") query.removeEventListener("change", update);
+      else query.removeListener(update);
+    };
+    update();
+    addQueryListener(coarsePointer);
+    addQueryListener(narrowViewport);
+    window.addEventListener("resize", update);
+    return () => {
+      removeQueryListener(coarsePointer);
+      removeQueryListener(narrowViewport);
+      window.removeEventListener("resize", update);
+    };
+  }, [getIsMobile]);
+
+  return isMobile;
+}
+
 // ============================================================================
 // Inlined utilities (matches Show2D/Show4DSTEM single-file convention)
 // ============================================================================
@@ -1199,6 +1237,7 @@ function computeROIPixelStats(
 // Main Component
 // ============================================================================
 function Show3D() {
+  const isMobileViewport = useMobileViewport();
   const model = useModel();
   React.useEffect(() => preserveRestoredWidgetModelsOnSave(model), [model]);
 
@@ -1428,6 +1467,7 @@ function Show3D() {
   const [maxCols, setMaxCols] = useModelState<number>("max_cols");
   const [linkPanels, setLinkPanels] = useModelState<boolean>("link_panels");
   const [showResizeHandles] = useModelState<boolean>("show_resize_handles");
+  const showResizeControls = showResizeHandles !== false && !isMobileViewport;
   const [showZoomIndicator] = useModelState<boolean>("show_zoom_indicator");
   const [showPanelTitles] = useModelState<boolean>("show_panel_titles");
   const [panelTitleFontSize] = useModelState<number>("panel_title_font_size");
@@ -9662,7 +9702,7 @@ function Show3D() {
                 no handle. Each handle scales the whole multi-panel canvas
                 (linked behavior). Match Show2D gallery: 16x16, grey, 0.6/1.0.
                 User trait `show_resize_handles` toggles visibility. */}
-            {showResizeHandles !== false && (() => {
+            {showResizeControls && (() => {
               const n = Math.max(1, visiblePanelCount || 1);
               const cols = panelColsForCount(n);
               const rows = Math.ceil(n / cols);
@@ -9829,10 +9869,12 @@ function Show3D() {
                 role="img"
                 aria-label="Line intensity profile along the drawn line"
               />
-              <div
-                onMouseDown={(e) => { e.preventDefault(); setIsResizingProfile(true); setProfileResizeStart({ y: e.clientY, height: profileHeight }); }}
-                style={{ width: "100%", height: 4, cursor: "ns-resize", borderLeft: `1px solid ${themeColors.border}`, borderRight: `1px solid ${themeColors.border}`, borderBottom: `1px solid ${themeColors.border}`, background: `linear-gradient(to bottom, ${themeColors.border}, transparent)` }}
-              />
+              {showResizeControls && (
+                <div
+                  onMouseDown={(e) => { e.preventDefault(); setIsResizingProfile(true); setProfileResizeStart({ y: e.clientY, height: profileHeight }); }}
+                  style={{ width: "100%", height: 4, cursor: "ns-resize", borderLeft: `1px solid ${themeColors.border}`, borderRight: `1px solid ${themeColors.border}`, borderBottom: `1px solid ${themeColors.border}`, background: `linear-gradient(to bottom, ${themeColors.border}, transparent)` }}
+                />
+              )}
             </Box>
           )}
           {/* ROI sparkline plot */}
@@ -10157,7 +10199,9 @@ function Show3D() {
             >
               <canvas ref={previewCanvasRef} width={previewCanvasDims.w} height={previewCanvasDims.h} style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", imageRendering: "pixelated" }} role="img" aria-label={`ROI preview crop${previewCropDims ? ` (${previewCropDims.w} by ${previewCropDims.h} pixels)` : ""}`} />
               <canvas ref={previewOverlayRef} width={Math.round(previewCanvasDims.w * DPR)} height={Math.round(previewCanvasDims.h * DPR)} style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", pointerEvents: "none" }} aria-hidden="true" />
-              <Box onMouseDown={handleMainResizeStart} sx={{ position: "absolute", bottom: 0, right: 0, width: 28, height: 28, cursor: "nwse-resize", opacity: 0.95, background: `linear-gradient(135deg, transparent 50%, ${themeColors.border} 50%)`, "&:hover": { opacity: 1 } }} />
+              {showResizeControls && (
+                <Box onMouseDown={handleMainResizeStart} sx={{ position: "absolute", bottom: 0, right: 0, width: 28, height: 28, cursor: "nwse-resize", opacity: 0.95, background: `linear-gradient(135deg, transparent 50%, ${themeColors.border} 50%)`, "&:hover": { opacity: 1 } }} />
+              )}
             </Box>
             {/* All-ROI Stats - one row per ROI, same style as main stats bar */}
             {showStats && allRoiStats.length > 0 && (
@@ -10227,7 +10271,7 @@ function Show3D() {
             >
               <canvas ref={fftCanvasRef} width={canvasW} height={canvasH} style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", imageRendering: smooth ? "auto" : "pixelated", touchAction: "none" }} role="img" aria-label={roiFftActive && fftCropDims ? `FFT power spectrum of ROI crop (${fftCropDims.cropWidth} by ${fftCropDims.cropHeight} pixels)` : "FFT power spectrum of current frame"} />
               <canvas ref={fftOverlayRef} width={Math.round(canvasW * DPR)} height={Math.round(canvasH * DPR)} style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", pointerEvents: "none" }} aria-hidden="true" />
-              {showResizeHandles !== false && (() => {
+              {showResizeControls && (() => {
                 const n = Math.max(1, visiblePanelCount || 1);
                 const cols = panelColsForCount(n);
                 const rows = Math.ceil(n / cols);
