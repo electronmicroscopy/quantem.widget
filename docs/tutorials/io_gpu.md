@@ -75,6 +75,92 @@ from quantem.widget.io import discover_masters
 masters = discover_masters("/data/session", scan_shape=(512, 512))
 ```
 
+## Common use cases
+
+### Open one scan at full precision
+
+Use this when the scan fits your GPU and you want the most faithful interactive
+view:
+
+```python
+from quantem.widget import load, Show4DSTEM
+
+data = load("scan_001_master.h5")
+Show4DSTEM(data)
+```
+
+### Browse a large folder quickly
+
+Use this when you have a whole microscope session and want to find the good
+fields of view first:
+
+```python
+from quantem.widget import load, Show4DSTEM
+from quantem.widget.io import discover_masters
+
+masters = discover_masters("/data/session", scan_shape=(512, 512))
+data = load(masters, det_bin=4, dtype="u8")
+Show4DSTEM(data)
+```
+
+This keeps all scans behind one dataset slider. It is a browsing copy, not the
+final reconstruction dataset.
+
+### Load several scans without throwing away detector counts
+
+Use detector binning but keep `uint16` when counts still matter:
+
+```python
+data = load(masters, det_bin=2, dtype="u16")
+Show4DSTEM(data)
+```
+
+This is a good middle ground for a 24 GB GPU: much smaller than full detector,
+but still count-preserving.
+
+### Use multiple NVIDIA GPUs
+
+The simplest reliable pattern is one Jupyter process per GPU. Start each server
+with a different `CUDA_VISIBLE_DEVICES` value:
+
+```bash
+# terminal 1: GPU 0
+CUDA_VISIBLE_DEVICES=0 jupyter lab --no-browser --ip=0.0.0.0 --port=8888
+
+# terminal 2: GPU 1
+CUDA_VISIBLE_DEVICES=1 jupyter lab --no-browser --ip=0.0.0.0 --port=8889
+```
+
+Then open the printed URLs from your laptop. Each notebook sees its assigned
+GPU as `cuda:0`, because CUDA remaps the selected physical GPU inside that
+process.
+
+### Check and free GPU memory
+
+Check the GPU before and after a large load:
+
+```python
+import torch
+
+free, total = torch.cuda.mem_get_info()
+print(f"free {free / 1e9:.1f} GB / total {total / 1e9:.1f} GB")
+```
+
+Free memory used by the current notebook:
+
+```python
+del data
+
+import gc
+import torch
+
+gc.collect()
+torch.cuda.empty_cache()
+```
+
+If memory is still occupied, another variable, notebook, or kernel still owns
+it. Shut down old kernels from JupyterLab before assuming the GPU is stuck.
+
 ## NVIDIA GPU workflow
 
 Most lab workflows should run Python on the NVIDIA workstation and open
@@ -114,20 +200,7 @@ print(torch.cuda.get_device_name(0))
 print(torch.cuda.mem_get_info())  # free bytes, total bytes
 ```
 
-Clean up the current Python kernel when you are done with a large dataset:
-
-```python
-del data
-
-import gc
-import torch
-
-gc.collect()
-torch.cuda.empty_cache()
-```
-
-This cleanup is for NVIDIA CUDA memory. If memory is still occupied, another
-object or another Jupyter kernel still owns it.
+Use the cleanup pattern above when you are done with a large dataset.
 
 ## Apple Silicon workflow
 
