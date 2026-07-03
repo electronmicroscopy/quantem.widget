@@ -21,6 +21,7 @@ The lower-level :func:`virtual` function (below) is mode-based
 (DP/BF/ABF/ADF/HAADF/DF, bands measured in the auto-detected disk radius) and is
 mainly the reference path the parity tests pin; ``ds.bf()`` etc. are the API.
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -521,5 +522,4 @@ def virtual_image(
     if side * side == n:
         return vi_1d.reshape(side, side)
     return vi_1d
-
 

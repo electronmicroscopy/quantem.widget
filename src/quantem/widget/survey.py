@@ -420,7 +420,7 @@ def survey(
     *,
     glob: str = "*.emd",
     thumb: int = 512,
-    eds_backend: str = "auto",
+    eds_backend: str = "stream",
     load_eds: bool = False,
     candidate_elements: list[str] | tuple[str, ...] | None = None,
     title: str | None = None,
@@ -439,9 +439,11 @@ def survey(
     thumb
         Common thumbnail size for the Show2D gallery.
     eds_backend
-        Backend passed to ``ShowEDS.from_emd``. Use ``"auto"`` for live Jupyter;
-        use ``"stream"`` for a portable single-file HTML when the sparse stream
-        fits the ShowEDS safety limit.
+        Backend passed to ``ShowEDS.from_emd``. The default ``"stream"`` keeps
+        exploratory surveys responsive by moving sparse EDS interaction into the
+        browser worker instead of using the notebook kernel for every band/ROI
+        update. Use ``"kernel"`` for exact lazy Python queries or ``"sidecar"``
+        for an explicit data-folder cache.
     load_eds
         If True, instantiate all ShowEDS widgets immediately. The default keeps
         the survey instant by rendering per-file launch buttons that create
@@ -649,7 +651,7 @@ def survey(
             if not group_images and not group_eds:
                 continue
             grouped_ids.update(item.file_id for item in group)
-            row_children = []
+            group_children = [HTML(_fov_group_html(group))]
             if group_images:
                 if group_view == "stack":
                     row_gallery = make_stack(group_images, title=_fov_group_title(group))
@@ -661,13 +663,13 @@ def survey(
                     )
                 gallery = gallery or row_gallery
                 image_galleries.append((row_gallery, group_images))
-                row_children.append(row_gallery)
+                group_children.append(row_gallery)
             if group_eds:
-                row_children.append(VBox([eds_widgets_by_id[item.file_id] for item in group_eds]))
-            children.append(VBox([
-                HTML(_fov_group_html(group)),
-                HBox(row_children, layout={"align_items": "flex-start"}),
-            ]))
+                group_children.append(VBox(
+                    [eds_widgets_by_id[item.file_id] for item in group_eds],
+                    layout={"width": "100%"},
+                ))
+            children.append(VBox(group_children, layout={"width": "100%"}))
 
     single_images = [item for item in image_items if item.file_id not in grouped_ids]
     if single_images:
@@ -1139,7 +1141,7 @@ def write_survey_notebook(
     *,
     glob: str = "*.emd",
     thumb: int = 512,
-    eds_backend: str = "auto",
+    eds_backend: str = "stream",
     title: str | None = None,
     group_by: str | None = "session",
     group_view: str = "stack",

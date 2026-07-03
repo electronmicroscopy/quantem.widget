@@ -27,10 +27,20 @@ class StaticFallbackMixin:
         mime); a kernel-less reopen falls back to the PNG. When ``save_state`` is
         True the full state is embedded, so no static fallback is needed.
         """
+        png = None
+        if not getattr(self, "_save_state", False):
+            # Build the preview before delegating to anywidget. In the common
+            # "last expression" path, Jupyter captures widget state while the
+            # widget-view bundle is being produced; storing after super() is too
+            # late and a saved lightweight model reopens blank.
+            png = self._static_png_b64()
+            if png:
+                store = getattr(self, "_store_static_fallback_preview", None)
+                if callable(store):
+                    store(png)
         bundle = super()._repr_mimebundle_(**kwargs)
         if getattr(self, "_save_state", False) or bundle is None:
             return bundle
-        png = self._static_png_b64()
         if png:
             data = bundle[0] if isinstance(bundle, tuple) else bundle
             data["image/png"] = png
@@ -125,6 +135,9 @@ class StaticFallbackMixin:
             png_b64 = self._static_png_b64()
             if not png_b64 or handle is None:
                 return
+            store = getattr(self, "_store_static_fallback_preview", None)
+            if callable(store):
+                store(png_b64)
             jpeg_b64 = self._png_to_jpeg_b64(png_b64)
             note = f"{type(self).__name__} static render (for saved-notebook viewing)"
             handle.update(
@@ -138,7 +151,10 @@ class StaticFallbackMixin:
             )
 
         def fill_once():
-            shell.events.unregister("post_execute", fill_once)
+            try:
+                shell.events.unregister("post_execute", fill_once)
+            except ValueError:
+                pass
             fill()
 
         shell.events.register("post_execute", fill_once)

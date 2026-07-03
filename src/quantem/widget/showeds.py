@@ -55,6 +55,7 @@ class SpectrumImage:
     sampling: float | tuple[float, float] | list[float] | None = None
     units: str | list[str] | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    stream_index: dict[str, Any] | None = None
 
     @property
     def array(self) -> Any | None:
@@ -71,6 +72,12 @@ class SpectrumImage:
         if self.initial_map is not None and self.energy_keV is not None:
             rows, cols = np.asarray(self.initial_map).shape
             return int(rows), int(cols), int(np.asarray(self.energy_keV).size)
+        if self.stream_index is not None:
+            return (
+                int(self.stream_index["rows"]),
+                int(self.stream_index["cols"]),
+                int(self.stream_index["n_energy"]),
+            )
         return self.source_shape
 
     def show(self, **kwargs: Any) -> "ShowEDS":
@@ -661,13 +668,14 @@ def _build_spectrum_stream_index(
     base_image: np.ndarray | None = None,
     energy_keV: np.ndarray | None = None,
     max_stream_bytes: int | None = DEFAULT_MAX_SHOWEDS_SIDECAR_BYTES,
+    candidate_elements: list[str] | tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     """Build exact sparse Velox stream indexes without writing a data folder."""
 
     source = pathlib.Path(path).expanduser()
     streams, rows, cols, n_energy = _velox_stream_groups(source)
     if energy_keV is None or base_image is None:
-        loaded = _read_emd_spectrum_image(source, lazy=True)
+        loaded = _read_emd_spectrum_image(source, lazy=True, candidate_elements=candidate_elements)
         energy_keV = np.asarray(loaded["energy_keV"], dtype=np.float32) if energy_keV is None else energy_keV
         if base_image is None and loaded.get("base_image") is not None:
             base_image = _compute_numpy(loaded["base_image"], dtype=np.float32)
@@ -1412,11 +1420,13 @@ def load_eds(
         eds = load_eds("scan.emd")
         ShowEDS(eds)
 
-    For native Velox/RSCIIO ``.emd`` files, ``backend="auto"`` keeps exact
-    no-bin data lazy by default: it parses metadata and the energy axis, but it
-    does not materialize the full dense cube. If a data folder is requested, or
-    if ``spatial_bin`` / ``energy_bin`` are larger than one, the existing exact
-    ShowEDS sidecar path is used.
+    For native Velox/RSCIIO ``.emd`` files, ``backend="auto"`` uses an existing
+    data folder when present. Otherwise exact no-bin spectrum streams are indexed
+    into browser-side sparse buffers so interactive band/ROI updates stay out of
+    the notebook kernel. Pass ``backend="kernel"`` only when explicit lazy Python
+    queries are required. If a data folder is requested, or if ``spatial_bin`` /
+    ``energy_bin`` are larger than one, the existing exact ShowEDS sidecar path
+    is used.
     """
 
     source = pathlib.Path(path).expanduser()
@@ -1469,15 +1479,14 @@ def load_eds(
     )
     meta_path = sidecar_path / "meta.json"
     has_existing_cache = (not rebuild_sidecar) and meta_path.exists()
-    use_native_query = backend_mode == "kernel" or (
-        backend_mode == "auto" and not has_existing_cache and not wants_binned_cache
-    )
+    use_native_query = backend_mode == "kernel"
+    use_auto_stream = backend_mode == "auto" and not has_existing_cache and not wants_binned_cache
 
-    if backend_mode == "stream":
+    if backend_mode == "stream" and wants_binned_cache:
         raise ValueError(
-            "load_eds(..., backend='stream') creates browser-resident sparse buffers. "
-            "Use ShowEDS.from_emd(..., backend='stream') to open the exact EMD stream "
-            "without a sidecar folder."
+            "load_eds(..., backend='stream') keeps the exact sparse EMD stream and does not "
+            "apply spatial_bin or energy_bin. Use backend='sidecar' when you intentionally want "
+            "a sum-binned data folder."
         )
 
     if backend_mode == "kernel" and wants_binned_cache:
@@ -1487,7 +1496,45 @@ def load_eds(
             "sum-binned data folder."
         )
 
-    if use_native_query:
+    if backend_mode == "stream" or use_auto_stream:
+        try:
+            index = _build_spectrum_stream_index(
+                source,
+                max_stream_bytes=max_sidecar_bytes,
+                candidate_elements=candidate_elements,
+            )
+        except (OSError, ValueError) as exc:
+            message = str(exc)
+            if backend_mode == "stream":
+                raise
+            if "safety limit" in message:
+                raise ValueError(
+                    "load_eds backend='auto' selected the responsive sparse-stream path, "
+                    "but the stream buffers exceed the configured safety limit. Pass "
+                    "backend='kernel' only if you accept slower notebook-kernel interaction, "
+                    "or increase max_sidecar_bytes for an intentional local experiment."
+                ) from exc
+        else:
+            axis = np.asarray(index["energy_keV"], dtype=np.float32)
+            return SpectrumImage(
+                cube=None,
+                energy_keV=axis,
+                base_image=index["base_image"],
+                title=source.stem,
+                candidate_elements=_normalise_element_symbols(candidate_elements or []),
+                path=source,
+                source_shape=(int(index["rows"]), int(index["cols"]), int(index["n_energy"])),
+                spatial_bin=1,
+                energy_bin=1,
+                backend="stream",
+                metadata={
+                    "source_shape": (int(index["rows"]), int(index["cols"]), int(index["n_energy"])),
+                    "path": str(source),
+                },
+                stream_index=index,
+            )
+
+    if use_native_query or use_auto_stream:
         loaded = _read_emd_spectrum_image(source, lazy=True, candidate_elements=candidate_elements)
         cube = loaded["cube"]
         axis = np.asarray(loaded["energy_keV"], dtype=np.float32)
@@ -1657,9 +1704,10 @@ class ShowEDS(StaticFallbackMixin, anywidget.AnyWidget):
     """Explore an EDS/EELS spectrum image ``(row, col, energy)``.
 
     For browser-backed widgets, the frontend keeps the spectrum cube resident in
-    WebGPU. ``ShowEDS.from_emd(...)`` keeps native EMD files lazy by default for
-    exact no-bin work: the source file remains the query backend, and only the
-    current map or ROI spectrum is read.
+    WebGPU. ``ShowEDS.from_emd(...)`` uses exact sparse browser-side streams
+    by default for native Velox/RSCIIO EMD spectrum streams, keeping band/ROI
+    interaction out of the notebook kernel. Pass ``backend="kernel"`` only
+    when explicit lazy Python queries are required.
     """
 
     _esm = pathlib.Path(__file__).parent / "static" / "showeds.js"
@@ -1697,7 +1745,7 @@ class ShowEDS(StaticFallbackMixin, anywidget.AnyWidget):
     spectrum_width_px = traitlets.Int(640).tag(sync=True)
     spectrum_height_px = traitlets.Int(250).tag(sync=True)
     show_controls = traitlets.Bool(True).tag(sync=True)
-    log_spectrum = traitlets.Bool(False).tag(sync=True)
+    log_spectrum = traitlets.Bool(True).tag(sync=True)
     smooth = traitlets.Bool(False).tag(sync=True)
     pixel_size = traitlets.Float(0.0).tag(sync=True)
     pixel_unit = traitlets.Unicode("px").tag(sync=True)
@@ -1747,7 +1795,7 @@ class ShowEDS(StaticFallbackMixin, anywidget.AnyWidget):
         spectrum_width_px: int | None = None,
         spectrum_height_px: int | None = None,
         show_controls: bool = True,
-        log_spectrum: bool = False,
+        log_spectrum: bool = True,
         smooth: bool = False,
         pixel_size: float | None = None,
         pixel_unit: str = "px",
@@ -1787,6 +1835,8 @@ class ShowEDS(StaticFallbackMixin, anywidget.AnyWidget):
         self._save_state = bool(save_state)
         self.widget_version = resolve_widget_version()
         spectrum_image_sidecar_dir: pathlib.Path | None = None
+        spectrum_image_stream_index: dict[str, Any] | None = None
+        spectrum_image_stream_meta: dict[str, Any] | None = None
         if isinstance(cube, SpectrumImage):
             spectrum_image = cube
             if title == "":
@@ -1870,6 +1920,27 @@ class ShowEDS(StaticFallbackMixin, anywidget.AnyWidget):
                 roi = startup["roi"]
                 roi_shape = startup["roi_shape"]
                 lazy_path = spectrum_image.path
+                cube = None
+            elif backend in {"stream", "sparse", "sparse-stream"}:
+                if spectrum_image.stream_index is None:
+                    raise ValueError("ShowEDS stream SpectrumImage requires stream_index")
+                spectrum_image_stream_index = spectrum_image.stream_index
+                startup = _startup_from_spectrum_stream_index(
+                    spectrum_image_stream_index,
+                    energy=energy,
+                    width=width,
+                    band=band,
+                    roi=roi,
+                    roi_shape=roi_shape,
+                )
+                initial_map = startup["initial_map"]
+                initial_spectrum = startup["initial_spectrum"]
+                base_image = startup["base_image"]
+                energy_keV = startup["energy_keV"]
+                spectrum_image_stream_meta = startup["meta"]
+                band = startup["band"]
+                roi = startup["roi"]
+                roi_shape = startup["roi_shape"]
                 cube = None
             else:
                 if spectrum_image.cube is None:
@@ -2006,6 +2077,31 @@ class ShowEDS(StaticFallbackMixin, anywidget.AnyWidget):
             self.initial_spectrum_bytes = np.ascontiguousarray(initial_spectrum_arr, dtype=np.float32).tobytes()
         if self._sidecar_dir is not None and self._sidecar_dir.exists():
             self.export_sidecar_bytes = _directory_size(self._sidecar_dir)
+        if spectrum_image_stream_index is not None:
+            self.compute_backend = "stream"
+            self.sidecar_url = ""
+            self.sidecar_meta_json = json.dumps(
+                spectrum_image_stream_meta or {},
+                separators=(",", ":"),
+            )
+            self.stream_channel_offsets_bytes = np.asarray(
+                spectrum_image_stream_index["channel_offsets"], dtype="<u4"
+            ).tobytes()
+            self.stream_channel_pixels_bytes = np.asarray(
+                spectrum_image_stream_index["channel_pixels"], dtype="<u4"
+            ).tobytes()
+            self.stream_pixel_offsets_bytes = np.asarray(
+                spectrum_image_stream_index["pixel_offsets"], dtype="<u4"
+            ).tobytes()
+            self.stream_pixel_channels_bytes = np.asarray(
+                spectrum_image_stream_index["pixel_channels"], dtype="<u2"
+            ).tobytes()
+            self.export_sidecar_bytes = (
+                len(self.stream_channel_offsets_bytes)
+                + len(self.stream_channel_pixels_bytes)
+                + len(self.stream_pixel_offsets_bytes)
+                + len(self.stream_pixel_channels_bytes)
+            )
 
         self.panel_width_px = int(max(180, panel_width_px))
         if spectrum_width_px is None:
@@ -2196,10 +2292,11 @@ class ShowEDS(StaticFallbackMixin, anywidget.AnyWidget):
         """Open a Velox/RSCIIO EMD spectrum image.
 
         ``backend="auto"`` uses an existing data folder if one is present.
-        Otherwise exact no-bin EMD stays native/lazy: the EMD file remains the
-        query source, and the widget reads only the current band map or ROI
-        spectrum. A prefix-cache data folder is built only when the caller asks
-        for ``backend="sidecar"`` or explicit binning for a portable viewer.
+        Otherwise, exact no-bin Velox/RSCIIO spectrum streams are indexed into
+        browser-side sparse buffers so band/ROI interaction does not block the
+        notebook kernel. Pass ``backend="kernel"`` to force the older lazy
+        Python query path, or ``backend="sidecar"`` / explicit binning for a
+        portable prefix-cache data folder.
         """
 
         source = pathlib.Path(path).expanduser()
@@ -2214,9 +2311,8 @@ class ShowEDS(StaticFallbackMixin, anywidget.AnyWidget):
         )
         meta_path = sidecar_path / "meta.json"
         has_existing_cache = (not rebuild_sidecar) and meta_path.exists()
-        use_native_query = backend_mode == "kernel" or (
-            backend_mode == "auto" and not has_existing_cache and not wants_binned_cache
-        )
+        use_native_query = backend_mode == "kernel"
+        use_auto_stream = backend_mode == "auto" and not has_existing_cache and not wants_binned_cache
 
         if backend_mode == "kernel" and wants_binned_cache:
             raise ValueError(
@@ -2235,6 +2331,7 @@ class ShowEDS(StaticFallbackMixin, anywidget.AnyWidget):
             index = _build_spectrum_stream_index(
                 source,
                 max_stream_bytes=max_sidecar_bytes,
+                candidate_elements=candidate_elements,
             )
             return cls._from_sparse_stream_index(
                 index,
@@ -2246,7 +2343,34 @@ class ShowEDS(StaticFallbackMixin, anywidget.AnyWidget):
                 **kwargs,
             )
 
-        if use_native_query:
+        if use_auto_stream:
+            try:
+                index = _build_spectrum_stream_index(
+                    source,
+                    max_stream_bytes=max_sidecar_bytes,
+                    candidate_elements=candidate_elements,
+                )
+            except (OSError, ValueError) as exc:
+                message = str(exc)
+                if "safety limit" in message:
+                    raise ValueError(
+                        "ShowEDS.from_emd backend='auto' selected the responsive sparse-stream path, "
+                        "but the stream buffers exceed the configured safety limit. Pass "
+                        "backend='kernel' only if you accept slower notebook-kernel interaction, "
+                        "or increase max_sidecar_bytes for an intentional local experiment."
+                    ) from exc
+            else:
+                return cls._from_sparse_stream_index(
+                    index,
+                    title=title or source.stem,
+                    energy=energy,
+                    width=width,
+                    element_label=element_label,
+                    candidate_elements=list(candidate_elements or ["O", "Si", "Ca", "Cu", "Au"]),
+                    **kwargs,
+                )
+
+        if use_native_query or use_auto_stream:
             loaded = _read_emd_spectrum_image(source, lazy=True, candidate_elements=candidate_elements)
             cube = loaded["cube"]
             axis = loaded["energy_keV"]

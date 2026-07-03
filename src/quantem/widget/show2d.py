@@ -5,7 +5,6 @@ For displaying a single image or a static gallery of multiple images.
 Unlike Show3D (interactive), Show2D focuses on static visualization.
 """
 
-import base64
 import io
 import json
 import math
@@ -375,6 +374,17 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
     # GPU memory budget for display buffers (MB). Each 4K image needs ~192 MB.
     # 12×4K = 2304 MB fits. 16+ triggers auto-bin.
     _GPU_DISPLAY_BUDGET_MB = 2500
+    # Wire budget for the initial frame payload, per panel. A 6144x6144 float32
+    # panel is 151 MB and Jupyter's kernel->browser channel moves ~24 MB/s, so
+    # shipping it wholesale stalls first paint for ~6 s while the ~1000 px
+    # canvas can only show ~1 MP of it. Panels above this budget send a binned
+    # preview instead; the browser streams full-res detail for the visible
+    # window on zoom (maps-style). 16 MiB keeps a plain 2048x2048 float32
+    # image (exactly 16 MiB) on the classic full-payload path.
+    _WIRE_BUDGET_BYTES_PER_PANEL = 16 * 1024 * 1024
+    # Cap on one detail reply so a zoom refetch stays sub-second on the slow
+    # Tornado channel. The JS coarsens the tile bin until the crop fits.
+    _DETAIL_BUDGET_BYTES = 8 * 1024 * 1024
 
     # =========================================================================
     widget_version = traitlets.Unicode("unknown").tag(sync=True)
@@ -395,6 +405,7 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
     # True only on a clone written by export_html: forces the standalone HTML to
     # render on a light/white background regardless of the viewer's OS theme.
     _export_light = traitlets.Bool(False).tag(sync=True)
+    _static_fallback_jpeg = traitlets.Unicode("").tag(sync=True)
     _offline_min = traitlets.Float(0.0).tag(sync=True)
     _offline_max = traitlets.Float(1.0).tag(sync=True)
     # Per-image quantization ranges. A gallery's panels can span very different
@@ -404,6 +415,13 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
     # its OWN (min, max) gives every panel the full 256 codes -> clean histogram.
     _offline_mins = traitlets.List(trait=traitlets.Float(), default_value=[]).tag(sync=True)
     _offline_maxs = traitlets.List(trait=traitlets.Float(), default_value=[]).tag(sync=True)
+    # Maps-style detail streaming (active whenever the preview is binned, i.e.
+    # _display_bin_factor > 1): JS writes a JSON request describing the visible
+    # window per panel; Python replies with cropped + binned float32 tiles.
+    # Request/response over traits, same pattern as export_request below.
+    _detail_request = traitlets.Unicode("").tag(sync=True)
+    _detail_meta = traitlets.Unicode("").tag(sync=True)
+    _detail_bytes = traitlets.Bytes(b"").tag(sync=True)
     export_request = traitlets.Unicode("").tag(sync=True)
     export_status = traitlets.Unicode("").tag(sync=True)
     export_enabled = traitlets.Bool(True).tag(sync=True)
@@ -873,6 +891,29 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
                         break
                 else:
                     self._display_bin = 8
+                # no surprise binning: announce the reduction and the way out
+                print(f"Show2D display auto-binned {self._display_bin}x to fit the GPU display budget "
+                      f"({total_mb:.0f} MB > {gpu_budget_mb} MB); pass display_bin=1 for native pixels")
+            # Wire budget (maps-style first paint): a panel whose float32 bytes
+            # exceed the per-panel budget would stall first paint for seconds on
+            # a remote Jupyter channel, while the screen canvas can only display
+            # a tiny fraction of those pixels at initial zoom. Send a preview
+            # binned so the longest side is ~2x the canvas CSS size; zooming
+            # streams full-res crops of the visible window via _detail_request,
+            # so full fidelity is preserved without ever shipping the full frame.
+            # Large galleries need a lower preview floor: 36x1024x1024 float32
+            # is still 144 MB before comm/base64/browser work, while the
+            # default 200 px panel can only display a fraction of those pixels.
+            panel_bytes = self.height * self.width * 4
+            if any(self.is_rgb):
+                panel_bytes *= 3  # RGB panels carry 3 interleaved float planes
+            if panel_bytes > self._WIRE_BUDGET_BYTES_PER_PANEL:
+                preview_floor_px = 512.0 if self.n_images >= 16 else 1024.0
+                preview_px = max(preview_floor_px, 2.0 * self._static_canvas_css_px())
+                wire_bin = max(2, math.ceil(max(self.height, self.width) / preview_px))
+                while panel_bytes / (wire_bin * wire_bin) > self._WIRE_BUDGET_BYTES_PER_PANEL:
+                    wire_bin += 1
+                self._display_bin = max(self._display_bin, wire_bin)
         elif isinstance(display_bin, int) and display_bin > 1:
             self._display_bin = display_bin
 
@@ -884,6 +925,16 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
             self.width = int(self._display_data.shape[2])
             if self.pixel_size > 0:
                 self.pixel_size = self.pixel_size * self._display_bin
+            # User-facing view coordinates (center=, view_box=) are full-res
+            # pixels, but JS interprets the traits in preview pixels once the
+            # display is binned. Rescale so a zoom target lands on the same
+            # physical feature at any bin factor.
+            if self.zoom_row is not None:
+                self.zoom_row = self.zoom_row / self._display_bin
+            if self.zoom_col is not None:
+                self.zoom_col = self.zoom_col / self._display_bin
+            if self.view_box:
+                self.view_box = [v / self._display_bin for v in self.view_box]
             self._display_bin_factor = self._display_bin
             # RGB panels bin per channel so the display copy matches the
             # luminance plane's resolution (JS derives offsets from one H×W).
@@ -893,7 +944,7 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
                 for f in self._rgb_frames
             ]
             if verbose:
-                print(f"  Display bin {self._display_bin}×: {orig_h}×{orig_w} → {self.height}×{self.width} ({self._display_data.nbytes // 1024 // 1024} MB)")
+                print(f"  Display bin {self._display_bin}×: {orig_h}×{orig_w} → {self.height}×{self.width} ({self._display_data.nbytes // 1024 // 1024} MB preview; full-res detail streams on zoom)")
         else:
             self._display_data = self._data
             self._display_bin_factor = 1
@@ -925,6 +976,7 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
         self._init_py_elapsed_ms = (_time.perf_counter() - _t0) * 1000
         self.observe(self._on_first_render, names=["_js_rendered"])
         self.observe(self._on_export_request_change, names=["export_request"])
+        self.observe(self._on_detail_request_change, names=["_detail_request"])
 
     @traitlets.validate("starred")
     def _validate_starred(self, proposal: dict) -> list[int]:
@@ -1267,9 +1319,60 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
         zoom = float(min(self.height / max(1.0, r1 - r0), self.width / max(1.0, c1 - c0)))
         return dict(zoom=round(zoom, 2), center=(round((r0 + r1) / 2, 1), round((c0 + c1) / 2, 1)))
 
+    def _on_detail_request_change(self, change: dict) -> None:
+        """Serve a maps-style detail request: crop the visible window from the
+        FULL-resolution data, mean-bin it to near canvas resolution, and reply
+        with a small float32 buffer. This is how a binned preview still shows
+        true full-res pixels under zoom: the browser swaps the tile in over
+        the preview, and the 100+ MB full frame never crosses the wire.
+        Coordinates arrive in preview pixels (the JS-side image space) and are
+        scaled back to full resolution here; the reply reports full-res
+        coordinates plus the tile bin so JS can place it exactly."""
+        raw = str(change.get("new") or "")
+        if not raw or getattr(self, "_data", None) is None:
+            return
+        from quantem.widget.utils.array import bin2d
+        try:
+            request = json.loads(raw)
+        except json.JSONDecodeError:
+            return
+        factor = max(1, int(self._display_bin_factor))
+        full_h, full_w = int(self._data.shape[1]), int(self._data.shape[2])
+        tiles: list[dict] = []
+        blocks: list[bytes] = []
+        offset = 0
+        for spec in request.get("tiles", []):
+            panel = int(spec.get("panel", -1))
+            # RGB panels keep preview-only rendering: a color tile would need a
+            # second interleaved payload path for a rare panel type.
+            if not (0 <= panel < self.n_images) or (panel < len(self.is_rgb) and self.is_rgb[panel]):
+                continue
+            bin_factor = max(1, int(spec.get("bin", 1)))
+            # Snap the window outward to bin multiples anchored at the image
+            # origin so mean-binning blocks tile the crop with no partial edges.
+            row0 = max(0, math.floor(float(spec["row0"]) * factor / bin_factor) * bin_factor)
+            col0 = max(0, math.floor(float(spec["col0"]) * factor / bin_factor) * bin_factor)
+            row1 = min(full_h, math.ceil(float(spec["row1"]) * factor / bin_factor) * bin_factor)
+            col1 = min(full_w, math.ceil(float(spec["col1"]) * factor / bin_factor) * bin_factor)
+            if row1 <= row0 or col1 <= col0:
+                continue
+            crop = self._data[panel, row0:row1, col0:col1]  # view: never copies the full array
+            tile = bin2d(crop, factor=bin_factor, mode="mean") if bin_factor > 1 else crop
+            tile = np.ascontiguousarray(tile, dtype=np.float32)
+            blocks.append(tile.tobytes())
+            tiles.append({"panel": panel, "row0": row0, "col0": col0,
+                          "rows": int(tile.shape[0]), "cols": int(tile.shape[1]),
+                          "bin": bin_factor, "offset": offset})
+            offset += tile.nbytes
+        # One comm message for bytes + meta so JS never pairs a fresh meta with
+        # a stale buffer (or vice versa) mid-update.
+        with self.hold_sync():
+            self._detail_bytes = _b64_safe(b"".join(blocks))
+            self._detail_meta = json.dumps({"id": str(request.get("id", "")), "tiles": tiles})
+
     # Traits that carry the bulk pixel payload. Dropped from the saved-notebook
     # snapshot when save_state is False so a plain display stays a few MB, not GB.
-    _UNSAVED_HEAVY_KEYS = ("frame_bytes", "export_payload")
+    _UNSAVED_HEAVY_KEYS = ("frame_bytes", "export_payload", "_detail_bytes")
 
     def get_state(self, key=None, drop_defaults=False):
         """Trait state for comm sync and notebook embedding.
@@ -1285,6 +1388,11 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
         """
         state = super().get_state(key=key, drop_defaults=drop_defaults)
         if key is None and not getattr(self, "_save_state", False):
+            if not self._static_fallback_jpeg:
+                png = self._static_png_b64()
+                if png:
+                    self._store_static_fallback_preview(png)
+                    state["_static_fallback_jpeg"] = self._static_fallback_jpeg
             for heavy_key in self._UNSAVED_HEAVY_KEYS:
                 state.pop(heavy_key, None)
         return state
@@ -1674,6 +1782,19 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
     # _repr_mimebundle_ / _ipython_display_ / static-fallback sibling plumbing
     # comes from StaticFallbackMixin (utils/static_fallback.py); this class only
     # supplies _static_png_b64 above.
+
+    def _store_static_fallback_preview(self, png_b64: str) -> None:
+        """Store a compact saved-notebook preview inside lightweight state.
+
+        JupyterLab can rehydrate a saved anywidget model even when
+        ``save_state=False`` stripped the heavy ``frame_bytes``. In the common
+        last-expression output path there is no separate static sibling output,
+        so the frontend needs a small in-model preview to avoid mounting a blank
+        widget after Cmd+S and reopen.
+        """
+        if getattr(self, "_save_state", False):
+            return
+        self._static_fallback_jpeg = self._png_to_jpeg_b64(png_b64)
 
     def state_dict(self):
         return {

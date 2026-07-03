@@ -11,6 +11,7 @@ import numpy as np
 import pytest
 
 from quantem.widget import Show2D
+from quantem.widget.utils.array import bin2d
 
 
 def _image(n=128):
@@ -121,3 +122,42 @@ def test_view_box_survives_state_dict_round_trip():
     w2.load_state_dict(w1.state_dict())
     assert w2.view_box == [8.0, 40.0, 16.0, 48.0]
     assert w2.current_view["box"] == (8.0, 40.0, 16.0, 48.0)
+
+
+def test_binned_preview_detail_request_returns_full_resolution_crop():
+    data = np.arange(2 * 96 * 128, dtype=np.float32).reshape(2, 96, 128)
+    w = Show2D(data, display_bin=4, verbose=False)
+
+    # Browser requests are expressed in preview pixels.  The Python side must
+    # convert back to the full-resolution source, snap outward to the requested
+    # tile bin, and return a compact float32 tile.
+    request = {
+        "id": "detail-1",
+        "tiles": [
+            {"panel": 1, "row0": 3.25, "row1": 15.75, "col0": 4.5, "col1": 19.25, "bin": 2}
+        ],
+    }
+    w._detail_request = __import__("json").dumps(request)
+
+    meta = __import__("json").loads(w._detail_meta)
+    assert meta["id"] == "detail-1"
+    assert len(meta["tiles"]) == 1
+
+    tile_meta = meta["tiles"][0]
+    assert tile_meta["panel"] == 1
+    assert tile_meta["row0"] == 12
+    assert tile_meta["col0"] == 18
+    assert tile_meta["bin"] == 2
+
+    rows = tile_meta["rows"]
+    cols = tile_meta["cols"]
+    byte_count = rows * cols * 4
+    raw = bytes(w._detail_bytes[:byte_count])
+    actual = np.frombuffer(raw, dtype=np.float32).reshape(rows, cols)
+    expected = bin2d(
+        data[1, tile_meta["row0"]:tile_meta["row0"] + rows * 2,
+             tile_meta["col0"]:tile_meta["col0"] + cols * 2],
+        factor=2,
+        mode="mean",
+    )
+    assert np.array_equal(actual, expected)

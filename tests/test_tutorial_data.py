@@ -59,3 +59,45 @@ def test_load_tutorial_show4dstem_preserves_uint16_counts(tmp_path, monkeypatch)
     assert dataset.array.dtype == np.uint16
     np.testing.assert_array_equal(dataset.array, stack[::2, ::2])
     assert tuple(dataset.sampling) == (4.0, 4.0, 3.68, 3.68)
+
+
+def test_create_tutorial_survey_folder_writes_velox_like_session(tmp_path):
+    from quantem.widget.survey import has_eds, scan_rotation_deg, survey
+
+    folder = tutorials.create_tutorial_survey_folder(tmp_path / "survey-demo")
+    files = sorted(folder.glob("*.emd"))
+
+    assert len(files) == 4
+    assert sum(has_eds(path) for path in files) == 1
+    assert scan_rotation_deg(folder / "0011 - HAADF 15Mx Nano 90deg.emd") == 90.0
+
+    result = survey(folder, thumb=32)
+    assert len(result.image_items) == 3
+    assert len(result.eds_items) == 1
+    assert len(result.fov_groups) == 1
+
+
+def test_load_tutorial_survey_folder_falls_back_offline(monkeypatch, tmp_path):
+    def fail_download(*args, **kwargs):
+        raise OSError("offline")
+
+    monkeypatch.setattr(tutorials, "snapshot_download", fail_download, raising=False)
+    monkeypatch.setattr(tutorials, "create_tutorial_survey_folder", lambda path=None: tmp_path)
+
+    folder = tutorials.load_tutorial_survey_folder(verbose=False)
+
+    assert folder == tmp_path
+
+
+def test_load_tutorial_survey_folder_can_require_real_download(monkeypatch):
+    def fail_download(*args, **kwargs):
+        raise OSError("offline")
+
+    monkeypatch.setattr(tutorials, "snapshot_download", fail_download, raising=False)
+
+    try:
+        tutorials.load_tutorial_survey_folder(verbose=False, allow_fallback=False)
+    except OSError as exc:
+        assert "offline" in str(exc)
+    else:
+        raise AssertionError("expected real-data tutorial loader to raise when download fails")

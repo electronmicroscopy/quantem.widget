@@ -19,8 +19,10 @@ import * as React from "react";
 export function useHideStaticFallback(
   model: unknown,
   rootRef: React.RefObject<HTMLElement | null>,
+  shouldHide = true,
 ): void {
   React.useEffect(() => {
+    if (!shouldHide) return;
     if (typeof document === "undefined") return;
     const modelId = (model as { model_id?: string } | undefined)?.model_id;
     let cancelled = false;
@@ -50,5 +52,5 @@ export function useHideStaticFallback(
       cancelled = true;
       observer.disconnect();
     };
-  }, [model]);
+  }, [model, shouldHide]);
 }
