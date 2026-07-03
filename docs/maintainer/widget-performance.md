@@ -325,6 +325,75 @@ Shared setup:
 - Start from a fresh render after any code/build change: rebuild, reload, and
   rerun the notebook cell or reopen the exported HTML.
 
+User-story map:
+
+Use these stories to decide whether the lower-level checklist actually covers
+the scientist's workflow. A release signoff can cite the story ID plus the
+checklist item numbers that were driven in the browser.
+
+Show2D user stories:
+
+- S2D-01: As a microscopist opening a large single image, I want a useful
+  preview within seconds so I can decide whether the file is worth inspecting.
+- S2D-02: As a user comparing several real-space images, I want to choose the
+  number of columns so I can arrange panels for my monitor and paper figures.
+- S2D-03: As a user screening many panels, I want to hide unimportant panels
+  without losing labels, stats, export order, or saved state.
+- S2D-04: As a user inspecting atomic/lattice detail, I want the initial binned
+  preview to stream native-resolution tiles when I zoom in.
+- S2D-05: As a user reading coordinates, I want hover readouts to stay in
+  native ``(row, col)`` coordinates even when the displayed preview is binned.
+- S2D-06: As a user adjusting contrast on noisy data, I want histogram drags to
+  update smoothly without stale square tiles or flash artifacts.
+- S2D-07: As a user comparing panels, I want linked zoom, pan, and contrast to
+  be optional and reversible.
+- S2D-08: As a user looking for periodicity, I want FFT views to align with
+  every visible panel and remain fast during resize and column changes.
+- S2D-09: As a user measuring image features, I want profile and ROI overlays
+  to be stable while I drag them quickly.
+- S2D-10: As a user preparing a shareable result, I want export choices to
+  clearly say exact float32 vs quantized uint8 HTML and show approximate size.
+- S2D-11: As a notebook user, I want ``Cmd+S`` and reopen to preserve a visible
+  compact output without embedding huge pixel buffers.
+- S2D-12: As a mobile or narrow-window user, I want controls to wrap and remain
+  usable without covering the scientific image.
+
+Show3D user stories:
+
+- S3D-01: As a user opening a time series or focal stack, I want first paint in
+  seconds so I can start scrubbing before the workflow feels blocked.
+- S3D-02: As a user comparing datasets side by side, I want multi-panel Show3D
+  to use the same visual language as Show2D: labels, scale bars, colormaps,
+  histogram controls, and compact status text.
+- S3D-03: As a user arranging many movie panels, I want a column selector so I
+  can switch between one row, multiple rows, and dense galleries.
+- S3D-04: As a user screening many panels, I want to hide panels and have
+  playback, FFT, stats, export, and saved previews follow the visible set.
+- S3D-05: As a user playing a movie, I want the image, frame label, histogram,
+  and slider to stay synchronized at the selected FPS.
+- S3D-06: As a user scrubbing a large stack manually, I want slider movement to
+  feel immediate and never show stale frames or background flashes.
+- S3D-07: As a user comparing dynamics across panels, I want linked zoom and
+  linked contrast to be fast and reversible.
+- S3D-08: As a user inspecting reciprocal space, I want FFT layouts on bottom,
+  right, or overlay without changing real-space interaction semantics.
+- S3D-09: As a user using FFT overlays, I want one overlay per visible panel,
+  centered on the FFT center, cached, independently zoomable, pannable, and
+  draggable with corner snap.
+- S3D-10: As a user validating FFT peaks, I want suspicious FFT views compared
+  against NumPy or another reference before trusting the display transform.
+- S3D-11: As a user making animations, I want GIF and MP4 exports to show only
+  image panels with clean borders, one label per panel, and predictable sizes.
+- S3D-12: As a user sharing HTML, I want exact/quantized export labels and
+  sizes to match the Show2D export vocabulary.
+- S3D-13: As a notebook user, I want ``Cmd+S`` and reopen to show a compact
+  Show3D fallback that is pixel-matched to a Show2D current-frame gallery.
+- S3D-14: As a user on constrained hardware, I want display binning to be
+  explicit: fast preview is acceptable, but native-pixel availability must be
+  clearly stated.
+- S3D-15: As a mobile or narrow-window user, I want playback controls, frame
+  slider, FFT controls, and panel menus to remain reachable.
+
 Show2D storyboard:
 
 1. Load a single real 4k or larger image. Verify first paint in seconds.
