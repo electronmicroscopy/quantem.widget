@@ -141,7 +141,7 @@ data = load("scan_001_master.h5")
 Show4DSTEM(data)
 ```
 
-Tested on MJGoat with `CUDA_VISIBLE_DEVICES="0"`:
+Example output on a Linux workstation with NVIDIA GPUs:
 
 ```text
 cuda available: True
@@ -164,7 +164,7 @@ import os
 os.environ["CUDA_VISIBLE_DEVICES"] = "1"  # switch to physical NVIDIA GPU 1
 ```
 
-Tested on MJGoat after restarting the Python process:
+Example output after restarting the Python process with GPU 1 selected:
 
 ```text
 cuda available: True
@@ -242,8 +242,8 @@ owned by the live Python process. That is correct behavior. A small residual
 allocation can remain after cleanup because CUDA keeps a runtime context and
 small caches alive until the kernel exits.
 
-MJGoat cleanup check, using a real `Au_TiO2_030_master.h5` 4D-STEM scan loaded
-as `det_bin=4, dtype="u8"`:
+NVIDIA GPU cleanup check, using a real `Au_TiO2_030_master.h5` 4D-STEM scan
+loaded as `det_bin=4, dtype="u8"`:
 
 ```text
 GPU 0: NVIDIA RTX PRO 6000 Blackwell Workstation Edition
