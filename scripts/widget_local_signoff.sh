@@ -111,6 +111,11 @@ fi
 
 end_unix="$(date +%s)"
 duration="$((end_unix - start_unix))"
+if [[ "$skip_docs" -eq 0 && "$mode" != "quick" ]]; then
+  docs_status="built"
+else
+  docs_status="skipped"
+fi
 cat > "$artifact_dir/index.html" <<EOF
 <!doctype html>
 <html>
@@ -137,7 +142,7 @@ cat > "$artifact_dir/index.html" <<EOF
       <tr><th>Commit</th><td>$commit</td></tr>
       <tr><th>Mode</th><td>$mode</td></tr>
       <tr><th>Performance smoke</th><td>$performance</td></tr>
-      <tr><th>Docs skipped</th><td>$skip_docs</td></tr>
+      <tr><th>Docs build</th><td>$docs_status</td></tr>
       <tr><th>Duration</th><td>${duration}s</td></tr>
     </tbody>
   </table>
