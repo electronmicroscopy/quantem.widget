@@ -148,7 +148,22 @@ cat > "$artifact_dir/report.md" <<EOF
 
 ## Console / performance notes
 
-- TODO
+Use docs/maintainer/performance-ui-testing.md for any speed, heavy-data,
+save/reopen, playback, FFT, or export claim.
+
+| Gate | Backend/data | Frontend/browser | Result | Notes |
+|---|---|---|---:|---|
+| PUI-2D-4K | TODO | TODO | TODO | TODO |
+| PUI-2D-BATCH | TODO | TODO | TODO | TODO |
+| PUI-3D-SINGLE | TODO | TODO | TODO | TODO |
+| PUI-3D-MULTI | TODO | TODO | TODO | TODO |
+| PUI-3D-EXPORT | TODO | TODO | TODO | TODO |
+
+Performance artifacts:
+
+- timing JSON: TODO
+- screenshots: TODO
+- videos: TODO
 
 ## Release decision
 
@@ -173,6 +188,53 @@ Open: $docs_url/tutorials/show2d.html
 - [ ] Light and dark theme text, borders, histogram, controls, and scale bar remain readable.
 - [ ] Final screenshot saved to screenshots/show2d-after.png.
 - [ ] Short video saved if any motion felt questionable.
+EOF
+
+cat > "$artifact_dir/checklists/performance-ui.md" <<EOF
+# Real-data performance UI checklist
+
+Reference: docs/maintainer/performance-ui-testing.md
+
+Run this for Show2D/Show3D speed, large-data, save/reopen, FFT, playback, or
+export changes. Synthetic data alone is not sufficient.
+
+## 1. Real dataset matrix
+
+- [ ] Show2D 8 x 4096 x 4096 real or real-derived panels.
+- [ ] Show2D 30 x 4096 x 4096 real or real-derived batch when relevant.
+- [ ] Show3D single-panel real stack, at least 512 x 512 x 100 frames.
+- [ ] Show3D 12 panels x 32 frames x 2048 x 2048 source for heavy signoff.
+- [ ] Exact path, shape, dtype, native bytes, and backend host recorded.
+
+## 2. Backend/frontend topology
+
+- [ ] MJGOAT/workstation backend recorded: env, commit, Jupyter URL, data path.
+- [ ] Mac/browser frontend recorded: browser, viewport, WebGPU adapter if used.
+- [ ] Kernel busy state observed during pointer-only interactions.
+- [ ] Standalone exported HTML tested separately from live Jupyter.
+
+## 3. FPS and latency
+
+- [ ] First useful paint measured.
+- [ ] Show2D zoom/pan, histogram drag, FFT, columns, hide panels driven.
+- [ ] Show3D playback, scrub, sliders, columns, zoom/pan, FFT overlay driven.
+- [ ] 30 FPS target checked for pointer interactions and sliders/playback.
+- [ ] Console errors recorded.
+
+## 4. Native pixel / preview contract
+
+- [ ] Show2D auto preview and native/detail streaming behavior verified.
+- [ ] Stale detail tiles do not draw after fast zoom/pan.
+- [ ] Show3D display/export binning is explicit; no false native-pixel claim.
+- [ ] Cursor/readout coordinates remain native where promised.
+
+## 5. Report and release decision
+
+- [ ] Timing JSON saved under the artifact directory or /tmp.
+- [ ] Screenshots/videos saved for the interactions tested.
+- [ ] Export size/time/reopen recorded.
+- [ ] Cmd+S save/reopen recorded.
+- [ ] PASS / PASS WITH LIMITATION / BLOCKED selected with remaining risk.
 EOF
 
 cat > "$artifact_dir/checklists/show3d.md" <<EOF
@@ -301,4 +363,3 @@ Next:
    $artifact_dir
 6. Fill in report.md before release.
 EOF
-

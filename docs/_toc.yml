@@ -47,6 +47,8 @@ parts:
         title: Agent signoff
       - file: maintainer/widget-ui-protocol
         title: UI protocol
+      - file: maintainer/performance-ui-testing
+        title: Performance UI testing
       - file: maintainer/storyboard
         title: Storyboard
         sections:

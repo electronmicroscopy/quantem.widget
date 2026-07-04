@@ -10,7 +10,10 @@ agent report must say which story IDs were driven, which were skipped, and why.
 
 Use these files for UI behavior, real-data workflows, browser testing, and
 release signoff. Keep performance lessons, timing observations, and
-implementation policy in [Performance](widget-performance).
+implementation policy in [Performance](widget-performance). Use
+[Performance UI Testing](performance-ui-testing) when the claim involves load
+speed, FPS, heavy real data, MJGOAT/backend topology, save/reopen timing, or
+export size.
 
 Every storyboard should cover four scientific workflow classes:
 
@@ -146,3 +149,6 @@ Remaining risk:
   verify it next. P1 examples: physical iPhone checks, maximum-size datasets,
   or hardware-specific WebGPU adapter coverage.
 - The storyboard report must be linked from the release candidate signoff.
+- Any Show2D or Show3D performance claim must also cite the measured gate from
+  [Performance UI Testing](performance-ui-testing), including real dataset,
+  backend host, browser surface, first paint, and FPS/latency observations.

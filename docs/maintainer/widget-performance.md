@@ -228,7 +228,9 @@ Show3D policy:
 
 Performance notes should capture what we learned: measured timings, failure
 modes, payload tradeoffs, and implementation policy. UI behavior and recurring
-AI/browser drive plans live in [Storyboard](storyboard).
+AI/browser drive plans live in [Storyboard](storyboard). Repeatable heavy
+browser performance gates live in
+[Performance UI Testing](performance-ui-testing).
 
 Use the storyboard for scientific user stories and release signoff. Link the
 story IDs from performance investigations when a speed or correctness issue maps

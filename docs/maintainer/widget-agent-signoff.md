@@ -9,6 +9,9 @@ This is deliberately not a fully automated smoke test. It is a fix-and-redrive
 loop. Start from the scientific user stories in
 [Storyboard](storyboard); use generated checklist packets only as
 evidence containers and prompts for concrete browser actions.
+When the change touches speed, heavy data, save/reopen, FFT, playback, export,
+or large-panel layout, also run the real-data gates in
+[Performance UI Testing](performance-ui-testing).
 
 ## When to run
 
@@ -113,3 +116,6 @@ Before tagging a release candidate, the report should say one of:
 
 Do not hide a laggy or visually broken interaction behind a passing test suite.
 If the interaction is not real time, either fix it or mark the release blocked.
+For Show2D and Show3D, "real time" means the report names the real dataset,
+MJGOAT/workstation backend, browser frontend, first-paint time, interaction
+FPS/latency method, save/reopen result, and export reopen result.
