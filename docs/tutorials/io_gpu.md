@@ -204,9 +204,22 @@ free, total = torch.cuda.mem_get_info()
 print(f"free {free / 1e9:.1f} GB / total {total / 1e9:.1f} GB")
 ```
 
-Free memory used by the current notebook:
+Keep a handle to the viewer if you plan to release memory later:
 
 ```python
+from quantem.widget import load, Show4DSTEM
+
+data = load("scan_001_master.h5")
+viewer = Show4DSTEM(data)
+viewer
+```
+
+When you are done with that dataset, free the viewer and delete the loaded data:
+
+```python
+viewer.free()   # releases widget tensor/backend caches
+viewer.close()  # closes the ipywidget comm/model
+del viewer
 del data
 
 import gc
@@ -214,10 +227,43 @@ import torch
 
 gc.collect()
 torch.cuda.empty_cache()
+
+try:
+    import cupy as cp
+except Exception:
+    pass
+else:
+    cp.get_default_memory_pool().free_all_blocks()
+    cp.get_default_pinned_memory_pool().free_all_blocks()
 ```
 
-If memory is still occupied, another variable, notebook, or kernel still owns
-it. Shut down old kernels from JupyterLab before assuming the GPU is stuck.
+If `viewer` or `data` still exists anywhere in the notebook, the memory is still
+owned by the live Python process. That is correct behavior. A small residual
+allocation can remain after cleanup because CUDA keeps a runtime context and
+small caches alive until the kernel exits.
+
+MJGoat cleanup check, using a real `Au_TiO2_030_master.h5` 4D-STEM scan loaded
+as `det_bin=4, dtype="u8"`:
+
+```text
+GPU 0: NVIDIA RTX PRO 6000 Blackwell Workstation Edition
+before:              free 74.12 GiB / total 94.95 GiB
+after load:          free 71.72 GiB   cupy used 2.25 GiB
+after Show4DSTEM:    free 70.64 GiB   torch reserved 0.98 GiB
+after cleanup:       free 73.74 GiB   cupy used 0.00 GiB
+residual:            0.38 GiB CUDA runtime/cache overhead
+
+GPU 1: NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition
+before:              free 80.95 GiB / total 94.97 GiB
+after load:          free 78.68 GiB   cupy used 2.25 GiB
+after Show4DSTEM:    free 77.60 GiB   torch reserved 0.98 GiB
+after cleanup:       free 80.70 GiB   cupy used 0.00 GiB
+residual:            0.25 GiB CUDA runtime/cache overhead
+```
+
+If memory is still occupied after this pattern, another variable, notebook, or
+kernel still owns it. Shut down old kernels from JupyterLab before assuming the
+GPU is stuck.
 
 ## NVIDIA GPU workflow
 
