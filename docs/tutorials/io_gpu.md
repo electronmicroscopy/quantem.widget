@@ -89,7 +89,24 @@ from quantem.widget.io import discover_masters
 masters = discover_masters("/data/session", scan_shape=(512, 512))
 ```
 
-## Common use cases
+## Two different IO paths
+
+Use the 4D-STEM loader for detector stacks, and use the image readers for
+ordinary survey images. They are intentionally different:
+
+| data on disk | reader | what is accelerated |
+|---|---|---|
+| 4D-STEM HDF5 master files | `load(...)` | optimized detector decompression, optional detector binning, GPU-resident arrays when CUDA or Metal is available |
+| HAADF/ADF/BF survey images, PNG, TIFF, JPEG, GIF, DM, NPY | `read_image(...)`, `read_images(...)` | CPU file decoding through the format library, optional threaded batch reads, then explicit GPU transfer if you need Torch/CuPy |
+| folders of same-size image frames | `read_image_stack(...)` | threaded CPU decoding, preallocated stack, then optional GPU transfer |
+
+PNG, TIFF, and EMD survey-image decoding is not a WebGPU operation and is not
+decoded by the browser. It happens in Python. That is still the right path for
+single images and 50-60 survey files because the files are independent and can
+be read in parallel. Move the resulting arrays to the GPU only when you are
+about to compute on them.
+
+## Survey images and frame folders
 
 ### Open a HAADF, EMD survey image, PNG, or TIFF
 
@@ -117,6 +134,22 @@ Use this path for HAADF, ADF, BF, overview images, diffraction snapshots saved
 as images, and quick previews. It avoids the 4D-STEM decompression path
 entirely, so loading is immediate for normal image sizes.
 
+### Open many EMD, PNG, TIFF, or DM survey images
+
+For a folder of independent microscope images, use `read_images`. This keeps the
+simple one-image API but reads many files concurrently when you ask for workers.
+
+```python
+from quantem.widget import Show2D, read_images
+
+images = read_images("survey_images", workers=8)
+Show2D(images)
+```
+
+This is the best fit for 50-60 HAADF/ADF/BF survey images that may be different
+sizes or formats. If every frame is the same size and you want a time/depth
+slider, use `read_image_stack` instead.
+
 ### Open a folder of PNG or TIFF frames
 
 For an in-situ sequence, tilt series, denoising sweep, or any folder of
@@ -139,6 +172,44 @@ stack = read_image_stack("frames", pattern="frame_*.png", workers=8)
 Keep the files in their original integer dtype on disk. The reader converts the
 viewer stack to `float32`, which is the right display/processing dtype for most
 image stacks and avoids accidental `float64` memory growth.
+
+### Profile your own image folder
+
+Before changing file formats, measure the folder you actually have:
+
+```python
+import time
+from pathlib import Path
+from quantem.widget import read_images
+
+folder = Path("survey_images")
+
+t0 = time.perf_counter()
+images = read_images(folder, workers=8)
+dt = time.perf_counter() - t0
+
+pixels = sum(ds.array.size for ds in images)
+print(f"{len(images)} images")
+print(f"{pixels / 1e6:.0f} megapixels")
+print(f"{dt:.2f} s")
+print(f"{pixels / dt / 1e6:.0f} megapixels/s")
+```
+
+Use this to compare `workers=1` and `workers=8`. On many image folders the
+parallel path is faster; on slow network storage, the disk can become the limit.
+
+Example local profile with 24 synthetic `4096 x 4096` `uint16` survey frames
+(`0.81 GB` raw pixels):
+
+| folder | `workers=1` | `workers=8` | note |
+|---|---:|---:|---|
+| uncompressed TIFF | 0.40 s | 0.16 s | fast image frames |
+| PNG | 3.42 s | 0.74 s | slower because PNG decompression is real work |
+| Velox-style EMD survey images | 0.22 s | 0.12 s | fast when image data is stored directly |
+
+For 50-60 full 4k survey images, prefer EMD or TIFF when you control the export
+format. PNG is fine for screenshots and compact sharing, but it is not the
+fastest format for high-throughput analysis.
 
 ### Open a diffraction image or diffraction stack
 
@@ -164,6 +235,8 @@ ShowDiffraction(dp_stack.array)
 This is separate from `Show4DSTEM`: use `ShowDiffraction` when the data is just
 one detector image or a detector-image stack, and use `Show4DSTEM(load(...))`
 when you have a scan grid with a diffraction pattern at every probe position.
+
+## 4D-STEM detector stacks
 
 ### Open one scan at full precision
 

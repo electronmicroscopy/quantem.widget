@@ -1,10 +1,14 @@
 """Read 2D survey images and folders of frames into quantem datasets.
 
-``io.load`` is the iterative-4D-STEM loader (Arina/Dectris HDF5). A plain 2D
+``io.load`` is the optimized 4D-STEM loader (Arina/Dectris HDF5). A plain 2D
 survey image - a HAADF saved by Velox as ``.emd``, or a ``.npy`` - needs a
 different, tiny reader. :func:`read_image` is it, returning a :class:`Dataset2d`
 that carries the pixel size + raw metadata, so ``Show2D(io.read_image(path))``
 draws a real scale bar (in nm) with no extra arguments.
+
+:func:`read_images` is for a folder of independent survey images, including EMD,
+PNG, TIFF, DM, and NPY files. It keeps per-image calibration and can use a thread
+pool for large sessions.
 
 :func:`read_image_stack` is the folder analog: a directory of PNG/TIFF frames
 (an in-situ time series, a tilt series, a reconstruction sweep) decoded in
@@ -29,7 +33,12 @@ _IMAGE_SUFFIXES = (".npy", ".emd", ".tif", ".tiff", ".png",
                    ".jpg", ".jpeg", ".bmp", ".gif", ".dm3", ".dm4")
 
 
-def read_images(folder: str | Path) -> list[Dataset2d]:
+def read_images(
+    folder: str | Path,
+    *,
+    workers: int = 1,
+    progress: bool = False,
+) -> list[Dataset2d]:
     """Read every image in a folder into a list of :class:`Dataset2d`.
 
     The folder analog of :func:`read_image` for a *mixed* set of survey images -
@@ -37,6 +46,16 @@ def read_images(folder: str | Path) -> list[Dataset2d]:
     :func:`read_image_stack` for a folder of same-size frames). Files are sorted
     by name; every supported extension is read, anything else is skipped. Lets a
     gallery be one line: ``Show2D([d.array for d in io.read_images(folder)])``.
+
+    Parameters
+    ----------
+    folder : str or Path
+        Folder containing supported 2D image files.
+    workers : int, default 1
+        Thread count for reading many files. Use ``workers=8`` for large folders
+        of independent EMD/TIFF/PNG survey images.
+    progress : bool, default False
+        Show a tqdm bar while reading.
     """
     folder = Path(folder)
     if not folder.is_dir():
@@ -46,7 +65,26 @@ def read_images(folder: str | Path) -> list[Dataset2d]:
                    and not p.name.startswith("."))
     if not files:
         raise FileNotFoundError(f"No supported images in {folder}")
-    return [read_image(p) for p in files]
+    if workers <= 1 or len(files) == 1:
+        iterable = files
+        if progress:
+            try:
+                from tqdm import tqdm  # noqa: PLC0415
+                iterable = tqdm(files, desc=f"Reading {len(files)} images", unit="image")
+            except ImportError:
+                pass
+        return [read_image(p) for p in iterable]
+
+    with ThreadPoolExecutor(max_workers=min(workers, len(files))) as pool:
+        results = pool.map(read_image, files)
+        if progress:
+            try:
+                from tqdm import tqdm  # noqa: PLC0415
+                results = tqdm(results, desc=f"Reading {len(files)} images",
+                               total=len(files), unit="image")
+            except ImportError:
+                pass
+        return list(results)
 
 
 def read_image(path: str | Path) -> Dataset2d:

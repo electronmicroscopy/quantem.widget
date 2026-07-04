@@ -149,6 +149,19 @@ def test_read_images_folder_mixed(tmp_path):
     np.testing.assert_array_equal(out[1].array, a)
 
 
+def test_read_images_folder_parallel_preserves_order(tmp_path):
+    from PIL import Image
+
+    for idx in range(4):
+        frame = np.full((10, 12), idx, dtype=np.uint8)
+        Image.fromarray(frame).save(tmp_path / f"frame_{idx}.png")
+
+    out = read_images(tmp_path, workers=2)
+    assert [d.name for d in out] == [f"frame_{idx}" for idx in range(4)]
+    for idx, ds in enumerate(out):
+        np.testing.assert_array_equal(ds.array, np.full((10, 12), idx, dtype=np.uint8))
+
+
 def test_read_images_empty_dir_raises(tmp_path):
     with pytest.raises(FileNotFoundError, match="No supported images"):
         read_images(tmp_path)
