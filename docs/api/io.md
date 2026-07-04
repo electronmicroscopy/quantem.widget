@@ -269,7 +269,7 @@ print(meta)   # voltage_kV, semiangle_mrad, scan_sampling_A, det_shape, ...
 ## I have HAADF or a 2D image (Velox EMD, TIFF, PNG). How do I load that?
 
 ```python
-from quantem.widget import read_image, Show2D
+from quantem.widget import Show2D, read_image
 
 img = read_image("haadf.emd")   # Dataset2d with sampling + units
 Show2D(img)
@@ -278,9 +278,10 @@ Show2D(img)
 For a stack (multi-frame TIFF, sequence of PNGs):
 
 ```python
-from quantem.widget.io import read_image_stack
+from quantem.widget import Show3D, read_image_stack
 
-stack = read_image_stack(["a.png", "b.png", "c.png"])
+stack = read_image_stack("frames", pattern="frame_*.png")
+Show3D(stack)
 ```
 
 ## I want the reference gold or MoS2 dataset from Hugging Face.

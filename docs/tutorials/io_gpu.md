@@ -91,6 +91,80 @@ masters = discover_masters("/data/session", scan_shape=(512, 512))
 
 ## Common use cases
 
+### Open a HAADF, EMD survey image, PNG, or TIFF
+
+Not every dataset is a 4D-STEM master file. For a single 2D microscope image,
+use `read_image`. It returns a calibrated `Dataset2d` when the file carries
+metadata, so `Show2D` can draw the scale bar automatically.
+
+```python
+from quantem.widget import Show2D, read_image
+
+haadf = read_image("haadf.emd")       # Velox EMD HAADF / survey image
+Show2D(haadf)
+```
+
+The same reader works for common image files:
+
+```python
+from quantem.widget import Show2D, read_image
+
+image = read_image("overview.tif")    # also .png, .jpg, .bmp, .gif, .dm3, .dm4, .npy
+Show2D(image)
+```
+
+Use this path for HAADF, ADF, BF, overview images, diffraction snapshots saved
+as images, and quick previews. It avoids the 4D-STEM decompression path
+entirely, so loading is immediate for normal image sizes.
+
+### Open a folder of PNG or TIFF frames
+
+For an in-situ sequence, tilt series, denoising sweep, or any folder of
+same-size frames, use `read_image_stack`. It decodes PNG/TIFF frames in parallel
+and returns a `Dataset3d` for `Show3D`.
+
+```python
+from quantem.widget import Show3D, read_image_stack
+
+stack = read_image_stack("frames", file_type="tif", workers=8)
+Show3D(stack)
+```
+
+You can also use a glob pattern:
+
+```python
+stack = read_image_stack("frames", pattern="frame_*.png", workers=8)
+```
+
+Keep the files in their original integer dtype on disk. The reader converts the
+viewer stack to `float32`, which is the right display/processing dtype for most
+image stacks and avoids accidental `float64` memory growth.
+
+### Open a diffraction image or diffraction stack
+
+Use `ShowDiffraction` for a single diffraction pattern or a small stack of
+patterns:
+
+```python
+from quantem.widget import ShowDiffraction, read_image
+
+dp = read_image("diffraction.tif")
+ShowDiffraction(dp.array)
+```
+
+For a folder of diffraction frames:
+
+```python
+from quantem.widget import ShowDiffraction, read_image_stack
+
+dp_stack = read_image_stack("diffraction_frames", file_type="tif")
+ShowDiffraction(dp_stack.array)
+```
+
+This is separate from `Show4DSTEM`: use `ShowDiffraction` when the data is just
+one detector image or a detector-image stack, and use `Show4DSTEM(load(...))`
+when you have a scan grid with a diffraction pattern at every probe position.
+
 ### Open one scan at full precision
 
 Use this when the scan fits your GPU and you want the most faithful interactive
@@ -352,6 +426,57 @@ print(torch.cuda.mem_get_info())  # free bytes, total bytes
 ```
 
 Use the cleanup pattern above when you are done with a large dataset.
+
+## Moving image data to Torch or CuPy
+
+Most viewers accept NumPy arrays or quantem datasets directly, so you usually do
+not need to move a PNG, TIFF, or EMD survey image to Torch just to view it. Move
+data to the GPU when you are about to run your own GPU computation.
+
+For Torch:
+
+```python
+import numpy as np
+import torch
+from quantem.widget import read_image
+
+ds = read_image("haadf.emd")
+image = np.ascontiguousarray(ds.array, dtype=np.float32)
+
+device = "cuda" if torch.cuda.is_available() else "cpu"
+image_t = torch.as_tensor(image, device=device)
+```
+
+For a large CPU array that you will reuse many times on an NVIDIA GPU:
+
+```python
+if torch.cuda.is_available():
+    image_t = torch.from_numpy(image).pin_memory().to("cuda", non_blocking=True)
+    torch.cuda.synchronize()
+```
+
+For CuPy:
+
+```python
+import cupy as cp
+
+image_gpu = cp.asarray(image)
+```
+
+Keep raw detector counts as `uint16` until you need decimal math. Convert to
+`float32` for filtering, fitting, normalization, neural networks, or display
+processing. Avoid accidental `float64`; it doubles memory with no benefit for
+normal interactive viewing.
+
+For large `.npy` files, memory-map first so Python does not copy the whole file
+before you decide what to view:
+
+```python
+import numpy as np
+
+stack = np.load("stack.npy", mmap_mode="r")
+preview = np.asarray(stack[::8], dtype=np.float32)  # explicit preview reduction
+```
 
 ## Apple Silicon workflow
 
