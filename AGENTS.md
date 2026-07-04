@@ -68,6 +68,9 @@ bug unless the limitation is explicitly documented and accepted.
 
 ## Widget UI Consistency
 
+For widget visual style and control wording, read
+`docs/maintainer/widget-ui-protocol.md` before editing frontend controls.
+
 For in-widget toolbar dropdowns, use the shared MUI `Select`/`MenuItem` pattern
 with the widget's `themedSelect` and `themedMenuProps` styling. Do not add
 native HTML `<select>` controls to widget toolbars. Match the Show4DSTEM and

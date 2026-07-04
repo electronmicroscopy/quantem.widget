@@ -703,6 +703,7 @@ const compactButton = {
   py: 0.25,
   px: 1,
   minWidth: 0,
+  textTransform: "none" as const,
   "&.Mui-disabled": {
     color: "#666",
     borderColor: "#444",

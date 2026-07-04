@@ -3745,7 +3745,7 @@ function ShowEDS() {
           <Box sx={{ mt: 0.25, display: "flex", gap: 1, width: "fit-content", maxWidth: "100%", boxSizing: "border-box", alignItems: "flex-start", overflowX: "auto", pb: 0.5 }}>
             <Box sx={{ display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 0.5, flex: "0 0 auto", minWidth: 0 }}>
               <Box sx={controlRowSx}>
-                <Typography sx={controlLabelSx}>Band:</Typography>
+                <Typography sx={controlLabelSx}>Band</Typography>
                 <Box
                   ref={bandSliderRef}
                   sx={{ width: 260, flexShrink: 0, display: "flex", alignItems: "center", height: 20, position: "relative" }}
@@ -3826,7 +3826,7 @@ function ShowEDS() {
                     }}
                   />
                 </Box>
-                <Typography sx={controlLabelSx}>Overlay:</Typography>
+                <Typography sx={controlLabelSx}>Overlay</Typography>
                 <Slider
                   value={displayOverlayOpacity}
                   min={0}
@@ -3871,7 +3871,7 @@ function ShowEDS() {
                 </Menu>
               </Box>
               <Box sx={controlRowSx}>
-                <Typography sx={controlLabelSx}>ROI:</Typography>
+                <Typography sx={controlLabelSx}>ROI</Typography>
                 <Button
                   size="small"
                   sx={compactButtonSx}
@@ -3885,7 +3885,7 @@ function ShowEDS() {
                 >
                   {ROI_SHAPE_LABELS[normalizeRoiShape(roi.shape)]}
                 </Button>
-                <Typography sx={controlLabelSx}>Auto:</Typography>
+                <Typography sx={controlLabelSx}>Auto</Typography>
                 <Switch
                   checked={autoMapContrastOn}
                   onChange={(e) => {
@@ -3899,7 +3899,7 @@ function ShowEDS() {
                   sx={controlLabelSx}
                   title="CSS bilinear interpolation. Same data, browser smooths visually when upscaling."
                 >
-                  Smooth:
+                  Smooth
                 </Typography>
                 <Switch
                   checked={Boolean(smooth)}

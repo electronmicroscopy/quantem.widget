@@ -143,7 +143,8 @@ through it line by line.
   [Show3D](docs/tutorials/show3d.ipynb),
   [Show3DSlices](docs/tutorials/show3dslices.ipynb),
   [Show4DSTEM](docs/tutorials/show4dstem.ipynb), and
-  [ShowEDS](docs/tutorials/showeds.ipynb).
+  [ShowEDS](docs/tutorials/showeds.ipynb). Follow the
+  [widget UI protocol](docs/maintainer/widget-ui-protocol.md).
 - [ ] Controls are compact and content-sized: use icon/text buttons for
   commands, switches for binary options, sliders for numeric values, menus for
   option sets, and avoid stretched empty control bars.

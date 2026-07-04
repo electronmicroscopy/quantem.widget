@@ -232,6 +232,7 @@ const compactButton = {
   py: 0.25,
   px: 1,
   minWidth: 0,
+  textTransform: "none" as const,
   "&.Mui-disabled": {
     color: "#666",
     borderColor: "#444",
@@ -4536,7 +4537,7 @@ function Show4DSTEM() {
               <span style={{ color: roiColors.textColor, marginLeft: SPACING.SM }}>k: ({Math.round(localKRow)}, {Math.round(localKCol)})</span>
             </Typography>
             <Stack direction="row" spacing={`${SPACING.SM}px`} alignItems="center">
-              <Typography sx={{ ...typo.label, fontSize: 10 }}>Profile:</Typography>
+              <Typography sx={{ ...typo.label, fontSize: 10 }}>Profile</Typography>
               <Switch checked={profileActive} onChange={(e) => {
                 const on = e.target.checked;
                 setProfileActive(on);
@@ -4685,7 +4686,7 @@ function Show4DSTEM() {
                   <Box sx={{ display: "flex", flexDirection: "column", gap: `${SPACING.XS}px`, flex: "1 1 220px", minWidth: 0, justifyContent: "center" }}>
                     {/* Row 1: Detector + slider */}
                     <Box sx={{ ...controlRow, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>
-                      <Typography sx={{ ...typo.label, fontSize: 10 }}>Detector:</Typography>
+                      <Typography sx={{ ...typo.label, fontSize: 10 }}>Detector</Typography>
                       <Select value={roiMode || "point"} onChange={(e) => setRoiMode(e.target.value)} size="small" sx={{ ...themedSelect, minWidth: 65, fontSize: 10 }} MenuProps={themedMenuProps}>
                         <MenuItem value="point">Point</MenuItem>
                         <MenuItem value="circle">Circle</MenuItem>
@@ -4720,7 +4721,7 @@ function Show4DSTEM() {
                     </Box>
                     {/* Row 2: Color + Scale + Colorbar */}
                     <Box sx={{ ...controlRow, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>
-                      <Typography sx={{ ...typo.label, fontSize: 10 }}>Color:</Typography>
+                      <Typography sx={{ ...typo.label, fontSize: 10 }}>Color</Typography>
                       <Select value={dpColormap} onChange={(e) => setDpColormap(String(e.target.value))} size="small" sx={{ ...themedSelect, minWidth: 65, fontSize: 10 }} MenuProps={themedMenuProps}>
                         <MenuItem value="inferno">Inferno</MenuItem>
                         <MenuItem value="viridis">Viridis</MenuItem>
@@ -4729,13 +4730,13 @@ function Show4DSTEM() {
                         <MenuItem value="hot">Hot</MenuItem>
                         <MenuItem value="gray">Gray</MenuItem>
                       </Select>
-                      <Typography sx={{ ...typo.label, fontSize: 10 }}>Scale:</Typography>
+                      <Typography sx={{ ...typo.label, fontSize: 10 }}>Scale</Typography>
                       <Select value={dpScaleMode} onChange={(e) => setDpScaleMode(e.target.value as "linear" | "log")} size="small" sx={{ ...themedSelect, minWidth: 50, fontSize: 10 }} MenuProps={themedMenuProps}>
                         <MenuItem value="linear">Lin</MenuItem>
                         <MenuItem value="log">Log</MenuItem>
 
                       </Select>
-                      <Typography sx={{ ...typo.label, fontSize: 10 }}>Colorbar:</Typography>
+                      <Typography sx={{ ...typo.label, fontSize: 10 }}>Colorbar</Typography>
                       <Switch checked={showDpColorbar} onChange={(e) => setShowDpColorbar(e.target.checked)} size="small" sx={switchStyles.small} />
                     </Box>
                   </Box>
@@ -4757,9 +4758,9 @@ function Show4DSTEM() {
               {shapeRows}×{shapeCols} | {detRows}×{detCols}
             </Typography>
             <Stack direction="row" spacing={`${SPACING.SM}px`} alignItems="center">
-              <Typography sx={{ ...typo.label, fontSize: 10 }}>FFT:</Typography>
+              <Typography sx={{ ...typo.label, fontSize: 10 }}>FFT</Typography>
               <Switch checked={effectiveShowFft} onChange={(e) => setShowFft(e.target.checked)} size="small" sx={switchStyles.small} />
-              <Typography sx={{ ...typo.label, fontSize: 10 }}>Profile:</Typography>
+              <Typography sx={{ ...typo.label, fontSize: 10 }}>Profile</Typography>
               <Switch checked={viProfileActive} onChange={(e) => {
                 const on = e.target.checked;
                 setViProfileActive(on);
@@ -4827,9 +4828,9 @@ function Show4DSTEM() {
               <Typography sx={statsTextSx}>Max <Box component="span" sx={statsValueSx}>{formatStat(viStats[2])}</Box></Typography>
               <Typography sx={statsTextSx}>Std <Box component="span" sx={statsValueSx}>{formatStat(viStats[3])}</Box></Typography>
               <Box sx={{ ml: "auto", display: "flex", alignItems: "center", gap: "2px", flexWrap: "nowrap", whiteSpace: "nowrap", flexShrink: 0 }}>
-                <Typography sx={{ ...typo.label, fontSize: 10, lineHeight: "20px" }}>Auto:</Typography>
+                <Typography sx={{ ...typo.label, fontSize: 10, lineHeight: "20px" }}>Auto</Typography>
                 <Switch checked={viAutoContrast} onChange={(e) => toggleViAutoContrast(e.target.checked)} size="small" sx={switchStyles.small} />
-                <Typography sx={{ ...typo.label, fontSize: 10, lineHeight: "20px" }} title="CSS bilinear interpolation. Same data, browser smooths visually.">Smooth:</Typography>
+                <Typography sx={{ ...typo.label, fontSize: 10, lineHeight: "20px" }} title="CSS bilinear interpolation. Same data, browser smooths visually.">Smooth</Typography>
                 <Switch checked={viSmooth} onChange={(e) => setViSmooth(e.target.checked)} size="small" sx={switchStyles.small} />
               </Box>
             </Box>
@@ -4872,7 +4873,7 @@ function Show4DSTEM() {
                   <Box sx={{ display: "flex", flexDirection: "column", gap: `${SPACING.XS}px`, flex: "1 1 220px", minWidth: 0, justifyContent: "center" }}>
                     {/* Row 1: ROI selector */}
                     <Box sx={{ ...controlRow, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>
-                      <Typography sx={{ ...typo.label, fontSize: 10 }}>ROI:</Typography>
+                      <Typography sx={{ ...typo.label, fontSize: 10 }}>ROI</Typography>
                       <Select value={viRoiMode || "off"} onChange={(e) => setViRoiMode(e.target.value)} size="small" sx={{ ...themedSelect, minWidth: 60, fontSize: 10 }} MenuProps={themedMenuProps}>
                         <MenuItem value="off">Off</MenuItem>
                         <MenuItem value="circle">Circle</MenuItem>
@@ -4906,7 +4907,7 @@ function Show4DSTEM() {
                     </Box>
                     {/* Row 2: Color + Scale */}
                     <Box sx={{ ...controlRow, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>
-                      <Typography sx={{ ...typo.label, fontSize: 10 }}>Color:</Typography>
+                      <Typography sx={{ ...typo.label, fontSize: 10 }}>Color</Typography>
                       <Select value={viColormap} onChange={(e) => setViColormap(String(e.target.value))} size="small" sx={{ ...themedSelect, minWidth: 65, fontSize: 10 }} MenuProps={themedMenuProps}>
                         <MenuItem value="inferno">Inferno</MenuItem>
                         <MenuItem value="viridis">Viridis</MenuItem>
@@ -4915,7 +4916,7 @@ function Show4DSTEM() {
                         <MenuItem value="hot">Hot</MenuItem>
                         <MenuItem value="gray">Gray</MenuItem>
                       </Select>
-                      <Typography sx={{ ...typo.label, fontSize: 10 }}>Scale:</Typography>
+                      <Typography sx={{ ...typo.label, fontSize: 10 }}>Scale</Typography>
                       <Select value={viScaleMode} onChange={(e) => setViScaleMode(e.target.value as "linear" | "log")} size="small" sx={{ ...themedSelect, minWidth: 50, fontSize: 10 }} MenuProps={themedMenuProps}>
                         <MenuItem value="linear">Lin</MenuItem>
                         <MenuItem value="log">Log</MenuItem>
@@ -5011,24 +5012,24 @@ function Show4DSTEM() {
                     <Box sx={{ display: "flex", flexDirection: "column", gap: `${SPACING.XS}px`, flex: "1 1 220px", minWidth: 0, justifyContent: "center" }}>
                       {/* Row 1: Scale + Clip */}
                       <Box sx={{ ...controlRow, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>
-                        <Typography sx={{ ...typo.label, fontSize: 10 }}>Scale:</Typography>
+                        <Typography sx={{ ...typo.label, fontSize: 10 }}>Scale</Typography>
                         <Select value={fftScaleMode} onChange={(e) => setFftScaleMode(e.target.value as "linear" | "log")} size="small" sx={{ ...themedSelect, minWidth: 50, fontSize: 10 }} MenuProps={themedMenuProps}>
                           <MenuItem value="linear">Lin</MenuItem>
                           <MenuItem value="log">Log</MenuItem>
 
                         </Select>
-                        <Typography sx={{ ...typo.label, fontSize: 10 }}>Auto:</Typography>
+                        <Typography sx={{ ...typo.label, fontSize: 10 }}>Auto</Typography>
                         <Switch checked={fftAuto} onChange={(e) => toggleFftAuto(e.target.checked)} size="small" sx={switchStyles.small} />
                         {fftCropDims && (
                           <>
-                            <Typography sx={{ ...typo.label, fontSize: 10 }}>Win:</Typography>
+                            <Typography sx={{ ...typo.label, fontSize: 10 }}>Win</Typography>
                             <Switch checked={fftWindow} onChange={(e) => setFftWindow(e.target.checked)} size="small" sx={switchStyles.small} />
                           </>
                         )}
                       </Box>
                       {/* Row 2: Color */}
                       <Box sx={{ ...controlRow, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>
-                        <Typography sx={{ ...typo.label, fontSize: 10 }}>Color:</Typography>
+                        <Typography sx={{ ...typo.label, fontSize: 10 }}>Color</Typography>
                         <Select value={fftColormap} onChange={(e) => setFftColormap(String(e.target.value))} size="small" sx={{ ...themedSelect, minWidth: 65, fontSize: 10 }} MenuProps={themedMenuProps}>
                           <MenuItem value="inferno">Inferno</MenuItem>
                           <MenuItem value="viridis">Viridis</MenuItem>
@@ -5100,7 +5101,7 @@ function Show4DSTEM() {
           </Stack>
           <Slider value={pathIndex} onChange={(_, v) => { setPathPlaying(false); setPathIndex(v as number); }} min={0} max={Math.max(0, pathLength - 1)} size="small" sx={{ flex: 1, minWidth: 60, "& .MuiSlider-thumb": { width: 10, height: 10 } }} />
           <Typography sx={{ ...typo.value, minWidth: 50, textAlign: "right", flexShrink: 0 }}>{pathIndex + 1}/{pathLength}</Typography>
-          <Typography sx={{ ...typo.label, fontSize: 10 }}>Loop:</Typography>
+          <Typography sx={{ ...typo.label, fontSize: 10 }}>Loop</Typography>
           <Switch checked={pathLoop} onChange={(_, v) => { model.set("path_loop", v); model.save_changes(); }} size="small" sx={switchStyles.small} />
         </Box>
       )}

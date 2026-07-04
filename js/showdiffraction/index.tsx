@@ -56,6 +56,7 @@ const compactButton = {
   py: 0.25,
   px: 1,
   minWidth: 0,
+  textTransform: "none" as const,
   "&.Mui-disabled": {
     color: "#666",
     borderColor: "#444",
@@ -854,22 +855,22 @@ function ShowDiffraction() {
             <Stack direction="row" alignItems="center" spacing={`${SPACING.SM}px`} useFlexGap sx={{ mb: `${SPACING.XS}px`, minHeight: 28, flexWrap: "wrap", rowGap: `${SPACING.XS}px`, maxWidth: canvasSize, px: 1, py: 0.5, border: `1px solid ${themeColors.border}`, borderRadius: "4px", bgcolor: themeColors.controlBg }}>
               <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} onClick={() => setDetectRequest(20)} title="Auto-detect Bragg spots">Spots</Button>
               <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} onClick={() => setDetectRingsRequest(8)} title="Auto-detect Debye–Scherrer rings">Rings</Button>
-              <Typography sx={{ ...typography.label, fontSize: 10 }}>Center:</Typography>
+              <Typography sx={{ ...typography.label, fontSize: 10 }}>Center</Typography>
               <Select size="small" value={centerMode} onChange={(e) => setCenterMode(String(e.target.value))} sx={{ ...themedSelect, minWidth: 80 }} MenuProps={themedMenuProps}>
                 <MenuItem value="auto" sx={{ fontSize: 10 }}>Auto</MenuItem>
                 <MenuItem value="manual" sx={{ fontSize: 10 }}>Manual</MenuItem>
               </Select>
-              <Typography sx={{ ...typography.label, fontSize: 10 }}>Cmap:</Typography>
+              <Typography sx={{ ...typography.label, fontSize: 10 }}>Cmap</Typography>
               <Select size="small" value={dpColormap} onChange={(e) => setDpColormap(e.target.value)} sx={themedSelect} MenuProps={themedMenuProps}>
                 {COLORMAP_NAMES.map(n => <MenuItem key={n} value={n} sx={{ fontSize: 10 }}>{n}</MenuItem>)}
               </Select>
-              <Typography sx={{ ...typography.label, fontSize: 10 }}>Scale:</Typography>
+              <Typography sx={{ ...typography.label, fontSize: 10 }}>Scale</Typography>
               <Select size="small" value={dpScaleMode} onChange={(e) => setDpScaleMode(e.target.value)} sx={{ ...themedSelect, minWidth: 60 }} MenuProps={themedMenuProps}>
                 <MenuItem value="linear" sx={{ fontSize: 10 }}>Linear</MenuItem>
                 <MenuItem value="log" sx={{ fontSize: 10 }}>Log</MenuItem>
                 <MenuItem value="sqrt" sx={{ fontSize: 10 }}>Sqrt</MenuItem>
               </Select>
-              <Typography sx={{ ...typography.label, fontSize: 10 }}>Invert:</Typography>
+              <Typography sx={{ ...typography.label, fontSize: 10 }}>Invert</Typography>
               <Switch size="small" checked={dpInvert} onChange={(_, v) => setDpInvert(v)} sx={switchStyles.small} />
               {centerMode === "manual" && (
                 <Typography sx={{ ...typography.value, color: themeColors.accent }}>click to set</Typography>
@@ -903,7 +904,7 @@ function ShowDiffraction() {
           {/* Frame slider (3D stacks only) */}
           {nFrames > 1 && (
             <Box sx={{ ...controlRow, width: canvasSize }}>
-              <Typography sx={typography.label}>Frame:</Typography>
+              <Typography sx={typography.label}>Frame</Typography>
               <Slider
                 value={localFrame}
                 min={0} max={nFrames - 1} step={1} size="small"
@@ -1076,20 +1077,20 @@ function ShowDiffraction() {
         <Box sx={{ mt: `${SPACING.MD}px`, maxWidth: canvasSize }}>
           <Stack direction="row" spacing={`${SPACING.LG}px`} sx={{ flexWrap: "wrap" }}>
             <Box sx={controlBox}>
-              <Typography sx={typography.label}>Refine:</Typography>
+              <Typography sx={typography.label}>Refine</Typography>
               <Switch
                 size="small" checked={spotRefine}
                 onChange={(_, v) => setSpotRefine(v)}
                 sx={switchStyles.small}
               />
-              <Typography sx={{ ...typography.label, ml: 1 }}>Snap:</Typography>
+              <Typography sx={{ ...typography.label, ml: 1 }}>Snap</Typography>
               <Switch
                 size="small" checked={snapEnabled}
                 onChange={(_, v) => setSnapEnabled(v)}
                 sx={switchStyles.small}
                 disabled={spotRefine}
               />
-              <Typography sx={typography.label}>r:</Typography>
+              <Typography sx={typography.label}>r</Typography>
               <Typography sx={typography.value}>{snapRadius}</Typography>
             </Box>
 
