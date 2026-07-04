@@ -209,6 +209,37 @@ def test_html_export_clones_keep_bulk_buffers():
         stem.close()
 
 
+def test_show3d_quantized_html_export_can_bin_heavy_stacks(tmp_path):
+    """Report-style Show3D exports can opt into a compact binned uint8 pack.
+
+    The live widget remains native resolution; only the export clone is
+    spatially binned and its scale-bar pixel size is adjusted.
+    """
+    rng = np.random.default_rng(123)
+    data = rng.random((4, 64, 64), dtype=np.float32)
+    widget = Show3D(data, sampling=0.2, units="nm", save_state=False, title="binned export")
+
+    full_clone = widget._clone_for_html_export(quantized=True)
+    binned_clone = widget._clone_for_html_export(quantized=True, downsample=4)
+    try:
+        assert (widget.height, widget.width) == (64, 64)
+        assert widget.pixel_size == pytest.approx(0.2)
+        assert (full_clone.n_slices, full_clone.height, full_clone.width) == (4, 64, 64)
+        assert (binned_clone.n_slices, binned_clone.height, binned_clone.width) == (4, 16, 16)
+        assert binned_clone.pixel_size == pytest.approx(0.8)
+        assert len(binned_clone._offline_stack) < len(full_clone._offline_stack) / 8
+    finally:
+        full_clone.close()
+        binned_clone.close()
+
+    out = widget.export_html(tmp_path / "binned.html", encoding="uint8", downsample=4)
+    assert out.exists()
+    assert "4x binned" in widget.export_status
+    with pytest.raises(ValueError, match="exact float32"):
+        widget.export_html(tmp_path / "bad.html", encoding="full", downsample=2)
+    widget.close()
+
+
 def test_show4dstem_bslz4_html_export_embeds_self_with_bulk_state(monkeypatch, tmp_path):
     """Show4DSTEM's bslz4 export branch embeds ``self``, not an export clone."""
     widget = Show4DSTEM(

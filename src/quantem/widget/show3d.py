@@ -2310,9 +2310,10 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
         numerical precision. The quantized export writes the existing offline
         uint8 representation plus global min/max metadata, making a smaller
         single-file report for visual sharing. Preferred export options are
-        ``mode="single"``, ``encoding="full"`` or ``encoding="uint8"``, and
-        ``downsample=None``. ``quantized`` is kept as a compatibility alias for
-        ``encoding="uint8"``.
+        ``mode="single"``, ``encoding="full"`` or ``encoding="uint8"``. Use
+        ``downsample=2`` / ``4`` / ``8`` with ``encoding="uint8"`` for compact
+        report HTML from heavy multi-panel movies. ``quantized`` is kept as a
+        compatibility alias for ``encoding="uint8"``.
 
         Parameters
         ----------
@@ -2322,6 +2323,10 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
         quantized : bool, default False
             If True, write the uint8 offline pack. If False, write exact
             float32 bytes.
+        downsample : int, optional
+            Spatial integer binning factor for the exported HTML only. The
+            source widget data and live notebook view are unchanged. Binned
+            exports multiply the scale-bar pixel size by this factor.
         title : str, optional
             Browser page title. Defaults to the widget title or class name.
 
@@ -2333,16 +2338,24 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
         if self._data is None:
             raise ValueError("Cannot export HTML after free(); rebuild the widget first.")
 
-        quantized = self._normalise_html_export_options(
+        quantized, downsample_factor = self._normalise_html_export_options(
             mode=mode,
             encoding=encoding,
             downsample=downsample,
             quantized=quantized,
         )
-        export_path = pathlib.Path(path) if path is not None else self._default_html_export_path(quantized)
-        self._write_html_export(export_path, quantized=quantized, title=title)
+        export_path = pathlib.Path(path) if path is not None else self._default_html_export_path(
+            quantized,
+            downsample=downsample_factor,
+        )
+        self._write_html_export(
+            export_path,
+            quantized=quantized,
+            downsample=downsample_factor,
+            title=title,
+        )
         size_mb = export_path.stat().st_size / (1024 * 1024)
-        label = self._export_mode_label(quantized)
+        label = self._export_mode_label(quantized, downsample=downsample_factor)
         self.export_status = f"Exported {export_path.name} ({size_mb:.1f} MB, {label})"
         return export_path
 
@@ -2353,7 +2366,7 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
         encoding: str = "full",
         downsample: int | None = None,
         quantized: bool | None = None,
-    ) -> bool:
+    ) -> tuple[bool, int]:
         raw_mode = str(mode or "single").strip().lower().replace("_", "-")
         if raw_mode in {"exact", "full"}:
             raw_mode = "single"
@@ -2363,17 +2376,27 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
             encoding = "uint8"
         if raw_mode != "single":
             raise ValueError("Show3D HTML export supports mode='single'")
-        if downsample not in (None, 1, "1", "", 0, "0"):
-            raise NotImplementedError("Show3D HTML export does not support downsample yet")
+        if downsample in (None, "", 0, "0"):
+            downsample_factor = 1
+        else:
+            if isinstance(downsample, bool):
+                raise ValueError("Show3D HTML export downsample must be an integer factor, not bool")
+            downsample_factor = int(downsample)
+        if downsample_factor < 1:
+            raise ValueError(f"Show3D HTML export downsample must be >= 1, got {downsample!r}")
+        if downsample_factor not in {1, 2, 4, 8}:
+            raise ValueError("Show3D HTML export downsample must be one of 1, 2, 4, or 8")
         raw_encoding = str(encoding or "full").strip().lower().replace("_", "-")
         if quantized is True:
             raw_encoding = "uint8"
         elif quantized is False and raw_encoding in {"quantized", "uint8", "u8"}:
             raw_encoding = "uint8"
         if raw_encoding in {"full", "exact", "float32", "f32"}:
-            return False
+            if downsample_factor != 1:
+                raise ValueError("Show3D exact float32 HTML export does not support downsample; use encoding='uint8'")
+            return False, 1
         if raw_encoding in {"uint8", "u8", "quantized"}:
-            return True
+            return True, downsample_factor
         raise ValueError(f"unknown Show3D export encoding {encoding!r}; expected 'full' or 'uint8'")
 
     def load_state_dict(self, state: dict) -> None:
@@ -3708,32 +3731,35 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
                     size_mb = path.stat().st_size / (1024 * 1024)
                     self.export_status = f"Exported {path.name} ({size_mb:.1f} MB)"
                 return
-            quantized = self._normalise_html_export_options(
+            quantized, downsample_factor = self._normalise_html_export_options(
                 mode=mode,
                 encoding=str(payload.get("encoding", "full")),
                 downsample=payload.get("downsample"),
                 quantized=None,
             )
             if payload.get("download"):
-                filename = str(payload.get("filename") or self._default_html_export_path(quantized).name)
+                filename = str(payload.get("filename") or self._default_html_export_path(
+                    quantized,
+                    downsample=downsample_factor,
+                ).name)
                 request_id = str(payload.get("id") or "")
                 self.export_status = f"Preparing {filename}..."
-                html = self._html_export_bytes(quantized=quantized)
+                html = self._html_export_bytes(quantized=quantized, downsample=downsample_factor)
                 self.export_filename = filename
                 self.export_payload = html
                 self.export_payload_id = request_id
                 size_mb = len(html) / (1024 * 1024)
-                label = self._export_mode_label(quantized)
+                label = self._export_mode_label(quantized, downsample=downsample_factor)
                 self.export_status = f"Ready {filename} ({size_mb:.1f} MB, {label})"
             else:
                 self.export_status = f"Exporting {mode} HTML..."
-                self.export_html(quantized=quantized)
+                self.export_html(quantized=quantized, downsample=downsample_factor)
         except Exception as exc:
             self.export_status = f"Export failed: {exc}"
 
     # === Internal primitives ===
 
-    def _default_html_export_path(self, quantized: bool) -> pathlib.Path:
+    def _default_html_export_path(self, quantized: bool, *, downsample: int = 1) -> pathlib.Path:
         """Build a stable, human-readable export filename in the kernel cwd."""
         label = self.title.strip() or "show3d"
         slug = "".join(ch.lower() if ch.isalnum() else "_" for ch in label).strip("_")
@@ -3742,7 +3768,8 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
         if not slug:
             slug = "show3d"
         mode = "quantized" if quantized else "exact"
-        return pathlib.Path.cwd() / f"{slug}_{self.n_slices}x{self.height}x{self.width}_{mode}.html"
+        suffix = f"_{int(downsample)}xbin" if quantized and int(downsample) > 1 else ""
+        return pathlib.Path.cwd() / f"{slug}_{self.n_slices}x{self.height}x{self.width}_{mode}{suffix}.html"
 
     def _default_animation_export_path(self, mode: str, quality: str = "medium") -> pathlib.Path:
         """Build a stable, human-readable GIF/MP4 export filename."""
@@ -3769,14 +3796,19 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
         """Map UI quality labels to H.264 compression quality."""
         return {"low": 24, "medium": 21, "high": 18}[self._normalise_animation_quality(quality)]
 
-    def _export_mode_label(self, quantized: bool) -> str:
-        return "uint8" if quantized else "full float32"
+    def _export_mode_label(self, quantized: bool, *, downsample: int = 1) -> str:
+        if not quantized:
+            return "full float32"
+        if int(downsample) > 1:
+            return f"uint8, {int(downsample)}x binned"
+        return "uint8"
 
     def _write_html_export(
         self,
         path: str | pathlib.Path,
         *,
         quantized: bool,
+        downsample: int = 1,
         title: str | None = None,
     ) -> pathlib.Path:
         """Write a standalone HTML export without updating toolbar status."""
@@ -3787,7 +3819,7 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
         export_path = pathlib.Path(path)
         export_path.parent.mkdir(parents=True, exist_ok=True)
         page_title = title or self.title or "Show3D"
-        export_widget = self._clone_for_html_export(quantized=quantized)
+        export_widget = self._clone_for_html_export(quantized=quantized, downsample=downsample)
         try:
             state = dependency_state([export_widget], drop_defaults=False)
             embed_minimal_html(
@@ -3802,11 +3834,14 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
         ensure_mobile_viewport(export_path)
         return export_path
 
-    def _html_export_bytes(self, *, quantized: bool) -> bytes:
+    def _html_export_bytes(self, *, quantized: bool, downsample: int = 1) -> bytes:
         """Build a standalone HTML export in a temp directory and return bytes."""
         with tempfile.TemporaryDirectory(prefix="show3d-export-") as tmp:
-            path = pathlib.Path(tmp) / self._default_html_export_path(quantized).name
-            self._write_html_export(path, quantized=quantized)
+            path = pathlib.Path(tmp) / self._default_html_export_path(
+                quantized,
+                downsample=downsample,
+            ).name
+            self._write_html_export(path, quantized=quantized, downsample=downsample)
             return path.read_bytes()
 
     def _animation_export_bytes(self, mode: str, *, quality: str = "medium") -> bytes:
@@ -3822,30 +3857,39 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
                 raise ValueError(f"unsupported animation export mode {mode!r}")
             return path.read_bytes()
 
-    def _export_data_args(self) -> tuple[np.ndarray, ...]:
+    def _export_data_args(self, *, downsample: int = 1) -> tuple[np.ndarray, ...]:
         """Return display-shaped data args so exported HTML matches the widget."""
         if self._display_data is None:
             raise ValueError("Cannot export HTML after free(); rebuild the widget first.")
+        downsample = int(downsample)
+        if downsample > 1:
+            from quantem.widget.utils.array import bin2d
+
+            def _bin(panel: np.ndarray) -> np.ndarray:
+                return np.ascontiguousarray(bin2d(panel, factor=downsample, mode="mean"), dtype=np.float32)
+        else:
+            def _bin(panel: np.ndarray) -> np.ndarray:
+                return np.ascontiguousarray(panel, dtype=np.float32)
+
         n_panels = int(self.n_panels)
         if self.shared_panel_source and n_panels > 1:
-            src = np.ascontiguousarray(self._display_data, dtype=np.float32)
+            src = _bin(self._display_data)
             return tuple(src for _ in range(n_panels))
         if self._separate_panel_data is not None:
             return tuple(
-                np.ascontiguousarray(panel, dtype=np.float32)
+                _bin(panel)
                 for panel in self._separate_panel_data
             )
         if n_panels > 1 and int(self.panel_width_px) > 0:
             panel_w = int(self.panel_width_px)
             if int(self.width) == panel_w * n_panels:
                 return tuple(
-                    np.ascontiguousarray(
+                    _bin(
                         self._display_data[:, :, i * panel_w : (i + 1) * panel_w],
-                        dtype=np.float32,
                     )
                     for i in range(n_panels)
                 )
-        return (np.ascontiguousarray(self._display_data, dtype=np.float32),)
+        return (_bin(self._display_data),)
 
     def _offline_stack_source(self) -> np.ndarray:
         """Return the stack shape that the offline frontend indexes per frame."""
@@ -3873,10 +3917,12 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
         self.frame_bytes = b""
         self._buffer_bytes = b""
 
-    def _clone_for_html_export(self, *, quantized: bool) -> Self:
+    def _clone_for_html_export(self, *, quantized: bool, downsample: int = 1) -> Self:
         """Create an export-only widget with current state and requested packing."""
+        downsample = int(downsample)
+        export_pixel_size = self.pixel_size * downsample if self.pixel_size > 0 else self.pixel_size
         clone = type(self)(
-            *self._export_data_args(),
+            *self._export_data_args(downsample=downsample),
             labels=list(self.labels) if self.labels else None,
             panel_titles=list(self.panel_titles) if self.panel_titles else None,
             panel_frame_labels=[list(labels) for labels in self.panel_frame_labels] if self.panel_frame_labels else None,
@@ -3891,7 +3937,7 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
             cmap=self.cmap,
             vmin=self.vmin,
             vmax=self.vmax,
-            pixel_size=self.pixel_size,
+            pixel_size=export_pixel_size,
             pixel_unit=self.pixel_unit,
             smooth=self.smooth,
             image_rotation=self.image_rotation,
@@ -3929,6 +3975,8 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
             show_scale_bar=self.scale_bar_visible,
         )
         clone.load_state_dict(self.state_dict())
+        if downsample > 1 and clone.pixel_size > 0:
+            clone.pixel_size = export_pixel_size
         if quantized:
             clone._offline_float_stack = b""
         else:
