@@ -41,6 +41,8 @@ parts:
         title: Changelog
       - file: maintainer/widget-release
         title: Release
+      - file: maintainer/automation
+        title: Automation
       - file: maintainer/viewing-html-on-mobile
         title: Mobile HTML
       - file: maintainer/widget-agent-signoff

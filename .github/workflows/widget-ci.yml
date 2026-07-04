@@ -1,0 +1,63 @@
+name: widget ci
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/widget-ci.yml"
+      - "docs/**"
+      - "js/**"
+      - "scripts/**"
+      - "src/**"
+      - "tests/**"
+      - "package-lock.json"
+      - "package.json"
+      - "pyproject.toml"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/widget-ci.yml"
+      - "docs/**"
+      - "js/**"
+      - "scripts/**"
+      - "src/**"
+      - "tests/**"
+      - "package-lock.json"
+      - "package.json"
+      - "pyproject.toml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: widget-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  signoff:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22.x"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r docs/requirements.txt
+          python -m pip install -e .
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Run local signoff
+        run: scripts/widget_local_signoff.sh

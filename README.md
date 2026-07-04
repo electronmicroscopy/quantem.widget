@@ -173,17 +173,18 @@ through it line by line.
   dragging controls in JupyterLab or exported HTML, not only by reading code or
   unit tests.
 - [ ] For interaction-sensitive changes, run
-  `scripts/widget_agent_signoff.sh --quick`, fix issues immediately, rebuild,
+  `scripts/widget_local_signoff.sh --quick`, fix issues immediately, rebuild,
   refresh, and redrive before claiming the widget is ready. See
+  [Automation](docs/maintainer/automation.md) and
   [Agent signoff](docs/maintainer/widget-agent-signoff.md).
 - [ ] Expensive work avoids Python/kernel round trips during pointer movement;
   use WebGPU, typed arrays, cached indexes, workers, or throttled schedulers
   where the widget interaction requires live feedback.
 - [ ] Large scientific data stays honest about precision and size: do not
   silently crop, bin, downsample, quantize, or materialize sparse zeros.
-- [ ] Real tutorial data is hosted through public `quantem.data` pages instead
-  of committed to this repo; coordinate with Bob Lee if a new dataset needs
-  online hosting.
+- [ ] Keep `main` lightweight: small real rendered examples are fine, but large
+  tutorial arrays or HTML payloads should be generated during docs builds or
+  downloaded from public data hosting only when the size justifies it.
 - [ ] Any binning/downsampling is explicit in the API and documentation, with
   the reducer named clearly, for example mean, sum, or display-scaled `uint8`.
 - [ ] The widget exposes `export_html(path=None, title=None, mode="single",
@@ -208,7 +209,7 @@ through it line by line.
   imports; let the returned widget render naturally.
 - [ ] The change includes focused tests for Python state/export behavior and
   frontend build coverage where possible; start with `PYTHONPATH=src pytest -q`
-  and `npm run build`.
+  and `npm run build`, or run `scripts/widget_local_signoff.sh`.
 - [ ] Before committing, inspect `git status --short` and `git diff --stat`;
   do not commit generated HTML, docs builds, screenshots, local notebooks,
   private data, or machine-specific notes.

@@ -1594,7 +1594,8 @@ function Show3D() {
   const hasLiveFrameBytes = !!rawFrameBytes && rawFrameBytes.byteLength > 0;
   const hasOfflineStack = !!offlineStack && offlineStack.byteLength > 0;
   const hasOfflineFloatStack = !!offlineFloatStack && offlineFloatStack.byteLength > 0;
-  const canRenderLive = hasLiveFrameBytes || hasOfflineStack || hasOfflineFloatStack;
+  const hasFrameServer = !offline && !!frameServerUrl;
+  const canRenderLive = hasLiveFrameBytes || hasOfflineStack || hasOfflineFloatStack || hasFrameServer;
   const staticFallbackUrl = staticFallbackJpeg ? `data:image/jpeg;base64,${staticFallbackJpeg}` : "";
   const hasSavedStaticFallback = staticFallbackUrl.length > 0;
   useHideStaticFallback(model, rootRef, canRenderLive || hasSavedStaticFallback);

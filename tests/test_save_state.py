@@ -60,6 +60,8 @@ def test_full_snapshot_trims_bulk_buffers(widget):
     """save_state=False: no bulk pixel buffer may appear in the saved-notebook
     snapshot. This is the anti-1GB guard."""
     w, _ = _make(widget, save_state=False)
+    if widget is Show3D:
+        w._on_first_render({"new": True})
     full = w.get_state()
     leaked = [k for k in w._UNSAVED_HEAVY_KEYS if k in full]
     assert not leaked, (
@@ -159,6 +161,28 @@ def test_show3d_first_render_clears_heavy_transfer_buffers():
     buffers = widget._get_embed_state().get("buffers", [])
     assert not [b for b in buffers if b.get("path") in (["frame_bytes"], ["_buffer_bytes"])]
     assert not [b for b in buffers if b.get("data")]
+
+
+def test_show3d_live_mount_state_keeps_initial_frame_before_first_render():
+    """The initial full state is also the live anywidget mount payload.
+
+    ``save_state=False`` should strip heavy buffers from later notebook saves,
+    but not from the pre-render mount state; otherwise JupyterLab mounts a
+    Show3D root with only the static JPEG preview and no interactive canvas.
+    """
+    stack = np.random.default_rng(2).random((3, 64, 64), dtype=np.float32)
+    widget = Show3D(stack, save_state=False, offline=False)
+
+    pre_render = widget._with_initial_live_mount_state(widget.get_state)
+
+    assert widget._js_rendered is False
+    assert pre_render.get("frame_bytes"), "pre-render live mount lost frame_bytes"
+
+    widget._on_first_render({"new": True})
+    post_render = widget.get_state()
+
+    assert "frame_bytes" not in post_render
+    assert "_buffer_bytes" not in post_render
 
 
 def _assert_export_state_keeps_buffer(widget, key: str) -> None:

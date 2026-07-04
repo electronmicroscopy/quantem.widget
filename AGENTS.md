@@ -41,6 +41,12 @@ migration.
 For any `quantem.widget` release or release-candidate work, follow
 `docs/maintainer/widget-release.md`.
 
+For routine local readiness checks, run `scripts/widget_local_signoff.sh`.
+Use `--quick` while iterating, and `--full --performance` before broad UI or
+release-candidate work. See `docs/maintainer/automation.md`.
+Each run writes a visual report directory with a top-level `index.html`; use
+`--artifact-dir` when another agent or the user needs a stable path to inspect.
+
 Do not create or push a `widget-v*` tag until the required local gates in that
 runbook pass. For RCs intended for TestPyPI, also run the real browser/Jupyter
 user-path checks called out in the runbook before tagging.
@@ -96,3 +102,9 @@ Keep public documentation in durable paths such as `README.md`,
 Do not commit local session notes, one-off benchmark scripts, AppleDouble
 `._*` files, generated docs builds, screenshots, or scratch files unless they
 have been promoted into a documented test, example, or maintainer runbook.
+
+Keep the main branch simple. Do not split documentation into a separate repo or
+introduce Git LFS just to support routine widget docs. Prefer source notebooks,
+small real rendered examples, and generated docs output. Use public data hosting
+only when real tutorial data or standalone HTML would make normal clones
+unnecessarily large.

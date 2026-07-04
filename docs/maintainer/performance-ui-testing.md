@@ -189,12 +189,15 @@ For the common Show2D + Show3D heavy gate, an agent should do the following:
 
 1. Start from `main`, rebuild the frontend, and launch the MJGOAT Jupyter
    backend with the patched checkout first on `PYTHONPATH`.
-2. Generate or open one Show2D notebook for PUI-2D-4K/PUI-2D-BATCH and one
-   Show3D notebook for PUI-3D-MULTI/PUI-3D-EXPORT.
-3. Drive the in-app browser through all controls listed in Gate 3, including
+2. Run `PYTHONPATH=src:. python scripts/widget_performance_smoke.py` with
+   real-data size options appropriate for the release gate. The script writes
+   standalone exports, `index.html`, `report.json`, and `browser-plan.json`.
+3. Serve the artifact directory and open the generated pages in the in-app
+   browser.
+4. Drive the in-app browser through all controls listed in Gate 3, including
    repeated fast gestures.
-4. Save screenshots and a timing JSON under `/tmp/quantem-widget-perf-ui`.
-5. Run `PYTHONPATH=src pytest -q` and `npm run build`, then attach the browser
+5. Save screenshots and browser timing JSON under `/tmp/quantem-widget-perf-ui`.
+6. Run `PYTHONPATH=src pytest -q` and `npm run build`, then attach the browser
    report before claiming the release is ready.
 
 The browser report is the proof. Passing tests without a browser report is

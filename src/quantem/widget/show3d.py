@@ -4276,7 +4276,11 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
         without a kernel.
         """
         state = super().get_state(key=key, drop_defaults=drop_defaults)
-        if key is None and not getattr(self, "_save_state", False):
+        if (
+            key is None
+            and not getattr(self, "_save_state", False)
+            and not getattr(self, "_initial_live_mount_state", False)
+        ):
             if not self._static_fallback_jpeg:
                 png = self._static_png_b64()
                 if png:
@@ -4285,6 +4289,23 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
             for heavy_key in self._UNSAVED_HEAVY_KEYS:
                 state.pop(heavy_key, None)
         return state
+
+    def _with_initial_live_mount_state(self, fn, *args, **kwargs):
+        """Expose the first live frame only during the Jupyter display handshake."""
+        self._initial_live_mount_state = True
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            self._initial_live_mount_state = False
+
+    def _repr_mimebundle_(self, **kwargs):
+        return self._with_initial_live_mount_state(
+            super()._repr_mimebundle_,
+            **kwargs,
+        )
+
+    def _ipython_display_(self):
+        return self._with_initial_live_mount_state(super()._ipython_display_)
 
     def _static_panel_frame_label(self, panel: int, idx: int) -> str:
         """Return the dynamic frame label shown in the live panel title."""
