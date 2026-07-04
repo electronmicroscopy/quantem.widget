@@ -19,6 +19,10 @@ data = load("scan_master.h5", det_bin=2)              # smaller detector, still 
 data = load("scan_master.h5", det_bin=4, dtype="u8")  # small browse copy
 ```
 
+The loader prints useful progress by default. Keep those lines visible while you
+are learning a new dataset; they tell you how much memory was allocated, whether
+the data was narrowed safely, and whether a preview dtype clipped counts.
+
 ## Dtype in plain language
 
 The `dtype` is how each number is stored.
@@ -34,6 +38,16 @@ counts exactly and is still much smaller than `float32`.
 
 Use `uint8` only when you want a lightweight preview or tutorial copy. It is
 fast and small, but it can saturate real counts above 255.
+
+If you request `dtype="u8"` and any counts exceed 255, `load` warns you:
+
+```text
+Warning: dtype='u8' saturated 1,482,913 pixels (0.0124%) above 255 to 255.
+Pass dtype='u16' or 'auto' to keep full counts.
+```
+
+That warning is intentional. It means the browsing copy is no longer exact, so
+use `dtype="u16"` or the default load for quantitative work.
 
 ## Size estimates
 
@@ -84,10 +98,28 @@ view:
 
 ```python
 from quantem.widget import load, Show4DSTEM
+from quantem.widget.io import memory
 
-data = load("scan_001_master.h5")
+memory()  # optional: check VRAM before loading
+data = load("scan_001_master.h5", verbose=True)
+print(data.data.shape, data.data.dtype, f"{data.data.nbytes / 1e9:.1f} GB")
+memory()  # optional: confirm VRAM after loading
 Show4DSTEM(data)
 ```
+
+Typical output:
+
+```text
+VRAM GPU0    12.6 /   95.0 GB used   (82.4 free)   [torch 0.0, cupy 0.0]   NVIDIA RTX PRO 6000
+RAM          84.1 /  540.0 GB used   (447.2 free)
+  Loaded 1,048,576 frames (19.3 GB) in 6.42s (3.0 GB/s)
+(1024, 1024, 96, 96) uint16 19.3 GB
+VRAM GPU0    32.1 /   95.0 GB used   (62.9 free)   [torch 0.0, cupy 19.3]  NVIDIA RTX PRO 6000
+RAM          84.4 /  540.0 GB used   (446.8 free)
+```
+
+Read this as: the full detector-count stack is now on the NVIDIA GPU as
+`uint16`; no browser copy has been quantized.
 
 ### Browse a large folder quickly
 
@@ -99,12 +131,23 @@ from quantem.widget import load, Show4DSTEM
 from quantem.widget.io import discover_masters
 
 masters = discover_masters("/data/session", scan_shape=(512, 512))
-data = load(masters, det_bin=4, dtype="u8")
+data = load(masters, det_bin=4, dtype="u8", verbose=True)
 Show4DSTEM(data)
 ```
 
 This keeps all scans behind one dataset slider. It is a browsing copy, not the
 final reconstruction dataset.
+
+Typical output:
+
+```text
+  Loaded 262,144 frames (0.6 GB) in 4.81s (4.0 GB/s)
+  Loaded in uint8 for browsing - using 0.6 GB, half of uint16
+  (decoded straight to uint8, so peak memory stayed low). Reconstruction uses raw uint16.
+```
+
+If this path prints a saturation warning, the preview still works for finding
+fields of view, but it is not count-exact.
 
 ### Load several scans without throwing away detector counts
 
