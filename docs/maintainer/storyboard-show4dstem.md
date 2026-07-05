@@ -315,3 +315,29 @@ dataset.
 - If a future GUI exposes memory status, verify it reports backend ownership and
   links to cleanup instructions instead of pretending the viewer alone can free
   all GPU memory.
+
+### S4D-14: Append Live Scope Acquisitions
+
+**User story**: As a microscope user collecting a session of 4D-STEM scans, I
+want newly completed ``*_master.h5`` files to appear in the same Show4DSTEM
+viewer so I can process data in real time without rebuilding the notebook.
+
+**Primary widgets**: Show4DSTEM with the lazy MPS multi-dataset handle.
+
+**Data to use**: a live or simulated acquisition folder where masters appear
+over time, including at least one partial/incomplete master that should be
+ignored until ready.
+
+**Acceptance checks**:
+
+- Start with ``load_macbook_datasets(folder, det_bin=4, scan_size=...)`` and
+  mount ``Show4DSTEM(live)`` while only the first dataset is ready.
+- Call ``live.watch_master_folder(folder, interval=...)`` and verify newly
+  completed masters append into the existing Dataset slider.
+- Verify partial masters are skipped until ``is_master_ready`` confirms linked
+  data files exist.
+- Verify repeated polls do not duplicate already loaded masters.
+- Drive detector drag, scan-position movement, diffraction pan/zoom, FFT, and
+  contrast after an append to confirm the active viewer remains real time.
+- Record load/append timing, backend path, detector bin, dtype, scan size, and
+  GPU memory behavior in the signoff report.

@@ -23,6 +23,14 @@ w = Show4DSTEM(load(path, backend="mps", det_bin=4))
 # Multi-dataset stack: one viewer, one Dataset slider.
 w = Show4DSTEM(load([path1, path2, path3], det_bin=4))
 
+# Apple Silicon live acquisition folder: dataset 0 appears first, then newly
+# completed *_master.h5 files append into the same Dataset slider.
+from quantem.widget.multidataset_mps import load_macbook_datasets
+
+live = load_macbook_datasets("/data/live-scope-session", det_bin=4, scan_size=512)
+w = Show4DSTEM(live)
+live.watch_master_folder("/data/live-scope-session", interval=2.0, scan_size=512)
+
 # Live-kernel WebGPU: the browser owns virtual-detector compute.
 w = Show4DSTEM(load(path), backend="web")
 
@@ -50,6 +58,28 @@ On Apple Silicon, prefer the raw Metal/MPS loading path for large first-pass
 browsing because it can control chunking, detector binning, and dtype more
 tightly than a generic Torch-MPS tensor path. Torch-MPS remains useful for
 some tensor workflows, but reports should say which path was used.
+
+## Live scope folders
+
+For real-time processing on a microscope or acquisition workstation, keep one
+Show4DSTEM viewer mounted and append new completed acquisitions into it. On the
+Apple Silicon raw-Metal path, `load_macbook_datasets(...)` returns a lazy handle
+that owns the live multi-dataset container:
+
+```python
+from quantem.widget import Show4DSTEM
+from quantem.widget.multidataset_mps import load_macbook_datasets
+
+live = load_macbook_datasets("/data/live-scope-session", det_bin=4, scan_size=512)
+widget = Show4DSTEM(live, title="Live 4D-STEM")
+live.watch_master_folder("/data/live-scope-session", interval=2.0, scan_size=512)
+widget
+```
+
+`watch_master_folder(...)` polls for `*_master.h5` files, ignores masters whose
+linked data files are not present yet, and appends only new acquisitions. The
+notebook cell and viewer stay stable; the dataset slider grows as files become
+ready. Use `live.stop_watch()` before switching to a different folder.
 
 GPU memory is owned by the loaded data object and the Python session, not by the
 visual widget alone. To release GPU memory, remove or replace the backend data

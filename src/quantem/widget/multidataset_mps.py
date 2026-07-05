@@ -49,6 +49,8 @@ class LazyMacbookDatasets:
         self.multi = multi  # MultiChunkedFrames([ds0], n_total=N, names=names)
         self._decode = decode
         self.verbose = bool(verbose)
+        self._watch_stop: threading.Event | None = None
+        self._watch_thread: threading.Thread | None = None
 
     def build_viewer(self, **viewer_kwargs):
         """Show dataset 0 now, fill 1..N-1 in a daemon thread."""
@@ -126,6 +128,115 @@ class LazyMacbookDatasets:
         else:
             _decode_and_append()
         return idx
+
+    @staticmethod
+    def _master_key(master) -> str:
+        return os.path.abspath(os.path.expanduser(str(master)))
+
+    def append_new_masters(self, masters, *, async_: bool = True) -> list[int]:
+        """Append only masters that are not already present in this live handle.
+
+        This is the safe inner loop for microscope/live-folder workflows: callers
+        can repeatedly pass the current discovered master list, and already loaded
+        acquisitions are skipped without rebuilding the viewer.
+        """
+        known = {self._master_key(master) for master in self.masters}
+        added: list[int] = []
+        for master in masters:
+            key = self._master_key(master)
+            if key in known:
+                continue
+            added.append(self.append_master(key, async_=async_))
+            known.add(key)
+        return added
+
+    def poll_master_folder(
+        self,
+        folder,
+        *,
+        pattern: str = "*_master.h5",
+        recursive: bool = True,
+        scan_size: int | None = None,
+        ready_only: bool = True,
+        async_: bool = True,
+    ) -> list[int]:
+        """Discover ready master files in *folder* and append new acquisitions.
+
+        Parameters mirror :func:`quantem.widget.io.discover_masters`. When
+        ``ready_only`` is true, partially written masters are ignored until their
+        linked data files are present.
+        """
+        from quantem.widget.io import discover_masters, is_master_ready
+
+        scan_shape = (int(scan_size), int(scan_size)) if scan_size else None
+        masters = discover_masters(
+            os.path.expanduser(str(folder)),
+            pattern=pattern,
+            recursive=recursive,
+            scan_shape=scan_shape,
+            verbose=False,
+        )
+        if ready_only:
+            masters = [master for master in masters if is_master_ready(master)]
+        return self.append_new_masters(masters, async_=async_)
+
+    def watch_master_folder(
+        self,
+        folder,
+        *,
+        interval: float = 2.0,
+        pattern: str = "*_master.h5",
+        recursive: bool = True,
+        scan_size: int | None = None,
+        ready_only: bool = True,
+        async_: bool = True,
+    ) -> "LazyMacbookDatasets":
+        """Poll a live acquisition folder and append new ready masters.
+
+        The existing Show4DSTEM viewer stays mounted; newly completed masters
+        are appended to the dataset slider as they decode. Call
+        :meth:`stop_watch` before starting a different watcher.
+        """
+        self.stop_watch()
+        stop = threading.Event()
+        self._watch_stop = stop
+
+        def _worker() -> None:
+            while not stop.wait(float(interval)):
+                try:
+                    added = self.poll_master_folder(
+                        folder,
+                        pattern=pattern,
+                        recursive=recursive,
+                        scan_size=scan_size,
+                        ready_only=ready_only,
+                        async_=async_,
+                    )
+                    if self.verbose and added:
+                        print(f"[watch] appended {len(added)} new master(s)", flush=True)
+                except ValueError:
+                    # Empty folders are normal at the start of a live session.
+                    continue
+                except Exception as exc:
+                    if self.verbose:
+                        print(f"[watch] master folder poll failed: {str(exc)[:120]}",
+                              flush=True)
+
+        self._watch_thread = threading.Thread(
+            target=_worker,
+            name="Show4DSTEMMPS-watch-master-folder",
+            daemon=True,
+        )
+        self._watch_thread.start()
+        return self
+
+    def stop_watch(self) -> None:
+        """Stop the live master-folder watcher if one is running."""
+        stop = getattr(self, "_watch_stop", None)
+        if stop is not None:
+            stop.set()
+        self._watch_stop = None
+        self._watch_thread = None
 
 
 def load_macbook_datasets(masters, *, det_bin: int = 4, scan_size: int | None = None,

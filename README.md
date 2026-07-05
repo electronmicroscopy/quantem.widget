@@ -90,6 +90,12 @@ default 8) so the packed stack stays small and fits a laptop's browser - you can
 data that never fit full resolution. Several masters (a folder, or listed explicitly)
 stack into one 5D viewer with a dataset slider (the multi-tilt case).
 
+For live microscope sessions, keep the Show4DSTEM viewer mounted and append new
+completed `*_master.h5` acquisitions into the same dataset slider. On Apple
+Silicon, use `load_macbook_datasets(...)` and `live.watch_master_folder(...)`;
+see the [Show4DSTEM API](docs/api/show4dstem.md#live-scope-folders) and
+[Show4DSTEM storyboard](docs/maintainer/storyboard-show4dstem.md#s4d-14-append-live-scope-acquisitions).
+
 **Notebooks**: `quantem html notebook.ipynb` is the share path for a tutorial or report
 you wrote. It runs every cell, then bakes the outputs (Show2D/Show3D widgets included, as
 static images) into one self-contained HTML that opens in any browser with no Python or
@@ -172,6 +178,11 @@ through it line by line.
 - [ ] Real-time interactions are browser-driven and verified by actually
   dragging controls in JupyterLab or exported HTML, not only by reading code or
   unit tests.
+- [ ] Show4DSTEM live-scope workflows append new ready `*_master.h5`
+  acquisitions into the same live viewer without rebuilding the notebook. Verify
+  new masters appear in the Dataset slider, partial files are skipped until
+  ready, and detector/scan interactions remain real time after append. See
+  [Show4DSTEM live scope folders](docs/api/show4dstem.md#live-scope-folders).
 - [ ] Performance reports separate load time, widget build time, first browser
   paint, and interaction FPS/latency. Include data shape, dtype, raw size,
   backend, and any crop/bin/downsample/quantization. Prefer `verbose=True`
