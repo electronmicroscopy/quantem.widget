@@ -26,6 +26,22 @@ from typing import Any
 from PIL import Image
 
 
+STORY_IDS_BY_VARIANT = {
+    "show2d-single": ["S2D-01", "S2D-04", "S2D-05", "S2D-09"],
+    "show2d-gallery-3": ["S2D-02", "S2D-05", "S2D-06"],
+    "show2d-gallery-6-fft": ["S2D-02", "S2D-07", "S2D-12"],
+    "show2d-hidden-starred": ["S2D-03", "S2D-12"],
+    "show2d-compact-no-titles": ["S2D-11", "S2D-13"],
+    "show3d-single-stack": ["S3D-01", "S3D-02", "S3D-05"],
+    "show3d-single-fft-bottom": ["S3D-07", "S3D-09"],
+    "show3d-single-fft-overlay": ["S3D-08", "S3D-09"],
+    "show3d-three-panels": ["S3D-03", "S3D-05", "S3D-06"],
+    "show3d-hidden-panel": ["S3D-04", "S3D-14"],
+    "show3d-four-panel-downsample": ["S3D-14", "S3D-15", "S3D-16"],
+    "show4dstem": ["S4D-01", "S4D-02", "S4D-03", "S4D-06", "S4D-09"],
+}
+
+
 def _chrome_executable() -> str | None:
     candidates = [
         os.environ.get("CHROME_EXECUTABLE"),
@@ -120,6 +136,88 @@ def _visible_canvas_boxes(page) -> list[dict[str, float]]:
     )
 
 
+def _visible_text_present(page, text: str) -> bool:
+    return bool(
+        page.evaluate(
+            """(text) => {
+              const normalize = (value) => value.trim().replace(/:$/, '').toLowerCase();
+              const wanted = normalize(text);
+              for (const node of [...document.querySelectorAll('button,[role="button"],label,span,div')]) {
+                const value = normalize(node.textContent || '');
+                if (value !== wanted) continue;
+                const rect = node.getBoundingClientRect();
+                const style = getComputedStyle(node);
+                if (rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none') {
+                  return true;
+                }
+              }
+              return false;
+            }""",
+            text,
+        )
+    )
+
+
+def _toggle_labeled_switch(page, label: str) -> dict[str, Any]:
+    return page.evaluate(
+        """(label) => {
+          const normalize = (value) => value.trim().replace(/:$/, '').toLowerCase();
+          const wanted = normalize(label);
+          const visible = (node) => {
+            const rect = node.getBoundingClientRect();
+            const style = getComputedStyle(node);
+            return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+          };
+          const textNodes = [...document.querySelectorAll('button,[role="button"],label,span,div')]
+            .filter(node => normalize(node.textContent || '') === wanted && visible(node));
+          for (const node of textNodes) {
+            const candidates = [];
+            let cursor = node;
+            for (let depth = 0; cursor && depth < 5; depth += 1, cursor = cursor.parentElement) {
+              candidates.push(...cursor.querySelectorAll('input[type="checkbox"]'));
+              if (cursor.nextElementSibling) {
+                candidates.push(...cursor.nextElementSibling.querySelectorAll('input[type="checkbox"]'));
+                if (cursor.nextElementSibling.matches?.('input[type="checkbox"]')) {
+                  candidates.push(cursor.nextElementSibling);
+                }
+              }
+            }
+            const input = candidates.find(item => visible(item.closest('label') || item.parentElement || item));
+            if (input) {
+              const before = Boolean(input.checked);
+              input.click();
+              return {found: true, before, after: Boolean(input.checked)};
+            }
+          }
+          return {found: false, before: null, after: null};
+        }""",
+        label,
+    )
+
+
+def _measure_fps(page, duration_ms: int) -> float:
+    return float(
+        page.evaluate(
+            """async (durationMs) => {
+              const start = performance.now();
+              let frames = 0;
+              return await new Promise(resolve => {
+                function step(now) {
+                  frames += 1;
+                  if (now - start >= durationMs) {
+                    resolve(frames * 1000 / Math.max(1, now - start));
+                  } else {
+                    requestAnimationFrame(step);
+                  }
+                }
+                requestAnimationFrame(step);
+              });
+            }""",
+            duration_ms,
+        )
+    )
+
+
 def _click_text_controls(page, labels: list[str]) -> list[str]:
     clicked: list[str] = []
     for label in labels:
@@ -204,13 +302,48 @@ def _drive_canvas(page, box: dict[str, float]) -> None:
     page.wait_for_timeout(180)
 
 
+def _story_ids_for(row: dict[str, Any]) -> list[str]:
+    variant = str(row["variant"])
+    if variant.startswith("show4dstem"):
+        return STORY_IDS_BY_VARIANT["show4dstem"]
+    return STORY_IDS_BY_VARIANT.get(variant, [])
+
+
+def _semantic_checks(page, row: dict[str, Any], canvas_count: int) -> dict[str, Any]:
+    variant = str(row["variant"])
+    checks: dict[str, Any] = {
+        "story_ids": _story_ids_for(row),
+        "export_action_visible": _visible_text_present(page, "Export"),
+    }
+    errors: list[str] = []
+
+    if "fft" in variant:
+        fft_present = _visible_text_present(page, "FFT")
+        fft_toggle = _toggle_labeled_switch(page, "FFT")
+        body_has_fft = bool(page.evaluate("document.body.innerText.toLowerCase().includes('fft')"))
+        fft_rendered = canvas_count >= 2
+        checks["fft_label_visible"] = fft_present
+        checks["fft_text_present"] = body_has_fft
+        checks["fft_rendered"] = fft_rendered
+        checks["fft_toggle"] = fft_toggle
+        if not (fft_present or body_has_fft or fft_rendered):
+            errors.append("FFT state is not visible for FFT variant")
+        page.wait_for_timeout(120)
+
+    checks["errors"] = errors
+    return checks
+
+
 def _write_html_report(artifact_dir: Path, report: dict[str, Any]) -> None:
     rows = "\n".join(
         "<tr>"
+        f"<td>{html.escape(row['viewport'])}</td>"
         f"<td>{html.escape(row['widget'])}</td>"
         f"<td>{html.escape(row['variant'])}</td>"
         f"<td>{'pass' if row['passed'] else 'fail'}</td>"
         f"<td>{html.escape(str(row['canvas_count']))}</td>"
+        f"<td>{html.escape(f'{row.get('fps', 0):.1f}')}</td>"
+        f"<td>{html.escape(', '.join(row.get('story_ids', [])))}</td>"
         f"<td>{html.escape(str(row['switches_clicked']))}</td>"
         f"<td>{html.escape(str(row['slider_dragged']))}</td>"
         f"<td>{html.escape(str(row['canvas_changed']))}</td>"
@@ -243,7 +376,7 @@ def _write_html_report(artifact_dir: Path, report: dict[str, Any]) -> None:
   drives basic widget interactions.</p>
   <p>Passed: <strong>{report['passed']}</strong> / {len(report['pages'])}</p>
   <table>
-    <thead><tr><th>Widget</th><th>Variant</th><th>Status</th><th>Canvases</th><th>Switches</th><th>Slider</th><th>Canvas changed</th><th>Screenshot</th><th>Errors</th><th>Warnings</th></tr></thead>
+    <thead><tr><th>Viewport</th><th>Widget</th><th>Variant</th><th>Status</th><th>Canvases</th><th>FPS</th><th>Stories</th><th>Switches</th><th>Slider</th><th>Canvas changed</th><th>Screenshot</th><th>Errors</th><th>Warnings</th></tr></thead>
     <tbody>{rows}</tbody>
   </table>
   <h2>Machine-readable report</h2>
@@ -255,7 +388,16 @@ def _write_html_report(artifact_dir: Path, report: dict[str, Any]) -> None:
     (artifact_dir / "browser-smoke.html").write_text(page, encoding="utf-8")
 
 
-def _check_page(context, base_url: str, artifact_dir: Path, row: dict[str, Any], timeout_ms: int) -> dict[str, Any]:
+def _check_page(
+    context,
+    base_url: str,
+    artifact_dir: Path,
+    row: dict[str, Any],
+    timeout_ms: int,
+    viewport_label: str,
+    fps_sample_ms: int,
+    min_fps: float,
+) -> dict[str, Any]:
     page = context.new_page()
     browser_errors: list[str] = []
     console_errors: list[str] = []
@@ -283,17 +425,23 @@ def _check_page(context, base_url: str, artifact_dir: Path, row: dict[str, Any],
     )
     variant = str(row["variant"])
     widget = str(row["widget"])
-    screenshot_name = f"screenshots/{_safe_name(variant)}.png"
-    canvas_name = f"screenshots/{_safe_name(variant)}-canvas.png"
+    screenshot_name = f"screenshots/{_safe_name(viewport_label)}-{_safe_name(variant)}.png"
+    canvas_name = f"screenshots/{_safe_name(viewport_label)}-{_safe_name(variant)}-canvas.png"
     result: dict[str, Any] = {
         "widget": widget,
         "variant": variant,
+        "viewport": viewport_label,
         "url": f"{base_url}/{Path(str(row['path'])).name}",
         "screenshot": screenshot_name,
         "canvas_screenshot": canvas_name,
+        "story_ids": _story_ids_for(row),
         "canvas_count": 0,
         "canvas_nonblank": False,
         "canvas_changed": False,
+        "fps": 0.0,
+        "min_fps": min_fps,
+        "fps_passed": False,
+        "semantic_checks": {},
         "switches_clicked": 0,
         "text_controls_clicked": [],
         "slider_dragged": False,
@@ -326,11 +474,20 @@ def _check_page(context, base_url: str, artifact_dir: Path, row: dict[str, Any],
             after = locator.screenshot(timeout=timeout_ms)
             result["canvas_changed"] = _sha256(before) != _sha256(after)
 
+        semantic = _semantic_checks(page, row, int(result["canvas_count"]))
+        result["semantic_checks"] = semantic
+        result["story_ids"] = semantic["story_ids"]
+        result["errors"].extend(semantic["errors"])
+
         labels = ["Profile", "FFT", "ROI", "Lens", "Panels", "Stats", "Export"]
         result["text_controls_clicked"] = _click_text_controls(page, labels)
         result["switches_clicked"] = _click_switches(page, 3)
         result["slider_dragged"] = _drag_first_slider(page)
         page.wait_for_timeout(300)
+        result["fps"] = _measure_fps(page, fps_sample_ms)
+        result["fps_passed"] = result["fps"] >= min_fps
+        if not result["fps_passed"]:
+            result["errors"].append(f"FPS {result['fps']:.1f} below minimum {min_fps:.1f}")
 
         page.screenshot(path=str(artifact_dir / screenshot_name), full_page=True, timeout=timeout_ms)
         result["browser_errors"] = browser_errors
@@ -361,6 +518,9 @@ def main() -> int:
     parser.add_argument("--headed", action="store_true", help="Show the Chromium window while driving.")
     parser.add_argument("--timeout-ms", type=int, default=60_000)
     parser.add_argument("--max-pages", type=int, default=0, help="Limit pages for debugging; 0 means all.")
+    parser.add_argument("--min-fps", type=float, default=30.0, help="Minimum requestAnimationFrame FPS for each page.")
+    parser.add_argument("--fps-sample-ms", type=int, default=1000, help="Milliseconds to sample requestAnimationFrame FPS.")
+    parser.add_argument("--mobile", action="store_true", help="Also run the smoke in a 390x844 mobile Chromium viewport.")
     args = parser.parse_args()
 
     try:
@@ -395,11 +555,35 @@ def main() -> int:
     with _StaticServer(artifact_dir, port) as base_url:
         with sync_playwright() as pw:
             browser = pw.chromium.launch(**launch_kwargs)
-            context = browser.new_context(viewport={"width": 1280, "height": 950})
             try:
-                pages = [_check_page(context, base_url, artifact_dir, row, args.timeout_ms) for row in rows]
+                pages: list[dict[str, Any]] = []
+                viewports = [("desktop", {"viewport": {"width": 1280, "height": 950}})]
+                if args.mobile:
+                    viewports.append(
+                        (
+                            "mobile-390x844",
+                            {"viewport": {"width": 390, "height": 844}, "is_mobile": True, "has_touch": True},
+                        )
+                    )
+                for viewport_label, viewport_options in viewports:
+                    context = browser.new_context(**viewport_options)
+                    try:
+                        pages.extend(
+                            _check_page(
+                                context,
+                                base_url,
+                                artifact_dir,
+                                row,
+                                args.timeout_ms,
+                                viewport_label,
+                                args.fps_sample_ms,
+                                args.min_fps,
+                            )
+                            for row in rows
+                        )
+                    finally:
+                        context.close()
             finally:
-                context.close()
                 browser.close()
 
     report = {
@@ -407,6 +591,9 @@ def main() -> int:
         "created_at_unix": started_at,
         "base_url": f"http://127.0.0.1:{port}",
         "headed": bool(args.headed),
+        "mobile": bool(args.mobile),
+        "min_fps": float(args.min_fps),
+        "fps_sample_ms": int(args.fps_sample_ms),
         "passed": sum(1 for page in pages if page["passed"]),
         "pages": pages,
     }

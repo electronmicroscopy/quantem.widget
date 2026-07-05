@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: scripts/widget_local_signoff.sh [--quick] [--full] [--browser] [--performance] [--skip-docs] [--artifact-dir DIR]
+Usage: scripts/widget_local_signoff.sh [--quick] [--full] [--browser] [--mobile] [--performance] [--skip-docs] [--artifact-dir DIR]
 
 Canonical local automation before saying widget work is ready.
 
@@ -20,6 +20,9 @@ Options:
   --full         Also run npm typecheck/test and widget_release_check.sh --skip-wheel.
   --browser      Drive generated HTML exports in Chromium, verify nonblank
                  canvases, exercise basic controls, and write screenshots.
+  --mobile       With --browser, also run the browser smoke in a 390x844
+                 touch viewport. This is a Chromium pre-check, not proof of
+                 physical iPhone Safari behavior.
   --performance  Run real-data Show2D/Show3D export performance smoke.
   --skip-docs    Skip docs build.
   --artifact-dir DIR
@@ -30,6 +33,7 @@ EOF
 
 mode=default
 browser=0
+mobile=0
 performance=0
 skip_docs=0
 artifact_dir=""
@@ -40,6 +44,7 @@ while [[ $# -gt 0 ]]; do
     --quick) mode=quick ;;
     --full) mode=full ;;
     --browser) browser=1 ;;
+    --mobile) mobile=1 ;;
     --performance) performance=1 ;;
     --skip-docs) skip_docs=1 ;;
     --artifact-dir)
@@ -96,7 +101,11 @@ PYTHONPATH=src:. python scripts/widget_html_smoke.py --artifact-dir "$artifact_d
 
 if [[ "$browser" -eq 1 ]]; then
   echo "== browser-drive HTML smoke =="
-  PYTHONPATH=src:. python scripts/widget_browser_smoke.py --artifact-dir "$artifact_dir/html-smoke"
+  browser_args=(--artifact-dir "$artifact_dir/html-smoke")
+  if [[ "$mobile" -eq 1 ]]; then
+    browser_args+=(--mobile)
+  fi
+  PYTHONPATH=src:. python scripts/widget_browser_smoke.py "${browser_args[@]}"
 fi
 
 if [[ "$performance" -eq 1 ]]; then
@@ -151,6 +160,7 @@ cat > "$artifact_dir/index.html" <<EOF
       <tr><th>Commit</th><td>$commit</td></tr>
       <tr><th>Mode</th><td>$mode</td></tr>
       <tr><th>Browser smoke</th><td>$browser</td></tr>
+      <tr><th>Mobile browser pre-check</th><td>$mobile</td></tr>
       <tr><th>Performance smoke</th><td>$performance</td></tr>
       <tr><th>Docs build</th><td>$docs_status</td></tr>
       <tr><th>Duration</th><td>${duration}s</td></tr>

@@ -127,6 +127,10 @@ def test_automation_documentation_names_entrypoints() -> None:
         "index.html",
         "browser-plan.json",
         "browser-smoke.html",
+        "--mobile",
+        "--min-fps",
+        "storyboard IDs",
+        "390x844",
     ]:
         assert path in doc
 

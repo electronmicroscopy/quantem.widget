@@ -33,6 +33,18 @@ For visual/frontend-sensitive widget work, add the browser-drive gate:
 scripts/widget_local_signoff.sh --quick --browser
 ```
 
+For mobile-sensitive layout or touch work, include the automated mobile
+viewport pre-check:
+
+```bash
+scripts/widget_local_signoff.sh --quick --browser --mobile
+```
+
+This runs the exported HTML smoke in both the desktop viewport and a 390x844
+touch Chromium viewport. It is a useful automated gate for width, wrapping,
+nonblank rendering, controls, and FPS. It is not a substitute for physical
+iPhone Safari testing when the user specifically asks for real device behavior.
+
 Every signoff run writes a visual report directory. By default it uses:
 
 ```text
@@ -132,7 +144,9 @@ PYTHONPATH=src:. python scripts/widget_browser_smoke.py --artifact-dir /tmp/quan
 This is the automated browser layer for exported HTML. It opens every page from
 `report.json`, verifies visible canvases are nonblank, performs wheel/drag
 interactions on the primary canvas, toggles visible switches, drags a slider
-when one is present, records console/page/HTTP errors, and saves screenshots.
+when one is present, records console/page/HTTP errors, samples
+`requestAnimationFrame` FPS, records storyboard IDs covered by each export, and
+saves screenshots.
 
 Run this after `scripts/widget_html_smoke.py`, or use
 `scripts/widget_local_signoff.sh --quick --browser` to run both in order. Use
@@ -140,6 +154,27 @@ Run this after `scripts/widget_html_smoke.py`, or use
 browser drive around. Known harmless Chromium bootstrap warnings are recorded
 separately from failures; rendering, HTTP, page, and unexpected console errors
 still fail the gate.
+
+Use these options when the visual change touches performance or mobile layout:
+
+```bash
+PYTHONPATH=src:. python scripts/widget_browser_smoke.py \
+  --artifact-dir /tmp/quantem-widget-signoff/html-smoke \
+  --mobile \
+  --min-fps 30
+```
+
+The FPS check is intentionally browser-side and mechanical: it measures the
+page's `requestAnimationFrame` cadence after the smoke interactions. It catches
+bad regressions such as blocking scripts, runaway layout work, and interaction
+states that prevent normal repainting. It does not prove scientific throughput
+or physical iPhone Safari behavior.
+
+The semantic checks are intentionally small and stable. They record public
+controls such as `Export`, verify FFT state on FFT variants, and attach
+storyboard IDs such as `S2D-07` or `S3D-16` to the report so humans and agents
+can see which story a smoke export covers. Full story signoff still lives in
+the storyboard documents; this browser smoke is the automatic baseline.
 
 ## Size Guards
 
@@ -166,7 +201,7 @@ thresholds or failure wording, update those tests in the same commit.
 | `scripts/check_large_files.py` | Prevent accidental large tracked data or rendered artifacts. | Yes. | File-size policy or allowlisted artifact types change. |
 | `scripts/check_notebook_sizes.py` | Keep tutorial notebooks and embedded outputs clone-friendly. | Yes. | Notebook size policy changes. |
 | `scripts/widget_html_smoke.py` | Verify every export-capable widget writes standalone HTML state, a visual report, and a browser-drive plan. | Yes. | A widget adds/removes/changes HTML export support. |
-| `scripts/widget_browser_smoke.py` | Open generated HTML exports in Chromium, check nonblank canvas rendering, drive basic controls, and save screenshots. | No, only `--browser`. | Exported widget browser behavior, interaction contracts, or report format changes. |
+| `scripts/widget_browser_smoke.py` | Open generated HTML exports in Chromium, check nonblank canvas rendering, semantic controls, FPS, storyboard coverage, desktop/mobile viewport behavior, and save screenshots. | No, only `--browser`. | Exported widget browser behavior, interaction contracts, mobile layout expectations, FPS thresholds, or report format changes. |
 | `scripts/widget_performance_smoke.py` | Record real-data Show2D/Show3D export timing, payload sizes, report HTML, and browser-drive plan. | No, only `--performance`. | Real-data performance expectations change. |
 | `scripts/docs_preview.sh` | Build and serve docs for local visual review. | No. | The docs build command or served path changes. |
 | `.github/workflows/widget-ci.yml` | Run the same local signoff on PRs and main pushes. | Yes, on matching GitHub events. | Local signoff dependencies or trigger paths change. |
