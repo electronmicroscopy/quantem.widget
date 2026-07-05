@@ -14,12 +14,16 @@ real-data proof.
 | Widget UI, interaction, or HTML export change | `scripts/widget_local_signoff.sh --quick --browser` | Exported HTML plus automated Chromium report, screenshots, nonblank canvas checks, FPS. |
 | Mobile layout or touch-sensitive change | `scripts/widget_local_signoff.sh --quick --browser --mobile` | Desktop and 390x844 touch Chromium pre-check. |
 | Release-oriented validation | `scripts/widget_local_signoff.sh --full --performance` | Full local gates, frontend typecheck/tests, release check without wheel, real-data export timing report. |
-| Heavy real-data performance claim | `PYTHONPATH=src:. python scripts/widget_heavy_perf_signoff.py` | Local-only MJGOAT/Phil-style real-data browser FPS, screenshots, FFT idle-cache report. |
+| Heavy real-data performance claim | `PYTHONPATH=src:. python scripts/widget_heavy_perf_signoff.py` | Local-only HPC/workstation real-data browser FPS, screenshots, FFT idle-cache report. |
 | Physical iPhone Safari behavior | `python scripts/widget_phone_handoff.py /tmp/quantem-widget-signoff` | Tailscale/HTTPS handoff URL plus phone viewport, touch, pointer, and WebGPU logs. |
 | Local docs visual review | `scripts/docs_preview.sh` | Rendered documentation site in a browser. |
 
 Use `--artifact-dir /tmp/quantem-widget-signoff` when coordinating with another
 agent or serving the report over Tailscale.
+When served locally, open the report URL in the browser, for example
+`http://127.0.0.1:8779/index.html`.
+Use `--search-root` or `QUANTEM_WIDGET_REAL_DATA_ROOTS` for private lab data
+locations instead of hardcoding machine-specific paths in shared scripts.
 
 ## Definition Of Done
 
@@ -213,7 +217,7 @@ the size justifies it.
 | `scripts/widget_browser_smoke.py` | Open generated HTML exports in Chromium, check nonblank canvas rendering, semantic controls, FPS, storyboard coverage, desktop/mobile viewport behavior, and save screenshots. | No, only `--browser`. | Exported widget browser behavior, interaction contracts, mobile layout expectations, FPS thresholds, or report format changes. |
 | `scripts/widget_phone_handoff.py` | Serve a signoff/report directory on `0.0.0.0`, print local/Tailscale URLs, and record physical phone viewport/touch probe logs. | No, manual physical-device handoff only. | Physical phone test workflow or Tailscale handoff expectations change. |
 | `scripts/widget_performance_smoke.py` | Record real-data Show2D/Show3D export timing, payload sizes, report HTML, and browser-drive plan. | No, only `--performance`. | Real-data performance expectations change. |
-| `scripts/widget_heavy_perf_signoff.py` | Local-only MJGOAT/Phil heavy browser signoff for real Show2D/Show3D data, including browser FPS, screenshots, and Show3D FFT idle-cache checks. | No, never normal CI. | Heavy real-data datasets, FPS thresholds, FFT overlay performance expectations, or report format change. |
+| `scripts/widget_heavy_perf_signoff.py` | Local-only HPC/workstation heavy browser signoff for real Show2D/Show3D data, including browser FPS, screenshots, and Show3D FFT idle-cache checks. | No, never normal CI. | Heavy real-data datasets, FPS thresholds, FFT overlay performance expectations, or report format change. |
 | `scripts/docs_preview.sh` | Build and serve docs for local visual review. | No. | The docs build command or served path changes. |
 | `.github/workflows/widget-ci.yml` | Run local signoff and upload signoff artifacts on PRs and main pushes. | Yes, on matching GitHub events. | Local signoff dependencies, trigger paths, or artifact policy changes. |
 

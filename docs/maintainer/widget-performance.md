@@ -184,7 +184,7 @@ Test topology:
 
 - The data construction/export path ran from the quantem.widget Python backend
   on the workstation repo checkout used for the audit. In normal lab use this
-  can be mjgoat or buffle: Python owns the large arrays, file I/O, export
+  can be an HPC/workstation backend: Python owns the large arrays, file I/O, export
   packing, and any live detail tile replies.
 - The interaction path was tested in the Codex in-app browser on the Mac. That
   is the machine exercising browser rendering, canvas compositing, WebGPU
@@ -280,8 +280,8 @@ Save/reopen audit:
 
 - Date: 2026-07-02 / 2026-07-03 overnight pass.
 - A dedicated notebook, ``tmp/codex_show_save_reopen_e2e.ipynb``, was executed
-  through Jupyter with ``/Users/macbook/mjgoat/repos/quantem.widget/src`` placed
-  first on ``sys.path`` so the MJ/Jupyter backend used the patched checkout.
+  through Jupyter with the patched checkout placed first on ``sys.path`` so the
+  Jupyter backend used the local changes.
 - The notebook displayed one Show2D and one Show3D with ``save_state=False``.
   Both printed ``_static_fallback_jpeg=True`` and ``frame_bytes=False`` from
   their full ``get_state()`` snapshot.

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run the local-only real-data widget performance signoff.
 
-This is intentionally not a normal CI script. It uses local MJGOAT/Phil real
+This is intentionally not a normal CI script. It uses local HPC/workstation real
 microscopy data when available, writes artifacts under ``/tmp`` by default, and
 drives the exported HTML in Chromium. Do not commit generated data, screenshots,
 or reports from this script unless a release explicitly asks for them.
@@ -175,7 +175,7 @@ def _write_index(artifact_dir: Path, report: dict[str, Any]) -> None:
 </head>
 <body>
   <h1>quantem.widget heavy performance signoff</h1>
-  <p class="warn">Local-only real-data report. Keep MJGOAT/Phil paths, screenshots,
+  <p class="warn">Local-only real-data report. Keep lab workstation paths, screenshots,
   generated HTML, and timing JSON out of GitHub unless explicitly approved.</p>
   <p>Result: <strong>{'PASS' if report['passed'] else 'FAIL'}</strong></p>
   <h2>Artifacts</h2>
@@ -290,7 +290,7 @@ def main() -> int:
         "normal_ci": False,
         "artifact_dir": str(artifact_dir),
         "real_data_policy": (
-            "Generated artifacts and local MJGOAT/Phil data paths are for local signoff only; "
+            "Generated artifacts and local lab workstation data paths are for local signoff only; "
             "do not upload real data or heavy generated HTML to GitHub."
         ),
         "thresholds": {

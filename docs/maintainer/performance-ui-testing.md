@@ -5,11 +5,11 @@ interaction, notebook save/reopen, or export size. It is intentionally separate
 from the storyboards: storyboards describe scientific behavior; this page
 defines the real-data performance gate that agents must measure.
 
-The default production topology is **MJGOAT or another workstation as the
-backend** and the **Mac browser as the frontend**. Python/Jupyter owns file I/O,
-large arrays, CUDA/MPS/CPU preprocessing, and export packing. The browser owns
-canvas drawing, WebGPU, pointer events, playback, menus, and exported HTML.
-Reports must not mix those timings.
+The default production topology is **an HPC/workstation with an NVIDIA GPU or
+other lab compute backend** and the **local browser as the frontend**.
+Python/Jupyter owns file I/O, large arrays, CUDA/MPS/CPU preprocessing, and
+export packing. The browser owns canvas drawing, WebGPU, pointer events,
+playback, menus, and exported HTML. Reports must not mix those timings.
 
 ## Maintainer Map
 
@@ -25,7 +25,7 @@ change needs them.
 | `scripts/widget_html_smoke.py` | Every export-capable widget can write standalone HTML with state. | `export_html()`, expected markers, file size, widget coverage matrix, browser-drive plan. | CI/default signoff; update when a widget gains or changes HTML export. | `index.html`, `report.json`, `browser-plan.json`, exported widget HTML files. |
 | `scripts/widget_browser_smoke.py` | Exported HTML actually renders and responds in Chromium. | Nonblank canvases, wheel/drag interaction, switches, sliders, console/page/HTTP errors, `requestAnimationFrame` FPS, FFT state, storyboard IDs, optional mobile viewport. | `scripts/widget_local_signoff.sh --quick --browser`; add `--mobile` for narrow/touch layout changes. | `browser-smoke.html`, `browser-smoke-report.json`, screenshots. |
 | `scripts/widget_performance_smoke.py` | Backend export packing and small real-data Show2D/Show3D payloads are measurable. | Real-data discovery, export time, output size, browser-drive plan. | `--performance` signoff or when checking export size/time trends. | `index.html`, `report.json`, `browser-plan.json`, exported real-data HTML. |
-| `scripts/widget_heavy_perf_signoff.py` | Heavy Show2D/Show3D real-data browser performance is acceptable on lab data. | Local real-data discovery, heavy exports, browser FPS, nonblank render, screenshots, Show3D FFT overlay idle-cache guard. | Local-only MJGOAT/Phil-class performance claims; never normal CI. | `index.html`, `heavy-signoff-report.json`, `browser-smoke-report.json`, screenshots under `/tmp`. |
+| `scripts/widget_heavy_perf_signoff.py` | Heavy Show2D/Show3D real-data browser performance is acceptable on lab data. | Local real-data discovery, heavy exports, browser FPS, nonblank render, screenshots, Show3D FFT overlay idle-cache guard. | Local-only HPC/workstation performance claims; never normal CI. | `index.html`, `heavy-signoff-report.json`, `browser-smoke-report.json`, screenshots under `/tmp`. |
 | `scripts/widget_phone_handoff.py` | A human can verify physical phone Safari behavior with shared logs. | Serves report on `0.0.0.0`, prints Tailscale/HTTPS handoff command, records viewport/touch/pointer/WebGPU events. | Physical iPhone/iPad checks after browser smoke, especially WebGPU or touch changes. | Served report, `phone-probe.html`, `phone-events.ndjson`. |
 | `scripts/widget_visual_signoff.sh` | Visual stories can be driven in Jupyter/browser before release. | Story-oriented widget drive packets, screenshots, selected release gates. | Broad UI or release-candidate work when a human/agent must drive real workflows. | Signoff packet/report under `/tmp` or configured artifact path. |
 | `scripts/widget_agent_signoff.sh` | Agent-driven story redrive is structured and auditable. | Story IDs, issue observed, fix made, redriven evidence. | Before release candidates or after interaction-heavy fixes. | Agent signoff report. |
@@ -52,14 +52,14 @@ Preferred heavy datasets on the lab machines:
 
 | Gate | Widget | Minimum real-data target | Preferred source |
 |---|---|---|---|
-| PUI-2D-4K | Show2D | 8 panels, 4096 x 4096 | Drift/denoise/ptycho real-space outputs on MJGOAT |
+| PUI-2D-4K | Show2D | 8 panels, 4096 x 4096 | Drift/denoise/ptycho real-space outputs on an HPC/workstation with NVIDIA GPU |
 | PUI-2D-BATCH | Show2D | 30 panels, 4096 x 4096 | High-throughput denoise or drift batch |
 | PUI-2D-STRESS | Show2D | 45 to 85 panels, 4096 x 4096 | Optional stress pass when backend memory allows |
 | PUI-3D-SINGLE | Show3D | 1 panel, at least 512 x 512 x 100 frames | Real time series, focal stack, or SSB iteration stack |
 | PUI-3D-MULTI | Show3D | 12 panels x 32 frames x 2048 x 2048 source | Real-derived drift/ptycho/gold stack |
 | PUI-3D-EXPORT | Show3D | same as PUI-3D-MULTI | Exact/quantized/binned HTML export paths |
 | PUI-EDS | ShowEDS | native sparse EDS stream, no hidden crop/bin | DGGG 0039 or equivalent Velox EDS stream |
-| PUI-4DSTEM | Show4DSTEM | real scan with diffraction and virtual images | 4D-STEM tutorial or paper data on MJGOAT |
+| PUI-4DSTEM | Show4DSTEM | real scan with diffraction and virtual images | 4D-STEM tutorial or paper data on an HPC/workstation or hosted dataset |
 | PUI-FOLDER | ShowFolder | folder with many microscopy files | Real screening folder with cache reuse |
 
 If a preferred source is unavailable, use the closest local real source and
@@ -78,14 +78,14 @@ Every run must identify both sides:
 
 The normal heavy signoff is:
 
-1. Build or install the widget package on MJGOAT.
-2. Launch Jupyter on MJGOAT or the active workstation.
+1. Build or install the widget package on the HPC/workstation backend.
+2. Launch Jupyter on the HPC/workstation backend or the active local workstation.
 3. Open the notebook or exported HTML from the Mac in the Codex in-app browser.
 4. Drive the real UI from the Mac.
 5. Store screenshots, timing JSON, and the final report outside the repo unless
    the user explicitly asks to commit them.
 
-Real-data performance signoff is **local-only**. Do not upload MJGOAT/Phil data,
+Real-data performance signoff is **local-only**. Do not upload lab workstation data,
 absolute local paths, screenshots of private data, or heavy generated HTML to
 GitHub. Normal CI must not depend on local lab data. CI owns lightweight protocol
 and synthetic smoke coverage; the local heavy gate owns real data and browser
@@ -222,7 +222,7 @@ Release rule:
 
 For the common Show2D + Show3D heavy gate, an agent should do the following:
 
-1. Start from `main`, rebuild the frontend, and launch the MJGOAT Jupyter
+1. Start from `main`, rebuild the frontend, and launch the HPC/workstation Jupyter
    backend with the patched checkout first on `PYTHONPATH`.
 2. Run `PYTHONPATH=src:. python scripts/widget_performance_smoke.py` with
    real-data size options appropriate for the release gate. The script writes
@@ -257,7 +257,7 @@ By default it writes to:
 
 The heavy signoff:
 
-- discovers local real microscopy images from MJGOAT/Phil-style data roots,
+- discovers local real microscopy images from common HPC/workstation data roots,
 - builds Show2D real 4K exports and a Show3D real-derived heavy FFT overlay
   export,
 - runs `scripts/widget_browser_smoke.py` against the generated standalone HTML,
@@ -267,12 +267,16 @@ The heavy signoff:
   `heavy-signoff-report.json`,
 - writes `index.html` as the visual handoff report.
 
-Use explicit roots when the default MJGOAT paths are not the active dataset:
+Use explicit roots when the default local data paths are not the active dataset:
 
 ```bash
 PYTHONPATH=src:. python scripts/widget_heavy_perf_signoff.py \
   --search-root /path/to/local/real/microscopy/data
 ```
+
+For repeated lab runs, set `QUANTEM_WIDGET_REAL_DATA_ROOTS` to one or more
+local data roots separated by the platform path separator, then run the same
+signoff command without hardcoding private paths in the repository.
 
 Use `--quick` only while debugging the automation itself. A release or
 performance claim needs the full local real-data run. Use `--skip-browser` only

@@ -143,6 +143,8 @@ def test_automation_documentation_names_entrypoints() -> None:
         "Do Not Do This",
         "Report Artifacts",
         "actions/upload-artifact",
+        "http://127.0.0.1:8779/index.html",
+        "QUANTEM_WIDGET_REAL_DATA_ROOTS",
         "synthetic data for real-data performance claims",
         "final answer names the exact command and report path",
         "Do not run `pkill chrome`",
@@ -157,6 +159,22 @@ def test_ci_workflow_uploads_signoff_artifacts() -> None:
     assert "actions/upload-artifact@v4" in workflow
     assert "widget-ci-signoff" in workflow
     assert "if: always()" in workflow
+
+
+def test_maintained_automation_docs_use_generic_backend_names() -> None:
+    checked_paths = [
+        ROOT / "docs/maintainer/automation.md",
+        ROOT / "docs/maintainer/performance-ui-testing.md",
+        ROOT / "docs/maintainer/storyboard.md",
+        ROOT / "docs/maintainer/widget-agent-signoff.md",
+        ROOT / "scripts/widget_agent_signoff.sh",
+        ROOT / "scripts/widget_heavy_perf_signoff.py",
+        ROOT / "scripts/widget_performance_smoke.py",
+    ]
+
+    combined = "\n".join(path.read_text(encoding="utf-8") for path in checked_paths)
+    for forbidden in ["MJGOAT", "Mjgoat", "mjgoat", "Phil", "phil"]:
+        assert forbidden not in combined
 
 
 def test_browser_artifact_cleanup_removes_old_quantem_artifacts(tmp_path: Path) -> None:

@@ -120,5 +120,5 @@ Before tagging a release candidate, the report should say one of:
 Do not hide a laggy or visually broken interaction behind a passing test suite.
 If the interaction is not real time, either fix it or mark the release blocked.
 For Show2D and Show3D, "real time" means the report names the real dataset,
-MJGOAT/workstation backend, browser frontend, first-paint time, interaction
+HPC/workstation backend, browser frontend, first-paint time, interaction
 FPS/latency method, save/reopen result, and export reopen result.

@@ -28,9 +28,11 @@ from quantem.widget import Show2D, Show3D
 
 
 DEFAULT_SEARCH_ROOTS = [
-    Path("/Users/macbook/mjgoat/reports"),
-    Path("/Users/macbook/mjgoat/repos/quantem-data/datasets"),
-    Path("/Users/macbook/mjgoat/share/denova_test_data"),
+    Path.home() / "reports",
+    Path.home() / "quantem-data" / "datasets",
+    Path.home() / "share" / "denova_test_data",
+    Path("/data/quantem"),
+    Path("/scratch/quantem"),
 ]
 
 
@@ -82,8 +84,8 @@ def _discover_real_image_paths(search_roots: list[Path], limit: int) -> list[Pat
             candidates.extend(path for path in root.glob(pattern) if path.is_file())
         if len(candidates) >= limit:
             break
-    # Prefer drift outputs and processed gold pairs, which are common MJGOAT
-    # real-data sources, then keep deterministic ordering for reports.
+    # Prefer drift outputs and processed gold pairs, which are common real-data
+    # sources, then keep deterministic ordering for reports.
     candidates = sorted(
         dict.fromkeys(candidates),
         key=lambda path: (
@@ -256,7 +258,12 @@ def main() -> int:
     show3d_frames = args.show3d_frames or (12 if args.quick else 32)
     show3d_size = args.show3d_size or (512 if args.quick else 2048)
 
-    search_roots = args.search_root or DEFAULT_SEARCH_ROOTS
+    env_roots = [
+        Path(value).expanduser()
+        for value in os.environ.get("QUANTEM_WIDGET_REAL_DATA_ROOTS", "").split(os.pathsep)
+        if value
+    ]
+    search_roots = args.search_root or env_roots or DEFAULT_SEARCH_ROOTS
     source_paths = _discover_real_image_paths(search_roots, max(show2d_panels, show3d_panels, 8))
 
     start = time.perf_counter()

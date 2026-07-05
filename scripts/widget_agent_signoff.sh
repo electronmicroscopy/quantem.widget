@@ -208,7 +208,7 @@ export changes. Synthetic data alone is not sufficient.
 
 ## 2. Backend/frontend topology
 
-- [ ] MJGOAT/workstation backend recorded: env, commit, Jupyter URL, data path.
+- [ ] HPC/workstation backend recorded: env, commit, Jupyter URL, data path.
 - [ ] Mac/browser frontend recorded: browser, viewport, WebGPU adapter if used.
 - [ ] Kernel busy state observed during pointer-only interactions.
 - [ ] Standalone exported HTML tested separately from live Jupyter.

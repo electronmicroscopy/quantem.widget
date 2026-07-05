@@ -12,7 +12,7 @@ Use these files for UI behavior, real-data workflows, browser testing, and
 release signoff. Keep performance lessons, timing observations, and
 implementation policy in [Performance](widget-performance). Use
 [Performance UI Testing](performance-ui-testing) when the claim involves load
-speed, FPS, heavy real data, MJGOAT/backend topology, save/reopen timing, or
+speed, FPS, heavy real data, HPC/backend topology, save/reopen timing, or
 export size.
 
 Every storyboard should cover four scientific workflow classes:
