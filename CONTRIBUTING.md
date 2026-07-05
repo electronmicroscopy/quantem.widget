@@ -69,10 +69,18 @@ only with unit tests. Open the affected notebook or exported HTML, drive the
 changed controls, and check the widget debug HUD or another direct timing signal
 when available.
 
-Report FPS/latency in the PR or handoff. Any loss of real-time interaction is a
-bug to fix or explicitly document. For ShowEDS real-data workflows, band, ROI,
-zoom, contrast, and smooth/auto display interactions should remain at 30 FPS or
-better.
+Report load, render, and interaction timings in the PR or handoff. At minimum,
+name the data shape, dtype, raw size, backend, loader time, widget construction
+time, first browser-paint time when available, and FPS/latency for the changed
+interaction. Prefer `verbose=True` in debug notebooks so the output is
+copyable. Use `quantem.widget.profile_widget` for notebook profiling when
+possible so load, pack, and widget-build timings use the same table format
+across viewers. The full timing checklist lives in
+`docs/maintainer/widget-performance.md`.
+
+Any loss of real-time interaction is a bug to fix or explicitly document. For
+ShowEDS real-data workflows, band, ROI, zoom, contrast, and smooth/auto display
+interactions should remain at 30 FPS or better.
 
 Use `scripts/widget_agent_signoff.sh` for a fix-and-redrive session: the agent
 opens the real notebook, docs page, or exported HTML, drives the controls like a

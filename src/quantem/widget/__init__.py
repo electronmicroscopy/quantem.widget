@@ -38,6 +38,13 @@ from quantem.widget.export import (
 from quantem.widget.dpc import idpc, com
 from quantem.widget.info import device_info
 from quantem.widget.detector import bf, adf, df
+from quantem.widget._timing import (
+    WidgetProfile,
+    format_timing_table,
+    format_widget_render_timing,
+    profile_widget,
+    widget_timing_report,
+)
 
 
 def Show4DSTEM(data, **kwargs):

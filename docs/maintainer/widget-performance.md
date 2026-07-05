@@ -4,6 +4,95 @@ These notes capture interaction bugs that were easy to misread while building
 the widgets. Keep this page short and practical: it should explain what went
 wrong, how to recognize the pattern, and what to do instead.
 
+## Timing protocol for every widget
+
+Every widget report should separate loading speed from rendering speed. A fast
+loader can still produce a slow browser widget, and a smooth browser widget can
+still hide a slow Python data-prep step. When a widget, loader, tutorial, or
+release signoff is changed, record these timings in the notebook output,
+signoff report, or PR notes:
+
+- **Input**: widget name, data shape, dtype, raw byte size, file count, file
+  format, backend, and whether the data were cropped, binned, downsampled,
+  quantized, sparsely streamed, or exact.
+- **Load**: wall time for the public loader, for example
+  ``load(...)``, ``load_eds(...)``, ``read_image(...)``,
+  ``read_images(...)``, or the tutorial loader.
+- **Pack/build**: wall time for array stacking, display-bin generation,
+  side-index construction, export packing, or other Python work before widget
+  construction.
+- **First browser paint**: widget timing after the frontend has decoded and
+  painted the first useful view. For widgets that expose timing traits, report
+  ``render_total_ms``, ``render_python_build_ms``, and
+  ``render_wire_js_ms``.
+- **Interaction**: FPS or pointer-to-preview latency for the control under
+  test. For drag/zoom/scrub workflows, say whether the kernel became busy and
+  whether the visible preview moved during the drag or only after release.
+- **Export/reopen**: standalone HTML size, export time, reopen time, and
+  whether the exported page is exact or reduced.
+
+Prefer ``verbose=True`` in public examples where it helps users debug why a
+notebook is slow. Verbose output should be short and copyable. Good output
+looks like this:
+
+```text
+read_images workers=8: 0.604s for 40 EMD files; dtype=uint16; shape=(4096, 4096)
+np.stack: 0.588s; stack=(40, 4096, 4096) uint16; raw=1.25 GiB
+Show3D live profile
+-------------------
+Backend       NVIDIA CUDA workstation
+Data          40x4096x4096 | uint16 | 1.25 GiB
+Load          604 ms
+Pack/prep     588 ms
+Widget build  5.47 s
+
+Show3D timing
+-------------
+Data             40x4096x4096 | uint16 | 1.25 GiB
+Render total     5.47 s
+Python build     820 ms
+Wire + JS paint  4.65 s
+Frame server     on
+Offline stack    off
+```
+
+Do not report only the fastest number. For large data, report the total path a
+scientist actually waits for: file IO, Python packing, widget construction,
+browser first paint, and the interaction that matters for the workflow. If a
+number is measured in a script rather than in JupyterLab or exported HTML, label
+it as a script measurement.
+
+Timing traits and debug surfaces should stay stable across widgets:
+
+- ``render_total_ms``: total Python construction through first browser paint,
+  when the widget can observe the frontend paint.
+- ``render_python_build_ms``: subset spent in Python widget setup.
+- ``render_wire_js_ms``: transfer, browser decode, and first paint remainder.
+- ``show_debug`` / debug HUD: opt-in browser interaction telemetry such as FPS,
+  map/spectrum/draw time, frame fetch time, and render time.
+
+Use ``quantem.widget.profile_widget`` in profiling notebooks to time the Python
+construction path in the same format:
+
+```python
+from quantem.widget import Show3D, profile_widget, widget_timing_report
+
+widget, profile = profile_widget(
+    "Show3D live",
+    lambda: Show3D(stack, verbose=True, save_state=False),
+    data=stack,
+    load_ms=read_ms,
+    pack_ms=stack_ms,
+    backend="NVIDIA CUDA workstation",
+)
+widget
+```
+
+After the widget paints in JupyterLab, ``widget_timing_report(widget)`` returns
+the first-paint timing table again. New widgets should provide equivalent
+timing hooks rather than inventing a private debug vocabulary. Existing widgets
+should be updated opportunistically when their load/render path changes.
+
 ## Mistake log: Show3D cursor readout pop
 
 Date: 2026-06-30

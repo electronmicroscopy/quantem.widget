@@ -74,7 +74,10 @@ For each widget, attach:
 - a short video for motion-sensitive issues such as histogram center drag,
   ShowEDS band drag, Show4DSTEM detector drag, or Show3DSlices scrub/rotate,
 - console-error notes,
-- FPS or debug-HUD notes when available,
+- load/build/first-paint timing from notebook output, widget timing traits, or
+  another direct timing signal,
+- FPS or debug-HUD notes when available, including whether the kernel became
+  busy during the tested interaction,
 - a short list of fixes made during the session.
 
 Screenshots are enough for static layout and theme review. Use video when the

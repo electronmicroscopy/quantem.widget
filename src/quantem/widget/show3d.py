@@ -1273,6 +1273,7 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
         offline: bool | None = None,
         state=None,
         save_state: bool = False,
+        verbose: bool = True,
         max_cols: int | None = None,
         panel_gap: int | None = None,
         panel_title_font_size: int | None = None,
@@ -1321,6 +1322,7 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
             raise ValueError(f"fft_overlay_zoom must be in [1.0, 32.0], got {fft_overlay_zoom}")
         if show_scale_bar is not None:
             kwargs["scale_bar_visible"] = bool(show_scale_bar)
+        self._verbose = bool(verbose)
         panel_width_px = int(panel_width_px)
         if panel_width_px < 0:
             raise ValueError(f"panel_width_px must be >= 0, got {panel_width_px}")
@@ -3577,16 +3579,16 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
     def _on_first_render(self, change):
         """Observer for `_js_rendered=True`: prints true end-to-end construction
         timing telemetry (Python + comm + JS paint) and unobserves itself."""
+        from quantem.widget._timing import format_widget_render_timing
         if not change.get("new"):
             return
         total_ms = (time.perf_counter() - self._init_t0) * 1000
         py_ms = self._init_py_elapsed_ms
-        shape = f"{self.n_slices}×{self.height}×{self.width}"
+        shape = (self.n_slices, self.height, self.width)
         if self.separate_panel_frames and getattr(self, "_separate_panel_data", None) is not None:
             mem = sum(int(p.nbytes) for p in self._separate_panel_data)
         else:
             mem = self._data.nbytes
-        mem_str = f"{mem / (1 << 20):.0f} MB" if mem >= 1 << 20 else f"{mem / (1 << 10):.0f} KB"
         self.render_total_ms = int(total_ms)
         self.render_python_build_ms = int(py_ms)
         self.render_wire_js_ms = int(total_ms - py_ms)
@@ -3597,12 +3599,26 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
             # multi-frame transfer buffers. Targeted initial sync is untouched.
             self.frame_bytes = b""
             self._buffer_bytes = b""
-        print(
-            f"Show3D: {shape} {mem_str} - "
-            f"rendered in {total_ms:.0f} ms (Python build {py_ms:.0f} ms, "
-            f"wire+JS {total_ms - py_ms:.0f} ms)",
-            flush=True,
-        )
+        if getattr(self, "_verbose", True):
+            print(
+                format_widget_render_timing(
+                    "Show3D",
+                    shape=shape,
+                    dtype=str(self._data.dtype) if self._data is not None else None,
+                    raw_bytes=int(mem),
+                    total_ms=total_ms,
+                    python_ms=py_ms,
+                    wire_js_ms=total_ms - py_ms,
+                    extra_rows=[
+                        ("Frame server", "on" if self.frame_server_url else "off"),
+                        (
+                            "Offline stack",
+                            "on" if bool(self._offline_stack or self._offline_float_stack) else "off",
+                        ),
+                    ],
+                ),
+                flush=True,
+            )
         try:
             self.unobserve(self._on_first_render, names=["_js_rendered"])
         except (ValueError, KeyError):

@@ -1063,14 +1063,17 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
 
     def _on_first_render(self, change):
         import time as _time
+        from quantem.widget._timing import format_widget_render_timing
         if not change.get("new"):
             return
         total_ms = (_time.perf_counter() - self._init_t0) * 1000
         py_ms = self._init_py_elapsed_ms
-        shape = (f"{self.n_images}×{self.height}×{self.width}"
-                 if self.n_images > 1 else f"{self.height}×{self.width}")
+        shape = (
+            (self.n_images, self.height, self.width)
+            if self.n_images > 1
+            else (self.height, self.width)
+        )
         mem = self._data.nbytes
-        mem_str = f"{mem / (1 << 20):.0f} MB" if mem >= 1 << 20 else f"{mem / (1 << 10):.0f} KB"
         # Expose as attributes so tests and notebooks can assert on them.
         # These are the ground truth for "did JS actually paint": if they're
         # None, the JS side never signaled first render.
@@ -1087,9 +1090,15 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
             pass
         else:
             print(
-                f"Show2D: {shape} {mem_str}: "
-                f"rendered in {total_ms:.0f} ms (Python build {py_ms:.0f} ms, "
-                f"wire+JS {total_ms - py_ms:.0f} ms)",
+                format_widget_render_timing(
+                    "Show2D",
+                    shape=shape,
+                    dtype=str(self._data.dtype),
+                    raw_bytes=int(mem),
+                    total_ms=total_ms,
+                    python_ms=py_ms,
+                    wire_js_ms=total_ms - py_ms,
+                ),
                 flush=True,
             )
         # Detach observer: one-shot, we only care about the first paint.

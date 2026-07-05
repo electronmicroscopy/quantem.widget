@@ -172,6 +172,12 @@ through it line by line.
 - [ ] Real-time interactions are browser-driven and verified by actually
   dragging controls in JupyterLab or exported HTML, not only by reading code or
   unit tests.
+- [ ] Performance reports separate load time, widget build time, first browser
+  paint, and interaction FPS/latency. Include data shape, dtype, raw size,
+  backend, and any crop/bin/downsample/quantization. Prefer `verbose=True`
+  output that users and agents can copy; use `quantem.widget.profile_widget`
+  for profiling notebooks when possible. See
+  [performance notes](docs/maintainer/widget-performance.md).
 - [ ] For interaction-sensitive changes, run
   `scripts/widget_local_signoff.sh --quick`, fix issues immediately, rebuild,
   refresh, and redrive before claiming the widget is ready. See
