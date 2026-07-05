@@ -97,23 +97,6 @@ def test_invalid_lattice_raises():
         Phase.from_cubic("bad", -1.0)
 
 
-def test_phase_from_structure_magnetite():
-    pytest.importorskip("pymatgen")
-    from pymatgen.core import Lattice, Structure
-
-    mag = Structure.from_spacegroup(
-        227,
-        Lattice.cubic(8.3963),
-        ["Fe", "Fe", "O"],
-        [[0.125, 0.125, 0.125], [0.5, 0.5, 0.5], [0.2549, 0.2549, 0.2549]],
-    )
-    ph = Phase.from_structure(mag, name="Fe3O4")
-    dvals = [r["d"] for r in ph.reflections()]
-    assert any(abs(d - 2.532) < 0.02 for d in dvals)  # 311
-    assert any(abs(d - 2.967) < 0.02 for d in dvals)  # 220
-    assert all(r["intensity"] is not None for r in ph.reflections())
-
-
 def test_diamond_absence_rule():
     """Diamond structure: all-odd allowed; all-even needs h+k+l divisible by 4."""
     si = Phase.from_cubic("Si", 5.4310, absences="diamond")
@@ -135,7 +118,7 @@ def test_phase_library_names_and_values():
     assert au.d_spacing((1, 1, 1)) == pytest.approx(4.0782 / math.sqrt(3), abs=1e-4)
     si = library_phase("Si")
     assert si.absences == "diamond"
-    assert si.d_spacing((3, 1, 1)) == pytest.approx(5.4310 / math.sqrt(11), abs=1e-4)
+    assert si.d_spacing((3, 1, 1)) == pytest.approx(5.4311 / math.sqrt(11), abs=1e-4)
     fe = library_phase("α-Fe")
     assert fe.absences == "bcc"
 
@@ -162,9 +145,9 @@ def test_hexagonal_library_dspacings():
     from quantem.widget.crystal import library_phase
 
     ti = library_phase("Ti")
-    assert ti.d_spacing((1, 0, 0)) == pytest.approx(2.9505 * math.sqrt(3) / 2, abs=1e-3)
+    assert ti.d_spacing((1, 0, 0)) == pytest.approx(2.9500 * math.sqrt(3) / 2, abs=1e-3)
     graphite = library_phase("C (graphite)")
-    assert graphite.d_spacing((0, 0, 2)) == pytest.approx(6.7080 / 2, abs=1e-3)
+    assert graphite.d_spacing((0, 0, 2)) == pytest.approx(6.7110 / 2, abs=1e-3)
     assert not graphite.is_allowed((0, 0, 1))
 
 
@@ -227,11 +210,34 @@ def test_tetragonal_and_new_library_entries():
     anatase = library_phase("TiO2 (anatase)")
     assert anatase.d_spacing((1, 0, 1)) == pytest.approx(3.517, abs=5e-3)
     rutile = library_phase("TiO2 (rutile)")
-    assert rutile.d_spacing((1, 1, 0)) == pytest.approx(4.5937 / math.sqrt(2), abs=1e-3)
+    assert rutile.d_spacing((1, 1, 0)) == pytest.approx(4.5940 / math.sqrt(2), abs=1e-3)
     hematite = library_phase("α-Fe2O3 (hematite)")
     assert hematite.d_spacing((1, 0, 4)) == pytest.approx(2.700, abs=5e-3)
     zno = library_phase("ZnO")
     assert zno.d_spacing((1, 0, 1)) == pytest.approx(2.476, abs=5e-3)
     lab6 = library_phase("LaB6")
     assert lab6.is_allowed((1, 0, 0))
-    assert lab6.d_spacing((1, 1, 0)) == pytest.approx(4.1569 / math.sqrt(2), abs=1e-3)
+    assert lab6.d_spacing((1, 1, 0)) == pytest.approx(4.1568 / math.sqrt(2), abs=1e-3)
+
+
+def test_library_additions():
+    """d-spacing spot checks for the newer library entries against their cited cells."""
+    from quantem.widget.crystal import library_phase
+
+    checks = {
+        "CaO": ((2, 0, 0), 2.4054),
+        "ZrC": ((2, 0, 0), 2.3502),
+        "CuI": ((1, 1, 1), 3.5005),
+        "Co3O4": ((3, 1, 1), 2.4368),
+        "NiFe2O4": ((3, 1, 1), 2.5205),
+        "BaTiO3": ((1, 1, 0), 2.8217),
+        "WC": ((0, 0, 1), 2.8377),
+        "TiB2": ((1, 0, 1), 2.0359),
+        "ZnS (wurtzite)": ((1, 0, 0), 3.3105),
+        "Bi": ((0, 1, 2), 3.2802),
+        "Sb": ((0, 1, 2), 3.1113),
+    }
+    for name, (hkl, d_ref) in checks.items():
+        phase = library_phase(name)
+        assert phase.is_allowed(hkl)
+        assert abs(phase.d_spacing(hkl) - d_ref) < 0.002

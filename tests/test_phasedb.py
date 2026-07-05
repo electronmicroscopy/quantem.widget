@@ -1,60 +1,8 @@
 import pytest
 
-from quantem.widget.phasedb import (
-    match_candidate,
-    match_sort_key,
-    phases_from_cifs,
-    structure_reflections,
-)
+from quantem.widget.phasedb import match_candidate, match_sort_key
 
-# Diamond-cubic Si, P1 setting: robust to parse without symmetry machinery
-SI_CIF = """data_Si
-_cell_length_a 5.431
-_cell_length_b 5.431
-_cell_length_c 5.431
-_cell_angle_alpha 90
-_cell_angle_beta 90
-_cell_angle_gamma 90
-_symmetry_space_group_name_H-M 'P 1'
-loop_
-_atom_site_label
-_atom_site_type_symbol
-_atom_site_fract_x
-_atom_site_fract_y
-_atom_site_fract_z
-_atom_site_occupancy
-Si1 Si 0.00 0.00 0.00 1
-Si2 Si 0.50 0.50 0.00 1
-Si3 Si 0.50 0.00 0.50 1
-Si4 Si 0.00 0.50 0.50 1
-Si5 Si 0.25 0.25 0.25 1
-Si6 Si 0.75 0.75 0.25 1
-Si7 Si 0.75 0.25 0.75 1
-Si8 Si 0.25 0.75 0.75 1
-"""
-
-
-# --- Electron intensities ---
-
-
-def test_structure_reflections_si_electron_intensities():
-    pytest.importorskip("pymatgen")
-    from pymatgen.core import Lattice, Structure
-
-    si = Structure.from_spacegroup(227, Lattice.cubic(5.431), ["Si"], [[0, 0, 0]])
-    refls = structure_reflections(si, d_min=0.8)
-    ds = [r["d"] for r in refls]
-    assert ds == sorted(ds, reverse=True)
-    by_hkl = {r["hkl_str"]: r for r in refls}
-    assert by_hkl["111"]["d"] == pytest.approx(3.135, abs=5e-3)
-    assert "200" not in by_hkl  # diamond systematic absence
-    assert not any(abs(d - 5.431 / 2) < 5e-3 for d in ds)
-    # electron (Mott-Bethe) intensities, not X-ray + LP: 220 nearly as bright as 111
-    assert by_hkl["220"]["intensity"] / by_hkl["111"]["intensity"] > 0.85
-    assert by_hkl["111"]["multiplicity"] == 8
-
-
-# --- Matcher (no pymatgen needed) ---
+# --- Matcher ---
 
 
 def _lines(entries):
@@ -104,8 +52,8 @@ def test_rank_missing_strong_below_missing_weak():
     assert match_sort_key(sc_weak) < match_sort_key(sc_strong)
 
 
-def test_match_candidate_accepts_structure_reflections_key():
-    # structure_reflections emits "intensity"; the matcher must honor it too
+def test_match_candidate_accepts_intensity_key():
+    # reference cards may carry "intensity" instead of "i_rel"
     refs = [
         {"d": 3.0, "intensity": 100.0},
         {"d": 2.0, "intensity": 90.0},
@@ -133,39 +81,3 @@ def test_match_candidate_no_reference_lines():
     sc = match_candidate([2.5, 1.7], [], tol=0.03)
     assert sc["matched"] == 0
     assert sc["assignments"] == []
-
-
-# --- Local CIF loading ---
-
-
-def test_phases_from_cifs_loads_directory(tmp_path):
-    pytest.importorskip("pymatgen")
-    (tmp_path / "si.cif").write_text(SI_CIF)
-    phases = phases_from_cifs(tmp_path)
-    assert [p.name for p in phases] == ["Si"]
-    r0 = phases[0].reflections()[0]
-    assert r0["d"] == pytest.approx(3.135, abs=5e-3)
-    assert r0["intensity"] is not None
-
-
-def test_phases_from_cifs_accepts_file_list(tmp_path):
-    pytest.importorskip("pymatgen")
-    path = tmp_path / "si.cif"
-    path.write_text(SI_CIF)
-    phases = phases_from_cifs([path])
-    assert [p.name for p in phases] == ["Si"]
-
-
-def test_phases_from_cifs_skips_bad_files(tmp_path):
-    pytest.importorskip("pymatgen")
-    (tmp_path / "good.cif").write_text(SI_CIF)
-    (tmp_path / "bad.cif").write_text("this is not a cif file\n")
-    phases = phases_from_cifs(tmp_path)
-    assert [p.name for p in phases] == ["Si"]
-
-
-def test_phases_from_cifs_all_bad_raises(tmp_path):
-    pytest.importorskip("pymatgen")
-    (tmp_path / "bad.cif").write_text("this is not a cif file\n")
-    with pytest.raises(ValueError, match="no CIF"):
-        phases_from_cifs(tmp_path)

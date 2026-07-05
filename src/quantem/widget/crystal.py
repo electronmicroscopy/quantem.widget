@@ -7,14 +7,9 @@ spacings are available.
 """
 
 import math
-import pathlib
 from collections.abc import Iterable, Sequence
-from typing import TYPE_CHECKING
 
 import numpy as np
-
-if TYPE_CHECKING:
-    from pymatgen.core import Structure
 
 
 def _allow_all(*_) -> bool:
@@ -58,115 +53,174 @@ _ABSENCE_RULES = {
     "rhombohedral": _allow_rhombohedral,
 }
 
-# Built-in standards
+# Built-in standards: room-temperature lattice parameters in Å, each taken from
+# the license-clean source cited on its line (non-cubic entries: line above) —
+# NIST SRM certificates and NBS circulars/monographs (US public domain), the
+# Crystallography Open Database (COD, CC0), or primary literature (numerical
+# facts, cited for provenance). No values from proprietary compilations
+# (ICDD PDF, Pearson's Handbook).
 PHASE_LIBRARY = {
     # fcc metals
-    "Au": {"a": 4.0782, "absences": "fcc"},
-    "Ag": {"a": 4.0853, "absences": "fcc"},
-    "Al": {"a": 4.0495, "absences": "fcc"},
-    "Cu": {"a": 3.6149, "absences": "fcc"},
-    "Ni": {"a": 3.5238, "absences": "fcc"},
-    "Pt": {"a": 3.9242, "absences": "fcc"},
-    "Pd": {"a": 3.8907, "absences": "fcc"},
-    "Pb": {"a": 4.9508, "absences": "fcc"},
-    "Ir": {"a": 3.8390, "absences": "fcc"},
-    "Rh": {"a": 3.8034, "absences": "fcc"},
+    "Au": {"a": 4.0782, "absences": "fcc"},  # COD 9008463 (Wyckoff 1963)
+    "Ag": {"a": 4.0855, "absences": "fcc"},  # COD 1100136 (Spreadborough & Christian 1959)
+    "Al": {"a": 4.0494, "absences": "fcc"},  # NBS Circ. 539 v1 (Swanson & Tatge 1953)
+    "Cu": {"a": 3.6149, "absences": "fcc"},  # Lu & Chang 1941 (NBS Circ. 539 v1)
+    "Ni": {"a": 3.5238, "absences": "fcc"},  # NBS Circ. 539 v1 (Swanson & Tatge 1953)
+    "Pt": {"a": 3.9236, "absences": "fcc"},  # Arblaster 1997, Platin. Met. Rev. 41 12
+    "Pd": {"a": 3.8902, "absences": "fcc"},  # Arblaster 2012, Platin. Met. Rev. 56 181
+    "Pb": {"a": 4.9508, "absences": "fcc"},  # Klug 1946 (NBS Circ. 539 v1)
+    "Ir": {"a": 3.8392, "absences": "fcc"},  # Arblaster 2010, Platin. Met. Rev. 54 93
+    "Rh": {"a": 3.8034, "absences": "fcc"},  # Arblaster 1997, Platin. Met. Rev. 41 184
     # bcc metals
-    "α-Fe": {"a": 2.8665, "absences": "bcc"},
-    "W": {"a": 3.1652, "absences": "bcc"},
-    "Cr": {"a": 2.8848, "absences": "bcc"},
-    "Mo": {"a": 3.1472, "absences": "bcc"},
-    "Nb": {"a": 3.3004, "absences": "bcc"},
-    "Ta": {"a": 3.3058, "absences": "bcc"},
-    "V": {"a": 3.0240, "absences": "bcc"},
+    "α-Fe": {"a": 2.8665, "absences": "bcc"},  # COD 9008536 (Wyckoff 1963)
+    "W": {"a": 3.1652, "absences": "bcc"},  # NBS Mono. 25 Sec. 13 (internal standard)
+    "Cr": {"a": 2.8839, "absences": "bcc"},  # NBS Circ. 539 v5 (1955), COD 5000220
+    "Mo": {"a": 3.1472, "absences": "bcc"},  # NBS Circ. 539 v1 (Swanson & Tatge 1953)
+    "Nb": {"a": 3.3004, "absences": "bcc"},  # COD 9008546 (Wyckoff 1963)
+    "Ta": {"a": 3.3058, "absences": "bcc"},  # COD 9008552 (Wyckoff 1963)
+    "V": {"a": 3.0241, "absences": "bcc"},  # COD 9012770 (James & Straumanis 1960)
     # diamond cubic
-    "Si": {"a": 5.4310, "absences": "diamond"},
-    "Ge": {"a": 5.6575, "absences": "diamond"},
-    "C (diamond)": {"a": 3.5668, "absences": "diamond"},
-    "α-Sn": {"a": 6.4892, "absences": "diamond"},
+    "Si": {"a": 5.4311, "absences": "diamond"},  # NIST SRM 640f
+    "Ge": {"a": 5.6578, "absences": "diamond"},  # COD 9011999 (Hom et al. 1975)
+    "C (diamond)": {"a": 3.5668, "absences": "diamond"},  # COD 9008564 (Wyckoff 1963)
+    "α-Sn": {"a": 6.4912, "absences": "diamond"},  # COD 9008568 (Wyckoff 1963)
     # rocksalt
-    "MgO": {"a": 4.2117, "absences": "fcc"},
-    "NaCl": {"a": 5.6402, "absences": "fcc"},
-    "LiF": {"a": 4.0270, "absences": "fcc"},
-    "TiN": {"a": 4.2400, "absences": "fcc"},
-    "TiC": {"a": 4.3280, "absences": "fcc"},
-    "NiO": {"a": 4.1770, "absences": "fcc"},
+    "MgO": {"a": 4.2117, "absences": "fcc"},  # NBS Circ. 539 v1 (Swanson & Tatge 1953)
+    "NaCl": {"a": 5.6402, "absences": "fcc"},  # NBS Circ. 539 v2 (Swanson & Fuyat 1953)
+    "LiF": {"a": 4.0270, "absences": "fcc"},  # NBS Circ. 539 v1 (Swanson & Tatge 1953)
+    "TiN": {"a": 4.2390, "absences": "fcc"},  # COD 1100037 (Christensen 1978)
+    "TiC": {"a": 4.3280, "absences": "fcc"},  # COD 9012564 (Christensen 1978)
+    "NiO": {"a": 4.1771, "absences": "fcc"},  # COD 4329325 (Malingowski et al. 2012)
+    "CaO": {"a": 4.8107, "absences": "fcc"},  # COD 7200686 (Verbraeken et al. 2009)
+    "ZrN": {"a": 4.5780, "absences": "fcc"},  # COD 1538058 (Gatterer et al. 1975)
+    "CrN": {"a": 4.1480, "absences": "fcc"},  # COD 1008956 (Nasr Eddine et al. 1977)
+    "TaC": {"a": 4.4540, "absences": "fcc"},  # COD 9008731 (Wyckoff 1963)
+    "NbC": {"a": 4.4691, "absences": "fcc"},  # COD 9008682 (Wyckoff 1963)
+    "ZrC": {"a": 4.7004, "absences": "fcc"},  # COD 1562921 (Chinthaka Silva et al. 2012)
     # fluorite
-    "CaF2": {"a": 5.4626, "absences": "fcc"},
-    "CeO2": {"a": 5.4113, "absences": "fcc"},
-    "UO2": {"a": 5.4704, "absences": "fcc"},
+    "CaF2": {"a": 5.4630, "absences": "fcc"},  # COD 9009005 (Wyckoff 1963)
+    "CeO2": {"a": 5.4115, "absences": "fcc"},  # NIST SRM 674b
+    "UO2": {"a": 5.4704, "absences": "fcc"},  # Grønvold 1955, J. Inorg. Nucl. Chem. 1 357
     # zincblende
-    "GaAs": {"a": 5.6533, "absences": "fcc"},
-    "GaP": {"a": 5.4505, "absences": "fcc"},
-    "InP": {"a": 5.8687, "absences": "fcc"},
-    "InAs": {"a": 6.0583, "absences": "fcc"},
-    "ZnS": {"a": 5.4109, "absences": "fcc"},
-    "ZnSe": {"a": 5.6676, "absences": "fcc"},
-    "CdTe": {"a": 6.4820, "absences": "fcc"},
-    "3C-SiC": {"a": 4.3596, "absences": "fcc"},
+    "GaAs": {"a": 5.6533, "absences": "fcc"},  # Straumanis & Kim 1965, J. Appl. Phys. 36 3822
+    "GaP": {"a": 5.4505, "absences": "fcc"},  # COD 9008846 (Wyckoff 1963)
+    "InP": {"a": 5.8687, "absences": "fcc"},  # COD 9008852 (Wyckoff 1963)
+    "InAs": {"a": 6.0580, "absences": "fcc"},  # NBS Mono. 25 Sec. 3 (1964)
+    "ZnS": {"a": 5.4093, "absences": "fcc"},  # COD 9000107 (Skinner 1961)
+    "ZnSe": {"a": 5.6676, "absences": "fcc"},  # COD 9008857 (Wyckoff 1963)
+    "CdTe": {"a": 6.4810, "absences": "fcc"},  # NBS Mono. 25 Sec. 3 (1964)
+    "3C-SiC": {"a": 4.3596, "absences": "fcc"},  # Sultan et al. 2022, Materials 15 6229
+    "CuI": {"a": 6.0630, "absences": "fcc"},  # COD 9004456 (Cooper & Hawthorne 1997)
     # spinel
-    "Fe3O4": {"a": 8.3963, "absences": "fcc"},
-    "γ-Fe2O3": {"a": 8.3515, "absences": "fcc"},
-    "MgAl2O4": {"a": 8.0831, "absences": "fcc"},
+    "Fe3O4": {"a": 8.3967, "absences": "fcc"},  # COD 9013529 (Bosi et al. 2009)
+    "γ-Fe2O3": {"a": 8.3474, "absences": "fcc"},  # COD 9017489 (Shmakov et al. 1995)
+    "MgAl2O4": {"a": 8.0836, "absences": "fcc"},  # COD 9002044 (Redfern et al. 1999)
+    "Co3O4": {"a": 8.0821, "absences": "fcc"},  # COD 9005887 (Liu & Prewitt 1990)
+    "CoFe2O4": {"a": 8.3806, "absences": "fcc"},  # COD 1533163 (Ferreira et al. 2003)
+    "NiFe2O4": {"a": 8.3597, "absences": "fcc"},  # COD 2300289 (Kremenović et al. 2010)
+    "ZnFe2O4": {"a": 8.4421, "absences": "fcc"},  # COD 9005102 (O'Neill 1992)
     # primitive cubic
-    "SrTiO3": {"a": 3.9050, "absences": "none"},
-    "CsCl": {"a": 4.1230, "absences": "none"},
+    "SrTiO3": {"a": 3.9050, "absences": "none"},  # NBS Circ. 539 v3 (Swanson et al. 1954)
+    "CsCl": {"a": 4.1230, "absences": "none"},  # NBS Circ. 539 v2 (Swanson & Fuyat 1953)
     # additional cubic phases
-    "Th": {"a": 5.0842, "absences": "fcc"},
-    "KCl": {"a": 6.2917, "absences": "fcc"},
-    "KBr": {"a": 6.6000, "absences": "fcc"},
-    "CoO": {"a": 4.2603, "absences": "fcc"},
-    "MnO": {"a": 4.4448, "absences": "fcc"},
-    "PbS": {"a": 5.9362, "absences": "fcc"},
-    "PbSe": {"a": 6.1243, "absences": "fcc"},
-    "PbTe": {"a": 6.4620, "absences": "fcc"},
-    "AgCl": {"a": 5.5491, "absences": "fcc"},
-    "AgBr": {"a": 5.7745, "absences": "fcc"},
-    "ThO2": {"a": 5.5997, "absences": "fcc"},
-    "BaF2": {"a": 6.2001, "absences": "fcc"},
-    "SrF2": {"a": 5.7996, "absences": "fcc"},
-    "AlAs": {"a": 5.6605, "absences": "fcc"},
-    "GaSb": {"a": 6.0959, "absences": "fcc"},
-    "InSb": {"a": 6.4794, "absences": "fcc"},
-    "ZnTe": {"a": 6.1034, "absences": "fcc"},
-    "c-BN": {"a": 3.6157, "absences": "fcc"},
-    "γ-Al2O3": {"a": 7.9110, "absences": "fcc"},
-    "Y2O3": {"a": 10.6040, "absences": "bcc"},
-    "In2O3": {"a": 10.1170, "absences": "bcc"},
-    "LaB6": {"a": 4.1569, "absences": "none"},
-    "Cu2O": {"a": 4.2696, "absences": "none"},
+    "Th": {"a": 5.0843, "absences": "fcc"},  # COD 9008485 (Wyckoff 1963)
+    "KCl": {"a": 6.2917, "absences": "fcc"},  # NBS Circ. 539 v1 (Swanson & Tatge 1953)
+    "KBr": {"a": 6.6000, "absences": "fcc"},  # COD 9008650 (Wyckoff 1963)
+    "CoO": {"a": 4.2630, "absences": "fcc"},  # COD 1533087 (Sasaki et al. 1979)
+    "MnO": {"a": 4.4449, "absences": "fcc"},  # COD 9005946 (Pacalo & Graham 1991)
+    "PbS": {"a": 5.9362, "absences": "fcc"},  # NBS Circ. 539 v2 (Swanson & Fuyat 1953)
+    "PbSe": {"a": 6.1243, "absences": "fcc"},  # COD 9008695 (Wyckoff 1963)
+    "PbTe": {"a": 6.4541, "absences": "fcc"},  # COD 9011358 (Noda et al. 1987)
+    "AgCl": {"a": 5.5491, "absences": "fcc"},  # NBS Circ. 539 v4 (Swanson et al. 1955)
+    "AgBr": {"a": 5.7745, "absences": "fcc"},  # NBS Circ. 539 v4 (Swanson et al. 1955)
+    "ThO2": {"a": 5.5997, "absences": "fcc"},  # COD 9009046 (Wyckoff 1963)
+    "BaF2": {"a": 6.2001, "absences": "fcc"},  # COD 9009004 (Wyckoff 1963)
+    "SrF2": {"a": 5.7996, "absences": "fcc"},  # COD 9009043 (Wyckoff 1963)
+    "AlAs": {"a": 5.6608, "absences": "fcc"},  # COD 1540257 (Leszczynski et al. 1992)
+    "GaSb": {"a": 6.0959, "absences": "fcc"},  # Straumanis & Kim 1965, J. Appl. Phys. 36 3822
+    "InSb": {"a": 6.4794, "absences": "fcc"},  # Straumanis & Kim 1965, J. Appl. Phys. 36 3822
+    "ZnTe": {"a": 6.1026, "absences": "fcc"},  # COD 1540103 (Holland & Beck 1968)
+    "c-BN": {"a": 3.6153, "absences": "fcc"},  # Kurdyumov et al. 1995, J. Appl. Cryst. 28 540
+    "γ-Al2O3": {"a": 7.9140, "absences": "fcc"},  # COD 2107301 (Zhou & Snyder 1991)
+    "Y2O3": {"a": 10.6040, "absences": "bcc"},  # COD 1513300 (Ferreira et al. 2005)
+    "In2O3": {"a": 10.1170, "absences": "bcc"},  # COD 2310009 (Marezio 1966)
+    "LaB6": {"a": 4.1568, "absences": "none"},  # NIST SRM 660c
+    "Cu2O": {"a": 4.2696, "absences": "none"},  # NBS Circ. 539 v2 (Swanson & Fuyat 1953)
     # tetragonal
-    "TiO2 (rutile)": {"a": 4.5937, "c": 2.9587, "gamma": 90.0, "absences": "none"},
+    # NIST SRM 674b
+    "TiO2 (rutile)": {"a": 4.5940, "c": 2.9589, "gamma": 90.0, "absences": "none"},
+    # NBS Mono. 25 Sec. 7 (1969)
     "TiO2 (anatase)": {"a": 3.7852, "c": 9.5139, "gamma": 90.0, "absences": "bcc"},
-    "SnO2": {"a": 4.7382, "c": 3.1871, "gamma": 90.0, "absences": "none"},
-    "β-Sn": {"a": 5.8318, "c": 3.1819, "gamma": 90.0, "absences": "bcc"},
+    # COD 2101853 (Bolzan et al. 1997)
+    "SnO2": {"a": 4.7374, "c": 3.1864, "gamma": 90.0, "absences": "none"},
+    # COD 1534488 (Lee & Raynor 1954)
+    "β-Sn": {"a": 5.8317, "c": 3.1813, "gamma": 90.0, "absences": "bcc"},
+    # COD 1513252 (Yasuda et al. 2009)
+    "BaTiO3": {"a": 3.9905, "c": 4.0412, "gamma": 90.0, "absences": "none"},
+    # primitive hexagonal
+    # COD 1501516 (Litasov et al. 2010)
+    "WC": {"a": 2.9059, "c": 2.8377, "gamma": 120.0, "absences": "none"},
+    # COD 2002799 (Möhr et al. 1996)
+    "TiB2": {"a": 3.0292, "c": 3.2284, "gamma": 120.0, "absences": "none"},
     # wurtzite
-    "ZnO": {"a": 3.2495, "c": 5.2069, "gamma": 120.0, "absences": "wurtzite"},
-    "GaN": {"a": 3.1890, "c": 5.1850, "gamma": 120.0, "absences": "wurtzite"},
-    "AlN": {"a": 3.1110, "c": 4.9790, "gamma": 120.0, "absences": "wurtzite"},
+    # NIST SRM 674b
+    "ZnO": {"a": 3.2499, "c": 5.2067, "gamma": 120.0, "absences": "wurtzite"},
+    # Detchprohm et al. 1992, Jpn. J. Appl. Phys. 31 L1454
+    "GaN": {"a": 3.1892, "c": 5.1850, "gamma": 120.0, "absences": "wurtzite"},
+    # Schulz & Thiemann 1977, Solid State Commun. 23 815
+    "AlN": {"a": 3.1100, "c": 4.9800, "gamma": 120.0, "absences": "wurtzite"},
+    # Paszkowicz 1999, Powder Diffr. 14 258
     "InN": {"a": 3.5378, "c": 5.7033, "gamma": 120.0, "absences": "wurtzite"},
-    "CdS (wurtzite)": {"a": 4.1365, "c": 6.7160, "gamma": 120.0, "absences": "wurtzite"},
-    "CdSe (wurtzite)": {"a": 4.2985, "c": 7.0150, "gamma": 120.0, "absences": "wurtzite"},
+    # COD 9011663 (Xu & Ching 1993)
+    "CdS (wurtzite)": {"a": 4.1370, "c": 6.7144, "gamma": 120.0, "absences": "wurtzite"},
+    # COD 9011664 (Xu & Ching 1993)
+    "CdSe (wurtzite)": {"a": 4.2985, "c": 7.0152, "gamma": 120.0, "absences": "wurtzite"},
+    # COD 1100044 (Kisi & Elcombe 1989)
+    "ZnS (wurtzite)": {"a": 3.8227, "c": 6.2607, "gamma": 120.0, "absences": "wurtzite"},
+    # COD 1529745 (Cava et al. 1977)
+    "β-AgI": {"a": 4.5980, "c": 7.5140, "gamma": 120.0, "absences": "wurtzite"},
     # rhombohedral
-    "α-Al2O3": {"a": 4.7587, "c": 12.9929, "gamma": 120.0, "absences": "rhombohedral"},
+    # NIST SRM 676a
+    "α-Al2O3": {"a": 4.7594, "c": 12.9923, "gamma": 120.0, "absences": "rhombohedral"},
+    # NBS Mono. 25 Sec. 18 (1981)
     "α-Fe2O3 (hematite)": {"a": 5.0356, "c": 13.7489, "gamma": 120.0, "absences": "rhombohedral"},
-    "Cr2O3": {"a": 4.9587, "c": 13.5942, "gamma": 120.0, "absences": "rhombohedral"},
+    # NIST SRM 674b
+    "Cr2O3": {"a": 4.9586, "c": 13.5965, "gamma": 120.0, "absences": "rhombohedral"},
+    # NBS Circ. 539 v2 (Swanson & Fuyat 1953)
     "CaCO3 (calcite)": {"a": 4.9890, "c": 17.0620, "gamma": 120.0, "absences": "rhombohedral"},
+    # COD 1541936 (Abrahams et al. 1966)
     "LiNbO3": {"a": 5.1483, "c": 13.8631, "gamma": 120.0, "absences": "rhombohedral"},
+    # COD 2310889 (Cucka & Barrett 1962)
+    "Bi": {"a": 4.5460, "c": 11.8620, "gamma": 120.0, "absences": "rhombohedral"},
+    # COD 5000214 (Barrett et al. 1963)
+    "Sb": {"a": 4.3084, "c": 11.2740, "gamma": 120.0, "absences": "rhombohedral"},
     # hcp metals + graphite
-    "Ti": {"a": 2.9505, "c": 4.6826, "gamma": 120.0, "absences": "hcp"},
+    # NBS Circ. 539 v3 (Swanson et al. 1954)
+    "Ti": {"a": 2.9500, "c": 4.6860, "gamma": 120.0, "absences": "hcp"},
+    # Jette & Foote 1935 (NBS Circ. 539 v1)
     "Zn": {"a": 2.6649, "c": 4.9468, "gamma": 120.0, "absences": "hcp"},
-    "Mg": {"a": 3.2094, "c": 5.2107, "gamma": 120.0, "absences": "hcp"},
-    "Co": {"a": 2.5071, "c": 4.0695, "gamma": 120.0, "absences": "hcp"},
+    # NBS Circ. 539 v1 (Swanson & Tatge 1953)
+    "Mg": {"a": 3.2094, "c": 5.2103, "gamma": 120.0, "absences": "hcp"},
+    # COD 9008492 (Wyckoff 1963)
+    "Co": {"a": 2.5071, "c": 4.0686, "gamma": 120.0, "absences": "hcp"},
+    # NBS Circ. 539 v2 (Swanson & Fuyat 1953)
     "Zr": {"a": 3.2320, "c": 5.1470, "gamma": 120.0, "absences": "hcp"},
-    "Ru": {"a": 2.7059, "c": 4.2815, "gamma": 120.0, "absences": "hcp"},
+    # NBS Circ. 539 v4 (Swanson et al. 1955)
+    "Ru": {"a": 2.7058, "c": 4.2819, "gamma": 120.0, "absences": "hcp"},
+    # Mackay & Hill 1963 (NBS Mono. 25 Sec. 9)
     "Be": {"a": 2.2858, "c": 3.5843, "gamma": 120.0, "absences": "hcp"},
-    "Cd": {"a": 2.9793, "c": 5.6196, "gamma": 120.0, "absences": "hcp"},
-    "Re": {"a": 2.7610, "c": 4.4560, "gamma": 120.0, "absences": "hcp"},
-    "Os": {"a": 2.7344, "c": 4.3174, "gamma": 120.0, "absences": "hcp"},
-    "Hf": {"a": 3.1946, "c": 5.0511, "gamma": 120.0, "absences": "hcp"},
+    # NBS Circ. 539 v3 (Swanson et al. 1954)
+    "Cd": {"a": 2.9793, "c": 5.6181, "gamma": 120.0, "absences": "hcp"},
+    # COD 9008512 (Wyckoff 1963)
+    "Re": {"a": 2.7608, "c": 4.4582, "gamma": 120.0, "absences": "hcp"},
+    # NBS Circ. 539 v4 (Swanson et al. 1955)
+    "Os": {"a": 2.7341, "c": 4.3197, "gamma": 120.0, "absences": "hcp"},
+    # Russell 1953 (COD 1539076)
+    "Hf": {"a": 3.1964, "c": 5.0511, "gamma": 120.0, "absences": "hcp"},
+    # Spedding et al. 1956 (COD 9010984)
     "Y": {"a": 3.6474, "c": 5.7306, "gamma": 120.0, "absences": "hcp"},
-    "C (graphite)": {"a": 2.4610, "c": 6.7080, "gamma": 120.0, "absences": "hcp"},
+    # Trucano & Chen 1975 (COD 9011577)
+    "C (graphite)": {"a": 2.4640, "c": 6.7110, "gamma": 120.0, "absences": "hcp"},
 }
 
 
@@ -263,35 +317,6 @@ class Phase:
             intensity = float(entry[2]) if len(entry) > 2 else None
             reference_lines.append((float(spacing), str(label), intensity))
         return cls(name, 1.0, 1.0, 1.0, _reference_lines=reference_lines)
-
-    @classmethod
-    def from_structure(
-        cls, structure: "Structure", name: str | None = None, d_min: float = 0.7
-    ) -> "Phase":
-        """Phase from a pymatgen Structure using electron intensities."""
-        from .phasedb import structure_reflections
-
-        entries = [
-            (r["d"], r["hkl_str"], r["intensity"])
-            for r in structure_reflections(structure, d_min=d_min)
-        ]
-        if name is None:
-            name = structure.composition.reduced_formula
-        return cls.from_dspacings(name, entries)
-
-    @classmethod
-    def from_cif(
-        cls, path: str | pathlib.Path, name: str | None = None, d_min: float = 0.7
-    ) -> "Phase":
-        """Phase from a CIF file (via pymatgen ``Structure.from_file``)."""
-        try:
-            from pymatgen.core import Structure
-        except ImportError as exc:  # pragma: no cover
-            raise ImportError(
-                "Phase.from_cif needs pymatgen; install it with "
-                "'pip install \"quantem.widget[phaseid]\"'"
-            ) from exc
-        return cls.from_structure(Structure.from_file(str(path)), name=name, d_min=d_min)
 
     # --- Geometry ---
     def d_spacing(self, hkl: Sequence[float]) -> float:
