@@ -498,6 +498,19 @@ def _write_index(artifact_dir: Path, report: dict[str, Any]) -> None:
     browser = report.get("browser") or {}
     screenshot = browser.get("screenshot")
     shot_html = f"<p><a href='{html.escape(screenshot)}'>Browser screenshot</a></p>" if screenshot else ""
+    targets = report.get("targets", {})
+    target_rows = "\n".join(
+        f"<tr><th>{html.escape(str(key))}</th><td>{html.escape(str(value))}</td></tr>"
+        for key, value in [
+            ("backend", targets.get("backend", "")),
+            ("devices", targets.get("devices", "")),
+            ("requested_master_count", targets.get("requested_master_count", "")),
+            ("max_successful_masters", targets.get("max_successful_masters", "")),
+            ("det_bin", targets.get("det_bin", "")),
+            ("export_det_bin", targets.get("export_det_bin", "")),
+            ("min_fps", targets.get("min_fps", "")),
+        ]
+    )
     page = f"""<!doctype html>
 <html>
 <head>
@@ -518,6 +531,8 @@ def _write_index(artifact_dir: Path, report: dict[str, Any]) -> None:
   <p class="warn">Local-only real-data report. Do not commit private data paths,
   generated HTML, screenshots, or timing JSON unless explicitly approved.</p>
   <p>Result: <strong>{'PASS' if report['passed'] else 'FAIL'}</strong></p>
+  <h2>Targets</h2>
+  <table><tbody>{target_rows}</tbody></table>
   <h2>Exports</h2>
   <ul>{exports}</ul>
   {shot_html}
@@ -620,6 +635,7 @@ def main() -> int:
                 backend=backend,
                 det_bin=args.det_bin,
                 scan_shape=scan_shape,
+                series_type="generic" if backend == "cuda" else None,
                 verbose=True,
             ),
         )
@@ -685,6 +701,10 @@ def main() -> int:
     )
 
     append_results: list[dict[str, Any]] = []
+    if backend == "cuda" and len(masters) > 1 and hasattr(widget, "close"):
+        widget.close()
+        widget = None
+    last_good_count = 1
     for idx, master in enumerate(masters[1:], start=2):
         label = master.name
         t0 = time.perf_counter()
@@ -696,15 +716,21 @@ def main() -> int:
                 active_data = lazy
                 result = {"indices": indices}
             else:
+                previous_data = active_data
+                if hasattr(previous_data, "free"):
+                    previous_data.free()
+                    active_data = None
                 active_data = load(
                     [str(path) for path in masters[:idx]],
                     backend=backend,
                     det_bin=args.det_bin,
                     scan_shape=scan_shape,
+                    series_type="generic" if backend == "cuda" else None,
                     verbose=True,
                     devices=devices,
                 )
                 chunking_after = _describe_backend_data(active_data, backend=backend)
+                last_good_count = idx
                 result = {"loaded_masters": idx}
             append_results.append(
                 {
@@ -720,6 +746,30 @@ def main() -> int:
         except Exception as exc:
             errors.append(f"append {label} failed: {exc}")
             append_results.append({"master": str(master), "strategy": append_strategy, "error": str(exc)[:300]})
+            try:
+                import gc
+                import traceback
+
+                traceback.clear_frames(exc.__traceback__)
+                gc.collect()
+            except Exception:
+                pass
+            if backend == "cuda" and last_good_count > 0:
+                _cleanup_backend_memory("free_gpu_after_append_failure", cleanup_records)
+                try:
+                    active_data = load(
+                        [str(path) for path in masters[:last_good_count]],
+                        backend=backend,
+                        det_bin=args.det_bin,
+                        scan_shape=scan_shape,
+                        series_type="generic",
+                        verbose=True,
+                        devices=devices,
+                    )
+                except Exception as reload_exc:
+                    active_data = None
+                    errors.append(f"reload last successful {last_good_count} master(s) failed: {reload_exc}")
+            break
 
     if len(masters) > 1 and active_data is not None:
         if hasattr(widget, "close"):
@@ -741,36 +791,43 @@ def main() -> int:
             ),
         )
 
-    chunking = _describe_chunks(lazy) if backend == "mps" and lazy is not None else _describe_backend_data(active_data, backend=backend)
-    export = _timed(
-        f"export_html_{args.encoding}_bin{args.export_det_bin}",
-        timing,
-        lambda: _export_widget(widget, artifact_dir, dtype=args.encoding, det_bin=args.export_det_bin),
-    )
-
+    exports: list[dict[str, Any]] = []
     browser: dict[str, Any] | None = None
-    if args.skip_browser:
-        errors.append("browser checks skipped; this is not a full Show4DSTEM UI performance signoff")
+    if active_data is None or widget is None:
+        chunking = {}
+        errors.append("no active Show4DSTEM data remained after append/capacity probe; export and browser checks skipped")
     else:
-        try:
-            browser = _drive_browser_export(
-                artifact_dir,
-                export,
-                min_fps=args.min_fps,
-                timeout_ms=args.timeout_ms,
-                headed=args.headed,
-            )
-            if not browser.get("passed"):
-                errors.extend(browser.get("errors", []))
-        except Exception as exc:
-            errors.append(f"browser signoff failed: {exc}")
-            browser = {"passed": False, "errors": [str(exc)]}
+        chunking = _describe_chunks(lazy) if backend == "mps" and lazy is not None else _describe_backend_data(active_data, backend=backend)
+        export = _timed(
+            f"export_html_{args.encoding}_bin{args.export_det_bin}",
+            timing,
+            lambda: _export_widget(widget, artifact_dir, dtype=args.encoding, det_bin=args.export_det_bin),
+        )
+        exports.append(export)
 
-    if hasattr(widget, "close"):
+        if args.skip_browser:
+            errors.append("browser checks skipped; this is not a full Show4DSTEM UI performance signoff")
+        else:
+            try:
+                browser = _drive_browser_export(
+                    artifact_dir,
+                    export,
+                    min_fps=args.min_fps,
+                    timeout_ms=args.timeout_ms,
+                    headed=args.headed,
+                )
+                if not browser.get("passed"):
+                    errors.extend(browser.get("errors", []))
+            except Exception as exc:
+                errors.append(f"browser signoff failed: {exc}")
+                browser = {"passed": False, "errors": [str(exc)]}
+
+    if widget is not None and hasattr(widget, "close"):
         widget.close()
     if hasattr(lazy, "stop_watch"):
         lazy.stop_watch()
-    del widget
+    if widget is not None:
+        del widget
     if not args.no_free_gpu_after:
         _cleanup_backend_memory("free_gpu_after", cleanup_records)
 
@@ -793,6 +850,8 @@ def main() -> int:
         },
         "targets": {
             "masters": [str(master) for master in masters],
+            "requested_master_count": len(masters),
+            "max_successful_masters": last_good_count,
             "backend": backend,
             "append_strategy": append_strategy,
             "devices": devices,
@@ -806,7 +865,7 @@ def main() -> int:
         "cleanup": cleanup_records,
         "append_results": append_results,
         "chunking": chunking,
-        "exports": [export],
+        "exports": exports,
         "browser": browser,
         "memory_final": _memory_snapshot("final"),
         "errors": errors,

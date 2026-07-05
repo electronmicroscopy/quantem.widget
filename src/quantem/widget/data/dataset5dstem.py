@@ -183,11 +183,49 @@ class Dataset5dstem:
         return self._frames[0].dtype if self._frames is not None else self._tensor.dtype
 
     @property
+    def device(self):
+        """Device for the first frame.
+
+        A sharded series can span multiple devices; use :attr:`devices` when
+        placement matters for every frame. The first-frame device is enough for
+        viewer initialization and small coordinate tensors.
+        """
+        if self._frames is not None:
+            return self._frames[0].device
+        if self._tensor is None:
+            raise RuntimeError("Dataset5dstem has been freed; re-load to use it again.")
+        return self._tensor.device
+
+    @property
     def devices(self) -> list[str]:
         """Device of each frame, in series order."""
         if self._frames is not None:
             return [str(t.device) for t in self._frames]
         return [str(self._tensor.device)] * len(self)
+
+    @property
+    def nbytes(self) -> int:
+        """Total resident bytes across tensor/frame backing."""
+        if self._frames is not None:
+            return int(sum(f.element_size() * f.nelement() for f in self._frames))
+        if self._tensor is None:
+            raise RuntimeError("Dataset5dstem has been freed; re-load to use it again.")
+        return int(self._tensor.element_size() * self._tensor.nelement())
+
+    def numel(self) -> int:
+        """Total logical element count, matching ``torch.Tensor.numel()``."""
+        total = 1
+        for value in self.shape:
+            total *= int(value)
+        return int(total)
+
+    def element_size(self) -> int:
+        """Bytes per element, matching ``torch.Tensor.element_size()``."""
+        if self._frames is not None:
+            return int(self._frames[0].element_size())
+        if self._tensor is None:
+            raise RuntimeError("Dataset5dstem has been freed; re-load to use it again.")
+        return int(self._tensor.element_size())
 
     @property
     def frames(self) -> list[torch.Tensor]:

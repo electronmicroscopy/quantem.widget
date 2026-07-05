@@ -61,6 +61,7 @@ Preferred heavy datasets on the lab machines:
 | PUI-3D-EXPORT | Show3D | same as PUI-3D-MULTI | Exact/quantized/binned HTML export paths |
 | PUI-EDS | ShowEDS | native sparse EDS stream, no hidden crop/bin | DGGG 0039 or equivalent Velox EDS stream |
 | PUI-4DSTEM | Show4DSTEM | real scan with diffraction and virtual images | 4D-STEM tutorial or paper data on an HPC/workstation or hosted dataset |
+| PUI-4DSTEM-NOBIN | Show4DSTEM | 30-40 ready real masters at `det_bin=1` as a capacity probe, plus a browser-enabled no-bin stack that fits | Private lab 4D-STEM masters on an NVIDIA workstation; never commit data or reports |
 | PUI-FOLDER | ShowFolder | folder with many microscopy files | Real screening folder with cache reuse |
 
 If a preferred source is unavailable, use the closest local real source and
@@ -171,6 +172,11 @@ Show4DSTEM and ShowEDS:
   then let the user flip through loaded datasets/frames from the browser at the
   target FPS. Timing first load without testing the dataset slider is not a
   complete signoff.
+- A 30-40 master no-bin Show4DSTEM request is a memory-capacity gate first and
+  a browser FPS gate only if the backend can actually keep that many masters
+  available. Reports must state the per-master bytes, maximum loaded count,
+  devices used, append failure if any, and cleanup result. Do not replace this
+  with MPS when the requested backend is NVIDIA/CUDA.
 - Browser interaction should not require a Python round trip during drag unless
   the report calls out the limitation.
 - WebGPU/MPS/CUDA usage must be recorded by surface: browser WebGPU is not the

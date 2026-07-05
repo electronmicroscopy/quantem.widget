@@ -1771,6 +1771,108 @@ def _load_as_dataset5dstem(
     except ImportError as exc:
         raise ImportError("series_type= needs torch installed.") from exc
 
+    if devices is not None and isinstance(filepath, (list, tuple)):
+        import concurrent.futures
+        import time
+
+        filepaths = list(filepath)
+        if devices == "all":
+            devices = list(range(cp.cuda.runtime.getDeviceCount()))
+        devices = [int(d) for d in devices]
+        assign = {d: [i for i in range(len(filepaths)) if devices[i % len(devices)] == d]
+                  for d in devices}
+        if verbose:
+            bin_str = f", det_bin={det_bin}" if det_bin > 1 else ""
+            print(f"Loading {len(filepaths)} files as Dataset5dstem frames across GPUs {devices}{bin_str}")
+        frames: list[torch.Tensor | None] = [None] * len(filepaths)
+        meta_box: dict[int, dict] = {}
+        skipped: list[int] = []
+
+        def worker(dev: int):
+            idxs = assign[dev]
+            if not idxs:
+                return
+            with cp.cuda.Device(dev):
+                anchor = None
+                for idx in idxs:
+                    try:
+                        result = load(
+                            filepaths[idx],
+                            dataset_path=dataset_path,
+                            apply_mask=apply_mask,
+                            scan_shape=scan_shape,
+                            det_bin=det_bin,
+                            verbose=False,
+                            auto_narrow=auto_narrow,
+                            output_dtype=output_dtype,
+                            device=dev,
+                        )
+                    except (FileNotFoundError, OSError, ValueError) as exc:
+                        if verbose:
+                            print(f"  gpu{dev} [{idx + 1}/{len(filepaths)}] SKIPPED: {exc}")
+                        skipped.append(idx)
+                        continue
+                    data = result.data
+                    if data.ndim == 5 and data.shape[0] == 1:
+                        data = data[0]
+                    if data.ndim != 4:
+                        if verbose:
+                            print(f"  gpu{dev} [{idx + 1}/{len(filepaths)}] SKIPPED: expected 4D frame, got {data.shape}")
+                        skipped.append(idx)
+                        continue
+                    if anchor is None:
+                        anchor = tuple(data.shape)
+                    elif tuple(data.shape) != anchor:
+                        if verbose:
+                            print(f"  gpu{dev} [{idx + 1}/{len(filepaths)}] SKIPPED: shape mismatch")
+                        skipped.append(idx)
+                        continue
+                    frames[idx] = torch.from_dlpack(data)
+                    meta_box.setdefault(dev, result.metadata)
+                    del data, result
+                    cp.get_default_memory_pool().free_all_blocks()
+
+        t0 = time.perf_counter()
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=len(devices)) as pool:
+                list(pool.map(worker, devices))
+        except Exception:
+            import gc
+
+            for idx in range(len(frames)):
+                frames[idx] = None
+            gc.collect()
+            for dev in devices:
+                with torch.cuda.device(dev):
+                    torch.cuda.empty_cache()
+                with cp.cuda.Device(dev):
+                    cp.get_default_memory_pool().free_all_blocks()
+            raise
+        loaded = [(idx, frame) for idx, frame in enumerate(frames) if frame is not None]
+        if not loaded:
+            raise FileNotFoundError(f"All {len(filepaths)} files failed to load")
+        loaded_indices = [idx for idx, _frame in loaded]
+        loaded_frames = [frame for _idx, frame in loaded]
+        series_subset = None if series is None else np.asarray(series)[loaded_indices]
+        dataset = Dataset5dstem.from_frames(
+            loaded_frames,
+            sampling=sampling,
+            units=units,
+            series_type=series_type,
+            series=series_subset,
+        )
+        if verbose:
+            dt = time.perf_counter() - t0
+            per_device: dict[str, float] = {}
+            for frame in loaded_frames:
+                gib = frame.element_size() * frame.nelement() / (1 << 30)
+                per_device[str(frame.device)] = per_device.get(str(frame.device), 0.0) + gib
+            per = " ".join(f"{device}:{gib:.0f}GiB" for device, gib in sorted(per_device.items()))
+            skip = f" (skipped {len(skipped)})" if skipped else ""
+            print(f"  Done: {len(loaded_frames)} files{skip} as Dataset5dstem frames "
+                  f"[{per}] total {dataset.nbytes / (1 << 30):.1f} GiB in {dt:.2f}s")
+        return dataset
+
     result = load(
         filepath, dataset_path=dataset_path, apply_mask=apply_mask,
         scan_shape=scan_shape, det_bin=det_bin, verbose=verbose,

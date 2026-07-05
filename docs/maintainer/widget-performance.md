@@ -194,6 +194,23 @@ memory before the next run? A single 512 x 512 x 192 x 192 uint16 master is
 about 18 GiB resident, so 20-30 masters no-bin is a capacity stress, not a
 reasonable default expectation on every two-GPU machine.
 
+2026-07-05 CUDA no-bin result on a private NVIDIA lab workstation: two RTX PRO
+6000 GPUs (about 96 GiB each) loaded real PE-5 masters at `det_bin=1`. A
+four-master stack (4 x 512 x 512 x 192 x 192 uint16, about 72 GiB resident)
+passed the browser-enabled signoff: first master load was about 0.8 s, widget
+build about 0.6 s, stack growth to four masters about 1.5 s, and browser
+scan-position, detector, wheel-zoom, and dataset-flip checks all measured about
+60 FPS. The compact standalone export for that four-master stack used
+`uint8` with `export_det_bin=8`, produced an 85 MB HTML file, and took about
+28-33 s on the workstation run. A 40-master no-bin capacity probe failed
+cleanly while appending the fifth master with an allocation request of about
+18 GiB; the script released GPU memory, reloaded the last successful
+four-master stack, and wrote the failure report. This is expected for
+eager-resident no-bin data: 30-40 files would be roughly 540-720 GiB of
+detector data before viewer overhead. To make 30-40 no-bin files browsable as
+a normal workflow, implement an out-of-core/paged CUDA or NVMe-backed frame
+cache instead of promising that all masters stay resident on the GPUs.
+
 After the capacity stress, run a browser-enabled multi-master pass that fits in
 memory. That pass must prove the user workflow, not only the load path: the
 viewer opens quickly, additional masters are available through the Dataset

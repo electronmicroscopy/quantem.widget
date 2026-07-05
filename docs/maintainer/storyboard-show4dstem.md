@@ -378,3 +378,8 @@ HTML reports to GitHub.
   recompute latency, and wheel-zoom FPS are recorded.
 - Treat ``--skip-browser`` as backend/export debugging only, not performance
   signoff.
+- For NVIDIA no-bin stress, run a separate capacity probe with 30-40 ready
+  masters and ``--det-bin 1``. Passing means either the data fit and browser
+  flip-around is measured, or the report fails clearly with the maximum loaded
+  master count, allocation error, and GPU cleanup evidence. Do not call a
+  30-40 file no-bin workflow supported just because a smaller stack is smooth.

@@ -74,6 +74,43 @@ def test_multi_chunked_frames_export_materializes_all_ready_datasets() -> None:
     assert arr[1, 0, 0, 0, 0] == 20
 
 
+def test_show4dstem_keeps_dataset5dstem_frame_backing_for_export() -> None:
+    import torch
+
+    from quantem.widget.data import Dataset5dstem
+    from quantem.widget.show4dstem import Show4DSTEM
+
+    frames = [
+        torch.full((4, 4, 4, 4), 10, dtype=torch.uint16),
+        torch.full((4, 4, 4, 4), 20, dtype=torch.uint16),
+    ]
+    data = Dataset5dstem(frames=frames, name="frame-backed test")
+
+    widget = Show4DSTEM(
+        data,
+        center=(2, 2),
+        bf_radius=1,
+        precompute_virtual_images=False,
+        verbose=False,
+    )
+
+    assert widget._data is data
+    assert widget.n_frames == 2
+    assert widget.frame_dim_label == "Frame"
+
+    arr = widget._export_data_array(dtype="uint8", det_bin=2)
+
+    assert arr.shape == (2, 4, 4, 2, 2)
+    assert arr.dtype == np.uint8
+    assert np.all(arr[0] == 10)
+    assert np.all(arr[1] == 20)
+
+    vi = widget._virtual_image_for_frame(1)
+
+    assert vi.shape == (4, 4)
+    assert np.all(vi == 100)
+
+
 def test_lazy_macbook_datasets_append_master_sync() -> None:
     appended: list[tuple[object, str | None]] = []
 

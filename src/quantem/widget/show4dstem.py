@@ -442,8 +442,9 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
 
         # Extract underlying array / tensor + auto-calibrate from Dataset input
         # (duck-typed via the dual-slot private attributes _tensor / _array).
-        tensor = getattr(data, "_tensor", None)
-        array = getattr(data, "_array", None)
+        is_dataset5dstem_input = type(data).__name__ == "Dataset5dstem" and hasattr(data, "frames")
+        tensor = None if is_dataset5dstem_input else getattr(data, "_tensor", None)
+        array = None if is_dataset5dstem_input else getattr(data, "_array", None)
         if tensor is not None or array is not None:
             if not title and getattr(data, "name", ""):
                 title = str(data.name)
@@ -452,6 +453,13 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             if units is None:
                 units = list(data.units)
             data = tensor if tensor is not None else array
+        elif is_dataset5dstem_input:
+            if not title and getattr(data, "name", ""):
+                title = str(data.name)
+            if sampling is None:
+                sampling = tuple(float(s) for s in data.sampling)
+            if units is None:
+                units = list(data.units)
 
         # Resolve sampling + units (4 axes for 4D-STEM):
         # [scan_row, scan_col, k_row, k_col]. Scalar/None broadcast to (1, 1, 1, 1).
@@ -491,10 +499,11 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         # chunked-load (MPSChunked4DSTEM) for the Metal compute path.
         if hasattr(data, "_fields") and "data" in getattr(data, "_fields", ()):
             data = data.data
-        # Dataset5dstem (the 5D series wrapper) -> its 5D torch tensor on GPU (no copy
-        # for a single-device series). The frame slider then scrubs the tilt/time axis.
-        if type(data).__name__ == "Dataset5dstem" and hasattr(data, "tensor"):
-            data = data.tensor
+        # Dataset5dstem is the CUDA/MPS-friendly 5D series wrapper. Keep it as a
+        # frame-backed object instead of calling `.tensor`: sharded CUDA series may
+        # hold each 18 GiB no-bin master on a different GPU, and `.tensor` would
+        # gather everything onto one card.
+        is_dataset5dstem = type(data).__name__ == "Dataset5dstem" and hasattr(data, "frames")
         if hasattr(data, "chunks") and not getattr(data, "_is_gpu_frames", False):
             from quantem.widget.kernels.compute.mps import ChunkedFrames
             data = ChunkedFrames(data, row_prefix=bool(getattr(data, "row_prefix", False)))
@@ -506,7 +515,11 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             data = torch.from_dlpack(data)
         # Torch tensor input keeps its device (lets user pin a specific GPU via
         # `data.cuda(1)`). NumPy / Dataset input gets default-validated device.
-        if isinstance(data, torch.Tensor) or getattr(data, "_is_gpu_frames", False):
+        if is_dataset5dstem:
+            self._device = data.device
+            self._data_pre = data
+            data_np = None
+        elif isinstance(data, torch.Tensor) or getattr(data, "_is_gpu_frames", False):
             # `_is_gpu_frames` lets a duck-typed GPU array (e.g. a chunk-backed
             # no-bin stack that can't be one tensor) take the GPU path without a
             # numpy round-trip. It must expose .shape/.dtype/.ndim/.device and
@@ -554,7 +567,11 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         else:
             raise ValueError(f"Show4DSTEM expects a 3D ((N, det_h, det_w) flat-scan), 4D ((scan_h, scan_w, det_h, det_w)), or 5D ((n_frames, scan_h, scan_w, det_h, det_w)) array. Got {ndim}D.")
         if self._data_pre is not None:
-            self._data = self._data_pre if self._data_pre.device == self._device else self._data_pre.to(self._device)
+            self._data = (
+                self._data_pre
+                if is_dataset5dstem or self._data_pre.device == self._device
+                else self._data_pre.to(self._device)
+            )
             del self._data_pre
         else:
             self._data = torch.from_numpy(data_np).to(self._device)
@@ -583,7 +600,11 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         if _verbose:
             if str(self._device) == "mps":
                 torch.mps.synchronize()
-            n_bytes = self._data.element_size() * self._data.numel()
+            n_bytes = (
+                self._data.nbytes
+                if hasattr(self._data, "nbytes")
+                else self._data.element_size() * self._data.numel()
+            )
             print(f"  to {self._device}: {time.perf_counter() - _tc:.2f}s ({n_bytes / 1e9:.1f} GB)")
 
         self.shape_rows = self._scan_shape[0]
@@ -1118,8 +1139,49 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         if self.det_rows % det_bin != 0 or self.det_cols % det_bin != 0:
             raise ValueError(f"Detector shape {self.det_rows}x{self.det_cols} is not divisible by det_bin={det_bin}")
         data = self._data
+        if dtype not in {"uint8", "uint16"}:
+            raise ValueError(f"unknown export dtype {dtype!r}")
+
+        def _finish_export_chunk(chunk: np.ndarray) -> np.ndarray:
+            if dtype == "uint8":
+                return np.clip(chunk, 0, 255).astype(np.uint8, copy=False)
+            return np.clip(chunk, 0, 65535).astype(np.uint16, copy=False)
+
+        def _tensor_frame_to_export_array(frame: torch.Tensor) -> np.ndarray:
+            frame4 = (
+                frame
+                if frame.ndim == 4
+                else frame.reshape(self.shape_rows, self.shape_cols, self.det_rows, self.det_cols)
+            )
+            if det_bin <= 1:
+                return _finish_export_chunk(frame4.detach().to("cpu").numpy())
+            rows_per = self._chunk_rows()
+            chunks: list[np.ndarray] = []
+            for r0 in range(0, self.shape_rows, rows_per):
+                slab = frame4[r0:r0 + rows_per]
+                if not torch.is_floating_point(slab):
+                    slab = slab.float()
+                binned = slab.reshape(
+                    slab.shape[0],
+                    self.shape_cols,
+                    self.det_rows // det_bin,
+                    det_bin,
+                    self.det_cols // det_bin,
+                    det_bin,
+                ).mean(dim=(3, 5)).round()
+                chunks.append(_finish_export_chunk(binned.detach().to("cpu").numpy()))
+            return np.concatenate(chunks, axis=0)
+
+        if type(data).__name__ == "Dataset5dstem" and hasattr(data, "frames"):
+            frames = [_tensor_frame_to_export_array(data[i]) for i in range(self.n_frames)]
+            arr = np.stack(frames, axis=0) if self.n_frames > 1 else frames[0]
+            return np.ascontiguousarray(arr)
         if isinstance(data, torch.Tensor):
-            arr = data.detach().to("cpu").numpy()
+            if self.n_frames > 1:
+                arr = np.stack([_tensor_frame_to_export_array(data[i]) for i in range(self.n_frames)], axis=0)
+            else:
+                arr = _tensor_frame_to_export_array(data)
+            return np.ascontiguousarray(arr)
         elif hasattr(data, "datasets"):
             datasets = list(data.datasets[: self.n_frames])
             missing = [idx for idx, dataset in enumerate(datasets) if dataset is None]
@@ -1165,8 +1227,6 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             arr = np.clip(arr, 0, 255).astype(np.uint8, copy=False)
         elif dtype == "uint16":
             arr = np.clip(arr, 0, 65535).astype(np.uint16, copy=False)
-        else:
-            raise ValueError(f"unknown export dtype {dtype!r}")
         return np.ascontiguousarray(arr)
 
     def _export_state_for_bin(self, det_bin: int) -> dict:
@@ -1679,6 +1739,8 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
     @property
     def _frame_data(self) -> torch.Tensor:
         """Per-frame data (4D or 3D flattened), accounting for 5D time/tilt series."""
+        if type(self._data).__name__ == "Dataset5dstem":
+            return self._data[self.frame_idx]
         if self.n_frames > 1:
             return self._data[self.frame_idx]
         return self._data
@@ -3112,7 +3174,11 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
 
         Single chunked-torch path matching _fast_masked_sum.
         """
-        data = self._data[frame_idx] if self.n_frames > 1 else self._data
+        data = (
+            self._data[frame_idx]
+            if type(self._data).__name__ == "Dataset5dstem" or self.n_frames > 1
+            else self._data
+        )
         cx, cy = self.roi_center_col, self.roi_center_row
         if self.roi_mode == "circle" and self.roi_radius > 0:
             mask = self._create_circular_mask(cx, cy, self.roi_radius)
@@ -3131,9 +3197,10 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
                 vi = data[:, row, col].reshape(self._scan_shape)
             return vi.cpu().numpy().astype(np.float32, copy=False)
         data_4d = data if data.ndim == 4 else data.reshape(self._scan_shape[0], self._scan_shape[1], *self._det_shape)
-        mask_f = mask.float()
+        target_device = data.device if isinstance(data, torch.Tensor) else self._device
+        mask_f = mask.to(target_device).float()
         rows_per_chunk = self._chunk_rows()
-        out = torch.zeros(self._scan_shape, dtype=torch.float32, device=self._device)
+        out = torch.zeros(self._scan_shape, dtype=torch.float32, device=target_device)
         for i in range(0, data_4d.shape[0], rows_per_chunk):
             chunk = data_4d[i:i + rows_per_chunk]
             if not torch.is_floating_point(chunk):
