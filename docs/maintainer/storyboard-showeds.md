@@ -12,8 +12,8 @@ preview sizes so I can start selecting bands and ROIs.
 
 **Primary widgets**: ShowEDS.
 
-**Data to use**: real EDS/EELS spectrum-image data from MJ-goat or buffle; use
-streaming sparse/indexed data for large cases.
+**Data to use**: real EDS/EELS spectrum-image data from the HPC/workstation
+backend; use streaming sparse/indexed data for large cases.
 
 **Acceptance checks**:
 

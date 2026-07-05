@@ -296,9 +296,9 @@ real-derived gallery.
 
 **Acceptance checks**:
 
-- Launch from a remote Jupyter backend path when possible: MJ-goat or buffle
-  owns the data and Python kernel; the browser drives the widget from the local
-  machine.
+- Launch from a remote Jupyter backend path when possible: the HPC/workstation
+  backend owns the data and Python kernel; the browser drives the widget from
+  the local laptop.
 - Open the notebook or exported HTML in a wide browser viewport and use browser
   full-screen mode.
 - Verify the scientific image or gallery grows with the viewport while controls

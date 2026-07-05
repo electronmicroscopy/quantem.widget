@@ -220,8 +220,8 @@ large browser-shareable views do not become dead files.
 **Primary widgets**: Show4DSTEM.
 
 **Data to use**: the largest real or real-derived 4D-STEM dataset available on
-MJ-goat or buffle for routine testing, plus a smaller deterministic dataset for
-reference parity.
+the HPC/workstation backend for routine testing, plus a smaller deterministic
+dataset for reference parity.
 
 **Acceptance checks**:
 

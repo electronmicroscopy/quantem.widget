@@ -31,11 +31,11 @@ Every storyboard should cover four scientific workflow classes:
 
 The primary production workflow is remote compute with local interaction:
 scientists run Python, file I/O, CUDA/MPS/CPU backend work, and large-data
-preparation on a workstation such as MJ-goat or buffle, then view and drive the
-widget from their laptop browser. This is the highest-priority path because
-large electron microscopy datasets usually live next to the GPU, storage, and
-Jupyter server, while the user wants a responsive viewer on the computer in
-front of them.
+preparation on an HPC/workstation backend, then view and drive the widget from
+their local laptop browser. This is the highest-priority path because large
+electron microscopy datasets usually live next to the GPU, storage, and Jupyter
+server, while the user wants a responsive viewer on the computer in front of
+them.
 
 The secondary workflow is local laptop use: a user installs ``quantem.widget``
 and opens smaller files, tutorial data, exported HTML, or saved notebooks on
@@ -45,9 +45,9 @@ for Python round trips during pointer interaction.
 
 For signoff, always state which mode was tested:
 
-- **Remote backend / local frontend**: Jupyter kernel and data live on MJ-goat,
-  buffle, or another GPU workstation; Codex or the user drives the browser from
-  a laptop.
+- **Remote backend / local frontend**: Jupyter kernel and data live on an
+  HPC/workstation backend; Codex or the user drives the browser from a local
+  laptop.
 - **Local laptop**: Python kernel, files, and browser all live on the same
   laptop.
 - **Standalone HTML**: no Python kernel; all required interactive data is in
@@ -96,7 +96,7 @@ blindly clicking through a list.
 
 - Drive the actual widget in the Codex in-app browser or Chrome; Python tests
   alone do not verify a story.
-- Use an MJ-goat or buffle Jupyter backend when testing real data, large arrays,
+- Use an HPC/workstation Jupyter backend when testing real data, large arrays,
   save/reopen, backend streaming, or any workflow intended to represent the
   normal lab deployment.
 - Use real or real-derived microscopy data first. Synthetic data is a secondary

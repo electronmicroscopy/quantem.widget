@@ -5162,7 +5162,7 @@ function Show3D() {
       // WebGPU-only per CLAUDE.md "WebGPU is THE pipeline" rule.
       // setGpuCmapReady(true) upstream triggers this effect to re-fire as
       // soon as the engine resolves. Skip painting until then (canvas
-      // briefly blank for ~50-200 ms on phil/mjgoat, never CPU-rendered).
+      // briefly blank for ~50-200 ms on some GPU workstations, never CPU-rendered).
       gpuRenderSerialRef.current++;
     }
 
