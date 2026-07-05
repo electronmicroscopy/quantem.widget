@@ -14,6 +14,8 @@ scripts/widget_local_signoff.sh
 
 This runs repository size guards, frontend build, the full Python test suite,
 HTML export smoke coverage for every export-capable widget, and the docs build.
+It also performs stale browser artifact cleanup before the main checks so a
+previous crashed browser run does not bias memory, disk, or process behavior.
 
 For faster iteration while fixing one issue:
 
@@ -209,6 +211,27 @@ storyboard IDs such as `S2D-07` or `S3D-16` to the report so humans and agents
 can see which story a smoke export covers. Full story signoff still lives in
 the storyboard documents; this browser smoke is the automatic baseline.
 
+Browser tests must clean up after themselves. Use the maintained janitor before
+and after browser-heavy work:
+
+```bash
+python scripts/cleanup_browser_artifacts.py
+```
+
+The script removes stale QuantEM/Playwright/Chrome temp profiles and logs under
+`/tmp` after they are older than six hours. It intentionally does not run a
+global `pkill chrome` and does not touch normal interactive Chrome, Brave,
+Claude, or VS Code sessions. Browser automation should use isolated temporary
+profiles, close contexts/browsers in `finally`, and leave only report artifacts
+that humans need to inspect. If a browser process is launched manually, write a
+PID file under `/tmp/quantem-widget-browser-pids` so the janitor can terminate
+only that known browser process if a later run crashes.
+
+`scripts/widget_local_signoff.sh` runs this cleanup at the start of every
+signoff and again after `--browser` or `--performance` gates. Keep this cleanup
+path in the protocol to prevent memory leaks, zombie test profiles, and stale
+browser caches from changing future test results.
+
 ## Size Guards
 
 Keep the main branch lightweight:
@@ -231,6 +254,7 @@ thresholds or failure wording, update those tests in the same commit.
 | File | Why it exists | Runs by default | Update when |
 | --- | --- | --- | --- |
 | `scripts/widget_local_signoff.sh` | One local command for normal readiness gates. | Yes, in CI and local signoff. | The project-wide readiness definition changes. |
+| `scripts/cleanup_browser_artifacts.py` | Remove stale QuantEM/Playwright/Chrome temp profiles, logs, and known browser PID files without killing normal user browser sessions. | Yes, through local signoff. | Browser automation changes temp profile naming, PID tracking, or cleanup policy. |
 | `scripts/check_large_files.py` | Prevent accidental large tracked data or rendered artifacts. | Yes. | File-size policy or allowlisted artifact types change. |
 | `scripts/check_notebook_sizes.py` | Keep tutorial notebooks and embedded outputs clone-friendly. | Yes. | Notebook size policy changes. |
 | `scripts/widget_html_smoke.py` | Verify every export-capable widget writes standalone HTML state, a visual report, and a browser-drive plan. | Yes. | A widget adds/removes/changes HTML export support. |

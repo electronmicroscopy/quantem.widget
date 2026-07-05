@@ -82,6 +82,9 @@ echo "== size guards =="
 python scripts/check_large_files.py
 python scripts/check_notebook_sizes.py
 
+echo "== stale browser artifact cleanup =="
+python scripts/cleanup_browser_artifacts.py
+
 echo "== frontend build =="
 npm run build
 
@@ -106,11 +109,17 @@ if [[ "$browser" -eq 1 ]]; then
     browser_args+=(--mobile)
   fi
   PYTHONPATH=src:. python scripts/widget_browser_smoke.py "${browser_args[@]}"
+
+  echo "== post-browser artifact cleanup =="
+  python scripts/cleanup_browser_artifacts.py
 fi
 
 if [[ "$performance" -eq 1 ]]; then
   echo "== real-data performance smoke =="
   PYTHONPATH=src:. python scripts/widget_performance_smoke.py --artifact-dir "$artifact_dir/performance"
+
+  echo "== post-performance browser artifact cleanup =="
+  python scripts/cleanup_browser_artifacts.py
 fi
 
 if [[ "$skip_docs" -eq 0 && "$mode" != "quick" ]]; then

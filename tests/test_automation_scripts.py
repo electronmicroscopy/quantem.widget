@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -117,6 +118,7 @@ def test_automation_documentation_names_entrypoints() -> None:
     for path in [
         "scripts/widget_local_signoff.sh",
         "scripts/docs_preview.sh",
+        "scripts/cleanup_browser_artifacts.py",
         "scripts/widget_html_smoke.py",
         "scripts/widget_browser_smoke.py",
         "scripts/widget_phone_handoff.py",
@@ -135,8 +137,63 @@ def test_automation_documentation_names_entrypoints() -> None:
         "390x844",
         "never normal CI",
         "FFT overlay cache counters",
+        "stale browser artifact cleanup",
     ]:
         assert path in doc
+
+
+def test_browser_artifact_cleanup_removes_old_quantem_artifacts(tmp_path: Path) -> None:
+    old_profile = tmp_path / "playwright-artifacts-stale"
+    old_profile.mkdir()
+    old_log = tmp_path / "quantem_chrome_stale.log"
+    old_log.write_text("old chrome log", encoding="utf-8")
+    recent_profile = tmp_path / "playwright-artifacts-recent"
+    recent_profile.mkdir()
+
+    old_mtime = 1_700_000_000
+    recent_mtime = 4_000_000_000
+    for path in [old_profile, old_log]:
+        os.utime(path, (old_mtime, old_mtime))
+    os.utime(recent_profile, (recent_mtime, recent_mtime))
+
+    result = _run(
+        sys.executable,
+        "scripts/cleanup_browser_artifacts.py",
+        "--tmp-root",
+        str(tmp_path),
+        "--older-than-hours",
+        "1",
+        "--json",
+    )
+
+    assert result.returncode == 0, result.stdout
+    report = json.loads(result.stdout)
+    assert report["removed"] == 2
+    assert not old_profile.exists()
+    assert not old_log.exists()
+    assert recent_profile.exists()
+
+
+def test_browser_artifact_cleanup_dry_run_keeps_files(tmp_path: Path) -> None:
+    old_profile = tmp_path / "com.google.Chrome.stale"
+    old_profile.mkdir()
+    os.utime(old_profile, (1_700_000_000, 1_700_000_000))
+
+    result = _run(
+        sys.executable,
+        "scripts/cleanup_browser_artifacts.py",
+        "--tmp-root",
+        str(tmp_path),
+        "--older-than-hours",
+        "1",
+        "--dry-run",
+        "--json",
+    )
+
+    assert result.returncode == 0, result.stdout
+    assert old_profile.exists()
+    report = json.loads(result.stdout)
+    assert any(item["status"] == "would_remove" for item in report["records"])
 
 
 def test_heavy_perf_signoff_help_documents_local_only_contract() -> None:
