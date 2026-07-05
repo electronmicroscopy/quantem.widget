@@ -237,6 +237,11 @@ def main() -> int:
     parser.add_argument("--show3d-frames", type=int, default=None)
     parser.add_argument("--show3d-size", type=int, default=None)
     parser.add_argument("--show3d-export-downsample", type=int, default=4)
+    parser.add_argument(
+        "--skip-show3d-full-export",
+        action="store_true",
+        help="Skip the unbinned Show3D uint8 export for local heavy browser signoff.",
+    )
     parser.add_argument("--max-single-mb", type=float, default=250.0)
     args = parser.parse_args()
 
@@ -284,6 +289,7 @@ def main() -> int:
         elapsed = time.perf_counter() - start
         exports.append({
             "widget": "show2d",
+            "variant": f"show2d-real-{encoding}",
             "encoding": encoding,
             "path": str(out),
             "seconds": round(elapsed, 3),
@@ -315,10 +321,11 @@ def main() -> int:
         "frames": show3d_frames,
         "size": show3d_size,
     })
-    for encoding, downsample in (
-        ("uint8", 1),
-        ("uint8", args.show3d_export_downsample),
-    ):
+    show3d_exports = []
+    if not args.skip_show3d_full_export:
+        show3d_exports.append(("uint8", 1))
+    show3d_exports.append(("uint8", args.show3d_export_downsample))
+    for encoding, downsample in show3d_exports:
         suffix = "uint8" if downsample == 1 else f"uint8-{downsample}xbin"
         start = time.perf_counter()
         out = show3d.export_html(
@@ -329,6 +336,7 @@ def main() -> int:
         elapsed = time.perf_counter() - start
         exports.append({
             "widget": "show3d",
+            "variant": f"show3d-real-derived-{suffix}",
             "encoding": suffix,
             "path": str(out),
             "seconds": round(elapsed, 3),

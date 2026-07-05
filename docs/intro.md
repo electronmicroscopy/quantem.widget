@@ -47,13 +47,18 @@ detector at load (`det_bin`) to cut memory and speed first paint - see
 | `ShowDiffraction` | 2D/3D diffraction d-spacing: Bragg spots, rings, center finding, k calibration | [tutorial](tutorials/showdiffraction) · [API](api/showdiffraction) |
 | `ShowFolder` | Folder-level microscopy browser: navigate a session, review thumbnails, select files/folders, and save curation state | [tutorial](tutorials/showfolder) · [API](api/showfolder) |
 
-The [Tutorials](tutorials/download_data) walk through each widget on real public data
-where practical, with compact synthetic data only where it keeps an example
-portable. The [ShowFolder tutorial](tutorials/showfolder) covers folder browsing workflows
-and how to [save and share widget exports](tutorials/widget_export). The [API reference](api/index)
-documents every parameter, method, and interactive control (and doubles as a
-UI-test spec for automated agents). All example data here is synthetic or pulled
-from a public Hugging Face dataset - no private data ships in the docs.
+The [Tutorials](tutorials/download_data) walk through each widget on real public
+data where practical, with compact synthetic data only where it keeps an example
+portable. Real tutorial datasets are downloaded from public data hosting such as
+Hugging Face and cached locally; they are not committed to this repository or
+bundled into the Python wheel. That keeps clone size and microscope-PC installs
+small while still letting the rendered docs use realistic microscopy examples.
+The [ShowFolder tutorial](tutorials/showfolder) covers folder browsing workflows
+and how to [save and share widget exports](tutorials/widget_export). The
+[API reference](api/index) documents every parameter, method, and interactive
+control (and doubles as a UI-test spec for automated agents). All example data
+here is synthetic or pulled from a public Hugging Face dataset - no private data
+ships in the docs.
 
 Every widget accepts a NumPy array, a PyTorch tensor (CPU or GPU), or a quantem
 `Dataset` (`Dataset2d` / `Dataset3d` / `Dataset4dstem`), pulling calibration and

@@ -27,6 +27,20 @@ For release-oriented validation:
 scripts/widget_local_signoff.sh --full --performance
 ```
 
+For the local-only real-data browser performance gate on MJGOAT/Phil-class
+data:
+
+```bash
+PYTHONPATH=src:. python scripts/widget_heavy_perf_signoff.py
+```
+
+This is deliberately not a normal CI command. It discovers local real
+microscopy data, generates heavy Show2D/Show3D standalone HTML, drives those
+pages in Chromium, verifies FPS, checks the Show3D FFT overlay idle-cache guard,
+and writes screenshots plus `heavy-signoff-report.json` under `/tmp` by
+default. Do not commit or upload the real-data artifacts, local paths, or
+screenshots unless a release explicitly asks for them.
+
 For visual/frontend-sensitive widget work, add the browser-drive gate:
 
 ```bash
@@ -89,6 +103,12 @@ separate from the default path because it can touch large real-data files.
 Python timings cover backend loading and export packing; browser FPS still
 requires opening the generated pages in the in-app browser and driving the
 interactions from the browser plan.
+
+For a complete browser-driven heavy proof, prefer
+`scripts/widget_heavy_perf_signoff.py`. It wraps the export performance smoke,
+runs browser drive, samples FPS, records screenshots, and asserts that
+Show3D FFT overlay cache counters do not grow while idle. Keep it out of normal CI
+because it depends on local real datasets and can generate private heavy files.
 
 Update this script when the project-wide definition of "ready" changes. Do not
 add widget-specific debugging experiments here; put those in a focused test or
@@ -217,6 +237,7 @@ thresholds or failure wording, update those tests in the same commit.
 | `scripts/widget_browser_smoke.py` | Open generated HTML exports in Chromium, check nonblank canvas rendering, semantic controls, FPS, storyboard coverage, desktop/mobile viewport behavior, and save screenshots. | No, only `--browser`. | Exported widget browser behavior, interaction contracts, mobile layout expectations, FPS thresholds, or report format changes. |
 | `scripts/widget_phone_handoff.py` | Serve a signoff/report directory on `0.0.0.0`, print local/Tailscale URLs, and record physical phone viewport/touch probe logs. | No, manual physical-device handoff only. | Physical phone test workflow or Tailscale handoff expectations change. |
 | `scripts/widget_performance_smoke.py` | Record real-data Show2D/Show3D export timing, payload sizes, report HTML, and browser-drive plan. | No, only `--performance`. | Real-data performance expectations change. |
+| `scripts/widget_heavy_perf_signoff.py` | Local-only MJGOAT/Phil heavy browser signoff for real Show2D/Show3D data, including browser FPS, screenshots, and Show3D FFT idle-cache checks. | No, never normal CI. | Heavy real-data datasets, FPS thresholds, FFT overlay performance expectations, or report format change. |
 | `scripts/docs_preview.sh` | Build and serve docs for local visual review. | No. | The docs build command or served path changes. |
 | `.github/workflows/widget-ci.yml` | Run the same local signoff on PRs and main pushes. | Yes, on matching GitHub events. | Local signoff dependencies or trigger paths change. |
 

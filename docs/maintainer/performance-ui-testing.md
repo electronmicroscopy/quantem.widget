@@ -11,6 +11,35 @@ large arrays, CUDA/MPS/CPU preprocessing, and export packing. The browser owns
 canvas drawing, WebGPU, pointer events, playback, menus, and exported HTML.
 Reports must not mix those timings.
 
+## Maintainer Map
+
+Use this table when you only need the high-level view of what each performance
+or visual automation file proves. The point is to keep routine CI small, while
+still having stronger browser, real-data, phone, and release gates when the
+change needs them.
+
+| File | What it proves | Main checks | When to run | Output |
+| --- | --- | --- | --- | --- |
+| `scripts/widget_local_signoff.sh` | The repository is generally ready. | Size guards, frontend build, Python tests, HTML export smoke, optional browser/mobile/performance gates. | Default before saying a widget change is ready; `--quick --browser --mobile` for exported UI work. | Top-level `index.html` report under `/tmp/quantem-widget-local-signoff/...` or `--artifact-dir`. |
+| `.github/workflows/widget-ci.yml` | CI can repeat the normal local signoff on clean Linux. | Same default local signoff path: build, tests, export smoke, docs build when not quick. | Automatically on PRs and pushes touching widget code/docs/tests. | GitHub Actions logs. |
+| `scripts/widget_html_smoke.py` | Every export-capable widget can write standalone HTML with state. | `export_html()`, expected markers, file size, widget coverage matrix, browser-drive plan. | CI/default signoff; update when a widget gains or changes HTML export. | `index.html`, `report.json`, `browser-plan.json`, exported widget HTML files. |
+| `scripts/widget_browser_smoke.py` | Exported HTML actually renders and responds in Chromium. | Nonblank canvases, wheel/drag interaction, switches, sliders, console/page/HTTP errors, `requestAnimationFrame` FPS, FFT state, storyboard IDs, optional mobile viewport. | `scripts/widget_local_signoff.sh --quick --browser`; add `--mobile` for narrow/touch layout changes. | `browser-smoke.html`, `browser-smoke-report.json`, screenshots. |
+| `scripts/widget_performance_smoke.py` | Backend export packing and small real-data Show2D/Show3D payloads are measurable. | Real-data discovery, export time, output size, browser-drive plan. | `--performance` signoff or when checking export size/time trends. | `index.html`, `report.json`, `browser-plan.json`, exported real-data HTML. |
+| `scripts/widget_heavy_perf_signoff.py` | Heavy Show2D/Show3D real-data browser performance is acceptable on lab data. | Local real-data discovery, heavy exports, browser FPS, nonblank render, screenshots, Show3D FFT overlay idle-cache guard. | Local-only MJGOAT/Phil-class performance claims; never normal CI. | `index.html`, `heavy-signoff-report.json`, `browser-smoke-report.json`, screenshots under `/tmp`. |
+| `scripts/widget_phone_handoff.py` | A human can verify physical phone Safari behavior with shared logs. | Serves report on `0.0.0.0`, prints Tailscale/HTTPS handoff command, records viewport/touch/pointer/WebGPU events. | Physical iPhone/iPad checks after browser smoke, especially WebGPU or touch changes. | Served report, `phone-probe.html`, `phone-events.ndjson`. |
+| `scripts/widget_visual_signoff.sh` | Visual stories can be driven in Jupyter/browser before release. | Story-oriented widget drive packets, screenshots, selected release gates. | Broad UI or release-candidate work when a human/agent must drive real workflows. | Signoff packet/report under `/tmp` or configured artifact path. |
+| `scripts/widget_agent_signoff.sh` | Agent-driven story redrive is structured and auditable. | Story IDs, issue observed, fix made, redriven evidence. | Before release candidates or after interaction-heavy fixes. | Agent signoff report. |
+| `scripts/widget_release_check.sh` | The package can ship. | TypeScript typecheck/tests/build, standalone/offline browser build, Python compile, wheel build/content check. | Before tagging `widget-v*` release candidates. | Console logs and local `dist/widget-release-check` artifacts. |
+| `tests/test_tutorial_data.py` | Tutorial data loaders work without heavy network downloads in CI. | Tiny monkeypatched Show2D/Show3D/Show4DSTEM datasets, ShowFolder fallback. | Normal pytest/CI. | Pytest result. |
+| `tests/test_save_state.py` | Notebook state stays compact and visible instead of embedding huge arrays. | Saved widget MIME output, screenshot fallback, export state size behavior. | Normal pytest; important after save/export changes. | Pytest result. |
+| `tests/test_widget_visual_jupyter.py` | Live Jupyter widgets can render nonblank canvases in browser-driven tests. | Jupyter display, nonblank canvas, browser interaction/FPS when enabled. | Opt-in browser/Jupyter visual verification. | Pytest/browser artifacts. |
+
+Read the table left to right: unit tests and HTML export smoke protect protocol;
+browser smoke protects rendered exported HTML; heavy signoff protects real-data
+performance; phone handoff protects physical Safari/touch behavior; release
+check protects packaging. Do not replace a stronger gate with a weaker one when
+the user story depends on the stronger surface.
+
 ## The Five Gates
 
 ### 1. Real Dataset Matrix
@@ -55,6 +84,12 @@ The normal heavy signoff is:
 4. Drive the real UI from the Mac.
 5. Store screenshots, timing JSON, and the final report outside the repo unless
    the user explicitly asks to commit them.
+
+Real-data performance signoff is **local-only**. Do not upload MJGOAT/Phil data,
+absolute local paths, screenshots of private data, or heavy generated HTML to
+GitHub. Normal CI must not depend on local lab data. CI owns lightweight protocol
+and synthetic smoke coverage; the local heavy gate owns real data and browser
+performance proof.
 
 Standalone exported HTML is a separate surface. It must be tested in the
 browser without assuming a Python kernel exists.
@@ -202,3 +237,48 @@ For the common Show2D + Show3D heavy gate, an agent should do the following:
 
 The browser report is the proof. Passing tests without a browser report is
 `Not verified` for UI performance.
+
+## Local Heavy Signoff Command
+
+Use this command on the lab workstation that can see the real data. It is the
+preferred one-command signoff when a change touches Show2D/Show3D heavy
+rendering, FFT overlays, exported HTML performance, or browser interaction
+latency:
+
+```bash
+PYTHONPATH=src:. python scripts/widget_heavy_perf_signoff.py
+```
+
+By default it writes to:
+
+```text
+/tmp/quantem-widget-heavy-signoff/<timestamp>/
+```
+
+The heavy signoff:
+
+- discovers local real microscopy images from MJGOAT/Phil-style data roots,
+- builds Show2D real 4K exports and a Show3D real-derived heavy FFT overlay
+  export,
+- runs `scripts/widget_browser_smoke.py` against the generated standalone HTML,
+- checks browser FPS against the configured threshold,
+- checks that Show3D FFT cache counters do not grow while the page is idle,
+- saves screenshots, command logs, `browser-smoke-report.json`, and
+  `heavy-signoff-report.json`,
+- writes `index.html` as the visual handoff report.
+
+Use explicit roots when the default MJGOAT paths are not the active dataset:
+
+```bash
+PYTHONPATH=src:. python scripts/widget_heavy_perf_signoff.py \
+  --search-root /path/to/local/real/microscopy/data
+```
+
+Use `--quick` only while debugging the automation itself. A release or
+performance claim needs the full local real-data run. Use `--skip-browser` only
+to debug export generation; it intentionally reports that UI performance was
+not fully verified.
+
+This script is intentionally excluded from normal CI because it requires local
+real data and can produce large private artifacts. Keep those artifacts under
+`/tmp` or another ignored local directory.

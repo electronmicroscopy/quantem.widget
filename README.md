@@ -192,6 +192,14 @@ through it line by line.
 - [ ] Keep `main` lightweight: small real rendered examples are fine, but large
   tutorial arrays or HTML payloads should be generated during docs builds or
   downloaded from public data hosting only when the size justifies it.
+- [ ] Keep clone and install size small for microscope PCs. Real tutorial data
+  belongs in public data hosting such as Hugging Face datasets, Zenodo, or
+  release assets, then gets downloaded and cached by tutorial helpers at run
+  time. Do not commit large real arrays, generated HTML, or rendered docs
+  branches to this repository just to make examples work.
+- [ ] CI should test data-loading protocol with tiny deterministic fixtures or
+  monkeypatched downloads. Full real-data downloads are reserved for docs builds,
+  release signoff, or local performance checks that explicitly opt in.
 - [ ] Any binning/downsampling is explicit in the API and documentation, with
   the reducer named clearly, for example mean, sum, or display-scaled `uint8`.
 - [ ] The widget exposes `export_html(path=None, title=None, mode="single",

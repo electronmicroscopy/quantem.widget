@@ -121,6 +121,7 @@ def test_automation_documentation_names_entrypoints() -> None:
         "scripts/widget_browser_smoke.py",
         "scripts/widget_phone_handoff.py",
         "scripts/widget_performance_smoke.py",
+        "scripts/widget_heavy_perf_signoff.py",
         "scripts/check_large_files.py",
         "scripts/check_notebook_sizes.py",
         ".github/workflows/widget-ci.yml",
@@ -132,8 +133,20 @@ def test_automation_documentation_names_entrypoints() -> None:
         "--min-fps",
         "storyboard IDs",
         "390x844",
+        "never normal CI",
+        "FFT overlay cache counters",
     ]:
         assert path in doc
+
+
+def test_heavy_perf_signoff_help_documents_local_only_contract() -> None:
+    result = _run(sys.executable, "scripts/widget_heavy_perf_signoff.py", "--help")
+
+    assert result.returncode == 0, result.stdout
+    assert "local-only real-data widget performance signoff" in result.stdout
+    assert "--skip-browser" in result.stdout
+    assert "--min-fps" in result.stdout
+    assert "--idle-seconds" in result.stdout
 
 
 def test_widget_html_smoke_writes_visual_report(tmp_path: Path) -> None:
