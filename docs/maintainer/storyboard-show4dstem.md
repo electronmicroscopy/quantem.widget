@@ -349,8 +349,9 @@ real acquisition session, I want one report that proves the viewer loads a
 large master quickly, chunks memory safely, appends new masters, and stays
 interactive in the browser.
 
-**Primary widgets**: Show4DSTEM with the lazy MPS multi-dataset handle and
-standalone exported HTML.
+**Primary widgets**: Show4DSTEM with an NVIDIA/CUDA backend when available,
+plus standalone exported HTML. Use the lazy MPS multi-dataset handle only for
+MacBook fallback checks.
 
 **Data to use**: local real ``*_master.h5`` files from a lab workstation or
 HPC-backed acquisition folder. Do not commit these files or their generated
@@ -358,17 +359,22 @@ HTML reports to GitHub.
 
 **Acceptance checks**:
 
-- Run ``PYTHONPATH=src:. python scripts/widget_show4dstem_heavy_signoff.py``
-  with an explicit local real-data root or ``QUANTEM_WIDGET_4DSTEM_ROOTS``.
-- Verify first-master load time, widget build time, chunk count, chunk shapes,
-  resident chunk memory, fast sidecar state, and GPU memory before/after are in
+- Run ``PYTHONPATH=src:. python scripts/widget_show4dstem_heavy_signoff.py
+  --backend cuda`` with an explicit local real-data root or
+  ``QUANTEM_WIDGET_4DSTEM_ROOTS``.
+- Verify first-master load time, widget build time, backend shape, dtype, device,
+  resident memory, and GPU memory before/after are in
   ``show4dstem-heavy-signoff-report.json``.
-- Verify at least one additional ready master appends through the live handle
-  without rebuilding the viewer when the dataset is available.
+- Verify at least one additional ready master is measured through the current
+  backend's append strategy: CUDA records eager stack-growth/reload timing;
+  MPS records lazy live append timing.
+- After multiple masters are loaded, drive the Dataset/frame slider end to end
+  and record flip latency/FPS. A report that only measures first load does not
+  prove the real browsing workflow.
 - Verify standalone HTML export records explicit ``uint8``/``uint16`` and
   detector-bin settings, output size, and export time.
 - Drive the exported HTML in Chromium and verify WebGPU/browser information,
-  virtual-detector drag FPS, scan-position drag FPS, recompute latency, and
-  wheel-zoom FPS are recorded.
+  Dataset/frame flip FPS, virtual-detector drag FPS, scan-position drag FPS,
+  recompute latency, and wheel-zoom FPS are recorded.
 - Treat ``--skip-browser`` as backend/export debugging only, not performance
   signoff.

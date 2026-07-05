@@ -56,6 +56,8 @@ class LazyMacbookDatasets:
         """Show dataset 0 now, fill 1..N-1 in a daemon thread."""
         from quantem.widget.show4dstem_mps import Show4DSTEM_MACBOOK
         verbose = bool(viewer_kwargs.pop("verbose", self.verbose))
+        viewer_kwargs.setdefault("frame_dim_label", "Dataset")
+        viewer_kwargs.setdefault("frame_labels", list(self.names))
         viewer = Show4DSTEM_MACBOOK(self.multi, verbose=verbose, **viewer_kwargs)
         n = len(self.masters)
         if n > 1:

@@ -167,24 +167,41 @@ reports backend ownership and delegates to a documented backend cleanup path.
 ## Show4DSTEM heavy signoff
 
 The repeatable heavy Show4DSTEM proof is
-`scripts/widget_show4dstem_heavy_signoff.py`. It is local-only and must stay out
-of normal CI because it depends on real lab ``*_master.h5`` files and can
-generate private screenshots and HTML exports.
+`scripts/widget_show4dstem_heavy_signoff.py --backend cuda`. It is local-only
+and must stay out of normal CI because it depends on real lab ``*_master.h5``
+files and can generate private screenshots and HTML exports.
 
 The report must keep the same split as the policy above:
 
-- backend: real master discovery, first lazy MPS load, widget build time,
-  chunk count, chunk shapes, resident chunk memory, fast sidecar state, append
-  time for new masters, and Python/GPU memory before/after;
+- backend: real master discovery, first NVIDIA/CUDA load, widget build time,
+  backend shape/dtype/device, resident memory, append or stack-growth time for
+  new masters, and Python/GPU memory before/after;
 - export: explicit ``uint8``/``uint16`` choice, detector bin factor, file size,
   and packing time;
 - browser: WebGPU adapter information, virtual-detector drag FPS, scan-position
-  movement FPS, recompute latency, wheel-zoom FPS, console errors, and a
-  screenshot.
+  movement FPS, dataset/frame flip FPS for multi-master sessions, recompute
+  latency, wheel-zoom FPS, console errors, and a screenshot.
 
 `--skip-browser` is allowed only to debug backend or export failures. It is not
 a performance signoff because the user-facing requirement is smooth browser
 interaction.
+
+Use `--devices 0,1 --max-masters 20` or `--max-masters 30 --det-bin 1
+--skip-browser` for the no-bin two-GPU capacity stress. That run answers a
+different question from browser FPS: can the NVIDIA backend hold the requested
+real stack, and if not, does it fail with an auditable report and release GPU
+memory before the next run? A single 512 x 512 x 192 x 192 uint16 master is
+about 18 GiB resident, so 20-30 masters no-bin is a capacity stress, not a
+reasonable default expectation on every two-GPU machine.
+
+After the capacity stress, run a browser-enabled multi-master pass that fits in
+memory. That pass must prove the user workflow, not only the load path: the
+viewer opens quickly, additional masters are available through the Dataset
+slider, and flipping between loaded datasets stays near the target FPS while
+scan-position and detector interactions remain responsive.
+
+Use `--backend mps` only for MacBook fallback checks. It should not replace the
+NVIDIA/CUDA heavy signoff when that backend is available.
 
 ## Heavy Show2D / Show3D audit
 

@@ -2,10 +2,10 @@
 """Run the local-only real-data Show4DSTEM heavy performance signoff.
 
 This gate is intentionally not normal CI. It uses local 4D-STEM master files,
-measures the lazy MPS/chunking path, exports a standalone HTML viewer, then
-drives that exported viewer in Chromium. Generated reports, screenshots, and
-private lab paths stay under ``/tmp`` unless a maintainer explicitly asks for
-them.
+measures the selected backend path (CUDA/NVIDIA by default, MPS only when
+requested), exports a standalone HTML viewer, then drives that exported viewer
+in Chromium. Generated reports, screenshots, and private lab paths stay under
+``/tmp`` unless a maintainer explicitly asks for them.
 """
 
 from __future__ import annotations
@@ -172,6 +172,47 @@ def _describe_chunks(live: Any) -> dict[str, Any]:
     }
 
 
+def _loadresult_payload(data: Any) -> Any:
+    return data.data if hasattr(data, "_fields") and "data" in getattr(data, "_fields", ()) else data
+
+
+def _describe_backend_data(data: Any, *, backend: str) -> dict[str, Any]:
+    payload = _loadresult_payload(data)
+    if backend == "mps" and hasattr(data, "multi"):
+        return _describe_chunks(data)
+    if isinstance(payload, dict):
+        shards = []
+        total = 0
+        for device, shard in payload.items():
+            nbytes = int(getattr(shard, "nbytes", 0) or 0)
+            total += nbytes
+            shards.append(
+                {
+                    "device": str(device),
+                    "shape": list(getattr(shard, "shape", ())),
+                    "dtype": str(getattr(shard, "dtype", "")),
+                    "nbytes_mb": round(nbytes / 1024**2, 1),
+                }
+            )
+        return {
+            "type": type(payload).__name__,
+            "backend": backend,
+            "shape": "sharded",
+            "resident_mb": round(total / 1024**2, 1),
+            "shards": shards,
+        }
+    nbytes = int(getattr(payload, "nbytes", 0) or 0)
+    return {
+        "type": type(payload).__name__,
+        "backend": backend,
+        "shape": list(getattr(payload, "shape", ())),
+        "dtype": str(getattr(payload, "dtype", "")),
+        "device": str(getattr(payload, "device", "")),
+        "resident_mb": round(nbytes / 1024**2, 1),
+        "chunk_count": len(getattr(payload, "chunks", []) or []),
+    }
+
+
 def _timed(label: str, records: list[dict[str, Any]], func):
     t0 = time.perf_counter()
     before = _memory_snapshot(f"{label}:before")
@@ -188,6 +229,57 @@ def _timed(label: str, records: list[dict[str, Any]], func):
     return result
 
 
+def _timed_maybe(label: str, records: list[dict[str, Any]], func):
+    t0 = time.perf_counter()
+    before = _memory_snapshot(f"{label}:before")
+    try:
+        result = func()
+    except Exception as exc:
+        records.append(
+            {
+                "label": label,
+                "seconds": round(time.perf_counter() - t0, 3),
+                "memory_before": before,
+                "memory_after": _memory_snapshot(f"{label}:after_error"),
+                "error": f"{type(exc).__name__}: {str(exc)[:500]}",
+            }
+        )
+        return None, exc
+    after = _memory_snapshot(f"{label}:after")
+    records.append(
+        {
+            "label": label,
+            "seconds": round(time.perf_counter() - t0, 3),
+            "memory_before": before,
+            "memory_after": after,
+        }
+    )
+    return result, None
+
+
+def _cleanup_backend_memory(label: str, records: list[dict[str, Any]]) -> None:
+    before = _memory_snapshot(f"{label}:before")
+    t0 = time.perf_counter()
+    try:
+        from quantem.widget import free_gpu
+
+        released_gb = float(free_gpu(verbose=True))
+        error = ""
+    except Exception as exc:
+        released_gb = 0.0
+        error = f"{type(exc).__name__}: {str(exc)[:300]}"
+    records.append(
+        {
+            "label": label,
+            "seconds": round(time.perf_counter() - t0, 3),
+            "released_gb": round(released_gb, 3),
+            "memory_before": before,
+            "memory_after": _memory_snapshot(f"{label}:after"),
+            "error": error,
+        }
+    )
+
+
 def _export_widget(widget: Any, artifact_dir: Path, *, dtype: str, det_bin: int) -> dict[str, Any]:
     path = artifact_dir / f"show4dstem-real-{dtype}-bin{det_bin}.html"
     t0 = time.perf_counter()
@@ -201,6 +293,8 @@ def _export_widget(widget: Any, artifact_dir: Path, *, dtype: str, det_bin: int)
         "path": str(path),
         "seconds": round(seconds, 3),
         "size_mb": round(path.stat().st_size / 1024**2, 2),
+        "n_frames": int(getattr(widget, "n_frames", 1) or 1),
+        "frame_dim_label": str(getattr(widget, "frame_dim_label", "Frame") or "Frame"),
     }
 
 
@@ -235,6 +329,61 @@ def _drag_box(page, box: dict[str, float], *, steps: int = 16) -> float:
     return round((time.perf_counter() - t0) * 1000, 1)
 
 
+def _dataset_slider_box(page) -> dict[str, float] | None:
+    return page.evaluate(
+        """() => {
+          const visible = (el) => {
+            const rect = el.getBoundingClientRect();
+            const style = getComputedStyle(el);
+            return rect.width > 50 && rect.height > 6 && style.visibility !== 'hidden' && style.display !== 'none';
+          };
+          const candidates = [];
+          for (const root of [...document.querySelectorAll('.MuiSlider-root')]) {
+            if (!visible(root)) continue;
+            const thumbs = [...root.querySelectorAll('.MuiSlider-thumb')];
+            if (thumbs.length !== 1) continue;
+            const inputs = [...root.querySelectorAll('input')];
+            const maxVals = inputs
+              .map(input => Number(input.getAttribute('aria-valuemax') || input.max || '0'))
+              .filter(Number.isFinite);
+            const max = maxVals.length ? Math.max(...maxVals) : 0;
+            if (max < 1) continue;
+            const host = root.closest('.MuiBox-root') || root.parentElement;
+            const text = (host?.innerText || '').toLowerCase();
+            const score =
+              (text.includes('dataset') ? 5 : 0) +
+              (text.includes('frame') ? 3 : 0) +
+              (text.includes('tilt') ? 3 : 0) +
+              (text.includes('time') ? 3 : 0) +
+              (text.includes('/') ? 1 : 0);
+            const rect = root.getBoundingClientRect();
+            candidates.push({x: rect.x, y: rect.y, width: rect.width, height: rect.height, max, score});
+          }
+          if (!candidates.length) return null;
+          candidates.sort((a, b) => (b.score - a.score) || (b.y - a.y) || (b.max - a.max));
+          return candidates[0];
+        }"""
+    )
+
+
+def _drag_dataset_slider(page) -> dict[str, Any]:
+    box = _dataset_slider_box(page)
+    if not box:
+        return {"found": False, "drag_ms": 0.0}
+    y = box["y"] + box["height"] / 2
+    t0 = time.perf_counter()
+    page.mouse.move(box["x"] + box["width"] * 0.1, y)
+    page.mouse.down()
+    page.mouse.move(box["x"] + box["width"] * 0.9, y, steps=14)
+    page.mouse.up()
+    page.wait_for_timeout(180)
+    return {
+        "found": True,
+        "drag_ms": round((time.perf_counter() - t0) * 1000, 1),
+        "slider_max": int(box.get("max") or 0),
+    }
+
+
 def _drive_browser_export(
     artifact_dir: Path,
     export: dict[str, Any],
@@ -266,6 +415,7 @@ def _drive_browser_export(
         "errors": [],
         "passed": False,
         "min_fps": float(min_fps),
+        "n_frames": int(export.get("n_frames", 1) or 1),
     }
     screenshot = artifact_dir / "show4dstem-browser-signoff.png"
     with _StaticServer(artifact_dir, port) as base_url:
@@ -309,6 +459,15 @@ def _drive_browser_export(
                     page.mouse.wheel(0, -400)
                     page.wait_for_timeout(140)
                     results["wheel_zoom_fps"] = round(float(_measure_fps(page, 1200)), 1)
+                    if int(export.get("n_frames", 1) or 1) > 1:
+                        flip = _drag_dataset_slider(page)
+                        results["dataset_flip"] = flip
+                        if flip.get("found"):
+                            results["dataset_flip_fps"] = round(float(_measure_fps(page, 1200)), 1)
+                        else:
+                            results["errors"].append("dataset/frame slider not found for multi-frame export")
+                    else:
+                        results["dataset_flip"] = {"found": False, "skipped": "single frame export"}
                 page.screenshot(path=str(screenshot), full_page=True, timeout=timeout_ms)
                 results["screenshot"] = screenshot.name
                 results["console_errors"] = console_errors
@@ -319,7 +478,9 @@ def _drive_browser_export(
             finally:
                 browser.close()
 
-    for key in ["initial_fps", "scan_position_fps", "detector_drag_fps", "wheel_zoom_fps"]:
+    for key in ["initial_fps", "scan_position_fps", "detector_drag_fps", "wheel_zoom_fps", "dataset_flip_fps"]:
+        if key not in results:
+            continue
         value = float(results.get(key, 0) or 0)
         if value < min_fps:
             results["errors"].append(f"{key} {value:.1f} below {min_fps:.1f}")
@@ -376,6 +537,8 @@ def main() -> int:
     parser.add_argument("--pattern", default="*_master.h5")
     parser.add_argument("--scan-size", type=int, default=None)
     parser.add_argument("--max-masters", type=int, default=2)
+    parser.add_argument("--backend", choices=["cuda", "mps", "auto"], default="cuda")
+    parser.add_argument("--devices", default="", help="Comma-separated CUDA device IDs for sharded multi-GPU load, e.g. 0,1.")
     parser.add_argument("--det-bin", type=int, default=4)
     parser.add_argument("--export-det-bin", type=int, default=4)
     parser.add_argument("--encoding", choices=["uint8", "uint16"], default="uint8")
@@ -385,6 +548,8 @@ def main() -> int:
     parser.add_argument("--skip-browser", action="store_true", help="Measure backend/export only; do not claim UI performance signoff.")
     parser.add_argument("--allow-unready", action="store_true", help="Include discovered masters even if readiness checks fail.")
     parser.add_argument("--quick", action="store_true", help="Use one master and browser-suitable binning for script iteration.")
+    parser.add_argument("--no-free-gpu-before", action="store_true", help="Do not clear Torch/CuPy/MPS allocator caches before loading.")
+    parser.add_argument("--no-free-gpu-after", action="store_true", help="Do not clear Torch/CuPy/MPS allocator caches before exiting.")
     args = parser.parse_args()
 
     root = Path(__file__).resolve().parents[1]
@@ -419,21 +584,99 @@ def main() -> int:
         print(f"No real Show4DSTEM masters found. Report: {artifact_dir / 'index.html'}")
         return 2
 
-    from quantem.widget import Show4DSTEM
-    from quantem.widget.multidataset_mps import load_macbook_datasets
+    from quantem.widget import Show4DSTEM, load
+    from quantem.widget.backend import resolve_backend
 
     timing: list[dict[str, Any]] = []
+    cleanup_records: list[dict[str, Any]] = []
     errors: list[str] = []
-    lazy = _timed(
-        "load_first_master_lazy_mps",
-        timing,
-        lambda: load_macbook_datasets([masters[0]], det_bin=args.det_bin, scan_size=args.scan_size, verbose=True),
-    )
+    backend = resolve_backend(args.backend)
+    scan_shape = (int(args.scan_size), int(args.scan_size)) if args.scan_size else None
+    devices = [int(item.strip()) for item in args.devices.split(",") if item.strip()] or None
+    lazy = None
+    active_data = None
+    append_strategy = "none"
+    if not args.no_free_gpu_before:
+        _cleanup_backend_memory("free_gpu_before", cleanup_records)
+
+    if backend == "mps":
+        from quantem.widget.multidataset_mps import load_macbook_datasets
+
+        lazy, load_error = _timed_maybe(
+            "load_first_master_lazy_mps",
+            timing,
+            lambda: load_macbook_datasets([masters[0]], det_bin=args.det_bin, scan_size=args.scan_size, verbose=True),
+        )
+        if load_error is not None:
+            errors.append(f"initial {backend} load failed: {load_error}")
+        active_data = lazy
+        append_strategy = "mps_live_lazy_append"
+    else:
+        active_data, load_error = _timed_maybe(
+            f"load_first_master_{backend}",
+            timing,
+            lambda: load(
+                str(masters[0]),
+                backend=backend,
+                det_bin=args.det_bin,
+                scan_shape=scan_shape,
+                verbose=True,
+            ),
+        )
+        if load_error is not None:
+            errors.append(f"initial {backend} load failed: {load_error}")
+        append_strategy = "cuda_eager_stack_reload" if backend == "cuda" else "eager_stack_reload"
+
+    if active_data is None:
+        if not args.no_free_gpu_after:
+            _cleanup_backend_memory("free_gpu_after_error", cleanup_records)
+        report = {
+            "passed": False,
+            "local_only": True,
+            "normal_ci": False,
+            "artifact_dir": str(artifact_dir),
+            "repo": str(root),
+            "commit": os.popen("git rev-parse HEAD").read().strip(),
+            "host": {
+                "hostname": socket.gethostname(),
+                "platform": platform.platform(),
+                "python": sys.version.split()[0],
+            },
+            "policy": {
+                "real_data_not_committed": True,
+                "normal_ci_excluded": True,
+                "browser_and_backend_timings_are_separate": True,
+            },
+            "targets": {
+                "masters": [str(master) for master in masters],
+                "backend": backend,
+                "append_strategy": append_strategy,
+                "devices": devices,
+                "det_bin": args.det_bin,
+                "export_det_bin": args.export_det_bin,
+                "encoding": args.encoding,
+                "min_fps": args.min_fps,
+            },
+            "discovery_notes": discovery_notes,
+            "timing": timing,
+            "cleanup": cleanup_records,
+            "append_results": [],
+            "chunking": {},
+            "exports": [],
+            "browser": None,
+            "memory_final": _memory_snapshot("final"),
+            "errors": errors,
+        }
+        (artifact_dir / "show4dstem-heavy-signoff-report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+        _write_index(artifact_dir, report)
+        print(f"Show4DSTEM heavy signoff report: {artifact_dir / 'index.html'}")
+        return 1
+
     widget = _timed(
         "build_show4dstem_viewer",
         timing,
         lambda: Show4DSTEM(
-            lazy,
+            active_data,
             title="Show4DSTEM heavy signoff",
             save_state=False,
             verbose=False,
@@ -442,27 +685,63 @@ def main() -> int:
     )
 
     append_results: list[dict[str, Any]] = []
-    for master in masters[1:]:
+    for idx, master in enumerate(masters[1:], start=2):
         label = master.name
         t0 = time.perf_counter()
         before = _memory_snapshot(f"append:{label}:before")
         try:
-            indices = lazy.append_new_masters([master], async_=False)
+            if backend == "mps" and lazy is not None:
+                indices = lazy.append_new_masters([master], async_=False)
+                chunking_after = _describe_chunks(lazy)
+                active_data = lazy
+                result = {"indices": indices}
+            else:
+                active_data = load(
+                    [str(path) for path in masters[:idx]],
+                    backend=backend,
+                    det_bin=args.det_bin,
+                    scan_shape=scan_shape,
+                    verbose=True,
+                    devices=devices,
+                )
+                chunking_after = _describe_backend_data(active_data, backend=backend)
+                result = {"loaded_masters": idx}
             append_results.append(
                 {
                     "master": str(master),
-                    "indices": indices,
+                    "strategy": append_strategy,
+                    **result,
                     "seconds": round(time.perf_counter() - t0, 3),
                     "memory_before": before,
                     "memory_after": _memory_snapshot(f"append:{label}:after"),
-                    "chunking_after": _describe_chunks(lazy),
+                    "backend_after": chunking_after,
                 }
             )
         except Exception as exc:
             errors.append(f"append {label} failed: {exc}")
-            append_results.append({"master": str(master), "error": str(exc)[:300]})
+            append_results.append({"master": str(master), "strategy": append_strategy, "error": str(exc)[:300]})
 
-    chunking = _describe_chunks(lazy)
+    if len(masters) > 1 and active_data is not None:
+        if hasattr(widget, "close"):
+            widget.close()
+        rebuild_label = (
+            "build_show4dstem_viewer_after_lazy_append"
+            if backend == "mps"
+            else "build_show4dstem_viewer_after_stack_growth"
+        )
+        widget = _timed(
+            rebuild_label,
+            timing,
+            lambda: Show4DSTEM(
+                active_data,
+                title="Show4DSTEM heavy signoff",
+                save_state=False,
+                verbose=False,
+                show_controls=True,
+            ),
+        )
+
+    chunking = _describe_chunks(lazy) if backend == "mps" and lazy is not None else _describe_backend_data(active_data, backend=backend)
     export = _timed(
         f"export_html_{args.encoding}_bin{args.export_det_bin}",
         timing,
@@ -491,6 +770,9 @@ def main() -> int:
         widget.close()
     if hasattr(lazy, "stop_watch"):
         lazy.stop_watch()
+    del widget
+    if not args.no_free_gpu_after:
+        _cleanup_backend_memory("free_gpu_after", cleanup_records)
 
     report = {
         "passed": not errors,
@@ -511,6 +793,9 @@ def main() -> int:
         },
         "targets": {
             "masters": [str(master) for master in masters],
+            "backend": backend,
+            "append_strategy": append_strategy,
+            "devices": devices,
             "det_bin": args.det_bin,
             "export_det_bin": args.export_det_bin,
             "encoding": args.encoding,
@@ -518,6 +803,7 @@ def main() -> int:
         },
         "discovery_notes": discovery_notes,
         "timing": timing,
+        "cleanup": cleanup_records,
         "append_results": append_results,
         "chunking": chunking,
         "exports": [export],

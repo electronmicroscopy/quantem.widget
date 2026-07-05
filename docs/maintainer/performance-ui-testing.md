@@ -26,7 +26,7 @@ change needs them.
 | `scripts/widget_browser_smoke.py` | Exported HTML actually renders and responds in Chromium. | Nonblank canvases, wheel/drag interaction, switches, sliders, console/page/HTTP errors, `requestAnimationFrame` FPS, FFT state, storyboard IDs, optional mobile viewport. | `scripts/widget_local_signoff.sh --quick --browser`; add `--mobile` for narrow/touch layout changes. | `browser-smoke.html`, `browser-smoke-report.json`, screenshots. |
 | `scripts/widget_performance_smoke.py` | Backend export packing and small real-data Show2D/Show3D payloads are measurable. | Real-data discovery, export time, output size, browser-drive plan. | `--performance` signoff or when checking export size/time trends. | `index.html`, `report.json`, `browser-plan.json`, exported real-data HTML. |
 | `scripts/widget_heavy_perf_signoff.py` | Heavy Show2D/Show3D real-data browser performance is acceptable on lab data. | Local real-data discovery, heavy exports, browser FPS, nonblank render, screenshots, Show3D FFT overlay idle-cache guard. | Local-only HPC/workstation performance claims; never normal CI. | `index.html`, `heavy-signoff-report.json`, `browser-smoke-report.json`, screenshots under `/tmp`. |
-| `scripts/widget_show4dstem_heavy_signoff.py` | Heavy Show4DSTEM real-data loading, MPS chunking, append, export, and browser interaction are acceptable on lab data. | Local 4D-STEM master discovery, lazy MPS first-load timing, chunk/memory report, append timing, virtual-detector drag FPS, scan-position FPS, WebGPU/MPS split, GPU memory before/after. | Local-only Show4DSTEM performance claims; never normal CI. | `index.html`, `show4dstem-heavy-signoff-report.json`, exported Show4DSTEM HTML, browser screenshot under `/tmp`. |
+| `scripts/widget_show4dstem_heavy_signoff.py` | Heavy Show4DSTEM real-data loading, NVIDIA/CUDA backend memory, append/stack-growth, export, and browser interaction are acceptable on lab data. | Local 4D-STEM master discovery, CUDA first-load timing, backend memory report, append/stack-growth timing, dataset/frame flip FPS, virtual-detector drag FPS, scan-position FPS, browser WebGPU/backend split, GPU memory before/after. | Local-only Show4DSTEM performance claims; never normal CI. | `index.html`, `show4dstem-heavy-signoff-report.json`, exported Show4DSTEM HTML, browser screenshot under `/tmp`. |
 | `scripts/widget_phone_handoff.py` | A human can verify physical phone Safari behavior with shared logs. | Serves report on `0.0.0.0`, prints Tailscale/HTTPS handoff command, records viewport/touch/pointer/WebGPU events. | Physical iPhone/iPad checks after browser smoke, especially WebGPU or touch changes. | Served report, `phone-probe.html`, `phone-events.ndjson`. |
 | `scripts/widget_visual_signoff.sh` | Visual stories can be driven in Jupyter/browser before release. | Story-oriented widget drive packets, screenshots, selected release gates. | Broad UI or release-candidate work when a human/agent must drive real workflows. | Signoff packet/report under `/tmp` or configured artifact path. |
 | `scripts/widget_agent_signoff.sh` | Agent-driven story redrive is structured and auditable. | Story IDs, issue observed, fix made, redriven evidence. | Before release candidates or after interaction-heavy fixes. | Agent signoff report. |
@@ -167,6 +167,10 @@ Show3D:
 Show4DSTEM and ShowEDS:
 
 - Native data should stay queryable or sparse where possible.
+- Multi-master Show4DSTEM sessions must load quickly enough to become useful,
+  then let the user flip through loaded datasets/frames from the browser at the
+  target FPS. Timing first load without testing the dataset slider is not a
+  complete signoff.
 - Browser interaction should not require a Python round trip during drag unless
   the report calls out the limitation.
 - WebGPU/MPS/CUDA usage must be recorded by surface: browser WebGPU is not the
@@ -297,6 +301,7 @@ browser drawing, or standalone HTML export:
 ```bash
 PYTHONPATH=src:. python scripts/widget_show4dstem_heavy_signoff.py \
   --search-root /path/to/local/real/4dstem/data \
+  --backend cuda \
   --max-masters 2 \
   --det-bin 4 \
   --export-det-bin 4 \
@@ -312,17 +317,71 @@ By default it writes to:
 The Show4DSTEM signoff:
 
 - discovers local ready ``*_master.h5`` files without committing those paths,
-- measures lazy MPS first-master load time and widget build time,
-- records chunk count, chunk shapes, resident chunk memory, fast sidecar state,
+- measures CUDA first-master load time and widget build time on NVIDIA backends,
+- records backend shape, dtype, device, resident memory, and memory before/after,
   and Python/GPU memory before and after each stage,
-- appends additional masters through the live ``LazyMacbookDatasets`` handle and
-  measures append latency,
+- measures additional masters through the active backend's append strategy:
+  CUDA records eager stack-growth/reload timing, while MPS records live lazy
+  append timing,
 - exports standalone Show4DSTEM HTML with explicit ``uint8``/``uint16`` and
   detector binning labels,
 - opens the export in Chromium, records browser WebGPU adapter information, and
   measures virtual-detector drag FPS, scan-position movement FPS, wheel-zoom FPS,
   and recompute latency,
 - writes `show4dstem-heavy-signoff-report.json` and `index.html`.
+
+Run two Show4DSTEM modes when memory allows:
+
+```bash
+# Practical browse path: detector-binned live data on NVIDIA/CUDA.
+PYTHONPATH=src:. python scripts/widget_show4dstem_heavy_signoff.py \
+  --search-root /path/to/local/real/4dstem/data \
+  --backend cuda \
+  --max-masters 2 \
+  --det-bin 4 \
+  --export-det-bin 4 \
+  --min-fps 30
+
+# No-bin backend path: full detector data in NVIDIA memory, compact export for sharing.
+PYTHONPATH=src:. python scripts/widget_show4dstem_heavy_signoff.py \
+  --search-root /path/to/local/real/4dstem/data \
+  --backend cuda \
+  --max-masters 1 \
+  --det-bin 1 \
+  --export-det-bin 8 \
+  --min-fps 30
+```
+
+The no-bin pass is important because it exposes real resident memory pressure,
+full-detector backend behavior, and virtual-detector latency.
+Use a compact export bin for that pass unless the explicit goal is to measure a
+large private standalone HTML payload.
+
+Use `--backend mps` only for local MacBook fallback checks. It is not the
+primary heavy signoff when an NVIDIA backend is available.
+
+For the high-risk capacity test the user cares about, run the backend-only
+stress first so a too-large request fails cleanly and releases memory:
+
+```bash
+PYTHONPATH=src:. python scripts/widget_show4dstem_heavy_signoff.py \
+  --search-root /path/to/local/real/4dstem/data \
+  --backend cuda \
+  --devices 0,1 \
+  --max-masters 30 \
+  --det-bin 1 \
+  --export-det-bin 8 \
+  --skip-browser \
+  --min-fps 30
+```
+
+This intentionally records CUDA memory before load, after load or OOM, and
+after `free_gpu()` cleanup. A 20-30 file no-bin stack can exceed even a
+two-GPU workstation because a single 512 x 512 x 192 x 192 uint16 master is
+about 18 GiB resident before transient decompression overhead. If this stress
+does not fit, the report should say where it failed and prove GPU memory was
+returned before the next run. After the capacity pass, run a smaller no-bin
+browser pass without `--skip-browser` to verify user interaction remains smooth.
 
 Use `QUANTEM_WIDGET_4DSTEM_ROOTS` or `QUANTEM_WIDGET_REAL_DATA_ROOTS` to avoid
 hardcoding private data roots in commands. Use `--quick` only while iterating on

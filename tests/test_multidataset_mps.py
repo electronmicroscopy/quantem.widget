@@ -17,6 +17,7 @@ class _DummyFrames:
         self.device = "cpu"
         self.metadata = {}
         self.value = value
+        self.chunks = [np.stack([self.frame(i) for i in range(self._n)], axis=0)]
 
     def frame(self, idx: int) -> np.ndarray:
         return np.full(self._det, self.value + int(idx), dtype=np.uint16)
@@ -49,6 +50,28 @@ def test_multi_chunked_frames_rejects_incompatible_append() -> None:
 
     with np.testing.assert_raises(ValueError):
         multi.append_dataset(_DummyFrames(det=(16, 16)))
+
+
+def test_multi_chunked_frames_export_materializes_all_ready_datasets() -> None:
+    from quantem.widget.show4dstem import Show4DSTEM
+
+    multi = MultiChunkedFrames([_DummyFrames(value=1)], names=["first"])
+    multi.append_dataset(_DummyFrames(value=20), name="second")
+
+    class _ExportView:
+        _data = multi
+        n_frames = 2
+        shape_rows = 4
+        shape_cols = 4
+        det_rows = 8
+        det_cols = 8
+
+    arr = Show4DSTEM._export_data_array(_ExportView(), dtype="uint8", det_bin=2)
+
+    assert arr.shape == (2, 4, 4, 4, 4)
+    assert arr.dtype == np.uint8
+    assert arr[0, 0, 0, 0, 0] == 1
+    assert arr[1, 0, 0, 0, 0] == 20
 
 
 def test_lazy_macbook_datasets_append_master_sync() -> None:

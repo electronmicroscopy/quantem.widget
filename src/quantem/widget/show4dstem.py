@@ -1120,6 +1120,22 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         data = self._data
         if isinstance(data, torch.Tensor):
             arr = data.detach().to("cpu").numpy()
+        elif hasattr(data, "datasets"):
+            datasets = list(data.datasets[: self.n_frames])
+            missing = [idx for idx, dataset in enumerate(datasets) if dataset is None]
+            if len(datasets) < self.n_frames or missing:
+                raise ValueError(
+                    "Cannot export lazy multi-dataset Show4DSTEM before the "
+                    f"first {self.n_frames} dataset(s) are ready"
+                )
+            volumes = []
+            for dataset in datasets:
+                if hasattr(dataset, "chunks"):
+                    flat = np.concatenate([np.asarray(chunk) for chunk in dataset.chunks], axis=0)
+                else:
+                    flat = np.asarray(dataset)
+                volumes.append(flat.reshape(self.shape_rows, self.shape_cols, self.det_rows, self.det_cols))
+            arr = np.stack(volumes, axis=0)
         elif hasattr(data, "chunks"):
             # MacBook MPS path: data is a zero-copy ChunkedFrames (numpy views over
             # Metal buffers), not a tensor. Materialize the flat stack by concatenating
