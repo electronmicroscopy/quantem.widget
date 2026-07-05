@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import html
 from pathlib import Path
+import threading
+import time
 from typing import Any
 
 
@@ -43,6 +45,10 @@ class ShowFolder:
         self._chooser = None
         self._output = None
         self._status = None
+        self._watch_stop = None
+        self._watch_thread = None
+        self._watch_signature = None
+        self._watch_status = None
 
         if self.path is not None:
             self.refresh(self.path)
@@ -144,6 +150,94 @@ class ShowFolder:
             raise ValueError("No folder has been browsed yet.")
         return self.browser.show_selected_stack()
 
+    def watch(
+        self,
+        interval: float = 2.0,
+        *,
+        start: bool = True,
+    ) -> "ShowFolder":
+        """Watch the folder and update the displayed browser when files change.
+
+        The watcher uses the same thumbnail/index cache as normal ShowFolder
+        construction. Unchanged files stay cached, new or modified files are
+        read, and files removed from disk disappear from the in-memory browser
+        and from the next cache manifest.
+        """
+        if self.path is None:
+            raise ValueError("No folder path is selected.")
+        if self.browser is None:
+            self.refresh(self.path)
+        if start:
+            self.stop_watch()
+        self._ensure_watch_status()
+        self._watch_signature = self._folder_signature()
+        self._set_watch_status("watching", interval=float(interval))
+        if not start:
+            return self
+        stop = threading.Event()
+        self._watch_stop = stop
+
+        def _loop() -> None:
+            while not stop.wait(float(interval)):
+                try:
+                    self.watch_once()
+                except Exception as exc:  # pragma: no cover - defensive UI path
+                    self._set_watch_status(f"watch error: {exc}")
+
+        thread = threading.Thread(target=_loop, name="ShowFolderWatch", daemon=True)
+        self._watch_thread = thread
+        thread.start()
+        return self
+
+    def stop_watch(self) -> "ShowFolder":
+        """Stop a running ShowFolder folder watcher."""
+        stop = self._watch_stop
+        if stop is not None:
+            stop.set()
+        thread = self._watch_thread
+        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=1.0)
+        self._watch_stop = None
+        self._watch_thread = None
+        if self._watch_status is not None:
+            self._set_watch_status("watch stopped")
+        return self
+
+    def watch_once(self) -> bool:
+        """Poll once and update the displayed browser if the folder changed."""
+        if self.path is None:
+            raise ValueError("No folder path is selected.")
+        before = self._watch_signature or self._folder_signature()
+        after = self._folder_signature()
+        if after == before:
+            self._set_watch_status("watching", interval=None)
+            return False
+        old_ids = {item.file_id for item in self.items}
+        old_selection = self.selection()
+        selected_ids = {
+            str(row.get("id"))
+            for row in old_selection.get("selected_files", [])
+            if row.get("kind") == "image"
+        }
+        hidden_ids = set(old_selection.get("hidden_image_ids", []))
+        started = time.perf_counter()
+        self._set_watch_status("reading changed folder...")
+        self._replace_browser(selected_image_ids=selected_ids, hidden_image_ids=hidden_ids)
+        self._watch_signature = self._folder_signature()
+        new_ids = {item.file_id for item in self.items}
+        added = sorted(new_ids - old_ids)
+        removed = sorted(old_ids - new_ids)
+        cache = self.cache_info
+        self._set_watch_status(
+            "updated",
+            added=added,
+            removed=removed,
+            hits=int(cache.get("hits", 0)),
+            misses=int(cache.get("misses", 0)),
+            seconds=time.perf_counter() - started,
+        )
+        return True
+
     def refresh(self, path: str | Path | None = None) -> "ShowFolder":
         """Run or rerun the microscopy folder browser."""
         from quantem.widget.showfolder_core import build_showfolder
@@ -158,14 +252,105 @@ class ShowFolder:
             cache = _load_cache()
             cache[self.key] = str(self.path)
             _save_cache(cache)
-        self.browser = build_showfolder(self.path, **self.browser_kwargs)
-        self.widget = self.browser.widget
+        new_browser = build_showfolder(self.path, **self.browser_kwargs)
+        if self.widget is not None and self.browser is not None:
+            self._install_browser(new_browser)
+        else:
+            self.browser = new_browser
+            self.widget = new_browser.widget
+        self._watch_signature = self._folder_signature()
         if self._status is not None:
             self._status.value = (
                 "<b>Selected folder:</b> "
                 f"<code>{html.escape(str(self.browser.folder))}</code>"
             )
         return self
+
+    def _replace_browser(
+        self,
+        *,
+        selected_image_ids: set[str],
+        hidden_image_ids: set[str],
+    ) -> None:
+        from quantem.widget.showfolder_core import build_showfolder
+
+        if self.path is None:
+            raise ValueError("No folder path is selected.")
+        new_browser = build_showfolder(self.path, **self.browser_kwargs)
+        new_browser.apply_selection(
+            selected_image_ids=selected_image_ids,
+            hidden_image_ids=hidden_image_ids,
+        )
+        self._install_browser(new_browser)
+
+    def _install_browser(self, new_browser: Any) -> None:
+        if self.widget is not None:
+            self.widget.children = tuple(new_browser.widget.children)
+            new_browser.widget = self.widget
+        else:
+            self.widget = new_browser.widget
+        self.browser = new_browser
+        if self._watch_status is not None:
+            self._insert_watch_status()
+
+    def _folder_signature(self) -> tuple[tuple[str, int, int], ...]:
+        if self.path is None:
+            return ()
+        root = Path(self.path).expanduser().resolve()
+        glob = str(self.browser_kwargs.get("glob", "*.emd"))
+        rows = []
+        if not root.is_dir():
+            return ()
+        for path in sorted(p for p in root.glob(glob) if p.is_file() and not p.name.startswith(".")):
+            stat = path.stat()
+            rows.append((path.relative_to(root).as_posix(), int(stat.st_size), int(stat.st_mtime_ns)))
+        return tuple(rows)
+
+    def _ensure_watch_status(self) -> None:
+        if self._watch_status is None:
+            from ipywidgets import HTML
+
+            self._watch_status = HTML()
+        self._insert_watch_status()
+
+    def _insert_watch_status(self) -> None:
+        if self.widget is None or self._watch_status is None:
+            return
+        children = [child for child in self.widget.children if child is not self._watch_status]
+        insert_at = 1 if children else 0
+        self.widget.children = tuple(children[:insert_at] + [self._watch_status] + children[insert_at:])
+
+    def _set_watch_status(
+        self,
+        message: str,
+        *,
+        interval: float | None = None,
+        added: list[str] | None = None,
+        removed: list[str] | None = None,
+        hits: int | None = None,
+        misses: int | None = None,
+        seconds: float | None = None,
+    ) -> None:
+        if self._watch_status is None:
+            return
+        details = [html.escape(message)]
+        if interval is not None:
+            details.append(f"poll {interval:g}s")
+        if hits is not None and misses is not None:
+            details.append(f"{hits} cached")
+            details.append(f"{misses} read")
+        if added:
+            details.append(f"{len(added)} new")
+        if removed:
+            details.append(f"{len(removed)} removed")
+        if seconds is not None:
+            details.append(f"{seconds:.2f}s")
+        self._watch_status.value = (
+            "<div style='font-size:12px;color:#555;margin:2px 0 8px 0;"
+            "padding:4px 6px;background:#f6f8fa;border:1px solid #d0d7de;"
+            "border-radius:4px;display:inline-block'>"
+            f"ShowFolder watch: {' · '.join(details)}</div>"
+        )
 
     def _init_chooser(self) -> None:
         from quantem.widget.folder_picker import _load_cache

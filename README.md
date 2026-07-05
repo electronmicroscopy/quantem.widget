@@ -179,8 +179,9 @@ through it line by line.
   for profiling notebooks when possible. See
   [performance notes](docs/maintainer/widget-performance.md).
 - [ ] For interaction-sensitive changes, run
-  `scripts/widget_local_signoff.sh --quick`, fix issues immediately, rebuild,
-  refresh, and redrive before claiming the widget is ready. See
+  `scripts/widget_local_signoff.sh --quick --browser` for exported HTML/UI
+  paths, fix issues immediately, rebuild, refresh, and redrive before claiming
+  the widget is ready. See
   [Automation](docs/maintainer/automation.md) and
   [Agent signoff](docs/maintainer/widget-agent-signoff.md).
 - [ ] Expensive work avoids Python/kernel round trips during pointer movement;

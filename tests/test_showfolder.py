@@ -136,6 +136,46 @@ def test_show_folder_reuses_thumbnail_cache(tmp_path: Path, monkeypatch) -> None
     assert len(second.items) == 2
 
 
+def test_show_folder_watch_once_adds_and_removes_files_in_place(tmp_path: Path) -> None:
+    img0 = tmp_path / "0010 - HAADF 15Mx Nano.emd"
+    img1 = tmp_path / "0011 - HAADF 15Mx Nano.emd"
+    _image_emd(img0)
+    _image_emd(img1)
+
+    widget = ShowFolder(
+        tmp_path,
+        thumb=8,
+        group_by="none",
+        cache_dir=tmp_path / "cache",
+    )
+    assert widget.browser is not None
+    assert widget.browser.gallery is not None
+    displayed = widget.widget
+    widget.browser.gallery.star_panel(0)
+
+    widget.watch(start=False)
+    img2 = tmp_path / "0012 - HAADF 15Mx Nano.emd"
+    _image_emd(img2)
+
+    assert widget.watch_once() is True
+    assert widget.widget is displayed
+    assert [item.file_id for item in widget.items] == ["0010", "0011", "0012"]
+    assert [item.file_id for item in widget.selected("image")] == ["0010"]
+    assert "1 new" in widget._watch_status.value
+
+    img0.unlink()
+
+    assert widget.watch_once() is True
+    assert [item.file_id for item in widget.items] == ["0011", "0012"]
+    assert widget.selected("image") == []
+    assert "1 removed" in widget._watch_status.value
+
+    manifest = widget.cache_path / "manifest.json"
+    payload = json.loads(manifest.read_text())
+    cached_rel_paths = [entry["relative_path"] for entry in payload["entries"]]
+    assert cached_rel_paths == [img1.name, img2.name]
+
+
 def test_show_folder_cache_invalidates_changed_file(tmp_path: Path, monkeypatch) -> None:
     img0 = tmp_path / "0010 - HAADF 15Mx Nano.emd"
     img1 = tmp_path / "0011 - HAADF 15Mx Nano.emd"

@@ -231,6 +231,29 @@ class ShowFolderBrowser:
         """Compatibility alias for ``load(path)``."""
         return self.load(path)
 
+    def apply_selection(
+        self,
+        *,
+        selected_image_ids: set[str] | list[str] | tuple[str, ...] = (),
+        hidden_image_ids: set[str] | list[str] | tuple[str, ...] = (),
+    ) -> None:
+        """Restore selected/hidden image IDs after a live browser rebuild."""
+        selected_ids = set(selected_image_ids)
+        hidden_ids = set(hidden_image_ids)
+        for gallery, image_items in self.image_galleries:
+            starred = [idx for idx, item in enumerate(image_items) if item.file_id in selected_ids]
+            hidden = [idx for idx, item in enumerate(image_items) if item.file_id in hidden_ids]
+            if _is_show3d_stack(gallery):
+                if starred:
+                    gallery.star_panel(0, frame=starred[0])
+                else:
+                    gallery.unstar_panel(0)
+            else:
+                gallery.set_starred_panels(starred)
+                if hidden and len(hidden) < len(image_items):
+                    gallery.set_hidden_panels(hidden)
+        self._refresh_selection_panel()
+
     def clear_cache(self) -> None:
         """Delete this survey's thumbnail/index cache, if one was used."""
         if self.cache_path is None:

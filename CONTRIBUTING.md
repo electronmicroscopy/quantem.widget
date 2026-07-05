@@ -37,6 +37,12 @@ For HTML export or widget-state changes:
 PYTHONPATH=src pytest -q tests/test_html_export_protocol.py
 ```
 
+For exported-HTML UI changes, also run the browser-drive smoke:
+
+```bash
+scripts/widget_local_signoff.sh --quick --browser
+```
+
 For ShowEDS changes:
 
 ```bash
