@@ -389,6 +389,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         state=None,
         backend: str | None = None,
         save_state: bool = False,
+        page_budget: int | None = None,
         **kwargs,
     ):
         # save_state controls whether the heavy pixel buffers (the packed 4D
@@ -573,6 +574,15 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
                 else self._data_pre.to(self._device)
             )
             del self._data_pre
+            # Out-of-core dataset paging: with many 4D datasets behind the frame
+            # slider (e.g. a 40-master folder), keeping every one resident fills
+            # VRAM. page_budget caps how many stay on the GPU; switching frames
+            # pages the target in and evicts the least-recently-used one to RAM
+            # (via _frame_data -> Dataset5dstem.frame(i)). Only a Dataset5dstem
+            # can page (it owns the per-frame device list); a plain 5D tensor
+            # can't be partially offloaded, so page_budget is ignored there.
+            if page_budget is not None and is_dataset5dstem and self.n_frames > 1:
+                self._data.page(int(page_budget), device=self._device)
         else:
             self._data = torch.from_numpy(data_np).to(self._device)
             # Saturation filter: zero detector pixels at full-scale (65535 / 255).
@@ -624,7 +634,14 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         # Histogram axis range — first frame is enough (JS does per-frame percentile clipping).
         # Cast to float for min/max reductions: PyTorch CUDA lacks integer min/max kernels,
         # and the first slice is tiny (144 KB at 192×192) so the cast is free.
-        first_frame = self._data[0] if self._data.ndim == 5 else self._data
+        # .frame(0) (not [0]) so a paged Dataset5dstem brings frame 0 onto the GPU
+        # for this reduction instead of handing back an offloaded CPU tensor.
+        if type(self._data).__name__ == "Dataset5dstem":
+            first_frame = self._data.frame(0)
+        elif self._data.ndim == 5:
+            first_frame = self._data[0]
+        else:
+            first_frame = self._data
         first_frame_sample = first_frame[0] if first_frame.ndim >= 3 else first_frame
         if not torch.is_floating_point(first_frame_sample):
             first_frame_sample = first_frame_sample.float()
@@ -1740,7 +1757,10 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
     def _frame_data(self) -> torch.Tensor:
         """Per-frame data (4D or 3D flattened), accounting for 5D time/tilt series."""
         if type(self._data).__name__ == "Dataset5dstem":
-            return self._data[self.frame_idx]
+            # .frame() is paging-aware: when page_budget is set it brings this
+            # dataset into VRAM and evicts the least-recently-used one; when
+            # paging is off it is identical to self._data[frame_idx].
+            return self._data.frame(self.frame_idx)
         if self.n_frames > 1:
             return self._data[self.frame_idx]
         return self._data
@@ -3174,11 +3194,12 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
 
         Single chunked-torch path matching _fast_masked_sum.
         """
-        data = (
-            self._data[frame_idx]
-            if type(self._data).__name__ == "Dataset5dstem" or self.n_frames > 1
-            else self._data
-        )
+        if type(self._data).__name__ == "Dataset5dstem":
+            data = self._data.frame(frame_idx)   # paging-aware (see _frame_data)
+        elif self.n_frames > 1:
+            data = self._data[frame_idx]
+        else:
+            data = self._data
         cx, cy = self.roi_center_col, self.roi_center_row
         if self.roi_mode == "circle" and self.roi_radius > 0:
             mask = self._create_circular_mask(cx, cy, self.roi_radius)
