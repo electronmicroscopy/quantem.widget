@@ -60,4 +60,13 @@ jobs:
         run: npm ci
 
       - name: Run local signoff
-        run: scripts/widget_local_signoff.sh
+        run: scripts/widget_local_signoff.sh --artifact-dir /tmp/quantem-widget-ci-signoff
+
+      - name: Upload signoff report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: widget-ci-signoff
+          path: /tmp/quantem-widget-ci-signoff
+          if-no-files-found: warn
+          retention-days: 14

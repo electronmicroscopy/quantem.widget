@@ -138,8 +138,25 @@ def test_automation_documentation_names_entrypoints() -> None:
         "never normal CI",
         "FFT overlay cache counters",
         "stale browser artifact cleanup",
+        "Which Command Should I Run?",
+        "Definition Of Done",
+        "Do Not Do This",
+        "Report Artifacts",
+        "actions/upload-artifact",
+        "synthetic data for real-data performance claims",
+        "final answer names the exact command and report path",
+        "Do not run `pkill chrome`",
     ]:
         assert path in doc
+
+
+def test_ci_workflow_uploads_signoff_artifacts() -> None:
+    workflow = (ROOT / ".github/workflows/widget-ci.yml").read_text(encoding="utf-8")
+
+    assert "--artifact-dir /tmp/quantem-widget-ci-signoff" in workflow
+    assert "actions/upload-artifact@v4" in workflow
+    assert "widget-ci-signoff" in workflow
+    assert "if: always()" in workflow
 
 
 def test_browser_artifact_cleanup_removes_old_quantem_artifacts(tmp_path: Path) -> None:
