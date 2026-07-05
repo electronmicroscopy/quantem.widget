@@ -42,8 +42,9 @@ For any `quantem.widget` release or release-candidate work, follow
 `docs/maintainer/widget-release.md`.
 
 For routine local readiness checks, run `scripts/widget_local_signoff.sh`.
-Use `--quick` while iterating, and `--full --performance` before broad UI or
-release-candidate work. See `docs/maintainer/automation.md`.
+Use `--quick` while iterating, `--quick --browser` for exported-HTML frontend
+changes, and `--full --performance` before broad UI or release-candidate work.
+See `docs/maintainer/automation.md`.
 Each run writes a visual report directory with a top-level `index.html`; use
 `--artifact-dir` when another agent or the user needs a stable path to inspect.
 

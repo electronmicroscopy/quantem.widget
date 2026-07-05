@@ -27,6 +27,12 @@ For release-oriented validation:
 scripts/widget_local_signoff.sh --full --performance
 ```
 
+For visual/frontend-sensitive widget work, add the browser-drive gate:
+
+```bash
+scripts/widget_local_signoff.sh --quick --browser
+```
+
 Every signoff run writes a visual report directory. By default it uses:
 
 ```text
@@ -48,6 +54,9 @@ real-data performance report. The normal HTML smoke report contains:
 - `report.json`: sizes and backend export timings.
 - `browser-plan.json`: the pages and interactions an agent should drive in the
   in-app browser for visual signoff.
+- `browser-smoke.html` and `browser-smoke-report.json`, when `--browser` is
+  used: automated Chromium results, screenshots, nonblank canvas checks, and
+  basic interaction checks.
 
 The performance mode writes real-data Show2D and Show3D HTML exports plus its
 own `index.html`, `report.json`, and `browser-plan.json`. It is intentionally
@@ -99,14 +108,38 @@ PYTHONPATH=src:. python scripts/widget_html_smoke.py
 ```
 
 The smoke covers `Show2D`, `Show3D`, `Show3DSlices`, `Show4DSTEM`, `ShowEDS`,
-`ShowDiffraction`, and `ShowFolder`. It verifies that each export writes widget
-state and expected content markers. It also writes an `index.html` visual report
-and `browser-plan.json` in the artifact directory, so another agent or reviewer
-can open the generated pages and inspect the widgets directly.
+`ShowDiffraction`, and `ShowFolder`. `Show2D` and `Show3D` intentionally get a
+small settings matrix rather than a single happy-path export: single panel,
+multi-panel galleries, FFT modes, hidden/starred panels, compact/no-title
+layouts, panel visibility, multi-panel Show3D, and downsampled Show3D export.
+It verifies that each export writes widget state and expected content markers.
+It also writes an `index.html` visual report and `browser-plan.json` in the
+artifact directory, so another agent or reviewer can open the generated pages
+and inspect the widgets directly.
 
 Update this smoke when a new public widget gains `export_html()`, or when an
 existing widget's canonical small export options change. Keep the datasets tiny;
 this checks export protocol coverage, not heavy interaction performance.
+
+## Browser HTML Smoke
+
+Drive the generated standalone HTML in Chromium:
+
+```bash
+PYTHONPATH=src:. python scripts/widget_browser_smoke.py --artifact-dir /tmp/quantem-widget-signoff/html-smoke
+```
+
+This is the automated browser layer for exported HTML. It opens every page from
+`report.json`, verifies visible canvases are nonblank, performs wheel/drag
+interactions on the primary canvas, toggles visible switches, drags a slider
+when one is present, records console/page/HTTP errors, and saves screenshots.
+
+Run this after `scripts/widget_html_smoke.py`, or use
+`scripts/widget_local_signoff.sh --quick --browser` to run both in order. Use
+`--headed` on `scripts/widget_browser_smoke.py` when you want to watch the
+browser drive around. Known harmless Chromium bootstrap warnings are recorded
+separately from failures; rendering, HTTP, page, and unexpected console errors
+still fail the gate.
 
 ## Size Guards
 
@@ -133,6 +166,7 @@ thresholds or failure wording, update those tests in the same commit.
 | `scripts/check_large_files.py` | Prevent accidental large tracked data or rendered artifacts. | Yes. | File-size policy or allowlisted artifact types change. |
 | `scripts/check_notebook_sizes.py` | Keep tutorial notebooks and embedded outputs clone-friendly. | Yes. | Notebook size policy changes. |
 | `scripts/widget_html_smoke.py` | Verify every export-capable widget writes standalone HTML state, a visual report, and a browser-drive plan. | Yes. | A widget adds/removes/changes HTML export support. |
+| `scripts/widget_browser_smoke.py` | Open generated HTML exports in Chromium, check nonblank canvas rendering, drive basic controls, and save screenshots. | No, only `--browser`. | Exported widget browser behavior, interaction contracts, or report format changes. |
 | `scripts/widget_performance_smoke.py` | Record real-data Show2D/Show3D export timing, payload sizes, report HTML, and browser-drive plan. | No, only `--performance`. | Real-data performance expectations change. |
 | `scripts/docs_preview.sh` | Build and serve docs for local visual review. | No. | The docs build command or served path changes. |
 | `.github/workflows/widget-ci.yml` | Run the same local signoff on PRs and main pushes. | Yes, on matching GitHub events. | Local signoff dependencies or trigger paths change. |

@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: scripts/widget_local_signoff.sh [--quick] [--full] [--performance] [--skip-docs] [--artifact-dir DIR]
+Usage: scripts/widget_local_signoff.sh [--quick] [--full] [--browser] [--performance] [--skip-docs] [--artifact-dir DIR]
 
 Canonical local automation before saying widget work is ready.
 
@@ -18,6 +18,8 @@ Options:
   --quick        Run size guards, frontend build, focused HTML protocol tests,
                  and HTML export smoke. Skip full pytest/docs build.
   --full         Also run npm typecheck/test and widget_release_check.sh --skip-wheel.
+  --browser      Drive generated HTML exports in Chromium, verify nonblank
+                 canvases, exercise basic controls, and write screenshots.
   --performance  Run real-data Show2D/Show3D export performance smoke.
   --skip-docs    Skip docs build.
   --artifact-dir DIR
@@ -27,6 +29,7 @@ EOF
 }
 
 mode=default
+browser=0
 performance=0
 skip_docs=0
 artifact_dir=""
@@ -36,6 +39,7 @@ while [[ $# -gt 0 ]]; do
     --help|-h) usage; exit 0 ;;
     --quick) mode=quick ;;
     --full) mode=full ;;
+    --browser) browser=1 ;;
     --performance) performance=1 ;;
     --skip-docs) skip_docs=1 ;;
     --artifact-dir)
@@ -90,6 +94,11 @@ fi
 echo "== HTML export smoke matrix =="
 PYTHONPATH=src:. python scripts/widget_html_smoke.py --artifact-dir "$artifact_dir/html-smoke"
 
+if [[ "$browser" -eq 1 ]]; then
+  echo "== browser-drive HTML smoke =="
+  PYTHONPATH=src:. python scripts/widget_browser_smoke.py --artifact-dir "$artifact_dir/html-smoke"
+fi
+
 if [[ "$performance" -eq 1 ]]; then
   echo "== real-data performance smoke =="
   PYTHONPATH=src:. python scripts/widget_performance_smoke.py --artifact-dir "$artifact_dir/performance"
@@ -141,6 +150,7 @@ cat > "$artifact_dir/index.html" <<EOF
       <tr><th>Branch</th><td>$branch</td></tr>
       <tr><th>Commit</th><td>$commit</td></tr>
       <tr><th>Mode</th><td>$mode</td></tr>
+      <tr><th>Browser smoke</th><td>$browser</td></tr>
       <tr><th>Performance smoke</th><td>$performance</td></tr>
       <tr><th>Docs build</th><td>$docs_status</td></tr>
       <tr><th>Duration</th><td>${duration}s</td></tr>
@@ -150,6 +160,12 @@ cat > "$artifact_dir/index.html" <<EOF
   <ul>
     <li><a href="html-smoke/index.html">HTML export smoke matrix</a></li>
 EOF
+
+if [[ "$browser" -eq 1 ]]; then
+  cat >> "$artifact_dir/index.html" <<EOF
+    <li><a href="html-smoke/browser-smoke.html">Browser-drive HTML smoke</a></li>
+EOF
+fi
 
 if [[ "$performance" -eq 1 ]]; then
   cat >> "$artifact_dir/index.html" <<EOF
@@ -166,6 +182,12 @@ cat >> "$artifact_dir/index.html" <<EOF
     <li>Python tests for the selected mode</li>
     <li>Standalone HTML export smoke for every export-capable widget</li>
 EOF
+
+if [[ "$browser" -eq 1 ]]; then
+  cat >> "$artifact_dir/index.html" <<EOF
+    <li>Browser-drive smoke for generated HTML exports</li>
+EOF
+fi
 
 if [[ "$skip_docs" -eq 0 && "$mode" != "quick" ]]; then
   cat >> "$artifact_dir/index.html" <<EOF

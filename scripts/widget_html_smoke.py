@@ -41,27 +41,185 @@ def _image_emd(path: Path) -> None:
         group.create_dataset("Metadata", data=_metadata())
 
 
-def _cases(folder_root: Path) -> list[tuple[str, object, dict[str, object], str]]:
+def _wave_stack(rng: np.random.Generator, frames: int, rows: int, cols: int) -> np.ndarray:
+    y, x = np.mgrid[:rows, :cols].astype(np.float32)
+    stack = []
+    for idx in range(frames):
+        blob = np.exp(-(((y - rows * (0.35 + 0.03 * idx)) ** 2) + ((x - cols * 0.48) ** 2)) / (rows * cols * 0.035))
+        lattice = np.sin((x + idx * 1.7) / 3.0) + np.cos((y - idx * 0.9) / 4.0)
+        noise = rng.normal(0, 0.03, size=(rows, cols)).astype(np.float32)
+        stack.append((blob + 0.15 * lattice + noise).astype(np.float32))
+    return np.stack(stack, axis=0)
+
+
+def _cases(folder_root: Path) -> list[tuple[str, str, object, dict[str, object], str]]:
     rng = np.random.default_rng(0)
     showfolder_dir = folder_root / "showfolder-session"
     showfolder_dir.mkdir(parents=True, exist_ok=True)
     _image_emd(showfolder_dir / "0010 - HAADF 15Mx Nano.emd")
     _image_emd(showfolder_dir / "0011 - HAADF 15Mx Nano.emd")
 
-    return [
+    show2d_single = _wave_stack(rng, 1, 40, 48)[0]
+    show2d_gallery3 = _wave_stack(rng, 3, 36, 40)
+    show2d_gallery6 = _wave_stack(rng, 6, 28, 32)
+    show2d_gallery8 = _wave_stack(rng, 8, 24, 28)
+    show3d_stack = _wave_stack(rng, 10, 36, 40)
+    show3d_short = _wave_stack(rng, 5, 32, 32)
+    show3d_panel_a = _wave_stack(rng, 8, 32, 32)
+    show3d_panel_b = _wave_stack(rng, 8, 32, 32) * 0.7
+    show3d_panel_c = _wave_stack(rng, 8, 32, 32) + 0.2
+    show3d_panel_d = _wave_stack(rng, 8, 32, 32)
+
+    cases: list[tuple[str, str, object, dict[str, object], str]] = [
         (
             "show2d",
-            Show2D(rng.random((3, 32, 32), dtype=np.float32), title="Smoke Show2D", verbose=False),
+            "show2d-single",
+            Show2D(show2d_single, title="Smoke Show2D Single", sampling=0.2, units="nm", verbose=False),
             {"encoding": "uint8"},
-            "Smoke Show2D",
+            "Smoke Show2D Single",
+        ),
+        (
+            "show2d",
+            "show2d-gallery-3",
+            Show2D(
+                show2d_gallery3,
+                labels=["original", "shifted", "noisy"],
+                title="Smoke Show2D Gallery 3",
+                ncols=3,
+                sampling=0.2,
+                units="nm",
+                verbose=False,
+            ),
+            {"encoding": "uint8"},
+            "Smoke Show2D Gallery 3",
+        ),
+        (
+            "show2d",
+            "show2d-gallery-6-fft",
+            Show2D(
+                show2d_gallery6,
+                labels=[f"panel {idx + 1}" for idx in range(6)],
+                title="Smoke Show2D Gallery 6 FFT",
+                ncols=3,
+                show_fft=True,
+                link_zoom=True,
+                link_pan=True,
+                link_contrast=True,
+                verbose=False,
+            ),
+            {"encoding": "uint8"},
+            "Smoke Show2D Gallery 6 FFT",
+        ),
+        (
+            "show2d",
+            "show2d-hidden-starred",
+            Show2D(
+                show2d_gallery6,
+                labels=[f"panel {idx + 1}" for idx in range(6)],
+                title="Smoke Show2D Hidden Starred",
+                ncols=3,
+                hidden_panels=[1, "panel 5"],
+                starred=[0, "panel 3"],
+                verbose=False,
+            ),
+            {"encoding": "uint8"},
+            "Smoke Show2D Hidden Starred",
+        ),
+        (
+            "show2d",
+            "show2d-compact-no-titles",
+            Show2D(
+                show2d_gallery8,
+                labels=[f"compact {idx + 1}" for idx in range(8)],
+                title="Smoke Show2D Compact No Titles",
+                ncols=4,
+                show_panel_titles=False,
+                show_stats=False,
+                display_bin=2,
+                verbose=False,
+            ),
+            {"encoding": "uint8"},
+            "Smoke Show2D Compact No Titles",
         ),
         (
             "show3d",
-            Show3D(rng.random((8, 32, 32), dtype=np.float32), title="Smoke Show3D"),
+            "show3d-single-stack",
+            Show3D(show3d_stack, title="Smoke Show3D Single Stack", sampling=0.2, units="nm"),
             {"encoding": "uint8"},
-            "Smoke Show3D",
+            "Smoke Show3D Single Stack",
         ),
         (
+            "show3d",
+            "show3d-single-fft-bottom",
+            Show3D(show3d_short, title="Smoke Show3D FFT Bottom", show_fft=True, fft_layout="bottom", fps=12),
+            {"encoding": "uint8"},
+            "Smoke Show3D FFT Bottom",
+        ),
+        (
+            "show3d",
+            "show3d-single-fft-overlay",
+            Show3D(
+                show3d_short,
+                title="Smoke Show3D FFT Overlay",
+                show_fft=True,
+                fft_layout="overlay",
+                fft_overlay_position="bottom-right",
+                fps=12,
+            ),
+            {"encoding": "uint8"},
+            "Smoke Show3D FFT Overlay",
+        ),
+        (
+            "show3d",
+            "show3d-three-panels",
+            Show3D(
+                show3d_panel_a,
+                show3d_panel_b,
+                show3d_panel_c,
+                title="Smoke Show3D Three Panels",
+                panel_titles=["SSB reconstruction", "Mean DP", "Probe"],
+                max_cols=3,
+                hideable=True,
+            ),
+            {"encoding": "uint8"},
+            "Smoke Show3D Three Panels",
+        ),
+        (
+            "show3d",
+            "show3d-hidden-panel",
+            Show3D(
+                show3d_panel_a,
+                show3d_panel_b,
+                show3d_panel_c,
+                title="Smoke Show3D Hidden Panel",
+                panel_titles=["SSB reconstruction", "Mean DP", "Probe"],
+                hidden_panels=["Mean DP"],
+                hideable=True,
+                max_cols=3,
+                show_stats=False,
+            ),
+            {"encoding": "uint8"},
+            "Smoke Show3D Hidden Panel",
+        ),
+        (
+            "show3d",
+            "show3d-four-panel-downsample",
+            Show3D(
+                show3d_panel_a,
+                show3d_panel_b,
+                show3d_panel_c,
+                show3d_panel_d,
+                title="Smoke Show3D Four Panel Downsample",
+                panel_titles=["A", "B", "C", "D"],
+                max_cols=4,
+                avg_window=2,
+                fps=18,
+            ),
+            {"encoding": "uint8", "downsample": 2},
+            "Smoke Show3D Four Panel Downsample",
+        ),
+        (
+            "show3dslices",
             "show3dslices",
             Show3DSlices(rng.random((8, 32, 32), dtype=np.float32), title="Smoke Show3DSlices"),
             {"encoding": "uint8"},
@@ -69,11 +227,13 @@ def _cases(folder_root: Path) -> list[tuple[str, object, dict[str, object], str]
         ),
         (
             "show4dstem",
+            "show4dstem",
             Show4DSTEM(rng.integers(0, 64, size=(4, 4, 8, 8), dtype=np.uint16), title="Smoke Show4DSTEM", verbose=False),
             {"encoding": "uint8", "downsample": 1},
             "Smoke Show4DSTEM",
         ),
         (
+            "showeds",
             "showeds",
             ShowEDS(rng.integers(0, 32, size=(5, 6, 12), dtype=np.uint16), title="Smoke ShowEDS", band=(2, 8), roi=(1, 1, 3, 3)),
             {"mode": "single", "encoding": "full"},
@@ -81,23 +241,27 @@ def _cases(folder_root: Path) -> list[tuple[str, object, dict[str, object], str]
         ),
         (
             "showdiffraction",
+            "showdiffraction",
             ShowDiffraction(rng.random((48, 48), dtype=np.float32), title="Smoke ShowDiffraction", verbose=False),
             {"encoding": "full"},
             "Smoke ShowDiffraction",
         ),
         (
             "showfolder",
+            "showfolder",
             ShowFolder(showfolder_dir, thumb=8, group_by="none", cache_dir=folder_root / "cache"),
             {},
             "0010",
         ),
     ]
+    return cases
 
 
 def _write_browser_plan(artifact_dir: Path, report: dict[str, Any]) -> None:
     pages = [
         {
             "widget": item["widget"],
+            "variant": item["variant"],
             "file": Path(str(item["path"])).name,
             "url_path": Path(str(item["path"])).name,
             "required_interactions": [
@@ -122,6 +286,7 @@ def _write_html_report(artifact_dir: Path, report: dict[str, Any]) -> None:
     rows = "\n".join(
         "<tr>"
         f"<td>{html.escape(str(item['widget']))}</td>"
+        f"<td>{html.escape(str(item['variant']))}</td>"
         f"<td>{html.escape(str(item['seconds']))}</td>"
         f"<td>{html.escape(f'{float(item["size_mb"]):.3f}')}</td>"
         f"<td><a href='{html.escape(Path(str(item['path'])).name)}'>"
@@ -153,7 +318,7 @@ def _write_html_report(artifact_dir: Path, report: dict[str, Any]) -> None:
   when a visual signoff is needed.</p>
   <p>Total export size: <strong>{html.escape(f'{float(report["total_size_mb"]):.3f} MB')}</strong></p>
   <table>
-    <thead><tr><th>Widget</th><th>Export seconds</th><th>Size MB</th><th>Standalone HTML</th></tr></thead>
+    <thead><tr><th>Widget</th><th>Variant</th><th>Export seconds</th><th>Size MB</th><th>Standalone HTML</th></tr></thead>
     <tbody>{rows}</tbody>
   </table>
   <h2>Machine-readable report</h2>
@@ -179,11 +344,11 @@ def main() -> int:
 
     report_rows: list[dict[str, object]] = []
     total_size = 0
-    for name, widget, kwargs, marker in _cases(artifact_dir):
+    for widget_name, variant, widget, kwargs, marker in _cases(artifact_dir):
         if not supports_html_export(widget):
-            raise RuntimeError(f"{name} does not satisfy supports_html_export")
+            raise RuntimeError(f"{variant} does not satisfy supports_html_export")
         start = time.perf_counter()
-        out = widget.export_html(artifact_dir / f"{name}.html", title=f"Smoke {name}", **kwargs)
+        out = widget.export_html(artifact_dir / f"{variant}.html", title=f"Smoke {variant}", **kwargs)
         elapsed = time.perf_counter() - start
         text = out.read_text(encoding="utf-8")
         size = out.stat().st_size
@@ -195,12 +360,14 @@ def main() -> int:
         ]
         missing = [item for item in required if item not in text]
         if missing:
-            raise RuntimeError(f"{name} export missing markers: {missing}")
+            raise RuntimeError(f"{variant} export missing markers: {missing}")
         report_rows.append({
-            "widget": name,
+            "widget": widget_name,
+            "variant": variant,
             "path": str(out),
             "seconds": round(elapsed, 3),
             "size_mb": round(size / 1024 / 1024, 3),
+            "options": kwargs,
         })
 
     max_total = args.max_total_mb * 1024 * 1024

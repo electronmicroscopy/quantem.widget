@@ -118,6 +118,7 @@ def test_automation_documentation_names_entrypoints() -> None:
         "scripts/widget_local_signoff.sh",
         "scripts/docs_preview.sh",
         "scripts/widget_html_smoke.py",
+        "scripts/widget_browser_smoke.py",
         "scripts/widget_performance_smoke.py",
         "scripts/check_large_files.py",
         "scripts/check_notebook_sizes.py",
@@ -125,6 +126,7 @@ def test_automation_documentation_names_entrypoints() -> None:
         "--artifact-dir",
         "index.html",
         "browser-plan.json",
+        "browser-smoke.html",
     ]:
         assert path in doc
 
@@ -146,7 +148,9 @@ def test_widget_html_smoke_writes_visual_report(tmp_path: Path) -> None:
     plan = json.loads((artifact_dir / "browser-plan.json").read_text(encoding="utf-8"))
     index = (artifact_dir / "index.html").read_text(encoding="utf-8")
 
-    assert len(report["exports"]) == 7
+    assert len(report["exports"]) == 16
+    assert sum(1 for item in report["exports"] if item["widget"] == "show2d") >= 5
+    assert sum(1 for item in report["exports"] if item["widget"] == "show3d") >= 6
     assert {item["widget"] for item in report["exports"]} == {
         "show2d",
         "show3d",
@@ -156,7 +160,8 @@ def test_widget_html_smoke_writes_visual_report(tmp_path: Path) -> None:
         "showdiffraction",
         "showfolder",
     }
-    assert "show2d.html" in index
+    assert "show2d-gallery-6-fft.html" in index
+    assert "show3d-four-panel-downsample.html" in index
     assert "showfolder.html" in index
     assert {page["widget"] for page in plan["pages"]} == {
         "show2d",
