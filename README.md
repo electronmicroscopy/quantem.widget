@@ -29,6 +29,7 @@ python -c "import quantem.widget; print(quantem.widget.__version__)"
 | `Show3D` | 3D stack | scrub / play through frames |
 | `Show3DSlices` | 3D volume | orthogonal-slice viewer |
 | `Show4DSTEM` | 4D-STEM array | live virtual detectors (BF / ABF / ADF), CoM / iCoM / DPC |
+| `ShowDiffraction` | 2D diffraction pattern or 3D stack | spot/ring d-spacings, center refinement, calibration, phase indexing |
 | `ShowEDS` | EDS/EELS spectrum image | experimental linked element map, spectrum, energy band, and real-space ROI |
 | `ShowFolder` | microscopy session folder | fast thumbnail browser, grouping, and file selection |
 

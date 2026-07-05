@@ -1,10 +1,4 @@
-/**
- * ShowDiffraction — interactive d-spacing analysis for a single 2D/3D diffraction pattern.
- *
- * Lean single-panel viewer: one diffraction-pattern (DP) canvas with colormap,
- * scale mode, contrast, center/BF disk, spots, rings, calibration and a frame
- * slider to scrub a 3D stack.
- */
+/** ShowDiffraction frontend. */
 
 import * as React from "react";
 import { createRender, useModel, useModelState } from "@anywidget/react";
@@ -25,14 +19,14 @@ import { computeHistogramFromBytes, findDataRange, sliderRange, applyLogScaleInP
 import { COLORMAPS, COLORMAP_NAMES, applyColormap } from "../colormaps";
 import { MetadataSection } from "../widgetInfo";
 
-// ============================================================================
 // Style tokens
-// ============================================================================
 
 const MIN_ZOOM = 0.5;
 const MAX_ZOOM = 10;
 const DPR = window.devicePixelRatio || 1;
 const CANVAS_MIN = 384;
+const PROFILE_H = 140;
+const PROFILE_PAD = { left: 54, right: 14, top: 16, bottom: 34 };
 const SPACING = { XS: 4, SM: 8, MD: 12, LG: 16 } as const;
 const typography = {
   label: { fontSize: 11 },
@@ -67,11 +61,15 @@ const compactButton = {
 const upwardMenuProps = {
   anchorOrigin: { vertical: "top" as const, horizontal: "left" as const },
   transformOrigin: { vertical: "bottom" as const, horizontal: "left" as const },
+  sx: { zIndex: 9999 },
+};
+const downwardMenuProps = {
+  anchorOrigin: { vertical: "bottom" as const, horizontal: "left" as const },
+  transformOrigin: { vertical: "top" as const, horizontal: "left" as const },
+  sx: { zIndex: 9999 },
 };
 
-// ============================================================================
-// Info tooltip + keyboard shortcuts
-// ============================================================================
+// Info tooltip
 
 function InfoTooltip({ text, theme = "dark" }: { text: React.ReactNode; theme?: "light" | "dark" }) {
   const isDark = theme === "dark";
@@ -129,9 +127,18 @@ function KeyboardShortcuts({ items }: { items: [string, string][] }) {
   );
 }
 
-// ============================================================================
-// Contrast histogram with draggable min/max handles
-// ============================================================================
+function calibrationSourceLabel(source: string): string {
+  const labels: Record<string, string> = {
+    from_phase: "phase",
+    from_ring: "ring",
+    from_spot: "spot",
+    manual: "manual",
+    metadata: "metadata",
+  };
+  return labels[source] ?? source;
+}
+
+// Contrast histogram
 
 interface HistogramProps {
   data: Float32Array | null;
@@ -204,9 +211,7 @@ function Histogram({ data, vminPct, vmaxPct, onRangeChange, width = 110, height 
   );
 }
 
-// ============================================================================
-// Format a stat value for the readout
-// ============================================================================
+// Stat values
 function formatStat(v: number): string {
   if (v === 0) return "0";
   const a = Math.abs(v);
@@ -215,9 +220,7 @@ function formatStat(v: number): string {
   return v.toPrecision(3);
 }
 
-// ============================================================================
-// Spot and ring types
-// ============================================================================
+// Model types
 
 interface SpotDict {
   id: number;
@@ -234,7 +237,29 @@ interface SpotDict {
   fit_quality?: number | null;
   intensity: number;
   hkl?: string;
+  d_ref?: number | null;
+  d_error?: number | null;
   note?: string;
+}
+
+interface PhaseEntry {
+  name: string;
+  a: number;
+  b?: number;
+  c?: number;
+  alpha?: number;
+  beta?: number;
+  gamma?: number;
+  absences: string;
+}
+
+interface MaskRegion {
+  kind: string;
+  start_deg?: number;
+  end_deg?: number;
+  row?: number;
+  col?: number;
+  radius?: number;
 }
 
 interface RingDict {
@@ -243,21 +268,55 @@ interface RingDict {
   g_magnitude: number | null;
   d_spacing: number | null;
   intensity: number;
+  hkl?: string;
+  d_ref?: number | null;
+  d_error?: number | null;
+  fwhm_px?: number | null;
+  fit_quality?: number | null;
 }
 
-// Spot colors, shared by table rows and canvas overlay.
+interface IdentifyLine {
+  obs_d: number | null;
+  ref_d: number | null;
+  hkl: string;
+  err: number | null;
+  i_rel: number | null;
+}
+
+interface IdentifyResult {
+  phase_id: string;
+  name: string;
+  formula: string;
+  spacegroup: string;
+  crystal_system: string;
+  matched: number;
+  n_obs: number;
+  mean_err: number | null;
+  n_missing_strong: number;
+  lines: IdentifyLine[];
+}
+
+interface QualityDict {
+  center?: { method: string };
+  calibration?: { source: string; k_pixel_size: number; rms_px: number };
+  ellipse?: { ratio: number; angle_deg: number; corrected: boolean };
+  rings?: { id: number; fit_quality: number }[];
+  n_unexplained_rings?: number;
+  mask_coverage_pct?: number;
+  ring_snr?: { cv: number; coverage: number; snr: number };
+}
+
+// Spot colors
 const PICK_COLORS = [
   "#ff4d4f", "#40a9ff", "#73d13d", "#ffa940",
   "#9254de", "#13c2c2", "#f759ab", "#bae637",
 ];
 const spotColorAt = (index: number) => PICK_COLORS[((index % PICK_COLORS.length) + PICK_COLORS.length) % PICK_COLORS.length];
 
-// ============================================================================
 // Main component
-// ============================================================================
 
 function ShowDiffraction() {
-  // Force a light background for offline/export HTML renders.
+  // Offline theme
   const [offline] = useModelState<boolean>("offline");
   const { themeInfo, colors: themeColors } = useTheme(offline);
   const rootRef = React.useRef<HTMLDivElement>(null);
@@ -274,10 +333,20 @@ function ShowDiffraction() {
   };
   const themedMenuProps = {
     ...upwardMenuProps,
-    PaperProps: { sx: { bgcolor: themeColors.controlBg, color: themeColors.text, border: `1px solid ${themeColors.border}` } },
+    PaperProps: { sx: { bgcolor: themeColors.controlBg, color: themeColors.text, border: `1px solid ${themeColors.border}`, maxHeight: 200, overflowY: "auto" } },
   };
-  // Bordered control group.
+  const topToolbarMenuProps = {
+    ...downwardMenuProps,
+    PaperProps: themedMenuProps.PaperProps,
+  };
+  // Control group
   const controlBox = { ...controlRow, border: `1px solid ${themeColors.border}`, borderRadius: "4px", bgcolor: themeColors.controlBg };
+  // Number input
+  const numInput = (width: number) => ({ width, fontSize: 10, padding: "2px 4px", background: themeColors.controlBg, color: themeColors.text, border: `1px solid ${themeColors.border}` });
+  // Status colors
+  const statusColors = themeInfo.theme === "dark"
+    ? { good: "#81c784", warn: "#ffb74d", bad: "#e57373" }
+    : { good: "#2e7d32", warn: "#e65100", bad: "#d32f2f" };
 
   // Model state
   const [title] = useModelState<string>("title");
@@ -303,6 +372,7 @@ function ShowDiffraction() {
   const [, setDetectRequest] = useModelState<number>("_detect_spots_request");
   const [, setDetectRingsRequest] = useModelState<number>("_detect_rings_request");
   const [, setSpotRemoveRequest] = useModelState<number>("_spot_remove_request");
+  const [, setSpotMoveRequest] = useModelState<number[]>("_spot_move_request");
   const [, setRingRemoveRequest] = useModelState<number>("_ring_remove_request");
   const [dpColormap, setDpColormap] = useModelState<string>("dp_colormap");
   const [dpScaleMode, setDpScaleMode] = useModelState<string>("dp_scale_mode");
@@ -310,13 +380,13 @@ function ShowDiffraction() {
   const [dpVminPct, setDpVminPct] = useModelState<number>("dp_vmin_pct");
   const [dpVmaxPct, setDpVmaxPct] = useModelState<number>("dp_vmax_pct");
   const [dpStats] = useModelState<number[]>("dp_stats");
-  const [showStats] = useModelState<boolean>("show_stats");
-  const [showControls] = useModelState<boolean>("show_controls");
+  const [showStats, setShowStats] = useModelState<boolean>("show_stats");
+  const [showControls, setShowControls] = useModelState<boolean>("show_controls");
   const [controlsCollapsed, setControlsCollapsed] = useModelState<boolean>("controls_collapsed");
   const controlsVisible = showControls && !controlsCollapsed;
   const [panelWidthPx] = useModelState<number>("panel_width_px");
 
-  // Standalone HTML export bridge.
+  // HTML export
   const [, setExportRequest] = useModelState<string>("export_request");
   const [exportStatus] = useModelState<string>("export_status");
   const [exportEnabled] = useModelState<boolean>("export_enabled");
@@ -326,9 +396,12 @@ function ShowDiffraction() {
   const exportCounterRef = React.useRef(0);
   const pendingExportRef = React.useRef<string>("");
 
-  // Center, rings, calibration
+  // Geometry
   const [centerMode, setCenterMode] = useModelState<string>("center_mode");
   const [rings] = useModelState<RingDict[]>("rings");
+  const [showHkl, setShowHkl] = useModelState<boolean>("show_hkl");
+  const [zoneAxis] = useModelState<string>("zone_axis");
+  const [phaseMatch] = useModelState<string>("phase_match");
   const [calibrationSource] = useModelState<string>("calibration_source");
   const [calibrationRefD] = useModelState<number>("calibration_ref_d");
   const [calibrationRefRadius] = useModelState<number>("calibration_ref_radius");
@@ -336,36 +409,74 @@ function ShowDiffraction() {
   const [, setRingClearRequest] = useModelState<boolean>("_ring_clear_request");
   const [, setCalibrateFromRingRequest] = useModelState<number[]>("_calibrate_from_ring_request");
   const [, setCalibrateFromSpotRequest] = useModelState<number[]>("_calibrate_from_spot_request");
+  const [ellipseRatio] = useModelState<number>("ellipse_ratio");
+  const [ellipseAngle] = useModelState<number>("ellipse_angle");
+  const [ellipseCorrected, setEllipseCorrected] = useModelState<boolean>("ellipse_corrected");
+  const [analysisStatus] = useModelState<string>("analysis_status");
+  const [showProfile, setShowProfile] = useModelState<boolean>("show_profile");
+  const [profileLog, setProfileLog] = useModelState<boolean>("profile_log");
+  const [profileSubtract, setProfileSubtract] = useModelState<boolean>("profile_subtract_background");
+  const [profileData] = useModelState<DataView>("_profile_data");
+  const [, setRingAddRequest] = useModelState<number[]>("_ring_add_request");
+  const [, setRefineCenterRequest] = useModelState<boolean>("_refine_center_request");
+  const [, setFitRingsRequest] = useModelState<boolean>("_fit_rings_request");
+  const [, setFitEllipseRequest] = useModelState<boolean>("_fit_ellipse_request");
+  const [, setCalibratePhaseRequest] = useModelState<boolean>("_calibrate_phase_request");
+  const [, setIndexRingsRequest] = useModelState<boolean>("_index_rings_request");
+  const [, setIndexSpotsRequest] = useModelState<boolean>("_index_spots_request");
+  const [, setIdentifyRequest] = useModelState<boolean>("_identify_request");
+  const [, setAutoRequest] = useModelState<boolean>("_auto_request");
+  const [refineMethod, setRefineMethod] = useModelState<string>("refine_method");
+  const [centerMethod] = useModelState<string>("center_method");
+  const [, setMergeRequest] = useModelState<boolean>("_merge_request");
+  const [, setQualityRequest] = useModelState<boolean>("_quality_request");
+  const [identifyElements, setIdentifyElements] = useModelState<string>("identify_elements");
+  const [identifyCustomOnly, setIdentifyCustomOnly] = useModelState<boolean>("identify_custom_only");
+  const [identifyResults] = useModelState<IdentifyResult[]>("_identify_results");
+  const [quality] = useModelState<QualityDict>("_quality");
+  const [selectedRingId, setSelectedRingId] = useModelState<number>("selected_ring_id");
+  const [phaseName, setPhaseName] = useModelState<string>("phase_name");
+  const [customPhases, setCustomPhases] = useModelState<PhaseEntry[]>("custom_phases");
+  const [phaseLibrary] = useModelState<PhaseEntry[]>("_phase_library");
+  const [maskRegions, setMaskRegions] = useModelState<MaskRegion[]>("mask_regions");
+  const [showMask, setShowMask] = useModelState<boolean>("show_mask");
+  const [showAzimuthal, setShowAzimuthal] = useModelState<boolean>("show_azimuthal");
+  const [azimuthalData] = useModelState<DataView>("_azimuthal_data");
 
-  // Export spots and rings as CSV or JSON.
-  const exportMeasurements = React.useCallback((format: "csv" | "json") => {
+  // Measurement export
+  const exportMeasurements = React.useCallback((format: "csv" | "json", kind: "spots" | "rings" | "all" = "all") => {
     const cols = [
       "id", "kind", "row", "col", "r_pixels", "r_pixels_err",
       "g_inv_angstrom", "g_inv_angstrom_err", "d_angstrom", "d_angstrom_err",
       "angle_deg", "angle_deg_err", "intensity", "fit_quality", "hkl", "note",
     ];
     const rows: (string | number | null)[][] = [];
-    for (const s of spots || []) {
-      rows.push([s.id, "spot", s.row, s.col, s.r_pixels, s.r_pixels_err ?? null,
-        s.g_magnitude, s.g_magnitude_err ?? null, s.d_spacing, s.d_spacing_err ?? null,
-        s.angle_deg ?? null, s.angle_deg_err ?? null, s.intensity, s.fit_quality ?? null,
-        s.hkl ?? "", s.note ?? ""]);
+    if (kind === "spots" || kind === "all") {
+      for (const s of spots || []) {
+        rows.push([s.id, "spot", s.row, s.col, s.r_pixels, s.r_pixels_err ?? null,
+          s.g_magnitude, s.g_magnitude_err ?? null, s.d_spacing, s.d_spacing_err ?? null,
+          s.angle_deg ?? null, s.angle_deg_err ?? null, s.intensity, s.fit_quality ?? null,
+          s.hkl ?? "", s.note ?? ""]);
+      }
     }
-    for (const r of rings || []) {
-      rows.push([r.id, "ring", null, null, r.radius_px, null, r.g_magnitude, null,
-        r.d_spacing, null, null, null, r.intensity, null, "", ""]);
+    if (kind === "rings" || kind === "all") {
+      for (const r of rings || []) {
+        rows.push([r.id, "ring", null, null, r.radius_px, null, r.g_magnitude, null,
+          r.d_spacing, null, null, null, r.intensity, r.fit_quality ?? null, r.hkl ?? "", ""]);
+      }
     }
+    const basename = kind === "all" ? "measurements" : kind;
     if (format === "json") {
       const records = rows.map((r) => Object.fromEntries(cols.map((c, i) => [c, r[i]])));
       const blob = new Blob([JSON.stringify({ measurements: records }, null, 2)], { type: "application/json" });
-      downloadBlob(blob, "measurements.json");
+      downloadBlob(blob, `${basename}.json`);
     } else {
       const esc = (v: string | number | null) => {
         const s = v == null ? "" : String(v);
         return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
       };
       const csv = [cols.join(","), ...rows.map((r) => r.map(esc).join(","))].join("\n");
-      downloadBlob(new Blob([csv], { type: "text/csv" }), "measurements.csv");
+      downloadBlob(new Blob([csv], { type: "text/csv" }), `${basename}.csv`);
     }
   }, [spots, rings]);
 
@@ -384,6 +495,28 @@ function ShowDiffraction() {
   const [dpHistData, setDpHistData] = React.useState<Float32Array | null>(null);
   const [cursorInfo, setCursorInfo] = React.useState<{ row: number; col: number; value: number } | null>(null);
   const [dpExportAnchor, setDpExportAnchor] = React.useState<HTMLElement | null>(null);
+  const [phaseMenuAnchor, setPhaseMenuAnchor] = React.useState<HTMLElement | null>(null);
+  const [maskMenuAnchor, setMaskMenuAnchor] = React.useState<HTMLElement | null>(null);
+  const [refineMenuAnchor, setRefineMenuAnchor] = React.useState<HTMLElement | null>(null);
+  const [showQc, setShowQc] = React.useState(false);
+  const toggleQuality = React.useCallback(() => {
+    const next = !showQc;
+    setShowQc(next);
+    if (next) setQualityRequest(true);
+  }, [showQc, setQualityRequest]);
+  const [identifyCollapsed, setIdentifyCollapsed] = React.useState(false);
+  const [expandedPhaseId, setExpandedPhaseId] = React.useState<string | null>(null);
+  const [customName, setCustomName] = React.useState("");
+  const [customA, setCustomA] = React.useState("");
+  const [customB, setCustomB] = React.useState("");
+  const [customC, setCustomC] = React.useState("");
+  const [customAlpha, setCustomAlpha] = React.useState("");
+  const [customBeta, setCustomBeta] = React.useState("");
+  const [customGamma, setCustomGamma] = React.useState("");
+  const [customAbsences, setCustomAbsences] = React.useState("fcc");
+  const [wedgeStart, setWedgeStart] = React.useState("");
+  const [wedgeEnd, setWedgeEnd] = React.useState("");
+  const [diskRadius, setDiskRadius] = React.useState("");
   const [dKnown, setDKnown] = React.useState("");
 
   React.useEffect(() => {
@@ -392,11 +525,31 @@ function ShowDiffraction() {
     }
   }, [initialCanvasSize]);
 
-  // Local frame index for smooth scrubbing; commit on release.
+  // Canvas drag modes
+  const [moveSpots, setMoveSpots] = React.useState(false);
+  const [drawMode, setDrawMode] = React.useState<"disk" | "wedge" | null>(null);
+  type DragPreview =
+    | { kind: "spot"; id: number; row: number; col: number }
+    | { kind: "disk"; row: number; col: number; radius: number }
+    | { kind: "wedge"; start_deg: number; end_deg: number };
+  const [dragPreview, setDragPreview] = React.useState<DragPreview | null>(null);
+  const dragTargetRef = React.useRef<
+    | { kind: "spot"; id: number }
+    | { kind: "disk"; row: number; col: number }
+    | { kind: "wedge"; start_deg: number }
+    | null
+  >(null);
+  const dragPosRef = React.useRef({ row: 0, col: 0 });
+  const dragRafRef = React.useRef(0);
+
+  // Smooth scrubbing
   const [localFrame, setLocalFrame] = React.useState(frameIdx);
   React.useEffect(() => { setLocalFrame(frameIdx); }, [frameIdx]);
 
-  // Zoom to the diffraction center.
+  // Identify table
+  React.useEffect(() => { setIdentifyCollapsed(false); }, [identifyResults]);
+
+  // Center zoom
   const zoomToCenter = React.useCallback(() => {
     const Z = 2.5;
     setDpZoom(Z);
@@ -407,12 +560,144 @@ function ShowDiffraction() {
   const dpCanvasRef = React.useRef<HTMLCanvasElement>(null);
   const dpUiRef = React.useRef<HTMLCanvasElement>(null);
   const dpScaleRef = React.useRef<HTMLCanvasElement>(null);
+  const profileCanvasRef = React.useRef<HTMLCanvasElement>(null);
+  const azimuthalCanvasRef = React.useRef<HTMLCanvasElement>(null);
   const dpOffscreenRef = React.useRef<HTMLCanvasElement | null>(null);
   const [dpVersion, setDpVersion] = React.useState(0);
   const dpVminRef = React.useRef(0);
   const dpVmaxRef = React.useRef(1);
 
-  // Drag the corner handle to resize the canvas.
+  const decodeHalves = (data: DataView, on: boolean) => {
+    if (!on) return null;
+    const arr = extractFloat32(data);
+    if (!arr || arr.length < 4 || arr.length % 2 !== 0) return null;
+    const n = arr.length / 2;
+    return { x: arr.subarray(0, n), y: arr.subarray(n) };
+  };
+
+  // Curve painter
+  const drawCurvePanel = React.useCallback((
+    canvas: HTMLCanvasElement | null,
+    data: { x: Float32Array; y: Float32Array } | null,
+    xLabel: string, yLabel: string, zeroLine: boolean,
+    opts?: { logY?: boolean; rings?: RingDict[]; bfRadius?: number; selectedRingId?: number },
+  ) => {
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    canvas.width = canvasSize * DPR;
+    canvas.height = PROFILE_H * DPR;
+    ctx.scale(DPR, DPR);
+    const isDark = themeInfo.theme === "dark";
+    ctx.fillStyle = isDark ? "#050505" : "#ffffff";
+    ctx.fillRect(0, 0, canvasSize, PROFILE_H);
+    if (!data) return;
+    const plotW = canvasSize - PROFILE_PAD.left - PROFILE_PAD.right;
+    const plotH = PROFILE_H - PROFILE_PAD.top - PROFILE_PAD.bottom;
+    const n = data.x.length;
+    const xMin = data.x[0], xMax = data.x[n - 1];
+    let vMin = Infinity, vMax = -Infinity;
+    for (let i = 0; i < n; i++) {
+      if (data.y[i] < vMin) vMin = data.y[i];
+      if (data.y[i] > vMax) vMax = data.y[i];
+    }
+    const xOf = (x: number) => PROFILE_PAD.left + ((x - xMin) / Math.max(1e-9, xMax - xMin)) * plotW;
+    const yOf = (v: number) => {
+      const t = opts?.logY
+        ? Math.log1p(Math.max(0, v - vMin)) / Math.max(1e-9, Math.log1p(vMax - vMin))
+        : (v - vMin) / Math.max(1e-9, vMax - vMin);
+      return PROFILE_PAD.top + (1 - t) * plotH;
+    };
+    ctx.strokeStyle = isDark ? "#333333" : "#d8d8d8";
+    ctx.lineWidth = 1;
+    for (let g = 0; g <= 4; g++) {
+      const y = PROFILE_PAD.top + (g / 4) * plotH;
+      ctx.beginPath(); ctx.moveTo(PROFILE_PAD.left, y); ctx.lineTo(canvasSize - PROFILE_PAD.right, y); ctx.stroke();
+    }
+    if (zeroLine && vMin < 0 && vMax > 0) {
+      ctx.strokeStyle = isDark ? "#666666" : "#999999";
+      ctx.beginPath(); ctx.moveTo(PROFILE_PAD.left, yOf(0)); ctx.lineTo(canvasSize - PROFILE_PAD.right, yOf(0)); ctx.stroke();
+    }
+    const ringColor = isDark ? "#ffb74d" : "#e65100";
+    for (const ring of opts?.rings || []) {
+      const x = xOf(ring.radius_px);
+      const selected = opts?.selectedRingId != null && opts.selectedRingId !== 0 && ring.id === opts.selectedRingId;
+      ctx.strokeStyle = selected ? themeColors.accent : ringColor;
+      ctx.lineWidth = selected ? 2.5 : 1;
+      ctx.setLineDash([3, 3]);
+      ctx.beginPath(); ctx.moveTo(x, PROFILE_PAD.top); ctx.lineTo(x, PROFILE_PAD.top + plotH); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.lineWidth = 1;
+      ctx.fillStyle = selected ? themeColors.accent : ringColor;
+      ctx.font = "9px -apple-system, sans-serif";
+      ctx.textAlign = "left"; ctx.textBaseline = "top";
+      ctx.fillText(`${ring.id}`, x + 2, PROFILE_PAD.top);
+      if (kCalibrated && kPixelSize > 0 && ring.radius_px > 0) {
+        ctx.fillText(`${(1 / (ring.radius_px * kPixelSize)).toFixed(2)}Å`, x + 2, PROFILE_PAD.top + 10);
+      }
+    }
+    if (opts?.bfRadius && opts.bfRadius > 0 && opts.bfRadius <= xMax) {
+      ctx.strokeStyle = isDark ? "#333333" : "#d8d8d8";
+      ctx.beginPath();
+      ctx.moveTo(xOf(opts.bfRadius), PROFILE_PAD.top + plotH - 6);
+      ctx.lineTo(xOf(opts.bfRadius), PROFILE_PAD.top + plotH);
+      ctx.stroke();
+    }
+    ctx.strokeStyle = themeColors.accent;
+    ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    for (let i = 0; i < n; i++) {
+      const px = xOf(data.x[i]), py = yOf(data.y[i]);
+      if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    }
+    ctx.stroke();
+    ctx.fillStyle = isDark ? "#dddddd" : "#222222";
+    ctx.font = "10px -apple-system, sans-serif";
+    ctx.textAlign = "left"; ctx.textBaseline = "top";
+    ctx.fillText(yLabel, 4, 4);
+    ctx.textBaseline = "bottom";
+    ctx.fillText(xLabel, PROFILE_PAD.left, PROFILE_H - 4);
+    ctx.textAlign = "center";
+    for (const frac of [0.25, 0.5, 0.75, 1.0]) {
+      const xv = xMin + (xMax - xMin) * frac;
+      ctx.fillText(xv >= 100 ? `${Math.round(xv)}` : xv.toFixed(1), xOf(xv), PROFILE_H - 16);
+    }
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+  }, [canvasSize, themeInfo.theme, themeColors.accent, kCalibrated, kPixelSize]);
+
+  const azimuthalArrays = React.useMemo(() => decodeHalves(azimuthalData, showAzimuthal), [azimuthalData, showAzimuthal]);
+
+  React.useLayoutEffect(() => {
+    if (showAzimuthal) drawCurvePanel(azimuthalCanvasRef.current, azimuthalArrays, "θ (°)", "I", false);
+  }, [azimuthalArrays, showAzimuthal, drawCurvePanel]);
+
+  const profileArrays = React.useMemo(() => decodeHalves(profileData, showProfile), [profileData, showProfile]);
+
+  const handleProfileClick = React.useCallback((e: React.MouseEvent) => {
+    const canvas = profileCanvasRef.current;
+    if (!canvas || !profileArrays) return;
+    const rect = canvas.getBoundingClientRect();
+    const plotW = canvasSize - PROFILE_PAD.left - PROFILE_PAD.right;
+    const rMax = profileArrays.x[profileArrays.x.length - 1];
+    const radius = ((e.clientX - rect.left - PROFILE_PAD.left) / Math.max(1, plotW)) * rMax;
+    if (!(radius > 0 && radius <= rMax)) return;
+    // Ring selection
+    const hit = (rings || []).find((r) => Math.abs(r.radius_px - radius) <= 3);
+    if (hit) {
+      setSelectedRingId(selectedRingId === hit.id ? 0 : hit.id);
+      return;
+    }
+    setRingAddRequest([radius]);
+  }, [profileArrays, canvasSize, rings, selectedRingId, setSelectedRingId, setRingAddRequest]);
+
+  React.useLayoutEffect(() => {
+    if (showProfile) {
+      drawCurvePanel(profileCanvasRef.current, profileArrays, "r (px)", profileLog ? "log I" : "I",
+        false, { logY: profileLog, rings, bfRadius, selectedRingId });
+    }
+  }, [profileArrays, profileLog, rings, bfRadius, showProfile, selectedRingId, drawCurvePanel]);
+
+  // Canvas resize
   const handleCanvasResizeStart = (e: React.MouseEvent) => {
     e.stopPropagation();
     e.preventDefault();
@@ -451,7 +736,7 @@ function ShowDiffraction() {
     };
   }, [isResizingCanvas, resizeCanvasStart]);
 
-  // Colormap LUT, reversed when Invert is on.
+  // Colormap LUT
   const dpLut = React.useMemo(() => {
     const base = COLORMAPS[dpColormap] || COLORMAPS.inferno;
     if (!dpInvert) return base;
@@ -464,7 +749,7 @@ function ShowDiffraction() {
     return inv;
   }, [dpColormap, dpInvert]);
 
-  // Offline bakes the whole stack for client-side scrubbing; live streams one frame.
+  // Frame bytes
   const activeFrame = React.useMemo<Float32Array | null>(() => {
     const frameLen = detRows * detCols;
     if (offline && offlineFrames && frameLen > 0
@@ -478,7 +763,7 @@ function ShowDiffraction() {
     return extractFloat32(frameBytes, frameLen);
   }, [offline, offlineFrames, frameBytes, frameIdx, nFrames, detRows, detCols]);
 
-  // Render the frame: scale then colormap
+  // Frame render
   React.useEffect(() => {
     const raw = activeFrame;
     if (!raw || raw.length === 0) return;
@@ -511,7 +796,7 @@ function ShowDiffraction() {
     setDpVersion(v => v + 1);
   }, [activeFrame, dpLut, dpScaleMode, dpVminPct, dpVmaxPct, detRows, detCols]);
 
-  // Draw the rendered frame with zoom and pan
+  // Frame canvas
   React.useLayoutEffect(() => {
     const canvas = dpCanvasRef.current;
     const offscreen = dpOffscreenRef.current;
@@ -527,7 +812,7 @@ function ShowDiffraction() {
     ctx.drawImage(offscreen, offX, offY, canvasSize * dpZoom, canvasSize * dpZoom);
   }, [dpVersion, dpZoom, dpPanX, dpPanY, canvasSize, detRows, detCols]);
 
-  // Overlay: center, spots, rings, colorbar
+  // Overlays
   React.useLayoutEffect(() => {
     const canvas = dpUiRef.current;
     if (!canvas) return;
@@ -564,8 +849,9 @@ function ShowDiffraction() {
     // Spot markers
     if (spots && spots.length > 0) {
       spots.forEach((spot, i) => {
-        const sx = offX + spot.col * scX;
-        const sy = offY + spot.row * scY;
+        const dragged = dragPreview?.kind === "spot" && dragPreview.id === spot.id ? dragPreview : null;
+        const sx = offX + (dragged ? dragged.col : spot.col) * scX;
+        const sy = offY + (dragged ? dragged.row : spot.row) * scY;
         const color = spotColorAt(i);
         ctx.strokeStyle = color;
         ctx.lineWidth = 1.5;
@@ -577,18 +863,89 @@ function ShowDiffraction() {
         ctx.textAlign = "left";
         ctx.textBaseline = "bottom";
         ctx.fillText(`${spot.id}`, sx + 8, sy - 2);
+        if (showHkl && spot.hkl) {
+          ctx.textBaseline = "top";
+          ctx.fillText(spot.hkl, sx + 8, sy + 2);
+          ctx.textBaseline = "bottom";
+        }
       });
     }
 
     // Rings
     if (rings && rings.length > 0) {
-      ctx.strokeStyle = themeInfo.theme === "dark" ? "#ffb74d" : "#e65100";
-      ctx.lineWidth = 1.2;
+      const ringColor = themeInfo.theme === "dark" ? "#ffb74d" : "#e65100";
       for (const ring of rings) {
+        const selected = selectedRingId !== 0 && ring.id === selectedRingId;
+        ctx.strokeStyle = selected ? themeColors.accent : ringColor;
+        ctx.lineWidth = selected ? 2.5 : 1.2;
         ctx.beginPath();
         ctx.arc(cx, cy, ring.radius_px * scX, 0, 2 * Math.PI);
         ctx.stroke();
+        if (showHkl && ring.hkl) {
+          const rr = ring.radius_px * scX * Math.SQRT1_2;
+          ctx.fillStyle = selected ? themeColors.accent : ringColor;
+          ctx.font = "bold 10px -apple-system, sans-serif";
+          ctx.textAlign = "left";
+          ctx.textBaseline = "bottom";
+          ctx.fillText(ring.hkl, cx + rr + 4, cy - rr - 4);
+        }
       }
+    }
+
+    // Excluded mask regions
+    if (showMask && maskRegions && maskRegions.length > 0) {
+      ctx.save();
+      ctx.fillStyle = themeInfo.theme === "dark" ? "rgba(244,67,54,0.18)" : "rgba(211,47,47,0.15)";
+      for (const region of maskRegions) {
+        if (region.kind === "disk" && region.radius != null) {
+          ctx.beginPath();
+          ctx.arc(offX + (region.col ?? 0) * scX, offY + (region.row ?? 0) * scY, region.radius * scX, 0, 2 * Math.PI);
+          ctx.fill();
+        } else if (region.kind === "wedge" && region.start_deg != null && region.end_deg != null) {
+          const rBig = Math.hypot(detRows, detCols) * scX;
+          ctx.beginPath();
+          ctx.moveTo(cx, cy);
+          ctx.arc(cx, cy, rBig, (region.start_deg * Math.PI) / 180, (region.end_deg * Math.PI) / 180);
+          ctx.closePath();
+          ctx.fill();
+        }
+      }
+      ctx.restore();
+    }
+
+    // Draw-mode preview
+    if (dragPreview && dragPreview.kind !== "spot") {
+      ctx.save();
+      ctx.strokeStyle = themeInfo.theme === "dark" ? "rgba(244,67,54,0.9)" : "rgba(211,47,47,0.9)";
+      ctx.fillStyle = themeInfo.theme === "dark" ? "rgba(244,67,54,0.18)" : "rgba(211,47,47,0.15)";
+      ctx.setLineDash([4, 4]);
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      if (dragPreview.kind === "disk") {
+        ctx.arc(offX + dragPreview.col * scX, offY + dragPreview.row * scY, dragPreview.radius * scX, 0, 2 * Math.PI);
+      } else {
+        const rBig = Math.hypot(detRows, detCols) * scX;
+        ctx.moveTo(cx, cy);
+        ctx.arc(cx, cy, rBig, (dragPreview.start_deg * Math.PI) / 180, (dragPreview.end_deg * Math.PI) / 180);
+        ctx.closePath();
+      }
+      ctx.fill();
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    // Fitted ellipse
+    if (ellipseRatio > 1.002 && rings && rings.length > 0) {
+      const rMax = Math.max(...rings.map((r) => r.radius_px));
+      const s = Math.sqrt(ellipseRatio);
+      ctx.save();
+      ctx.strokeStyle = themeInfo.theme === "dark" ? "#4dd0e1" : "#00838f";
+      ctx.setLineDash([6, 4]);
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.ellipse(cx, cy, rMax * s * scX, (rMax / s) * scX, (ellipseAngle * Math.PI) / 180, 0, 2 * Math.PI);
+      ctx.stroke();
+      ctx.restore();
     }
 
     drawColorbar(ctx, cssW, cssW, dpLut, dpVminRef.current, dpVmaxRef.current, dpScaleMode === "log");
@@ -602,19 +959,19 @@ function ShowDiffraction() {
     }
 
     ctx.setTransform(1, 0, 0, 1, 0, 0);
-  }, [dpVersion, dpZoom, dpPanX, dpPanY, canvasSize, detRows, detCols, centerRow, centerCol, bfRadius, spots, rings, dpLut, dpScaleMode, themeInfo.theme]);
+  }, [dpVersion, dpZoom, dpPanX, dpPanY, canvasSize, detRows, detCols, centerRow, centerCol, bfRadius, spots, rings, showHkl, selectedRingId, ellipseRatio, ellipseAngle, maskRegions, showMask, dragPreview, dpLut, dpScaleMode, themeInfo.theme, themeColors.accent]);
 
-  // K-space scale bar on its own canvas.
+  // Scale bar
   React.useLayoutEffect(() => {
     const canvas = dpScaleRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
-    canvas.width = canvasSize * DPR;   // resets + clears
+    canvas.width = canvasSize * DPR;
     canvas.height = canvasSize * DPR;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     if (kCalibrated && kPixelSize > 0) {
-      drawScaleBarHiDPI(canvas, DPR, dpZoom, kPixelSize, "mrad", detCols);
+      drawScaleBarHiDPI(canvas, DPR, dpZoom, kPixelSize, "1/Å", detCols);
     }
   }, [canvasSize, dpZoom, kCalibrated, kPixelSize, detCols]);
 
@@ -622,7 +979,7 @@ function ShowDiffraction() {
   const dpIsDragging = React.useRef(false);
   const dpDragStart = React.useRef({ x: 0, y: 0, panX: 0, panY: 0 });
 
-  // Canvas pixel to image (row, col).
+  // Canvas to data
   const dpToImage = (e: React.MouseEvent) => {
     const canvas = dpCanvasRef.current;
     if (!canvas) return { row: 0, col: 0 };
@@ -636,6 +993,9 @@ function ShowDiffraction() {
     return { row, col };
   };
 
+  const angleOf = (row: number, col: number) =>
+    (Math.atan2(row - centerRow, col - centerCol) * 180 / Math.PI + 360) % 360;
+
   const handleDpMouseDown = (e: React.MouseEvent) => {
     if (e.button === 1 || e.button === 2 || e.shiftKey) {
       dpIsDragging.current = true;
@@ -644,7 +1004,32 @@ function ShowDiffraction() {
     }
     const { row, col } = dpToImage(e);
     if (!(row >= 0 && row < detRows && col >= 0 && col < detCols)) return;
-    // Manual mode: click sets the center instead of adding a spot.
+    dragPosRef.current = { row, col };
+    if (drawMode === "disk") {
+      dragTargetRef.current = { kind: "disk", row, col };
+      setDragPreview({ kind: "disk", row, col, radius: 0 });
+      return;
+    }
+    if (drawMode === "wedge") {
+      const start = angleOf(row, col);
+      dragTargetRef.current = { kind: "wedge", start_deg: start };
+      setDragPreview({ kind: "wedge", start_deg: start, end_deg: start });
+      return;
+    }
+    if (moveSpots && spots && spots.length > 0) {
+      let nearest = -1, nearestDist = Infinity;
+      spots.forEach((s, i) => {
+        const dist = Math.hypot(s.row - row, s.col - col);
+        if (dist < nearestDist) { nearestDist = dist; nearest = i; }
+      });
+      const scX = (canvasSize / detCols) * dpZoom;
+      if (nearest >= 0 && nearestDist * scX <= 12) {
+        dragTargetRef.current = { kind: "spot", id: spots[nearest].id };
+        setDragPreview({ kind: "spot", id: spots[nearest].id, row, col });
+        return;
+      }
+    }
+    // Manual center
     if (centerMode === "manual") {
       setCenterRow(row);
       setCenterCol(col);
@@ -659,6 +1044,25 @@ function ShowDiffraction() {
       setDpPanY(dpDragStart.current.panY + (e.clientY - dpDragStart.current.y));
       return;
     }
+    if (dragTargetRef.current) {
+      dragPosRef.current = dpToImage(e);
+      if (!dragRafRef.current) {
+        dragRafRef.current = requestAnimationFrame(() => {
+          dragRafRef.current = 0;
+          const target = dragTargetRef.current;
+          if (!target) return;
+          const { row, col } = dragPosRef.current;
+          if (target.kind === "spot") {
+            setDragPreview({ kind: "spot", id: target.id, row, col });
+          } else if (target.kind === "disk") {
+            setDragPreview({ kind: "disk", row: target.row, col: target.col, radius: Math.hypot(row - target.row, col - target.col) });
+          } else {
+            setDragPreview({ kind: "wedge", start_deg: target.start_deg, end_deg: angleOf(row, col) });
+          }
+        });
+      }
+      return;
+    }
     if (!activeFrame) return;
     const { row, col } = dpToImage(e);
     const ri = Math.round(row), ci = Math.round(col);
@@ -670,10 +1074,40 @@ function ShowDiffraction() {
     }
   };
 
-  const handleDpMouseUp = () => { dpIsDragging.current = false; };
-  const handleDpMouseLeave = () => { dpIsDragging.current = false; setCursorInfo(null); };
+  const cancelCanvasDrag = () => {
+    dragTargetRef.current = null;
+    cancelAnimationFrame(dragRafRef.current);
+    dragRafRef.current = 0;
+    setDragPreview(null);
+  };
 
-  // Scroll to zoom.
+  const handleDpMouseUp = () => {
+    dpIsDragging.current = false;
+    const target = dragTargetRef.current;
+    if (!target) return;
+    const { row, col } = dragPosRef.current;
+    if (target.kind === "spot") {
+      setSpotMoveRequest([target.id, row, col]);
+    } else if (target.kind === "disk") {
+      const radius = Math.hypot(row - target.row, col - target.col);
+      if (radius >= 2) {
+        setMaskRegions([...(maskRegions || []), { kind: "disk", row: Math.round(target.row * 10) / 10, col: Math.round(target.col * 10) / 10, radius: Math.round(radius * 10) / 10 }]);
+        setShowMask(true);
+      }
+      setDrawMode(null);
+    } else {
+      const end = angleOf(row, col);
+      if (end !== target.start_deg) {
+        setMaskRegions([...(maskRegions || []), { kind: "wedge", start_deg: Math.round(target.start_deg * 10) / 10, end_deg: Math.round(end * 10) / 10 }]);
+        setShowMask(true);
+      }
+      setDrawMode(null);
+    }
+    cancelCanvasDrag();
+  };
+  const handleDpMouseLeave = () => { dpIsDragging.current = false; cancelCanvasDrag(); setCursorInfo(null); };
+
+  // Scroll zoom
   const handleDpWheel = (e: React.WheelEvent) => {
     e.preventDefault();
     const delta = e.deltaY > 0 ? 0.9 : 1.1;
@@ -682,7 +1116,7 @@ function ShowDiffraction() {
 
   const resetDpView = () => { setDpZoom(1); setDpPanX(0); setDpPanY(0); };
 
-  // Wheel scroll prevention
+  // Wheel guard
   const dpContainerRef = React.useRef<HTMLDivElement>(null);
   React.useEffect(() => {
     const prevent = (e: WheelEvent) => e.preventDefault();
@@ -711,7 +1145,7 @@ function ShowDiffraction() {
     dpCanvasRef.current.toBlob((b) => { if (b) downloadBlob(b, "showdiffraction_dp.png"); }, "image/png");
   };
 
-  // Request an HTML export; the effect below downloads the payload.
+  // HTML request
   const handleExportHtml = () => {
     setDpExportAnchor(null);
     exportCounterRef.current += 1;
@@ -725,7 +1159,7 @@ function ShowDiffraction() {
     setExportRequest(JSON.stringify({ mode: "single", download: true, id, filename }));
   };
 
-  // Download the HTML payload once it arrives.
+  // HTML payload
   React.useEffect(() => {
     if (!exportPayloadId || exportPayloadId !== pendingExportRef.current) return;
     const bytes = extractBytes(exportPayload);
@@ -740,7 +1174,7 @@ function ShowDiffraction() {
   }, [exportPayload, exportPayloadId, exportPayloadFilename, setExportRequest]);
 
   // Keyboard
-  // Skip shortcuts while typing in a field.
+  // Typing guard
   const isTypingTarget = React.useCallback((target: EventTarget | null): boolean => {
     if (!(target instanceof HTMLElement)) return false;
     if (target.isContentEditable) return true;
@@ -775,6 +1209,11 @@ function ShowDiffraction() {
         setSpotUndoRequest(true);
         handled = true;
         break;
+      case "Escape":
+        setDrawMode(null);
+        cancelCanvasDrag();
+        handled = true;
+        break;
     }
 
     if (handled) {
@@ -791,11 +1230,13 @@ function ShowDiffraction() {
     height: canvasSize,
     bgcolor: "#000",
   };
+  const sideMenuWidth = 76;
+  const patternPanelWidth = canvasSize + sideMenuWidth + SPACING.XS;
 
   return (
     <Box
       ref={rootRef}
-      sx={{ p: `${SPACING.LG}px`, bgcolor: themeColors.bg, color: themeColors.text, outline: "none" }}
+      sx={{ p: `${SPACING.LG}px`, bgcolor: themeColors.bg, color: themeColors.text, outline: "none", overflow: "visible" }}
       tabIndex={0}
       onKeyDown={handleKeyDown}
       onMouseDownCapture={handleRootMouseDownCapture}
@@ -823,6 +1264,7 @@ function ShowDiffraction() {
                     ["Shift+Drag", "Pan"],
                     ["R", "Reset zoom/pan"],
                     ["Z", "Undo last spot"],
+                    ["Esc", "Cancel draw mode"],
                     ["Double-click", "Reset view"],
                   ]} />
                 </Box>
@@ -881,40 +1323,162 @@ function ShowDiffraction() {
       {/* DP panel */}
       <Box sx={{ display: "flex", justifyContent: "flex-start" }}>
         <Box>
-          {/* Toolbar: general controls above the display */}
+          {/* Toolbar */}
           {controlsVisible && (
-            <Stack direction="row" alignItems="center" spacing={`${SPACING.SM}px`} useFlexGap sx={{ mb: `${SPACING.XS}px`, minHeight: 28, flexWrap: "wrap", rowGap: `${SPACING.XS}px`, maxWidth: canvasSize, px: 1, py: 0.5, border: `1px solid ${themeColors.border}`, borderRadius: "4px", bgcolor: themeColors.controlBg }}>
-              <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} onClick={() => setDetectRequest(20)} title="Auto-detect Bragg spots">Spots</Button>
-              <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} onClick={() => setDetectRingsRequest(8)} title="Auto-detect Debye–Scherrer rings">Rings</Button>
+            <Stack direction="row" alignItems="center" spacing={`${SPACING.SM}px`} useFlexGap sx={{ mb: `${SPACING.XS}px`, minHeight: 28, flexWrap: "wrap", rowGap: `${SPACING.XS}px`, maxWidth: patternPanelWidth, px: 1, py: 0.5, border: `1px solid ${themeColors.border}`, borderRadius: "4px", bgcolor: themeColors.controlBg }}>
+              <Button size="small" sx={{ ...compactButton, color: themeColors.accent, fontWeight: 700 }} onClick={() => setAutoRequest(true)} title="Run full analysis">AUTO</Button>
+              {nFrames > 1 && (
+                <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} onClick={() => setMergeRequest(true)} title="Align and merge frames">MERGE</Button>
+              )}
+              <Button size="small" sx={{ ...compactButton, color: phaseName ? themeColors.accent : themeColors.textMuted }} onClick={(e) => setPhaseMenuAnchor(e.currentTarget)} title="Phase library">
+                {phaseName ? `PHASE: ${phaseName}` : "PHASE"}
+              </Button>
+              <Button size="small" sx={{ ...compactButton, color: maskRegions && maskRegions.length ? themeColors.accent : themeColors.textMuted }} onClick={(e) => setMaskMenuAnchor(e.currentTarget)} title="Edit excluded regions">
+                EXCLUDE{maskRegions && maskRegions.length ? ` (${maskRegions.length})` : ""}
+              </Button>
               <Typography sx={{ ...typography.label, fontSize: 10 }}>Center</Typography>
-              <Select size="small" value={centerMode} onChange={(e) => setCenterMode(String(e.target.value))} sx={{ ...themedSelect, minWidth: 80 }} MenuProps={themedMenuProps}>
+              <Select size="small" value={centerMode} onChange={(e) => setCenterMode(String(e.target.value))} sx={{ ...themedSelect, minWidth: 80 }} MenuProps={topToolbarMenuProps}>
                 <MenuItem value="auto" sx={{ fontSize: 10 }}>Auto</MenuItem>
                 <MenuItem value="manual" sx={{ fontSize: 10 }}>Manual</MenuItem>
               </Select>
+              <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} onClick={(e) => setRefineMenuAnchor(e.currentTarget)} title="Refine center">REFINE</Button>
               <Typography sx={{ ...typography.label, fontSize: 10 }}>Cmap</Typography>
-              <Select size="small" value={dpColormap} onChange={(e) => setDpColormap(e.target.value)} sx={themedSelect} MenuProps={themedMenuProps}>
+              <Select size="small" value={dpColormap} onChange={(e) => setDpColormap(e.target.value)} sx={themedSelect} MenuProps={topToolbarMenuProps}>
                 {COLORMAP_NAMES.map(n => <MenuItem key={n} value={n} sx={{ fontSize: 10 }}>{n}</MenuItem>)}
               </Select>
               <Typography sx={{ ...typography.label, fontSize: 10 }}>Scale</Typography>
-              <Select size="small" value={dpScaleMode} onChange={(e) => setDpScaleMode(e.target.value)} sx={{ ...themedSelect, minWidth: 60 }} MenuProps={themedMenuProps}>
+              <Select size="small" value={dpScaleMode} onChange={(e) => setDpScaleMode(e.target.value)} sx={{ ...themedSelect, minWidth: 60 }} MenuProps={topToolbarMenuProps}>
                 <MenuItem value="linear" sx={{ fontSize: 10 }}>Linear</MenuItem>
                 <MenuItem value="log" sx={{ fontSize: 10 }}>Log</MenuItem>
                 <MenuItem value="sqrt" sx={{ fontSize: 10 }}>Sqrt</MenuItem>
               </Select>
-              <Typography sx={{ ...typography.label, fontSize: 10 }}>Invert</Typography>
-              <Switch size="small" checked={dpInvert} onChange={(_, v) => setDpInvert(v)} sx={switchStyles.small} />
               {centerMode === "manual" && (
                 <Typography sx={{ ...typography.value, color: themeColors.accent }}>click to set</Typography>
               )}
             </Stack>
           )}
+
+          <Menu anchorEl={phaseMenuAnchor} open={Boolean(phaseMenuAnchor)} onClose={() => setPhaseMenuAnchor(null)} anchorOrigin={{ vertical: "bottom", horizontal: "left" }} transformOrigin={{ vertical: "top", horizontal: "left" }} sx={{ zIndex: 9999 }}>
+            <Box sx={{ px: 1.5, py: 0.5, width: 300, bgcolor: themeColors.controlBg }}>
+              <Typography sx={{ ...typography.label, mb: 0.5 }}>Phase library</Typography>
+              <Box sx={{ maxHeight: 180, overflow: "auto", border: `1px solid ${themeColors.border}`, mb: 1 }}>
+                <MenuItem selected={!phaseName} onClick={() => setPhaseName("")} sx={{ fontSize: 11, minHeight: 24 }}>None</MenuItem>
+                {(phaseLibrary || []).concat(customPhases || []).map((p) => (
+                  <MenuItem key={p.name} selected={p.name === phaseName} onClick={() => setPhaseName(p.name)} sx={{ fontSize: 11, minHeight: 24, display: "flex", justifyContent: "space-between" }}>
+                    <span>{p.name}</span>
+                    <span style={{ color: themeColors.textMuted }}>{[`a=${p.a}`, p.b != null ? `b=${p.b}` : "", p.c != null ? `c=${p.c}` : ""].filter(Boolean).join(" ")} · {p.absences}</span>
+                  </MenuItem>
+                ))}
+              </Box>
+              <Stack direction="row" spacing={`${SPACING.XS}px`} alignItems="center" sx={{ mb: 0.5 }}>
+                <input value={customName} onChange={(e) => setCustomName(e.target.value)} placeholder="name" style={numInput(70)} />
+                <input type="number" value={customA} onChange={(e) => setCustomA(e.target.value)} placeholder="a (Å)" style={numInput(56)} />
+                <Select size="small" value={customAbsences} onChange={(e) => setCustomAbsences(String(e.target.value))} sx={{ ...themedSelect, minWidth: 78 }} MenuProps={themedMenuProps}>
+                  {["none", "fcc", "bcc", "diamond", "hcp", "wurtzite", "rhombohedral"].map((r) => <MenuItem key={r} value={r} sx={{ fontSize: 10 }}>{r}</MenuItem>)}
+                </Select>
+                <Button size="small" sx={{ ...compactButton, color: themeColors.accent }}
+                  disabled={!customName.trim() || !(parseFloat(customA) > 0)}
+                  onClick={() => {
+                    const entry: PhaseEntry = { name: customName.trim(), a: parseFloat(customA), absences: customAbsences };
+                    if (parseFloat(customB) > 0) entry.b = parseFloat(customB);
+                    if (parseFloat(customC) > 0) entry.c = parseFloat(customC);
+                    if (parseFloat(customAlpha) > 0) entry.alpha = parseFloat(customAlpha);
+                    if (parseFloat(customBeta) > 0) entry.beta = parseFloat(customBeta);
+                    if (parseFloat(customGamma) > 0) entry.gamma = parseFloat(customGamma);
+                    setCustomPhases([...(customPhases || []), entry]);
+                    setPhaseName(customName.trim());
+                    setCustomName(""); setCustomA(""); setCustomB(""); setCustomC("");
+                    setCustomAlpha(""); setCustomBeta(""); setCustomGamma("");
+                  }}>ADD</Button>
+              </Stack>
+              <Stack direction="row" spacing={`${SPACING.XS}px`} alignItems="center" sx={{ mb: 1 }} title="Optional non-cubic lattice; blank = b,c=a and angles 90°">
+                <input type="number" value={customB} onChange={(e) => setCustomB(e.target.value)} placeholder="b=a" style={numInput(46)} />
+                <input type="number" value={customC} onChange={(e) => setCustomC(e.target.value)} placeholder="c=a" style={numInput(46)} />
+                <input type="number" value={customAlpha} onChange={(e) => setCustomAlpha(e.target.value)} placeholder="α 90" style={numInput(46)} />
+                <input type="number" value={customBeta} onChange={(e) => setCustomBeta(e.target.value)} placeholder="β 90" style={numInput(46)} />
+                <input type="number" value={customGamma} onChange={(e) => setCustomGamma(e.target.value)} placeholder="γ 90" style={numInput(46)} />
+              </Stack>
+              <Stack direction="row" spacing={`${SPACING.XS}px`} alignItems="center" sx={{ mb: 0.5 }}>
+                <Typography sx={{ ...typography.label, fontSize: 10 }} title="Identify ranks only custom phases, not the library">Identify candidates only</Typography>
+                <Switch size="small" checked={identifyCustomOnly} onChange={(_, v) => setIdentifyCustomOnly(v)} sx={switchStyles.small} />
+              </Stack>
+              <Stack direction="row" spacing={`${SPACING.XS}px`} alignItems="center" useFlexGap sx={{ flexWrap: "wrap" }}>
+                <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} disabled={!phaseName || !rings || rings.length < 2} onClick={() => setCalibratePhaseRequest(true)} title="Calibrate from rings">CALIBRATE</Button>
+                <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} disabled={!phaseName || !rings || rings.length === 0} onClick={() => setIndexRingsRequest(true)}>INDEX RINGS</Button>
+                <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} disabled={!phaseName || !spots || spots.length === 0} onClick={() => setIndexSpotsRequest(true)}>INDEX SPOTS</Button>
+                <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} disabled={(!rings || rings.length === 0) && (!spots || spots.length === 0)} onClick={() => setIdentifyRequest(true)} title="Identify phase">IDENTIFY</Button>
+              </Stack>
+            </Box>
+          </Menu>
+
+          <Menu anchorEl={maskMenuAnchor} open={Boolean(maskMenuAnchor)} onClose={() => setMaskMenuAnchor(null)} anchorOrigin={{ vertical: "bottom", horizontal: "left" }} transformOrigin={{ vertical: "top", horizontal: "left" }} sx={{ zIndex: 9999 }}>
+            <Box sx={{ px: 1.5, py: 0.5, width: 290, bgcolor: themeColors.controlBg }}>
+              <Typography sx={{ ...typography.label, mb: 0.5 }}>Excluded regions</Typography>
+              {(maskRegions || []).map((region, i) => (
+                <Stack key={i} direction="row" justifyContent="space-between" alignItems="center">
+                  <Typography sx={typography.value}>
+                    {region.kind === "wedge"
+                      ? `wedge ${region.start_deg}°–${region.end_deg}°`
+                      : `disk (${Number(region.row).toFixed(0)}, ${Number(region.col).toFixed(0)}) r=${region.radius}`}
+                  </Typography>
+                  <span onClick={() => setMaskRegions(maskRegions.filter((_, j) => j !== i))} title="Remove" style={{ cursor: "pointer", color: themeColors.textMuted, fontWeight: "bold", padding: "0 4px" }}>×</span>
+                </Stack>
+              ))}
+              <Stack direction="row" spacing={`${SPACING.XS}px`} alignItems="center" sx={{ mt: 1 }}>
+                <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} title="Drag on the pattern: center out to the radius" onClick={() => { setDrawMode("disk"); setMaskMenuAnchor(null); }}>DRAW DISK</Button>
+                <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} title="Drag on the pattern: start angle to end angle" onClick={() => { setDrawMode("wedge"); setMaskMenuAnchor(null); }}>DRAW WEDGE</Button>
+              </Stack>
+              <Stack direction="row" spacing={`${SPACING.XS}px`} alignItems="center" sx={{ mt: 0.5 }}>
+                <input type="number" value={wedgeStart} onChange={(e) => setWedgeStart(e.target.value)} placeholder="start°" style={numInput(52)} />
+                <input type="number" value={wedgeEnd} onChange={(e) => setWedgeEnd(e.target.value)} placeholder="end°" style={numInput(52)} />
+                <Button size="small" sx={{ ...compactButton, color: themeColors.accent }}
+                  disabled={wedgeStart === "" || wedgeEnd === ""}
+                  onClick={() => { setMaskRegions([...(maskRegions || []), { kind: "wedge", start_deg: parseFloat(wedgeStart), end_deg: parseFloat(wedgeEnd) }]); setWedgeStart(""); setWedgeEnd(""); }}>+ WEDGE</Button>
+              </Stack>
+              <Stack direction="row" spacing={`${SPACING.XS}px`} alignItems="center" sx={{ mt: 0.5 }}>
+                <input type="number" value={diskRadius} onChange={(e) => setDiskRadius(e.target.value)} placeholder="radius px" style={numInput(66)} />
+                <Button size="small" sx={{ ...compactButton, color: themeColors.accent }}
+                  disabled={!(parseFloat(diskRadius) > 0) || !spots || spots.length === 0}
+                  title="Mask disk at last spot"
+                  onClick={() => { const s = spots[spots.length - 1]; setMaskRegions([...(maskRegions || []), { kind: "disk", row: s.row, col: s.col, radius: parseFloat(diskRadius) }]); setDiskRadius(""); }}>+ DISK @ LAST SPOT</Button>
+                <Typography sx={{ ...typography.label, fontSize: 10 }}>Show:</Typography>
+                <Switch size="small" checked={showMask} onChange={(_, v) => setShowMask(v)} sx={switchStyles.small} />
+              </Stack>
+            </Box>
+          </Menu>
+
+          <Menu anchorEl={refineMenuAnchor} open={Boolean(refineMenuAnchor)} onClose={() => setRefineMenuAnchor(null)} anchorOrigin={{ vertical: "bottom", horizontal: "left" }} transformOrigin={{ vertical: "top", horizontal: "left" }} sx={{ zIndex: 9999 }}>
+            <Box sx={{ px: 1.5, py: 0.5, width: 210, bgcolor: themeColors.controlBg }}>
+              <Typography sx={{ ...typography.label, mb: 0.5 }}>Refine center</Typography>
+              <Stack direction="row" spacing={`${SPACING.XS}px`} alignItems="center">
+                <Select size="small" value={refineMethod || "auto"} onChange={(e) => setRefineMethod(String(e.target.value))} sx={{ ...themedSelect, minWidth: 100 }} MenuProps={themedMenuProps}>
+                  <MenuItem value="auto" sx={{ fontSize: 10 }}>Auto</MenuItem>
+                  <MenuItem value="symmetry" sx={{ fontSize: 10 }}>Symmetry</MenuItem>
+                  <MenuItem value="phase_corr" sx={{ fontSize: 10 }}>Phase corr</MenuItem>
+                </Select>
+                <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} onClick={() => { setRefineCenterRequest(true); setRefineMenuAnchor(null); }}>RUN</Button>
+              </Stack>
+              {centerMethod && (
+                <Typography sx={{ ...typography.value, mt: 0.5, color: themeColors.textMuted }}>
+                  {centerMethod}
+                </Typography>
+              )}
+            </Box>
+          </Menu>
           <Typography sx={{ fontSize: 10, color: themeColors.textMuted, mb: `${SPACING.XS}px` }}>
             {nFrames > 1 ? `Frame ${localFrame + 1} / ${nFrames}` : "Diffraction"}
+            {drawMode && <span style={{ marginLeft: 8, color: themeColors.accent }}>
+              drag on the pattern to draw the excluded {drawMode} (Esc cancels)
+            </span>}
+            {moveSpots && !drawMode && <span style={{ marginLeft: 8, color: themeColors.accent }}>
+              drag a spot to move it
+            </span>}
             {cursorInfo && <span style={{ marginLeft: 8, color: themeColors.accent }}>
               ({cursorInfo.row}, {cursorInfo.col}) {formatNumber(cursorInfo.value)}
             </span>}
           </Typography>
-          <Box ref={dpContainerRef} sx={canvasBox}>
+          <Stack direction="row" spacing={`${SPACING.XS}px`} alignItems="flex-start" sx={{ width: patternPanelWidth, maxWidth: "100%" }}>
+          <Box ref={dpContainerRef} sx={{ ...canvasBox, flexShrink: 0 }}>
             <canvas ref={dpCanvasRef} style={{ position: "absolute", top: 0, left: 0, width: canvasSize, height: canvasSize, imageRendering: "pixelated" }} />
             <canvas ref={dpUiRef} style={{ position: "absolute", top: 0, left: 0, width: canvasSize, height: canvasSize, pointerEvents: "none" }} />
             <canvas ref={dpScaleRef} style={{ position: "absolute", top: 0, left: 0, width: canvasSize, height: canvasSize, pointerEvents: "none" }} />
@@ -932,7 +1496,189 @@ function ShowDiffraction() {
             <Box onMouseDown={handleCanvasResizeStart} sx={{ position: "absolute", bottom: 0, right: 0, width: 16, height: 16, cursor: "nwse-resize", opacity: 0.6, background: `linear-gradient(135deg, transparent 50%, ${themeColors.accent} 50%)`, "&:hover": { opacity: 1 } }} />
           </Box>
 
-          {/* Frame slider (3D stacks only) */}
+          {/* Side menu */}
+          <Stack spacing="2px" sx={{ width: sideMenuWidth, flexShrink: 0 }}>
+            {([
+              ["PROFILE", "Radial profile", showProfile, () => setShowProfile(!showProfile)],
+              ["AZIM", "Azimuthal profile", showAzimuthal, () => setShowAzimuthal(!showAzimuthal)],
+              ["HKL", "hkl labels", showHkl, () => setShowHkl(!showHkl)],
+              ["MASK VIEW", "Mask overlay", showMask, () => setShowMask(!showMask)],
+              ["INVERT", "Invert colormap", dpInvert, () => setDpInvert(!dpInvert)],
+              ["STATS", "Statistics", showStats, () => setShowStats(!showStats)],
+              ["QUALITY", "Analysis quality", showQc, toggleQuality],
+              ["CTRL", "Control bar", showControls, () => setShowControls(!showControls)],
+            ] as [string, string, boolean, () => void][]).map(([label, hint, on, toggle]) => (
+              <Button key={label} size="small" title={hint} onClick={toggle}
+                sx={{ ...compactButton, width: sideMenuWidth, justifyContent: "flex-start", color: on ? themeColors.accent : themeColors.textMuted }}>
+                {label}
+              </Button>
+            ))}
+          </Stack>
+          </Stack>
+
+          {/* Quality */}
+          {showQc && (
+            <Box sx={{ mt: `${SPACING.XS}px`, width: canvasSize, px: 1, py: 0.5, border: `1px solid ${themeColors.border}`, borderRadius: "4px", bgcolor: themeColors.controlBg }}>
+              <Typography sx={{ ...typography.label, mb: 0.5 }}>Analysis quality</Typography>
+              {quality?.center && (
+                <Typography sx={typography.value}>
+                  <span style={{ color: themeColors.textMuted }}>Center: </span>
+                  {quality.center.method}
+                </Typography>
+              )}
+              {quality?.calibration && (
+                <Typography sx={typography.value}>
+                  <span style={{ color: themeColors.textMuted }}>Calibration: </span>
+                  {quality.calibration.source === "none" ? (
+                    <span style={{ color: themeColors.textMuted }}>uncalibrated</span>
+                  ) : (
+                    <span style={{ color: quality.calibration.rms_px <= 0.5 ? statusColors.good : quality.calibration.rms_px <= 1.5 ? statusColors.warn : statusColors.bad }}>
+                      {quality.calibration.source} · rms {quality.calibration.rms_px.toFixed(2)} px
+                    </span>
+                  )}
+                </Typography>
+              )}
+              {quality?.ellipse && (
+                <Typography sx={typography.value}>
+                  <span style={{ color: themeColors.textMuted }}>Ellipse: </span>
+                  {quality.ellipse.ratio.toFixed(3)} @ {quality.ellipse.angle_deg.toFixed(1)}° · {quality.ellipse.corrected ? "corrected" : "not corrected"}
+                </Typography>
+              )}
+              {quality?.rings && quality.rings.length > 0 && (
+                <Typography sx={typography.value}>
+                  <span style={{ color: themeColors.textMuted }}>Ring fits: </span>
+                  {quality.rings.filter((r) => r.fit_quality >= 0.9).length}/{quality.rings.length}
+                </Typography>
+              )}
+              {quality?.n_unexplained_rings != null && (
+                <Typography sx={typography.value}>
+                  <span style={{ color: themeColors.textMuted }}>Unexplained rings: </span>
+                  <span style={{ color: quality.n_unexplained_rings === 0 ? statusColors.good : statusColors.warn }}>
+                    {quality.n_unexplained_rings}
+                  </span>
+                </Typography>
+              )}
+              {quality?.mask_coverage_pct != null && (
+                <Typography sx={typography.value}>
+                  <span style={{ color: themeColors.textMuted }}>Mask coverage: </span>
+                  {quality.mask_coverage_pct.toFixed(1)}%
+                </Typography>
+              )}
+              {quality?.ring_snr && (
+                <Typography sx={typography.value}>
+                  <span style={{ color: themeColors.textMuted }}>Ring SNR: </span>
+                  {quality.ring_snr.snr.toFixed(1)} · cov {quality.ring_snr.coverage.toFixed(2)}
+                </Typography>
+              )}
+            </Box>
+          )}
+
+          {/* Radial profile */}
+          {showProfile && (
+            <Box sx={{ mt: `${SPACING.XS}px`, width: canvasSize }}>
+              <Stack direction="row" alignItems="center" spacing={`${SPACING.SM}px`} sx={{ px: 1, mb: `${SPACING.XS}px` }}>
+                <Typography sx={typography.label}>Radial profile</Typography>
+                <Typography sx={{ ...typography.label, fontSize: 10 }}>log:</Typography>
+                <Switch size="small" checked={profileLog} onChange={(_, v) => setProfileLog(v)} sx={switchStyles.small} />
+                <Typography sx={{ ...typography.label, fontSize: 10 }}>−bg:</Typography>
+                <Switch size="small" checked={profileSubtract} onChange={(_, v) => setProfileSubtract(v)} sx={switchStyles.small} />
+                <Typography sx={{ ...typography.value, color: themeColors.textMuted }}>click to add ring</Typography>
+              </Stack>
+              <canvas
+                ref={profileCanvasRef}
+                style={{ display: "block", width: canvasSize, height: PROFILE_H, cursor: "crosshair", border: `1px solid ${themeColors.border}` }}
+                onMouseDown={handleProfileClick}
+              />
+            </Box>
+          )}
+
+          {/* Azimuthal */}
+          {showAzimuthal && (
+            <Box sx={{ mt: `${SPACING.XS}px`, width: canvasSize }}>
+              <Typography sx={{ ...typography.label, px: 1, mb: `${SPACING.XS}px` }}>
+                Azimuthal profile (outermost ring)
+              </Typography>
+              <canvas ref={azimuthalCanvasRef} style={{ display: "block", width: canvasSize, height: PROFILE_H, border: `1px solid ${themeColors.border}` }} />
+            </Box>
+          )}
+
+          {/* Candidates */}
+          {identifyResults && identifyResults.length > 0 && (
+            <Box sx={{ mt: `${SPACING.XS}px`, width: canvasSize }}>
+              <Stack direction="row" alignItems="center" spacing={`${SPACING.SM}px`} sx={{ px: 1, mb: `${SPACING.XS}px` }}>
+                <Typography sx={typography.label}>Candidate phases</Typography>
+                <input value={identifyElements} onChange={(e) => setIdentifyElements(e.target.value)} placeholder="elements e.g. Fe,O" style={numInput(110)} />
+                <Typography sx={{ ...typography.label, fontSize: 10 }} title="Rank only custom phases, not the library">candidates only</Typography>
+                <Switch size="small" checked={identifyCustomOnly} onChange={(_, v) => setIdentifyCustomOnly(v)} sx={switchStyles.small} />
+                <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} onClick={() => setIdentifyRequest(true)} title="Identify phase">IDENTIFY</Button>
+                <Button size="small" sx={{ ...compactButton, color: themeColors.textMuted }} onClick={() => setIdentifyCollapsed(true)} title="Hide results">CLEAR</Button>
+              </Stack>
+              {!identifyCollapsed && (
+                <Box sx={{ maxHeight: 240, overflow: "auto", border: `1px solid ${themeColors.border}` }}>
+                  <table style={{ width: "100%", fontSize: 10, fontFamily: "monospace", borderCollapse: "collapse", color: themeColors.text }}>
+                    <thead>
+                      <tr style={{ borderBottom: `1px solid ${themeColors.border}`, textAlign: "left" }}>
+                        <th style={{ padding: "2px 6px" }}>name</th>
+                        <th style={{ padding: "2px 6px" }} title="matched lines / observed">matched</th>
+                        <th style={{ padding: "2px 6px" }} title="mean |Δd| vs reference">Δd (%)</th>
+                        <th style={{ padding: "2px 6px" }} title="strong reference lines not observed">missing</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {identifyResults.map((cand) => (
+                        <React.Fragment key={cand.phase_id}>
+                          <tr
+                            style={{ borderBottom: `1px solid ${themeColors.border}22`, cursor: "pointer", background: expandedPhaseId === cand.phase_id ? `${themeColors.accent}18` : undefined }}
+                            onClick={() => setExpandedPhaseId(expandedPhaseId === cand.phase_id ? null : cand.phase_id)}
+                          >
+                            <td style={{ padding: "2px 6px", color: themeColors.accent }}>{cand.name}</td>
+                            <td style={{ padding: "2px 6px" }}>{cand.matched}/{cand.n_obs}</td>
+                            <td style={{ padding: "2px 6px" }}>{cand.mean_err != null ? (cand.mean_err * 100).toFixed(2) : "—"}</td>
+                            <td style={{ padding: "2px 6px" }}>{cand.n_missing_strong ?? 0}</td>
+                          </tr>
+                          {expandedPhaseId === cand.phase_id && (
+                            <tr style={{ borderBottom: `1px solid ${themeColors.border}22` }}>
+                              <td colSpan={4} style={{ padding: "2px 6px 4px 14px" }}>
+                                <table style={{ width: "100%", fontSize: 10, fontFamily: "monospace", borderCollapse: "collapse", color: themeColors.text }}>
+                                  <thead>
+                                    <tr style={{ borderBottom: `1px solid ${themeColors.border}`, textAlign: "left", color: themeColors.textMuted }}>
+                                      <th style={{ padding: "1px 6px" }}>d_obs (Å)</th>
+                                      <th style={{ padding: "1px 6px" }}>d_ref (Å)</th>
+                                      <th style={{ padding: "1px 6px" }}>hkl</th>
+                                      <th style={{ padding: "1px 6px" }}>Δd (%)</th>
+                                      <th style={{ padding: "1px 6px" }}>I_rel</th>
+                                      <th style={{ padding: "1px 6px" }}></th>
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {(cand.lines || []).map((line, li) => {
+                                      const lineColor = line.ref_d == null ? statusColors.bad : line.obs_d == null ? themeColors.textMuted : undefined;
+                                      return (
+                                        <tr key={li} style={{ color: lineColor }}>
+                                          <td style={{ padding: "1px 6px" }}>{line.obs_d != null ? line.obs_d.toFixed(3) : "—"}</td>
+                                          <td style={{ padding: "1px 6px" }}>{line.ref_d != null ? line.ref_d.toFixed(3) : "—"}</td>
+                                          <td style={{ padding: "1px 6px" }}>{line.hkl || "—"}</td>
+                                          <td style={{ padding: "1px 6px" }}>{line.err != null ? (line.err * 100).toFixed(2) : "—"}</td>
+                                          <td style={{ padding: "1px 6px" }}>{line.i_rel != null ? line.i_rel.toFixed(0) : "—"}</td>
+                                          <td style={{ padding: "1px 6px" }}>{line.ref_d == null ? "unexplained" : line.obs_d == null ? "missing" : ""}</td>
+                                        </tr>
+                                      );
+                                    })}
+                                  </tbody>
+                                </table>
+                              </td>
+                            </tr>
+                          )}
+                        </React.Fragment>
+                      ))}
+                    </tbody>
+                  </table>
+                </Box>
+              )}
+            </Box>
+          )}
+
+          {/* Frame slider */}
           {nFrames > 1 && (
             <Box sx={{ ...controlRow, width: canvasSize }}>
               <Typography sx={typography.label}>Frame</Typography>
@@ -949,7 +1695,7 @@ function ShowDiffraction() {
             </Box>
           )}
 
-          {/* DP Stats */}
+          {/* Stats */}
           {showStats && dpStats && dpStats.length === 4 && (
             <Box sx={{ mt: `${SPACING.XS}px`, px: 1, py: 0.25, display: "flex", gap: 2 }}>
               <Typography sx={{ ...typography.value, color: themeColors.textMuted }}>
@@ -966,27 +1712,59 @@ function ShowDiffraction() {
               </Typography>
             </Box>
           )}
+
+          {/* Indexing */}
+          {showStats && (zoneAxis || phaseMatch) && (
+            <Box sx={{ px: 1, py: 0.25, display: "flex", gap: 2, flexWrap: "wrap" }}>
+              {zoneAxis && (
+                <Typography sx={{ ...typography.value, color: themeColors.textMuted }}>
+                  Zone <Box component="span" sx={{ color: themeColors.accent }}>{zoneAxis}</Box>
+                </Typography>
+              )}
+              {phaseMatch && (
+                <Typography sx={{ ...typography.value, color: themeColors.textMuted }}>
+                  {phaseMatch}
+                </Typography>
+              )}
+            </Box>
+          )}
+
+          {/* Status */}
+          {analysisStatus && (
+            <Box sx={{ px: 1, py: 0.25 }}>
+              <Typography
+                sx={{ ...typography.value, maxWidth: canvasSize, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: analysisStatus.includes("failed") ? "#d32f2f" : themeColors.textMuted }}
+                title={analysisStatus}
+              >
+                {analysisStatus}
+              </Typography>
+            </Box>
+          )}
         </Box>
       </Box>
 
-      {/* Spots Table */}
+      {/* Spots */}
       <Box sx={{ mt: `${SPACING.MD}px`, maxWidth: canvasSize }}>
           <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: `${SPACING.XS}px` }}>
-            <Typography sx={{ ...typography.label, color: themeColors.text }}>
-              Spots ({spots ? spots.length : 0})
-            </Typography>
+            <Stack direction="row" alignItems="center" spacing={`${SPACING.XS}px`}>
+              <Typography sx={{ ...typography.label, color: themeColors.text }}>
+                Spots ({spots ? spots.length : 0})
+              </Typography>
+              <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} onClick={() => setDetectRequest(-1)} title="Detect spots">AUTO</Button>
+              <Button size="small" sx={{ ...compactButton, color: moveSpots ? themeColors.accent : themeColors.textMuted }} onClick={() => setMoveSpots(!moveSpots)} title="Drag spots on the pattern to move them">MOVE</Button>
+            </Stack>
             <Stack direction="row" spacing={`${SPACING.XS}px`} sx={{ p: 0.25, border: `1px solid ${themeColors.border}`, borderRadius: "4px", bgcolor: themeColors.controlBg }}>
               <Button
                 size="small" sx={{ ...compactButton, color: themeColors.accent }}
                 disabled={!spots || spots.length === 0}
-                onClick={() => exportMeasurements("csv")}
+                onClick={() => exportMeasurements("csv", "spots")}
               >
                 CSV
               </Button>
               <Button
                 size="small" sx={{ ...compactButton, color: themeColors.accent }}
                 disabled={!spots || spots.length === 0}
-                onClick={() => exportMeasurements("json")}
+                onClick={() => exportMeasurements("json", "spots")}
               >
                 JSON
               </Button>
@@ -1013,6 +1791,10 @@ function ShowDiffraction() {
                   <tr style={{ borderBottom: `1px solid ${themeColors.border}`, textAlign: "left" }}>
                     <th style={{ padding: "2px 4px" }}>#</th>
                     <th style={{ padding: "2px 6px" }}>d (Å)</th>
+                    <th style={{ padding: "2px 6px" }} title="indexed reflection">hkl</th>
+                    {spots.some((s) => s.d_ref != null) && (
+                      <th style={{ padding: "2px 6px" }} title="measured vs reference d">Δd (%)</th>
+                    )}
                     <th style={{ padding: "2px 6px" }} title="|g| = 1/d in 1/Å · 1/nm">|g| (1/Å·1/nm)</th>
                     <th style={{ padding: "2px 6px" }} title="angle vs reference spot">∠ (°)</th>
                     <th style={{ padding: "2px 6px" }} title="Gaussian fit R²">fit</th>
@@ -1036,6 +1818,10 @@ function ShowDiffraction() {
                       <tr key={spot.id} style={{ borderBottom: `1px solid ${themeColors.border}22` }}>
                         <td style={{ padding: "2px 4px", color, fontWeight: "bold" }}>{spot.id}</td>
                         <td style={{ padding: "2px 6px" }}>{dStr}</td>
+                        <td style={{ padding: "2px 6px" }}>{spot.hkl || "—"}</td>
+                        {spots.some((s) => s.d_ref != null) && (
+                          <td style={{ padding: "2px 6px" }}>{spot.d_error != null ? (spot.d_error * 100).toFixed(2) : "—"}</td>
+                        )}
                         <td style={{ padding: "2px 6px" }}>{gStr}</td>
                         <td style={{ padding: "2px 6px" }}>{aStr}</td>
                         <td style={{ padding: "2px 6px" }}>{spot.fit_quality != null ? spot.fit_quality.toFixed(2) : "—"}</td>
@@ -1056,18 +1842,24 @@ function ShowDiffraction() {
           )}
         </Box>
 
-      {/* Rings Table */}
-      {rings && rings.length > 0 && (
-        <Box sx={{ mt: `${SPACING.MD}px`, maxWidth: canvasSize }}>
+      {/* Rings */}
+      <Box sx={{ mt: `${SPACING.MD}px`, maxWidth: canvasSize }}>
           <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: `${SPACING.XS}px` }}>
-            <Typography sx={{ ...typography.label, color: themeColors.text }}>
-              Rings ({rings.length})
-            </Typography>
+            <Stack direction="row" alignItems="center" spacing={`${SPACING.XS}px`}>
+              <Typography sx={{ ...typography.label, color: themeColors.text }}>
+                Rings ({rings ? rings.length : 0})
+              </Typography>
+              <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} onClick={() => setDetectRingsRequest(-1)} title="Detect rings">AUTO</Button>
+            </Stack>
             <Stack direction="row" spacing={`${SPACING.XS}px`} sx={{ p: 0.25, border: `1px solid ${themeColors.border}`, borderRadius: "4px", bgcolor: themeColors.controlBg }}>
-              <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} onClick={() => setRingUndoRequest(true)}>Undo</Button>
-              <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} onClick={() => setRingClearRequest(true)}>Clear</Button>
+              <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} disabled={!rings || rings.length === 0} onClick={() => exportMeasurements("csv", "rings")}>CSV</Button>
+              <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} disabled={!rings || rings.length === 0} onClick={() => exportMeasurements("json", "rings")}>JSON</Button>
+              <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} disabled={!rings || rings.length === 0} onClick={() => setFitRingsRequest(true)} title="Fit ring profiles">FIT</Button>
+              <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} disabled={!rings || rings.length === 0} onClick={() => setRingUndoRequest(true)}>Undo</Button>
+              <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} disabled={!rings || rings.length === 0} onClick={() => setRingClearRequest(true)}>Clear</Button>
             </Stack>
           </Stack>
+          {rings && rings.length > 0 && (
           <Box sx={{ maxHeight: 160, overflow: "auto", border: `1px solid ${themeColors.border}` }}>
             <table style={{ width: "100%", fontSize: 10, fontFamily: "monospace", borderCollapse: "collapse", color: themeColors.text }}>
               <thead>
@@ -1075,22 +1867,40 @@ function ShowDiffraction() {
                   <th style={{ padding: "2px 6px" }}>#</th>
                   <th style={{ padding: "2px 6px" }}>radius (px)</th>
                   <th style={{ padding: "2px 6px" }}>d (Å)</th>
+                  <th style={{ padding: "2px 6px" }} title="indexed reflection">hkl</th>
+                  {rings.some((r) => r.d_ref != null) && (
+                    <th style={{ padding: "2px 6px" }} title="measured vs reference d">Δd (%)</th>
+                  )}
                   <th style={{ padding: "2px 6px" }}>|g| (1/Å)</th>
+                  {rings.some((r) => r.fwhm_px != null) && (
+                    <th style={{ padding: "2px 6px" }} title="fitted peak width">fwhm (px)</th>
+                  )}
                   <th style={{ padding: "2px 6px" }}>I</th>
                   <th style={{ padding: "2px 4px" }}></th>
                 </tr>
               </thead>
               <tbody>
                 {rings.map((ring: RingDict) => (
-                  <tr key={ring.id} style={{ borderBottom: `1px solid ${themeColors.border}22` }}>
+                  <tr
+                    key={ring.id}
+                    style={{ borderBottom: `1px solid ${themeColors.border}22`, cursor: "pointer", background: selectedRingId === ring.id ? `${themeColors.accent}18` : undefined }}
+                    onClick={() => setSelectedRingId(selectedRingId === ring.id ? 0 : ring.id)}
+                  >
                     <td style={{ padding: "2px 6px", color: themeColors.accent }}>{ring.id}</td>
                     <td style={{ padding: "2px 6px" }}>{ring.radius_px.toFixed(1)}</td>
                     <td style={{ padding: "2px 6px" }}>{ring.d_spacing != null ? ring.d_spacing.toFixed(3) : "—"}</td>
+                    <td style={{ padding: "2px 6px" }}>{ring.hkl || "—"}</td>
+                    {rings.some((r) => r.d_ref != null) && (
+                      <td style={{ padding: "2px 6px" }}>{ring.d_error != null ? (ring.d_error * 100).toFixed(2) : "—"}</td>
+                    )}
                     <td style={{ padding: "2px 6px" }}>{ring.g_magnitude != null ? ring.g_magnitude.toFixed(4) : "—"}</td>
+                    {rings.some((r) => r.fwhm_px != null) && (
+                      <td style={{ padding: "2px 6px" }}>{ring.fwhm_px != null ? ring.fwhm_px.toFixed(2) : "—"}</td>
+                    )}
                     <td style={{ padding: "2px 6px" }}>{formatNumber(ring.intensity)}</td>
                     <td style={{ padding: "1px 4px", textAlign: "center" }}>
                       <span
-                        onClick={() => setRingRemoveRequest(ring.id)}
+                        onClick={(e) => { e.stopPropagation(); setRingRemoveRequest(ring.id); }}
                         title="Delete this ring"
                         style={{ cursor: "pointer", color: themeColors.textMuted, fontWeight: "bold", padding: "0 3px" }}
                       >×</span>
@@ -1100,29 +1910,26 @@ function ShowDiffraction() {
               </tbody>
             </table>
           </Box>
-        </Box>
-      )}
+          )}
+      </Box>
 
       {/* Fine controls below the display */}
       {controlsVisible && (
         <Box sx={{ mt: `${SPACING.MD}px`, maxWidth: canvasSize }}>
           <Stack direction="row" spacing={`${SPACING.LG}px`} sx={{ flexWrap: "wrap" }}>
-            <Box sx={controlBox}>
-              <Typography sx={typography.label}>Refine</Typography>
-              <Switch
-                size="small" checked={spotRefine}
-                onChange={(_, v) => setSpotRefine(v)}
-                sx={switchStyles.small}
-              />
-              <Typography sx={{ ...typography.label, ml: 1 }}>Snap</Typography>
-              <Switch
-                size="small" checked={snapEnabled}
-                onChange={(_, v) => setSnapEnabled(v)}
-                sx={switchStyles.small}
-                disabled={spotRefine}
-              />
-              <Typography sx={typography.label}>r</Typography>
-              <Typography sx={typography.value}>{snapRadius}</Typography>
+            <Box sx={controlBox} title={`How clicked spots are placed (±${snapRadius} px search window)`}>
+              <Typography sx={typography.label}>Spot pick</Typography>
+              <Select
+                size="small"
+                value={spotRefine ? "fit" : snapEnabled ? "snap" : "exact"}
+                onChange={(e) => { const v = String(e.target.value); setSpotRefine(v === "fit"); setSnapEnabled(v === "snap"); }}
+                sx={{ ...themedSelect, minWidth: 96 }}
+                MenuProps={themedMenuProps}
+              >
+                <MenuItem value="fit" sx={{ fontSize: 10 }}>Fit peak</MenuItem>
+                <MenuItem value="snap" sx={{ fontSize: 10 }}>Snap to max</MenuItem>
+                <MenuItem value="exact" sx={{ fontSize: 10 }}>Exact click</MenuItem>
+              </Select>
             </Box>
 
             <Box sx={controlBox}>
@@ -1142,7 +1949,7 @@ function ShowDiffraction() {
               type="number" value={dKnown}
               onChange={(e) => setDKnown(e.target.value)}
               placeholder="2.355"
-              style={{ width: 64, fontSize: 10, padding: "2px 4px", background: themeColors.controlBg, color: themeColors.text, border: `1px solid ${themeColors.border}` }}
+              style={numInput(64)}
             />
             <Button
               size="small" sx={{ ...compactButton, color: themeColors.accent }}
@@ -1161,6 +1968,29 @@ function ShowDiffraction() {
             >Center View</Button>
           </Box>
 
+          <Box sx={{ ...controlBox, mt: `${SPACING.XS}px` }}>
+            <Typography sx={typography.label}>Distortion:</Typography>
+            <Button
+              size="small" sx={{ ...compactButton, color: themeColors.accent }}
+              disabled={!rings || rings.length === 0}
+              onClick={() => setFitEllipseRequest(true)}
+              title="Fit ellipse distortion"
+            >FIT ELLIPSE</Button>
+            <Typography sx={{ ...typography.label, fontSize: 10 }}>Use correction:</Typography>
+            <Switch
+              size="small" checked={ellipseCorrected}
+              onChange={(_, v) => setEllipseCorrected(v)}
+              sx={switchStyles.small}
+              title="Use fitted ellipse correction"
+              disabled={!(ellipseRatio > 1.0)}
+            />
+            {ellipseRatio > 1.0 && (
+              <Typography sx={{ ...typography.value, color: themeColors.textMuted }}>
+                a/b {ellipseRatio.toFixed(3)} @ {ellipseAngle.toFixed(1)}°
+              </Typography>
+            )}
+          </Box>
+
           <Box sx={{ ...controlRow, mt: `${SPACING.XS}px` }}>
             <Typography sx={{ ...typography.value, color: themeColors.textMuted }}>
               Center: ({centerRow.toFixed(1)}, {centerCol.toFixed(1)})  BF r={bfRadius.toFixed(1)}
@@ -1170,7 +2000,7 @@ function ShowDiffraction() {
           {kCalibrated && (
             <Box sx={controlRow}>
               <Typography sx={{ ...typography.value, color: themeColors.textMuted }}>
-                Calib: {calibrationSource}
+                Calibration: {calibrationSourceLabel(calibrationSource)}
                 {calibrationRefD > 0 && ` (d=${calibrationRefD.toFixed(3)} Å @ r=${calibrationRefRadius.toFixed(1)} px)`}
               </Typography>
             </Box>
