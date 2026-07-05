@@ -166,3 +166,16 @@ touchscreen. The VI/DP/FFT canvases in `js/show4dstem/index.tsx` follow this;
 mirror it for any new interactive canvas. Verify with Chrome touch emulation
 (`Emulation.setTouchEmulationEnabled`, `Input.dispatchTouchEvent`), but remember
 emulation is not iOS WebKit: confirm the real device too.
+
+For repository signoff artifacts, use the maintained handoff helper:
+
+```bash
+python scripts/widget_phone_handoff.py /tmp/quantem-widget-signoff
+```
+
+It serves the report directory on `0.0.0.0`, prints local and Tailscale URLs,
+and creates `phone-probe.html`. Open `phone-probe.html` on the physical phone
+from the same origin as the widget, then drag, pinch, tap, rotate, and scroll.
+The server writes `phone-events.ndjson` with viewport, scroll, pointer, touch,
+click, and WebGPU availability events. This does not automate Safari; it gives
+the human phone tester and the agent a shared event log for the real device.

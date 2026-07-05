@@ -39,6 +39,7 @@ STORY_IDS_BY_VARIANT = {
     "show3d-hidden-panel": ["S3D-04", "S3D-14"],
     "show3d-four-panel-downsample": ["S3D-14", "S3D-15", "S3D-16"],
     "show4dstem": ["S4D-01", "S4D-02", "S4D-03", "S4D-06", "S4D-09"],
+    "showfolder": ["SF-2", "SF-5", "SF-8"],
 }
 
 

@@ -45,6 +45,19 @@ touch Chromium viewport. It is a useful automated gate for width, wrapping,
 nonblank rendering, controls, and FPS. It is not a substitute for physical
 iPhone Safari testing when the user specifically asks for real device behavior.
 
+For physical phone handoff after a signoff run:
+
+```bash
+python scripts/widget_phone_handoff.py /tmp/quantem-widget-signoff
+```
+
+Open the printed URL on the phone, or use the printed `tailscale serve` command
+to serve the same report over HTTPS. The script also writes
+`phone-probe.html`, which records viewport, scroll, pointer, touch, click, and
+WebGPU availability events to `phone-events.ndjson` while the server is running.
+Use this for real iPhone Safari checks; keep the generated logs outside git
+unless a release explicitly needs them as evidence.
+
 Every signoff run writes a visual report directory. By default it uses:
 
 ```text
@@ -202,6 +215,7 @@ thresholds or failure wording, update those tests in the same commit.
 | `scripts/check_notebook_sizes.py` | Keep tutorial notebooks and embedded outputs clone-friendly. | Yes. | Notebook size policy changes. |
 | `scripts/widget_html_smoke.py` | Verify every export-capable widget writes standalone HTML state, a visual report, and a browser-drive plan. | Yes. | A widget adds/removes/changes HTML export support. |
 | `scripts/widget_browser_smoke.py` | Open generated HTML exports in Chromium, check nonblank canvas rendering, semantic controls, FPS, storyboard coverage, desktop/mobile viewport behavior, and save screenshots. | No, only `--browser`. | Exported widget browser behavior, interaction contracts, mobile layout expectations, FPS thresholds, or report format changes. |
+| `scripts/widget_phone_handoff.py` | Serve a signoff/report directory on `0.0.0.0`, print local/Tailscale URLs, and record physical phone viewport/touch probe logs. | No, manual physical-device handoff only. | Physical phone test workflow or Tailscale handoff expectations change. |
 | `scripts/widget_performance_smoke.py` | Record real-data Show2D/Show3D export timing, payload sizes, report HTML, and browser-drive plan. | No, only `--performance`. | Real-data performance expectations change. |
 | `scripts/docs_preview.sh` | Build and serve docs for local visual review. | No. | The docs build command or served path changes. |
 | `.github/workflows/widget-ci.yml` | Run the same local signoff on PRs and main pushes. | Yes, on matching GitHub events. | Local signoff dependencies or trigger paths change. |

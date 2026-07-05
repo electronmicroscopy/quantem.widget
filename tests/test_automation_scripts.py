@@ -119,6 +119,7 @@ def test_automation_documentation_names_entrypoints() -> None:
         "scripts/docs_preview.sh",
         "scripts/widget_html_smoke.py",
         "scripts/widget_browser_smoke.py",
+        "scripts/widget_phone_handoff.py",
         "scripts/widget_performance_smoke.py",
         "scripts/check_large_files.py",
         "scripts/check_notebook_sizes.py",
