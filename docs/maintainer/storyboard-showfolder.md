@@ -71,7 +71,30 @@ directory.
 - `cache="folder"` writes under `.quantem/showfolder-cache`.
 - `clear_cache()` removes the active manifest and thumbnail bundle.
 
-## SF-4: Select and Save
+## SF-4: Watch a Live Folder
+
+**User story**: A user is collecting or generating microscopy files while a
+notebook is open and wants ShowFolder to show new results without rerunning the
+cell or losing their current selection.
+
+**Primary widgets**: ShowFolder watcher, cache status banner, image gallery.
+
+**Data to use**: A real or real-derived folder where files can be copied in and
+removed during the test. Prefer lab data from MJ Go or another backend; keep
+the raw files outside the widget repository.
+
+**Acceptance checks**:
+
+- `ShowFolder(path).watch(interval=...)` inserts a visible status line.
+- Adding a file updates the already displayed browser in place.
+- The status line reports cached versus newly read files.
+- Existing stars/hidden panels are preserved when those files still exist.
+- Removing a file removes it from the browser, selection, and next cache
+  manifest so stale files are not retained in memory or cache state.
+- `watch_once()` performs one deterministic poll for tests and automation.
+- `stop_watch()` stops the background watcher before kernel shutdown.
+
+## SF-5: Select and Save
 
 **User story**: A user reviews a session, marks useful files, and saves the
 selection so analysis code can use the exact file list later.
@@ -91,7 +114,7 @@ should not be selected.
   loading.
 - Saved selections use file paths and metadata, not large image buffers.
 
-## SF-5: Open Selected Images Immediately
+## SF-6: Open Selected Images Immediately
 
 **User story**: A microscopist stars interesting images while browsing a folder
 and wants to inspect them immediately without remembering a second API or
@@ -116,7 +139,7 @@ commit those raw files to the widget repository.
 - The embedded viewers use cached thumbnail/preview data for immediate
   inspection and do not silently embed full-resolution raw acquisitions.
 
-## SF-6: Notebook and Documentation Behavior
+## SF-7: Notebook and Documentation Behavior
 
 **User story**: A user can trust the docs and notebooks without accidentally
 creating giant notebook files.
@@ -139,7 +162,7 @@ creating giant notebook files.
 - API docs point folder browsing to `ShowFolder`, not a separate `survey()`
   function.
 
-## SF-7: Export a Shareable Folder Browser
+## SF-8: Export a Shareable Folder Browser
 
 **User story**: A user finishes browsing a folder and wants to send a lightweight
 interactive browser to a collaborator without asking them to run a live kernel.
@@ -162,7 +185,7 @@ rows and calibrated scale bars.
 - Exported HTML uses the same public export convention as Show2D and Show3D,
   with `export_html(path=None, title=None)` returning the written path.
 
-## SF-8: Prebuild for High-Throughput Sessions
+## SF-9: Prebuild for High-Throughput Sessions
 
 **User story**: A user has a large session on a workstation or SSD-backed
 scratch path and wants the folder browser to open quickly during live analysis.

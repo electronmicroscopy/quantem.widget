@@ -35,6 +35,19 @@ prebuild_showfolder_cache("/data/session", thumb=256, cache_dir="/fast/ssd/cache
 w = ShowFolder("/data/session", thumb=256, cache_dir="/fast/ssd/cache")
 ```
 
+For folders that are still being written, start the watcher. It polls for new,
+changed, or removed files; reuses cached thumbnails for unchanged files; updates
+the displayed browser in place; and shows a small status line such as
+`2 cached · 1 read · 1 new`.
+
+```python
+w = ShowFolder("/data/live-session", thumb=256, cache_dir="/fast/ssd/cache")
+w.watch(interval=2.0)
+```
+
+Use `watch_once()` in scripts or tests when you want one deterministic poll,
+and `stop_watch()` before shutting down a long-running notebook kernel.
+
 If you do not pass a path, `ShowFolder()` displays a folder chooser first:
 
 ```python
