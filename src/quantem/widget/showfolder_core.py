@@ -498,9 +498,19 @@ class ShowFolderBrowser:
             dtype=dtype, scan_size=scan_size,
         )
         self._active_selected_modes = {"show4dstem"}
-        widget = self._apply_selected_show4dstem()
-        self._refresh_selected_viewers()
-        return widget
+        if getattr(self, "_selection_viewer_output", None) is not None:
+            self._refresh_selected_viewers()
+            return getattr(self, "_selected_show4dstem_widget", None)
+        return self._apply_selected_show4dstem()
+
+    def _release_selected_show4dstem_widget(self) -> None:
+        widget = getattr(self, "_selected_show4dstem_widget", None)
+        if widget is not None and hasattr(widget, "free"):
+            try:
+                widget.free()
+            except Exception:
+                pass
+        self._selected_show4dstem_widget = None
 
     def _apply_selected_show4dstem(self):
         """Build a paged multi-GPU Show4DSTEM over the folder's 4D masters."""
@@ -510,7 +520,13 @@ class ShowFolderBrowser:
         from quantem.widget.io import discover_masters, is_master_ready
 
         cfg = getattr(self, "_show4dstem_config", None) or {}
-        gpus = cfg.get("gpus") or [0]
+        gpus = cfg.get("gpus")
+        if isinstance(gpus, int):
+            gpus = [gpus]
+        elif gpus is not None:
+            gpus = list(gpus)
+            if not gpus:
+                raise ValueError("gpus must be None, an int, or a non-empty sequence of GPU ids.")
         det_bin = int(cfg.get("det_bin", 4))
         dtype = cfg.get("dtype", "u8")
         scan_size = cfg.get("scan_size")
@@ -519,6 +535,7 @@ class ShowFolderBrowser:
         scan_shape = (int(scan_size), int(scan_size)) if scan_size else None
         masters = discover_masters(str(self.folder), scan_shape=scan_shape, verbose=False)
         frames, names = [], []
+        self._release_selected_show4dstem_widget()
         for master in masters:
             # Skip half-written masters (missing sibling data files) so a live
             # acquisition folder does not crash the viewer mid-session.
@@ -530,10 +547,13 @@ class ShowFolderBrowser:
                 continue
             data = result.data
             tensor = data if isinstance(data, torch.Tensor) else torch.from_dlpack(data)
-            # Each dataset lands on its own card (round-robin) so N GPUs give N x
-            # capacity; page_budget then bounds how many are resident per card.
-            device = f"cuda:{gpus[len(frames) % len(gpus)]}"
-            frames.append(tensor.to(device))
+            if gpus is not None:
+                # Explicit GPU list: place datasets round-robin. Dataset5dstem
+                # remembers those devices before paging/offload, so later frame
+                # switches page each dataset back to its assigned card.
+                device = f"cuda:{gpus[len(frames) % len(gpus)]}"
+                tensor = tensor.to(device)
+            frames.append(tensor)
             stem = str(master).split("/")[-1]
             names.append(stem[:-len("_master.h5")] if stem.endswith("_master.h5") else stem)
         if not frames:

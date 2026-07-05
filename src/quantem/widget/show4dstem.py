@@ -582,7 +582,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             # can page (it owns the per-frame device list); a plain 5D tensor
             # can't be partially offloaded, so page_budget is ignored there.
             if page_budget is not None and is_dataset5dstem and self.n_frames > 1:
-                self._data.page(int(page_budget), device=self._device)
+                self._data.page(int(page_budget), device=None)
         else:
             self._data = torch.from_numpy(data_np).to(self._device)
             # Saturation filter: zero detector pixels at full-scale (65535 / 255).

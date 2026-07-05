@@ -401,18 +401,30 @@ class Dataset5dstem:
         self._reclaim(src)
 
     # --- auto-swap / out-of-core paging ---
-    def page(self, vram_frames: int, device=0) -> Self:
+    def page(self, vram_frames: int, device=None) -> Self:
         """Enable out-of-core paging: keep at most ``vram_frames`` frames resident in
         VRAM; the rest live in host RAM and are paged in on access via :meth:`frame`,
         evicting the least-recently-used VRAM frame when over budget.
 
         Lets you scrub or jointly reconstruct a series LARGER than VRAM — only the
         active window sits on the GPU. (RAM tier today; a disk tier for series bigger
-        than RAM is the next step.) Returns self.
+        than RAM is the next step.) ``device=None`` preserves each frame's current
+        device before offload, so a round-robin multi-GPU series pages frame ``i``
+        back to its original card. Pass one device to page every frame to the same
+        card, or a list/tuple to define a round-robin paging target. Returns self.
         """
-        self._materialize_frames()
+        frames = self._materialize_frames()
         self._page_budget = max(1, int(vram_frames))
-        self._page_device = self._as_device(device)
+        if device is None:
+            self._page_devices = [f.device for f in frames]
+        elif isinstance(device, (list, tuple)):
+            targets = [self._as_device(d) for d in device]
+            if not targets:
+                raise ValueError("device list for page() must not be empty.")
+            self._page_devices = [targets[i % len(targets)] for i in range(len(frames))]
+        else:
+            target = self._as_device(device)
+            self._page_devices = [target for _ in frames]
         self._lru: list[int] = []
         self.offload()  # start cold — everything in RAM, paged in on demand
         return self
@@ -426,13 +438,17 @@ class Dataset5dstem:
             return self[i]
         self._materialize_frames()
         if self._frames[i].device.type == "cpu":
-            self._frames[i] = self._frames[i].to(self._page_device)
+            page_devices = getattr(self, "_page_devices", None)
+            if not page_devices:
+                raise RuntimeError("Dataset5dstem paging was not initialized correctly.")
+            self._frames[i] = self._frames[i].to(page_devices[i % len(page_devices)])
         self._lru = [x for x in self._lru if x != i] + [i]  # most-recent last
         resident = [x for x in self._lru if self._frames[x].device.type != "cpu"]
         while len(resident) > self._page_budget:
             evict = resident.pop(0)  # least-recently-used
+            evict_device = self._frames[evict].device
             self._frames[evict] = self._frames[evict].to("cpu")
-            self._reclaim({self._page_device})
+            self._reclaim({evict_device})
         return self._frames[i]
 
     def vram_resident(self) -> list[int]:
