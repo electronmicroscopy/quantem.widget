@@ -554,12 +554,14 @@ class ShowFolderBrowser:
                 device = f"cuda:{gpus[len(frames) % len(gpus)]}"
                 tensor = tensor.to(device)
             frames.append(tensor)
+            del data, tensor, result
             stem = str(master).split("/")[-1]
             names.append(stem[:-len("_master.h5")] if stem.endswith("_master.h5") else stem)
         if not frames:
             self._selected_show4dstem_widget = None
             return None
         series = Dataset5dstem.from_frames(frames)
+        frames.clear()
         widget = Show4DSTEM(
             series,
             page_budget=page_budget,
