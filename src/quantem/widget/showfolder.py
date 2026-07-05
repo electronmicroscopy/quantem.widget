@@ -276,11 +276,14 @@ class ShowFolder:
 
         if self.path is None:
             raise ValueError("No folder path is selected.")
+        previous = self.browser
         new_browser = build_showfolder(self.path, **self.browser_kwargs)
         new_browser.apply_selection(
             selected_image_ids=selected_image_ids,
             hidden_image_ids=hidden_image_ids,
         )
+        if previous is not None:
+            new_browser.inherit_selected_viewers_from(previous)
         self._install_browser(new_browser)
 
     def _install_browser(self, new_browser: Any) -> None:

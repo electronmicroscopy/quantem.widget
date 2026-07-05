@@ -1107,6 +1107,83 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
         except (ValueError, KeyError):
             pass
 
+    def set_image(self, data, labels: list[str | None] | None = None) -> None:
+        """Replace the displayed image stack without rebuilding the widget.
+
+        This is the light-weight live-update path used by ShowFolder watched
+        selections. It preserves display controls such as colormap, contrast,
+        FFT/profile toggles, and gallery layout, while resetting per-panel state
+        tied to the previous image count or dimensions.
+        """
+        if hasattr(data, "array") and hasattr(data, "name") and hasattr(data, "sampling"):
+            data = data.array
+        data = to_numpy(data)
+        if data.ndim == 2:
+            data = data[np.newaxis, ...]
+        if data.ndim != 3:
+            raise ValueError(f"Show2D.set_image expects a 2D image or 3D stack, got {data.ndim}D")
+        if 0 in data.shape:
+            raise ValueError(f"Empty image stack: shape {data.shape}. All dims must be >= 1.")
+        if np.iscomplexobj(data):
+            raise TypeError(
+                "Show2D does not accept complex data. Convert first: "
+                "np.abs(arr) for magnitude or np.angle(arr) for phase."
+            )
+        data = np.asarray(data, dtype=np.float32)
+        if not np.isfinite(data).all():
+            raise ValueError(
+                "Data contains NaN or inf. Clean first: "
+                "np.nan_to_num(arr, nan=0, posinf=0, neginf=0)."
+            )
+
+        previous_shape = (int(self.n_images), int(self.height), int(self.width))
+        with self.hold_sync():
+            self._data = data
+            self._data_original = [self._data[i] for i in range(self._data.shape[0])]
+            self._originals_are_views = True
+            self._rgb_frames = [None] * int(data.shape[0])
+            self._display_rgb = self._rgb_frames
+            self.is_rgb = [False] * int(data.shape[0])
+            self.n_images = int(data.shape[0])
+            self.image_rotations = [0] * self.n_images
+            self.starred = [0] * self.n_images
+            self.hidden_panels = []
+            if labels is None:
+                self.labels = [f"Image {i + 1}" for i in range(self.n_images)]
+            else:
+                if len(labels) != self.n_images:
+                    raise ValueError(
+                        f"labels length ({len(labels)}) must match n_images ({self.n_images})"
+                    )
+                self.labels = ["" if label is None else str(label) for label in labels]
+            self.selected_idx = min(int(self.selected_idx), self.n_images - 1)
+            self.roi_list = []
+            self.roi_selected_idx = -1
+            self.profile_line = []
+            self._detail_request = ""
+            self._detail_meta = ""
+            self._detail_bytes = b""
+            self.vmins = None
+            self.vmaxs = None
+
+            self._display_bin = max(1, int(getattr(self, "_display_bin", 1)))
+            if self._display_bin > 1:
+                from quantem.widget.utils.array import bin2d
+
+                self._display_data = bin2d(self._data, factor=self._display_bin, mode="mean")
+            else:
+                self._display_data = self._data
+            display = self._display_data if self._display_data is not None else self._data
+            self.height = int(display.shape[1])
+            self.width = int(display.shape[2])
+            self._display_bin_factor = self._display_bin
+            if (self.n_images, self.height, self.width) != previous_shape:
+                self.view_box = []
+                self.zoom_row = None
+                self.zoom_col = None
+            self._compute_all_stats()
+            self._update_all_frames()
+
     def __repr__(self) -> str:
         if self.n_images > 1:
             shape = f"{self.n_images}×{self.height}×{self.width}"

@@ -161,3 +161,29 @@ def test_binned_preview_detail_request_returns_full_resolution_crop():
         mode="mean",
     )
     assert np.array_equal(actual, expected)
+
+
+def test_set_image_replaces_stack_in_place_and_resets_stale_view_state():
+    w = Show2D(np.zeros((2, 8, 8), dtype=np.float32), labels=["old 0", "old 1"], verbose=False)
+    w.view_box = [1.0, 4.0, 2.0, 5.0]
+    w._detail_meta = "stale"
+    w._detail_bytes = b"stale"
+
+    data = np.stack([
+        np.full((6, 6), 2.0, dtype=np.float32),
+        np.full((6, 6), 4.0, dtype=np.float32),
+        np.full((6, 6), 6.0, dtype=np.float32),
+    ])
+    w.set_image(data, labels=["new 0", "new 1", "new 2"])
+
+    assert w._data.shape == (3, 6, 6)
+    assert w.n_images == 3
+    assert w.height == 6
+    assert w.width == 6
+    assert w.labels == ["new 0", "new 1", "new 2"]
+    assert w.starred == [0, 0, 0]
+    assert w.hidden_panels == []
+    assert w.view_box == []
+    assert w._detail_meta == ""
+    assert w._detail_bytes == b""
+    assert w.stats_mean == [2.0, 4.0, 6.0]

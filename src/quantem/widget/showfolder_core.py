@@ -420,6 +420,66 @@ class ShowFolderBrowser:
                 widget.scale_bar_visible = False
         return widget
 
+    def inherit_selected_viewers_from(self, previous: "ShowFolderBrowser") -> None:
+        """Carry open selected Show2D/Show3D viewers across a browser rebuild."""
+        self._active_selected_modes = set(getattr(previous, "_active_selected_modes", set()))
+        self._selected_show2d_widget = getattr(previous, "_selected_show2d_widget", None)
+        self._selected_show3d_widget = getattr(previous, "_selected_show3d_widget", None)
+        self._refresh_selected_viewers()
+
+    def _apply_selected_show2d(self):
+        data, labels, pixel_sizes_out, pixel_unit = self._selected_preview_frames()
+        if data is None:
+            self._selected_show2d_widget = None
+            return None
+        widget = getattr(self, "_selected_show2d_widget", None)
+        if widget is not None and hasattr(widget, "set_image"):
+            widget.set_image(data, labels=labels)
+        else:
+            widget = self.show_selected()
+        if len(pixel_sizes_out) == data.shape[0] and hasattr(widget, "pixel_sizes"):
+            widget.pixel_sizes = pixel_sizes_out
+            widget.pixel_unit = pixel_unit
+        self._selected_show2d_widget = widget
+        return widget
+
+    def _apply_selected_show3d(self):
+        data, labels, pixel_sizes_out, pixel_unit = self._selected_preview_frames()
+        if data is None:
+            self._selected_show3d_widget = None
+            return None
+        widget = getattr(self, "_selected_show3d_widget", None)
+        if widget is not None and hasattr(widget, "set_image"):
+            widget.set_image(data, labels=labels)
+        else:
+            widget = self.show_selected_stack()
+        if len(pixel_sizes_out) == data.shape[0] and hasattr(widget, "pixel_size"):
+            first = float(pixel_sizes_out[0])
+            if all(math.isclose(first, float(size), rel_tol=1e-6, abs_tol=1e-12) for size in pixel_sizes_out):
+                widget.pixel_size = first
+                widget.pixel_unit = pixel_unit
+            else:
+                widget.scale_bar_visible = False
+        self._selected_show3d_widget = widget
+        return widget
+
+    def _refresh_selected_viewers(self) -> None:
+        output = getattr(self, "_selection_viewer_output", None)
+        modes = set(getattr(self, "_active_selected_modes", set()))
+        if output is None or not modes:
+            return
+        from IPython.display import display
+        from ipywidgets import HTML
+
+        output.clear_output(wait=True)
+        with output:
+            if "show2d" in modes:
+                widget = self._apply_selected_show2d()
+                display(widget if widget is not None else HTML("<p><b>No starred image panels yet.</b></p>"))
+            if "show3d" in modes:
+                widget = self._apply_selected_show3d()
+                display(widget if widget is not None else HTML("<p><b>No starred image panels yet.</b></p>"))
+
     def attach_selection_panel(self) -> Any:
         """Append the live curation panel below the ShowFolder widget."""
         from ipywidgets import Button, HBox, HTML, Output, VBox
@@ -456,20 +516,14 @@ class ShowFolderBrowser:
             _refresh()
 
         def _open_show2d(_=None):
-            from IPython.display import display
-
+            self._active_selected_modes = {"show2d"}
             _refresh()
-            viewer_output.clear_output(wait=True)
-            with viewer_output:
-                display(self.show_selected())
+            self._refresh_selected_viewers()
 
         def _open_show3d(_=None):
-            from IPython.display import display
-
+            self._active_selected_modes = {"show3d"}
             _refresh()
-            viewer_output.clear_output(wait=True)
-            with viewer_output:
-                display(self.show_selected_stack())
+            self._refresh_selected_viewers()
 
         refresh.on_click(_refresh)
         save.on_click(_save)
@@ -488,6 +542,9 @@ class ShowFolderBrowser:
         self._selection_summary = summary
         self._selection_output = output
         self._selection_viewer_output = viewer_output
+        self._active_selected_modes = set()
+        self._selected_show2d_widget = None
+        self._selected_show3d_widget = None
         for gallery, _ in self.image_galleries:
             gallery.observe(lambda _: self._refresh_selection_panel(), names="starred")
             gallery.observe(lambda _: self._refresh_selection_panel(), names="hidden_panels")
@@ -532,6 +589,7 @@ class ShowFolderBrowser:
             with output:
                 for item in selected_images:
                     print(f"{item.file_id}\timage\t{item.path.name}")
+        self._refresh_selected_viewers()
 
 
 def build_showfolder(
