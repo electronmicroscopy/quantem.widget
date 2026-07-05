@@ -6,11 +6,18 @@ read calibrated d-spacings, and calibrate k-space from a known reflection. See t
 [ShowDiffraction tutorial](../tutorials/showdiffraction) for a worked example.
 
 The primary phase workflow is candidate verification: you usually know which
-phases to expect, so build them (`Phase.from_cif`, `Phase.from_cubic`,
+phases to expect, so build them (`library_phase`, `Phase.from_cubic`,
 `Phase.from_dspacings`, or custom phases in the Phase menu) and rank only
 those with `identify_phase(candidates)` or the *candidates only* switch.
 `search_phases()` against the built-in library is the fallback for when you
 have no candidates in mind; narrow it with an element filter.
+
+Reference data sources: every lattice parameter in the built-in phase library
+(`PHASE_LIBRARY` in `crystal.py`) is a room-temperature value taken from a
+license-clean source cited next to the entry — NIST SRM certificates and NBS
+circulars/monographs (US public domain), the Crystallography Open Database
+(CC0), or the primary literature. No values come from proprietary compilations
+such as the ICDD PDF or Pearson's Handbook.
 
 ## Viewer UI
 
@@ -37,7 +44,7 @@ no console error, no NaN frame).
 | Colormap dropdown | `dp_colormap` | Pattern recolors to the chosen map |
 | Scale mode dropdown | `dp_scale_mode` | Intensity mapped linear / log / sqrt |
 | Invert toggle | `dp_invert` | Colormap reversed |
-| Contrast min / max sliders | `dp_vmin_pct`, `dp_vmax_pct` | Display clamp changes; histogram markers move |
+| Contrast histogram (dual-thumb slider) | `dp_vmin_pct`, `dp_vmax_pct` | Drag either thumb (mouse or touch) for a live preview; traits update once on release |
 | Center mode dropdown | `center_mode` | `auto` re-detects the BF disk; `manual` enables click-to-set |
 | Click to set center (manual) | `center_row`, `center_col` | Crosshair moves; spot d-spacings recompute |
 | Detect spots | `_detect_spots_request`, `spots` | Auto-finds every isolated peak with contrast at least 10% of the strongest (`min_relative`); no count cap |
@@ -70,6 +77,7 @@ no console error, no NaN frame).
 | Ring click in profile | `selected_ring_id` | Highlights the picked ring marker (0 clears) |
 | Frame slider (3D) | `frame_idx` | Scrubs to a different pattern in the stack |
 | Pan (drag) / zoom (wheel) | view transform | Pattern translates / zooms about the cursor |
+| Touch: two-finger pinch / drag, double-tap | view transform | Pinch zooms about the fingers, two-finger drag pans, double-tap resets the view |
 | Export → HTML | `export_request`, `export_payload` | Writes a standalone HTML viewer |
 
 ```{seealso}

@@ -843,34 +843,20 @@ def test_identify_phase_summary():
 
 
 def test_identify_phase_real_magnetite_summary():
-    pytest.importorskip("pymatgen")
     import pathlib
 
-    from pymatgen.core import Lattice, Structure
-
     from quantem.widget import showdiffraction
+    from quantem.widget.crystal import library_phase
 
     pat = np.load(pathlib.Path(showdiffraction.__file__).parent / "data" / "fe3o4_saed_512.npy")
     m = ShowDiffraction(pat, offline=True, verbose=False)
-    m.auto_detect_center()
-    m.detect_rings(max_rings=5, exclude_radius=40)
-    inner = min(m.rings, key=lambda r: r["radius_px"])
-    m.calibrate_from_ring(inner["radius_px"], d_known=2.532)  # external camera constant
-    mag = Structure.from_spacegroup(
-        227,
-        Lattice.cubic(8.3963),
-        ["Fe", "Fe", "O"],
-        [[0.125, 0.125, 0.125], [0.5, 0.5, 0.5], [0.2549, 0.2549, 0.2549]],
-    )
-    hem = Structure.from_spacegroup(
-        167,
-        Lattice.hexagonal(5.0356, 13.7489),
-        ["Fe", "O"],
-        [[0, 0, 0.3553], [0.3059, 0, 0.25]],
-    )
-    db = [Phase.from_structure(hem, name="Fe2O3"), Phase.from_structure(mag, name="Fe3O4")]
-    ranked = m.identify_phase(db)
+    m.phase_name = "Fe3O4"
+    m.run_auto(max_rings=5, exclude_radius=70)
+    names = ("Fe3O4", "γ-Fe2O3", "α-Fe2O3 (hematite)", "α-Fe")
+    ranked = m.identify_phase([library_phase(n) for n in names])
     assert ranked[0]["name"] == "Fe3O4"
+    # the maghemite/magnetite spinel pair is inseparable by ring positions
+    assert {r["name"] for r in ranked[:2]} == {"Fe3O4", "γ-Fe2O3"}
     assert "Fe3O4" in m.phase_match
 
 
@@ -1231,7 +1217,10 @@ def test_identify_request_ranks_library():
     assert len(w._identify_results) > 0
     assert w._identify_request is False
     ranked = w.identify_phase(w._all_phases())
-    assert {"Fe3O4", "γ-Fe2O3"} == {rep["name"] for rep in ranked[:2]}
+    assert ranked[0]["name"] == "Fe3O4"
+    # the a = 8.35-8.44 spinel family is near-degenerate on ring positions alone
+    spinels = {"Fe3O4", "CoFe2O4", "NiFe2O4", "ZnFe2O4", "γ-Fe2O3"}
+    assert {rep["name"] for rep in ranked[:5]} == spinels
 
 
 def test_search_phases_ranks_and_filters():
