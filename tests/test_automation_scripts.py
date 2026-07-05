@@ -117,6 +117,7 @@ def test_automation_documentation_names_entrypoints() -> None:
 
     for path in [
         "scripts/widget_local_signoff.sh",
+        "scripts/widget_signoff_dashboard.py",
         "scripts/docs_preview.sh",
         "scripts/cleanup_browser_artifacts.py",
         "scripts/widget_html_smoke.py",
@@ -124,6 +125,7 @@ def test_automation_documentation_names_entrypoints() -> None:
         "scripts/widget_phone_handoff.py",
         "scripts/widget_performance_smoke.py",
         "scripts/widget_heavy_perf_signoff.py",
+        "scripts/widget_show4dstem_heavy_signoff.py",
         "scripts/check_large_files.py",
         "scripts/check_notebook_sizes.py",
         ".github/workflows/widget-ci.yml",
@@ -142,9 +144,12 @@ def test_automation_documentation_names_entrypoints() -> None:
         "Definition Of Done",
         "Do Not Do This",
         "Report Artifacts",
+        "signoff-dashboard.json",
         "actions/upload-artifact",
+        "workflow_dispatch",
         "http://127.0.0.1:8779/index.html",
         "QUANTEM_WIDGET_REAL_DATA_ROOTS",
+        "QUANTEM_WIDGET_4DSTEM_ROOTS",
         "synthetic data for real-data performance claims",
         "final answer names the exact command and report path",
         "Do not run `pkill chrome`",
@@ -159,6 +164,44 @@ def test_ci_workflow_uploads_signoff_artifacts() -> None:
     assert "actions/upload-artifact@v4" in workflow
     assert "widget-ci-signoff" in workflow
     assert "if: always()" in workflow
+    assert "signoff_mode" in workflow
+    assert "inputs.browser" in workflow
+    assert "inputs.mobile" in workflow
+    assert "inputs.performance" in workflow
+
+
+def test_signoff_dashboard_summarizes_available_reports(tmp_path: Path) -> None:
+    artifact_dir = tmp_path / "signoff"
+    html_smoke = artifact_dir / "html-smoke"
+    html_smoke.mkdir(parents=True)
+    (artifact_dir / "signoff-manifest.json").write_text(
+        json.dumps({
+            "status": "pass",
+            "commit": "abc123",
+            "mode": "quick",
+            "browser_smoke": True,
+            "duration_seconds": 12,
+        }),
+        encoding="utf-8",
+    )
+    (html_smoke / "index.html").write_text("<html>matrix</html>", encoding="utf-8")
+    (html_smoke / "report.json").write_text(json.dumps({"exports": [{"widget": "show2d"}]}), encoding="utf-8")
+    (html_smoke / "browser-smoke.html").write_text("<html>browser</html>", encoding="utf-8")
+    (html_smoke / "browser-smoke-report.json").write_text(
+        json.dumps({"passed": 1, "pages": [{"passed": True}]}),
+        encoding="utf-8",
+    )
+
+    result = _run(sys.executable, "scripts/widget_signoff_dashboard.py", "--artifact-dir", str(artifact_dir))
+
+    assert result.returncode == 0, result.stdout
+    dashboard = (artifact_dir / "index.html").read_text(encoding="utf-8")
+    dashboard_json = json.loads((artifact_dir / "signoff-dashboard.json").read_text(encoding="utf-8"))
+    assert "quantem.widget signoff dashboard: PASS" in dashboard
+    assert "HTML export smoke" in dashboard
+    assert "Browser HTML smoke" in dashboard
+    assert "html-smoke/browser-smoke.html" in dashboard
+    assert dashboard_json["manifest"]["commit"] == "abc123"
 
 
 def test_maintained_automation_docs_use_generic_backend_names() -> None:
@@ -173,6 +216,7 @@ def test_maintained_automation_docs_use_generic_backend_names() -> None:
         ROOT / "js/show3d/index.tsx",
         ROOT / "scripts/widget_agent_signoff.sh",
         ROOT / "scripts/widget_heavy_perf_signoff.py",
+        ROOT / "scripts/widget_show4dstem_heavy_signoff.py",
         ROOT / "scripts/widget_performance_smoke.py",
     ]
 
@@ -243,6 +287,17 @@ def test_heavy_perf_signoff_help_documents_local_only_contract() -> None:
     assert "--skip-browser" in result.stdout
     assert "--min-fps" in result.stdout
     assert "--idle-seconds" in result.stdout
+
+
+def test_show4dstem_heavy_signoff_help_documents_local_only_contract() -> None:
+    result = _run(sys.executable, "scripts/widget_show4dstem_heavy_signoff.py", "--help")
+
+    assert result.returncode == 0, result.stdout
+    assert "local-only real-data Show4DSTEM heavy performance signoff" in result.stdout
+    assert "--skip-browser" in result.stdout
+    assert "--min-fps" in result.stdout
+    assert "--max-masters" in result.stdout
+    assert "--export-det-bin" in result.stdout
 
 
 def test_widget_html_smoke_writes_visual_report(tmp_path: Path) -> None:

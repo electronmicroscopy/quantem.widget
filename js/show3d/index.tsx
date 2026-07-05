@@ -6732,7 +6732,7 @@ function Show3D() {
     const srcH = grid ? grid.panelHeight : fftH;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.imageSmoothingEnabled = srcW < panelW || srcH < panelH;
-    visiblePanelIndices.forEach((panel, slot) => {
+    visiblePanelIndices.forEach((_panel, slot) => {
       if (slot >= count) return;
       const panelLeft = (slot % cols) * (panelW + gap);
       const panelTop = Math.floor(slot / cols) * (panelH + gap);

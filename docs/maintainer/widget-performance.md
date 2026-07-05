@@ -164,6 +164,28 @@ backend-specific cache cleanup utility if one exists, or restart the kernel. Do
 not add or test a misleading "free GPU" viewer button unless it explicitly
 reports backend ownership and delegates to a documented backend cleanup path.
 
+## Show4DSTEM heavy signoff
+
+The repeatable heavy Show4DSTEM proof is
+`scripts/widget_show4dstem_heavy_signoff.py`. It is local-only and must stay out
+of normal CI because it depends on real lab ``*_master.h5`` files and can
+generate private screenshots and HTML exports.
+
+The report must keep the same split as the policy above:
+
+- backend: real master discovery, first lazy MPS load, widget build time,
+  chunk count, chunk shapes, resident chunk memory, fast sidecar state, append
+  time for new masters, and Python/GPU memory before/after;
+- export: explicit ``uint8``/``uint16`` choice, detector bin factor, file size,
+  and packing time;
+- browser: WebGPU adapter information, virtual-detector drag FPS, scan-position
+  movement FPS, recompute latency, wheel-zoom FPS, console errors, and a
+  screenshot.
+
+`--skip-browser` is allowed only to debug backend or export failures. It is not
+a performance signoff because the user-facing requirement is smooth browser
+interaction.
+
 ## Heavy Show2D / Show3D audit
 
 Date: 2026-07-02
@@ -174,7 +196,8 @@ support. These are related but not identical contracts for Show2D and Show3D.
 
 Real-data stress input used for the audit:
 
-- Source: ``/Users/macbook/repos/arina-ptycho/results/res36mrad_33.3us_512rpx_tR1_192qpx_bQ8.npz``.
+- Source: local real ptychography reconstruction arrays from an ignored lab
+  data directory. Keep the exact private path out of shared documentation.
 - Show2D: eight real-derived 4096 x 4096 panels, tiled from ADF/SSB/WDD arrays
   to preserve real lattice/noise structure while stressing the browser path.
 - Show3D: twelve real-derived panels, 32 frames each, 2048 x 2048 native source

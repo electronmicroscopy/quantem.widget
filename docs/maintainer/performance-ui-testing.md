@@ -26,6 +26,7 @@ change needs them.
 | `scripts/widget_browser_smoke.py` | Exported HTML actually renders and responds in Chromium. | Nonblank canvases, wheel/drag interaction, switches, sliders, console/page/HTTP errors, `requestAnimationFrame` FPS, FFT state, storyboard IDs, optional mobile viewport. | `scripts/widget_local_signoff.sh --quick --browser`; add `--mobile` for narrow/touch layout changes. | `browser-smoke.html`, `browser-smoke-report.json`, screenshots. |
 | `scripts/widget_performance_smoke.py` | Backend export packing and small real-data Show2D/Show3D payloads are measurable. | Real-data discovery, export time, output size, browser-drive plan. | `--performance` signoff or when checking export size/time trends. | `index.html`, `report.json`, `browser-plan.json`, exported real-data HTML. |
 | `scripts/widget_heavy_perf_signoff.py` | Heavy Show2D/Show3D real-data browser performance is acceptable on lab data. | Local real-data discovery, heavy exports, browser FPS, nonblank render, screenshots, Show3D FFT overlay idle-cache guard. | Local-only HPC/workstation performance claims; never normal CI. | `index.html`, `heavy-signoff-report.json`, `browser-smoke-report.json`, screenshots under `/tmp`. |
+| `scripts/widget_show4dstem_heavy_signoff.py` | Heavy Show4DSTEM real-data loading, MPS chunking, append, export, and browser interaction are acceptable on lab data. | Local 4D-STEM master discovery, lazy MPS first-load timing, chunk/memory report, append timing, virtual-detector drag FPS, scan-position FPS, WebGPU/MPS split, GPU memory before/after. | Local-only Show4DSTEM performance claims; never normal CI. | `index.html`, `show4dstem-heavy-signoff-report.json`, exported Show4DSTEM HTML, browser screenshot under `/tmp`. |
 | `scripts/widget_phone_handoff.py` | A human can verify physical phone Safari behavior with shared logs. | Serves report on `0.0.0.0`, prints Tailscale/HTTPS handoff command, records viewport/touch/pointer/WebGPU events. | Physical iPhone/iPad checks after browser smoke, especially WebGPU or touch changes. | Served report, `phone-probe.html`, `phone-events.ndjson`. |
 | `scripts/widget_visual_signoff.sh` | Visual stories can be driven in Jupyter/browser before release. | Story-oriented widget drive packets, screenshots, selected release gates. | Broad UI or release-candidate work when a human/agent must drive real workflows. | Signoff packet/report under `/tmp` or configured artifact path. |
 | `scripts/widget_agent_signoff.sh` | Agent-driven story redrive is structured and auditable. | Story IDs, issue observed, fix made, redriven evidence. | Before release candidates or after interaction-heavy fixes. | Agent signoff report. |
@@ -286,3 +287,44 @@ not fully verified.
 This script is intentionally excluded from normal CI because it requires local
 real data and can produce large private artifacts. Keep those artifacts under
 `/tmp` or another ignored local directory.
+
+## Local Show4DSTEM Heavy Signoff
+
+Use this command when a change touches Show4DSTEM loading, chunking, lazy
+multi-master append, detector interaction, scan-position browsing, WebGPU
+browser drawing, or standalone HTML export:
+
+```bash
+PYTHONPATH=src:. python scripts/widget_show4dstem_heavy_signoff.py \
+  --search-root /path/to/local/real/4dstem/data \
+  --max-masters 2 \
+  --det-bin 4 \
+  --export-det-bin 4 \
+  --min-fps 30
+```
+
+By default it writes to:
+
+```text
+/tmp/quantem-widget-show4dstem-heavy-signoff/<timestamp>/
+```
+
+The Show4DSTEM signoff:
+
+- discovers local ready ``*_master.h5`` files without committing those paths,
+- measures lazy MPS first-master load time and widget build time,
+- records chunk count, chunk shapes, resident chunk memory, fast sidecar state,
+  and Python/GPU memory before and after each stage,
+- appends additional masters through the live ``LazyMacbookDatasets`` handle and
+  measures append latency,
+- exports standalone Show4DSTEM HTML with explicit ``uint8``/``uint16`` and
+  detector binning labels,
+- opens the export in Chromium, records browser WebGPU adapter information, and
+  measures virtual-detector drag FPS, scan-position movement FPS, wheel-zoom FPS,
+  and recompute latency,
+- writes `show4dstem-heavy-signoff-report.json` and `index.html`.
+
+Use `QUANTEM_WIDGET_4DSTEM_ROOTS` or `QUANTEM_WIDGET_REAL_DATA_ROOTS` to avoid
+hardcoding private data roots in commands. Use `--quick` only while iterating on
+the signoff script itself. Use `--skip-browser` only for backend/export
+debugging; it intentionally reports that UI performance was not fully verified.

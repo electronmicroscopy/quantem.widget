@@ -25,6 +25,31 @@ on:
       - "package.json"
       - "pyproject.toml"
   workflow_dispatch:
+    inputs:
+      signoff_mode:
+        description: "Local signoff mode"
+        type: choice
+        default: default
+        options:
+          - default
+          - quick
+          - full
+      browser:
+        description: "Run exported HTML browser smoke"
+        type: boolean
+        default: false
+      mobile:
+        description: "Run 390x844 mobile Chromium pre-check with browser smoke"
+        type: boolean
+        default: false
+      performance:
+        description: "Run real-data export performance smoke"
+        type: boolean
+        default: false
+      skip_docs:
+        description: "Skip documentation build"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -60,7 +85,27 @@ jobs:
         run: npm ci
 
       - name: Run local signoff
-        run: scripts/widget_local_signoff.sh --artifact-dir /tmp/quantem-widget-ci-signoff
+        run: |
+          args=(--artifact-dir /tmp/quantem-widget-ci-signoff)
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            case "${{ inputs.signoff_mode }}" in
+              quick) args+=(--quick) ;;
+              full) args+=(--full) ;;
+            esac
+            if [[ "${{ inputs.browser }}" == "true" || "${{ inputs.mobile }}" == "true" ]]; then
+              args+=(--browser)
+            fi
+            if [[ "${{ inputs.mobile }}" == "true" ]]; then
+              args+=(--mobile)
+            fi
+            if [[ "${{ inputs.performance }}" == "true" ]]; then
+              args+=(--performance)
+            fi
+            if [[ "${{ inputs.skip_docs }}" == "true" ]]; then
+              args+=(--skip-docs)
+            fi
+          fi
+          scripts/widget_local_signoff.sh "${args[@]}"
 
       - name: Upload signoff report
         if: always()

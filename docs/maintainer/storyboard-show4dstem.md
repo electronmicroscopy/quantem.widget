@@ -341,3 +341,34 @@ ignored until ready.
   contrast after an append to confirm the active viewer remains real time.
 - Record load/append timing, backend path, detector bin, dtype, scan size, and
   GPU memory behavior in the signoff report.
+
+### S4D-15: Sign Off Real Heavy 4D-STEM Performance
+
+**User story**: As a microscopist deciding whether Show4DSTEM is ready for a
+real acquisition session, I want one report that proves the viewer loads a
+large master quickly, chunks memory safely, appends new masters, and stays
+interactive in the browser.
+
+**Primary widgets**: Show4DSTEM with the lazy MPS multi-dataset handle and
+standalone exported HTML.
+
+**Data to use**: local real ``*_master.h5`` files from a lab workstation or
+HPC-backed acquisition folder. Do not commit these files or their generated
+HTML reports to GitHub.
+
+**Acceptance checks**:
+
+- Run ``PYTHONPATH=src:. python scripts/widget_show4dstem_heavy_signoff.py``
+  with an explicit local real-data root or ``QUANTEM_WIDGET_4DSTEM_ROOTS``.
+- Verify first-master load time, widget build time, chunk count, chunk shapes,
+  resident chunk memory, fast sidecar state, and GPU memory before/after are in
+  ``show4dstem-heavy-signoff-report.json``.
+- Verify at least one additional ready master appends through the live handle
+  without rebuilding the viewer when the dataset is available.
+- Verify standalone HTML export records explicit ``uint8``/``uint16`` and
+  detector-bin settings, output size, and export time.
+- Drive the exported HTML in Chromium and verify WebGPU/browser information,
+  virtual-detector drag FPS, scan-position drag FPS, recompute latency, and
+  wheel-zoom FPS are recorded.
+- Treat ``--skip-browser`` as backend/export debugging only, not performance
+  signoff.
