@@ -469,6 +469,87 @@ class ShowFolderBrowser:
         self._selected_show3d_widget = widget
         return widget
 
+    def open_show4dstem(self, *, gpus=None, page_budget=None, det_bin=4,
+                        dtype="u8", scan_size=None):
+        """Render every 4D-STEM master in this folder as ONE Show4DSTEM.
+
+        The masters are discovered in :attr:`folder`, loaded round-robin across
+        ``gpus`` (each dataset on its own card), and presented behind the
+        Show4DSTEM dataset slider. ``page_budget`` caps how many datasets stay
+        resident in VRAM: sliding to a new dataset pages it onto the GPU and
+        evicts the least-recently-used one to RAM, so a 40-master folder does
+        not fill VRAM. ``None`` keeps every dataset resident (instant switch,
+        only for folders that fit).
+
+        Parameters
+        ----------
+        gpus : list[int] or None
+            Cards to spread the datasets across (round-robin). ``None`` = the
+            current device.
+        page_budget : int or None
+            Max datasets resident in VRAM at once. ``None`` = all resident.
+        det_bin, dtype, scan_size
+            Forwarded to :func:`load` / :func:`discover_masters` — bin the
+            detector, pick the browse dtype, and (optionally) keep only masters
+            of a given ``scan_size`` in a mixed folder.
+        """
+        self._show4dstem_config = dict(
+            gpus=gpus, page_budget=page_budget, det_bin=det_bin,
+            dtype=dtype, scan_size=scan_size,
+        )
+        self._active_selected_modes = {"show4dstem"}
+        widget = self._apply_selected_show4dstem()
+        self._refresh_selected_viewers()
+        return widget
+
+    def _apply_selected_show4dstem(self):
+        """Build a paged multi-GPU Show4DSTEM over the folder's 4D masters."""
+        import torch
+        from quantem.widget import Show4DSTEM, load
+        from quantem.widget.data import Dataset5dstem
+        from quantem.widget.io import discover_masters, is_master_ready
+
+        cfg = getattr(self, "_show4dstem_config", None) or {}
+        gpus = cfg.get("gpus") or [0]
+        det_bin = int(cfg.get("det_bin", 4))
+        dtype = cfg.get("dtype", "u8")
+        scan_size = cfg.get("scan_size")
+        page_budget = cfg.get("page_budget")
+
+        scan_shape = (int(scan_size), int(scan_size)) if scan_size else None
+        masters = discover_masters(str(self.folder), scan_shape=scan_shape, verbose=False)
+        frames, names = [], []
+        for master in masters:
+            # Skip half-written masters (missing sibling data files) so a live
+            # acquisition folder does not crash the viewer mid-session.
+            if not is_master_ready(master):
+                continue
+            try:
+                result = load(master, det_bin=det_bin, dtype=dtype, verbose=False)
+            except (FileNotFoundError, ValueError, RuntimeError):
+                continue
+            data = result.data
+            tensor = data if isinstance(data, torch.Tensor) else torch.from_dlpack(data)
+            # Each dataset lands on its own card (round-robin) so N GPUs give N x
+            # capacity; page_budget then bounds how many are resident per card.
+            device = f"cuda:{gpus[len(frames) % len(gpus)]}"
+            frames.append(tensor.to(device))
+            stem = str(master).split("/")[-1]
+            names.append(stem[:-len("_master.h5")] if stem.endswith("_master.h5") else stem)
+        if not frames:
+            self._selected_show4dstem_widget = None
+            return None
+        series = Dataset5dstem.from_frames(frames)
+        widget = Show4DSTEM(
+            series,
+            page_budget=page_budget,
+            frame_dim_label="Dataset",
+            frame_labels=names,
+            verbose=False,
+        )
+        self._selected_show4dstem_widget = widget
+        return widget
+
     def _refresh_selected_viewers(self) -> None:
         output = getattr(self, "_selection_viewer_output", None)
         modes = set(getattr(self, "_active_selected_modes", set()))
@@ -485,6 +566,9 @@ class ShowFolderBrowser:
             if "show3d" in modes:
                 widget = self._apply_selected_show3d()
                 display(widget if widget is not None else HTML("<p><b>No starred image panels yet.</b></p>"))
+            if "show4dstem" in modes:
+                widget = self._apply_selected_show4dstem()
+                display(widget if widget is not None else HTML("<p><b>No 4D-STEM masters (*_master.h5) in this folder.</b></p>"))
 
     def attach_selection_panel(self) -> Any:
         """Append the live curation panel below the ShowFolder widget."""
@@ -498,6 +582,8 @@ class ShowFolderBrowser:
         open_show2d = Button(description="Open Show2D", tooltip="Render starred images below")
         open_show3d = Button(description="Open Show3D", tooltip="Render starred images as a frame stack below")
         open_both = Button(description="Open both", tooltip="Render starred images as Show2D and Show3D below")
+        open_show4dstem = Button(description="Open Show4DSTEM",
+                                 tooltip="Load every *_master.h5 in this folder into one Show4DSTEM (paged VRAM)")
         hide = Button(description="Show starred only", tooltip="Hide unstarred image panels")
         show_all = Button(description="Show all images", tooltip="Restore hidden image panels")
 
@@ -534,17 +620,28 @@ class ShowFolderBrowser:
             self._active_selected_modes = {"show2d", "show3d"}
             _refresh()
 
+        def _open_show4dstem(_=None):
+            # Cap residency at the GPU count so switching datasets evicts the LRU
+            # instead of filling VRAM. Config can be overridden by calling
+            # open_show4dstem(...) directly.
+            self._show4dstem_config = getattr(self, "_show4dstem_config", None) or dict(
+                gpus=None, page_budget=1, det_bin=4, dtype="u8", scan_size=None,
+            )
+            self._active_selected_modes = {"show4dstem"}
+            _refresh()
+
         refresh.on_click(_refresh)
         save.on_click(_save)
         open_show2d.on_click(_open_show2d)
         open_show3d.on_click(_open_show3d)
         open_both.on_click(_open_both)
+        open_show4dstem.on_click(_open_show4dstem)
         hide.on_click(_hide)
         show_all.on_click(_show_all)
         panel = VBox([
             HTML("<h3 style=\"margin:12px 0 6px 0\">Selected for downstream analysis</h3>"),
             summary,
-            HBox([refresh, save, open_show2d, open_show3d, open_both, hide, show_all]),
+            HBox([refresh, save, open_show2d, open_show3d, open_both, open_show4dstem, hide, show_all]),
             output,
             viewer_output,
         ])
