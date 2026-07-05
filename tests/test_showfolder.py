@@ -73,6 +73,27 @@ def test_show_folder_save_and_load_selection(tmp_path: Path) -> None:
     assert [item.file_id for item in restored.selected("image")] == ["0010"]
 
 
+def test_show_folder_opens_selected_images_as_show2d_and_show3d(tmp_path: Path) -> None:
+    _image_emd(tmp_path / "0010 - HAADF 15Mx Nano.emd")
+    _image_emd(tmp_path / "0011 - HAADF 15Mx Nano.emd")
+    _image_emd(tmp_path / "0012 - HAADF 15Mx Nano.emd")
+
+    widget = ShowFolder(tmp_path, thumb=8, group_by="none")
+    assert widget.browser is not None
+    assert widget.browser.gallery is not None
+    widget.browser.gallery.set_starred_panels([0, 2])
+
+    selected_2d = widget.show_selected()
+    selected_3d = widget.show_selected_stack()
+
+    assert selected_2d.__class__.__name__ == "Show2D"
+    assert selected_3d.__class__.__name__ == "Show3D"
+    assert selected_2d._data.shape[0] == 2
+    assert selected_3d.n_slices == 2
+    assert [label.split(" | ", 1)[0] for label in selected_2d.labels] == ["0010", "0012"]
+    assert [label.split(" | ", 1)[0] for label in selected_3d.labels] == ["0010", "0012"]
+
+
 def test_show_folder_reuses_thumbnail_cache(tmp_path: Path, monkeypatch) -> None:
     _image_emd(tmp_path / "0010 - HAADF 15Mx Nano.emd")
     _image_emd(tmp_path / "0011 - HAADF 15Mx Nano.emd")

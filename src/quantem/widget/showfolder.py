@@ -132,6 +132,18 @@ class ShowFolder:
             raise ValueError("No folder has been browsed yet.")
         return self.browser.export_html(path, title=title)
 
+    def show_selected(self):
+        """Return a Show2D gallery containing the currently starred images."""
+        if self.browser is None:
+            raise ValueError("No folder has been browsed yet.")
+        return self.browser.show_selected()
+
+    def show_selected_stack(self):
+        """Return currently starred images as a Show3D frame stack."""
+        if self.browser is None:
+            raise ValueError("No folder has been browsed yet.")
+        return self.browser.show_selected_stack()
+
     def refresh(self, path: str | Path | None = None) -> "ShowFolder":
         """Run or rerun the microscopy folder browser."""
         from quantem.widget.showfolder_core import build_showfolder

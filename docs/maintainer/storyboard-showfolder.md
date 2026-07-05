@@ -91,7 +91,32 @@ should not be selected.
   loading.
 - Saved selections use file paths and metadata, not large image buffers.
 
-## SF-5: Notebook and Documentation Behavior
+## SF-5: Open Selected Images Immediately
+
+**User story**: A microscopist stars interesting images while browsing a folder
+and wants to inspect them immediately without remembering a second API or
+rewriting notebook boilerplate.
+
+**Primary widgets**: ShowFolder selection panel, Show2D, Show3D.
+
+**Data to use**: A real or real-derived microscopy folder with at least three
+calibrated image files. Prefer files from MJ Go or another lab backend; do not
+commit those raw files to the widget repository.
+
+**Acceptance checks**:
+
+- Starred images appear in the selection summary in acquisition order.
+- `Open Show2D` renders a compact Show2D gallery below ShowFolder.
+- `Open Show3D` renders the same starred images as a frame stack below
+  ShowFolder.
+- The explicit Python methods `show_selected()` and `show_selected_stack()`
+  return the same widgets for notebook authors who prefer code.
+- Scale bars and labels are preserved when all selected previews share a
+  compatible calibration.
+- The embedded viewers use cached thumbnail/preview data for immediate
+  inspection and do not silently embed full-resolution raw acquisitions.
+
+## SF-6: Notebook and Documentation Behavior
 
 **User story**: A user can trust the docs and notebooks without accidentally
 creating giant notebook files.
@@ -111,8 +136,10 @@ creating giant notebook files.
   before static conversion.
 - Agent signoff says whether browser testing used JupyterLab, exported HTML, or
   a static report.
+- API docs point folder browsing to `ShowFolder`, not a separate `survey()`
+  function.
 
-## SF-6: Export a Shareable Folder Browser
+## SF-7: Export a Shareable Folder Browser
 
 **User story**: A user finishes browsing a folder and wants to send a lightweight
 interactive browser to a collaborator without asking them to run a live kernel.
@@ -135,7 +162,7 @@ rows and calibrated scale bars.
 - Exported HTML uses the same public export convention as Show2D and Show3D,
   with `export_html(path=None, title=None)` returning the written path.
 
-## SF-7: Prebuild for High-Throughput Sessions
+## SF-8: Prebuild for High-Throughput Sessions
 
 **User story**: A user has a large session on a workstation or SSD-backed
 scratch path and wants the folder browser to open quickly during live analysis.

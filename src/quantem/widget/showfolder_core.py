@@ -312,14 +312,10 @@ class ShowFolderBrowser:
         self._refresh_selection_panel()
         return self
 
-    def show_selected(self):
-        """Return a compact Show2D gallery containing only starred image panels."""
-        from ipywidgets import HTML
-        from quantem.widget import Show2D
-
+    def _selected_preview_frames(self) -> tuple[np.ndarray | None, list[str], list[float], str]:
         selected = self.selected_image_items()
         if not selected:
-            return HTML("<p><b>No starred image panels yet.</b></p>")
+            return None, [], [], "pixels"
         frames = []
         labels = []
         pixel_sizes_out = []
@@ -341,29 +337,77 @@ class ShowFolderBrowser:
                             pixel_sizes_out.append(pixel_sizes[idx])
                             pixel_unit = getattr(gallery, "pixel_unit", "pixels")
                     break
+        if not frames:
+            return None, [], [], "pixels"
         data = np.stack(frames).astype(np.float32, copy=False)
+        return data, labels, pixel_sizes_out, pixel_unit
+
+    def show_selected(self):
+        """Return a compact Show2D gallery containing only starred image panels."""
+        from ipywidgets import HTML
+        from quantem.widget import Show2D
+
+        data, labels, pixel_sizes_out, pixel_unit = self._selected_preview_frames()
+        if data is None:
+            return HTML("<p><b>No starred image panels yet.</b></p>")
         source_gallery = self.gallery
         widget = Show2D(
             data,
             labels=labels,
-            title="Selected survey images",
+            title="Selected ShowFolder images",
             gallery_gap_px=getattr(source_gallery, "gallery_gap_px", 2),
             panel_title_font_size=getattr(source_gallery, "panel_title_font_size", 9),
             save_state=False,
         )
-        if len(pixel_sizes_out) == len(frames):
+        if len(pixel_sizes_out) == data.shape[0]:
             widget.pixel_sizes = pixel_sizes_out
             widget.pixel_unit = pixel_unit
         return widget
 
+    def show_selected_stack(self):
+        """Return starred image panels as a Show3D frame stack."""
+        from ipywidgets import HTML
+        from quantem.widget import Show3D
+
+        data, labels, pixel_sizes_out, pixel_unit = self._selected_preview_frames()
+        if data is None:
+            return HTML("<p><b>No starred image panels yet.</b></p>")
+        widget = Show3D(
+            data,
+            labels=labels,
+            title="Selected ShowFolder stack",
+            cmap="inferno",
+            smooth=False,
+            show_controls=True,
+            show_stats=True,
+            show_fft=False,
+            dim_label="Selected image",
+            panel_width_px=420,
+            panel_title_font_size=10,
+            panel_gap=4,
+            show_panel_titles=True,
+            save_state=False,
+        )
+        if len(pixel_sizes_out) == data.shape[0]:
+            first = float(pixel_sizes_out[0])
+            if all(math.isclose(first, float(size), rel_tol=1e-6, abs_tol=1e-12) for size in pixel_sizes_out):
+                widget.pixel_size = first
+                widget.pixel_unit = pixel_unit
+            else:
+                widget.scale_bar_visible = False
+        return widget
+
     def attach_selection_panel(self) -> Any:
-        """Append the live curation panel below the survey widget."""
+        """Append the live curation panel below the ShowFolder widget."""
         from ipywidgets import Button, HBox, HTML, Output, VBox
 
         summary = HTML()
         output = Output()
+        viewer_output = Output()
         refresh = Button(description="Refresh selection", tooltip="Read current stars/checks")
         save = Button(description="Save selection", tooltip=f"Write {self.selection_file.name}")
+        open_show2d = Button(description="Open Show2D", tooltip="Render starred images below")
+        open_show3d = Button(description="Open Show3D", tooltip="Render starred images as a frame stack below")
         hide = Button(description="Show starred only", tooltip="Hide unstarred image panels")
         show_all = Button(description="Show all images", tooltip="Restore hidden image panels")
 
@@ -388,19 +432,39 @@ class ShowFolderBrowser:
             self.show_all_images()
             _refresh()
 
+        def _open_show2d(_=None):
+            from IPython.display import display
+
+            _refresh()
+            viewer_output.clear_output(wait=True)
+            with viewer_output:
+                display(self.show_selected())
+
+        def _open_show3d(_=None):
+            from IPython.display import display
+
+            _refresh()
+            viewer_output.clear_output(wait=True)
+            with viewer_output:
+                display(self.show_selected_stack())
+
         refresh.on_click(_refresh)
         save.on_click(_save)
+        open_show2d.on_click(_open_show2d)
+        open_show3d.on_click(_open_show3d)
         hide.on_click(_hide)
         show_all.on_click(_show_all)
         panel = VBox([
             HTML("<h3 style=\"margin:12px 0 6px 0\">Selected for downstream analysis</h3>"),
             summary,
-            HBox([refresh, save, hide, show_all]),
+            HBox([refresh, save, open_show2d, open_show3d, hide, show_all]),
             output,
+            viewer_output,
         ])
         self.selection_panel = panel
         self._selection_summary = summary
         self._selection_output = output
+        self._selection_viewer_output = viewer_output
         for gallery, _ in self.image_galleries:
             gallery.observe(lambda _: self._refresh_selection_panel(), names="starred")
             gallery.observe(lambda _: self._refresh_selection_panel(), names="hidden_panels")

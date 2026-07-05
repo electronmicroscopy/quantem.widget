@@ -42,10 +42,6 @@ _HUB_EXPORTS = {
     "status",
 }
 
-# Look-before-you-load folder survey (header-only memory/completeness report).
-# Import-light: reads HDF5 headers only, never pixel data.
-_SURVEY_EXPORTS = {"survey"}
-
 # 2D image reader (Velox EMD HAADF / .npy) - separate from the 4D-STEM loader.
 _IMAGE_EXPORTS = {"read_gif", "read_image", "read_image_stack", "read_images"}
 
@@ -90,7 +86,6 @@ __all__ = [
     "read_pixel_mask",
     "save",
     "status",
-    "survey",
     "upload",
     "wait_for_saves",
     "__version__",
@@ -105,11 +100,6 @@ def __getattr__(name: str):
         return value
     if name in _HUB_EXPORTS:
         module = import_module("quantem.widget.io.hub")
-        value = getattr(module, name)
-        globals()[name] = value
-        return value
-    if name in _SURVEY_EXPORTS:
-        module = import_module("quantem.widget.io.survey")
         value = getattr(module, name)
         globals()[name] = value
         return value

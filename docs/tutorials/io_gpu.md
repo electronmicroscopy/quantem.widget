@@ -4,11 +4,12 @@ Use this page when you have microscope data on disk and want to open it without
 wasting memory. The basic workflow is:
 
 ```python
-from quantem.widget import load, Show4DSTEM
-from quantem.widget.io import survey
+from quantem.widget import ShowFolder, load, Show4DSTEM
+from quantem.widget.io import discover_masters
 
-survey("/data/session")        # inspect first; no pixel data loaded
-data = load("scan_master.h5")  # full precision when it fits
+folder = ShowFolder("/data/session")  # browse thumbnails, cache, star files
+masters = discover_masters("/data/session")
+data = load(masters[0])               # full precision when it fits
 Show4DSTEM(data)
 ```
 
@@ -72,16 +73,20 @@ Leave a few GB free for the viewer, browser, and downstream processing.
 
 ## Inspect before loading
 
-Use `survey` to inspect a folder before allocating memory:
+Use `ShowFolder` to inspect microscopy folders before allocating memory. It
+builds cached thumbnails, shows image metadata, lets you star files for
+downstream analysis, and can open the starred images immediately as Show2D or
+Show3D from the embedded selection panel.
 
 ```python
-from quantem.widget.io import survey
+from quantem.widget import ShowFolder
 
-survey("/data/session")
+folder = ShowFolder("/data/session")
+folder.paths("image")  # selected files after you star panels
 ```
 
-It reports scan size, detector size, dtype, completeness, and memory estimates.
-If the folder contains many scans, filter before loading:
+For 4D-STEM master files, use `discover_masters` to collect the candidate HDF5
+masters before loading:
 
 ```python
 from quantem.widget.io import discover_masters

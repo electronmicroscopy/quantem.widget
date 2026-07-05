@@ -14,7 +14,8 @@ decoded); ``Show4DSTEM(handle)`` builds the viewer and starts the background
 fill. One dedicated worker owns every Metal decode (the command queue is serial
 - one owner is the safe + correct model). Memory is the same as loading all
 upfront (~1.2 GB each at bin4); lazy hides the TIME, not the footprint. Run
-``io.survey(folder)`` first to confirm it all fits.
+``discover_masters(folder)`` and inspect representative metadata before loading
+the full stack.
 
 CUDA / CPU never reach this module: ``load([...])`` eager-stacks into one 5D
 array there (big VRAM, instant dataset switch). Only MPS is lazy.
