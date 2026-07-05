@@ -42,10 +42,6 @@ test = [
     "pytest>=8",
     "nbconvert>=7",
 ]
-# Structure/CIF-backed phase identification: ShowDiffraction.identify_phase and
-# Phase.from_cif / from_structure compute reference d-I cards from real crystal
-# structures. Soft-imported, so the base install stays lean.
-phaseid = ["pymatgen>=2024.1.1"]
 
 [project.scripts]
 quantem = "quantem.widget.cli:main"

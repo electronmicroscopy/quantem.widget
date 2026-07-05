@@ -138,6 +138,45 @@ function calibrationSourceLabel(source: string): string {
   return labels[source] ?? source;
 }
 
+// Mobile viewport
+function useMobileViewport(): boolean {
+  const getIsMobile = React.useCallback(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
+      return false;
+    }
+    return window.matchMedia("(pointer: coarse)").matches || window.matchMedia("(max-width: 768px)").matches;
+  }, []);
+  const [isMobile, setIsMobile] = React.useState(getIsMobile);
+
+  React.useEffect(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
+      return;
+    }
+    const coarsePointer = window.matchMedia("(pointer: coarse)");
+    const narrowViewport = window.matchMedia("(max-width: 768px)");
+    const update = () => setIsMobile(getIsMobile());
+    const addQueryListener = (query: MediaQueryList) => {
+      if (typeof query.addEventListener === "function") query.addEventListener("change", update);
+      else query.addListener(update);
+    };
+    const removeQueryListener = (query: MediaQueryList) => {
+      if (typeof query.removeEventListener === "function") query.removeEventListener("change", update);
+      else query.removeListener(update);
+    };
+    update();
+    addQueryListener(coarsePointer);
+    addQueryListener(narrowViewport);
+    window.addEventListener("resize", update);
+    return () => {
+      removeQueryListener(coarsePointer);
+      removeQueryListener(narrowViewport);
+      window.removeEventListener("resize", update);
+    };
+  }, [getIsMobile]);
+
+  return isMobile;
+}
+
 // Contrast histogram
 
 interface HistogramProps {
@@ -145,69 +184,210 @@ interface HistogramProps {
   vminPct: number;
   vmaxPct: number;
   onRangeChange: (min: number, max: number) => void;
+  onRangePreview?: (min: number, max: number) => void;
+  onRangeCommit?: (min: number, max: number) => void;
   width?: number;
   height?: number;
   theme?: "light" | "dark";
+  dataMin?: number;
+  dataMax?: number;
 }
 
-function Histogram({ data, vminPct, vmaxPct, onRangeChange, width = 110, height = 50, theme = "dark" }: HistogramProps) {
+function Histogram({ data, vminPct, vmaxPct, onRangeChange, onRangePreview, onRangeCommit, width = 110, height = 50, theme = "dark", dataMin = 0, dataMax = 1 }: HistogramProps) {
   const canvasRef = React.useRef<HTMLCanvasElement>(null);
-  const bins = React.useMemo(() => data ? computeHistogramFromBytes(data) : null, [data]);
-  const draggingRef = React.useRef<"left" | "right" | null>(null);
+  const sliderRef = React.useRef<HTMLDivElement | null>(null);
+  const minLabelRef = React.useRef<HTMLElement | null>(null);
+  const maxLabelRef = React.useRef<HTMLElement | null>(null);
+  const onRangeChangeRef = React.useRef(onRangeChange);
+  const onRangePreviewRef = React.useRef(onRangePreview);
+  const onRangeCommitRef = React.useRef(onRangeCommit);
+  const pendingRangeRef = React.useRef<[number, number] | null>(null);
+  const rangeRafRef = React.useRef<number | null>(null);
+  const [liveRange, setLiveRange] = React.useState<[number, number]>([vminPct, vmaxPct]);
+  React.useEffect(() => { setLiveRange([vminPct, vmaxPct]); }, [vminPct, vmaxPct]);
+  const [liveVminPct, liveVmaxPct] = liveRange;
+  const bins = React.useMemo(() => data ? computeHistogramFromBytes(data) : new Array(256).fill(0), [data]);
   const isDark = theme === "dark";
+  const colors = isDark
+    ? { bg: "#1a1a2e", barActive: "#888", barInactive: "#444", border: "#333" }
+    : { bg: "#f0f0f0", barActive: "#666", barInactive: "#bbb", border: "#ccc" };
 
-  React.useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas || !bins) return;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-    ctx.clearRect(0, 0, width, height);
-    ctx.fillStyle = isDark ? "#1a1a2e" : "#f0f0f0";
-    ctx.fillRect(0, 0, width, height);
-    const maxBin = Math.max(...Array.from(bins));
-    if (maxBin > 0) {
-      ctx.fillStyle = isDark ? "#555" : "#999";
-      for (let i = 0; i < bins.length; i++) {
-        const x = (i / bins.length) * width;
-        const bw = width / bins.length;
-        const bh = (bins[i] / maxBin) * height;
-        ctx.fillRect(x, height - bh, bw, bh);
-      }
-    }
-    const lx = (vminPct / 100) * width;
-    const rx = (vmaxPct / 100) * width;
-    ctx.fillStyle = isDark ? "rgba(0,0,0,0.5)" : "rgba(0,0,0,0.2)";
-    ctx.fillRect(0, 0, lx, height);
-    ctx.fillRect(rx, 0, width - rx, height);
-    ctx.fillStyle = isDark ? "#4fc3f7" : "#1976d2";
-    ctx.fillRect(lx - 1, 0, 3, height);
-    ctx.fillRect(rx - 1, 0, 3, height);
-  }, [bins, vminPct, vmaxPct, width, height, isDark]);
+  const formatValue = React.useCallback((pct: number) => {
+    const val = dataMin + (pct / 100) * (dataMax - dataMin);
+    return val >= 1000 ? val.toExponential(1) : val.toFixed(1);
+  }, [dataMax, dataMin]);
 
-  const handleMouse = (e: React.MouseEvent, isDown: boolean) => {
+  const drawHistogram = React.useCallback((loPct: number, hiPct: number) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const rect = canvas.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const pct = Math.max(0, Math.min(100, (x / width) * 100));
-    if (isDown) {
-      const dl = Math.abs(pct - vminPct);
-      const dr = Math.abs(pct - vmaxPct);
-      draggingRef.current = dl < dr ? "left" : "right";
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    canvas.width = width * DPR;
+    canvas.height = height * DPR;
+    ctx.scale(DPR, DPR);
+    ctx.fillStyle = colors.bg;
+    ctx.fillRect(0, 0, width, height);
+    const displayBins = 64;
+    const binRatio = Math.floor(bins.length / displayBins);
+    const reducedBins: number[] = [];
+    for (let i = 0; i < displayBins; i++) {
+      let sum = 0;
+      for (let j = 0; j < binRatio; j++) sum += bins[i * binRatio + j] || 0;
+      reducedBins.push(sum / binRatio);
     }
-    if (draggingRef.current === "left") onRangeChange(Math.min(pct, vmaxPct - 1), vmaxPct);
-    else if (draggingRef.current === "right") onRangeChange(vminPct, Math.max(pct, vminPct + 1));
-  };
+    const maxVal = Math.max(...reducedBins, 0.001);
+    const barWidth = width / displayBins;
+    const vminBin = Math.floor((loPct / 100) * displayBins);
+    const vmaxBin = Math.floor((hiPct / 100) * displayBins);
+    for (let i = 0; i < displayBins; i++) {
+      const barHeight = (reducedBins[i] / maxVal) * (height - 2);
+      ctx.fillStyle = (i >= vminBin && i <= vmaxBin) ? colors.barActive : colors.barInactive;
+      ctx.fillRect(i * barWidth + 0.5, height - barHeight, Math.max(1, barWidth - 1), barHeight);
+    }
+  }, [bins, colors, height, width]);
+
+  const applyRangePreview = React.useCallback((next: [number, number]) => {
+    const [lo, hi] = next;
+    const slider = sliderRef.current?.querySelector(".MuiSlider-root") as HTMLElement | null;
+    const thumbs = slider?.querySelectorAll(".MuiSlider-thumb");
+    const track = slider?.querySelector(".MuiSlider-track") as HTMLElement | null;
+    if (thumbs && thumbs.length >= 2) {
+      (thumbs[0] as HTMLElement).style.left = `${lo}%`;
+      (thumbs[1] as HTMLElement).style.left = `${hi}%`;
+    }
+    if (track) {
+      track.style.left = `${lo}%`;
+      track.style.width = `${Math.max(0, hi - lo)}%`;
+    }
+    if (minLabelRef.current) minLabelRef.current.textContent = formatValue(lo);
+    if (maxLabelRef.current) maxLabelRef.current.textContent = formatValue(hi);
+    drawHistogram(lo, hi);
+  }, [drawHistogram, formatValue]);
+
+  React.useEffect(() => {
+    drawHistogram(liveVminPct, liveVmaxPct);
+  }, [drawHistogram, liveVmaxPct, liveVminPct]);
+
+  React.useEffect(() => {
+    onRangeChangeRef.current = onRangeChange;
+    onRangePreviewRef.current = onRangePreview;
+    onRangeCommitRef.current = onRangeCommit;
+  }, [onRangeChange, onRangeCommit, onRangePreview]);
+  const emitRangePreview = React.useCallback((min: number, max: number) => {
+    (onRangePreviewRef.current || onRangeChangeRef.current)(min, max);
+  }, []);
+  const emitRangeCommit = React.useCallback((min: number, max: number) => {
+    (onRangeCommitRef.current || onRangeChangeRef.current)(min, max);
+  }, []);
+  const flushRangePreview = React.useCallback(() => {
+    if (rangeRafRef.current != null) {
+      window.cancelAnimationFrame(rangeRafRef.current);
+      rangeRafRef.current = null;
+    }
+    const pending = pendingRangeRef.current;
+    pendingRangeRef.current = null;
+    if (pending) {
+      setLiveRange(pending);
+      applyRangePreview(pending);
+      emitRangeCommit(pending[0], pending[1]);
+    }
+  }, [applyRangePreview, emitRangeCommit]);
+  React.useEffect(() => () => {
+    if (rangeRafRef.current != null) window.cancelAnimationFrame(rangeRafRef.current);
+  }, []);
+  const beginRangeDrag = React.useCallback((event: React.PointerEvent, dragWidth: number, lo0: number, hi0: number) => {
+    const startX = event.clientX;
+    const span = Math.max(1, hi0 - lo0);
+    const previousCursor = document.body.style.cursor;
+    document.body.style.cursor = "grabbing";
+    const onMove = (moveEvent: PointerEvent) => {
+      moveEvent.preventDefault();
+      const deltaPct = ((moveEvent.clientX - startX) / Math.max(1, dragWidth)) * 100;
+      const lo = Math.max(0, Math.min(100 - span, lo0 + deltaPct));
+      const next: [number, number] = [lo, lo + span];
+      pendingRangeRef.current = next;
+      if (rangeRafRef.current == null) {
+        rangeRafRef.current = window.requestAnimationFrame(() => {
+          rangeRafRef.current = null;
+          const pending = pendingRangeRef.current;
+          if (pending) {
+            setLiveRange(pending);
+            applyRangePreview(pending);
+            emitRangePreview(pending[0], pending[1]);
+          }
+        });
+      }
+    };
+    const onUp = () => {
+      document.removeEventListener("pointermove", onMove);
+      document.removeEventListener("pointerup", onUp);
+      document.removeEventListener("pointercancel", onUp);
+      document.body.style.cursor = previousCursor;
+      flushRangePreview();
+    };
+    document.addEventListener("pointermove", onMove);
+    document.addEventListener("pointerup", onUp);
+    document.addEventListener("pointercancel", onUp);
+  }, [applyRangePreview, emitRangePreview, flushRangePreview]);
+
+  const sliderInset = 4;
+  const sliderWidth = Math.max(1, width - sliderInset * 2);
 
   return (
-    <canvas
-      ref={canvasRef} width={width} height={height}
-      style={{ cursor: "ew-resize", display: "block" }}
-      onMouseDown={(e) => handleMouse(e, true)}
-      onMouseMove={(e) => { if (draggingRef.current) handleMouse(e, false); }}
-      onMouseUp={() => { draggingRef.current = null; }}
-      onMouseLeave={() => { draggingRef.current = null; }}
-    />
+    <Box sx={{ display: "flex", flexDirection: "column", gap: 0, width, overflow: "visible" }}>
+      <Box sx={{ position: "relative", width, height: height + 6, overflow: "visible" }}>
+        <canvas ref={canvasRef} style={{ width, height, border: `1px solid ${colors.border}`, display: "block" }} />
+        <Box
+          ref={sliderRef}
+          onPointerDownCapture={(e) => {
+            if ((e.target as HTMLElement).closest(".MuiSlider-thumb")) return;
+            const rect = sliderRef.current?.getBoundingClientRect();
+            if (!rect) return;
+            const lo = Math.max(0, Math.min(100, Math.min(liveVminPct, liveVmaxPct)));
+            const hi = Math.max(0, Math.min(100, Math.max(liveVminPct, liveVmaxPct)));
+            const pct = ((e.clientX - rect.left) / Math.max(1, rect.width)) * 100;
+            if (pct < lo || pct > hi) return;
+            const thumbGuardPct = Math.max(4, (10 / Math.max(1, rect.width)) * 100);
+            if (Math.abs(pct - lo) <= thumbGuardPct || Math.abs(pct - hi) <= thumbGuardPct) return;
+            beginRangeDrag(e, rect.width, lo, hi);
+            e.preventDefault();
+            e.stopPropagation();
+            e.nativeEvent.stopImmediatePropagation();
+          }}
+          sx={{ position: "absolute", left: sliderInset, top: height - 1, width: sliderWidth, height: 8, display: "flex", alignItems: "flex-start", cursor: "grab", zIndex: 2, overflow: "visible", touchAction: "none" }}
+        >
+          <Slider
+            value={liveRange}
+            onChange={(_, v) => {
+              const [newMin, newMax] = v as number[];
+              const next: [number, number] = [Math.min(newMin, newMax - 1), Math.max(newMax, newMin + 1)];
+              setLiveRange(next);
+              emitRangePreview(next[0], next[1]);
+            }}
+            onChangeCommitted={(_, v) => {
+              const [newMin, newMax] = v as number[];
+              const next: [number, number] = [Math.min(newMin, newMax - 1), Math.max(newMax, newMin + 1)];
+              setLiveRange(next);
+              emitRangeCommit(next[0], next[1]);
+            }}
+            min={0} max={100} size="small" valueLabelDisplay="auto"
+            valueLabelFormat={formatValue}
+            sx={{
+              width: sliderWidth,
+              py: 0,
+              position: "relative",
+              zIndex: 3,
+              overflow: "visible",
+              "& .MuiSlider-rail": { height: 2, zIndex: 1 },
+              "& .MuiSlider-track": { height: 2, cursor: "grab", zIndex: 2 },
+              "& .MuiSlider-thumb": { width: 8, height: 8, zIndex: 4 },
+              "& .MuiSlider-valueLabel": { fontSize: 10, padding: "2px 4px", zIndex: 5 },
+            }}
+          />
+        </Box>
+      </Box>
+      <Box sx={{ display: "flex", justifyContent: "space-between", width }}><Typography ref={minLabelRef} sx={{ fontSize: 8, fontFamily: "monospace", opacity: 0.6, lineHeight: 1 }}>{formatValue(liveVminPct)}</Typography><Typography ref={maxLabelRef} sx={{ fontSize: 8, fontFamily: "monospace", opacity: 0.6, lineHeight: 1 }}>{formatValue(liveVmaxPct)}</Typography></Box>
+    </Box>
   );
 }
 
@@ -481,6 +661,7 @@ function ShowDiffraction() {
   }, [spots, rings]);
 
   // Local UI state
+  const isMobile = useMobileViewport();
   const initialCanvasSize = React.useMemo(() => {
     const requested = Number(panelWidthPx);
     return Number.isFinite(requested) && requested > 0 ? Math.max(CANVAS_MIN, Math.round(requested)) : CANVAS_MIN;
@@ -673,13 +854,14 @@ function ShowDiffraction() {
 
   const profileArrays = React.useMemo(() => decodeHalves(profileData, showProfile), [profileData, showProfile]);
 
-  const handleProfileClick = React.useCallback((e: React.MouseEvent) => {
+  const handleProfileClick = React.useCallback((e: React.PointerEvent) => {
     const canvas = profileCanvasRef.current;
     if (!canvas || !profileArrays) return;
     const rect = canvas.getBoundingClientRect();
+    const scale = rect.width > 0 ? canvasSize / rect.width : 1;
     const plotW = canvasSize - PROFILE_PAD.left - PROFILE_PAD.right;
     const rMax = profileArrays.x[profileArrays.x.length - 1];
-    const radius = ((e.clientX - rect.left - PROFILE_PAD.left) / Math.max(1, plotW)) * rMax;
+    const radius = (((e.clientX - rect.left) * scale - PROFILE_PAD.left) / Math.max(1, plotW)) * rMax;
     if (!(radius > 0 && radius <= rMax)) return;
     // Ring selection
     const hit = (rings || []).find((r) => Math.abs(r.radius_px - radius) <= 3);
@@ -698,7 +880,7 @@ function ShowDiffraction() {
   }, [profileArrays, profileLog, rings, bfRadius, showProfile, selectedRingId, drawCurvePanel]);
 
   // Canvas resize
-  const handleCanvasResizeStart = (e: React.MouseEvent) => {
+  const handleCanvasResizeStart = (e: React.PointerEvent) => {
     e.stopPropagation();
     e.preventDefault();
     hasResizedCanvasRef.current = true;
@@ -710,7 +892,7 @@ function ShowDiffraction() {
     if (!isResizingCanvas) return;
     let rafId = 0;
     let latestSize = resizeCanvasStart ? resizeCanvasStart.size : canvasSize;
-    const handleMouseMove = (e: MouseEvent) => {
+    const handleMouseMove = (e: PointerEvent) => {
       if (!resizeCanvasStart) return;
       const delta = Math.max(e.clientX - resizeCanvasStart.x, e.clientY - resizeCanvasStart.y);
       latestSize = Math.max(CANVAS_MIN, resizeCanvasStart.size + delta);
@@ -727,12 +909,14 @@ function ShowDiffraction() {
       setIsResizingCanvas(false);
       setResizeCanvasStart(null);
     };
-    document.addEventListener("mousemove", handleMouseMove);
-    document.addEventListener("mouseup", handleMouseUp);
+    document.addEventListener("pointermove", handleMouseMove);
+    document.addEventListener("pointerup", handleMouseUp);
+    document.addEventListener("pointercancel", handleMouseUp);
     return () => {
       cancelAnimationFrame(rafId);
-      document.removeEventListener("mousemove", handleMouseMove);
-      document.removeEventListener("mouseup", handleMouseUp);
+      document.removeEventListener("pointermove", handleMouseMove);
+      document.removeEventListener("pointerup", handleMouseUp);
+      document.removeEventListener("pointercancel", handleMouseUp);
     };
   }, [isResizingCanvas, resizeCanvasStart]);
 
@@ -763,10 +947,10 @@ function ShowDiffraction() {
     return extractFloat32(frameBytes, frameLen);
   }, [offline, offlineFrames, frameBytes, frameIdx, nFrames, detRows, detCols]);
 
-  // Frame render
-  React.useEffect(() => {
+  // Frame scaling
+  const scaledFrame = React.useMemo(() => {
     const raw = activeFrame;
-    if (!raw || raw.length === 0) return;
+    if (!raw || raw.length === 0) return null;
     let scaled: Float32Array;
     if (dpScaleMode === "log") {
       scaled = new Float32Array(raw.length);
@@ -780,7 +964,13 @@ function ShowDiffraction() {
       scaled = raw;
     }
     const { min: dataMin, max: dataMax } = findDataRange(scaled);
-    const { vmin, vmax } = sliderRange(dataMin, dataMax, dpVminPct, dpVmaxPct);
+    return { scaled, dataMin, dataMax };
+  }, [activeFrame, dpScaleMode]);
+
+  // Contrast painter
+  const paintContrast = React.useCallback((loPct: number, hiPct: number) => {
+    if (!scaledFrame) return;
+    const { vmin, vmax } = sliderRange(scaledFrame.dataMin, scaledFrame.dataMax, loPct, hiPct);
     dpVminRef.current = vmin;
     dpVmaxRef.current = vmax;
     let offscreen = dpOffscreenRef.current;
@@ -790,11 +980,44 @@ function ShowDiffraction() {
     const ctx = offscreen.getContext("2d");
     if (!ctx) return;
     const imgData = ctx.createImageData(detCols, detRows);
-    applyColormap(scaled, imgData.data, dpLut, vmin, vmax);
+    applyColormap(scaledFrame.scaled, imgData.data, dpLut, vmin, vmax);
     ctx.putImageData(imgData, 0, 0);
-    setDpHistData(scaled);
     setDpVersion(v => v + 1);
-  }, [activeFrame, dpLut, dpScaleMode, dpVminPct, dpVmaxPct, detRows, detCols]);
+  }, [scaledFrame, dpLut, detRows, detCols]);
+
+  // Frame render
+  React.useEffect(() => {
+    if (!scaledFrame) return;
+    paintContrast(dpVminPct, dpVmaxPct);
+    setDpHistData(scaledFrame.scaled);
+  }, [scaledFrame, paintContrast, dpVminPct, dpVmaxPct]);
+
+  // Contrast preview: rAF-throttled paint, traits written once on commit
+  const pendingContrastRef = React.useRef<[number, number] | null>(null);
+  const contrastRafRef = React.useRef(0);
+  const previewContrast = React.useCallback((lo: number, hi: number) => {
+    pendingContrastRef.current = [lo, hi];
+    if (!contrastRafRef.current) {
+      contrastRafRef.current = window.requestAnimationFrame(() => {
+        contrastRafRef.current = 0;
+        const pending = pendingContrastRef.current;
+        if (pending) paintContrast(pending[0], pending[1]);
+      });
+    }
+  }, [paintContrast]);
+  const commitContrast = React.useCallback((lo: number, hi: number) => {
+    if (contrastRafRef.current) {
+      window.cancelAnimationFrame(contrastRafRef.current);
+      contrastRafRef.current = 0;
+    }
+    pendingContrastRef.current = null;
+    paintContrast(lo, hi);
+    setDpVminPct(lo);
+    setDpVmaxPct(hi);
+  }, [paintContrast, setDpVminPct, setDpVmaxPct]);
+  React.useEffect(() => () => {
+    if (contrastRafRef.current) window.cancelAnimationFrame(contrastRafRef.current);
+  }, []);
 
   // Frame canvas
   React.useLayoutEffect(() => {
@@ -975,17 +1198,26 @@ function ShowDiffraction() {
     }
   }, [canvasSize, dpZoom, kCalibrated, kPixelSize, detCols]);
 
-  // Mouse handlers
+  // Pointer handlers
   const dpIsDragging = React.useRef(false);
   const dpDragStart = React.useRef({ x: 0, y: 0, panX: 0, panY: 0 });
 
+  // CSS px to internal canvas px (canvas can render narrower than canvasSize)
+  const dpDisplayScale = () => {
+    const canvas = dpCanvasRef.current;
+    if (!canvas) return 1;
+    const rect = canvas.getBoundingClientRect();
+    return rect.width > 0 ? canvasSize / rect.width : 1;
+  };
+
   // Canvas to data
-  const dpToImage = (e: React.MouseEvent) => {
+  const dpToImage = (e: { clientX: number; clientY: number }) => {
     const canvas = dpCanvasRef.current;
     if (!canvas) return { row: 0, col: 0 };
     const rect = canvas.getBoundingClientRect();
-    const mx = e.clientX - rect.left;
-    const my = e.clientY - rect.top;
+    const scale = rect.width > 0 ? canvasSize / rect.width : 1;
+    const mx = (e.clientX - rect.left) * scale;
+    const my = (e.clientY - rect.top) * scale;
     const offX = (canvasSize - canvasSize * dpZoom) / 2 + dpPanX;
     const offY = (canvasSize - canvasSize * dpZoom) / 2 + dpPanY;
     const col = (mx - offX) / (canvasSize * dpZoom) * detCols;
@@ -996,8 +1228,75 @@ function ShowDiffraction() {
   const angleOf = (row: number, col: number) =>
     (Math.atan2(row - centerRow, col - centerCol) * 180 / Math.PI + 360) % 360;
 
-  const handleDpMouseDown = (e: React.MouseEvent) => {
-    if (e.button === 1 || e.button === 2 || e.shiftKey) {
+  // Two-finger pinch (zoom + pan) via tracked pointers
+  const activePointersRef = React.useRef(new Map<number, { x: number; y: number }>());
+  const pinchStartRef = React.useRef<
+    | { dist: number; midX: number; midY: number; zoom: number; offX: number; offY: number }
+    | null
+  >(null);
+  const pinchRafRef = React.useRef(0);
+  const multiTouchRef = React.useRef(false);
+  const lastTapRef = React.useRef({ time: 0, x: 0, y: 0 });
+  const pendingTapRef = React.useRef<{ x: number; y: number; row: number; col: number } | null>(null);
+
+  const cancelCanvasDrag = () => {
+    dragTargetRef.current = null;
+    cancelAnimationFrame(dragRafRef.current);
+    dragRafRef.current = 0;
+    setDragPreview(null);
+  };
+
+  const applyPinch = () => {
+    const start = pinchStartRef.current;
+    const points = Array.from(activePointersRef.current.values());
+    if (!start || points.length < 2) return;
+    const scale = dpDisplayScale();
+    const dist = Math.hypot(points[0].x - points[1].x, points[0].y - points[1].y) * scale;
+    const canvas = dpCanvasRef.current;
+    if (!canvas || dist <= 0 || start.dist <= 0) return;
+    const rect = canvas.getBoundingClientRect();
+    const midX = ((points[0].x + points[1].x) / 2 - rect.left) * scale;
+    const midY = ((points[0].y + points[1].y) / 2 - rect.top) * scale;
+    const newZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, start.zoom * (dist / start.dist)));
+    const zoomRatio = newZoom / start.zoom;
+    // keep the content point under the start midpoint anchored to the live midpoint
+    const newOffX = midX - (start.midX - start.offX) * zoomRatio;
+    const newOffY = midY - (start.midY - start.offY) * zoomRatio;
+    setDpZoom(newZoom);
+    setDpPanX(newOffX - (canvasSize - canvasSize * newZoom) / 2);
+    setDpPanY(newOffY - (canvasSize - canvasSize * newZoom) / 2);
+  };
+
+  const beginPinch = () => {
+    const points = Array.from(activePointersRef.current.values());
+    const canvas = dpCanvasRef.current;
+    if (!canvas || points.length < 2) return;
+    const rect = canvas.getBoundingClientRect();
+    const scale = rect.width > 0 ? canvasSize / rect.width : 1;
+    pinchStartRef.current = {
+      dist: Math.hypot(points[0].x - points[1].x, points[0].y - points[1].y) * scale,
+      midX: ((points[0].x + points[1].x) / 2 - rect.left) * scale,
+      midY: ((points[0].y + points[1].y) / 2 - rect.top) * scale,
+      zoom: dpZoom,
+      offX: (canvasSize - canvasSize * dpZoom) / 2 + dpPanX,
+      offY: (canvasSize - canvasSize * dpZoom) / 2 + dpPanY,
+    };
+  };
+
+  const handleDpPointerDown = (e: React.PointerEvent) => {
+    try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* unsupported host */ }
+    activePointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (activePointersRef.current.size === 2) {
+      // second finger: switch to pinch, cancel any single-pointer gesture
+      multiTouchRef.current = true;
+      dpIsDragging.current = false;
+      pendingTapRef.current = null;
+      cancelCanvasDrag();
+      beginPinch();
+      return;
+    }
+    if (pinchStartRef.current) return;
+    if (e.button === 1 || e.button === 2 || e.shiftKey || (e.pointerType === "touch" && dpZoom !== 1 && drawMode === null && !moveSpots)) {
       dpIsDragging.current = true;
       dpDragStart.current = { x: e.clientX, y: e.clientY, panX: dpPanX, panY: dpPanY };
       return;
@@ -1023,11 +1322,17 @@ function ShowDiffraction() {
         if (dist < nearestDist) { nearestDist = dist; nearest = i; }
       });
       const scX = (canvasSize / detCols) * dpZoom;
-      if (nearest >= 0 && nearestDist * scX <= 12) {
+      const hitPx = (e.pointerType === "touch" ? 20 : 12) * dpDisplayScale();
+      if (nearest >= 0 && nearestDist * scX <= hitPx) {
         dragTargetRef.current = { kind: "spot", id: spots[nearest].id };
         setDragPreview({ kind: "spot", id: spots[nearest].id, row, col });
         return;
       }
+    }
+    // touch: defer tap actions to pointerup so a pinch's first finger fires nothing
+    if (e.pointerType === "touch") {
+      pendingTapRef.current = { x: e.clientX, y: e.clientY, row, col };
+      return;
     }
     // Manual center
     if (centerMode === "manual") {
@@ -1038,10 +1343,37 @@ function ShowDiffraction() {
     setSpotAddRequest([row, col]);
   };
 
-  const handleDpMouseMove = (e: React.MouseEvent) => {
+  const commitTapAction = (row: number, col: number) => {
+    if (centerMode === "manual") {
+      setCenterRow(row);
+      setCenterCol(col);
+      return;
+    }
+    setSpotAddRequest([row, col]);
+  };
+
+  const handleDpPointerMove = (e: React.PointerEvent) => {
+    if (activePointersRef.current.has(e.pointerId)) {
+      activePointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    }
+    const pendingTap = pendingTapRef.current;
+    if (pendingTap && Math.hypot(e.clientX - pendingTap.x, e.clientY - pendingTap.y) > 10) {
+      pendingTapRef.current = null;  // finger wandered: not a tap
+    }
+    if (pinchStartRef.current) {
+      e.preventDefault();
+      if (!pinchRafRef.current) {
+        pinchRafRef.current = requestAnimationFrame(() => {
+          pinchRafRef.current = 0;
+          applyPinch();
+        });
+      }
+      return;
+    }
     if (dpIsDragging.current) {
-      setDpPanX(dpDragStart.current.panX + (e.clientX - dpDragStart.current.x));
-      setDpPanY(dpDragStart.current.panY + (e.clientY - dpDragStart.current.y));
+      const scale = dpDisplayScale();
+      setDpPanX(dpDragStart.current.panX + (e.clientX - dpDragStart.current.x) * scale);
+      setDpPanY(dpDragStart.current.panY + (e.clientY - dpDragStart.current.y) * scale);
       return;
     }
     if (dragTargetRef.current) {
@@ -1074,14 +1406,42 @@ function ShowDiffraction() {
     }
   };
 
-  const cancelCanvasDrag = () => {
-    dragTargetRef.current = null;
-    cancelAnimationFrame(dragRafRef.current);
-    dragRafRef.current = 0;
-    setDragPreview(null);
+  const releasePointer = (e: React.PointerEvent) => {
+    activePointersRef.current.delete(e.pointerId);
+    if (activePointersRef.current.size === 0) multiTouchRef.current = false;
+    if (pinchStartRef.current) {
+      if (activePointersRef.current.size < 2) {
+        pinchStartRef.current = null;
+        cancelAnimationFrame(pinchRafRef.current);
+        pinchRafRef.current = 0;
+        dpIsDragging.current = false;
+      } else {
+        beginPinch();  // remaining fingers become the new baseline
+      }
+    }
   };
 
-  const handleDpMouseUp = () => {
+  const handleDpPointerUp = (e: React.PointerEvent) => {
+    const wasMultiTouch = multiTouchRef.current;
+    const pendingTap = pendingTapRef.current;
+    pendingTapRef.current = null;
+    releasePointer(e);
+    if (wasMultiTouch) return;
+    // double-tap resets the view (touch counterpart of double-click)
+    if (e.pointerType === "touch" && !dragTargetRef.current && !dpIsDragging.current) {
+      const now = performance.now();
+      const last = lastTapRef.current;
+      if (now - last.time < 320 && Math.hypot(e.clientX - last.x, e.clientY - last.y) < 24) {
+        lastTapRef.current = { time: 0, x: 0, y: 0 };
+        resetDpView();
+        return;
+      }
+      lastTapRef.current = { time: now, x: e.clientX, y: e.clientY };
+    }
+    if (pendingTap) {
+      commitTapAction(pendingTap.row, pendingTap.col);
+      return;
+    }
     dpIsDragging.current = false;
     const target = dragTargetRef.current;
     if (!target) return;
@@ -1105,7 +1465,15 @@ function ShowDiffraction() {
     }
     cancelCanvasDrag();
   };
-  const handleDpMouseLeave = () => { dpIsDragging.current = false; cancelCanvasDrag(); setCursorInfo(null); };
+  const handleDpPointerCancel = (e: React.PointerEvent) => {
+    releasePointer(e);
+    pendingTapRef.current = null;
+    dpIsDragging.current = false;
+    cancelCanvasDrag();
+    setCursorInfo(null);
+  };
+  // pointer capture keeps drags alive past the edge; leave only clears the readout
+  const handleDpPointerLeave = () => { setCursorInfo(null); };
 
   // Scroll zoom
   const handleDpWheel = (e: React.WheelEvent) => {
@@ -1226,17 +1594,22 @@ function ShowDiffraction() {
     position: "relative" as const,
     border: `1px solid ${themeColors.border}`,
     overflow: "hidden",
-    width: canvasSize,
-    height: canvasSize,
+    width: "100%",
+    maxWidth: canvasSize,
+    aspectRatio: "1 / 1",
     bgcolor: "#000",
+    touchAction: "none" as const,
+    boxSizing: "border-box" as const,
   };
   const sideMenuWidth = 76;
   const patternPanelWidth = canvasSize + sideMenuWidth + SPACING.XS;
+  // fluid panel: full width on small hosts, capped at the canvas size
+  const panelWidth = { width: "100%", maxWidth: canvasSize, boxSizing: "border-box" as const };
 
   return (
     <Box
       ref={rootRef}
-      sx={{ p: `${SPACING.LG}px`, bgcolor: themeColors.bg, color: themeColors.text, outline: "none", overflow: "visible" }}
+      sx={{ p: { xs: `${SPACING.SM}px`, sm: `${SPACING.LG}px` }, bgcolor: themeColors.bg, color: themeColors.text, outline: "none", overflow: "visible", maxWidth: "100%", boxSizing: "border-box" }}
       tabIndex={0}
       onKeyDown={handleKeyDown}
       onMouseDownCapture={handleRootMouseDownCapture}
@@ -1325,7 +1698,7 @@ function ShowDiffraction() {
         <Box>
           {/* Toolbar */}
           {controlsVisible && (
-            <Stack direction="row" alignItems="center" spacing={`${SPACING.SM}px`} useFlexGap sx={{ mb: `${SPACING.XS}px`, minHeight: 28, flexWrap: "wrap", rowGap: `${SPACING.XS}px`, maxWidth: patternPanelWidth, px: 1, py: 0.5, border: `1px solid ${themeColors.border}`, borderRadius: "4px", bgcolor: themeColors.controlBg }}>
+            <Stack direction="row" alignItems="center" spacing={`${SPACING.SM}px`} useFlexGap sx={{ mb: `${SPACING.XS}px`, minHeight: 28, flexWrap: "wrap", rowGap: `${SPACING.XS}px`, maxWidth: isMobile ? "100%" : patternPanelWidth, boxSizing: "border-box", px: 1, py: 0.5, border: `1px solid ${themeColors.border}`, borderRadius: "4px", bgcolor: themeColors.controlBg }}>
               <Button size="small" sx={{ ...compactButton, color: themeColors.accent, fontWeight: 700 }} onClick={() => setAutoRequest(true)} title="Run full analysis">AUTO</Button>
               {nFrames > 1 && (
                 <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} onClick={() => setMergeRequest(true)} title="Align and merge frames">MERGE</Button>
@@ -1359,7 +1732,7 @@ function ShowDiffraction() {
           )}
 
           <Menu anchorEl={phaseMenuAnchor} open={Boolean(phaseMenuAnchor)} onClose={() => setPhaseMenuAnchor(null)} anchorOrigin={{ vertical: "bottom", horizontal: "left" }} transformOrigin={{ vertical: "top", horizontal: "left" }} sx={{ zIndex: 9999 }}>
-            <Box sx={{ px: 1.5, py: 0.5, width: 300, bgcolor: themeColors.controlBg }}>
+            <Box sx={{ px: 1.5, py: 0.5, width: "min(300px, calc(100vw - 48px))", boxSizing: "border-box", bgcolor: themeColors.controlBg }}>
               <Typography sx={{ ...typography.label, mb: 0.5 }}>Phase library</Typography>
               <Box sx={{ maxHeight: 180, overflow: "auto", border: `1px solid ${themeColors.border}`, mb: 1 }}>
                 <MenuItem selected={!phaseName} onClick={() => setPhaseName("")} sx={{ fontSize: 11, minHeight: 24 }}>None</MenuItem>
@@ -1412,7 +1785,7 @@ function ShowDiffraction() {
           </Menu>
 
           <Menu anchorEl={maskMenuAnchor} open={Boolean(maskMenuAnchor)} onClose={() => setMaskMenuAnchor(null)} anchorOrigin={{ vertical: "bottom", horizontal: "left" }} transformOrigin={{ vertical: "top", horizontal: "left" }} sx={{ zIndex: 9999 }}>
-            <Box sx={{ px: 1.5, py: 0.5, width: 290, bgcolor: themeColors.controlBg }}>
+            <Box sx={{ px: 1.5, py: 0.5, width: "min(290px, calc(100vw - 48px))", boxSizing: "border-box", bgcolor: themeColors.controlBg }}>
               <Typography sx={{ ...typography.label, mb: 0.5 }}>Excluded regions</Typography>
               {(maskRegions || []).map((region, i) => (
                 <Stack key={i} direction="row" justifyContent="space-between" alignItems="center">
@@ -1448,7 +1821,7 @@ function ShowDiffraction() {
           </Menu>
 
           <Menu anchorEl={refineMenuAnchor} open={Boolean(refineMenuAnchor)} onClose={() => setRefineMenuAnchor(null)} anchorOrigin={{ vertical: "bottom", horizontal: "left" }} transformOrigin={{ vertical: "top", horizontal: "left" }} sx={{ zIndex: 9999 }}>
-            <Box sx={{ px: 1.5, py: 0.5, width: 210, bgcolor: themeColors.controlBg }}>
+            <Box sx={{ px: 1.5, py: 0.5, width: "min(210px, calc(100vw - 48px))", boxSizing: "border-box", bgcolor: themeColors.controlBg }}>
               <Typography sx={{ ...typography.label, mb: 0.5 }}>Refine center</Typography>
               <Stack direction="row" spacing={`${SPACING.XS}px`} alignItems="center">
                 <Select size="small" value={refineMethod || "auto"} onChange={(e) => setRefineMethod(String(e.target.value))} sx={{ ...themedSelect, minWidth: 100 }} MenuProps={themedMenuProps}>
@@ -1477,27 +1850,35 @@ function ShowDiffraction() {
               ({cursorInfo.row}, {cursorInfo.col}) {formatNumber(cursorInfo.value)}
             </span>}
           </Typography>
-          <Stack direction="row" spacing={`${SPACING.XS}px`} alignItems="flex-start" sx={{ width: patternPanelWidth, maxWidth: "100%" }}>
-          <Box ref={dpContainerRef} sx={{ ...canvasBox, flexShrink: 0 }}>
-            <canvas ref={dpCanvasRef} style={{ position: "absolute", top: 0, left: 0, width: canvasSize, height: canvasSize, imageRendering: "pixelated" }} />
-            <canvas ref={dpUiRef} style={{ position: "absolute", top: 0, left: 0, width: canvasSize, height: canvasSize, pointerEvents: "none" }} />
-            <canvas ref={dpScaleRef} style={{ position: "absolute", top: 0, left: 0, width: canvasSize, height: canvasSize, pointerEvents: "none" }} />
+          <Stack direction={isMobile ? "column" : "row"} spacing={`${SPACING.XS}px`} alignItems="flex-start" sx={{ width: isMobile ? "100%" : patternPanelWidth, maxWidth: "100%" }}>
+          <Box ref={dpContainerRef} sx={{ ...canvasBox, flex: "0 1 auto", minWidth: 0 }}>
+            <canvas ref={dpCanvasRef} style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", imageRendering: "pixelated" }} />
+            <canvas ref={dpUiRef} style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", pointerEvents: "none" }} />
+            <canvas ref={dpScaleRef} style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", pointerEvents: "none" }} />
             <canvas
-              style={{ position: "absolute", top: 0, left: 0, width: canvasSize, height: canvasSize, cursor: "crosshair", opacity: 0 }}
+              style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", cursor: "crosshair", opacity: 0, touchAction: "none" }}
               width={canvasSize} height={canvasSize}
-              onMouseDown={handleDpMouseDown}
-              onMouseMove={handleDpMouseMove}
-              onMouseUp={handleDpMouseUp}
-              onMouseLeave={handleDpMouseLeave}
+              onPointerDown={handleDpPointerDown}
+              onPointerMove={handleDpPointerMove}
+              onPointerUp={handleDpPointerUp}
+              onPointerCancel={handleDpPointerCancel}
+              onPointerLeave={handleDpPointerLeave}
               onWheel={handleDpWheel}
               onDoubleClick={resetDpView}
             />
             {/* Resize handle */}
-            <Box onMouseDown={handleCanvasResizeStart} sx={{ position: "absolute", bottom: 0, right: 0, width: 16, height: 16, cursor: "nwse-resize", opacity: 0.6, background: `linear-gradient(135deg, transparent 50%, ${themeColors.accent} 50%)`, "&:hover": { opacity: 1 } }} />
+            <Box onPointerDown={handleCanvasResizeStart} sx={{ position: "absolute", bottom: 0, right: 0, width: 16, height: 16, cursor: "nwse-resize", opacity: 0.6, background: `linear-gradient(135deg, transparent 50%, ${themeColors.accent} 50%)`, "&:hover": { opacity: 1 }, touchAction: "none" }} />
           </Box>
 
           {/* Side menu */}
-          <Stack spacing="2px" sx={{ width: sideMenuWidth, flexShrink: 0 }}>
+          <Stack
+            direction={isMobile ? "row" : "column"}
+            spacing="2px"
+            sx={isMobile
+              ? { width: "100%", flexWrap: "wrap", rowGap: "2px" }
+              : { width: sideMenuWidth, flexShrink: 0 }}
+            useFlexGap={isMobile}
+          >
             {([
               ["PROFILE", "Radial profile", showProfile, () => setShowProfile(!showProfile)],
               ["AZIM", "Azimuthal profile", showAzimuthal, () => setShowAzimuthal(!showAzimuthal)],
@@ -1509,7 +1890,7 @@ function ShowDiffraction() {
               ["CTRL", "Control bar", showControls, () => setShowControls(!showControls)],
             ] as [string, string, boolean, () => void][]).map(([label, hint, on, toggle]) => (
               <Button key={label} size="small" title={hint} onClick={toggle}
-                sx={{ ...compactButton, width: sideMenuWidth, justifyContent: "flex-start", color: on ? themeColors.accent : themeColors.textMuted }}>
+                sx={{ ...compactButton, width: isMobile ? "auto" : sideMenuWidth, justifyContent: "flex-start", color: on ? themeColors.accent : themeColors.textMuted }}>
                 {label}
               </Button>
             ))}
@@ -1518,7 +1899,7 @@ function ShowDiffraction() {
 
           {/* Quality */}
           {showQc && (
-            <Box sx={{ mt: `${SPACING.XS}px`, width: canvasSize, px: 1, py: 0.5, border: `1px solid ${themeColors.border}`, borderRadius: "4px", bgcolor: themeColors.controlBg }}>
+            <Box sx={{ mt: `${SPACING.XS}px`, ...panelWidth, px: 1, py: 0.5, border: `1px solid ${themeColors.border}`, borderRadius: "4px", bgcolor: themeColors.controlBg }}>
               <Typography sx={{ ...typography.label, mb: 0.5 }}>Analysis quality</Typography>
               {quality?.center && (
                 <Typography sx={typography.value}>
@@ -1575,7 +1956,7 @@ function ShowDiffraction() {
 
           {/* Radial profile */}
           {showProfile && (
-            <Box sx={{ mt: `${SPACING.XS}px`, width: canvasSize }}>
+            <Box sx={{ mt: `${SPACING.XS}px`, ...panelWidth }}>
               <Stack direction="row" alignItems="center" spacing={`${SPACING.SM}px`} sx={{ px: 1, mb: `${SPACING.XS}px` }}>
                 <Typography sx={typography.label}>Radial profile</Typography>
                 <Typography sx={{ ...typography.label, fontSize: 10 }}>log:</Typography>
@@ -1586,25 +1967,25 @@ function ShowDiffraction() {
               </Stack>
               <canvas
                 ref={profileCanvasRef}
-                style={{ display: "block", width: canvasSize, height: PROFILE_H, cursor: "crosshair", border: `1px solid ${themeColors.border}` }}
-                onMouseDown={handleProfileClick}
+                style={{ display: "block", width: "100%", maxWidth: canvasSize, height: PROFILE_H, cursor: "crosshair", border: `1px solid ${themeColors.border}`, boxSizing: "border-box" }}
+                onPointerDown={handleProfileClick}
               />
             </Box>
           )}
 
           {/* Azimuthal */}
           {showAzimuthal && (
-            <Box sx={{ mt: `${SPACING.XS}px`, width: canvasSize }}>
+            <Box sx={{ mt: `${SPACING.XS}px`, ...panelWidth }}>
               <Typography sx={{ ...typography.label, px: 1, mb: `${SPACING.XS}px` }}>
                 Azimuthal profile (outermost ring)
               </Typography>
-              <canvas ref={azimuthalCanvasRef} style={{ display: "block", width: canvasSize, height: PROFILE_H, border: `1px solid ${themeColors.border}` }} />
+              <canvas ref={azimuthalCanvasRef} style={{ display: "block", width: "100%", maxWidth: canvasSize, height: PROFILE_H, border: `1px solid ${themeColors.border}`, boxSizing: "border-box" }} />
             </Box>
           )}
 
           {/* Candidates */}
           {identifyResults && identifyResults.length > 0 && (
-            <Box sx={{ mt: `${SPACING.XS}px`, width: canvasSize }}>
+            <Box sx={{ mt: `${SPACING.XS}px`, ...panelWidth }}>
               <Stack direction="row" alignItems="center" spacing={`${SPACING.SM}px`} sx={{ px: 1, mb: `${SPACING.XS}px` }}>
                 <Typography sx={typography.label}>Candidate phases</Typography>
                 <input value={identifyElements} onChange={(e) => setIdentifyElements(e.target.value)} placeholder="elements e.g. Fe,O" style={numInput(110)} />
@@ -1680,7 +2061,7 @@ function ShowDiffraction() {
 
           {/* Frame slider */}
           {nFrames > 1 && (
-            <Box sx={{ ...controlRow, width: canvasSize }}>
+            <Box sx={{ ...controlRow, ...panelWidth }}>
               <Typography sx={typography.label}>Frame</Typography>
               <Slider
                 value={localFrame}
@@ -1932,12 +2313,16 @@ function ShowDiffraction() {
               </Select>
             </Box>
 
-            <Box sx={controlBox}>
+            <Box sx={{ ...controlBox, overflow: "visible" }}>
               <Histogram
                 data={dpHistData}
                 vminPct={dpVminPct}
                 vmaxPct={dpVmaxPct}
+                dataMin={scaledFrame?.dataMin ?? 0}
+                dataMax={scaledFrame?.dataMax ?? 1}
                 onRangeChange={(min, max) => { setDpVminPct(min); setDpVmaxPct(max); }}
+                onRangePreview={previewContrast}
+                onRangeCommit={commitContrast}
                 theme={themeInfo.theme}
               />
             </Box>

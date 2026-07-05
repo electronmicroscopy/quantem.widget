@@ -1570,9 +1570,10 @@ class ShowDiffraction(anywidget.AnyWidget):
         """Rank an explicit list of candidate phases against measured d-spacings.
 
         This is the primary verification workflow: build the candidates you
-        expect (:meth:`Phase.from_cif`, :meth:`Phase.from_cubic`,
-        :meth:`Phase.from_dspacings`, ...) and rank only those. Use
-        :meth:`search_phases` when you have no candidates in mind.
+        expect (:func:`~quantem.widget.crystal.library_phase`,
+        :meth:`Phase.from_cubic`, :meth:`Phase.from_dspacings`, ...) and rank
+        only those. Use :meth:`search_phases` when you have no candidates in
+        mind.
         """
         self._require_calibrated()
         phases = list(database)
