@@ -21,6 +21,12 @@ scientific output.
 
 What should change?
 
+### Expected user behavior
+
+Describe what the user should be able to do after this is fixed or built. Write
+this in plain language, from the user's point of view, before listing technical
+details.
+
 <!--
 Agent checklist:
 - Identify the affected widget(s), docs, scripts, and tests.
