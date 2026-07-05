@@ -164,6 +164,7 @@ class Show4DSTEMMPS(Show4DSTEM):
         b = self._compute
 
         def _apply():
+            self._multi_total = b.multi_total()
             self.n_frames = max(1, b.multi_n_ready)
             self._refresh_multi_title()
 

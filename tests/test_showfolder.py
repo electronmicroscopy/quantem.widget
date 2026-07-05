@@ -85,9 +85,12 @@ def test_show_folder_opens_selected_images_as_show2d_and_show3d(tmp_path: Path) 
 
     selected_2d = widget.show_selected()
     selected_3d = widget.show_selected_stack()
+    selected_both = widget.browser.show_selected_both()
 
     assert selected_2d.__class__.__name__ == "Show2D"
     assert selected_3d.__class__.__name__ == "Show3D"
+    assert selected_both.__class__.__name__ == "VBox"
+    assert [child.__class__.__name__ for child in selected_both.children] == ["Show2D", "Show3D"]
     assert selected_2d._data.shape[0] == 2
     assert selected_3d.n_slices == 2
     assert [label.split(" | ", 1)[0] for label in selected_2d.labels] == ["0010", "0012"]
@@ -152,10 +155,13 @@ def test_show_folder_watch_once_adds_and_removes_files_in_place(tmp_path: Path) 
     assert widget.browser.gallery is not None
     displayed = widget.widget
     widget.browser.gallery.star_panel(0)
-    selected_view = widget.show_selected()
-    widget.browser._active_selected_modes = {"show2d"}
-    widget.browser._selected_show2d_widget = selected_view
-    assert selected_view._data.shape[0] == 1
+    selected_2d = widget.show_selected()
+    selected_3d = widget.show_selected_stack()
+    widget.browser._active_selected_modes = {"show2d", "show3d"}
+    widget.browser._selected_show2d_widget = selected_2d
+    widget.browser._selected_show3d_widget = selected_3d
+    assert selected_2d._data.shape[0] == 1
+    assert selected_3d.n_slices == 1
 
     widget.watch(start=False)
     img2 = tmp_path / "0012 - HAADF 15Mx Nano.emd"
@@ -165,22 +171,28 @@ def test_show_folder_watch_once_adds_and_removes_files_in_place(tmp_path: Path) 
     assert widget.widget is displayed
     assert [item.file_id for item in widget.items] == ["0010", "0011", "0012"]
     assert [item.file_id for item in widget.selected("image")] == ["0010"]
-    assert widget.browser._selected_show2d_widget is selected_view
-    assert selected_view._data.shape[0] == 1
+    assert widget.browser._selected_show2d_widget is selected_2d
+    assert widget.browser._selected_show3d_widget is selected_3d
+    assert selected_2d._data.shape[0] == 1
+    assert selected_3d.n_slices == 1
     assert "1 new" in widget._watch_status.value
 
     widget.browser.gallery.star_panel(2)
     assert [item.file_id for item in widget.selected("image")] == ["0010", "0012"]
-    assert widget.browser._selected_show2d_widget is selected_view
-    assert selected_view._data.shape[0] == 2
+    assert widget.browser._selected_show2d_widget is selected_2d
+    assert widget.browser._selected_show3d_widget is selected_3d
+    assert selected_2d._data.shape[0] == 2
+    assert selected_3d.n_slices == 2
 
     img0.unlink()
 
     assert widget.watch_once() is True
     assert [item.file_id for item in widget.items] == ["0011", "0012"]
     assert [item.file_id for item in widget.selected("image")] == ["0012"]
-    assert widget.browser._selected_show2d_widget is selected_view
-    assert selected_view._data.shape[0] == 1
+    assert widget.browser._selected_show2d_widget is selected_2d
+    assert widget.browser._selected_show3d_widget is selected_3d
+    assert selected_2d._data.shape[0] == 1
+    assert selected_3d.n_slices == 1
     assert "1 removed" in widget._watch_status.value
 
     manifest = widget.cache_path / "manifest.json"

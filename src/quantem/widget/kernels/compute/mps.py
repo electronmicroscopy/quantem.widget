@@ -1175,12 +1175,45 @@ class MultiChunkedFrames(ChunkedFrames):
         self.dtype = d0.dtype
         self.device = d0.device
 
+    def _validate_compatible_dataset(self, frames: "ChunkedFrames") -> None:
+        det = tuple(getattr(frames, "_det", ()))
+        if det != tuple(self._det):
+            raise ValueError(
+                f"Dataset detector shape {det} does not match existing {tuple(self._det)}"
+            )
+        scan = int(round(int(getattr(frames, "_n", 0)) ** 0.5))
+        if (scan, scan) != tuple(self._scan):
+            raise ValueError(
+                f"Dataset scan shape {(scan, scan)} does not match existing {tuple(self._scan)}"
+            )
+
     def set_dataset(self, idx: int, frames: "ChunkedFrames") -> None:
         """Background loader fills slot ``idx`` once decoded, then pings the viewer
         (if wired) so the frame slider grows + the loading banner updates."""
+        idx = int(idx)
+        if idx < 0 or idx >= len(self.datasets):
+            raise IndexError(f"dataset index {idx} out of range for {len(self.datasets)} slots")
+        self._validate_compatible_dataset(frames)
         self.datasets[idx] = frames
         if self.on_ready is not None:
             self.on_ready(idx)
+
+    def append_dataset(self, frames: "ChunkedFrames", name: str | None = None) -> int:
+        """Append one decoded dataset and notify a live Show4DSTEM viewer.
+
+        This is the dynamic-folder primitive for 4D-STEM: a watcher can decode a
+        new master file, append it here, and the existing viewer grows its
+        dataset slider instead of rebuilding the full widget.
+        """
+        self._validate_compatible_dataset(frames)
+        idx = len(self.datasets)
+        self.datasets.append(frames)
+        self.names.append(str(name) if name is not None else f"dataset {idx}")
+        scan_r, scan_c = self._scan
+        self.shape = (len(self.datasets), scan_r, scan_c, *self._det)
+        if self.on_ready is not None:
+            self.on_ready(idx)
+        return idx
 
     @property
     def n_ready(self) -> int:

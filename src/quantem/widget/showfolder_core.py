@@ -420,6 +420,12 @@ class ShowFolderBrowser:
                 widget.scale_bar_visible = False
         return widget
 
+    def show_selected_both(self):
+        """Return both Show2D and Show3D views for starred image panels."""
+        from ipywidgets import VBox
+
+        return VBox([self.show_selected(), self.show_selected_stack()])
+
     def inherit_selected_viewers_from(self, previous: "ShowFolderBrowser") -> None:
         """Carry open selected Show2D/Show3D viewers across a browser rebuild."""
         self._active_selected_modes = set(getattr(previous, "_active_selected_modes", set()))
@@ -491,6 +497,7 @@ class ShowFolderBrowser:
         save = Button(description="Save selection", tooltip=f"Write {self.selection_file.name}")
         open_show2d = Button(description="Open Show2D", tooltip="Render starred images below")
         open_show3d = Button(description="Open Show3D", tooltip="Render starred images as a frame stack below")
+        open_both = Button(description="Open both", tooltip="Render starred images as Show2D and Show3D below")
         hide = Button(description="Show starred only", tooltip="Hide unstarred image panels")
         show_all = Button(description="Show all images", tooltip="Restore hidden image panels")
 
@@ -518,23 +525,26 @@ class ShowFolderBrowser:
         def _open_show2d(_=None):
             self._active_selected_modes = {"show2d"}
             _refresh()
-            self._refresh_selected_viewers()
 
         def _open_show3d(_=None):
             self._active_selected_modes = {"show3d"}
             _refresh()
-            self._refresh_selected_viewers()
+
+        def _open_both(_=None):
+            self._active_selected_modes = {"show2d", "show3d"}
+            _refresh()
 
         refresh.on_click(_refresh)
         save.on_click(_save)
         open_show2d.on_click(_open_show2d)
         open_show3d.on_click(_open_show3d)
+        open_both.on_click(_open_both)
         hide.on_click(_hide)
         show_all.on_click(_show_all)
         panel = VBox([
             HTML("<h3 style=\"margin:12px 0 6px 0\">Selected for downstream analysis</h3>"),
             summary,
-            HBox([refresh, save, open_show2d, open_show3d, hide, show_all]),
+            HBox([refresh, save, open_show2d, open_show3d, open_both, hide, show_all]),
             output,
             viewer_output,
         ])

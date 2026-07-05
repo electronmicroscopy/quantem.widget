@@ -74,6 +74,59 @@ class LazyMacbookDatasets:
             threading.Thread(target=_worker, daemon=True).start()
         return viewer
 
+    def append_master(self, master, *, name: str | None = None, async_: bool = True) -> int:
+        """Decode one newly discovered master and append it to the live dataset list.
+
+        Parameters
+        ----------
+        master
+            Path to a 4D-STEM master file compatible with the existing stack.
+        name
+            Optional dataset label. Defaults to the master filename stem.
+        async_
+            If ``True`` (default), decode in a background daemon thread and
+            return the future slot index immediately. If ``False``, decode and
+            append before returning.
+
+        Returns
+        -------
+        int
+            Dataset slot index assigned to the appended master.
+        """
+        path = str(master)
+        label = str(name) if name is not None else os.path.basename(path)
+        if label.endswith("_master.h5"):
+            label = label[:-len("_master.h5")]
+
+        idx = len(self.masters)
+        self.masters.append(path)
+        self.names.append(label)
+
+        def _decode_and_append():
+            try:
+                if self.verbose:
+                    print(f"[append {idx + 1}] loading {label} ...", flush=True)
+                t = time.perf_counter()
+                self.multi.append_dataset(self._decode(path), name=label)
+                if self.verbose:
+                    print(f"[append {idx + 1}] {label} ready in "
+                          f"{time.perf_counter() - t:.1f}s", flush=True)
+            except Exception as exc:
+                if self.verbose:
+                    print(f"[append {idx + 1}] {label} FAILED: {str(exc)[:80]}",
+                          flush=True)
+                raise
+
+        if async_:
+            threading.Thread(
+                target=_decode_and_append,
+                name="Show4DSTEMMPS-append-master",
+                daemon=True,
+            ).start()
+        else:
+            _decode_and_append()
+        return idx
+
 
 def load_macbook_datasets(masters, *, det_bin: int = 4, scan_size: int | None = None,
                           verbose: bool = True) -> LazyMacbookDatasets:
