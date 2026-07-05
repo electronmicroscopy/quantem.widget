@@ -200,3 +200,55 @@ def test_showfolder_open_show4dstem_with_selection_panel_builds_once(monkeypatch
 
     assert sf.open_show4dstem(gpus=[0], page_budget=1) == "widget"
     assert calls == ["apply"]
+
+
+@cuda_required
+def test_showfolder_open_show4dstem_drops_staging_frames_on_second_gpu(monkeypatch, tmp_path):
+    """Explicit multi-GPU staging must not pin offloaded frames outside Dataset5dstem."""
+    if torch.cuda.device_count() < 2:
+        pytest.skip("needs two CUDA devices")
+    import gc
+
+    import quantem.widget as qw
+    import quantem.widget.io as wio
+
+    fake_masters = [str(tmp_path / f"scan_{i:02d}_master.h5") for i in range(4)]
+
+    def fake_discover(folder, *, scan_shape=None, verbose=False, **kw):
+        return list(fake_masters)
+
+    def fake_ready(path):
+        return True
+
+    class _Result:
+        def __init__(self, path):
+            v = int(path.split("scan_")[1][:2])
+            self.data = torch.full((16, 16, 24, 24), v, dtype=torch.uint8, device="cuda:0")
+
+    def fake_load(path, *, det_bin=4, dtype="u8", verbose=False, **kw):
+        return _Result(path)
+
+    monkeypatch.setattr(wio, "discover_masters", fake_discover)
+    monkeypatch.setattr(wio, "is_master_ready", fake_ready)
+    monkeypatch.setattr(qw, "load", fake_load)
+
+    sf = _stub_browser(tmp_path)
+    w = sf.open_show4dstem(gpus=[0, 1], page_budget=1, det_bin=4, dtype="u8")
+    gc.collect()
+    with torch.cuda.device(1):
+        torch.cuda.empty_cache()
+
+    assert w._data.vram_resident() == [0]
+    leaked = []
+    for obj in gc.get_objects():
+        try:
+            if (
+                isinstance(obj, torch.Tensor)
+                and obj.device.type == "cuda"
+                and obj.device.index == 1
+                and tuple(obj.shape) == (16, 16, 24, 24)
+            ):
+                leaked.append(obj)
+        except Exception:
+            pass
+    assert leaked == []
