@@ -47,6 +47,8 @@ parts:
         title: Mobile HTML
       - file: maintainer/widget-agent-signoff
         title: Agent signoff
+      - file: maintainer/widget-review-matrix
+        title: Review matrix
       - file: maintainer/widget-ui-protocol
         title: UI protocol
       - file: maintainer/performance-ui-testing
