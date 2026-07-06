@@ -415,6 +415,48 @@ def test_showfolder_open_show4dstem_with_selection_panel_builds_once(monkeypatch
     assert calls == ["apply"]
 
 
+def test_showfolder_inherits_live_show4dstem_config_and_releases_old_widget(
+    monkeypatch,
+    tmp_path,
+):
+    """A watched folder rebuild keeps 4D paging options without leaking the old widget."""
+
+    class _FakeShow4DSTEM:
+        freed = False
+
+        def free(self):
+            self.freed = True
+
+    previous = _stub_browser(tmp_path)
+    old_widget = _FakeShow4DSTEM()
+    previous._active_selected_modes = {"show4dstem"}
+    previous._show4dstem_config = {
+        "gpus": [0],
+        "page_budget": "auto",
+        "det_bin": 8,
+        "dtype": "u8",
+        "scan_size": 128,
+    }
+    previous._selected_show4dstem_widget = old_widget
+
+    current = _stub_browser(tmp_path)
+    refresh_calls = []
+    monkeypatch.setattr(
+        current,
+        "_refresh_selected_viewers",
+        lambda: refresh_calls.append("refresh"),
+    )
+
+    current.inherit_selected_viewers_from(previous)
+
+    assert current._active_selected_modes == {"show4dstem"}
+    assert current._show4dstem_config == previous._show4dstem_config
+    assert getattr(current, "_selected_show4dstem_widget", None) is None
+    assert getattr(previous, "_selected_show4dstem_widget", None) is None
+    assert old_widget.freed is True
+    assert refresh_calls == ["refresh"]
+
+
 @cuda_required
 def test_showfolder_open_show4dstem_drops_staging_frames_on_second_gpu(monkeypatch, tmp_path):
     """Explicit multi-GPU staging must not pin offloaded frames outside Dataset5dstem."""

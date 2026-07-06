@@ -110,6 +110,21 @@ def test_show_folder_renders_master_only_folder_for_show4dstem(tmp_path: Path) -
     assert "4D-STEM master" in widget.browser.widget.children[0].value
 
 
+def test_show_folder_watch_signature_tracks_4dstem_masters(tmp_path: Path) -> None:
+    first_master = tmp_path / "scan_000_master.h5"
+    first_master.touch()
+
+    widget = ShowFolder(tmp_path, thumb=8, group_by="none")
+    before = widget._folder_signature()
+
+    second_master = tmp_path / "scan_001_master.h5"
+    second_master.touch()
+    after = widget._folder_signature()
+
+    assert {row[0] for row in before} == {first_master.name}
+    assert {row[0] for row in after} == {first_master.name, second_master.name}
+
+
 def test_show_folder_reuses_thumbnail_cache(tmp_path: Path, monkeypatch) -> None:
     _image_emd(tmp_path / "0010 - HAADF 15Mx Nano.emd")
     _image_emd(tmp_path / "0011 - HAADF 15Mx Nano.emd")

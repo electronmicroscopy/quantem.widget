@@ -304,9 +304,21 @@ class ShowFolder:
         rows = []
         if not root.is_dir():
             return ()
-        for path in sorted(p for p in root.glob(glob) if p.is_file() and not p.name.startswith(".")):
+        paths = {
+            p for p in root.glob(glob)
+            if p.is_file() and not p.name.startswith(".")
+        }
+        paths.update(
+            p for p in root.glob("*_master.h5")
+            if p.is_file() and not p.name.startswith(".")
+        )
+        for path in sorted(paths):
             stat = path.stat()
-            rows.append((path.relative_to(root).as_posix(), int(stat.st_size), int(stat.st_mtime_ns)))
+            rows.append((
+                path.relative_to(root).as_posix(),
+                int(stat.st_size),
+                int(stat.st_mtime_ns),
+            ))
         return tuple(rows)
 
     def _ensure_watch_status(self) -> None:

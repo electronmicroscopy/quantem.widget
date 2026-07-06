@@ -48,6 +48,14 @@ w.watch(interval=2.0)
 Use `watch_once()` in scripts or tests when you want one deterministic poll,
 and `stop_watch()` before shutting down a long-running notebook kernel.
 
+`ShowFolder` owns folder watching. `Show2D`, `Show3D`, and `Show4DSTEM` stay as
+display widgets: open them from the selection panel, then let `ShowFolder`
+refresh the active view as files arrive. Image selections update the existing
+Show2D/Show3D viewer in place. For 4D-STEM folders, the watcher also tracks
+`*_master.h5` files and rebuilds the active lazy Show4DSTEM view with the same
+paging options, so new Dataset4DSTEM masters appear without preloading the whole
+folder.
+
 If you do not pass a path, `ShowFolder()` displays a folder chooser first:
 
 ```python

@@ -427,10 +427,16 @@ class ShowFolderBrowser:
         return VBox([self.show_selected(), self.show_selected_stack()])
 
     def inherit_selected_viewers_from(self, previous: "ShowFolderBrowser") -> None:
-        """Carry open selected Show2D/Show3D viewers across a browser rebuild."""
+        """Carry open selected viewers across a live-folder browser rebuild."""
         self._active_selected_modes = set(getattr(previous, "_active_selected_modes", set()))
         self._selected_show2d_widget = getattr(previous, "_selected_show2d_widget", None)
         self._selected_show3d_widget = getattr(previous, "_selected_show3d_widget", None)
+        self._show4dstem_config = getattr(previous, "_show4dstem_config", None)
+        if "show4dstem" in self._active_selected_modes:
+            release = getattr(previous, "_release_selected_show4dstem_widget", None)
+            if callable(release):
+                release()
+            self._selected_show4dstem_widget = None
         self._refresh_selected_viewers()
 
     def _apply_selected_show2d(self):
