@@ -37,7 +37,10 @@ dependencies = [
 # Not published on PyPI yet so cannot be a hard depedency
 # pip install quantem.widget[hub] once available
 hub = ["quantem.data>=0.0.1rc1"]
-test = ["pytest>=8"]
+test = [
+    "pytest>=8",
+    "nbconvert>=7",
+]
 
 [project.scripts]
 quantem = "quantem.widget.cli:main"
