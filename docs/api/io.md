@@ -87,6 +87,23 @@ print(meta["scan_shape"], meta["detector_shape"])
 # e.g. (512, 512) (192, 192)
 ```
 
+## Lightweight visual thumbnails
+
+Use `quantem.widget.render.thumbnail` when you need compact visual previews for
+folder reports, static dashboards, or quick review pages. These outputs are for
+looking, not measuring: keep scientific arrays in array/HDF5 formats when the
+values need to be reused.
+
+```python
+from quantem.widget.render import save_thumbnail, thumbnail_webp
+
+webp_bytes = thumbnail_webp(image, size=256, cmap="inferno")
+save_thumbnail(image, "preview.webp", size=256, cmap="inferno")
+```
+
+Use `save_image(...)` on a widget when you want a publication-style figure, and
+use `export_html(...)` when you want the interactive widget.
+
 ---
 
 ## I'm on a Linux workstation with an NVIDIA RTX GPU. How do I load a scan?
