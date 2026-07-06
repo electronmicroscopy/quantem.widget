@@ -127,6 +127,8 @@ def test_automation_documentation_names_entrypoints() -> None:
         "scripts/widget_performance_smoke.py",
         "scripts/widget_heavy_perf_signoff.py",
         "scripts/widget_show4dstem_heavy_signoff.py",
+        "scripts/widget_load_bench_matrix.py",
+        "scripts/widget_load_bench_sharded.py",
         "scripts/check_large_files.py",
         "scripts/check_notebook_sizes.py",
         ".github/workflows/widget-ci.yml",
@@ -153,6 +155,7 @@ def test_automation_documentation_names_entrypoints() -> None:
         "http://127.0.0.1:8779/index.html",
         "QUANTEM_WIDGET_REAL_DATA_ROOTS",
         "QUANTEM_WIDGET_4DSTEM_ROOTS",
+        "QUANTEM_WIDGET_BENCH_MASTERS_GLOB",
         "synthetic data for real-data performance claims",
         "final answer names the exact command and report path",
         "Do not run `pkill chrome`",
@@ -199,6 +202,20 @@ def test_github_actions_use_node24_action_generations() -> None:
         "actions/deploy-pages@v4",
     ]:
         assert stale not in workflows
+
+
+def test_real_data_loader_benchmark_scripts_are_documented_as_local_only() -> None:
+    for script in [
+        ROOT / "scripts/widget_load_bench_matrix.py",
+        ROOT / "scripts/widget_load_bench_sharded.py",
+    ]:
+        result = _run(sys.executable, str(script), "--help")
+        normalized = result.stdout.replace("\n", "").replace(" ", "")
+
+        assert result.returncode == 0, result.stdout
+        assert "private real" in result.stdout
+        assert "masters-glob" in result.stdout
+        assert "/tmp/quantem-widget-load-bench" in normalized
 
 
 def test_signoff_dashboard_summarizes_available_reports(tmp_path: Path) -> None:

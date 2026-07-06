@@ -1733,10 +1733,12 @@ def _load_sharded(
 ) -> LoadResult:
     """Sharded multi-GPU load — files split across GPUs, each kept on its card.
 
-    Round-robins the file list across ``devices``; one thread per device loads
-    its subset (each thread pinned to its GPU via ``cp.cuda.Device``) and stacks
-    them into one per-device array. No cross-GPU gather, no host bounce — the
-    only way a stack exceeding one card's VRAM fits, and faster than gather.
+    Files are assigned to devices in disk-interleaved order: when files are
+    spread across physical disks, each GPU gets a balanced disk stream instead
+    of both GPUs waiting on the same drive. One thread per device loads its
+    subset (each thread pinned to its GPU via ``cp.cuda.Device``) and stacks them
+    into one per-device array. No cross-GPU gather, no host bounce — the only way
+    a stack exceeding one card's VRAM fits, and faster than gather.
 
     Returns ``LoadResult`` whose ``.data`` is ``{device: stacked_array}`` (each
     array resident on that device) and ``.metadata["device_map"] = {file_idx:
@@ -1749,8 +1751,7 @@ def _load_sharded(
         devices = list(range(cp.cuda.runtime.getDeviceCount()))
     devices = [int(d) for d in devices]
     n_files = len(filepaths)
-    assign = {d: [i for i in range(n_files) if devices[i % len(devices)] == d]
-              for d in devices}
+    assign = _assign_indices_to_devices(filepaths, devices)
     if verbose:
         bin_str = f", det_bin={det_bin}" if det_bin > 1 else ""
         print(f"Loading {n_files} files sharded across GPUs {devices}{bin_str}")
@@ -1853,8 +1854,7 @@ def _load_as_dataset5dstem(
         if devices == "all":
             devices = list(range(cp.cuda.runtime.getDeviceCount()))
         devices = [int(d) for d in devices]
-        assign = {d: [i for i in range(len(filepaths)) if devices[i % len(devices)] == d]
-                  for d in devices}
+        assign = _assign_indices_to_devices(filepaths, devices)
         if verbose:
             bin_str = f", det_bin={det_bin}" if det_bin > 1 else ""
             print(f"Loading {len(filepaths)} files as Dataset5dstem frames across GPUs {devices}{bin_str}")
@@ -2233,6 +2233,44 @@ def group_by_disk(paths) -> dict:
     return out
 
 
+def _disk_interleaved_indices(paths) -> list[int]:
+    """Return indices ordered to touch different physical disks early.
+
+    This is intentionally small and deterministic so tests can validate the
+    scheduling policy without real disks or CUDA. With paths grouped by disk,
+    ``[d0a, d0b, d1a, d1b]`` becomes ``[d0a, d1a, d0b, d1b]``; with one disk,
+    the original order is preserved.
+    """
+    buckets: dict[str, list[int]] = {}
+    disk_order: list[str] = []
+    for idx, path in enumerate(paths):
+        disk = disk_of(path)
+        if disk not in buckets:
+            disk_order.append(disk)
+            buckets[disk] = []
+        buckets[disk].append(idx)
+
+    queues = [list(buckets[disk]) for disk in disk_order]
+    order: list[int] = []
+    while any(queues):
+        for queue_ in queues:
+            if queue_:
+                order.append(queue_.pop(0))
+    return order
+
+
+def _assign_indices_to_devices(filepaths, devices) -> dict[int, list[int]]:
+    """Assign file indices to devices using disk-interleaved round robin."""
+    devices = [int(device) for device in devices]
+    if not devices:
+        raise ValueError("devices must contain at least one CUDA device")
+
+    assign: dict[int, list[int]] = {device: [] for device in devices}
+    for offset, idx in enumerate(_disk_interleaved_indices(filepaths)):
+        assign[devices[offset % len(devices)]].append(idx)
+    return assign
+
+
 def _load_many_parallel(masters, *, gpus=None, max_concurrent=None, verbose=False, **load_kwargs):
     """Load many masters with concurrent READS + SERIAL GPU decode, placing each
     master on a chosen GPU. The data-feeding path for joint reconstruction.
@@ -2294,14 +2332,7 @@ def _load_many_parallel(masters, *, gpus=None, max_concurrent=None, verbose=Fals
     n_read = max(n_read, 2) if n > 1 else 1  # >=2 so a read is always queued ahead
 
     # Disk-interleaved read order: hit different disks first for peak parallel BW.
-    order, buckets = [], {}
-    for i, dk in enumerate(disks):
-        buckets.setdefault(dk, []).append(i)
-    ql = [list(q) for q in buckets.values()]
-    while any(ql):
-        for q in ql:
-            if q:
-                order.append(q.pop(0))
+    order = _disk_interleaved_indices(masters)
 
     # Producer: concurrent read+prepare (host) into a bounded queue. The pinned-
     # buffer pool is lock-guarded, so concurrent reads are thread-safe; the queue
@@ -2421,14 +2452,15 @@ def _load_impl(
         (``device=1`` or ``"cuda:1"``). Default None = current device.
     devices : list[int], optional
         **Sharded multi-GPU load** (lists of files only). Split the files
-        round-robin across these GPUs; each card decompresses + keeps its own
-        subset, with NO gather to one card. This is how a stack larger than a
-        single card fits - e.g. ``load(six_512_masters, devices=[0, 1])`` holds
-        108 GiB (6× 512²×192² no-bin) across two 96 GB cards. The result's
-        ``.data`` is a ``{device: array}`` dict (not one array), and
-        ``metadata["device_map"]`` records which file landed on which GPU.
-        Sharding is for CAPACITY, not speed: cold load is disk-bound and both
-        cards share the one NVMe, so 16× sharded ≈ 16× single-GPU in wall time.
+        across these GPUs in disk-interleaved order; each card decompresses +
+        keeps its own subset, with NO gather to one card. This is how a stack
+        larger than a single card fits - e.g. ``load(six_512_masters,
+        devices=[0, 1])`` holds 108 GiB (6 x 512 x 512 x 192 x 192 no-bin)
+        across two 96 GB cards. The result's ``.data`` is a ``{device: array}``
+        dict (not one array), and ``metadata["device_map"]`` records which file
+        landed on which GPU. Sharding is primarily for capacity, and it also
+        unlocks load-speed wins when the masters are spread across independent
+        disks because GPU workers no longer all hammer the same drive first.
 
     Returns
     -------

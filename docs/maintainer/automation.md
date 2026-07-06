@@ -17,6 +17,8 @@ real-data proof.
 | Release-oriented validation | `scripts/widget_local_signoff.sh --full --performance` | Full local gates, frontend typecheck/tests, release check without wheel, real-data export timing report. |
 | Heavy real-data performance claim | `PYTHONPATH=src:. python scripts/widget_heavy_perf_signoff.py` | Local-only HPC/workstation real-data browser FPS, screenshots, FFT idle-cache report. |
 | Heavy Show4DSTEM real-data claim | `PYTHONPATH=src:. python scripts/widget_show4dstem_heavy_signoff.py --backend cuda` | Local-only real 4D-STEM NVIDIA/CUDA load, memory, append/stack-growth, export, browser WebGPU/FPS report. |
+| Raw Show4DSTEM loader speed or U8/U16 claim | `PYTHONPATH=src:. python scripts/widget_load_bench_matrix.py` | Local-only private real-data cold/warm `load(...)` table with parity outside the timer. |
+| Multi-disk / two-GPU Show4DSTEM load claim | `PYTHONPATH=src:. python scripts/widget_load_bench_sharded.py --devices 0,1` | Local-only private real-data disk layout, sharded GPU placement, cold/warm table, and capacity boundary. |
 | Physical iPhone Safari behavior | `python scripts/widget_phone_handoff.py /tmp/quantem-widget-signoff` | Tailscale/HTTPS handoff URL plus phone viewport, touch, pointer, and WebGPU logs. |
 | Local docs visual review | `scripts/docs_preview.sh` | Rendered documentation site in a browser. |
 
@@ -27,6 +29,8 @@ When served locally, open the report URL in the browser, for example
 Use `--search-root`, `QUANTEM_WIDGET_REAL_DATA_ROOTS`, or
 `QUANTEM_WIDGET_4DSTEM_ROOTS` for private lab data locations instead of
 hardcoding machine-specific paths in shared scripts.
+Use `QUANTEM_WIDGET_BENCH_MASTERS_GLOB` for raw loader benchmarks. It can contain
+multiple `:`-separated globs when a dataset was split across several disks.
 
 ## Definition Of Done
 
@@ -213,6 +217,16 @@ WebGPU adapter information, detector-drag FPS, scan-position movement FPS,
 virtual-detector recompute latency, and GPU memory before/after. Keep it out of
 normal CI and keep generated reports under `/tmp` unless a release explicitly
 asks for them.
+
+Use `scripts/widget_load_bench_matrix.py` and
+`scripts/widget_load_bench_sharded.py` when the question is specifically loader
+throughput, exact `uint16` versus browse `uint8`, disk layout, or two-GPU
+capacity. These scripts write Markdown reports to
+`/tmp/quantem-widget-load-bench/` by default and run real cases in subprocesses
+so CUDA pools and page-cache state from one case do not leak into the next.
+They are not browser signoff: after loader speed is acceptable, still run the
+Show4DSTEM heavy signoff to prove WebGPU interaction, detector dragging,
+scan-position movement, dataset flipping, and export reopen behavior.
 
 Use `scripts/widget_phone_handoff.py` after a signoff run when the user asks for
 real iPhone behavior. Serve the existing report directory, open the printed

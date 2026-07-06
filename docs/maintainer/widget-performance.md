@@ -220,6 +220,80 @@ scan-position and detector interactions remain responsive.
 Use `--backend mps` only for MacBook fallback checks. It should not replace the
 NVIDIA/CUDA heavy signoff when that backend is available.
 
+## Show4DSTEM loader benchmark matrix
+
+Use these local-only scripts when the claim is about raw loader speed, not the
+browser UI:
+
+```bash
+PYTHONPATH=src:. python scripts/widget_load_bench_matrix.py \
+  --masters-glob "$QUANTEM_WIDGET_BENCH_MASTERS_GLOB"
+
+PYTHONPATH=src:. python scripts/widget_load_bench_sharded.py \
+  --masters-glob "$QUANTEM_WIDGET_BENCH_MASTERS_GLOB" \
+  --devices 0,1
+```
+
+`QUANTEM_WIDGET_BENCH_MASTERS_GLOB` may be one glob or several globs separated
+by `os.pathsep` (`:` on Linux/macOS). Use that form when a folder was split
+across multiple NVMe mounts, for example:
+
+```bash
+export QUANTEM_WIDGET_BENCH_MASTERS_GLOB='/mnt/nvme0/run/*_master.h5:/mnt/nvme1/run/*_master.h5'
+```
+
+The scripts write Markdown tables under `/tmp/quantem-widget-load-bench/` by
+default. Keep the generated reports local unless a release note intentionally
+summarizes the numbers. Do not commit raw data, generated benchmark payloads, or
+machine-specific private paths.
+
+Loader policy:
+
+- `dtype="u16"` is the exact-count browse/reconstruction path. Optimize it, but
+  do not replace it with `uint8` silently.
+- `dtype="u8"` is an explicit browse path that decodes directly into uint8 and
+  clips values above 255. It is useful for fast folder screening and memory
+  pressure, not for exact-count reconstruction.
+- `load(masters, devices=[0, 1])` is disk-aware. The loader interleaves files by
+  physical disk first, then assigns the interleaved stream to GPUs. If users
+  split masters across independent disks, both disk bandwidth and GPU capacity
+  can be used. If all masters are on one disk, sharding is still useful for
+  capacity but the cold load remains disk-bound.
+- Each benchmark case runs in a fresh subprocess. Do not time parity hashes
+  inside the load timer; a full uint64 sum over tens of GiB is a correctness
+  check, not load latency.
+
+Current private MJGOAT measurement, single real 512 x 512 x 192 x 192 Arina
+master, no detector binning, parity checked against the full tensor:
+
+| path | first measured load | hot repeated load | resident size | note |
+| --- | ---: | ---: | ---: | --- |
+| `load(master, dtype="u16", det_bin=1)` | 0.953 s | 0.320-0.321 s | 19.33 GB | exact uint16 counts |
+| `load(master, dtype="u8", det_bin=1)` | 1.26 s in a fresh process; 0.311 s after U16 warmup | 0.309-0.314 s | 9.66 GB | direct uint8 decode for browsing |
+
+Post-migration smoke using the new scripts on the same private workstation
+confirmed that the entrypoints run end to end. This smoke used
+`--skip-parity`; rely on the full parity run above for numerical equivalence.
+
+| script smoke | cold | warm | resident size | note |
+| --- | ---: | ---: | ---: | --- |
+| matrix, `dtype="u16"`, no-bin, single master on the freer GPU | 0.634 s | 0.405 s | 18.0 GiB | exact browse path, GPU0 was occupied |
+| matrix, `dtype="u8"`, no-bin, single master on the freer GPU | 0.591 s | 0.392 s | 9.0 GiB | direct uint8 browse path |
+| sharded, two masters, `devices=[0, 1]`, `det_bin=4` | 1.114 s | 0.684 s | 2.2 GiB | one real master per GPU |
+
+The current MJGOAT sample resolved to one physical disk (`nvme2n1`) for the
+available real masters, so the smoke validates sharded GPU placement and the
+benchmark harness, not a real multi-disk bandwidth gain. To prove the disk
+speedup, run `widget_load_bench_sharded.py` on a host where
+`group_by_disk(masters)` reports two or more real disks.
+
+Interpretation: U16 is already on the same hot path as U8. Further U16 wins are
+more likely to come from first-use warmup, disk layout, or multi-file scheduling
+than from changing the single-master decode kernel. For 20-40 no-bin masters,
+use the sharded benchmark table to prove the real workflow: cold load, hot load,
+per-GPU resident GiB, disk groups, and whether the run failed cleanly at the
+expected capacity boundary.
+
 ## Heavy Show2D / Show3D audit
 
 Date: 2026-07-02
