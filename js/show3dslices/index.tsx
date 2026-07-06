@@ -32,6 +32,7 @@ import { VolumeRenderer, CameraState, DEFAULT_CAMERA } from "../webgpu-volume";
 import { drawScaleBarHiDPI, drawFFTScaleBarHiDPI, drawColorbar } from "../figure";
 import { downloadBlob, extractBytes, extractFloat32, formatNumber, preserveRestoredWidgetModelsOnSave } from "../format";
 import { findDataRange, applyLogScale, percentileClip, sliderRange, computeHistogramFromBytes } from "../stats";
+import { MetadataSection } from "../widgetInfo";
 
 const MAX_PLAYBACK_FPS = 30;
 
@@ -4104,6 +4105,14 @@ function Show3DSlices() {
         {/* Title row */}
         <Typography variant="caption" sx={{ ...typography.label, color: tc.accent, mb: `${SPACING.XS}px`, display: "block", height: 16, lineHeight: "16px", overflow: "hidden" }}>
           {title || "Volume 3D"}<InfoTooltip text={<Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
+            <MetadataSection rows={[
+              ["Shape", `${nz} x ${ny} x ${nx}`],
+              ["Axes", Array.isArray(dimLabels) && dimLabels.length ? dimLabels.join(", ") : "slice, row, col"],
+              ["Sampling", Array.isArray(pixelSizeAxes) && pixelSizeAxes.length >= 3
+                ? pixelSizeAxes.map((v) => formatNumber(v)).join(" x ")
+                : pixelSize > 0 ? `${formatNumber(pixelSize)} /px` : ""],
+              ["Display", `z stretch ${formatNumber(zStretch)}, ${orthographic ? "orthographic" : "perspective"}`],
+            ]} />
             <Typography sx={{ fontSize: 11, fontWeight: "bold" }}>Controls</Typography>
             <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>FFT shows the power spectrum below each slice.</Typography>
             <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>Auto uses percentile-based contrast (2nd-98th percentile). FFT Auto masks DC + clips to 99.9th.</Typography>

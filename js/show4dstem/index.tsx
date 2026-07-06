@@ -30,6 +30,7 @@ import { drawScaleBarHiDPI, drawColorbar, roundToNiceValue } from "../figure";
 import { findDataRange, sliderRange, computeStats, computeHistogramFromBytes, percentileClip } from "../stats";
 import { downloadBlob, extractBytes, formatNumber, downloadDataView, preserveRestoredWidgetModelsOnSave } from "../format";
 import { useHideStaticFallback } from "../staticFallback";
+import { MetadataSection } from "../widgetInfo";
 
 // Detector mask for the offline WebGPU virtual-image sum. Mirrors the Python
 // mask geometry exactly (show4dstem.py _create_*_mask): cx pairs with column,
@@ -4489,6 +4490,13 @@ function Show4DSTEM() {
         {title || "4D-STEM Explorer"}
         {nFrames > 1 && <span style={{ fontWeight: "normal", fontSize: 13, marginLeft: 8, opacity: 0.7 }}>({frameLabels && frameLabels.length > frameIdx ? frameLabels[frameIdx] : `${frameDimLabel} ${frameIdx + 1}/${nFrames}`})</span>}
         <InfoTooltip text={<Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
+          <MetadataSection rows={[
+            ["Scan", `${shapeRows} x ${shapeCols}`],
+            ["Detector", `${detRows} x ${detCols}`],
+            ["Frames", nFrames > 1 ? `${nFrames} ${frameDimLabel}` : "single frame"],
+            ["Real space", pixelSize > 0 ? `${formatNumber(pixelSize)} ${pixelUnit || "px"}/px` : ""],
+            ["Diffraction", kCalibrated && kPixelSize > 0 ? `${formatNumber(kPixelSize)} ${kPixelUnit || "px"}/px` : "detector pixels"],
+          ]} />
           <Typography sx={{ fontSize: 11, fontWeight: "bold" }}>Controls</Typography>
           <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>DP: Diffraction pattern I(kx,ky) at scan position. Drag to move ROI center.</Typography>
           <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>Detector: ROI mask shape — defines which DP pixels are integrated for the virtual image.</Typography>

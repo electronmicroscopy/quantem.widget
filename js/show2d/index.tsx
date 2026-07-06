@@ -29,6 +29,7 @@ import { drawScaleBarHiDPI, drawColorbar, roundToNiceValue } from "../figure";
 import { extractBytes, extractFloat32, formatNumber, downloadBlob, preserveRestoredWidgetModelsOnSave } from "../format";
 import { useHideStaticFallback } from "../staticFallback";
 import { computeHistogramFromBytes, findDataRange, applyLogScale, percentileClip, sliderRange, computeStats } from "../stats";
+import { MetadataSection } from "../widgetInfo";
 
 function InfoTooltip({ text, theme = "dark" }: { text: React.ReactNode; theme?: "light" | "dark" }) {
   const isDark = theme === "dark";
@@ -4945,6 +4946,12 @@ function Show2D() {
               </Box>
             ) : null; })()}
             <InfoTooltip text={<Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
+              <MetadataSection rows={[
+                ["Shape", isGallery ? `${nImages} x ${height} x ${width}` : `${height} x ${width}`],
+                ["Panels", isGallery ? `${nImages} images, ${clampedNcols} columns` : "single image"],
+                ["Sampling", pixelSize > 0 ? `${formatNumber(pixelSize)} ${pixelUnit || "px"}/px` : ""],
+                ["Display", displayBinFactor > 1 ? `${displayBinFactor}x preview, detail streams on zoom` : "full resolution"],
+              ]} />
               <Typography sx={{ fontSize: 11, fontWeight: "bold" }}>Controls</Typography>
               <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>FFT: Show power spectrum (Fourier transform) alongside image.</Typography>
               <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>Profile: Click two points on image to draw a line intensity profile.</Typography>

@@ -8,12 +8,14 @@ import MenuItem from "@mui/material/MenuItem";
 import Slider from "@mui/material/Slider";
 import Stack from "@mui/material/Stack";
 import Switch from "@mui/material/Switch";
+import Tooltip from "@mui/material/Tooltip";
 import Typography from "@mui/material/Typography";
 import { drawScaleBarHiDPI } from "../figure";
 import { downloadBlob, extractBytes, extractFloat32, formatNumber, markWidgetNotebookDirty, preserveRestoredWidgetModelsOnSave } from "../format";
 import { useHideStaticFallback } from "../staticFallback";
 import { computeHistogramFromBytes, percentileClip, sliderRange } from "../stats";
 import { useTheme } from "../theme";
+import { MetadataSection } from "../widgetInfo";
 
 type RoiShape = "rect" | "circle" | "ellipse";
 type Roi = { row: number; col: number; height: number; width: number; shape?: RoiShape };
@@ -219,6 +221,50 @@ const PERIODIC_ELEMENTS: PeriodicElement[] = [
   { z: 91, symbol: "Pa", name: "Protactinium", group: 5, period: 9 },
   { z: 92, symbol: "U", name: "Uranium", group: 6, period: 9 },
 ];
+
+function InfoTooltip({ text, theme = "dark" }: { text: React.ReactNode; theme?: "light" | "dark" }) {
+  const isDark = theme === "dark";
+  const content = typeof text === "string"
+    ? <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>{text}</Typography>
+    : text;
+  return (
+    <Tooltip
+      title={content}
+      arrow
+      placement="bottom"
+      componentsProps={{
+        tooltip: {
+          sx: {
+            bgcolor: isDark ? "#333" : "#fff",
+            color: isDark ? "#ddd" : "#333",
+            border: `1px solid ${isDark ? "#555" : "#ccc"}`,
+            maxWidth: 360,
+            p: 1,
+          },
+        },
+        arrow: {
+          sx: {
+            color: isDark ? "#333" : "#fff",
+            "&::before": { border: `1px solid ${isDark ? "#555" : "#ccc"}` },
+          },
+        },
+      }}
+    >
+      <Typography
+        component="span"
+        sx={{
+          fontSize: 12,
+          color: isDark ? "#888" : "#666",
+          cursor: "help",
+          ml: 0.5,
+          "&:hover": { color: isDark ? "#aaa" : "#444" },
+        }}
+      >
+        ⓘ
+      </Typography>
+    </Tooltip>
+  );
+}
 const MAP_WGSL = `
 @group(0) @binding(0) var<storage,read> cube: array<u32>;
 @group(0) @binding(1) var<storage,read_write> out: array<f32>;
@@ -2038,6 +2084,20 @@ function ShowEDS() {
   const backendLabel = isSparseWorkerBackend
     ? (hasEmbeddedStream || isStreamBackend ? "Sparse stream" : "Data folder")
     : isKernelBackend ? "Kernel exact" : "WebGPU";
+  const dataInfoRows = React.useMemo(() => {
+    const energyLo = energy.length > 0 ? energy[0] : null;
+    const energyHi = energy.length > 0 ? energy[energy.length - 1] : null;
+    const sampling = pixelSize > 0 ? `${formatNumber(pixelSize)} ${pixelUnit || "px"}/px` : "";
+    const selected = safeSelectedElements.length > 0 ? safeSelectedElements.join(", ") : "Auto ID";
+    return [
+      ["Shape", `${rows} x ${cols} x ${nEnergy}`],
+      ["Dtype", cubeDtype],
+      ["Energy", energyLo != null && energyHi != null ? `${formatEnergy(energyLo)} - ${formatEnergy(energyHi)}` : ""],
+      ["Sampling", sampling],
+      ["Backend", backendLabel],
+      ["Lines", `${lineHints?.length ?? 0} hints, ${selected}`],
+    ] as [string, React.ReactNode][];
+  }, [backendLabel, cols, cubeDtype, energy, lineHints?.length, nEnergy, pixelSize, pixelUnit, rows, safeSelectedElements]);
   const embeddedPayloadBytes =
     (cube?.byteLength ?? 0)
     + (base?.byteLength ?? rows * cols * 4)
@@ -3340,7 +3400,19 @@ function ShowEDS() {
       <Stack spacing={1.2}>
         <Stack direction="row" spacing={1} alignItems="center" sx={{ width: specW + size + 16 }}>
           <Stack direction="row" spacing={1} alignItems="center" sx={{ flex: 1, minWidth: 0 }}>
-            <Typography sx={{ fontWeight: 700, fontSize: 14 }}>{title || "EDS spectrum image"}</Typography>
+            <Typography sx={{ fontWeight: 700, fontSize: 14 }}>
+              {title || "EDS spectrum image"}
+              <InfoTooltip text={<Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
+                <MetadataSection rows={dataInfoRows} />
+                <Typography sx={{ fontSize: 11, fontWeight: "bold", mt: 0.5 }}>Element picker</Typography>
+                <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>
+                  Elements opens an EDS periodic table sourced from characteristic X-ray line data. Click an element to overlay its lines; double-click isolates it. Auto ID ranks likely elements from the selected energy band and ROI spectrum.
+                </Typography>
+                <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>
+                  Drag the energy band to update the map; drag the real-space ROI to update the spectrum. Band maps and ROI spectra stay in the browser path when data are embedded or streamed.
+                </Typography>
+              </Box>} theme={themeInfo.theme} />
+            </Typography>
             <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>
               {rows}x{cols}x{nEnergy} | {backendLabel} {elementLabel ? `| ${elementLabel}` : ""} {busy ? "| computing" : ""}
             </Typography>

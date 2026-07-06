@@ -36,6 +36,7 @@ import { drawScaleBarHiDPI, drawFFTScaleBarHiDPI, drawColorbar, roundToNiceValue
 import { downloadBlob, extractBytes, extractFloat32, formatNumber, preserveRestoredWidgetModelsOnSave } from "../format";
 import { useHideStaticFallback } from "../staticFallback";
 import { findDataRange, applyLogScale, applyLogScaleInPlace, percentileClip, sliderRange, computeStats, computeHistogramFromBytes } from "../stats";
+import { MetadataSection } from "../widgetInfo";
 // ============================================================================
 // Style tokens (inlined - matches Show2D/Show4DSTEM single-file convention)
 // ============================================================================
@@ -9223,6 +9224,13 @@ function Show3D() {
               </Typography>
             )}
             <InfoTooltip text={<Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
+              <MetadataSection rows={[
+                ["Shape", `${nSlices} x ${height} x ${width}`],
+                ["Panels", nPanels > 1 ? `${nPanels} panels` : "single panel"],
+                ["Frame axis", `${dimLabel || "Frame"}${dimSampling ? `, ${formatNumber(dimSampling)} ${dimUnit || ""}` : ""}`],
+                ["Sampling", pixelSize > 0 ? `${formatNumber(pixelSize)} ${unitSymbol(pixelUnit || "px")}/px` : ""],
+                ["Source", hasFrameServer ? "detail server" : "embedded stack"],
+              ]} />
               <Typography sx={{ fontSize: 11, fontWeight: "bold" }}>Controls</Typography>
               <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>FFT: Show power spectrum (Fourier transform) alongside image.</Typography>
               <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>

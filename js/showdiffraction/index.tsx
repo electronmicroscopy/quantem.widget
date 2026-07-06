@@ -23,6 +23,7 @@ import { drawScaleBarHiDPI, drawColorbar } from "../figure";
 import { extractBytes, extractFloat32, formatNumber, downloadBlob, preserveRestoredWidgetModelsOnSave } from "../format";
 import { computeHistogramFromBytes, findDataRange, sliderRange, applyLogScaleInPlace } from "../stats";
 import { COLORMAPS, COLORMAP_NAMES, applyColormap } from "../colormaps";
+import { MetadataSection } from "../widgetInfo";
 
 // ============================================================================
 // Style tokens
@@ -801,16 +802,25 @@ function ShowDiffraction() {
         <Stack direction="row" alignItems="center" spacing={`${SPACING.XS}px`}>
           <Typography sx={{ fontSize: 13, fontWeight: 600 }}>{title || "Diffraction"}</Typography>
           <InfoTooltip theme={themeInfo.theme} text={
-            <KeyboardShortcuts items={[
-              ["Click", "Add spot (or set center in Manual mode)"],
-              ["← →", "Previous / next frame"],
-              ["Shift+Arrow", "Move 10 frames"],
-              ["Scroll", "Zoom in/out"],
-              ["Shift+Drag", "Pan"],
-              ["R", "Reset zoom/pan"],
-              ["Z", "Undo last spot"],
-              ["Double-click", "Reset view"],
-            ]} />
+            <Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
+              <MetadataSection rows={[
+                ["Detector", `${detRows} x ${detCols}`],
+                ["Frames", nFrames > 1 ? `${nFrames}` : "single frame"],
+                ["Calibration", kCalibrated && kPixelSize > 0 ? `${formatNumber(kPixelSize)} 1/Å/px` : "pixel units"],
+                ["Center", `${formatNumber(centerRow)}, ${formatNumber(centerCol)}`],
+                ["Annotations", `${spots.length} spots, ${rings.length} rings`],
+              ]} />
+              <KeyboardShortcuts items={[
+                ["Click", "Add spot (or set center in Manual mode)"],
+                ["← →", "Previous / next frame"],
+                ["Shift+Arrow", "Move 10 frames"],
+                ["Scroll", "Zoom in/out"],
+                ["Shift+Drag", "Pan"],
+                ["R", "Reset zoom/pan"],
+                ["Z", "Undo last spot"],
+                ["Double-click", "Reset view"],
+              ]} />
+            </Box>
           } />
         </Stack>
         <Stack direction="row" spacing={`${SPACING.XS}px`}>
