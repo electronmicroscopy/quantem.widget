@@ -122,6 +122,7 @@ class ShowDiffraction(anywidget.AnyWidget):
     _STATE_FIELDS = (
         "title",
         "frame_idx",
+        "panel_width_px",
         "pixel_size",
         "k_pixel_size",
         "k_calibrated",
@@ -1380,9 +1381,12 @@ class ShowDiffraction(anywidget.AnyWidget):
         angular_range: tuple[float, float] | None = None,
         subtract_background: bool = False,
     ) -> tuple[np.ndarray, np.ndarray]:
-        """Azimuthally averaged profile in px, q, or d units."""
-        if units not in ("auto", "px", "q", "d"):
-            raise ValueError(f"units must be 'auto', 'px', 'q' or 'd', got {units!r}")
+        """Azimuthally averaged profile in px, g, or d units.
+
+        ``units="q"`` is kept as a legacy alias for ``"g"``.
+        """
+        if units not in ("auto", "px", "g", "q", "d"):
+            raise ValueError(f"units must be 'auto', 'px', 'g', 'q' or 'd', got {units!r}")
         if n_bins is not None and n_bins <= 0:
             raise ValueError(f"n_bins must be positive, got {n_bins}")
         if max_radius is not None and max_radius <= 0:
@@ -1390,7 +1394,7 @@ class ShowDiffraction(anywidget.AnyWidget):
         if angular_range is not None and len(angular_range) != 2:
             raise ValueError("angular_range must be a (start_deg, end_deg) pair")
         calibrated = self.k_calibrated and self.k_pixel_size > 0
-        if units in ("q", "d") and not calibrated:
+        if units in ("g", "q", "d") and not calibrated:
             raise ValueError(
                 f"radial_profile(units={units!r}) needs a calibrated pattern; call "
                 "calibrate_from_ring / calibrate_from_spot / calibrate_from_phase first"
@@ -1404,10 +1408,10 @@ class ShowDiffraction(anywidget.AnyWidget):
             )
             intensity = intensity - background
         if units == "auto":
-            units = "q" if calibrated else "px"
+            units = "g" if calibrated else "px"
         if units == "px":
             return radii_px, intensity
-        if units == "q":
+        if units in ("g", "q"):
             return (radii_px * self.k_pixel_size).astype(np.float32), intensity
         keep = radii_px > 0
         d_axis = (1.0 / (radii_px[keep] * self.k_pixel_size)).astype(np.float32)
@@ -1650,9 +1654,6 @@ class ShowDiffraction(anywidget.AnyWidget):
                 {
                     "phase_id": f"phase-{phase.name}",
                     "name": phase.name,
-                    "formula": "",
-                    "spacegroup": "",
-                    "crystal_system": "",
                     "lines": self._match_lines(observed, lines, report),
                 }
             )

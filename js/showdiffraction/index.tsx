@@ -466,9 +466,6 @@ interface IdentifyLine {
 interface IdentifyResult {
   phase_id: string;
   name: string;
-  formula: string;
-  spacegroup: string;
-  crystal_system: string;
   matched: number;
   n_obs: number;
   mean_err: number | null;
@@ -1699,23 +1696,23 @@ function ShowDiffraction() {
           {/* Toolbar */}
           {controlsVisible && (
             <Stack direction="row" alignItems="center" spacing={`${SPACING.SM}px`} useFlexGap sx={{ mb: `${SPACING.XS}px`, minHeight: 28, flexWrap: "wrap", rowGap: `${SPACING.XS}px`, maxWidth: isMobile ? "100%" : patternPanelWidth, boxSizing: "border-box", px: 1, py: 0.5, border: `1px solid ${themeColors.border}`, borderRadius: "4px", bgcolor: themeColors.controlBg }}>
-              <Button size="small" sx={{ ...compactButton, color: themeColors.accent, fontWeight: 700 }} onClick={() => setAutoRequest(true)} title="Run full analysis">AUTO</Button>
+              <Button size="small" sx={{ ...compactButton, color: themeColors.accent, fontWeight: 700 }} onClick={() => setAutoRequest(true)} title="Run full analysis">Auto</Button>
               {nFrames > 1 && (
-                <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} onClick={() => setMergeRequest(true)} title="Align and merge frames">MERGE</Button>
+                <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} onClick={() => setMergeRequest(true)} title="Align and merge frames">Merge</Button>
               )}
               <Button size="small" sx={{ ...compactButton, color: phaseName ? themeColors.accent : themeColors.textMuted }} onClick={(e) => setPhaseMenuAnchor(e.currentTarget)} title="Phase library">
-                {phaseName ? `PHASE: ${phaseName}` : "PHASE"}
+                {phaseName ? `Phase ${phaseName}` : "Phase"}
               </Button>
               <Button size="small" sx={{ ...compactButton, color: maskRegions && maskRegions.length ? themeColors.accent : themeColors.textMuted }} onClick={(e) => setMaskMenuAnchor(e.currentTarget)} title="Edit excluded regions">
-                EXCLUDE{maskRegions && maskRegions.length ? ` (${maskRegions.length})` : ""}
+                Exclude{maskRegions && maskRegions.length ? ` (${maskRegions.length})` : ""}
               </Button>
               <Typography sx={{ ...typography.label, fontSize: 10 }}>Center</Typography>
               <Select size="small" value={centerMode} onChange={(e) => setCenterMode(String(e.target.value))} sx={{ ...themedSelect, minWidth: 80 }} MenuProps={topToolbarMenuProps}>
                 <MenuItem value="auto" sx={{ fontSize: 10 }}>Auto</MenuItem>
                 <MenuItem value="manual" sx={{ fontSize: 10 }}>Manual</MenuItem>
               </Select>
-              <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} onClick={(e) => setRefineMenuAnchor(e.currentTarget)} title="Refine center">REFINE</Button>
-              <Typography sx={{ ...typography.label, fontSize: 10 }}>Cmap</Typography>
+              <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} onClick={(e) => setRefineMenuAnchor(e.currentTarget)} title="Refine center">Refine</Button>
+              <Typography sx={{ ...typography.label, fontSize: 10 }}>Color</Typography>
               <Select size="small" value={dpColormap} onChange={(e) => setDpColormap(e.target.value)} sx={themedSelect} MenuProps={topToolbarMenuProps}>
                 {COLORMAP_NAMES.map(n => <MenuItem key={n} value={n} sx={{ fontSize: 10 }}>{n}</MenuItem>)}
               </Select>
@@ -1747,7 +1744,7 @@ function ShowDiffraction() {
                 <input value={customName} onChange={(e) => setCustomName(e.target.value)} placeholder="name" style={numInput(70)} />
                 <input type="number" value={customA} onChange={(e) => setCustomA(e.target.value)} placeholder="a (Å)" style={numInput(56)} />
                 <Select size="small" value={customAbsences} onChange={(e) => setCustomAbsences(String(e.target.value))} sx={{ ...themedSelect, minWidth: 78 }} MenuProps={themedMenuProps}>
-                  {["none", "fcc", "bcc", "diamond", "hcp", "wurtzite", "rhombohedral"].map((r) => <MenuItem key={r} value={r} sx={{ fontSize: 10 }}>{r}</MenuItem>)}
+                  {["none", "fcc", "bcc", "diamond", "hcp", "wurtzite", "rhombohedral", "rhombohedral-c"].map((r) => <MenuItem key={r} value={r} sx={{ fontSize: 10 }}>{r}</MenuItem>)}
                 </Select>
                 <Button size="small" sx={{ ...compactButton, color: themeColors.accent }}
                   disabled={!customName.trim() || !(parseFloat(customA) > 0)}
@@ -1762,7 +1759,7 @@ function ShowDiffraction() {
                     setPhaseName(customName.trim());
                     setCustomName(""); setCustomA(""); setCustomB(""); setCustomC("");
                     setCustomAlpha(""); setCustomBeta(""); setCustomGamma("");
-                  }}>ADD</Button>
+                  }}>Add</Button>
               </Stack>
               <Stack direction="row" spacing={`${SPACING.XS}px`} alignItems="center" sx={{ mb: 1 }} title="Optional non-cubic lattice; blank = b,c=a and angles 90°">
                 <input type="number" value={customB} onChange={(e) => setCustomB(e.target.value)} placeholder="b=a" style={numInput(46)} />
@@ -1776,10 +1773,10 @@ function ShowDiffraction() {
                 <Switch size="small" checked={identifyCustomOnly} onChange={(_, v) => setIdentifyCustomOnly(v)} sx={switchStyles.small} />
               </Stack>
               <Stack direction="row" spacing={`${SPACING.XS}px`} alignItems="center" useFlexGap sx={{ flexWrap: "wrap" }}>
-                <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} disabled={!phaseName || !rings || rings.length < 2} onClick={() => setCalibratePhaseRequest(true)} title="Calibrate from rings">CALIBRATE</Button>
-                <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} disabled={!phaseName || !rings || rings.length === 0} onClick={() => setIndexRingsRequest(true)}>INDEX RINGS</Button>
-                <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} disabled={!phaseName || !spots || spots.length === 0} onClick={() => setIndexSpotsRequest(true)}>INDEX SPOTS</Button>
-                <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} disabled={(!rings || rings.length === 0) && (!spots || spots.length === 0)} onClick={() => setIdentifyRequest(true)} title="Identify phase">IDENTIFY</Button>
+                <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} disabled={!phaseName || !rings || rings.length < 2} onClick={() => setCalibratePhaseRequest(true)} title="Calibrate from rings">Calibrate</Button>
+                <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} disabled={!phaseName || !rings || rings.length === 0} onClick={() => setIndexRingsRequest(true)}>Index Rings</Button>
+                <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} disabled={!phaseName || !spots || spots.length === 0} onClick={() => setIndexSpotsRequest(true)}>Index Spots</Button>
+                <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} disabled={(!rings || rings.length === 0) && (!spots || spots.length === 0)} onClick={() => setIdentifyRequest(true)} title="Identify phase">Identify</Button>
               </Stack>
             </Box>
           </Menu>
@@ -1798,23 +1795,23 @@ function ShowDiffraction() {
                 </Stack>
               ))}
               <Stack direction="row" spacing={`${SPACING.XS}px`} alignItems="center" sx={{ mt: 1 }}>
-                <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} title="Drag on the pattern: center out to the radius" onClick={() => { setDrawMode("disk"); setMaskMenuAnchor(null); }}>DRAW DISK</Button>
-                <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} title="Drag on the pattern: start angle to end angle" onClick={() => { setDrawMode("wedge"); setMaskMenuAnchor(null); }}>DRAW WEDGE</Button>
+                <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} title="Drag on the pattern: center out to the radius" onClick={() => { setDrawMode("disk"); setMaskMenuAnchor(null); }}>Draw Disk</Button>
+                <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} title="Drag on the pattern: start angle to end angle" onClick={() => { setDrawMode("wedge"); setMaskMenuAnchor(null); }}>Draw Wedge</Button>
               </Stack>
               <Stack direction="row" spacing={`${SPACING.XS}px`} alignItems="center" sx={{ mt: 0.5 }}>
                 <input type="number" value={wedgeStart} onChange={(e) => setWedgeStart(e.target.value)} placeholder="start°" style={numInput(52)} />
                 <input type="number" value={wedgeEnd} onChange={(e) => setWedgeEnd(e.target.value)} placeholder="end°" style={numInput(52)} />
                 <Button size="small" sx={{ ...compactButton, color: themeColors.accent }}
                   disabled={wedgeStart === "" || wedgeEnd === ""}
-                  onClick={() => { setMaskRegions([...(maskRegions || []), { kind: "wedge", start_deg: parseFloat(wedgeStart), end_deg: parseFloat(wedgeEnd) }]); setWedgeStart(""); setWedgeEnd(""); }}>+ WEDGE</Button>
+                  onClick={() => { setMaskRegions([...(maskRegions || []), { kind: "wedge", start_deg: parseFloat(wedgeStart), end_deg: parseFloat(wedgeEnd) }]); setWedgeStart(""); setWedgeEnd(""); }}>Add Wedge</Button>
               </Stack>
               <Stack direction="row" spacing={`${SPACING.XS}px`} alignItems="center" sx={{ mt: 0.5 }}>
                 <input type="number" value={diskRadius} onChange={(e) => setDiskRadius(e.target.value)} placeholder="radius px" style={numInput(66)} />
                 <Button size="small" sx={{ ...compactButton, color: themeColors.accent }}
                   disabled={!(parseFloat(diskRadius) > 0) || !spots || spots.length === 0}
                   title="Mask disk at last spot"
-                  onClick={() => { const s = spots[spots.length - 1]; setMaskRegions([...(maskRegions || []), { kind: "disk", row: s.row, col: s.col, radius: parseFloat(diskRadius) }]); setDiskRadius(""); }}>+ DISK @ LAST SPOT</Button>
-                <Typography sx={{ ...typography.label, fontSize: 10 }}>Show:</Typography>
+                  onClick={() => { const s = spots[spots.length - 1]; setMaskRegions([...(maskRegions || []), { kind: "disk", row: s.row, col: s.col, radius: parseFloat(diskRadius) }]); setDiskRadius(""); }}>Add Disk at Last Spot</Button>
+                <Typography sx={{ ...typography.label, fontSize: 10 }}>Show</Typography>
                 <Switch size="small" checked={showMask} onChange={(_, v) => setShowMask(v)} sx={switchStyles.small} />
               </Stack>
             </Box>
@@ -1829,7 +1826,7 @@ function ShowDiffraction() {
                   <MenuItem value="symmetry" sx={{ fontSize: 10 }}>Symmetry</MenuItem>
                   <MenuItem value="phase_corr" sx={{ fontSize: 10 }}>Phase corr</MenuItem>
                 </Select>
-                <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} onClick={() => { setRefineCenterRequest(true); setRefineMenuAnchor(null); }}>RUN</Button>
+                <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} onClick={() => { setRefineCenterRequest(true); setRefineMenuAnchor(null); }}>Run</Button>
               </Stack>
               {centerMethod && (
                 <Typography sx={{ ...typography.value, mt: 0.5, color: themeColors.textMuted }}>
@@ -1880,14 +1877,14 @@ function ShowDiffraction() {
             useFlexGap={isMobile}
           >
             {([
-              ["PROFILE", "Radial profile", showProfile, () => setShowProfile(!showProfile)],
-              ["AZIM", "Azimuthal profile", showAzimuthal, () => setShowAzimuthal(!showAzimuthal)],
+              ["Profile", "Radial profile", showProfile, () => setShowProfile(!showProfile)],
+              ["Azim", "Azimuthal profile", showAzimuthal, () => setShowAzimuthal(!showAzimuthal)],
               ["HKL", "hkl labels", showHkl, () => setShowHkl(!showHkl)],
-              ["MASK VIEW", "Mask overlay", showMask, () => setShowMask(!showMask)],
-              ["INVERT", "Invert colormap", dpInvert, () => setDpInvert(!dpInvert)],
-              ["STATS", "Statistics", showStats, () => setShowStats(!showStats)],
-              ["QUALITY", "Analysis quality", showQc, toggleQuality],
-              ["CTRL", "Control bar", showControls, () => setShowControls(!showControls)],
+              ["Mask View", "Mask overlay", showMask, () => setShowMask(!showMask)],
+              ["Invert", "Invert colormap", dpInvert, () => setDpInvert(!dpInvert)],
+              ["Stats", "Statistics", showStats, () => setShowStats(!showStats)],
+              ["Quality", "Analysis quality", showQc, toggleQuality],
+              ["Controls", "Control bar", showControls, () => setShowControls(!showControls)],
             ] as [string, string, boolean, () => void][]).map(([label, hint, on, toggle]) => (
               <Button key={label} size="small" title={hint} onClick={toggle}
                 sx={{ ...compactButton, width: isMobile ? "auto" : sideMenuWidth, justifyContent: "flex-start", color: on ? themeColors.accent : themeColors.textMuted }}>
@@ -1959,9 +1956,9 @@ function ShowDiffraction() {
             <Box sx={{ mt: `${SPACING.XS}px`, ...panelWidth }}>
               <Stack direction="row" alignItems="center" spacing={`${SPACING.SM}px`} sx={{ px: 1, mb: `${SPACING.XS}px` }}>
                 <Typography sx={typography.label}>Radial profile</Typography>
-                <Typography sx={{ ...typography.label, fontSize: 10 }}>log:</Typography>
+                <Typography sx={{ ...typography.label, fontSize: 10 }}>Log</Typography>
                 <Switch size="small" checked={profileLog} onChange={(_, v) => setProfileLog(v)} sx={switchStyles.small} />
-                <Typography sx={{ ...typography.label, fontSize: 10 }}>−bg:</Typography>
+                <Typography sx={{ ...typography.label, fontSize: 10 }}>−bg</Typography>
                 <Switch size="small" checked={profileSubtract} onChange={(_, v) => setProfileSubtract(v)} sx={switchStyles.small} />
                 <Typography sx={{ ...typography.value, color: themeColors.textMuted }}>click to add ring</Typography>
               </Stack>
@@ -1991,8 +1988,8 @@ function ShowDiffraction() {
                 <input value={identifyElements} onChange={(e) => setIdentifyElements(e.target.value)} placeholder="elements e.g. Fe,O" style={numInput(110)} />
                 <Typography sx={{ ...typography.label, fontSize: 10 }} title="Rank only custom phases, not the library">candidates only</Typography>
                 <Switch size="small" checked={identifyCustomOnly} onChange={(_, v) => setIdentifyCustomOnly(v)} sx={switchStyles.small} />
-                <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} onClick={() => setIdentifyRequest(true)} title="Identify phase">IDENTIFY</Button>
-                <Button size="small" sx={{ ...compactButton, color: themeColors.textMuted }} onClick={() => setIdentifyCollapsed(true)} title="Hide results">CLEAR</Button>
+                <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} onClick={() => setIdentifyRequest(true)} title="Identify phase">Identify</Button>
+                <Button size="small" sx={{ ...compactButton, color: themeColors.textMuted }} onClick={() => setIdentifyCollapsed(true)} title="Hide results">Clear</Button>
               </Stack>
               {!identifyCollapsed && (
                 <Box sx={{ maxHeight: 240, overflow: "auto", border: `1px solid ${themeColors.border}` }}>
@@ -2131,8 +2128,8 @@ function ShowDiffraction() {
               <Typography sx={{ ...typography.label, color: themeColors.text }}>
                 Spots ({spots ? spots.length : 0})
               </Typography>
-              <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} onClick={() => setDetectRequest(-1)} title="Detect spots">AUTO</Button>
-              <Button size="small" sx={{ ...compactButton, color: moveSpots ? themeColors.accent : themeColors.textMuted }} onClick={() => setMoveSpots(!moveSpots)} title="Drag spots on the pattern to move them">MOVE</Button>
+              <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} onClick={() => setDetectRequest(-1)} title="Detect spots">Auto</Button>
+              <Button size="small" sx={{ ...compactButton, color: moveSpots ? themeColors.accent : themeColors.textMuted }} onClick={() => setMoveSpots(!moveSpots)} title="Drag spots on the pattern to move them">Move</Button>
             </Stack>
             <Stack direction="row" spacing={`${SPACING.XS}px`} sx={{ p: 0.25, border: `1px solid ${themeColors.border}`, borderRadius: "4px", bgcolor: themeColors.controlBg }}>
               <Button
@@ -2176,7 +2173,7 @@ function ShowDiffraction() {
                     {spots.some((s) => s.d_ref != null) && (
                       <th style={{ padding: "2px 6px" }} title="measured vs reference d">Δd (%)</th>
                     )}
-                    <th style={{ padding: "2px 6px" }} title="|g| = 1/d in 1/Å · 1/nm">|g| (1/Å·1/nm)</th>
+                    <th style={{ padding: "2px 6px" }} title="|g| = 1/d, shown in 1/Å / 1/nm">|g| (1/Å / 1/nm)</th>
                     <th style={{ padding: "2px 6px" }} title="angle vs reference spot">∠ (°)</th>
                     <th style={{ padding: "2px 6px" }} title="Gaussian fit R²">fit</th>
                     <th style={{ padding: "2px 6px" }}>I</th>
@@ -2190,7 +2187,7 @@ function ShowDiffraction() {
                       ? (spot.d_spacing_err ? `${spot.d_spacing.toFixed(3)}±${spot.d_spacing_err.toFixed(3)}` : spot.d_spacing.toFixed(3))
                       : "—";
                     const gStr = spot.g_magnitude != null
-                      ? `${spot.g_magnitude.toFixed(4)}·${(spot.g_magnitude * 10).toFixed(3)}`
+                      ? `${spot.g_magnitude.toFixed(4)} / ${(spot.g_magnitude * 10).toFixed(3)}`
                       : `${spot.r_pixels.toFixed(1)} px`;
                     const aStr = spot.angle_deg != null
                       ? (spot.angle_deg_err ? `${spot.angle_deg.toFixed(1)}±${spot.angle_deg_err.toFixed(1)}` : spot.angle_deg.toFixed(1))
@@ -2230,12 +2227,12 @@ function ShowDiffraction() {
               <Typography sx={{ ...typography.label, color: themeColors.text }}>
                 Rings ({rings ? rings.length : 0})
               </Typography>
-              <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} onClick={() => setDetectRingsRequest(-1)} title="Detect rings">AUTO</Button>
+              <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} onClick={() => setDetectRingsRequest(-1)} title="Detect rings">Auto</Button>
             </Stack>
             <Stack direction="row" spacing={`${SPACING.XS}px`} sx={{ p: 0.25, border: `1px solid ${themeColors.border}`, borderRadius: "4px", bgcolor: themeColors.controlBg }}>
               <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} disabled={!rings || rings.length === 0} onClick={() => exportMeasurements("csv", "rings")}>CSV</Button>
               <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} disabled={!rings || rings.length === 0} onClick={() => exportMeasurements("json", "rings")}>JSON</Button>
-              <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} disabled={!rings || rings.length === 0} onClick={() => setFitRingsRequest(true)} title="Fit ring profiles">FIT</Button>
+              <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} disabled={!rings || rings.length === 0} onClick={() => setFitRingsRequest(true)} title="Fit ring profiles">Fit</Button>
               <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} disabled={!rings || rings.length === 0} onClick={() => setRingUndoRequest(true)}>Undo</Button>
               <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} disabled={!rings || rings.length === 0} onClick={() => setRingClearRequest(true)}>Clear</Button>
             </Stack>
@@ -2329,7 +2326,7 @@ function ShowDiffraction() {
           </Stack>
 
           <Box sx={{ ...controlBox, mt: `${SPACING.XS}px` }}>
-            <Typography sx={typography.label}>Calibrate d (Å):</Typography>
+            <Typography sx={typography.label}>Calibrate d (Å)</Typography>
             <input
               type="number" value={dKnown}
               onChange={(e) => setDKnown(e.target.value)}
@@ -2354,14 +2351,14 @@ function ShowDiffraction() {
           </Box>
 
           <Box sx={{ ...controlBox, mt: `${SPACING.XS}px` }}>
-            <Typography sx={typography.label}>Distortion:</Typography>
+            <Typography sx={typography.label}>Distortion</Typography>
             <Button
               size="small" sx={{ ...compactButton, color: themeColors.accent }}
               disabled={!rings || rings.length === 0}
               onClick={() => setFitEllipseRequest(true)}
               title="Fit ellipse distortion"
-            >FIT ELLIPSE</Button>
-            <Typography sx={{ ...typography.label, fontSize: 10 }}>Use correction:</Typography>
+            >Fit Ellipse</Button>
+            <Typography sx={{ ...typography.label, fontSize: 10 }}>Use Correction</Typography>
             <Switch
               size="small" checked={ellipseCorrected}
               onChange={(_, v) => setEllipseCorrected(v)}
