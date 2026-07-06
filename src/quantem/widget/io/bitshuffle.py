@@ -968,6 +968,100 @@ extern "C" __global__ void pack_h5_chunks_kernel(
         dst += 4 + sz;
     }
 }
+
+extern "C" __global__ void clip_u16_to_u8_count_kernel(
+    const uint16_t* __restrict__ src,
+    uint8_t* __restrict__ dst,
+    const uint64_t n,
+    uint64_t* __restrict__ block_counts
+) {
+    extern __shared__ uint64_t counts[];
+    uint64_t i = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    const uint64_t stride = (uint64_t)blockDim.x * gridDim.x;
+    uint64_t local = 0;
+
+    for (; i < n; i += stride) {
+        const uint16_t v = src[i];
+        const bool clipped = v > 255;
+        local += clipped ? 1 : 0;
+        dst[i] = (uint8_t)(clipped ? 255 : v);
+    }
+
+    counts[threadIdx.x] = local;
+    __syncthreads();
+
+    for (uint32_t offset = blockDim.x >> 1; offset > 0; offset >>= 1) {
+        if (threadIdx.x < offset) {
+            counts[threadIdx.x] += counts[threadIdx.x + offset];
+        }
+        __syncthreads();
+    }
+
+    if (threadIdx.x == 0) {
+        block_counts[blockIdx.x] = counts[0];
+    }
+}
+
+extern "C" __global__ void clip_u16_to_u8_kernel(
+    const uint16_t* __restrict__ src,
+    uint8_t* __restrict__ dst,
+    const uint64_t n
+) {
+    uint64_t i = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    const uint64_t stride = (uint64_t)blockDim.x * gridDim.x;
+
+    for (; i < n; i += stride) {
+        const uint16_t v = src[i];
+        dst[i] = (uint8_t)(v > 255 ? 255 : v);
+    }
+}
+
+extern "C" __global__ void clip_u32_to_u8_count_kernel(
+    const uint32_t* __restrict__ src,
+    uint8_t* __restrict__ dst,
+    const uint64_t n,
+    uint64_t* __restrict__ block_counts
+) {
+    extern __shared__ uint64_t counts[];
+    uint64_t i = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    const uint64_t stride = (uint64_t)blockDim.x * gridDim.x;
+    uint64_t local = 0;
+
+    for (; i < n; i += stride) {
+        const uint32_t v = src[i];
+        const bool clipped = v > 255;
+        local += clipped ? 1 : 0;
+        dst[i] = (uint8_t)(clipped ? 255 : v);
+    }
+
+    counts[threadIdx.x] = local;
+    __syncthreads();
+
+    for (uint32_t offset = blockDim.x >> 1; offset > 0; offset >>= 1) {
+        if (threadIdx.x < offset) {
+            counts[threadIdx.x] += counts[threadIdx.x + offset];
+        }
+        __syncthreads();
+    }
+
+    if (threadIdx.x == 0) {
+        block_counts[blockIdx.x] = counts[0];
+    }
+}
+
+extern "C" __global__ void clip_u32_to_u8_kernel(
+    const uint32_t* __restrict__ src,
+    uint8_t* __restrict__ dst,
+    const uint64_t n
+) {
+    uint64_t i = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    const uint64_t stride = (uint64_t)blockDim.x * gridDim.x;
+
+    for (; i < n; i += stride) {
+        const uint32_t v = src[i];
+        dst[i] = (uint8_t)(v > 255 ? 255 : v);
+    }
+}
 '''
 
 # =============================================================================
@@ -996,6 +1090,10 @@ _KERNEL_FUNCS = {
     "lz4_compress_var_kernel": "lz4_compress_var_kernel",
     "compact_kernel": "compact_compressed",
     "pack_h5_chunks_kernel": "pack_h5_chunks_kernel",
+    "clip_u16_to_u8_kernel": "clip_u16_to_u8_kernel",
+    "clip_u32_to_u8_kernel": "clip_u32_to_u8_kernel",
+    "clip_u16_to_u8_count_kernel": "clip_u16_to_u8_count_kernel",
+    "clip_u32_to_u8_count_kernel": "clip_u32_to_u8_count_kernel",
 }
 _cuda_module = None
 

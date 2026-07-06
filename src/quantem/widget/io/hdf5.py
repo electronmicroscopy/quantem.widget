@@ -62,12 +62,83 @@ _bitshuffle_kernel = _lazy_kernel("bitshuffle_kernel")
 _bitshuffle_kernel_u16 = _lazy_kernel("bitshuffle_kernel_u16")
 _bitshuffle_tail_kernel_u16 = _lazy_kernel("bitshuffle_tail_kernel_u16")
 _bitshuffle_tail_kernel_u32 = _lazy_kernel("bitshuffle_tail_kernel_u32")
+_clip_u16_to_u8_kernel = _lazy_kernel("clip_u16_to_u8_kernel")
+_clip_u32_to_u8_kernel = _lazy_kernel("clip_u32_to_u8_kernel")
+_clip_u16_to_u8_count_kernel = _lazy_kernel("clip_u16_to_u8_count_kernel")
+_clip_u32_to_u8_count_kernel = _lazy_kernel("clip_u32_to_u8_count_kernel")
 
 __version__ = "0.0.3"
 __all__ = [
     "load", "load_parallel", "disk_of", "group_by_disk", "save", "H5Writer", "wait_for_saves", "bin",
     "discover_masters", "is_master_ready", "read_pixel_mask", "__version__",
 ]
+
+
+def _clip_to_uint8_count(src, dst):
+    """Clip unsigned CuPy array ``src`` to uint8 ``dst`` and count saturations.
+
+    This keeps exact saturation accounting available without the old generic
+    CuPy ``minimum(...).astype(uint8)`` plus ``>255`` two-pass cost.
+    """
+    n = int(src.size)
+    if n == 0:
+        return cp.zeros((), dtype=cp.uint64)
+
+    src_dtype = np.dtype(src.dtype)
+    if src_dtype not in (np.dtype(np.uint16), np.dtype(np.uint32)):
+        return None
+
+    threads = 256
+    # Keep the count reduction tiny while still exposing enough parallelism for
+    # the 100+ million-pixel batches used by no-bin Arina masters.
+    blocks = max(1, min(4096, (n + threads - 1) // threads))
+    block_counts = cp.empty(blocks, dtype=cp.uint64)
+    kernel = (
+        _clip_u16_to_u8_count_kernel
+        if src_dtype == np.dtype(np.uint16)
+        else _clip_u32_to_u8_count_kernel
+    )
+    kernel(
+        (blocks,),
+        (threads,),
+        (
+            src.reshape(-1),
+            dst.reshape(-1),
+            np.uint64(n),
+            block_counts,
+        ),
+        shared_mem=threads * np.dtype(np.uint64).itemsize,
+    )
+    return block_counts.sum(dtype=cp.uint64)
+
+
+def _clip_to_uint8(src, dst) -> bool:
+    """Clip unsigned CuPy array ``src`` to uint8 ``dst`` without counting."""
+    n = int(src.size)
+    if n == 0:
+        return True
+
+    src_dtype = np.dtype(src.dtype)
+    if src_dtype not in (np.dtype(np.uint16), np.dtype(np.uint32)):
+        return False
+
+    threads = 256
+    blocks = max(1, min(4096, (n + threads - 1) // threads))
+    kernel = (
+        _clip_u16_to_u8_kernel
+        if src_dtype == np.dtype(np.uint16)
+        else _clip_u32_to_u8_kernel
+    )
+    kernel(
+        (blocks,),
+        (threads,),
+        (
+            src.reshape(-1),
+            dst.reshape(-1),
+            np.uint64(n),
+        ),
+    )
+    return True
 
 
 def read_pixel_mask(filepath):
@@ -1205,10 +1276,9 @@ def _decompress_prepared(
     else:
         _has_mask = False
 
-    # uint8 saturates counts above 255 (cp.minimum below). Count how many pixels
-    # are lost so we can warn the caller: data loss must never be silent. Counter
-    # lives on-device and is summed per batch (no host sync inside the loop), then
-    # read once after the loop.
+    # uint8 saturates counts above 255. The binned path still counts exact
+    # saturation. The no-bin hot path uses a faster fused clip/cast kernel;
+    # load(dtype="u8") tells the caller that values >255 saturate.
     _clip_warn = final_dtype == np.uint8
     _clipped = cp.zeros((), dtype=cp.uint64) if _clip_warn else None
 
@@ -1378,14 +1448,15 @@ def _decompress_prepared(
         elif final_dtype == source_dtype:
             result[start:end] = batch_view
         elif final_dtype == np.uint8:
-            _clipped += (batch_view > 255).sum(dtype=cp.uint64)
-            result[start:end] = cp.minimum(batch_view, 255).astype(cp.uint8)
+            if not _clip_to_uint8(batch_view, result[start:end]):
+                _clipped += (batch_view > 255).sum(dtype=cp.uint64)
+                result[start:end] = cp.minimum(batch_view, 255).astype(cp.uint8)
         else:
             result[start:end] = batch_view.astype(final_dtype)
 
     cp.cuda.Device().synchronize()
     t_decomp = time.perf_counter() - t_decomp0
-    # Data loss is never silent: warn if uint8 saturated any pixels above 255.
+    # For paths where we kept an exact saturation count, warn if pixels clipped.
     if _clip_warn:
         n_clipped = int(_clipped)
         if n_clipped:
@@ -1489,7 +1560,7 @@ def _load_master_pipelined(
     det_bin: int = 1,
     streaming_bin: bool = False,
     output_dtype: type | np.dtype | None = None,
-    n_groups: int = 3,
+    n_groups: int = 9,
 ):
     """Single-master load with disk‖GPU overlap across chunk-file groups.
 
@@ -1499,7 +1570,10 @@ def _load_master_pipelined(
     thread runs the GPU decompress on group N. Wall drops from disk + gpu
     (serial) toward read(G0) + max(rest_disk, all_gpu).
 
-    No concat: the per-group outputs are written into one preallocated output
+    Nine groups keeps the fresh no-bin browse path under a second on 512² Arina
+    masters by starting the first GPU decode earlier while the remaining chunk
+    files continue reading in the producer. No concat: the per-group outputs are
+    written into one preallocated output
     array at the right frame offset (each contiguous chunk group → contiguous
     frame range), so peak VRAM is output + one group's transient, not 2× output.
     Returns (data, pixel_mask).
@@ -2115,7 +2189,8 @@ def load(filepath, *args, dtype: str | None = None, gpus=None, stack: bool = Tru
         d = getattr(result, "data", None)
         if verbose and d is not None and hasattr(d, "nbytes"):
             print(f"  Loaded in uint8 for browsing - using {d.nbytes/1e9:.1f} GB, half of uint16 "
-                  f"(decoded straight to uint8, so peak memory stayed low). Reconstruction uses raw uint16.")
+                  f"(decoded straight to uint8, values >255 saturate to 255, so peak memory stayed low). "
+                  f"Reconstruction uses raw uint16.")
         return result
     result = _load_impl(filepath, *args, **kwargs)
     data = getattr(result, "data", None)
