@@ -68,6 +68,8 @@ class Dataset5dstem:
         self._lazy_shape = None if lazy_shape is None else tuple(int(x) for x in lazy_shape)
         self._lazy_dtype = lazy_dtype
         if lazy_loaders is not None:
+            if not lazy_loaders:
+                raise ValueError("lazy_loaders needs at least one loader.")
             if self._lazy_shape is None or len(self._lazy_shape) != 5:
                 raise ValueError("lazy_shape must be a 5D shape (N, scan_row, scan_col, k_row, k_col).")
             if int(self._lazy_shape[0]) != len(lazy_loaders):
@@ -79,7 +81,11 @@ class Dataset5dstem:
                 raise ValueError("lazy_dtype is required for lazy_loaders.")
             self._frames = [None] * len(lazy_loaders)
             for idx, frame in (initial_frames or {}).items():
-                self._frames[int(idx)] = frame
+                idx = int(idx)
+                if idx < 0 or idx >= len(lazy_loaders):
+                    raise ValueError(f"initial frame index {idx} is out of range for {len(lazy_loaders)} loaders.")
+                self._validate_lazy_frame(frame, idx)
+                self._frames[idx] = frame
         self.name = name
         self.series_type = series_type
         self.sampling = sampling
@@ -163,6 +169,21 @@ class Dataset5dstem:
             series_type=series_type,
             series=series,
         )
+
+    def _validate_lazy_frame(self, frame: torch.Tensor, i: int) -> None:
+        if self._lazy_shape is None or self._lazy_dtype is None:
+            raise RuntimeError("lazy frame validation requires lazy shape and dtype metadata.")
+        if frame.ndim != 4:
+            raise ValueError(f"lazy frame {i} must load a 4D tensor, got {tuple(frame.shape)}.")
+        expected_shape = tuple(self._lazy_shape[1:])
+        if tuple(frame.shape) != expected_shape:
+            raise ValueError(
+                f"lazy frame {i} loaded shape {tuple(frame.shape)}, expected {expected_shape}."
+            )
+        if frame.dtype != self._lazy_dtype:
+            raise ValueError(
+                f"lazy frame {i} loaded dtype {frame.dtype}, expected {self._lazy_dtype}."
+            )
 
     # --- calibration (4-length: scan + k; series axis is separate) ---
     @property
@@ -281,13 +302,26 @@ class Dataset5dstem:
 
     @property
     def nbytes(self) -> int:
-        """Total resident bytes across tensor/frame backing."""
+        """Total logical bytes across the full series."""
         if self._lazy_shape is not None:
             return int(self.element_size() * self.numel())
         if self._frames is not None:
             return int(sum(f.element_size() * f.nelement() for f in self._frames))
         if self._tensor is None:
             raise RuntimeError("Dataset5dstem has been freed; re-load to use it again.")
+        return int(self._tensor.element_size() * self._tensor.nelement())
+
+    @property
+    def resident_nbytes(self) -> int:
+        """Bytes currently backed by live tensors.
+
+        For lazy file-backed series this is the loaded/cache footprint, not the
+        logical size of every master on disk.
+        """
+        if self._frames is not None:
+            return int(sum(f.element_size() * f.nelement() for f in self._frames if f is not None))
+        if self._tensor is None:
+            return 0
         return int(self._tensor.element_size() * self._tensor.nelement())
 
     def numel(self) -> int:
@@ -363,7 +397,7 @@ class Dataset5dstem:
             return torch.device(f"cuda:{device}")
         return torch.device(device)
 
-    def _materialize_frames(self) -> list[torch.Tensor]:
+    def _materialize_frames(self) -> list[torch.Tensor | None]:
         """Force the per-frame list backing so frames can be placed/freed independently.
 
         A single 5D tensor is split into independent per-frame tensors (own storage via
@@ -375,6 +409,21 @@ class Dataset5dstem:
             self._frames = [self._tensor[i].clone() for i in range(self._tensor.shape[0])]
             self._tensor = None
         return self._frames
+
+    def _ensure_frame_loaded(self, i: int) -> torch.Tensor:
+        """Load lazy frame ``i`` once, preserving already-loaded/cached frames."""
+        if self._frames is None:
+            raise RuntimeError("Dataset5dstem has been freed; re-load to use it again.")
+        i = i % len(self)
+        frame = self._frames[i]
+        if frame is not None:
+            return frame
+        if self._lazy_loaders is None or self._lazy_shape is None or self._lazy_dtype is None:
+            raise RuntimeError(f"frame {i} is missing and no lazy loader is available.")
+        loaded = self._lazy_loaders[i]()
+        self._validate_lazy_frame(loaded, i)
+        self._frames[i] = loaded
+        return loaded
 
     def _indices(self, idx) -> list[int]:
         """Normalize idx (None=all, int, or iterable) to a sorted unique in-range index list."""
@@ -400,7 +449,7 @@ class Dataset5dstem:
         except ImportError:
             return
         for d in cuda_devs:
-            with cp.cuda.Device(d.index):
+            with cp.cuda.Device(0 if d.index is None else d.index):
                 cp.get_default_memory_pool().free_all_blocks()
 
     def to(self, device, idx=None) -> Self:
@@ -416,8 +465,11 @@ class Dataset5dstem:
                 raise ValueError("cannot pass idx= when spreading across a device list; spread moves the whole series.")
             targets = [self._as_device(d) for d in device]
             old = self._materialize_frames()
-            src = {f.device for f in old}
-            self._frames = [f.to(targets[i % len(targets)]) for i, f in enumerate(old)]
+            src = {f.device for f in old if f is not None}
+            self._frames = [
+                None if f is None else f.to(targets[i % len(targets)])
+                for i, f in enumerate(old)
+            ]
             del old
             self._reclaim(src)
             return self
@@ -432,8 +484,11 @@ class Dataset5dstem:
             return self
         old = self._materialize_frames()
         move = set(self._indices(idx))
-        src = {old[i].device for i in move}
-        self._frames = [f.to(target) if i in move else f for i, f in enumerate(old)]
+        src = {old[i].device for i in move if old[i] is not None}
+        self._frames = [
+            f.to(target) if i in move and f is not None else f
+            for i, f in enumerate(old)
+        ]
         del old
         self._reclaim(src)
         return self
@@ -456,11 +511,14 @@ class Dataset5dstem:
         if idx is None and device is None:
             devs = set()
             if self._frames is not None:
-                devs = {t.device for t in self._frames}
+                devs = {t.device for t in self._frames if t is not None}
             elif self._tensor is not None:
                 devs = {self._tensor.device}
             self._frames = None
             self._tensor = None
+            self._lazy_loaders = None
+            self._lazy_shape = None
+            self._lazy_dtype = None
             self._series = None
             self._reclaim(devs)
             return
@@ -468,18 +526,30 @@ class Dataset5dstem:
         drop = set(self._indices(idx)) if idx is not None else set()
         if device is not None:
             dev = self._as_device(device)
-            drop |= {i for i, f in enumerate(old) if f.device == dev}
+            drop |= {i for i, f in enumerate(old) if f is not None and f.device == dev}
         if not drop:
             return
-        src = {old[i].device for i in drop}
+        src = {old[i].device for i in drop if old[i] is not None}
         keep = [i for i in range(len(old)) if i not in drop]
         self._frames = [old[i] for i in keep]
+        if self._lazy_loaders is not None:
+            self._lazy_loaders = [self._lazy_loaders[i] for i in keep]
+            if self._lazy_shape is not None:
+                self._lazy_shape = (len(keep), *self._lazy_shape[1:])
+        if hasattr(self, "_page_devices"):
+            self._page_devices = [self._page_devices[i] for i in keep]
+        if hasattr(self, "_lru"):
+            old_to_new = {old_i: new_i for new_i, old_i in enumerate(keep)}
+            self._lru = [old_to_new[i] for i in self._lru if i in old_to_new]
         if self._series is not None:
             self._series = self._series[keep]
         del old
         if not self._frames:
             self._frames = None
             self._tensor = None
+            self._lazy_loaders = None
+            self._lazy_shape = None
+            self._lazy_dtype = None
             self._series = None
         self._reclaim(src)
 
@@ -532,19 +602,23 @@ class Dataset5dstem:
             return
         self._lru = [i for i in getattr(self, "_lru", []) if i < len(frames)]
         for i, frame in enumerate(frames):
-            if frame.device.type != "cpu" and i not in self._lru:
+            if frame is not None and frame.device.type != "cpu" and i not in self._lru:
                 self._lru.insert(0, i)
 
         reclaimed: set[torch.device] = set()
 
         def evict(idx: int) -> None:
-            dev = frames[idx].device
-            frames[idx] = frames[idx].to("cpu")
+            frame = frames[idx]
+            if frame is None:
+                self._lru[:] = [x for x in self._lru if x != idx]
+                return
+            dev = frame.device
+            frames[idx] = None if self._lazy_loaders is not None else frame.to("cpu")
             reclaimed.add(dev)
             self._lru[:] = [x for x in self._lru if x != idx]
 
         while budget is not None:
-            resident = [i for i in self._lru if frames[i].device.type != "cpu"]
+            resident = [i for i in self._lru if frames[i] is not None and frames[i].device.type != "cpu"]
             if len(resident) <= int(budget):
                 break
             candidates = [i for i in resident if i != current] or resident
@@ -554,8 +628,8 @@ class Dataset5dstem:
             if dev.type != "cuda" or max_bytes <= 0:
                 continue
             while True:
-                resident = [i for i in self._lru if frames[i].device == dev]
-                used = sum(self._frame_nbytes(frames[i]) for i in resident)
+                resident = [i for i in self._lru if frames[i] is not None and frames[i].device == dev]
+                used = sum(self._frame_nbytes(frames[i]) for i in resident if frames[i] is not None)
                 if used <= max_bytes or not resident:
                     break
                 candidates = [i for i in resident if i != current]
@@ -593,7 +667,10 @@ class Dataset5dstem:
         auto = isinstance(vram_frames, str) and vram_frames.lower() == "auto"
         self._page_budget = None if auto else max(1, int(vram_frames))
         if device is None:
-            self._page_devices = [f.device for f in frames]
+            self._page_devices = [
+                f.device if f is not None else torch.device("cpu")
+                for f in frames
+            ]
         elif isinstance(device, (list, tuple)):
             targets = [self._as_device(d) for d in device]
             if not targets:
@@ -609,12 +686,15 @@ class Dataset5dstem:
                 reserve_vram_bytes=reserve_vram_bytes,
                 max_vram_bytes=max_vram_bytes,
             )
-            self._lru = [i for i, f in enumerate(frames) if f.device.type != "cpu"]
+            self._lru = [i for i, f in enumerate(frames) if f is not None and f.device.type != "cpu"]
             self._evict_to_page_limits()
         else:
             self._page_max_vram_bytes = {}
-            self._lru = []
-            self.offload()  # fixed-count mode starts cold for a flat footprint
+            self._lru = [i for i, f in enumerate(frames) if f is not None and f.device.type != "cpu"]
+            if self._lazy_loaders is None:
+                self.offload()  # fixed-count mode starts cold for a flat footprint
+            else:
+                self._evict_to_page_limits()
         return self
 
     def frame(self, i: int) -> "torch.Tensor":
@@ -623,13 +703,15 @@ class Dataset5dstem:
         if that exceeds the budget. Without :meth:`page` it is just ``self[i]``.
         """
         if getattr(self, "_page_budget", None) is None and not getattr(self, "_page_max_vram_bytes", None):
-            return self[i]
+            return self._ensure_frame_loaded(i) if self._lazy_loaders is not None else self[i]
         self._materialize_frames()
-        if self._frames[i].device.type == "cpu":
+        i = i % len(self)
+        frame = self._ensure_frame_loaded(i)
+        if frame.device.type == "cpu":
             page_devices = getattr(self, "_page_devices", None)
             if not page_devices:
                 raise RuntimeError("Dataset5dstem paging was not initialized correctly.")
-            self._frames[i] = self._frames[i].to(page_devices[i % len(page_devices)])
+            self._frames[i] = frame.to(page_devices[i % len(page_devices)])
         self._lru = [x for x in self._lru if x != i] + [i]  # most-recent last
         self._evict_to_page_limits(current=i)
         return self._frames[i]
@@ -638,7 +720,7 @@ class Dataset5dstem:
         """Indices of frames currently in VRAM (the rest are paged out to RAM)."""
         if self._frames is None:
             return list(range(len(self))) if self._tensor is not None else []
-        return [i for i, f in enumerate(self._frames) if f.device.type != "cpu"]
+        return [i for i, f in enumerate(self._frames) if f is not None and f.device.type != "cpu"]
 
     # --- frame access ---
     def __len__(self) -> int:
@@ -680,7 +762,8 @@ class Dataset5dstem:
             gen.manual_seed(int(seed))
         # Per-device list of (frame_idx, scan_idx chunk).
         by_dev: dict = {}
-        for fi, f in enumerate(self._frames):
+        for fi in range(len(self)):
+            f = self.frame(fi)
             dev = str(f.device)
             n_scan = int(f.shape[0]) * int(f.shape[1])
             order = (torch.randperm(n_scan, generator=gen) if shuffle
@@ -694,7 +777,7 @@ class Dataset5dstem:
             rnd = []
             for dev, batches in by_dev.items():
                 fi, scan_idx = batches[r % len(batches)]
-                f = self._frames[fi]
+                f = self.frame(fi)
                 flat = f.reshape(-1, *f.shape[2:])          # (n_scan, k, k)
                 dp = flat[scan_idx.to(f.device)]            # on-device slice, no copy
                 rnd.append((dev, fi, scan_idx, dp))
@@ -702,9 +785,29 @@ class Dataset5dstem:
 
     def __getitem__(self, index: int | slice) -> torch.Tensor | Self:
         if isinstance(index, int):
-            return self._frames[index] if self._frames is not None else self._tensor[index]
+            return self.frame(index) if self._lazy_loaders is not None else (
+                self._frames[index] if self._frames is not None else self._tensor[index]
+            )
         sub_series = None if self._series is None else self._series[index]
         if self._frames is not None:
+            if self._lazy_loaders is not None:
+                selected = list(range(len(self)))[index]
+                initial = {
+                    new_i: self._frames[old_i]
+                    for new_i, old_i in enumerate(selected)
+                    if self._frames[old_i] is not None
+                }
+                return Dataset5dstem.from_lazy_loaders(
+                    [self._lazy_loaders[i] for i in selected],
+                    shape=(len(selected), *self.shape[1:]),
+                    dtype=self._lazy_dtype,
+                    initial_frames=initial,
+                    name=self.name,
+                    sampling=self._sampling,
+                    units=self._units,
+                    series_type=self.series_type,
+                    series=sub_series,
+                )
             return Dataset5dstem.from_frames(
                 self._frames[index], name=self.name, sampling=self._sampling,
                 units=self._units, series_type=self.series_type, series=sub_series)

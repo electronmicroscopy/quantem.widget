@@ -106,6 +106,84 @@ def test_page_budget_accepts_explicit_device_sequence_on_cpu():
     assert ds.frame(1).device.type == "cpu"
 
 
+def test_lazy_dataset_loads_only_requested_frame_on_cpu():
+    calls = []
+
+    def make_loader(i):
+        def load():
+            calls.append(i)
+            return torch.full((2, 2, 3, 3), i, dtype=torch.uint8)
+        return load
+
+    ds = Dataset5dstem.from_lazy_loaders(
+        [make_loader(i) for i in range(4)],
+        shape=(4, 2, 2, 3, 3),
+        dtype=torch.uint8,
+    )
+
+    assert ds.shape == (4, 2, 2, 3, 3)
+    assert ds.dtype == torch.uint8
+    assert calls == []
+
+    assert int(ds.frame(2)[0, 0, 0, 0]) == 2
+    assert calls == [2]
+    assert int(ds.frame(2)[0, 0, 0, 0]) == 2
+    assert calls == [2]
+    assert int(ds.frame(0)[0, 0, 0, 0]) == 0
+    assert calls == [2, 0]
+
+
+def test_lazy_dataset_validates_metadata_and_initial_frames():
+    def load():
+        return torch.zeros((2, 2, 3, 3), dtype=torch.uint8)
+
+    with pytest.raises(ValueError, match="at least one"):
+        Dataset5dstem.from_lazy_loaders([], shape=(0, 2, 2, 3, 3), dtype=torch.uint8)
+
+    with pytest.raises(ValueError, match="out of range"):
+        Dataset5dstem.from_lazy_loaders(
+            [load], shape=(1, 2, 2, 3, 3), dtype=torch.uint8,
+            initial_frames={1: load()},
+        )
+
+    with pytest.raises(ValueError, match="expected"):
+        Dataset5dstem.from_lazy_loaders(
+            [load], shape=(1, 2, 2, 3, 3), dtype=torch.uint8,
+            initial_frames={0: torch.zeros((2, 2, 4, 4), dtype=torch.uint8)},
+        )
+
+
+def test_lazy_dataset_slice_and_subset_free_keep_lazy_metadata():
+    calls = []
+
+    def make_loader(i):
+        def load():
+            calls.append(i)
+            return torch.full((2, 2, 3, 3), i, dtype=torch.uint8)
+        return load
+
+    ds = Dataset5dstem.from_lazy_loaders(
+        [make_loader(i) for i in range(4)],
+        shape=(4, 2, 2, 3, 3),
+        dtype=torch.uint8,
+        initial_frames={0: torch.zeros((2, 2, 3, 3), dtype=torch.uint8)},
+    )
+
+    sub = ds[1:4:2]
+
+    assert sub.shape == (2, 2, 2, 3, 3)
+    assert calls == []
+    assert int(sub.frame(1)[0, 0, 0, 0]) == 3
+    assert calls == [3]
+
+    ds.free(idx=[0, 2])
+
+    assert ds.shape == (2, 2, 2, 3, 3)
+    assert len(ds._lazy_loaders) == 2
+    assert int(ds.frame(1)[0, 0, 0, 0]) == 3
+    assert calls == [3, 3]
+
+
 def test_show4dstem_free_releases_dataset5dstem_on_cpu():
     """free() must release the Dataset5dstem owner, not just the widget ref."""
     frames = [torch.full((2, 2, 3, 3), i, dtype=torch.uint8) for i in range(2)]
@@ -169,13 +247,58 @@ def test_showfolder_open_show4dstem_preserves_loader_device_when_gpus_none(monke
     assert [frame.device.type for frame in ds.frames] == ["cpu", "cpu"]
 
 
-@cuda_required
-def test_showfolder_open_show4dstem_builds_paged_multimaster_on_explicit_cuda(monkeypatch, tmp_path):
-    """open_show4dstem(gpus=[...]) loads every folder master into one paged Show4DSTEM."""
+def test_showfolder_open_show4dstem_is_lazy_after_initial_frame(monkeypatch, tmp_path):
+    """Opening a master folder must not load every dataset hot."""
     import quantem.widget.io as wio
     import quantem.widget as qw
 
     fake_masters = [str(tmp_path / f"scan_{i:02d}_master.h5") for i in range(4)]
+    calls = []
+
+    def fake_discover(folder, *, scan_shape=None, verbose=False, **kw):
+        return list(fake_masters)
+
+    def fake_ready(path):
+        return True
+
+    class _Result:
+        def __init__(self, path):
+            v = int(path.split("scan_")[1][:2])
+            self.data = torch.full((4, 4, 6, 6), v, dtype=torch.uint8)
+
+    def fake_load(path, *, det_bin=4, dtype="u8", verbose=False, **kw):
+        calls.append(path)
+        return _Result(path)
+
+    monkeypatch.setattr(wio, "discover_masters", fake_discover)
+    monkeypatch.setattr(wio, "is_master_ready", fake_ready)
+    monkeypatch.setattr(qw, "load", fake_load)
+
+    sf = _stub_browser(tmp_path)
+    w = sf.open_show4dstem(gpus=None, page_budget="auto", det_bin=4, dtype="u8")
+
+    assert w is not None
+    assert w.n_frames == 4
+    assert calls == [fake_masters[0]]
+    loaded = [idx for idx, frame in enumerate(w._data._frames) if frame is not None]
+    assert loaded == [0]
+
+    w.frame_idx = 3
+    _ = w._frame_data
+
+    assert calls == [fake_masters[0], fake_masters[3]]
+    loaded = [idx for idx, frame in enumerate(w._data._frames) if frame is not None]
+    assert loaded == [0, 3]
+
+
+@cuda_required
+def test_showfolder_open_show4dstem_builds_paged_multimaster_on_explicit_cuda(monkeypatch, tmp_path):
+    """open_show4dstem(gpus=[...]) pages lazy masters into one Show4DSTEM."""
+    import quantem.widget.io as wio
+    import quantem.widget as qw
+
+    fake_masters = [str(tmp_path / f"scan_{i:02d}_master.h5") for i in range(4)]
+    calls = []
 
     def fake_discover(folder, *, scan_shape=None, verbose=False, **kw):
         return list(fake_masters)
@@ -189,6 +312,7 @@ def test_showfolder_open_show4dstem_builds_paged_multimaster_on_explicit_cuda(mo
             self.data = torch.full((16, 16, 24, 24), v, dtype=torch.uint8, device="cuda:0")
 
     def fake_load(path, *, det_bin=4, dtype="u8", verbose=False, **kw):
+        calls.append(path)
         return _Result(path)
 
     monkeypatch.setattr(wio, "discover_masters", fake_discover)
@@ -201,10 +325,17 @@ def test_showfolder_open_show4dstem_builds_paged_multimaster_on_explicit_cuda(mo
     ds = w._data
     assert w.n_frames == 4
     assert list(w.frame_labels) == [f"scan_{i:02d}" for i in range(4)]
+    assert calls == [fake_masters[0]]
     assert ds.vram_resident() == [0]
     w.frame_idx = 3
     _ = w._frame_data
+    assert calls == [fake_masters[0], fake_masters[3]]
     assert ds.vram_resident() == [3]
+    assert ds._frames[0] is None
+    w.frame_idx = 0
+    _ = w._frame_data
+    assert calls == [fake_masters[0], fake_masters[3], fake_masters[0]]
+    assert ds.vram_resident() == [0]
 
 
 @cuda_required

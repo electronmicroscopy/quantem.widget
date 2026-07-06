@@ -481,15 +481,16 @@ class ShowFolderBrowser:
         page_reserve_vram_bytes=None,
         page_max_vram_bytes=None,
     ):
-        """Render every 4D-STEM master in this folder as ONE Show4DSTEM.
+        """Browse this folder's 4D-STEM masters as ONE lazy Show4DSTEM.
 
-        The masters are discovered in :attr:`folder`, loaded round-robin across
-        ``gpus`` (each dataset on its own card), and presented behind the
-        Show4DSTEM dataset slider. ``page_budget="auto"`` keeps as many datasets
-        resident as the current GPU-memory budget allows, then LRU-evicts to RAM
-        while the user continues browsing. ``page_budget=N`` keeps a fixed count
-        hot. ``None`` keeps every dataset resident (instant switch, only for
-        folders that fit).
+        The masters are discovered in :attr:`folder`, but only the first usable
+        dataset is loaded to render the initial screen. Switching the Show4DSTEM
+        dataset slider loads later masters on demand, round-robin across
+        ``gpus`` when provided. ``page_budget="auto"`` keeps as many datasets
+        resident as the current GPU-memory budget allows, then LRU-evicts lazy
+        file-backed frames back to unloaded slots while the user continues
+        browsing. ``page_budget=N`` keeps a fixed count hot. ``None`` leaves
+        loaded datasets resident; it still does not preload the whole folder.
 
         Parameters
         ----------
@@ -498,7 +499,8 @@ class ShowFolderBrowser:
             current device.
         page_budget : "auto", int, or None
             GPU cache policy. ``"auto"`` = memory-sized LRU cache; integer =
-            fixed resident count; ``None`` = all resident.
+            fixed resident count; ``None`` = no eviction after a dataset is
+            loaded.
         det_bin, dtype, scan_size
             Forwarded to :func:`load` / :func:`discover_masters` — bin the
             detector, pick the browse dtype, and (optionally) keep only masters
@@ -527,7 +529,7 @@ class ShowFolderBrowser:
         self._selected_show4dstem_widget = None
 
     def _apply_selected_show4dstem(self):
-        """Build a paged multi-GPU Show4DSTEM over the folder's 4D masters."""
+        """Build a lazy, paged multi-GPU Show4DSTEM over the folder's 4D masters."""
         import torch
         from quantem.widget import Show4DSTEM, load
         from quantem.widget.data import Dataset5dstem
@@ -551,93 +553,60 @@ class ShowFolderBrowser:
 
         scan_shape = (int(scan_size), int(scan_size)) if scan_size else None
         masters = discover_masters(str(self.folder), scan_shape=scan_shape, verbose=False)
-        frames, names = [], []
+        ready_masters = [master for master in masters if is_master_ready(master)]
         self._release_selected_show4dstem_widget()
         page_devices = gpus if gpus is not None else None
-        auto_page = isinstance(page_budget, str) and page_budget.lower() == "auto"
-        fixed_page_budget = None if auto_page or page_budget is None else max(1, int(page_budget))
-        staging_lru: list[int] = []
-        staging_byte_budgets = (
-            Dataset5dstem._auto_vram_budgets(
-                [f"cuda:{gpu}" for gpu in gpus],
-                max_vram_fraction=page_max_vram_fraction,
-                reserve_vram_bytes=page_reserve_vram_bytes,
-                max_vram_bytes=page_max_vram_bytes,
-            )
-            if auto_page and gpus is not None
-            else {}
-        )
 
-        def reclaim(devices) -> None:
-            Dataset5dstem._reclaim({torch.device(device) for device in devices})
+        if not ready_masters:
+            self._selected_show4dstem_widget = None
+            return None
 
-        def frame_nbytes(frame: torch.Tensor) -> int:
-            return int(frame.element_size() * frame.nelement())
-
-        def enforce_staging_cache(current: int) -> None:
-            if page_budget is None:
-                return
-            nonlocal staging_lru
-            staging_lru = [idx for idx in staging_lru if idx < len(frames)]
-            for idx, frame in enumerate(frames):
-                if frame.device.type != "cpu" and idx not in staging_lru:
-                    staging_lru.append(idx)
-            reclaimed: set[torch.device] = set()
-
-            def offload(idx: int) -> None:
-                dev = frames[idx].device
-                frames[idx] = frames[idx].to("cpu")
-                staging_lru[:] = [x for x in staging_lru if x != idx]
-                reclaimed.add(dev)
-
-            if fixed_page_budget is not None:
-                while True:
-                    resident = [idx for idx in staging_lru if frames[idx].device.type != "cpu"]
-                    if len(resident) <= fixed_page_budget:
-                        break
-                    candidates = [idx for idx in resident if idx != current] or resident
-                    offload(candidates[0])
-            for dev, max_bytes in staging_byte_budgets.items():
-                while True:
-                    resident = [idx for idx in staging_lru if frames[idx].device == dev]
-                    used = sum(frame_nbytes(frames[idx]) for idx in resident)
-                    if used <= max_bytes or not resident:
-                        break
-                    candidates = [idx for idx in resident if idx != current]
-                    if not candidates:
-                        break
-                    offload(candidates[0])
-            if reclaimed:
-                reclaim(reclaimed)
-
-        for master in masters:
-            # Skip half-written masters (missing sibling data files) so a live
-            # acquisition folder does not crash the viewer mid-session.
-            if not is_master_ready(master):
-                continue
+        def load_master(master, idx: int) -> torch.Tensor:
             try:
                 result = load(master, det_bin=det_bin, dtype=dtype, verbose=False)
             except (FileNotFoundError, ValueError, RuntimeError):
-                continue
+                raise
             data = result.data
             tensor = data if isinstance(data, torch.Tensor) else torch.from_dlpack(data)
             if gpus is not None:
-                # Explicit GPU list: place datasets round-robin. Dataset5dstem
-                # remembers those devices before paging/offload, so later frame
-                # switches page each dataset back to its assigned card.
-                device = f"cuda:{gpus[len(frames) % len(gpus)]}"
+                device = f"cuda:{gpus[idx % len(gpus)]}"
                 tensor = tensor.to(device)
-            frames.append(tensor)
-            staging_lru.append(len(frames) - 1)
-            enforce_staging_cache(len(frames) - 1)
-            del data, tensor, result
-            stem = str(master).split("/")[-1]
-            names.append(stem[:-len("_master.h5")] if stem.endswith("_master.h5") else stem)
-        if not frames:
+            return tensor
+
+        first_tensor = None
+        first_idx = None
+        kept_masters = []
+        for idx, master in enumerate(ready_masters):
+            try:
+                first_tensor = load_master(master, idx)
+            except (FileNotFoundError, ValueError, RuntimeError):
+                continue
+            first_idx = len(kept_masters)
+            kept_masters.append(master)
+            break
+        if first_tensor is None or first_idx is None:
             self._selected_show4dstem_widget = None
             return None
-        series = Dataset5dstem.from_frames(frames, stack_same_device=False)
-        frames.clear()
+        kept_masters.extend(ready_masters[ready_masters.index(kept_masters[0]) + 1:])
+
+        names = []
+        loaders = []
+        for idx, master in enumerate(kept_masters):
+            stem = str(master).split("/")[-1]
+            names.append(stem[:-len("_master.h5")] if stem.endswith("_master.h5") else stem)
+
+            def make_loader(path=master, load_idx=idx):
+                return lambda: load_master(path, load_idx)
+
+            loaders.append(make_loader())
+
+        series = Dataset5dstem.from_lazy_loaders(
+            loaders,
+            shape=(len(loaders), *tuple(first_tensor.shape)),
+            dtype=first_tensor.dtype,
+            initial_frames={first_idx: first_tensor},
+            name="ShowFolder lazy 4D-STEM masters",
+        )
         widget = Show4DSTEM(
             series,
             page_budget=page_budget,
@@ -685,7 +654,7 @@ class ShowFolderBrowser:
         open_show3d = Button(description="Open Show3D", tooltip="Render starred images as a frame stack below")
         open_both = Button(description="Open both", tooltip="Render starred images as Show2D and Show3D below")
         open_show4dstem = Button(description="Open Show4DSTEM",
-                                 tooltip="Load every *_master.h5 in this folder into one Show4DSTEM (paged VRAM)")
+                                 tooltip="Open *_master.h5 files as one lazy Show4DSTEM with paged VRAM")
         hide = Button(description="Show starred only", tooltip="Hide unstarred image panels")
         show_all = Button(description="Show all images", tooltip="Restore hidden image panels")
 

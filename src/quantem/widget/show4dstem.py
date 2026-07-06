@@ -447,7 +447,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
 
         # Extract underlying array / tensor + auto-calibrate from Dataset input
         # (duck-typed via the dual-slot private attributes _tensor / _array).
-        is_dataset5dstem_input = type(data).__name__ == "Dataset5dstem" and hasattr(data, "frames")
+        is_dataset5dstem_input = type(data).__name__ == "Dataset5dstem" and hasattr(data, "frame")
         tensor = None if is_dataset5dstem_input else getattr(data, "_tensor", None)
         array = None if is_dataset5dstem_input else getattr(data, "_array", None)
         if tensor is not None or array is not None:
@@ -508,7 +508,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         # frame-backed object instead of calling `.tensor`: sharded CUDA series may
         # hold each 18 GiB no-bin master on a different GPU, and `.tensor` would
         # gather everything onto one card.
-        is_dataset5dstem = type(data).__name__ == "Dataset5dstem" and hasattr(data, "frames")
+        is_dataset5dstem = type(data).__name__ == "Dataset5dstem" and hasattr(data, "frame")
         if hasattr(data, "chunks") and not getattr(data, "_is_gpu_frames", False):
             from quantem.widget.kernels.compute.mps import ChunkedFrames
             data = ChunkedFrames(data, row_prefix=bool(getattr(data, "row_prefix", False)))
@@ -1683,7 +1683,9 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             record_device(data)
         record_device(getattr(self, "_compute_for", None))
         nbytes = (
-            data.nbytes
+            data.resident_nbytes
+            if data is not None and hasattr(data, "resident_nbytes")
+            else data.nbytes
             if data is not None and hasattr(data, "nbytes")
             else 0
         )
