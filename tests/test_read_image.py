@@ -10,9 +10,9 @@ import json
 import numpy as np
 import pytest
 
+from quantem.core.datastructures import Dataset2d, Dataset3d
 from quantem.widget import Show2D, Show3D, read_gif
-from quantem.widget.io.image import read_image, read_images
-from quantem.core.datastructures import Dataset2d
+from quantem.widget.io.image import read_image, read_image_stack, read_images
 
 
 # --- per-format round trips ------------------------------------------------
@@ -165,6 +165,43 @@ def test_read_images_folder_parallel_preserves_order(tmp_path):
 def test_read_images_empty_dir_raises(tmp_path):
     with pytest.raises(FileNotFoundError, match="No supported images"):
         read_images(tmp_path)
+
+
+# --- folder stack reader ----------------------------------------------------
+
+def test_read_image_stack_natural_sort_and_pattern(tmp_path):
+    from PIL import Image
+
+    for idx in (10, 2, 1):
+        frame = np.full((6, 8), idx, dtype=np.uint8)
+        Image.fromarray(frame).save(tmp_path / f"frame_{idx}.png")
+    Image.fromarray(np.full((6, 8), 99, dtype=np.uint8)).save(tmp_path / "survey.png")
+
+    ds = read_image_stack(tmp_path, pattern="frame_*.png", workers=2, progress=False)
+
+    assert isinstance(ds, Dataset3d)
+    assert ds.name == tmp_path.name
+    assert ds.array.shape == (3, 6, 8)
+    assert ds.array.dtype == np.float32
+    np.testing.assert_array_equal(ds.array[:, 0, 0], [1, 2, 10])
+
+
+def test_read_image_stack_file_type_filter(tmp_path):
+    from PIL import Image
+
+    Image.fromarray(np.full((4, 5), 3, dtype=np.uint16)).save(tmp_path / "frame_001.tif")
+    Image.fromarray(np.full((4, 5), 9, dtype=np.uint8)).save(tmp_path / "frame_002.png")
+
+    ds = read_image_stack(tmp_path, file_type="tif", progress=False)
+
+    assert ds.array.shape == (1, 4, 5)
+    assert ds.array.dtype == np.float32
+    np.testing.assert_array_equal(ds.array[0], np.full((4, 5), 3, dtype=np.float32))
+
+
+def test_read_image_stack_empty_dir_raises(tmp_path):
+    with pytest.raises(FileNotFoundError, match="No image frames"):
+        read_image_stack(tmp_path, progress=False)
 
 
 # --- error path ------------------------------------------------------------
