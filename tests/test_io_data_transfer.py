@@ -162,6 +162,101 @@ def test_data_transfer_manifest_and_copy_are_safe_by_default(monkeypatch, tmp_pa
     assert not list(target.glob("*.partial"))
 
 
+def test_update_data_transfer_plan_appends_without_moving_existing_targets(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from quantem.widget.io import hdf5
+    from quantem.widget.io.data_transfer import plan_data_transfer, update_data_transfer_plan
+
+    source = tmp_path / "source"
+    target_a = tmp_path / "target"
+    target_b = target_a / "nested"
+    target_b.mkdir(parents=True)
+    _master(source, "scan_000", 10)
+
+    monkeypatch.setattr(hdf5, "disk_of", lambda path: "disk")
+    monkeypatch.setattr(hdf5, "is_master_ready", lambda path: True)
+
+    plan = plan_data_transfer(source, [target_a, target_b], strategy="round-robin")
+    original_target = plan.entries[0].target_root
+
+    _master(source, "scan_001", 100)
+    updated = update_data_transfer_plan(plan)
+
+    assert [entry.logical_id for entry in updated.entries] == ["scan_000", "scan_001"]
+    assert updated.entries[0].target_root == original_target
+    assert updated.entries[1].target_root == str(target_b)
+    assert updated.total_bytes == 110
+
+
+def test_data_transfer_widget_can_copy_only_pending(monkeypatch, tmp_path: Path) -> None:
+    from quantem.widget import DataTransfer
+    from quantem.widget.io import hdf5
+
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    _master(source, "scan_000", 10, 5)
+    _master(source, "scan_001", 8, 4)
+
+    monkeypatch.setattr(hdf5, "disk_of", lambda path: "disk")
+    monkeypatch.setattr(hdf5, "is_master_ready", lambda path: True)
+
+    transfer = DataTransfer(source, [target])
+    first_entry = transfer.plan.entries[0]
+    first_master = Path(first_entry.target_master)
+    first_master.parent.mkdir(parents=True, exist_ok=True)
+    first_master.write_bytes(Path(first_entry.master).read_bytes())
+    first_sidecar = Path(first_entry.target_files[1])
+    first_sidecar.with_name(f"{first_sidecar.name}.partial").write_bytes(b"partial")
+
+    dry = transfer.copy_pending(dry_run=True)
+    assert {Path(result.target).name for result in dry} == {
+        "scan_000_data_000001.h5",
+        "scan_001_master.h5",
+        "scan_001_data_000001.h5",
+    }
+    assert {state.status for state in transfer.inspect()} == {
+        "exists",
+        "partial",
+        "not-started",
+    }
+
+    copied = transfer.copy_pending(dry_run=False)
+    assert {result.status for result in copied} == {"copied"}
+    assert {state.status for state in transfer.inspect()} == {"exists"}
+    assert not list(target.glob("*.partial"))
+
+
+def test_data_transfer_widget_rescans_and_renders_session_panels(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from quantem.widget import DataTransfer
+    from quantem.widget.io import hdf5
+
+    source = tmp_path / "source"
+    target_a = tmp_path / "target-a"
+    target_b = tmp_path / "target-b"
+    target_a.mkdir()
+    target_b.mkdir()
+    _master(source, "scan_000", 10)
+
+    monkeypatch.setattr(hdf5, "disk_of", lambda path: "disk")
+    monkeypatch.setattr(hdf5, "is_master_ready", lambda path: True)
+
+    transfer = DataTransfer(source, [target_a, target_b], strategy="round-robin")
+    _master(source, "scan_001", 20)
+
+    assert transfer.rescan() == 1
+    assert [entry.logical_id for entry in transfer.plan.entries] == ["scan_000", "scan_001"]
+    assert "Backend" in transfer._backend.value
+    assert "Datasets" in transfer._datasets.value
+    assert "Last action" in transfer._perf_panel.value
+    assert "scan_001" in transfer._datasets.value
+    assert "open_show4dstem" in transfer._summary.value
+
+
 def test_copy_data_transfer_refuses_different_existing_target(monkeypatch, tmp_path: Path) -> None:
     from quantem.widget.io import hdf5
     from quantem.widget.io.data_transfer import copy_data_transfer, plan_data_transfer

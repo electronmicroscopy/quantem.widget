@@ -96,6 +96,19 @@ scientific acronyms, detector labels, and file-format names uppercase when the
 uppercase form is the term users recognize, such as `FFT`, `ROI`, `BF`, `ABF`,
 `ADF`, `HTML`, `PNG`, `GIF`, and `MP4`.
 
+## Agent Handoff Reporting
+
+Whenever an agent finishes a concrete task, the final update must clearly state:
+
+- **Done**: what changed or what was verified.
+- **Next**: the immediate recommended next action for the user or agent.
+- **Missing / not verified**: anything still untested, blocked, unstaged,
+  uncommitted, unpushed, or needing user confirmation. If nothing is missing,
+  say that explicitly.
+
+Keep this short, but do it every time. The goal is that a user can leave and
+come back knowing exactly where the work stands and what should happen next.
+
 ## Repository Hygiene
 
 Keep public documentation in durable paths such as `README.md`,

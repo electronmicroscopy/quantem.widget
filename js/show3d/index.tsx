@@ -37,6 +37,21 @@ import { downloadBlob, extractBytes, extractFloat32, formatNumber, preserveResto
 import { useHideStaticFallback } from "../staticFallback";
 import { findDataRange, applyLogScale, applyLogScaleInPlace, percentileClip, sliderRange, computeStats, computeHistogramFromBytes } from "../stats";
 import { MetadataSection } from "../widgetInfo";
+import { EmbeddedWidgetView } from "../embeddedWidget";
+
+const SHOW3D_TO_SHOW2D_LINKED_TRAITS = [
+  { source: "cmap" },
+  { source: "log_scale" },
+  { source: "auto_contrast" },
+  { source: "vmin" },
+  { source: "vmax" },
+  { source: "show_stats" },
+  { source: "show_controls" },
+  { source: "controls_collapsed" },
+  { source: "link_contrast" },
+  { source: "show_fft" },
+  { source: "hidden_panels" },
+];
 // ============================================================================
 // Style tokens (inlined - matches Show2D/Show4DSTEM single-file convention)
 // ============================================================================
@@ -1598,6 +1613,7 @@ function Show3D() {
   const [, setHandoffRequest] = useModelState<string>("handoff_request");
   const [handoffStatus] = useModelState<string>("handoff_status");
   const [handoffEnabled] = useModelState<boolean>("handoff_enabled");
+  const [preparedViewWidget] = useModelState<unknown>("prepared_view_widget");
 
   // Canvas refs
   const rootRef = React.useRef<HTMLDivElement>(null);
@@ -7537,6 +7553,13 @@ function Show3D() {
     }));
   }, [displaySliceIdx, visiblePanelIndices, setHandoffRequest]);
 
+  const handleClosePreparedView = React.useCallback(() => {
+    setHandoffRequest(JSON.stringify({
+      mode: "clear",
+      id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    }));
+  }, [setHandoffRequest]);
+
   const clickStartRef = React.useRef<{ x: number; y: number } | null>(null);
   const touchTransformRef = React.useRef<TouchTransformState | null>(null);
   const fftTouchTransformRef = React.useRef<FftTouchTransformState | null>(null);
@@ -9215,6 +9238,7 @@ function Show3D() {
         </Box>
       )}
       {(canRenderLive || !hasSavedStaticFallback) && (
+      <>
       <Stack
         direction="row"
         spacing={`${SPACING.SM}px`}
@@ -9525,7 +9549,7 @@ function Show3D() {
                     {...themedMenuProps}
                   >
                     <MenuItem onClick={handleHandoffToShow2D}>
-                      Prepare frame as 2D
+                      View frame as 2D
                     </MenuItem>
                   </Menu>
                 </>
@@ -9593,7 +9617,7 @@ function Show3D() {
                     overflow: "hidden",
                     textOverflow: "ellipsis",
                     whiteSpace: "nowrap",
-                    color: handoffStatus.startsWith("Handoff failed") ? "#d32f2f" : themeColors.textMuted,
+                    color: handoffStatus.startsWith("View failed") ? "#d32f2f" : themeColors.textMuted,
                   }}
                   title={handoffStatus}
                 >
@@ -10629,6 +10653,17 @@ function Show3D() {
           </Box>
         )}
       </Stack>
+      {handoffEnabled && preparedViewWidget != null && (
+        <EmbeddedWidgetView
+          hostModel={model}
+          widgetModel={preparedViewWidget}
+          title="2D view"
+          onClose={handleClosePreparedView}
+          themeColors={themeColors}
+          linkedTraits={SHOW3D_TO_SHOW2D_LINKED_TRAITS}
+        />
+      )}
+      </>
       )}
 
     </Box>

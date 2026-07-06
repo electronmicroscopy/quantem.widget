@@ -16,6 +16,7 @@ from enum import StrEnum
 from typing import Any, Self, Sequence
 
 import anywidget
+import ipywidgets
 import matplotlib
 import matplotlib.patches
 import matplotlib.patheffects
@@ -468,6 +469,10 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
     handoff_request = traitlets.Unicode("").tag(sync=True)
     handoff_status = traitlets.Unicode("").tag(sync=True)
     handoff_enabled = traitlets.Bool(True).tag(sync=True)
+    prepared_view_widget = traitlets.Instance(ipywidgets.Widget, allow_none=True).tag(
+        sync=True,
+        **ipywidgets.widget_serialization,
+    )
     labels = traitlets.List(traitlets.Unicode()).tag(sync=True)
     # Per-panel RGB flag. True panels carry display-ready (H, W, 3) pixels that
     # bypass the colormap/contrast pipeline in JS; False panels are grayscale.
@@ -743,6 +748,7 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
         self._display_data = None  # initialized after data setup
         self._display_bin = 1
         self.prepared_view = None
+        self.prepared_view_widget = None
 
         # First-class support for quantem Dataset2d / Dataset3d:
         # auto-extract array + sampling + units from the dataset object.
@@ -2265,6 +2271,8 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
         clone.handoff_enabled = False
         clone.handoff_status = ""
         clone.handoff_request = ""
+        clone.prepared_view = None
+        clone.prepared_view_widget = None
         clone._update_all_frames()
         return clone
 
@@ -2424,34 +2432,20 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
             request = json.loads(raw)
             mode = str(request.get("mode", "show3d")).lower()
             if mode == "clear":
+                self.prepared_view = None
+                self.prepared_view_widget = None
                 self.handoff_status = ""
                 return
             if mode != "show3d":
                 raise ValueError(f"unsupported handoff mode {mode!r}")
             self.prepared_view = self.to_show3d(panels=request.get("panels", None))
+            self.prepared_view_widget = self.prepared_view
             n_frames = int(getattr(self.prepared_view, "n_slices", 0))
-            self.handoff_status = f"Ready: 3D with {n_frames} frame{'s' if n_frames != 1 else ''}"
+            self.handoff_status = f"Showing 3D with {n_frames} frame{'s' if n_frames != 1 else ''}"
         except Exception as exc:  # pragma: no cover - defensive comm boundary
             self.prepared_view = None
-            self.handoff_status = f"Handoff failed: {exc}"
-
-    def show_prepared_view(self) -> Any:
-        """Display and return the widget prepared by the toolbar View menu.
-
-        Jupyter frontends do not reliably attach new cell output from an
-        asynchronous widget callback, so toolbar prepare requests prepare the
-        alternate view and leave the original widget unchanged. Call this method
-        in a notebook cell when you want the prepared temporary view rendered.
-        """
-        if self.prepared_view is None:
-            raise RuntimeError("No prepared view. Use the View menu first.")
-        try:
-            from IPython.display import display
-
-            display(self.prepared_view)
-        except Exception:
-            pass
-        return self.prepared_view
+            self.prepared_view_widget = None
+            self.handoff_status = f"View failed: {exc}"
 
     @property
     def visible_panels(self) -> list[int]:

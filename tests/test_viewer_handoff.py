@@ -5,6 +5,7 @@ import pytest
 
 from quantem.widget.show2d import Show2D
 from quantem.widget.show3d import Show3D
+from quantem.widget.show1d import Show1D
 
 
 def test_show2d_to_show3d_uses_visible_panels_as_frames():
@@ -51,8 +52,14 @@ def test_show2d_prepare_request_creates_prepared_show3d_view():
 
     assert isinstance(widget.prepared_view, Show3D)
     assert widget.prepared_view.labels == ["b"]
-    assert widget.handoff_status == "Ready: 3D with 1 frame"
-    assert widget.show_prepared_view() is widget.prepared_view
+    assert widget.prepared_view_widget is widget.prepared_view
+    assert widget.handoff_status == "Showing 3D with 1 frame"
+
+    widget.handoff_request = json.dumps({"mode": "clear", "id": "clear"})
+
+    assert widget.prepared_view is None
+    assert widget.prepared_view_widget is None
+    assert widget.handoff_status == ""
 
 
 def test_show3d_to_show2d_uses_current_frame_and_visible_panels():
@@ -100,5 +107,75 @@ def test_show3d_prepare_request_creates_prepared_show2d_view():
     assert isinstance(widget.prepared_view, Show2D)
     assert widget.prepared_view.n_images == 2
     assert widget.prepared_view.labels == ["left 2/2", "right 2/2"]
-    assert widget.handoff_status == "Ready: 2D with 2 panels"
-    assert widget.show_prepared_view() is widget.prepared_view
+    assert widget.prepared_view_widget is widget.prepared_view
+    assert widget.handoff_status == "Showing 2D with 2 panels"
+
+    widget.handoff_request = json.dumps({"mode": "clear", "id": "clear"})
+
+    assert widget.prepared_view is None
+    assert widget.prepared_view_widget is None
+    assert widget.handoff_status == ""
+
+
+def test_show1d_to_show2d_uses_selected_snapshot_group_and_review_state():
+    widget = Show1D(
+        {"frame-by-frame": [3.0, 2.0], "lambda 10": [4.0, 5.0]},
+        image_cmap="magma",
+        sampling=0.25,
+        units="nm",
+        show_snapshot_fft=True,
+    )
+    widget.snapshot(
+        0,
+        reference=np.zeros((4, 5), dtype=np.float32),
+        **{
+            "frame-by-frame": np.ones((4, 5), dtype=np.float32),
+            "lambda_10": np.full((3, 4), 2.0, dtype=np.float32),
+        },
+    )
+    widget.star_trial("frame-by-frame")
+    widget.hide_trial("lambda_10")
+    widget.goto_snapshot(0)
+
+    out = widget.to_show2d()
+
+    assert isinstance(out, Show2D)
+    assert out.n_images == 2
+    assert out.labels == ["reference", "frame-by-frame"]
+    assert out.cmap == "magma"
+    assert out.pixel_size == pytest.approx(0.25)
+    assert out.pixel_unit == "nm"
+    assert out.show_fft is True
+    assert out.link_zoom is True
+    assert out.link_pan is True
+    assert out.link_contrast is True
+    assert out.starred == [0, 1]
+    np.testing.assert_allclose(out._data[1], np.ones((4, 5), dtype=np.float32))
+
+
+def test_show1d_prepare_request_creates_prepared_show2d_view():
+    widget = Show1D({"loss": [2.0, 1.0]})
+    widget.snapshot(
+        4,
+        object=np.ones((3, 4), dtype=np.float32),
+        probe=np.full((2, 2), 2.0, dtype=np.float32),
+    )
+
+    widget.handoff_request = json.dumps({
+        "mode": "show2d",
+        "id": "test",
+        "group": 0,
+        "images": ["probe"],
+    })
+
+    assert isinstance(widget.prepared_view, Show2D)
+    assert widget.prepared_view.n_images == 1
+    assert widget.prepared_view.labels == ["probe"]
+    assert widget.prepared_view_widget is widget.prepared_view
+    assert widget.handoff_status == "Showing 2D with 1 panel"
+
+    widget.handoff_request = json.dumps({"mode": "clear", "id": "clear"})
+
+    assert widget.prepared_view is None
+    assert widget.prepared_view_widget is None
+    assert widget.handoff_status == ""

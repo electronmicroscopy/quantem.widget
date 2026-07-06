@@ -16,11 +16,11 @@ state: logical acquisition IDs, source paths, target paths, target disks,
 current file status, copy progress, and the manifest that lets a notebook or
 future ptycho pipeline reproduce exactly what happened.
 
-The first implementation is a shared planner utility with a conservative CLI and
-a lightweight notebook review widget. It inventories real data, groups master
-files with their sidecars, chooses target disks, writes a typed manifest, inspects
-current file state, and proves what would happen without mutating the source
-folder.
+The implementation is a shared planner utility with a conservative CLI and a
+notebook session-control widget. It inventories real data, groups master files
+with their sidecars, chooses target disks, writes a typed manifest, inspects
+current file state, watches for newly completed groups, and proves what would
+happen without mutating the source folder.
 
 ## DT-1: Plan a Multi-Disk Ptycho Session
 
@@ -47,6 +47,9 @@ logic.
 - The visual widget presents the same plan as a state table, not only terminal
   text: logical acquisition, source path, target path, source location, target
   location, bytes, and status.
+- The widget presents a top-level session summary, target balance cards,
+  backend/disk/GPU status, loader controls (`det_bin`, dtype, GPU list, page
+  budget), safe action buttons, dataset readiness rows, and file detail rows.
 - The default strategy balances by group size, not by file count.
 - The planner writes a JSON manifest that the widget, CLI, or ptycho pipeline
   can read without rerunning discovery.
@@ -137,7 +140,8 @@ folders.
 user is transferring and browsing. The user wants complete files to be copied
 and visible without preloading everything.
 
-**Primary tools**: future watcher mode, ShowFolder watch, DataTransfer widget.
+**Primary tools**: `update_data_transfer_plan`, DataTransfer `rescan()`,
+notebook watch controls, ShowFolder watch, DataTransfer widget.
 
 **Data to use**: A folder where ready and incomplete `*_master.h5` groups can be
 added during the test.
@@ -145,11 +149,15 @@ added during the test.
 **Acceptance checks**:
 
 - Newly discovered masters are ignored until they pass readiness checks.
-- Complete new groups are assigned to the least-loaded target by the same
+- Complete new groups are appended to the existing manifest. Existing logical
+  IDs keep their target assignments; new groups are assigned by the same
   strategy as the original plan.
 - Active ShowFolder and Show4DSTEM handoffs can refresh after transfer completes.
 - Removed or failed files do not remain in memory or manifest state as valid
   acquisitions.
+- Repeated rescans do not duplicate skipped/not-ready groups.
+- A live session can show "new groups", last scan time, watch state, and last
+  copy/open timing without opening every dataset hot.
 
 ## CLI and Widget Split
 
@@ -162,9 +170,10 @@ The core data-transfer planner should be the source of truth.
   workflows. It should print the same plan table the widget shows and write the
   manifest by default.
 - **Widget** owns human review and durable state display: disk balance bars,
-  logical acquisition table, source and target paths, incomplete file warnings,
-  copy progress, error rows, and buttons to open the transferred session in
-  ShowFolder or Show4DSTEM.
+  backend/GPU status, logical acquisition table, source and target paths,
+  incomplete file warnings, copy progress, error rows, loader choices, watch
+  controls, and buttons to open the transferred session in ShowFolder or
+  Show4DSTEM.
 - **ShowFolder integration** should be a launch point, not core file movement:
   `ShowFolder(path).data_transfer(...)` can create the DataTransfer widget, but
   ShowFolder itself should remain a browser and not silently mutate lab data.

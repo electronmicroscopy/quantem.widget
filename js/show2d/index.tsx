@@ -30,6 +30,20 @@ import { extractBytes, extractFloat32, formatNumber, downloadBlob, preserveResto
 import { useHideStaticFallback } from "../staticFallback";
 import { computeHistogramFromBytes, findDataRange, applyLogScale, percentileClip, sliderRange, computeStats } from "../stats";
 import { MetadataSection } from "../widgetInfo";
+import { EmbeddedWidgetView } from "../embeddedWidget";
+
+const SHOW2D_TO_SHOW3D_LINKED_TRAITS = [
+  { source: "cmap" },
+  { source: "log_scale" },
+  { source: "auto_contrast" },
+  { source: "vmin" },
+  { source: "vmax" },
+  { source: "show_stats" },
+  { source: "show_controls" },
+  { source: "controls_collapsed" },
+  { source: "link_contrast" },
+  { source: "show_fft" },
+];
 
 function InfoTooltip({ text, theme = "dark" }: { text: React.ReactNode; theme?: "light" | "dark" }) {
   const isDark = theme === "dark";
@@ -860,6 +874,7 @@ function Show2D() {
   const [, setHandoffRequest] = useModelState<string>("handoff_request");
   const [handoffStatus] = useModelState<string>("handoff_status");
   const [handoffEnabled] = useModelState<boolean>("handoff_enabled");
+  const [preparedViewWidget] = useModelState<unknown>("prepared_view_widget");
   const [exportBusy, setExportBusy] = React.useState(false);
   const [localExportStatus, setLocalExportStatus] = React.useState("");
   const pendingHtmlExportRef = React.useRef<{
@@ -4728,6 +4743,13 @@ function Show2D() {
     }));
   }, [hiddenPanelSet, totalPanelCount, setHandoffRequest]);
 
+  const handleClosePreparedView = React.useCallback(() => {
+    setHandoffRequest(JSON.stringify({
+      mode: "clear",
+      id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    }));
+  }, [setHandoffRequest]);
+
   // Resize Handlers
   // -------------------------------------------------------------------------
   const handleCanvasResizeStart = (e: React.MouseEvent) => {
@@ -4919,6 +4941,7 @@ function Show2D() {
         </Box>
       )}
       {(canRenderLive || !hasSavedStaticFallback) && (
+      <>
       <Stack
         direction="row"
         spacing={`${SPACING.LG}px`}
@@ -5189,7 +5212,7 @@ function Show2D() {
                     {...themedTopMenuProps}
                   >
                     <MenuItem onClick={handleHandoffToShow3D} sx={{ fontSize: 12 }}>
-                      Prepare as 3D
+                      View as 3D
                     </MenuItem>
                   </Menu>
                 </>
@@ -5235,7 +5258,7 @@ function Show2D() {
                     overflow: "hidden",
                     textOverflow: "ellipsis",
                     whiteSpace: "nowrap",
-                    color: handoffStatus.startsWith("Handoff failed") ? "#d32f2f" : themeColors.textMuted,
+                    color: handoffStatus.startsWith("View failed") ? "#d32f2f" : themeColors.textMuted,
                   }}
                   title={handoffStatus}
                 >
@@ -6013,6 +6036,17 @@ function Show2D() {
           </Box>
         )}
       </Stack>
+      {handoffEnabled && preparedViewWidget != null && (
+        <EmbeddedWidgetView
+          hostModel={model}
+          widgetModel={preparedViewWidget}
+          title="3D view"
+          onClose={handleClosePreparedView}
+          themeColors={themeColors}
+          linkedTraits={SHOW2D_TO_SHOW3D_LINKED_TRAITS}
+        />
+      )}
+      </>
       )}
     </Box>
   );

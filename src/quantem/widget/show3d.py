@@ -27,6 +27,7 @@ from enum import Enum
 from typing import Any, Self
 
 import anywidget
+import ipywidgets
 import numpy as np
 import traitlets
 
@@ -601,6 +602,10 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
     handoff_request = traitlets.Unicode("").tag(sync=True)
     handoff_status = traitlets.Unicode("").tag(sync=True)
     handoff_enabled = traitlets.Bool(True).tag(sync=True)
+    prepared_view_widget = traitlets.Instance(ipywidgets.Widget, allow_none=True).tag(
+        sync=True,
+        **ipywidgets.widget_serialization,
+    )
     # Flipped True by JS after the first colormap pass has painted to canvas.
     # Drives the truthful timing print (end-to-end, not __init__-only).
     _js_rendered = traitlets.Bool(False).tag(sync=True)
@@ -1427,6 +1432,7 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
         # without a kernel.
         self._save_state = bool(save_state)
         self.prepared_view = None
+        self.prepared_view_widget = None
         self._configure_static_fallback(
             notebook_preview_format=notebook_preview_format,
             notebook_preview_quality=notebook_preview_quality,
@@ -2160,6 +2166,8 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
             request = json.loads(raw)
             mode = str(request.get("mode", "show2d")).lower()
             if mode == "clear":
+                self.prepared_view = None
+                self.prepared_view_widget = None
                 self.handoff_status = ""
                 return
             if mode != "show2d":
@@ -2168,29 +2176,13 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
                 frame=request.get("frame", None),
                 panel=request.get("panel", None),
             )
+            self.prepared_view_widget = self.prepared_view
             n_images = int(getattr(self.prepared_view, "n_images", 0))
-            self.handoff_status = f"Ready: 2D with {n_images} panel{'s' if n_images != 1 else ''}"
+            self.handoff_status = f"Showing 2D with {n_images} panel{'s' if n_images != 1 else ''}"
         except Exception as exc:  # pragma: no cover - defensive comm boundary
             self.prepared_view = None
-            self.handoff_status = f"Handoff failed: {exc}"
-
-    def show_prepared_view(self) -> Any:
-        """Display and return the widget prepared by the toolbar View menu.
-
-        Jupyter frontends do not reliably attach new cell output from an
-        asynchronous widget callback, so toolbar prepare requests prepare the
-        alternate view and leave the original widget unchanged. Call this method
-        in a notebook cell when you want the prepared temporary view rendered.
-        """
-        if self.prepared_view is None:
-            raise RuntimeError("No prepared view. Use the View menu first.")
-        try:
-            from IPython.display import display
-
-            display(self.prepared_view)
-        except Exception:
-            pass
-        return self.prepared_view
+            self.prepared_view_widget = None
+            self.handoff_status = f"View failed: {exc}"
 
     def set_image(self, data, labels: list[str] | None = None) -> None:
         """Replace the stack data in place without rebuilding the widget.
@@ -4232,6 +4224,8 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
         clone.handoff_enabled = False
         clone.handoff_status = ""
         clone.handoff_request = ""
+        clone.prepared_view = None
+        clone.prepared_view_widget = None
         clone._stop_frame_server()
         clone.frame_server_url = ""
         clone._buffer_bytes = b""

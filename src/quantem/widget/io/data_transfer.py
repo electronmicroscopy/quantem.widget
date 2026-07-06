@@ -46,6 +46,7 @@ __all__ = [
     "plan_data_transfer",
     "read_data_transfer_manifest",
     "summarize_data_transfer",
+    "update_data_transfer_plan",
     "write_data_transfer_manifest",
 ]
 
@@ -430,6 +431,109 @@ def plan_data_transfer(
         total_bytes=sum(entry.size_bytes for entry in entries),
         totals_by_target=totals,
         skipped=tuple(skipped),
+    )
+
+
+def _entry_for_group(
+    group: DataTransferGroup,
+    target_root: str,
+    target_disk: str,
+) -> DataTransferEntry:
+    """Build a placement entry for a collected group."""
+    target_files = tuple(
+        str(Path(target_root) / file.relative_path)
+        for file in group.files
+    )
+    target_master = next(
+        str(Path(target_root) / file.relative_path)
+        for file in group.files
+        if file.role == "master"
+    )
+    return DataTransferEntry(
+        logical_id=group.logical_id,
+        master=group.master,
+        target_master=target_master,
+        target_root=target_root,
+        target_disk=target_disk,
+        source_disk=group.source_disk,
+        size_bytes=group.size_bytes,
+        files=group.files,
+        target_files=target_files,
+    )
+
+
+def update_data_transfer_plan(
+    plan: DataTransferPlan,
+    *,
+    source: str | Path | list[str | Path] | tuple[str | Path, ...] | None = None,
+    pattern: str = "*_master.h5",
+    recursive: bool = True,
+    require_ready: bool = False,
+    hash_algorithm: HashAlgorithm | str | None = None,
+) -> DataTransferPlan:
+    """Return a plan with newly discovered groups appended.
+
+    Existing entries keep their target assignments. Newly discovered groups are
+    assigned using the original strategy and the current assigned totals, which
+    lets a watched folder grow without silently moving older datasets to a
+    different disk.
+    """
+    if plan.action != "copy":
+        raise ValueError("update_data_transfer_plan only supports copy plans.")
+    target_roots = tuple(plan.target_roots)
+    if not target_roots:
+        raise ValueError("Cannot update a plan with no target roots.")
+
+    source_to_scan = source if source is not None else Path(plan.source_root)
+    groups = collect_data_transfer_groups(
+        source_to_scan,
+        pattern=pattern,
+        recursive=recursive,
+        require_ready=require_ready,
+        hash_algorithm=hash_algorithm,
+    )
+    existing_ids = {entry.logical_id for entry in plan.entries}
+    entries = list(plan.entries)
+    totals = {target: 0 for target in target_roots}
+    for entry in entries:
+        totals[entry.target_root] = totals.get(entry.target_root, 0) + entry.size_bytes
+    target_disks = {target: _disk_of_existing(Path(target)) for target in target_roots}
+    skipped = list(plan.skipped)
+    skipped_ids = {group.logical_id for group in skipped}
+
+    new_groups = [group for group in groups if group.logical_id not in existing_ids]
+    if require_ready:
+        ready_groups = []
+        for group in new_groups:
+            if group.ready:
+                ready_groups.append(group)
+            elif group.logical_id not in skipped_ids:
+                skipped.append(group)
+                skipped_ids.add(group.logical_id)
+        new_groups = ready_groups
+    if plan.strategy == "balance-by-size":
+        new_groups = sorted(new_groups, key=lambda group: group.size_bytes, reverse=True)
+
+    for idx, group in enumerate(new_groups):
+        if plan.strategy == "balance-by-size":
+            target_root = min(target_roots, key=lambda target: (totals[target], target))
+        else:
+            target_root = target_roots[(len(entries) + idx) % len(target_roots)]
+        entry = _entry_for_group(group, target_root, target_disks[target_root])
+        entries.append(entry)
+        totals[target_root] = totals.get(target_root, 0) + entry.size_bytes
+
+    return DataTransferPlan(
+        logical_name=plan.logical_name,
+        source_root=plan.source_root,
+        target_roots=target_roots,
+        action=plan.action,
+        strategy=plan.strategy,
+        entries=tuple(entries),
+        total_bytes=sum(entry.size_bytes for entry in entries),
+        totals_by_target=totals,
+        skipped=tuple(skipped),
+        manifest_version=plan.manifest_version,
     )
 
 

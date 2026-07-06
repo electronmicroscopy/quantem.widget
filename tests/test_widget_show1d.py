@@ -133,6 +133,8 @@ def test_show1d_display_public_api_state_and_validation() -> None:
         show_snapshot_fft=True,
         snapshot_fft_window=False,
         snapshot_fft_cmap="inferno",
+        starred_snapshot_image_labels=["lambda_10"],
+        hidden_snapshot_image_labels=["lambda_300"],
         prefer_webgpu=False,
     )
 
@@ -150,6 +152,8 @@ def test_show1d_display_public_api_state_and_validation() -> None:
     assert widget.show_snapshot_fft is True
     assert widget.snapshot_fft_window is False
     assert widget.snapshot_fft_cmap == "inferno"
+    assert widget.starred_snapshot_image_labels == ["lambda_10"]
+    assert widget.hidden_snapshot_image_labels == ["lambda_300"]
     assert widget.prefer_webgpu is False
 
     state = widget.state_dict()
@@ -164,6 +168,8 @@ def test_show1d_display_public_api_state_and_validation() -> None:
     assert state["show_snapshot_fft"] is True
     assert state["snapshot_fft_window"] is False
     assert state["snapshot_fft_cmap"] == "inferno"
+    assert state["starred_snapshot_image_labels"] == ["lambda_10"]
+    assert state["hidden_snapshot_image_labels"] == ["lambda_300"]
     assert state["prefer_webgpu"] is False
 
     widget.snapshot_columns = 99
@@ -180,6 +186,87 @@ def test_show1d_display_public_api_state_and_validation() -> None:
 
     with np.testing.assert_raises(ValueError):
         Show1D(np.arange(4, dtype=np.float32), sampling=-1.0)
+
+
+def test_show1d_trial_review_helpers_persist_state() -> None:
+    widget = Show1D({"lambda 10": [3.0, 2.0], "lambda 300": [4.0, 4.5]})
+
+    assert widget.star_trial("lambda_10") is widget
+    widget.star_trial("lambda 10")
+    widget.hide_trial("lambda_300")
+
+    assert widget.starred_snapshot_image_labels == ["lambda_10"]
+    assert widget.hidden_snapshot_image_labels == ["lambda_300"]
+
+    widget.hide_trial("lambda 10")
+    assert widget.starred_snapshot_image_labels == []
+    assert widget.hidden_snapshot_image_labels == ["lambda_300", "lambda 10"]
+
+    state = widget.state_dict()
+    restored = Show1D(np.zeros((2, 2), dtype=np.float32), state=state)
+    assert restored.hidden_snapshot_image_labels == ["lambda_300", "lambda 10"]
+    assert restored.show_trial("lambda 300") is restored
+    assert restored.hidden_snapshot_image_labels == ["lambda 10"]
+    restored.unstar_trial("lambda_10").show_all_trials().clear_starred_trials()
+    assert restored.hidden_snapshot_image_labels == []
+    assert restored.starred_snapshot_image_labels == []
+
+
+def test_show1d_ranking_notes_tags_alerts_and_summary_export(tmp_path: pathlib.Path) -> None:
+    widget = Show1D(
+        {
+            "lambda 1": [5.0, 3.0, 1.0],
+            "lambda 3": [np.nan, 4.0, 2.0],
+            "lambda 10": [5.0, 6.0, 7.0],
+        },
+        trial_sort_key="final_loss",
+    )
+
+    assert widget.best_trial_label == "lambda 1"
+    assert [row["label"] for row in widget.trial_rankings] == ["lambda 1", "lambda 3", "lambda 10"]
+
+    widget.set_trial_note("lambda 1", "best lambda").tag_trial("lambda 1", "best")
+    widget.star_best_trial().hide_worst_trials()
+
+    assert widget.starred_snapshot_image_labels == ["lambda 1"]
+    assert widget.hidden_snapshot_image_labels == ["lambda 10"]
+    assert widget.trial_notes == {"lambda 1": "best lambda"}
+    assert widget.trial_tags == {"lambda 1": ["best"]}
+    assert any(alert["kind"] == "nonfinite" and alert["label"] == "lambda 3" for alert in widget.trial_alerts)
+    assert any(alert["kind"] == "worse_final" and alert["label"] == "lambda 10" for alert in widget.trial_alerts)
+
+    out = widget.export_run_summary(tmp_path / "summary.json")
+    summary = json.loads(out.read_text())
+    assert summary["best_trial"] == "lambda 1"
+    assert summary["starred_trials"] == ["lambda 1"]
+    assert summary["hidden_trials"] == ["lambda 10"]
+    assert summary["trial_notes"] == {"lambda 1": "best lambda"}
+
+
+def test_show1d_review_state_exports_strict_json_without_nan(tmp_path: pathlib.Path) -> None:
+    widget = Show1D(
+        {
+            "frame-by-frame": [3.0, 2.0, 1.0],
+            "lambda 10": [4.0, 3.0, 2.0],
+        },
+        title="review export",
+    )
+
+    assert widget.trial_rankings[0]["lambda"] is None
+    assert widget.run_summary["rankings"][0]["lambda"] is None
+
+    summary_path = widget.export_run_summary(tmp_path / "summary.json")
+    summary_text = summary_path.read_text()
+    assert "NaN" not in summary_text
+    json.loads(summary_text)
+
+    html_path = widget.export_html(tmp_path / "show1d_review.html")
+    html = html_path.read_text()
+    state_json = html.split('<script type="application/vnd.jupyter.widget-state+json">', 1)[1].split("</script>", 1)[0]
+    json.loads(
+        state_json,
+        parse_constant=lambda value: (_ for _ in ()).throw(AssertionError(f"non-finite JSON constant {value}")),
+    )
 
 
 def test_show1d_ui_mode_presets_and_overrides() -> None:
@@ -307,3 +394,96 @@ def test_show1d_from_joint_time_report_loads_metrics_and_snapshots(tmp_path: pat
     assert widget.report_metadata["data"] == "ducky"
     assert widget.n_snapshots == 3
     assert widget.snapshot_labels == ["clean reference", "frame_by_frame average", "joint_lambda_0.1 average"]
+
+
+def test_show1d_from_joint_time_report_frame_by_frame_loads_full_sweep(tmp_path: pathlib.Path) -> None:
+    summary = {
+        "data": "ducky",
+        "num_frames": 4,
+        "num_iters": 12,
+        "metrics": {
+            "frame_by_frame": {
+                "final_losses": [4.0, 3.0, 2.0, 1.0],
+                "rmse_per_frame_mask": 0.8,
+            },
+            "joint_lambda_0.1": {
+                "final_losses": [5.0, 4.0, 2.5, 1.5],
+                "rmse_per_frame_mask": 0.4,
+            },
+        },
+    }
+    summary_path = tmp_path / "summary.json"
+    summary_path.write_text(json.dumps(summary))
+    np.savez(
+        tmp_path / "reconstructions.npz",
+        reference_phase=np.zeros((4, 6), dtype=np.float32),
+        frame_by_frame=np.ones((4, 4, 6), dtype=np.float32),
+        **{"joint_lambda_0.1": np.full((4, 4, 6), 2.0, dtype=np.float32)},
+    )
+
+    widget = Show1D.from_joint_time_report(
+        summary_path,
+        frame_by_frame=True,
+        snapshot_downsample=2,
+    )
+
+    assert widget.labels == ["frame-by-frame", "lambda 0.1"]
+    np.testing.assert_allclose(widget._data, [[4, 3, 2, 1], [5, 4, 2.5, 1.5]])
+    assert widget.x_label == "frame"
+    assert widget.method_labels == ["0", "1", "2", "3"]
+    assert widget.report_metadata["frame_by_frame"] is True
+    assert widget.report_metadata["metrics_by_trial"]["lambda 0.1"]["rmse_per_frame_mask"] == 0.4
+    assert widget.n_snapshot_groups == 4
+    assert widget.n_snapshots == 12
+    assert widget.snapshot_image_labels[:3] == ["reference", "frame-by-frame", "lambda_0.1"]
+    assert widget.snapshot_height == 2
+    assert widget.snapshot_width == 3
+
+
+def test_show1d_monitor_file_reloads_losses_snapshots_and_review_state(tmp_path: pathlib.Path) -> None:
+    image0 = tmp_path / "lambda1_0.npy"
+    image1 = tmp_path / "lambda1_1.npy"
+    np.save(image0, np.ones((3, 3), dtype=np.float32))
+    np.save(image1, np.full((3, 3), 2.0, dtype=np.float32))
+    monitor = tmp_path / "show1d_monitor.jsonl"
+
+    Show1D.append_monitor_event(
+        monitor,
+        {
+            "iteration": 0,
+            "losses": {"lambda 1": 3.0, "lambda 10": 5.0},
+            "snapshots": {"lambda_1": image0.name},
+            "warnings": ["started from coarse object"],
+        },
+    )
+    Show1D.append_monitor_event(
+        monitor,
+        {
+            "iteration": 1,
+            "losses": {"lambda 1": 1.0, "lambda 10": 6.0},
+            "snapshots": {"lambda_1": image1.name},
+            "starred": ["lambda 1"],
+            "notes": {"lambda 1": "best so far"},
+            "tags": {"lambda 1": ["best"]},
+        },
+    )
+
+    widget = Show1D.from_monitor_file(monitor)
+
+    assert widget.monitor_path == str(monitor)
+    assert widget.labels == ["lambda 1", "lambda 10"]
+    assert widget.n_points == 2
+    assert widget.n_snapshot_groups == 2
+    assert widget.n_snapshots == 2
+    assert widget.starred_snapshot_image_labels == ["lambda 1"]
+    assert widget.trial_notes == {"lambda 1": "best so far"}
+    assert widget.trial_tags == {"lambda 1": ["best"]}
+    assert any(alert["kind"] == "monitor_warning" for alert in widget.trial_alerts)
+
+    widget.hide_trial("lambda 10")
+    Show1D.append_monitor_event(monitor, {"iteration": 2, "losses": {"lambda 1": 0.5, "lambda 10": 7.0}})
+    widget.refresh_monitor()
+
+    assert widget.n_points == 3
+    assert widget.hidden_snapshot_image_labels == ["lambda 10"]
+    assert widget.trial_notes == {"lambda 1": "best so far"}

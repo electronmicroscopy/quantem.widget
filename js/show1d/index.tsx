@@ -4,14 +4,17 @@ import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
 import Divider from "@mui/material/Divider";
 import IconButton from "@mui/material/IconButton";
+import InputAdornment from "@mui/material/InputAdornment";
 import Menu from "@mui/material/Menu";
 import MenuItem from "@mui/material/MenuItem";
 import Select from "@mui/material/Select";
 import Slider from "@mui/material/Slider";
 import Stack from "@mui/material/Stack";
 import Switch from "@mui/material/Switch";
+import TextField from "@mui/material/TextField";
 import Tooltip from "@mui/material/Tooltip";
 import Typography from "@mui/material/Typography";
+import ClearIcon from "@mui/icons-material/Clear";
 import DownloadIcon from "@mui/icons-material/Download";
 import FastForwardIcon from "@mui/icons-material/FastForward";
 import FastRewindIcon from "@mui/icons-material/FastRewind";
@@ -22,6 +25,8 @@ import PauseIcon from "@mui/icons-material/Pause";
 import PlayArrowIcon from "@mui/icons-material/PlayArrow";
 import RestartAltIcon from "@mui/icons-material/RestartAlt";
 import ShowChartIcon from "@mui/icons-material/ShowChart";
+import StarIcon from "@mui/icons-material/Star";
+import StarBorderIcon from "@mui/icons-material/StarBorder";
 import StopIcon from "@mui/icons-material/Stop";
 import TableChartIcon from "@mui/icons-material/TableChart";
 import VisibilityIcon from "@mui/icons-material/Visibility";
@@ -32,6 +37,16 @@ import { computeHistogramFromBytes, findDataRange, percentileClip } from "../sta
 import { applyHannWindow2D, autoEnhanceFFT, computeMagnitude, fft2dAsync, fftshift, getWebGPUFFT, nextPow2, WebGPUFFT } from "../fft";
 import { formatScaleLabel, roundToNiceValue } from "../figure";
 import { useTheme } from "../theme";
+import { EmbeddedWidgetView } from "../embeddedWidget";
+
+const SHOW1D_TO_SHOW2D_LINKED_TRAITS = [
+  { source: "image_cmap", target: "cmap" },
+  { source: "show_snapshot_fft", target: "show_fft" },
+  { source: "show_stats" },
+  { source: "show_controls" },
+  { source: "controls_collapsed" },
+  { source: "scale_bar_visible" },
+];
 
 type Marker = {
   x?: number;
@@ -80,6 +95,32 @@ type SnapshotFftCacheEntry = {
   width: number;
   height: number;
   backend: string;
+};
+
+type TrialRanking = {
+  label?: string;
+  trace_index?: number;
+  rank?: number;
+  score?: number;
+  lambda?: number;
+  final_loss?: number;
+  min_loss?: number;
+  rmse?: number;
+  flicker?: number;
+  object_quality?: number;
+  probe_quality?: number;
+  alert_count?: number;
+  starred?: boolean;
+  hidden?: boolean;
+  note?: string;
+  tags?: string[];
+};
+
+type TrialAlert = {
+  label?: string;
+  kind?: string;
+  severity?: string;
+  message?: string;
 };
 
 type Show1DWritableFile = {
@@ -200,10 +241,12 @@ function yExtent(
   xData: Float32Array,
   xRange: [number, number],
   logScale: boolean,
+  hiddenTraces?: Set<number>,
 ): [number, number] {
   let lo = Infinity;
   let hi = -Infinity;
   for (let trace = 0; trace < nTraces; trace += 1) {
+    if (hiddenTraces?.has(trace)) continue;
     const offset = trace * nPoints;
     for (let point = 0; point < nPoints; point += 1) {
       const x = xData.length > point ? xData[point] : point;
@@ -291,6 +334,57 @@ function shortMethodLabel(label: string): string {
   if (label === "frame_by_frame") return "frame";
   if (label.startsWith("joint_lambda_")) return `lambda ${label.slice("joint_lambda_".length)}`;
   return label.replace(/_/g, " ");
+}
+
+function trialKey(label: string): string {
+  return String(label || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+function uniqueStrings(values: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const value of values) {
+    const text = String(value || "").trim();
+    if (!text || seen.has(text)) continue;
+    seen.add(text);
+    out.push(text);
+  }
+  return out;
+}
+
+function lookupByTrialKey<T>(mapping: Record<string, T> | undefined, label: string): T | undefined {
+  if (!mapping) return undefined;
+  const key = trialKey(label);
+  for (const [rawLabel, value] of Object.entries(mapping)) {
+    if (trialKey(rawLabel) === key) return value;
+  }
+  return undefined;
+}
+
+function parseLambdaLabel(label: string): number {
+  const match = String(label || "").replace(/_/g, " ").match(/lambda\s+([-+]?\d*\.?\d+(?:e[-+]?\d+)?)/i);
+  if (!match) return Number.NaN;
+  return Number(match[1]);
+}
+
+function isReferenceLabel(label: string): boolean {
+  return trialKey(label).includes("reference");
+}
+
+function rankingNumber(row: TrialRanking, key: string): number {
+  const clean = key === "default" ? "final_loss" : key;
+  if (clean === "object_quality" || clean === "probe_quality") {
+    const value = Number(row[clean]);
+    return Number.isFinite(value) ? -value : Number.NaN;
+  }
+  const value = Number((row as Record<string, unknown>)[clean]);
+  return Number.isFinite(value) ? value : Number.NaN;
+}
+
+function rankingDisplayValue(row: TrialRanking, key: string): string {
+  const clean = key === "default" ? "final_loss" : key;
+  const raw = Number((row as Record<string, unknown>)[clean]);
+  return Number.isFinite(raw) ? formatNumber(raw, clean === "lambda" ? 3 : 4) : "";
 }
 
 function trimTrailingZeros(value: string): string {
@@ -1315,6 +1409,19 @@ function Show1DWidget() {
   const [snapshotHeights] = useModelState<number[]>("snapshot_heights");
   const [snapshotWidths] = useModelState<number[]>("snapshot_widths");
   const [snapshotImageLabels] = useModelState<string[]>("snapshot_image_labels");
+  const [starredSnapshotImageLabels, setStarredSnapshotImageLabels] = useModelState<string[]>("starred_snapshot_image_labels");
+  const [hiddenSnapshotImageLabels, setHiddenSnapshotImageLabels] = useModelState<string[]>("hidden_snapshot_image_labels");
+  const [trialNotes, setTrialNotes] = useModelState<Record<string, string>>("trial_notes");
+  const [trialTags, setTrialTags] = useModelState<Record<string, string[]>>("trial_tags");
+  const [showStarredOnly, setShowStarredOnly] = useModelState<boolean>("show_starred_only");
+  const [trialSortKey, setTrialSortKey] = useModelState<string>("trial_sort_key");
+  const [trialSortDescending, setTrialSortDescending] = useModelState<boolean>("trial_sort_descending");
+  const [trialFilterText, setTrialFilterText] = useModelState<string>("trial_filter_text");
+  const [topTrialCount, setTopTrialCount] = useModelState<number>("top_trial_count");
+  const [trialRankings] = useModelState<TrialRanking[]>("trial_rankings");
+  const [trialAlerts] = useModelState<TrialAlert[]>("trial_alerts");
+  const [bestTrialLabel] = useModelState<string>("best_trial_label");
+  const [runSummary] = useModelState<Record<string, unknown>>("run_summary");
   const [snapshotGroupIndices] = useModelState<number[]>("snapshot_group_indices");
   const [snapshotGroupIterations] = useModelState<number[]>("snapshot_group_iterations");
   const [snapshotGroupLabels] = useModelState<string[]>("snapshot_group_labels");
@@ -1346,6 +1453,10 @@ function Show1DWidget() {
   const [exportPayload] = useModelState<DataView>("export_payload");
   const [exportPayloadId] = useModelState<string>("export_payload_id");
   const [exportPayloadFilename] = useModelState<string>("export_filename");
+  const [, setHandoffRequest] = useModelState<string>("handoff_request");
+  const [handoffStatus] = useModelState<string>("handoff_status");
+  const [handoffEnabled] = useModelState<boolean>("handoff_enabled");
+  const [preparedViewWidget] = useModelState<unknown>("prepared_view_widget");
 
   const { colors: themeColors } = useTheme(Boolean(offlineForTheme));
   const yData = React.useMemo(() => safeFloat32(yBytes, Math.max(0, nTraces * nPoints)), [yBytes, nTraces, nPoints]);
@@ -1357,6 +1468,130 @@ function Show1DWidget() {
   const profileImageData = React.useMemo(
     () => safeFloat32(profileImageBytes, Math.max(0, profileImageHeight * profileImageWidth)),
     [profileImageBytes, profileImageHeight, profileImageWidth],
+  );
+  const hiddenTrialLabels = React.useMemo(() => uniqueStrings(hiddenSnapshotImageLabels ?? []), [hiddenSnapshotImageLabels]);
+  const starredTrialLabels = React.useMemo(() => uniqueStrings(starredSnapshotImageLabels ?? []), [starredSnapshotImageLabels]);
+  const hiddenTrialKeys = React.useMemo(() => new Set(hiddenTrialLabels.map(trialKey)), [hiddenTrialLabels]);
+  const starredTrialKeys = React.useMemo(() => new Set(starredTrialLabels.map(trialKey)), [starredTrialLabels]);
+  const normalisedSortKey = React.useMemo(() => String(trialSortKey || "final_loss"), [trialSortKey]);
+  const baseTrialRows = React.useMemo<TrialRanking[]>(() => {
+    const rowsByKey = new Map<string, TrialRanking>();
+    for (const row of trialRankings ?? []) {
+      const label = String(row.label || "");
+      if (label) rowsByKey.set(trialKey(label), { ...row, label });
+    }
+    for (let idx = 0; idx < nTraces; idx += 1) {
+      const label = labels?.[idx] || `Trace ${idx + 1}`;
+      const key = trialKey(label);
+      const existing = rowsByKey.get(key) ?? {};
+      const offset = idx * nPoints;
+      let finalLoss = Number(existing.final_loss);
+      let minLoss = Number(existing.min_loss);
+      if (!Number.isFinite(finalLoss) || !Number.isFinite(minLoss)) {
+        finalLoss = Number.NaN;
+        minLoss = Number.POSITIVE_INFINITY;
+        for (let point = 0; point < nPoints; point += 1) {
+          const value = yData[offset + point];
+          if (!Number.isFinite(value)) continue;
+          finalLoss = value;
+          if (value < minLoss) minLoss = value;
+        }
+        if (!Number.isFinite(minLoss)) minLoss = Number.NaN;
+      }
+      rowsByKey.set(key, {
+        ...existing,
+        label,
+        trace_index: idx,
+        lambda: Number.isFinite(Number(existing.lambda)) ? Number(existing.lambda) : parseLambdaLabel(label),
+        final_loss: finalLoss,
+        min_loss: minLoss,
+        rmse: Number(existing.rmse),
+        flicker: Number(existing.flicker),
+        object_quality: Number(existing.object_quality),
+        probe_quality: Number(existing.probe_quality),
+        alert_count: Number(existing.alert_count) || 0,
+        starred: starredTrialKeys.has(key),
+        hidden: hiddenTrialKeys.has(key),
+        note: lookupByTrialKey(trialNotes, label) ?? String(existing.note || ""),
+        tags: lookupByTrialKey(trialTags, label) ?? existing.tags ?? [],
+      });
+    }
+    return Array.from(rowsByKey.values()).filter((row) => Number.isFinite(Number(row.trace_index)));
+  }, [hiddenTrialKeys, labels, nPoints, nTraces, starredTrialKeys, trialNotes, trialRankings, trialTags, yData]);
+  const sortedTrialRows = React.useMemo(() => {
+    const rows = [...baseTrialRows];
+    if (normalisedSortKey === "label") {
+      rows.sort((a, b) => String(a.label || "").localeCompare(String(b.label || "")));
+    } else {
+      rows.sort((a, b) => {
+        const av = rankingNumber(a, normalisedSortKey);
+        const bv = rankingNumber(b, normalisedSortKey);
+        if (Number.isFinite(av) && Number.isFinite(bv) && av !== bv) return av - bv;
+        if (Number.isFinite(av) !== Number.isFinite(bv)) return Number.isFinite(av) ? -1 : 1;
+        return String(a.label || "").localeCompare(String(b.label || ""));
+      });
+    }
+    if (trialSortDescending) rows.reverse();
+    return rows.map((row, idx) => ({ ...row, rank: idx + 1, score: rankingNumber(row, normalisedSortKey) }));
+  }, [baseTrialRows, normalisedSortKey, trialSortDescending]);
+  const trialRowByKey = React.useMemo(() => {
+    const out = new Map<string, TrialRanking>();
+    for (const row of sortedTrialRows) {
+      if (row.label) out.set(trialKey(row.label), row);
+    }
+    return out;
+  }, [sortedTrialRows]);
+  const filterText = String(trialFilterText || "").trim().toLowerCase();
+  const topTrialLimit = Math.max(0, Number.isFinite(topTrialCount) ? Math.round(topTrialCount) : 0);
+  const topTrialKeys = React.useMemo(() => {
+    if (topTrialLimit <= 0) return new Set<string>();
+    return new Set(sortedTrialRows.slice(0, topTrialLimit).map((row) => trialKey(row.label || "")));
+  }, [sortedTrialRows, topTrialLimit]);
+  const passesReviewFilter = React.useCallback((label: string) => {
+    if (isReferenceLabel(label)) return true;
+    const key = trialKey(label);
+    const row = trialRowByKey.get(key);
+    if (showStarredOnly && !starredTrialKeys.has(key)) return false;
+    if (topTrialLimit > 0 && !topTrialKeys.has(key)) return false;
+    if (filterText) {
+      const haystack = [
+        label,
+        row?.note || "",
+        ...(row?.tags ?? []),
+      ].join(" ").toLowerCase();
+      if (!haystack.includes(filterText)) return false;
+    }
+    return true;
+  }, [filterText, showStarredOnly, starredTrialKeys, topTrialKeys, topTrialLimit, trialRowByKey]);
+  const imageLabelForIndex = React.useCallback(
+    (imageIdx: number) => snapshotImageLabels?.[imageIdx] || snapshotLabels?.[imageIdx] || `image ${imageIdx + 1}`,
+    [snapshotImageLabels, snapshotLabels],
+  );
+  const isSnapshotImageHidden = React.useCallback(
+    (imageIdx: number) => {
+      const label = imageLabelForIndex(imageIdx);
+      return hiddenTrialKeys.has(trialKey(label)) || !passesReviewFilter(label);
+    },
+    [hiddenTrialKeys, imageLabelForIndex, passesReviewFilter],
+  );
+  const hiddenTraceIndices = React.useMemo(
+    () => Array.from({ length: nTraces }, (_, idx) => idx).filter((idx) => {
+      const label = labels?.[idx] || `Trace ${idx + 1}`;
+      return hiddenTrialKeys.has(trialKey(label)) || !passesReviewFilter(label);
+    }),
+    [hiddenTrialKeys, labels, nTraces, passesReviewFilter],
+  );
+  const hiddenTraceSet = React.useMemo(() => new Set(hiddenTraceIndices), [hiddenTraceIndices]);
+  const visibleTraceIndices = React.useMemo(
+    () => sortedTrialRows
+      .map((row) => Number(row.trace_index))
+      .filter((idx) => Number.isInteger(idx) && idx >= 0 && idx < nTraces && !hiddenTraceSet.has(idx)),
+    [hiddenTraceSet, nTraces, sortedTrialRows],
+  );
+  const hiddenTrialCount = hiddenTrialLabels.length;
+  const activeReviewCount = React.useMemo(
+    () => sortedTrialRows.filter((row) => row.label && !hiddenTraceSet.has(Number(row.trace_index))).length,
+    [hiddenTraceSet, sortedTrialRows],
   );
 
   const rootRef = React.useRef<HTMLDivElement>(null);
@@ -1378,6 +1613,7 @@ function Show1DWidget() {
   const hoverRafRef = React.useRef<number | null>(null);
   const pendingHoverRef = React.useRef<HoverPoint | null>(null);
   const [exportAnchor, setExportAnchor] = React.useState<HTMLElement | null>(null);
+  const [viewMenuAnchor, setViewMenuAnchor] = React.useState<HTMLElement | null>(null);
   const [exportBusy, setExportBusy] = React.useState(false);
   const [localExportStatus, setLocalExportStatus] = React.useState("");
   const pendingExportRef = React.useRef<{ id: string; filename: string; handle: Show1DFileHandle | null } | null>(null);
@@ -1390,8 +1626,8 @@ function Show1DWidget() {
     return fullXRange;
   }, [xRange, fullXRange]);
   const fullYRange = React.useMemo(
-    () => yExtent(yData, nTraces, nPoints, xData, effectiveXRange, logScale),
-    [yData, nTraces, nPoints, xData, effectiveXRange, logScale],
+    () => yExtent(yData, nTraces, nPoints, xData, effectiveXRange, logScale, hiddenTraceSet),
+    [yData, nTraces, nPoints, xData, effectiveXRange, logScale, hiddenTraceSet],
   );
   const effectiveYRange: [number, number] = React.useMemo(() => {
     if (yRange?.length === 2 && Number.isFinite(yRange[0]) && Number.isFinite(yRange[1]) && yRange[0] < yRange[1]) {
@@ -1434,10 +1670,20 @@ function Show1DWidget() {
       groupCount - 1,
     )
     : -1;
-  const selectedGroupImageIndices = selectedGroup >= 0 ? (snapshotGroups[selectedGroup] ?? []) : [];
+  const selectedGroupAllImageIndices = selectedGroup >= 0 ? (snapshotGroups[selectedGroup] ?? []) : [];
+  const selectedGroupImageIndices = selectedGroupAllImageIndices
+    .filter((imageIdx) => !isSnapshotImageHidden(imageIdx))
+    .sort((a, b) => {
+      const aLabel = imageLabelForIndex(a);
+      const bLabel = imageLabelForIndex(b);
+      if (isReferenceLabel(aLabel) !== isReferenceLabel(bLabel)) return isReferenceLabel(aLabel) ? -1 : 1;
+      const ar = Number(trialRowByKey.get(trialKey(aLabel))?.rank ?? Number.MAX_SAFE_INTEGER);
+      const br = Number(trialRowByKey.get(trialKey(bLabel))?.rank ?? Number.MAX_SAFE_INTEGER);
+      return ar - br || aLabel.localeCompare(bLabel);
+    });
   const selectedSnapshot = selectedGroupImageIndices.includes(legacySelectedSnapshot)
     ? legacySelectedSnapshot
-    : selectedGroupImageIndices[0] ?? legacySelectedSnapshot;
+    : selectedGroupImageIndices[0] ?? -1;
   const selectedSnapshotIteration = selectedGroup >= 0 && Number.isFinite(snapshotGroupIterations?.[selectedGroup])
     ? Number(snapshotGroupIterations[selectedGroup])
     : selectedSnapshot >= 0 && snapshotIterations?.length > selectedSnapshot
@@ -1473,9 +1719,9 @@ function Show1DWidget() {
     if (groupCount <= 0) return;
     const groupIdx = clampValue(Math.round(value), 0, groupCount - 1);
     setSelectedSnapshotGroupIdx(groupIdx);
-    const imageIdx = snapshotGroups[groupIdx]?.[0] ?? -1;
-    setSelectedSnapshotIdx(imageIdx >= 0 ? imageIdx : groupIdx);
-  }, [groupCount, setSelectedSnapshotGroupIdx, setSelectedSnapshotIdx, snapshotGroups]);
+    const imageIdx = snapshotGroups[groupIdx]?.find((idx) => !isSnapshotImageHidden(idx)) ?? -1;
+    setSelectedSnapshotIdx(imageIdx);
+  }, [groupCount, isSnapshotImageHidden, setSelectedSnapshotGroupIdx, setSelectedSnapshotIdx, snapshotGroups]);
 
   const selectSnapshotImage = React.useCallback((imageIdx: number) => {
     if (imageIdx < 0 || imageIdx >= nSnapshots) return;
@@ -1483,6 +1729,82 @@ function Show1DWidget() {
     const groupIdx = snapshotImageGroups[imageIdx] ?? selectedGroup;
     if (groupIdx >= 0 && groupIdx < groupCount) setSelectedSnapshotGroupIdx(groupIdx);
   }, [groupCount, nSnapshots, selectedGroup, setSelectedSnapshotGroupIdx, setSelectedSnapshotIdx, snapshotImageGroups]);
+
+  const toggleStarredTrial = React.useCallback((label: string) => {
+    const clean = String(label || "").trim();
+    if (!clean) return;
+    const key = trialKey(clean);
+    const current = uniqueStrings(starredSnapshotImageLabels ?? []);
+    if (current.some((value) => trialKey(value) === key)) {
+      setStarredSnapshotImageLabels(current.filter((value) => trialKey(value) !== key));
+      return;
+    }
+    setStarredSnapshotImageLabels([...current, clean]);
+  }, [setStarredSnapshotImageLabels, starredSnapshotImageLabels]);
+
+  const hideTrial = React.useCallback((label: string) => {
+    const clean = String(label || "").trim();
+    if (!clean) return;
+    const key = trialKey(clean);
+    const hidden = uniqueStrings(hiddenSnapshotImageLabels ?? []);
+    const starred = uniqueStrings(starredSnapshotImageLabels ?? []);
+    if (!hidden.some((value) => trialKey(value) === key)) {
+      setHiddenSnapshotImageLabels([...hidden, clean]);
+    }
+    if (starred.some((value) => trialKey(value) === key)) {
+      setStarredSnapshotImageLabels(starred.filter((value) => trialKey(value) !== key));
+    }
+  }, [hiddenSnapshotImageLabels, setHiddenSnapshotImageLabels, setStarredSnapshotImageLabels, starredSnapshotImageLabels]);
+
+  const showAllTrials = React.useCallback(() => {
+    setHiddenSnapshotImageLabels([]);
+  }, [setHiddenSnapshotImageLabels]);
+
+  const setTrialNoteForLabel = React.useCallback((label: string, note: string) => {
+    const clean = String(label || "").trim();
+    if (!clean) return;
+    const key = trialKey(clean);
+    const next: Record<string, string> = {};
+    for (const [rawLabel, value] of Object.entries(trialNotes ?? {})) {
+      if (trialKey(rawLabel) !== key && String(value || "").trim()) next[rawLabel] = String(value);
+    }
+    if (note.trim()) next[clean] = note;
+    setTrialNotes(next);
+  }, [setTrialNotes, trialNotes]);
+
+  const toggleTrialTag = React.useCallback((label: string, tag: string) => {
+    const clean = String(label || "").trim();
+    const cleanTag = String(tag || "").trim();
+    if (!clean || !cleanTag) return;
+    const key = trialKey(clean);
+    const next: Record<string, string[]> = {};
+    let current: string[] = [];
+    for (const [rawLabel, values] of Object.entries(trialTags ?? {})) {
+      const list = Array.isArray(values) ? values.map(String).filter(Boolean) : [];
+      if (trialKey(rawLabel) === key) current = list;
+      else if (list.length) next[rawLabel] = uniqueStrings(list);
+    }
+    next[clean] = current.some((value) => value === cleanTag)
+      ? current.filter((value) => value !== cleanTag)
+      : uniqueStrings([...current, cleanTag]);
+    if (!next[clean].length) delete next[clean];
+    setTrialTags(next);
+  }, [setTrialTags, trialTags]);
+
+  const starBestTrial = React.useCallback(() => {
+    const best = sortedTrialRows.find((row) => row.label && !hiddenTrialKeys.has(trialKey(row.label)));
+    if (!best?.label) return;
+    const current = uniqueStrings(starredSnapshotImageLabels ?? []);
+    if (!current.some((value) => trialKey(value) === trialKey(best.label || ""))) {
+      setStarredSnapshotImageLabels([...current, best.label]);
+    }
+  }, [hiddenTrialKeys, setStarredSnapshotImageLabels, sortedTrialRows, starredSnapshotImageLabels]);
+
+  const hideWorstTrial = React.useCallback(() => {
+    const candidates = sortedTrialRows.filter((row) => row.label && !hiddenTrialKeys.has(trialKey(row.label)) && !starredTrialKeys.has(trialKey(row.label)));
+    const worst = candidates[candidates.length - 1];
+    if (worst?.label) hideTrial(worst.label);
+  }, [hiddenTrialKeys, hideTrial, sortedTrialRows, starredTrialKeys]);
 
   const scheduleHover = React.useCallback((value: HoverPoint | null) => {
     pendingHoverRef.current = value;
@@ -1504,6 +1826,10 @@ function Show1DWidget() {
   React.useEffect(() => {
     if (snapshotColumns !== snapshotColumnCount) setSnapshotColumns(snapshotColumnCount);
   }, [setSnapshotColumns, snapshotColumnCount, snapshotColumns]);
+
+  React.useEffect(() => {
+    if (focusedTrace >= 0 && hiddenTraceSet.has(focusedTrace)) setFocusedTrace(-1);
+  }, [focusedTrace, hiddenTraceSet, setFocusedTrace]);
 
   React.useEffect(() => {
     if (plotHeightPx !== plotHeight) setPlotHeightPx(plotHeight);
@@ -1771,6 +2097,7 @@ function Show1DWidget() {
     }
 
     for (let trace = 0; trace < nTraces; trace += 1) {
+      if (hiddenTraceSet.has(trace)) continue;
       const isFocused = focusedTrace < 0 || focusedTrace === trace;
       ctx.strokeStyle = cssColor(colors ?? [], trace);
       ctx.lineWidth = Math.max(1, lineWidth) * (focusedTrace === trace ? 1.8 : 1);
@@ -1803,7 +2130,14 @@ function Show1DWidget() {
       const thumbW = thumbnailSize;
       const lanes = Math.max(1, Math.min(3, Math.floor((geom.plotH - 12) / (thumbnailSize + 6)) || 1));
       for (let groupIdx = 0; groupIdx < groupCount; groupIdx += 1) {
-        const imageIndices = snapshotGroups[groupIdx] ?? [];
+        const imageIndices = (snapshotGroups[groupIdx] ?? []).filter((idx) => !isSnapshotImageHidden(idx)).sort((a, b) => {
+          const aLabel = imageLabelForIndex(a);
+          const bLabel = imageLabelForIndex(b);
+          if (isReferenceLabel(aLabel) !== isReferenceLabel(bLabel)) return isReferenceLabel(aLabel) ? -1 : 1;
+          const ar = Number(trialRowByKey.get(trialKey(aLabel))?.rank ?? Number.MAX_SAFE_INTEGER);
+          const br = Number(trialRowByKey.get(trialKey(bLabel))?.rank ?? Number.MAX_SAFE_INTEGER);
+          return ar - br || aLabel.localeCompare(bLabel);
+        });
         const imageIdx = imageIndices[0];
         if (imageIdx === undefined) continue;
         const thumbMetrics = snapshotGroupThumbnailMetrics(imageIndices.length, thumbW);
@@ -1926,6 +2260,7 @@ function Show1DWidget() {
     showGrid,
     lineWidth,
     focusedTrace,
+    hiddenTraceSet,
     effectiveXRange,
     effectiveYRange,
     markers,
@@ -1934,6 +2269,8 @@ function Show1DWidget() {
     showSnapshotThumbnails,
     hasSnapshots,
     groupCount,
+    imageLabelForIndex,
+    isSnapshotImageHidden,
     snapshotGroups,
     snapshotGroupIterations,
     snapshotIterations,
@@ -1943,6 +2280,7 @@ function Show1DWidget() {
     snapshotHeight,
     snapshotWidth,
     selectedGroup,
+    trialRowByKey,
     thumbnailSize,
     imageLut,
     normalisedSnapshotContrastPreset,
@@ -1959,6 +2297,7 @@ function Show1DWidget() {
     let best: HoverPoint | null = null;
     let bestDist = 24 * 24;
     for (let trace = 0; trace < nTraces; trace += 1) {
+      if (hiddenTraceSet.has(trace)) continue;
       const offset = trace * nPoints;
       for (let point = 0; point < nPoints; point += 1) {
         const x = xData.length > point ? xData[point] : point;
@@ -1975,7 +2314,7 @@ function Show1DWidget() {
       }
     }
     return best;
-  }, [nPoints, nTraces, xData, yData, logScale]);
+  }, [hiddenTraceSet, nPoints, nTraces, xData, yData, logScale]);
 
   const handlePointerMove = React.useCallback((event: React.PointerEvent<HTMLCanvasElement>) => {
     scheduleHover(nearestPoint(event.clientX, event.clientY));
@@ -2069,9 +2408,31 @@ function Show1DWidget() {
     setExportRequest(JSON.stringify({ mode: "single", encoding: "full", id, filename, download: true }));
   }, [exportEnabled, labels, nPoints, nTraces, setExportRequest, title, xData, yData]);
 
+  const handleHandoffToShow2D = React.useCallback(() => {
+    const images = selectedGroupImageIndices.map((idx) => imageLabelForIndex(idx));
+    setViewMenuAnchor(null);
+    setHandoffRequest(JSON.stringify({
+      mode: "show2d",
+      id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      group: selectedGroup,
+      images,
+      respect_review_filters: false,
+    }));
+  }, [imageLabelForIndex, selectedGroup, selectedGroupImageIndices, setHandoffRequest]);
+
+  const handleClosePreparedView = React.useCallback(() => {
+    setHandoffRequest(JSON.stringify({
+      mode: "clear",
+      id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    }));
+  }, [setHandoffRequest]);
+
   const selectedSnapshotLabel = selectedGroup >= 0
     ? snapshotGroupLabels?.[selectedGroup] || snapshotLabels?.[selectedSnapshot] || `snapshot ${selectedGroup + 1}`
     : "";
+  const selectedSnapshotImageLabel = selectedSnapshot >= 0 ? imageLabelForIndex(selectedSnapshot) : "";
+  const selectedTrialNote = selectedSnapshotImageLabel ? lookupByTrialKey(trialNotes, selectedSnapshotImageLabel) ?? "" : "";
+  const selectedTrialTags = selectedSnapshotImageLabel ? lookupByTrialKey(trialTags, selectedSnapshotImageLabel) ?? [] : [];
   const selectedSnapshotPosition = selectedSnapshotIteration !== null && !labelAlreadyContainsValue(selectedSnapshotLabel, selectedSnapshotIteration)
     ? axisPositionText(selectedSnapshotIteration, xLabel, xUnit)
     : "";
@@ -2162,6 +2523,132 @@ function Show1DWidget() {
               </Stack>
             )}
             {nTraces > 1 && (
+              <Stack direction="row" alignItems="center" spacing={0.5} sx={{ flexShrink: 0 }}>
+                <Typography sx={{ fontSize: 12, color: themeColors.textMuted }}>Starred</Typography>
+                <Switch
+                  size="small"
+                  checked={Boolean(showStarredOnly)}
+                  onChange={(_, checked) => setShowStarredOnly(checked)}
+                  sx={switchStyles.small}
+                  slotProps={{ input: { "aria-label": "Show starred trials only" } }}
+                />
+              </Stack>
+            )}
+            {nTraces > 1 && (
+              <Stack direction="row" alignItems="center" spacing={0.5} sx={{ flexShrink: 0 }}>
+                <Typography sx={{ fontSize: 12, color: themeColors.textMuted }}>rank</Typography>
+                <Select
+                  size="small"
+                  value={normalisedSortKey}
+                  onChange={(event) => setTrialSortKey(String(event.target.value))}
+                  sx={{ ...themedSelect, minWidth: 92, height: 30, fontSize: 11 }}
+                  MenuProps={themedMenuProps}
+                  inputProps={{ "aria-label": "Trial ranking objective" }}
+                >
+                  <MenuItem value="final_loss">final loss</MenuItem>
+                  <MenuItem value="min_loss">min loss</MenuItem>
+                  <MenuItem value="rmse">RMSE</MenuItem>
+                  <MenuItem value="flicker">flicker</MenuItem>
+                  <MenuItem value="lambda">lambda</MenuItem>
+                  <MenuItem value="object_quality">object</MenuItem>
+                  <MenuItem value="probe_quality">probe</MenuItem>
+                  <MenuItem value="alert_count">alerts</MenuItem>
+                  <MenuItem value="label">label</MenuItem>
+                </Select>
+                <Tooltip title={trialSortDescending ? "Descending" : "Ascending"}>
+                  <Switch
+                    size="small"
+                    checked={Boolean(trialSortDescending)}
+                    onChange={(_, checked) => setTrialSortDescending(checked)}
+                    sx={switchStyles.small}
+                    slotProps={{ input: { "aria-label": "Reverse trial ranking order" } }}
+                  />
+                </Tooltip>
+              </Stack>
+            )}
+            {nTraces > 1 && (
+              <Stack direction="row" alignItems="center" spacing={0.5} sx={{ flexShrink: 0 }}>
+                <Typography sx={{ fontSize: 12, color: themeColors.textMuted }}>top</Typography>
+                <Select
+                  size="small"
+                  value={topTrialLimit}
+                  onChange={(event) => setTopTrialCount(Number(event.target.value))}
+                  sx={{ ...themedSelect, minWidth: 54, height: 30, fontSize: 11 }}
+                  MenuProps={themedMenuProps}
+                  inputProps={{ "aria-label": "Top trial count" }}
+                >
+                  <MenuItem value={0}>all</MenuItem>
+                  {[1, 2, 3, 5, 10].map((value) => (
+                    <MenuItem key={value} value={value}>{value}</MenuItem>
+                  ))}
+                </Select>
+              </Stack>
+            )}
+            {nTraces > 1 && (
+              <TextField
+                size="small"
+                value={trialFilterText || ""}
+                onChange={(event) => setTrialFilterText(event.target.value)}
+                placeholder="filter"
+                inputProps={{ "aria-label": "Filter trials" }}
+                InputProps={{
+                  endAdornment: trialFilterText ? (
+                    <InputAdornment position="end">
+                      <IconButton
+                        size="small"
+                        onClick={() => setTrialFilterText("")}
+                        aria-label="Clear trial filter"
+                        sx={{ color: themeColors.textMuted, p: 0.25 }}
+                      >
+                        <ClearIcon fontSize="inherit" />
+                      </IconButton>
+                    </InputAdornment>
+                  ) : null,
+                }}
+                sx={{
+                  width: 104,
+                  flexShrink: 0,
+                  "& .MuiInputBase-root": { height: 30, fontSize: 11, bgcolor: themeColors.controlBg, color: themeColors.text },
+                  "& .MuiInputAdornment-root": { ml: 0.25 },
+                  "& .MuiOutlinedInput-notchedOutline": { borderColor: themeColors.border },
+                  "&:hover .MuiOutlinedInput-notchedOutline": { borderColor: themeColors.accent },
+                }}
+              />
+            )}
+            {nTraces > 1 && (
+              <Button
+                size="small"
+                variant="outlined"
+                onClick={starBestTrial}
+                sx={{ color: themeColors.text, borderColor: themeColors.border, textTransform: "none", height: 30, px: 1, flexShrink: 0 }}
+                aria-label="Star best ranked trial"
+              >
+                Star best
+              </Button>
+            )}
+            {nTraces > 1 && (
+              <Button
+                size="small"
+                variant="outlined"
+                onClick={hideWorstTrial}
+                sx={{ color: themeColors.text, borderColor: themeColors.border, textTransform: "none", height: 30, px: 1, flexShrink: 0 }}
+                aria-label="Hide worst ranked trial"
+              >
+                Hide worst
+              </Button>
+            )}
+            {hiddenTrialCount > 0 && (
+              <Button
+                size="small"
+                variant="outlined"
+                onClick={showAllTrials}
+                sx={{ color: themeColors.text, borderColor: themeColors.border, textTransform: "none", height: 30, px: 1, flexShrink: 0 }}
+                aria-label={`Show all hidden trials (${hiddenTrialCount})`}
+              >
+                Show all ({hiddenTrialCount})
+              </Button>
+            )}
+            {nTraces > 1 && (
             <Select
               size="small"
               value={String(focusedTrace)}
@@ -2169,8 +2656,8 @@ function Show1DWidget() {
               sx={{ ...themedSelect, minWidth: 120, height: 30, fontSize: 12 }}
               MenuProps={themedMenuProps}
             >
-              <MenuItem value="-1">All Traces</MenuItem>
-              {Array.from({ length: nTraces }, (_, idx) => (
+              <MenuItem value="-1">{hiddenTraceIndices.length ? "All Visible" : "All Traces"}</MenuItem>
+              {visibleTraceIndices.map((idx) => (
                 <MenuItem key={idx} value={String(idx)}>{labels?.[idx] || `Trace ${idx + 1}`}</MenuItem>
               ))}
             </Select>
@@ -2208,6 +2695,54 @@ function Show1DWidget() {
             )}
             </Box>
             <Box sx={{ flex: 1 }} />
+            {handoffEnabled && hasSnapshots && (
+              <>
+                <Button
+                  size="small"
+                  variant="outlined"
+                  onClick={(event) => setViewMenuAnchor(event.currentTarget)}
+                  sx={{ color: themeColors.text, borderColor: themeColors.border, textTransform: "none", height: 30 }}
+                  aria-label="Open view options"
+                  aria-controls={viewMenuAnchor ? "show1d-view-menu" : undefined}
+                  aria-expanded={viewMenuAnchor ? "true" : undefined}
+                  aria-haspopup="menu"
+                  title={handoffStatus || "View options"}
+                >
+                  View
+                </Button>
+                <Menu
+                  id="show1d-view-menu"
+                  anchorEl={viewMenuAnchor}
+                  open={Boolean(viewMenuAnchor)}
+                  onClose={() => setViewMenuAnchor(null)}
+                  MenuListProps={{ "aria-label": "View options" }}
+                  {...themedMenuProps}
+                >
+                  <MenuItem
+                    onClick={handleHandoffToShow2D}
+                    disabled={selectedGroupImageIndices.length === 0}
+                    sx={{ fontSize: 12 }}
+                  >
+                    View selected as 2D
+                  </MenuItem>
+                </Menu>
+                {handoffStatus && (
+                  <Typography
+                    sx={{
+                      fontSize: 10.5,
+                      color: handoffStatus.startsWith("View failed") ? "#b91c1c" : themeColors.textMuted,
+                      maxWidth: 130,
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                    }}
+                    title={handoffStatus}
+                  >
+                    {handoffStatus}
+                  </Typography>
+                )}
+              </>
+            )}
             <Button
             size="small"
             variant="outlined"
@@ -2272,9 +2807,9 @@ function Show1DWidget() {
               </Box>
             )}
           </Box>
-          {showLegend && nTraces > 0 && (
+          {showLegend && visibleTraceIndices.length > 0 && (
             <Stack direction="row" spacing={1} sx={{ px: 1, py: 0.5, flexWrap: "wrap", rowGap: 0.5 }}>
-              {Array.from({ length: nTraces }, (_, idx) => (
+              {visibleTraceIndices.map((idx) => (
                 <Stack key={idx} direction="row" alignItems="center" spacing={0.5} sx={{ opacity: focusedTrace < 0 || focusedTrace === idx ? 1 : 0.45 }}>
                   <Box sx={{ width: 16, height: 3, bgcolor: cssColor(colors ?? [], idx), borderRadius: 1 }} />
                   <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>{labels?.[idx] || `Trace ${idx + 1}`}</Typography>
@@ -2315,7 +2850,9 @@ function Show1DWidget() {
                   {selectedGroupImageIndices.map((imageIdx) => {
                     const imageHeight = snapshotHeights?.[imageIdx] || snapshotHeight;
                     const imageWidth = snapshotWidths?.[imageIdx] || snapshotWidth;
-                    const imageLabel = snapshotImageLabels?.[imageIdx] || snapshotLabels?.[imageIdx] || `image ${imageIdx + 1}`;
+                    const imageLabel = imageLabelForIndex(imageIdx);
+                    const imageKey = trialKey(imageLabel);
+                    const starred = starredTrialKeys.has(imageKey);
                     const selected = imageIdx === selectedSnapshot;
                     return (
                       <Box
@@ -2356,13 +2893,135 @@ function Show1DWidget() {
                           onFftViewChange={setSnapshotFftView}
                           onSelect={() => selectSnapshotImage(imageIdx)}
                         />
+                        <Tooltip title={starred ? `Unstar ${imageLabel}` : `Star ${imageLabel}`}>
+                          <IconButton
+                            size="small"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              toggleStarredTrial(imageLabel);
+                            }}
+                            aria-label={starred ? `Unstar ${imageLabel} candidate` : `Star ${imageLabel} as candidate`}
+                            sx={{
+                              position: "absolute",
+                              top: 4,
+                              right: 4,
+                              zIndex: 4,
+                              width: 24,
+                              height: 24,
+                              p: 0,
+                              color: starred ? "#facc15" : "rgba(255,255,255,0.92)",
+                              bgcolor: "rgba(0,0,0,0.28)",
+                              "&:hover": { bgcolor: "rgba(0,0,0,0.5)", color: starred ? "#fde047" : "#fff" },
+                            }}
+                          >
+                            {starred ? <StarIcon sx={{ fontSize: 17 }} /> : <StarBorderIcon sx={{ fontSize: 17 }} />}
+                          </IconButton>
+                        </Tooltip>
+                        <Tooltip title={`Hide ${imageLabel}`}>
+                          <IconButton
+                            size="small"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              hideTrial(imageLabel);
+                            }}
+                            aria-label={`Hide ${imageLabel} trial`}
+                            sx={{
+                              position: "absolute",
+                              top: 4,
+                              left: 4,
+                              zIndex: 4,
+                              width: 24,
+                              height: 24,
+                              p: 0,
+                              color: "rgba(255,255,255,0.9)",
+                              bgcolor: "rgba(0,0,0,0.28)",
+                              "&:hover": { bgcolor: "rgba(0,0,0,0.5)", color: "#fff" },
+                            }}
+                          >
+                            <VisibilityOffIcon sx={{ fontSize: 16 }} />
+                          </IconButton>
+                        </Tooltip>
                       </Box>
                     );
                   })}
+                  {selectedGroupAllImageIndices.length > 0 && selectedGroupImageIndices.length === 0 && (
+                    <Box
+                      sx={{
+                        minHeight: 170,
+                        gridColumn: `span ${selectedImageColumns}`,
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        flexDirection: "column",
+                        gap: 1,
+                        bgcolor: themeColors.bgAlt,
+                        color: themeColors.textMuted,
+                        border: `1px solid ${themeColors.border}`,
+                      }}
+                    >
+                      <Typography sx={{ fontSize: 12 }}>All trials hidden</Typography>
+                      <Button
+                        size="small"
+                        variant="outlined"
+                        onClick={showAllTrials}
+                        sx={{ color: themeColors.text, borderColor: themeColors.border, textTransform: "none", height: 28 }}
+                      >
+                        Show all
+                      </Button>
+                    </Box>
+                  )}
                 </Box>
                 <Typography sx={{ fontSize: 11, color: themeColors.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", mt: 0.75 }}>
                   {selectedSnapshotLabel}{selectedSnapshotPosition ? ` · ${selectedSnapshotPosition}` : ""}
                 </Typography>
+                {starredTrialLabels.length > 0 && (
+                  <Typography sx={{ fontSize: 11, color: themeColors.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", mt: 0.25 }}>
+                    starred: {starredTrialLabels.join(", ")}
+                  </Typography>
+                )}
+                {selectedSnapshotImageLabel && !isReferenceLabel(selectedSnapshotImageLabel) && (
+                  <Box sx={{ ...controlRow, width: "100%", border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, mt: 0.5, mb: 0.5 }}>
+                    <Typography sx={{ ...typography.label, color: themeColors.textMuted, flexShrink: 0 }}>note</Typography>
+                    <TextField
+                      size="small"
+                      value={selectedTrialNote}
+                      onChange={(event) => setTrialNoteForLabel(selectedSnapshotImageLabel, event.target.value)}
+                      placeholder="add note"
+                      inputProps={{ "aria-label": `Note for ${selectedSnapshotImageLabel}` }}
+                      sx={{
+                        flex: "1 1 130px",
+                        minWidth: 120,
+                        "& .MuiInputBase-root": { height: 26, fontSize: 11, bgcolor: themeColors.bg, color: themeColors.text },
+                        "& .MuiOutlinedInput-notchedOutline": { borderColor: themeColors.border },
+                      }}
+                    />
+                    {["best", "bad start", "probe drift", "object issue"].map((tag) => {
+                      const active = selectedTrialTags.includes(tag);
+                      return (
+                        <Button
+                          key={tag}
+                          size="small"
+                          variant={active ? "contained" : "outlined"}
+                          onClick={() => toggleTrialTag(selectedSnapshotImageLabel, tag)}
+                          sx={{
+                            minWidth: 0,
+                            height: 24,
+                            px: 0.75,
+                            py: 0,
+                            fontSize: 10,
+                            textTransform: "none",
+                            color: active ? "#fff" : themeColors.text,
+                            bgcolor: active ? themeColors.accent : "transparent",
+                            borderColor: active ? themeColors.accent : themeColors.border,
+                          }}
+                          aria-label={`${active ? "Remove" : "Add"} ${tag} tag for ${selectedSnapshotImageLabel}`}
+                        >
+                          {tag}
+                        </Button>
+                      );
+                    })}
+                  </Box>
+                )}
                 <Box sx={{ ...controlRow, width: "100%", flexWrap: "nowrap", border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, mb: 0.5 }}>
                   <Typography sx={{ ...typography.label, color: themeColors.textMuted, flexShrink: 0 }}>play</Typography>
                   <Stack direction="row" spacing={0} sx={{ flexShrink: 0 }}>
@@ -2545,7 +3204,54 @@ function Show1DWidget() {
                 )}
               </Box>
             )}
-            {showStats && nTraces > 0 && (
+            {nTraces > 1 && (
+              <Box>
+                <Stack direction="row" alignItems="center" spacing={0.75} sx={{ mb: 0.5 }}>
+                  <Typography sx={{ fontSize: 12, fontWeight: 600 }}>Review</Typography>
+                  <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>
+                    best {bestTrialLabel || String(runSummary?.best_trial || sortedTrialRows[0]?.label || "")}
+                  </Typography>
+                  <Box sx={{ flex: 1 }} />
+                  <Typography sx={{ fontSize: 10.5, color: themeColors.textMuted }}>
+                    {activeReviewCount}/{nTraces} visible · {trialAlerts?.length ?? 0} alerts
+                  </Typography>
+                </Stack>
+                <Divider sx={{ borderColor: themeColors.border, mb: 0.5 }} />
+                {trialAlerts?.length > 0 && (
+                  <Box sx={{ mb: 0.5 }}>
+                    {trialAlerts.slice(0, 3).map((alert, idx) => (
+                      <Typography key={`${alert.label || "run"}-${alert.kind || idx}`} sx={{ fontSize: 10.5, color: alert.severity === "error" ? "#b91c1c" : themeColors.textMuted, lineHeight: 1.25 }}>
+                        {alert.label ? `${alert.label}: ` : ""}{alert.message || alert.kind}
+                      </Typography>
+                    ))}
+                  </Box>
+                )}
+                <Box component="table" sx={{ width: "100%", borderCollapse: "collapse", tableLayout: "fixed", "& th, & td": { fontSize: 10.5, py: 0.28, textAlign: "right", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }, "& th:first-of-type, & td:first-of-type": { textAlign: "left" } }}>
+                  <thead>
+                    <tr>
+                      <th>Trial</th><th>{normalisedSortKey.replace("_", " ")}</th><th>Alerts</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {sortedTrialRows.slice(0, 6).map((row) => {
+                      const key = trialKey(row.label || "");
+                      const hidden = hiddenTrialKeys.has(key) || !passesReviewFilter(row.label || "");
+                      return (
+                        <tr key={key} style={{ opacity: hidden ? 0.45 : 1 }}>
+                          <td title={row.label || ""}>
+                            <Box component="span" sx={{ display: "inline-block", width: 7, height: 7, bgcolor: cssColor(colors ?? [], Number(row.trace_index) || 0), mr: 0.5, borderRadius: "50%" }} />
+                            {starredTrialKeys.has(key) ? "* " : ""}{row.label}
+                          </td>
+                          <td>{rankingDisplayValue(row, normalisedSortKey)}</td>
+                          <td>{Number(row.alert_count) || 0}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </Box>
+              </Box>
+            )}
+            {showStats && visibleTraceIndices.length > 0 && (
               <Box>
                 <Stack direction="row" alignItems="center" spacing={0.75} sx={{ mb: 0.5 }}>
                   <Typography sx={{ fontSize: 12, fontWeight: 600 }}>Stats</Typography>
@@ -2564,7 +3270,7 @@ function Show1DWidget() {
                     </tr>
                   </thead>
                   <tbody>
-                    {Array.from({ length: nTraces }, (_, idx) => (
+                    {visibleTraceIndices.map((idx) => (
                       <tr key={idx}>
                         <td title={labels?.[idx] || `Trace ${idx + 1}`}>
                           <Box component="span" sx={{ display: "inline-block", width: 7, height: 7, bgcolor: cssColor(colors ?? [], idx), mr: 0.5, borderRadius: "50%" }} />
@@ -2583,6 +3289,16 @@ function Show1DWidget() {
           </Stack>
         )}
       </Box>
+      {handoffEnabled && preparedViewWidget != null && (
+        <EmbeddedWidgetView
+          hostModel={model}
+          widgetModel={preparedViewWidget}
+          title="2D view"
+          onClose={handleClosePreparedView}
+          themeColors={themeColors}
+          linkedTraits={SHOW1D_TO_SHOW2D_LINKED_TRAITS}
+        />
+      )}
     </Box>
   );
 }

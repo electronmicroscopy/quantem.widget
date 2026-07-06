@@ -257,7 +257,9 @@ def test_core_widgets_render_and_interact_in_jupyter(tmp_path):
                 page.goto(url, wait_until="domcontentloaded", timeout=120_000)
                 page.wait_for_selector(".jp-Notebook", timeout=120_000)
                 page.locator(".jp-Cell").first.click()
-                page.keyboard.press("Shift+Enter")
+                run_command = page.locator('[data-command="notebook:run-cell-and-select-next"]')
+                assert run_command.count() == 1
+                run_command.click()
                 page.wait_for_function(
                     "document.body.innerText.includes('Agent Visual Show2D')"
                     " && document.body.innerText.includes('Agent Visual Show3D')"
