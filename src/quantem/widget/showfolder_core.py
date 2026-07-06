@@ -56,6 +56,26 @@ class SurveyItem:
         return " | ".join(parts)
 
 
+@dataclass(frozen=True)
+class MasterQC:
+    """Lightweight readiness row for one 4D-STEM master file."""
+
+    path: Path
+    name: str
+    stem: str
+    status: str
+    reason: str
+    action: str
+    n_frames: int | None = None
+    scan_shape: tuple[int, int] | None = None
+    detector_shape: tuple[int, int] | None = None
+    dtype: str | None = None
+    chunk_count: int = 0
+    missing_chunks: int = 0
+    master_bytes: int = 0
+    external_bytes: int = 0
+
+
 class ShowFolderBrowser:
     """Rendered ShowFolder browser.
 
@@ -79,6 +99,7 @@ class ShowFolderBrowser:
         thumb: int,
         glob: str,
         group_view: str,
+        master_qc: list[MasterQC] | None = None,
         cache_info: dict[str, Any] | None = None,
         cache_path: Path | None = None,
     ) -> None:
@@ -94,6 +115,7 @@ class ShowFolderBrowser:
         self.thumb = thumb
         self.glob = glob
         self.group_view = group_view
+        self.master_qc = master_qc or []
         self.cache_info = cache_info or {"enabled": False}
         self.cache_path = cache_path
         self.selection_panel = None
@@ -139,6 +161,11 @@ class ShowFolderBrowser:
         import pandas as pd
 
         return pd.DataFrame(self.inventory_rows)
+
+    @property
+    def master_qc_rows(self) -> list[dict[str, Any]]:
+        """JSON-serializable 4D-STEM master readiness rows."""
+        return [_master_qc_row(row) for row in self.master_qc]
 
     def selected_image_items(self) -> list[SurveyItem]:
         """Return image items starred in the survey image widgets."""
@@ -834,6 +861,7 @@ def build_showfolder(
         raise FileNotFoundError(f"not a folder: {root}")
     files = sorted(p for p in root.glob(glob) if p.is_file() and not p.name.startswith("."))
     master_files = sorted(p for p in root.glob("*_master.h5") if p.is_file() and not p.name.startswith("."))
+    master_qc = inspect_master_folder(root, master_files=master_files)
     if not files:
         if not master_files:
             raise FileNotFoundError(f"no files matching {glob!r} in {root}")
@@ -984,10 +1012,13 @@ def build_showfolder(
 
     heading = title or f"{root.name} ShowFolder"
     inventory = HTML(_inventory_html(items))
-    master_text = (
-        f" · {len(master_files)} 4D-STEM master{'s' if len(master_files) != 1 else ''}"
-        if master_files else ""
-    )
+    master_text = ""
+    if master_files:
+        ready = sum(1 for row in master_qc if row.status == "ready")
+        master_text = (
+            f" · {len(master_files)} 4D-STEM master{'s' if len(master_files) != 1 else ''}"
+            f" ({ready} ready)"
+        )
     children: list[Any] = [
         HTML(
             f"<h2 style=\"margin:0 0 4px 0\">{html.escape(heading)}</h2>"
@@ -1083,6 +1114,9 @@ def build_showfolder(
         else:
             children.append(HTML("<p><b>HAADF/STEM gallery:</b> no non-EDS image files found.</p>"))
 
+    if master_qc:
+        children.append(HTML(_master_qc_html(master_qc)))
+
     children.append(inventory)
 
     widget = VBox(children)
@@ -1099,6 +1133,7 @@ def build_showfolder(
         thumb=thumb,
         glob=glob,
         group_view=group_view,
+        master_qc=master_qc,
         cache_info=cache_info,
         cache_path=None if cache_path is None else Path(cache_path),
     )
@@ -1342,6 +1377,113 @@ def _fov_group_html(group: list[SurveyItem]) -> str:
     )
 
 
+def _master_stem(path: Path) -> str:
+    stem = path.stem
+    return stem[:-7] if stem.endswith("_master") else stem
+
+
+def _master_dataset_shape(shape: tuple[int, ...]) -> dict[str, Any]:
+    dims = tuple(int(value) for value in shape)
+    if len(dims) < 3:
+        return {"n_frames": 0, "scan_shape": None, "detector_shape": None}
+    detector_shape = (dims[-2], dims[-1])
+    frame_dims = dims[:-2]
+    n_frames = int(math.prod(frame_dims))
+    scan_shape = None
+    if len(frame_dims) >= 2:
+        scan_shape = (frame_dims[-2], frame_dims[-1])
+    elif n_frames:
+        side = math.isqrt(n_frames)
+        if side * side == n_frames:
+            scan_shape = (side, side)
+    return {
+        "n_frames": n_frames,
+        "scan_shape": scan_shape,
+        "detector_shape": detector_shape,
+    }
+
+
+def _shape_text(shape: tuple[int, int] | None) -> str:
+    return "" if shape is None else f"{shape[0]}x{shape[1]}"
+
+
+def _bytes_text(n_bytes: int) -> str:
+    if n_bytes >= 1_000_000_000:
+        return f"{n_bytes / 1_000_000_000:.2f} GB"
+    if n_bytes >= 1_000_000:
+        return f"{n_bytes / 1_000_000:.1f} MB"
+    if n_bytes >= 1_000:
+        return f"{n_bytes / 1_000:.1f} kB"
+    return f"{n_bytes} B"
+
+
+def _master_qc_row(row: MasterQC) -> dict[str, Any]:
+    return {
+        "file": row.name,
+        "stem": row.stem,
+        "status": row.status,
+        "reason": row.reason,
+        "action": row.action,
+        "n_frames": row.n_frames,
+        "scan_shape": None if row.scan_shape is None else list(row.scan_shape),
+        "detector_shape": None if row.detector_shape is None else list(row.detector_shape),
+        "dtype": row.dtype,
+        "chunk_count": row.chunk_count,
+        "missing_chunks": row.missing_chunks,
+        "bytes": row.master_bytes + row.external_bytes,
+    }
+
+
+def _master_qc_html(rows: list[MasterQC]) -> str:
+    status_color = {
+        "ready": "#1b5e20",
+        "incomplete": "#a15c00",
+        "bad": "#b00020",
+    }
+    body = []
+    for row in rows:
+        color = status_color.get(row.status, "#555")
+        body.append(
+            "<tr>"
+            f"<td>{html.escape(row.name)}</td>"
+            f"<td style=\"color:{color};font-weight:600\">{html.escape(row.status)}</td>"
+            f"<td>{html.escape(_shape_text(row.scan_shape))}</td>"
+            f"<td>{html.escape(_shape_text(row.detector_shape))}</td>"
+            f"<td>{'' if row.n_frames is None else int(row.n_frames)}</td>"
+            f"<td>{html.escape(row.dtype or '')}</td>"
+            f"<td>{row.chunk_count}</td>"
+            f"<td>{row.missing_chunks}</td>"
+            f"<td>{html.escape(_bytes_text(row.master_bytes + row.external_bytes))}</td>"
+            f"<td>{html.escape(row.reason)}</td>"
+            f"<td>{html.escape(row.action)}</td>"
+            "</tr>"
+        )
+    return f"""
+<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;margin:10px 0">
+  <h3 style="margin:12px 0 6px 0">4D-STEM master QC</h3>
+  <div style="color:#555;margin-bottom:6px">Header-only readiness check; no detector frames are decompressed.</div>
+  <table style="border-collapse:collapse;font-size:13px">
+    <thead>
+      <tr>
+        <th style="text-align:left;padding:4px 8px;border-bottom:2px solid #444">file</th>
+        <th style="text-align:left;padding:4px 8px;border-bottom:2px solid #444">status</th>
+        <th style="text-align:left;padding:4px 8px;border-bottom:2px solid #444">scan</th>
+        <th style="text-align:left;padding:4px 8px;border-bottom:2px solid #444">detector</th>
+        <th style="text-align:left;padding:4px 8px;border-bottom:2px solid #444">frames</th>
+        <th style="text-align:left;padding:4px 8px;border-bottom:2px solid #444">dtype</th>
+        <th style="text-align:left;padding:4px 8px;border-bottom:2px solid #444">chunks</th>
+        <th style="text-align:left;padding:4px 8px;border-bottom:2px solid #444">missing</th>
+        <th style="text-align:left;padding:4px 8px;border-bottom:2px solid #444">size</th>
+        <th style="text-align:left;padding:4px 8px;border-bottom:2px solid #444">reason</th>
+        <th style="text-align:left;padding:4px 8px;border-bottom:2px solid #444">next step</th>
+      </tr>
+    </thead>
+    <tbody>{''.join(body)}</tbody>
+  </table>
+</div>
+"""
+
+
 def has_eds(path: str | Path) -> bool:
     """Return True when a Velox EMD file has a SpectrumStream group."""
     import h5py
@@ -1351,6 +1493,133 @@ def has_eds(path: str | Path) -> bool:
             return "Data/SpectrumStream" in h
     except OSError:
         return False
+
+
+def inspect_master_file(path: str | Path) -> MasterQC:
+    """Inspect one 4D-STEM master file without reading detector frames.
+
+    The check is intentionally cheap enough for ShowFolder: it opens HDF5
+    headers, checks inline datasets or external ``data_000001`` links, and
+    reports whether sibling chunk files are present. It does not decompress
+    frames or allocate GPU memory.
+    """
+    import h5py
+
+    master = Path(path).expanduser().resolve()
+    stem = _master_stem(master)
+    qc = MasterQC(
+        path=master,
+        name=master.name,
+        stem=stem,
+        status="bad",
+        reason="not inspected",
+        action="do not screen",
+        master_bytes=master.stat().st_size if master.exists() else 0,
+    )
+    if not master.exists():
+        return replace(qc, reason="master file is missing")
+    try:
+        with h5py.File(master, "r") as h5:
+            data_group = h5.get("entry/data")
+            if data_group is None:
+                return replace(
+                    qc,
+                    reason="missing entry/data group",
+                    action="recopy or export the acquisition before loading",
+                )
+            dataset_names = ["data"] if "data" in data_group else []
+            dataset_names.extend(sorted(name for name in data_group if re.match(r"data_\d{6}$", name)))
+            chunk_names = [name for name in dataset_names if re.match(r"data_\d{6}$", name)]
+            if not dataset_names:
+                return replace(
+                    qc,
+                    reason="no inline data or data_000001 chunk links",
+                    action="recopy or export the acquisition before loading",
+                )
+
+            missing = 0
+            external_bytes = 0
+            n_frames = 0
+            scan_shape = None
+            detector_shape = None
+            dtype = None
+            readable = False
+            for name in dataset_names:
+                link = data_group.get(name, getlink=True)
+                if isinstance(link, h5py.ExternalLink):
+                    chunk_path = (master.parent / link.filename).resolve()
+                    if not chunk_path.exists():
+                        missing += 1
+                        continue
+                    external_bytes += chunk_path.stat().st_size
+                    try:
+                        with h5py.File(chunk_path, "r") as chunk_h5:
+                            dataset = chunk_h5.get(link.path)
+                            if dataset is not None:
+                                shape_info = _master_dataset_shape(dataset.shape)
+                                readable = True
+                                dtype = str(dataset.dtype)
+                                n_frames += shape_info["n_frames"]
+                                detector_shape = shape_info["detector_shape"] or detector_shape
+                                scan_shape = shape_info["scan_shape"] or scan_shape
+                    except OSError:
+                        missing += 1
+                else:
+                    try:
+                        dataset = data_group[name]
+                        shape_info = _master_dataset_shape(dataset.shape)
+                        readable = True
+                        dtype = str(dataset.dtype)
+                        n_frames += shape_info["n_frames"]
+                        detector_shape = shape_info["detector_shape"] or detector_shape
+                        scan_shape = shape_info["scan_shape"] or scan_shape
+                    except (KeyError, OSError, TypeError):
+                        missing += 1
+    except OSError as exc:
+        return replace(
+            qc,
+            reason=str(exc),
+            action="wait for file copy to finish, or recopy the master file",
+        )
+
+    if missing:
+        status = "incomplete"
+        reason = f"missing {missing} of {len(dataset_names)} data chunk(s)"
+        action = "wait for acquisition/copy sibling data files before loading"
+    elif readable:
+        status = "ready"
+        reason = "master and data chunks are readable"
+        action = "safe to open with Show4DSTEM"
+    else:
+        status = "bad"
+        reason = "data links exist but no readable dataset shape was found"
+        action = "recopy or export the acquisition before loading"
+    return replace(
+        qc,
+        status=status,
+        reason=reason,
+        action=action,
+        n_frames=n_frames or None,
+        scan_shape=scan_shape,
+        detector_shape=detector_shape,
+        dtype=dtype,
+        chunk_count=len(chunk_names),
+        missing_chunks=missing,
+        external_bytes=external_bytes,
+    )
+
+
+def inspect_master_folder(
+    folder: str | Path,
+    *,
+    master_files: list[Path] | None = None,
+) -> list[MasterQC]:
+    """Return cheap QC rows for ``*_master.h5`` files in a folder."""
+    root = Path(folder).expanduser().resolve()
+    masters = master_files
+    if masters is None:
+        masters = sorted(p for p in root.glob("*_master.h5") if p.is_file() and not p.name.startswith("."))
+    return [inspect_master_file(path) for path in masters]
 
 
 def scan_rotation_deg(path: str | Path) -> float | None:

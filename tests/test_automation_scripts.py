@@ -421,10 +421,16 @@ def test_widget_showfolder_live_smoke_writes_report(tmp_path: Path) -> None:
     assert image_step["watch_changed"] is True
     assert image_step["show2d_panels"] == 2
     assert image_step["show3d_slices"] == 2
+    assert len(image_step["thumbnail_previews"]) == 3
+    for preview in image_step["thumbnail_previews"]:
+        assert (artifact_dir / preview["webp"]).exists()
     assert master_step["watch_changed"] is True
     assert master_step["after_frames"] == 2
     assert master_step["frame_labels"] == ["scan_000", "scan_001"]
+    assert [row["status"] for row in master_step["master_qc"]] == ["ready", "ready"]
     assert "ShowFolder live-folder smoke: PASS" in index
+    assert "<img" in index
+    assert "4D-STEM Master QC" in index
     assert (artifact_dir / "showfolder-live-show2d.html").exists()
     assert (artifact_dir / "showfolder-live-show3d.html").exists()
     assert (artifact_dir / "showfolder-live-show4dstem.html").exists()

@@ -105,6 +105,7 @@ def test_show_folder_renders_master_only_folder_for_show4dstem(tmp_path: Path) -
 
     assert widget.browser is not None
     assert widget.items == []
+    assert [row["status"] for row in widget.master_qc_rows] == ["bad", "bad"]
     assert widget.browser.gallery is None
     assert widget.browser.selection_panel is not None
     assert "4D-STEM master" in widget.browser.widget.children[0].value

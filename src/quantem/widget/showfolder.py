@@ -73,6 +73,11 @@ class ShowFolder:
         return [] if self.browser is None else self.browser.inventory_rows
 
     @property
+    def master_qc_rows(self) -> list[dict[str, Any]]:
+        """JSON-serializable readiness rows for ``*_master.h5`` files."""
+        return [] if self.browser is None else self.browser.master_qc_rows
+
+    @property
     def cache_info(self) -> dict[str, Any]:
         """Thumbnail/index cache status for the latest folder-browser run."""
         return {"enabled": False} if self.browser is None else dict(self.browser.cache_info)

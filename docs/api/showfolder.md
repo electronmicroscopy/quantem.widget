@@ -56,6 +56,21 @@ Show2D/Show3D viewer in place. For 4D-STEM folders, the watcher also tracks
 paging options, so new Dataset4DSTEM masters appear without preloading the whole
 folder.
 
+Folders with `*_master.h5` files also show a **4D-STEM master QC** table. This
+is a header-only readiness check: it opens the HDF5 headers, verifies inline or
+linked data chunks, and reports scan shape, detector shape, dtype, missing
+chunks, and the next step. It does not decompress detector frames or allocate
+GPU memory.
+
+```python
+w.master_qc_rows
+# [{'file': 'scan_000_master.h5', 'status': 'ready', ...}, ...]
+```
+
+Use these rows to decide whether a master is ready for `Show4DSTEM` or whether
+you should wait for sibling data files to finish copying. The status values are
+`"ready"`, `"incomplete"`, and `"bad"`.
+
 If you do not pass a path, `ShowFolder()` displays a folder chooser first:
 
 ```python

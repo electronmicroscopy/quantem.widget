@@ -16,6 +16,7 @@ import numpy as np
 import torch
 
 from quantem.widget import ShowFolder
+from quantem.widget.render import save_thumbnail
 
 
 def _metadata() -> np.ndarray:
@@ -37,7 +38,11 @@ def _image_emd(path: Path, *, offset: int) -> None:
 
 
 def _write_master(path: Path) -> None:
-    path.write_bytes(b"quantem.widget live ShowFolder 4D-STEM smoke\n")
+    idx = int(path.name.split("_master.h5", 1)[0].rsplit("_", 1)[-1])
+    data = np.full((4, 4, 8, 8), idx + 1, dtype=np.uint16)
+    with h5py.File(path, "w") as h5:
+        entry = h5.create_group("entry/data")
+        entry.create_dataset("data", data=data)
 
 
 def _export(widget: Any, path: Path, *, title: str) -> Path | None:
@@ -45,6 +50,29 @@ def _export(widget: Any, path: Path, *, title: str) -> Path | None:
     if export is None:
         return None
     return Path(export(path, title=title))
+
+
+def _write_thumbnail_previews(artifact_dir: Path, browser: Any, *, prefix: str) -> list[dict[str, Any]]:
+    preview_dir = artifact_dir / "previews"
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for gallery, image_items in browser.image_galleries:
+        data = np.asarray(getattr(gallery, "_data", np.empty((0, 0, 0))))
+        if data.ndim < 3:
+            continue
+        for idx, item in enumerate(image_items):
+            if idx >= data.shape[0] or item.file_id in seen:
+                continue
+            seen.add(item.file_id)
+            out = preview_dir / f"{prefix}-{item.file_id}.webp"
+            save_thumbnail(data[idx], out, size=96, cmap="inferno")
+            rows.append({
+                "id": item.file_id,
+                "file": item.path.name,
+                "webp": out.relative_to(artifact_dir).as_posix(),
+                "bytes": out.stat().st_size,
+            })
+    return rows
 
 
 def _run_image_live_smoke(artifact_dir: Path) -> dict[str, Any]:
@@ -93,6 +121,7 @@ def _run_image_live_smoke(artifact_dir: Path) -> dict[str, Any]:
     assert selected_folders == [folder.resolve()]
     assert selected_2d._data.shape[0] == 2
     assert selected_3d.n_slices == 2
+    thumbnail_previews = _write_thumbnail_previews(artifact_dir, widget.browser, prefix="live-image")
 
     exports = {
         "showfolder": _export(
@@ -122,6 +151,7 @@ def _run_image_live_smoke(artifact_dir: Path) -> dict[str, Any]:
         "selected_folders": [str(path) for path in selected_folders],
         "show2d_panels": int(selected_2d._data.shape[0]),
         "show3d_slices": int(selected_3d.n_slices),
+        "thumbnail_previews": thumbnail_previews,
         "exports": {key: None if value is None else value.name for key, value in exports.items()},
     }
 
@@ -173,6 +203,7 @@ def _run_master_live_smoke(artifact_dir: Path) -> dict[str, Any]:
         first = widget.browser.open_show4dstem(gpus=None, page_budget=1, det_bin=4, dtype="u8")
         assert first is not None
         assert first.n_frames == 1
+        assert widget.master_qc_rows[0]["status"] == "ready"
 
         widget.watch(start=False)
         _write_master(folder / "scan_001_master.h5")
@@ -197,6 +228,7 @@ def _run_master_live_smoke(artifact_dir: Path) -> dict[str, Any]:
             "after_frames": int(second.n_frames),
             "reused_old_widget": second is first,
             "frame_labels": list(second.frame_labels),
+            "master_qc": widget.master_qc_rows,
             "exports": {"show4dstem": None if export_path is None else export_path.name},
         }
     finally:
@@ -219,6 +251,34 @@ def _write_report(artifact_dir: Path, report: dict[str, Any]) -> None:
         for name in (step.get("exports") or {}).values():
             if name:
                 links.append(f"<li><a href='{html.escape(name)}'>{html.escape(name)}</a></li>")
+    preview_cards = []
+    for step in report["steps"]:
+        for preview in step.get("thumbnail_previews") or []:
+            src = html.escape(str(preview["webp"]))
+            label = html.escape(f"{preview['id']} · {preview['file']}")
+            preview_cards.append(
+                "<figure>"
+                f"<img src='{src}' alt='{label}'>"
+                f"<figcaption>{label}</figcaption>"
+                "</figure>"
+            )
+    qc_rows = []
+    for step in report["steps"]:
+        for row in step.get("master_qc") or []:
+            scan = row.get("scan_shape")
+            det = row.get("detector_shape")
+            qc_rows.append(
+                "<tr>"
+                f"<td>{html.escape(str(row.get('file', '')))}</td>"
+                f"<td>{html.escape(str(row.get('status', '')))}</td>"
+                f"<td>{'' if scan is None else html.escape('x'.join(str(v) for v in scan))}</td>"
+                f"<td>{'' if det is None else html.escape('x'.join(str(v) for v in det))}</td>"
+                f"<td>{html.escape(str(row.get('n_frames') or ''))}</td>"
+                f"<td>{html.escape(str(row.get('dtype') or ''))}</td>"
+                f"<td>{html.escape(str(row.get('reason', '')))}</td>"
+                f"<td>{html.escape(str(row.get('action', '')))}</td>"
+                "</tr>"
+            )
     page = f"""<!doctype html>
 <html>
 <head>
@@ -233,15 +293,28 @@ def _write_report(artifact_dir: Path, report: dict[str, Any]) -> None:
     code, pre {{ background: #f5f7f9; border-radius: 4px; }}
     code {{ padding: 2px 4px; }}
     pre {{ overflow: auto; padding: 12px; max-width: 1180px; }}
+    .previews {{ display: flex; flex-wrap: wrap; gap: 12px; margin-top: 10px; }}
+    figure {{ margin: 0; border: 1px solid #ccd3db; border-radius: 6px; padding: 8px; background: #f8fafc; }}
+    figure img {{ display: block; width: 96px; height: 96px; object-fit: contain; background: #111827; }}
+    figcaption {{ max-width: 160px; margin-top: 6px; font-size: 12px; color: #3b4654; overflow-wrap: anywhere; }}
   </style>
 </head>
 <body>
   <h1>ShowFolder live-folder smoke: {'PASS' if report['passed'] else 'FAIL'}</h1>
   <p>This report proves the folder watcher owns live updates while Show2D,
-  Show3D, and Show4DSTEM remain display widgets. It uses tiny generated files;
-  heavy real-data performance is covered by the separate local-only signoffs.</p>
+  Show3D, and Show4DSTEM remain display widgets. It also writes compact WebP
+  previews for visual review while keeping the numeric thumbnail cache as
+  arrays for widget handoff. It uses tiny generated files; heavy real-data
+  performance is covered by the separate local-only signoffs.</p>
   <h2>Review Exports</h2>
   <ul>{''.join(links)}</ul>
+  <h2>Thumbnail Previews</h2>
+  <div class="previews">{''.join(preview_cards) if preview_cards else '<p>No thumbnail previews.</p>'}</div>
+  <h2>4D-STEM Master QC</h2>
+  <table>
+    <thead><tr><th>Master</th><th>Status</th><th>Scan</th><th>Detector</th><th>Frames</th><th>Dtype</th><th>Reason</th><th>Next step</th></tr></thead>
+    <tbody>{''.join(qc_rows) if qc_rows else '<tr><td colspan="8">No master QC rows.</td></tr>'}</tbody>
+  </table>
   <h2>Checks</h2>
   <table>
     <thead><tr><th>Scenario</th><th>Status</th><th>Evidence</th></tr></thead>

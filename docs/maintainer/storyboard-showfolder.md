@@ -48,6 +48,10 @@ opening the EDS viewer.
 - File names, shapes, and errors are readable.
 - EDS files are listed in the inventory when present, but ShowFolder does not
   create ShowEDS launchers or EDS selection controls.
+- `*_master.h5` files are summarized in the 4D-STEM master QC table with
+  status, scan shape, detector shape, dtype, chunk count, and a corrective next
+  step. This is a header-only check; it must not decompress detector frames or
+  allocate GPU memory.
 - The UI remains usable when the folder contains many files.
 
 ## SF-3: Cache and Rerun
@@ -140,6 +144,9 @@ not commit those raw files to the widget repository.
   compatible calibration.
 - The embedded viewers use cached thumbnail/preview data for immediate
   inspection and do not silently embed full-resolution raw acquisitions.
+- ShowFolder keeps its maintained thumbnail cache as numeric arrays
+  (`thumbnails.npz`) because selected Show2D/Show3D handoff needs array data.
+  WebP thumbnails are only for human review pages and dashboards.
 - ShowFolder owns live folder watching. Show2D and Show3D receive refreshed
   selected preview data; they do not watch microscope folders directly.
 
@@ -221,6 +228,10 @@ Run these before committing ShowFolder changes:
 PYTHONPATH=src pytest -q tests/test_showfolder.py tests/test_showfolder_core.py
 PYTHONPATH=src:. python scripts/widget_showfolder_live_smoke.py --artifact-dir /tmp/quantem-widget-showfolder-live
 ```
+
+The live smoke report must include WebP thumbnail previews and 4D-STEM master
+QC rows. Those report images are visual evidence for humans; they are not the
+cache used by ShowFolder widgets.
 
 When a change affects docs or examples, also run the docs build used by the
 current branch and open the rendered ShowFolder page in a browser.

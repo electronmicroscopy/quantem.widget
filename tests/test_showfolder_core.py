@@ -4,7 +4,13 @@ from pathlib import Path
 import h5py
 import numpy as np
 
-from quantem.widget.showfolder_core import build_showfolder, has_eds, scan_rotation_deg, write_showfolder_notebook
+from quantem.widget.showfolder_core import (
+    build_showfolder,
+    has_eds,
+    inspect_master_file,
+    scan_rotation_deg,
+    write_showfolder_notebook,
+)
 
 
 def _metadata(rotation: float, *, stage=None, fov=None):
@@ -39,6 +45,18 @@ def _eds_emd(path: Path, *, shape=(8, 8), rotation=1.57079632679, stage=None, fo
         h.create_group("Data/SpectrumStream")
 
 
+def _master_inline(path: Path, *, shape=(2, 3, 4, 5)):
+    with h5py.File(path, "w") as h:
+        group = h.create_group("entry/data")
+        group.create_dataset("data", data=np.zeros(shape, dtype=np.uint16))
+
+
+def _master_external_missing(path: Path):
+    with h5py.File(path, "w") as h:
+        group = h.create_group("entry/data")
+        group["data_000001"] = h5py.ExternalLink("missing_data.h5", "/entry/data/data")
+
+
 def test_survey_detects_eds_and_scan_rotation(tmp_path):
     img = tmp_path / "0010 - HAADF 15Mx Nano.emd"
     eds = tmp_path / "0020 - HAADF 10.5Mx Nano EDS.emd"
@@ -49,6 +67,31 @@ def test_survey_detects_eds_and_scan_rotation(tmp_path):
     assert has_eds(eds)
     assert scan_rotation_deg(img) == np.degrees(0.25)
     assert round(scan_rotation_deg(eds), 1) == 90.0
+
+
+def test_showfolder_master_qc_ready_and_incomplete_rows(tmp_path):
+    ready = tmp_path / "scan_000_master.h5"
+    incomplete = tmp_path / "scan_001_master.h5"
+    _master_inline(ready)
+    _master_external_missing(incomplete)
+
+    ready_qc = inspect_master_file(ready)
+    incomplete_qc = inspect_master_file(incomplete)
+
+    assert ready_qc.status == "ready"
+    assert ready_qc.scan_shape == (2, 3)
+    assert ready_qc.detector_shape == (4, 5)
+    assert ready_qc.n_frames == 6
+    assert ready_qc.dtype == "uint16"
+    assert incomplete_qc.status == "incomplete"
+    assert incomplete_qc.missing_chunks == 1
+
+    result = build_showfolder(tmp_path, thumb=8, group_by="none")
+
+    rows = result.master_qc_rows
+    assert [row["status"] for row in rows] == ["ready", "incomplete"]
+    assert rows[0]["scan_shape"] == [2, 3]
+    assert any("4D-STEM master QC" in getattr(child, "value", "") for child in result.widget.children)
 
 
 def test_showfolder_builds_image_gallery_and_inventory(tmp_path):
