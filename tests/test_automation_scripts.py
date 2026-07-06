@@ -186,7 +186,7 @@ def test_github_actions_use_node24_action_generations() -> None:
         "actions/upload-artifact@v7",
         "actions/configure-pages@v6",
         "actions/upload-pages-artifact@v5",
-        "actions/deploy-pages@v6",
+        "actions/deploy-pages@v5",
     ]:
         assert expected in workflows
     for stale in [
