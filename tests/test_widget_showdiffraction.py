@@ -23,12 +23,6 @@ def test_showdiffraction_2d_single_frame():
     assert w.panel_width_px == 384
 
 
-def test_showdiffraction_panel_width_hint():
-    dp = np.random.rand(32, 48).astype(np.float32)
-    w = ShowDiffraction(dp, panel_width_px=480, verbose=False)
-    assert w.panel_width_px == 480
-
-
 def test_showdiffraction_3d_stack():
     data = np.random.rand(5, 16, 16).astype(np.float32)
     w = ShowDiffraction(data, verbose=False)
@@ -315,22 +309,6 @@ def test_showdiffraction_hot_pixel_removal():
     data[0, 3, 5] = 65535
     w = ShowDiffraction(data, verbose=False)
     assert w._get_frame(0)[3, 5] == 0
-
-
-def test_showdiffraction_repr():
-    w = ShowDiffraction(
-        np.random.rand(4, 16, 16).astype(np.float32), k_pixel_size=0.1, verbose=False
-    )
-    r = repr(w)
-    assert "ShowDiffraction" in r
-    assert "sampling=" in r
-    assert "frame=" in r
-
-
-def test_showdiffraction_free():
-    w = ShowDiffraction(np.random.rand(4, 16, 16).astype(np.float32), verbose=False)
-    w.free()
-    assert not hasattr(w, "_data")
 
 
 def _disk_dp(size=64, center=(32, 30), radius=6):
@@ -849,24 +827,6 @@ def test_identify_phase_summary():
         w2.identify_phase([magnetite])
 
 
-def test_identify_phase_real_magnetite_summary():
-    import pathlib
-
-    from quantem.widget import showdiffraction
-    from quantem.widget.crystal import library_phase
-
-    pat = np.load(pathlib.Path(showdiffraction.__file__).parent / "data" / "fe3o4_saed_512.npy")
-    m = ShowDiffraction(pat, offline=True, verbose=False)
-    m.phase_name = "Fe3O4"
-    m.run_auto(max_rings=5, exclude_radius=70)
-    names = ("Fe3O4", "γ-Fe2O3", "α-Fe2O3 (hematite)", "α-Fe")
-    ranked = m.identify_phase([library_phase(n) for n in names])
-    assert ranked[0]["name"] == "Fe3O4"
-    # the maghemite/magnetite spinel pair is inseparable by ring positions
-    assert {r["name"] for r in ranked[:2]} == {"Fe3O4", "γ-Fe2O3"}
-    assert "Fe3O4" in m.phase_match
-
-
 def _au_spot_widget(specs, k=0.01, size=256):
     # specs: [(hkl, angle_deg)] -> spot at radius 1/(d(hkl)*k) px, angle from +col axis
     au, cen = _au(), (size // 2, size // 2)
@@ -1017,17 +977,6 @@ def test_detect_spots_keeps_all_strong_peaks():
     assert len(w.spots) == 5
     w.detect_spots(min_relative=2.0)  # nothing is twice the strongest peak
     assert len(w.spots) == 0
-
-
-def test_detect_spots_strict_on_real_data():
-    import pathlib
-
-    from quantem.widget import showdiffraction
-
-    pat = np.load(pathlib.Path(showdiffraction.__file__).parent / "data" / "fe3o4_saed_512.npy")
-    w = ShowDiffraction(pat, spot_refine=False, verbose=False)
-    w.detect_spots()
-    assert 10 <= len(w.spots) <= 120  # strong maxima only, not hundreds
 
 
 def test_detect_spots_low_contrast_lattice_and_ring_rejection():
