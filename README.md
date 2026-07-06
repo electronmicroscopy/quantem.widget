@@ -35,10 +35,13 @@ python -c "import quantem.widget; print(quantem.widget.__version__)"
 
 ```python
 import numpy as np
-from quantem.widget import Show2D, Show3D, Show3DSlices, Show4DSTEM, ShowEDS, ShowFolder
+from quantem.widget import (
+    Show2D, Show3D, Show3DSlices, Show4DSTEM, ShowDiffraction, ShowEDS, ShowFolder
+)
 
 Show2D(np.random.rand(512, 512))
 Show4DSTEM(np.random.rand(64, 64, 128, 128))
+ShowDiffraction(np.random.rand(512, 512))
 ShowEDS(np.random.poisson(2, (64, 64, 256)).astype("uint16"))
 ShowFolder("/data/session")
 ```

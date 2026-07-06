@@ -8,7 +8,7 @@ read calibrated d-spacings, and calibrate k-space from a known reflection. See t
 The primary phase workflow is candidate verification: you usually know which
 phases to expect, so build them (`library_phase`, `Phase.from_cubic`,
 `Phase.from_dspacings`, or custom phases in the Phase menu) and rank only
-those with `identify_phase(candidates)` or the *candidates only* switch.
+those with `identify_phase(database)` or the *candidates only* switch.
 `search_phases()` against the built-in library is the fallback for when you
 have no candidates in mind; narrow it with an element filter.
 
@@ -18,6 +18,15 @@ license-clean source cited next to the entry — NIST SRM certificates and NBS
 circulars/monographs (US public domain), the Crystallography Open Database
 (CC0), or the primary literature. No values come from proprietary compilations
 such as the ICDD PDF or Pearson's Handbook.
+
+The lattice-based phase model enumerates d-spacings and geometric systematic
+absences. It does not calculate structure-factor intensities, thermal effects,
+or dynamical diffraction; use `Phase.from_dspacings` when matching against a
+measured or literature line table with intensities.
+
+Calibrated radial axes are reported as `g = 1/d` in `1/Å`; the legacy
+`radial_profile(units="q")` spelling is an alias for `units="g"`, not a
+`2πg` scattering-vector axis.
 
 ## Viewer UI
 
@@ -49,12 +58,12 @@ no console error, no NaN frame).
 | Click to set center (manual) | `center_row`, `center_col` | Crosshair moves; spot d-spacings recompute |
 | Detect spots | `_detect_spots_request`, `spots` | Auto-finds every isolated peak with contrast at least 10% of the strongest (`min_relative`); no count cap |
 | Add / remove spot (click) | `_spot_add_request`, `_spot_remove_request`, `spots` | Marker placed/removed; d-spacing updates |
-| Move spot (MOVE + drag) | `_spot_move_request`, `spots` | Re-picks the spot at the drop position; stale hkl clears |
+| Move spot (Move + drag) | `_spot_move_request`, `spots` | Re-picks the spot at the drop position; stale hkl clears |
 | Spot pick dropdown | `spot_refine`, `snap_enabled`, `snap_radius` | Clicked spots are Gaussian-fitted, snapped to the local maximum, or kept exactly as clicked |
 | Detect rings | `_detect_rings_request`, `rings` | Auto-finds all Debye–Scherrer rings above the profile prominence threshold; no count cap |
 | Add / remove ring | `_ring_add_request`, `_ring_remove_request`, `rings` | Ring overlay; ring d-spacing updates |
 | Calibrate from spot / ring | `_calibrate_from_spot_request`, `_calibrate_from_ring_request`, `k_pixel_size` | Sets k-space pixel size from a known d |
-| AUTO button | `_auto_request`, `analysis_status` | Runs center, rings, calibration, fit, and indexing in one pass; status reports failed steps only |
+| Auto button | `_auto_request`, `analysis_status` | Runs center, rings, calibration, fit, and indexing in one pass; status reports failed steps only |
 | Phase menu | `phase_name`, `custom_phases` | Selects a library or custom phase for calibration and indexing; custom entries take a full lattice (a, b, c, α, β, γ) and absence rule |
 | Identify candidates only | `identify_custom_only` | Identify ranks only custom phases, skipping the library |
 | Calibrate from phase | `_calibrate_phase_request`, `calibration_rms_px` | Fits k-space sampling from ring-to-reflection assignment |
@@ -67,6 +76,9 @@ no console error, no NaN frame).
 | Profile panel | `show_profile`, `profile_log`, `profile_subtract_background`, `_profile_data` | Radial profile with ring markers; click adds a ring |
 | Azimuthal panel | `show_azimuthal`, `_azimuthal_data` | Intensity vs azimuth around the outermost ring |
 | hkl toggle | `show_hkl` | Shows or hides hkl labels on spots and rings |
+| Stats toggle | `show_stats` | Shows or hides the pattern-statistics readout |
+| Undo / clear spots and rings | `_spot_undo_request`, `_spot_clear_request`, `_ring_undo_request`, `_ring_clear_request` | Removes the last or all markers (Ctrl+Z also undoes) |
+| Center view | view transform | Recenters and zooms the view to the diffraction center |
 | Spot / ring CSV and JSON | measurement tables | Downloads the visible measurement table rows |
 | Refine method dropdown | `refine_method` | Picks the center-refinement algorithm (auto / symmetry / phase_corr) |
 | Refine center | `_refine_center_request`, `center_method` | Refines the center; records the method used |
@@ -78,7 +90,7 @@ no console error, no NaN frame).
 | Frame slider (3D) | `frame_idx` | Scrubs to a different pattern in the stack |
 | Pan (drag) / zoom (wheel) | view transform | Pattern translates / zooms about the cursor |
 | Touch: two-finger pinch / drag, double-tap | view transform | Pinch zooms about the fingers, two-finger drag pans, double-tap resets the view |
-| Export → HTML | `export_request`, `export_payload` | Writes a standalone HTML viewer |
+| Export → PNG / HTML | `export_request`, `export_payload` | Saves the current view as a PNG image or a standalone HTML viewer |
 
 ```{seealso}
 The shared HTML-export contract is documented in [html-export](html-export).

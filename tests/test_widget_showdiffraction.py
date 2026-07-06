@@ -573,9 +573,11 @@ def test_radial_profile_axes_and_units():
         w.radial_profile(units="nm")
     w2 = ShowDiffraction(dp, center=cen, k_pixel_size=0.02, verbose=False)
     r_px, _ = w2.radial_profile(units="px")
-    q, _ = w2.radial_profile(units="q")
-    assert np.allclose(q, r_px * 0.02, rtol=1e-6)
-    assert np.allclose(w2.radial_profile()[0], q)
+    g, _ = w2.radial_profile(units="g")
+    q_alias, _ = w2.radial_profile(units="q")
+    assert np.allclose(g, r_px * 0.02, rtol=1e-6)
+    assert np.allclose(q_alias, g)
+    assert np.allclose(w2.radial_profile()[0], g)
 
 
 def test_radial_profile_azimuthal_wedge():
@@ -752,6 +754,11 @@ def test_apply_ellipse_correction_equalizes_dspacing():
     w.apply_ellipse_correction()
     d_major, d_minor = (s["d_spacing"] for s in w.spots)
     assert abs(d_major - d_minor) / d_minor < 0.02
+    # mean-preserving: both axes map to the mean radius sqrt(A*B) = 60*sqrt(1.2),
+    # so the correction does not silently rescale an existing calibration
+    d_mean = 1.0 / (60.0 * math.sqrt(1.2) * 0.01)
+    assert abs(d_major - d_mean) / d_mean < 0.03
+    assert abs(d_minor - d_mean) / d_mean < 0.03
 
 
 # --- phase calibration & indexing ---
@@ -936,7 +943,7 @@ def test_identify_phase_spots_fallback():
 
 
 def test_refine_center_request_moves_center():
-    """The REFINE button channel runs refine_center and resets itself."""
+    """The Refine button channel runs refine_center and resets itself."""
     true = (124.0, 130.5)
     dp = _off_center_ring_dp(true, radii=(50.0, 75.0))
     w = ShowDiffraction(dp, center=(121.0, 133.0), verbose=False)
@@ -947,7 +954,7 @@ def test_refine_center_request_moves_center():
 
 
 def test_refine_request_honors_refine_method():
-    """The REFINE channel runs the method picked in the dropdown and reports the grade."""
+    """The Refine channel runs the method picked in the dropdown and reports the grade."""
     dp = _off_center_ring_dp((124.0, 130.5), radii=(50.0, 75.0))
     w = ShowDiffraction(dp, center=(121.0, 133.0), verbose=False)
     w.refine_method = "phase_corr"
@@ -1320,7 +1327,7 @@ def test_run_auto_full_pipeline():
     assert all(ring["hkl"] for ring in w.rings)
     assert all(ring.get("fwhm_px") is not None for ring in w.rings)
     assert w.analysis_status == ""
-    # AUTO button channel
+    # Auto button channel
     dp, _ = _ring_dp([60.0, 90.0], background="power")
     w2 = ShowDiffraction(dp, verbose=False)
     w2._auto_request = True

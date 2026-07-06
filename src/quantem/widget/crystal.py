@@ -34,13 +34,14 @@ def _allow_hcp(h: int, k: int, ell: int) -> bool:
     return not ((h + 2 * k) % 3 == 0 and ell % 2 == 1)
 
 
-def _allow_wurtzite(h: int, k: int, ell: int) -> bool:
-    hh_family = h == k or k == -(h + k) or h == -(h + k)
-    return not (hh_family and ell % 2 == 1)
-
-
 def _allow_rhombohedral(h: int, k: int, ell: int) -> bool:
     return (-h + k + ell) % 3 == 0
+
+
+def _allow_rhombohedral_c(h: int, k: int, ell: int) -> bool:
+    if (h == 0 or k == 0 or h == -k) and ell % 2 == 1:
+        return False
+    return _allow_rhombohedral(h, k, ell)
 
 
 _ABSENCE_RULES = {
@@ -49,8 +50,9 @@ _ABSENCE_RULES = {
     "bcc": _allow_bcc,
     "diamond": _allow_diamond,
     "hcp": _allow_hcp,
-    "wurtzite": _allow_wurtzite,
+    "wurtzite": _allow_hcp,  # 2b wurtzite sites zero the same reflections as hcp
     "rhombohedral": _allow_rhombohedral,
+    "rhombohedral-c": _allow_rhombohedral_c,
 }
 
 # Built-in standards: room-temperature lattice parameters in Å, each taken from
@@ -179,17 +181,23 @@ PHASE_LIBRARY = {
     "ZnS (wurtzite)": {"a": 3.8227, "c": 6.2607, "gamma": 120.0, "absences": "wurtzite"},
     # COD 1529745 (Cava et al. 1977)
     "β-AgI": {"a": 4.5980, "c": 7.5140, "gamma": 120.0, "absences": "wurtzite"},
-    # rhombohedral
+    # rhombohedral, R-3c/R3c (c glide)
     # NIST SRM 676a
-    "α-Al2O3": {"a": 4.7594, "c": 12.9923, "gamma": 120.0, "absences": "rhombohedral"},
+    "α-Al2O3": {"a": 4.7594, "c": 12.9923, "gamma": 120.0, "absences": "rhombohedral-c"},
     # NBS Mono. 25 Sec. 18 (1981)
-    "α-Fe2O3 (hematite)": {"a": 5.0356, "c": 13.7489, "gamma": 120.0, "absences": "rhombohedral"},
+    "α-Fe2O3 (hematite)": {
+        "a": 5.0356,
+        "c": 13.7489,
+        "gamma": 120.0,
+        "absences": "rhombohedral-c",
+    },
     # NIST SRM 674b
-    "Cr2O3": {"a": 4.9586, "c": 13.5965, "gamma": 120.0, "absences": "rhombohedral"},
+    "Cr2O3": {"a": 4.9586, "c": 13.5965, "gamma": 120.0, "absences": "rhombohedral-c"},
     # NBS Circ. 539 v2 (Swanson & Fuyat 1953)
-    "CaCO3 (calcite)": {"a": 4.9890, "c": 17.0620, "gamma": 120.0, "absences": "rhombohedral"},
+    "CaCO3 (calcite)": {"a": 4.9890, "c": 17.0620, "gamma": 120.0, "absences": "rhombohedral-c"},
     # COD 1541936 (Abrahams et al. 1966)
-    "LiNbO3": {"a": 5.1483, "c": 13.8631, "gamma": 120.0, "absences": "rhombohedral"},
+    "LiNbO3": {"a": 5.1483, "c": 13.8631, "gamma": 120.0, "absences": "rhombohedral-c"},
+    # rhombohedral, R-3m
     # COD 2310889 (Cucka & Barrett 1962)
     "Bi": {"a": 4.5460, "c": 11.8620, "gamma": 120.0, "absences": "rhombohedral"},
     # COD 5000214 (Barrett et al. 1963)
@@ -255,8 +263,51 @@ def _parse_hkl_label(label: str) -> tuple[int, int, int] | None:
     return tuple(parts) if len(parts) == 3 else None
 
 
-def _canonical_hkl(hkl: Sequence[float]) -> tuple[int, int, int]:
-    return tuple(sorted((abs(int(i)) for i in hkl), reverse=True))
+def _is_cubic_lattice(lattice: tuple[float, float, float, float, float, float] | None) -> bool:
+    if lattice is None:
+        return False
+    a, b, c, alpha, beta, gamma = lattice
+    return (
+        math.isclose(a, b)
+        and math.isclose(b, c)
+        and math.isclose(alpha, 90.0)
+        and math.isclose(beta, 90.0)
+        and math.isclose(gamma, 90.0)
+    )
+
+
+def _is_orthogonal_lattice(lattice: tuple[float, float, float, float, float, float]) -> bool:
+    return (
+        math.isclose(lattice[3], 90.0)
+        and math.isclose(lattice[4], 90.0)
+        and math.isclose(lattice[5], 90.0)
+    )
+
+
+def _canonical_hkl(
+    hkl: Sequence[float],
+    lattice: tuple[float, float, float, float, float, float] | None,
+) -> tuple[int, int, int]:
+    indices = tuple(int(i) for i in hkl)
+    if _is_cubic_lattice(lattice):
+        return tuple(sorted((abs(i) for i in indices), reverse=True))
+    if lattice is not None and _is_orthogonal_lattice(lattice):
+        h, k, ell = (abs(i) for i in indices)
+        if math.isclose(lattice[0], lattice[1]):
+            h, k = sorted((h, k), reverse=True)
+        return (h, k, ell)
+    for value in indices:
+        if value < 0:
+            return tuple(-i for i in indices)
+        if value > 0:
+            return indices
+    return indices
+
+
+def _label_preference(hkl: tuple[int, int, int]) -> tuple[int, tuple[int, int, int]]:
+    """Sort key preferring the conventional family label: fewest negative
+    indices, then lexicographically largest (h before k before l)."""
+    return (sum(1 for i in hkl if i < 0), tuple(-i for i in hkl))
 
 
 class Phase:
@@ -384,7 +435,7 @@ class Phase:
                     if spacing < d_min:
                         continue
                     d_key = int(round(spacing * 1e4))
-                    representative = _canonical_hkl(hkl)
+                    representative = _canonical_hkl(hkl, self.lattice)
                     family = families_by_d.get(d_key)
                     if family is None:
                         families_by_d[d_key] = {
@@ -396,7 +447,7 @@ class Phase:
                         }
                     else:
                         family["multiplicity"] += 1
-                        if representative < family["hkl"]:
+                        if _label_preference(representative) < _label_preference(family["hkl"]):
                             family["hkl"] = representative
                             family["hkl_str"] = _format_hkl(representative)
         return sorted(families_by_d.values(), key=lambda reflection: -reflection["d"])
