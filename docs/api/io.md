@@ -90,9 +90,25 @@ print(meta["scan_shape"], meta["detector_shape"])
 ## Lightweight visual thumbnails
 
 Use `quantem.widget.render.thumbnail` when you need compact visual previews for
-folder reports, static dashboards, or quick review pages. These outputs are for
-looking, not measuring: keep scientific arrays in array/HDF5 formats when the
-values need to be reused.
+folder reports, static dashboards, or quick review pages. WebP is the default
+preview format because it gives small files for noisy microscopy images while
+still showing the structure a human needs for browsing: particles, scan
+artifacts, contrast, FFT-like texture, and bad frames. This matters when a
+folder contains hundreds of images, when an HTML report is opened on a laptop or
+phone, or when a CI/dashboard page needs many thumbnails without becoming a
+large artifact.
+
+Use WebP thumbnails for:
+
+- folder-browser previews and cached visual review pages
+- maintainer smoke dashboards and HTML reports
+- static notebook previews where file size matters more than exact pixel values
+- quick human decisions such as "which file should I open next?"
+
+Do not use WebP thumbnails for scientific data storage, measurements,
+publication figures, exact widget state, or HTML exports that need interaction.
+WebP is a visual preview and may be lossy. Keep scientific arrays in array/HDF5
+formats when values need to be reused.
 
 ```python
 from quantem.widget.render import save_thumbnail, thumbnail_webp
@@ -101,8 +117,9 @@ webp_bytes = thumbnail_webp(image, size=256, cmap="inferno")
 save_thumbnail(image, "preview.webp", size=256, cmap="inferno")
 ```
 
-Use `save_image(...)` on a widget when you want a publication-style figure, and
-use `export_html(...)` when you want the interactive widget.
+Use `save_image(...)` on a widget when you want a publication-style figure,
+`export_html(...)` when you want the interactive widget, and `io.save(...)` or a
+domain file format when you want data that another analysis step will consume.
 
 ---
 
