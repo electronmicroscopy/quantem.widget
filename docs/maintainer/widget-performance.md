@@ -4,6 +4,30 @@ These notes capture interaction bugs that were easy to misread while building
 the widgets. Keep this page short and practical: it should explain what went
 wrong, how to recognize the pattern, and what to do instead.
 
+## Current summary
+
+2026-07-05 Show4DSTEM loader work:
+
+- Exact `uint16` no-bin loading is already on the same fast path as browse
+  `uint8` for a single real 512 x 512 x 192 x 192 Arina master. On the private
+  MJGOAT workstation, the new benchmark script measured `uint16` at 0.634 s
+  cold / 0.405 s hot and `uint8` at 0.591 s cold / 0.392 s hot on the freer GPU.
+- Multi-GPU loading now uses disk-aware scheduling. `load(masters,
+  devices=[0, 1])` interleaves files by physical disk before assigning work to
+  GPUs, so folders split across independent NVMe disks can use disk bandwidth
+  and GPU capacity together.
+- Two local-only benchmark entrypoints own this proof:
+  `scripts/widget_load_bench_matrix.py` for U16/U8 single and stacked load
+  timing, and `scripts/widget_load_bench_sharded.py` for disk layout,
+  two-GPU placement, cold/warm timing, and capacity boundaries.
+- Keep real benchmark outputs under `/tmp/quantem-widget-load-bench/`. Do not
+  commit private paths, raw data, generated benchmark payloads, screenshots, or
+  large reports.
+- Current MJGOAT sampled masters resolve to one physical disk (`nvme2n1`), so
+  the smoke validates the sharded code path and report harness, not an actual
+  two-disk bandwidth gain. Prove the disk speedup on a host where
+  `group_by_disk(masters)` reports at least two real disks.
+
 ## Timing protocol for every widget
 
 Every widget report should separate loading speed from rendering speed. A fast
