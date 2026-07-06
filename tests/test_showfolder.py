@@ -97,6 +97,19 @@ def test_show_folder_opens_selected_images_as_show2d_and_show3d(tmp_path: Path) 
     assert [label.split(" | ", 1)[0] for label in selected_3d.labels] == ["0010", "0012"]
 
 
+def test_show_folder_renders_master_only_folder_for_show4dstem(tmp_path: Path) -> None:
+    (tmp_path / "scan_000_master.h5").touch()
+    (tmp_path / "scan_001_master.h5").touch()
+
+    widget = ShowFolder(tmp_path, thumb=8, group_by="none")
+
+    assert widget.browser is not None
+    assert widget.items == []
+    assert widget.browser.gallery is None
+    assert widget.browser.selection_panel is not None
+    assert "4D-STEM master" in widget.browser.widget.children[0].value
+
+
 def test_show_folder_reuses_thumbnail_cache(tmp_path: Path, monkeypatch) -> None:
     _image_emd(tmp_path / "0010 - HAADF 15Mx Nano.emd")
     _image_emd(tmp_path / "0011 - HAADF 15Mx Nano.emd")

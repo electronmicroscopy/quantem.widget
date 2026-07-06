@@ -469,25 +469,36 @@ class ShowFolderBrowser:
         self._selected_show3d_widget = widget
         return widget
 
-    def open_show4dstem(self, *, gpus=None, page_budget=None, det_bin=4,
-                        dtype="u8", scan_size=None):
+    def open_show4dstem(
+        self,
+        *,
+        gpus=None,
+        page_budget="auto",
+        det_bin=4,
+        dtype="u8",
+        scan_size=None,
+        page_max_vram_fraction=0.75,
+        page_reserve_vram_bytes=None,
+        page_max_vram_bytes=None,
+    ):
         """Render every 4D-STEM master in this folder as ONE Show4DSTEM.
 
         The masters are discovered in :attr:`folder`, loaded round-robin across
         ``gpus`` (each dataset on its own card), and presented behind the
-        Show4DSTEM dataset slider. ``page_budget`` caps how many datasets stay
-        resident in VRAM: sliding to a new dataset pages it onto the GPU and
-        evicts the least-recently-used one to RAM, so a 40-master folder does
-        not fill VRAM. ``None`` keeps every dataset resident (instant switch,
-        only for folders that fit).
+        Show4DSTEM dataset slider. ``page_budget="auto"`` keeps as many datasets
+        resident as the current GPU-memory budget allows, then LRU-evicts to RAM
+        while the user continues browsing. ``page_budget=N`` keeps a fixed count
+        hot. ``None`` keeps every dataset resident (instant switch, only for
+        folders that fit).
 
         Parameters
         ----------
         gpus : list[int] or None
             Cards to spread the datasets across (round-robin). ``None`` = the
             current device.
-        page_budget : int or None
-            Max datasets resident in VRAM at once. ``None`` = all resident.
+        page_budget : "auto", int, or None
+            GPU cache policy. ``"auto"`` = memory-sized LRU cache; integer =
+            fixed resident count; ``None`` = all resident.
         det_bin, dtype, scan_size
             Forwarded to :func:`load` / :func:`discover_masters` — bin the
             detector, pick the browse dtype, and (optionally) keep only masters
@@ -496,6 +507,9 @@ class ShowFolderBrowser:
         self._show4dstem_config = dict(
             gpus=gpus, page_budget=page_budget, det_bin=det_bin,
             dtype=dtype, scan_size=scan_size,
+            page_max_vram_fraction=page_max_vram_fraction,
+            page_reserve_vram_bytes=page_reserve_vram_bytes,
+            page_max_vram_bytes=page_max_vram_bytes,
         )
         self._active_selected_modes = {"show4dstem"}
         if getattr(self, "_selection_viewer_output", None) is not None:
@@ -531,11 +545,71 @@ class ShowFolderBrowser:
         dtype = cfg.get("dtype", "u8")
         scan_size = cfg.get("scan_size")
         page_budget = cfg.get("page_budget")
+        page_max_vram_fraction = float(cfg.get("page_max_vram_fraction", 0.75))
+        page_reserve_vram_bytes = cfg.get("page_reserve_vram_bytes")
+        page_max_vram_bytes = cfg.get("page_max_vram_bytes")
 
         scan_shape = (int(scan_size), int(scan_size)) if scan_size else None
         masters = discover_masters(str(self.folder), scan_shape=scan_shape, verbose=False)
         frames, names = [], []
         self._release_selected_show4dstem_widget()
+        page_devices = gpus if gpus is not None else None
+        auto_page = isinstance(page_budget, str) and page_budget.lower() == "auto"
+        fixed_page_budget = None if auto_page or page_budget is None else max(1, int(page_budget))
+        staging_lru: list[int] = []
+        staging_byte_budgets = (
+            Dataset5dstem._auto_vram_budgets(
+                [f"cuda:{gpu}" for gpu in gpus],
+                max_vram_fraction=page_max_vram_fraction,
+                reserve_vram_bytes=page_reserve_vram_bytes,
+                max_vram_bytes=page_max_vram_bytes,
+            )
+            if auto_page and gpus is not None
+            else {}
+        )
+
+        def reclaim(devices) -> None:
+            Dataset5dstem._reclaim({torch.device(device) for device in devices})
+
+        def frame_nbytes(frame: torch.Tensor) -> int:
+            return int(frame.element_size() * frame.nelement())
+
+        def enforce_staging_cache(current: int) -> None:
+            if page_budget is None:
+                return
+            nonlocal staging_lru
+            staging_lru = [idx for idx in staging_lru if idx < len(frames)]
+            for idx, frame in enumerate(frames):
+                if frame.device.type != "cpu" and idx not in staging_lru:
+                    staging_lru.append(idx)
+            reclaimed: set[torch.device] = set()
+
+            def offload(idx: int) -> None:
+                dev = frames[idx].device
+                frames[idx] = frames[idx].to("cpu")
+                staging_lru[:] = [x for x in staging_lru if x != idx]
+                reclaimed.add(dev)
+
+            if fixed_page_budget is not None:
+                while True:
+                    resident = [idx for idx in staging_lru if frames[idx].device.type != "cpu"]
+                    if len(resident) <= fixed_page_budget:
+                        break
+                    candidates = [idx for idx in resident if idx != current] or resident
+                    offload(candidates[0])
+            for dev, max_bytes in staging_byte_budgets.items():
+                while True:
+                    resident = [idx for idx in staging_lru if frames[idx].device == dev]
+                    used = sum(frame_nbytes(frames[idx]) for idx in resident)
+                    if used <= max_bytes or not resident:
+                        break
+                    candidates = [idx for idx in resident if idx != current]
+                    if not candidates:
+                        break
+                    offload(candidates[0])
+            if reclaimed:
+                reclaim(reclaimed)
+
         for master in masters:
             # Skip half-written masters (missing sibling data files) so a live
             # acquisition folder does not crash the viewer mid-session.
@@ -554,17 +628,23 @@ class ShowFolderBrowser:
                 device = f"cuda:{gpus[len(frames) % len(gpus)]}"
                 tensor = tensor.to(device)
             frames.append(tensor)
+            staging_lru.append(len(frames) - 1)
+            enforce_staging_cache(len(frames) - 1)
             del data, tensor, result
             stem = str(master).split("/")[-1]
             names.append(stem[:-len("_master.h5")] if stem.endswith("_master.h5") else stem)
         if not frames:
             self._selected_show4dstem_widget = None
             return None
-        series = Dataset5dstem.from_frames(frames)
+        series = Dataset5dstem.from_frames(frames, stack_same_device=False)
         frames.clear()
         widget = Show4DSTEM(
             series,
             page_budget=page_budget,
+            page_device=page_devices,
+            page_max_vram_fraction=page_max_vram_fraction,
+            page_reserve_vram_bytes=page_reserve_vram_bytes,
+            page_max_vram_bytes=page_max_vram_bytes,
             frame_dim_label="Dataset",
             frame_labels=names,
             verbose=False,
@@ -643,11 +723,11 @@ class ShowFolderBrowser:
             _refresh()
 
         def _open_show4dstem(_=None):
-            # Cap residency at the GPU count so switching datasets evicts the LRU
-            # instead of filling VRAM. Config can be overridden by calling
-            # open_show4dstem(...) directly.
+            # Memory-sized residency: keep hot datasets until the GPU cache
+            # budget is full, then LRU-evict. Config can be overridden by
+            # calling open_show4dstem(...) directly.
             self._show4dstem_config = getattr(self, "_show4dstem_config", None) or dict(
-                gpus=None, page_budget=1, det_bin=4, dtype="u8", scan_size=None,
+                gpus=None, page_budget="auto", det_bin=4, dtype="u8", scan_size=None,
             )
             self._active_selected_modes = {"show4dstem"}
             _refresh()
@@ -778,8 +858,11 @@ def build_showfolder(
     if not root.is_dir():
         raise FileNotFoundError(f"not a folder: {root}")
     files = sorted(p for p in root.glob(glob) if p.is_file() and not p.name.startswith("."))
+    master_files = sorted(p for p in root.glob("*_master.h5") if p.is_file() and not p.name.startswith("."))
     if not files:
-        raise FileNotFoundError(f"no files matching {glob!r} in {root}")
+        if not master_files:
+            raise FileNotFoundError(f"no files matching {glob!r} in {root}")
+        files = []
 
     thumb = int(thumb)
     if thumb <= 0:
@@ -926,13 +1009,17 @@ def build_showfolder(
 
     heading = title or f"{root.name} ShowFolder"
     inventory = HTML(_inventory_html(items))
+    master_text = (
+        f" · {len(master_files)} 4D-STEM master{'s' if len(master_files) != 1 else ''}"
+        if master_files else ""
+    )
     children: list[Any] = [
         HTML(
             f"<h2 style=\"margin:0 0 4px 0\">{html.escape(heading)}</h2>"
             f"<div style=\"color:#555;margin-bottom:8px\">"
             f"{html.escape(str(root))} · {len(items)} files matching {html.escape(glob)!r} · "
             f"{len([item for item in items if not item.is_eds and item.error is None])} image · "
-            f"thumbnail {thumb}px · scale bars use downsampled pixel size · "
+            f"thumbnail {thumb}px · scale bars use downsampled pixel size{master_text} · "
             f"{_cache_status_text(cache_info)}</div>"
         )
     ]
@@ -1013,7 +1100,13 @@ def build_showfolder(
         image_galleries.append((single_gallery, single_images))
         children.append(single_gallery)
     elif not image_items:
-        children.append(HTML("<p><b>HAADF/STEM gallery:</b> no non-EDS image files found.</p>"))
+        if master_files:
+            children.append(HTML(
+                "<p><b>HAADF/STEM gallery:</b> no non-EDS image files found. "
+                "Use <b>Open Show4DSTEM</b> below to browse the 4D-STEM masters in this folder.</p>"
+            ))
+        else:
+            children.append(HTML("<p><b>HAADF/STEM gallery:</b> no non-EDS image files found.</p>"))
 
     children.append(inventory)
 

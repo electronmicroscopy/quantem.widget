@@ -389,7 +389,11 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         state=None,
         backend: str | None = None,
         save_state: bool = False,
-        page_budget: int | None = None,
+        page_budget: int | str | None = None,
+        page_device=None,
+        page_max_vram_fraction: float = 0.75,
+        page_reserve_vram_bytes: int | None = None,
+        page_max_vram_bytes: int | dict | None = None,
         **kwargs,
     ):
         # save_state controls whether the heavy pixel buffers (the packed 4D
@@ -582,7 +586,13 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             # can page (it owns the per-frame device list); a plain 5D tensor
             # can't be partially offloaded, so page_budget is ignored there.
             if page_budget is not None and is_dataset5dstem and self.n_frames > 1:
-                self._data.page(int(page_budget), device=None)
+                self._data.page(
+                    page_budget,
+                    device=page_device,
+                    max_vram_fraction=page_max_vram_fraction,
+                    reserve_vram_bytes=page_reserve_vram_bytes,
+                    max_vram_bytes=page_max_vram_bytes,
+                )
         else:
             self._data = torch.from_numpy(data_np).to(self._device)
             # Saturation filter: zero detector pixels at full-scale (65535 / 255).

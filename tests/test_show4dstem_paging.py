@@ -1,11 +1,10 @@
 """Show4DSTEM dataset-slider paging (out-of-core multi-dataset VRAM control).
 
 A ShowFolder of many 4D masters loads into one Show4DSTEM behind a dataset
-slider. Keeping every master resident fills VRAM; ``page_budget`` caps how many
-stay on the GPU and switching the slider pages the target in while evicting the
-least-recently-used dataset to RAM. This guards that wiring: without the budget
-every dataset is resident (unchanged default); with it, only ``page_budget``
-datasets sit in VRAM and the footprint stays flat across switches (no leak).
+slider. Keeping every master resident fills VRAM; ``page_budget`` controls how
+many stay on the GPU and switching the slider pages the target in while evicting
+least-recently-used datasets to RAM. This guards both fixed-count paging and
+``page_budget="auto"`` memory-sized caching.
 """
 from __future__ import annotations
 
@@ -64,6 +63,27 @@ def test_page_budget_two_keeps_two_resident():
     _ = w._frame_data
     resident = set(ds.vram_resident())
     assert len(resident) == 2 and 3 in resident   # newest always resident, ≤ budget
+
+
+@cuda_required
+def test_page_budget_auto_keeps_hot_frames_until_byte_budget():
+    frames = [
+        torch.randint(0, 100, (16, 16, 24, 24), dtype=torch.uint8, device="cuda:0")
+        for _ in range(4)
+    ]
+    frame_bytes = frames[0].element_size() * frames[0].nelement()
+    ds = Dataset5dstem.from_frames(frames, stack_same_device=False)
+
+    ds.page("auto", device=[0], max_vram_bytes=frame_bytes * 2 + 1)
+
+    assert len(ds.vram_resident()) <= 2
+    for target in (3, 2, 1, 0):
+        frame = ds.frame(target)
+        assert frame.device.type == "cuda"
+        del frame
+        resident = ds.vram_resident()
+        assert target in resident
+        assert len(resident) <= 2
 
 
 def test_page_budget_preserves_existing_frame_devices_on_cpu():
@@ -185,6 +205,55 @@ def test_showfolder_open_show4dstem_builds_paged_multimaster_on_explicit_cuda(mo
     w.frame_idx = 3
     _ = w._frame_data
     assert ds.vram_resident() == [3]
+
+
+@cuda_required
+def test_showfolder_open_show4dstem_auto_uses_gpu_sized_cache(monkeypatch, tmp_path):
+    """Auto paging keeps hot datasets until the byte budget, then LRU-evicts."""
+    import quantem.widget as qw
+    import quantem.widget.io as wio
+
+    fake_masters = [str(tmp_path / f"scan_{i:02d}_master.h5") for i in range(5)]
+
+    def fake_discover(folder, *, scan_shape=None, verbose=False, **kw):
+        return list(fake_masters)
+
+    def fake_ready(path):
+        return True
+
+    class _Result:
+        def __init__(self, path):
+            v = int(path.split("scan_")[1][:2])
+            self.data = torch.full((16, 16, 24, 24), v, dtype=torch.uint8, device="cuda:0")
+
+    def fake_load(path, *, det_bin=4, dtype="u8", verbose=False, **kw):
+        return _Result(path)
+
+    monkeypatch.setattr(wio, "discover_masters", fake_discover)
+    monkeypatch.setattr(wio, "is_master_ready", fake_ready)
+    monkeypatch.setattr(qw, "load", fake_load)
+
+    frame_bytes = 16 * 16 * 24 * 24
+    sf = _stub_browser(tmp_path)
+    w = sf.open_show4dstem(
+        gpus=[0],
+        page_budget="auto",
+        page_max_vram_bytes=frame_bytes * 2 + 1,
+        det_bin=4,
+        dtype="u8",
+    )
+
+    assert w is not None
+    ds = w._data
+    assert w.n_frames == 5
+    assert 0 in ds.vram_resident()
+    assert len(ds.vram_resident()) <= 2
+    w.frame_idx = 4
+    frame = w._frame_data
+    assert frame.device.type == "cuda"
+    del frame
+    assert 4 in ds.vram_resident()
+    assert len(ds.vram_resident()) <= 2
 
 
 def test_showfolder_open_show4dstem_no_masters_returns_none(monkeypatch, tmp_path):
