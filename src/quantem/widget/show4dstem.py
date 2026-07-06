@@ -1650,36 +1650,66 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         """
         import gc
 
-        device = str(self._device) if hasattr(self, "_device") else ""
+        data = self._data
+        cuda_indices: set[int] = set()
+        needs_mps_clear = False
+
+        def record_device(value) -> None:
+            nonlocal needs_mps_clear
+            if value is None:
+                return
+            dev = value.device if isinstance(value, torch.Tensor) else value
+            device = torch.device(dev)
+            if device.type == "cuda":
+                cuda_indices.add(0 if device.index is None else int(device.index))
+            elif device.type == "mps":
+                needs_mps_clear = True
+
+        record_device(getattr(self, "_device", None))
+        if type(data).__name__ == "Dataset5dstem" and hasattr(data, "devices"):
+            for dev in data.devices:
+                record_device(dev)
+        elif isinstance(data, torch.Tensor):
+            record_device(data)
+        record_device(getattr(self, "_compute_for", None))
         nbytes = (
-            self._data.nbytes
-            if self._data is not None and hasattr(self._data, "nbytes")
+            data.nbytes
+            if data is not None and hasattr(data, "nbytes")
             else 0
         )
         # Every holder of the data storage (verified via a gc storage scan):
         # the widget's own ref, the compute backend's view cache, and the per-op cache.
-        self._data = None
         self._compute_backend = None
         self._compute_for = None
+        if type(data).__name__ == "Dataset5dstem" and hasattr(data, "free"):
+            data.free()
+        self._data = None
         gc.collect()
-        if device == "mps":
+        if needs_mps_clear:
             try:
                 torch.mps.empty_cache()
             except AttributeError:
                 pass
-        elif device.startswith("cuda"):
-            torch.cuda.empty_cache()
-            # Storage is cupy-owned via dlpack; the freed memory sits in the cupy pool
-            # until its blocks are returned to the driver.
-            try:
-                import cupy as cp
+        for idx in sorted(cuda_indices):
+            with torch.cuda.device(idx):
+                torch.cuda.empty_cache()
+        # Storage is cupy-owned via dlpack; the freed memory sits in the cupy pool
+        # until its blocks are returned to the driver.
+        try:
+            import cupy as cp
 
-                cp.get_default_memory_pool().free_all_blocks()
-                cp.get_default_pinned_memory_pool().free_all_blocks()
-            except ImportError:
-                pass
+            for idx in sorted(cuda_indices):
+                with cp.cuda.Device(idx):
+                    cp.get_default_memory_pool().free_all_blocks()
+                    cp.get_default_pinned_memory_pool().free_all_blocks()
+        except ImportError:
+            pass
         if nbytes > 0:
-            print(f"freed {_format_memory(nbytes)} ({device})")
+            devices = [f"cuda:{idx}" for idx in sorted(cuda_indices)]
+            if needs_mps_clear:
+                devices.append("mps")
+            label = ", ".join(devices) if devices else "host"
+            print(f"freed {_format_memory(nbytes)} ({label})")
 
     def summary(self):
         name = self.title if self.title else "Show4DSTEM"

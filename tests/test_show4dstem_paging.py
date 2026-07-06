@@ -86,6 +86,19 @@ def test_page_budget_accepts_explicit_device_sequence_on_cpu():
     assert ds.frame(1).device.type == "cpu"
 
 
+def test_show4dstem_free_releases_dataset5dstem_on_cpu():
+    """free() must release the Dataset5dstem owner, not just the widget ref."""
+    frames = [torch.full((2, 2, 3, 3), i, dtype=torch.uint8) for i in range(2)]
+    ds = Dataset5dstem(frames=frames)
+    widget = Show4DSTEM(ds, verbose=False)
+
+    widget.free()
+
+    assert widget._data is None
+    with pytest.raises(RuntimeError, match="Dataset5dstem has been freed"):
+        len(ds)
+
+
 # --- ShowFolder -> Show4DSTEM handoff -----------------------------------------
 
 def _stub_browser(folder):
@@ -252,3 +265,26 @@ def test_showfolder_open_show4dstem_drops_staging_frames_on_second_gpu(monkeypat
         except Exception:
             pass
     assert leaked == []
+
+    w.frame_idx = 1
+    frame = w._frame_data
+    torch.cuda.synchronize(frame.device.index)
+    del frame
+    w.free()
+    gc.collect()
+    for device in (0, 1):
+        with torch.cuda.device(device):
+            torch.cuda.empty_cache()
+    leaked_after_free = []
+    for obj in gc.get_objects():
+        try:
+            if (
+                isinstance(obj, torch.Tensor)
+                and obj.device.type == "cuda"
+                and obj.device.index == 1
+                and tuple(obj.shape) == (16, 16, 24, 24)
+            ):
+                leaked_after_free.append(obj)
+        except Exception:
+            pass
+    assert leaked_after_free == []
