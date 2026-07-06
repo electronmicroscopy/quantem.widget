@@ -161,6 +161,9 @@ fi
 echo "== HTML export smoke matrix =="
 PYTHONPATH=src:. python scripts/widget_html_smoke.py --artifact-dir "$artifact_dir/html-smoke"
 
+echo "== ShowFolder live-folder smoke =="
+PYTHONPATH=src:. python scripts/widget_showfolder_live_smoke.py --artifact-dir "$artifact_dir/showfolder-live"
+
 if [[ "$browser" -eq 1 ]]; then
   echo "== browser-drive HTML smoke =="
   browser_args=(--artifact-dir "$artifact_dir/html-smoke")

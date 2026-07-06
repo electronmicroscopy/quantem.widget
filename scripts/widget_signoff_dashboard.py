@@ -77,6 +77,25 @@ def _artifact_rows(root: Path) -> list[dict[str, str]]:
             "notes": "Run with --browser for exported HTML interaction/FPS proof",
         })
 
+    live_html = root / "showfolder-live" / "index.html"
+    live_report = _read_json(root / "showfolder-live" / "report.json")
+    if live_html.exists():
+        steps = (live_report or {}).get("steps", [])
+        passed = bool((live_report or {}).get("passed"))
+        rows.append({
+            "gate": "ShowFolder live-folder smoke",
+            "status": "pass" if passed else "fail",
+            "evidence": _link("showfolder-live/index.html", "Live-folder report"),
+            "notes": f"{len(steps)} live handoff scenario(s)",
+        })
+    else:
+        rows.append({
+            "gate": "ShowFolder live-folder smoke",
+            "status": "missing",
+            "evidence": "",
+            "notes": "Expected from local signoff; proves live Show2D/Show3D/Show4DSTEM handoff",
+        })
+
     perf_html = root / "performance" / "index.html"
     perf_report = _read_json(root / "performance" / "report.json")
     if perf_html.exists():

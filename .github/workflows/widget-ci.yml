@@ -62,9 +62,9 @@ jobs:
   signoff:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: pip
@@ -109,7 +109,7 @@ jobs:
 
       - name: Upload signoff report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: widget-ci-signoff
           path: /tmp/quantem-widget-ci-signoff

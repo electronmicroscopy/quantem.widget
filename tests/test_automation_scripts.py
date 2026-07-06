@@ -121,6 +121,7 @@ def test_automation_documentation_names_entrypoints() -> None:
         "scripts/docs_preview.sh",
         "scripts/cleanup_browser_artifacts.py",
         "scripts/widget_html_smoke.py",
+        "scripts/widget_showfolder_live_smoke.py",
         "scripts/widget_browser_smoke.py",
         "scripts/widget_phone_handoff.py",
         "scripts/widget_performance_smoke.py",
@@ -132,6 +133,8 @@ def test_automation_documentation_names_entrypoints() -> None:
         "--artifact-dir",
         "index.html",
         "browser-plan.json",
+        "showfolder-live/index.html",
+        "ShowFolder live-folder smoke",
         "browser-smoke.html",
         "--mobile",
         "--min-fps",
@@ -161,7 +164,7 @@ def test_ci_workflow_uploads_signoff_artifacts() -> None:
     workflow = (ROOT / ".github/workflows/widget-ci.yml").read_text(encoding="utf-8")
 
     assert "--artifact-dir /tmp/quantem-widget-ci-signoff" in workflow
-    assert "actions/upload-artifact@v4" in workflow
+    assert "actions/upload-artifact@v7" in workflow
     assert "widget-ci-signoff" in workflow
     assert "if: always()" in workflow
     assert "signoff_mode" in workflow
@@ -170,10 +173,40 @@ def test_ci_workflow_uploads_signoff_artifacts() -> None:
     assert "inputs.performance" in workflow
 
 
+def test_github_actions_use_node24_action_generations() -> None:
+    workflows = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in sorted((ROOT / ".github/workflows").glob("*.yml"))
+    )
+
+    for expected in [
+        "actions/checkout@v7",
+        "actions/setup-python@v6",
+        "actions/setup-node@v6",
+        "actions/upload-artifact@v7",
+        "actions/configure-pages@v6",
+        "actions/upload-pages-artifact@v5",
+        "actions/deploy-pages@v6",
+    ]:
+        assert expected in workflows
+    for stale in [
+        "actions/checkout@v4",
+        "actions/checkout@v6",
+        "actions/setup-python@v5",
+        "actions/upload-artifact@v4",
+        "actions/configure-pages@v5",
+        "actions/upload-pages-artifact@v3",
+        "actions/deploy-pages@v4",
+    ]:
+        assert stale not in workflows
+
+
 def test_signoff_dashboard_summarizes_available_reports(tmp_path: Path) -> None:
     artifact_dir = tmp_path / "signoff"
     html_smoke = artifact_dir / "html-smoke"
     html_smoke.mkdir(parents=True)
+    showfolder_live = artifact_dir / "showfolder-live"
+    showfolder_live.mkdir()
     (artifact_dir / "signoff-manifest.json").write_text(
         json.dumps({
             "status": "pass",
@@ -191,6 +224,11 @@ def test_signoff_dashboard_summarizes_available_reports(tmp_path: Path) -> None:
         json.dumps({"passed": 1, "pages": [{"passed": True}]}),
         encoding="utf-8",
     )
+    (showfolder_live / "index.html").write_text("<html>live</html>", encoding="utf-8")
+    (showfolder_live / "report.json").write_text(
+        json.dumps({"passed": True, "steps": [{"name": "live", "passed": True}]}),
+        encoding="utf-8",
+    )
 
     result = _run(sys.executable, "scripts/widget_signoff_dashboard.py", "--artifact-dir", str(artifact_dir))
 
@@ -200,6 +238,8 @@ def test_signoff_dashboard_summarizes_available_reports(tmp_path: Path) -> None:
     assert "quantem.widget signoff dashboard: PASS" in dashboard
     assert "HTML export smoke" in dashboard
     assert "Browser HTML smoke" in dashboard
+    assert "ShowFolder live-folder smoke" in dashboard
+    assert "showfolder-live/index.html" in dashboard
     assert "html-smoke/browser-smoke.html" in dashboard
     assert dashboard_json["manifest"]["commit"] == "abc123"
 
@@ -341,6 +381,36 @@ def test_widget_html_smoke_writes_visual_report(tmp_path: Path) -> None:
         "showdiffraction",
         "showfolder",
     }
+
+
+def test_widget_showfolder_live_smoke_writes_report(tmp_path: Path) -> None:
+    artifact_dir = tmp_path / "showfolder-live"
+
+    result = _run(
+        sys.executable,
+        "scripts/widget_showfolder_live_smoke.py",
+        "--artifact-dir",
+        str(artifact_dir),
+    )
+
+    assert result.returncode == 0, result.stdout
+    report = json.loads((artifact_dir / "report.json").read_text(encoding="utf-8"))
+    index = (artifact_dir / "index.html").read_text(encoding="utf-8")
+
+    assert report["passed"] is True
+    assert len(report["steps"]) == 2
+    image_step = report["steps"][0]
+    master_step = report["steps"][1]
+    assert image_step["watch_changed"] is True
+    assert image_step["show2d_panels"] == 2
+    assert image_step["show3d_slices"] == 2
+    assert master_step["watch_changed"] is True
+    assert master_step["after_frames"] == 2
+    assert master_step["frame_labels"] == ["scan_000", "scan_001"]
+    assert "ShowFolder live-folder smoke: PASS" in index
+    assert (artifact_dir / "showfolder-live-show2d.html").exists()
+    assert (artifact_dir / "showfolder-live-show3d.html").exists()
+    assert (artifact_dir / "showfolder-live-show4dstem.html").exists()
 
 
 def test_widget_performance_smoke_writes_browser_plan(tmp_path: Path) -> None:

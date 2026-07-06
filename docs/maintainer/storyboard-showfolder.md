@@ -80,8 +80,8 @@ cell or losing their current selection.
 **Primary widgets**: ShowFolder watcher, cache status banner, image gallery.
 
 **Data to use**: A real or real-derived folder where files can be copied in and
-removed during the test. Prefer lab data from MJ Go or another backend; keep
-the raw files outside the widget repository.
+removed during the test. Prefer lab data from an HPC/workstation or microscope
+backend; keep the raw files outside the widget repository.
 
 **Acceptance checks**:
 
@@ -91,6 +91,8 @@ the raw files outside the widget repository.
 - Existing stars/hidden panels are preserved when those files still exist.
 - Removing a file removes it from the browser, selection, and next cache
   manifest so stale files are not retained in memory or cache state.
+- New `*_master.h5` 4D-STEM files trigger the same watch path and refresh the
+  active lazy Show4DSTEM handoff without preloading every master.
 - `watch_once()` performs one deterministic poll for tests and automation.
 - `stop_watch()` stops the background watcher before kernel shutdown.
 
@@ -123,8 +125,8 @@ rewriting notebook boilerplate.
 **Primary widgets**: ShowFolder selection panel, Show2D, Show3D.
 
 **Data to use**: A real or real-derived microscopy folder with at least three
-calibrated image files. Prefer files from MJ Go or another lab backend; do not
-commit those raw files to the widget repository.
+calibrated image files. Prefer files from an HPC/workstation or lab backend; do
+not commit those raw files to the widget repository.
 
 **Acceptance checks**:
 
@@ -138,6 +140,8 @@ commit those raw files to the widget repository.
   compatible calibration.
 - The embedded viewers use cached thumbnail/preview data for immediate
   inspection and do not silently embed full-resolution raw acquisitions.
+- ShowFolder owns live folder watching. Show2D and Show3D receive refreshed
+  selected preview data; they do not watch microscope folders directly.
 
 ## SF-7: Notebook and Documentation Behavior
 
@@ -215,6 +219,7 @@ Run these before committing ShowFolder changes:
 
 ```bash
 PYTHONPATH=src pytest -q tests/test_showfolder.py tests/test_showfolder_core.py
+PYTHONPATH=src:. python scripts/widget_showfolder_live_smoke.py --artifact-dir /tmp/quantem-widget-showfolder-live
 ```
 
 When a change affects docs or examples, also run the docs build used by the
