@@ -1,16 +1,36 @@
 """Array utilities for widgets. NumPy + PyTorch input."""
+from typing import Any
+
 import numpy as np
 import torch
-from quantem.core.datastructures import Dataset4dstem
 
 
-def unwrap_core_4dstem(data):
+_DATASET4DSTEM_IMPORT_ATTEMPTED = False
+_DATASET4DSTEM_TYPE: type[Any] | None = None
+
+
+def _dataset4dstem_type() -> type[Any] | None:
+    """Return the core Dataset4dstem type when quantem.core is importable."""
+    global _DATASET4DSTEM_IMPORT_ATTEMPTED, _DATASET4DSTEM_TYPE
+    if not _DATASET4DSTEM_IMPORT_ATTEMPTED:
+        _DATASET4DSTEM_IMPORT_ATTEMPTED = True
+        try:
+            from quantem.core.datastructures import Dataset4dstem
+        except Exception:
+            _DATASET4DSTEM_TYPE = None
+        else:
+            _DATASET4DSTEM_TYPE = Dataset4dstem
+    return _DATASET4DSTEM_TYPE
+
+
+def unwrap_core_4dstem(data: Any) -> Any:
     """Return the backing tensor/array for a core ``Dataset4dstem``.
 
     ``quantem.core`` owns dataset containers. Widget detector/DPC code only needs
     the numeric backing so it can reuse the existing backend dispatch.
     """
-    if not isinstance(data, Dataset4dstem):
+    dataset_type = _dataset4dstem_type()
+    if dataset_type is None or not isinstance(data, dataset_type):
         return data
     tensor = getattr(data, "_tensor", None)
     if tensor is not None:

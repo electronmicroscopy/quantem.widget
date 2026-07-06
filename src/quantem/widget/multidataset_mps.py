@@ -241,8 +241,14 @@ class LazyMacbookDatasets:
         self._watch_thread = None
 
 
-def load_macbook_datasets(masters, *, det_bin: int = 4, scan_size: int | None = None,
-                          verbose: bool = True) -> LazyMacbookDatasets:
+def load_macbook_datasets(
+    masters,
+    *,
+    det_bin: int = 4,
+    scan_size: int | None = None,
+    verbose: bool = True,
+    skip_mps_memory_check: bool | None = None,
+) -> LazyMacbookDatasets:
     """Decode dataset 0, return a lazy handle over all N (MPS only).
 
     ``masters`` is either a folder (every ``*_master.h5`` in it is discovered +
@@ -271,7 +277,13 @@ def load_macbook_datasets(masters, *, det_bin: int = 4, scan_size: int | None = 
         # load() returns a LoadResult(data, meta); data is the MPSChunked4DSTEM
         # (chunks + metadata). Wrap in the compute container so MultiChunkedFrames
         # sees a uniform ChunkedFrames.
-        data, _meta = load(path, backend="mps", det_bin=det_bin, verbose=False)
+        data, _meta = load(
+            path,
+            backend="mps",
+            det_bin=det_bin,
+            verbose=False,
+            skip_mps_memory_check=skip_mps_memory_check,
+        )
         row_prefix = bool(getattr(data, "row_prefix", False)
                           or getattr(data, "metadata", {}).get("row_prefix", False))
         return ChunkedFrames(data, row_prefix=row_prefix)
@@ -286,8 +298,15 @@ def load_macbook_datasets(masters, *, det_bin: int = 4, scan_size: int | None = 
     return LazyMacbookDatasets(masters, det_bin, names, multi, _decode, verbose=verbose)
 
 
-def load_4dstem_macbook(masters, *, det_bin: int = 4, scan_size: int | None = None,
-                        verbose: bool = True, **viewer_kwargs):
+def load_4dstem_macbook(
+    masters,
+    *,
+    det_bin: int = 4,
+    scan_size: int | None = None,
+    verbose: bool = True,
+    skip_mps_memory_check: bool | None = None,
+    **viewer_kwargs,
+):
     """Convenience wrapper: build the MPS lazy handle AND return a mounted Show4DSTEM viewer.
 
     Same discovery + decode behavior as :func:`load_macbook_datasets`, but
@@ -298,6 +317,10 @@ def load_4dstem_macbook(masters, *, det_bin: int = 4, scan_size: int | None = No
     """
     from quantem.widget import Show4DSTEM
     lazy = load_macbook_datasets(
-        masters, det_bin=det_bin, scan_size=scan_size, verbose=verbose,
+        masters,
+        det_bin=det_bin,
+        scan_size=scan_size,
+        verbose=verbose,
+        skip_mps_memory_check=skip_mps_memory_check,
     )
     return Show4DSTEM(lazy, **viewer_kwargs)

@@ -27,6 +27,15 @@ wrong, how to recognize the pattern, and what to do instead.
   the smoke validates the sharded code path and report harness, not an actual
   two-disk bandwidth gain. Prove the disk speedup on a host where
   `group_by_disk(masters)` reports at least two real disks.
+- 2026-07-06 U8 follow-up on real private BTOSTO masters:
+  `load(master, dtype="u8", det_bin=1)` measured 0.850 s cold / 0.385 s hot
+  for one 512 x 512 x 192 x 192 master with parity enabled. Sharded
+  `dtype="u8"`, two no-bin masters across `devices=[0, 1]`, measured
+  1.428 s cold / 0.641 s hot with one 9.0 GiB U8 file resident on each GPU.
+  The single-master browse path meets the <0.5 s hot-load target; the two-master
+  sharded reload is close but not below target yet. The full remote
+  Show4DSTEM browser signoff was blocked in that MJGOAT environment by a
+  neighboring `quantem.core` circular import during `import quantem.widget`.
 
 ## Timing protocol for every widget
 
@@ -305,6 +314,14 @@ confirmed that the entrypoints run end to end. This smoke used
 | matrix, `dtype="u8"`, no-bin, single master on the freer GPU | 0.591 s | 0.392 s | 9.0 GiB | direct uint8 browse path |
 | sharded, two masters, `devices=[0, 1]`, `det_bin=4` | 1.114 s | 0.684 s | 2.2 GiB | one real master per GPU |
 
+2026-07-06 U8 no-bin verification, parity enabled:
+
+| script | cold | warm | resident size | note |
+| --- | ---: | ---: | ---: | --- |
+| matrix, `dtype="u8"`, no-bin, single master | 0.850 s | 0.385 s | 9.0 GiB | meets the <0.5 s hot single-master target |
+| sharded, two masters, `dtype="u8"`, no-bin, `devices=[0, 1]` | 1.428 s | 0.641 s | 18.0 GiB total | one 9.0 GiB U8 master per GPU; close, not yet <0.5 s |
+| matrix, `dtype="u16"`, no-bin, single master | ERR | - | - | current GPU memory was not clean enough for the exact-count allocation |
+
 The current MJGOAT sample resolved to one physical disk (`nvme2n1`) for the
 available real masters, so the smoke validates sharded GPU placement and the
 benchmark harness, not a real multi-disk bandwidth gain. To prove the disk
@@ -317,6 +334,38 @@ than from changing the single-master decode kernel. For 20-40 no-bin masters,
 use the sharded benchmark table to prove the real workflow: cold load, hot load,
 per-GPU resident GiB, disk groups, and whether the run failed cleanly at the
 expected capacity boundary.
+
+IO review and next optimization targets:
+
+- Keep `dtype="u8"` routed to `output_dtype=np.uint8` before any low-level load
+  path. This must hold for single masters, stacked `load(masters, dtype="u8")`,
+  `load(masters, devices=[...], dtype="u8")`, and legacy
+  `load(masters, gpus=[...], stack=False, dtype="u8")`. If the route regresses,
+  the public API can silently materialize uint16 first and lose the browse
+  memory/speed benefit.
+- The remaining <0.5 s gap for two no-bin U8 masters is not a single-file
+  decoder problem. Focus on sharded reload overhead: per-worker first-use
+  warmup, per-file group scheduling, thread startup, repeated HDF5 metadata
+  opens, and whether each device can reuse pinned/compressed scratch buffers
+  across files.
+- Multi-disk proof is still missing. The scheduler is disk-aware, but the
+  current real masters are all on `nvme2n1`. A valid multi-disk report must show
+  `group_by_disk(masters)` with at least two disks and then compare one-disk and
+  split-disk cold/warm timing with the same master count, dtype, and detector
+  binning.
+- Do not run two GPU-heavy loader benchmarks concurrently on the same GPUs.
+  Parallel benchmark processes create artificial OOMs and hide the true loader
+  behavior. Run U8/U16 and sharded/single cases serially unless the goal is an
+  explicit contention test.
+- Fix environment import blockers before claiming browser signoff. The direct
+  HDF5 benchmarks can bypass `import quantem.widget`, but the real
+  Show4DSTEM UI/export signoff cannot. A remote `quantem.core` circular import
+  blocks the full widget path and must be reported as `Not verified`, not
+  papered over with loader timings.
+- For 30-40 no-bin masters, prefer a lazy/paged resident set over opening all
+  masters hot. The benchmark can prove per-file load speed and GPU placement;
+  the user workflow still needs fast dataset flipping with bounded resident
+  memory and clear eviction/cache status in the viewer/report.
 
 ## Heavy Show2D / Show3D audit
 

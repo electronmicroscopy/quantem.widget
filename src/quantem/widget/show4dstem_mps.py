@@ -1,9 +1,19 @@
-"""MacBook 4D-STEM viewer (Show4DSTEMMPS / Show4DSTEM_MACBOOK).
+"""MacBook raw-Metal widget adapter for the public Show4DSTEM factory.
 
-UI-only subclass. The MPS-specific lifecycle (bin2 fast_vi sidecar, radial
-row-prefix cache, multi-dataset proxy) has moved into ``MetalRawBackend``;
-this class only owns the matching ``traitlets`` + observers, plus the
-detector-preset cache (BF/ABF/ADF/HAADF) and the numpy ROI-mask builder.
+Normal users should call ``quantem.widget.Show4DSTEM(load(..., backend="mps"))``.
+The names in this module stay importable for compatibility and for backend
+tests, but they are implementation details behind the single public widget API.
+
+This file is deliberately one cohesive adapter rather than many small MPS UI
+modules. The responsibilities split across layers like this:
+
+* ``show4dstem_factory`` decides whether public ``Show4DSTEM(...)`` should route
+  to the base viewer or this MPS adapter.
+* ``kernels/io/mps.py`` owns HDF5/Metal decode and detector binning.
+* ``kernels/compute/backends.py:MetalRawBackend`` owns masked-sum compute,
+  fast-sidecar/radial-cache lifecycles, and lazy multi-dataset backend state.
+* ``Show4DSTEMMPS`` owns only widget-facing traitlets, observers, preset caches,
+  ROI mask translation, and status updates needed by the frontend.
 
 See ``kernels/compute/backend.py`` for the protocol, ``kernels/compute/
 backends.py:MetalRawBackend`` for the compute implementation.
@@ -34,12 +44,12 @@ def _drop_cached_decompressor():
 
 
 class Show4DSTEMMPS(Show4DSTEM):
-    """Show4DSTEM over a no-bin uint16 stack with raw-Metal BF/DF (no torch).
+    """Show4DSTEM widget adapter over raw-Metal frame buffers.
 
     Lifecycle (fast_vi sidecar / radial cache / multi-dataset) is delegated to
     ``MetalRawBackend``; this class drives it through the ``self._compute``
-    property (the shared backend handle). The MPS-specific traits below are
-    observed and synced to the JS widget for status indicators.
+    property. The MPS-specific traits below are observed and synced to the JS
+    widget for status indicators.
     """
 
     fast_interaction = traitlets.Bool(False).tag(sync=True)
@@ -47,6 +57,8 @@ class Show4DSTEMMPS(Show4DSTEM):
     fast_interaction_building = traitlets.Bool(False).tag(sync=True)
     radial_interaction_ready = traitlets.Bool(False).tag(sync=True)
     radial_interaction_building = traitlets.Bool(False).tag(sync=True)
+
+    # ----------------------------------------------------------------- setup
 
     def __init__(
         self,
@@ -128,7 +140,7 @@ class Show4DSTEMMPS(Show4DSTEM):
                 f"({shape}, Raw Metal, {mode})"
             )
 
-    # ----------------------------------------------------------------- multi_dataset
+    # ----------------------------------------------------------------- multi-dataset status
     # Lazy 5D multi-file proxy — the backend owns the underlying MultiChunkedFrames;
     # this widget only wires the n_frames trait + title to its on_ready callback.
 
@@ -181,7 +193,7 @@ class Show4DSTEMMPS(Show4DSTEM):
                 self._refresh_multi_title()
         return super()._on_frame_idx_change(change)
 
-    # ----------------------------------------------------------------- compute overrides
+    # ----------------------------------------------------------------- frame and detector compute
     # Frame access + masked_sum already route through self._compute in the parent,
     # so we only need to handle the ROI-specific virtual image (preset caching,
     # radial path, scan-position column fallback).
@@ -266,7 +278,7 @@ class Show4DSTEMMPS(Show4DSTEM):
                 self._compute_virtual_image_from_roi()
         return self
 
-    # ----------------------------------------------------------------- ROI -> VI dispatch
+    # ----------------------------------------------------------------- detector ROI -> virtual image
     def _set_virtual_image_bytes_np(self, vi: np.ndarray):
         arr = np.asarray(vi).reshape(self._scan_shape)
         arr = np.asarray(arr, dtype=np.float32, order="C")
@@ -351,7 +363,7 @@ class Show4DSTEMMPS(Show4DSTEM):
         if start_radial_background:
             self._kick_radial_background()
 
-    # ----------------------------------------------------------------- preset caching
+    # ----------------------------------------------------------------- detector-preset cache
     def _clear_virtual_image_caches(self):
         self._cached_bf_virtual = None
         self._cached_abf_virtual = None
@@ -411,7 +423,7 @@ class Show4DSTEMMPS(Show4DSTEM):
         for name, arr in cached.items():
             setattr(self, attr_map[name], arr.tobytes())
 
-    # ----------------------------------------------------------------- fast_sidecar lifecycle
+    # ----------------------------------------------------------------- fast-sidecar lifecycle
     def set_fast_interaction(self, enabled: bool = True, *, wait: bool = True):
         """Toggle bin2 fast interaction for BF/DF/ADF virtual images."""
         enabled = bool(enabled)
@@ -487,7 +499,7 @@ class Show4DSTEMMPS(Show4DSTEM):
             raise RuntimeError(self._fast_interaction_error)
         return bool(self.fast_interaction_ready)
 
-    # ----------------------------------------------------------------- radial_cache lifecycle
+    # ----------------------------------------------------------------- radial-cache lifecycle
     def _kick_radial_background(self):
         """Ask the backend to build the radial cache at the current ROI center."""
         b = self._compute
@@ -527,7 +539,7 @@ class Show4DSTEMMPS(Show4DSTEM):
             raise RuntimeError(b.radial_error)
         return bool(self.radial_interaction_ready)
 
-    # ----------------------------------------------------------------- ROI guards
+    # ----------------------------------------------------------------- ROI observer guards
     def _on_roi_change(self, change=None):
         if getattr(self, "_mps_initializing", False):
             return
@@ -538,7 +550,7 @@ class Show4DSTEMMPS(Show4DSTEM):
             return
         return super()._on_roi_center_change(change)
 
-    # ----------------------------------------------------------------- vi_roi DP (scan-ROI -> DP)
+    # ----------------------------------------------------------------- scan-ROI -> diffraction pattern
     def _clear_vi_roi_dp(self):
         if hasattr(self, "vi_roi_dp_bytes"):
             self.vi_roi_dp_bytes = b""
@@ -626,7 +638,7 @@ class Show4DSTEMMPS(Show4DSTEM):
 
 
 # =====================================================================
-# Public factories (kept for back-compat; preferred path is Show4DSTEM(load(...))).
+# Back-compat factories. Preferred path is ``Show4DSTEM(load(...))``.
 # =====================================================================
 
 def load_4dstem_mps(
@@ -641,6 +653,7 @@ def load_4dstem_mps(
     compact_target_gb: float = _DEFAULT_COMPACT_TARGET_BYTES / 1e9,
     auto_detect_frames: int | None = 64,
     initial_preset: str | None = "BF",
+    skip_mps_memory_check: bool | None = None,
     **kwargs,
 ):
     """Deprecated combo loader+viewer. Use ``Show4DSTEM(load(path, backend='mps'))``."""
@@ -665,6 +678,7 @@ def load_4dstem_mps(
         compact=compact,
         compact_target_gb=compact_target_gb,
         det_bin=det_bin,
+        skip_mps_memory_check=skip_mps_memory_check,
     )
     return _build_mps_viewer(
         data,
@@ -767,7 +781,7 @@ def Show4DSTEM_MACBOOK(
     units=None,
     **kwargs,
 ):
-    """Local MacBook raw-Metal 4D-STEM viewer (alias for show_4dstem_mps + auto-sampling)."""
+    """Build the raw-Metal backend viewer used by ``quantem.widget.Show4DSTEM``."""
     combined_meta = {}
     if hasattr(data, "metadata"):
         combined_meta.update(getattr(data, "metadata", {}) or {})
@@ -828,3 +842,11 @@ def Show4DSTEM_MACBOOK(
             parts.append(f"detector {float(det_sampling_mrad_per_px):.4g} mrad/px{source}")
         print(f"MacBook sampling: {', '.join(parts)}")
     return viewer
+
+
+__all__ = [
+    "Show4DSTEMMPS",
+    "Show4DSTEM_MACBOOK",
+    "show_4dstem_mps",
+    "load_4dstem_mps",
+]

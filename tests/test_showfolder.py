@@ -111,6 +111,27 @@ def test_show_folder_renders_master_only_folder_for_show4dstem(tmp_path: Path) -
     assert "4D-STEM master" in widget.browser.widget.children[0].value
 
 
+def test_show_folder_launches_data_transfer_without_copying(tmp_path: Path, monkeypatch) -> None:
+    import quantem.widget.io.hdf5 as hdf5
+    from quantem.widget import DataTransfer
+
+    (tmp_path / "scan_000_master.h5").write_bytes(b"master")
+    target = tmp_path / "target"
+    target.mkdir()
+
+    monkeypatch.setattr(hdf5, "disk_of", lambda path: "disk")
+    monkeypatch.setattr(hdf5, "is_master_ready", lambda path: True)
+
+    widget = ShowFolder(tmp_path, thumb=8, group_by="none")
+    transfer = widget.data_transfer([target])
+
+    assert isinstance(transfer, DataTransfer)
+    assert transfer.plan.source_root == str(tmp_path.resolve())
+    assert transfer.plan.target_roots == (str(target),)
+    assert [entry.logical_id for entry in transfer.plan.entries] == ["scan_000"]
+    assert not (target / "scan_000_master.h5").exists()
+
+
 def test_show_folder_watch_signature_tracks_4dstem_masters(tmp_path: Path) -> None:
     first_master = tmp_path / "scan_000_master.h5"
     first_master.touch()

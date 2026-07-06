@@ -73,6 +73,60 @@ def test_show3dslices_panel_width_px_syncs_to_frontend_state():
     assert widget.state_dict()["panel_width_px"] == 70
 
 
+def test_show3dslices_ui_mode_presets_and_scale_bar_alias():
+    data = np.zeros((4, 8, 8), dtype=np.float32)
+
+    presentation = Show3DSlices(data, ui_mode="presentation")
+    assert presentation.show_title is True
+    assert presentation.show_controls is True
+    assert presentation.controls_collapsed is True
+    assert presentation.show_stats is False
+    assert presentation.show_crosshair is True
+    assert presentation.scale_bar_visible is True
+
+    report = Show3DSlices(data, ui_mode="report")
+    assert report.show_title is True
+    assert report.show_controls is False
+    assert report.controls_collapsed is False
+    assert report.show_stats is False
+    assert report.show_crosshair is True
+    assert report.scale_bar_visible is True
+
+    minimal = Show3DSlices(data, ui_mode="minimal")
+    assert minimal.show_title is False
+    assert minimal.show_controls is False
+    assert minimal.controls_collapsed is False
+    assert minimal.show_stats is False
+    assert minimal.show_crosshair is False
+    assert minimal.scale_bar_visible is False
+
+    override = Show3DSlices(
+        data,
+        ui_mode="minimal",
+        show_title=True,
+        show_controls=True,
+        controls_collapsed=True,
+        show_stats=True,
+        show_crosshair=True,
+        show_scale_bar=True,
+    )
+    assert override.show_title is True
+    assert override.show_controls is True
+    assert override.controls_collapsed is True
+    assert override.show_stats is True
+    assert override.show_crosshair is True
+    assert override.scale_bar_visible is True
+    assert override.expand_controls() is override
+    assert override.controls_collapsed is False
+    assert override.collapse_controls() is override
+    assert override.controls_collapsed is True
+    assert override.toggle_controls() is override
+    assert override.controls_collapsed is False
+
+    with pytest.raises(ValueError, match="show_scale_bar"):
+        Show3DSlices(data, scale_bar_visible=True, show_scale_bar=False)
+
+
 def test_show4dstem_panel_width_px_syncs_to_frontend_state():
     data = np.zeros((2, 2, 8, 8), dtype=np.float32)
 

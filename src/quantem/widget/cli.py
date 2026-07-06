@@ -63,6 +63,8 @@ def main(argv: list[str] | None = None) -> int:
         "github", help="Make a widget notebook GitHub-displayable (strip offline state, snapshots to JPEG)."))
     _add_showfolder_args(sub.add_parser(
         "showfolder", help="Browse a microscopy folder with ShowFolder: inventory, thumbnails, and selection state."))
+    _add_data_transfer_args(sub.add_parser(
+        "data-transfer", help="Plan, inspect, and copy microscopy data layouts across folders/disks."))
     args = parser.parse_args(argv)
     try:
         if args.command == "html":
@@ -73,6 +75,8 @@ def main(argv: list[str] | None = None) -> int:
             return _prepare_github(args)
         if args.command == "showfolder":
             return _showfolder(args)
+        if args.command == "data-transfer":
+            return _data_transfer(args)
         if args.command not in forced:
             parser.print_help()
             return 0
@@ -109,6 +113,150 @@ def _add_showfolder_args(parser: argparse.ArgumentParser) -> None:
                         help="Grouped image display mode (default 'stack').")
     parser.add_argument("--timeout", type=int, default=900, help="Notebook execution timeout in seconds.")
     parser.add_argument("--no-open", action="store_true", help="Write outputs but do not launch/open them.")
+
+
+def _add_data_transfer_args(parser: argparse.ArgumentParser) -> None:
+    """Attach options for the ``data-transfer`` subcommand."""
+    parser.add_argument("action", choices=("plan", "inspect", "copy"),
+                        help="Plan a transfer, inspect a manifest, or copy from a manifest.")
+    parser.add_argument("source", nargs="?", help="Source folder or master path(s) for the plan action.")
+    parser.add_argument("targets", nargs="*", help="Target folder(s) for the plan action.")
+    parser.add_argument("--manifest", default=None,
+                        help="Manifest path. Plan writes it; inspect/copy read it.")
+    parser.add_argument("--pattern", default=MASTER_PATTERN, help="Master glob for planning.")
+    parser.add_argument("--strategy", default="balance-by-size",
+                        choices=("balance-by-size", "round-robin"),
+                        help="Target assignment strategy.")
+    parser.add_argument("--require-ready", action="store_true",
+                        help="Skip masters that do not pass readiness checks.")
+    parser.add_argument("--hash", dest="hash_algorithm", default=None,
+                        choices=("none", "sha256"),
+                        help="Include optional source hashes in the manifest.")
+    parser.add_argument("--verify", default="size",
+                        choices=("size", "none", "hash", "sha256"),
+                        help="Verification mode for inspect/copy.")
+    parser.add_argument("--execute", action="store_true",
+                        help="Actually copy files. Without this, copy is a dry-run.")
+    parser.add_argument("--overwrite", action="store_true",
+                        help="Overwrite existing targets after verification failure.")
+    parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+
+
+def _data_transfer(args: argparse.Namespace) -> int:
+    """Run data-transfer plan/inspect/copy commands."""
+    from dataclasses import asdict
+    from quantem.widget.io import (
+        copy_data_transfer,
+        inspect_data_transfer,
+        plan_data_transfer,
+        read_data_transfer_manifest,
+        summarize_data_transfer,
+        write_data_transfer_manifest,
+    )
+
+    if args.action == "plan":
+        if not args.source or not args.targets:
+            raise ValueError("data-transfer plan requires SOURCE and at least one TARGET.")
+        plan = plan_data_transfer(
+            pathlib.Path(args.source).expanduser(),
+            [pathlib.Path(target).expanduser() for target in args.targets],
+            pattern=args.pattern,
+            strategy=args.strategy,
+            require_ready=args.require_ready,
+            hash_algorithm=args.hash_algorithm,
+        )
+        manifest = pathlib.Path(args.manifest).expanduser() if args.manifest else (
+            pathlib.Path.cwd() / f"{plan.logical_name}_data_transfer.json"
+        )
+        write_data_transfer_manifest(plan, manifest)
+        states = inspect_data_transfer(plan, verify=args.verify)
+        summary = summarize_data_transfer(states)
+        if args.json:
+            print(json.dumps({"manifest": str(manifest), "plan": plan.to_dict(), "summary": asdict(summary)}, indent=2))
+        else:
+            print(f"manifest: {manifest}")
+            _print_data_transfer_plan(plan)
+            _print_data_transfer_summary(summary)
+        return 0
+
+    if not args.manifest:
+        raise ValueError(f"data-transfer {args.action} requires --manifest.")
+    plan = read_data_transfer_manifest(args.manifest)
+    if args.action == "inspect":
+        states = inspect_data_transfer(plan, verify=args.verify)
+        summary = summarize_data_transfer(states)
+        if args.json:
+            print(json.dumps({"summary": asdict(summary), "states": [asdict(state) for state in states]}, indent=2))
+        else:
+            _print_data_transfer_plan(plan)
+            _print_data_transfer_summary(summary)
+            _print_data_transfer_states(states)
+        return 0
+    if args.action == "copy":
+        results = copy_data_transfer(
+            plan,
+            dry_run=not args.execute,
+            verify=args.verify,
+            overwrite=args.overwrite,
+        )
+        states = inspect_data_transfer(plan, verify=args.verify)
+        summary = summarize_data_transfer(states)
+        if args.json:
+            print(json.dumps({
+                "executed": bool(args.execute),
+                "results": [asdict(result) for result in results],
+                "summary": asdict(summary),
+            }, indent=2))
+        else:
+            print("copy executed" if args.execute else "copy dry-run")
+            _print_data_transfer_results(results)
+            _print_data_transfer_summary(summary)
+        return 0
+    raise ValueError(f"unknown data-transfer action: {args.action}")
+
+
+def _print_data_transfer_plan(plan) -> None:
+    print(
+        f"plan: {plan.logical_name}  groups={len(plan.entries)}  "
+        f"files={sum(len(entry.files) for entry in plan.entries)}  "
+        f"bytes={_fmt_bytes(plan.total_bytes)}"
+    )
+    for target, size in plan.totals_by_target.items():
+        print(f"  target {target}: {_fmt_bytes(size)}")
+    if plan.skipped:
+        print(f"  skipped not-ready groups: {len(plan.skipped)}")
+
+
+def _print_data_transfer_summary(summary) -> None:
+    counts = ", ".join(f"{key}={value}" for key, value in sorted(summary.status_counts.items()))
+    print(
+        f"state: {counts or 'no files'}  "
+        f"complete={_fmt_bytes(summary.complete_bytes)} / {_fmt_bytes(summary.total_bytes)}  "
+        f"problems={summary.problem_files}"
+    )
+
+
+def _print_data_transfer_states(states) -> None:
+    for state in states[:80]:
+        print(f"  {state.status:14s} {_fmt_bytes(state.size_bytes):>9s} {state.target}")
+    if len(states) > 80:
+        print(f"  ... {len(states) - 80} more files")
+
+
+def _print_data_transfer_results(results) -> None:
+    for result in results[:80]:
+        print(f"  {result.status:8s} {_fmt_bytes(result.size_bytes):>9s} {result.target}")
+    if len(results) > 80:
+        print(f"  ... {len(results) - 80} more files")
+
+
+def _fmt_bytes(value: int) -> str:
+    size = float(value)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if abs(size) < 1000 or unit == "TB":
+            return f"{size:.1f} {unit}" if unit != "B" else f"{int(size)} B"
+        size /= 1000.0
+    return f"{size:.1f} TB"
 
 
 def _showfolder(args: argparse.Namespace) -> int:

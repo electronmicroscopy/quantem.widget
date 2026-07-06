@@ -21,6 +21,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import os
 import time
+import warnings
 import Metal
 import h5py
 import hdf5plugin  # noqa: F401 - registers bitshuffle filter
@@ -129,6 +130,9 @@ _master_plan_cache: dict[tuple[str, int, int], MPSMasterPlan] = {}
 _chunk_read_plan_cache: dict[tuple[str, int, int], _ChunkReadPlan] = {}
 _cached_dec = None
 _cached_dec_key = None
+_MPS_SAFE_WORKING_SET_FRACTION = 0.70
+_MPS_WARN_WORKING_SET_FRACTION = 0.50
+_MPS_SKIP_MEMORY_CHECK_ENV = "QUANTEM_WIDGET_MPS_SKIP_MEMORY_CHECK"
 
 
 def _file_cache_key(path: str) -> tuple[str, int, int]:
@@ -154,6 +158,135 @@ def clear_mps_cache() -> None:
     global _cached_dec, _cached_dec_key
     _cached_dec = None
     _cached_dec_key = None
+
+
+def _format_gib(nbytes: int | float | None) -> str:
+    if nbytes is None:
+        return "unknown"
+    return f"{float(nbytes) / (1 << 30):.1f} GiB"
+
+
+def _mps_recommended_working_set_bytes() -> int | None:
+    fn = getattr(_device, "recommendedMaxWorkingSetSize", None)
+    if not callable(fn):
+        return None
+    try:
+        value = int(fn())
+    except Exception:
+        return None
+    return value if value > 0 else None
+
+
+def _mps_max_buffer_bytes() -> int | None:
+    fn = getattr(_device, "maxBufferLength", None)
+    if not callable(fn):
+        return None
+    try:
+        value = int(fn())
+    except Exception:
+        return None
+    return value if value > 0 else None
+
+
+def _mps_output_bytes(plan: MPSMasterPlan, det_bin: int) -> int:
+    det_bin = int(det_bin)
+    if det_bin < 1:
+        raise ValueError("det_bin must be >= 1.")
+    det_row, det_col = (int(x) for x in plan.detector_shape)
+    if det_row % det_bin or det_col % det_bin:
+        raise ValueError(
+            f"Detector dims {(det_row, det_col)} are not divisible by det_bin={det_bin}."
+        )
+    return (
+        int(plan.total_frames)
+        * (det_row // det_bin)
+        * (det_col // det_bin)
+        * int(plan.dtype.itemsize)
+    )
+
+
+def _mps_recommended_det_bin(plan: MPSMasterPlan, limit_bytes: int) -> tuple[int, int] | None:
+    for factor in (2, 4, 8, 16):
+        det_row, det_col = (int(x) for x in plan.detector_shape)
+        if det_row % factor or det_col % factor:
+            continue
+        output_bytes = _mps_output_bytes(plan, factor)
+        if output_bytes <= int(limit_bytes):
+            return factor, output_bytes
+    return None
+
+
+def _mps_skip_memory_check_requested(skip_memory_check: bool | None) -> bool:
+    if skip_memory_check is not None:
+        return bool(skip_memory_check)
+    value = os.environ.get(_MPS_SKIP_MEMORY_CHECK_ENV, "")
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _check_mps_memory_guard(
+    plan: MPSMasterPlan,
+    *,
+    det_bin: int,
+    skip_memory_check: bool | None = None,
+) -> None:
+    """Fail early before an MPS load can pressure unified memory.
+
+    The guard is intentionally metadata-only: it runs before Metal output
+    buffers are allocated. It never silently changes ``det_bin`` because binning
+    changes the data; instead it recommends the smallest safer bin factor.
+    """
+    det_bin = int(det_bin)
+    recommended = _mps_recommended_working_set_bytes()
+    if recommended is None:
+        return
+    output_bytes = _mps_output_bytes(plan, det_bin)
+    safe_limit = int(recommended * _MPS_SAFE_WORKING_SET_FRACTION)
+    warn_limit = int(recommended * _MPS_WARN_WORKING_SET_FRACTION)
+    max_buffer = _mps_max_buffer_bytes()
+    hard_limit = safe_limit
+    if det_bin > 1 and max_buffer is not None:
+        # The binned MPS path uses one output Metal buffer, so maxBufferLength is
+        # a hard per-allocation cap in addition to total unified-memory pressure.
+        hard_limit = min(hard_limit, int(max_buffer * 0.95))
+
+    if output_bytes <= warn_limit:
+        return
+
+    recommendation = _mps_recommended_det_bin(plan, hard_limit)
+    if recommendation is None:
+        rec_text = "Use a larger det_bin or load a smaller scan region."
+    else:
+        rec_bin, rec_bytes = recommendation
+        rec_text = (
+            f"Use det_bin={rec_bin} "
+            f"(estimated output {_format_gib(rec_bytes)}) for browsing."
+        )
+    message = (
+        "MPS load memory check: "
+        f"det_bin={det_bin} would materialize {_format_gib(output_bytes)} "
+        f"for {os.path.basename(plan.master_path)}. This Mac reports a Metal "
+        f"recommended working set of {_format_gib(recommended)}; quantem.widget "
+        f"uses a conservative {_MPS_SAFE_WORKING_SET_FRACTION:.0%} limit "
+        f"({_format_gib(safe_limit)}) to avoid freezing the laptop. {rec_text} "
+        "MPS is still selected automatically; only the large allocation is blocked."
+    )
+    if output_bytes <= hard_limit:
+        warnings.warn(message, RuntimeWarning, stacklevel=3)
+        return
+
+    if _mps_skip_memory_check_requested(skip_memory_check):
+        warnings.warn(
+            message
+            + f" Proceeding because skip_mps_memory_check=True or {_MPS_SKIP_MEMORY_CHECK_ENV}=1.",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+        return
+    raise MemoryError(
+        message
+        + " To bypass this memory check and force the no-bin/large MPS load, pass "
+        "skip_mps_memory_check=True or set QUANTEM_WIDGET_MPS_SKIP_MEMORY_CHECK=1."
+    )
 
 
 def _get_cached_decompressor(frame_bytes: int, max_frames: int) -> "MPSDecompressor":
@@ -1556,6 +1689,7 @@ def load_mps_4dstem(
     row_prefix: bool = False,
     det_bin: int = 1,
     fast_det_bin: int | None = None,
+    skip_mps_memory_check: bool | None = None,
 ) -> MPSChunked4DSTEM:
     """Load full no-bin Arina data as zero-copy MPS chunks for viewing.
 
@@ -1586,6 +1720,11 @@ def load_mps_4dstem(
         fast_det_bin = int(fast_det_bin)
         if fast_det_bin <= 1:
             fast_det_bin = None
+    _check_mps_memory_guard(
+        plan,
+        det_bin=det_bin,
+        skip_memory_check=skip_mps_memory_check,
+    )
     target_bytes = int(float(compact_target_gb) * 1e9) if compact else None
     if verbose:
         layout = (

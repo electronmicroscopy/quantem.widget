@@ -22,8 +22,9 @@ change needs them.
 | --- | --- | --- | --- | --- |
 | `scripts/widget_local_signoff.sh` | The repository is generally ready. | Size guards, frontend build, Python tests, HTML export smoke, optional browser/mobile/performance gates. | Default before saying a widget change is ready; `--quick --browser --mobile` for exported UI work. | Top-level `index.html` report under `/tmp/quantem-widget-local-signoff/...` or `--artifact-dir`. |
 | `.github/workflows/widget-ci.yml` | CI can repeat the normal local signoff on clean Linux. | Same default local signoff path: build, tests, export smoke, docs build when not quick. | Automatically on PRs and pushes touching widget code/docs/tests. | GitHub Actions logs. |
-| `scripts/widget_html_smoke.py` | Every export-capable widget can write standalone HTML with state. | `export_html()`, expected markers, file size, widget coverage matrix, browser-drive plan. | CI/default signoff; update when a widget gains or changes HTML export. | `index.html`, `report.json`, `browser-plan.json`, exported widget HTML files. |
+| `scripts/widget_html_smoke.py` | Every export-capable widget can write standalone HTML with state. | `export_html()`, expected markers, file size, widget coverage matrix, browser-drive plan, small MoS2-like Show2D/Show3D lattice examples for meaningful visual review. | CI/default signoff; update when a widget gains or changes HTML export. | `index.html`, `report.json`, `browser-plan.json`, exported widget HTML files. |
 | `scripts/widget_showfolder_live_smoke.py` | ShowFolder live-folder handoff stays centralized and functional. | Adds image files and `*_master.h5` markers, calls `watch_once()`, verifies active Show2D/Show3D/Show4DSTEM refresh, writes reviewable exports. | CI/default signoff; update when ShowFolder watcher or selection handoff changes. | `showfolder-live/index.html`, `showfolder-live/report.json`, final ShowFolder/Show2D/Show3D/Show4DSTEM exports. |
+| `scripts/widget_show3d_animation_smoke.py` | Show3D GIF exports are presentation-ready. | Dry-run size plan, multi-panel low/medium/high GIF previews, panel-gap control, live-style labels, scale bar, zoom readout, export seconds, file sizes, dimensions, frame count, frame-delta metric, optional local Caitlyn time-series source. | When GIF/MP4 animation export, PowerPoint sharing, or Show3D movie quality changes. | `index.html`, `report.json`, `show3d-caitlyn-timeseries-*.gif` unless `--dry-run`. |
 | `scripts/widget_browser_smoke.py` | Exported HTML actually renders and responds in Chromium. | Nonblank canvases, wheel/drag interaction, switches, sliders, console/page/HTTP errors, `requestAnimationFrame` FPS, FFT state, storyboard IDs, optional mobile viewport. | `scripts/widget_local_signoff.sh --quick --browser`; add `--mobile` for narrow/touch layout changes. | `browser-smoke.html`, `browser-smoke-report.json`, screenshots. |
 | `scripts/widget_performance_smoke.py` | Backend export packing and small real-data Show2D/Show3D payloads are measurable. | Real-data discovery, export time, output size, browser-drive plan. | `--performance` signoff or when checking export size/time trends. | `index.html`, `report.json`, `browser-plan.json`, exported real-data HTML. |
 | `scripts/widget_heavy_perf_signoff.py` | Heavy Show2D/Show3D real-data browser performance is acceptable on lab data. | Local real-data discovery, heavy exports, browser FPS, nonblank render, screenshots, Show3D FFT overlay idle-cache guard. | Local-only HPC/workstation performance claims; never normal CI. | `index.html`, `heavy-signoff-report.json`, `browser-smoke-report.json`, screenshots under `/tmp`. |
@@ -178,6 +179,16 @@ Show4DSTEM and ShowEDS:
   available. Reports must state the per-master bytes, maximum loaded count,
   devices used, append failure if any, and cleanup result. Do not replace this
   with MPS when the requested backend is NVIDIA/CUDA.
+- U8 no-bin browse timing and full Show4DSTEM UI signoff are different claims.
+  It is valid to benchmark the direct HDF5 loader with
+  `scripts/widget_load_bench_matrix.py` or
+  `scripts/widget_load_bench_sharded.py`, but a release claim still needs the
+  real Show4DSTEM widget/export/browser path. If `import quantem.widget` fails
+  in the workstation environment, report the UI gate as blocked even when the
+  direct HDF5 loader benchmarks pass.
+- Multi-disk loading must be proven on a real multi-disk layout. A report where
+  `group_by_disk(masters)` is `{'nvme2n1': N}` validates GPU sharding and
+  capacity, but it does not validate aggregate disk bandwidth.
 - Browser interaction should not require a Python round trip during drag unless
   the report calls out the limitation.
 - WebGPU/MPS/CUDA usage must be recorded by surface: browser WebGPU is not the

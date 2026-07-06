@@ -122,6 +122,7 @@ def test_automation_documentation_names_entrypoints() -> None:
         "scripts/cleanup_browser_artifacts.py",
         "scripts/widget_html_smoke.py",
         "scripts/widget_showfolder_live_smoke.py",
+        "scripts/widget_show3d_animation_smoke.py",
         "scripts/widget_browser_smoke.py",
         "scripts/widget_phone_handoff.py",
         "scripts/widget_performance_smoke.py",
@@ -137,6 +138,11 @@ def test_automation_documentation_names_entrypoints() -> None:
         "browser-plan.json",
         "showfolder-live/index.html",
         "ShowFolder live-folder smoke",
+        "Show3D GIF presentation smoke",
+        "--dry-run",
+        "--panel-gap",
+        "--no-panel-labels",
+        "--max-work-mb",
         "browser-smoke.html",
         "--mobile",
         "--min-fps",
@@ -216,6 +222,13 @@ def test_real_data_loader_benchmark_scripts_are_documented_as_local_only() -> No
         assert "private real" in result.stdout
         assert "masters-glob" in result.stdout
         assert "/tmp/quantem-widget-load-bench" in normalized
+
+
+def test_sharded_loader_benchmark_exercises_public_u8_api() -> None:
+    script = (ROOT / "scripts/widget_load_bench_sharded.py").read_text(encoding="utf-8")
+
+    assert 'kwargs["dtype"] = "u8"' in script
+    assert 'kwargs["output_dtype"]' not in script
 
 
 def test_signoff_dashboard_summarizes_available_reports(tmp_path: Path) -> None:
@@ -389,6 +402,7 @@ def test_widget_html_smoke_writes_visual_report(tmp_path: Path) -> None:
     assert "show2d-gallery-6-fft.html" in index
     assert "show3d-four-panel-downsample.html" in index
     assert "showfolder.html" in index
+    assert "synthetic MoS2-like HAADF lattice" in index
     assert {page["widget"] for page in plan["pages"]} == {
         "show2d",
         "show3d",
@@ -434,6 +448,129 @@ def test_widget_showfolder_live_smoke_writes_report(tmp_path: Path) -> None:
     assert (artifact_dir / "showfolder-live-show2d.html").exists()
     assert (artifact_dir / "showfolder-live-show3d.html").exists()
     assert (artifact_dir / "showfolder-live-show4dstem.html").exists()
+
+
+def test_widget_show3d_animation_smoke_writes_gif_report(tmp_path: Path) -> None:
+    artifact_dir = tmp_path / "show3d-gif"
+
+    result = _run(
+        sys.executable,
+        "scripts/widget_show3d_animation_smoke.py",
+        "--artifact-dir",
+        str(artifact_dir),
+        "--source",
+        "synthetic",
+        "--crop-size",
+        "64",
+        "--frames",
+        "5",
+        "--fps",
+        "5",
+        "--qualities",
+        "low",
+        "medium",
+        "--max-total-mb",
+        "5",
+    )
+
+    assert result.returncode == 0, result.stdout
+    report = json.loads((artifact_dir / "report.json").read_text(encoding="utf-8"))
+    index = (artifact_dir / "index.html").read_text(encoding="utf-8")
+
+    assert report["source"]["kind"] == "synthetic CI fallback"
+    assert report["input_shape"] == [5, 64, 64]
+    assert report["panels"] == ["Raw", "Smoothed", "Change"]
+    assert report["panel_gap"] == 10
+    assert report["panel_labels"] is True
+    assert report["scale_bar"] == {"visible": True, "sampling_nm": 0.05}
+    assert report["zoom_indicator"] is True
+    assert report["playback"] == "bounce"
+    assert report["frame_labels"] is True
+    assert [item["quality"] for item in report["exports"]] == ["low", "medium"]
+    assert all(item["n_frames"] == 8 for item in report["exports"])
+    assert all(item["mean_abs_delta"] > 0 for item in report["exports"])
+    assert all(item["width"] > item["height"] for item in report["exports"])
+    for item in report["exports"]:
+        assert (artifact_dir / Path(item["path"]).name).exists()
+    assert "Show3D GIF presentation smoke" in index
+    assert "Raw, Smoothed, Change" in index
+    assert "PowerPoint" in index
+    assert "<img" in index
+
+
+def test_widget_show3d_animation_smoke_supports_zero_panel_gap(tmp_path: Path) -> None:
+    artifact_dir = tmp_path / "show3d-gif-zero-gap"
+
+    result = _run(
+        sys.executable,
+        "scripts/widget_show3d_animation_smoke.py",
+        "--artifact-dir",
+        str(artifact_dir),
+        "--source",
+        "synthetic",
+        "--crop-size",
+        "64",
+        "--frames",
+        "4",
+        "--qualities",
+        "high",
+        "--panel-gap",
+        "0",
+        "--no-frame-labels",
+        "--max-total-mb",
+        "5",
+    )
+
+    assert result.returncode == 0, result.stdout
+    report = json.loads((artifact_dir / "report.json").read_text(encoding="utf-8"))
+    index = (artifact_dir / "index.html").read_text(encoding="utf-8")
+
+    assert report["panel_gap"] == 0
+    assert report["frame_labels"] is False
+    assert report["planned_exports"][0]["width"] == 64 * 3
+    assert report["planned_exports"][0]["height"] == 64
+    assert report["exports"][0]["width"] == 64 * 3
+    assert report["exports"][0]["height"] == 64
+    assert "Panel gap: 0 px" in index
+    assert "frame labels: off" in index
+
+
+def test_widget_show3d_animation_smoke_dry_run_reports_size_plan(tmp_path: Path) -> None:
+    artifact_dir = tmp_path / "show3d-gif-dry-run"
+
+    result = _run(
+        sys.executable,
+        "scripts/widget_show3d_animation_smoke.py",
+        "--artifact-dir",
+        str(artifact_dir),
+        "--source",
+        "synthetic",
+        "--crop-size",
+        "64",
+        "--frames",
+        "5",
+        "--qualities",
+        "low",
+        "high",
+        "--dry-run",
+        "--max-work-mb",
+        "0.001",
+    )
+
+    assert result.returncode == 0, result.stdout
+    report = json.loads((artifact_dir / "report.json").read_text(encoding="utf-8"))
+    index = (artifact_dir / "index.html").read_text(encoding="utf-8")
+
+    assert report["dry_run"] is True
+    assert report["exports"] == []
+    assert [item["quality"] for item in report["planned_exports"]] == ["low", "high"]
+    assert report["dry_run_decision"]["should_run"] is False
+    assert report["dry_run_decision"]["total_uncompressed_rgb_mb"] > 0
+    assert not list(artifact_dir.glob("*.gif"))
+    assert "Show3D GIF presentation dry run" in index
+    assert "Uncompressed RGB MB" in index
+    assert "Dry run only" in index
+    assert "<img" not in index
 
 
 def test_widget_performance_smoke_writes_browser_plan(tmp_path: Path) -> None:

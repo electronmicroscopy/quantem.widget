@@ -46,6 +46,7 @@ from quantem.widget.utils.state_io import (
     unwrap_state_payload,
 )
 from quantem.widget.utils.static_fallback import StaticFallbackMixin
+from quantem.widget.utils.ui import UiMode, resolve_ui_mode
 
 try:
     import torch
@@ -485,6 +486,26 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
         Draw the bottom-right scale bar. When ``pixel_size`` is provided the
         label uses physical units; otherwise it shows pixel units. Set
         ``False`` for GIF/video exports or uncluttered figure captures.
+    show_controls : bool, default True
+        Show the live control UI. Set ``False`` for a permanently clean display.
+    controls_collapsed : bool, default False
+        Start with the live control UI collapsed behind a small GUI toggle.
+        Unlike ``show_controls=False``, users can expand the controls in the
+        frontend and Python can call ``expand_controls()`` later.
+    save_state : bool, default False
+        When False, saved notebooks omit heavy stack buffers and keep a compact
+        static preview for cold reopen. Set True only for small widgets that
+        must reopen interactively without rerunning the kernel.
+    notebook_preview_format : {"jpeg", "webp", "png"} or None, default "jpeg"
+        Static preview format used when ``save_state=False``. ``"jpeg"`` is the
+        most portable notebook default, ``"webp"`` is smaller for local/report
+        workflows, ``"png"`` is lossless but larger, and ``None`` disables the
+        preview.
+    notebook_preview_quality : int, default 88
+        Lossy preview quality for JPEG/WebP, from 1 to 100. Ignored for PNG.
+    notebook_preview_max_px : int, default 512
+        Longest panel side for the saved-notebook preview. Lower values make
+        notebooks smaller; higher values make the static fallback sharper.
     Attributes
     ----------
     render_total_ms : int or None
@@ -562,6 +583,7 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
     # Decoupled from `offline` (which selects uint8 vs float data packing).
     _export_light = traitlets.Bool(False).tag(sync=True)
     _static_fallback_jpeg = traitlets.Unicode("").tag(sync=True)
+    _static_fallback_mime = traitlets.Unicode("image/jpeg").tag(sync=True)
     _offline_stack = traitlets.Bytes(b"").tag(sync=True)
     _offline_float_stack = traitlets.Bytes(b"").tag(sync=True)
     _offline_min = traitlets.Float(0.0).tag(sync=True)
@@ -576,6 +598,9 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
     export_payload = traitlets.Bytes(b"").tag(sync=True)
     export_payload_id = traitlets.Unicode("").tag(sync=True)
     export_filename = traitlets.Unicode("").tag(sync=True)
+    handoff_request = traitlets.Unicode("").tag(sync=True)
+    handoff_status = traitlets.Unicode("").tag(sync=True)
+    handoff_enabled = traitlets.Bool(True).tag(sync=True)
     # Flipped True by JS after the first colormap pass has painted to canvas.
     # Drives the truthful timing print (end-to-end, not __init__-only).
     _js_rendered = traitlets.Bool(False).tag(sync=True)
@@ -585,6 +610,7 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
     panel_frame_metadata = traitlets.List(default_value=[]).tag(sync=True)
     frame_label_format = traitlets.Unicode("").tag(sync=True)
     title = traitlets.Unicode("").tag(sync=True)
+    show_title = traitlets.Bool(True).tag(sync=True)
     cmap = traitlets.Unicode("plasma").tag(sync=True)
     dim_label = traitlets.Unicode("Frame").tag(sync=True)
     dim_sampling = traitlets.Float(1.0).tag(sync=True)
@@ -651,6 +677,7 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
     # Statistics Panel
     # =========================================================================
     show_controls = traitlets.Bool(True).tag(sync=True)
+    controls_collapsed = traitlets.Bool(False).tag(sync=True)
     show_stats = traitlets.Bool(False).tag(sync=True)
     stats_mean = traitlets.Float(0.0).tag(sync=True)
     stats_min = traitlets.Float(0.0).tag(sync=True)
@@ -1229,6 +1256,8 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
         panel_real_frames: list[int] | None = None,
         hidden_panels: Sequence[int | str] | int | str | None = None,
         title: str = "",
+        ui_mode: UiMode = "interactive",
+        show_title: bool | None = None,
         cmap: str | Colormap = Colormap.PLASMA,
         vmin: float | None = None,
         vmax: float | None = None,
@@ -1253,7 +1282,8 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
         fft_overlay_zoom: float = 1.0,
         fft_window: bool = True,
         show_stats: bool | None = None,
-        show_controls: bool = True,
+        show_controls: bool | None = None,
+        controls_collapsed: bool | None = None,
         size: int = 0,
         panel_width_px: int = 0,
         crop: int | tuple[int, int] | tuple[int, int, int, int] = 0,
@@ -1273,6 +1303,9 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
         offline: bool | None = None,
         state=None,
         save_state: bool = False,
+        notebook_preview_format: str | None = "jpeg",
+        notebook_preview_quality: int = 88,
+        notebook_preview_max_px: int = 512,
         verbose: bool = True,
         max_cols: int | None = None,
         panel_gap: int | None = None,
@@ -1284,20 +1317,56 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
         dedupe_identical_panels: bool = False,
         **kwargs,
     ):
+        scale_bar_visible = kwargs.pop("scale_bar_visible", None)
+        if (
+            scale_bar_visible is not None
+            and show_scale_bar is not None
+            and bool(scale_bar_visible) != bool(show_scale_bar)
+        ):
+            raise ValueError("Use either show_scale_bar or scale_bar_visible, not conflicting values")
+        ui = resolve_ui_mode(
+            ui_mode,
+            defaults={
+                "show_title": True,
+                "show_controls": True,
+                "controls_collapsed": False,
+                "show_stats": False,
+                "show_panel_titles": True,
+                "show_resize_handles": True,
+                "show_zoom_indicator": True,
+                "show_scale_bar": True,
+            },
+            overrides={
+                "show_title": show_title,
+                "show_controls": show_controls,
+                "controls_collapsed": controls_collapsed,
+                "show_stats": show_stats,
+                "show_panel_titles": show_panel_titles,
+                "show_resize_handles": show_resize_handles,
+                "show_zoom_indicator": show_zoom_indicator,
+                "show_scale_bar": scale_bar_visible if scale_bar_visible is not None else show_scale_bar,
+            },
+        )
+        show_title = bool(ui["show_title"])
+        show_controls = bool(ui["show_controls"])
+        controls_collapsed = bool(ui["controls_collapsed"])
+        show_stats = bool(ui["show_stats"])
+        show_panel_titles = bool(ui["show_panel_titles"])
+        show_resize_handles = bool(ui["show_resize_handles"])
+        show_zoom_indicator = bool(ui["show_zoom_indicator"])
+        show_scale_bar = bool(ui["show_scale_bar"])
         if hideable:
             kwargs["hideable"] = True
+        kwargs["show_title"] = show_title
         if max_cols is not None:
             kwargs["max_cols"] = int(max_cols)
         if panel_gap is not None:
             kwargs["panel_gap"] = int(panel_gap)
         if panel_title_font_size is not None:
             kwargs["panel_title_font_size"] = int(panel_title_font_size)
-        if show_panel_titles is not None:
-            kwargs["show_panel_titles"] = bool(show_panel_titles)
-        if show_resize_handles is not None:
-            kwargs["show_resize_handles"] = bool(show_resize_handles)
-        if show_zoom_indicator is not None:
-            kwargs["show_zoom_indicator"] = bool(show_zoom_indicator)
+        kwargs["show_panel_titles"] = show_panel_titles
+        kwargs["show_resize_handles"] = show_resize_handles
+        kwargs["show_zoom_indicator"] = show_zoom_indicator
         fft_layout = str(fft_layout).lower()
         if fft_layout not in {"bottom", "right", "overlay"}:
             raise ValueError(
@@ -1320,8 +1389,7 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
             raise ValueError(f"fft_overlay_zoom must be finite, got {fft_overlay_zoom}")
         if not 1.0 <= fft_overlay_zoom <= 32.0:
             raise ValueError(f"fft_overlay_zoom must be in [1.0, 32.0], got {fft_overlay_zoom}")
-        if show_scale_bar is not None:
-            kwargs["scale_bar_visible"] = bool(show_scale_bar)
+        kwargs["scale_bar_visible"] = show_scale_bar
         self._verbose = bool(verbose)
         panel_width_px = int(panel_width_px)
         if panel_width_px < 0:
@@ -1353,12 +1421,19 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
         _reject_unknown_kwargs(type(self), kwargs)
         # save_state controls whether the heavy pixel buffers are persisted into
         # the notebook's metadata.widgets on save. Default False: a plain display
-        # embeds only light traits + a static PNG, so a large z-stack does not
-        # bake hundreds of MB into the .ipynb. Set True to persist full
-        # interactive state so a reopened notebook restores the widget without a
-        # kernel.
+        # embeds only light traits + a static image preview, so a large z-stack
+        # does not bake hundreds of MB into the .ipynb. Set True to persist
+        # full interactive state so a reopened notebook restores the widget
+        # without a kernel.
         self._save_state = bool(save_state)
+        self.prepared_view = None
+        self._configure_static_fallback(
+            notebook_preview_format=notebook_preview_format,
+            notebook_preview_quality=notebook_preview_quality,
+            notebook_preview_max_px=notebook_preview_max_px,
+        )
         super().__init__(**kwargs)
+        self._static_fallback_mime = self._static_fallback_mime_type()
         # hold_sync() batches ALL traitlet assignments into a single comm message
         # sent when the context manager exits.  Without this, each self.x = y
         # fires a separate round-trip over the ZMQ/websocket channel, which
@@ -1388,6 +1463,7 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
                             fft_overlay_zoom=fft_overlay_zoom,
                             fft_window=fft_window,
                             show_stats=show_stats, show_controls=show_controls,
+                            controls_collapsed=controls_collapsed,
                             size=size, crop=crop, padding=padding, pad_mode=pad_mode,
                             config=config, rotation_deg=rotation_deg,
                             post_crop=post_crop,
@@ -1418,6 +1494,7 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
                    fft_overlay_position: str, fft_overlay_size: float,
                    fft_overlay_zoom: float, fft_window: bool,
                    show_stats: bool | None, show_controls: bool,
+                   controls_collapsed: bool,
                    size: int, crop: int | tuple[int, int] | tuple[int, int, int, int],
                    padding: int | tuple[int, int], pad_mode: str,
                    config, rotation_deg, post_crop, apply_config_transforms: bool,
@@ -1891,6 +1968,7 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
         # and exported HTML, especially on phones.
         self.show_stats = False if show_stats is None else bool(show_stats)
         self.show_controls = show_controls
+        self.controls_collapsed = bool(controls_collapsed)
         self.size = size
         frame_bytes = self.height * self.width * 4  # float32
         # Exact float32 sliding window. Do not ship the whole stack when it
@@ -1968,6 +2046,7 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
         self.observe(self._on_prefetch, names=["_prefetch_request"])
         self.observe(self._on_diff_mode_change, names=["diff_mode"])
         self.observe(self._on_export_request_change, names=["export_request"])
+        self.observe(self._on_handoff_request_change, names=["handoff_request"])
 
         self._start_frame_server()
 
@@ -1994,6 +2073,124 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
 
 
     # === Public API ===
+
+    def to_show2d(
+        self,
+        frame: int | None = None,
+        panel: Sequence[int | str] | int | str | None = None,
+        *,
+        title: str | None = None,
+        copy: bool = True,
+        include_hidden: bool = False,
+    ):
+        """Create a ``Show2D`` view from the current Show3D frame.
+
+        By default this converts the current frame for all visible panels. Pass
+        ``panel=...`` to choose a panel by index or title. Hidden panels are
+        skipped unless ``include_hidden=True``.
+        """
+        from quantem.widget.show2d import Show2D
+
+        idx = int(self.slice_idx if frame is None else frame)
+        if not 0 <= idx < int(self.n_slices):
+            raise ValueError(f"frame index {idx} out of range [0, {self.n_slices})")
+
+        if panel is None:
+            panel_indices = list(range(int(self.n_panels))) if include_hidden else self.visible_panels
+        else:
+            panel_indices = self._normalize_panel_refs(panel)
+            if not include_hidden:
+                hidden = set(int(i) for i in self.hidden_panels)
+                panel_indices = [p for p in panel_indices if p not in hidden]
+        if not panel_indices:
+            raise ValueError("Show3D.to_show2d() needs at least one visible panel")
+
+        frames = [np.asarray(self._get_display_panel_frame(p, idx), dtype=np.float32) for p in panel_indices]
+        if copy:
+            frames = [np.array(frame_arr, copy=True) for frame_arr in frames]
+        labels = [self._static_panel_title(p, idx) for p in panel_indices]
+
+        vmin = None
+        vmax = None
+        if any(v is not None for v in self.vmin_per_panel):
+            vmin = [self.vmin_per_panel[p] if p < len(self.vmin_per_panel) else None for p in panel_indices]
+        elif self.vmin is not None:
+            vmin = self.vmin
+        if any(v is not None for v in self.vmax_per_panel):
+            vmax = [self.vmax_per_panel[p] if p < len(self.vmax_per_panel) else None for p in panel_indices]
+        elif self.vmax is not None:
+            vmax = self.vmax
+
+        return Show2D(
+            frames,
+            labels=labels,
+            title=title if title is not None else self.title,
+            cmap=self.cmap,
+            sampling=self.pixel_size if self.pixel_size > 0 else None,
+            units=self.pixel_unit,
+            scale_bar_visible=self.scale_bar_visible,
+            show_fft=False,
+            show_controls=self.show_controls,
+            controls_collapsed=self.controls_collapsed,
+            show_stats=self.show_stats,
+            verbose=False,
+            log_scale=self.log_scale,
+            auto_contrast=self.auto_contrast,
+            vmin=vmin,
+            vmax=vmax,
+            ncols=max(1, min(int(self.max_cols) if int(self.max_cols) > 0 else len(frames), len(frames))),
+            size=int(self.size or 0),
+            smooth=self.smooth,
+            link_zoom=self.link_panels,
+            link_pan=self.link_panels,
+            link_contrast=self.link_contrast,
+            display_bin=1,
+            show_panel_titles=self.show_panel_titles,
+            panel_title_font_size=int(self.panel_title_font_size or 11),
+            gallery_gap_px=max(0, int(self.panel_gap)),
+            save_state=False,
+        )
+
+    def _on_handoff_request_change(self, change: dict) -> None:
+        """Build a Python-side prepared view from a frontend toolbar request."""
+        raw = change.get("new") or ""
+        if not raw:
+            return
+        try:
+            request = json.loads(raw)
+            mode = str(request.get("mode", "show2d")).lower()
+            if mode == "clear":
+                self.handoff_status = ""
+                return
+            if mode != "show2d":
+                raise ValueError(f"unsupported handoff mode {mode!r}")
+            self.prepared_view = self.to_show2d(
+                frame=request.get("frame", None),
+                panel=request.get("panel", None),
+            )
+            n_images = int(getattr(self.prepared_view, "n_images", 0))
+            self.handoff_status = f"Ready: 2D with {n_images} panel{'s' if n_images != 1 else ''}"
+        except Exception as exc:  # pragma: no cover - defensive comm boundary
+            self.prepared_view = None
+            self.handoff_status = f"Handoff failed: {exc}"
+
+    def show_prepared_view(self) -> Any:
+        """Display and return the widget prepared by the toolbar View menu.
+
+        Jupyter frontends do not reliably attach new cell output from an
+        asynchronous widget callback, so toolbar prepare requests prepare the
+        alternate view and leave the original widget unchanged. Call this method
+        in a notebook cell when you want the prepared temporary view rendered.
+        """
+        if self.prepared_view is None:
+            raise RuntimeError("No prepared view. Use the View menu first.")
+        try:
+            from IPython.display import display
+
+            display(self.prepared_view)
+        except Exception:
+            pass
+        return self.prepared_view
 
     def set_image(self, data, labels: list[str] | None = None) -> None:
         """Replace the stack data in place without rebuilding the widget.
@@ -2212,8 +2409,10 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
             "view_state": dict(self.view_state),
             "vmin_per_panel": list(self.vmin_per_panel),
             "vmax_per_panel": list(self.vmax_per_panel),
+            "show_title": self.show_title,
             "show_stats": self.show_stats,
             "show_controls": self.show_controls,
+            "controls_collapsed": self.controls_collapsed,
             "show_fft": self.show_fft,
             "fft_layout": self.fft_layout,
             "fft_overlay_position": self.fft_overlay_position,
@@ -2315,7 +2514,8 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
         ``mode="single"``, ``encoding="full"`` or ``encoding="uint8"``. Use
         ``downsample=2`` / ``4`` / ``8`` with ``encoding="uint8"`` for compact
         report HTML from heavy multi-panel movies. ``quantized`` is kept as a
-        compatibility alias for ``encoding="uint8"``.
+        compatibility alias for ``encoding="uint8"``. If the widget is playing
+        when exported, the standalone HTML starts playback on load.
 
         Parameters
         ----------
@@ -2911,6 +3111,21 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
         self.hidden_panels = []
         return self
 
+    def collapse_controls(self) -> Self:
+        """Collapse the live control UI while leaving the GUI toggle available."""
+        self.controls_collapsed = True
+        return self
+
+    def expand_controls(self) -> Self:
+        """Expand the live control UI."""
+        self.controls_collapsed = False
+        return self
+
+    def toggle_controls(self) -> Self:
+        """Toggle the collapsed state of the live control UI."""
+        self.controls_collapsed = not bool(self.controls_collapsed)
+        return self
+
     @property
     def visible_indices(self) -> list[int]:
         """Live list of frame indices NOT in hidden_indices. Read-only;
@@ -3311,16 +3526,25 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
             for panel in panel_indices:
                 data = self._get_display_panel_frame(panel, frame_idx)
                 img = gif_utils.colorize(self._normalize_frame(data), self.cmap)
-                panel_images.append(gif_utils.finalize_frame(img, quality, pixel_size, unit))
+                panel_images.append(
+                    gif_utils.finalize_frame(
+                        img,
+                        quality,
+                        pixel_size,
+                        unit,
+                        show_zoom_indicator=bool(self.show_zoom_indicator),
+                    )
+                )
+            frame_panel_titles = (
+                [self._static_panel_title(panel, frame_idx) for panel in panel_indices]
+                if show_frame_labels
+                else panel_titles
+            )
             frames.append(
                 gif_utils.compose_panel_grid(
                     panel_images,
-                    panel_titles=panel_titles,
-                    frame_labels=(
-                        self._animation_frame_labels(panel_indices, frame_idx)
-                        if show_frame_labels
-                        else None
-                    ),
+                    panel_titles=frame_panel_titles,
+                    frame_labels=None,
                     show_panel_titles=bool(self.show_panel_titles),
                     title_font_size=title_font_size,
                     max_cols=int(self.max_cols),
@@ -3967,6 +4191,7 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
             avg_window=self.avg_window,
             timestamps=list(self.timestamps) if self.timestamps else None,
             timestamp_unit=self.timestamp_unit,
+            show_title=self.show_title,
             show_fft=self.show_fft,
             fft_layout=self.fft_layout,
             fft_overlay_position=self.fft_overlay_position,
@@ -3975,6 +4200,7 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
             fft_window=self.fft_window,
             show_stats=self.show_stats,
             show_controls=self.show_controls,
+            controls_collapsed=self.controls_collapsed,
             size=self.size,
             diff_mode=self.diff_mode,
             buffer_size=getattr(self, "_buffer_size", 64),
@@ -3997,12 +4223,15 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
             clone._offline_float_stack = b""
         else:
             clone._pack_exact_offline_stack()
-        clone.playing = False
+        clone.playing = bool(self.playing)
         clone.export_enabled = False
         clone.export_status = ""
         clone.export_payload = b""
         clone.export_payload_id = ""
         clone.export_filename = ""
+        clone.handoff_enabled = False
+        clone.handoff_status = ""
+        clone.handoff_request = ""
         clone._stop_frame_server()
         clone.frame_server_url = ""
         clone._buffer_bytes = b""
@@ -4297,11 +4526,15 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
             and not getattr(self, "_save_state", False)
             and not getattr(self, "_initial_live_mount_state", False)
         ):
-            if not self._static_fallback_jpeg:
-                png = self._static_png_b64()
+            if not self._static_fallback_enabled():
+                state.pop("_static_fallback_jpeg", None)
+                state.pop("_static_fallback_mime", None)
+            elif not self._static_fallback_jpeg:
+                png = self._static_fallback_png_b64()
                 if png:
                     self._store_static_fallback_preview(png)
                     state["_static_fallback_jpeg"] = self._static_fallback_jpeg
+                    state["_static_fallback_mime"] = self._static_fallback_mime
             for heavy_key in self._UNSAVED_HEAVY_KEYS:
                 state.pop(heavy_key, None)
         return state
@@ -4458,7 +4691,14 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
         """Store a compact saved-notebook preview inside lightweight state."""
         if getattr(self, "_save_state", False):
             return
-        self._static_fallback_jpeg = self._png_to_jpeg_b64(png_b64)
+        encoded = self._encode_static_fallback_b64(png_b64)
+        if not encoded:
+            self._static_fallback_jpeg = ""
+            self._static_fallback_mime = ""
+            return
+        mime, image_b64 = encoded
+        self._static_fallback_jpeg = image_b64
+        self._static_fallback_mime = mime
 
     def _get_color_range(self, frame: np.ndarray) -> tuple[float, float]:
         """Get vmin/vmax based on current settings."""

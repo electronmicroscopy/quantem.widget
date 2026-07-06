@@ -28,6 +28,7 @@ import traitlets
 from quantem.widget.utils.array import to_numpy
 from quantem.widget.export import ensure_mobile_viewport
 from quantem.widget.utils.state_io import resolve_widget_version, save_state_file, unwrap_state_payload
+from quantem.widget.utils.ui import UiMode, resolve_ui_mode
 
 # ============================================================================
 # Constants
@@ -70,10 +71,18 @@ class ShowDiffraction(anywidget.AnyWidget):
         Sub-pixel refine spots with a 2D Gaussian fit on add.
     dp_scale_mode : str, default "log"
         Diffraction display scaling ("linear", "log", "sqrt").
+    ui_mode : {"interactive", "presentation", "report", "minimal"}, default "interactive"
+        Shared viewer UI preset. Explicit ``show_*`` keyword arguments override
+        preset values.
+    show_title : bool, default True
+        Show the top title row.
     show_stats : bool, default True
         Show statistics (mean, min, max, std).
     show_controls : bool, default True
         Show the control panel.
+    controls_collapsed : bool, default False
+        Start with controls hidden while keeping a recoverable ``Controls``
+        button in the frontend.
     panel_width_px : int, optional
         Initial diffraction canvas width in CSS pixels. The frontend still lets
         users resize the panel interactively.
@@ -194,8 +203,10 @@ class ShowDiffraction(anywidget.AnyWidget):
     # =========================================================================
     # UI Visibility
     # =========================================================================
+    show_title = traitlets.Bool(True).tag(sync=True)
     show_stats = traitlets.Bool(True).tag(sync=True)
     show_controls = traitlets.Bool(True).tag(sync=True)
+    controls_collapsed = traitlets.Bool(False).tag(sync=True)
     panel_width_px = traitlets.Int(384).tag(sync=True)
 
     @traitlets.validate("center_mode")
@@ -233,8 +244,11 @@ class ShowDiffraction(anywidget.AnyWidget):
         snap_radius: int = 5,
         spot_refine: bool = True,
         dp_scale_mode: str = "log",
-        show_stats: bool = True,
-        show_controls: bool = True,
+        ui_mode: UiMode = "interactive",
+        show_title: bool | None = None,
+        show_stats: bool | None = None,
+        show_controls: bool | None = None,
+        controls_collapsed: bool | None = None,
         panel_width_px: int | None = None,
         offline: bool = False,
         verbose: bool = True,
@@ -289,8 +303,25 @@ class ShowDiffraction(anywidget.AnyWidget):
         self.snap_enabled = snap_enabled
         self.snap_radius = snap_radius
         self.spot_refine = spot_refine
-        self.show_stats = show_stats
-        self.show_controls = show_controls
+        ui = resolve_ui_mode(
+            ui_mode,
+            defaults={
+                "show_title": True,
+                "show_stats": True,
+                "show_controls": True,
+                "controls_collapsed": False,
+            },
+            overrides={
+                "show_title": show_title,
+                "show_stats": show_stats,
+                "show_controls": show_controls,
+                "controls_collapsed": controls_collapsed,
+            },
+        )
+        self.show_title = bool(ui["show_title"])
+        self.show_stats = bool(ui["show_stats"])
+        self.show_controls = bool(ui["show_controls"])
+        self.controls_collapsed = bool(ui["controls_collapsed"])
         if panel_width_px is not None:
             self.panel_width_px = int(panel_width_px)
         self.offline = offline
@@ -1380,12 +1411,29 @@ class ShowDiffraction(anywidget.AnyWidget):
             "dp_invert": self.dp_invert,
             "dp_vmin_pct": self.dp_vmin_pct,
             "dp_vmax_pct": self.dp_vmax_pct,
+            "show_title": self.show_title,
             "show_stats": self.show_stats,
             "show_controls": self.show_controls,
+            "controls_collapsed": self.controls_collapsed,
         }
 
     def save(self, path: str):
         save_state_file(path, "ShowDiffraction", self.state_dict())
+
+    def collapse_controls(self) -> Self:
+        """Collapse controls behind the frontend ``Controls`` button."""
+        self.controls_collapsed = True
+        return self
+
+    def expand_controls(self) -> Self:
+        """Expand frontend controls when ``show_controls`` is enabled."""
+        self.controls_collapsed = False
+        return self
+
+    def toggle_controls(self) -> Self:
+        """Toggle whether frontend controls start collapsed."""
+        self.controls_collapsed = not bool(self.controls_collapsed)
+        return self
 
     def load_state_dict(self, state):
         allowed_keys = set(self.state_dict().keys())

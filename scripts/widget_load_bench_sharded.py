@@ -184,8 +184,6 @@ def _describe(payload: dict[int, Any], metadata: dict[str, Any]) -> dict[str, An
 
 
 def _timed_load(case: dict[str, Any], args: argparse.Namespace) -> tuple[float, Any, int | None]:
-    import numpy as np
-
     load = _widget_hdf5_module().load
     kwargs: dict[str, Any] = {
         "det_bin": int(case["det_bin"]),
@@ -193,7 +191,7 @@ def _timed_load(case: dict[str, Any], args: argparse.Namespace) -> tuple[float, 
         "verbose": False,
     }
     if args.dtype == "u8":
-        kwargs["output_dtype"] = np.uint8
+        kwargs["dtype"] = "u8"
     t0 = time.perf_counter()
     result = load(case["masters"], **kwargs)
     payload = result.data

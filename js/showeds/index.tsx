@@ -1570,6 +1570,7 @@ function ShowEDS() {
   }, [tc, themeInfo.theme]);
 
   const [title] = useModelState<string>("title");
+  const [showTitle] = useModelState<boolean>("show_title");
   const [rows] = useModelState<number>("n_rows");
   const [cols] = useModelState<number>("n_cols");
   const [nEnergy] = useModelState<number>("n_energy");
@@ -1597,6 +1598,8 @@ function ShowEDS() {
   const [spectrumWidth, setSpectrumWidth] = useModelState<number>("spectrum_width_px");
   const [spectrumHeight, setSpectrumHeight] = useModelState<number>("spectrum_height_px");
   const [showControls] = useModelState<boolean>("show_controls");
+  const [controlsCollapsed, setControlsCollapsed] = useModelState<boolean>("controls_collapsed");
+  const controlsVisible = showControls && !controlsCollapsed;
   const [logSpectrum, setLogSpectrum] = useModelState<boolean>("log_spectrum");
   const [smooth, setSmooth] = useModelState<boolean>("smooth");
   const [pixelSize] = useModelState<number>("pixel_size");
@@ -3398,7 +3401,9 @@ function ShowEDS() {
   return (
     <Box ref={staticFallbackRootRef} sx={{ p: 2, fontFamily: UI_FONT, bgcolor: themeColors.bg, color: themeColors.text, overflowX: "auto" }}>
       <Stack spacing={1.2}>
+        {(showTitle || showControls) && (
         <Stack direction="row" spacing={1} alignItems="center" sx={{ width: specW + size + 16 }}>
+          {showTitle && (
           <Stack direction="row" spacing={1} alignItems="center" sx={{ flex: 1, minWidth: 0 }}>
             <Typography sx={{ fontWeight: 700, fontSize: 14 }}>
               {title || "EDS spectrum image"}
@@ -3417,8 +3422,20 @@ function ShowEDS() {
               {rows}x{cols}x{nEnergy} | {backendLabel} {elementLabel ? `| ${elementLabel}` : ""} {busy ? "| computing" : ""}
             </Typography>
           </Stack>
+          )}
           {showControls && (
             <Stack direction="row" spacing={1} alignItems="center">
+              <Button
+                size="small"
+                variant="outlined"
+                sx={compactButtonSx}
+                onClick={() => setControlsCollapsed(!controlsCollapsed)}
+                aria-label={controlsCollapsed ? "Show controls" : "Hide controls"}
+              >
+                {controlsCollapsed ? "Controls" : "Hide"}
+              </Button>
+              {controlsVisible && (
+                <>
               <Button
                 size="small"
                 variant={safeSelectedElements.length > 0 ? "contained" : "outlined"}
@@ -3633,9 +3650,12 @@ function ShowEDS() {
                   {localExportStatus || exportStatus}
                 </Typography>
               )}
+                </>
+              )}
             </Stack>
           )}
         </Stack>
+        )}
         {gpuError && <Typography sx={{ color: themeColors.error, fontSize: 12 }}>{gpuError}</Typography>}
         {showDebug && (
           <Box
@@ -3813,7 +3833,7 @@ function ShowEDS() {
             </Typography>
           </Box>
         </Stack>
-        {showControls && (
+        {controlsVisible && (
           <Box sx={{ mt: 0.25, display: "flex", gap: 1, width: "fit-content", maxWidth: "100%", boxSizing: "border-box", alignItems: "flex-start", overflowX: "auto", pb: 0.5 }}>
             <Box sx={{ display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 0.5, flex: "0 0 auto", minWidth: 0 }}>
               <Box sx={controlRowSx}>

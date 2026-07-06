@@ -26,7 +26,12 @@ no console error, no NaN frame).
 | Log-scale toggle | `log_scale` | Intensity mapped through log |
 | FFT toggle | `show_fft` | Canvas shows the power spectrum; lattice spots appear |
 | FFT window toggle | `fft_window` | Apodization on/off (ringing at edges differs) |
-| Scale bar toggle | `scale_bar_visible` | Calibrated bar shows/hides (needs `pixel_size > 0`) |
+| Viewer chrome preset | `ui_mode` plus explicit `show_*` kwargs | Applies shared display presets; see [Viewer UI controls](viewer-ui) |
+| Control visibility | `show_controls`, `controls_collapsed`; `collapse_controls()`, `expand_controls()`, `toggle_controls()` | Permanently remove controls or temporarily collapse them behind the top GUI toggle |
+| Title visibility | `show_title` | Top title row shows/hides |
+| Stats visibility | `show_stats` | Mean/min/max/std readout shows/hides |
+| Panel title visibility | `show_panel_titles`, `panel_title_font_size` | Per-panel labels show/hide and resize |
+| Scale bar toggle | `show_scale_bar` (`scale_bar_visible` in saved state) | Calibrated bar shows/hides (needs `pixel_size > 0`) |
 | Pan (drag) | per-image pan | Image translates; with `link_pan` all panels move together |
 | Zoom (wheel) | `initial_zoom`, `zoom_row`, `zoom_col` | Zooms about the cursor |
 | Smooth toggle | `smooth` | Bilinear vs nearest sampling |

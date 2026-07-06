@@ -70,6 +70,7 @@ quantem show4dstem ./masters/                # *_master.h5         -> live Show4
 quantem show4dstem a_master.h5 b_master.h5   # several masters     -> one 5D multi-tilt viewer
 quantem show4dstem ./masters/ --html         # 4D-STEM             -> shareable offline HTML
 quantem showfolder ./session/                # microscopy folder   -> ShowFolder notebook/HTML
+quantem data-transfer plan ./raw/ /ssd0/run /ssd1/run --manifest run.json
 quantem html tutorial.ipynb                  # a notebook          -> standalone offline HTML
 ```
 
@@ -80,6 +81,7 @@ quantem html tutorial.ipynb                  # a notebook          -> standalone
 | `quantem show3d <folder>` | a folder of same-size frames | Show3D scrub HTML |
 | `quantem show4dstem <master(s) / folder>` | one or more `*_master.h5` | live Show4DSTEM notebook (or `--html`) |
 | `quantem showfolder <folder>` | microscopy session folder | ShowFolder notebook (or `--html`) |
+| `quantem data-transfer plan/inspect/copy` | `*_master.h5` folder plus target roots | manifest-backed transfer planning, state inspection, and explicit copy |
 | `quantem html <notebook.ipynb>` | a notebook you wrote | runs it, bakes outputs into one offline HTML |
 
 **Images** save a standalone HTML and open in your browser. **4D-STEM** opens a live,

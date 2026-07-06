@@ -4,6 +4,10 @@ Use this page when editing widget frontend controls, reviewing a widget PR, or
 asking an agent to make UI changes. The goal is for every viewer to feel like
 one scientific tool family, even when the underlying data are very different.
 
+For developer-facing `ui_mode`, `show_*`, and control-visibility tables, use
+the [UI Guide](../developer/ui-guide). This maintainer page is the internal protocol
+for frontend wording, toolbar layout, export labels, and review checks.
+
 ## Command text
 
 Use Title Case for command buttons and toolbar actions:

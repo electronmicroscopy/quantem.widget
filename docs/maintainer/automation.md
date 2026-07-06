@@ -13,6 +13,7 @@ real-data proof.
 | Normal widget change before saying it is ready | `scripts/widget_local_signoff.sh` | Signoff dashboard, full tests, HTML export smoke report, docs build. |
 | ShowFolder watcher, selected-viewer handoff, thumbnail report, or master QC change | `PYTHONPATH=src:. python scripts/widget_showfolder_live_smoke.py --artifact-dir /tmp/quantem-widget-showfolder-live` | Live-folder report proving ShowFolder refreshes active Show2D, Show3D, and Show4DSTEM handoffs, plus WebP thumbnail previews and header-only 4D-STEM master QC rows. |
 | Widget UI, interaction, or HTML export change | `scripts/widget_local_signoff.sh --quick --browser` | Signoff dashboard, exported HTML plus automated Chromium report, screenshots, nonblank canvas checks, FPS. |
+| Show3D GIF/PowerPoint animation review | `PYTHONPATH=src:. python scripts/widget_show3d_animation_smoke.py --artifact-dir /tmp/quantem-widget-show3d-gif` | Visual GIF report with low/medium/high quality previews, export seconds, file sizes, dimensions, frame count, and source data. |
 | Mobile layout or touch-sensitive change | `scripts/widget_local_signoff.sh --quick --browser --mobile` | Desktop and 390x844 touch Chromium pre-check. |
 | Release-oriented validation | `scripts/widget_local_signoff.sh --full --performance` | Full local gates, frontend typecheck/tests, release check without wheel, real-data export timing report. |
 | Heavy real-data performance claim | `PYTHONPATH=src:. python scripts/widget_heavy_perf_signoff.py` | Local-only HPC/workstation real-data browser FPS, screenshots, FFT idle-cache report. |
@@ -101,6 +102,14 @@ Performance mode writes real-data Show2D and Show3D HTML exports plus its own
 writes `heavy-signoff-report.json`, browser screenshots, and an `index.html`
 summary. Keep real-data artifacts outside git.
 
+Show3D GIF presentation smoke writes:
+
+- `index.html`: PowerPoint/email-oriented GIF preview report.
+- `report.json`: source, shape, native size, FPS, playback mode, quality tier,
+  export time, GIF dimensions, frame count, file size, and frame-delta metric.
+- `show3d-caitlyn-timeseries-*.gif`: low/medium/high GIF exports when the local
+  Caitlyn time-series folder is present, otherwise the selected fallback source.
+
 ## Browser Cleanup
 
 Browser tests must clean up after themselves:
@@ -155,6 +164,12 @@ compact/no-title layouts, panel visibility, multi-panel Show3D, and
 downsampled Show3D export. This checks export protocol coverage with tiny data,
 not heavy interaction performance.
 
+Use microscopy-like synthetic data for the tiny Show2D/Show3D cases. The
+current smoke uses a MoS2-like HAADF lattice phantom, which keeps CI small while
+making the visual report useful for reviewing atomic contrast, FFT peaks, scale
+bars, and panel layout. Do not replace these with smooth blobs or plain random
+noise unless the test is specifically about those inputs.
+
 Update this smoke when a new public widget gains `export_html()`, or when an
 existing widget's canonical small export options change.
 
@@ -181,6 +196,52 @@ viewer widgets unless the project explicitly changes that architecture.
 Keep ShowFolder's real cache as numeric arrays for widget handoff. WebP belongs
 in reports, dashboards, and other visual review surfaces, not in the selection
 or data cache.
+
+## Show3D GIF Presentation Smoke
+
+Run the focused animation-export report when the question is whether a Show3D
+movie is good enough for PowerPoint, email, or a quick supplement:
+
+```bash
+PYTHONPATH=src:. python scripts/widget_show3d_animation_smoke.py \
+  --artifact-dir /tmp/quantem-widget-show3d-gif
+```
+
+When the data may be large, start with the dry run:
+
+```bash
+PYTHONPATH=src:. python scripts/widget_show3d_animation_smoke.py \
+  --artifact-dir /tmp/quantem-widget-show3d-gif-dry-run \
+  --dry-run
+```
+
+The dry run writes `index.html` and `report.json` but does not write GIF files.
+It reports the source file size when known, the native input size, the derived
+multi-panel array size, planned GIF dimensions, frame count, and projected
+uncompressed RGB work for each quality tier. Read the `Decision` line first:
+`Run the full GIF export` means the size plan is reasonable; `Reduce crop size,
+frame count, or quality tiers` means adjust `--crop-size`, `--frames`, or
+`--qualities` before spending time on the full export. Use `--max-native-mb` and
+`--max-work-mb` to tighten or relax those dry-run warnings.
+
+The default `auto` source uses local Caitlyn Show3D PNG/TIFF time-series frames
+when they are available, then falls back to the public tutorial Show3D data, and
+finally to a tiny synthetic CI fallback. Use `--source caitlyn`, `--source
+tutorial`, or `--source synthetic` when the report must be explicit.
+
+The report is multi-panel by default (`Raw`, `Smoothed`, `Change`) so it checks
+the case scientists usually paste into slides. It deliberately keeps live-style
+panel labels, scale bars, and the `1.0x` zoom readout in the GIF. Use
+`--panel-gap 0` when the review needs edge-to-edge panels with no whitespace
+between images. Use `--no-panel-labels`, `--no-frame-labels`,
+`--no-scale-bar`, and `--no-zoom-label` only when the test is deliberately
+checking a cleaner output. The report prints those controls near the top so a
+reader can tell whether labels were supposed to be visible.
+
+The script exports GIF low, medium, and high. GIF quality means spatial
+resolution: the palette remains GIF-limited, while `low`/`medium`/`high` trade
+slide sharpness against file size. Use `--sampling-nm` to set the display
+sampling used for the scale bar in this review report.
 
 ## Browser HTML Smoke
 

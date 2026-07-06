@@ -1286,6 +1286,7 @@ function Show3D() {
   const [height] = useModelState<number>("height");
   const [rawFrameBytes] = useModelState<DataView>("frame_bytes");
   const [staticFallbackJpeg] = useModelState<string>("_static_fallback_jpeg");
+  const [staticFallbackMime] = useModelState<string>("_static_fallback_mime");
   // Defensive: traitlets.Bytes can identity-suppress trait events when content
   // and length are similar. frame_seq is incremented Python-side on every write
   // so JS effects always see a change. Use it in dep arrays alongside frameBytes.
@@ -1406,6 +1407,7 @@ function Show3D() {
   }, [frameBytes, setJsRendered]);
 
   const [title] = useModelState<string>("title");
+  const [showTitle] = useModelState<boolean>("show_title");
   const [dimLabel] = useModelState<string>("dim_label");
   const [dimSampling] = useModelState<number>("dim_sampling");
   const [dimUnit] = useModelState<string>("dim_unit");
@@ -1477,7 +1479,7 @@ function Show3D() {
   const [maxCols, setMaxCols] = useModelState<number>("max_cols");
   const [linkPanels, setLinkPanels] = useModelState<boolean>("link_panels");
   const [showResizeHandles] = useModelState<boolean>("show_resize_handles");
-  const showResizeControls = showResizeHandles !== false && !isMobileViewport;
+  const allowResizeControls = showResizeHandles !== false && !isMobileViewport;
   const [showZoomIndicator] = useModelState<boolean>("show_zoom_indicator");
   const [showPanelTitles] = useModelState<boolean>("show_panel_titles");
   const [panelTitleFontSize] = useModelState<number>("panel_title_font_size");
@@ -1509,6 +1511,10 @@ function Show3D() {
   // Stats
   const [showStats, setShowStats] = useModelState<boolean>("show_stats");
   const [showControls] = useModelState<boolean>("show_controls");
+  const [controlsCollapsed, setControlsCollapsed] = useModelState<boolean>("controls_collapsed");
+  const controlsVisible = showControls && !controlsCollapsed;
+  const panelChromeVisible = controlsVisible;
+  const showResizeControls = allowResizeControls && panelChromeVisible;
   const [statsMean] = useModelState<number>("stats_mean");
   const [statsMin] = useModelState<number>("stats_min");
   const [statsMax] = useModelState<number>("stats_max");
@@ -1589,6 +1595,9 @@ function Show3D() {
   const [exportPayload] = useModelState<DataView>("export_payload");
   const [exportPayloadId] = useModelState<string>("export_payload_id");
   const [exportPayloadFilename] = useModelState<string>("export_filename");
+  const [, setHandoffRequest] = useModelState<string>("handoff_request");
+  const [handoffStatus] = useModelState<string>("handoff_status");
+  const [handoffEnabled] = useModelState<boolean>("handoff_enabled");
 
   // Canvas refs
   const rootRef = React.useRef<HTMLDivElement>(null);
@@ -1597,7 +1606,9 @@ function Show3D() {
   const hasOfflineFloatStack = !!offlineFloatStack && offlineFloatStack.byteLength > 0;
   const hasFrameServer = !offline && !!frameServerUrl;
   const canRenderLive = hasLiveFrameBytes || hasOfflineStack || hasOfflineFloatStack || hasFrameServer;
-  const staticFallbackUrl = staticFallbackJpeg ? `data:image/jpeg;base64,${staticFallbackJpeg}` : "";
+  const staticFallbackUrl = staticFallbackJpeg
+    ? `data:${staticFallbackMime || "image/jpeg"};base64,${staticFallbackJpeg}`
+    : "";
   const hasSavedStaticFallback = staticFallbackUrl.length > 0;
   useHideStaticFallback(model, rootRef, canRenderLive || hasSavedStaticFallback);
   const canvasRef = React.useRef<HTMLCanvasElement>(null);
@@ -1615,6 +1626,7 @@ function Show3D() {
 
   const [exportMenuAnchor, setExportMenuAnchor] = React.useState<HTMLElement | null>(null);
   const [panelMenuAnchor, setPanelMenuAnchor] = React.useState<HTMLElement | null>(null);
+  const [viewMenuAnchor, setViewMenuAnchor] = React.useState<HTMLElement | null>(null);
   const [exportBusy, setExportBusy] = React.useState(false);
   const [localExportStatus, setLocalExportStatus] = React.useState("");
   const fftOverlayDragRef = React.useRef<{
@@ -6090,7 +6102,7 @@ function Show3D() {
         ctx.textAlign = "center";
         ctx.textBaseline = "bottom";
         ctx.fillText(label, barX + barPx / 2, barY - 4);
-        if (showZoomIndicator !== false) {
+        if (showZoomIndicator !== false && panelChromeVisible) {
           ctx.textAlign = "left";
           ctx.textBaseline = "bottom";
           ctx.fillText(`${panelState.zoom.toFixed(1)}×`, slotX + margin, slotY + slotH - margin + barThickness);
@@ -6164,7 +6176,7 @@ function Show3D() {
       }
       ctx.restore();
     }
-  }, [pixelSize, pixelUnit, scaleBarVisible, width, sourcePanelWidth, canvasW, canvasH, displayScale, zoom, nPanels, visiblePanelCount, visiblePanelIndices, maxCols, panelStates, linkedState, linkPanels, panelGapTrait, showZoomIndicator, showColorbar, cmap, imageDataRange, imageVminPct, imageVmaxPct, logScale, autoContrast, imageHistogramData, autoVmins, autoVmaxs, displaySliceIdx, percentileLow, percentileHigh, dataMin, dataMax, traitVmin, traitVmax, linkContrast, sharedPanelSource, panelDataRanges, vminPerPanel, vmaxPerPanel]);
+  }, [pixelSize, pixelUnit, scaleBarVisible, width, sourcePanelWidth, canvasW, canvasH, displayScale, zoom, nPanels, visiblePanelCount, visiblePanelIndices, maxCols, panelStates, linkedState, linkPanels, panelGapTrait, showZoomIndicator, panelChromeVisible, showColorbar, cmap, imageDataRange, imageVminPct, imageVmaxPct, logScale, autoContrast, imageHistogramData, autoVmins, autoVmaxs, displaySliceIdx, percentileLow, percentileHigh, dataMin, dataMax, traitVmin, traitVmax, linkContrast, sharedPanelSource, panelDataRanges, vminPerPanel, vmaxPerPanel]);
 
   // Compute FFT magnitude (expensive, async - only re-run on data/GPU changes)
   // Supports ROI-scoped FFT: when ROI is active with a selected ROI, compute
@@ -7514,6 +7526,16 @@ function Show3D() {
       console.warn("Show3D copy failed", err);
     }
   };
+
+  const handleHandoffToShow2D = React.useCallback(() => {
+    setViewMenuAnchor(null);
+    setHandoffRequest(JSON.stringify({
+      mode: "show2d",
+      id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      frame: displaySliceIdx,
+      panel: visiblePanelIndices,
+    }));
+  }, [displaySliceIdx, visiblePanelIndices, setHandoffRequest]);
 
   const clickStartRef = React.useRef<{ x: number; y: number } | null>(null);
   const touchTransformRef = React.useRef<TouchTransformState | null>(null);
@@ -9216,14 +9238,14 @@ function Show3D() {
       >
         <Box sx={{ width: mainPanelWidth, maxWidth: "100%", flexShrink: effectiveShowFft && fftLayoutBottom && (nPanels || 1) > 1 ? 0 : 1, boxSizing: "border-box" }}>
           {/* Title row */}
-          <Typography variant="caption" sx={{ ...typography.label, color: themeColors.accent, mb: `${SPACING.XS}px`, display: "block", height: 16, lineHeight: "16px", overflow: "hidden" }}>
+          {showTitle && <Typography variant="caption" sx={{ ...typography.label, color: themeColors.accent, mb: `${SPACING.XS}px`, display: "block", height: 16, lineHeight: "16px", overflow: "hidden" }}>
             {title || "Image"}
             {diffMode !== "off" && (
               <Typography component="span" sx={{ fontSize: 9, fontWeight: "bold", color: "#fff", bgcolor: "#e65100", px: 0.5, py: 0.125, ml: 0.5, verticalAlign: "middle" }}>
                 {diffMode === "previous" ? "\u0394-PREV" : "\u0394-FIRST"}
               </Typography>
             )}
-            <InfoTooltip text={<Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
+	            {showControls && <InfoTooltip text={<Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
               <MetadataSection rows={[
                 ["Shape", `${nSlices} x ${height} x ${width}`],
                 ["Panels", nPanels > 1 ? `${nPanels} panels` : "single panel"],
@@ -9264,10 +9286,31 @@ function Show3D() {
               <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>Export / Copy: Export HTML, GIF, or MP4 panel-only animations, or copy the current panel view from the toolbar.</Typography>
               <Typography sx={{ fontSize: 11, fontWeight: "bold", mt: 0.5 }}>Keyboard</Typography>
               <KeyboardShortcuts items={keyboardShortcutItems} />
-            </Box>} theme={themeInfo.theme} />
-          </Typography>
-          {/* Controls row */}
-          <Box sx={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: "4px", mb: `${SPACING.XS}px`, minHeight: 28 }}>
+	            </Box>} theme={themeInfo.theme} />}
+	            {showControls && (
+	              <Button
+	                size="small"
+	                sx={{
+	                  ...compactButton,
+	                  ml: 0.75,
+	                  py: 0,
+	                  px: 0.5,
+	                  minHeight: 16,
+	                  lineHeight: "16px",
+	                  verticalAlign: "baseline",
+	                }}
+	                onClick={() => setControlsCollapsed(!controlsCollapsed)}
+	                aria-label={controlsCollapsed ? "Show controls" : "Hide controls"}
+	                aria-pressed={!controlsCollapsed}
+	                title={controlsCollapsed ? "Show controls" : "Hide controls"}
+	              >
+	                Controls
+	              </Button>
+	            )}
+	          </Typography>}
+	          {/* Controls row */}
+	          {controlsVisible && (
+	          <Box sx={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: "4px", mb: `${SPACING.XS}px`, minHeight: 28 }}>
             {visiblePanelCount > 1 && (
               <>
                 <Typography sx={{ ...typography.label, fontSize: 10, ml: "2px" }}>Cols</Typography>
@@ -9459,6 +9502,34 @@ function Show3D() {
                   </Menu>
                 </>
               )}
+              {handoffEnabled && (
+                <>
+                  <Button
+                    size="small"
+                    sx={compactButton}
+                    onClick={(event) => setViewMenuAnchor(event.currentTarget)}
+                    aria-label="Open view options"
+                    aria-controls={viewMenuAnchor ? "show3d-view-menu" : undefined}
+                    aria-expanded={viewMenuAnchor ? "true" : undefined}
+                    aria-haspopup="menu"
+                    title={handoffStatus || "View options"}
+                  >
+                    View
+                  </Button>
+                  <Menu
+                    id="show3d-view-menu"
+                    anchorEl={viewMenuAnchor}
+                    open={Boolean(viewMenuAnchor)}
+                    onClose={() => setViewMenuAnchor(null)}
+                    MenuListProps={{ "aria-label": "View options" }}
+                    {...themedMenuProps}
+                  >
+                    <MenuItem onClick={handleHandoffToShow2D}>
+                      Prepare frame as 2D
+                    </MenuItem>
+                  </Menu>
+                </>
+              )}
               {exportEnabled && (
                 <>
                   <Button
@@ -9513,8 +9584,25 @@ function Show3D() {
                 </Typography>
               )}
               <Button size="small" sx={compactButton} disabled={!needsReset} onClick={handleDoubleClick} aria-label="Reset zoom and pan">Reset</Button>
-            </Box>
-          </Box>
+              {handoffEnabled && handoffStatus && (
+                <Typography
+                  sx={{
+                    ...typography.label,
+                    fontSize: 10,
+                    maxWidth: 140,
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                    color: handoffStatus.startsWith("Handoff failed") ? "#d32f2f" : themeColors.textMuted,
+                  }}
+                  title={handoffStatus}
+                >
+                  {handoffStatus}
+                </Typography>
+              )}
+	          </Box>
+	          </Box>
+	          )}
           <Box
             ref={canvasContainerRef}
             sx={{
@@ -9626,7 +9714,7 @@ function Show3D() {
             {/* Per-panel "best frame" stars. One gold ★ button top-right of
                 each panel. Click toggles the star on the currently displayed
                 slice for THAT panel. Programmatic API: widget.star_panel(i). */}
-            {visiblePanelIndices.map((i, slot) => {
+	            {panelChromeVisible && visiblePanelIndices.map((i, slot) => {
               const n = Math.max(1, visiblePanelCount || 1);
               const cols = panelColsForCount(n);
               const gap = n > 1 ? (panelGapTrait ?? 10) : 0;
@@ -9679,7 +9767,7 @@ function Show3D() {
                 </button>
               );
             })}
-            {(nPanels || 1) > 1 && visiblePanelIndices.map((panel, slot) => {
+	            {panelChromeVisible && (nPanels || 1) > 1 && visiblePanelIndices.map((panel, slot) => {
               const n = Math.max(1, visiblePanelCount || 1);
               const cols = panelColsForCount(n);
               const gap = n > 1 ? (panelGapTrait ?? 10) : 0;
@@ -9728,7 +9816,7 @@ function Show3D() {
             {/* Zoom indicator now drawn on the ui canvas in the scale-bar
                 pass (Show2D-matching style: white, sans, Unicode ×). */}
             {/* Cursor readout overlay */}
-            {cursorInfo && (() => {
+	            {panelChromeVisible && cursorInfo && (() => {
               const n = Math.max(1, visiblePanelCount || 1);
               const cols = panelColsForCount(n);
               const rows = Math.ceil(n / cols);
@@ -9764,7 +9852,7 @@ function Show3D() {
                 </Box>
               );
             })()}
-            {effectiveRoiActive && roiItems.length > 0 && showRoiResizeHint && (
+	            {panelChromeVisible && effectiveRoiActive && roiItems.length > 0 && showRoiResizeHint && (
               <Box sx={{ position: "absolute", left: 6, top: 6, px: 0.6, py: 0.25, bgcolor: "rgba(0,0,0,0.45)", pointerEvents: "none" }}>
                 <Typography sx={{ fontSize: 9, color: "rgba(255,255,255,0.8)", lineHeight: 1.1 }}>
                   Hover ROI edge to resize
@@ -9950,7 +10038,7 @@ function Show3D() {
           )}
           {/* Image controls stay content-sized so multi-panel stacks do not
               create a large empty gutter between display and playback rows. */}
-          {showControls && (
+	          {controlsVisible && (
             <Box sx={{ mt: `${SPACING.SM}px`, display: "flex", columnGap: `${SPACING.SM}px`, rowGap: `${SPACING.XS}px`, alignItems: "flex-start", justifyContent: "flex-start", width: "fit-content", maxWidth: "100%", boxSizing: "border-box", flexWrap: "wrap" }}>
               <Box sx={{ display: "flex", flexDirection: "column", gap: `${SPACING.XS}px`, flex: "0 0 auto", justifyContent: "center" }}>
                 {/* Row 1: Scale + Auto + Color */}
@@ -10387,7 +10475,7 @@ function Show3D() {
               </Box>
             )}
             {/* FFT Controls - two rows with histogram on right (like Show4DSTEM) */}
-            {showControls && <Box sx={{ mt: `${SPACING.SM}px`, display: "flex", gap: `${SPACING.SM}px`, width: "100%", maxWidth: canvasW, boxSizing: "border-box", flexWrap: "wrap" }}>
+	            {controlsVisible && <Box sx={{ mt: `${SPACING.SM}px`, display: "flex", gap: `${SPACING.SM}px`, width: "100%", maxWidth: canvasW, boxSizing: "border-box", flexWrap: "wrap" }}>
               {/* Left: two rows of controls */}
               <Box sx={{ display: "flex", flexDirection: "column", gap: `${SPACING.XS}px`, flex: 1, justifyContent: "center" }}>
                 {/* Row 1: Scale + Auto */}
@@ -10500,7 +10588,7 @@ function Show3D() {
               </Box>
             )}
             {/* Kymograph Controls - two rows with histogram on right (mirror FFT) */}
-            {showControls && <Box sx={{ mt: `${SPACING.SM}px`, display: "flex", gap: `${SPACING.SM}px`, width: "100%", maxWidth: canvasW, boxSizing: "border-box", flexWrap: "wrap" }}>
+	            {controlsVisible && <Box sx={{ mt: `${SPACING.SM}px`, display: "flex", gap: `${SPACING.SM}px`, width: "100%", maxWidth: canvasW, boxSizing: "border-box", flexWrap: "wrap" }}>
               {/* Left: two rows of controls */}
               <Box sx={{ display: "flex", flexDirection: "column", gap: `${SPACING.XS}px`, flex: 1, justifyContent: "center" }}>
                 {/* Row 1: Scale + Auto */}

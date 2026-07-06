@@ -720,7 +720,7 @@ const imagePanelRadius = 0;
 
 function Show2D() {
   const isMobileViewport = useMobileViewport();
-  const showResizeControls = !isMobileViewport;
+  const allowResizeControls = !isMobileViewport;
   const model = useModel();
   React.useEffect(() => preserveRestoredWidgetModelsOnSave(model), [model]);
 
@@ -759,8 +759,11 @@ function Show2D() {
   const [height] = useModelState<number>("height");
   const [frameBytes] = useModelState<DataView>("frame_bytes");
   const [staticFallbackJpeg] = useModelState<string>("_static_fallback_jpeg");
+  const [staticFallbackMime] = useModelState<string>("_static_fallback_mime");
   const hasLiveFrameBytes = !!frameBytes && frameBytes.byteLength > 0;
-  const staticFallbackUrl = staticFallbackJpeg ? `data:image/jpeg;base64,${staticFallbackJpeg}` : "";
+  const staticFallbackUrl = staticFallbackJpeg
+    ? `data:${staticFallbackMime || "image/jpeg"};base64,${staticFallbackJpeg}`
+    : "";
   const hasSavedStaticFallback = staticFallbackUrl.length > 0;
   // Per-panel RGB flags: RGB panels carry display-ready (H, W, 3) float pixels
   // that bypass the colormap LUT + contrast pipeline and paint directly.
@@ -773,6 +776,7 @@ function Show2D() {
   const [panelTitleFontSize] = useModelState<number>("panel_title_font_size");
   const [galleryGapPxState] = useModelState<number>("gallery_gap_px");
   const [title] = useModelState<string>("title");
+  const [showTitle] = useModelState<boolean>("show_title");
   const [displayBinFactor] = useModelState<number>("_display_bin_factor");
   const [, setGpuMaxBufferMB] = useModelState<number>("_gpu_max_buffer_mb");
   const [cmap, setCmap] = useModelState<string>("cmap");
@@ -807,6 +811,10 @@ function Show2D() {
 
   // UI visibility
   const [showControls] = useModelState<boolean>("show_controls");
+  const [controlsCollapsed, setControlsCollapsed] = useModelState<boolean>("controls_collapsed");
+  const controlsVisible = showControls && !controlsCollapsed;
+  const panelChromeVisible = controlsVisible;
+  const showResizeControls = allowResizeControls && panelChromeVisible;
   const [showStats] = useModelState<boolean>("show_stats");
   const [statsMean] = useModelState<number[]>("stats_mean");
   const [statsMin] = useModelState<number[]>("stats_min");
@@ -834,6 +842,7 @@ function Show2D() {
   const [newRoiShape, setNewRoiShape] = React.useState<"circle" | "square" | "rectangle" | "annular">("square");
   const [exportAnchor, setExportAnchor] = React.useState<HTMLElement | null>(null);
   const [panelMenuAnchor, setPanelMenuAnchor] = React.useState<HTMLElement | null>(null);
+  const [viewMenuAnchor, setViewMenuAnchor] = React.useState<HTMLElement | null>(null);
   // Maps-style detail streaming: when the preview is binned
   // (_display_bin_factor > 1), zooming past the preview's resolution requests
   // a full-res crop of the visible window from Python instead of ever
@@ -848,6 +857,9 @@ function Show2D() {
   const [exportPayload] = useModelState<DataView>("export_payload");
   const [exportPayloadId] = useModelState<string>("export_payload_id");
   const [exportPayloadFilename] = useModelState<string>("export_filename");
+  const [, setHandoffRequest] = useModelState<string>("handoff_request");
+  const [handoffStatus] = useModelState<string>("handoff_status");
+  const [handoffEnabled] = useModelState<boolean>("handoff_enabled");
   const [exportBusy, setExportBusy] = React.useState(false);
   const [localExportStatus, setLocalExportStatus] = React.useState("");
   const pendingHtmlExportRef = React.useRef<{
@@ -4705,6 +4717,17 @@ function Show2D() {
     }
   }, [isGallery, selectedIdx, labels]);
 
+  const handleHandoffToShow3D = React.useCallback(() => {
+    const panels = Array.from({ length: totalPanelCount }, (_, panel) => panel)
+      .filter((panel) => !hiddenPanelSet.has(panel));
+    setViewMenuAnchor(null);
+    setHandoffRequest(JSON.stringify({
+      mode: "show3d",
+      id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      panels,
+    }));
+  }, [hiddenPanelSet, totalPanelCount, setHandoffRequest]);
+
   // Resize Handlers
   // -------------------------------------------------------------------------
   const handleCanvasResizeStart = (e: React.MouseEvent) => {
@@ -4918,7 +4941,7 @@ function Show2D() {
         {/* Main panel */}
         <Box sx={{ width: "100%", maxWidth: galleryGridWidth, boxSizing: "border-box" }}>
           {/* Title row */}
-          <Typography variant="caption" sx={{ ...typography.label, color: themeColors.accent, mb: `${SPACING.XS}px`, display: "block", minHeight: 16, lineHeight: "16px", overflow: "visible" }}>
+          {showTitle && <Typography variant="caption" sx={{ ...typography.label, color: themeColors.accent, mb: `${SPACING.XS}px`, display: "block", minHeight: 16, lineHeight: "16px", overflow: "visible" }}>
             {title || (isGallery ? "Gallery" : "Image")}
             {displayBinFactor > 1 && (
               <Box component="span" sx={{ ml: 0.5, px: 0.5, py: 0, fontSize: 9, fontWeight: 600, borderRadius: "3px", backgroundColor: themeColors.accent + "22", color: themeColors.accent, border: `1px solid ${themeColors.accent}44` }}>
@@ -4945,7 +4968,7 @@ function Show2D() {
                 ({rk * 90}°)
               </Box>
             ) : null; })()}
-            <InfoTooltip text={<Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
+	            {showControls && <InfoTooltip text={<Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
               <MetadataSection rows={[
                 ["Shape", isGallery ? `${nImages} x ${height} x ${width}` : `${height} x ${width}`],
                 ["Panels", isGallery ? `${nImages} images, ${clampedNcols} columns` : "single image"],
@@ -4966,10 +4989,31 @@ function Show2D() {
               <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>Export / Copy: Save or copy the current panel view using the toolbar actions.</Typography>
               <Typography sx={{ fontSize: 11, fontWeight: "bold", mt: 0.5 }}>Keyboard</Typography>
               <KeyboardShortcuts items={isGallery ? [["← / →", "Prev / Next image"], ["1 – 9", "Select image"], ["] / [", "Rotate CW / CCW 90°"], ["Del / ⌫", "Delete selected ROI"], ["M", "Measure distance"], ["Esc", "Exit measure"], ["R", "Reset zoom"], ["Scroll", "Zoom"], ["Dbl-click", "Reset view"]] : [["] / [", "Rotate CW / CCW 90°"], ["Del / ⌫", "Delete selected ROI"], ["M", "Measure distance"], ["Esc", "Exit measure"], ["R", "Reset zoom"], ["Scroll", "Zoom"], ["Dbl-click", "Reset view"]]} />
-            </Box>} theme={themeInfo.theme} />
-          </Typography>
-          {/* Controls row: viewer toggles on the left, actions on the right */}
-          <Stack direction="row" alignItems="center" spacing={`${SPACING.SM}px`} useFlexGap sx={{ mb: `${SPACING.XS}px`, minHeight: 28, flexWrap: "wrap", rowGap: `${SPACING.XS}px`, width: "100%", maxWidth: "100%", boxSizing: "border-box" }}>
+	            </Box>} theme={themeInfo.theme} />}
+	            {showControls && (
+	              <Button
+	                size="small"
+	                sx={{
+	                  ...compactButton,
+	                  ml: 0.75,
+	                  py: 0,
+	                  px: 0.5,
+	                  minHeight: 16,
+	                  lineHeight: "16px",
+	                  verticalAlign: "baseline",
+	                }}
+	                onClick={() => setControlsCollapsed(!controlsCollapsed)}
+	                aria-label={controlsCollapsed ? "Show controls" : "Hide controls"}
+	                aria-pressed={!controlsCollapsed}
+	                title={controlsCollapsed ? "Show controls" : "Hide controls"}
+	              >
+	                Controls
+	              </Button>
+	            )}
+	          </Typography>}
+	          {/* Controls row: viewer toggles on the left, actions on the right */}
+	          {controlsVisible && (
+	          <Stack direction="row" alignItems="center" spacing={`${SPACING.SM}px`} useFlexGap sx={{ mb: `${SPACING.XS}px`, minHeight: 28, flexWrap: "wrap", rowGap: `${SPACING.XS}px`, width: "100%", maxWidth: "100%", boxSizing: "border-box" }}>
             {isGallery && (
               <>
                 <Typography sx={{ ...typography.label, fontSize: 10 }}>Cols</Typography>
@@ -5122,6 +5166,34 @@ function Show2D() {
                   </Menu>
                 </>
               )}
+              {handoffEnabled && (
+                <>
+                  <Button
+                    size="small"
+                    sx={compactButton}
+                    onClick={(e) => setViewMenuAnchor(e.currentTarget)}
+                    aria-label="Open view options"
+                    aria-controls={viewMenuAnchor ? "show2d-view-menu" : undefined}
+                    aria-expanded={viewMenuAnchor ? "true" : undefined}
+                    aria-haspopup="menu"
+                    title={handoffStatus || "View options"}
+                  >
+                    View
+                  </Button>
+                  <Menu
+                    id="show2d-view-menu"
+                    anchorEl={viewMenuAnchor}
+                    open={Boolean(viewMenuAnchor)}
+                    onClose={() => setViewMenuAnchor(null)}
+                    MenuListProps={{ "aria-label": "View options" }}
+                    {...themedTopMenuProps}
+                  >
+                    <MenuItem onClick={handleHandoffToShow3D} sx={{ fontSize: 12 }}>
+                      Prepare as 3D
+                    </MenuItem>
+                  </Menu>
+                </>
+              )}
               <Button
                 size="small"
                 sx={{ ...compactButton, color: themeColors.accent }}
@@ -5155,8 +5227,24 @@ function Show2D() {
               )}
               <Button size="small" sx={compactButton} disabled={!needsReset} onClick={handleResetAll}>Reset</Button>
               <Button size="small" sx={compactButton} onClick={handleCopy}>Copy</Button>
+              {handoffEnabled && handoffStatus && (
+                <Typography
+                  sx={{
+                    ...typography.label,
+                    maxWidth: 140,
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                    color: handoffStatus.startsWith("Handoff failed") ? "#d32f2f" : themeColors.textMuted,
+                  }}
+                  title={handoffStatus}
+                >
+                  {handoffStatus}
+                </Typography>
+              )}
             </Box>
-          </Stack>
+	          </Stack>
+	          )}
 
           {isGallery ? (
             /* Gallery mode */
@@ -5167,7 +5255,7 @@ function Show2D() {
                     ref={(el: HTMLDivElement | null) => { imageContainerRefs.current[i] = el; }}
                     sx={{
                       ...responsivePanelSx,
-                      border: `2px solid ${i === selectedIdx ? themeColors.accent : themeColors.border}`,
+	                      border: `2px solid ${panelChromeVisible && i === selectedIdx ? themeColors.accent : themeColors.border}`,
                       "&:hover .show2d-panel-hide-button, &:focus-within .show2d-panel-hide-button": {
                         opacity: 1,
                         pointerEvents: "auto",
@@ -5205,7 +5293,7 @@ function Show2D() {
                       width={Math.round(canvasW * DPR)} height={Math.round(canvasH * DPR)}
                       style={responsiveOverlayStyle}
                     />
-                    {cursorInfo && cursorInfo.idx === i && (
+	                    {panelChromeVisible && cursorInfo && cursorInfo.idx === i && (
                       /* Show4DSTEM readout spec; top-right, dropped 25px below the star button row */
                       <Box sx={{ position: "absolute", top: 28, right: 3, bgcolor: "rgba(0,0,0,0.35)", px: 0.5, py: 0.15, pointerEvents: "none", minWidth: 100, textAlign: "right", zIndex: 2 }}>
                         <Typography sx={{ fontSize: 9, fontFamily: "monospace", color: "rgba(255,255,255,0.7)", whiteSpace: "nowrap", lineHeight: 1.2 }}>
@@ -5239,7 +5327,8 @@ function Show2D() {
                         {panelLabel(i)}
                       </Box>
                     )}
-                    <IconButton
+	                    {panelChromeVisible && (
+	                    <IconButton
                       className="show2d-panel-star-button"
                       size="small"
                       onPointerDown={(event) => event.stopPropagation()}
@@ -5280,8 +5369,10 @@ function Show2D() {
                       }}
                     >
                       {starred?.[i] ? "★" : "☆"}
-                    </IconButton>
-                    <IconButton
+	                    </IconButton>
+	                    )}
+	                    {panelChromeVisible && (
+	                    <IconButton
                       className="show2d-panel-hide-button"
                       size="small"
                       disabled={visibleImageCount <= 1}
@@ -5313,7 +5404,8 @@ function Show2D() {
                       }}
                     >
                       <VisibilityOffIcon sx={{ fontSize: 15 }} />
-                    </IconButton>
+	                    </IconButton>
+	                    )}
                     {showResizeControls && (
                       <Box
                         onMouseDown={handleCanvasResizeStart}
@@ -5358,7 +5450,7 @@ function Show2D() {
                       sx={{
                         mt: 0.5,
                         ...responsivePanelSx,
-                        border: `2px solid ${i === selectedIdx ? themeColors.accent : themeColors.border}`,
+	                        border: `2px solid ${panelChromeVisible && i === selectedIdx ? themeColors.accent : themeColors.border}`,
                         cursor: "grab",
                       }}
                       onWheel={(i === selectedIdx || fftLinkedZoom) ? (e) => handleGalleryFftWheel(e, i) : undefined}
@@ -5468,7 +5560,7 @@ function Show2D() {
                 width={Math.round(canvasW * DPR)} height={Math.round(canvasH * DPR)}
                 style={responsiveOverlayStyle}
               />
-              {cursorInfo && (
+	              {panelChromeVisible && cursorInfo && (
                 /* Show4DSTEM readout spec verbatim (single-image mode has no star button) */
                 <Box sx={{ position: "absolute", top: 3, right: 3, bgcolor: "rgba(0,0,0,0.35)", px: 0.5, py: 0.15, pointerEvents: "none", minWidth: 100, textAlign: "right" }}>
                   <Typography sx={{ fontSize: 9, fontFamily: "monospace", color: "rgba(255,255,255,0.7)", whiteSpace: "nowrap", lineHeight: 1.2 }}>
@@ -5524,7 +5616,7 @@ function Show2D() {
           )}
 
           {/* Controls: two rows left + histogram right, ROI below */}
-          {showControls && (
+	          {controlsVisible && (
             <Box sx={{ mt: (effectiveShowFft && isGallery) ? `${SPACING.XS}px` : `${SPACING.SM}px`, display: "flex", flexDirection: "column", gap: `${SPACING.XS}px`, boxSizing: "border-box" }}>
               {/* Top: control rows + histogram side by side */}
               <Box sx={{ display: "flex", flexWrap: "wrap", gap: `${SPACING.SM}px`, width: "100%", maxWidth: galleryGridWidth, minWidth: 0, boxSizing: "border-box" }}>
@@ -5725,7 +5817,7 @@ function Show2D() {
           )}
 
           {/* Gallery FFT Controls - below regular image controls */}
-          {effectiveShowFft && isGallery && (
+	          {controlsVisible && effectiveShowFft && isGallery && (
             <Box sx={{ mt: `${SPACING.XS}px`, display: "flex", flexWrap: "wrap", gap: `${SPACING.SM}px`, width: "100%", maxWidth: galleryGridWidth, minWidth: 0, boxSizing: "border-box" }}>
               <Box sx={{ display: "flex", flexDirection: "column", gap: `${SPACING.XS}px`, flex: "1 1 260px", minWidth: 0, justifyContent: "flex-start" }}>
                 <Box sx={{ ...controlRow, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, opacity: 1, pointerEvents: "auto" }}>

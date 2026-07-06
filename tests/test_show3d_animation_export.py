@@ -138,10 +138,10 @@ def test_show3d_save_mp4_uses_panel_only_renderer(
 
 
 def test_show3d_animation_frame_labels_are_opt_in(monkeypatch) -> None:
-    captured: list[list[str] | None] = []
+    captured: list[tuple[list[str] | None, list[str] | None]] = []
 
     def fake_compose_panel_grid(images, **kwargs):
-        captured.append(kwargs["frame_labels"])
+        captured.append((kwargs["panel_titles"], kwargs["frame_labels"]))
         return images[0]
 
     monkeypatch.setattr(gif_utils, "compose_panel_grid", fake_compose_panel_grid)
@@ -163,7 +163,7 @@ def test_show3d_animation_frame_labels_are_opt_in(monkeypatch) -> None:
         show_frame_labels=False,
         background="dark",
     )
-    assert captured[-1] is None
+    assert captured[-1] == (["raw", "denoised"], None)
 
     widget._render_animation_frames(
         quality="high",
@@ -171,7 +171,49 @@ def test_show3d_animation_frame_labels_are_opt_in(monkeypatch) -> None:
         show_frame_labels=True,
         background="dark",
     )
-    assert captured[-1] == ["raw frame 4", "den frame 4"]
+    assert captured[-1] == (
+        ["raw · raw frame 4 4/4", "denoised · den frame 4 4/4"],
+        None,
+    )
+
+
+def test_show3d_gif_multi_panel_draws_live_style_overlays() -> None:
+    yy, xx = np.mgrid[:64, :64].astype(np.float32)
+    stack = np.stack([
+        np.exp(-((xx - 24 - idx) ** 2 + (yy - 30) ** 2) / 90.0)
+        for idx in range(3)
+    ]).astype(np.float32)
+    widget = Show3D(
+        stack,
+        stack * 0.7,
+        panel_titles=["Raw", "Smoothed"],
+        panel_frame_labels=[
+            ["scan 001", "scan 002", "scan 003"],
+            ["scan 001", "scan 002", "scan 003"],
+        ],
+        sampling=0.5,
+        units="nm",
+        max_cols=2,
+        panel_gap=4,
+        cmap="inferno",
+        show_controls=False,
+        show_panel_titles=True,
+        show_scale_bar=True,
+        show_zoom_indicator=True,
+    )
+
+    frame = widget._render_animation_frames(
+        quality="high",
+        playback="forward",
+        show_frame_labels=True,
+        background="black",
+    )[0]
+
+    arr = np.asarray(frame.convert("RGB"))
+    white = np.all(arr > 245, axis=2)
+    assert white[:14].sum() > 8  # centered top labels
+    assert white[-24:, :42].sum() > 5  # bottom-left 1.0x zoom readout
+    assert white[-18:, -52:].sum() > 20  # bottom-right scale bar and label
 
 
 def test_show3d_frontend_gif_export_request_creates_payload() -> None:

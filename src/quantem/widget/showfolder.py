@@ -155,6 +155,22 @@ class ShowFolder:
             raise ValueError("No folder has been browsed yet.")
         return self.browser.show_selected_stack()
 
+    def data_transfer(
+        self,
+        targets: list[str | Path] | tuple[str | Path, ...],
+        **kwargs: Any,
+    ):
+        """Create a DataTransfer review widget for this folder.
+
+        ShowFolder remains read-only browsing; DataTransfer owns the explicit
+        copy/verify/manifest workflow.
+        """
+        if self.folder is None:
+            raise ValueError("No folder has been browsed yet.")
+        from quantem.widget.data_transfer import DataTransfer
+
+        return DataTransfer(self.folder, targets, **kwargs)
+
     def watch(
         self,
         interval: float = 2.0,

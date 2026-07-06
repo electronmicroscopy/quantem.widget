@@ -198,6 +198,48 @@ def test_showdiffraction_state_dict_roundtrip():
     assert len(w2.spots) == 1
 
 
+def test_showdiffraction_ui_mode_presets_and_overrides():
+    data = np.random.rand(16, 16).astype(np.float32)
+
+    presentation = ShowDiffraction(data, ui_mode="presentation", verbose=False)
+    assert presentation.show_title is True
+    assert presentation.show_controls is True
+    assert presentation.controls_collapsed is True
+    assert presentation.show_stats is False
+
+    report = ShowDiffraction(data, ui_mode="report", verbose=False)
+    assert report.show_title is True
+    assert report.show_controls is False
+    assert report.controls_collapsed is False
+    assert report.show_stats is False
+
+    minimal = ShowDiffraction(data, ui_mode="minimal", verbose=False)
+    assert minimal.show_title is False
+    assert minimal.show_controls is False
+    assert minimal.controls_collapsed is False
+    assert minimal.show_stats is False
+
+    override = ShowDiffraction(
+        data,
+        ui_mode="minimal",
+        show_title=True,
+        show_controls=True,
+        controls_collapsed=True,
+        show_stats=True,
+        verbose=False,
+    )
+    assert override.show_title is True
+    assert override.show_controls is True
+    assert override.controls_collapsed is True
+    assert override.show_stats is True
+    assert override.expand_controls() is override
+    assert override.controls_collapsed is False
+    assert override.collapse_controls() is override
+    assert override.controls_collapsed is True
+    assert override.toggle_controls() is override
+    assert override.controls_collapsed is False
+
+
 def test_showdiffraction_save_load_file(tmp_path):
     data = np.random.rand(16, 16).astype(np.float32)
     w = ShowDiffraction(data, verbose=False)

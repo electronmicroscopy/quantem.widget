@@ -453,6 +453,16 @@ class ShowFolderBrowser:
 
         return VBox([self.show_selected(), self.show_selected_stack()])
 
+    def data_transfer(
+        self,
+        targets: list[str | Path] | tuple[str | Path, ...],
+        **kwargs: Any,
+    ):
+        """Create a DataTransfer review widget for this browsed folder."""
+        from quantem.widget.data_transfer import DataTransfer
+
+        return DataTransfer(self.folder, targets, **kwargs)
+
     def inherit_selected_viewers_from(self, previous: "ShowFolderBrowser") -> None:
         """Carry open selected viewers across a live-folder browser rebuild."""
         self._active_selected_modes = set(getattr(previous, "_active_selected_modes", set()))

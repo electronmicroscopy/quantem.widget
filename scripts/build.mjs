@@ -7,6 +7,7 @@ import { rmSync, copyFileSync, mkdirSync, existsSync } from "fs";
 
 const watch = process.argv.includes("--watch");
 const widgets = [
+  { name: "show1d" },
   { name: "show2d" },
   { name: "show3d" },
   { name: "show3dslices" },

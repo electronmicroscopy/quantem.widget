@@ -74,6 +74,50 @@ def test_showeds_constructor_sets_shape_and_state():
     assert len(widget.base_image_bytes) == cube.shape[0] * cube.shape[1] * 4
 
 
+def test_showeds_ui_mode_presets_and_scale_bar_alias():
+    cube = np.zeros((5, 6, 7), dtype=np.float32)
+
+    presentation = ShowEDS(cube, ui_mode="presentation")
+    assert presentation.show_title is True
+    assert presentation.show_controls is True
+    assert presentation.controls_collapsed is True
+    assert presentation.scale_bar_visible is True
+
+    report = ShowEDS(cube, ui_mode="report")
+    assert report.show_title is True
+    assert report.show_controls is False
+    assert report.controls_collapsed is False
+    assert report.scale_bar_visible is True
+
+    minimal = ShowEDS(cube, ui_mode="minimal")
+    assert minimal.show_title is False
+    assert minimal.show_controls is False
+    assert minimal.controls_collapsed is False
+    assert minimal.scale_bar_visible is False
+
+    override = ShowEDS(
+        cube,
+        ui_mode="minimal",
+        show_title=True,
+        show_controls=True,
+        controls_collapsed=True,
+        show_scale_bar=True,
+    )
+    assert override.show_title is True
+    assert override.show_controls is True
+    assert override.controls_collapsed is True
+    assert override.scale_bar_visible is True
+    assert override.expand_controls() is override
+    assert override.controls_collapsed is False
+    assert override.collapse_controls() is override
+    assert override.controls_collapsed is True
+    assert override.toggle_controls() is override
+    assert override.controls_collapsed is False
+
+    with pytest.raises(ValueError, match="show_scale_bar"):
+        ShowEDS(cube, scale_bar_visible=True, show_scale_bar=False)
+
+
 def test_showeds_accepts_spectrum_image_container():
     cube = np.arange(4 * 5 * 6, dtype=np.uint16).reshape(4, 5, 6)
     energy = np.linspace(0, 5, 6, dtype=np.float32)

@@ -182,9 +182,11 @@ sizes.
 **Acceptance checks**:
 
 - Export GIF and MP4 panel-only animations.
-- Verify expected frame count, labels, border/background, playback speed, and
-  file size.
+- Verify expected frame count, multi-panel layout, live-style labels, scale bar,
+  zoom readout, border/background, playback speed, and file size.
 - Verify quality/speed options are visible and have clear labels.
+- Run `PYTHONPATH=src:. python scripts/widget_show3d_animation_smoke.py` when
+  judging whether a GIF is good enough for PowerPoint/email sharing.
 
 ### S3D-11: Export Shareable HTML
 

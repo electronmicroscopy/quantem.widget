@@ -5,12 +5,13 @@ homes for structures that have not moved to core yet.
 """
 
 from quantem.widget.data.dataset5dstem import Dataset5dstem
-from quantem.widget.data.tutorials import (
-    load_tutorial_showfolder_folder,
-    load_tutorial_show2d,
-    load_tutorial_show3d,
-    load_tutorial_show4dstem,
-)
+
+_TUTORIAL_EXPORTS = {
+    "load_tutorial_showfolder_folder",
+    "load_tutorial_show2d",
+    "load_tutorial_show3d",
+    "load_tutorial_show4dstem",
+}
 
 __all__ = [
     "Dataset5dstem",
@@ -19,3 +20,13 @@ __all__ = [
     "load_tutorial_show3d",
     "load_tutorial_show4dstem",
 ]
+
+
+def __getattr__(name: str):
+    if name in _TUTORIAL_EXPORTS:
+        from quantem.widget.data import tutorials
+
+        value = getattr(tutorials, name)
+        globals()[name] = value
+        return value
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

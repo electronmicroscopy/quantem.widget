@@ -4,8 +4,8 @@ Background: an anywidget syncs its pixel buffers as ``sync=True`` traits. On
 notebook save, ipywidgets serializes those buffers into ``metadata.widgets`` -
 a 5-panel 4k Show2D baked ~1 GB into a single .ipynb. The fix: ``save_state``
 (default False) drops the bulk buffers from the FULL-state snapshot (the save
-path, ``get_state(key=None)``) and instead attaches a static PNG so a cold
-reopen still shows the render. ``save_state=True`` embeds everything for
+path, ``get_state(key=None)``) and instead attaches a static preview image so a
+cold reopen still shows the render. ``save_state=True`` embeds everything for
 kernel-less restore.
 
 The danger in that fix is trimming too much: if the trim also hit the TARGETED
@@ -14,12 +14,57 @@ receive the buffer and the widget would render blank - invisible to unit tests
 that only check output size. These tests lock both halves of the contract so a
 future edit can't silently reintroduce either the bloat or the blank render.
 """
+import base64
+import io
 import pathlib
 
 import numpy as np
 import pytest
+from PIL import Image
 
 from quantem.widget import Show2D, Show3D, Show4DSTEM, ShowEDS
+
+
+IMAGE_MIME_KEYS = ("image/jpeg", "image/webp", "image/png")
+
+
+def _mos2_like_stack(frames: int, rows: int, cols: int) -> np.ndarray:
+    """Tiny deterministic 1H-MoS2-like HAADF lattice for preview-format tests."""
+    y, x = np.mgrid[:rows, :cols].astype(np.float32)
+    spacing = max(7.0, min(rows, cols) / 8.5)
+    sigma_mo = max(0.65, spacing * 0.115)
+    sigma_s2 = max(0.72, spacing * 0.135)
+    angle = np.deg2rad(8.0)
+    a1 = spacing * np.array([np.cos(angle), np.sin(angle)], dtype=np.float32)
+    a2 = spacing * np.array([np.cos(angle + np.pi / 3.0), np.sin(angle + np.pi / 3.0)], dtype=np.float32)
+    basis = [
+        (np.array([0.0, 0.0], dtype=np.float32), 1.00, sigma_mo),
+        ((a1 + a2) / 3.0, 0.42, sigma_s2),
+    ]
+    out: list[np.ndarray] = []
+    for idx in range(frames):
+        frame = np.full((rows, cols), 0.035, dtype=np.float32)
+        origin = np.array(
+            [cols * 0.08 + 0.16 * idx, rows * 0.10 - 0.11 * idx],
+            dtype=np.float32,
+        )
+        for lattice_row in range(-2, int(rows / spacing) + 4):
+            for lattice_col in range(-2, int(cols / spacing) + 4):
+                cell = origin + lattice_col * a1 + lattice_row * a2
+                for offset, amp, sigma in basis:
+                    cx, cy = cell + offset
+                    if (
+                        -3 * sigma <= cx < cols + 3 * sigma
+                        and -3 * sigma <= cy < rows + 3 * sigma
+                    ):
+                        r2 = (x - cx) ** 2 + (y - cy) ** 2
+                        frame += amp * np.exp(-r2 / (2.0 * sigma**2))
+        frame *= 1.0 + 0.035 * np.sin((y + 0.7 * idx) / max(rows, 1) * 2.0 * np.pi)
+        frame += 0.014 * np.sin((x + 2.0 * y + idx) / 5.0)
+        frame -= float(frame.min())
+        frame /= float(frame.max()) + 1e-6
+        out.append(frame.astype(np.float32))
+    return np.stack(out, axis=0)
 
 
 def _make(widget, *, save_state):
@@ -70,31 +115,33 @@ def test_full_snapshot_trims_bulk_buffers(widget):
 
 
 @pytest.mark.parametrize("widget", WIDGETS)
-def test_static_png_fallback_present(widget):
-    """save_state=False: a static image/png must be attached so a kernel-less
+def test_static_fallback_present(widget):
+    """save_state=False: a static image fallback must be attached so a kernel-less
     reopen (GitHub, nbviewer, cold Lab) still shows the render."""
     w, _ = _make(widget, save_state=False)
     bundle = w._repr_mimebundle_()
     data = bundle[0] if isinstance(bundle, tuple) else bundle
-    assert "image/png" in (data or {}), (
-        f"{widget.__name__}: no static PNG fallback for a cold reopen")
+    image_keys = [key for key in IMAGE_MIME_KEYS if key in (data or {})]
+    assert image_keys == ["image/jpeg"], (
+        f"{widget.__name__}: no default JPEG static fallback for a cold reopen")
 
 
 @pytest.mark.parametrize("widget", WIDGETS)
 def test_save_state_true_does_not_force_png(widget):
-    """save_state=True embeds full interactive state, so it must NOT inject the
-    static PNG (the live widget restores from the embedded buffers instead)."""
+    """save_state=True embeds full interactive state, so it must NOT inject a
+    static preview (the live widget restores from the embedded buffers instead)."""
     w, _ = _make(widget, save_state=True)
     bundle = w._repr_mimebundle_()
     data = bundle[0] if isinstance(bundle, tuple) else bundle
-    assert "image/png" not in (data or {}), (
-        f"{widget.__name__}: save_state=True should not attach the static PNG")
+    image_keys = [key for key in IMAGE_MIME_KEYS if key in (data or {})]
+    assert not image_keys, (
+        f"{widget.__name__}: save_state=True should not attach the static preview")
 
 
 @pytest.mark.parametrize("widget", WIDGETS)
 def test_default_is_save_state_false(widget):
     """The whole point: persistence is opt-in. A plain construction must behave
-    as save_state=False (static PNG present)."""
+    as save_state=False (static preview present)."""
     w, _ = _make(widget, save_state=False)
     assert w._save_state is False
 
@@ -107,14 +154,15 @@ def test_show2d_static_png_preserves_sparse_large_content():
     nearly black even though the live widget rendered fine. The PNG path should
     area-downsample instead, so thin/sparse features survive notebook save.
     """
-    import base64
-    import io
-
-    from PIL import Image
-
     image = np.zeros((1024, 1024), dtype=np.float32)
     image[101:109, 611:619] = 1000
-    widget = Show2D(image, labels=["Sparse feature"], save_state=False, verbose=False)
+    widget = Show2D(
+        image,
+        labels=["Sparse feature"],
+        save_state=False,
+        notebook_preview_format="png",
+        verbose=False,
+    )
 
     bundle = widget._repr_mimebundle_()
     data = bundle[0] if isinstance(bundle, tuple) else bundle
@@ -129,6 +177,90 @@ def test_show2d_static_png_preserves_sparse_large_content():
         & nonwhite
     )
     assert int(warm_signal.sum()) > 20
+
+
+@pytest.mark.parametrize(
+    ("format_name", "mime", "pil_format"),
+    [
+        ("jpeg", "image/jpeg", "JPEG"),
+        ("webp", "image/webp", "WEBP"),
+        ("png", "image/png", "PNG"),
+    ],
+)
+@pytest.mark.parametrize("widget_cls", [Show2D, Show3D])
+def test_notebook_preview_format_controls_saved_fallback(widget_cls, format_name, mime, pil_format):
+    """Show2D/Show3D should expose the saved-notebook preview format directly.
+
+    The compatibility trait name stays ``_static_fallback_jpeg`` for old
+    frontends, but the MIME trait tells the frontend how to interpret the bytes.
+    """
+    lattice = _mos2_like_stack(3, 64, 64)
+    if widget_cls is Show2D:
+        widget = Show2D(
+            lattice[0],
+            notebook_preview_format=format_name,
+            notebook_preview_quality=85,
+            save_state=False,
+            verbose=False,
+        )
+    else:
+        widget = Show3D(
+            lattice,
+            notebook_preview_format=format_name,
+            notebook_preview_quality=85,
+            save_state=False,
+        )
+
+    bundle = widget._repr_mimebundle_()
+    data = bundle[0] if isinstance(bundle, tuple) else bundle
+    image_keys = [key for key in IMAGE_MIME_KEYS if key in (data or {})]
+    assert image_keys == [mime]
+    with Image.open(io.BytesIO(base64.b64decode(data[mime]))) as img:
+        assert img.format == pil_format
+        assert min(img.size) > 10
+        assert np.asarray(img.convert("RGB")).std() > 0
+
+    state = widget.get_state()
+    assert state["_static_fallback_mime"] == mime
+    assert "_static_fallback_jpeg" in state
+    with Image.open(io.BytesIO(base64.b64decode(state["_static_fallback_jpeg"]))) as img:
+        assert img.format == pil_format
+
+
+def test_notebook_preview_format_none_disables_static_preview():
+    """Advanced opt-out: no preview means the notebook remains smallest, but a
+    cold reopen without widget state has no static render."""
+    widget = Show2D(
+        np.random.default_rng(34).random((48, 48), dtype=np.float32),
+        notebook_preview_format=None,
+        save_state=False,
+        verbose=False,
+    )
+    bundle = widget._repr_mimebundle_()
+    data = bundle[0] if isinstance(bundle, tuple) else bundle
+
+    assert not [key for key in IMAGE_MIME_KEYS if key in (data or {})]
+    state = widget.get_state()
+    assert "_static_fallback_jpeg" not in state
+    assert "frame_bytes" not in state
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"notebook_preview_format": "bmp"}, "notebook_preview_format"),
+        ({"notebook_preview_quality": 0}, "notebook_preview_quality"),
+        ({"notebook_preview_max_px": 0}, "notebook_preview_max_px"),
+    ],
+)
+def test_notebook_preview_options_validate(kwargs, message):
+    with pytest.raises(ValueError, match=message):
+        Show2D(
+            np.zeros((16, 16), dtype=np.float32),
+            save_state=False,
+            verbose=False,
+            **kwargs,
+        )
 
 
 def test_show2d_first_render_clears_heavy_frame_buffer():
@@ -231,6 +363,21 @@ def test_html_export_clones_keep_bulk_buffers():
     finally:
         stem_clone.close()
         stem.close()
+
+
+def test_show3d_html_export_clone_preserves_playing_state():
+    """Standalone Show3D export should autoplay when the source widget is playing."""
+    rng = np.random.default_rng(12)
+    widget = Show3D(rng.random((4, 24, 24), dtype=np.float32), save_state=False)
+    widget.play()
+
+    clone = widget._clone_for_html_export(quantized=False)
+    try:
+        assert clone.playing is True
+        assert clone.get_state()["playing"] is True
+    finally:
+        clone.close()
+        widget.close()
 
 
 def test_show3d_quantized_html_export_can_bin_heavy_stacks(tmp_path):
@@ -686,6 +833,7 @@ def test_show2d_sibling_static_output_via_nbconvert(tmp_path):
     body = dict(anymodel["state"])
     body.pop("_esm", None)
     body.pop("_static_fallback_jpeg", None)
+    body.pop("_static_fallback_mime", None)
     buffer_bytes = sum(len(b["data"]) for b in anymodel.get("buffers", []))
     assert buffer_bytes < 20_000
     assert len(json.dumps(body)) < 20_000
@@ -708,6 +856,7 @@ def test_show2d_cmd_s_snapshot_keeps_static_preview_without_heavy_pixels():
     state = widget.get_state()
 
     assert "_static_fallback_jpeg" in state
+    assert state["_static_fallback_mime"] == "image/jpeg"
     assert len(state["_static_fallback_jpeg"]) > 1000
     assert "frame_bytes" not in state
     assert "_detail_bytes" not in state
@@ -724,6 +873,7 @@ def test_show3d_cmd_s_snapshot_keeps_static_preview_without_heavy_pixels():
     state = widget.get_state()
 
     assert "_static_fallback_jpeg" in state
+    assert state["_static_fallback_mime"] == "image/jpeg"
     assert len(state["_static_fallback_jpeg"]) > 1000
     assert "frame_bytes" not in state
     assert "_buffer_bytes" not in state

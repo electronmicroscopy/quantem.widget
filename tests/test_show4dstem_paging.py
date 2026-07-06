@@ -291,6 +291,50 @@ def test_showfolder_open_show4dstem_is_lazy_after_initial_frame(monkeypatch, tmp
     assert loaded == [0, 3]
 
 
+def test_data_transfer_open_show4dstem_is_lazy_after_initial_frame(monkeypatch, tmp_path):
+    """DataTransfer handoff must not load every transferred master hot."""
+    import quantem.widget as qw
+    import quantem.widget.io.hdf5 as hdf5
+    from quantem.widget import DataTransfer
+
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    source.mkdir()
+    target.mkdir()
+    for i in range(4):
+        (source / f"scan_{i:02d}_master.h5").write_bytes(b"source")
+        (target / f"scan_{i:02d}_master.h5").write_bytes(b"target")
+    calls = []
+
+    class _Result:
+        def __init__(self, path):
+            v = int(path.split("scan_")[1][:2])
+            self.data = torch.full((4, 4, 6, 6), v, dtype=torch.uint8)
+
+    def fake_load(path, *, det_bin=4, dtype="u8", verbose=False, **kw):
+        calls.append(path)
+        return _Result(path)
+
+    monkeypatch.setattr(hdf5, "disk_of", lambda path: "disk")
+    monkeypatch.setattr(hdf5, "is_master_ready", lambda path: True)
+    monkeypatch.setattr(qw, "load", fake_load)
+
+    transfer = DataTransfer(source, [target])
+    w = transfer.open_show4dstem(gpus=None, page_budget="auto", det_bin=4, dtype="u8")
+
+    assert w.n_frames == 4
+    assert calls == [str(target / "scan_00_master.h5")]
+    assert [idx for idx, frame in enumerate(w._data._frames) if frame is not None] == [0]
+
+    w.frame_idx = 3
+    _ = w._frame_data
+
+    assert calls == [
+        str(target / "scan_00_master.h5"),
+        str(target / "scan_03_master.h5"),
+    ]
+
+
 @cuda_required
 def test_showfolder_open_show4dstem_builds_paged_multimaster_on_explicit_cuda(monkeypatch, tmp_path):
     """open_show4dstem(gpus=[...]) pages lazy masters into one Show4DSTEM."""

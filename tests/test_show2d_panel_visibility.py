@@ -109,3 +109,82 @@ def test_show2d_hidden_and_starred_roundtrip_in_state_and_html(tmp_path: pathlib
     assert "hidden_panels" in html
     assert "starred" in html
     assert "Filtered" in html
+
+
+def test_show2d_controls_collapsed_roundtrips_state_and_html(tmp_path: pathlib.Path) -> None:
+    widget = Show2D(
+        _images()[:2],
+        labels=["Raw", "Filtered"],
+        show_controls=True,
+        controls_collapsed=True,
+        verbose=False,
+    )
+
+    assert widget.controls_collapsed is True
+    assert widget.expand_controls() is widget
+    assert widget.controls_collapsed is False
+    assert widget.collapse_controls() is widget
+    assert widget.controls_collapsed is True
+    assert widget.toggle_controls() is widget
+    assert widget.controls_collapsed is False
+
+    widget.collapse_controls()
+    state = widget.state_dict()
+    assert state["show_controls"] is True
+    assert state["controls_collapsed"] is True
+
+    restored = Show2D(_images()[:2], labels=["Raw", "Filtered"], verbose=False)
+    restored.load_state_dict(state)
+    assert restored.controls_collapsed is True
+
+    out = widget.export_html(tmp_path / "show2d_controls_collapsed.html", encoding="full")
+    html = out.read_text()
+    assert "controls_collapsed" in html
+
+
+def test_show2d_ui_mode_presets_and_overrides() -> None:
+    presentation = Show2D(_images()[:2], ui_mode="presentation", verbose=False)
+    assert presentation.show_title is True
+    assert presentation.show_controls is True
+    assert presentation.controls_collapsed is True
+    assert presentation.show_stats is False
+    assert presentation.show_panel_titles is True
+    assert presentation.scale_bar_visible is True
+
+    report = Show2D(_images()[:2], ui_mode="report", verbose=False)
+    assert report.show_title is True
+    assert report.show_controls is False
+    assert report.controls_collapsed is False
+    assert report.show_stats is False
+    assert report.show_panel_titles is True
+    assert report.scale_bar_visible is True
+
+    minimal = Show2D(_images()[:2], ui_mode="minimal", verbose=False)
+    assert minimal.show_title is False
+    assert minimal.show_controls is False
+    assert minimal.controls_collapsed is False
+    assert minimal.show_stats is False
+    assert minimal.show_panel_titles is False
+    assert minimal.scale_bar_visible is False
+
+    override = Show2D(
+        _images()[:2],
+        ui_mode="minimal",
+        show_title=True,
+        show_controls=True,
+        controls_collapsed=True,
+        show_panel_titles=True,
+        show_scale_bar=True,
+        verbose=False,
+    )
+    assert override.show_title is True
+    assert override.show_controls is True
+    assert override.controls_collapsed is True
+    assert override.show_panel_titles is True
+    assert override.scale_bar_visible is True
+
+    alias = Show2D(_images()[:1], show_scale_bar=False, verbose=False)
+    assert alias.scale_bar_visible is False
+
+    with pytest.raises(ValueError, match="show_scale_bar"):
+        Show2D(_images()[:1], show_scale_bar=True, scale_bar_visible=False, verbose=False)

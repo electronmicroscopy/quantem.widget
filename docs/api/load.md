@@ -34,12 +34,29 @@ Show4DSTEM(data)
 
 On a MacBook the read uses a zero-copy Metal path, so a laptop can browse 4D-STEM
 data that does not fit in RAM **if you bin at load**: `det_bin` reduces the
-detector on the way in (mean reduction), so the full multi-gigabyte stack never
-has to materialize. A typical laptop session:
+detector on the way in with integer-sum binning, so the full multi-gigabyte
+stack never has to materialize. A typical laptop session:
 
 ```python
 data = load("scan_master.h5", det_bin=8)   # MPS, detector binned 8x -> small
 Show4DSTEM(data)
+```
+
+MPS loads include a preflight memory guard. Before allocating Metal buffers, the
+loader estimates the output footprint from HDF5 metadata and compares it to the
+Mac's recommended Metal working set. No-bin loads that exceed that budget fail
+early with a specific `det_bin` recommendation instead of risking a frozen
+laptop:
+
+```python
+data = load("scan_master.h5", backend="mps", det_bin=4)
+```
+
+Bypass the check only when you have a clean memory budget and need the exact
+no-bin stack:
+
+```python
+data = load("scan_master.h5", backend="mps", skip_mps_memory_check=True)
 ```
 
 For fastest browse workflows, combine detector binning with compact dtype:
@@ -77,12 +94,30 @@ The returned data has shape `(n_files, scan_y, scan_x, det_y, det_x)`.
 `Show4DSTEM` labels the extra axis as `Dataset` and uses the source filenames
 as slider labels when they are available.
 
+`dtype="u8"` is a browse contract, not a reconstruction contract. It routes to
+the direct `uint8` output path before stacking or sharding, so the loader avoids
+materializing a full `uint16` stack first. Counts above 255 clip to 255; use
+`dtype="u16"` or omit `dtype` when detector counts are part of the scientific
+claim.
+
 For larger series or solver workflows that should stay sharded across GPUs,
 use:
 
 ```python
 parts = load(masters, det_bin=2, gpus=[0, 1], stack=False)
 ```
+
+For browse-scale multi-GPU sessions, use the same public dtype vocabulary:
+
+```python
+parts = load(masters, det_bin=1, dtype="u8", devices=[0, 1])
+```
+
+The sharded result keeps one stack per GPU and records the file-to-device map in
+the metadata. It is disk-aware: when masters are split across independent NVMe
+mounts, the loader interleaves files by physical disk before assigning them to
+GPUs. When all files live on one disk, sharding still increases GPU capacity,
+but cold load remains disk-bound.
 
 For an explicit logical series object:
 

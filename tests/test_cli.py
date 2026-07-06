@@ -254,6 +254,55 @@ def test_show4dstem_subcommand_writes_notebook(tmp_path):
     assert list(dest.glob("*.ipynb"))
 
 
+def test_data_transfer_cli_plan_inspect_copy(tmp_path, monkeypatch):
+    import quantem.widget.io.hdf5 as hdf5
+
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    source.mkdir()
+    target.mkdir()
+    (source / "scan_000_master.h5").write_bytes(b"master")
+    (source / "scan_000_data_000001.h5").write_bytes(b"data")
+    manifest = tmp_path / "transfer.json"
+
+    monkeypatch.setattr(hdf5, "disk_of", lambda path: "disk")
+    monkeypatch.setattr(hdf5, "is_master_ready", lambda path: True)
+
+    assert cli.main([
+        "data-transfer",
+        "plan",
+        str(source),
+        str(target),
+        "--manifest",
+        str(manifest),
+    ]) == 0
+    assert manifest.exists()
+
+    assert cli.main([
+        "data-transfer",
+        "inspect",
+        "--manifest",
+        str(manifest),
+    ]) == 0
+
+    assert cli.main([
+        "data-transfer",
+        "copy",
+        "--manifest",
+        str(manifest),
+    ]) == 0
+    assert not (target / "scan_000_master.h5").exists()
+
+    assert cli.main([
+        "data-transfer",
+        "copy",
+        "--manifest",
+        str(manifest),
+        "--execute",
+    ]) == 0
+    assert (target / "scan_000_master.h5").read_bytes() == b"master"
+
+
 def test_out_path_explicit_file(tmp_path):
     p = tmp_path / "img.png"
     _png(p)

@@ -51,6 +51,7 @@ from quantem.widget.utils.state_io import (
     save_state_file,
     unwrap_state_payload,
 )
+from quantem.widget.utils.ui import UiMode, resolve_ui_mode
 
 
 # Names that JS bundle's GPUColormapEngine knows. Keep in sync with
@@ -124,6 +125,11 @@ class Show3DSlices(anywidget.AnyWidget):
         (uses ``.array`` and ``.sampling`` automatically).
     title : str, optional
         Title displayed above the viewer.
+    ui_mode : {"interactive", "presentation", "report", "minimal"}, default "interactive"
+        Shared viewer UI preset. Explicit ``show_*`` keyword arguments override
+        preset values.
+    show_title : bool, default True
+        Show the top title row.
     cmap : str, default "plasma"
         Colormap name. One of the project's valid colormaps (``"inferno"``,
         ``"viridis"``, ``"magma"``, ``"gray"``, ``"plasma"``, ...).
@@ -176,6 +182,9 @@ class Show3DSlices(anywidget.AnyWidget):
         Show secondary controls for color, colorbar, smoothing, crosshair,
         z-stretch, contrast, and playback. The slice toolbar keeps only FFT
         and Reset Zoom visible.
+    controls_collapsed : bool, default False
+        Start with controls hidden while keeping a recoverable ``Controls``
+        button in the frontend.
     show_crosshair : bool, default True
         Show slice intersection guides across orthogonal panels.
     show_fft : bool, default False
@@ -265,6 +274,7 @@ class Show3DSlices(anywidget.AnyWidget):
     export_filename = traitlets.Unicode("").tag(sync=True)
     # Display
     title = traitlets.Unicode("").tag(sync=True)
+    show_title = traitlets.Bool(True).tag(sync=True)
     cmap = traitlets.Unicode("plasma").tag(sync=True)
     log_scale = traitlets.Bool(False).tag(sync=True)
     auto_contrast = traitlets.Bool(True).tag(sync=True)
@@ -286,6 +296,7 @@ class Show3DSlices(anywidget.AnyWidget):
     view_state = traitlets.Dict(default_value={}).tag(sync=True)
     # UI
     show_controls = traitlets.Bool(True).tag(sync=True)
+    controls_collapsed = traitlets.Bool(False).tag(sync=True)
     show_stats = traitlets.Bool(False)  # Python-only: gates _compute_stats reductions, no JS bar
     show_crosshair = traitlets.Bool(True).tag(sync=True)
     show_fft = traitlets.Bool(False).tag(sync=True)
@@ -537,6 +548,8 @@ class Show3DSlices(anywidget.AnyWidget):
         *,
         title: str = "",
         title_b: str = "",
+        ui_mode: UiMode = "interactive",
+        show_title: bool | None = None,
         cmap: str = "plasma",
         sampling: float | Sequence[float] | None = None,
         units: str | Sequence[str] | None = None,
@@ -547,12 +560,14 @@ class Show3DSlices(anywidget.AnyWidget):
         pad_mode: str = "median",
         rotation_deg: float | None = None,
         post_crop: int | tuple[int, int] | tuple[int, int, int, int] | None = None,
-        scale_bar_visible: bool = True,
+        scale_bar_visible: bool | None = None,
+        show_scale_bar: bool | None = None,
         z_stretch: float | None = None,
         panel_width_px: int = 0,
-        show_controls: bool = True,
-        show_stats: bool = False,
-        show_crosshair: bool = True,
+        show_controls: bool | None = None,
+        controls_collapsed: bool | None = None,
+        show_stats: bool | None = None,
+        show_crosshair: bool | None = None,
         show_fft: bool = False,
         fft_window: bool = False,
         orthographic: bool = False,
@@ -722,7 +737,33 @@ class Show3DSlices(anywidget.AnyWidget):
         self.slice_y = self.ny // 2
         self.slice_x = self.nx // 2
 
+        if (
+            scale_bar_visible is not None
+            and show_scale_bar is not None
+            and bool(scale_bar_visible) != bool(show_scale_bar)
+        ):
+            raise ValueError("Use either show_scale_bar or scale_bar_visible, not conflicting values")
+        ui = resolve_ui_mode(
+            ui_mode,
+            defaults={
+                "show_title": True,
+                "show_controls": True,
+                "controls_collapsed": False,
+                "show_stats": False,
+                "show_crosshair": True,
+                "show_scale_bar": True,
+            },
+            overrides={
+                "show_title": show_title,
+                "show_controls": show_controls,
+                "controls_collapsed": controls_collapsed,
+                "show_stats": show_stats,
+                "show_crosshair": show_crosshair,
+                "show_scale_bar": scale_bar_visible if scale_bar_visible is not None else show_scale_bar,
+            },
+        )
         self.title = title
+        self.show_title = bool(ui["show_title"])
         self.cmap = cmap
         # pixel_size accepts: None → 0 (no scale bar), scalar (isotropic), or
         # 3-tuple/list/ndarray (anisotropic: [pz, py, px] in the same units).
@@ -753,14 +794,15 @@ class Show3DSlices(anywidget.AnyWidget):
             ps_scalar = (ps_axes[1] + ps_axes[2]) / 2.0  # lateral mean
         self.pixel_size = ps_scalar
         self.pixel_size_axes = ps_axes
-        self.scale_bar_visible = scale_bar_visible
+        self.scale_bar_visible = bool(ui["show_scale_bar"])
         if z_stretch is None:
             z_stretch = 30.0
         self.z_stretch = float(z_stretch)
         self.panel_width_px = int(panel_width_px)
-        self.show_controls = show_controls
-        self.show_stats = show_stats
-        self.show_crosshair = show_crosshair
+        self.show_controls = bool(ui["show_controls"])
+        self.controls_collapsed = bool(ui["controls_collapsed"])
+        self.show_stats = bool(ui["show_stats"])
+        self.show_crosshair = bool(ui["show_crosshair"])
         self.show_fft = show_fft
         self.fft_window = fft_window
         self.orthographic = orthographic
@@ -899,6 +941,7 @@ class Show3DSlices(anywidget.AnyWidget):
             # loads (e.g. Show3D.state_dict() into Show3DSlices) cleanly.
             "_widget": "Show3DSlices",
             "title": self.title,
+            "show_title": self.show_title,
             "viewer_kind": self.viewer_kind,
             "cmap": self.cmap,
             "log_scale": self.log_scale,
@@ -907,6 +950,7 @@ class Show3DSlices(anywidget.AnyWidget):
             "vmax": self.vmax,
             "show_stats": self.show_stats,
             "show_controls": self.show_controls,
+            "controls_collapsed": self.controls_collapsed,
             "show_crosshair": self.show_crosshair,
             "show_fft": self.show_fft,
             "fft_window": self.fft_window,
@@ -941,6 +985,21 @@ class Show3DSlices(anywidget.AnyWidget):
             "play_axis": self.play_axis,
             "dim_labels": list(self.dim_labels),
         }
+
+    def collapse_controls(self) -> Self:
+        """Collapse controls behind the frontend ``Controls`` button."""
+        self.controls_collapsed = True
+        return self
+
+    def expand_controls(self) -> Self:
+        """Expand frontend controls when ``show_controls`` is enabled."""
+        self.controls_collapsed = False
+        return self
+
+    def toggle_controls(self) -> Self:
+        """Toggle whether frontend controls start collapsed."""
+        self.controls_collapsed = not bool(self.controls_collapsed)
+        return self
 
     def save(self, path: str) -> None:
         """Write the current widget state to a versioned JSON file.
@@ -1554,11 +1613,13 @@ class Show3DSlices(anywidget.AnyWidget):
         clone = type(self)(
             self._data,
             title=self.title,
+            show_title=self.show_title,
             cmap=self.cmap,
             sampling=list(self.pixel_size_axes),
-            scale_bar_visible=self.scale_bar_visible,
+            show_scale_bar=self.scale_bar_visible,
             z_stretch=self.z_stretch,
             show_controls=self.show_controls,
+            controls_collapsed=self.controls_collapsed,
             show_stats=self.show_stats,
             show_crosshair=self.show_crosshair,
             show_fft=self.show_fft,

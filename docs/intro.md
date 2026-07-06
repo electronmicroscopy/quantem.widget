@@ -5,7 +5,7 @@ Interactive, GPU-aware Python widgets for electron microscopy, built on
 JupyterLab, VS Code, or Colab.
 
 ```python
-from quantem.widget import Show2D, Show3D, Show3DSlices, Show4DSTEM, ShowEDS, ShowDiffraction, ShowFolder, load
+from quantem.widget import Show1D, Show2D, Show3D, Show3DSlices, Show4DSTEM, ShowEDS, ShowDiffraction, ShowFolder, load
 ```
 
 ## Quickest start: no notebook needed
@@ -39,6 +39,7 @@ detector at load (`det_bin`) to cut memory and speed first paint - see
 
 | Widget | Use it for | Tutorial · API |
 |---|---|---|
+| `Show1D` | Interactive traces, live reconstruction metrics, line profiles, and linked image snapshots | [API](api/show1d) |
 | `Show2D` | One or many 2D images: contrast, FFT, ROIs, line profiles, scale bars | [tutorial](tutorials/show2d) · [API](api/show2d) |
 | `Show3D` | A 3D volume scrubbed slice-by-slice (e.g. a ptychographic object) | [tutorial](tutorials/show3d) · [API](api/show3d) |
 | `Show3DSlices` | Side-by-side slices of a 3D volume across an axis | [tutorial](tutorials/show3dslices) · [API](api/show3dslices) |

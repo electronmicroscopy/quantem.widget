@@ -3,6 +3,13 @@
 Orthogonal slices of a 3D volume side by side with a synced crosshair. See the
 [Show3DSlices tutorial](../tutorials/show3dslices).
 
+## Viewer UI
+
+`Show3DSlices` supports the shared `ui_mode`, `show_title`, `show_controls`,
+`controls_collapsed`, `show_stats`, `show_crosshair`, and `show_scale_bar`
+names. The saved-state scale-bar trait remains `scale_bar_visible` for
+compatibility. See [Viewer UI controls](viewer-ui).
+
 ## Reference
 
 ```{eval-rst}

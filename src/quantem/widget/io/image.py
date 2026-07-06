@@ -23,10 +23,25 @@ import json
 import re
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 
-from quantem.core.datastructures import Dataset2d, Dataset3d
+if TYPE_CHECKING:
+    from quantem.core.datastructures import Dataset2d, Dataset3d
+
+
+def _core_dataset_classes():
+    """Return core dataset classes when a reader actually needs them."""
+    try:
+        from quantem.core.datastructures import Dataset2d, Dataset3d
+    except Exception as exc:
+        raise ImportError(
+            "quantem.widget.io image readers require quantem.core dataset "
+            "classes. Check that quantem.core imports cleanly in this Python "
+            "environment."
+        ) from exc
+    return Dataset2d, Dataset3d
 
 
 _IMAGE_SUFFIXES = (".npy", ".emd", ".tif", ".tiff", ".png",
@@ -104,6 +119,7 @@ def read_image(path: str | Path) -> Dataset2d:
     A 3D result (a multi-frame container) is reduced to its first frame so the
     return is always a single 2D image.
     """
+    Dataset2d, _ = _core_dataset_classes()
     p = Path(path)
     ext = p.suffix.lower()
     if ext == ".npy":
@@ -145,6 +161,7 @@ def read_gif(path: str | Path) -> Dataset3d:
     Dataset3d
         Grayscale frame stack named from the file stem.
     """
+    _, Dataset3d = _core_dataset_classes()
     p = Path(path)
     if not p.is_file():
         raise FileNotFoundError(f"GIF file not found: {p}")
@@ -177,6 +194,7 @@ def _first_frame(arr: np.ndarray) -> np.ndarray:
 
 def _read_emd(p: Path) -> Dataset2d:
     """Read an EMD image: Velox HAADF layout if present, else the largest 2D dataset."""
+    Dataset2d, _ = _core_dataset_classes()
     import h5py  # noqa: PLC0415
     with h5py.File(p, "r") as f:
         if "Data/Image" in f:                       # Velox HAADF
@@ -277,6 +295,7 @@ def read_image_stack(
         Shape ``(N, H, W)``, dtype float32. Sampling defaults to pixels since a
         bare image folder carries no calibration.
     """
+    _, Dataset3d = _core_dataset_classes()
     path = Path(path)
     if not path.is_dir():
         raise FileNotFoundError(f"Not a directory: {path}")

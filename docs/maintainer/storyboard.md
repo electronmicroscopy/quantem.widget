@@ -78,6 +78,7 @@ whether a canvas appears.
 - [Show4DSTEM](storyboard-show4dstem)
 - [ShowEDS](storyboard-showeds)
 - [ShowFolder](storyboard-showfolder)
+- [DataTransfer](storyboard-data-transfer)
 
 ## Story Format
 

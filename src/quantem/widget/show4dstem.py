@@ -36,11 +36,17 @@ from quantem.widget.utils.state_io import (
     unwrap_state_payload,
 )
 from quantem.widget.utils.static_fallback import StaticFallbackMixin
-
-from quantem.core.config import validate_device
+from quantem.widget.utils.ui import UiMode, resolve_ui_mode
 
 # Cap transient chunk memory at ~600 MB regardless of detector size.
 _CHUNK_BYTE_BUDGET = 600 * 1024 * 1024
+
+
+def _validate_device(device: str | None) -> tuple[str, Any]:
+    """Resolve a compute device without importing quantem.core at module import."""
+    from quantem.core.config import validate_device
+
+    return validate_device(device)
 
 
 def _format_memory(nbytes: int) -> str:
@@ -94,6 +100,21 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
     frame_dim_label : str, optional
         Label for the frame dimension when 5D data is provided.
         Defaults to "Frame". Common values: "Tilt", "Time", "Focus".
+    ui_mode : {"interactive", "presentation", "report", "minimal"}, default "interactive"
+        Preset for viewer chrome. Explicit ``show_*`` keyword arguments override
+        the preset.
+    show_title : bool, default True
+        Show the top title row.
+    show_controls : bool, default True
+        Show the live control UI. Set ``False`` for a permanently clean display.
+    controls_collapsed : bool, default False
+        Start with the live control UI collapsed behind a small GUI toggle.
+        Unlike ``show_controls=False``, users can expand the controls in the
+        frontend and Python can call ``expand_controls()`` later.
+    show_stats : bool, default True
+        Show mean/min/max/std readout bars under the DP, virtual image, and FFT.
+    show_scale_bar : bool, default True
+        Draw scale bars on the diffraction and virtual-image canvases.
     Examples
     --------
     >>> import numpy as np
@@ -150,6 +171,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
     # Position in scan space
     widget_version = traitlets.Unicode("unknown").tag(sync=True)
     title = traitlets.Unicode("").tag(sync=True)
+    show_title = traitlets.Bool(True).tag(sync=True)
     pos_row = traitlets.Int(0).tag(sync=True)
     pos_col = traitlets.Int(0).tag(sync=True)
 
@@ -330,6 +352,9 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
     _preset_request = traitlets.Unicode("").tag(sync=True)
     fft_window = traitlets.Bool(True).tag(sync=True)
     show_controls = traitlets.Bool(True).tag(sync=True)
+    controls_collapsed = traitlets.Bool(False).tag(sync=True)
+    show_stats = traitlets.Bool(True).tag(sync=True)
+    show_scale_bar = traitlets.Bool(True).tag(sync=True)
     panel_width_px = traitlets.Int(0).tag(sync=True)
     dp_show_colorbar = traitlets.Bool(False).tag(sync=True)
     # VI panel auto-contrast (1st/99th percentile clip) and CSS smoothing.
@@ -373,13 +398,18 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         frame_dim_label: str | None = None,
         frame_labels: list[str] | None = None,
         title: str = "",
+        ui_mode: UiMode = "interactive",
+        show_title: bool | None = None,
         offline: bool | None = False,
         data_url: str | None = None,
         offline_codec: str = "gzip",
         offline_dtype: str = "uint8",
         show_fft: bool = False,
         fft_window: bool = True,
-        show_controls: bool = True,
+        show_controls: bool | None = None,
+        controls_collapsed: bool | None = None,
+        show_stats: bool | None = None,
+        show_scale_bar: bool | None = None,
         panel_width_px: int = 0,
         dp_vmin: float | None = None,
         dp_vmax: float | None = None,
@@ -404,6 +434,28 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         # persist full interactive state so a reopened notebook restores the
         # widget (offline WebGPU browse) without a kernel.
         self._save_state = bool(save_state)
+        ui = resolve_ui_mode(
+            ui_mode,
+            defaults={
+                "show_title": True,
+                "show_controls": True,
+                "controls_collapsed": False,
+                "show_stats": True,
+                "show_scale_bar": True,
+            },
+            overrides={
+                "show_title": show_title,
+                "show_controls": show_controls,
+                "controls_collapsed": controls_collapsed,
+                "show_stats": show_stats,
+                "show_scale_bar": show_scale_bar,
+            },
+        )
+        show_title = bool(ui["show_title"])
+        show_controls = bool(ui["show_controls"])
+        controls_collapsed = bool(ui["controls_collapsed"])
+        show_stats = bool(ui["show_stats"])
+        show_scale_bar = bool(ui["show_scale_bar"])
         super().__init__(**kwargs)
         self.widget_version = resolve_widget_version()
         panel_width_px = int(panel_width_px)
@@ -482,6 +534,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             units = [str(u) for u in units]
 
         self.title = title
+        self.show_title = show_title
         self.pixel_size = sampling[1]   # scan_col axis (horizontal scale bar)
         self.pixel_unit = units[1] if len(units) > 1 else "pixels"
         self.k_pixel_size = sampling[3] if len(sampling) > 3 else 1.0
@@ -491,6 +544,9 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         self.show_fft = show_fft
         self.fft_window = fft_window
         self.show_controls = show_controls
+        self.controls_collapsed = controls_collapsed
+        self.show_stats = show_stats
+        self.show_scale_bar = show_scale_bar
         self.dp_vmin = dp_vmin
         self.dp_vmax = dp_vmax
         self.vi_vmin = vi_vmin
@@ -533,7 +589,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             self._data_pre = data
             data_np = None
         else:
-            device_str, _ = validate_device(None)
+            device_str, _ = _validate_device(None)
             self._device = torch.device(device_str)
             data_np = to_numpy(data)
             self._data_pre = None
@@ -1146,10 +1202,14 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             frame_dim_label=self.frame_dim_label,
             frame_labels=list(self.frame_labels),
             title=self.title,
+            show_title=self.show_title,
             offline=False,
             show_fft=self.show_fft,
             fft_window=self.fft_window,
             show_controls=self.show_controls,
+            controls_collapsed=self.controls_collapsed,
+            show_stats=self.show_stats,
+            show_scale_bar=self.show_scale_bar,
             verbose=False,
         )
         clone.load_state_dict(self._export_state_for_bin(det_bin))
@@ -1557,6 +1617,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
     def state_dict(self):
         return {
             "title": self.title,
+            "show_title": self.show_title,
             "pos_row": self.pos_row,
             "pos_col": self.pos_col,
             "pixel_size": self.pixel_size,
@@ -1602,6 +1663,9 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             "show_fft": self.show_fft,
             "fft_window": self.fft_window,
             "show_controls": self.show_controls,
+            "controls_collapsed": self.controls_collapsed,
+            "show_stats": self.show_stats,
+            "show_scale_bar": self.show_scale_bar,
             "panel_width_px": self.panel_width_px,
             "dp_show_colorbar": self.dp_show_colorbar,
             "vi_auto_contrast": self.vi_auto_contrast,
@@ -1639,6 +1703,21 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             col = int(self.pos_col if pending_pos_col is None else pending_pos_col)
             self.pos_row = int(max(0, min(row, self.shape_rows - 1)))
             self.pos_col = int(max(0, min(col, self.shape_cols - 1)))
+
+    def collapse_controls(self) -> Self:
+        """Collapse the live control UI while leaving the GUI toggle available."""
+        self.controls_collapsed = True
+        return self
+
+    def expand_controls(self) -> Self:
+        """Expand the live control UI."""
+        self.controls_collapsed = False
+        return self
+
+    def toggle_controls(self) -> Self:
+        """Toggle the collapsed state of the live control UI."""
+        self.controls_collapsed = not bool(self.controls_collapsed)
+        return self
 
     def free(self):
         """Free GPU memory held by this widget.

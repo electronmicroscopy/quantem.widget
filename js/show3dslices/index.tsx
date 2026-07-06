@@ -933,12 +933,15 @@ function Show3DSlices() {
   const [obliqueAngle, setObliqueAngle] = useModelState<number>("oblique_angle");
   const [obliqueProfileLine, setObliqueProfileLine] = useModelState<{ row: number; col: number }[]>("oblique_profile_line");
   const [title] = useModelState<string>("title");
+  const [showTitle] = useModelState<boolean>("show_title");
   const [cmap, setCmap] = useModelState<string>("cmap");
   const [logScale, setLogScale] = useModelState<boolean>("log_scale");
   const [autoContrast, setAutoContrast] = useModelState<boolean>("auto_contrast");
   const [traitVmin] = useModelState<number | null>("vmin");
   const [traitVmax] = useModelState<number | null>("vmax");
   const [showControls] = useModelState<boolean>("show_controls");
+  const [controlsCollapsed, setControlsCollapsed] = useModelState<boolean>("controls_collapsed");
+  const controlsVisible = showControls && !controlsCollapsed;
   const [showCrosshair] = useModelState<boolean>("show_crosshair");
   const [panelWidthPx] = useModelState<number>("panel_width_px");
   type Show3DSlicesViewState = {
@@ -4034,6 +4037,18 @@ function Show3DSlices() {
       maxWidth: "none",
       flexWrap: "nowrap" as const,
     }}>
+      {showControls && (
+        <Button
+          size="small"
+          sx={compactButton}
+          onClick={() => setControlsCollapsed(!controlsCollapsed)}
+          aria-label={controlsCollapsed ? "Show controls" : "Hide controls"}
+        >
+          {controlsCollapsed ? "Controls" : "Hide"}
+        </Button>
+      )}
+      {controlsVisible && (
+        <>
       <Typography sx={{ ...controlLabel }}>FFT</Typography>
       <Switch checked={showFft} onChange={(e) => setShowFft(e.target.checked)} size="small" sx={switchStyles.small} inputProps={{ "aria-label": "Toggle FFT power spectrum panels" }} />
       {exportEnabled && (
@@ -4089,6 +4104,8 @@ function Show3DSlices() {
       >
         Reset Zoom
       </Button>
+        </>
+      )}
     </Box>
   );
 
@@ -4103,7 +4120,7 @@ function Show3DSlices() {
       {/* 3D Volume Renderer (left column) */}
       <Box sx={{ mb: 0, flexShrink: 0, width: webgpuSupported ? volumeCanvasSize : 220, overflow: "visible" }}>
         {/* Title row */}
-        <Typography variant="caption" sx={{ ...typography.label, color: tc.accent, mb: `${SPACING.XS}px`, display: "block", height: 16, lineHeight: "16px", overflow: "hidden" }}>
+        {showTitle && <Typography variant="caption" sx={{ ...typography.label, color: tc.accent, mb: `${SPACING.XS}px`, display: "block", height: 16, lineHeight: "16px", overflow: "hidden" }}>
           {title || "Volume 3D"}<InfoTooltip text={<Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
             <MetadataSection rows={[
               ["Shape", `${nz} x ${ny} x ${nx}`],
@@ -4124,11 +4141,12 @@ function Show3DSlices() {
             <KeyboardShortcuts items={[["Space", "Play / Pause"], ["← / →", "Active axis -/+"], ["↑ / ↓", "Angle -/+"], ["Home / End", "First / Last on active axis"], ["R", "Reset zoom"], ["Click panel", "Jump to voxel"], ["Scroll", "Zoom"], ["Dbl-click", "Reset view"]]} />
           </Box>} theme={themeInfo.theme} />
           {/* ControlCustomizer dropped in new monorepo */}
-        </Typography>
+        </Typography>}
         {webgpuSupported ? (
           <Stack direction="row" spacing={`${SPACING.SM}px`}>
             {/* Volume A */}
             <Box>
+              {controlsVisible && (
               <Box sx={{ ...inlineVolumeControlRow, mb: `${SPACING.XS}px` }}>
                 <Typography sx={{ ...controlLabel }}>Planes</Typography>
                 <ToggleButtonGroup
@@ -4160,6 +4178,7 @@ function Show3DSlices() {
                 <Typography sx={{ ...controlLabel }}>Vol Strength</Typography>
                 <LiveNumberSlider value={opacityA} min={0} max={1} step={0.05} onLiveChange={(v) => handleVolumeControlChange("opacity", v)} onCommit={(v) => handleVolumeControlCommit("opacity", v)} sx={{ ...sliderStyles.small, width: 50 }} ariaLabel="Volume strength" />
               </Box>
+              )}
               <Box
                 sx={{
                   ...container.imageBox,
@@ -4530,7 +4549,7 @@ function Show3DSlices() {
         </Box>
       )}
       {/* Controls row with histogram anchored to the slice panel columns. */}
-      {showControls && (() => {
+      {controlsVisible && (() => {
         const histogramW = 110;
         const histogramH = controlRowHeight * 2 + SPACING.XS;
         return (
@@ -4597,7 +4616,7 @@ function Show3DSlices() {
         );
       })()}
       {/* Playback: transport + axis selector + fps + loop + bounce */}
-      <Box sx={{ ...contentControlRow, mt: `${SPACING.SM}px`, flexWrap: "nowrap" }}>
+      {controlsVisible && <Box sx={{ ...contentControlRow, mt: `${SPACING.SM}px`, flexWrap: "nowrap" }}>
         <Select
           value={playbackAxis}
           onChange={(e) => { setPlaying(false); setPlayAxis(Number(e.target.value)); }}
@@ -4643,7 +4662,7 @@ function Show3DSlices() {
         <Switch size="small" checked={loop} onChange={() => setLoop(!loop)} sx={{ ...switchStyles.small, flexShrink: 0 }} inputProps={{ "aria-label": "Toggle loop playback" }} />
         <Typography sx={{ ...controlLabel, color: tc.textMuted, flexShrink: 0 }}>Bounce</Typography>
         <Switch size="small" checked={boomerang} onChange={() => setBoomerang(!boomerang)} sx={{ ...switchStyles.small, flexShrink: 0 }} inputProps={{ "aria-label": "Toggle bounce (ping-pong) playback" }} />
-      </Box>
+      </Box>}
     </Box>
   );
 }

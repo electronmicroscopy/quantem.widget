@@ -13,7 +13,7 @@ import pathlib
 import tempfile
 import warnings
 from enum import StrEnum
-from typing import Self, Sequence
+from typing import Any, Self, Sequence
 
 import anywidget
 import matplotlib
@@ -25,8 +25,24 @@ import traitlets
 from quantem.widget.utils.array import _b64_safe, _resize_image, to_numpy
 from quantem.widget.utils.state_io import resolve_widget_version, save_state_file, unwrap_state_payload
 from quantem.widget.utils.static_fallback import StaticFallbackMixin
+from quantem.widget.utils.ui import UiMode, resolve_ui_mode
 
-from quantem.core.datastructures import Dataset2d, Dataset3d
+_CORE_IMAGE_DATASET_IMPORT_ATTEMPTED = False
+_CORE_IMAGE_DATASET_TYPES: tuple[type[Any], ...] = ()
+
+
+def _core_image_dataset_types() -> tuple[type[Any], ...]:
+    """Return core image dataset classes when quantem.core is importable."""
+    global _CORE_IMAGE_DATASET_IMPORT_ATTEMPTED, _CORE_IMAGE_DATASET_TYPES
+    if not _CORE_IMAGE_DATASET_IMPORT_ATTEMPTED:
+        _CORE_IMAGE_DATASET_IMPORT_ATTEMPTED = True
+        try:
+            from quantem.core.datastructures import Dataset2d, Dataset3d
+        except Exception:
+            _CORE_IMAGE_DATASET_TYPES = ()
+        else:
+            _CORE_IMAGE_DATASET_TYPES = (Dataset2d, Dataset3d)
+    return _CORE_IMAGE_DATASET_TYPES
 
 
 def _reject_unknown_kwargs(cls, kwargs: dict) -> None:
@@ -247,6 +263,12 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
         ``"nm"``, ``"pixels"``. Defaults to ``["pixels", "pixels"]``.
     show_fft : bool, default False
         Show FFT and histogram panels.
+    show_controls : bool, default True
+        Show the live control UI. Set ``False`` for a permanently clean display.
+    controls_collapsed : bool, default False
+        Start with the live control UI collapsed behind a small GUI toggle.
+        Unlike ``show_controls=False``, users can expand the controls in the
+        frontend and Python can call ``expand_controls()`` later.
     show_stats : bool, default True
         Show statistics (mean, min, max, std).
     log_scale : bool, default False
@@ -278,6 +300,20 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
         presentation, or ``size=200`` to compress alongside a control panel.
         This controls **display only**: the underlying image resolution is
         never resampled; zooming into a 4K image preserves every pixel.
+    save_state : bool, default False
+        When False, saved notebooks omit heavy image buffers and keep a compact
+        static preview for cold reopen. Set True only for small widgets that
+        must reopen interactively without rerunning the kernel.
+    notebook_preview_format : {"jpeg", "webp", "png"} or None, default "jpeg"
+        Static preview format used when ``save_state=False``. ``"jpeg"`` is the
+        most portable notebook default, ``"webp"`` is smaller for local/report
+        workflows, ``"png"`` is lossless but larger, and ``None`` disables the
+        preview.
+    notebook_preview_quality : int, default 88
+        Lossy preview quality for JPEG/WebP, from 1 to 100. Ignored for PNG.
+    notebook_preview_max_px : int, default 512
+        Longest panel side for the saved-notebook preview. Lower values make
+        notebooks smaller; higher values make the static fallback sharper.
     Attributes
     ----------
     render_total_ms : int or None
@@ -406,6 +442,7 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
     # render on a light/white background regardless of the viewer's OS theme.
     _export_light = traitlets.Bool(False).tag(sync=True)
     _static_fallback_jpeg = traitlets.Unicode("").tag(sync=True)
+    _static_fallback_mime = traitlets.Unicode("image/jpeg").tag(sync=True)
     _offline_min = traitlets.Float(0.0).tag(sync=True)
     _offline_max = traitlets.Float(1.0).tag(sync=True)
     # Per-image quantization ranges. A gallery's panels can span very different
@@ -428,6 +465,9 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
     export_payload = traitlets.Bytes(b"").tag(sync=True)
     export_payload_id = traitlets.Unicode("").tag(sync=True)
     export_filename = traitlets.Unicode("").tag(sync=True)
+    handoff_request = traitlets.Unicode("").tag(sync=True)
+    handoff_status = traitlets.Unicode("").tag(sync=True)
+    handoff_enabled = traitlets.Bool(True).tag(sync=True)
     labels = traitlets.List(traitlets.Unicode()).tag(sync=True)
     # Per-panel RGB flag. True panels carry display-ready (H, W, 3) pixels that
     # bypass the colormap/contrast pipeline in JS; False panels are grayscale.
@@ -438,6 +478,7 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
     panel_title_font_size = traitlets.Int(11).tag(sync=True)
     gallery_gap_px = traitlets.Int(0).tag(sync=True)
     title = traitlets.Unicode("").tag(sync=True)
+    show_title = traitlets.Bool(True).tag(sync=True)
     cmap = traitlets.Unicode("inferno").tag(sync=True)
     ncols = traitlets.Int(3).tag(sync=True)
 
@@ -479,6 +520,7 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
     # UI Visibility
     # =========================================================================
     show_controls = traitlets.Bool(True).tag(sync=True)
+    controls_collapsed = traitlets.Bool(False).tag(sync=True)
     show_stats = traitlets.Bool(True).tag(sync=True)
     stats_mean = traitlets.List(traitlets.Float()).tag(sync=True)
     stats_min = traitlets.List(traitlets.Float()).tag(sync=True)
@@ -554,14 +596,18 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
         data: np.ndarray | list[np.ndarray],
         labels: list[str | None] = None,
         title: str = "",
+        ui_mode: UiMode = "interactive",
+        show_title: bool | None = None,
         cmap: str | Colormap = Colormap.INFERNO,
         sampling: float | tuple[float, float] | list[float] | None = None,
         units: str | list[str] | None = None,
-        scale_bar_visible: bool = True,
+        scale_bar_visible: bool | None = None,
+        show_scale_bar: bool | None = None,
         show_fft: bool = False,
         fft_window: bool = True,
-        show_controls: bool = True,
-        show_stats: bool = True,
+        show_controls: bool | None = None,
+        controls_collapsed: bool | None = None,
+        show_stats: bool | None = None,
         verbose: bool = True,
         log_scale: bool = False,
         auto_contrast: bool = False,
@@ -585,11 +631,14 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
         display_bin: int | str = "auto",
         hidden_panels: Sequence[int | str] | int | str | None = None,
         starred: Sequence[int | str] | int | str | None = None,
-        show_panel_titles: bool = True,
+        show_panel_titles: bool | None = None,
         panel_title_font_size: int = 11,
         gallery_gap_px: int = 0,
         state=None,
         save_state: bool = False,
+        notebook_preview_format: str | None = "jpeg",
+        notebook_preview_quality: int = 88,
+        notebook_preview_max_px: int = 512,
         **kwargs,
     ):
         import time as _time
@@ -609,13 +658,51 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
         gallery_gap_px = int(gallery_gap_px)
         if gallery_gap_px < 0:
             raise ValueError(f"gallery_gap_px must be >= 0, got {gallery_gap_px}")
+        if (
+            scale_bar_visible is not None
+            and show_scale_bar is not None
+            and bool(scale_bar_visible) != bool(show_scale_bar)
+        ):
+            raise ValueError("Use either show_scale_bar or scale_bar_visible, not conflicting values")
+        ui = resolve_ui_mode(
+            ui_mode,
+            defaults={
+                "show_title": True,
+                "show_controls": True,
+                "controls_collapsed": False,
+                "show_stats": True,
+                "show_panel_titles": True,
+                "show_scale_bar": True,
+            },
+            overrides={
+                "show_title": show_title,
+                "show_controls": show_controls,
+                "controls_collapsed": controls_collapsed,
+                "show_stats": show_stats,
+                "show_panel_titles": show_panel_titles,
+                "show_scale_bar": scale_bar_visible if scale_bar_visible is not None else show_scale_bar,
+            },
+        )
+        show_title = bool(ui["show_title"])
+        show_controls = bool(ui["show_controls"])
+        controls_collapsed = bool(ui["controls_collapsed"])
+        show_stats = bool(ui["show_stats"])
+        show_panel_titles = bool(ui["show_panel_titles"])
+        scale_bar_visible = bool(ui["show_scale_bar"])
         # save_state controls whether the heavy pixel buffers are persisted into
         # the notebook's metadata.widgets on save. Default False: a plain display
-        # embeds only light traits + a static PNG, so a 5-panel 4k gallery does
-        # not bake ~1 GB into the .ipynb. Set True to persist full interactive
-        # state so a reopened notebook restores the widget without a kernel.
+        # embeds only light traits + a static image preview, so a 5-panel 4k
+        # gallery does not bake ~1 GB into the .ipynb. Set True to persist full
+        # interactive state so a reopened notebook restores the widget without
+        # a kernel.
         self._save_state = bool(save_state)
+        self._configure_static_fallback(
+            notebook_preview_format=notebook_preview_format,
+            notebook_preview_quality=notebook_preview_quality,
+            notebook_preview_max_px=notebook_preview_max_px,
+        )
         super().__init__(**kwargs)
+        self._static_fallback_mime = self._static_fallback_mime_type()
         # hold_sync() batches ALL traitlet assignments into a single comm message
         # sent when the context manager exits.  Without this, each self.x = y
         # fires a separate round-trip over the ZMQ/websocket channel, which
@@ -626,9 +713,11 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
         with self.hold_sync():
             self._init_sync(
                 data=data, labels=labels, title=title, cmap=cmap,
+                show_title=show_title,
                 sampling=sampling, units=units, scale_bar_visible=scale_bar_visible,
                 show_fft=show_fft, fft_window=fft_window,
-                show_controls=show_controls, show_stats=show_stats,
+                show_controls=show_controls, controls_collapsed=controls_collapsed,
+                show_stats=show_stats,
                 log_scale=log_scale, auto_contrast=auto_contrast, offline=offline,
                 vmin=vmin, vmax=vmax,
                 ncols=ncols, size=size, smooth=smooth, zoom=zoom,
@@ -640,9 +729,9 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
                 gallery_gap_px=gallery_gap_px,
                 verbose=verbose, state=state, _t0=_t0)
 
-    def _init_sync(self, *, data, labels, title, cmap, sampling, units,
+    def _init_sync(self, *, data, labels, title, cmap, show_title, sampling, units,
                    scale_bar_visible, show_fft, fft_window,
-                   show_controls, show_stats, log_scale, auto_contrast, offline,
+                   show_controls, controls_collapsed, show_stats, log_scale, auto_contrast, offline,
                    vmin, vmax,
                    ncols, size, smooth, zoom, zoom_row, zoom_col,
                    link_zoom, link_pan, link_contrast, diff_mode, overlay, view_box,
@@ -653,12 +742,19 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
         self.widget_version = resolve_widget_version()
         self._display_data = None  # initialized after data setup
         self._display_bin = 1
+        self.prepared_view = None
 
         # First-class support for quantem Dataset2d / Dataset3d:
         # auto-extract array + sampling + units from the dataset object.
-        if isinstance(data, (Dataset2d, Dataset3d)) or (
+        core_image_dataset_types = _core_image_dataset_types()
+        is_core_image_dataset = (
+            bool(core_image_dataset_types)
+            and isinstance(data, core_image_dataset_types)
+        )
+        has_image_dataset_shape = (
             hasattr(data, "array") and hasattr(data, "name") and hasattr(data, "sampling")
-        ):
+        )
+        if is_core_image_dataset or has_image_dataset_shape:
             if not title and data.name:
                 title = data.name
             if sampling is None:
@@ -667,16 +763,21 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
                 units = list(data.units[-2:])
             data = data.array
         # Same auto-extract for list/tuple of Dataset2d (gallery from per-file load).
-        elif isinstance(data, (list, tuple)) and len(data) > 0 and (
-            isinstance(data[0], (Dataset2d, Dataset3d)) or
-            (hasattr(data[0], "array") and hasattr(data[0], "sampling"))
-        ):
+        elif isinstance(data, (list, tuple)) and len(data) > 0:
             first = data[0]
-            if sampling is None:
-                sampling = tuple(float(s) for s in first.sampling[-2:])
-            if units is None and hasattr(first, "units"):
-                units = list(first.units[-2:])
-            data = [d.array for d in data]
+            first_is_core_image_dataset = (
+                bool(core_image_dataset_types)
+                and isinstance(first, core_image_dataset_types)
+            )
+            first_has_image_dataset_shape = (
+                hasattr(first, "array") and hasattr(first, "sampling")
+            )
+            if first_is_core_image_dataset or first_has_image_dataset_shape:
+                if sampling is None:
+                    sampling = tuple(float(s) for s in first.sampling[-2:])
+                if units is None and hasattr(first, "units"):
+                    units = list(first.units[-2:])
+                data = [d.array for d in data]
 
         # Convert NumPy / PyTorch / list inputs to a NumPy array.
         # RGB detection rule: per-ITEM in a list input, an item with ndim == 3
@@ -792,6 +893,7 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
 
         # Options
         self.title = title
+        self.show_title = bool(show_title)
         self.cmap = cmap
         # Resolve sampling + units to scalar pixel_size + pixel_unit (column axis).
         # Scalar shorthand: sampling=0.5 → (0.5, 0.5). units="nm" → ["nm", "nm"].
@@ -843,6 +945,7 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
         self.show_fft = show_fft
         self.fft_window = fft_window
         self.show_controls = show_controls
+        self.controls_collapsed = bool(controls_collapsed)
         self.show_stats = show_stats
         self.log_scale = log_scale
         self.auto_contrast = auto_contrast
@@ -976,6 +1079,7 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
         self._init_py_elapsed_ms = (_time.perf_counter() - _t0) * 1000
         self.observe(self._on_first_render, names=["_js_rendered"])
         self.observe(self._on_export_request_change, names=["export_request"])
+        self.observe(self._on_handoff_request_change, names=["handoff_request"])
         self.observe(self._on_detail_request_change, names=["_detail_request"])
 
     @traitlets.validate("starred")
@@ -1474,11 +1578,15 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
         """
         state = super().get_state(key=key, drop_defaults=drop_defaults)
         if key is None and not getattr(self, "_save_state", False):
-            if not self._static_fallback_jpeg:
-                png = self._static_png_b64()
+            if not self._static_fallback_enabled():
+                state.pop("_static_fallback_jpeg", None)
+                state.pop("_static_fallback_mime", None)
+            elif not self._static_fallback_jpeg:
+                png = self._static_fallback_png_b64()
                 if png:
                     self._store_static_fallback_preview(png)
                     state["_static_fallback_jpeg"] = self._static_fallback_jpeg
+                    state["_static_fallback_mime"] = self._static_fallback_mime
             for heavy_key in self._UNSAVED_HEAVY_KEYS:
                 state.pop(heavy_key, None)
         return state
@@ -1880,11 +1988,19 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
         """
         if getattr(self, "_save_state", False):
             return
-        self._static_fallback_jpeg = self._png_to_jpeg_b64(png_b64)
+        encoded = self._encode_static_fallback_b64(png_b64)
+        if not encoded:
+            self._static_fallback_jpeg = ""
+            self._static_fallback_mime = ""
+            return
+        mime, image_b64 = encoded
+        self._static_fallback_jpeg = image_b64
+        self._static_fallback_mime = mime
 
     def state_dict(self):
         return {
             "title": self.title,
+            "show_title": self.show_title,
             "cmap": self.cmap,
             "log_scale": self.log_scale,
             "auto_contrast": self.auto_contrast,
@@ -1899,6 +2015,7 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
             "show_fft": self.show_fft,
             "fft_window": self.fft_window,
             "show_controls": self.show_controls,
+            "controls_collapsed": self.controls_collapsed,
             "pixel_size": self.pixel_size,
             "pixel_sizes": list(self.pixel_sizes),
             "pixel_unit": self.pixel_unit,
@@ -2103,6 +2220,7 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
             np.ascontiguousarray(data, dtype=np.float32),
             labels=list(self.labels),
             title=self.title,
+            show_title=self.show_title,
             cmap=self.cmap,
             sampling=self.pixel_size if self.pixel_size > 0 else None,
             units=self.pixel_unit,
@@ -2110,6 +2228,7 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
             show_fft=self.show_fft,
             fft_window=self.fft_window,
             show_controls=self.show_controls,
+            controls_collapsed=self.controls_collapsed,
             show_stats=self.show_stats,
             verbose=False,
             log_scale=self.log_scale,
@@ -2143,6 +2262,9 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
         clone.export_payload = b""
         clone.export_payload_id = ""
         clone.export_filename = ""
+        clone.handoff_enabled = False
+        clone.handoff_status = ""
+        clone.handoff_request = ""
         clone._update_all_frames()
         return clone
 
@@ -2218,6 +2340,119 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
                          "unit": self.pixel_unit})
         return view
 
+    def to_show3d(
+        self,
+        panels: Sequence[int | str] | int | str | None = None,
+        *,
+        title: str | None = None,
+        copy: bool = True,
+        include_hidden: bool = False,
+    ):
+        """Create a ``Show3D`` stack from this Show2D image gallery.
+
+        The default uses currently visible panels as frames, preserving labels,
+        colormap, sampling, scale-bar units, and contrast settings. Use
+        ``include_hidden=True`` when hidden panels should also become frames.
+        """
+        from quantem.widget.show3d import Show3D
+
+        if any(self.is_rgb):
+            raise ValueError("Show2D.to_show3d() supports grayscale panels; RGB panels cannot become Show3D frames yet")
+        if panels is None:
+            panel_indices = list(range(int(self.n_images))) if include_hidden else self.visible_panels
+        else:
+            panel_indices = self._normalize_panel_refs(panels)
+            if not include_hidden:
+                hidden = set(int(i) for i in self.hidden_panels)
+                panel_indices = [idx for idx in panel_indices if idx not in hidden]
+        if not panel_indices:
+            raise ValueError("Show2D.to_show3d() needs at least one visible panel")
+
+        frames = [np.asarray(self._data[idx], dtype=np.float32) for idx in panel_indices]
+        shapes = {frame.shape for frame in frames}
+        if len(shapes) != 1:
+            raise ValueError(
+                "Show2D.to_show3d() requires selected panels to have the same shape; "
+                f"got {sorted(shapes)!r}"
+            )
+        stack = np.stack(frames, axis=0)
+        if copy:
+            stack = np.array(stack, copy=True)
+
+        vmin = self.vmin
+        vmax = self.vmax
+        if self.link_contrast and self.vmins and len(self.vmins) == int(self.n_images):
+            chosen_vmins = [self.vmins[idx] for idx in panel_indices]
+            chosen_vmaxs = [self.vmaxs[idx] for idx in panel_indices]
+            if len({float(v) for v in chosen_vmins}) == 1:
+                vmin = float(chosen_vmins[0])
+            if len({float(v) for v in chosen_vmaxs}) == 1:
+                vmax = float(chosen_vmaxs[0])
+
+        return Show3D(
+            stack,
+            labels=[self._panel_title_for_index(idx) for idx in panel_indices],
+            panel_titles=[title or self.title or "Show2D"],
+            title=title if title is not None else self.title,
+            show_title=self.show_title,
+            cmap=self.cmap,
+            vmin=vmin,
+            vmax=vmax,
+            sampling=self.pixel_size if self.pixel_size > 0 else None,
+            units=self.pixel_unit,
+            smooth=self.smooth,
+            log_scale=self.log_scale,
+            auto_contrast=self.auto_contrast,
+            show_fft=False,
+            show_stats=self.show_stats,
+            show_controls=self.show_controls,
+            controls_collapsed=self.controls_collapsed,
+            size=int(self.size or 0),
+            panel_title_font_size=int(self.panel_title_font_size or 11),
+            show_panel_titles=self.show_panel_titles,
+            show_scale_bar=self.scale_bar_visible,
+            save_state=False,
+            verbose=False,
+        )
+
+    def _on_handoff_request_change(self, change: dict) -> None:
+        """Build a Python-side prepared view from a frontend toolbar request."""
+        raw = change.get("new") or ""
+        if not raw:
+            return
+        try:
+            request = json.loads(raw)
+            mode = str(request.get("mode", "show3d")).lower()
+            if mode == "clear":
+                self.handoff_status = ""
+                return
+            if mode != "show3d":
+                raise ValueError(f"unsupported handoff mode {mode!r}")
+            self.prepared_view = self.to_show3d(panels=request.get("panels", None))
+            n_frames = int(getattr(self.prepared_view, "n_slices", 0))
+            self.handoff_status = f"Ready: 3D with {n_frames} frame{'s' if n_frames != 1 else ''}"
+        except Exception as exc:  # pragma: no cover - defensive comm boundary
+            self.prepared_view = None
+            self.handoff_status = f"Handoff failed: {exc}"
+
+    def show_prepared_view(self) -> Any:
+        """Display and return the widget prepared by the toolbar View menu.
+
+        Jupyter frontends do not reliably attach new cell output from an
+        asynchronous widget callback, so toolbar prepare requests prepare the
+        alternate view and leave the original widget unchanged. Call this method
+        in a notebook cell when you want the prepared temporary view rendered.
+        """
+        if self.prepared_view is None:
+            raise RuntimeError("No prepared view. Use the View menu first.")
+        try:
+            from IPython.display import display
+
+            display(self.prepared_view)
+        except Exception:
+            pass
+        return self.prepared_view
+
     @property
     def visible_panels(self) -> list[int]:
         """Zero-based image panel indices currently visible in the gallery."""
@@ -2260,6 +2495,21 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
     def show_all_panels(self) -> Self:
         """Restore every image panel in the gallery."""
         self.hidden_panels = []
+        return self
+
+    def collapse_controls(self) -> Self:
+        """Collapse the live control UI while leaving the GUI toggle available."""
+        self.controls_collapsed = True
+        return self
+
+    def expand_controls(self) -> Self:
+        """Expand the live control UI."""
+        self.controls_collapsed = False
+        return self
+
+    def toggle_controls(self) -> Self:
+        """Toggle the collapsed state of the live control UI."""
+        self.controls_collapsed = not bool(self.controls_collapsed)
         return self
 
     def set_starred_panels(self, panels: Sequence[int | str] | int | str) -> Self:

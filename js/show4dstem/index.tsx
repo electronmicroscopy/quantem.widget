@@ -1207,6 +1207,7 @@ function Show4DSTEM() {
   const [kPixelUnit] = useModelState<string>("k_pixel_unit");
   const [kCalibrated] = useModelState<boolean>("k_calibrated");
   const [title] = useModelState<string>("title");
+  const [showTitle] = useModelState<boolean>("show_title");
 
   const [frameBytes] = useModelState<DataView>("frame_bytes");
   const [virtualImageBytes] = useModelState<DataView>("virtual_image_bytes");
@@ -1706,6 +1707,11 @@ function Show4DSTEM() {
   const [showFft, setShowFft] = useModelState<boolean>("show_fft");
   const [fftWindow, setFftWindow] = useModelState<boolean>("fft_window");
   const [showControls] = useModelState<boolean>("show_controls");
+  const [controlsCollapsed, setControlsCollapsed] = useModelState<boolean>("controls_collapsed");
+  const controlsVisible = showControls && !controlsCollapsed;
+  const panelChromeVisible = controlsVisible;
+  const [showStats] = useModelState<boolean>("show_stats");
+  const [showScaleBar] = useModelState<boolean>("show_scale_bar");
   const [mobileDpOptionsOpen, setMobileDpOptionsOpen] = React.useState(false);
   const [mobileViOptionsOpen, setMobileViOptionsOpen] = React.useState(false);
   const [mobileFftOptionsOpen, setMobileFftOptionsOpen] = React.useState(false);
@@ -2686,9 +2692,12 @@ function Show4DSTEM() {
   // DP scale bar + crosshair + ROI overlay + profile line (high-DPI)
   React.useEffect(() => {
     if (!dpUiRef.current) return;
-    // Draw scale bar first (clears canvas)
+    const canvas = dpUiRef.current;
+    const ctx = canvas.getContext("2d");
+    ctx?.clearRect(0, 0, canvas.width, canvas.height);
+    // Draw scale bar first when enabled.
     const kUnit = kCalibrated ? kPixelUnit : "px";
-    drawScaleBarHiDPI(dpUiRef.current, DPR, dpZoom, kPixelSize || 1, kUnit, detCols);
+    if (showScaleBar) drawScaleBarHiDPI(canvas, DPR, dpZoom, kPixelSize || 1, kUnit, detCols);
     // Draw ROI overlay (circle, square, rect, annular) or point crosshair
     if (roiMode === "point") {
       drawDpCrosshairHiDPI(dpUiRef.current, DPR, localKCol, localKRow, dpZoom, dpPanX, dpPanY, detCols, detRows, isDraggingDP, roiColors);
@@ -2704,8 +2713,7 @@ function Show4DSTEM() {
 
     // Profile line overlay
     if (profileActive && profilePoints.length > 0) {
-      const canvas = dpUiRef.current;
-      const ctx = canvas.getContext("2d");
+        const ctx = canvas.getContext("2d");
       if (ctx) {
         ctx.save();
         ctx.scale(DPR, DPR);
@@ -2773,7 +2781,6 @@ function Show4DSTEM() {
 
     // Colorbar overlay — uses cached vmin/vmax from the expensive DP offscreen effect
     if (showDpColorbar) {
-      const canvas = dpUiRef.current;
       const ctx = canvas.getContext("2d");
       if (ctx) {
         ctx.save();
@@ -2785,14 +2792,17 @@ function Show4DSTEM() {
         ctx.restore();
       }
     }
-  }, [dpZoom, dpPanX, dpPanY, kPixelSize, kCalibrated, detRows, detCols, roiMode, roiRadius, roiRadiusInner, roiWidth, roiHeight, localKCol, localKRow, isDraggingDP, isDraggingResize, isDraggingResizeInner, isHoveringResize, isHoveringResizeInner,
-      profileActive, profilePoints, profileWidth, themeColors, showDpColorbar, dpColormap, dpScaleMode, dpVminPct, dpVmaxPct, canvasSize, roiColors]);
+  }, [dpZoom, dpPanX, dpPanY, kPixelSize, kPixelUnit, kCalibrated, detRows, detCols, roiMode, roiRadius, roiRadiusInner, roiWidth, roiHeight, localKCol, localKRow, isDraggingDP, isDraggingResize, isDraggingResizeInner, isHoveringResize, isHoveringResizeInner,
+      profileActive, profilePoints, profileWidth, themeColors, showDpColorbar, showScaleBar, dpColormap, dpScaleMode, dpVminPct, dpVmaxPct, canvasSize, roiColors]);
   
   // VI scale bar + crosshair + ROI + profile lines (high-DPI)
   React.useEffect(() => {
     if (!viUiRef.current) return;
-    // Draw scale bar first (clears canvas)
-    drawScaleBarHiDPI(viUiRef.current, DPR, viZoom, pixelSize || 1, pixelUnit || "px", shapeCols);
+    const canvas = viUiRef.current;
+    const ctx = canvas.getContext("2d");
+    ctx?.clearRect(0, 0, canvas.width, canvas.height);
+    // Draw scale bar first when enabled.
+    if (showScaleBar) drawScaleBarHiDPI(canvas, DPR, viZoom, pixelSize || 1, pixelUnit || "px", shapeCols);
     // Draw crosshair only when ROI is off (ROI replaces the crosshair)
     if (!viRoiMode || viRoiMode === "off") {
       drawViPositionMarker(viUiRef.current, DPR, localPosRow, localPosCol, viZoom, viPanX, viPanY, shapeCols, shapeRows, isDraggingVI);
@@ -2849,7 +2859,7 @@ function Show4DSTEM() {
         ctx.restore();
       }
     }
-  }, [viZoom, viPanX, viPanY, pixelSize, shapeRows, shapeCols, localPosRow, localPosCol, isDraggingVI,
+  }, [viZoom, viPanX, viPanY, pixelSize, pixelUnit, showScaleBar, shapeRows, shapeCols, localPosRow, localPosCol, isDraggingVI,
       viRoiMode, localViRoiCenterRow, localViRoiCenterCol, viRoiRadius, viRoiWidth, viRoiHeight,
       isDraggingViRoi, isDraggingViRoiResize, isHoveringViRoiResize, canvasSize, viProfileActive, viProfilePoints]);
 
@@ -4486,10 +4496,10 @@ function Show4DSTEM() {
       sx={{ p: 2, bgcolor: themeColors.bg, color: themeColors.text, outline: "none", borderRadius: "2px", width: "100%", maxWidth: "100%", boxSizing: "border-box", "@media (max-width: 700px)": { p: 0, ".jp-OutputArea-output &, .jp-OutputArea-child &": { width: "calc(100vw - 96px)", maxWidth: "calc(100vw - 96px)" } } }}
     >
       {/* HEADER */}
-      <Typography variant="h6" sx={{ ...typo.title, mb: `${SPACING.SM}px` }}>
+      {showTitle && <Typography variant="h6" sx={{ ...typo.title, mb: `${SPACING.SM}px` }}>
         {title || "4D-STEM Explorer"}
         {nFrames > 1 && <span style={{ fontWeight: "normal", fontSize: 13, marginLeft: 8, opacity: 0.7 }}>({frameLabels && frameLabels.length > frameIdx ? frameLabels[frameIdx] : `${frameDimLabel} ${frameIdx + 1}/${nFrames}`})</span>}
-        <InfoTooltip text={<Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
+        {panelChromeVisible && <InfoTooltip text={<Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
           <MetadataSection rows={[
             ["Scan", `${shapeRows} x ${shapeCols}`],
             ["Detector", `${detRows} x ${detCols}`],
@@ -4513,8 +4523,20 @@ function Show4DSTEM() {
           </>}
           <Typography sx={{ fontSize: 11, fontWeight: "bold", mt: 0.5 }}>Keyboard</Typography>
           <KeyboardShortcuts items={keyboardShortcutItems} />
-        </Box>} theme={themeInfo.theme} />
-      </Typography>
+        </Box>} theme={themeInfo.theme} />}
+      </Typography>}
+      {showControls && (
+        <Box sx={{ display: "flex", justifyContent: "flex-end", mb: `${SPACING.XS}px`, minHeight: 24 }}>
+          <Button
+            size="small"
+            sx={compactButton}
+            onClick={() => setControlsCollapsed(!controlsCollapsed)}
+            aria-label={controlsCollapsed ? "Show controls" : "Hide controls"}
+          >
+            {controlsCollapsed ? "Controls" : "Hide"}
+          </Button>
+        </Box>
+      )}
 
       {/* MAIN CONTENT: DP | VI | FFT (three columns when FFT shown) */}
       <Stack
@@ -4544,7 +4566,7 @@ function Show4DSTEM() {
               DP at ({Math.round(localPosRow)}, {Math.round(localPosCol)})
               <span style={{ color: roiColors.textColor, marginLeft: SPACING.SM }}>k: ({Math.round(localKRow)}, {Math.round(localKCol)})</span>
             </Typography>
-            <Stack direction="row" spacing={`${SPACING.SM}px`} alignItems="center">
+            {controlsVisible && <Stack direction="row" spacing={`${SPACING.SM}px`} alignItems="center">
               <Typography sx={{ ...typo.label, fontSize: 10 }}>Profile</Typography>
               <Switch checked={profileActive} onChange={(e) => {
                 const on = e.target.checked;
@@ -4602,7 +4624,7 @@ function Show4DSTEM() {
                   {localHtmlExportStatus || exportStatus}
                 </Typography>
               )}
-            </Stack>
+            </Stack>}
           </Stack>
 
           {/* DP Canvas */}
@@ -4633,27 +4655,29 @@ function Show4DSTEM() {
               }}
             />
             <canvas ref={dpUiRef} width={canvasSize * DPR} height={canvasSize * DPR} style={{ position: "absolute", width: "100%", height: "100%", pointerEvents: "none" }} />
-            {cursorInfo && cursorInfo.panel === "DP" && (
+            {panelChromeVisible && cursorInfo && cursorInfo.panel === "DP" && (
               <Box sx={{ position: "absolute", top: 3, right: 3, bgcolor: "rgba(0,0,0,0.35)", px: 0.5, py: 0.15, pointerEvents: "none", minWidth: 100, textAlign: "right" }}>
                 <Typography sx={{ fontSize: 9, fontFamily: "monospace", color: "rgba(255,255,255,0.7)", whiteSpace: "nowrap", lineHeight: 1.2 }}>
                   ({cursorInfo.row}, {cursorInfo.col}) {formatNumber(cursorInfo.value)}
                 </Typography>
               </Box>
             )}
-            <Box onMouseDown={handleCanvasResizeStart} sx={{ position: "absolute", bottom: 0, right: 0, width: 16, height: 16, cursor: "nwse-resize", opacity: 0.6, background: `linear-gradient(135deg, transparent 50%, ${themeColors.accent} 50%)`, "&:hover": { opacity: 1 } }} />
+            {panelChromeVisible && <Box onMouseDown={handleCanvasResizeStart} sx={{ position: "absolute", bottom: 0, right: 0, width: 16, height: 16, cursor: "nwse-resize", opacity: 0.6, background: `linear-gradient(135deg, transparent 50%, ${themeColors.accent} 50%)`, "&:hover": { opacity: 1 } }} />}
           </Box>
 
           {/* DP Stats Bar */}
-          {dpStats && dpStats.length === 4 && (
+          {showStats && dpStats && dpStats.length === 4 && (
             <Box sx={statsBarSx}>
               <Typography sx={statsTextSx}>Mean <Box component="span" sx={statsValueSx}>{formatStat(dpStats[0])}</Box></Typography>
               <Typography sx={statsTextSx}>Min <Box component="span" sx={statsValueSx}>{formatStat(dpStats[1])}</Box></Typography>
               <Typography sx={statsTextSx}>Max <Box component="span" sx={statsValueSx}>{formatStat(dpStats[2])}</Box></Typography>
               <Typography sx={statsTextSx}>Std <Box component="span" sx={statsValueSx}>{formatStat(dpStats[3])}</Box></Typography>
-              <Box sx={{ flex: 1, minWidth: 4, "@media (max-width: 700px)": { display: "none" } }} />
-              <Typography component="span" onClick={() => { model.set("_preset_request", "bf"); model.save_changes(); }} sx={{ ...statsTextSx, color: roiColors.textColor, fontWeight: "bold", cursor: "pointer", "&:hover": { textDecoration: "underline" } }}>BF</Typography>
-              <Typography component="span" onClick={() => { model.set("_preset_request", "abf"); model.save_changes(); }} sx={{ ...statsTextSx, color: "#4af", fontWeight: "bold", cursor: "pointer", "&:hover": { textDecoration: "underline" } }}>ABF</Typography>
-              <Typography component="span" onClick={() => { model.set("_preset_request", "adf"); model.save_changes(); }} sx={{ ...statsTextSx, color: "#fa4", fontWeight: "bold", cursor: "pointer", "&:hover": { textDecoration: "underline" } }}>ADF</Typography>
+              {controlsVisible && <>
+                <Box sx={{ flex: 1, minWidth: 4, "@media (max-width: 700px)": { display: "none" } }} />
+                <Typography component="span" onClick={() => { model.set("_preset_request", "bf"); model.save_changes(); }} sx={{ ...statsTextSx, color: roiColors.textColor, fontWeight: "bold", cursor: "pointer", "&:hover": { textDecoration: "underline" } }}>BF</Typography>
+                <Typography component="span" onClick={() => { model.set("_preset_request", "abf"); model.save_changes(); }} sx={{ ...statsTextSx, color: "#4af", fontWeight: "bold", cursor: "pointer", "&:hover": { textDecoration: "underline" } }}>ABF</Typography>
+                <Typography component="span" onClick={() => { model.set("_preset_request", "adf"); model.save_changes(); }} sx={{ ...statsTextSx, color: "#fa4", fontWeight: "bold", cursor: "pointer", "&:hover": { textDecoration: "underline" } }}>ADF</Typography>
+              </>}
             </Box>
           )}
 
@@ -4677,7 +4701,7 @@ function Show4DSTEM() {
           )}
 
           {/* DP Controls - two rows with histogram on right */}
-          {showControls && (
+          {controlsVisible && (
             <>
               <Button
                 size="small"
@@ -4765,7 +4789,7 @@ function Show4DSTEM() {
             <Typography sx={{ ...typo.label, color: themeColors.textMuted }}>
               {shapeRows}×{shapeCols} | {detRows}×{detCols}
             </Typography>
-            <Stack direction="row" spacing={`${SPACING.SM}px`} alignItems="center">
+            {controlsVisible && <Stack direction="row" spacing={`${SPACING.SM}px`} alignItems="center">
               <Typography sx={{ ...typo.label, fontSize: 10 }}>FFT</Typography>
               <Switch checked={effectiveShowFft} onChange={(e) => setShowFft(e.target.checked)} size="small" sx={switchStyles.small} />
               <Typography sx={{ ...typo.label, fontSize: 10 }}>Profile</Typography>
@@ -4789,7 +4813,7 @@ function Show4DSTEM() {
                   virtualCanvasRef.current.toBlob((b) => { if (b) downloadBlob(b, "show4dstem_vi.png"); }, "image/png");
                 }
               }}>Copy</Button>
-            </Stack>
+            </Stack>}
           </Stack>
 
           {/* VI Canvas */}
@@ -4818,29 +4842,29 @@ function Show4DSTEM() {
               }}
             />
             <canvas ref={viUiRef} width={viCanvasWidth * DPR} height={viCanvasHeight * DPR} style={{ position: "absolute", width: "100%", height: "100%", pointerEvents: "none" }} />
-            {cursorInfo && cursorInfo.panel === "VI" && (
+            {panelChromeVisible && cursorInfo && cursorInfo.panel === "VI" && (
               <Box sx={{ position: "absolute", top: 3, right: 3, bgcolor: "rgba(0,0,0,0.35)", px: 0.5, py: 0.15, pointerEvents: "none", minWidth: 100, textAlign: "right" }}>
                 <Typography sx={{ fontSize: 9, fontFamily: "monospace", color: "rgba(255,255,255,0.7)", whiteSpace: "nowrap", lineHeight: 1.2 }}>
                   ({cursorInfo.row}, {cursorInfo.col}) {formatNumber(cursorInfo.value)}
                 </Typography>
               </Box>
             )}
-            <Box onMouseDown={handleCanvasResizeStart} sx={{ position: "absolute", bottom: 0, right: 0, width: 16, height: 16, cursor: "nwse-resize", opacity: 0.6, background: `linear-gradient(135deg, transparent 50%, ${themeColors.accent} 50%)`, "&:hover": { opacity: 1 } }} />
+            {panelChromeVisible && <Box onMouseDown={handleCanvasResizeStart} sx={{ position: "absolute", bottom: 0, right: 0, width: 16, height: 16, cursor: "nwse-resize", opacity: 0.6, background: `linear-gradient(135deg, transparent 50%, ${themeColors.accent} 50%)`, "&:hover": { opacity: 1 } }} />}
           </Box>
 
           {/* VI Stats Bar — stats on left, Auto/Smooth toggles on right edge */}
-          {viStats && viStats.length === 4 && (
+          {showStats && viStats && viStats.length === 4 && (
             <Box sx={statsBarSx}>
               <Typography sx={statsTextSx}>Mean <Box component="span" sx={statsValueSx}>{formatStat(viStats[0])}</Box></Typography>
               <Typography sx={statsTextSx}>Min <Box component="span" sx={statsValueSx}>{formatStat(viStats[1])}</Box></Typography>
               <Typography sx={statsTextSx}>Max <Box component="span" sx={statsValueSx}>{formatStat(viStats[2])}</Box></Typography>
               <Typography sx={statsTextSx}>Std <Box component="span" sx={statsValueSx}>{formatStat(viStats[3])}</Box></Typography>
-              <Box sx={{ ml: "auto", display: "flex", alignItems: "center", gap: "2px", flexWrap: "nowrap", whiteSpace: "nowrap", flexShrink: 0 }}>
+              {controlsVisible && <Box sx={{ ml: "auto", display: "flex", alignItems: "center", gap: "2px", flexWrap: "nowrap", whiteSpace: "nowrap", flexShrink: 0 }}>
                 <Typography sx={{ ...typo.label, fontSize: 10, lineHeight: "20px" }}>Auto</Typography>
                 <Switch checked={viAutoContrast} onChange={(e) => toggleViAutoContrast(e.target.checked)} size="small" sx={switchStyles.small} />
                 <Typography sx={{ ...typo.label, fontSize: 10, lineHeight: "20px" }} title="CSS bilinear interpolation. Same data, browser smooths visually.">Smooth</Typography>
                 <Switch checked={viSmooth} onChange={(e) => setViSmooth(e.target.checked)} size="small" sx={switchStyles.small} />
-              </Box>
+              </Box>}
             </Box>
           )}
 
@@ -4864,7 +4888,7 @@ function Show4DSTEM() {
           )}
 
           {/* VI Controls - Two rows with histogram on right */}
-          {showControls && (
+          {controlsVisible && (
             <>
               <Button
                 size="small"
@@ -4947,9 +4971,9 @@ function Show4DSTEM() {
             {/* FFT Header */}
             <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: `${SPACING.XS}px`, minHeight: 28, height: "auto", flexWrap: "wrap", gap: `${SPACING.XS}px`, "@media (max-width: 700px)": { mb: "1px", minHeight: 22, rowGap: "1px" } }}>
               <Typography variant="caption" sx={{ ...typo.label, color: roiFftActive && fftCropDims ? accentGreen : themeColors.textMuted }}>{roiFftActive && fftCropDims ? `ROI FFT (${fftCropDims.cropWidth}\u00D7${fftCropDims.cropHeight})` : "FFT"}</Typography>
-              <Stack direction="row" spacing={`${SPACING.SM}px`} alignItems="center">
+              {controlsVisible && <Stack direction="row" spacing={`${SPACING.SM}px`} alignItems="center">
                 <Button size="small" sx={compactButton} disabled={fftZoom === 1 && fftPanX === 0 && fftPanY === 0} onClick={() => { setFftZoom(1); setFftPanX(0); setFftPanY(0); }}>Reset</Button>
-              </Stack>
+              </Stack>}
             </Stack>
 
             {/* FFT Canvas */}
@@ -4967,11 +4991,11 @@ function Show4DSTEM() {
                 onTouchCancel={handlePanelTouchEnd}
                 style={{ position: "absolute", width: "100%", height: "100%", touchAction: "none", cursor: isDraggingFFT ? "grabbing" : "grab" }}
               />
-              <Box onMouseDown={handleCanvasResizeStart} sx={{ position: "absolute", bottom: 0, right: 0, width: 16, height: 16, cursor: "nwse-resize", opacity: 0.6, background: `linear-gradient(135deg, transparent 50%, ${themeColors.accent} 50%)`, "&:hover": { opacity: 1 } }} />
+              {panelChromeVisible && <Box onMouseDown={handleCanvasResizeStart} sx={{ position: "absolute", bottom: 0, right: 0, width: 16, height: 16, cursor: "nwse-resize", opacity: 0.6, background: `linear-gradient(135deg, transparent 50%, ${themeColors.accent} 50%)`, "&:hover": { opacity: 1 } }} />}
             </Box>
 
             {/* FFT Stats Bar */}
-            {fftStats && fftStats.length === 4 && (
+            {showStats && fftStats && fftStats.length === 4 && (
               <Box sx={statsBarSx}>
                 <Typography sx={statsTextSx}>Mean <Box component="span" sx={statsValueSx}>{formatStat(fftStats[0])}</Box></Typography>
                 <Typography sx={statsTextSx}>Min <Box component="span" sx={statsValueSx}>{formatStat(fftStats[1])}</Box></Typography>
@@ -5003,7 +5027,7 @@ function Show4DSTEM() {
             )}
 
             {/* FFT Controls - Two rows with histogram on right */}
-            {showControls && (
+            {controlsVisible && (
               <>
                 <Button
                   size="small"
@@ -5065,7 +5089,7 @@ function Show4DSTEM() {
       {/* BOTTOM CONTROLS */}
 
       {/* Frame controls (5D time/tilt series) — matches Show3D playback */}
-      {showControls && nFrames > 1 && (<>
+      {controlsVisible && nFrames > 1 && (<>
         <Box sx={{ ...controlRow, mt: `${SPACING.SM}px`, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>
           <Typography sx={{ ...typo.label, fontSize: 10, flexShrink: 0 }}>{frameDimLabel}:</Typography>
           <Stack direction="row" spacing={0} sx={{ flexShrink: 0 }}>
@@ -5097,7 +5121,7 @@ function Show4DSTEM() {
       </>)}
 
       {/* Path animation slider */}
-      {showControls && pathLength > 0 && (
+      {controlsVisible && pathLength > 0 && (
         <Box sx={{ ...controlRow, mt: `${SPACING.SM}px`, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>
           <Stack direction="row" spacing={0} sx={{ flexShrink: 0 }}>
             <IconButton size="small" onClick={() => setPathPlaying(!pathPlaying)} sx={{ color: themeColors.accent, p: 0.25 }}>

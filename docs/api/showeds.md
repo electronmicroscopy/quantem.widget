@@ -11,6 +11,12 @@ from quantem.widget import ShowEDS, load_eds
 the energy band updates the element map, and dragging the rectangular real-space
 ROI updates the summed spectrum.
 
+## Viewer UI
+
+`ShowEDS` supports the shared `ui_mode`, `show_title`, `show_controls`,
+`controls_collapsed`, and `show_scale_bar` names. The saved-state trait remains
+`scale_bar_visible` for compatibility. See [Viewer UI controls](viewer-ui).
+
 `ShowEDS` is still experimental. The merged baseline supports synthetic/small
 cubes and the documented data-folder workflow. Direct native EMD sparse-stream
 loading is under active real-data testing and should not be treated as finalized

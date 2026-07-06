@@ -102,13 +102,39 @@ Use WebP thumbnails for:
 
 - folder-browser previews and cached visual review pages
 - maintainer smoke dashboards and HTML reports
-- static notebook previews where file size matters more than exact pixel values
+- static report previews where file size matters more than exact pixel values
 - quick human decisions such as "which file should I open next?"
 
 Do not use WebP thumbnails for scientific data storage, measurements,
 publication figures, exact widget state, or HTML exports that need interaction.
 WebP is a visual preview and may be lossy. Keep scientific arrays in array/HDF5
 formats when values need to be reused.
+
+`q85` means "quality 85" for a lossy image encoder. Higher values keep more
+visual detail and make larger files; lower values make smaller files and can
+show compression artifacts. It is only a preview setting, not a scientific data
+type or measurement setting.
+
+Use this policy when choosing a widget output image format:
+
+| Surface | Preferred format | Why |
+|---|---|---|
+| Saved-notebook fallback for `Show2D` / `Show3D` | JPEG preview generated from the widget render | Very portable across JupyterLab, VS Code, Colab, GitHub previews, and nbconvert; much smaller than PNG for noisy microscopy images |
+| Folder browser, ShowFolder reports, smoke dashboards | WebP thumbnail, usually quality 85 | Smallest practical preview for pages with many images |
+| Publication-style static output from `save_image(...)` | PNG, PDF, or TIFF | Stable, lossless or publication-friendly output |
+| Interactive sharing | HTML export | Keeps controls live without a Python kernel |
+| Exact analysis data or reproducible widget state | Array/HDF5 data plus JSON view state, or `save_state=True` only for small widgets | Preserves values and interactivity instead of storing a lossy preview |
+
+The default saved-notebook path should stay conservative: keep notebooks small
+by omitting heavy widget buffers, but use a broadly supported JPEG preview so
+the output remains visible when someone opens the notebook without rerunning
+the kernel. If a local workflow values smaller files more than maximum
+notebook-tool compatibility, choose WebP explicitly:
+
+```python
+Show2D(image, notebook_preview_format="webp", notebook_preview_quality=85)
+Show3D(stack, notebook_preview_format="webp", notebook_preview_quality=85)
+```
 
 ```python
 from quantem.widget.render import save_thumbnail, thumbnail_webp
@@ -252,6 +278,24 @@ Show4DSTEM(data)
 
 Result shape: `(n_files, scan_y, scan_x, det_y, det_x)`. Filenames become
 slider labels.
+
+On a CUDA workstation with multiple GPUs, keep large browse series sharded
+instead of forcing every master into one allocation:
+
+```python
+data = load(masters, det_bin=1, dtype="u8", devices=[0, 1])
+Show4DSTEM(data)
+```
+
+`dtype="u8"` is the fast browse contract. It decodes directly into uint8 before
+stacking or sharding, so the loader does not build a full uint16 stack first.
+Values above 255 clip, so use uint16/no-bin when detector counts are the
+scientific result.
+
+The sharded path is disk-aware. If masters live on independent NVMe devices,
+`load(..., devices=[0, 1])` interleaves files by physical disk and GPU. If every
+file is on one disk, sharding still increases GPU capacity and keeps flipping
+bounded, but cold loading stays limited by that disk.
 
 ## I want to load every master file in a folder.
 

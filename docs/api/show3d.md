@@ -26,7 +26,13 @@ export. See the [Show3D tutorial](../tutorials/show3d).
 | Export button | `export_request`, `export_status` | Writes a standalone HTML viewer |
 | Panel layout (multi-panel) | `n_panels`, `link_panels`, `max_cols` | Panels arrange; linked scrub moves all |
 | Panel visibility (multi-panel) | `hidden_panels` | Panels collapse from view without deleting data |
+| Viewer chrome preset | `ui_mode` plus explicit `show_*` kwargs | Applies shared display presets; see [Viewer UI controls](viewer-ui) |
+| Control visibility | `show_controls`, `controls_collapsed`; `collapse_controls()`, `expand_controls()`, `toggle_controls()` | Permanently remove controls or temporarily collapse them behind the top GUI toggle |
+| Title visibility | `show_title` | Top title row shows/hides |
 | Statistics | `show_stats` | Optional mean/min/max/std readout |
+| Panel title visibility | `show_panel_titles`, `panel_title_font_size` | Per-panel labels show/hide and resize |
+| Scale bar visibility | `show_scale_bar` (`scale_bar_visible` in saved state) | Scale bar shows/hides |
+| Resize / zoom chrome | `show_resize_handles`, `show_zoom_indicator` | Resize handles and zoom readout show/hide |
 
 ## Live stack updates
 
@@ -92,6 +98,32 @@ removed from the data, and readers can restore them from the `Panels` menu.
 
 The statistics readout is off by default. Turn on `show_stats=True` in Python,
 or use the `Stats` switch in the widget, when mean/min/max/std values are useful.
+
+## Animation exports
+
+Use HTML when collaborators should keep scrubbing, zooming, and changing
+contrast. Use GIF or MP4 when the result needs to drop into PowerPoint, email, or
+a static report:
+
+```python
+w.save_gif("movie.gif", quality="medium", fps=6)
+w.save_mp4("movie.mp4", quality="high", fps=12)
+```
+
+`quality="low"`, `"medium"`, and `"high"` control the exported spatial
+resolution. GIF is always palette-limited, so medium is usually the practical
+slide/email choice; high is sharper but larger. Pass `show_frame_labels=True`
+when panel titles should include the same live-style frame label and count that
+the widget canvas shows. GIF/MP4 exports keep the panel labels, scale bar, and
+zoom readout styling consistent with the static/offline widget image output.
+
+```python
+w.save_gif("movie.gif", quality="medium", fps=6, show_frame_labels=True)
+```
+
+The GIF/MP4 path exports the full panel frames. Browser-only zoom and pan
+gestures are view state, so use HTML export when collaborators need to continue
+zooming, panning, or changing contrast interactively.
 
 ```{note}
 `export_html(quantized=True)` writes the smaller uint8 pack; the default writes

@@ -1,6 +1,8 @@
 # API reference
 
 Complete reference for the widgets, HTML export, and data loading / I/O.
+Common display-chrome names and presets are documented in [Viewer UI controls](viewer-ui).
+The same tables are surfaced in the developer-facing [UI Guide](../developer/ui-guide).
 Widget pages have two halves:
 
 1. **Reference** - the constructor signature, every parameter, and every public
@@ -23,6 +25,7 @@ readers and test agents.
 
 | Widget | Class | Offline export |
 |---|---|---|
+| [Show1D](show1d) | `quantem.widget.show1d.Show1D` | state JSON, CSV, PNG/PDF via Python, interactive HTML |
 | [Show2D](show2d) | `quantem.widget.show2d.Show2D` | state JSON, PNG, interactive HTML (`encoding="full"` / `encoding="uint8"`) |
 | [Show3D](show3d) | `quantem.widget.show3d.Show3D` | state JSON, PNG, interactive HTML (`encoding="full"` / `encoding="uint8"`) |
 | [Show3DSlices](show3dslices) | `quantem.widget.show3dslices.Show3DSlices` | state JSON, PNG, interactive HTML (`encoding="full"` / `encoding="uint8"`) |

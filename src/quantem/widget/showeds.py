@@ -8,7 +8,7 @@ import tempfile
 import time
 from dataclasses import dataclass, field
 from functools import lru_cache
-from typing import Any
+from typing import Any, Self
 from urllib.parse import quote, unquote
 
 import anywidget
@@ -22,6 +22,7 @@ from quantem.widget.utils.state_io import (
     save_state_file,
     unwrap_state_payload,
 )
+from quantem.widget.utils.ui import UiMode, resolve_ui_mode
 
 
 DEFAULT_MAX_SHOWEDS_SIDECAR_BYTES = 12 * 1024**3
@@ -1716,6 +1717,7 @@ class ShowEDS(StaticFallbackMixin, anywidget.AnyWidget):
 
     widget_version = traitlets.Unicode("unknown").tag(sync=True)
     title = traitlets.Unicode("").tag(sync=True)
+    show_title = traitlets.Bool(True).tag(sync=True)
     n_rows = traitlets.Int(1).tag(sync=True)
     n_cols = traitlets.Int(1).tag(sync=True)
     n_energy = traitlets.Int(1).tag(sync=True)
@@ -1745,6 +1747,7 @@ class ShowEDS(StaticFallbackMixin, anywidget.AnyWidget):
     spectrum_width_px = traitlets.Int(640).tag(sync=True)
     spectrum_height_px = traitlets.Int(250).tag(sync=True)
     show_controls = traitlets.Bool(True).tag(sync=True)
+    controls_collapsed = traitlets.Bool(False).tag(sync=True)
     log_spectrum = traitlets.Bool(True).tag(sync=True)
     smooth = traitlets.Bool(False).tag(sync=True)
     pixel_size = traitlets.Float(0.0).tag(sync=True)
@@ -1785,6 +1788,8 @@ class ShowEDS(StaticFallbackMixin, anywidget.AnyWidget):
         energy_keV: np.ndarray | list[float] | None = None,
         *,
         title: str = "",
+        ui_mode: UiMode = "interactive",
+        show_title: bool | None = None,
         base_image: np.ndarray | None = None,
         energy: float | None = None,
         width: float | None = None,
@@ -1794,14 +1799,16 @@ class ShowEDS(StaticFallbackMixin, anywidget.AnyWidget):
         panel_width_px: int = 420,
         spectrum_width_px: int | None = None,
         spectrum_height_px: int | None = None,
-        show_controls: bool = True,
+        show_controls: bool | None = None,
+        controls_collapsed: bool | None = None,
         log_spectrum: bool = True,
         smooth: bool = False,
         pixel_size: float | None = None,
         pixel_unit: str = "px",
         sampling: float | tuple[float, float] | list[float] | None = None,
         units: str | list[str] | None = None,
-        scale_bar_visible: bool = True,
+        scale_bar_visible: bool | None = None,
+        show_scale_bar: bool | None = None,
         map_vmin_pct: float = 2.0,
         map_vmax_pct: float = 98.0,
         overlay_opacity: float = 0.65,
@@ -2006,8 +2013,31 @@ class ShowEDS(StaticFallbackMixin, anywidget.AnyWidget):
         self.n_rows = int(rows)
         self.n_cols = int(cols)
         self.n_energy = int(n_energy)
+        if (
+            scale_bar_visible is not None
+            and show_scale_bar is not None
+            and bool(scale_bar_visible) != bool(show_scale_bar)
+        ):
+            raise ValueError("Use either show_scale_bar or scale_bar_visible, not conflicting values")
+        ui = resolve_ui_mode(
+            ui_mode,
+            defaults={
+                "show_title": True,
+                "show_controls": True,
+                "controls_collapsed": False,
+                "show_scale_bar": True,
+            },
+            overrides={
+                "show_title": show_title,
+                "show_controls": show_controls,
+                "controls_collapsed": controls_collapsed,
+                "show_scale_bar": scale_bar_visible if scale_bar_visible is not None else show_scale_bar,
+            },
+        )
         self.title = title
-        self.show_controls = bool(show_controls)
+        self.show_title = bool(ui["show_title"])
+        self.show_controls = bool(ui["show_controls"])
+        self.controls_collapsed = bool(ui["controls_collapsed"])
         self.log_spectrum = bool(log_spectrum)
         self.smooth = bool(smooth)
         if pixel_size is None:
@@ -2023,7 +2053,7 @@ class ShowEDS(StaticFallbackMixin, anywidget.AnyWidget):
             self.pixel_unit = units if isinstance(units, str) else str(units[-1])
         else:
             self.pixel_unit = str(pixel_unit)
-        self.scale_bar_visible = bool(scale_bar_visible)
+        self.scale_bar_visible = bool(ui["show_scale_bar"])
         self.map_vmin_pct = float(max(0.0, min(100.0, map_vmin_pct)))
         self.map_vmax_pct = float(max(self.map_vmin_pct, min(100.0, map_vmax_pct)))
         self.overlay_opacity = float(max(0.0, min(1.0, overlay_opacity)))
@@ -2671,6 +2701,7 @@ class ShowEDS(StaticFallbackMixin, anywidget.AnyWidget):
         return {
             "_widget": "ShowEDS",
             "title": self.title,
+            "show_title": self.show_title,
             "band_start": self.band_start,
             "band_end": self.band_end,
             "roi_row": self.roi_row,
@@ -2682,6 +2713,7 @@ class ShowEDS(StaticFallbackMixin, anywidget.AnyWidget):
             "spectrum_width_px": self.spectrum_width_px,
             "spectrum_height_px": self.spectrum_height_px,
             "show_controls": self.show_controls,
+            "controls_collapsed": self.controls_collapsed,
             "log_spectrum": self.log_spectrum,
             "smooth": self.smooth,
             "pixel_size": self.pixel_size,
@@ -2705,6 +2737,21 @@ class ShowEDS(StaticFallbackMixin, anywidget.AnyWidget):
             "saved_bands": [dict(item) for item in self.saved_bands],
             "export_presets": [dict(item) for item in self.export_presets],
         }
+
+    def collapse_controls(self) -> Self:
+        """Collapse controls behind the frontend ``Controls`` button."""
+        self.controls_collapsed = True
+        return self
+
+    def expand_controls(self) -> Self:
+        """Expand frontend controls when ``show_controls`` is enabled."""
+        self.controls_collapsed = False
+        return self
+
+    def toggle_controls(self) -> Self:
+        """Toggle whether frontend controls start collapsed."""
+        self.controls_collapsed = not bool(self.controls_collapsed)
+        return self
 
     def load_state_dict(self, state: dict[str, Any]) -> None:
         state = dict(state)
@@ -2942,12 +2989,14 @@ class ShowEDS(StaticFallbackMixin, anywidget.AnyWidget):
             panel_width_px=self.panel_width_px,
             spectrum_width_px=self.spectrum_width_px,
             spectrum_height_px=self.spectrum_height_px,
+            show_title=self.show_title,
             show_controls=self.show_controls,
+            controls_collapsed=self.controls_collapsed,
             log_spectrum=self.log_spectrum,
             smooth=self.smooth,
             pixel_size=self.pixel_size,
             pixel_unit=self.pixel_unit,
-            scale_bar_visible=self.scale_bar_visible,
+            show_scale_bar=self.scale_bar_visible,
             map_vmin_pct=self.map_vmin_pct,
             map_vmax_pct=self.map_vmax_pct,
             overlay_opacity=self.overlay_opacity,
@@ -3073,12 +3122,14 @@ class ShowEDS(StaticFallbackMixin, anywidget.AnyWidget):
             panel_width_px=self.panel_width_px,
             spectrum_width_px=self.spectrum_width_px,
             spectrum_height_px=self.spectrum_height_px,
+            show_title=self.show_title,
             show_controls=self.show_controls,
+            controls_collapsed=self.controls_collapsed,
             log_spectrum=self.log_spectrum,
             smooth=self.smooth,
             pixel_size=self.pixel_size * spatial_bin if self.pixel_size > 0 else 0.0,
             pixel_unit=self.pixel_unit,
-            scale_bar_visible=self.scale_bar_visible,
+            show_scale_bar=self.scale_bar_visible,
             map_vmin_pct=self.map_vmin_pct,
             map_vmax_pct=self.map_vmax_pct,
             overlay_opacity=self.overlay_opacity,

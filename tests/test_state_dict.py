@@ -67,7 +67,18 @@ def test_show4dstem_state_dict_keys(show4dstem_widget):
     assert isinstance(s, dict)
     assert len(s) > 10
     # Required keys for the widget's user-facing display state
-    for required in ("title", "dp_colormap", "vi_colormap", "roi_mode", "vi_roi_reduce"):
+    for required in (
+        "title",
+        "dp_colormap",
+        "vi_colormap",
+        "roi_mode",
+        "vi_roi_reduce",
+        "show_title",
+        "show_controls",
+        "controls_collapsed",
+        "show_stats",
+        "show_scale_bar",
+    ):
         assert required in s, f"state_dict missing key {required!r}"
 
 
@@ -121,6 +132,87 @@ def test_show4dstem_save_and_load(tmp_path, show4dstem_widget):
     assert fresh.show_fft is True
 
 
+def test_show4dstem_controls_collapsed_roundtrips_state_and_html(tmp_path):
+    """Controls can be collapsed reversibly and persist through standalone export."""
+    rng = np.random.default_rng(1)
+    data = rng.integers(0, 100, (4, 4, 8, 8), dtype=np.uint16)
+    widget = Show4DSTEM(
+        data,
+        show_controls=True,
+        controls_collapsed=True,
+        verbose=False,
+    )
+
+    assert widget.controls_collapsed is True
+    assert widget.expand_controls() is widget
+    assert widget.controls_collapsed is False
+    assert widget.collapse_controls() is widget
+    assert widget.controls_collapsed is True
+    assert widget.toggle_controls() is widget
+    assert widget.controls_collapsed is False
+
+    widget.collapse_controls()
+    state = widget.state_dict()
+    assert state["show_controls"] is True
+    assert state["controls_collapsed"] is True
+
+    restored = Show4DSTEM(data, state=state, verbose=False)
+    assert restored.controls_collapsed is True
+
+    clone = widget._clone_for_html_export(dtype="uint16", det_bin=1)
+    try:
+        assert clone.controls_collapsed is True
+        assert clone.state_dict()["controls_collapsed"] is True
+    finally:
+        clone.close()
+
+    out = widget.export_html(tmp_path / "show4dstem_controls_collapsed.html", encoding="full")
+    html = out.read_text(encoding="utf-8")
+    assert "controls_collapsed" in html
+
+
+def test_show4dstem_ui_mode_presets_and_overrides():
+    rng = np.random.default_rng(2)
+    data = rng.integers(0, 100, (4, 4, 8, 8), dtype=np.uint16)
+
+    presentation = Show4DSTEM(data, ui_mode="presentation", verbose=False)
+    assert presentation.show_title is True
+    assert presentation.show_controls is True
+    assert presentation.controls_collapsed is True
+    assert presentation.show_stats is False
+    assert presentation.show_scale_bar is True
+
+    report = Show4DSTEM(data, ui_mode="report", verbose=False)
+    assert report.show_title is True
+    assert report.show_controls is False
+    assert report.controls_collapsed is False
+    assert report.show_stats is False
+    assert report.show_scale_bar is True
+
+    minimal = Show4DSTEM(data, ui_mode="minimal", verbose=False)
+    assert minimal.show_title is False
+    assert minimal.show_controls is False
+    assert minimal.controls_collapsed is False
+    assert minimal.show_stats is False
+    assert minimal.show_scale_bar is False
+
+    override = Show4DSTEM(
+        data,
+        ui_mode="minimal",
+        show_title=True,
+        show_controls=True,
+        controls_collapsed=True,
+        show_stats=True,
+        show_scale_bar=True,
+        verbose=False,
+    )
+    assert override.show_title is True
+    assert override.show_controls is True
+    assert override.controls_collapsed is True
+    assert override.show_stats is True
+    assert override.show_scale_bar is True
+
+
 # ---------------------------------------------------------------------------
 # Show2D
 # ---------------------------------------------------------------------------
@@ -134,7 +226,7 @@ def test_show2d_state_dict_keys(show2d_widget):
     s = show2d_widget.state_dict()
     assert isinstance(s, dict)
     assert len(s) > 5
-    for required in ("cmap", "log_scale"):
+    for required in ("cmap", "log_scale", "show_title", "show_controls", "controls_collapsed"):
         assert required in s, f"state_dict missing key {required!r}"
 
 

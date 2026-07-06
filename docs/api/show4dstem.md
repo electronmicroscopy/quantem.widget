@@ -11,6 +11,12 @@ viewer from what `load(...)` returns and from the requested widget backend:
 CUDA/Torch on Linux, raw Metal on Apple Silicon MPS loads, CPU fallback, or
 browser WebGPU.
 
+The MPS code is intentionally a backend implementation, not a separate public
+viewer to choose in notebooks. Direct names such as `Show4DSTEMMPS`,
+`Show4DSTEM_MACBOOK`, and `show_4dstem_mps(...)` stay importable for old
+notebooks and backend tests, but new code should use the single factory:
+`Show4DSTEM(load(path, backend="mps", det_bin=...))`.
+
 Canonical forms:
 
 ```python
@@ -58,6 +64,17 @@ On Apple Silicon, prefer the raw Metal/MPS loading path for large first-pass
 browsing because it can control chunking, detector binning, and dtype more
 tightly than a generic Torch-MPS tensor path. Torch-MPS remains useful for
 some tensor workflows, but reports should say which path was used.
+
+MPS loading also has an automatic preflight memory guard. If a no-bin or large
+Metal allocation would exceed the Mac's conservative working-set budget,
+`load(..., backend="mps")` fails before allocating and recommends a safer
+`det_bin` value. This is intentional: it protects laptop sessions from
+unresponsive unified-memory pressure while keeping the MPS backend automatic.
+
+Routing lives in `quantem.widget.show4dstem_factory`: chunked MPS payloads and
+lazy MacBook multi-dataset handles go to the raw-Metal backend, while CUDA/CPU
+arrays and CUDA 5D dataset wrappers stay on the universal base viewer. This
+keeps the user-facing API stable while backend-specific code stays isolated.
 
 ## Live scope folders
 
@@ -117,5 +134,10 @@ Python round trip - see [Performance](../maintainer/widget-performance).
 | Annular inner / outer | `roi_radius_inner`, `roi_radius` | ADF annulus geometry |
 | Virtual-image ROI | `vi_roi_mode`, `vi_roi_center_row`, `vi_roi_center_col` | Pick a real-space region to average its diffraction |
 | FFT toggle | `show_fft`, `fft_window` | Power spectrum of the virtual image |
+| Viewer chrome preset | `ui_mode` plus explicit `show_*` kwargs | Applies shared display presets; see [Viewer UI controls](viewer-ui) |
+| Control visibility | `show_controls`, `controls_collapsed`; `collapse_controls()`, `expand_controls()`, `toggle_controls()` | Permanently remove controls or temporarily collapse them behind the top GUI toggle |
+| Title visibility | `show_title` | Top title row shows/hides |
+| Stats visibility | `show_stats` | DP, virtual-image, and FFT stats bars show/hide |
+| Scale bar visibility | `show_scale_bar` | DP and virtual-image scale bars show/hide |
 | Scan-path playback | `path_playing`, `path_index`, `path_interval_ms` | Sweeps the probe across the scan |
 | k-space calibration | `k_pixel_size`, `k_calibrated` | Diffraction axes read in mrad when calibrated |

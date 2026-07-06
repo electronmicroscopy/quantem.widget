@@ -281,6 +281,7 @@ function ShowDiffraction() {
 
   // Model state
   const [title] = useModelState<string>("title");
+  const [showTitle] = useModelState<boolean>("show_title");
   const [detRows] = useModelState<number>("det_rows");
   const [detCols] = useModelState<number>("det_cols");
   const [frameBytes] = useModelState<DataView>("frame_bytes");
@@ -311,6 +312,8 @@ function ShowDiffraction() {
   const [dpStats] = useModelState<number[]>("dp_stats");
   const [showStats] = useModelState<boolean>("show_stats");
   const [showControls] = useModelState<boolean>("show_controls");
+  const [controlsCollapsed, setControlsCollapsed] = useModelState<boolean>("controls_collapsed");
+  const controlsVisible = showControls && !controlsCollapsed;
   const [panelWidthPx] = useModelState<number>("panel_width_px");
 
   // Standalone HTML export bridge.
@@ -798,70 +801,88 @@ function ShowDiffraction() {
       onMouseDownCapture={handleRootMouseDownCapture}
     >
       {/* Header */}
-      <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: `${SPACING.SM}px` }}>
-        <Stack direction="row" alignItems="center" spacing={`${SPACING.XS}px`}>
-          <Typography sx={{ fontSize: 13, fontWeight: 600 }}>{title || "Diffraction"}</Typography>
-          <InfoTooltip theme={themeInfo.theme} text={
-            <Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
-              <MetadataSection rows={[
-                ["Detector", `${detRows} x ${detCols}`],
-                ["Frames", nFrames > 1 ? `${nFrames}` : "single frame"],
-                ["Calibration", kCalibrated && kPixelSize > 0 ? `${formatNumber(kPixelSize)} 1/Å/px` : "pixel units"],
-                ["Center", `${formatNumber(centerRow)}, ${formatNumber(centerCol)}`],
-                ["Annotations", `${spots.length} spots, ${rings.length} rings`],
-              ]} />
-              <KeyboardShortcuts items={[
-                ["Click", "Add spot (or set center in Manual mode)"],
-                ["← →", "Previous / next frame"],
-                ["Shift+Arrow", "Move 10 frames"],
-                ["Scroll", "Zoom in/out"],
-                ["Shift+Drag", "Pan"],
-                ["R", "Reset zoom/pan"],
-                ["Z", "Undo last spot"],
-                ["Double-click", "Reset view"],
-              ]} />
-            </Box>
-          } />
-        </Stack>
-        <Stack direction="row" spacing={`${SPACING.XS}px`}>
-          <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} onClick={handleCopyDP}>
-            Copy
-          </Button>
-          <Button
-            size="small"
-            sx={{ ...compactButton, color: themeColors.accent }}
-            onClick={(e) => setDpExportAnchor(e.currentTarget)}
-            title={exportStatus || "Export a PNG or a standalone HTML viewer"}
-          >
-            Export
-          </Button>
-          <Menu anchorEl={dpExportAnchor} open={Boolean(dpExportAnchor)} onClose={() => setDpExportAnchor(null)} anchorOrigin={{ vertical: "bottom", horizontal: "left" }} transformOrigin={{ vertical: "top", horizontal: "left" }} sx={{ zIndex: 9999 }}>
-            <MenuItem onClick={handleExportPng} sx={{ fontSize: 12 }}>PNG</MenuItem>
-            {exportEnabled && <MenuItem onClick={handleExportHtml} sx={{ fontSize: 12 }}>HTML</MenuItem>}
-          </Menu>
-          {exportEnabled && exportStatus && (
-            <Typography
-              sx={{
-                ...typography.value,
-                maxWidth: 160,
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-                whiteSpace: "nowrap",
-                color: exportStatus.startsWith("Export failed") ? "#d32f2f" : themeColors.textMuted,
-              }}
-              title={exportStatus}
-            >
-              {exportStatus}
-            </Typography>
+      {(showTitle || showControls) && (
+        <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: `${SPACING.SM}px` }}>
+          {showTitle && (
+            <Stack direction="row" alignItems="center" spacing={`${SPACING.XS}px`}>
+              <Typography sx={{ fontSize: 13, fontWeight: 600 }}>{title || "Diffraction"}</Typography>
+              <InfoTooltip theme={themeInfo.theme} text={
+                <Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
+                  <MetadataSection rows={[
+                    ["Detector", `${detRows} x ${detCols}`],
+                    ["Frames", nFrames > 1 ? `${nFrames}` : "single frame"],
+                    ["Calibration", kCalibrated && kPixelSize > 0 ? `${formatNumber(kPixelSize)} 1/Å/px` : "pixel units"],
+                    ["Center", `${formatNumber(centerRow)}, ${formatNumber(centerCol)}`],
+                    ["Annotations", `${spots.length} spots, ${rings.length} rings`],
+                  ]} />
+                  <KeyboardShortcuts items={[
+                    ["Click", "Add spot (or set center in Manual mode)"],
+                    ["← →", "Previous / next frame"],
+                    ["Shift+Arrow", "Move 10 frames"],
+                    ["Scroll", "Zoom in/out"],
+                    ["Shift+Drag", "Pan"],
+                    ["R", "Reset zoom/pan"],
+                    ["Z", "Undo last spot"],
+                    ["Double-click", "Reset view"],
+                  ]} />
+                </Box>
+              } />
+            </Stack>
+          )}
+          {showControls && (
+            <Stack direction="row" spacing={`${SPACING.XS}px`}>
+              <Button
+                size="small"
+                sx={{ ...compactButton, color: themeColors.accent }}
+                onClick={() => setControlsCollapsed(!controlsCollapsed)}
+                aria-label={controlsCollapsed ? "Show controls" : "Hide controls"}
+              >
+                {controlsCollapsed ? "Controls" : "Hide"}
+              </Button>
+              {controlsVisible && (
+                <>
+                  <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} onClick={handleCopyDP}>
+                    Copy
+                  </Button>
+                  <Button
+                    size="small"
+                    sx={{ ...compactButton, color: themeColors.accent }}
+                    onClick={(e) => setDpExportAnchor(e.currentTarget)}
+                    title={exportStatus || "Export a PNG or a standalone HTML viewer"}
+                  >
+                    Export
+                  </Button>
+                  <Menu anchorEl={dpExportAnchor} open={Boolean(dpExportAnchor)} onClose={() => setDpExportAnchor(null)} anchorOrigin={{ vertical: "bottom", horizontal: "left" }} transformOrigin={{ vertical: "top", horizontal: "left" }} sx={{ zIndex: 9999 }}>
+                    <MenuItem onClick={handleExportPng} sx={{ fontSize: 12 }}>PNG</MenuItem>
+                    {exportEnabled && <MenuItem onClick={handleExportHtml} sx={{ fontSize: 12 }}>HTML</MenuItem>}
+                  </Menu>
+                  {exportEnabled && exportStatus && (
+                    <Typography
+                      sx={{
+                        ...typography.value,
+                        maxWidth: 160,
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                        color: exportStatus.startsWith("Export failed") ? "#d32f2f" : themeColors.textMuted,
+                      }}
+                      title={exportStatus}
+                    >
+                      {exportStatus}
+                    </Typography>
+                  )}
+                </>
+              )}
+            </Stack>
           )}
         </Stack>
-      </Stack>
+      )}
 
       {/* DP panel */}
       <Box sx={{ display: "flex", justifyContent: "flex-start" }}>
         <Box>
           {/* Toolbar: general controls above the display */}
-          {showControls && (
+          {controlsVisible && (
             <Stack direction="row" alignItems="center" spacing={`${SPACING.SM}px`} useFlexGap sx={{ mb: `${SPACING.XS}px`, minHeight: 28, flexWrap: "wrap", rowGap: `${SPACING.XS}px`, maxWidth: canvasSize, px: 1, py: 0.5, border: `1px solid ${themeColors.border}`, borderRadius: "4px", bgcolor: themeColors.controlBg }}>
               <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} onClick={() => setDetectRequest(20)} title="Auto-detect Bragg spots">Spots</Button>
               <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} onClick={() => setDetectRingsRequest(8)} title="Auto-detect Debye–Scherrer rings">Rings</Button>
@@ -1083,7 +1104,7 @@ function ShowDiffraction() {
       )}
 
       {/* Fine controls below the display */}
-      {showControls && (
+      {controlsVisible && (
         <Box sx={{ mt: `${SPACING.MD}px`, maxWidth: canvasSize }}>
           <Stack direction="row" spacing={`${SPACING.LG}px`} sx={{ flexWrap: "wrap" }}>
             <Box sx={controlBox}>

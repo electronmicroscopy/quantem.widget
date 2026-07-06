@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 
 from quantem.widget.export import HTML_EXPORT_TRAITS, supports_html_export
+from quantem.widget.show1d import Show1D
 from quantem.widget.show2d import Show2D
 from quantem.widget.show3d import Show3D
 from quantem.widget.show3dslices import Show3DSlices
@@ -16,7 +17,12 @@ from quantem.widget.showdiffraction import ShowDiffraction
 from quantem.widget.showeds import ShowEDS
 
 
-EXPORT_WIDGET_CLASSES = (Show2D, Show3D, Show3DSlices, Show4DSTEM, ShowEDS, ShowDiffraction)
+EXPORT_WIDGET_CLASSES = (Show1D, Show2D, Show3D, Show3DSlices, Show4DSTEM, ShowEDS, ShowDiffraction)
+
+
+def _show1d() -> Show1D:
+    data = np.asarray([[3.0, 2.0, 1.0], [2.5, 1.7, 1.1]], dtype=np.float32)
+    return Show1D(data, x=[0, 1, 2], labels=["loss", "validation"], title="Protocol Show1D")
 
 
 def _show2d() -> Show2D:
@@ -50,6 +56,7 @@ def _showdiffraction() -> ShowDiffraction:
 
 
 EXPORT_WIDGET_CASES = (
+    pytest.param(_show1d, {"encoding": "full"}, {"mode": "single", "encoding": "full"}, "Protocol Show1D", id="show1d"),
     pytest.param(_show2d, {"encoding": "full"}, {"mode": "single", "encoding": "full"}, "Protocol Show2D", id="show2d"),
     pytest.param(_show3d, {"encoding": "full"}, {"mode": "single", "encoding": "full"}, "Protocol Show3D", id="show3d"),
     pytest.param(_show3dslices, {"encoding": "full"}, {"mode": "single", "encoding": "full"}, "Protocol Show3DSlices", id="show3dslices"),

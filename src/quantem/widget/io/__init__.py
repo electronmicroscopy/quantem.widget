@@ -48,6 +48,27 @@ _IMAGE_EXPORTS = {"read_gif", "read_image", "read_image_stack", "read_images"}
 # Memory profiler (disk staging + RAM + per-GPU VRAM).
 _MEMORY_EXPORTS = {"memory"}
 
+# Data-transfer planner for large microscopy/HPC workflows. Kept import-light so
+# future CLI commands can dry-run transfer plans without importing viewer code.
+_DATA_TRANSFER_EXPORTS = {
+    "DataTransferEntry",
+    "DataTransferFile",
+    "DataTransferGroup",
+    "DataTransferPlan",
+    "DataTransferResult",
+    "DataTransferState",
+    "DataTransferSummary",
+    "collect_data_transfer_groups",
+    "copy_data_transfer",
+    "data_transfer_plan_from_dict",
+    "filter_data_transfer_plan",
+    "inspect_data_transfer",
+    "plan_data_transfer",
+    "read_data_transfer_manifest",
+    "summarize_data_transfer",
+    "write_data_transfer_manifest",
+}
+
 # Decompress-backend selection. Import-light (no cupy/Metal), so it stays cheap
 # to ask "which backend would load() pick here?" without loading any kernel.
 _BACKEND_EXPORTS = {"detect_backend", "resolve_backend"}
@@ -77,6 +98,21 @@ __all__ = [
     "disk_of",
     "group_by_disk",
     "memory",
+    "DataTransferEntry",
+    "DataTransferFile",
+    "DataTransferGroup",
+    "DataTransferPlan",
+    "DataTransferResult",
+    "DataTransferState",
+    "DataTransferSummary",
+    "collect_data_transfer_groups",
+    "copy_data_transfer",
+    "data_transfer_plan_from_dict",
+    "filter_data_transfer_plan",
+    "inspect_data_transfer",
+    "plan_data_transfer",
+    "read_data_transfer_manifest",
+    "summarize_data_transfer",
     "resolve_backend",
     "read_emd_metadata",
     "read_gif",
@@ -88,6 +124,7 @@ __all__ = [
     "status",
     "upload",
     "wait_for_saves",
+    "write_data_transfer_manifest",
     "__version__",
 ]
 
@@ -110,6 +147,11 @@ def __getattr__(name: str):
         return value
     if name in _MEMORY_EXPORTS:
         module = import_module("quantem.widget.io.memory")
+        value = getattr(module, name)
+        globals()[name] = value
+        return value
+    if name in _DATA_TRANSFER_EXPORTS:
+        module = import_module("quantem.widget.io.data_transfer")
         value = getattr(module, name)
         globals()[name] = value
         return value

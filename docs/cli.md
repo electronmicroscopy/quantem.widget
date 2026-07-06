@@ -10,6 +10,8 @@ quantem show3d ./frames/                       # a folder of frames -> Show3D sc
 quantem show4dstem ./masters/                  # *_master.h5        -> live Show4DSTEM
 quantem show4dstem a_master.h5 b_master.h5     # several masters    -> one 5D multi-tilt viewer
 quantem show4dstem ./masters/ --html           # 4D-STEM            -> shareable offline HTML
+quantem showfolder ./session/                  # microscopy folder  -> ShowFolder notebook/HTML
+quantem data-transfer plan ./raw/ /ssd0/run /ssd1/run --manifest run.json
 quantem html tutorial.ipynb                    # a notebook         -> standalone interactive HTML
 quantem github tutorial_github.ipynb --no-execute # optional static copy for GitHub preview
 ```
@@ -22,6 +24,8 @@ quantem github tutorial_github.ipynb --no-execute # optional static copy for Git
 | `quantem show2d <image / folder>` | one image, or a folder | a Show2D HTML (a folder becomes a gallery) |
 | `quantem show3d <folder>` | a folder of same-size frames | a Show3D scrub HTML |
 | `quantem show4dstem <master(s) / folder>` | one or more `*_master.h5` | a live Show4DSTEM notebook (or `--html`) |
+| `quantem showfolder <folder>` | microscopy session folder | a ShowFolder notebook (or `--html`) |
+| `quantem data-transfer plan/inspect/copy` | `*_master.h5` folder plus target roots | manifest-backed transfer planning, state inspection, and explicit copy |
 | `quantem html <notebook.ipynb>` | a notebook you wrote | runs it, or with `--no-execute` exports saved outputs/state, into one standalone interactive HTML |
 | `quantem github <notebook.ipynb>` | an optional static copy of a notebook | strips widget state and embeds compressed pictures for GitHub's notebook preview |
 
@@ -35,6 +39,24 @@ Dataset slider** to flip between scans. `--combined --html` writes that as one
 offline file (served locally, since a `file://` page can't fetch its companion).
 
 Everything lands in `~/Downloads` and opens automatically.
+
+## DataTransfer
+
+Use `data-transfer` before heavy multi-GPU browsing or ptychography when a
+session should be split across fast disks. It writes a durable manifest that the
+CLI, notebook widget, and downstream tools can inspect later.
+
+```bash
+quantem data-transfer plan ./raw_session/ /nvme0/session /nvme1/session --manifest session.json
+quantem data-transfer inspect --manifest session.json
+quantem data-transfer copy --manifest session.json          # dry-run by default
+quantem data-transfer copy --manifest session.json --execute
+```
+
+`copy` writes through `*.partial` files and refuses mismatched existing targets.
+Default verification is by file size for speed; add `--hash sha256` at planning
+time and `--verify hash` at inspect/copy time when the extra full-file reads are
+worth the stronger guarantee.
 
 For notebook sharing, keep the full-state `.ipynb` for collaborators and use
 `quantem html --no-execute` for an interactive web artifact. Use `quantem github

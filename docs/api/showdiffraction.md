@@ -6,6 +6,12 @@ read calibrated d-spacings, and calibrate k-space from a known reflection. For
 full 4D-STEM datasets, use [Show4DSTEM](show4dstem). See the
 [ShowDiffraction tutorial](../tutorials/showdiffraction) for a worked example.
 
+## Viewer UI
+
+`ShowDiffraction` supports the shared `ui_mode`, `show_title`,
+`show_controls`, `controls_collapsed`, and `show_stats` names. See
+[Viewer UI controls](viewer-ui).
+
 ## Reference
 
 ```{eval-rst}

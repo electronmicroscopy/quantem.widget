@@ -65,25 +65,42 @@ def _format_scale_label(value: float, unit: str) -> str:
     return f"{round(nice)} {sym}" if nice >= 1 else f"{nice:.2f} {sym}"
 
 
-def _draw_scalebar(img, pixel_size: float, unit: str):
-    """Burn a bottom-right scale bar matching js/figure.ts exportFigure exactly.
+def _draw_text_shadow(draw, xy: tuple[float, float], text: str, font, *, anchor: str | None = None) -> None:
+    """Draw white overlay text with the 1 px shadow used by widget canvases."""
+    kwargs = {"fill": (0, 0, 0), "font": font}
+    if anchor is not None:
+        kwargs["anchor"] = anchor
+    draw.text((xy[0] + 1, xy[1] + 1), text, **kwargs)
+    kwargs["fill"] = (255, 255, 255)
+    draw.text(xy, text, **kwargs)
 
-    White bar + bold centered label with a 1px drop shadow, sized relative to the
-    image: targetBarPx = max(60, w*0.15), thickness = max(4, h*0.012),
-    font = max(14, h*0.04), margin = max(12, w*0.03). The bar physical length is
-    snapped to a 1/2/5/10 value, identical to the on-screen and figure exports.
+
+def _draw_scalebar(
+    img,
+    pixel_size: float,
+    unit: str,
+    *,
+    show_zoom_indicator: bool = False,
+    zoom: float = 1.0,
+):
+    """Burn the Show3D canvas scale bar and optional zoom readout into a frame.
+
+    The geometry mirrors the widget canvas overlay: a 60 px target bar capped at
+    25% of the panel width, 5 px bar thickness, 16 px text, 12 px margin, and a
+    1 px drop shadow. The zoom readout is bottom-left; the scale bar is
+    bottom-right.
     """
     from PIL import ImageDraw, ImageFont
     if pixel_size <= 0:
         return img
     width, height = img.size
-    target_bar_px = max(60.0, width * 0.15)
-    bar_thickness = max(4, round(height * 0.012))
-    # Slightly smaller than figure.ts (0.04) so the GIF label is less heavy.
-    font_size = max(12, round(height * 0.032))
-    margin = max(12, round(width * 0.03))
-    nice_phys = _round_to_nice_value(target_bar_px * pixel_size)
-    bar_px = nice_phys / pixel_size
+    target_bar_px = min(60.0, width * 0.25)
+    bar_thickness = 5
+    font_size = 16
+    margin = 12
+    effective_zoom = max(1e-6, float(zoom))
+    nice_phys = _round_to_nice_value((target_bar_px / effective_zoom) * pixel_size)
+    bar_px = (nice_phys / pixel_size) * effective_zoom
     bar_y = height - margin
     bar_x = width - bar_px - margin
     draw = ImageDraw.Draw(img)
@@ -95,13 +112,9 @@ def _draw_scalebar(img, pixel_size: float, unit: str):
         font = ImageFont.truetype("DejaVuSans-Bold.ttf", font_size)
     except OSError:
         font = ImageFont.load_default()
-    tb = draw.textbbox((0, 0), label, font=font)
-    tw = tb[2] - tb[0]
-    # textAlign center, baseline bottom, 4px above the bar (matches fillText).
-    tx = bar_x + bar_px / 2 - tw / 2
-    ty = bar_y - 4 - (tb[3] - tb[1])
-    draw.text((tx + 1, ty + 1), label, fill=(0, 0, 0), font=font)
-    draw.text((tx, ty), label, fill=(255, 255, 255), font=font)
+    _draw_text_shadow(draw, (bar_x + bar_px / 2, bar_y - 4), label, font, anchor="mb")
+    if show_zoom_indicator:
+        _draw_text_shadow(draw, (margin, height - margin + bar_thickness), f"{effective_zoom:.1f}x", font, anchor="lb")
     return img
 
 
@@ -114,7 +127,15 @@ def colorize(normalized_uint8: np.ndarray, cmap_name: str):
     return Image.fromarray(rgb, mode="RGB")
 
 
-def finalize_frame(img, quality: str, pixel_size: float, unit: str):
+def finalize_frame(
+    img,
+    quality: str,
+    pixel_size: float,
+    unit: str,
+    *,
+    show_zoom_indicator: bool = False,
+    zoom: float = 1.0,
+):
     """Downscale by the quality factor, then draw the scale bar at output res."""
     scale = QUALITY_SCALE.get(quality, 1.0)
     if scale < 1.0:
@@ -122,7 +143,13 @@ def finalize_frame(img, quality: str, pixel_size: float, unit: str):
         width, height = img.size
         img = img.resize((max(1, int(width * scale)), max(1, int(height * scale))), Image.LANCZOS)
     # Each output pixel spans pixel_size / scale of sample after the downscale.
-    return _draw_scalebar(img, pixel_size / scale if scale > 0 else pixel_size, unit)
+    return _draw_scalebar(
+        img,
+        pixel_size / scale if scale > 0 else pixel_size,
+        unit,
+        show_zoom_indicator=show_zoom_indicator,
+        zoom=zoom,
+    )
 
 
 def normalize_background(background: str | tuple[int, int, int]) -> tuple[int, int, int]:
@@ -207,7 +234,7 @@ def compose_panel_grid(
                 title_parts.append(str(panel_titles[i]))
             if frame_labels and i < len(frame_labels) and frame_labels[i]:
                 title_parts.append(str(frame_labels[i]))
-            _draw_panel_title(panel, " - ".join(title_parts), title_font_size)
+            _draw_panel_title(panel, " · ".join(title_parts), title_font_size)
         row, col = divmod(i, cols)
         x = col * (cell_w + gap) + (cell_w - panel.size[0]) // 2
         y = row * (cell_h + gap) + (cell_h - panel.size[1]) // 2

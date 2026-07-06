@@ -1840,11 +1840,16 @@ def _load_as_dataset5dstem(
     """
     try:
         import torch
+    except ImportError as exc:
+        raise ImportError("series_type= needs torch installed.") from exc
+    try:
         # Dataset5dstem is vendored in quantem.live for now (self-contained torch
         # container; migrates to quantem core once #228/#231 land there).
         from quantem.widget.data import Dataset5dstem
     except ImportError as exc:
-        raise ImportError("series_type= needs torch installed.") from exc
+        raise ImportError(
+            "series_type= could not import quantem.widget.data.Dataset5dstem."
+        ) from exc
 
     if devices is not None and isinstance(filepath, (list, tuple)):
         import concurrent.futures
@@ -1984,6 +1989,7 @@ def _load_view(
     auto_narrow: bool = True,
     output_dtype=None,
     row_prefix: bool = False,
+    skip_mps_memory_check: bool | None = None,
 ):
     """View/screen load path for the non-cuda backends (cpu, mps).
 
@@ -2018,6 +2024,7 @@ def _load_view(
                 verbose=verbose,
                 row_prefix=row_prefix,
                 det_bin=det_bin,
+                skip_mps_memory_check=skip_mps_memory_check,
             )
             meta.update(data.metadata)
             if apply_mask:
@@ -2155,6 +2162,11 @@ def _browse_dtype_advise_and_cast(data, dtype, verbose):
     return data
 
 
+def _is_uint8_browse_dtype(dtype: str | None) -> bool:
+    """Return True when the public browse dtype requests 8-bit unsigned data."""
+    return isinstance(dtype, str) and dtype.lower() in ("u8", "uint8")
+
+
 def load(filepath, *args, dtype: str | None = None, gpus=None, stack: bool = True,
          max_concurrent=None, **kwargs):
     """Load 4D-STEM data — one master, or many.
@@ -2174,17 +2186,30 @@ def load(filepath, *args, dtype: str | None = None, gpus=None, stack: bool = Tru
     picks uint8 only if lossless.
     """
     is_seq = isinstance(filepath, (list, tuple))
+    verbose = kwargs.get("verbose", True)
+    requested_u8 = _is_uint8_browse_dtype(dtype)
+    if requested_u8 and kwargs.get("output_dtype") is None:
+        # Route the public browse token through the low-level direct-output
+        # path for every loader shape: single master, stacked list,
+        # gpus=/stack=False placement, and devices= sharded placement.
+        # Without this, list loads can silently materialize uint16 first and
+        # only cast later, defeating the U8 memory/speed contract.
+        kwargs["output_dtype"] = np.uint8
     if is_seq and (gpus is not None or not stack):
         # N separate GPU-placed datasets (parallel read, serial decode).
-        return _load_many_parallel(list(filepath), gpus=gpus, max_concurrent=max_concurrent,
-                                   verbose=kwargs.pop("verbose", False), **kwargs)
-    verbose = kwargs.get("verbose", True)
+        result = _load_many_parallel(list(filepath), gpus=gpus, max_concurrent=max_concurrent,
+                                     verbose=kwargs.pop("verbose", False), **kwargs)
+        if requested_u8 and verbose:
+            print("  Loaded in uint8 for browsing - values >255 saturate to 255. "
+                  "Reconstruction uses raw uint16.")
+        return result
     sel = (dtype or "").lower()
-    if sel in ("u8", "uint8") and kwargs.get("output_dtype") is None and not isinstance(filepath, (list, tuple)):
-        # decode-DIRECT to uint8: the batched decoder clips@255 into a uint8
-        # output, so the full uint16 block is never materialized (peak ~ uint8
-        # out + one batch + scratch, not uint16+uint8). The laptop browse path.
-        kwargs["output_dtype"] = np.uint8
+    if requested_u8:
+        # decode-DIRECT to uint8 whenever the backend supports output_dtype:
+        # the batched decoder clips@255 into a uint8 output, so the full uint16
+        # block is never materialized (peak ~ uint8 out + one batch + scratch,
+        # not uint16+uint8). The browse path is explicit and count-clipping is
+        # user-visible.
         result = _load_impl(filepath, *args, **kwargs)
         d = getattr(result, "data", None)
         if verbose and d is not None and hasattr(d, "nbytes"):
@@ -2400,6 +2425,7 @@ def _load_impl(
     units=None,
     backend: str = "auto",
     row_prefix: bool = False,
+    skip_mps_memory_check: bool | None = None,
 ) -> "LoadResult":
     """Load bitshuffle+LZ4 compressed HDF5 data directly to GPU.
 
@@ -2447,6 +2473,12 @@ def _load_impl(
         4D-STEM archives saved as ``float32``: callers can request
         ``output_dtype=np.float16`` and/or ``det_bin=2`` to work with a much
         smaller GPU array while keeping the on-disk archive high precision.
+    skip_mps_memory_check : bool, optional
+        Override the Apple Silicon MPS memory guard. By default, MPS loads use
+        HDF5 metadata to estimate the unified-memory footprint before allocating
+        Metal buffers and refuse no-bin/large loads that can freeze a laptop.
+        Prefer ``det_bin=2`` or ``det_bin=4`` for browsing; set this only when
+        you intentionally want to force the risky allocation.
     device : int or str, optional
         Pin every allocation of a single-target load to this GPU
         (``device=1`` or ``"cuda:1"``). Default None = current device.
@@ -2598,13 +2630,18 @@ def _load_impl(
         ):
             from quantem.widget.multidataset_mps import load_macbook_datasets
             return load_macbook_datasets(
-                filepath, det_bin=det_bin, scan_size=None, verbose=verbose,
+                filepath,
+                det_bin=det_bin,
+                scan_size=None,
+                verbose=verbose,
+                skip_mps_memory_check=skip_mps_memory_check,
             )
         return _load_view(
             filepath, backend, dataset_path=dataset_path, apply_mask=apply_mask,
             scan_shape=scan_shape, det_bin=det_bin, verbose=verbose,
             auto_narrow=auto_narrow, output_dtype=output_dtype,
             row_prefix=row_prefix,
+            skip_mps_memory_check=skip_mps_memory_check,
         )
 
     # series_type set → return a Dataset5dstem (a multi-tilt / time series),
@@ -2632,6 +2669,7 @@ def _load_impl(
                 filepath, dataset_path=dataset_path, apply_mask=apply_mask,
                 scan_shape=scan_shape, det_bin=det_bin, verbose=verbose,
                 auto_narrow=auto_narrow, output_dtype=output_dtype,
+                skip_mps_memory_check=skip_mps_memory_check,
             )
 
     # Sharded multi-GPU: split files across `devices`, each device loads + keeps

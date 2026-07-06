@@ -26,6 +26,8 @@ parts:
   - caption: API reference
     chapters:
       - file: api/index
+      - file: api/viewer-ui
+      - file: api/show1d
       - file: api/show2d
       - file: api/show3d
       - file: api/show3dslices
@@ -35,6 +37,10 @@ parts:
       - file: api/showfolder
       - file: api/html-export
       - file: api/io
+  - caption: Developers
+    chapters:
+      - file: developer/ui-guide
+        title: UI Guide
   - caption: Maintainers
     chapters:
       - file: changelog
@@ -68,5 +74,7 @@ parts:
             title: ShowEDS
           - file: maintainer/storyboard-showfolder
             title: ShowFolder
+          - file: maintainer/storyboard-data-transfer
+            title: DataTransfer
       - file: maintainer/widget-performance
         title: Performance
