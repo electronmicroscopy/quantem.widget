@@ -175,13 +175,19 @@ def corrected_radius(
     ellipse_angle: float = 0.0,
     ellipse_corrected: bool = False,
 ):
-    """Radius with optional elliptical-distortion correction."""
+    """Radius with optional elliptical-distortion correction.
+
+    The correction is mean-preserving: an ellipse of semi-axes A, B maps to a
+    circle of radius sqrt(A*B) (the mean radius), so a calibration set before
+    the correction stays valid after it.
+    """
     if not ellipse_corrected or ellipse_ratio == 1.0:
         return np.hypot(d_row, d_col)
     angle = math.radians(ellipse_angle)
     major = d_col * math.cos(angle) + d_row * math.sin(angle)
     minor = -d_col * math.sin(angle) + d_row * math.cos(angle)
-    return np.hypot(major / ellipse_ratio, minor)
+    root_ratio = math.sqrt(ellipse_ratio)
+    return np.hypot(major / root_ratio, minor * root_ratio)
 
 
 def radial_profile_px(
@@ -328,14 +334,22 @@ def texture_from_profile(
     theta_deg: np.ndarray, intensity: np.ndarray, *, return_profile: bool = False
 ) -> dict:
     """Texture strength and preferred angle from an azimuthal profile."""
-    pedestal_free = intensity.astype(np.float64) - float(intensity.min())
-    total = pedestal_free.sum()
-    if total <= 0:
+    values = intensity.astype(np.float64)
+    # empty sectors (masked or off-detector) come back as exactly zero; a
+    # uniform ring with a missing wedge would otherwise read as textured
+    covered = values != 0.0
+    if covered.sum() < 3:
         strength, angle = 0.0, 0.0
     else:
-        component = np.sum(pedestal_free * np.exp(2j * np.radians(theta_deg)))
-        strength = float(abs(component) / total)
-        angle = float(np.degrees(np.angle(component)) / 2.0 % 180.0)
+        theta = np.radians(theta_deg)[covered]
+        pedestal_free = values[covered] - float(values[covered].min())
+        total = pedestal_free.sum()
+        if total <= 0:
+            strength, angle = 0.0, 0.0
+        else:
+            component = np.sum(pedestal_free * np.exp(2j * theta))
+            strength = float(abs(component) / total)
+            angle = float(np.degrees(np.angle(component)) / 2.0 % 180.0)
     report = {"strength": strength, "angle_deg": angle}
     if return_profile:
         report["profile"] = (theta_deg, intensity)
@@ -552,12 +566,20 @@ def _fit_ring_peak(
     amplitude = float(fit_params[0])
     fit_radius = float(fit_params[1])
     sigma = float(abs(fit_params[2]))
+    if model == "pseudo_voigt":
+        eta = float(fit_params[4])
+        gamma = sigma * 2.3548 / 2.0
+        integrated = amplitude * (
+            eta * math.pi * gamma + (1.0 - eta) * sigma * math.sqrt(2.0 * math.pi)
+        )
+    else:
+        integrated = amplitude * sigma * math.sqrt(2.0 * math.pi)
     return {
         "raw_radius_px": float(radius_guess),
         "radius_px": fit_radius,
         "intensity": amplitude,
         "fwhm_px": 2.3548 * sigma,
-        "intensity_integrated": amplitude * sigma * math.sqrt(2.0 * math.pi),
+        "intensity_integrated": integrated,
         "fit_quality": float(r_squared),
     }
 

@@ -182,25 +182,62 @@ def test_expanded_library_coverage():
 
 
 def test_wurtzite_absence_rule():
-    """P6_3mc: hh-type reflections with odd l are absent; others unconstrained."""
+    """Both species sit at 2b (1/3, 2/3, z), so wurtzite zeros the same
+    reflections as hcp: h + 2k = 3n with odd l are structurally absent."""
     zno = Phase("ZnO", 3.2495, 3.2495, 5.2069, 90.0, 90.0, 120.0, absences="wurtzite")
     assert not zno.is_allowed((0, 0, 1))
     assert not zno.is_allowed((1, 1, 1))
+    assert not zno.is_allowed((3, 0, 1))
     assert zno.is_allowed((0, 0, 2))
     assert zno.is_allowed((1, 0, 0))
     assert zno.is_allowed((1, 0, 1))
+    assert zno.is_allowed((1, 1, 0))
     assert zno.is_allowed((1, 0, 3))
-    assert zno.is_allowed((3, 0, 1))  # allowed here, forbidden in hcp metals
+
+
+def test_non_cubic_reflection_labels_keep_axis_order():
+    """Non-cubic phases keep h, k, l order; cubic phases use family labels."""
+    graphite = Phase(
+        "graphite",
+        2.4640,
+        2.4640,
+        6.7110,
+        90.0,
+        90.0,
+        120.0,
+        absences="hcp",
+    )
+    by_d = graphite.reflections(d_min=2.0)
+    assert by_d[0]["hkl_str"] == "002"
+    assert by_d[0]["d"] == pytest.approx(6.7110 / 2, abs=1e-3)
+
+    rutile = Phase("rutile", 4.5940, 4.5940, 2.9589)
+    labels = {reflection["hkl_str"] for reflection in rutile.reflections(d_min=2.8)}
+    assert "001" in labels
+    assert "100" in labels
 
 
 def test_rhombohedral_absence_rule():
-    """R-centering (hexagonal setting): -h + k + l = 3n."""
-    hem = Phase("Fe2O3", 5.0356, 5.0356, 13.7489, 90.0, 90.0, 120.0, absences="rhombohedral")
+    """R-3m (hexagonal setting): -h + k + l = 3n."""
+    bi = Phase("Bi", 4.5460, 4.5460, 11.8620, 90.0, 90.0, 120.0, absences="rhombohedral")
+    assert bi.is_allowed((0, 0, 3))
+    assert bi.is_allowed((1, 0, 4))
+    assert bi.is_allowed((1, 1, 0))
+    assert bi.is_allowed((0, 1, 2))
+    assert not bi.is_allowed((1, 0, 0))
+    assert not bi.is_allowed((0, 1, 1))
+
+
+def test_rhombohedral_c_glide_absence_rule():
+    """R-3c/R3c adds a c glide: 00l, h0l and 0kl with odd l are absent."""
+    hem = Phase("Fe2O3", 5.0356, 5.0356, 13.7489, 90.0, 90.0, 120.0, absences="rhombohedral-c")
+    assert hem.is_allowed((0, 1, 2))
     assert hem.is_allowed((1, 0, 4))
     assert hem.is_allowed((1, 1, 0))
-    assert hem.is_allowed((0, 1, 2))
-    assert not hem.is_allowed((1, 0, 0))
-    assert not hem.is_allowed((0, 1, 1))
+    assert hem.is_allowed((3, 0, 0))
+    assert not hem.is_allowed((0, 0, 3))
+    assert not hem.is_allowed((1, 0, 1))
+    assert not hem.is_allowed((0, 1, 5))
 
 
 def test_tetragonal_and_new_library_entries():
