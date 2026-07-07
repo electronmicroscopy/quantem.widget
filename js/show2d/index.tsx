@@ -24,6 +24,7 @@ import IconButton from "@mui/material/IconButton";
 import Tooltip from "@mui/material/Tooltip";
 import VisibilityIcon from "@mui/icons-material/Visibility";
 import VisibilityOffIcon from "@mui/icons-material/VisibilityOff";
+import DragIndicatorIcon from "@mui/icons-material/DragIndicator";
 import { useTheme } from "../theme";
 import { drawScaleBarHiDPI, drawColorbar, roundToNiceValue } from "../figure";
 import { extractBytes, extractFloat32, formatNumber, downloadBlob, preserveRestoredWidgetModelsOnSave } from "../format";
@@ -786,6 +787,7 @@ function Show2D() {
   const [labels] = useModelState<string[]>("labels");
   const [starred, setStarred] = useModelState<number[]>("starred");
   const [hiddenPanels, setHiddenPanels] = useModelState<number[]>("hidden_panels");
+  const [panelOrder, setPanelOrder] = useModelState<number[]>("panel_order");
   const [showPanelTitles] = useModelState<boolean>("show_panel_titles");
   const [panelTitleFontSize] = useModelState<number>("panel_title_font_size");
   const [galleryGapPxState] = useModelState<number>("gallery_gap_px");
@@ -857,6 +859,10 @@ function Show2D() {
   const [exportAnchor, setExportAnchor] = React.useState<HTMLElement | null>(null);
   const [panelMenuAnchor, setPanelMenuAnchor] = React.useState<HTMLElement | null>(null);
   const [viewMenuAnchor, setViewMenuAnchor] = React.useState<HTMLElement | null>(null);
+  const [reorderMode, setReorderMode] = React.useState(false);
+  const [dragOverPanel, setDragOverPanel] = React.useState<number | null>(null);
+  const draggedPanelRef = React.useRef<number | null>(null);
+  const pointerReorderPanelRef = React.useRef<number | null>(null);
   // Maps-style detail streaming: when the preview is binned
   // (_display_bin_factor > 1), zooming past the preview's resolution requests
   // a full-res crop of the visible window from Python instead of ever
@@ -1419,9 +1425,22 @@ function Show2D() {
     if (out.size >= totalPanelCount) out.delete(totalPanelCount - 1);
     return out;
   }, [hiddenPanels, totalPanelCount]);
+  const naturalPanelOrder = React.useMemo(
+    () => Array.from({ length: totalPanelCount }, (_, i) => i),
+    [totalPanelCount]
+  );
+  const orderedImageIndices = React.useMemo(() => {
+    const values = Array.isArray(panelOrder) ? panelOrder.map(value => Math.round(Number(value))) : [];
+    const valid = (
+      values.length === totalPanelCount &&
+      values.every((value) => Number.isFinite(value) && value >= 0 && value < totalPanelCount) &&
+      new Set(values).size === totalPanelCount
+    );
+    return valid ? values : naturalPanelOrder;
+  }, [panelOrder, naturalPanelOrder, totalPanelCount]);
   const visibleImageIndices = React.useMemo(
-    () => Array.from({ length: totalPanelCount }, (_, i) => i).filter(i => !hiddenPanelSet.has(i)),
-    [hiddenPanelSet, totalPanelCount]
+    () => orderedImageIndices.filter(i => !hiddenPanelSet.has(i)),
+    [hiddenPanelSet, orderedImageIndices]
   );
   const visibleImageCount = Math.max(1, visibleImageIndices.length);
   const panelLabel = React.useCallback((idx: number) => labels?.[idx] || `Image ${idx + 1}`, [labels]);
@@ -1445,6 +1464,91 @@ function Show2D() {
     next[panel] = next[panel] ? 0 : 1;
     setStarred(next);
   }, [starred, totalPanelCount, setStarred]);
+  const applyPanelOrder = React.useCallback((order: number[]) => {
+    const clean = order.filter((value) => Number.isInteger(value) && value >= 0 && value < totalPanelCount);
+    if (clean.length !== totalPanelCount || new Set(clean).size !== totalPanelCount) return;
+    const natural = clean.every((value, idx) => value === idx);
+    setPanelOrder(natural ? [] : clean);
+  }, [setPanelOrder, totalPanelCount]);
+  const movePanelBefore = React.useCallback((source: number, target: number) => {
+    if (source === target) return;
+    const next = [...orderedImageIndices];
+    const from = next.indexOf(source);
+    if (from < 0) return;
+    next.splice(from, 1);
+    const to = next.indexOf(target);
+    if (to < 0) return;
+    next.splice(to, 0, source);
+    applyPanelOrder(next);
+  }, [applyPanelOrder, orderedImageIndices]);
+  const handlePanelDragStart = React.useCallback((event: React.DragEvent, panel: number) => {
+    if (!reorderMode) return;
+    draggedPanelRef.current = panel;
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", String(panel));
+    event.stopPropagation();
+  }, [reorderMode]);
+  const handlePanelDragOver = React.useCallback((event: React.DragEvent, panel: number) => {
+    if (!reorderMode) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    if (dragOverPanel !== panel) setDragOverPanel(panel);
+    event.stopPropagation();
+  }, [dragOverPanel, reorderMode]);
+  const handlePanelDrop = React.useCallback((event: React.DragEvent, panel: number) => {
+    if (!reorderMode) return;
+    event.preventDefault();
+    const raw = event.dataTransfer.getData("text/plain");
+    const source = raw.trim() !== "" && Number.isFinite(Number(raw))
+      ? Math.round(Number(raw))
+      : draggedPanelRef.current;
+    if (source !== null && source !== undefined) movePanelBefore(source, panel);
+    setDragOverPanel(null);
+    draggedPanelRef.current = null;
+    event.stopPropagation();
+  }, [movePanelBefore, reorderMode]);
+  const handlePanelDragEnd = React.useCallback(() => {
+    setDragOverPanel(null);
+    draggedPanelRef.current = null;
+  }, []);
+  const handlePanelReorderPointerDown = React.useCallback((event: React.PointerEvent, panel: number) => {
+    if (!reorderMode) return;
+    pointerReorderPanelRef.current = panel;
+    draggedPanelRef.current = panel;
+    setDragOverPanel(panel);
+    event.preventDefault();
+    event.stopPropagation();
+  }, [reorderMode]);
+  const handlePanelReorderPointerEnter = React.useCallback((event: React.PointerEvent, panel: number) => {
+    if (!reorderMode || pointerReorderPanelRef.current === null) return;
+    if (dragOverPanel !== panel) setDragOverPanel(panel);
+    event.stopPropagation();
+  }, [dragOverPanel, reorderMode]);
+  const handlePanelReorderPointerUp = React.useCallback((event: React.PointerEvent, panel: number) => {
+    if (!reorderMode) return;
+    const source = pointerReorderPanelRef.current;
+    if (source !== null) movePanelBefore(source, panel);
+    pointerReorderPanelRef.current = null;
+    draggedPanelRef.current = null;
+    setDragOverPanel(null);
+    event.preventDefault();
+    event.stopPropagation();
+  }, [movePanelBefore, reorderMode]);
+  const resetPanelOrder = React.useCallback(() => {
+    setPanelOrder([]);
+    setDragOverPanel(null);
+    draggedPanelRef.current = null;
+    pointerReorderPanelRef.current = null;
+  }, [setPanelOrder]);
+  React.useEffect(() => {
+    if (!isGallery && reorderMode) setReorderMode(false);
+  }, [isGallery, reorderMode]);
+  React.useEffect(() => {
+    if (reorderMode) return;
+    pointerReorderPanelRef.current = null;
+    draggedPanelRef.current = null;
+    setDragOverPanel(null);
+  }, [reorderMode]);
   React.useEffect(() => {
     if (!isGallery) return;
     if (!hiddenPanelSet.has(selectedIdx)) return;
@@ -4733,15 +4837,14 @@ function Show2D() {
   }, [isGallery, selectedIdx, labels]);
 
   const handleHandoffToShow3D = React.useCallback(() => {
-    const panels = Array.from({ length: totalPanelCount }, (_, panel) => panel)
-      .filter((panel) => !hiddenPanelSet.has(panel));
+    const panels = visibleImageIndices;
     setViewMenuAnchor(null);
     setHandoffRequest(JSON.stringify({
       mode: "show3d",
       id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
       panels,
     }));
-  }, [hiddenPanelSet, totalPanelCount, setHandoffRequest]);
+  }, [visibleImageIndices, setHandoffRequest]);
 
   const handleClosePreparedView = React.useCallback(() => {
     setHandoffRequest(JSON.stringify({
@@ -5140,6 +5243,21 @@ function Show2D() {
                 <>
                   <Button
                     size="small"
+                    sx={{
+                      ...compactButton,
+                      color: reorderMode ? themeColors.accent : themeColors.text,
+                      "& .MuiButton-startIcon": { mr: 0.4 },
+                    }}
+                    startIcon={<DragIndicatorIcon sx={{ fontSize: 14 }} />}
+                    onClick={() => setReorderMode((value) => !value)}
+                    aria-pressed={reorderMode ? "true" : "false"}
+                    aria-label={reorderMode ? "Finish reordering panels" : "Reorder panels"}
+                    title={reorderMode ? "Finish reordering panels" : "Reorder panels"}
+                  >
+                    Reorder
+                  </Button>
+                  <Button
+                    size="small"
                     sx={{ ...compactButton, "& .MuiButton-startIcon": { mr: 0.4 } }}
                     startIcon={<VisibilityIcon sx={{ fontSize: 14 }} />}
                     onClick={(e) => setPanelMenuAnchor(e.currentTarget)}
@@ -5158,7 +5276,7 @@ function Show2D() {
                     MenuListProps={{ "aria-label": "Panel visibility options" }}
                     {...themedTopMenuProps}
                   >
-                    {Array.from({ length: totalPanelCount }, (_, panel) => {
+                    {orderedImageIndices.map((panel) => {
                       const hidden = hiddenPanelSet.has(panel);
                       const disabled = !hidden && visibleImageCount <= 1;
                       return (
@@ -5185,6 +5303,14 @@ function Show2D() {
                     >
                       <VisibilityIcon sx={{ fontSize: 16, mr: 1, color: themeColors.accent }} />
                       <Typography sx={{ fontSize: 11 }}>Show all panels</Typography>
+                    </MenuItem>
+                    <MenuItem
+                      dense
+                      disabled={(panelOrder || []).length === 0}
+                      onClick={resetPanelOrder}
+                    >
+                      <DragIndicatorIcon sx={{ fontSize: 16, mr: 1, color: themeColors.accent }} />
+                      <Typography sx={{ fontSize: 11 }}>Reset order</Typography>
                     </MenuItem>
                   </Menu>
                 </>
@@ -5273,12 +5399,36 @@ function Show2D() {
             /* Gallery mode */
             <Box sx={{ display: "grid", gridTemplateColumns: galleryGridColumns, gap: `${galleryGapPx}px`, maxWidth: galleryGridWidth, width: "100%", boxSizing: "border-box", justifyContent: "start", "@media (max-width: 900px)": { gridTemplateColumns: "minmax(0, 1fr)", maxWidth: "100%" } }}>
               {visibleImageIndices.map((i) => (
-                <Box key={i} sx={{ minWidth: 0, cursor: i === selectedIdx ? ((isDraggingResize || isDraggingResizeInner || isHoveringResize || isHoveringResizeInner) ? "nwse-resize" : isDraggingROI ? "move" : (draggingProfileEndpoint !== null || isDraggingProfileLine) ? "grabbing" : (profileActive && (hoveredProfileEndpoint !== null || isHoveringProfileLine)) ? "grab" : (profileActive || roiActive || measureActive) ? "crosshair" : "grab") : ("pointer") }}>
+                <Box
+                  key={i}
+                  sx={{
+                    minWidth: 0,
+                    cursor: reorderMode ? "grab" : i === selectedIdx ? ((isDraggingResize || isDraggingResizeInner || isHoveringResize || isHoveringResizeInner) ? "nwse-resize" : isDraggingROI ? "move" : (draggingProfileEndpoint !== null || isDraggingProfileLine) ? "grabbing" : (profileActive && (hoveredProfileEndpoint !== null || isHoveringProfileLine)) ? "grab" : (profileActive || roiActive || measureActive) ? "crosshair" : "grab") : ("pointer"),
+                    opacity: draggedPanelRef.current === i ? 0.62 : 1,
+                    transform: dragOverPanel === i ? "translateY(-2px)" : "translateY(0)",
+                    transition: "transform 120ms ease, opacity 120ms ease",
+                    ...(reorderMode ? {
+                      "@keyframes show2d-reorder-jiggle": {
+                        "0%": { rotate: "-0.25deg" },
+                        "100%": { rotate: "0.25deg" },
+                      },
+                      animation: "show2d-reorder-jiggle 180ms ease-in-out infinite alternate",
+                    } : {}),
+                  }}
+                >
                   <Box
+                    draggable={reorderMode}
+                    onDragStart={(event) => handlePanelDragStart(event, i)}
+                    onDragOver={(event) => handlePanelDragOver(event, i)}
+                    onDrop={(event) => handlePanelDrop(event, i)}
+                    onDragEnd={handlePanelDragEnd}
+                    onPointerDown={reorderMode ? (event) => handlePanelReorderPointerDown(event, i) : undefined}
+                    onPointerEnter={reorderMode ? (event) => handlePanelReorderPointerEnter(event, i) : undefined}
+                    onPointerUp={reorderMode ? (event) => handlePanelReorderPointerUp(event, i) : undefined}
                     ref={(el: HTMLDivElement | null) => { imageContainerRefs.current[i] = el; }}
                     sx={{
                       ...responsivePanelSx,
-	                      border: `2px solid ${panelChromeVisible && i === selectedIdx ? themeColors.accent : themeColors.border}`,
+	                      border: `2px solid ${reorderMode && dragOverPanel === i ? themeColors.accent : panelChromeVisible && i === selectedIdx ? themeColors.accent : themeColors.border}`,
                       "&:hover .show2d-panel-hide-button, &:focus-within .show2d-panel-hide-button": {
                         opacity: 1,
                         pointerEvents: "auto",
@@ -5295,16 +5445,16 @@ function Show2D() {
                         "& .show2d-panel-star-button": { opacity: 1, pointerEvents: "auto", transform: "translateY(0)" },
                       },
                     }}
-                    onMouseDown={(e) => handleMouseDown(e, i)}
-                    onMouseMove={(e) => handleMouseMove(e, i)}
-                    onMouseUp={(e) => handleMouseUp(e, i)}
-                    onMouseLeave={() => handleMouseLeave(i)}
-                    onWheel={(i === selectedIdx || linkedZoom) ? (e) => handleWheel(e, i) : undefined}
-                    onDoubleClick={(e) => handleDoubleClick(e, i)}
-                    onTouchStart={(e) => handleTouchStart(e, i)}
-                    onTouchMove={(e) => handleTouchMove(e, i)}
-                    onTouchEnd={(e) => handleTouchEnd(e, i)}
-                    onTouchCancel={(e) => handleTouchEnd(e, i)}
+                    onMouseDown={reorderMode ? undefined : (e) => handleMouseDown(e, i)}
+                    onMouseMove={reorderMode ? undefined : (e) => handleMouseMove(e, i)}
+                    onMouseUp={reorderMode ? undefined : (e) => handleMouseUp(e, i)}
+                    onMouseLeave={reorderMode ? undefined : () => handleMouseLeave(i)}
+                    onWheel={!reorderMode && (i === selectedIdx || linkedZoom) ? (e) => handleWheel(e, i) : undefined}
+                    onDoubleClick={reorderMode ? undefined : (e) => handleDoubleClick(e, i)}
+                    onTouchStart={reorderMode ? undefined : (e) => handleTouchStart(e, i)}
+                    onTouchMove={reorderMode ? undefined : (e) => handleTouchMove(e, i)}
+                    onTouchEnd={reorderMode ? undefined : (e) => handleTouchEnd(e, i)}
+                    onTouchCancel={reorderMode ? undefined : (e) => handleTouchEnd(e, i)}
                   >
                     <canvas
                       ref={(el) => { if (el && canvasRefs.current[i] !== el) { canvasRefs.current[i] = el; setCanvasReady(c => c + 1); } }}
@@ -5348,6 +5498,28 @@ function Show2D() {
                         }}
                       >
                         {panelLabel(i)}
+                      </Box>
+                    )}
+                    {panelChromeVisible && reorderMode && (
+                      <Box
+                        sx={{
+                          position: "absolute",
+                          bottom: 6,
+                          left: "50%",
+                          transform: "translateX(-50%)",
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          width: 28,
+                          height: 20,
+                          borderRadius: 1,
+                          bgcolor: "rgba(0,0,0,0.35)",
+                          color: "rgba(255,255,255,0.9)",
+                          pointerEvents: "none",
+                          zIndex: 3,
+                        }}
+                      >
+                        <DragIndicatorIcon sx={{ fontSize: 18 }} />
                       </Box>
                     )}
 	                    {panelChromeVisible && (

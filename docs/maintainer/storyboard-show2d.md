@@ -43,6 +43,9 @@ figure layout.
 - Verify the menu does not offer impractical counts above 12.
 - Verify labels, scale bars, stats, histograms, and borders remain aligned.
 - Verify the current zoom center and contrast do not jump during reflow.
+- Enable Reorder, drag panels into a non-source order, and verify
+  `panel_order`, keyboard navigation, hidden-panel export, and `to_show3d()`
+  follow the displayed order while source-index labels/stars remain correct.
 
 ### S2D-03: Hide Unimportant Panels
 

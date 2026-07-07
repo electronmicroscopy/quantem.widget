@@ -479,6 +479,7 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
     is_rgb = traitlets.List(traitlets.Bool(), default_value=[]).tag(sync=True)
     starred = traitlets.List(traitlets.Int()).tag(sync=True)
     hidden_panels = traitlets.List(traitlets.Int(), default_value=[]).tag(sync=True)
+    panel_order = traitlets.List(traitlets.Int(), default_value=[]).tag(sync=True)
     show_panel_titles = traitlets.Bool(True).tag(sync=True)
     panel_title_font_size = traitlets.Int(11).tag(sync=True)
     gallery_gap_px = traitlets.Int(0).tag(sync=True)
@@ -636,6 +637,7 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
         display_bin: int | str = "auto",
         hidden_panels: Sequence[int | str] | int | str | None = None,
         starred: Sequence[int | str] | int | str | None = None,
+        panel_order: Sequence[int | str] | None = None,
         show_panel_titles: bool | None = None,
         panel_title_font_size: int = 11,
         gallery_gap_px: int = 0,
@@ -730,6 +732,7 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
                 link_zoom=link_zoom, link_pan=link_pan, link_contrast=link_contrast,
                 diff_mode=diff_mode, overlay=overlay, view_box=view_box,
                 display_bin=display_bin, hidden_panels=hidden_panels, starred=starred,
+                panel_order=panel_order,
                 show_panel_titles=show_panel_titles, panel_title_font_size=panel_title_font_size,
                 gallery_gap_px=gallery_gap_px,
                 verbose=verbose, state=state, _t0=_t0)
@@ -740,7 +743,7 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
                    vmin, vmax,
                    ncols, size, smooth, zoom, zoom_row, zoom_col,
                    link_zoom, link_pan, link_contrast, diff_mode, overlay, view_box,
-                   display_bin, hidden_panels, starred, show_panel_titles,
+                   display_bin, hidden_panels, starred, panel_order, show_panel_titles,
                    panel_title_font_size, gallery_gap_px, verbose, state, _t0):
         import time as _time
         self._verbose = verbose
@@ -896,6 +899,8 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
             self.set_starred_panels(starred)
         if hidden_panels is not None:
             self.set_hidden_panels(hidden_panels)
+        if panel_order is not None:
+            self.set_panel_order(panel_order)
 
         # Options
         self.title = title
@@ -1119,6 +1124,29 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
             )
         return clean
 
+    @traitlets.validate("panel_order")
+    def _validate_panel_order(self, proposal: dict) -> list[int]:
+        """Normalize optional display order over source image indices."""
+        n_img = int(self.n_images)
+        values = list(proposal["value"] or [])
+        if not values:
+            return []
+        clean: list[int] = []
+        try:
+            for value in values:
+                if isinstance(value, bool):
+                    raise TypeError
+                clean.append(int(value))
+        except (TypeError, ValueError) as exc:
+            raise traitlets.TraitError("panel_order must contain integer panel indices") from exc
+        expected = list(range(n_img))
+        if len(clean) != n_img or sorted(clean) != expected:
+            raise traitlets.TraitError(
+                "panel_order must include every panel index exactly once "
+                f"(expected a permutation of {expected!r})"
+            )
+        return clean
+
     def _panel_title_for_index(self, panel: int) -> str:
         """Return the user-facing label for a Show2D image panel."""
         if 0 <= panel < len(self.labels) and self.labels[panel]:
@@ -1258,6 +1286,7 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
             self.image_rotations = [0] * self.n_images
             self.starred = [0] * self.n_images
             self.hidden_panels = []
+            self.panel_order = []
             if labels is None:
                 self.labels = [f"Image {i + 1}" for i in range(self.n_images)]
             else:
@@ -2015,6 +2044,7 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
             "labels": list(self.labels),
             "starred": list(self.starred),
             "hidden_panels": list(self.hidden_panels),
+            "panel_order": list(self.panel_order),
             "show_panel_titles": self.show_panel_titles,
             "panel_title_font_size": self.panel_title_font_size,
             "show_stats": self.show_stats,
@@ -2254,6 +2284,7 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
             diff_mode=self.diff_mode,
             hidden_panels=list(self.hidden_panels),
             starred=[i for i, value in enumerate(self.starred) if value],
+            panel_order=list(self.panel_order),
             show_panel_titles=self.show_panel_titles,
             panel_title_font_size=self.panel_title_font_size,
             display_bin=1,
@@ -2296,6 +2327,15 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
             if len(clean) >= n_img:
                 clean = clean[:-1]
             state["hidden_panels"] = clean
+        if "panel_order" in state and isinstance(state["panel_order"], list):
+            try:
+                order = [int(value) for value in state["panel_order"] if not isinstance(value, bool)]
+            except (TypeError, ValueError):
+                order = []
+            if len(order) != int(self.n_images) or sorted(order) != list(range(int(self.n_images))):
+                state.pop("panel_order")
+            else:
+                state["panel_order"] = order
         for key, val in state.items():
             # Silent migrations for renamed keys in older saved state files.
             if key == "pixel_size_angstrom":
@@ -2448,10 +2488,18 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
             self.handoff_status = f"View failed: {exc}"
 
     @property
+    def ordered_panels(self) -> list[int]:
+        """Zero-based image panel indices in the current display order."""
+        order = list(self.panel_order or [])
+        if len(order) == int(self.n_images) and sorted(order) == list(range(int(self.n_images))):
+            return order
+        return list(range(int(self.n_images)))
+
+    @property
     def visible_panels(self) -> list[int]:
         """Zero-based image panel indices currently visible in the gallery."""
         hidden = set(self.hidden_panels)
-        return [i for i in range(int(self.n_images)) if i not in hidden]
+        return [i for i in self.ordered_panels if i not in hidden]
 
     @property
     def starred_panels(self) -> list[int]:
@@ -2489,6 +2537,41 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
     def show_all_panels(self) -> Self:
         """Restore every image panel in the gallery."""
         self.hidden_panels = []
+        return self
+
+    def set_panel_order(self, panels: Sequence[int | str]) -> Self:
+        """Set the gallery display order by panel index or exact label.
+
+        The order is display-only: source data, labels, hidden state, stars, and
+        pixel sizes stay keyed by their original panel indices.
+        """
+        order = self._normalize_panel_refs(panels, allow_empty=True)
+        if not order:
+            self.panel_order = []
+            return self
+        expected = set(range(int(self.n_images)))
+        if len(order) != int(self.n_images) or set(order) != expected:
+            raise ValueError("set_panel_order requires every panel exactly once")
+        self.panel_order = order
+        return self
+
+    def reset_panel_order(self) -> Self:
+        """Restore the natural source-image order."""
+        self.panel_order = []
+        return self
+
+    def move_panel(self, panel: int | str, position: int) -> Self:
+        """Move one panel to a zero-based display position."""
+        idx = self._resolve_panel_ref(panel)
+        order = self.ordered_panels
+        order.remove(idx)
+        pos = int(position)
+        if pos < 0:
+            pos = 0
+        if pos > len(order):
+            pos = len(order)
+        order.insert(pos, idx)
+        self.panel_order = order
         return self
 
     def collapse_controls(self) -> Self:

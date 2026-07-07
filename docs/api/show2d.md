@@ -37,7 +37,15 @@ no console error, no NaN frame).
 | Smooth toggle | `smooth` | Bilinear vs nearest sampling |
 | ROI add / drag | `roi_active`, `roi_list`, `roi_selected_idx` | Region overlay; stats panel reports the ROI |
 | Gallery select | `selected_idx` | Highlights the active panel |
+| Panel reorder | `panel_order`; `set_panel_order()`, `move_panel()`, `reset_panel_order()` | Reorders gallery display without changing source data, labels, stars, or hidden state |
 | Diff mode | `diff_mode`, `diff_reference` | Panels render as difference vs the reference |
+
+```python
+w = Show2D(images, labels=["raw", "filtered", "residual"])
+w.set_panel_order(["residual", "raw", "filtered"])
+w.move_panel("raw", 0)
+w.reset_panel_order()
+```
 
 ```{seealso}
 The deeper behavioral spec (invariants, per-feature pass criteria, isolation

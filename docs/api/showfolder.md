@@ -56,6 +56,22 @@ Show2D/Show3D viewer in place. For 4D-STEM folders, the watcher also tracks
 paging options, so new Dataset4DSTEM masters appear without preloading the whole
 folder.
 
+For acquisition folders where every new image should appear immediately, open
+the all-image viewers before starting the watcher:
+
+```python
+w = ShowFolder("/data/live-session", thumb=256, group_by="none")
+w.open_show2d(all_images=True)  # or w.open_show3d(all_images=True)
+w.watch(interval=2.0)
+```
+
+The equivalent CLI shortcuts write that live notebook for you:
+
+```bash
+quantem show2d /data/live-session --watch
+quantem show3d /data/live-session --watch
+```
+
 Folders with `*_master.h5` files also show a **4D-STEM master QC** table. This
 is a header-only readiness check: it opens the HDF5 headers, verifies inline or
 linked data chunks, and reports scan shape, detector shape, dtype, missing

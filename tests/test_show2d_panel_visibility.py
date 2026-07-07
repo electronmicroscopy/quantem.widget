@@ -83,10 +83,60 @@ def test_show2d_starred_panels_roundtrip() -> None:
     assert widget.starred_panels == [2]
 
 
+def test_show2d_panel_order_controls_visible_order_and_handoff() -> None:
+    widget = Show2D(
+        _images(),
+        labels=["Raw", "Filtered", "Residual"],
+        panel_order=["Residual", "Raw", "Filtered"],
+        hidden_panels=["Filtered"],
+        show_controls=False,
+        verbose=False,
+    )
+
+    assert widget.panel_order == [2, 0, 1]
+    assert widget.ordered_panels == [2, 0, 1]
+    assert widget.visible_panels == [2, 0]
+
+    widget.move_panel("Raw", 2)
+    assert widget.panel_order == [2, 1, 0]
+    assert widget.visible_panels == [2, 0]
+
+    show3d = widget.to_show3d()
+    assert show3d.labels == ["Residual", "Raw"]
+
+    widget.reset_panel_order()
+    assert widget.panel_order == []
+    assert widget.visible_panels == [0, 2]
+
+
+def test_show2d_panel_order_roundtrips_state_and_validates() -> None:
+    widget = Show2D(
+        _images(),
+        labels=["Raw", "Filtered", "Residual"],
+        show_controls=False,
+        verbose=False,
+    )
+    widget.set_panel_order([2, 0, 1])
+    state = widget.state_dict()
+    assert state["panel_order"] == [2, 0, 1]
+
+    restored = Show2D(_images(), labels=["Raw", "Filtered", "Residual"], show_controls=False, verbose=False)
+    restored.load_state_dict(state)
+    assert restored.panel_order == [2, 0, 1]
+    assert restored.visible_panels == [2, 0, 1]
+
+    with pytest.raises(ValueError, match="every panel exactly once"):
+        widget.set_panel_order([0, 1])
+
+    with pytest.raises(Exception, match="panel_order"):
+        widget.panel_order = [0, 0, 1]
+
+
 def test_show2d_hidden_and_starred_roundtrip_in_state_and_html(tmp_path: pathlib.Path) -> None:
     widget = Show2D(
         _images()[:2],
         labels=["Raw", "Filtered"],
+        panel_order=["Filtered", "Raw"],
         hidden_panels=["Filtered"],
         starred=["Raw"],
         show_controls=False,
@@ -95,11 +145,13 @@ def test_show2d_hidden_and_starred_roundtrip_in_state_and_html(tmp_path: pathlib
 
     state = widget.state_dict()
     assert state["labels"] == ["Raw", "Filtered"]
+    assert state["panel_order"] == [1, 0]
     assert state["hidden_panels"] == [1]
     assert state["starred"] == [1, 0]
 
     restored = Show2D(_images()[:2], labels=["Raw", "Filtered"], show_controls=False, verbose=False)
     restored.load_state_dict(state)
+    assert restored.panel_order == [1, 0]
     assert restored.hidden_panels == [1]
     assert restored.visible_panels == [0]
     assert restored.starred_panels == [0]
@@ -107,6 +159,7 @@ def test_show2d_hidden_and_starred_roundtrip_in_state_and_html(tmp_path: pathlib
     out = widget.export_html(tmp_path / "show2d_hidden_starred.html", encoding="full")
     html = out.read_text()
     assert "hidden_panels" in html
+    assert "panel_order" in html
     assert "starred" in html
     assert "Filtered" in html
 

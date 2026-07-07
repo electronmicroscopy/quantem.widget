@@ -66,6 +66,7 @@ Python. Installing the package adds the `quantem` command.
 quantem show ./anything/                     # auto-detect content, pick the viewer
 quantem show2d scan.png                      # an image            -> Show2D
 quantem show3d ./frames/                     # a folder of frames  -> Show3D scrub
+quantem show2d ./frames/ --watch             # live folder         -> append new images
 quantem show4dstem ./masters/                # *_master.h5         -> live Show4DSTEM
 quantem show4dstem a_master.h5 b_master.h5   # several masters     -> one 5D multi-tilt viewer
 quantem show4dstem ./masters/ --html         # 4D-STEM             -> shareable offline HTML
@@ -77,8 +78,8 @@ quantem html tutorial.ipynb                  # a notebook          -> standalone
 | Command | Input | Output |
 |---|---|---|
 | `quantem show <path>` | anything | auto-detects and dispatches to one of the below |
-| `quantem show2d <img / folder>` | one image, or a folder | Show2D HTML (a folder becomes a gallery) |
-| `quantem show3d <folder>` | a folder of same-size frames | Show3D scrub HTML |
+| `quantem show2d <img / folder>` | one image, or a folder | Show2D HTML (a folder becomes a gallery); with `--watch`, a live ShowFolder notebook |
+| `quantem show3d <folder>` | a folder of same-size frames | Show3D scrub HTML; with `--watch`, a live ShowFolder notebook |
 | `quantem show4dstem <master(s) / folder>` | one or more `*_master.h5` | live Show4DSTEM notebook (or `--html`) |
 | `quantem showfolder <folder>` | microscopy session folder | ShowFolder notebook (or `--html`) |
 | `quantem data-transfer plan/inspect/copy` | `*_master.h5` folder plus target roots | manifest-backed transfer planning, state inspection, and explicit copy |

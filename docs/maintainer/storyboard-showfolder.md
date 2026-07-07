@@ -97,6 +97,9 @@ backend; keep the raw files outside the widget repository.
   manifest so stale files are not retained in memory or cache state.
 - New `*_master.h5` 4D-STEM files trigger the same watch path and refresh the
   active lazy Show4DSTEM handoff without preloading every master.
+- When the all-image viewers are open (`open_show2d(all_images=True)` or
+  `open_show3d(all_images=True)`), new readable image files append to the same
+  Show2D/Show3D widget instance on the next poll.
 - `watch_once()` performs one deterministic poll for tests and automation.
 - `stop_watch()` stops the background watcher before kernel shutdown.
 
@@ -138,6 +141,8 @@ not commit those raw files to the widget repository.
 - `Open Show2D` renders a compact Show2D gallery below ShowFolder.
 - `Open Show3D` renders the same starred images as a frame stack below
   ShowFolder.
+- `Open all Show2D` and `Open all Show3D` render every readable image in the
+  folder and live-append new files while the watcher is running.
 - The explicit Python methods `show_selected()` and `show_selected_stack()`
   return the same widgets for notebook authors who prefer code.
 - Scale bars and labels are preserved when all selected previews share a
