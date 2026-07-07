@@ -387,7 +387,7 @@ def test_widget_html_smoke_writes_visual_report(tmp_path: Path) -> None:
     plan = json.loads((artifact_dir / "browser-plan.json").read_text(encoding="utf-8"))
     index = (artifact_dir / "index.html").read_text(encoding="utf-8")
 
-    assert len(report["exports"]) == 16
+    assert len(report["exports"]) == 17
     assert sum(1 for item in report["exports"] if item["widget"] == "show2d") >= 5
     assert sum(1 for item in report["exports"] if item["widget"] == "show3d") >= 6
     assert {item["widget"] for item in report["exports"]} == {
@@ -401,6 +401,7 @@ def test_widget_html_smoke_writes_visual_report(tmp_path: Path) -> None:
     }
     assert "show2d-gallery-6-fft.html" in index
     assert "show3d-four-panel-downsample.html" in index
+    assert "show4dstem-compare.html" in index
     assert "showfolder.html" in index
     assert "synthetic MoS2-like HAADF lattice" in index
     assert {page["widget"] for page in plan["pages"]} == {

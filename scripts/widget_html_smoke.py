@@ -274,6 +274,22 @@ def _cases(folder_root: Path) -> list[tuple[str, str, object, dict[str, object],
             "Smoke Show4DSTEM",
         ),
         (
+            "show4dstem",
+            "show4dstem-compare",
+            Show4DSTEM(
+                rng.integers(0, 64, size=(6, 4, 4, 8, 8), dtype=np.uint16),
+                title="Smoke Show4DSTEM Compare",
+                frame_dim_label="Dataset",
+                frame_labels=[f"scan-{idx}" for idx in range(6)],
+                view_mode="compare",
+                compare_cols=3,
+                compare_max_panels=6,
+                verbose=False,
+            ),
+            {"encoding": "uint8", "downsample": 1},
+            "Smoke Show4DSTEM Compare",
+        ),
+        (
             "showeds",
             "showeds",
             ShowEDS(rng.integers(0, 32, size=(5, 6, 12), dtype=np.uint16), title="Smoke ShowEDS", band=(2, 8), roi=(1, 1, 3, 3)),
@@ -329,7 +345,7 @@ def _write_html_report(artifact_dir: Path, report: dict[str, Any]) -> None:
         f"<td>{html.escape(str(item['widget']))}</td>"
         f"<td>{html.escape(str(item['variant']))}</td>"
         f"<td>{html.escape(str(item['seconds']))}</td>"
-        f"<td>{html.escape(f'{float(item["size_mb"]):.3f}')}</td>"
+        f"<td>{html.escape(format(float(item['size_mb']), '.3f'))}</td>"
         f"<td><a href='{html.escape(Path(str(item['path'])).name)}'>"
         f"{html.escape(Path(str(item['path'])).name)}</a></td>"
         "</tr>"

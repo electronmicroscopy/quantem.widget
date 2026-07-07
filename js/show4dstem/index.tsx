@@ -1181,6 +1181,214 @@ function cropSingleROI(
   return { cropped, cropW, cropH };
 }
 
+interface CompareVirtualGridProps {
+  bytes: DataView | null | undefined;
+  count: number;
+  indices: number[];
+  labels: string[];
+  activeIdx: number;
+  shapeRows: number;
+  shapeCols: number;
+  cols: number;
+  colormap: string;
+  scaleMode: "linear" | "log";
+  vminPct: number;
+  vmaxPct: number;
+  autoContrast: boolean;
+  smooth: boolean;
+  cursorRow: number;
+  cursorCol: number;
+  status: string;
+  themeColors: ReturnType<typeof useTheme>["colors"];
+  onSelect: (idx: number) => void;
+}
+
+function CompareVirtualGrid({
+  bytes,
+  count,
+  indices,
+  labels,
+  activeIdx,
+  shapeRows,
+  shapeCols,
+  cols,
+  colormap,
+  scaleMode,
+  vminPct,
+  vmaxPct,
+  autoContrast,
+  smooth,
+  cursorRow,
+  cursorCol,
+  status,
+  themeColors,
+  onSelect,
+}: CompareVirtualGridProps) {
+  const canvasRefs = React.useRef<(HTMLCanvasElement | null)[]>([]);
+  const panelPixels = Math.max(1, shapeRows * shapeCols);
+  const panels = React.useMemo(() => {
+    if (!bytes || count <= 0 || bytes.byteLength < panelPixels * count * 4) {
+      return [] as Float32Array[];
+    }
+    const raw = new Float32Array(bytes.buffer, bytes.byteOffset, Math.floor(bytes.byteLength / 4));
+    return Array.from({ length: count }, (_, idx) => {
+      const start = idx * panelPixels;
+      return raw.slice(start, start + panelPixels);
+    });
+  }, [bytes, count, panelPixels]);
+
+  React.useEffect(() => {
+    const lut = COLORMAPS[colormap] || COLORMAPS.inferno;
+    panels.forEach((panel, idx) => {
+      const canvas = canvasRefs.current[idx];
+      if (!canvas) return;
+      if (canvas.width !== shapeCols) canvas.width = shapeCols;
+      if (canvas.height !== shapeRows) canvas.height = shapeRows;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
+      ctx.imageSmoothingEnabled = smooth;
+      if (smooth) ctx.imageSmoothingQuality = "high";
+
+      let scaled = panel;
+      if (scaleMode === "log") {
+        scaled = new Float32Array(panel.length);
+        for (let i = 0; i < panel.length; i++) {
+          scaled[i] = Math.log1p(Math.max(0, panel[i]));
+        }
+      }
+      const { min, max } = findDataRange(scaled);
+      let vmin: number;
+      let vmax: number;
+      if (autoContrast) {
+        ({ vmin, vmax } = percentileClip(scaled, 1, 99));
+      } else {
+        ({ vmin, vmax } = sliderRange(min, max, vminPct, vmaxPct));
+      }
+      const imageData = ctx.createImageData(shapeCols, shapeRows);
+      applyColormap(scaled, imageData.data, lut, vmin, vmax);
+      ctx.putImageData(imageData, 0, 0);
+    });
+  }, [autoContrast, colormap, panels, scaleMode, shapeCols, shapeRows, smooth, vmaxPct, vminPct]);
+
+  const gridCols = Math.max(
+    1,
+    cols > 0 ? cols : Math.min(count || 1, count >= 8 ? 4 : count >= 5 ? 3 : count >= 2 ? 2 : 1),
+  );
+  const markerLeft = `${((Math.max(0, Math.min(shapeCols - 1, cursorCol)) + 0.5) / Math.max(1, shapeCols)) * 100}%`;
+  const markerTop = `${((Math.max(0, Math.min(shapeRows - 1, cursorRow)) + 0.5) / Math.max(1, shapeRows)) * 100}%`;
+
+  if (panels.length === 0) {
+    return (
+      <Box sx={{ border: `1px solid ${themeColors.border}`, bgcolor: themeColors.bgAlt, px: 1, py: 2 }}>
+        <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>
+          {status || "Compare grid is waiting for multiple frames or datasets."}
+        </Typography>
+      </Box>
+    );
+  }
+
+  return (
+    <Box sx={{ width: "100%", maxWidth: "100%" }}>
+      {status && (
+        <Typography sx={{ fontSize: 10, color: themeColors.textMuted, mb: 0.5 }}>
+          {status}
+        </Typography>
+      )}
+      <Box
+        sx={{
+          display: "grid",
+          gridTemplateColumns: `repeat(${gridCols}, minmax(128px, 1fr))`,
+          gap: "6px",
+          maxWidth: "100%",
+          "@media (max-width: 700px)": {
+            gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+            gap: "4px",
+          },
+        }}
+      >
+        {panels.map((_, localIdx) => {
+          const frame = indices[localIdx] ?? localIdx;
+          const active = frame === activeIdx;
+          const label = labels && labels.length > frame ? labels[frame] : `Dataset ${frame + 1}`;
+          return (
+            <Box
+              key={`${frame}-${localIdx}`}
+              role="button"
+              aria-label={`Show4DSTEM compare panel ${frame + 1}`}
+              tabIndex={0}
+              onClick={() => onSelect(frame)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  onSelect(frame);
+                }
+              }}
+              sx={{
+                position: "relative",
+                bgcolor: "#000",
+                border: `2px solid ${active ? themeColors.accent : themeColors.border}`,
+                outline: "none",
+                cursor: "pointer",
+                overflow: "hidden",
+                aspectRatio: `${shapeCols} / ${shapeRows}`,
+                "&:focus-visible": { borderColor: themeColors.accent },
+              }}
+            >
+              <canvas
+                ref={(node) => { canvasRefs.current[localIdx] = node; }}
+                width={shapeCols}
+                height={shapeRows}
+                style={{
+                  position: "absolute",
+                  inset: 0,
+                  width: "100%",
+                  height: "100%",
+                  imageRendering: smooth ? "auto" : "pixelated",
+                }}
+              />
+              <Box
+                sx={{
+                  position: "absolute",
+                  left: markerLeft,
+                  top: markerTop,
+                  width: 11,
+                  height: 11,
+                  transform: "translate(-50%, -50%)",
+                  pointerEvents: "none",
+                  border: "1px solid rgba(255,255,255,0.95)",
+                  borderRadius: "50%",
+                  boxShadow: "0 0 0 1px rgba(0,0,0,0.65)",
+                }}
+              />
+              <Box
+                sx={{
+                  position: "absolute",
+                  top: 0,
+                  left: 0,
+                  right: 0,
+                  px: 0.5,
+                  py: 0.25,
+                  bgcolor: "rgba(0,0,0,0.45)",
+                  color: "white",
+                  fontSize: 10,
+                  lineHeight: 1.2,
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                  pointerEvents: "none",
+                }}
+                title={label}
+              >
+                {label}
+              </Box>
+            </Box>
+          );
+        })}
+      </Box>
+    </Box>
+  );
+}
+
 // ============================================================================
 // Main Component
 // ============================================================================
@@ -1249,6 +1457,13 @@ function Show4DSTEM() {
   const [frameFps, setFrameFps] = useModelState<number>("frame_fps");
   const [frameReverse, setFrameReverse] = useModelState<boolean>("frame_reverse");
   const [frameBoomerang, setFrameBoomerang] = useModelState<boolean>("frame_boomerang");
+  const [viewMode, setViewMode] = useModelState<string>("view_mode");
+  const [compareLayout] = useModelState<string>("compare_layout");
+  const [compareCols, setCompareCols] = useModelState<number>("compare_cols");
+  const [compareVirtualImageBytes] = useModelState<DataView>("compare_virtual_image_bytes");
+  const [comparePanelCount] = useModelState<number>("compare_panel_count");
+  const [comparePanelIndices] = useModelState<number[]>("compare_panel_indices");
+  const [compareStatus] = useModelState<string>("compare_status");
 
   // Profile line state (synced with Python)
   const [profileLine, setProfileLine] = useModelState<{row: number; col: number}[]>("profile_line");
@@ -1718,6 +1933,7 @@ function Show4DSTEM() {
   const [panelWidthPx, setPanelWidthPx] = useModelState<number>("panel_width_px");
 
   const effectiveShowFft = showFft;
+  const compareMode = viewMode === "compare" && nFrames > 1;
 
   // ROI FFT state (VI ROI crops virtual image for FFT)
   const [fftCropDims, setFftCropDims] = React.useState<{ cropWidth: number; cropHeight: number; fftWidth: number; fftHeight: number } | null>(null);
@@ -4422,7 +4638,8 @@ function Show4DSTEM() {
     ["Dbl-click", "Reset view"],
   ];
   const squarePanelWidth = `min(${canvasSize}px, 100%)`;
-  const viPanelWidth = `min(${viCanvasWidth}px, 100%)`;
+  const viPanelWidth = compareMode ? "min(980px, 100%)" : `min(${viCanvasWidth}px, 100%)`;
+  const mainStackDirection = compareMode && compareLayout === "top" ? "column" : "row";
   const optionLabel = (value: string | undefined | null): string => {
     if (!value) return "";
     return value.charAt(0).toUpperCase() + value.slice(1);
@@ -4540,7 +4757,7 @@ function Show4DSTEM() {
 
       {/* MAIN CONTENT: DP | VI | FFT (three columns when FFT shown) */}
       <Stack
-        direction="row"
+        direction={mainStackDirection}
         sx={{
           gap: `${SPACING.LG}px`,
           flexWrap: "wrap",
@@ -4787,70 +5004,99 @@ function Show4DSTEM() {
           {/* VI Header */}
           <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: `${SPACING.XS}px`, minHeight: 28, height: "auto", flexWrap: "wrap", gap: `${SPACING.XS}px`, "@media (max-width: 700px)": { mb: "1px", minHeight: 22, rowGap: "1px" } }}>
             <Typography sx={{ ...typo.label, color: themeColors.textMuted }}>
-              {shapeRows}×{shapeCols} | {detRows}×{detCols}
+              {compareMode ? `Compare grid | ${shapeRows}×${shapeCols}` : `${shapeRows}×${shapeCols} | ${detRows}×${detCols}`}
             </Typography>
             {controlsVisible && <Stack direction="row" spacing={`${SPACING.SM}px`} alignItems="center">
               <Typography sx={{ ...typo.label, fontSize: 10 }}>FFT</Typography>
               <Switch checked={effectiveShowFft} onChange={(e) => setShowFft(e.target.checked)} size="small" sx={switchStyles.small} />
-              <Typography sx={{ ...typo.label, fontSize: 10 }}>Profile</Typography>
-              <Switch checked={viProfileActive} onChange={(e) => {
-                const on = e.target.checked;
-                setViProfileActive(on);
-                if (!on) {
-                  setViProfilePoints([]);
-                  setHoveredViProfileEndpoint(null);
-                  setIsHoveringViProfileLine(false);
-                }
-              }} size="small" sx={switchStyles.small} />
-              <Button size="small" sx={compactButton} disabled={viZoom === 1 && viPanX === 0 && viPanY === 0} onClick={() => { setViZoom(1); setViPanX(0); setViPanY(0); }}>Reset</Button>
-              <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} onClick={async () => {
-                if (!virtualCanvasRef.current) return;
-                try {
-                  const blob = await new Promise<Blob | null>(resolve => virtualCanvasRef.current!.toBlob(resolve, "image/png"));
-                  if (!blob) return;
-                  await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
-                } catch {
-                  virtualCanvasRef.current.toBlob((b) => { if (b) downloadBlob(b, "show4dstem_vi.png"); }, "image/png");
-                }
-              }}>Copy</Button>
+              {!compareMode && <>
+                <Typography sx={{ ...typo.label, fontSize: 10 }}>Profile</Typography>
+                <Switch checked={viProfileActive} onChange={(e) => {
+                  const on = e.target.checked;
+                  setViProfileActive(on);
+                  if (!on) {
+                    setViProfilePoints([]);
+                    setHoveredViProfileEndpoint(null);
+                    setIsHoveringViProfileLine(false);
+                  }
+                }} size="small" sx={switchStyles.small} />
+                <Button size="small" sx={compactButton} disabled={viZoom === 1 && viPanX === 0 && viPanY === 0} onClick={() => { setViZoom(1); setViPanX(0); setViPanY(0); }}>Reset</Button>
+                <Button size="small" sx={{ ...compactButton, color: themeColors.accent }} onClick={async () => {
+                  if (!virtualCanvasRef.current) return;
+                  try {
+                    const blob = await new Promise<Blob | null>(resolve => virtualCanvasRef.current!.toBlob(resolve, "image/png"));
+                    if (!blob) return;
+                    await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+                  } catch {
+                    virtualCanvasRef.current.toBlob((b) => { if (b) downloadBlob(b, "show4dstem_vi.png"); }, "image/png");
+                  }
+                }}>Copy</Button>
+              </>}
             </Stack>}
           </Stack>
 
           {/* VI Canvas */}
-          <Box sx={{ ...container.imageBox, width: "100%", maxWidth: viCanvasWidth, aspectRatio: `${shapeCols} / ${shapeRows}`, height: "auto", touchAction: "none" }}>
-            <canvas ref={virtualCanvasRef} width={shapeCols} height={shapeRows} style={{ position: "absolute", width: "100%", height: "100%", imageRendering: "pixelated" }} />
-            <canvas
-              ref={virtualOverlayRef} width={shapeCols} height={shapeRows}
-              onPointerDown={handleViMouseDown} onPointerMove={handleViMouseMove}
-              onPointerUp={handleViMouseUp} onPointerCancel={handleViMouseUp} onMouseLeave={handleViMouseLeave}
-              onWheel={createZoomHandler(setViZoom, setViPanX, setViPanY, viViewRef, virtualOverlayRef)}
-              onDoubleClick={handleViDoubleClick}
-              onTouchStart={handlePanelTouchStart("vi")}
-              onTouchMove={handlePanelTouchMove("vi")}
-              onTouchEnd={handlePanelTouchEnd}
-              onTouchCancel={handlePanelTouchEnd}
-              style={{
-                position: "absolute",
-                width: "100%",
-                height: "100%",
-                touchAction: "none",
-                cursor: (draggingViProfileEndpoint !== null || isDraggingViProfileLine)
-                  ? "grabbing"
-                  : (viProfileActive && (hoveredViProfileEndpoint !== null || isHoveringViProfileLine))
-                    ? "grab"
-                    : "crosshair",
+          {compareMode ? (
+            <CompareVirtualGrid
+              bytes={compareVirtualImageBytes}
+              count={comparePanelCount || 0}
+              indices={comparePanelIndices || []}
+              labels={frameLabels || []}
+              activeIdx={frameIdx}
+              shapeRows={shapeRows}
+              shapeCols={shapeCols}
+              cols={compareCols || 0}
+              colormap={viColormap}
+              scaleMode={viScaleMode}
+              vminPct={viVminPct}
+              vmaxPct={viVmaxPct}
+              autoContrast={viAutoContrast}
+              smooth={viSmooth}
+              cursorRow={localPosRow}
+              cursorCol={localPosCol}
+              status={compareStatus}
+              themeColors={themeColors}
+              onSelect={(idx) => {
+                setFramePlaying(false);
+                setFrameIdx(Math.max(0, Math.min(nFrames - 1, idx)));
               }}
             />
-            <canvas ref={viUiRef} width={viCanvasWidth * DPR} height={viCanvasHeight * DPR} style={{ position: "absolute", width: "100%", height: "100%", pointerEvents: "none" }} />
-            {panelChromeVisible && cursorInfo && cursorInfo.panel === "VI" && (
-              <Box sx={{ position: "absolute", top: 3, right: 3, bgcolor: "rgba(0,0,0,0.35)", px: 0.5, py: 0.15, pointerEvents: "none", minWidth: 100, textAlign: "right" }}>
-                <Typography sx={{ fontSize: 9, fontFamily: "monospace", color: "rgba(255,255,255,0.7)", whiteSpace: "nowrap", lineHeight: 1.2 }}>
-                  ({cursorInfo.row}, {cursorInfo.col}) {formatNumber(cursorInfo.value)}
-                </Typography>
-              </Box>
-            )}
-            {panelChromeVisible && <Box onMouseDown={handleCanvasResizeStart} sx={{ position: "absolute", bottom: 0, right: 0, width: 16, height: 16, cursor: "nwse-resize", opacity: 0.6, background: `linear-gradient(135deg, transparent 50%, ${themeColors.accent} 50%)`, "&:hover": { opacity: 1 } }} />}
-          </Box>
+          ) : (
+            <Box sx={{ ...container.imageBox, width: "100%", maxWidth: viCanvasWidth, aspectRatio: `${shapeCols} / ${shapeRows}`, height: "auto", touchAction: "none" }}>
+              <canvas ref={virtualCanvasRef} width={shapeCols} height={shapeRows} style={{ position: "absolute", width: "100%", height: "100%", imageRendering: "pixelated" }} />
+              <canvas
+                ref={virtualOverlayRef} width={shapeCols} height={shapeRows}
+                onPointerDown={handleViMouseDown} onPointerMove={handleViMouseMove}
+                onPointerUp={handleViMouseUp} onPointerCancel={handleViMouseUp} onMouseLeave={handleViMouseLeave}
+                onWheel={createZoomHandler(setViZoom, setViPanX, setViPanY, viViewRef, virtualOverlayRef)}
+                onDoubleClick={handleViDoubleClick}
+                onTouchStart={handlePanelTouchStart("vi")}
+                onTouchMove={handlePanelTouchMove("vi")}
+                onTouchEnd={handlePanelTouchEnd}
+                onTouchCancel={handlePanelTouchEnd}
+                style={{
+                  position: "absolute",
+                  width: "100%",
+                  height: "100%",
+                  touchAction: "none",
+                  cursor: (draggingViProfileEndpoint !== null || isDraggingViProfileLine)
+                    ? "grabbing"
+                    : (viProfileActive && (hoveredViProfileEndpoint !== null || isHoveringViProfileLine))
+                      ? "grab"
+                      : "crosshair",
+                }}
+              />
+              <canvas ref={viUiRef} width={viCanvasWidth * DPR} height={viCanvasHeight * DPR} style={{ position: "absolute", width: "100%", height: "100%", pointerEvents: "none" }} />
+              {panelChromeVisible && cursorInfo && cursorInfo.panel === "VI" && (
+                <Box sx={{ position: "absolute", top: 3, right: 3, bgcolor: "rgba(0,0,0,0.35)", px: 0.5, py: 0.15, pointerEvents: "none", minWidth: 100, textAlign: "right" }}>
+                  <Typography sx={{ fontSize: 9, fontFamily: "monospace", color: "rgba(255,255,255,0.7)", whiteSpace: "nowrap", lineHeight: 1.2 }}>
+                    ({cursorInfo.row}, {cursorInfo.col}) {formatNumber(cursorInfo.value)}
+                  </Typography>
+                </Box>
+              )}
+              {panelChromeVisible && <Box onMouseDown={handleCanvasResizeStart} sx={{ position: "absolute", bottom: 0, right: 0, width: 16, height: 16, cursor: "nwse-resize", opacity: 0.6, background: `linear-gradient(135deg, transparent 50%, ${themeColors.accent} 50%)`, "&:hover": { opacity: 1 } }} />}
+            </Box>
+          )}
 
           {/* VI Stats Bar — stats on left, Auto/Smooth toggles on right edge */}
           {showStats && viStats && viStats.length === 4 && (
@@ -4869,7 +5115,7 @@ function Show4DSTEM() {
           )}
 
           {/* VI Profile sparkline */}
-          {viProfileActive && (
+          {!compareMode && viProfileActive && (
             <Box sx={{ mt: `${SPACING.XS}px`, width: "100%", maxWidth: viCanvasWidth, boxSizing: "border-box" }}>
               <canvas
                 ref={viProfileCanvasRef}
@@ -5091,6 +5337,38 @@ function Show4DSTEM() {
       {/* Frame controls (5D time/tilt series) — matches Show3D playback */}
       {controlsVisible && nFrames > 1 && (<>
         <Box sx={{ ...controlRow, mt: `${SPACING.SM}px`, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>
+          <Typography sx={{ ...typo.label, fontSize: 10, flexShrink: 0 }}>View</Typography>
+          <Select
+            value={viewMode || "single"}
+            onChange={(e) => setViewMode(String(e.target.value))}
+            size="small"
+            inputProps={{ "aria-label": "Show4DSTEM view mode" }}
+            sx={{ ...themedSelect, minWidth: 82, fontSize: 10 }}
+            MenuProps={themedMenuProps}
+          >
+            <MenuItem value="single">Single</MenuItem>
+            <MenuItem value="temporal">Temporal</MenuItem>
+            <MenuItem value="compare">Compare</MenuItem>
+          </Select>
+          {compareMode && (
+            <>
+              <Typography sx={{ ...typo.label, fontSize: 10, flexShrink: 0 }}>Cols</Typography>
+              <Select
+                value={compareCols || 0}
+                onChange={(e) => setCompareCols(Number(e.target.value))}
+                size="small"
+                inputProps={{ "aria-label": "Show4DSTEM compare columns" }}
+                sx={{ ...themedSelect, minWidth: 54, fontSize: 10 }}
+                MenuProps={themedMenuProps}
+              >
+                <MenuItem value={0}>Auto</MenuItem>
+                <MenuItem value={2}>2</MenuItem>
+                <MenuItem value={3}>3</MenuItem>
+                <MenuItem value={4}>4</MenuItem>
+                <MenuItem value={5}>5</MenuItem>
+              </Select>
+            </>
+          )}
           <Typography sx={{ ...typo.label, fontSize: 10, flexShrink: 0 }}>{frameDimLabel}:</Typography>
           <Stack direction="row" spacing={0} sx={{ flexShrink: 0 }}>
             <IconButton size="small" onClick={() => { setFrameReverse(true); setFramePlaying(true); }} sx={{ color: frameReverse && framePlaying ? themeColors.accent : themeColors.textMuted, p: 0.25 }}>

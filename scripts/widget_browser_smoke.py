@@ -739,6 +739,47 @@ def _semantic_checks(page, row: dict[str, Any], canvas_count: int) -> dict[str, 
         if column_check["restored"] is not None and not column_check["restored"].get("selected"):
             errors.append(f"Show3D column select did not restore {column_check['before_value']}")
 
+    if variant == "show4dstem-compare":
+        compare = page.evaluate(
+            """() => {
+              const panels = [...document.querySelectorAll('[aria-label^="Show4DSTEM compare panel"]')];
+              const before = panels.map((panel) => {
+                const rect = panel.getBoundingClientRect();
+                const style = getComputedStyle(panel);
+                return {
+                  label: panel.getAttribute('aria-label'),
+                  width: rect.width,
+                  height: rect.height,
+                  border: style.borderColor,
+                };
+              });
+              if (panels.length > 1) panels[1].click();
+              return {
+                count: panels.length,
+                before,
+                text: document.body.innerText,
+              };
+            }"""
+        )
+        page.wait_for_timeout(280)
+        after_frame_text = bool(
+            page.evaluate(
+                "document.body.innerText.includes('scan-1') || document.body.innerText.includes('Dataset 2')"
+            )
+        )
+        checks["compare_grid"] = {**compare, "selected_second_panel": after_frame_text}
+        if compare.get("count", 0) < 4:
+            errors.append(f"Show4DSTEM compare grid rendered too few panels: {compare}")
+        if any(
+            item.get("width", 0) <= 40 or item.get("height", 0) <= 40
+            for item in compare.get("before", [])
+        ):
+            errors.append(f"Show4DSTEM compare grid has tiny/invalid panels: {compare}")
+        if "Compare grid" not in str(compare.get("text", "")):
+            errors.append("Show4DSTEM compare grid label is not visible")
+        if not after_frame_text:
+            errors.append("Show4DSTEM compare panel click did not select the second dataset")
+
     checks["errors"] = errors
     return checks
 
@@ -751,7 +792,7 @@ def _write_html_report(artifact_dir: Path, report: dict[str, Any]) -> None:
         f"<td>{html.escape(row['variant'])}</td>"
         f"<td>{'pass' if row['passed'] else 'fail'}</td>"
         f"<td>{html.escape(str(row['canvas_count']))}</td>"
-        f"<td>{html.escape(f'{row.get('fps', 0):.1f}')}</td>"
+        f"<td>{html.escape(format(row.get('fps', 0), '.1f'))}</td>"
         f"<td>{html.escape(', '.join(row.get('story_ids', [])))}</td>"
         f"<td>{html.escape(str(row['switches_clicked']))}</td>"
         f"<td>{html.escape(str(row['slider_dragged']))}</td>"

@@ -100,6 +100,19 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
     frame_dim_label : str, optional
         Label for the frame dimension when 5D data is provided.
         Defaults to "Frame". Common values: "Tilt", "Time", "Focus".
+    view_mode : {"single", "temporal", "compare"}, default "single"
+        Scientific layout mode. ``"single"`` and ``"temporal"`` keep the
+        existing one-virtual-image workflow. ``"compare"`` shows a grid of
+        virtual images for the first ready frames/datasets while sharing the
+        detector ROI and scan cursor with the existing diffraction panel.
+    compare_layout : {"side", "top"}, default "side"
+        Frontend layout hint for ``view_mode="compare"``. The current widget
+        renders ``"side"`` as the default shared-DP plus virtual-image grid.
+    compare_cols : int, default 0
+        Number of columns in the compare virtual-image grid. ``0`` selects a
+        responsive automatic layout.
+    compare_max_panels : int, default 12
+        Maximum ready frames/datasets included in the compare grid.
     ui_mode : {"interactive", "presentation", "report", "minimal"}, default "interactive"
         Preset for viewer chrome. Explicit ``show_*`` keyword arguments override
         the preset.
@@ -376,6 +389,18 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
     frame_reverse = traitlets.Bool(False).tag(sync=True)
     frame_boomerang = traitlets.Bool(False).tag(sync=True)
 
+    # Compare-grid mode: one shared diffraction panel, many synchronized virtual
+    # images. The bytes are stacked float32 arrays with shape
+    # (compare_panel_count, shape_rows, shape_cols).
+    view_mode = traitlets.Unicode("single").tag(sync=True)
+    compare_layout = traitlets.Unicode("side").tag(sync=True)
+    compare_cols = traitlets.Int(0).tag(sync=True)
+    compare_max_panels = traitlets.Int(12).tag(sync=True)
+    compare_virtual_image_bytes = traitlets.Bytes(b"").tag(sync=True)
+    compare_panel_count = traitlets.Int(0).tag(sync=True)
+    compare_panel_indices = traitlets.List(traitlets.Int(), default_value=[]).tag(sync=True)
+    compare_status = traitlets.Unicode("").tag(sync=True)
+
     # Export (GIF)
     _gif_export_requested = traitlets.Bool(False).tag(sync=True)
     _gif_data = traitlets.Bytes(b"").tag(sync=True)
@@ -386,6 +411,28 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
     profile_width = traitlets.Int(1).tag(sync=True)
 
     # =========================================================================
+    @staticmethod
+    def _normalise_view_mode(value: str) -> str:
+        mode = str(value or "single").strip().lower().replace("-", "_")
+        if mode in {"default", "normal"}:
+            mode = "single"
+        if mode not in {"single", "temporal", "compare"}:
+            raise ValueError(
+                "view_mode must be 'single', 'temporal', or 'compare', "
+                f"got {value!r}"
+            )
+        return mode
+
+    @staticmethod
+    def _normalise_compare_layout(value: str) -> str:
+        layout = str(value or "side").strip().lower().replace("-", "_")
+        if layout not in {"side", "top"}:
+            raise ValueError(
+                "compare_layout must be 'side' or 'top', "
+                f"got {value!r}"
+            )
+        return layout
+
     def __init__(
         self,
         data: "Dataset4dstem | np.ndarray",
@@ -397,6 +444,10 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         precompute_virtual_images: bool = True,
         frame_dim_label: str | None = None,
         frame_labels: list[str] | None = None,
+        view_mode: str = "single",
+        compare_layout: str = "side",
+        compare_cols: int = 0,
+        compare_max_panels: int = 12,
         title: str = "",
         ui_mode: UiMode = "interactive",
         show_title: bool | None = None,
@@ -462,6 +513,18 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         if panel_width_px < 0:
             raise ValueError(f"panel_width_px must be >= 0, got {panel_width_px}")
         self.panel_width_px = panel_width_px
+        self.view_mode = self._normalise_view_mode(view_mode)
+        self.compare_layout = self._normalise_compare_layout(compare_layout)
+        compare_cols = int(compare_cols)
+        if compare_cols < 0:
+            raise ValueError(f"compare_cols must be >= 0, got {compare_cols}")
+        self.compare_cols = compare_cols
+        compare_max_panels = int(compare_max_panels)
+        if compare_max_panels < 1:
+            raise ValueError(
+                f"compare_max_panels must be >= 1, got {compare_max_panels}"
+            )
+        self.compare_max_panels = compare_max_panels
         # Backend selector. ONLY two values:
         #   None  -> auto-pick Python compute (TorchBackend on torch
         #            tensors, MetalRawBackend on ChunkedFrames). Default.
@@ -781,6 +844,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         # Compute initial virtual image and frame (once, after all ROI traits are set)
         _tc = time.perf_counter()
         self._compute_virtual_image_from_roi()
+        self._refresh_compare_virtual_images()
         self._update_frame()
         if _verbose:
             print(f"  virtual image + frame: {time.perf_counter() - _tc:.2f}s")
@@ -793,6 +857,9 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         # Frame animation (5D): observe frame_idx changes from frontend
         self.observe(self._on_frame_idx_change, names=["frame_idx"])
         self.observe(self._on_preset_request, names=["_preset_request"])
+        self.observe(self._on_compare_config_change, names=[
+            "view_mode", "compare_max_panels", "n_frames"
+        ])
 
         # Auto-detect trigger: observe changes from frontend
 
@@ -871,7 +938,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         except Exception:
             return
         def _resend():
-            for name in ("virtual_image_bytes", "frame_bytes"):
+            for name in ("virtual_image_bytes", "frame_bytes", "compare_virtual_image_bytes"):
                 try:
                     self.send_state(name)
                 except Exception:
@@ -1210,6 +1277,10 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             controls_collapsed=self.controls_collapsed,
             show_stats=self.show_stats,
             show_scale_bar=self.show_scale_bar,
+            view_mode=self.view_mode,
+            compare_layout=self.compare_layout,
+            compare_cols=self.compare_cols,
+            compare_max_panels=self.compare_max_panels,
             verbose=False,
         )
         clone.load_state_dict(self._export_state_for_bin(det_bin))
@@ -1670,6 +1741,10 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             "dp_show_colorbar": self.dp_show_colorbar,
             "vi_auto_contrast": self.vi_auto_contrast,
             "vi_smooth": self.vi_smooth,
+            "view_mode": self.view_mode,
+            "compare_layout": self.compare_layout,
+            "compare_cols": self.compare_cols,
+            "compare_max_panels": self.compare_max_panels,
             "path_interval_ms": self.path_interval_ms,
             "path_loop": self.path_loop,
             "profile_line": self.profile_line,
@@ -1695,6 +1770,10 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             if key in {"pos_row", "pos_col", "frame_idx"}:
                 continue
             if key in allowed_keys:
+                if key == "view_mode":
+                    val = self._normalise_view_mode(val)
+                elif key == "compare_layout":
+                    val = self._normalise_compare_layout(val)
                 setattr(self, key, val)
         if pending_frame_idx is not None:
             self.frame_idx = int(max(0, min(int(pending_frame_idx), self.n_frames - 1)))
@@ -1703,6 +1782,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             col = int(self.pos_col if pending_pos_col is None else pending_pos_col)
             self.pos_row = int(max(0, min(row, self.shape_rows - 1)))
             self.pos_col = int(max(0, min(col, self.shape_cols - 1)))
+        self._refresh_compare_virtual_images()
 
     def collapse_controls(self) -> Self:
         """Collapse the live control UI while leaving the GUI toggle available."""
@@ -1775,6 +1855,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         if type(data).__name__ == "Dataset5dstem" and hasattr(data, "free"):
             data.free()
         self._data = None
+        self._clear_compare_virtual_images()
         gc.collect()
         if needs_mps_clear:
             try:
@@ -2059,6 +2140,12 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         if name in ("bf", "abf", "adf", "haadf"):
             self.apply_preset(name)
             self._preset_request = ""  # consume trigger
+
+    def _on_compare_config_change(self, change=None) -> None:
+        """Refresh compare-grid payload after relevant config/readiness changes."""
+        if change and change.get("name") == "view_mode":
+            self.view_mode = self._normalise_view_mode(change.get("new", "single"))
+        self._refresh_compare_virtual_images()
 
     def _on_frame_idx_change(self, change=None):
         """Called when frame_idx changes (5D time/tilt series).
@@ -3035,6 +3122,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             self._suppress_roi_recompute = False
         # Single recompute with final, consistent state.
         self._compute_virtual_image_from_roi()
+        self._refresh_compare_virtual_images()
         return self
 
 
@@ -3158,6 +3246,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         if getattr(self, "_suppress_roi_recompute", False):
             return
         self._compute_virtual_image_from_roi()
+        self._refresh_compare_virtual_images()
 
     def _on_roi_center_change(self, change=None):
         """Handle batched roi_center updates from JS (single observer for row+col).
@@ -3177,6 +3266,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             self.roi_center_col = col
             self.observe(self._on_roi_change, names=["roi_center_col", "roi_center_row"])
         self._compute_virtual_image_from_roi()
+        self._refresh_compare_virtual_images()
 
     def _on_vi_roi_center_change(self, change=None):
         """Apply compound (row, col) update atomically (avoids split-trait race)."""
@@ -3254,6 +3344,104 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         """Create rectangular mask (boolean tensor on device)."""
         mask = (torch.abs(self._det_col_coords - cx) <= half_width) & (torch.abs(self._det_row_coords - cy) <= half_height)
         return mask
+
+    def _current_detector_mask(self):
+        """Return the detector mask for the current virtual-image ROI."""
+        cx, cy = self.roi_center_col, self.roi_center_row
+        if self.roi_mode == "circle" and self.roi_radius > 0:
+            return self._create_circular_mask(cx, cy, self.roi_radius)
+        if self.roi_mode == "square" and self.roi_radius > 0:
+            return self._create_square_mask(cx, cy, self.roi_radius)
+        if self.roi_mode == "annular" and self.roi_radius > 0:
+            return self._create_annular_mask(cx, cy, self.roi_radius_inner, self.roi_radius)
+        if self.roi_mode == "rect" and self.roi_width > 0 and self.roi_height > 0:
+            return self._create_rect_mask(cx, cy, self.roi_width / 2, self.roi_height / 2)
+
+        row = int(max(0, min(round(cy), self._det_shape[0] - 1)))
+        col = int(max(0, min(round(cx), self._det_shape[1] - 1)))
+        point_mask = np.zeros(self._det_shape, dtype=np.float32)
+        point_mask[row, col] = 1.0
+        return point_mask
+
+    def _clear_compare_virtual_images(self) -> None:
+        with self.hold_trait_notifications():
+            self.compare_virtual_image_bytes = b""
+            self.compare_panel_count = 0
+            self.compare_panel_indices = []
+            self.compare_status = ""
+
+    def _compare_ready_indices(self) -> list[int]:
+        if self.n_frames <= 1:
+            return []
+        max_panels = max(1, int(self.compare_max_panels))
+        data = getattr(self, "_data", None)
+        datasets = getattr(data, "datasets", None)
+        if datasets is not None:
+            return [
+                idx
+                for idx, dataset in enumerate(list(datasets))
+                if dataset is not None
+            ][:max_panels]
+        return list(range(min(int(self.n_frames), max_panels)))
+
+    def _virtual_image_for_chunked_dataset(self, dataset, mask) -> np.ndarray:
+        """Compute one compare tile for a chunked MPS dataset slot."""
+        from quantem.widget.kernels.compute.backends import compute_backend
+
+        mask_np = mask.detach().cpu().numpy() if hasattr(mask, "detach") else np.asarray(mask)
+        backend = compute_backend(dataset)
+        return np.asarray(backend.masked_sum(mask_np), dtype=np.float32)
+
+    def _compare_virtual_image_for_frame(self, idx: int, mask) -> np.ndarray:
+        data = getattr(self, "_data", None)
+        datasets = getattr(data, "datasets", None)
+        if datasets is not None:
+            dataset = datasets[int(idx)]
+            if dataset is None:
+                raise ValueError(f"dataset {idx} is not ready")
+            return self._virtual_image_for_chunked_dataset(dataset, mask)
+        return self._virtual_image_for_frame(int(idx))
+
+    def _refresh_compare_virtual_images(self) -> None:
+        """Build the lightweight virtual-image stack used by compare mode."""
+        if getattr(self, "_data", None) is None:
+            self._clear_compare_virtual_images()
+            return
+        if self.view_mode != "compare":
+            if self.compare_panel_count or self.compare_virtual_image_bytes:
+                self._clear_compare_virtual_images()
+            return
+        indices = self._compare_ready_indices()
+        if not indices:
+            self._clear_compare_virtual_images()
+            return
+        if getattr(self, "_suppress_compare_recompute", False):
+            return
+        self._suppress_compare_recompute = True
+        try:
+            mask = self._current_detector_mask()
+            images = [
+                np.ascontiguousarray(
+                    self._compare_virtual_image_for_frame(idx, mask),
+                    dtype=np.float32,
+                ).reshape(self.shape_rows, self.shape_cols)
+                for idx in indices
+            ]
+            stack = np.ascontiguousarray(np.stack(images, axis=0), dtype=np.float32)
+            with self.hold_trait_notifications():
+                self.compare_virtual_image_bytes = stack.tobytes()
+                self.compare_panel_count = len(indices)
+                self.compare_panel_indices = [int(idx) for idx in indices]
+                suffix = "" if len(indices) >= min(self.n_frames, self.compare_max_panels) else " ready"
+                self.compare_status = f"{len(indices)}/{self.n_frames} {self.frame_dim_label.lower()} panels{suffix}"
+        except Exception as exc:
+            with self.hold_trait_notifications():
+                self.compare_virtual_image_bytes = b""
+                self.compare_panel_count = 0
+                self.compare_panel_indices = []
+                self.compare_status = f"Compare grid unavailable: {exc}"
+        finally:
+            self._suppress_compare_recompute = False
 
     def _on_calibration_change(self, change=None):
         self._cached_bf_virtual = None

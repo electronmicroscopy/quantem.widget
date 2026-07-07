@@ -29,6 +29,13 @@ w = Show4DSTEM(load(path, backend="mps", det_bin=4))
 # Multi-dataset stack: one viewer, one Dataset slider.
 w = Show4DSTEM(load([path1, path2, path3], det_bin=4))
 
+# Multi-dataset comparison: one shared diffraction ROI, many virtual images.
+w = Show4DSTEM(
+    load([path1, path2, path3], det_bin=4),
+    view_mode="compare",
+    compare_cols=3,
+)
+
 # Apple Silicon live acquisition folder: dataset 0 appears first, then newly
 # completed *_master.h5 files append into the same Dataset slider.
 from quantem.widget.multidataset_mps import load_macbook_datasets
@@ -104,6 +111,33 @@ object, clear references, use backend-specific cleanup utilities when provided,
 or restart the kernel/session. Exported HTML has no live Python GPU allocation,
 so it should not expose a "free GPU memory" control.
 
+## Compare grid
+
+Use `view_mode="compare"` when the extra frame axis represents multiple
+acquisitions that should be inspected side by side. The viewer keeps the
+standard diffraction-panel workflow: one shared detector ROI, one shared scan
+cursor, and one Dataset slider. The virtual-image side becomes a grid of ready
+frames or datasets.
+
+```python
+from quantem.widget import load, Show4DSTEM
+
+widget = Show4DSTEM(
+    load([path1, path2, path3, path4], det_bin=4),
+    view_mode="compare",
+    compare_cols=2,
+    compare_max_panels=4,
+)
+widget
+```
+
+`compare_cols=0` lets the frontend pick a responsive layout. `compare_layout`
+accepts `"side"` and `"top"` for placing the shared diffraction panel next to
+or above the compare grid. On lazy MPS multi-dataset loads, the grid starts with
+the first decoded dataset and appends tiles as the background loader marks
+additional datasets ready; it does not materialize a full 5D stack just to build
+the comparison.
+
 ## Reference
 
 ```{eval-rst}
@@ -134,6 +168,7 @@ Python round trip - see [Performance](../maintainer/widget-performance).
 | Annular inner / outer | `roi_radius_inner`, `roi_radius` | ADF annulus geometry |
 | Virtual-image ROI | `vi_roi_mode`, `vi_roi_center_row`, `vi_roi_center_col` | Pick a real-space region to average its diffraction |
 | FFT toggle | `show_fft`, `fft_window` | Power spectrum of the virtual image |
+| Compare grid | `view_mode="compare"`, `compare_cols`, `compare_max_panels`, `compare_layout` | Shows ready frames/datasets as synchronized virtual images sharing the detector ROI and scan cursor |
 | Viewer chrome preset | `ui_mode` plus explicit `show_*` kwargs | Applies shared display presets; see [Viewer UI controls](viewer-ui) |
 | Control visibility | `show_controls`, `controls_collapsed`; `collapse_controls()`, `expand_controls()`, `toggle_controls()` | Permanently remove controls or temporarily collapse them behind the top GUI toggle |
 | Title visibility | `show_title` | Top title row shows/hides |

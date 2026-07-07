@@ -144,53 +144,75 @@ class Show4DSTEMMPS(Show4DSTEM):
     # Lazy 5D multi-file proxy — the backend owns the underlying MultiChunkedFrames;
     # this widget only wires the n_frames trait + title to its on_ready callback.
 
+    def _multi_source(self):
+        """Return the live multi-dataset proxy, if this viewer wraps one."""
+        data = getattr(self, "_data", None)
+        if (
+            hasattr(data, "datasets")
+            and hasattr(data, "set_active")
+            and hasattr(data, "on_ready")
+        ):
+            return data
+        return None
+
     def _wire_multi_dataset(self):
-        b = self._compute
-        if "multi_dataset" not in b.capabilities:
+        multi = self._multi_source()
+        if multi is None:
             self._multi = None
             return
-        self._multi = self._data
-        self._multi_total = b.multi_total()
+        self._multi = multi
+        self._multi_total = len(multi.datasets)
         self.frame_dim_label = "Dataset"
-        # slider only spans what's decoded
-        self.n_frames = max(1, b.multi_n_ready)
+        # Keep the full dataset axis visible while background decode fills slots.
+        self.n_frames = max(1, self._multi_total)
         self._refresh_multi_title()
         try:
             from tornado.ioloop import IOLoop
             self._ioloop = IOLoop.current()
         except Exception:
             self._ioloop = None
-        b.set_multi_ready_callback(self._on_multi_dataset_ready)
+        multi.on_ready = self._on_multi_dataset_ready
 
     def _refresh_multi_title(self):
-        b = self._compute
-        if "multi_dataset" not in b.capabilities:
+        multi = getattr(self, "_multi", None)
+        if multi is None:
             return
-        names = b.multi_names
-        name = names[b.multi_active_idx] if names else f"dataset {b.multi_active_idx}"
-        n_ready = b.multi_n_ready
+        names = list(getattr(multi, "names", []) or [])
+        active_idx = int(getattr(multi, "active_idx", 0))
+        name = names[active_idx] if 0 <= active_idx < len(names) else f"dataset {active_idx}"
+        n_ready = int(getattr(multi, "n_ready", 1))
         n_total = self._multi_total
         self.title = name if n_ready >= n_total else f"{name}  -  loading {n_ready}/{n_total}"
 
     def _on_multi_dataset_ready(self, idx: int):
-        b = self._compute
+        multi = getattr(self, "_multi", None)
+        if multi is None:
+            return
 
         def _apply():
-            self._multi_total = b.multi_total()
-            self.n_frames = max(1, b.multi_n_ready)
+            self._multi_total = len(getattr(multi, "datasets", []) or [])
+            self.n_frames = max(1, self._multi_total)
             self._refresh_multi_title()
+            self._refresh_compare_virtual_images()
 
+        loop_running = False
         if self._ioloop is not None:
+            try:
+                loop_running = bool(self._ioloop.asyncio_loop.is_running())
+            except Exception:
+                loop_running = False
+        if self._ioloop is not None and loop_running:
             self._ioloop.add_callback(_apply)
         else:
             _apply()
 
     def _on_frame_idx_change(self, change=None):
-        b = self._compute
-        if "multi_dataset" in b.capabilities:
-            b.set_active_dataset(int(self.frame_idx))
-            if getattr(self, "_multi", None) is not None:
-                self._refresh_multi_title()
+        multi = getattr(self, "_multi", None)
+        if multi is not None:
+            multi.set_active(int(self.frame_idx))
+            self._compute_backend = None
+            self._compute_for = None
+            self._refresh_multi_title()
         return super()._on_frame_idx_change(change)
 
     # ----------------------------------------------------------------- frame and detector compute

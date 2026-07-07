@@ -144,3 +144,58 @@ def test_public_show4dstem_constructs_small_binned_numpy_viewer() -> None:
         assert widget.show_controls is False
     finally:
         widget.close()
+
+
+def test_show4dstem_compare_grid_builds_virtual_image_stack() -> None:
+    from quantem.widget import Show4DSTEM
+
+    data = np.arange(5 * 3 * 4 * 6 * 6, dtype=np.uint16).reshape(5, 3, 4, 6, 6)
+    widget = Show4DSTEM(
+        data,
+        view_mode="compare",
+        compare_cols=3,
+        compare_max_panels=4,
+        frame_dim_label="Dataset",
+        frame_labels=[f"scan-{idx}" for idx in range(5)],
+        precompute_virtual_images=False,
+        verbose=False,
+    )
+
+    try:
+        assert widget.view_mode == "compare"
+        assert widget.compare_cols == 3
+        assert widget.compare_panel_count == 4
+        assert widget.compare_panel_indices == [0, 1, 2, 3]
+        assert len(widget.compare_virtual_image_bytes) == 4 * 3 * 4 * 4
+        assert "4/5 dataset panels" in widget.compare_status
+
+        before = widget.compare_virtual_image_bytes
+        widget.apply_preset("adf")
+        assert widget.compare_panel_count == 4
+        assert widget.compare_virtual_image_bytes != before
+
+        widget.view_mode = "single"
+        widget._refresh_compare_virtual_images()
+        assert widget.compare_panel_count == 0
+        assert widget.compare_virtual_image_bytes == b""
+    finally:
+        widget.close()
+
+
+def test_show4dstem_compare_grid_validates_api() -> None:
+    from quantem.widget import Show4DSTEM
+
+    data = np.zeros((2, 2, 2, 4, 4), dtype=np.uint16)
+
+    for kwargs, message in [
+        ({"view_mode": "movie"}, "view_mode"),
+        ({"compare_layout": "diagonal"}, "compare_layout"),
+        ({"compare_cols": -1}, "compare_cols"),
+        ({"compare_max_panels": 0}, "compare_max_panels"),
+    ]:
+        try:
+            Show4DSTEM(data, verbose=False, **kwargs)
+        except ValueError as exc:
+            assert message in str(exc)
+        else:  # pragma: no cover - assertion helper
+            raise AssertionError(f"Show4DSTEM accepted invalid kwargs {kwargs!r}")
