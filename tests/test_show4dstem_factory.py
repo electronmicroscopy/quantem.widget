@@ -164,15 +164,66 @@ def test_show4dstem_compare_grid_builds_virtual_image_stack() -> None:
     try:
         assert widget.view_mode == "compare"
         assert widget.compare_cols == 3
+        assert widget.compare_dp_mode == "average"
         assert widget.compare_panel_count == 4
         assert widget.compare_panel_indices == [0, 1, 2, 3]
         assert len(widget.compare_virtual_image_bytes) == 4 * 3 * 4 * 4
         assert "4/5 dataset panels" in widget.compare_status
+        average_dp = widget.frame_bytes
+        widget.compare_dp_mode = "selected"
+        assert widget.compare_dp_mode == "selected"
+        assert widget.frame_bytes != average_dp
+
+        widget.compare_dp_mode = "avg"
+        assert widget.compare_dp_mode == "average"
+
+        widget.set_compare_panel_order(["scan-3", "scan-0", "scan-1", "scan-2", "scan-4"])
+        assert widget.compare_panel_order == [3, 0, 1, 2, 4]
+        assert widget.compare_panel_indices == [3, 0, 1, 2]
+
+        widget.hide_compare_panel("scan-0")
+        assert widget.compare_hidden_panels == [0]
+        assert widget.compare_panel_indices == [3, 1, 2, 4]
+        widget.show_compare_panel("scan-0")
+        assert widget.compare_hidden_panels == []
+
+        widget.star_compare_panel("scan-3")
+        widget.star_compare_panel(1)
+        widget.unstar_compare_panel(1)
+        assert widget.compare_starred_panels == [3]
+
+        try:
+            widget.set_compare_hidden_panels([0, 1, 2, 3, 4])
+        except ValueError as exc:
+            assert "hide every panel" in str(exc)
+        else:  # pragma: no cover - assertion helper
+            raise AssertionError("Show4DSTEM allowed hiding every compare panel")
 
         before = widget.compare_virtual_image_bytes
         widget.apply_preset("adf")
         assert widget.compare_panel_count == 4
         assert widget.compare_virtual_image_bytes != before
+
+        state = widget.state_dict()
+        restored = Show4DSTEM(
+            data,
+            view_mode="compare",
+            compare_cols=1,
+            compare_max_panels=4,
+            frame_dim_label="Dataset",
+            frame_labels=[f"scan-{idx}" for idx in range(5)],
+            precompute_virtual_images=False,
+            verbose=False,
+        )
+        try:
+            restored.load_state_dict(state)
+            assert restored.compare_dp_mode == widget.compare_dp_mode
+            assert restored.compare_panel_order == widget.compare_panel_order
+            assert restored.compare_hidden_panels == widget.compare_hidden_panels
+            assert restored.compare_starred_panels == widget.compare_starred_panels
+            assert restored.compare_panel_indices == widget.compare_panel_indices
+        finally:
+            restored.close()
 
         widget.view_mode = "single"
         widget._refresh_compare_virtual_images()
@@ -192,6 +243,7 @@ def test_show4dstem_compare_grid_validates_api() -> None:
         ({"compare_layout": "diagonal"}, "compare_layout"),
         ({"compare_cols": -1}, "compare_cols"),
         ({"compare_max_panels": 0}, "compare_max_panels"),
+        ({"compare_dp_mode": "median"}, "compare_dp_mode"),
     ]:
         try:
             Show4DSTEM(data, verbose=False, **kwargs)

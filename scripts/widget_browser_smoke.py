@@ -743,13 +743,25 @@ def _semantic_checks(page, row: dict[str, Any], canvas_count: int) -> dict[str, 
         compare = page.evaluate(
             """() => {
               const panels = [...document.querySelectorAll('[aria-label^="Show4DSTEM compare panel"]')];
+              const rowTops = [];
+              const rowCounts = [];
+              const rowFor = (top) => {
+                const idx = rowTops.findIndex((rowTop) => Math.abs(rowTop - top) < 3);
+                if (idx >= 0) return idx;
+                rowTops.push(top);
+                rowCounts.push(0);
+                return rowTops.length - 1;
+              };
               const before = panels.map((panel) => {
                 const rect = panel.getBoundingClientRect();
                 const style = getComputedStyle(panel);
+                rowCounts[rowFor(rect.top)] += 1;
                 return {
                   label: panel.getAttribute('aria-label'),
                   width: rect.width,
                   height: rect.height,
+                  top: rect.top,
+                  left: rect.left,
                   border: style.borderColor,
                 };
               });
@@ -757,6 +769,9 @@ def _semantic_checks(page, row: dict[str, Any], canvas_count: int) -> dict[str, 
               return {
                 count: panels.length,
                 before,
+                row_counts: rowCounts,
+                max_row_count: rowCounts.length ? Math.max(...rowCounts) : 0,
+                viewport_width: window.innerWidth,
                 text: document.body.innerText,
               };
             }"""
@@ -767,9 +782,79 @@ def _semantic_checks(page, row: dict[str, Any], canvas_count: int) -> dict[str, 
                 "document.body.innerText.includes('scan-1') || document.body.innerText.includes('Dataset 2')"
             )
         )
-        checks["compare_grid"] = {**compare, "selected_second_panel": after_frame_text}
-        if compare.get("count", 0) < 4:
-            errors.append(f"Show4DSTEM compare grid rendered too few panels: {compare}")
+        compare_actions: dict[str, Any] = {}
+        try:
+            star = page.locator('.show4dstem-compare-star[data-frame="1"]').nth(0)
+            compare_actions["star_before"] = star.get_attribute("aria-label")
+            star.click(timeout=2000)
+            page.wait_for_timeout(120)
+            compare_actions["star_after"] = page.locator('.show4dstem-compare-star[data-frame="1"]').nth(0).get_attribute("aria-label")
+
+            page.locator(".show4dstem-compare-reorder").nth(0).click(timeout=2000)
+            page.locator('[aria-label="Show4DSTEM compare panel 1"]').nth(0).click(timeout=2000)
+            page.locator('[aria-label="Show4DSTEM compare panel 3"]').nth(0).click(timeout=2000)
+            page.wait_for_function(
+                """() => {
+                    const panel = document.querySelector('[aria-label^="Show4DSTEM compare panel"]');
+                    return panel && panel.textContent.includes('scan-1');
+                }""",
+                timeout=4000,
+            )
+            compare_actions["after_reorder"] = page.evaluate(
+                """() => [...document.querySelectorAll('[aria-label^="Show4DSTEM compare panel"]')]
+                    .slice(0, 4)
+                    .map((panel) => panel.textContent.trim())"""
+            )
+
+            page.locator('.show4dstem-compare-hide[data-frame="1"]').nth(0).click(timeout=2000)
+            page.wait_for_function(
+                "() => document.querySelectorAll('[aria-label^=\"Show4DSTEM compare panel\"]').length === 13",
+                timeout=4000,
+            )
+            compare_actions["count_after_hide"] = page.locator('[aria-label^="Show4DSTEM compare panel"]').count()
+            page.locator(".show4dstem-compare-show-all").nth(0).click(timeout=2000)
+            page.wait_for_function(
+                "() => document.querySelectorAll('[aria-label^=\"Show4DSTEM compare panel\"]').length === 14",
+                timeout=4000,
+            )
+            compare_actions["count_after_show_all"] = page.locator('[aria-label^="Show4DSTEM compare panel"]').count()
+            page.locator(".show4dstem-compare-reset").nth(0).click(timeout=2000)
+            page.wait_for_function(
+                """() => {
+                    const panel = document.querySelector('[aria-label^="Show4DSTEM compare panel"]');
+                    return panel && panel.textContent.includes('scan-0');
+                }""",
+                timeout=4000,
+            )
+            compare_actions["after_reset"] = page.evaluate(
+                """() => [...document.querySelectorAll('[aria-label^="Show4DSTEM compare panel"]')]
+                    .slice(0, 4)
+                    .map((panel) => panel.textContent.trim())"""
+            )
+        except Exception as exc:  # pragma: no cover - captured in smoke report
+            compare_actions["error"] = str(exc)
+
+        checks["compare_grid"] = {
+            **compare,
+            "selected_second_panel": after_frame_text,
+            "actions": compare_actions,
+        }
+        expected_count = 14
+        expected_max_cols = 2 if narrow_viewport else 4
+        if compare.get("count", 0) != expected_count:
+            errors.append(
+                f"Show4DSTEM compare grid rendered {compare.get('count')} panels, "
+                f"expected {expected_count}: {compare}"
+            )
+        if compare.get("max_row_count", 0) > expected_max_cols:
+            errors.append(
+                f"Show4DSTEM compare grid exceeded {expected_max_cols} columns "
+                f"in this viewport: {compare}"
+            )
+        if not narrow_viewport and compare.get("max_row_count", 0) != expected_max_cols:
+            errors.append(f"Show4DSTEM desktop compare grid did not use 4 columns: {compare}")
+        if narrow_viewport and compare.get("max_row_count", 0) != expected_max_cols:
+            errors.append(f"Show4DSTEM mobile compare grid did not use 2 columns: {compare}")
         if any(
             item.get("width", 0) <= 40 or item.get("height", 0) <= 40
             for item in compare.get("before", [])
@@ -779,6 +864,18 @@ def _semantic_checks(page, row: dict[str, Any], canvas_count: int) -> dict[str, 
             errors.append("Show4DSTEM compare grid label is not visible")
         if not after_frame_text:
             errors.append("Show4DSTEM compare panel click did not select the second dataset")
+        if compare_actions.get("error"):
+            errors.append(f"Show4DSTEM compare panel controls failed: {compare_actions['error']}")
+        if "Unstar" not in str(compare_actions.get("star_after", "")):
+            errors.append(f"Show4DSTEM compare star button did not toggle: {compare_actions}")
+        if not compare_actions.get("after_reorder", [""])[0].startswith("scan-1"):
+            errors.append(f"Show4DSTEM compare reorder did not move scan-1 first: {compare_actions}")
+        if compare_actions.get("count_after_hide") != 13:
+            errors.append(f"Show4DSTEM compare hide did not remove one panel: {compare_actions}")
+        if compare_actions.get("count_after_show_all") != 14:
+            errors.append(f"Show4DSTEM compare show-all did not restore panels: {compare_actions}")
+        if not compare_actions.get("after_reset", [""])[0].startswith("scan-0"):
+            errors.append(f"Show4DSTEM compare reset did not restore natural order: {compare_actions}")
 
     checks["errors"] = errors
     return checks

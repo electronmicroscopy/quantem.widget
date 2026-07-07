@@ -19,7 +19,7 @@ import os
 import pathlib
 import tempfile
 import time
-from typing import TYPE_CHECKING, Any, Self
+from typing import TYPE_CHECKING, Any, Self, Sequence
 
 if TYPE_CHECKING:
     from quantem.core.datastructures import Dataset4dstem
@@ -113,6 +113,10 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         responsive automatic layout.
     compare_max_panels : int, default 12
         Maximum ready frames/datasets included in the compare grid.
+    compare_dp_mode : {"average", "selected"}, default "average"
+        Diffraction panel source in compare mode. ``"average"`` displays the
+        mean diffraction pattern at the current scan position across visible
+        ready compare panels. ``"selected"`` displays the active frame/dataset.
     ui_mode : {"interactive", "presentation", "report", "minimal"}, default "interactive"
         Preset for viewer chrome. Explicit ``show_*`` keyword arguments override
         the preset.
@@ -396,6 +400,10 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
     compare_layout = traitlets.Unicode("side").tag(sync=True)
     compare_cols = traitlets.Int(0).tag(sync=True)
     compare_max_panels = traitlets.Int(12).tag(sync=True)
+    compare_dp_mode = traitlets.Unicode("average").tag(sync=True)
+    compare_panel_order = traitlets.List(traitlets.Int(), default_value=[]).tag(sync=True)
+    compare_hidden_panels = traitlets.List(traitlets.Int(), default_value=[]).tag(sync=True)
+    compare_starred_panels = traitlets.List(traitlets.Int(), default_value=[]).tag(sync=True)
     compare_virtual_image_bytes = traitlets.Bytes(b"").tag(sync=True)
     compare_panel_count = traitlets.Int(0).tag(sync=True)
     compare_panel_indices = traitlets.List(traitlets.Int(), default_value=[]).tag(sync=True)
@@ -433,6 +441,18 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             )
         return layout
 
+    @staticmethod
+    def _normalise_compare_dp_mode(value: str) -> str:
+        mode = str(value or "average").strip().lower().replace("-", "_")
+        aliases = {"avg": "average", "mean": "average", "current": "selected"}
+        mode = aliases.get(mode, mode)
+        if mode not in {"average", "selected"}:
+            raise ValueError(
+                "compare_dp_mode must be 'average' or 'selected', "
+                f"got {value!r}"
+            )
+        return mode
+
     def __init__(
         self,
         data: "Dataset4dstem | np.ndarray",
@@ -448,6 +468,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         compare_layout: str = "side",
         compare_cols: int = 0,
         compare_max_panels: int = 12,
+        compare_dp_mode: str = "average",
         title: str = "",
         ui_mode: UiMode = "interactive",
         show_title: bool | None = None,
@@ -515,6 +536,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         self.panel_width_px = panel_width_px
         self.view_mode = self._normalise_view_mode(view_mode)
         self.compare_layout = self._normalise_compare_layout(compare_layout)
+        self.compare_dp_mode = self._normalise_compare_dp_mode(compare_dp_mode)
         compare_cols = int(compare_cols)
         if compare_cols < 0:
             raise ValueError(f"compare_cols must be >= 0, got {compare_cols}")
@@ -858,8 +880,10 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         self.observe(self._on_frame_idx_change, names=["frame_idx"])
         self.observe(self._on_preset_request, names=["_preset_request"])
         self.observe(self._on_compare_config_change, names=[
-            "view_mode", "compare_max_panels", "n_frames"
+            "view_mode", "compare_max_panels", "n_frames",
+            "compare_panel_order", "compare_hidden_panels"
         ])
+        self.observe(self._on_compare_dp_mode_change, names=["compare_dp_mode"])
 
         # Auto-detect trigger: observe changes from frontend
 
@@ -1281,6 +1305,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             compare_layout=self.compare_layout,
             compare_cols=self.compare_cols,
             compare_max_panels=self.compare_max_panels,
+            compare_dp_mode=self.compare_dp_mode,
             verbose=False,
         )
         clone.load_state_dict(self._export_state_for_bin(det_bin))
@@ -1745,6 +1770,10 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             "compare_layout": self.compare_layout,
             "compare_cols": self.compare_cols,
             "compare_max_panels": self.compare_max_panels,
+            "compare_dp_mode": self.compare_dp_mode,
+            "compare_panel_order": list(self.compare_panel_order),
+            "compare_hidden_panels": list(self.compare_hidden_panels),
+            "compare_starred_panels": list(self.compare_starred_panels),
             "path_interval_ms": self.path_interval_ms,
             "path_loop": self.path_loop,
             "profile_line": self.profile_line,
@@ -1774,6 +1803,8 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
                     val = self._normalise_view_mode(val)
                 elif key == "compare_layout":
                     val = self._normalise_compare_layout(val)
+                elif key == "compare_dp_mode":
+                    val = self._normalise_compare_dp_mode(val)
                 setattr(self, key, val)
         if pending_frame_idx is not None:
             self.frame_idx = int(max(0, min(int(pending_frame_idx), self.n_frames - 1)))
@@ -1783,6 +1814,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             self.pos_row = int(max(0, min(row, self.shape_rows - 1)))
             self.pos_col = int(max(0, min(col, self.shape_cols - 1)))
         self._refresh_compare_virtual_images()
+        self._update_frame()
 
     def collapse_controls(self) -> Self:
         """Collapse the live control UI while leaving the GUI toggle available."""
@@ -2146,6 +2178,15 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         if change and change.get("name") == "view_mode":
             self.view_mode = self._normalise_view_mode(change.get("new", "single"))
         self._refresh_compare_virtual_images()
+        if self.view_mode == "compare":
+            self._update_frame()
+
+    def _on_compare_dp_mode_change(self, change=None) -> None:
+        """Normalize and apply compare DP source mode changes."""
+        if change:
+            self.compare_dp_mode = self._normalise_compare_dp_mode(change.get("new", "average"))
+        if self.view_mode == "compare":
+            self._update_frame()
 
     def _on_frame_idx_change(self, change=None):
         """Called when frame_idx changes (5D time/tilt series).
@@ -3218,23 +3259,66 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         """Send raw float32 frame to frontend (JS handles scale/colormap)."""
         if self._data is None:
             return
-        # Get frame as tensor (stays on device)
-        data = self._frame_data
-        if data.ndim == 3:
-            idx = self.pos_row * self.shape_cols + self.pos_col
-            frame = data[idx]
+        if (
+            self.view_mode == "compare"
+            and self.n_frames > 1
+            and self._normalise_compare_dp_mode(self.compare_dp_mode) == "average"
+        ):
+            frame = self._average_compare_diffraction_frame()
         else:
-            frame = data[self.pos_row, self.pos_col]
+            frame = self._diffraction_frame_for_index(self.frame_idx)
 
         # Cast small frame to float32 for stats and JS transfer. Bulk data
         # stays in native dtype; only this single 192×192 (~144 KB) frame
         # gets promoted.
+        if not isinstance(frame, torch.Tensor):
+            frame = torch.as_tensor(np.asarray(frame))
         if frame.dtype != torch.float32:
             frame = frame.float()
         # Stats compute moved to JS (frontend has frame_bytes; computeStats() in
         # js/stats.ts does mean/min/max/std on the Float32Array directly,
         # avoiding 4 sync trait round-trips per scan-position click).
-        self.frame_bytes = frame.cpu().numpy().tobytes()
+        self.frame_bytes = frame.detach().cpu().numpy().tobytes()
+
+    def _diffraction_frame_for_index(self, frame_idx: int):
+        """Return one diffraction pattern at the current scan position."""
+        data_source = getattr(self, "_data", None)
+        datasets = getattr(data_source, "datasets", None)
+        if datasets is not None:
+            idx = int(max(0, min(int(frame_idx), len(datasets) - 1)))
+            dataset = datasets[idx]
+            if dataset is None:
+                ready = [item for item in datasets if item is not None]
+                if not ready:
+                    raise ValueError("no ready compare datasets")
+                dataset = ready[0]
+            flat_idx = int(self.pos_row) * int(self.shape_cols) + int(self.pos_col)
+            return dataset.frame(flat_idx)
+
+        if type(data_source).__name__ == "Dataset5dstem":
+            data = data_source.frame(int(frame_idx))
+        elif self.n_frames > 1:
+            data = data_source[int(frame_idx)]
+        else:
+            data = data_source
+        if data.ndim == 3:
+            idx = self.pos_row * self.shape_cols + self.pos_col
+            return data[idx]
+        return data[self.pos_row, self.pos_col]
+
+    def _average_compare_diffraction_frame(self):
+        """Average ready visible compare-panel diffraction patterns."""
+        frames = []
+        for idx in self._compare_ready_indices():
+            frame = self._diffraction_frame_for_index(idx)
+            if not isinstance(frame, torch.Tensor):
+                frame = torch.as_tensor(np.asarray(frame))
+            frames.append(frame.detach().cpu().float())
+        if not frames:
+            return self._diffraction_frame_for_index(self.frame_idx)
+        if len(frames) == 1:
+            return frames[0]
+        return torch.stack(frames, dim=0).mean(dim=0)
 
     def _on_roi_change(self, change=None):
         """Recompute virtual image when individual ROI params change.
@@ -3363,6 +3447,150 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         point_mask[row, col] = 1.0
         return point_mask
 
+    def _compare_panel_title_for_index(self, panel: int) -> str:
+        """Return the user-facing label for a compare panel."""
+        if 0 <= panel < len(self.frame_labels) and self.frame_labels[panel]:
+            return str(self.frame_labels[panel])
+        return f"{self.frame_dim_label} {panel + 1}"
+
+    def _resolve_compare_panel_ref(self, panel: int | str) -> int:
+        """Resolve a compare panel index or exact label into a frame index."""
+        if isinstance(panel, bool):
+            raise TypeError("panel must be an integer index or exact label, not bool")
+        if isinstance(panel, int):
+            idx = int(panel)
+            if 0 <= idx < int(self.n_frames):
+                return idx
+            raise ValueError(f"panel index {idx} out of range [0, {self.n_frames})")
+        if isinstance(panel, str):
+            titles = [self._compare_panel_title_for_index(i) for i in range(int(self.n_frames))]
+            matches = [i for i, title in enumerate(titles) if title == panel]
+            if len(matches) == 1:
+                return matches[0]
+            if len(matches) > 1:
+                raise ValueError(
+                    f"panel label {panel!r} is not unique; use a zero-based panel index instead"
+                )
+            available = ", ".join(repr(title) for title in titles)
+            raise ValueError(f"unknown panel label {panel!r}; available labels: {available}")
+        raise TypeError(
+            f"panel must be an integer index or exact label, got {type(panel).__name__}"
+        )
+
+    def _normalize_compare_panel_refs(
+        self,
+        panels: Sequence[int | str] | int | str,
+        *,
+        allow_empty: bool = False,
+    ) -> list[int]:
+        """Resolve and de-duplicate compare panel references."""
+        if isinstance(panels, (str, int)) and not isinstance(panels, bool):
+            values: Sequence[int | str] = [panels]
+        else:
+            values = panels  # type: ignore[assignment]
+        out: list[int] = []
+        seen: set[int] = set()
+        for panel in values:
+            idx = self._resolve_compare_panel_ref(panel)
+            if idx not in seen:
+                out.append(idx)
+                seen.add(idx)
+        if not out and not allow_empty:
+            raise ValueError("at least one compare panel index or label is required")
+        return out
+
+    @property
+    def compare_ordered_panels(self) -> list[int]:
+        """Frame/dataset indices in the current compare display order."""
+        order = list(self.compare_panel_order or [])
+        n = int(self.n_frames)
+        if len(order) == n and sorted(order) == list(range(n)):
+            return [int(idx) for idx in order]
+        return list(range(n))
+
+    @property
+    def compare_visible_panels(self) -> list[int]:
+        """Frame/dataset indices currently visible in compare mode."""
+        hidden = {
+            int(idx) for idx in self.compare_hidden_panels
+            if not isinstance(idx, bool) and 0 <= int(idx) < int(self.n_frames)
+        }
+        return [idx for idx in self.compare_ordered_panels if idx not in hidden]
+
+    def set_compare_hidden_panels(self, panels: Sequence[int | str] | int | str) -> Self:
+        """Replace the hidden compare panel set by index or exact label."""
+        hidden = self._normalize_compare_panel_refs(panels, allow_empty=True)
+        if len(hidden) >= int(self.n_frames):
+            raise ValueError("set_compare_hidden_panels would hide every panel; leave at least one visible")
+        self.compare_hidden_panels = sorted(hidden)
+        return self
+
+    def hide_compare_panel(self, *panels: int | str) -> Self:
+        """Hide one or more compare panels by zero-based index or exact label."""
+        to_hide = set(self.compare_hidden_panels)
+        to_hide.update(self._normalize_compare_panel_refs(list(panels)))
+        if len(to_hide) >= int(self.n_frames):
+            raise ValueError("hide_compare_panel would hide every panel; leave at least one visible")
+        self.compare_hidden_panels = sorted(to_hide)
+        return self
+
+    def show_compare_panel(self, *panels: int | str) -> Self:
+        """Restore one or more hidden compare panels by index or exact label."""
+        to_show = set(self._normalize_compare_panel_refs(list(panels)))
+        self.compare_hidden_panels = sorted(set(self.compare_hidden_panels) - to_show)
+        return self
+
+    def show_all_compare_panels(self) -> Self:
+        """Restore every compare panel."""
+        self.compare_hidden_panels = []
+        return self
+
+    def set_compare_panel_order(self, panels: Sequence[int | str]) -> Self:
+        """Set the compare-grid display order by panel index or exact label."""
+        order = self._normalize_compare_panel_refs(panels, allow_empty=True)
+        if not order:
+            self.compare_panel_order = []
+            return self
+        expected = set(range(int(self.n_frames)))
+        if len(order) != int(self.n_frames) or set(order) != expected:
+            raise ValueError("set_compare_panel_order requires every compare panel exactly once")
+        self.compare_panel_order = order
+        return self
+
+    def reset_compare_panel_order(self) -> Self:
+        """Restore the natural compare panel order."""
+        self.compare_panel_order = []
+        return self
+
+    def move_compare_panel(self, panel: int | str, position: int) -> Self:
+        """Move one compare panel to a zero-based display position."""
+        idx = self._resolve_compare_panel_ref(panel)
+        order = self.compare_ordered_panels
+        order.remove(idx)
+        pos = max(0, min(int(position), len(order)))
+        order.insert(pos, idx)
+        self.compare_panel_order = order
+        return self
+
+    def set_compare_starred_panels(self, panels: Sequence[int | str] | int | str) -> Self:
+        """Replace the set of starred compare panels by index or exact label."""
+        self.compare_starred_panels = sorted(
+            self._normalize_compare_panel_refs(panels, allow_empty=True)
+        )
+        return self
+
+    def star_compare_panel(self, panel: int | str) -> Self:
+        """Mark a compare panel with a star."""
+        idx = self._resolve_compare_panel_ref(panel)
+        self.compare_starred_panels = sorted(set(self.compare_starred_panels) | {idx})
+        return self
+
+    def unstar_compare_panel(self, panel: int | str) -> Self:
+        """Clear the star on a compare panel."""
+        idx = self._resolve_compare_panel_ref(panel)
+        self.compare_starred_panels = sorted(set(self.compare_starred_panels) - {idx})
+        return self
+
     def _clear_compare_virtual_images(self) -> None:
         with self.hold_trait_notifications():
             self.compare_virtual_image_bytes = b""
@@ -3377,12 +3605,26 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         data = getattr(self, "_data", None)
         datasets = getattr(data, "datasets", None)
         if datasets is not None:
-            return [
+            ready = [
                 idx
                 for idx, dataset in enumerate(list(datasets))
                 if dataset is not None
-            ][:max_panels]
-        return list(range(min(int(self.n_frames), max_panels)))
+            ]
+        else:
+            ready = list(range(int(self.n_frames)))
+        ready_set = set(ready)
+        ordered_ready = [idx for idx in self.compare_ordered_panels if idx in ready_set]
+        hidden = {
+            int(idx) for idx in self.compare_hidden_panels
+            if not isinstance(idx, bool) and 0 <= int(idx) < int(self.n_frames)
+        }
+        visible = [idx for idx in ordered_ready if idx not in hidden]
+        if not visible and ordered_ready:
+            # Frontend/state load should not be able to leave compare mode blank.
+            keep = ordered_ready[0]
+            self.compare_hidden_panels = sorted(idx for idx in hidden if idx != keep)
+            visible = [keep]
+        return visible[:max_panels]
 
     def _virtual_image_for_chunked_dataset(self, dataset, mask) -> np.ndarray:
         """Compute one compare tile for a chunked MPS dataset slot."""

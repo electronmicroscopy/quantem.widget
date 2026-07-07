@@ -19,6 +19,10 @@ import FastRewindIcon from "@mui/icons-material/FastRewind";
 import FastForwardIcon from "@mui/icons-material/FastForward";
 import KeyboardArrowDownIcon from "@mui/icons-material/KeyboardArrowDown";
 import KeyboardArrowUpIcon from "@mui/icons-material/KeyboardArrowUp";
+import DragIndicatorIcon from "@mui/icons-material/DragIndicator";
+import StarIcon from "@mui/icons-material/Star";
+import StarBorderIcon from "@mui/icons-material/StarBorder";
+import VisibilityOffIcon from "@mui/icons-material/VisibilityOff";
 import { useTheme } from "../theme";
 import { COLORMAPS, applyColormap } from "../colormaps";
 import { WebGPUFFT, getWebGPUFFT, fft2d, fftshift, autoEnhanceFFT, nextPow2, applyHannWindow2D } from "../fft";
@@ -1200,7 +1204,18 @@ interface CompareVirtualGridProps {
   cursorCol: number;
   status: string;
   themeColors: ReturnType<typeof useTheme>["colors"];
+  panelOrder: number[];
+  hidden: number[];
+  starred: number[];
+  reorderMode: boolean;
+  draggingFrame: number | null;
+  pendingMoveFrame: number | null;
   onSelect: (idx: number) => void;
+  onToggleStar: (idx: number) => void;
+  onHide: (idx: number) => void;
+  onReorderFrame: (dragFrame: number, targetFrame: number) => void;
+  onDragFrameChange: (idx: number | null) => void;
+  onPendingMoveFrameChange: (idx: number | null) => void;
 }
 
 function CompareVirtualGrid({
@@ -1222,7 +1237,18 @@ function CompareVirtualGrid({
   cursorCol,
   status,
   themeColors,
+  panelOrder,
+  hidden,
+  starred,
+  reorderMode,
+  draggingFrame,
+  pendingMoveFrame,
   onSelect,
+  onToggleStar,
+  onHide,
+  onReorderFrame,
+  onDragFrameChange,
+  onPendingMoveFrameChange,
 }: CompareVirtualGridProps) {
   const canvasRefs = React.useRef<(HTMLCanvasElement | null)[]>([]);
   const panelPixels = Math.max(1, shapeRows * shapeCols);
@@ -1236,10 +1262,63 @@ function CompareVirtualGrid({
       return raw.slice(start, start + panelPixels);
     });
   }, [bytes, count, panelPixels]);
+  const [previewIndices, setPreviewIndices] = React.useState<number[] | null>(null);
+  const panelByFrame = React.useMemo(() => {
+    const out = new Map<number, Float32Array>();
+    (indices || []).forEach((frame, idx) => {
+      const panel = panels[idx];
+      if (panel) out.set(frame, panel);
+    });
+    return out;
+  }, [indices, panels]);
+  const displayIndices = React.useMemo(() => {
+    const available = new Set(indices || []);
+    const hiddenSet = new Set((hidden || []).filter((idx) => Number.isInteger(idx) && available.has(idx)));
+    const ordered: number[] = [];
+    const seen = new Set<number>();
+    (panelOrder || []).forEach((idx) => {
+      if (available.has(idx) && !hiddenSet.has(idx) && !seen.has(idx)) {
+        ordered.push(idx);
+        seen.add(idx);
+      }
+    });
+    (indices || []).forEach((idx) => {
+      if (!hiddenSet.has(idx) && !seen.has(idx)) ordered.push(idx);
+    });
+    return ordered;
+  }, [hidden, indices, panelOrder]);
+  const orderKey = displayIndices.join("|");
+
+  React.useEffect(() => {
+    setPreviewIndices(null);
+  }, [orderKey, reorderMode]);
+
+  const renderIndices = (
+    reorderMode && previewIndices && previewIndices.length === displayIndices.length
+      ? previewIndices
+      : displayIndices
+  );
+  const renderEntries = React.useMemo(() => {
+    return (renderIndices || [])
+      .map((frame) => ({ frame, panel: panelByFrame.get(frame) }))
+      .filter((entry): entry is { frame: number; panel: Float32Array } => entry.panel !== undefined);
+  }, [panelByFrame, renderIndices]);
+
+  const movePreviewFrame = React.useCallback((dragFrame: number, targetFrame: number) => {
+    if (dragFrame === targetFrame) return;
+    setPreviewIndices((current) => {
+      const base = current && current.length === displayIndices.length ? current : [...displayIndices];
+      if (!base.includes(dragFrame) || !base.includes(targetFrame)) return base;
+      const next = base.filter((frame) => frame !== dragFrame);
+      const targetPos = next.indexOf(targetFrame);
+      next.splice(targetPos < 0 ? next.length : targetPos, 0, dragFrame);
+      return next;
+    });
+  }, [displayIndices]);
 
   React.useEffect(() => {
     const lut = COLORMAPS[colormap] || COLORMAPS.inferno;
-    panels.forEach((panel, idx) => {
+    renderEntries.forEach(({ panel }, idx) => {
       const canvas = canvasRefs.current[idx];
       if (!canvas) return;
       if (canvas.width !== shapeCols) canvas.width = shapeCols;
@@ -1268,16 +1347,17 @@ function CompareVirtualGrid({
       applyColormap(scaled, imageData.data, lut, vmin, vmax);
       ctx.putImageData(imageData, 0, 0);
     });
-  }, [autoContrast, colormap, panels, scaleMode, shapeCols, shapeRows, smooth, vmaxPct, vminPct]);
+  }, [autoContrast, colormap, renderEntries, scaleMode, shapeCols, shapeRows, smooth, vmaxPct, vminPct]);
 
-  const gridCols = Math.max(
-    1,
-    cols > 0 ? cols : Math.min(count || 1, count >= 8 ? 4 : count >= 5 ? 3 : count >= 2 ? 2 : 1),
-  );
+  const displayCount = Math.max(1, renderEntries.length);
+  const autoCols = displayCount >= 8 ? 4 : displayCount >= 5 ? 3 : displayCount >= 2 ? 2 : 1;
+  const requestedMaxCols = cols > 0 ? Math.max(1, Math.floor(cols)) : autoCols;
+  const gridCols = Math.max(1, Math.min(displayCount, requestedMaxCols));
+  const mobileGridCols = Math.max(1, Math.min(gridCols, 2));
   const markerLeft = `${((Math.max(0, Math.min(shapeCols - 1, cursorCol)) + 0.5) / Math.max(1, shapeCols)) * 100}%`;
   const markerTop = `${((Math.max(0, Math.min(shapeRows - 1, cursorRow)) + 0.5) / Math.max(1, shapeRows)) * 100}%`;
 
-  if (panels.length === 0) {
+  if (renderEntries.length === 0) {
     return (
       <Box sx={{ border: `1px solid ${themeColors.border}`, bgcolor: themeColors.bgAlt, px: 1, py: 2 }}>
         <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>
@@ -1301,35 +1381,98 @@ function CompareVirtualGrid({
           gap: "6px",
           maxWidth: "100%",
           "@media (max-width: 700px)": {
-            gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+            gridTemplateColumns: `repeat(${mobileGridCols}, minmax(0, 1fr))`,
             gap: "4px",
           },
         }}
       >
-        {panels.map((_, localIdx) => {
-          const frame = indices[localIdx] ?? localIdx;
+        {renderEntries.map(({ frame }, localIdx) => {
           const active = frame === activeIdx;
           const label = labels && labels.length > frame ? labels[frame] : `Dataset ${frame + 1}`;
+          const isStarred = (starred || []).includes(frame);
+          const isDragging = draggingFrame === frame;
+          const isPendingMove = pendingMoveFrame === frame;
           return (
             <Box
               key={`${frame}-${localIdx}`}
               role="button"
               aria-label={`Show4DSTEM compare panel ${frame + 1}`}
               tabIndex={0}
-              onClick={() => onSelect(frame)}
+              draggable={reorderMode}
+              onClick={() => {
+                if (!reorderMode) {
+                  onSelect(frame);
+                  return;
+                }
+                if (pendingMoveFrame == null) {
+                  onPendingMoveFrameChange(frame);
+                  return;
+                }
+                if (pendingMoveFrame === frame) {
+                  onPendingMoveFrameChange(null);
+                  return;
+                }
+                onReorderFrame(pendingMoveFrame, frame);
+                onPendingMoveFrameChange(null);
+              }}
               onKeyDown={(event) => {
                 if (event.key === "Enter" || event.key === " ") {
                   event.preventDefault();
-                  onSelect(frame);
+                  if (reorderMode) {
+                    if (pendingMoveFrame == null) {
+                      onPendingMoveFrameChange(frame);
+                    } else if (pendingMoveFrame === frame) {
+                      onPendingMoveFrameChange(null);
+                    } else {
+                      onReorderFrame(pendingMoveFrame, frame);
+                      onPendingMoveFrameChange(null);
+                    }
+                  } else {
+                    onSelect(frame);
+                  }
                 }
+              }}
+              onDragStart={(event) => {
+                if (!reorderMode) return;
+                event.dataTransfer.effectAllowed = "move";
+                event.dataTransfer.setData("text/plain", String(frame));
+                setPreviewIndices([...displayIndices]);
+                onDragFrameChange(frame);
+              }}
+              onDragEnter={(event) => {
+                if (!reorderMode || draggingFrame == null || draggingFrame === frame) return;
+                event.preventDefault();
+                movePreviewFrame(draggingFrame, frame);
+              }}
+              onDragOver={(event) => {
+                if (!reorderMode) return;
+                event.preventDefault();
+                event.dataTransfer.dropEffect = "move";
+              }}
+              onDrop={(event) => {
+                if (!reorderMode) return;
+                event.preventDefault();
+                const rawFrame = event.dataTransfer.getData("text/plain");
+                const dragFrame = rawFrame ? Number(rawFrame) : draggingFrame;
+                if (typeof dragFrame === "number" && Number.isInteger(dragFrame) && dragFrame !== frame) {
+                  onReorderFrame(dragFrame, frame);
+                }
+                setPreviewIndices(null);
+                onDragFrameChange(null);
+                onPendingMoveFrameChange(null);
+              }}
+              onDragEnd={() => {
+                setPreviewIndices(null);
+                onDragFrameChange(null);
               }}
               sx={{
                 position: "relative",
                 bgcolor: "#000",
-                border: `2px solid ${active ? themeColors.accent : themeColors.border}`,
+                border: `2px solid ${isPendingMove ? "#facc15" : active ? themeColors.accent : themeColors.border}`,
                 outline: "none",
-                cursor: "pointer",
+                cursor: reorderMode ? "grab" : "pointer",
                 overflow: "hidden",
+                opacity: isDragging ? 0.45 : 1,
                 aspectRatio: `${shapeCols} / ${shapeRows}`,
                 "&:focus-visible": { borderColor: themeColors.accent },
               }}
@@ -1380,6 +1523,53 @@ function CompareVirtualGrid({
                 title={label}
               >
                 {label}
+              </Box>
+              <Box
+                sx={{
+                  position: "absolute",
+                  top: 2,
+                  right: 2,
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "2px",
+                  bgcolor: "rgba(0,0,0,0.42)",
+                  borderRadius: "4px",
+                  pointerEvents: "auto",
+                }}
+              >
+                {reorderMode && (
+                  <DragIndicatorIcon sx={{ fontSize: 15, color: "rgba(255,255,255,0.82)", mx: 0.2 }} />
+                )}
+                <Tooltip title={isStarred ? "Unstar" : "Star"}>
+                  <IconButton
+                    size="small"
+                    aria-label={`${isStarred ? "Unstar" : "Star"} Show4DSTEM compare panel ${frame + 1}`}
+                    className="show4dstem-compare-star"
+                    data-frame={frame}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      onToggleStar(frame);
+                    }}
+                    sx={{ p: 0.2, color: isStarred ? "#facc15" : "rgba(255,255,255,0.82)" }}
+                  >
+                    {isStarred ? <StarIcon sx={{ fontSize: 15 }} /> : <StarBorderIcon sx={{ fontSize: 15 }} />}
+                  </IconButton>
+                </Tooltip>
+                <Tooltip title="Hide">
+                  <IconButton
+                    size="small"
+                    aria-label={`Hide Show4DSTEM compare panel ${frame + 1}`}
+                    className="show4dstem-compare-hide"
+                    data-frame={frame}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      if (renderEntries.length > 1) onHide(frame);
+                    }}
+                    sx={{ p: 0.2, color: renderEntries.length > 1 ? "rgba(255,255,255,0.82)" : "rgba(255,255,255,0.3)" }}
+                  >
+                    <VisibilityOffIcon sx={{ fontSize: 15 }} />
+                  </IconButton>
+                </Tooltip>
               </Box>
             </Box>
           );
@@ -1464,6 +1654,10 @@ function Show4DSTEM() {
   const [comparePanelCount] = useModelState<number>("compare_panel_count");
   const [comparePanelIndices] = useModelState<number[]>("compare_panel_indices");
   const [compareStatus] = useModelState<string>("compare_status");
+  const [compareDpMode, setCompareDpMode] = useModelState<string>("compare_dp_mode");
+  const [comparePanelOrder, setComparePanelOrder] = useModelState<number[]>("compare_panel_order");
+  const [compareHiddenPanels, setCompareHiddenPanels] = useModelState<number[]>("compare_hidden_panels");
+  const [compareStarredPanels, setCompareStarredPanels] = useModelState<number[]>("compare_starred_panels");
 
   // Profile line state (synced with Python)
   const [profileLine, setProfileLine] = useModelState<{row: number; col: number}[]>("profile_line");
@@ -1930,10 +2124,70 @@ function Show4DSTEM() {
   const [mobileDpOptionsOpen, setMobileDpOptionsOpen] = React.useState(false);
   const [mobileViOptionsOpen, setMobileViOptionsOpen] = React.useState(false);
   const [mobileFftOptionsOpen, setMobileFftOptionsOpen] = React.useState(false);
+  const [compareReorderMode, setCompareReorderMode] = React.useState(false);
+  const [compareDraggingFrame, setCompareDraggingFrame] = React.useState<number | null>(null);
+  const [comparePendingMoveFrame, setComparePendingMoveFrame] = React.useState<number | null>(null);
   const [panelWidthPx, setPanelWidthPx] = useModelState<number>("panel_width_px");
 
   const effectiveShowFft = showFft;
   const compareMode = viewMode === "compare" && nFrames > 1;
+  React.useEffect(() => {
+    if (!compareMode) {
+      setCompareReorderMode(false);
+      setCompareDraggingFrame(null);
+      setComparePendingMoveFrame(null);
+    }
+  }, [compareMode]);
+  const compareHiddenCount = React.useMemo(() => {
+    const seen = new Set<number>();
+    (compareHiddenPanels || []).forEach((idx) => {
+      if (Number.isInteger(idx) && idx >= 0 && idx < nFrames) seen.add(idx);
+    });
+    return seen.size;
+  }, [compareHiddenPanels, nFrames]);
+  const normalizedCompareOrder = React.useCallback(() => {
+    const natural = Array.from({ length: Math.max(0, nFrames) }, (_, idx) => idx);
+    const order = Array.isArray(comparePanelOrder) ? comparePanelOrder : [];
+    if (order.length !== nFrames) return natural;
+    const seen = new Set<number>();
+    for (const idx of order) {
+      if (!Number.isInteger(idx) || idx < 0 || idx >= nFrames || seen.has(idx)) return natural;
+      seen.add(idx);
+    }
+    return [...order];
+  }, [comparePanelOrder, nFrames]);
+  const moveCompareFrame = React.useCallback((dragFrame: number, targetFrame: number) => {
+    if (!Number.isInteger(dragFrame) || !Number.isInteger(targetFrame) || dragFrame === targetFrame) return;
+    const order = normalizedCompareOrder();
+    if (!order.includes(dragFrame) || !order.includes(targetFrame)) return;
+    const next = order.filter((idx) => idx !== dragFrame);
+    const targetPos = next.indexOf(targetFrame);
+    next.splice(targetPos < 0 ? next.length : targetPos, 0, dragFrame);
+    setComparePanelOrder(next);
+    setFramePlaying(false);
+  }, [normalizedCompareOrder, setComparePanelOrder, setFramePlaying]);
+  const toggleCompareStar = React.useCallback((frame: number) => {
+    if (!Number.isInteger(frame) || frame < 0 || frame >= nFrames) return;
+    const next = new Set<number>((compareStarredPanels || []).filter((idx) => Number.isInteger(idx) && idx >= 0 && idx < nFrames));
+    if (next.has(frame)) next.delete(frame);
+    else next.add(frame);
+    setCompareStarredPanels([...next].sort((a, b) => a - b));
+  }, [compareStarredPanels, nFrames, setCompareStarredPanels]);
+  const hideCompareFrame = React.useCallback((frame: number) => {
+    if (!Number.isInteger(frame) || frame < 0 || frame >= nFrames) return;
+    const next = new Set<number>((compareHiddenPanels || []).filter((idx) => Number.isInteger(idx) && idx >= 0 && idx < nFrames));
+    if (next.size >= Math.max(0, nFrames - 1) && !next.has(frame)) return;
+    next.add(frame);
+    if (next.size < nFrames) setCompareHiddenPanels([...next].sort((a, b) => a - b));
+    if (comparePendingMoveFrame === frame) setComparePendingMoveFrame(null);
+  }, [compareHiddenPanels, comparePendingMoveFrame, nFrames, setCompareHiddenPanels]);
+  const resetComparePanelState = React.useCallback(() => {
+    setComparePanelOrder([]);
+    setCompareHiddenPanels([]);
+    setCompareStarredPanels([]);
+    setComparePendingMoveFrame(null);
+    setCompareDraggingFrame(null);
+  }, [setCompareHiddenPanels, setComparePanelOrder, setCompareStarredPanels]);
 
   // ROI FFT state (VI ROI crops virtual image for FFT)
   const [fftCropDims, setFftCropDims] = React.useState<{ cropWidth: number; cropHeight: number; fftWidth: number; fftHeight: number } | null>(null);
@@ -5056,10 +5310,21 @@ function Show4DSTEM() {
               cursorCol={localPosCol}
               status={compareStatus}
               themeColors={themeColors}
+              panelOrder={comparePanelOrder || []}
+              hidden={compareHiddenPanels || []}
+              starred={compareStarredPanels || []}
+              reorderMode={compareReorderMode}
+              draggingFrame={compareDraggingFrame}
+              pendingMoveFrame={comparePendingMoveFrame}
               onSelect={(idx) => {
                 setFramePlaying(false);
                 setFrameIdx(Math.max(0, Math.min(nFrames - 1, idx)));
               }}
+              onToggleStar={toggleCompareStar}
+              onHide={hideCompareFrame}
+              onReorderFrame={moveCompareFrame}
+              onDragFrameChange={setCompareDraggingFrame}
+              onPendingMoveFrameChange={setComparePendingMoveFrame}
             />
           ) : (
             <Box sx={{ ...container.imageBox, width: "100%", maxWidth: viCanvasWidth, aspectRatio: `${shapeCols} / ${shapeRows}`, height: "auto", touchAction: "none" }}>
@@ -5352,6 +5617,18 @@ function Show4DSTEM() {
           </Select>
           {compareMode && (
             <>
+              <Typography sx={{ ...typo.label, fontSize: 10, flexShrink: 0 }}>DP</Typography>
+              <Select
+                value={compareDpMode || "average"}
+                onChange={(e) => setCompareDpMode(String(e.target.value))}
+                size="small"
+                inputProps={{ "aria-label": "Show4DSTEM compare DP source" }}
+                sx={{ ...themedSelect, minWidth: 82, fontSize: 10 }}
+                MenuProps={themedMenuProps}
+              >
+                <MenuItem value="average">Average</MenuItem>
+                <MenuItem value="selected">Selected</MenuItem>
+              </Select>
               <Typography sx={{ ...typo.label, fontSize: 10, flexShrink: 0 }}>Cols</Typography>
               <Select
                 value={compareCols || 0}
@@ -5367,6 +5644,44 @@ function Show4DSTEM() {
                 <MenuItem value={4}>4</MenuItem>
                 <MenuItem value={5}>5</MenuItem>
               </Select>
+              <Tooltip title={compareReorderMode ? "Finish reordering" : "Reorder compare panels"}>
+                <IconButton
+                  size="small"
+                  aria-label="Show4DSTEM compare reorder"
+                  className="show4dstem-compare-reorder"
+                  onClick={() => {
+                    setCompareReorderMode((value) => !value);
+                    setComparePendingMoveFrame(null);
+                    setCompareDraggingFrame(null);
+                  }}
+                  sx={{ color: compareReorderMode ? themeColors.accent : themeColors.textMuted, p: 0.25 }}
+                >
+                  <DragIndicatorIcon sx={{ fontSize: 17 }} />
+                </IconButton>
+              </Tooltip>
+              {compareHiddenCount > 0 && (
+                <Button
+                  size="small"
+                  sx={compactButton}
+                  className="show4dstem-compare-show-all"
+                  onClick={() => setCompareHiddenPanels([])}
+                >
+                  Show all
+                </Button>
+              )}
+              <Button
+                size="small"
+                sx={compactButton}
+                className="show4dstem-compare-reset"
+                disabled={
+                  !(comparePanelOrder || []).length
+                  && !(compareHiddenPanels || []).length
+                  && !(compareStarredPanels || []).length
+                }
+                onClick={resetComparePanelState}
+              >
+                Reset
+              </Button>
             </>
           )}
           <Typography sx={{ ...typo.label, fontSize: 10, flexShrink: 0 }}>{frameDimLabel}:</Typography>
