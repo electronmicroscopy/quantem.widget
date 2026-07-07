@@ -190,9 +190,14 @@ def test_update_data_transfer_plan_appends_without_moving_existing_targets(
     assert updated.total_bytes == 110
 
 
-def test_data_transfer_widget_can_copy_only_pending(monkeypatch, tmp_path: Path) -> None:
-    from quantem.widget import DataTransfer
+def test_data_transfer_core_can_copy_only_pending(monkeypatch, tmp_path: Path) -> None:
     from quantem.widget.io import hdf5
+    from quantem.widget.io.data_transfer import (
+        copy_data_transfer,
+        filter_data_transfer_plan,
+        inspect_data_transfer,
+        plan_data_transfer,
+    )
 
     source = tmp_path / "source"
     target = tmp_path / "target"
@@ -202,38 +207,50 @@ def test_data_transfer_widget_can_copy_only_pending(monkeypatch, tmp_path: Path)
     monkeypatch.setattr(hdf5, "disk_of", lambda path: "disk")
     monkeypatch.setattr(hdf5, "is_master_ready", lambda path: True)
 
-    transfer = DataTransfer(source, [target])
-    first_entry = transfer.plan.entries[0]
+    plan = plan_data_transfer(source, [target])
+    first_entry = plan.entries[0]
     first_master = Path(first_entry.target_master)
     first_master.parent.mkdir(parents=True, exist_ok=True)
     first_master.write_bytes(Path(first_entry.master).read_bytes())
     first_sidecar = Path(first_entry.target_files[1])
     first_sidecar.with_name(f"{first_sidecar.name}.partial").write_bytes(b"partial")
 
-    dry = transfer.copy_pending(dry_run=True)
+    pending_plan = filter_data_transfer_plan(
+        plan,
+        statuses=("not-started", "partial"),
+    )
+    dry = copy_data_transfer(pending_plan, dry_run=True)
     assert {Path(result.target).name for result in dry} == {
         "scan_000_data_000001.h5",
         "scan_001_master.h5",
         "scan_001_data_000001.h5",
     }
-    assert {state.status for state in transfer.inspect()} == {
+    assert {state.status for state in inspect_data_transfer(plan)} == {
         "exists",
         "partial",
         "not-started",
     }
 
-    copied = transfer.copy_pending(dry_run=False)
+    copied = copy_data_transfer(pending_plan, dry_run=False)
     assert {result.status for result in copied} == {"copied"}
-    assert {state.status for state in transfer.inspect()} == {"exists"}
+    assert {state.status for state in inspect_data_transfer(plan)} == {"exists"}
     assert not list(target.glob("*.partial"))
 
 
-def test_data_transfer_widget_rescans_and_renders_session_panels(
+def test_data_transfer_ui_is_not_public_api() -> None:
+    import quantem.widget as qw
+
+    assert not hasattr(qw, "DataTransfer")
+    with pytest.raises(ModuleNotFoundError):
+        __import__("quantem.widget.data_transfer")
+
+
+def test_data_transfer_core_rescans_without_widget(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    from quantem.widget import DataTransfer
     from quantem.widget.io import hdf5
+    from quantem.widget.io.data_transfer import plan_data_transfer, update_data_transfer_plan
 
     source = tmp_path / "source"
     target_a = tmp_path / "target-a"
@@ -245,16 +262,14 @@ def test_data_transfer_widget_rescans_and_renders_session_panels(
     monkeypatch.setattr(hdf5, "disk_of", lambda path: "disk")
     monkeypatch.setattr(hdf5, "is_master_ready", lambda path: True)
 
-    transfer = DataTransfer(source, [target_a, target_b], strategy="round-robin")
+    plan = plan_data_transfer(source, [target_a, target_b], strategy="round-robin")
     _master(source, "scan_001", 20)
 
-    assert transfer.rescan() == 1
-    assert [entry.logical_id for entry in transfer.plan.entries] == ["scan_000", "scan_001"]
-    assert "Backend" in transfer._backend.value
-    assert "Datasets" in transfer._datasets.value
-    assert "Last action" in transfer._perf_panel.value
-    assert "scan_001" in transfer._datasets.value
-    assert "open_show4dstem" in transfer._summary.value
+    updated = update_data_transfer_plan(plan)
+
+    assert [entry.logical_id for entry in updated.entries] == ["scan_000", "scan_001"]
+    assert updated.entries[0].target_root == str(target_a)
+    assert updated.entries[1].target_root == str(target_b)
 
 
 def test_copy_data_transfer_refuses_different_existing_target(monkeypatch, tmp_path: Path) -> None:

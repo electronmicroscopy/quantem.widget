@@ -155,21 +155,29 @@ class ShowFolder:
             raise ValueError("No folder has been browsed yet.")
         return self.browser.show_selected_stack()
 
-    def data_transfer(
-        self,
-        targets: list[str | Path] | tuple[str | Path, ...],
-        **kwargs: Any,
-    ):
-        """Create a DataTransfer review widget for this folder.
-
-        ShowFolder remains read-only browsing; DataTransfer owns the explicit
-        copy/verify/manifest workflow.
-        """
-        if self.folder is None:
+    def show_all_as_show2d(self):
+        """Return all readable folder images as a Show2D preview gallery."""
+        if self.browser is None:
             raise ValueError("No folder has been browsed yet.")
-        from quantem.widget.data_transfer import DataTransfer
+        return self.browser.show_all_as_show2d()
 
-        return DataTransfer(self.folder, targets, **kwargs)
+    def show_all_as_show3d_stack(self):
+        """Return all readable folder images as a Show3D frame stack."""
+        if self.browser is None:
+            raise ValueError("No folder has been browsed yet.")
+        return self.browser.show_all_as_show3d_stack()
+
+    def open_show2d(self, *, all_images: bool = False):
+        """Open a live Show2D viewer in the attached selection panel."""
+        if self.browser is None:
+            raise ValueError("No folder has been browsed yet.")
+        return self.browser.open_show2d(all_images=all_images)
+
+    def open_show3d(self, *, all_images: bool = False):
+        """Open a live Show3D viewer in the attached selection panel."""
+        if self.browser is None:
+            raise ValueError("No folder has been browsed yet.")
+        return self.browser.open_show3d(all_images=all_images)
 
     def watch(
         self,

@@ -97,6 +97,24 @@ def test_show_folder_opens_selected_images_as_show2d_and_show3d(tmp_path: Path) 
     assert [label.split(" | ", 1)[0] for label in selected_3d.labels] == ["0010", "0012"]
 
 
+def test_show_folder_opens_all_images_as_live_show2d_and_show3d(tmp_path: Path) -> None:
+    _image_emd(tmp_path / "0010 - HAADF 15Mx Nano.emd")
+    _image_emd(tmp_path / "0011 - HAADF 15Mx Nano.emd")
+
+    widget = ShowFolder(tmp_path, thumb=8, group_by="none")
+    assert widget.browser is not None
+
+    all_2d = widget.show_all_as_show2d()
+    all_3d = widget.show_all_as_show3d_stack()
+
+    assert all_2d.__class__.__name__ == "Show2D"
+    assert all_3d.__class__.__name__ == "Show3D"
+    assert all_2d._data.shape[0] == 2
+    assert all_3d.n_slices == 2
+    assert [label.split(" | ", 1)[0] for label in all_2d.labels] == ["0010", "0011"]
+    assert [label.split(" | ", 1)[0] for label in all_3d.labels] == ["0010", "0011"]
+
+
 def test_show_folder_renders_master_only_folder_for_show4dstem(tmp_path: Path) -> None:
     (tmp_path / "scan_000_master.h5").touch()
     (tmp_path / "scan_001_master.h5").touch()
@@ -109,27 +127,6 @@ def test_show_folder_renders_master_only_folder_for_show4dstem(tmp_path: Path) -
     assert widget.browser.gallery is None
     assert widget.browser.selection_panel is not None
     assert "4D-STEM master" in widget.browser.widget.children[0].value
-
-
-def test_show_folder_launches_data_transfer_without_copying(tmp_path: Path, monkeypatch) -> None:
-    import quantem.widget.io.hdf5 as hdf5
-    from quantem.widget import DataTransfer
-
-    (tmp_path / "scan_000_master.h5").write_bytes(b"master")
-    target = tmp_path / "target"
-    target.mkdir()
-
-    monkeypatch.setattr(hdf5, "disk_of", lambda path: "disk")
-    monkeypatch.setattr(hdf5, "is_master_ready", lambda path: True)
-
-    widget = ShowFolder(tmp_path, thumb=8, group_by="none")
-    transfer = widget.data_transfer([target])
-
-    assert isinstance(transfer, DataTransfer)
-    assert transfer.plan.source_root == str(tmp_path.resolve())
-    assert transfer.plan.target_roots == (str(target),)
-    assert [entry.logical_id for entry in transfer.plan.entries] == ["scan_000"]
-    assert not (target / "scan_000_master.h5").exists()
 
 
 def test_show_folder_watch_signature_tracks_4dstem_masters(tmp_path: Path) -> None:
@@ -249,6 +246,40 @@ def test_show_folder_watch_once_adds_and_removes_files_in_place(tmp_path: Path) 
     payload = json.loads(manifest.read_text())
     cached_rel_paths = [entry["relative_path"] for entry in payload["entries"]]
     assert cached_rel_paths == [img1.name, img2.name]
+
+
+def test_show_folder_watch_once_appends_all_image_viewers_in_place(tmp_path: Path) -> None:
+    img0 = tmp_path / "0010 - HAADF 15Mx Nano.emd"
+    img1 = tmp_path / "0011 - HAADF 15Mx Nano.emd"
+    _image_emd(img0)
+    _image_emd(img1)
+
+    widget = ShowFolder(
+        tmp_path,
+        thumb=8,
+        group_by="none",
+        cache_dir=tmp_path / "cache",
+    )
+    assert widget.browser is not None
+    all_2d = widget.open_show2d(all_images=True)
+    all_3d = widget.open_show3d(all_images=True)
+    widget.browser._active_selected_modes = {"show2d_all", "show3d_all"}
+    widget.browser._selected_show2d_widget = all_2d
+    widget.browser._selected_show3d_widget = all_3d
+    assert all_2d._data.shape[0] == 2
+    assert all_3d.n_slices == 2
+
+    widget.watch(start=False)
+    img2 = tmp_path / "0012 - HAADF 15Mx Nano.emd"
+    _image_emd(img2)
+
+    assert widget.watch_once() is True
+    assert widget.browser._selected_show2d_widget is all_2d
+    assert widget.browser._selected_show3d_widget is all_3d
+    assert all_2d._data.shape[0] == 3
+    assert all_3d.n_slices == 3
+    assert [label.split(" | ", 1)[0] for label in all_2d.labels] == ["0010", "0011", "0012"]
+    assert [label.split(" | ", 1)[0] for label in all_3d.labels] == ["0010", "0011", "0012"]
 
 
 def test_show_folder_cache_invalidates_changed_file(tmp_path: Path, monkeypatch) -> None:

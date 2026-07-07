@@ -183,6 +183,19 @@ class ShowFolderBrowser:
                         selected[item.file_id] = item
         return [item for item in self.items if item.file_id in selected and not item.is_eds and item.error is None]
 
+    def all_image_items(self) -> list[SurveyItem]:
+        """Return every readable image item in display order."""
+        available_ids = {
+            item.file_id
+            for _gallery, image_items in self.image_galleries
+            for item in image_items
+        }
+        return [
+            item
+            for item in self.items
+            if item.file_id in available_ids and not item.is_eds and item.error is None
+        ]
+
     def selected(self, kind: str | None = None) -> list[SurveyItem]:
         """Return selected image items, optionally filtered by ``"image"``."""
         if kind is None:
@@ -362,15 +375,17 @@ class ShowFolderBrowser:
         self._refresh_selection_panel()
         return self
 
-    def _selected_preview_frames(self) -> tuple[np.ndarray | None, list[str], list[float], str]:
-        selected = self.selected_image_items()
-        if not selected:
+    def _preview_frames_for_items(
+        self,
+        items: list[SurveyItem],
+    ) -> tuple[np.ndarray | None, list[str], list[float], str]:
+        if not items:
             return None, [], [], "pixels"
         frames = []
         labels = []
         pixel_sizes_out = []
         pixel_unit = "pixels"
-        for item in selected:
+        for item in items:
             for gallery, image_items in self.image_galleries:
                 if item in image_items:
                     idx = image_items.index(item)
@@ -392,23 +407,72 @@ class ShowFolderBrowser:
         data = np.stack(frames).astype(np.float32, copy=False)
         return data, labels, pixel_sizes_out, pixel_unit
 
-    def show_selected(self):
-        """Return a compact Show2D gallery containing only starred image panels."""
-        from ipywidgets import HTML
+    def _selected_preview_frames(self) -> tuple[np.ndarray | None, list[str], list[float], str]:
+        return self._preview_frames_for_items(self.selected_image_items())
+
+    def _all_preview_frames(self) -> tuple[np.ndarray | None, list[str], list[float], str]:
+        return self._preview_frames_for_items(self.all_image_items())
+
+    def _source_gallery(self):
+        if self.gallery is not None:
+            return self.gallery
+        if self.image_galleries:
+            return self.image_galleries[0][0]
+        return None
+
+    def _make_show2d_from_frames(
+        self,
+        data: np.ndarray,
+        labels: list[str],
+        *,
+        title: str,
+    ):
         from quantem.widget import Show2D
 
-        data, labels, pixel_sizes_out, pixel_unit = self._selected_preview_frames()
-        if data is None:
-            return HTML("<p><b>No starred image panels yet.</b></p>")
-        source_gallery = self.gallery
-        widget = Show2D(
+        source_gallery = self._source_gallery()
+        return Show2D(
             data,
             labels=labels,
-            title="Selected ShowFolder images",
+            title=title,
             gallery_gap_px=getattr(source_gallery, "gallery_gap_px", 2),
             panel_title_font_size=getattr(source_gallery, "panel_title_font_size", 9),
             save_state=False,
         )
+
+    def _make_show3d_from_frames(
+        self,
+        data: np.ndarray,
+        labels: list[str],
+        *,
+        title: str,
+    ):
+        from quantem.widget import Show3D
+
+        return Show3D(
+            data,
+            labels=labels,
+            title=title,
+            cmap="inferno",
+            smooth=False,
+            show_controls=True,
+            show_stats=True,
+            show_fft=False,
+            dim_label="Image",
+            panel_width_px=420,
+            panel_title_font_size=10,
+            panel_gap=4,
+            show_panel_titles=True,
+            save_state=False,
+        )
+
+    def show_selected(self):
+        """Return a compact Show2D gallery containing only starred image panels."""
+        from ipywidgets import HTML
+
+        data, labels, pixel_sizes_out, pixel_unit = self._selected_preview_frames()
+        if data is None:
+            return HTML("<p><b>No starred image panels yet.</b></p>")
+        widget = self._make_show2d_from_frames(data, labels, title="Selected ShowFolder images")
         if len(pixel_sizes_out) == data.shape[0]:
             widget.pixel_sizes = pixel_sizes_out
             widget.pixel_unit = pixel_unit
@@ -417,27 +481,41 @@ class ShowFolderBrowser:
     def show_selected_stack(self):
         """Return starred image panels as a Show3D frame stack."""
         from ipywidgets import HTML
-        from quantem.widget import Show3D
 
         data, labels, pixel_sizes_out, pixel_unit = self._selected_preview_frames()
         if data is None:
             return HTML("<p><b>No starred image panels yet.</b></p>")
-        widget = Show3D(
-            data,
-            labels=labels,
-            title="Selected ShowFolder stack",
-            cmap="inferno",
-            smooth=False,
-            show_controls=True,
-            show_stats=True,
-            show_fft=False,
-            dim_label="Selected image",
-            panel_width_px=420,
-            panel_title_font_size=10,
-            panel_gap=4,
-            show_panel_titles=True,
-            save_state=False,
-        )
+        widget = self._make_show3d_from_frames(data, labels, title="Selected ShowFolder stack")
+        if len(pixel_sizes_out) == data.shape[0]:
+            first = float(pixel_sizes_out[0])
+            if all(math.isclose(first, float(size), rel_tol=1e-6, abs_tol=1e-12) for size in pixel_sizes_out):
+                widget.pixel_size = first
+                widget.pixel_unit = pixel_unit
+            else:
+                widget.scale_bar_visible = False
+        return widget
+
+    def show_all_as_show2d(self):
+        """Return all readable folder images as a live Show2D preview gallery."""
+        from ipywidgets import HTML
+
+        data, labels, pixel_sizes_out, pixel_unit = self._all_preview_frames()
+        if data is None:
+            return HTML("<p><b>No readable image panels yet.</b></p>")
+        widget = self._make_show2d_from_frames(data, labels, title="All ShowFolder images")
+        if len(pixel_sizes_out) == data.shape[0]:
+            widget.pixel_sizes = pixel_sizes_out
+            widget.pixel_unit = pixel_unit
+        return widget
+
+    def show_all_as_show3d_stack(self):
+        """Return all readable folder images as a live Show3D frame stack."""
+        from ipywidgets import HTML
+
+        data, labels, pixel_sizes_out, pixel_unit = self._all_preview_frames()
+        if data is None:
+            return HTML("<p><b>No readable image panels yet.</b></p>")
+        widget = self._make_show3d_from_frames(data, labels, title="All ShowFolder images")
         if len(pixel_sizes_out) == data.shape[0]:
             first = float(pixel_sizes_out[0])
             if all(math.isclose(first, float(size), rel_tol=1e-6, abs_tol=1e-12) for size in pixel_sizes_out):
@@ -453,16 +531,6 @@ class ShowFolderBrowser:
 
         return VBox([self.show_selected(), self.show_selected_stack()])
 
-    def data_transfer(
-        self,
-        targets: list[str | Path] | tuple[str | Path, ...],
-        **kwargs: Any,
-    ):
-        """Create a DataTransfer review widget for this browsed folder."""
-        from quantem.widget.data_transfer import DataTransfer
-
-        return DataTransfer(self.folder, targets, **kwargs)
-
     def inherit_selected_viewers_from(self, previous: "ShowFolderBrowser") -> None:
         """Carry open selected viewers across a live-folder browser rebuild."""
         self._active_selected_modes = set(getattr(previous, "_active_selected_modes", set()))
@@ -477,7 +545,18 @@ class ShowFolderBrowser:
         self._refresh_selected_viewers()
 
     def _apply_selected_show2d(self):
-        data, labels, pixel_sizes_out, pixel_unit = self._selected_preview_frames()
+        return self._apply_show2d_frames(self._selected_preview_frames(), all_images=False)
+
+    def _apply_all_show2d(self):
+        return self._apply_show2d_frames(self._all_preview_frames(), all_images=True)
+
+    def _apply_show2d_frames(
+        self,
+        frames: tuple[np.ndarray | None, list[str], list[float], str],
+        *,
+        all_images: bool,
+    ):
+        data, labels, pixel_sizes_out, pixel_unit = frames
         if data is None:
             self._selected_show2d_widget = None
             return None
@@ -485,7 +564,11 @@ class ShowFolderBrowser:
         if widget is not None and hasattr(widget, "set_image"):
             widget.set_image(data, labels=labels)
         else:
-            widget = self.show_selected()
+            widget = (
+                self.show_all_as_show2d()
+                if all_images
+                else self.show_selected()
+            )
         if len(pixel_sizes_out) == data.shape[0] and hasattr(widget, "pixel_sizes"):
             widget.pixel_sizes = pixel_sizes_out
             widget.pixel_unit = pixel_unit
@@ -493,7 +576,18 @@ class ShowFolderBrowser:
         return widget
 
     def _apply_selected_show3d(self):
-        data, labels, pixel_sizes_out, pixel_unit = self._selected_preview_frames()
+        return self._apply_show3d_frames(self._selected_preview_frames(), all_images=False)
+
+    def _apply_all_show3d(self):
+        return self._apply_show3d_frames(self._all_preview_frames(), all_images=True)
+
+    def _apply_show3d_frames(
+        self,
+        frames: tuple[np.ndarray | None, list[str], list[float], str],
+        *,
+        all_images: bool,
+    ):
+        data, labels, pixel_sizes_out, pixel_unit = frames
         if data is None:
             self._selected_show3d_widget = None
             return None
@@ -501,7 +595,11 @@ class ShowFolderBrowser:
         if widget is not None and hasattr(widget, "set_image"):
             widget.set_image(data, labels=labels)
         else:
-            widget = self.show_selected_stack()
+            widget = (
+                self.show_all_as_show3d_stack()
+                if all_images
+                else self.show_selected_stack()
+            )
         if len(pixel_sizes_out) == data.shape[0] and hasattr(widget, "pixel_size"):
             first = float(pixel_sizes_out[0])
             if all(math.isclose(first, float(size), rel_tol=1e-6, abs_tol=1e-12) for size in pixel_sizes_out):
@@ -511,6 +609,27 @@ class ShowFolderBrowser:
                 widget.scale_bar_visible = False
         self._selected_show3d_widget = widget
         return widget
+
+    def open_show2d(self, *, all_images: bool = False):
+        """Open a live Show2D viewer below the folder browser.
+
+        By default this viewer tracks the currently starred images. With
+        ``all_images=True`` it tracks every readable image in the watched folder,
+        so newly added files append on the next folder poll.
+        """
+        self._active_selected_modes = {"show2d_all" if all_images else "show2d"}
+        if getattr(self, "_selection_viewer_output", None) is not None:
+            self._refresh_selected_viewers()
+            return getattr(self, "_selected_show2d_widget", None)
+        return self._apply_all_show2d() if all_images else self._apply_selected_show2d()
+
+    def open_show3d(self, *, all_images: bool = False):
+        """Open a live Show3D stack below the folder browser."""
+        self._active_selected_modes = {"show3d_all" if all_images else "show3d"}
+        if getattr(self, "_selection_viewer_output", None) is not None:
+            self._refresh_selected_viewers()
+            return getattr(self, "_selected_show3d_widget", None)
+        return self._apply_all_show3d() if all_images else self._apply_selected_show3d()
 
     def open_show4dstem(
         self,
@@ -677,9 +796,15 @@ class ShowFolderBrowser:
             if "show2d" in modes:
                 widget = self._apply_selected_show2d()
                 display(widget if widget is not None else HTML("<p><b>No starred image panels yet.</b></p>"))
+            if "show2d_all" in modes:
+                widget = self._apply_all_show2d()
+                display(widget if widget is not None else HTML("<p><b>No readable image panels yet.</b></p>"))
             if "show3d" in modes:
                 widget = self._apply_selected_show3d()
                 display(widget if widget is not None else HTML("<p><b>No starred image panels yet.</b></p>"))
+            if "show3d_all" in modes:
+                widget = self._apply_all_show3d()
+                display(widget if widget is not None else HTML("<p><b>No readable image panels yet.</b></p>"))
             if "show4dstem" in modes:
                 widget = self._apply_selected_show4dstem()
                 display(widget if widget is not None else HTML("<p><b>No 4D-STEM masters (*_master.h5) in this folder.</b></p>"))
@@ -687,6 +812,9 @@ class ShowFolderBrowser:
     def attach_selection_panel(self) -> Any:
         """Append the live curation panel below the ShowFolder widget."""
         from ipywidgets import Button, HBox, HTML, Output, VBox
+
+        if self.selection_panel is not None:
+            return self.selection_panel
 
         summary = HTML()
         output = Output()
@@ -696,6 +824,8 @@ class ShowFolderBrowser:
         open_show2d = Button(description="Open Show2D", tooltip="Render starred images below")
         open_show3d = Button(description="Open Show3D", tooltip="Render starred images as a frame stack below")
         open_both = Button(description="Open both", tooltip="Render starred images as Show2D and Show3D below")
+        open_all_show2d = Button(description="Open all Show2D", tooltip="Render every image and live-append new files")
+        open_all_show3d = Button(description="Open all Show3D", tooltip="Render every image as a live frame stack")
         open_show4dstem = Button(description="Open Show4DSTEM",
                                  tooltip="Open *_master.h5 files as one lazy Show4DSTEM with paged VRAM")
         hide = Button(description="Show starred only", tooltip="Hide unstarred image panels")
@@ -723,15 +853,23 @@ class ShowFolderBrowser:
             _refresh()
 
         def _open_show2d(_=None):
-            self._active_selected_modes = {"show2d"}
+            self.open_show2d()
             _refresh()
 
         def _open_show3d(_=None):
-            self._active_selected_modes = {"show3d"}
+            self.open_show3d()
             _refresh()
 
         def _open_both(_=None):
             self._active_selected_modes = {"show2d", "show3d"}
+            _refresh()
+
+        def _open_all_show2d(_=None):
+            self.open_show2d(all_images=True)
+            _refresh()
+
+        def _open_all_show3d(_=None):
+            self.open_show3d(all_images=True)
             _refresh()
 
         def _open_show4dstem(_=None):
@@ -749,13 +887,18 @@ class ShowFolderBrowser:
         open_show2d.on_click(_open_show2d)
         open_show3d.on_click(_open_show3d)
         open_both.on_click(_open_both)
+        open_all_show2d.on_click(_open_all_show2d)
+        open_all_show3d.on_click(_open_all_show3d)
         open_show4dstem.on_click(_open_show4dstem)
         hide.on_click(_hide)
         show_all.on_click(_show_all)
         panel = VBox([
             HTML("<h3 style=\"margin:12px 0 6px 0\">Selected for downstream analysis</h3>"),
             summary,
-            HBox([refresh, save, open_show2d, open_show3d, open_both, open_show4dstem, hide, show_all]),
+            HBox([
+                refresh, save, open_show2d, open_show3d, open_both,
+                open_all_show2d, open_all_show3d, open_show4dstem, hide, show_all,
+            ]),
             output,
             viewer_output,
         ])

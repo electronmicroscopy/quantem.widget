@@ -7,6 +7,7 @@ folder and it renders the right viewer - no notebook, no Python.
 quantem show ./anything/                     # auto-detect content, pick the viewer
 quantem show2d scan.png                       # an image            -> Show2D
 quantem show3d ./frames/                       # a folder of frames -> Show3D scrub
+quantem show2d ./frames/ --watch               # live folder        -> append new images
 quantem show4dstem ./masters/                  # *_master.h5        -> live Show4DSTEM
 quantem show4dstem a_master.h5 b_master.h5     # several masters    -> one 5D multi-tilt viewer
 quantem show4dstem ./masters/ --html           # 4D-STEM            -> shareable offline HTML
@@ -21,8 +22,8 @@ quantem github tutorial_github.ipynb --no-execute # optional static copy for Git
 | Command | Input | Output |
 |---|---|---|
 | `quantem show <path>` | anything | auto-detects and dispatches to one of the below |
-| `quantem show2d <image / folder>` | one image, or a folder | a Show2D HTML (a folder becomes a gallery) |
-| `quantem show3d <folder>` | a folder of same-size frames | a Show3D scrub HTML |
+| `quantem show2d <image / folder>` | one image, or a folder | a Show2D HTML (a folder becomes a gallery); with `--watch`, a live ShowFolder notebook |
+| `quantem show3d <folder>` | a folder of same-size frames | a Show3D scrub HTML; with `--watch`, a live ShowFolder notebook |
 | `quantem show4dstem <master(s) / folder>` | one or more `*_master.h5` | a live Show4DSTEM notebook (or `--html`) |
 | `quantem showfolder <folder>` | microscopy session folder | a ShowFolder notebook (or `--html`) |
 | `quantem data-transfer plan/inspect/copy` | `*_master.h5` folder plus target roots | manifest-backed transfer planning, state inspection, and explicit copy |
@@ -44,7 +45,7 @@ Everything lands in `~/Downloads` and opens automatically.
 
 Use `data-transfer` before heavy multi-GPU browsing or ptychography when a
 session should be split across fast disks. It writes a durable manifest that the
-CLI, notebook widget, and downstream tools can inspect later.
+CLI, Python utilities, and downstream tools can inspect later.
 
 ```bash
 quantem data-transfer plan ./raw_session/ /nvme0/session /nvme1/session --manifest session.json
@@ -70,6 +71,8 @@ HTML; serve HTML from GitHub Pages or another static host.
 |---|---|
 | `--bin N` | detector mean-bin factor for 4D-STEM (default 8) |
 | `--html` | 4D-STEM: write the offline-WebGPU HTML instead of a notebook |
+| `--watch` | folder: write a live ShowFolder-watched notebook; Show2D/Show3D append new image files, Show4DSTEM opens lazy masters |
+| `--gpus 0,1`, `--page-budget auto` | watched Show4DSTEM: pick CUDA cards and GPU-resident dataset cache policy |
 | `--combined` | many masters -> one 5D HTML viewer (served locally) |
 | `--widget {2d,3d,4dstem}` | force a widget instead of auto-detect |
 | `--out PATH` | output file or directory (default `~/Downloads`) |

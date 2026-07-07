@@ -247,11 +247,101 @@ def test_show2d_subcommand_folder_is_gallery(tmp_path):
     assert (dest / "frames_gallery.html").exists()
 
 
+def test_show2d_folder_watch_writes_live_notebook(tmp_path):
+    src = tmp_path / "frames"
+    src.mkdir()
+    _png(src / "f0.png", (36, 36))
+    dest = tmp_path / "out"
+
+    assert cli.main([
+        "show2d",
+        str(src),
+        "--watch",
+        "--watch-interval",
+        "0.5",
+        "--no-open",
+        "--out",
+        str(dest),
+    ]) == 0
+
+    notebooks = list(dest.glob("*_show2d_live.ipynb"))
+    assert len(notebooks) == 1
+    import json
+
+    code = "".join(json.loads(notebooks[0].read_text())["cells"][1]["source"])
+    assert "ShowFolder(" in code
+    assert "open_show2d(all_images=True)" in code
+    assert "folder.watch(interval=0.5)" in code
+
+
+def test_show3d_folder_watch_writes_live_notebook(tmp_path):
+    src = tmp_path / "frames"
+    src.mkdir()
+    _png(src / "f0.png", (36, 36))
+    dest = tmp_path / "out"
+
+    assert cli.main(["show3d", str(src), "--watch", "--no-open", "--out", str(dest)]) == 0
+
+    notebooks = list(dest.glob("*_show3d_live.ipynb"))
+    assert len(notebooks) == 1
+    import json
+
+    code = "".join(json.loads(notebooks[0].read_text())["cells"][1]["source"])
+    assert "ShowFolder(" in code
+    assert "open_show3d(all_images=True)" in code
+    assert "folder.watch(interval=2.0)" in code
+
+
 def test_show4dstem_subcommand_writes_notebook(tmp_path):
     (tmp_path / "scan_master.h5").write_bytes(b"\x00")
     dest = tmp_path / "out"
     assert cli.main(["show4dstem", str(tmp_path / "scan_master.h5"), "--no-open", "--out", str(dest)]) == 0
     assert list(dest.glob("*.ipynb"))
+
+
+def test_show4dstem_folder_watch_writes_live_notebook(tmp_path):
+    source = tmp_path / "live"
+    source.mkdir()
+    (source / "scan_000_master.h5").write_bytes(b"\x00")
+    dest = tmp_path / "out"
+
+    assert cli.main([
+        "show4dstem",
+        str(source),
+        "--watch",
+        "--bin",
+        "4",
+        "--gpus",
+        "0,1",
+        "--page-budget",
+        "2",
+        "--watch-interval",
+        "1.5",
+        "--no-open",
+        "--out",
+        str(dest),
+    ]) == 0
+
+    notebooks = list(dest.glob("*_live.ipynb"))
+    assert len(notebooks) == 1
+    import json
+
+    code = "".join(json.loads(notebooks[0].read_text())["cells"][1]["source"])
+    assert "ShowFolder(" in code
+    assert "attach_selection_panel()" in code
+    assert "open_show4dstem(" in code
+    assert "gpus=[0, 1]" in code
+    assert "page_budget=2" in code
+    assert "det_bin=4" in code
+    assert "folder.watch(interval=1.5)" in code
+
+
+def test_show4dstem_watch_requires_live_folder_notebook(tmp_path):
+    master = tmp_path / "scan_master.h5"
+    master.write_bytes(b"\x00")
+
+    assert cli.main(["show4dstem", str(master), "--watch", "--no-open"]) == 1
+    assert cli.main(["show4dstem", str(tmp_path), "--watch", "--html", "--no-open"]) == 1
 
 
 def test_data_transfer_cli_plan_inspect_copy(tmp_path, monkeypatch):

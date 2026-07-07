@@ -742,6 +742,18 @@ def _add_show_args(parser: argparse.ArgumentParser) -> None:
                         help="Image widgets: uint8 pack (smaller file).")
     parser.add_argument("--html", action="store_true",
                         help="4D-STEM: export a standalone offline-WebGPU HTML instead of a live notebook.")
+    parser.add_argument("--watch", action="store_true",
+                        help="Folder: write a live ShowFolder-watched notebook that appends new files.")
+    parser.add_argument("--watch-interval", type=float, default=2.0,
+                        help="Polling interval in seconds for --watch live folders (default 2).")
+    parser.add_argument("--gpus", default=None,
+                        help="4D-STEM --watch: comma-separated CUDA GPU ids, e.g. 0 or 0,1. Default preserves loader device.")
+    parser.add_argument("--page-budget", default="auto",
+                        help="4D-STEM --watch: resident dataset cache, e.g. auto, 1, 2, or none (default auto).")
+    parser.add_argument("--dtype", default="u8", choices=("u8", "u16", "float32"),
+                        help="4D-STEM --watch browse dtype (default u8).")
+    parser.add_argument("--scan-size", type=int, default=None,
+                        help="4D-STEM --watch: only include masters with this square scan size.")
     parser.add_argument("--no-open", action="store_true", help="Write the file(s) but do not launch anything.")
     parser.add_argument("--serve", action="store_true",
                         help="Open via a local HTTP server even for self-contained files (tunnelable URL).")
@@ -765,6 +777,8 @@ def _show(args: argparse.Namespace) -> int:
     # Several explicit paths: a list of masters -> one 5D viewer (multi-tilt), or a
     # set of image files -> a gallery. A single path falls through to _detect.
     if len(paths) > 1:
+        if args.watch:
+            raise ValueError("--watch requires one folder path, not multiple explicit paths.")
         if args.widget != "4dstem" and all(p.suffix.lower() in IMAGE_EXTS for p in paths):
             out = _render_gallery(paths, "gallery", args)
             _open_html(out, serve=args.serve, no_open=args.no_open)
@@ -774,12 +788,30 @@ def _show(args: argparse.Namespace) -> int:
     path = paths[0]
     kind = _detect(path, args.widget)
     if kind == "4dstem":
+        if args.watch:
+            if args.html:
+                raise ValueError("--watch writes a live notebook; omit --html.")
+            if not path.is_dir():
+                raise ValueError("--watch requires a folder path containing *_master.h5 files.")
         from quantem.widget.io import discover_masters
         masters = [str(path)] if path.is_file() else discover_masters(str(path), verbose=args.verbose)
         if not masters:
             raise ValueError(f"no *_master.h5 found in {path}")
         label = pathlib.Path(masters[0]).stem.replace("_master", "") if path.is_file() else path.name
+        if args.watch:
+            notebook = _render_4dstem_watch_notebook(path, label, args)
+            _launch_notebook(notebook, no_open=args.no_open)
+            return 0
         return _do_4dstem(masters, label, args)
+    if args.watch:
+        if args.html:
+            raise ValueError("--watch writes a live notebook; omit --html.")
+        if kind != "images" or not path.is_dir():
+            raise ValueError("--watch requires one folder path.")
+        widget = "show3d" if args.widget == "3d" else "show2d"
+        notebook = _render_image_watch_notebook(path, path.name, args, widget=widget)
+        _launch_notebook(notebook, no_open=args.no_open)
+        return 0
     out = _render_images(path, kind, args)
     _open_html(out, serve=args.serve, no_open=args.no_open)
     return 0
@@ -892,6 +924,143 @@ def _render_4dstem_notebook(masters: list[str], label: str, args: argparse.Names
         "nbformat": 4, "nbformat_minor": 5,
     }
     out = _out_dir(args.out) / f"{label}.ipynb"
+    out.write_text(json.dumps(nb, indent=1))
+    return out
+
+
+def _python_page_budget(value: str | int | None) -> str:
+    """Return a source literal for a Show4DSTEM page budget CLI value."""
+    if value is None:
+        return "None"
+    if isinstance(value, int):
+        return str(value)
+    text = str(value).strip()
+    if text.lower() in {"none", "off", "false", "no"}:
+        return "None"
+    if text.isdigit():
+        return str(int(text))
+    return repr(text)
+
+
+def _python_gpus(value: str | None) -> str:
+    """Return a source literal for comma-separated CUDA GPU ids."""
+    if value is None or not str(value).strip():
+        return "None"
+    try:
+        ids = [int(part.strip()) for part in str(value).split(",") if part.strip()]
+    except ValueError as exc:
+        raise ValueError("--gpus must be a comma-separated list of integer ids, e.g. 0 or 0,1") from exc
+    if not ids:
+        return "None"
+    return repr(ids)
+
+
+def _render_4dstem_watch_notebook(folder: pathlib.Path, label: str, args: argparse.Namespace) -> pathlib.Path:
+    """Write a live ShowFolder-watched notebook for a 4D-STEM acquisition folder."""
+    import json
+
+    print(
+        f"{folder.name}: watched folder, bin {args.det_bin}, page_budget {args.page_budget} "
+        "-> ShowFolder + lazy Show4DSTEM"
+    )
+    gpus = _python_gpus(args.gpus)
+    page_budget = _python_page_budget(args.page_budget)
+    scan_size = "None" if args.scan_size is None else str(int(args.scan_size))
+    source = (
+        "from quantem.widget import ShowFolder\n"
+        "\n"
+        f"folder = ShowFolder({str(folder)!r}, thumb=256, group_by='none')\n"
+        "folder.browser.attach_selection_panel()\n"
+        "folder.browser.open_show4dstem(\n"
+        f"    gpus={gpus},\n"
+        f"    page_budget={page_budget},\n"
+        f"    det_bin={int(args.det_bin)},\n"
+        f"    dtype={args.dtype!r},\n"
+        f"    scan_size={scan_size},\n"
+        ")\n"
+        f"folder.watch(interval={float(args.watch_interval)!r})\n"
+        "folder\n"
+    )
+    nb = {
+        "cells": [
+            {
+                "cell_type": "markdown",
+                "id": "title",
+                "metadata": {},
+                "source": [
+                    f"# {label} live Show4DSTEM\n",
+                    f"\nWatched folder: `{folder}`\n",
+                    f"\nDetector bin {args.det_bin}; page budget `{args.page_budget}`; "
+                    f"watch interval {args.watch_interval:g}s.",
+                ],
+            },
+            {
+                "cell_type": "code",
+                "id": "live-viewer",
+                "execution_count": None,
+                "metadata": {},
+                "outputs": [],
+                "source": source.splitlines(keepends=True),
+            },
+        ],
+        "metadata": {"kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"}},
+        "nbformat": 4,
+        "nbformat_minor": 5,
+    }
+    out = _out_dir(args.out) / f"{label}_live.ipynb"
+    out.write_text(json.dumps(nb, indent=1))
+    return out
+
+
+def _render_image_watch_notebook(
+    folder: pathlib.Path,
+    label: str,
+    args: argparse.Namespace,
+    *,
+    widget: str,
+) -> pathlib.Path:
+    """Write a live ShowFolder-watched notebook for image folder previews."""
+    import json
+
+    method = "open_show3d" if widget == "show3d" else "open_show2d"
+    title = "Show3D" if widget == "show3d" else "Show2D"
+    print(f"{folder.name}: watched folder -> ShowFolder + live all-image {title}")
+    source = (
+        "from quantem.widget import ShowFolder\n"
+        "\n"
+        f"folder = ShowFolder({str(folder)!r}, thumb=256, group_by='none')\n"
+        "folder.browser.attach_selection_panel()\n"
+        f"folder.browser.{method}(all_images=True)\n"
+        f"folder.watch(interval={float(args.watch_interval)!r})\n"
+        "folder\n"
+    )
+    nb = {
+        "cells": [
+            {
+                "cell_type": "markdown",
+                "id": "title",
+                "metadata": {},
+                "source": [
+                    f"# {label} live {title}\n",
+                    f"\nWatched folder: `{folder}`\n",
+                    f"\nNew readable image files append on the next poll; "
+                    f"watch interval {args.watch_interval:g}s.",
+                ],
+            },
+            {
+                "cell_type": "code",
+                "id": "live-viewer",
+                "execution_count": None,
+                "metadata": {},
+                "outputs": [],
+                "source": source.splitlines(keepends=True),
+            },
+        ],
+        "metadata": {"kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"}},
+        "nbformat": 4,
+        "nbformat_minor": 5,
+    }
+    out = _out_dir(args.out) / f"{label}_{widget}_live.ipynb"
     out.write_text(json.dumps(nb, indent=1))
     return out
 
