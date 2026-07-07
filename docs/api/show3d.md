@@ -26,6 +26,7 @@ export. See the [Show3D tutorial](../tutorials/show3d).
 | Export button | `export_request`, `export_status` | Writes a standalone HTML viewer |
 | Panel layout (multi-panel) | `n_panels`, `link_panels`, `max_cols` | Panels arrange; linked scrub moves all |
 | Panel visibility (multi-panel) | `hidden_panels` | Panels collapse from view without deleting data |
+| Panel reorder (multi-panel) | `panel_order`; `set_panel_order()`, `move_panel()`, `reset_panel_order()` | Reorders panel display without changing source data, labels, stars, or hidden state |
 | Viewer chrome preset | `ui_mode` plus explicit `show_*` kwargs | Applies shared display presets; see [Viewer UI controls](viewer-ui) |
 | Control visibility | `show_controls`, `controls_collapsed`; `collapse_controls()`, `expand_controls()`, `toggle_controls()` | Permanently remove controls or temporarily collapse them behind the top GUI toggle |
 | Title visibility | `show_title` | Top title row shows/hides |
@@ -95,6 +96,19 @@ w.show_all_panels()
 
 Hidden panels stay in the widget state and standalone HTML export. They are not
 removed from the data, and readers can restore them from the `Panels` menu.
+
+Use panel reordering when the comparison order should change without copying or
+rebuilding the source stacks:
+
+```python
+w.set_panel_order(["Probe", "SSB reconstruction", "Mean DP"])
+w.move_panel("SSB reconstruction", 0)
+w.reset_panel_order()
+```
+
+Panel order is saved in widget state and standalone HTML. It is display-only:
+hidden panels, stars, titles, and per-panel contrast remain keyed by the
+original source panel index.
 
 The statistics readout is off by default. Turn on `show_stats=True` in Python,
 or use the `Stats` switch in the widget, when mean/min/max/std values are useful.

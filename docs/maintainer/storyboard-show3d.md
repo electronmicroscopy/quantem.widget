@@ -47,7 +47,8 @@ for parity.
 ### S3D-03: Arrange Movie Panels
 
 **User story**: As a user arranging many movie panels, I want a column selector
-so I can switch between one row, multiple rows, and dense galleries.
+and panel reorder control so I can switch between one row, multiple rows, dense
+galleries, and the comparison order I want to share.
 
 **Primary widgets**: Show3D.
 
@@ -58,6 +59,9 @@ release signoff.
 
 - Change columns through 1, 2, 3, 4, 6, 8, and 12.
 - Verify the menu does not offer impractical counts above 12.
+- Toggle `Reorder`, drag panels into a new order, reset the order, and confirm
+  `panel_order`, `visible_panels`, Show2D handoff, saved state, and HTML export
+  follow the same order.
 - Verify the current frame, zoom center, labels, scale bars, histogram, and
   contrast do not jump during reflow.
 

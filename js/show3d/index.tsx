@@ -31,6 +31,7 @@ import FastForwardIcon from "@mui/icons-material/FastForward";
 import StopIcon from "@mui/icons-material/Stop";
 import VisibilityIcon from "@mui/icons-material/Visibility";
 import VisibilityOffIcon from "@mui/icons-material/VisibilityOff";
+import DragIndicatorIcon from "@mui/icons-material/DragIndicator";
 import { useTheme } from "../theme";
 import { drawScaleBarHiDPI, drawFFTScaleBarHiDPI, drawColorbar, roundToNiceValue, unitSymbol, formatScaleLabel } from "../figure";
 import { downloadBlob, extractBytes, extractFloat32, formatNumber, preserveRestoredWidgetModelsOnSave } from "../format";
@@ -1456,6 +1457,11 @@ function Show3D() {
   const [panelRealFrames] = useModelState<number[]>("panel_real_frames");
   const [starred, setStarred] = useModelState<number[]>("starred");
   const [hiddenPanels, setHiddenPanels] = useModelState<number[]>("hidden_panels");
+  const [panelOrder, setPanelOrder] = useModelState<number[]>("panel_order");
+  const [reorderMode, setReorderMode] = React.useState(false);
+  const [dragOverPanel, setDragOverPanel] = React.useState<number | null>(null);
+  const draggedPanelRef = React.useRef<number | null>(null);
+  const pointerReorderPanelRef = React.useRef<number | null>(null);
   const totalPanelCount = Math.max(1, nPanels || 1);
   const hiddenPanelSet = React.useMemo(() => {
     const clean = new Set<number>();
@@ -1466,13 +1472,23 @@ function Show3D() {
     if (clean.size >= totalPanelCount) clean.delete(totalPanelCount - 1);
     return clean;
   }, [hiddenPanels, totalPanelCount]);
-  const visiblePanelIndices = React.useMemo(() => {
-    const panels: number[] = [];
-    for (let panel = 0; panel < totalPanelCount; panel++) {
-      if (!hiddenPanelSet.has(panel)) panels.push(panel);
-    }
-    return panels.length ? panels : [0];
-  }, [hiddenPanelSet, totalPanelCount]);
+  const naturalPanelOrder = React.useMemo(
+    () => Array.from({ length: totalPanelCount }, (_, panel) => panel),
+    [totalPanelCount]
+  );
+  const orderedPanelIndices = React.useMemo(() => {
+    const values = Array.isArray(panelOrder) ? panelOrder.map(value => Math.trunc(Number(value))) : [];
+    const valid = (
+      values.length === totalPanelCount &&
+      values.every((value) => Number.isFinite(value) && value >= 0 && value < totalPanelCount) &&
+      new Set(values).size === totalPanelCount
+    );
+    return valid ? values : naturalPanelOrder;
+  }, [panelOrder, naturalPanelOrder, totalPanelCount]);
+  const visiblePanelIndices = React.useMemo(
+    () => orderedPanelIndices.filter(panel => !hiddenPanelSet.has(panel)),
+    [hiddenPanelSet, orderedPanelIndices]
+  );
   const visiblePanelCount = visiblePanelIndices.length;
   const panelLabel = React.useCallback((panel: number) => (
     (panelTitles && panelTitles[panel]) || `Panel ${panel + 1}`
@@ -1492,6 +1508,91 @@ function Show3D() {
     }
     setHiddenPanels(Array.from(next).sort((a, b) => a - b));
   }, [hiddenPanels, totalPanelCount, setHiddenPanels]);
+  const applyPanelOrder = React.useCallback((order: number[]) => {
+    const clean = order.filter((value) => Number.isInteger(value) && value >= 0 && value < totalPanelCount);
+    if (clean.length !== totalPanelCount || new Set(clean).size !== totalPanelCount) return;
+    const natural = clean.every((value, idx) => value === idx);
+    setPanelOrder(natural ? [] : clean);
+  }, [setPanelOrder, totalPanelCount]);
+  const movePanelBefore = React.useCallback((source: number, target: number) => {
+    if (source === target) return;
+    const next = [...orderedPanelIndices];
+    const from = next.indexOf(source);
+    if (from < 0) return;
+    next.splice(from, 1);
+    const to = next.indexOf(target);
+    if (to < 0) return;
+    next.splice(to, 0, source);
+    applyPanelOrder(next);
+  }, [applyPanelOrder, orderedPanelIndices]);
+  const handlePanelDragStart = React.useCallback((event: React.DragEvent, panel: number) => {
+    if (!reorderMode) return;
+    draggedPanelRef.current = panel;
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", String(panel));
+    event.stopPropagation();
+  }, [reorderMode]);
+  const handlePanelDragOver = React.useCallback((event: React.DragEvent, panel: number) => {
+    if (!reorderMode) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    if (dragOverPanel !== panel) setDragOverPanel(panel);
+    event.stopPropagation();
+  }, [dragOverPanel, reorderMode]);
+  const handlePanelDrop = React.useCallback((event: React.DragEvent, panel: number) => {
+    if (!reorderMode) return;
+    event.preventDefault();
+    const raw = event.dataTransfer.getData("text/plain");
+    const source = raw.trim() !== "" && Number.isFinite(Number(raw))
+      ? Math.trunc(Number(raw))
+      : draggedPanelRef.current;
+    if (source !== null && source !== undefined) movePanelBefore(source, panel);
+    setDragOverPanel(null);
+    draggedPanelRef.current = null;
+    event.stopPropagation();
+  }, [movePanelBefore, reorderMode]);
+  const handlePanelDragEnd = React.useCallback(() => {
+    setDragOverPanel(null);
+    draggedPanelRef.current = null;
+  }, []);
+  const handlePanelReorderPointerDown = React.useCallback((event: React.PointerEvent, panel: number) => {
+    if (!reorderMode) return;
+    pointerReorderPanelRef.current = panel;
+    draggedPanelRef.current = panel;
+    setDragOverPanel(panel);
+    event.preventDefault();
+    event.stopPropagation();
+  }, [reorderMode]);
+  const handlePanelReorderPointerEnter = React.useCallback((event: React.PointerEvent, panel: number) => {
+    if (!reorderMode || pointerReorderPanelRef.current === null) return;
+    if (dragOverPanel !== panel) setDragOverPanel(panel);
+    event.stopPropagation();
+  }, [dragOverPanel, reorderMode]);
+  const handlePanelReorderPointerUp = React.useCallback((event: React.PointerEvent, panel: number) => {
+    if (!reorderMode) return;
+    const source = pointerReorderPanelRef.current;
+    if (source !== null) movePanelBefore(source, panel);
+    pointerReorderPanelRef.current = null;
+    draggedPanelRef.current = null;
+    setDragOverPanel(null);
+    event.preventDefault();
+    event.stopPropagation();
+  }, [movePanelBefore, reorderMode]);
+  const resetPanelOrder = React.useCallback(() => {
+    setPanelOrder([]);
+    setDragOverPanel(null);
+    draggedPanelRef.current = null;
+    pointerReorderPanelRef.current = null;
+  }, [setPanelOrder]);
+  React.useEffect(() => {
+    if ((nPanels || 1) <= 1 && reorderMode) setReorderMode(false);
+  }, [nPanels, reorderMode]);
+  React.useEffect(() => {
+    if (reorderMode) return;
+    pointerReorderPanelRef.current = null;
+    draggedPanelRef.current = null;
+    setDragOverPanel(null);
+  }, [reorderMode]);
   const [hiddenIndices] = useModelState<number[]>("hidden_indices");
   const hiddenSet = new Set(hiddenIndices || []);
   const nextVisible = (from: number, dir: 1 | -1, allowWrap = true): number => {
@@ -7485,6 +7586,7 @@ function Show3D() {
     if (fftInsetNativeWheelHandlerRef.current?.(event)) return;
     event.preventDefault();
     event.stopPropagation();
+    if (reorderMode) return;
     applyCanvasWheelZoom(event.clientX, event.clientY, event.deltaY);
   };
 
@@ -9506,6 +9608,21 @@ function Show3D() {
                 <>
                   <Button
                     size="small"
+                    sx={{
+                      ...compactButton,
+                      color: reorderMode ? themeColors.accent : themeColors.text,
+                      "& .MuiButton-startIcon": { mr: 0.4 },
+                    }}
+                    startIcon={<DragIndicatorIcon sx={{ fontSize: 14 }} />}
+                    onClick={() => setReorderMode((value) => !value)}
+                    aria-pressed={reorderMode ? "true" : "false"}
+                    aria-label={reorderMode ? "Finish reordering panels" : "Reorder panels"}
+                    title={reorderMode ? "Finish reordering panels" : "Reorder panels"}
+                  >
+                    Reorder
+                  </Button>
+                  <Button
+                    size="small"
                     sx={{ ...compactButton, "& .MuiButton-startIcon": { mr: 0.4 } }}
                     startIcon={<VisibilityIcon sx={{ fontSize: 14 }} />}
                     onClick={(event) => setPanelMenuAnchor(event.currentTarget)}
@@ -9524,7 +9641,7 @@ function Show3D() {
                     MenuListProps={{ "aria-label": "Panel visibility options" }}
                     {...themedMenuProps}
                   >
-                    {Array.from({ length: totalPanelCount }, (_, panel) => {
+                    {orderedPanelIndices.map((panel) => {
                       const hidden = hiddenPanelSet.has(panel);
                       const disabled = !hidden && visiblePanelCount <= 1;
                       return (
@@ -9551,6 +9668,14 @@ function Show3D() {
                     >
                       <VisibilityIcon sx={{ fontSize: 16, mr: 1, color: themeColors.accent }} />
                       <Typography sx={{ fontSize: 11 }}>Show all panels</Typography>
+                    </MenuItem>
+                    <MenuItem
+                      dense
+                      disabled={(panelOrder || []).length === 0}
+                      onClick={resetPanelOrder}
+                    >
+                      <DragIndicatorIcon sx={{ fontSize: 16, mr: 1, color: themeColors.accent }} />
+                      <Typography sx={{ fontSize: 11 }}>Reset order</Typography>
                     </MenuItem>
                   </Menu>
                 </>
@@ -9676,7 +9801,15 @@ function Show3D() {
                   display: "none",
                 },
               },
-              cursor: isHoveringLensEdge
+              ...(reorderMode ? {
+                "@keyframes show3d-reorder-jiggle": {
+                  "0%": { rotate: "-0.18deg" },
+                  "100%": { rotate: "0.18deg" },
+                },
+              } : {}),
+              cursor: reorderMode
+                ? "grab"
+                : isHoveringLensEdge
                 ? "nwse-resize"
                 : (isHoveringResize || isDraggingResize || isHoveringResizeInner || isDraggingResizeInner)
                   ? "nwse-resize"
@@ -9688,20 +9821,20 @@ function Show3D() {
                         ? "crosshair"
                         : "grab",
             }}
-            onMouseDown={handleCanvasMouseDown}
-            onMouseMove={handleCanvasMouseMove}
-            onMouseUp={handleCanvasMouseUp}
-            onMouseLeave={handleCanvasMouseLeave}
-            onDoubleClick={handleDoubleClick}
+            onMouseDown={reorderMode ? undefined : handleCanvasMouseDown}
+            onMouseMove={reorderMode ? undefined : handleCanvasMouseMove}
+            onMouseUp={reorderMode ? undefined : handleCanvasMouseUp}
+            onMouseLeave={reorderMode ? undefined : handleCanvasMouseLeave}
+            onDoubleClick={reorderMode ? undefined : handleDoubleClick}
           >
             <canvas
               ref={canvasRef}
               width={canvasW}
               height={canvasH}
-              onTouchStart={handleCanvasTouchStart}
-              onTouchMove={handleCanvasTouchMove}
-              onTouchEnd={handleCanvasTouchEnd}
-              onTouchCancel={handleCanvasTouchEnd}
+              onTouchStart={reorderMode ? undefined : handleCanvasTouchStart}
+              onTouchMove={reorderMode ? undefined : handleCanvasTouchMove}
+              onTouchEnd={reorderMode ? undefined : handleCanvasTouchEnd}
+              onTouchCancel={reorderMode ? undefined : handleCanvasTouchEnd}
               style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", imageRendering: smooth ? "auto" : "pixelated", opacity: gpuDisplayVisible ? 0 : 1, display: "block", touchAction: "none" }}
               role="img"
               aria-label={`Slice image ${visibleSliceIdx + 1} of ${nSlices}${title ? `: ${title}` : ""} (${width} by ${height} pixels). Use arrow keys to scrub frames.`}
@@ -9820,7 +9953,7 @@ function Show3D() {
                 </button>
               );
             })}
-	            {panelChromeVisible && (nPanels || 1) > 1 && visiblePanelIndices.map((panel, slot) => {
+            {panelChromeVisible && (nPanels || 1) > 1 && visiblePanelIndices.map((panel, slot) => {
               const n = Math.max(1, visiblePanelCount || 1);
               const cols = panelColsForCount(n);
               const gap = n > 1 ? (panelGapTrait ?? 10) : 0;
@@ -9864,6 +9997,71 @@ function Show3D() {
                 >
                   <VisibilityOffIcon sx={{ fontSize: 15 }} />
                 </IconButton>
+              );
+            })}
+            {panelChromeVisible && reorderMode && (nPanels || 1) > 1 && visiblePanelIndices.map((panel, slot) => {
+              const n = Math.max(1, visiblePanelCount || 1);
+              const cols = panelColsForCount(n);
+              const rows = Math.ceil(n / cols);
+              const gap = n > 1 ? (panelGapTrait ?? 10) : 0;
+              const panelW = (canvasW - gap * (cols - 1)) / cols;
+              const panelH = (canvasH - gap * (rows - 1)) / rows;
+              const panelLeft = (slot % cols) * (panelW + gap);
+              const panelTop = Math.floor(slot / cols) * (panelH + gap);
+              const active = dragOverPanel === panel;
+              return (
+                <Box
+                  key={`panel-reorder-${panel}`}
+                  draggable={reorderMode}
+                  role="button"
+                  aria-label={`Move ${panelLabel(panel)}`}
+                  title={`Drag to reorder ${panelLabel(panel)}`}
+                  onDragStart={(event) => handlePanelDragStart(event, panel)}
+                  onDragOver={(event) => handlePanelDragOver(event, panel)}
+                  onDrop={(event) => handlePanelDrop(event, panel)}
+                  onDragEnd={handlePanelDragEnd}
+                  onPointerDown={(event) => handlePanelReorderPointerDown(event, panel)}
+                  onPointerEnter={(event) => handlePanelReorderPointerEnter(event, panel)}
+                  onPointerUp={(event) => handlePanelReorderPointerUp(event, panel)}
+                  sx={{
+                    position: "absolute",
+                    top: `${(panelTop / Math.max(1, canvasH)) * 100}%`,
+                    left: `${(panelLeft / Math.max(1, canvasW)) * 100}%`,
+                    width: `${(panelW / Math.max(1, canvasW)) * 100}%`,
+                    height: `${(panelH / Math.max(1, canvasH)) * 100}%`,
+                    boxSizing: "border-box",
+                    border: `2px solid ${active ? themeColors.accent : "rgba(255,255,255,0.45)"}`,
+                    bgcolor: active ? "rgba(79, 195, 247, 0.12)" : "rgba(0,0,0,0.02)",
+                    outline: active ? `1px solid ${themeColors.accent}` : "none",
+                    opacity: draggedPanelRef.current === panel ? 0.72 : 1,
+                    transform: active ? "translateY(-2px)" : "translateY(0)",
+                    transition: "transform 120ms ease, opacity 120ms ease, background-color 120ms ease, border-color 120ms ease",
+                    animation: "show3d-reorder-jiggle 180ms ease-in-out infinite alternate",
+                    cursor: "grab",
+                    pointerEvents: "auto",
+                    zIndex: 8,
+                  }}
+                >
+                  <Box
+                    sx={{
+                      position: "absolute",
+                      bottom: 6,
+                      left: "50%",
+                      transform: "translateX(-50%)",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      width: 30,
+                      height: 22,
+                      borderRadius: 1,
+                      bgcolor: "rgba(0,0,0,0.38)",
+                      color: "rgba(255,255,255,0.92)",
+                      pointerEvents: "none",
+                    }}
+                  >
+                    <DragIndicatorIcon sx={{ fontSize: 18 }} />
+                  </Box>
+                </Box>
               );
             })}
             {/* Zoom indicator now drawn on the ui canvas in the scale-bar

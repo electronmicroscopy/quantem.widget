@@ -229,6 +229,64 @@ def test_show3d_hidden_panels_roundtrip_in_state_and_html(tmp_path: pathlib.Path
     assert "Mean DP" in html
 
 
+def test_show3d_panel_order_controls_visible_order_and_handoff() -> None:
+    widget = Show3D(
+        *_panels(),
+        panel_titles=["SSB", "Mean DP", "Probe"],
+        panel_order=["Probe", "SSB", "Mean DP"],
+        hidden_panels=["Mean DP"],
+        show_controls=False,
+    )
+
+    assert widget.panel_order == [2, 0, 1]
+    assert widget.ordered_panels == [2, 0, 1]
+    assert widget.visible_panels == [2, 0]
+
+    widget.move_panel("SSB", 2)
+    assert widget.panel_order == [2, 1, 0]
+    assert widget.visible_panels == [2, 0]
+
+    out = widget.to_show2d(frame=1)
+    assert out.labels == ["Probe 2/3", "SSB 2/3"]
+    np.testing.assert_allclose(out._data[0], _panels()[2][1])
+    np.testing.assert_allclose(out._data[1], _panels()[0][1])
+
+    widget.reset_panel_order()
+    assert widget.panel_order == []
+    assert widget.visible_panels == [0, 2]
+
+
+def test_show3d_panel_order_roundtrips_state_and_validates(tmp_path: pathlib.Path) -> None:
+    widget = Show3D(
+        *_panels(),
+        panel_titles=["SSB", "Mean DP", "Probe"],
+        show_controls=False,
+    )
+    widget.set_panel_order([2, 0, 1])
+    state = widget.state_dict()
+
+    assert state["panel_order"] == [2, 0, 1]
+
+    restored = Show3D(*_panels(), panel_titles=["SSB", "Mean DP", "Probe"], show_controls=False)
+    restored.load_state_dict(state)
+    assert restored.panel_order == [2, 0, 1]
+    assert restored.visible_panels == [2, 0, 1]
+
+    with pytest.raises(ValueError, match="every panel"):
+        widget.set_panel_order([0, 1])
+    with pytest.raises(Exception, match="panel_order"):
+        widget.panel_order = [0, 0, 1]
+
+    smaller = Show3D(*_panels()[:2], panel_titles=["SSB", "Mean DP"], show_controls=False)
+    smaller.load_state_dict(state)
+    assert smaller.panel_order == []
+    assert smaller.visible_panels == [0, 1]
+
+    out = widget.export_html(tmp_path / "show3d_panel_order.html", encoding="full")
+    html = out.read_text()
+    assert "panel_order" in html
+
+
 def test_show3d_panel_frame_labels_roundtrip_in_state_and_html(tmp_path: pathlib.Path) -> None:
     frame_labels = [
         ["SSB iter 1", "SSB iter 2", "SSB iter 3"],

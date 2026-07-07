@@ -471,6 +471,11 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
         zero-based panel indices; strings match ``panel_titles`` exactly. Hidden
         panels stay in the widget state and exported HTML, and can be restored
         later with ``show_panel`` or ``show_all_panels``.
+    panel_order : sequence of int or str, optional
+        Multi-panel display order. Integers are zero-based panel indices;
+        strings match ``panel_titles`` exactly. Reordering is display-only:
+        source data, titles, stars, and hidden-panel state stay keyed by their
+        original panel indices.
     show_panel_titles : bool, default True
         Draw the top-center per-panel title and frame counter on multi-panel
         canvases. Set ``False`` for clean GIF/video exports.
@@ -634,6 +639,7 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
     # Per-panel visibility. Hidden panels stay in state/export but are collapsed
     # from the canvas grid and skipped by panel-scoped frontend computations.
     hidden_panels = traitlets.List(traitlets.Int(), default_value=[]).tag(sync=True)
+    panel_order = traitlets.List(traitlets.Int(), default_value=[]).tag(sync=True)
     # Real frame count per panel for stack comparison: stacks of different
     # lengths get auto-padded to the longest; this trait lets JS mark
     # "end-of-stack" frames (frame idx >= real[panel]). Empty = all real.
@@ -1036,6 +1042,29 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
             )
         return clean
 
+    @traitlets.validate("panel_order")
+    def _validate_panel_order(self, proposal: dict) -> list[int]:
+        """Normalize optional display order over source panel indices."""
+        n_pan = int(self.n_panels)
+        values = list(proposal["value"] or [])
+        if not values:
+            return []
+        clean: list[int] = []
+        try:
+            for value in values:
+                if isinstance(value, bool):
+                    raise TypeError
+                clean.append(int(value))
+        except (TypeError, ValueError) as exc:
+            raise traitlets.TraitError("panel_order must contain integer panel indices") from exc
+        expected = list(range(n_pan))
+        if len(clean) != n_pan or sorted(clean) != expected:
+            raise traitlets.TraitError(
+                "panel_order must include every panel index exactly once "
+                f"(expected a permutation of {expected!r})"
+            )
+        return clean
+
     def _panel_title_for_index(self, panel: int) -> str:
         """Return the user-facing title for a panel index."""
         if 0 <= panel < len(self.panel_titles) and self.panel_titles[panel]:
@@ -1260,6 +1289,7 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
         frame_label_format: str | Callable[..., object] | None = None,
         panel_real_frames: list[int] | None = None,
         hidden_panels: Sequence[int | str] | int | str | None = None,
+        panel_order: Sequence[int | str] | None = None,
         title: str = "",
         ui_mode: UiMode = "interactive",
         show_title: bool | None = None,
@@ -1479,6 +1509,8 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
                             display_bin=display_bin, offline=offline,
                             state=state, dedupe_identical_panels=dedupe_identical_panels,
                             _t0=_t0)
+            if panel_order is not None:
+                self.set_panel_order(panel_order)
             if hidden_panels is not None:
                 self.set_hidden_panels(hidden_panels)
 
@@ -1672,6 +1704,7 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
             else:
                 self.panel_titles = [f"Panel {i+1}" for i in range(self.n_panels)]
             self.starred = [-1] * self.n_panels
+            self.panel_order = []
 
             if shared_source:
                 _as_valid_panel(data, "Panel 0")
@@ -1796,6 +1829,7 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
             if panel_titles is not None:
                 self.panel_titles = list(panel_titles)
             self.starred = [-1]
+            self.panel_order = []
 
         # Reject complex input - silently dropping the imaginary part on
         # ptychography probes was a real data-loss footgun. User should
@@ -2102,7 +2136,7 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
             raise ValueError(f"frame index {idx} out of range [0, {self.n_slices})")
 
         if panel is None:
-            panel_indices = list(range(int(self.n_panels))) if include_hidden else self.visible_panels
+            panel_indices = self.ordered_panels if include_hidden else self.visible_panels
         else:
             panel_indices = self._normalize_panel_refs(panel)
             if not include_hidden:
@@ -2282,6 +2316,7 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
         self.n_panels = 1
         self.panel_titles = []
         self.starred = [-1]
+        self.panel_order = []
         self._reset_panel_contrast_traits()
         self._multi_panel_bin = 0
         self._panel_width = int(data.shape[2])
@@ -2431,6 +2466,7 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
             "bookmarked_frames": self.bookmarked_frames,
             "starred": list(self.starred),
             "hidden_panels": list(self.hidden_panels),
+            "panel_order": list(self.panel_order),
             "playback_path": self.playback_path,
             "slice_idx": self.slice_idx,
             "roi_active": self.roi_active,
@@ -2708,6 +2744,8 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
         # saved from a 4-panel widget, loading into a single-panel one).
         if "starred" in state and isinstance(state["starred"], list) and len(state["starred"]) != int(self.n_panels):
             state.pop("starred")
+        if "panel_titles" in state and isinstance(state["panel_titles"], list) and len(state["panel_titles"]) != int(self.n_panels):
+            state.pop("panel_titles")
         if "hidden_panels" in state and isinstance(state["hidden_panels"], list):
             n_pan = int(self.n_panels)
             clean_set: set[int] = set()
@@ -2724,6 +2762,15 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
             if len(clean) >= n_pan:
                 clean = clean[:-1]
             state["hidden_panels"] = clean
+        if "panel_order" in state and isinstance(state["panel_order"], list):
+            try:
+                order = [int(value) for value in state["panel_order"] if not isinstance(value, bool)]
+            except (TypeError, ValueError):
+                order = []
+            if len(order) != int(self.n_panels) or sorted(order) != list(range(int(self.n_panels))):
+                state.pop("panel_order")
+            else:
+                state["panel_order"] = order
         # These were briefly present in the development branch. Contrast auto,
         # percentile, and log scale now stay global to match Show2D.
         for key in (
@@ -3044,10 +3091,18 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
         return {i: f for i, f in enumerate(self.starred) if f >= 0}
 
     @property
+    def ordered_panels(self) -> list[int]:
+        """Zero-based movie panel indices in the current display order."""
+        order = list(self.panel_order or [])
+        if len(order) == int(self.n_panels) and sorted(order) == list(range(int(self.n_panels))):
+            return order
+        return list(range(int(self.n_panels)))
+
+    @property
     def visible_panels(self) -> list[int]:
         """Zero-based panel indices currently visible in the canvas grid."""
         hidden = set(self.hidden_panels)
-        return [i for i in range(int(self.n_panels)) if i not in hidden]
+        return [i for i in self.ordered_panels if i not in hidden]
 
     def set_hidden_panels(self, panels: Sequence[int | str] | int | str) -> Self:
         """Replace the hidden panel set by index or exact panel title.
@@ -3101,6 +3156,41 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
     def show_all_panels(self) -> Self:
         """Restore every panel in the canvas grid."""
         self.hidden_panels = []
+        return self
+
+    def set_panel_order(self, panels: Sequence[int | str]) -> Self:
+        """Set the multi-panel display order by panel index or exact title.
+
+        The order is display-only: source data, titles, hidden state, stars,
+        and per-panel contrast stay keyed by their original panel indices.
+        """
+        order = self._normalize_panel_refs(panels, allow_empty=True)
+        if not order:
+            self.panel_order = []
+            return self
+        expected = set(range(int(self.n_panels)))
+        if len(order) != int(self.n_panels) or set(order) != expected:
+            raise ValueError("set_panel_order requires every panel exactly once")
+        self.panel_order = order
+        return self
+
+    def reset_panel_order(self) -> Self:
+        """Restore the natural source-panel order."""
+        self.panel_order = []
+        return self
+
+    def move_panel(self, panel: int | str, position: int) -> Self:
+        """Move one panel to a zero-based display position."""
+        idx = self._resolve_panel_ref(panel)
+        order = self.ordered_panels
+        order.remove(idx)
+        pos = int(position)
+        if pos < 0:
+            pos = 0
+        if pos > len(order):
+            pos = len(order)
+        order.insert(pos, idx)
+        self.panel_order = order
         return self
 
     def collapse_controls(self) -> Self:
@@ -3476,8 +3566,7 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
 
     def _animation_panel_indices(self) -> list[int]:
         """Return visible panel indices for panel-only animation export."""
-        hidden = set(int(i) for i in getattr(self, "hidden_panels", []))
-        panels = [i for i in range(int(self.n_panels)) if i not in hidden]
+        panels = self.visible_panels
         if not panels:
             raise ValueError("cannot export animation with every panel hidden")
         return panels
@@ -4607,10 +4696,10 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
             return None
         from quantem.widget.show2d import Show2D
 
-        hidden = {int(i) for i in getattr(self, "hidden_panels", [])}
         if panels is None:
-            panels = [p for p in range(int(self.n_panels)) if p not in hidden]
+            panels = self.visible_panels
         else:
+            hidden = {int(i) for i in getattr(self, "hidden_panels", [])}
             panels = [int(p) for p in panels if int(p) not in hidden]
         if not panels:
             panels = [0]
