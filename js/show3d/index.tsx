@@ -941,6 +941,7 @@ const MIN_IMAGE_ZOOM = 1;
 const MAX_ZOOM = 30;
 const MAX_PLAYBACK_FPS = 30;
 const HTML_EXPORT_OVERHEAD_BYTES = 700_000;
+const ANIMATION_QUALITY_SCALE: Record<string, number> = { low: 0.35, medium: 0.6, high: 1.0 };
 
 function formatEstimatedHtmlSize(payloadBytes: number): string {
   const htmlBytes = Math.max(0, payloadBytes) * 4 / 3 + HTML_EXPORT_OVERHEAD_BYTES;
@@ -948,6 +949,31 @@ function formatEstimatedHtmlSize(payloadBytes: number): string {
   if (mb >= 100) return `~${Math.round(mb)} MB`;
   if (mb >= 10) return `~${mb.toFixed(1)} MB`;
   return `~${mb.toFixed(2)} MB`;
+}
+
+function formatEstimatedAnimationWork(
+  width: number,
+  height: number,
+  nSlices: number,
+  visiblePanels: number,
+  maxCols: number,
+  panelGap: number,
+  quality: string,
+): string {
+  const scale = ANIMATION_QUALITY_SCALE[quality] ?? ANIMATION_QUALITY_SCALE.medium;
+  const panelW = Math.max(1, Math.floor(Math.max(1, width) * scale));
+  const panelH = Math.max(1, Math.floor(Math.max(1, height) * scale));
+  const panels = Math.max(1, visiblePanels);
+  const cols = maxCols <= 0 ? panels : Math.max(1, Math.min(maxCols, panels));
+  const rows = Math.max(1, Math.ceil(panels / cols));
+  const gap = Math.max(0, Math.round(panelGap || 0));
+  const outW = cols * panelW + Math.max(0, cols - 1) * gap;
+  const outH = rows * panelH + Math.max(0, rows - 1) * gap;
+  const rgbBytes = outW * outH * Math.max(1, nSlices) * 3;
+  const mb = rgbBytes / (1024 * 1024);
+  if (mb >= 100) return `~${Math.round(mb)} MB work`;
+  if (mb >= 10) return `~${mb.toFixed(1)} MB work`;
+  return `~${mb.toFixed(2)} MB work`;
 }
 
 const clampPlaybackFps = (value: number) => {
@@ -1690,6 +1716,9 @@ function Show3D() {
   const quantizedExportSize2 = formatEstimatedHtmlSize(Math.ceil(voxelCount / 4));
   const quantizedExportSize4 = formatEstimatedHtmlSize(Math.ceil(voxelCount / 16));
   const quantizedExportSize8 = formatEstimatedHtmlSize(Math.ceil(voxelCount / 64));
+  const gifLowEstimate = formatEstimatedAnimationWork(width, height, nSlices, visiblePanelCount, maxCols, panelGapTrait ?? 10, "low");
+  const gifMediumEstimate = formatEstimatedAnimationWork(width, height, nSlices, visiblePanelCount, maxCols, panelGapTrait ?? 10, "medium");
+  const gifHighEstimate = formatEstimatedAnimationWork(width, height, nSlices, visiblePanelCount, maxCols, panelGapTrait ?? 10, "high");
   const handleExportMenuOpen = (event: React.MouseEvent<HTMLElement>) => {
     setExportMenuAnchor(event.currentTarget);
   };
@@ -9582,12 +9611,12 @@ function Show3D() {
                     {height >= 2 && width >= 2 && <MenuItem onClick={() => handleExportSelect("quantized", "medium", 2)}>HTML quantized uint8, 2× binned ({quantizedExportSize2})</MenuItem>}
                     {height >= 4 && width >= 4 && <MenuItem onClick={() => handleExportSelect("quantized", "medium", 4)}>HTML quantized uint8, 4× binned ({quantizedExportSize4})</MenuItem>}
                     {height >= 8 && width >= 8 && <MenuItem onClick={() => handleExportSelect("quantized", "medium", 8)}>HTML quantized uint8, 8× binned ({quantizedExportSize8})</MenuItem>}
-                    <MenuItem onClick={() => handleExportSelect("gif", "low")}>GIF low</MenuItem>
-                    <MenuItem onClick={() => handleExportSelect("gif", "medium")}>GIF medium</MenuItem>
-                    <MenuItem onClick={() => handleExportSelect("gif", "high")}>GIF high</MenuItem>
-                    <MenuItem onClick={() => handleExportSelect("mp4", "low")}>MP4 low</MenuItem>
-                    <MenuItem onClick={() => handleExportSelect("mp4", "medium")}>MP4 medium</MenuItem>
-                    <MenuItem onClick={() => handleExportSelect("mp4", "high")}>MP4 high</MenuItem>
+                    <MenuItem onClick={() => handleExportSelect("gif", "low")}>GIF low ({gifLowEstimate})</MenuItem>
+                    <MenuItem onClick={() => handleExportSelect("gif", "medium")}>GIF medium ({gifMediumEstimate})</MenuItem>
+                    <MenuItem onClick={() => handleExportSelect("gif", "high")}>GIF high ({gifHighEstimate})</MenuItem>
+                    <MenuItem onClick={() => handleExportSelect("mp4", "low")}>MP4 low ({gifLowEstimate})</MenuItem>
+                    <MenuItem onClick={() => handleExportSelect("mp4", "medium")}>MP4 medium ({gifMediumEstimate})</MenuItem>
+                    <MenuItem onClick={() => handleExportSelect("mp4", "high")}>MP4 high ({gifHighEstimate})</MenuItem>
                   </Menu>
                 </>
               )}

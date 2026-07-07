@@ -116,6 +116,10 @@ slide/email choice; high is sharper but larger. Pass `show_frame_labels=True`
 when panel titles should include the same live-style frame label and count that
 the widget canvas shows. GIF/MP4 exports keep the panel labels, scale bar, and
 zoom readout styling consistent with the static/offline widget image output.
+The widget **Export** menu keeps the common path simple: choose `GIF low`,
+`GIF medium`, `GIF high`, or the matching MP4 option. The size shown in that
+menu is estimated uncompressed RGB render work, so the final GIF/MP4 file is
+usually smaller but can vary with image texture and palette compression.
 
 ```python
 w.save_gif("movie.gif", quality="medium", fps=6, show_frame_labels=True)
@@ -124,6 +128,21 @@ w.save_gif("movie.gif", quality="medium", fps=6, show_frame_labels=True)
 The GIF/MP4 path exports the full panel frames. Browser-only zoom and pan
 gestures are view state, so use HTML export when collaborators need to continue
 zooming, panning, or changing contrast interactively.
+
+Advanced animation choices stay in Python and the maintainer smoke report
+rather than crowding the widget toolbar. Use the Python API for frame labels,
+background color, bounce playback, and other presentation-specific choices:
+
+```python
+w.save_gif(
+    "movie.gif",
+    quality="medium",
+    fps=6,
+    playback="bounce",
+    show_frame_labels=True,
+    background="black",
+)
+```
 
 ```{note}
 `export_html(quantized=True)` writes the smaller uint8 pack; the default writes

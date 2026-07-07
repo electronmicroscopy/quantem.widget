@@ -71,17 +71,27 @@ Export menu labels should tell users what will be saved:
 - Format or mode: `HTML`, `GIF`, `MP4`, `PNG`
 - Encoding: `Exact float32`, `Exact uint16`, `Quantized uint8`
 - Reduction: `Downsample 2x`, `Binned 4x`, or the widget-specific reducer
-- Estimated size when available
+- Estimated size or render work when available
 
 Examples:
 
 - `HTML exact float32 (82 MB)`
 - `HTML quantized uint8 (21 MB)`
 - `Binned 4x uint16 (180 MB)`
-- `GIF medium`
+- `GIF medium (1.6 MB work)`
 
 Do not hide scientific reductions behind vague words like "small" unless the
 menu also says what changed.
+
+For animation exports, the GUI may not know the compressed GIF/MP4 size before
+encoding. In that case, show estimated uncompressed RGB render work and keep
+the label explicit. Do not imply this estimate is the final file size.
+
+Keep advanced animation controls out of the primary toolbar unless they become
+common user actions. The GUI should expose the simple path, usually
+`GIF low/medium/high` and `MP4 low/medium/high`; Python and maintainer smoke
+reports should cover advanced options such as frame labels, background color,
+bounce playback, panel gap, and dry-run planning.
 
 ## Visual testing
 
