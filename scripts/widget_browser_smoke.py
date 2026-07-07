@@ -143,7 +143,7 @@ def _visible_text_present(page, text: str) -> bool:
             """(text) => {
               const normalize = (value) => value.trim().replace(/:$/, '').toLowerCase();
               const wanted = normalize(text);
-              for (const node of [...document.querySelectorAll('button,[role="button"],label,span,div')]) {
+              for (const node of [...document.querySelectorAll('button,[role="button"],label,p,span,div')]) {
                 const value = normalize(node.textContent || '');
                 if (value !== wanted) continue;
                 const rect = node.getBoundingClientRect();
@@ -169,22 +169,24 @@ def _toggle_labeled_switch(page, label: str) -> dict[str, Any]:
             const style = getComputedStyle(node);
             return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
           };
-          const textNodes = [...document.querySelectorAll('button,[role="button"],label,span,div')]
+          const textNodes = [...document.querySelectorAll('button,[role="button"],label,p,span,div')]
             .filter(node => normalize(node.textContent || '') === wanted && visible(node));
           for (const node of textNodes) {
-            const candidates = [];
-            let cursor = node;
-            for (let depth = 0; cursor && depth < 5; depth += 1, cursor = cursor.parentElement) {
-              candidates.push(...cursor.querySelectorAll('input[type="checkbox"]'));
-              if (cursor.nextElementSibling) {
-                candidates.push(...cursor.nextElementSibling.querySelectorAll('input[type="checkbox"]'));
-                if (cursor.nextElementSibling.matches?.('input[type="checkbox"]')) {
-                  candidates.push(cursor.nextElementSibling);
-                }
-              }
-            }
-            const input = candidates.find(item => visible(item.closest('label') || item.parentElement || item));
-            if (input) {
+            const labelRect = node.getBoundingClientRect();
+            const labelCy = labelRect.y + labelRect.height / 2;
+            const candidates = [...document.querySelectorAll('input[type="checkbox"]')]
+              .map((input) => {
+                const host = input.closest('.MuiSwitch-root') || input.closest('label') || input.parentElement || input;
+                const rect = host.getBoundingClientRect();
+                return {input, host, rect, score: Math.abs((rect.y + rect.height / 2) - labelCy) + Math.max(0, labelRect.right - rect.left)};
+              })
+              .filter((item) =>
+                visible(item.host) &&
+                Math.abs((item.rect.y + item.rect.height / 2) - labelCy) <= Math.max(24, labelRect.height * 1.8) &&
+                item.rect.left >= labelRect.left - 4
+              )
+              .sort((a, b) => a.score - b.score);
+            for (const {input} of candidates) {
               const before = Boolean(input.checked);
               input.click();
               return {found: true, before, after: Boolean(input.checked)};
@@ -194,6 +196,168 @@ def _toggle_labeled_switch(page, label: str) -> dict[str, Any]:
         }""",
         label,
     )
+
+
+def _canvas_layout_summary(page) -> dict[str, Any]:
+    return page.evaluate(
+        """() => {
+          const boxes = [...document.querySelectorAll('canvas')].map((canvas, index) => {
+            const rect = canvas.getBoundingClientRect();
+            const style = getComputedStyle(canvas);
+            return {
+              index,
+              x: rect.x,
+              y: rect.y,
+              width: rect.width,
+              height: rect.height,
+              area: rect.width * rect.height,
+              backingWidth: canvas.width,
+              backingHeight: canvas.height,
+              visible: rect.width > 24 && rect.height > 24 && canvas.width > 0 && canvas.height > 0 &&
+                style.visibility !== 'hidden' && style.display !== 'none' && Number(style.opacity || '1') > 0.05
+            };
+          }).filter((item) => item.visible);
+          const maxArea = boxes.reduce((value, item) => Math.max(value, item.area), 0);
+          const large = boxes.filter((item) => item.area >= maxArea * 0.45 && item.width >= 48 && item.height >= 48);
+          const rows = [];
+          for (const item of [...large].sort((a, b) => a.y - b.y || a.x - b.x)) {
+            const row = rows.find((candidate) => Math.abs(candidate.y - item.y) <= Math.max(12, item.height * 0.18));
+            if (row) {
+              row.y = (row.y * row.items.length + item.y) / (row.items.length + 1);
+              row.items.push(item);
+            } else {
+              rows.push({y: item.y, items: [item]});
+            }
+          }
+          const rowCounts = rows.map((row) => row.items.length);
+          const primary = [...boxes].sort((a, b) => b.area - a.area)[0] || null;
+          const signature = large
+            .map((item) => [Math.round(item.x), Math.round(item.y), Math.round(item.width), Math.round(item.height)].join(','))
+            .join('|');
+          const allSignature = boxes
+            .map((item) => [Math.round(item.x), Math.round(item.y), Math.round(item.width), Math.round(item.height)].join(','))
+            .join('|');
+          return {
+            canvas_count: boxes.length,
+            large_canvas_count: large.length,
+            row_counts: rowCounts,
+            max_row_count: rowCounts.length ? Math.max(...rowCounts) : 0,
+            primary,
+            primary_aspect: primary ? primary.width / Math.max(1, primary.height) : null,
+            signature,
+            all_signature: allSignature,
+          };
+        }"""
+    )
+
+
+def _mui_select_value(page, aria_label: str) -> str | None:
+    return page.evaluate(
+        """(ariaLabel) => {
+          const control = [...document.querySelectorAll('[aria-label]')]
+            .find((node) => node.getAttribute('aria-label') === ariaLabel);
+          if (!control) return null;
+          return control.value ?? (control.textContent || '').trim();
+        }""",
+        aria_label,
+    )
+
+
+def _select_mui_option(page, aria_label: str, value: int | str) -> dict[str, Any]:
+    before = _mui_select_value(page, aria_label)
+    opened = page.evaluate(
+        """(ariaLabel) => {
+          const visible = (node) => {
+            const rect = node.getBoundingClientRect();
+            const style = getComputedStyle(node);
+            return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+          };
+          const control = [...document.querySelectorAll('[aria-label]')]
+            .find((node) => node.getAttribute('aria-label') === ariaLabel);
+          if (!control) return false;
+          const root = control.closest('.MuiInputBase-root') || control.parentElement;
+          const target = root?.querySelector('[role="combobox"]') || root || control;
+          if (!target || !visible(target)) return false;
+          target.dispatchEvent(new MouseEvent('mousedown', {bubbles: true, cancelable: true, view: window}));
+          target.click();
+          return true;
+        }""",
+        aria_label,
+    )
+    if not opened:
+        return {"found": False, "before": before, "after": before, "selected": False}
+    page.wait_for_timeout(120)
+    selected = page.evaluate(
+        """(value) => {
+          const wanted = String(value).trim();
+          const visible = (node) => {
+            const rect = node.getBoundingClientRect();
+            const style = getComputedStyle(node);
+            return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+          };
+          const options = [...document.querySelectorAll('[role="option"], .MuiMenuItem-root')]
+            .filter(visible);
+          const option = options.find((node) => (node.textContent || '').trim() === wanted);
+          if (!option) return false;
+          option.click();
+          return true;
+        }""",
+        str(value),
+    )
+    page.wait_for_timeout(260)
+    after = _mui_select_value(page, aria_label)
+    return {"found": True, "before": before, "after": after, "selected": bool(selected)}
+
+
+def _exercise_column_select(page, aria_label: str, target: int) -> dict[str, Any]:
+    before = _canvas_layout_summary(page)
+    before_value = _mui_select_value(page, aria_label)
+    to_target = _select_mui_option(page, aria_label, target)
+    target_layout = _canvas_layout_summary(page)
+    restored: dict[str, Any] | None = None
+    restored_layout: dict[str, Any] | None = None
+    if before_value is not None and before_value != str(target):
+        restored = _select_mui_option(page, aria_label, before_value)
+        restored_layout = _canvas_layout_summary(page)
+    changed = (
+        before.get("signature") != target_layout.get("signature") or
+        before.get("primary_aspect") != target_layout.get("primary_aspect")
+    )
+    return {
+        "aria_label": aria_label,
+        "target": target,
+        "before_value": before_value,
+        "to_target": to_target,
+        "before_layout": before,
+        "target_layout": target_layout,
+        "changed": bool(to_target.get("selected") and changed),
+        "restored": restored,
+        "restored_layout": restored_layout,
+    }
+
+
+def _exercise_fft_toggle(page) -> dict[str, Any]:
+    before_layout = _canvas_layout_summary(page)
+    before_hash = _sha256(page.screenshot(full_page=False))
+    off = _toggle_labeled_switch(page, "FFT")
+    page.wait_for_timeout(260)
+    off_layout = _canvas_layout_summary(page)
+    off_hash = _sha256(page.screenshot(full_page=False))
+    on = _toggle_labeled_switch(page, "FFT") if off.get("found") else {"found": False, "before": None, "after": None}
+    page.wait_for_timeout(420)
+    on_layout = _canvas_layout_summary(page)
+    on_hash = _sha256(page.screenshot(full_page=False))
+    return {
+        "off": off,
+        "on": on,
+        "before_layout": before_layout,
+        "off_layout": off_layout,
+        "on_layout": on_layout,
+        "layout_changed_when_off": before_layout.get("all_signature") != off_layout.get("all_signature"),
+        "visual_changed_when_off": before_hash != off_hash,
+        "visual_changed_after_restore": off_hash != on_hash,
+        "rendered_after_on": on_layout.get("canvas_count", 0) >= 2,
+    }
 
 
 def _measure_fps(page, duration_ms: int) -> float:
@@ -225,7 +389,7 @@ def _click_text_controls(page, labels: list[str]) -> list[str]:
         did_click = page.evaluate(
             """(label) => {
               const wanted = label.toLowerCase();
-              const nodes = [...document.querySelectorAll('button,[role="button"],label,span,div')]
+              const nodes = [...document.querySelectorAll('button,[role="button"],label,p,span,div')]
                 .filter(node => (node.textContent || '').trim().toLowerCase() === wanted);
               for (const node of nodes) {
                 const rect = node.getBoundingClientRect();
@@ -387,8 +551,8 @@ def _exercise_show3d_reorder(page) -> dict[str, Any]:
     page.wait_for_timeout(80)
     ghost_start = _show3d_reorder_ghost(page)
     page.mouse.move(start_x + (end_x - start_x) * 0.35, start_y + (end_y - start_y) * 0.25, steps=6)
-    page.mouse.move(start_x + (end_x - start_x) * 0.72, start_y + (end_y - start_y) * 0.1, steps=8)
-    page.wait_for_timeout(120)
+    page.mouse.move(start_x + (end_x - start_x) * 0.85, start_y + (end_y - start_y) * 0.1, steps=8)
+    page.wait_for_timeout(220)
     ghost_mid = _show3d_reorder_ghost(page)
     during = _show3d_reorder_labels(page)
     result["during"] = during
@@ -399,12 +563,19 @@ def _exercise_show3d_reorder(page) -> dict[str, Any]:
         and ghost_mid
         and abs(float(ghost_mid["x"]) - float(ghost_start["x"])) > 12
     )
-    page.mouse.move(end_x, end_y, steps=8)
     page.mouse.up()
     page.wait_for_timeout(250)
     after = _show3d_reorder_labels(page)
     result["after"] = after
     result["changed"] = bool(before and after and before != after and before[0] == after[-1])
+    page.evaluate(
+        """() => {
+          const button = [...document.querySelectorAll('button')]
+            .find((el) => (el.textContent || '').trim() === 'Reorder' && el.getAttribute('aria-pressed') === 'true');
+          if (button) button.click();
+        }"""
+    )
+    page.wait_for_timeout(120)
     return result
 
 
@@ -425,16 +596,77 @@ def _semantic_checks(page, row: dict[str, Any], canvas_count: int) -> dict[str, 
 
     if "fft" in variant:
         fft_present = _visible_text_present(page, "FFT")
-        fft_toggle = _toggle_labeled_switch(page, "FFT")
         body_has_fft = bool(page.evaluate("document.body.innerText.toLowerCase().includes('fft')"))
         fft_rendered = canvas_count >= 2
+        fft_toggle = _exercise_fft_toggle(page)
         checks["fft_label_visible"] = fft_present
         checks["fft_text_present"] = body_has_fft
         checks["fft_rendered"] = fft_rendered
         checks["fft_toggle"] = fft_toggle
         if not (fft_present or body_has_fft or fft_rendered):
             errors.append("FFT state is not visible for FFT variant")
+        if not fft_toggle["off"]["found"]:
+            errors.append("FFT toggle could not be found")
+        elif not (fft_toggle["off"]["before"] is True and fft_toggle["off"]["after"] is False):
+            errors.append(f"FFT toggle did not turn off cleanly: {fft_toggle['off']}")
+        elif not (fft_toggle["on"]["found"] and fft_toggle["on"]["after"] is True):
+            errors.append(f"FFT toggle did not restore on cleanly: {fft_toggle['on']}")
+        if (
+            fft_toggle["off"]["found"]
+            and not fft_toggle["layout_changed_when_off"]
+            and not fft_toggle["visual_changed_when_off"]
+        ):
+            errors.append("FFT toggle did not change visible canvas layout or viewport pixels")
+        if fft_toggle["off"]["found"] and not fft_toggle["visual_changed_after_restore"]:
+            errors.append("FFT toggle restore did not change viewport pixels")
+        if not fft_toggle["rendered_after_on"]:
+            errors.append("FFT did not render visible canvases after being toggled back on")
         page.wait_for_timeout(120)
+
+    narrow_viewport = bool(page.evaluate("window.innerWidth < 700"))
+    show2d_column_targets = {
+        "show2d-gallery-3": 1,
+        "show2d-gallery-6-fft": 2,
+        "show2d-hidden-starred": 2,
+        "show2d-compact-no-titles": 2,
+    }
+    show3d_column_targets = {
+        "show3d-hidden-panel": 1,
+        "show3d-four-panel-downsample": 2,
+    }
+    if variant in show2d_column_targets:
+        column_check = _exercise_column_select(page, "Gallery columns", show2d_column_targets[variant])
+        checks["column_select"] = column_check
+        if not column_check["to_target"]["found"]:
+            errors.append("Show2D column select could not be found")
+        elif not column_check["to_target"]["selected"]:
+            errors.append(f"Show2D column select could not choose {column_check['target']}")
+        elif not column_check["changed"] and not narrow_viewport:
+            errors.append(
+                "Show2D column select did not change gallery layout "
+                f"({column_check['before_layout']} -> {column_check['target_layout']})"
+            )
+        elif not column_check["changed"]:
+            column_check["layout_change_skipped_reason"] = "narrow responsive viewport"
+        if column_check["restored"] is not None and not column_check["restored"].get("selected"):
+            errors.append(f"Show2D column select did not restore {column_check['before_value']}")
+
+    if variant in show3d_column_targets:
+        column_check = _exercise_column_select(page, "Show3D panel columns", show3d_column_targets[variant])
+        checks["column_select"] = column_check
+        if not column_check["to_target"]["found"]:
+            errors.append("Show3D column select could not be found")
+        elif not column_check["to_target"]["selected"]:
+            errors.append(f"Show3D column select could not choose {column_check['target']}")
+        elif not column_check["changed"] and not narrow_viewport:
+            errors.append(
+                "Show3D column select did not change panel layout "
+                f"({column_check['before_layout']} -> {column_check['target_layout']})"
+            )
+        elif not column_check["changed"]:
+            column_check["layout_change_skipped_reason"] = "narrow responsive viewport"
+        if column_check["restored"] is not None and not column_check["restored"].get("selected"):
+            errors.append(f"Show3D column select did not restore {column_check['before_value']}")
 
     if variant in {"show2d-gallery-3", "show3d-three-panels"}:
         reorder_visible = _visible_text_present(page, "Reorder")
@@ -490,6 +722,22 @@ def _semantic_checks(page, row: dict[str, Any], canvas_count: int) -> dict[str, 
                 "Show3D reorder order did not update before mouse release "
                 f"({reorder_drag['before']} -> {reorder_drag['during']})"
             )
+
+        column_check = _exercise_column_select(page, "Show3D panel columns", 1)
+        checks["column_select"] = column_check
+        if not column_check["to_target"]["found"]:
+            errors.append("Show3D column select could not be found")
+        elif not column_check["to_target"]["selected"]:
+            errors.append(f"Show3D column select could not choose {column_check['target']}")
+        elif not column_check["changed"] and not narrow_viewport:
+            errors.append(
+                "Show3D column select did not change panel layout "
+                f"({column_check['before_layout']} -> {column_check['target_layout']})"
+            )
+        elif not column_check["changed"]:
+            column_check["layout_change_skipped_reason"] = "narrow responsive viewport"
+        if column_check["restored"] is not None and not column_check["restored"].get("selected"):
+            errors.append(f"Show3D column select did not restore {column_check['before_value']}")
 
     checks["errors"] = errors
     return checks
