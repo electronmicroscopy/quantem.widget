@@ -100,6 +100,7 @@ const typography = {
   title: { fontWeight: "bold" as const },
 };
 type FftOverlayPosition = "top-left" | "top-right" | "bottom-left" | "bottom-right";
+type ReorderPlacement = "before" | "after";
 
 function useMobileViewport(): boolean {
   const getIsMobile = React.useCallback(() => {
@@ -1459,8 +1460,10 @@ function Show3D() {
   const [panelOrder, setPanelOrder] = useModelState<number[]>("panel_order");
   const [reorderMode, setReorderMode] = React.useState(false);
   const [dragOverPanel, setDragOverPanel] = React.useState<number | null>(null);
+  const [reorderPreviewOrder, setReorderPreviewOrder] = React.useState<number[] | null>(null);
   const draggedPanelRef = React.useRef<number | null>(null);
   const pointerReorderPanelRef = React.useRef<number | null>(null);
+  const reorderPreviewOrderRef = React.useRef<number[] | null>(null);
   const totalPanelCount = Math.max(1, nPanels || 1);
   const hiddenPanelSet = React.useMemo(() => {
     const clean = new Set<number>();
@@ -1484,9 +1487,19 @@ function Show3D() {
     );
     return valid ? values : naturalPanelOrder;
   }, [panelOrder, naturalPanelOrder, totalPanelCount]);
+  const previewOrderedPanelIndices = React.useMemo(() => {
+    const values = Array.isArray(reorderPreviewOrder) ? reorderPreviewOrder.map(value => Math.trunc(Number(value))) : [];
+    const valid = (
+      values.length === totalPanelCount &&
+      values.every((value) => Number.isFinite(value) && value >= 0 && value < totalPanelCount) &&
+      new Set(values).size === totalPanelCount
+    );
+    return valid ? values : null;
+  }, [reorderPreviewOrder, totalPanelCount]);
+  const displayOrderedPanelIndices = previewOrderedPanelIndices || orderedPanelIndices;
   const visiblePanelIndices = React.useMemo(
-    () => orderedPanelIndices.filter(panel => !hiddenPanelSet.has(panel)),
-    [hiddenPanelSet, orderedPanelIndices]
+    () => displayOrderedPanelIndices.filter(panel => !hiddenPanelSet.has(panel)),
+    [hiddenPanelSet, displayOrderedPanelIndices]
   );
   const visiblePanelCount = visiblePanelIndices.length;
   const panelLabel = React.useCallback((panel: number) => (
@@ -1513,85 +1526,186 @@ function Show3D() {
     const natural = clean.every((value, idx) => value === idx);
     setPanelOrder(natural ? [] : clean);
   }, [setPanelOrder, totalPanelCount]);
-  const movePanelBefore = React.useCallback((source: number, target: number) => {
-    if (source === target) return;
-    const next = [...orderedPanelIndices];
+  const setReorderPreviewOrderValue = React.useCallback((order: number[] | null) => {
+    reorderPreviewOrderRef.current = order;
+    setReorderPreviewOrder(order);
+  }, []);
+  const buildPanelMovedOrder = React.useCallback((
+    source: number,
+    target: number,
+    placement: ReorderPlacement,
+    baseOrder?: number[] | null,
+  ): number[] | null => {
+    if (source === target) return null;
+    const base = Array.isArray(baseOrder) && baseOrder.length === totalPanelCount
+      ? baseOrder
+      : orderedPanelIndices;
+    const next = [...base];
     const from = next.indexOf(source);
-    if (from < 0) return;
+    if (from < 0) return null;
     next.splice(from, 1);
-    const to = next.indexOf(target);
-    if (to < 0) return;
-    next.splice(to, 0, source);
-    applyPanelOrder(next);
-  }, [applyPanelOrder, orderedPanelIndices]);
+    const targetIndex = next.indexOf(target);
+    if (targetIndex < 0) return null;
+    const insertAt = placement === "after" ? targetIndex + 1 : targetIndex;
+    next.splice(insertAt, 0, source);
+    return next;
+  }, [orderedPanelIndices, totalPanelCount]);
+  const panelReorderTargetFromPoint = React.useCallback((clientX: number, clientY: number): { panel: number; placement: ReorderPlacement } | null => {
+    if (typeof document === "undefined") return null;
+    const elements = document.elementsFromPoint(clientX, clientY);
+    let targetEl: HTMLElement | null = null;
+    for (const element of elements) {
+      if (!(element instanceof HTMLElement)) continue;
+      const candidate = element.closest("[data-show3d-reorder-panel]");
+      if (candidate instanceof HTMLElement) {
+        targetEl = candidate;
+        break;
+      }
+    }
+    const allTargets = Array.from(document.querySelectorAll<HTMLElement>("[data-show3d-reorder-panel]"))
+      .map((element) => {
+        const rect = element.getBoundingClientRect();
+        const raw = element.dataset.show3dReorderPanel;
+        const panel = raw == null ? Number.NaN : Math.trunc(Number(raw));
+        return { element, rect, panel };
+      })
+      .filter((item) => Number.isFinite(item.panel) && item.rect.width > 0 && item.rect.height > 0);
+    if (!targetEl && allTargets.length) {
+      let best = allTargets[0];
+      let bestDistance = Number.POSITIVE_INFINITY;
+      for (const item of allTargets) {
+        const dx = Math.max(item.rect.left - clientX, 0, clientX - item.rect.right);
+        const dy = Math.max(item.rect.top - clientY, 0, clientY - item.rect.bottom);
+        const distance = dx * dx + dy * dy;
+        if (distance < bestDistance) {
+          best = item;
+          bestDistance = distance;
+        }
+      }
+      targetEl = best.element;
+    }
+    if (!targetEl) return null;
+    const raw = targetEl.dataset.show3dReorderPanel;
+    const panel = raw == null ? Number.NaN : Math.trunc(Number(raw));
+    if (!Number.isFinite(panel) || panel < 0 || panel >= totalPanelCount) return null;
+    const rect = targetEl.getBoundingClientRect();
+    const sameRowNeighbor = allTargets.some((item) => item.panel !== panel && Math.abs(item.rect.top - rect.top) < 8);
+    const sameColumnNeighbor = allTargets.some((item) => item.panel !== panel && Math.abs(item.rect.left - rect.left) < 8);
+    const useHorizontal = sameRowNeighbor || !sameColumnNeighbor;
+    const placement: ReorderPlacement = useHorizontal
+      ? (clientX >= rect.left + rect.width / 2 ? "after" : "before")
+      : (clientY >= rect.top + rect.height / 2 ? "after" : "before");
+    return { panel, placement };
+  }, [totalPanelCount]);
+  const previewPanelReorderFromPoint = React.useCallback((clientX: number, clientY: number) => {
+    const source = pointerReorderPanelRef.current ?? draggedPanelRef.current;
+    if (source === null) return;
+    const target = panelReorderTargetFromPoint(clientX, clientY);
+    if (!target) return;
+    setDragOverPanel(target.panel);
+    const base = reorderPreviewOrderRef.current || orderedPanelIndices;
+    const next = buildPanelMovedOrder(source, target.panel, target.placement, base);
+    if (!next) return;
+    const current = reorderPreviewOrderRef.current || orderedPanelIndices;
+    if (next.length === current.length && next.every((value, idx) => value === current[idx])) return;
+    setReorderPreviewOrderValue(next);
+  }, [buildPanelMovedOrder, orderedPanelIndices, panelReorderTargetFromPoint, setReorderPreviewOrderValue]);
+  const commitPanelReorderPreview = React.useCallback(() => {
+    const next = reorderPreviewOrderRef.current;
+    if (next) applyPanelOrder(next);
+    setReorderPreviewOrderValue(null);
+    setDragOverPanel(null);
+    draggedPanelRef.current = null;
+    pointerReorderPanelRef.current = null;
+  }, [applyPanelOrder, setReorderPreviewOrderValue]);
+  const cancelPanelReorderPreview = React.useCallback(() => {
+    setReorderPreviewOrderValue(null);
+    setDragOverPanel(null);
+    draggedPanelRef.current = null;
+    pointerReorderPanelRef.current = null;
+  }, [setReorderPreviewOrderValue]);
   const handlePanelDragStart = React.useCallback((event: React.DragEvent, panel: number) => {
     if (!reorderMode) return;
     draggedPanelRef.current = panel;
+    setReorderPreviewOrderValue(orderedPanelIndices);
+    setDragOverPanel(panel);
     event.dataTransfer.effectAllowed = "move";
     event.dataTransfer.setData("text/plain", String(panel));
     event.stopPropagation();
-  }, [reorderMode]);
+  }, [orderedPanelIndices, reorderMode, setReorderPreviewOrderValue]);
   const handlePanelDragOver = React.useCallback((event: React.DragEvent, panel: number) => {
     if (!reorderMode) return;
     event.preventDefault();
     event.dataTransfer.dropEffect = "move";
     if (dragOverPanel !== panel) setDragOverPanel(panel);
+    previewPanelReorderFromPoint(event.clientX, event.clientY);
     event.stopPropagation();
-  }, [dragOverPanel, reorderMode]);
-  const handlePanelDrop = React.useCallback((event: React.DragEvent, panel: number) => {
+  }, [dragOverPanel, previewPanelReorderFromPoint, reorderMode]);
+  const handlePanelDrop = React.useCallback((event: React.DragEvent) => {
     if (!reorderMode) return;
     event.preventDefault();
     const raw = event.dataTransfer.getData("text/plain");
     const source = raw.trim() !== "" && Number.isFinite(Number(raw))
       ? Math.trunc(Number(raw))
       : draggedPanelRef.current;
-    if (source !== null && source !== undefined) movePanelBefore(source, panel);
-    setDragOverPanel(null);
-    draggedPanelRef.current = null;
+    if (source !== null && source !== undefined) {
+      draggedPanelRef.current = source;
+      previewPanelReorderFromPoint(event.clientX, event.clientY);
+    }
+    commitPanelReorderPreview();
     event.stopPropagation();
-  }, [movePanelBefore, reorderMode]);
+  }, [commitPanelReorderPreview, previewPanelReorderFromPoint, reorderMode]);
   const handlePanelDragEnd = React.useCallback(() => {
-    setDragOverPanel(null);
-    draggedPanelRef.current = null;
-  }, []);
+    cancelPanelReorderPreview();
+  }, [cancelPanelReorderPreview]);
   const handlePanelReorderPointerDown = React.useCallback((event: React.PointerEvent, panel: number) => {
     if (!reorderMode) return;
     pointerReorderPanelRef.current = panel;
     draggedPanelRef.current = panel;
+    setReorderPreviewOrderValue(orderedPanelIndices);
     setDragOverPanel(panel);
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+      // Some browser automation paths do not expose pointer capture.
+    }
     event.preventDefault();
     event.stopPropagation();
-  }, [reorderMode]);
+  }, [orderedPanelIndices, reorderMode, setReorderPreviewOrderValue]);
   const handlePanelReorderPointerEnter = React.useCallback((event: React.PointerEvent, panel: number) => {
     if (!reorderMode || pointerReorderPanelRef.current === null) return;
     if (dragOverPanel !== panel) setDragOverPanel(panel);
     event.stopPropagation();
   }, [dragOverPanel, reorderMode]);
-  const handlePanelReorderPointerUp = React.useCallback((event: React.PointerEvent, panel: number) => {
-    if (!reorderMode) return;
-    const source = pointerReorderPanelRef.current;
-    if (source !== null) movePanelBefore(source, panel);
-    pointerReorderPanelRef.current = null;
-    draggedPanelRef.current = null;
-    setDragOverPanel(null);
+  const handlePanelReorderPointerMove = React.useCallback((event: React.PointerEvent) => {
+    if (!reorderMode || pointerReorderPanelRef.current === null) return;
+    previewPanelReorderFromPoint(event.clientX, event.clientY);
     event.preventDefault();
     event.stopPropagation();
-  }, [movePanelBefore, reorderMode]);
+  }, [previewPanelReorderFromPoint, reorderMode]);
+  const handlePanelReorderPointerUp = React.useCallback((event: React.PointerEvent) => {
+    if (!reorderMode) return;
+    previewPanelReorderFromPoint(event.clientX, event.clientY);
+    commitPanelReorderPreview();
+    try {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    } catch {
+      // Ignore capture release failures from synthetic pointer streams.
+    }
+    event.preventDefault();
+    event.stopPropagation();
+  }, [commitPanelReorderPreview, previewPanelReorderFromPoint, reorderMode]);
   const resetPanelOrder = React.useCallback(() => {
     setPanelOrder([]);
-    setDragOverPanel(null);
-    draggedPanelRef.current = null;
-    pointerReorderPanelRef.current = null;
-  }, [setPanelOrder]);
+    cancelPanelReorderPreview();
+  }, [cancelPanelReorderPreview, setPanelOrder]);
   React.useEffect(() => {
     if ((nPanels || 1) <= 1 && reorderMode) setReorderMode(false);
   }, [nPanels, reorderMode]);
   React.useEffect(() => {
     if (reorderMode) return;
-    pointerReorderPanelRef.current = null;
-    draggedPanelRef.current = null;
-    setDragOverPanel(null);
-  }, [reorderMode]);
+    cancelPanelReorderPreview();
+  }, [cancelPanelReorderPreview, reorderMode]);
   const [hiddenIndices] = useModelState<number[]>("hidden_indices");
   const hiddenSet = new Set(hiddenIndices || []);
   const nextVisible = (from: number, dir: 1 | -1, allowWrap = true): number => {
@@ -9798,8 +9912,8 @@ function Show3D() {
               },
               ...(reorderMode ? {
                 "@keyframes show3d-reorder-jiggle": {
-                  "0%": { rotate: "-0.18deg" },
-                  "100%": { rotate: "0.18deg" },
+                  "0%": { rotate: "-0.45deg" },
+                  "100%": { rotate: "0.45deg" },
                 },
               } : {}),
               cursor: reorderMode
@@ -10009,15 +10123,17 @@ function Show3D() {
                   key={`panel-reorder-${panel}`}
                   draggable={reorderMode}
                   role="button"
+                  data-show3d-reorder-panel={panel}
                   aria-label={`Move ${panelLabel(panel)}`}
                   title={`Drag to reorder ${panelLabel(panel)}`}
                   onDragStart={(event) => handlePanelDragStart(event, panel)}
                   onDragOver={(event) => handlePanelDragOver(event, panel)}
-                  onDrop={(event) => handlePanelDrop(event, panel)}
+                  onDrop={handlePanelDrop}
                   onDragEnd={handlePanelDragEnd}
                   onPointerDown={(event) => handlePanelReorderPointerDown(event, panel)}
                   onPointerEnter={(event) => handlePanelReorderPointerEnter(event, panel)}
-                  onPointerUp={(event) => handlePanelReorderPointerUp(event, panel)}
+                  onPointerMove={handlePanelReorderPointerMove}
+                  onPointerUp={handlePanelReorderPointerUp}
                   sx={{
                     position: "absolute",
                     top: `${(panelTop / Math.max(1, canvasH)) * 100}%`,
@@ -10025,14 +10141,15 @@ function Show3D() {
                     width: `${(panelW / Math.max(1, canvasW)) * 100}%`,
                     height: `${(panelH / Math.max(1, canvasH)) * 100}%`,
                     boxSizing: "border-box",
-                    border: `2px solid ${active ? themeColors.accent : "rgba(255,255,255,0.45)"}`,
-                    bgcolor: active ? "rgba(79, 195, 247, 0.12)" : "rgba(0,0,0,0.02)",
+                    border: `2px solid ${active ? themeColors.accent : "rgba(255,255,255,0.48)"}`,
+                    bgcolor: active ? "rgba(79, 195, 247, 0.16)" : "rgba(0,0,0,0.04)",
                     outline: active ? `1px solid ${themeColors.accent}` : "none",
                     opacity: draggedPanelRef.current === panel ? 0.72 : 1,
-                    transform: active ? "translateY(-2px)" : "translateY(0)",
-                    transition: "transform 120ms ease, opacity 120ms ease, background-color 120ms ease, border-color 120ms ease",
-                    animation: "show3d-reorder-jiggle 180ms ease-in-out infinite alternate",
-                    cursor: "grab",
+                    transform: active ? "translateY(-3px) scale(1.006)" : "translateY(0) scale(1)",
+                    transition: "transform 110ms ease, opacity 110ms ease, background-color 110ms ease, border-color 110ms ease, box-shadow 110ms ease",
+                    animation: "show3d-reorder-jiggle 220ms ease-in-out infinite alternate",
+                    boxShadow: active ? `0 0 0 2px ${themeColors.accent}, 0 8px 18px rgba(0,0,0,0.20)` : "none",
+                    cursor: draggedPanelRef.current === panel ? "grabbing" : "grab",
                     pointerEvents: "auto",
                     zIndex: 8,
                   }}

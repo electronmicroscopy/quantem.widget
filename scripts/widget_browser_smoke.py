@@ -303,6 +303,72 @@ def _drive_canvas(page, box: dict[str, float]) -> None:
     page.wait_for_timeout(180)
 
 
+def _show3d_reorder_labels(page) -> list[str]:
+    return page.evaluate(
+        """() => {
+          return [...document.querySelectorAll('[data-show3d-reorder-panel]')]
+            .map((el) => {
+              const rect = el.getBoundingClientRect();
+              const label = (el.getAttribute('aria-label') || '').replace(/^Move\\s+/, '');
+              return { label, x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+            })
+            .filter((item) => item.label && item.width > 40 && item.height > 40)
+            .sort((a, b) => a.y - b.y || a.x - b.x)
+            .map((item) => item.label);
+        }"""
+    )
+
+
+def _exercise_show3d_reorder(page) -> dict[str, Any]:
+    result: dict[str, Any] = {"attempted": False, "before": [], "after": [], "changed": False}
+    opened = page.evaluate(
+        """() => {
+          const button = [...document.querySelectorAll('button')]
+            .find((el) => (el.textContent || '').trim() === 'Reorder');
+          if (!button) return false;
+          button.click();
+          return true;
+        }"""
+    )
+    if not opened:
+        return result
+    page.wait_for_timeout(180)
+    before = _show3d_reorder_labels(page)
+    result["attempted"] = True
+    result["before"] = before
+    boxes = page.evaluate(
+        """() => {
+          return [...document.querySelectorAll('[data-show3d-reorder-panel]')]
+            .map((el) => {
+              const rect = el.getBoundingClientRect();
+              const label = (el.getAttribute('aria-label') || '').replace(/^Move\\s+/, '');
+              return { label, x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+            })
+            .filter((item) => item.label && item.width > 40 && item.height > 40)
+            .sort((a, b) => a.y - b.y || a.x - b.x);
+        }"""
+    )
+    if len(boxes) < 2:
+        return result
+    source = boxes[0]
+    target = boxes[-1]
+    start_x = source["x"] + source["width"] * 0.5
+    start_y = source["y"] + source["height"] * 0.5
+    end_x = target["x"] + target["width"] * 0.78
+    end_y = target["y"] + target["height"] * 0.5
+    page.mouse.move(start_x, start_y)
+    page.mouse.down()
+    page.mouse.move(start_x + (end_x - start_x) * 0.35, start_y + (end_y - start_y) * 0.25, steps=6)
+    page.mouse.move(start_x + (end_x - start_x) * 0.72, start_y + (end_y - start_y) * 0.1, steps=8)
+    page.mouse.move(end_x, end_y, steps=8)
+    page.mouse.up()
+    page.wait_for_timeout(250)
+    after = _show3d_reorder_labels(page)
+    result["after"] = after
+    result["changed"] = bool(before and after and before != after and before[0] == after[-1])
+    return result
+
+
 def _story_ids_for(row: dict[str, Any]) -> list[str]:
     variant = str(row["variant"])
     if variant.startswith("show4dstem"):
@@ -366,6 +432,16 @@ def _semantic_checks(page, row: dict[str, Any], canvas_count: int) -> dict[str, 
         checks["primary_canvas_geometry"] = canvas_geometry
         if not canvas_geometry or canvas_geometry["width"] <= canvas_geometry["height"]:
             errors.append("Show3D Cols=3 rendered as a vertical panel stack")
+
+        reorder_drag = _exercise_show3d_reorder(page)
+        checks["reorder_drag"] = reorder_drag
+        if not reorder_drag["attempted"]:
+            errors.append("Show3D reorder drag could not be started")
+        elif not reorder_drag["changed"]:
+            errors.append(
+                "Show3D reorder drag did not move the first panel to the final slot "
+                f"({reorder_drag['before']} -> {reorder_drag['after']})"
+            )
 
     checks["errors"] = errors
     return checks
