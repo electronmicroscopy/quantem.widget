@@ -2316,9 +2316,14 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
         self.n_panels = 1
         self.panel_titles = []
         self.starred = [-1]
+        self.hidden_panels = []
         self.panel_order = []
         self._reset_panel_contrast_traits()
         self._multi_panel_bin = 0
+        self.shared_panel_source = False
+        self.separate_panel_frames = False
+        self._separate_panel_data = None
+        self.panel_real_frames = []
         self._panel_width = int(data.shape[2])
         self.n_slices = int(data.shape[0])
 

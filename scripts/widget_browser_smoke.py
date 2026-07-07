@@ -331,6 +331,20 @@ def _semantic_checks(page, row: dict[str, Any], canvas_count: int) -> dict[str, 
             errors.append("FFT state is not visible for FFT variant")
         page.wait_for_timeout(120)
 
+    if variant in {"show2d-gallery-3", "show3d-three-panels"}:
+        reorder_visible = _visible_text_present(page, "Reorder")
+        panels_visible = _visible_text_present(page, "Panels")
+        state_has_panel_order = bool(page.evaluate("document.documentElement.innerHTML.includes('panel_order')"))
+        checks["reorder_visible"] = reorder_visible
+        checks["panels_menu_visible"] = panels_visible
+        checks["state_has_panel_order"] = state_has_panel_order
+        if not reorder_visible:
+            errors.append("Reorder control is not visible for reordered multi-panel variant")
+        if not panels_visible:
+            errors.append("Panels menu is not visible for reordered multi-panel variant")
+        if not state_has_panel_order:
+            errors.append("export state does not include panel_order")
+
     checks["errors"] = errors
     return checks
 

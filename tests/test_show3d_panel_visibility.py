@@ -76,6 +76,44 @@ def test_show3d_statistics_are_opt_in() -> None:
     assert explicit.show_stats is True
 
 
+def test_show3d_set_image_replaces_stack_and_triggers_new_frame_transfer() -> None:
+    widget = Show3D(
+        *_panels()[:2],
+        panel_titles=["SSB", "Mean DP"],
+        hidden_panels=["Mean DP"],
+        panel_order=["Mean DP", "SSB"],
+        offline=False,
+        show_controls=False,
+        verbose=False,
+    )
+    widget.slice_idx = 2
+    widget.playing = True
+    old_seq = int(widget.frame_seq)
+
+    data = np.stack(
+        [
+            np.full((6, 7), 3.0, dtype=np.float32),
+            np.full((6, 7), 9.0, dtype=np.float32),
+        ]
+    )
+    widget.set_image(data, labels=["fresh 0", "fresh 1"])
+
+    assert widget.n_panels == 1
+    assert widget.n_slices == 2
+    assert widget.height == 6
+    assert widget.width == 7
+    assert widget.labels == ["fresh 0", "fresh 1"]
+    assert widget.slice_idx == 1
+    assert widget.playing is False
+    assert widget.hidden_panels == []
+    assert widget.panel_order == []
+    assert widget.panel_titles == []
+    assert widget.starred == [-1]
+    assert widget.frame_seq > old_seq
+    assert bytes(widget.frame_bytes) == data[1].tobytes()
+    assert widget._buffer_bytes == b""
+
+
 def test_show3d_controls_collapsed_roundtrips_state_and_html(tmp_path: pathlib.Path) -> None:
     widget = Show3D(
         *_panels()[:2],

@@ -51,3 +51,36 @@ w.reset_panel_order()
 The deeper behavioral spec (invariants, per-feature pass criteria, isolation
 checks) lives alongside the integration test at `widget/docs/show2d-test-spec.md`.
 ```
+
+## Live image updates
+
+Use `set_image()` to trigger a new browser render in an already displayed
+`Show2D` widget. Keep a reference to the widget object, display it once, then
+replace the image or gallery data through that method:
+
+```python
+import numpy as np
+from quantem.widget import Show2D
+
+w = Show2D(first_image, labels=["initial"], offline=False)
+w
+
+for step, next_image in enumerate(image_stream, start=1):
+    w.set_image(next_image, labels=[f"step {step}"])
+```
+
+For a gallery, pass a 3D stack `(N, H, W)` and one label per panel:
+
+```python
+w.set_image(
+    np.stack([raw, filtered, residual]),
+    labels=["raw", "filtered", "residual"],
+)
+```
+
+`set_image()` is the re-render trigger. Mutating the original NumPy array in
+place does not notify the frontend. The method sends fresh synced `frame_bytes`
+and resets state tied to the old image count or dimensions, including stale
+hidden panels, stars, view box, ROIs, line profiles, detail tiles, and panel
+order. Use `offline=False` for acquisition-style updates so the live Jupyter
+Comm path carries each new frame instead of the saved/offline notebook path.

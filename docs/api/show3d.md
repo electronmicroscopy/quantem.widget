@@ -38,9 +38,11 @@ export. See the [Show3D tutorial](../tutorials/show3d).
 ## Live stack updates
 
 Use `set_image()` to replace the stack in an already displayed widget while a
-notebook kernel is still running. For live acquisitions or reconstruction loops,
-construct the widget with `offline=False` so frames travel over the live
-Jupyter Comm channel instead of the saved/offline notebook-data path:
+notebook kernel is still running. Keep a reference to the widget, display it
+once, then call `set_image(...)` whenever new stack data should be rendered.
+For live acquisitions or reconstruction loops, construct the widget with
+`offline=False` so frames travel over the live Jupyter Comm channel instead of
+the saved/offline notebook-data path:
 
 ```python
 import numpy as np
@@ -62,6 +64,12 @@ for next_frame in acquisition:
 In a real JupyterLab browser session this updates the displayed frame as each
 `set_image()` call is processed. A background thread is optional for UI
 ergonomics, but is not required for the widget update itself.
+
+`set_image()` is the re-render trigger. Mutating the original NumPy array in
+place does not notify the frontend. The method writes a fresh current-frame
+transfer, bumps `frame_seq`, invalidates playback buffers, clamps the current
+slice and loop range, and resets stale panel-specific state when replacing a
+multi-panel view with a single stack.
 
 ```{important}
 Do not use the default tiny-stack constructor path for acquisition-style live

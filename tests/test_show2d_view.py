@@ -164,10 +164,11 @@ def test_binned_preview_detail_request_returns_full_resolution_crop():
 
 
 def test_set_image_replaces_stack_in_place_and_resets_stale_view_state():
-    w = Show2D(np.zeros((2, 8, 8), dtype=np.float32), labels=["old 0", "old 1"], verbose=False)
+    w = Show2D(np.zeros((2, 8, 8), dtype=np.float32), labels=["old 0", "old 1"], offline=False, verbose=False)
     w.view_box = [1.0, 4.0, 2.0, 5.0]
     w._detail_meta = "stale"
     w._detail_bytes = b"stale"
+    old_frame_bytes = bytes(w.frame_bytes)
 
     data = np.stack([
         np.full((6, 6), 2.0, dtype=np.float32),
@@ -187,3 +188,5 @@ def test_set_image_replaces_stack_in_place_and_resets_stale_view_state():
     assert w._detail_meta == ""
     assert w._detail_bytes == b""
     assert w.stats_mean == [2.0, 4.0, 6.0]
+    assert bytes(w.frame_bytes) != old_frame_bytes
+    assert len(w.frame_bytes) == data.nbytes
