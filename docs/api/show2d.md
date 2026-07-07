@@ -37,6 +37,7 @@ no console error, no NaN frame).
 | Smooth toggle | `smooth` | Bilinear vs nearest sampling |
 | ROI add / drag | `roi_active`, `roi_list`, `roi_selected_idx` | Region overlay; stats panel reports the ROI |
 | Gallery select | `selected_idx` | Highlights the active panel |
+| Gallery page slider | `page_idx`, `n_pages`, `panels_per_page`, `page_labels`, `page_starred` | Switches between panel pages without changing the source stack |
 | Panel reorder | `panel_order`; `set_panel_order()`, `move_panel()`, `reset_panel_order()` | Reorders gallery display without changing source data, labels, stars, or hidden state |
 | Diff mode | `diff_mode`, `diff_reference` | Panels render as difference vs the reference |
 
@@ -77,6 +78,53 @@ w.set_image(
     labels=["raw", "filtered", "residual"],
 )
 ```
+
+## Paged galleries
+
+Use paged galleries when each view contains the same panel grid across several
+analysis settings, iterations, or parameter values. A common example is a
+4-by-4 reconstruction sweep where each page is one iteration or one denoising
+parameter, and the panels within the page are the related output images.
+
+Pass a 4D array with shape `(pages, panels_per_page, rows, cols)`:
+
+```python
+from quantem.widget import Show2D
+
+w = Show2D(
+    reconstruction_sweep,
+    labels=[
+        "lambda 0.01", "lambda 0.03", "lambda 0.10", "lambda 0.30",
+        "lambda 1", "lambda 3", "lambda 10", "lambda 30",
+        "raw", "filtered", "residual", "score",
+        "phase", "amplitude", "mask", "diagnostic",
+    ],
+    page_labels=["iteration 10", "iteration 20", "iteration 30"],
+    ncols=4,
+)
+w
+```
+
+You can also pass explicit page dictionaries when the page titles naturally
+belong beside the image data:
+
+```python
+w = Show2D(
+    [
+        {"title": "iteration 10", "images": iter10_panels, "labels": panel_labels},
+        {"title": "iteration 20", "images": iter20_panels, "labels": panel_labels},
+    ],
+    ncols=4,
+)
+```
+
+Paged galleries keep the Python data model simple: all pages use the same panel
+count and image shape, the browser renders only the active page, and page stars
+are stored separately from panel stars. Use `star_page(page)` and
+`unstar_page(page)` from Python, or the star button beside the page slider in
+the widget. For very large 4K sweeps, start with a reduced or representative
+stack; a future lazy page transport can avoid sending every page to the browser
+at once.
 
 `set_image()` is the re-render trigger. Mutating the original NumPy array in
 place does not notify the frontend. The method sends fresh synced `frame_bytes`

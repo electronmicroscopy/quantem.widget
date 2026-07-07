@@ -64,6 +64,141 @@ def _reject_unknown_kwargs(cls, kwargs: dict) -> None:
         )
 
 
+def _is_show2d_page_dict(value: object) -> bool:
+    """Return True for a dict-like Show2D page specification."""
+    return isinstance(value, dict) and any(key in value for key in ("images", "data", "array"))
+
+
+def _normalise_show2d_pages(
+    data,
+    *,
+    labels: list[str | None] | None,
+    page_labels: Sequence[str | None] | None,
+) -> tuple[object, list[str | None] | None, int, int, list[str], list[int]]:
+    """Flatten Show2D paged input into the established gallery stack.
+
+    Public page data is ``pages x panels x rows x cols``. Internally this stays
+    compatible with Show2D's existing gallery transport by flattening pages into
+    one stack and syncing page metadata separately. The browser then renders
+    only the active page.
+    """
+    explicit_page_dicts = (
+        isinstance(data, (list, tuple))
+        and len(data) > 0
+        and all(_is_show2d_page_dict(item) for item in data)
+    )
+    if explicit_page_dicts:
+        page_arrays: list[np.ndarray] = []
+        flattened_labels: list[str | None] = []
+        inferred_page_labels: list[str] = []
+        panels_per_page: int | None = None
+        for page_idx, page in enumerate(data):
+            raw_images = page.get("images", page.get("data", page.get("array")))
+            if raw_images is None:
+                raise ValueError(
+                    f"Show2D page {page_idx} is missing images/data/array. "
+                    "Use {'title': '...', 'images': [...]}"
+                )
+            arr = to_numpy(raw_images)
+            if arr.ndim == 2:
+                arr = arr[np.newaxis, ...]
+            if arr.ndim != 3:
+                raise ValueError(
+                    f"Show2D page {page_idx} must contain a 2D image or 3D panel stack, "
+                    f"got shape {arr.shape}"
+                )
+            if panels_per_page is None:
+                panels_per_page = int(arr.shape[0])
+            elif int(arr.shape[0]) != panels_per_page:
+                raise ValueError(
+                    "Every Show2D page must contain the same number of panels; "
+                    f"page 0 has {panels_per_page}, page {page_idx} has {arr.shape[0]}"
+                )
+            page_arrays.append(arr)
+            inferred_page_labels.append(str(page.get("title") or page.get("label") or f"Page {page_idx + 1}"))
+            page_panel_labels = page.get("labels")
+            if page_panel_labels is not None:
+                if len(page_panel_labels) != int(arr.shape[0]):
+                    raise ValueError(
+                        f"Show2D page {page_idx} labels length ({len(page_panel_labels)}) "
+                        f"must match its panel count ({arr.shape[0]})"
+                    )
+                flattened_labels.extend([None if label is None else str(label) for label in page_panel_labels])
+            elif labels is not None:
+                if len(labels) == int(arr.shape[0]):
+                    flattened_labels.extend([None if label is None else str(label) for label in labels])
+                elif panels_per_page is not None and len(labels) == len(data) * panels_per_page:
+                    start = page_idx * panels_per_page
+                    stop = start + panels_per_page
+                    flattened_labels.extend([None if label is None else str(label) for label in labels[start:stop]])
+                else:
+                    raise ValueError(
+                        "labels for paged Show2D must have length panels_per_page "
+                        f"({arr.shape[0]}) or n_pages * panels_per_page "
+                        f"({len(data) * arr.shape[0]}), got {len(labels)}"
+                    )
+            else:
+                flattened_labels.extend([f"Panel {i + 1}" for i in range(int(arr.shape[0]))])
+        stack = np.stack(page_arrays, axis=0)
+        n_pages = int(stack.shape[0])
+        panels = int(stack.shape[1])
+        resolved_page_labels = [
+            "" if label is None else str(label)
+            for label in (page_labels if page_labels is not None else inferred_page_labels)
+        ]
+        if len(resolved_page_labels) != n_pages:
+            raise ValueError(f"page_labels length ({len(resolved_page_labels)}) must match n_pages ({n_pages})")
+        return (
+            stack.reshape(n_pages * panels, *stack.shape[-2:]),
+            flattened_labels,
+            n_pages,
+            panels,
+            resolved_page_labels,
+            [0] * n_pages,
+        )
+
+    arr = None
+    if not isinstance(data, list):
+        try:
+            arr = to_numpy(data)
+        except Exception:
+            arr = None
+    if arr is not None and arr.ndim == 4:
+        n_pages, panels = int(arr.shape[0]), int(arr.shape[1])
+        resolved_page_labels = [
+            "" if label is None else str(label)
+            for label in (page_labels if page_labels is not None else [f"Page {i + 1}" for i in range(n_pages)])
+        ]
+        if len(resolved_page_labels) != n_pages:
+            raise ValueError(f"page_labels length ({len(resolved_page_labels)}) must match n_pages ({n_pages})")
+        if labels is not None:
+            if len(labels) == panels:
+                resolved_labels = [
+                    "" if label is None else str(label)
+                    for _ in range(n_pages)
+                    for label in labels
+                ]
+            elif len(labels) == n_pages * panels:
+                resolved_labels = [None if label is None else str(label) for label in labels]
+            else:
+                raise ValueError(
+                    "labels for paged Show2D must have length panels_per_page "
+                    f"({panels}) or n_pages * panels_per_page ({n_pages * panels}), got {len(labels)}"
+                )
+        else:
+            resolved_labels = [f"Panel {i + 1}" for _ in range(n_pages) for i in range(panels)]
+        return (
+            arr.reshape(n_pages * panels, *arr.shape[-2:]),
+            resolved_labels,
+            n_pages,
+            panels,
+            resolved_page_labels,
+            [0] * n_pages,
+        )
+
+    return data, labels, 1, 0, [], []
+
+
 def _round_to_nice(value: float) -> float:
     """Round a physical length to a 'nice' value (1, 2, 5, 10, 20, 50, ...)."""
     if value <= 0:
@@ -426,6 +561,11 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
     # =========================================================================
     widget_version = traitlets.Unicode("unknown").tag(sync=True)
     n_images = traitlets.Int(1).tag(sync=True)
+    n_pages = traitlets.Int(1).tag(sync=True)
+    page_idx = traitlets.Int(0).tag(sync=True)
+    panels_per_page = traitlets.Int(0).tag(sync=True)
+    page_labels = traitlets.List(traitlets.Unicode(), default_value=[]).tag(sync=True)
+    page_starred = traitlets.List(traitlets.Int(), default_value=[]).tag(sync=True)
     height = traitlets.Int(1).tag(sync=True)
     width = traitlets.Int(1).tag(sync=True)
     _display_bin_factor = traitlets.Int(1).tag(sync=True)  # 1 = full-res, 2/4/8 = binned
@@ -601,6 +741,7 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
         self,
         data: np.ndarray | list[np.ndarray],
         labels: list[str | None] = None,
+        page_labels: Sequence[str | None] | None = None,
         title: str = "",
         ui_mode: UiMode = "interactive",
         show_title: bool | None = None,
@@ -654,6 +795,11 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
         # anywidget/traitlets silently ignores unknown keys, which hid the
         # pixel_size_angstrom bug in show2d_all_features.ipynb for months.
         _reject_unknown_kwargs(type(self), kwargs)
+        data, labels, n_pages, panels_per_page, resolved_page_labels, resolved_page_starred = _normalise_show2d_pages(
+            data,
+            labels=labels,
+            page_labels=page_labels,
+        )
         panel_width_px = int(panel_width_px)
         if panel_width_px < 0:
             raise ValueError(f"panel_width_px must be >= 0, got {panel_width_px}")
@@ -720,6 +866,8 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
         with self.hold_sync():
             self._init_sync(
                 data=data, labels=labels, title=title, cmap=cmap,
+                n_pages=n_pages, panels_per_page=panels_per_page,
+                page_labels=resolved_page_labels, page_starred=resolved_page_starred,
                 show_title=show_title,
                 sampling=sampling, units=units, scale_bar_visible=scale_bar_visible,
                 show_fft=show_fft, fft_window=fft_window,
@@ -737,7 +885,8 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
                 gallery_gap_px=gallery_gap_px,
                 verbose=verbose, state=state, _t0=_t0)
 
-    def _init_sync(self, *, data, labels, title, cmap, show_title, sampling, units,
+    def _init_sync(self, *, data, labels, title, cmap, n_pages, panels_per_page,
+                   page_labels, page_starred, show_title, sampling, units,
                    scale_bar_visible, show_fft, fft_window,
                    show_controls, controls_collapsed, show_stats, log_scale, auto_contrast, offline,
                    vmin, vmax,
@@ -752,6 +901,11 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
         self._display_bin = 1
         self.prepared_view = None
         self.prepared_view_widget = None
+        self.n_pages = int(max(1, n_pages))
+        self.panels_per_page = int(max(0, panels_per_page))
+        self.page_idx = 0
+        self.page_labels = list(page_labels or [])
+        self.page_starred = list(page_starred or [])
 
         # First-class support for quantem Dataset2d / Dataset3d:
         # auto-extract array + sampling + units from the dataset object.
@@ -878,6 +1032,22 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
         self.height = int(data.shape[1])
         self.width = int(data.shape[2])
         self.image_rotations = [0] * self.n_images
+        if self.n_pages > 1:
+            if self.panels_per_page <= 0:
+                raise ValueError("panels_per_page must be > 0 when n_pages > 1")
+            if self.n_images != self.n_pages * self.panels_per_page:
+                raise ValueError(
+                    f"paged Show2D expects n_images == n_pages * panels_per_page, "
+                    f"got {self.n_images} != {self.n_pages} * {self.panels_per_page}"
+                )
+            if not self.page_labels:
+                self.page_labels = [f"Page {i + 1}" for i in range(self.n_pages)]
+            if len(self.page_labels) != self.n_pages:
+                raise ValueError(
+                    f"page_labels length ({len(self.page_labels)}) must equal n_pages ({self.n_pages})"
+                )
+            if not self.page_starred:
+                self.page_starred = [0] * self.n_pages
 
         # Labels
         if labels is None:
@@ -1106,6 +1276,25 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
             )
         return [1 if int(v) else 0 for v in val]
 
+    @traitlets.validate("page_idx")
+    def _validate_page_idx(self, proposal: dict) -> int:
+        """Clamp the active page index to the available page range."""
+        n_pages = max(1, int(getattr(self, "n_pages", 1)))
+        return int(max(0, min(int(proposal["value"]), n_pages - 1)))
+
+    @traitlets.validate("page_starred")
+    def _validate_page_starred(self, proposal: dict) -> list[int]:
+        """Normalize per-page star flags."""
+        val = list(proposal["value"])
+        n_pages = max(1, int(getattr(self, "n_pages", 1)))
+        if not val:
+            return [0] * n_pages
+        if len(val) != n_pages:
+            raise traitlets.TraitError(
+                f"page_starred length ({len(val)}) must equal n_pages ({n_pages})"
+            )
+        return [1 if int(v) else 0 for v in val]
+
     @traitlets.validate("hidden_panels")
     def _validate_hidden_panels(self, proposal: dict) -> list[int]:
         """Normalize hidden image indices and keep at least one image visible."""
@@ -1283,6 +1472,11 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
             self._display_rgb = self._rgb_frames
             self.is_rgb = [False] * int(data.shape[0])
             self.n_images = int(data.shape[0])
+            self.n_pages = 1
+            self.page_idx = 0
+            self.panels_per_page = 0
+            self.page_labels = []
+            self.page_starred = [0]
             self.image_rotations = [0] * self.n_images
             self.starred = [0] * self.n_images
             self.hidden_panels = []
@@ -2043,6 +2237,11 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
             "vmax": self.vmax,
             "labels": list(self.labels),
             "starred": list(self.starred),
+            "n_pages": int(self.n_pages),
+            "page_idx": int(self.page_idx),
+            "panels_per_page": int(self.panels_per_page),
+            "page_labels": list(self.page_labels),
+            "page_starred": list(self.page_starred),
             "hidden_panels": list(self.hidden_panels),
             "panel_order": list(self.panel_order),
             "show_panel_titles": self.show_panel_titles,
@@ -2255,6 +2454,7 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
         clone = type(self)(
             np.ascontiguousarray(data, dtype=np.float32),
             labels=list(self.labels),
+            page_labels=list(self.page_labels) if self.n_pages > 1 else None,
             title=self.title,
             show_title=self.show_title,
             cmap=self.cmap,
@@ -2290,6 +2490,11 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
             display_bin=1,
         )
         clone.pixel_sizes = list(self.pixel_sizes)
+        clone.n_pages = int(self.n_pages)
+        clone.panels_per_page = int(self.panels_per_page)
+        clone.page_labels = list(self.page_labels)
+        clone.page_idx = int(self.page_idx)
+        clone.page_starred = list(self.page_starred)
         clone.load_state_dict(self.state_dict())
         clone.offline = quantized
         clone._export_light = True
@@ -2309,6 +2514,17 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
 
     def load_state_dict(self, state):
         state = dict(state)
+        if "page_idx" in state:
+            try:
+                state["page_idx"] = int(max(0, min(int(state["page_idx"]), int(self.n_pages) - 1)))
+            except (TypeError, ValueError):
+                state.pop("page_idx")
+        if "page_starred" in state and isinstance(state["page_starred"], list):
+            if len(state["page_starred"]) != int(self.n_pages):
+                state.pop("page_starred")
+        if "page_labels" in state and isinstance(state["page_labels"], list):
+            if len(state["page_labels"]) != int(self.n_pages):
+                state.pop("page_labels")
         if "starred" in state and isinstance(state["starred"], list) and len(state["starred"]) != int(self.n_images):
             state.pop("starred")
         if "hidden_panels" in state and isinstance(state["hidden_panels"], list):
@@ -2490,6 +2706,9 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
     @property
     def ordered_panels(self) -> list[int]:
         """Zero-based image panel indices in the current display order."""
+        if int(self.n_pages) > 1 and int(self.panels_per_page) > 0:
+            start = int(self.page_idx) * int(self.panels_per_page)
+            return list(range(start, min(start + int(self.panels_per_page), int(self.n_images))))
         order = list(self.panel_order or [])
         if len(order) == int(self.n_images) and sorted(order) == list(range(int(self.n_images))):
             return order
@@ -2505,6 +2724,11 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
     def starred_panels(self) -> list[int]:
         """Zero-based image panel indices marked with a star."""
         return [i for i, value in enumerate(self.starred) if value]
+
+    @property
+    def starred_pages(self) -> list[int]:
+        """Zero-based page indices marked with a star."""
+        return [i for i, value in enumerate(self.page_starred) if value]
 
     def set_hidden_panels(self, panels: Sequence[int | str] | int | str) -> Self:
         """Replace the hidden panel set by index or exact label.
@@ -2615,6 +2839,30 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
             starred = [0] * int(self.n_images)
         starred[idx] = 0
         self.starred = starred
+        return self
+
+    def star_page(self, page: int) -> Self:
+        """Mark a page with a star."""
+        idx = int(page)
+        if idx < 0 or idx >= int(self.n_pages):
+            raise ValueError(f"page index {idx} out of range [0, {self.n_pages})")
+        starred = list(self.page_starred)
+        if len(starred) != int(self.n_pages):
+            starred = [0] * int(self.n_pages)
+        starred[idx] = 1
+        self.page_starred = starred
+        return self
+
+    def unstar_page(self, page: int) -> Self:
+        """Clear the star on a page."""
+        idx = int(page)
+        if idx < 0 or idx >= int(self.n_pages):
+            raise ValueError(f"page index {idx} out of range [0, {self.n_pages})")
+        starred = list(self.page_starred)
+        if len(starred) != int(self.n_pages):
+            starred = [0] * int(self.n_pages)
+        starred[idx] = 0
+        self.page_starred = starred
         return self
 
     def summary(self):

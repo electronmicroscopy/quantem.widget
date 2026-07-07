@@ -769,7 +769,20 @@ function Show2D() {
 
   // Model state
   const [nImages] = useModelState<number>("n_images");
-  const isGallery = nImages > 1;
+  const [nPages] = useModelState<number>("n_pages");
+  const [pageIdx, setPageIdx] = useModelState<number>("page_idx");
+  const [panelsPerPage] = useModelState<number>("panels_per_page");
+  const [pageLabels] = useModelState<string[]>("page_labels");
+  const [pageStarred, setPageStarred] = useModelState<number[]>("page_starred");
+  const isPaged = (nPages || 1) > 1 && (panelsPerPage || 0) > 0;
+  const activePageStart = isPaged ? Math.max(0, Math.min((nPages || 1) - 1, pageIdx || 0)) * Math.max(1, panelsPerPage || 1) : 0;
+  const activePageEnd = isPaged ? Math.min(nImages, activePageStart + Math.max(1, panelsPerPage || 1)) : nImages;
+  const activePageIndices = React.useMemo(
+    () => Array.from({ length: Math.max(0, activePageEnd - activePageStart) }, (_, i) => activePageStart + i),
+    [activePageStart, activePageEnd]
+  );
+  const activePanelCount = isPaged ? activePageIndices.length : Math.max(1, nImages || 1);
+  const isGallery = (isPaged ? activePageIndices.length : nImages) > 1;
   const [width] = useModelState<number>("width");
   const [height] = useModelState<number>("height");
   const [frameBytes] = useModelState<DataView>("frame_bytes");
@@ -893,9 +906,9 @@ function Show2D() {
 
   const effectiveShowFft = showFft;
   const galleryColumnOptions = React.useMemo(() => {
-    const maxCols = Math.max(1, Math.min(nImages, MAX_PANEL_COLUMNS));
+    const maxCols = Math.max(1, Math.min(isPaged ? activePanelCount : nImages, MAX_PANEL_COLUMNS));
     return Array.from({ length: maxCols }, (_, i) => i + 1);
-  }, [nImages]);
+  }, [activePanelCount, isPaged, nImages]);
   React.useEffect(() => {
     if (!exportStatus) return;
     const preparing = exportStatus.startsWith("Preparing ") || exportStatus.startsWith("Exporting ");
@@ -1411,10 +1424,10 @@ function Show2D() {
   const [fftCropDims, setFftCropDims] = React.useState<{ cropWidth: number; cropHeight: number; fftWidth: number; fftHeight: number } | null>(null);
 
   // Layout calculations
-  const showDiffPanel = diffMode && nImages >= 2;
+  const showDiffPanel = diffMode && nImages >= 2 && !isPaged;
   // RGB panels never get a diff panel (see diffOtherIndices below).
   const rgbPanelCount = isRgbFlags ? isRgbFlags.filter(Boolean).length : 0;
-  const diffPanelCount = showDiffPanel ? Math.max(0, nImages - 1 - rgbPanelCount) : 0;
+  const diffPanelCount = showDiffPanel && !isPaged ? Math.max(0, nImages - 1 - rgbPanelCount) : 0;
   const totalPanelCount = Math.max(1, nImages || 1);
   const hiddenPanelSet = React.useMemo(() => {
     const out = new Set<number>();
@@ -1422,14 +1435,17 @@ function Show2D() {
       const idx = Math.round(Number(value));
       if (Number.isFinite(idx) && idx >= 0 && idx < totalPanelCount) out.add(idx);
     }
-    if (out.size >= totalPanelCount) out.delete(totalPanelCount - 1);
+    const activeHiddenCount = (isPaged ? activePageIndices : Array.from({ length: totalPanelCount }, (_, i) => i))
+      .filter((idx) => out.has(idx)).length;
+    if (activeHiddenCount >= Math.max(1, activePanelCount)) out.delete((isPaged ? activePageIndices : [totalPanelCount - 1])[Math.max(0, activePanelCount - 1)]);
     return out;
-  }, [hiddenPanels, totalPanelCount]);
+  }, [hiddenPanels, totalPanelCount, isPaged, activePageIndices, activePanelCount]);
   const naturalPanelOrder = React.useMemo(
-    () => Array.from({ length: totalPanelCount }, (_, i) => i),
-    [totalPanelCount]
+    () => isPaged ? activePageIndices : Array.from({ length: totalPanelCount }, (_, i) => i),
+    [activePageIndices, isPaged, totalPanelCount]
   );
   const orderedImageIndices = React.useMemo(() => {
+    if (isPaged) return naturalPanelOrder;
     const values = Array.isArray(panelOrder) ? panelOrder.map(value => Math.round(Number(value))) : [];
     const valid = (
       values.length === totalPanelCount &&
@@ -1437,12 +1453,14 @@ function Show2D() {
       new Set(values).size === totalPanelCount
     );
     return valid ? values : naturalPanelOrder;
-  }, [panelOrder, naturalPanelOrder, totalPanelCount]);
+  }, [panelOrder, naturalPanelOrder, totalPanelCount, isPaged]);
   const visibleImageIndices = React.useMemo(
     () => orderedImageIndices.filter(i => !hiddenPanelSet.has(i)),
     [hiddenPanelSet, orderedImageIndices]
   );
   const visibleImageCount = Math.max(1, visibleImageIndices.length);
+  const panelMenuTotal = isPaged ? activePanelCount : totalPanelCount;
+  const allCurrentPanelsVisible = visibleImageCount === panelMenuTotal;
   const panelLabel = React.useCallback((idx: number) => labels?.[idx] || `Image ${idx + 1}`, [labels]);
   const pixelSizeForPanel = React.useCallback((idx: number) => {
     const perPanel = pixelSizes?.[idx];
@@ -1554,6 +1572,11 @@ function Show2D() {
     if (!hiddenPanelSet.has(selectedIdx)) return;
     setSelectedIdx(visibleImageIndices[0] ?? 0);
   }, [hiddenPanelSet, isGallery, selectedIdx, setSelectedIdx, visibleImageIndices]);
+  React.useEffect(() => {
+    if (!isPaged) return;
+    if (visibleImageIndices.includes(selectedIdx)) return;
+    setSelectedIdx(visibleImageIndices[0] ?? activePageStart);
+  }, [activePageStart, isPaged, selectedIdx, setSelectedIdx, visibleImageIndices]);
   const clampedNcols = Math.max(1, Math.min(ncols || 1, visibleImageCount, MAX_PANEL_COLUMNS));
   const effectiveNcols = clampedNcols + diffPanelCount;
   const diffOtherIndices = React.useMemo(
@@ -5140,12 +5163,52 @@ function Show2D() {
 	          {/* Controls row: viewer toggles on the left, actions on the right */}
 	          {controlsVisible && (
 	          <Stack direction="row" alignItems="center" spacing={`${SPACING.SM}px`} useFlexGap sx={{ mb: `${SPACING.XS}px`, minHeight: 28, flexWrap: "wrap", rowGap: `${SPACING.XS}px`, width: "100%", maxWidth: "100%", boxSizing: "border-box" }}>
+            {isPaged && (
+              <>
+                <Typography sx={{ ...typography.label, fontSize: 10 }}>Page</Typography>
+                <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.accent, minWidth: 56 }}>
+                  {(pageLabels?.[pageIdx] || `Page ${pageIdx + 1}`)} {pageIdx + 1}/{nPages}
+                </Typography>
+                <Slider
+                  value={pageIdx}
+                  min={0}
+                  max={Math.max(0, (nPages || 1) - 1)}
+                  step={1}
+                  onChange={(_, value) => {
+                    const next = Array.isArray(value) ? value[0] : value;
+                    setPageIdx(Math.max(0, Math.min((nPages || 1) - 1, Math.round(Number(next) || 0))));
+                  }}
+                  size="small"
+                  sx={{ ...sliderStyles.small, width: 120, color: themeColors.accent }}
+                  aria-label="Page"
+                />
+                <IconButton
+                  size="small"
+                  onClick={() => {
+                    const next = Array.from({ length: Math.max(1, nPages || 1) }, (_, idx) => pageStarred?.[idx] ? 1 : 0);
+                    next[pageIdx] = next[pageIdx] ? 0 : 1;
+                    setPageStarred(next);
+                  }}
+                  title={(pageStarred?.[pageIdx] ? "Unstar " : "Star ") + (pageLabels?.[pageIdx] || `Page ${pageIdx + 1}`)}
+                  aria-label={(pageStarred?.[pageIdx] ? "Unstar " : "Star ") + (pageLabels?.[pageIdx] || `Page ${pageIdx + 1}`)}
+                  sx={{
+                    width: 24,
+                    height: 24,
+                    p: 0,
+                    color: pageStarred?.[pageIdx] ? "#ffc107" : themeColors.textMuted,
+                    "&:hover": { color: pageStarred?.[pageIdx] ? "#ffc107" : themeColors.text },
+                  }}
+                >
+                  {pageStarred?.[pageIdx] ? "★" : "☆"}
+                </IconButton>
+              </>
+            )}
             {isGallery && (
               <>
                 <Typography sx={{ ...typography.label, fontSize: 10 }}>Cols</Typography>
                 <Select
                   value={String(clampedNcols)}
-                  onChange={(e) => setNcols(Math.max(1, Math.min(Number(e.target.value) || 1, nImages, MAX_PANEL_COLUMNS)))}
+                  onChange={(e) => setNcols(Math.max(1, Math.min(Number(e.target.value) || 1, isPaged ? activePanelCount : nImages, MAX_PANEL_COLUMNS)))}
                   size="small"
                   sx={{ ...themedSelect, minWidth: 48, fontSize: 10 }}
                   MenuProps={themedTopMenuProps}
@@ -5241,7 +5304,7 @@ function Show2D() {
             <Box sx={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: `${SPACING.SM}px`, flexWrap: "wrap", flex: "0 0 auto", ml: "auto" }}>
               {isGallery && (
                 <>
-                  <Button
+                  {!isPaged && <Button
                     size="small"
                     sx={{
                       ...compactButton,
@@ -5255,7 +5318,7 @@ function Show2D() {
                     title={reorderMode ? "Finish reordering panels" : "Reorder panels"}
                   >
                     Reorder
-                  </Button>
+                  </Button>}
                   <Button
                     size="small"
                     sx={{ ...compactButton, "& .MuiButton-startIcon": { mr: 0.4 } }}
@@ -5266,7 +5329,7 @@ function Show2D() {
                     aria-expanded={panelMenuAnchor ? "true" : undefined}
                     aria-haspopup="menu"
                   >
-                    {visibleImageCount === totalPanelCount ? "Panels" : `Panels ${visibleImageCount}/${totalPanelCount}`}
+                    {allCurrentPanelsVisible ? "Panels" : `Panels ${visibleImageCount}/${panelMenuTotal}`}
                   </Button>
                   <Menu
                     id="show2d-panels-menu"
