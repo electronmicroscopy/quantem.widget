@@ -101,6 +101,22 @@ const typography = {
 };
 type FftOverlayPosition = "top-left" | "top-right" | "bottom-left" | "bottom-right";
 type ReorderPlacement = "before" | "after";
+type ReorderDragVisual = {
+  panel: number;
+  label: string;
+  imageUrl: string;
+  width: number;
+  height: number;
+  x: number;
+  y: number;
+  offsetX: number;
+  offsetY: number;
+};
+type ReorderDragStart = {
+  x: number;
+  y: number;
+};
+const REORDER_DRAG_THRESHOLD_PX = 8;
 
 function useMobileViewport(): boolean {
   const getIsMobile = React.useCallback(() => {
@@ -1461,9 +1477,19 @@ function Show3D() {
   const [reorderMode, setReorderMode] = React.useState(false);
   const [dragOverPanel, setDragOverPanel] = React.useState<number | null>(null);
   const [reorderPreviewOrder, setReorderPreviewOrder] = React.useState<number[] | null>(null);
+  const [reorderDragVisual, setReorderDragVisual] = React.useState<ReorderDragVisual | null>(null);
   const draggedPanelRef = React.useRef<number | null>(null);
   const pointerReorderPanelRef = React.useRef<number | null>(null);
   const reorderPreviewOrderRef = React.useRef<number[] | null>(null);
+  const reorderDragVisualRef = React.useRef<ReorderDragVisual | null>(null);
+  const reorderGhostRef = React.useRef<HTMLDivElement>(null);
+  const reorderGhostRafRef = React.useRef<number | null>(null);
+  const reorderGhostPendingRef = React.useRef<{ x: number; y: number } | null>(null);
+  const reorderDragStartRef = React.useRef<ReorderDragStart | null>(null);
+  const reorderDragActivatedRef = React.useRef(false);
+  const canvasRef = React.useRef<HTMLCanvasElement>(null);
+  const gpuCanvasRef = React.useRef<HTMLCanvasElement>(null);
+  const canvasContainerRef = React.useRef<HTMLDivElement>(null);
   const totalPanelCount = Math.max(1, nPanels || 1);
   const hiddenPanelSet = React.useMemo(() => {
     const clean = new Set<number>();
@@ -1529,6 +1555,100 @@ function Show3D() {
   const setReorderPreviewOrderValue = React.useCallback((order: number[] | null) => {
     reorderPreviewOrderRef.current = order;
     setReorderPreviewOrder(order);
+  }, []);
+  const setReorderDragVisualValue = React.useCallback((visual: ReorderDragVisual | null) => {
+    reorderDragVisualRef.current = visual;
+    setReorderDragVisual(visual);
+  }, []);
+  const captureReorderPanelImage = React.useCallback((panelRect: DOMRect, containerRect: DOMRect): string => {
+    const container = canvasContainerRef.current;
+    if (!container) return "";
+    const canvases = Array.from(container.querySelectorAll("canvas")) as HTMLCanvasElement[];
+    const source = canvases.find((canvas) => {
+      const rect = canvas.getBoundingClientRect();
+      const style = window.getComputedStyle(canvas);
+      const opacity = Number(style.opacity || "1");
+      return rect.width > 0 && rect.height > 0 && canvas.width > 0 && canvas.height > 0 &&
+        style.display !== "none" && opacity > 0.5;
+    }) || canvases.find((canvas) => canvas.width > 0 && canvas.height > 0);
+    if (!source) return "";
+    const scaleX = source.width / Math.max(1, containerRect.width);
+    const scaleY = source.height / Math.max(1, containerRect.height);
+    const sx = Math.max(0, Math.round((panelRect.left - containerRect.left) * scaleX));
+    const sy = Math.max(0, Math.round((panelRect.top - containerRect.top) * scaleY));
+    const sw = Math.max(1, Math.min(source.width - sx, Math.round(panelRect.width * scaleX)));
+    const sh = Math.max(1, Math.min(source.height - sy, Math.round(panelRect.height * scaleY)));
+    if (sw <= 0 || sh <= 0) return "";
+    const scratch = document.createElement("canvas");
+    scratch.width = sw;
+    scratch.height = sh;
+    const ctx = scratch.getContext("2d");
+    if (!ctx) return "";
+    try {
+      ctx.drawImage(source, sx, sy, sw, sh, 0, 0, sw, sh);
+      return scratch.toDataURL("image/png");
+    } catch {
+      return "";
+    }
+  }, []);
+  const updateReorderGhostPosition = React.useCallback((clientX: number, clientY: number) => {
+    const visual = reorderDragVisualRef.current;
+    const container = canvasContainerRef.current;
+    if (!visual || !container) return;
+    const rect = container.getBoundingClientRect();
+    const x = Math.max(0, Math.min(Math.max(0, rect.width - visual.width), clientX - rect.left - visual.offsetX));
+    const y = Math.max(0, Math.min(Math.max(0, rect.height - visual.height), clientY - rect.top - visual.offsetY));
+    reorderGhostPendingRef.current = { x, y };
+    if (reorderGhostRafRef.current !== null) return;
+    reorderGhostRafRef.current = window.requestAnimationFrame(() => {
+      reorderGhostRafRef.current = null;
+      const pending = reorderGhostPendingRef.current;
+      const ghost = reorderGhostRef.current;
+      if (!pending || !ghost) return;
+      ghost.style.transform = `translate3d(${pending.x}px, ${pending.y}px, 0)`;
+    });
+  }, []);
+  const beginReorderDragVisual = React.useCallback((event: React.PointerEvent, panel: number) => {
+    const container = canvasContainerRef.current;
+    if (!container) return;
+    const panelRect = event.currentTarget.getBoundingClientRect();
+    const containerRect = container.getBoundingClientRect();
+    const offsetX = Math.max(0, Math.min(panelRect.width, event.clientX - panelRect.left));
+    const offsetY = Math.max(0, Math.min(panelRect.height, event.clientY - panelRect.top));
+    const x = Math.max(0, Math.min(Math.max(0, containerRect.width - panelRect.width), event.clientX - containerRect.left - offsetX));
+    const y = Math.max(0, Math.min(Math.max(0, containerRect.height - panelRect.height), event.clientY - containerRect.top - offsetY));
+    setReorderDragVisualValue({
+      panel,
+      label: panelLabel(panel),
+      imageUrl: captureReorderPanelImage(panelRect, containerRect),
+      width: panelRect.width,
+      height: panelRect.height,
+      x,
+      y,
+      offsetX,
+      offsetY,
+    });
+    reorderGhostPendingRef.current = { x, y };
+    requestAnimationFrame(() => updateReorderGhostPosition(event.clientX, event.clientY));
+  }, [captureReorderPanelImage, panelLabel, setReorderDragVisualValue, updateReorderGhostPosition]);
+  const clearReorderDragVisual = React.useCallback(() => {
+    if (reorderGhostRafRef.current !== null) {
+      window.cancelAnimationFrame(reorderGhostRafRef.current);
+      reorderGhostRafRef.current = null;
+    }
+    reorderGhostPendingRef.current = null;
+    reorderDragStartRef.current = null;
+    reorderDragActivatedRef.current = false;
+    setReorderDragVisualValue(null);
+  }, [setReorderDragVisualValue]);
+  const reorderDragHasPassedThreshold = React.useCallback((clientX: number, clientY: number) => {
+    const start = reorderDragStartRef.current;
+    if (!start) return true;
+    if (reorderDragActivatedRef.current) return true;
+    const distance = Math.hypot(clientX - start.x, clientY - start.y);
+    if (distance < REORDER_DRAG_THRESHOLD_PX) return false;
+    reorderDragActivatedRef.current = true;
+    return true;
   }, []);
   const buildPanelMovedOrder = React.useCallback((
     source: number,
@@ -1617,13 +1737,15 @@ function Show3D() {
     setDragOverPanel(null);
     draggedPanelRef.current = null;
     pointerReorderPanelRef.current = null;
-  }, [applyPanelOrder, setReorderPreviewOrderValue]);
+    clearReorderDragVisual();
+  }, [applyPanelOrder, clearReorderDragVisual, setReorderPreviewOrderValue]);
   const cancelPanelReorderPreview = React.useCallback(() => {
     setReorderPreviewOrderValue(null);
     setDragOverPanel(null);
     draggedPanelRef.current = null;
     pointerReorderPanelRef.current = null;
-  }, [setReorderPreviewOrderValue]);
+    clearReorderDragVisual();
+  }, [clearReorderDragVisual, setReorderPreviewOrderValue]);
   const handlePanelDragStart = React.useCallback((event: React.DragEvent, panel: number) => {
     if (!reorderMode) return;
     draggedPanelRef.current = panel;
@@ -1631,6 +1753,10 @@ function Show3D() {
     setDragOverPanel(panel);
     event.dataTransfer.effectAllowed = "move";
     event.dataTransfer.setData("text/plain", String(panel));
+    const blankDragImage = document.createElement("canvas");
+    blankDragImage.width = 1;
+    blankDragImage.height = 1;
+    event.dataTransfer.setDragImage(blankDragImage, 0, 0);
     event.stopPropagation();
   }, [orderedPanelIndices, reorderMode, setReorderPreviewOrderValue]);
   const handlePanelDragOver = React.useCallback((event: React.DragEvent, panel: number) => {
@@ -1662,8 +1788,11 @@ function Show3D() {
     if (!reorderMode) return;
     pointerReorderPanelRef.current = panel;
     draggedPanelRef.current = panel;
+    reorderDragStartRef.current = { x: event.clientX, y: event.clientY };
+    reorderDragActivatedRef.current = false;
     setReorderPreviewOrderValue(orderedPanelIndices);
     setDragOverPanel(panel);
+    beginReorderDragVisual(event, panel);
     try {
       event.currentTarget.setPointerCapture(event.pointerId);
     } catch {
@@ -1671,7 +1800,7 @@ function Show3D() {
     }
     event.preventDefault();
     event.stopPropagation();
-  }, [orderedPanelIndices, reorderMode, setReorderPreviewOrderValue]);
+  }, [beginReorderDragVisual, orderedPanelIndices, reorderMode, setReorderPreviewOrderValue]);
   const handlePanelReorderPointerEnter = React.useCallback((event: React.PointerEvent, panel: number) => {
     if (!reorderMode || pointerReorderPanelRef.current === null) return;
     if (dragOverPanel !== panel) setDragOverPanel(panel);
@@ -1679,14 +1808,25 @@ function Show3D() {
   }, [dragOverPanel, reorderMode]);
   const handlePanelReorderPointerMove = React.useCallback((event: React.PointerEvent) => {
     if (!reorderMode || pointerReorderPanelRef.current === null) return;
+    updateReorderGhostPosition(event.clientX, event.clientY);
+    if (!reorderDragHasPassedThreshold(event.clientX, event.clientY)) {
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
     previewPanelReorderFromPoint(event.clientX, event.clientY);
     event.preventDefault();
     event.stopPropagation();
-  }, [previewPanelReorderFromPoint, reorderMode]);
+  }, [previewPanelReorderFromPoint, reorderDragHasPassedThreshold, reorderMode, updateReorderGhostPosition]);
   const handlePanelReorderPointerUp = React.useCallback((event: React.PointerEvent) => {
     if (!reorderMode) return;
-    previewPanelReorderFromPoint(event.clientX, event.clientY);
-    commitPanelReorderPreview();
+    updateReorderGhostPosition(event.clientX, event.clientY);
+    if (reorderDragHasPassedThreshold(event.clientX, event.clientY)) {
+      previewPanelReorderFromPoint(event.clientX, event.clientY);
+      commitPanelReorderPreview();
+    } else {
+      cancelPanelReorderPreview();
+    }
     try {
       event.currentTarget.releasePointerCapture(event.pointerId);
     } catch {
@@ -1694,7 +1834,7 @@ function Show3D() {
     }
     event.preventDefault();
     event.stopPropagation();
-  }, [commitPanelReorderPreview, previewPanelReorderFromPoint, reorderMode]);
+  }, [cancelPanelReorderPreview, commitPanelReorderPreview, previewPanelReorderFromPoint, reorderDragHasPassedThreshold, reorderMode, updateReorderGhostPosition]);
   const resetPanelOrder = React.useCallback(() => {
     setPanelOrder([]);
     cancelPanelReorderPreview();
@@ -1706,6 +1846,12 @@ function Show3D() {
     if (reorderMode) return;
     cancelPanelReorderPreview();
   }, [cancelPanelReorderPreview, reorderMode]);
+  React.useEffect(() => () => {
+    if (reorderGhostRafRef.current !== null) {
+      window.cancelAnimationFrame(reorderGhostRafRef.current);
+      reorderGhostRafRef.current = null;
+    }
+  }, []);
   const [hiddenIndices] = useModelState<number[]>("hidden_indices");
   const hiddenSet = new Set(hiddenIndices || []);
   const nextVisible = (from: number, dir: 1 | -1, allowWrap = true): number => {
@@ -1867,13 +2013,10 @@ function Show3D() {
     : "";
   const hasSavedStaticFallback = staticFallbackUrl.length > 0;
   useHideStaticFallback(model, rootRef, canRenderLive || hasSavedStaticFallback);
-  const canvasRef = React.useRef<HTMLCanvasElement>(null);
-  const gpuCanvasRef = React.useRef<HTMLCanvasElement>(null);
   const gpuCanvasCtxRef = React.useRef<GPUCanvasContext | null>(null);
   const gpuCanvasSizeRef = React.useRef<{ w: number; h: number } | null>(null);
   const overlayRef = React.useRef<HTMLCanvasElement>(null);
   const uiRef = React.useRef<HTMLCanvasElement>(null);
-  const canvasContainerRef = React.useRef<HTMLDivElement>(null);
   const canvasWheelHandlerRef = React.useRef<((event: WheelEvent) => void) | null>(null);
   const fftInsetNativeWheelHandlerRef = React.useRef<((event: WheelEvent) => boolean) | null>(null);
   const fftCanvasRef = React.useRef<HTMLCanvasElement>(null);
@@ -10118,6 +10261,7 @@ function Show3D() {
               const panelLeft = (slot % cols) * (panelW + gap);
               const panelTop = Math.floor(slot / cols) * (panelH + gap);
               const active = dragOverPanel === panel;
+              const draggingThisPanel = reorderDragVisual?.panel === panel;
               return (
                 <Box
                   key={`panel-reorder-${panel}`}
@@ -10134,6 +10278,7 @@ function Show3D() {
                   onPointerEnter={(event) => handlePanelReorderPointerEnter(event, panel)}
                   onPointerMove={handlePanelReorderPointerMove}
                   onPointerUp={handlePanelReorderPointerUp}
+                  onPointerCancel={cancelPanelReorderPreview}
                   sx={{
                     position: "absolute",
                     top: `${(panelTop / Math.max(1, canvasH)) * 100}%`,
@@ -10142,9 +10287,9 @@ function Show3D() {
                     height: `${(panelH / Math.max(1, canvasH)) * 100}%`,
                     boxSizing: "border-box",
                     border: `2px solid ${active ? themeColors.accent : "rgba(255,255,255,0.48)"}`,
-                    bgcolor: active ? "rgba(79, 195, 247, 0.16)" : "rgba(0,0,0,0.04)",
+                    bgcolor: draggingThisPanel ? "rgba(0,0,0,0.28)" : active ? "rgba(79, 195, 247, 0.16)" : "rgba(0,0,0,0.04)",
                     outline: active ? `1px solid ${themeColors.accent}` : "none",
-                    opacity: draggedPanelRef.current === panel ? 0.72 : 1,
+                    opacity: draggingThisPanel ? 0.38 : 1,
                     transform: active ? "translateY(-3px) scale(1.006)" : "translateY(0) scale(1)",
                     transition: "transform 110ms ease, opacity 110ms ease, background-color 110ms ease, border-color 110ms ease, box-shadow 110ms ease",
                     animation: "show3d-reorder-jiggle 220ms ease-in-out infinite alternate",
@@ -10176,6 +10321,85 @@ function Show3D() {
                 </Box>
               );
             })}
+            {panelChromeVisible && reorderMode && reorderDragVisual && (
+              <Box
+                ref={reorderGhostRef}
+                data-show3d-reorder-ghost={reorderDragVisual.panel}
+                aria-hidden="true"
+                sx={{
+                  position: "absolute",
+                  top: 0,
+                  left: 0,
+                  width: `${reorderDragVisual.width}px`,
+                  height: `${reorderDragVisual.height}px`,
+                  transform: `translate3d(${reorderDragVisual.x}px, ${reorderDragVisual.y}px, 0)`,
+                  boxSizing: "border-box",
+                  overflow: "hidden",
+                  border: `2px solid ${themeColors.accent}`,
+                  bgcolor: reorderDragVisual.imageUrl ? "rgba(0,0,0,0.04)" : "rgba(25,25,25,0.68)",
+                  boxShadow: `0 10px 24px rgba(0,0,0,0.32), 0 0 0 1px ${themeColors.accent}`,
+                  opacity: 0.9,
+                  pointerEvents: "none",
+                  zIndex: 12,
+                  willChange: "transform",
+                }}
+              >
+                {reorderDragVisual.imageUrl && (
+                  <Box
+                    sx={{
+                      position: "absolute",
+                      inset: 0,
+                      backgroundImage: `url(${reorderDragVisual.imageUrl})`,
+                      backgroundSize: "100% 100%",
+                      backgroundPosition: "center",
+                      imageRendering: smooth ? "auto" : "pixelated",
+                    }}
+                  />
+                )}
+                <Box
+                  sx={{
+                    position: "absolute",
+                    top: 6,
+                    left: 8,
+                    right: 8,
+                    px: 0.75,
+                    py: 0.25,
+                    borderRadius: 0.75,
+                    bgcolor: "rgba(0,0,0,0.48)",
+                    color: "rgba(255,255,255,0.96)",
+                    fontFamily: UI_FONT,
+                    fontSize: Math.max(8, panelTitleFontSize || 11),
+                    fontWeight: 700,
+                    lineHeight: 1.2,
+                    textAlign: "center",
+                    textShadow: "0 1px 2px rgba(0,0,0,0.9)",
+                    whiteSpace: "nowrap",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                  }}
+                >
+                  {reorderDragVisual.label}
+                </Box>
+                <Box
+                  sx={{
+                    position: "absolute",
+                    bottom: 8,
+                    left: "50%",
+                    transform: "translateX(-50%)",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    width: 34,
+                    height: 24,
+                    borderRadius: 1,
+                    bgcolor: "rgba(0,0,0,0.48)",
+                    color: "rgba(255,255,255,0.95)",
+                  }}
+                >
+                  <DragIndicatorIcon sx={{ fontSize: 19 }} />
+                </Box>
+              </Box>
+            )}
             {/* Zoom indicator now drawn on the ui canvas in the scale-bar
                 pass (Show2D-matching style: white, sans, Unicode ×). */}
             {/* Cursor readout overlay */}

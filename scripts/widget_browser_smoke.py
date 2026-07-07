@@ -319,8 +319,34 @@ def _show3d_reorder_labels(page) -> list[str]:
     )
 
 
+def _show3d_reorder_ghost(page) -> dict[str, Any] | None:
+    return page.evaluate(
+        """() => {
+          const el = document.querySelector('[data-show3d-reorder-ghost]');
+          if (!el) return null;
+          const rect = el.getBoundingClientRect();
+          return {
+            panel: el.getAttribute('data-show3d-reorder-ghost'),
+            x: rect.x,
+            y: rect.y,
+            width: rect.width,
+            height: rect.height,
+          };
+        }"""
+    )
+
+
 def _exercise_show3d_reorder(page) -> dict[str, Any]:
-    result: dict[str, Any] = {"attempted": False, "before": [], "after": [], "changed": False}
+    result: dict[str, Any] = {
+        "attempted": False,
+        "before": [],
+        "during": [],
+        "after": [],
+        "changed": False,
+        "dynamic_changed_before_release": False,
+        "ghost_visible": False,
+        "ghost_moved": False,
+    }
     opened = page.evaluate(
         """() => {
           const button = [...document.querySelectorAll('button')]
@@ -358,8 +384,21 @@ def _exercise_show3d_reorder(page) -> dict[str, Any]:
     end_y = target["y"] + target["height"] * 0.5
     page.mouse.move(start_x, start_y)
     page.mouse.down()
+    page.wait_for_timeout(80)
+    ghost_start = _show3d_reorder_ghost(page)
     page.mouse.move(start_x + (end_x - start_x) * 0.35, start_y + (end_y - start_y) * 0.25, steps=6)
     page.mouse.move(start_x + (end_x - start_x) * 0.72, start_y + (end_y - start_y) * 0.1, steps=8)
+    page.wait_for_timeout(120)
+    ghost_mid = _show3d_reorder_ghost(page)
+    during = _show3d_reorder_labels(page)
+    result["during"] = during
+    result["dynamic_changed_before_release"] = bool(before and during and before != during)
+    result["ghost_visible"] = bool(ghost_start and ghost_mid)
+    result["ghost_moved"] = bool(
+        ghost_start
+        and ghost_mid
+        and abs(float(ghost_mid["x"]) - float(ghost_start["x"])) > 12
+    )
     page.mouse.move(end_x, end_y, steps=8)
     page.mouse.up()
     page.wait_for_timeout(250)
@@ -441,6 +480,15 @@ def _semantic_checks(page, row: dict[str, Any], canvas_count: int) -> dict[str, 
             errors.append(
                 "Show3D reorder drag did not move the first panel to the final slot "
                 f"({reorder_drag['before']} -> {reorder_drag['after']})"
+            )
+        if not reorder_drag["ghost_visible"]:
+            errors.append("Show3D reorder drag ghost did not appear during drag")
+        elif not reorder_drag["ghost_moved"]:
+            errors.append("Show3D reorder drag ghost did not follow the pointer")
+        if not reorder_drag["dynamic_changed_before_release"]:
+            errors.append(
+                "Show3D reorder order did not update before mouse release "
+                f"({reorder_drag['before']} -> {reorder_drag['during']})"
             )
 
     checks["errors"] = errors
