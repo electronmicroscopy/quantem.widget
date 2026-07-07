@@ -124,6 +124,149 @@ class AnimationExportPreview:
         return path.resolve().as_uri()
 
 
+def _is_show3d_page_dict(value: object) -> bool:
+    """Return True for explicit Show3D page descriptors."""
+    if not isinstance(value, Mapping):
+        return False
+    return any(key in value for key in ("stacks", "panels", "data", "array", "images"))
+
+
+def _normalise_show3d_pages(
+    data_args: tuple,
+    *,
+    panel_titles: list[str] | None,
+    page_labels: Sequence[str | None] | None,
+) -> tuple[tuple, list[str] | None, int, int, list[str], list[int]]:
+    """Flatten paged Show3D input into the existing multi-panel stack path."""
+    if len(data_args) != 1:
+        return data_args, panel_titles, 1, 0, [], []
+
+    data = data_args[0]
+    explicit_page_dicts = (
+        isinstance(data, (list, tuple))
+        and len(data) > 0
+        and all(_is_show3d_page_dict(item) for item in data)
+    )
+    if explicit_page_dicts:
+        page_panel_arrays: list[list[np.ndarray]] = []
+        flattened_titles: list[str] = []
+        inferred_page_labels: list[str] = []
+        panels_per_page: int | None = None
+        frames_per_page: int | None = None
+        image_shape: tuple[int, int] | None = None
+        for page_idx, page in enumerate(data):
+            raw_panels = page.get("stacks", page.get("panels", page.get("data", page.get("array", page.get("images")))))
+            if raw_panels is None:
+                raise ValueError(
+                    f"Show3D page {page_idx} is missing stacks/panels/data/array. "
+                    "Use {'title': '...', 'stacks': [...]}"
+                )
+            if isinstance(raw_panels, np.ndarray):
+                arr = to_numpy(raw_panels)
+                if arr.ndim == 3:
+                    panels = [arr]
+                elif arr.ndim == 4:
+                    panels = [arr[i] for i in range(arr.shape[0])]
+                else:
+                    raise ValueError(
+                        f"Show3D page {page_idx} must contain 3D stacks or a 4D panel stack, "
+                        f"got shape {arr.shape}"
+                    )
+            else:
+                panels = []
+                for panel_idx, raw_panel in enumerate(raw_panels):
+                    arr = to_numpy(raw_panel.array if hasattr(raw_panel, "array") else raw_panel)
+                    if arr.ndim == 2:
+                        arr = arr[np.newaxis, ...]
+                    if arr.ndim != 3:
+                        raise ValueError(
+                            f"Show3D page {page_idx} panel {panel_idx} must be a 2D image or 3D stack, "
+                            f"got shape {arr.shape}"
+                        )
+                    panels.append(arr)
+            if not panels:
+                raise ValueError(f"Show3D page {page_idx} must contain at least one panel")
+            if panels_per_page is None:
+                panels_per_page = len(panels)
+                frames_per_page = int(panels[0].shape[0])
+                image_shape = tuple(int(v) for v in panels[0].shape[1:])
+            elif len(panels) != panels_per_page:
+                raise ValueError(
+                    "Every Show3D page must contain the same number of panels; "
+                    f"page 0 has {panels_per_page}, page {page_idx} has {len(panels)}"
+                )
+            page_titles = page.get("panel_titles", page.get("labels"))
+            for panel_idx, arr in enumerate(panels):
+                if int(arr.shape[0]) != frames_per_page or tuple(int(v) for v in arr.shape[1:]) != image_shape:
+                    raise ValueError(
+                        "Every Show3D page panel must have the same frames and image shape; "
+                        f"expected ({frames_per_page}, {image_shape[0]}, {image_shape[1]}), got {arr.shape}"
+                    )
+                if page_titles is not None:
+                    if len(page_titles) != len(panels):
+                        raise ValueError(
+                            f"Show3D page {page_idx} panel_titles length ({len(page_titles)}) "
+                            f"must match its panel count ({len(panels)})"
+                        )
+                    flattened_titles.append(str(page_titles[panel_idx]))
+                elif panel_titles is not None:
+                    if len(panel_titles) == len(panels):
+                        flattened_titles.append(str(panel_titles[panel_idx]))
+                    elif panels_per_page is not None and len(panel_titles) == len(data) * panels_per_page:
+                        flattened_titles.append(str(panel_titles[page_idx * panels_per_page + panel_idx]))
+                    else:
+                        raise ValueError(
+                            "panel_titles for paged Show3D must have length panels_per_page "
+                            f"({len(panels)}) or n_pages * panels_per_page ({len(data) * len(panels)}), "
+                            f"got {len(panel_titles)}"
+                        )
+                else:
+                    flattened_titles.append(f"Panel {panel_idx + 1}")
+            page_panel_arrays.append(panels)
+            inferred_page_labels.append(str(page.get("title") or page.get("label") or f"Page {page_idx + 1}"))
+        n_pages = len(page_panel_arrays)
+        panels_per = int(panels_per_page or 1)
+        resolved_page_labels = [
+            "" if label is None else str(label)
+            for label in (page_labels if page_labels is not None else inferred_page_labels)
+        ]
+        if len(resolved_page_labels) != n_pages:
+            raise ValueError(f"page_labels length ({len(resolved_page_labels)}) must match n_pages ({n_pages})")
+        flattened = tuple(panel for page in page_panel_arrays for panel in page)
+        return flattened, flattened_titles, n_pages, panels_per, resolved_page_labels, [0] * n_pages
+
+    arr = None
+    if not isinstance(data, list):
+        try:
+            arr = to_numpy(data)
+        except Exception:
+            arr = None
+    if arr is not None and arr.ndim == 5:
+        n_pages, panels = int(arr.shape[0]), int(arr.shape[1])
+        resolved_page_labels = [
+            "" if label is None else str(label)
+            for label in (page_labels if page_labels is not None else [f"Page {i + 1}" for i in range(n_pages)])
+        ]
+        if len(resolved_page_labels) != n_pages:
+            raise ValueError(f"page_labels length ({len(resolved_page_labels)}) must match n_pages ({n_pages})")
+        if panel_titles is not None:
+            if len(panel_titles) == panels:
+                resolved_titles = [str(label) for _ in range(n_pages) for label in panel_titles]
+            elif len(panel_titles) == n_pages * panels:
+                resolved_titles = [str(label) for label in panel_titles]
+            else:
+                raise ValueError(
+                    "panel_titles for paged Show3D must have length panels_per_page "
+                    f"({panels}) or n_pages * panels_per_page ({n_pages * panels}), got {len(panel_titles)}"
+                )
+        else:
+            resolved_titles = [f"Panel {i + 1}" for _ in range(n_pages) for i in range(panels)]
+        flattened = tuple(arr.reshape(n_pages * panels, *arr.shape[2:]))
+        return flattened, resolved_titles, n_pages, panels, resolved_page_labels, [0] * n_pages
+
+    return data_args, panel_titles, 1, 0, [], []
+
+
 def _all_finite(arr: np.ndarray, *, chunk_size: int = 1_000_000) -> bool:
     """Chunked full finite scan without allocating one giant boolean array."""
     flat = np.ravel(arr)
@@ -644,6 +787,11 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
     # lengths get auto-padded to the longest; this trait lets JS mark
     # "end-of-stack" frames (frame idx >= real[panel]). Empty = all real.
     panel_real_frames = traitlets.List(traitlets.Int()).tag(sync=True)
+    n_pages = traitlets.Int(1).tag(sync=True)
+    page_idx = traitlets.Int(0).tag(sync=True)
+    panels_per_page = traitlets.Int(0).tag(sync=True)
+    page_labels = traitlets.List(traitlets.Unicode(), default_value=[]).tag(sync=True)
+    page_starred = traitlets.List(traitlets.Int(), default_value=[]).tag(sync=True)
     # Single Link toggle controls both zoom and pan (independent axes proved confusing).
     link_panels = traitlets.Bool(True).tag(sync=True)
     link_contrast = traitlets.Bool(True).tag(sync=True)  # share vmin/vmax across panels
@@ -1065,6 +1213,25 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
             )
         return clean
 
+    @traitlets.validate("page_idx")
+    def _validate_page_idx(self, proposal: dict) -> int:
+        """Clamp the active page index to the available page range."""
+        n_pages = max(1, int(getattr(self, "n_pages", 1)))
+        return int(max(0, min(int(proposal["value"]), n_pages - 1)))
+
+    @traitlets.validate("page_starred")
+    def _validate_page_starred(self, proposal: dict) -> list[int]:
+        """Normalize per-page star flags."""
+        val = list(proposal["value"])
+        n_pages = max(1, int(getattr(self, "n_pages", 1)))
+        if not val:
+            return [0] * n_pages
+        if len(val) != n_pages:
+            raise traitlets.TraitError(
+                f"page_starred length ({len(val)}) must equal n_pages ({n_pages})"
+            )
+        return [1 if int(v) else 0 for v in val]
+
     def _panel_title_for_index(self, panel: int) -> str:
         """Return the user-facing title for a panel index."""
         if 0 <= panel < len(self.panel_titles) and self.panel_titles[panel]:
@@ -1287,6 +1454,7 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
         frame_metadata: Sequence[Mapping[str, Any]] | None = None,
         panel_frame_metadata: Sequence[Sequence[Mapping[str, Any]]] | None = None,
         frame_label_format: str | Callable[..., object] | None = None,
+        page_labels: Sequence[str | None] | None = None,
         panel_real_frames: list[int] | None = None,
         hidden_panels: Sequence[int | str] | int | str | None = None,
         panel_order: Sequence[int | str] | None = None,
@@ -1451,6 +1619,11 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
             pixel_size = float(samp)
         if units is not None:
             pixel_unit = units[0] if isinstance(units, (tuple, list)) else units
+        data_args, panel_titles, n_pages, panels_per_page, resolved_page_labels, resolved_page_starred = _normalise_show3d_pages(
+            data_args,
+            panel_titles=panel_titles,
+            page_labels=page_labels,
+        )
         _t0 = time.perf_counter()
         # Reject unknown kwargs so typos raise instead of being silently ignored.
         _reject_unknown_kwargs(type(self), kwargs)
@@ -1483,6 +1656,8 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
                             panel_frame_metadata=panel_frame_metadata,
                             frame_label_format=frame_label_format,
                             title=title, cmap=cmap, vmin=vmin, vmax=vmax,
+                            n_pages=n_pages, panels_per_page=panels_per_page,
+                            page_labels=resolved_page_labels, page_starred=resolved_page_starred,
                             pixel_size=pixel_size, pixel_unit=pixel_unit,
                             smooth=smooth, image_rotation=image_rotation,
                             log_scale=log_scale,
@@ -1521,6 +1696,8 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
                    panel_frame_metadata: Sequence[Sequence[Mapping[str, Any]]] | None,
                    frame_label_format: str | Callable[..., object] | None,
                    title: str,
+                   n_pages: int, panels_per_page: int,
+                   page_labels: list[str], page_starred: list[int],
                    cmap: str | Colormap, vmin: float | None, vmax: float | None,
                    pixel_size: float, pixel_unit: str | None, smooth: bool, image_rotation: int,
                    log_scale: bool, auto_contrast: bool,
@@ -1552,6 +1729,11 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
         self._separate_panel_data = None
         self._crop = _normalize_crop(crop)
         self._padding = _normalize_padding(padding)
+        self.n_pages = int(max(1, n_pages))
+        self.panels_per_page = int(max(0, panels_per_page))
+        self.page_idx = 0
+        self.page_labels = list(page_labels or [])
+        self.page_starred = list(page_starred or [])
         if pad_mode not in ("median", "constant"):
             raise ValueError(f"pad_mode must be 'median' or 'constant', got {pad_mode!r}")
         self._pad_mode = pad_mode
@@ -1885,6 +2067,28 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
             self.width = orig_w
         if self.shared_panel_source:
             self.panel_width_px = self.width
+        if int(self.n_pages) > 1:
+            if int(self.panels_per_page) <= 0:
+                raise ValueError("panels_per_page must be > 0 when n_pages > 1")
+            if int(self.n_panels) != int(self.n_pages) * int(self.panels_per_page):
+                raise ValueError(
+                    f"paged Show3D expects n_panels == n_pages * panels_per_page, "
+                    f"got {self.n_panels} != {self.n_pages} * {self.panels_per_page}"
+                )
+            if not self.page_labels:
+                self.page_labels = [f"Page {i + 1}" for i in range(int(self.n_pages))]
+            if len(self.page_labels) != int(self.n_pages):
+                raise ValueError(
+                    f"page_labels length ({len(self.page_labels)}) must equal n_pages ({self.n_pages})"
+                )
+            if len(self.page_starred) != int(self.n_pages):
+                self.page_starred = [0] * int(self.n_pages)
+        else:
+            self.n_pages = 1
+            self.page_idx = 0
+            self.panels_per_page = 0
+            self.page_labels = []
+            self.page_starred = []
 
         # Color range (global across all frames)
         self._vmin_user = vmin
@@ -2318,6 +2522,11 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
         self.starred = [-1]
         self.hidden_panels = []
         self.panel_order = []
+        self.n_pages = 1
+        self.page_idx = 0
+        self.panels_per_page = 0
+        self.page_labels = []
+        self.page_starred = []
         self._reset_panel_contrast_traits()
         self._multi_panel_bin = 0
         self.shared_panel_source = False
@@ -2472,6 +2681,11 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
             "starred": list(self.starred),
             "hidden_panels": list(self.hidden_panels),
             "panel_order": list(self.panel_order),
+            "n_pages": int(self.n_pages),
+            "page_idx": int(self.page_idx),
+            "panels_per_page": int(self.panels_per_page),
+            "page_labels": list(self.page_labels),
+            "page_starred": list(self.page_starred),
             "playback_path": self.playback_path,
             "slice_idx": self.slice_idx,
             "roi_active": self.roi_active,
@@ -2776,6 +2990,24 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
                 state.pop("panel_order")
             else:
                 state["panel_order"] = order
+        if int(self.n_pages) > 1:
+            expected_panels_per_page = int(self.panels_per_page)
+            state["n_pages"] = int(self.n_pages)
+            state["panels_per_page"] = expected_panels_per_page
+            if "page_idx" in state:
+                try:
+                    state["page_idx"] = int(max(0, min(int(state["page_idx"]), int(self.n_pages) - 1)))
+                except (TypeError, ValueError):
+                    state.pop("page_idx")
+            if "page_labels" in state and isinstance(state["page_labels"], list):
+                if len(state["page_labels"]) != int(self.n_pages):
+                    state.pop("page_labels")
+            if "page_starred" in state and isinstance(state["page_starred"], list):
+                if len(state["page_starred"]) != int(self.n_pages):
+                    state.pop("page_starred")
+        else:
+            for key in ("n_pages", "page_idx", "panels_per_page", "page_labels", "page_starred"):
+                state.pop(key, None)
         # These were briefly present in the development branch. Contrast auto,
         # percentile, and log scale now stay global to match Show2D.
         for key in (
@@ -3096,8 +3328,16 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
         return {i: f for i, f in enumerate(self.starred) if f >= 0}
 
     @property
+    def starred_pages(self) -> list[int]:
+        """Zero-based page indices marked with a star."""
+        return [i for i, value in enumerate(self.page_starred) if value]
+
+    @property
     def ordered_panels(self) -> list[int]:
         """Zero-based movie panel indices in the current display order."""
+        if int(self.n_pages) > 1 and int(self.panels_per_page) > 0:
+            start = int(self.page_idx) * int(self.panels_per_page)
+            return list(range(start, min(start + int(self.panels_per_page), int(self.n_panels))))
         order = list(self.panel_order or [])
         if len(order) == int(self.n_panels) and sorted(order) == list(range(int(self.n_panels))):
             return order
@@ -3108,6 +3348,30 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
         """Zero-based panel indices currently visible in the canvas grid."""
         hidden = set(self.hidden_panels)
         return [i for i in self.ordered_panels if i not in hidden]
+
+    def star_page(self, page: int) -> Self:
+        """Mark a page with a star."""
+        idx = int(page)
+        if idx < 0 or idx >= int(self.n_pages):
+            raise ValueError(f"page index {idx} out of range [0, {self.n_pages})")
+        starred = list(self.page_starred)
+        if len(starred) != int(self.n_pages):
+            starred = [0] * int(self.n_pages)
+        starred[idx] = 1
+        self.page_starred = starred
+        return self
+
+    def unstar_page(self, page: int) -> Self:
+        """Clear the star on a page."""
+        idx = int(page)
+        if idx < 0 or idx >= int(self.n_pages):
+            raise ValueError(f"page index {idx} out of range [0, {self.n_pages})")
+        starred = list(self.page_starred)
+        if len(starred) != int(self.n_pages):
+            starred = [0] * int(self.n_pages)
+        starred[idx] = 0
+        self.page_starred = starred
+        return self
 
     def set_hidden_panels(self, panels: Sequence[int | str] | int | str) -> Self:
         """Replace the hidden panel set by index or exact panel title.
@@ -4302,6 +4566,11 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
             show_zoom_indicator=self.show_zoom_indicator,
             show_scale_bar=self.scale_bar_visible,
         )
+        clone.n_pages = int(self.n_pages)
+        clone.panels_per_page = int(self.panels_per_page)
+        clone.page_labels = list(self.page_labels)
+        clone.page_starred = list(self.page_starred)
+        clone.page_idx = int(self.page_idx)
         clone.load_state_dict(self.state_dict())
         if downsample > 1 and clone.pixel_size > 0:
             clone.pixel_size = export_pixel_size

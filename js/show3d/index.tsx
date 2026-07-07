@@ -1474,6 +1474,11 @@ function Show3D() {
   const [starred, setStarred] = useModelState<number[]>("starred");
   const [hiddenPanels, setHiddenPanels] = useModelState<number[]>("hidden_panels");
   const [panelOrder, setPanelOrder] = useModelState<number[]>("panel_order");
+  const [nPages] = useModelState<number>("n_pages");
+  const [pageIdx, setPageIdx] = useModelState<number>("page_idx");
+  const [panelsPerPage] = useModelState<number>("panels_per_page");
+  const [pageLabels] = useModelState<string[]>("page_labels");
+  const [pageStarred, setPageStarred] = useModelState<number[]>("page_starred");
   const [reorderMode, setReorderMode] = React.useState(false);
   const [dragOverPanel, setDragOverPanel] = React.useState<number | null>(null);
   const [reorderPreviewOrder, setReorderPreviewOrder] = React.useState<number[] | null>(null);
@@ -1491,20 +1496,35 @@ function Show3D() {
   const gpuCanvasRef = React.useRef<HTMLCanvasElement>(null);
   const canvasContainerRef = React.useRef<HTMLDivElement>(null);
   const totalPanelCount = Math.max(1, nPanels || 1);
+  const isPaged = (nPages || 1) > 1 && (panelsPerPage || 0) > 0;
+  const currentPageIdx = Math.max(0, Math.min((nPages || 1) - 1, Math.round(pageIdx || 0)));
+  const activePageStart = isPaged ? currentPageIdx * Math.max(1, panelsPerPage || 1) : 0;
+  const activePageEnd = isPaged ? Math.min(totalPanelCount, activePageStart + Math.max(1, panelsPerPage || 1)) : totalPanelCount;
+  const activePageIndices = React.useMemo(
+    () => Array.from({ length: Math.max(0, activePageEnd - activePageStart) }, (_, i) => activePageStart + i),
+    [activePageStart, activePageEnd]
+  );
+  const activePanelCount = isPaged ? activePageIndices.length : totalPanelCount;
   const hiddenPanelSet = React.useMemo(() => {
     const clean = new Set<number>();
     for (const value of hiddenPanels || []) {
       const idx = Math.trunc(Number(value));
       if (Number.isFinite(idx) && idx >= 0 && idx < totalPanelCount) clean.add(idx);
     }
-    if (clean.size >= totalPanelCount) clean.delete(totalPanelCount - 1);
+    const activeHiddenCount = (isPaged ? activePageIndices : Array.from({ length: totalPanelCount }, (_, panel) => panel))
+      .filter((panel) => clean.has(panel)).length;
+    if (activeHiddenCount >= Math.max(1, activePanelCount)) {
+      const fallback = (isPaged ? activePageIndices : [totalPanelCount - 1])[Math.max(0, activePanelCount - 1)];
+      clean.delete(fallback);
+    }
     return clean;
-  }, [hiddenPanels, totalPanelCount]);
+  }, [hiddenPanels, totalPanelCount, isPaged, activePageIndices, activePanelCount]);
   const naturalPanelOrder = React.useMemo(
-    () => Array.from({ length: totalPanelCount }, (_, panel) => panel),
-    [totalPanelCount]
+    () => isPaged ? activePageIndices : Array.from({ length: totalPanelCount }, (_, panel) => panel),
+    [activePageIndices, isPaged, totalPanelCount]
   );
   const orderedPanelIndices = React.useMemo(() => {
+    if (isPaged) return naturalPanelOrder;
     const values = Array.isArray(panelOrder) ? panelOrder.map(value => Math.trunc(Number(value))) : [];
     const valid = (
       values.length === totalPanelCount &&
@@ -1512,8 +1532,9 @@ function Show3D() {
       new Set(values).size === totalPanelCount
     );
     return valid ? values : naturalPanelOrder;
-  }, [panelOrder, naturalPanelOrder, totalPanelCount]);
+  }, [panelOrder, naturalPanelOrder, totalPanelCount, isPaged]);
   const previewOrderedPanelIndices = React.useMemo(() => {
+    if (isPaged) return null;
     const values = Array.isArray(reorderPreviewOrder) ? reorderPreviewOrder.map(value => Math.trunc(Number(value))) : [];
     const valid = (
       values.length === totalPanelCount &&
@@ -1521,13 +1542,14 @@ function Show3D() {
       new Set(values).size === totalPanelCount
     );
     return valid ? values : null;
-  }, [reorderPreviewOrder, totalPanelCount]);
+  }, [reorderPreviewOrder, totalPanelCount, isPaged]);
   const displayOrderedPanelIndices = previewOrderedPanelIndices || orderedPanelIndices;
   const visiblePanelIndices = React.useMemo(
     () => displayOrderedPanelIndices.filter(panel => !hiddenPanelSet.has(panel)),
     [hiddenPanelSet, displayOrderedPanelIndices]
   );
   const visiblePanelCount = visiblePanelIndices.length;
+  const panelMenuTotal = isPaged ? activePanelCount : totalPanelCount;
   const panelLabel = React.useCallback((panel: number) => (
     (panelTitles && panelTitles[panel]) || `Panel ${panel + 1}`
   ), [panelTitles]);
@@ -1539,13 +1561,15 @@ function Show3D() {
       if (Number.isFinite(idx) && idx >= 0 && idx < totalPanelCount) next.add(idx);
     }
     if (hidden) {
-      if (!next.has(panel) && totalPanelCount - next.size <= 1) return;
+      const activeVisible = (isPaged ? activePageIndices : Array.from({ length: totalPanelCount }, (_, idx) => idx))
+        .filter((idx) => !next.has(idx)).length;
+      if (!next.has(panel) && activeVisible <= 1) return;
       next.add(panel);
     } else {
       next.delete(panel);
     }
     setHiddenPanels(Array.from(next).sort((a, b) => a - b));
-  }, [hiddenPanels, totalPanelCount, setHiddenPanels]);
+  }, [hiddenPanels, totalPanelCount, isPaged, activePageIndices, setHiddenPanels]);
   const applyPanelOrder = React.useCallback((order: number[]) => {
     const clean = order.filter((value) => Number.isInteger(value) && value >= 0 && value < totalPanelCount);
     if (clean.length !== totalPanelCount || new Set(clean).size !== totalPanelCount) return;
@@ -1840,8 +1864,8 @@ function Show3D() {
     cancelPanelReorderPreview();
   }, [cancelPanelReorderPreview, setPanelOrder]);
   React.useEffect(() => {
-    if ((nPanels || 1) <= 1 && reorderMode) setReorderMode(false);
-  }, [nPanels, reorderMode]);
+    if (((nPanels || 1) <= 1 || isPaged) && reorderMode) setReorderMode(false);
+  }, [nPanels, isPaged, reorderMode]);
   React.useEffect(() => {
     if (reorderMode) return;
     cancelPanelReorderPreview();
@@ -9718,6 +9742,46 @@ function Show3D() {
 	          {/* Controls row */}
 	          {controlsVisible && (
 	          <Box sx={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: "4px", mb: `${SPACING.XS}px`, minHeight: 28 }}>
+            {isPaged && (
+              <>
+                <Typography sx={{ ...typography.label, fontSize: 10, ml: "2px" }}>Page</Typography>
+                <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.accent, minWidth: 56 }}>
+                  {(pageLabels?.[currentPageIdx] || `Page ${currentPageIdx + 1}`)} {currentPageIdx + 1}/{nPages}
+                </Typography>
+                <Slider
+                  value={currentPageIdx}
+                  min={0}
+                  max={Math.max(0, (nPages || 1) - 1)}
+                  step={1}
+                  onChange={(_, value) => {
+                    const raw = Array.isArray(value) ? value[0] : value;
+                    setPageIdx(Math.max(0, Math.min((nPages || 1) - 1, Math.round(Number(raw) || 0))));
+                  }}
+                  size="small"
+                  sx={{ ...sliderStyles.small, width: 120, color: themeColors.accent, ml: "2px" }}
+                  aria-label="Page"
+                />
+                <IconButton
+                  size="small"
+                  onClick={() => {
+                    const next = Array.from({ length: Math.max(1, nPages || 1) }, (_, idx) => pageStarred?.[idx] ? 1 : 0);
+                    next[currentPageIdx] = next[currentPageIdx] ? 0 : 1;
+                    setPageStarred(next);
+                  }}
+                  title={(pageStarred?.[currentPageIdx] ? "Unstar " : "Star ") + (pageLabels?.[currentPageIdx] || `Page ${currentPageIdx + 1}`)}
+                  aria-label={(pageStarred?.[currentPageIdx] ? "Unstar " : "Star ") + (pageLabels?.[currentPageIdx] || `Page ${currentPageIdx + 1}`)}
+                  sx={{
+                    width: 24,
+                    height: 24,
+                    p: 0,
+                    color: pageStarred?.[currentPageIdx] ? "#ffc107" : themeColors.textMuted,
+                    "&:hover": { color: pageStarred?.[currentPageIdx] ? "#ffc107" : themeColors.text },
+                  }}
+                >
+                  {pageStarred?.[currentPageIdx] ? "★" : "☆"}
+                </IconButton>
+              </>
+            )}
             {visiblePanelCount > 1 && (
               <>
                 <Typography sx={{ ...typography.label, fontSize: 10, ml: "2px" }}>Cols</Typography>
@@ -9858,21 +9922,23 @@ function Show3D() {
               <Button size="small" sx={compactButton} onClick={handleCopy} aria-label="Copy current frame to clipboard as PNG">Copy</Button>
               {(nPanels || 1) > 1 && (
                 <>
-                  <Button
-                    size="small"
-                    sx={{
-                      ...compactButton,
-                      color: reorderMode ? themeColors.accent : themeColors.text,
-                      "& .MuiButton-startIcon": { mr: 0.4 },
-                    }}
-                    startIcon={<DragIndicatorIcon sx={{ fontSize: 14 }} />}
-                    onClick={() => setReorderMode((value) => !value)}
-                    aria-pressed={reorderMode ? "true" : "false"}
-                    aria-label={reorderMode ? "Finish reordering panels" : "Reorder panels"}
-                    title={reorderMode ? "Finish reordering panels" : "Reorder panels"}
-                  >
-                    Reorder
-                  </Button>
+                  {!isPaged && (
+                    <Button
+                      size="small"
+                      sx={{
+                        ...compactButton,
+                        color: reorderMode ? themeColors.accent : themeColors.text,
+                        "& .MuiButton-startIcon": { mr: 0.4 },
+                      }}
+                      startIcon={<DragIndicatorIcon sx={{ fontSize: 14 }} />}
+                      onClick={() => setReorderMode((value) => !value)}
+                      aria-pressed={reorderMode ? "true" : "false"}
+                      aria-label={reorderMode ? "Finish reordering panels" : "Reorder panels"}
+                      title={reorderMode ? "Finish reordering panels" : "Reorder panels"}
+                    >
+                      Reorder
+                    </Button>
+                  )}
                   <Button
                     size="small"
                     sx={{ ...compactButton, "& .MuiButton-startIcon": { mr: 0.4 } }}
@@ -9883,7 +9949,7 @@ function Show3D() {
                     aria-expanded={panelMenuAnchor ? "true" : undefined}
                     aria-haspopup="menu"
                   >
-                    {visiblePanelCount === totalPanelCount ? "Panels" : `Panels ${visiblePanelCount}/${totalPanelCount}`}
+                    {visiblePanelCount === panelMenuTotal ? "Panels" : `Panels ${visiblePanelCount}/${panelMenuTotal}`}
                   </Button>
                   <Menu
                     id="show3d-panels-menu"
@@ -9921,14 +9987,16 @@ function Show3D() {
                       <VisibilityIcon sx={{ fontSize: 16, mr: 1, color: themeColors.accent }} />
                       <Typography sx={{ fontSize: 11 }}>Show all panels</Typography>
                     </MenuItem>
-                    <MenuItem
-                      dense
-                      disabled={(panelOrder || []).length === 0}
-                      onClick={resetPanelOrder}
-                    >
-                      <DragIndicatorIcon sx={{ fontSize: 16, mr: 1, color: themeColors.accent }} />
-                      <Typography sx={{ fontSize: 11 }}>Reset order</Typography>
-                    </MenuItem>
+                    {!isPaged && (
+                      <MenuItem
+                        dense
+                        disabled={(panelOrder || []).length === 0}
+                        onClick={resetPanelOrder}
+                      >
+                        <DragIndicatorIcon sx={{ fontSize: 16, mr: 1, color: themeColors.accent }} />
+                        <Typography sx={{ fontSize: 11 }}>Reset order</Typography>
+                      </MenuItem>
+                    )}
                   </Menu>
                 </>
               )}
