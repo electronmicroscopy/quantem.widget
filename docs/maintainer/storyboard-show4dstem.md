@@ -383,3 +383,43 @@ HTML reports to GitHub.
   flip-around is measured, or the report fails clearly with the maximum loaded
   master count, allocation error, and GPU cleanup evidence. Do not call a
   30-40 file no-bin workflow supported just because a smaller stack is smooth.
+
+### S4D-16: Screen Many 4D-STEM Datasets In Compare Mode
+
+**User story**: As a microscopist reviewing a session with many related
+4D-STEM acquisitions, I want Show4DSTEM to show many virtual images at once
+while sharing the diffraction ROI and scan cursor, so I can quickly decide
+which datasets are useful, hide bad ones, star good ones, and preserve that
+curation for later notebook cells or shared HTML.
+
+**Primary widgets**: Show4DSTEM in ``view_mode="compare"`` with 5D data or a
+lazy multi-dataset handle.
+
+**Data to use**: 8-14 binned real or real-derived 4D-STEM datasets for routine
+browser smoke; 30-40 ready masters on CUDA or MPS for heavy signoff when the
+backend and memory budget allow it.
+
+**Acceptance checks**:
+
+- Construct ``Show4DSTEM(..., view_mode="compare", compare_cols=...)`` from
+  multiple datasets and verify the compare grid renders all ready panels without
+  materializing an unsafe full stack on MPS.
+- Verify desktop ``compare_cols`` is a maximum column count and the phone or
+  narrow viewport caps the grid at two columns with readable tiles.
+- Toggle ``compare_dp_mode`` between ``"average"`` and ``"selected"``; verify
+  the diffraction panel either averages visible compare panels or follows the
+  clicked dataset.
+- Star at least one useful dataset and hide at least one rejected dataset from
+  the GUI; verify the visible panel count, labels, and selected dataset remain
+  coherent.
+- Reorder panels by drag or click-then-click reorder mode; verify dynamic order
+  changes before/after release and the saved order is still visible after
+  reset/show-all actions.
+- Round-trip ``compare_panel_order``, ``compare_hidden_panels``,
+  ``compare_starred_panels``, and ``compare_dp_mode`` through
+  ``state_dict()`` / ``load_state_dict()`` and through exported HTML.
+- Drive the same workflow in a physical phone browser when making iPhone/Safari
+  claims; Chromium mobile emulation is only a pre-check.
+- Record dataset count, ready count, backend, dtype, detector bin, grid column
+  count on desktop/mobile, FPS, and whether the artifact is live Jupyter or
+  standalone HTML.

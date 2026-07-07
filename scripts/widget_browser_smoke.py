@@ -39,6 +39,7 @@ STORY_IDS_BY_VARIANT = {
     "show3d-hidden-panel": ["S3D-04", "S3D-14"],
     "show3d-four-panel-downsample": ["S3D-14", "S3D-15", "S3D-16"],
     "show4dstem": ["S4D-01", "S4D-02", "S4D-03", "S4D-06", "S4D-09"],
+    "show4dstem-compare": ["S4D-02", "S4D-03", "S4D-07", "S4D-16"],
     "showfolder": ["SF-2", "SF-5", "SF-8"],
 }
 
@@ -581,6 +582,8 @@ def _exercise_show3d_reorder(page) -> dict[str, Any]:
 
 def _story_ids_for(row: dict[str, Any]) -> list[str]:
     variant = str(row["variant"])
+    if variant in STORY_IDS_BY_VARIANT:
+        return STORY_IDS_BY_VARIANT[variant]
     if variant.startswith("show4dstem"):
         return STORY_IDS_BY_VARIANT["show4dstem"]
     return STORY_IDS_BY_VARIANT.get(variant, [])
