@@ -345,6 +345,28 @@ def _semantic_checks(page, row: dict[str, Any], canvas_count: int) -> dict[str, 
         if not state_has_panel_order:
             errors.append("export state does not include panel_order")
 
+    if variant == "show3d-three-panels":
+        canvas_geometry = page.evaluate(
+            """() => {
+              const canvases = [...document.querySelectorAll('canvas')].map((canvas) => {
+                const rect = canvas.getBoundingClientRect();
+                return {
+                  width: canvas.width,
+                  height: canvas.height,
+                  cssWidth: rect.width,
+                  cssHeight: rect.height,
+                  area: rect.width * rect.height
+                };
+              }).filter(item => item.width > 0 && item.height > 0 && item.cssWidth > 0 && item.cssHeight > 0);
+              if (!canvases.length) return null;
+              canvases.sort((a, b) => b.area - a.area);
+              return canvases[0];
+            }"""
+        )
+        checks["primary_canvas_geometry"] = canvas_geometry
+        if not canvas_geometry or canvas_geometry["width"] <= canvas_geometry["height"]:
+            errors.append("Show3D Cols=3 rendered as a vertical panel stack")
+
     checks["errors"] = errors
     return checks
 

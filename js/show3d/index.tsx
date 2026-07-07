@@ -934,7 +934,6 @@ function pointToSegmentDistance(col: number, row: number, col0: number, row0: nu
 // never clobbers a cached playback slot.
 const OFFLINE_HIST_SLOT = 1_000_000;
 const CANVAS_TARGET_SIZE = 600;
-const MIN_WRAPPED_PANEL_SIZE = 250;
 const MAX_PANEL_COLUMNS = 12;
 const FFT_OVERLAY_MAX_SOURCE_SIZE = 512;
 const MIN_ZOOM = 0.5;
@@ -2058,16 +2057,12 @@ function Show3D() {
   const [mainCanvasSize, setMainCanvasSize] = React.useState(CANVAS_TARGET_SIZE);
   const rawFrameDataRef = React.useRef<Float32Array | null>(null);
   const initialCanvasSizeRef = React.useRef<number>(canvasSizeTrait > 0 ? canvasSizeTrait : CANVAS_TARGET_SIZE);
-  const panelColsForSize = React.useCallback((count: number, size: number) => {
+  const panelColsForCount = React.useCallback((count: number) => {
     const n = Math.max(1, count || 1);
     const requestedCols = (maxCols && maxCols > 0) ? Math.min(maxCols, n, MAX_PANEL_COLUMNS) : Math.min(n, MAX_PANEL_COLUMNS);
     if (n <= 1) return 1;
-    const colsThatFit = Math.max(1, Math.floor(Math.max(MIN_WRAPPED_PANEL_SIZE, size) / MIN_WRAPPED_PANEL_SIZE));
-    return Math.max(1, Math.min(requestedCols, colsThatFit));
+    return Math.max(1, requestedCols);
   }, [maxCols]);
-  const panelColsForCount = React.useCallback((count: number) => (
-    panelColsForSize(count, mainCanvasSize)
-  ), [mainCanvasSize, panelColsForSize]);
   const show3dColumnOptions = React.useMemo(() => {
     const n = Math.max(1, visiblePanelCount || 1);
     const values = new Set<number>([1, 2, 3, 4, 5, 6, 8, 10, 12]);
@@ -3310,7 +3305,7 @@ function Show3D() {
     if (initialCanvasSizeRef.current === CANVAS_TARGET_SIZE) {
       initialCanvasSizeRef.current = target;
     }
-  }, [canvasSizeTrait, visiblePanelCount, maxCols]);
+  }, [canvasSizeTrait, visiblePanelCount, panelColsForCount]);
 
   // Calculate display scale. In multi-panel mode `width` may be either the
   // concatenated source width or one shared source frame drawn into N slots.
@@ -9081,7 +9076,7 @@ function Show3D() {
       // Absolute minimum: 200 px per panel column. Lets reader shrink BELOW
       // the initial `size=` value (preset / kwarg) when their screen is small,
       // without collapsing the canvas to an unreadable sliver.
-      const colsLocal = panelColsForSize(visiblePanels, nextSize);
+      const colsLocal = panelColsForCount(visiblePanels);
       const minSize = 200 * colsLocal;
       latestSize = Math.max(minSize, nextSize);
       if (!rafId) {
@@ -9094,7 +9089,7 @@ function Show3D() {
     const handleMouseUp = () => {
       cancelAnimationFrame(rafId);
       setMainCanvasSize(latestSize);
-      const colsLocal = panelColsForSize(visiblePanels, latestSize);
+      const colsLocal = panelColsForCount(visiblePanels);
       setCanvasSizeTrait(Math.round(latestSize / colsLocal));
       document.removeEventListener("mousemove", handleMouseMove);
       document.removeEventListener("mouseup", handleMouseUp);
