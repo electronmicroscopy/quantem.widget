@@ -46,6 +46,8 @@ __all__ = [
     "plan_data_transfer",
     "read_data_transfer_manifest",
     "summarize_data_transfer",
+    "target_masters",
+    "data_transfer_load_warnings",
     "update_data_transfer_plan",
     "write_data_transfer_manifest",
 ]
@@ -622,6 +624,116 @@ def read_data_transfer_manifest(path: str | Path) -> DataTransferPlan:
     """Read a data-transfer manifest as a typed plan."""
     data = json.loads(Path(path).expanduser().read_text(encoding="utf-8"))
     return data_transfer_plan_from_dict(data)
+
+
+def target_masters(
+    plan: DataTransferPlan,
+    *,
+    existing_only: bool = True,
+    require_complete: bool = True,
+    verify: VerifyMode = "size",
+) -> list[Path]:
+    """Return target master paths from a transfer manifest.
+
+    Parameters
+    ----------
+    plan
+        Data-transfer plan or manifest loaded with
+        :func:`read_data_transfer_manifest`.
+    existing_only
+        If ``True`` (default), only return masters whose target files exist.
+    require_complete
+        If ``True`` (default), require every file in a logical acquisition
+        group to verify as ``exists`` before returning that group's master.
+        This is the safest default for Arina-style masters with sidecar data
+        files. Set ``False`` to return masters as soon as the target master file
+        itself exists.
+    verify
+        Verification mode used when checking target state.
+
+    Returns
+    -------
+    list[pathlib.Path]
+        Target master paths, in manifest order, ready to pass to
+        ``load(masters, devices=[...])``.
+    """
+    if not existing_only:
+        return [Path(entry.target_master) for entry in plan.entries]
+
+    states = inspect_data_transfer(plan, verify=verify)
+    state_by_target = {state.target: state.status for state in states}
+    masters: list[Path] = []
+    for entry in plan.entries:
+        if require_complete:
+            if all(state_by_target.get(target) == "exists" for target in entry.target_files):
+                masters.append(Path(entry.target_master))
+        elif state_by_target.get(entry.target_master) == "exists":
+            masters.append(Path(entry.target_master))
+    return masters
+
+
+def _normalize_devices(devices: str | int | list[int] | tuple[int, ...] | None) -> list[int] | None:
+    """Normalize CUDA device selectors for warning/report logic."""
+    if devices is None or devices == "":
+        return None
+    if isinstance(devices, int):
+        return [devices]
+    if isinstance(devices, str):
+        values = [int(item.strip()) for item in devices.split(",") if item.strip()]
+        return values or None
+    values = [int(item) for item in devices]
+    return values or None
+
+
+def data_transfer_load_warnings(
+    plan: DataTransferPlan,
+    *,
+    devices: str | int | list[int] | tuple[int, ...] | None = None,
+    verify: VerifyMode = "size",
+) -> list[str]:
+    """Return guardrail messages for loading a transferred plan.
+
+    These warnings explain when a manifest is not yet a good disk-to-GPU load
+    candidate: incomplete copies, all targets on one physical disk, or multiple
+    requested GPUs fed by one disk.
+    """
+    warnings: list[str] = []
+    states = inspect_data_transfer(plan, verify=verify)
+    summary = summarize_data_transfer(states)
+    ready_masters = target_masters(plan, existing_only=True, require_complete=True, verify=verify)
+    if len(ready_masters) < len(plan.entries):
+        warnings.append(
+            f"{len(ready_masters)} of {len(plan.entries)} acquisitions are complete; "
+            "copy/verify pending files before loading the full session."
+        )
+    if summary.problem_files:
+        warnings.append(
+            f"{summary.problem_files} files have mismatched or missing sources; "
+            "resolve these before loading."
+        )
+    planned_target_disks = {entry.target_disk for entry in plan.entries if entry.target_disk}
+    ready_targets = {str(path) for path in ready_masters}
+    ready_target_disks = {
+        entry.target_disk
+        for entry in plan.entries
+        if entry.target_disk and entry.target_master in ready_targets
+    }
+    if len(plan.target_roots) > 1 and len(planned_target_disks) < 2:
+        warnings.append(
+            "All target roots resolve to one physical disk; multi-GPU loading can "
+            "still help capacity, but cold load speed remains disk-bound."
+        )
+    normalized_devices = _normalize_devices(devices)
+    load_target_disks = ready_target_disks or planned_target_disks
+    if normalized_devices is not None and len(normalized_devices) > 1 and len(load_target_disks) < 2:
+        warnings.append(
+            f"{len(normalized_devices)} GPUs requested but ready targets span "
+            f"{max(1, len(load_target_disks))} physical disk; split files across "
+            "independent disks to improve disk-to-GPU load bandwidth."
+        )
+    if not ready_masters and plan.entries:
+        warnings.append("No complete target masters are ready to load yet.")
+    return warnings
 
 
 def inspect_data_transfer(

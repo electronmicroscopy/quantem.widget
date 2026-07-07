@@ -76,7 +76,8 @@ files are safe.
 session is being prepared. The user wants to append complete groups without
 changing existing target assignments.
 
-**Primary tools**: `update_data_transfer_plan`, then manifest write/inspect/copy.
+**Primary tools**: `quantem data-transfer update`,
+`update_data_transfer_plan`, then manifest write/inspect/copy.
 
 **Acceptance checks**:
 
@@ -85,14 +86,17 @@ changing existing target assignments.
 - New groups use the original target strategy.
 - Repeated updates do not duplicate skipped or not-ready groups.
 - Removed or failed files do not become valid acquisitions silently.
+- The CLI rewrites the same manifest only after producing a valid updated plan.
 
 ## DT-5: Open Viewers After Transfer
 
 **User story**: After files are copied, the user wants to browse them with
-ShowFolder or load selected masters with Show4DSTEM.
+ShowFolder or load ready target masters with Show4DSTEM without remembering the
+exact target paths.
 
-**Primary tools**: `ShowFolder(target_folder)`, `quantem showfolder`, and
-`Show4DSTEM`/`quantem show4dstem` after transfer completes.
+**Primary tools**: `quantem data-transfer masters`,
+`quantem data-transfer show4dstem`, `target_masters`, `ShowFolder(target_folder)`,
+and `Show4DSTEM(load(...))`.
 
 **Acceptance checks**:
 
@@ -100,6 +104,34 @@ ShowFolder or load selected masters with Show4DSTEM.
 - Transfer timing and viewer timing are measured separately.
 - Show4DSTEM still relies on its own lazy paging and GPU memory controls.
 - Data-transfer code does not import or construct viewer widgets.
+- `target_masters(plan)` returns only complete target master groups by default.
+- `quantem data-transfer masters --all-masters` can print planned target paths
+  before copy completion for lab-log review.
+- `quantem data-transfer show4dstem --gpus 0,1 --dtype u8 --bin 1` writes a
+  notebook whose code explicitly uses `load(masters, devices=[0, 1], dtype="u8",
+  det_bin=1)` and `Show4DSTEM(...)`.
+- The generated notebook reloads the manifest and prints warnings so saved
+  outputs record whether the handoff was complete and multi-disk.
+
+## DT-6: Guard Disk-to-GPU Assumptions
+
+**User story**: A user expects two GPUs to make browsing fast. They need the
+tooling to say when a transfer layout still feeds both GPUs from one disk.
+
+**Primary tools**: `data_transfer_load_warnings`, `quantem data-transfer inspect`,
+`quantem data-transfer show4dstem`.
+
+**Acceptance checks**:
+
+- Warnings appear when not all acquisitions are complete.
+- Warnings appear when multiple target roots resolve to one physical disk.
+- Warnings appear when multiple GPUs are requested but ready targets do not span
+  multiple physical disks.
+- Warnings are advisory and do not block `masters --all-masters` or dry-run
+  inspection.
+- Real-data signoff records source disk, target disks, requested GPUs, browse
+  dtype, detector binning, cold-load time, warm-load time, and GPU memory before
+  and after.
 
 ## Required Test Commands
 
@@ -107,7 +139,7 @@ Run these before committing data-transfer changes:
 
 ```bash
 PYTHONPATH=src pytest -q tests/test_io_data_transfer.py
-PYTHONPATH=src pytest -q tests/test_cli.py::test_data_transfer_cli_plan_inspect_copy
+PYTHONPATH=src pytest -q tests/test_cli.py::test_data_transfer_cli_plan_inspect_copy_update_and_show4dstem
 PYTHONPATH=src pytest -q tests/test_hdf5_disk_scheduling.py
 ```
 

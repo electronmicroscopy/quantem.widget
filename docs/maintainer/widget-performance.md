@@ -352,7 +352,9 @@ IO review and next optimization targets:
   current real masters are all on `nvme2n1`. A valid multi-disk report must show
   `group_by_disk(masters)` with at least two disks and then compare one-disk and
   split-disk cold/warm timing with the same master count, dtype, and detector
-  binning.
+  binning. Use `quantem data-transfer plan/copy/masters/show4dstem` to create
+  and record that split layout; keep the manifest path and timing report local
+  when it contains private MJGOAT paths.
 - Do not run two GPU-heavy loader benchmarks concurrently on the same GPUs.
   Parallel benchmark processes create artificial OOMs and hide the true loader
   behavior. Run U8/U16 and sharded/single cases serially unless the goal is an

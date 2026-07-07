@@ -66,6 +66,8 @@ _DATA_TRANSFER_EXPORTS = {
     "plan_data_transfer",
     "read_data_transfer_manifest",
     "summarize_data_transfer",
+    "target_masters",
+    "data_transfer_load_warnings",
     "update_data_transfer_plan",
     "write_data_transfer_manifest",
 }
@@ -114,6 +116,8 @@ __all__ = [
     "plan_data_transfer",
     "read_data_transfer_manifest",
     "summarize_data_transfer",
+    "target_masters",
+    "data_transfer_load_warnings",
     "update_data_transfer_plan",
     "resolve_backend",
     "read_emd_metadata",

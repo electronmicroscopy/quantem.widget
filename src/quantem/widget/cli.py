@@ -117,8 +117,11 @@ def _add_showfolder_args(parser: argparse.ArgumentParser) -> None:
 
 def _add_data_transfer_args(parser: argparse.ArgumentParser) -> None:
     """Attach options for the ``data-transfer`` subcommand."""
-    parser.add_argument("action", choices=("plan", "inspect", "copy"),
-                        help="Plan a transfer, inspect a manifest, or copy from a manifest.")
+    parser.add_argument("action", choices=("plan", "inspect", "copy", "update", "masters", "show4dstem"),
+                        help=(
+                            "Plan a transfer, inspect/update a manifest, copy from a manifest, "
+                            "print ready target masters, or write a Show4DSTEM handoff notebook."
+                        ))
     parser.add_argument("source", nargs="?", help="Source folder or master path(s) for the plan action.")
     parser.add_argument("targets", nargs="*", help="Target folder(s) for the plan action.")
     parser.add_argument("--manifest", default=None,
@@ -139,6 +142,22 @@ def _add_data_transfer_args(parser: argparse.ArgumentParser) -> None:
                         help="Actually copy files. Without this, copy is a dry-run.")
     parser.add_argument("--overwrite", action="store_true",
                         help="Overwrite existing targets after verification failure.")
+    parser.add_argument("--show-masters", action="store_true",
+                        help="Also print ready target master paths during inspect/update/copy.")
+    parser.add_argument("--all-masters", action="store_true",
+                        help="masters: print planned target masters even when targets are incomplete.")
+    parser.add_argument("--gpus", default=None,
+                        help="show4dstem: comma-separated CUDA GPU ids, e.g. 0 or 0,1.")
+    parser.add_argument("--page-budget", default="auto",
+                        help="show4dstem: resident dataset cache, e.g. auto, 1, 2, or none (default auto).")
+    parser.add_argument("--dtype", default="u8", choices=("auto", "u8", "uint8", "u16", "uint16", "float32"),
+                        help="show4dstem browse dtype (default u8 for fast visual screening).")
+    parser.add_argument("--bin", type=int, default=1, dest="det_bin",
+                        help="show4dstem detector binning factor (default 1: no detector binning).")
+    parser.add_argument("--out", default=None,
+                        help="show4dstem notebook output directory (default: ~/Downloads).")
+    parser.add_argument("--no-open", action="store_true",
+                        help="show4dstem: write the notebook but do not launch Jupyter.")
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
 
 
@@ -147,10 +166,13 @@ def _data_transfer(args: argparse.Namespace) -> int:
     from dataclasses import asdict
     from quantem.widget.io import (
         copy_data_transfer,
+        data_transfer_load_warnings,
         inspect_data_transfer,
         plan_data_transfer,
         read_data_transfer_manifest,
         summarize_data_transfer,
+        target_masters,
+        update_data_transfer_plan,
         write_data_transfer_manifest,
     )
 
@@ -177,20 +199,32 @@ def _data_transfer(args: argparse.Namespace) -> int:
             print(f"manifest: {manifest}")
             _print_data_transfer_plan(plan)
             _print_data_transfer_summary(summary)
+            _print_data_transfer_warnings(data_transfer_load_warnings(plan, devices=args.gpus, verify=args.verify))
         return 0
 
     if not args.manifest:
         raise ValueError(f"data-transfer {args.action} requires --manifest.")
     plan = read_data_transfer_manifest(args.manifest)
+    manifest = pathlib.Path(args.manifest).expanduser()
     if args.action == "inspect":
         states = inspect_data_transfer(plan, verify=args.verify)
         summary = summarize_data_transfer(states)
+        masters = target_masters(plan, verify=args.verify)
+        warnings = data_transfer_load_warnings(plan, devices=args.gpus, verify=args.verify)
         if args.json:
-            print(json.dumps({"summary": asdict(summary), "states": [asdict(state) for state in states]}, indent=2))
+            print(json.dumps({
+                "summary": asdict(summary),
+                "states": [asdict(state) for state in states],
+                "masters": [str(master) for master in masters],
+                "warnings": warnings,
+            }, indent=2))
         else:
             _print_data_transfer_plan(plan)
             _print_data_transfer_summary(summary)
             _print_data_transfer_states(states)
+            if args.show_masters:
+                _print_data_transfer_masters(masters)
+            _print_data_transfer_warnings(warnings)
         return 0
     if args.action == "copy":
         results = copy_data_transfer(
@@ -201,16 +235,79 @@ def _data_transfer(args: argparse.Namespace) -> int:
         )
         states = inspect_data_transfer(plan, verify=args.verify)
         summary = summarize_data_transfer(states)
+        masters = target_masters(plan, verify=args.verify)
+        warnings = data_transfer_load_warnings(plan, devices=args.gpus, verify=args.verify)
         if args.json:
             print(json.dumps({
                 "executed": bool(args.execute),
                 "results": [asdict(result) for result in results],
                 "summary": asdict(summary),
+                "masters": [str(master) for master in masters],
+                "warnings": warnings,
             }, indent=2))
         else:
             print("copy executed" if args.execute else "copy dry-run")
             _print_data_transfer_results(results)
             _print_data_transfer_summary(summary)
+            if args.show_masters:
+                _print_data_transfer_masters(masters)
+            _print_data_transfer_warnings(warnings)
+        return 0
+    if args.action == "update":
+        updated = update_data_transfer_plan(
+            plan,
+            source=pathlib.Path(args.source).expanduser() if args.source else None,
+            pattern=args.pattern,
+            require_ready=args.require_ready,
+            hash_algorithm=args.hash_algorithm,
+        )
+        write_data_transfer_manifest(updated, manifest)
+        states = inspect_data_transfer(updated, verify=args.verify)
+        summary = summarize_data_transfer(states)
+        masters = target_masters(updated, verify=args.verify)
+        warnings = data_transfer_load_warnings(updated, devices=args.gpus, verify=args.verify)
+        if args.json:
+            print(json.dumps({
+                "manifest": str(manifest),
+                "plan": updated.to_dict(),
+                "summary": asdict(summary),
+                "masters": [str(master) for master in masters],
+                "warnings": warnings,
+            }, indent=2))
+        else:
+            print(f"updated manifest: {manifest}")
+            _print_data_transfer_plan(updated)
+            _print_data_transfer_summary(summary)
+            if args.show_masters:
+                _print_data_transfer_masters(masters)
+            _print_data_transfer_warnings(warnings)
+        return 0
+    if args.action == "masters":
+        masters = target_masters(
+            plan,
+            existing_only=not args.all_masters,
+            require_complete=not args.all_masters,
+            verify=args.verify,
+        )
+        warnings = data_transfer_load_warnings(plan, devices=args.gpus, verify=args.verify)
+        if args.json:
+            print(json.dumps({
+                "masters": [str(master) for master in masters],
+                "ready_only": not args.all_masters,
+                "warnings": warnings,
+            }, indent=2))
+        else:
+            _print_data_transfer_masters(masters, ready_only=not args.all_masters)
+            _print_data_transfer_warnings(warnings)
+        return 0
+    if args.action == "show4dstem":
+        masters = target_masters(plan, verify=args.verify)
+        if not masters:
+            raise ValueError("no complete target masters are ready; run data-transfer copy --execute first.")
+        warnings = data_transfer_load_warnings(plan, devices=args.gpus, verify=args.verify)
+        _print_data_transfer_warnings(warnings)
+        notebook = _render_data_transfer_show4dstem_notebook(manifest, plan.logical_name, masters, args)
+        _launch_notebook(notebook, no_open=args.no_open)
         return 0
     raise ValueError(f"unknown data-transfer action: {args.action}")
 
@@ -241,6 +338,18 @@ def _print_data_transfer_states(states) -> None:
         print(f"  {state.status:14s} {_fmt_bytes(state.size_bytes):>9s} {state.target}")
     if len(states) > 80:
         print(f"  ... {len(states) - 80} more files")
+
+
+def _print_data_transfer_masters(masters, *, ready_only: bool = True) -> None:
+    label = "ready masters" if ready_only else "planned masters"
+    print(f"{label}: {len(masters)}")
+    for master in masters:
+        print(f"  {master}")
+
+
+def _print_data_transfer_warnings(warnings) -> None:
+    for warning in warnings:
+        print(f"warning: {warning}", file=sys.stderr)
 
 
 def _print_data_transfer_results(results) -> None:
@@ -953,6 +1062,81 @@ def _python_gpus(value: str | None) -> str:
     if not ids:
         return "None"
     return repr(ids)
+
+
+def _render_data_transfer_show4dstem_notebook(
+    manifest: pathlib.Path,
+    label: str,
+    masters,
+    args: argparse.Namespace,
+) -> pathlib.Path:
+    """Write a live Show4DSTEM notebook from ready target masters in a manifest."""
+    import json
+
+    devices = _python_gpus(args.gpus)
+    page_budget = _python_page_budget(args.page_budget)
+    print(
+        f"{len(masters)} transferred target master(s), bin {args.det_bin}, dtype {args.dtype}, "
+        f"devices {devices} -> Show4DSTEM (live notebook)"
+    )
+    source = (
+        "from pathlib import Path\n"
+        "from quantem.widget import Show4DSTEM, load\n"
+        "from quantem.widget.io import data_transfer_load_warnings, read_data_transfer_manifest, target_masters\n"
+        "\n"
+        f"manifest = Path({str(manifest)!r})\n"
+        "plan = read_data_transfer_manifest(manifest)\n"
+        "masters = [str(path) for path in target_masters(plan)]\n"
+        f"devices = {devices}\n"
+        "warnings = data_transfer_load_warnings(plan, devices=devices)\n"
+        "for warning in warnings:\n"
+        "    print(f\"warning: {warning}\")\n"
+        "print(f\"ready masters: {len(masters)}\")\n"
+        "print(\"devices:\", devices)\n"
+        "print(\"dtype:\", " + repr(args.dtype) + ", \"det_bin:\", " + str(int(args.det_bin)) + ")\n"
+        "data = load(\n"
+        "    masters,\n"
+        f"    det_bin={int(args.det_bin)},\n"
+        f"    dtype={args.dtype!r},\n"
+        "    devices=devices,\n"
+        "    verbose=True,\n"
+        ")\n"
+        "Show4DSTEM(\n"
+        "    data,\n"
+        f"    page_budget={page_budget},\n"
+        "    page_device=devices,\n"
+        "    verbose=True,\n"
+        ")\n"
+    )
+    nb = {
+        "cells": [
+            {
+                "cell_type": "markdown",
+                "id": "title",
+                "metadata": {},
+                "source": [
+                    f"# {label} transferred Show4DSTEM\n",
+                    f"\nManifest: `{manifest}`\n",
+                    f"\nReady target masters: {len(masters)}. Detector bin {args.det_bin}; "
+                    f"dtype `{args.dtype}`; devices `{devices}`; page budget `{args.page_budget}`.",
+                ],
+            },
+            {
+                "cell_type": "code",
+                "id": "transferred-viewer",
+                "execution_count": None,
+                "metadata": {},
+                "outputs": [],
+                "source": source.splitlines(keepends=True),
+            },
+        ],
+        "metadata": {"kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"}},
+        "nbformat": 4,
+        "nbformat_minor": 5,
+    }
+    out = _out_dir(args.out) / f"{label}_transferred_show4dstem.ipynb"
+    out.write_text(json.dumps(nb, indent=1))
+    return out
 
 
 def _render_4dstem_watch_notebook(folder: pathlib.Path, label: str, args: argparse.Namespace) -> pathlib.Path:

@@ -344,7 +344,8 @@ def test_show4dstem_watch_requires_live_folder_notebook(tmp_path):
     assert cli.main(["show4dstem", str(tmp_path), "--watch", "--html", "--no-open"]) == 1
 
 
-def test_data_transfer_cli_plan_inspect_copy(tmp_path, monkeypatch):
+def test_data_transfer_cli_plan_inspect_copy_update_and_show4dstem(tmp_path, monkeypatch, capsys):
+    import json
     import quantem.widget.io.hdf5 as hdf5
 
     source = tmp_path / "source"
@@ -391,6 +392,66 @@ def test_data_transfer_cli_plan_inspect_copy(tmp_path, monkeypatch):
         "--execute",
     ]) == 0
     assert (target / "scan_000_master.h5").read_bytes() == b"master"
+
+    assert cli.main([
+        "data-transfer",
+        "masters",
+        "--manifest",
+        str(manifest),
+    ]) == 0
+    captured = capsys.readouterr()
+    assert "ready masters: 1" in captured.out
+    assert "scan_000_master.h5" in captured.out
+
+    (source / "scan_001_master.h5").write_bytes(b"master-2")
+    assert cli.main([
+        "data-transfer",
+        "update",
+        "--manifest",
+        str(manifest),
+        "--show-masters",
+    ]) == 0
+    plan = json.loads(manifest.read_text())
+    assert [entry["logical_id"] for entry in plan["entries"]] == ["scan_000", "scan_001"]
+
+    assert cli.main([
+        "data-transfer",
+        "masters",
+        "--manifest",
+        str(manifest),
+        "--all-masters",
+    ]) == 0
+    captured = capsys.readouterr()
+    assert "planned masters: 2" in captured.out
+    assert "scan_001_master.h5" in captured.out
+
+    dest = tmp_path / "notebooks"
+    assert cli.main([
+        "data-transfer",
+        "show4dstem",
+        "--manifest",
+        str(manifest),
+        "--gpus",
+        "0,1",
+        "--page-budget",
+        "2",
+        "--bin",
+        "1",
+        "--dtype",
+        "u8",
+        "--no-open",
+        "--out",
+        str(dest),
+    ]) == 0
+    notebooks = list(dest.glob("*_transferred_show4dstem.ipynb"))
+    assert len(notebooks) == 1
+    code = "".join(json.loads(notebooks[0].read_text())["cells"][1]["source"])
+    assert "target_masters(plan)" in code
+    assert "devices = [0, 1]" in code
+    assert "det_bin=1" in code
+    assert "dtype='u8'" in code
+    assert "page_budget=2" in code
+    assert "Show4DSTEM(" in code
 
 
 def test_out_path_explicit_file(tmp_path):

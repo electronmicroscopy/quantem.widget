@@ -116,11 +116,13 @@ def test_data_transfer_manifest_and_copy_are_safe_by_default(monkeypatch, tmp_pa
     from quantem.widget.io import hdf5
     from quantem.widget.io.data_transfer import (
         copy_data_transfer,
+        data_transfer_load_warnings,
         filter_data_transfer_plan,
         inspect_data_transfer,
         plan_data_transfer,
         read_data_transfer_manifest,
         summarize_data_transfer,
+        target_masters,
         write_data_transfer_manifest,
     )
 
@@ -146,6 +148,11 @@ def test_data_transfer_manifest_and_copy_are_safe_by_default(monkeypatch, tmp_pa
     assert len(manifest_plan.entries) == 1
     assert json.loads(manifest.read_text())["total_bytes"] == 15
     assert {state.status for state in inspect_data_transfer(manifest_plan)} == {"not-started"}
+    assert target_masters(manifest_plan) == []
+    assert target_masters(manifest_plan, existing_only=False) == [
+        target / "scan_000_master.h5",
+    ]
+    assert any("0 of 1 acquisitions" in warning for warning in data_transfer_load_warnings(manifest_plan))
     assert filter_data_transfer_plan(manifest_plan).total_bytes == 15
 
     copied = copy_data_transfer(plan, dry_run=False)
@@ -153,6 +160,8 @@ def test_data_transfer_manifest_and_copy_are_safe_by_default(monkeypatch, tmp_pa
     states = inspect_data_transfer(plan)
     assert {state.status for state in states} == {"exists"}
     assert summarize_data_transfer(states).pending_bytes == 0
+    assert target_masters(manifest_plan) == [target / "scan_000_master.h5"]
+    assert data_transfer_load_warnings(manifest_plan) == []
     assert (target / "scan_000_master.h5").read_bytes() == (
         source / "scan_000_master.h5"
     ).read_bytes()
@@ -160,6 +169,32 @@ def test_data_transfer_manifest_and_copy_are_safe_by_default(monkeypatch, tmp_pa
         source / "scan_000_data_000001.h5"
     ).read_bytes()
     assert not list(target.glob("*.partial"))
+
+
+def test_data_transfer_load_warnings_report_single_disk_multi_gpu(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from quantem.widget.io import hdf5
+    from quantem.widget.io.data_transfer import data_transfer_load_warnings, plan_data_transfer
+
+    source = tmp_path / "source"
+    target_a = tmp_path / "target-a"
+    target_b = tmp_path / "target-b"
+    target_a.mkdir()
+    target_b.mkdir()
+    _master(source, "scan_000", 10)
+    _master(source, "scan_001", 20)
+
+    monkeypatch.setattr(hdf5, "disk_of", lambda path: "same-disk")
+    monkeypatch.setattr(hdf5, "is_master_ready", lambda path: True)
+
+    plan = plan_data_transfer(source, [target_a, target_b])
+    warnings = data_transfer_load_warnings(plan, devices=[0, 1])
+
+    assert any("0 of 2 acquisitions" in warning for warning in warnings)
+    assert any("one physical disk" in warning for warning in warnings)
+    assert any("2 GPUs requested" in warning for warning in warnings)
 
 
 def test_update_data_transfer_plan_appends_without_moving_existing_targets(
