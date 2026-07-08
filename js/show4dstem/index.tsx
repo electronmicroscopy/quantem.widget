@@ -5823,6 +5823,23 @@ function Show4DSTEM() {
               {compareMode ? `Multiple grid | ${shapeRows}×${shapeCols}` : `${shapeRows}×${shapeCols} | ${detRows}×${detCols}`}
             </Typography>
             {controlsVisible && <Stack direction="row" spacing={`${SPACING.SM}px`} alignItems="center">
+              {compareMode && <>
+                <Typography sx={{ ...typo.label, fontSize: 10 }}>Cols</Typography>
+                <Select
+                  value={compareCols || 0}
+                  onChange={(e) => setCompareCols(Number(e.target.value))}
+                  size="small"
+                  inputProps={{ "aria-label": "Show4DSTEM multiple columns" }}
+                  sx={{ ...themedSelect, minWidth: 54, fontSize: 10 }}
+                  MenuProps={themedMenuProps}
+                >
+                  <MenuItem value={0}>Auto</MenuItem>
+                  <MenuItem value={2}>2</MenuItem>
+                  <MenuItem value={3}>3</MenuItem>
+                  <MenuItem value={4}>4</MenuItem>
+                  <MenuItem value={5}>5</MenuItem>
+                </Select>
+              </>}
               <Typography sx={{ ...typo.label, fontSize: 10 }}>FFT</Typography>
               <Switch checked={effectiveShowFft} onChange={(e) => setShowFft(e.target.checked)} size="small" sx={switchStyles.small} />
               {!compareMode && <>
@@ -6198,21 +6215,6 @@ function Show4DSTEM() {
               >
                 <MenuItem value="average">Average</MenuItem>
                 <MenuItem value="selected">Selected</MenuItem>
-              </Select>
-              <Typography sx={{ ...typo.label, fontSize: 10, flexShrink: 0 }}>Cols</Typography>
-              <Select
-                value={compareCols || 0}
-                onChange={(e) => setCompareCols(Number(e.target.value))}
-                size="small"
-                inputProps={{ "aria-label": "Show4DSTEM multiple columns" }}
-                sx={{ ...themedSelect, minWidth: 54, fontSize: 10 }}
-                MenuProps={themedMenuProps}
-              >
-                <MenuItem value={0}>Auto</MenuItem>
-                <MenuItem value={2}>2</MenuItem>
-                <MenuItem value={3}>3</MenuItem>
-                <MenuItem value={4}>4</MenuItem>
-                <MenuItem value={5}>5</MenuItem>
               </Select>
               <Tooltip title={compareReorderMode ? "Finish reordering" : "Reorder multiple panels"}>
                 <IconButton

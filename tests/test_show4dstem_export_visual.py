@@ -530,6 +530,51 @@ def _assert_multiple_grid_layout(page, expected_cols: int, max_gap_above_grid: f
     return layout
 
 
+def _assert_multiple_columns_control_in_grid_header(page) -> dict:
+    result = page.evaluate(
+        """() => {
+          const rect = (node) => {
+            const r = node.getBoundingClientRect();
+            return {left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width, height: r.height};
+          };
+          const textRects = (text, exact = true) => {
+            const out = [];
+            const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+            while (walker.nextNode()) {
+              const node = walker.currentNode;
+              const content = (node.textContent || '').trim();
+              if (exact ? content !== text : !content.startsWith(text)) continue;
+              const range = document.createRange();
+              range.selectNodeContents(node);
+              const r = range.getBoundingClientRect();
+              if (r.width > 0 && r.height > 0) out.push({left: r.left, right: r.right, top: r.top, bottom: r.bottom});
+            }
+            return out;
+          };
+          const combo = [...document.querySelectorAll('[role="combobox"]')]
+            .find(node => node.getAttribute('aria-label') === 'Show4DSTEM multiple columns');
+          const firstPanel = document.querySelector('[role="button"][aria-label="Show4DSTEM multiple panel 1"]');
+          if (!combo || !firstPanel) return {error: 'missing columns control or first multiple panel'};
+          const comboRect = rect(combo);
+          const panelRect = rect(firstPanel);
+          const colsRects = textRects('Cols');
+          const sameRowFft = textRects('FFT')
+            .filter(r => Math.abs(((r.top + r.bottom) / 2) - ((comboRect.top + comboRect.bottom) / 2)) < 14)
+            .sort((a, b) => Math.abs(a.left - comboRect.right) - Math.abs(b.left - comboRect.right))[0];
+          const gridLabel = textRects('Multiple grid |', false)
+            .sort((a, b) => a.top - b.top)[0];
+          return {comboRect, panelRect, colsRects, sameRowFft, gridLabel};
+        }"""
+    )
+    assert "error" not in result, result
+    assert len(result["colsRects"]) == 1, result
+    assert result["comboRect"]["bottom"] < result["panelRect"]["top"], result
+    assert result["sameRowFft"], result
+    assert result["comboRect"]["right"] <= result["sameRowFft"]["left"] + 2, result
+    assert result["gridLabel"]["right"] <= result["colsRects"][0]["left"] + 4, result
+    return result
+
+
 def _click_multiple_panel(page, panel_number: int) -> None:
     panel = page.locator(f'[role="button"][aria-label="Show4DSTEM multiple panel {panel_number}"]')
     assert panel.count() == 1
@@ -632,6 +677,7 @@ def test_exported_show4dstem_real_data_visual_smoke(tmp_path: Path) -> None:
                 multiple4_title = "Visual Smoke Show4DSTEM multiple-cols4"
                 _open_page(page, f"http://127.0.0.1:{port}/{pages['multiple-cols4'].name}", multiple4_title, 12)
                 layout4 = _assert_multiple_grid_layout(page, expected_cols=4)
+                cols_header4 = _assert_multiple_columns_control_in_grid_header(page)
                 resize4 = _resize_multiple_panel(page, panel_number=1)
                 layout4_after_resize = _assert_multiple_grid_layout(page, expected_cols=4)
                 label4 = _assert_multiple_coordinate_label_once(page)
@@ -663,6 +709,7 @@ def test_exported_show4dstem_real_data_visual_smoke(tmp_path: Path) -> None:
                         "multiple_cols2_layout": layout2,
                         "multiple_cols2_pixels": multiple2_pixels,
                         "multiple_cols4_layout": layout4,
+                        "multiple_cols4_columns_header": cols_header4,
                         "multiple_cols4_resize": resize4,
                         "multiple_cols4_layout_after_resize": layout4_after_resize,
                         "multiple_cols4_coordinate_label": label4,
