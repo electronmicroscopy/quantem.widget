@@ -1383,11 +1383,6 @@ function CompareVirtualGrid({
   const imageTop = `${(comparePanY / Math.max(1, shapeRows)) * 100}%`;
   const imageWidth = `${compareZoom * 100}%`;
   const imageHeight = `${compareZoom * 100}%`;
-  const availablePanelCount = Math.max(0, (indices || []).length);
-  const statusText = renderEntries.length < availablePanelCount
-    ? `${renderEntries.length}/${availablePanelCount} visible`
-    : status;
-
   React.useEffect(() => {
     const view = compareViewRef.current;
     view.zoom = compareZoom;
@@ -1508,11 +1503,6 @@ function CompareVirtualGrid({
 
   return (
     <Box sx={{ width: "100%", maxWidth: maxWidthPx > 0 ? `${maxWidthPx}px` : "100%", position: "relative", "@media (max-width: 700px)": { maxWidth: "100%" } }}>
-      {statusText && (
-        <Typography sx={{ fontSize: 10, color: themeColors.textMuted, mb: 0.5, "@media (max-width: 700px)": { display: "none" } }}>
-          {statusText}
-        </Typography>
-      )}
       <Box
         sx={{
           display: "grid",
