@@ -52,6 +52,7 @@ const SHOW3D_TO_SHOW2D_LINKED_TRAITS = [
   { source: "link_contrast" },
   { source: "show_fft" },
   { source: "hidden_panels" },
+  { source: "hidden_page_slots" },
 ];
 // ============================================================================
 // Style tokens (inlined - matches Show2D/Show4DSTEM single-file convention)
@@ -444,6 +445,24 @@ function percentileFromHistory(values: unknown, percentile: number): number | nu
   if (nums.length === 0) return null;
   const idx = Math.min(nums.length - 1, Math.max(0, Math.ceil((percentile / 100) * nums.length) - 1));
   return Number(nums[idx].toFixed(2));
+}
+
+function sameNumberArray(a: number[] | undefined, b: number[]): boolean {
+  if (!Array.isArray(a) || a.length !== b.length) return false;
+  return a.every((value, idx) => value === b[idx]);
+}
+
+function normalizeHiddenPageSlots(values: unknown, maxSlots: number): number[] {
+  const nSlots = Math.max(0, Math.trunc(Number(maxSlots) || 0));
+  if (!Array.isArray(values) || nSlots <= 1) return [];
+  const clean = new Set<number>();
+  for (const value of values) {
+    const slot = Math.trunc(Number(value));
+    if (Number.isFinite(slot) && slot >= 0 && slot < nSlots) clean.add(slot);
+  }
+  const sorted = Array.from(clean).sort((a, b) => a - b);
+  if (sorted.length >= nSlots) sorted.pop();
+  return sorted;
 }
 
 function estimateRafFps(sampleMs: number): Promise<number | null> {
@@ -1479,6 +1498,7 @@ function Show3D() {
   const [panelRealFrames] = useModelState<number[]>("panel_real_frames");
   const [starred, setStarred] = useModelState<number[]>("starred");
   const [hiddenPanels, setHiddenPanels] = useModelState<number[]>("hidden_panels");
+  const [hiddenPageSlotsTrait, setHiddenPageSlotsTrait] = useModelState<number[] | undefined>("hidden_page_slots");
   const [panelOrder, setPanelOrder] = useModelState<number[]>("panel_order");
   const [nPages] = useModelState<number>("n_pages");
   const [pageIdx, setPageIdx] = useModelState<number>("page_idx");
@@ -1492,7 +1512,6 @@ function Show3D() {
   const currentPageIdxRef = React.useRef(0);
   const pageCommitPendingRef = React.useRef<number | null>(null);
   const pageCommitRafRef = React.useRef<number | null>(null);
-  const hiddenPanelSyncTimerRef = React.useRef<number | null>(null);
   const [reorderMode, setReorderMode] = React.useState(false);
   const [dragOverPanel, setDragOverPanel] = React.useState<number | null>(null);
   const [reorderPreviewOrder, setReorderPreviewOrder] = React.useState<number[] | null>(null);
@@ -1556,10 +1575,6 @@ function Show3D() {
       window.cancelAnimationFrame(pageCommitRafRef.current);
       pageCommitRafRef.current = null;
     }
-    if (hiddenPanelSyncTimerRef.current !== null) {
-      window.clearTimeout(hiddenPanelSyncTimerRef.current);
-      hiddenPanelSyncTimerRef.current = null;
-    }
   }, []);
   const currentPageLabel = pageLabels?.[currentPageIdx] || `Page ${currentPageIdx + 1}`;
   const pageControlIdx = clampPageIdx(pageSliderPreviewIdx ?? currentPageIdx);
@@ -1587,44 +1602,23 @@ function Show3D() {
   React.useEffect(() => {
     if (!isPaged) {
       hiddenPageSlotsInitializedRef.current = false;
+      setHiddenPageSlots(prev => prev.length === 0 ? prev : []);
+      return;
+    }
+    if (Array.isArray(hiddenPageSlotsTrait)) {
+      const slots = normalizeHiddenPageSlots(hiddenPageSlotsTrait, activePanelCount);
+      hiddenPageSlotsInitializedRef.current = true;
+      setHiddenPageSlots(prev => sameNumberArray(prev, slots) ? prev : slots);
       return;
     }
     if (hiddenPageSlotsInitializedRef.current) return;
     hiddenPageSlotsInitializedRef.current = true;
-    const slots = new Set<number>();
-    for (const value of hiddenPanels || []) {
-      const idx = Math.trunc(Number(value));
-      if (Number.isFinite(idx) && idx >= activePageStart && idx < activePageEnd) {
-        slots.add(idx - activePageStart);
-      }
-    }
-    setHiddenPageSlots(Array.from(slots).filter(slot => slot >= 0 && slot < activePanelCount).sort((a, b) => a - b));
-  }, [activePageEnd, activePageStart, activePanelCount, hiddenPanels, isPaged]);
-  React.useEffect(() => {
-    if (!isPaged) return;
-    if (hiddenPanelSyncTimerRef.current !== null) {
-      window.clearTimeout(hiddenPanelSyncTimerRef.current);
-    }
-    hiddenPanelSyncTimerRef.current = window.setTimeout(() => {
-      hiddenPanelSyncTimerRef.current = null;
-      const mapped = Array.from(new Set(hiddenPageSlots
-        .map(slot => activePageStart + Math.trunc(Number(slot)))
-        .filter(panel => Number.isFinite(panel) && panel >= activePageStart && panel < activePageEnd)))
-        .sort((a, b) => a - b);
-      const current = (hiddenPanels || [])
-        .map(value => Math.trunc(Number(value)))
-        .filter(panel => Number.isFinite(panel) && panel >= 0 && panel < totalPanelCount)
-        .sort((a, b) => a - b);
-      if (mapped.length === current.length && mapped.every((panel, idx) => panel === current[idx])) return;
-      setHiddenPanels(mapped);
-    }, 120);
-    return () => {
-      if (hiddenPanelSyncTimerRef.current !== null) {
-        window.clearTimeout(hiddenPanelSyncTimerRef.current);
-        hiddenPanelSyncTimerRef.current = null;
-      }
-    };
-  }, [activePageEnd, activePageStart, hiddenPageSlots, hiddenPanels, isPaged, setHiddenPanels, totalPanelCount]);
+    const slots = normalizeHiddenPageSlots(
+      (hiddenPanels || []).map((value) => Math.trunc(Number(value)) - activePageStart),
+      activePanelCount,
+    );
+    setHiddenPageSlots(prev => sameNumberArray(prev, slots) ? prev : slots);
+  }, [activePageStart, activePanelCount, hiddenPageSlotsTrait, hiddenPanels, isPaged]);
   const hiddenPanelSet = React.useMemo(() => {
     const clean = new Set<number>();
     if (isPaged) {
@@ -1699,7 +1693,9 @@ function Show3D() {
       } else {
         next.delete(slot);
       }
-      setHiddenPageSlots(Array.from(next).sort((a, b) => a - b));
+      const slots = normalizeHiddenPageSlots(Array.from(next), activePanelCount);
+      setHiddenPageSlots(slots);
+      setHiddenPageSlotsTrait(slots);
       return;
     }
     const next = new Set<number>();
@@ -1716,7 +1712,7 @@ function Show3D() {
       next.delete(panel);
     }
     setHiddenPanels(Array.from(next).sort((a, b) => a - b));
-  }, [activePageEnd, activePageStart, activePanelCount, hiddenPageSlots, hiddenPanels, totalPanelCount, isPaged, activePageIndices, setHiddenPanels]);
+  }, [activePageEnd, activePageStart, activePanelCount, hiddenPageSlots, hiddenPanels, totalPanelCount, isPaged, activePageIndices, setHiddenPanels, setHiddenPageSlotsTrait]);
   const applyPanelOrder = React.useCallback((order: number[]) => {
     const clean = order.filter((value) => Number.isInteger(value) && value >= 0 && value < totalPanelCount);
     if (clean.length !== totalPanelCount || new Set(clean).size !== totalPanelCount) return;
@@ -10232,7 +10228,10 @@ function Show3D() {
                       dense
                       disabled={hiddenPanelSet.size === 0}
                       onClick={() => {
-                        if (isPaged) setHiddenPageSlots([]);
+                        if (isPaged) {
+                          setHiddenPageSlots([]);
+                          setHiddenPageSlotsTrait([]);
+                        }
                         setHiddenPanels([]);
                       }}
                     >

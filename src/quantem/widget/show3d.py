@@ -792,6 +792,9 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
     panels_per_page = traitlets.Int(0).tag(sync=True)
     page_labels = traitlets.List(traitlets.Unicode(), default_value=[]).tag(sync=True)
     page_starred = traitlets.List(traitlets.Int(), default_value=[]).tag(sync=True)
+    # Slot-level visibility for paged widgets. Hiding slot 1 means "hide the
+    # second panel on every page", so page scrubbing does not bring it back.
+    hidden_page_slots = traitlets.List(traitlets.Int(), default_value=[]).tag(sync=True)
     # Single Link toggle controls both zoom and pan (independent axes proved confusing).
     link_panels = traitlets.Bool(True).tag(sync=True)
     link_contrast = traitlets.Bool(True).tag(sync=True)  # share vmin/vmax across panels
@@ -1190,6 +1193,59 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
                 "hidden_panels cannot hide every panel; at least one panel must remain visible"
             )
         return clean
+
+    def _normalize_hidden_page_slots(
+        self,
+        values: Sequence[object],
+        *,
+        drop_if_full: bool = False,
+    ) -> list[int]:
+        """Normalize paged-widget hidden slots while keeping one slot visible."""
+        if int(self.n_pages) <= 1 or int(self.panels_per_page) <= 0:
+            return []
+        n_slots = int(self.panels_per_page)
+        clean_set: set[int] = set()
+        for value in values or []:
+            if isinstance(value, bool):
+                continue
+            try:
+                slot = int(value)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= slot < n_slots:
+                clean_set.add(slot)
+        clean = sorted(clean_set)
+        if len(clean) >= n_slots:
+            if drop_if_full:
+                clean = clean[:-1]
+            else:
+                raise traitlets.TraitError(
+                    "hidden_page_slots cannot hide every page slot; at least one panel must remain visible"
+                )
+        return clean
+
+    def _hidden_page_slots_from_panels(
+        self,
+        panels: Sequence[int],
+        *,
+        drop_if_full: bool = False,
+    ) -> list[int]:
+        """Map absolute hidden panel indices to reusable page slots."""
+        if int(self.n_pages) <= 1 or int(self.panels_per_page) <= 0:
+            return []
+        n_pan = int(self.n_panels)
+        per_page = int(self.panels_per_page)
+        slots = [
+            int(panel) % per_page
+            for panel in panels
+            if 0 <= int(panel) < n_pan
+        ]
+        return self._normalize_hidden_page_slots(slots, drop_if_full=drop_if_full)
+
+    @traitlets.validate("hidden_page_slots")
+    def _validate_hidden_page_slots(self, proposal: dict) -> list[int]:
+        """Normalize hidden page slots for paged widgets."""
+        return self._normalize_hidden_page_slots(proposal["value"])
 
     @traitlets.validate("panel_order")
     def _validate_panel_order(self, proposal: dict) -> list[int]:
@@ -2092,6 +2148,7 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
             self.panels_per_page = 0
             self.page_labels = []
             self.page_starred = []
+            self.hidden_page_slots = []
 
         # Color range (global across all frames)
         self._vmin_user = vmin
@@ -2531,6 +2588,7 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
         self.panels_per_page = 0
         self.page_labels = []
         self.page_starred = []
+        self.hidden_page_slots = []
         self._reset_panel_contrast_traits()
         self._multi_panel_bin = 0
         self.shared_panel_source = False
@@ -2691,6 +2749,7 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
             "panels_per_page": int(self.panels_per_page),
             "page_labels": list(self.page_labels),
             "page_starred": list(self.page_starred),
+            "hidden_page_slots": list(self.hidden_page_slots),
             "playback_path": self.playback_path,
             "slice_idx": self.slice_idx,
             "roi_active": self.roi_active,
@@ -2986,6 +3045,16 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
             if len(clean) >= n_pan:
                 clean = clean[:-1]
             state["hidden_panels"] = clean
+        if "hidden_page_slots" in state and isinstance(state["hidden_page_slots"], list):
+            state["hidden_page_slots"] = self._normalize_hidden_page_slots(
+                state["hidden_page_slots"],
+                drop_if_full=True,
+            )
+        elif int(self.n_pages) > 1 and "hidden_panels" in state and isinstance(state["hidden_panels"], list):
+            state["hidden_page_slots"] = self._hidden_page_slots_from_panels(
+                state["hidden_panels"],
+                drop_if_full=True,
+            )
         if "panel_order" in state and isinstance(state["panel_order"], list):
             try:
                 order = [int(value) for value in state["panel_order"] if not isinstance(value, bool)]
@@ -3011,7 +3080,7 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
                 if len(state["page_starred"]) != int(self.n_pages):
                     state.pop("page_starred")
         else:
-            for key in ("n_pages", "page_idx", "panels_per_page", "page_labels", "page_starred"):
+            for key in ("n_pages", "page_idx", "panels_per_page", "page_labels", "page_starred", "hidden_page_slots"):
                 state.pop(key, None)
         # These were briefly present in the development branch. Contrast auto,
         # percentile, and log scale now stay global to match Show2D.
@@ -3351,6 +3420,15 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
     @property
     def visible_panels(self) -> list[int]:
         """Zero-based panel indices currently visible in the canvas grid."""
+        if int(self.n_pages) > 1 and int(self.panels_per_page) > 0:
+            start = int(self.page_idx) * int(self.panels_per_page)
+            hidden_slots = set(self.hidden_page_slots)
+            visible = [
+                panel
+                for panel in self.ordered_panels
+                if (panel - start) not in hidden_slots
+            ]
+            return visible or self.ordered_panels[:1]
         hidden = set(self.hidden_panels)
         return [i for i in self.ordered_panels if i not in hidden]
 
@@ -3403,9 +3481,19 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
         >>> w.set_hidden_panels([1])  # doctest: +SKIP
         """
         hidden = self._normalize_panel_refs(panels, allow_empty=True)
+        if int(self.n_pages) > 1:
+            try:
+                hidden_page_slots = self._hidden_page_slots_from_panels(hidden)
+            except traitlets.TraitError as exc:
+                raise ValueError(
+                    "set_hidden_panels would hide every page slot; leave at least one visible"
+                ) from exc
+        else:
+            hidden_page_slots = []
         if len(hidden) >= int(self.n_panels):
             raise ValueError("set_hidden_panels would hide every panel; leave at least one visible")
         self.hidden_panels = sorted(hidden)
+        self.hidden_page_slots = hidden_page_slots
         return self
 
     def hide_panel(self, *panels: int | str) -> Self:
@@ -3416,20 +3504,31 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
         """
         to_hide = set(self.hidden_panels)
         to_hide.update(self._normalize_panel_refs(list(panels)))
+        if int(self.n_pages) > 1:
+            try:
+                hidden_page_slots = self._hidden_page_slots_from_panels(sorted(to_hide))
+            except traitlets.TraitError as exc:
+                raise ValueError("hide_panel would hide every page slot; leave at least one visible") from exc
+        else:
+            hidden_page_slots = []
         if len(to_hide) >= int(self.n_panels):
             raise ValueError("hide_panel would hide every panel; leave at least one visible")
         self.hidden_panels = sorted(to_hide)
+        self.hidden_page_slots = hidden_page_slots
         return self
 
     def show_panel(self, *panels: int | str) -> Self:
         """Restore one or more hidden panels by zero-based index or exact title."""
         to_show = set(self._normalize_panel_refs(list(panels)))
-        self.hidden_panels = sorted(set(self.hidden_panels) - to_show)
+        hidden = sorted(set(self.hidden_panels) - to_show)
+        self.hidden_panels = hidden
+        self.hidden_page_slots = self._hidden_page_slots_from_panels(hidden)
         return self
 
     def show_all_panels(self) -> Self:
         """Restore every panel in the canvas grid."""
         self.hidden_panels = []
+        self.hidden_page_slots = []
         return self
 
     def set_panel_order(self, panels: Sequence[int | str]) -> Self:

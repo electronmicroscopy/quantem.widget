@@ -90,13 +90,17 @@ def test_show3d_paged_state_and_html_roundtrip(tmp_path: pathlib.Path) -> None:
     assert restored.page_idx == 1
     assert restored.page_starred == [0, 1, 0]
     assert restored.hidden_panels == [5]
+    assert restored.hidden_page_slots == [1]
     assert restored.visible_panels == [4, 6, 7]
+    restored.page_idx = 2
+    assert restored.visible_panels == [8, 10, 11]
     assert restored.starred[6] == 3
 
     out = widget.export_html(tmp_path / "show3d_pages.html", encoding="uint8")
     html = out.read_text()
     assert "page_idx" in html
     assert "page_starred" in html
+    assert "hidden_page_slots" in html
     assert "lambda 0.03" in html
 
 
