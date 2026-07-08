@@ -136,6 +136,9 @@ const SPACING = {
 };
 
 const CANVAS_SIZE = 480;  // Both DP and VI canvases
+const MIN_CANVAS_SIZE = 240;
+const COMPARE_GRID_DEFAULT_WIDTH = 980;
+const MIN_COMPARE_GRID_WIDTH = 320;
 const HTML_EXPORT_OVERHEAD_BYTES = 700_000;
 
 type Show4DSTEMWritableFile = {
@@ -1212,6 +1215,8 @@ interface CompareVirtualGridProps {
   reorderMode: boolean;
   draggingFrame: number | null;
   pendingMoveFrame: number | null;
+  maxWidthPx: number;
+  onResizeStart?: (event: React.PointerEvent<HTMLElement>) => void;
   onSelect: (idx: number) => void;
   onToggleStar: (idx: number) => void;
   onHide: (idx: number) => void;
@@ -1249,6 +1254,8 @@ function CompareVirtualGrid({
   reorderMode,
   draggingFrame,
   pendingMoveFrame,
+  maxWidthPx,
+  onResizeStart,
   onSelect,
   onToggleStar,
   onHide,
@@ -1415,7 +1422,7 @@ function CompareVirtualGrid({
   }
 
   return (
-    <Box sx={{ width: "100%", maxWidth: "100%" }}>
+    <Box sx={{ width: "100%", maxWidth: maxWidthPx > 0 ? `${maxWidthPx}px` : "100%", position: "relative", "@media (max-width: 700px)": { maxWidth: "100%" } }}>
       {statusText && (
         <Typography sx={{ fontSize: 10, color: themeColors.textMuted, mb: 0.5, "@media (max-width: 700px)": { display: "none" } }}>
           {statusText}
@@ -1734,6 +1741,27 @@ function CompareVirtualGrid({
           );
         })}
       </Box>
+      {panelChromeVisible && onResizeStart && (
+        <Box
+          onPointerDown={onResizeStart}
+          aria-label="Resize Show4DSTEM compare grid"
+          role="button"
+          tabIndex={-1}
+          sx={{
+            position: "absolute",
+            bottom: 0,
+            right: 0,
+            width: 16,
+            height: 16,
+            cursor: "nwse-resize",
+            opacity: 0.6,
+            background: `linear-gradient(135deg, transparent 50%, ${themeColors.accent} 50%)`,
+            zIndex: 5,
+            "&:hover": { opacity: 1 },
+            "@media (max-width: 700px)": { display: "none" },
+          }}
+        />
+      )}
     </Box>
   );
 }
@@ -2335,14 +2363,22 @@ function Show4DSTEM() {
   const [compareDraggingFrame, setCompareDraggingFrame] = React.useState<number | null>(null);
   const [comparePendingMoveFrame, setComparePendingMoveFrame] = React.useState<number | null>(null);
   const [panelWidthPx, setPanelWidthPx] = useModelState<number>("panel_width_px");
+  const [compareGridWidthPx, setCompareGridWidthPx] = useModelState<number>("compare_grid_width_px");
+  const [compareGridPreviewWidth, setCompareGridPreviewWidth] = React.useState<number | null>(null);
+  const [isResizingCompareGrid, setIsResizingCompareGrid] = React.useState(false);
+  const [compareGridResizeStart, setCompareGridResizeStart] = React.useState<{ x: number; y: number; width: number } | null>(null);
 
   const effectiveShowFft = showFft;
   const compareMode = viewMode === "compare" && nFrames > 1;
+  const compareGridWidth = compareGridPreviewWidth ?? (compareGridWidthPx > 0 ? compareGridWidthPx : COMPARE_GRID_DEFAULT_WIDTH);
   React.useEffect(() => {
     if (!compareMode) {
       setCompareReorderMode(false);
       setCompareDraggingFrame(null);
       setComparePendingMoveFrame(null);
+      setCompareGridPreviewWidth(null);
+      setIsResizingCompareGrid(false);
+      setCompareGridResizeStart(null);
     }
   }, [compareMode]);
   const compareHiddenCount = React.useMemo(() => {
@@ -5025,7 +5061,7 @@ function Show4DSTEM() {
     const handleMouseMove = (e: MouseEvent) => {
       if (!resizeCanvasStart) return;
       const delta = Math.max(e.clientX - resizeCanvasStart.x, e.clientY - resizeCanvasStart.y);
-      const minCanvasSize = Math.max(1, panelWidthPx > 0 ? panelWidthPx : CANVAS_SIZE);
+      const minCanvasSize = MIN_CANVAS_SIZE;
       latestSize = Math.max(minCanvasSize, resizeCanvasStart.size + delta);
       if (!rafId) {
         rafId = requestAnimationFrame(() => {
@@ -5049,6 +5085,47 @@ function Show4DSTEM() {
       document.removeEventListener("mouseup", handleMouseUp);
     };
   }, [isResizingCanvas, resizeCanvasStart, panelWidthPx, setPanelWidthPx]);
+
+  const handleCompareGridResizeStart = (e: React.PointerEvent<HTMLElement>) => {
+    e.stopPropagation();
+    e.preventDefault();
+    try { e.currentTarget.setPointerCapture(e.pointerId); } catch {}
+    setIsResizingCompareGrid(true);
+    setCompareGridResizeStart({ x: e.clientX, y: e.clientY, width: compareGridWidth });
+  };
+
+  React.useEffect(() => {
+    if (!isResizingCompareGrid) return;
+    let rafId = 0;
+    let latestWidth = compareGridResizeStart ? compareGridResizeStart.width : compareGridWidth;
+    const handlePointerMove = (e: PointerEvent) => {
+      if (!compareGridResizeStart) return;
+      const delta = Math.max(e.clientX - compareGridResizeStart.x, e.clientY - compareGridResizeStart.y);
+      latestWidth = Math.max(MIN_COMPARE_GRID_WIDTH, compareGridResizeStart.width + delta);
+      if (!rafId) {
+        rafId = requestAnimationFrame(() => {
+          rafId = 0;
+          setCompareGridPreviewWidth(latestWidth);
+        });
+      }
+    };
+    const handlePointerUp = () => {
+      cancelAnimationFrame(rafId);
+      setCompareGridWidthPx(Math.round(latestWidth));
+      setCompareGridPreviewWidth(null);
+      setIsResizingCompareGrid(false);
+      setCompareGridResizeStart(null);
+    };
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", handlePointerUp);
+    window.addEventListener("pointercancel", handlePointerUp);
+    return () => {
+      cancelAnimationFrame(rafId);
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", handlePointerUp);
+      window.removeEventListener("pointercancel", handlePointerUp);
+    };
+  }, [compareGridResizeStart, compareGridWidth, isResizingCompareGrid, setCompareGridWidthPx]);
 
   // ─────────────────────────────────────────────────────────────────────────
   // Render
@@ -5131,7 +5208,7 @@ function Show4DSTEM() {
   ];
   const temporalMode = viewMode === "temporal" && nFrames > 1;
   const squarePanelWidth = `min(${canvasSize}px, 100%)`;
-  const viPanelWidth = compareMode ? "min(980px, 100%)" : `min(${viCanvasWidth}px, 100%)`;
+  const viPanelWidth = compareMode ? `min(${compareGridWidth}px, 100%)` : `min(${viCanvasWidth}px, 100%)`;
   const mobileTightLayout = temporalMode || compareMode;
   const mobilePanelSx = {
     "@media (max-width: 700px)": {
@@ -5587,6 +5664,8 @@ function Show4DSTEM() {
               reorderMode={compareReorderMode}
               draggingFrame={compareDraggingFrame}
               pendingMoveFrame={comparePendingMoveFrame}
+              maxWidthPx={compareGridWidth}
+              onResizeStart={handleCompareGridResizeStart}
               onSelect={(idx) => {
                 setFramePlaying(false);
                 setFrameIdx(Math.max(0, Math.min(nFrames - 1, idx)));

@@ -154,6 +154,7 @@ def test_show4dstem_compare_grid_builds_virtual_image_stack() -> None:
         data,
         view_mode="compare",
         compare_cols=3,
+        compare_grid_width_px=720,
         compare_max_panels=4,
         frame_dim_label="Dataset",
         frame_labels=[f"scan-{idx}" for idx in range(5)],
@@ -164,6 +165,7 @@ def test_show4dstem_compare_grid_builds_virtual_image_stack() -> None:
     try:
         assert widget.view_mode == "compare"
         assert widget.compare_cols == 3
+        assert widget.compare_grid_width_px == 720
         assert widget.compare_dp_mode == "average"
         assert widget.compare_panel_count == 4
         assert widget.compare_panel_indices == [0, 1, 2, 3]
@@ -218,6 +220,7 @@ def test_show4dstem_compare_grid_builds_virtual_image_stack() -> None:
         try:
             restored.load_state_dict(state)
             assert restored.compare_dp_mode == widget.compare_dp_mode
+            assert restored.compare_grid_width_px == widget.compare_grid_width_px
             assert restored.compare_panel_order == widget.compare_panel_order
             assert restored.compare_hidden_panels == widget.compare_hidden_panels
             assert restored.compare_starred_panels == widget.compare_starred_panels
@@ -277,6 +280,7 @@ def test_show4dstem_compare_grid_validates_api() -> None:
         ({"view_mode": "movie"}, "view_mode"),
         ({"compare_layout": "diagonal"}, "compare_layout"),
         ({"compare_cols": -1}, "compare_cols"),
+        ({"compare_grid_width_px": -1}, "compare_grid_width_px"),
         ({"compare_max_panels": 0}, "compare_max_panels"),
         ({"compare_dp_mode": "median"}, "compare_dp_mode"),
     ]:
