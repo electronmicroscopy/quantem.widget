@@ -780,6 +780,8 @@ function Show2D() {
   const [pageStarred, setPageStarred] = useModelState<number[]>("page_starred");
   const isPaged = (nPages || 1) > 1 && (panelsPerPage || 0) > 0;
   const currentPageIdx = Math.max(0, Math.min((nPages || 1) - 1, Math.round(pageIdx || 0)));
+  const currentPageLabel = pageLabels?.[currentPageIdx] || `Page ${currentPageIdx + 1}`;
+  const currentPageStatus = `${currentPageLabel} ${currentPageIdx + 1}/${nPages || 1}`;
   const [pagePlaying, setPagePlaying] = React.useState(false);
   const [pagePlayFps, setPagePlayFps] = React.useState<number>(2);
   const activePageStart = isPaged ? currentPageIdx * Math.max(1, panelsPerPage || 1) : 0;
@@ -861,6 +863,35 @@ function Show2D() {
   const controlsVisible = showControls && !controlsCollapsed;
   const panelChromeVisible = controlsVisible;
   const showResizeControls = allowResizeControls && panelChromeVisible;
+  const resizeGripSx = React.useMemo(() => ({
+    position: "absolute",
+    bottom: 0,
+    right: 0,
+    width: 18,
+    height: 18,
+    cursor: "nwse-resize",
+    opacity: 0.8,
+    pointerEvents: "auto",
+    background: "transparent",
+    clipPath: "polygon(100% 0, 100% 100%, 0 100%)",
+    zIndex: 5,
+    "&::before": {
+      content: "\"\"",
+      position: "absolute",
+      right: 2,
+      bottom: 3,
+      width: 16,
+      height: 2,
+      borderRadius: 999,
+      backgroundColor: themeColors.accent,
+      transform: "rotate(-45deg)",
+      transformOrigin: "right bottom",
+      boxShadow: `0 -5px 0 ${themeColors.accent}, 0 -10px 0 ${themeColors.accent}`,
+      filter: "drop-shadow(0 0 1px rgba(0,0,0,0.85))",
+      pointerEvents: "none",
+    },
+    "&:hover": { opacity: 1 },
+  }), [themeColors.accent]);
   const [showStats] = useModelState<boolean>("show_stats");
   const [statsMean] = useModelState<number[]>("stats_mean");
   const [statsMin] = useModelState<number[]>("stats_min");
@@ -1356,8 +1387,7 @@ function Show2D() {
     if (canvasSizeTrait > 0) setCanvasSize(canvasSizeTrait);
   }, [canvasSizeTrait]);
 
-  const [isResizingCanvas, setIsResizingCanvas] = React.useState(false);
-  const [resizeStart, setResizeStart] = React.useState<{ x: number, y: number, size: number } | null>(null);
+  const canvasResizeCleanupRef = React.useRef<(() => void) | null>(null);
 
   // Profile height resize
   const [profileHeight, setProfileHeight] = React.useState(76);
@@ -4932,6 +4962,7 @@ function Show2D() {
   const handleCanvasResizeStart = (e: React.MouseEvent) => {
     e.stopPropagation();
     e.preventDefault();
+    canvasResizeCleanupRef.current?.();
     const perAnchors = new Map<number, ZoomAnchor>();
     zoomStates.forEach((state, idx) => perAnchors.set(idx, zoomStateToAnchor(state)));
     canvasResizeViewAnchorRef.current = {
@@ -4939,19 +4970,13 @@ function Show2D() {
       per: perAnchors,
       reset: resetZoomStateRef.current ? zoomStateToAnchor(resetZoomStateRef.current) : null,
     };
-    setIsResizingCanvas(true);
-    setResizeStart({ x: e.clientX, y: e.clientY, size: canvasSize });
-  };
-
-  React.useEffect(() => {
-    if (!isResizingCanvas) return;
+    const start = { x: e.clientX, y: e.clientY, size: canvasSize };
     let rafId = 0;
-    let latestSize = resizeStart ? resizeStart.size : canvasSize;
+    let latestSize = start.size;
 
-    const handleMouseMove = (e: MouseEvent) => {
-      if (!resizeStart) return;
-      const delta = Math.max(e.clientX - resizeStart.x, e.clientY - resizeStart.y);
-      latestSize = Math.max(200, resizeStart.size + delta);
+    const handleMouseMove = (event: MouseEvent) => {
+      const delta = Math.max(event.clientX - start.x, event.clientY - start.y);
+      latestSize = Math.max(200, start.size + delta);
       if (!rafId) {
         rafId = requestAnimationFrame(() => {
           rafId = 0;
@@ -4961,24 +4986,30 @@ function Show2D() {
       }
     };
 
-    const handleMouseUp = () => {
+    const finishResize = () => {
       cancelAnimationFrame(rafId);
       applyResizeViewAnchor(latestSize);
       setCanvasSize(latestSize);
       setCanvasSizeTrait(Math.round(latestSize));
-      setIsResizingCanvas(false);
-      setResizeStart(null);
+      document.removeEventListener("mousemove", handleMouseMove);
+      document.removeEventListener("mouseup", finishResize);
+      window.removeEventListener("blur", finishResize);
+      canvasResizeCleanupRef.current = null;
       window.setTimeout(() => { canvasResizeViewAnchorRef.current = null; }, 0);
     };
 
     document.addEventListener("mousemove", handleMouseMove);
-    document.addEventListener("mouseup", handleMouseUp);
+    document.addEventListener("mouseup", finishResize);
+    window.addEventListener("blur", finishResize);
+    canvasResizeCleanupRef.current = finishResize;
+  };
+
+  React.useEffect(() => {
     return () => {
-      cancelAnimationFrame(rafId);
-      document.removeEventListener("mousemove", handleMouseMove);
-      document.removeEventListener("mouseup", handleMouseUp);
+      canvasResizeCleanupRef.current?.();
+      canvasResizeCleanupRef.current = null;
     };
-  }, [isResizingCanvas, resizeStart, setCanvasSizeTrait, applyResizeViewAnchor]);
+  }, []);
 
   // Profile height resize
   React.useEffect(() => {
@@ -5216,9 +5247,23 @@ function Show2D() {
 	          <Stack direction="row" alignItems="center" spacing={`${SPACING.SM}px`} useFlexGap sx={{ mb: `${SPACING.XS}px`, minHeight: 28, flexWrap: "wrap", rowGap: `${SPACING.XS}px`, width: "100%", maxWidth: "100%", boxSizing: "border-box" }}>
             {isPaged && (
               <>
-                <Typography sx={{ ...typography.label, fontSize: 10 }}>Page</Typography>
-                <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.accent, minWidth: 56 }}>
-                  {(pageLabels?.[currentPageIdx] || `Page ${currentPageIdx + 1}`)} {currentPageIdx + 1}/{nPages}
+                <Typography sx={{ ...typography.label, fontSize: 10, flexShrink: 0 }}>Page</Typography>
+                <Typography
+                  title={currentPageStatus}
+                  sx={{
+                    ...typography.label,
+                    fontSize: 10,
+                    color: themeColors.accent,
+                    flex: "0 1 14ch",
+                    minWidth: "8ch",
+                    maxWidth: { xs: "11ch", sm: "16ch", md: "20ch" },
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                    fontVariantNumeric: "tabular-nums",
+                  }}
+                >
+                  {currentPageStatus}
                 </Typography>
                 <Slider
                   value={currentPageIdx}
@@ -5234,7 +5279,7 @@ function Show2D() {
                   }}
                   onChangeCommitted={() => setPagePlaying(false)}
                   size="small"
-                  sx={{ ...sliderStyles.small, width: 120, color: themeColors.accent }}
+                  sx={{ ...sliderStyles.small, width: 120, flex: "0 0 120px", color: themeColors.accent }}
                   aria-label="Page"
                 />
                 <IconButton
@@ -5266,8 +5311,8 @@ function Show2D() {
                     next[currentPageIdx] = next[currentPageIdx] ? 0 : 1;
                     setPageStarred(next);
                   }}
-                  title={(pageStarred?.[currentPageIdx] ? "Unstar " : "Star ") + (pageLabels?.[currentPageIdx] || `Page ${currentPageIdx + 1}`)}
-                  aria-label={(pageStarred?.[currentPageIdx] ? "Unstar " : "Star ") + (pageLabels?.[currentPageIdx] || `Page ${currentPageIdx + 1}`)}
+                  title={(pageStarred?.[currentPageIdx] ? "Unstar " : "Star ") + currentPageLabel}
+                  aria-label={(pageStarred?.[currentPageIdx] ? "Unstar " : "Star ") + currentPageLabel}
                   sx={{
                     width: 24,
                     height: 24,
@@ -5745,19 +5790,7 @@ function Show2D() {
                       <Box
                         onMouseDown={handleCanvasResizeStart}
                         title="Resize panels"
-                        sx={{
-                          position: "absolute",
-                          bottom: 0,
-                          right: 0,
-                          width: 16,
-                          height: 16,
-                          cursor: "nwse-resize",
-                          opacity: 0.6,
-                          pointerEvents: "auto",
-                          background: `linear-gradient(135deg, transparent 50%, ${themeColors.accent} 50%)`,
-                          borderRadius: "0 0 4px 0",
-                          "&:hover": { opacity: 1 },
-                        }}
+                        sx={resizeGripSx}
                       />
                     )}
                   </Box>
@@ -5930,7 +5963,7 @@ function Show2D() {
                 </Box>
               )}
               {showResizeControls && (
-                <Box onMouseDown={handleCanvasResizeStart} title="Resize image" sx={{ position: "absolute", bottom: 0, right: 0, width: 16, height: 16, cursor: "nwse-resize", opacity: 0.6, pointerEvents: "auto", background: `linear-gradient(135deg, transparent 50%, ${themeColors.accent} 50%)`, borderRadius: "0 0 4px 0", "&:hover": { opacity: 1 } }} />
+                <Box onMouseDown={handleCanvasResizeStart} title="Resize image" sx={resizeGripSx} />
               )}
             </Box>
           )}
@@ -6330,7 +6363,7 @@ function Show2D() {
                 </Box>
               )}
               {showResizeControls && (
-                <Box onMouseDown={handleCanvasResizeStart} sx={{ position: "absolute", bottom: 0, right: 0, width: 16, height: 16, cursor: "nwse-resize", opacity: 0.6, pointerEvents: "auto", background: `linear-gradient(135deg, transparent 50%, ${themeColors.accent} 50%)`, borderRadius: "0 0 4px 0", "&:hover": { opacity: 1 } }} />
+                <Box onMouseDown={handleCanvasResizeStart} title="Resize image" sx={resizeGripSx} />
               )}
             </Box>
             {/* FFT Stats Bar */}

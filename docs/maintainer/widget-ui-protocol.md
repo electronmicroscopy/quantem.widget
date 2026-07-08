@@ -64,6 +64,23 @@ Keep existing widget-specific exceptions only when the scientific workflow
 depends on them. If changing the order, compare the result against Show2D,
 Show3D, Show4DSTEM, and ShowEDS before committing.
 
+## Dynamic labels
+
+Scientific labels can be long and data-dependent: page labels, run names, file
+names, lambda/RMSE summaries, detector names, export statuses, and frame labels.
+Do not let that text resize the whole toolbar or shift nearby controls while the
+user scrubs pages or frames.
+
+For dynamic labels inside dense toolbars:
+
+- Give the label a bounded width with `overflow: hidden`, `text-overflow:
+  ellipsis`, and `white-space: nowrap`.
+- Keep the full value in `title` and the relevant `aria-label`.
+- Use fixed or reserved widths for neighboring sliders and compact controls.
+- Use tabular numbers for counters such as `2/11`, `10/11`, and `4 fps`.
+- Put detailed metadata in a tooltip, panel label, report table, or secondary
+  line instead of making the primary toolbar grow with every dataset.
+
 ## Export labels
 
 Export menu labels should tell users what will be saved:

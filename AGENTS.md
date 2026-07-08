@@ -73,6 +73,18 @@ For ShowEDS real-data work, keep band, ROI, zoom, contrast, and smooth/auto
 display interactions at real-time speed. Treat loss of 30 FPS interaction as a
 bug unless the limitation is explicitly documented and accepted.
 
+## Runtime and Backend Choice
+
+Do not run heavy widget workloads in the local Codex bundled runtime, system
+Python, or a laptop CPU-only environment. Those are acceptable only for
+lightweight inspections, small unit tests, and quick syntax/type checks.
+
+For large tutorial data generation, exported-HTML browser reports, real-data
+performance probes, long notebook runs, or GPU/WebGPU stress tests, use the
+project development backend or an HPC/GPU-capable backend so the user's laptop
+does not freeze. Keep generated reports and scratch artifacts outside the repo
+unless they are intentionally promoted into a documented maintainer workflow.
+
 ## Widget UI Consistency
 
 For widget visual style and control wording, read
@@ -122,3 +134,17 @@ introduce Git LFS just to support routine widget docs. Prefer source notebooks,
 small real rendered examples, and generated docs output. Use public data hosting
 only when real tutorial data or standalone HTML would make normal clones
 unnecessarily large.
+
+## Tutorial Data Generation
+
+When generating synthetic or real-derived arrays for `docs/tutorials/`, docs
+builds, smoke reports, or browser probes, use vectorized NumPy or Torch
+operations. Prefer Torch for larger lattice, page-stack, movie-stack, FFT, or
+multi-panel examples because it keeps array construction fast on CPU/GPU
+backends and avoids slow Python loops in notebooks.
+
+Keep tutorials readable: hide or collapse bulky data-construction cells when
+they are not the teaching point, and make the rendered widget or result the
+focus. If Torch is not already a dependency for the path being edited, keep the
+import local to the tutorial/helper and fall back to NumPy when Torch is
+unavailable.

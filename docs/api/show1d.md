@@ -5,6 +5,8 @@ linked image snapshots. Use it for loss curves, Adam/optimizer diagnostics,
 joint-time ptychography comparisons, and image-derived profiles that need a
 visible 2D context.
 
+For a runnable notebook walkthrough, see the [Show1D tutorial](../tutorials/show1d).
+
 ## Viewer UI
 
 `Show1D` supports the shared `ui_mode`, `show_title`, `show_controls`,
@@ -166,23 +168,23 @@ no console error, no NaN frame).
 | Control | Trait | Expected effect |
 |---|---|---|
 | Trace hover | read-only canvas overlay | Nearest trace point is highlighted and reported |
-| Trace click | `focused_trace` | Selected trace remains emphasized; other traces fade |
-| Trace dropdown | `focused_trace` | All traces or one trace is emphasized |
+| Trace or legend click | `focused_trace` | Selected trace remains emphasized; clicking it again or double-clicking the plot restores all traces |
 | Reset view | `x_range`, `y_range`, `focused_trace` | Plot returns to full data extent |
 | Grid toggle | `show_grid` | Grid lines show/hide |
 | Log toggle | `log_scale` | Positive y values render on a logarithmic axis |
 | Stats toggle | `show_stats` | Optional stats side table shows/hides; hidden by default |
 | Review toggle | `show_review` | Optional ranking, notes, tags, and alerts UI shows/hides; hidden by default |
 | Legend toggle | `show_legend` | Trace legend shows/hides |
-| Snapshots toggle | `show_snapshots` | Reconstruction snapshot panel shows/hides |
-| Thumbnail toggle | `show_snapshot_thumbnails` | Grouped image thumbnails show/hide on snapshot points in the plot |
-| Thumbnail size slider | `snapshot_thumbnail_size` | Plot thumbnails resize while keeping grouped object/probe montage layout |
+| Snapshot panel visibility API | `show_snapshots` | Reconstruction snapshot panel is shown by default; set this from Python for plot-only summaries |
+| Plot thumbnail API | `show_snapshot_thumbnails`, `snapshot_thumbnail_size` | Plot thumbnails are shown by default; set size from Python when a notebook needs denser or larger checkpoint previews |
 | Snapshot colormap menu | `image_cmap` | Profile/snapshot images use the selected scientific colormap |
 | Snapshot contrast buttons | `snapshot_contrast_preset`, `snapshot_contrast_range` | Snapshot images use full, 0.5-99.5, 1-99, 2-98, or 5-95 percentile clipping; choosing a preset clears custom histogram clipping |
 | Snapshot histogram drag | `snapshot_contrast_range` | Drag either endpoint knot to adjust min/max; drag the middle span to move the contrast window |
+| Snapshot histogram size API | `snapshot_histogram_width`, `snapshot_histogram_height` | Keeps the compact contrast histogram independent of the reconstruction grid size |
 | Snapshot profile toggle | `show_snapshot_profile`, `snapshot_profile_line`, `snapshot_profile_height` | Draws a shared `(row, col)` line profile on reconstruction panels and compares visible panel intensities below the image grid |
 | Snapshot columns menu | `snapshot_columns` | Snapshot object/probe image grid uses automatic overview columns or a fixed 1-8 columns |
 | Snapshot overlay menu | `snapshot_overlay_position` | Snapshot label and zoom overlays can sit in any corner: top-left, top-right, bottom-left, or bottom-right |
+| Snapshot grid corner drag | `snapshot_panel_width_px` | Resizes reconstruction panels from the grid corner while keeping controls aligned to the snapshot width |
 | Snapshot star button | `starred_snapshot_image_labels` | In Review mode, marks candidate reconstructions to revisit while sweeping lambda or denoising settings |
 | Snapshot hide button | `hidden_snapshot_image_labels` | In Review mode, hides bad trials from the snapshot grid, loss plot, legend, and stats |
 | Show all hidden trials | `hidden_snapshot_image_labels` | In Review mode, restores hidden reconstruction trials |

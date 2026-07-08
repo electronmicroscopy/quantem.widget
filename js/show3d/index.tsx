@@ -1502,6 +1502,8 @@ function Show3D() {
   const totalPanelCount = Math.max(1, nPanels || 1);
   const isPaged = (nPages || 1) > 1 && (panelsPerPage || 0) > 0;
   const currentPageIdx = Math.max(0, Math.min((nPages || 1) - 1, Math.round(pageIdx || 0)));
+  const currentPageLabel = pageLabels?.[currentPageIdx] || `Page ${currentPageIdx + 1}`;
+  const currentPageStatus = `${currentPageLabel} ${currentPageIdx + 1}/${nPages || 1}`;
   React.useEffect(() => {
     if (!isPaged || (nPages || 1) <= 1) setPagePlaying(false);
   }, [isPaged, nPages]);
@@ -9861,9 +9863,23 @@ function Show3D() {
 	          <Box sx={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: "4px", mb: `${SPACING.XS}px`, minHeight: 28 }}>
             {isPaged && (
               <>
-                <Typography sx={{ ...typography.label, fontSize: 10, ml: "2px" }}>Page</Typography>
-                <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.accent, minWidth: 56 }}>
-                  {(pageLabels?.[currentPageIdx] || `Page ${currentPageIdx + 1}`)} {currentPageIdx + 1}/{nPages}
+                <Typography sx={{ ...typography.label, fontSize: 10, ml: "2px", flexShrink: 0 }}>Page</Typography>
+                <Typography
+                  title={currentPageStatus}
+                  sx={{
+                    ...typography.label,
+                    fontSize: 10,
+                    color: themeColors.accent,
+                    flex: "0 1 14ch",
+                    minWidth: "8ch",
+                    maxWidth: { xs: "11ch", sm: "16ch", md: "20ch" },
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                    fontVariantNumeric: "tabular-nums",
+                  }}
+                >
+                  {currentPageStatus}
                 </Typography>
                 <Slider
                   value={currentPageIdx}
@@ -9879,7 +9895,7 @@ function Show3D() {
                   }}
                   onChangeCommitted={() => setPagePlaying(false)}
                   size="small"
-                  sx={{ ...sliderStyles.small, width: 120, color: themeColors.accent, ml: "2px" }}
+                  sx={{ ...sliderStyles.small, width: 120, flex: "0 0 120px", color: themeColors.accent, ml: "2px" }}
                   aria-label="Page"
                 />
                 <IconButton
@@ -9911,8 +9927,8 @@ function Show3D() {
                     next[currentPageIdx] = next[currentPageIdx] ? 0 : 1;
                     setPageStarred(next);
                   }}
-                  title={(pageStarred?.[currentPageIdx] ? "Unstar " : "Star ") + (pageLabels?.[currentPageIdx] || `Page ${currentPageIdx + 1}`)}
-                  aria-label={(pageStarred?.[currentPageIdx] ? "Unstar " : "Star ") + (pageLabels?.[currentPageIdx] || `Page ${currentPageIdx + 1}`)}
+                  title={(pageStarred?.[currentPageIdx] ? "Unstar " : "Star ") + currentPageLabel}
+                  aria-label={(pageStarred?.[currentPageIdx] ? "Unstar " : "Star ") + currentPageLabel}
                   sx={{
                     width: 24,
                     height: 24,

@@ -795,6 +795,7 @@ function drawFloatImage(
   view: ImageViewState = { zoom: 1, panX: 0, panY: 0 },
   drawSizeLabel = true,
   displayRange?: [number, number],
+  drawImageBorder = true,
 ): void {
   const rect = canvas.getBoundingClientRect();
   const dpr = window.devicePixelRatio || 1;
@@ -837,9 +838,11 @@ function drawFloatImage(
   const y0 = cssH / 2 - drawH / 2 + view.panY;
   ctx.imageSmoothingEnabled = false;
   ctx.drawImage(bitmap, x0, y0, drawW, drawH);
-  ctx.strokeStyle = colors.border;
-  ctx.lineWidth = 1;
-  ctx.strokeRect(x0, y0, drawW, drawH);
+  if (drawImageBorder) {
+    ctx.strokeStyle = colors.border;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(x0, y0, drawW, drawH);
+  }
   if (line.length >= 2) {
     const a = line[0];
     const b = line[1];
@@ -1217,7 +1220,7 @@ function InteractiveFloatCanvas({
       border: selected ? colors.accent : colors.border,
       accent: colors.accent,
       text: colors.text,
-    }, localView, false, displayRange);
+    }, localView, false, displayRange, false);
   }, [cleanView, colors, currentApiView, data, displayRange, drawTick, height, lut, selected, width]);
 
   React.useEffect(() => {
@@ -1852,6 +1855,8 @@ function MiniHistogram({
   clipMax,
   colors,
   onClipRangeChange,
+  width = 360,
+  height = 52,
 }: {
   bins: number[];
   dataMin: number;
@@ -1860,6 +1865,8 @@ function MiniHistogram({
   clipMax: number;
   colors: { bgAlt: string; border: string; textMuted: string; accent: string };
   onClipRangeChange?: (range: [number, number]) => void;
+  width?: number;
+  height?: number;
 }) {
   const canvasRef = React.useRef<HTMLCanvasElement>(null);
   const dragRef = React.useRef<{
@@ -2034,14 +2041,14 @@ function MiniHistogram({
   }, []);
 
   return (
-    <Box>
+    <Box sx={{ width, maxWidth: "100%" }}>
       <Stack direction="row" alignItems="center" sx={{ mb: 0.25, minHeight: 12 }}>
         <Box sx={{ flex: 1 }} />
         <Typography sx={{ fontSize: 10, color: colors.textMuted, fontVariantNumeric: "tabular-nums" }}>
           {formatRangeValue(clipMin)} - {formatRangeValue(clipMax)}
         </Typography>
       </Stack>
-      <Box sx={{ height: 48, bgcolor: colors.bgAlt, border: `1px solid ${colors.border}`, borderRadius: 1, overflow: "hidden" }}>
+      <Box sx={{ height, bgcolor: colors.bgAlt, border: `1px solid ${colors.border}`, borderRadius: 1, overflow: "hidden" }}>
         <canvas
           ref={canvasRef}
           onPointerDown={handlePointerDown}
@@ -2117,6 +2124,8 @@ function Show1DWidget() {
   const [snapshotFftCmap, setSnapshotFftCmap] = useModelState<string>("snapshot_fft_cmap");
   const [snapshotContrastPreset, setSnapshotContrastPreset] = useModelState<string>("snapshot_contrast_preset");
   const [snapshotContrastRange, setSnapshotContrastRange] = useModelState<number[]>("snapshot_contrast_range");
+  const [snapshotHistogramWidth] = useModelState<number>("snapshot_histogram_width");
+  const [snapshotHistogramHeight] = useModelState<number>("snapshot_histogram_height");
   const [snapshotThumbnailSize, setSnapshotThumbnailSize] = useModelState<number>("snapshot_thumbnail_size");
   const [snapshotPanelWidthPx, setSnapshotPanelWidthPx] = useModelState<number>("snapshot_panel_width_px");
   const [snapshotColumns, setSnapshotColumns] = useModelState<number>("snapshot_columns");
@@ -2269,7 +2278,14 @@ function Show1DWidget() {
   const [sidePanelWidthUserAdjusted] = React.useState(false);
   const snapshotResizePointerIdRef = React.useRef<number | null>(null);
   const snapshotResizeCleanupRef = React.useRef<(() => void) | null>(null);
-  const snapshotResizeStartRef = React.useRef<{ x: number; y: number; width: number } | null>(null);
+  const snapshotResizeStartRef = React.useRef<{
+    x: number;
+    y: number;
+    width: number;
+    tileWidth?: number;
+    tileAspect?: number;
+    columns?: number;
+  } | null>(null);
   const snapshotViewportWidthRef = React.useRef(0);
   const histogramSlotRef = React.useRef(9000 + Math.floor(Math.random() * 100000));
   const [snapshotHistogramBins, setSnapshotHistogramBins] = React.useState<number[]>(new Array(256).fill(0));
@@ -2489,6 +2505,17 @@ function Show1DWidget() {
     PaperProps: themedMenuProps.PaperProps,
     sx: { zIndex: 9999 },
   };
+  const snapshotControlMenuProps = {
+    PaperProps: {
+      sx: {
+        bgcolor: themeColors.controlBg,
+        color: themeColors.text,
+        border: "none",
+        boxShadow: "0 8px 24px rgba(15, 23, 42, 0.14)",
+      },
+    },
+    sx: { zIndex: 9999 },
+  };
   const toolbarLabelSx = { ...typography.label, fontSize: 10, color: themeColors.textMuted };
   const selectedGroupRef = React.useRef(selectedGroup);
 
@@ -2598,20 +2625,35 @@ function Show1DWidget() {
     setSnapshotPanelWidthPx(Math.round(clampValue(width, Math.min(220, sidePanelWidth), sidePanelWidth)));
   }, [setSnapshotPanelWidthPx, sidePanelWidth]);
 
-  const handleSnapshotResizePointerDown = React.useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+  const handleSnapshotTileResizePointerDown = React.useCallback((event: React.PointerEvent<HTMLDivElement>) => {
     event.preventDefault();
     event.stopPropagation();
     snapshotResizeCleanupRef.current?.();
     const pointerId = event.pointerId;
+    const tileRect = event.currentTarget.parentElement?.getBoundingClientRect();
+    const columns = Math.max(1, Math.min(snapshotColumnCount, Math.max(1, selectedGroupImageIndices.length)));
+    const tileWidth = Math.max(1, tileRect?.width ?? (snapshotViewportWidthRef.current || sidePanelWidth) / columns);
+    const tileHeight = Math.max(1, tileRect?.height ?? tileWidth);
     snapshotResizePointerIdRef.current = pointerId;
-    snapshotResizeStartRef.current = { x: event.clientX, y: event.clientY, width: snapshotViewportWidthRef.current || sidePanelWidth };
+    snapshotResizeStartRef.current = {
+      x: event.clientX,
+      y: event.clientY,
+      width: snapshotViewportWidthRef.current || sidePanelWidth,
+      tileWidth,
+      tileAspect: tileHeight / tileWidth,
+      columns,
+    };
     event.currentTarget.setPointerCapture(pointerId);
     const handleWindowPointerMove = (moveEvent: PointerEvent) => {
       const start = snapshotResizeStartRef.current;
       if (snapshotResizePointerIdRef.current !== pointerId || !start) return;
       moveEvent.preventDefault();
-      const delta = Math.max(moveEvent.clientX - start.x, moveEvent.clientY - start.y);
-      setSnapshotViewportWidth(start.width + delta);
+      const tileAspect = Math.max(1e-6, start.tileAspect ?? 1);
+      const deltaX = moveEvent.clientX - start.x;
+      const deltaY = (moveEvent.clientY - start.y) / tileAspect;
+      const delta = Math.abs(deltaX) >= Math.abs(deltaY) ? deltaX : deltaY;
+      const nextTileWidth = Math.max(70, (start.tileWidth ?? start.width / Math.max(1, start.columns ?? 1)) + delta);
+      setSnapshotViewportWidth(nextTileWidth * Math.max(1, start.columns ?? columns));
     };
     const handleWindowPointerUp = (upEvent: PointerEvent) => {
       if (snapshotResizePointerIdRef.current !== pointerId) return;
@@ -2629,18 +2671,7 @@ function Show1DWidget() {
       snapshotResizePointerIdRef.current = null;
       snapshotResizeStartRef.current = null;
     };
-  }, [setSnapshotViewportWidth, sidePanelWidth]);
-
-  const handleSnapshotResizePointerUp = React.useCallback((event: React.PointerEvent<HTMLDivElement>) => {
-    if (snapshotResizePointerIdRef.current !== event.pointerId) return;
-    event.preventDefault();
-    event.stopPropagation();
-    snapshotResizeCleanupRef.current?.();
-    snapshotResizeCleanupRef.current = null;
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-      event.currentTarget.releasePointerCapture(event.pointerId);
-    }
-  }, []);
+  }, [selectedGroupImageIndices.length, setSnapshotViewportWidth, sidePanelWidth, snapshotColumnCount]);
 
   React.useEffect(() => {
     if (snapshotThumbnailSize !== thumbnailSize) setSnapshotThumbnailSize(thumbnailSize);
@@ -3384,6 +3415,8 @@ function Show1DWidget() {
   const snapshotFullGridHeight = snapshotTileDisplayHeight * selectedImageRows;
   const snapshotGridMaxHeight = `${Math.round(clampValue(snapshotFullGridHeight, 220, snapshotGridHeightCap))}px`;
   const snapshotProfilePlotHeight = Math.round(clampValue(Number.isFinite(snapshotProfileHeight) ? snapshotProfileHeight : 76, 44, 220));
+  const snapshotHistogramDisplayWidth = Math.round(clampValue(Number.isFinite(snapshotHistogramWidth) ? snapshotHistogramWidth : 360, 110, Math.min(640, sidePanelWidth)));
+  const snapshotHistogramDisplayHeight = Math.round(clampValue(Number.isFinite(snapshotHistogramHeight) ? snapshotHistogramHeight : 52, 36, 110));
   const statsPanel = showStats && visibleTraceIndices.length > 0 ? (
     <Box data-testid="show1d-stats-table" sx={{ width: "100%", mb: 0.5 }}>
       <Box
@@ -3429,7 +3462,7 @@ function Show1DWidget() {
   const snapshotPanelControls = (
     <Box
       data-testid="show1d-panel-controls"
-      sx={{ ...controlRow, width: "100%", border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, mb: 0.5 }}
+      sx={{ ...controlRow, width: "100%", flexWrap: "wrap", border: "none", bgcolor: "transparent", px: 0, py: 0.25, mb: 0.25 }}
     >
       <Typography sx={{ ...typography.label, color: themeColors.textMuted, flexShrink: 0 }}>cols</Typography>
       <Select
@@ -3437,7 +3470,7 @@ function Show1DWidget() {
         value={rawSnapshotColumnCount}
         onChange={(event) => setSnapshotColumns(Number(event.target.value))}
         sx={{ ...themedSelect, minWidth: 58, fontSize: 10 }}
-        MenuProps={themedMenuProps}
+        MenuProps={snapshotControlMenuProps}
         inputProps={{ "aria-label": "Snapshot image columns" }}
       >
         <MenuItem value={0}>auto</MenuItem>
@@ -3451,7 +3484,7 @@ function Show1DWidget() {
         value={resolvedSnapshotOverlayPosition}
         onChange={(event) => setSnapshotOverlayPosition(String(event.target.value))}
         sx={{ ...themedSelect, minWidth: 74, fontSize: 10 }}
-        MenuProps={themedMenuProps}
+        MenuProps={snapshotControlMenuProps}
         inputProps={{ "aria-label": "Snapshot overlay position" }}
       >
         <MenuItem value="top-left">top left</MenuItem>
@@ -3459,6 +3492,50 @@ function Show1DWidget() {
         <MenuItem value="bottom-left">bottom left</MenuItem>
         <MenuItem value="bottom-right">bottom right</MenuItem>
       </Select>
+      <Typography sx={{ ...typography.label, color: themeColors.textMuted, flexShrink: 0 }}>Profile</Typography>
+      <Switch
+        size="small"
+        checked={Boolean(showSnapshotProfile)}
+        onChange={(_, checked) => {
+          setShowSnapshotProfile(checked);
+          if (!checked) setSnapshotProfileLine([]);
+        }}
+        sx={{ ...switchStyles.small, flexShrink: 0 }}
+        slotProps={{ input: { "aria-label": "Show snapshot line profile" } }}
+      />
+      <Typography sx={{ ...typography.label, color: themeColors.textMuted, flexShrink: 0 }}>FFT</Typography>
+      <Switch
+        size="small"
+        checked={Boolean(showSnapshotFft)}
+        onChange={(_, checked) => setShowSnapshotFft(checked)}
+        sx={{ ...switchStyles.small, flexShrink: 0 }}
+        slotProps={{ input: { "aria-label": "Show snapshot FFT panels" } }}
+      />
+      {showSnapshotFft && (
+        <>
+          <Typography sx={{ ...typography.label, color: themeColors.textMuted, flexShrink: 0 }}>cmap</Typography>
+          <Select
+            size="small"
+            value={COLORMAPS[snapshotFftCmap] ? snapshotFftCmap : "magma"}
+            onChange={(event) => setSnapshotFftCmap(event.target.value)}
+            sx={{ ...themedSelect, minWidth: 65, fontSize: 10 }}
+            MenuProps={snapshotControlMenuProps}
+            inputProps={{ "aria-label": "Snapshot FFT colormap" }}
+          >
+            {COLORMAP_NAMES.map((name) => (
+              <MenuItem key={name} value={name}>{name}</MenuItem>
+            ))}
+          </Select>
+          <Typography sx={{ ...typography.label, color: themeColors.textMuted, flexShrink: 0 }}>win</Typography>
+          <Switch
+            size="small"
+            checked={Boolean(snapshotFftWindow)}
+            onChange={(_, checked) => setSnapshotFftWindow(checked)}
+            sx={{ ...switchStyles.small, flexShrink: 0 }}
+            slotProps={{ input: { "aria-label": "Apply Hann window before snapshot FFT" } }}
+          />
+        </>
+      )}
     </Box>
   );
 
@@ -3490,21 +3567,6 @@ function Show1DWidget() {
             )}
           </Stack>
           <Stack direction="row" alignItems="center" spacing={1} useFlexGap sx={{ flexWrap: "wrap", rowGap: 0.5, minHeight: 28, width: "100%", maxWidth: "100%", boxSizing: "border-box" }}>
-            {nTraces > 1 && (
-              <Select
-                size="small"
-                value={String(focusedTrace)}
-                onChange={(event) => setFocusedTrace(Number(event.target.value))}
-                sx={{ ...themedSelect, minWidth: 120, height: 30, fontSize: 12 }}
-                MenuProps={themedTopMenuProps}
-                inputProps={{ "aria-label": "Trace selector" }}
-              >
-                <MenuItem value="-1">{hiddenTraceIndices.length ? "All Visible" : "All Traces"}</MenuItem>
-                {visibleTraceIndices.map((idx) => (
-                  <MenuItem key={idx} value={String(idx)}>{compactScienceLabel(labels?.[idx] || `Trace ${idx + 1}`)}</MenuItem>
-                ))}
-              </Select>
-            )}
             <Stack direction="row" alignItems="center" spacing={0.5}>
               <Typography sx={toolbarLabelSx}>Log</Typography>
               <Switch
@@ -3689,7 +3751,28 @@ function Show1DWidget() {
           {showLegend && visibleTraceIndices.length > 0 && (
             <Stack direction="row" spacing={1} sx={{ px: 1, py: 0.5, flexWrap: "wrap", rowGap: 0.5 }}>
               {visibleTraceIndices.map((idx) => (
-                <Stack key={idx} direction="row" alignItems="center" spacing={0.5} sx={{ opacity: focusedTrace < 0 || focusedTrace === idx ? 1 : 0.45 }}>
+                <Stack
+                  key={idx}
+                  direction="row"
+                  alignItems="center"
+                  spacing={0.5}
+                  role="button"
+                  tabIndex={0}
+                  aria-pressed={focusedTrace === idx}
+                  onClick={() => setFocusedTrace(focusedTrace === idx ? -1 : idx)}
+                  onKeyDown={(event) => {
+                    if (event.key !== "Enter" && event.key !== " ") return;
+                    event.preventDefault();
+                    setFocusedTrace(focusedTrace === idx ? -1 : idx);
+                  }}
+                  sx={{
+                    opacity: focusedTrace < 0 || focusedTrace === idx ? 1 : 0.45,
+                    cursor: "pointer",
+                    outline: "none",
+                    borderRadius: 0.5,
+                    "&:focus-visible": { boxShadow: `0 0 0 2px ${themeColors.accent}` },
+                  }}
+                >
                   <Box sx={{ width: 16, height: 3, bgcolor: cssColor(colors ?? [], idx), borderRadius: 1 }} />
                   <Typography data-testid={`show1d-legend-label-${idx}`} sx={{ fontSize: 11, color: themeColors.textMuted }} title={labels?.[idx] || `Trace ${idx + 1}`}>
                     {compactScienceLabel(labels?.[idx] || `Trace ${idx + 1}`)}
@@ -3734,36 +3817,38 @@ function Show1DWidget() {
                     overflowY: "auto",
                     overscrollBehavior: "contain",
                     pr: 0,
-                    border: `1px solid ${themeColors.border}`,
-                    bgcolor: themeColors.border,
+                    border: "none",
+                    bgcolor: themeColors.bg,
                   }}
                 >
-	                  {selectedGroupImageIndices.map((imageIdx) => {
-	                    const imageHeight = snapshotHeights?.[imageIdx] || snapshotHeight;
-	                    const imageWidth = snapshotWidths?.[imageIdx] || snapshotWidth;
-	                    const imageLabel = imageLabelForIndex(imageIdx);
-	                    const selected = imageIdx === selectedSnapshot;
-	                    const hideDisabled = selectedGroupImageIndices.length <= 1;
-	                    const hideLabel = hideDisabled ? "Cannot hide the last visible panel" : `Hide ${imageLabel}`;
-	                    return (
-	                      <Box
-	                        key={imageIdx}
-	                        title={imageLabel}
-	                        sx={{
+                  {selectedGroupImageIndices.map((imageIdx) => {
+                    const imageHeight = snapshotHeights?.[imageIdx] || snapshotHeight;
+                    const imageWidth = snapshotWidths?.[imageIdx] || snapshotWidth;
+                    const imageLabel = imageLabelForIndex(imageIdx);
+                    const selected = imageIdx === selectedSnapshot;
+                    const hideDisabled = selectedGroupImageIndices.length <= 1;
+                    const hideLabel = hideDisabled ? "Cannot hide the last visible panel" : `Hide ${imageLabel}`;
+                    return (
+                      <Box
+                        key={imageIdx}
+                        title={imageLabel}
+                        sx={{
                           minWidth: 0,
                           position: "relative",
-	                          bgcolor: themeColors.bgAlt,
-	                          overflow: "hidden",
-	                          outline: selected ? `2px solid ${themeColors.accent}` : `1px solid ${themeColors.border}`,
-	                          outlineOffset: -1,
-	                          "&:hover .show1d-panel-hide-button, &:focus-within .show1d-panel-hide-button": {
-	                            opacity: 1,
-	                            transform: "translateY(0)",
-	                            pointerEvents: "auto",
-	                          },
-	                        }}
-	                      >
-	                        <SnapshotImageCanvas
+                          bgcolor: themeColors.bg,
+                          overflow: "hidden",
+                          outline: "none",
+                          "&:hover .show1d-panel-hide-button, &:focus-within .show1d-panel-hide-button": {
+                            opacity: 1,
+                            transform: "translateY(0)",
+                            pointerEvents: "auto",
+                          },
+                          "&:hover .show1d-tile-resize-handle, &:focus-within .show1d-tile-resize-handle": {
+                            opacity: 0.9,
+                          },
+                        }}
+                      >
+                        <SnapshotImageCanvas
                           data={snapshotData}
                           imageIndex={imageIdx}
                           packedHeight={snapshotHeight}
@@ -3798,40 +3883,65 @@ function Show1DWidget() {
                           onProfileLineChange={setSnapshotProfileLine}
                           onSelect={() => selectSnapshotImage(imageIdx)}
                         />
-	                        <IconButton
-	                          className="show1d-panel-hide-button"
-	                          data-testid={`show1d-panel-hide-${imageIdx}`}
-	                          size="small"
-	                          disabled={hideDisabled}
-	                          onMouseDown={(event) => event.stopPropagation()}
-	                          onClick={(event) => {
-	                            event.stopPropagation();
-	                            if (!hideDisabled) hideTrial(imageLabel);
-	                          }}
-	                          aria-label={hideLabel}
-	                          title={hideLabel}
-	                          sx={{
-	                            position: "absolute",
-	                            top: 5,
-	                            left: 5,
-	                            zIndex: 4,
-	                            width: 22,
-	                            height: 22,
-	                            p: 0,
-	                            opacity: hideDisabled ? 0.18 : 0.52,
-	                            transform: "translateY(0)",
-	                            transition: "opacity 120ms ease, transform 120ms ease, background-color 120ms ease, color 120ms ease",
-	                            color: hideDisabled ? "rgba(255,255,255,0.25)" : "rgba(255,255,255,0.75)",
-	                            bgcolor: "rgba(0,0,0,0.22)",
-	                            pointerEvents: "auto",
-	                            "&:hover, &:focus-visible": {
-	                              bgcolor: "rgba(0,0,0,0.42)",
-	                              color: "rgba(255,255,255,0.95)",
-	                            },
-	                          }}
-	                        >
-	                          <VisibilityOffIcon sx={{ fontSize: 15 }} />
-	                        </IconButton>
+                        <IconButton
+                          className="show1d-panel-hide-button"
+                          data-testid={`show1d-panel-hide-${imageIdx}`}
+                          size="small"
+                          disabled={hideDisabled}
+                          onMouseDown={(event) => event.stopPropagation()}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            if (!hideDisabled) hideTrial(imageLabel);
+                          }}
+                          aria-label={hideLabel}
+                          title={hideLabel}
+                          sx={{
+                            position: "absolute",
+                            top: 5,
+                            left: 5,
+                            zIndex: 4,
+                            width: 22,
+                            height: 22,
+                            p: 0,
+                            opacity: hideDisabled ? 0.18 : 0.52,
+                            transform: "translateY(0)",
+                            transition: "opacity 120ms ease, transform 120ms ease, background-color 120ms ease, color 120ms ease",
+                            color: hideDisabled ? "rgba(255,255,255,0.25)" : "rgba(255,255,255,0.75)",
+                            bgcolor: "rgba(0,0,0,0.22)",
+                            pointerEvents: "auto",
+                            "&:hover, &:focus-visible": {
+                              bgcolor: "rgba(0,0,0,0.42)",
+                              color: "rgba(255,255,255,0.95)",
+                            },
+                          }}
+                        >
+                          <VisibilityOffIcon sx={{ fontSize: 15 }} />
+                        </IconButton>
+                        <Box
+                          className="show1d-tile-resize-handle"
+                          data-testid={`show1d-tile-resize-${imageIdx}`}
+                          aria-hidden="true"
+                          onPointerDown={handleSnapshotTileResizePointerDown}
+                          sx={{
+                            position: "absolute",
+                            right: 0,
+                            bottom: 0,
+                            width: 18,
+                            height: 18,
+                            zIndex: 5,
+                            cursor: "nwse-resize",
+                            opacity: 0.42,
+                            pointerEvents: "auto",
+                            touchAction: "none",
+                            background: "linear-gradient(135deg, transparent 52%, rgba(255,255,255,0.78) 52%, rgba(255,255,255,0.78) 64%, rgba(0,0,0,0.34) 64%)",
+                            filter: "drop-shadow(0 0 1px rgba(0,0,0,0.6))",
+                            transition: "opacity 120ms ease",
+                            "&:hover, &:focus-visible": {
+                              opacity: 0.95,
+                              outline: "none",
+                            },
+                          }}
+                        />
                       </Box>
                     );
                   })}
@@ -3847,7 +3957,7 @@ function Show1DWidget() {
                         gap: 1,
                         bgcolor: themeColors.bgAlt,
                         color: themeColors.textMuted,
-                        border: `1px solid ${themeColors.border}`,
+                        border: "none",
                       }}
                     >
                       <Typography sx={{ fontSize: 12 }}>All trials hidden</Typography>
@@ -3861,33 +3971,6 @@ function Show1DWidget() {
                       </Button>
                     </Box>
                   )}
-                  <Box
-                    data-testid="show1d-snapshot-resize-handle"
-                    role="separator"
-                    aria-label="Resize snapshot panels"
-                    aria-orientation="vertical"
-                    onPointerDown={handleSnapshotResizePointerDown}
-                    onPointerUp={handleSnapshotResizePointerUp}
-                    onPointerCancel={handleSnapshotResizePointerUp}
-                    sx={{
-                      position: "absolute",
-                      right: 0,
-                      bottom: 0,
-                      width: 22,
-                      height: 22,
-                      zIndex: 6,
-                      cursor: "nwse-resize",
-                      opacity: 0.72,
-                      pointerEvents: "auto",
-                      touchAction: "none",
-                      background: `linear-gradient(135deg, transparent 50%, ${themeColors.border} 50%)`,
-                      borderRadius: "0 0 2px 0",
-                      "&:hover, &:focus-visible": {
-                        opacity: 1,
-                        background: `linear-gradient(135deg, transparent 50%, ${themeColors.accent} 50%)`,
-                      },
-                    }}
-                  />
                 </Box>
                 {showSnapshotProfile && isFiniteProfilePoint(snapshotProfileLine?.[0]) && isFiniteProfilePoint(snapshotProfileLine?.[1]) && selectedGroupImageIndices.length > 0 && (
                   <Box sx={{ width: "100%" }}>
@@ -3970,54 +4053,8 @@ function Show1DWidget() {
                     aria-label={`Current snapshot group (${Math.max(0, selectedGroup) + 1} of ${Math.max(1, groupCount)})`}
                   />
                 </Box>
-                <Box sx={{ ...controlRow, width: "100%", border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, mb: 0.5 }}>
-                  <Typography sx={{ ...typography.label, color: themeColors.textMuted, flexShrink: 0 }}>Profile</Typography>
-                  <Switch
-                    size="small"
-                    checked={Boolean(showSnapshotProfile)}
-                    onChange={(_, checked) => {
-                      setShowSnapshotProfile(checked);
-                      if (!checked) setSnapshotProfileLine([]);
-                    }}
-                    sx={{ ...switchStyles.small, flexShrink: 0 }}
-                    slotProps={{ input: { "aria-label": "Show snapshot line profile" } }}
-                  />
-                  <Typography sx={{ ...typography.label, color: themeColors.textMuted, flexShrink: 0 }}>FFT</Typography>
-                  <Switch
-                    size="small"
-                    checked={Boolean(showSnapshotFft)}
-                    onChange={(_, checked) => setShowSnapshotFft(checked)}
-                    sx={{ ...switchStyles.small, flexShrink: 0 }}
-                    slotProps={{ input: { "aria-label": "Show snapshot FFT panels" } }}
-                  />
-                  {showSnapshotFft && (
-                    <>
-                      <Typography sx={{ ...typography.label, color: themeColors.textMuted, flexShrink: 0 }}>cmap</Typography>
-                      <Select
-                        size="small"
-                        value={COLORMAPS[snapshotFftCmap] ? snapshotFftCmap : "magma"}
-                        onChange={(event) => setSnapshotFftCmap(event.target.value)}
-                        sx={{ ...themedSelect, minWidth: 65, fontSize: 10 }}
-                        MenuProps={themedMenuProps}
-                        inputProps={{ "aria-label": "Snapshot FFT colormap" }}
-                      >
-                        {COLORMAP_NAMES.map((name) => (
-                          <MenuItem key={name} value={name}>{name}</MenuItem>
-                        ))}
-                      </Select>
-                      <Typography sx={{ ...typography.label, color: themeColors.textMuted, flexShrink: 0 }}>win</Typography>
-                      <Switch
-                        size="small"
-                        checked={Boolean(snapshotFftWindow)}
-                        onChange={(_, checked) => setSnapshotFftWindow(checked)}
-                        sx={{ ...switchStyles.small, flexShrink: 0 }}
-                        slotProps={{ input: { "aria-label": "Apply Hann window before snapshot FFT" } }}
-                      />
-                    </>
-                  )}
-                </Box>
                 {selectedSnapshot >= 0 && (
-                  <Box sx={{ mb: 0.75 }}>
+                  <Box sx={{ mb: 0.75, width: "fit-content", maxWidth: "100%", alignSelf: "flex-start" }}>
                     <MiniHistogram
                       bins={snapshotHistogramBins}
                       dataMin={snapshotHistogramRange[0]}
@@ -4026,8 +4063,10 @@ function Show1DWidget() {
                       clipMax={snapshotHistogramClipRange[1]}
                       colors={themeColors}
                       onClipRangeChange={(range) => setSnapshotContrastRange([range[0], range[1]])}
+                      width={snapshotHistogramDisplayWidth}
+                      height={snapshotHistogramDisplayHeight}
                     />
-                    <Box sx={{ ...controlRow, width: "100%", border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, mt: 0.5 }}>
+                    <Box sx={{ ...controlRow, width: "fit-content", maxWidth: "100%", border: "none", bgcolor: "transparent", px: 0, py: 0.25, mt: 0.5 }}>
                       <Typography sx={{ ...typography.label, color: themeColors.textMuted, flexShrink: 0 }}>cmap</Typography>
                       <Select
                         size="small"

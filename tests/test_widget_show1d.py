@@ -170,6 +170,8 @@ def test_show1d_display_public_api_state_and_validation() -> None:
         show_snapshot_profile=True,
         snapshot_profile_line=((2, 3), (8, 9)),
         snapshot_profile_height=88,
+        snapshot_histogram_width=320,
+        snapshot_histogram_height=50,
         starred_snapshot_image_labels=["lambda_10"],
         hidden_snapshot_image_labels=["lambda_300"],
         show_trial_notes=True,
@@ -201,6 +203,8 @@ def test_show1d_display_public_api_state_and_validation() -> None:
     assert widget.show_snapshot_profile is True
     assert widget.snapshot_profile_line == [{"row": 2.0, "col": 3.0}, {"row": 8.0, "col": 9.0}]
     assert widget.snapshot_profile_height == 88
+    assert widget.snapshot_histogram_width == 320
+    assert widget.snapshot_histogram_height == 50
     assert widget.starred_snapshot_image_labels == ["lambda_10"]
     assert widget.hidden_snapshot_image_labels == ["lambda_300"]
     assert widget.show_trial_notes is True
@@ -213,12 +217,16 @@ def test_show1d_display_public_api_state_and_validation() -> None:
         "snapshot_fft_center": (7.0, 8.0),
         "snapshot_profile_line": [{"row": 1.5, "col": 2.5}],
         "snapshot_profile_height": 999,
+        "snapshot_histogram_width": 1000,
+        "snapshot_histogram_height": 20,
     })
     assert widget.snapshot_fps == 4
     assert widget.snapshot_fft_zoom == 32.0
     assert widget.snapshot_fft_center == [7.0, 8.0]
     assert widget.snapshot_profile_line == [{"row": 1.5, "col": 2.5}]
     assert widget.snapshot_profile_height == 220
+    assert widget.snapshot_histogram_width == 640
+    assert widget.snapshot_histogram_height == 36
 
     state = widget.state_dict()
     assert state["show_stats"] is False
@@ -237,6 +245,8 @@ def test_show1d_display_public_api_state_and_validation() -> None:
     assert state["show_snapshot_profile"] is True
     assert state["snapshot_profile_line"] == [{"row": 1.5, "col": 2.5}]
     assert state["snapshot_profile_height"] == 220
+    assert state["snapshot_histogram_width"] == 640
+    assert state["snapshot_histogram_height"] == 36
     assert state["snapshot_fps"] == 4
     assert state["pixel_size"] == 0.5
     assert state["pixel_unit"] == "A"

@@ -263,6 +263,10 @@ class Show1D(anywidget.AnyWidget):
     snapshot_profile_line : sequence, optional
         Initial profile endpoints as ``((row0, col0), (row1, col1))`` in
         snapshot image coordinates.
+    snapshot_histogram_width, snapshot_histogram_height : int, default 360, 52
+        Display size, in CSS pixels, for the draggable snapshot contrast
+        histogram. The histogram is independent of the reconstruction grid
+        width so overnight dashboards can stay compact.
     snapshot_thumbnail_size : int, default 48
         Size of plot-embedded snapshot thumbnails in pixels.
     snapshot_panel_width_px : int, default 0
@@ -386,6 +390,8 @@ class Show1D(anywidget.AnyWidget):
     show_snapshot_profile = traitlets.Bool(False).tag(sync=True)
     snapshot_profile_line = traitlets.List(traitlets.Dict(), default_value=[]).tag(sync=True)
     snapshot_profile_height = traitlets.Int(76).tag(sync=True)
+    snapshot_histogram_width = traitlets.Int(360).tag(sync=True)
+    snapshot_histogram_height = traitlets.Int(52).tag(sync=True)
     snapshot_contrast_preset = traitlets.Unicode("full").tag(sync=True)
     snapshot_contrast_range = traitlets.List(traitlets.Float(), default_value=[]).tag(sync=True)
     snapshot_thumbnail_size = traitlets.Int(48).tag(sync=True)
@@ -480,6 +486,8 @@ class Show1D(anywidget.AnyWidget):
         show_snapshot_profile: bool = False,
         snapshot_profile_line: Sequence[Sequence[float]] | None = None,
         snapshot_profile_height: int = 76,
+        snapshot_histogram_width: int = 360,
+        snapshot_histogram_height: int = 52,
         starred_snapshot_image_labels: Sequence[str] | None = None,
         hidden_snapshot_image_labels: Sequence[str] | None = None,
         trial_notes: Mapping[str, str] | None = None,
@@ -586,6 +594,8 @@ class Show1D(anywidget.AnyWidget):
         self.show_snapshot_profile = bool(show_snapshot_profile)
         self.snapshot_profile_line = self._normalise_profile_line(snapshot_profile_line)
         self.snapshot_profile_height = max(44, min(220, int(snapshot_profile_height)))
+        self.snapshot_histogram_width = max(110, min(640, int(snapshot_histogram_width)))
+        self.snapshot_histogram_height = max(36, min(110, int(snapshot_histogram_height)))
         self.starred_snapshot_image_labels = self._normalise_trial_labels(starred_snapshot_image_labels or [])
         self.hidden_snapshot_image_labels = self._normalise_trial_labels(hidden_snapshot_image_labels or [])
         self.trial_notes = self._normalise_trial_notes(trial_notes or {})
@@ -697,6 +707,14 @@ class Show1D(anywidget.AnyWidget):
     @traitlets.validate("snapshot_profile_height")
     def _validate_snapshot_profile_height(self, proposal: dict[str, Any]) -> int:
         return max(44, min(220, int(proposal["value"])))
+
+    @traitlets.validate("snapshot_histogram_width")
+    def _validate_snapshot_histogram_width(self, proposal: dict[str, Any]) -> int:
+        return max(110, min(640, int(proposal["value"])))
+
+    @traitlets.validate("snapshot_histogram_height")
+    def _validate_snapshot_histogram_height(self, proposal: dict[str, Any]) -> int:
+        return max(36, min(110, int(proposal["value"])))
 
     @traitlets.validate("trial_sort_key")
     def _validate_trial_sort_key(self, proposal: dict[str, Any]) -> str:
@@ -1699,6 +1717,8 @@ class Show1D(anywidget.AnyWidget):
             image_cmap=self.image_cmap,
             snapshot_contrast_preset=self.snapshot_contrast_preset,
             snapshot_contrast_range=list(self.snapshot_contrast_range),
+            snapshot_histogram_width=self.snapshot_histogram_width,
+            snapshot_histogram_height=self.snapshot_histogram_height,
             snapshot_thumbnail_size=self.snapshot_thumbnail_size,
             snapshot_panel_width_px=self.snapshot_panel_width_px,
             snapshot_columns=self.snapshot_columns,
@@ -1866,6 +1886,8 @@ class Show1D(anywidget.AnyWidget):
             "show_snapshot_profile": self.show_snapshot_profile,
             "snapshot_profile_line": [dict(point) for point in self.snapshot_profile_line],
             "snapshot_profile_height": self.snapshot_profile_height,
+            "snapshot_histogram_width": self.snapshot_histogram_width,
+            "snapshot_histogram_height": self.snapshot_histogram_height,
             "snapshot_contrast_preset": self.snapshot_contrast_preset,
             "snapshot_contrast_range": list(self.snapshot_contrast_range),
             "snapshot_thumbnail_size": self.snapshot_thumbnail_size,
@@ -1941,6 +1963,10 @@ class Show1D(anywidget.AnyWidget):
                     value = self._normalise_profile_line(value)
                 elif key == "snapshot_profile_height":
                     value = max(44, min(220, int(value)))
+                elif key == "snapshot_histogram_width":
+                    value = max(110, min(640, int(value)))
+                elif key == "snapshot_histogram_height":
+                    value = max(36, min(110, int(value)))
                 elif key in {"snapshot_real_space_zoom", "snapshot_fft_zoom"}:
                     value = self._normalise_snapshot_view_zoom(value)
                 elif key in {"snapshot_real_space_center", "snapshot_fft_center"}:
@@ -2917,6 +2943,8 @@ class Show1D(anywidget.AnyWidget):
             show_snapshot_profile=self.show_snapshot_profile,
             snapshot_profile_line=list(self.snapshot_profile_line),
             snapshot_profile_height=self.snapshot_profile_height,
+            snapshot_histogram_width=self.snapshot_histogram_width,
+            snapshot_histogram_height=self.snapshot_histogram_height,
             prefer_webgpu=self.prefer_webgpu,
         )
         clone.load_state_dict(self.state_dict())
@@ -2966,6 +2994,8 @@ class Show1D(anywidget.AnyWidget):
         clone.show_snapshot_profile = self.show_snapshot_profile
         clone.snapshot_profile_line = list(self.snapshot_profile_line)
         clone.snapshot_profile_height = self.snapshot_profile_height
+        clone.snapshot_histogram_width = self.snapshot_histogram_width
+        clone.snapshot_histogram_height = self.snapshot_histogram_height
         clone._update_snapshot_bytes()
         if self._profile_image is not None:
             clone.set_profile_image(self._profile_image, line=None)
