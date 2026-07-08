@@ -1217,7 +1217,7 @@ interface CompareVirtualGridProps {
   pendingMoveFrame: number | null;
   maxWidthPx: number;
   panelGapPx: number;
-  onResizeStart?: (event: React.PointerEvent<HTMLElement>) => void;
+  onResizeStart?: (event: React.PointerEvent<HTMLElement>, panelScale?: number) => void;
   onSelect: (idx: number) => void;
   onToggleStar: (idx: number) => void;
   onHide: (idx: number) => void;
@@ -1381,6 +1381,36 @@ function CompareVirtualGrid({
   const gridCols = Math.max(1, Math.min(displayCount, requestedMaxCols));
   const mobileGridCols = cols > 0 ? gridCols : Math.max(1, Math.min(gridCols, 2));
   const gridGapPx = Math.max(0, Math.floor(Number.isFinite(panelGapPx) ? panelGapPx : 0));
+  const resizeGripSx = React.useMemo(() => ({
+    position: "absolute",
+    bottom: 0,
+    right: 0,
+    width: 18,
+    height: 18,
+    cursor: "nwse-resize",
+    opacity: 0.82,
+    pointerEvents: "auto",
+    background: "transparent",
+    clipPath: "polygon(100% 0, 100% 100%, 0 100%)",
+    touchAction: "none",
+    zIndex: 5,
+    "&::before": {
+      content: "\"\"",
+      position: "absolute",
+      right: 2,
+      bottom: 3,
+      width: 16,
+      height: 2,
+      borderRadius: 999,
+      backgroundColor: themeColors.accent,
+      transform: "rotate(-45deg)",
+      transformOrigin: "right bottom",
+      boxShadow: `0 -5px 0 ${themeColors.accent}, 0 -10px 0 ${themeColors.accent}`,
+      filter: "drop-shadow(0 0 1px rgba(0,0,0,0.85))",
+      pointerEvents: "none",
+    },
+    "&:hover": { opacity: 1 },
+  }), [themeColors.accent]);
   const imageLeft = `${(comparePanX / Math.max(1, shapeCols)) * 100}%`;
   const imageTop = `${(comparePanY / Math.max(1, shapeRows)) * 100}%`;
   const imageWidth = `${compareZoom * 100}%`;
@@ -1857,31 +1887,21 @@ function CompareVirtualGrid({
                   </IconButton>
                 </Tooltip>
               )}
+              {panelChromeVisible && onResizeStart && !reorderMode && (
+                <Box
+                  onPointerDown={(event) => onResizeStart(event, gridCols)}
+                  aria-label={`Resize Show4DSTEM multiple panel ${frame + 1}`}
+                  role="button"
+                  tabIndex={-1}
+                  className="show4dstem-compare-panel-resize"
+                  title="Resize panels"
+                  sx={resizeGripSx}
+                />
+              )}
             </Box>
           );
         })}
       </Box>
-      {panelChromeVisible && onResizeStart && (
-        <Box
-          onPointerDown={onResizeStart}
-          aria-label="Resize Show4DSTEM multiple grid"
-          role="button"
-          tabIndex={-1}
-          sx={{
-            position: "absolute",
-            bottom: 0,
-            right: 0,
-            width: 16,
-            height: 16,
-            cursor: "nwse-resize",
-            opacity: 0.6,
-            background: `linear-gradient(135deg, transparent 50%, ${themeColors.accent} 50%)`,
-            zIndex: 5,
-            "&:hover": { opacity: 1 },
-            "@media (max-width: 700px)": { display: "none" },
-          }}
-        />
-      )}
     </Box>
   );
 }
@@ -5308,7 +5328,7 @@ function Show4DSTEM() {
     };
   }, [isResizingCanvas, resizeCanvasStart, panelWidthPx, setPanelWidthPx]);
 
-  const handleCompareGridResizeStart = (e: React.PointerEvent<HTMLElement>) => {
+  const handleCompareGridResizeStart = (e: React.PointerEvent<HTMLElement>, panelScale = 1) => {
     e.stopPropagation();
     e.preventDefault();
     try { e.currentTarget.setPointerCapture(e.pointerId); } catch {}
@@ -5316,11 +5336,12 @@ function Show4DSTEM() {
     const startX = e.clientX;
     const startY = e.clientY;
     const startWidth = compareGridWidth;
+    const resizeScale = Math.max(1, Number.isFinite(panelScale) ? panelScale : 1);
     let rafId = 0;
     let latestWidth = startWidth;
     const handlePointerMove = (e: PointerEvent) => {
       const delta = Math.max(e.clientX - startX, e.clientY - startY);
-      latestWidth = Math.max(MIN_COMPARE_GRID_WIDTH, startWidth + delta);
+      latestWidth = Math.max(MIN_COMPARE_GRID_WIDTH, startWidth + delta * resizeScale);
       if (!rafId) {
         rafId = requestAnimationFrame(() => {
           rafId = 0;

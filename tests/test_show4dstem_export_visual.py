@@ -243,6 +243,49 @@ def _drag_multiple_panel(page, panel_number: int = 1) -> None:
     assert after != before, f"multiple panel drag did not update scan position: {before}"
 
 
+def _resize_multiple_panel(page, panel_number: int = 1, delta: int = 42) -> dict:
+    panels = page.locator('[role="button"][aria-label^="Show4DSTEM multiple panel"]')
+    handles = page.locator('[role="button"][aria-label^="Resize Show4DSTEM multiple panel"]')
+    assert handles.count() == panels.count(), "each multiple panel should expose a resize handle"
+    panel = page.locator(f'[role="button"][aria-label="Show4DSTEM multiple panel {panel_number}"]')
+    handle = page.locator(f'[role="button"][aria-label="Resize Show4DSTEM multiple panel {panel_number}"]')
+    assert panel.count() == 1
+    assert handle.count() == 1
+    panel.scroll_into_view_if_needed()
+    page.wait_for_timeout(100)
+    box = panel.bounding_box()
+    viewport_h = int(page.viewport_size["height"])
+    assert box is not None
+    if box["y"] + box["height"] > viewport_h - 64:
+        page.evaluate("(dy) => window.scrollBy(0, dy)", box["y"] + box["height"] - viewport_h + 96)
+        page.wait_for_timeout(100)
+    before = panel.bounding_box()
+    grip = handle.bounding_box()
+    assert before and before["width"] > 40 and before["height"] > 40
+    assert grip and grip["width"] >= 12 and grip["height"] >= 12
+    dp_before = _dp_at(page)
+    start_x = grip["x"] + grip["width"] - 4
+    start_y = grip["y"] + grip["height"] - 4
+    page.mouse.move(start_x, start_y)
+    page.mouse.down()
+    page.mouse.move(start_x + delta, start_y, steps=10)
+    page.mouse.up()
+    page.wait_for_timeout(500)
+    after = panel.bounding_box()
+    assert after and after["width"] > before["width"] + 20, {
+        "before": before,
+        "after": after,
+    }
+    assert _dp_at(page) == dp_before, "resizing a panel should not move the scan cursor"
+    return {
+        "before_width": before["width"],
+        "after_width": after["width"],
+        "handle_width": grip["width"],
+        "handle_height": grip["height"],
+        "handle_count": handles.count(),
+    }
+
+
 def _toggle_fft(page) -> None:
     result = page.evaluate(
         """() => {
@@ -509,6 +552,8 @@ def test_exported_show4dstem_real_data_visual_smoke(tmp_path: Path) -> None:
                 multiple4_title = "Visual Smoke Show4DSTEM multiple-cols4"
                 _open_page(page, f"http://127.0.0.1:{port}/{pages['multiple-cols4'].name}", multiple4_title, 12)
                 layout4 = _assert_multiple_grid_layout(page, expected_cols=4)
+                resize4 = _resize_multiple_panel(page, panel_number=1)
+                layout4_after_resize = _assert_multiple_grid_layout(page, expected_cols=4)
                 _drag_multiple_panel(page, panel_number=1)
                 _click_multiple_panel(page, panel_number=4)
                 multiple4_pixels = _assert_canvas_pixels(page)
@@ -537,6 +582,8 @@ def test_exported_show4dstem_real_data_visual_smoke(tmp_path: Path) -> None:
                         "multiple_cols2_layout": layout2,
                         "multiple_cols2_pixels": multiple2_pixels,
                         "multiple_cols4_layout": layout4,
+                        "multiple_cols4_resize": resize4,
+                        "multiple_cols4_layout_after_resize": layout4_after_resize,
                         "multiple_cols4_pixels": multiple4_pixels,
                         "multiple_selected_layout": selected_layout,
                         "multiple_selected_pixels": selected_pixels,
