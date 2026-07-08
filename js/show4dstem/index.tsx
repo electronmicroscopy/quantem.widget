@@ -1362,7 +1362,7 @@ function CompareVirtualGrid({
   const autoCols = displayCount >= 8 ? 4 : displayCount >= 5 ? 3 : displayCount >= 2 ? 2 : 1;
   const requestedMaxCols = cols > 0 ? Math.max(1, Math.floor(cols)) : autoCols;
   const gridCols = Math.max(1, Math.min(displayCount, requestedMaxCols));
-  const mobileGridCols = Math.max(1, Math.min(gridCols, 2));
+  const mobileGridCols = cols > 0 ? gridCols : Math.max(1, Math.min(gridCols, 2));
   const mobileGridGap = 0;
   const markerLeft = `${((Math.max(0, Math.min(shapeCols - 1, cursorCol)) + 0.5) / Math.max(1, shapeCols)) * 100}%`;
   const markerTop = `${((Math.max(0, Math.min(shapeRows - 1, cursorRow)) + 0.5) / Math.max(1, shapeRows)) * 100}%`;
@@ -1417,7 +1417,7 @@ function CompareVirtualGrid({
   return (
     <Box sx={{ width: "100%", maxWidth: "100%" }}>
       {statusText && (
-        <Typography sx={{ fontSize: 10, color: themeColors.textMuted, mb: 0.5 }}>
+        <Typography sx={{ fontSize: 10, color: themeColors.textMuted, mb: 0.5, "@media (max-width: 700px)": { mb: 0, lineHeight: 1.1 } }}>
           {statusText}
         </Typography>
       )}
@@ -5084,7 +5084,7 @@ function Show4DSTEM() {
     overflow: "hidden",
     boxSizing: "border-box",
     "@media (max-width: 700px)": {
-      mt: "2px",
+      mt: 0,
       px: 0.5,
       py: 0.25,
       height: 24,
@@ -5126,6 +5126,18 @@ function Show4DSTEM() {
   const mobileImageBoxSx = {
     "@media (max-width: 700px)": {
       maxWidth: "100%",
+    },
+  };
+  const panelHeaderSx = {
+    mb: `${SPACING.XS}px`,
+    minHeight: 28,
+    height: "auto",
+    flexWrap: "wrap",
+    gap: `${SPACING.XS}px`,
+    "@media (max-width: 700px)": {
+      mb: mobileTightLayout ? 0 : "1px",
+      minHeight: mobileTightLayout ? 18 : 22,
+      rowGap: "1px",
     },
   };
   const mainStackDirection = compareMode && compareLayout === "top" ? "column" : "row";
@@ -5267,7 +5279,7 @@ function Show4DSTEM() {
         {/* LEFT COLUMN: DP Panel */}
         <Box sx={{ width: squarePanelWidth, maxWidth: "100%", ...mobilePanelSx }}>
           {/* DP Header */}
-          <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: `${SPACING.XS}px`, minHeight: 28, height: "auto", flexWrap: "wrap", gap: `${SPACING.XS}px`, "@media (max-width: 700px)": { mb: "1px", minHeight: 22, rowGap: "1px" } }}>
+          <Stack direction="row" justifyContent="space-between" alignItems="center" sx={panelHeaderSx}>
             <Typography variant="caption" sx={{ ...typo.label }}>
               DP at ({Math.round(localPosRow)}, {Math.round(localPosCol)})
               <span style={{ color: roiColors.textColor, marginLeft: SPACING.SM }}>k: ({Math.round(localKRow)}, {Math.round(localKCol)})</span>
@@ -5491,7 +5503,7 @@ function Show4DSTEM() {
         {/* SECOND COLUMN: VI Panel */}
         <Box sx={{ width: viPanelWidth, maxWidth: "100%", ...mobilePanelSx }}>
           {/* VI Header */}
-          <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: `${SPACING.XS}px`, minHeight: 28, height: "auto", flexWrap: "wrap", gap: `${SPACING.XS}px`, "@media (max-width: 700px)": { mb: "1px", minHeight: 22, rowGap: "1px" } }}>
+          <Stack direction="row" justifyContent="space-between" alignItems="center" sx={panelHeaderSx}>
             <Typography sx={{ ...typo.label, color: themeColors.textMuted }}>
               {compareMode ? `Compare grid | ${shapeRows}×${shapeCols}` : `${shapeRows}×${shapeCols} | ${detRows}×${detCols}`}
             </Typography>
@@ -5719,7 +5731,7 @@ function Show4DSTEM() {
         {effectiveShowFft && (
           <Box sx={{ width: viPanelWidth, maxWidth: "100%" }}>
             {/* FFT Header */}
-            <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: `${SPACING.XS}px`, minHeight: 28, height: "auto", flexWrap: "wrap", gap: `${SPACING.XS}px`, "@media (max-width: 700px)": { mb: "1px", minHeight: 22, rowGap: "1px" } }}>
+            <Stack direction="row" justifyContent="space-between" alignItems="center" sx={panelHeaderSx}>
               <Typography variant="caption" sx={{ ...typo.label, color: roiFftActive && fftCropDims ? accentGreen : themeColors.textMuted }}>{roiFftActive && fftCropDims ? `ROI FFT (${fftCropDims.cropWidth}\u00D7${fftCropDims.cropHeight})` : "FFT"}</Typography>
               {controlsVisible && <Stack direction="row" spacing={`${SPACING.SM}px`} alignItems="center">
                 <Button size="small" sx={compactButton} disabled={fftZoom === 1 && fftPanX === 0 && fftPanY === 0} onClick={() => { setFftZoom(1); setFftPanX(0); setFftPanY(0); }}>Reset</Button>
