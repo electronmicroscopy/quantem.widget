@@ -1363,6 +1363,7 @@ function CompareVirtualGrid({
   const requestedMaxCols = cols > 0 ? Math.max(1, Math.floor(cols)) : autoCols;
   const gridCols = Math.max(1, Math.min(displayCount, requestedMaxCols));
   const mobileGridCols = Math.max(1, Math.min(gridCols, 2));
+  const mobileGridGap = 0;
   const markerLeft = `${((Math.max(0, Math.min(shapeCols - 1, cursorCol)) + 0.5) / Math.max(1, shapeCols)) * 100}%`;
   const markerTop = `${((Math.max(0, Math.min(shapeRows - 1, cursorRow)) + 0.5) / Math.max(1, shapeRows)) * 100}%`;
   const availablePanelCount = Math.max(0, (indices || []).length);
@@ -1428,7 +1429,7 @@ function CompareVirtualGrid({
           maxWidth: "100%",
           "@media (max-width: 700px)": {
             gridTemplateColumns: `repeat(${mobileGridCols}, minmax(0, 1fr))`,
-            gap: "4px",
+            gap: mobileGridGap,
           },
         }}
       >
@@ -5111,8 +5112,22 @@ function Show4DSTEM() {
     ["Scroll", "Zoom"],
     ["Dbl-click", "Reset view"],
   ];
+  const temporalMode = viewMode === "temporal" && nFrames > 1;
   const squarePanelWidth = `min(${canvasSize}px, 100%)`;
   const viPanelWidth = compareMode ? "min(980px, 100%)" : `min(${viCanvasWidth}px, 100%)`;
+  const mobileTightLayout = temporalMode || compareMode;
+  const mobilePanelSx = {
+    "@media (max-width: 700px)": {
+      width: "100%",
+      maxWidth: "100%",
+      minWidth: 0,
+    },
+  };
+  const mobileImageBoxSx = {
+    "@media (max-width: 700px)": {
+      maxWidth: "100%",
+    },
+  };
   const mainStackDirection = compareMode && compareLayout === "top" ? "column" : "row";
   const optionLabel = (value: string | undefined | null): string => {
     if (!value) return "";
@@ -5184,7 +5199,7 @@ function Show4DSTEM() {
       tabIndex={0}
       onKeyDown={handleKeyDown}
       onMouseDownCapture={handleRootMouseDownCapture}
-      sx={{ p: 2, bgcolor: themeColors.bg, color: themeColors.text, outline: "none", borderRadius: "2px", width: "100%", maxWidth: "100%", boxSizing: "border-box", "@media (max-width: 700px)": { p: 0, ".jp-OutputArea-output &, .jp-OutputArea-child &": { width: "calc(100vw - 96px)", maxWidth: "calc(100vw - 96px)" } } }}
+      sx={{ p: 2, bgcolor: themeColors.bg, color: themeColors.text, outline: "none", borderRadius: "2px", width: "100%", maxWidth: "100%", boxSizing: "border-box", "@media (max-width: 700px)": { p: 0, overflowX: "hidden", ".jp-OutputArea-output &, .jp-OutputArea-child &": { width: "calc(100vw - 96px)", maxWidth: "calc(100vw - 96px)" } } }}
     >
       {/* HEADER */}
       {showTitle && <Typography variant="h6" sx={{ ...typo.title, mb: `${SPACING.SM}px` }}>
@@ -5241,7 +5256,7 @@ function Show4DSTEM() {
           "@media (max-width: 700px)": {
             flexDirection: "column",
             alignItems: "stretch",
-            gap: "4px",
+            gap: mobileTightLayout ? 0 : "4px",
             "& > :not(style) + :not(style)": {
               marginLeft: "0 !important",
               marginTop: 0,
@@ -5250,7 +5265,7 @@ function Show4DSTEM() {
         }}
       >
         {/* LEFT COLUMN: DP Panel */}
-        <Box sx={{ width: squarePanelWidth, maxWidth: "100%" }}>
+        <Box sx={{ width: squarePanelWidth, maxWidth: "100%", ...mobilePanelSx }}>
           {/* DP Header */}
           <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: `${SPACING.XS}px`, minHeight: 28, height: "auto", flexWrap: "wrap", gap: `${SPACING.XS}px`, "@media (max-width: 700px)": { mb: "1px", minHeight: 22, rowGap: "1px" } }}>
             <Typography variant="caption" sx={{ ...typo.label }}>
@@ -5319,7 +5334,7 @@ function Show4DSTEM() {
           </Stack>
 
           {/* DP Canvas */}
-          <Box sx={{ ...container.imageBox, width: "100%", maxWidth: canvasSize, aspectRatio: "1 / 1", height: "auto", touchAction: "none" }}>
+          <Box sx={{ ...container.imageBox, width: "100%", maxWidth: canvasSize, aspectRatio: "1 / 1", height: "auto", touchAction: "none", ...mobileImageBoxSx }}>
             <canvas ref={dpCanvasRef} width={detCols} height={detRows} style={{ position: "absolute", width: "100%", height: "100%", imageRendering: "pixelated" }} />
             <canvas
               ref={dpOverlayRef} width={detCols} height={detRows}
@@ -5374,7 +5389,7 @@ function Show4DSTEM() {
 
           {/* Profile sparkline */}
           {profileActive && (
-            <Box sx={{ mt: `${SPACING.XS}px`, width: "100%", maxWidth: canvasSize, boxSizing: "border-box" }}>
+            <Box sx={{ mt: `${SPACING.XS}px`, width: "100%", maxWidth: canvasSize, boxSizing: "border-box", ...mobileImageBoxSx }}>
               <canvas
                 ref={profileCanvasRef}
                 onMouseMove={handleProfileMouseMove}
@@ -5474,7 +5489,7 @@ function Show4DSTEM() {
         </Box>
 
         {/* SECOND COLUMN: VI Panel */}
-        <Box sx={{ width: viPanelWidth, maxWidth: "100%" }}>
+        <Box sx={{ width: viPanelWidth, maxWidth: "100%", ...mobilePanelSx }}>
           {/* VI Header */}
           <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: `${SPACING.XS}px`, minHeight: 28, height: "auto", flexWrap: "wrap", gap: `${SPACING.XS}px`, "@media (max-width: 700px)": { mb: "1px", minHeight: 22, rowGap: "1px" } }}>
             <Typography sx={{ ...typo.label, color: themeColors.textMuted }}>
@@ -5551,7 +5566,7 @@ function Show4DSTEM() {
               onPendingMoveFrameChange={setComparePendingMoveFrame}
             />
           ) : (
-            <Box sx={{ ...container.imageBox, width: "100%", maxWidth: viCanvasWidth, aspectRatio: `${shapeCols} / ${shapeRows}`, height: "auto", touchAction: "none" }}>
+            <Box sx={{ ...container.imageBox, width: "100%", maxWidth: viCanvasWidth, aspectRatio: `${shapeCols} / ${shapeRows}`, height: "auto", touchAction: "none", ...mobileImageBoxSx }}>
               <canvas ref={virtualCanvasRef} width={shapeCols} height={shapeRows} style={{ position: "absolute", width: "100%", height: "100%", imageRendering: "pixelated" }} />
               <canvas
                 ref={virtualOverlayRef} width={shapeCols} height={shapeRows}
@@ -5605,7 +5620,7 @@ function Show4DSTEM() {
 
           {/* VI Profile sparkline */}
           {!compareMode && viProfileActive && (
-            <Box sx={{ mt: `${SPACING.XS}px`, width: "100%", maxWidth: viCanvasWidth, boxSizing: "border-box" }}>
+            <Box sx={{ mt: `${SPACING.XS}px`, width: "100%", maxWidth: viCanvasWidth, boxSizing: "border-box", ...mobileImageBoxSx }}>
               <canvas
                 ref={viProfileCanvasRef}
                 onMouseMove={handleViProfileMouseMove}
@@ -5712,7 +5727,7 @@ function Show4DSTEM() {
             </Stack>
 
             {/* FFT Canvas */}
-            <Box sx={{ ...container.imageBox, width: "100%", maxWidth: viCanvasWidth, aspectRatio: `${shapeCols} / ${shapeRows}`, height: "auto", touchAction: "none" }}>
+            <Box sx={{ ...container.imageBox, width: "100%", maxWidth: viCanvasWidth, aspectRatio: `${shapeCols} / ${shapeRows}`, height: "auto", touchAction: "none", ...mobileImageBoxSx }}>
               <canvas ref={fftCanvasRef} width={shapeCols} height={shapeRows} style={{ position: "absolute", width: "100%", height: "100%", imageRendering: "pixelated" }} />
               <canvas
                 ref={fftOverlayRef} width={shapeCols} height={shapeRows}
