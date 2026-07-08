@@ -38,6 +38,7 @@ _HUB_EXPORTS = {
     "upload",
     "download",
     "list_datasets",
+    "read_meta",
     "delete",
     "status",
 }
@@ -121,6 +122,7 @@ __all__ = [
     "update_data_transfer_plan",
     "resolve_backend",
     "read_emd_metadata",
+    "read_meta",
     "read_gif",
     "read_image",
     "read_image_stack",
