@@ -126,6 +126,7 @@ widget = Show4DSTEM(
     load([path1, path2, path3, path4], det_bin=4),
     view_mode="compare",
     compare_cols=2,
+    compare_panel_gap_px=0,
     compare_max_panels=4,
     compare_dp_mode="average",
 )
@@ -140,6 +141,13 @@ columns so the tiles remain touch-friendly. On lazy MPS multi-dataset loads, the
 grid starts with the first decoded dataset and appends tiles as the background
 loader marks additional datasets ready; it does not materialize a full 5D stack
 just to build the comparison.
+
+`compare_panel_gap_px=0` renders the virtual-image grid edge-to-edge for dense
+screening. Increase it when a report or presentation needs visible gutters
+between panels. Mouse-wheel or trackpad scroll over a compare tile zooms the
+shared virtual-image grid instead of scrolling the page; double-click a tile to
+reset the compare zoom. The single-panel diffraction and virtual-image canvases
+use the same scroll-to-zoom behavior.
 
 The shared diffraction panel defaults to `compare_dp_mode="average"`, which
 shows the mean diffraction pattern at the current scan position across visible
@@ -192,7 +200,7 @@ Python round trip - see [Performance](../maintainer/widget-performance).
 | Annular inner / outer | `roi_radius_inner`, `roi_radius` | ADF annulus geometry |
 | Virtual-image ROI | `vi_roi_mode`, `vi_roi_center_row`, `vi_roi_center_col` | Pick a real-space region to average its diffraction |
 | FFT toggle | `show_fft`, `fft_window` | Power spectrum of the virtual image |
-| Compare grid | `view_mode="compare"`, `compare_cols`, `compare_max_panels`, `compare_layout` | Shows ready frames/datasets as synchronized virtual images sharing the detector ROI and scan cursor |
+| Compare grid | `view_mode="compare"`, `compare_cols`, `compare_panel_gap_px`, `compare_max_panels`, `compare_layout` | Shows ready frames/datasets as synchronized virtual images sharing the detector ROI and scan cursor |
 | Compare DP source | `compare_dp_mode` | Shows either the average DP across visible compare panels or the selected panel's DP |
 | Compare panel state | `compare_panel_order`, `compare_hidden_panels`, `compare_starred_panels`; `set_compare_panel_order()`, `hide_compare_panel()`, `show_all_compare_panels()`, `star_compare_panel()` | Saves/reuses panel order, hidden panels, and starred picks across cells, state files, and HTML export |
 | Viewer chrome preset | `ui_mode` plus explicit `show_*` kwargs | Applies shared display presets; see [Viewer UI controls](viewer-ui) |

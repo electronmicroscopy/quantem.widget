@@ -406,6 +406,11 @@ backend and memory budget allow it.
   materializing an unsafe full stack on MPS.
 - Verify desktop ``compare_cols`` is a maximum column count and the phone or
   narrow viewport caps the grid at two columns with readable tiles.
+- Verify ``compare_panel_gap_px=0`` removes horizontal and vertical gutters
+  between compare panels, and nonzero values intentionally restore spacing.
+- Scroll over compare tiles and the single-panel diffraction/virtual-image
+  canvases; verify wheel input zooms the image instead of scrolling the page,
+  and zoom-out behaves symmetrically.
 - Toggle ``compare_dp_mode`` between ``"average"`` and ``"selected"``; verify
   the diffraction panel either averages visible compare panels or follows the
   clicked dataset.

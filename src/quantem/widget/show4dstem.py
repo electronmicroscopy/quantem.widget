@@ -115,6 +115,10 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         Desktop width of the compare virtual-image grid in CSS pixels. ``0``
         uses the default responsive width. The frontend resize handle updates
         this value without changing the diffraction-panel size.
+    compare_panel_gap_px : int, default 0
+        Gap between compare virtual-image panels in CSS pixels. ``0`` gives a
+        dense, edge-to-edge grid for browsing many datasets; larger values can
+        be useful in reports.
     compare_max_panels : int, default 12
         Maximum ready frames/datasets included in the compare grid.
     compare_dp_mode : {"average", "selected"}, default "average"
@@ -404,6 +408,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
     compare_layout = traitlets.Unicode("side").tag(sync=True)
     compare_cols = traitlets.Int(0).tag(sync=True)
     compare_grid_width_px = traitlets.Int(0).tag(sync=True)
+    compare_panel_gap_px = traitlets.Int(0).tag(sync=True)
     compare_max_panels = traitlets.Int(12).tag(sync=True)
     compare_dp_mode = traitlets.Unicode("average").tag(sync=True)
     compare_panel_order = traitlets.List(traitlets.Int(), default_value=[]).tag(sync=True)
@@ -473,6 +478,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         compare_layout: str = "side",
         compare_cols: int = 0,
         compare_grid_width_px: int = 0,
+        compare_panel_gap_px: int = 0,
         compare_max_panels: int = 12,
         compare_dp_mode: str = "average",
         title: str = "",
@@ -553,6 +559,12 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
                 f"compare_grid_width_px must be >= 0, got {compare_grid_width_px}"
             )
         self.compare_grid_width_px = compare_grid_width_px
+        compare_panel_gap_px = int(compare_panel_gap_px)
+        if compare_panel_gap_px < 0:
+            raise ValueError(
+                f"compare_panel_gap_px must be >= 0, got {compare_panel_gap_px}"
+            )
+        self.compare_panel_gap_px = compare_panel_gap_px
         compare_max_panels = int(compare_max_panels)
         if compare_max_panels < 1:
             raise ValueError(
@@ -1321,6 +1333,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             compare_layout=self.compare_layout,
             compare_cols=self.compare_cols,
             compare_grid_width_px=self.compare_grid_width_px,
+            compare_panel_gap_px=self.compare_panel_gap_px,
             compare_max_panels=self.compare_max_panels,
             compare_dp_mode=self.compare_dp_mode,
             verbose=False,
@@ -1787,6 +1800,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             "compare_layout": self.compare_layout,
             "compare_cols": self.compare_cols,
             "compare_grid_width_px": self.compare_grid_width_px,
+            "compare_panel_gap_px": self.compare_panel_gap_px,
             "compare_max_panels": self.compare_max_panels,
             "compare_dp_mode": self.compare_dp_mode,
             "compare_panel_order": list(self.compare_panel_order),

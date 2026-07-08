@@ -1216,6 +1216,7 @@ interface CompareVirtualGridProps {
   draggingFrame: number | null;
   pendingMoveFrame: number | null;
   maxWidthPx: number;
+  panelGapPx: number;
   onResizeStart?: (event: React.PointerEvent<HTMLElement>) => void;
   onSelect: (idx: number) => void;
   onToggleStar: (idx: number) => void;
@@ -1255,6 +1256,7 @@ function CompareVirtualGrid({
   draggingFrame,
   pendingMoveFrame,
   maxWidthPx,
+  panelGapPx,
   onResizeStart,
   onSelect,
   onToggleStar,
@@ -1267,6 +1269,10 @@ function CompareVirtualGrid({
   const overlayRefs = React.useRef<(HTMLCanvasElement | null)[]>([]);
   const tileRefs = React.useRef<(HTMLDivElement | null)[]>([]);
   const [overlayVersion, setOverlayVersion] = React.useState(0);
+  const [compareZoom, setCompareZoom] = React.useState(1);
+  const [comparePanX, setComparePanX] = React.useState(0);
+  const [comparePanY, setComparePanY] = React.useState(0);
+  const compareViewRef = React.useRef({ zoom: 1, panX: 0, panY: 0, raf: 0 });
   const panelPixels = Math.max(1, shapeRows * shapeCols);
   const panels = React.useMemo(() => {
     if (!bytes || count <= 0 || bytes.byteLength < panelPixels * count * 4) {
@@ -1370,13 +1376,92 @@ function CompareVirtualGrid({
   const requestedMaxCols = cols > 0 ? Math.max(1, Math.floor(cols)) : autoCols;
   const gridCols = Math.max(1, Math.min(displayCount, requestedMaxCols));
   const mobileGridCols = cols > 0 ? gridCols : Math.max(1, Math.min(gridCols, 2));
-  const mobileGridGap = 0;
-  const markerLeft = `${((Math.max(0, Math.min(shapeCols - 1, cursorCol)) + 0.5) / Math.max(1, shapeCols)) * 100}%`;
-  const markerTop = `${((Math.max(0, Math.min(shapeRows - 1, cursorRow)) + 0.5) / Math.max(1, shapeRows)) * 100}%`;
+  const gridGapPx = Math.max(0, Math.floor(Number.isFinite(panelGapPx) ? panelGapPx : 0));
+  const markerLeft = `${((((Math.max(0, Math.min(shapeCols - 1, cursorCol)) + 0.5) * compareZoom) + comparePanX) / Math.max(1, shapeCols)) * 100}%`;
+  const markerTop = `${((((Math.max(0, Math.min(shapeRows - 1, cursorRow)) + 0.5) * compareZoom) + comparePanY) / Math.max(1, shapeRows)) * 100}%`;
+  const imageLeft = `${(comparePanX / Math.max(1, shapeCols)) * 100}%`;
+  const imageTop = `${(comparePanY / Math.max(1, shapeRows)) * 100}%`;
+  const imageWidth = `${compareZoom * 100}%`;
+  const imageHeight = `${compareZoom * 100}%`;
   const availablePanelCount = Math.max(0, (indices || []).length);
   const statusText = renderEntries.length < availablePanelCount
     ? `${renderEntries.length}/${availablePanelCount} visible`
     : status;
+
+  React.useEffect(() => {
+    const view = compareViewRef.current;
+    view.zoom = compareZoom;
+    view.panX = comparePanX;
+    view.panY = comparePanY;
+  }, [compareZoom, comparePanX, comparePanY]);
+
+  React.useEffect(() => {
+    const view = compareViewRef.current;
+    view.zoom = 1;
+    view.panX = 0;
+    view.panY = 0;
+    setCompareZoom(1);
+    setComparePanX(0);
+    setComparePanY(0);
+  }, [shapeCols, shapeRows]);
+
+  React.useEffect(() => {
+    return () => {
+      const raf = compareViewRef.current.raf;
+      if (raf) cancelAnimationFrame(raf);
+    };
+  }, []);
+
+  const zoomCompareAt = React.useCallback((tile: HTMLDivElement, clientX: number, clientY: number, deltaY: number) => {
+    const rect = tile.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return;
+    const mouseX = ((clientX - rect.left) / rect.width) * shapeCols;
+    const mouseY = ((clientY - rect.top) / rect.height) * shapeRows;
+    const view = compareViewRef.current;
+    const zoomFactor = deltaY > 0 ? 0.9 : 1.1;
+    const newZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, view.zoom * zoomFactor));
+    const zoomRatio = newZoom / view.zoom;
+    view.zoom = newZoom;
+    view.panX = mouseX - (mouseX - view.panX) * zoomRatio;
+    view.panY = mouseY - (mouseY - view.panY) * zoomRatio;
+    if (view.raf === 0) {
+      view.raf = requestAnimationFrame(() => {
+        view.raf = 0;
+        setCompareZoom(view.zoom);
+        setComparePanX(view.panX);
+        setComparePanY(view.panY);
+      });
+    }
+  }, [shapeCols, shapeRows]);
+
+  React.useEffect(() => {
+    const listeners: Array<[HTMLDivElement, (event: WheelEvent) => void]> = [];
+    tileRefs.current.forEach((node) => {
+      if (!node) return;
+      const listener = (event: WheelEvent) => {
+        event.preventDefault();
+        event.stopPropagation();
+        zoomCompareAt(node, event.clientX, event.clientY, event.deltaY);
+      };
+      node.addEventListener("wheel", listener, { passive: false });
+      listeners.push([node, listener]);
+    });
+    return () => {
+      listeners.forEach(([node, listener]) => node.removeEventListener("wheel", listener));
+    };
+  }, [orderKey, renderEntries.length, zoomCompareAt]);
+
+  const handleCompareDoubleClick = React.useCallback((event: React.MouseEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const view = compareViewRef.current;
+    view.zoom = 1;
+    view.panX = 0;
+    view.panY = 0;
+    setCompareZoom(1);
+    setComparePanX(0);
+    setComparePanY(0);
+  }, []);
 
   React.useLayoutEffect(() => {
     const bump = () => setOverlayVersion((value) => value + 1);
@@ -1403,13 +1488,13 @@ function CompareVirtualGrid({
       if (showScaleBar) {
         const unit = pixelSize > 0 ? pixelUnit || "px" : "px";
         const pxSize = pixelSize > 0 ? pixelSize : 1;
-        drawScaleBarHiDPI(overlay, dpr, 1, pxSize, unit, shapeCols);
+        drawScaleBarHiDPI(overlay, dpr, compareZoom, pxSize, unit, shapeCols);
       } else {
         const ctx = overlay.getContext("2d");
         ctx?.clearRect(0, 0, overlay.width, overlay.height);
       }
     });
-  }, [overlayVersion, pixelSize, pixelUnit, renderEntries, shapeCols, showScaleBar]);
+  }, [compareZoom, overlayVersion, pixelSize, pixelUnit, renderEntries, shapeCols, showScaleBar]);
 
   if (renderEntries.length === 0) {
     return (
@@ -1432,11 +1517,11 @@ function CompareVirtualGrid({
         sx={{
           display: "grid",
           gridTemplateColumns: `repeat(${gridCols}, minmax(128px, 1fr))`,
-          gap: "6px",
+          gap: `${gridGapPx}px`,
           maxWidth: "100%",
           "@media (max-width: 700px)": {
             gridTemplateColumns: `repeat(${mobileGridCols}, minmax(0, 1fr))`,
-            gap: mobileGridGap,
+            gap: `${gridGapPx}px`,
           },
         }}
       >
@@ -1459,6 +1544,7 @@ function CompareVirtualGrid({
               aria-label={`Show4DSTEM compare panel ${frame + 1}`}
               tabIndex={0}
               draggable={reorderMode}
+              onDoubleClick={handleCompareDoubleClick}
               onClick={() => {
                 if (!reorderMode) {
                   onSelect(frame);
@@ -1578,10 +1664,12 @@ function CompareVirtualGrid({
                 height={shapeRows}
                 style={{
                   position: "absolute",
-                  inset: 0,
-                  width: "100%",
-                  height: "100%",
+                  left: imageLeft,
+                  top: imageTop,
+                  width: imageWidth,
+                  height: imageHeight,
                   imageRendering: smooth ? "auto" : "pixelated",
+                  pointerEvents: "none",
                 }}
               />
               <canvas
@@ -1842,6 +1930,7 @@ function Show4DSTEM() {
   const [comparePanelIndices] = useModelState<number[]>("compare_panel_indices");
   const [compareStatus] = useModelState<string>("compare_status");
   const [compareDpMode, setCompareDpMode] = useModelState<string>("compare_dp_mode");
+  const [comparePanelGapPx] = useModelState<number>("compare_panel_gap_px");
   const [comparePanelOrder, setComparePanelOrder] = useModelState<number[]>("compare_panel_order");
   const [compareHiddenPanels, setCompareHiddenPanels] = useModelState<number[]>("compare_hidden_panels");
   const [compareStarredPanels, setCompareStarredPanels] = useModelState<number[]>("compare_starred_panels");
@@ -4046,7 +4135,7 @@ function Show4DSTEM() {
     viewRef: React.RefObject<{ zoom: number; panX: number; panY: number; raf: number }>,
     canvasRef: React.RefObject<HTMLCanvasElement | null>,
   ) => (e: React.WheelEvent<HTMLCanvasElement>) => {
-    e.preventDefault();
+    e.stopPropagation();
     const canvas = canvasRef.current;
     if (!canvas) return;
     const rect = canvas.getBoundingClientRect();
@@ -5664,6 +5753,7 @@ function Show4DSTEM() {
               draggingFrame={compareDraggingFrame}
               pendingMoveFrame={comparePendingMoveFrame}
               maxWidthPx={compareGridWidth}
+              panelGapPx={comparePanelGapPx}
               onResizeStart={handleCompareGridResizeStart}
               onSelect={(idx) => {
                 setFramePlaying(false);
