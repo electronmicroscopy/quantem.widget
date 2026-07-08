@@ -2275,6 +2275,7 @@ function Show1DWidget() {
   const plotThumbnailHitAreasRef = React.useRef<PlotThumbnailHitArea[]>([]);
   const [hover, setHover] = React.useState<HoverPoint | null>(null);
   const [hoverSnapshotGroupIdx, setHoverSnapshotGroupIdx] = React.useState<number | null>(null);
+  const [hoverSnapshotImageIdx, setHoverSnapshotImageIdx] = React.useState<number | null>(null);
   const hoverSnapshotGroupRef = React.useRef<number | null>(null);
   const [sidePanelWidthUserAdjusted, setSidePanelWidthUserAdjusted] = React.useState(false);
   const plotResizePointerIdRef = React.useRef<number | null>(null);
@@ -3926,10 +3927,19 @@ function Show1DWidget() {
                     const selected = imageIdx === selectedSnapshot;
                     const hideDisabled = selectedGroupImageIndices.length <= 1;
                     const hideLabel = hideDisabled ? "Cannot hide the last visible panel" : `Hide ${imageLabel}`;
+                    const showHideButton = hoverSnapshotImageIdx === imageIdx;
                     return (
                       <Box
                         key={imageIdx}
                         title={imageLabel}
+                        onMouseEnter={() => setHoverSnapshotImageIdx(imageIdx)}
+                        onMouseLeave={() => setHoverSnapshotImageIdx((current) => (current === imageIdx ? null : current))}
+                        onFocus={() => setHoverSnapshotImageIdx(imageIdx)}
+                        onBlur={(event) => {
+                          if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+                            setHoverSnapshotImageIdx((current) => (current === imageIdx ? null : current));
+                          }
+                        }}
                         sx={{
                           minWidth: 0,
                           position: "relative",
@@ -3937,9 +3947,7 @@ function Show1DWidget() {
                           overflow: "hidden",
                           outline: "none",
                           "&:hover .show1d-panel-hide-button, &:focus-within .show1d-panel-hide-button": {
-                            opacity: hideDisabled ? 0.28 : 1,
                             transform: "translateY(0)",
-                            pointerEvents: "auto",
                           },
                           "&:hover .show1d-tile-resize-handle, &:focus-within .show1d-tile-resize-handle": {
                             opacity: 0.9,
@@ -4001,12 +4009,12 @@ function Show1DWidget() {
                             width: 22,
                             height: 22,
                             p: 0,
-                            opacity: 0,
-                            transform: "translateY(-2px)",
+                            opacity: showHideButton ? (hideDisabled ? 0.28 : 1) : 0,
+                            transform: showHideButton ? "translateY(0)" : "translateY(-2px)",
                             transition: "opacity 120ms ease, transform 120ms ease, background-color 120ms ease, color 120ms ease",
                             color: hideDisabled ? "rgba(255,255,255,0.25)" : "rgba(255,255,255,0.75)",
                             bgcolor: "rgba(0,0,0,0.22)",
-                            pointerEvents: "none",
+                            pointerEvents: showHideButton ? "auto" : "none",
                             "&:hover, &:focus-visible": {
                               bgcolor: "rgba(0,0,0,0.42)",
                               color: "rgba(255,255,255,0.95)",
