@@ -262,7 +262,22 @@ def _resize_multiple_panel(page, panel_number: int = 1, delta: int = 42) -> dict
     before = panel.bounding_box()
     grip = handle.bounding_box()
     assert before and before["width"] > 40 and before["height"] > 40
-    assert grip and grip["width"] >= 12 and grip["height"] >= 12
+    assert grip and round(grip["width"]) == 16 and round(grip["height"]) == 16
+    grip_style = handle.evaluate(
+        """node => {
+          const style = getComputedStyle(node);
+          return {
+            backgroundImage: style.backgroundImage,
+            clipPath: style.clipPath,
+            cursor: style.cursor,
+            opacity: style.opacity,
+          };
+        }"""
+    )
+    assert "linear-gradient" in grip_style["backgroundImage"], grip_style
+    assert grip_style["clipPath"] in {"none", "border-box"}, grip_style
+    assert grip_style["cursor"] == "nwse-resize", grip_style
+    assert float(grip_style["opacity"]) <= 0.7, grip_style
     dp_before = _dp_at(page)
     start_x = grip["x"] + grip["width"] - 4
     start_y = grip["y"] + grip["height"] - 4
@@ -282,6 +297,7 @@ def _resize_multiple_panel(page, panel_number: int = 1, delta: int = 42) -> dict
         "after_width": after["width"],
         "handle_width": grip["width"],
         "handle_height": grip["height"],
+        "handle_style": grip_style,
         "handle_count": handles.count(),
     }
 
