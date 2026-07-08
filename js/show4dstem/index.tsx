@@ -1224,6 +1224,7 @@ interface CompareVirtualGridProps {
   onReorderFrame: (dragFrame: number, targetFrame: number) => void;
   onDragFrameChange: (idx: number | null) => void;
   onPendingMoveFrameChange: (idx: number | null) => void;
+  onPositionChange: (row: number, col: number, commit?: boolean) => void;
 }
 
 function CompareVirtualGrid({
@@ -1264,10 +1265,12 @@ function CompareVirtualGrid({
   onReorderFrame,
   onDragFrameChange,
   onPendingMoveFrameChange,
+  onPositionChange,
 }: CompareVirtualGridProps) {
   const canvasRefs = React.useRef<(HTMLCanvasElement | null)[]>([]);
   const overlayRefs = React.useRef<(HTMLCanvasElement | null)[]>([]);
   const tileRefs = React.useRef<(HTMLDivElement | null)[]>([]);
+  const isDraggingPositionRef = React.useRef(false);
   const [overlayVersion, setOverlayVersion] = React.useState(0);
   const [compareZoom, setCompareZoom] = React.useState(1);
   const [comparePanX, setComparePanX] = React.useState(0);
@@ -1379,6 +1382,8 @@ function CompareVirtualGrid({
   const gridGapPx = Math.max(0, Math.floor(Number.isFinite(panelGapPx) ? panelGapPx : 0));
   const markerLeft = `${((((Math.max(0, Math.min(shapeCols - 1, cursorCol)) + 0.5) * compareZoom) + comparePanX) / Math.max(1, shapeCols)) * 100}%`;
   const markerTop = `${((((Math.max(0, Math.min(shapeRows - 1, cursorRow)) + 0.5) * compareZoom) + comparePanY) / Math.max(1, shapeRows)) * 100}%`;
+  const markerColor = "rgba(255,255,255,0.98)";
+  const markerShadow = "0 0 0 1px rgba(0,0,0,0.72), 0 0 4px rgba(0,0,0,0.9)";
   const imageLeft = `${(comparePanX / Math.max(1, shapeCols)) * 100}%`;
   const imageTop = `${(comparePanY / Math.max(1, shapeRows)) * 100}%`;
   const imageWidth = `${compareZoom * 100}%`;
@@ -1458,6 +1463,21 @@ function CompareVirtualGrid({
     setComparePanY(0);
   }, []);
 
+  const updatePositionFromPointer = React.useCallback((
+    tile: HTMLDivElement,
+    clientX: number,
+    clientY: number,
+    commit = false,
+  ) => {
+    const rect = tile.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return;
+    const tileX = ((clientX - rect.left) / rect.width) * shapeCols;
+    const tileY = ((clientY - rect.top) / rect.height) * shapeRows;
+    const col = Math.round(Math.max(0, Math.min(shapeCols - 1, (tileX - comparePanX) / compareZoom)));
+    const row = Math.round(Math.max(0, Math.min(shapeRows - 1, (tileY - comparePanY) / compareZoom)));
+    onPositionChange(row, col, commit);
+  }, [comparePanX, comparePanY, compareZoom, onPositionChange, shapeCols, shapeRows]);
+
   React.useLayoutEffect(() => {
     const bump = () => setOverlayVersion((value) => value + 1);
     const observer = typeof ResizeObserver !== "undefined" ? new ResizeObserver(bump) : null;
@@ -1535,6 +1555,29 @@ function CompareVirtualGrid({
               tabIndex={0}
               draggable={reorderMode}
               onDoubleClick={handleCompareDoubleClick}
+              onPointerDown={(event) => {
+                const target = event.target instanceof Element ? event.target : null;
+                if (reorderMode || target?.closest("button")) return;
+                try { event.currentTarget.setPointerCapture(event.pointerId); } catch {}
+                isDraggingPositionRef.current = true;
+                updatePositionFromPointer(event.currentTarget, event.clientX, event.clientY);
+                onSelect(frame);
+              }}
+              onPointerMove={(event) => {
+                if (!isDraggingPositionRef.current || reorderMode) return;
+                event.preventDefault();
+                updatePositionFromPointer(event.currentTarget, event.clientX, event.clientY);
+              }}
+              onPointerUp={(event) => {
+                if (!isDraggingPositionRef.current) return;
+                updatePositionFromPointer(event.currentTarget, event.clientX, event.clientY, true);
+                isDraggingPositionRef.current = false;
+              }}
+              onPointerCancel={(event) => {
+                if (!isDraggingPositionRef.current) return;
+                updatePositionFromPointer(event.currentTarget, event.clientX, event.clientY, true);
+                isDraggingPositionRef.current = false;
+              }}
               onClick={() => {
                 if (!reorderMode) {
                   onSelect(frame);
@@ -1607,8 +1650,9 @@ function CompareVirtualGrid({
                 border: "none",
                 boxSizing: "border-box",
                 outline: "none",
-                cursor: reorderMode ? "grab" : "pointer",
+                cursor: reorderMode ? "grab" : "crosshair",
                 overflow: "hidden",
+                touchAction: reorderMode ? "auto" : "none",
                 opacity: isDragging ? 0.45 : 1,
                 transform: isPendingMove ? "translateY(-2px)" : "translateY(0)",
                 transition: "transform 120ms ease, opacity 120ms ease",
@@ -1677,13 +1721,35 @@ function CompareVirtualGrid({
                   position: "absolute",
                   left: markerLeft,
                   top: markerTop,
-                  width: 11,
-                  height: 11,
+                  width: 24,
+                  height: 24,
                   transform: "translate(-50%, -50%)",
                   pointerEvents: "none",
-                  border: "1px solid rgba(255,255,255,0.95)",
-                  borderRadius: "50%",
-                  boxShadow: "0 0 0 1px rgba(0,0,0,0.65)",
+                  zIndex: 3,
+                  backgroundImage: "radial-gradient(circle, rgba(0,0,0,0.78) 0 2px, rgba(255,255,255,0.98) 2px 4px, rgba(0,0,0,0.72) 4px 5px, transparent 5px)",
+                  filter: active ? "none" : "drop-shadow(0 0 1px rgba(0,0,0,0.85))",
+                  "&::before": {
+                    content: '""',
+                    position: "absolute",
+                    left: 0,
+                    right: 0,
+                    top: "50%",
+                    height: 2,
+                    bgcolor: markerColor,
+                    transform: "translateY(-50%)",
+                    boxShadow: markerShadow,
+                  },
+                  "&::after": {
+                    content: '""',
+                    position: "absolute",
+                    top: 0,
+                    bottom: 0,
+                    left: "50%",
+                    width: 2,
+                    bgcolor: markerColor,
+                    transform: "translateX(-50%)",
+                    boxShadow: markerShadow,
+                  },
                 }}
               />
               <Box
@@ -1786,6 +1852,7 @@ function CompareVirtualGrid({
                     aria-label={renderEntries.length <= 1 ? "Cannot hide the last visible panel" : `Hide Show4DSTEM multiple panel ${frame + 1}`}
                     className="show4dstem-compare-hide-button"
                     data-frame={frame}
+                    onPointerDown={(event) => event.stopPropagation()}
                     onMouseDown={(event) => event.stopPropagation()}
                     onClick={(event) => {
                       event.stopPropagation();
@@ -1937,6 +2004,48 @@ function Show4DSTEM() {
   const [localKRow, setLocalKRow] = React.useState(roiCenterRow);
   const [localPosRow, setLocalPosRow] = React.useState(posRow);
   const [localPosCol, setLocalPosCol] = React.useState(posCol);
+  const scanPositionPendingRef = React.useRef<[number, number] | null>(null);
+  const scanPositionRafRef = React.useRef<number | null>(null);
+  const scanPositionOptimisticRef = React.useRef<[number, number] | null>(null);
+  const scanPositionCurrentRef = React.useRef<[number, number]>([Math.round(posRow), Math.round(posCol)]);
+  const writeQueuedScanPosition = React.useCallback(() => {
+    const pending = scanPositionPendingRef.current;
+    if (!pending) return;
+    const [row, col] = pending;
+    scanPositionPendingRef.current = null;
+    scanPositionCurrentRef.current = [row, col];
+    model.set("pos_row", row);
+    model.set("pos_col", col);
+    model.save_changes();
+  }, [model]);
+  const queueScanPosition = React.useCallback((row: number, col: number) => {
+    const current = scanPositionPendingRef.current
+      ?? scanPositionOptimisticRef.current
+      ?? scanPositionCurrentRef.current;
+    if (current[0] === row && current[1] === col) return;
+    scanPositionPendingRef.current = [row, col];
+    scanPositionOptimisticRef.current = [row, col];
+    if (scanPositionRafRef.current === null) {
+      scanPositionRafRef.current = requestAnimationFrame(() => {
+        scanPositionRafRef.current = null;
+        writeQueuedScanPosition();
+      });
+    }
+  }, [writeQueuedScanPosition]);
+  const flushScanPosition = React.useCallback(() => {
+    if (scanPositionRafRef.current !== null) {
+      cancelAnimationFrame(scanPositionRafRef.current);
+      scanPositionRafRef.current = null;
+    }
+    writeQueuedScanPosition();
+  }, [writeQueuedScanPosition]);
+  React.useEffect(() => {
+    return () => {
+      if (scanPositionRafRef.current !== null) {
+        cancelAnimationFrame(scanPositionRafRef.current);
+      }
+    };
+  }, []);
   const [isDraggingDP, setIsDraggingDP] = React.useState(false);
   // rAF coalescing for ROI drag: collapse rapid mousemove events into ≤1
   // Python comm message per animation frame. Without this, drag fires 60+
@@ -2981,8 +3090,23 @@ function Show4DSTEM() {
   }, [roiCenterCol, roiCenterRow, isDraggingDP, isDraggingResize]);
 
   React.useEffect(() => {
-    if (!isDraggingVI) { setLocalPosRow(posRow); setLocalPosCol(posCol); }
+    scanPositionCurrentRef.current = [Math.round(posRow), Math.round(posCol)];
+    if (isDraggingVI) return;
+    const optimistic = scanPositionOptimisticRef.current;
+    if (optimistic) {
+      if (Math.round(posRow) !== optimistic[0] || Math.round(posCol) !== optimistic[1]) return;
+      scanPositionOptimisticRef.current = null;
+    }
+    setLocalPosRow(posRow);
+    setLocalPosCol(posCol);
   }, [posRow, posCol, isDraggingVI]);
+
+  const updateScanPosition = React.useCallback((row: number, col: number, commit = false) => {
+    setLocalPosRow(row);
+    setLocalPosCol(col);
+    queueScanPosition(row, col);
+    if (commit) flushScanPosition();
+  }, [flushScanPosition, queueScanPosition]);
 
   // Sync VI ROI local state
   React.useEffect(() => {
@@ -4702,10 +4826,7 @@ function Show4DSTEM() {
     // CBED is sampled from (not the fractional cursor position).
     const newX = Math.round(Math.max(0, Math.min(shapeRows - 1, imgX)));
     const newY = Math.round(Math.max(0, Math.min(shapeCols - 1, imgY)));
-    setLocalPosRow(newX); setLocalPosCol(newY);
-    model.set("pos_row", newX);
-    model.set("pos_col", newY);
-    model.save_changes();
+    updateScanPosition(newX, newY);
   };
 
   const handleViMouseMove = (e: React.MouseEvent<HTMLCanvasElement> | React.PointerEvent<HTMLCanvasElement>) => {
@@ -4824,13 +4945,11 @@ function Show4DSTEM() {
     // positions, matching the CBED actually shown.
     const newX = Math.round(Math.max(0, Math.min(shapeRows - 1, imgX)));
     const newY = Math.round(Math.max(0, Math.min(shapeCols - 1, imgY)));
-    setLocalPosRow(newX); setLocalPosCol(newY);
-    model.set("pos_row", newX);
-    model.set("pos_col", newY);
-    model.save_changes();
+    updateScanPosition(newX, newY);
   };
 
   const handleViMouseUp = (e: React.MouseEvent<HTMLCanvasElement> | React.PointerEvent<HTMLCanvasElement>) => {
+    flushScanPosition();
     if (draggingViProfileEndpoint !== null || isDraggingViProfileLine) {
       setDraggingViProfileEndpoint(null);
       setIsDraggingViProfileLine(false);
@@ -4880,6 +4999,7 @@ function Show4DSTEM() {
     setIsDraggingViRoiResize(false);
   };
   const handleViMouseLeave = () => {
+    flushScanPosition();
     viClickStartRef.current = null;
     setDraggingViProfileEndpoint(null);
     setIsDraggingViProfileLine(false);
@@ -5791,6 +5911,7 @@ function Show4DSTEM() {
               onReorderFrame={moveCompareFrame}
               onDragFrameChange={setCompareDraggingFrame}
               onPendingMoveFrameChange={setComparePendingMoveFrame}
+              onPositionChange={updateScanPosition}
             />
           ) : (
             <Box sx={{ ...container.imageBox, width: "100%", maxWidth: viCanvasWidth, aspectRatio: `${shapeCols} / ${shapeRows}`, height: "auto", touchAction: "none", ...mobileImageBoxSx }}>
