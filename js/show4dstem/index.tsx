@@ -1960,7 +1960,8 @@ function Show4DSTEM() {
       let volMetas: any[] = [];                  // multi-volume descriptors (lazy)
       const volCache = new Map<number, Show4DSTEMCompute>();   // LRU: idx -> decoded volume
       const inlineVolCache = new Map<number, Show4DSTEMCompute | Show4DSTEMCpuCompute>(); // LRU for inline gzip 5D exports
-      const MAX_RESIDENT = 3;                    // recent volumes kept hot for instant back-scrub
+      const compareResidentTarget = Math.max(3, Math.min(12, Math.max(1, Number(model.get("compare_max_panels") || 3))));
+      const MAX_RESIDENT = compareResidentTarget; // recent / compare volumes kept hot for instant scrub and detector drags
       let volumeCount = 0;
       let getVol: ((idx: number) => Promise<Show4DSTEMCompute | Show4DSTEMCpuCompute | null>) | null = null;
       // H5 source: read the merged float32 .h5 file straight off disk via WebGPU
@@ -2109,7 +2110,7 @@ function Show4DSTEM() {
         if (widgetFrames > 1 && (stack.byteLength === expectedU8 || stack.byteLength === expectedU16)) {
           const volumeBytes = stack.byteLength / widgetFrames;
           volumeCount = widgetFrames;
-          const MAX_INLINE_RESIDENT = 3;
+          const MAX_INLINE_RESIDENT = Math.max(3, Math.min(widgetFrames, compareResidentTarget));
           getVol = async (idx: number) => {
             if (inlineVolCache.has(idx)) return inlineVolCache.get(idx)!;
             const start = idx * volumeBytes;
@@ -2141,7 +2142,53 @@ function Show4DSTEM() {
         const vi = await compute!.maskedSum(buildDetectorMask(model, detR, detC));
         model.set("virtual_image_bytes", new DataView(vi.buffer));
       };
-      (window as unknown as { __sh4d: unknown }).__sh4d = { model, recomputeVI,
+      let compareViGen = 0;
+      const compareVisibleIndices = () => {
+        const total = Math.max(0, Number(model.get("n_frames") || 0));
+        if (total <= 1 || model.get("view_mode") !== "compare") return [] as number[];
+        const maxPanels = Math.max(1, Number(model.get("compare_max_panels") || total));
+        const natural = Array.from({ length: total }, (_, idx) => idx);
+        const rawOrder = Array.isArray(model.get("compare_panel_order")) ? model.get("compare_panel_order") as number[] : [];
+        let ordered = natural;
+        if (
+          rawOrder.length === total
+          && rawOrder.every((idx) => Number.isInteger(idx) && idx >= 0 && idx < total)
+          && new Set(rawOrder).size === total
+        ) {
+          ordered = rawOrder.map((idx) => Number(idx));
+        }
+        const hidden = new Set(
+          (Array.isArray(model.get("compare_hidden_panels")) ? model.get("compare_hidden_panels") as number[] : [])
+            .filter((idx) => Number.isInteger(idx) && idx >= 0 && idx < total)
+            .map((idx) => Number(idx)),
+        );
+        return ordered.filter((idx) => !hidden.has(idx)).slice(0, maxPanels);
+      };
+      const recomputeCompareVI = async () => {
+        const indices = compareVisibleIndices();
+        if (!indices.length) return;
+        const gen = ++compareViGen;
+        const mask = buildDetectorMask(model, detR, detC);
+        let maskArea = 0;
+        for (let i = 0; i < mask.length; i++) maskArea += mask[i] ? 1 : 0;
+        maskArea = Math.max(1, maskArea);
+        const panelPixels = scanRows * scanCols;
+        const stack = new Float32Array(indices.length * panelPixels);
+        for (let slot = 0; slot < indices.length; slot++) {
+          const idx = indices[slot];
+          const panelCompute = getVol ? await getVol(idx) : compute;
+          if (gen !== compareViGen || !panelCompute) return;
+          const vi = await panelCompute.maskedSum(mask);
+          if (gen !== compareViGen) return;
+          for (let p = 0; p < panelPixels; p++) {
+            stack[slot * panelPixels + p] = vi[p] / maskArea;
+          }
+        }
+        model.set("compare_virtual_image_bytes", new DataView(stack.buffer));
+        model.set("compare_panel_count", indices.length);
+        model.set("compare_panel_indices", indices);
+      };
+      (window as unknown as { __sh4d: unknown }).__sh4d = { model, recomputeVI, recomputeCompareVI,
         detMask: () => buildDetectorMask(model, detR, detC),
         deriveOnly: async () => { const vi = await compute!.maskedSum(buildDetectorMask(model, detR, detC)); return vi.length; },
         comLen: () => { const c = compute as unknown as { com?: Float32Array | null }; return c && c.com ? c.com.length : -1; },
@@ -2168,7 +2215,7 @@ function Show4DSTEM() {
           : await compute!.frameAt(scanIdx);
         model.set("frame_bytes", new DataView(frame.buffer)); model.save_changes();
       };
-      const onVI = () => { void recomputeVI(); };
+      const onVI = () => { void recomputeVI(); void recomputeCompareVI(); };
       const onDP = () => { void recomputeDP(); };
       const onPos = () => { void recomputeFrame(); };
       // 5D multi-volume: the slider picks the active dataset; decode-on-scrub (LRU).
@@ -2181,7 +2228,7 @@ function Show4DSTEM() {
         const cc = await getVol(v);
         if (gen !== frameGen || !cc) return;      // a newer scroll superseded this one
         compute = cc;
-        void recomputeVI(); void recomputeDP(); void recomputeFrame();
+        void recomputeVI(); void recomputeCompareVI(); void recomputeDP(); void recomputeFrame();
       };
       if (getVol) model.on("change:frame_idx", onFrame);
       void recomputeFrame();  // initial DP at mount (so the panel isn't blank)
@@ -2200,7 +2247,7 @@ function Show4DSTEM() {
         else if (name === "adf") { model.set("roi_mode", "annular"); model.set("roi_radius_inner", bf); model.set("roi_radius", bf * 2); }
         else if (name === "haadf") { model.set("roi_mode", "annular"); model.set("roi_radius_inner", bf * 2); model.set("roi_radius", bf * 4); }
         model.set("_preset_request", "");  // consume so the same preset can fire again
-        void recomputeVI();
+        void recomputeVI(); void recomputeCompareVI();
       };
       // Dragging the aperture sets the COMPOUND roi_center [row, col]; the kernel
       // normally splits it into roi_center_row/col. With no kernel we split it
@@ -2210,7 +2257,7 @@ function Show4DSTEM() {
       const onRoiCenter = () => {
         const rc = model.get("roi_center");
         if (Array.isArray(rc) && rc.length === 2) { model.set("roi_center_row", rc[0]); model.set("roi_center_col", rc[1]); }
-        void recomputeVI();
+        void recomputeVI(); void recomputeCompareVI();
       };
       const onViCenter = () => {
         const rc = model.get("vi_roi_center");
@@ -2240,12 +2287,13 @@ function Show4DSTEM() {
         inlineVolCache.forEach((c) => c.dispose()); inlineVolCache.clear();
       };
       await recomputeVI();  // initial virtual image, no interaction needed
+      await recomputeCompareVI();
       // Safety re-run: at first mount the offline stack / roi-detector traits can
       // still be settling, so the very first maskedSum can return an empty (zero)
       // virtual image - leaving the panel blank until the user nudges the detector.
       // A deferred recompute guarantees the BF image appears with no interaction.
-      requestAnimationFrame(() => { if (!disposed) void recomputeVI(); });
-      setTimeout(() => { if (!disposed) void recomputeVI(); }, 200);
+      requestAnimationFrame(() => { if (!disposed) { void recomputeVI(); void recomputeCompareVI(); } });
+      setTimeout(() => { if (!disposed) { void recomputeVI(); void recomputeCompareVI(); } }, 200);
     })();
     return () => { disposed = true; detach?.(); };
   }, [offline]);
