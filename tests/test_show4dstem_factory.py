@@ -170,7 +170,7 @@ def test_show4dstem_compare_grid_builds_virtual_image_stack() -> None:
     data = np.arange(5 * 3 * 4 * 6 * 6, dtype=np.uint16).reshape(5, 3, 4, 6, 6)
     widget = Show4DSTEM(
         data,
-        view_mode="compare",
+        view_mode="multiple",
         compare_cols=3,
         compare_grid_width_px=720,
         compare_panel_gap_px=3,
@@ -182,7 +182,7 @@ def test_show4dstem_compare_grid_builds_virtual_image_stack() -> None:
     )
 
     try:
-        assert widget.view_mode == "compare"
+        assert widget.view_mode == "multiple"
         assert widget.compare_cols == 3
         assert widget.compare_grid_width_px == 720
         assert widget.compare_panel_gap_px == 3
@@ -229,7 +229,7 @@ def test_show4dstem_compare_grid_builds_virtual_image_stack() -> None:
         state = widget.state_dict()
         restored = Show4DSTEM(
             data,
-            view_mode="compare",
+            view_mode="multiple",
             compare_cols=1,
             compare_max_panels=4,
             frame_dim_label="Dataset",
@@ -265,7 +265,7 @@ def test_show4dstem_compare_grid_normalizes_detector_roi_preview() -> None:
     data[1] = 7
     widget = Show4DSTEM(
         data,
-        view_mode="compare",
+        view_mode="multiple",
         compare_max_panels=2,
         precompute_virtual_images=False,
         verbose=False,
@@ -292,7 +292,7 @@ def test_show4dstem_compare_grid_normalizes_detector_roi_preview() -> None:
         widget.close()
 
 
-def test_show4dstem_temporal_view_refreshes_after_compare_mode() -> None:
+def test_show4dstem_single_view_refreshes_after_multiple_mode() -> None:
     from quantem.widget import Show4DSTEM
 
     data = np.empty((2, 2, 2, 4, 4), dtype=np.uint16)
@@ -300,7 +300,7 @@ def test_show4dstem_temporal_view_refreshes_after_compare_mode() -> None:
     data[1] = 7
     widget = Show4DSTEM(
         data,
-        view_mode="compare",
+        view_mode="multiple",
         compare_max_panels=2,
         center=(1.5, 1.5),
         bf_radius=2,
@@ -310,18 +310,33 @@ def test_show4dstem_temporal_view_refreshes_after_compare_mode() -> None:
 
     try:
         widget.frame_idx = 1
-        compare_dp = np.frombuffer(widget.frame_bytes, dtype=np.float32).reshape(4, 4)
-        np.testing.assert_allclose(compare_dp, np.full((4, 4), 4, dtype=np.float32))
+        multiple_dp = np.frombuffer(widget.frame_bytes, dtype=np.float32).reshape(4, 4)
+        np.testing.assert_allclose(multiple_dp, np.full((4, 4), 4, dtype=np.float32))
 
-        widget.view_mode = "temporal"
-        temporal_dp = np.frombuffer(widget.frame_bytes, dtype=np.float32).reshape(4, 4)
-        temporal_vi = np.frombuffer(widget.virtual_image_bytes, dtype=np.float32).reshape(2, 2)
+        widget.view_mode = "single"
+        single_dp = np.frombuffer(widget.frame_bytes, dtype=np.float32).reshape(4, 4)
+        single_vi = np.frombuffer(widget.virtual_image_bytes, dtype=np.float32).reshape(2, 2)
 
-        np.testing.assert_allclose(temporal_dp, np.full((4, 4), 7, dtype=np.float32))
-        assert float(temporal_vi.min()) > 0
-        np.testing.assert_allclose(temporal_vi, np.full((2, 2), temporal_vi[0, 0], dtype=np.float32))
+        np.testing.assert_allclose(single_dp, np.full((4, 4), 7, dtype=np.float32))
+        assert float(single_vi.min()) > 0
+        np.testing.assert_allclose(single_vi, np.full((2, 2), single_vi[0, 0], dtype=np.float32))
     finally:
         widget.close()
+
+
+def test_show4dstem_view_mode_legacy_aliases() -> None:
+    from quantem.widget import Show4DSTEM
+
+    data = np.zeros((2, 2, 2, 4, 4), dtype=np.uint16)
+
+    compare_alias = Show4DSTEM(data, view_mode="compare", verbose=False)
+    temporal_alias = Show4DSTEM(data, view_mode="temporal", verbose=False)
+    try:
+        assert compare_alias.view_mode == "multiple"
+        assert temporal_alias.view_mode == "single"
+    finally:
+        compare_alias.close()
+        temporal_alias.close()
 
 
 def test_show4dstem_compare_grid_validates_api() -> None:

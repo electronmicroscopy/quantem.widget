@@ -32,7 +32,7 @@ w = Show4DSTEM(load([path1, path2, path3], det_bin=4))
 # Multi-dataset comparison: one shared diffraction ROI, many virtual images.
 w = Show4DSTEM(
     load([path1, path2, path3], det_bin=4),
-    view_mode="compare",
+    view_mode="multiple",
     compare_cols=3,
 )
 
@@ -111,20 +111,23 @@ object, clear references, use backend-specific cleanup utilities when provided,
 or restart the kernel/session. Exported HTML has no live Python GPU allocation,
 so it should not expose a "free GPU memory" control.
 
-## Compare grid
+## Multiple grid
 
-Use `view_mode="compare"` when the extra frame axis represents multiple
+Use `view_mode="multiple"` when the extra frame axis represents multiple
 acquisitions that should be inspected side by side. The viewer keeps the
 standard diffraction-panel workflow: one shared detector ROI, one shared scan
 cursor, and one Dataset slider. The virtual-image side becomes a grid of ready
-frames or datasets.
+frames or datasets. Older notebooks that pass `view_mode="compare"` still load
+as the same multiple-grid mode. Older `view_mode="temporal"` inputs are treated
+as `view_mode="single"` because the one-at-a-time dataset browser is the single
+view.
 
 ```python
 from quantem.widget import load, Show4DSTEM
 
 widget = Show4DSTEM(
     load([path1, path2, path3, path4], det_bin=4),
-    view_mode="compare",
+    view_mode="multiple",
     compare_cols=2,
     compare_panel_gap_px=0,
     compare_max_panels=4,
@@ -135,7 +138,7 @@ widget
 
 `compare_cols=0` lets the frontend pick a responsive layout. `compare_layout`
 accepts `"side"` and `"top"` for placing the shared diffraction panel next to
-or above the compare grid. Positive `compare_cols` values are treated as the
+or above the multiple grid. Positive `compare_cols` values are treated as the
 maximum grid columns on desktop; narrow/mobile viewports cap the grid at two
 columns so the tiles remain touch-friendly. On lazy MPS multi-dataset loads, the
 grid starts with the first decoded dataset and appends tiles as the background
@@ -144,17 +147,17 @@ just to build the comparison.
 
 `compare_panel_gap_px=0` renders the virtual-image grid edge-to-edge for dense
 screening. Increase it when a report or presentation needs visible gutters
-between panels. Mouse-wheel or trackpad scroll over a compare tile zooms the
+between panels. Mouse-wheel or trackpad scroll over a multiple tile zooms the
 shared virtual-image grid instead of scrolling the page; double-click a tile to
 reset the compare zoom. The single-panel diffraction and virtual-image canvases
 use the same scroll-to-zoom behavior.
 
 The shared diffraction panel defaults to `compare_dp_mode="average"`, which
 shows the mean diffraction pattern at the current scan position across visible
-ready compare panels. Use `compare_dp_mode="selected"` when the diffraction
+ready multiple panels. Use `compare_dp_mode="selected"` when the diffraction
 panel should follow the clicked/active dataset instead.
 
-Compare panel curation is stored on the widget, so a notebook can reuse the
+Multiple panel curation is stored on the widget, so a notebook can reuse the
 same state in a later cell or saved HTML export:
 
 ```python
@@ -166,9 +169,9 @@ state = widget.state_dict()
 another_widget.load_state_dict(state)
 ```
 
-The GUI exposes the same state: the star and hide icons live on each compare
+The GUI exposes the same state: the star and hide icons live on each multiple
 tile, the reorder button enables drag-and-drop or click-then-click ordering, and
-the compare toolbar can restore hidden panels or reset the saved panel state.
+the multiple toolbar can restore hidden panels or reset the saved panel state.
 
 ## Reference
 
@@ -200,9 +203,9 @@ Python round trip - see [Performance](../maintainer/widget-performance).
 | Annular inner / outer | `roi_radius_inner`, `roi_radius` | ADF annulus geometry |
 | Virtual-image ROI | `vi_roi_mode`, `vi_roi_center_row`, `vi_roi_center_col` | Pick a real-space region to average its diffraction |
 | FFT toggle | `show_fft`, `fft_window` | Power spectrum of the virtual image |
-| Compare grid | `view_mode="compare"`, `compare_cols`, `compare_panel_gap_px`, `compare_max_panels`, `compare_layout` | Shows ready frames/datasets as synchronized virtual images sharing the detector ROI and scan cursor |
-| Compare DP source | `compare_dp_mode` | Shows either the average DP across visible compare panels or the selected panel's DP |
-| Compare panel state | `compare_panel_order`, `compare_hidden_panels`, `compare_starred_panels`; `set_compare_panel_order()`, `hide_compare_panel()`, `show_all_compare_panels()`, `star_compare_panel()` | Saves/reuses panel order, hidden panels, and starred picks across cells, state files, and HTML export |
+| Multiple grid | `view_mode="multiple"`, `compare_cols`, `compare_panel_gap_px`, `compare_max_panels`, `compare_layout` | Shows ready frames/datasets as synchronized virtual images sharing the detector ROI and scan cursor |
+| Multiple DP source | `compare_dp_mode` | Shows either the average DP across visible multiple panels or the selected panel's DP |
+| Multiple panel state | `compare_panel_order`, `compare_hidden_panels`, `compare_starred_panels`; `set_compare_panel_order()`, `hide_compare_panel()`, `show_all_compare_panels()`, `star_compare_panel()` | Saves/reuses panel order, hidden panels, and starred picks across cells, state files, and HTML export |
 | Viewer chrome preset | `ui_mode` plus explicit `show_*` kwargs | Applies shared display presets; see [Viewer UI controls](viewer-ui) |
 | Control visibility | `show_controls`, `controls_collapsed`; `collapse_controls()`, `expand_controls()`, `toggle_controls()` | Permanently remove controls or temporarily collapse them behind the top GUI toggle |
 | Title visibility | `show_title` | Top title row shows/hides |

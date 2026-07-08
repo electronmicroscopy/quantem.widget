@@ -100,13 +100,14 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
     frame_dim_label : str, optional
         Label for the frame dimension when 5D data is provided.
         Defaults to "Frame". Common values: "Tilt", "Time", "Focus".
-    view_mode : {"single", "temporal", "compare"}, default "single"
-        Scientific layout mode. ``"single"`` and ``"temporal"`` keep the
-        existing one-virtual-image workflow. ``"compare"`` shows a grid of
-        virtual images for the first ready frames/datasets while sharing the
-        detector ROI and scan cursor with the existing diffraction panel.
+    view_mode : {"single", "multiple"}, default "single"
+        Scientific layout mode. ``"single"`` shows one selected frame/dataset.
+        ``"multiple"`` shows a grid of virtual images for the first ready
+        frames/datasets while sharing the detector ROI and scan cursor with the
+        existing diffraction panel. Legacy aliases ``"temporal"`` and
+        ``"compare"`` are accepted as ``"single"`` and ``"multiple"``.
     compare_layout : {"side", "top"}, default "side"
-        Frontend layout hint for ``view_mode="compare"``. The current widget
+        Frontend layout hint for ``view_mode="multiple"``. The current widget
         renders ``"side"`` as the default shared-DP plus virtual-image grid.
     compare_cols : int, default 0
         Number of columns in the compare virtual-image grid. ``0`` selects a
@@ -432,11 +433,13 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
     @staticmethod
     def _normalise_view_mode(value: str) -> str:
         mode = str(value or "single").strip().lower().replace("-", "_")
-        if mode in {"default", "normal"}:
+        if mode in {"default", "normal", "temporal"}:
             mode = "single"
-        if mode not in {"single", "temporal", "compare"}:
+        elif mode in {"compare", "multi"}:
+            mode = "multiple"
+        if mode not in {"single", "multiple"}:
             raise ValueError(
-                "view_mode must be 'single', 'temporal', or 'compare', "
+                "view_mode must be 'single' or 'multiple', "
                 f"got {value!r}"
             )
         return mode
@@ -2210,7 +2213,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         if change and change.get("name") == "view_mode":
             self.view_mode = self._normalise_view_mode(change.get("new", "single"))
         self._refresh_compare_virtual_images()
-        if self.view_mode == "compare":
+        if self.view_mode == "multiple":
             self._update_frame()
         else:
             self._compute_virtual_image_from_roi()
@@ -2220,7 +2223,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         """Normalize and apply compare DP source mode changes."""
         if change:
             self.compare_dp_mode = self._normalise_compare_dp_mode(change.get("new", "average"))
-        if self.view_mode == "compare":
+        if self.view_mode == "multiple":
             self._update_frame()
 
     def _on_frame_idx_change(self, change=None):
@@ -3295,7 +3298,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         if self._data is None:
             return
         if (
-            self.view_mode == "compare"
+            self.view_mode == "multiple"
             and self.n_frames > 1
             and self._normalise_compare_dp_mode(self.compare_dp_mode) == "average"
         ):
@@ -3699,7 +3702,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         if getattr(self, "_data", None) is None:
             self._clear_compare_virtual_images()
             return
-        if self.view_mode != "compare":
+        if self.view_mode != "multiple":
             if self.compare_panel_count or self.compare_virtual_image_bytes:
                 self._clear_compare_virtual_images()
             return
@@ -3731,7 +3734,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
                 self.compare_virtual_image_bytes = b""
                 self.compare_panel_count = 0
                 self.compare_panel_indices = []
-                self.compare_status = f"Compare grid unavailable: {exc}"
+                self.compare_status = f"Multiple grid unavailable: {exc}"
         finally:
             self._suppress_compare_recompute = False
 

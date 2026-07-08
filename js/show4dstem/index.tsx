@@ -1495,7 +1495,7 @@ function CompareVirtualGrid({
     return (
       <Box sx={{ border: `1px solid ${themeColors.border}`, bgcolor: themeColors.bgAlt, px: 1, py: 2 }}>
         <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>
-          {status || "Compare grid is waiting for multiple frames or datasets."}
+          {status || "Multiple grid is waiting for multiple frames or datasets."}
         </Typography>
       </Box>
     );
@@ -1531,7 +1531,7 @@ function CompareVirtualGrid({
               key={`${frame}-${localIdx}`}
               ref={(node: HTMLDivElement | null) => { tileRefs.current[localIdx] = node; }}
               role="button"
-              aria-label={`Show4DSTEM compare panel ${frame + 1}`}
+              aria-label={`Show4DSTEM multiple panel ${frame + 1}`}
               tabIndex={0}
               draggable={reorderMode}
               onDoubleClick={handleCompareDoubleClick}
@@ -1737,7 +1737,7 @@ function CompareVirtualGrid({
                 <Tooltip title={(isStarred ? "Unstar " : "Star ") + label}>
                   <IconButton
                     size="small"
-                    aria-label={`${isStarred ? "Unstar" : "Star"} Show4DSTEM compare panel ${frame + 1}`}
+                    aria-label={`${isStarred ? "Unstar" : "Star"} Show4DSTEM multiple panel ${frame + 1}`}
                     className="show4dstem-compare-star-button"
                     data-frame={frame}
                     onPointerDown={(event) => event.stopPropagation()}
@@ -1783,7 +1783,7 @@ function CompareVirtualGrid({
                   <IconButton
                     size="small"
                     disabled={renderEntries.length <= 1}
-                    aria-label={renderEntries.length <= 1 ? "Cannot hide the last visible panel" : `Hide Show4DSTEM compare panel ${frame + 1}`}
+                    aria-label={renderEntries.length <= 1 ? "Cannot hide the last visible panel" : `Hide Show4DSTEM multiple panel ${frame + 1}`}
                     className="show4dstem-compare-hide-button"
                     data-frame={frame}
                     onMouseDown={(event) => event.stopPropagation()}
@@ -1822,7 +1822,7 @@ function CompareVirtualGrid({
       {panelChromeVisible && onResizeStart && (
         <Box
           onPointerDown={onResizeStart}
-          aria-label="Resize Show4DSTEM compare grid"
+          aria-label="Resize Show4DSTEM multiple grid"
           role="button"
           tabIndex={-1}
           sx={{
@@ -2270,7 +2270,8 @@ function Show4DSTEM() {
       let compareViGen = 0;
       const compareVisibleIndices = () => {
         const total = Math.max(0, Number(model.get("n_frames") || 0));
-        if (total <= 1 || model.get("view_mode") !== "compare") return [] as number[];
+        const mode = String(model.get("view_mode") || "single");
+        if (total <= 1 || (mode !== "multiple" && mode !== "compare")) return [] as number[];
         const maxPanels = Math.max(1, Number(model.get("compare_max_panels") || total));
         const natural = Array.from({ length: total }, (_, idx) => idx);
         const rawOrder = Array.isArray(model.get("compare_panel_order")) ? model.get("compare_panel_order") as number[] : [];
@@ -2462,7 +2463,8 @@ function Show4DSTEM() {
   const compareGridResizeCleanupRef = React.useRef<(() => void) | null>(null);
 
   const effectiveShowFft = showFft;
-  const compareMode = viewMode === "compare" && nFrames > 1;
+  const displayViewMode = viewMode === "compare" ? "multiple" : viewMode === "temporal" ? "single" : (viewMode || "single");
+  const compareMode = (displayViewMode === "multiple" || viewMode === "compare") && nFrames > 1;
   const compareGridWidth = compareGridPreviewWidth ?? (compareGridWidthPx > 0 ? compareGridWidthPx : COMPARE_GRID_DEFAULT_WIDTH);
   React.useEffect(() => {
     if (!compareMode) {
@@ -5299,10 +5301,9 @@ function Show4DSTEM() {
     ["Scroll", "Zoom"],
     ["Dbl-click", "Reset view"],
   ];
-  const temporalMode = viewMode === "temporal" && nFrames > 1;
   const squarePanelWidth = `min(${canvasSize}px, 100%)`;
   const viPanelWidth = compareMode ? `min(${compareGridWidth}px, 100%)` : `min(${viCanvasWidth}px, 100%)`;
-  const mobileTightLayout = temporalMode || compareMode;
+  const mobileTightLayout = nFrames > 1;
   const mobilePanelSx = {
     "@media (max-width: 700px)": {
       width: "100%",
@@ -5695,7 +5696,7 @@ function Show4DSTEM() {
           {/* VI Header */}
           <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ ...panelHeaderSx, ...hideBetweenPanelsOnMobileSx }}>
             <Typography sx={{ ...typo.label, color: themeColors.textMuted }}>
-              {compareMode ? `Compare grid | ${shapeRows}×${shapeCols}` : `${shapeRows}×${shapeCols} | ${detRows}×${detCols}`}
+              {compareMode ? `Multiple grid | ${shapeRows}×${shapeCols}` : `${shapeRows}×${shapeCols} | ${detRows}×${detCols}`}
             </Typography>
             {controlsVisible && <Stack direction="row" spacing={`${SPACING.SM}px`} alignItems="center">
               <Typography sx={{ ...typo.label, fontSize: 10 }}>FFT</Typography>
@@ -6048,7 +6049,7 @@ function Show4DSTEM() {
         <Box sx={{ ...controlRow, mt: `${SPACING.SM}px`, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>
           <Typography sx={{ ...typo.label, fontSize: 10, flexShrink: 0 }}>View</Typography>
           <Select
-            value={viewMode || "single"}
+            value={displayViewMode}
             onChange={(e) => setViewMode(String(e.target.value))}
             size="small"
             inputProps={{ "aria-label": "Show4DSTEM view mode" }}
@@ -6056,8 +6057,7 @@ function Show4DSTEM() {
             MenuProps={themedMenuProps}
           >
             <MenuItem value="single">Single</MenuItem>
-            <MenuItem value="temporal">Temporal</MenuItem>
-            <MenuItem value="compare">Compare</MenuItem>
+            <MenuItem value="multiple">Multiple</MenuItem>
           </Select>
           {compareMode && (
             <>
@@ -6066,7 +6066,7 @@ function Show4DSTEM() {
                 value={compareDpMode || "average"}
                 onChange={(e) => setCompareDpMode(String(e.target.value))}
                 size="small"
-                inputProps={{ "aria-label": "Show4DSTEM compare DP source" }}
+                inputProps={{ "aria-label": "Show4DSTEM multiple DP source" }}
                 sx={{ ...themedSelect, minWidth: 82, fontSize: 10 }}
                 MenuProps={themedMenuProps}
               >
@@ -6078,7 +6078,7 @@ function Show4DSTEM() {
                 value={compareCols || 0}
                 onChange={(e) => setCompareCols(Number(e.target.value))}
                 size="small"
-                inputProps={{ "aria-label": "Show4DSTEM compare columns" }}
+                inputProps={{ "aria-label": "Show4DSTEM multiple columns" }}
                 sx={{ ...themedSelect, minWidth: 54, fontSize: 10 }}
                 MenuProps={themedMenuProps}
               >
@@ -6088,10 +6088,10 @@ function Show4DSTEM() {
                 <MenuItem value={4}>4</MenuItem>
                 <MenuItem value={5}>5</MenuItem>
               </Select>
-              <Tooltip title={compareReorderMode ? "Finish reordering" : "Reorder compare panels"}>
+              <Tooltip title={compareReorderMode ? "Finish reordering" : "Reorder multiple panels"}>
                 <IconButton
                   size="small"
-                  aria-label="Show4DSTEM compare reorder"
+                  aria-label="Show4DSTEM multiple reorder"
                   className="show4dstem-compare-reorder"
                   onClick={() => {
                     setCompareReorderMode((value) => !value);

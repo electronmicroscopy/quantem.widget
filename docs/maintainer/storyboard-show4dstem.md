@@ -384,7 +384,7 @@ HTML reports to GitHub.
   master count, allocation error, and GPU cleanup evidence. Do not call a
   30-40 file no-bin workflow supported just because a smaller stack is smooth.
 
-### S4D-16: Screen Many 4D-STEM Datasets In Compare Mode
+### S4D-16: Screen Many 4D-STEM Datasets In Multiple Mode
 
 **User story**: As a microscopist reviewing a session with many related
 4D-STEM acquisitions, I want Show4DSTEM to show many virtual images at once
@@ -392,7 +392,7 @@ while sharing the diffraction ROI and scan cursor, so I can quickly decide
 which datasets are useful, hide bad ones, star good ones, and preserve that
 curation for later notebook cells or shared HTML.
 
-**Primary widgets**: Show4DSTEM in ``view_mode="compare"`` with 5D data or a
+**Primary widgets**: Show4DSTEM in ``view_mode="multiple"`` with 5D data or a
 lazy multi-dataset handle.
 
 **Data to use**: 8-14 binned real or real-derived 4D-STEM datasets for routine
@@ -401,18 +401,18 @@ backend and memory budget allow it.
 
 **Acceptance checks**:
 
-- Construct ``Show4DSTEM(..., view_mode="compare", compare_cols=...)`` from
-  multiple datasets and verify the compare grid renders all ready panels without
+- Construct ``Show4DSTEM(..., view_mode="multiple", compare_cols=...)`` from
+  multiple datasets and verify the multiple grid renders all ready panels without
   materializing an unsafe full stack on MPS.
 - Verify desktop ``compare_cols`` is a maximum column count and the phone or
   narrow viewport caps the grid at two columns with readable tiles.
 - Verify ``compare_panel_gap_px=0`` removes horizontal and vertical gutters
-  between compare panels, and nonzero values intentionally restore spacing.
-- Scroll over compare tiles and the single-panel diffraction/virtual-image
+  between multiple panels, and nonzero values intentionally restore spacing.
+- Scroll over multiple tiles and the single-panel diffraction/virtual-image
   canvases; verify wheel input zooms the image instead of scrolling the page,
   and zoom-out behaves symmetrically.
 - Toggle ``compare_dp_mode`` between ``"average"`` and ``"selected"``; verify
-  the diffraction panel either averages visible compare panels or follows the
+  the diffraction panel either averages visible multiple panels or follows the
   clicked dataset.
 - Star at least one useful dataset and hide at least one rejected dataset from
   the GUI; verify the visible panel count, labels, and selected dataset remain
