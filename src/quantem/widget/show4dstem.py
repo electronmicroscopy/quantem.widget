@@ -747,6 +747,10 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
                     max_vram_bytes=page_max_vram_bytes,
                 )
         else:
+            if not data_np.flags.writeable:
+                # torch.from_numpy shares CPU memory; make read-only memmaps safe
+                # before saturation cleanup mutates detector hot pixels in-place.
+                data_np = np.array(data_np, copy=True)
             self._data = torch.from_numpy(data_np).to(self._device)
             # Saturation filter: zero detector pixels at full-scale (65535 / 255).
             # PyTorch lacks unsigned int comparison kernels, but uint16 viewed

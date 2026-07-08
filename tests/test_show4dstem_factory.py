@@ -146,6 +146,24 @@ def test_public_show4dstem_constructs_small_binned_numpy_viewer() -> None:
         widget.close()
 
 
+def test_show4dstem_accepts_read_only_numpy_without_torch_warning(recwarn) -> None:
+    from quantem.widget import Show4DSTEM
+
+    data = np.arange(2 * 2 * 4 * 4, dtype=np.uint16).reshape(2, 2, 4, 4)
+    data.setflags(write=False)
+    widget = Show4DSTEM(data, precompute_virtual_images=False, verbose=False)
+
+    try:
+        assert widget.shape_rows == 2
+        assert widget.shape_cols == 2
+        assert widget.det_rows == 4
+        assert widget.det_cols == 4
+    finally:
+        widget.close()
+
+    assert not any("not writable" in str(warning.message) for warning in recwarn)
+
+
 def test_show4dstem_compare_grid_builds_virtual_image_stack() -> None:
     from quantem.widget import Show4DSTEM
 

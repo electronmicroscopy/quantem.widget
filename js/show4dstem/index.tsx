@@ -2365,8 +2365,7 @@ function Show4DSTEM() {
   const [panelWidthPx, setPanelWidthPx] = useModelState<number>("panel_width_px");
   const [compareGridWidthPx, setCompareGridWidthPx] = useModelState<number>("compare_grid_width_px");
   const [compareGridPreviewWidth, setCompareGridPreviewWidth] = React.useState<number | null>(null);
-  const [isResizingCompareGrid, setIsResizingCompareGrid] = React.useState(false);
-  const [compareGridResizeStart, setCompareGridResizeStart] = React.useState<{ x: number; y: number; width: number } | null>(null);
+  const compareGridResizeCleanupRef = React.useRef<(() => void) | null>(null);
 
   const effectiveShowFft = showFft;
   const compareMode = viewMode === "compare" && nFrames > 1;
@@ -2377,8 +2376,7 @@ function Show4DSTEM() {
       setCompareDraggingFrame(null);
       setComparePendingMoveFrame(null);
       setCompareGridPreviewWidth(null);
-      setIsResizingCompareGrid(false);
-      setCompareGridResizeStart(null);
+      compareGridResizeCleanupRef.current?.();
     }
   }, [compareMode]);
   const compareHiddenCount = React.useMemo(() => {
@@ -5090,42 +5088,43 @@ function Show4DSTEM() {
     e.stopPropagation();
     e.preventDefault();
     try { e.currentTarget.setPointerCapture(e.pointerId); } catch {}
-    setIsResizingCompareGrid(true);
-    setCompareGridResizeStart({ x: e.clientX, y: e.clientY, width: compareGridWidth });
-  };
-
-  React.useEffect(() => {
-    if (!isResizingCompareGrid) return;
+    compareGridResizeCleanupRef.current?.();
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const startWidth = compareGridWidth;
     let rafId = 0;
-    let latestWidth = compareGridResizeStart ? compareGridResizeStart.width : compareGridWidth;
+    let latestWidth = startWidth;
     const handlePointerMove = (e: PointerEvent) => {
-      if (!compareGridResizeStart) return;
-      const delta = Math.max(e.clientX - compareGridResizeStart.x, e.clientY - compareGridResizeStart.y);
-      latestWidth = Math.max(MIN_COMPARE_GRID_WIDTH, compareGridResizeStart.width + delta);
+      const delta = Math.max(e.clientX - startX, e.clientY - startY);
+      latestWidth = Math.max(MIN_COMPARE_GRID_WIDTH, startWidth + delta);
       if (!rafId) {
         rafId = requestAnimationFrame(() => {
           rafId = 0;
           setCompareGridPreviewWidth(latestWidth);
         });
       }
+      e.preventDefault();
     };
     const handlePointerUp = () => {
       cancelAnimationFrame(rafId);
       setCompareGridWidthPx(Math.round(latestWidth));
       setCompareGridPreviewWidth(null);
-      setIsResizingCompareGrid(false);
-      setCompareGridResizeStart(null);
-    };
-    window.addEventListener("pointermove", handlePointerMove);
-    window.addEventListener("pointerup", handlePointerUp);
-    window.addEventListener("pointercancel", handlePointerUp);
-    return () => {
-      cancelAnimationFrame(rafId);
       window.removeEventListener("pointermove", handlePointerMove);
       window.removeEventListener("pointerup", handlePointerUp);
       window.removeEventListener("pointercancel", handlePointerUp);
+      compareGridResizeCleanupRef.current = null;
     };
-  }, [compareGridResizeStart, compareGridWidth, isResizingCompareGrid, setCompareGridWidthPx]);
+    compareGridResizeCleanupRef.current = handlePointerUp;
+    window.addEventListener("pointermove", handlePointerMove, { passive: false });
+    window.addEventListener("pointerup", handlePointerUp);
+    window.addEventListener("pointercancel", handlePointerUp);
+  };
+
+  React.useEffect(() => {
+    return () => {
+      compareGridResizeCleanupRef.current?.();
+    };
+  }, []);
 
   // ─────────────────────────────────────────────────────────────────────────
   // Render
