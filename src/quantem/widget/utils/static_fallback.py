@@ -270,7 +270,13 @@ class StaticFallbackMixin:
                 shell.events.unregister("post_execute", fill_once)
             except ValueError:
                 pass
-            fill()
+            try:
+                fill()
+            except Exception:
+                # The sibling preview is a saved-notebook convenience. The live
+                # widget has already displayed, so a renderer edge case should
+                # not pollute collaborator exports with callback tracebacks.
+                return
 
         shell.events.register("post_execute", fill_once)
         self._static_fallback_fill = fill  # test hook: flush the deferred render

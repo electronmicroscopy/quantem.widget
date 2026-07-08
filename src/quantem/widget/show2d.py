@@ -2033,23 +2033,43 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
         def stats_line(mean: float, lo: float, hi: float, std: float) -> str:
             fmt = self._format_stat
             return f"Mean {fmt(mean)}   Min {fmt(lo)}   Max {fmt(hi)}   Std {fmt(std)}"
+
+        def panel_stats_line(index: int, frame: np.ndarray) -> str:
+            stat_arrays = (self.stats_mean, self.stats_min, self.stats_max, self.stats_std)
+            if all(index < len(values) for values in stat_arrays):
+                return stats_line(
+                    self.stats_mean[index],
+                    self.stats_min[index],
+                    self.stats_max[index],
+                    self.stats_std[index],
+                )
+            data = np.asarray(frame, dtype=np.float64)
+            return stats_line(
+                float(np.nanmean(data)),
+                float(np.nanmin(data)),
+                float(np.nanmax(data)),
+                float(np.nanstd(data)),
+            )
+
         specs: list[dict] = []
         display_rgb = getattr(self, "_display_rgb", None) or [None] * len(frames)
         for i in self.visible_panels:
+            if i >= len(frames):
+                continue
             label = self._panel_title_for_index(i) if self.show_panel_titles else ""
             panel_rgb = display_rgb[i] if i < len(display_rgb) else None
+            frame = panel_rgb if panel_rgb is not None else frames[i]
             specs.append({
                 # RGB panels pass their display-ready pixels straight through:
                 # no colormap, no log, no contrast window (stats stay luminance).
-                "frame": panel_rgb if panel_rgb is not None else frames[i],
+                "frame": frame,
                 "rgb": panel_rgb is not None,
                 "vmin": ranges[i][0],
                 "vmax": ranges[i][1],
                 "cmap": self.cmap,
                 "apply_log": self.log_scale and panel_rgb is None,
                 "label": label,
-                "stats": stats_line(self.stats_mean[i], self.stats_min[i],
-                                    self.stats_max[i], self.stats_std[i]),
+                "stats": panel_stats_line(i, frame),
             })
         if self.diff_mode and len(frames) >= 2:
             ref = int(self.diff_reference)

@@ -1134,6 +1134,47 @@ def test_sibling_static_fallback_contract(widget, monkeypatch):
     assert not leaked, f"{widget.__name__}: heavy keys {leaked} leaked into full get_state"
 
 
+def test_deferred_static_fallback_failure_does_not_emit_traceback(monkeypatch):
+    """A failed saved-notebook preview must not pollute notebook exports."""
+    import IPython
+
+    w, _ = _make(Show2D, save_state=False)
+    displayed, updated, hooks = [], [], {}
+
+    class FakeHandle:
+        def update(self, data, raw=False, metadata=None):
+            updated.append((data, metadata))
+
+    class FakeEvents:
+        def register(self, name, fn):
+            hooks[name] = fn
+
+        def unregister(self, name, fn):
+            hooks.pop(name, None)
+
+    class ZMQInteractiveShell:
+        events = FakeEvents()
+
+    def fake_display(data, raw=False, metadata=None, display_id=None, **kw):
+        displayed.append((data, metadata, display_id))
+        return FakeHandle() if display_id else None
+
+    def fail_preview(*args, **kwargs):
+        raise RuntimeError("preview renderer failed")
+
+    monkeypatch.setattr(IPython, "get_ipython", lambda: ZMQInteractiveShell())
+    monkeypatch.setattr("IPython.display.display", fake_display)
+    monkeypatch.setattr(type(w), "_static_png_b64", fail_preview)
+
+    w._ipython_display_()
+    assert "post_execute" in hooks
+    hooks["post_execute"]()
+
+    assert "post_execute" not in hooks
+    assert len(displayed) == 2
+    assert updated == []
+
+
 @pytest.mark.parametrize("widget", WIDGETS)
 def test_sibling_not_emitted_with_save_state_true(widget, monkeypatch):
     """save_state=True embeds full interactive state; no sibling placeholder."""
