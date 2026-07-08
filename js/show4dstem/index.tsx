@@ -3414,7 +3414,7 @@ function Show4DSTEM() {
     ctx.scale(viZoom, viZoom);
     ctx.drawImage(offscreen, 0, 0);
     ctx.restore();
-  }, [viOffscreenVersion, viZoom, viPanX, viPanY, viSmooth]);
+  }, [compareMode, viOffscreenVersion, viZoom, viPanX, viPanY, viSmooth]);
 
   // Render virtual image overlay (just clear - crosshair drawn on high-DPI UI canvas)
   React.useEffect(() => {
@@ -3837,7 +3837,7 @@ function Show4DSTEM() {
         ctx.restore();
       }
     }
-  }, [viZoom, viPanX, viPanY, pixelSize, pixelUnit, showScaleBar, shapeRows, shapeCols, localPosRow, localPosCol, isDraggingVI,
+  }, [compareMode, viZoom, viPanX, viPanY, pixelSize, pixelUnit, showScaleBar, shapeRows, shapeCols, localPosRow, localPosCol, isDraggingVI,
       viRoiMode, localViRoiCenterRow, localViRoiCenterCol, viRoiRadius, viRoiWidth, viRoiHeight,
       isDraggingViRoi, isDraggingViRoiResize, isHoveringViRoiResize, canvasSize, viProfileActive, viProfilePoints]);
 

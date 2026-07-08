@@ -416,6 +416,70 @@ def _assert_canvas_pixels(page) -> dict:
     return stats
 
 
+def _panel_canvas_stats(page, rect: dict) -> list[dict]:
+    return page.evaluate(
+        """(target) => {
+          const out = [];
+          for (const canvas of document.querySelectorAll('canvas')) {
+            const rect = canvas.getBoundingClientRect();
+            if (
+              Math.abs(rect.x - target.x) > 2
+              || Math.abs(rect.y - target.y) > 2
+              || Math.abs(rect.width - target.w) > 2
+              || Math.abs(rect.height - target.h) > 2
+              || canvas.width <= 0
+              || canvas.height <= 0
+            ) {
+              continue;
+            }
+            const ctx = canvas.getContext('2d', {willReadFrequently: true}) || canvas.getContext('2d');
+            if (!ctx) continue;
+            let data;
+            try {
+              data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+            } catch {
+              continue;
+            }
+            const pixels = canvas.width * canvas.height;
+            const step = Math.max(1, Math.floor(pixels / 20000));
+            let nonblank = 0, signature = 0;
+            for (let p = 0; p < pixels; p += step) {
+              const i = p * 4;
+              const r = data[i], g = data[i + 1], b = data[i + 2], a = data[i + 3];
+              if (a > 20 && (r > 8 || g > 8 || b > 8)) nonblank++;
+              signature += r * 3 + g * 5 + b * 7 + a;
+            }
+            out.push({width: canvas.width, height: canvas.height, nonblank, signature});
+          }
+          return out;
+        }""",
+        rect,
+    )
+
+
+def _assert_single_vi_visible_after_multiple_to_single(page) -> dict:
+    combo = page.get_by_role("combobox", name="Show4DSTEM view mode")
+    assert combo.count() == 1
+    combo.click()
+    page.get_by_role("option", name="Single").click()
+    page.wait_for_function(
+        """() =>
+          document.body.innerText.includes('24×24 | 24×24')
+          && !document.body.innerText.includes('Multiple grid |')""",
+        timeout=5_000,
+    )
+    rect = _large_canvas_rects(page)[1]
+    stats = _panel_canvas_stats(page, rect)
+    assert stats, f"single VI canvases were not found after view switch: {rect!r}"
+    max_nonblank = max(item["nonblank"] for item in stats)
+    max_signature = max(item["signature"] for item in stats)
+    assert max_nonblank > 20 and max_signature > 0, {
+        "rect": rect,
+        "stats": stats,
+    }
+    return {"rect": rect, "stats": stats, "max_nonblank": max_nonblank, "max_signature": max_signature}
+
+
 def _assert_multiple_coordinate_label_once(page) -> dict:
     result = page.evaluate(
         """() => {
@@ -685,6 +749,8 @@ def test_exported_show4dstem_real_data_visual_smoke(tmp_path: Path) -> None:
                 _click_multiple_panel(page, panel_number=4)
                 multiple4_pixels = _assert_canvas_pixels(page)
                 page.screenshot(path=str(artifacts / "multiple-cols4-desktop.png"), full_page=False)
+                single_after_toggle = _assert_single_vi_visible_after_multiple_to_single(page)
+                page.screenshot(path=str(artifacts / "multiple-to-single-desktop.png"), full_page=False)
 
                 selected_title = "Visual Smoke Show4DSTEM multiple-selected"
                 _open_page(page, f"http://127.0.0.1:{port}/{pages['multiple-selected'].name}", selected_title, 12)
@@ -714,6 +780,7 @@ def test_exported_show4dstem_real_data_visual_smoke(tmp_path: Path) -> None:
                         "multiple_cols4_layout_after_resize": layout4_after_resize,
                         "multiple_cols4_coordinate_label": label4,
                         "multiple_cols4_pixels": multiple4_pixels,
+                        "multiple_to_single": single_after_toggle,
                         "multiple_selected_layout": selected_layout,
                         "multiple_selected_pixels": selected_pixels,
                         "mobile_layout": mobile_layout,
