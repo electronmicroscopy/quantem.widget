@@ -1271,6 +1271,7 @@ function CompareVirtualGrid({
   const overlayRefs = React.useRef<(HTMLCanvasElement | null)[]>([]);
   const tileRefs = React.useRef<(HTMLDivElement | null)[]>([]);
   const isDraggingPositionRef = React.useRef(false);
+  const [isDraggingPosition, setIsDraggingPosition] = React.useState(false);
   const [overlayVersion, setOverlayVersion] = React.useState(0);
   const [compareZoom, setCompareZoom] = React.useState(1);
   const [comparePanX, setComparePanX] = React.useState(0);
@@ -1380,10 +1381,6 @@ function CompareVirtualGrid({
   const gridCols = Math.max(1, Math.min(displayCount, requestedMaxCols));
   const mobileGridCols = cols > 0 ? gridCols : Math.max(1, Math.min(gridCols, 2));
   const gridGapPx = Math.max(0, Math.floor(Number.isFinite(panelGapPx) ? panelGapPx : 0));
-  const markerLeft = `${((((Math.max(0, Math.min(shapeCols - 1, cursorCol)) + 0.5) * compareZoom) + comparePanX) / Math.max(1, shapeCols)) * 100}%`;
-  const markerTop = `${((((Math.max(0, Math.min(shapeRows - 1, cursorRow)) + 0.5) * compareZoom) + comparePanY) / Math.max(1, shapeRows)) * 100}%`;
-  const markerColor = "rgba(255,255,255,0.98)";
-  const markerShadow = "0 0 0 1px rgba(0,0,0,0.72), 0 0 4px rgba(0,0,0,0.9)";
   const imageLeft = `${(comparePanX / Math.max(1, shapeCols)) * 100}%`;
   const imageTop = `${(comparePanY / Math.max(1, shapeRows)) * 100}%`;
   const imageWidth = `${compareZoom * 100}%`;
@@ -1500,16 +1497,27 @@ function CompareVirtualGrid({
       const height = Math.max(1, Math.round(cssHeight * dpr));
       if (overlay.width !== width) overlay.width = width;
       if (overlay.height !== height) overlay.height = height;
+      const ctx = overlay.getContext("2d");
+      ctx?.clearRect(0, 0, overlay.width, overlay.height);
       if (showScaleBar) {
         const unit = pixelSize > 0 ? pixelUnit || "px" : "px";
         const pxSize = pixelSize > 0 ? pixelSize : 1;
         drawScaleBarHiDPI(overlay, dpr, compareZoom, pxSize, unit, shapeCols);
-      } else {
-        const ctx = overlay.getContext("2d");
-        ctx?.clearRect(0, 0, overlay.width, overlay.height);
       }
+      drawViPositionMarker(
+        overlay,
+        dpr,
+        cursorRow,
+        cursorCol,
+        compareZoom,
+        comparePanX,
+        comparePanY,
+        shapeCols,
+        shapeRows,
+        isDraggingPosition,
+      );
     });
-  }, [compareZoom, overlayVersion, pixelSize, pixelUnit, renderEntries, shapeCols, showScaleBar]);
+  }, [comparePanX, comparePanY, compareZoom, cursorCol, cursorRow, isDraggingPosition, overlayVersion, pixelSize, pixelUnit, renderEntries, shapeCols, shapeRows, showScaleBar]);
 
   if (renderEntries.length === 0) {
     return (
@@ -1560,6 +1568,7 @@ function CompareVirtualGrid({
                 if (reorderMode || target?.closest("button")) return;
                 try { event.currentTarget.setPointerCapture(event.pointerId); } catch {}
                 isDraggingPositionRef.current = true;
+                setIsDraggingPosition(true);
                 updatePositionFromPointer(event.currentTarget, event.clientX, event.clientY);
                 onSelect(frame);
               }}
@@ -1572,11 +1581,13 @@ function CompareVirtualGrid({
                 if (!isDraggingPositionRef.current) return;
                 updatePositionFromPointer(event.currentTarget, event.clientX, event.clientY, true);
                 isDraggingPositionRef.current = false;
+                setIsDraggingPosition(false);
               }}
               onPointerCancel={(event) => {
                 if (!isDraggingPositionRef.current) return;
                 updatePositionFromPointer(event.currentTarget, event.clientX, event.clientY, true);
                 isDraggingPositionRef.current = false;
+                setIsDraggingPosition(false);
               }}
               onClick={() => {
                 if (!reorderMode) {
@@ -1714,42 +1725,6 @@ function CompareVirtualGrid({
                   width: "100%",
                   height: "100%",
                   pointerEvents: "none",
-                }}
-              />
-              <Box
-                sx={{
-                  position: "absolute",
-                  left: markerLeft,
-                  top: markerTop,
-                  width: 24,
-                  height: 24,
-                  transform: "translate(-50%, -50%)",
-                  pointerEvents: "none",
-                  zIndex: 3,
-                  backgroundImage: "radial-gradient(circle, rgba(0,0,0,0.78) 0 2px, rgba(255,255,255,0.98) 2px 4px, rgba(0,0,0,0.72) 4px 5px, transparent 5px)",
-                  filter: active ? "none" : "drop-shadow(0 0 1px rgba(0,0,0,0.85))",
-                  "&::before": {
-                    content: '""',
-                    position: "absolute",
-                    left: 0,
-                    right: 0,
-                    top: "50%",
-                    height: 2,
-                    bgcolor: markerColor,
-                    transform: "translateY(-50%)",
-                    boxShadow: markerShadow,
-                  },
-                  "&::after": {
-                    content: '""',
-                    position: "absolute",
-                    top: 0,
-                    bottom: 0,
-                    left: "50%",
-                    width: 2,
-                    bgcolor: markerColor,
-                    transform: "translateX(-50%)",
-                    boxShadow: markerShadow,
-                  },
                 }}
               />
               <Box
