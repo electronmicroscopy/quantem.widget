@@ -27,6 +27,7 @@ change needs them.
 | `scripts/widget_show3d_animation_smoke.py` | Show3D GIF exports are presentation-ready. | Dry-run size plan, multi-panel low/medium/high GIF previews, panel-gap control, live-style labels, scale bar, zoom readout, export seconds, file sizes, dimensions, frame count, frame-delta metric, optional local Caitlyn time-series source. | When GIF/MP4 animation export, PowerPoint sharing, or Show3D movie quality changes. | `index.html`, `report.json`, `show3d-caitlyn-timeseries-*.gif` unless `--dry-run`. |
 | `scripts/widget_browser_smoke.py` | Exported HTML actually renders and responds in Chromium. | Nonblank canvases, wheel/drag interaction, switches, sliders, console/page/HTTP errors, `requestAnimationFrame` FPS, FFT state, storyboard IDs, optional mobile viewport. | `scripts/widget_local_signoff.sh --quick --browser`; add `--mobile` for narrow/touch layout changes. | `browser-smoke.html`, `browser-smoke-report.json`, screenshots. |
 | `scripts/widget_performance_smoke.py` | Backend export packing and small real-data Show2D/Show3D payloads are measurable. | Real-data discovery, export time, output size, browser-drive plan. | `--performance` signoff or when checking export size/time trends. | `index.html`, `report.json`, `browser-plan.json`, exported real-data HTML. |
+| `scripts/widget_external_html_profile.py` | A standalone exported HTML report that already exists outside the repo remains interactive and fast. | Opens a provided URL, checks nonblank canvases, samples FPS, drives common Show3D page/play/hide controls when present, captures screenshots and console/page errors. | Local-only review of Tailscale-served or hosted real-data reports, especially when a user points to an existing exported HTML file. | `index.html`, `metrics.json`, screenshots under `/tmp` or `--artifact-dir`. |
 | `scripts/widget_heavy_perf_signoff.py` | Heavy Show2D/Show3D real-data browser performance is acceptable on lab data. | Local real-data discovery, heavy exports, browser FPS, nonblank render, screenshots, Show3D FFT overlay idle-cache guard, and FFT metric stats-toggle cache guard. | Local-only HPC/workstation performance claims; never normal CI. | `index.html`, `heavy-signoff-report.json`, `browser-smoke-report.json`, screenshots under `/tmp`. |
 | `scripts/widget_show4dstem_heavy_signoff.py` | Heavy Show4DSTEM real-data loading, NVIDIA/CUDA backend memory, append/stack-growth, export, and browser interaction are acceptable on lab data. | Local 4D-STEM master discovery, CUDA first-load timing, backend memory report, append/stack-growth timing, dataset/frame flip FPS, virtual-detector drag FPS, scan-position FPS, browser WebGPU/backend split, GPU memory before/after. | Local-only Show4DSTEM performance claims; never normal CI. | `index.html`, `show4dstem-heavy-signoff-report.json`, exported Show4DSTEM HTML, browser screenshot under `/tmp`. |
 | `scripts/widget_phone_handoff.py` | A human can verify physical phone Safari behavior with shared logs. | Serves report on `0.0.0.0`, prints Tailscale/HTTPS handoff command, records viewport/touch/pointer/WebGPU events. | Physical iPhone/iPad checks after browser smoke, especially WebGPU or touch changes. | Served report, `phone-probe.html`, `phone-events.ndjson`. |
@@ -97,6 +98,20 @@ performance proof.
 
 Standalone exported HTML is a separate surface. It must be tested in the
 browser without assuming a Python kernel exists.
+
+When the real-data export already exists, profile the URL directly instead of
+regenerating data:
+
+```bash
+PYTHONPATH=src:. python scripts/widget_external_html_profile.py \
+  --url http://127.0.0.1:8779/path/to/exported-widget.html \
+  --artifact-dir /tmp/quantem-widget-external-html-profile
+```
+
+Use this for Tailscale-served reports, overnight studies, and other external
+HTML evidence. The report is local-only by default; do not commit private
+screenshots, generated HTML, or metrics containing private paths unless the
+user explicitly asks for a sanitized artifact.
 
 ### 3. Browser FPS And Latency Measurements
 

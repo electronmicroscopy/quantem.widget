@@ -22,6 +22,8 @@ import Slider from "@mui/material/Slider";
 import Button from "@mui/material/Button";
 import IconButton from "@mui/material/IconButton";
 import Tooltip from "@mui/material/Tooltip";
+import PlayArrowIcon from "@mui/icons-material/PlayArrow";
+import PauseIcon from "@mui/icons-material/Pause";
 import VisibilityIcon from "@mui/icons-material/Visibility";
 import VisibilityOffIcon from "@mui/icons-material/VisibilityOff";
 import DragIndicatorIcon from "@mui/icons-material/DragIndicator";
@@ -32,6 +34,9 @@ import { useHideStaticFallback } from "../staticFallback";
 import { computeHistogramFromBytes, findDataRange, applyLogScale, percentileClip, sliderRange, computeStats } from "../stats";
 import { MetadataSection } from "../widgetInfo";
 import { EmbeddedWidgetView } from "../embeddedWidget";
+import { getWebGPUFFT, WebGPUFFT, fft2d, fft2dAsync, fftshift, computeMagnitude, autoEnhanceFFT, nextPow2, applyHannWindow2D, getGPUInfo } from "../fft";
+import { computeFftQualityMetrics, formatFftQualityLabel, type FftQualityMetrics } from "../fftMetrics";
+import { COLORMAPS, COLORMAP_NAMES, renderToOffscreen, renderToOffscreenReuse, GPUColormapEngine, getGPUColormapEngine, getGPUMaxBufferSize } from "../colormaps";
 
 const SHOW2D_TO_SHOW3D_LINKED_TRAITS = [
   { source: "cmap" },
@@ -106,9 +111,7 @@ const upwardMenuProps = {
   transformOrigin: { vertical: "bottom" as const, horizontal: "left" as const },
   sx: { zIndex: 9999 },
 };
-import { getWebGPUFFT, WebGPUFFT, fft2d, fft2dAsync, fftshift, computeMagnitude, autoEnhanceFFT, nextPow2, applyHannWindow2D, getGPUInfo } from "../fft";
-import { computeFftQualityMetrics, formatFftQualityLabel, type FftQualityMetrics } from "../fftMetrics";
-import { COLORMAPS, COLORMAP_NAMES, renderToOffscreen, renderToOffscreenReuse, GPUColormapEngine, getGPUColormapEngine, getGPUMaxBufferSize } from "../colormaps";
+const PAGE_PLAY_FPS_OPTIONS = [1, 2, 3, 4] as const;
 
 function useMobileViewport(): boolean {
   const getIsMobile = React.useCallback(() => {
@@ -776,7 +779,10 @@ function Show2D() {
   const [pageLabels] = useModelState<string[]>("page_labels");
   const [pageStarred, setPageStarred] = useModelState<number[]>("page_starred");
   const isPaged = (nPages || 1) > 1 && (panelsPerPage || 0) > 0;
-  const activePageStart = isPaged ? Math.max(0, Math.min((nPages || 1) - 1, pageIdx || 0)) * Math.max(1, panelsPerPage || 1) : 0;
+  const currentPageIdx = Math.max(0, Math.min((nPages || 1) - 1, Math.round(pageIdx || 0)));
+  const [pagePlaying, setPagePlaying] = React.useState(false);
+  const [pagePlayFps, setPagePlayFps] = React.useState<number>(2);
+  const activePageStart = isPaged ? currentPageIdx * Math.max(1, panelsPerPage || 1) : 0;
   const activePageEnd = isPaged ? Math.min(nImages, activePageStart + Math.max(1, panelsPerPage || 1)) : nImages;
   const activePageIndices = React.useMemo(
     () => Array.from({ length: Math.max(0, activePageEnd - activePageStart) }, (_, i) => activePageStart + i),
@@ -784,6 +790,16 @@ function Show2D() {
   );
   const activePanelCount = isPaged ? activePageIndices.length : Math.max(1, nImages || 1);
   const isGallery = (isPaged ? activePageIndices.length : nImages) > 1;
+  React.useEffect(() => {
+    if (!isPaged || (nPages || 1) <= 1) setPagePlaying(false);
+  }, [isPaged, nPages]);
+  React.useEffect(() => {
+    if (!pagePlaying || !isPaged || (nPages || 1) <= 1) return;
+    const timeout = window.setTimeout(() => {
+      setPageIdx((currentPageIdx + 1) % Math.max(1, nPages || 1));
+    }, 1000 / Math.max(1, pagePlayFps));
+    return () => window.clearTimeout(timeout);
+  }, [currentPageIdx, isPaged, nPages, pagePlayFps, pagePlaying, setPageIdx]);
   const [width] = useModelState<number>("width");
   const [height] = useModelState<number>("height");
   const [frameBytes] = useModelState<DataView>("frame_bytes");
@@ -5202,39 +5218,65 @@ function Show2D() {
               <>
                 <Typography sx={{ ...typography.label, fontSize: 10 }}>Page</Typography>
                 <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.accent, minWidth: 56 }}>
-                  {(pageLabels?.[pageIdx] || `Page ${pageIdx + 1}`)} {pageIdx + 1}/{nPages}
+                  {(pageLabels?.[currentPageIdx] || `Page ${currentPageIdx + 1}`)} {currentPageIdx + 1}/{nPages}
                 </Typography>
                 <Slider
-                  value={pageIdx}
+                  value={currentPageIdx}
                   min={0}
                   max={Math.max(0, (nPages || 1) - 1)}
                   step={1}
+                  onPointerDownCapture={() => setPagePlaying(false)}
+                  onKeyDown={() => setPagePlaying(false)}
                   onChange={(_, value) => {
                     const next = Array.isArray(value) ? value[0] : value;
+                    setPagePlaying(false);
                     setPageIdx(Math.max(0, Math.min((nPages || 1) - 1, Math.round(Number(next) || 0))));
                   }}
+                  onChangeCommitted={() => setPagePlaying(false)}
                   size="small"
                   sx={{ ...sliderStyles.small, width: 120, color: themeColors.accent }}
                   aria-label="Page"
                 />
                 <IconButton
                   size="small"
+                  onClick={() => setPagePlaying((value) => !value)}
+                  title={pagePlaying ? "Pause page playback" : "Play pages"}
+                  aria-label={pagePlaying ? "Pause page playback" : "Play pages"}
+                  sx={{ width: 24, height: 24, p: 0, color: themeColors.accent }}
+                >
+                  {pagePlaying ? <PauseIcon sx={{ fontSize: 16 }} /> : <PlayArrowIcon sx={{ fontSize: 16 }} />}
+                </IconButton>
+                <Select
+                  value={String(pagePlayFps)}
+                  onChange={(e) => setPagePlayFps(Number(e.target.value) || 2)}
+                  size="small"
+                  sx={{ ...themedSelect, minWidth: 48, fontSize: 10 }}
+                  MenuProps={themedTopMenuProps}
+                  inputProps={{ "aria-label": "Page playback frames per second" }}
+                  title="Page playback speed"
+                >
+                  {PAGE_PLAY_FPS_OPTIONS.map((fps) => (
+                    <MenuItem key={fps} value={String(fps)}>{fps} fps</MenuItem>
+                  ))}
+                </Select>
+                <IconButton
+                  size="small"
                   onClick={() => {
                     const next = Array.from({ length: Math.max(1, nPages || 1) }, (_, idx) => pageStarred?.[idx] ? 1 : 0);
-                    next[pageIdx] = next[pageIdx] ? 0 : 1;
+                    next[currentPageIdx] = next[currentPageIdx] ? 0 : 1;
                     setPageStarred(next);
                   }}
-                  title={(pageStarred?.[pageIdx] ? "Unstar " : "Star ") + (pageLabels?.[pageIdx] || `Page ${pageIdx + 1}`)}
-                  aria-label={(pageStarred?.[pageIdx] ? "Unstar " : "Star ") + (pageLabels?.[pageIdx] || `Page ${pageIdx + 1}`)}
+                  title={(pageStarred?.[currentPageIdx] ? "Unstar " : "Star ") + (pageLabels?.[currentPageIdx] || `Page ${currentPageIdx + 1}`)}
+                  aria-label={(pageStarred?.[currentPageIdx] ? "Unstar " : "Star ") + (pageLabels?.[currentPageIdx] || `Page ${currentPageIdx + 1}`)}
                   sx={{
                     width: 24,
                     height: 24,
                     p: 0,
-                    color: pageStarred?.[pageIdx] ? "#ffc107" : themeColors.textMuted,
-                    "&:hover": { color: pageStarred?.[pageIdx] ? "#ffc107" : themeColors.text },
+                    color: pageStarred?.[currentPageIdx] ? "#ffc107" : themeColors.textMuted,
+                    "&:hover": { color: pageStarred?.[currentPageIdx] ? "#ffc107" : themeColors.text },
                   }}
                 >
-                  {pageStarred?.[pageIdx] ? "★" : "☆"}
+                  {pageStarred?.[currentPageIdx] ? "★" : "☆"}
                 </IconButton>
               </>
             )}
@@ -5784,10 +5826,10 @@ function Show2D() {
                             textOverflow: "ellipsis",
                             zIndex: 2,
                           }}
-                      >
-                        FFT · {panelLabel(i)}
-                      </Box>
-                    )}
+                        >
+                          FFT · {panelLabel(i)}
+                        </Box>
+                      )}
                       {fftMetricsEnabled && galleryFftQuality[i] && (
                         <Box
                           className="quantem-fft-quality-label"

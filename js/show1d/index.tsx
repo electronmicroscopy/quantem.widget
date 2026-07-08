@@ -2,34 +2,24 @@ import * as React from "react";
 import { createRender, useModel, useModelState } from "@anywidget/react";
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
-import Divider from "@mui/material/Divider";
 import IconButton from "@mui/material/IconButton";
-import InputAdornment from "@mui/material/InputAdornment";
 import Menu from "@mui/material/Menu";
 import MenuItem from "@mui/material/MenuItem";
 import Select from "@mui/material/Select";
 import Slider from "@mui/material/Slider";
 import Stack from "@mui/material/Stack";
 import Switch from "@mui/material/Switch";
-import TextField from "@mui/material/TextField";
 import Tooltip from "@mui/material/Tooltip";
 import Typography from "@mui/material/Typography";
-import ClearIcon from "@mui/icons-material/Clear";
 import DownloadIcon from "@mui/icons-material/Download";
 import FastForwardIcon from "@mui/icons-material/FastForward";
 import FastRewindIcon from "@mui/icons-material/FastRewind";
-import GridOffIcon from "@mui/icons-material/GridOff";
-import GridOnIcon from "@mui/icons-material/GridOn";
 import ImageIcon from "@mui/icons-material/Image";
 import PauseIcon from "@mui/icons-material/Pause";
 import PlayArrowIcon from "@mui/icons-material/PlayArrow";
-import RestartAltIcon from "@mui/icons-material/RestartAlt";
 import ShowChartIcon from "@mui/icons-material/ShowChart";
-import StarIcon from "@mui/icons-material/Star";
-import StarBorderIcon from "@mui/icons-material/StarBorder";
 import StopIcon from "@mui/icons-material/Stop";
 import TableChartIcon from "@mui/icons-material/TableChart";
-import VisibilityIcon from "@mui/icons-material/Visibility";
 import VisibilityOffIcon from "@mui/icons-material/VisibilityOff";
 import { downloadBlob, extractBytes, extractFloat32, formatNumber, preserveRestoredWidgetModelsOnSave } from "../format";
 import { COLORMAPS, COLORMAP_NAMES, getGPUColormapEngine } from "../colormaps";
@@ -90,11 +80,33 @@ type ImageViewState = {
   panY: number;
 };
 
+type ImageViewApiState = {
+  zoom: number;
+  center: number[];
+};
+
+type SnapshotOverlayPosition = "top-left" | "top-right" | "bottom-left" | "bottom-right";
+
 type SnapshotFftCacheEntry = {
   data: Float32Array;
   width: number;
   height: number;
   backend: string;
+};
+
+type PlotThumbnailCacheEntry = {
+  canvas: HTMLCanvasElement;
+  width: number;
+  height: number;
+  iteration: number;
+};
+
+type PlotThumbnailHitArea = {
+  groupIdx: number;
+  x0: number;
+  y0: number;
+  width: number;
+  height: number;
 };
 
 type TrialRanking = {
@@ -114,13 +126,6 @@ type TrialRanking = {
   hidden?: boolean;
   note?: string;
   tags?: string[];
-};
-
-type TrialAlert = {
-  label?: string;
-  kind?: string;
-  severity?: string;
-  message?: string;
 };
 
 type Show1DWritableFile = {
@@ -143,6 +148,8 @@ type Show1DWindow = Window & typeof globalThis & {
 
 const EMPTY_BYTES = new Uint8Array(0);
 const DEFAULT_SIZE = { width: 820, height: 380 };
+const SNAPSHOT_OVERLAY_POSITIONS: SnapshotOverlayPosition[] = ["top-left", "top-right", "bottom-left", "bottom-right"];
+const PROFILE_COLORS = ["#4fc3f7", "#81c784", "#ffb74d", "#ce93d8", "#ef5350", "#ffd54f", "#90a4ae", "#a1887f"];
 const controlRow = {
   display: "flex",
   alignItems: "center",
@@ -156,6 +163,17 @@ const controlRow = {
 };
 const controlPanel = {
   select: { minWidth: 90, fontSize: 11, "& .MuiSelect-select": { py: 0.5 } },
+};
+const compactButton = {
+  fontSize: 10,
+  py: 0.25,
+  px: 1,
+  minWidth: 0,
+  textTransform: "none" as const,
+  "&.Mui-disabled": {
+    color: "#666",
+    borderColor: "#444",
+  },
 };
 const upwardMenuProps = {
   anchorOrigin: { vertical: "top" as const, horizontal: "left" as const },
@@ -205,6 +223,19 @@ function useElementSize(ref: React.RefObject<HTMLElement | null>, fallback: { wi
     observer.observe(node);
     return () => observer.disconnect();
   }, [ref]);
+  return size;
+}
+
+function useViewportSize() {
+  const [size, setSize] = React.useState(() => ({
+    width: typeof window === "undefined" ? 1280 : window.innerWidth,
+    height: typeof window === "undefined" ? 800 : window.innerHeight,
+  }));
+  React.useEffect(() => {
+    const update = () => setSize({ width: window.innerWidth, height: window.innerHeight });
+    window.addEventListener("resize", update);
+    return () => window.removeEventListener("resize", update);
+  }, []);
   return size;
 }
 
@@ -330,10 +361,30 @@ function cssColor(colors: string[], idx: number): string {
   return colors[idx] || ["#1f77b4", "#2ca02c", "#ff7f0e", "#d62728", "#9467bd", "#8c564b"][idx % 6];
 }
 
+function compactScienceLabel(label: string): string {
+  let text = String(label || "").trim();
+  if (!text) return text;
+  text = text.replace(/_/g, " ");
+  text = text.replace(/\bframe\s*[- ]\s*by\s*[- ]\s*frame\b/gi, "frame");
+  text = text.replace(/\bjoint\s+lambda\s*/gi, "λ");
+  text = text.replace(/\blambda\s*/gi, "λ");
+  text = text.replace(/\balpha\s*/gi, "α");
+  text = text.replace(/\bbeta\s*/gi, "β");
+  text = text.replace(/\bgamma\s*/gi, "γ");
+  text = text.replace(/\bsigma\s*/gi, "σ");
+  text = text.replace(/\s*\/\s*/g, "/");
+  return text.replace(/\s+/g, " ").trim();
+}
+
+function normaliseSnapshotOverlayPosition(value: string): SnapshotOverlayPosition {
+  const clean = String(value || "").toLowerCase().replace(/_/g, "-");
+  return SNAPSHOT_OVERLAY_POSITIONS.includes(clean as SnapshotOverlayPosition)
+    ? clean as SnapshotOverlayPosition
+    : "top-right";
+}
+
 function shortMethodLabel(label: string): string {
-  if (label === "frame_by_frame") return "frame";
-  if (label.startsWith("joint_lambda_")) return `lambda ${label.slice("joint_lambda_".length)}`;
-  return label.replace(/_/g, " ");
+  return compactScienceLabel(label);
 }
 
 function trialKey(label: string): string {
@@ -350,15 +401,6 @@ function uniqueStrings(values: string[]): string[] {
     out.push(text);
   }
   return out;
-}
-
-function lookupByTrialKey<T>(mapping: Record<string, T> | undefined, label: string): T | undefined {
-  if (!mapping) return undefined;
-  const key = trialKey(label);
-  for (const [rawLabel, value] of Object.entries(mapping)) {
-    if (trialKey(rawLabel) === key) return value;
-  }
-  return undefined;
 }
 
 function parseLambdaLabel(label: string): number {
@@ -379,12 +421,6 @@ function rankingNumber(row: TrialRanking, key: string): number {
   }
   const value = Number((row as Record<string, unknown>)[clean]);
   return Number.isFinite(value) ? value : Number.NaN;
-}
-
-function rankingDisplayValue(row: TrialRanking, key: string): string {
-  const clean = key === "default" ? "final_loss" : key;
-  const raw = Number((row as Record<string, unknown>)[clean]);
-  return Number.isFinite(raw) ? formatNumber(raw, clean === "lambda" ? 3 : 4) : "";
 }
 
 function trimTrailingZeros(value: string): string {
@@ -422,13 +458,6 @@ function axisPositionText(value: number, label: string, unit: string): string {
   if (!formatted) return "";
   const axis = label.trim() || "x";
   return `${axis} ${formatted}${unit.trim() ? ` ${unit.trim()}` : ""}`;
-}
-
-function labelAlreadyContainsValue(label: string, value: number): boolean {
-  const formatted = formatAxisValue(value);
-  if (!formatted) return false;
-  const escaped = formatted.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return new RegExp(`(^|[^0-9.\\-])${escaped}([^0-9.]|$)`).test(label);
 }
 
 function makeExportFilename(title: string, nTraces: number, nPoints: number, mode: "html" | "csv" | "png"): string {
@@ -473,11 +502,19 @@ function clampValue(value: number, min: number, max: number): number {
 }
 
 function clampSnapshotFps(value: number): number {
-  return clampValue(Number.isFinite(value) ? value : 2, 0.25, 24);
+  return Math.round(clampValue(Number.isFinite(value) ? value : 2, 1, 24));
 }
 
 function clampThumbnailSize(value: number): number {
   return Math.round(clampValue(Number.isFinite(value) ? value : 48, 24, 112));
+}
+
+function autoSnapshotColumnsForCount(count: number): number {
+  if (count >= 12) return 6;
+  if (count >= 9) return 5;
+  if (count >= 6) return 4;
+  if (count >= 3) return 3;
+  return Math.max(1, count);
 }
 
 function clampImageZoom(value: number): number {
@@ -506,8 +543,118 @@ function clampImagePan(
   };
 }
 
+function normaliseImageViewCenter(center: number[] | null | undefined, imageH: number, imageW: number): [number, number] {
+  if (center && center.length === 2 && Number.isFinite(center[0]) && Number.isFinite(center[1])) {
+    return [
+      clampValue(Number(center[0]), 0, Math.max(1, imageH)),
+      clampValue(Number(center[1]), 0, Math.max(1, imageW)),
+    ];
+  }
+  return [Math.max(1, imageH) / 2, Math.max(1, imageW) / 2];
+}
+
+function imageApiToView(
+  zoom: number,
+  center: number[] | null | undefined,
+  canvasW: number,
+  canvasH: number,
+  imageW: number,
+  imageH: number,
+): ImageViewState {
+  const cleanZoom = clampImageZoom(zoom);
+  const [centerRow, centerCol] = normaliseImageViewCenter(center, imageH, imageW);
+  const fit = Math.min(canvasW / Math.max(1, imageW), canvasH / Math.max(1, imageH));
+  return clampImagePan(
+    (Math.max(1, imageW) / 2 - centerCol) * fit * cleanZoom,
+    (Math.max(1, imageH) / 2 - centerRow) * fit * cleanZoom,
+    cleanZoom,
+    canvasW,
+    canvasH,
+    imageW,
+    imageH,
+  );
+}
+
+function imageViewToApi(
+  view: ImageViewState,
+  canvasW: number,
+  canvasH: number,
+  imageW: number,
+  imageH: number,
+): ImageViewApiState {
+  const cleanZoom = clampImageZoom(view.zoom);
+  if (cleanZoom <= 1.0001) return { zoom: 1, center: [] };
+  const fit = Math.min(canvasW / Math.max(1, imageW), canvasH / Math.max(1, imageH));
+  const scale = Math.max(fit * cleanZoom, 1e-12);
+  const centerRow = Math.max(1, imageH) / 2 - view.panY / scale;
+  const centerCol = Math.max(1, imageW) / 2 - view.panX / scale;
+  return {
+    zoom: Number(cleanZoom.toFixed(4)),
+    center: [Number(centerRow.toFixed(3)), Number(centerCol.toFixed(3))],
+  };
+}
+
+function imageViewNeedsReset(zoom: number, center: number[] | null | undefined): boolean {
+  return clampImageZoom(zoom) > 1.0001 || Boolean(center && center.length === 2);
+}
+
+function sampleLineProfile(data: Float32Array, width: number, height: number, row0: number, col0: number, row1: number, col1: number): Float32Array {
+  const dc = col1 - col0;
+  const dr = row1 - row0;
+  const length = Math.sqrt(dc * dc + dr * dr);
+  const n = Math.max(2, Math.ceil(length) + 1);
+  const out = new Float32Array(n);
+  for (let idx = 0; idx < n; idx += 1) {
+    const t = idx / Math.max(1, n - 1);
+    const col = col0 + t * dc;
+    const row = row0 + t * dr;
+    const ci = Math.floor(col);
+    const ri = Math.floor(row);
+    const cf = col - ci;
+    const rf = row - ri;
+    const c0 = clampValue(ci, 0, width - 1);
+    const c1 = clampValue(ci + 1, 0, width - 1);
+    const r0 = clampValue(ri, 0, height - 1);
+    const r1 = clampValue(ri + 1, 0, height - 1);
+    out[idx] = data[r0 * width + c0] * (1 - cf) * (1 - rf)
+      + data[r0 * width + c1] * cf * (1 - rf)
+      + data[r1 * width + c0] * (1 - cf) * rf
+      + data[r1 * width + c1] * cf * rf;
+  }
+  return out;
+}
+
+function pointToSegmentDistance(col: number, row: number, col0: number, row0: number, col1: number, row1: number): number {
+  const dc = col1 - col0;
+  const dr = row1 - row0;
+  const lenSq = dc * dc + dr * dr;
+  if (lenSq <= 1e-12) return Math.sqrt((col - col0) ** 2 + (row - row0) ** 2);
+  const t = clampValue(((col - col0) * dc + (row - row0) * dr) / lenSq, 0, 1);
+  const projCol = col0 + t * dc;
+  const projRow = row0 + t * dr;
+  return Math.sqrt((col - projCol) ** 2 + (row - projRow) ** 2);
+}
+
+function isFiniteProfilePoint(point: ProfilePoint | undefined): point is Required<ProfilePoint> {
+  return Boolean(point && Number.isFinite(point.row) && Number.isFinite(point.col));
+}
+
+function clampProfilePoint(point: ProfilePoint, height: number, width: number): Required<ProfilePoint> {
+  return {
+    row: clampValue(Number(point.row ?? 0), 0, Math.max(0, height - 1)),
+    col: clampValue(Number(point.col ?? 0), 0, Math.max(0, width - 1)),
+  };
+}
+
 function normaliseSnapshotContrastPreset(value: string): string {
   return snapshotContrastPresets.some((preset) => preset.value === value) ? value : "full";
+}
+
+function normaliseSnapshotContrastRange(value: number[] | undefined | null): [number, number] | null {
+  if (!value || value.length !== 2) return null;
+  const lo = Number(value[0]);
+  const hi = Number(value[1]);
+  return Number.isFinite(lo) && Number.isFinite(hi) && lo < hi ? [lo, hi] : null;
 }
 
 function finitePercentileClip(data: Float32Array, low: number, high: number): { vmin: number; vmax: number } | null {
@@ -532,7 +679,8 @@ function finitePercentileClip(data: Float32Array, low: number, high: number): { 
   return { vmin: clipped.vmin, vmax: clipped.vmax };
 }
 
-function resolveSnapshotDisplayRange(data: Float32Array, presetValue: string): [number, number] {
+function resolveSnapshotDisplayRange(data: Float32Array, presetValue: string, customRange?: [number, number] | null): [number, number] {
+  if (customRange) return customRange;
   const preset = snapshotContrastPresets.find((item) => item.value === normaliseSnapshotContrastPreset(presetValue)) ?? snapshotContrastPresets[0];
   if (preset.value === "full") return finiteExtent(data, [0, 1]);
   const clipped = finitePercentileClip(data, preset.low, preset.high);
@@ -836,6 +984,27 @@ function drawSnapshotGroupThumbnail(
   ctx.restore();
 }
 
+function createSnapshotGroupThumbnailCanvas(
+  images: { data: Float32Array; height: number; width: number }[],
+  size: number,
+  lut: Uint8Array,
+  colors: { bgAlt: string; border: string; accent: string; text: string },
+  contrastPreset: string,
+): { canvas: HTMLCanvasElement; width: number; height: number } | null {
+  if (typeof document === "undefined") return null;
+  const valid = images.filter((image) => image.data.length && image.height > 0 && image.width > 0).slice(0, 9);
+  if (!valid.length || size <= 0) return null;
+  const metrics = snapshotGroupThumbnailMetrics(valid.length, size);
+  if (metrics.width <= 0 || metrics.height <= 0) return null;
+  const canvas = document.createElement("canvas");
+  canvas.width = metrics.width;
+  canvas.height = metrics.height;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return null;
+  drawSnapshotGroupThumbnail(ctx, valid, 0, 0, size, false, lut, colors, contrastPreset);
+  return { canvas, width: metrics.width, height: metrics.height };
+}
+
 function drawPanelScaleBarHiDPI(
   canvas: HTMLCanvasElement,
   dpr: number,
@@ -878,10 +1047,6 @@ function drawPanelScaleBarHiDPI(
   ctx.textAlign = "center";
   ctx.textBaseline = "bottom";
   ctx.fillText(formatScaleLabel(nicePhysical, unit || "px"), barX + Math.min(barPx, cssWidth - margin - barX) / 2, barY - 4);
-
-  ctx.textAlign = "left";
-  ctx.textBaseline = "bottom";
-  ctx.fillText(`${zoom.toFixed(1)}×`, margin, cssHeight - margin + barThickness);
   ctx.restore();
 }
 
@@ -896,11 +1061,16 @@ function InteractiveFloatCanvas({
   loading = false,
   displayRange,
   scaleBarVisible,
+  overlayPosition,
   pixelSize,
   pixelUnit,
   ariaLabel,
-  view,
+  viewZoom,
+  viewCenter,
+  profileActive = false,
+  profileLine = [],
   onViewChange,
+  onProfileLineChange,
   onSelect,
 }: {
   data: Float32Array;
@@ -913,21 +1083,52 @@ function InteractiveFloatCanvas({
   loading?: boolean;
   displayRange?: [number, number];
   scaleBarVisible: boolean;
+  overlayPosition: string;
   pixelSize: number;
   pixelUnit: string;
   ariaLabel: string;
-  view: ImageViewState;
-  onViewChange: (view: ImageViewState) => void;
+  viewZoom: number;
+  viewCenter: number[];
+  profileActive?: boolean;
+  profileLine?: ProfilePoint[];
+  onViewChange: (view: ImageViewApiState) => void;
+  onProfileLineChange?: (line: ProfilePoint[]) => void;
   onSelect?: () => void;
 }) {
   const hostRef = React.useRef<HTMLDivElement>(null);
   const canvasRef = React.useRef<HTMLCanvasElement>(null);
   const overlayRef = React.useRef<HTMLCanvasElement>(null);
-  const viewRef = React.useRef<ImageViewState>(view);
+  const viewRef = React.useRef<ImageViewState>({ zoom: 1, panX: 0, panY: 0 });
   const pendingViewRef = React.useRef<ImageViewState | null>(null);
   const viewRafRef = React.useRef<number | null>(null);
   const dragRef = React.useRef<{ pointerId: number; x: number; y: number; panX: number; panY: number; zoom: number } | null>(null);
+  const profileDragRef = React.useRef<{
+    pointerId: number;
+    mode: "start" | "end" | "line" | "new";
+    x: number;
+    y: number;
+    row: number;
+    col: number;
+    p0?: Required<ProfilePoint>;
+    p1?: Required<ProfilePoint>;
+  } | null>(null);
+  const [profileHoverMode, setProfileHoverMode] = React.useState<"endpoint" | "line" | null>(null);
   const [drawTick, setDrawTick] = React.useState(0);
+  const resolvedOverlayPosition = normaliseSnapshotOverlayPosition(overlayPosition);
+  const overlayOnRight = resolvedOverlayPosition.endsWith("right");
+  const overlayOnBottom = resolvedOverlayPosition.startsWith("bottom");
+
+  const currentApiView = React.useCallback(() => {
+    const rect = canvasRef.current?.getBoundingClientRect();
+    return imageApiToView(
+      viewZoom,
+      viewCenter,
+      rect?.width ?? Math.max(1, width),
+      rect?.height ?? Math.max(1, height),
+      width,
+      height,
+    );
+  }, [height, viewCenter, viewZoom, width]);
 
   const cleanView = React.useCallback((next: ImageViewState) => {
     const rect = canvasRef.current?.getBoundingClientRect();
@@ -942,6 +1143,38 @@ function InteractiveFloatCanvas({
     );
   }, [height, width]);
 
+  const imagePointFromClient = React.useCallback((clientX: number, clientY: number) => {
+    const rect = canvasRef.current?.getBoundingClientRect();
+    if (!rect || width <= 0 || height <= 0) return null;
+    const view = viewRef.current;
+    const fit = Math.min(rect.width / Math.max(1, width), rect.height / Math.max(1, height));
+    const zoom = clampImageZoom(view.zoom);
+    const scale = Math.max(1e-12, fit * zoom);
+    const drawW = width * scale;
+    const drawH = height * scale;
+    const x0 = rect.width / 2 - drawW / 2 + view.panX;
+    const y0 = rect.height / 2 - drawH / 2 + view.panY;
+    const col = (clientX - rect.left - x0) / scale;
+    const row = (clientY - rect.top - y0) / scale;
+    if (col < 0 || col > width - 1 || row < 0 || row > height - 1) return null;
+    return {
+      row,
+      col,
+      hitRadius: 10 / scale,
+    };
+  }, [height, width]);
+
+  const profileHitTest = React.useCallback((row: number, col: number, hitRadius: number) => {
+    if (!profileActive || !isFiniteProfilePoint(profileLine[0]) || !isFiniteProfilePoint(profileLine[1])) return null;
+    const p0 = clampProfilePoint(profileLine[0], height, width);
+    const p1 = clampProfilePoint(profileLine[1], height, width);
+    const d0 = Math.sqrt((col - p0.col) ** 2 + (row - p0.row) ** 2);
+    const d1 = Math.sqrt((col - p1.col) ** 2 + (row - p1.row) ** 2);
+    if (d0 <= hitRadius || d1 <= hitRadius) return { mode: d0 <= d1 ? "start" as const : "end" as const, p0, p1 };
+    if (pointToSegmentDistance(col, row, p0.col, p0.row, p1.col, p1.row) <= hitRadius) return { mode: "line" as const, p0, p1 };
+    return null;
+  }, [height, profileActive, profileLine, width]);
+
   const scheduleView = React.useCallback((next: ImageViewState) => {
     const clean = cleanView(next);
     pendingViewRef.current = clean;
@@ -949,9 +1182,18 @@ function InteractiveFloatCanvas({
     if (viewRafRef.current !== null) return;
     viewRafRef.current = window.requestAnimationFrame(() => {
       viewRafRef.current = null;
-      if (pendingViewRef.current) onViewChange(pendingViewRef.current);
+      if (pendingViewRef.current) {
+        const rect = canvasRef.current?.getBoundingClientRect();
+        onViewChange(imageViewToApi(
+          pendingViewRef.current,
+          rect?.width ?? Math.max(1, width),
+          rect?.height ?? Math.max(1, height),
+          width,
+          height,
+        ));
+      }
     });
-  }, [cleanView, onViewChange]);
+  }, [cleanView, height, onViewChange, width]);
 
   React.useLayoutEffect(() => {
     const node = hostRef.current;
@@ -968,7 +1210,7 @@ function InteractiveFloatCanvas({
   React.useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const localView = cleanView(view);
+    const localView = cleanView(currentApiView());
     viewRef.current = localView;
     drawFloatImage(canvas, data, height, width, [], lut, {
       bg: colors.bgAlt,
@@ -976,7 +1218,7 @@ function InteractiveFloatCanvas({
       accent: colors.accent,
       text: colors.text,
     }, localView, false, displayRange);
-  }, [cleanView, colors, data, displayRange, drawTick, height, lut, selected, view, width]);
+  }, [cleanView, colors, currentApiView, data, displayRange, drawTick, height, lut, selected, width]);
 
   React.useEffect(() => {
     const overlay = overlayRef.current;
@@ -990,18 +1232,61 @@ function InteractiveFloatCanvas({
     overlay.height = Math.round(cssH * dpr);
     const ctx = overlay.getContext("2d");
     if (!ctx) return;
-    ctx.clearRect(0, 0, overlay.width, overlay.height);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, cssW, cssH);
+    const localView = cleanView(currentApiView());
+    if (profileActive && isFiniteProfilePoint(profileLine[0])) {
+      const fit = Math.min(cssW / Math.max(1, width), cssH / Math.max(1, height));
+      const zoom = clampImageZoom(localView.zoom);
+      const scale = fit * zoom;
+      const drawW = width * scale;
+      const drawH = height * scale;
+      const x0 = cssW / 2 - drawW / 2 + localView.panX;
+      const y0 = cssH / 2 - drawH / 2 + localView.panY;
+      const toScreen = (point: ProfilePoint) => {
+        const clean = clampProfilePoint(point, height, width);
+        return { x: x0 + clean.col * scale, y: y0 + clean.row * scale };
+      };
+      const p0 = toScreen(profileLine[0]);
+      ctx.save();
+      ctx.lineCap = "round";
+      ctx.shadowColor = "rgba(0,0,0,0.75)";
+      ctx.shadowBlur = 2;
+      if (isFiniteProfilePoint(profileLine[1])) {
+        const p1 = toScreen(profileLine[1]);
+        ctx.strokeStyle = colors.accent;
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([4, 3]);
+        ctx.beginPath();
+        ctx.moveTo(p0.x, p0.y);
+        ctx.lineTo(p1.x, p1.y);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.fillStyle = colors.accent;
+        ctx.beginPath();
+        ctx.arc(p1.x, p1.y, 4, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.fillStyle = colors.accent;
+      ctx.beginPath();
+      ctx.arc(p0.x, p0.y, 4, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
     if (!scaleBarVisible) return;
-    const localView = cleanView(view);
     const pxSize = pixelSize > 0 ? pixelSize : 1;
     const unit = pixelSize > 0 ? pixelUnit : "px";
     drawPanelScaleBarHiDPI(overlay, dpr, localView.zoom, pxSize, unit, width);
-  }, [cleanView, drawTick, pixelSize, pixelUnit, scaleBarVisible, view, width]);
+  }, [cleanView, colors.accent, currentApiView, drawTick, height, pixelSize, pixelUnit, profileActive, profileLine, scaleBarVisible, width]);
 
-  const handleWheel = React.useCallback((event: React.WheelEvent<HTMLCanvasElement>) => {
+  const handleWheel = React.useCallback((event: WheelEvent) => {
+    const target = canvasRef.current ?? hostRef.current;
+    if (!target) return;
     event.preventDefault();
+    event.stopPropagation();
+    event.stopImmediatePropagation();
     onSelect?.();
-    const rect = event.currentTarget.getBoundingClientRect();
+    const rect = target.getBoundingClientRect();
     const current = viewRef.current;
     const nextZoom = clampImageZoom(current.zoom * Math.exp(-event.deltaY * 0.0014));
     const factor = nextZoom / Math.max(current.zoom, 1e-12);
@@ -1014,8 +1299,33 @@ function InteractiveFloatCanvas({
     });
   }, [onSelect, scheduleView]);
 
+  React.useEffect(() => {
+    const node = hostRef.current;
+    if (!node) return;
+    node.addEventListener("wheel", handleWheel, { capture: true, passive: false });
+    return () => node.removeEventListener("wheel", handleWheel, { capture: true });
+  }, [handleWheel]);
+
   const handlePointerDown = React.useCallback((event: React.PointerEvent<HTMLCanvasElement>) => {
     onSelect?.();
+    if (profileActive && onProfileLineChange) {
+      const point = imagePointFromClient(event.clientX, event.clientY);
+      if (!point) return;
+      const hit = profileHitTest(point.row, point.col, point.hitRadius);
+      profileDragRef.current = {
+        pointerId: event.pointerId,
+        mode: hit?.mode ?? "new",
+        x: event.clientX,
+        y: event.clientY,
+        row: point.row,
+        col: point.col,
+        p0: hit?.p0,
+        p1: hit?.p1,
+      };
+      event.currentTarget.setPointerCapture(event.pointerId);
+      event.preventDefault();
+      return;
+    }
     const current = viewRef.current;
     dragRef.current = {
       pointerId: event.pointerId,
@@ -1026,9 +1336,42 @@ function InteractiveFloatCanvas({
       zoom: current.zoom,
     };
     event.currentTarget.setPointerCapture(event.pointerId);
-  }, [onSelect]);
+  }, [imagePointFromClient, onProfileLineChange, onSelect, profileActive, profileHitTest]);
 
   const handlePointerMove = React.useCallback((event: React.PointerEvent<HTMLCanvasElement>) => {
+    if (profileActive && onProfileLineChange) {
+      const drag = profileDragRef.current;
+      const point = imagePointFromClient(event.clientX, event.clientY);
+      if (drag && drag.pointerId === event.pointerId && point) {
+        if (drag.mode === "start" && drag.p1) {
+          onProfileLineChange([clampProfilePoint(point, height, width), drag.p1]);
+        } else if (drag.mode === "end" && drag.p0) {
+          onProfileLineChange([drag.p0, clampProfilePoint(point, height, width)]);
+        } else if (drag.mode === "line" && drag.p0 && drag.p1) {
+          let dRow = point.row - drag.row;
+          let dCol = point.col - drag.col;
+          const minRow = Math.min(drag.p0.row, drag.p1.row);
+          const maxRow = Math.max(drag.p0.row, drag.p1.row);
+          const minCol = Math.min(drag.p0.col, drag.p1.col);
+          const maxCol = Math.max(drag.p0.col, drag.p1.col);
+          dRow = clampValue(dRow, -minRow, (height - 1) - maxRow);
+          dCol = clampValue(dCol, -minCol, (width - 1) - maxCol);
+          onProfileLineChange([
+            { row: drag.p0.row + dRow, col: drag.p0.col + dCol },
+            { row: drag.p1.row + dRow, col: drag.p1.col + dCol },
+          ]);
+        }
+        event.preventDefault();
+        return;
+      }
+      if (point) {
+        const hit = profileHitTest(point.row, point.col, point.hitRadius);
+        setProfileHoverMode(hit?.mode === "line" ? "line" : hit ? "endpoint" : null);
+      } else if (profileHoverMode !== null) {
+        setProfileHoverMode(null);
+      }
+      return;
+    }
     const drag = dragRef.current;
     if (!drag || drag.pointerId !== event.pointerId) return;
     event.preventDefault();
@@ -1037,11 +1380,26 @@ function InteractiveFloatCanvas({
       panX: drag.panX + event.clientX - drag.x,
       panY: drag.panY + event.clientY - drag.y,
     });
-  }, [scheduleView]);
+  }, [height, imagePointFromClient, onProfileLineChange, profileActive, profileHitTest, profileHoverMode, scheduleView, width]);
 
   const stopDrag = React.useCallback((event: React.PointerEvent<HTMLCanvasElement>) => {
+    const profileDrag = profileDragRef.current;
+    if (profileDrag?.pointerId === event.pointerId) {
+      const point = imagePointFromClient(event.clientX, event.clientY);
+      const moved = Math.sqrt((event.clientX - profileDrag.x) ** 2 + (event.clientY - profileDrag.y) ** 2);
+      if (profileActive && onProfileLineChange && profileDrag.mode === "new" && point && moved < 3) {
+        const cleanPoint = clampProfilePoint(point, height, width);
+        if (!isFiniteProfilePoint(profileLine[0]) || isFiniteProfilePoint(profileLine[1])) {
+          onProfileLineChange([cleanPoint]);
+        } else {
+          onProfileLineChange([clampProfilePoint(profileLine[0], height, width), cleanPoint]);
+        }
+      }
+      profileDragRef.current = null;
+      return;
+    }
     if (dragRef.current?.pointerId === event.pointerId) dragRef.current = null;
-  }, []);
+  }, [height, imagePointFromClient, onProfileLineChange, profileActive, profileLine, width]);
 
   const resetView = React.useCallback((event: React.MouseEvent<HTMLCanvasElement>) => {
     event.stopPropagation();
@@ -1050,10 +1408,9 @@ function InteractiveFloatCanvas({
   }, [onSelect, scheduleView]);
 
   return (
-    <Box ref={hostRef} sx={{ position: "relative", width: "100%", height: "100%", overflow: "hidden", bgcolor: colors.bgAlt }}>
+    <Box ref={hostRef} sx={{ position: "relative", width: "100%", height: "100%", overflow: "hidden", overscrollBehavior: "contain", bgcolor: colors.bgAlt }}>
       <canvas
         ref={canvasRef}
-        onWheel={handleWheel}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={stopDrag}
@@ -1064,7 +1421,11 @@ function InteractiveFloatCanvas({
           width: "100%",
           height: "100%",
           display: "block",
-          cursor: dragRef.current ? "grabbing" : view.zoom > 1.01 ? "grab" : "zoom-in",
+          cursor: profileDragRef.current
+            ? "grabbing"
+            : profileActive
+              ? profileHoverMode ? "grab" : "crosshair"
+              : dragRef.current ? "grabbing" : clampImageZoom(viewZoom) > 1.01 ? "grab" : "zoom-in",
           touchAction: "none",
         }}
       />
@@ -1084,20 +1445,25 @@ function InteractiveFloatCanvas({
         sx={{
           position: "absolute",
           zIndex: 2,
-          top: 6,
-          left: 0,
-          width: "100%",
-          px: 0.75,
+          top: overlayOnBottom ? "auto" : 6,
+          bottom: overlayOnBottom ? (scaleBarVisible && overlayOnRight ? 34 : 6) : "auto",
+          left: overlayOnRight ? "auto" : 6,
+          right: overlayOnRight ? 6 : "auto",
+          maxWidth: "calc(100% - 12px)",
+          px: 0,
           boxSizing: "border-box",
           color: "rgba(255,255,255,0.95)",
           pointerEvents: "none",
-          textAlign: "center",
+          textAlign: overlayOnRight ? "right" : "left",
           textShadow: "1px 1px 0 rgba(0,0,0,0.85), 0 0 3px rgba(0,0,0,0.75)",
           userSelect: "none",
         }}
       >
-        <Typography sx={{ fontSize: 11, fontWeight: 700, lineHeight: 1.2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+        <Typography sx={{ fontSize: 11, fontWeight: 700, lineHeight: 1.15, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
           {label}
+        </Typography>
+        <Typography sx={{ fontSize: 11, fontWeight: 600, lineHeight: 1.15, fontVariantNumeric: "tabular-nums" }}>
+          {clampImageZoom(viewZoom).toFixed(1)}x
         </Typography>
       </Box>
       {loading && (
@@ -1132,20 +1498,28 @@ function SnapshotImageCanvas({
   fftLut,
   colors,
   showFft,
+  deferFft,
   fftWindow,
   preferWebgpu,
   contrastPreset,
+  contrastRange,
   selected,
   label,
   scaleBarVisible,
+  overlayPosition,
   pixelSize,
   pixelUnit,
-  imageView,
-  fftView,
+  imageViewZoom,
+  imageViewCenter,
+  fftViewZoom,
+  fftViewCenter,
+  profileActive,
+  profileLine,
   fftCacheRef,
   fftGpuRef,
   onImageViewChange,
   onFftViewChange,
+  onProfileLineChange,
   onSelect,
 }: {
   data: Float32Array;
@@ -1158,20 +1532,28 @@ function SnapshotImageCanvas({
   fftLut: Uint8Array;
   colors: { bgAlt: string; border: string; accent: string; text: string };
   showFft: boolean;
+  deferFft: boolean;
   fftWindow: boolean;
   preferWebgpu: boolean;
   contrastPreset: string;
+  contrastRange: [number, number] | null;
   selected: boolean;
   label: string;
   scaleBarVisible: boolean;
+  overlayPosition: string;
   pixelSize: number;
   pixelUnit: string;
-  imageView: ImageViewState;
-  fftView: ImageViewState;
+  imageViewZoom: number;
+  imageViewCenter: number[];
+  fftViewZoom: number;
+  fftViewCenter: number[];
+  profileActive: boolean;
+  profileLine: ProfilePoint[];
   fftCacheRef: React.MutableRefObject<Map<string, SnapshotFftCacheEntry>>;
   fftGpuRef: React.MutableRefObject<WebGPUFFT | null>;
-  onImageViewChange: (view: ImageViewState) => void;
-  onFftViewChange: (view: ImageViewState) => void;
+  onImageViewChange: (view: ImageViewApiState) => void;
+  onFftViewChange: (view: ImageViewApiState) => void;
+  onProfileLineChange: (line: ProfilePoint[]) => void;
   onSelect: () => void;
 }) {
   const image = React.useMemo(
@@ -1179,8 +1561,8 @@ function SnapshotImageCanvas({
     [data, imageHeight, imageIndex, imageWidth, packedHeight, packedWidth],
   );
   const imageDisplayRange = React.useMemo(
-    () => resolveSnapshotDisplayRange(image, contrastPreset),
-    [contrastPreset, image],
+    () => resolveSnapshotDisplayRange(image, contrastPreset, contrastRange),
+    [contrastPreset, contrastRange, image],
   );
   const [fftEntry, setFftEntry] = React.useState<SnapshotFftCacheEntry | null>(null);
   const [fftLoading, setFftLoading] = React.useState(false);
@@ -1188,6 +1570,10 @@ function SnapshotImageCanvas({
   React.useEffect(() => {
     if (!showFft) {
       setFftEntry(null);
+      setFftLoading(false);
+      return;
+    }
+    if (deferFft) {
       setFftLoading(false);
       return;
     }
@@ -1214,7 +1600,7 @@ function SnapshotImageCanvas({
         if (!canceled) setFftLoading(false);
       });
     return () => { canceled = true; };
-  }, [fftCacheRef, fftGpuRef, fftWindow, image, imageHeight, imageIndex, imageWidth, preferWebgpu, showFft]);
+  }, [deferFft, fftCacheRef, fftGpuRef, fftWindow, image, imageHeight, imageIndex, imageWidth, preferWebgpu, showFft]);
 
   const displayFft = fftEntry ?? {
     data: new Float32Array(0),
@@ -1238,15 +1624,20 @@ function SnapshotImageCanvas({
           selected={selected}
           displayRange={imageDisplayRange}
           scaleBarVisible={scaleBarVisible}
+          overlayPosition={overlayPosition}
           pixelSize={pixelSize}
           pixelUnit={pixelUnit}
           ariaLabel={`${label} snapshot image`}
-          view={imageView}
+          viewZoom={imageViewZoom}
+          viewCenter={imageViewCenter}
+          profileActive={profileActive}
+          profileLine={profileLine}
           onViewChange={onImageViewChange}
+          onProfileLineChange={onProfileLineChange}
           onSelect={onSelect}
         />
       </Box>
-      {showFft && (
+      {showFft && !deferFft && (
         <Box
           sx={{
             position: "relative",
@@ -1265,11 +1656,13 @@ function SnapshotImageCanvas({
             selected={false}
             displayRange={FFT_DISPLAY_RANGE}
             scaleBarVisible={scaleBarVisible}
+            overlayPosition={overlayPosition}
             pixelSize={1}
             pixelUnit="px"
             loading={fftLoading}
             ariaLabel={`${label} ${fftLabel}`}
-            view={fftView}
+            viewZoom={fftViewZoom}
+            viewCenter={fftViewCenter}
             onViewChange={onFftViewChange}
             onSelect={onSelect}
           />
@@ -1279,25 +1672,242 @@ function SnapshotImageCanvas({
   );
 }
 
+function SnapshotProfilePlot({
+  data,
+  imageIndices,
+  packedHeight,
+  packedWidth,
+  imageHeights,
+  imageWidths,
+  imageLabels,
+  selectedImageIndex,
+  profileLine,
+  height,
+  pixelSize,
+  pixelUnit,
+  colors,
+}: {
+  data: Float32Array;
+  imageIndices: number[];
+  packedHeight: number;
+  packedWidth: number;
+  imageHeights: number[];
+  imageWidths: number[];
+  imageLabels: string[];
+  selectedImageIndex: number;
+  profileLine: ProfilePoint[];
+  height: number;
+  pixelSize: number;
+  pixelUnit: string;
+  colors: { bgAlt: string; border: string; text: string; textMuted: string; accent: string };
+}) {
+  const canvasRef = React.useRef<HTMLCanvasElement>(null);
+  const profiles = React.useMemo(() => {
+    if (!isFiniteProfilePoint(profileLine[0]) || !isFiniteProfilePoint(profileLine[1])) return [];
+    return imageIndices.map((imageIdx) => {
+      const imageHeight = imageHeights?.[imageIdx] || packedHeight;
+      const imageWidth = imageWidths?.[imageIdx] || packedWidth;
+      const image = extractPackedImage(data, imageIdx, packedHeight, packedWidth, imageHeight, imageWidth);
+      return {
+        imageIdx,
+        label: imageLabels?.[imageIdx] || `image ${imageIdx + 1}`,
+        values: image.length
+          ? sampleLineProfile(image, imageWidth, imageHeight, Number(profileLine[0].row), Number(profileLine[0].col), Number(profileLine[1].row), Number(profileLine[1].col))
+          : new Float32Array(0),
+      };
+    });
+  }, [data, imageHeights, imageIndices, imageLabels, imageWidths, packedHeight, packedWidth, profileLine]);
+
+  React.useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    const cssW = Math.max(1, Math.round(rect.width));
+    const cssH = Math.max(1, Math.round(height));
+    canvas.width = Math.round(cssW * dpr);
+    canvas.height = Math.round(cssH * dpr);
+    canvas.style.height = `${cssH}px`;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.fillStyle = colors.bgAlt;
+    ctx.fillRect(0, 0, cssW, cssH);
+
+    const validProfiles = profiles.filter((profile) => profile.values.length >= 2);
+    if (!validProfiles.length) return;
+    const padLeft = 38;
+    const padRight = 8;
+    const padTop = 6;
+    const padBottom = 17;
+    const plotW = Math.max(1, cssW - padLeft - padRight);
+    const plotH = Math.max(1, cssH - padTop - padBottom);
+    let gMin = Infinity;
+    let gMax = -Infinity;
+    for (const profile of validProfiles) {
+      for (let idx = 0; idx < profile.values.length; idx += 1) {
+        const value = profile.values[idx];
+        if (!Number.isFinite(value)) continue;
+        gMin = Math.min(gMin, value);
+        gMax = Math.max(gMax, value);
+      }
+    }
+    if (!Number.isFinite(gMin) || !Number.isFinite(gMax)) return;
+    const range = Math.max(gMax - gMin, 1e-12);
+    ctx.strokeStyle = colors.border;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(padLeft, padTop);
+    ctx.lineTo(padLeft, padTop + plotH);
+    ctx.lineTo(padLeft + plotW, padTop + plotH);
+    ctx.stroke();
+
+    for (let pIdx = 0; pIdx < validProfiles.length; pIdx += 1) {
+      const profile = validProfiles[pIdx];
+      const values = profile.values;
+      const active = profile.imageIdx === selectedImageIndex || validProfiles.length === 1;
+      ctx.strokeStyle = validProfiles.length === 1 ? colors.accent : PROFILE_COLORS[pIdx % PROFILE_COLORS.length];
+      ctx.lineWidth = active ? 1.6 : 1;
+      ctx.globalAlpha = active ? 1 : 0.48;
+      ctx.beginPath();
+      for (let idx = 0; idx < values.length; idx += 1) {
+        const x = padLeft + (idx / Math.max(1, values.length - 1)) * plotW;
+        const y = padTop + plotH - ((values[idx] - gMin) / range) * plotH;
+        if (idx === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+
+    const p0 = profileLine[0];
+    const p1 = profileLine[1];
+    const distPx = Math.sqrt((Number(p1.col) - Number(p0.col)) ** 2 + (Number(p1.row) - Number(p0.row)) ** 2);
+    const totalDist = pixelSize > 0 ? distPx * pixelSize : distPx;
+    const unit = pixelSize > 0 ? pixelUnit : "px";
+    const tickY = padTop + plotH;
+    const tickStep = roundToNiceValue(totalDist / Math.max(2, Math.floor(plotW / 78)));
+    ctx.font = "9px system-ui, sans-serif";
+    ctx.fillStyle = colors.textMuted;
+    ctx.textBaseline = "top";
+    ctx.strokeStyle = colors.border;
+    for (let value = 0; value <= totalDist + tickStep * 0.01; value += tickStep) {
+      if (value > totalDist * 1.001) break;
+      const frac = totalDist > 0 ? value / totalDist : 0;
+      const x = padLeft + frac * plotW;
+      ctx.beginPath();
+      ctx.moveTo(x, tickY);
+      ctx.lineTo(x, tickY + 3);
+      ctx.stroke();
+      ctx.textAlign = frac < 0.05 ? "left" : frac > 0.95 ? "right" : "center";
+      const label = value % 1 === 0 ? value.toFixed(0) : value.toFixed(1);
+      ctx.fillText(value + tickStep > totalDist ? `${label} ${unit}` : label, x, tickY + 4);
+    }
+    ctx.textAlign = "right";
+    ctx.textBaseline = "top";
+    ctx.fillText(formatCompactValue(gMax, 3), padLeft - 4, padTop);
+    ctx.textBaseline = "bottom";
+    ctx.fillText(formatCompactValue(gMin, 3), padLeft - 4, padTop + plotH);
+
+    ctx.textBaseline = "top";
+    ctx.font = "9px system-ui, sans-serif";
+    let legendX = cssW - 4;
+    for (let pIdx = validProfiles.length - 1; pIdx >= 0; pIdx -= 1) {
+      const profile = validProfiles[pIdx];
+      const label = compactScienceLabel(profile.label);
+      const color = validProfiles.length === 1 ? colors.accent : PROFILE_COLORS[pIdx % PROFILE_COLORS.length];
+      const textW = ctx.measureText(label).width;
+      if (legendX - textW < padLeft + 20) break;
+      ctx.globalAlpha = profile.imageIdx === selectedImageIndex ? 1 : 0.55;
+      ctx.fillStyle = color;
+      ctx.fillRect(legendX - textW - 10, 3, 6, 6);
+      ctx.fillStyle = colors.textMuted;
+      ctx.fillText(label, legendX, 1);
+      legendX -= textW + 16;
+    }
+    ctx.globalAlpha = 1;
+  }, [colors, height, pixelSize, pixelUnit, profileLine, profiles, selectedImageIndex]);
+
+  return (
+    <canvas
+      ref={canvasRef}
+      data-testid="show1d-snapshot-profile-plot"
+      style={{
+        width: "100%",
+        height,
+        display: "block",
+        border: `1px solid ${colors.border}`,
+        borderTop: "none",
+        boxSizing: "border-box",
+      }}
+    />
+  );
+}
+
 function MiniHistogram({
   bins,
   dataMin,
   dataMax,
   clipMin,
   clipMax,
-  backend,
   colors,
+  onClipRangeChange,
 }: {
   bins: number[];
   dataMin: number;
   dataMax: number;
   clipMin: number;
   clipMax: number;
-  backend: string;
   colors: { bgAlt: string; border: string; textMuted: string; accent: string };
+  onClipRangeChange?: (range: [number, number]) => void;
 }) {
   const canvasRef = React.useRef<HTMLCanvasElement>(null);
-  const backendText = backendBadge(backend);
+  const dragRef = React.useRef<{
+    mode: "left" | "right" | "middle";
+    pointerId: number;
+    startClientX: number;
+    startMin: number;
+    startMax: number;
+  } | null>(null);
+  const pendingClipRef = React.useRef<[number, number] | null>(null);
+  const clipRafRef = React.useRef<number | null>(null);
+  const dataSpan = Math.max(dataMax - dataMin, 1e-12);
+  const minClipSpan = Math.max(dataSpan * 0.002, 1e-12);
+
+  const queueClipRange = React.useCallback((range: [number, number]) => {
+    if (!onClipRangeChange) return;
+    pendingClipRef.current = range;
+    if (clipRafRef.current !== null) return;
+    clipRafRef.current = window.requestAnimationFrame(() => {
+      clipRafRef.current = null;
+      const next = pendingClipRef.current;
+      pendingClipRef.current = null;
+      if (next) onClipRangeChange(next);
+    });
+  }, [onClipRangeChange]);
+
+  React.useEffect(() => () => {
+    if (clipRafRef.current !== null) window.cancelAnimationFrame(clipRafRef.current);
+  }, []);
+
+  const xToValue = React.useCallback((x: number, width: number) => (
+    dataMin + clampValue(x / Math.max(width, 1), 0, 1) * dataSpan
+  ), [dataMin, dataSpan]);
+
+  const valueToX = React.useCallback((value: number, width: number) => (
+    clampValue(((value - dataMin) / dataSpan) * width, 0, width)
+  ), [dataMin, dataSpan]);
+
+  const clampClipRange = React.useCallback((lo: number, hi: number): [number, number] => {
+    let nextMin = clampValue(lo, dataMin, dataMax - minClipSpan);
+    let nextMax = clampValue(hi, nextMin + minClipSpan, dataMax);
+    if (nextMax - nextMin < minClipSpan) {
+      nextMax = clampValue(nextMin + minClipSpan, dataMin + minClipSpan, dataMax);
+      nextMin = clampValue(nextMin, dataMin, nextMax - minClipSpan);
+    }
+    return [nextMin, nextMax];
+  }, [dataMax, dataMin, minClipSpan]);
+
   React.useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -1312,6 +1922,12 @@ function MiniHistogram({
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.fillStyle = colors.bgAlt;
     ctx.fillRect(0, 0, width, height);
+    const x0 = valueToX(clipMin, width);
+    const x1 = valueToX(clipMax, width);
+    ctx.fillStyle = colors.accent;
+    ctx.globalAlpha = 0.08;
+    ctx.fillRect(Math.min(x0, x1), 0, Math.max(1, Math.abs(x1 - x0)), height);
+    ctx.globalAlpha = 1;
     const displayBins = 64;
     const step = Math.max(1, Math.floor(bins.length / displayBins));
     const reduced = Array.from({ length: displayBins }, (_, idx) => {
@@ -1332,8 +1948,6 @@ function MiniHistogram({
     }
     ctx.globalAlpha = 1;
     if (clipMax > clipMin && dataMax > dataMin) {
-      const x0 = clampValue(((clipMin - dataMin) / span) * width, 0, width);
-      const x1 = clampValue(((clipMax - dataMin) / span) * width, 0, width);
       ctx.strokeStyle = colors.accent;
       ctx.globalAlpha = 0.9;
       ctx.beginPath();
@@ -1343,23 +1957,101 @@ function MiniHistogram({
       ctx.lineTo(x1, height);
       ctx.stroke();
       ctx.globalAlpha = 1;
+      const knobY = Math.round(height * 0.5);
+      ctx.fillStyle = colors.accent;
+      ctx.strokeStyle = colors.bgAlt;
+      for (const handleX of [x0, x1]) {
+        ctx.beginPath();
+        ctx.arc(handleX, knobY, 5.5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+      }
     }
     ctx.strokeStyle = colors.border;
     ctx.strokeRect(0.5, 0.5, width - 1, height - 1);
-  }, [bins, clipMax, clipMin, colors, dataMax, dataMin]);
+  }, [bins, clipMax, clipMin, colors, dataMax, dataMin, valueToX]);
+
+  const handlePointerDown = React.useCallback((event: React.PointerEvent<HTMLCanvasElement>) => {
+    if (!onClipRangeChange || dataMax <= dataMin) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const x = event.clientX - rect.left;
+    const x0 = valueToX(clipMin, rect.width);
+    const x1 = valueToX(clipMax, rect.width);
+    const handleHit = 11;
+    let mode: "left" | "right" | "middle";
+    const leftDistance = Math.abs(x - x0);
+    const rightDistance = Math.abs(x - x1);
+    if (leftDistance <= handleHit || rightDistance <= handleHit) {
+      mode = leftDistance <= rightDistance ? "left" : "right";
+    } else if (x > Math.min(x0, x1) && x < Math.max(x0, x1)) {
+      mode = "middle";
+    } else {
+      mode = leftDistance <= rightDistance ? "left" : "right";
+    }
+    dragRef.current = {
+      mode,
+      pointerId: event.pointerId,
+      startClientX: event.clientX,
+      startMin: clipMin,
+      startMax: clipMax,
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+    if (mode !== "middle") {
+      const value = xToValue(x, rect.width);
+      queueClipRange(mode === "left" ? clampClipRange(value, clipMax) : clampClipRange(clipMin, value));
+    }
+  }, [clampClipRange, clipMax, clipMin, dataMax, dataMin, onClipRangeChange, queueClipRange, valueToX, xToValue]);
+
+  const handlePointerMove = React.useCallback((event: React.PointerEvent<HTMLCanvasElement>) => {
+    const drag = dragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const dxValue = ((event.clientX - drag.startClientX) / Math.max(rect.width, 1)) * dataSpan;
+    if (drag.mode === "middle") {
+      const width = Math.min(drag.startMax - drag.startMin, dataSpan);
+      const nextMin = clampValue(drag.startMin + dxValue, dataMin, dataMax - width);
+      queueClipRange([nextMin, nextMin + width]);
+    } else if (drag.mode === "left") {
+      queueClipRange(clampClipRange(drag.startMin + dxValue, drag.startMax));
+    } else {
+      queueClipRange(clampClipRange(drag.startMin, drag.startMax + dxValue));
+    }
+  }, [clampClipRange, dataMax, dataMin, dataSpan, queueClipRange]);
+
+  const handlePointerUp = React.useCallback((event: React.PointerEvent<HTMLCanvasElement>) => {
+    if (dragRef.current?.pointerId !== event.pointerId) return;
+    dragRef.current = null;
+    event.currentTarget.releasePointerCapture(event.pointerId);
+  }, []);
 
   return (
     <Box>
-      <Stack direction="row" alignItems="center" spacing={0.75} sx={{ mb: 0.35 }}>
-        <Typography sx={{ fontSize: 11, fontWeight: 600 }}>Histogram</Typography>
-        {backendText && <Typography sx={{ fontSize: 10, color: colors.textMuted }}>{backendText}</Typography>}
+      <Stack direction="row" alignItems="center" sx={{ mb: 0.25, minHeight: 12 }}>
         <Box sx={{ flex: 1 }} />
         <Typography sx={{ fontSize: 10, color: colors.textMuted, fontVariantNumeric: "tabular-nums" }}>
           {formatRangeValue(clipMin)} - {formatRangeValue(clipMax)}
         </Typography>
       </Stack>
       <Box sx={{ height: 48, bgcolor: colors.bgAlt, border: `1px solid ${colors.border}`, borderRadius: 1, overflow: "hidden" }}>
-        <canvas ref={canvasRef} style={{ width: "100%", height: "100%", display: "block" }} />
+        <canvas
+          ref={canvasRef}
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerUp}
+          onPointerCancel={handlePointerUp}
+          aria-label="Snapshot contrast range histogram"
+          title="Drag endpoints to change contrast; drag between them to move the range"
+          style={{ width: "100%", height: "100%", display: "block", cursor: onClipRangeChange ? "ew-resize" : "default", touchAction: "none" }}
+        />
       </Box>
     </Box>
   );
@@ -1386,7 +2078,7 @@ function Show1DWidget() {
   const [logScale, setLogScale] = useModelState<boolean>("log_scale");
   const [showStats, setShowStats] = useModelState<boolean>("show_stats");
   const [showLegend, setShowLegend] = useModelState<boolean>("show_legend");
-  const [showGrid, setShowGrid] = useModelState<boolean>("show_grid");
+  const [showGrid] = useModelState<boolean>("show_grid");
   const [showControls] = useModelState<boolean>("show_controls");
   const controlsVisible = Boolean(showControls);
   const [lineWidth] = useModelState<number>("line_width");
@@ -1409,34 +2101,34 @@ function Show1DWidget() {
   const [snapshotHeights] = useModelState<number[]>("snapshot_heights");
   const [snapshotWidths] = useModelState<number[]>("snapshot_widths");
   const [snapshotImageLabels] = useModelState<string[]>("snapshot_image_labels");
-  const [starredSnapshotImageLabels, setStarredSnapshotImageLabels] = useModelState<string[]>("starred_snapshot_image_labels");
   const [hiddenSnapshotImageLabels, setHiddenSnapshotImageLabels] = useModelState<string[]>("hidden_snapshot_image_labels");
-  const [trialNotes, setTrialNotes] = useModelState<Record<string, string>>("trial_notes");
-  const [trialTags, setTrialTags] = useModelState<Record<string, string[]>>("trial_tags");
-  const [showStarredOnly, setShowStarredOnly] = useModelState<boolean>("show_starred_only");
-  const [trialSortKey, setTrialSortKey] = useModelState<string>("trial_sort_key");
-  const [trialSortDescending, setTrialSortDescending] = useModelState<boolean>("trial_sort_descending");
-  const [trialFilterText, setTrialFilterText] = useModelState<string>("trial_filter_text");
-  const [topTrialCount, setTopTrialCount] = useModelState<number>("top_trial_count");
+  const [trialSortKey] = useModelState<string>("trial_sort_key");
+  const [trialSortDescending] = useModelState<boolean>("trial_sort_descending");
   const [trialRankings] = useModelState<TrialRanking[]>("trial_rankings");
-  const [trialAlerts] = useModelState<TrialAlert[]>("trial_alerts");
-  const [bestTrialLabel] = useModelState<string>("best_trial_label");
-  const [runSummary] = useModelState<Record<string, unknown>>("run_summary");
   const [snapshotGroupIndices] = useModelState<number[]>("snapshot_group_indices");
   const [snapshotGroupIterations] = useModelState<number[]>("snapshot_group_iterations");
-  const [snapshotGroupLabels] = useModelState<string[]>("snapshot_group_labels");
   const [nSnapshotGroups] = useModelState<number>("n_snapshot_groups");
   const [selectedSnapshotIdx, setSelectedSnapshotIdx] = useModelState<number>("selected_snapshot_idx");
   const [selectedSnapshotGroupIdx, setSelectedSnapshotGroupIdx] = useModelState<number>("selected_snapshot_group_idx");
-  const [showSnapshots, setShowSnapshots] = useModelState<boolean>("show_snapshots");
-  const [showSnapshotThumbnails, setShowSnapshotThumbnails] = useModelState<boolean>("show_snapshot_thumbnails");
+  const [showSnapshots] = useModelState<boolean>("show_snapshots");
+  const [showSnapshotThumbnails] = useModelState<boolean>("show_snapshot_thumbnails");
   const [showSnapshotFft, setShowSnapshotFft] = useModelState<boolean>("show_snapshot_fft");
   const [snapshotFftWindow, setSnapshotFftWindow] = useModelState<boolean>("snapshot_fft_window");
   const [snapshotFftCmap, setSnapshotFftCmap] = useModelState<string>("snapshot_fft_cmap");
   const [snapshotContrastPreset, setSnapshotContrastPreset] = useModelState<string>("snapshot_contrast_preset");
+  const [snapshotContrastRange, setSnapshotContrastRange] = useModelState<number[]>("snapshot_contrast_range");
   const [snapshotThumbnailSize, setSnapshotThumbnailSize] = useModelState<number>("snapshot_thumbnail_size");
+  const [snapshotPanelWidthPx, setSnapshotPanelWidthPx] = useModelState<number>("snapshot_panel_width_px");
   const [snapshotColumns, setSnapshotColumns] = useModelState<number>("snapshot_columns");
+  const [snapshotOverlayPosition, setSnapshotOverlayPosition] = useModelState<string>("snapshot_overlay_position");
   const [imageCmap, setImageCmap] = useModelState<string>("image_cmap");
+  const [snapshotRealSpaceZoom, setSnapshotRealSpaceZoom] = useModelState<number>("snapshot_real_space_zoom");
+  const [snapshotRealSpaceCenter, setSnapshotRealSpaceCenter] = useModelState<number[]>("snapshot_real_space_center");
+  const [snapshotFftZoom, setSnapshotFftZoom] = useModelState<number>("snapshot_fft_zoom");
+  const [snapshotFftCenter, setSnapshotFftCenter] = useModelState<number[]>("snapshot_fft_center");
+  const [showSnapshotProfile, setShowSnapshotProfile] = useModelState<boolean>("show_snapshot_profile");
+  const [snapshotProfileLine, setSnapshotProfileLine] = useModelState<ProfilePoint[]>("snapshot_profile_line");
+  const [snapshotProfileHeight] = useModelState<number>("snapshot_profile_height");
   const [scaleBarVisible] = useModelState<boolean>("scale_bar_visible");
   const [pixelSize] = useModelState<number>("pixel_size");
   const [pixelUnit] = useModelState<string>("pixel_unit");
@@ -1457,6 +2149,7 @@ function Show1DWidget() {
   const [handoffStatus] = useModelState<string>("handoff_status");
   const [handoffEnabled] = useModelState<boolean>("handoff_enabled");
   const [preparedViewWidget] = useModelState<unknown>("prepared_view_widget");
+  const [transientSnapshotGroupIdx, setTransientSnapshotGroupIdx] = React.useState<number | null>(null);
 
   const { colors: themeColors } = useTheme(Boolean(offlineForTheme));
   const yData = React.useMemo(() => safeFloat32(yBytes, Math.max(0, nTraces * nPoints)), [yBytes, nTraces, nPoints]);
@@ -1470,9 +2163,7 @@ function Show1DWidget() {
     [profileImageBytes, profileImageHeight, profileImageWidth],
   );
   const hiddenTrialLabels = React.useMemo(() => uniqueStrings(hiddenSnapshotImageLabels ?? []), [hiddenSnapshotImageLabels]);
-  const starredTrialLabels = React.useMemo(() => uniqueStrings(starredSnapshotImageLabels ?? []), [starredSnapshotImageLabels]);
   const hiddenTrialKeys = React.useMemo(() => new Set(hiddenTrialLabels.map(trialKey)), [hiddenTrialLabels]);
-  const starredTrialKeys = React.useMemo(() => new Set(starredTrialLabels.map(trialKey)), [starredTrialLabels]);
   const normalisedSortKey = React.useMemo(() => String(trialSortKey || "final_loss"), [trialSortKey]);
   const baseTrialRows = React.useMemo<TrialRanking[]>(() => {
     const rowsByKey = new Map<string, TrialRanking>();
@@ -1510,14 +2201,11 @@ function Show1DWidget() {
         object_quality: Number(existing.object_quality),
         probe_quality: Number(existing.probe_quality),
         alert_count: Number(existing.alert_count) || 0,
-        starred: starredTrialKeys.has(key),
         hidden: hiddenTrialKeys.has(key),
-        note: lookupByTrialKey(trialNotes, label) ?? String(existing.note || ""),
-        tags: lookupByTrialKey(trialTags, label) ?? existing.tags ?? [],
       });
     }
     return Array.from(rowsByKey.values()).filter((row) => Number.isFinite(Number(row.trace_index)));
-  }, [hiddenTrialKeys, labels, nPoints, nTraces, starredTrialKeys, trialNotes, trialRankings, trialTags, yData]);
+  }, [hiddenTrialKeys, labels, nPoints, nTraces, trialRankings, yData]);
   const sortedTrialRows = React.useMemo(() => {
     const rows = [...baseTrialRows];
     if (normalisedSortKey === "label") {
@@ -1541,28 +2229,6 @@ function Show1DWidget() {
     }
     return out;
   }, [sortedTrialRows]);
-  const filterText = String(trialFilterText || "").trim().toLowerCase();
-  const topTrialLimit = Math.max(0, Number.isFinite(topTrialCount) ? Math.round(topTrialCount) : 0);
-  const topTrialKeys = React.useMemo(() => {
-    if (topTrialLimit <= 0) return new Set<string>();
-    return new Set(sortedTrialRows.slice(0, topTrialLimit).map((row) => trialKey(row.label || "")));
-  }, [sortedTrialRows, topTrialLimit]);
-  const passesReviewFilter = React.useCallback((label: string) => {
-    if (isReferenceLabel(label)) return true;
-    const key = trialKey(label);
-    const row = trialRowByKey.get(key);
-    if (showStarredOnly && !starredTrialKeys.has(key)) return false;
-    if (topTrialLimit > 0 && !topTrialKeys.has(key)) return false;
-    if (filterText) {
-      const haystack = [
-        label,
-        row?.note || "",
-        ...(row?.tags ?? []),
-      ].join(" ").toLowerCase();
-      if (!haystack.includes(filterText)) return false;
-    }
-    return true;
-  }, [filterText, showStarredOnly, starredTrialKeys, topTrialKeys, topTrialLimit, trialRowByKey]);
   const imageLabelForIndex = React.useCallback(
     (imageIdx: number) => snapshotImageLabels?.[imageIdx] || snapshotLabels?.[imageIdx] || `image ${imageIdx + 1}`,
     [snapshotImageLabels, snapshotLabels],
@@ -1570,16 +2236,16 @@ function Show1DWidget() {
   const isSnapshotImageHidden = React.useCallback(
     (imageIdx: number) => {
       const label = imageLabelForIndex(imageIdx);
-      return hiddenTrialKeys.has(trialKey(label)) || !passesReviewFilter(label);
+      return hiddenTrialKeys.has(trialKey(label));
     },
-    [hiddenTrialKeys, imageLabelForIndex, passesReviewFilter],
+    [hiddenTrialKeys, imageLabelForIndex],
   );
   const hiddenTraceIndices = React.useMemo(
     () => Array.from({ length: nTraces }, (_, idx) => idx).filter((idx) => {
       const label = labels?.[idx] || `Trace ${idx + 1}`;
-      return hiddenTrialKeys.has(trialKey(label)) || !passesReviewFilter(label);
+      return hiddenTrialKeys.has(trialKey(label));
     }),
-    [hiddenTrialKeys, labels, nTraces, passesReviewFilter],
+    [hiddenTrialKeys, labels, nTraces],
   );
   const hiddenTraceSet = React.useMemo(() => new Set(hiddenTraceIndices), [hiddenTraceIndices]);
   const visibleTraceIndices = React.useMemo(
@@ -1588,28 +2254,30 @@ function Show1DWidget() {
       .filter((idx) => Number.isInteger(idx) && idx >= 0 && idx < nTraces && !hiddenTraceSet.has(idx)),
     [hiddenTraceSet, nTraces, sortedTrialRows],
   );
-  const hiddenTrialCount = hiddenTrialLabels.length;
-  const activeReviewCount = React.useMemo(
-    () => sortedTrialRows.filter((row) => row.label && !hiddenTraceSet.has(Number(row.trace_index))).length,
-    [hiddenTraceSet, sortedTrialRows],
-  );
-
   const rootRef = React.useRef<HTMLDivElement>(null);
+  const mainGridRef = React.useRef<HTMLDivElement>(null);
   const plotHostRef = React.useRef<HTMLDivElement>(null);
   const canvasRef = React.useRef<HTMLCanvasElement>(null);
   const profileCanvasRef = React.useRef<HTMLCanvasElement>(null);
+  const viewportSize = useViewportSize();
   const plotSize = useElementSize(plotHostRef, DEFAULT_SIZE);
   const geomRef = React.useRef<PlotGeometry | null>(null);
+  const plotThumbnailHitAreasRef = React.useRef<PlotThumbnailHitArea[]>([]);
   const [hover, setHover] = React.useState<HoverPoint | null>(null);
+  const [hoverSnapshotGroupIdx, setHoverSnapshotGroupIdx] = React.useState<number | null>(null);
+  const hoverSnapshotGroupRef = React.useRef<number | null>(null);
+  const [sidePanelWidthUserAdjusted] = React.useState(false);
+  const snapshotResizePointerIdRef = React.useRef<number | null>(null);
+  const snapshotResizeCleanupRef = React.useRef<(() => void) | null>(null);
+  const snapshotResizeStartRef = React.useRef<{ x: number; y: number; width: number } | null>(null);
+  const snapshotViewportWidthRef = React.useRef(0);
   const histogramSlotRef = React.useRef(9000 + Math.floor(Math.random() * 100000));
   const [snapshotHistogramBins, setSnapshotHistogramBins] = React.useState<number[]>(new Array(256).fill(0));
   const [snapshotHistogramRange, setSnapshotHistogramRange] = React.useState<[number, number]>([0, 1]);
   const [snapshotHistogramClipRange, setSnapshotHistogramClipRange] = React.useState<[number, number]>([0, 1]);
-  const [snapshotHistogramBackend, setSnapshotHistogramBackend] = React.useState("cpu");
+  const [, setSnapshotHistogramBackend] = React.useState("cpu");
   const snapshotFftCacheRef = React.useRef<Map<string, SnapshotFftCacheEntry>>(new Map());
   const snapshotFftGpuRef = React.useRef<WebGPUFFT | null>(null);
-  const [snapshotImageView, setSnapshotImageView] = React.useState<ImageViewState>({ zoom: 1, panX: 0, panY: 0 });
-  const [snapshotFftView, setSnapshotFftView] = React.useState<ImageViewState>({ zoom: 1, panX: 0, panY: 0 });
   const hoverRafRef = React.useRef<number | null>(null);
   const pendingHoverRef = React.useRef<HoverPoint | null>(null);
   const [exportAnchor, setExportAnchor] = React.useState<HTMLElement | null>(null);
@@ -1663,9 +2331,17 @@ function Show1DWidget() {
   const legacySelectedSnapshot = nSnapshots > 0
     ? clampValue(Math.round(selectedSnapshotIdx < 0 ? nSnapshots - 1 : selectedSnapshotIdx), 0, nSnapshots - 1)
     : -1;
+  const modelSelectedSnapshotGroup = selectedSnapshotGroupIdx >= 0
+    ? selectedSnapshotGroupIdx
+    : (snapshotImageGroups[legacySelectedSnapshot] ?? legacySelectedSnapshot);
+  const activeSelectedSnapshotGroup = hoverSnapshotGroupIdx !== null
+    ? hoverSnapshotGroupIdx
+    : transientSnapshotGroupIdx !== null
+      ? transientSnapshotGroupIdx
+      : modelSelectedSnapshotGroup;
   const selectedGroup = groupCount > 0
     ? clampValue(
-      Math.round(selectedSnapshotGroupIdx >= 0 ? selectedSnapshotGroupIdx : (snapshotImageGroups[legacySelectedSnapshot] ?? legacySelectedSnapshot)),
+      Math.round(activeSelectedSnapshotGroup),
       0,
       groupCount - 1,
     )
@@ -1694,14 +2370,109 @@ function Show1DWidget() {
   const htmlSize = formatEstimatedHtmlSize((nTraces * nPoints + nSnapshots * snapshotHeight * snapshotWidth + profileImageHeight * profileImageWidth) * 4);
   const thumbnailSize = clampThumbnailSize(snapshotThumbnailSize);
   const plotHeight = Math.round(clampValue(Number.isFinite(plotHeightPx) ? plotHeightPx : 390, 220, 720));
-  const sidePanelWidth = Math.round(clampValue(Number.isFinite(sidePanelWidthPx) ? sidePanelWidthPx : 360, 300, 640));
-  const snapshotColumnCount = Math.round(clampValue(Number.isFinite(snapshotColumns) ? snapshotColumns : 2, 1, 4));
+  const snapshotOverview = hasSnapshots && selectedGroupImageIndices.length >= 6;
+  const rawSidePanelWidth = Number.isFinite(sidePanelWidthPx) ? Number(sidePanelWidthPx) : 360;
+  const autoSidePanelWidth = snapshotOverview && !sidePanelWidthUserAdjusted && Math.round(rawSidePanelWidth) <= 360
+    ? 620
+    : rawSidePanelWidth;
+  const sidePanelWidth = Math.round(clampValue(autoSidePanelWidth, 300, 960));
+  const rawSnapshotColumnCount = Math.round(clampValue(Number.isFinite(snapshotColumns) ? snapshotColumns : 0, 0, 8));
+  const snapshotColumnCount = rawSnapshotColumnCount > 0
+    ? rawSnapshotColumnCount
+    : autoSnapshotColumnsForCount(selectedGroupImageIndices.length);
+  const resolvedSnapshotOverlayPosition = normaliseSnapshotOverlayPosition(snapshotOverlayPosition);
+  const effectivePlotHeight = snapshotOverview ? Math.round(clampValue(Math.min(plotHeight, 330), 260, 720)) : plotHeight;
+  const viewportShellHeight = { xs: "none", md: "calc(100vh - 8px)" };
+  const mainGridViewportHeight = { xs: "auto", md: controlsVisible ? "calc(100vh - 82px)" : "calc(100vh - 8px)" };
+  const mainGridTemplateColumns = sidePanelVisible
+    ? {
+      xs: "1fr",
+      md: `minmax(260px, 1fr) minmax(300px, ${sidePanelWidth}px)`,
+    }
+    : "1fr";
   const normalisedSnapshotContrastPreset = normaliseSnapshotContrastPreset(snapshotContrastPreset);
+  const customSnapshotContrastRange = React.useMemo(
+    () => normaliseSnapshotContrastRange(snapshotContrastRange),
+    [snapshotContrastRange],
+  );
   const imageLut = React.useMemo(() => COLORMAPS[imageCmap] || COLORMAPS.cividis || COLORMAPS.gray, [imageCmap]);
   const snapshotFftLut = React.useMemo(
     () => COLORMAPS[snapshotFftCmap] || COLORMAPS.magma || imageLut,
     [imageLut, snapshotFftCmap],
   );
+  const plotThumbnailColors = React.useMemo(
+    () => ({
+      bgAlt: themeColors.bgAlt,
+      border: themeColors.border,
+      accent: themeColors.accent,
+      text: themeColors.text,
+    }),
+    [themeColors.accent, themeColors.bgAlt, themeColors.border, themeColors.text],
+  );
+  const plotThumbnailCache = React.useMemo(() => {
+    const cache = new Map<number, PlotThumbnailCacheEntry>();
+    if (!showSnapshotThumbnails || !hasSnapshots || groupCount <= 0) return cache;
+    for (let groupIdx = 0; groupIdx < groupCount; groupIdx += 1) {
+      const imageIndices = (snapshotGroups[groupIdx] ?? []).filter((idx) => !isSnapshotImageHidden(idx)).sort((a, b) => {
+        const aLabel = imageLabelForIndex(a);
+        const bLabel = imageLabelForIndex(b);
+        if (isReferenceLabel(aLabel) !== isReferenceLabel(bLabel)) return isReferenceLabel(aLabel) ? -1 : 1;
+        const ar = Number(trialRowByKey.get(trialKey(aLabel))?.rank ?? Number.MAX_SAFE_INTEGER);
+        const br = Number(trialRowByKey.get(trialKey(bLabel))?.rank ?? Number.MAX_SAFE_INTEGER);
+        return ar - br || aLabel.localeCompare(bLabel);
+      });
+      const firstImageIdx = imageIndices[0];
+      if (firstImageIdx === undefined) continue;
+      const iteration = Number.isFinite(snapshotGroupIterations?.[groupIdx])
+        ? Number(snapshotGroupIterations[groupIdx])
+        : snapshotIterations?.[firstImageIdx];
+      if (!Number.isFinite(iteration)) continue;
+      const images = imageIndices.map((idx) => {
+        const imageHeight = snapshotHeights?.[idx] || snapshotHeight;
+        const imageWidth = snapshotWidths?.[idx] || snapshotWidth;
+        return {
+          data: extractPackedImage(snapshotData, idx, snapshotHeight, snapshotWidth, imageHeight, imageWidth),
+          height: imageHeight,
+          width: imageWidth,
+        };
+      });
+      const rendered = createSnapshotGroupThumbnailCanvas(
+        images,
+        thumbnailSize,
+        imageLut,
+        plotThumbnailColors,
+        normalisedSnapshotContrastPreset,
+      );
+      if (rendered) {
+        cache.set(groupIdx, {
+          canvas: rendered.canvas,
+          width: rendered.width,
+          height: rendered.height,
+          iteration: Number(iteration),
+        });
+      }
+    }
+    return cache;
+  }, [
+    groupCount,
+    hasSnapshots,
+    imageLabelForIndex,
+    imageLut,
+    isSnapshotImageHidden,
+    normalisedSnapshotContrastPreset,
+    plotThumbnailColors,
+    showSnapshotThumbnails,
+    snapshotData,
+    snapshotGroupIterations,
+    snapshotGroups,
+    snapshotHeight,
+    snapshotHeights,
+    snapshotIterations,
+    snapshotWidth,
+    snapshotWidths,
+    thumbnailSize,
+    trialRowByKey,
+  ]);
   const themedSelect = {
     ...controlPanel.select,
     bgcolor: themeColors.controlBg,
@@ -1714,10 +2485,26 @@ function Show1DWidget() {
     ...upwardMenuProps,
     PaperProps: { sx: { bgcolor: themeColors.controlBg, color: themeColors.text, border: `1px solid ${themeColors.border}` } },
   };
+  const themedTopMenuProps = {
+    PaperProps: themedMenuProps.PaperProps,
+    sx: { zIndex: 9999 },
+  };
+  const toolbarLabelSx = { ...typography.label, fontSize: 10, color: themeColors.textMuted };
+  const selectedGroupRef = React.useRef(selectedGroup);
 
-  const selectSnapshotGroup = React.useCallback((value: number) => {
+  React.useEffect(() => {
+    selectedGroupRef.current = selectedGroup;
+  }, [selectedGroup]);
+
+  const selectSnapshotGroup = React.useCallback((value: number, syncModel = true) => {
     if (groupCount <= 0) return;
     const groupIdx = clampValue(Math.round(value), 0, groupCount - 1);
+    selectedGroupRef.current = groupIdx;
+    if (!syncModel) {
+      setTransientSnapshotGroupIdx(groupIdx);
+      return;
+    }
+    setTransientSnapshotGroupIdx(null);
     setSelectedSnapshotGroupIdx(groupIdx);
     const imageIdx = snapshotGroups[groupIdx]?.find((idx) => !isSnapshotImageHidden(idx)) ?? -1;
     setSelectedSnapshotIdx(imageIdx);
@@ -1725,86 +2512,70 @@ function Show1DWidget() {
 
   const selectSnapshotImage = React.useCallback((imageIdx: number) => {
     if (imageIdx < 0 || imageIdx >= nSnapshots) return;
+    setTransientSnapshotGroupIdx(null);
     setSelectedSnapshotIdx(imageIdx);
     const groupIdx = snapshotImageGroups[imageIdx] ?? selectedGroup;
     if (groupIdx >= 0 && groupIdx < groupCount) setSelectedSnapshotGroupIdx(groupIdx);
   }, [groupCount, nSnapshots, selectedGroup, setSelectedSnapshotGroupIdx, setSelectedSnapshotIdx, snapshotImageGroups]);
 
-  const toggleStarredTrial = React.useCallback((label: string) => {
-    const clean = String(label || "").trim();
-    if (!clean) return;
-    const key = trialKey(clean);
-    const current = uniqueStrings(starredSnapshotImageLabels ?? []);
-    if (current.some((value) => trialKey(value) === key)) {
-      setStarredSnapshotImageLabels(current.filter((value) => trialKey(value) !== key));
-      return;
+  const clearPlotThumbnailPreview = React.useCallback(() => {
+    hoverSnapshotGroupRef.current = null;
+    setHoverSnapshotGroupIdx(null);
+    if (canvasRef.current) canvasRef.current.style.cursor = "crosshair";
+  }, []);
+
+  const findPlotThumbnailHit = React.useCallback((clientX: number, clientY: number): PlotThumbnailHitArea | null => {
+    const canvas = canvasRef.current;
+    if (!canvas) return null;
+    const rect = canvas.getBoundingClientRect();
+    const px = clientX - rect.left;
+    const py = clientY - rect.top;
+    const hitAreas = plotThumbnailHitAreasRef.current;
+    for (let idx = hitAreas.length - 1; idx >= 0; idx -= 1) {
+      const area = hitAreas[idx];
+      if (px >= area.x0 && px <= area.x0 + area.width && py >= area.y0 && py <= area.y0 + area.height) {
+        return area;
+      }
     }
-    setStarredSnapshotImageLabels([...current, clean]);
-  }, [setStarredSnapshotImageLabels, starredSnapshotImageLabels]);
+    return null;
+  }, []);
+
+  const previewPlotThumbnailAtPointer = React.useCallback((clientX: number, clientY: number) => {
+    if (snapshotPlaying) return false;
+    const hit = findPlotThumbnailHit(clientX, clientY);
+    if (!hit) {
+      if (hoverSnapshotGroupRef.current !== null) clearPlotThumbnailPreview();
+      return false;
+    }
+    if (hoverSnapshotGroupRef.current !== hit.groupIdx) {
+      hoverSnapshotGroupRef.current = hit.groupIdx;
+      setHoverSnapshotGroupIdx(hit.groupIdx);
+    }
+    if (canvasRef.current) canvasRef.current.style.cursor = "pointer";
+    return true;
+  }, [clearPlotThumbnailPreview, findPlotThumbnailHit, snapshotPlaying]);
+
+  const commitPlotThumbnailAtPointer = React.useCallback((clientX: number, clientY: number) => {
+    const hit = findPlotThumbnailHit(clientX, clientY);
+    if (!hit) return false;
+    clearPlotThumbnailPreview();
+    selectSnapshotGroup(hit.groupIdx);
+    return true;
+  }, [clearPlotThumbnailPreview, findPlotThumbnailHit, selectSnapshotGroup]);
 
   const hideTrial = React.useCallback((label: string) => {
     const clean = String(label || "").trim();
     if (!clean) return;
     const key = trialKey(clean);
     const hidden = uniqueStrings(hiddenSnapshotImageLabels ?? []);
-    const starred = uniqueStrings(starredSnapshotImageLabels ?? []);
     if (!hidden.some((value) => trialKey(value) === key)) {
       setHiddenSnapshotImageLabels([...hidden, clean]);
     }
-    if (starred.some((value) => trialKey(value) === key)) {
-      setStarredSnapshotImageLabels(starred.filter((value) => trialKey(value) !== key));
-    }
-  }, [hiddenSnapshotImageLabels, setHiddenSnapshotImageLabels, setStarredSnapshotImageLabels, starredSnapshotImageLabels]);
+  }, [hiddenSnapshotImageLabels, setHiddenSnapshotImageLabels]);
 
   const showAllTrials = React.useCallback(() => {
     setHiddenSnapshotImageLabels([]);
   }, [setHiddenSnapshotImageLabels]);
-
-  const setTrialNoteForLabel = React.useCallback((label: string, note: string) => {
-    const clean = String(label || "").trim();
-    if (!clean) return;
-    const key = trialKey(clean);
-    const next: Record<string, string> = {};
-    for (const [rawLabel, value] of Object.entries(trialNotes ?? {})) {
-      if (trialKey(rawLabel) !== key && String(value || "").trim()) next[rawLabel] = String(value);
-    }
-    if (note.trim()) next[clean] = note;
-    setTrialNotes(next);
-  }, [setTrialNotes, trialNotes]);
-
-  const toggleTrialTag = React.useCallback((label: string, tag: string) => {
-    const clean = String(label || "").trim();
-    const cleanTag = String(tag || "").trim();
-    if (!clean || !cleanTag) return;
-    const key = trialKey(clean);
-    const next: Record<string, string[]> = {};
-    let current: string[] = [];
-    for (const [rawLabel, values] of Object.entries(trialTags ?? {})) {
-      const list = Array.isArray(values) ? values.map(String).filter(Boolean) : [];
-      if (trialKey(rawLabel) === key) current = list;
-      else if (list.length) next[rawLabel] = uniqueStrings(list);
-    }
-    next[clean] = current.some((value) => value === cleanTag)
-      ? current.filter((value) => value !== cleanTag)
-      : uniqueStrings([...current, cleanTag]);
-    if (!next[clean].length) delete next[clean];
-    setTrialTags(next);
-  }, [setTrialTags, trialTags]);
-
-  const starBestTrial = React.useCallback(() => {
-    const best = sortedTrialRows.find((row) => row.label && !hiddenTrialKeys.has(trialKey(row.label)));
-    if (!best?.label) return;
-    const current = uniqueStrings(starredSnapshotImageLabels ?? []);
-    if (!current.some((value) => trialKey(value) === trialKey(best.label || ""))) {
-      setStarredSnapshotImageLabels([...current, best.label]);
-    }
-  }, [hiddenTrialKeys, setStarredSnapshotImageLabels, sortedTrialRows, starredSnapshotImageLabels]);
-
-  const hideWorstTrial = React.useCallback(() => {
-    const candidates = sortedTrialRows.filter((row) => row.label && !hiddenTrialKeys.has(trialKey(row.label)) && !starredTrialKeys.has(trialKey(row.label)));
-    const worst = candidates[candidates.length - 1];
-    if (worst?.label) hideTrial(worst.label);
-  }, [hiddenTrialKeys, hideTrial, sortedTrialRows, starredTrialKeys]);
 
   const scheduleHover = React.useCallback((value: HoverPoint | null) => {
     pendingHoverRef.current = value;
@@ -1819,13 +2590,70 @@ function Show1DWidget() {
     if (hoverRafRef.current !== null) window.cancelAnimationFrame(hoverRafRef.current);
   }, []);
 
+  React.useEffect(() => () => {
+    snapshotResizeCleanupRef.current?.();
+  }, []);
+
+  const setSnapshotViewportWidth = React.useCallback((width: number) => {
+    setSnapshotPanelWidthPx(Math.round(clampValue(width, Math.min(220, sidePanelWidth), sidePanelWidth)));
+  }, [setSnapshotPanelWidthPx, sidePanelWidth]);
+
+  const handleSnapshotResizePointerDown = React.useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    snapshotResizeCleanupRef.current?.();
+    const pointerId = event.pointerId;
+    snapshotResizePointerIdRef.current = pointerId;
+    snapshotResizeStartRef.current = { x: event.clientX, y: event.clientY, width: snapshotViewportWidthRef.current || sidePanelWidth };
+    event.currentTarget.setPointerCapture(pointerId);
+    const handleWindowPointerMove = (moveEvent: PointerEvent) => {
+      const start = snapshotResizeStartRef.current;
+      if (snapshotResizePointerIdRef.current !== pointerId || !start) return;
+      moveEvent.preventDefault();
+      const delta = Math.max(moveEvent.clientX - start.x, moveEvent.clientY - start.y);
+      setSnapshotViewportWidth(start.width + delta);
+    };
+    const handleWindowPointerUp = (upEvent: PointerEvent) => {
+      if (snapshotResizePointerIdRef.current !== pointerId) return;
+      upEvent.preventDefault();
+      snapshotResizeCleanupRef.current?.();
+      snapshotResizeCleanupRef.current = null;
+    };
+    window.addEventListener("pointermove", handleWindowPointerMove, { capture: true });
+    window.addEventListener("pointerup", handleWindowPointerUp, { capture: true });
+    window.addEventListener("pointercancel", handleWindowPointerUp, { capture: true });
+    snapshotResizeCleanupRef.current = () => {
+      window.removeEventListener("pointermove", handleWindowPointerMove, { capture: true });
+      window.removeEventListener("pointerup", handleWindowPointerUp, { capture: true });
+      window.removeEventListener("pointercancel", handleWindowPointerUp, { capture: true });
+      snapshotResizePointerIdRef.current = null;
+      snapshotResizeStartRef.current = null;
+    };
+  }, [setSnapshotViewportWidth, sidePanelWidth]);
+
+  const handleSnapshotResizePointerUp = React.useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    if (snapshotResizePointerIdRef.current !== event.pointerId) return;
+    event.preventDefault();
+    event.stopPropagation();
+    snapshotResizeCleanupRef.current?.();
+    snapshotResizeCleanupRef.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+  }, []);
+
   React.useEffect(() => {
     if (snapshotThumbnailSize !== thumbnailSize) setSnapshotThumbnailSize(thumbnailSize);
   }, [setSnapshotThumbnailSize, snapshotThumbnailSize, thumbnailSize]);
 
   React.useEffect(() => {
-    if (snapshotColumns !== snapshotColumnCount) setSnapshotColumns(snapshotColumnCount);
-  }, [setSnapshotColumns, snapshotColumnCount, snapshotColumns]);
+    const fps = clampSnapshotFps(snapshotFps);
+    if (snapshotFps !== fps) setSnapshotFps(fps);
+  }, [setSnapshotFps, snapshotFps]);
+
+  React.useEffect(() => {
+    if (snapshotColumns !== rawSnapshotColumnCount) setSnapshotColumns(rawSnapshotColumnCount);
+  }, [rawSnapshotColumnCount, setSnapshotColumns, snapshotColumns]);
 
   React.useEffect(() => {
     if (focusedTrace >= 0 && hiddenTraceSet.has(focusedTrace)) setFocusedTrace(-1);
@@ -1854,6 +2682,53 @@ function Show1DWidget() {
   }, [normalisedSnapshotContrastPreset, setSnapshotContrastPreset, snapshotContrastPreset]);
 
   React.useEffect(() => {
+    hoverSnapshotGroupRef.current = hoverSnapshotGroupIdx;
+  }, [hoverSnapshotGroupIdx]);
+
+  React.useEffect(() => {
+    if (
+      hoverSnapshotGroupIdx === null
+      || (showSnapshotThumbnails && hasSnapshots && groupCount > 0 && hoverSnapshotGroupIdx < groupCount && !snapshotPlaying)
+    ) {
+      return;
+    }
+    clearPlotThumbnailPreview();
+  }, [
+    clearPlotThumbnailPreview,
+    groupCount,
+    hasSnapshots,
+    hoverSnapshotGroupIdx,
+    showSnapshotThumbnails,
+    snapshotPlaying,
+  ]);
+
+  React.useEffect(() => {
+    if (hoverSnapshotGroupIdx === null) return;
+    const handleWindowPointerMove = (event: PointerEvent) => {
+      const canvas = canvasRef.current;
+      if (!canvas) {
+        clearPlotThumbnailPreview();
+        return;
+      }
+      const rect = canvas.getBoundingClientRect();
+      if (
+        event.clientX < rect.left
+        || event.clientX > rect.right
+        || event.clientY < rect.top
+        || event.clientY > rect.bottom
+      ) {
+        clearPlotThumbnailPreview();
+      }
+    };
+    window.addEventListener("pointermove", handleWindowPointerMove, true);
+    window.addEventListener("blur", clearPlotThumbnailPreview);
+    return () => {
+      window.removeEventListener("pointermove", handleWindowPointerMove, true);
+      window.removeEventListener("blur", clearPlotThumbnailPreview);
+    };
+  }, [clearPlotThumbnailPreview, hoverSnapshotGroupIdx]);
+
+  React.useEffect(() => {
     snapshotFftCacheRef.current.clear();
   }, [snapshotData, snapshotHeight, snapshotHeights, snapshotWidth, snapshotWidths]);
 
@@ -1865,6 +2740,28 @@ function Show1DWidget() {
   }, [groupCount, hasSnapshots, setSnapshotPlaying, snapshotPlaying]);
 
   React.useEffect(() => {
+    if (snapshotPlaying || transientSnapshotGroupIdx === null) return;
+    if (groupCount <= 0) {
+      setTransientSnapshotGroupIdx(null);
+      return;
+    }
+    const groupIdx = clampValue(Math.round(transientSnapshotGroupIdx), 0, groupCount - 1);
+    setTransientSnapshotGroupIdx(null);
+    setSelectedSnapshotGroupIdx(groupIdx);
+    const imageIdx = snapshotGroups[groupIdx]?.find((idx) => !isSnapshotImageHidden(idx)) ?? -1;
+    setSelectedSnapshotIdx(imageIdx);
+  }, [
+    groupCount,
+    isSnapshotImageHidden,
+    setSelectedSnapshotGroupIdx,
+    setSelectedSnapshotIdx,
+    snapshotGroups,
+    snapshotPlaying,
+    transientSnapshotGroupIdx,
+  ]);
+
+  React.useEffect(() => {
+    if (snapshotPlaying) return;
     if (!hasSnapshots || selectedSnapshot < 0) {
       setSnapshotHistogramBins(new Array(256).fill(0));
       setSnapshotHistogramRange([0, 1]);
@@ -1878,9 +2775,7 @@ function Show1DWidget() {
     const dataRange = findDataRange(image);
     const dataMin = dataRange.min;
     const dataMax = dataRange.max > dataRange.min ? dataRange.max : dataRange.min + 1;
-    const clipRange = resolveSnapshotDisplayRange(image, normalisedSnapshotContrastPreset);
     setSnapshotHistogramRange([dataMin, dataMax]);
-    setSnapshotHistogramClipRange(clipRange);
     let canceled = false;
     const useCpu = () => {
       if (canceled) return;
@@ -1910,8 +2805,31 @@ function Show1DWidget() {
   }, [
     hasSnapshots,
     preferWebgpu,
+    selectedSnapshot,
+    snapshotPlaying,
+    snapshotData,
+    snapshotHeight,
+    snapshotHeights,
+    snapshotWidth,
+    snapshotWidths,
+  ]);
+
+  React.useEffect(() => {
+    if (snapshotPlaying) return;
+    if (!hasSnapshots || selectedSnapshot < 0) {
+      setSnapshotHistogramClipRange([0, 1]);
+      return;
+    }
+    const imageHeight = snapshotHeights?.[selectedSnapshot] || snapshotHeight;
+    const imageWidth = snapshotWidths?.[selectedSnapshot] || snapshotWidth;
+    const image = extractPackedImage(snapshotData, selectedSnapshot, snapshotHeight, snapshotWidth, imageHeight, imageWidth);
+    setSnapshotHistogramClipRange(resolveSnapshotDisplayRange(image, normalisedSnapshotContrastPreset, customSnapshotContrastRange));
+  }, [
+    customSnapshotContrastRange,
+    hasSnapshots,
     normalisedSnapshotContrastPreset,
     selectedSnapshot,
+    snapshotPlaying,
     snapshotData,
     snapshotHeight,
     snapshotHeights,
@@ -1927,14 +2845,15 @@ function Show1DWidget() {
     const tick = (now: number) => {
       if (!previous) previous = now;
       if (now - previous >= intervalMs) {
-        selectSnapshotGroup((selectedGroup + 1) % groupCount);
+        const currentGroup = selectedGroupRef.current >= 0 ? selectedGroupRef.current : 0;
+        selectSnapshotGroup((currentGroup + 1) % groupCount, false);
         previous = now;
       }
       raf = window.requestAnimationFrame(tick);
     };
     raf = window.requestAnimationFrame(tick);
     return () => window.cancelAnimationFrame(raf);
-  }, [groupCount, hasSnapshots, selectSnapshotGroup, selectedGroup, snapshotFps, snapshotPlaying]);
+  }, [groupCount, hasSnapshots, selectSnapshotGroup, snapshotFps, snapshotPlaying]);
 
   React.useEffect(() => {
     if (!exportStatus) return;
@@ -2001,26 +2920,33 @@ function Show1DWidget() {
 
   React.useEffect(() => {
     const canvas = canvasRef.current;
-    if (!canvas) return;
+    if (!canvas) {
+      plotThumbnailHitAreasRef.current = [];
+      return;
+    }
     const dpr = window.devicePixelRatio || 1;
     canvas.width = Math.round(plotSize.width * dpr);
     canvas.height = Math.round(plotSize.height * dpr);
     canvas.style.width = `${plotSize.width}px`;
     canvas.style.height = `${plotSize.height}px`;
     const ctx = canvas.getContext("2d");
-    if (!ctx) return;
+    if (!ctx) {
+      plotThumbnailHitAreasRef.current = [];
+      return;
+    }
+    const nextPlotThumbnailHitAreas: PlotThumbnailHitArea[] = [];
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.fillStyle = themeColors.bg;
     ctx.fillRect(0, 0, plotSize.width, plotSize.height);
 
     const geom: PlotGeometry = {
       left: 64,
-      right: 18,
+      right: 8,
       top: plotTitleVisible ? 28 : 16,
       bottom: 46,
       width: plotSize.width,
       height: plotSize.height,
-      plotW: Math.max(1, plotSize.width - 82),
+      plotW: Math.max(1, plotSize.width - 72),
       plotH: Math.max(1, plotSize.height - (plotTitleVisible ? 74 : 62)),
       xMin: effectiveXRange[0],
       xMax: effectiveXRange[1],
@@ -2130,54 +3056,25 @@ function Show1DWidget() {
       const thumbW = thumbnailSize;
       const lanes = Math.max(1, Math.min(3, Math.floor((geom.plotH - 12) / (thumbnailSize + 6)) || 1));
       for (let groupIdx = 0; groupIdx < groupCount; groupIdx += 1) {
-        const imageIndices = (snapshotGroups[groupIdx] ?? []).filter((idx) => !isSnapshotImageHidden(idx)).sort((a, b) => {
-          const aLabel = imageLabelForIndex(a);
-          const bLabel = imageLabelForIndex(b);
-          if (isReferenceLabel(aLabel) !== isReferenceLabel(bLabel)) return isReferenceLabel(aLabel) ? -1 : 1;
-          const ar = Number(trialRowByKey.get(trialKey(aLabel))?.rank ?? Number.MAX_SAFE_INTEGER);
-          const br = Number(trialRowByKey.get(trialKey(bLabel))?.rank ?? Number.MAX_SAFE_INTEGER);
-          return ar - br || aLabel.localeCompare(bLabel);
-        });
-        const imageIdx = imageIndices[0];
-        if (imageIdx === undefined) continue;
-        const thumbMetrics = snapshotGroupThumbnailMetrics(imageIndices.length, thumbW);
-        if (thumbMetrics.width <= 0 || thumbMetrics.height <= 0) continue;
-        const iteration = Number.isFinite(snapshotGroupIterations?.[groupIdx])
-          ? Number(snapshotGroupIterations[groupIdx])
-          : snapshotIterations?.[imageIdx];
-        if (!Number.isFinite(iteration)) continue;
-        const xCenter = dataToX(Number(iteration), geom);
+        const thumb = plotThumbnailCache.get(groupIdx);
+        if (!thumb) continue;
+        const xCenter = dataToX(thumb.iteration, geom);
         if (xCenter < geom.left - thumbW || xCenter > geom.left + geom.plotW + thumbW) continue;
-        const images = imageIndices.map((idx) => {
-          const imageHeight = snapshotHeights?.[idx] || snapshotHeight;
-          const imageWidth = snapshotWidths?.[idx] || snapshotWidth;
-          return {
-            data: extractPackedImage(snapshotData, idx, snapshotHeight, snapshotWidth, imageHeight, imageWidth),
-            height: imageHeight,
-            width: imageWidth,
-          };
-        });
         const lane = lanes > 1 ? groupIdx % lanes : 0;
-        const x0 = clampValue(xCenter - thumbMetrics.width / 2, geom.left + 2, geom.left + geom.plotW - thumbMetrics.width - 2);
-        const y0 = Math.min(geom.top + geom.plotH - thumbMetrics.height - 4, geom.top + 8 + lane * (thumbnailSize + 4));
+        const x0 = clampValue(xCenter - thumb.width / 2, geom.left + 2, geom.left + geom.plotW - thumb.width - 2);
+        const y0 = Math.min(geom.top + geom.plotH - thumb.height - 4, geom.top + 8 + lane * (thumbnailSize + 4));
+        nextPlotThumbnailHitAreas.push({ groupIdx, x0, y0, width: thumb.width, height: thumb.height });
         ctx.strokeStyle = groupIdx === selectedGroup ? themeColors.accent : themeColors.border;
         ctx.globalAlpha = groupIdx === selectedGroup ? 0.55 : 0.28;
         ctx.beginPath();
         ctx.moveTo(xCenter, geom.top);
-        ctx.lineTo(xCenter, y0 + thumbMetrics.height);
+        ctx.lineTo(xCenter, y0 + thumb.height);
         ctx.stroke();
         ctx.globalAlpha = 1;
-        drawSnapshotGroupThumbnail(
-          ctx,
-          images,
-          x0,
-          y0,
-          thumbW,
-          groupIdx === selectedGroup,
-          imageLut,
-          themeColors,
-          normalisedSnapshotContrastPreset,
-        );
+        ctx.drawImage(thumb.canvas, x0, y0, thumb.width, thumb.height);
+        ctx.strokeStyle = groupIdx === selectedGroup ? themeColors.accent : themeColors.border;
+        ctx.lineWidth = groupIdx === selectedGroup ? 2 : 1;
+        ctx.strokeRect(x0 + 0.5, y0 + 0.5, thumb.width - 1, thumb.height - 1);
       }
     }
 
@@ -2240,6 +3137,7 @@ function Show1DWidget() {
       ctx.font = "13px system-ui, sans-serif";
       ctx.fillText("No data", geom.left + geom.plotW / 2, geom.top + geom.plotH / 2);
     }
+    plotThumbnailHitAreasRef.current = nextPlotThumbnailHitAreas;
   }, [
     plotSize,
     themeColors,
@@ -2269,21 +3167,9 @@ function Show1DWidget() {
     showSnapshotThumbnails,
     hasSnapshots,
     groupCount,
-    imageLabelForIndex,
-    isSnapshotImageHidden,
-    snapshotGroups,
-    snapshotGroupIterations,
-    snapshotIterations,
-    snapshotHeights,
-    snapshotWidths,
-    snapshotData,
-    snapshotHeight,
-    snapshotWidth,
     selectedGroup,
-    trialRowByKey,
+    plotThumbnailCache,
     thumbnailSize,
-    imageLut,
-    normalisedSnapshotContrastPreset,
   ]);
 
   const nearestPoint = React.useCallback((clientX: number, clientY: number): HoverPoint | null => {
@@ -2317,22 +3203,52 @@ function Show1DWidget() {
   }, [hiddenTraceSet, nPoints, nTraces, xData, yData, logScale]);
 
   const handlePointerMove = React.useCallback((event: React.PointerEvent<HTMLCanvasElement>) => {
+    if (previewPlotThumbnailAtPointer(event.clientX, event.clientY)) {
+      scheduleHover(null);
+      return;
+    }
     scheduleHover(nearestPoint(event.clientX, event.clientY));
-  }, [nearestPoint, scheduleHover]);
+  }, [nearestPoint, previewPlotThumbnailAtPointer, scheduleHover]);
 
-  const handlePointerLeave = React.useCallback(() => scheduleHover(null), [scheduleHover]);
+  const handlePointerLeave = React.useCallback(() => {
+    clearPlotThumbnailPreview();
+    scheduleHover(null);
+  }, [clearPlotThumbnailPreview, scheduleHover]);
 
-  const handleClick = React.useCallback(() => {
+  const handleClick = React.useCallback((event: React.MouseEvent<HTMLCanvasElement>) => {
+    if (commitPlotThumbnailAtPointer(event.clientX, event.clientY)) {
+      scheduleHover(null);
+      return;
+    }
     if (hover) setFocusedTrace(hover.trace);
-  }, [hover, setFocusedTrace]);
+  }, [commitPlotThumbnailAtPointer, hover, scheduleHover, setFocusedTrace]);
+
+  const setSnapshotRealSpaceView = React.useCallback((view: ImageViewApiState) => {
+    setSnapshotRealSpaceZoom(view.zoom);
+    setSnapshotRealSpaceCenter(view.center);
+  }, [setSnapshotRealSpaceCenter, setSnapshotRealSpaceZoom]);
+
+  const setSnapshotFftView = React.useCallback((view: ImageViewApiState) => {
+    setSnapshotFftZoom(view.zoom);
+    setSnapshotFftCenter(view.center);
+  }, [setSnapshotFftCenter, setSnapshotFftZoom]);
 
   const resetRanges = React.useCallback(() => {
     setXRange([]);
     setYRange([]);
     setFocusedTrace(-1);
-    setSnapshotImageView({ zoom: 1, panX: 0, panY: 0 });
-    setSnapshotFftView({ zoom: 1, panX: 0, panY: 0 });
-  }, [setFocusedTrace, setXRange, setYRange]);
+    setSnapshotRealSpaceZoom(1);
+    setSnapshotRealSpaceCenter([]);
+    setSnapshotFftZoom(1);
+    setSnapshotFftCenter([]);
+  }, [setFocusedTrace, setSnapshotFftCenter, setSnapshotFftZoom, setSnapshotRealSpaceCenter, setSnapshotRealSpaceZoom, setXRange, setYRange]);
+  const needsReset = Boolean(
+    (xRange?.length ?? 0) > 0
+    || (yRange?.length ?? 0) > 0
+    || focusedTrace >= 0
+    || imageViewNeedsReset(snapshotRealSpaceZoom, snapshotRealSpaceCenter)
+    || imageViewNeedsReset(snapshotFftZoom, snapshotFftCenter),
+  );
 
   const handleWheel = React.useCallback((event: React.WheelEvent<HTMLCanvasElement>) => {
     const geom = geomRef.current;
@@ -2427,37 +3343,144 @@ function Show1DWidget() {
     }));
   }, [setHandoffRequest]);
 
-  const selectedSnapshotLabel = selectedGroup >= 0
-    ? snapshotGroupLabels?.[selectedGroup] || snapshotLabels?.[selectedSnapshot] || `snapshot ${selectedGroup + 1}`
-    : "";
-  const selectedSnapshotImageLabel = selectedSnapshot >= 0 ? imageLabelForIndex(selectedSnapshot) : "";
-  const selectedTrialNote = selectedSnapshotImageLabel ? lookupByTrialKey(trialNotes, selectedSnapshotImageLabel) ?? "" : "";
-  const selectedTrialTags = selectedSnapshotImageLabel ? lookupByTrialKey(trialTags, selectedSnapshotImageLabel) ?? [] : [];
-  const selectedSnapshotPosition = selectedSnapshotIteration !== null && !labelAlreadyContainsValue(selectedSnapshotLabel, selectedSnapshotIteration)
-    ? axisPositionText(selectedSnapshotIteration, xLabel, xUnit)
-    : "";
   const snapshotSliderMarks = React.useMemo(
     () => groupCount > 1 && groupCount <= 24 ? Array.from({ length: groupCount }, (_, value) => ({ value })) : [],
     [groupCount],
   );
   const selectedImageColumns = Math.max(1, Math.min(snapshotColumnCount, Math.max(1, selectedGroupImageIndices.length)));
+  const snapshotTileWidth = Math.max(
+    1,
+    ...selectedGroupImageIndices.map((imageIdx) => snapshotWidths?.[imageIdx] || snapshotWidth || 1),
+  );
+  const selectedImageRows = Math.max(1, Math.ceil(Math.max(1, selectedGroupImageIndices.length) / selectedImageColumns));
+  const snapshotTallestAspect = Math.max(
+    1,
+    ...selectedGroupImageIndices.map((imageIdx) => {
+      const imageHeight = snapshotHeights?.[imageIdx] || snapshotHeight || 1;
+      const imageWidth = snapshotWidths?.[imageIdx] || snapshotWidth || 1;
+      return imageHeight / Math.max(1, imageWidth);
+    }),
+  );
+  const snapshotGridHeightCap = Math.round(clampValue(viewportSize.height - (controlsVisible ? 330 : 260), 420, 920));
+  const snapshotNaturalViewportWidth = Math.round(clampValue(selectedImageColumns * snapshotTileWidth, 240, sidePanelWidth));
+  const snapshotFitAllViewportWidth = Math.floor(snapshotGridHeightCap * selectedImageColumns / Math.max(1, selectedImageRows * snapshotTallestAspect));
+  const snapshotManualViewportWidth = Number.isFinite(snapshotPanelWidthPx) && snapshotPanelWidthPx > 0
+    ? Math.round(snapshotPanelWidthPx)
+    : 0;
+  const snapshotViewportWidth = Math.round(clampValue(
+    snapshotManualViewportWidth || Math.min(snapshotNaturalViewportWidth, snapshotFitAllViewportWidth),
+    Math.min(220, sidePanelWidth),
+    sidePanelWidth,
+  ));
+  snapshotViewportWidthRef.current = snapshotViewportWidth;
+  const snapshotViewportSx = {
+    width: "100%",
+    maxWidth: `${snapshotViewportWidth}px`,
+    minWidth: 0,
+    alignSelf: "flex-start",
+  };
+  const snapshotTileDisplayWidth = snapshotViewportWidth / Math.max(1, selectedImageColumns);
+  const snapshotTileDisplayHeight = Math.ceil(snapshotTileDisplayWidth * snapshotTallestAspect);
+  const snapshotFullGridHeight = snapshotTileDisplayHeight * selectedImageRows;
+  const snapshotGridMaxHeight = `${Math.round(clampValue(snapshotFullGridHeight, 220, snapshotGridHeightCap))}px`;
+  const snapshotProfilePlotHeight = Math.round(clampValue(Number.isFinite(snapshotProfileHeight) ? snapshotProfileHeight : 76, 44, 220));
+  const statsPanel = showStats && visibleTraceIndices.length > 0 ? (
+    <Box data-testid="show1d-stats-table" sx={{ width: "100%", mb: 0.5 }}>
+      <Box
+        component="table"
+        sx={{
+          width: "100%",
+          borderCollapse: "collapse",
+          tableLayout: "fixed",
+          "& th, & td": {
+            fontSize: 10.5,
+            py: 0.35,
+            textAlign: "right",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          },
+          "& th:first-of-type, & td:first-of-type": { textAlign: "left" },
+        }}
+      >
+        <thead>
+          <tr>
+            <th>Trace</th><th>Mean</th><th>Min</th><th>Max</th><th>Std</th>
+          </tr>
+        </thead>
+        <tbody>
+          {visibleTraceIndices.map((idx) => (
+            <tr key={idx}>
+              <td title={labels?.[idx] || `Trace ${idx + 1}`}>
+                <Box component="span" sx={{ display: "inline-block", width: 7, height: 7, bgcolor: cssColor(colors ?? [], idx), mr: 0.5, borderRadius: "50%" }} />
+                {compactScienceLabel(labels?.[idx] || `Trace ${idx + 1}`)}
+              </td>
+              <td>{formatNumber(statsMean?.[idx] ?? NaN, 2)}</td>
+              <td>{formatNumber(statsMin?.[idx] ?? NaN, 2)}</td>
+              <td>{formatNumber(statsMax?.[idx] ?? NaN, 2)}</td>
+              <td>{formatNumber(statsStd?.[idx] ?? NaN, 2)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </Box>
+    </Box>
+  ) : null;
+
+  const snapshotPanelControls = (
+    <Box
+      data-testid="show1d-panel-controls"
+      sx={{ ...controlRow, width: "100%", border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, mb: 0.5 }}
+    >
+      <Typography sx={{ ...typography.label, color: themeColors.textMuted, flexShrink: 0 }}>cols</Typography>
+      <Select
+        size="small"
+        value={rawSnapshotColumnCount}
+        onChange={(event) => setSnapshotColumns(Number(event.target.value))}
+        sx={{ ...themedSelect, minWidth: 58, fontSize: 10 }}
+        MenuProps={themedMenuProps}
+        inputProps={{ "aria-label": "Snapshot image columns" }}
+      >
+        <MenuItem value={0}>auto</MenuItem>
+        {[1, 2, 3, 4, 5, 6, 7, 8].map((value) => (
+          <MenuItem key={value} value={value}>{value}</MenuItem>
+        ))}
+      </Select>
+      <Typography sx={{ ...typography.label, color: themeColors.textMuted, flexShrink: 0 }}>overlay</Typography>
+      <Select
+        size="small"
+        value={resolvedSnapshotOverlayPosition}
+        onChange={(event) => setSnapshotOverlayPosition(String(event.target.value))}
+        sx={{ ...themedSelect, minWidth: 74, fontSize: 10 }}
+        MenuProps={themedMenuProps}
+        inputProps={{ "aria-label": "Snapshot overlay position" }}
+      >
+        <MenuItem value="top-left">top left</MenuItem>
+        <MenuItem value="top-right">top right</MenuItem>
+        <MenuItem value="bottom-left">bottom left</MenuItem>
+        <MenuItem value="bottom-right">bottom right</MenuItem>
+      </Select>
+    </Box>
+  );
 
   return (
     <Box
       ref={rootRef}
+      data-testid="show1d-root"
       sx={{
         width: "100%",
         maxWidth: 1180,
         bgcolor: themeColors.bg,
         color: themeColors.text,
-        border: `1px solid ${themeColors.border}`,
-        borderRadius: 1,
+        border: "none",
+        borderRadius: 0,
         overflow: "hidden",
+        maxHeight: viewportShellHeight,
+        overscrollBehavior: "contain",
         fontFamily: "system-ui, sans-serif",
       }}
     >
       {controlsVisible && (
-        <Box sx={{ px: 1.25, py: 0.75, borderBottom: `1px solid ${themeColors.border}`, bgcolor: themeColors.bg }}>
+        <Box sx={{ px: 1.25, py: 0.75, bgcolor: themeColors.bg }}>
           <Stack direction="row" alignItems="center" spacing={0.75} sx={{ minWidth: 0, mb: 0.75 }}>
             <ShowChartIcon sx={{ fontSize: 18, color: themeColors.accent, flexShrink: 0 }} />
             {showTitle && (
@@ -2466,310 +3489,166 @@ function Show1DWidget() {
               </Typography>
             )}
           </Stack>
-          <Stack direction="row" alignItems="center" spacing={1} sx={{ flexWrap: "wrap", rowGap: 0.75 }}>
-            <Button
-              size="small"
-              variant="outlined"
-              startIcon={<RestartAltIcon fontSize="small" />}
-              onClick={resetRanges}
-              sx={{ color: themeColors.text, borderColor: themeColors.border, textTransform: "none", height: 30, flexShrink: 0 }}
-            >
-              Reset
-            </Button>
-            <Tooltip title={showGrid ? "Hide Grid" : "Show Grid"}>
-              <IconButton size="small" onClick={() => setShowGrid(!showGrid)} sx={{ color: themeColors.text }}>
-                {showGrid ? <GridOnIcon fontSize="small" /> : <GridOffIcon fontSize="small" />}
-              </IconButton>
-            </Tooltip>
-            <Stack direction="row" alignItems="center" spacing={0.5}>
-              <Typography sx={{ fontSize: 12, color: themeColors.textMuted }}>Log</Typography>
-              <Switch size="small" checked={Boolean(logScale)} onChange={(_, checked) => setLogScale(checked)} sx={switchStyles.small} />
-            </Stack>
-            <Stack direction="row" alignItems="center" spacing={0.5}>
-              <Typography sx={{ fontSize: 12, color: themeColors.textMuted }}>Stats</Typography>
-              <Switch size="small" checked={Boolean(showStats)} onChange={(_, checked) => setShowStats(checked)} sx={switchStyles.small} />
-            </Stack>
-            <Stack direction="row" alignItems="center" spacing={0.5}>
-              <Typography sx={{ fontSize: 12, color: themeColors.textMuted }}>Legend</Typography>
-              <Switch size="small" checked={Boolean(showLegend)} onChange={(_, checked) => setShowLegend(checked)} sx={switchStyles.small} />
-            </Stack>
-            {hasSnapshots && (
-            <Stack direction="row" alignItems="center" spacing={0.5}>
-              <Typography sx={{ fontSize: 12, color: themeColors.textMuted }}>Snapshots</Typography>
-              <Switch size="small" checked={Boolean(showSnapshots)} onChange={(_, checked) => setShowSnapshots(checked)} sx={switchStyles.small} />
-            </Stack>
-          )}
-            {hasSnapshots && (
-            <Stack direction="row" alignItems="center" spacing={0.5}>
-              <Typography sx={{ fontSize: 12, color: themeColors.textMuted }}>Thumbs</Typography>
-              <Switch size="small" checked={Boolean(showSnapshotThumbnails)} onChange={(_, checked) => setShowSnapshotThumbnails(checked)} sx={switchStyles.small} />
-            </Stack>
-            )}
-            {hasSnapshots && (
-              <Stack direction="row" alignItems="center" spacing={0.5} sx={{ flexShrink: 0 }}>
-                <Typography sx={{ fontSize: 12, color: themeColors.textMuted }}>cols</Typography>
-                <Select
-                  size="small"
-                  value={snapshotColumnCount}
-                  onChange={(event) => setSnapshotColumns(Number(event.target.value))}
-                  sx={{ ...themedSelect, minWidth: 50, height: 30, fontSize: 11 }}
-                  MenuProps={themedMenuProps}
-                  inputProps={{ "aria-label": "Snapshot image columns" }}
-                >
-                  {[1, 2, 3, 4].map((value) => (
-                    <MenuItem key={value} value={value}>{value}</MenuItem>
-                  ))}
-                </Select>
-              </Stack>
-            )}
+          <Stack direction="row" alignItems="center" spacing={1} useFlexGap sx={{ flexWrap: "wrap", rowGap: 0.5, minHeight: 28, width: "100%", maxWidth: "100%", boxSizing: "border-box" }}>
             {nTraces > 1 && (
-              <Stack direction="row" alignItems="center" spacing={0.5} sx={{ flexShrink: 0 }}>
-                <Typography sx={{ fontSize: 12, color: themeColors.textMuted }}>Starred</Typography>
-                <Switch
-                  size="small"
-                  checked={Boolean(showStarredOnly)}
-                  onChange={(_, checked) => setShowStarredOnly(checked)}
-                  sx={switchStyles.small}
-                  slotProps={{ input: { "aria-label": "Show starred trials only" } }}
-                />
-              </Stack>
-            )}
-            {nTraces > 1 && (
-              <Stack direction="row" alignItems="center" spacing={0.5} sx={{ flexShrink: 0 }}>
-                <Typography sx={{ fontSize: 12, color: themeColors.textMuted }}>rank</Typography>
-                <Select
-                  size="small"
-                  value={normalisedSortKey}
-                  onChange={(event) => setTrialSortKey(String(event.target.value))}
-                  sx={{ ...themedSelect, minWidth: 92, height: 30, fontSize: 11 }}
-                  MenuProps={themedMenuProps}
-                  inputProps={{ "aria-label": "Trial ranking objective" }}
-                >
-                  <MenuItem value="final_loss">final loss</MenuItem>
-                  <MenuItem value="min_loss">min loss</MenuItem>
-                  <MenuItem value="rmse">RMSE</MenuItem>
-                  <MenuItem value="flicker">flicker</MenuItem>
-                  <MenuItem value="lambda">lambda</MenuItem>
-                  <MenuItem value="object_quality">object</MenuItem>
-                  <MenuItem value="probe_quality">probe</MenuItem>
-                  <MenuItem value="alert_count">alerts</MenuItem>
-                  <MenuItem value="label">label</MenuItem>
-                </Select>
-                <Tooltip title={trialSortDescending ? "Descending" : "Ascending"}>
-                  <Switch
-                    size="small"
-                    checked={Boolean(trialSortDescending)}
-                    onChange={(_, checked) => setTrialSortDescending(checked)}
-                    sx={switchStyles.small}
-                    slotProps={{ input: { "aria-label": "Reverse trial ranking order" } }}
-                  />
-                </Tooltip>
-              </Stack>
-            )}
-            {nTraces > 1 && (
-              <Stack direction="row" alignItems="center" spacing={0.5} sx={{ flexShrink: 0 }}>
-                <Typography sx={{ fontSize: 12, color: themeColors.textMuted }}>top</Typography>
-                <Select
-                  size="small"
-                  value={topTrialLimit}
-                  onChange={(event) => setTopTrialCount(Number(event.target.value))}
-                  sx={{ ...themedSelect, minWidth: 54, height: 30, fontSize: 11 }}
-                  MenuProps={themedMenuProps}
-                  inputProps={{ "aria-label": "Top trial count" }}
-                >
-                  <MenuItem value={0}>all</MenuItem>
-                  {[1, 2, 3, 5, 10].map((value) => (
-                    <MenuItem key={value} value={value}>{value}</MenuItem>
-                  ))}
-                </Select>
-              </Stack>
-            )}
-            {nTraces > 1 && (
-              <TextField
+              <Select
                 size="small"
-                value={trialFilterText || ""}
-                onChange={(event) => setTrialFilterText(event.target.value)}
-                placeholder="filter"
-                inputProps={{ "aria-label": "Filter trials" }}
-                InputProps={{
-                  endAdornment: trialFilterText ? (
-                    <InputAdornment position="end">
-                      <IconButton
-                        size="small"
-                        onClick={() => setTrialFilterText("")}
-                        aria-label="Clear trial filter"
-                        sx={{ color: themeColors.textMuted, p: 0.25 }}
-                      >
-                        <ClearIcon fontSize="inherit" />
-                      </IconButton>
-                    </InputAdornment>
-                  ) : null,
-                }}
-                sx={{
-                  width: 104,
-                  flexShrink: 0,
-                  "& .MuiInputBase-root": { height: 30, fontSize: 11, bgcolor: themeColors.controlBg, color: themeColors.text },
-                  "& .MuiInputAdornment-root": { ml: 0.25 },
-                  "& .MuiOutlinedInput-notchedOutline": { borderColor: themeColors.border },
-                  "&:hover .MuiOutlinedInput-notchedOutline": { borderColor: themeColors.accent },
-                }}
-              />
-            )}
-            {nTraces > 1 && (
-              <Button
-                size="small"
-                variant="outlined"
-                onClick={starBestTrial}
-                sx={{ color: themeColors.text, borderColor: themeColors.border, textTransform: "none", height: 30, px: 1, flexShrink: 0 }}
-                aria-label="Star best ranked trial"
+                value={String(focusedTrace)}
+                onChange={(event) => setFocusedTrace(Number(event.target.value))}
+                sx={{ ...themedSelect, minWidth: 120, height: 30, fontSize: 12 }}
+                MenuProps={themedTopMenuProps}
+                inputProps={{ "aria-label": "Trace selector" }}
               >
-                Star best
-              </Button>
+                <MenuItem value="-1">{hiddenTraceIndices.length ? "All Visible" : "All Traces"}</MenuItem>
+                {visibleTraceIndices.map((idx) => (
+                  <MenuItem key={idx} value={String(idx)}>{compactScienceLabel(labels?.[idx] || `Trace ${idx + 1}`)}</MenuItem>
+                ))}
+              </Select>
             )}
-            {nTraces > 1 && (
-              <Button
+            <Stack direction="row" alignItems="center" spacing={0.5}>
+              <Typography sx={toolbarLabelSx}>Log</Typography>
+              <Switch
                 size="small"
-                variant="outlined"
-                onClick={hideWorstTrial}
-                sx={{ color: themeColors.text, borderColor: themeColors.border, textTransform: "none", height: 30, px: 1, flexShrink: 0 }}
-                aria-label="Hide worst ranked trial"
-              >
-                Hide worst
-              </Button>
-            )}
-            {hiddenTrialCount > 0 && (
-              <Button
-                size="small"
-                variant="outlined"
-                onClick={showAllTrials}
-                sx={{ color: themeColors.text, borderColor: themeColors.border, textTransform: "none", height: 30, px: 1, flexShrink: 0 }}
-                aria-label={`Show all hidden trials (${hiddenTrialCount})`}
-              >
-                Show all ({hiddenTrialCount})
-              </Button>
-            )}
-            {nTraces > 1 && (
-            <Select
-              size="small"
-              value={String(focusedTrace)}
-              onChange={(event) => setFocusedTrace(Number(event.target.value))}
-              sx={{ ...themedSelect, minWidth: 120, height: 30, fontSize: 12 }}
-              MenuProps={themedMenuProps}
-            >
-              <MenuItem value="-1">{hiddenTraceIndices.length ? "All Visible" : "All Traces"}</MenuItem>
-              {visibleTraceIndices.map((idx) => (
-                <MenuItem key={idx} value={String(idx)}>{labels?.[idx] || `Trace ${idx + 1}`}</MenuItem>
-              ))}
-            </Select>
-            )}
-            <Box sx={{ display: "flex", alignItems: "center", gap: 1, flexWrap: "nowrap", flexShrink: 0, minWidth: sidePanelVisible ? 284 : 136 }}>
-            <Stack direction="row" alignItems="center" spacing={0.75} sx={{ flexShrink: 0 }}>
-              <Typography sx={{ fontSize: 12, color: themeColors.textMuted, whiteSpace: "nowrap" }}>plot height</Typography>
-              <Slider
-                size="small"
-                value={plotHeight}
-                min={220}
-                max={720}
-                step={10}
-                onChange={(_, value) => setPlotHeightPx(Array.isArray(value) ? value[0] : value)}
-                sx={{ ...sliderStyles.small, width: 64, color: themeColors.accent }}
-                aria-label="Plot height"
-                valueLabelDisplay="auto"
+                checked={Boolean(logScale)}
+                onChange={(_, checked) => setLogScale(checked)}
+                sx={switchStyles.small}
+                slotProps={{ input: { "aria-label": "Use log scale" } }}
               />
             </Stack>
-            {sidePanelVisible && (
-              <Stack direction="row" alignItems="center" spacing={0.75} sx={{ flexShrink: 0 }}>
-                <Typography sx={{ fontSize: 12, color: themeColors.textMuted, whiteSpace: "nowrap" }}>panel width</Typography>
-                <Slider
-                  size="small"
-                  value={sidePanelWidth}
-                  min={300}
-                  max={640}
-                  step={10}
-                  onChange={(_, value) => setSidePanelWidthPx(Array.isArray(value) ? value[0] : value)}
-                  sx={{ ...sliderStyles.small, width: 64, color: themeColors.accent }}
-                  aria-label="Side panel width"
-                  valueLabelDisplay="auto"
-                />
-              </Stack>
-            )}
-            </Box>
+            <Stack direction="row" alignItems="center" spacing={0.5}>
+              <Typography sx={toolbarLabelSx}>Stats</Typography>
+              <Switch
+                size="small"
+                checked={Boolean(showStats)}
+                onChange={(_, checked) => setShowStats(checked)}
+                sx={switchStyles.small}
+                slotProps={{ input: { "aria-label": "Show stats panel" } }}
+              />
+            </Stack>
+            <Stack direction="row" alignItems="center" spacing={0.5}>
+              <Typography sx={toolbarLabelSx}>Legend</Typography>
+              <Switch
+                size="small"
+                checked={Boolean(showLegend)}
+                onChange={(_, checked) => setShowLegend(checked)}
+                sx={switchStyles.small}
+                slotProps={{ input: { "aria-label": "Show legend" } }}
+              />
+            </Stack>
             <Box sx={{ flex: 1 }} />
-            {handoffEnabled && hasSnapshots && (
-              <>
-                <Button
-                  size="small"
-                  variant="outlined"
-                  onClick={(event) => setViewMenuAnchor(event.currentTarget)}
-                  sx={{ color: themeColors.text, borderColor: themeColors.border, textTransform: "none", height: 30 }}
-                  aria-label="Open view options"
-                  aria-controls={viewMenuAnchor ? "show1d-view-menu" : undefined}
-                  aria-expanded={viewMenuAnchor ? "true" : undefined}
-                  aria-haspopup="menu"
-                  title={handoffStatus || "View options"}
-                >
-                  View
-                </Button>
-                <Menu
-                  id="show1d-view-menu"
-                  anchorEl={viewMenuAnchor}
-                  open={Boolean(viewMenuAnchor)}
-                  onClose={() => setViewMenuAnchor(null)}
-                  MenuListProps={{ "aria-label": "View options" }}
-                  {...themedMenuProps}
-                >
-                  <MenuItem
-                    onClick={handleHandoffToShow2D}
-                    disabled={selectedGroupImageIndices.length === 0}
-                    sx={{ fontSize: 12 }}
+            <Box sx={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 1, flexWrap: "wrap", flex: "0 0 auto", ml: "auto" }}>
+              {handoffEnabled && hasSnapshots && (
+                <>
+                  <Button
+                    size="small"
+                    sx={compactButton}
+                    onClick={(event) => setViewMenuAnchor(event.currentTarget)}
+                    aria-label="Open view options"
+                    aria-controls={viewMenuAnchor ? "show1d-view-menu" : undefined}
+                    aria-expanded={viewMenuAnchor ? "true" : undefined}
+                    aria-haspopup="menu"
+                    title={handoffStatus || "View options"}
                   >
-                    View selected as 2D
-                  </MenuItem>
-                </Menu>
-                {handoffStatus && (
-                  <Typography
-                    sx={{
-                      fontSize: 10.5,
-                      color: handoffStatus.startsWith("View failed") ? "#b91c1c" : themeColors.textMuted,
-                      maxWidth: 130,
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                      whiteSpace: "nowrap",
-                    }}
-                    title={handoffStatus}
+                    View
+                  </Button>
+                  <Menu
+                    id="show1d-view-menu"
+                    anchorEl={viewMenuAnchor}
+                    open={Boolean(viewMenuAnchor)}
+                    onClose={() => setViewMenuAnchor(null)}
+                    MenuListProps={{ "aria-label": "View options" }}
+                    {...themedTopMenuProps}
                   >
-                    {handoffStatus}
-                  </Typography>
-                )}
-              </>
-            )}
-            <Button
-            size="small"
-            variant="outlined"
-            startIcon={<DownloadIcon />}
-            onClick={(event) => setExportAnchor(event.currentTarget)}
-            disabled={exportBusy}
-            sx={{ color: themeColors.text, borderColor: themeColors.border, textTransform: "none", height: 30 }}
-          >
-            Export
-            </Button>
-            <Menu anchorEl={exportAnchor} open={Boolean(exportAnchor)} onClose={() => setExportAnchor(null)}>
-            <MenuItem onClick={() => void handleExportSelect("html")} disabled={!exportEnabled}>
-              <DownloadIcon fontSize="small" sx={{ mr: 1 }} /> HTML full float32 ({htmlSize})
-            </MenuItem>
-            <MenuItem onClick={() => void handleExportSelect("csv")}>
-              <TableChartIcon fontSize="small" sx={{ mr: 1 }} /> CSV traces
-            </MenuItem>
-            <MenuItem onClick={() => void handleExportSelect("png")}>
-              <ImageIcon fontSize="small" sx={{ mr: 1 }} /> PNG view
-            </MenuItem>
-            </Menu>
+                    <MenuItem
+                      onClick={handleHandoffToShow2D}
+                      disabled={selectedGroupImageIndices.length === 0}
+                      sx={{ fontSize: 12 }}
+                    >
+                      View selected as 2D
+                    </MenuItem>
+                  </Menu>
+                  {handoffStatus && (
+                    <Typography
+                      sx={{
+                        ...toolbarLabelSx,
+                        color: handoffStatus.startsWith("View failed") ? "#b91c1c" : themeColors.textMuted,
+                        maxWidth: 130,
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                      }}
+                      title={handoffStatus}
+                    >
+                      {handoffStatus}
+                    </Typography>
+                  )}
+                </>
+              )}
+              <Button
+                size="small"
+                sx={{ ...compactButton, color: themeColors.accent }}
+                onClick={(event) => setExportAnchor(event.currentTarget)}
+                disabled={exportBusy}
+                title={localExportStatus || exportStatus || "Export traces, view, or standalone HTML"}
+              >
+                {exportBusy ? "Exporting" : "Export"}
+              </Button>
+              <Menu
+                anchorEl={exportAnchor}
+                open={Boolean(exportAnchor)}
+                onClose={() => setExportAnchor(null)}
+                anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
+                transformOrigin={{ vertical: "top", horizontal: "right" }}
+                {...themedTopMenuProps}
+              >
+                <MenuItem onClick={() => void handleExportSelect("html")} disabled={!exportEnabled} sx={{ fontSize: 12 }}>
+                  <DownloadIcon fontSize="small" sx={{ mr: 1 }} /> HTML full float32 ({htmlSize})
+                </MenuItem>
+                <MenuItem onClick={() => void handleExportSelect("csv")} sx={{ fontSize: 12 }}>
+                  <TableChartIcon fontSize="small" sx={{ mr: 1 }} /> CSV traces
+                </MenuItem>
+                <MenuItem onClick={() => void handleExportSelect("png")} sx={{ fontSize: 12 }}>
+                  <ImageIcon fontSize="small" sx={{ mr: 1 }} /> PNG view
+                </MenuItem>
+              </Menu>
+              {(localExportStatus || exportStatus) && (
+                <Typography
+                  sx={{
+                    ...toolbarLabelSx,
+                    maxWidth: 120,
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                    color: (localExportStatus || exportStatus).startsWith("Export failed") ? "#b91c1c" : themeColors.textMuted,
+                  }}
+                  title={localExportStatus || exportStatus}
+                >
+                  {localExportStatus || exportStatus}
+                </Typography>
+              )}
+              <Button size="small" sx={compactButton} disabled={!needsReset} onClick={resetRanges}>
+                Reset
+              </Button>
+            </Box>
           </Stack>
         </Box>
       )}
-      <Box sx={{ display: "grid", gridTemplateColumns: sidePanelVisible ? { xs: "1fr", md: `minmax(0, 1fr) ${sidePanelWidth}px` } : "1fr", alignItems: "start", minHeight: 360 }}>
-        <Box sx={{ minWidth: 0, p: 1 }}>
-          <Box ref={plotHostRef} sx={{ position: "relative", height: { xs: Math.max(280, Math.min(plotHeight, 520)), md: plotHeight }, minWidth: 0 }}>
+      <Box
+        ref={mainGridRef}
+        data-testid="show1d-main-grid"
+        sx={{
+          display: "grid",
+          gridTemplateColumns: mainGridTemplateColumns,
+          alignItems: "stretch",
+          minHeight: { xs: 360, md: 0 },
+          height: mainGridViewportHeight,
+          maxHeight: mainGridViewportHeight,
+          columnGap: 0,
+          overflow: "hidden",
+        }}
+      >
+        <Box sx={{ minWidth: 0, pl: 0.75, pr: 0.25, py: 0.5 }}>
+          <Box ref={plotHostRef} sx={{ position: "relative", height: { xs: Math.max(260, Math.min(effectivePlotHeight, 520)), md: effectivePlotHeight }, minWidth: 0 }}>
             <canvas
               ref={canvasRef}
               onPointerMove={handlePointerMove}
@@ -2798,7 +3677,7 @@ function Show1DWidget() {
                 }}
               >
                 <Typography sx={{ fontSize: 11, fontWeight: 600, color: cssColor(colors ?? [], hover.trace), lineHeight: 1.25 }}>
-                  {labels?.[hover.trace] || `Trace ${hover.trace + 1}`}
+                  {compactScienceLabel(labels?.[hover.trace] || `Trace ${hover.trace + 1}`)}
                 </Typography>
                 <Typography sx={{ fontSize: 11, lineHeight: 1.25 }}>
                   {methodLabels?.[hover.point] ? shortMethodLabel(methodLabels[hover.point]) : axisPositionText(hover.x, xLabel, xUnit)}
@@ -2812,19 +3691,27 @@ function Show1DWidget() {
               {visibleTraceIndices.map((idx) => (
                 <Stack key={idx} direction="row" alignItems="center" spacing={0.5} sx={{ opacity: focusedTrace < 0 || focusedTrace === idx ? 1 : 0.45 }}>
                   <Box sx={{ width: 16, height: 3, bgcolor: cssColor(colors ?? [], idx), borderRadius: 1 }} />
-                  <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>{labels?.[idx] || `Trace ${idx + 1}`}</Typography>
+                  <Typography data-testid={`show1d-legend-label-${idx}`} sx={{ fontSize: 11, color: themeColors.textMuted }} title={labels?.[idx] || `Trace ${idx + 1}`}>
+                    {compactScienceLabel(labels?.[idx] || `Trace ${idx + 1}`)}
+                  </Typography>
                 </Stack>
               ))}
             </Stack>
           )}
-          {(localExportStatus || exportStatus) && (
-            <Typography sx={{ px: 1, pb: 0.75, fontSize: 11, color: themeColors.textMuted }}>
-              {localExportStatus || exportStatus}
-            </Typography>
-          )}
         </Box>
         {sidePanelVisible && (
-          <Stack spacing={1} sx={{ borderLeft: { xs: "none", md: `1px solid ${themeColors.border}` }, borderTop: { xs: `1px solid ${themeColors.border}`, md: "none" }, p: 1, minWidth: 0 }}>
+          <Stack
+            data-testid="show1d-side-panel"
+            spacing={0.5}
+            sx={{
+              p: 0,
+              minWidth: 0,
+              maxHeight: mainGridViewportHeight,
+              overflowY: "auto",
+              overflowX: "hidden",
+              overscrollBehavior: "contain",
+            }}
+          >
             {hasProfileImage && (
               <Box>
                 <Typography sx={{ fontSize: 12, fontWeight: 600, mb: 0.5 }}>Profile Image</Typography>
@@ -2834,39 +3721,49 @@ function Show1DWidget() {
               </Box>
             )}
             {showSnapshots && hasSnapshots && (
-              <Box>
+              <Box sx={snapshotViewportSx}>
+                {snapshotPanelControls}
                 <Box
+                  data-testid="show1d-snapshot-grid"
                   sx={{
                     display: "grid",
+                    position: "relative",
                     gridTemplateColumns: `repeat(${selectedImageColumns}, minmax(0, 1fr))`,
                     gap: 0,
-                    maxHeight: 430,
+                    maxHeight: snapshotGridMaxHeight,
                     overflowY: "auto",
+                    overscrollBehavior: "contain",
                     pr: 0,
                     border: `1px solid ${themeColors.border}`,
                     bgcolor: themeColors.border,
                   }}
                 >
-                  {selectedGroupImageIndices.map((imageIdx) => {
-                    const imageHeight = snapshotHeights?.[imageIdx] || snapshotHeight;
-                    const imageWidth = snapshotWidths?.[imageIdx] || snapshotWidth;
-                    const imageLabel = imageLabelForIndex(imageIdx);
-                    const imageKey = trialKey(imageLabel);
-                    const starred = starredTrialKeys.has(imageKey);
-                    const selected = imageIdx === selectedSnapshot;
-                    return (
-                      <Box
-                        key={imageIdx}
-                        sx={{
+	                  {selectedGroupImageIndices.map((imageIdx) => {
+	                    const imageHeight = snapshotHeights?.[imageIdx] || snapshotHeight;
+	                    const imageWidth = snapshotWidths?.[imageIdx] || snapshotWidth;
+	                    const imageLabel = imageLabelForIndex(imageIdx);
+	                    const selected = imageIdx === selectedSnapshot;
+	                    const hideDisabled = selectedGroupImageIndices.length <= 1;
+	                    const hideLabel = hideDisabled ? "Cannot hide the last visible panel" : `Hide ${imageLabel}`;
+	                    return (
+	                      <Box
+	                        key={imageIdx}
+	                        title={imageLabel}
+	                        sx={{
                           minWidth: 0,
                           position: "relative",
-                          bgcolor: themeColors.bgAlt,
-                          overflow: "hidden",
-                          outline: selected ? `2px solid ${themeColors.accent}` : `1px solid ${themeColors.border}`,
-                          outlineOffset: -1,
-                        }}
-                      >
-                        <SnapshotImageCanvas
+	                          bgcolor: themeColors.bgAlt,
+	                          overflow: "hidden",
+	                          outline: selected ? `2px solid ${themeColors.accent}` : `1px solid ${themeColors.border}`,
+	                          outlineOffset: -1,
+	                          "&:hover .show1d-panel-hide-button, &:focus-within .show1d-panel-hide-button": {
+	                            opacity: 1,
+	                            transform: "translateY(0)",
+	                            pointerEvents: "auto",
+	                          },
+	                        }}
+	                      >
+	                        <SnapshotImageCanvas
                           data={snapshotData}
                           imageIndex={imageIdx}
                           packedHeight={snapshotHeight}
@@ -2877,70 +3774,64 @@ function Show1DWidget() {
                           fftLut={snapshotFftLut}
                           colors={themeColors}
                           showFft={Boolean(showSnapshotFft)}
+                          deferFft={Boolean(snapshotPlaying)}
                           fftWindow={Boolean(snapshotFftWindow)}
                           preferWebgpu={Boolean(preferWebgpu)}
                           contrastPreset={normalisedSnapshotContrastPreset}
+                          contrastRange={customSnapshotContrastRange}
                           selected={selected}
-                          label={imageLabel}
+                          label={compactScienceLabel(imageLabel)}
                           scaleBarVisible={Boolean(scaleBarVisible)}
+                          overlayPosition={resolvedSnapshotOverlayPosition}
                           pixelSize={Number.isFinite(pixelSize) && pixelSize > 0 ? pixelSize : 1}
                           pixelUnit={pixelSize > 0 ? pixelUnit : "px"}
-                          imageView={snapshotImageView}
-                          fftView={snapshotFftView}
+                          imageViewZoom={snapshotRealSpaceZoom}
+                          imageViewCenter={snapshotRealSpaceCenter}
+                          fftViewZoom={snapshotFftZoom}
+                          fftViewCenter={snapshotFftCenter}
+                          profileActive={Boolean(showSnapshotProfile)}
+                          profileLine={snapshotProfileLine ?? []}
                           fftCacheRef={snapshotFftCacheRef}
                           fftGpuRef={snapshotFftGpuRef}
-                          onImageViewChange={setSnapshotImageView}
+                          onImageViewChange={setSnapshotRealSpaceView}
                           onFftViewChange={setSnapshotFftView}
+                          onProfileLineChange={setSnapshotProfileLine}
                           onSelect={() => selectSnapshotImage(imageIdx)}
                         />
-                        <Tooltip title={starred ? `Unstar ${imageLabel}` : `Star ${imageLabel}`}>
-                          <IconButton
-                            size="small"
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              toggleStarredTrial(imageLabel);
-                            }}
-                            aria-label={starred ? `Unstar ${imageLabel} candidate` : `Star ${imageLabel} as candidate`}
-                            sx={{
-                              position: "absolute",
-                              top: 4,
-                              right: 4,
-                              zIndex: 4,
-                              width: 24,
-                              height: 24,
-                              p: 0,
-                              color: starred ? "#facc15" : "rgba(255,255,255,0.92)",
-                              bgcolor: "rgba(0,0,0,0.28)",
-                              "&:hover": { bgcolor: "rgba(0,0,0,0.5)", color: starred ? "#fde047" : "#fff" },
-                            }}
-                          >
-                            {starred ? <StarIcon sx={{ fontSize: 17 }} /> : <StarBorderIcon sx={{ fontSize: 17 }} />}
-                          </IconButton>
-                        </Tooltip>
-                        <Tooltip title={`Hide ${imageLabel}`}>
-                          <IconButton
-                            size="small"
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              hideTrial(imageLabel);
-                            }}
-                            aria-label={`Hide ${imageLabel} trial`}
-                            sx={{
-                              position: "absolute",
-                              top: 4,
-                              left: 4,
-                              zIndex: 4,
-                              width: 24,
-                              height: 24,
-                              p: 0,
-                              color: "rgba(255,255,255,0.9)",
-                              bgcolor: "rgba(0,0,0,0.28)",
-                              "&:hover": { bgcolor: "rgba(0,0,0,0.5)", color: "#fff" },
-                            }}
-                          >
-                            <VisibilityOffIcon sx={{ fontSize: 16 }} />
-                          </IconButton>
-                        </Tooltip>
+	                        <IconButton
+	                          className="show1d-panel-hide-button"
+	                          data-testid={`show1d-panel-hide-${imageIdx}`}
+	                          size="small"
+	                          disabled={hideDisabled}
+	                          onMouseDown={(event) => event.stopPropagation()}
+	                          onClick={(event) => {
+	                            event.stopPropagation();
+	                            if (!hideDisabled) hideTrial(imageLabel);
+	                          }}
+	                          aria-label={hideLabel}
+	                          title={hideLabel}
+	                          sx={{
+	                            position: "absolute",
+	                            top: 5,
+	                            left: 5,
+	                            zIndex: 4,
+	                            width: 22,
+	                            height: 22,
+	                            p: 0,
+	                            opacity: hideDisabled ? 0.18 : 0.52,
+	                            transform: "translateY(0)",
+	                            transition: "opacity 120ms ease, transform 120ms ease, background-color 120ms ease, color 120ms ease",
+	                            color: hideDisabled ? "rgba(255,255,255,0.25)" : "rgba(255,255,255,0.75)",
+	                            bgcolor: "rgba(0,0,0,0.22)",
+	                            pointerEvents: "auto",
+	                            "&:hover, &:focus-visible": {
+	                              bgcolor: "rgba(0,0,0,0.42)",
+	                              color: "rgba(255,255,255,0.95)",
+	                            },
+	                          }}
+	                        >
+	                          <VisibilityOffIcon sx={{ fontSize: 15 }} />
+	                        </IconButton>
                       </Box>
                     );
                   })}
@@ -2970,60 +3861,55 @@ function Show1DWidget() {
                       </Button>
                     </Box>
                   )}
+                  <Box
+                    data-testid="show1d-snapshot-resize-handle"
+                    role="separator"
+                    aria-label="Resize snapshot panels"
+                    aria-orientation="vertical"
+                    onPointerDown={handleSnapshotResizePointerDown}
+                    onPointerUp={handleSnapshotResizePointerUp}
+                    onPointerCancel={handleSnapshotResizePointerUp}
+                    sx={{
+                      position: "absolute",
+                      right: 0,
+                      bottom: 0,
+                      width: 22,
+                      height: 22,
+                      zIndex: 6,
+                      cursor: "nwse-resize",
+                      opacity: 0.72,
+                      pointerEvents: "auto",
+                      touchAction: "none",
+                      background: `linear-gradient(135deg, transparent 50%, ${themeColors.border} 50%)`,
+                      borderRadius: "0 0 2px 0",
+                      "&:hover, &:focus-visible": {
+                        opacity: 1,
+                        background: `linear-gradient(135deg, transparent 50%, ${themeColors.accent} 50%)`,
+                      },
+                    }}
+                  />
                 </Box>
-                <Typography sx={{ fontSize: 11, color: themeColors.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", mt: 0.75 }}>
-                  {selectedSnapshotLabel}{selectedSnapshotPosition ? ` · ${selectedSnapshotPosition}` : ""}
-                </Typography>
-                {starredTrialLabels.length > 0 && (
-                  <Typography sx={{ fontSize: 11, color: themeColors.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", mt: 0.25 }}>
-                    starred: {starredTrialLabels.join(", ")}
-                  </Typography>
-                )}
-                {selectedSnapshotImageLabel && !isReferenceLabel(selectedSnapshotImageLabel) && (
-                  <Box sx={{ ...controlRow, width: "100%", border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, mt: 0.5, mb: 0.5 }}>
-                    <Typography sx={{ ...typography.label, color: themeColors.textMuted, flexShrink: 0 }}>note</Typography>
-                    <TextField
-                      size="small"
-                      value={selectedTrialNote}
-                      onChange={(event) => setTrialNoteForLabel(selectedSnapshotImageLabel, event.target.value)}
-                      placeholder="add note"
-                      inputProps={{ "aria-label": `Note for ${selectedSnapshotImageLabel}` }}
-                      sx={{
-                        flex: "1 1 130px",
-                        minWidth: 120,
-                        "& .MuiInputBase-root": { height: 26, fontSize: 11, bgcolor: themeColors.bg, color: themeColors.text },
-                        "& .MuiOutlinedInput-notchedOutline": { borderColor: themeColors.border },
-                      }}
+                {showSnapshotProfile && isFiniteProfilePoint(snapshotProfileLine?.[0]) && isFiniteProfilePoint(snapshotProfileLine?.[1]) && selectedGroupImageIndices.length > 0 && (
+                  <Box sx={{ width: "100%" }}>
+                    <SnapshotProfilePlot
+                      data={snapshotData}
+                      imageIndices={selectedGroupImageIndices}
+                      packedHeight={snapshotHeight}
+                      packedWidth={snapshotWidth}
+                      imageHeights={snapshotHeights ?? []}
+                      imageWidths={snapshotWidths ?? []}
+                      imageLabels={snapshotImageLabels ?? []}
+                      selectedImageIndex={selectedSnapshot}
+                      profileLine={snapshotProfileLine ?? []}
+                      height={snapshotProfilePlotHeight}
+                      pixelSize={Number.isFinite(pixelSize) && pixelSize > 0 ? pixelSize : 0}
+                      pixelUnit={pixelSize > 0 ? pixelUnit : "px"}
+                      colors={themeColors}
                     />
-                    {["best", "bad start", "probe drift", "object issue"].map((tag) => {
-                      const active = selectedTrialTags.includes(tag);
-                      return (
-                        <Button
-                          key={tag}
-                          size="small"
-                          variant={active ? "contained" : "outlined"}
-                          onClick={() => toggleTrialTag(selectedSnapshotImageLabel, tag)}
-                          sx={{
-                            minWidth: 0,
-                            height: 24,
-                            px: 0.75,
-                            py: 0,
-                            fontSize: 10,
-                            textTransform: "none",
-                            color: active ? "#fff" : themeColors.text,
-                            bgcolor: active ? themeColors.accent : "transparent",
-                            borderColor: active ? themeColors.accent : themeColors.border,
-                          }}
-                          aria-label={`${active ? "Remove" : "Add"} ${tag} tag for ${selectedSnapshotImageLabel}`}
-                        >
-                          {tag}
-                        </Button>
-                      );
-                    })}
                   </Box>
                 )}
+                {statsPanel}
                 <Box sx={{ ...controlRow, width: "100%", flexWrap: "nowrap", border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, mb: 0.5 }}>
-                  <Typography sx={{ ...typography.label, color: themeColors.textMuted, flexShrink: 0 }}>play</Typography>
                   <Stack direction="row" spacing={0} sx={{ flexShrink: 0 }}>
                     <Tooltip title="Previous Snapshot">
                       <IconButton size="small" onClick={() => selectSnapshotGroup(Math.max(0, selectedGroup - 1))} sx={{ color: themeColors.textMuted, p: 0.25 }} aria-label="Previous snapshot">
@@ -3054,6 +3940,22 @@ function Show1DWidget() {
                       </IconButton>
                     </Tooltip>
                   </Stack>
+                  <Typography sx={{ ...typography.label, color: themeColors.textMuted, flexShrink: 0 }}>fps</Typography>
+                  <Slider
+                    size="small"
+                    value={clampSnapshotFps(snapshotFps)}
+                    min={1}
+                    max={24}
+                    step={1}
+                    onChange={(_, value) => setSnapshotFps(clampSnapshotFps(Array.isArray(value) ? value[0] : value))}
+                    sx={{ ...sliderStyles.small, width: 54, flexShrink: 0, color: themeColors.accent }}
+                    aria-label="Snapshot playback frames per second"
+                    valueLabelDisplay="auto"
+                    valueLabelFormat={(value) => String(clampSnapshotFps(Number(value)))}
+                  />
+                  <Typography sx={{ ...typography.value, color: themeColors.textMuted, minWidth: 18, textAlign: "right", flexShrink: 0 }}>
+                    {clampSnapshotFps(snapshotFps)}
+                  </Typography>
                   <Slider
                     size="small"
                     value={Math.max(0, selectedGroup)}
@@ -3069,46 +3971,17 @@ function Show1DWidget() {
                   />
                 </Box>
                 <Box sx={{ ...controlRow, width: "100%", border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, mb: 0.5 }}>
-                  <Typography sx={{ ...typography.label, color: themeColors.textMuted, flexShrink: 0 }}>fps</Typography>
-                  <Slider
-                    size="small"
-                    value={clampSnapshotFps(snapshotFps)}
-                    min={0.25}
-                    max={12}
-                    step={0.25}
-                    onChange={(_, value) => setSnapshotFps(Array.isArray(value) ? value[0] : value)}
-                    sx={{ ...sliderStyles.small, width: 56, flexShrink: 0, color: themeColors.accent }}
-                    aria-label="Snapshot playback frames per second"
-                    valueLabelDisplay="auto"
-                  />
-                  <Typography sx={{ ...typography.value, color: themeColors.textMuted, minWidth: 28, textAlign: "right", flexShrink: 0 }}>
-                    {formatCompactValue(clampSnapshotFps(snapshotFps), 2)}
-                  </Typography>
-                  <Typography sx={{ ...typography.label, color: themeColors.textMuted, flexShrink: 0 }}>thumb size</Typography>
-                  <Slider
-                    size="small"
-                    value={thumbnailSize}
-                    min={24}
-                    max={112}
-                    step={4}
-                    onChange={(_, value) => setSnapshotThumbnailSize(Array.isArray(value) ? value[0] : value)}
-                    sx={{ ...sliderStyles.small, width: 64, flexShrink: 0, color: themeColors.accent }}
-                    aria-label="Snapshot thumbnail size"
-                    valueLabelDisplay="auto"
-                  />
-                  <Typography sx={{ ...typography.value, color: themeColors.textMuted, minWidth: 28, textAlign: "right", flexShrink: 0 }}>
-                    {thumbnailSize}
-                  </Typography>
-                  <Typography sx={{ ...typography.label, color: themeColors.textMuted, flexShrink: 0 }}>plot thumbs</Typography>
+                  <Typography sx={{ ...typography.label, color: themeColors.textMuted, flexShrink: 0 }}>Profile</Typography>
                   <Switch
                     size="small"
-                    checked={Boolean(showSnapshotThumbnails)}
-                    onChange={(_, checked) => setShowSnapshotThumbnails(checked)}
+                    checked={Boolean(showSnapshotProfile)}
+                    onChange={(_, checked) => {
+                      setShowSnapshotProfile(checked);
+                      if (!checked) setSnapshotProfileLine([]);
+                    }}
                     sx={{ ...switchStyles.small, flexShrink: 0 }}
-                    slotProps={{ input: { "aria-label": "Show snapshot thumbnails on plot" } }}
+                    slotProps={{ input: { "aria-label": "Show snapshot line profile" } }}
                   />
-                </Box>
-                <Box sx={{ ...controlRow, width: "100%", border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, mb: 0.5 }}>
                   <Typography sx={{ ...typography.label, color: themeColors.textMuted, flexShrink: 0 }}>FFT</Typography>
                   <Switch
                     size="small"
@@ -3117,32 +3990,32 @@ function Show1DWidget() {
                     sx={{ ...switchStyles.small, flexShrink: 0 }}
                     slotProps={{ input: { "aria-label": "Show snapshot FFT panels" } }}
                   />
+                  {showSnapshotFft && (
+                    <>
+                      <Typography sx={{ ...typography.label, color: themeColors.textMuted, flexShrink: 0 }}>cmap</Typography>
+                      <Select
+                        size="small"
+                        value={COLORMAPS[snapshotFftCmap] ? snapshotFftCmap : "magma"}
+                        onChange={(event) => setSnapshotFftCmap(event.target.value)}
+                        sx={{ ...themedSelect, minWidth: 65, fontSize: 10 }}
+                        MenuProps={themedMenuProps}
+                        inputProps={{ "aria-label": "Snapshot FFT colormap" }}
+                      >
+                        {COLORMAP_NAMES.map((name) => (
+                          <MenuItem key={name} value={name}>{name}</MenuItem>
+                        ))}
+                      </Select>
+                      <Typography sx={{ ...typography.label, color: themeColors.textMuted, flexShrink: 0 }}>win</Typography>
+                      <Switch
+                        size="small"
+                        checked={Boolean(snapshotFftWindow)}
+                        onChange={(_, checked) => setSnapshotFftWindow(checked)}
+                        sx={{ ...switchStyles.small, flexShrink: 0 }}
+                        slotProps={{ input: { "aria-label": "Apply Hann window before snapshot FFT" } }}
+                      />
+                    </>
+                  )}
                 </Box>
-                {showSnapshotFft && (
-                  <Box sx={{ ...controlRow, width: "100%", border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, mb: 0.75 }}>
-                    <Typography sx={{ ...typography.label, color: themeColors.textMuted, flexShrink: 0 }}>FFT</Typography>
-                    <Select
-                      size="small"
-                      value={COLORMAPS[snapshotFftCmap] ? snapshotFftCmap : "magma"}
-                      onChange={(event) => setSnapshotFftCmap(event.target.value)}
-                      sx={{ ...themedSelect, minWidth: 65, fontSize: 10 }}
-                      MenuProps={themedMenuProps}
-                      inputProps={{ "aria-label": "Snapshot FFT colormap" }}
-                    >
-                      {COLORMAP_NAMES.map((name) => (
-                        <MenuItem key={name} value={name}>{name}</MenuItem>
-                      ))}
-                    </Select>
-                    <Typography sx={{ ...typography.label, color: themeColors.textMuted, flexShrink: 0 }}>win</Typography>
-                    <Switch
-                      size="small"
-                      checked={Boolean(snapshotFftWindow)}
-                      onChange={(_, checked) => setSnapshotFftWindow(checked)}
-                      sx={{ ...switchStyles.small, flexShrink: 0 }}
-                      slotProps={{ input: { "aria-label": "Apply Hann window before snapshot FFT" } }}
-                    />
-                  </Box>
-                )}
                 {selectedSnapshot >= 0 && (
                   <Box sx={{ mb: 0.75 }}>
                     <MiniHistogram
@@ -3151,8 +4024,8 @@ function Show1DWidget() {
                       dataMax={snapshotHistogramRange[1]}
                       clipMin={snapshotHistogramClipRange[0]}
                       clipMax={snapshotHistogramClipRange[1]}
-                      backend={snapshotHistogramBackend}
                       colors={themeColors}
+                      onClipRangeChange={(range) => setSnapshotContrastRange([range[0], range[1]])}
                     />
                     <Box sx={{ ...controlRow, width: "100%", border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, mt: 0.5 }}>
                       <Typography sx={{ ...typography.label, color: themeColors.textMuted, flexShrink: 0 }}>cmap</Typography>
@@ -3175,8 +4048,11 @@ function Show1DWidget() {
                           <Button
                             key={preset.value}
                             size="small"
-                            variant={active ? "contained" : "outlined"}
-                            onClick={() => setSnapshotContrastPreset(preset.value)}
+                            variant={active && !customSnapshotContrastRange ? "contained" : "outlined"}
+                            onClick={() => {
+                              setSnapshotContrastRange([]);
+                              setSnapshotContrastPreset(preset.value);
+                            }}
                             sx={{
                               minWidth: preset.value === "full" ? 38 : 48,
                               height: 24,
@@ -3185,11 +4061,11 @@ function Show1DWidget() {
                               fontSize: 10,
                               lineHeight: 1,
                               textTransform: "none",
-                              color: active ? "#fff" : themeColors.text,
-                              bgcolor: active ? themeColors.accent : "transparent",
-                              borderColor: active ? themeColors.accent : themeColors.border,
+                              color: active && !customSnapshotContrastRange ? "#fff" : themeColors.text,
+                              bgcolor: active && !customSnapshotContrastRange ? themeColors.accent : "transparent",
+                              borderColor: active && !customSnapshotContrastRange ? themeColors.accent : themeColors.border,
                               "&:hover": {
-                                bgcolor: active ? themeColors.accent : themeColors.bgAlt,
+                                bgcolor: active && !customSnapshotContrastRange ? themeColors.accent : themeColors.bgAlt,
                                 borderColor: themeColors.accent,
                               },
                             }}
@@ -3204,88 +4080,7 @@ function Show1DWidget() {
                 )}
               </Box>
             )}
-            {nTraces > 1 && (
-              <Box>
-                <Stack direction="row" alignItems="center" spacing={0.75} sx={{ mb: 0.5 }}>
-                  <Typography sx={{ fontSize: 12, fontWeight: 600 }}>Review</Typography>
-                  <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>
-                    best {bestTrialLabel || String(runSummary?.best_trial || sortedTrialRows[0]?.label || "")}
-                  </Typography>
-                  <Box sx={{ flex: 1 }} />
-                  <Typography sx={{ fontSize: 10.5, color: themeColors.textMuted }}>
-                    {activeReviewCount}/{nTraces} visible · {trialAlerts?.length ?? 0} alerts
-                  </Typography>
-                </Stack>
-                <Divider sx={{ borderColor: themeColors.border, mb: 0.5 }} />
-                {trialAlerts?.length > 0 && (
-                  <Box sx={{ mb: 0.5 }}>
-                    {trialAlerts.slice(0, 3).map((alert, idx) => (
-                      <Typography key={`${alert.label || "run"}-${alert.kind || idx}`} sx={{ fontSize: 10.5, color: alert.severity === "error" ? "#b91c1c" : themeColors.textMuted, lineHeight: 1.25 }}>
-                        {alert.label ? `${alert.label}: ` : ""}{alert.message || alert.kind}
-                      </Typography>
-                    ))}
-                  </Box>
-                )}
-                <Box component="table" sx={{ width: "100%", borderCollapse: "collapse", tableLayout: "fixed", "& th, & td": { fontSize: 10.5, py: 0.28, textAlign: "right", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }, "& th:first-of-type, & td:first-of-type": { textAlign: "left" } }}>
-                  <thead>
-                    <tr>
-                      <th>Trial</th><th>{normalisedSortKey.replace("_", " ")}</th><th>Alerts</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {sortedTrialRows.slice(0, 6).map((row) => {
-                      const key = trialKey(row.label || "");
-                      const hidden = hiddenTrialKeys.has(key) || !passesReviewFilter(row.label || "");
-                      return (
-                        <tr key={key} style={{ opacity: hidden ? 0.45 : 1 }}>
-                          <td title={row.label || ""}>
-                            <Box component="span" sx={{ display: "inline-block", width: 7, height: 7, bgcolor: cssColor(colors ?? [], Number(row.trace_index) || 0), mr: 0.5, borderRadius: "50%" }} />
-                            {starredTrialKeys.has(key) ? "* " : ""}{row.label}
-                          </td>
-                          <td>{rankingDisplayValue(row, normalisedSortKey)}</td>
-                          <td>{Number(row.alert_count) || 0}</td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </Box>
-              </Box>
-            )}
-            {showStats && visibleTraceIndices.length > 0 && (
-              <Box>
-                <Stack direction="row" alignItems="center" spacing={0.75} sx={{ mb: 0.5 }}>
-                  <Typography sx={{ fontSize: 12, fontWeight: 600 }}>Stats</Typography>
-                  <Box sx={{ flex: 1 }} />
-                  <Tooltip title={showStats ? "Hide Stats" : "Show Stats"}>
-                    <IconButton size="small" onClick={() => setShowStats(!showStats)} sx={{ color: themeColors.textMuted }}>
-                      {showStats ? <VisibilityIcon fontSize="inherit" /> : <VisibilityOffIcon fontSize="inherit" />}
-                    </IconButton>
-                  </Tooltip>
-                </Stack>
-                <Divider sx={{ borderColor: themeColors.border, mb: 0.5 }} />
-                <Box component="table" sx={{ width: "100%", borderCollapse: "collapse", tableLayout: "fixed", "& th, & td": { fontSize: 10.5, py: 0.35, textAlign: "right", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }, "& th:first-of-type, & td:first-of-type": { textAlign: "left" } }}>
-                  <thead>
-                    <tr>
-                      <th>Trace</th><th>Mean</th><th>Min</th><th>Max</th><th>Std</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {visibleTraceIndices.map((idx) => (
-                      <tr key={idx}>
-                        <td title={labels?.[idx] || `Trace ${idx + 1}`}>
-                          <Box component="span" sx={{ display: "inline-block", width: 7, height: 7, bgcolor: cssColor(colors ?? [], idx), mr: 0.5, borderRadius: "50%" }} />
-                          {labels?.[idx] || `Trace ${idx + 1}`}
-                        </td>
-                        <td>{formatNumber(statsMean?.[idx] ?? NaN, 2)}</td>
-                        <td>{formatNumber(statsMin?.[idx] ?? NaN, 2)}</td>
-                        <td>{formatNumber(statsMax?.[idx] ?? NaN, 2)}</td>
-                        <td>{formatNumber(statsStd?.[idx] ?? NaN, 2)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </Box>
-              </Box>
-            )}
+            {!(showSnapshots && hasSnapshots) && statsPanel}
           </Stack>
         )}
       </Box>

@@ -6,6 +6,8 @@ new `rcN` heading when that rc is published to TestPyPI.
 
 ## Unreleased
 
+- Add paged Show2D / Show3D playback controls for iteration/lambda-style galleries, with pause-on-manual-scrub behavior and Show3D page-swap cache invalidation to avoid stale or wasted panel GPU work.
+
 ## rc27 - 2026-06-30
 
 - Add ShowDiffraction for calibrated diffraction images and stacks, including d-spacing/ring tools, k calibration, tutorial, API docs, and tests.

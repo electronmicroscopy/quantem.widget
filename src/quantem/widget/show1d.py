@@ -240,7 +240,7 @@ class Show1D(anywidget.AnyWidget):
     ui_mode : {"interactive", "presentation", "report", "minimal"}, default "interactive"
         Shared viewer UI preset. Explicit ``show_*`` keyword arguments override
         preset values.
-    show_title, show_stats, show_legend, show_grid, show_controls : bool
+    show_title, show_stats, show_review, show_legend, show_grid, show_controls : bool
         Toggle compact plot UI elements.
     controls_collapsed : bool, default False
         Start with controls hidden while keeping a recoverable ``Controls``
@@ -251,11 +251,38 @@ class Show1D(anywidget.AnyWidget):
         Colormap used for profile and snapshot images.
     snapshot_contrast_preset : {"full", "0.5-99.5", "1-99", "2-98", "5-95"}, default "full"
         Percentile contrast preset used for snapshot images and plot thumbnails.
+    snapshot_contrast_range : sequence of 2 floats, optional
+        Explicit snapshot display range. Empty uses ``snapshot_contrast_preset``;
+        a two-value ``(min, max)`` range enables the draggable histogram clip.
+    show_snapshot_profile : bool, default False
+        Show an interactive line-profile overlay on snapshot reconstruction
+        panels and a compact profile comparison below the snapshot grid.
+    show_trial_notes : bool, default False
+        Show the per-trial note/tag editor in the review panel. Notes and tags
+        are preserved regardless of whether the editor is currently visible.
+    snapshot_profile_line : sequence, optional
+        Initial profile endpoints as ``((row0, col0), (row1, col1))`` in
+        snapshot image coordinates.
     snapshot_thumbnail_size : int, default 48
         Size of plot-embedded snapshot thumbnails in pixels.
-    snapshot_columns : int, default 2
-        Number of columns used for the side-panel snapshot image grid, clamped
-        to 1 through 4.
+    snapshot_panel_width_px : int, default 0
+        Initial snapshot reconstruction panel width in pixels. Use ``0`` for
+        automatic fit-to-view sizing; dragging the snapshot grid corner updates
+        this value in the live widget.
+    snapshot_columns : int, default 0
+        Number of columns used for the side-panel snapshot image grid. Use
+        ``0`` for automatic overview columns, or 1 through 8 for a fixed count.
+    snapshot_overlay_position : {"top-left", "top-right", "bottom-left",
+            "bottom-right"}, default "top-right"
+        Corner used for snapshot panel label and zoom overlays.
+    snapshot_real_space_zoom : float, default 1.0
+        Initial zoom for real-space snapshot image panels.
+    snapshot_real_space_center : sequence of 2 floats, optional
+        Initial real-space snapshot center as ``(row, col)`` in image pixels.
+    snapshot_fft_zoom : float, default 1.0
+        Initial zoom for snapshot FFT panels.
+    snapshot_fft_center : sequence of 2 floats, optional
+        Initial FFT snapshot center as ``(row, col)`` in FFT pixel coordinates.
     sampling : float or sequence of float, optional
         Snapshot/profile image sampling used for the scale bar. Scalar values
         apply to both image axes; sequences use the last value as the displayed
@@ -302,7 +329,8 @@ class Show1D(anywidget.AnyWidget):
     y_unit = traitlets.Unicode("").tag(sync=True)
     log_scale = traitlets.Bool(False).tag(sync=True)
     show_title = traitlets.Bool(True).tag(sync=True)
-    show_stats = traitlets.Bool(True).tag(sync=True)
+    show_stats = traitlets.Bool(False).tag(sync=True)
+    show_review = traitlets.Bool(False).tag(sync=True)
     show_legend = traitlets.Bool(True).tag(sync=True)
     show_grid = traitlets.Bool(True).tag(sync=True)
     show_controls = traitlets.Bool(True).tag(sync=True)
@@ -333,6 +361,7 @@ class Show1D(anywidget.AnyWidget):
     hidden_snapshot_image_labels = traitlets.List(traitlets.Unicode()).tag(sync=True)
     trial_notes = traitlets.Dict().tag(sync=True)
     trial_tags = traitlets.Dict().tag(sync=True)
+    show_trial_notes = traitlets.Bool(False).tag(sync=True)
     show_starred_only = traitlets.Bool(False).tag(sync=True)
     trial_sort_key = traitlets.Unicode("final_loss").tag(sync=True)
     trial_sort_descending = traitlets.Bool(False).tag(sync=True)
@@ -354,16 +383,26 @@ class Show1D(anywidget.AnyWidget):
     show_snapshot_fft = traitlets.Bool(False).tag(sync=True)
     snapshot_fft_window = traitlets.Bool(True).tag(sync=True)
     snapshot_fft_cmap = traitlets.Unicode("magma").tag(sync=True)
+    show_snapshot_profile = traitlets.Bool(False).tag(sync=True)
+    snapshot_profile_line = traitlets.List(traitlets.Dict(), default_value=[]).tag(sync=True)
+    snapshot_profile_height = traitlets.Int(76).tag(sync=True)
     snapshot_contrast_preset = traitlets.Unicode("full").tag(sync=True)
+    snapshot_contrast_range = traitlets.List(traitlets.Float(), default_value=[]).tag(sync=True)
     snapshot_thumbnail_size = traitlets.Int(48).tag(sync=True)
-    snapshot_columns = traitlets.Int(2).tag(sync=True)
+    snapshot_panel_width_px = traitlets.Int(0).tag(sync=True)
+    snapshot_columns = traitlets.Int(0).tag(sync=True)
+    snapshot_overlay_position = traitlets.Unicode("top-right").tag(sync=True)
+    snapshot_real_space_zoom = traitlets.Float(1.0).tag(sync=True)
+    snapshot_real_space_center = traitlets.List(traitlets.Float(), default_value=[]).tag(sync=True)
+    snapshot_fft_zoom = traitlets.Float(1.0).tag(sync=True)
+    snapshot_fft_center = traitlets.List(traitlets.Float(), default_value=[]).tag(sync=True)
     image_cmap = traitlets.Unicode("cividis").tag(sync=True)
     pixel_size = traitlets.Float(0.0).tag(sync=True)
     pixel_unit = traitlets.Unicode("px").tag(sync=True)
     scale_bar_visible = traitlets.Bool(True).tag(sync=True)
     prefer_webgpu = traitlets.Bool(True).tag(sync=True)
     snapshot_playing = traitlets.Bool(False).tag(sync=True)
-    snapshot_fps = traitlets.Float(2.0).tag(sync=True)
+    snapshot_fps = traitlets.Int(2).tag(sync=True)
 
     profile_image_bytes = traitlets.Bytes(b"").tag(sync=True)
     profile_image_height = traitlets.Int(0).tag(sync=True)
@@ -406,6 +445,7 @@ class Show1D(anywidget.AnyWidget):
         ui_mode: UiMode = "interactive",
         show_title: bool | None = None,
         show_stats: bool | None = None,
+        show_review: bool | None = None,
         show_legend: bool | None = None,
         show_grid: bool | None = None,
         show_controls: bool | None = None,
@@ -418,8 +458,15 @@ class Show1D(anywidget.AnyWidget):
         profile_width: int = 1,
         image_cmap: str = "cividis",
         snapshot_contrast_preset: str = "full",
+        snapshot_contrast_range: Sequence[float] | None = None,
         snapshot_thumbnail_size: int = 48,
-        snapshot_columns: int = 2,
+        snapshot_panel_width_px: int = 0,
+        snapshot_columns: int = 0,
+        snapshot_overlay_position: str = "top-right",
+        snapshot_real_space_zoom: float = 1.0,
+        snapshot_real_space_center: Sequence[float] | None = None,
+        snapshot_fft_zoom: float = 1.0,
+        snapshot_fft_center: Sequence[float] | None = None,
         sampling: float | Sequence[float] | None = None,
         units: str | Sequence[str] | None = None,
         pixel_size: float | None = None,
@@ -430,10 +477,14 @@ class Show1D(anywidget.AnyWidget):
         show_snapshot_fft: bool = False,
         snapshot_fft_window: bool = True,
         snapshot_fft_cmap: str = "magma",
+        show_snapshot_profile: bool = False,
+        snapshot_profile_line: Sequence[Sequence[float]] | None = None,
+        snapshot_profile_height: int = 76,
         starred_snapshot_image_labels: Sequence[str] | None = None,
         hidden_snapshot_image_labels: Sequence[str] | None = None,
         trial_notes: Mapping[str, str] | None = None,
         trial_tags: Mapping[str, Sequence[str]] | None = None,
+        show_trial_notes: bool = False,
         show_starred_only: bool = False,
         trial_sort_key: str = "final_loss",
         trial_sort_descending: bool = False,
@@ -474,7 +525,8 @@ class Show1D(anywidget.AnyWidget):
             ui_mode,
             defaults={
                 "show_title": True,
-                "show_stats": True,
+                "show_stats": False,
+                "show_review": False,
                 "show_legend": True,
                 "show_grid": True,
                 "show_controls": True,
@@ -483,6 +535,7 @@ class Show1D(anywidget.AnyWidget):
             overrides={
                 "show_title": show_title,
                 "show_stats": show_stats,
+                "show_review": show_review,
                 "show_legend": show_legend,
                 "show_grid": show_grid,
                 "show_controls": show_controls,
@@ -491,18 +544,34 @@ class Show1D(anywidget.AnyWidget):
         )
         self.show_title = bool(ui["show_title"])
         self.show_stats = bool(ui["show_stats"])
+        self.show_review = bool(ui["show_review"])
         self.show_legend = bool(ui["show_legend"])
         self.show_grid = bool(ui["show_grid"])
         self.show_controls = bool(ui["show_controls"])
         self.controls_collapsed = bool(ui["controls_collapsed"])
         self.line_width = float(line_width)
         self.plot_height_px = max(220, min(720, int(plot_height_px)))
-        self.side_panel_width_px = max(300, min(640, int(side_panel_width_px)))
+        self.side_panel_width_px = max(300, min(960, int(side_panel_width_px)))
         self.profile_width = max(1, int(profile_width))
         self.image_cmap = self._normalise_image_cmap(image_cmap)
         self.snapshot_contrast_preset = self._normalise_snapshot_contrast_preset(snapshot_contrast_preset)
+        self.snapshot_contrast_range = self._normalise_snapshot_contrast_range(snapshot_contrast_range)
         self.snapshot_thumbnail_size = max(24, min(112, int(snapshot_thumbnail_size)))
-        self.snapshot_columns = max(1, min(4, int(snapshot_columns)))
+        self.snapshot_panel_width_px = max(0, min(960, int(snapshot_panel_width_px)))
+        self.snapshot_columns = max(0, min(8, int(snapshot_columns)))
+        self.snapshot_overlay_position = self._normalise_snapshot_overlay_position(
+            snapshot_overlay_position
+        )
+        self.snapshot_real_space_zoom = self._normalise_snapshot_view_zoom(
+            snapshot_real_space_zoom
+        )
+        self.snapshot_real_space_center = self._normalise_snapshot_view_center(
+            snapshot_real_space_center
+        )
+        self.snapshot_fft_zoom = self._normalise_snapshot_view_zoom(snapshot_fft_zoom)
+        self.snapshot_fft_center = self._normalise_snapshot_view_center(
+            snapshot_fft_center
+        )
         self.pixel_size = self._resolve_pixel_size(pixel_size, sampling)
         self.pixel_unit = self._resolve_pixel_unit(pixel_unit, units)
         self.scale_bar_visible = bool(
@@ -514,10 +583,14 @@ class Show1D(anywidget.AnyWidget):
         self.show_snapshot_fft = bool(show_snapshot_fft)
         self.snapshot_fft_window = bool(snapshot_fft_window)
         self.snapshot_fft_cmap = self._normalise_image_cmap(snapshot_fft_cmap)
+        self.show_snapshot_profile = bool(show_snapshot_profile)
+        self.snapshot_profile_line = self._normalise_profile_line(snapshot_profile_line)
+        self.snapshot_profile_height = max(44, min(220, int(snapshot_profile_height)))
         self.starred_snapshot_image_labels = self._normalise_trial_labels(starred_snapshot_image_labels or [])
         self.hidden_snapshot_image_labels = self._normalise_trial_labels(hidden_snapshot_image_labels or [])
         self.trial_notes = self._normalise_trial_notes(trial_notes or {})
         self.trial_tags = self._normalise_trial_tags(trial_tags or {})
+        self.show_trial_notes = bool(show_trial_notes)
         self.show_starred_only = bool(show_starred_only)
         self.trial_sort_key = self._normalise_trial_sort_key(trial_sort_key)
         self.trial_sort_descending = bool(trial_sort_descending)
@@ -529,6 +602,8 @@ class Show1D(anywidget.AnyWidget):
         self._monitor_thread: threading.Thread | None = None
         self._monitor_stop: threading.Event | None = None
         self._monitor_mtime: float = 0.0
+        self._monitor_offset: int = 0
+        self._monitor_line_count: int = 0
         self.prepared_view = None
         self.prepared_view_widget = None
 
@@ -562,21 +637,45 @@ class Show1D(anywidget.AnyWidget):
     def _validate_snapshot_contrast_preset(self, proposal: dict[str, Any]) -> str:
         return self._normalise_snapshot_contrast_preset(str(proposal["value"]))
 
+    @traitlets.validate("snapshot_contrast_range")
+    def _validate_snapshot_contrast_range(self, proposal: dict[str, Any]) -> list[float]:
+        return self._normalise_snapshot_contrast_range(proposal["value"])
+
     @traitlets.validate("plot_height_px")
     def _validate_plot_height_px(self, proposal: dict[str, Any]) -> int:
         return max(220, min(720, int(proposal["value"])))
 
     @traitlets.validate("side_panel_width_px")
     def _validate_side_panel_width_px(self, proposal: dict[str, Any]) -> int:
-        return max(300, min(640, int(proposal["value"])))
+        return max(300, min(960, int(proposal["value"])))
 
     @traitlets.validate("snapshot_thumbnail_size")
     def _validate_snapshot_thumbnail_size(self, proposal: dict[str, Any]) -> int:
         return max(24, min(112, int(proposal["value"])))
 
+    @traitlets.validate("snapshot_panel_width_px")
+    def _validate_snapshot_panel_width_px(self, proposal: dict[str, Any]) -> int:
+        return max(0, min(960, int(proposal["value"])))
+
+    @traitlets.validate("snapshot_fps")
+    def _validate_snapshot_fps(self, proposal: dict[str, Any]) -> int:
+        return max(1, min(24, int(round(float(proposal["value"])))))
+
     @traitlets.validate("snapshot_columns")
     def _validate_snapshot_columns(self, proposal: dict[str, Any]) -> int:
-        return max(1, min(4, int(proposal["value"])))
+        return max(0, min(8, int(proposal["value"])))
+
+    @traitlets.validate("snapshot_overlay_position")
+    def _validate_snapshot_overlay_position(self, proposal: dict[str, Any]) -> str:
+        return self._normalise_snapshot_overlay_position(str(proposal["value"]))
+
+    @traitlets.validate("snapshot_real_space_zoom", "snapshot_fft_zoom")
+    def _validate_snapshot_view_zoom(self, proposal: dict[str, Any]) -> float:
+        return self._normalise_snapshot_view_zoom(proposal["value"])
+
+    @traitlets.validate("snapshot_real_space_center", "snapshot_fft_center")
+    def _validate_snapshot_view_center(self, proposal: dict[str, Any]) -> list[float]:
+        return self._normalise_snapshot_view_center(proposal["value"])
 
     @traitlets.validate("pixel_size")
     def _validate_pixel_size(self, proposal: dict[str, Any]) -> float:
@@ -590,6 +689,14 @@ class Show1D(anywidget.AnyWidget):
     @traitlets.validate("snapshot_fft_cmap")
     def _validate_snapshot_fft_cmap(self, proposal: dict[str, Any]) -> str:
         return self._normalise_image_cmap(str(proposal["value"]))
+
+    @traitlets.validate("snapshot_profile_line")
+    def _validate_snapshot_profile_line(self, proposal: dict[str, Any]) -> list[dict[str, float]]:
+        return self._normalise_profile_line(proposal["value"])
+
+    @traitlets.validate("snapshot_profile_height")
+    def _validate_snapshot_profile_height(self, proposal: dict[str, Any]) -> int:
+        return max(44, min(220, int(proposal["value"])))
 
     @traitlets.validate("trial_sort_key")
     def _validate_trial_sort_key(self, proposal: dict[str, Any]) -> str:
@@ -848,6 +955,19 @@ class Show1D(anywidget.AnyWidget):
         if not events:
             widget = cls.live(title=title, x_label=x_label, y_label=y_label, log_scale=log_scale, **kwargs)
             widget.monitor_path = str(monitor_file)
+            widget.report_metadata = {
+                "monitor_path": str(monitor_file),
+                "monitor_events": 0,
+                "monitor_warnings": [],
+                "metrics_by_trial": {},
+            }
+            widget._monitor_offset = monitor_file.stat().st_size if monitor_file.exists() else 0
+            widget._monitor_line_count = len(monitor_file.read_text(encoding="utf-8").splitlines()) if monitor_file.exists() else 0
+            widget.report_metadata = {
+                **dict(widget.report_metadata),
+                "monitor_offset": widget._monitor_offset,
+                "monitor_lines": widget._monitor_line_count,
+            }
             widget._update_trial_analysis()
             return widget
 
@@ -862,59 +982,20 @@ class Show1D(anywidget.AnyWidget):
         widget.monitor_path = str(monitor_file)
         widget.report_metadata = {
             "monitor_path": str(monitor_file),
-            "monitor_events": len(events),
+            "monitor_events": 0,
             "monitor_warnings": [],
             "metrics_by_trial": {},
         }
 
-        for event_idx, event in enumerate(events):
-            iteration = _as_float(event.get("iteration", event_idx))
-            losses = event.get("losses")
-            if isinstance(losses, Mapping):
-                widget.append(iteration, **{str(name): _as_float(value) for name, value in losses.items()})
-
-            metrics = event.get("metrics")
-            if isinstance(metrics, Mapping):
-                metric_map = widget.report_metadata.setdefault("metrics_by_trial", {})
-                for label, values in metrics.items():
-                    if isinstance(values, Mapping):
-                        metric_map[str(label)] = dict(values)
-
-            snapshots = event.get("snapshots")
-            if isinstance(snapshots, Mapping):
-                images: dict[str, np.ndarray] = {}
-                for label, image_path in snapshots.items():
-                    arr = cls._load_monitor_image(monitor_file.parent / pathlib.Path(str(image_path)))
-                    if arr is not None:
-                        images[str(label)] = arr
-                if images:
-                    widget.snapshot(iteration, label=str(event.get("label") or f"iter {iteration:g}"), **images)
-
-            warnings = event.get("warnings")
-            if isinstance(warnings, Sequence) and not isinstance(warnings, (str, bytes)):
-                widget.report_metadata.setdefault("monitor_warnings", []).extend(str(item) for item in warnings)
-            elif warnings:
-                widget.report_metadata.setdefault("monitor_warnings", []).append(str(warnings))
-
-            starred = event.get("starred", [])
-            if isinstance(starred, (str, bytes)) or not isinstance(starred, Sequence):
-                starred = [starred] if starred else []
-            for label in starred:
-                widget.star_trial(str(label))
-            hidden = event.get("hidden", [])
-            if isinstance(hidden, (str, bytes)) or not isinstance(hidden, Sequence):
-                hidden = [hidden] if hidden else []
-            for label in hidden:
-                widget.hide_trial(str(label))
-            if isinstance(event.get("notes"), Mapping):
-                for label, note in event["notes"].items():
-                    widget.set_trial_note(str(label), str(note))
-            if isinstance(event.get("tags"), Mapping):
-                for label, tags in event["tags"].items():
-                    if isinstance(tags, Sequence) and not isinstance(tags, (str, bytes)):
-                        for tag in tags:
-                            widget.tag_trial(str(label), str(tag))
-
+        widget.apply_monitor_events(events, base_path=monitor_file)
+        widget._monitor_offset = monitor_file.stat().st_size if monitor_file.exists() else 0
+        widget._monitor_line_count = len(monitor_file.read_text(encoding="utf-8").splitlines()) if monitor_file.exists() else 0
+        widget.report_metadata = {
+            **dict(widget.report_metadata),
+            "monitor_events": len(events),
+            "monitor_offset": widget._monitor_offset,
+            "monitor_lines": widget._monitor_line_count,
+        }
         widget._update_trial_analysis()
         return widget
 
@@ -942,7 +1023,7 @@ class Show1D(anywidget.AnyWidget):
         monitor_file = Show1D._resolve_monitor_file(path, create=True)
         monitor_file.parent.mkdir(parents=True, exist_ok=True)
         with monitor_file.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(dict(event), sort_keys=True) + "\n")
+            handle.write(json.dumps(_json_safe(dict(event)), allow_nan=False, sort_keys=True) + "\n")
         return monitor_file
 
     def append(self, x: float | None = None, **values: Any) -> Self:
@@ -984,6 +1065,179 @@ class Show1D(anywidget.AnyWidget):
         """Alias for :meth:`append` with reconstruction-friendly naming."""
 
         return self.append(x=iteration, **values)
+
+    def extend(self, x: Sequence[float] | np.ndarray | None = None, **values: Any) -> Self:
+        """Append a batch of live scalar samples in one widget update.
+
+        Parameters
+        ----------
+        x : sequence of float, optional
+            Iteration or frame coordinates for the appended samples. If omitted,
+            coordinates continue from the current final x value.
+        **values : array_like
+            Mapping of trace name to a 1D sequence of values. New trace names are
+            added automatically and existing traces omitted from ``values`` are
+            back-filled with ``NaN`` for the appended span.
+
+        Returns
+        -------
+        Show1D
+            The mutated widget, ready for the frontend to redraw via trait sync.
+        """
+
+        if not values:
+            raise ValueError("extend requires at least one named value sequence")
+
+        arrays: dict[str, np.ndarray] = {}
+        n_new: int | None = None
+        for name, raw in values.items():
+            arr = np.asarray(to_numpy(raw), dtype=np.float32).ravel()
+            if n_new is None:
+                n_new = int(arr.size)
+            elif arr.size != n_new:
+                raise ValueError(
+                    f"all extend value sequences must have length {n_new}; "
+                    f"{name!r} has length {arr.size}"
+                )
+            arrays[str(name)] = arr
+        if not n_new:
+            return self
+
+        if x is None:
+            start = float(self.n_points if self._x is None or self._x.size == 0 else self._x[-1] + 1)
+            x_values = np.arange(start, start + n_new, dtype=np.float32)
+        else:
+            x_values = np.asarray(to_numpy(x), dtype=np.float32).ravel()
+            if x_values.size != n_new:
+                raise ValueError(f"x must have length {n_new}, got {x_values.size}")
+
+        if self._data.size == 0 and self.n_traces == 0:
+            self.labels = list(arrays)
+            self.colors = self._default_colors(len(self.labels))
+            self._data = np.empty((len(self.labels), 0), dtype=np.float32)
+            self.n_traces = len(self.labels)
+
+        labels = list(self.labels)
+        for name in arrays:
+            if name not in labels:
+                labels.append(name)
+                filler = np.full((1, self.n_points), np.nan, dtype=np.float32)
+                self._data = np.vstack([self._data, filler]) if self._data.size else filler
+                self.colors = list(self.colors) + [_DEFAULT_COLORS[(len(labels) - 1) % len(_DEFAULT_COLORS)]]
+
+        block = np.full((len(labels), n_new), np.nan, dtype=np.float32)
+        for row, label in enumerate(labels):
+            if label in arrays:
+                block[row, :] = arrays[label]
+
+        self._data = np.column_stack([self._data, block]) if self._data.size else block
+        self._x = x_values if self._x is None else np.concatenate([self._x.astype(np.float32, copy=False), x_values])
+        self.labels = labels
+        self.n_traces = int(self._data.shape[0])
+        self.n_points = int(self._data.shape[1])
+        self._update_stats()
+        self._update_data_bytes()
+        self._update_trial_analysis()
+        return self
+
+    append_many = extend
+
+    def apply_monitor_events(
+        self,
+        events: Sequence[Mapping[str, Any]],
+        *,
+        base_path: str | pathlib.Path | None = None,
+    ) -> Self:
+        """Apply monitor JSONL events to this live widget incrementally.
+
+        This is the programmatic counterpart to :meth:`refresh_monitor`: callers
+        can feed parsed events directly, while ``watch_run`` tails newly written
+        JSONL lines and calls the same method. Existing traces, snapshots,
+        review state, notes, and tags remain in place.
+        """
+
+        if not events:
+            return self
+
+        base_dir = pathlib.Path(base_path).parent if base_path is not None else pathlib.Path.cwd()
+        metadata = dict(self.report_metadata)
+        warnings_list = list(metadata.get("monitor_warnings", []))
+        metric_map = dict(metadata.get("metrics_by_trial", {}))
+        processed = int(metadata.get("monitor_events", 0) or 0)
+
+        for event in events:
+            if not isinstance(event, Mapping):
+                raise ValueError("monitor events must be mappings")
+            iteration = _as_float(event.get("iteration", self.n_points))
+
+            losses = event.get("losses")
+            if isinstance(losses, Mapping):
+                self.append(iteration, **{str(name): _as_float(value) for name, value in losses.items()})
+
+            metrics = event.get("metrics")
+            if isinstance(metrics, Mapping):
+                for label, metric_values in metrics.items():
+                    if isinstance(metric_values, Mapping):
+                        existing = dict(metric_map.get(str(label), {}))
+                        existing.update(dict(metric_values))
+                        metric_map[str(label)] = existing
+
+            snapshots = event.get("snapshots")
+            if isinstance(snapshots, Mapping):
+                images: dict[str, np.ndarray] = {}
+                for label, image_path in snapshots.items():
+                    path = pathlib.Path(str(image_path))
+                    if not path.is_absolute():
+                        path = base_dir / path
+                    arr = self._load_monitor_image(path)
+                    if arr is not None:
+                        images[str(label)] = arr
+                if images:
+                    label = str(event.get("label") or f"iter {iteration:g}")
+                    self.snapshot(iteration, label=label, **images)
+
+            warnings = event.get("warnings")
+            if isinstance(warnings, Sequence) and not isinstance(warnings, (str, bytes)):
+                warnings_list.extend(str(item) for item in warnings)
+            elif warnings:
+                warnings_list.append(str(warnings))
+
+            starred = event.get("starred", [])
+            if isinstance(starred, (str, bytes)) or not isinstance(starred, Sequence):
+                starred = [starred] if starred else []
+            for label in starred:
+                self.star_trial(str(label))
+
+            hidden = event.get("hidden", [])
+            if isinstance(hidden, (str, bytes)) or not isinstance(hidden, Sequence):
+                hidden = [hidden] if hidden else []
+            for label in hidden:
+                self.hide_trial(str(label))
+
+            notes = event.get("notes")
+            if isinstance(notes, Mapping):
+                for label, note in notes.items():
+                    self.set_trial_note(str(label), str(note))
+
+            tags = event.get("tags")
+            if isinstance(tags, Mapping):
+                for label, values_for_label in tags.items():
+                    if isinstance(values_for_label, Sequence) and not isinstance(values_for_label, (str, bytes)):
+                        for tag in values_for_label:
+                            self.tag_trial(str(label), str(tag))
+
+        metadata.update(
+            {
+                "monitor_path": self.monitor_path or str(base_path or ""),
+                "monitor_events": processed + len(events),
+                "monitor_warnings": warnings_list,
+                "metrics_by_trial": metric_map,
+            }
+        )
+        metadata.pop("monitor_error", None)
+        self.report_metadata = _json_safe(metadata)
+        self._update_trial_analysis()
+        return self
 
     def snapshot(
         self,
@@ -1385,11 +1639,44 @@ class Show1D(anywidget.AnyWidget):
         )
         return out
 
-    def refresh_monitor(self) -> Self:
-        """Reload the current monitor file while preserving review choices."""
+    def refresh_monitor(self, *, incremental: bool = True) -> Self:
+        """Refresh the current monitor file while preserving review choices.
+
+        By default only newly appended JSONL lines are read and applied. Pass
+        ``incremental=False`` to rebuild from the full monitor file, which is
+        useful after a run directory is replaced or edited by hand.
+        """
 
         if not self.monitor_path:
             raise ValueError("monitor_path is empty")
+        monitor_file = self._resolve_monitor_file(self.monitor_path)
+
+        if incremental:
+            if monitor_file.exists() and monitor_file.stat().st_size < self._monitor_offset:
+                incremental = False
+            else:
+                events, offset, consumed_lines = self._read_monitor_events_from(
+                    monitor_file,
+                    offset=self._monitor_offset,
+                    start_line=self._monitor_line_count + 1,
+                )
+                self._monitor_offset = offset
+                self._monitor_line_count += consumed_lines
+                if events:
+                    self.apply_monitor_events(events, base_path=monitor_file)
+                metadata = dict(self.report_metadata)
+                metadata.pop("monitor_error", None)
+                metadata.update(
+                    {
+                        "monitor_path": str(monitor_file),
+                        "monitor_offset": self._monitor_offset,
+                        "monitor_lines": self._monitor_line_count,
+                    }
+                )
+                self.report_metadata = _json_safe(metadata)
+                self._update_trial_analysis()
+                return self
+
         review_state = {
             "starred_snapshot_image_labels": list(self.starred_snapshot_image_labels),
             "hidden_snapshot_image_labels": list(self.hidden_snapshot_image_labels),
@@ -1402,7 +1689,7 @@ class Show1D(anywidget.AnyWidget):
             "top_trial_count": self.top_trial_count,
         }
         fresh = type(self).from_monitor_file(
-            self.monitor_path,
+            monitor_file,
             title=self.title or "Overnight Reconstruction Monitor",
             x_label=self.x_label or "iteration",
             y_label=self.y_label or "loss",
@@ -1411,7 +1698,9 @@ class Show1D(anywidget.AnyWidget):
             side_panel_width_px=self.side_panel_width_px,
             image_cmap=self.image_cmap,
             snapshot_contrast_preset=self.snapshot_contrast_preset,
+            snapshot_contrast_range=list(self.snapshot_contrast_range),
             snapshot_thumbnail_size=self.snapshot_thumbnail_size,
+            snapshot_panel_width_px=self.snapshot_panel_width_px,
             snapshot_columns=self.snapshot_columns,
         )
         self._data = np.ascontiguousarray(fresh._data, dtype=np.float32)
@@ -1428,6 +1717,8 @@ class Show1D(anywidget.AnyWidget):
         self.snapshot_group_iterations = list(fresh.snapshot_group_iterations)
         self.snapshot_group_labels = list(fresh.snapshot_group_labels)
         self.report_metadata = dict(fresh.report_metadata)
+        self._monitor_offset = fresh._monitor_offset
+        self._monitor_line_count = fresh._monitor_line_count
         self.load_state_dict(review_state)
         self._update_stats()
         self._update_data_bytes()
@@ -1453,7 +1744,7 @@ class Show1D(anywidget.AnyWidget):
                     mtime = path.stat().st_mtime
                     if mtime > self._monitor_mtime:
                         self._monitor_mtime = mtime
-                        self.refresh_monitor()
+                        self.refresh_monitor(incremental=True)
                 except Exception as exc:  # pragma: no cover - background safety path
                     self.report_metadata = {
                         **dict(self.report_metadata),
@@ -1552,6 +1843,7 @@ class Show1D(anywidget.AnyWidget):
             "log_scale": self.log_scale,
             "show_title": self.show_title,
             "show_stats": self.show_stats,
+            "show_review": self.show_review,
             "show_legend": self.show_legend,
             "show_grid": self.show_grid,
             "show_controls": self.show_controls,
@@ -1571,14 +1863,25 @@ class Show1D(anywidget.AnyWidget):
             "show_snapshot_fft": self.show_snapshot_fft,
             "snapshot_fft_window": self.snapshot_fft_window,
             "snapshot_fft_cmap": self.snapshot_fft_cmap,
+            "show_snapshot_profile": self.show_snapshot_profile,
+            "snapshot_profile_line": [dict(point) for point in self.snapshot_profile_line],
+            "snapshot_profile_height": self.snapshot_profile_height,
             "snapshot_contrast_preset": self.snapshot_contrast_preset,
+            "snapshot_contrast_range": list(self.snapshot_contrast_range),
             "snapshot_thumbnail_size": self.snapshot_thumbnail_size,
+            "snapshot_panel_width_px": self.snapshot_panel_width_px,
             "snapshot_columns": self.snapshot_columns,
+            "snapshot_overlay_position": self.snapshot_overlay_position,
+            "snapshot_real_space_zoom": self.snapshot_real_space_zoom,
+            "snapshot_real_space_center": list(self.snapshot_real_space_center),
+            "snapshot_fft_zoom": self.snapshot_fft_zoom,
+            "snapshot_fft_center": list(self.snapshot_fft_center),
             "image_cmap": self.image_cmap,
             "starred_snapshot_image_labels": list(self.starred_snapshot_image_labels),
             "hidden_snapshot_image_labels": list(self.hidden_snapshot_image_labels),
             "trial_notes": dict(self.trial_notes),
             "trial_tags": {str(k): list(v) for k, v in self.trial_tags.items()},
+            "show_trial_notes": self.show_trial_notes,
             "show_starred_only": self.show_starred_only,
             "trial_sort_key": self.trial_sort_key,
             "trial_sort_descending": self.trial_sort_descending,
@@ -1632,6 +1935,16 @@ class Show1D(anywidget.AnyWidget):
                     value = self._normalise_trial_sort_key(str(value))
                 elif key == "top_trial_count":
                     value = max(0, int(value))
+                elif key == "snapshot_fps":
+                    value = max(1, min(24, int(round(float(value)))))
+                elif key == "snapshot_profile_line":
+                    value = self._normalise_profile_line(value)
+                elif key == "snapshot_profile_height":
+                    value = max(44, min(220, int(value)))
+                elif key in {"snapshot_real_space_zoom", "snapshot_fft_zoom"}:
+                    value = self._normalise_snapshot_view_zoom(value)
+                elif key in {"snapshot_real_space_center", "snapshot_fft_center"}:
+                    value = self._normalise_snapshot_view_center(value)
                 setattr(self, key, value)
         self._update_trial_analysis()
 
@@ -1771,6 +2084,93 @@ class Show1D(anywidget.AnyWidget):
                 f"{name!r}. Valid: {sorted(_VALID_SNAPSHOT_CONTRAST_PRESETS)}"
             )
         return name
+
+    def _normalise_snapshot_contrast_range(self, value: Sequence[float] | None) -> list[float]:
+        if value is None:
+            return []
+        if len(value) == 0:
+            return []
+        if len(value) != 2:
+            raise ValueError(
+                "snapshot_contrast_range must be empty or contain exactly "
+                f"two values, got {value!r}"
+            )
+        vmin = float(value[0])
+        vmax = float(value[1])
+        if not math.isfinite(vmin) or not math.isfinite(vmax):
+            raise ValueError(
+                "snapshot_contrast_range values must be finite, "
+                f"got {value!r}"
+            )
+        if vmax <= vmin:
+            raise ValueError(
+                "snapshot_contrast_range must be increasing "
+                f"(min < max), got {value!r}"
+            )
+        return [vmin, vmax]
+
+    def _normalise_snapshot_overlay_position(self, position: str) -> str:
+        name = str(position).strip().lower().replace("_", "-")
+        valid = {"top-left", "top-right", "bottom-left", "bottom-right"}
+        if name not in valid:
+            raise ValueError(
+                "snapshot_overlay_position must be one of "
+                f"{sorted(valid)}, got {position!r}"
+            )
+        return name
+
+    def _normalise_snapshot_view_zoom(self, value: float) -> float:
+        zoom = float(value)
+        if not math.isfinite(zoom):
+            raise ValueError(f"snapshot view zoom must be finite, got {value!r}")
+        return max(1.0, min(32.0, zoom))
+
+    def _normalise_snapshot_view_center(self, value: Sequence[float] | None) -> list[float]:
+        if value is None:
+            return []
+        if len(value) == 0:
+            return []
+        if len(value) != 2:
+            raise ValueError(
+                "snapshot view center must be empty or contain exactly two "
+                f"(row, col) values, got {value!r}"
+            )
+        row = float(value[0])
+        col = float(value[1])
+        if not math.isfinite(row) or not math.isfinite(col):
+            raise ValueError(f"snapshot view center values must be finite, got {value!r}")
+        return [row, col]
+
+    def _normalise_profile_line(self, value: Sequence[Any] | None) -> list[dict[str, float]]:
+        if value is None:
+            return []
+        if len(value) == 0:
+            return []
+        if len(value) > 2:
+            raise ValueError(
+                "snapshot_profile_line must contain at most two "
+                f"(row, col) points, got {value!r}"
+            )
+        out: list[dict[str, float]] = []
+        for point in value:
+            if isinstance(point, Mapping):
+                row = float(point.get("row", math.nan))
+                col = float(point.get("col", math.nan))
+            else:
+                if len(point) != 2:
+                    raise ValueError(
+                        "snapshot_profile_line points must be (row, col), "
+                        f"got {point!r}"
+                    )
+                row = float(point[0])
+                col = float(point[1])
+            if not math.isfinite(row) or not math.isfinite(col):
+                raise ValueError(
+                    "snapshot_profile_line coordinates must be finite, "
+                    f"got {point!r}"
+                )
+            out.append({"row": row, "col": col})
+        return out
 
     @staticmethod
     def _trial_label_key(label: str) -> str:
@@ -2234,6 +2634,55 @@ class Show1D(anywidget.AnyWidget):
         return events
 
     @staticmethod
+    def _read_monitor_events_from(
+        path: pathlib.Path,
+        *,
+        offset: int = 0,
+        start_line: int = 1,
+    ) -> tuple[list[dict[str, Any]], int, int]:
+        """Read complete JSONL events appended after ``offset``.
+
+        The final line is ignored until it ends with a newline. This avoids
+        parsing a half-written event while a reconstruction process is flushing
+        the monitor file.
+        """
+
+        if not path.exists():
+            return [], max(0, int(offset)), 0
+        size = path.stat().st_size
+        clean_offset = max(0, int(offset))
+        if clean_offset > size:
+            clean_offset = 0
+            start_line = 1
+        with path.open("rb") as handle:
+            handle.seek(clean_offset)
+            chunk = handle.read()
+        if not chunk:
+            return [], clean_offset, 0
+        complete = chunk
+        if not complete.endswith(b"\n"):
+            last_newline = complete.rfind(b"\n")
+            if last_newline < 0:
+                return [], clean_offset, 0
+            complete = complete[: last_newline + 1]
+        text = complete.decode("utf-8")
+        events: list[dict[str, Any]] = []
+        consumed_lines = 0
+        for consumed_lines, raw in enumerate(text.splitlines(), start=1):
+            line_no = start_line + consumed_lines - 1
+            value = raw.strip()
+            if not value or value.startswith("#"):
+                continue
+            try:
+                event = json.loads(value)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"invalid monitor JSON on line {line_no}: {exc}") from exc
+            if not isinstance(event, dict):
+                raise ValueError(f"monitor line {line_no} must be a JSON object")
+            events.append(event)
+        return events, clean_offset + len(complete), consumed_lines
+
+    @staticmethod
     def _load_monitor_image(path: pathlib.Path) -> np.ndarray | None:
         if not path.exists():
             return None
@@ -2429,6 +2878,7 @@ class Show1D(anywidget.AnyWidget):
             log_scale=self.log_scale,
             show_title=self.show_title,
             show_stats=self.show_stats,
+            show_review=self.show_review,
             show_legend=self.show_legend,
             show_grid=self.show_grid,
             show_controls=self.show_controls,
@@ -2438,12 +2888,20 @@ class Show1D(anywidget.AnyWidget):
             side_panel_width_px=self.side_panel_width_px,
             image_cmap=self.image_cmap,
             snapshot_contrast_preset=self.snapshot_contrast_preset,
+            snapshot_contrast_range=list(self.snapshot_contrast_range),
             snapshot_thumbnail_size=self.snapshot_thumbnail_size,
+            snapshot_panel_width_px=self.snapshot_panel_width_px,
             snapshot_columns=self.snapshot_columns,
+            snapshot_overlay_position=self.snapshot_overlay_position,
+            snapshot_real_space_zoom=self.snapshot_real_space_zoom,
+            snapshot_real_space_center=list(self.snapshot_real_space_center),
+            snapshot_fft_zoom=self.snapshot_fft_zoom,
+            snapshot_fft_center=list(self.snapshot_fft_center),
             starred_snapshot_image_labels=list(self.starred_snapshot_image_labels),
             hidden_snapshot_image_labels=list(self.hidden_snapshot_image_labels),
             trial_notes=dict(self.trial_notes),
             trial_tags={str(k): list(v) for k, v in self.trial_tags.items()},
+            show_trial_notes=self.show_trial_notes,
             show_starred_only=self.show_starred_only,
             trial_sort_key=self.trial_sort_key,
             trial_sort_descending=self.trial_sort_descending,
@@ -2456,6 +2914,9 @@ class Show1D(anywidget.AnyWidget):
             show_snapshot_fft=self.show_snapshot_fft,
             snapshot_fft_window=self.snapshot_fft_window,
             snapshot_fft_cmap=self.snapshot_fft_cmap,
+            show_snapshot_profile=self.show_snapshot_profile,
+            snapshot_profile_line=list(self.snapshot_profile_line),
+            snapshot_profile_height=self.snapshot_profile_height,
             prefer_webgpu=self.prefer_webgpu,
         )
         clone.load_state_dict(self.state_dict())
@@ -2469,6 +2930,7 @@ class Show1D(anywidget.AnyWidget):
         clone.hidden_snapshot_image_labels = list(self.hidden_snapshot_image_labels)
         clone.trial_notes = dict(self.trial_notes)
         clone.trial_tags = {str(k): list(v) for k, v in self.trial_tags.items()}
+        clone.show_trial_notes = self.show_trial_notes
         clone.show_starred_only = self.show_starred_only
         clone.trial_sort_key = self.trial_sort_key
         clone.trial_sort_descending = self.trial_sort_descending
@@ -2487,13 +2949,23 @@ class Show1D(anywidget.AnyWidget):
         clone.snapshot_fft_window = self.snapshot_fft_window
         clone.snapshot_fft_cmap = self.snapshot_fft_cmap
         clone.snapshot_contrast_preset = self.snapshot_contrast_preset
+        clone.snapshot_contrast_range = list(self.snapshot_contrast_range)
         clone.snapshot_thumbnail_size = self.snapshot_thumbnail_size
+        clone.snapshot_panel_width_px = self.snapshot_panel_width_px
         clone.snapshot_columns = self.snapshot_columns
+        clone.snapshot_overlay_position = self.snapshot_overlay_position
+        clone.snapshot_real_space_zoom = self.snapshot_real_space_zoom
+        clone.snapshot_real_space_center = list(self.snapshot_real_space_center)
+        clone.snapshot_fft_zoom = self.snapshot_fft_zoom
+        clone.snapshot_fft_center = list(self.snapshot_fft_center)
         clone.pixel_size = self.pixel_size
         clone.pixel_unit = self.pixel_unit
         clone.scale_bar_visible = self.scale_bar_visible
         clone.snapshot_playing = self.snapshot_playing
         clone.snapshot_fps = self.snapshot_fps
+        clone.show_snapshot_profile = self.show_snapshot_profile
+        clone.snapshot_profile_line = list(self.snapshot_profile_line)
+        clone.snapshot_profile_height = self.snapshot_profile_height
         clone._update_snapshot_bytes()
         if self._profile_image is not None:
             clone.set_profile_image(self._profile_image, line=None)

@@ -2,10 +2,20 @@ from __future__ import annotations
 
 import json
 import pathlib
+import time
 
 import numpy as np
 
 from quantem.widget.show1d import Show1D, sample_line_profile
+
+
+def _wait_until(predicate, *, timeout_s: float = 5.0) -> None:
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        if predicate():
+            return
+        time.sleep(0.05)
+    raise AssertionError("condition was not reached before timeout")
 
 
 def test_show1d_live_append_adds_traces_and_exports_csv(tmp_path: pathlib.Path) -> None:
@@ -27,6 +37,24 @@ def test_show1d_live_append_adds_traces_and_exports_csv(tmp_path: pathlib.Path) 
     assert rows[0] == "x,loss,step_size"
     assert rows[1].startswith("0.0,3.0,")
     assert rows[2] == "1.0,1.5,0.01"
+
+
+def test_show1d_live_extend_batches_reactive_trace_updates() -> None:
+    widget = Show1D.live(["loss"], title="Adam loss")
+
+    widget.extend([0, 1, 2], loss=[3.0, 2.0, 1.0], reg=[0.3, 0.2, 0.1])
+    widget.append_many([3, 4], loss=[0.8, 0.6])
+
+    assert widget.labels == ["loss", "reg"]
+    assert widget.n_points == 5
+    np.testing.assert_allclose(widget._x, [0, 1, 2, 3, 4])
+    np.testing.assert_allclose(widget._data[0], [3.0, 2.0, 1.0, 0.8, 0.6])
+    np.testing.assert_allclose(widget._data[1, :3], [0.3, 0.2, 0.1])
+    assert np.isnan(widget._data[1, 3])
+    assert np.isnan(widget._data[1, 4])
+
+    with np.testing.assert_raises(ValueError):
+        widget.extend([5, 6], loss=[0.4])
 
 
 def test_show1d_from_loss_runs_flattens_nested_loss_families() -> None:
@@ -124,8 +152,14 @@ def test_show1d_display_public_api_state_and_validation() -> None:
         side_panel_width_px=420,
         image_cmap="viridis",
         snapshot_contrast_preset="1-99",
+        snapshot_contrast_range=(0.1, 0.9),
         snapshot_thumbnail_size=80,
         snapshot_columns=3,
+        snapshot_overlay_position="bottom-left",
+        snapshot_real_space_zoom=2.5,
+        snapshot_real_space_center=(12.0, 18.5),
+        snapshot_fft_zoom=3.0,
+        snapshot_fft_center=(64.0, 65.5),
         sampling=(2.0, 0.5),
         units=("nm", "A"),
         show_scale_bar=True,
@@ -133,18 +167,30 @@ def test_show1d_display_public_api_state_and_validation() -> None:
         show_snapshot_fft=True,
         snapshot_fft_window=False,
         snapshot_fft_cmap="inferno",
+        show_snapshot_profile=True,
+        snapshot_profile_line=((2, 3), (8, 9)),
+        snapshot_profile_height=88,
         starred_snapshot_image_labels=["lambda_10"],
         hidden_snapshot_image_labels=["lambda_300"],
+        show_trial_notes=True,
         prefer_webgpu=False,
     )
 
     assert widget.colors[0] == "#0072B2"
+    assert widget.show_stats is False
+    assert widget.show_review is False
     assert widget.plot_height_px == 500
     assert widget.side_panel_width_px == 420
     assert widget.image_cmap == "viridis"
     assert widget.snapshot_contrast_preset == "1-99"
+    assert widget.snapshot_contrast_range == [0.1, 0.9]
     assert widget.snapshot_thumbnail_size == 80
     assert widget.snapshot_columns == 3
+    assert widget.snapshot_overlay_position == "bottom-left"
+    assert widget.snapshot_real_space_zoom == 2.5
+    assert widget.snapshot_real_space_center == [12.0, 18.5]
+    assert widget.snapshot_fft_zoom == 3.0
+    assert widget.snapshot_fft_center == [64.0, 65.5]
     assert widget.pixel_size == 0.5
     assert widget.pixel_unit == "A"
     assert widget.scale_bar_visible is True
@@ -152,16 +198,46 @@ def test_show1d_display_public_api_state_and_validation() -> None:
     assert widget.show_snapshot_fft is True
     assert widget.snapshot_fft_window is False
     assert widget.snapshot_fft_cmap == "inferno"
+    assert widget.show_snapshot_profile is True
+    assert widget.snapshot_profile_line == [{"row": 2.0, "col": 3.0}, {"row": 8.0, "col": 9.0}]
+    assert widget.snapshot_profile_height == 88
     assert widget.starred_snapshot_image_labels == ["lambda_10"]
     assert widget.hidden_snapshot_image_labels == ["lambda_300"]
+    assert widget.show_trial_notes is True
     assert widget.prefer_webgpu is False
+    widget.snapshot_fps = 5
+    assert widget.snapshot_fps == 5
+    widget.load_state_dict({
+        "snapshot_fps": 4.25,
+        "snapshot_fft_zoom": 99,
+        "snapshot_fft_center": (7.0, 8.0),
+        "snapshot_profile_line": [{"row": 1.5, "col": 2.5}],
+        "snapshot_profile_height": 999,
+    })
+    assert widget.snapshot_fps == 4
+    assert widget.snapshot_fft_zoom == 32.0
+    assert widget.snapshot_fft_center == [7.0, 8.0]
+    assert widget.snapshot_profile_line == [{"row": 1.5, "col": 2.5}]
+    assert widget.snapshot_profile_height == 220
 
     state = widget.state_dict()
+    assert state["show_stats"] is False
+    assert state["show_review"] is False
     assert state["plot_height_px"] == 500
     assert state["side_panel_width_px"] == 420
     assert state["image_cmap"] == "viridis"
     assert state["snapshot_contrast_preset"] == "1-99"
+    assert state["snapshot_contrast_range"] == [0.1, 0.9]
     assert state["snapshot_columns"] == 3
+    assert state["snapshot_overlay_position"] == "bottom-left"
+    assert state["snapshot_real_space_zoom"] == 2.5
+    assert state["snapshot_real_space_center"] == [12.0, 18.5]
+    assert state["snapshot_fft_zoom"] == 32.0
+    assert state["snapshot_fft_center"] == [7.0, 8.0]
+    assert state["show_snapshot_profile"] is True
+    assert state["snapshot_profile_line"] == [{"row": 1.5, "col": 2.5}]
+    assert state["snapshot_profile_height"] == 220
+    assert state["snapshot_fps"] == 4
     assert state["pixel_size"] == 0.5
     assert state["pixel_unit"] == "A"
     assert state["scale_bar_visible"] is True
@@ -170,16 +246,38 @@ def test_show1d_display_public_api_state_and_validation() -> None:
     assert state["snapshot_fft_cmap"] == "inferno"
     assert state["starred_snapshot_image_labels"] == ["lambda_10"]
     assert state["hidden_snapshot_image_labels"] == ["lambda_300"]
+    assert state["show_trial_notes"] is True
     assert state["prefer_webgpu"] is False
 
     widget.snapshot_columns = 99
-    assert widget.snapshot_columns == 4
+    assert widget.snapshot_columns == 8
+
+    widget.snapshot_columns = -1
+    assert widget.snapshot_columns == 0
 
     with np.testing.assert_raises(ValueError):
         Show1D(np.arange(4, dtype=np.float32), image_cmap="not-a-cmap")
 
     with np.testing.assert_raises(ValueError):
         Show1D(np.arange(4, dtype=np.float32), snapshot_contrast_preset="middle-ish")
+
+    with np.testing.assert_raises(ValueError):
+        Show1D(np.arange(4, dtype=np.float32), snapshot_contrast_range=(1.0,))
+
+    with np.testing.assert_raises(ValueError):
+        Show1D(np.arange(4, dtype=np.float32), snapshot_profile_line=((0, 0), (1, 1), (2, 2)))
+
+    with np.testing.assert_raises(ValueError):
+        Show1D(np.arange(4, dtype=np.float32), snapshot_contrast_range=(1.0, 0.0))
+
+    with np.testing.assert_raises(ValueError):
+        Show1D(np.arange(4, dtype=np.float32), snapshot_overlay_position="center")
+
+    with np.testing.assert_raises(ValueError):
+        Show1D(np.arange(4, dtype=np.float32), snapshot_real_space_zoom=float("nan"))
+
+    with np.testing.assert_raises(ValueError):
+        Show1D(np.arange(4, dtype=np.float32), snapshot_fft_center=(1.0,))
 
     with np.testing.assert_raises(ValueError):
         Show1D(np.arange(4, dtype=np.float32), show_scale_bar=True, scale_bar_visible=False)
@@ -272,11 +370,16 @@ def test_show1d_review_state_exports_strict_json_without_nan(tmp_path: pathlib.P
 def test_show1d_ui_mode_presets_and_overrides() -> None:
     data = np.arange(4, dtype=np.float32)
 
+    default = Show1D(data)
+    assert default.show_stats is False
+    assert default.show_review is False
+
     presentation = Show1D(data, ui_mode="presentation")
     assert presentation.show_title is True
     assert presentation.show_controls is True
     assert presentation.controls_collapsed is True
     assert presentation.show_stats is False
+    assert presentation.show_review is False
     assert presentation.show_legend is True
     assert presentation.show_grid is True
 
@@ -285,6 +388,7 @@ def test_show1d_ui_mode_presets_and_overrides() -> None:
     assert report.show_controls is False
     assert report.controls_collapsed is False
     assert report.show_stats is False
+    assert report.show_review is False
     assert report.show_legend is True
     assert report.show_grid is True
 
@@ -293,6 +397,7 @@ def test_show1d_ui_mode_presets_and_overrides() -> None:
     assert minimal.show_controls is False
     assert minimal.controls_collapsed is False
     assert minimal.show_stats is False
+    assert minimal.show_review is False
     assert minimal.show_legend is False
     assert minimal.show_grid is False
 
@@ -303,6 +408,7 @@ def test_show1d_ui_mode_presets_and_overrides() -> None:
         show_controls=True,
         controls_collapsed=True,
         show_stats=True,
+        show_review=True,
         show_legend=True,
         show_grid=True,
     )
@@ -310,6 +416,7 @@ def test_show1d_ui_mode_presets_and_overrides() -> None:
     assert override.show_controls is True
     assert override.controls_collapsed is True
     assert override.show_stats is True
+    assert override.show_review is True
     assert override.show_legend is True
     assert override.show_grid is True
     assert override.expand_controls() is override
@@ -485,5 +592,86 @@ def test_show1d_monitor_file_reloads_losses_snapshots_and_review_state(tmp_path:
     widget.refresh_monitor()
 
     assert widget.n_points == 3
+    assert widget.n_snapshots == 2
     assert widget.hidden_snapshot_image_labels == ["lambda 10"]
     assert widget.trial_notes == {"lambda 1": "best so far"}
+    assert widget.report_metadata["monitor_events"] == 3
+
+    partial_offset = widget._monitor_offset
+    with monitor.open("a", encoding="utf-8") as handle:
+        handle.write('{"iteration": 3, "losses": {"lambda 1": 0.25')
+    widget.refresh_monitor()
+    assert widget.n_points == 3
+    assert widget._monitor_offset == partial_offset
+
+    with monitor.open("a", encoding="utf-8") as handle:
+        handle.write(', "lambda 10": 8.0}}\n')
+    widget.refresh_monitor()
+    assert widget.n_points == 4
+    np.testing.assert_allclose(widget._data[:, -1], [0.25, 8.0])
+
+
+def test_show1d_watch_run_polls_joint_ptycho_monitor_with_object_probe_snapshots(tmp_path: pathlib.Path) -> None:
+    snapshots = tmp_path / "snapshots"
+    snapshots.mkdir()
+    monitor = tmp_path / "show1d_monitor.jsonl"
+    y, x = np.mgrid[-1:1:16j, -1:1:16j]
+    duck = np.exp(-((x + 0.1) ** 2 + (y + 0.05) ** 2) * 5).astype(np.float32)
+
+    obj0 = snapshots / "lambda1_i000_object.npy"
+    probe0 = snapshots / "lambda1_i000_probe.npy"
+    np.save(obj0, duck)
+    np.save(probe0, np.exp(-(x**2 + y**2) * 20).astype(np.float32))
+    Show1D.append_monitor_event(
+        monitor,
+        {
+            "iteration": 0,
+            "losses": {"lambda 1": 3.0, "lambda 10": 4.0, "lambda 30": 5.0},
+            "metrics": {
+                "lambda 1": {"rmse": 0.5, "flicker": 0.1},
+                "lambda 10": {"rmse": 0.7, "flicker": 0.2},
+            },
+            "snapshots": {"lambda_1": obj0.relative_to(tmp_path), "lambda_1_probe": probe0.relative_to(tmp_path)},
+            "warnings": ["coarse initialization"],
+        },
+    )
+
+    widget = Show1D.watch_run(monitor, refresh_s=0.25, start=True, show_review=True, snapshot_columns=2)
+    try:
+        assert widget.n_points == 1
+        assert widget.n_snapshot_groups == 1
+        assert widget.snapshot_image_labels == ["lambda_1", "lambda_1_probe"]
+
+        obj1 = snapshots / "lambda1_i001_object.npy"
+        obj30 = snapshots / "lambda30_i001_object.npy"
+        np.save(obj1, (duck * 1.2).astype(np.float32))
+        np.save(obj30, np.zeros((16, 16), dtype=np.float32))
+        Show1D.append_monitor_event(
+            monitor,
+            {
+                "iteration": 1,
+                "losses": {"lambda 1": 1.2, "lambda 10": 8.0, "lambda 30": None},
+                "metrics": {
+                    "lambda 1": {"rmse": 0.2, "flicker": 0.15},
+                    "lambda 10": {"rmse": 0.9, "flicker": 0.85},
+                    "lambda 30": {"rmse": 1.2},
+                },
+                "snapshots": {"lambda_1": obj1.relative_to(tmp_path), "lambda_30": obj30.relative_to(tmp_path)},
+                "starred": ["lambda 1"],
+                "tags": {"lambda 1": ["best"], "lambda 30": ["bad start"]},
+                "notes": {"lambda 10": "exploded after first update"},
+            },
+        )
+
+        _wait_until(lambda: widget.n_points == 2 and widget.n_snapshot_groups == 2)
+        assert widget.report_metadata["monitor_events"] == 2
+        assert widget.best_trial_label == "lambda 1"
+        assert widget.starred_snapshot_image_labels == ["lambda 1"]
+        assert widget.trial_tags["lambda 30"] == ["bad start"]
+        assert widget.trial_notes["lambda 10"] == "exploded after first update"
+        assert any(alert["kind"] == "monitor_warning" for alert in widget.trial_alerts)
+        assert any(alert["kind"] == "worse_final" and alert["label"] == "lambda 10" for alert in widget.trial_alerts)
+        assert any(alert["kind"] == "nonfinite" and alert["label"] == "lambda 30" for alert in widget.trial_alerts)
+        assert any(alert["kind"] == "image_collapse" and alert["label"] == "lambda 30" for alert in widget.trial_alerts)
+    finally:
+        widget.stop_monitor()

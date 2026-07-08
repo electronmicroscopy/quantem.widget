@@ -38,7 +38,7 @@ no console error, no NaN frame).
 | Smooth toggle | `smooth` | Bilinear vs nearest sampling |
 | ROI add / drag | `roi_active`, `roi_list`, `roi_selected_idx` | Region overlay; stats panel reports the ROI |
 | Gallery select | `selected_idx` | Highlights the active panel |
-| Gallery page slider | `page_idx`, `n_pages`, `panels_per_page`, `page_labels`, `page_starred` | Switches between panel pages without changing the source stack |
+| Gallery page controls | `page_idx`, `n_pages`, `panels_per_page`, `page_labels`, `page_starred` | Switch, star, or play through panel pages without changing the source stack |
 | Panel reorder | `panel_order`; `set_panel_order()`, `move_panel()`, `reset_panel_order()` | Reorders gallery display without changing source data, labels, stars, or hidden state |
 | Diff mode | `diff_mode`, `diff_reference` | Panels render as difference vs the reference |
 
@@ -132,9 +132,11 @@ Paged galleries keep the Python data model simple: all pages use the same panel
 count and image shape, the browser renders only the active page, and page stars
 are stored separately from panel stars. Use `star_page(page)` and
 `unstar_page(page)` from Python, or the star button beside the page slider in
-the widget. For very large 4K sweeps, start with a reduced or representative
-stack; a future lazy page transport can avoid sending every page to the browser
-at once.
+the widget. The page row also includes play/pause and a small FPS menu so
+readers can step through iteration or parameter pages without touching the main
+image controls. Manual slider scrubbing pauses page playback. For very large 4K
+sweeps, start with a reduced or representative stack; a future lazy page
+transport can avoid sending every page to the browser at once.
 
 `set_image()` is the re-render trigger. Mutating the original NumPy array in
 place does not notify the frontend. The method sends fresh synced `frame_bytes`

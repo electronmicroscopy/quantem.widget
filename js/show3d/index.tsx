@@ -93,6 +93,7 @@ const sliderStyles = {
     "& .MuiSlider-track": { height: 2 },
   },
 };
+const PAGE_PLAY_FPS_OPTIONS = [1, 2, 3, 4] as const;
 const typography = {
   label: { fontSize: 11 },
   labelSmall: { fontSize: 10 },
@@ -1480,6 +1481,8 @@ function Show3D() {
   const [panelsPerPage] = useModelState<number>("panels_per_page");
   const [pageLabels] = useModelState<string[]>("page_labels");
   const [pageStarred, setPageStarred] = useModelState<number[]>("page_starred");
+  const [pagePlaying, setPagePlaying] = React.useState(false);
+  const [pagePlayFps, setPagePlayFps] = React.useState<number>(2);
   const [reorderMode, setReorderMode] = React.useState(false);
   const [dragOverPanel, setDragOverPanel] = React.useState<number | null>(null);
   const [reorderPreviewOrder, setReorderPreviewOrder] = React.useState<number[] | null>(null);
@@ -1499,6 +1502,16 @@ function Show3D() {
   const totalPanelCount = Math.max(1, nPanels || 1);
   const isPaged = (nPages || 1) > 1 && (panelsPerPage || 0) > 0;
   const currentPageIdx = Math.max(0, Math.min((nPages || 1) - 1, Math.round(pageIdx || 0)));
+  React.useEffect(() => {
+    if (!isPaged || (nPages || 1) <= 1) setPagePlaying(false);
+  }, [isPaged, nPages]);
+  React.useEffect(() => {
+    if (!pagePlaying || !isPaged || (nPages || 1) <= 1) return;
+    const timeout = window.setTimeout(() => {
+      setPageIdx((currentPageIdx + 1) % Math.max(1, nPages || 1));
+    }, 1000 / Math.max(1, pagePlayFps));
+    return () => window.clearTimeout(timeout);
+  }, [currentPageIdx, isPaged, nPages, pagePlayFps, pagePlaying, setPageIdx]);
   const activePageStart = isPaged ? currentPageIdx * Math.max(1, panelsPerPage || 1) : 0;
   const activePageEnd = isPaged ? Math.min(totalPanelCount, activePageStart + Math.max(1, panelsPerPage || 1)) : totalPanelCount;
   const activePageIndices = React.useMemo(
@@ -1506,11 +1519,52 @@ function Show3D() {
     [activePageStart, activePageEnd]
   );
   const activePanelCount = isPaged ? activePageIndices.length : totalPanelCount;
-  const hiddenPanelSet = React.useMemo(() => {
-    const clean = new Set<number>();
+  const [hiddenPageSlots, setHiddenPageSlots] = React.useState<number[]>([]);
+  const hiddenPageSlotsInitializedRef = React.useRef(false);
+  React.useEffect(() => {
+    if (!isPaged) {
+      hiddenPageSlotsInitializedRef.current = false;
+      return;
+    }
+    if (hiddenPageSlotsInitializedRef.current) return;
+    hiddenPageSlotsInitializedRef.current = true;
+    const slots = new Set<number>();
     for (const value of hiddenPanels || []) {
       const idx = Math.trunc(Number(value));
-      if (Number.isFinite(idx) && idx >= 0 && idx < totalPanelCount) clean.add(idx);
+      if (Number.isFinite(idx) && idx >= activePageStart && idx < activePageEnd) {
+        slots.add(idx - activePageStart);
+      }
+    }
+    setHiddenPageSlots(Array.from(slots).filter(slot => slot >= 0 && slot < activePanelCount).sort((a, b) => a - b));
+  }, [activePageEnd, activePageStart, activePanelCount, hiddenPanels, isPaged]);
+  React.useEffect(() => {
+    if (!isPaged) return;
+    const mapped = Array.from(new Set(hiddenPageSlots
+      .map(slot => activePageStart + Math.trunc(Number(slot)))
+      .filter(panel => Number.isFinite(panel) && panel >= activePageStart && panel < activePageEnd)))
+      .sort((a, b) => a - b);
+    const current = (hiddenPanels || [])
+      .map(value => Math.trunc(Number(value)))
+      .filter(panel => Number.isFinite(panel) && panel >= 0 && panel < totalPanelCount)
+      .sort((a, b) => a - b);
+    if (mapped.length === current.length && mapped.every((panel, idx) => panel === current[idx])) return;
+    setHiddenPanels(mapped);
+  }, [activePageEnd, activePageStart, hiddenPageSlots, hiddenPanels, isPaged, setHiddenPanels, totalPanelCount]);
+  const hiddenPanelSet = React.useMemo(() => {
+    const clean = new Set<number>();
+    if (isPaged) {
+      for (const value of hiddenPageSlots || []) {
+        const slot = Math.trunc(Number(value));
+        const idx = activePageStart + slot;
+        if (Number.isFinite(slot) && slot >= 0 && slot < activePanelCount && idx >= activePageStart && idx < activePageEnd) {
+          clean.add(idx);
+        }
+      }
+    } else {
+      for (const value of hiddenPanels || []) {
+        const idx = Math.trunc(Number(value));
+        if (Number.isFinite(idx) && idx >= 0 && idx < totalPanelCount) clean.add(idx);
+      }
     }
     const activeHiddenCount = (isPaged ? activePageIndices : Array.from({ length: totalPanelCount }, (_, panel) => panel))
       .filter((panel) => clean.has(panel)).length;
@@ -1519,7 +1573,7 @@ function Show3D() {
       clean.delete(fallback);
     }
     return clean;
-  }, [hiddenPanels, totalPanelCount, isPaged, activePageIndices, activePanelCount]);
+  }, [activePageEnd, activePageIndices, activePageStart, activePanelCount, hiddenPageSlots, hiddenPanels, totalPanelCount, isPaged]);
   const naturalPanelOrder = React.useMemo(
     () => isPaged ? activePageIndices : Array.from({ length: totalPanelCount }, (_, panel) => panel),
     [activePageIndices, isPaged, totalPanelCount]
@@ -1556,6 +1610,23 @@ function Show3D() {
   ), [panelTitles]);
   const setPanelHidden = React.useCallback((panel: number, hidden: boolean) => {
     if (panel < 0 || panel >= totalPanelCount) return;
+    if (isPaged) {
+      if (panel < activePageStart || panel >= activePageEnd) return;
+      const slot = panel - activePageStart;
+      const next = new Set<number>();
+      for (const value of hiddenPageSlots || []) {
+        const idx = Math.trunc(Number(value));
+        if (Number.isFinite(idx) && idx >= 0 && idx < activePanelCount) next.add(idx);
+      }
+      if (hidden) {
+        if (!next.has(slot) && activePanelCount - next.size <= 1) return;
+        next.add(slot);
+      } else {
+        next.delete(slot);
+      }
+      setHiddenPageSlots(Array.from(next).sort((a, b) => a - b));
+      return;
+    }
     const next = new Set<number>();
     for (const value of hiddenPanels || []) {
       const idx = Math.trunc(Number(value));
@@ -1570,7 +1641,7 @@ function Show3D() {
       next.delete(panel);
     }
     setHiddenPanels(Array.from(next).sort((a, b) => a - b));
-  }, [hiddenPanels, totalPanelCount, isPaged, activePageIndices, setHiddenPanels]);
+  }, [activePageEnd, activePageStart, activePanelCount, hiddenPageSlots, hiddenPanels, totalPanelCount, isPaged, activePageIndices, setHiddenPanels]);
   const applyPanelOrder = React.useCallback((order: number[]) => {
     const clean = order.filter((value) => Number.isInteger(value) && value >= 0 && value < totalPanelCount);
     if (clean.length !== totalPanelCount || new Set(clean).size !== totalPanelCount) return;
@@ -2791,9 +2862,12 @@ function Show3D() {
 
   React.useEffect(() => {
     if (!separatePanelFrames) return;
+    // Separate-panel GPU slots are keyed by frame plus panel index. A page
+    // change swaps the visible panel set, so the old "frame is uploaded" mark
+    // cannot be reused for the new page's panel slots.
     gpuFrameCacheUploadedRef.current.clear();
     panelGpuFramePendingRef.current.clear();
-  }, [hiddenPanels, separatePanelFrames]);
+  }, [hiddenPanels, separatePanelFrames, visiblePanelIndices]);
 
   const ensurePanelFrameGpu = React.useCallback(async (
     idx: number,
@@ -9796,14 +9870,40 @@ function Show3D() {
                   min={0}
                   max={Math.max(0, (nPages || 1) - 1)}
                   step={1}
+                  onPointerDownCapture={() => setPagePlaying(false)}
+                  onKeyDown={() => setPagePlaying(false)}
                   onChange={(_, value) => {
                     const raw = Array.isArray(value) ? value[0] : value;
+                    setPagePlaying(false);
                     setPageIdx(Math.max(0, Math.min((nPages || 1) - 1, Math.round(Number(raw) || 0))));
                   }}
+                  onChangeCommitted={() => setPagePlaying(false)}
                   size="small"
                   sx={{ ...sliderStyles.small, width: 120, color: themeColors.accent, ml: "2px" }}
                   aria-label="Page"
                 />
+                <IconButton
+                  size="small"
+                  onClick={() => setPagePlaying((value) => !value)}
+                  title={pagePlaying ? "Pause page playback" : "Play pages"}
+                  aria-label={pagePlaying ? "Pause page playback" : "Play pages"}
+                  sx={{ width: 24, height: 24, p: 0, color: themeColors.accent }}
+                >
+                  {pagePlaying ? <PauseIcon sx={{ fontSize: 16 }} /> : <PlayArrowIcon sx={{ fontSize: 16 }} />}
+                </IconButton>
+                <Select
+                  value={String(pagePlayFps)}
+                  onChange={(e) => setPagePlayFps(Number(e.target.value) || 2)}
+                  size="small"
+                  sx={{ ...themedSelect, minWidth: 48, fontSize: 10 }}
+                  MenuProps={themedMenuProps}
+                  inputProps={{ "aria-label": "Page playback frames per second" }}
+                  title="Page playback speed"
+                >
+                  {PAGE_PLAY_FPS_OPTIONS.map((fps) => (
+                    <MenuItem key={fps} value={String(fps)}>{fps} fps</MenuItem>
+                  ))}
+                </Select>
                 <IconButton
                   size="small"
                   onClick={() => {
@@ -10025,7 +10125,10 @@ function Show3D() {
                     <MenuItem
                       dense
                       disabled={hiddenPanelSet.size === 0}
-                      onClick={() => setHiddenPanels([])}
+                      onClick={() => {
+                        if (isPaged) setHiddenPageSlots([]);
+                        setHiddenPanels([]);
+                      }}
                     >
                       <VisibilityIcon sx={{ fontSize: 16, mr: 1, color: themeColors.accent }} />
                       <Typography sx={{ fontSize: 11 }}>Show all panels</Typography>
@@ -10648,32 +10751,6 @@ function Show3D() {
                       touchAction: "none",
                     }}
                   >
-                    {slot === 0 && fftMetricsEnabled && fftQuality && (
-                      <Box
-                        className="quantem-fft-quality-label"
-                        aria-label={`FFT quality: ${formatFftQualityLabel(fftQuality)}`}
-                        sx={{
-                          position: "absolute",
-                          top: 5,
-                          left: 6,
-                          maxWidth: "calc(100% - 12px)",
-                          color: "rgba(255,255,255,0.96)",
-                          fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
-                          fontSize: Math.max(8, Math.min(11, insetH * 0.08)),
-                          fontWeight: 700,
-                          lineHeight: 1.15,
-                          whiteSpace: "nowrap",
-                          overflow: "hidden",
-                          textOverflow: "ellipsis",
-                          textShadow: "1px 1px 0 rgba(0,0,0,0.9), 0 0 3px rgba(0,0,0,0.85)",
-                          pointerEvents: "none",
-                          userSelect: "none",
-                          zIndex: 3,
-                        }}
-                      >
-                        {formatFftQualityLabel(fftQuality)}
-                      </Box>
-                    )}
                     <Box
                       data-show3d-fft-move-handle="true"
                       aria-label="Move FFT overlay; snaps to nearest corner"
@@ -10701,6 +10778,32 @@ function Show3D() {
                         "&:hover": { opacity: 1 },
                       }}
                     />
+                    {slot === 0 && fftMetricsEnabled && fftQuality && (
+                      <Box
+                        className="quantem-fft-quality-label"
+                        aria-label={`FFT quality: ${formatFftQualityLabel(fftQuality)}`}
+                        sx={{
+                          position: "absolute",
+                          top: 4,
+                          left: 5,
+                          right: 5,
+                          color: "rgba(255,255,255,0.96)",
+                          fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+                          fontSize: 10,
+                          fontWeight: 700,
+                          lineHeight: 1.15,
+                          whiteSpace: "nowrap",
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          textShadow: "1px 1px 0 rgba(0,0,0,0.9), 0 0 3px rgba(0,0,0,0.85)",
+                          pointerEvents: "none",
+                          userSelect: "none",
+                          zIndex: 3,
+                        }}
+                      >
+                        {formatFftQualityLabel(fftQuality)}
+                      </Box>
+                    )}
                   </Box>
                 );
               });
@@ -11143,6 +11246,32 @@ function Show3D() {
             >
               <canvas ref={fftCanvasRef} width={canvasW} height={canvasH} style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", imageRendering: smooth ? "auto" : "pixelated", touchAction: "none" }} role="img" aria-label={roiFftActive && fftCropDims ? `FFT power spectrum of ROI crop (${fftCropDims.cropWidth} by ${fftCropDims.cropHeight} pixels)` : "FFT power spectrum of current frame"} />
               <canvas ref={fftOverlayRef} width={Math.round(canvasW * DPR)} height={Math.round(canvasH * DPR)} style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", pointerEvents: "none" }} aria-hidden="true" />
+              {fftMetricsEnabled && fftQuality && (
+                <Box
+                  className="quantem-fft-quality-label"
+                  aria-label={`FFT quality: ${formatFftQualityLabel(fftQuality)}`}
+                  sx={{
+                    position: "absolute",
+                    top: 8,
+                    left: 8,
+                    maxWidth: "calc(100% - 16px)",
+                    color: "rgba(255,255,255,0.96)",
+                    fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+                    fontSize: 11,
+                    fontWeight: 700,
+                    lineHeight: 1.2,
+                    whiteSpace: "nowrap",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    textShadow: "1px 1px 0 rgba(0,0,0,0.9), 0 0 3px rgba(0,0,0,0.85)",
+                    pointerEvents: "none",
+                    userSelect: "none",
+                    zIndex: 4,
+                  }}
+                >
+                  {formatFftQualityLabel(fftQuality)}
+                </Box>
+              )}
               {showResizeControls && (() => {
                 const n = Math.max(1, visiblePanelCount || 1);
                 const cols = panelColsForCount(n);
@@ -11176,32 +11305,6 @@ function Show3D() {
                   );
                 });
               })()}
-              {fftMetricsEnabled && fftQuality && (
-                <Box
-                  className="quantem-fft-quality-label"
-                  aria-label={`FFT quality: ${formatFftQualityLabel(fftQuality)}`}
-                  sx={{
-                    position: "absolute",
-                    top: 8,
-                    left: 8,
-                    maxWidth: "calc(100% - 16px)",
-                    color: "rgba(255,255,255,0.96)",
-                    fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
-                    fontSize: 11,
-                    fontWeight: 700,
-                    lineHeight: 1.2,
-                    whiteSpace: "nowrap",
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                    textShadow: "1px 1px 0 rgba(0,0,0,0.9), 0 0 3px rgba(0,0,0,0.85)",
-                    pointerEvents: "none",
-                    userSelect: "none",
-                    zIndex: 4,
-                  }}
-                >
-                  {formatFftQualityLabel(fftQuality)}
-                </Box>
-              )}
             </Box>
             {/* FFT Statistics bar */}
             {showStats && (

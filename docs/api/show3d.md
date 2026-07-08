@@ -24,8 +24,7 @@ export. See the [Show3D tutorial](../tutorials/show3d).
 | Loop range | `loop_start`, `loop_end` | Playback confined to the sub-range |
 | Colormap dropdown | `cmap` | Canvas recolors |
 | Export button | `export_request`, `export_status` | Writes a standalone HTML viewer |
-| Page slider (paged galleries) | `page_idx`, `n_pages`, `panels_per_page` | Shows one page of panels at a time |
-| Page star (paged galleries) | `page_starred`; `star_page()`, `unstar_page()` | Marks a whole page as worth revisiting |
+| Page controls (paged galleries) | `page_idx`, `n_pages`, `panels_per_page`, `page_starred`; `star_page()`, `unstar_page()` | Shows, stars, or plays through one page of panels at a time |
 | Panel layout (multi-panel) | `n_panels`, `link_panels`, `max_cols` | Panels arrange; linked scrub moves all |
 | Panel visibility (multi-panel) | `hidden_panels` | Panels collapse from view without deleting data |
 | Panel reorder (multi-panel) | `panel_order`; `set_panel_order()`, `move_panel()`, `reset_panel_order()` | Reorders panel display without changing source data, labels, stars, or hidden state |
@@ -163,7 +162,10 @@ Paged Show3D keeps the data in the normal multi-panel transport internally, so
 HTML export, notebook state, panel hiding, panel stars, playback, FFT, and GIF/MP4
 export use the same paths as ordinary Show3D. In page mode, `visible_panels`
 returns only panels from the active page, and `to_show2d()` converts the current
-visible page into a Show2D gallery.
+visible page into a Show2D gallery. The page row has its own play/pause button
+and FPS menu; the lower frame playback controls still scrub time or depth
+inside the active page. Manual page scrubbing pauses page playback, and Show3D
+keeps rendering work scoped to the active visible page.
 
 ```python
 w.page_idx = 2
