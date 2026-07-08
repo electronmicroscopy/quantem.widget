@@ -314,7 +314,8 @@ function drawViPositionMarker(
   panY: number,
   imageWidth: number,
   imageHeight: number,
-  isDragging: boolean
+  isDragging: boolean,
+  showLabel: boolean = true,
 ) {
   const ctx = canvas.getContext("2d");
   if (!ctx) return;
@@ -356,21 +357,23 @@ function drawViPositionMarker(
   ctx.lineTo(screenX, screenY + crosshairSize);
   ctx.stroke();
 
-  // Label the exact scan position (row, col) so the scientist knows which
-  // position the diffraction pattern was sampled from.
-  const label = `(${cellRow}, ${cellCol})`;
-  ctx.shadowBlur = 0;
-  ctx.shadowOffsetX = 0;
-  ctx.shadowOffsetY = 0;
-  ctx.font = "11px monospace";
-  ctx.textBaseline = "bottom";
-  const textW = ctx.measureText(label).width;
-  const labelX = Math.min(cssWidth - textW - 4, screenX + crosshairSize + 4);
-  const labelY = Math.max(13, screenY - 4);
-  ctx.fillStyle = "rgba(0, 0, 0, 0.6)";
-  ctx.fillRect(labelX - 2, labelY - 12, textW + 4, 13);
-  ctx.fillStyle = isDragging ? "rgba(255, 255, 0, 0.95)" : "rgba(255, 160, 160, 0.95)";
-  ctx.fillText(label, labelX, labelY);
+  if (showLabel) {
+    // Label the exact scan position (row, col) so the scientist knows which
+    // position the diffraction pattern was sampled from.
+    const label = `(${cellRow}, ${cellCol})`;
+    ctx.shadowBlur = 0;
+    ctx.shadowOffsetX = 0;
+    ctx.shadowOffsetY = 0;
+    ctx.font = "11px monospace";
+    ctx.textBaseline = "bottom";
+    const textW = ctx.measureText(label).width;
+    const labelX = Math.min(cssWidth - textW - 4, screenX + crosshairSize + 4);
+    const labelY = Math.max(13, screenY - 4);
+    ctx.fillStyle = "rgba(0, 0, 0, 0.6)";
+    ctx.fillRect(labelX - 2, labelY - 12, textW + 4, 13);
+    ctx.fillStyle = isDragging ? "rgba(255, 255, 0, 0.95)" : "rgba(255, 160, 160, 0.95)";
+    ctx.fillText(label, labelX, labelY);
+  }
 
   ctx.restore();
 }
@@ -1529,6 +1532,7 @@ function CompareVirtualGrid({
         shapeCols,
         shapeRows,
         isDraggingPosition,
+        idx === 0,
       );
     });
   }, [comparePanX, comparePanY, compareZoom, cursorCol, cursorRow, isDraggingPosition, overlayVersion, pixelSize, pixelUnit, renderEntries, shapeCols, shapeRows, showScaleBar]);

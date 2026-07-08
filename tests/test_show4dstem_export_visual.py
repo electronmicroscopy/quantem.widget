@@ -416,6 +416,70 @@ def _assert_canvas_pixels(page) -> dict:
     return stats
 
 
+def _assert_multiple_coordinate_label_once(page) -> dict:
+    result = page.evaluate(
+        """() => {
+          const body = document.body.innerText;
+          const dp = body.match(/DP at \\((\\d+),\\s*(\\d+)\\)/);
+          const shape = body.match(/Multiple grid \\|\\s*(\\d+)×(\\d+)/);
+          if (!dp || !shape) return {error: "missing dp or shape label", body};
+          const row = Number(dp[1]);
+          const col = Number(dp[2]);
+          const shapeRows = Number(shape[1]);
+          const shapeCols = Number(shape[2]);
+          const panels = [...document.querySelectorAll('[role="button"][aria-label^="Show4DSTEM multiple panel"]')];
+          const out = [];
+          for (const [idx, panel] of panels.entries()) {
+            const canvases = [...panel.querySelectorAll('canvas')];
+            const overlay = canvases[1];
+            if (!overlay) continue;
+            const rect = overlay.getBoundingClientRect();
+            const ctx = overlay.getContext('2d', {willReadFrequently: true}) || overlay.getContext('2d');
+            if (!ctx || rect.width <= 0 || rect.height <= 0) continue;
+            const dprX = overlay.width / rect.width;
+            const dprY = overlay.height / rect.height;
+            const cssWidth = overlay.width / dprX;
+            const cssHeight = overlay.height / dprY;
+            const screenX = (col + 0.5) * (cssWidth / shapeCols);
+            const screenY = (row + 0.5) * (cssHeight / shapeRows);
+            ctx.font = '11px monospace';
+            const label = `(${row}, ${col})`;
+            const textW = ctx.measureText(label).width;
+            const labelX = Math.min(cssWidth - textW - 4, screenX + 16);
+            const labelY = Math.max(13, screenY - 4);
+            const data = ctx.getImageData(0, 0, overlay.width, overlay.height).data;
+            const x0 = Math.max(0, Math.floor((labelX - 2) * dprX));
+            const y0 = Math.max(0, Math.floor((labelY - 12) * dprY));
+            const x1 = Math.min(overlay.width, Math.ceil((labelX + textW + 2) * dprX));
+            const y1 = Math.min(overlay.height, Math.ceil((labelY + 1) * dprY));
+            let labelDark = 0;
+            for (let y = y0; y < y1; y++) {
+              for (let x = x0; x < x1; x++) {
+                const i = (y * overlay.width + x) * 4;
+                const r = data[i], g = data[i + 1], b = data[i + 2], a = data[i + 3];
+                if (a > 80 && r < 20 && g < 20 && b < 20) labelDark++;
+              }
+            }
+            let crosshair = 0;
+            const step = Math.max(1, Math.floor((overlay.width * overlay.height) / 12000));
+            for (let p = 0; p < overlay.width * overlay.height; p += step) {
+              const i = p * 4;
+              const r = data[i], g = data[i + 1], b = data[i + 2], a = data[i + 3];
+              if (a > 80 && ((r > 180 && g < 190 && b < 190) || (r > 180 && g > 160 && b < 120))) crosshair++;
+            }
+            out.push({panel: idx + 1, labelDark, crosshair});
+          }
+          return {row, col, shapeRows, shapeCols, panels: out};
+        }"""
+    )
+    assert "error" not in result, result
+    assert len(result["panels"]) >= 4, result
+    label_panels = [item["panel"] for item in result["panels"] if item["labelDark"] > 20]
+    assert label_panels == [1], result
+    assert all(item["crosshair"] > 0 for item in result["panels"]), result
+    return result
+
+
 def _assert_multiple_grid_layout(page, expected_cols: int, max_gap_above_grid: float = 240) -> dict:
     layout = page.evaluate(
         """([expectedCols, maxGapAboveGrid]) => {
@@ -570,6 +634,7 @@ def test_exported_show4dstem_real_data_visual_smoke(tmp_path: Path) -> None:
                 layout4 = _assert_multiple_grid_layout(page, expected_cols=4)
                 resize4 = _resize_multiple_panel(page, panel_number=1)
                 layout4_after_resize = _assert_multiple_grid_layout(page, expected_cols=4)
+                label4 = _assert_multiple_coordinate_label_once(page)
                 _drag_multiple_panel(page, panel_number=1)
                 _click_multiple_panel(page, panel_number=4)
                 multiple4_pixels = _assert_canvas_pixels(page)
@@ -600,6 +665,7 @@ def test_exported_show4dstem_real_data_visual_smoke(tmp_path: Path) -> None:
                         "multiple_cols4_layout": layout4,
                         "multiple_cols4_resize": resize4,
                         "multiple_cols4_layout_after_resize": layout4_after_resize,
+                        "multiple_cols4_coordinate_label": label4,
                         "multiple_cols4_pixels": multiple4_pixels,
                         "multiple_selected_layout": selected_layout,
                         "multiple_selected_pixels": selected_pixels,
