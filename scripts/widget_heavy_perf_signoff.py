@@ -142,6 +142,139 @@ def _check_show3d_fft_idle(
     }
 
 
+def _check_show3d_fft_stats_toggle(
+    artifact_dir: Path,
+    show3d_file: str,
+    *,
+    timeout_ms: int,
+    toggles: int,
+    headed: bool,
+) -> dict[str, Any]:
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError as exc:  # pragma: no cover - environment guard
+        raise RuntimeError("playwright is required for heavy browser signoff") from exc
+
+    port = _free_port()
+    screenshot = artifact_dir / "show3d-fft-stats-toggle.png"
+    chrome = _chrome_executable()
+    launch_kwargs: dict[str, Any] = {
+        "headless": not headed,
+        "args": [
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-search-engine-choice-screen",
+        ],
+    }
+    if chrome is not None:
+        launch_kwargs["executable_path"] = chrome
+
+    durations_ms: list[float] = []
+    before: dict[str, Any] | None = None
+    after: dict[str, Any] | None = None
+    labels_before: list[str] = []
+    labels_after: list[str] = []
+    console_errors: list[str] = []
+    page_errors: list[str] = []
+    probe_errors: list[str] = []
+    computing_text = False
+    try:
+        with _StaticServer(artifact_dir, port) as base_url:
+            with sync_playwright() as pw:
+                browser = pw.chromium.launch(**launch_kwargs)
+                try:
+                    page = browser.new_page(viewport={"width": 1440, "height": 1050})
+                    page.on("pageerror", lambda exc: page_errors.append(str(exc)))
+                    page.on(
+                        "console",
+                        lambda msg: console_errors.append(msg.text)
+                        if msg.type == "error" and "Failed to load resource:" not in msg.text
+                        else None,
+                    )
+                    page.goto(f"{base_url}/{Path(show3d_file).name}", wait_until="domcontentloaded", timeout=timeout_ms)
+                    page.wait_for_function(
+                        """
+                        () => document.querySelectorAll('.quantem-fft-quality-label').length > 0
+                          || Boolean(window.__quantemShow3DPerf?.lastFftMetricLabel)
+                        """,
+                        timeout=timeout_ms,
+                    )
+                    page.wait_for_timeout(500)
+                    before = page.evaluate("() => window.__quantemShow3DPerf || null")
+                    labels_before = page.evaluate(
+                        """
+                        () => {
+                          const labels = [...document.querySelectorAll('.quantem-fft-quality-label')]
+                            .map(node => node.textContent.trim())
+                            .filter(Boolean);
+                          const debugLabel = window.__quantemShow3DPerf?.lastFftMetricLabel;
+                          return labels.length ? labels : (debugLabel ? [debugLabel] : []);
+                        }
+                        """
+                    )
+
+                    stats = page.locator('input[aria-label="Toggle statistics readout"]')
+                    if stats.count() != 1:
+                        raise RuntimeError("Show3D stats switch was not uniquely found")
+                    for _ in range(toggles):
+                        target = not bool(stats.is_checked())
+                        t0 = time.perf_counter()
+                        stats.set_checked(target, force=True, timeout=timeout_ms)
+                        page.wait_for_timeout(120)
+                        durations_ms.append((time.perf_counter() - t0) * 1000)
+
+                    after = page.evaluate("() => window.__quantemShow3DPerf || null")
+                    labels_after = page.evaluate(
+                        """
+                        () => {
+                          const labels = [...document.querySelectorAll('.quantem-fft-quality-label')]
+                            .map(node => node.textContent.trim())
+                            .filter(Boolean);
+                          const debugLabel = window.__quantemShow3DPerf?.lastFftMetricLabel;
+                          return labels.length ? labels : (debugLabel ? [debugLabel] : []);
+                        }
+                        """
+                    )
+                    computing_text = page.evaluate("() => document.body.innerText.includes('Computing FFT')")
+                    page.screenshot(path=str(screenshot), full_page=True, timeout=timeout_ms)
+                finally:
+                    browser.close()
+    except Exception as exc:  # pragma: no cover - browser/runtime guard
+        probe_errors.append(f"Show3D stats-toggle probe failed: {exc}")
+
+    start_fft = int((before or {}).get("fftComputes") or 0)
+    end_fft = int((after or {}).get("fftComputes") or 0)
+    start_metric = int((before or {}).get("fftMetricComputes") or 0)
+    end_metric = int((after or {}).get("fftMetricComputes") or 0)
+    errors = probe_errors + list(page_errors) + list(console_errors)
+    if not labels_before:
+        errors.append("Show3D FFT metric label was not visible before stats toggles")
+    if labels_before != labels_after:
+        errors.append(f"Show3D FFT metric label changed during stats toggles: {labels_before} -> {labels_after}")
+    if end_fft - start_fft > 0:
+        errors.append(f"Show3D FFT recomputed during stats toggles: {start_fft} -> {end_fft}")
+    if end_metric - start_metric > 0:
+        errors.append(f"Show3D FFT metric recomputed during stats toggles: {start_metric} -> {end_metric}")
+    if computing_text:
+        errors.append("Show3D showed 'Computing FFT' after stats toggles")
+
+    return {
+        "file": Path(show3d_file).name,
+        "screenshot": screenshot.name,
+        "toggles": int(toggles),
+        "avg_toggle_ms": round(sum(durations_ms) / len(durations_ms), 1) if durations_ms else None,
+        "max_toggle_ms": round(max(durations_ms), 1) if durations_ms else None,
+        "labels_before": labels_before,
+        "labels_after": labels_after,
+        "perf_before": before,
+        "perf_after": after,
+        "fft_compute_growth": end_fft - start_fft,
+        "fft_metric_compute_growth": end_metric - start_metric,
+        "errors": errors,
+        "passed": not errors,
+    }
+
+
 def _write_index(artifact_dir: Path, report: dict[str, Any]) -> None:
     links = "\n".join(
         f"<li><a href='{Path(str(item['path'])).name}'>{item['widget']} {item['encoding']}</a> "
@@ -156,6 +289,11 @@ def _write_index(artifact_dir: Path, report: dict[str, Any]) -> None:
     fft_link = (
         "<li><a href='show3d-fft-idle.png'>Show3D FFT idle screenshot</a></li>"
         if (artifact_dir / "show3d-fft-idle.png").exists()
+        else ""
+    )
+    fft_stats_link = (
+        "<li><a href='show3d-fft-stats-toggle.png'>Show3D FFT stats-toggle screenshot</a></li>"
+        if (artifact_dir / "show3d-fft-stats-toggle.png").exists()
         else ""
     )
     report_json = json.dumps(report, indent=2)
@@ -183,6 +321,7 @@ def _write_index(artifact_dir: Path, report: dict[str, Any]) -> None:
     {links}
     {browser_link}
     {fft_link}
+    {fft_stats_link}
     <li><a href="heavy-signoff-report.json">Machine-readable report</a></li>
   </ul>
   <h2>Machine-readable report</h2>
@@ -207,6 +346,7 @@ def main() -> int:
     parser.add_argument("--min-fps", type=float, default=30.0)
     parser.add_argument("--timeout-ms", type=int, default=90_000)
     parser.add_argument("--idle-seconds", type=float, default=5.0)
+    parser.add_argument("--stats-toggles", type=int, default=8)
     parser.add_argument("--headed", action="store_true")
     parser.add_argument("--skip-browser", action="store_true", help="Generate exports only; do not claim UI performance signoff.")
     args = parser.parse_args()
@@ -249,6 +389,7 @@ def main() -> int:
     performance_report = json.loads((artifact_dir / "report.json").read_text(encoding="utf-8"))
     browser_report: dict[str, Any] | None = None
     fft_idle: dict[str, Any] | None = None
+    fft_stats_toggle: dict[str, Any] | None = None
     errors: list[str] = []
 
     if args.skip_browser:
@@ -283,6 +424,14 @@ def main() -> int:
             headed=args.headed,
         )
         errors.extend(fft_idle["errors"])
+        fft_stats_toggle = _check_show3d_fft_stats_toggle(
+            artifact_dir,
+            str(show3d["path"]),
+            timeout_ms=args.timeout_ms,
+            toggles=args.stats_toggles,
+            headed=args.headed,
+        )
+        errors.extend(fft_stats_toggle["errors"])
 
     final_report = {
         "passed": not errors,
@@ -296,10 +445,12 @@ def main() -> int:
         "thresholds": {
             "min_fps": float(args.min_fps),
             "fft_idle_seconds": float(args.idle_seconds),
+            "stats_toggles": int(args.stats_toggles),
         },
         "performance": performance_report,
         "browser": browser_report,
         "show3d_fft_idle": fft_idle,
+        "show3d_fft_stats_toggle": fft_stats_toggle,
         "errors": errors,
     }
     (artifact_dir / "heavy-signoff-report.json").write_text(json.dumps(final_report, indent=2), encoding="utf-8")

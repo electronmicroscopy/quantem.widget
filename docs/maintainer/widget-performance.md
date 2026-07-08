@@ -519,6 +519,27 @@ Show3D policy:
   then stream exact full-resolution tiles for the visible panel/frame window on
   zoom. Until that exists, docs and UI copy must be explicit about the tradeoff.
 
+FFT metric label policy:
+
+- FFT quality labels are useful for live microscopy because they make peak
+  sharpness and reciprocal-space signal quality visible without opening another
+  panel. They must stay cheap enough to leave playback and pointer interaction
+  smooth.
+- Compute FFT quality metrics from the cached FFT magnitude. Do not run a
+  second FFT for a label.
+- Cache the label by scientific inputs: FFT magnitude version, FFT dimensions,
+  sampling, units, crop, and panel grid. Do not include Stats/Profile toggles,
+  toolbar visibility, hover labels, or other display chrome in the metric cache
+  key.
+- Keep the label as a stable overlay inside the FFT image, using the same
+  compact white-on-image style as panel labels. Do not add a separate stats row
+  for the metric unless the user explicitly asks for a detailed readout.
+- Verify correctness with a deterministic NumPy parity test before trusting the
+  browser label. The current test is ``js/fftMetrics.numpy.test.ts``.
+- Verify performance with browser counters. ``scripts/widget_heavy_perf_signoff.py``
+  must report zero FFT compute growth and zero FFT metric compute growth while
+  toggling the Stats UI.
+
 ## Agent Storyboards
 
 Performance notes should capture what we learned: measured timings, failure

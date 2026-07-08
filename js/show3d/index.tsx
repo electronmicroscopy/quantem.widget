@@ -829,6 +829,7 @@ function drawROI(
 }
 
 import { WebGPUFFT, getWebGPUFFT, getGPUInfo, fft2d, fft2dAsync, fftshift, computeMagnitude, autoEnhanceFFT, nextPow2, applyHannWindow2D } from "../fft";
+import { computeFftQualityMetrics, formatFftQualityLabel, summarizeFftQualityMetrics, type FftQualityMetrics } from "../fftMetrics";
 
 const FFT_SNAP_RADIUS = 5;
 
@@ -1997,6 +1998,8 @@ function Show3D() {
   const [fftOverlaySize, setFftOverlaySize] = useModelState<number>("fft_overlay_size");
   const [fftOverlayZoomTrait, setFftOverlayZoomTrait] = useModelState<number>("fft_overlay_zoom");
   const [fftWindow, setFftWindow] = useModelState<boolean>("fft_window");
+  const [fftMetricsTrait] = useModelState<boolean>("fft_metrics");
+  const fftMetricsEnabled = fftMetricsTrait !== false;
   const resolvedFftLayout = (["bottom", "right", "overlay"].includes(String(fftLayout)) ? String(fftLayout) : "bottom") as "bottom" | "right" | "overlay";
   const fftLayoutBottom = resolvedFftLayout === "bottom";
   const fftLayoutOverlay = resolvedFftLayout === "overlay";
@@ -3261,6 +3264,8 @@ function Show3D() {
   const [fftHistogramData, setFftHistogramData] = React.useState<Float32Array | null>(null);
   const [fftDataRange, setFftDataRange] = React.useState<{ min: number; max: number }>({ min: 0, max: 1 });
   const [fftStats, setFftStats] = React.useState<{ mean: number; min: number; max: number; std: number }>({ mean: 0, min: 0, max: 0, std: 0 });
+  const [fftQuality, setFftQuality] = React.useState<FftQualityMetrics | null>(null);
+  const fftQualityKeyRef = React.useRef("");
   const [fftColormap, setFftColormap] = React.useState("inferno");
   const [fftLogScale, setFftLogScale] = React.useState(false);
   const [fftAuto, setFftAuto] = React.useState(true);  // Auto: mask DC + 99.9% clipping
@@ -6727,6 +6732,7 @@ function Show3D() {
           dbg.fftCacheMisses = Number(dbg.fftCacheMisses || 0) + 1;
           dbg.fftCacheSize = cache.size;
           dbg.fftCacheBytes = totalBytes;
+          dbg.fftComputes = Number(dbg.fftComputes || 0) + 1;
         }
       };
 
@@ -7036,10 +7042,47 @@ function Show3D() {
     const cropDimsForRender = fftCropDimsRef.current;
     const fftW = cropDimsForRender?.fftWidth ?? width;
     const fftH = cropDimsForRender?.fftHeight ?? height;
+    const grid = fftPanelGridRef.current;
+    if (fftMetricsEnabled) {
+      const qualityKey = `${fftMagVersion}:${fftW}x${fftH}:${pixelSize || 0}:${pixelUnit || ""}:${grid ? `${grid.panelWidth}x${grid.panelHeight}x${grid.cols}x${grid.count}` : "single"}`;
+      if (fftQualityKeyRef.current !== qualityKey) {
+        fftQualityKeyRef.current = qualityKey;
+        const metricStartMs = performance.now();
+        let nextQuality: FftQualityMetrics | null;
+        if (grid) {
+          const panelMetrics: Array<FftQualityMetrics | null> = [];
+          for (let panel = 0; panel < grid.count; panel++) {
+            panelMetrics.push(computeFftQualityMetrics(mag, fftW, fftH, {
+              sampling: pixelSize,
+              unit: pixelUnit,
+              region: {
+                x: (panel % grid.cols) * grid.panelWidth,
+                y: Math.floor(panel / grid.cols) * grid.panelHeight,
+                width: grid.panelWidth,
+                height: grid.panelHeight,
+              },
+            }));
+          }
+          nextQuality = summarizeFftQualityMetrics(panelMetrics);
+        } else {
+          nextQuality = computeFftQualityMetrics(mag, fftW, fftH, { sampling: pixelSize, unit: pixelUnit });
+        }
+        setFftQuality(nextQuality);
+        const dbg = show3dPerfDebug();
+        if (dbg) {
+          dbg.fftMetricComputes = Number(dbg.fftMetricComputes || 0) + 1;
+          dbg.lastFftMetricMs = Number((performance.now() - metricStartMs).toFixed(2));
+          dbg.lastFftMetricKey = qualityKey;
+          dbg.lastFftMetricLabel = formatFftQualityLabel(nextQuality);
+        }
+      }
+    } else if (fftQualityKeyRef.current) {
+      fftQualityKeyRef.current = "";
+      setFftQuality(null);
+    }
 
     let displayMin: number, displayMax: number;
     let displayData: Float32Array;
-    const grid = fftPanelGridRef.current;
     if (fftAuto && grid) {
       // Multi-panel FFTs can differ by orders of magnitude (BF/DF vs SSB).
       // Auto mode should reveal each panel, so normalize every FFT tile before
@@ -7131,7 +7174,7 @@ function Show3D() {
         drawFftOffscreen(ctx, offscreen);
       }
     }
-  }, [effectiveShowFft, fftMagVersion, fftLogScale, fftAuto, fftVminPct, fftVmaxPct, fftColormap, width, height, canvasW, canvasH, fftCropDims, drawFftOffscreen]);
+  }, [effectiveShowFft, fftMagVersion, fftLogScale, fftAuto, fftVminPct, fftVmaxPct, fftColormap, width, height, canvasW, canvasH, fftCropDims, drawFftOffscreen, pixelSize, pixelUnit, fftMetricsEnabled]);
 
   // Redraw cached FFT with zoom/pan/resize before paint. Changing a canvas
   // width/height attribute clears its bitmap, so a normal effect can expose a
@@ -10605,6 +10648,32 @@ function Show3D() {
                       touchAction: "none",
                     }}
                   >
+                    {slot === 0 && fftMetricsEnabled && fftQuality && (
+                      <Box
+                        className="quantem-fft-quality-label"
+                        aria-label={`FFT quality: ${formatFftQualityLabel(fftQuality)}`}
+                        sx={{
+                          position: "absolute",
+                          top: 5,
+                          left: 6,
+                          maxWidth: "calc(100% - 12px)",
+                          color: "rgba(255,255,255,0.96)",
+                          fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+                          fontSize: Math.max(8, Math.min(11, insetH * 0.08)),
+                          fontWeight: 700,
+                          lineHeight: 1.15,
+                          whiteSpace: "nowrap",
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          textShadow: "1px 1px 0 rgba(0,0,0,0.9), 0 0 3px rgba(0,0,0,0.85)",
+                          pointerEvents: "none",
+                          userSelect: "none",
+                          zIndex: 3,
+                        }}
+                      >
+                        {formatFftQualityLabel(fftQuality)}
+                      </Box>
+                    )}
                     <Box
                       data-show3d-fft-move-handle="true"
                       aria-label="Move FFT overlay; snaps to nearest corner"
@@ -11107,6 +11176,32 @@ function Show3D() {
                   );
                 });
               })()}
+              {fftMetricsEnabled && fftQuality && (
+                <Box
+                  className="quantem-fft-quality-label"
+                  aria-label={`FFT quality: ${formatFftQualityLabel(fftQuality)}`}
+                  sx={{
+                    position: "absolute",
+                    top: 8,
+                    left: 8,
+                    maxWidth: "calc(100% - 16px)",
+                    color: "rgba(255,255,255,0.96)",
+                    fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+                    fontSize: 11,
+                    fontWeight: 700,
+                    lineHeight: 1.2,
+                    whiteSpace: "nowrap",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    textShadow: "1px 1px 0 rgba(0,0,0,0.9), 0 0 3px rgba(0,0,0,0.85)",
+                    pointerEvents: "none",
+                    userSelect: "none",
+                    zIndex: 4,
+                  }}
+                >
+                  {formatFftQualityLabel(fftQuality)}
+                </Box>
+              )}
             </Box>
             {/* FFT Statistics bar */}
             {showStats && (

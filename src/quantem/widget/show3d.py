@@ -512,7 +512,7 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
     - Diff mode (vs first frame or vs previous frame) for delta visualization
     - ROI tools (circle / square / rectangle / annular) with per-frame timeseries
     - Line profiles sampled across the full stack
-    - FFT panel with optional Hann window
+    - FFT panel with compact quality labels and optional Hann window
     - Side-by-side multi-panel mode with linked or independent zoom / pan / contrast
     - Panel visibility controls by index or title without removing data
     - Frame hiding (``hide``, ``show``, ``set_hidden``, ``show_all``) without rebuilding
@@ -907,6 +907,7 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
     fft_overlay_size = traitlets.Float(0.35).tag(sync=True)
     fft_overlay_zoom = traitlets.Float(1.0).tag(sync=True)
     fft_window = traitlets.Bool(True).tag(sync=True)
+    fft_metrics = traitlets.Bool(True).tag(sync=True)
     widget_version = traitlets.Unicode("unknown")  # Python-only: telemetry readout
     # =========================================================================
     # Line Profile
@@ -1484,6 +1485,7 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
         fft_overlay_size: float = 0.35,
         fft_overlay_zoom: float = 1.0,
         fft_window: bool = True,
+        fft_metrics: bool = True,
         show_stats: bool | None = None,
         show_controls: bool | None = None,
         controls_collapsed: bool | None = None,
@@ -1673,6 +1675,7 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
                             fft_overlay_size=fft_overlay_size,
                             fft_overlay_zoom=fft_overlay_zoom,
                             fft_window=fft_window,
+                            fft_metrics=fft_metrics,
                             show_stats=show_stats, show_controls=show_controls,
                             controls_collapsed=controls_collapsed,
                             size=size, crop=crop, padding=padding, pad_mode=pad_mode,
@@ -1707,7 +1710,7 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
                    timestamps: list[float] | None,
                    timestamp_unit: str, show_fft: bool, fft_layout: str,
                    fft_overlay_position: str, fft_overlay_size: float,
-                   fft_overlay_zoom: float, fft_window: bool,
+                   fft_overlay_zoom: float, fft_window: bool, fft_metrics: bool,
                    show_stats: bool | None, show_controls: bool,
                    controls_collapsed: bool,
                    size: int, crop: int | tuple[int, int] | tuple[int, int, int, int],
@@ -2208,6 +2211,7 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
         self.fft_overlay_size = fft_overlay_size
         self.fft_overlay_zoom = fft_overlay_zoom
         self.fft_window = fft_window
+        self.fft_metrics = bool(fft_metrics)
         # Statistics are opt-in because they occupy vertical space in notebooks
         # and exported HTML, especially on phones.
         self.show_stats = False if show_stats is None else bool(show_stats)
@@ -2661,6 +2665,7 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
             "fft_overlay_zoom": self.fft_overlay_zoom,
             "show_kymograph": self.show_kymograph,
             "fft_window": self.fft_window,
+            "fft_metrics": self.fft_metrics,
             "pixel_size": self.pixel_size,
             "pixel_unit": self.pixel_unit,
             "smooth": self.smooth,
@@ -4548,6 +4553,7 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
             fft_overlay_size=self.fft_overlay_size,
             fft_overlay_zoom=self.fft_overlay_zoom,
             fft_window=self.fft_window,
+            fft_metrics=self.fft_metrics,
             show_stats=self.show_stats,
             show_controls=self.show_controls,
             controls_collapsed=self.controls_collapsed,

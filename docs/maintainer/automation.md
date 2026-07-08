@@ -16,7 +16,7 @@ real-data proof.
 | Show3D GIF/PowerPoint animation review | `PYTHONPATH=src:. python scripts/widget_show3d_animation_smoke.py --artifact-dir /tmp/quantem-widget-show3d-gif` | Visual GIF report with low/medium/high quality previews, export seconds, file sizes, dimensions, frame count, and source data. |
 | Mobile layout or touch-sensitive change | `scripts/widget_local_signoff.sh --quick --browser --mobile` | Desktop and 390x844 touch Chromium pre-check. |
 | Release-oriented validation | `scripts/widget_local_signoff.sh --full --performance` | Full local gates, frontend typecheck/tests, release check without wheel, real-data export timing report. |
-| Heavy real-data performance claim | `PYTHONPATH=src:. python scripts/widget_heavy_perf_signoff.py` | Local-only HPC/workstation real-data browser FPS, screenshots, FFT idle-cache report. |
+| Heavy real-data performance claim | `PYTHONPATH=src:. python scripts/widget_heavy_perf_signoff.py` | Local-only HPC/workstation real-data browser FPS, screenshots, FFT idle-cache report, and FFT metric stats-toggle cache report. |
 | Heavy Show4DSTEM real-data claim | `PYTHONPATH=src:. python scripts/widget_show4dstem_heavy_signoff.py --backend cuda` | Local-only real 4D-STEM NVIDIA/CUDA load, memory, append/stack-growth, export, browser WebGPU/FPS report. |
 | Raw Show4DSTEM loader speed or U8/U16 claim | `PYTHONPATH=src:. python scripts/widget_load_bench_matrix.py` | Local-only private real-data cold/warm `load(...)` table with parity outside the timer. |
 | Multi-disk / two-GPU Show4DSTEM load claim | `PYTHONPATH=src:. python scripts/widget_load_bench_sharded.py --devices 0,1` | Local-only private real-data disk layout, sharded GPU placement, cold/warm table, and capacity boundary. |
@@ -101,6 +101,13 @@ Performance mode writes real-data Show2D and Show3D HTML exports plus its own
 `index.html`, `report.json`, and `browser-plan.json`. Heavy performance signoff
 writes `heavy-signoff-report.json`, browser screenshots, and an `index.html`
 summary. Keep real-data artifacts outside git.
+
+Distilled long-lived baselines belong in the
+`Performance Evidence Registry` in [Performance UI Testing](performance-ui-testing),
+not as committed raw reports. The current full local heavy baseline is
+`fft-metric-full-cache-guard` on the `gold-haadf-local-full` dataset alias; the
+`fft-metric-quick-cache-guard` row on `gold-haadf-local-quick` exists only as
+an automation debugging example.
 
 Show3D GIF presentation smoke writes:
 
@@ -272,8 +279,9 @@ layout checks, but it is not proof of physical iPhone Safari behavior.
 
 Use `scripts/widget_heavy_perf_signoff.py` for a complete browser-driven
 heavy-data proof. It wraps export performance smoke, runs browser drive, samples
-FPS, records screenshots, and asserts that Show3D FFT overlay cache counters do
-not grow while idle. Keep it out of normal CI because it depends on local real
+FPS, records screenshots, asserts that Show3D FFT overlay cache counters do not
+grow while idle, and asserts that toggling Stats does not recompute cached FFT
+metric labels. Keep it out of normal CI because it depends on local real
 datasets and can generate private heavy files.
 
 Use `scripts/widget_show4dstem_heavy_signoff.py --backend cuda` for
@@ -344,7 +352,7 @@ the size justifies it.
 | `scripts/widget_browser_smoke.py` | Open generated HTML exports in Chromium, check nonblank canvas rendering, semantic controls, FPS, storyboard coverage, desktop/mobile viewport behavior, and save screenshots. | No, only `--browser`. | Exported widget browser behavior, interaction contracts, mobile layout expectations, FPS thresholds, or report format changes. |
 | `scripts/widget_phone_handoff.py` | Serve a signoff/report directory on `0.0.0.0`, print local/Tailscale URLs, and record physical phone viewport/touch probe logs. | No, manual physical-device handoff only. | Physical phone test workflow or Tailscale handoff expectations change. |
 | `scripts/widget_performance_smoke.py` | Record real-data Show2D/Show3D export timing, payload sizes, report HTML, and browser-drive plan. | No, only `--performance`. | Real-data performance expectations change. |
-| `scripts/widget_heavy_perf_signoff.py` | Local-only HPC/workstation heavy browser signoff for real Show2D/Show3D data, including browser FPS, screenshots, and Show3D FFT idle-cache checks. | No, never normal CI. | Heavy real-data datasets, FPS thresholds, FFT overlay performance expectations, or report format change. |
+| `scripts/widget_heavy_perf_signoff.py` | Local-only HPC/workstation heavy browser signoff for real Show2D/Show3D data, including browser FPS, screenshots, Show3D FFT idle-cache checks, and Show3D FFT metric stats-toggle cache checks. | No, never normal CI. | Heavy real-data datasets, FPS thresholds, FFT overlay/metric performance expectations, or report format change. |
 | `scripts/widget_show4dstem_heavy_signoff.py` | Local-only Show4DSTEM heavy browser signoff for real 4D-STEM masters, including NVIDIA/CUDA load timing, append/stack-growth timing, dataset/frame flip FPS, memory pressure, virtual-detector FPS, scan-position FPS, and browser/WebGPU split. | No, never normal CI. | Show4DSTEM CUDA/MPS/cache/chunking behavior, exported HTML performance, or report format changes. |
 | `scripts/docs_preview.sh` | Build and serve docs for local visual review. | No. | The docs build command or served path changes. |
 | `.github/workflows/widget-ci.yml` | Run local signoff and upload signoff artifacts on PRs and main pushes. | Yes, on matching GitHub events. | Local signoff dependencies, trigger paths, or artifact policy changes. |

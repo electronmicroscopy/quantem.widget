@@ -26,6 +26,7 @@ no console error, no NaN frame).
 | Log-scale toggle | `log_scale` | Intensity mapped through log |
 | FFT toggle | `show_fft` | Canvas shows the power spectrum; lattice spots appear |
 | FFT window toggle | `fft_window` | Apodization on/off (ringing at edges differs) |
+| FFT quality labels | `fft_metrics` | Compact in-panel label reports FFT sharpness, peak count, and peak SNR from the cached FFT magnitude |
 | Viewer chrome preset | `ui_mode` plus explicit `show_*` kwargs | Applies shared display presets; see [Viewer UI controls](viewer-ui) |
 | Control visibility | `show_controls`, `controls_collapsed`; `collapse_controls()`, `expand_controls()`, `toggle_controls()` | Permanently remove controls or temporarily collapse them behind the top GUI toggle |
 | Title visibility | `show_title` | Top title row shows/hides |
@@ -40,6 +41,15 @@ no console error, no NaN frame).
 | Gallery page slider | `page_idx`, `n_pages`, `panels_per_page`, `page_labels`, `page_starred` | Switches between panel pages without changing the source stack |
 | Panel reorder | `panel_order`; `set_panel_order()`, `move_panel()`, `reset_panel_order()` | Reorders gallery display without changing source data, labels, stars, or hidden state |
 | Diff mode | `diff_mode`, `diff_reference` | Panels render as difference vs the reference |
+
+## FFT quality labels
+
+Pass `show_fft=True` to show the FFT panel. By default, `fft_metrics=True`
+adds a small white label inside each FFT panel with three quick checks:
+sharpness, peak count, and peak SNR. These values are computed from the FFT
+magnitude already used for rendering, so the label does not trigger a second
+FFT. Set `fft_metrics=False` when a clean FFT image is more important than the
+readout.
 
 ```python
 w = Show2D(images, labels=["raw", "filtered", "residual"])

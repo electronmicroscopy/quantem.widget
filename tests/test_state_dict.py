@@ -96,10 +96,25 @@ def test_show4dstem_state_dict_roundtrip_defaults(show4dstem_widget):
 def test_show4dstem_state_dict_roundtrip_mutated(show4dstem_widget):
     """Mutating every trait then roundtripping preserves the mutations."""
     # Position / frame indices are clamped to valid range by trait validators
-    # against the data dimensions; mutating them generically is meaningless here.
-    skip = {"pos_row", "pos_col", "frame_idx", "path_index", "path_length",
-            "vi_roi_center_row", "vi_roi_center_col"}
-    mutated = _mutate_state(show4dstem_widget.state_dict())
+    # against the data dimensions; enum-like strings are validated choices.
+    # Mutating those generically is meaningless here.
+    skip = {
+        "pos_row",
+        "pos_col",
+        "frame_idx",
+        "path_index",
+        "path_length",
+        "vi_roi_center_row",
+        "vi_roi_center_col",
+        "view_mode",
+        "compare_layout",
+        "compare_dp_mode",
+    }
+    original = show4dstem_widget.state_dict()
+    mutated = _mutate_state(original)
+    for key in skip:
+        if key in mutated:
+            mutated[key] = original[key]
     show4dstem_widget.load_state_dict(mutated)
     out = show4dstem_widget.state_dict()
     for k, v in mutated.items():

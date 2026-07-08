@@ -107,6 +107,7 @@ const upwardMenuProps = {
   sx: { zIndex: 9999 },
 };
 import { getWebGPUFFT, WebGPUFFT, fft2d, fft2dAsync, fftshift, computeMagnitude, autoEnhanceFFT, nextPow2, applyHannWindow2D, getGPUInfo } from "../fft";
+import { computeFftQualityMetrics, formatFftQualityLabel, type FftQualityMetrics } from "../fftMetrics";
 import { COLORMAPS, COLORMAP_NAMES, renderToOffscreen, renderToOffscreenReuse, GPUColormapEngine, getGPUColormapEngine, getGPUMaxBufferSize } from "../colormaps";
 
 function useMobileViewport(): boolean {
@@ -853,6 +854,8 @@ function Show2D() {
   // Analysis Panels (FFT + Histogram)
   const [showFft, setShowFft] = useModelState<boolean>("show_fft");
   const [fftWindow, setFftWindow] = useModelState<boolean>("fft_window");
+  const [fftMetricsTrait] = useModelState<boolean>("fft_metrics");
+  const fftMetricsEnabled = fftMetricsTrait !== false;
 
   // Selection
   const [selectedIdx, setSelectedIdx] = useModelState<number>("selected_idx");
@@ -1243,6 +1246,9 @@ function Show2D() {
     }
   }, [fftLinkedContrast]);
   const [fftStats, setFftStats] = React.useState<number[] | null>(null);
+  const [fftQuality, setFftQuality] = React.useState<FftQualityMetrics | null>(null);
+  const [galleryFftQuality, setGalleryFftQuality] = React.useState<Array<FftQualityMetrics | null>>([]);
+  const fftQualityKeyRef = React.useRef("");
   const [fftShowColorbar, setFftShowColorbar] = React.useState(false);
 
   // FFT loading state — shown as a pulsing overlay while FFT computes
@@ -3389,6 +3395,16 @@ function Show2D() {
     // Use crop dimensions when ROI FFT is active
     const fftW = fftCropDims?.fftWidth ?? width;
     const fftH = fftCropDims?.fftHeight ?? height;
+    if (fftMetricsEnabled) {
+      const qualityKey = `${fftMagVersion}:${fftW}x${fftH}:${pixelSize || 0}:${pixelUnit || ""}`;
+      if (fftQualityKeyRef.current !== qualityKey) {
+        fftQualityKeyRef.current = qualityKey;
+        setFftQuality(computeFftQualityMetrics(fftMag, fftW, fftH, { sampling: pixelSize, unit: pixelUnit }));
+      }
+    } else if (fftQualityKeyRef.current) {
+      fftQualityKeyRef.current = "";
+      setFftQuality(null);
+    }
 
     // Heavy steps (log/power transform, range, stats, histogram-data copy) only
     // when source magnitude OR scale-mode changed — NOT on every contrast slider tick.
@@ -3446,7 +3462,7 @@ function Show2D() {
     if (!offscreen) return;
     fftOffscreenRef.current = offscreen;
     setFftOffscreenVersion(v => v + 1);
-  }, [effectiveShowFft, isGallery, fftMagVersion, fftVminPct, fftVmaxPct, fftColormap, fftScaleMode, fftAuto, width, height, fftCropDims, nImages]);
+  }, [effectiveShowFft, isGallery, fftMagVersion, fftVminPct, fftVmaxPct, fftColormap, fftScaleMode, fftAuto, width, height, fftCropDims, nImages, pixelSize, pixelUnit, fftMetricsEnabled]);
 
   // -------------------------------------------------------------------------
   // FFT draw effect: cheap drawImage from cached offscreen (zoom/pan changes)
@@ -3819,6 +3835,25 @@ function Show2D() {
     renderGalleryFft();
     return () => { cancelled = true; };
   }, [effectiveShowFft, isGallery, nImages, width, height, galleryFftMagVersion, fftColormap, fftScaleMode, fftAuto, fftVminPct, fftVmaxPct, selectedIdx, fftLinkedContrast, fftContrastStates]);
+
+  React.useEffect(() => {
+    if (!effectiveShowFft || !isGallery || !fftMetricsEnabled) {
+      setGalleryFftQuality([]);
+      return;
+    }
+    const fftW = galleryFftDimsRef.current?.w ?? width;
+    const fftH = galleryFftDimsRef.current?.h ?? height;
+    const next = new Array<FftQualityMetrics | null>(nImages).fill(null);
+    for (let idx = 0; idx < nImages; idx++) {
+      const mag = fftMagCacheGalleryRef.current[idx];
+      if (!mag) continue;
+      next[idx] = computeFftQualityMetrics(mag, fftW, fftH, {
+        sampling: pixelSizeForPanel(idx),
+        unit: pixelUnit,
+      });
+    }
+    setGalleryFftQuality(next);
+  }, [effectiveShowFft, isGallery, fftMetricsEnabled, galleryFftMagVersion, nImages, width, height, pixelSizeForPanel, pixelUnit]);
 
   // Gallery FFT draw effect: cheap drawImage from cached offscreens (zoom/pan changes)
   React.useLayoutEffect(() => {
@@ -5749,8 +5784,34 @@ function Show2D() {
                             textOverflow: "ellipsis",
                             zIndex: 2,
                           }}
+                      >
+                        FFT · {panelLabel(i)}
+                      </Box>
+                    )}
+                      {fftMetricsEnabled && galleryFftQuality[i] && (
+                        <Box
+                          className="quantem-fft-quality-label"
+                          aria-label={`FFT quality for ${panelLabel(i)}: ${formatFftQualityLabel(galleryFftQuality[i])}`}
+                          sx={{
+                            position: "absolute",
+                            top: 6,
+                            left: 8,
+                            maxWidth: "calc(100% - 16px)",
+                            color: "rgba(255,255,255,0.96)",
+                            fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+                            fontSize: Math.max(9, Math.min(12, panelTitleFontSize || 11)),
+                            fontWeight: 700,
+                            lineHeight: 1.2,
+                            whiteSpace: "nowrap",
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                            textShadow: "1px 1px 0 rgba(0,0,0,0.9), 0 0 3px rgba(0,0,0,0.85)",
+                            pointerEvents: "none",
+                            userSelect: "none",
+                            zIndex: 3,
+                          }}
                         >
-                          FFT · {panelLabel(i)}
+                          {formatFftQualityLabel(galleryFftQuality[i])}
                         </Box>
                       )}
                       {fftComputing && !fftMagCacheGalleryRef.current[i] && (
@@ -6193,6 +6254,32 @@ function Show2D() {
             >
               <canvas ref={fftCanvasRef} width={canvasW} height={canvasH} style={responsiveCanvasStyle} />
               <canvas ref={fftOverlayRef} width={Math.round(canvasW * DPR)} height={Math.round(canvasH * DPR)} style={responsiveOverlayStyle} />
+              {fftMetricsEnabled && fftQuality && (
+                <Box
+                  className="quantem-fft-quality-label"
+                  aria-label={`FFT quality: ${formatFftQualityLabel(fftQuality)}`}
+                  sx={{
+                    position: "absolute",
+                    top: 8,
+                    left: 8,
+                    maxWidth: "calc(100% - 16px)",
+                    color: "rgba(255,255,255,0.96)",
+                    fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+                    fontSize: 11,
+                    fontWeight: 700,
+                    lineHeight: 1.2,
+                    whiteSpace: "nowrap",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    textShadow: "1px 1px 0 rgba(0,0,0,0.9), 0 0 3px rgba(0,0,0,0.85)",
+                    pointerEvents: "none",
+                    userSelect: "none",
+                    zIndex: 4,
+                  }}
+                >
+                  {formatFftQualityLabel(fftQuality)}
+                </Box>
+              )}
               {fftComputing && (
                 <Box sx={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", bgcolor: "rgba(0,0,0,0.6)", pointerEvents: "none" }}>
                   <Typography sx={{ fontSize: 11, color: "#aaa", fontFamily: "monospace", "@keyframes pulse": { "0%,100%": { opacity: 0.4 }, "50%": { opacity: 1 } }, animation: "pulse 1.2s ease-in-out infinite" }}>

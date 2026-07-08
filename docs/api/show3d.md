@@ -35,7 +35,19 @@ export. See the [Show3D tutorial](../tutorials/show3d).
 | Statistics | `show_stats` | Optional mean/min/max/std readout |
 | Panel title visibility | `show_panel_titles`, `panel_title_font_size` | Per-panel labels show/hide and resize |
 | Scale bar visibility | `show_scale_bar` (`scale_bar_visible` in saved state) | Scale bar shows/hides |
+| FFT toggle | `show_fft` | Shows the FFT view for the current frame or visible panel grid |
+| FFT quality labels | `fft_metrics` | Compact in-panel label reports FFT sharpness, peak count, and peak SNR from the cached FFT magnitude |
+| FFT window toggle | `fft_window` | Apodization on/off before FFT rendering |
 | Resize / zoom chrome | `show_resize_handles`, `show_zoom_indicator` | Resize handles and zoom readout show/hide |
+
+## FFT quality labels
+
+Pass `show_fft=True` to show the FFT view. By default, `fft_metrics=True`
+adds a small white label inside the FFT panel with sharpness, peak count, and
+peak SNR. In multi-panel FFT views, Show3D summarizes the visible FFT tiles.
+The metrics reuse the cached FFT magnitude used for rendering, so frame
+playback, zoom, and pan do not trigger an extra FFT for the label. Set
+`fft_metrics=False` for a clean FFT image.
 
 ## Live stack updates
 

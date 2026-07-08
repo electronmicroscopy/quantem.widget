@@ -399,6 +399,10 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
         ``"nm"``, ``"pixels"``. Defaults to ``["pixels", "pixels"]``.
     show_fft : bool, default False
         Show FFT and histogram panels.
+    fft_metrics : bool, default True
+        Show compact FFT quality labels inside FFT panels when FFT is visible.
+        The frontend computes these labels from the cached FFT magnitude and
+        does not trigger another FFT.
     show_controls : bool, default True
         Show the live control UI. Set ``False`` for a permanently clean display.
     controls_collapsed : bool, default False
@@ -678,6 +682,7 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
     # =========================================================================
     show_fft = traitlets.Bool(False).tag(sync=True)
     fft_window = traitlets.Bool(True).tag(sync=True)
+    fft_metrics = traitlets.Bool(True).tag(sync=True)
 
     # =========================================================================
     # Selected Image (for single-image analysis display)
@@ -752,6 +757,7 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
         show_scale_bar: bool | None = None,
         show_fft: bool = False,
         fft_window: bool = True,
+        fft_metrics: bool = True,
         show_controls: bool | None = None,
         controls_collapsed: bool | None = None,
         show_stats: bool | None = None,
@@ -870,7 +876,7 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
                 page_labels=resolved_page_labels, page_starred=resolved_page_starred,
                 show_title=show_title,
                 sampling=sampling, units=units, scale_bar_visible=scale_bar_visible,
-                show_fft=show_fft, fft_window=fft_window,
+                show_fft=show_fft, fft_window=fft_window, fft_metrics=fft_metrics,
                 show_controls=show_controls, controls_collapsed=controls_collapsed,
                 show_stats=show_stats,
                 log_scale=log_scale, auto_contrast=auto_contrast, offline=offline,
@@ -887,7 +893,7 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
 
     def _init_sync(self, *, data, labels, title, cmap, n_pages, panels_per_page,
                    page_labels, page_starred, show_title, sampling, units,
-                   scale_bar_visible, show_fft, fft_window,
+                   scale_bar_visible, show_fft, fft_window, fft_metrics,
                    show_controls, controls_collapsed, show_stats, log_scale, auto_contrast, offline,
                    vmin, vmax,
                    ncols, size, smooth, zoom, zoom_row, zoom_col,
@@ -1125,6 +1131,7 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
             )
         self.show_fft = show_fft
         self.fft_window = fft_window
+        self.fft_metrics = bool(fft_metrics)
         self.show_controls = show_controls
         self.controls_collapsed = bool(controls_collapsed)
         self.show_stats = show_stats
@@ -2249,6 +2256,7 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
             "show_stats": self.show_stats,
             "show_fft": self.show_fft,
             "fft_window": self.fft_window,
+            "fft_metrics": self.fft_metrics,
             "show_controls": self.show_controls,
             "controls_collapsed": self.controls_collapsed,
             "pixel_size": self.pixel_size,
@@ -2463,6 +2471,7 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
             scale_bar_visible=self.scale_bar_visible,
             show_fft=self.show_fft,
             fft_window=self.fft_window,
+            fft_metrics=self.fft_metrics,
             show_controls=self.show_controls,
             controls_collapsed=self.controls_collapsed,
             show_stats=self.show_stats,

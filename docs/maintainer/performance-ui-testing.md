@@ -27,7 +27,7 @@ change needs them.
 | `scripts/widget_show3d_animation_smoke.py` | Show3D GIF exports are presentation-ready. | Dry-run size plan, multi-panel low/medium/high GIF previews, panel-gap control, live-style labels, scale bar, zoom readout, export seconds, file sizes, dimensions, frame count, frame-delta metric, optional local Caitlyn time-series source. | When GIF/MP4 animation export, PowerPoint sharing, or Show3D movie quality changes. | `index.html`, `report.json`, `show3d-caitlyn-timeseries-*.gif` unless `--dry-run`. |
 | `scripts/widget_browser_smoke.py` | Exported HTML actually renders and responds in Chromium. | Nonblank canvases, wheel/drag interaction, switches, sliders, console/page/HTTP errors, `requestAnimationFrame` FPS, FFT state, storyboard IDs, optional mobile viewport. | `scripts/widget_local_signoff.sh --quick --browser`; add `--mobile` for narrow/touch layout changes. | `browser-smoke.html`, `browser-smoke-report.json`, screenshots. |
 | `scripts/widget_performance_smoke.py` | Backend export packing and small real-data Show2D/Show3D payloads are measurable. | Real-data discovery, export time, output size, browser-drive plan. | `--performance` signoff or when checking export size/time trends. | `index.html`, `report.json`, `browser-plan.json`, exported real-data HTML. |
-| `scripts/widget_heavy_perf_signoff.py` | Heavy Show2D/Show3D real-data browser performance is acceptable on lab data. | Local real-data discovery, heavy exports, browser FPS, nonblank render, screenshots, Show3D FFT overlay idle-cache guard. | Local-only HPC/workstation performance claims; never normal CI. | `index.html`, `heavy-signoff-report.json`, `browser-smoke-report.json`, screenshots under `/tmp`. |
+| `scripts/widget_heavy_perf_signoff.py` | Heavy Show2D/Show3D real-data browser performance is acceptable on lab data. | Local real-data discovery, heavy exports, browser FPS, nonblank render, screenshots, Show3D FFT overlay idle-cache guard, and FFT metric stats-toggle cache guard. | Local-only HPC/workstation performance claims; never normal CI. | `index.html`, `heavy-signoff-report.json`, `browser-smoke-report.json`, screenshots under `/tmp`. |
 | `scripts/widget_show4dstem_heavy_signoff.py` | Heavy Show4DSTEM real-data loading, NVIDIA/CUDA backend memory, append/stack-growth, export, and browser interaction are acceptable on lab data. | Local 4D-STEM master discovery, CUDA first-load timing, backend memory report, append/stack-growth timing, dataset/frame flip FPS, virtual-detector drag FPS, scan-position FPS, browser WebGPU/backend split, GPU memory before/after. | Local-only Show4DSTEM performance claims; never normal CI. | `index.html`, `show4dstem-heavy-signoff-report.json`, exported Show4DSTEM HTML, browser screenshot under `/tmp`. |
 | `scripts/widget_phone_handoff.py` | A human can verify physical phone Safari behavior with shared logs. | Serves report on `0.0.0.0`, prints Tailscale/HTTPS handoff command, records viewport/touch/pointer/WebGPU events. | Physical iPhone/iPad checks after browser smoke, especially WebGPU or touch changes. | Served report, `phone-probe.html`, `phone-events.ndjson`. |
 | `scripts/widget_visual_signoff.sh` | Visual stories can be driven in Jupyter/browser before release. | Story-oriented widget drive packets, screenshots, selected release gates. | Broad UI or release-candidate work when a human/agent must drive real workflows. | Signoff packet/report under `/tmp` or configured artifact path. |
@@ -127,6 +127,9 @@ For Show3D, drive and record:
 - FFT bottom/right/overlay layouts,
 - FFT overlay drag, corner snap, independent zoom, and pan,
 - FFT cache behavior during scroll, resize, playback, and frame scrub,
+- FFT metric labels while toggling Stats, Profile, page playback, and panel
+  visibility. These UI controls must not recompute FFTs or metric summaries
+  unless the displayed scientific input changed,
 - export exact, quantized, GIF, MP4, and binned quantized HTML where supported,
 - `Cmd+S` save/reopen with compact visible output.
 
@@ -241,6 +244,43 @@ Release rule:
   saved notebook output is blank, FFT is incorrect, or the test used synthetic
   data for a real-data claim.
 
+## Performance Evidence Registry
+
+Do not commit raw heavy reports by default. Keep generated HTML, screenshots,
+private file paths, timing JSON, and local browser artifacts in `/tmp` or CI
+artifacts. Commit only distilled metadata when the result is useful as a future
+baseline or protocol example.
+
+Each evidence row should record:
+
+- date and purpose,
+- widget and scenario,
+- dataset alias, not private path,
+- shape, dtype, and native size,
+- export mode, exported size, and export time,
+- browser surface, FPS, and key interaction checks,
+- cache counters or correctness checks that mattered,
+- command family and local report path pattern,
+- result and limitation.
+
+Use three dataset tiers:
+
+| Tier | Purpose | Storage policy |
+| --- | --- | --- |
+| CI tiny | Protocol coverage, export matrix, nonblank canvas, API behavior. | Commit only tiny generated fixtures or create them at test time. |
+| Public real | Reproducible docs/tutorial/performance examples. | Prefer hosted datasets or small tracked examples when clone size stays reasonable. |
+| Private heavy | Release-grade workstation/HPC proof. | Keep data, reports, screenshots, and private paths out of git; commit only alias-level summary. |
+
+Current distilled evidence:
+
+| Date | Evidence ID | Widget/scenario | Dataset alias | Shape/native size | Export | Browser/cache result | Command family | Result |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 2026-07-07 | `fft-metric-quick-cache-guard` | Show3D overlay FFT metric label, Stats toggle cache guard | `gold-haadf-local-quick` | 3 panels x 16 frames x 384 x 384, 27.0 MB native float32 | `uint8-4xbin`, 1.313 MB, 0.585 s | Browser smoke 121.3 FPS; FFT idle 120.7 FPS; idle FFT recompute growth 0; Stats-toggle FFT recompute growth 0; Stats-toggle FFT metric growth 0; label stayed `FFT sharp 13.2 · peaks 16 · SNR 14.9` | `scripts/widget_heavy_perf_signoff.py --quick --search-root <local-gold-dataset-root> --stats-toggles 4 --min-fps 1`; report pattern `/tmp/quantem-widget-heavy-signoff-fftmetrics-quick/index.html` | PASS as quick automation evidence; not a full release-grade heavy baseline because it used `--quick` and `--min-fps 1`. |
+| 2026-07-07 | `fft-metric-full-cache-guard` | Show2D/Show3D heavy export, browser render, Show3D overlay FFT metric label, Stats toggle cache guard | `gold-haadf-local-full` | Show2D: 8 panels x 4096 x 4096, 512 MB native float32; Show3D: 12 panels x 32 frames x 2048 x 2048, 6144 MB native float32 | Show2D `uint8`, 11.326 MB, 0.141 s; Show2D `full`, 43.326 MB, 0.376 s; Show3D `uint8-4xbin`, 128.752 MB, 60.115 s | Browser smoke: Show2D `uint8` 120.3 FPS, Show2D `full` 120.2 FPS, Show3D 121.8 FPS with nonblank changing canvases; FFT idle 120.8 FPS; idle FFT recompute growth 0; Stats-toggle FFT recompute growth 0; Stats-toggle FFT metric growth 0 across 8 toggles; label stayed `FFT sharp 6.0 · peaks 516 · SNR 64.9` | `scripts/widget_heavy_perf_signoff.py --search-root <local-gold-dataset-root> --min-fps 30 --stats-toggles 8`; report pattern `/tmp/quantem-widget-heavy-signoff-fftmetrics-full/index.html` | PASS as local full heavy signoff evidence; raw report, screenshots, and private paths remain outside git. |
+
+Keep quick rows only as automation debugging examples. A release or performance
+claim should reference the strongest matching full local heavy signoff row.
+
 ## Minimal Agent Run
 
 For the common Show2D + Show3D heavy gate, an agent should do the following:
@@ -286,6 +326,9 @@ The heavy signoff:
 - runs `scripts/widget_browser_smoke.py` against the generated standalone HTML,
 - checks browser FPS against the configured threshold,
 - checks that Show3D FFT cache counters do not grow while the page is idle,
+- checks that Show3D FFT and FFT metric counters do not grow while toggling the
+  Stats UI. Stats are display chrome; they must not invalidate cached FFT
+  magnitudes or metric summaries,
 - saves screenshots, command logs, `browser-smoke-report.json`, and
   `heavy-signoff-report.json`,
 - writes `index.html` as the visual handoff report.
@@ -309,6 +352,66 @@ not fully verified.
 This script is intentionally excluded from normal CI because it requires local
 real data and can produce large private artifacts. Keep those artifacts under
 `/tmp` or another ignored local directory.
+
+## Heavy Compute UI Protocol
+
+Use this protocol before adding any expensive browser-side computation such as
+FFT metrics, peak finding, segmentation overlays, or live denoise previews.
+The goal is to keep scientific feedback visible without dropping browser FPS.
+
+Separate the work into four phases:
+
+1. **Scientific input**: frame index, visible panel IDs, FFT window, ROI,
+   sampling, units, display bin, and data version. These are the only values
+   that should invalidate the expensive cache.
+2. **Expensive compute**: FFT, peak finding, metric summaries, or GPU kernels.
+   Cache these by a stable key derived from the scientific input. Do not put
+   `show_stats`, labels, toolbar visibility, hover text, or layout chrome into
+   that key unless they change the math.
+3. **Display transform**: colormap, log/linear view, clipping, and annotations.
+   This should reuse the cached numeric result whenever possible.
+4. **Pointer UI**: hover labels, sliders, drag overlays, and toolbar state. Keep
+   this path cheap: use refs, `requestAnimationFrame`, stable DOM nodes, and
+   opacity/transform updates instead of recomputing arrays or forcing large
+   React rerenders on every pointer event.
+
+Every heavy compute feature needs both math proof and cache proof:
+
+- Math proof: compare against NumPy, PyTorch, or another trusted reference on a
+  deterministic microscopy-like fixture. For FFT metrics, the parity test is
+  `js/fftMetrics.numpy.test.ts`.
+- Cache proof: expose local debug counters for expensive work, for example
+  `fftComputes`, `fftMetricComputes`, `lastFftMetricMs`, and the cache key. The
+  browser signoff must assert those counters do not grow during cosmetic UI
+  changes such as Stats toggles.
+- Visual proof: open the rendered HTML or notebook in the browser, confirm the
+  canvas is nonblank, and capture a report screenshot with the label/overlay
+  visible.
+
+Optimization order:
+
+1. Cache first. Reuse display-sized arrays and cached FFT magnitudes before
+   moving work to another thread or GPU path.
+2. Downsample or summarize for labels. A quality label should not scan a full
+   native 4K frame on every redraw when a sampled cached magnitude is enough.
+3. Move real heavy kernels to WebGPU or a worker only when cached CPU work still
+   shows up in the browser report.
+4. Keep microbenchmarks local-only. Use them to compare algorithm cost, but do
+   not make normal CI depend on workstation hardware, private data, or browser
+   timing variance.
+
+For the current FFT metric label, the accepted behavior is:
+
+- Compute the label from the cached FFT magnitude, not from a second FFT.
+- Recompute only when the FFT magnitude version, FFT crop dimensions, sampling,
+  units, or visible FFT panel grid changes.
+- Do not recompute when users toggle Stats, Profile, panel menu visibility,
+  page playback controls, or other toolbar chrome.
+- Verify the math with `npm test -- --run js/fftMetrics.numpy.test.ts
+  js/fftMetrics.test.ts`.
+- Verify the browser cache behavior with `scripts/widget_heavy_perf_signoff.py`;
+  the report must include `show3d_fft_stats_toggle` with zero FFT and zero FFT
+  metric growth.
 
 ## Local Show4DSTEM Heavy Signoff
 
