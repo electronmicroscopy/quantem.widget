@@ -1487,6 +1487,12 @@ function Show3D() {
   const [pageStarred, setPageStarred] = useModelState<number[]>("page_starred");
   const [pagePlaying, setPagePlaying] = React.useState(false);
   const [pagePlayFps, setPagePlayFps] = React.useState<number>(2);
+  const [pageSliderPreviewIdx, setPageSliderPreviewIdxState] = React.useState<number | null>(null);
+  const pageSliderPreviewIdxRef = React.useRef<number | null>(null);
+  const currentPageIdxRef = React.useRef(0);
+  const pageCommitPendingRef = React.useRef<number | null>(null);
+  const pageCommitRafRef = React.useRef<number | null>(null);
+  const hiddenPanelSyncTimerRef = React.useRef<number | null>(null);
   const [reorderMode, setReorderMode] = React.useState(false);
   const [dragOverPanel, setDragOverPanel] = React.useState<number | null>(null);
   const [reorderPreviewOrder, setReorderPreviewOrder] = React.useState<number[] | null>(null);
@@ -1506,8 +1512,59 @@ function Show3D() {
   const totalPanelCount = Math.max(1, nPanels || 1);
   const isPaged = (nPages || 1) > 1 && (panelsPerPage || 0) > 0;
   const currentPageIdx = Math.max(0, Math.min((nPages || 1) - 1, Math.round(pageIdx || 0)));
+  React.useEffect(() => {
+    currentPageIdxRef.current = currentPageIdx;
+  }, [currentPageIdx]);
+  const clampPageIdx = React.useCallback((value: number) => (
+    Math.max(0, Math.min((nPages || 1) - 1, Math.round(Number(value) || 0)))
+  ), [nPages]);
+  const setPageSliderPreviewIdx = React.useCallback((value: number | null) => {
+    pageSliderPreviewIdxRef.current = value;
+    setPageSliderPreviewIdxState(value);
+  }, []);
+  const commitPageIdx = React.useCallback((value: number, immediate = false) => {
+    const next = clampPageIdx(value);
+    pageCommitPendingRef.current = next;
+    if (immediate) {
+      if (pageCommitRafRef.current !== null) {
+        window.cancelAnimationFrame(pageCommitRafRef.current);
+        pageCommitRafRef.current = null;
+      }
+      pageCommitPendingRef.current = null;
+      if (next !== currentPageIdxRef.current) setPageIdx(next);
+      return;
+    }
+    if (pageCommitRafRef.current !== null) return;
+    pageCommitRafRef.current = window.requestAnimationFrame(() => {
+      pageCommitRafRef.current = null;
+      const pending = pageCommitPendingRef.current;
+      pageCommitPendingRef.current = null;
+      if (pending !== null && pending !== currentPageIdxRef.current) setPageIdx(pending);
+    });
+  }, [clampPageIdx, setPageIdx]);
+  const stopPagePlayback = React.useCallback(() => {
+    setPagePlaying(value => value ? false : value);
+  }, []);
+  React.useEffect(() => {
+    const preview = pageSliderPreviewIdxRef.current;
+    if (preview !== null && preview === currentPageIdx) {
+      setPageSliderPreviewIdx(null);
+    }
+  }, [currentPageIdx, setPageSliderPreviewIdx]);
+  React.useEffect(() => () => {
+    if (pageCommitRafRef.current !== null) {
+      window.cancelAnimationFrame(pageCommitRafRef.current);
+      pageCommitRafRef.current = null;
+    }
+    if (hiddenPanelSyncTimerRef.current !== null) {
+      window.clearTimeout(hiddenPanelSyncTimerRef.current);
+      hiddenPanelSyncTimerRef.current = null;
+    }
+  }, []);
   const currentPageLabel = pageLabels?.[currentPageIdx] || `Page ${currentPageIdx + 1}`;
-  const currentPageStatus = `${currentPageLabel} ${currentPageIdx + 1}/${nPages || 1}`;
+  const pageControlIdx = clampPageIdx(pageSliderPreviewIdx ?? currentPageIdx);
+  const pageControlLabel = pageLabels?.[pageControlIdx] || `Page ${pageControlIdx + 1}`;
+  const pageControlStatus = `${pageControlLabel} ${pageControlIdx + 1}/${nPages || 1}`;
   React.useEffect(() => {
     if (!isPaged || (nPages || 1) <= 1) setPagePlaying(false);
   }, [isPaged, nPages]);
@@ -1545,16 +1602,28 @@ function Show3D() {
   }, [activePageEnd, activePageStart, activePanelCount, hiddenPanels, isPaged]);
   React.useEffect(() => {
     if (!isPaged) return;
-    const mapped = Array.from(new Set(hiddenPageSlots
-      .map(slot => activePageStart + Math.trunc(Number(slot)))
-      .filter(panel => Number.isFinite(panel) && panel >= activePageStart && panel < activePageEnd)))
-      .sort((a, b) => a - b);
-    const current = (hiddenPanels || [])
-      .map(value => Math.trunc(Number(value)))
-      .filter(panel => Number.isFinite(panel) && panel >= 0 && panel < totalPanelCount)
-      .sort((a, b) => a - b);
-    if (mapped.length === current.length && mapped.every((panel, idx) => panel === current[idx])) return;
-    setHiddenPanels(mapped);
+    if (hiddenPanelSyncTimerRef.current !== null) {
+      window.clearTimeout(hiddenPanelSyncTimerRef.current);
+    }
+    hiddenPanelSyncTimerRef.current = window.setTimeout(() => {
+      hiddenPanelSyncTimerRef.current = null;
+      const mapped = Array.from(new Set(hiddenPageSlots
+        .map(slot => activePageStart + Math.trunc(Number(slot)))
+        .filter(panel => Number.isFinite(panel) && panel >= activePageStart && panel < activePageEnd)))
+        .sort((a, b) => a - b);
+      const current = (hiddenPanels || [])
+        .map(value => Math.trunc(Number(value)))
+        .filter(panel => Number.isFinite(panel) && panel >= 0 && panel < totalPanelCount)
+        .sort((a, b) => a - b);
+      if (mapped.length === current.length && mapped.every((panel, idx) => panel === current[idx])) return;
+      setHiddenPanels(mapped);
+    }, 120);
+    return () => {
+      if (hiddenPanelSyncTimerRef.current !== null) {
+        window.clearTimeout(hiddenPanelSyncTimerRef.current);
+        hiddenPanelSyncTimerRef.current = null;
+      }
+    };
   }, [activePageEnd, activePageStart, hiddenPageSlots, hiddenPanels, isPaged, setHiddenPanels, totalPanelCount]);
   const hiddenPanelSet = React.useMemo(() => {
     const clean = new Set<number>();
@@ -6004,7 +6073,7 @@ function Show3D() {
     const ctx = canvasRef.current.getContext("2d");
     if (ctx) drawMain(ctx, mainOffscreenRef.current, { preserveGpuDisplay });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [smooth, canvasW, canvasH, nPanels, maxCols, imageRotation, panelStates, linkedState, linkPanels, themeColors.bg, panelRealFrames, panelTitles, showPanelTitles, panelGapTrait, panelTitleFontSize, panelWidthPx, sharedPanelSource, sliceIdx, displaySliceIdx, liveSliceIdx, offline, playing, nSlices]);
+  }, [smooth, canvasW, canvasH, nPanels, visiblePanelIndices, maxCols, imageRotation, panelStates, linkedState, linkPanels, themeColors.bg, panelRealFrames, panelTitles, showPanelTitles, panelGapTrait, panelTitleFontSize, panelWidthPx, sharedPanelSource, sliceIdx, displaySliceIdx, liveSliceIdx, offline, playing, nSlices]);
 
   // Render overlay (ROI only) - HiDPI aware
   React.useEffect(() => {
@@ -9876,7 +9945,7 @@ function Show3D() {
               <>
                 <Typography sx={{ ...typography.label, fontSize: 10, ml: "2px", flexShrink: 0 }}>Page</Typography>
                 <Typography
-                  title={currentPageStatus}
+                  title={pageControlStatus}
                   sx={{
                     ...typography.label,
                     fontSize: 10,
@@ -9890,21 +9959,31 @@ function Show3D() {
                     fontVariantNumeric: "tabular-nums",
                   }}
                 >
-                  {currentPageStatus}
+                  {pageControlStatus}
                 </Typography>
                 <Slider
-                  value={currentPageIdx}
+                  value={pageControlIdx}
                   min={0}
                   max={Math.max(0, (nPages || 1) - 1)}
                   step={1}
-                  onPointerDownCapture={() => setPagePlaying(false)}
-                  onKeyDown={() => setPagePlaying(false)}
+                  onPointerDownCapture={() => {
+                    stopPagePlayback();
+                    setPageSliderPreviewIdx(currentPageIdx);
+                  }}
+                  onKeyDown={() => stopPagePlayback()}
                   onChange={(_, value) => {
                     const raw = Array.isArray(value) ? value[0] : value;
-                    setPagePlaying(false);
-                    setPageIdx(Math.max(0, Math.min((nPages || 1) - 1, Math.round(Number(raw) || 0))));
+                    const next = clampPageIdx(Number(raw));
+                    setPageSliderPreviewIdx(next);
+                    commitPageIdx(next);
                   }}
-                  onChangeCommitted={() => setPagePlaying(false)}
+                  onChangeCommitted={(_, value) => {
+                    const raw = Array.isArray(value) ? value[0] : value;
+                    const next = clampPageIdx(Number(raw));
+                    stopPagePlayback();
+                    setPageSliderPreviewIdx(next);
+                    commitPageIdx(next, true);
+                  }}
                   size="small"
                   sx={{ ...sliderStyles.small, width: 120, flex: "0 0 120px", color: themeColors.accent, ml: "2px" }}
                   aria-label="Page"
