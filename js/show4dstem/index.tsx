@@ -2188,8 +2188,9 @@ function Show4DSTEM() {
             const cc = await decodeVol(volMetas[idx]);
             if (cc) {
               volCache.set(idx, cc);
+              const activeFrame = Math.max(0, Math.min(volMetas.length - 1, model.get("frame_idx") | 0));
               while (volCache.size > MAX_RESIDENT) {           // evict the oldest non-active volume
-                const old = [...volCache.keys()].find((k) => k !== idx);
+                const old = [...volCache.keys()].find((k) => k !== idx && k !== activeFrame);
                 if (old === undefined) break;
                 volCache.get(old)!.dispose(); volCache.delete(old);
               }
@@ -2243,8 +2244,9 @@ function Show4DSTEM() {
             const cc = await Show4DSTEMCompute.create(bytes, scanCount, detSize) ?? Show4DSTEMCpuCompute.create(bytes, scanCount, detSize);
             if (cc) {
               inlineVolCache.set(idx, cc);
+              const activeFrame = Math.max(0, Math.min(widgetFrames - 1, model.get("frame_idx") | 0));
               while (inlineVolCache.size > MAX_INLINE_RESIDENT) {
-                const old = [...inlineVolCache.keys()].find((k) => k !== idx);
+                const old = [...inlineVolCache.keys()].find((k) => k !== idx && k !== activeFrame);
                 if (old === undefined) break;
                 inlineVolCache.get(old)!.dispose();
                 inlineVolCache.delete(old);
@@ -2335,6 +2337,28 @@ function Show4DSTEM() {
         const pr = Math.max(0, Math.min(scanRows - 1, model.get("pos_row") | 0));
         const pc = Math.max(0, Math.min(scanCols - 1, model.get("pos_col") | 0));
         const scanIdx = pr * scanCols + pc;
+        const mode = String(model.get("view_mode") || "single");
+        const dpMode = String(model.get("compare_dp_mode") || "average");
+        if ((mode === "multiple" || mode === "compare") && dpMode !== "selected" && getVol) {
+          const indices = compareVisibleIndices();
+          if (indices.length) {
+            const averaged = new Float32Array(detSize);
+            let count = 0;
+            for (const idx of indices) {
+              const source = await getVol(idx);
+              if (!source) continue;
+              const frame = await source.frameAt(scanIdx);
+              for (let k = 0; k < detSize; k++) averaged[k] += frame[k];
+              count += 1;
+            }
+            if (count > 0) {
+              for (let k = 0; k < detSize; k++) averaged[k] /= count;
+              model.set("frame_bytes", new DataView(averaged.buffer));
+              model.save_changes();
+              return;
+            }
+          }
+        }
         // bslz4 / chunked stacks have no CPU copy -> extract the frame on the GPU.
         const frame = cpuStack
           ? (() => { const f = new Float32Array(detSize); const base = scanIdx * detSize; for (let k = 0; k < detSize; k++) f[k] = sample(base + k); return f; })()
@@ -2344,6 +2368,7 @@ function Show4DSTEM() {
       const onVI = () => { void recomputeVI(); void recomputeCompareVI(); };
       const onDP = () => { void recomputeDP(); };
       const onPos = () => { void recomputeFrame(); };
+      const onCompareFrameSource = () => { void recomputeFrame(); };
       const activateCurrentVolume = async () => {
         if (!getVol) return true;
         const nVolumes = volumeCount || volMetas.length || 1;
@@ -2413,6 +2438,10 @@ function Show4DSTEM() {
       model.on("change:_preset_request", onPreset);
       model.on("change:pos_row", onPos);
       model.on("change:pos_col", onPos);
+      model.on("change:compare_dp_mode", onCompareFrameSource);
+      model.on("change:compare_max_panels", onCompareFrameSource);
+      model.on("change:compare_panel_order", onCompareFrameSource);
+      model.on("change:compare_hidden_panels", onCompareFrameSource);
       detach = () => {
         viTraits.forEach((t) => model.off("change:" + t, onVI));
         dpTraits.forEach((t) => model.off("change:" + t, onDP));
@@ -2421,6 +2450,10 @@ function Show4DSTEM() {
         model.off("change:_preset_request", onPreset);
         model.off("change:pos_row", onPos);
         model.off("change:pos_col", onPos);
+        model.off("change:compare_dp_mode", onCompareFrameSource);
+        model.off("change:compare_max_panels", onCompareFrameSource);
+        model.off("change:compare_panel_order", onCompareFrameSource);
+        model.off("change:compare_hidden_panels", onCompareFrameSource);
         model.off("change:frame_idx", onFrame);
         model.off("change:view_mode", recomputeActiveView);
         computes.forEach((c) => c.dispose());          // single / non-lazy resident set
@@ -5763,6 +5796,7 @@ function Show4DSTEM() {
               onResizeStart={handleCompareGridResizeStart}
               onSelect={(idx) => {
                 setFramePlaying(false);
+                setCompareDpMode("selected");
                 setFrameIdx(Math.max(0, Math.min(nFrames - 1, idx)));
               }}
               onToggleStar={toggleCompareStar}
