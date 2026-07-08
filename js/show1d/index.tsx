@@ -149,6 +149,7 @@ type Show1DWindow = Window & typeof globalThis & {
 const EMPTY_BYTES = new Uint8Array(0);
 const DEFAULT_SIZE = { width: 820, height: 380 };
 const DEFAULT_PLOT_HEIGHT = 390;
+const SNAPSHOT_PLAYBACK_CONTROL_WIDTH = 620;
 const SNAPSHOT_OVERLAY_POSITIONS: SnapshotOverlayPosition[] = ["top-left", "top-right", "bottom-left", "bottom-right"];
 const PROFILE_COLORS = ["#4fc3f7", "#81c784", "#ffb74d", "#ce93d8", "#ef5350", "#ffd54f", "#90a4ae", "#a1887f"];
 const controlRow = {
@@ -203,6 +204,12 @@ const snapshotContrastPresets = [
   { value: "2-98", label: "2-98", low: 2, high: 98 },
   { value: "5-95", label: "5-95", low: 5, high: 95 },
 ] as const;
+const MIN_SIDE_PANEL_WIDTH = 300;
+const MAX_SIDE_PANEL_WIDTH = 1600;
+const MIN_SNAPSHOT_VIEWPORT_WIDTH = 220;
+const MAX_SNAPSHOT_VIEWPORT_WIDTH = 1600;
+const MIN_PLOT_HEIGHT = 220;
+const MAX_PLOT_HEIGHT = 960;
 const FFT_DISPLAY_RANGE: [number, number] = [0, 1];
 const typography = {
   label: { fontSize: 11 },
@@ -2043,13 +2050,26 @@ function MiniHistogram({
 
   return (
     <Box sx={{ width, maxWidth: "100%" }}>
-      <Stack direction="row" alignItems="center" sx={{ mb: 0.25, minHeight: 12 }}>
-        <Box sx={{ flex: 1 }} />
-        <Typography sx={{ fontSize: 10, color: colors.textMuted, fontVariantNumeric: "tabular-nums" }}>
+      <Box sx={{ height, bgcolor: colors.bgAlt, border: `1px solid ${colors.border}`, borderRadius: 1, overflow: "hidden", position: "relative" }}>
+        <Typography
+          data-testid="show1d-histogram-range-label"
+          sx={{
+            position: "absolute",
+            top: 1,
+            right: 4,
+            zIndex: 1,
+            fontSize: 10,
+            lineHeight: 1,
+            color: colors.textMuted,
+            fontVariantNumeric: "tabular-nums",
+            bgcolor: "rgba(255,255,255,0.72)",
+            px: 0.25,
+            pointerEvents: "none",
+            userSelect: "none",
+          }}
+        >
           {formatRangeValue(clipMin)} - {formatRangeValue(clipMax)}
         </Typography>
-      </Stack>
-      <Box sx={{ height, bgcolor: colors.bgAlt, border: `1px solid ${colors.border}`, borderRadius: 1, overflow: "hidden" }}>
         <canvas
           ref={canvasRef}
           onPointerDown={handlePointerDown}
@@ -2145,6 +2165,8 @@ function Show1DWidget() {
   const [preferWebgpu] = useModelState<boolean>("prefer_webgpu");
   const [snapshotPlaying, setSnapshotPlaying] = useModelState<boolean>("snapshot_playing");
   const [snapshotFps, setSnapshotFps] = useModelState<number>("snapshot_fps");
+  const [snapshotLoop, setSnapshotLoop] = useModelState<boolean>("snapshot_loop");
+  const [snapshotBounce, setSnapshotBounce] = useModelState<boolean>("snapshot_bounce");
   const [profileImageBytes] = useModelState<DataView>("profile_image_bytes");
   const [profileImageHeight] = useModelState<number>("profile_image_height");
   const [profileImageWidth] = useModelState<number>("profile_image_width");
@@ -2266,10 +2288,15 @@ function Show1DWidget() {
   );
   const rootRef = React.useRef<HTMLDivElement>(null);
   const mainGridRef = React.useRef<HTMLDivElement>(null);
+  const plotPanelRef = React.useRef<HTMLDivElement>(null);
   const plotHostRef = React.useRef<HTMLDivElement>(null);
   const canvasRef = React.useRef<HTMLCanvasElement>(null);
   const profileCanvasRef = React.useRef<HTMLCanvasElement>(null);
   const viewportSize = useViewportSize();
+  const mainGridSize = useElementSize(mainGridRef, {
+    width: Math.max(600, viewportSize.width),
+    height: Math.max(360, viewportSize.height),
+  });
   const plotSize = useElementSize(plotHostRef, DEFAULT_SIZE);
   const geomRef = React.useRef<PlotGeometry | null>(null);
   const plotThumbnailHitAreasRef = React.useRef<PlotThumbnailHitArea[]>([]);
@@ -2307,6 +2334,7 @@ function Show1DWidget() {
   const [, setSnapshotHistogramBackend] = React.useState("cpu");
   const snapshotFftCacheRef = React.useRef<Map<string, SnapshotFftCacheEntry>>(new Map());
   const snapshotFftGpuRef = React.useRef<WebGPUFFT | null>(null);
+  const snapshotBounceDirectionRef = React.useRef<1 | -1>(1);
   const hoverRafRef = React.useRef<number | null>(null);
   const pendingHoverRef = React.useRef<HoverPoint | null>(null);
   const [exportAnchor, setExportAnchor] = React.useState<HTMLElement | null>(null);
@@ -2398,26 +2426,39 @@ function Show1DWidget() {
   const plotTitleVisible = false;
   const htmlSize = formatEstimatedHtmlSize((nTraces * nPoints + nSnapshots * snapshotHeight * snapshotWidth + profileImageHeight * profileImageWidth) * 4);
   const thumbnailSize = clampThumbnailSize(snapshotThumbnailSize);
-  const plotHeight = Math.round(clampValue(Number.isFinite(plotHeightPx) ? plotHeightPx : DEFAULT_PLOT_HEIGHT, 220, 720));
+  const plotHeight = Math.round(clampValue(Number.isFinite(plotHeightPx) ? plotHeightPx : DEFAULT_PLOT_HEIGHT, MIN_PLOT_HEIGHT, MAX_PLOT_HEIGHT));
   const plotHeightExplicit = Math.abs(plotHeight - DEFAULT_PLOT_HEIGHT) > 0.5;
   const snapshotOverview = hasSnapshots && selectedGroupImageIndices.length >= 6;
   const rawSidePanelWidth = Number.isFinite(sidePanelWidthPx) ? Number(sidePanelWidthPx) : 360;
   const autoSidePanelWidth = snapshotOverview && !sidePanelWidthUserAdjusted && Math.round(rawSidePanelWidth) <= 360
     ? 620
     : rawSidePanelWidth;
-  const sidePanelWidth = Math.round(clampValue(autoSidePanelWidth, 300, 960));
+  const rawSnapshotPanelWidth = Number.isFinite(snapshotPanelWidthPx) ? Number(snapshotPanelWidthPx) : 0;
+  const requestedSidePanelWidth = rawSnapshotPanelWidth > 0
+    ? Math.max(autoSidePanelWidth, rawSnapshotPanelWidth)
+    : autoSidePanelWidth;
+  const availableSidePanelWidth = Math.round(clampValue(
+    Math.min(MAX_SIDE_PANEL_WIDTH, mainGridSize.width - 260),
+    MIN_SIDE_PANEL_WIDTH,
+    MAX_SIDE_PANEL_WIDTH,
+  ));
+  const availableSnapshotViewportWidth = Math.round(clampValue(
+    Math.min(MAX_SNAPSHOT_VIEWPORT_WIDTH, availableSidePanelWidth),
+    MIN_SNAPSHOT_VIEWPORT_WIDTH,
+    MAX_SNAPSHOT_VIEWPORT_WIDTH,
+  ));
+  const sidePanelWidth = Math.round(clampValue(requestedSidePanelWidth, MIN_SIDE_PANEL_WIDTH, availableSidePanelWidth));
   const rawSnapshotColumnCount = Math.round(clampValue(Number.isFinite(snapshotColumns) ? snapshotColumns : 0, 0, 8));
   const snapshotColumnCount = rawSnapshotColumnCount > 0
     ? rawSnapshotColumnCount
     : autoSnapshotColumnsForCount(selectedGroupImageIndices.length);
   const resolvedSnapshotOverlayPosition = normaliseSnapshotOverlayPosition(snapshotOverlayPosition);
-  const effectivePlotHeight = snapshotOverview && !plotHeightExplicit ? Math.round(clampValue(Math.min(plotHeight, 330), 260, 720)) : plotHeight;
   const viewportShellHeight = { xs: "none", md: "calc(100vh - 8px)" };
   const mainGridViewportHeight = { xs: "auto", md: controlsVisible ? "calc(100vh - 82px)" : "calc(100vh - 8px)" };
   const mainGridTemplateColumns = sidePanelVisible
     ? {
       xs: "1fr",
-      md: `minmax(260px, 1fr) minmax(300px, ${sidePanelWidth}px)`,
+      md: `minmax(260px, 1fr) minmax(${MIN_SIDE_PANEL_WIDTH}px, ${sidePanelWidth}px)`,
     }
     : "1fr";
   const normalisedSnapshotContrastPreset = normaliseSnapshotContrastPreset(snapshotContrastPreset);
@@ -2640,7 +2681,8 @@ function Show1DWidget() {
     event.preventDefault();
     event.stopPropagation();
     plotResizeCleanupRef.current?.();
-    const plotRect = plotHostRef.current?.getBoundingClientRect();
+    const plotRect = plotPanelRef.current?.getBoundingClientRect() ?? plotHostRef.current?.getBoundingClientRect();
+    const plotHostRect = plotHostRef.current?.getBoundingClientRect();
     if (!plotRect) return;
     const pointerId = event.pointerId;
     const gridRect = mainGridRef.current?.getBoundingClientRect();
@@ -2653,7 +2695,7 @@ function Show1DWidget() {
       x: event.clientX,
       y: event.clientY,
       plotWidth: plotRect.width,
-      plotHeight: plotRect.height,
+      plotHeight: plotHostRect?.height ?? plotRect.height,
       gridWidth,
       sidePanelWidth,
       nonPlotWidth: Math.max(0, gridWidth - plotRect.width - (sidePanelVisible ? sidePanelWidth : 0)),
@@ -2665,11 +2707,11 @@ function Show1DWidget() {
       moveEvent.preventDefault();
       const dx = moveEvent.clientX - start.x;
       const dy = moveEvent.clientY - start.y;
-      setPlotHeightPx(Math.round(clampValue(start.plotHeight + dy, 220, 720)));
+      setPlotHeightPx(Math.round(clampValue(start.plotHeight + dy, MIN_PLOT_HEIGHT, MAX_PLOT_HEIGHT)));
       if (!sidePanelVisible) return;
       const minPlotWidth = 260;
-      const minSidePanelWidth = 300;
-      const maxSidePanelWidth = Math.min(960, start.gridWidth - start.nonPlotWidth - minPlotWidth);
+      const minSidePanelWidth = MIN_SIDE_PANEL_WIDTH;
+      const maxSidePanelWidth = Math.min(MAX_SIDE_PANEL_WIDTH, start.gridWidth - start.nonPlotWidth - minPlotWidth);
       const maxPlotWidth = start.gridWidth - start.nonPlotWidth - minSidePanelWidth;
       if (maxSidePanelWidth < minSidePanelWidth || maxPlotWidth < minPlotWidth) return;
       const nextPlotWidth = clampValue(start.plotWidth + dx, minPlotWidth, maxPlotWidth);
@@ -2680,6 +2722,9 @@ function Show1DWidget() {
       );
       setSidePanelWidthUserAdjusted(true);
       setSidePanelWidthPx(Math.round(nextSidePanelWidth));
+      if (showSnapshots && hasSnapshots) {
+        setSnapshotPanelWidthPx(Math.round(nextSidePanelWidth));
+      }
     };
     const handleWindowPointerUp = (upEvent: PointerEvent) => {
       if (plotResizePointerIdRef.current !== pointerId) return;
@@ -2697,11 +2742,27 @@ function Show1DWidget() {
       plotResizePointerIdRef.current = null;
       plotResizeStartRef.current = null;
     };
-  }, [setPlotHeightPx, setSidePanelWidthPx, sidePanelVisible, sidePanelWidth]);
+  }, [hasSnapshots, setPlotHeightPx, setSidePanelWidthPx, setSnapshotPanelWidthPx, showSnapshots, sidePanelVisible, sidePanelWidth]);
 
   const setSnapshotViewportWidth = React.useCallback((width: number) => {
-    setSnapshotPanelWidthPx(Math.round(clampValue(width, Math.min(220, sidePanelWidth), sidePanelWidth)));
-  }, [setSnapshotPanelWidthPx, sidePanelWidth]);
+    const nextWidth = Math.round(clampValue(
+      width,
+      Math.min(MIN_SNAPSHOT_VIEWPORT_WIDTH, availableSnapshotViewportWidth),
+      availableSnapshotViewportWidth,
+    ));
+    setSnapshotPanelWidthPx(nextWidth);
+    if (sidePanelVisible && nextWidth > sidePanelWidth) {
+      setSidePanelWidthUserAdjusted(true);
+      setSidePanelWidthPx(Math.min(nextWidth, availableSidePanelWidth));
+    }
+  }, [
+    availableSidePanelWidth,
+    availableSnapshotViewportWidth,
+    setSidePanelWidthPx,
+    setSnapshotPanelWidthPx,
+    sidePanelVisible,
+    sidePanelWidth,
+  ]);
 
   const handleSnapshotTileResizePointerDown = React.useCallback((event: React.PointerEvent<HTMLDivElement>) => {
     event.preventDefault();
@@ -2759,6 +2820,10 @@ function Show1DWidget() {
     const fps = clampSnapshotFps(snapshotFps);
     if (snapshotFps !== fps) setSnapshotFps(fps);
   }, [setSnapshotFps, snapshotFps]);
+
+  React.useEffect(() => {
+    if (!snapshotBounce) snapshotBounceDirectionRef.current = 1;
+  }, [snapshotBounce]);
 
   React.useEffect(() => {
     if (snapshotColumns !== rawSnapshotColumnCount) setSnapshotColumns(rawSnapshotColumnCount);
@@ -2955,14 +3020,45 @@ function Show1DWidget() {
       if (!previous) previous = now;
       if (now - previous >= intervalMs) {
         const currentGroup = selectedGroupRef.current >= 0 ? selectedGroupRef.current : 0;
-        selectSnapshotGroup((currentGroup + 1) % groupCount, false);
+        if (snapshotBounce) {
+          let direction = snapshotBounceDirectionRef.current;
+          let nextGroup = currentGroup + direction;
+          if (nextGroup >= groupCount) {
+            direction = -1;
+            nextGroup = Math.max(0, groupCount - 2);
+          } else if (nextGroup < 0) {
+            if (!snapshotLoop) {
+              selectSnapshotGroup(0, false);
+              setSnapshotPlaying(false);
+              previous = now;
+              return;
+            }
+            direction = 1;
+            nextGroup = Math.min(groupCount - 1, 1);
+          }
+          snapshotBounceDirectionRef.current = direction;
+          selectSnapshotGroup(nextGroup, false);
+        } else {
+          const nextGroup = currentGroup + 1;
+          if (nextGroup >= groupCount) {
+            if (!snapshotLoop) {
+              selectSnapshotGroup(groupCount - 1, false);
+              setSnapshotPlaying(false);
+              previous = now;
+              return;
+            }
+            selectSnapshotGroup(0, false);
+          } else {
+            selectSnapshotGroup(nextGroup, false);
+          }
+        }
         previous = now;
       }
       raf = window.requestAnimationFrame(tick);
     };
     raf = window.requestAnimationFrame(tick);
     return () => window.cancelAnimationFrame(raf);
-  }, [groupCount, hasSnapshots, selectSnapshotGroup, snapshotFps, snapshotPlaying]);
+  }, [groupCount, hasSnapshots, selectSnapshotGroup, setSnapshotPlaying, snapshotBounce, snapshotFps, snapshotLoop, snapshotPlaying]);
 
   React.useEffect(() => {
     if (!exportStatus) return;
@@ -3456,6 +3552,7 @@ function Show1DWidget() {
     () => groupCount > 1 && groupCount <= 24 ? Array.from({ length: groupCount }, (_, value) => ({ value })) : [],
     [groupCount],
   );
+  const snapshotTimelineWidth = Math.round(clampValue(140 + Math.min(Math.max(groupCount, 1), 18) * 6, 180, 240));
   const selectedImageColumns = Math.max(1, Math.min(snapshotColumnCount, Math.max(1, selectedGroupImageIndices.length)));
   const snapshotTileWidth = Math.max(
     1,
@@ -3471,15 +3568,20 @@ function Show1DWidget() {
     }),
   );
   const snapshotGridHeightCap = Math.round(clampValue(viewportSize.height - (controlsVisible ? 330 : 260), 420, 920));
-  const snapshotNaturalViewportWidth = Math.round(clampValue(selectedImageColumns * snapshotTileWidth, 240, sidePanelWidth));
+  const snapshotNaturalViewportWidth = Math.round(clampValue(selectedImageColumns * snapshotTileWidth, 240, availableSnapshotViewportWidth));
   const snapshotFitAllViewportWidth = Math.floor(snapshotGridHeightCap * selectedImageColumns / Math.max(1, selectedImageRows * snapshotTallestAspect));
-  const snapshotManualViewportWidth = Number.isFinite(snapshotPanelWidthPx) && snapshotPanelWidthPx > 0
-    ? Math.round(snapshotPanelWidthPx)
+  const snapshotFullViewMaxWidth = Math.round(clampValue(
+    Math.min(availableSnapshotViewportWidth, Math.max(1, snapshotFitAllViewportWidth)),
+    Math.min(120, availableSnapshotViewportWidth),
+    availableSnapshotViewportWidth,
+  ));
+  const snapshotManualViewportWidth = rawSnapshotPanelWidth > 0
+    ? Math.round(rawSnapshotPanelWidth)
     : 0;
   const snapshotViewportWidth = Math.round(clampValue(
     snapshotManualViewportWidth || Math.min(snapshotNaturalViewportWidth, snapshotFitAllViewportWidth),
-    Math.min(220, sidePanelWidth),
-    sidePanelWidth,
+    Math.min(120, snapshotFullViewMaxWidth),
+    snapshotFullViewMaxWidth,
   ));
   snapshotViewportWidthRef.current = snapshotViewportWidth;
   const snapshotViewportSx = {
@@ -3491,10 +3593,25 @@ function Show1DWidget() {
   const snapshotTileDisplayWidth = snapshotViewportWidth / Math.max(1, selectedImageColumns);
   const snapshotTileDisplayHeight = Math.ceil(snapshotTileDisplayWidth * snapshotTallestAspect);
   const snapshotFullGridHeight = snapshotTileDisplayHeight * selectedImageRows;
-  const snapshotGridMaxHeight = `${Math.round(clampValue(snapshotFullGridHeight, 220, snapshotGridHeightCap))}px`;
+  const snapshotGridHeight = Math.ceil(snapshotFullGridHeight);
   const snapshotProfilePlotHeight = Math.round(clampValue(Number.isFinite(snapshotProfileHeight) ? snapshotProfileHeight : 76, 44, 220));
   const snapshotHistogramDisplayWidth = Math.round(clampValue(Number.isFinite(snapshotHistogramWidth) ? snapshotHistogramWidth : 360, 110, Math.min(640, sidePanelWidth)));
   const snapshotHistogramDisplayHeight = Math.round(clampValue(Number.isFinite(snapshotHistogramHeight) ? snapshotHistogramHeight : 52, 36, 110));
+  const snapshotPanelContentHeight = showSnapshots && hasSnapshots
+    ? snapshotGridHeight
+      + 32
+      + (showSnapshotProfile ? snapshotProfilePlotHeight : 0)
+      + (selectedSnapshot >= 0 ? snapshotHistogramDisplayHeight + 42 : 0)
+      + (showStats ? 130 : 0)
+    : 0;
+  const plotNonCanvasHeightEstimate = showLegend && visibleTraceIndices.length > 0 ? 54 : 12;
+  const effectivePlotHeight = snapshotOverview && !plotHeightExplicit
+    ? Math.round(clampValue(
+      Math.max(plotHeight, snapshotPanelContentHeight - plotNonCanvasHeightEstimate),
+      260,
+      MAX_PLOT_HEIGHT,
+    ))
+    : plotHeight;
   const statsPanel = showStats && visibleTraceIndices.length > 0 ? (
     <Box data-testid="show1d-stats-table" sx={{ width: "100%", mb: 0.5 }}>
       <Box
@@ -3540,9 +3657,22 @@ function Show1DWidget() {
   const snapshotPanelControls = (
     <Box
       data-testid="show1d-panel-controls"
-      sx={{ ...controlRow, width: "100%", flexWrap: "wrap", border: "none", bgcolor: "transparent", px: 0, py: 0.25, mb: 0.25 }}
+      sx={{
+        ...controlRow,
+        width: "fit-content",
+        maxWidth: "100%",
+        flex: "0 1 auto",
+        flexWrap: "wrap",
+        rowGap: 0.25,
+        border: "none",
+        bgcolor: "transparent",
+        px: 0,
+        py: 0,
+        mb: 0,
+        minHeight: 28,
+      }}
     >
-      <Typography sx={{ ...typography.label, color: themeColors.textMuted, flexShrink: 0 }}>cols</Typography>
+      <Typography sx={{ ...toolbarLabelSx, flexShrink: 0 }}>cols</Typography>
       <Select
         size="small"
         value={rawSnapshotColumnCount}
@@ -3556,7 +3686,7 @@ function Show1DWidget() {
           <MenuItem key={value} value={value}>{value}</MenuItem>
         ))}
       </Select>
-      <Typography sx={{ ...typography.label, color: themeColors.textMuted, flexShrink: 0 }}>overlay</Typography>
+      <Typography sx={{ ...toolbarLabelSx, flexShrink: 0 }}>overlay</Typography>
       <Select
         size="small"
         value={resolvedSnapshotOverlayPosition}
@@ -3570,7 +3700,7 @@ function Show1DWidget() {
         <MenuItem value="bottom-left">bottom left</MenuItem>
         <MenuItem value="bottom-right">bottom right</MenuItem>
       </Select>
-      <Typography sx={{ ...typography.label, color: themeColors.textMuted, flexShrink: 0 }}>Profile</Typography>
+      <Typography sx={{ ...toolbarLabelSx, flexShrink: 0 }}>Profile</Typography>
       <Switch
         size="small"
         checked={Boolean(showSnapshotProfile)}
@@ -3581,7 +3711,7 @@ function Show1DWidget() {
         sx={{ ...switchStyles.small, flexShrink: 0 }}
         slotProps={{ input: { "aria-label": "Show snapshot line profile" } }}
       />
-      <Typography sx={{ ...typography.label, color: themeColors.textMuted, flexShrink: 0 }}>FFT</Typography>
+      <Typography sx={{ ...toolbarLabelSx, flexShrink: 0 }}>FFT</Typography>
       <Switch
         size="small"
         checked={Boolean(showSnapshotFft)}
@@ -3591,7 +3721,7 @@ function Show1DWidget() {
       />
       {showSnapshotFft && (
         <>
-          <Typography sx={{ ...typography.label, color: themeColors.textMuted, flexShrink: 0 }}>cmap</Typography>
+          <Typography sx={{ ...toolbarLabelSx, flexShrink: 0 }}>cmap</Typography>
           <Select
             size="small"
             value={COLORMAPS[snapshotFftCmap] ? snapshotFftCmap : "magma"}
@@ -3604,7 +3734,7 @@ function Show1DWidget() {
               <MenuItem key={name} value={name}>{name}</MenuItem>
             ))}
           </Select>
-          <Typography sx={{ ...typography.label, color: themeColors.textMuted, flexShrink: 0 }}>win</Typography>
+          <Typography sx={{ ...toolbarLabelSx, flexShrink: 0 }}>win</Typography>
           <Switch
             size="small"
             checked={Boolean(snapshotFftWindow)}
@@ -3616,6 +3746,145 @@ function Show1DWidget() {
       )}
     </Box>
   );
+  const panelToolbarWidth = sidePanelVisible
+    ? Math.round(showSnapshots && hasSnapshots ? snapshotViewportWidth : sidePanelWidth)
+    : 0;
+  const plotToolbarControls = (
+    <Stack
+      direction="row"
+      alignItems="center"
+      spacing={1}
+      useFlexGap
+      sx={{ flexWrap: "wrap", rowGap: 0.5, minHeight: 28, minWidth: 0 }}
+    >
+      <Stack direction="row" alignItems="center" spacing={0.5}>
+        <Typography sx={toolbarLabelSx}>Log</Typography>
+        <Switch
+          size="small"
+          checked={Boolean(logScale)}
+          onChange={(_, checked) => setLogScale(checked)}
+          sx={switchStyles.small}
+          slotProps={{ input: { "aria-label": "Use log scale" } }}
+        />
+      </Stack>
+      <Stack direction="row" alignItems="center" spacing={0.5}>
+        <Typography sx={toolbarLabelSx}>Stats</Typography>
+        <Switch
+          size="small"
+          checked={Boolean(showStats)}
+          onChange={(_, checked) => setShowStats(checked)}
+          sx={switchStyles.small}
+          slotProps={{ input: { "aria-label": "Show stats panel" } }}
+        />
+      </Stack>
+      <Stack direction="row" alignItems="center" spacing={0.5}>
+        <Typography sx={toolbarLabelSx}>Legend</Typography>
+        <Switch
+          size="small"
+          checked={Boolean(showLegend)}
+          onChange={(_, checked) => setShowLegend(checked)}
+          sx={switchStyles.small}
+          slotProps={{ input: { "aria-label": "Show legend" } }}
+        />
+      </Stack>
+    </Stack>
+  );
+  const topToolbarActions = (
+    <Box sx={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 1, flexWrap: "wrap", flex: "0 0 auto" }}>
+      {handoffEnabled && hasSnapshots && (
+        <>
+          <Button
+            size="small"
+            sx={compactButton}
+            onClick={(event) => setViewMenuAnchor(event.currentTarget)}
+            aria-label="Open view options"
+            aria-controls={viewMenuAnchor ? "show1d-view-menu" : undefined}
+            aria-expanded={viewMenuAnchor ? "true" : undefined}
+            aria-haspopup="menu"
+            title={handoffStatus || "View options"}
+          >
+            View
+          </Button>
+          <Menu
+            id="show1d-view-menu"
+            anchorEl={viewMenuAnchor}
+            open={Boolean(viewMenuAnchor)}
+            onClose={() => setViewMenuAnchor(null)}
+            MenuListProps={{ "aria-label": "View options" }}
+            {...themedTopMenuProps}
+          >
+            <MenuItem
+              onClick={handleHandoffToShow2D}
+              disabled={selectedGroupImageIndices.length === 0}
+              sx={{ fontSize: 12 }}
+            >
+              View selected as 2D
+            </MenuItem>
+          </Menu>
+          {handoffStatus && (
+            <Typography
+              sx={{
+                ...toolbarLabelSx,
+                color: handoffStatus.startsWith("View failed") ? "#b91c1c" : themeColors.textMuted,
+                maxWidth: 130,
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+              }}
+              title={handoffStatus}
+            >
+              {handoffStatus}
+            </Typography>
+          )}
+        </>
+      )}
+      <Button
+        size="small"
+        sx={{ ...compactButton, color: themeColors.accent }}
+        onClick={(event) => setExportAnchor(event.currentTarget)}
+        disabled={exportBusy}
+        title={localExportStatus || exportStatus || "Export traces, view, or standalone HTML"}
+      >
+        {exportBusy ? "Exporting" : "Export"}
+      </Button>
+      <Menu
+        anchorEl={exportAnchor}
+        open={Boolean(exportAnchor)}
+        onClose={() => setExportAnchor(null)}
+        anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
+        transformOrigin={{ vertical: "top", horizontal: "right" }}
+        {...themedTopMenuProps}
+      >
+        <MenuItem onClick={() => void handleExportSelect("html")} disabled={!exportEnabled} sx={{ fontSize: 12 }}>
+          <DownloadIcon fontSize="small" sx={{ mr: 1 }} /> HTML full float32 ({htmlSize})
+        </MenuItem>
+        <MenuItem onClick={() => void handleExportSelect("csv")} sx={{ fontSize: 12 }}>
+          <TableChartIcon fontSize="small" sx={{ mr: 1 }} /> CSV traces
+        </MenuItem>
+        <MenuItem onClick={() => void handleExportSelect("png")} sx={{ fontSize: 12 }}>
+          <ImageIcon fontSize="small" sx={{ mr: 1 }} /> PNG view
+        </MenuItem>
+      </Menu>
+      {(localExportStatus || exportStatus) && (
+        <Typography
+          sx={{
+            ...toolbarLabelSx,
+            maxWidth: 120,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+            color: (localExportStatus || exportStatus).startsWith("Export failed") ? "#b91c1c" : themeColors.textMuted,
+          }}
+          title={localExportStatus || exportStatus}
+        >
+          {localExportStatus || exportStatus}
+        </Typography>
+      )}
+      <Button size="small" sx={compactButton} disabled={!needsReset} onClick={resetRanges}>
+        Reset
+      </Button>
+    </Box>
+  );
 
   return (
     <Box
@@ -3623,7 +3892,7 @@ function Show1DWidget() {
       data-testid="show1d-root"
       sx={{
         width: "100%",
-        maxWidth: 1180,
+        maxWidth: "100%",
         bgcolor: themeColors.bg,
         color: themeColors.text,
         border: "none",
@@ -3635,8 +3904,8 @@ function Show1DWidget() {
       }}
     >
       {controlsVisible && (
-        <Box sx={{ px: 1.25, py: 0.75, bgcolor: themeColors.bg }}>
-          <Stack direction="row" alignItems="center" spacing={0.75} sx={{ minWidth: 0, mb: 0.75 }}>
+        <Box sx={{ px: 0, py: 0.75, bgcolor: themeColors.bg }}>
+          <Stack direction="row" alignItems="center" spacing={0.75} sx={{ minWidth: 0, mb: 0.75, px: 1.25 }}>
             <ShowChartIcon sx={{ fontSize: 18, color: themeColors.accent, flexShrink: 0 }} />
             {showTitle && (
               <Typography sx={{ fontWeight: 600, fontSize: 13, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
@@ -3644,133 +3913,59 @@ function Show1DWidget() {
               </Typography>
             )}
           </Stack>
-          <Stack direction="row" alignItems="center" spacing={1} useFlexGap sx={{ flexWrap: "wrap", rowGap: 0.5, minHeight: 28, width: "100%", maxWidth: "100%", boxSizing: "border-box" }}>
-            <Stack direction="row" alignItems="center" spacing={0.5}>
-              <Typography sx={toolbarLabelSx}>Log</Typography>
-              <Switch
-                size="small"
-                checked={Boolean(logScale)}
-                onChange={(_, checked) => setLogScale(checked)}
-                sx={switchStyles.small}
-                slotProps={{ input: { "aria-label": "Use log scale" } }}
-              />
-            </Stack>
-            <Stack direction="row" alignItems="center" spacing={0.5}>
-              <Typography sx={toolbarLabelSx}>Stats</Typography>
-              <Switch
-                size="small"
-                checked={Boolean(showStats)}
-                onChange={(_, checked) => setShowStats(checked)}
-                sx={switchStyles.small}
-                slotProps={{ input: { "aria-label": "Show stats panel" } }}
-              />
-            </Stack>
-            <Stack direction="row" alignItems="center" spacing={0.5}>
-              <Typography sx={toolbarLabelSx}>Legend</Typography>
-              <Switch
-                size="small"
-                checked={Boolean(showLegend)}
-                onChange={(_, checked) => setShowLegend(checked)}
-                sx={switchStyles.small}
-                slotProps={{ input: { "aria-label": "Show legend" } }}
-              />
-            </Stack>
-            <Box sx={{ flex: 1 }} />
-            <Box sx={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 1, flexWrap: "wrap", flex: "0 0 auto", ml: "auto" }}>
-              {handoffEnabled && hasSnapshots && (
+          <Box
+            data-testid="show1d-toolbar-grid"
+            sx={{
+              display: "grid",
+              gridTemplateColumns: mainGridTemplateColumns,
+              alignItems: "center",
+              columnGap: 0,
+              width: "100%",
+              minHeight: 28,
+              boxSizing: "border-box",
+            }}
+          >
+            <Box
+              data-testid="show1d-plot-toolbar"
+              sx={{
+                minWidth: 0,
+                pl: 0.75,
+                pr: sidePanelVisible ? 0.25 : 1.25,
+                display: "flex",
+                alignItems: "center",
+                gap: 1,
+              }}
+            >
+              {plotToolbarControls}
+              {!sidePanelVisible && (
                 <>
-                  <Button
-                    size="small"
-                    sx={compactButton}
-                    onClick={(event) => setViewMenuAnchor(event.currentTarget)}
-                    aria-label="Open view options"
-                    aria-controls={viewMenuAnchor ? "show1d-view-menu" : undefined}
-                    aria-expanded={viewMenuAnchor ? "true" : undefined}
-                    aria-haspopup="menu"
-                    title={handoffStatus || "View options"}
-                  >
-                    View
-                  </Button>
-                  <Menu
-                    id="show1d-view-menu"
-                    anchorEl={viewMenuAnchor}
-                    open={Boolean(viewMenuAnchor)}
-                    onClose={() => setViewMenuAnchor(null)}
-                    MenuListProps={{ "aria-label": "View options" }}
-                    {...themedTopMenuProps}
-                  >
-                    <MenuItem
-                      onClick={handleHandoffToShow2D}
-                      disabled={selectedGroupImageIndices.length === 0}
-                      sx={{ fontSize: 12 }}
-                    >
-                      View selected as 2D
-                    </MenuItem>
-                  </Menu>
-                  {handoffStatus && (
-                    <Typography
-                      sx={{
-                        ...toolbarLabelSx,
-                        color: handoffStatus.startsWith("View failed") ? "#b91c1c" : themeColors.textMuted,
-                        maxWidth: 130,
-                        overflow: "hidden",
-                        textOverflow: "ellipsis",
-                        whiteSpace: "nowrap",
-                      }}
-                      title={handoffStatus}
-                    >
-                      {handoffStatus}
-                    </Typography>
-                  )}
+                  <Box sx={{ flex: 1 }} />
+                  {topToolbarActions}
                 </>
               )}
-              <Button
-                size="small"
-                sx={{ ...compactButton, color: themeColors.accent }}
-                onClick={(event) => setExportAnchor(event.currentTarget)}
-                disabled={exportBusy}
-                title={localExportStatus || exportStatus || "Export traces, view, or standalone HTML"}
-              >
-                {exportBusy ? "Exporting" : "Export"}
-              </Button>
-              <Menu
-                anchorEl={exportAnchor}
-                open={Boolean(exportAnchor)}
-                onClose={() => setExportAnchor(null)}
-                anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
-                transformOrigin={{ vertical: "top", horizontal: "right" }}
-                {...themedTopMenuProps}
-              >
-                <MenuItem onClick={() => void handleExportSelect("html")} disabled={!exportEnabled} sx={{ fontSize: 12 }}>
-                  <DownloadIcon fontSize="small" sx={{ mr: 1 }} /> HTML full float32 ({htmlSize})
-                </MenuItem>
-                <MenuItem onClick={() => void handleExportSelect("csv")} sx={{ fontSize: 12 }}>
-                  <TableChartIcon fontSize="small" sx={{ mr: 1 }} /> CSV traces
-                </MenuItem>
-                <MenuItem onClick={() => void handleExportSelect("png")} sx={{ fontSize: 12 }}>
-                  <ImageIcon fontSize="small" sx={{ mr: 1 }} /> PNG view
-                </MenuItem>
-              </Menu>
-              {(localExportStatus || exportStatus) && (
-                <Typography
-                  sx={{
-                    ...toolbarLabelSx,
-                    maxWidth: 120,
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                    whiteSpace: "nowrap",
-                    color: (localExportStatus || exportStatus).startsWith("Export failed") ? "#b91c1c" : themeColors.textMuted,
-                  }}
-                  title={localExportStatus || exportStatus}
-                >
-                  {localExportStatus || exportStatus}
-                </Typography>
-              )}
-              <Button size="small" sx={compactButton} disabled={!needsReset} onClick={resetRanges}>
-                Reset
-              </Button>
             </Box>
-          </Stack>
+            {sidePanelVisible && (
+              <Box
+                data-testid="show1d-panel-toolbar"
+                sx={{
+                  width: `${panelToolbarWidth}px`,
+                  maxWidth: "100%",
+                  minWidth: 0,
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  gap: 1,
+                  flexWrap: "wrap",
+                  rowGap: 0.5,
+                }}
+              >
+                <Box sx={{ minWidth: 0, flex: "1 1 auto", display: "flex", alignItems: "center" }}>
+                  {showSnapshots && hasSnapshots && snapshotPanelControls}
+                </Box>
+                {topToolbarActions}
+              </Box>
+            )}
+          </Box>
         </Box>
       )}
       <Box
@@ -3779,15 +3974,19 @@ function Show1DWidget() {
         sx={{
           display: "grid",
           gridTemplateColumns: mainGridTemplateColumns,
-          alignItems: "stretch",
+          alignItems: "start",
           minHeight: { xs: 360, md: 0 },
-          height: mainGridViewportHeight,
+          height: "auto",
           maxHeight: mainGridViewportHeight,
           columnGap: 0,
           overflow: "hidden",
         }}
       >
-        <Box sx={{ minWidth: 0, pl: 0.75, pr: 0.25, py: 0.5 }}>
+        <Box
+          ref={plotPanelRef}
+          data-testid="show1d-plot-panel"
+          sx={{ alignSelf: "start", minWidth: 0, pl: 0.75, pr: 0.25, py: 0.5, position: "relative", overflow: "hidden" }}
+        >
           <Box ref={plotHostRef} sx={{ position: "relative", height: { xs: Math.max(260, Math.min(effectivePlotHeight, 520)), md: effectivePlotHeight }, minWidth: 0 }}>
             <canvas
               ref={canvasRef}
@@ -3825,27 +4024,6 @@ function Show1DWidget() {
                 <Typography sx={{ fontSize: 11, lineHeight: 1.25 }}>y {formatNumber(hover.y, 4)}</Typography>
               </Box>
             )}
-            <Box
-              className="show1d-plot-resize-handle"
-              data-testid="show1d-plot-resize"
-              aria-hidden="true"
-              onPointerDown={handlePlotResizePointerDown}
-              sx={{
-                position: "absolute",
-                right: 0,
-                bottom: 0,
-                width: 18,
-                height: 18,
-                zIndex: 6,
-                cursor: "nwse-resize",
-                opacity: 0.5,
-                pointerEvents: "auto",
-                touchAction: "none",
-                background: `linear-gradient(135deg, transparent 52%, ${themeColors.accent} 52%)`,
-                transition: "opacity 120ms ease",
-                "&:hover": { opacity: 0.95 },
-              }}
-            />
           </Box>
           {showLegend && visibleTraceIndices.length > 0 && (
             <Stack direction="row" spacing={1} sx={{ px: 1, py: 0.5, flexWrap: "wrap", rowGap: 0.5 }}>
@@ -3880,12 +4058,43 @@ function Show1DWidget() {
               ))}
             </Stack>
           )}
+          <Box
+            className="show1d-plot-resize-handle"
+            data-testid="show1d-plot-resize"
+            aria-hidden="true"
+            onPointerDown={handlePlotResizePointerDown}
+            sx={{
+              position: "absolute",
+              right: 0,
+              bottom: 0,
+              width: 28,
+              height: 28,
+              zIndex: 7,
+              cursor: "nwse-resize",
+              opacity: 0.68,
+              pointerEvents: "auto",
+              touchAction: "none",
+              "&::before": {
+                content: '""',
+                position: "absolute",
+                right: 5,
+                bottom: 5,
+                width: 12,
+                height: 12,
+                borderRight: `2px solid ${themeColors.accent}`,
+                borderBottom: `2px solid ${themeColors.accent}`,
+                opacity: 0.7,
+              },
+              "&:hover::before": { opacity: 1 },
+            }}
+          />
         </Box>
         {sidePanelVisible && (
           <Stack
             data-testid="show1d-side-panel"
             spacing={0.5}
             sx={{
+              alignSelf: "start",
               p: 0,
               minWidth: 0,
               maxHeight: mainGridViewportHeight,
@@ -3904,7 +4113,6 @@ function Show1DWidget() {
             )}
             {showSnapshots && hasSnapshots && (
               <Box sx={snapshotViewportSx}>
-                {snapshotPanelControls}
                 <Box
                   data-testid="show1d-snapshot-grid"
                   sx={{
@@ -3912,8 +4120,8 @@ function Show1DWidget() {
                     position: "relative",
                     gridTemplateColumns: `repeat(${selectedImageColumns}, minmax(0, 1fr))`,
                     gap: 0,
-                    maxHeight: snapshotGridMaxHeight,
-                    overflowY: "auto",
+                    height: `${snapshotGridHeight}px`,
+                    overflow: "hidden",
                     overscrollBehavior: "contain",
                     pr: 0,
                     border: "none",
@@ -3933,7 +4141,11 @@ function Show1DWidget() {
                         key={imageIdx}
                         title={imageLabel}
                         onMouseEnter={() => setHoverSnapshotImageIdx(imageIdx)}
+                        onMouseOver={() => setHoverSnapshotImageIdx(imageIdx)}
                         onMouseLeave={() => setHoverSnapshotImageIdx((current) => (current === imageIdx ? null : current))}
+                        onPointerEnter={() => setHoverSnapshotImageIdx(imageIdx)}
+                        onPointerOver={() => setHoverSnapshotImageIdx(imageIdx)}
+                        onPointerLeave={() => setHoverSnapshotImageIdx((current) => (current === imageIdx ? null : current))}
                         onFocus={() => setHoverSnapshotImageIdx(imageIdx)}
                         onBlur={(event) => {
                           if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
@@ -3947,7 +4159,9 @@ function Show1DWidget() {
                           overflow: "hidden",
                           outline: "none",
                           "&:hover .show1d-panel-hide-button, &:focus-within .show1d-panel-hide-button": {
+                            opacity: hideDisabled ? 0.28 : 1,
                             transform: "translateY(0)",
+                            pointerEvents: "auto",
                           },
                           "&:hover .show1d-tile-resize-handle, &:focus-within .show1d-tile-resize-handle": {
                             opacity: 0.9,
@@ -4098,10 +4312,28 @@ function Show1DWidget() {
                   </Box>
                 )}
                 {statsPanel}
-                <Box sx={{ ...controlRow, width: "100%", flexWrap: "nowrap", border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, mb: 0.5 }}>
+                <Box
+                  data-testid="show1d-snapshot-playback-controls"
+                  sx={{
+                    ...controlRow,
+                    width: `min(100%, ${SNAPSHOT_PLAYBACK_CONTROL_WIDTH}px)`,
+                    flexWrap: "nowrap",
+                    border: `1px solid ${themeColors.border}`,
+                    bgcolor: themeColors.controlBg,
+                    mb: 0.5,
+                  }}
+                >
                   <Stack direction="row" spacing={0} sx={{ flexShrink: 0 }}>
                     <Tooltip title="Previous Snapshot">
-                      <IconButton size="small" onClick={() => selectSnapshotGroup(Math.max(0, selectedGroup - 1))} sx={{ color: themeColors.textMuted, p: 0.25 }} aria-label="Previous snapshot">
+                      <IconButton
+                        size="small"
+                        onClick={() => {
+                          snapshotBounceDirectionRef.current = -1;
+                          selectSnapshotGroup(Math.max(0, selectedGroup - 1));
+                        }}
+                        sx={{ color: themeColors.textMuted, p: 0.25 }}
+                        aria-label="Previous snapshot"
+                      >
                         <FastRewindIcon sx={{ fontSize: 18 }} />
                       </IconButton>
                     </Tooltip>
@@ -4111,7 +4343,15 @@ function Show1DWidget() {
                       </IconButton>
                     </Tooltip>
                     <Tooltip title="Next Snapshot">
-                      <IconButton size="small" onClick={() => selectSnapshotGroup(Math.min(groupCount - 1, selectedGroup + 1))} sx={{ color: themeColors.textMuted, p: 0.25 }} aria-label="Next snapshot">
+                      <IconButton
+                        size="small"
+                        onClick={() => {
+                          snapshotBounceDirectionRef.current = 1;
+                          selectSnapshotGroup(Math.min(groupCount - 1, selectedGroup + 1));
+                        }}
+                        sx={{ color: themeColors.textMuted, p: 0.25 }}
+                        aria-label="Next snapshot"
+                      >
                         <FastForwardIcon sx={{ fontSize: 18 }} />
                       </IconButton>
                     </Tooltip>
@@ -4120,6 +4360,7 @@ function Show1DWidget() {
                         size="small"
                         onClick={() => {
                           setSnapshotPlaying(false);
+                          snapshotBounceDirectionRef.current = 1;
                           selectSnapshotGroup(0);
                         }}
                         sx={{ color: themeColors.textMuted, p: 0.25 }}
@@ -4145,6 +4386,22 @@ function Show1DWidget() {
                   <Typography sx={{ ...typography.value, color: themeColors.textMuted, minWidth: 18, textAlign: "right", flexShrink: 0 }}>
                     {clampSnapshotFps(snapshotFps)}
                   </Typography>
+                  <Typography sx={{ ...typography.label, color: themeColors.textMuted, flexShrink: 0 }}>loop</Typography>
+                  <Switch
+                    size="small"
+                    checked={Boolean(snapshotLoop)}
+                    onChange={() => setSnapshotLoop(!snapshotLoop)}
+                    sx={{ ...switchStyles.small, flexShrink: 0 }}
+                    slotProps={{ input: { "aria-label": "Toggle loop playback" } }}
+                  />
+                  <Typography sx={{ ...typography.label, color: themeColors.textMuted, flexShrink: 0 }}>bounce</Typography>
+                  <Switch
+                    size="small"
+                    checked={Boolean(snapshotBounce)}
+                    onChange={() => setSnapshotBounce(!snapshotBounce)}
+                    sx={{ ...switchStyles.small, flexShrink: 0 }}
+                    slotProps={{ input: { "aria-label": "Toggle bounce playback" } }}
+                  />
                   <Slider
                     size="small"
                     value={Math.max(0, selectedGroup)}
@@ -4155,7 +4412,7 @@ function Show1DWidget() {
                     valueLabelDisplay="auto"
                     valueLabelFormat={(value) => `${Number(value) + 1}/${Math.max(1, groupCount)}`}
                     onChange={(_, value) => selectSnapshotGroup(Array.isArray(value) ? value[0] : value)}
-                    sx={{ ...sliderStyles.small, flex: "1 1 130px", minWidth: 86, color: themeColors.accent, "& .MuiSlider-mark": { bgcolor: themeColors.accent, width: 4, height: 4, borderRadius: "50%", top: "50%", transform: "translate(-50%, -50%)" } }}
+                    sx={{ ...sliderStyles.small, flex: "0 1 auto", width: `${snapshotTimelineWidth}px`, minWidth: 140, color: themeColors.accent, "& .MuiSlider-mark": { bgcolor: themeColors.accent, width: 4, height: 4, borderRadius: "50%", top: "50%", transform: "translate(-50%, -50%)" } }}
                     aria-label={`Current snapshot group (${Math.max(0, selectedGroup) + 1} of ${Math.max(1, groupCount)})`}
                   />
                 </Box>

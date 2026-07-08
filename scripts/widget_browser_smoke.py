@@ -745,7 +745,7 @@ def _semantic_checks(page, row: dict[str, Any], canvas_count: int) -> dict[str, 
     if variant == "show4dstem-compare":
         compare = page.evaluate(
             """() => {
-              const panels = [...document.querySelectorAll('[aria-label^="Show4DSTEM compare panel"]')];
+              const panels = [...document.querySelectorAll('[aria-label^="Show4DSTEM multiple panel"]')];
               const rowTops = [];
               const rowCounts = [];
               const rowFor = (top) => {
@@ -787,50 +787,51 @@ def _semantic_checks(page, row: dict[str, Any], canvas_count: int) -> dict[str, 
         )
         compare_actions: dict[str, Any] = {}
         try:
-            star = page.locator('.show4dstem-compare-star[data-frame="1"]').nth(0)
+            star = page.locator('.show4dstem-compare-star-button[data-frame="1"]').nth(0)
             compare_actions["star_before"] = star.get_attribute("aria-label")
             star.click(timeout=2000)
             page.wait_for_timeout(120)
-            compare_actions["star_after"] = page.locator('.show4dstem-compare-star[data-frame="1"]').nth(0).get_attribute("aria-label")
+            compare_actions["star_after"] = page.locator('.show4dstem-compare-star-button[data-frame="1"]').nth(0).get_attribute("aria-label")
 
             page.locator(".show4dstem-compare-reorder").nth(0).click(timeout=2000)
-            page.locator('[aria-label="Show4DSTEM compare panel 1"]').nth(0).click(timeout=2000)
-            page.locator('[aria-label="Show4DSTEM compare panel 3"]').nth(0).click(timeout=2000)
+            page.locator('[aria-label="Show4DSTEM multiple panel 1"]').nth(0).click(timeout=2000, force=True)
+            page.locator('[aria-label="Show4DSTEM multiple panel 3"]').nth(0).click(timeout=2000, force=True)
             page.wait_for_function(
                 """() => {
-                    const panel = document.querySelector('[aria-label^="Show4DSTEM compare panel"]');
+                    const panel = document.querySelector('[aria-label^="Show4DSTEM multiple panel"]');
                     return panel && panel.textContent.includes('scan-1');
                 }""",
                 timeout=4000,
             )
             compare_actions["after_reorder"] = page.evaluate(
-                """() => [...document.querySelectorAll('[aria-label^="Show4DSTEM compare panel"]')]
+                """() => [...document.querySelectorAll('[aria-label^="Show4DSTEM multiple panel"]')]
                     .slice(0, 4)
                     .map((panel) => panel.textContent.trim())"""
             )
 
-            page.locator('.show4dstem-compare-hide[data-frame="1"]').nth(0).click(timeout=2000)
+            page.locator('.show4dstem-compare-hide-button[data-frame="1"]').nth(0).click(timeout=2000, force=True)
             page.wait_for_function(
-                "() => document.querySelectorAll('[aria-label^=\"Show4DSTEM compare panel\"]').length === 13",
+                "() => document.querySelectorAll('[aria-label^=\"Show4DSTEM multiple panel\"]').length === 13",
                 timeout=4000,
             )
-            compare_actions["count_after_hide"] = page.locator('[aria-label^="Show4DSTEM compare panel"]').count()
-            page.locator(".show4dstem-compare-show-all").nth(0).click(timeout=2000)
+            compare_actions["count_after_hide"] = page.locator('[aria-label^="Show4DSTEM multiple panel"]').count()
+            page.locator(".show4dstem-compare-hidden-menu").nth(0).click(timeout=2000)
+            page.locator('[aria-label="Show Show4DSTEM multiple panel 2"]').nth(0).click(timeout=2000)
             page.wait_for_function(
-                "() => document.querySelectorAll('[aria-label^=\"Show4DSTEM compare panel\"]').length === 14",
+                "() => document.querySelectorAll('[aria-label^=\"Show4DSTEM multiple panel\"]').length === 14",
                 timeout=4000,
             )
-            compare_actions["count_after_show_all"] = page.locator('[aria-label^="Show4DSTEM compare panel"]').count()
+            compare_actions["count_after_show_all"] = page.locator('[aria-label^="Show4DSTEM multiple panel"]').count()
             page.locator(".show4dstem-compare-reset").nth(0).click(timeout=2000)
             page.wait_for_function(
                 """() => {
-                    const panel = document.querySelector('[aria-label^="Show4DSTEM compare panel"]');
+                    const panel = document.querySelector('[aria-label^="Show4DSTEM multiple panel"]');
                     return panel && panel.textContent.includes('scan-0');
                 }""",
                 timeout=4000,
             )
             compare_actions["after_reset"] = page.evaluate(
-                """() => [...document.querySelectorAll('[aria-label^="Show4DSTEM compare panel"]')]
+                """() => [...document.querySelectorAll('[aria-label^="Show4DSTEM multiple panel"]')]
                     .slice(0, 4)
                     .map((panel) => panel.textContent.trim())"""
             )
@@ -863,8 +864,9 @@ def _semantic_checks(page, row: dict[str, Any], canvas_count: int) -> dict[str, 
             for item in compare.get("before", [])
         ):
             errors.append(f"Show4DSTEM compare grid has tiny/invalid panels: {compare}")
-        if "Compare grid" not in str(compare.get("text", "")):
-            errors.append("Show4DSTEM compare grid label is not visible")
+        compare_text = str(compare.get("text", ""))
+        if "Multiple grid" not in compare_text and "Compare grid" not in compare_text:
+            errors.append("Show4DSTEM multiple grid label is not visible")
         if not after_frame_text:
             errors.append("Show4DSTEM compare panel click did not select the second dataset")
         if compare_actions.get("error"):

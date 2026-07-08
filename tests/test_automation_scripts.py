@@ -615,8 +615,21 @@ def test_widget_performance_smoke_writes_browser_plan(tmp_path: Path) -> None:
     report = json.loads((artifact_dir / "report.json").read_text(encoding="utf-8"))
     plan = json.loads((artifact_dir / "browser-plan.json").read_text(encoding="utf-8"))
     assert (artifact_dir / "index.html").exists()
-    assert report["targets"]["show2d"] == {"panels": 2, "size": 32}
-    assert report["targets"]["show3d"] == {"panels": 2, "frames": 3, "size": 32}
+    assert report["targets"]["show2d"] == {
+        "requested_panels": 2,
+        "pages": 2,
+        "panels_per_page": 1,
+        "total_panels": 2,
+        "size": 32,
+    }
+    assert report["targets"]["show3d"] == {
+        "requested_panels": 2,
+        "pages": 2,
+        "panels_per_page": 1,
+        "total_panels": 2,
+        "frames": 3,
+        "size": 32,
+    }
     assert len(report["exports"]) == 4
     assert plan["target_fps"] == 30
     assert {page["widget"] for page in plan["pages"]} == {"show2d", "show3d"}

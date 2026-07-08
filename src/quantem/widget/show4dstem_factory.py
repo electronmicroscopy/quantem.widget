@@ -10,6 +10,8 @@ should normally reach it through ``Show4DSTEM(load(..., backend="mps"))``.
 """
 from __future__ import annotations
 
+import os
+import pathlib
 from typing import Any
 
 from quantem.widget.show4dstem import Show4DSTEM as _Show4DSTEMBase
@@ -111,8 +113,193 @@ def Show4DSTEM(data: Any, **kwargs: Any) -> Any:
     return _Show4DSTEMBase(data, **kwargs)
 
 
+def _normalise_gpus(gpus) -> list[int] | None:
+    if gpus is None:
+        return None
+    if isinstance(gpus, int):
+        return [int(gpus)]
+    out = [int(gpu) for gpu in gpus]
+    if not out:
+        raise ValueError("gpus must be None, an int, or a non-empty sequence of GPU ids.")
+    return out
+
+
+def _master_label(master) -> str:
+    name = os.path.basename(str(master))
+    return name[:-len("_master.h5")] if name.endswith("_master.h5") else name
+
+
+def from_folder(
+    folder,
+    *,
+    pattern: str = "*_master.h5",
+    recursive: bool = True,
+    scan_size: int | None = None,
+    ready_only: bool = True,
+    gpus=None,
+    page_budget: int | str | None = "auto",
+    det_bin: int = 4,
+    dtype: str = "u8",
+    backend: str | None = None,
+    load_kwargs: dict[str, Any] | None = None,
+    watch: bool = False,
+    watch_interval: float = 2.0,
+    page_max_vram_fraction: float = 0.75,
+    page_reserve_vram_bytes: int | None = None,
+    page_max_vram_bytes: int | dict | None = None,
+    view_mode: str = "multiple",
+    compare_cols: int = 3,
+    compare_max_panels: int = 12,
+    verbose: bool = True,
+    **viewer_kwargs: Any,
+) -> Any:
+    """Open a lazy, folder-backed Show4DSTEM over ready ``*_master.h5`` files.
+
+    This is the direct many-master browse API. It differs from ``load(folder)``
+    by loading only the first ready master for shape and first paint; remaining
+    masters are lazy slots and allocate GPU memory only when selected or shown in
+    the visible multiple grid. ``poll_folder()`` / ``watch_folder()`` append new
+    ready masters as lazy slots without rebuilding the widget.
+    """
+    import torch
+    from quantem.widget.data import Dataset5dstem
+    from quantem.widget.io import discover_masters, is_master_ready
+    from quantem.widget import load
+
+    if backend == "mps":
+        from quantem.widget.multidataset_mps import load_macbook_datasets
+
+        live = load_macbook_datasets(
+            folder,
+            det_bin=det_bin,
+            scan_size=scan_size,
+            verbose=verbose,
+            skip_mps_memory_check=(load_kwargs or {}).get("skip_mps_memory_check"),
+        )
+        viewer = Show4DSTEM(
+            live,
+            view_mode=view_mode,
+            compare_cols=compare_cols,
+            compare_max_panels=compare_max_panels,
+            verbose=verbose,
+            **viewer_kwargs,
+        )
+        if watch:
+            live.watch_master_folder(folder, interval=watch_interval, scan_size=scan_size)
+        return viewer
+
+    gpu_ids = _normalise_gpus(gpus)
+    folder_path = pathlib.Path(folder).expanduser().resolve()
+    scan_shape = (int(scan_size), int(scan_size)) if scan_size else None
+    masters = discover_masters(
+        str(folder_path),
+        pattern=pattern,
+        recursive=recursive,
+        scan_shape=scan_shape,
+        verbose=False,
+    )
+    if ready_only:
+        masters = [master for master in masters if is_master_ready(master)]
+    if not masters:
+        raise ValueError(
+            f"No ready {pattern!r} files found in {folder_path}. "
+            "Wait for linked data files to finish writing, or pass ready_only=False "
+            "if you know the masters are complete."
+        )
+
+    load_options = dict(load_kwargs or {})
+    if backend is not None:
+        load_options.setdefault("backend", backend)
+
+    def load_master(master, idx: int) -> torch.Tensor:
+        result = load(
+            master,
+            det_bin=det_bin,
+            dtype=dtype,
+            verbose=False,
+            **load_options,
+        )
+        data = result.data if hasattr(result, "_fields") and "data" in result._fields else result
+        tensor = data if isinstance(data, torch.Tensor) else torch.from_dlpack(data)
+        if gpu_ids is not None:
+            tensor = tensor.to(f"cuda:{gpu_ids[idx % len(gpu_ids)]}")
+        return tensor
+
+    first_tensor = None
+    first_master = None
+    first_original_idx = 0
+    for original_idx, master in enumerate(masters):
+        try:
+            first_tensor = load_master(master, original_idx)
+        except (FileNotFoundError, ValueError, RuntimeError):
+            if ready_only:
+                continue
+            raise
+        first_master = master
+        first_original_idx = original_idx
+        break
+    if first_tensor is None or first_master is None:
+        raise ValueError(f"No readable {pattern!r} files found in {folder_path}.")
+
+    kept_masters = [first_master, *masters[first_original_idx + 1:]]
+
+    def make_loader(master, idx: int):
+        label = _master_label(master)
+
+        def _loader(path=master, load_idx=idx):
+            return load_master(path, load_idx)
+
+        return label, _loader
+
+    names: list[str] = []
+    loaders = []
+    for idx, master in enumerate(kept_masters):
+        label, loader = make_loader(master, idx)
+        names.append(label)
+        loaders.append(loader)
+
+    series = Dataset5dstem.from_lazy_loaders(
+        loaders,
+        shape=(len(loaders), *tuple(first_tensor.shape)),
+        dtype=first_tensor.dtype,
+        initial_frames={0: first_tensor},
+        name=f"Show4DSTEM folder: {folder_path.name}",
+    )
+    viewer_kwargs.setdefault("frame_dim_label", "Dataset")
+    viewer_kwargs.setdefault("frame_labels", names)
+    viewer_kwargs.setdefault("view_mode", view_mode)
+    viewer_kwargs.setdefault("compare_cols", compare_cols)
+    viewer_kwargs.setdefault("compare_max_panels", compare_max_panels)
+    viewer_kwargs.setdefault("verbose", verbose)
+    widget = _Show4DSTEMBase(
+        series,
+        page_budget=page_budget,
+        page_device=gpu_ids,
+        page_max_vram_fraction=page_max_vram_fraction,
+        page_reserve_vram_bytes=page_reserve_vram_bytes,
+        page_max_vram_bytes=page_max_vram_bytes,
+        **viewer_kwargs,
+    )
+    widget._attach_folder_source(
+        folder=folder_path,
+        pattern=pattern,
+        recursive=recursive,
+        scan_shape=scan_shape,
+        ready_only=ready_only,
+        known_masters=kept_masters,
+        make_loader=make_loader,
+    )
+    if watch:
+        widget.watch_folder(interval=watch_interval)
+    return widget
+
+
+Show4DSTEM.from_folder = from_folder  # type: ignore[attr-defined]
+
+
 __all__ = [
     "Show4DSTEM",
+    "from_folder",
     "is_mps_show4dstem_payload",
     "show4dstem_backend_kind",
 ]

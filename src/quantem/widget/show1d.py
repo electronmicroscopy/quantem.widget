@@ -39,6 +39,9 @@ _DEFAULT_COLORS = [
     "#F0E442",
     "#999999",
 ]
+_MAX_SIDE_PANEL_WIDTH_PX = 1600
+_MAX_SNAPSHOT_PANEL_WIDTH_PX = 1600
+_MAX_PLOT_HEIGHT_PX = 960
 
 _VALID_IMAGE_CMAPS = {
     "inferno",
@@ -267,12 +270,19 @@ class Show1D(anywidget.AnyWidget):
         Display size, in CSS pixels, for the draggable snapshot contrast
         histogram. The histogram is independent of the reconstruction grid
         width so overnight dashboards can stay compact.
+    snapshot_loop : bool, default True
+        Continue playback after reaching a snapshot endpoint. When disabled,
+        playback stops at the final endpoint.
+    snapshot_bounce : bool, default False
+        Reverse direction at snapshot endpoints instead of wrapping from the
+        final group back to the first.
     snapshot_thumbnail_size : int, default 48
         Size of plot-embedded snapshot thumbnails in pixels.
     snapshot_panel_width_px : int, default 0
         Initial snapshot reconstruction panel width in pixels. Use ``0`` for
         automatic fit-to-view sizing; dragging the snapshot grid corner updates
-        this value in the live widget.
+        this value in the live widget. Values are clamped to the available
+        frontend width, up to 1600 pixels.
     snapshot_columns : int, default 0
         Number of columns used for the side-panel snapshot image grid. Use
         ``0`` for automatic overview columns, or 1 through 8 for a fixed count.
@@ -409,6 +419,8 @@ class Show1D(anywidget.AnyWidget):
     prefer_webgpu = traitlets.Bool(True).tag(sync=True)
     snapshot_playing = traitlets.Bool(False).tag(sync=True)
     snapshot_fps = traitlets.Int(2).tag(sync=True)
+    snapshot_loop = traitlets.Bool(True).tag(sync=True)
+    snapshot_bounce = traitlets.Bool(False).tag(sync=True)
 
     profile_image_bytes = traitlets.Bytes(b"").tag(sync=True)
     profile_image_height = traitlets.Int(0).tag(sync=True)
@@ -488,6 +500,8 @@ class Show1D(anywidget.AnyWidget):
         snapshot_profile_height: int = 76,
         snapshot_histogram_width: int = 360,
         snapshot_histogram_height: int = 52,
+        snapshot_loop: bool = True,
+        snapshot_bounce: bool = False,
         starred_snapshot_image_labels: Sequence[str] | None = None,
         hidden_snapshot_image_labels: Sequence[str] | None = None,
         trial_notes: Mapping[str, str] | None = None,
@@ -558,14 +572,14 @@ class Show1D(anywidget.AnyWidget):
         self.show_controls = bool(ui["show_controls"])
         self.controls_collapsed = bool(ui["controls_collapsed"])
         self.line_width = float(line_width)
-        self.plot_height_px = max(220, min(720, int(plot_height_px)))
-        self.side_panel_width_px = max(300, min(960, int(side_panel_width_px)))
+        self.plot_height_px = max(220, min(_MAX_PLOT_HEIGHT_PX, int(plot_height_px)))
+        self.side_panel_width_px = max(300, min(_MAX_SIDE_PANEL_WIDTH_PX, int(side_panel_width_px)))
         self.profile_width = max(1, int(profile_width))
         self.image_cmap = self._normalise_image_cmap(image_cmap)
         self.snapshot_contrast_preset = self._normalise_snapshot_contrast_preset(snapshot_contrast_preset)
         self.snapshot_contrast_range = self._normalise_snapshot_contrast_range(snapshot_contrast_range)
         self.snapshot_thumbnail_size = max(24, min(112, int(snapshot_thumbnail_size)))
-        self.snapshot_panel_width_px = max(0, min(960, int(snapshot_panel_width_px)))
+        self.snapshot_panel_width_px = max(0, min(_MAX_SNAPSHOT_PANEL_WIDTH_PX, int(snapshot_panel_width_px)))
         self.snapshot_columns = max(0, min(8, int(snapshot_columns)))
         self.snapshot_overlay_position = self._normalise_snapshot_overlay_position(
             snapshot_overlay_position
@@ -596,6 +610,8 @@ class Show1D(anywidget.AnyWidget):
         self.snapshot_profile_height = max(44, min(220, int(snapshot_profile_height)))
         self.snapshot_histogram_width = max(110, min(640, int(snapshot_histogram_width)))
         self.snapshot_histogram_height = max(36, min(110, int(snapshot_histogram_height)))
+        self.snapshot_loop = bool(snapshot_loop)
+        self.snapshot_bounce = bool(snapshot_bounce)
         self.starred_snapshot_image_labels = self._normalise_trial_labels(starred_snapshot_image_labels or [])
         self.hidden_snapshot_image_labels = self._normalise_trial_labels(hidden_snapshot_image_labels or [])
         self.trial_notes = self._normalise_trial_notes(trial_notes or {})
@@ -653,11 +669,11 @@ class Show1D(anywidget.AnyWidget):
 
     @traitlets.validate("plot_height_px")
     def _validate_plot_height_px(self, proposal: dict[str, Any]) -> int:
-        return max(220, min(720, int(proposal["value"])))
+        return max(220, min(_MAX_PLOT_HEIGHT_PX, int(proposal["value"])))
 
     @traitlets.validate("side_panel_width_px")
     def _validate_side_panel_width_px(self, proposal: dict[str, Any]) -> int:
-        return max(300, min(960, int(proposal["value"])))
+        return max(300, min(_MAX_SIDE_PANEL_WIDTH_PX, int(proposal["value"])))
 
     @traitlets.validate("snapshot_thumbnail_size")
     def _validate_snapshot_thumbnail_size(self, proposal: dict[str, Any]) -> int:
@@ -665,7 +681,7 @@ class Show1D(anywidget.AnyWidget):
 
     @traitlets.validate("snapshot_panel_width_px")
     def _validate_snapshot_panel_width_px(self, proposal: dict[str, Any]) -> int:
-        return max(0, min(960, int(proposal["value"])))
+        return max(0, min(_MAX_SNAPSHOT_PANEL_WIDTH_PX, int(proposal["value"])))
 
     @traitlets.validate("snapshot_fps")
     def _validate_snapshot_fps(self, proposal: dict[str, Any]) -> int:
@@ -1352,9 +1368,13 @@ class Show1D(anywidget.AnyWidget):
         self.markers = []
         return self
 
-    def play(self) -> Self:
+    def play(self, *, loop: bool | None = None, bounce: bool | None = None) -> Self:
         """Start cycling through snapshot groups in the frontend."""
 
+        if loop is not None:
+            self.snapshot_loop = bool(loop)
+        if bounce is not None:
+            self.snapshot_bounce = bool(bounce)
         self.snapshot_playing = True
         return self
 
@@ -1919,6 +1939,8 @@ class Show1D(anywidget.AnyWidget):
             "prefer_webgpu": self.prefer_webgpu,
             "snapshot_playing": self.snapshot_playing,
             "snapshot_fps": self.snapshot_fps,
+            "snapshot_loop": self.snapshot_loop,
+            "snapshot_bounce": self.snapshot_bounce,
             "profile_line": list(self.profile_line),
             "profile_width": self.profile_width,
             "report_metadata": _json_safe(dict(self.report_metadata)),
@@ -1959,6 +1981,10 @@ class Show1D(anywidget.AnyWidget):
                     value = max(0, int(value))
                 elif key == "snapshot_fps":
                     value = max(1, min(24, int(round(float(value)))))
+                elif key == "snapshot_loop":
+                    value = bool(value)
+                elif key == "snapshot_bounce":
+                    value = bool(value)
                 elif key == "snapshot_profile_line":
                     value = self._normalise_profile_line(value)
                 elif key == "snapshot_profile_height":
@@ -2991,6 +3017,8 @@ class Show1D(anywidget.AnyWidget):
         clone.scale_bar_visible = self.scale_bar_visible
         clone.snapshot_playing = self.snapshot_playing
         clone.snapshot_fps = self.snapshot_fps
+        clone.snapshot_loop = self.snapshot_loop
+        clone.snapshot_bounce = self.snapshot_bounce
         clone.show_snapshot_profile = self.show_snapshot_profile
         clone.snapshot_profile_line = list(self.snapshot_profile_line)
         clone.snapshot_profile_height = self.snapshot_profile_height

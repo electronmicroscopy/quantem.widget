@@ -72,10 +72,11 @@ user-path checks called out in the runbook before tagging.
 Interactive speed is a required part of widget correctness. For any frontend,
 WebGPU, notebook-state, or export change that can affect a widget interaction,
 drive the affected widget in JupyterLab or standalone HTML and verify that the
-change did not regress responsiveness. Use the widget's debug HUD or another
-direct timing signal when available, and report the measured FPS/latency in the
-handoff or final summary. Do not rely only on unit tests for interaction-heavy
-changes.
+change did not regress responsiveness. For Show2D, Show3D, and Show4DSTEM, use
+`debug=True` when an internal browser-side FPS badge would help an agent or
+human reviewer see responsiveness while driving the widget. Report the measured
+FPS/latency and the browser report path in the handoff or final summary. Do not
+rely only on unit tests or the debug badge for interaction-heavy changes.
 
 For UI performance patterns and known interaction mistakes, read
 `docs/maintainer/widget-performance.md`. In particular, cursor labels, hover

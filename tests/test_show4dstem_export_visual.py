@@ -617,26 +617,59 @@ def _assert_multiple_columns_control_in_grid_header(page) -> dict:
           };
           const combo = [...document.querySelectorAll('[role="combobox"]')]
             .find(node => node.getAttribute('aria-label') === 'Show4DSTEM multiple columns');
+          const hiddenButton = document.querySelector('[aria-label="Show4DSTEM hidden multiple panels"]');
           const firstPanel = document.querySelector('[role="button"][aria-label="Show4DSTEM multiple panel 1"]');
-          if (!combo || !firstPanel) return {error: 'missing columns control or first multiple panel'};
+          if (!combo || !hiddenButton || !firstPanel) return {error: 'missing columns control, hidden menu, or first multiple panel'};
           const comboRect = rect(combo);
+          const hiddenButtonRect = rect(hiddenButton);
           const panelRect = rect(firstPanel);
           const colsRects = textRects('Cols');
           const sameRowFft = textRects('FFT')
-            .filter(r => Math.abs(((r.top + r.bottom) / 2) - ((comboRect.top + comboRect.bottom) / 2)) < 14)
-            .sort((a, b) => Math.abs(a.left - comboRect.right) - Math.abs(b.left - comboRect.right))[0];
+            .filter(r => Math.abs(((r.top + r.bottom) / 2) - ((hiddenButtonRect.top + hiddenButtonRect.bottom) / 2)) < 14)
+            .sort((a, b) => Math.abs(a.left - hiddenButtonRect.right) - Math.abs(b.left - hiddenButtonRect.right))[0];
           const gridLabel = textRects('Multiple grid |', false)
             .sort((a, b) => a.top - b.top)[0];
-          return {comboRect, panelRect, colsRects, sameRowFft, gridLabel};
+          return {comboRect, hiddenButtonRect, panelRect, colsRects, sameRowFft, gridLabel};
         }"""
     )
     assert "error" not in result, result
     assert len(result["colsRects"]) == 1, result
     assert result["comboRect"]["bottom"] < result["panelRect"]["top"], result
     assert result["sameRowFft"], result
-    assert result["comboRect"]["right"] <= result["sameRowFft"]["left"] + 2, result
+    assert result["comboRect"]["right"] <= result["hiddenButtonRect"]["left"] + 2, result
+    assert result["hiddenButtonRect"]["right"] <= result["sameRowFft"]["left"] + 2, result
     assert result["gridLabel"]["right"] <= result["colsRects"][0]["left"] + 4, result
     return result
+
+
+def _assert_multiple_hidden_menu_and_star_controls(page) -> dict:
+    panel = page.locator('[role="button"][aria-label="Show4DSTEM multiple panel 2"]')
+    assert panel.count() == 1
+    panel.hover()
+    page.wait_for_timeout(150)
+
+    star = page.locator('[aria-label="Star Show4DSTEM multiple panel 2"]')
+    assert star.count() == 1
+    star.click()
+    page.wait_for_timeout(150)
+    assert page.locator('[aria-label="Unstar Show4DSTEM multiple panel 2"]').count() == 1
+
+    hide = page.locator('[aria-label="Hide Show4DSTEM multiple panel 2"]')
+    assert hide.count() == 1
+    hide.click()
+    page.wait_for_timeout(500)
+    assert panel.count() == 0
+
+    menu = page.get_by_role("button", name="Show4DSTEM hidden multiple panels")
+    assert menu.count() == 1
+    menu_text = menu.inner_text()
+    assert "1" in menu_text, menu_text
+    menu.click()
+    page.get_by_role("menuitem", name="Show Show4DSTEM multiple panel 2").click()
+    page.wait_for_timeout(500)
+    assert page.locator('[role="button"][aria-label="Show4DSTEM multiple panel 2"]').count() == 1
+    assert page.locator('[aria-label="Unstar Show4DSTEM multiple panel 2"]').count() == 1
+    return {"menu_text_after_hide": menu_text}
 
 
 def _click_multiple_panel(page, panel_number: int) -> None:
@@ -742,6 +775,7 @@ def test_exported_show4dstem_real_data_visual_smoke(tmp_path: Path) -> None:
                 _open_page(page, f"http://127.0.0.1:{port}/{pages['multiple-cols4'].name}", multiple4_title, 12)
                 layout4 = _assert_multiple_grid_layout(page, expected_cols=4)
                 cols_header4 = _assert_multiple_columns_control_in_grid_header(page)
+                hidden_star4 = _assert_multiple_hidden_menu_and_star_controls(page)
                 resize4 = _resize_multiple_panel(page, panel_number=1)
                 layout4_after_resize = _assert_multiple_grid_layout(page, expected_cols=4)
                 label4 = _assert_multiple_coordinate_label_once(page)
@@ -776,6 +810,7 @@ def test_exported_show4dstem_real_data_visual_smoke(tmp_path: Path) -> None:
                         "multiple_cols2_pixels": multiple2_pixels,
                         "multiple_cols4_layout": layout4,
                         "multiple_cols4_columns_header": cols_header4,
+                        "multiple_cols4_hidden_star_controls": hidden_star4,
                         "multiple_cols4_resize": resize4,
                         "multiple_cols4_layout_after_resize": layout4_after_resize,
                         "multiple_cols4_coordinate_label": label4,

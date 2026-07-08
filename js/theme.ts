@@ -123,10 +123,10 @@ export function detectTheme(): ThemeInfo {
   }
 
   // Final fallback: check body background luminance
-  const bg = getComputedStyle(document.body).backgroundColor;
+  const bg = document.body ? getComputedStyle(document.body).backgroundColor : "";
   return {
     environment: "unknown",
-    theme: isColorDark(bg) ? "dark" : "light",
+    theme: bg && isColorDark(bg) ? "dark" : "light",
   };
 }
 
@@ -142,9 +142,13 @@ export function useTheme(forceLight = false): { themeInfo: ThemeInfo; colors: Th
     mediaQuery?.addEventListener?.('change', handleChange);
 
     const observer = new MutationObserver(() => setDetected(detectTheme()));
-    observer.observe(document.body, { attributes: true, attributeFilter: ['data-jp-theme-light', 'class'] });
+    if (document.body) {
+      observer.observe(document.body, { attributes: true, attributeFilter: ['data-jp-theme-light', 'class'] });
+    }
     // <html> carries the Sphinx/PyData docs light-dark toggle (data-theme / data-mode).
-    observer.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme', 'data-mode', 'class'] });
+    if (document.documentElement) {
+      observer.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme', 'data-mode', 'class'] });
+    }
 
     return () => {
       mediaQuery?.removeEventListener?.('change', handleChange);

@@ -411,6 +411,8 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
         frontend and Python can call ``expand_controls()`` later.
     show_stats : bool, default True
         Show statistics (mean, min, max, std).
+    debug : bool, default False
+        Show a compact frontend FPS/debug badge in the widget title row.
     log_scale : bool, default False
         Use log scale for intensity mapping.
     auto_contrast : bool, default False
@@ -623,6 +625,7 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
     is_rgb = traitlets.List(traitlets.Bool(), default_value=[]).tag(sync=True)
     starred = traitlets.List(traitlets.Int()).tag(sync=True)
     hidden_panels = traitlets.List(traitlets.Int(), default_value=[]).tag(sync=True)
+    hidden_page_slots = traitlets.List(traitlets.Int(), default_value=[]).tag(sync=True)
     panel_order = traitlets.List(traitlets.Int(), default_value=[]).tag(sync=True)
     show_panel_titles = traitlets.Bool(True).tag(sync=True)
     panel_title_font_size = traitlets.Int(11).tag(sync=True)
@@ -672,6 +675,7 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
     show_controls = traitlets.Bool(True).tag(sync=True)
     controls_collapsed = traitlets.Bool(False).tag(sync=True)
     show_stats = traitlets.Bool(True).tag(sync=True)
+    debug = traitlets.Bool(False).tag(sync=True)
     stats_mean = traitlets.List(traitlets.Float()).tag(sync=True)
     stats_min = traitlets.List(traitlets.Float()).tag(sync=True)
     stats_max = traitlets.List(traitlets.Float()).tag(sync=True)
@@ -761,6 +765,7 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
         show_controls: bool | None = None,
         controls_collapsed: bool | None = None,
         show_stats: bool | None = None,
+        debug: bool = False,
         verbose: bool = True,
         log_scale: bool = False,
         auto_contrast: bool = False,
@@ -878,7 +883,7 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
                 sampling=sampling, units=units, scale_bar_visible=scale_bar_visible,
                 show_fft=show_fft, fft_window=fft_window, fft_metrics=fft_metrics,
                 show_controls=show_controls, controls_collapsed=controls_collapsed,
-                show_stats=show_stats,
+                show_stats=show_stats, debug=debug,
                 log_scale=log_scale, auto_contrast=auto_contrast, offline=offline,
                 vmin=vmin, vmax=vmax,
                 ncols=ncols, size=size, smooth=smooth, zoom=zoom,
@@ -894,7 +899,7 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
     def _init_sync(self, *, data, labels, title, cmap, n_pages, panels_per_page,
                    page_labels, page_starred, show_title, sampling, units,
                    scale_bar_visible, show_fft, fft_window, fft_metrics,
-                   show_controls, controls_collapsed, show_stats, log_scale, auto_contrast, offline,
+                   show_controls, controls_collapsed, show_stats, debug, log_scale, auto_contrast, offline,
                    vmin, vmax,
                    ncols, size, smooth, zoom, zoom_row, zoom_col,
                    link_zoom, link_pan, link_contrast, diff_mode, overlay, view_box,
@@ -1068,6 +1073,7 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
             self.labels = resolved_labels
         self.starred = [0] * self.n_images
         self.hidden_panels = []
+        self.hidden_page_slots = []
         self.show_panel_titles = bool(show_panel_titles)
         self.panel_title_font_size = int(panel_title_font_size)
         self.gallery_gap_px = int(gallery_gap_px)
@@ -1135,6 +1141,7 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
         self.show_controls = show_controls
         self.controls_collapsed = bool(controls_collapsed)
         self.show_stats = show_stats
+        self.debug = bool(debug)
         self.log_scale = log_scale
         self.auto_contrast = auto_contrast
         self.offline = offline
@@ -1319,6 +1326,59 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
                 "hidden_panels cannot hide every panel; at least one panel must remain visible"
             )
         return clean
+
+    def _normalize_hidden_page_slots(
+        self,
+        values: Sequence[object],
+        *,
+        drop_if_full: bool = False,
+    ) -> list[int]:
+        """Normalize reusable hidden panel slots for paged galleries."""
+        if int(self.n_pages) <= 1 or int(self.panels_per_page) <= 0:
+            return []
+        n_slots = int(self.panels_per_page)
+        clean_set: set[int] = set()
+        for value in values or []:
+            if isinstance(value, bool):
+                continue
+            try:
+                slot = int(value)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= slot < n_slots:
+                clean_set.add(slot)
+        clean = sorted(clean_set)
+        if len(clean) >= n_slots:
+            if drop_if_full:
+                clean = clean[:-1]
+            else:
+                raise traitlets.TraitError(
+                    "hidden_page_slots cannot hide every page slot; at least one panel must remain visible"
+                )
+        return clean
+
+    def _hidden_page_slots_from_panels(
+        self,
+        panels: Sequence[int],
+        *,
+        drop_if_full: bool = False,
+    ) -> list[int]:
+        """Map absolute hidden image indices to reusable page slots."""
+        if int(self.n_pages) <= 1 or int(self.panels_per_page) <= 0:
+            return []
+        n_img = int(self.n_images)
+        per_page = int(self.panels_per_page)
+        slots = [
+            int(panel) % per_page
+            for panel in panels
+            if 0 <= int(panel) < n_img
+        ]
+        return self._normalize_hidden_page_slots(slots, drop_if_full=drop_if_full)
+
+    @traitlets.validate("hidden_page_slots")
+    def _validate_hidden_page_slots(self, proposal: dict) -> list[int]:
+        """Normalize hidden page slots for paged galleries."""
+        return self._normalize_hidden_page_slots(proposal["value"])
 
     @traitlets.validate("panel_order")
     def _validate_panel_order(self, proposal: dict) -> list[int]:
@@ -2250,10 +2310,12 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
             "page_labels": list(self.page_labels),
             "page_starred": list(self.page_starred),
             "hidden_panels": list(self.hidden_panels),
+            "hidden_page_slots": list(self.hidden_page_slots),
             "panel_order": list(self.panel_order),
             "show_panel_titles": self.show_panel_titles,
             "panel_title_font_size": self.panel_title_font_size,
             "show_stats": self.show_stats,
+            "debug": self.debug,
             "show_fft": self.show_fft,
             "fft_window": self.fft_window,
             "fft_metrics": self.fft_metrics,
@@ -2475,6 +2537,7 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
             show_controls=self.show_controls,
             controls_collapsed=self.controls_collapsed,
             show_stats=self.show_stats,
+            debug=self.debug,
             verbose=False,
             log_scale=self.log_scale,
             auto_contrast=self.auto_contrast,
@@ -2552,6 +2615,16 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
             if len(clean) >= n_img:
                 clean = clean[:-1]
             state["hidden_panels"] = clean
+        if "hidden_page_slots" in state and isinstance(state["hidden_page_slots"], list):
+            state["hidden_page_slots"] = self._normalize_hidden_page_slots(
+                state["hidden_page_slots"],
+                drop_if_full=True,
+            )
+        elif int(self.n_pages) > 1 and "hidden_panels" in state and isinstance(state["hidden_panels"], list):
+            state["hidden_page_slots"] = self._hidden_page_slots_from_panels(
+                state["hidden_panels"],
+                drop_if_full=True,
+            )
         if "panel_order" in state and isinstance(state["panel_order"], list):
             try:
                 order = [int(value) for value in state["panel_order"] if not isinstance(value, bool)]
@@ -2726,6 +2799,13 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
     @property
     def visible_panels(self) -> list[int]:
         """Zero-based image panel indices currently visible in the gallery."""
+        if int(self.n_pages) > 1 and int(self.panels_per_page) > 0:
+            hidden_slots = set(
+                self.hidden_page_slots
+                or self._hidden_page_slots_from_panels(self.hidden_panels, drop_if_full=True)
+            )
+            per_page = int(self.panels_per_page)
+            return [i for i in self.ordered_panels if (i % per_page) not in hidden_slots]
         hidden = set(self.hidden_panels)
         return [i for i in self.ordered_panels if i not in hidden]
 
@@ -2747,29 +2827,50 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
         must stay visible.
         """
         hidden = self._normalize_panel_refs(panels, allow_empty=True)
+        if int(self.n_pages) > 1:
+            try:
+                hidden_page_slots = self._hidden_page_slots_from_panels(hidden)
+            except traitlets.TraitError as exc:
+                raise ValueError(
+                    "set_hidden_panels would hide every page slot; leave at least one visible"
+                ) from exc
+        else:
+            hidden_page_slots = []
         if len(hidden) >= int(self.n_images):
             raise ValueError("set_hidden_panels would hide every panel; leave at least one visible")
         self.hidden_panels = sorted(hidden)
+        self.hidden_page_slots = hidden_page_slots
         return self
 
     def hide_panel(self, *panels: int | str) -> Self:
         """Hide one or more image panels by zero-based index or exact label."""
         to_hide = set(self.hidden_panels)
         to_hide.update(self._normalize_panel_refs(list(panels)))
+        if int(self.n_pages) > 1:
+            try:
+                hidden_page_slots = self._hidden_page_slots_from_panels(sorted(to_hide))
+            except traitlets.TraitError as exc:
+                raise ValueError("hide_panel would hide every page slot; leave at least one visible") from exc
+        else:
+            hidden_page_slots = []
         if len(to_hide) >= int(self.n_images):
             raise ValueError("hide_panel would hide every panel; leave at least one visible")
         self.hidden_panels = sorted(to_hide)
+        self.hidden_page_slots = hidden_page_slots
         return self
 
     def show_panel(self, *panels: int | str) -> Self:
         """Restore one or more hidden image panels by zero-based index or exact label."""
         to_show = set(self._normalize_panel_refs(list(panels)))
-        self.hidden_panels = sorted(set(self.hidden_panels) - to_show)
+        hidden = sorted(set(self.hidden_panels) - to_show)
+        self.hidden_panels = hidden
+        self.hidden_page_slots = self._hidden_page_slots_from_panels(hidden)
         return self
 
     def show_all_panels(self) -> Self:
         """Restore every image panel in the gallery."""
         self.hidden_panels = []
+        self.hidden_page_slots = []
         return self
 
     def set_panel_order(self, panels: Sequence[int | str]) -> Self:

@@ -172,6 +172,8 @@ def test_show1d_display_public_api_state_and_validation() -> None:
         snapshot_profile_height=88,
         snapshot_histogram_width=320,
         snapshot_histogram_height=50,
+        snapshot_loop=False,
+        snapshot_bounce=True,
         starred_snapshot_image_labels=["lambda_10"],
         hidden_snapshot_image_labels=["lambda_300"],
         show_trial_notes=True,
@@ -205,6 +207,8 @@ def test_show1d_display_public_api_state_and_validation() -> None:
     assert widget.snapshot_profile_height == 88
     assert widget.snapshot_histogram_width == 320
     assert widget.snapshot_histogram_height == 50
+    assert widget.snapshot_loop is False
+    assert widget.snapshot_bounce is True
     assert widget.starred_snapshot_image_labels == ["lambda_10"]
     assert widget.hidden_snapshot_image_labels == ["lambda_300"]
     assert widget.show_trial_notes is True
@@ -219,6 +223,8 @@ def test_show1d_display_public_api_state_and_validation() -> None:
         "snapshot_profile_height": 999,
         "snapshot_histogram_width": 1000,
         "snapshot_histogram_height": 20,
+        "snapshot_loop": True,
+        "snapshot_bounce": False,
     })
     assert widget.snapshot_fps == 4
     assert widget.snapshot_fft_zoom == 32.0
@@ -227,6 +233,8 @@ def test_show1d_display_public_api_state_and_validation() -> None:
     assert widget.snapshot_profile_height == 220
     assert widget.snapshot_histogram_width == 640
     assert widget.snapshot_histogram_height == 36
+    assert widget.snapshot_loop is True
+    assert widget.snapshot_bounce is False
 
     state = widget.state_dict()
     assert state["show_stats"] is False
@@ -248,6 +256,8 @@ def test_show1d_display_public_api_state_and_validation() -> None:
     assert state["snapshot_histogram_width"] == 640
     assert state["snapshot_histogram_height"] == 36
     assert state["snapshot_fps"] == 4
+    assert state["snapshot_loop"] is True
+    assert state["snapshot_bounce"] is False
     assert state["pixel_size"] == 0.5
     assert state["pixel_unit"] == "A"
     assert state["scale_bar_visible"] is True
@@ -264,6 +274,23 @@ def test_show1d_display_public_api_state_and_validation() -> None:
 
     widget.snapshot_columns = -1
     assert widget.snapshot_columns == 0
+
+    wide_widget = Show1D(
+        np.arange(4, dtype=np.float32),
+        side_panel_width_px=2000,
+        snapshot_panel_width_px=1800,
+    )
+    assert wide_widget.side_panel_width_px == 1600
+    assert wide_widget.snapshot_panel_width_px == 1600
+    wide_widget.side_panel_width_px = 1400
+    wide_widget.snapshot_panel_width_px = 1500
+    assert wide_widget.side_panel_width_px == 1400
+    assert wide_widget.snapshot_panel_width_px == 1500
+
+    tall_widget = Show1D(np.arange(4, dtype=np.float32), plot_height_px=2000)
+    assert tall_widget.plot_height_px == 960
+    tall_widget.plot_height_px = 900
+    assert tall_widget.plot_height_px == 900
 
     with np.testing.assert_raises(ValueError):
         Show1D(np.arange(4, dtype=np.float32), image_cmap="not-a-cmap")
@@ -460,8 +487,10 @@ def test_show1d_snapshot_group_accepts_multiple_mixed_size_images() -> None:
     widget.snapshot_thumbnail_size = 72
     assert widget.state_dict()["snapshot_thumbnail_size"] == 72
 
-    widget.play()
+    widget.play(loop=False, bounce=True)
     assert widget.snapshot_playing is True
+    assert widget.snapshot_loop is False
+    assert widget.snapshot_bounce is True
     widget.pause()
     assert widget.snapshot_playing is False
     widget.goto_snapshot(10)

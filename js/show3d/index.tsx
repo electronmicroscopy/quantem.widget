@@ -49,6 +49,7 @@ const SHOW3D_TO_SHOW2D_LINKED_TRAITS = [
   { source: "show_stats" },
   { source: "show_controls" },
   { source: "controls_collapsed" },
+  { source: "debug" },
   { source: "link_contrast" },
   { source: "show_fft" },
   { source: "hidden_panels" },
@@ -96,6 +97,8 @@ const sliderStyles = {
 };
 const PAGE_PLAY_FPS_OPTIONS = [1, 2, 3, 4] as const;
 const AVG_WINDOW_OPTIONS = Array.from({ length: 15 }, (_, idx) => idx + 1);
+const OFFLINE_FRAME_CACHE_BYTES = 2 * 1024 * 1024 * 1024;
+const OFFLINE_FRAME_CACHE_MIN_FRAMES = 2;
 const typography = {
   label: { fontSize: 11 },
   labelSmall: { fontSize: 10 },
@@ -120,6 +123,77 @@ type ReorderDragStart = {
   y: number;
 };
 const REORDER_DRAG_THRESHOLD_PX = 8;
+
+function useDebugFps(enabled: boolean): number | null {
+  const [fps, setFps] = React.useState<number | null>(null);
+
+  React.useEffect(() => {
+    if (!enabled) {
+      setFps(null);
+      return;
+    }
+    if (typeof window === "undefined" || typeof window.requestAnimationFrame !== "function") {
+      return;
+    }
+    let disposed = false;
+    let frameCount = 0;
+    let last = window.performance.now();
+    let raf = 0;
+    const tick = (now: number) => {
+      if (disposed) return;
+      frameCount += 1;
+      const elapsed = now - last;
+      if (elapsed >= 500) {
+        setFps(Math.round((frameCount * 1000) / Math.max(1, elapsed)));
+        frameCount = 0;
+        last = now;
+      }
+      raf = window.requestAnimationFrame(tick);
+    };
+    raf = window.requestAnimationFrame(tick);
+    return () => {
+      disposed = true;
+      window.cancelAnimationFrame(raf);
+    };
+  }, [enabled]);
+
+  return fps;
+}
+
+function DebugPerfBadge({
+  widget,
+  fps,
+  themeColors,
+}: {
+  widget: string;
+  fps: number | null;
+  themeColors: { accent: string };
+}) {
+  const fpsText = fps === null ? "--" : String(fps);
+  return (
+    <Box
+      component="span"
+      data-quantem-debug-badge={widget}
+      title={`${widget} debug browser FPS`}
+      sx={{
+        ml: 0.6,
+        px: 0.5,
+        py: 0,
+        borderRadius: "3px",
+        border: `1px solid ${themeColors.accent}55`,
+        bgcolor: themeColors.accent + "18",
+        color: themeColors.accent,
+        fontSize: 9,
+        fontWeight: 600,
+        fontVariantNumeric: "tabular-nums",
+        whiteSpace: "nowrap",
+        verticalAlign: "baseline",
+      }}
+    >
+      Debug FPS {fpsText}
+    </Box>
+  );
+}
 
 function useMobileViewport(): boolean {
   const getIsMobile = React.useCallback(() => {
@@ -397,6 +471,18 @@ function show3dPerfDebug(): Record<string, unknown> | null {
     }
     return show3dPerfDebugFallback;
   }
+}
+
+function orderedFramePrewarmIndices(startIdx: number, nFrames: number): number[] {
+  const n = Math.max(1, Math.round(nFrames || 1));
+  const start = ((Math.round(startIdx) % n) + n) % n;
+  const order: number[] = [start];
+  for (let distance = 1; distance < n; distance++) {
+    order.push((start + distance) % n);
+    if (order.length >= n) break;
+    order.push((start - distance + n) % n);
+  }
+  return order;
 }
 
 const FRAME_INTERVAL_HISTORY = 512;
@@ -1392,6 +1478,8 @@ function Show3D() {
   // doesn't re-allocate. Indexed by (width, height) since reshape resets it.
   const offlineScratch = React.useRef<Float32Array | null>(null);
   const offlineScratchKey = React.useRef<number>(-1);
+  const offlineFrameCacheRef = React.useRef<Map<number, Float32Array>>(new Map());
+  const offlineFramePrewarmSerialRef = React.useRef(0);
   // Local live index used by the offline frameBytes useMemo. During MUI Slider
   // drag, `setSliceIdx` (anywidget useModelState) goes through model.set +
   // save_changes which appears to batch under rapid mousemove ticks - useMemo
@@ -1401,6 +1489,62 @@ function Show3D() {
   // updated for state.dict round-trips and observers.
   const [liveSliceIdx, setLiveSliceIdx] = React.useState<number>(sliceIdx);
   React.useEffect(() => { setLiveSliceIdx(sliceIdx); }, [sliceIdx]);
+  const offlineFrameCacheLimit = React.useMemo(() => {
+    const n = Math.max(1, Math.round(nSlices || 1));
+    const pixelCount = Math.max(1, Math.round(width || 0) * Math.round(height || 0));
+    if (!offline || pixelCount <= 0) return 0;
+    if (offlineFloatStack && offlineFloatStack.byteLength > 0) return n;
+    const frameBytes = Math.max(1, pixelCount * 4);
+    const budgetFrames = Math.max(1, Math.floor(OFFLINE_FRAME_CACHE_BYTES / frameBytes));
+    const minFrames = frameBytes <= OFFLINE_FRAME_CACHE_BYTES / OFFLINE_FRAME_CACHE_MIN_FRAMES
+      ? OFFLINE_FRAME_CACHE_MIN_FRAMES
+      : 1;
+    return Math.max(1, Math.min(n, Math.max(minFrames, budgetFrames)));
+  }, [offline, offlineFloatStack, width, height, nSlices]);
+  React.useEffect(() => {
+    offlineFrameCacheRef.current.clear();
+    offlineFramePrewarmSerialRef.current++;
+    const dbg = show3dPerfDebug();
+    if (dbg) {
+      dbg.offlineFrameCacheSize = 0;
+      dbg.offlineFrameCacheLimit = offlineFrameCacheLimit;
+      dbg.offlineFrameCacheHits = 0;
+      dbg.offlineFrameCacheMisses = 0;
+      dbg.offlineFramePrewarmDone = 0;
+      dbg.offlineFramePrewarmTarget = 0;
+      dbg.offlineFramePrewarmActive = false;
+    }
+  }, [
+    offline,
+    offlineStack,
+    offlineFloatStack,
+    offlineMin,
+    offlineMax,
+    offlineMins,
+    offlineMaxs,
+    width,
+    height,
+    nPanels,
+    panelWidthPx,
+    nSlices,
+    offlineFrameCacheLimit,
+  ]);
+  const putOfflineFrameCache = React.useCallback((idx: number, frame: Float32Array) => {
+    if (!offline || offlineFrameCacheLimit <= 0) return;
+    const cache = offlineFrameCacheRef.current;
+    if (cache.has(idx)) cache.delete(idx);
+    cache.set(idx, frame);
+    while (cache.size > offlineFrameCacheLimit) {
+      const oldest = cache.keys().next().value;
+      if (oldest === undefined) break;
+      cache.delete(oldest);
+    }
+    const dbg = show3dPerfDebug();
+    if (dbg) {
+      dbg.offlineFrameCacheSize = cache.size;
+      dbg.offlineFrameCacheLimit = offlineFrameCacheLimit;
+    }
+  }, [offline, offlineFrameCacheLimit]);
   const frameBytes = React.useMemo<DataView>(() => {
     const pixelCount = width * height;
     if (offline && offlineFloatStack && offlineFloatStack.byteLength > 0 && pixelCount > 0) {
@@ -1439,20 +1583,36 @@ function Show3D() {
     }
     return rawFrameBytes;
   }, [offline, offlineStack, offlineFloatStack, offlineMin, offlineMax, offlineMins, offlineMaxs, rawFrameBytes, liveSliceIdx, width, height, nPanels, panelWidthPx]);
-  const getOfflineFrame = (idx: number): Float32Array | null => {
-    // Allocate a FRESH Float32Array per call so the GPU upload path's
-    // pointer-equality cache can't short-circuit the upload and leave
-    // the canvas painted with a stale frame. Previously reused a single
-    // scratch buffer in place; engine.uploadData saw identical reference
-    // every tick and skipped the texture refresh — autoplay frame counter
-    // advanced but canvas stayed on initial frame. Verified 2026-05-24.
+  const getOfflineFrame = React.useCallback((idx: number): Float32Array | null => {
+    // Cache per-frame Float32Array objects by frame index. The previous single
+    // scratch buffer was unsafe because pointer-equality upload guards could skip
+    // a texture refresh; per-index cached arrays keep stable identity without
+    // mutating one shared backing store.
     if (!offline || width <= 0 || height <= 0) return null;
+    const n = Math.max(1, nSlices || 1);
+    const normalized = ((Math.round(idx) % n) + n) % n;
+    const cached = offlineFrameCacheRef.current.get(normalized);
+    const dbg = show3dPerfDebug();
+    if (cached) {
+      offlineFrameCacheRef.current.delete(normalized);
+      offlineFrameCacheRef.current.set(normalized, cached);
+      if (dbg) {
+        dbg.offlineFrameCacheHits = ((dbg.offlineFrameCacheHits as number | undefined) ?? 0) + 1;
+        dbg.offlineFrameCacheSize = offlineFrameCacheRef.current.size;
+      }
+      return cached;
+    }
+    if (dbg) {
+      dbg.offlineFrameCacheMisses = ((dbg.offlineFrameCacheMisses as number | undefined) ?? 0) + 1;
+    }
     const pixelCount = width * height;
     if (offlineFloatStack && offlineFloatStack.byteLength > 0) {
-      return float32FrameFromDataView(offlineFloatStack, idx, pixelCount, true);
+      const frame = float32FrameFromDataView(offlineFloatStack, normalized, pixelCount, false);
+      if (frame) putOfflineFrameCache(normalized, frame);
+      return frame;
     }
     if (!offlineStack || offlineStack.byteLength === 0) return null;
-    const start = idx * pixelCount;
+    const start = normalized * pixelCount;
     if (start < 0 || start + pixelCount > offlineStack.byteLength) return null;
     const u8 = new Uint8Array(offlineStack.buffer, offlineStack.byteOffset + start, pixelCount);
     const f32 = new Float32Array(pixelCount);
@@ -1473,8 +1633,68 @@ function Show3D() {
       const scale = (offlineMax - offlineMin) / 255.0;
       for (let i = 0; i < pixelCount; i++) f32[i] = u8[i] * scale + offlineMin;
     }
+    putOfflineFrameCache(normalized, f32);
     return f32;
-  };
+  }, [
+    offline,
+    width,
+    height,
+    nSlices,
+    offlineFloatStack,
+    offlineStack,
+    offlineMins,
+    offlineMaxs,
+    offlineMin,
+    offlineMax,
+    nPanels,
+    panelWidthPx,
+    putOfflineFrameCache,
+  ]);
+
+  React.useEffect(() => {
+    if (!offline || width <= 0 || height <= 0 || nSlices <= 1 || offlineFrameCacheLimit <= 0) return;
+    const serial = ++offlineFramePrewarmSerialRef.current;
+    let cancelled = false;
+    let timer: number | null = null;
+    const order = orderedFramePrewarmIndices(liveSliceIdx, nSlices).slice(0, offlineFrameCacheLimit);
+    const dbg = show3dPerfDebug();
+    if (dbg) {
+      dbg.offlineFramePrewarmActive = true;
+      dbg.offlineFramePrewarmTarget = order.length;
+      dbg.offlineFramePrewarmDone = 0;
+      dbg.offlineFrameCacheLimit = offlineFrameCacheLimit;
+    }
+    const schedule = (delayMs = 0) => {
+      timer = window.setTimeout(step, delayMs);
+    };
+    let cursor = 0;
+    const step = () => {
+      timer = null;
+      if (cancelled || serial !== offlineFramePrewarmSerialRef.current) return;
+      const frameBudgetStart = performance.now();
+      while (cursor < order.length && performance.now() - frameBudgetStart < 8) {
+        getOfflineFrame(order[cursor]);
+        cursor++;
+      }
+      const d = show3dPerfDebug();
+      if (d) {
+        d.offlineFramePrewarmDone = cursor;
+        d.offlineFrameCacheSize = offlineFrameCacheRef.current.size;
+        d.offlineFrameCacheLimit = offlineFrameCacheLimit;
+        d.offlineFramePrewarmActive = cursor < order.length;
+      }
+      if (cursor < order.length) {
+        schedule(0);
+      }
+    };
+    schedule(0);
+    return () => {
+      cancelled = true;
+      if (timer !== null) window.clearTimeout(timer);
+      const d = show3dPerfDebug();
+      if (d) d.offlineFramePrewarmActive = false;
+    };
+  }, [offline, width, height, nSlices, liveSliceIdx, offlineFrameCacheLimit, getOfflineFrame]);
 
   // Truthful first-render signal: flipped ONCE after the first frame_bytes
   // arrives and the browser has had time to composite two frames.  Python side
@@ -1531,6 +1751,9 @@ function Show3D() {
   const totalPanelCount = Math.max(1, nPanels || 1);
   const isPaged = (nPages || 1) > 1 && (panelsPerPage || 0) > 0;
   const currentPageIdx = Math.max(0, Math.min((nPages || 1) - 1, Math.round(pageIdx || 0)));
+  const displayPageIdx = pageSliderPreviewIdx === null
+    ? currentPageIdx
+    : Math.max(0, Math.min((nPages || 1) - 1, Math.round(pageSliderPreviewIdx || 0)));
   React.useEffect(() => {
     currentPageIdxRef.current = currentPageIdx;
   }, [currentPageIdx]);
@@ -1576,7 +1799,6 @@ function Show3D() {
       pageCommitRafRef.current = null;
     }
   }, []);
-  const currentPageLabel = pageLabels?.[currentPageIdx] || `Page ${currentPageIdx + 1}`;
   const pageControlIdx = clampPageIdx(pageSliderPreviewIdx ?? currentPageIdx);
   const pageControlLabel = pageLabels?.[pageControlIdx] || `Page ${pageControlIdx + 1}`;
   const pageControlStatus = `${pageControlLabel} ${pageControlIdx + 1}/${nPages || 1}`;
@@ -1586,11 +1808,13 @@ function Show3D() {
   React.useEffect(() => {
     if (!pagePlaying || !isPaged || (nPages || 1) <= 1) return;
     const timeout = window.setTimeout(() => {
-      setPageIdx((currentPageIdx + 1) % Math.max(1, nPages || 1));
+      const next = (currentPageIdx + 1) % Math.max(1, nPages || 1);
+      setPageSliderPreviewIdx(next);
+      setPageIdx(next);
     }, 1000 / Math.max(1, pagePlayFps));
     return () => window.clearTimeout(timeout);
-  }, [currentPageIdx, isPaged, nPages, pagePlayFps, pagePlaying, setPageIdx]);
-  const activePageStart = isPaged ? currentPageIdx * Math.max(1, panelsPerPage || 1) : 0;
+  }, [currentPageIdx, isPaged, nPages, pagePlayFps, pagePlaying, setPageIdx, setPageSliderPreviewIdx]);
+  const activePageStart = isPaged ? displayPageIdx * Math.max(1, panelsPerPage || 1) : 0;
   const activePageEnd = isPaged ? Math.min(totalPanelCount, activePageStart + Math.max(1, panelsPerPage || 1)) : totalPanelCount;
   const activePageIndices = React.useMemo(
     () => Array.from({ length: Math.max(0, activePageEnd - activePageStart) }, (_, i) => activePageStart + i),
@@ -2080,9 +2304,11 @@ function Show3D() {
   const [showStats, setShowStats] = useModelState<boolean>("show_stats");
   const [showControls] = useModelState<boolean>("show_controls");
   const [controlsCollapsed, setControlsCollapsed] = useModelState<boolean>("controls_collapsed");
+  const [debug] = useModelState<boolean>("debug");
   const controlsVisible = showControls && !controlsCollapsed;
   const panelChromeVisible = controlsVisible;
   const showResizeControls = allowResizeControls && panelChromeVisible;
+  const debugFps = useDebugFps(Boolean(debug));
   const [statsMean] = useModelState<number>("stats_mean");
   const [statsMin] = useModelState<number>("stats_min");
   const [statsMax] = useModelState<number>("stats_max");
@@ -9871,6 +10097,7 @@ function Show3D() {
                 {diffMode === "previous" ? "\u0394-PREV" : "\u0394-FIRST"}
               </Typography>
             )}
+            {debug && <DebugPerfBadge widget="Show3D" fps={debugFps} themeColors={themeColors} />}
 	            {showControls && <InfoTooltip text={<Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
               <MetadataSection rows={[
                 ["Shape", `${nSlices} x ${height} x ${width}`],
@@ -10010,20 +10237,20 @@ function Show3D() {
                   size="small"
                   onClick={() => {
                     const next = Array.from({ length: Math.max(1, nPages || 1) }, (_, idx) => pageStarred?.[idx] ? 1 : 0);
-                    next[currentPageIdx] = next[currentPageIdx] ? 0 : 1;
+                    next[pageControlIdx] = next[pageControlIdx] ? 0 : 1;
                     setPageStarred(next);
                   }}
-                  title={(pageStarred?.[currentPageIdx] ? "Unstar " : "Star ") + currentPageLabel}
-                  aria-label={(pageStarred?.[currentPageIdx] ? "Unstar " : "Star ") + currentPageLabel}
+                  title={(pageStarred?.[pageControlIdx] ? "Unstar " : "Star ") + pageControlLabel}
+                  aria-label={(pageStarred?.[pageControlIdx] ? "Unstar " : "Star ") + pageControlLabel}
                   sx={{
                     width: 24,
                     height: 24,
                     p: 0,
-                    color: pageStarred?.[currentPageIdx] ? "#ffc107" : themeColors.textMuted,
-                    "&:hover": { color: pageStarred?.[currentPageIdx] ? "#ffc107" : themeColors.text },
+                    color: pageStarred?.[pageControlIdx] ? "#ffc107" : themeColors.textMuted,
+                    "&:hover": { color: pageStarred?.[pageControlIdx] ? "#ffc107" : themeColors.text },
                   }}
                 >
-                  {pageStarred?.[currentPageIdx] ? "★" : "☆"}
+                  {pageStarred?.[pageControlIdx] ? "★" : "☆"}
                 </IconButton>
               </>
             )}
@@ -10459,9 +10686,10 @@ function Show3D() {
                     pointerEvents: "none",
                     userSelect: "none",
                     zIndex: 2,
-                    whiteSpace: "nowrap",
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
+                    whiteSpace: "normal",
+                    overflow: "visible",
+                    textOverflow: "clip",
+                    overflowWrap: "anywhere",
                   }}
                 >
                   {titleText}{frameLabel ? ` · ${frameLabel}` : ""} {shown}/{total}
@@ -10692,9 +10920,10 @@ function Show3D() {
                     lineHeight: 1.2,
                     textAlign: "center",
                     textShadow: "0 1px 2px rgba(0,0,0,0.9)",
-                    whiteSpace: "nowrap",
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
+                    whiteSpace: "normal",
+                    overflow: "visible",
+                    textOverflow: "clip",
+                    overflowWrap: "anywhere",
                   }}
                 >
                   {reorderDragVisual.label}

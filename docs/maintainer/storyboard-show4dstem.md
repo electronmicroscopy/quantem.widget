@@ -322,7 +322,8 @@ dataset.
 want newly completed ``*_master.h5`` files to appear in the same Show4DSTEM
 viewer so I can process data in real time without rebuilding the notebook.
 
-**Primary widgets**: Show4DSTEM with the lazy MPS multi-dataset handle.
+**Primary widgets**: `Show4DSTEM.from_folder(...)` for CUDA/CPU lazy folder
+browsing, plus the lazy MPS multi-dataset handle on Apple Silicon.
 
 **Data to use**: a live or simulated acquisition folder where masters appear
 over time, including at least one partial/incomplete master that should be
@@ -330,17 +331,22 @@ ignored until ready.
 
 **Acceptance checks**:
 
-- Start with ``load_macbook_datasets(folder, det_bin=4, scan_size=...)`` and
-  mount ``Show4DSTEM(live)`` while only the first dataset is ready.
-- Call ``live.watch_master_folder(folder, interval=...)`` and verify newly
-  completed masters append into the existing Dataset slider.
+- Start with ``Show4DSTEM.from_folder(folder, det_bin=..., page_budget="auto",
+  watch=True)`` while only the first dataset is ready.
+- Verify newly completed masters append into the existing Dataset slider and
+  multiple grid as cold lazy slots.
+- On Apple Silicon, repeat the same workflow with
+  ``load_macbook_datasets(folder, det_bin=4, scan_size=...)`` and
+  ``live.watch_master_folder(folder, interval=...)``.
 - Verify partial masters are skipped until ``is_master_ready`` confirms linked
   data files exist.
 - Verify repeated polls do not duplicate already loaded masters.
+- Hide one loaded multiple-grid panel and verify that hidden panel is released
+  from the lazy resident cache and skipped by BF/ABF/ADF compare recompute.
 - Drive detector drag, scan-position movement, diffraction pan/zoom, FFT, and
   contrast after an append to confirm the active viewer remains real time.
-- Record load/append timing, backend path, detector bin, dtype, scan size, and
-  GPU memory behavior in the signoff report.
+- Record load/append timing, backend path, detector bin, dtype, scan size, the
+  top-row GPU memory label, and GPU memory behavior in the signoff report.
 
 ### S4D-15: Sign Off Real Heavy 4D-STEM Performance
 

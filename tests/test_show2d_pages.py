@@ -100,3 +100,33 @@ def test_show2d_page_state_and_html_roundtrip(tmp_path: pathlib.Path) -> None:
     assert "page_idx" in html
     assert "page_starred" in html
     assert "lambda 0.03" in html
+
+
+def test_show2d_hidden_page_slots_follow_paged_layout(tmp_path: pathlib.Path) -> None:
+    widget = Show2D(
+        _paged_stack(),
+        labels=["raw", "filtered", "residual", "score"],
+        page_labels=["lambda 0.01", "lambda 0.03", "lambda 0.10"],
+        verbose=False,
+    )
+
+    widget.hide_panel(1)
+    assert widget.hidden_page_slots == [1]
+    assert widget.visible_panels == [0, 2, 3]
+
+    widget.page_idx = 2
+    assert widget.visible_panels == [8, 10, 11]
+
+    restored = Show2D(
+        _paged_stack(),
+        labels=["raw", "filtered", "residual", "score"],
+        page_labels=["lambda 0.01", "lambda 0.03", "lambda 0.10"],
+        verbose=False,
+    )
+    restored.load_state_dict(widget.state_dict())
+    restored.page_idx = 1
+    assert restored.hidden_page_slots == [1]
+    assert restored.visible_panels == [4, 6, 7]
+
+    out = widget.export_html(tmp_path / "show2d_hidden_page_slots.html", encoding="uint8")
+    assert "hidden_page_slots" in out.read_text()

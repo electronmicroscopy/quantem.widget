@@ -141,6 +141,77 @@ const COMPARE_GRID_DEFAULT_WIDTH = 980;
 const MIN_COMPARE_GRID_WIDTH = 320;
 const HTML_EXPORT_OVERHEAD_BYTES = 700_000;
 
+function useDebugFps(enabled: boolean): number | null {
+  const [fps, setFps] = React.useState<number | null>(null);
+
+  React.useEffect(() => {
+    if (!enabled) {
+      setFps(null);
+      return;
+    }
+    if (typeof window === "undefined" || typeof window.requestAnimationFrame !== "function") {
+      return;
+    }
+    let disposed = false;
+    let frameCount = 0;
+    let last = window.performance.now();
+    let raf = 0;
+    const tick = (now: number) => {
+      if (disposed) return;
+      frameCount += 1;
+      const elapsed = now - last;
+      if (elapsed >= 500) {
+        setFps(Math.round((frameCount * 1000) / Math.max(1, elapsed)));
+        frameCount = 0;
+        last = now;
+      }
+      raf = window.requestAnimationFrame(tick);
+    };
+    raf = window.requestAnimationFrame(tick);
+    return () => {
+      disposed = true;
+      window.cancelAnimationFrame(raf);
+    };
+  }, [enabled]);
+
+  return fps;
+}
+
+function DebugPerfBadge({
+  widget,
+  fps,
+  themeColors,
+}: {
+  widget: string;
+  fps: number | null;
+  themeColors: { accent: string };
+}) {
+  const fpsText = fps === null ? "--" : String(fps);
+  return (
+    <Box
+      component="span"
+      data-quantem-debug-badge={widget}
+      title={`${widget} debug browser FPS`}
+      sx={{
+        ml: 0.75,
+        px: 0.5,
+        py: 0,
+        borderRadius: "3px",
+        border: `1px solid ${themeColors.accent}55`,
+        bgcolor: themeColors.accent + "18",
+        color: themeColors.accent,
+        fontSize: 10,
+        fontWeight: 600,
+        fontVariantNumeric: "tabular-nums",
+        whiteSpace: "nowrap",
+        verticalAlign: "middle",
+      }}
+    >
+      Debug FPS {fpsText}
+    </Box>
+  );
+}
+
 type Show4DSTEMWritableFile = {
   write: (data: BlobPart) => Promise<void>;
   close: () => Promise<void>;
@@ -1921,6 +1992,7 @@ function Show4DSTEM() {
   const [kCalibrated] = useModelState<boolean>("k_calibrated");
   const [title] = useModelState<string>("title");
   const [showTitle] = useModelState<boolean>("show_title");
+  const [gpuMemoryLabel] = useModelState<string>("gpu_memory_label");
 
   const [frameBytes] = useModelState<DataView>("frame_bytes");
   const [virtualImageBytes] = useModelState<DataView>("virtual_image_bytes");
@@ -2572,8 +2644,10 @@ function Show4DSTEM() {
   const [fftWindow, setFftWindow] = useModelState<boolean>("fft_window");
   const [showControls] = useModelState<boolean>("show_controls");
   const [controlsCollapsed] = useModelState<boolean>("controls_collapsed");
+  const [debug] = useModelState<boolean>("debug");
   const controlsVisible = showControls && !controlsCollapsed;
   const panelChromeVisible = controlsVisible;
+  const debugFps = useDebugFps(Boolean(debug));
   const [showStats] = useModelState<boolean>("show_stats");
   const [showScaleBar] = useModelState<boolean>("show_scale_bar");
   const [mobileDpOptionsOpen, setMobileDpOptionsOpen] = React.useState(false);
@@ -2586,6 +2660,7 @@ function Show4DSTEM() {
   const [compareGridWidthPx, setCompareGridWidthPx] = useModelState<number>("compare_grid_width_px");
   const [compareGridPreviewWidth, setCompareGridPreviewWidth] = React.useState<number | null>(null);
   const compareGridResizeCleanupRef = React.useRef<(() => void) | null>(null);
+  const [compareHiddenMenuAnchor, setCompareHiddenMenuAnchor] = React.useState<HTMLElement | null>(null);
 
   const effectiveShowFft = showFft;
   const displayViewMode = viewMode === "compare" ? "multiple" : viewMode === "temporal" ? "single" : (viewMode || "single");
@@ -2618,6 +2693,19 @@ function Show4DSTEM() {
     }
     return [...order];
   }, [comparePanelOrder, nFrames]);
+  const comparePanelLabel = React.useCallback((idx: number) => {
+    return frameLabels && frameLabels.length > idx && frameLabels[idx]
+      ? frameLabels[idx]
+      : `${frameDimLabel} ${idx + 1}`;
+  }, [frameDimLabel, frameLabels]);
+  const compareHiddenPanelItems = React.useMemo(() => {
+    const hidden = new Set<number>(
+      (compareHiddenPanels || []).filter((idx) => Number.isInteger(idx) && idx >= 0 && idx < nFrames),
+    );
+    return normalizedCompareOrder()
+      .filter((idx) => hidden.has(idx))
+      .map((idx) => ({ idx, label: comparePanelLabel(idx) }));
+  }, [compareHiddenPanels, comparePanelLabel, nFrames, normalizedCompareOrder]);
   const moveCompareFrame = React.useCallback((dragFrame: number, targetFrame: number) => {
     if (!Number.isInteger(dragFrame) || !Number.isInteger(targetFrame) || dragFrame === targetFrame) return;
     const order = normalizedCompareOrder();
@@ -2635,6 +2723,13 @@ function Show4DSTEM() {
     else next.add(frame);
     setCompareStarredPanels([...next].sort((a, b) => a - b));
   }, [compareStarredPanels, nFrames, setCompareStarredPanels]);
+  const showCompareFrame = React.useCallback((frame: number) => {
+    if (!Number.isInteger(frame) || frame < 0 || frame >= nFrames) return;
+    const next = (compareHiddenPanels || [])
+      .filter((idx) => Number.isInteger(idx) && idx >= 0 && idx < nFrames && idx !== frame);
+    setCompareHiddenPanels([...new Set(next)].sort((a, b) => a - b));
+    setCompareHiddenMenuAnchor(null);
+  }, [compareHiddenPanels, nFrames, setCompareHiddenPanels]);
   const hideCompareFrame = React.useCallback((frame: number) => {
     if (!Number.isInteger(frame) || frame < 0 || frame >= nFrames) return;
     const next = new Set<number>((compareHiddenPanels || []).filter((idx) => Number.isInteger(idx) && idx >= 0 && idx < nFrames));
@@ -2649,6 +2744,7 @@ function Show4DSTEM() {
     setCompareStarredPanels([]);
     setComparePendingMoveFrame(null);
     setCompareDraggingFrame(null);
+    setCompareHiddenMenuAnchor(null);
   }, [setCompareHiddenPanels, setComparePanelOrder, setCompareStarredPanels]);
 
   // ROI FFT state (VI ROI crops virtual image for FFT)
@@ -5545,6 +5641,10 @@ function Show4DSTEM() {
       {showTitle && <Typography variant="h6" sx={{ ...typo.title, mb: `${SPACING.SM}px` }}>
         {title || "4D-STEM Explorer"}
         {nFrames > 1 && <span style={{ fontWeight: "normal", fontSize: 13, marginLeft: 8, opacity: 0.7 }}>({frameLabels && frameLabels.length > frameIdx ? frameLabels[frameIdx] : `${frameDimLabel} ${frameIdx + 1}/${nFrames}`})</span>}
+        {gpuMemoryLabel && <span style={{ fontWeight: 500, fontSize: 11, marginLeft: 10, opacity: 0.66 }} title="Current Python GPU memory">
+          {gpuMemoryLabel}
+        </span>}
+        {debug && <DebugPerfBadge widget="Show4DSTEM" fps={debugFps} themeColors={themeColors} />}
         {panelChromeVisible && <InfoTooltip text={<Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
           <MetadataSection rows={[
             ["Scan", `${shapeRows} x ${shapeCols}`],
@@ -5839,6 +5939,56 @@ function Show4DSTEM() {
                   <MenuItem value={4}>4</MenuItem>
                   <MenuItem value={5}>5</MenuItem>
                 </Select>
+                <Tooltip title={compareHiddenCount > 0 ? `${compareHiddenCount} hidden panel${compareHiddenCount === 1 ? "" : "s"}` : "No hidden panels"}>
+                  <Button
+                    size="small"
+                    aria-label="Show4DSTEM hidden multiple panels"
+                    className="show4dstem-compare-hidden-menu"
+                    onClick={(event) => setCompareHiddenMenuAnchor(event.currentTarget)}
+                    startIcon={<VisibilityOffIcon sx={{ fontSize: 14 }} />}
+                    sx={{
+                      ...compactButton,
+                      minWidth: 64,
+                      px: 0.75,
+                      color: compareHiddenCount > 0 ? themeColors.accent : themeColors.textMuted,
+                      "& .MuiButton-startIcon": { mr: 0.25, ml: 0 },
+                    }}
+                  >
+                    {compareHiddenCount > 0 ? `Hidden ${compareHiddenCount}` : "Hidden"}
+                  </Button>
+                </Tooltip>
+                <Menu
+                  anchorEl={compareHiddenMenuAnchor}
+                  open={Boolean(compareHiddenMenuAnchor)}
+                  onClose={() => setCompareHiddenMenuAnchor(null)}
+                  MenuListProps={{ "aria-label": "Show4DSTEM hidden multiple panels menu" }}
+                  {...themedMenuProps}
+                >
+                  {compareHiddenPanelItems.length === 0 ? (
+                    <MenuItem disabled>No hidden panels</MenuItem>
+                  ) : (
+                    compareHiddenPanelItems.map(({ idx, label }) => (
+                      <MenuItem
+                        key={idx}
+                        aria-label={`Show Show4DSTEM multiple panel ${idx + 1}`}
+                        onClick={() => showCompareFrame(idx)}
+                      >
+                        Show {label}
+                      </MenuItem>
+                    ))
+                  )}
+                  {compareHiddenPanelItems.length > 1 && (
+                    <MenuItem
+                      aria-label="Show all Show4DSTEM multiple panels"
+                      onClick={() => {
+                        setCompareHiddenPanels([]);
+                        setCompareHiddenMenuAnchor(null);
+                      }}
+                    >
+                      Show all
+                    </MenuItem>
+                  )}
+                </Menu>
               </>}
               <Typography sx={{ ...typo.label, fontSize: 10 }}>FFT</Typography>
               <Switch checked={effectiveShowFft} onChange={(e) => setShowFft(e.target.checked)} size="small" sx={switchStyles.small} />
@@ -6231,16 +6381,6 @@ function Show4DSTEM() {
                   <DragIndicatorIcon sx={{ fontSize: 17 }} />
                 </IconButton>
               </Tooltip>
-              {compareHiddenCount > 0 && (
-                <Button
-                  size="small"
-                  sx={compactButton}
-                  className="show4dstem-compare-show-all"
-                  onClick={() => setCompareHiddenPanels([])}
-                >
-                  Show all
-                </Button>
-              )}
               <Button
                 size="small"
                 sx={compactButton}

@@ -47,6 +47,7 @@ const SHOW2D_TO_SHOW3D_LINKED_TRAITS = [
   { source: "show_stats" },
   { source: "show_controls" },
   { source: "controls_collapsed" },
+  { source: "debug" },
   { source: "link_contrast" },
   { source: "show_fft" },
 ];
@@ -112,6 +113,95 @@ const upwardMenuProps = {
   sx: { zIndex: 9999 },
 };
 const PAGE_PLAY_FPS_OPTIONS = [1, 2, 3, 4] as const;
+
+function useDebugFps(enabled: boolean): number | null {
+  const [fps, setFps] = React.useState<number | null>(null);
+
+  React.useEffect(() => {
+    if (!enabled) {
+      setFps(null);
+      return;
+    }
+    if (typeof window === "undefined" || typeof window.requestAnimationFrame !== "function") {
+      return;
+    }
+    let disposed = false;
+    let frameCount = 0;
+    let last = window.performance.now();
+    let raf = 0;
+    const tick = (now: number) => {
+      if (disposed) return;
+      frameCount += 1;
+      const elapsed = now - last;
+      if (elapsed >= 500) {
+        setFps(Math.round((frameCount * 1000) / Math.max(1, elapsed)));
+        frameCount = 0;
+        last = now;
+      }
+      raf = window.requestAnimationFrame(tick);
+    };
+    raf = window.requestAnimationFrame(tick);
+    return () => {
+      disposed = true;
+      window.cancelAnimationFrame(raf);
+    };
+  }, [enabled]);
+
+  return fps;
+}
+
+function DebugPerfBadge({
+  widget,
+  fps,
+  themeColors,
+}: {
+  widget: string;
+  fps: number | null;
+  themeColors: { accent: string; border: string };
+}) {
+  const fpsText = fps === null ? "--" : String(fps);
+  return (
+    <Box
+      component="span"
+      data-quantem-debug-badge={widget}
+      title={`${widget} debug browser FPS`}
+      sx={{
+        ml: 0.6,
+        px: 0.5,
+        py: 0,
+        borderRadius: "3px",
+        border: `1px solid ${themeColors.accent}55`,
+        bgcolor: themeColors.accent + "18",
+        color: themeColors.accent,
+        fontSize: 9,
+        fontWeight: 600,
+        fontVariantNumeric: "tabular-nums",
+        whiteSpace: "nowrap",
+        verticalAlign: "baseline",
+      }}
+    >
+      Debug FPS {fpsText}
+    </Box>
+  );
+}
+
+function sameNumberArray(a: number[] | undefined, b: number[]): boolean {
+  if (!Array.isArray(a) || a.length !== b.length) return false;
+  return a.every((value, idx) => value === b[idx]);
+}
+
+function normalizeHiddenPageSlots(values: unknown, maxSlots: number): number[] {
+  const nSlots = Math.max(0, Math.trunc(Number(maxSlots) || 0));
+  if (!Array.isArray(values) || nSlots <= 1) return [];
+  const clean = new Set<number>();
+  for (const value of values) {
+    const slot = Math.trunc(Number(value));
+    if (Number.isFinite(slot) && slot >= 0 && slot < nSlots) clean.add(slot);
+  }
+  const sorted = Array.from(clean).sort((a, b) => a - b);
+  if (sorted.length >= nSlots) sorted.pop();
+  return sorted;
+}
 
 function useMobileViewport(): boolean {
   const getIsMobile = React.useCallback(() => {
@@ -789,11 +879,60 @@ function Show2D() {
   const [pageStarred, setPageStarred] = useModelState<number[]>("page_starred");
   const isPaged = (nPages || 1) > 1 && (panelsPerPage || 0) > 0;
   const currentPageIdx = Math.max(0, Math.min((nPages || 1) - 1, Math.round(pageIdx || 0)));
-  const currentPageLabel = pageLabels?.[currentPageIdx] || `Page ${currentPageIdx + 1}`;
-  const currentPageStatus = `${currentPageLabel} ${currentPageIdx + 1}/${nPages || 1}`;
   const [pagePlaying, setPagePlaying] = React.useState(false);
   const [pagePlayFps, setPagePlayFps] = React.useState<number>(2);
-  const activePageStart = isPaged ? currentPageIdx * Math.max(1, panelsPerPage || 1) : 0;
+  const [pageSliderPreviewIdx, setPageSliderPreviewIdxState] = React.useState<number | null>(null);
+  const pageSliderPreviewIdxRef = React.useRef<number | null>(null);
+  const currentPageIdxRef = React.useRef(0);
+  const pageCommitPendingRef = React.useRef<number | null>(null);
+  const pageCommitRafRef = React.useRef<number | null>(null);
+  React.useEffect(() => {
+    currentPageIdxRef.current = currentPageIdx;
+  }, [currentPageIdx]);
+  const clampPageIdx = React.useCallback((value: number) => (
+    Math.max(0, Math.min((nPages || 1) - 1, Math.round(Number(value) || 0)))
+  ), [nPages]);
+  const setPageSliderPreviewIdx = React.useCallback((value: number | null) => {
+    pageSliderPreviewIdxRef.current = value;
+    setPageSliderPreviewIdxState(value);
+  }, []);
+  const commitPageIdx = React.useCallback((value: number, immediate = false) => {
+    const next = clampPageIdx(value);
+    pageCommitPendingRef.current = next;
+    if (immediate) {
+      if (pageCommitRafRef.current !== null) {
+        window.cancelAnimationFrame(pageCommitRafRef.current);
+        pageCommitRafRef.current = null;
+      }
+      pageCommitPendingRef.current = null;
+      if (next !== currentPageIdxRef.current) setPageIdx(next);
+      return;
+    }
+    if (pageCommitRafRef.current !== null) return;
+    pageCommitRafRef.current = window.requestAnimationFrame(() => {
+      pageCommitRafRef.current = null;
+      const pending = pageCommitPendingRef.current;
+      pageCommitPendingRef.current = null;
+      if (pending !== null && pending !== currentPageIdxRef.current) setPageIdx(pending);
+    });
+  }, [clampPageIdx, setPageIdx]);
+  const stopPagePlayback = React.useCallback(() => {
+    setPagePlaying(value => value ? false : value);
+  }, []);
+  React.useEffect(() => {
+    const preview = pageSliderPreviewIdxRef.current;
+    if (preview !== null && preview === currentPageIdx) setPageSliderPreviewIdx(null);
+  }, [currentPageIdx, setPageSliderPreviewIdx]);
+  React.useEffect(() => () => {
+    if (pageCommitRafRef.current !== null) {
+      window.cancelAnimationFrame(pageCommitRafRef.current);
+      pageCommitRafRef.current = null;
+    }
+  }, []);
+  const pageControlIdx = clampPageIdx(pageSliderPreviewIdx ?? currentPageIdx);
+  const pageControlLabel = pageLabels?.[pageControlIdx] || `Page ${pageControlIdx + 1}`;
+  const pageControlStatus = `${pageControlLabel} ${pageControlIdx + 1}/${nPages || 1}`;
+  const activePageStart = isPaged ? pageControlIdx * Math.max(1, panelsPerPage || 1) : 0;
   const activePageEnd = isPaged ? Math.min(nImages, activePageStart + Math.max(1, panelsPerPage || 1)) : nImages;
   const activePageIndices = React.useMemo(
     () => Array.from({ length: Math.max(0, activePageEnd - activePageStart) }, (_, i) => activePageStart + i),
@@ -807,10 +946,12 @@ function Show2D() {
   React.useEffect(() => {
     if (!pagePlaying || !isPaged || (nPages || 1) <= 1) return;
     const timeout = window.setTimeout(() => {
-      setPageIdx((currentPageIdx + 1) % Math.max(1, nPages || 1));
+      const next = (currentPageIdx + 1) % Math.max(1, nPages || 1);
+      setPageSliderPreviewIdx(next);
+      setPageIdx(next);
     }, 1000 / Math.max(1, pagePlayFps));
     return () => window.clearTimeout(timeout);
-  }, [currentPageIdx, isPaged, nPages, pagePlayFps, pagePlaying, setPageIdx]);
+  }, [currentPageIdx, isPaged, nPages, pagePlayFps, pagePlaying, setPageIdx, setPageSliderPreviewIdx]);
   const [width] = useModelState<number>("width");
   const [height] = useModelState<number>("height");
   const [frameBytes] = useModelState<DataView>("frame_bytes");
@@ -828,6 +969,7 @@ function Show2D() {
   const [labels] = useModelState<string[]>("labels");
   const [starred, setStarred] = useModelState<number[]>("starred");
   const [hiddenPanels, setHiddenPanels] = useModelState<number[]>("hidden_panels");
+  const [hiddenPageSlotsTrait, setHiddenPageSlotsTrait] = useModelState<number[] | undefined>("hidden_page_slots");
   const [panelOrder, setPanelOrder] = useModelState<number[]>("panel_order");
   const [showPanelTitles] = useModelState<boolean>("show_panel_titles");
   const [panelTitleFontSize] = useModelState<number>("panel_title_font_size");
@@ -869,9 +1011,11 @@ function Show2D() {
   // UI visibility
   const [showControls] = useModelState<boolean>("show_controls");
   const [controlsCollapsed, setControlsCollapsed] = useModelState<boolean>("controls_collapsed");
+  const [debug] = useModelState<boolean>("debug");
   const controlsVisible = showControls && !controlsCollapsed;
   const panelChromeVisible = controlsVisible;
   const showResizeControls = allowResizeControls && panelChromeVisible;
+  const debugFps = useDebugFps(Boolean(debug));
   const resizeGripSx = React.useMemo(() => ({
     position: "absolute",
     bottom: 0,
@@ -1490,17 +1634,49 @@ function Show2D() {
   const rgbPanelCount = isRgbFlags ? isRgbFlags.filter(Boolean).length : 0;
   const diffPanelCount = showDiffPanel && !isPaged ? Math.max(0, nImages - 1 - rgbPanelCount) : 0;
   const totalPanelCount = Math.max(1, nImages || 1);
+  const [hiddenPageSlots, setHiddenPageSlots] = React.useState<number[]>([]);
+  const hiddenPageSlotsInitializedRef = React.useRef(false);
+  React.useEffect(() => {
+    if (!isPaged) {
+      hiddenPageSlotsInitializedRef.current = false;
+      setHiddenPageSlots(prev => prev.length === 0 ? prev : []);
+      return;
+    }
+    if (Array.isArray(hiddenPageSlotsTrait)) {
+      const slots = normalizeHiddenPageSlots(hiddenPageSlotsTrait, activePanelCount);
+      hiddenPageSlotsInitializedRef.current = true;
+      setHiddenPageSlots(prev => sameNumberArray(prev, slots) ? prev : slots);
+      return;
+    }
+    if (hiddenPageSlotsInitializedRef.current) return;
+    hiddenPageSlotsInitializedRef.current = true;
+    const slots = normalizeHiddenPageSlots(
+      (hiddenPanels || []).map((value) => Math.trunc(Number(value)) - activePageStart),
+      activePanelCount,
+    );
+    setHiddenPageSlots(prev => sameNumberArray(prev, slots) ? prev : slots);
+  }, [activePageStart, activePanelCount, hiddenPageSlotsTrait, hiddenPanels, isPaged]);
   const hiddenPanelSet = React.useMemo(() => {
     const out = new Set<number>();
-    for (const value of hiddenPanels || []) {
-      const idx = Math.round(Number(value));
-      if (Number.isFinite(idx) && idx >= 0 && idx < totalPanelCount) out.add(idx);
+    if (isPaged) {
+      for (const value of hiddenPageSlots || []) {
+        const slot = Math.trunc(Number(value));
+        const idx = activePageStart + slot;
+        if (Number.isFinite(slot) && slot >= 0 && slot < activePanelCount && idx >= activePageStart && idx < activePageEnd) {
+          out.add(idx);
+        }
+      }
+    } else {
+      for (const value of hiddenPanels || []) {
+        const idx = Math.round(Number(value));
+        if (Number.isFinite(idx) && idx >= 0 && idx < totalPanelCount) out.add(idx);
+      }
     }
     const activeHiddenCount = (isPaged ? activePageIndices : Array.from({ length: totalPanelCount }, (_, i) => i))
       .filter((idx) => out.has(idx)).length;
     if (activeHiddenCount >= Math.max(1, activePanelCount)) out.delete((isPaged ? activePageIndices : [totalPanelCount - 1])[Math.max(0, activePanelCount - 1)]);
     return out;
-  }, [hiddenPanels, totalPanelCount, isPaged, activePageIndices, activePanelCount]);
+  }, [activePageEnd, activePageIndices, activePageStart, activePanelCount, hiddenPageSlots, hiddenPanels, totalPanelCount, isPaged]);
   const naturalPanelOrder = React.useMemo(
     () => isPaged ? activePageIndices : Array.from({ length: totalPanelCount }, (_, i) => i),
     [activePageIndices, isPaged, totalPanelCount]
@@ -1528,6 +1704,25 @@ function Show2D() {
     return perPanel && perPanel > 0 ? perPanel : pixelSize;
   }, [pixelSize, pixelSizes]);
   const setPanelHidden = React.useCallback((panel: number, hidden: boolean) => {
+    if (isPaged) {
+      if (panel < activePageStart || panel >= activePageEnd) return;
+      const slot = panel - activePageStart;
+      const next = new Set<number>();
+      for (const value of hiddenPageSlots || []) {
+        const idx = Math.trunc(Number(value));
+        if (Number.isFinite(idx) && idx >= 0 && idx < activePanelCount) next.add(idx);
+      }
+      if (hidden) {
+        if (!next.has(slot) && activePanelCount - next.size <= 1) return;
+        next.add(slot);
+      } else {
+        next.delete(slot);
+      }
+      const slots = normalizeHiddenPageSlots(Array.from(next), activePanelCount);
+      setHiddenPageSlots(slots);
+      setHiddenPageSlotsTrait(slots);
+      return;
+    }
     const next = new Set<number>();
     for (const value of hiddenPanels || []) {
       const idx = Math.round(Number(value));
@@ -1537,7 +1732,7 @@ function Show2D() {
     else next.delete(panel);
     if (next.size >= totalPanelCount) return;
     setHiddenPanels(Array.from(next).sort((a, b) => a - b));
-  }, [hiddenPanels, totalPanelCount, setHiddenPanels]);
+  }, [activePageEnd, activePageStart, activePanelCount, hiddenPageSlots, hiddenPanels, totalPanelCount, isPaged, setHiddenPanels, setHiddenPageSlotsTrait]);
   const togglePanelStar = React.useCallback((panel: number) => {
     const next = Array.from({ length: totalPanelCount }, (_, idx) => starred?.[idx] ? 1 : 0);
     next[panel] = next[panel] ? 0 : 1;
@@ -5208,6 +5403,7 @@ function Show2D() {
                 ({rk * 90}°)
               </Box>
             ) : null; })()}
+            {debug && <DebugPerfBadge widget="Show2D" fps={debugFps} themeColors={themeColors} />}
 	            {showControls && <InfoTooltip text={<Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
               <MetadataSection rows={[
                 ["Shape", isGallery ? `${nImages} x ${height} x ${width}` : `${height} x ${width}`],
@@ -5258,7 +5454,7 @@ function Show2D() {
               <>
                 <Typography sx={{ ...typography.label, fontSize: 10, flexShrink: 0 }}>Page</Typography>
                 <Typography
-                  title={currentPageStatus}
+                  title={pageControlStatus}
                   sx={{
                     ...typography.label,
                     fontSize: 10,
@@ -5272,21 +5468,31 @@ function Show2D() {
                     fontVariantNumeric: "tabular-nums",
                   }}
                 >
-                  {currentPageStatus}
+                  {pageControlStatus}
                 </Typography>
                 <Slider
-                  value={currentPageIdx}
+                  value={pageControlIdx}
                   min={0}
                   max={Math.max(0, (nPages || 1) - 1)}
                   step={1}
-                  onPointerDownCapture={() => setPagePlaying(false)}
-                  onKeyDown={() => setPagePlaying(false)}
-                  onChange={(_, value) => {
-                    const next = Array.isArray(value) ? value[0] : value;
-                    setPagePlaying(false);
-                    setPageIdx(Math.max(0, Math.min((nPages || 1) - 1, Math.round(Number(next) || 0))));
+                  onPointerDownCapture={() => {
+                    stopPagePlayback();
+                    setPageSliderPreviewIdx(currentPageIdx);
                   }}
-                  onChangeCommitted={() => setPagePlaying(false)}
+                  onKeyDown={() => stopPagePlayback()}
+                  onChange={(_, value) => {
+                    const raw = Array.isArray(value) ? value[0] : value;
+                    const next = clampPageIdx(Number(raw));
+                    setPageSliderPreviewIdx(next);
+                    commitPageIdx(next);
+                  }}
+                  onChangeCommitted={(_, value) => {
+                    const raw = Array.isArray(value) ? value[0] : value;
+                    const next = clampPageIdx(Number(raw));
+                    stopPagePlayback();
+                    setPageSliderPreviewIdx(next);
+                    commitPageIdx(next, true);
+                  }}
                   size="small"
                   sx={{ ...sliderStyles.small, width: 120, flex: "0 0 120px", color: themeColors.accent }}
                   aria-label="Page"
@@ -5317,20 +5523,20 @@ function Show2D() {
                   size="small"
                   onClick={() => {
                     const next = Array.from({ length: Math.max(1, nPages || 1) }, (_, idx) => pageStarred?.[idx] ? 1 : 0);
-                    next[currentPageIdx] = next[currentPageIdx] ? 0 : 1;
+                    next[pageControlIdx] = next[pageControlIdx] ? 0 : 1;
                     setPageStarred(next);
                   }}
-                  title={(pageStarred?.[currentPageIdx] ? "Unstar " : "Star ") + currentPageLabel}
-                  aria-label={(pageStarred?.[currentPageIdx] ? "Unstar " : "Star ") + currentPageLabel}
+                  title={(pageStarred?.[pageControlIdx] ? "Unstar " : "Star ") + pageControlLabel}
+                  aria-label={(pageStarred?.[pageControlIdx] ? "Unstar " : "Star ") + pageControlLabel}
                   sx={{
                     width: 24,
                     height: 24,
                     p: 0,
-                    color: pageStarred?.[currentPageIdx] ? "#ffc107" : themeColors.textMuted,
-                    "&:hover": { color: pageStarred?.[currentPageIdx] ? "#ffc107" : themeColors.text },
+                    color: pageStarred?.[pageControlIdx] ? "#ffc107" : themeColors.textMuted,
+                    "&:hover": { color: pageStarred?.[pageControlIdx] ? "#ffc107" : themeColors.text },
                   }}
                 >
-                  {pageStarred?.[currentPageIdx] ? "★" : "☆"}
+                  {pageStarred?.[pageControlIdx] ? "★" : "☆"}
                 </IconButton>
               </>
             )}
@@ -5493,7 +5699,13 @@ function Show2D() {
                     <MenuItem
                       dense
                       disabled={hiddenPanelSet.size === 0}
-                      onClick={() => setHiddenPanels([])}
+                      onClick={() => {
+                        if (isPaged) {
+                          setHiddenPageSlots([]);
+                          setHiddenPageSlotsTrait([]);
+                        }
+                        setHiddenPanels([]);
+                      }}
                     >
                       <VisibilityIcon sx={{ fontSize: 16, mr: 1, color: themeColors.accent }} />
                       <Typography sx={{ fontSize: 11 }}>Show all panels</Typography>
@@ -5685,9 +5897,10 @@ function Show2D() {
                           textShadow: "1px 1px 0 rgba(0,0,0,0.85), 0 0 3px rgba(0,0,0,0.75)",
                           pointerEvents: "none",
                           userSelect: "none",
-                          whiteSpace: "nowrap",
-                          overflow: "hidden",
-                          textOverflow: "ellipsis",
+                          whiteSpace: "normal",
+                          overflow: "visible",
+                          textOverflow: "clip",
+                          overflowWrap: "anywhere",
                           zIndex: 2,
                         }}
                       >
@@ -5863,9 +6076,10 @@ function Show2D() {
                             textShadow: "1px 1px 0 rgba(0,0,0,0.85), 0 0 3px rgba(0,0,0,0.75)",
                             pointerEvents: "none",
                             userSelect: "none",
-                            whiteSpace: "nowrap",
-                            overflow: "hidden",
-                            textOverflow: "ellipsis",
+                            whiteSpace: "normal",
+                            overflow: "visible",
+                            textOverflow: "clip",
+                            overflowWrap: "anywhere",
                             zIndex: 2,
                           }}
                         >

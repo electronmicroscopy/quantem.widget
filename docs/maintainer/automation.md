@@ -17,7 +17,7 @@ real-data proof.
 | Mobile layout or touch-sensitive change | `scripts/widget_local_signoff.sh --quick --browser --mobile` | Desktop and 390x844 touch Chromium pre-check. |
 | Existing standalone HTML report or Tailscale-served real-data export | `PYTHONPATH=src:. python scripts/widget_external_html_profile.py --url http://127.0.0.1:8779/path/to/export.html --artifact-dir /tmp/quantem-widget-external-html-profile` | Browser profile of the existing export: first ready time, nonblank canvases, screenshots, common Show3D play/page/hide interactions, console/page errors, and FPS. |
 | Release-oriented validation | `scripts/widget_local_signoff.sh --full --performance` | Full local gates, frontend typecheck/tests, release check without wheel, real-data export timing report. |
-| Heavy real-data performance claim | `PYTHONPATH=src:. python scripts/widget_heavy_perf_signoff.py` | Local-only HPC/workstation real-data browser FPS, screenshots, FFT idle-cache report, and FFT metric stats-toggle cache report. |
+| Heavy real-data performance claim | `PYTHONPATH=src:. python scripts/widget_heavy_perf_signoff.py` | Local-only HPC/workstation real-data browser FPS, screenshots, paged Show2D/Show3D scrub and hidden-panel persistence, Show3D offline frame-cache/prewarm counters, FFT idle-cache report, and FFT metric stats-toggle cache report. |
 | Heavy Show4DSTEM real-data claim | `PYTHONPATH=src:. python scripts/widget_show4dstem_heavy_signoff.py --backend cuda` | Local-only real 4D-STEM NVIDIA/CUDA load, memory, append/stack-growth, export, browser WebGPU/FPS report. |
 | Raw Show4DSTEM loader speed or U8/U16 claim | `PYTHONPATH=src:. python scripts/widget_load_bench_matrix.py` | Local-only private real-data cold/warm `load(...)` table with parity outside the timer. |
 | Multi-disk / two-GPU Show4DSTEM load claim | `PYTHONPATH=src:. python scripts/widget_load_bench_sharded.py --devices 0,1` | Local-only private real-data disk layout, sharded GPU placement, cold/warm table, and capacity boundary. |
@@ -208,9 +208,10 @@ writes a dashboard row labeled `ShowFolder live-folder smoke`, WebP thumbnail
 previews for human review, 4D-STEM master QC rows, and reviewable exports for
 the final ShowFolder, Show2D, Show3D, and Show4DSTEM states.
 
-Keep this contract simple: ShowFolder watches folders; Show2D, Show3D, and
-Show4DSTEM render data passed to them. Do not add automatic folder watchers to
-viewer widgets unless the project explicitly changes that architecture.
+Keep this contract simple: ShowFolder watches general microscopy folders, while
+Show2D and Show3D render data passed to them. Show4DSTEM also has the explicit
+`Show4DSTEM.from_folder(...)` exception for lazy 4D-STEM master folders where
+new ready masters append as cold lazy slots.
 Keep ShowFolder's real cache as numeric arrays for widget handoff. WebP belongs
 in reports, dashboards, and other visual review surfaces, not in the selection
 or data cache.
@@ -290,10 +291,12 @@ layout checks, but it is not proof of physical iPhone Safari behavior.
 
 Use `scripts/widget_heavy_perf_signoff.py` for a complete browser-driven
 heavy-data proof. It wraps export performance smoke, runs browser drive, samples
-FPS, records screenshots, asserts that Show3D FFT overlay cache counters do not
-grow while idle, and asserts that toggling Stats does not recompute cached FFT
-metric labels. Keep it out of normal CI because it depends on local real
-datasets and can generate private heavy files.
+FPS, records screenshots, asserts that paged Show2D/Show3D hidden-panel state
+survives page scrubs, records Show3D standalone frame-cache/prewarm counters,
+asserts that Show3D FFT overlay cache counters do not grow while idle, and
+asserts that toggling Stats does not recompute cached FFT metric labels. Keep
+it out of normal CI because it depends on local real datasets and can generate
+private heavy files.
 
 Use `scripts/widget_show4dstem_heavy_signoff.py --backend cuda` for
 Show4DSTEM. It discovers local real 4D-STEM masters, measures NVIDIA/CUDA
@@ -363,7 +366,7 @@ the size justifies it.
 | `scripts/widget_browser_smoke.py` | Open generated HTML exports in Chromium, check nonblank canvas rendering, semantic controls, FPS, storyboard coverage, desktop/mobile viewport behavior, and save screenshots. | No, only `--browser`. | Exported widget browser behavior, interaction contracts, mobile layout expectations, FPS thresholds, or report format changes. |
 | `scripts/widget_phone_handoff.py` | Serve a signoff/report directory on `0.0.0.0`, print local/Tailscale URLs, and record physical phone viewport/touch probe logs. | No, manual physical-device handoff only. | Physical phone test workflow or Tailscale handoff expectations change. |
 | `scripts/widget_performance_smoke.py` | Record real-data Show2D/Show3D export timing, payload sizes, report HTML, and browser-drive plan. | No, only `--performance`. | Real-data performance expectations change. |
-| `scripts/widget_heavy_perf_signoff.py` | Local-only HPC/workstation heavy browser signoff for real Show2D/Show3D data, including browser FPS, screenshots, Show3D FFT idle-cache checks, and Show3D FFT metric stats-toggle cache checks. | No, never normal CI. | Heavy real-data datasets, FPS thresholds, FFT overlay/metric performance expectations, or report format change. |
+| `scripts/widget_heavy_perf_signoff.py` | Local-only HPC/workstation heavy browser signoff for real Show2D/Show3D data, including browser FPS, screenshots, paged scrub/hidden-panel checks, Show3D frame-cache/prewarm counters, Show3D FFT idle-cache checks, and Show3D FFT metric stats-toggle cache checks. | No, never normal CI. | Heavy real-data datasets, FPS thresholds, page-scrub/cache expectations, FFT overlay/metric performance expectations, or report format change. |
 | `scripts/widget_show4dstem_heavy_signoff.py` | Local-only Show4DSTEM heavy browser signoff for real 4D-STEM masters, including NVIDIA/CUDA load timing, append/stack-growth timing, dataset/frame flip FPS, memory pressure, virtual-detector FPS, scan-position FPS, and browser/WebGPU split. | No, never normal CI. | Show4DSTEM CUDA/MPS/cache/chunking behavior, exported HTML performance, or report format changes. |
 | `scripts/docs_preview.sh` | Build and serve docs for local visual review. | No. | The docs build command or served path changes. |
 | `.github/workflows/widget-ci.yml` | Run local signoff and upload signoff artifacts on PRs and main pushes. | Yes, on matching GitHub events. | Local signoff dependencies, trigger paths, or artifact policy changes. |

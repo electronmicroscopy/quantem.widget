@@ -28,7 +28,7 @@ change needs them.
 | `scripts/widget_browser_smoke.py` | Exported HTML actually renders and responds in Chromium. | Nonblank canvases, wheel/drag interaction, switches, sliders, console/page/HTTP errors, `requestAnimationFrame` FPS, FFT state, storyboard IDs, optional mobile viewport. | `scripts/widget_local_signoff.sh --quick --browser`; add `--mobile` for narrow/touch layout changes. | `browser-smoke.html`, `browser-smoke-report.json`, screenshots. |
 | `scripts/widget_performance_smoke.py` | Backend export packing and small real-data Show2D/Show3D payloads are measurable. | Real-data discovery, export time, output size, browser-drive plan. | `--performance` signoff or when checking export size/time trends. | `index.html`, `report.json`, `browser-plan.json`, exported real-data HTML. |
 | `scripts/widget_external_html_profile.py` | A standalone exported HTML report that already exists outside the repo remains interactive and fast. | Opens a provided URL, checks nonblank canvases, samples FPS, drives common Show3D page/play/hide controls when present, captures screenshots and console/page errors. | Local-only review of Tailscale-served or hosted real-data reports, especially when a user points to an existing exported HTML file. | `index.html`, `metrics.json`, screenshots under `/tmp` or `--artifact-dir`. |
-| `scripts/widget_heavy_perf_signoff.py` | Heavy Show2D/Show3D real-data browser performance is acceptable on lab data. | Local real-data discovery, heavy exports, browser FPS, nonblank render, screenshots, Show3D FFT overlay idle-cache guard, and FFT metric stats-toggle cache guard. | Local-only HPC/workstation performance claims; never normal CI. | `index.html`, `heavy-signoff-report.json`, `browser-smoke-report.json`, screenshots under `/tmp`. |
+| `scripts/widget_heavy_perf_signoff.py` | Heavy Show2D/Show3D real-data browser performance is acceptable on lab data. | Local real-data discovery, paged heavy exports, browser FPS, nonblank render, screenshots, page-scrub latency, hidden-panel persistence across page swaps, Show3D offline frame-cache/prewarm counters, Show3D FFT overlay idle-cache guard, and FFT metric stats-toggle cache guard. | Local-only HPC/workstation performance claims; never normal CI. | `index.html`, `heavy-signoff-report.json`, `browser-smoke-report.json`, screenshots under `/tmp`. |
 | `scripts/widget_show4dstem_heavy_signoff.py` | Heavy Show4DSTEM real-data loading, NVIDIA/CUDA backend memory, append/stack-growth, export, and browser interaction are acceptable on lab data. | Local 4D-STEM master discovery, CUDA first-load timing, backend memory report, append/stack-growth timing, dataset/frame flip FPS, virtual-detector drag FPS, scan-position FPS, browser WebGPU/backend split, GPU memory before/after. | Local-only Show4DSTEM performance claims; never normal CI. | `index.html`, `show4dstem-heavy-signoff-report.json`, exported Show4DSTEM HTML, browser screenshot under `/tmp`. |
 | `scripts/widget_phone_handoff.py` | A human can verify physical phone Safari behavior with shared logs. | Serves report on `0.0.0.0`, prints Tailscale/HTTPS handoff command, records viewport/touch/pointer/WebGPU events. | Physical iPhone/iPad checks after browser smoke, especially WebGPU or touch changes. | Served report, `phone-probe.html`, `phone-events.ndjson`. |
 | `scripts/widget_visual_signoff.sh` | Visual stories can be driven in Jupyter/browser before release. | Story-oriented widget drive packets, screenshots, selected release gates. | Broad UI or release-candidate work when a human/agent must drive real workflows. | Signoff packet/report under `/tmp` or configured artifact path. |
@@ -99,6 +99,20 @@ performance proof.
 Standalone exported HTML is a separate surface. It must be tested in the
 browser without assuming a Python kernel exists.
 
+Rendered tutorial HTML is also a separate surface. A screenshot is not enough:
+for interactive tutorials, execute the notebook, open the rendered HTML in a
+browser, and drive the widget. For the Show4DSTEM tutorial, use:
+
+```bash
+PYTHONPATH=src:. python scripts/widget_tutorial_interactivity_smoke.py \
+  docs/tutorials/show4dstem.ipynb \
+  --artifact-dir /tmp/quantem-widget-tutorial-interactivity-smoke
+```
+
+The smoke fails if the rendered multi-panel widget does not update its
+`DP at (...)` coordinate after a real drag. Keep these rendered HTML files and
+screenshots under `/tmp` unless a sanitized artifact is explicitly requested.
+
 When the real-data export already exists, profile the URL directly instead of
 regenerating data:
 
@@ -118,6 +132,21 @@ user explicitly asks for a sanitized artifact.
 Measure the interactions users feel. Unit tests and Python timers are not
 enough.
 
+Show2D, Show3D, and Show4DSTEM support an internal debug overlay with
+`debug=True`. It shows a compact `Debug FPS` badge in the widget title row and
+is meant for live diagnosis in Jupyter and exported HTML. Agents should turn it
+on when they need a quick, visible performance signal while driving a widget:
+
+```python
+Show3D(stack, debug=True)
+```
+
+Keep it off by default, keep the sampler browser-local, and do not update
+Python traits from the animation loop. The badge is an in-browser smoke signal
+for AI/human review, not a release benchmark. A performance claim still needs
+browser smoke, external HTML profile, or heavy signoff evidence with the report
+path recorded in the final handoff.
+
 For Show2D, drive and record:
 
 - first paint for PUI-2D-4K and PUI-2D-BATCH,
@@ -125,6 +154,11 @@ For Show2D, drive and record:
 - histogram min/max drag and center drag,
 - linked zoom/pan/contrast across panels,
 - column reflow through 1, 2, 4, 6, 8, and 12 columns,
+- paged panel sweeps: dragging or keyboard-stepping the Page slider should
+  update the visible page from local browser state immediately, then commit the
+  trait on the next animation frame,
+- hidden panels in paged views should be page-slot based, so hiding panel slot 2
+  keeps slot 2 hidden after moving to another page,
 - FFT toggle, FFT pan/zoom, and FFT reflow,
 - narrow mobile control wrapping: label/control pairs stay grouped for
   `Auto`, `Smooth`, `Zoom`, `Pan`, `Contrast`, and FFT controls, with no
@@ -140,6 +174,10 @@ For Show3D, drive and record:
   synchronized,
 - high-FPS playback stress and slider lag,
 - frame slider scrub, keyboard frame step, loop, bounce, and averaging,
+- paged panel sweeps: Page slider scrubs and Page play should not wait for a
+  Python trait round trip before the rendered page changes,
+- hidden panels in paged views should be page-slot based and must remain hidden
+  after Page slider scrubs, Page play, and page-label changes,
 - wheel zoom and drag pan with linked zoom on/off,
 - column reflow through 1, 2, 4, 6, 8, and 12 columns,
 - FFT bottom/right/overlay layouts,
@@ -163,6 +201,9 @@ Targets:
   the report must say which interaction, dataset, browser, and likely cause.
 - Playback/sliders: target 30 FPS for heavy practical views. Slider and image
   must stay synchronized at the selected FPS.
+- Page sliders: target a visible page update within one animation frame. In
+  heavy local signoff, page-scrub latency above 500 ms is treated as a failure
+  unless the report documents a hardware or browser limitation.
 - Mobile controls: labels and their switches, menus, sliders, or buttons must
   wrap as grouped pairs. A dense row may wrap onto another line, but it must
   not separate the label from the control it names.
@@ -346,10 +387,13 @@ By default it writes to:
 The heavy signoff:
 
 - discovers local real microscopy images from common HPC/workstation data roots,
-- builds Show2D real 4K exports and a Show3D real-derived heavy FFT overlay
-  export,
+- builds paged Show2D real 4K exports and a paged Show3D real-derived heavy
+  FFT overlay export,
 - runs `scripts/widget_browser_smoke.py` against the generated standalone HTML,
 - checks browser FPS against the configured threshold,
+- checks that paged Show2D and Show3D keep hidden-panel state after page scrubs,
+- checks that standalone Show3D exports expose bounded offline frame-cache and
+  prewarm counters in `window.__quantemShow3DPerf`,
 - checks that Show3D FFT cache counters do not grow while the page is idle,
 - checks that Show3D FFT and FFT metric counters do not grow while toggling the
   Stats UI. Stats are display chrome; they must not invalidate cached FFT
@@ -399,6 +443,14 @@ Separate the work into four phases:
    this path cheap: use refs, `requestAnimationFrame`, stable DOM nodes, and
    opacity/transform updates instead of recomputing arrays or forcing large
    React rerenders on every pointer event.
+
+Paged Show2D/Show3D sliders are in the pointer/UI layer. Render the requested
+page from local browser state immediately, then batch the synced trait write
+with `requestAnimationFrame`. Hidden panels in paged viewers are layout slots,
+not one absolute source index, so a hidden slot remains hidden as the page
+changes. Standalone Show3D HTML should render the current page/frame first,
+then prewarm neighboring frames and later frames in the background using a
+bounded cache with debug counters.
 
 Every heavy compute feature needs both math proof and cache proof:
 

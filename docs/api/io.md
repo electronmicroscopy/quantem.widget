@@ -299,6 +299,32 @@ bounded, but cold loading stays limited by that disk.
 
 ## I want to load every master file in a folder.
 
+Use `Show4DSTEM.from_folder(...)` when the folder can grow or when you want a
+GPU-resident cache instead of loading every master immediately:
+
+```python
+from quantem.widget import Show4DSTEM
+
+w = Show4DSTEM.from_folder(
+    "/data/session",
+    backend="cuda",
+    gpus=[0, 1],
+    det_bin=1,
+    dtype="u8",
+    page_budget="auto",
+    view_mode="multiple",
+    compare_cols=3,
+    watch=True,
+)
+```
+
+The first ready master paints the viewer. Other masters stay as lazy slots and
+new ready masters append through `poll_folder()` / `watch_folder()` without
+rebuilding the widget.
+
+Use explicit discovery plus `load(...)` when the file list is fixed and you want
+to control exactly what enters the stack:
+
 ```python
 from quantem.widget import load, discover_masters, Show4DSTEM
 

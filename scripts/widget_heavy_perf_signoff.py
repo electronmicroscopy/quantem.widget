@@ -61,6 +61,275 @@ def _show3d_export(report: dict[str, Any]) -> dict[str, Any]:
     return min(show3d_exports, key=lambda item: float(item.get("size_mb", 0) or 0))
 
 
+def _smallest_export(report: dict[str, Any], widget: str) -> dict[str, Any]:
+    exports = [item for item in report.get("exports", []) if item.get("widget") == widget]
+    if not exports:
+        raise RuntimeError(f"performance smoke did not produce a {widget} export")
+    return min(exports, key=lambda item: float(item.get("size_mb", 0) or 0))
+
+
+def _chrome_launch_kwargs(*, headed: bool) -> dict[str, Any]:
+    chrome = _chrome_executable()
+    launch_kwargs: dict[str, Any] = {
+        "headless": not headed,
+        "args": [
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-search-engine-choice-screen",
+        ],
+    }
+    if chrome is not None:
+        launch_kwargs["executable_path"] = chrome
+    return launch_kwargs
+
+
+def _text_button(page, label_prefix: str) -> str:
+    return str(
+        page.evaluate(
+            """(labelPrefix) => {
+              const visible = (node) => {
+                const rect = node.getBoundingClientRect();
+                const style = getComputedStyle(node);
+                return rect.width > 0 && rect.height > 0 &&
+                  style.visibility !== 'hidden' && style.display !== 'none';
+              };
+              const button = [...document.querySelectorAll('button')]
+                .find((node) => visible(node) && (node.textContent || '').trim().startsWith(labelPrefix));
+              return button ? (button.textContent || '').trim().replace(/\\s+/g, ' ') : '';
+            }""",
+            label_prefix,
+        )
+    )
+
+
+def _hide_first_panel_from_menu(page) -> dict[str, Any]:
+    before_text = _text_button(page, "Panels")
+    opened = bool(
+        page.evaluate(
+            """() => {
+              const visible = (node) => {
+                const rect = node.getBoundingClientRect();
+                const style = getComputedStyle(node);
+                return rect.width > 0 && rect.height > 0 &&
+                  style.visibility !== 'hidden' && style.display !== 'none';
+              };
+              const button = [...document.querySelectorAll('button')]
+                .find((node) =>
+                  visible(node) &&
+                  node.getAttribute('aria-label') === 'Choose visible panels' &&
+                  (node.textContent || '').trim().startsWith('Panels')
+                );
+              if (!button) return false;
+              button.click();
+              return true;
+            }"""
+        )
+    )
+    if not opened:
+        return {"opened": False, "clicked": False, "before": before_text, "after": before_text}
+    page.wait_for_timeout(150)
+    clicked = bool(
+        page.evaluate(
+            """() => {
+              const visible = (node) => {
+                const rect = node.getBoundingClientRect();
+                const style = getComputedStyle(node);
+                return rect.width > 0 && rect.height > 0 &&
+                  style.visibility !== 'hidden' && style.display !== 'none';
+              };
+              const items = [...document.querySelectorAll('[role="menuitem"], .MuiMenuItem-root')]
+                .filter((node) => {
+                  const text = (node.textContent || '').trim();
+                  const disabled = node.getAttribute('aria-disabled') === 'true' ||
+                    node.classList.contains('Mui-disabled');
+                  return visible(node) && !disabled && text &&
+                    !/show all panels|reset order/i.test(text);
+                });
+              if (!items.length) return false;
+              items[0].click();
+              return true;
+            }"""
+        )
+    )
+    page.wait_for_timeout(120)
+    for _ in range(3):
+        if int(page.locator('[role="menu"], .MuiPopover-root, .MuiModal-root').count()) == 0:
+            break
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(100)
+    return {"opened": opened, "clicked": clicked, "before": before_text, "after": _text_button(page, "Panels")}
+
+
+def _page_slider_value(page) -> str | None:
+    value = page.evaluate(
+        """() => {
+          const input = document.querySelector('input[aria-label="Page"]');
+          return input ? String(input.value ?? '') : null;
+        }"""
+    )
+    return None if value is None else str(value)
+
+
+def _page_slider_max(page) -> int:
+    value = page.evaluate(
+        """() => {
+          const input = document.querySelector('input[aria-label="Page"]');
+          const raw = input ? Number(input.max || 0) : 0;
+          return Number.isFinite(raw) ? Math.max(0, Math.round(raw)) : 0;
+        }"""
+    )
+    return int(value or 0)
+
+
+def _set_page_slider_by_pointer(page, target_idx: int, *, timeout_ms: int) -> None:
+    target = page.evaluate(
+        """(targetIdx) => {
+          const input = document.querySelector('input[aria-label="Page"]');
+          if (!input) throw new Error('Page slider input not found');
+          const root = input.closest('.MuiSlider-root') || input.parentElement;
+          if (!root) throw new Error('Page slider root not found');
+          const rect = root.getBoundingClientRect();
+          const max = Math.max(0, Math.round(Number(input.max || 0)));
+          const clamped = Math.max(0, Math.min(max, Math.round(Number(targetIdx || 0))));
+          if (max <= 0) throw new Error('Page slider has no second page');
+          const bucket = (clamped + 0.5) / (max + 1);
+          return {
+            x: rect.left + (rect.width * bucket),
+            y: rect.top + rect.height / 2,
+            value: String(clamped),
+          };
+        }""",
+        target_idx,
+    )
+    page.mouse.click(float(target["x"]), float(target["y"]))
+    page.wait_for_function(
+        """(targetValue) => {
+          const input = document.querySelector('input[aria-label="Page"]');
+          return input && String(Math.round(Number(input.value || 0))) === String(targetValue);
+        }""",
+        arg=target["value"],
+        timeout=min(1000, timeout_ms),
+    )
+
+
+def _check_paged_widget_scrub(
+    artifact_dir: Path,
+    export_file: str,
+    *,
+    widget: str,
+    timeout_ms: int,
+    headed: bool,
+) -> dict[str, Any]:
+    try:
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+        from playwright.sync_api import sync_playwright
+    except ImportError as exc:  # pragma: no cover - environment guard
+        raise RuntimeError("playwright is required for heavy browser signoff") from exc
+
+    port = _free_port()
+    screenshot = artifact_dir / f"{widget}-paged-scrub.png"
+    console_errors: list[str] = []
+    page_errors: list[str] = []
+    probe_errors: list[str] = []
+    page_durations_ms: list[float] = []
+    fps = 0.0
+    slider_count = 0
+    slider_before: str | None = None
+    slider_after: str | None = None
+    hide_probe: dict[str, Any] = {}
+    panels_after_scrub = ""
+    perf_before: dict[str, Any] | None = None
+    perf_after: dict[str, Any] | None = None
+    try:
+        with _StaticServer(artifact_dir, port) as base_url:
+            with sync_playwright() as pw:
+                browser = pw.chromium.launch(**_chrome_launch_kwargs(headed=headed))
+                try:
+                    page = browser.new_page(viewport={"width": 1440, "height": 1050})
+                    page.on("pageerror", lambda exc: page_errors.append(str(exc)))
+                    page.on(
+                        "console",
+                        lambda msg: console_errors.append(msg.text)
+                        if msg.type == "error" and "Failed to load resource:" not in msg.text
+                        else None,
+                    )
+                    page.goto(f"{base_url}/{Path(export_file).name}", wait_until="domcontentloaded", timeout=timeout_ms)
+                    page.wait_for_function("document.querySelectorAll('canvas').length > 0", timeout=timeout_ms)
+                    page.wait_for_timeout(1200)
+                    slider_count = int(page.locator('input[aria-label="Page"]').count())
+                    if slider_count != 1:
+                        raise RuntimeError(f"{widget} expected one Page slider, found {slider_count}")
+                    slider = page.locator('input[aria-label="Page"]').first
+                    slider.focus(timeout=timeout_ms)
+                    page.keyboard.press("Home")
+                    page.wait_for_timeout(160)
+                    slider_before = _page_slider_value(page)
+                    hide_probe = _hide_first_panel_from_menu(page)
+                    if not hide_probe.get("clicked"):
+                        raise RuntimeError(f"{widget} could not hide a panel from the Panels menu: {hide_probe}")
+                    fps = _measure_fps(page, 900)
+                    perf_before = page.evaluate("() => window.__quantemShow3DPerf || null")
+                    max_page_idx = _page_slider_max(page)
+                    if max_page_idx < 1:
+                        raise RuntimeError(f"{widget} Page slider has no second page")
+                    scrub_targets = [max_page_idx, 0, max_page_idx, 0]
+                    for _ in range(4):
+                        before = _page_slider_value(page)
+                        target = scrub_targets[len(page_durations_ms) % len(scrub_targets)]
+                        t0 = time.perf_counter()
+                        try:
+                            _set_page_slider_by_pointer(page, target, timeout_ms=timeout_ms)
+                        except PlaywrightTimeoutError:
+                            probe_errors.append(
+                                f"{widget} Page slider did not move from {before!r} to {target!r}"
+                            )
+                        page.wait_for_timeout(60)
+                        page_durations_ms.append((time.perf_counter() - t0) * 1000)
+                    slider_after = _page_slider_value(page)
+                    panels_after_scrub = _text_button(page, "Panels")
+                    perf_after = page.evaluate("() => window.__quantemShow3DPerf || null")
+                    page.screenshot(path=str(screenshot), full_page=True, timeout=timeout_ms)
+                finally:
+                    browser.close()
+    except Exception as exc:  # pragma: no cover - browser/runtime guard
+        probe_errors.append(f"{widget} paged scrub probe failed: {exc}")
+
+    errors = probe_errors + list(page_errors) + list(console_errors)
+    hidden_before = str(hide_probe.get("before") or "")
+    hidden_after = str(hide_probe.get("after") or "")
+    max_page_ms = max(page_durations_ms) if page_durations_ms else None
+    avg_page_ms = sum(page_durations_ms) / len(page_durations_ms) if page_durations_ms else None
+    if hide_probe and hidden_before == hidden_after:
+        errors.append(f"{widget} Panels button did not reflect hidden panel state: {hide_probe}")
+    if hidden_after and panels_after_scrub and hidden_after != panels_after_scrub:
+        errors.append(f"{widget} hidden panel state changed after page scrubs: {hidden_after} -> {panels_after_scrub}")
+    if max_page_ms is not None and max_page_ms > 500:
+        errors.append(f"{widget} page scrub max latency {max_page_ms:.1f} ms exceeded 500 ms")
+    if widget == "show3d" and perf_after:
+        cache_size = int(perf_after.get("offlineFrameCacheSize") or 0)
+        cache_limit = int(perf_after.get("offlineFrameCacheLimit") or 0)
+        if cache_limit > 0 and cache_size > cache_limit:
+            errors.append(f"Show3D offline frame cache exceeded limit: {cache_size} > {cache_limit}")
+
+    return {
+        "widget": widget,
+        "file": Path(export_file).name,
+        "screenshot": screenshot.name if screenshot.exists() else None,
+        "slider_count": slider_count,
+        "slider_before": slider_before,
+        "slider_after": slider_after,
+        "hide_probe": hide_probe,
+        "panels_after_scrub": panels_after_scrub,
+        "fps": round(float(fps), 1),
+        "page_scrub_avg_ms": round(avg_page_ms, 1) if avg_page_ms is not None else None,
+        "page_scrub_max_ms": round(max_page_ms, 1) if max_page_ms is not None else None,
+        "perf_before": perf_before,
+        "perf_after": perf_after,
+        "errors": errors,
+        "passed": not errors,
+    }
+
+
 def _check_show3d_fft_idle(
     artifact_dir: Path,
     show3d_file: str,
@@ -77,21 +346,9 @@ def _check_show3d_fft_idle(
 
     port = _free_port()
     screenshot = artifact_dir / "show3d-fft-idle.png"
-    chrome = _chrome_executable()
-    launch_kwargs: dict[str, Any] = {
-        "headless": not headed,
-        "args": [
-            "--no-first-run",
-            "--no-default-browser-check",
-            "--disable-search-engine-choice-screen",
-        ],
-    }
-    if chrome is not None:
-        launch_kwargs["executable_path"] = chrome
-
     with _StaticServer(artifact_dir, port) as base_url:
         with sync_playwright() as pw:
-            browser = pw.chromium.launch(**launch_kwargs)
+            browser = pw.chromium.launch(**_chrome_launch_kwargs(headed=headed))
             try:
                 page = browser.new_page(viewport={"width": 1440, "height": 1050})
                 console_errors: list[str] = []
@@ -157,18 +414,6 @@ def _check_show3d_fft_stats_toggle(
 
     port = _free_port()
     screenshot = artifact_dir / "show3d-fft-stats-toggle.png"
-    chrome = _chrome_executable()
-    launch_kwargs: dict[str, Any] = {
-        "headless": not headed,
-        "args": [
-            "--no-first-run",
-            "--no-default-browser-check",
-            "--disable-search-engine-choice-screen",
-        ],
-    }
-    if chrome is not None:
-        launch_kwargs["executable_path"] = chrome
-
     durations_ms: list[float] = []
     before: dict[str, Any] | None = None
     after: dict[str, Any] | None = None
@@ -181,7 +426,7 @@ def _check_show3d_fft_stats_toggle(
     try:
         with _StaticServer(artifact_dir, port) as base_url:
             with sync_playwright() as pw:
-                browser = pw.chromium.launch(**launch_kwargs)
+                browser = pw.chromium.launch(**_chrome_launch_kwargs(headed=headed))
                 try:
                     page = browser.new_page(viewport={"width": 1440, "height": 1050})
                     page.on("pageerror", lambda exc: page_errors.append(str(exc)))
@@ -296,6 +541,11 @@ def _write_index(artifact_dir: Path, report: dict[str, Any]) -> None:
         if (artifact_dir / "show3d-fft-stats-toggle.png").exists()
         else ""
     )
+    page_links = "\n".join(
+        f"<li><a href='{name}'>{name}</a></li>"
+        for name in ("show2d-paged-scrub.png", "show3d-paged-scrub.png")
+        if (artifact_dir / name).exists()
+    )
     report_json = json.dumps(report, indent=2)
     html = f"""<!doctype html>
 <html>
@@ -322,6 +572,7 @@ def _write_index(artifact_dir: Path, report: dict[str, Any]) -> None:
     {browser_link}
     {fft_link}
     {fft_stats_link}
+    {page_links}
     <li><a href="heavy-signoff-report.json">Machine-readable report</a></li>
   </ul>
   <h2>Machine-readable report</h2>
@@ -390,6 +641,8 @@ def main() -> int:
     browser_report: dict[str, Any] | None = None
     fft_idle: dict[str, Any] | None = None
     fft_stats_toggle: dict[str, Any] | None = None
+    show2d_paged_scrub: dict[str, Any] | None = None
+    show3d_paged_scrub: dict[str, Any] | None = None
     errors: list[str] = []
 
     if args.skip_browser:
@@ -414,7 +667,24 @@ def main() -> int:
         if browser_result.returncode != 0:
             errors.append("browser smoke failed; see browser-smoke.log")
 
+        show2d = _smallest_export(performance_report, "show2d")
+        show2d_paged_scrub = _check_paged_widget_scrub(
+            artifact_dir,
+            str(show2d["path"]),
+            widget="show2d",
+            timeout_ms=args.timeout_ms,
+            headed=args.headed,
+        )
+        errors.extend(show2d_paged_scrub["errors"])
         show3d = _show3d_export(performance_report)
+        show3d_paged_scrub = _check_paged_widget_scrub(
+            artifact_dir,
+            str(show3d["path"]),
+            widget="show3d",
+            timeout_ms=args.timeout_ms,
+            headed=args.headed,
+        )
+        errors.extend(show3d_paged_scrub["errors"])
         fft_idle = _check_show3d_fft_idle(
             artifact_dir,
             str(show3d["path"]),
@@ -449,6 +719,8 @@ def main() -> int:
         },
         "performance": performance_report,
         "browser": browser_report,
+        "show2d_paged_scrub": show2d_paged_scrub,
+        "show3d_paged_scrub": show3d_paged_scrub,
         "show3d_fft_idle": fft_idle,
         "show3d_fft_stats_toggle": fft_stats_toggle,
         "errors": errors,

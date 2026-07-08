@@ -101,8 +101,10 @@ Timing traits and debug surfaces should stay stable across widgets:
   when the widget can observe the frontend paint.
 - ``render_python_build_ms``: subset spent in Python widget setup.
 - ``render_wire_js_ms``: transfer, browser decode, and first paint remainder.
-- ``show_debug`` / debug HUD: opt-in browser interaction telemetry such as FPS,
-  map/spectrum/draw time, frame fetch time, and render time.
+- ``debug=True`` / debug HUD: opt-in browser interaction telemetry such as FPS,
+  map/spectrum/draw time, frame fetch time, and render time. Show2D, Show3D,
+  and Show4DSTEM expose a browser-local `Debug FPS` badge for quick agent and
+  human smoke checks in notebooks and exported HTML.
 
 Use ``quantem.widget.profile_widget`` in profiling notebooks to time the Python
 construction path in the same format:

@@ -641,6 +641,8 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
         Start with the live control UI collapsed behind a small GUI toggle.
         Unlike ``show_controls=False``, users can expand the controls in the
         frontend and Python can call ``expand_controls()`` later.
+    debug : bool, default False
+        Show a compact frontend FPS/debug badge in the widget title row.
     save_state : bool, default False
         When False, saved notebooks omit heavy stack buffers and keep a compact
         static preview for cold reopen. Set True only for small widgets that
@@ -841,6 +843,7 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
     show_controls = traitlets.Bool(True).tag(sync=True)
     controls_collapsed = traitlets.Bool(False).tag(sync=True)
     show_stats = traitlets.Bool(False).tag(sync=True)
+    debug = traitlets.Bool(False).tag(sync=True)
     stats_mean = traitlets.Float(0.0).tag(sync=True)
     stats_min = traitlets.Float(0.0).tag(sync=True)
     stats_max = traitlets.Float(0.0).tag(sync=True)
@@ -1545,6 +1548,7 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
         show_stats: bool | None = None,
         show_controls: bool | None = None,
         controls_collapsed: bool | None = None,
+        debug: bool = False,
         size: int = 0,
         panel_width_px: int = 0,
         crop: int | tuple[int, int] | tuple[int, int, int, int] = 0,
@@ -1733,7 +1737,7 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
                             fft_window=fft_window,
                             fft_metrics=fft_metrics,
                             show_stats=show_stats, show_controls=show_controls,
-                            controls_collapsed=controls_collapsed,
+                            controls_collapsed=controls_collapsed, debug=debug,
                             size=size, crop=crop, padding=padding, pad_mode=pad_mode,
                             config=config, rotation_deg=rotation_deg,
                             post_crop=post_crop,
@@ -1768,7 +1772,7 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
                    fft_overlay_position: str, fft_overlay_size: float,
                    fft_overlay_zoom: float, fft_window: bool, fft_metrics: bool,
                    show_stats: bool | None, show_controls: bool,
-                   controls_collapsed: bool,
+                   controls_collapsed: bool, debug: bool,
                    size: int, crop: int | tuple[int, int] | tuple[int, int, int, int],
                    padding: int | tuple[int, int], pad_mode: str,
                    config, rotation_deg, post_crop, apply_config_transforms: bool,
@@ -2274,6 +2278,7 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
         self.show_stats = False if show_stats is None else bool(show_stats)
         self.show_controls = show_controls
         self.controls_collapsed = bool(controls_collapsed)
+        self.debug = bool(debug)
         self.size = size
         frame_bytes = self.height * self.width * 4  # float32
         # Exact float32 sliding window. Do not ship the whole stack when it
@@ -2714,6 +2719,7 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
             "vmax_per_panel": list(self.vmax_per_panel),
             "show_title": self.show_title,
             "show_stats": self.show_stats,
+            "debug": self.debug,
             "show_controls": self.show_controls,
             "controls_collapsed": self.controls_collapsed,
             "show_fft": self.show_fft,
@@ -4656,6 +4662,7 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
             show_stats=self.show_stats,
             show_controls=self.show_controls,
             controls_collapsed=self.controls_collapsed,
+            debug=self.debug,
             size=self.size,
             diff_mode=self.diff_mode,
             buffer_size=getattr(self, "_buffer_size", 64),

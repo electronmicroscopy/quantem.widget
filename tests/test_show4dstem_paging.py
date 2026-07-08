@@ -8,6 +8,8 @@ least-recently-used datasets to RAM. This guards both fixed-count paging and
 """
 from __future__ import annotations
 
+from collections import namedtuple
+
 import pytest
 
 torch = pytest.importorskip("torch")
@@ -16,6 +18,7 @@ from quantem.widget import Show4DSTEM
 from quantem.widget.data.dataset5dstem import Dataset5dstem
 
 cuda_required = pytest.mark.skipif(not torch.cuda.is_available(), reason="paging test needs a CUDA device")
+LoadResult = namedtuple("LoadResult", ["data", "metadata"])
 
 
 def _series(n=4, scan=32, det=48):
@@ -133,6 +136,32 @@ def test_lazy_dataset_loads_only_requested_frame_on_cpu():
     assert calls == [2, 0]
 
 
+def test_lazy_dataset_release_preserves_index_and_reloads_on_demand():
+    calls = []
+
+    def make_loader(i):
+        def load():
+            calls.append(i)
+            return torch.full((2, 2, 3, 3), i, dtype=torch.uint8)
+        return load
+
+    ds = Dataset5dstem.from_lazy_loaders(
+        [make_loader(i) for i in range(3)],
+        shape=(3, 2, 2, 3, 3),
+        dtype=torch.uint8,
+    )
+
+    assert int(ds.frame(1)[0, 0, 0, 0]) == 1
+    assert ds.loaded_indices() == [1]
+    released = ds.release(idx=[1])
+
+    assert released == [1]
+    assert ds.shape == (3, 2, 2, 3, 3)
+    assert ds.loaded_indices() == []
+    assert int(ds.frame(1)[0, 0, 0, 0]) == 1
+    assert calls == [1, 1]
+
+
 def test_lazy_dataset_validates_metadata_and_initial_frames():
     def load():
         return torch.zeros((2, 2, 3, 3), dtype=torch.uint8)
@@ -195,6 +224,49 @@ def test_show4dstem_free_releases_dataset5dstem_on_cpu():
     assert widget._data is None
     with pytest.raises(RuntimeError, match="Dataset5dstem has been freed"):
         len(ds)
+
+
+def test_show4dstem_hiding_lazy_compare_panel_releases_and_skips_recompute():
+    calls = []
+
+    def make_loader(i):
+        def load():
+            calls.append(i)
+            return torch.full((3, 3, 6, 6), i + 1, dtype=torch.uint8)
+        return load
+
+    ds = Dataset5dstem.from_lazy_loaders(
+        [make_loader(i) for i in range(4)],
+        shape=(4, 3, 3, 6, 6),
+        dtype=torch.uint8,
+        initial_frames={0: torch.ones((3, 3, 6, 6), dtype=torch.uint8)},
+    )
+    widget = Show4DSTEM(
+        ds,
+        view_mode="multiple",
+        compare_max_panels=3,
+        precompute_virtual_images=False,
+        verbose=False,
+    )
+
+    try:
+        assert widget.compare_panel_indices == [0, 1, 2]
+        assert calls == [1, 2]
+        assert ds.loaded_indices() == [0, 1, 2]
+
+        widget.hide_compare_panel(1)
+
+        assert widget.compare_hidden_panels == [1]
+        assert 1 not in ds.loaded_indices()
+        assert widget.compare_panel_indices == [0, 2, 3]
+        assert calls == [1, 2, 3]
+
+        widget.apply_preset("adf")
+
+        assert 1 not in calls[3:]
+        assert widget.compare_panel_indices == [0, 2, 3]
+    finally:
+        widget.close()
 
 
 # --- ShowFolder -> Show4DSTEM handoff -----------------------------------------
@@ -289,6 +361,61 @@ def test_showfolder_open_show4dstem_is_lazy_after_initial_frame(monkeypatch, tmp
     assert calls == [fake_masters[0], fake_masters[3]]
     loaded = [idx for idx, frame in enumerate(w._data._frames) if frame is not None]
     assert loaded == [0, 3]
+
+
+def test_show4dstem_from_folder_builds_lazy_widget_and_poll_appends(monkeypatch, tmp_path):
+    import quantem.widget as qw
+    import quantem.widget.io as wio
+
+    masters = [str(tmp_path / f"scan_{i:02d}_master.h5") for i in range(2)]
+    calls = []
+    discovered = [masters[0]]
+
+    def fake_discover(folder, *, pattern="*_master.h5", recursive=True, scan_shape=None, verbose=False, **kw):
+        return list(discovered)
+
+    def fake_ready(path):
+        return True
+
+    def fake_load(path, *, det_bin=4, dtype="u8", verbose=False, **kw):
+        calls.append(path)
+        value = int(path.split("scan_")[1][:2]) + 1
+        return LoadResult(torch.full((3, 3, 6, 6), value, dtype=torch.uint8), {})
+
+    monkeypatch.setattr(wio, "discover_masters", fake_discover)
+    monkeypatch.setattr(wio, "is_master_ready", fake_ready)
+    monkeypatch.setattr(qw, "load", fake_load)
+
+    widget = Show4DSTEM.from_folder(
+        tmp_path,
+        gpus=None,
+        page_budget=1,
+        det_bin=4,
+        dtype="u8",
+        view_mode="single",
+        precompute_virtual_images=False,
+        verbose=False,
+    )
+
+    try:
+        assert widget.n_frames == 1
+        assert list(widget.frame_labels) == ["scan_00"]
+        assert calls == [masters[0]]
+
+        discovered.append(masters[1])
+        added = widget.poll_folder()
+
+        assert added == [1]
+        assert widget.n_frames == 2
+        assert list(widget.frame_labels) == ["scan_00", "scan_01"]
+        assert calls == [masters[0]]
+
+        widget.frame_idx = 1
+        assert int(widget._frame_data[0, 0, 0, 0]) == 2
+        assert calls == [masters[0], masters[1]]
+    finally:
+        widget.stop_folder_watch()
+        widget.close()
 
 
 @cuda_required

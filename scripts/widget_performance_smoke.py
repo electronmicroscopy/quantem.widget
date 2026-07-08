@@ -155,6 +155,17 @@ def _make_show3d_stack(images: list[np.ndarray], frames: int, size: int) -> np.n
     return np.stack(panels, axis=0)
 
 
+def _page_shape(requested_panels: int, preferred_pages: int) -> tuple[int, int, int]:
+    """Return ``(n_pages, panels_per_page, total_panels)`` for page smoke data."""
+
+    requested = max(1, int(requested_panels))
+    if requested < 2:
+        return 1, requested, requested
+    n_pages = min(max(2, int(preferred_pages)), requested)
+    panels_per_page = int(np.ceil(requested / n_pages))
+    return n_pages, panels_per_page, n_pages * panels_per_page
+
+
 def _write_html_report(artifact_dir: Path, report: dict[str, Any]) -> None:
     rows = "\n".join(
         "<tr>"
@@ -264,29 +275,44 @@ def main() -> int:
         if value
     ]
     search_roots = args.search_root or env_roots or DEFAULT_SEARCH_ROOTS
-    source_paths = _discover_real_image_paths(search_roots, max(show2d_panels, show3d_panels, 8))
+    show2d_pages, show2d_panels_per_page, show2d_total_panels = _page_shape(show2d_panels, 2)
+    show3d_pages, show3d_panels_per_page, show3d_total_panels = _page_shape(
+        show3d_panels,
+        3 if show3d_panels >= 6 else 2,
+    )
+    source_paths = _discover_real_image_paths(search_roots, max(show2d_total_panels, show3d_total_panels, 8))
 
     start = time.perf_counter()
-    show2d_images, show2d_sources = _load_real_images(source_paths, show2d_panels, show2d_size)
+    show2d_images, show2d_sources = _load_real_images(source_paths, show2d_total_panels, show2d_size)
     show2d_stack = np.stack(show2d_images, axis=0)
+    show2d_pages_stack = show2d_stack.reshape(
+        show2d_pages,
+        show2d_panels_per_page,
+        show2d_size,
+        show2d_size,
+    )
     timers.record("load_show2d_real_images", start, {
         "shape": list(show2d_stack.shape),
+        "paged_shape": list(show2d_pages_stack.shape),
         "native_mb": _native_mb(show2d_stack),
         "sources": show2d_sources,
     })
 
     start = time.perf_counter()
     show2d = Show2D(
-        show2d_stack,
-        title=f"Performance Show2D real {show2d_panels}x{show2d_size}",
-        labels=[f"P{i + 1:02d}" for i in range(show2d_panels)],
-        ncols=min(4, show2d_panels),
+        show2d_pages_stack,
+        title=f"Performance Show2D real pages {show2d_pages}x{show2d_panels_per_page}x{show2d_size}",
+        labels=[f"P{i + 1:02d}" for i in range(show2d_panels_per_page)],
+        page_labels=[f"page {i + 1:02d}" for i in range(show2d_pages)],
+        ncols=min(4, show2d_panels_per_page),
         display_bin="auto",
         show_fft=False,
         verbose=False,
     )
     timers.record("construct_show2d", start, {
-        "n_panels": show2d_panels,
+        "n_pages": show2d_pages,
+        "panels_per_page": show2d_panels_per_page,
+        "n_panels": show2d_total_panels,
         "size": show2d_size,
         "display_bin": getattr(show2d, "display_bin_factor", None),
     })
@@ -304,27 +330,41 @@ def main() -> int:
         })
 
     start = time.perf_counter()
-    show3d_images, show3d_sources = _load_real_images(source_paths, show3d_panels, show3d_size)
+    show3d_images, show3d_sources = _load_real_images(source_paths, show3d_total_panels, show3d_size)
     show3d_stack = _make_show3d_stack(show3d_images, show3d_frames, show3d_size)
+    show3d_pages_stack = show3d_stack.reshape(
+        show3d_pages,
+        show3d_panels_per_page,
+        show3d_frames,
+        show3d_size,
+        show3d_size,
+    )
     timers.record("load_show3d_real_derived_stack", start, {
         "shape": list(show3d_stack.shape),
+        "paged_shape": list(show3d_pages_stack.shape),
         "native_mb": _native_mb(show3d_stack),
         "sources": show3d_sources,
     })
 
     start = time.perf_counter()
     show3d = Show3D(
-        *[show3d_stack[idx] for idx in range(show3d_panels)],
-        title=f"Performance Show3D real-derived {show3d_panels}x{show3d_frames}x{show3d_size}",
-        panel_titles=[f"P{i + 1:02d}" for i in range(show3d_panels)],
-        max_cols=min(4, show3d_panels),
+        show3d_pages_stack,
+        title=(
+            "Performance Show3D real-derived pages "
+            f"{show3d_pages}x{show3d_panels_per_page}x{show3d_frames}x{show3d_size}"
+        ),
+        panel_titles=[f"P{i + 1:02d}" for i in range(show3d_panels_per_page)],
+        page_labels=[f"page {i + 1:02d}" for i in range(show3d_pages)],
+        max_cols=min(4, show3d_panels_per_page),
         show_fft=True,
         fft_layout="overlay",
         fft_overlay_size=0.25,
         save_state=False,
     )
     timers.record("construct_show3d", start, {
-        "n_panels": show3d_panels,
+        "n_pages": show3d_pages,
+        "panels_per_page": show3d_panels_per_page,
+        "n_panels": show3d_total_panels,
         "frames": show3d_frames,
         "size": show3d_size,
     })
@@ -361,8 +401,21 @@ def main() -> int:
             "pid": os.getpid(),
         },
         "targets": {
-            "show2d": {"panels": show2d_panels, "size": show2d_size},
-            "show3d": {"panels": show3d_panels, "frames": show3d_frames, "size": show3d_size},
+            "show2d": {
+                "requested_panels": show2d_panels,
+                "pages": show2d_pages,
+                "panels_per_page": show2d_panels_per_page,
+                "total_panels": show2d_total_panels,
+                "size": show2d_size,
+            },
+            "show3d": {
+                "requested_panels": show3d_panels,
+                "pages": show3d_pages,
+                "panels_per_page": show3d_panels_per_page,
+                "total_panels": show3d_total_panels,
+                "frames": show3d_frames,
+                "size": show3d_size,
+            },
         },
         "timings": timers.rows,
         "exports": exports,

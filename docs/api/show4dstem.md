@@ -36,6 +36,19 @@ w = Show4DSTEM(
     compare_cols=3,
 )
 
+# Dynamic folder browse: first ready master paints now; others stay lazy.
+w = Show4DSTEM.from_folder(
+    "/data/session",
+    backend="cuda",
+    gpus=[0, 1],
+    det_bin=1,
+    dtype="u8",
+    page_budget="auto",
+    view_mode="multiple",
+    compare_cols=3,
+    watch=True,
+)
+
 # Apple Silicon live acquisition folder: dataset 0 appears first, then newly
 # completed *_master.h5 files append into the same Dataset slider.
 from quantem.widget.multidataset_mps import load_macbook_datasets
@@ -85,10 +98,38 @@ keeps the user-facing API stable while backend-specific code stays isolated.
 
 ## Live scope folders
 
-For real-time processing on a microscope or acquisition workstation, keep one
-Show4DSTEM viewer mounted and append new completed acquisitions into it. On the
-Apple Silicon raw-Metal path, `load_macbook_datasets(...)` returns a lazy handle
-that owns the live multi-dataset container:
+For real-time processing on a microscope or acquisition workstation, prefer the
+direct folder-backed API when you want ready masters to become available without
+materializing a full 5D stack:
+
+```python
+from quantem.widget import Show4DSTEM
+
+widget = Show4DSTEM.from_folder(
+    "/data/live-scope-session",
+    backend="cuda",          # optional; omit for the default loader route
+    gpus=[0, 1],             # round-robin lazy frame placement
+    det_bin=1,
+    dtype="u8",
+    page_budget="auto",     # GPU-resident cache, not total dataset count
+    view_mode="multiple",
+    compare_cols=3,
+    watch=True,
+    watch_interval=2.0,
+)
+widget
+```
+
+`from_folder(...)` loads only the first ready master to infer shape and paint the
+viewer. The remaining discovered masters are lazy slots: they allocate GPU
+memory only when selected or included in the visible multiple grid. New ready
+masters can be appended manually with `widget.poll_folder()` or automatically
+with `watch=True` / `widget.watch_folder(interval=...)`. Hidden multiple-grid
+panels are released from the lazy resident cache and are skipped by compare
+computes until unhidden.
+
+On the Apple Silicon raw-Metal path, `load_macbook_datasets(...)` remains the
+backend-specific live handle:
 
 ```python
 from quantem.widget import Show4DSTEM
@@ -106,10 +147,11 @@ notebook cell and viewer stay stable; the dataset slider grows as files become
 ready. Use `live.stop_watch()` before switching to a different folder.
 
 GPU memory is owned by the loaded data object and the Python session, not by the
-visual widget alone. To release GPU memory, remove or replace the backend data
-object, clear references, use backend-specific cleanup utilities when provided,
-or restart the kernel/session. Exported HTML has no live Python GPU allocation,
-so it should not expose a "free GPU memory" control.
+visual widget alone. The live widget shows a compact GPU memory label in its
+title row when CUDA or MPS memory is visible. To release all memory, remove or
+replace the backend data object, clear references, use backend-specific cleanup
+utilities when provided, or restart the kernel/session. Exported HTML has no
+live Python GPU allocation, so it should not expose a "free GPU memory" control.
 
 ## Multiple grid
 

@@ -257,6 +257,208 @@ def test_show4dstem_compare_grid_builds_virtual_image_stack() -> None:
         widget.close()
 
 
+def test_show4dstem_5d_offline_save_state_embeds_inline_stack() -> None:
+    from quantem.widget import Show4DSTEM
+
+    data = np.arange(3 * 2 * 2 * 4 * 4, dtype=np.uint16).reshape(3, 2, 2, 4, 4)
+    widget = Show4DSTEM(
+        data,
+        view_mode="multiple",
+        offline=True,
+        offline_dtype="uint16",
+        save_state=True,
+        compare_max_panels=3,
+        precompute_virtual_images=False,
+        verbose=False,
+    )
+
+    try:
+        assert widget.offline is True
+        assert widget._offline_gzip is True
+        assert len(widget._offline_stack) > 0
+        state = widget.get_state(drop_defaults=False)
+        assert state["offline"] is True
+        assert state["_offline_stack"] == widget._offline_stack
+    finally:
+        widget.close()
+
+
+def test_show4dstem_multiple_init_renders_compare_grid_once(monkeypatch) -> None:
+    from quantem.widget import Show4DSTEM
+    from quantem.widget.show4dstem import Show4DSTEM as Show4DSTEMBase
+
+    data = np.arange(3 * 2 * 2 * 4 * 4, dtype=np.uint16).reshape(3, 2, 2, 4, 4)
+    calls = {"virtual": 0, "compare": 0}
+    original_virtual = Show4DSTEMBase._compute_virtual_image_from_roi
+    original_compare = Show4DSTEMBase._refresh_compare_virtual_images
+
+    def count_virtual(self):
+        calls["virtual"] += 1
+        return original_virtual(self)
+
+    def count_compare(self):
+        calls["compare"] += 1
+        return original_compare(self)
+
+    monkeypatch.setattr(
+        Show4DSTEMBase,
+        "_compute_virtual_image_from_roi",
+        count_virtual,
+    )
+    monkeypatch.setattr(
+        Show4DSTEMBase,
+        "_refresh_compare_virtual_images",
+        count_compare,
+    )
+
+    widget = Show4DSTEM(
+        data,
+        view_mode="multiple",
+        compare_max_panels=3,
+        center=(1.5, 1.5),
+        bf_radius=2,
+        precompute_virtual_images=False,
+        verbose=False,
+    )
+
+    try:
+        assert calls == {"virtual": 1, "compare": 1}
+        assert widget.compare_panel_count == 3
+    finally:
+        widget.close()
+
+
+def test_show4dstem_free_reports_data_freed_for_multiple_grid() -> None:
+    from quantem.widget import Show4DSTEM
+
+    data = np.arange(2 * 2 * 2 * 4 * 4, dtype=np.uint16).reshape(2, 2, 2, 4, 4)
+    widget = Show4DSTEM(
+        data,
+        view_mode="multiple",
+        compare_max_panels=2,
+        center=(1.5, 1.5),
+        bf_radius=2,
+        precompute_virtual_images=False,
+        verbose=False,
+    )
+
+    try:
+        assert widget.compare_panel_count == 2
+        widget.free()
+        assert widget.compare_panel_count == 0
+        assert "data was freed" in widget.compare_status
+    finally:
+        widget.close()
+
+
+def test_show4dstem_compare_preset_cache_reuses_multiple_grid(monkeypatch) -> None:
+    from quantem.widget import Show4DSTEM
+    from quantem.widget.show4dstem import Show4DSTEM as Show4DSTEMBase
+
+    data = np.arange(3 * 2 * 2 * 6 * 6, dtype=np.uint16).reshape(3, 2, 2, 6, 6)
+    widget = Show4DSTEM(
+        data,
+        view_mode="multiple",
+        compare_max_panels=3,
+        center=(2.5, 2.5),
+        bf_radius=2,
+        precompute_virtual_images=False,
+        verbose=False,
+    )
+
+    calls = {"compare_grid": 0}
+    original = Show4DSTEMBase._compare_virtual_images_for_indices
+
+    def count_compare_grid(self, indices, mask):
+        calls["compare_grid"] += 1
+        return original(self, indices, mask)
+
+    monkeypatch.setattr(
+        Show4DSTEMBase,
+        "_compare_virtual_images_for_indices",
+        count_compare_grid,
+    )
+    try:
+        widget._refresh_compare_virtual_images()
+        assert calls["compare_grid"] == 0
+
+        widget.apply_preset("adf")
+        assert calls["compare_grid"] == 1
+
+        widget.apply_preset("adf")
+        assert calls["compare_grid"] == 1
+    finally:
+        widget.close()
+
+
+def test_show4dstem_frame_virtual_image_uses_sparse_detector_mask(monkeypatch) -> None:
+    import torch
+
+    from quantem.widget import Show4DSTEM
+    from quantem.widget.show4dstem import Show4DSTEM as Show4DSTEMBase
+
+    data = torch.arange(2 * 4 * 4 * 16 * 16, dtype=torch.int32).to(torch.uint16)
+    data = data.reshape(2, 4, 4, 16, 16)
+    widget = Show4DSTEM(
+        data,
+        view_mode="multiple",
+        compare_max_panels=2,
+        center=(8, 8),
+        bf_radius=4,
+        precompute_virtual_images=False,
+        verbose=False,
+    )
+
+    calls = {"sparse": 0}
+    original = Show4DSTEMBase._sparse_masked_sum_tensor_for_frame_data
+
+    def count_sparse(self, frame_data, mask):
+        calls["sparse"] += 1
+        return original(self, frame_data, mask)
+
+    monkeypatch.setattr(
+        Show4DSTEMBase,
+        "_sparse_masked_sum_tensor_for_frame_data",
+        count_sparse,
+    )
+    try:
+        widget.roi_mode = "annular"
+        widget.roi_center_row = 8
+        widget.roi_center_col = 8
+        widget.roi_radius_inner = 2
+        widget.roi_radius = 4
+        calls["sparse"] = 0
+        vi = widget._virtual_image_for_frame(0)
+
+        mask = widget._current_detector_mask().bool()
+        expected = data[0].float()[:, :, mask].sum(dim=2).numpy()
+
+        assert calls["sparse"] == 1
+        np.testing.assert_allclose(vi, expected)
+    finally:
+        widget.close()
+
+
+def test_torch_backend_sparse_masked_sum_matches_dense_reference() -> None:
+    import torch
+
+    from quantem.widget.kernels.compute.backends import compute_backend
+
+    data = torch.arange(4 * 4 * 16 * 16, dtype=torch.int32).to(torch.uint16)
+    data = data.reshape(4, 4, 16, 16)
+    yy, xx = np.ogrid[:16, :16]
+    mask = ((yy - 8) ** 2 + (xx - 8) ** 2 <= 3**2).astype(np.float32)
+    backend = compute_backend(data)
+
+    sparse = backend._sparse_masked_sum(mask)
+    vi = backend.masked_sum(mask)
+    expected = (data.float() * torch.as_tensor(mask)).sum(dim=(2, 3)).numpy()
+
+    assert sparse is not None
+    np.testing.assert_allclose(sparse, expected)
+    np.testing.assert_allclose(vi, expected)
+
+
 def test_show4dstem_compare_grid_normalizes_detector_roi_preview() -> None:
     from quantem.widget import Show4DSTEM
 

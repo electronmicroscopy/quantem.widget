@@ -79,6 +79,7 @@ from quantem.widget.kernels.compute.backend import ComputeBackend  # noqa: F401
 
 # Cap transient float32 memory per reduction chunk (matches the widget budget).
 _CHUNK_BYTE_BUDGET = 600 * 1024 * 1024
+_SPARSE_MASK_CHUNK_BYTE_BUDGET = 64 * 1024 * 1024
 
 
 def compute_backend(data):
@@ -164,9 +165,43 @@ class TorchBackend:
     def frame(self, idx: int) -> np.ndarray:
         return self._flat[int(idx)].cpu().numpy()
 
+    def _sparse_masked_sum(self, det_mask: np.ndarray) -> np.ndarray | None:
+        """Virtual image for sparse detector masks by summing selected pixels."""
+        torch = self.torch
+        det_pixels = int(self.det_shape[0] * self.det_shape[1])
+        mask = torch.as_tensor(
+            np.ascontiguousarray(det_mask),
+            device=self.device,
+            dtype=torch.bool,
+        ).reshape(-1)
+        selected = int(mask.sum().item())
+        if selected <= 0:
+            return np.zeros(self.scan_shape, dtype=np.float32)
+        # Dense tensordot is better once the ROI covers a large detector fraction.
+        if selected > det_pixels // 4:
+            return None
+
+        cols = torch.nonzero(mask, as_tuple=False).reshape(-1)
+        flat = self._flat.reshape(self.n_frames, det_pixels)
+        out = torch.empty(self.n_frames, dtype=torch.float32, device=self.device)
+        step = max(
+            1,
+            _SPARSE_MASK_CHUNK_BYTE_BUDGET // max(1, selected * 4),
+        )
+        for i in range(0, self.n_frames, step):
+            j = min(self.n_frames, i + step)
+            chunk = flat[i:j].index_select(1, cols)
+            if not torch.is_floating_point(chunk):
+                chunk = chunk.float()
+            out[i:j] = chunk.sum(dim=1)
+        return out.reshape(self.scan_shape).cpu().numpy()
+
     def masked_sum(self, det_mask: np.ndarray) -> np.ndarray:
         """Virtual image: sum masked detector pixels per scan position (chunked)."""
         torch = self.torch
+        sparse = self._sparse_masked_sum(det_mask)
+        if sparse is not None:
+            return sparse
         mask = torch.as_tensor(np.ascontiguousarray(det_mask), device=self.device).float()
         out = torch.zeros(self.scan_shape, dtype=torch.float32, device=self.device)
         step = self._chunk_rows()

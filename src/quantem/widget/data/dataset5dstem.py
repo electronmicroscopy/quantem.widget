@@ -170,6 +170,50 @@ class Dataset5dstem:
             series=series,
         )
 
+    @property
+    def is_lazy(self) -> bool:
+        """True when file-backed frames can be released and reloaded later."""
+        return self._lazy_loaders is not None
+
+    def loaded_indices(self) -> list[int]:
+        """Indices whose frame tensor is currently resident in memory."""
+        if self._frames is None:
+            return list(range(len(self))) if self._tensor is not None else []
+        return [i for i, frame in enumerate(self._frames) if frame is not None]
+
+    def append_lazy_frame(
+        self,
+        loader: Callable[[], torch.Tensor],
+        *,
+        frame: torch.Tensor | None = None,
+        series_value: float | None = None,
+    ) -> int:
+        """Append one lazy frame slot without loading it immediately.
+
+        This keeps a live folder-backed Show4DSTEM viewer stable while newly
+        completed masters become available. The frame is loaded only when the
+        viewer selects or computes that panel.
+        """
+        if self._lazy_loaders is None or self._lazy_shape is None or self._lazy_dtype is None:
+            raise RuntimeError("append_lazy_frame requires a lazy Dataset5dstem.")
+        if self._frames is None:
+            raise RuntimeError("Dataset5dstem has been freed; re-load to use it again.")
+        idx = len(self._lazy_loaders)
+        self._lazy_loaders.append(loader)
+        self._frames.append(None)
+        self._lazy_shape = (idx + 1, *self._lazy_shape[1:])
+        if frame is not None:
+            self._validate_lazy_frame(frame, idx)
+            self._frames[idx] = frame
+        if self._series is not None:
+            value = np.nan if series_value is None else float(series_value)
+            self._series = np.concatenate([self._series, np.asarray([value], dtype=float)])
+        if hasattr(self, "_page_devices"):
+            page_devices = list(getattr(self, "_page_devices", []))
+            target = page_devices[idx % len(page_devices)] if page_devices else torch.device("cpu")
+            self._page_devices.append(target)
+        return idx
+
     def _validate_lazy_frame(self, frame: torch.Tensor, i: int) -> None:
         if self._lazy_shape is None or self._lazy_dtype is None:
             raise RuntimeError("lazy frame validation requires lazy shape and dtype metadata.")
@@ -500,6 +544,46 @@ class Dataset5dstem:
         The non-destructive counterpart to ``.free`` - use this when a series is bigger than
         total VRAM and you want to page frames in and out."""
         return self.to("cpu", idx)
+
+    def release(self, idx=None, device=None) -> list[int]:
+        """Release resident frame tensors while preserving frame indices.
+
+        For lazy file-backed series, released frames become unloaded slots and
+        reload from their original loader on the next access. This is the right
+        primitive for UI hide/curation: hidden datasets stop occupying GPU
+        memory, but labels, ordering, and saved hidden-state indices remain
+        stable. For non-lazy frame-backed series this offloads selected GPU
+        frames to CPU without removing them.
+        """
+        frames = self._materialize_frames()
+        drop = set(self._indices(idx)) if idx is not None else set()
+        if device is not None:
+            dev = self._as_device(device)
+            drop |= {i for i, frame in enumerate(frames) if frame is not None and frame.device == dev}
+        if not drop:
+            return []
+
+        reclaimed: set[torch.device] = set()
+        released: list[int] = []
+        for i in sorted(drop):
+            frame = frames[i]
+            if frame is None:
+                continue
+            dev = frame.device
+            if self._lazy_loaders is not None:
+                frames[i] = None
+                released.append(i)
+            elif dev.type != "cpu":
+                frames[i] = frame.to("cpu")
+                released.append(i)
+            if dev.type != "cpu":
+                reclaimed.add(dev)
+
+        if hasattr(self, "_lru"):
+            self._lru = [i for i in self._lru if i not in set(released)]
+        if reclaimed:
+            self._reclaim(reclaimed)
+        return released
 
     def free(self, idx=None, device=None) -> None:
         """Release frame VRAM, reclaiming the torch + cupy pools.
