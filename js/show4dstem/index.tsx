@@ -1439,6 +1439,11 @@ function CompareVirtualGrid({
           const isStarred = (starred || []).includes(frame);
           const isDragging = draggingFrame === frame;
           const isPendingMove = pendingMoveFrame === frame;
+          const tileRing = isPendingMove
+            ? "inset 0 0 0 2px #facc15, inset 0 0 0 3px rgba(0,0,0,0.75)"
+            : active
+              ? `inset 0 0 0 2px ${themeColors.accent}, inset 0 0 0 3px rgba(255,255,255,0.72)`
+              : "none";
           return (
             <Box
               key={`${frame}-${localIdx}`}
@@ -1516,15 +1521,27 @@ function CompareVirtualGrid({
               sx={{
                 position: "relative",
                 bgcolor: "#000",
-                border: `2px solid ${isPendingMove ? "#facc15" : active ? themeColors.accent : themeColors.border}`,
+                border: "none",
+                boxSizing: "border-box",
                 outline: "none",
                 cursor: reorderMode ? "grab" : "pointer",
                 overflow: "hidden",
                 opacity: isDragging ? 0.45 : 1,
                 transform: isPendingMove ? "translateY(-2px)" : "translateY(0)",
-                transition: "transform 120ms ease, opacity 120ms ease, border-color 120ms ease",
+                transition: "transform 120ms ease, opacity 120ms ease",
                 aspectRatio: `${shapeCols} / ${shapeRows}`,
-                "&:focus-visible": { borderColor: themeColors.accent },
+                "&::after": {
+                  content: '""',
+                  position: "absolute",
+                  inset: 0,
+                  pointerEvents: "none",
+                  boxShadow: tileRing,
+                  transition: "box-shadow 120ms ease",
+                  zIndex: 4,
+                },
+                "&:focus-visible::after": {
+                  boxShadow: `inset 0 0 0 2px ${themeColors.accent}, inset 0 0 0 4px rgba(255,255,255,0.82)`,
+                },
                 "&:hover .show4dstem-compare-hide-button, &:focus-within .show4dstem-compare-hide-button": {
                   opacity: 1,
                   pointerEvents: "auto",
