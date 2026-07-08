@@ -126,6 +126,9 @@ For Show2D, drive and record:
 - linked zoom/pan/contrast across panels,
 - column reflow through 1, 2, 4, 6, 8, and 12 columns,
 - FFT toggle, FFT pan/zoom, and FFT reflow,
+- narrow mobile control wrapping: label/control pairs stay grouped for
+  `Auto`, `Smooth`, `Zoom`, `Pan`, `Contrast`, and FFT controls, with no
+  overlap or orphaned switch/menu controls,
 - panel hide/restore,
 - export menu open and exported HTML reopen,
 - `Cmd+S` save/reopen with compact visible output.
@@ -145,6 +148,10 @@ For Show3D, drive and record:
 - FFT metric labels while toggling Stats, Profile, page playback, and panel
   visibility. These UI controls must not recompute FFTs or metric summaries
   unless the displayed scientific input changed,
+- narrow mobile control wrapping: label/control pairs stay grouped for
+  `Scale`, `Color`, `Auto`, `Smooth`, `Diff`, `fps`, `avg`, `Loop`, `Bounce`,
+  FFT controls, and any page/column controls, with no overlap or orphaned
+  switch/menu controls,
 - export exact, quantized, GIF, MP4, and binned quantized HTML where supported,
 - `Cmd+S` save/reopen with compact visible output.
 
@@ -156,6 +163,9 @@ Targets:
   the report must say which interaction, dataset, browser, and likely cause.
 - Playback/sliders: target 30 FPS for heavy practical views. Slider and image
   must stay synchronized at the selected FPS.
+- Mobile controls: labels and their switches, menus, sliders, or buttons must
+  wrap as grouped pairs. A dense row may wrap onto another line, but it must
+  not separate the label from the control it names.
 - Export: menu labels must say the format and size class. Heavy standalone
   exports should offer compact choices rather than silently creating unusable
   hundreds-of-MB HTML.

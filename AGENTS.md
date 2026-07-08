@@ -117,6 +117,12 @@ as `Scale`, `Color`, `Auto`, `Smooth`, `Link`, `Zoom`, `Pan`, `Contrast`,
 prose, tooltips, docs, and other full sentences where they improve readability,
 but avoid them in dense controls where they waste horizontal space.
 
+Keep each compact label grouped with the control it names. A label plus switch,
+dropdown, slider, or compact button should wrap as one unit on mobile and
+narrow layouts; the row may wrap, but the label must not separate from its
+control. Verify this in the browser for Show2D/Show3D-style rows such as
+`Auto`, `Smooth`, `Zoom`, `Pan`, `Contrast`, `fps`, and `avg`.
+
 Use Title Case for command buttons and toolbar actions: `Copy`, `Export`,
 `Reset`, `Add`, `Clear`, `Undo`, `Save Band`, and similar actions. Keep
 scientific acronyms, detector labels, and file-format names uppercase when the

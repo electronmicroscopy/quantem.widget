@@ -178,6 +178,10 @@ through it line by line.
 - [ ] Controls are compact and content-sized: use icon/text buttons for
   commands, switches for binary options, sliders for numeric values, menus for
   option sets, and avoid stretched empty control bars.
+- [ ] Compact labels stay grouped with the control they name on mobile and
+  narrow layouts. A row may wrap, but `Auto`, `Smooth`, `Zoom`, `Pan`,
+  `Contrast`, `fps`, `avg`, and similar labels must not separate from their
+  switch, menu, slider, or button.
 - [ ] Compact widget control labels do not use decorative colons. Prefer
   `Scale`, `Color`, `Auto`, `Link`, `Zoom`, `Pan`, and `ROI` in dense toolbar
   rows; keep colons for explanatory prose and tooltips.

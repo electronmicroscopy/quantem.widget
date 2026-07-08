@@ -50,6 +50,29 @@ Use colons in explanatory prose, tooltips, documentation, and status text when
 they make the sentence clearer. Avoid them inside compact controls because
 they waste horizontal space and create inconsistent rhythm.
 
+## Control Pairs
+
+Treat a compact label and the control it names as one UI unit. This applies to
+labels paired with switches, dropdowns, sliders, icon buttons, and compact text
+buttons:
+
+- `Auto` + switch
+- `Smooth` + switch
+- `Color` + menu
+- `Scale` + menu
+- `fps` + slider/value
+- `avg` + menu
+
+On mobile and narrow layouts, the row may wrap, but the pair must stay
+together. Do not allow a label to remain on one line while its switch or menu
+wraps to the next line. Use an inline-flex pair wrapper or an equivalent stable
+layout primitive with small fixed gaps.
+
+Browser signoff for dense controls must include at least one narrow viewport.
+For Show2D and Show3D, check the main image controls, FFT controls, playback
+controls, linked zoom/pan/contrast controls, and any page/column controls that
+can wrap.
+
 ## Toolbar order
 
 When a widget has these actions, prefer this order:
