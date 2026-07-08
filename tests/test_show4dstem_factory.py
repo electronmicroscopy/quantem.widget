@@ -292,6 +292,38 @@ def test_show4dstem_compare_grid_normalizes_detector_roi_preview() -> None:
         widget.close()
 
 
+def test_show4dstem_temporal_view_refreshes_after_compare_mode() -> None:
+    from quantem.widget import Show4DSTEM
+
+    data = np.empty((2, 2, 2, 4, 4), dtype=np.uint16)
+    data[0] = 1
+    data[1] = 7
+    widget = Show4DSTEM(
+        data,
+        view_mode="compare",
+        compare_max_panels=2,
+        center=(1.5, 1.5),
+        bf_radius=2,
+        precompute_virtual_images=False,
+        verbose=False,
+    )
+
+    try:
+        widget.frame_idx = 1
+        compare_dp = np.frombuffer(widget.frame_bytes, dtype=np.float32).reshape(4, 4)
+        np.testing.assert_allclose(compare_dp, np.full((4, 4), 4, dtype=np.float32))
+
+        widget.view_mode = "temporal"
+        temporal_dp = np.frombuffer(widget.frame_bytes, dtype=np.float32).reshape(4, 4)
+        temporal_vi = np.frombuffer(widget.virtual_image_bytes, dtype=np.float32).reshape(2, 2)
+
+        np.testing.assert_allclose(temporal_dp, np.full((4, 4), 7, dtype=np.float32))
+        assert float(temporal_vi.min()) > 0
+        np.testing.assert_allclose(temporal_vi, np.full((2, 2), temporal_vi[0, 0], dtype=np.float32))
+    finally:
+        widget.close()
+
+
 def test_show4dstem_compare_grid_validates_api() -> None:
     from quantem.widget import Show4DSTEM
 

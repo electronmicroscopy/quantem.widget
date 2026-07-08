@@ -2343,19 +2343,33 @@ function Show4DSTEM() {
       const onVI = () => { void recomputeVI(); void recomputeCompareVI(); };
       const onDP = () => { void recomputeDP(); };
       const onPos = () => { void recomputeFrame(); };
+      const activateCurrentVolume = async () => {
+        if (!getVol) return true;
+        const nVolumes = volumeCount || volMetas.length || 1;
+        const v = Math.max(0, Math.min(nVolumes - 1, model.get("frame_idx") | 0));
+        const cc = await getVol(v);
+        if (!cc) return false;
+        compute = cc;
+        return true;
+      };
+      const recomputeActiveView = async () => {
+        const ready = await activateCurrentVolume();
+        if (!ready || disposed) return;
+        void recomputeVI();
+        void recomputeCompareVI();
+        void recomputeDP();
+        void recomputeFrame();
+      };
       // 5D multi-volume: the slider picks the active dataset; decode-on-scrub (LRU).
       let frameGen = 0;
       const onFrame = async () => {
-        if (!getVol) return;
-        const nVolumes = volumeCount || volMetas.length || 1;
-        const v = Math.max(0, Math.min(nVolumes - 1, model.get("frame_idx") | 0));
         const gen = ++frameGen;                  // ignore a stale decode if the user keeps scrubbing
-        const cc = await getVol(v);
-        if (gen !== frameGen || !cc) return;      // a newer scroll superseded this one
-        compute = cc;
+        const ready = await activateCurrentVolume();
+        if (gen !== frameGen || !ready) return;   // a newer scroll superseded this one
         void recomputeVI(); void recomputeCompareVI(); void recomputeDP(); void recomputeFrame();
       };
       if (getVol) model.on("change:frame_idx", onFrame);
+      model.on("change:view_mode", recomputeActiveView);
       void recomputeFrame();  // initial DP at mount (so the panel isn't blank)
       // BF/ABF/ADF/HAADF presets normally route through the Python kernel
       // (_preset_request -> apply_preset). With no kernel we translate them into
@@ -2407,6 +2421,7 @@ function Show4DSTEM() {
         model.off("change:pos_row", onPos);
         model.off("change:pos_col", onPos);
         model.off("change:frame_idx", onFrame);
+        model.off("change:view_mode", recomputeActiveView);
         computes.forEach((c) => c.dispose());          // single / non-lazy resident set
         volCache.forEach((c) => c.dispose()); volCache.clear();  // every cached lazy volume
         inlineVolCache.forEach((c) => c.dispose()); inlineVolCache.clear();

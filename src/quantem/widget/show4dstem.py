@@ -2212,6 +2212,9 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         self._refresh_compare_virtual_images()
         if self.view_mode == "compare":
             self._update_frame()
+        else:
+            self._compute_virtual_image_from_roi()
+            self._update_frame()
 
     def _on_compare_dp_mode_change(self, change=None) -> None:
         """Normalize and apply compare DP source mode changes."""
