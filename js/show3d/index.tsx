@@ -68,7 +68,7 @@ const controlRow = {
   width: "fit-content",
   maxWidth: "100%",
   boxSizing: "border-box",
-};
+} as const;
 const compactButton = {
   fontSize: 10,
   fontFamily: "inherit",
@@ -1320,6 +1320,9 @@ function Show3D() {
     accentGreen: themeInfo.theme === "dark" ? "#0f0" : "#1a7a1a",
     accentYellow: themeInfo.theme === "dark" ? "#ff0" : "#b08800",
   };
+  const mobileControlRowSx = isMobileViewport
+    ? ({ columnGap: "8px", rowGap: "4px", px: 0.75, py: 0.25 } as const)
+    : ({} as const);
 
   // Theme-aware select style (matching Show4DSTEM)
   const themedSelect = {
@@ -10886,7 +10889,7 @@ function Show3D() {
             <Box sx={{ mt: `${SPACING.SM}px`, display: "flex", columnGap: `${SPACING.SM}px`, rowGap: `${SPACING.XS}px`, alignItems: "flex-start", justifyContent: "flex-start", width: "fit-content", maxWidth: "100%", boxSizing: "border-box", flexWrap: "wrap" }}>
               <Box sx={{ display: "flex", flexDirection: "column", gap: `${SPACING.XS}px`, flex: "0 0 auto", justifyContent: "center" }}>
                 {/* Row 1: Scale + Auto + Color */}
-                <Box sx={{ ...controlRow, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>
+                <Box sx={{ ...controlRow, ...mobileControlRowSx, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>
                   <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted }}>Scale</Typography>
                   <Select value={logScale ? "log" : "linear"} onChange={(e) => setLogScale(e.target.value === "log")} size="small" sx={{ ...themedSelect, minWidth: 45, fontSize: 10 }} MenuProps={themedMenuProps} inputProps={{ "aria-label": "Intensity scale (linear or logarithmic)" }}>
                     <MenuItem value="linear">Lin</MenuItem>
@@ -10900,7 +10903,7 @@ function Show3D() {
                   <Switch checked={showColorbar} onChange={(e) => setShowColorbar(e.target.checked)} size="small" sx={switchStyles.small} slotProps={{ input: { "aria-label": "Toggle colorbar overlay" } }} />
                 </Box>
                 {/* Row 2: Color + Smooth + Diff + zoom indicator */}
-                <Box sx={{ ...controlRow, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>
+                <Box sx={{ ...controlRow, ...mobileControlRowSx, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>
                   <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted }}>Color</Typography>
                   <Select size="small" value={cmap} onChange={(e) => setCmap(e.target.value)} MenuProps={themedMenuProps} sx={{ ...themedSelect, minWidth: 60, fontSize: 10 }} inputProps={{ "aria-label": "Image colormap" }}>
                     {COLORMAP_NAMES.map((name) => (<MenuItem key={name} value={name}>{name.charAt(0).toUpperCase() + name.slice(1)}</MenuItem>))}
@@ -10919,7 +10922,7 @@ function Show3D() {
               {/* Playback: 2 rows side-by-side with Display + Histogram. */}
               {(() => { const activeIdx = visibleSliceIdx; return (
                 <Box sx={{ display: "flex", flexDirection: "column", alignItems: "flex-start", gap: `${SPACING.XS}px`, flex: "0 1 auto", minWidth: 0, maxWidth: "100%", justifyContent: "center" }}>
-                  <Box sx={{ ...controlRow, width: "fit-content", maxWidth: "100%", flexWrap: "nowrap", border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, boxSizing: "border-box" }}>
+                  <Box sx={{ ...controlRow, ...mobileControlRowSx, width: "fit-content", maxWidth: "100%", flexWrap: "nowrap", border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, boxSizing: "border-box" }}>
                     <Stack direction="row" spacing={0} sx={{ flexShrink: 0, mr: 0.5 }}>
                       <IconButton size="small" onClick={() => playFromCurrentFrame(-1)} sx={{ color: reverse && playing ? themeColors.accent : themeColors.textMuted, p: 0.25 }} aria-label="Play in reverse" title="Play reverse">
                         <FastRewindIcon sx={{ fontSize: 18 }} />
@@ -10941,7 +10944,7 @@ function Show3D() {
                     )}
                     <Typography ref={playbackLiveCountRef} sx={{ ...typography.value, color: themeColors.textMuted, minWidth: hiddenSet.size ? `${String(nSlices).length * 2 + String(visibleCount).length + 5}ch` : `${String(nSlices).length * 2 + 1}ch`, fontVariantNumeric: "tabular-nums", textAlign: "right", flexShrink: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{hiddenSet.size ? `${activeIdx + 1}/${visibleCount} (${nSlices})` : `${activeIdx + 1}/${nSlices}`}</Typography>
                   </Box>
-                  <Box sx={{ ...controlRow, width: "fit-content", maxWidth: "100%", flexWrap: "wrap", columnGap: isMobileViewport ? "8px" : `${SPACING.SM}px`, rowGap: isMobileViewport ? "4px" : `${SPACING.SM}px`, px: isMobileViewport ? 0.75 : 1, py: isMobileViewport ? 0.25 : 0.5, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, boxSizing: "border-box" }}>
+                  <Box sx={{ ...controlRow, ...mobileControlRowSx, width: "fit-content", maxWidth: "100%", flexWrap: "wrap", border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, boxSizing: "border-box" }}>
                     <Box sx={{ display: "flex", alignItems: "center", gap: isMobileViewport ? "4px" : `${SPACING.SM}px`, flexShrink: 0 }}>
                       <Typography sx={{ ...typography.label, color: themeColors.textMuted, fontSize: isMobileViewport ? 10 : typography.label.fontSize, flexShrink: 0 }}>fps</Typography>
                       <Slider value={playbackFps} min={1} max={MAX_PLAYBACK_FPS} step={1} onChange={(_, v) => setPlaybackFps(v as number)} size="small" sx={{ ...sliderStyles.small, width: isMobileViewport ? 40 : 44, mx: isMobileViewport ? "3px" : 0, flexShrink: 0 }} aria-label="Playback frames per second" valueLabelDisplay="auto" />
@@ -11070,7 +11073,7 @@ function Show3D() {
           {/* Lens settings row (when Lens is active) */}
           {showLens && (
             <Box sx={{ mt: `${SPACING.XS}px`, display: "flex", flexDirection: "column", gap: `${SPACING.XS}px`, width: "fit-content" }}>
-              <Box sx={{ ...controlRow, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>
+              <Box sx={{ ...controlRow, ...mobileControlRowSx, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>
                 <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted }}>Lens {lensMag}×</Typography>
                 <Slider value={lensMag} min={2} max={8} step={1} onChange={(_, v) => setLensMag(v as number)} size="small" sx={{ ...sliderStyles.small, width: 35 }} aria-label="Lens magnification" valueLabelDisplay="auto" />
                 <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted }}>{lensDisplaySize}px</Typography>
@@ -11375,7 +11378,7 @@ function Show3D() {
               {/* Left: two rows of controls */}
               <Box sx={{ display: "flex", flexDirection: "column", gap: `${SPACING.XS}px`, flex: 1, justifyContent: "center" }}>
                 {/* Row 1: Scale + Auto */}
-                <Box sx={{ ...controlRow, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>
+                <Box sx={{ ...controlRow, ...mobileControlRowSx, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>
                   <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted }}>Scale</Typography>
                   <Select value={fftLogScale ? "log" : "linear"} onChange={(e) => setFftLogScale(e.target.value === "log")} size="small" sx={{ ...themedSelect, minWidth: 45, fontSize: 10 }} MenuProps={themedMenuProps} inputProps={{ "aria-label": "FFT intensity scale (linear or logarithmic)" }}>
                     <MenuItem value="linear">Lin</MenuItem>
@@ -11391,7 +11394,7 @@ function Show3D() {
                   )}
                 </Box>
                 {/* Row 2: Color + Colorbar */}
-                <Box sx={{ ...controlRow, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>
+                <Box sx={{ ...controlRow, ...mobileControlRowSx, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>
                   <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted }}>Color</Typography>
                   <Select value={fftColormap} onChange={(e) => setFftColormap(String(e.target.value))} size="small" sx={{ ...themedSelect, minWidth: 60, fontSize: 10 }} MenuProps={themedMenuProps} inputProps={{ "aria-label": "FFT colormap" }}>
                     {COLORMAP_NAMES.map((name) => (<MenuItem key={name} value={name}>{name.charAt(0).toUpperCase() + name.slice(1)}</MenuItem>))}
@@ -11488,7 +11491,7 @@ function Show3D() {
               {/* Left: two rows of controls */}
               <Box sx={{ display: "flex", flexDirection: "column", gap: `${SPACING.XS}px`, flex: 1, justifyContent: "center" }}>
                 {/* Row 1: Scale + Auto */}
-                <Box sx={{ ...controlRow, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>
+                <Box sx={{ ...controlRow, ...mobileControlRowSx, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>
                   <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted }}>Scale</Typography>
                   <Select value={kymoLogScale ? "log" : "linear"} onChange={(e) => setKymoLogScale(e.target.value === "log")} size="small" sx={{ ...themedSelect, minWidth: 45, fontSize: 10 }} MenuProps={themedMenuProps} inputProps={{ "aria-label": "Kymograph intensity scale (linear or logarithmic)" }}>
                     <MenuItem value="linear">Lin</MenuItem>
@@ -11498,7 +11501,7 @@ function Show3D() {
                   <Switch checked={kymoAuto} onChange={(e) => setKymoAuto(e.target.checked)} size="small" sx={switchStyles.small} slotProps={{ input: { "aria-label": "Toggle automatic kymograph contrast" } }} />
                 </Box>
                 {/* Row 2: Color + Colorbar */}
-                <Box sx={{ ...controlRow, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>
+                <Box sx={{ ...controlRow, ...mobileControlRowSx, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>
                   <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted }}>Color</Typography>
                   <Select value={kymoColormap} onChange={(e) => setKymoColormap(String(e.target.value))} size="small" sx={{ ...themedSelect, minWidth: 60, fontSize: 10 }} MenuProps={themedMenuProps} inputProps={{ "aria-label": "Kymograph colormap" }}>
                     {COLORMAP_NAMES.map((name) => (<MenuItem key={name} value={name}>{name.charAt(0).toUpperCase() + name.slice(1)}</MenuItem>))}

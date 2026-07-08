@@ -717,7 +717,7 @@ const controlRow = {
   width: "fit-content",
   maxWidth: "100%",
   boxSizing: "border-box",
-};
+} as const;
 const compactButton = {
   fontSize: 10,
   py: 0.25,
@@ -752,6 +752,15 @@ function Show2D() {
     ...tc,
     accentGreen: themeInfo.theme === "dark" ? "#0f0" : "#1a7a1a",
   };
+  const mobileControlRowSx = isMobileViewport
+    ? ({ columnGap: "8px", rowGap: "4px", px: 0.75, py: 0.25 } as const)
+    : ({} as const);
+  const controlPairSx = {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: isMobileViewport ? "4px" : `${SPACING.XS}px`,
+    flexShrink: 0,
+  } as const;
 
   const themedSelect = {
     fontSize: 10,
@@ -6017,7 +6026,7 @@ function Show2D() {
                 <Box sx={{ display: "flex", flexDirection: "column", gap: `${SPACING.XS}px`, flex: "1 1 260px", minWidth: 0, justifyContent: "flex-start" }}>
                   {/* Row 1: Scale + Color */}
                   {(
-                    <Box sx={{ ...controlRow, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, opacity: 1, pointerEvents: "auto" }}>
+                    <Box sx={{ ...controlRow, ...mobileControlRowSx, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, opacity: 1, pointerEvents: "auto" }}>
                       <Typography sx={{ ...typography.label, fontSize: 10 }}>Scale</Typography>
                       <Select value={logScale ? "log" : "linear"} onChange={(e) => setLogScale(e.target.value === "log")} size="small" sx={{ ...themedSelect, minWidth: 45 }} MenuProps={themedMenuProps}>
                         <MenuItem value="linear">Lin</MenuItem>
@@ -6037,11 +6046,15 @@ function Show2D() {
                   )}
                   {/* Row 2: Auto + Lens settings + Link Zoom (gallery) + zoom indicator */}
                   {(
-                    <Box sx={{ ...controlRow, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, opacity: 1, pointerEvents: "auto" }}>
-                      <Typography sx={{ ...typography.label, fontSize: 10 }}>Auto</Typography>
-                      <Switch checked={autoContrast} onChange={() => { setAutoContrast(!autoContrast); }} size="small" sx={switchStyles.small} />
-                      <Typography sx={{ ...typography.label, fontSize: 10 }} title="CSS bilinear interpolation. Same data, browser smooths visually — useful when upscaling small images on a large canvas.">Smooth</Typography>
-                      <Switch checked={smooth} onChange={() => { setSmooth(!smooth); }} size="small" sx={switchStyles.small} />
+                    <Box sx={{ ...controlRow, ...mobileControlRowSx, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, opacity: 1, pointerEvents: "auto" }}>
+                      <Box sx={controlPairSx}>
+                        <Typography sx={{ ...typography.label, fontSize: 10 }}>Auto</Typography>
+                        <Switch checked={autoContrast} onChange={() => { setAutoContrast(!autoContrast); }} size="small" sx={switchStyles.small} />
+                      </Box>
+                      <Box sx={controlPairSx}>
+                        <Typography sx={{ ...typography.label, fontSize: 10 }} title="CSS bilinear interpolation. Same data, browser smooths visually — useful when upscaling small images on a large canvas.">Smooth</Typography>
+                        <Switch checked={smooth} onChange={() => { setSmooth(!smooth); }} size="small" sx={switchStyles.small} />
+                      </Box>
                       {!isGallery && showLens && (
                         <>
                           <Typography sx={{ ...typography.label, fontSize: 10 }}>Lens {lensMag}×</Typography>
@@ -6052,13 +6065,19 @@ function Show2D() {
                       )}
                       {isGallery && (
                         <>
-                          <Typography sx={{ ...typography.label, fontSize: 10 }}>Link</Typography>
-                          <Typography sx={{ ...typography.label, fontSize: 10 }} title="Zoom together across panels.">Zoom</Typography>
-                          <Switch checked={linkedZoom} onChange={() => { setLinkedZoom(!linkedZoom); }} size="small" sx={switchStyles.small} />
-                          <Typography sx={{ ...typography.label, fontSize: 10 }} title="Pan together (independent of zoom).">Pan</Typography>
-                          <Switch checked={linkPan} onChange={() => { setLinkPan(!linkPan); }} size="small" sx={switchStyles.small} />
-                          <Typography sx={{ ...typography.label, fontSize: 10 }} title="Share contrast slider across panels.">Contrast</Typography>
-                          <Switch checked={linkedContrast} onChange={() => { setLinkedContrast(!linkedContrast); }} size="small" sx={switchStyles.small} />
+                          <Box sx={controlPairSx}>
+                            <Typography sx={{ ...typography.label, fontSize: 10 }}>Link</Typography>
+                            <Typography sx={{ ...typography.label, fontSize: 10 }} title="Zoom together across panels.">Zoom</Typography>
+                            <Switch checked={linkedZoom} onChange={() => { setLinkedZoom(!linkedZoom); }} size="small" sx={switchStyles.small} />
+                          </Box>
+                          <Box sx={controlPairSx}>
+                            <Typography sx={{ ...typography.label, fontSize: 10 }} title="Pan together (independent of zoom).">Pan</Typography>
+                            <Switch checked={linkPan} onChange={() => { setLinkPan(!linkPan); }} size="small" sx={switchStyles.small} />
+                          </Box>
+                          <Box sx={controlPairSx}>
+                            <Typography sx={{ ...typography.label, fontSize: 10 }} title="Share contrast slider across panels.">Contrast</Typography>
+                            <Switch checked={linkedContrast} onChange={() => { setLinkedContrast(!linkedContrast); }} size="small" sx={switchStyles.small} />
+                          </Box>
                         </>
                       )}
                       {getZoomState(isGallery ? selectedIdx : 0).zoom !== 1 && (
@@ -6214,7 +6233,7 @@ function Show2D() {
 	          {controlsVisible && effectiveShowFft && isGallery && (
             <Box sx={{ mt: `${SPACING.XS}px`, display: "flex", flexWrap: "wrap", gap: `${SPACING.SM}px`, width: "100%", maxWidth: galleryGridWidth, minWidth: 0, boxSizing: "border-box" }}>
               <Box sx={{ display: "flex", flexDirection: "column", gap: `${SPACING.XS}px`, flex: "1 1 260px", minWidth: 0, justifyContent: "flex-start" }}>
-                <Box sx={{ ...controlRow, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, opacity: 1, pointerEvents: "auto" }}>
+                <Box sx={{ ...controlRow, ...mobileControlRowSx, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, opacity: 1, pointerEvents: "auto" }}>
                   <Typography sx={{ ...typography.label, fontSize: 10 }}>FFT Scale</Typography>
                   <Select value={fftScaleMode} onChange={(e) => setFftScaleMode(e.target.value as "linear" | "log")} size="small" sx={{ ...themedSelect, minWidth: 50, fontSize: 10 }} MenuProps={themedMenuProps}>
                     <MenuItem value="linear">Lin</MenuItem>
@@ -6232,20 +6251,30 @@ function Show2D() {
                   </Select>
                 </Box>
                 {/* FFT Row 2: Auto + Smooth + Link Zoom/Pan/Contrast (mirrors main image Row 2) */}
-                <Box sx={{ ...controlRow, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, opacity: 1, pointerEvents: "auto" }}>
-                  <Typography sx={{ ...typography.label, fontSize: 10 }}>Auto</Typography>
-                  <Switch checked={fftAuto} onChange={(e) => { setFftAuto(e.target.checked); }} size="small" sx={switchStyles.small} />
-                  <Typography sx={{ ...typography.label, fontSize: 10 }} title="CSS bilinear interpolation on the FFT canvas.">Smooth</Typography>
-                  <Switch checked={fftSmooth} onChange={(e) => { setFftSmooth(e.target.checked); }} size="small" sx={switchStyles.small} />
+                <Box sx={{ ...controlRow, ...mobileControlRowSx, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, opacity: 1, pointerEvents: "auto" }}>
+                  <Box sx={controlPairSx}>
+                    <Typography sx={{ ...typography.label, fontSize: 10 }}>Auto</Typography>
+                    <Switch checked={fftAuto} onChange={(e) => { setFftAuto(e.target.checked); }} size="small" sx={switchStyles.small} />
+                  </Box>
+                  <Box sx={controlPairSx}>
+                    <Typography sx={{ ...typography.label, fontSize: 10 }} title="CSS bilinear interpolation on the FFT canvas.">Smooth</Typography>
+                    <Switch checked={fftSmooth} onChange={(e) => { setFftSmooth(e.target.checked); }} size="small" sx={switchStyles.small} />
+                  </Box>
                   {isGallery && (
                     <>
-                      <Typography sx={{ ...typography.label, fontSize: 10 }}>Link</Typography>
-                      <Typography sx={{ ...typography.label, fontSize: 10 }} title="Zoom together across FFT panels (FFT-only, independent of main image link).">Zoom</Typography>
-                      <Switch checked={fftLinkedZoom} onChange={() => { setFftLinkedZoom(!fftLinkedZoom); }} size="small" sx={switchStyles.small} />
-                      <Typography sx={{ ...typography.label, fontSize: 10 }} title="Pan FFT panels together (FFT-only).">Pan</Typography>
-                      <Switch checked={fftLinkPan} onChange={() => { setFftLinkPan(!fftLinkPan); }} size="small" sx={switchStyles.small} />
-                      <Typography sx={{ ...typography.label, fontSize: 10 }} title="Share FFT contrast slider across panels (FFT-only).">Contrast</Typography>
-                      <Switch checked={fftLinkedContrast} onChange={() => { setFftLinkedContrast(!fftLinkedContrast); }} size="small" sx={switchStyles.small} />
+                      <Box sx={controlPairSx}>
+                        <Typography sx={{ ...typography.label, fontSize: 10 }}>Link</Typography>
+                        <Typography sx={{ ...typography.label, fontSize: 10 }} title="Zoom together across FFT panels (FFT-only, independent of main image link).">Zoom</Typography>
+                        <Switch checked={fftLinkedZoom} onChange={() => { setFftLinkedZoom(!fftLinkedZoom); }} size="small" sx={switchStyles.small} />
+                      </Box>
+                      <Box sx={controlPairSx}>
+                        <Typography sx={{ ...typography.label, fontSize: 10 }} title="Pan FFT panels together (FFT-only).">Pan</Typography>
+                        <Switch checked={fftLinkPan} onChange={() => { setFftLinkPan(!fftLinkPan); }} size="small" sx={switchStyles.small} />
+                      </Box>
+                      <Box sx={controlPairSx}>
+                        <Typography sx={{ ...typography.label, fontSize: 10 }} title="Share FFT contrast slider across panels (FFT-only).">Contrast</Typography>
+                        <Switch checked={fftLinkedContrast} onChange={() => { setFftLinkedContrast(!fftLinkedContrast); }} size="small" sx={switchStyles.small} />
+                      </Box>
                     </>
                   )}
                 </Box>
@@ -6392,7 +6421,7 @@ function Show2D() {
               <Box sx={{ display: "flex", gap: `${SPACING.SM}px` }}>
                 <Box sx={{ display: "flex", flexDirection: "column", gap: `${SPACING.XS}px`, flex: 1, justifyContent: "flex-start" }}>
                   {/* Row 1: Scale + Color + Colorbar */}
-                  <Box sx={{ ...controlRow, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, opacity: 1, pointerEvents: "auto" }}>
+                  <Box sx={{ ...controlRow, ...mobileControlRowSx, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, opacity: 1, pointerEvents: "auto" }}>
                     <Typography sx={{ ...typography.label, fontSize: 10 }}>Scale</Typography>
                     <Select value={fftScaleMode} onChange={(e) => setFftScaleMode(e.target.value as "linear" | "log")} size="small" sx={{ ...themedSelect, minWidth: 50, fontSize: 10 }} MenuProps={themedMenuProps}>
                       <MenuItem value="linear">Lin</MenuItem>
@@ -6406,14 +6435,16 @@ function Show2D() {
                     <Switch checked={fftShowColorbar} onChange={(e) => { setFftShowColorbar(e.target.checked); }} size="small" sx={switchStyles.small} />
                   </Box>
                   {/* Row 2: Auto + zoom indicator */}
-                  <Box sx={{ ...controlRow, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, opacity: 1, pointerEvents: "auto" }}>
-                    <Typography sx={{ ...typography.label, fontSize: 10 }}>Auto</Typography>
-                    <Switch checked={fftAuto} onChange={(e) => { setFftAuto(e.target.checked); }} size="small" sx={switchStyles.small} />
+                  <Box sx={{ ...controlRow, ...mobileControlRowSx, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, opacity: 1, pointerEvents: "auto" }}>
+                    <Box sx={controlPairSx}>
+                      <Typography sx={{ ...typography.label, fontSize: 10 }}>Auto</Typography>
+                      <Switch checked={fftAuto} onChange={(e) => { setFftAuto(e.target.checked); }} size="small" sx={switchStyles.small} />
+                    </Box>
                     {fftCropDims && (
-                      <>
+                      <Box sx={controlPairSx}>
                         <Typography sx={{ ...typography.label, fontSize: 10 }}>Win</Typography>
                         <Switch checked={fftWindow} onChange={(e) => { setFftWindow(e.target.checked); }} size="small" sx={switchStyles.small} />
-                      </>
+                      </Box>
                     )}
                     {fftZoom !== DEFAULT_FFT_ZOOM && (
                       <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.accent, fontWeight: "bold" }}>{fftZoom.toFixed(1)}x</Typography>
