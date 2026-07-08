@@ -20,8 +20,6 @@ import FastForwardIcon from "@mui/icons-material/FastForward";
 import KeyboardArrowDownIcon from "@mui/icons-material/KeyboardArrowDown";
 import KeyboardArrowUpIcon from "@mui/icons-material/KeyboardArrowUp";
 import DragIndicatorIcon from "@mui/icons-material/DragIndicator";
-import StarIcon from "@mui/icons-material/Star";
-import StarBorderIcon from "@mui/icons-material/StarBorder";
 import VisibilityOffIcon from "@mui/icons-material/VisibilityOff";
 import { useTheme } from "../theme";
 import { COLORMAPS, applyColormap } from "../colormaps";
@@ -1204,6 +1202,10 @@ interface CompareVirtualGridProps {
   cursorCol: number;
   status: string;
   themeColors: ReturnType<typeof useTheme>["colors"];
+  panelChromeVisible: boolean;
+  showScaleBar: boolean;
+  pixelSize: number;
+  pixelUnit: string;
   panelOrder: number[];
   hidden: number[];
   starred: number[];
@@ -1237,6 +1239,10 @@ function CompareVirtualGrid({
   cursorCol,
   status,
   themeColors,
+  panelChromeVisible,
+  showScaleBar,
+  pixelSize,
+  pixelUnit,
   panelOrder,
   hidden,
   starred,
@@ -1251,6 +1257,9 @@ function CompareVirtualGrid({
   onPendingMoveFrameChange,
 }: CompareVirtualGridProps) {
   const canvasRefs = React.useRef<(HTMLCanvasElement | null)[]>([]);
+  const overlayRefs = React.useRef<(HTMLCanvasElement | null)[]>([]);
+  const tileRefs = React.useRef<(HTMLDivElement | null)[]>([]);
+  const [overlayVersion, setOverlayVersion] = React.useState(0);
   const panelPixels = Math.max(1, shapeRows * shapeCols);
   const panels = React.useMemo(() => {
     if (!bytes || count <= 0 || bytes.byteLength < panelPixels * count * 4) {
@@ -1356,6 +1365,43 @@ function CompareVirtualGrid({
   const mobileGridCols = Math.max(1, Math.min(gridCols, 2));
   const markerLeft = `${((Math.max(0, Math.min(shapeCols - 1, cursorCol)) + 0.5) / Math.max(1, shapeCols)) * 100}%`;
   const markerTop = `${((Math.max(0, Math.min(shapeRows - 1, cursorRow)) + 0.5) / Math.max(1, shapeRows)) * 100}%`;
+  const availablePanelCount = Math.max(0, (indices || []).length);
+  const statusText = renderEntries.length < availablePanelCount
+    ? `${renderEntries.length}/${availablePanelCount} visible`
+    : status;
+
+  React.useLayoutEffect(() => {
+    const bump = () => setOverlayVersion((value) => value + 1);
+    const observer = typeof ResizeObserver !== "undefined" ? new ResizeObserver(bump) : null;
+    tileRefs.current.forEach((node) => {
+      if (node) observer?.observe(node);
+    });
+    bump();
+    return () => observer?.disconnect();
+  }, [gridCols, mobileGridCols, renderEntries.length]);
+
+  React.useEffect(() => {
+    const dpr = typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1;
+    renderEntries.forEach((_, idx) => {
+      const overlay = overlayRefs.current[idx];
+      const tile = tileRefs.current[idx];
+      if (!overlay || !tile) return;
+      const cssWidth = Math.max(1, Math.round(tile.clientWidth));
+      const cssHeight = Math.max(1, Math.round(tile.clientHeight));
+      const width = Math.max(1, Math.round(cssWidth * dpr));
+      const height = Math.max(1, Math.round(cssHeight * dpr));
+      if (overlay.width !== width) overlay.width = width;
+      if (overlay.height !== height) overlay.height = height;
+      if (showScaleBar) {
+        const unit = pixelSize > 0 ? pixelUnit || "px" : "px";
+        const pxSize = pixelSize > 0 ? pixelSize : 1;
+        drawScaleBarHiDPI(overlay, dpr, 1, pxSize, unit, shapeCols);
+      } else {
+        const ctx = overlay.getContext("2d");
+        ctx?.clearRect(0, 0, overlay.width, overlay.height);
+      }
+    });
+  }, [overlayVersion, pixelSize, pixelUnit, renderEntries, shapeCols, showScaleBar]);
 
   if (renderEntries.length === 0) {
     return (
@@ -1369,9 +1415,9 @@ function CompareVirtualGrid({
 
   return (
     <Box sx={{ width: "100%", maxWidth: "100%" }}>
-      {status && (
+      {statusText && (
         <Typography sx={{ fontSize: 10, color: themeColors.textMuted, mb: 0.5 }}>
-          {status}
+          {statusText}
         </Typography>
       )}
       <Box
@@ -1395,6 +1441,7 @@ function CompareVirtualGrid({
           return (
             <Box
               key={`${frame}-${localIdx}`}
+              ref={(node: HTMLDivElement | null) => { tileRefs.current[localIdx] = node; }}
               role="button"
               aria-label={`Show4DSTEM compare panel ${frame + 1}`}
               tabIndex={0}
@@ -1473,8 +1520,31 @@ function CompareVirtualGrid({
                 cursor: reorderMode ? "grab" : "pointer",
                 overflow: "hidden",
                 opacity: isDragging ? 0.45 : 1,
+                transform: isPendingMove ? "translateY(-2px)" : "translateY(0)",
+                transition: "transform 120ms ease, opacity 120ms ease, border-color 120ms ease",
                 aspectRatio: `${shapeCols} / ${shapeRows}`,
                 "&:focus-visible": { borderColor: themeColors.accent },
+                "&:hover .show4dstem-compare-hide-button, &:focus-within .show4dstem-compare-hide-button": {
+                  opacity: 1,
+                  pointerEvents: "auto",
+                  transform: "translateY(0)",
+                },
+                "&:hover .show4dstem-compare-star-button, &:focus-within .show4dstem-compare-star-button": {
+                  opacity: 1,
+                  pointerEvents: "auto",
+                  transform: "translateY(0)",
+                },
+                "@media (hover: none), (pointer: coarse)": {
+                  "& .show4dstem-compare-hide-button": { display: "none" },
+                  "& .show4dstem-compare-star-button": { opacity: 1, pointerEvents: "auto", transform: "translateY(0)" },
+                },
+                ...(reorderMode ? {
+                  "@keyframes show4dstem-compare-reorder-jiggle": {
+                    "0%": { rotate: "-0.25deg" },
+                    "100%": { rotate: "0.25deg" },
+                  },
+                  animation: "show4dstem-compare-reorder-jiggle 180ms ease-in-out infinite alternate",
+                } : {}),
               }}
             >
               <canvas
@@ -1487,6 +1557,16 @@ function CompareVirtualGrid({
                   width: "100%",
                   height: "100%",
                   imageRendering: smooth ? "auto" : "pixelated",
+                }}
+              />
+              <canvas
+                ref={(node) => { overlayRefs.current[localIdx] = node; }}
+                style={{
+                  position: "absolute",
+                  inset: 0,
+                  width: "100%",
+                  height: "100%",
+                  pointerEvents: "none",
                 }}
               />
               <Box
@@ -1506,71 +1586,132 @@ function CompareVirtualGrid({
               <Box
                 sx={{
                   position: "absolute",
-                  top: 0,
-                  left: 0,
-                  right: 0,
+                  top: 6,
+                  left: 28,
+                  right: 28,
                   px: 0.5,
-                  py: 0.25,
-                  bgcolor: "rgba(0,0,0,0.45)",
-                  color: "white",
-                  fontSize: 10,
+                  color: "rgba(255,255,255,0.95)",
+                  fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+                  fontSize: 11,
+                  fontWeight: 700,
                   lineHeight: 1.2,
+                  textAlign: "center",
+                  textShadow: "1px 1px 0 rgba(0,0,0,0.85), 0 0 3px rgba(0,0,0,0.75)",
                   overflow: "hidden",
                   textOverflow: "ellipsis",
                   whiteSpace: "nowrap",
                   pointerEvents: "none",
+                  userSelect: "none",
+                  zIndex: 2,
                 }}
                 title={label}
               >
                 {label}
               </Box>
-              <Box
-                sx={{
-                  position: "absolute",
-                  top: 2,
-                  right: 2,
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "2px",
-                  bgcolor: "rgba(0,0,0,0.42)",
-                  borderRadius: "4px",
-                  pointerEvents: "auto",
-                }}
-              >
-                {reorderMode && (
-                  <DragIndicatorIcon sx={{ fontSize: 15, color: "rgba(255,255,255,0.82)", mx: 0.2 }} />
-                )}
-                <Tooltip title={isStarred ? "Unstar" : "Star"}>
+              {panelChromeVisible && reorderMode && (
+                <Box
+                  sx={{
+                    position: "absolute",
+                    bottom: 6,
+                    left: "50%",
+                    transform: "translateX(-50%)",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    width: 28,
+                    height: 20,
+                    borderRadius: 1,
+                    bgcolor: "rgba(0,0,0,0.35)",
+                    color: "rgba(255,255,255,0.9)",
+                    pointerEvents: "none",
+                    zIndex: 3,
+                  }}
+                >
+                  <DragIndicatorIcon sx={{ fontSize: 18 }} />
+                </Box>
+              )}
+              {panelChromeVisible && (
+                <Tooltip title={(isStarred ? "Unstar " : "Star ") + label}>
                   <IconButton
                     size="small"
                     aria-label={`${isStarred ? "Unstar" : "Star"} Show4DSTEM compare panel ${frame + 1}`}
-                    className="show4dstem-compare-star"
+                    className="show4dstem-compare-star-button"
                     data-frame={frame}
+                    onPointerDown={(event) => event.stopPropagation()}
+                    onMouseDown={(event) => event.stopPropagation()}
+                    onMouseUp={(event) => event.stopPropagation()}
                     onClick={(event) => {
                       event.stopPropagation();
                       onToggleStar(frame);
                     }}
-                    sx={{ p: 0.2, color: isStarred ? "#facc15" : "rgba(255,255,255,0.82)" }}
+                    sx={{
+                      position: "absolute",
+                      top: 5,
+                      right: 5,
+                      width: 22,
+                      height: 22,
+                      p: 0,
+                      border: "none",
+                      bgcolor: "transparent",
+                      cursor: "pointer",
+                      fontSize: 18,
+                      lineHeight: "20px",
+                      textAlign: "center",
+                      color: isStarred ? "#ffc107" : "rgba(255,255,255,0.58)",
+                      textShadow: "0 0 3px rgba(0,0,0,0.8)",
+                      opacity: isStarred ? 1 : 0,
+                      pointerEvents: "auto",
+                      transform: isStarred ? "translateY(0)" : "translateY(-3px)",
+                      transition: "opacity 120ms ease, transform 120ms ease, background-color 120ms ease, color 120ms ease",
+                      userSelect: "none",
+                      zIndex: 3,
+                      "&:hover, &:focus-visible": {
+                        bgcolor: "rgba(0,0,0,0.22)",
+                        color: isStarred ? "#ffc107" : "rgba(255,255,255,0.9)",
+                      },
+                    }}
                   >
-                    {isStarred ? <StarIcon sx={{ fontSize: 15 }} /> : <StarBorderIcon sx={{ fontSize: 15 }} />}
+                    {isStarred ? "★" : "☆"}
                   </IconButton>
                 </Tooltip>
-                <Tooltip title="Hide">
+              )}
+              {panelChromeVisible && (
+                <Tooltip title={renderEntries.length <= 1 ? "Cannot hide the last visible panel" : `Hide ${label}`}>
                   <IconButton
                     size="small"
-                    aria-label={`Hide Show4DSTEM compare panel ${frame + 1}`}
-                    className="show4dstem-compare-hide"
+                    disabled={renderEntries.length <= 1}
+                    aria-label={renderEntries.length <= 1 ? "Cannot hide the last visible panel" : `Hide Show4DSTEM compare panel ${frame + 1}`}
+                    className="show4dstem-compare-hide-button"
                     data-frame={frame}
+                    onMouseDown={(event) => event.stopPropagation()}
                     onClick={(event) => {
                       event.stopPropagation();
                       if (renderEntries.length > 1) onHide(frame);
                     }}
-                    sx={{ p: 0.2, color: renderEntries.length > 1 ? "rgba(255,255,255,0.82)" : "rgba(255,255,255,0.3)" }}
+                    sx={{
+                      position: "absolute",
+                      top: 5,
+                      left: 5,
+                      width: 22,
+                      height: 22,
+                      p: 0,
+                      opacity: 0,
+                      transform: "translateY(-3px)",
+                      transition: "opacity 120ms ease, transform 120ms ease, background-color 120ms ease, color 120ms ease",
+                      color: renderEntries.length <= 1 ? "rgba(255,255,255,0.25)" : "rgba(255,255,255,0.75)",
+                      bgcolor: "rgba(0,0,0,0.22)",
+                      pointerEvents: "none",
+                      zIndex: 3,
+                      "&:hover, &:focus-visible": {
+                        bgcolor: "rgba(0,0,0,0.42)",
+                        color: "rgba(255,255,255,0.95)",
+                      },
+                    }}
                   >
                     <VisibilityOffIcon sx={{ fontSize: 15 }} />
                   </IconButton>
                 </Tooltip>
-              </Box>
+              )}
             </Box>
           );
         })}
@@ -2711,22 +2852,53 @@ function Show4DSTEM() {
     // Python sending bytes + 4 separate stat traits caused a comm-message ordering race on rapid
     // preset clicks: bytes from click N could arrive with min/max from click N-1, normalizing
     // the colormap to the wrong range and producing a uniform-color VI flash.
+    if (!compareMode) {
+      const s = computeStats(rawData);
+      setViStats([s.mean, s.min, s.max, s.std]);
+      setViDataMin(s.min);
+      setViDataMax(s.max);
+    }
+
+    // Apply scale transformation for histogram display
+    if (!compareMode) {
+      const scaledData = new Float32Array(numFloats);
+      if (viScaleMode === "log") {
+        for (let i = 0; i < numFloats; i++) {
+          scaledData[i] = Math.log1p(Math.max(0, rawData[i]));
+        }
+      } else {
+        scaledData.set(rawData);
+      }
+      setViHistogramData(scaledData);
+    }
+  }, [compareMode, virtualImageBytes, viScaleMode]);
+
+  React.useEffect(() => {
+    if (!compareMode) return;
+    const expectedFloats = Math.max(0, (comparePanelCount || 0) * shapeRows * shapeCols);
+    if (!compareVirtualImageBytes || expectedFloats === 0 || compareVirtualImageBytes.byteLength < expectedFloats * 4) {
+      return;
+    }
+    const rawData = new Float32Array(
+      compareVirtualImageBytes.buffer,
+      compareVirtualImageBytes.byteOffset,
+      expectedFloats,
+    );
     const s = computeStats(rawData);
     setViStats([s.mean, s.min, s.max, s.std]);
     setViDataMin(s.min);
     setViDataMax(s.max);
 
-    // Apply scale transformation for histogram display
-    const scaledData = new Float32Array(numFloats);
+    const scaledData = new Float32Array(expectedFloats);
     if (viScaleMode === "log") {
-      for (let i = 0; i < numFloats; i++) {
+      for (let i = 0; i < expectedFloats; i++) {
         scaledData[i] = Math.log1p(Math.max(0, rawData[i]));
       }
     } else {
       scaledData.set(rawData);
     }
     setViHistogramData(scaledData);
-  }, [virtualImageBytes, viScaleMode]);
+  }, [compareMode, comparePanelCount, compareVirtualImageBytes, shapeCols, shapeRows, viScaleMode]);
 
   // Render DP with zoom (use summed DP when VI ROI is active)
   // Expensive: colormap + data processing → cached offscreen canvas
@@ -5310,6 +5482,10 @@ function Show4DSTEM() {
               cursorCol={localPosCol}
               status={compareStatus}
               themeColors={themeColors}
+              panelChromeVisible={panelChromeVisible}
+              showScaleBar={showScaleBar}
+              pixelSize={pixelSize}
+              pixelUnit={pixelUnit}
               panelOrder={comparePanelOrder || []}
               hidden={compareHiddenPanels || []}
               starred={compareStarredPanels || []}

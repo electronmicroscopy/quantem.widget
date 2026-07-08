@@ -233,6 +233,41 @@ def test_show4dstem_compare_grid_builds_virtual_image_stack() -> None:
         widget.close()
 
 
+def test_show4dstem_compare_grid_normalizes_detector_roi_preview() -> None:
+    from quantem.widget import Show4DSTEM
+
+    data = np.zeros((2, 2, 2, 4, 4), dtype=np.uint16)
+    data[0] = 4
+    data[1] = 7
+    widget = Show4DSTEM(
+        data,
+        view_mode="compare",
+        compare_max_panels=2,
+        precompute_virtual_images=False,
+        verbose=False,
+    )
+
+    try:
+        widget.roi_mode = "rect"
+        widget.roi_center_row = 1.5
+        widget.roi_center_col = 1.5
+        widget.roi_width = 4
+        widget.roi_height = 4
+        widget._compute_virtual_image_from_roi()
+        widget._refresh_compare_virtual_images()
+
+        main_vi = np.frombuffer(widget.virtual_image_bytes, dtype=np.float32).reshape(2, 2)
+        compare_vi = np.frombuffer(
+            widget.compare_virtual_image_bytes, dtype=np.float32
+        ).reshape(2, 2, 2)
+
+        np.testing.assert_allclose(main_vi, np.full((2, 2), 64, dtype=np.float32))
+        np.testing.assert_allclose(compare_vi[0], np.full((2, 2), 4, dtype=np.float32))
+        np.testing.assert_allclose(compare_vi[1], np.full((2, 2), 7, dtype=np.float32))
+    finally:
+        widget.close()
+
+
 def test_show4dstem_compare_grid_validates_api() -> None:
     from quantem.widget import Show4DSTEM
 

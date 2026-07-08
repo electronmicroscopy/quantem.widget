@@ -3634,15 +3634,30 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         backend = compute_backend(dataset)
         return np.asarray(backend.masked_sum(mask_np), dtype=np.float32)
 
+    def _detector_mask_area(self, mask) -> float:
+        """Number of detector pixels contributing to the current ROI."""
+        if hasattr(mask, "detach"):
+            area = float(mask.detach().float().sum().item())
+        else:
+            area = float(np.asarray(mask, dtype=np.float32).sum())
+        return max(1.0, area)
+
     def _compare_virtual_image_for_frame(self, idx: int, mask) -> np.ndarray:
+        # Compare panels are visual previews across many datasets. Normalize by
+        # detector ROI area so changing from BF to ADF does not flatten/saturate
+        # panels purely because the detector mask covers more pixels. The main
+        # VI remains summed for quantitative count integration.
+        mask_area = self._detector_mask_area(mask)
         data = getattr(self, "_data", None)
         datasets = getattr(data, "datasets", None)
         if datasets is not None:
             dataset = datasets[int(idx)]
             if dataset is None:
                 raise ValueError(f"dataset {idx} is not ready")
-            return self._virtual_image_for_chunked_dataset(dataset, mask)
-        return self._virtual_image_for_frame(int(idx))
+            vi = self._virtual_image_for_chunked_dataset(dataset, mask)
+        else:
+            vi = self._virtual_image_for_frame(int(idx))
+        return np.asarray(vi, dtype=np.float32) / mask_area
 
     def _refresh_compare_virtual_images(self) -> None:
         """Build the lightweight virtual-image stack used by compare mode."""
