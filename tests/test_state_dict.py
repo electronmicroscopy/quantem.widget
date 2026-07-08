@@ -184,6 +184,8 @@ def test_show4dstem_controls_collapsed_roundtrips_state_and_html(tmp_path):
     out = widget.export_html(tmp_path / "show4dstem_controls_collapsed.html", encoding="full")
     html = out.read_text(encoding="utf-8")
     assert "controls_collapsed" in html
+    assert "Hide controls" not in html
+    assert "Show controls" not in html
 
 
 def test_show4dstem_ui_mode_presets_and_overrides():

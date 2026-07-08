@@ -134,9 +134,8 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
     show_controls : bool, default True
         Show the live control UI. Set ``False`` for a permanently clean display.
     controls_collapsed : bool, default False
-        Start with the live control UI collapsed behind a small GUI toggle.
-        Unlike ``show_controls=False``, users can expand the controls in the
-        frontend and Python can call ``expand_controls()`` later.
+        Start with the live control UI collapsed. Unlike
+        ``show_controls=False``, Python can call ``expand_controls()`` later.
     show_stats : bool, default True
         Show mean/min/max/std readout bars under the DP, virtual image, and FFT.
     show_scale_bar : bool, default True
@@ -1852,7 +1851,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         self._update_frame()
 
     def collapse_controls(self) -> Self:
-        """Collapse the live control UI while leaving the GUI toggle available."""
+        """Collapse the live control UI programmatically."""
         self.controls_collapsed = True
         return self
 

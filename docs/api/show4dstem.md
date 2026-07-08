@@ -207,7 +207,7 @@ Python round trip - see [Performance](../maintainer/widget-performance).
 | Multiple DP source | `compare_dp_mode` | Shows either the average DP across visible multiple panels or the selected panel's DP |
 | Multiple panel state | `compare_panel_order`, `compare_hidden_panels`, `compare_starred_panels`; `set_compare_panel_order()`, `hide_compare_panel()`, `show_all_compare_panels()`, `star_compare_panel()` | Saves/reuses panel order, hidden panels, and starred picks across cells, state files, and HTML export |
 | Viewer chrome preset | `ui_mode` plus explicit `show_*` kwargs | Applies shared display presets; see [Viewer UI controls](viewer-ui) |
-| Control visibility | `show_controls`, `controls_collapsed`; `collapse_controls()`, `expand_controls()`, `toggle_controls()` | Permanently remove controls or temporarily collapse them behind the top GUI toggle |
+| Control visibility | `show_controls`, `controls_collapsed`; `collapse_controls()`, `expand_controls()`, `toggle_controls()` | Permanently remove controls or programmatically collapse/expand them for clean exports |
 | Title visibility | `show_title` | Top title row shows/hides |
 | Stats visibility | `show_stats` | DP, virtual-image, and FFT stats bars show/hide |
 | Scale bar visibility | `show_scale_bar` | DP and virtual-image scale bars show/hide |

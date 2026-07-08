@@ -2479,7 +2479,7 @@ function Show4DSTEM() {
   const [showFft, setShowFft] = useModelState<boolean>("show_fft");
   const [fftWindow, setFftWindow] = useModelState<boolean>("fft_window");
   const [showControls] = useModelState<boolean>("show_controls");
-  const [controlsCollapsed, setControlsCollapsed] = useModelState<boolean>("controls_collapsed");
+  const [controlsCollapsed] = useModelState<boolean>("controls_collapsed");
   const controlsVisible = showControls && !controlsCollapsed;
   const panelChromeVisible = controlsVisible;
   const [showStats] = useModelState<boolean>("show_stats");
@@ -5467,19 +5467,6 @@ function Show4DSTEM() {
           <KeyboardShortcuts items={keyboardShortcutItems} />
         </Box>} theme={themeInfo.theme} />}
       </Typography>}
-      {showControls && (
-        <Box sx={{ display: "flex", justifyContent: "flex-end", mb: `${SPACING.XS}px`, minHeight: 24 }}>
-          <Button
-            size="small"
-            sx={compactButton}
-            onClick={() => setControlsCollapsed(!controlsCollapsed)}
-            aria-label={controlsCollapsed ? "Show controls" : "Hide controls"}
-          >
-            {controlsCollapsed ? "Controls" : "Hide"}
-          </Button>
-        </Box>
-      )}
-
       {/* MAIN CONTENT: DP | VI | FFT (three columns when FFT shown) */}
       <Stack
         direction={mainStackDirection}
