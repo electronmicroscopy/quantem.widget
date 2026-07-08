@@ -1,8 +1,7 @@
-# Commit and Local Agent Guidelines
+# Agent Commit Guidelines
 
-This file is not a legal Contributor License Agreement. It records the
-repository conventions that human contributors and coding agents should follow
-when making commits.
+This file records repository conventions that coding agents should follow when
+making commits.
 
 ## Commit Messages
 

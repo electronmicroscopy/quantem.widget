@@ -158,7 +158,7 @@ docs: update HTML export protocol
 
 Keep commit messages single-line unless the change genuinely needs a body. Do
 not add `Co-authored-by` trailers unless requested. The same standard is
-mirrored in [CLA.md](CLA.md) for agent and contributor handoffs.
+mirrored in [CLAUDE.md](CLAUDE.md) for agent handoffs.
 
 ### Widget PR checklist
 
