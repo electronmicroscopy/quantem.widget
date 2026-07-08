@@ -148,6 +148,7 @@ type Show1DWindow = Window & typeof globalThis & {
 
 const EMPTY_BYTES = new Uint8Array(0);
 const DEFAULT_SIZE = { width: 820, height: 380 };
+const DEFAULT_PLOT_HEIGHT = 390;
 const SNAPSHOT_OVERLAY_POSITIONS: SnapshotOverlayPosition[] = ["top-left", "top-right", "bottom-left", "bottom-right"];
 const PROFILE_COLORS = ["#4fc3f7", "#81c784", "#ffb74d", "#ce93d8", "#ef5350", "#ffd54f", "#90a4ae", "#a1887f"];
 const controlRow = {
@@ -2275,7 +2276,18 @@ function Show1DWidget() {
   const [hover, setHover] = React.useState<HoverPoint | null>(null);
   const [hoverSnapshotGroupIdx, setHoverSnapshotGroupIdx] = React.useState<number | null>(null);
   const hoverSnapshotGroupRef = React.useRef<number | null>(null);
-  const [sidePanelWidthUserAdjusted] = React.useState(false);
+  const [sidePanelWidthUserAdjusted, setSidePanelWidthUserAdjusted] = React.useState(false);
+  const plotResizePointerIdRef = React.useRef<number | null>(null);
+  const plotResizeCleanupRef = React.useRef<(() => void) | null>(null);
+  const plotResizeStartRef = React.useRef<{
+    x: number;
+    y: number;
+    plotWidth: number;
+    plotHeight: number;
+    gridWidth: number;
+    sidePanelWidth: number;
+    nonPlotWidth: number;
+  } | null>(null);
   const snapshotResizePointerIdRef = React.useRef<number | null>(null);
   const snapshotResizeCleanupRef = React.useRef<(() => void) | null>(null);
   const snapshotResizeStartRef = React.useRef<{
@@ -2385,7 +2397,8 @@ function Show1DWidget() {
   const plotTitleVisible = false;
   const htmlSize = formatEstimatedHtmlSize((nTraces * nPoints + nSnapshots * snapshotHeight * snapshotWidth + profileImageHeight * profileImageWidth) * 4);
   const thumbnailSize = clampThumbnailSize(snapshotThumbnailSize);
-  const plotHeight = Math.round(clampValue(Number.isFinite(plotHeightPx) ? plotHeightPx : 390, 220, 720));
+  const plotHeight = Math.round(clampValue(Number.isFinite(plotHeightPx) ? plotHeightPx : DEFAULT_PLOT_HEIGHT, 220, 720));
+  const plotHeightExplicit = Math.abs(plotHeight - DEFAULT_PLOT_HEIGHT) > 0.5;
   const snapshotOverview = hasSnapshots && selectedGroupImageIndices.length >= 6;
   const rawSidePanelWidth = Number.isFinite(sidePanelWidthPx) ? Number(sidePanelWidthPx) : 360;
   const autoSidePanelWidth = snapshotOverview && !sidePanelWidthUserAdjusted && Math.round(rawSidePanelWidth) <= 360
@@ -2397,7 +2410,7 @@ function Show1DWidget() {
     ? rawSnapshotColumnCount
     : autoSnapshotColumnsForCount(selectedGroupImageIndices.length);
   const resolvedSnapshotOverlayPosition = normaliseSnapshotOverlayPosition(snapshotOverlayPosition);
-  const effectivePlotHeight = snapshotOverview ? Math.round(clampValue(Math.min(plotHeight, 330), 260, 720)) : plotHeight;
+  const effectivePlotHeight = snapshotOverview && !plotHeightExplicit ? Math.round(clampValue(Math.min(plotHeight, 330), 260, 720)) : plotHeight;
   const viewportShellHeight = { xs: "none", md: "calc(100vh - 8px)" };
   const mainGridViewportHeight = { xs: "auto", md: controlsVisible ? "calc(100vh - 82px)" : "calc(100vh - 8px)" };
   const mainGridTemplateColumns = sidePanelVisible
@@ -2618,8 +2631,72 @@ function Show1DWidget() {
   }, []);
 
   React.useEffect(() => () => {
+    plotResizeCleanupRef.current?.();
     snapshotResizeCleanupRef.current?.();
   }, []);
+
+  const handlePlotResizePointerDown = React.useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    plotResizeCleanupRef.current?.();
+    const plotRect = plotHostRef.current?.getBoundingClientRect();
+    if (!plotRect) return;
+    const pointerId = event.pointerId;
+    const gridRect = mainGridRef.current?.getBoundingClientRect();
+    const gridWidth = Math.max(
+      plotRect.width,
+      gridRect?.width ?? plotRect.width + (sidePanelVisible ? sidePanelWidth : 0),
+    );
+    plotResizePointerIdRef.current = pointerId;
+    plotResizeStartRef.current = {
+      x: event.clientX,
+      y: event.clientY,
+      plotWidth: plotRect.width,
+      plotHeight: plotRect.height,
+      gridWidth,
+      sidePanelWidth,
+      nonPlotWidth: Math.max(0, gridWidth - plotRect.width - (sidePanelVisible ? sidePanelWidth : 0)),
+    };
+    event.currentTarget.setPointerCapture(pointerId);
+    const handleWindowPointerMove = (moveEvent: PointerEvent) => {
+      const start = plotResizeStartRef.current;
+      if (plotResizePointerIdRef.current !== pointerId || !start) return;
+      moveEvent.preventDefault();
+      const dx = moveEvent.clientX - start.x;
+      const dy = moveEvent.clientY - start.y;
+      setPlotHeightPx(Math.round(clampValue(start.plotHeight + dy, 220, 720)));
+      if (!sidePanelVisible) return;
+      const minPlotWidth = 260;
+      const minSidePanelWidth = 300;
+      const maxSidePanelWidth = Math.min(960, start.gridWidth - start.nonPlotWidth - minPlotWidth);
+      const maxPlotWidth = start.gridWidth - start.nonPlotWidth - minSidePanelWidth;
+      if (maxSidePanelWidth < minSidePanelWidth || maxPlotWidth < minPlotWidth) return;
+      const nextPlotWidth = clampValue(start.plotWidth + dx, minPlotWidth, maxPlotWidth);
+      const nextSidePanelWidth = clampValue(
+        start.gridWidth - start.nonPlotWidth - nextPlotWidth,
+        minSidePanelWidth,
+        maxSidePanelWidth,
+      );
+      setSidePanelWidthUserAdjusted(true);
+      setSidePanelWidthPx(Math.round(nextSidePanelWidth));
+    };
+    const handleWindowPointerUp = (upEvent: PointerEvent) => {
+      if (plotResizePointerIdRef.current !== pointerId) return;
+      upEvent.preventDefault();
+      plotResizeCleanupRef.current?.();
+      plotResizeCleanupRef.current = null;
+    };
+    window.addEventListener("pointermove", handleWindowPointerMove, { capture: true });
+    window.addEventListener("pointerup", handleWindowPointerUp, { capture: true });
+    window.addEventListener("pointercancel", handleWindowPointerUp, { capture: true });
+    plotResizeCleanupRef.current = () => {
+      window.removeEventListener("pointermove", handleWindowPointerMove, { capture: true });
+      window.removeEventListener("pointerup", handleWindowPointerUp, { capture: true });
+      window.removeEventListener("pointercancel", handleWindowPointerUp, { capture: true });
+      plotResizePointerIdRef.current = null;
+      plotResizeStartRef.current = null;
+    };
+  }, [setPlotHeightPx, setSidePanelWidthPx, sidePanelVisible, sidePanelWidth]);
 
   const setSnapshotViewportWidth = React.useCallback((width: number) => {
     setSnapshotPanelWidthPx(Math.round(clampValue(width, Math.min(220, sidePanelWidth), sidePanelWidth)));
@@ -3747,6 +3824,27 @@ function Show1DWidget() {
                 <Typography sx={{ fontSize: 11, lineHeight: 1.25 }}>y {formatNumber(hover.y, 4)}</Typography>
               </Box>
             )}
+            <Box
+              className="show1d-plot-resize-handle"
+              data-testid="show1d-plot-resize"
+              aria-hidden="true"
+              onPointerDown={handlePlotResizePointerDown}
+              sx={{
+                position: "absolute",
+                right: 0,
+                bottom: 0,
+                width: 18,
+                height: 18,
+                zIndex: 6,
+                cursor: "nwse-resize",
+                opacity: 0.5,
+                pointerEvents: "auto",
+                touchAction: "none",
+                background: `linear-gradient(135deg, transparent 52%, ${themeColors.accent} 52%)`,
+                transition: "opacity 120ms ease",
+                "&:hover": { opacity: 0.95 },
+              }}
+            />
           </Box>
           {showLegend && visibleTraceIndices.length > 0 && (
             <Stack direction="row" spacing={1} sx={{ px: 1, py: 0.5, flexWrap: "wrap", rowGap: 0.5 }}>

@@ -169,6 +169,7 @@ no console error, no NaN frame).
 |---|---|---|
 | Trace hover | read-only canvas overlay | Nearest trace point is highlighted and reported |
 | Trace or legend click | `focused_trace` | Selected trace remains emphasized; clicking it again or double-clicking the plot restores all traces |
+| Plot corner drag | `plot_height_px`, `side_panel_width_px` | Bottom-right loss-plot handle resizes plot height and reallocates width between the loss plot and snapshot panel |
 | Reset view | `x_range`, `y_range`, `focused_trace` | Plot returns to full data extent |
 | Grid toggle | `show_grid` | Grid lines show/hide |
 | Log toggle | `log_scale` | Positive y values render on a logarithmic axis |
