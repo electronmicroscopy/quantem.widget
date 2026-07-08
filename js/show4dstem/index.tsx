@@ -1417,7 +1417,7 @@ function CompareVirtualGrid({
   return (
     <Box sx={{ width: "100%", maxWidth: "100%" }}>
       {statusText && (
-        <Typography sx={{ fontSize: 10, color: themeColors.textMuted, mb: 0.5, "@media (max-width: 700px)": { mb: 0, lineHeight: 1.1 } }}>
+        <Typography sx={{ fontSize: 10, color: themeColors.textMuted, mb: 0.5, "@media (max-width: 700px)": { display: "none" } }}>
           {statusText}
         </Typography>
       )}
@@ -5140,6 +5140,9 @@ function Show4DSTEM() {
       rowGap: "1px",
     },
   };
+  const hideBetweenPanelsOnMobileSx = mobileTightLayout
+    ? { "@media (max-width: 700px)": { display: "none" } }
+    : {};
   const mainStackDirection = compareMode && compareLayout === "top" ? "column" : "row";
   const optionLabel = (value: string | undefined | null): string => {
     if (!value) return "";
@@ -5385,7 +5388,7 @@ function Show4DSTEM() {
 
           {/* DP Stats Bar */}
           {showStats && dpStats && dpStats.length === 4 && (
-            <Box sx={statsBarSx}>
+            <Box sx={{ ...statsBarSx, ...hideBetweenPanelsOnMobileSx }}>
               <Typography sx={statsTextSx}>Mean <Box component="span" sx={statsValueSx}>{formatStat(dpStats[0])}</Box></Typography>
               <Typography sx={statsTextSx}>Min <Box component="span" sx={statsValueSx}>{formatStat(dpStats[1])}</Box></Typography>
               <Typography sx={statsTextSx}>Max <Box component="span" sx={statsValueSx}>{formatStat(dpStats[2])}</Box></Typography>
@@ -5503,7 +5506,7 @@ function Show4DSTEM() {
         {/* SECOND COLUMN: VI Panel */}
         <Box sx={{ width: viPanelWidth, maxWidth: "100%", ...mobilePanelSx }}>
           {/* VI Header */}
-          <Stack direction="row" justifyContent="space-between" alignItems="center" sx={panelHeaderSx}>
+          <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ ...panelHeaderSx, ...hideBetweenPanelsOnMobileSx }}>
             <Typography sx={{ ...typo.label, color: themeColors.textMuted }}>
               {compareMode ? `Compare grid | ${shapeRows}×${shapeCols}` : `${shapeRows}×${shapeCols} | ${detRows}×${detCols}`}
             </Typography>
