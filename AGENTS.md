@@ -2,6 +2,21 @@
 
 Interactive Jupyter widgets and standalone browser GUI for electron microscopy.
 
+## Commit Messages
+
+Use short Conventional Commit-style first lines for routine commits:
+
+```text
+type: short imperative summary
+```
+
+Use `feat:`, `fix:`, `docs:`, `test:`, `refactor:`, `perf:`, `build:`,
+`ci:`, or `chore:` followed by a concise summary. Examples:
+`fix: stabilize Show2D resize handle`, `docs: update release checklist`.
+Keep commit messages single-line unless a detailed body is requested, preserve
+the user's configured author identity, and do not add `Co-authored-by` trailers
+unless explicitly requested.
+
 ## User-facing export language
 
 For docs, menus, README text, and tutorials, use science-friendly export terms:

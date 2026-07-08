@@ -139,6 +139,27 @@ can be opened directly in Colab. To make a GitHub-readable preview copy, see
 See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, checks, widget export
 expectations, agent signoff, and release-candidate guidance.
 
+### Commit messages
+
+Use a short Conventional Commit-style first line:
+
+```text
+type: short imperative summary
+```
+
+Common types are `feat`, `fix`, `docs`, `test`, `refactor`, `perf`, `build`,
+`ci`, and `chore`. Examples:
+
+```text
+feat: add ShowFolder thumbnail cache
+fix: stabilize Show2D resize handle
+docs: update HTML export protocol
+```
+
+Keep commit messages single-line unless the change genuinely needs a body. Do
+not add `Co-authored-by` trailers unless requested. The same standard is
+mirrored in [CLA.md](CLA.md) for agent and contributor handoffs.
+
 ### Widget PR checklist
 
 Use this before opening a widget PR. It is intentionally explicit so human

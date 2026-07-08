@@ -147,9 +147,38 @@ The diff should contain only files that belong to the change.
 Keep PRs focused. Widget behavior, release process, and documentation cleanups
 are easier to review as separate PRs.
 
-Use the repository pull request template. Prefer a short single-line commit
-message unless a detailed body is requested. Do not add `Co-authored-by` unless
-the contributor explicitly asks for it.
+Use the repository pull request template.
+
+## Commit Messages
+
+Use a short Conventional Commit-style first line:
+
+```text
+type: short imperative summary
+```
+
+Use these common types:
+
+- `feat:` for a user-facing feature.
+- `fix:` for a bug fix.
+- `docs:` for documentation-only changes.
+- `test:` for test-only changes.
+- `refactor:` for internal restructuring without behavior changes.
+- `perf:` for performance improvements.
+- `build:` for packaging, dependencies, or build tooling.
+- `ci:` for GitHub Actions or CI workflow changes.
+- `chore:` for maintenance that does not fit the above.
+
+Examples:
+
+```text
+feat: add ShowFolder thumbnail cache
+fix: stabilize Show2D resize handle
+docs: update HTML export protocol
+```
+
+Prefer one-line commit messages unless a detailed body is requested. Do not add
+`Co-authored-by` unless the contributor explicitly asks for it.
 
 ## Release Candidates
 
