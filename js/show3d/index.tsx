@@ -4835,7 +4835,14 @@ function Show3D() {
           transform.zoom === 1 && transform.panX === 0 && transform.panY === 0
         ));
         const packedPanelDirectCanvas = panelCountForGrid > 1 && !sharedPanelSource;
+        // In standalone exported HTML, direct WebGPU canvas presentation can
+        // briefly win the opacity handoff before the next image is visible,
+        // producing a black flash when playback starts. Keep offline playback
+        // on the stable 2D display canvas; live frame-server paths can still
+        // use the direct GPU canvas for maximum throughput.
+        const allowDirectGpuCanvas = !offline;
         const canDirectGridCanvas =
+          allowDirectGpuCanvas &&
           allPanelsVisibleForDirect &&
           c.imageRotation % 4 === 0 &&
           (
