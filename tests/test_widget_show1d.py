@@ -156,6 +156,7 @@ def test_show1d_display_public_api_state_and_validation() -> None:
         snapshot_thumbnail_size=80,
         snapshot_columns=3,
         snapshot_overlay_position="bottom-left",
+        snapshot_fft_layout="below",
         snapshot_real_space_zoom=2.5,
         snapshot_real_space_center=(12.0, 18.5),
         snapshot_fft_zoom=3.0,
@@ -191,6 +192,7 @@ def test_show1d_display_public_api_state_and_validation() -> None:
     assert widget.snapshot_thumbnail_size == 80
     assert widget.snapshot_columns == 3
     assert widget.snapshot_overlay_position == "bottom-left"
+    assert widget.snapshot_fft_layout == "below"
     assert widget.snapshot_real_space_zoom == 2.5
     assert widget.snapshot_real_space_center == [12.0, 18.5]
     assert widget.snapshot_fft_zoom == 3.0
@@ -246,6 +248,7 @@ def test_show1d_display_public_api_state_and_validation() -> None:
     assert state["snapshot_contrast_range"] == [0.1, 0.9]
     assert state["snapshot_columns"] == 3
     assert state["snapshot_overlay_position"] == "bottom-left"
+    assert state["snapshot_fft_layout"] == "below"
     assert state["snapshot_real_space_zoom"] == 2.5
     assert state["snapshot_real_space_center"] == [12.0, 18.5]
     assert state["snapshot_fft_zoom"] == 32.0
@@ -277,15 +280,15 @@ def test_show1d_display_public_api_state_and_validation() -> None:
 
     wide_widget = Show1D(
         np.arange(4, dtype=np.float32),
-        side_panel_width_px=2000,
-        snapshot_panel_width_px=1800,
+        side_panel_width_px=5000,
+        snapshot_panel_width_px=5000,
     )
-    assert wide_widget.side_panel_width_px == 1600
-    assert wide_widget.snapshot_panel_width_px == 1600
-    wide_widget.side_panel_width_px = 1400
-    wide_widget.snapshot_panel_width_px = 1500
-    assert wide_widget.side_panel_width_px == 1400
-    assert wide_widget.snapshot_panel_width_px == 1500
+    assert wide_widget.side_panel_width_px == 4096
+    assert wide_widget.snapshot_panel_width_px == 4096
+    wide_widget.side_panel_width_px = 2200
+    wide_widget.snapshot_panel_width_px = 2600
+    assert wide_widget.side_panel_width_px == 2200
+    assert wide_widget.snapshot_panel_width_px == 2600
 
     tall_widget = Show1D(np.arange(4, dtype=np.float32), plot_height_px=2000)
     assert tall_widget.plot_height_px == 960
@@ -309,6 +312,9 @@ def test_show1d_display_public_api_state_and_validation() -> None:
 
     with np.testing.assert_raises(ValueError):
         Show1D(np.arange(4, dtype=np.float32), snapshot_overlay_position="center")
+
+    with np.testing.assert_raises(ValueError):
+        Show1D(np.arange(4, dtype=np.float32), snapshot_fft_layout="right")
 
     with np.testing.assert_raises(ValueError):
         Show1D(np.arange(4, dtype=np.float32), snapshot_real_space_zoom=float("nan"))

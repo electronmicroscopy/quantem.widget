@@ -94,6 +94,9 @@ type SnapshotFftCacheEntry = {
   backend: string;
 };
 
+type SnapshotFftCacheRef = React.MutableRefObject<Map<string, SnapshotFftCacheEntry>>;
+type SnapshotFftPendingRef = React.MutableRefObject<Map<string, Promise<SnapshotFftCacheEntry>>>;
+
 type PlotThumbnailCacheEntry = {
   canvas: HTMLCanvasElement;
   width: number;
@@ -144,6 +147,40 @@ type Show1DSavePickerOptions = {
 
 type Show1DWindow = Window & typeof globalThis & {
   showSaveFilePicker?: (options?: Show1DSavePickerOptions) => Promise<Show1DFileHandle>;
+};
+
+type Show1DInitialInteractiveState = {
+  logScale: boolean;
+  showStats: boolean;
+  showLegend: boolean;
+  plotHeightPx: number;
+  sidePanelWidthPx: number;
+  snapshotPanelWidthPx: number;
+  focusedTrace: number;
+  xRange: number[];
+  yRange: number[];
+  selectedSnapshotIdx: number;
+  selectedSnapshotGroupIdx: number;
+  hiddenSnapshotImageLabels: string[];
+  showSnapshotFft: boolean;
+  snapshotFftLayout: string;
+  snapshotFftWindow: boolean;
+  snapshotFftCmap: string;
+  snapshotContrastPreset: string;
+  snapshotContrastRange: number[];
+  snapshotThumbnailSize: number;
+  snapshotOverlayPosition: string;
+  imageCmap: string;
+  snapshotRealSpaceZoom: number;
+  snapshotRealSpaceCenter: number[];
+  snapshotFftZoom: number;
+  snapshotFftCenter: number[];
+  showSnapshotProfile: boolean;
+  snapshotProfileLine: ProfilePoint[];
+  snapshotPlaying: boolean;
+  snapshotFps: number;
+  snapshotLoop: boolean;
+  snapshotBounce: boolean;
 };
 
 const EMPTY_BYTES = new Uint8Array(0);
@@ -205,12 +242,15 @@ const snapshotContrastPresets = [
   { value: "5-95", label: "5-95", low: 5, high: 95 },
 ] as const;
 const MIN_SIDE_PANEL_WIDTH = 300;
-const MAX_SIDE_PANEL_WIDTH = 1600;
+const MAX_SIDE_PANEL_WIDTH = 4096;
 const MIN_SNAPSHOT_VIEWPORT_WIDTH = 220;
-const MAX_SNAPSHOT_VIEWPORT_WIDTH = 1600;
+const MAX_SNAPSHOT_VIEWPORT_WIDTH = 4096;
+const MIN_PLOT_WIDTH = 220;
 const MIN_PLOT_HEIGHT = 220;
 const MAX_PLOT_HEIGHT = 960;
 const FFT_DISPLAY_RANGE: [number, number] = [0, 1];
+let snapshotFftWebGpuUnavailable = false;
+let snapshotFftWebGpuInitPromise: Promise<WebGPUFFT | null> | null = null;
 const typography = {
   label: { fontSize: 11 },
   value: { fontSize: 10, fontVariantNumeric: "tabular-nums" as const },
@@ -245,6 +285,51 @@ function useViewportSize() {
     return () => window.removeEventListener("resize", update);
   }, []);
   return size;
+}
+
+function copyNumberArray(value: number[] | null | undefined): number[] {
+  return Array.isArray(value) ? value.map(Number).filter((item) => Number.isFinite(item)) : [];
+}
+
+function copyStringArray(value: string[] | null | undefined): string[] {
+  return Array.isArray(value) ? value.map(String) : [];
+}
+
+function copyProfileLine(value: ProfilePoint[] | null | undefined): ProfilePoint[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((point) => ({ row: Number(point?.row), col: Number(point?.col) }))
+    .filter((point) => Number.isFinite(point.row) && Number.isFinite(point.col));
+}
+
+function numberArraysEqual(a: number[] | null | undefined, b: number[] | null | undefined): boolean {
+  const left = Array.isArray(a) ? a : [];
+  const right = Array.isArray(b) ? b : [];
+  if (left.length !== right.length) return false;
+  for (let idx = 0; idx < left.length; idx += 1) {
+    if (left[idx] !== right[idx]) return false;
+  }
+  return true;
+}
+
+function stringArraysEqual(a: string[] | null | undefined, b: string[] | null | undefined): boolean {
+  const left = Array.isArray(a) ? a : [];
+  const right = Array.isArray(b) ? b : [];
+  if (left.length !== right.length) return false;
+  for (let idx = 0; idx < left.length; idx += 1) {
+    if (left[idx] !== right[idx]) return false;
+  }
+  return true;
+}
+
+function profileLinesEqual(a: ProfilePoint[] | null | undefined, b: ProfilePoint[] | null | undefined): boolean {
+  const left = copyProfileLine(a);
+  const right = copyProfileLine(b);
+  if (left.length !== right.length) return false;
+  for (let idx = 0; idx < left.length; idx += 1) {
+    if (left[idx].row !== right[idx].row || left[idx].col !== right[idx].col) return false;
+  }
+  return true;
 }
 
 function safeFloat32(data: DataView | ArrayBuffer | Uint8Array | null | undefined, expectedFloats: number): Float32Array {
@@ -391,6 +476,14 @@ function normaliseSnapshotOverlayPosition(value: string): SnapshotOverlayPositio
     : "top-right";
 }
 
+function normaliseSnapshotFftLayout(value: string): "overlay" | "below" {
+  return String(value || "").toLowerCase() === "below" ? "below" : "overlay";
+}
+
+function labelPositionAwayFromInset(insetPosition: string): "top-left" | "top-right" {
+  return normaliseSnapshotOverlayPosition(insetPosition).endsWith("right") ? "top-left" : "top-right";
+}
+
 function shortMethodLabel(label: string): string {
   return compactScienceLabel(label);
 }
@@ -455,10 +548,6 @@ function formatAxisValue(value: number): string {
 
 function formatRangeValue(value: number): string {
   return formatCompactValue(value, 2);
-}
-
-function backendBadge(backend: string): string {
-  return backend === "webgpu" ? "" : backend;
 }
 
 function axisPositionText(value: number, label: string, unit: string): string {
@@ -602,10 +691,6 @@ function imageViewToApi(
   };
 }
 
-function imageViewNeedsReset(zoom: number, center: number[] | null | undefined): boolean {
-  return clampImageZoom(zoom) > 1.0001 || Boolean(center && center.length === 2);
-}
-
 function sampleLineProfile(data: Float32Array, width: number, height: number, row0: number, col0: number, row1: number, col1: number): Float32Array {
   const dc = col1 - col0;
   const dr = row1 - row0;
@@ -716,6 +801,30 @@ function normaliseFftDisplay(data: Float32Array, width: number, height: number):
   return out;
 }
 
+async function getSnapshotFftWebGpu(
+  gpuFftRef: React.MutableRefObject<WebGPUFFT | null>,
+): Promise<WebGPUFFT | null> {
+  if (gpuFftRef.current) return gpuFftRef.current;
+  if (snapshotFftWebGpuUnavailable) return null;
+  if (!snapshotFftWebGpuInitPromise) {
+    snapshotFftWebGpuInitPromise = getWebGPUFFT()
+      .then((fft) => {
+        if (!fft) snapshotFftWebGpuUnavailable = true;
+        return fft;
+      })
+      .catch(() => {
+        snapshotFftWebGpuUnavailable = true;
+        return null;
+      })
+      .finally(() => {
+        snapshotFftWebGpuInitPromise = null;
+      });
+  }
+  const fft = await snapshotFftWebGpuInitPromise;
+  gpuFftRef.current = fft;
+  return fft;
+}
+
 async function computeSnapshotFft(
   image: Float32Array,
   width: number,
@@ -734,10 +843,9 @@ async function computeSnapshotFft(
     real.set(source.subarray(row * width, row * width + width), row * fftW);
   }
   const imag = new Float32Array(real.length);
-  if (preferWebgpu) {
+  if (preferWebgpu && !snapshotFftWebGpuUnavailable) {
     try {
-      const fft = gpuFftRef.current ?? await getWebGPUFFT();
-      gpuFftRef.current = fft;
+      const fft = await getSnapshotFftWebGpu(gpuFftRef);
       if (fft) {
         const result = await fft.fft2D(real, imag, fftW, fftH, false);
         fftshift(result.real, fftW, fftH);
@@ -751,6 +859,7 @@ async function computeSnapshotFft(
       }
     } catch {
       gpuFftRef.current = null;
+      snapshotFftWebGpuUnavailable = true;
     }
   }
   const result = await fft2dAsync(real, imag, fftW, fftH, false);
@@ -760,6 +869,43 @@ async function computeSnapshotFft(
     height: fftH,
     backend: "cpu",
   };
+}
+
+function snapshotFftCacheKey(
+  imageIndex: number,
+  width: number,
+  height: number,
+  useWindow: boolean,
+  preferWebgpu: boolean,
+): string {
+  return `${imageIndex}:${width}x${height}:${useWindow ? "hann" : "raw"}:${preferWebgpu ? "gpu" : "cpu"}`;
+}
+
+function computeSnapshotFftCached(
+  cacheKey: string,
+  image: Float32Array,
+  width: number,
+  height: number,
+  useWindow: boolean,
+  preferWebgpu: boolean,
+  cacheRef: SnapshotFftCacheRef,
+  pendingRef: SnapshotFftPendingRef,
+  gpuFftRef: React.MutableRefObject<WebGPUFFT | null>,
+): Promise<SnapshotFftCacheEntry> {
+  const cached = cacheRef.current.get(cacheKey);
+  if (cached) return Promise.resolve(cached);
+  const pending = pendingRef.current.get(cacheKey);
+  if (pending) return pending;
+  const promise = computeSnapshotFft(image, width, height, useWindow, preferWebgpu, gpuFftRef)
+    .then((entry) => {
+      cacheRef.current.set(cacheKey, entry);
+      return entry;
+    })
+    .finally(() => {
+      pendingRef.current.delete(cacheKey);
+    });
+  pendingRef.current.set(cacheKey, promise);
+  return promise;
 }
 
 function snapshotGroupForImage(index: number, groupIndices: number[] | undefined): number {
@@ -1078,6 +1224,8 @@ function InteractiveFloatCanvas({
   ariaLabel,
   viewZoom,
   viewCenter,
+  overlayTextVisible = true,
+  imageBorderVisible = true,
   profileActive = false,
   profileLine = [],
   onViewChange,
@@ -1100,6 +1248,8 @@ function InteractiveFloatCanvas({
   ariaLabel: string;
   viewZoom: number;
   viewCenter: number[];
+  overlayTextVisible?: boolean;
+  imageBorderVisible?: boolean;
   profileActive?: boolean;
   profileLine?: ProfilePoint[];
   onViewChange: (view: ImageViewApiState) => void;
@@ -1228,8 +1378,8 @@ function InteractiveFloatCanvas({
       border: selected ? colors.accent : colors.border,
       accent: colors.accent,
       text: colors.text,
-    }, localView, false, displayRange, false);
-  }, [cleanView, colors, currentApiView, data, displayRange, drawTick, height, lut, selected, width]);
+    }, localView, false, displayRange, imageBorderVisible);
+  }, [cleanView, colors, currentApiView, data, displayRange, drawTick, height, imageBorderVisible, lut, selected, width]);
 
   React.useEffect(() => {
     const overlay = overlayRef.current;
@@ -1371,6 +1521,11 @@ function InteractiveFloatCanvas({
             { row: drag.p0.row + dRow, col: drag.p0.col + dCol },
             { row: drag.p1.row + dRow, col: drag.p1.col + dCol },
           ]);
+        } else if (drag.mode === "new") {
+          onProfileLineChange([
+            clampProfilePoint({ row: drag.row, col: drag.col }, height, width),
+            clampProfilePoint(point, height, width),
+          ]);
         }
         event.preventDefault();
         return;
@@ -1452,32 +1607,34 @@ function InteractiveFloatCanvas({
           display: "block",
         }}
       />
-      <Box
-        sx={{
-          position: "absolute",
-          zIndex: 2,
-          top: overlayOnBottom ? "auto" : 6,
-          bottom: overlayOnBottom ? (scaleBarVisible && overlayOnRight ? 34 : 6) : "auto",
-          left: overlayOnRight ? "auto" : 6,
-          right: overlayOnRight ? 6 : "auto",
-          maxWidth: "calc(100% - 12px)",
-          px: 0,
-          boxSizing: "border-box",
-          color: "rgba(255,255,255,0.95)",
-          pointerEvents: "none",
-          textAlign: overlayOnRight ? "right" : "left",
-          textShadow: "1px 1px 0 rgba(0,0,0,0.85), 0 0 3px rgba(0,0,0,0.75)",
-          userSelect: "none",
-        }}
-      >
-        <Typography sx={{ fontSize: 11, fontWeight: 700, lineHeight: 1.15, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-          {label}
-        </Typography>
-        <Typography sx={{ fontSize: 11, fontWeight: 600, lineHeight: 1.15, fontVariantNumeric: "tabular-nums" }}>
-          {clampImageZoom(viewZoom).toFixed(1)}x
-        </Typography>
-      </Box>
-      {loading && (
+      {overlayTextVisible && (
+        <Box
+          sx={{
+            position: "absolute",
+            zIndex: 2,
+            top: overlayOnBottom ? "auto" : 6,
+            bottom: overlayOnBottom ? (scaleBarVisible && overlayOnRight ? 34 : 6) : "auto",
+            left: overlayOnRight ? "auto" : 6,
+            right: overlayOnRight ? 6 : "auto",
+            maxWidth: "calc(100% - 12px)",
+            px: 0,
+            boxSizing: "border-box",
+            color: "rgba(255,255,255,0.95)",
+            pointerEvents: "none",
+            textAlign: overlayOnRight ? "right" : "left",
+            textShadow: "1px 1px 0 rgba(0,0,0,0.85), 0 0 3px rgba(0,0,0,0.75)",
+            userSelect: "none",
+          }}
+        >
+          <Typography sx={{ fontSize: 11, fontWeight: 700, lineHeight: 1.15, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {label}
+          </Typography>
+          <Typography sx={{ fontSize: 11, fontWeight: 600, lineHeight: 1.15, fontVariantNumeric: "tabular-nums" }}>
+            {clampImageZoom(viewZoom).toFixed(1)}x
+          </Typography>
+        </Box>
+      )}
+      {loading && overlayTextVisible && (
         <Box
           sx={{
             position: "absolute",
@@ -1512,6 +1669,7 @@ function SnapshotImageCanvas({
   deferFft,
   fftWindow,
   preferWebgpu,
+  fftLayout,
   contrastPreset,
   contrastRange,
   selected,
@@ -1527,10 +1685,13 @@ function SnapshotImageCanvas({
   profileActive,
   profileLine,
   fftCacheRef,
+  fftPendingRef,
   fftGpuRef,
+  fftCacheVersion,
   onImageViewChange,
   onFftViewChange,
   onProfileLineChange,
+  onFftOverlayPositionChange,
   onSelect,
 }: {
   data: Float32Array;
@@ -1546,6 +1707,7 @@ function SnapshotImageCanvas({
   deferFft: boolean;
   fftWindow: boolean;
   preferWebgpu: boolean;
+  fftLayout: "overlay" | "below";
   contrastPreset: string;
   contrastRange: [number, number] | null;
   selected: boolean;
@@ -1560,13 +1722,32 @@ function SnapshotImageCanvas({
   fftViewCenter: number[];
   profileActive: boolean;
   profileLine: ProfilePoint[];
-  fftCacheRef: React.MutableRefObject<Map<string, SnapshotFftCacheEntry>>;
+  fftCacheRef: SnapshotFftCacheRef;
+  fftPendingRef: SnapshotFftPendingRef;
   fftGpuRef: React.MutableRefObject<WebGPUFFT | null>;
+  fftCacheVersion: number;
   onImageViewChange: (view: ImageViewApiState) => void;
   onFftViewChange: (view: ImageViewApiState) => void;
   onProfileLineChange: (line: ProfilePoint[]) => void;
+  onFftOverlayPositionChange: (position: SnapshotOverlayPosition) => void;
   onSelect: () => void;
 }) {
+  const imageContainerRef = React.useRef<HTMLDivElement | null>(null);
+  const fftOverlayDragRef = React.useRef<{
+    pointerId: number;
+    startClientX: number;
+    startClientY: number;
+    startLeft: number;
+    startTop: number;
+    overlayW: number;
+    overlayH: number;
+    containerW: number;
+    containerH: number;
+    moved: boolean;
+  } | null>(null);
+  const fftOverlayDragFrameRef = React.useRef<number | null>(null);
+  const fftOverlayDragPreviewRef = React.useRef<{ left: number; top: number } | null>(null);
+  const [fftOverlayDragPreview, setFftOverlayDragPreview] = React.useState<{ left: number; top: number } | null>(null);
   const image = React.useMemo(
     () => extractPackedImage(data, imageIndex, packedHeight, packedWidth, imageHeight, imageWidth),
     [data, imageHeight, imageIndex, imageWidth, packedHeight, packedWidth],
@@ -1575,12 +1756,33 @@ function SnapshotImageCanvas({
     () => resolveSnapshotDisplayRange(image, contrastPreset, contrastRange),
     [contrastPreset, contrastRange, image],
   );
-  const [fftEntry, setFftEntry] = React.useState<SnapshotFftCacheEntry | null>(null);
+  const fftCacheKey = React.useMemo(
+    () => snapshotFftCacheKey(imageIndex, imageWidth, imageHeight, fftWindow, preferWebgpu),
+    [fftWindow, imageHeight, imageIndex, imageWidth, preferWebgpu],
+  );
+  const cachedFftEntry = React.useMemo(
+    () => fftCacheRef.current.get(fftCacheKey) ?? null,
+    [fftCacheKey, fftCacheRef, fftCacheVersion],
+  );
+  const [fftEntryState, setFftEntryState] = React.useState<{ key: string; entry: SnapshotFftCacheEntry } | null>(() => {
+    const entry = fftCacheRef.current.get(fftCacheKey);
+    return entry ? { key: fftCacheKey, entry } : null;
+  });
   const [fftLoading, setFftLoading] = React.useState(false);
+  const fftEntry = fftEntryState?.key === fftCacheKey ? fftEntryState.entry : cachedFftEntry;
 
   React.useEffect(() => {
     if (!showFft) {
-      setFftEntry(null);
+      setFftLoading(false);
+      return;
+    }
+    if (!image.length || imageWidth <= 0 || imageHeight <= 0) {
+      setFftLoading(false);
+      return;
+    }
+    const cached = fftCacheRef.current.get(fftCacheKey);
+    if (cached) {
+      setFftEntryState({ key: fftCacheKey, entry: cached });
       setFftLoading(false);
       return;
     }
@@ -1588,30 +1790,48 @@ function SnapshotImageCanvas({
       setFftLoading(false);
       return;
     }
-    const cacheKey = `${imageIndex}:${imageWidth}x${imageHeight}:${fftWindow ? "hann" : "raw"}:${preferWebgpu ? "gpu" : "cpu"}`;
-    const cached = fftCacheRef.current.get(cacheKey);
-    if (cached) {
-      setFftEntry(cached);
-      setFftLoading(false);
-      return;
-    }
     let canceled = false;
     setFftLoading(true);
-    setFftEntry(null);
-    void computeSnapshotFft(image, imageWidth, imageHeight, fftWindow, preferWebgpu, fftGpuRef)
+    void computeSnapshotFftCached(
+      fftCacheKey,
+      image,
+      imageWidth,
+      imageHeight,
+      fftWindow,
+      preferWebgpu,
+      fftCacheRef,
+      fftPendingRef,
+      fftGpuRef,
+    )
       .then((entry) => {
         if (canceled) return;
-        fftCacheRef.current.set(cacheKey, entry);
-        setFftEntry(entry);
+        setFftEntryState({ key: fftCacheKey, entry });
       })
       .catch(() => {
-        if (!canceled) setFftEntry({ data: new Float32Array(0), width: imageWidth, height: imageHeight, backend: "error" });
+        if (!canceled) {
+          setFftEntryState({
+            key: fftCacheKey,
+            entry: { data: new Float32Array(0), width: imageWidth, height: imageHeight, backend: "error" },
+          });
+        }
       })
       .finally(() => {
         if (!canceled) setFftLoading(false);
       });
     return () => { canceled = true; };
-  }, [deferFft, fftCacheRef, fftGpuRef, fftWindow, image, imageHeight, imageIndex, imageWidth, preferWebgpu, showFft]);
+  }, [
+    deferFft,
+    fftCacheKey,
+    fftCacheRef,
+    fftGpuRef,
+    fftPendingRef,
+    fftWindow,
+    image,
+    imageHeight,
+    imageWidth,
+    preferWebgpu,
+    showFft,
+  ]);
 
   const displayFft = fftEntry ?? {
     data: new Float32Array(0),
@@ -1619,12 +1839,113 @@ function SnapshotImageCanvas({
     height: nextPow2(Math.max(1, imageHeight)),
     backend: fftLoading ? "..." : "pending",
   };
-  const fftBackend = backendBadge(displayFft.backend);
-  const fftLabel = fftBackend ? `FFT ${fftBackend}` : "FFT";
+  const fftReady = Boolean(fftEntry && fftEntry.data.length > 0 && fftEntry.width > 0 && fftEntry.height > 0);
+  const fftLabel = "FFT";
+  const resolvedFftOverlayPosition = normaliseSnapshotOverlayPosition(overlayPosition);
+  const fftOverlayRequested = showFft && fftLayout === "overlay";
+  const fftOverlayEnabled = fftOverlayRequested && fftReady;
+  const fftBelowEnabled = showFft && fftLayout === "below" && fftReady;
+  const fftInsetPlacement = {
+    top: resolvedFftOverlayPosition.startsWith("top") ? 7 : "auto",
+    bottom: resolvedFftOverlayPosition.startsWith("bottom") ? 7 : "auto",
+    left: resolvedFftOverlayPosition.endsWith("left") ? 7 : "auto",
+    right: resolvedFftOverlayPosition.endsWith("right") ? 7 : "auto",
+  };
+  const mainLabelPosition = fftOverlayRequested
+    ? labelPositionAwayFromInset(resolvedFftOverlayPosition)
+    : "top-right";
+  const scheduleFftOverlayDragPreview = React.useCallback((preview: { left: number; top: number }) => {
+    fftOverlayDragPreviewRef.current = preview;
+    if (typeof window === "undefined" || typeof window.requestAnimationFrame !== "function") {
+      setFftOverlayDragPreview(preview);
+      return;
+    }
+    if (fftOverlayDragFrameRef.current !== null) return;
+    fftOverlayDragFrameRef.current = window.requestAnimationFrame(() => {
+      fftOverlayDragFrameRef.current = null;
+      setFftOverlayDragPreview(fftOverlayDragPreviewRef.current);
+    });
+  }, []);
+  React.useEffect(() => () => {
+    if (fftOverlayDragFrameRef.current !== null && typeof window !== "undefined") {
+      window.cancelAnimationFrame(fftOverlayDragFrameRef.current);
+    }
+  }, []);
+  const handleFftOverlayPointerDown = React.useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return;
+    const containerRect = imageContainerRef.current?.getBoundingClientRect();
+    const overlayRect = event.currentTarget.getBoundingClientRect();
+    if (!containerRect || containerRect.width <= 0 || containerRect.height <= 0 || overlayRect.width <= 0 || overlayRect.height <= 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const startLeft = clampValue(overlayRect.left - containerRect.left, 0, Math.max(0, containerRect.width - overlayRect.width));
+    const startTop = clampValue(overlayRect.top - containerRect.top, 0, Math.max(0, containerRect.height - overlayRect.height));
+    fftOverlayDragPreviewRef.current = { left: startLeft, top: startTop };
+    setFftOverlayDragPreview({ left: startLeft, top: startTop });
+    fftOverlayDragRef.current = {
+      pointerId: event.pointerId,
+      startClientX: event.clientX,
+      startClientY: event.clientY,
+      startLeft,
+      startTop,
+      overlayW: overlayRect.width,
+      overlayH: overlayRect.height,
+      containerW: containerRect.width,
+      containerH: containerRect.height,
+      moved: false,
+    };
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+      // Pointer capture is best-effort; global state still keeps the drag bounded.
+    }
+  }, []);
+  const handleFftOverlayPointerMove = React.useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    const drag = fftOverlayDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (Math.hypot(event.clientX - drag.startClientX, event.clientY - drag.startClientY) > 4) {
+      drag.moved = true;
+    }
+    if (!drag.moved) return;
+    scheduleFftOverlayDragPreview({
+      left: clampValue(drag.startLeft + event.clientX - drag.startClientX, 0, Math.max(0, drag.containerW - drag.overlayW)),
+      top: clampValue(drag.startTop + event.clientY - drag.startClientY, 0, Math.max(0, drag.containerH - drag.overlayH)),
+    });
+  }, [scheduleFftOverlayDragPreview]);
+  const finishFftOverlayDrag = React.useCallback((event: React.PointerEvent<HTMLDivElement>, commit: boolean) => {
+    const drag = fftOverlayDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    event.stopPropagation();
+    fftOverlayDragRef.current = null;
+    if (fftOverlayDragFrameRef.current !== null && typeof window !== "undefined") {
+      window.cancelAnimationFrame(fftOverlayDragFrameRef.current);
+      fftOverlayDragFrameRef.current = null;
+    }
+    const preview = fftOverlayDragPreviewRef.current;
+    fftOverlayDragPreviewRef.current = null;
+    setFftOverlayDragPreview(null);
+    try {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    } catch {
+      // Ignore stale pointer captures from browser-level pointer cancellation.
+    }
+    if (!commit || !drag.moved || !preview) return;
+    const centerX = preview.left + drag.overlayW / 2;
+    const centerY = preview.top + drag.overlayH / 2;
+    const vertical = centerY < drag.containerH / 2 ? "top" : "bottom";
+    const horizontal = centerX < drag.containerW / 2 ? "left" : "right";
+    onFftOverlayPositionChange(`${vertical}-${horizontal}` as SnapshotOverlayPosition);
+  }, [onFftOverlayPositionChange]);
+  const fftInsetDragPlacement = fftOverlayDragPreview
+    ? { top: fftOverlayDragPreview.top, left: fftOverlayDragPreview.left, right: "auto", bottom: "auto" }
+    : fftInsetPlacement;
 
   return (
     <Box sx={{ display: "flex", flexDirection: "column", width: "100%", minWidth: 0, bgcolor: colors.bgAlt }}>
-      <Box sx={{ position: "relative", aspectRatio: `${Math.max(1, imageWidth)} / ${Math.max(1, imageHeight)}`, minHeight: 0 }}>
+      <Box ref={imageContainerRef} sx={{ position: "relative", aspectRatio: `${Math.max(1, imageWidth)} / ${Math.max(1, imageHeight)}`, minHeight: 0 }}>
         <InteractiveFloatCanvas
           data={image}
           height={imageHeight}
@@ -1635,7 +1956,7 @@ function SnapshotImageCanvas({
           selected={selected}
           displayRange={imageDisplayRange}
           scaleBarVisible={scaleBarVisible}
-          overlayPosition={overlayPosition}
+          overlayPosition={mainLabelPosition}
           pixelSize={pixelSize}
           pixelUnit={pixelUnit}
           ariaLabel={`${label} snapshot image`}
@@ -1643,18 +1964,72 @@ function SnapshotImageCanvas({
           viewCenter={imageViewCenter}
           profileActive={profileActive}
           profileLine={profileLine}
+          imageBorderVisible={false}
           onViewChange={onImageViewChange}
           onProfileLineChange={onProfileLineChange}
           onSelect={onSelect}
         />
+        {fftOverlayEnabled && (
+          <Box
+            data-testid={`show1d-snapshot-fft-overlay-${imageIndex}`}
+            sx={{
+              position: "absolute",
+              ...fftInsetDragPlacement,
+              width: "38%",
+              aspectRatio: `${Math.max(1, displayFft.width)} / ${Math.max(1, displayFft.height)}`,
+              minWidth: 42,
+              maxWidth: "58%",
+              zIndex: 6,
+              overflow: "hidden",
+              bgcolor: "transparent",
+              border: "none",
+              outline: "none",
+              boxShadow: "none",
+              WebkitMaskImage: "radial-gradient(ellipse at center, #000 0%, #000 64%, rgba(0,0,0,0.72) 78%, transparent 100%)",
+              maskImage: "radial-gradient(ellipse at center, #000 0%, #000 64%, rgba(0,0,0,0.72) 78%, transparent 100%)",
+              pointerEvents: "auto",
+              touchAction: "none",
+              cursor: fftOverlayDragPreview ? "grabbing" : "grab",
+              willChange: fftOverlayDragPreview ? "top, left" : "auto",
+            }}
+            onPointerDownCapture={handleFftOverlayPointerDown}
+            onPointerMoveCapture={handleFftOverlayPointerMove}
+            onPointerUpCapture={(event) => finishFftOverlayDrag(event, true)}
+            onPointerCancelCapture={(event) => finishFftOverlayDrag(event, false)}
+            aria-label={`${label} FFT inset drag handle`}
+          >
+            <InteractiveFloatCanvas
+              data={displayFft.data}
+              height={displayFft.height}
+              width={displayFft.width}
+              lut={fftLut}
+              colors={colors}
+              label={fftLabel}
+              selected={false}
+              displayRange={FFT_DISPLAY_RANGE}
+              scaleBarVisible={false}
+              overlayPosition="top-right"
+              pixelSize={1}
+              pixelUnit="px"
+              loading={fftLoading}
+              overlayTextVisible={false}
+              imageBorderVisible={false}
+              ariaLabel={`${label} FFT overlay`}
+              viewZoom={fftViewZoom}
+              viewCenter={fftViewCenter}
+              onViewChange={onFftViewChange}
+              onSelect={onSelect}
+            />
+          </Box>
+        )}
       </Box>
-      {showFft && !deferFft && (
+      {fftBelowEnabled && (
         <Box
           sx={{
             position: "relative",
             aspectRatio: `${Math.max(1, displayFft.width)} / ${Math.max(1, displayFft.height)}`,
             minHeight: 0,
-            borderTop: `1px solid ${colors.border}`,
+            borderTop: "none",
           }}
         >
           <InteractiveFloatCanvas
@@ -1666,12 +2041,14 @@ function SnapshotImageCanvas({
             label={fftLabel}
             selected={false}
             displayRange={FFT_DISPLAY_RANGE}
-            scaleBarVisible={scaleBarVisible}
+            scaleBarVisible={false}
             overlayPosition={overlayPosition}
             pixelSize={1}
             pixelUnit="px"
             loading={fftLoading}
-            ariaLabel={`${label} ${fftLabel}`}
+            overlayTextVisible={false}
+            imageBorderVisible={false}
+            ariaLabel={`${label} FFT`}
             viewZoom={fftViewZoom}
             viewCenter={fftViewCenter}
             onViewChange={onFftViewChange}
@@ -2141,6 +2518,7 @@ function Show1DWidget() {
   const [showSnapshots] = useModelState<boolean>("show_snapshots");
   const [showSnapshotThumbnails] = useModelState<boolean>("show_snapshot_thumbnails");
   const [showSnapshotFft, setShowSnapshotFft] = useModelState<boolean>("show_snapshot_fft");
+  const [snapshotFftLayout, setSnapshotFftLayout] = useModelState<string>("snapshot_fft_layout");
   const [snapshotFftWindow, setSnapshotFftWindow] = useModelState<boolean>("snapshot_fft_window");
   const [snapshotFftCmap, setSnapshotFftCmap] = useModelState<string>("snapshot_fft_cmap");
   const [snapshotContrastPreset, setSnapshotContrastPreset] = useModelState<string>("snapshot_contrast_preset");
@@ -2182,6 +2560,8 @@ function Show1DWidget() {
   const [handoffEnabled] = useModelState<boolean>("handoff_enabled");
   const [preparedViewWidget] = useModelState<unknown>("prepared_view_widget");
   const [transientSnapshotGroupIdx, setTransientSnapshotGroupIdx] = React.useState<number | null>(null);
+  const initialInteractiveStateRef = React.useRef<Show1DInitialInteractiveState | null>(null);
+  const [resetBaselineReady, setResetBaselineReady] = React.useState(false);
 
   const { colors: themeColors } = useTheme(Boolean(offlineForTheme));
   const yData = React.useMemo(() => safeFloat32(yBytes, Math.max(0, nTraces * nPoints)), [yBytes, nTraces, nPoints]);
@@ -2292,6 +2672,7 @@ function Show1DWidget() {
   const plotHostRef = React.useRef<HTMLDivElement>(null);
   const canvasRef = React.useRef<HTMLCanvasElement>(null);
   const profileCanvasRef = React.useRef<HTMLCanvasElement>(null);
+  const snapshotGridRef = React.useRef<HTMLDivElement>(null);
   const viewportSize = useViewportSize();
   const mainGridSize = useElementSize(mainGridRef, {
     width: Math.max(600, viewportSize.width),
@@ -2322,9 +2703,7 @@ function Show1DWidget() {
     x: number;
     y: number;
     width: number;
-    tileWidth?: number;
-    tileAspect?: number;
-    columns?: number;
+    gridAspect: number;
   } | null>(null);
   const snapshotViewportWidthRef = React.useRef(0);
   const histogramSlotRef = React.useRef(9000 + Math.floor(Math.random() * 100000));
@@ -2333,7 +2712,9 @@ function Show1DWidget() {
   const [snapshotHistogramClipRange, setSnapshotHistogramClipRange] = React.useState<[number, number]>([0, 1]);
   const [, setSnapshotHistogramBackend] = React.useState("cpu");
   const snapshotFftCacheRef = React.useRef<Map<string, SnapshotFftCacheEntry>>(new Map());
+  const snapshotFftPendingRef = React.useRef<Map<string, Promise<SnapshotFftCacheEntry>>>(new Map());
   const snapshotFftGpuRef = React.useRef<WebGPUFFT | null>(null);
+  const [snapshotFftCacheVersion, setSnapshotFftCacheVersion] = React.useState(0);
   const snapshotBounceDirectionRef = React.useRef<1 | -1>(1);
   const hoverRafRef = React.useRef<number | null>(null);
   const pendingHoverRef = React.useRef<HoverPoint | null>(null);
@@ -2438,7 +2819,7 @@ function Show1DWidget() {
     ? Math.max(autoSidePanelWidth, rawSnapshotPanelWidth)
     : autoSidePanelWidth;
   const availableSidePanelWidth = Math.round(clampValue(
-    Math.min(MAX_SIDE_PANEL_WIDTH, mainGridSize.width - 260),
+    Math.min(MAX_SIDE_PANEL_WIDTH, mainGridSize.width - MIN_PLOT_WIDTH),
     MIN_SIDE_PANEL_WIDTH,
     MAX_SIDE_PANEL_WIDTH,
   ));
@@ -2453,12 +2834,13 @@ function Show1DWidget() {
     ? rawSnapshotColumnCount
     : autoSnapshotColumnsForCount(selectedGroupImageIndices.length);
   const resolvedSnapshotOverlayPosition = normaliseSnapshotOverlayPosition(snapshotOverlayPosition);
+  const resolvedSnapshotFftLayout = normaliseSnapshotFftLayout(snapshotFftLayout);
   const viewportShellHeight = { xs: "none", md: "calc(100vh - 8px)" };
   const mainGridViewportHeight = { xs: "auto", md: controlsVisible ? "calc(100vh - 82px)" : "calc(100vh - 8px)" };
   const mainGridTemplateColumns = sidePanelVisible
     ? {
       xs: "1fr",
-      md: `minmax(260px, 1fr) minmax(${MIN_SIDE_PANEL_WIDTH}px, ${sidePanelWidth}px)`,
+      md: `minmax(${MIN_PLOT_WIDTH}px, 1fr) minmax(${MIN_SIDE_PANEL_WIDTH}px, ${sidePanelWidth}px)`,
     }
     : "1fr";
   const normalisedSnapshotContrastPreset = normaliseSnapshotContrastPreset(snapshotContrastPreset);
@@ -2709,7 +3091,7 @@ function Show1DWidget() {
       const dy = moveEvent.clientY - start.y;
       setPlotHeightPx(Math.round(clampValue(start.plotHeight + dy, MIN_PLOT_HEIGHT, MAX_PLOT_HEIGHT)));
       if (!sidePanelVisible) return;
-      const minPlotWidth = 260;
+      const minPlotWidth = MIN_PLOT_WIDTH;
       const minSidePanelWidth = MIN_SIDE_PANEL_WIDTH;
       const maxSidePanelWidth = Math.min(MAX_SIDE_PANEL_WIDTH, start.gridWidth - start.nonPlotWidth - minPlotWidth);
       const maxPlotWidth = start.gridWidth - start.nonPlotWidth - minSidePanelWidth;
@@ -2764,35 +3146,32 @@ function Show1DWidget() {
     sidePanelWidth,
   ]);
 
-  const handleSnapshotTileResizePointerDown = React.useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+  const handleSnapshotGridResizePointerDown = React.useCallback((event: React.PointerEvent<HTMLDivElement>) => {
     event.preventDefault();
     event.stopPropagation();
     snapshotResizeCleanupRef.current?.();
     const pointerId = event.pointerId;
-    const tileRect = event.currentTarget.parentElement?.getBoundingClientRect();
-    const columns = Math.max(1, Math.min(snapshotColumnCount, Math.max(1, selectedGroupImageIndices.length)));
-    const tileWidth = Math.max(1, tileRect?.width ?? (snapshotViewportWidthRef.current || sidePanelWidth) / columns);
-    const tileHeight = Math.max(1, tileRect?.height ?? tileWidth);
+    const gridRect = snapshotGridRef.current?.getBoundingClientRect();
+    const fallbackGridWidth = snapshotViewportWidthRef.current || sidePanelWidth;
+    const gridWidth = Math.max(1, gridRect?.width ?? fallbackGridWidth);
+    const gridHeight = Math.max(1, gridRect?.height ?? gridWidth);
     snapshotResizePointerIdRef.current = pointerId;
     snapshotResizeStartRef.current = {
       x: event.clientX,
       y: event.clientY,
-      width: snapshotViewportWidthRef.current || sidePanelWidth,
-      tileWidth,
-      tileAspect: tileHeight / tileWidth,
-      columns,
+      width: snapshotViewportWidthRef.current || gridWidth,
+      gridAspect: gridHeight / gridWidth,
     };
     event.currentTarget.setPointerCapture(pointerId);
     const handleWindowPointerMove = (moveEvent: PointerEvent) => {
       const start = snapshotResizeStartRef.current;
       if (snapshotResizePointerIdRef.current !== pointerId || !start) return;
       moveEvent.preventDefault();
-      const tileAspect = Math.max(1e-6, start.tileAspect ?? 1);
+      const gridAspect = Math.max(1e-6, start.gridAspect);
       const deltaX = moveEvent.clientX - start.x;
-      const deltaY = (moveEvent.clientY - start.y) / tileAspect;
+      const deltaY = (moveEvent.clientY - start.y) / gridAspect;
       const delta = Math.abs(deltaX) >= Math.abs(deltaY) ? deltaX : deltaY;
-      const nextTileWidth = Math.max(70, (start.tileWidth ?? start.width / Math.max(1, start.columns ?? 1)) + delta);
-      setSnapshotViewportWidth(nextTileWidth * Math.max(1, start.columns ?? columns));
+      setSnapshotViewportWidth(start.width + delta);
     };
     const handleWindowPointerUp = (upEvent: PointerEvent) => {
       if (snapshotResizePointerIdRef.current !== pointerId) return;
@@ -2810,7 +3189,7 @@ function Show1DWidget() {
       snapshotResizePointerIdRef.current = null;
       snapshotResizeStartRef.current = null;
     };
-  }, [selectedGroupImageIndices.length, setSnapshotViewportWidth, sidePanelWidth, snapshotColumnCount]);
+  }, [setSnapshotViewportWidth, sidePanelWidth]);
 
   React.useEffect(() => {
     if (snapshotThumbnailSize !== thumbnailSize) setSnapshotThumbnailSize(thumbnailSize);
@@ -2854,6 +3233,80 @@ function Show1DWidget() {
       setSnapshotContrastPreset(normalisedSnapshotContrastPreset);
     }
   }, [normalisedSnapshotContrastPreset, setSnapshotContrastPreset, snapshotContrastPreset]);
+
+  React.useEffect(() => {
+    if (initialInteractiveStateRef.current !== null) return;
+    const timeout = window.setTimeout(() => {
+      if (initialInteractiveStateRef.current !== null) return;
+      initialInteractiveStateRef.current = {
+        logScale: Boolean(logScale),
+        showStats: Boolean(showStats),
+        showLegend: Boolean(showLegend),
+        plotHeightPx: Number.isFinite(plotHeightPx) ? plotHeightPx : DEFAULT_PLOT_HEIGHT,
+        sidePanelWidthPx: Number.isFinite(sidePanelWidthPx) ? sidePanelWidthPx : 360,
+        snapshotPanelWidthPx: Number.isFinite(snapshotPanelWidthPx) ? snapshotPanelWidthPx : 0,
+        focusedTrace: Number.isFinite(focusedTrace) ? focusedTrace : -1,
+        xRange: copyNumberArray(xRange),
+        yRange: copyNumberArray(yRange),
+        selectedSnapshotIdx: Number.isFinite(selectedSnapshotIdx) ? selectedSnapshotIdx : -1,
+        selectedSnapshotGroupIdx: Number.isFinite(selectedSnapshotGroupIdx) ? selectedSnapshotGroupIdx : -1,
+        hiddenSnapshotImageLabels: copyStringArray(hiddenSnapshotImageLabels),
+        showSnapshotFft: Boolean(showSnapshotFft),
+        snapshotFftLayout: String(snapshotFftLayout || "overlay"),
+        snapshotFftWindow: Boolean(snapshotFftWindow),
+        snapshotFftCmap: String(snapshotFftCmap || "magma"),
+        snapshotContrastPreset: String(snapshotContrastPreset || "full"),
+        snapshotContrastRange: copyNumberArray(snapshotContrastRange),
+        snapshotThumbnailSize: Number.isFinite(snapshotThumbnailSize) ? snapshotThumbnailSize : 48,
+        snapshotOverlayPosition: String(snapshotOverlayPosition || "top-right"),
+        imageCmap: String(imageCmap || "cividis"),
+        snapshotRealSpaceZoom: Number.isFinite(snapshotRealSpaceZoom) ? snapshotRealSpaceZoom : 1,
+        snapshotRealSpaceCenter: copyNumberArray(snapshotRealSpaceCenter),
+        snapshotFftZoom: Number.isFinite(snapshotFftZoom) ? snapshotFftZoom : 1,
+        snapshotFftCenter: copyNumberArray(snapshotFftCenter),
+        showSnapshotProfile: Boolean(showSnapshotProfile),
+        snapshotProfileLine: copyProfileLine(snapshotProfileLine),
+        snapshotPlaying: Boolean(snapshotPlaying),
+        snapshotFps: Number.isFinite(snapshotFps) ? snapshotFps : 2,
+        snapshotLoop: Boolean(snapshotLoop),
+        snapshotBounce: Boolean(snapshotBounce),
+      };
+      setResetBaselineReady(true);
+    }, 0);
+    return () => window.clearTimeout(timeout);
+  }, [
+    focusedTrace,
+    hiddenSnapshotImageLabels,
+    imageCmap,
+    logScale,
+    plotHeightPx,
+    selectedSnapshotGroupIdx,
+    selectedSnapshotIdx,
+    showLegend,
+    showSnapshotFft,
+    showSnapshotProfile,
+    showStats,
+    sidePanelWidthPx,
+    snapshotBounce,
+    snapshotContrastPreset,
+    snapshotContrastRange,
+    snapshotFftCenter,
+    snapshotFftCmap,
+    snapshotFftLayout,
+    snapshotFftWindow,
+    snapshotFftZoom,
+    snapshotFps,
+    snapshotLoop,
+    snapshotOverlayPosition,
+    snapshotPanelWidthPx,
+    snapshotProfileLine,
+    snapshotRealSpaceCenter,
+    snapshotRealSpaceZoom,
+    snapshotThumbnailSize,
+    snapshotPlaying,
+    xRange,
+    yRange,
+  ]);
 
   React.useEffect(() => {
     hoverSnapshotGroupRef.current = hoverSnapshotGroupIdx;
@@ -2904,7 +3357,75 @@ function Show1DWidget() {
 
   React.useEffect(() => {
     snapshotFftCacheRef.current.clear();
+    snapshotFftPendingRef.current.clear();
+    setSnapshotFftCacheVersion((value) => value + 1);
   }, [snapshotData, snapshotHeight, snapshotHeights, snapshotWidth, snapshotWidths]);
+
+  React.useEffect(() => {
+    if (!showSnapshotFft || !hasSnapshots || groupCount <= 0 || nSnapshots <= 0 || snapshotData.length === 0) return;
+    let canceled = false;
+    const anchorGroup = selectedGroup >= 0 ? selectedGroup : 0;
+    const orderedGroups = Array.from({ length: groupCount }, (_, groupIdx) => groupIdx)
+      .sort((a, b) => Math.abs(a - anchorGroup) - Math.abs(b - anchorGroup) || a - b);
+
+    const warmSnapshotFftCache = async () => {
+      for (const groupIdx of orderedGroups) {
+        const imageIndices = snapshotGroups[groupIdx] ?? [];
+        for (const imageIdx of imageIndices) {
+          if (canceled) return;
+          const imageHeight = snapshotHeights?.[imageIdx] || snapshotHeight;
+          const imageWidth = snapshotWidths?.[imageIdx] || snapshotWidth;
+          if (imageIdx < 0 || imageHeight <= 0 || imageWidth <= 0) continue;
+          const cacheKey = snapshotFftCacheKey(
+            imageIdx,
+            imageWidth,
+            imageHeight,
+            Boolean(snapshotFftWindow),
+            Boolean(preferWebgpu),
+          );
+          if (snapshotFftCacheRef.current.has(cacheKey)) continue;
+          const image = extractPackedImage(snapshotData, imageIdx, snapshotHeight, snapshotWidth, imageHeight, imageWidth);
+          if (!image.length) continue;
+          try {
+            const entry = await computeSnapshotFftCached(
+              cacheKey,
+              image,
+              imageWidth,
+              imageHeight,
+              Boolean(snapshotFftWindow),
+              Boolean(preferWebgpu),
+              snapshotFftCacheRef,
+              snapshotFftPendingRef,
+              snapshotFftGpuRef,
+            );
+            if (!canceled && groupIdx === anchorGroup && entry.data.length > 0) {
+              setSnapshotFftCacheVersion((value) => value + 1);
+            }
+          } catch {
+            // Keep the visible image layer stable; a failed FFT can be retried on the next state change.
+          }
+          await new Promise<void>((resolve) => { window.setTimeout(resolve, 0); });
+        }
+      }
+    };
+
+    void warmSnapshotFftCache();
+    return () => { canceled = true; };
+  }, [
+    groupCount,
+    hasSnapshots,
+    nSnapshots,
+    preferWebgpu,
+    selectedGroup,
+    showSnapshotFft,
+    snapshotData,
+    snapshotFftWindow,
+    snapshotGroups,
+    snapshotHeight,
+    snapshotHeights,
+    snapshotWidth,
+    snapshotWidths,
+  ]);
 
   React.useEffect(() => {
     if (!snapshotPlaying) return;
@@ -3438,7 +3959,7 @@ function Show1DWidget() {
     setSnapshotFftCenter(view.center);
   }, [setSnapshotFftCenter, setSnapshotFftZoom]);
 
-  const resetRanges = React.useCallback(() => {
+  const resetPlotAndSnapshotViews = React.useCallback(() => {
     setXRange([]);
     setYRange([]);
     setFocusedTrace(-1);
@@ -3447,13 +3968,161 @@ function Show1DWidget() {
     setSnapshotFftZoom(1);
     setSnapshotFftCenter([]);
   }, [setFocusedTrace, setSnapshotFftCenter, setSnapshotFftZoom, setSnapshotRealSpaceCenter, setSnapshotRealSpaceZoom, setXRange, setYRange]);
-  const needsReset = Boolean(
-    (xRange?.length ?? 0) > 0
-    || (yRange?.length ?? 0) > 0
-    || focusedTrace >= 0
-    || imageViewNeedsReset(snapshotRealSpaceZoom, snapshotRealSpaceCenter)
-    || imageViewNeedsReset(snapshotFftZoom, snapshotFftCenter),
-  );
+
+  const resetToInitialState = React.useCallback(() => {
+    const initial = initialInteractiveStateRef.current;
+    if (!initial) return;
+    setLogScale(initial.logScale);
+    setShowStats(initial.showStats);
+    setShowLegend(initial.showLegend);
+    setPlotHeightPx(initial.plotHeightPx);
+    setSidePanelWidthPx(initial.sidePanelWidthPx);
+    setSnapshotPanelWidthPx(initial.snapshotPanelWidthPx);
+    setSidePanelWidthUserAdjusted(false);
+    setXRange([...initial.xRange]);
+    setYRange([...initial.yRange]);
+    setFocusedTrace(initial.focusedTrace);
+    setSelectedSnapshotIdx(initial.selectedSnapshotIdx);
+    setSelectedSnapshotGroupIdx(initial.selectedSnapshotGroupIdx);
+    setTransientSnapshotGroupIdx(null);
+    setHoverSnapshotGroupIdx(null);
+    setHoverSnapshotImageIdx(null);
+    hoverSnapshotGroupRef.current = null;
+    if (canvasRef.current) canvasRef.current.style.cursor = "crosshair";
+    setHiddenSnapshotImageLabels([...initial.hiddenSnapshotImageLabels]);
+    setShowSnapshotFft(initial.showSnapshotFft);
+    setSnapshotFftLayout(initial.snapshotFftLayout);
+    setSnapshotFftWindow(initial.snapshotFftWindow);
+    setSnapshotFftCmap(initial.snapshotFftCmap);
+    snapshotFftCacheRef.current.clear();
+    snapshotFftPendingRef.current.clear();
+    setSnapshotFftCacheVersion((value) => value + 1);
+    setSnapshotContrastPreset(initial.snapshotContrastPreset);
+    setSnapshotContrastRange([...initial.snapshotContrastRange]);
+    setSnapshotThumbnailSize(initial.snapshotThumbnailSize);
+    setSnapshotOverlayPosition(initial.snapshotOverlayPosition);
+    setImageCmap(initial.imageCmap);
+    setSnapshotRealSpaceZoom(initial.snapshotRealSpaceZoom);
+    setSnapshotRealSpaceCenter([...initial.snapshotRealSpaceCenter]);
+    setSnapshotFftZoom(initial.snapshotFftZoom);
+    setSnapshotFftCenter([...initial.snapshotFftCenter]);
+    setShowSnapshotProfile(initial.showSnapshotProfile);
+    setSnapshotProfileLine(initial.snapshotProfileLine.map((point) => ({ ...point })));
+    setSnapshotPlaying(initial.snapshotPlaying);
+    setSnapshotFps(initial.snapshotFps);
+    setSnapshotLoop(initial.snapshotLoop);
+    setSnapshotBounce(initial.snapshotBounce);
+    snapshotBounceDirectionRef.current = 1;
+    setLocalExportStatus("");
+    setViewMenuAnchor(null);
+    setExportAnchor(null);
+  }, [
+    setFocusedTrace,
+    setHiddenSnapshotImageLabels,
+    setImageCmap,
+    setLogScale,
+    setPlotHeightPx,
+    setSelectedSnapshotGroupIdx,
+    setSelectedSnapshotIdx,
+    setShowLegend,
+    setShowSnapshotFft,
+    setShowSnapshotProfile,
+    setShowStats,
+    setSidePanelWidthPx,
+    setSnapshotBounce,
+    setSnapshotContrastPreset,
+    setSnapshotContrastRange,
+    setSnapshotFftCenter,
+    setSnapshotFftCmap,
+    setSnapshotFftLayout,
+    setSnapshotFftWindow,
+    setSnapshotFftZoom,
+    setSnapshotFps,
+    setSnapshotLoop,
+    setSnapshotOverlayPosition,
+    setSnapshotPanelWidthPx,
+    setSnapshotProfileLine,
+    setSnapshotRealSpaceCenter,
+    setSnapshotRealSpaceZoom,
+    setSnapshotThumbnailSize,
+    setSnapshotPlaying,
+    setXRange,
+    setYRange,
+  ]);
+
+  const needsReset = React.useMemo(() => {
+    if (!resetBaselineReady) return false;
+    const initial = initialInteractiveStateRef.current;
+    if (!initial) return false;
+    return (
+      logScale !== initial.logScale
+      || showStats !== initial.showStats
+      || showLegend !== initial.showLegend
+      || plotHeightPx !== initial.plotHeightPx
+      || sidePanelWidthPx !== initial.sidePanelWidthPx
+      || snapshotPanelWidthPx !== initial.snapshotPanelWidthPx
+      || sidePanelWidthUserAdjusted
+      || focusedTrace !== initial.focusedTrace
+      || !numberArraysEqual(xRange, initial.xRange)
+      || !numberArraysEqual(yRange, initial.yRange)
+      || selectedSnapshotIdx !== initial.selectedSnapshotIdx
+      || selectedSnapshotGroupIdx !== initial.selectedSnapshotGroupIdx
+      || !stringArraysEqual(hiddenSnapshotImageLabels, initial.hiddenSnapshotImageLabels)
+      || showSnapshotFft !== initial.showSnapshotFft
+      || snapshotFftLayout !== initial.snapshotFftLayout
+      || snapshotFftWindow !== initial.snapshotFftWindow
+      || snapshotFftCmap !== initial.snapshotFftCmap
+      || snapshotContrastPreset !== initial.snapshotContrastPreset
+      || !numberArraysEqual(snapshotContrastRange, initial.snapshotContrastRange)
+      || snapshotThumbnailSize !== initial.snapshotThumbnailSize
+      || snapshotOverlayPosition !== initial.snapshotOverlayPosition
+      || imageCmap !== initial.imageCmap
+      || snapshotRealSpaceZoom !== initial.snapshotRealSpaceZoom
+      || !numberArraysEqual(snapshotRealSpaceCenter, initial.snapshotRealSpaceCenter)
+      || snapshotFftZoom !== initial.snapshotFftZoom
+      || !numberArraysEqual(snapshotFftCenter, initial.snapshotFftCenter)
+      || showSnapshotProfile !== initial.showSnapshotProfile
+      || !profileLinesEqual(snapshotProfileLine, initial.snapshotProfileLine)
+      || snapshotPlaying !== initial.snapshotPlaying
+      || snapshotFps !== initial.snapshotFps
+      || snapshotLoop !== initial.snapshotLoop
+      || snapshotBounce !== initial.snapshotBounce
+    );
+  }, [
+    focusedTrace,
+    hiddenSnapshotImageLabels,
+    imageCmap,
+    logScale,
+    plotHeightPx,
+    resetBaselineReady,
+    selectedSnapshotGroupIdx,
+    selectedSnapshotIdx,
+    showLegend,
+    showSnapshotFft,
+    showSnapshotProfile,
+    showStats,
+    sidePanelWidthPx,
+    sidePanelWidthUserAdjusted,
+    snapshotBounce,
+    snapshotContrastPreset,
+    snapshotContrastRange,
+    snapshotFftCenter,
+    snapshotFftCmap,
+    snapshotFftLayout,
+    snapshotFftWindow,
+    snapshotFftZoom,
+    snapshotFps,
+    snapshotLoop,
+    snapshotOverlayPosition,
+    snapshotPanelWidthPx,
+    snapshotProfileLine,
+    snapshotRealSpaceCenter,
+    snapshotRealSpaceZoom,
+    snapshotThumbnailSize,
+    snapshotPlaying,
+    xRange,
+    yRange,
+  ]);
 
   const handleWheel = React.useCallback((event: React.WheelEvent<HTMLCanvasElement>) => {
     const geom = geomRef.current;
@@ -3564,7 +4233,8 @@ function Show1DWidget() {
     ...selectedGroupImageIndices.map((imageIdx) => {
       const imageHeight = snapshotHeights?.[imageIdx] || snapshotHeight || 1;
       const imageWidth = snapshotWidths?.[imageIdx] || snapshotWidth || 1;
-      return imageHeight / Math.max(1, imageWidth);
+      const baseAspect = imageHeight / Math.max(1, imageWidth);
+      return showSnapshotFft && resolvedSnapshotFftLayout === "below" ? baseAspect * 2 : baseAspect;
     }),
   );
   const snapshotGridHeightCap = Math.round(clampValue(viewportSize.height - (controlsVisible ? 330 : 260), 420, 920));
@@ -3686,20 +4356,6 @@ function Show1DWidget() {
           <MenuItem key={value} value={value}>{value}</MenuItem>
         ))}
       </Select>
-      <Typography sx={{ ...toolbarLabelSx, flexShrink: 0 }}>overlay</Typography>
-      <Select
-        size="small"
-        value={resolvedSnapshotOverlayPosition}
-        onChange={(event) => setSnapshotOverlayPosition(String(event.target.value))}
-        sx={{ ...themedSelect, minWidth: 74, fontSize: 10 }}
-        MenuProps={snapshotControlMenuProps}
-        inputProps={{ "aria-label": "Snapshot overlay position" }}
-      >
-        <MenuItem value="top-left">top left</MenuItem>
-        <MenuItem value="top-right">top right</MenuItem>
-        <MenuItem value="bottom-left">bottom left</MenuItem>
-        <MenuItem value="bottom-right">bottom right</MenuItem>
-      </Select>
       <Typography sx={{ ...toolbarLabelSx, flexShrink: 0 }}>Profile</Typography>
       <Switch
         size="small"
@@ -3711,7 +4367,7 @@ function Show1DWidget() {
         sx={{ ...switchStyles.small, flexShrink: 0 }}
         slotProps={{ input: { "aria-label": "Show snapshot line profile" } }}
       />
-      <Typography sx={{ ...toolbarLabelSx, flexShrink: 0 }}>FFT</Typography>
+      <Typography sx={{ ...toolbarLabelSx, flexShrink: 0 }}>FFT:</Typography>
       <Switch
         size="small"
         checked={Boolean(showSnapshotFft)}
@@ -3721,7 +4377,19 @@ function Show1DWidget() {
       />
       {showSnapshotFft && (
         <>
-          <Typography sx={{ ...toolbarLabelSx, flexShrink: 0 }}>cmap</Typography>
+          <Select
+            size="small"
+            value={resolvedSnapshotOverlayPosition}
+            onChange={(event) => setSnapshotOverlayPosition(String(event.target.value))}
+            sx={{ ...themedSelect, minWidth: 74, fontSize: 10 }}
+            MenuProps={snapshotControlMenuProps}
+            inputProps={{ "aria-label": "Snapshot FFT overlay position" }}
+          >
+            <MenuItem value="top-left">top left</MenuItem>
+            <MenuItem value="top-right">top right</MenuItem>
+            <MenuItem value="bottom-left">bottom left</MenuItem>
+            <MenuItem value="bottom-right">bottom right</MenuItem>
+          </Select>
           <Select
             size="small"
             value={COLORMAPS[snapshotFftCmap] ? snapshotFftCmap : "magma"}
@@ -3880,7 +4548,7 @@ function Show1DWidget() {
           {localExportStatus || exportStatus}
         </Typography>
       )}
-      <Button size="small" sx={compactButton} disabled={!needsReset} onClick={resetRanges}>
+      <Button size="small" sx={compactButton} disabled={!needsReset} onClick={resetToInitialState}>
         Reset
       </Button>
     </Box>
@@ -3993,7 +4661,7 @@ function Show1DWidget() {
               onPointerMove={handlePointerMove}
               onPointerLeave={handlePointerLeave}
               onClick={handleClick}
-              onDoubleClick={resetRanges}
+              onDoubleClick={resetPlotAndSnapshotViews}
               onWheel={handleWheel}
               style={{ display: "block", width: "100%", height: "100%", cursor: "crosshair", touchAction: "none" }}
             />
@@ -4026,7 +4694,20 @@ function Show1DWidget() {
             )}
           </Box>
           {showLegend && visibleTraceIndices.length > 0 && (
-            <Stack direction="row" spacing={1} sx={{ px: 1, py: 0.5, flexWrap: "wrap", rowGap: 0.5 }}>
+            <Stack
+              direction="row"
+              spacing={1}
+              sx={{
+                px: 1,
+                py: 0.5,
+                flexWrap: "wrap",
+                justifyContent: "center",
+                alignItems: "center",
+                rowGap: 0.5,
+                width: "100%",
+                boxSizing: "border-box",
+              }}
+            >
               {visibleTraceIndices.map((idx) => (
                 <Stack
                   key={idx}
@@ -4115,6 +4796,7 @@ function Show1DWidget() {
               <Box sx={snapshotViewportSx}>
                 <Box
                   data-testid="show1d-snapshot-grid"
+                  ref={snapshotGridRef}
                   sx={{
                     display: "grid",
                     position: "relative",
@@ -4128,7 +4810,7 @@ function Show1DWidget() {
                     bgcolor: themeColors.bg,
                   }}
                 >
-                  {selectedGroupImageIndices.map((imageIdx) => {
+                  {selectedGroupImageIndices.map((imageIdx, gridSlot) => {
                     const imageHeight = snapshotHeights?.[imageIdx] || snapshotHeight;
                     const imageWidth = snapshotWidths?.[imageIdx] || snapshotWidth;
                     const imageLabel = imageLabelForIndex(imageIdx);
@@ -4136,6 +4818,8 @@ function Show1DWidget() {
                     const hideDisabled = selectedGroupImageIndices.length <= 1;
                     const hideLabel = hideDisabled ? "Cannot hide the last visible panel" : `Hide ${imageLabel}`;
                     const showHideButton = hoverSnapshotImageIdx === imageIdx;
+                    const isFirstGridColumn = gridSlot % Math.max(1, selectedImageColumns) === 0;
+                    const isFirstGridRow = gridSlot < Math.max(1, selectedImageColumns);
                     return (
                       <Box
                         key={imageIdx}
@@ -4157,14 +4841,15 @@ function Show1DWidget() {
                           position: "relative",
                           bgcolor: themeColors.bg,
                           overflow: "hidden",
+                          ml: isFirstGridColumn ? 0 : "-1px",
+                          mt: isFirstGridRow ? 0 : "-1px",
+                          width: isFirstGridColumn ? "100%" : "calc(100% + 1px)",
+                          zIndex: selected ? 2 : 1,
                           outline: "none",
                           "&:hover .show1d-panel-hide-button, &:focus-within .show1d-panel-hide-button": {
                             opacity: hideDisabled ? 0.28 : 1,
                             transform: "translateY(0)",
                             pointerEvents: "auto",
-                          },
-                          "&:hover .show1d-tile-resize-handle, &:focus-within .show1d-tile-resize-handle": {
-                            opacity: 0.9,
                           },
                         }}
                       >
@@ -4182,6 +4867,7 @@ function Show1DWidget() {
                           deferFft={Boolean(snapshotPlaying)}
                           fftWindow={Boolean(snapshotFftWindow)}
                           preferWebgpu={Boolean(preferWebgpu)}
+                          fftLayout={resolvedSnapshotFftLayout}
                           contrastPreset={normalisedSnapshotContrastPreset}
                           contrastRange={customSnapshotContrastRange}
                           selected={selected}
@@ -4197,10 +4883,13 @@ function Show1DWidget() {
                           profileActive={Boolean(showSnapshotProfile)}
                           profileLine={snapshotProfileLine ?? []}
                           fftCacheRef={snapshotFftCacheRef}
+                          fftPendingRef={snapshotFftPendingRef}
                           fftGpuRef={snapshotFftGpuRef}
+                          fftCacheVersion={snapshotFftCacheVersion}
                           onImageViewChange={setSnapshotRealSpaceView}
                           onFftViewChange={setSnapshotFftView}
                           onProfileLineChange={setSnapshotProfileLine}
+                          onFftOverlayPositionChange={setSnapshotOverlayPosition}
                           onSelect={() => selectSnapshotImage(imageIdx)}
                         />
                         <IconButton
@@ -4237,31 +4926,6 @@ function Show1DWidget() {
                         >
                           <VisibilityOffIcon sx={{ fontSize: 15 }} />
                         </IconButton>
-                        <Box
-                          className="show1d-tile-resize-handle"
-                          data-testid={`show1d-tile-resize-${imageIdx}`}
-                          aria-hidden="true"
-                          onPointerDown={handleSnapshotTileResizePointerDown}
-                          sx={{
-                            position: "absolute",
-                            right: 0,
-                            bottom: 0,
-                            width: 18,
-                            height: 18,
-                            zIndex: 5,
-                            cursor: "nwse-resize",
-                            opacity: 0.42,
-                            pointerEvents: "auto",
-                            touchAction: "none",
-                            background: "linear-gradient(135deg, transparent 52%, rgba(255,255,255,0.78) 52%, rgba(255,255,255,0.78) 64%, rgba(0,0,0,0.34) 64%)",
-                            filter: "drop-shadow(0 0 1px rgba(0,0,0,0.6))",
-                            transition: "opacity 120ms ease",
-                            "&:hover, &:focus-visible": {
-                              opacity: 0.95,
-                              outline: "none",
-                            },
-                          }}
-                        />
                       </Box>
                     );
                   })}
@@ -4291,6 +4955,39 @@ function Show1DWidget() {
                       </Button>
                     </Box>
                   )}
+                  <Box
+                    className="show1d-snapshot-grid-resize-handle"
+                    data-testid="show1d-snapshot-grid-resize"
+                    aria-hidden="true"
+                    onPointerDown={handleSnapshotGridResizePointerDown}
+                    sx={{
+                      position: "absolute",
+                      right: 0,
+                      bottom: 0,
+                      width: 30,
+                      height: 30,
+                      zIndex: 8,
+                      cursor: "nwse-resize",
+                      opacity: 0.76,
+                      pointerEvents: "auto",
+                      touchAction: "none",
+                      "&::before": {
+                        content: '""',
+                        position: "absolute",
+                        right: 6,
+                        bottom: 6,
+                        width: 12,
+                        height: 12,
+                        borderRight: "2px solid rgba(255,255,255,0.86)",
+                        borderBottom: "2px solid rgba(255,255,255,0.86)",
+                        filter: "drop-shadow(0 0 2px rgba(0,0,0,0.7))",
+                      },
+                      "&:hover, &:focus-visible": {
+                        opacity: 1,
+                        outline: "none",
+                      },
+                    }}
+                  />
                 </Box>
                 {showSnapshotProfile && isFiniteProfilePoint(snapshotProfileLine?.[0]) && isFiniteProfilePoint(snapshotProfileLine?.[1]) && selectedGroupImageIndices.length > 0 && (
                   <Box sx={{ width: "100%" }}>

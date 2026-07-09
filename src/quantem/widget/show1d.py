@@ -39,8 +39,8 @@ _DEFAULT_COLORS = [
     "#F0E442",
     "#999999",
 ]
-_MAX_SIDE_PANEL_WIDTH_PX = 1600
-_MAX_SNAPSHOT_PANEL_WIDTH_PX = 1600
+_MAX_SIDE_PANEL_WIDTH_PX = 4096
+_MAX_SNAPSHOT_PANEL_WIDTH_PX = 4096
 _MAX_PLOT_HEIGHT_PX = 960
 
 _VALID_IMAGE_CMAPS = {
@@ -282,13 +282,17 @@ class Show1D(anywidget.AnyWidget):
         Initial snapshot reconstruction panel width in pixels. Use ``0`` for
         automatic fit-to-view sizing; dragging the snapshot grid corner updates
         this value in the live widget. Values are clamped to the available
-        frontend width, up to 1600 pixels.
+        frontend width, up to 4096 pixels.
     snapshot_columns : int, default 0
         Number of columns used for the side-panel snapshot image grid. Use
         ``0`` for automatic overview columns, or 1 through 8 for a fixed count.
     snapshot_overlay_position : {"top-left", "top-right", "bottom-left",
             "bottom-right"}, default "top-right"
-        Corner used for snapshot panel label and zoom overlays.
+        Corner used for the snapshot FFT inset when
+        ``snapshot_fft_layout="overlay"``.
+    snapshot_fft_layout : {"overlay", "below"}, default "overlay"
+        How to display snapshot FFTs. ``"overlay"`` follows the compact
+        Show3D-style inset; ``"below"`` stacks the FFT under each snapshot.
     snapshot_real_space_zoom : float, default 1.0
         Initial zoom for real-space snapshot image panels.
     snapshot_real_space_center : sequence of 2 floats, optional
@@ -310,7 +314,9 @@ class Show1D(anywidget.AnyWidget):
         Show the selected snapshot histogram and prefer WebGPU for snapshot
         histogram/FFT computation when the browser supports it.
     show_snapshot_fft : bool, default False
-        Show a log-magnitude FFT panel below each snapshot image.
+        Show log-magnitude FFTs for snapshot images. The default layout is a
+        compact inset overlay; set ``snapshot_fft_layout="below"`` for stacked
+        panels.
     snapshot_fft_window : bool, default True
         Apply a Hann window before snapshot FFT computation.
     snapshot_fft_cmap : str, default "magma"
@@ -395,6 +401,7 @@ class Show1D(anywidget.AnyWidget):
     show_snapshot_thumbnails = traitlets.Bool(True).tag(sync=True)
     show_snapshot_histogram = traitlets.Bool(True).tag(sync=True)
     show_snapshot_fft = traitlets.Bool(False).tag(sync=True)
+    snapshot_fft_layout = traitlets.Unicode("overlay").tag(sync=True)
     snapshot_fft_window = traitlets.Bool(True).tag(sync=True)
     snapshot_fft_cmap = traitlets.Unicode("magma").tag(sync=True)
     show_snapshot_profile = traitlets.Bool(False).tag(sync=True)
@@ -481,6 +488,7 @@ class Show1D(anywidget.AnyWidget):
         snapshot_panel_width_px: int = 0,
         snapshot_columns: int = 0,
         snapshot_overlay_position: str = "top-right",
+        snapshot_fft_layout: str = "overlay",
         snapshot_real_space_zoom: float = 1.0,
         snapshot_real_space_center: Sequence[float] | None = None,
         snapshot_fft_zoom: float = 1.0,
@@ -583,6 +591,9 @@ class Show1D(anywidget.AnyWidget):
         self.snapshot_columns = max(0, min(8, int(snapshot_columns)))
         self.snapshot_overlay_position = self._normalise_snapshot_overlay_position(
             snapshot_overlay_position
+        )
+        self.snapshot_fft_layout = self._normalise_snapshot_fft_layout(
+            snapshot_fft_layout
         )
         self.snapshot_real_space_zoom = self._normalise_snapshot_view_zoom(
             snapshot_real_space_zoom
@@ -694,6 +705,10 @@ class Show1D(anywidget.AnyWidget):
     @traitlets.validate("snapshot_overlay_position")
     def _validate_snapshot_overlay_position(self, proposal: dict[str, Any]) -> str:
         return self._normalise_snapshot_overlay_position(str(proposal["value"]))
+
+    @traitlets.validate("snapshot_fft_layout")
+    def _validate_snapshot_fft_layout(self, proposal: dict[str, Any]) -> str:
+        return self._normalise_snapshot_fft_layout(str(proposal["value"]))
 
     @traitlets.validate("snapshot_real_space_zoom", "snapshot_fft_zoom")
     def _validate_snapshot_view_zoom(self, proposal: dict[str, Any]) -> float:
@@ -1914,6 +1929,7 @@ class Show1D(anywidget.AnyWidget):
             "snapshot_panel_width_px": self.snapshot_panel_width_px,
             "snapshot_columns": self.snapshot_columns,
             "snapshot_overlay_position": self.snapshot_overlay_position,
+            "snapshot_fft_layout": self.snapshot_fft_layout,
             "snapshot_real_space_zoom": self.snapshot_real_space_zoom,
             "snapshot_real_space_center": list(self.snapshot_real_space_center),
             "snapshot_fft_zoom": self.snapshot_fft_zoom,
@@ -2168,6 +2184,16 @@ class Show1D(anywidget.AnyWidget):
             raise ValueError(
                 "snapshot_overlay_position must be one of "
                 f"{sorted(valid)}, got {position!r}"
+            )
+        return name
+
+    def _normalise_snapshot_fft_layout(self, layout: str) -> str:
+        name = str(layout).strip().lower().replace("_", "-")
+        valid = {"overlay", "below"}
+        if name not in valid:
+            raise ValueError(
+                "snapshot_fft_layout must be one of "
+                f"{sorted(valid)}, got {layout!r}"
             )
         return name
 
@@ -2945,6 +2971,7 @@ class Show1D(anywidget.AnyWidget):
             snapshot_panel_width_px=self.snapshot_panel_width_px,
             snapshot_columns=self.snapshot_columns,
             snapshot_overlay_position=self.snapshot_overlay_position,
+            snapshot_fft_layout=self.snapshot_fft_layout,
             snapshot_real_space_zoom=self.snapshot_real_space_zoom,
             snapshot_real_space_center=list(self.snapshot_real_space_center),
             snapshot_fft_zoom=self.snapshot_fft_zoom,
@@ -3008,6 +3035,7 @@ class Show1D(anywidget.AnyWidget):
         clone.snapshot_panel_width_px = self.snapshot_panel_width_px
         clone.snapshot_columns = self.snapshot_columns
         clone.snapshot_overlay_position = self.snapshot_overlay_position
+        clone.snapshot_fft_layout = self.snapshot_fft_layout
         clone.snapshot_real_space_zoom = self.snapshot_real_space_zoom
         clone.snapshot_real_space_center = list(self.snapshot_real_space_center)
         clone.snapshot_fft_zoom = self.snapshot_fft_zoom

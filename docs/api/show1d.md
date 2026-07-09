@@ -181,10 +181,11 @@ no console error, no NaN frame).
 | Snapshot colormap menu | `image_cmap` | Profile/snapshot images use the selected scientific colormap |
 | Snapshot contrast buttons | `snapshot_contrast_preset`, `snapshot_contrast_range` | Snapshot images use full, 0.5-99.5, 1-99, 2-98, or 5-95 percentile clipping; choosing a preset clears custom histogram clipping |
 | Snapshot histogram drag | `snapshot_contrast_range` | Drag either endpoint knot to adjust min/max; drag the middle span to move the contrast window |
+| Snapshot histogram visibility API | `show_snapshot_histogram` | Shows or hides the compact selected-snapshot histogram; it is shown by default |
 | Snapshot histogram size API | `snapshot_histogram_width`, `snapshot_histogram_height` | Keeps the compact contrast histogram independent of the reconstruction grid size |
 | Snapshot profile toggle | `show_snapshot_profile`, `snapshot_profile_line`, `snapshot_profile_height` | Draws a shared `(row, col)` line profile on reconstruction panels and compares visible panel intensities below the image grid |
 | Snapshot columns menu | `snapshot_columns` | Snapshot object/probe image grid uses automatic overview columns or a fixed 1-8 columns |
-| Snapshot overlay menu | `snapshot_overlay_position` | Snapshot label and zoom overlays can sit in any corner: top-left, top-right, bottom-left, or bottom-right |
+| Snapshot FFT overlay position | `snapshot_overlay_position` | FFT inset overlays can sit in any corner; drag the inset to snap it to the nearest corner or set top-left, top-right, bottom-left, or bottom-right from Python |
 | Snapshot grid corner drag | `snapshot_panel_width_px` | Resizes reconstruction panels from the grid corner while keeping controls aligned to the snapshot width |
 | Snapshot star button | `starred_snapshot_image_labels` | In Review mode, marks candidate reconstructions to revisit while sweeping lambda or denoising settings |
 | Snapshot hide button | `hidden_snapshot_image_labels` | In Review mode, hides bad trials from the snapshot grid, loss plot, legend, and stats |
@@ -194,6 +195,7 @@ no console error, no NaN frame).
 | Ranking order toggle | `trial_sort_descending` | In Review mode, reverses candidate ranking order |
 | Top-K menu | `top_trial_count` | In Review mode, restricts visible trials to the top ranked candidates |
 | Trial filter field | `trial_filter_text` | In Review mode, filters trials by label, note, or tag |
+| Trial notes editor toggle | `show_trial_notes` | In Review mode, shows or hides the note/tag editor while preserving stored notes and tags |
 | Star best button | `starred_snapshot_image_labels`, `trial_rankings` | In Review mode, stars the current best ranked visible trial |
 | Hide worst button | `hidden_snapshot_image_labels`, `trial_rankings` | In Review mode, hides the current worst ranked non-starred trial |
 | Trial note field | `trial_notes` | In Review mode, stores per-trial review notes |
@@ -205,11 +207,12 @@ no console error, no NaN frame).
 | Snapshot FFT view API | `snapshot_fft_zoom`, `snapshot_fft_center` | Starts or restores FFT panels at a given zoom and `(row, col)` FFT center |
 | Snapshot histogram | computed automatically | Selected snapshot histogram stays visible with draggable contrast knots and a numeric range readout |
 | WebGPU preference API | `prefer_webgpu` | Hidden UI preference; histogram and snapshot FFT use WebGPU when available, with CPU fallback |
-| Snapshot FFT toggle | `show_snapshot_fft` | Log-magnitude FFT panels show below snapshot images |
+| Snapshot FFT toggle | `show_snapshot_fft`, `snapshot_fft_layout` | Log-magnitude FFTs show as compact inset overlays by default; set `snapshot_fft_layout="below"` for stacked panels |
 | Snapshot FFT window toggle | `snapshot_fft_window` | Applies a Hann window before snapshot FFT computation |
 | Snapshot FFT colormap menu | `snapshot_fft_cmap` | FFT panels use the selected scientific colormap |
 | Snapshot play/pause | `snapshot_playing` | Snapshot groups advance through reconstruction checkpoints |
 | Snapshot stop | `snapshot_playing`, `selected_snapshot_group_idx` | Playback stops and returns to the first snapshot group |
+| Snapshot playback endpoint mode | `snapshot_loop`, `snapshot_bounce` | Playback either wraps, stops, or reverses direction at the first and final snapshot groups |
 | Snapshot group slider | `selected_snapshot_group_idx`, `selected_snapshot_idx` | Object/probe/multi-object image group changes; plot marker moves to that iteration |
 | Snapshot FPS slider | `snapshot_fps` | Playback speed changes in whole frames per second |
 | Snapshot image wheel | local image view | Zooms snapshot/FFT panels under the cursor without scrolling the page |
