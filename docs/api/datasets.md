@@ -11,6 +11,7 @@ from quantem.widget.datasets import (
     show2d_gold,
     show3d_gold,
     show4dstem_gold,
+    showfolder_gold,
 )
 ```
 
@@ -49,21 +50,28 @@ widget = Show1D.from_example("ducky", size="small")
 widget
 ```
 
-The public Hugging Face dataset is organized under:
+The public Hugging Face dataset is organized under `widget-tutorials/`. Reused
+sources live once under `shared/`; widget-specific monitor runs or session
+folders live under the widget name.
 
 ```text
-widget-tutorials/{widget}/{example}/{size}/...
+widget-tutorials/{widget-or-shared}/{example}/{size}/...
 ```
 
-For the current ducky tutorial:
+Current tutorial payloads:
 
 ```text
 widget-tutorials/show1d/ducky/small/show1d_monitor.jsonl
 widget-tutorials/show1d/ducky/small/snapshots/*.npy
+widget-tutorials/shared/gold-haadf/full/data.npy
+widget-tutorials/show4dstem/gold-128-bin8/full/data.npy
+widget-tutorials/showfolder/gold-haadf-session/small/*.emd
 ```
 
 This keeps widget tutorial payloads grouped together instead of placing many
-example files at the top level of the shared dataset repository.
+example files at the top level of the shared dataset repository. `show2d_gold`
+and `show3d_gold` intentionally share `widget-tutorials/shared/gold-haadf/full`
+so the same HAADF source image is not duplicated per widget.
 
 ## Reference
 

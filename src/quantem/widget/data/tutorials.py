@@ -15,9 +15,6 @@ snapshot_download = None
 TUTORIAL_DATA_REPO_ID = "bobleesj/quantem-data"
 TUTORIAL_DATA_ROOT = "widget-tutorials"
 TUTORIAL_SIZES = ("small", "medium", "large", "full")
-_SHOWFOLDER_HF_PATTERNS = (
-    "survey/gold_haadf_session/*.emd",
-)
 _SHOW2D_STRIDE_BY_SIZE = {
     "small": 8,
     "medium": 4,
@@ -36,6 +33,14 @@ _SHOW4DSTEM_SCAN_STRIDE_BY_SIZE = {
     "large": 1,
     "full": 1,
 }
+_GOLD_HAADF_VIEWER = "shared"
+_GOLD_HAADF_NAME = "gold-haadf"
+_GOLD_HAADF_SOURCE_SIZE = "full"
+_GOLD_4DSTEM_VIEWER = "show4dstem"
+_GOLD_4DSTEM_NAME = "gold-128-bin8"
+_GOLD_4DSTEM_SOURCE_SIZE = "full"
+_SHOWFOLDER_GOLD_VIEWER = "showfolder"
+_SHOWFOLDER_GOLD_NAME = "gold-haadf-session"
 
 
 def _download_dataset(name: str, *, verbose: bool = False) -> Path:
@@ -156,24 +161,235 @@ def show1d_ducky(
     return folder
 
 
-def show2d_gold(*, size: str = "small", verbose: bool = True) -> Dataset2d:
-    """Load the gold HAADF Show2D tutorial dataset by friendly size name."""
+def show2d_gold(
+    *,
+    size: str = "small",
+    cache_dir: str | Path | None = None,
+    revision: str | None = None,
+    force_download: bool = False,
+    verbose: bool = True,
+) -> Dataset2d:
+    """Load the gold HAADF Show2D tutorial dataset by friendly size name.
 
-    return load_tutorial_show2d(stride=_SHOW2D_STRIDE_BY_SIZE[_normalise_tutorial_size(size)], verbose=verbose)
+    The source image is downloaded once from
+    ``widget-tutorials/shared/gold-haadf/full`` and the requested size controls
+    the preview stride. The same source is reused by :func:`show3d_gold`.
+    """
+
+    size = _normalise_tutorial_size(size)
+    folder = _download_widget_tutorial_folder(
+        _GOLD_HAADF_VIEWER,
+        _GOLD_HAADF_NAME,
+        size=_GOLD_HAADF_SOURCE_SIZE,
+        cache_dir=cache_dir,
+        revision=revision,
+        force_download=force_download,
+    )
+    return _gold_haadf_2d_from_folder(
+        folder,
+        stride=_SHOW2D_STRIDE_BY_SIZE[size],
+        verbose=verbose,
+    )
 
 
-def show3d_gold(*, size: str = "small", verbose: bool = True) -> Dataset3d:
-    """Load the gold HAADF Show3D tutorial stack by friendly size name."""
+def show3d_gold(
+    *,
+    size: str = "small",
+    cache_dir: str | Path | None = None,
+    revision: str | None = None,
+    force_download: bool = False,
+    verbose: bool = True,
+) -> Dataset3d:
+    """Load the gold HAADF Show3D tutorial stack by friendly size name.
 
-    params = _SHOW3D_PARAMS_BY_SIZE[_normalise_tutorial_size(size)]
-    return load_tutorial_show3d(**params, verbose=verbose)
+    The stack is built from moving crops of the shared gold HAADF tutorial
+    source instead of storing a second copy of the image for Show3D.
+    """
+
+    size = _normalise_tutorial_size(size)
+    folder = _download_widget_tutorial_folder(
+        _GOLD_HAADF_VIEWER,
+        _GOLD_HAADF_NAME,
+        size=_GOLD_HAADF_SOURCE_SIZE,
+        cache_dir=cache_dir,
+        revision=revision,
+        force_download=force_download,
+    )
+    params = _SHOW3D_PARAMS_BY_SIZE[size]
+    return _gold_haadf_3d_from_folder(folder, **params, verbose=verbose)
 
 
-def show4dstem_gold(*, size: str = "small", verbose: bool = True) -> Dataset4dstem:
-    """Load the gold 4D-STEM Show4DSTEM tutorial scan by friendly size name."""
+def show4dstem_gold(
+    *,
+    size: str = "small",
+    cache_dir: str | Path | None = None,
+    revision: str | None = None,
+    force_download: bool = False,
+    verbose: bool = True,
+) -> Dataset4dstem:
+    """Load the gold 4D-STEM Show4DSTEM tutorial scan by friendly size name.
 
-    scan_stride = _SHOW4DSTEM_SCAN_STRIDE_BY_SIZE[_normalise_tutorial_size(size)]
-    return load_tutorial_show4dstem(scan_stride=scan_stride, verbose=verbose)
+    The source scan is stored once under
+    ``widget-tutorials/show4dstem/gold-128-bin8/full`` and the requested size
+    controls the scan-axis stride.
+    """
+
+    size = _normalise_tutorial_size(size)
+    folder = _download_widget_tutorial_folder(
+        _GOLD_4DSTEM_VIEWER,
+        _GOLD_4DSTEM_NAME,
+        size=_GOLD_4DSTEM_SOURCE_SIZE,
+        cache_dir=cache_dir,
+        revision=revision,
+        force_download=force_download,
+    )
+    scan_stride = _SHOW4DSTEM_SCAN_STRIDE_BY_SIZE[size]
+    return _gold_4dstem_from_folder(folder, scan_stride=scan_stride, verbose=verbose)
+
+
+def showfolder_gold(
+    *,
+    size: str = "small",
+    cache_dir: str | Path | None = None,
+    revision: str | None = None,
+    force_download: bool = False,
+    verbose: bool = True,
+    allow_fallback: bool = True,
+) -> Path:
+    """Download the compact gold HAADF ShowFolder tutorial session.
+
+    The returned folder contains the public ``.emd`` files used by the
+    ShowFolder tutorial under
+    ``widget-tutorials/showfolder/gold-haadf-session/small``.
+    """
+
+    _normalise_tutorial_size(size)
+    os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+    try:
+        folder = _download_widget_tutorial_folder(
+            _SHOWFOLDER_GOLD_VIEWER,
+            _SHOWFOLDER_GOLD_NAME,
+            size=size,
+            cache_dir=cache_dir,
+            revision=revision,
+            force_download=force_download,
+        )
+    except Exception:
+        if not allow_fallback:
+            raise
+        folder = create_tutorial_showfolder_folder()
+
+    if verbose:
+        files = sorted(path.name for path in folder.glob("*.emd"))
+        print(f"Tutorial ShowFolder folder: {folder}")
+        print(f"Files: {len(files)} EMD")
+    return folder
+
+
+def _gold_haadf_2d_from_folder(folder: Path, *, stride: int, verbose: bool = True) -> Dataset2d:
+    """Build a calibrated 2D HAADF preview from the shared tutorial source."""
+
+    if stride < 1:
+        raise ValueError(f"stride must be >= 1, got {stride}")
+    meta = json.loads((folder / "meta.json").read_text())
+    full_image = np.load(folder / "data.npy", mmap_mode="r")
+
+    image = np.asarray(full_image[::stride, ::stride], dtype=np.float32)
+    sampling = tuple(float(v) * stride for v in meta["sampling"])
+    units = tuple(meta["units"])
+    dataset = Dataset2d.from_array(
+        image,
+        sampling=sampling,
+        units=units,
+        name="Gold HAADF preview",
+    )
+    if verbose:
+        print(f"Source: {meta['name']} from Hugging Face")
+        print(f"Full image: {full_image.shape[0]} x {full_image.shape[1]} {full_image.dtype}")
+        print(f"Preview: {image.shape[0]} x {image.shape[1]}, pixel size {sampling[0]:.4f} {units[0]}")
+    return dataset
+
+
+def _gold_haadf_3d_from_folder(
+    folder: Path,
+    *,
+    n_frames: int,
+    stride: int,
+    crop_size: int,
+    verbose: bool = True,
+) -> Dataset3d:
+    """Build a moving-crop stack from the shared HAADF tutorial source."""
+
+    if n_frames < 1:
+        raise ValueError(f"n_frames must be >= 1, got {n_frames}")
+    if stride < 1:
+        raise ValueError(f"stride must be >= 1, got {stride}")
+    if crop_size < 16:
+        raise ValueError(f"crop_size must be >= 16, got {crop_size}")
+
+    meta = json.loads((folder / "meta.json").read_text())
+    full_image = np.load(folder / "data.npy", mmap_mode="r")
+    preview = np.asarray(full_image[::stride, ::stride], dtype=np.float32)
+    if crop_size > min(preview.shape):
+        raise ValueError(
+            f"crop_size={crop_size} is larger than the strided preview shape {preview.shape}"
+        )
+
+    max_row = preview.shape[0] - crop_size
+    max_col = preview.shape[1] - crop_size
+    rows = np.linspace(0, max_row, n_frames)
+    cols = np.linspace(max_col, 0, n_frames)
+    stack = np.empty((n_frames, crop_size, crop_size), dtype=np.float32)
+    for idx, (row, col) in enumerate(zip(rows, cols)):
+        r0 = int(round(float(row)))
+        c0 = int(round(float(col)))
+        stack[idx] = preview[r0 : r0 + crop_size, c0 : c0 + crop_size]
+
+    pixel_sampling = float(meta["sampling"][0]) * stride
+    units = tuple(meta["units"])
+    dataset = Dataset3d.from_array(
+        stack,
+        sampling=(1.0, pixel_sampling, pixel_sampling),
+        units=("frame", units[0], units[1]),
+        name="Gold HAADF moving-crop stack",
+    )
+    if verbose:
+        print(f"Source: {meta['name']} from Hugging Face")
+        print(f"Full image: {full_image.shape[0]} x {full_image.shape[1]} {full_image.dtype}")
+        print(f"Stack: {stack.shape}, stride {stride}, pixel size {pixel_sampling:.4f} {units[0]}")
+    return dataset
+
+
+def _gold_4dstem_from_folder(
+    folder: Path,
+    *,
+    scan_stride: int = 2,
+    verbose: bool = True,
+) -> Dataset4dstem:
+    """Build a calibrated 4D-STEM preview from the widget tutorial source."""
+
+    if scan_stride < 1:
+        raise ValueError(f"scan_stride must be >= 1, got {scan_stride}")
+    meta = json.loads((folder / "meta.json").read_text())
+    full_stack = np.load(folder / "data.npy", mmap_mode="r")
+    stack = np.asarray(full_stack[::scan_stride, ::scan_stride], dtype=np.uint16)
+    sampling = tuple(
+        float(v) * scan_stride if axis < 2 else float(v)
+        for axis, v in enumerate(meta["sampling"])
+    )
+    dataset = Dataset4dstem.from_array(
+        stack,
+        sampling=sampling,
+        units=tuple(meta["units"]),
+        name="Gold 4D-STEM bin8 preview",
+    )
+    if verbose:
+        print(f"Source: {meta['name']} from Hugging Face")
+        print(f"Full stack: {full_stack.shape} {full_stack.dtype}")
+        print(f"Preview: {stack.shape}, scan stride {scan_stride}")
+        print(f"Sampling: {dataset.sampling} {dataset.units}")
+        print(f"Processing: {meta.get('processing', 'none')}")
+    return dataset
 
 
 def load_tutorial_showfolder_folder(*, verbose: bool = True, allow_fallback: bool = True) -> Path:
@@ -201,26 +417,7 @@ def load_tutorial_showfolder_folder(*, verbose: bool = True, allow_fallback: boo
         Folder containing tutorial ``.emd`` files.
     """
 
-    os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
-    try:
-        root = _snapshot_download_dataset(
-            repo_id="bobleesj/quantem-data",
-            repo_type="dataset",
-            allow_patterns=list(_SHOWFOLDER_HF_PATTERNS),
-        )
-        folder = root / "survey" / "gold_haadf_session"
-        if not folder.is_dir():
-            raise FileNotFoundError(f"downloaded tutorial folder is missing: {folder}")
-    except Exception:
-        if not allow_fallback:
-            raise
-        folder = create_tutorial_showfolder_folder()
-
-    if verbose:
-        files = sorted(path.name for path in folder.glob("*.emd"))
-        print(f"Tutorial ShowFolder folder: {folder}")
-        print(f"Files: {len(files)} EMD")
-    return folder
+    return showfolder_gold(verbose=verbose, allow_fallback=allow_fallback)
 
 
 def create_tutorial_showfolder_folder(path: str | Path | None = None) -> Path:
@@ -357,25 +554,8 @@ def load_tutorial_show2d(*, stride: int = 8, verbose: bool = True) -> Dataset2d:
 
     if stride < 1:
         raise ValueError(f"stride must be >= 1, got {stride}")
-    os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
     data_dir = _download_dataset("gold_haadf_npy", verbose=False)
-    meta = json.loads((data_dir / "meta.json").read_text())
-    full_image = np.load(data_dir / "data.npy", mmap_mode="r")
-
-    image = np.asarray(full_image[::stride, ::stride], dtype=np.float32)
-    sampling = tuple(float(v) * stride for v in meta["sampling"])
-    units = tuple(meta["units"])
-    dataset = Dataset2d.from_array(
-        image,
-        sampling=sampling,
-        units=units,
-        name="Gold HAADF preview",
-    )
-    if verbose:
-        print(f"Source: {meta['name']} from Hugging Face")
-        print(f"Full image: {full_image.shape[0]} x {full_image.shape[1]} {full_image.dtype}")
-        print(f"Preview: {image.shape[0]} x {image.shape[1]}, pixel size {sampling[0]:.4f} {units[0]}")
-    return dataset
+    return _gold_haadf_2d_from_folder(data_dir, stride=stride, verbose=verbose)
 
 
 def load_tutorial_show3d(
@@ -416,39 +596,14 @@ def load_tutorial_show3d(
     if crop_size < 16:
         raise ValueError(f"crop_size must be >= 16, got {crop_size}")
 
-    os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
     data_dir = _download_dataset("gold_haadf_npy", verbose=False)
-    meta = json.loads((data_dir / "meta.json").read_text())
-    full_image = np.load(data_dir / "data.npy", mmap_mode="r")
-    preview = np.asarray(full_image[::stride, ::stride], dtype=np.float32)
-    if crop_size > min(preview.shape):
-        raise ValueError(
-            f"crop_size={crop_size} is larger than the strided preview shape {preview.shape}"
-        )
-
-    max_row = preview.shape[0] - crop_size
-    max_col = preview.shape[1] - crop_size
-    rows = np.linspace(0, max_row, n_frames)
-    cols = np.linspace(max_col, 0, n_frames)
-    stack = np.empty((n_frames, crop_size, crop_size), dtype=np.float32)
-    for idx, (row, col) in enumerate(zip(rows, cols)):
-        r0 = int(round(float(row)))
-        c0 = int(round(float(col)))
-        stack[idx] = preview[r0 : r0 + crop_size, c0 : c0 + crop_size]
-
-    pixel_sampling = float(meta["sampling"][0]) * stride
-    units = tuple(meta["units"])
-    dataset = Dataset3d.from_array(
-        stack,
-        sampling=(1.0, pixel_sampling, pixel_sampling),
-        units=("frame", units[0], units[1]),
-        name="Gold HAADF moving-crop stack",
+    return _gold_haadf_3d_from_folder(
+        data_dir,
+        n_frames=n_frames,
+        stride=stride,
+        crop_size=crop_size,
+        verbose=verbose,
     )
-    if verbose:
-        print(f"Source: {meta['name']} from Hugging Face")
-        print(f"Full image: {full_image.shape[0]} x {full_image.shape[1]} {full_image.dtype}")
-        print(f"Stack: {stack.shape}, stride {stride}, pixel size {pixel_sampling:.4f} {units[0]}")
-    return dataset
 
 
 def load_tutorial_show4dstem(*, scan_stride: int = 2, verbose: bool = True) -> Dataset4dstem:
@@ -470,25 +625,5 @@ def load_tutorial_show4dstem(*, scan_stride: int = 2, verbose: bool = True) -> D
 
     if scan_stride < 1:
         raise ValueError(f"scan_stride must be >= 1, got {scan_stride}")
-    os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
     data_dir = _download_dataset("gold_128_npy_bin8", verbose=False)
-    meta = json.loads((data_dir / "meta.json").read_text())
-    full_stack = np.load(data_dir / "data.npy", mmap_mode="r")
-    stack = np.asarray(full_stack[::scan_stride, ::scan_stride], dtype=np.uint16)
-    sampling = tuple(
-        float(v) * scan_stride if axis < 2 else float(v)
-        for axis, v in enumerate(meta["sampling"])
-    )
-    dataset = Dataset4dstem.from_array(
-        stack,
-        sampling=sampling,
-        units=tuple(meta["units"]),
-        name="Gold 4D-STEM bin8 preview",
-    )
-    if verbose:
-        print(f"Source: {meta['name']} from Hugging Face")
-        print(f"Full stack: {full_stack.shape} {full_stack.dtype}")
-        print(f"Preview: {stack.shape}, scan stride {scan_stride}")
-        print(f"Sampling: {dataset.sampling} {dataset.units}")
-        print(f"Processing: {meta.get('processing', 'none')}")
-    return dataset
+    return _gold_4dstem_from_folder(data_dir, scan_stride=scan_stride, verbose=verbose)

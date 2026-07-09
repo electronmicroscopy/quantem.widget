@@ -15,6 +15,7 @@ _TUTORIAL_EXPORTS = {
     "show2d_gold",
     "show3d_gold",
     "show4dstem_gold",
+    "showfolder_gold",
 }
 
 __all__ = [
@@ -27,6 +28,7 @@ __all__ = [
     "show2d_gold",
     "show3d_gold",
     "show4dstem_gold",
+    "showfolder_gold",
 ]
 
 

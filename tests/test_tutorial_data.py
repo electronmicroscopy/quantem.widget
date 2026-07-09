@@ -22,18 +22,56 @@ def test_load_tutorial_show2d_uses_calibrated_preview(tmp_path, monkeypatch):
 
 
 def test_show2d_gold_size_maps_to_preview_stride(tmp_path, monkeypatch):
-    data_dir = tmp_path / "gold_haadf_npy"
-    data_dir.mkdir()
+    root = tmp_path / "hf-cache"
+    data_dir = root / "widget-tutorials" / "shared" / "gold-haadf" / "full"
+    data_dir.mkdir(parents=True)
     np.save(data_dir / "data.npy", np.arange(64, dtype=np.float32).reshape(8, 8))
     (data_dir / "meta.json").write_text(
         json.dumps({"name": "gold_haadf_npy", "sampling": [0.2, 0.2], "units": ["nm", "nm"]})
     )
-    monkeypatch.setattr(tutorials, "download", lambda *args, **kwargs: data_dir)
+    calls = []
+
+    def fake_snapshot_download(**kwargs):
+        calls.append(kwargs)
+        return root
+
+    monkeypatch.setattr(tutorials, "snapshot_download", fake_snapshot_download, raising=False)
 
     dataset = datasets.show2d_gold(size="medium", verbose=False)
 
     assert dataset.array.shape == (2, 2)
     assert tuple(dataset.sampling) == (0.8, 0.8)
+    assert calls == [
+        {
+            "repo_id": "bobleesj/quantem-data",
+            "repo_type": "dataset",
+            "allow_patterns": ["widget-tutorials/shared/gold-haadf/full/*"],
+            "force_download": False,
+        }
+    ]
+
+
+def test_show3d_gold_reuses_shared_haadf_source(tmp_path, monkeypatch):
+    root = tmp_path / "hf-cache"
+    data_dir = root / "widget-tutorials" / "shared" / "gold-haadf" / "full"
+    data_dir.mkdir(parents=True)
+    image = np.arange(2048 * 2048, dtype=np.float32).reshape(2048, 2048)
+    np.save(data_dir / "data.npy", image)
+    (data_dir / "meta.json").write_text(
+        json.dumps({"name": "gold_haadf_npy", "sampling": [0.2, 0.2], "units": ["nm", "nm"]})
+    )
+    calls = []
+
+    def fake_snapshot_download(**kwargs):
+        calls.append(kwargs)
+        return root
+
+    monkeypatch.setattr(tutorials, "snapshot_download", fake_snapshot_download, raising=False)
+
+    dataset = datasets.show3d_gold(size="small", verbose=False)
+
+    assert dataset.array.shape == (32, 256, 256)
+    assert calls[0]["allow_patterns"] == ["widget-tutorials/shared/gold-haadf/full/*"]
 
 
 def test_tutorial_size_names_are_strict():
@@ -88,6 +126,36 @@ def test_load_tutorial_show4dstem_preserves_uint16_counts(tmp_path, monkeypatch)
     assert tuple(dataset.sampling) == (4.0, 4.0, 3.68, 3.68)
 
 
+def test_show4dstem_gold_uses_widget_tutorial_source(tmp_path, monkeypatch):
+    root = tmp_path / "hf-cache"
+    data_dir = root / "widget-tutorials" / "show4dstem" / "gold-128-bin8" / "full"
+    data_dir.mkdir(parents=True)
+    stack = np.arange(8 * 8 * 2 * 2, dtype=np.uint16).reshape(8, 8, 2, 2)
+    np.save(data_dir / "data.npy", stack)
+    (data_dir / "meta.json").write_text(
+        json.dumps(
+            {
+                "name": "gold_128_npy_bin8",
+                "sampling": [2.0, 2.0, 3.68, 3.68],
+                "units": ["A", "A", "mrad", "mrad"],
+            }
+        )
+    )
+    calls = []
+
+    def fake_snapshot_download(**kwargs):
+        calls.append(kwargs)
+        return root
+
+    monkeypatch.setattr(tutorials, "snapshot_download", fake_snapshot_download, raising=False)
+
+    dataset = datasets.show4dstem_gold(size="small", verbose=False)
+
+    assert dataset.array.shape == (2, 2, 2, 2)
+    assert tuple(dataset.sampling) == (8.0, 8.0, 3.68, 3.68)
+    assert calls[0]["allow_patterns"] == ["widget-tutorials/show4dstem/gold-128-bin8/full/*"]
+
+
 def test_show1d_ducky_downloads_scoped_widget_tutorial_folder(tmp_path, monkeypatch):
     root = tmp_path / "hf-cache"
     folder = root / "widget-tutorials" / "show1d" / "ducky" / "small"
@@ -109,6 +177,33 @@ def test_show1d_ducky_downloads_scoped_widget_tutorial_folder(tmp_path, monkeypa
             "repo_id": "bobleesj/quantem-data",
             "repo_type": "dataset",
             "allow_patterns": ["widget-tutorials/show1d/ducky/small/*"],
+            "force_download": False,
+            "cache_dir": "/tmp/qw-cache",
+        }
+    ]
+
+
+def test_showfolder_gold_uses_widget_tutorial_folder(tmp_path, monkeypatch):
+    root = tmp_path / "hf-cache"
+    folder = root / "widget-tutorials" / "showfolder" / "gold-haadf-session" / "small"
+    folder.mkdir(parents=True)
+    (folder / "0010 - HAADF 15Mx Nano.emd").write_bytes(b"placeholder")
+    calls = []
+
+    def fake_snapshot_download(**kwargs):
+        calls.append(kwargs)
+        return root
+
+    monkeypatch.setattr(tutorials, "snapshot_download", fake_snapshot_download, raising=False)
+
+    result = datasets.showfolder_gold(size="small", cache_dir=Path("/tmp/qw-cache"), verbose=False)
+
+    assert result == folder
+    assert calls == [
+        {
+            "repo_id": "bobleesj/quantem-data",
+            "repo_type": "dataset",
+            "allow_patterns": ["widget-tutorials/showfolder/gold-haadf-session/small/*"],
             "force_download": False,
             "cache_dir": "/tmp/qw-cache",
         }
