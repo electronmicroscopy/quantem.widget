@@ -12,9 +12,30 @@ from quantem.core.datastructures import Dataset2d, Dataset3d, Dataset4dstem
 
 download = None
 snapshot_download = None
+TUTORIAL_DATA_REPO_ID = "bobleesj/quantem-data"
+TUTORIAL_DATA_ROOT = "widget-tutorials"
+TUTORIAL_SIZES = ("small", "medium", "large", "full")
 _SHOWFOLDER_HF_PATTERNS = (
     "survey/gold_haadf_session/*.emd",
 )
+_SHOW2D_STRIDE_BY_SIZE = {
+    "small": 8,
+    "medium": 4,
+    "large": 2,
+    "full": 1,
+}
+_SHOW3D_PARAMS_BY_SIZE = {
+    "small": {"n_frames": 32, "stride": 8, "crop_size": 256},
+    "medium": {"n_frames": 48, "stride": 4, "crop_size": 384},
+    "large": {"n_frames": 64, "stride": 2, "crop_size": 512},
+    "full": {"n_frames": 64, "stride": 1, "crop_size": 512},
+}
+_SHOW4DSTEM_SCAN_STRIDE_BY_SIZE = {
+    "small": 4,
+    "medium": 2,
+    "large": 1,
+    "full": 1,
+}
 
 
 def _download_dataset(name: str, *, verbose: bool = False) -> Path:
@@ -29,10 +50,130 @@ def _download_dataset(name: str, *, verbose: bool = False) -> Path:
 def _snapshot_download_dataset(**kwargs) -> Path:
     global snapshot_download
     if snapshot_download is None:
-        from huggingface_hub import snapshot_download as _snapshot_download  # noqa: PLC0415
+        try:
+            from huggingface_hub import snapshot_download as _snapshot_download  # noqa: PLC0415
+        except ImportError as exc:
+            raise ImportError(
+                "tutorial dataset downloads require huggingface_hub. "
+                "Install it with `pip install huggingface_hub`."
+            ) from exc
 
         snapshot_download = _snapshot_download
     return Path(snapshot_download(**kwargs))
+
+
+def _normalise_tutorial_size(size: str) -> str:
+    value = str(size).strip().lower()
+    if value not in TUTORIAL_SIZES:
+        valid = ", ".join(TUTORIAL_SIZES)
+        raise ValueError(f"size must be one of {valid}; got {size!r}")
+    return value
+
+
+def _download_widget_tutorial_folder(
+    viewer: str,
+    name: str,
+    *,
+    size: str = "small",
+    cache_dir: str | Path | None = None,
+    revision: str | None = None,
+    force_download: bool = False,
+) -> Path:
+    size = _normalise_tutorial_size(size)
+    path_in_repo = f"{TUTORIAL_DATA_ROOT}/{viewer}/{name}/{size}"
+    kwargs = {
+        "repo_id": TUTORIAL_DATA_REPO_ID,
+        "repo_type": "dataset",
+        "allow_patterns": [f"{path_in_repo}/*"],
+        "force_download": bool(force_download),
+    }
+    if cache_dir is not None:
+        kwargs["cache_dir"] = str(cache_dir)
+    if revision is not None:
+        kwargs["revision"] = str(revision)
+    os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+    root = _snapshot_download_dataset(**kwargs)
+    folder = root / path_in_repo
+    if not folder.is_dir():
+        raise FileNotFoundError(
+            f"downloaded tutorial folder is missing: {folder}. "
+            f"Expected Hugging Face path {TUTORIAL_DATA_REPO_ID}/{path_in_repo}"
+        )
+    return folder
+
+
+def show1d_ducky(
+    *,
+    size: str = "small",
+    cache_dir: str | Path | None = None,
+    revision: str | None = None,
+    force_download: bool = False,
+    verbose: bool = True,
+) -> Path:
+    """Download the real ducky joint-time ptychography Show1D tutorial run.
+
+    The returned folder contains ``show1d_monitor.jsonl`` and snapshot ``.npy``
+    files. Use it with :meth:`quantem.widget.Show1D.from_monitor_file`, or call
+    ``Show1D.from_example("ducky")`` when a one-line widget is preferred.
+
+    Parameters
+    ----------
+    size
+        Tutorial payload size. Valid values are ``"small"``, ``"medium"``,
+        ``"large"``, and ``"full"``. The current public upload provides the
+        ``"small"`` payload; larger sizes are reserved for future higher
+        resolution snapshots.
+    cache_dir
+        Optional Hugging Face cache directory.
+    revision
+        Optional Hugging Face dataset revision.
+    force_download
+        If ``True``, ask Hugging Face Hub to refresh the cached files.
+    verbose
+        If ``True``, print a short dataset summary.
+
+    Returns
+    -------
+    Path
+        Local folder containing the Show1D monitor run.
+    """
+
+    folder = _download_widget_tutorial_folder(
+        "show1d",
+        "ducky",
+        size=size,
+        cache_dir=cache_dir,
+        revision=revision,
+        force_download=force_download,
+    )
+    monitor = folder / "show1d_monitor.jsonl"
+    if not monitor.is_file():
+        raise FileNotFoundError(f"Show1D ducky tutorial monitor is missing: {monitor}")
+    if verbose:
+        events = sum(1 for line in monitor.read_text(encoding="utf-8").splitlines() if line.strip())
+        print(f"Show1D ducky tutorial run: {folder}")
+        print(f"Monitor events: {events}")
+    return folder
+
+
+def show2d_gold(*, size: str = "small", verbose: bool = True) -> Dataset2d:
+    """Load the gold HAADF Show2D tutorial dataset by friendly size name."""
+
+    return load_tutorial_show2d(stride=_SHOW2D_STRIDE_BY_SIZE[_normalise_tutorial_size(size)], verbose=verbose)
+
+
+def show3d_gold(*, size: str = "small", verbose: bool = True) -> Dataset3d:
+    """Load the gold HAADF Show3D tutorial stack by friendly size name."""
+
+    params = _SHOW3D_PARAMS_BY_SIZE[_normalise_tutorial_size(size)]
+    return load_tutorial_show3d(**params, verbose=verbose)
+
+
+def show4dstem_gold(*, size: str = "small", verbose: bool = True) -> Dataset4dstem:
+    """Load the gold 4D-STEM Show4DSTEM tutorial scan by friendly size name."""
+
+    scan_stride = _SHOW4DSTEM_SCAN_STRIDE_BY_SIZE[_normalise_tutorial_size(size)]
+    return load_tutorial_show4dstem(scan_stride=scan_stride, verbose=verbose)
 
 
 def load_tutorial_showfolder_folder(*, verbose: bool = True, allow_fallback: bool = True) -> Path:

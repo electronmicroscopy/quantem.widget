@@ -656,6 +656,62 @@ def test_show1d_monitor_file_reloads_losses_snapshots_and_review_state(tmp_path:
     np.testing.assert_allclose(widget._data[:, -1], [0.25, 8.0])
 
 
+def test_show1d_from_example_ducky_uses_public_dataset_loader(
+    tmp_path: pathlib.Path,
+    monkeypatch,
+) -> None:
+    import quantem.widget.datasets as tutorial_datasets
+
+    snapshots = tmp_path / "snapshots"
+    snapshots.mkdir()
+    image = snapshots / "lambda1_frame0.npy"
+    np.save(image, np.ones((4, 4), dtype=np.float32))
+    monitor = tmp_path / "show1d_monitor.jsonl"
+    Show1D.append_monitor_event(
+        monitor,
+        {
+            "iteration": 0,
+            "losses": {"lambda 1": 2.0},
+            "snapshots": {"lambda_1": image.relative_to(tmp_path)},
+        },
+    )
+    calls = []
+
+    def fake_show1d_ducky(**kwargs):
+        calls.append(kwargs)
+        return tmp_path
+
+    monkeypatch.setattr(tutorial_datasets, "show1d_ducky", fake_show1d_ducky)
+
+    widget = Show1D.from_example("ducky", size="small", show_snapshot_fft=False)
+
+    assert calls == [
+        {
+            "size": "small",
+            "cache_dir": None,
+            "revision": None,
+            "force_download": False,
+            "verbose": False,
+        }
+    ]
+    assert widget.title == "Real ducky joint iterative ptychography"
+    assert widget.x_label == "frame"
+    assert widget.y_label == "final loss"
+    assert widget.log_scale is False
+    assert widget.snapshot_columns == 4
+    assert widget.show_snapshot_fft is False
+    assert widget.n_snapshots == 1
+
+
+def test_show1d_html_export_configures_anywidget_requirejs(tmp_path: pathlib.Path) -> None:
+    widget = Show1D([[1.0, 0.5]], labels=["loss"], title="loss export")
+
+    html = widget.export_html(tmp_path / "show1d.html").read_text(encoding="utf-8")
+
+    assert 'id="quantem-widget-anywidget-requirejs"' in html
+    assert "anywidget@0.11.0/dist/index.min" in html
+
+
 def test_show1d_watch_run_polls_joint_ptycho_monitor_with_object_probe_snapshots(tmp_path: pathlib.Path) -> None:
     snapshots = tmp_path / "snapshots"
     snapshots.mkdir()

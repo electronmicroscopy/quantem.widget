@@ -27,6 +27,7 @@ parts:
   - caption: API reference
     chapters:
       - file: api/index
+      - file: api/datasets
       - file: api/viewer-ui
       - file: api/show1d
       - file: api/show2d

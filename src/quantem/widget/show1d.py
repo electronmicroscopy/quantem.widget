@@ -1049,6 +1049,73 @@ class Show1D(anywidget.AnyWidget):
         return widget
 
     @classmethod
+    def from_example(
+        cls,
+        name: str = "ducky",
+        *,
+        size: str = "small",
+        cache_dir: str | pathlib.Path | None = None,
+        revision: str | None = None,
+        force_download: bool = False,
+        title: str | None = None,
+        x_label: str | None = None,
+        y_label: str | None = None,
+        log_scale: bool | None = None,
+        **kwargs: Any,
+    ) -> Self:
+        """Create a Show1D viewer from a packaged tutorial example.
+
+        Parameters
+        ----------
+        name
+            Example name. ``"ducky"`` loads the real joint-time ptychography
+            lambda sweep used in the Show1D tutorial.
+        size
+            Tutorial payload size: ``"small"``, ``"medium"``, ``"large"``, or
+            ``"full"``.
+        cache_dir, revision, force_download
+            Forwarded to the Hugging Face tutorial-data loader.
+        title, x_label, y_label, log_scale
+            Optional overrides for the default example presentation.
+        **kwargs
+            Additional :class:`Show1D` constructor options, such as
+            ``snapshot_columns``, ``show_snapshot_fft``, and
+            ``snapshot_real_space_zoom``.
+        """
+
+        example = str(name).strip().lower().replace("_", "-")
+        if example not in {"ducky", "show1d-ducky", "joint-ducky", "joint-time-ducky"}:
+            raise ValueError(
+                "unknown Show1D example "
+                f"{name!r}; available examples are: 'ducky'"
+            )
+
+        from quantem.widget.datasets import show1d_ducky  # noqa: PLC0415
+
+        run = show1d_ducky(
+            size=size,
+            cache_dir=cache_dir,
+            revision=revision,
+            force_download=force_download,
+            verbose=False,
+        )
+        kwargs.setdefault("snapshot_columns", 4)
+        kwargs.setdefault("image_cmap", "cividis")
+        kwargs.setdefault("snapshot_contrast_preset", "1-99")
+        kwargs.setdefault("show_snapshot_fft", True)
+        kwargs.setdefault("snapshot_fft_layout", "overlay")
+        kwargs.setdefault("snapshot_overlay_position", "bottom-right")
+        kwargs.setdefault("snapshot_fft_cmap", "magma")
+        return cls.from_monitor_file(
+            run / "show1d_monitor.jsonl",
+            title=title or "Real ducky joint iterative ptychography",
+            x_label=x_label or "frame",
+            y_label=y_label or "final loss",
+            log_scale=False if log_scale is None else bool(log_scale),
+            **kwargs,
+        )
+
+    @classmethod
     def watch_run(
         cls,
         path: str | pathlib.Path,

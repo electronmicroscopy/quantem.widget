@@ -11,6 +11,10 @@ _TUTORIAL_EXPORTS = {
     "load_tutorial_show2d",
     "load_tutorial_show3d",
     "load_tutorial_show4dstem",
+    "show1d_ducky",
+    "show2d_gold",
+    "show3d_gold",
+    "show4dstem_gold",
 }
 
 __all__ = [
@@ -19,6 +23,10 @@ __all__ = [
     "load_tutorial_show2d",
     "load_tutorial_show3d",
     "load_tutorial_show4dstem",
+    "show1d_ducky",
+    "show2d_gold",
+    "show3d_gold",
+    "show4dstem_gold",
 ]
 
 

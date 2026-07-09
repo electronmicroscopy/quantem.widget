@@ -22,6 +22,15 @@ HTML_EXPORT_TRAITS = (
 )
 
 _MOBILE_VIEWPORT_META = '<meta name="viewport" content="width=device-width, initial-scale=1">'
+_ANYWIDGET_REQUIREJS_CONFIG = """<script id="quantem-widget-anywidget-requirejs">
+if (window.require && window.require.config) {
+  window.require.config({
+    paths: {
+      anywidget: "https://cdn.jsdelivr.net/npm/anywidget@0.11.0/dist/index.min"
+    }
+  });
+}
+</script>"""
 _STANDALONE_EXPORT_STYLE = """<style id="quantem-widget-export-layout">
 html, body {
   margin: 0;
@@ -40,11 +49,27 @@ body {
 
 
 def ensure_mobile_viewport(path: str | pathlib.Path) -> pathlib.Path:
-    """Add mobile-friendly standalone HTML shell tags if needed."""
+    """Add standalone HTML shell tags and widget-manager module paths if needed."""
 
     html_path = pathlib.Path(path)
     html = html_path.read_text(encoding="utf-8")
     changed = False
+    needs_anywidget = (
+        '"model_module": "anywidget"' in html
+        or '"_model_module": "anywidget"' in html
+        or '"view_module": "anywidget"' in html
+        or '"_view_module": "anywidget"' in html
+    )
+    if needs_anywidget and 'id="quantem-widget-anywidget-requirejs"' not in html:
+        marker = '<script src="https://cdn.jsdelivr.net/npm/@jupyter-widgets/html-manager'
+        marker_idx = html.find(marker)
+        if marker_idx >= 0:
+            html = f"{html[:marker_idx]}{_ANYWIDGET_REQUIREJS_CONFIG}\n{html[marker_idx:]}"
+        elif "</head>" in html:
+            html = html.replace("</head>", f"    {_ANYWIDGET_REQUIREJS_CONFIG}\n</head>", 1)
+        else:
+            html = f"{_ANYWIDGET_REQUIREJS_CONFIG}\n{html}"
+        changed = True
     if "<head>" in html:
         if 'name="viewport"' not in html and "name='viewport'" not in html:
             html = html.replace("<head>", f"<head>\n    {_MOBILE_VIEWPORT_META}", 1)

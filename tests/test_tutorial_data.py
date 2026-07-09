@@ -1,7 +1,9 @@
 import json
+from pathlib import Path
 
 import numpy as np
 
+from quantem.widget import datasets
 from quantem.widget.data import tutorials
 
 
@@ -17,6 +19,31 @@ def test_load_tutorial_show2d_uses_calibrated_preview(tmp_path, monkeypatch):
     np.testing.assert_array_equal(dataset.array, np.array([[0, 2], [8, 10]], dtype=np.float32))
     assert tuple(dataset.sampling) == (0.4, 0.4)
     assert tuple(dataset.units) == ("nm", "nm")
+
+
+def test_show2d_gold_size_maps_to_preview_stride(tmp_path, monkeypatch):
+    data_dir = tmp_path / "gold_haadf_npy"
+    data_dir.mkdir()
+    np.save(data_dir / "data.npy", np.arange(64, dtype=np.float32).reshape(8, 8))
+    (data_dir / "meta.json").write_text(
+        json.dumps({"name": "gold_haadf_npy", "sampling": [0.2, 0.2], "units": ["nm", "nm"]})
+    )
+    monkeypatch.setattr(tutorials, "download", lambda *args, **kwargs: data_dir)
+
+    dataset = datasets.show2d_gold(size="medium", verbose=False)
+
+    assert dataset.array.shape == (2, 2)
+    assert tuple(dataset.sampling) == (0.8, 0.8)
+
+
+def test_tutorial_size_names_are_strict():
+    assert tutorials._normalise_tutorial_size("Small") == "small"
+    try:
+        tutorials._normalise_tutorial_size("mini")
+    except ValueError as exc:
+        assert "small, medium, large, full" in str(exc)
+    else:
+        raise AssertionError("expected invalid tutorial size to raise")
 
 
 def test_load_tutorial_show3d_uses_real_image_crops(tmp_path, monkeypatch):
@@ -59,6 +86,33 @@ def test_load_tutorial_show4dstem_preserves_uint16_counts(tmp_path, monkeypatch)
     assert dataset.array.dtype == np.uint16
     np.testing.assert_array_equal(dataset.array, stack[::2, ::2])
     assert tuple(dataset.sampling) == (4.0, 4.0, 3.68, 3.68)
+
+
+def test_show1d_ducky_downloads_scoped_widget_tutorial_folder(tmp_path, monkeypatch):
+    root = tmp_path / "hf-cache"
+    folder = root / "widget-tutorials" / "show1d" / "ducky" / "small"
+    folder.mkdir(parents=True)
+    (folder / "show1d_monitor.jsonl").write_text('{"iteration": 0, "losses": {"lambda 1": 1.0}}\n')
+    calls = []
+
+    def fake_snapshot_download(**kwargs):
+        calls.append(kwargs)
+        return root
+
+    monkeypatch.setattr(tutorials, "snapshot_download", fake_snapshot_download, raising=False)
+
+    result = datasets.show1d_ducky(size="small", cache_dir=Path("/tmp/qw-cache"), verbose=False)
+
+    assert result == folder
+    assert calls == [
+        {
+            "repo_id": "bobleesj/quantem-data",
+            "repo_type": "dataset",
+            "allow_patterns": ["widget-tutorials/show1d/ducky/small/*"],
+            "force_download": False,
+            "cache_dir": "/tmp/qw-cache",
+        }
+    ]
 
 
 def test_create_tutorial_showfolder_folder_writes_velox_like_session(tmp_path):

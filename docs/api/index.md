@@ -1,7 +1,9 @@
 # API reference
 
-Complete reference for the widgets, HTML export, and data loading / I/O.
+Complete reference for the widgets, tutorial datasets, HTML export, and data
+loading / I/O.
 Common display-chrome names and presets are documented in [Viewer UI controls](viewer-ui).
+Named tutorial datasets are documented in [Tutorial Datasets](./datasets.md).
 The same tables are surfaced in the developer-facing [UI Guide](../developer/ui-guide).
 Widget pages have two halves:
 

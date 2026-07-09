@@ -89,6 +89,44 @@ Snapshot panels use the same scale-bar convention as `Show3D`: pass
 a pixel scale bar. Use `show_scale_bar=False` for a clean export without scale
 or zoom overlays.
 
+## Built-In Ducky Example
+
+For tutorials and quick regression checks, use the real ducky joint-time
+ptychography sweep hosted in the public QuantEM data repository:
+
+```python
+from quantem.widget import Show1D
+
+widget = Show1D.from_example("ducky", size="small")
+widget
+```
+
+This is equivalent to downloading the monitor run and opening it directly:
+
+```python
+from quantem.widget import Show1D
+from quantem.widget.datasets import show1d_ducky
+
+run = show1d_ducky(size="small")
+widget = Show1D.from_monitor_file(
+    run / "show1d_monitor.jsonl",
+    title="Real ducky joint iterative ptychography",
+    x_label="frame",
+    y_label="final loss",
+    log_scale=False,
+    snapshot_columns=4,
+    show_snapshot_fft=True,
+    snapshot_contrast_preset="1-99",
+)
+widget
+```
+
+The dataset files live under
+`widget-tutorials/show1d/ducky/small/...` in
+`bobleesj/quantem-data`, so tutorial payloads stay grouped by widget instead of
+spreading across the dataset root. See [Tutorial Datasets](./datasets.md) for the
+shared `small`, `medium`, `large`, and `full` size convention.
+
 ## Overnight Monitors
 
 For live notebook reconstruction, mutate one widget instead of recreating cells.
