@@ -9,9 +9,14 @@ from quantem.widget.showeds import (
     _estimate_spectrum_image_sidecar_bytes,
     _sum_bin_spectrum_image_lazy,
     bin_spectrum_image,
+    detect_elements,
+    detect_peaks,
+    detector_fwhm_kev,
     eds_line_hints,
     load_spectrum_image_sidecar,
+    match_elements,
     prepare_spectrum_image_sidecar,
+    snip_background,
 )
 
 
@@ -922,3 +927,400 @@ def test_showeds_stream_sidecar_exact_single_export_embeds_sparse_buffers(tmp_pa
     assert "/files/stream/" not in html
     assert "energy_prefix_u32.bin" not in html
     assert "spatial_prefix_u32.bin" not in html
+
+
+def _fe_detection_cube(
+    rows=8, cols=8, n_energy=1024, fe_rows=slice(0, 4), fe_cols=slice(0, 4)
+):
+    energy = (0.3 + 0.01 * np.arange(n_energy)).astype(np.float32)
+    continuum = 2.0 * (12.0 - energy) / (11.0 * energy) * 9.0
+    cube = np.broadcast_to(continuum, (rows, cols, n_energy)).astype(np.float32).copy()
+    for center, area in ((6.4052, 500.0), (7.0593, 120.0)):
+        sigma = 0.135 / 2.3548
+        peak = (
+            area
+            * np.exp(-0.5 * ((energy - center) / sigma) ** 2)
+            / (sigma * np.sqrt(2 * np.pi))
+            * 0.01
+        )
+        cube[fe_rows, fe_cols] += peak.astype(np.float32)
+    return cube, energy
+
+
+def test_detect_elements_sets_candidates_and_status():
+    cube, energy = _fe_detection_cube()
+    widget = ShowEDS(cube, energy)
+    before = list(widget.selected_elements)
+
+    results = widget.detect_elements(elements=["Fe", "Ca"])
+
+    assert [report["element"] for report in results] == ["Fe"]
+    assert widget.element_candidates == results
+    assert "Fe" in widget.detect_status
+    assert widget.selected_elements == before
+
+
+def test_detect_elements_select_updates_selected_elements():
+    cube, energy = _fe_detection_cube()
+    widget = ShowEDS(cube, energy)
+
+    results = widget.detect_elements(elements=["Fe"], select=True)
+
+    assert widget.selected_elements == [report["element"] for report in results]
+
+
+def test_detect_elements_roi_source_differs_from_sum():
+    cube, energy = _fe_detection_cube(fe_rows=slice(0, 4), fe_cols=slice(0, 4))
+    widget = ShowEDS(cube, energy, roi=(4, 4, 4, 4))
+
+    sum_names = [
+        report["element"] for report in widget.detect_elements(elements=["Fe"])
+    ]
+    roi_names = [
+        report["element"] for report in widget.detect_elements("roi", elements=["Fe"])
+    ]
+
+    assert "Fe" in sum_names
+    assert "Fe" not in roi_names
+
+
+def test_detect_msg_replies_detect_done(monkeypatch):
+    cube, energy = _fe_detection_cube()
+    widget = ShowEDS(cube, energy)
+    sent = []
+    monkeypatch.setattr(
+        widget, "send", lambda content, buffers=None: sent.append(content)
+    )
+
+    widget._handle_detect_msg(
+        widget, {"type": "detect_elements", "request_id": 7, "source": "sum"}, []
+    )
+
+    assert sent == [{"type": "detect_done", "request_id": 7, "ok": True}]
+    assert widget.element_candidates
+
+    monkeypatch.setattr(
+        widget,
+        "_detection_spectrum",
+        lambda source: (_ for _ in ()).throw(ValueError("broken")),
+    )
+    widget._handle_detect_msg(
+        widget, {"type": "detect_elements", "request_id": 8, "source": "sum"}, []
+    )
+
+    assert sent[-1] == {"type": "detect_done", "request_id": 8, "ok": False}
+    assert widget.detect_status.startswith("Detection failed")
+
+
+def test_detect_elements_kernel_backend_uses_lazy_cube(monkeypatch, tmp_path):
+    cube, energy = _fe_detection_cube()
+    base = cube.sum(axis=2).astype(np.float32)
+    monkeypatch.setattr(
+        showeds_module,
+        "_read_emd_spectrum_image",
+        lambda *args, **kwargs: {
+            "cube": cube,
+            "energy_keV": energy,
+            "base_image": base,
+            "title": "Native EMD",
+            "candidate_elements": [],
+            "source_shape": cube.shape,
+            "path": str(tmp_path / "scan.emd"),
+        },
+    )
+    loaded = load_eds(tmp_path / "scan.emd", backend="kernel")
+    widget = ShowEDS(loaded)
+
+    assert widget.compute_backend == "kernel"
+    names = [report["element"] for report in widget.detect_elements(elements=["Fe"])]
+    assert "Fe" in names
+
+
+def test_detect_elements_sidecar_backend_reads_data_folder(tmp_path):
+    cube, energy = _fe_detection_cube()
+    sidecar = prepare_spectrum_image_sidecar(
+        cube.astype(np.uint16), energy, tmp_path / "eds"
+    )
+    loaded = load_eds(sidecar, sidecar_url="/files/eds/")
+    widget = ShowEDS(loaded)
+
+    assert widget.compute_backend == "sidecar"
+    names = [report["element"] for report in widget.detect_elements(elements=["Fe"])]
+    assert "Fe" in names
+
+
+def test_state_roundtrip_ignores_detection_results():
+    cube, energy = _fe_detection_cube()
+    widget = ShowEDS(cube, energy)
+    widget.detect_elements(elements=["Fe"])
+    state = widget.state_dict()
+
+    assert "element_candidates" not in state
+    assert "detect_status" not in state
+
+    widget.load_state_dict(state)
+
+    assert [report["element"] for report in widget.element_candidates] == ["Fe"]
+
+
+def test_detect_elements_rejects_uncalibrated_energy_axis():
+    cube = np.zeros((4, 4, 64), dtype=np.float32)
+    widget = ShowEDS(cube, None)
+
+    with pytest.raises(ValueError, match="uncalibrated"):
+        widget.detect_elements()
+
+
+# --- element detection ---
+
+
+MN_KA_KEV = 5.8988
+CU_KA_KEV = 8.0463
+
+
+def _energy_axis(n=1024, offset=0.3, scale=0.01):
+    return offset + scale * np.arange(n, dtype=np.float64)
+
+
+def _gaussian(energy, center_kev, area, fwhm_kev):
+    sigma = fwhm_kev / 2.3548
+    return (
+        area
+        * np.exp(-0.5 * ((energy - center_kev) / sigma) ** 2)
+        / (sigma * np.sqrt(2 * np.pi))
+        * (energy[1] - energy[0])
+    )
+
+
+def _continuum(energy, level=100.0):
+    # Kramers-like falling continuum
+    return level * (12.0 - energy) / (11.0 * energy) * energy[0] * 30
+
+
+# --- detector_fwhm_kev ---
+
+
+def test_detector_fwhm_matches_mnka_reference():
+    assert detector_fwhm_kev(MN_KA_KEV) == pytest.approx(0.130, abs=1e-4)
+    assert detector_fwhm_kev(CU_KA_KEV) == pytest.approx(0.1492, abs=0.001)
+    energies = np.linspace(0.3, 10.5, 50)
+    widths = np.array([detector_fwhm_kev(e) for e in energies])
+    assert np.all(np.diff(widths) > 0)
+    assert np.all(widths > 0)
+
+
+def test_detector_fwhm_scales_with_resolution():
+    assert detector_fwhm_kev(MN_KA_KEV, energy_resolution_mnka=140.0) == pytest.approx(
+        0.140, abs=1e-4
+    )
+
+
+# --- snip_background ---
+
+
+def test_snip_background_recovers_smooth_continuum():
+    rng = np.random.default_rng(0)
+    energy = _energy_axis()
+    truth = _continuum(energy, level=120.0)
+    spectrum = rng.poisson(truth).astype(np.float64)
+    fwhm_channels = detector_fwhm_kev(energy[-1]) / (energy[1] - energy[0])
+    estimate = snip_background(spectrum, fwhm_channels)
+    interior = slice(40, -40)
+    rel_err = np.abs(estimate[interior] - truth[interior]) / truth[interior]
+    assert float(np.mean(rel_err)) < 0.10
+
+
+def test_snip_background_ignores_gaussian_peaks():
+    rng = np.random.default_rng(1)
+    energy = _energy_axis()
+    truth = _continuum(energy, level=120.0)
+    peaks = np.zeros_like(energy)
+    centers = [2.0, 5.0, 8.0]
+    for center in centers:
+        peaks += _gaussian(energy, center, 30000.0, detector_fwhm_kev(center))
+    spectrum = rng.poisson(truth + peaks).astype(np.float64)
+    fwhm_channels = detector_fwhm_kev(energy[-1]) / (energy[1] - energy[0])
+    estimate = snip_background(spectrum, fwhm_channels)
+    for center in centers:
+        window = np.abs(energy - center) < detector_fwhm_kev(center)
+        rel_err = np.abs(estimate[window] - truth[window]) / truth[window]
+        assert float(np.mean(rel_err)) < 0.15
+
+
+# --- detect_peaks ---
+
+
+def test_detect_peaks_finds_gaussians_with_poisson_noise():
+    rng = np.random.default_rng(2)
+    energy = _energy_axis()
+    truth = _continuum(energy, level=100.0)
+    strong = (2.0, 20000.0)
+    weak = (5.0, 500.0)
+    sub = (9.0, 40.0)
+    signal = np.zeros_like(energy)
+    for center, area in (strong, weak, sub):
+        signal += _gaussian(energy, center, area, detector_fwhm_kev(center))
+    spectrum = rng.poisson(truth + signal).astype(np.float64)
+    peaks = detect_peaks(spectrum, energy)
+    found = {round(p["energy_keV"], 1) for p in peaks}
+    for center, area in (strong, weak):
+        matches = [
+            p
+            for p in peaks
+            if abs(p["energy_keV"] - center) < 0.5 * detector_fwhm_kev(center)
+        ]
+        assert matches, f"peak at {center} keV not found (found {found})"
+        assert matches[0]["net_counts"] == pytest.approx(area, rel=0.25)
+    assert not [
+        p
+        for p in peaks
+        if abs(p["energy_keV"] - sub[0]) < 0.5 * detector_fwhm_kev(sub[0])
+    ]
+
+
+def test_detect_peaks_empty_for_pure_continuum():
+    rng = np.random.default_rng(3)
+    energy = _energy_axis()
+    spectrum = rng.poisson(_continuum(energy, level=100.0)).astype(np.float64)
+    assert detect_peaks(spectrum, energy) == []
+
+
+# --- match_elements ---
+
+
+def _peak(energy_kev, net_counts=1000.0):
+    return {"energy_keV": float(energy_kev), "net_counts": float(net_counts)}
+
+
+def test_match_elements_reports_lines_and_energy_error():
+    peaks = [_peak(6.4052 + 0.030), _peak(7.0593 + 0.030, 200.0)]
+    results = match_elements(peaks, energy_range=(0.3, 10.5), elements=["Fe"])
+    assert len(results) == 1
+    report = results[0]
+    assert report["element"] == "Fe"
+    assert report["n_peaks"] == 2
+    assert report["n_missing_strong"] == 0
+    ka1 = next(line for line in report["lines"] if line["line"] == "Ka1")
+    assert ka1["err_ev"] == pytest.approx(30.0, abs=2.0)
+    assert 20.0 < report["mean_err_ev"] < 50.0
+
+
+def test_match_elements_counts_missing_strong_lines():
+    results = match_elements([_peak(6.4052)], energy_range=(0.3, 10.5), elements=["Fe"])
+    report = results[0]
+    assert report["n_missing_strong"] == 1
+    assert "Kb1" in report["missing_strong"]
+
+
+def test_match_elements_disambiguates_mn_kb_from_fe_ka():
+    peaks = [_peak(6.4052), _peak(7.0593, 200.0)]
+    results = match_elements(peaks, energy_range=(0.3, 10.5), elements=["Fe", "Mn"])
+    names = [report["element"] for report in results]
+    assert names == ["Fe"]
+    assert results[0]["n_missing_strong"] == 0
+
+
+def test_match_elements_ignores_strong_lines_buried_in_neighbor_peak():
+    results = match_elements([_peak(1.4865)], energy_range=(0.3, 10.5), elements=["Al"])
+    report = results[0]
+    assert report["element"] == "Al"
+    assert report["n_missing_strong"] == 0
+
+
+def test_match_elements_excludes_elements_without_peaks():
+    results = match_elements(
+        [_peak(6.4052)], energy_range=(0.3, 10.5), elements=["Fe", "Ca"]
+    )
+    assert [report["element"] for report in results] == ["Fe"]
+
+
+def test_match_elements_ranks_lexicographically():
+    def line(element, name, energy_kev, intensity=1.0):
+        return {
+            "element": element,
+            "line": name,
+            "family": "K",
+            "energy_keV": energy_kev,
+            "intensity": intensity,
+        }
+
+    lines = [
+        line("Aa", "Ka1", 2.000),
+        line("Aa", "Kb1", 3.000),
+        line("Bb", "Ka1", 2.000),
+        line("Cc", "Ka1", 2.000),
+        line("Cc", "Kb1", 5.000),
+        line("Dd", "Ka1", 2.020),
+    ]
+    peaks = [_peak(2.000), _peak(3.000)]
+    results = match_elements(peaks, energy_range=(0.3, 10.5), lines=lines)
+    names = [report["element"] for report in results]
+    # Aa: 2 peaks; Bb: 1 peak 0 missing 0 err; Dd: 1 peak 0 missing 20 eV err; Cc: 1 peak 1 missing
+    assert names == ["Aa", "Bb", "Dd", "Cc"]
+
+
+# --- detect_elements ---
+
+
+def test_detect_elements_results_are_json_serializable():
+    rng = np.random.default_rng(4)
+    energy = _energy_axis()
+    truth = _continuum(energy, level=100.0)
+    truth += _gaussian(energy, 6.4052, 20000.0, detector_fwhm_kev(6.4052))
+    truth += _gaussian(energy, 7.0593, 3000.0, detector_fwhm_kev(7.0593))
+    spectrum = rng.poisson(truth).astype(np.float64)
+    results = detect_elements(spectrum, energy, elements=["Fe", "Cu"])
+    assert results
+    json.dumps(results)
+
+
+def test_detect_elements_excludes_lines_in_edge_guard_bands():
+    energy = np.arange(6.00, 7.10, 0.01)
+    truth = np.full_like(energy, 200.0)
+    for center, area in ((6.4052, 30000.0), (7.0593, 4500.0)):
+        truth += _gaussian(energy, center, area, detector_fwhm_kev(center))
+    rng = np.random.default_rng(0)
+    spectrum = rng.poisson(truth).astype(np.float64)
+
+    results = detect_elements(spectrum, energy, elements=["Fe"])
+
+    # Fe Kb sits within one FWHM of the axis top where peaks are undetectable,
+    # so it must not count as missing
+    assert results[0]["element"] == "Fe"
+    assert results[0]["missing_strong"] == []
+
+
+def test_match_elements_prunes_coincidental_family_without_vetoing_element():
+    # stray low-energy peak matches Ca L satellites; Ca K series is real and
+    # must survive with the L coincidence discarded
+    peaks = [_peak(0.413), _peak(3.6923), _peak(4.0131, 200.0)]
+    results = match_elements(peaks, energy_range=(0.25, 14.8), elements=["Ca"])
+    assert len(results) == 1
+    report = results[0]
+    assert report["n_peaks"] == 2
+    assert {line["family"] for line in report["lines"]} == {"K"}
+    assert report["n_missing_strong"] == 0
+
+
+def test_detect_peaks_ignores_nan_channels():
+    rng = np.random.default_rng(6)
+    energy = _energy_axis()
+    truth = _continuum(energy, level=100.0)
+    truth += _gaussian(energy, 6.4052, 20000.0, detector_fwhm_kev(6.4052))
+    spectrum = rng.poisson(truth).astype(np.float64)
+    spectrum[400:403] = np.nan
+    spectrum[500] = np.inf
+    spectrum[501] = -np.inf
+
+    peaks = detect_peaks(spectrum, energy)
+
+    assert any(abs(p["energy_keV"] - 6.4052) < 0.07 for p in peaks)
+
+
+def test_detect_peaks_rejects_single_channel_spike():
+    rng = np.random.default_rng(6)
+    energy = _energy_axis()
+    spectrum = rng.poisson(_continuum(energy, level=100.0)).astype(np.float64)
+    spectrum[700] += 50000.0
+
+    assert detect_peaks(spectrum, energy) == []
