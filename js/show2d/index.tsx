@@ -6113,7 +6113,14 @@ function Show2D() {
                     ref={(el: HTMLDivElement | null) => { imageContainerRefs.current[i] = el; }}
                     sx={{
                       ...responsivePanelSx,
-	                      border: `2px solid ${reorderMode && dragOverPanel === i ? themeColors.accent : panelChromeVisible && i === selectedIdx ? themeColors.accent : themeColors.border}`,
+	                      "&::after": {
+	                        content: '""',
+	                        position: "absolute",
+	                        inset: 0,
+	                        pointerEvents: "none",
+	                        zIndex: 5,
+	                        boxShadow: `inset 0 0 0 2px ${reorderMode && dragOverPanel === i ? themeColors.accent : panelChromeVisible && i === selectedIdx ? themeColors.accent : "transparent"}`,
+	                      },
                       "&:hover .show2d-panel-hide-button, &:focus-within .show2d-panel-hide-button": {
                         opacity: 1,
                         pointerEvents: "auto",
@@ -6410,7 +6417,14 @@ function Show2D() {
                       sx={{
                         mt: 0.5,
                         ...responsivePanelSx,
-	                        border: `2px solid ${panelChromeVisible && i === selectedIdx ? themeColors.accent : themeColors.border}`,
+	                        "&::after": {
+	                          content: '""',
+	                          position: "absolute",
+	                          inset: 0,
+	                          pointerEvents: "none",
+	                          zIndex: 5,
+	                          boxShadow: `inset 0 0 0 2px ${panelChromeVisible && i === selectedIdx ? themeColors.accent : "transparent"}`,
+	                        },
                         cursor: "grab",
                       }}
                       onWheel={(i === selectedIdx || fftLinkedZoom) ? (e) => handleGalleryFftWheel(e, i) : undefined}
