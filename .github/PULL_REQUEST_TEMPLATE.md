@@ -84,6 +84,11 @@ https://doi.org/10.1039/d6dd00121a
 - [ ] Histogram UI matches the existing Show2D-style interaction: compact panel,
   no extra whitespace, draggable min/max handles, fast center drag, and no
   visible lag.
+- [ ] New or changed widget interactions have a matching storyboard story in
+  [docs/maintainer/storyboard-&lt;widget&gt;.md](https://github.com/bobleesj/quantem.widget/blob/main/docs/maintainer/storyboard.md)
+  (add stories for new behavior, update stale ones), and the storyboard
+  drive-test was run for the affected widget with the driven story IDs
+  reported.
 
 </details>
 
