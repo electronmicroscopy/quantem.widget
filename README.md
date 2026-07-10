@@ -164,11 +164,16 @@ mirrored in [CLAUDE.md](CLAUDE.md) for agent handoffs.
 
 Use this before opening a widget PR. It is intentionally explicit so human
 contributors and coding agents can both work through it line by line. GitHub
-pre-fills new PR descriptions with this checklist from
-[.github/PULL_REQUEST_TEMPLATE.md](.github/PULL_REQUEST_TEMPLATE.md); check
-every box before requesting review, either verified yourself or checked off by
-a coding agent, and mark items that do not apply as "n/a" with a reason. If you
-edit the checklist here, update the template too.
+pre-fills new PR descriptions from
+[.github/PULL_REQUEST_TEMPLATE.md](.github/PULL_REQUEST_TEMPLATE.md), which
+groups these items into sections (API/docs, UI/theming, performance, data,
+export) — keep the small core checklist, complete only the sections your
+change touches, and delete the rest so reviewers see only relevant boxes.
+Verify each box yourself or have a coding agent verify and check it off. If
+you edit the checklist here, update the template too. The PR workflow follows
+the packaging standards for reproducible scientific software described in
+[scikit-package](https://doi.org/10.1039/d6dd00121a) (S. Lee, C. Myers,
+A. Yang, T. Zhang, Y. Xiao, and S. J. L. Billinge, *Digital Discovery*, 2026).
 
 - [ ] The widget has a small, stable Python API with NumPy-style docs, helpful
   errors, and `(row, col)` coordinate wording where positions are shown.

@@ -2,20 +2,53 @@
 This template mirrors the "Widget PR checklist" in README.md. If you edit one,
 update the other. Links are absolute because relative links do not resolve in
 PR descriptions.
+
+How to use: keep the Core checklist, then expand and complete only the
+sections your change touches. Delete sections that do not apply — a reviewer
+should only see boxes that are relevant to this PR. Either verify each box
+yourself or have a coding agent verify it and check it off for you; mark an
+item that is in a relevant section but does not apply as "n/a — reason".
+
+This PR workflow follows the scientific-software packaging standards described
+in: S. Lee, C. Myers, A. Yang, T. Zhang, Y. Xiao, and S. J. L. Billinge,
+"Scikit-package - software packaging standards and roadmap for sharing
+reproducible scientific software", Digital Discovery (2026).
+https://doi.org/10.1039/d6dd00121a
 -->
 
 ## Summary
 
 <!-- What does this PR change, and why? -->
 
-## Widget PR checklist
+## Core checklist (every PR)
 
-Work through every box before requesting review — either verify it yourself or
-have a coding agent verify it and check it off for you. If an item does not
-apply to this PR, check it and add "n/a — reason" instead of deleting the line.
+- [ ] The change includes focused tests for Python state/export behavior and
+  frontend build coverage where possible; start with `PYTHONPATH=src pytest -q`
+  and `npm run build`, or run `scripts/widget_local_signoff.sh`.
+- [ ] Before committing, inspect `git status --short` and `git diff --stat`;
+  do not commit generated HTML, docs builds, screenshots, local notebooks,
+  private data, or machine-specific notes.
+- [ ] Only the sections below that this PR touches are kept; the rest are
+  deleted from this description.
+
+<details>
+<summary><b>Python API and docs</b> — new widget, loader, or API change</summary>
 
 - [ ] The widget has a small, stable Python API with NumPy-style docs, helpful
   errors, and `(row, col)` coordinate wording where positions are shown.
+- [ ] Documentation includes a minimal tutorial notebook under
+  [docs/tutorials](https://github.com/bobleesj/quantem.widget/tree/main/docs/tutorials)
+  and an API page under
+  [docs/api](https://github.com/bobleesj/quantem.widget/tree/main/docs/api)
+  when a public widget or loader is added.
+- [ ] Tutorial notebooks avoid unnecessary `display(...)` and extra display
+  imports; let the returned widget render naturally.
+
+</details>
+
+<details>
+<summary><b>UI design and theming</b> — frontend / viewer changes</summary>
+
 - [ ] The frontend follows the local viewer patterns instead of inventing a new
   design system; compare against
   [Show2D](https://github.com/bobleesj/quantem.widget/blob/main/docs/tutorials/show2d.ipynb),
@@ -45,6 +78,12 @@ apply to this PR, check it and add "n/a — reason" instead of deleting the line
 - [ ] Histogram UI matches the existing Show2D-style interaction: compact panel,
   no extra whitespace, draggable min/max handles, fast center drag, and no
   visible lag.
+
+</details>
+
+<details>
+<summary><b>Performance and real-time interaction</b> — drag, live controls, big data paths</summary>
+
 - [ ] Any draggable selector has live preview separate from committed widget
   state; use refs/CSS transforms or an equivalent fast path during drag. See
   [performance notes](https://github.com/bobleesj/quantem.widget/blob/main/docs/maintainer/widget-performance.md).
@@ -76,8 +115,16 @@ apply to this PR, check it and add "n/a — reason" instead of deleting the line
 - [ ] Expensive work avoids Python/kernel round trips during pointer movement;
   use WebGPU, typed arrays, cached indexes, workers, or throttled schedulers
   where the widget interaction requires live feedback.
+
+</details>
+
+<details>
+<summary><b>Data honesty and repo size</b> — data loaders, tutorial data, CI fixtures</summary>
+
 - [ ] Large scientific data stays honest about precision and size: do not
   silently crop, bin, downsample, quantize, or materialize sparse zeros.
+- [ ] Any binning/downsampling is explicit in the API and documentation, with
+  the reducer named clearly, for example mean, sum, or display-scaled `uint8`.
 - [ ] Keep `main` lightweight: small real rendered examples are fine, but large
   tutorial arrays or HTML payloads should be generated during docs builds or
   downloaded from public data hosting only when the size justifies it.
@@ -89,8 +136,12 @@ apply to this PR, check it and add "n/a — reason" instead of deleting the line
 - [ ] CI should test data-loading protocol with tiny deterministic fixtures or
   monkeypatched downloads. Full real-data downloads are reserved for docs builds,
   release signoff, or local performance checks that explicitly opt in.
-- [ ] Any binning/downsampling is explicit in the API and documentation, with
-  the reducer named clearly, for example mean, sum, or display-scaled `uint8`.
+
+</details>
+
+<details>
+<summary><b>Export and saved state</b> — HTML export, widget state, sharing</summary>
+
 - [ ] The widget exposes `export_html(path=None, title=None, mode="single",
   encoding="full", downsample=None)` when it can be exported. Follow the
   [HTML export protocol](https://github.com/bobleesj/quantem.widget/blob/main/docs/api/html-export.md).
@@ -106,16 +157,13 @@ apply to this PR, check it and add "n/a — reason" instead of deleting the line
 - [ ] GitHub sharing is treated separately from live HTML: GitHub notebook
   previews should use static compressed widget pictures, never heavy live widget
   state. See [GitHub preview](https://github.com/bobleesj/quantem.widget/blob/main/docs/github-preview.md).
-- [ ] Documentation includes a minimal tutorial notebook under
-  [docs/tutorials](https://github.com/bobleesj/quantem.widget/tree/main/docs/tutorials)
-  and an API page under
-  [docs/api](https://github.com/bobleesj/quantem.widget/tree/main/docs/api)
-  when a public widget or loader is added.
-- [ ] Tutorial notebooks avoid unnecessary `display(...)` and extra display
-  imports; let the returned widget render naturally.
-- [ ] The change includes focused tests for Python state/export behavior and
-  frontend build coverage where possible; start with `PYTHONPATH=src pytest -q`
-  and `npm run build`, or run `scripts/widget_local_signoff.sh`.
-- [ ] Before committing, inspect `git status --short` and `git diff --stat`;
-  do not commit generated HTML, docs builds, screenshots, local notebooks,
-  private data, or machine-specific notes.
+
+</details>
+
+---
+
+This PR workflow follows the packaging standards for reproducible scientific
+software described in [scikit-package](https://doi.org/10.1039/d6dd00121a):
+S. Lee, C. Myers, A. Yang, T. Zhang, Y. Xiao, and S. J. L. Billinge,
+*Digital Discovery* (2026), DOI
+[10.1039/d6dd00121a](https://doi.org/10.1039/d6dd00121a).
