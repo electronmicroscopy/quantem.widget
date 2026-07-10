@@ -163,8 +163,12 @@ mirrored in [CLAUDE.md](CLAUDE.md) for agent handoffs.
 ### Widget PR checklist
 
 Use this before opening a widget PR. It is intentionally explicit so human
-contributors and coding agents can both copy it into a PR description and work
-through it line by line.
+contributors and coding agents can both work through it line by line. GitHub
+pre-fills new PR descriptions with this checklist from
+[.github/PULL_REQUEST_TEMPLATE.md](.github/PULL_REQUEST_TEMPLATE.md); check
+every box before requesting review, either verified yourself or checked off by
+a coding agent, and mark items that do not apply as "n/a" with a reason. If you
+edit the checklist here, update the template too.
 
 - [ ] The widget has a small, stable Python API with NumPy-style docs, helpful
   errors, and `(row, col)` coordinate wording where positions are shown.
