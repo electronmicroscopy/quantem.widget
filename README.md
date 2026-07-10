@@ -309,6 +309,12 @@ A. Yang, T. Zhang, Y. Xiao, and S. J. L. Billinge, *Digital Discovery*, 2026).
 - [ ] Before committing, inspect `git status --short` and `git diff --stat`;
   do not commit generated HTML, docs builds, screenshots, local notebooks,
   private data, or machine-specific notes.
+- [ ] Committed notebooks carry NO baked widget state (`metadata.widgets`) and
+  pass `scripts/check_notebook_sizes.py`. The docs CI executes tutorials at
+  build time (`execute_notebooks: force` in `docs/_config.yml`) and bakes
+  widget state into the published HTML only — never commit a re-executed
+  notebook with stored widget state, and never switch the docs build to
+  `cache` mode (it silently drops widget state and blanks every widget).
 
 ## Issues
 

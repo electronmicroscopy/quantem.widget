@@ -40,3 +40,13 @@ docs: update HTML export protocol
 Keep commit messages single-line unless the user or reviewer asks for a body.
 Preserve the user's configured Git author and committer identity. Do not add
 `Co-authored-by` trailers unless explicitly requested.
+
+## Notebooks
+
+Committed tutorial notebooks must carry NO baked widget state
+(`metadata.widgets`) and must pass `scripts/check_notebook_sizes.py`. The docs
+CI executes tutorials at build time (`execute_notebooks: force` in
+`docs/_config.yml`) and bakes widget state into the published HTML only. Never
+commit a re-executed notebook with stored widget state, and never switch the
+docs build to `cache` mode — jupyter-cache silently drops widget state and
+every widget on the docs site goes blank.
