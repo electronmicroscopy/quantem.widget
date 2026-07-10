@@ -50,3 +50,11 @@ CI executes tutorials at build time (`execute_notebooks: force` in
 commit a re-executed notebook with stored widget state, and never switch the
 docs build to `cache` mode — jupyter-cache silently drops widget state and
 every widget on the docs site goes blank.
+
+Built docs pages must show exactly ONE output per widget cell: the interactive
+widget. Every docs build sets `QUANTEM_WIDGET_STATIC_FALLBACK=0` (see
+widget-docs.yml and widget_local_signoff.sh) so the saved-notebook static
+preview sibling is never emitted — it would render as a duplicate image under
+the live widget. Set the same variable in any new docs/CI build path, and
+after changing widget display or save-state code, check built pages for zero
+`img.quantem-static-fallback` occurrences.
