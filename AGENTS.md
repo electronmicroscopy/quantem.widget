@@ -17,8 +17,15 @@ them to code, commits, issues, and PRs:
 - NumPy-style docstrings for public Python APIs; pytest tests with
   case comments in the `# C1: condition, expect ...` style.
 - Never force-push a branch under active review; append commits and use
-  `git revert` to undo. Self-review the diff before requesting review.
+  `git revert` to undo. Force-pushing rewrites the commits reviewers already
+  commented on: inline comments detach to "outdated", GitHub can no longer
+  show the "changes since your last review" diff (forcing a full re-review of
+  the whole PR each round), and anyone with the branch checked out breaks.
+  The maintainer squash-merges, so branch tidiness is never worth those
+  costs. Self-review the diff before requesting review.
 - Use `git mv` for moves and never commit OS junk (`.DS_Store`, `._*`).
+- For Git/GitHub onboarding, tutorials, and workflow walkthroughs (Colab
+  included), see https://github.com/ophusgroup/dev.
 
 ## Commit Messages
 

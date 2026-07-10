@@ -159,13 +159,18 @@ This repository follows the
 for reproducible scientific software: issue-first development (a PR closes a
 GitHub issue that states the problem), one small themed PR per issue,
 Conventional Commit-style messages, NumPy-style docstrings, self-reviewed
-PRs, and no force-pushing a branch under active review. Human contributors
+PRs, and no force-pushing a branch under active review (rewritten commits
+detach the reviewer's inline comments and destroy the incremental
+"changes since last review" diff — append commits and `git revert` instead;
+we squash-merge, so branch tidiness costs nothing). Human contributors
 and coding agents/LLMs alike should apply these standards when writing code,
 commits, issues, and PRs — the same rules are mirrored in
 [AGENTS.md](AGENTS.md) and [CLAUDE.md](CLAUDE.md) so automated contributors
 pick them up. Reference: S. Lee, C. Myers, A. Yang, T. Zhang, Y. Xiao, and
 S. J. L. Billinge, *Digital Discovery*, 2026,
-[doi:10.1039/d6dd00121a](https://doi.org/10.1039/d6dd00121a).
+[doi:10.1039/d6dd00121a](https://doi.org/10.1039/d6dd00121a). For Git/GitHub
+tutorials and workflow onboarding, see
+[ophusgroup/dev](https://github.com/ophusgroup/dev).
 
 ### Commit messages
 

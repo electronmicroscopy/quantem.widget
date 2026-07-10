@@ -4,6 +4,17 @@
 enough. A good contribution should keep the Python API, frontend bundle, saved
 widget state, standalone HTML export, and documentation in sync.
 
+## Branches and review
+
+Work on a small themed branch per issue and open the PR from it. Once a PR is
+under review, **do not force-push the branch**: rewriting history detaches the
+reviewer's inline comments to "outdated", removes GitHub's "changes since your
+last review" diff so the reviewer must re-read the whole PR, and breaks any
+local checkout of the branch. Push ordinary follow-up commits instead and use
+`git revert` to undo; the merge is squashed, so a messy branch history costs
+nothing. New to the Git/GitHub workflow? Start with the tutorials in
+[ophusgroup/dev](https://github.com/ophusgroup/dev).
+
 ## Setup
 
 Use Python 3.11 or newer and Node.js 22 when possible:
