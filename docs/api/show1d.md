@@ -43,6 +43,27 @@ widget = Show1D.from_loss_runs(
 )
 ```
 
+## Automatic Jump Detection
+
+Use `detect_jumps` to mark abrupt increases or decreases while preserving every
+original sample:
+
+```python
+events = widget.detect_jumps(
+    threshold=8.0,
+    min_abs_change=10.0,
+    min_separation=1,
+)
+```
+
+The detector scores consecutive-point slopes with a robust median/MAD baseline.
+It analyzes each contiguous finite trace segment independently, accounts for
+uneven x spacing, and suppresses weaker adjacent candidates. It does not bin,
+smooth, or modify the plotted values. Detected increases and decreases become
+colored plot markers and are recorded under `report_metadata["detected_jumps"]`.
+Manual markers are preserved; call `clear_detected_jumps()` to remove only the
+automatically generated markers.
+
 For joint-time ptychography, add snapshots at checkpoint iterations with
 multiple named images such as `object_t0`, `object_t5`, `object_t11`, and
 `probe`. The frontend treats each call to `snapshot(...)` as one grouped
@@ -205,8 +226,8 @@ no console error, no NaN frame).
 
 | Control | Trait | Expected effect |
 |---|---|---|
-| Trace hover | read-only canvas overlay | Nearest trace point is highlighted and reported |
-| Trace or legend click | `focused_trace` | Selected trace remains emphasized; clicking it again or double-clicking the plot restores all traces |
+| Trace hover | read-only canvas overlay, local snapshot preview | Nearest trace point is highlighted and reported; when a snapshot group has the same x value, its images and group label preview in the side panel |
+| Trace or legend click | `focused_trace`, `selected_snapshot_group_idx` | A trace-point click pins its matching snapshot group and emphasizes the trace; a legend click only emphasizes the trace, and double-clicking the plot restores all traces |
 | Plot corner drag | `plot_height_px`, `side_panel_width_px` | Bottom-right loss-plot handle resizes plot height and reallocates width between the loss plot and snapshot panel |
 | Reset view | `x_range`, `y_range`, `focused_trace` | Plot returns to full data extent |
 | Grid toggle | `show_grid` | Grid lines show/hide |
@@ -224,7 +245,8 @@ no console error, no NaN frame).
 | Snapshot profile toggle | `show_snapshot_profile`, `snapshot_profile_line`, `snapshot_profile_height` | Draws a shared `(row, col)` line profile on reconstruction panels and compares visible panel intensities below the image grid |
 | Snapshot columns menu | `snapshot_columns` | Snapshot object/probe image grid uses automatic overview columns or a fixed 1-8 columns |
 | Snapshot FFT overlay position | `snapshot_overlay_position` | FFT inset overlays can sit in any corner; drag the inset to snap it to the nearest corner or set top-left, top-right, bottom-left, or bottom-right from Python |
-| Snapshot grid corner drag | `snapshot_panel_width_px` | Resizes reconstruction panels from the grid corner while keeping controls aligned to the snapshot width |
+| Snapshot panel corner drag | `snapshot_panel_width_px` | Every real snapshot tile has a Show2D-style corner grip; dragging any grip changes one shared tile size, keeps all panels equal, preserves the selected column count, and keeps controls aligned to the grid width |
+| Snapshot playback star | `bookmarked_snapshot_groups`; `star_snapshot_group()`, `unstar_snapshot_group()`, `toggle_snapshot_group_star()`, `clear_snapshot_group_stars()` | Marks important reconstruction iterations in the playback timeline; starred positions render as gold timeline marks and persist in widget state/HTML export |
 | Snapshot star button | `starred_snapshot_image_labels` | In Review mode, marks candidate reconstructions to revisit while sweeping lambda or denoising settings |
 | Snapshot hide button | `hidden_snapshot_image_labels` | In Review mode, hides bad trials from the snapshot grid, loss plot, legend, and stats |
 | Show all hidden trials | `hidden_snapshot_image_labels` | In Review mode, restores hidden reconstruction trials |

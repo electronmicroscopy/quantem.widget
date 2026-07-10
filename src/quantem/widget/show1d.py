@@ -276,6 +276,10 @@ class Show1D(anywidget.AnyWidget):
     snapshot_bounce : bool, default False
         Reverse direction at snapshot endpoints instead of wrapping from the
         final group back to the first.
+    bookmarked_snapshot_groups : sequence of int, optional
+        Zero-based snapshot-group indices starred in the playback timeline.
+        Use :meth:`star_snapshot_group` and related methods to update them after
+        construction.
     snapshot_thumbnail_size : int, default 48
         Size of plot-embedded snapshot thumbnails in pixels.
     snapshot_panel_width_px : int, default 0
@@ -397,6 +401,7 @@ class Show1D(anywidget.AnyWidget):
     n_snapshot_groups = traitlets.Int(0).tag(sync=True)
     selected_snapshot_idx = traitlets.Int(-1).tag(sync=True)
     selected_snapshot_group_idx = traitlets.Int(-1).tag(sync=True)
+    bookmarked_snapshot_groups = traitlets.List(traitlets.Int()).tag(sync=True)
     show_snapshots = traitlets.Bool(True).tag(sync=True)
     show_snapshot_thumbnails = traitlets.Bool(True).tag(sync=True)
     show_snapshot_histogram = traitlets.Bool(True).tag(sync=True)
@@ -510,6 +515,7 @@ class Show1D(anywidget.AnyWidget):
         snapshot_histogram_height: int = 52,
         snapshot_loop: bool = True,
         snapshot_bounce: bool = False,
+        bookmarked_snapshot_groups: Sequence[int] | None = None,
         starred_snapshot_image_labels: Sequence[str] | None = None,
         hidden_snapshot_image_labels: Sequence[str] | None = None,
         trial_notes: Mapping[str, str] | None = None,
@@ -623,6 +629,9 @@ class Show1D(anywidget.AnyWidget):
         self.snapshot_histogram_height = max(36, min(110, int(snapshot_histogram_height)))
         self.snapshot_loop = bool(snapshot_loop)
         self.snapshot_bounce = bool(snapshot_bounce)
+        self.bookmarked_snapshot_groups = self._normalise_snapshot_group_indices(
+            bookmarked_snapshot_groups or []
+        )
         self.starred_snapshot_image_labels = self._normalise_trial_labels(starred_snapshot_image_labels or [])
         self.hidden_snapshot_image_labels = self._normalise_trial_labels(hidden_snapshot_image_labels or [])
         self.trial_notes = self._normalise_trial_notes(trial_notes or {})
@@ -1450,6 +1459,204 @@ class Show1D(anywidget.AnyWidget):
         self.markers = []
         return self
 
+    def detect_jumps(
+        self,
+        *,
+        threshold: float = 8.0,
+        min_abs_change: float = 0.0,
+        min_separation: int = 1,
+        replace: bool = True,
+    ) -> list[dict[str, Any]]:
+        """Detect abrupt increases and decreases without smoothing the traces.
+
+        Consecutive finite points are converted to slopes using their actual
+        x spacing. Each contiguous finite segment is scored independently with
+        a robust median and median absolute deviation (MAD). Nearby candidates
+        are reduced to the strongest event so a one-point spike is not reported
+        as two separate jumps.
+
+        Parameters
+        ----------
+        threshold : float, default 8.0
+            Minimum absolute robust z-score for a reported jump.
+        min_abs_change : float, default 0.0
+            Minimum absolute raw y change between consecutive points.
+        min_separation : int, default 1
+            Suppress weaker candidates within this many point indices of a
+            stronger event in the same trace.
+        replace : bool, default True
+            Replace markers created by an earlier ``detect_jumps`` call while
+            preserving manually added markers.
+
+        Returns
+        -------
+        list of dict
+            Detected events in trace/point order. Each event contains its trace,
+            point index, x/y values, raw delta, slope, robust score, and
+            increase/decrease direction.
+
+        Notes
+        -----
+        The detector uses every original point. It does not bin, smooth, or
+        modify the displayed data. NaNs split traces into independent segments,
+        so folder or acquisition boundaries do not create synthetic jumps.
+        """
+
+        threshold = float(threshold)
+        min_abs_change = float(min_abs_change)
+        min_separation = int(min_separation)
+        if not math.isfinite(threshold) or threshold <= 0:
+            raise ValueError(f"threshold must be finite and > 0, got {threshold}")
+        if not math.isfinite(min_abs_change) or min_abs_change < 0:
+            raise ValueError(
+                "min_abs_change must be finite and >= 0, "
+                f"got {min_abs_change}"
+            )
+        if min_separation < 0:
+            raise ValueError(
+                f"min_separation must be >= 0, got {min_separation}"
+            )
+
+        x = np.asarray(self._effective_x(), dtype=np.float64)
+        data = np.asarray(self._data, dtype=np.float64)
+        events: list[dict[str, Any]] = []
+        epsilon = np.finfo(np.float64).eps
+
+        for trace_index, values in enumerate(data):
+            finite_indices = np.flatnonzero(np.isfinite(x) & np.isfinite(values))
+            if finite_indices.size < 5:
+                continue
+            split_at = np.flatnonzero(np.diff(finite_indices) > 1) + 1
+            trace_candidates: list[dict[str, Any]] = []
+            for segment in np.split(finite_indices, split_at):
+                if segment.size < 5:
+                    continue
+                previous = segment[:-1]
+                current = segment[1:]
+                delta_x = x[current] - x[previous]
+                delta_y = values[current] - values[previous]
+                valid = np.isfinite(delta_x) & np.isfinite(delta_y) & (delta_x != 0)
+                if np.count_nonzero(valid) < 4:
+                    continue
+
+                previous = previous[valid]
+                current = current[valid]
+                delta_x = delta_x[valid]
+                delta_y = delta_y[valid]
+                slopes = delta_y / delta_x
+                center = float(np.median(slopes))
+                mad = float(np.median(np.abs(slopes - center)))
+                scale = 1.4826 * mad
+                if scale <= epsilon:
+                    magnitude = max(1.0, float(np.max(np.abs(slopes))))
+                    scale = epsilon * magnitude
+                scores = (slopes - center) / scale
+
+                for idx, score in enumerate(scores):
+                    delta = float(delta_y[idx])
+                    if abs(float(score)) < threshold:
+                        continue
+                    if abs(delta) < min_abs_change or abs(delta) <= epsilon:
+                        continue
+                    point_index = int(current[idx])
+                    previous_index = int(previous[idx])
+                    trace_label = (
+                        str(self.labels[trace_index])
+                        if trace_index < len(self.labels)
+                        else f"trace {trace_index + 1}"
+                    )
+                    trace_candidates.append(
+                        {
+                            "trace_index": trace_index,
+                            "trace_label": trace_label,
+                            "point_index": point_index,
+                            "previous_point_index": previous_index,
+                            "x": float(x[point_index]),
+                            "previous_x": float(x[previous_index]),
+                            "y": float(values[point_index]),
+                            "previous_y": float(values[previous_index]),
+                            "delta": delta,
+                            "slope": float(slopes[idx]),
+                            "score": float(score),
+                            "direction": "increase" if score > 0 else "decrease",
+                        }
+                    )
+
+            selected: list[dict[str, Any]] = []
+            for candidate in sorted(
+                trace_candidates,
+                key=lambda event: abs(float(event["score"])),
+                reverse=True,
+            ):
+                point_index = int(candidate["point_index"])
+                if any(
+                    abs(point_index - int(event["point_index"]))
+                    <= min_separation
+                    for event in selected
+                ):
+                    continue
+                selected.append(candidate)
+            events.extend(sorted(selected, key=lambda event: int(event["point_index"])))
+
+        events.sort(
+            key=lambda event: (
+                int(event["trace_index"]),
+                int(event["point_index"]),
+            )
+        )
+        unit = f" {self.y_unit}" if self.y_unit else ""
+        event_markers = [
+            {
+                "x": float(event["x"]),
+                "label": (
+                    f"{event['trace_label']}: "
+                    f"{float(event['delta']):+.3g}{unit}"
+                ),
+                "kind": str(event["direction"]),
+                "source": "auto-jump",
+                "trace_index": int(event["trace_index"]),
+                "point_index": int(event["point_index"]),
+                "delta": float(event["delta"]),
+                "score": float(event["score"]),
+            }
+            for event in events
+        ]
+        existing_markers = [dict(marker) for marker in self.markers]
+        if replace:
+            existing_markers = [
+                marker
+                for marker in existing_markers
+                if marker.get("source") != "auto-jump"
+            ]
+        self.markers = existing_markers + event_markers
+
+        metadata = dict(self.report_metadata)
+        metadata["jump_detection"] = {
+            "method": "first-difference-median-mad",
+            "threshold": threshold,
+            "min_abs_change": min_abs_change,
+            "min_separation": min_separation,
+            "uses_raw_points": True,
+            "event_count": len(events),
+        }
+        metadata["detected_jumps"] = events
+        self.report_metadata = _json_safe(metadata)
+        return events
+
+    def clear_detected_jumps(self) -> Self:
+        """Remove auto-detected jump markers while preserving manual markers."""
+
+        self.markers = [
+            dict(marker)
+            for marker in self.markers
+            if marker.get("source") != "auto-jump"
+        ]
+        metadata = dict(self.report_metadata)
+        metadata.pop("jump_detection", None)
+        metadata.pop("detected_jumps", None)
+        self.report_metadata = metadata
+        return self
+
     def play(self, *, loop: bool | None = None, bounce: bool | None = None) -> Self:
         """Start cycling through snapshot groups in the frontend."""
 
@@ -1597,6 +1804,38 @@ class Show1D(anywidget.AnyWidget):
 
         self.starred_snapshot_image_labels = []
         self._update_trial_analysis()
+        return self
+
+    def star_snapshot_group(self, group: int | str | None = None) -> Self:
+        """Star a snapshot group/iteration in the playback timeline."""
+
+        group_idx = self._normalise_snapshot_group_ref(group)
+        self.bookmarked_snapshot_groups = self._normalise_snapshot_group_indices(
+            [*self.bookmarked_snapshot_groups, group_idx]
+        )
+        return self
+
+    def unstar_snapshot_group(self, group: int | str | None = None) -> Self:
+        """Remove a snapshot group/iteration star from the playback timeline."""
+
+        group_idx = self._normalise_snapshot_group_ref(group)
+        self.bookmarked_snapshot_groups = [
+            idx for idx in self.bookmarked_snapshot_groups if int(idx) != group_idx
+        ]
+        return self
+
+    def toggle_snapshot_group_star(self, group: int | str | None = None) -> Self:
+        """Toggle the playback-timeline star for a snapshot group/iteration."""
+
+        group_idx = self._normalise_snapshot_group_ref(group)
+        if group_idx in self.bookmarked_snapshot_groups:
+            return self.unstar_snapshot_group(group_idx)
+        return self.star_snapshot_group(group_idx)
+
+    def clear_snapshot_group_stars(self) -> Self:
+        """Remove every snapshot-group star from the playback timeline."""
+
+        self.bookmarked_snapshot_groups = []
         return self
 
     def hide_trial(self, label: str) -> Self:
@@ -1979,6 +2218,7 @@ class Show1D(anywidget.AnyWidget):
             "markers": list(self.markers),
             "selected_snapshot_idx": self.selected_snapshot_idx,
             "selected_snapshot_group_idx": self.selected_snapshot_group_idx,
+            "bookmarked_snapshot_groups": list(self.bookmarked_snapshot_groups),
             "show_snapshots": self.show_snapshots,
             "show_snapshot_thumbnails": self.show_snapshot_thumbnails,
             "show_snapshot_histogram": self.show_snapshot_histogram,
@@ -2068,6 +2308,8 @@ class Show1D(anywidget.AnyWidget):
                     value = bool(value)
                 elif key == "snapshot_bounce":
                     value = bool(value)
+                elif key == "bookmarked_snapshot_groups":
+                    value = self._normalise_snapshot_group_indices(value or [])
                 elif key == "snapshot_profile_line":
                     value = self._normalise_profile_line(value)
                 elif key == "snapshot_profile_height":
@@ -2391,6 +2633,27 @@ class Show1D(anywidget.AnyWidget):
         if not 0 <= idx < self.n_snapshot_groups:
             raise ValueError(f"snapshot group index {idx} out of range [0, {self.n_snapshot_groups})")
         return idx
+
+    @staticmethod
+    def _normalise_snapshot_group_indices(groups: Sequence[int]) -> list[int]:
+        """Return sorted, unique, non-negative snapshot-group indices."""
+
+        out: set[int] = set()
+        for value in groups:
+            try:
+                idx = int(value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "bookmarked_snapshot_groups must contain integer indices, "
+                    f"got {value!r}"
+                ) from exc
+            if idx < 0:
+                raise ValueError(
+                    "bookmarked_snapshot_groups must contain non-negative "
+                    f"indices, got {idx}"
+                )
+            out.add(idx)
+        return sorted(out)
 
     def _snapshot_image_indices_for_group(self, group: int | str | None = None) -> list[int]:
         group_idx = self._normalise_snapshot_group_ref(group)

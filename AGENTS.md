@@ -130,6 +130,11 @@ scientific acronyms, detector labels, and file-format names uppercase when the
 uppercase form is the term users recognize, such as `FFT`, `ROI`, `BF`, `ABF`,
 `ADF`, `HTML`, `PNG`, `GIF`, and `MP4`.
 
+For Show1D scientific image and snapshot panels, use `viridis` or `magma` as
+the default colormap. Prefer `viridis` for real-space intensity and `magma` for
+FFT or magnitude views when the workflow does not specify a stronger domain
+convention. Always preserve an explicit user-selected colormap.
+
 ## Agent Handoff Reporting
 
 Whenever an agent finishes a concrete task, the final update must clearly state:

@@ -41,8 +41,16 @@ const SHOW1D_TO_SHOW2D_LINKED_TRAITS = [
 type Marker = {
   x?: number;
   label?: string;
+  mobile_label?: string;
   kind?: string;
 };
+
+function markerColor(marker: Marker, colors: ReturnType<typeof useTheme>["colors"]): string {
+  if (marker.kind === "increase") return "#00897b";
+  if (marker.kind === "decrease") return "#d1495b";
+  if (marker.kind === "checkpoint") return "#f59e0b";
+  return colors.textMuted;
+}
 
 type ProfilePoint = {
   row?: number;
@@ -161,6 +169,7 @@ type Show1DInitialInteractiveState = {
   yRange: number[];
   selectedSnapshotIdx: number;
   selectedSnapshotGroupIdx: number;
+  bookmarkedSnapshotGroups: number[];
   hiddenSnapshotImageLabels: string[];
   showSnapshotFft: boolean;
   snapshotFftLayout: string;
@@ -244,6 +253,7 @@ const snapshotContrastPresets = [
 const MIN_SIDE_PANEL_WIDTH = 300;
 const MAX_SIDE_PANEL_WIDTH = 4096;
 const MIN_SNAPSHOT_VIEWPORT_WIDTH = 220;
+const MIN_SNAPSHOT_TILE_WIDTH = 48;
 const MAX_SNAPSHOT_VIEWPORT_WIDTH = 4096;
 const MIN_PLOT_WIDTH = 220;
 const MIN_PLOT_HEIGHT = 220;
@@ -2512,9 +2522,11 @@ function Show1DWidget() {
   const [trialRankings] = useModelState<TrialRanking[]>("trial_rankings");
   const [snapshotGroupIndices] = useModelState<number[]>("snapshot_group_indices");
   const [snapshotGroupIterations] = useModelState<number[]>("snapshot_group_iterations");
+  const [snapshotGroupLabels] = useModelState<string[]>("snapshot_group_labels");
   const [nSnapshotGroups] = useModelState<number>("n_snapshot_groups");
   const [selectedSnapshotIdx, setSelectedSnapshotIdx] = useModelState<number>("selected_snapshot_idx");
   const [selectedSnapshotGroupIdx, setSelectedSnapshotGroupIdx] = useModelState<number>("selected_snapshot_group_idx");
+  const [bookmarkedSnapshotGroups, setBookmarkedSnapshotGroups] = useModelState<number[]>("bookmarked_snapshot_groups");
   const [showSnapshots] = useModelState<boolean>("show_snapshots");
   const [showSnapshotThumbnails] = useModelState<boolean>("show_snapshot_thumbnails");
   const [showSnapshotFft, setShowSnapshotFft] = useModelState<boolean>("show_snapshot_fft");
@@ -2564,6 +2576,36 @@ function Show1DWidget() {
   const [resetBaselineReady, setResetBaselineReady] = React.useState(false);
 
   const { colors: themeColors } = useTheme(Boolean(offlineForTheme));
+  const snapshotPanelResizeGripSx = React.useMemo(() => ({
+    position: "absolute",
+    right: 0,
+    bottom: 0,
+    width: 18,
+    height: 18,
+    cursor: "nwse-resize",
+    opacity: 0.8,
+    pointerEvents: "auto",
+    touchAction: "none",
+    background: "transparent",
+    clipPath: "polygon(100% 0, 100% 100%, 0 100%)",
+    zIndex: 6,
+    "&::before": {
+      content: '""',
+      position: "absolute",
+      right: 2,
+      bottom: 3,
+      width: 16,
+      height: 2,
+      borderRadius: 999,
+      backgroundColor: themeColors.accent,
+      transform: "rotate(-45deg)",
+      transformOrigin: "right bottom",
+      boxShadow: `0 -5px 0 ${themeColors.accent}, 0 -10px 0 ${themeColors.accent}`,
+      filter: "drop-shadow(0 0 1px rgba(0,0,0,0.85))",
+      pointerEvents: "none",
+    },
+    "&:hover, &:focus-visible": { opacity: 1, outline: "none" },
+  }), [themeColors.accent]);
   const yData = React.useMemo(() => safeFloat32(yBytes, Math.max(0, nTraces * nPoints)), [yBytes, nTraces, nPoints]);
   const xData = React.useMemo(() => safeFloat32(xBytes, Math.max(0, nPoints)), [xBytes, nPoints]);
   const snapshotData = React.useMemo(
@@ -2703,7 +2745,8 @@ function Show1DWidget() {
     x: number;
     y: number;
     width: number;
-    gridAspect: number;
+    columns: number;
+    tileAspect: number;
   } | null>(null);
   const snapshotViewportWidthRef = React.useRef(0);
   const histogramSlotRef = React.useRef(9000 + Math.floor(Math.random() * 100000));
@@ -2718,6 +2761,7 @@ function Show1DWidget() {
   const snapshotBounceDirectionRef = React.useRef<1 | -1>(1);
   const hoverRafRef = React.useRef<number | null>(null);
   const pendingHoverRef = React.useRef<HoverPoint | null>(null);
+  const pendingHoverSnapshotGroupRef = React.useRef<number | null | undefined>(undefined);
   const [exportAnchor, setExportAnchor] = React.useState<HTMLElement | null>(null);
   const [viewMenuAnchor, setViewMenuAnchor] = React.useState<HTMLElement | null>(null);
   const [exportBusy, setExportBusy] = React.useState(false);
@@ -2784,6 +2828,9 @@ function Show1DWidget() {
       groupCount - 1,
     )
     : -1;
+  const selectedGroupLabel = selectedGroup >= 0
+    ? snapshotGroupLabels?.[selectedGroup] || `Snapshot ${selectedGroup + 1}`
+    : "";
   const selectedGroupAllImageIndices = selectedGroup >= 0 ? (snapshotGroups[selectedGroup] ?? []) : [];
   const selectedGroupImageIndices = selectedGroupAllImageIndices
     .filter((imageIdx) => !isSnapshotImageHidden(imageIdx))
@@ -2803,6 +2850,16 @@ function Show1DWidget() {
     : selectedSnapshot >= 0 && snapshotIterations?.length > selectedSnapshot
       ? snapshotIterations[selectedSnapshot]
       : null;
+  const normalisedBookmarkedSnapshotGroups = React.useMemo(() => {
+    const groups = new Set<number>();
+    for (const raw of bookmarkedSnapshotGroups ?? []) {
+      const value = Math.round(Number(raw));
+      if (Number.isFinite(value) && value >= 0 && value < groupCount) groups.add(value);
+    }
+    return Array.from(groups).sort((a, b) => a - b);
+  }, [bookmarkedSnapshotGroups, groupCount]);
+  const currentSnapshotGroupBookmarked = selectedGroup >= 0
+    && normalisedBookmarkedSnapshotGroups.includes(selectedGroup);
   const sidePanelVisible = (showSnapshots && hasSnapshots) || hasProfileImage || showStats;
   const plotTitleVisible = false;
   const htmlSize = formatEstimatedHtmlSize((nTraces * nPoints + nSnapshots * snapshotHeight * snapshotWidth + profileImageHeight * profileImageWidth) * 4);
@@ -2816,23 +2873,31 @@ function Show1DWidget() {
     : rawSidePanelWidth;
   const rawSnapshotPanelWidth = Number.isFinite(snapshotPanelWidthPx) ? Number(snapshotPanelWidthPx) : 0;
   const requestedSidePanelWidth = rawSnapshotPanelWidth > 0
-    ? Math.max(autoSidePanelWidth, rawSnapshotPanelWidth)
+    ? rawSnapshotPanelWidth
     : autoSidePanelWidth;
   const availableSidePanelWidth = Math.round(clampValue(
     Math.min(MAX_SIDE_PANEL_WIDTH, mainGridSize.width - MIN_PLOT_WIDTH),
     MIN_SIDE_PANEL_WIDTH,
     MAX_SIDE_PANEL_WIDTH,
   ));
+  const sidePanelWidth = Math.round(clampValue(requestedSidePanelWidth, MIN_SIDE_PANEL_WIDTH, availableSidePanelWidth));
   const availableSnapshotViewportWidth = Math.round(clampValue(
-    Math.min(MAX_SNAPSHOT_VIEWPORT_WIDTH, availableSidePanelWidth),
+    Math.min(MAX_SNAPSHOT_VIEWPORT_WIDTH, sidePanelWidth),
     MIN_SNAPSHOT_VIEWPORT_WIDTH,
     MAX_SNAPSHOT_VIEWPORT_WIDTH,
   ));
-  const sidePanelWidth = Math.round(clampValue(requestedSidePanelWidth, MIN_SIDE_PANEL_WIDTH, availableSidePanelWidth));
   const rawSnapshotColumnCount = Math.round(clampValue(Number.isFinite(snapshotColumns) ? snapshotColumns : 0, 0, 8));
   const snapshotColumnCount = rawSnapshotColumnCount > 0
     ? rawSnapshotColumnCount
     : autoSnapshotColumnsForCount(selectedGroupImageIndices.length);
+  const selectedImageColumns = Math.max(
+    1,
+    Math.min(snapshotColumnCount, Math.max(1, selectedGroupImageIndices.length)),
+  );
+  const minimumSnapshotViewportWidth = Math.min(
+    availableSnapshotViewportWidth,
+    Math.max(MIN_SIDE_PANEL_WIDTH, selectedImageColumns * MIN_SNAPSHOT_TILE_WIDTH),
+  );
   const resolvedSnapshotOverlayPosition = normaliseSnapshotOverlayPosition(snapshotOverlayPosition);
   const resolvedSnapshotFftLayout = normaliseSnapshotFftLayout(snapshotFftLayout);
   const viewportShellHeight = { xs: "none", md: "calc(100vh - 8px)" };
@@ -3041,12 +3106,26 @@ function Show1DWidget() {
     setHiddenSnapshotImageLabels([]);
   }, [setHiddenSnapshotImageLabels]);
 
-  const scheduleHover = React.useCallback((value: HoverPoint | null) => {
+  const toggleCurrentSnapshotGroupBookmark = React.useCallback(() => {
+    if (selectedGroup < 0 || selectedGroup >= groupCount) return;
+    const next = new Set(normalisedBookmarkedSnapshotGroups);
+    if (next.has(selectedGroup)) next.delete(selectedGroup);
+    else next.add(selectedGroup);
+    setBookmarkedSnapshotGroups(Array.from(next).sort((a, b) => a - b));
+  }, [groupCount, normalisedBookmarkedSnapshotGroups, selectedGroup, setBookmarkedSnapshotGroups]);
+
+  const scheduleHover = React.useCallback((value: HoverPoint | null, snapshotGroupIdx?: number | null) => {
     pendingHoverRef.current = value;
+    pendingHoverSnapshotGroupRef.current = snapshotGroupIdx;
     if (hoverRafRef.current !== null) return;
     hoverRafRef.current = window.requestAnimationFrame(() => {
       hoverRafRef.current = null;
       setHover(pendingHoverRef.current);
+      const nextGroup = pendingHoverSnapshotGroupRef.current;
+      if (nextGroup !== undefined && hoverSnapshotGroupRef.current !== nextGroup) {
+        hoverSnapshotGroupRef.current = nextGroup;
+        setHoverSnapshotGroupIdx(nextGroup);
+      }
     });
   }, []);
 
@@ -3127,23 +3206,30 @@ function Show1DWidget() {
   }, [hasSnapshots, setPlotHeightPx, setSidePanelWidthPx, setSnapshotPanelWidthPx, showSnapshots, sidePanelVisible, sidePanelWidth]);
 
   const setSnapshotViewportWidth = React.useCallback((width: number) => {
+    const maximumResizableWidth = Math.min(
+      MAX_SNAPSHOT_VIEWPORT_WIDTH,
+      availableSidePanelWidth,
+    );
     const nextWidth = Math.round(clampValue(
       width,
-      Math.min(MIN_SNAPSHOT_VIEWPORT_WIDTH, availableSnapshotViewportWidth),
-      availableSnapshotViewportWidth,
+      minimumSnapshotViewportWidth,
+      maximumResizableWidth,
     ));
     setSnapshotPanelWidthPx(nextWidth);
-    if (sidePanelVisible && nextWidth > sidePanelWidth) {
+    if (sidePanelVisible) {
       setSidePanelWidthUserAdjusted(true);
-      setSidePanelWidthPx(Math.min(nextWidth, availableSidePanelWidth));
+      setSidePanelWidthPx(Math.round(clampValue(
+        nextWidth,
+        MIN_SIDE_PANEL_WIDTH,
+        availableSidePanelWidth,
+      )));
     }
   }, [
     availableSidePanelWidth,
-    availableSnapshotViewportWidth,
+    minimumSnapshotViewportWidth,
     setSidePanelWidthPx,
     setSnapshotPanelWidthPx,
     sidePanelVisible,
-    sidePanelWidth,
   ]);
 
   const handleSnapshotGridResizePointerDown = React.useCallback((event: React.PointerEvent<HTMLDivElement>) => {
@@ -3155,27 +3241,41 @@ function Show1DWidget() {
     const fallbackGridWidth = snapshotViewportWidthRef.current || sidePanelWidth;
     const gridWidth = Math.max(1, gridRect?.width ?? fallbackGridWidth);
     const gridHeight = Math.max(1, gridRect?.height ?? gridWidth);
+    const columns = Math.max(1, selectedImageColumns);
+    const rows = Math.max(1, Math.ceil(Math.max(1, selectedGroupImageIndices.length) / columns));
+    const tileWidth = gridWidth / columns;
+    const tileHeight = gridHeight / rows;
     snapshotResizePointerIdRef.current = pointerId;
     snapshotResizeStartRef.current = {
       x: event.clientX,
       y: event.clientY,
       width: snapshotViewportWidthRef.current || gridWidth,
-      gridAspect: gridHeight / gridWidth,
+      columns,
+      tileAspect: tileHeight / Math.max(1, tileWidth),
     };
     event.currentTarget.setPointerCapture(pointerId);
+    let resizeFrame = 0;
+    let latestWidth = snapshotResizeStartRef.current.width;
     const handleWindowPointerMove = (moveEvent: PointerEvent) => {
       const start = snapshotResizeStartRef.current;
       if (snapshotResizePointerIdRef.current !== pointerId || !start) return;
       moveEvent.preventDefault();
-      const gridAspect = Math.max(1e-6, start.gridAspect);
-      const deltaX = moveEvent.clientX - start.x;
-      const deltaY = (moveEvent.clientY - start.y) / gridAspect;
-      const delta = Math.abs(deltaX) >= Math.abs(deltaY) ? deltaX : deltaY;
-      setSnapshotViewportWidth(start.width + delta);
+      const deltaTileX = moveEvent.clientX - start.x;
+      const deltaTileY = (moveEvent.clientY - start.y) / Math.max(1e-6, start.tileAspect);
+      const deltaTile = Math.abs(deltaTileX) >= Math.abs(deltaTileY) ? deltaTileX : deltaTileY;
+      latestWidth = start.width + deltaTile * start.columns;
+      if (resizeFrame) return;
+      resizeFrame = window.requestAnimationFrame(() => {
+        resizeFrame = 0;
+        setSnapshotViewportWidth(latestWidth);
+      });
     };
     const handleWindowPointerUp = (upEvent: PointerEvent) => {
       if (snapshotResizePointerIdRef.current !== pointerId) return;
       upEvent.preventDefault();
+      if (resizeFrame) window.cancelAnimationFrame(resizeFrame);
+      resizeFrame = 0;
+      setSnapshotViewportWidth(latestWidth);
       snapshotResizeCleanupRef.current?.();
       snapshotResizeCleanupRef.current = null;
     };
@@ -3183,13 +3283,15 @@ function Show1DWidget() {
     window.addEventListener("pointerup", handleWindowPointerUp, { capture: true });
     window.addEventListener("pointercancel", handleWindowPointerUp, { capture: true });
     snapshotResizeCleanupRef.current = () => {
+      if (resizeFrame) window.cancelAnimationFrame(resizeFrame);
+      resizeFrame = 0;
       window.removeEventListener("pointermove", handleWindowPointerMove, { capture: true });
       window.removeEventListener("pointerup", handleWindowPointerUp, { capture: true });
       window.removeEventListener("pointercancel", handleWindowPointerUp, { capture: true });
       snapshotResizePointerIdRef.current = null;
       snapshotResizeStartRef.current = null;
     };
-  }, [setSnapshotViewportWidth, sidePanelWidth]);
+  }, [selectedGroupImageIndices.length, selectedImageColumns, setSnapshotViewportWidth, sidePanelWidth]);
 
   React.useEffect(() => {
     if (snapshotThumbnailSize !== thumbnailSize) setSnapshotThumbnailSize(thumbnailSize);
@@ -3250,6 +3352,7 @@ function Show1DWidget() {
         yRange: copyNumberArray(yRange),
         selectedSnapshotIdx: Number.isFinite(selectedSnapshotIdx) ? selectedSnapshotIdx : -1,
         selectedSnapshotGroupIdx: Number.isFinite(selectedSnapshotGroupIdx) ? selectedSnapshotGroupIdx : -1,
+        bookmarkedSnapshotGroups: copyNumberArray(bookmarkedSnapshotGroups),
         hiddenSnapshotImageLabels: copyStringArray(hiddenSnapshotImageLabels),
         showSnapshotFft: Boolean(showSnapshotFft),
         snapshotFftLayout: String(snapshotFftLayout || "overlay"),
@@ -3276,6 +3379,7 @@ function Show1DWidget() {
     return () => window.clearTimeout(timeout);
   }, [
     focusedTrace,
+    bookmarkedSnapshotGroups,
     hiddenSnapshotImageLabels,
     imageCmap,
     logScale,
@@ -3315,7 +3419,13 @@ function Show1DWidget() {
   React.useEffect(() => {
     if (
       hoverSnapshotGroupIdx === null
-      || (showSnapshotThumbnails && hasSnapshots && groupCount > 0 && hoverSnapshotGroupIdx < groupCount && !snapshotPlaying)
+      || (
+        hasSnapshots
+        && groupCount > 0
+        && hoverSnapshotGroupIdx >= 0
+        && hoverSnapshotGroupIdx < groupCount
+        && !snapshotPlaying
+      )
     ) {
       return;
     }
@@ -3325,7 +3435,6 @@ function Show1DWidget() {
     groupCount,
     hasSnapshots,
     hoverSnapshotGroupIdx,
-    showSnapshotThumbnails,
     snapshotPlaying,
   ]);
 
@@ -3717,21 +3826,27 @@ function Show1DWidget() {
       ctx.globalAlpha = 1;
     }
 
-    for (const marker of markers ?? []) {
+    const plotMarkers = markers ?? [];
+    for (let markerIndex = 0; markerIndex < plotMarkers.length; markerIndex += 1) {
+      const marker = plotMarkers[markerIndex];
       if (!Number.isFinite(marker.x)) continue;
       const x = dataToX(Number(marker.x), geom);
       if (x < geom.left || x > geom.left + geom.plotW) continue;
-      ctx.strokeStyle = marker.kind === "checkpoint" ? "#f59e0b" : themeColors.textMuted;
+      const color = markerColor(marker, themeColors);
+      ctx.strokeStyle = color;
       ctx.setLineDash([5, 4]);
       ctx.beginPath();
       ctx.moveTo(x, geom.top);
       ctx.lineTo(x, geom.top + geom.plotH);
       ctx.stroke();
       ctx.setLineDash([]);
-      if (marker.label) {
-        ctx.fillStyle = themeColors.textMuted;
+      const markerLabel = geom.plotW < 520 && marker.mobile_label !== undefined
+        ? marker.mobile_label
+        : marker.label;
+      if (markerLabel) {
+        ctx.fillStyle = color;
         ctx.font = "10px system-ui, sans-serif";
-        ctx.fillText(marker.label, x + 4, geom.top + 12);
+        ctx.fillText(markerLabel, x + 4, geom.top + 12 + (markerIndex % 3) * 12);
       }
     }
 
@@ -3928,17 +4043,35 @@ function Show1DWidget() {
     return best;
   }, [hiddenTraceSet, nPoints, nTraces, xData, yData, logScale]);
 
+  const snapshotGroupForPoint = React.useCallback((point: HoverPoint | null): number | null => {
+    if (!point || !hasSnapshots || groupCount <= 0) return null;
+    const tolerance = Math.max(1e-5, Math.abs(point.x) * 1e-6);
+    let bestGroup: number | null = null;
+    let bestDistance = Number.POSITIVE_INFINITY;
+    for (let groupIdx = 0; groupIdx < groupCount; groupIdx += 1) {
+      const iteration = Number(snapshotGroupIterations?.[groupIdx]);
+      if (!Number.isFinite(iteration)) continue;
+      const distance = Math.abs(iteration - point.x);
+      if (distance <= tolerance && distance < bestDistance) {
+        bestDistance = distance;
+        bestGroup = groupIdx;
+      }
+    }
+    return bestGroup;
+  }, [groupCount, hasSnapshots, snapshotGroupIterations]);
+
   const handlePointerMove = React.useCallback((event: React.PointerEvent<HTMLCanvasElement>) => {
     if (previewPlotThumbnailAtPointer(event.clientX, event.clientY)) {
       scheduleHover(null);
       return;
     }
-    scheduleHover(nearestPoint(event.clientX, event.clientY));
-  }, [nearestPoint, previewPlotThumbnailAtPointer, scheduleHover]);
+    const point = nearestPoint(event.clientX, event.clientY);
+    scheduleHover(point, snapshotGroupForPoint(point));
+  }, [nearestPoint, previewPlotThumbnailAtPointer, scheduleHover, snapshotGroupForPoint]);
 
   const handlePointerLeave = React.useCallback(() => {
     clearPlotThumbnailPreview();
-    scheduleHover(null);
+    scheduleHover(null, null);
   }, [clearPlotThumbnailPreview, scheduleHover]);
 
   const handleClick = React.useCallback((event: React.MouseEvent<HTMLCanvasElement>) => {
@@ -3946,8 +4079,11 @@ function Show1DWidget() {
       scheduleHover(null);
       return;
     }
-    if (hover) setFocusedTrace(hover.trace);
-  }, [commitPlotThumbnailAtPointer, hover, scheduleHover, setFocusedTrace]);
+    const point = nearestPoint(event.clientX, event.clientY) ?? hover;
+    const snapshotGroup = snapshotGroupForPoint(point);
+    if (snapshotGroup !== null) selectSnapshotGroup(snapshotGroup);
+    if (point) setFocusedTrace(point.trace);
+  }, [commitPlotThumbnailAtPointer, hover, nearestPoint, scheduleHover, selectSnapshotGroup, setFocusedTrace, snapshotGroupForPoint]);
 
   const setSnapshotRealSpaceView = React.useCallback((view: ImageViewApiState) => {
     setSnapshotRealSpaceZoom(view.zoom);
@@ -3984,6 +4120,7 @@ function Show1DWidget() {
     setFocusedTrace(initial.focusedTrace);
     setSelectedSnapshotIdx(initial.selectedSnapshotIdx);
     setSelectedSnapshotGroupIdx(initial.selectedSnapshotGroupIdx);
+    setBookmarkedSnapshotGroups([...initial.bookmarkedSnapshotGroups]);
     setTransientSnapshotGroupIdx(null);
     setHoverSnapshotGroupIdx(null);
     setHoverSnapshotImageIdx(null);
@@ -4018,6 +4155,7 @@ function Show1DWidget() {
     setExportAnchor(null);
   }, [
     setFocusedTrace,
+    setBookmarkedSnapshotGroups,
     setHiddenSnapshotImageLabels,
     setImageCmap,
     setLogScale,
@@ -4067,6 +4205,7 @@ function Show1DWidget() {
       || !numberArraysEqual(yRange, initial.yRange)
       || selectedSnapshotIdx !== initial.selectedSnapshotIdx
       || selectedSnapshotGroupIdx !== initial.selectedSnapshotGroupIdx
+      || !numberArraysEqual(bookmarkedSnapshotGroups, initial.bookmarkedSnapshotGroups)
       || !stringArraysEqual(hiddenSnapshotImageLabels, initial.hiddenSnapshotImageLabels)
       || showSnapshotFft !== initial.showSnapshotFft
       || snapshotFftLayout !== initial.snapshotFftLayout
@@ -4090,6 +4229,7 @@ function Show1DWidget() {
     );
   }, [
     focusedTrace,
+    bookmarkedSnapshotGroups,
     hiddenSnapshotImageLabels,
     imageCmap,
     logScale,
@@ -4217,12 +4357,27 @@ function Show1DWidget() {
     }));
   }, [setHandoffRequest]);
 
-  const snapshotSliderMarks = React.useMemo(
-    () => groupCount > 1 && groupCount <= 24 ? Array.from({ length: groupCount }, (_, value) => ({ value })) : [],
-    [groupCount],
-  );
+  const snapshotSliderMarks = React.useMemo(() => {
+    const values = groupCount > 1 && groupCount <= 24
+      ? Array.from({ length: groupCount }, (_, value) => value)
+      : normalisedBookmarkedSnapshotGroups;
+    return values.map((value) => ({ value }));
+  }, [groupCount, normalisedBookmarkedSnapshotGroups]);
+  const snapshotBookmarkMarkStyles = React.useMemo(() => {
+    const styles: Record<string, unknown> = {};
+    for (const value of normalisedBookmarkedSnapshotGroups) {
+      const markIndex = snapshotSliderMarks.findIndex((mark) => mark.value === value);
+      if (markIndex < 0) continue;
+      styles[`& .MuiSlider-mark[data-index="${markIndex}"]`] = {
+        bgcolor: "#ffc107",
+        width: 7,
+        height: 7,
+        zIndex: 1,
+      };
+    }
+    return styles;
+  }, [normalisedBookmarkedSnapshotGroups, snapshotSliderMarks]);
   const snapshotTimelineWidth = Math.round(clampValue(140 + Math.min(Math.max(groupCount, 1), 18) * 6, 180, 240));
-  const selectedImageColumns = Math.max(1, Math.min(snapshotColumnCount, Math.max(1, selectedGroupImageIndices.length)));
   const snapshotTileWidth = Math.max(
     1,
     ...selectedGroupImageIndices.map((imageIdx) => snapshotWidths?.[imageIdx] || snapshotWidth || 1),
@@ -4248,11 +4403,17 @@ function Show1DWidget() {
   const snapshotManualViewportWidth = rawSnapshotPanelWidth > 0
     ? Math.round(rawSnapshotPanelWidth)
     : 0;
-  const snapshotViewportWidth = Math.round(clampValue(
-    snapshotManualViewportWidth || Math.min(snapshotNaturalViewportWidth, snapshotFitAllViewportWidth),
-    Math.min(120, snapshotFullViewMaxWidth),
-    snapshotFullViewMaxWidth,
-  ));
+  const snapshotViewportWidth = snapshotManualViewportWidth > 0
+    ? Math.round(clampValue(
+      snapshotManualViewportWidth,
+      minimumSnapshotViewportWidth,
+      availableSnapshotViewportWidth,
+    ))
+    : Math.round(clampValue(
+      Math.min(snapshotNaturalViewportWidth, snapshotFitAllViewportWidth),
+      Math.min(minimumSnapshotViewportWidth, snapshotFullViewMaxWidth),
+      snapshotFullViewMaxWidth,
+    ));
   snapshotViewportWidthRef.current = snapshotViewportWidth;
   const snapshotViewportSx = {
     width: "100%",
@@ -4269,7 +4430,7 @@ function Show1DWidget() {
   const snapshotHistogramDisplayHeight = Math.round(clampValue(Number.isFinite(snapshotHistogramHeight) ? snapshotHistogramHeight : 52, 36, 110));
   const snapshotPanelContentHeight = showSnapshots && hasSnapshots
     ? snapshotGridHeight
-      + 32
+      + 58
       + (showSnapshotProfile ? snapshotProfilePlotHeight : 0)
       + (selectedSnapshot >= 0 ? snapshotHistogramDisplayHeight + 42 : 0)
       + (showStats ? 130 : 0)
@@ -4794,6 +4955,22 @@ function Show1DWidget() {
             )}
             {showSnapshots && hasSnapshots && (
               <Box sx={snapshotViewportSx}>
+                <Typography
+                  data-testid="show1d-snapshot-group-label"
+                  title={selectedGroupLabel}
+                  sx={{
+                    px: 0.5,
+                    py: 0.25,
+                    minHeight: 22,
+                    color: themeColors.text,
+                    fontSize: 11,
+                    fontWeight: 600,
+                    lineHeight: 1.25,
+                    overflowWrap: "anywhere",
+                  }}
+                >
+                  {selectedGroupLabel}
+                </Typography>
                 <Box
                   data-testid="show1d-snapshot-grid"
                   ref={snapshotGridRef}
@@ -4823,6 +5000,7 @@ function Show1DWidget() {
                     return (
                       <Box
                         key={imageIdx}
+                        data-testid={`show1d-snapshot-panel-${imageIdx}`}
                         title={imageLabel}
                         onMouseEnter={() => setHoverSnapshotImageIdx(imageIdx)}
                         onMouseOver={() => setHoverSnapshotImageIdx(imageIdx)}
@@ -4926,6 +5104,18 @@ function Show1DWidget() {
                         >
                           <VisibilityOffIcon sx={{ fontSize: 15 }} />
                         </IconButton>
+                        {controlsVisible && (
+                          <Box
+                            className="show1d-snapshot-panel-resize-handle"
+                            data-testid={`show1d-snapshot-panel-resize-${imageIdx}`}
+                            role="separator"
+                            aria-label={`Resize all snapshot panels from ${imageLabel}`}
+                            aria-orientation="horizontal"
+                            title="Resize all snapshot panels"
+                            onPointerDown={handleSnapshotGridResizePointerDown}
+                            sx={snapshotPanelResizeGripSx}
+                          />
+                        )}
                       </Box>
                     );
                   })}
@@ -4955,39 +5145,6 @@ function Show1DWidget() {
                       </Button>
                     </Box>
                   )}
-                  <Box
-                    className="show1d-snapshot-grid-resize-handle"
-                    data-testid="show1d-snapshot-grid-resize"
-                    aria-hidden="true"
-                    onPointerDown={handleSnapshotGridResizePointerDown}
-                    sx={{
-                      position: "absolute",
-                      right: 0,
-                      bottom: 0,
-                      width: 30,
-                      height: 30,
-                      zIndex: 8,
-                      cursor: "nwse-resize",
-                      opacity: 0.76,
-                      pointerEvents: "auto",
-                      touchAction: "none",
-                      "&::before": {
-                        content: '""',
-                        position: "absolute",
-                        right: 6,
-                        bottom: 6,
-                        width: 12,
-                        height: 12,
-                        borderRight: "2px solid rgba(255,255,255,0.86)",
-                        borderBottom: "2px solid rgba(255,255,255,0.86)",
-                        filter: "drop-shadow(0 0 2px rgba(0,0,0,0.7))",
-                      },
-                      "&:hover, &:focus-visible": {
-                        opacity: 1,
-                        outline: "none",
-                      },
-                    }}
-                  />
                 </Box>
                 {showSnapshotProfile && isFiniteProfilePoint(snapshotProfileLine?.[0]) && isFiniteProfilePoint(snapshotProfileLine?.[1]) && selectedGroupImageIndices.length > 0 && (
                   <Box sx={{ width: "100%" }}>
@@ -5014,7 +5171,8 @@ function Show1DWidget() {
                   sx={{
                     ...controlRow,
                     width: `min(100%, ${SNAPSHOT_PLAYBACK_CONTROL_WIDTH}px)`,
-                    flexWrap: "nowrap",
+                    flexWrap: { xs: "wrap", md: "nowrap" },
+                    rowGap: 0.25,
                     border: `1px solid ${themeColors.border}`,
                     bgcolor: themeColors.controlBg,
                     mb: 0.5,
@@ -5109,9 +5267,38 @@ function Show1DWidget() {
                     valueLabelDisplay="auto"
                     valueLabelFormat={(value) => `${Number(value) + 1}/${Math.max(1, groupCount)}`}
                     onChange={(_, value) => selectSnapshotGroup(Array.isArray(value) ? value[0] : value)}
-                    sx={{ ...sliderStyles.small, flex: "0 1 auto", width: `${snapshotTimelineWidth}px`, minWidth: 140, color: themeColors.accent, "& .MuiSlider-mark": { bgcolor: themeColors.accent, width: 4, height: 4, borderRadius: "50%", top: "50%", transform: "translate(-50%, -50%)" } }}
+                    sx={{
+                      ...sliderStyles.small,
+                      flex: { xs: "1 1 100%", md: "0 1 auto" },
+                      width: { xs: "100%", md: `${snapshotTimelineWidth}px` },
+                      minWidth: { xs: 0, md: 140 },
+                      mx: { xs: 0.75, md: 0 },
+                      color: themeColors.accent,
+                      "& .MuiSlider-mark": { bgcolor: themeColors.accent, width: 4, height: 4, borderRadius: "50%", top: "50%", transform: "translate(-50%, -50%)" },
+                      ...snapshotBookmarkMarkStyles,
+                    }}
                     aria-label={`Current snapshot group (${Math.max(0, selectedGroup) + 1} of ${Math.max(1, groupCount)})`}
                   />
+                  <IconButton
+                    size="small"
+                    onClick={toggleCurrentSnapshotGroupBookmark}
+                    disabled={selectedGroup < 0}
+                    aria-pressed={currentSnapshotGroupBookmarked}
+                    aria-label={`${currentSnapshotGroupBookmarked ? "Unstar" : "Star"} snapshot group ${Math.max(0, selectedGroup) + 1}`}
+                    title={`${currentSnapshotGroupBookmarked ? "Unstar" : "Star"} snapshot group ${Math.max(0, selectedGroup) + 1}`}
+                    sx={{
+                      color: currentSnapshotGroupBookmarked ? "#ffc107" : themeColors.textMuted,
+                      p: 0.25,
+                      width: 22,
+                      height: 22,
+                      flexShrink: 0,
+                      "&:hover": { color: currentSnapshotGroupBookmarked ? "#ffc107" : themeColors.text },
+                    }}
+                  >
+                    <Box component="span" sx={{ fontSize: 18, lineHeight: "18px" }}>
+                      {currentSnapshotGroupBookmarked ? "★" : "☆"}
+                    </Box>
+                  </IconButton>
                 </Box>
                 {selectedSnapshot >= 0 && (
                   <Box sx={{ mb: 0.75, width: "fit-content", maxWidth: "100%", alignSelf: "flex-start" }}>

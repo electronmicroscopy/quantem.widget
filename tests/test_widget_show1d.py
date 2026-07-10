@@ -39,6 +39,65 @@ def test_show1d_live_append_adds_traces_and_exports_csv(tmp_path: pathlib.Path) 
     assert rows[2] == "1.0,1.5,0.01"
 
 
+def test_show1d_detect_jumps_uses_raw_points_and_preserves_manual_markers() -> None:
+    data = np.asarray(
+        [
+            [0, 0, 0, 0, 50, 0, 0, 0, 0, 0, np.nan, np.nan],
+            [np.nan, np.nan, np.nan, np.nan, np.nan, 10, 10, 10, -60, -60, -60, -60],
+        ],
+        dtype=np.float32,
+    )
+    widget = Show1D(
+        data,
+        x=np.arange(data.shape[1]),
+        labels=["spike", "drop"],
+        y_unit="nm",
+    )
+    widget.add_marker(6, label="manual", kind="group")
+
+    events = widget.detect_jumps(threshold=8, min_separation=1)
+
+    assert [(event["trace_label"], event["point_index"]) for event in events] == [
+        ("spike", 4),
+        ("drop", 8),
+    ]
+    assert [event["direction"] for event in events] == ["increase", "decrease"]
+    assert [event["delta"] for event in events] == [50.0, -70.0]
+    assert widget.markers[0] == {
+        "x": 6.0,
+        "label": "manual",
+        "kind": "group",
+    }
+    assert [marker["source"] for marker in widget.markers[1:]] == [
+        "auto-jump",
+        "auto-jump",
+    ]
+    assert widget.report_metadata["jump_detection"] == {
+        "method": "first-difference-median-mad",
+        "threshold": 8.0,
+        "min_abs_change": 0.0,
+        "min_separation": 1,
+        "uses_raw_points": True,
+        "event_count": 2,
+    }
+
+    widget.clear_detected_jumps()
+
+    assert widget.markers == [{"x": 6.0, "label": "manual", "kind": "group"}]
+    assert "detected_jumps" not in widget.report_metadata
+
+
+def test_show1d_detect_jumps_validates_configuration() -> None:
+    widget = Show1D(np.arange(8, dtype=np.float32))
+
+    with np.testing.assert_raises(ValueError):
+        widget.detect_jumps(threshold=0)
+    with np.testing.assert_raises(ValueError):
+        widget.detect_jumps(min_abs_change=-1)
+    with np.testing.assert_raises(ValueError):
+        widget.detect_jumps(min_separation=-1)
+
+
 def test_show1d_live_extend_batches_reactive_trace_updates() -> None:
     widget = Show1D.live(["loss"], title="Adam loss")
 
@@ -143,6 +202,62 @@ def test_show1d_snapshots_keep_iteration_labels() -> None:
     assert widget.n_snapshot_groups == 2
     assert widget.selected_snapshot_idx == 1
     assert widget.selected_snapshot_group_idx == 1
+
+
+def test_show1d_snapshot_group_stars_persist_and_validate() -> None:
+    widget = Show1D.live(["loss"], bookmarked_snapshot_groups=[3, 3, 1])
+    widget.snapshot(0, image=np.ones((3, 4), dtype=np.float32), label="start")
+    widget.snapshot(10, image=np.full((3, 4), 2.0, dtype=np.float32), label="checkpoint")
+
+    assert widget.bookmarked_snapshot_groups == [1, 3]
+    assert widget.star_snapshot_group("start") is widget
+    assert widget.bookmarked_snapshot_groups == [0, 1, 3]
+    assert widget.toggle_snapshot_group_star("checkpoint") is widget
+    assert widget.bookmarked_snapshot_groups == [0, 3]
+    assert widget.toggle_snapshot_group_star(1) is widget
+    assert widget.bookmarked_snapshot_groups == [0, 1, 3]
+    assert widget.unstar_snapshot_group() is widget
+    assert widget.bookmarked_snapshot_groups == [0, 3]
+
+    restored = Show1D.live(["loss"])
+    restored.snapshot(0, image=np.ones((3, 4), dtype=np.float32), label="start")
+    restored.snapshot(10, image=np.full((3, 4), 2.0, dtype=np.float32), label="checkpoint")
+    restored.load_state_dict(widget.state_dict())
+    assert restored.bookmarked_snapshot_groups == [0, 3]
+    assert restored.clear_snapshot_group_stars() is restored
+    assert restored.bookmarked_snapshot_groups == []
+
+    with np.testing.assert_raises(ValueError):
+        Show1D(np.arange(4, dtype=np.float32), bookmarked_snapshot_groups=[-1])
+    with np.testing.assert_raises(ValueError):
+        Show1D(np.arange(4, dtype=np.float32), bookmarked_snapshot_groups=["bad"])
+
+
+def test_show1d_frontend_stars_current_snapshot_group_contract() -> None:
+    source = (
+        pathlib.Path(__file__).resolve().parents[1] / "js" / "show1d" / "index.tsx"
+    ).read_text(encoding="utf-8")
+
+    assert 'useModelState<number[]>("bookmarked_snapshot_groups")' in source
+    assert "const toggleCurrentSnapshotGroupBookmark" in source
+    assert "aria-pressed={currentSnapshotGroupBookmarked}" in source
+    assert 'currentSnapshotGroupBookmarked ? "Unstar" : "Star"' in source
+    assert 'bgcolor: "#ffc107"' in source
+
+
+def test_show1d_frontend_resizes_snapshot_tiles_like_show2d_contract() -> None:
+    source = (
+        pathlib.Path(__file__).resolve().parents[1] / "js" / "show1d" / "index.tsx"
+    ).read_text(encoding="utf-8")
+
+    assert 'data-testid={`show1d-snapshot-panel-resize-${imageIdx}`}' in source
+    assert 'title="Resize all snapshot panels"' in source
+    assert "deltaTile * start.columns" in source
+    assert "window.requestAnimationFrame" in source
+    assert "const maximumResizableWidth" in source
+    assert "setSidePanelWidthPx(Math.round(clampValue(" in source
+    assert "nextWidth > sidePanelWidth" not in source
+    assert 'data-testid="show1d-snapshot-grid-resize"' not in source
 
 
 def test_show1d_display_public_api_state_and_validation() -> None:
@@ -764,7 +879,11 @@ def test_show1d_watch_run_polls_joint_ptycho_monitor_with_object_probe_snapshots
             },
         )
 
-        _wait_until(lambda: widget.n_points == 2 and widget.n_snapshot_groups == 2)
+        _wait_until(
+            lambda: widget.n_points == 2
+            and widget.n_snapshot_groups == 2
+            and widget.report_metadata.get("monitor_events") == 2
+        )
         assert widget.report_metadata["monitor_events"] == 2
         assert widget.best_trial_label == "lambda 1"
         assert widget.starred_snapshot_image_labels == ["lambda 1"]
