@@ -226,14 +226,17 @@ def radial_profile_px(
     flat_i = frame.astype(np.float64).ravel()
     keep = None if mask is None else ~mask.ravel()
     if angular_range is not None:
-        theta = np.degrees(np.arctan2(d_row, d_col)).ravel() % 360.0
         start, end = float(angular_range[0]) % 360.0, float(angular_range[1]) % 360.0
-        wedge = (
-            (theta >= start) & (theta <= end)
-            if start <= end
-            else ((theta >= start) | (theta <= end))
-        )
-        keep = wedge if keep is None else keep & wedge
+        span = abs(float(angular_range[1]) - float(angular_range[0]))
+        # full-circle span: no angular restriction
+        if span < 360.0 and start != end:
+            theta = np.degrees(np.arctan2(d_row, d_col)).ravel() % 360.0
+            wedge = (
+                (theta >= start) & (theta <= end)
+                if start <= end
+                else ((theta >= start) | (theta <= end))
+            )
+            keep = wedge if keep is None else keep & wedge
     if keep is not None:
         flat_r, flat_i = flat_r[keep], flat_i[keep]
 
@@ -293,7 +296,8 @@ def ring_sectors(
     theta = np.degrees(np.arctan2(d_row, d_col)) % 360.0
     sector = np.minimum((theta[selected] / (360.0 / n_theta)).astype(int), n_theta - 1)
     intensity = frame[selected]
-    weight = intensity - intensity.min()
+    # median pedestal, negatives clipped
+    weight = np.clip(intensity - np.median(intensity), 0.0, None)
     counts = np.bincount(sector, minlength=n_theta).astype(np.float64)
     intensity_sum = np.bincount(sector, weights=intensity, minlength=n_theta)
     weight_sum = np.bincount(sector, weights=weight, minlength=n_theta)
