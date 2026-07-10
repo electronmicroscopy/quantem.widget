@@ -21,6 +21,16 @@ type RoiShape = "rect" | "circle" | "ellipse";
 type Roi = { row: number; col: number; height: number; width: number; shape?: RoiShape };
 type DragMode = "roi-move" | "roi-resize" | "map-pan" | "band-move" | "band-left" | "band-right" | null;
 type EdsLineHint = { element: string; line: string; family?: string; energy_keV: number; intensity?: number };
+type ElementCandidate = {
+  element: string;
+  n_peaks: number;
+  n_lines: number;
+  n_missing_strong: number;
+  mean_err_ev: number;
+  net_counts?: number;
+  missing_strong?: string[];
+  lines?: { line: string; energy_keV: number }[];
+};
 type SavedRoi = Roi & { name?: string };
 type SavedBand = { name?: string; start: number; end: number };
 type ExportPreset = { label?: string; mode?: string; downsample?: number; binning?: number; description?: string };
@@ -1618,6 +1628,9 @@ function ShowEDS() {
   const [lineHints] = useModelState<EdsLineHint[]>("line_hints");
   const [selectedElements, setSelectedElements] = useModelState<string[]>("selected_elements");
   const [autoIdentify, setAutoIdentify] = useModelState<boolean>("auto_identify");
+  const [elementCandidates] = useModelState<ElementCandidate[]>("element_candidates");
+  const [detectStatus] = useModelState<string>("detect_status");
+  const [detectBusy, setDetectBusy] = React.useState(false);
   const [showDebug, setShowDebug] = useModelState<boolean>("show_debug");
   const [backendSummary, setBackendSummary] = React.useState<{ map?: string; spectrum?: string }>({});
   const [debugControlVisible] = useModelState<boolean>("debug_control_visible");
@@ -2031,27 +2044,10 @@ function ShowEDS() {
       .sort((a, b) => (b.intensity ?? 0) - (a.intensity ?? 0))
       .slice(0, 10);
   }, [bandEnergyHi, bandEnergyLo, candidateLines, energy, nEnergy, selectedLineHints, spectrumView.end, spectrumView.start]);
-  const autoElementScores = React.useMemo(() => {
-    if (!autoIdentify || !roiSpectrum || !Array.isArray(lineHints) || energy.length < 2) return [];
-    const lo = Math.min(bandEnergyLo, bandEnergyHi);
-    const hi = Math.max(bandEnergyLo, bandEnergyHi);
-    const byElement = new Map<string, { symbol: string; score: number; lines: EdsLineHint[] }>();
-    for (const line of lineHints) {
-      if (!Number.isFinite(line.energy_keV) || line.energy_keV < lo || line.energy_keV > hi) continue;
-      const idx = Math.max(0, Math.min(nEnergy - 1, Math.round(energyToIndex(energy, line.energy_keV))));
-      const value = Math.max(0, Number(roiSpectrum[idx] ?? 0));
-      const score = value * Math.max(0.05, line.intensity ?? 0.1);
-      const symbol = normalizeElementSymbol(line.element);
-      const prev = byElement.get(symbol) || { symbol, score: 0, lines: [] };
-      prev.score += score;
-      prev.lines.push(line);
-      byElement.set(symbol, prev);
-    }
-    return [...byElement.values()]
-      .filter((item) => item.score > 0)
-      .sort((a, b) => b.score - a.score)
-      .slice(0, 6);
-  }, [autoIdentify, bandEnergyHi, bandEnergyLo, energy, lineHints, nEnergy, roiSpectrum]);
+  const kernelCandidates = React.useMemo(() => {
+    if (!Array.isArray(elementCandidates)) return [];
+    return elementCandidates.filter((item) => item && typeof item.element === "string");
+  }, [elementCandidates]);
   const toggleSelectedElement = React.useCallback((symbol: string) => {
     const clean = normalizeElementSymbol(symbol);
     if (!clean || !elementsWithLines.has(clean)) return;
@@ -2060,6 +2056,14 @@ function ShowEDS() {
       : [...safeSelectedElements, clean];
     setSelectedElements(next);
   }, [elementsWithLines, safeSelectedElements, selectedElementSet, setSelectedElements]);
+  const toggleCandidateElement = React.useCallback((symbol: string) => {
+    const clean = normalizeElementSymbol(symbol);
+    if (!clean) return;
+    const next = selectedElementSet.has(clean)
+      ? safeSelectedElements.filter((item) => item !== clean)
+      : [...safeSelectedElements, clean];
+    setSelectedElements(next);
+  }, [safeSelectedElements, selectedElementSet, setSelectedElements]);
   const selectOnlyElement = React.useCallback((symbol: string) => {
     const clean = normalizeElementSymbol(symbol);
     if (!clean || !elementsWithLines.has(clean)) return;
@@ -2390,6 +2394,8 @@ function ShowEDS() {
       } else if (content.type === "spectrum" && first) {
         setRoiSpectrum(extractFloat32(first, nEnergy));
         setBusy(false);
+      } else if (content.type === "detect_done") {
+        setDetectBusy(false);
       } else if (content.type === "error") {
         setGpuError(content.message || "Kernel-backed EDS compute failed.");
         setBusy(false);
@@ -3474,6 +3480,20 @@ function ShowEDS() {
                     </Typography>
                     <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Auto ID</Typography>
                     <Switch checked={autoIdentify} onChange={(e) => setAutoIdentify(e.target.checked)} size="small" />
+                    {!offlineForTheme && (
+                      <Button
+                        size="small"
+                        variant="outlined"
+                        sx={compactButtonSx}
+                        disabled={detectBusy}
+                        onClick={() => {
+                          setDetectBusy(true);
+                          model.send({ type: "detect_elements", request_id: ++requestIdRef.current, source: "sum" });
+                        }}
+                      >
+                        Detect
+                      </Button>
+                    )}
                     <Button
                       size="small"
                       variant="outlined"
@@ -3496,7 +3516,7 @@ function ShowEDS() {
                     {PERIODIC_ELEMENTS.map((el) => {
                       const enabled = elementsWithLines.has(el.symbol);
                       const selected = selectedElementSet.has(el.symbol);
-                      const scored = autoElementScores.some((item) => item.symbol === el.symbol);
+                      const scored = kernelCandidates.some((item) => item.element === el.symbol);
                       return (
                         <Button
                           key={el.symbol}
@@ -3545,23 +3565,28 @@ function ShowEDS() {
                         Auto-ID candidates
                       </Typography>
                       <Stack direction="row" spacing={0.5} useFlexGap flexWrap="wrap">
-                        {autoElementScores.length === 0 ? (
-                          <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>
-                            Move the band over peaks to rank likely elements.
-                          </Typography>
-                        ) : autoElementScores.map((item) => (
+                        {kernelCandidates.length > 0 ? kernelCandidates.map((item) => (
                           <Button
-                            key={item.symbol}
+                            key={item.element}
                             size="small"
-                            variant={selectedElementSet.has(item.symbol) ? "contained" : "outlined"}
+                            variant={selectedElementSet.has(item.element) ? "contained" : "outlined"}
                             sx={compactButtonSx}
-                            onClick={() => toggleSelectedElement(item.symbol)}
-                            title={`${item.symbol}: ${item.lines.slice(0, 3).map(lineLabel).join(", ")}`}
+                            onClick={() => toggleCandidateElement(item.element)}
+                            title={`${item.element}: ${item.n_peaks} peaks, ${item.n_missing_strong} strong missing, ${Math.round(item.mean_err_ev)} eV mean error`}
                           >
-                            {item.symbol}
+                            {item.element}
                           </Button>
-                        ))}
+                        )) : (
+                          <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>
+                            {offlineForTheme ? "No saved detection results." : "Press Detect to rank likely elements."}
+                          </Typography>
+                        )}
                       </Stack>
+                      {detectStatus ? (
+                        <Typography sx={{ fontSize: 10, color: themeColors.textMuted, mt: 0.5 }}>
+                          {detectStatus}
+                        </Typography>
+                      ) : null}
                     </Box>
                     <Box sx={{ flex: 1.2, minWidth: 0 }}>
                       <Typography sx={{ fontSize: 11, fontWeight: 700, color: themeColors.text, mb: 0.5 }}>

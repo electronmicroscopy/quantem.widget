@@ -8,7 +8,7 @@ import tempfile
 import time
 from dataclasses import dataclass, field
 from functools import lru_cache
-from typing import Any, Self
+from typing import Any, Self, Sequence
 from urllib.parse import quote, unquote
 
 import anywidget
@@ -180,6 +180,351 @@ def eds_line_hints(
         out.append(dict(line))
     out.sort(key=lambda item: (float(item["energy_keV"]), item["element"], _line_priority(item["line"])))
     return out[:max_lines]
+
+
+MN_KA_KEV = 5.8988
+_MIN_FWHM_KEV = 0.02
+
+# Siegbahn line name -> initial level (intensity normalization group)
+_SIEGBAHN_LEVELS = {
+    "La1": "L3",
+    "La2": "L3",
+    "Lb2": "L3",
+    "Lb2,15": "L3",
+    "Lb5": "L3",
+    "Lb6": "L3",
+    "Ll": "L3",
+    "Lb1": "L2",
+    "Lg1": "L2",
+    "Lg5": "L2",
+    "Lg6": "L2",
+    "Ln": "L2",
+    "Lb3": "L1",
+    "Lb4": "L1",
+    "Lg2": "L1",
+    "Lg3": "L1",
+    "Lg4": "L1",
+    "Ma": "M5",
+    "Mz": "M5",
+    "Mb": "M4",
+    "Mg": "M3",
+}
+
+_PRINCIPAL_LEVELS = {"K": "K", "L": "L3", "M": "M5"}
+
+
+def detector_fwhm_kev(
+    energy_kev: float, energy_resolution_mnka: float = 130.0
+) -> float:
+    """Detector FWHM in keV at ``energy_kev`` (Fiori-Newbury model, floored at 0.02 keV)."""
+    variance_ev2 = (
+        2.5 * (energy_kev * 1000.0 - MN_KA_KEV * 1000.0) + energy_resolution_mnka**2
+    )
+    return max(float(np.sqrt(max(variance_ev2, 0.0))) / 1000.0, _MIN_FWHM_KEV)
+
+
+def _boxcar(values: np.ndarray, width: int) -> np.ndarray:
+    width = max(int(width) | 1, 1)
+    padded = np.pad(values, width // 2, mode="edge")
+    kernel = np.full(width, 1.0 / width)
+    return np.convolve(padded, kernel, mode="valid")
+
+
+def snip_background(spectrum: np.ndarray, fwhm_channels: float) -> np.ndarray:
+    """SNIP continuum estimate: LLS clipping on a boxcar-smoothed copy plus a noise-bias add-back."""
+    values = np.clip(np.asarray(spectrum, dtype=np.float64), 0.0, None)
+    width = max(int(round(fwhm_channels)) | 1, 1)
+    smoothed = _boxcar(values, width)
+    lls = np.log(np.log(np.sqrt(smoothed + 1.0) + 1.0) + 1.0)
+    max_window = max(int(round(2.0 * fwhm_channels)), 1)
+    for window in range(max_window, 0, -1):
+        if 2 * window >= lls.size:
+            continue
+        average = 0.5 * (lls[: -2 * window] + lls[2 * window :])
+        lls[window:-window] = np.minimum(lls[window:-window], average)
+    estimate = (np.exp(np.exp(lls) - 1.0) - 1.0) ** 2 - 1.0
+    # min-clipping ratchets onto the noise lower envelope; add back the measured bias
+    noise_scale = np.sqrt(np.clip(estimate, 0.0, None) / width + 1e-12)
+    bias = float(np.median((smoothed - estimate) / noise_scale))
+    return estimate + max(bias, 0.0) * noise_scale
+
+
+def detect_peaks(
+    spectrum: np.ndarray,
+    energy_kev: np.ndarray,
+    *,
+    energy_resolution_mnka: float = 130.0,
+    min_significance: float = 4.0,
+) -> list[dict[str, Any]]:
+    """Significant peaks above the continuum as ``{energy_keV, net_counts, significance}`` dicts."""
+    values = np.nan_to_num(np.asarray(spectrum, dtype=np.float64), posinf=0.0, neginf=0.0)
+    energy = np.asarray(energy_kev, dtype=np.float64)
+    if values.size < 8 or energy.size != values.size:
+        return []
+    scale = float(energy[1] - energy[0])
+    fwhm_max_channels = (
+        detector_fwhm_kev(float(energy[-1]), energy_resolution_mnka) / scale
+    )
+    background = snip_background(values, fwhm_max_channels)
+    net = np.clip(values - background, 0.0, None)
+
+    sigma_channels = (
+        detector_fwhm_kev(float(energy[0]), energy_resolution_mnka)
+        / 2.3548
+        / 2.0
+        / scale
+    )
+    radius = max(int(round(4.0 * sigma_channels)), 1)
+    kernel = np.exp(
+        -0.5 * (np.arange(-radius, radius + 1) / max(sigma_channels, 1e-6)) ** 2
+    )
+    smoothed = np.convolve(net, kernel / kernel.sum(), mode="same")
+
+    residual = values - background
+
+    candidates = (
+        np.nonzero(
+            (smoothed[1:-1] > smoothed[:-2])
+            & (smoothed[1:-1] >= smoothed[2:])
+            & (smoothed[1:-1] > 0)
+        )[0]
+        + 1
+    )
+    peaks: list[dict[str, Any]] = []
+    for index in candidates:
+        fwhm_channels = (
+            detector_fwhm_kev(float(energy[index]), energy_resolution_mnka) / scale
+        )
+        half = max(int(round(fwhm_channels)), 1)
+        if index < fwhm_channels or index > values.size - 1 - fwhm_channels:
+            continue
+        lo, hi = max(index - half, 0), min(index + half + 1, values.size)
+        net_sum = float(residual[lo:hi].sum())
+        noise = float(np.sqrt(values[lo:hi].sum() + 1.0))
+        significance = net_sum / noise
+        if significance < min_significance:
+            continue
+        window = max(int(round(4.0 * fwhm_channels)), 2)
+        wlo, whi = max(index - window, 0), min(index + window + 1, values.size)
+        prominence = float(smoothed[index] - np.median(smoothed[wlo:whi])) * (hi - lo)
+        if prominence < min_significance * noise:
+            continue
+        weights = net[lo:hi]
+        # a real peak spans the detector response; a lone hot channel does not
+        if fwhm_channels >= 3 and weights.sum() > 0 and weights.max() > 0.6 * weights.sum():
+            continue
+        centroid = (
+            float(np.sum(energy[lo:hi] * weights) / weights.sum())
+            if weights.sum() > 0
+            else 0.0
+        )
+        peaks.append(
+            {
+                "energy_keV": centroid,
+                "net_counts": net_sum,
+                "significance": significance,
+            }
+        )
+
+    peaks.sort(key=lambda peak: peak["energy_keV"])
+    merged: list[dict[str, Any]] = []
+    for peak in peaks:
+        if merged:
+            gap = peak["energy_keV"] - merged[-1]["energy_keV"]
+            fwhm = detector_fwhm_kev(peak["energy_keV"], energy_resolution_mnka)
+            if gap < 0.5 * fwhm:
+                if peak["net_counts"] > merged[-1]["net_counts"]:
+                    merged[-1] = peak
+                continue
+        merged.append(peak)
+    return merged
+
+
+def match_elements(
+    peaks: Sequence[dict[str, Any]],
+    *,
+    energy_range: tuple[float, float],
+    lines: Sequence[dict[str, Any]] | None = None,
+    elements: Sequence[str] | None = None,
+    energy_resolution_mnka: float = 130.0,
+    strong_fraction: float = 0.10,
+    max_candidates: int = 8,
+) -> list[dict[str, Any]]:
+    """Rank candidate elements against detected peaks with plain-fact reports.
+
+    Lines match the nearest peak within 0.5 FWHM. Strong lines (>= ``strong_fraction``
+    of their initial-level maximum) in matched levels with no peak within 1.25 FWHM
+    count as missing; a family whose principal K/L3/M5 line is neither matched nor
+    within 1.25 FWHM of a peak loses its matches. Elements with no remaining matches
+    are dropped. Reports rank by (-n_peaks, n_missing_strong, mean_err_ev).
+    """
+    if lines is None:
+        lines = all_eds_lines()
+    if elements is not None:
+        allowed = set(_normalise_element_symbols(elements))
+        lines = [line for line in lines if line["element"] in allowed]
+    if not peaks:
+        return []
+
+    peak_energies = np.array([peak["energy_keV"] for peak in peaks], dtype=np.float64)
+    e_min, e_max = float(energy_range[0]), float(energy_range[1])
+
+    by_element: dict[str, list[dict[str, Any]]] = {}
+    for line in lines:
+        by_element.setdefault(line["element"], []).append(line)
+
+    reports: list[dict[str, Any]] = []
+    for element, element_lines in by_element.items():
+        level_max: dict[str, float] = {}
+        for line in element_lines:
+            level = _SIEGBAHN_LEVELS.get(line["line"], line["family"])
+            level_max[level] = max(level_max.get(level, 0.0), float(line["intensity"]))
+
+        in_range = [
+            line for line in element_lines if e_min <= line["energy_keV"] <= e_max
+        ]
+        matched: list[dict[str, Any]] = []
+        matched_families: set[str] = set()
+        matched_levels: set[str] = set()
+        matched_names: set[str] = set()
+        matched_peaks: set[int] = set()
+        for line in in_range:
+            nearest = int(np.argmin(np.abs(peak_energies - line["energy_keV"])))
+            distance = abs(float(peak_energies[nearest]) - float(line["energy_keV"]))
+            fwhm = detector_fwhm_kev(float(line["energy_keV"]), energy_resolution_mnka)
+            if distance > 0.5 * fwhm:
+                continue
+            matched_families.add(str(line["family"]))
+            matched_levels.add(_SIEGBAHN_LEVELS.get(line["line"], line["family"]))
+            matched_names.add(str(line["line"]))
+            matched_peaks.add(nearest)
+            matched.append(
+                {
+                    "line": str(line["line"]),
+                    "family": str(line["family"]),
+                    "energy_keV": float(line["energy_keV"]),
+                    "peak_keV": float(peak_energies[nearest]),
+                    "err_ev": distance * 1000.0,
+                    "net_counts": float(peaks[nearest]["net_counts"]),
+                }
+            )
+        if not matched:
+            continue
+
+        def _buried(line: dict[str, Any]) -> bool:
+            # weak-next-to-strong lines are unresolvable past 1 FWHM, so 1.25
+            nearest_ev = float(np.min(np.abs(peak_energies - line["energy_keV"])))
+            return nearest_ev <= 1.25 * detector_fwhm_kev(
+                float(line["energy_keV"]), energy_resolution_mnka
+            )
+
+        # anchor check: a family whose principal-level top line is absent loses
+        # its matches (coincidences), instead of vetoing the whole element
+        for family in sorted(matched_families):
+            principal_level = _PRINCIPAL_LEVELS.get(family, family)
+            family_lines = [
+                line
+                for line in in_range
+                if line["family"] == family
+                and _SIEGBAHN_LEVELS.get(line["line"], line["family"])
+                == principal_level
+            ]
+            if not family_lines:
+                continue
+            top = max(float(line["intensity"]) for line in family_lines)
+            principals = [
+                line for line in family_lines if float(line["intensity"]) >= top - 1e-12
+            ]
+            if not any(
+                line["line"] in matched_names or _buried(line) for line in principals
+            ):
+                matched = [line for line in matched if line["family"] != family]
+        matched_families = {line["family"] for line in matched}
+        matched_names = {line["line"] for line in matched}
+        matched_levels = {
+            _SIEGBAHN_LEVELS.get(line["line"], line["family"]) for line in matched
+        }
+        matched_peaks = {
+            int(np.argmin(np.abs(peak_energies - line["peak_keV"]))) for line in matched
+        }
+        if not matched:
+            continue
+
+        missing_strong: list[str] = []
+        for line in in_range:
+            if line["line"] in matched_names:
+                continue
+            level = _SIEGBAHN_LEVELS.get(line["line"], line["family"])
+            if level not in matched_levels:
+                continue
+            if float(line["intensity"]) < strong_fraction * level_max[level]:
+                continue
+            if _buried(line):
+                continue
+            missing_strong.append(str(line["line"]))
+
+        errors = [line["err_ev"] for line in matched]
+        reports.append(
+            {
+                "element": str(element),
+                "n_peaks": len(matched_peaks),
+                "n_lines": len(in_range),
+                "n_missing_strong": len(missing_strong),
+                "mean_err_ev": float(np.mean(errors)),
+                "net_counts": float(
+                    sum(peaks[index]["net_counts"] for index in matched_peaks)
+                ),
+                "missing_strong": missing_strong,
+                "lines": matched,
+            }
+        )
+
+    reports.sort(
+        key=lambda report: (
+            -report["n_peaks"],
+            report["n_missing_strong"],
+            report["mean_err_ev"],
+        )
+    )
+    return reports[: int(max_candidates)]
+
+
+def detect_elements(
+    spectrum: np.ndarray,
+    energy_kev: np.ndarray,
+    *,
+    elements: Sequence[str] | None = None,
+    lines: Sequence[dict[str, Any]] | None = None,
+    energy_resolution_mnka: float = 130.0,
+    min_significance: float = 4.0,
+    max_candidates: int = 8,
+) -> list[dict[str, Any]]:
+    """Detect peaks in a spectrum and rank candidate elements (see :func:`match_elements`)."""
+    energy = np.asarray(energy_kev, dtype=np.float64)
+    peaks = detect_peaks(
+        spectrum,
+        energy,
+        energy_resolution_mnka=energy_resolution_mnka,
+        min_significance=min_significance,
+    )
+    if not peaks:
+        return []
+    # peaks within one FWHM of the axis ends are undetectable, so lines there
+    # must not count as observable
+    e_min = float(energy[0]) + detector_fwhm_kev(
+        float(energy[0]), energy_resolution_mnka
+    )
+    e_max = float(energy[-1]) - detector_fwhm_kev(
+        float(energy[-1]), energy_resolution_mnka
+    )
+    return match_elements(
+        peaks,
+        energy_range=(e_min, e_max),
+        lines=lines,
+        elements=elements,
+        energy_resolution_mnka=energy_resolution_mnka,
+        max_candidates=max_candidates,
+    )
 
 
 def _normalise_element_symbols(elements: Any) -> list[str]:
@@ -877,6 +1222,23 @@ def _normalise_roi_shape(value: Any) -> str:
     if shape in {"ellipse", "oval"}:
         return "ellipse"
     return "rect"
+
+
+def _roi_mask(height: int, width: int, roi_shape: str) -> np.ndarray | None:
+    """Boolean pixel mask for a circle/ellipse ROI; ``None`` for rect."""
+
+    shape = _normalise_roi_shape(roi_shape)
+    if shape == "rect":
+        return None
+    yy, xx = np.ogrid[:height, :width]
+    cy = height * 0.5
+    cx = width * 0.5
+    if shape == "circle":
+        radius = max(height, width) * 0.5
+        return ((yy + 0.5 - cy) ** 2 + (xx + 0.5 - cx) ** 2) <= radius**2
+    ry = max(0.5, height * 0.5)
+    rx = max(0.5, width * 0.5)
+    return (((yy + 0.5 - cy) / ry) ** 2 + ((xx + 0.5 - cx) / rx) ** 2) <= 1.0
 
 
 def _normalise_roi(
@@ -1766,6 +2128,8 @@ class ShowEDS(StaticFallbackMixin, anywidget.AnyWidget):
     line_hints = traitlets.List(traitlets.Dict(), default_value=[]).tag(sync=True)
     selected_elements = traitlets.List(traitlets.Unicode(), default_value=[]).tag(sync=True)
     auto_identify = traitlets.Bool(True).tag(sync=True)
+    element_candidates = traitlets.List(traitlets.Dict(), default_value=[]).tag(sync=True)
+    detect_status = traitlets.Unicode("").tag(sync=True)
     show_debug = traitlets.Bool(False).tag(sync=True)
     debug_control_visible = traitlets.Bool(False).tag(sync=True)
     saved_rois = traitlets.List(traitlets.Dict(), default_value=[]).tag(sync=True)
@@ -2061,6 +2425,7 @@ class ShowEDS(StaticFallbackMixin, anywidget.AnyWidget):
         self.show_line_hints = bool(show_line_hints)
         self.selected_elements = _normalise_element_symbols(selected_elements or candidate_elements or [])
         self.auto_identify = bool(auto_identify)
+        self._candidate_elements = _normalise_element_symbols(candidate_elements or [])
         self.show_debug = bool(show_debug)
         self.debug_control_visible = bool(show_debug if debug_control_visible is None else debug_control_visible)
         self.roi_shape = _normalise_roi_shape(roi_shape)
@@ -2180,6 +2545,7 @@ class ShowEDS(StaticFallbackMixin, anywidget.AnyWidget):
 
         if self.compute_backend == "kernel":
             self.on_msg(self._handle_kernel_compute_msg)
+        self.on_msg(self._handle_detect_msg)
         self.observe(self._on_export_request_change, names=["export_request"])
 
     @classmethod
@@ -2516,6 +2882,8 @@ class ShowEDS(StaticFallbackMixin, anywidget.AnyWidget):
 
     def _handle_kernel_compute_msg(self, _widget: Any, content: dict[str, Any], _buffers: list[Any]) -> None:
         msg_type = content.get("type")
+        if msg_type not in ("compute_map", "compute_spectrum"):
+            return
         request_id = content.get("request_id")
         try:
             cube = self._ensure_lazy_cube()
@@ -2558,6 +2926,172 @@ class ShowEDS(StaticFallbackMixin, anywidget.AnyWidget):
             )
         except Exception as exc:
             self.send({"type": "error", "request_id": request_id, "message": str(exc)})
+
+    def _detection_spectrum(self, source: str) -> tuple[np.ndarray, str]:
+        """Spectrum for element detection plus a note when a fallback is used."""
+
+        mode = str(source).strip().lower()
+        if mode not in ("sum", "roi"):
+            raise ValueError(f"unknown detection source {source!r}; use 'sum' or 'roi'")
+        row, col = self.roi_row, self.roi_col
+        height, width = self.roi_height, self.roi_width
+        roi_shape = self.roi_shape if mode == "roi" else "rect"
+        if self.compute_backend == "browser" and self.cube_bytes:
+            dtype = (
+                np.uint16
+                if self.cube_dtype == "uint16"
+                else np.uint32
+                if self.cube_dtype == "uint32"
+                else np.float32
+            )
+            cube = np.frombuffer(self.cube_bytes, dtype=dtype).reshape(
+                self.n_rows, self.n_cols, self.n_energy
+            )
+            if mode == "roi":
+                subset = cube[row : row + height, col : col + width].astype(np.float64)
+                mask = _roi_mask(height, width, roi_shape)
+                if mask is not None:
+                    subset = subset * mask[:, :, None]
+                return subset.sum(axis=(0, 1)), ""
+            return cube.sum(axis=(0, 1), dtype=np.float64), ""
+        if self.compute_backend == "kernel" and self._lazy_path is not None:
+            cube = self._ensure_lazy_cube()
+            if mode == "roi":
+                subset = cube[row : row + height, col : col + width, :]
+                mask = _roi_mask(height, width, roi_shape)
+                reduced = (
+                    (subset * mask[:, :, None]).sum(axis=(0, 1))
+                    if mask is not None
+                    else subset.sum(axis=(0, 1))
+                )
+            else:
+                reduced = cube.sum(axis=(0, 1))
+            if hasattr(reduced, "compute"):
+                reduced = reduced.compute()
+            return np.asarray(reduced, dtype=np.float64), ""
+        if (
+            self.compute_backend == "sidecar"
+            and self._sidecar_dir is not None
+            and self._sidecar_dir.exists()
+        ):
+            roi = (
+                (row, col, height, width)
+                if mode == "roi"
+                else (0, 0, self.n_rows, self.n_cols)
+            )
+            startup = load_spectrum_image_sidecar(
+                self._sidecar_dir, roi=roi, roi_shape=roi_shape
+            )
+            return np.asarray(startup["initial_spectrum"], dtype=np.float64), ""
+        if self.compute_backend == "stream" and self.stream_channel_offsets_bytes:
+            if mode == "roi":
+                pixel_offsets = np.frombuffer(
+                    self.stream_pixel_offsets_bytes, dtype="<u4"
+                )
+                pixel_channels = np.frombuffer(
+                    self.stream_pixel_channels_bytes, dtype="<u2"
+                )
+                spectrum = _spectrum_from_stream_offsets(
+                    pixel_offsets,
+                    pixel_channels,
+                    rows=self.n_rows,
+                    cols=self.n_cols,
+                    n_energy=self.n_energy,
+                    row=row,
+                    col=col,
+                    height=height,
+                    width=width,
+                    roi_shape=roi_shape,
+                )
+                return np.asarray(spectrum, dtype=np.float64), ""
+            channel_offsets = np.frombuffer(
+                self.stream_channel_offsets_bytes, dtype="<u4"
+            )
+            return np.diff(channel_offsets).astype(np.float64), ""
+        if self.initial_spectrum_bytes:
+            spectrum = np.frombuffer(self.initial_spectrum_bytes, dtype=np.float32)
+            return spectrum.astype(np.float64), "startup ROI spectrum"
+        raise ValueError("no spectrum data available for element detection")
+
+    def detect_elements(
+        self,
+        source: str = "sum",
+        *,
+        elements: list[str] | tuple[str, ...] | None = None,
+        energy_resolution_mnka: float = 130.0,
+        min_significance: float = 4.0,
+        max_candidates: int = 8,
+        select: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Detect candidate elements from spectrum peaks and rank them.
+
+        Estimates the continuum background, finds significant peaks, and ranks
+        elements whose characteristic lines explain them (see
+        :func:`quantem.widget.eds.match_elements`). Results are advisory and
+        fill the ``element_candidates`` trait shown in the periodic-table menu.
+
+        Parameters
+        ----------
+        source
+            ``"sum"`` uses the full sum spectrum, ``"roi"`` the current ROI.
+        elements
+            Restrict candidates to these symbols. Defaults to the constructor's
+            ``candidate_elements`` when given, else the full line table.
+        energy_resolution_mnka
+            Detector resolution at Mn Ka in eV.
+        min_significance
+            Minimum peak significance in sigma.
+        max_candidates
+            Maximum number of ranked candidates.
+        select
+            If ``True``, write the candidate symbols to ``selected_elements``.
+
+        Returns
+        -------
+        list[dict]
+            Ranked per-element reports, also stored in ``element_candidates``.
+        """
+        spectrum, note = self._detection_spectrum(source)
+        energy = np.asarray(self.energy_keV, dtype=np.float64)
+        if energy.size and np.array_equal(energy, np.arange(energy.size)):
+            raise ValueError(
+                "energy axis is uncalibrated channel indices; pass energy_keV"
+            )
+        scope = elements if elements is not None else (self._candidate_elements or None)
+        results = detect_elements(
+            spectrum,
+            energy,
+            elements=scope,
+            energy_resolution_mnka=energy_resolution_mnka,
+            min_significance=min_significance,
+            max_candidates=max_candidates,
+        )
+        self.element_candidates = results
+        status = (
+            "Detected " + ", ".join(report["element"] for report in results)
+            if results
+            else "No elements detected"
+        )
+        if note:
+            status += f" ({note})"
+        self.detect_status = status
+        if select and results:
+            self.selected_elements = [report["element"] for report in results]
+        return results
+
+    def _handle_detect_msg(
+        self, _widget: Any, content: dict[str, Any], _buffers: list[Any]
+    ) -> None:
+        if content.get("type") != "detect_elements":
+            return
+        request_id = content.get("request_id")
+        ok = True
+        try:
+            self.detect_elements(str(content.get("source", "sum")))
+        except Exception as exc:
+            ok = False
+            self.detect_status = f"Detection failed: {exc}"
+        self.send({"type": "detect_done", "request_id": request_id, "ok": ok})
 
     # Traits that carry the bulk payload. Dropped from the saved-notebook
     # snapshot when save_state is False so a plain display stays a few MB, not
