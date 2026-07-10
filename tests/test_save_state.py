@@ -809,6 +809,36 @@ def test_show2d_display_defers_static_png_render(monkeypatch):
     assert fill_meta == {"quantem.widget": {"static_fallback": True}}
 
 
+def test_static_fallback_env_kill_switch(monkeypatch):
+    """QUANTEM_WIDGET_STATIC_FALLBACK=0 (docs/CI builds) must emit ONLY the
+    interactive widget output: no in-bundle preview image and no static
+    sibling display, so built docs pages show a single widget, not a
+    duplicate image under it."""
+    import IPython
+
+    monkeypatch.setenv("QUANTEM_WIDGET_STATIC_FALLBACK", "0")
+    frame = np.random.default_rng(9).random((32, 32)).astype(np.float32)
+    widget = Show2D(frame, verbose=False)
+
+    bundle = widget._repr_mimebundle_()
+    data = bundle[0] if isinstance(bundle, tuple) else bundle
+    assert "image/jpeg" not in data
+    assert "image/webp" not in data
+
+    displayed = []
+
+    class ZMQInteractiveShell:  # name is what the kernel check looks at
+        pass
+
+    def fake_display(data, raw=False, metadata=None, display_id=None, **kw):
+        displayed.append((data, metadata, display_id))
+
+    monkeypatch.setattr(IPython, "get_ipython", lambda: ZMQInteractiveShell())
+    monkeypatch.setattr("IPython.display.display", fake_display)
+    widget._ipython_display_()
+    assert len(displayed) == 1, "static sibling was emitted despite kill switch"
+
+
 def test_show2d_sibling_static_output_via_nbconvert(tmp_path):
     """Executing a notebook must leave a saved preview on the Show2D cell.
 
