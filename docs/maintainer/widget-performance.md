@@ -349,6 +349,12 @@ detector binning, dtype, and transient memory than a generic Torch-MPS tensor
 path. Torch-MPS can still be valid for specific tensor workflows, but reports
 must say which path was used and whether any operation fell back to CPU.
 
+Multi-master `load([masters])` differs by backend: CUDA and CPU eager-stack
+all masters into one resident 5D array, while MPS decodes dataset 0
+synchronously, shows the viewer immediately, and fills datasets 1..N-1 from a
+single background GPU worker (`multidataset_mps.py`). Performance reports for
+multi-master sessions must say which of the two paths ran.
+
 GPU memory belongs to the backend data object and Python session, not the
 visual widget alone. The viewer should avoid leaking buffers and should keep
 saved state compact, but freeing GPU memory should be handled by backend/session
@@ -400,9 +406,12 @@ cleanly while appending the fifth master with an allocation request of about
 18 GiB; the script released GPU memory, reloaded the last successful
 four-master stack, and wrote the failure report. This is expected for
 eager-resident no-bin data: 30-40 files would be roughly 540-720 GiB of
-detector data before viewer overhead. To make 30-40 no-bin files browsable as
-a normal workflow, implement an out-of-core/paged CUDA or NVMe-backed frame
-cache instead of promising that all masters stay resident on the GPUs.
+detector data before viewer overhead. For 30-40 no-bin files as a normal
+workflow, use the shipped paged path instead of eager residency:
+`Dataset5dstem` lazy loaders plus `Show4DSTEM(..., page_budget=...)` (CLI
+`--page-budget`, default `auto`) keep a bounded GPU-resident set and evict raw
+masters on demand. The no-bin capacity stress above still measures the
+eager-resident ceiling; a paged run answers the workflow question.
 
 After the capacity stress, run a browser-enabled multi-master pass that fits in
 memory. That pass must prove the user workflow, not only the load path: the
@@ -524,10 +533,11 @@ IO review and next optimization targets:
   Show4DSTEM UI/export signoff cannot. A remote `quantem.core` circular import
   blocks the full widget path and must be reported as `Not verified`, not
   papered over with loader timings.
-- For 30-40 no-bin masters, prefer a lazy/paged resident set over opening all
-  masters hot. The benchmark can prove per-file load speed and GPU placement;
-  the user workflow still needs fast dataset flipping with bounded resident
-  memory and clear eviction/cache status in the viewer/report.
+- For 30-40 no-bin masters, use the shipped lazy/paged resident set
+  (`page_budget`, `Dataset5dstem` lazy loaders) instead of opening all masters
+  hot. The benchmark can prove per-file load speed and GPU placement; the user
+  workflow still needs fast dataset flipping with bounded resident memory and
+  clear eviction/cache status in the viewer/report.
 
 ## Heavy Show2D / Show3D audit
 

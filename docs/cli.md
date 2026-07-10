@@ -1,7 +1,8 @@
 # Command line
 
-Installing `quantem.widget` adds a `quantem` command. Point it at a file or a
-folder and it renders the right viewer - no notebook, no Python.
+Installing `quantem.widget` adds a `quantem` command (and a short `qw` alias).
+Point it at a file or a folder and it renders the right viewer - no notebook,
+no Python.
 
 ```bash
 quantem show ./anything/                     # auto-detect content, pick the viewer
@@ -30,6 +31,7 @@ quantem github tutorial_github.ipynb --no-execute # optional static copy for Git
 | `quantem data-transfer plan/inspect/copy/update/masters/show4dstem` | `*_master.h5` folder plus target roots | manifest-backed transfer planning, state inspection, explicit copy, resume/update, ready-master listing, and Show4DSTEM notebook handoff |
 | `quantem html <notebook.ipynb>` | a notebook you wrote | runs it, or with `--no-execute` exports saved outputs/state, into one standalone interactive HTML |
 | `quantem github <notebook.ipynb>` | an optional static copy of a notebook | strips widget state and embeds compressed pictures for GitHub's notebook preview |
+| `quantem jupyter` | nothing (run on the GPU box) | starts JupyterLab (`--env`, `--port`) and prints the SSH-tunnel line to paste on your laptop |
 
 **Images** save a standalone HTML and open in your browser. **4D-STEM** opens a
 live, kernel-backed notebook by default (full real-time interaction); `--html`
@@ -40,7 +42,8 @@ Several masters (a folder, or listed explicitly) stack into **one 5D viewer with
 Dataset slider** to flip between scans. `--combined --html` writes that as one
 offline file (served locally, since a `file://` page can't fetch its companion).
 
-Everything lands in `~/Downloads` and opens automatically.
+Everything lands in `~/Downloads` (or the current directory on machines without
+one) and opens automatically on a desktop.
 
 ## DataTransfer
 
@@ -104,12 +107,11 @@ HTML; serve HTML from GitHub Pages or another static host.
 
 | Option | Effect |
 |---|---|
-| `--bin N` | detector mean-bin factor for 4D-STEM (default 8) |
+| `--bin N` | detector mean-bin factor for 4D-STEM (default 8 for `show*`; `data-transfer` defaults to 1) |
 | `--html` | 4D-STEM: write the offline-WebGPU HTML instead of a notebook |
 | `--watch` | folder: write a live ShowFolder-watched notebook; Show2D/Show3D append new image files, Show4DSTEM opens lazy masters |
 | `--gpus 0,1`, `--page-budget auto` | watched Show4DSTEM: pick CUDA cards and GPU-resident dataset cache policy |
 | `--combined` | many masters -> one 5D HTML viewer (served locally) |
-| `--widget {2d,3d,4dstem}` | force a widget instead of auto-detect |
 | `--out PATH` | output file or directory (default `~/Downloads`) |
 | `--no-open` | write the file(s) without launching a browser or Jupyter |
 | `--title`, `-v/--verbose` | page title; verbose progress |
