@@ -934,7 +934,11 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         # and the first slice is tiny (144 KB at 192×192) so the cast is free.
         # .frame(0) (not [0]) so a paged Dataset5dstem brings frame 0 onto the GPU
         # for this reduction instead of handing back an offloaded CPU tensor.
-        if type(self._data).__name__ == "Dataset5dstem":
+        # Require hasattr(frame): MAPED's multi-GPU Dataset5dstem and other
+        # duck-types may share the class name without the paging API.
+        if type(self._data).__name__ == "Dataset5dstem" and hasattr(
+            self._data, "frame"
+        ):
             first_frame = self._data.frame(0)
         elif self._data.ndim == 5:
             first_frame = self._data[0]
@@ -2943,7 +2947,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
     @property
     def _frame_data(self) -> torch.Tensor:
         """Per-frame data (4D or 3D flattened), accounting for 5D time/tilt series."""
-        if type(self._data).__name__ == "Dataset5dstem":
+        if type(self._data).__name__ == "Dataset5dstem" and hasattr(self._data, "frame"):
             # .frame() is paging-aware: when page_budget is set it brings this
             # dataset into VRAM and evicts the least-recently-used one; when
             # paging is off it is identical to self._data[frame_idx].
@@ -4346,7 +4350,9 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             flat_idx = int(self.pos_row) * int(self.shape_cols) + int(self.pos_col)
             return dataset.frame(flat_idx)
 
-        if type(data_source).__name__ == "Dataset5dstem":
+        if type(data_source).__name__ == "Dataset5dstem" and hasattr(
+            data_source, "frame"
+        ):
             data = data_source.frame(int(frame_idx))
         elif self.n_frames > 1:
             data = data_source[int(frame_idx)]
@@ -6115,7 +6121,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
                 self._compare_cache_warm_thread = None
 
     def _frame_data_for_index(self, frame_idx: int):
-        if type(self._data).__name__ == "Dataset5dstem":
+        if type(self._data).__name__ == "Dataset5dstem" and hasattr(self._data, "frame"):
             return self._data.frame(frame_idx)  # paging-aware (see _frame_data)
         if self.n_frames > 1:
             return self._data[frame_idx]

@@ -48,6 +48,58 @@ def _series(n=4, scan=32, det=48):
     return Dataset5dstem.from_frames(frames)
 
 
+def test_class_name_collision_without_frame_uses_regular_5d_indexing():
+    """A MAPED-style class name must not opt into widget paging by accident."""
+
+    class Dataset5dstem:
+        _is_gpu_frames = True
+
+        def __init__(self, tensor):
+            self._payload = tensor
+
+        @property
+        def shape(self):
+            return self._payload.shape
+
+        @property
+        def ndim(self):
+            return self._payload.ndim
+
+        @property
+        def dtype(self):
+            return self._payload.dtype
+
+        @property
+        def device(self):
+            return self._payload.device
+
+        def __getitem__(self, index):
+            return self._payload[index]
+
+        def __getattr__(self, name):
+            return getattr(self._payload, name)
+
+    data = torch.arange(
+        2 * 3 * 4 * 5 * 6,
+        dtype=torch.float32,
+    ).reshape(2, 3, 4, 5, 6)
+    wrapped = Dataset5dstem(data)
+    widget = Show4DSTEM(
+        wrapped,
+        precompute_virtual_images=False,
+        verbose=False,
+    )
+    try:
+        assert torch.equal(widget._frame_data, data[0])
+        assert torch.equal(widget._frame_data_for_index(1), data[1])
+        assert torch.equal(
+            widget._diffraction_frame_for_index(1),
+            data[1, 1, 2],
+        )
+    finally:
+        widget.close()
+
+
 @cuda_required
 def test_no_page_budget_keeps_all_datasets_resident():
     ds = _series(4)
