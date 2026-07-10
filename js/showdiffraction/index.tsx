@@ -469,7 +469,7 @@ interface IdentifyResult {
   matched: number;
   n_obs: number;
   mean_err: number | null;
-  n_missing_strong: number;
+  n_missing_strong: number | null;
   lines: IdentifyLine[];
 }
 
@@ -2012,7 +2012,7 @@ function ShowDiffraction() {
                             <td style={{ padding: "2px 6px", color: themeColors.accent }}>{cand.name}</td>
                             <td style={{ padding: "2px 6px" }}>{cand.matched}/{cand.n_obs}</td>
                             <td style={{ padding: "2px 6px" }}>{cand.mean_err != null ? (cand.mean_err * 100).toFixed(2) : "—"}</td>
-                            <td style={{ padding: "2px 6px" }}>{cand.n_missing_strong ?? 0}</td>
+                            <td style={{ padding: "2px 6px" }}>{cand.n_missing_strong ?? "-"}</td>
                           </tr>
                           {expandedPhaseId === cand.phase_id && (
                             <tr style={{ borderBottom: `1px solid ${themeColors.border}22` }}>
