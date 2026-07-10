@@ -35,6 +35,7 @@ import { findDataRange, applyLogScale, percentileClip, sliderRange, computeHisto
 import { MetadataSection } from "../widgetInfo";
 
 const MAX_PLAYBACK_FPS = 30;
+const PAGE_PLAY_FPS_OPTIONS = [1, 2, 4, 8] as const;
 
 // ============================================================================
 // Style tokens (inlined - matches Show2D/Show4DSTEM single-file convention)
@@ -292,6 +293,31 @@ function clampPointToImage(point: { x: number; y: number }, nx: number, ny: numb
   };
 }
 
+function translateSegmentInsideImage(
+  start: { x: number; y: number },
+  stop: { x: number; y: number },
+  dxRaw: number,
+  dyRaw: number,
+  nx: number,
+  ny: number,
+  inset: number = 0,
+): { start: { x: number; y: number }; stop: { x: number; y: number } } {
+  const xMin = Math.min(inset, Math.max(0, nx - 1));
+  const yMin = Math.min(inset, Math.max(0, ny - 1));
+  const xMax = Math.max(xMin, Math.max(1, nx) - 1 - inset);
+  const yMax = Math.max(yMin, Math.max(1, ny) - 1 - inset);
+  const dxMin = Math.max(xMin - start.x, xMin - stop.x);
+  const dxMax = Math.min(xMax - start.x, xMax - stop.x);
+  const dyMin = Math.max(yMin - start.y, yMin - stop.y);
+  const dyMax = Math.min(yMax - start.y, yMax - stop.y);
+  const dx = clampNumber(dxRaw, dxMin, dxMax);
+  const dy = clampNumber(dyRaw, dyMin, dyMax);
+  return {
+    start: { x: start.x + dx, y: start.y + dy },
+    stop: { x: stop.x + dx, y: stop.y + dy },
+  };
+}
+
 function segmentWidth(start: { x: number; y: number }, stop: { x: number; y: number }): number {
   return Math.max(1, Math.ceil(Math.hypot(stop.x - start.x, stop.y - start.y)) + 1);
 }
@@ -318,6 +344,57 @@ function sampleVolumeBilinear(
   const v01 = vol[base + y1 * nx + x0];
   const v11 = vol[base + y1 * nx + x1];
   return (v00 * (1 - tx) + v10 * tx) * (1 - ty) + (v01 * (1 - tx) + v11 * tx) * ty;
+}
+
+function sampleVolumeBilinearNearest(
+  vol: Float32Array,
+  nx: number,
+  ny: number,
+  nz: number,
+  z: number,
+  x: number,
+  y: number,
+): number {
+  const xClamped = clampNumber(x, 0, Math.max(0, nx - 1));
+  const yClamped = clampNumber(y, 0, Math.max(0, ny - 1));
+  return sampleVolumeBilinear(vol, nx, ny, nz, z, xClamped, yClamped);
+}
+
+function applyGlobalSliceAlignment(
+  vol: Float32Array | null,
+  nx: number,
+  ny: number,
+  nz: number,
+  rowShiftPxPerSlice: number,
+  colShiftPxPerSlice: number,
+): Float32Array | null {
+  if (!vol || vol.length === 0) return vol;
+  const rowSlope = Number.isFinite(rowShiftPxPerSlice) ? rowShiftPxPerSlice : 0;
+  const colSlope = Number.isFinite(colShiftPxPerSlice) ? colShiftPxPerSlice : 0;
+  if (Math.abs(rowSlope) < 1e-12 && Math.abs(colSlope) < 1e-12) return vol;
+  const expected = Math.max(0, Math.floor(nx) * Math.floor(ny) * Math.floor(nz));
+  if (vol.length < expected || expected === 0) return vol;
+  const out = new Float32Array(expected);
+  const center = (Math.max(1, nz) - 1) / 2;
+  for (let z = 0; z < nz; z++) {
+    const rowShift = (z - center) * rowSlope;
+    const colShift = (z - center) * colSlope;
+    const base = z * ny * nx;
+    for (let row = 0; row < ny; row++) {
+      for (let col = 0; col < nx; col++) {
+        out[base + row * nx + col] = sampleVolumeBilinearNearest(
+          vol,
+          nx,
+          ny,
+          nz,
+          z,
+          col - colShift,
+          row - rowShift,
+        );
+      }
+    }
+  }
+  return out;
 }
 
 function extractOblique(
@@ -351,8 +428,10 @@ function extractVolumeFloat32(
   nx: number,
   ny: number,
   nz: number,
+  panelCount = 1,
 ): Float32Array | null {
-  const count = Math.max(0, Math.floor(nx) * Math.floor(ny) * Math.floor(nz));
+  const panels = Math.max(1, Math.floor(panelCount || 1));
+  const count = Math.max(0, Math.floor(nx) * Math.floor(ny) * Math.floor(nz) * panels);
   if (!offline) return extractFloat32(dataView, count);
   const bytes = extractBytes(dataView);
   if (bytes.length === 0 || count === 0) return null;
@@ -845,6 +924,8 @@ const VOLUME_VIEW_PRESETS = [
   { value: "side", label: "Side", description: "oblique vertical plane view" },
 ] as const;
 const DPR = window.devicePixelRatio || 1;
+const SHOW3DSLICES_FFT_RESULT_CACHE_MAX_BYTES = 192 * 1024 * 1024;
+const SHOW3DSLICES_FFT_RESULT_CACHE_MAX_ENTRIES = 24;
 
 interface Show3DSlicesPerfCounters {
   widget: "Show3DSlices";
@@ -873,6 +954,12 @@ interface Show3DSlicesPerfCounters {
   lastAxis: number;
   lastIndex: number;
   gpuResident: boolean;
+  fftCacheHits: number;
+  fftCacheMisses: number;
+  fftCacheEntries: number;
+  fftCacheBytes: number;
+  lastFftCacheKey: string;
+  lastFftCacheHit: boolean;
 }
 
 declare global {
@@ -917,6 +1004,15 @@ function Show3DSlices() {
   const [nx] = useModelState<number>("nx");
   const [ny] = useModelState<number>("ny");
   const [nz] = useModelState<number>("nz");
+  const [panelCount] = useModelState<number>("panel_count");
+  const [activePanel, setActivePanel] = useModelState<number>("active_panel");
+  const [panelTitles] = useModelState<string[]>("panel_titles");
+  const [nPages] = useModelState<number>("n_pages");
+  const [pageIdx, setPageIdx] = useModelState<number>("page_idx");
+  const [panelsPerPage] = useModelState<number>("panels_per_page");
+  const [pageLabels] = useModelState<string[]>("page_labels");
+  const [pagePlaying, setPagePlaying] = React.useState(false);
+  const [pagePlayFps, setPagePlayFps] = React.useState<number>(2);
   const [volumeBytes] = useModelState<DataView>("volume_bytes");
   const [offline] = useModelState<boolean>("offline");
   const [offlineMin] = useModelState<number>("_offline_min");
@@ -934,6 +1030,58 @@ function Show3DSlices() {
   const [obliqueProfileLine, setObliqueProfileLine] = useModelState<{ row: number; col: number }[]>("oblique_profile_line");
   const [title] = useModelState<string>("title");
   const [showTitle] = useModelState<boolean>("show_title");
+  const safePanelCount = Math.max(1, Math.floor(panelCount || 1));
+  const safeNPages = Math.max(1, Math.floor(nPages || 1));
+  const safePanelsPerPage = Math.max(0, Math.floor(panelsPerPage || 0));
+  const isPaged = safeNPages > 1 && safePanelsPerPage > 0;
+  const safePageIdx = Math.max(0, Math.min(Math.floor(pageIdx || 0), safeNPages - 1));
+  const pageStart = isPaged ? safePageIdx * safePanelsPerPage : 0;
+  const pageEnd = isPaged
+    ? Math.min(safePanelCount, pageStart + safePanelsPerPage)
+    : safePanelCount;
+  const pagePanelIndices = React.useMemo(
+    () => Array.from({ length: Math.max(0, pageEnd - pageStart) }, (_, idx) => pageStart + idx),
+    [pageEnd, pageStart]
+  );
+  const absoluteActivePanel = Math.max(0, Math.min(Math.floor(activePanel || 0), safePanelCount - 1));
+  const activePanelSlot = isPaged
+    ? Math.max(0, Math.min(absoluteActivePanel % safePanelsPerPage, Math.max(0, pagePanelIndices.length - 1)))
+    : absoluteActivePanel;
+  const safeActivePanel = isPaged ? pageStart + activePanelSlot : absoluteActivePanel;
+  const effectivePanelTitles = Array.isArray(panelTitles) ? panelTitles : [];
+  const activePanelTitle = effectivePanelTitles[safeActivePanel] || `Panel ${safeActivePanel + 1}`;
+  const effectivePageLabels = Array.isArray(pageLabels) ? pageLabels : [];
+  const activePageLabel = effectivePageLabels[safePageIdx] || `Page ${safePageIdx + 1}`;
+  const pageStatus = `${activePageLabel} ${safePageIdx + 1}/${safeNPages}`;
+  const displayTitle = isPaged
+    ? `${title || "Volume 3D"} · ${activePageLabel}${pagePanelIndices.length > 1 ? ` · ${activePanelTitle}` : ""}`
+    : safePanelCount > 1
+      ? `${title || "Volume 3D"}: ${activePanelTitle}`
+      : (title || "Volume 3D");
+  React.useEffect(() => {
+    if (pageIdx !== safePageIdx) setPageIdx(safePageIdx);
+    if (activePanel !== safeActivePanel) setActivePanel(safeActivePanel);
+  }, [activePanel, pageIdx, safeActivePanel, safePageIdx, setActivePanel, setPageIdx]);
+  const showPage = React.useCallback((value: number) => {
+    const next = Math.max(0, Math.min(Math.round(value), safeNPages - 1));
+    setPagePlaying(false);
+    setPageIdx(next);
+    if (isPaged) {
+      setActivePanel(Math.min(safePanelCount - 1, next * safePanelsPerPage + activePanelSlot));
+    }
+  }, [activePanelSlot, isPaged, safeNPages, safePanelCount, safePanelsPerPage, setActivePanel, setPageIdx]);
+  React.useEffect(() => {
+    if (!isPaged || safeNPages <= 1) setPagePlaying(false);
+  }, [isPaged, safeNPages]);
+  React.useEffect(() => {
+    if (!pagePlaying || !isPaged || safeNPages <= 1) return;
+    const timeout = window.setTimeout(() => {
+      const next = (safePageIdx + 1) % safeNPages;
+      setPageIdx(next);
+      setActivePanel(Math.min(safePanelCount - 1, next * safePanelsPerPage + activePanelSlot));
+    }, 1000 / Math.max(1, pagePlayFps));
+    return () => window.clearTimeout(timeout);
+  }, [activePanelSlot, isPaged, pagePlayFps, pagePlaying, safeNPages, safePageIdx, safePanelCount, safePanelsPerPage, setActivePanel, setPageIdx]);
   const [cmap, setCmap] = useModelState<string>("cmap");
   const [logScale, setLogScale] = useModelState<boolean>("log_scale");
   const [autoContrast, setAutoContrast] = useModelState<boolean>("auto_contrast");
@@ -943,6 +1091,12 @@ function Show3DSlices() {
   const [controlsCollapsed, setControlsCollapsed] = useModelState<boolean>("controls_collapsed");
   const controlsVisible = showControls && !controlsCollapsed;
   const [showCrosshair] = useModelState<boolean>("show_crosshair");
+  const [sliceAlignment, setSliceAlignment] = useModelState<string>("slice_alignment");
+  const [rowShiftPxPerSlice, setRowShiftPxPerSlice] = useModelState<number>("row_shift_px_per_slice");
+  const [colShiftPxPerSlice, setColShiftPxPerSlice] = useModelState<number>("col_shift_px_per_slice");
+  const [sliceAlignmentCached, setSliceAlignmentCached] = useModelState<boolean>("slice_alignment_cached");
+  const [sliceAlignmentStatus] = useModelState<string>("slice_alignment_status");
+  const [, setSliceAlignmentRequest] = useModelState<string>("_slice_alignment_request");
   const [panelWidthPx] = useModelState<number>("panel_width_px");
   type Show3DSlicesViewState = {
     zooms?: Partial<ZoomState>[];
@@ -1045,6 +1199,21 @@ function Show3DSlices() {
   const fftOffscreenRefs = React.useRef<(HTMLCanvasElement | null)[]>([null, null, null]);
   const fftImgDataRefs = React.useRef<(ImageData | null)[]>([null, null, null]);
   const fftMagCacheRefs = React.useRef<(Float32Array | null)[]>([null, null, null]);
+  type FftResultCacheEntry = {
+    mag: Float32Array;
+    displayData: Float32Array;
+    displayMin: number;
+    displayMax: number;
+    width: number;
+    height: number;
+    bytes: number;
+    lastUsed: number;
+  };
+  const fftResultCacheRef = React.useRef<Map<string, FftResultCacheEntry>>(new Map());
+  const fftResultCacheSeqRef = React.useRef(0);
+  const fftResultCacheBytesRef = React.useRef(0);
+  const fftDataObjectRef = React.useRef<Float32Array | null>(null);
+  const fftDataTokenRef = React.useRef(0);
   const gpuFFTRef = React.useRef<WebGPUFFT | null>(null);
   const gpuCmapRef = React.useRef<GPUColormapEngine | null>(null);
   const [cmapReady, setCmapReady] = React.useState(false);
@@ -1096,6 +1265,12 @@ function Show3DSlices() {
         lastAxis: -1,
         lastIndex: -1,
         gpuResident,
+        fftCacheHits: 0,
+        fftCacheMisses: 0,
+        fftCacheEntries: 0,
+        fftCacheBytes: 0,
+        lastFftCacheKey: "",
+        lastFftCacheHit: false,
       };
       perfRef.current = p;
       window.__quantemShow3DSlicesPerf = p;
@@ -1136,6 +1311,22 @@ function Show3DSlices() {
     }
     window.__quantemShow3DSlicesPerf = p;
   };
+  const updateFftCachePerf = (key: string, hit: boolean) => {
+    let p = perfRef.current;
+    if (!p) {
+      recordPerfRef.current("fftCache", 0);
+      p = perfRef.current;
+    }
+    if (!p) return;
+    if (hit) p.fftCacheHits += 1;
+    else p.fftCacheMisses += 1;
+    p.fftCacheEntries = fftResultCacheRef.current.size;
+    p.fftCacheBytes = fftResultCacheBytesRef.current;
+    p.lastFftCacheKey = key;
+    p.lastFftCacheHit = hit;
+    window.__quantemShow3DSlicesPerf = p;
+  };
+
   // Live params snapshot for direct-paint (slider handler bypasses React).
   const paintParamsRef = React.useRef<{
     cmap: string; logScale: boolean; flip: boolean; autoContrast: boolean;
@@ -1292,6 +1483,10 @@ function Show3DSlices() {
   const [exportMenuAnchor, setExportMenuAnchor] = React.useState<HTMLElement | null>(null);
   const [exportBusy, setExportBusy] = React.useState(false);
   const [localExportStatus, setLocalExportStatus] = React.useState("");
+  const [advancedControlsOpen, setAdvancedControlsOpen] = React.useState(false);
+  const [localAlignmentStatus, setLocalAlignmentStatus] = React.useState("");
+  const [liveRowShift, setLiveRowShift] = React.useState(rowShiftPxPerSlice || 0);
+  const [liveColShift, setLiveColShift] = React.useState(colShiftPxPerSlice || 0);
   const pendingExportRef = React.useRef<{
     id: string;
     filename: string;
@@ -1310,6 +1505,15 @@ function Show3DSlices() {
       setExportBusy(false);
     }
   }, [exportStatus]);
+  React.useEffect(() => {
+    setLiveRowShift(rowShiftPxPerSlice || 0);
+  }, [rowShiftPxPerSlice]);
+  React.useEffect(() => {
+    setLiveColShift(colShiftPxPerSlice || 0);
+  }, [colShiftPxPerSlice]);
+  React.useEffect(() => {
+    if (sliceAlignmentStatus) setLocalAlignmentStatus(sliceAlignmentStatus);
+  }, [sliceAlignmentStatus]);
 
   // Cursor readout state
   const [cursorInfo, setCursorInfo] = React.useState<{ row: number; col: number; value: number; view: string } | null>(null);
@@ -1338,10 +1542,97 @@ function Show3DSlices() {
 
   // Parse volume data. Live notebooks receive exact float32 bytes; offline
   // reports receive uint8 bytes plus global min/max metadata to reduce HTML size.
-  const allFloats = React.useMemo(
-    () => extractVolumeFloat32(volumeBytes, offline, offlineMin, offlineMax, nx, ny, nz),
-    [volumeBytes, offline, offlineMin, offlineMax, nx, ny, nz],
+  const allPanelFloats = React.useMemo(
+    () => extractVolumeFloat32(volumeBytes, offline, offlineMin, offlineMax, nx, ny, nz, safePanelCount),
+    [volumeBytes, offline, offlineMin, offlineMax, nx, ny, nz, safePanelCount],
   );
+  const rawFloats = React.useMemo(() => {
+    if (!allPanelFloats || allPanelFloats.length === 0) return null;
+    const onePanelCount = Math.max(0, Math.floor(nx) * Math.floor(ny) * Math.floor(nz));
+    if (onePanelCount === 0) return null;
+    if (safePanelCount <= 1) return allPanelFloats;
+    const start = Math.min(safeActivePanel * onePanelCount, allPanelFloats.length);
+    const stop = Math.min(start + onePanelCount, allPanelFloats.length);
+    if (stop <= start) return null;
+    return allPanelFloats.subarray(start, stop);
+  }, [allPanelFloats, safePanelCount, safeActivePanel, nx, ny, nz]);
+  const alignmentMode = (sliceAlignment || "off").toLowerCase();
+  const alignmentActive = alignmentMode !== "off";
+  const lastAlignmentModeRef = React.useRef<"auto" | "manual">(
+    alignmentMode === "manual" ? "manual" : "auto",
+  );
+  React.useEffect(() => {
+    if (alignmentMode === "auto" || alignmentMode === "manual") {
+      lastAlignmentModeRef.current = alignmentMode;
+    }
+  }, [alignmentMode]);
+  const alignedFloatsCacheRef = React.useRef<{
+    raw: Float32Array;
+    nx: number;
+    ny: number;
+    nz: number;
+    rowShift: number;
+    colShift: number;
+    aligned: Float32Array;
+  } | null>(null);
+  const allFloats = React.useMemo(
+    () => {
+      if (!alignmentActive || !rawFloats) return rawFloats;
+      const cached = alignedFloatsCacheRef.current;
+      if (
+        cached
+        && cached.raw === rawFloats
+        && cached.nx === nx
+        && cached.ny === ny
+        && cached.nz === nz
+        && cached.rowShift === rowShiftPxPerSlice
+        && cached.colShift === colShiftPxPerSlice
+      ) {
+        return cached.aligned;
+      }
+      const aligned = applyGlobalSliceAlignment(
+        rawFloats,
+        nx,
+        ny,
+        nz,
+        rowShiftPxPerSlice,
+        colShiftPxPerSlice,
+      );
+      if (!aligned) return rawFloats;
+      alignedFloatsCacheRef.current = {
+        raw: rawFloats,
+        nx,
+        ny,
+        nz,
+        rowShift: rowShiftPxPerSlice,
+        colShift: colShiftPxPerSlice,
+        aligned,
+      };
+      return aligned;
+    },
+    [rawFloats, alignmentActive, nx, ny, nz, rowShiftPxPerSlice, colShiftPxPerSlice],
+  );
+  React.useEffect(() => {
+    if (fftDataObjectRef.current === allFloats) return;
+    fftDataObjectRef.current = allFloats;
+    fftDataTokenRef.current += 1;
+    fftResultCacheRef.current.clear();
+    fftResultCacheBytesRef.current = 0;
+    const p = perfRef.current;
+    if (p) {
+      p.fftCacheEntries = 0;
+      p.fftCacheBytes = 0;
+      p.lastFftCacheKey = "";
+      p.lastFftCacheHit = false;
+      window.__quantemShow3DSlicesPerf = p;
+    }
+  }, [allFloats]);
+  React.useEffect(() => {
+    if (cursorInfoRef.current !== null) {
+      cursorInfoRef.current = null;
+      setCursorInfo(null);
+    }
+  }, [safeActivePanel]);
   const obliqueSegment = React.useMemo(() => {
     const startFromState = profilePointFromAny(obliqueProfileLine?.[0]);
     const stopFromState = profilePointFromAny(obliqueProfileLine?.[1]);
@@ -1368,8 +1659,9 @@ function Show3DSlices() {
     [allFloats],
   );
   const voxelCount = Math.max(0, Math.floor(nx) * Math.floor(ny) * Math.floor(nz));
-  const exactExportSize = formatEstimatedHtmlSize(voxelCount * 4);
-  const quantizedExportSize = formatEstimatedHtmlSize(voxelCount);
+  const syncedVoxelCount = voxelCount * safePanelCount;
+  const exactExportSize = formatEstimatedHtmlSize(syncedVoxelCount * 4);
+  const quantizedExportSize = formatEstimatedHtmlSize(syncedVoxelCount);
   const handleExportMenuOpen = (event: React.MouseEvent<HTMLElement>) => {
     setExportMenuAnchor(event.currentTarget);
   };
@@ -1405,6 +1697,50 @@ function Show3DSlices() {
     pendingExportRef.current = { id, filename, mode, handle };
     setLocalExportStatus(`Preparing ${filename}...`);
     setExportRequest(JSON.stringify({ mode, id, filename, download: true }));
+  };
+  const requestSliceAlignmentEstimate = () => {
+    const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    setLocalAlignmentStatus("Estimating slice alignment...");
+    lastAlignmentModeRef.current = "auto";
+    setSliceAlignmentRequest(JSON.stringify({ mode: "estimate", id, panel: safeActivePanel }));
+  };
+  const handleSliceAlignmentToggle = (on: boolean) => {
+    if (!on) {
+      setSliceAlignment("off");
+      setLocalAlignmentStatus("");
+      return;
+    }
+    if (offline && !sliceAlignmentCached) {
+      setLocalAlignmentStatus("Estimate alignment in a live notebook before export.");
+      return;
+    }
+    if (sliceAlignmentCached) {
+      setSliceAlignment(lastAlignmentModeRef.current);
+      setLocalAlignmentStatus("");
+    } else {
+      setSliceAlignment("auto");
+      requestSliceAlignmentEstimate();
+    }
+  };
+  const commitManualSliceAlignment = (rowShift: number, colShift: number) => {
+    setRowShiftPxPerSlice(rowShift);
+    setColShiftPxPerSlice(colShift);
+    setSliceAlignmentCached(true);
+    setSliceAlignment("manual");
+    lastAlignmentModeRef.current = "manual";
+    setLocalAlignmentStatus(`Manual row ${rowShift >= 0 ? "+" : ""}${rowShift.toFixed(3)}, col ${colShift >= 0 ? "+" : ""}${colShift.toFixed(3)} px/slice`);
+  };
+  const resetSliceAlignment = () => {
+    setLiveRowShift(0);
+    setLiveColShift(0);
+    setRowShiftPxPerSlice(0);
+    setColShiftPxPerSlice(0);
+    setSliceAlignmentCached(false);
+    setSliceAlignment("off");
+    alignedFloatsCacheRef.current = null;
+    lastAlignmentModeRef.current = "auto";
+    setLocalAlignmentStatus("");
+    setSliceAlignmentRequest(JSON.stringify({ mode: "reset", id: `${Date.now()}-${Math.random().toString(36).slice(2)}` }));
   };
 
   React.useEffect(() => {
@@ -1450,6 +1786,252 @@ function Show3DSlices() {
     () => [[ny, nx], [nz, segmentWidth(obliqueSegment.start, obliqueSegment.stop)]],
     [ny, nx, nz, obliqueSegment],
   );
+  type LiveFftSegment = { start: { x: number; y: number }; stop: { x: number; y: number } };
+  const liveFftSchedulerRef = React.useRef<{
+    pending: { axes: number[]; sliceZ: number; segment: LiveFftSegment } | null;
+    inFlight: boolean;
+    timer: number | null;
+    lastStartMs: number;
+  }>({ pending: null, inFlight: false, timer: null, lastStartMs: 0 });
+
+  const makeFftResultCacheKey = (
+    axis: number,
+    sliceZValue: number,
+    segment: LiveFftSegment,
+    sliceW: number,
+    sliceH: number,
+  ) => {
+    const geometry = axis === 0
+      ? `z=${Math.round(sliceZValue)}`
+      : `line=${segment.start.x.toFixed(2)},${segment.start.y.toFixed(2)}:${segment.stop.x.toFixed(2)},${segment.stop.y.toFixed(2)}`;
+    return [
+      `data=${fftDataTokenRef.current}`,
+      `axis=${axis}`,
+      geometry,
+      `dims=${sliceW}x${sliceH}`,
+      `window=${fftWindow ? 1 : 0}`,
+      `log=${fftLogScale ? 1 : 0}`,
+      `auto=${fftAuto ? 1 : 0}`,
+    ].join("|");
+  };
+
+  const trimFftResultCache = () => {
+    const cache = fftResultCacheRef.current;
+    while (
+      cache.size > SHOW3DSLICES_FFT_RESULT_CACHE_MAX_ENTRIES ||
+      fftResultCacheBytesRef.current > SHOW3DSLICES_FFT_RESULT_CACHE_MAX_BYTES
+    ) {
+      let oldestKey = "";
+      let oldestUsed = Number.POSITIVE_INFINITY;
+      cache.forEach((entry, key) => {
+        if (entry.lastUsed < oldestUsed) {
+          oldestUsed = entry.lastUsed;
+          oldestKey = key;
+        }
+      });
+      if (!oldestKey) break;
+      const entry = cache.get(oldestKey);
+      if (entry) fftResultCacheBytesRef.current -= entry.bytes;
+      cache.delete(oldestKey);
+    }
+    const p = perfRef.current;
+    if (p) {
+      p.fftCacheEntries = cache.size;
+      p.fftCacheBytes = fftResultCacheBytesRef.current;
+      window.__quantemShow3DSlicesPerf = p;
+    }
+  };
+
+  const applyFftResultCacheEntry = (
+    axis: number,
+    entry: FftResultCacheEntry,
+    magCache: React.MutableRefObject<(Float32Array | null)[]>,
+    offscreenCache: React.MutableRefObject<(HTMLCanvasElement | null)[]>,
+    imgDataCache: React.MutableRefObject<(ImageData | null)[]>,
+  ) => {
+    const lut = COLORMAPS[fftColormap] || COLORMAPS.inferno;
+    magCache.current[axis] = entry.mag;
+    const existingOff = offscreenCache.current[axis];
+    const existingImg = imgDataCache.current[axis];
+    if (existingOff && existingImg && existingOff.width === entry.width && existingOff.height === entry.height) {
+      renderToOffscreenReuse(entry.displayData, lut, entry.displayMin, entry.displayMax, existingOff, existingImg);
+    } else {
+      const offscreen = renderToOffscreen(entry.displayData, entry.width, entry.height, lut, entry.displayMin, entry.displayMax);
+      if (!offscreen) return false;
+      offscreenCache.current[axis] = offscreen;
+      const ctx = offscreen.getContext("2d");
+      imgDataCache.current[axis] = ctx ? ctx.getImageData(0, 0, entry.width, entry.height) : null;
+    }
+    return true;
+  };
+
+  const putFftResultCacheEntry = (
+    key: string,
+    mag: Float32Array,
+    displayData: Float32Array,
+    displayMin: number,
+    displayMax: number,
+    width: number,
+    height: number,
+  ) => {
+    const existing = fftResultCacheRef.current.get(key);
+    if (existing) fftResultCacheBytesRef.current -= existing.bytes;
+    const bytes = mag.byteLength + (displayData === mag ? 0 : displayData.byteLength);
+    fftResultCacheRef.current.set(key, {
+      mag,
+      displayData,
+      displayMin,
+      displayMax,
+      width,
+      height,
+      bytes,
+      lastUsed: ++fftResultCacheSeqRef.current,
+    });
+    fftResultCacheBytesRef.current += bytes;
+    trimFftResultCache();
+  };
+
+  const computeLiveFftAxis = async (
+    axis: number,
+    sliceZValue: number,
+    segment: LiveFftSegment,
+  ): Promise<boolean> => {
+    if (!effectiveShowFft || !allFloats || allFloats.length === 0) return false;
+    const [sliceH, sliceW] = axis === 0 ? [ny, nx] : [nz, segmentWidth(segment.start, segment.stop)];
+    const cacheKey = makeFftResultCacheKey(axis, sliceZValue, segment, sliceW, sliceH);
+    const cached = fftResultCacheRef.current.get(cacheKey);
+    if (cached) {
+      cached.lastUsed = ++fftResultCacheSeqRef.current;
+      updateFftCachePerf(cacheKey, true);
+      return applyFftResultCacheEntry(
+        axis,
+        cached,
+        fftMagCacheRefs,
+        fftOffscreenRefs,
+        fftImgDataRefs,
+      );
+    }
+    updateFftCachePerf(cacheKey, false);
+    const extracted = axis === 0
+      ? extractXY(allFloats, nx, ny, nz, sliceZValue)
+      : extractOblique(allFloats, nx, ny, nz, segment.start, segment.stop);
+    const data = fftWindow ? new Float32Array(extracted) : extracted;
+    if (fftWindow) applyHannWindow2D(data, sliceW, sliceH);
+
+    const pw = nextPow2(sliceW);
+    const ph = nextPow2(sliceH);
+    const paddedSize = pw * ph;
+    let real: Float32Array;
+    let imag: Float32Array;
+
+    if (gpuReady && gpuFFTRef.current) {
+      const padReal = new Float32Array(paddedSize);
+      const padImag = new Float32Array(paddedSize);
+      for (let y = 0; y < sliceH; y++) for (let x = 0; x < sliceW; x++) padReal[y * pw + x] = data[y * sliceW + x];
+      const result = await gpuFFTRef.current.fft2D(padReal, padImag, pw, ph, false);
+      real = result.real;
+      imag = result.imag;
+    } else {
+      real = new Float32Array(paddedSize);
+      imag = new Float32Array(paddedSize);
+      for (let y = 0; y < sliceH; y++) for (let x = 0; x < sliceW; x++) real[y * pw + x] = data[y * sliceW + x];
+      fft2d(real, imag, pw, ph, false);
+    }
+
+    fftshift(real, pw, ph);
+    fftshift(imag, pw, ph);
+    const mag = computeMagnitude(real, imag);
+    fftMagCacheRefs.current[axis] = mag;
+
+    let displayMin: number;
+    let displayMax: number;
+    if (fftAuto) {
+      ({ min: displayMin, max: displayMax } = autoEnhanceFFT(mag, pw, ph));
+    } else {
+      ({ min: displayMin, max: displayMax } = findDataRange(mag));
+    }
+
+    const lut = COLORMAPS[fftColormap] || COLORMAPS.inferno;
+    const displayData = fftLogScale ? applyLogScale(mag) : mag;
+    if (fftLogScale) {
+      displayMin = Math.log1p(displayMin);
+      displayMax = Math.log1p(displayMax);
+    }
+    putFftResultCacheEntry(cacheKey, mag, displayData, displayMin, displayMax, pw, ph);
+
+    const existingOff = fftOffscreenRefs.current[axis];
+    const existingImg = fftImgDataRefs.current[axis];
+    if (existingOff && existingImg && existingOff.width === pw && existingOff.height === ph) {
+      renderToOffscreenReuse(displayData, lut, displayMin, displayMax, existingOff, existingImg);
+    } else {
+      const offscreen = renderToOffscreen(displayData, pw, ph, lut, displayMin, displayMax);
+      if (!offscreen) return false;
+      fftOffscreenRefs.current[axis] = offscreen;
+      const ctx = offscreen.getContext("2d");
+      fftImgDataRefs.current[axis] = ctx ? ctx.getImageData(0, 0, pw, ph) : null;
+    }
+    return true;
+  };
+
+  const runLiveFftScheduler = () => {
+    const state = liveFftSchedulerRef.current;
+    state.timer = null;
+    if (state.inFlight || !state.pending) return;
+    const now = performance.now();
+    const minIntervalMs = 16;
+    const waitMs = Math.max(0, minIntervalMs - (now - state.lastStartMs));
+    if (waitMs > 0) {
+      state.timer = window.setTimeout(runLiveFftScheduler, waitMs);
+      return;
+    }
+    const pending = state.pending;
+    state.pending = null;
+    state.inFlight = true;
+    state.lastStartMs = now;
+    Promise.all(pending.axes.map(axis => computeLiveFftAxis(axis, pending.sliceZ, pending.segment)))
+      .then(results => {
+        if (results.some(Boolean)) setFftVersion(v => v + 1);
+      })
+      .finally(() => {
+        state.inFlight = false;
+        if (state.pending && state.timer == null) runLiveFftScheduler();
+      });
+  };
+
+  const scheduleLiveFft = (
+    axes: number[],
+    options: { sliceZ?: number; segment?: LiveFftSegment } = {},
+  ) => {
+    if (!effectiveShowFft || !allFloats || allFloats.length === 0) return;
+    const state = liveFftSchedulerRef.current;
+    const prevAxes = state.pending?.axes ?? [];
+    const mergedAxes = Array.from(new Set([...prevAxes, ...axes])).filter(axis => axis === 0 || axis === 1);
+    if (mergedAxes.length === 0) return;
+    state.pending = {
+      axes: mergedAxes,
+      sliceZ: options.sliceZ ?? sliceZ,
+      segment: options.segment ?? { start: { ...obliqueSegment.start }, stop: { ...obliqueSegment.stop } },
+    };
+    if (!state.inFlight && state.timer == null) runLiveFftScheduler();
+  };
+
+  React.useEffect(() => () => {
+    const state = liveFftSchedulerRef.current;
+    if (state.timer != null) window.clearTimeout(state.timer);
+    state.timer = null;
+    state.pending = null;
+  }, []);
+  React.useEffect(() => {
+    sliceOffscreenRefs.current = [null, null, null];
+    sliceImgDataRefs.current = [null, null, null];
+    fftOffscreenRefs.current = [null, null, null];
+    fftImgDataRefs.current = [null, null, null];
+    fftMagCacheRefs.current = [null, null, null];
+    liveFftSchedulerRef.current.pending = null;
+    volUploadedKeyRef.current = null;
+    gpuVolReadyRef.current = false;
+    setFftVersion(v => v + 1);
+  }, [safeActivePanel, volumeBytes]);
 
   // Canvas sizes. For depth panels, keep the Z scale independent from the
   // oblique profile length; otherwise shortening the profile would secretly
@@ -1883,6 +2465,7 @@ function Show3DSlices() {
     setObliqueProfileLine(profileLinePayload(start, stop));
     setObliquePositionBounds(null);
     updateObliqueCenter((start.x + stop.x) / 2, (start.y + stop.y) / 2, nextAngle);
+    scheduleLiveFft([1], { segment: { start, stop } });
     volumeRenderParamsRef.current = {
       ...volumeRenderParamsRef.current,
       obliqueAngleDeg: nextAngle,
@@ -2453,9 +3036,18 @@ function Show3DSlices() {
 
       for (let a = 0; a < sliceDims.length; a++) {
         if (!forceAll && !fftAxisChanged[a]) continue;
+        const [sliceH, sliceW] = dims[a];
+        const cacheKey = makeFftResultCacheKey(a, sliceZ, obliqueSegment, sliceW, sliceH);
+        const cached = fftResultCacheRef.current.get(cacheKey);
+        if (cached) {
+          cached.lastUsed = ++fftResultCacheSeqRef.current;
+          updateFftCachePerf(cacheKey, true);
+          applyFftResultCacheEntry(a, cached, magCache, offscreenCache, imgDataCache);
+          continue;
+        }
+        updateFftCachePerf(cacheKey, false);
         const extracted = extractors[a]();
         const data = fftWindow ? new Float32Array(extracted) : extracted;
-        const [sliceH, sliceW] = dims[a];
         if (fftWindow) applyHannWindow2D(data, sliceW, sliceH);
 
         const pw = nextPow2(sliceW);
@@ -2491,6 +3083,7 @@ function Show3DSlices() {
 
         const displayData = fftLogScale ? applyLogScale(mag) : mag;
         if (fftLogScale) { displayMin = Math.log1p(displayMin); displayMax = Math.log1p(displayMax); }
+        putFftResultCacheEntry(cacheKey, mag, displayData, displayMin, displayMax, pw, ph);
 
         // Reuse cached offscreen if dims match - saves ~4 MB ImageData alloc per axis.
         const existingOff = offscreenCache.current[a];
@@ -2523,8 +3116,11 @@ function Show3DSlices() {
     };
 
     // Debounce FFT compute during slider scrubbing: defer 80 ms so a 60 Hz drag
-    // collapses to ~12 Hz, freeing the main thread for image redraws.
-    const debounceMs = 80;
+    // collapses to ~12 Hz, freeing the main thread for image redraws. Oblique
+    // line edits are a direct visual inspection path, so keep the side FFT close
+    // to frame rate while the endpoint or line body is actively dragged.
+    const liveObliqueEditing = obliqueHandleDragRef.current !== null;
+    const debounceMs = liveObliqueEditing ? 16 : 80;
     const timeoutId = setTimeout(() => {
       if (cancelled) return;
       computeAllFFTs().then((committed) => { if (committed) setFftVersion(v => v + 1); });
@@ -2865,7 +3461,8 @@ function Show3DSlices() {
   const handleWheel = (e: React.WheelEvent, axis: number) => {
     const canvas = canvasRefs.current[axis];
     if (!canvas) return;
-    e.preventDefault();
+    // The native passive:false listener above already blocks page scrolling.
+    // React delegates wheel events through a passive root listener in Chrome.
     const rect = canvas.getBoundingClientRect();
     const zs = liveZoomsRef.current[axis];
     const mouseX = (e.clientX - rect.left) * (canvas.width / rect.width);
@@ -2986,6 +3583,7 @@ function Show3DSlices() {
     setObliqueProfileLine(profileLinePayload(start, stop));
     setObliquePositionBounds(null);
     updateObliqueCenter(cx, cy, nextAngle, { start, stop });
+    scheduleLiveFft([1], { segment: { start, stop } });
   };
   const updateObliqueFromNormalOffset = (offset: number) => {
     const dragBasis = obliquePositionDragRef.current;
@@ -3010,6 +3608,7 @@ function Show3DSlices() {
     setLiveObliqueOffset(Math.round(nextOffset));
     setObliqueProfileLine(profileLinePayload(start, stop));
     updateObliqueCenter((start.x + stop.x) / 2, (start.y + stop.y) / 2, angleDeg, { start, stop });
+    scheduleLiveFft([1], { segment: { start, stop } });
   };
   const updateObliqueFromLineDrag = (
     drag: {
@@ -3020,14 +3619,22 @@ function Show3DSlices() {
     },
     point: { col: number; row: number },
   ) => {
-    const normal = obliqueNormal(drag.angleDeg);
-    const delta =
-      (point.col - drag.origin.x) * normal.x +
-      (point.row - drag.origin.y) * normal.y;
-    const currentOffset =
-      obliquePositionDragRef.current?.currentOffset ??
-      obliqueCenterOffset(nx, ny, drag.angleDeg, drag.start, drag.stop);
-    updateObliqueFromNormalOffset(Math.round(currentOffset + delta));
+    const dxRaw = point.col - drag.origin.x;
+    const dyRaw = point.row - drag.origin.y;
+    const { start, stop } = translateSegmentInsideImage(
+      drag.start,
+      drag.stop,
+      dxRaw,
+      dyRaw,
+      nx,
+      ny,
+      OBLIQUE_PROFILE_EDGE_INSET,
+    );
+    setLiveObliqueOffset(null);
+    setObliquePositionBounds(null);
+    setObliqueProfileLine(profileLinePayload(start, stop));
+    updateObliqueCenter((start.x + stop.x) / 2, (start.y + stop.y) / 2, drag.angleDeg, { start, stop });
+    scheduleLiveFft([1], { segment: { start, stop } });
   };
   const obliqueHitTargetFromEvent = (e: React.MouseEvent, axis: number): "endpoint" | "line" | null => {
     if (axis !== 0) return null;
@@ -3108,17 +3715,9 @@ function Show3DSlices() {
           e.preventDefault();
           e.stopPropagation();
           pausePlaybackForEdit();
-          const currentOffset = obliqueCenterOffset(nx, ny, obliqueAngle, start, stop);
-          const [minDelta, maxDelta] = obliqueSegmentOffsetBounds(nx, ny, obliqueAngle, start, stop, OBLIQUE_PROFILE_EDGE_INSET);
-          obliquePositionDragRef.current = {
-            angleDeg: obliqueAngle,
-            currentOffset,
-            minOffset: Math.ceil(currentOffset + minDelta),
-            maxOffset: Math.floor(currentOffset + maxDelta),
-            start: { ...start },
-            stop: { ...stop },
-          };
-          setLiveObliqueOffset(Math.round(currentOffset));
+          obliquePositionDragRef.current = null;
+          setLiveObliqueOffset(null);
+          setObliquePositionBounds(null);
           obliqueHandleDragRef.current = {
             mode: "line",
             angleDeg: obliqueAngle,
@@ -3419,7 +4018,7 @@ function Show3DSlices() {
   const handleFftWheel = (e: React.WheelEvent, axis: number) => {
     const canvas = fftCanvasRefs.current[axis];
     if (!canvas) return;
-    e.preventDefault();
+    // The canvas-level passive:false listener owns scroll suppression.
     const rect = canvas.getBoundingClientRect();
     const zs = liveFftZoomsRef.current[axis];
     const mouseX = (e.clientX - rect.left) * (canvas.width / rect.width);
@@ -3657,6 +4256,14 @@ function Show3DSlices() {
     sliceValuesRef.current = next;
     liveSliceParamsRef.current = { sliceZ: next[0], sliceY: next[1], sliceX: next[2] };
     volumeRenderParamsRef.current = { ...volumeRenderParamsRef.current, ...liveSliceParamsRef.current };
+    if (axis === 0) {
+      scheduleLiveFft([0], { sliceZ: next[0] });
+    } else if (!obliqueSegment.explicit) {
+      const [rawStart, rawStop] = obliqueLineEndpoints(nx, ny, next[2], next[1], obliqueAngle);
+      const start = clampPointToImage(rawStart, nx, ny, OBLIQUE_PROFILE_EDGE_INSET);
+      const stop = clampPointToImage(rawStop, nx, ny, OBLIQUE_PROFILE_EDGE_INSET);
+      scheduleLiveFft([1], { segment: { start, stop } });
+    }
     pendingPaintRef.current.set(axis, v);
     pendingPaintSourceRef.current.set(axis, source);
     if (sliderPaintRafRef.current != null) return;
@@ -3836,6 +4443,7 @@ function Show3DSlices() {
   // beside the single oblique depth panel.
   const panelTotalW = (canvasSizes[0]?.w ?? CANVAS_TARGET) + (canvasSizes[1]?.w ?? 0) + SPACING.SM;
   const sliceColumnOffsetPx = (webgpuSupported ? volumeCanvasSize : 220) + SPACING.SM;
+  const sideBySideMinWidth = sliceColumnOffsetPx + panelTotalW;
   const obliqueAngleSliderMin = 0;
   const obliqueAngleSliderMax = 179;
   const [rawObliqueAngleMinBound, rawObliqueAngleMaxBound] = obliqueAngleBounds ?? [
@@ -4026,6 +4634,17 @@ function Show3DSlices() {
     flexWrap: "wrap" as const,
     alignSelf: "flex-start",
   };
+  const alignmentShiftLimit = Math.max(
+    2,
+    Math.ceil(Math.max(Math.abs(liveRowShift), Math.abs(liveColShift), 1) * 1.5),
+  );
+  const alignmentStatusText = localAlignmentStatus || (
+    sliceAlignmentCached
+      ? `${alignmentActive ? "Applied" : "Cached"} row ${rowShiftPxPerSlice >= 0 ? "+" : ""}${(rowShiftPxPerSlice || 0).toFixed(3)}, col ${colShiftPxPerSlice >= 0 ? "+" : ""}${(colShiftPxPerSlice || 0).toFixed(3)} px/slice`
+      : alignmentActive
+        ? "Estimating slice alignment..."
+        : offline ? "Estimate in a live notebook before export." : ""
+  );
   const topRightActions = (
     <Box sx={{
       ...controlRow,
@@ -4034,9 +4653,87 @@ function Show3DSlices() {
       minHeight: 24,
       boxSizing: "border-box" as const,
       width: "fit-content",
-      maxWidth: "none",
-      flexWrap: "nowrap" as const,
+      maxWidth: "100%",
+      flexWrap: "wrap" as const,
     }}>
+      {isPaged && (
+        <>
+          <Box sx={{ display: "inline-flex", alignItems: "center", gap: `${SPACING.XS}px`, minWidth: 0 }}>
+            <Typography sx={{ ...controlLabel }}>Page</Typography>
+            <Typography
+              title={pageStatus}
+              sx={{
+                ...controlLabel,
+                color: tc.accent,
+                flex: "0 1 16ch",
+                minWidth: "8ch",
+                maxWidth: "18ch",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+                fontVariantNumeric: "tabular-nums",
+              }}
+            >
+              {pageStatus}
+            </Typography>
+            <Slider
+              value={safePageIdx}
+              min={0}
+              max={safeNPages - 1}
+              step={1}
+              onChange={(_, value) => showPage(Array.isArray(value) ? value[0] : value)}
+              size="small"
+              sx={{ ...sliderStyles.small, width: 96, flex: "0 0 96px", color: tc.accent }}
+              aria-label="Show3DSlices page"
+              valueLabelDisplay="auto"
+              valueLabelFormat={(value) => effectivePageLabels[value] || `Page ${value + 1}`}
+            />
+          </Box>
+          <Box sx={{ display: "inline-flex", alignItems: "center", gap: `${SPACING.XS}px` }}>
+            <IconButton
+              size="small"
+              onClick={() => setPagePlaying((value) => !value)}
+              title={pagePlaying ? "Pause page playback" : "Play pages"}
+              aria-label={pagePlaying ? "Pause page playback" : "Play pages"}
+              sx={{ width: 24, height: 24, p: 0, color: tc.accent }}
+            >
+              {pagePlaying ? <PauseIcon sx={{ fontSize: 16 }} /> : <PlayArrowIcon sx={{ fontSize: 16 }} />}
+            </IconButton>
+            <Select
+              value={String(pagePlayFps)}
+              onChange={(event) => setPagePlayFps(Number(event.target.value) || 2)}
+              size="small"
+              sx={{ ...denseSelect, minWidth: 48 }}
+              MenuProps={themedMenuProps}
+              inputProps={{ "aria-label": "Show3DSlices page playback frames per second" }}
+              title="Page playback speed"
+            >
+              {PAGE_PLAY_FPS_OPTIONS.map((value) => (
+                <MenuItem key={value} value={String(value)}>{value} fps</MenuItem>
+              ))}
+            </Select>
+          </Box>
+        </>
+      )}
+      {pagePanelIndices.length > 1 && (
+        <Box sx={{ display: "inline-flex", alignItems: "center", gap: `${SPACING.XS}px`, minWidth: 0 }}>
+          <Typography sx={{ ...controlLabel }}>Panel</Typography>
+          <Select
+            value={safeActivePanel}
+            onChange={(e) => setActivePanel(Number(e.target.value))}
+            size="small"
+            sx={{ ...denseSelect, minWidth: 150, maxWidth: 220 }}
+            MenuProps={themedMenuProps}
+            inputProps={{ "aria-label": "Select Show3DSlices panel" }}
+          >
+            {pagePanelIndices.map((i) => (
+              <MenuItem key={i} value={i}>
+                {effectivePanelTitles[i] || `Panel ${isPaged ? i - pageStart + 1 : i + 1}`}
+              </MenuItem>
+            ))}
+          </Select>
+        </Box>
+      )}
       {showControls && (
         <Button
           size="small"
@@ -4116,21 +4813,30 @@ function Show3DSlices() {
     <Box className="show3dslices-root" tabIndex={0} onKeyDown={handleKeyDown} sx={{ ...container.root, position: "relative", bgcolor: tc.bg, color: tc.text, outline: "none", "&:focus": { outline: "2px solid #0af", outlineOffset: 2 }, "& canvas": { display: "block" } }}>
       {/* 3D volume on the LEFT, slice toolbar + projected slice panels on the RIGHT.
           Side-by-side layout keeps the whole widget within a 13" laptop viewport. */}
-      <Box sx={{ display: "flex", flexDirection: "row", alignItems: "flex-start", gap: `${SPACING.SM}px` }}>
+      <Box sx={{ display: "flex", flexDirection: { xs: "column", md: "row" }, flexWrap: "wrap", alignItems: "flex-start", gap: `${SPACING.SM}px`, width: "100%" }}>
       {/* 3D Volume Renderer (left column) */}
-      <Box sx={{ mb: 0, flexShrink: 0, width: webgpuSupported ? volumeCanvasSize : 220, overflow: "visible" }}>
+      <Box sx={{ mb: 0, flexShrink: 0, width: { xs: "100%", md: webgpuSupported ? volumeCanvasSize : 220 }, maxWidth: "100%", overflow: "visible" }}>
         {/* Title row */}
-        {showTitle && <Typography variant="caption" sx={{ ...typography.label, color: tc.accent, mb: `${SPACING.XS}px`, display: "block", height: 16, lineHeight: "16px", overflow: "hidden" }}>
-          {title || "Volume 3D"}<InfoTooltip text={<Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
+        {showTitle && <Typography variant="caption" sx={{ ...typography.label, color: tc.accent, mb: `${SPACING.XS}px`, display: "block", minHeight: 16, maxWidth: webgpuSupported ? volumeCanvasSize : 220, lineHeight: "16px", whiteSpace: "normal", overflowWrap: "anywhere" }}>
+          {displayTitle}<InfoTooltip text={<Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
             <MetadataSection rows={[
-              ["Shape", `${nz} x ${ny} x ${nx}`],
-              ["Axes", Array.isArray(dimLabels) && dimLabels.length ? dimLabels.join(", ") : "slice, row, col"],
+              ...(isPaged ? [
+                ["Pages", String(safeNPages)] as [string, React.ReactNode],
+                ["Active page", `${safePageIdx + 1}: ${activePageLabel}`] as [string, React.ReactNode],
+              ] : []),
+              ...(pagePanelIndices.length > 1 ? [
+                ["Panels per page", String(pagePanelIndices.length)] as [string, React.ReactNode],
+                ["Active panel", `${activePanelSlot + 1}: ${activePanelTitle}`] as [string, React.ReactNode],
+              ] : []),
+              ["Shape", `${nz} x ${ny} x ${nx}`] as [string, React.ReactNode],
+              ["Axes", Array.isArray(dimLabels) && dimLabels.length ? dimLabels.join(", ") : "slice, row, col"] as [string, React.ReactNode],
               ["Sampling", Array.isArray(pixelSizeAxes) && pixelSizeAxes.length >= 3
                 ? pixelSizeAxes.map((v) => formatNumber(v)).join(" x ")
-                : pixelSize > 0 ? `${formatNumber(pixelSize)} /px` : ""],
-              ["Display", `z stretch ${formatNumber(zStretch)}, ${orthographic ? "orthographic" : "perspective"}`],
+                : pixelSize > 0 ? `${formatNumber(pixelSize)} /px` : ""] as [string, React.ReactNode],
+              ["Display", `z stretch ${formatNumber(zStretch)}, ${orthographic ? "orthographic" : "perspective"}`] as [string, React.ReactNode],
             ]} />
             <Typography sx={{ fontSize: 11, fontWeight: "bold" }}>Controls</Typography>
+            {isPaged && <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>Page switches comparable volumes while preserving the same top slice, side cut, zoom, and display settings.</Typography>}
             <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>FFT shows the power spectrum below each slice.</Typography>
             <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>Auto uses percentile-based contrast (2nd-98th percentile). FFT Auto masks DC + clips to 99.9th.</Typography>
             <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>Colorbar displays a colorbar overlay on each slice canvas.</Typography>
@@ -4196,7 +4902,7 @@ function Show3DSlices() {
                   ref={volumeCanvasRef}
                   style={{ width: volumeCanvasSize, height: volumeCanvasSize, display: "block" }}
                   role="img"
-                  aria-label={`3D volume rendering${title ? `: ${title}` : ""} (${nx} by ${ny} by ${nz} voxels). Drag to rotate, wheel to zoom.`}
+                  aria-label={`3D volume rendering: ${displayTitle} (${nx} by ${ny} by ${nz} voxels). Drag to rotate, wheel to zoom.`}
                 />
                 {cameraChanged && (
                   <Button
@@ -4276,8 +4982,8 @@ function Show3DSlices() {
       </Box>
       {/* Right column: slice toolbar + projected slice panels (grouped so they
           sit beside the 3D volume rather than below it). */}
-      <Box sx={{ display: "flex", flexDirection: "column", flex: 1, minWidth: 0, alignItems: "flex-start" }}>
-      <Box sx={{ display: "flex", justifyContent: "flex-end", alignItems: "center", width: panelTotalW, maxWidth: "100%", minHeight: 24, mb: `${SPACING.XS}px`, pointerEvents: "none" }}>
+      <Box sx={{ display: "flex", flexDirection: "column", flex: "1 1 auto", flexBasis: { xs: "100%", md: panelTotalW }, minWidth: 0, width: { xs: "100%", md: "auto" }, maxWidth: "100%", alignItems: "flex-start" }}>
+      <Box sx={{ display: "flex", justifyContent: { xs: "flex-start", md: "flex-end" }, alignItems: "center", width: { xs: "100%", md: panelTotalW }, maxWidth: "100%", minHeight: 24, mb: `${SPACING.XS}px`, pointerEvents: "none" }}>
         <Box sx={{ pointerEvents: "auto" }}>
         {topRightActions}
         </Box>
@@ -4516,7 +5222,7 @@ function Show3DSlices() {
           );
         });
         return (
-          <Box sx={{ display: "flex", alignItems: "flex-start", gap: `${SPACING.SM}px`, justifyContent: "flex-start", mt: `${SLICE_PANEL_TOP_ALIGN_PX}px` }}>
+          <Box sx={{ display: "flex", flexDirection: { xs: "column", sm: "row" }, flexWrap: "wrap", alignItems: "flex-start", gap: `${SPACING.SM}px`, justifyContent: "flex-start", mt: `${SLICE_PANEL_TOP_ALIGN_PX}px`, maxWidth: "100%" }}>
             {panels}
           </Box>
         );
@@ -4528,7 +5234,8 @@ function Show3DSlices() {
         <Box sx={{
           ...panelControlRow,
           mt: `${SPACING.SM}px`,
-          ml: `${sliceColumnOffsetPx}px`,
+          ml: { xs: 0, md: `${sliceColumnOffsetPx}px` },
+          [`@media (max-width:${sideBySideMinWidth - 1}px)`]: { ml: 0 },
           width: "fit-content",
           maxWidth: panelTotalW,
           flexWrap: "wrap",
@@ -4559,8 +5266,9 @@ function Show3DSlices() {
           gap: `${SPACING.SM}px`,
           alignItems: "flex-start",
           width: "fit-content",
-          maxWidth: panelTotalW,
+          maxWidth: { xs: "100%", md: panelTotalW },
           boxSizing: "border-box",
+          flexWrap: "wrap",
         }}>
           <Box sx={{ display: "flex", flexDirection: "column", gap: `${SPACING.XS}px`, justifyContent: "flex-start", minWidth: 0 }}>
             <Box sx={contentControlRow}>
@@ -4582,7 +5290,84 @@ function Show3DSlices() {
               <Switch checked={logScale} onChange={(e) => setLogScale(e.target.checked)} size="small" sx={switchStyles.small} inputProps={{ "aria-label": "Toggle log scale (signed log1p) display" }} />
               <Typography sx={{ ...controlLabel }}>Auto</Typography>
               <Switch checked={autoContrast} onChange={(e) => handleAutoContrastChange(e.target.checked)} size="small" sx={switchStyles.small} inputProps={{ "aria-label": "Toggle automatic percentile-based contrast" }} />
+              <Button
+                size="small"
+                sx={{ ...compactButton, color: advancedControlsOpen ? tc.accent : tc.textMuted }}
+                onClick={() => setAdvancedControlsOpen(!advancedControlsOpen)}
+                aria-expanded={advancedControlsOpen}
+                aria-controls="show3dslices-advanced-controls"
+              >
+                Advanced
+              </Button>
             </Box>
+            {advancedControlsOpen && <Box id="show3dslices-advanced-controls" sx={contentControlRow}>
+              <Typography sx={{ ...controlLabel }} title="Display-only global post-alignment through depth. Raw volume data is unchanged.">Slice alignment</Typography>
+              <Switch
+                checked={alignmentActive}
+                onChange={(e) => handleSliceAlignmentToggle(e.target.checked)}
+                disabled={offline && !sliceAlignmentCached}
+                size="small"
+                sx={switchStyles.small}
+                inputProps={{ "aria-label": "Enable automatic global slice alignment" }}
+              />
+              {alignmentActive && (
+                <>
+                  <Typography sx={{ ...controlLabel, color: tc.textMuted }}>Row</Typography>
+                  <LiveNumberSlider
+                    value={liveRowShift}
+                    min={-alignmentShiftLimit}
+                    max={alignmentShiftLimit}
+                    step={0.05}
+                    onLiveChange={setLiveRowShift}
+                    onCommit={(value) => commitManualSliceAlignment(value, liveColShift)}
+                    sx={{ ...sliderStyles.small, width: 58, flexShrink: 0 }}
+                    ariaLabel={`Row shift per slice ${liveRowShift.toFixed(3)} pixels`}
+                  />
+                  <Typography sx={{ ...typography.value, color: tc.textMuted, minWidth: 42, textAlign: "right" }}>
+                    {liveRowShift >= 0 ? "+" : ""}{liveRowShift.toFixed(2)}
+                  </Typography>
+                  <Typography sx={{ ...controlLabel, color: tc.textMuted }}>Col</Typography>
+                  <LiveNumberSlider
+                    value={liveColShift}
+                    min={-alignmentShiftLimit}
+                    max={alignmentShiftLimit}
+                    step={0.05}
+                    onLiveChange={setLiveColShift}
+                    onCommit={(value) => commitManualSliceAlignment(liveRowShift, value)}
+                    sx={{ ...sliderStyles.small, width: 58, flexShrink: 0 }}
+                    ariaLabel={`Column shift per slice ${liveColShift.toFixed(3)} pixels`}
+                  />
+                  <Typography sx={{ ...typography.value, color: tc.textMuted, minWidth: 42, textAlign: "right" }}>
+                    {liveColShift >= 0 ? "+" : ""}{liveColShift.toFixed(2)}
+                  </Typography>
+                </>
+              )}
+              <Button
+                size="small"
+                sx={compactButton}
+                disabled={!sliceAlignmentCached || offline}
+                onClick={resetSliceAlignment}
+                aria-label="Reset slice alignment"
+                title={offline ? "Reset cached alignment in the live notebook before export" : "Discard the cached alignment estimate"}
+              >
+                Reset
+              </Button>
+              {alignmentStatusText && (
+                <Typography
+                  sx={{
+                    ...controlLabel,
+                    maxWidth: 160,
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                    color: alignmentStatusText.startsWith("Slice alignment failed") ? "#d32f2f" : tc.textMuted,
+                  }}
+                  title={alignmentStatusText}
+                >
+                  {alignmentStatusText}
+                </Typography>
+              )}
+            </Box>}
           </Box>
           <Box sx={{ display: "flex", flexDirection: "row", gap: `${SPACING.SM}px`, alignItems: "flex-start", justifyContent: "flex-start" }}>
             <Box sx={{ display: "flex", flexDirection: "column", alignItems: "flex-end", justifyContent: "flex-start" }}>

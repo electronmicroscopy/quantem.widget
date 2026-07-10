@@ -38,8 +38,23 @@ crosshair/position markers to stay synchronized across orthogonal views.
 - Scrub each slice axis slowly and quickly.
 - Click in each slice panel and verify the other views jump to the correct
   corresponding position.
+- Drag the oblique line endpoints in the top slice and verify the side cut
+  rotates/resizes immediately.
+- Drag the oblique line body in the top slice and verify the whole side cut
+  translates in row and col, including diagonal movement, without resetting
+  zoom, contrast, or playback settings.
+- Open Advanced, enable Slice alignment, and verify the first enable estimates
+  one global row/col shift-per-slice slope without a second action. Toggle it
+  off/on repeatedly and confirm the cached raw/aligned views switch immediately
+  without changing the source volume. Reset must invalidate the cache; the
+  row/col sliders should refine the cached display and set manual mode.
+- With FFT enabled, verify the oblique FFT panel follows endpoint and line-body
+  drags continuously instead of updating only after release.
+- With FFT enabled, scrub a slice or oblique slider away and then back. The
+  return position should hit the browser-local FFT cache instead of recomputing.
 - Verify labels, crosshairs, and position readouts update together.
-- Record FPS for slider scrub and click-to-position updates.
+- Record FPS for slider scrub, click-to-position updates, and oblique line
+  endpoint/body drags with FFT enabled.
 
 ### S3S-03: Inspect Anisotropic Multislice Data
 
