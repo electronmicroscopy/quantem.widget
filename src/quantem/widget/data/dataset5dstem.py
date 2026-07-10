@@ -21,8 +21,9 @@ view:
   independent acquisition: placement is per-frame, freeing VRAM is per-frame.
 """
 
+import gc
+from collections.abc import Callable, Sequence
 from typing import Iterator, Self
-from collections.abc import Callable
 
 import numpy as np
 import torch
@@ -30,6 +31,23 @@ from numpy.typing import NDArray
 
 _SERIES_TYPES = ("time", "tilt", "energy", "dose", "focus", "generic")
 _GiB = 1 << 30
+_MiB = 1 << 20
+
+# Show4DSTEM reductions already cap their largest temporary chunks near 600 MiB.
+# Keep one such chunk plus allocator/context headroom, while allowing predictable
+# fixed-shape series to use almost all otherwise available VRAM.
+_DEFAULT_MAX_VRAM_FRACTION = 0.98
+_MAX_VRAM_FRACTION = 0.995
+_MIN_WORKSPACE_RESERVE_BYTES = 768 * _MiB
+_MAX_WORKSPACE_RESERVE_BYTES = 2 * _GiB
+
+
+def _is_recoverable_allocation_error(exc: BaseException) -> bool:
+    """True for backend allocation failures where a smaller retry can work."""
+    if isinstance(exc, MemoryError):
+        return True
+    message = str(exc).lower()
+    return "out of memory" in message or "oom" in message
 
 
 def _validate_4(value, default, name: str) -> NDArray:
@@ -48,6 +66,7 @@ class Dataset5dstem:
         tensor: torch.Tensor | None = None,
         frames: list[torch.Tensor] | None = None,
         lazy_loaders: list[Callable[[], torch.Tensor]] | None = None,
+        lazy_batch_loader: Callable[[Sequence[int]], dict[int, torch.Tensor]] | None = None,
         lazy_shape: tuple[int, int, int, int, int] | None = None,
         lazy_dtype: torch.dtype | None = None,
         initial_frames: dict[int, torch.Tensor] | None = None,
@@ -65,6 +84,7 @@ class Dataset5dstem:
         self._tensor = tensor          # 5D torch tensor, or None
         self._frames = frames          # list of 4D torch tensors (or lazy slots), or None
         self._lazy_loaders = lazy_loaders
+        self._lazy_batch_loader = lazy_batch_loader
         self._lazy_shape = None if lazy_shape is None else tuple(int(x) for x in lazy_shape)
         self._lazy_dtype = lazy_dtype
         if lazy_loaders is not None:
@@ -151,6 +171,7 @@ class Dataset5dstem:
         shape: tuple[int, int, int, int, int],
         dtype: torch.dtype,
         initial_frames: dict[int, torch.Tensor] | None = None,
+        batch_loader: Callable[[Sequence[int]], dict[int, torch.Tensor]] | None = None,
         name: str | None = None,
         sampling=None,
         units=None,
@@ -160,6 +181,7 @@ class Dataset5dstem:
         """Build a file-backed 5D series whose frames load only on demand."""
         return cls(
             lazy_loaders=list(loaders),
+            lazy_batch_loader=batch_loader,
             lazy_shape=shape,
             lazy_dtype=dtype,
             initial_frames=initial_frames,
@@ -210,9 +232,140 @@ class Dataset5dstem:
             self._series = np.concatenate([self._series, np.asarray([value], dtype=float)])
         if hasattr(self, "_page_devices"):
             page_devices = list(getattr(self, "_page_devices", []))
-            target = page_devices[idx % len(page_devices)] if page_devices else torch.device("cpu")
+            cycle = list(getattr(self, "_page_device_cycle", []) or [])
+            target = (
+                cycle[idx % len(cycle)]
+                if cycle
+                else page_devices[idx % len(page_devices)]
+                if page_devices
+                else torch.device("cpu")
+            )
             self._page_devices.append(target)
         return idx
+
+    def preload(self, indices: Sequence[int] | int) -> list[int]:
+        """Load a group of lazy frames, using the batch loader when available.
+
+        Compare-page browsing commonly needs several adjacent 4D-STEM masters at
+        once. Loading them one-by-one loses the optimized multi-file CUDA path,
+        so a folder-backed series can provide ``lazy_batch_loader`` to materialize
+        the whole visible page in one operation. Existing resident frames in that
+        page are preserved; lazy frames outside the requested group are released
+        before the batch arrives to avoid transient VRAM spikes.
+        """
+        frames = self._materialize_frames()
+        wanted = self._indices(indices)
+        if not wanted:
+            return []
+        missing = [idx for idx in wanted if frames[idx] is None]
+        if not missing:
+            self._lru = [idx for idx in getattr(self, "_lru", []) if idx not in wanted] + list(wanted)
+            self._evict_to_page_limits(current=wanted[-1])
+            return []
+        if self._lazy_loaders is None:
+            return [idx for idx in wanted if self.frame(idx) is not None]
+
+        loaded: list[int] = []
+        if self._lazy_batch_loader is not None and len(missing) > 1:
+            # Page-level batch loads can allocate several very large frames at
+            # once. Drop non-page lazy frames first so the transient remains
+            # bounded by the visible page rather than old page + new page.
+            self.release(idx=[idx for idx in self.loaded_indices() if idx not in set(wanted)])
+            frames = self._materialize_frames()
+            gc.collect()
+            batch_failed = False
+            try:
+                batch = self._lazy_batch_loader(tuple(missing))
+            except BaseException as exc:
+                if not _is_recoverable_allocation_error(exc):
+                    raise
+                batch_failed = True
+
+            if batch_failed:
+                # Run this after leaving the ``except`` block. CUDA/CuPy loaders
+                # can leave partial arrays reachable from the exception traceback;
+                # reclaiming while that traceback is still alive is ineffective.
+                self._reclaim(self._known_reclaim_devices())
+                gc.collect()
+            else:
+                for idx in missing:
+                    frame = batch.get(idx)
+                    if frame is None:
+                        continue
+                    self._validate_lazy_frame(frame, idx)
+                    frames[idx] = frame
+                    loaded.append(idx)
+
+        for idx in missing:
+            if frames[idx] is None:
+                try:
+                    self.frame(idx)
+                except BaseException as exc:
+                    if not _is_recoverable_allocation_error(exc):
+                        raise
+                    self._reclaim(self._known_reclaim_devices())
+                    gc.collect()
+                    break
+                loaded.append(idx)
+
+        resident_wanted = [idx for idx in wanted if frames[idx] is not None]
+        self._lru = [idx for idx in getattr(self, "_lru", []) if idx not in wanted] + resident_wanted
+        self._evict_to_page_limits(current=wanted[-1])
+        return loaded
+
+    def preload_batches(self, indices: Sequence[int] | int) -> list[list[int]]:
+        """Split lazy indices into groups that fit the configured page budget.
+
+        A display page can contain more panels than the raw 4D data that fit in
+        VRAM. This method keeps that UI page intact while returning smaller load
+        groups based on the fixed frame budget or per-device byte budgets set by
+        :meth:`page`.
+        """
+        wanted = self._indices(indices)
+        if not wanted:
+            return []
+
+        fixed_budget = getattr(self, "_page_budget", None)
+        byte_budgets = getattr(self, "_page_max_vram_bytes", None) or {}
+        page_devices = list(getattr(self, "_page_devices", []) or [])
+        if fixed_budget is None and not byte_budgets:
+            return [wanted]
+
+        batches: list[list[int]] = []
+        current: list[int] = []
+        used: dict[torch.device, int] = {}
+
+        def target_device(idx: int) -> torch.device:
+            if page_devices:
+                device = self._as_device(page_devices[idx % len(page_devices)])
+            else:
+                frame = self._materialize_frames()[idx]
+                device = torch.device("cpu") if frame is None else frame.device
+            if device.type == "cuda":
+                return torch.device(f"cuda:{0 if device.index is None else device.index}")
+            return device
+
+        def fits(idx: int) -> bool:
+            if fixed_budget is not None and len(current) >= int(fixed_budget):
+                return False
+            device = target_device(idx)
+            budget = byte_budgets.get(device)
+            if budget is None:
+                return True
+            nbytes = self._frame_nbytes_for_index(idx)
+            return not current or used.get(device, 0) + nbytes <= int(budget)
+
+        for idx in wanted:
+            if current and not fits(idx):
+                batches.append(current)
+                current = []
+                used = {}
+            device = target_device(idx)
+            current.append(idx)
+            used[device] = used.get(device, 0) + self._frame_nbytes_for_index(idx)
+        if current:
+            batches.append(current)
+        return batches
 
     def _validate_lazy_frame(self, frame: torch.Tensor, i: int) -> None:
         if self._lazy_shape is None or self._lazy_dtype is None:
@@ -477,6 +630,17 @@ class Dataset5dstem:
             idx = [idx]
         return sorted({i % len(self) for i in idx})
 
+    def _known_reclaim_devices(self) -> set[torch.device]:
+        """CUDA devices that may have unreferenced cached blocks after a failed load."""
+        devs: set[torch.device] = set()
+        if self._frames is not None:
+            devs.update(frame.device for frame in self._frames if frame is not None)
+        for device in getattr(self, "_page_devices", []) or []:
+            dev = self._as_device(device)
+            if dev.type == "cuda":
+                devs.add(torch.device(f"cuda:{0 if dev.index is None else dev.index}"))
+        return devs
+
     @staticmethod
     def _reclaim(devs) -> None:
         """Empty torch AND cupy caching pools on each device so freed VRAM returns.
@@ -581,6 +745,9 @@ class Dataset5dstem:
 
         if hasattr(self, "_lru"):
             self._lru = [i for i in self._lru if i not in set(released)]
+        # The loop variable otherwise keeps the final released tensor alive
+        # during _reclaim(), leaving its CUDA/CuPy block in the allocator pool.
+        del frame
         if reclaimed:
             self._reclaim(reclaimed)
         return released
@@ -601,6 +768,7 @@ class Dataset5dstem:
             self._frames = None
             self._tensor = None
             self._lazy_loaders = None
+            self._lazy_batch_loader = None
             self._lazy_shape = None
             self._lazy_dtype = None
             self._series = None
@@ -642,41 +810,286 @@ class Dataset5dstem:
     def _frame_nbytes(frame: torch.Tensor) -> int:
         return int(frame.element_size() * frame.nelement())
 
-    @classmethod
+    def _frame_nbytes_for_index(self, idx: int) -> int:
+        frames = self._materialize_frames()
+        frame = frames[idx]
+        if frame is not None:
+            return self._frame_nbytes(frame)
+        if self._lazy_shape is not None:
+            n = 1
+            for value in self._lazy_shape[1:]:
+                n *= int(value)
+            return int(n * self.element_size())
+        return 0
+
+    @staticmethod
+    def _canonical_cuda_device(device: torch.device) -> torch.device:
+        if device.type != "cuda":
+            return device
+        return torch.device(f"cuda:{0 if device.index is None else device.index}")
+
+    def _page_target_device(self, idx: int) -> torch.device:
+        frames = self._materialize_frames()
+        frame = frames[idx]
+        if frame is not None and frame.device.type == "cuda":
+            return self._canonical_cuda_device(frame.device)
+        page_devices = list(getattr(self, "_page_devices", []) or [])
+        if not page_devices:
+            return torch.device("cpu") if frame is None else frame.device
+        return self._canonical_cuda_device(
+            self._as_device(page_devices[idx % len(page_devices)])
+        )
+
+    def _managed_cuda_nbytes(self) -> dict[torch.device, int]:
+        managed: dict[torch.device, int] = {}
+        for frame in self._materialize_frames():
+            if frame is None or frame.device.type != "cuda":
+                continue
+            device = self._canonical_cuda_device(frame.device)
+            managed[device] = managed.get(device, 0) + self._frame_nbytes(frame)
+        return managed
+
+    def _largest_frame_nbytes_by_device(
+        self, devices: Sequence[torch.device]
+    ) -> dict[torch.device, int]:
+        largest = {self._canonical_cuda_device(device): 0 for device in devices}
+        for idx in range(len(self)):
+            device = self._page_target_device(idx)
+            if device.type != "cuda":
+                continue
+            largest[device] = max(
+                largest.get(device, 0), self._frame_nbytes_for_index(idx)
+            )
+        return largest
+
+    @staticmethod
+    def _adaptive_workspace_reserve(total: int, largest_frame: int) -> int:
+        """Return bounded CUDA headroom for reductions and allocator metadata."""
+        requested = max(
+            _MIN_WORKSPACE_RESERVE_BYTES,
+            int(total) // 100,
+            int(largest_frame) // 8,
+        )
+        return min(requested, _MAX_WORKSPACE_RESERVE_BYTES)
+
+    def _evict_for_incoming_lazy_frame(
+        self,
+        *,
+        current: int,
+        target_device: torch.device,
+    ) -> None:
+        """Make room before a lazy loader allocates the next frame."""
+        if self._lazy_loaders is None:
+            return
+        frames = self._materialize_frames()
+        self._lru = [i for i in getattr(self, "_lru", []) if i < len(frames)]
+        reclaimed: set[torch.device] = set()
+
+        def evict(idx: int) -> None:
+            frame = frames[idx]
+            if frame is None:
+                self._lru[:] = [x for x in self._lru if x != idx]
+                return
+            dev = frame.device
+            frames[idx] = None
+            if dev.type != "cpu":
+                reclaimed.add(dev)
+            self._lru[:] = [x for x in self._lru if x != idx]
+
+        budget = getattr(self, "_page_budget", None)
+        while budget is not None:
+            resident = [
+                i for i in self._lru
+                if frames[i] is not None
+                and (self._lazy_loaders is not None or frames[i].device.type != "cpu")
+            ]
+            if len(resident) < int(budget):
+                break
+            candidates = [i for i in resident if i != current] or resident
+            evict(candidates[0])
+
+        byte_budgets = getattr(self, "_page_max_vram_bytes", None) or {}
+        target = self._as_device(target_device)
+        if target.type == "cuda":
+            target = torch.device(f"cuda:{0 if target.index is None else target.index}")
+        max_bytes = int(byte_budgets.get(target, 0))
+        incoming = self._frame_nbytes_for_index(current)
+        while target.type == "cuda" and max_bytes > 0:
+            resident = [
+                i for i in self._lru
+                if frames[i] is not None and frames[i].device == target
+            ]
+            used = sum(self._frame_nbytes(frames[i]) for i in resident if frames[i] is not None)
+            if used + incoming <= max_bytes or not resident:
+                break
+            candidates = [i for i in resident if i != current] or resident
+            evict(candidates[0])
+
+        if reclaimed:
+            self._reclaim(reclaimed)
+
     def _auto_vram_budgets(
-        cls,
+        self,
         devices,
         *,
-        max_vram_fraction: float = 0.75,
+        max_vram_fraction: float = _DEFAULT_MAX_VRAM_FRACTION,
         reserve_vram_bytes: int | None = None,
         max_vram_bytes: int | dict | None = None,
     ) -> dict[torch.device, int]:
-        """Return per-CUDA-device cache budgets for automatic paging."""
-        targets = [cls._as_device(d) for d in devices]
-        cuda_targets = sorted({d.index if d.index is not None else 0 for d in targets if d.type == "cuda"})
+        """Return per-CUDA-device budgets for this series' resident frames.
+
+        The automatic budget uses current free memory plus bytes already owned by
+        this Dataset5dstem. Other tensors in the process remain accounted for as
+        unavailable, so loading a predictable full series cannot evict unrelated
+        work merely because it belongs to the same Python process.
+        """
+        targets = [self._as_device(d) for d in devices]
+        cuda_targets = sorted(
+            {
+                d.index if d.index is not None else 0
+                for d in targets
+                if d.type == "cuda"
+            }
+        )
         if not cuda_targets:
             return {}
         if max_vram_bytes is not None:
             if isinstance(max_vram_bytes, dict):
                 out = {}
                 for key, value in max_vram_bytes.items():
-                    dev = cls._as_device(key)
+                    dev = self._as_device(key)
                     if dev.type == "cuda":
-                        out[torch.device(f"cuda:{0 if dev.index is None else dev.index}")] = int(value)
+                        target = torch.device(
+                            f"cuda:{0 if dev.index is None else dev.index}"
+                        )
+                        out[target] = int(value)
                 return out
-            return {torch.device(f"cuda:{idx}"): int(max_vram_bytes) for idx in cuda_targets}
-        reserve = int(4 * 1024**3 if reserve_vram_bytes is None else reserve_vram_bytes)
-        fraction = float(max(0.05, min(float(max_vram_fraction), 0.95)))
+            return {
+                torch.device(f"cuda:{idx}"): int(max_vram_bytes)
+                for idx in cuda_targets
+            }
+        fraction = float(
+            max(0.05, min(float(max_vram_fraction), _MAX_VRAM_FRACTION))
+        )
+        managed = self._managed_cuda_nbytes()
+        cuda_devices = [torch.device(f"cuda:{idx}") for idx in cuda_targets]
+        largest = self._largest_frame_nbytes_by_device(cuda_devices)
         budgets: dict[torch.device, int] = {}
         for idx in cuda_targets:
+            device = torch.device(f"cuda:{idx}")
             with torch.cuda.device(idx):
                 free, total = torch.cuda.mem_get_info(idx)
-                live = torch.cuda.memory_allocated(idx)
+            reserve = (
+                self._adaptive_workspace_reserve(total, largest.get(device, 0))
+                if reserve_vram_bytes is None
+                else max(0, int(reserve_vram_bytes))
+            )
             total_budget = int(total * fraction)
-            process_available = max(0, int(free + live - reserve))
-            budget = max(0, min(total_budget, process_available))
-            budgets[torch.device(f"cuda:{idx}")] = budget
+            series_bytes = int(managed.get(device, 0))
+            available_to_series = max(0, int(free) + series_bytes - reserve)
+            # Never invalidate a frame that is already live merely because
+            # another process consumed memory after it was loaded.
+            budget = max(series_bytes, min(total_budget, available_to_series))
+            budgets[device] = budget
         return budgets
+
+    def _refresh_auto_vram_budgets(self) -> None:
+        config = getattr(self, "_page_auto_config", None)
+        if not config:
+            return
+        self._page_max_vram_bytes = self._auto_vram_budgets(
+            self._page_devices,
+            max_vram_fraction=config["max_vram_fraction"],
+            reserve_vram_bytes=config["reserve_vram_bytes"],
+            max_vram_bytes=config["max_vram_bytes"],
+        )
+
+    def residency_plan(
+        self, indices: Sequence[int] | int | None = None
+    ) -> dict[str, object]:
+        """Plan whether selected lazy frames can all remain in GPU memory.
+
+        Frame shapes and dtypes are known before file-backed frames load, so this
+        calculation does not read detector data. The returned per-device byte
+        totals are suitable for status displays and deterministic tests.
+        """
+        wanted = self._indices(indices)
+        self._refresh_auto_vram_budgets()
+        required: dict[torch.device, int] = {}
+        for idx in wanted:
+            device = self._page_target_device(idx)
+            required[device] = (
+                required.get(device, 0) + self._frame_nbytes_for_index(idx)
+            )
+
+        budgets = dict(getattr(self, "_page_max_vram_bytes", None) or {})
+        fixed_budget = getattr(self, "_page_budget", None)
+        cuda_only = bool(required) and all(
+            device.type == "cuda" for device in required
+        )
+        count_fits = fixed_budget is None or len(wanted) <= int(fixed_budget)
+        bytes_fit = bool(budgets) and all(
+            device in budgets and int(nbytes) <= int(budgets[device])
+            for device, nbytes in required.items()
+        )
+        fits = bool(cuda_only and count_fits and bytes_fit)
+        resident = set(self.vram_resident())
+        return {
+            "fits": fits,
+            "indices": list(wanted),
+            "required_bytes": required,
+            "budget_bytes": budgets,
+            "total_required_bytes": int(sum(required.values())),
+            "resident_count": sum(idx in resident for idx in wanted),
+        }
+
+    def preload_all_if_fits(
+        self,
+        indices: Sequence[int] | int | None = None,
+        *,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> dict[str, object]:
+        """Load every selected lazy frame only when the residency plan fits.
+
+        A memory change between planning and allocation is handled as a normal
+        paging fallback: frames that fit remain cached and the rest stay lazy.
+        Backend allocation errors are reclaimed and are not surfaced to users as
+        raw CUDA/CuPy out-of-memory traces.
+        """
+        plan = self.residency_plan(indices)
+        wanted = list(plan["indices"])
+        if not bool(plan["fits"]):
+            plan["resident"] = False
+            self._last_residency_plan = plan
+            return plan
+
+        # Keep each master in an independent allocation. A single stacked batch
+        # would make all frame views share one storage block, so hiding one panel
+        # could not return its share of VRAM until every sibling was released.
+        frames = self._materialize_frames()
+        for idx in wanted:
+            if cancelled is not None and cancelled():
+                break
+            if frames[idx] is not None:
+                continue
+            try:
+                self.frame(idx)
+            except BaseException as exc:
+                if not _is_recoverable_allocation_error(exc):
+                    raise
+                self._reclaim(self._known_reclaim_devices())
+                gc.collect()
+                break
+        resident = set(self.vram_resident())
+        complete = all(idx in resident for idx in wanted)
+        if not complete:
+            self._refresh_auto_vram_budgets()
+            self._evict_to_page_limits()
+            resident = set(self.vram_resident())
+        plan["resident"] = complete
+        plan["resident_count"] = sum(idx in resident for idx in wanted)
+        self._last_residency_plan = plan
+        return plan
 
     def _evict_to_page_limits(self, *, current: int | None = None) -> None:
         frames = self._materialize_frames()
@@ -686,7 +1099,11 @@ class Dataset5dstem:
             return
         self._lru = [i for i in getattr(self, "_lru", []) if i < len(frames)]
         for i, frame in enumerate(frames):
-            if frame is not None and frame.device.type != "cpu" and i not in self._lru:
+            if (
+                frame is not None
+                and (self._lazy_loaders is not None or frame.device.type != "cpu")
+                and i not in self._lru
+            ):
                 self._lru.insert(0, i)
 
         reclaimed: set[torch.device] = set()
@@ -702,7 +1119,11 @@ class Dataset5dstem:
             self._lru[:] = [x for x in self._lru if x != idx]
 
         while budget is not None:
-            resident = [i for i in self._lru if frames[i] is not None and frames[i].device.type != "cpu"]
+            resident = [
+                i for i in self._lru
+                if frames[i] is not None
+                and (self._lazy_loaders is not None or frames[i].device.type != "cpu")
+            ]
             if len(resident) <= int(budget):
                 break
             candidates = [i for i in resident if i != current] or resident
@@ -712,8 +1133,16 @@ class Dataset5dstem:
             if dev.type != "cuda" or max_bytes <= 0:
                 continue
             while True:
-                resident = [i for i in self._lru if frames[i] is not None and frames[i].device == dev]
-                used = sum(self._frame_nbytes(frames[i]) for i in resident if frames[i] is not None)
+                resident = [
+                    i
+                    for i in self._lru
+                    if frames[i] is not None and frames[i].device == dev
+                ]
+                used = sum(
+                    self._frame_nbytes(frames[i])
+                    for i in resident
+                    if frames[i] is not None
+                )
                 if used <= max_bytes or not resident:
                     break
                 candidates = [i for i in resident if i != current]
@@ -729,7 +1158,7 @@ class Dataset5dstem:
         vram_frames: int | str,
         device=None,
         *,
-        max_vram_fraction: float = 0.75,
+        max_vram_fraction: float = _DEFAULT_MAX_VRAM_FRACTION,
         reserve_vram_bytes: int | None = None,
         max_vram_bytes: int | dict | None = None,
     ) -> Self:
@@ -755,15 +1184,25 @@ class Dataset5dstem:
                 f.device if f is not None else torch.device("cpu")
                 for f in frames
             ]
+            self._page_device_cycle = []
         elif isinstance(device, (list, tuple)):
             targets = [self._as_device(d) for d in device]
             if not targets:
                 raise ValueError("device list for page() must not be empty.")
-            self._page_devices = [targets[i % len(targets)] for i in range(len(frames))]
+            self._page_devices = [
+                targets[i % len(targets)] for i in range(len(frames))
+            ]
+            self._page_device_cycle = list(targets)
         else:
             target = self._as_device(device)
             self._page_devices = [target for _ in frames]
+            self._page_device_cycle = [target]
         if auto:
+            self._page_auto_config = {
+                "max_vram_fraction": float(max_vram_fraction),
+                "reserve_vram_bytes": reserve_vram_bytes,
+                "max_vram_bytes": max_vram_bytes,
+            }
             self._page_max_vram_bytes = self._auto_vram_budgets(
                 self._page_devices,
                 max_vram_fraction=max_vram_fraction,
@@ -773,6 +1212,7 @@ class Dataset5dstem:
             self._lru = [i for i, f in enumerate(frames) if f is not None and f.device.type != "cpu"]
             self._evict_to_page_limits()
         else:
+            self._page_auto_config = None
             self._page_max_vram_bytes = {}
             self._lru = [i for i, f in enumerate(frames) if f is not None and f.device.type != "cpu"]
             if self._lazy_loaders is None:
@@ -788,11 +1228,18 @@ class Dataset5dstem:
         """
         if getattr(self, "_page_budget", None) is None and not getattr(self, "_page_max_vram_bytes", None):
             return self._ensure_frame_loaded(i) if self._lazy_loaders is not None else self[i]
-        self._materialize_frames()
+        frames = self._materialize_frames()
         i = i % len(self)
+        page_devices = getattr(self, "_page_devices", None)
+        if self._lazy_loaders is not None and frames[i] is None:
+            if not page_devices:
+                raise RuntimeError("Dataset5dstem paging was not initialized correctly.")
+            self._evict_for_incoming_lazy_frame(
+                current=i,
+                target_device=self._as_device(page_devices[i % len(page_devices)]),
+            )
         frame = self._ensure_frame_loaded(i)
         if frame.device.type == "cpu":
-            page_devices = getattr(self, "_page_devices", None)
             if not page_devices:
                 raise RuntimeError("Dataset5dstem paging was not initialized correctly.")
             self._frames[i] = frame.to(page_devices[i % len(page_devices)])

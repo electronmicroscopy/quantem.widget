@@ -90,7 +90,7 @@ r = load(masters, det_bin=4, dtype="u8")
 w = Show4DSTEM(r)
 ```
 
-The returned data has shape `(n_files, scan_y, scan_x, det_y, det_x)`.
+The returned data has shape `(n_files, scan_row, scan_col, det_row, det_col)`.
 `Show4DSTEM` labels the extra axis as `Dataset` and uses the source filenames
 as slider labels when they are available.
 

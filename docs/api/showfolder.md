@@ -16,6 +16,9 @@ the folder, builds calibrated thumbnails, and writes a small thumbnail/index
 cache in the user cache directory by default. The second run validates file
 path, size, and modification time, then reuses the cached thumbnails so users
 can browse large microscopy sessions quickly without loading full arrays again.
+The inventory includes per-pixel dwell time in microseconds when Velox records
+``Scan.DwellTime``. AutoExport TIFFs inherit it only from an exact matching EMD
+stem in the same folder or its parent; unmatched TIFFs remain blank.
 
 ```python
 w = ShowFolder("/data/session", thumb=256, group_by="fov")
@@ -48,13 +51,30 @@ w.watch(interval=2.0)
 Use `watch_once()` in scripts or tests when you want one deterministic poll,
 and `stop_watch()` before shutting down a long-running notebook kernel.
 
-`ShowFolder` owns folder watching. `Show2D`, `Show3D`, and `Show4DSTEM` stay as
-display widgets: open them from the selection panel, then let `ShowFolder`
-refresh the active view as files arrive. Image selections update the existing
-Show2D/Show3D viewer in place. For 4D-STEM folders, the watcher also tracks
-`*_master.h5` files and rebuilds the active lazy Show4DSTEM view with the same
-paging options, so new Dataset4DSTEM masters appear without preloading the whole
-folder.
+`ShowFolder` owns watching for its thumbnail browser and selection workflow.
+When a viewer should follow scientific source data directly, use
+`Show2D.from_folder(...)`, `Show3D.from_folder(...)`, or
+`Show4DSTEM.from_folder(...)`; those APIs have their own default watcher and do
+not depend on ShowFolder. Image selections opened through ShowFolder still
+update its active Show2D/Show3D viewer in place. For 4D-STEM selections,
+ShowFolder tracks `*_master.h5` files and refreshes the active lazy Show4DSTEM
+view with the same paging options. The first dataset paints immediately; when
+the complete known shape/dtype footprint fits the selected GPUs, the remaining
+unhidden datasets preload in the background. Larger folders remain
+full-resolution and lazy.
+
+```python
+stem = w.open_show4dstem(
+    gpus=[0, 1],
+    page_budget="auto",
+    preload_all_if_fits=True,
+)
+stem.wait_for_dataset_preload(timeout=120)  # optional deterministic wait
+```
+
+Set `preload_all_if_fits=False` to force page-on-demand loading. The automatic
+fit check does not silently bin or narrow data; `det_bin=` and `dtype=` remain
+explicit scientific choices.
 
 For acquisition folders where every new image should appear immediately, open
 the all-image viewers before starting the watcher:

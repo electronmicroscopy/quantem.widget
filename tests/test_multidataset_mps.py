@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import numpy as np
+import pytest
 
 from quantem.widget.kernels.compute.mps import MultiChunkedFrames
 from quantem.widget.multidataset_mps import LazyMacbookDatasets
@@ -199,3 +202,167 @@ def test_lazy_macbook_datasets_poll_master_folder_filters_ready(monkeypatch, tmp
 
     assert added == [1]
     assert calls == [str(ready)]
+
+
+def test_show4dstem_from_folder_mps_honors_public_folder_options(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    import quantem.widget.io as widget_io
+    import quantem.widget.multidataset_mps as multidataset_mps
+    import quantem.widget.show4dstem_factory as factory
+
+    masters = [str(tmp_path / f"scan_{idx}_master.h5") for idx in range(3)]
+    calls: dict[str, object] = {}
+
+    def fake_discover(
+        folder,
+        *,
+        pattern="*_master.h5",
+        recursive=True,
+        scan_shape=None,
+        verbose=False,
+        **kwargs,
+    ):
+        calls["discover"] = {
+            "folder": folder,
+            "pattern": pattern,
+            "recursive": recursive,
+            "scan_shape": scan_shape,
+            "verbose": verbose,
+            "kwargs": kwargs,
+        }
+        return list(masters)
+
+    def fake_ready(path):
+        return path != masters[1]
+
+    class _FakeLive:
+        def poll_master_folder(self, folder, **kwargs):
+            calls["poll"] = {"folder": folder, **kwargs}
+            return [7]
+
+        def watch_master_folder(self, folder, **kwargs):
+            calls["watch"] = {"folder": folder, **kwargs}
+            return self
+
+        def stop_watch(self):
+            calls["stop"] = True
+
+    live = _FakeLive()
+
+    def fake_load_macbook_datasets(
+        paths,
+        *,
+        det_bin=4,
+        scan_size=None,
+        verbose=True,
+        skip_mps_memory_check=None,
+    ):
+        calls["loader"] = {
+            "paths": list(paths),
+            "det_bin": det_bin,
+            "scan_size": scan_size,
+            "verbose": verbose,
+            "skip_mps_memory_check": skip_mps_memory_check,
+        }
+        return live
+
+    def fake_show4dstem(data, **kwargs):
+        calls["viewer"] = {"data": data, "kwargs": kwargs}
+        return SimpleNamespace()
+
+    monkeypatch.setattr(widget_io, "discover_masters", fake_discover)
+    monkeypatch.setattr(widget_io, "is_master_ready", fake_ready)
+    monkeypatch.setattr(
+        multidataset_mps,
+        "load_macbook_datasets",
+        fake_load_macbook_datasets,
+    )
+    monkeypatch.setattr(factory, "Show4DSTEM", fake_show4dstem)
+
+    with pytest.warns(RuntimeWarning, match="dtype='u8'.*paging/preload"):
+        viewer = factory.from_folder(
+            tmp_path,
+            backend="mps",
+            pattern="scan_*_master.h5",
+            recursive=False,
+            scan_size=256,
+            ready_only=True,
+            det_bin=8,
+            dtype="u8",
+            load_kwargs={"skip_mps_memory_check": True},
+            page_budget=2,
+            page_max_vram_fraction=0.5,
+            preload_initial_page=False,
+            view_mode="single",
+            compare_cols=2,
+            compare_max_panels=5,
+            watch=True,
+            watch_interval=0.25,
+            verbose=False,
+            custom_option="kept",
+        )
+
+    assert calls["discover"] == {
+        "folder": str(tmp_path.resolve()),
+        "pattern": "scan_*_master.h5",
+        "recursive": False,
+        "scan_shape": (256, 256),
+        "verbose": False,
+        "kwargs": {},
+    }
+    assert calls["loader"] == {
+        "paths": [masters[0], masters[2]],
+        "det_bin": 8,
+        "scan_size": 256,
+        "verbose": False,
+        "skip_mps_memory_check": True,
+    }
+    assert calls["viewer"] == {
+        "data": live,
+        "kwargs": {
+            "view_mode": "single",
+            "compare_cols": 2,
+            "compare_max_panels": 5,
+            "page_budget": 2,
+            "page_device": None,
+            "page_max_vram_fraction": 0.5,
+            "page_reserve_vram_bytes": None,
+            "page_max_vram_bytes": None,
+            "verbose": False,
+            "custom_option": "kept",
+        },
+    }
+    assert calls["watch"] == {
+        "folder": tmp_path.resolve(),
+        "interval": 0.25,
+        "pattern": "scan_*_master.h5",
+        "recursive": False,
+        "scan_size": 256,
+        "ready_only": True,
+    }
+
+    assert viewer.poll_folder(async_=False) == [7]
+    assert calls["poll"] == {
+        "folder": tmp_path.resolve(),
+        "pattern": "scan_*_master.h5",
+        "recursive": False,
+        "scan_size": 256,
+        "ready_only": True,
+        "async_": False,
+    }
+    viewer.stop_folder_watch()
+    assert calls["stop"] is True
+
+
+def test_show4dstem_from_folder_mps_rejects_unsupported_load_kwargs(tmp_path) -> None:
+    import quantem.widget.show4dstem_factory as factory
+
+    with pytest.raises(ValueError, match="apply_mask"):
+        factory.from_folder(
+            tmp_path,
+            backend="mps",
+            dtype="u16",
+            load_kwargs={"apply_mask": False},
+        )

@@ -101,10 +101,116 @@ Timing traits and debug surfaces should stay stable across widgets:
   when the widget can observe the frontend paint.
 - ``render_python_build_ms``: subset spent in Python widget setup.
 - ``render_wire_js_ms``: transfer, browser decode, and first paint remainder.
-- ``debug=True`` / debug HUD: opt-in browser interaction telemetry such as FPS,
-  map/spectrum/draw time, frame fetch time, and render time. Show2D, Show3D,
-  and Show4DSTEM expose a browser-local `Debug FPS` badge for quick agent and
-  human smoke checks in notebooks and exported HTML.
+- ``debug=True`` / debug HUD: opt-in browser interaction telemetry. Show2D,
+  Show3D, and Show4DSTEM expose a browser-local `Debug UI FPS` badge for quick
+  agent and human smoke checks in notebooks and exported HTML. That badge is
+  only the browser paint loop; widget-specific debug metrics should separately
+  report decode, draw, compute, cache, memory, and interaction-latency costs.
+
+Do not collapse all debugging into one FPS number. A scalable debug surface has
+one common metric plus widget-specific metrics:
+
+- **Common**: UI FPS, dropped frames, pointer-to-preview latency.
+- **Show2D**: image decode/draw, histogram draw, FFT prep/worker/GPU/post time,
+  ROI/profile time, page scrub latency, and panel cache state.
+- **Show3D**: frame fetch/decode, frame cache hit/miss, prewarm status, play
+  FPS, frame scrub latency, FFT/FFT-metric time, and panel/page cache state.
+- **Show4DSTEM**: diffraction-pattern fetch, virtual-detector compute, detector
+  ROI drag latency, compare-grid cache, WebGPU/backend path, and GPU memory.
+- **ShowEDS**: map compute/draw, spectrum compute/draw, backend path, and sparse
+  stream lookup costs.
+
+Keep detailed debug counters browser-local, for example under an existing
+`window.__quantemShow*Perf` object. Do not sync high-frequency debug samples
+back to Python traits.
+
+## Widget Performance Stories
+
+Use this table as the widget-level user story checklist. It is the maintainer
+view of what "fast enough" means before a change is called done. The cloud/CI
+path should cover the lightweight protocol and export checks. The local heavy
+signoff should cover real private data, browser screenshots, and FPS/cache
+evidence.
+
+| Widget | Primary user story | Must stay real-time | Performance proof |
+| --- | --- | --- | --- |
+| Show1D | Inspect scalar traces, losses, spectra, or per-iteration diagnostics while deciding which image view to open. | Cursor/readout movement, snapshot selection, and handoff to Show2D. | Lightweight state tests plus browser story when handoff or snapshot rendering changes. |
+| Show2D | Compare one image or many related images, often 4K microscopy outputs, with zoom, pan, histogram, FFT, profile, pages, and export. | Zoom/pan, histogram controls, page slider/play, hidden panels, FFT redraws after first compute, and HTML reopen. | `scripts/widget_browser_smoke.py` for exported HTML; `scripts/widget_heavy_perf_signoff.py` for 4K real-data panels. |
+| Show3D | Scrub or play time series, focal stacks, iterative reconstructions, and multi-panel comparisons without rebuilding the widget. | Frame scrub/play, page slider/play, hidden panels, frame cache/prewarm, FFT return-scrub cache, FFT metric labels, GIF/MP4/HTML export. | `scripts/widget_heavy_perf_signoff.py`; exported HTML profile for existing reports; animation smoke for GIF/MP4. |
+| Show3DSlices | Browse volume slices and orthogonal views with synchronized crosshair/plane controls. | Slice sliders, crosshair movement, oblique line endpoint/body drags, side-plane redraw, oblique FFT redraw during line drag, FFT return-scrub cache hits for slice/oblique sliders, histogram controls, FFT/log/smooth toggles, and export reopen. | Browser smoke plus focused visual story when slice/crosshair/oblique-line behavior changes. |
+| Show4DSTEM | Inspect diffraction patterns and virtual images from real 4D-STEM datasets without loading unnecessary data. | Scan-position movement, detector drag, BF/ABF/ADF updates, compare pages, lazy folder sessions, and export reopen. | `scripts/widget_show4dstem_heavy_signoff.py` on local real data; lightweight CI only checks protocol. |
+| ShowEDS | Explore spectral maps, ROIs, energy bands, element lines, and sparse/folder-backed EDS cubes. | Band dragging, map/spectrum sync, ROI changes, periodic table selection, sparse lookup/cache, and export reopen. | Browser story plus EDS-specific real-data smoke when backend or map/spectrum logic changes. |
+| ShowDiffraction | Inspect diffraction-like 2D patterns when a full 4D-STEM session is not needed. | Zoom/pan, histogram/contrast, peak/FFT-style overlays when present, and export reopen. | Lightweight export/browser smoke; use Show4DSTEM heavy signoff for full detector workflows. |
+| ShowFolder | Browse a session folder before loading heavy data, cache thumbnails, and open selected data in the right viewer. | Folder scan, thumbnail cache, live `watch_once()`, selected Show2D/Show3D refresh, lazy Show4DSTEM handoff, and compact saved state. | `scripts/widget_showfolder_live_smoke.py`; keep generated thumbnail/report artifacts outside git unless intentionally committed. |
+
+## Folder-watching performance contract
+
+`Show2D.from_folder(...)`, `Show3D.from_folder(...)`, and
+`Show4DSTEM.from_folder(...)` start watching by default. Treat their watcher as
+an append path, not as a periodic full rebuild.
+
+| Viewer | Required append behavior | Work that must not repeat |
+|---|---|---|
+| Show2D | Add each new full-resolution image as one panel | Reread existing source files; rebuild the widget; replace full-resolution data with ShowFolder thumbnails |
+| Show3D | Add each new full-resolution image as a frame in one panel | Reread existing source files or rebuild the widget |
+| Show4DSTEM | Add each ready master as a cold lazy dataset | Load every new master into VRAM immediately; clear unrelated reduced-page caches |
+
+For Show4DSTEM, raw 4D residency and reduced virtual-image caching are separate
+budgets. A visible cold page may load and compute once. Returning to a warmed
+page should use its reduced BF/ABF/ADF/HAADF result, while `page_budget` remains
+free to evict raw masters that are no longer needed. A newly appended master
+should invalidate or warm only the comparison pages whose membership changed.
+
+Folder-watching signoff must measure initial scan, idle poll, append-to-paint,
+and return-to-warm-page latency. It must also verify:
+
+- an idle poll performs no decode, transfer, render, or cache invalidation
+- incomplete files are retried without killing the watcher
+- each stable file appends exactly once and in deterministic order
+- the Python widget identity and existing panel/frame state remain unchanged
+- Show2D and Show3D pixels match the full-resolution source, not thumbnails
+- Show4DSTEM raw residency stays within its GPU budget as masters accumulate
+- `stop_folder_watch()` is idempotent and `close()` leaves no watcher or cache
+  worker running
+
+Keep test folders temporary and add files through an atomic rename when
+possible. Report source shape, dtype, append count, cache hits/misses, resident
+raw bytes, and append-to-paint latency. Use real microscope data for heavy local
+signoff; CI can use small files to prove lifecycle and cache invariants.
+
+### Show2D local-panel stack signoff (2026-07-09)
+
+Private real-data signoff used one Dasol Velox EDS acquisition with a
+`131 x 234 x 237` uint16 HAADF stack and four `234 x 237` elemental maps. The
+source stayed outside git. Standalone artifacts were served over local HTTP and
+driven with headless Playwright Chromium because in-app browser control was not
+available in that session.
+
+| Export | File size | First visible slider | Result |
+|---|---:|---:|---|
+| HTML exact float32 | 40,928,929 bytes | 1.80 s | frame 130 restored; scrub/play/stats/FFT/hide-restore passed |
+| HTML quantized uint8 | 10,760,236 bytes | 1.34 s | same interaction checks passed |
+
+Only the HAADF panel exposed a frame control. Moving from frame 130 to frame 0
+changed both the canvas checksum and the browser-local stats. Play advanced to
+frame 4 and remained there after pause; hiding and restoring HAADF preserved
+frame 4. FFT remained visible and updated after another frame change. Both
+exports completed without page or console errors, and the quantized export was
+also checked at 820 px viewport width.
+
+A 30-step requestAnimationFrame-paced keyboard scrub completed at 54.8 Hz
+without FFT and 65.9 Hz with FFT visible in that headless run, ending on frame
+30. These are input-scheduling rates, not a claim of measured GPU canvas FPS;
+the accompanying checksum/final-frame checks prove the input was applied. A
+future browser debug harness should record per-frame canvas presentation time
+directly.
+
+For Show2D and Show3D FFT specifically, the first compute may be expensive.
+Once a frame, panel set, ROI, and windowing state has been computed, returning
+to it must be a cache hit. A return scrub should increase hit counters while
+misses and compute counters stay unchanged. Do not put traitlet delivery
+counters such as `frame_seq` into FFT cache keys; invalidate the cache when the
+data source changes instead.
 
 Use ``quantem.widget.profile_widget`` in profiling notebooks to time the Python
 construction path in the same format:
@@ -172,6 +278,58 @@ Rule for future cursor and hover UI:
   possible and animate opacity or transform.
 - If an overlay is hidden, make sure it does not steal pointer events from the
   scientific image underneath.
+
+## Mistake log: Show3D standalone HTML WebGPU playback blank
+
+Date: 2026-07-09
+
+Symptom: a standalone exported Show3D HTML report looked correct when the user
+dragged the frame slider by hand, but the same packed multi-panel view could go
+blank or show stale/empty panels while `Play` was active. Pausing or manually
+scrubbing made the panels look correct again, which made ordinary after-pause
+screenshots misleading.
+
+What was wrong:
+
+- The standalone offline playback path was not always the same as the manual
+  scrub path.
+- Packed multi-panel HTML playback could opt back into a direct WebGPU canvas
+  route even though the stable scrub path rendered through the static 2D
+  canvas.
+- The direct WebGPU display canvas and the React/static canvas can race during
+  opacity/display handoff in exported HTML, especially on browser GPU stacks
+  where GPU work may present one frame later than the JavaScript state update.
+- The earlier generic "offline GPU playback owns canvas" guard was not enough:
+  packed multi-panel exports need their own rule because they have per-panel
+  contrast, panel geometry, and page/frame playback controls.
+- Testing only a paused frame, a slider drag, or a unit test misses the bug.
+
+Fix:
+
+- For offline packed multi-panel Show3D HTML, keep frame playback on the stable
+  static 2D canvas path. The code guard is
+  `offlinePackedPanelPlaybackUsesStaticCanvas`.
+- Do not let packed-panel standalone playback use the direct WebGPU display
+  canvas unless a browser test proves active playback stays nonblank on the
+  exported HTML.
+- Preserve per-panel contrast during playback. Do not fall back to a global
+  packed-frame range for BF/DF/DPC/SSB/COM panels with different physical
+  scales.
+- Test both visible play controls: page playback (`Play pages`) and frame
+  playback (`Play`, `Play forward`, or reverse controls).
+
+Required verification for future changes:
+
+- Build and reinstall the local widget checkout before exporting:
+  `npm run build && python -m pip install -e .`.
+- Regenerate the standalone HTML after the code change; the exported file embeds
+  the widget bundle.
+- Open the regenerated HTML in a real browser and capture screenshots while
+  playback is actively running, not only after pause.
+- Compare active playback against manual slider dragging on the same page and
+  frame family.
+- Check browser console errors and run the report smoke script when a report
+  harness exists.
 
 ## Policy: Show4DSTEM backend and memory ownership
 

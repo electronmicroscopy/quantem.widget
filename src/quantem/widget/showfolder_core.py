@@ -639,26 +639,25 @@ class ShowFolderBrowser:
         det_bin=4,
         dtype="u8",
         scan_size=None,
-        page_max_vram_fraction=0.75,
+        page_max_vram_fraction=0.98,
         page_reserve_vram_bytes=None,
         page_max_vram_bytes=None,
+        preload_all_if_fits=True,
     ):
         """Browse this folder's 4D-STEM masters as ONE lazy Show4DSTEM.
 
         The masters are discovered in :attr:`folder`, but only the first usable
-        dataset is loaded to render the initial screen. Switching the Show4DSTEM
-        dataset slider loads later masters on demand, round-robin across
-        ``gpus`` when provided. ``page_budget="auto"`` keeps as many datasets
-        resident as the current GPU-memory budget allows, then LRU-evicts lazy
-        file-backed frames back to unloaded slots while the user continues
-        browsing. ``page_budget=N`` keeps a fixed count hot. ``None`` leaves
-        loaded datasets resident; it still does not preload the whole folder.
+        dataset is loaded to render the initial screen. With the default
+        ``preload_all_if_fits=True``, fixed-shape masters fill the selected GPUs
+        in the background when the complete series fits. Larger series retain
+        full-resolution lazy paging. ``page_budget=N`` keeps a fixed count hot;
+        ``None`` leaves datasets resident after they are visited.
 
         Parameters
         ----------
-        gpus : list[int] or None
-            Cards to spread the datasets across (round-robin). ``None`` = the
-            current device.
+        gpus : list[int], "all", or None
+            Cards to spread the datasets across (round-robin). ``"all"`` uses
+            every visible CUDA card; ``None`` keeps the loader's current device.
         page_budget : "auto", int, or None
             GPU cache policy. ``"auto"`` = memory-sized LRU cache; integer =
             fixed resident count; ``None`` = no eviction after a dataset is
@@ -674,6 +673,7 @@ class ShowFolderBrowser:
             page_max_vram_fraction=page_max_vram_fraction,
             page_reserve_vram_bytes=page_reserve_vram_bytes,
             page_max_vram_bytes=page_max_vram_bytes,
+            preload_all_if_fits=preload_all_if_fits,
         )
         self._active_selected_modes = {"show4dstem"}
         if getattr(self, "_selection_viewer_output", None) is not None:
@@ -699,19 +699,30 @@ class ShowFolderBrowser:
 
         cfg = getattr(self, "_show4dstem_config", None) or {}
         gpus = cfg.get("gpus")
-        if isinstance(gpus, int):
+        if isinstance(gpus, str):
+            if gpus.strip().lower() != "all":
+                raise ValueError(
+                    "gpus must be None, 'all', an int, or a non-empty sequence of GPU ids."
+                )
+            if not torch.cuda.is_available() or torch.cuda.device_count() < 1:
+                raise ValueError("gpus='all' requires at least one visible CUDA device.")
+            gpus = list(range(torch.cuda.device_count()))
+        elif isinstance(gpus, int):
             gpus = [gpus]
         elif gpus is not None:
             gpus = list(gpus)
             if not gpus:
-                raise ValueError("gpus must be None, an int, or a non-empty sequence of GPU ids.")
+                raise ValueError(
+                    "gpus must be None, 'all', an int, or a non-empty sequence of GPU ids."
+                )
         det_bin = int(cfg.get("det_bin", 4))
         dtype = cfg.get("dtype", "u8")
         scan_size = cfg.get("scan_size")
         page_budget = cfg.get("page_budget")
-        page_max_vram_fraction = float(cfg.get("page_max_vram_fraction", 0.75))
+        page_max_vram_fraction = float(cfg.get("page_max_vram_fraction", 0.98))
         page_reserve_vram_bytes = cfg.get("page_reserve_vram_bytes")
         page_max_vram_bytes = cfg.get("page_max_vram_bytes")
+        preload_all_if_fits = bool(cfg.get("preload_all_if_fits", True))
 
         scan_shape = (int(scan_size), int(scan_size)) if scan_size else None
         masters = discover_masters(str(self.folder), scan_shape=scan_shape, verbose=False)
@@ -769,6 +780,8 @@ class ShowFolderBrowser:
             initial_frames={first_idx: first_tensor},
             name="ShowFolder lazy 4D-STEM masters",
         )
+        if page_devices is None and first_tensor.device.type == "cuda":
+            page_devices = [first_tensor.device]
         widget = Show4DSTEM(
             series,
             page_budget=page_budget,
@@ -780,6 +793,8 @@ class ShowFolderBrowser:
             frame_labels=names,
             verbose=False,
         )
+        if preload_all_if_fits:
+            widget.preload_all_datasets(background=True)
         self._selected_show4dstem_widget = widget
         return widget
 

@@ -128,7 +128,7 @@ def test_debug_overlay_frontend_contract_is_wired_for_key_widgets():
         assert 'useModelState<boolean>("debug")' in source
         assert "useDebugFps(Boolean(debug))" in source
         assert "data-quantem-debug-badge" in source
-        assert "Debug FPS" in source
+        assert "Debug UI FPS" in source
 
     for path in (
         ROOT / "src" / "quantem" / "widget" / "show2d.py",

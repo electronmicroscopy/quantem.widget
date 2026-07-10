@@ -12,13 +12,17 @@ To reduce data size, bin k-space at the dataset level before viewing:
 """
 
 import base64
+import gc
+import html
 import io
 import json
 import math
 import os
 import pathlib
 import tempfile
+import threading
 import time
+from collections import OrderedDict
 from typing import TYPE_CHECKING, Any, Self, Sequence
 
 if TYPE_CHECKING:
@@ -45,6 +49,14 @@ _CHUNK_BYTE_BUDGET = 600 * 1024 * 1024
 _SPARSE_MASK_CHUNK_BYTE_BUDGET = 64 * 1024 * 1024
 
 
+def _is_recoverable_allocation_error(exc: BaseException) -> bool:
+    """True for memory pressure errors where a lighter fallback can continue."""
+    if isinstance(exc, MemoryError):
+        return True
+    message = str(exc).lower()
+    return "out of memory" in message or "oom" in message
+
+
 def _validate_device(device: str | None) -> tuple[str, Any]:
     """Resolve a compute device without importing quantem.core at module import."""
     from quantem.core.config import validate_device
@@ -68,6 +80,7 @@ def _format_memory(nbytes: int) -> str:
 DEFAULT_BF_RATIO = 0.125  # BF disk radius as fraction of detector size (1/8)
 MIN_LOG_VALUE = 1e-10  # Minimum value for log scale to avoid log(0)
 DEFAULT_VI_ROI_RATIO = 0.15  # Default VI ROI size as fraction of scan dimension
+
 
 class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
     """
@@ -125,10 +138,22 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         be useful in reports.
     compare_max_panels : int, default 12
         Maximum ready frames/datasets included in the compare grid.
+    compare_group_mode : {"paged", "all"}, default "paged"
+        Compare-grid grouping behavior. ``"paged"`` shows one group of up to
+        ``compare_max_panels`` panels at a time. ``"all"`` collapses all
+        visible groups into one dense grid while still computing lazy datasets
+        in page-sized batches.
     compare_dp_mode : {"average", "selected"}, default "average"
         Diffraction panel source in compare mode. ``"average"`` displays the
         mean diffraction pattern at the current scan position across visible
         ready compare panels. ``"selected"`` displays the active frame/dataset.
+    compare_cache_pages : int, default 16
+        Number of reduced compare-grid virtual-image pages to keep in host
+        memory. This caches BF/ABF/ADF/HAADF thumbnails across page changes and
+        is separate from raw 4D GPU residency.
+    compare_cache_max_bytes : int, optional
+        Host-memory cap for the reduced compare-grid page cache. Defaults to
+        512 MiB. Set to ``0`` or ``compare_cache_pages=0`` to disable.
     ui_mode : {"interactive", "presentation", "report", "minimal"}, default "interactive"
         Preset for viewer chrome. Explicit ``show_*`` keyword arguments override
         the preset.
@@ -145,6 +170,17 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         Draw scale bars on the diffraction and virtual-image canvases.
     debug : bool, default False
         Show a compact frontend FPS/debug badge in the widget title row.
+    save_state : bool, default False
+        When False, saved notebooks omit heavy 4D buffers and keep a compact
+        static preview for cold reopen. Set True only for small widgets that
+        must reopen interactively without rerunning the kernel.
+    notebook_preview_format : {"jpeg", "webp", "png"} or None, default "jpeg"
+        Static preview format used when ``save_state=False``. Set to ``None``
+        for live-only notebooks that should publish only the interactive view.
+    notebook_preview_quality : int, default 88
+        Lossy preview quality for JPEG/WebP, from 1 to 100. Ignored for PNG.
+    notebook_preview_max_px : int, default 512
+        Longest panel side for the saved-notebook preview.
     Examples
     --------
     >>> import numpy as np
@@ -240,7 +276,9 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
     roi_center_col = traitlets.Float(0.0).tag(sync=True)
     roi_center_row = traitlets.Float(0.0).tag(sync=True)
     # Compound trait for batched row+col updates (JS sends both at once, 1 observer fires)
-    roi_center = traitlets.List(traitlets.Float(), default_value=[0.0, 0.0]).tag(sync=True)
+    roi_center = traitlets.List(traitlets.Float(), default_value=[0.0, 0.0]).tag(
+        sync=True
+    )
     roi_radius = traitlets.Float(10.0).tag(sync=True)
     roi_radius_inner = traitlets.Float(5.0).tag(sync=True)
     roi_width = traitlets.Float(20.0).tag(sync=True)
@@ -249,7 +287,9 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
     # =========================================================================
     # Virtual Image (ROI-based, updates as you drag ROI on DP)
     # =========================================================================
-    virtual_image_bytes = traitlets.Bytes(b"").tag(sync=True)  # Raw float32 (JS computes stats + range)
+    virtual_image_bytes = traitlets.Bytes(b"").tag(
+        sync=True
+    )  # Raw float32 (JS computes stats + range)
 
     # Offline / browser-compute mode: ship a compact 4D stack so JS runs the
     # virtual-image and DP-from-ROI reductions with no Python kernel. Inline gzip
@@ -309,7 +349,9 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
     vi_roi_center_col = traitlets.Float(0.0).tag(sync=True)
     # Compound (row, col) trait — JS sets in one call; one observer fires; bytes
     # never compute against split-trait state (old col + new row, or vice versa).
-    vi_roi_center = traitlets.List(traitlets.Float(), default_value=[0.0, 0.0]).tag(sync=True)
+    vi_roi_center = traitlets.List(traitlets.Float(), default_value=[0.0, 0.0]).tag(
+        sync=True
+    )
     vi_roi_radius = traitlets.Float(5.0).tag(sync=True)
     vi_roi_width = traitlets.Float(10.0).tag(sync=True)
     vi_roi_height = traitlets.Float(10.0).tag(sync=True)
@@ -325,7 +367,9 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
     pixel_unit = traitlets.Unicode("pixels").tag(sync=True)
     k_pixel_size = traitlets.Float(1.0).tag(sync=True)  # k-space pixel size (col axis)
     k_pixel_unit = traitlets.Unicode("pixels").tag(sync=True)
-    k_calibrated = traitlets.Bool(False).tag(sync=True)  # True if k-space has real units
+    k_calibrated = traitlets.Bool(False).tag(
+        sync=True
+    )  # True if k-space has real units
 
     # =========================================================================
     # Path Animation (programmatic crosshair control)
@@ -351,6 +395,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
     # Display settings (synced for programmatic export parity)
     # =========================================================================
     _static_fallback_jpeg = traitlets.Unicode("").tag(sync=True)
+    _static_fallback_mime = traitlets.Unicode("image/jpeg").tag(sync=True)
 
     dp_colormap = traitlets.Unicode("inferno").tag(sync=True)
     vi_colormap = traitlets.Unicode("inferno").tag(sync=True)
@@ -416,15 +461,27 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
     compare_grid_width_px = traitlets.Int(0).tag(sync=True)
     compare_panel_gap_px = traitlets.Int(0).tag(sync=True)
     compare_max_panels = traitlets.Int(12).tag(sync=True)
+    compare_group_mode = traitlets.Unicode("paged").tag(sync=True)
+    compare_page_idx = traitlets.Int(0).tag(sync=True)
+    compare_page_count = traitlets.Int(1).tag(sync=True)
     compare_dp_mode = traitlets.Unicode("average").tag(sync=True)
-    compare_panel_order = traitlets.List(traitlets.Int(), default_value=[]).tag(sync=True)
-    compare_hidden_panels = traitlets.List(traitlets.Int(), default_value=[]).tag(sync=True)
-    compare_starred_panels = traitlets.List(traitlets.Int(), default_value=[]).tag(sync=True)
+    compare_panel_order = traitlets.List(traitlets.Int(), default_value=[]).tag(
+        sync=True
+    )
+    compare_hidden_panels = traitlets.List(traitlets.Int(), default_value=[]).tag(
+        sync=True
+    )
+    compare_starred_panels = traitlets.List(traitlets.Int(), default_value=[]).tag(
+        sync=True
+    )
     compare_virtual_image_bytes = traitlets.Bytes(b"").tag(sync=True)
     compare_panel_count = traitlets.Int(0).tag(sync=True)
-    compare_panel_indices = traitlets.List(traitlets.Int(), default_value=[]).tag(sync=True)
+    compare_panel_indices = traitlets.List(traitlets.Int(), default_value=[]).tag(
+        sync=True
+    )
     compare_status = traitlets.Unicode("").tag(sync=True)
     gpu_memory_label = traitlets.Unicode("").tag(sync=True)
+    memory_warning = traitlets.Unicode("").tag(sync=True)
 
     # Export (GIF)
     _gif_export_requested = traitlets.Bool(False).tag(sync=True)
@@ -444,20 +501,14 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         elif mode in {"compare", "multi"}:
             mode = "multiple"
         if mode not in {"single", "multiple"}:
-            raise ValueError(
-                "view_mode must be 'single' or 'multiple', "
-                f"got {value!r}"
-            )
+            raise ValueError(f"view_mode must be 'single' or 'multiple', got {value!r}")
         return mode
 
     @staticmethod
     def _normalise_compare_layout(value: str) -> str:
         layout = str(value or "side").strip().lower().replace("-", "_")
         if layout not in {"side", "top"}:
-            raise ValueError(
-                "compare_layout must be 'side' or 'top', "
-                f"got {value!r}"
-            )
+            raise ValueError(f"compare_layout must be 'side' or 'top', got {value!r}")
         return layout
 
     @staticmethod
@@ -467,8 +518,26 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         mode = aliases.get(mode, mode)
         if mode not in {"average", "selected"}:
             raise ValueError(
-                "compare_dp_mode must be 'average' or 'selected', "
-                f"got {value!r}"
+                f"compare_dp_mode must be 'average' or 'selected', got {value!r}"
+            )
+        return mode
+
+    @staticmethod
+    def _normalise_compare_group_mode(value: str) -> str:
+        mode = str(value or "paged").strip().lower().replace("-", "_")
+        aliases = {
+            "page": "paged",
+            "pages": "paged",
+            "group": "paged",
+            "groups": "paged",
+            "collapse": "all",
+            "collapsed": "all",
+            "single": "all",
+        }
+        mode = aliases.get(mode, mode)
+        if mode not in {"paged", "all"}:
+            raise ValueError(
+                f"compare_group_mode must be 'paged' or 'all', got {value!r}"
             )
         return mode
 
@@ -489,6 +558,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         compare_grid_width_px: int = 0,
         compare_panel_gap_px: int = 0,
         compare_max_panels: int = 12,
+        compare_group_mode: str = "paged",
         compare_dp_mode: str = "average",
         title: str = "",
         ui_mode: UiMode = "interactive",
@@ -509,15 +579,20 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         dp_vmax: float | None = None,
         vi_vmin: float | None = None,
         vi_vmax: float | None = None,
-        verbose: bool = True,
+        verbose: bool = False,
         state=None,
         backend: str | None = None,
         save_state: bool = False,
+        notebook_preview_format: str | None = "jpeg",
+        notebook_preview_quality: int = 88,
+        notebook_preview_max_px: int = 512,
         page_budget: int | str | None = None,
         page_device=None,
-        page_max_vram_fraction: float = 0.75,
+        page_max_vram_fraction: float = 0.98,
         page_reserve_vram_bytes: int | None = None,
         page_max_vram_bytes: int | dict | None = None,
+        compare_cache_pages: int = 16,
+        compare_cache_max_bytes: int | None = 512 * 1024 * 1024,
         **kwargs,
     ):
         # save_state controls whether the heavy pixel buffers (the packed 4D
@@ -528,6 +603,11 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         # persist full interactive state so a reopened notebook restores the
         # widget (offline WebGPU browse) without a kernel.
         self._save_state = bool(save_state)
+        self._configure_static_fallback(
+            notebook_preview_format=notebook_preview_format,
+            notebook_preview_quality=notebook_preview_quality,
+            notebook_preview_max_px=notebook_preview_max_px,
+        )
         ui = resolve_ui_mode(
             ui_mode,
             defaults={
@@ -551,6 +631,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         show_stats = bool(ui["show_stats"])
         show_scale_bar = bool(ui["show_scale_bar"])
         super().__init__(**kwargs)
+        self._static_fallback_mime = self._static_fallback_mime_type()
         self.widget_version = resolve_widget_version()
         panel_width_px = int(panel_width_px)
         if panel_width_px < 0:
@@ -581,6 +662,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
                 f"compare_max_panels must be >= 1, got {compare_max_panels}"
             )
         self.compare_max_panels = compare_max_panels
+        self.compare_group_mode = self._normalise_compare_group_mode(compare_group_mode)
         # Backend selector. ONLY two values:
         #   None  -> auto-pick Python compute (TorchBackend on torch
         #            tensors, MetalRawBackend on ChunkedFrames). Default.
@@ -618,7 +700,9 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
 
         # Extract underlying array / tensor + auto-calibrate from Dataset input
         # (duck-typed via the dual-slot private attributes _tensor / _array).
-        is_dataset5dstem_input = type(data).__name__ == "Dataset5dstem" and hasattr(data, "frame")
+        is_dataset5dstem_input = type(data).__name__ == "Dataset5dstem" and hasattr(
+            data, "frame"
+        )
         tensor = None if is_dataset5dstem_input else getattr(data, "_tensor", None)
         array = None if is_dataset5dstem_input else getattr(data, "_array", None)
         if tensor is not None or array is not None:
@@ -654,7 +738,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
 
         self.title = title
         self.show_title = show_title
-        self.pixel_size = sampling[1]   # scan_col axis (horizontal scale bar)
+        self.pixel_size = sampling[1]  # scan_col axis (horizontal scale bar)
         self.pixel_unit = units[1] if len(units) > 1 else "pixels"
         self.k_pixel_size = sampling[3] if len(sampling) > 3 else 1.0
         self.k_pixel_unit = units[3] if len(units) > 3 else "pixels"
@@ -684,10 +768,15 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         # frame-backed object instead of calling `.tensor`: sharded CUDA series may
         # hold each 18 GiB no-bin master on a different GPU, and `.tensor` would
         # gather everything onto one card.
-        is_dataset5dstem = type(data).__name__ == "Dataset5dstem" and hasattr(data, "frame")
+        is_dataset5dstem = type(data).__name__ == "Dataset5dstem" and hasattr(
+            data, "frame"
+        )
         if hasattr(data, "chunks") and not getattr(data, "_is_gpu_frames", False):
             from quantem.widget.kernels.compute.mps import ChunkedFrames
-            data = ChunkedFrames(data, row_prefix=bool(getattr(data, "row_prefix", False)))
+
+            data = ChunkedFrames(
+                data, row_prefix=bool(getattr(data, "row_prefix", False))
+            )
         # cupy array (io.load default on CUDA) -> ZERO-COPY torch tensor on the same
         # GPU via dlpack. Without this, the fallback cp.asnumpy round-trips the whole
         # block to CPU and re-uploads (a 19.3 GB no-bin load -> ~58 GB transient and
@@ -714,13 +803,17 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             data_np = to_numpy(data)
             self._data_pre = None
             self._saturation_value = (
-                65535 if data_np.dtype == np.uint16
-                else 255 if data_np.dtype == np.uint8
+                65535
+                if data_np.dtype == np.uint16
+                else 255
+                if data_np.dtype == np.uint8
                 else None
             )
         # Handle dimensionality — 5D loads eagerly for instant frame switching
         # Resolve shape from whichever input path we took
-        shape = tuple(self._data_pre.shape) if self._data_pre is not None else data_np.shape
+        shape = (
+            tuple(self._data_pre.shape) if self._data_pre is not None else data_np.shape
+        )
         ndim = len(shape)
         _tc = time.perf_counter()
         if ndim == 5:
@@ -733,7 +826,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
                 self._scan_shape = scan_shape
             else:
                 n = shape[0]
-                side = int(n ** 0.5)
+                side = int(n**0.5)
                 if side * side != n:
                     raise ValueError(
                         f"Cannot infer square scan_shape from N={n}. "
@@ -746,7 +839,9 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             self._scan_shape = (shape[0], shape[1])
             self._det_shape = (shape[2], shape[3])
         else:
-            raise ValueError(f"Show4DSTEM expects a 3D ((N, det_h, det_w) flat-scan), 4D ((scan_h, scan_w, det_h, det_w)), or 5D ((n_frames, scan_h, scan_w, det_h, det_w)) array. Got {ndim}D.")
+            raise ValueError(
+                f"Show4DSTEM expects a 3D ((N, det_h, det_w) flat-scan), 4D ((scan_h, scan_w, det_h, det_w)), or 5D ((n_frames, scan_h, scan_w, det_h, det_w)) array. Got {ndim}D."
+            )
         if self._data_pre is not None:
             self._data = (
                 self._data_pre
@@ -754,6 +849,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
                 else self._data_pre.to(self._device)
             )
             del self._data_pre
+            self._dataset_page_config = None
             # Out-of-core dataset paging: with many 4D datasets behind the frame
             # slider (e.g. a 40-master folder), keeping every one resident fills
             # VRAM. page_budget caps how many stay on the GPU; switching frames
@@ -761,14 +857,16 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             # (via _frame_data -> Dataset5dstem.frame(i)). Only a Dataset5dstem
             # can page (it owns the per-frame device list); a plain 5D tensor
             # can't be partially offloaded, so page_budget is ignored there.
-            if page_budget is not None and is_dataset5dstem and self.n_frames > 1:
-                self._data.page(
-                    page_budget,
-                    device=page_device,
-                    max_vram_fraction=page_max_vram_fraction,
-                    reserve_vram_bytes=page_reserve_vram_bytes,
-                    max_vram_bytes=page_max_vram_bytes,
-                )
+            if page_budget is not None and is_dataset5dstem:
+                self._dataset_page_config = {
+                    "vram_frames": page_budget,
+                    "device": page_device,
+                    "max_vram_fraction": page_max_vram_fraction,
+                    "reserve_vram_bytes": page_reserve_vram_bytes,
+                    "max_vram_bytes": page_max_vram_bytes,
+                }
+                if self.n_frames > 1:
+                    self._data.page(**self._dataset_page_config)
         else:
             if not data_np.flags.writeable:
                 # torch.from_numpy shares CPU memory; make read-only memmaps safe
@@ -783,17 +881,23 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             # devices (Mac 24 GB unified, etc.). View-write keeps native dtype.
             sat = getattr(self, "_saturation_value", None)
             view_dtype = (
-                torch.int16 if sat is not None and self._data.dtype == torch.uint16
-                else torch.int8 if sat is not None and self._data.dtype == torch.uint8
+                torch.int16
+                if sat is not None and self._data.dtype == torch.uint16
+                else torch.int8
+                if sat is not None and self._data.dtype == torch.uint8
                 else None
             )
             if view_dtype is not None:
                 view = self._data.view(view_dtype).reshape(-1, *self._det_shape)
                 rows = view.shape[0]
                 # Bool mask transient = positions × det_h × det_w bytes; cap at budget.
-                pos_per_chunk = max(1, _CHUNK_BYTE_BUDGET // max(1, self._det_shape[0] * self._det_shape[1]))
+                pos_per_chunk = max(
+                    1,
+                    _CHUNK_BYTE_BUDGET
+                    // max(1, self._det_shape[0] * self._det_shape[1]),
+                )
                 for i in range(0, rows, pos_per_chunk):
-                    chunk = view[i:i + pos_per_chunk]
+                    chunk = view[i : i + pos_per_chunk]
                     chunk.masked_fill_(chunk == -1, 0)
         # Keep native dtype (uint8/uint16) to bound memory at ~ data_size.
         # Reductions cast in chunks (bounded transient).
@@ -805,7 +909,9 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
                 if hasattr(self._data, "nbytes")
                 else self._data.element_size() * self._data.numel()
             )
-            print(f"  to {self._device}: {time.perf_counter() - _tc:.2f}s ({n_bytes / 1e9:.1f} GB)")
+            print(
+                f"  to {self._device}: {time.perf_counter() - _tc:.2f}s ({n_bytes / 1e9:.1f} GB)"
+            )
 
         self.shape_rows = self._scan_shape[0]
         self.shape_cols = self._scan_shape[1]
@@ -815,7 +921,9 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         self.pos_row = self.shape_rows // 2
         self.pos_col = self.shape_cols // 2
         # Frame dimension label (for 5D time/tilt series UI)
-        self.frame_dim_label = frame_dim_label if frame_dim_label is not None else "Frame"
+        self.frame_dim_label = (
+            frame_dim_label if frame_dim_label is not None else "Frame"
+        )
         # Per-frame labels: explicit param > inferred > empty
         resolved_labels = frame_labels or _io_labels or []
         self._frame_labels = resolved_labels
@@ -838,10 +946,18 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         self.dp_global_min = max(float(first_frame_sample.min()), MIN_LOG_VALUE)
         self.dp_global_max = float(first_frame_sample.max())
         # Cache coordinate tensors for mask creation (avoid repeated torch.arange)
-        self._det_row_coords = torch.arange(self.det_rows, device=self._device, dtype=torch.float32)[:, None]
-        self._det_col_coords = torch.arange(self.det_cols, device=self._device, dtype=torch.float32)[None, :]
-        self._scan_row_coords = torch.arange(self.shape_rows, device=self._device, dtype=torch.float32)[:, None]
-        self._scan_col_coords = torch.arange(self.shape_cols, device=self._device, dtype=torch.float32)[None, :]
+        self._det_row_coords = torch.arange(
+            self.det_rows, device=self._device, dtype=torch.float32
+        )[:, None]
+        self._det_col_coords = torch.arange(
+            self.det_cols, device=self._device, dtype=torch.float32
+        )[None, :]
+        self._scan_row_coords = torch.arange(
+            self.shape_rows, device=self._device, dtype=torch.float32
+        )[:, None]
+        self._scan_col_coords = torch.arange(
+            self.shape_cols, device=self._device, dtype=torch.float32
+        )[None, :]
         # Setup center and BF radius
         det_size = min(self.det_rows, self.det_cols)
         if center is not None and bf_radius is not None:
@@ -874,24 +990,51 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         self._cached_abf_virtual = None
         self._cached_adf_virtual = None
         self._cached_haadf_virtual = None
-        self._cached_compare_bf_virtual = None
-        self._cached_compare_abf_virtual = None
-        self._cached_compare_adf_virtual = None
-        self._cached_compare_haadf_virtual = None
+        self._compare_virtual_page_cache: OrderedDict[
+            tuple[Any, ...], tuple[bytes, tuple[int, ...], str, int]
+        ] = OrderedDict()
+        self._compare_virtual_page_cache_bytes = 0
+        self._compare_diffraction_cache: OrderedDict[
+            tuple[int, int, int, int, int], tuple[bytes, int]
+        ] = OrderedDict()
+        self._compare_diffraction_cache_bytes = 0
+        self._compare_compute_lock = threading.RLock()
+        self._compare_cache_lock = threading.RLock()
+        self._compare_cache_generation = 0
+        self._compare_cache_warm_stop: threading.Event | None = None
+        self._compare_cache_warm_thread: threading.Thread | None = None
+        self._compare_cache_warm_status = "idle"
+        self._compare_cache_pages = max(0, int(compare_cache_pages))
+        self._compare_cache_max_bytes = (
+            None
+            if compare_cache_max_bytes is None
+            else max(0, int(compare_cache_max_bytes))
+        )
         if precompute_virtual_images and self.n_frames == 1:
             self._precompute_common_virtual_images()
 
         # Update frame when position changes (scale/colormap handled in JS)
         self.observe(self._update_frame, names=["pos_row", "pos_col"])
         # Observe individual ROI params
-        self.observe(self._on_roi_change, names=[
-            "roi_center_col", "roi_center_row", "roi_radius", "roi_radius_inner",
-            "roi_active", "roi_mode", "roi_width", "roi_height"
-        ])
+        self.observe(
+            self._on_roi_change,
+            names=[
+                "roi_center_col",
+                "roi_center_row",
+                "roi_radius",
+                "roi_radius_inner",
+                "roi_active",
+                "roi_mode",
+                "roi_width",
+                "roi_height",
+            ],
+        )
         # Observe compound roi_center for batched updates from JS
         self.observe(self._on_roi_center_change, names=["roi_center"])
         # Invalidate precomputed virtual image caches when calibration changes
-        self.observe(self._on_calibration_change, names=["center_row", "center_col", "bf_radius"])
+        self.observe(
+            self._on_calibration_change, names=["center_row", "center_col", "bf_radius"]
+        )
 
         # Default the ROI to the bright-field disk (circle at the detected center,
         # radius = BF radius) so the FIRST render shows a real virtual image. The
@@ -921,7 +1064,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         self._update_frame()
         if _verbose:
             print(f"  virtual image + frame: {time.perf_counter() - _tc:.2f}s")
-        
+
         # Path animation: observe index changes from frontend
         self.observe(self._on_path_index_change, names=["path_index"])
         self.observe(self._on_gif_export, names=["_gif_export_requested"])
@@ -930,10 +1073,18 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         # Frame animation (5D): observe frame_idx changes from frontend
         self.observe(self._on_frame_idx_change, names=["frame_idx"])
         self.observe(self._on_preset_request, names=["_preset_request"])
-        self.observe(self._on_compare_config_change, names=[
-            "view_mode", "compare_max_panels", "n_frames",
-            "compare_panel_order", "compare_hidden_panels"
-        ])
+        self.observe(
+            self._on_compare_config_change,
+            names=[
+                "view_mode",
+                "compare_max_panels",
+                "n_frames",
+                "compare_group_mode",
+                "compare_page_idx",
+                "compare_panel_order",
+                "compare_hidden_panels",
+            ],
+        )
         self.observe(self._on_compare_dp_mode_change, names=["compare_dp_mode"])
 
         # Auto-detect trigger: observe changes from frontend
@@ -943,14 +1094,24 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         self.vi_roi_center_row = float(self.shape_rows / 2)
         self.vi_roi_center_col = float(self.shape_cols / 2)
         # Set initial ROI size based on scan dimension
-        default_roi_size = max(3, min(self.shape_rows, self.shape_cols) * DEFAULT_VI_ROI_RATIO)
+        default_roi_size = max(
+            3, min(self.shape_rows, self.shape_cols) * DEFAULT_VI_ROI_RATIO
+        )
         self.vi_roi_radius = float(default_roi_size)
         self.vi_roi_width = float(default_roi_size * 2)
         self.vi_roi_height = float(default_roi_size)
-        self.observe(self._on_vi_roi_change, names=[
-            "vi_roi_mode", "vi_roi_center_row", "vi_roi_center_col",
-            "vi_roi_radius", "vi_roi_width", "vi_roi_height", "vi_roi_reduce"
-        ])
+        self.observe(
+            self._on_vi_roi_change,
+            names=[
+                "vi_roi_mode",
+                "vi_roi_center_row",
+                "vi_roi_center_col",
+                "vi_roi_radius",
+                "vi_roi_width",
+                "vi_roi_height",
+                "vi_roi_reduce",
+            ],
+        )
         self.observe(self._on_vi_roi_center_change, names=["vi_roi_center"])
 
         # The frontend can mount a tick AFTER __init__ set virtual_image_bytes /
@@ -992,8 +1153,11 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
                     backend, where = "Apple GPU (Metal, torch)", "Apple unified memory"
                 else:
                     backend, where = "CPU (torch)", "system RAM"
-            src = ("NumPy input uploaded to device"
-                   if data_np is not None else "kept on input device (no copy)")
+            src = (
+                "NumPy input uploaded to device"
+                if data_np is not None
+                else "kept on input device (no copy)"
+            )
             print(f"Show4DSTEM ready in {time.perf_counter() - _t0:.2f}s")
             print(f"  shape   : {shape}")
             print(f"  backend : {backend}   device={self._device}")
@@ -1011,15 +1175,22 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         """
         try:
             from tornado.ioloop import IOLoop
+
             loop = IOLoop.current()
         except Exception:
             return
+
         def _resend():
-            for name in ("virtual_image_bytes", "frame_bytes", "compare_virtual_image_bytes"):
+            for name in (
+                "virtual_image_bytes",
+                "frame_bytes",
+                "compare_virtual_image_bytes",
+            ):
                 try:
                     self.send_state(name)
                 except Exception:
                     pass
+
         # Two delays: 0.3s covers a fast local mount, 1.5s covers a slow mount
         # (Colab, heavy install) where the frontend connects later.
         for delay in (0.3, 1.5):
@@ -1078,23 +1249,38 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
                 self._pack_offline_bslz4(data_url)
             return
         if data_url and self._data.ndim != 4:
-            print("  offline browser mode skipped: gzip companion mode only supports "
-                  "4D stacks; use offline_codec='bslz4' for 5D companion data")
+            print(
+                "  offline browser mode skipped: gzip companion mode only supports "
+                "4D stacks; use offline_codec='bslz4' for 5D companion data"
+            )
             return
         if n_bytes > budget:
-            print(f"  offline browser mode skipped: stack is {n_bytes / 1e6:.0f} MB > "
-                  f"{budget / 1e6:.0f} MB budget; the kernel still works")
+            print(
+                f"  offline browser mode skipped: stack is {n_bytes / 1e6:.0f} MB > "
+                f"{budget / 1e6:.0f} MB budget; the kernel still works"
+            )
             return
         # Direct clip to the target integer range - NOT global-linear scaling.
         # For uint8, pixels <=255 are exact and larger counts clip for compact
         # browse data. For uint16, real detector counts are preserved.
-        import gzip, json, pathlib
+        import gzip
+
         if offline_dtype == "uint16":
-            packed = np.clip(self._data.detach().to("cpu").numpy(), 0, 65535).astype(np.uint16)
+            packed = np.clip(self._data.detach().to("cpu").numpy(), 0, 65535).astype(
+                np.uint16
+            )
         else:
-            packed = np.clip(self._data.detach().to("cpu").numpy(), 0, 255).astype(np.uint8)
+            packed = np.clip(self._data.detach().to("cpu").numpy(), 0, 255).astype(
+                np.uint8
+            )
         target_shape = (
-            (self.n_frames, self.shape_rows, self.shape_cols, self.det_rows, self.det_cols)
+            (
+                self.n_frames,
+                self.shape_rows,
+                self.shape_cols,
+                self.det_rows,
+                self.det_cols,
+            )
             if self._data.ndim == 5
             else (self.shape_rows, self.shape_cols, self.det_rows, self.det_cols)
         )
@@ -1108,25 +1294,40 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         chunk_bytes = 768 * 1024 * 1024
         rows_per = max(1, chunk_bytes // max(1, scan_cols * det_size * bytes_per_pixel))
         if data_url and packed.nbytes > chunk_bytes:
-            out = pathlib.Path(data_url); out.parent.mkdir(parents=True, exist_ok=True)
+            out = pathlib.Path(data_url)
+            out.parent.mkdir(parents=True, exist_ok=True)
             meta, blob, coff = [], bytearray(), 0
             for r0 in range(0, self.shape_rows, rows_per):
                 r1 = min(self.shape_rows, r0 + rows_per)
                 cz = gzip.compress(packed[r0:r1].tobytes(), compresslevel=6)
-                meta.append({"coff": coff, "clen": len(cz), "startScan": r0 * scan_cols, "nScan": (r1 - r0) * scan_cols})
-                blob += cz; coff += len(cz)
+                meta.append(
+                    {
+                        "coff": coff,
+                        "clen": len(cz),
+                        "startScan": r0 * scan_cols,
+                        "nScan": (r1 - r0) * scan_cols,
+                    }
+                )
+                blob += cz
+                coff += len(cz)
             out.write_bytes(blob)
             self._offline_url = data_url
             self._offline_chunks = json.dumps(meta)
             if getattr(self, "_verbose", True):
-                print(f"  offline companion (chunked): {out} {len(blob)/1e6:.0f} MB gzip, {len(meta)} chunks; streams into {len(meta)} GPU buffers")
+                print(
+                    f"  offline companion (chunked): {out} {len(blob) / 1e6:.0f} MB gzip, {len(meta)} chunks; streams into {len(meta)} GPU buffers"
+                )
         else:
             gz = gzip.compress(packed.tobytes(), compresslevel=6)
             if data_url:
-                out = pathlib.Path(data_url); out.parent.mkdir(parents=True, exist_ok=True)
-                out.write_bytes(gz); self._offline_url = data_url
+                out = pathlib.Path(data_url)
+                out.parent.mkdir(parents=True, exist_ok=True)
+                out.write_bytes(gz)
+                self._offline_url = data_url
                 if getattr(self, "_verbose", True):
-                    print(f"  offline companion: wrote {out} ({len(gz)/1e6:.0f} MB gzip)")
+                    print(
+                        f"  offline companion: wrote {out} ({len(gz) / 1e6:.0f} MB gzip)"
+                    )
             else:
                 self._offline_stack = gz  # inline single self-contained file
 
@@ -1140,31 +1341,67 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         downsample: int | None = None,
         dtype: str = "uint8",
         det_bin: int = 1,
+        scan_bin: int = 1,
+        real_space_bin: int | None = None,
+        export_kind: str = "interactive",
+        dataset_scope: str = "unhidden",
     ) -> pathlib.Path:
         """Write a standalone HTML viewer.
 
-        The export packages the currently loaded dataset representation into
-        offline browser-compute mode. ``det_bin`` bins detector pixels by summing
-        over ``det_bin x det_bin`` blocks, and ``dtype`` may be ``"uint8"`` or
-        ``"uint16"``. Preferred export options are ``mode="single"``,
-        ``encoding="uint8"`` or ``encoding="full"``, and ``downsample=1``, 2,
-        4, or 8. ``dtype`` and ``det_bin`` are kept as compatibility aliases.
-        This does not reload the original file; it operates on the tensor
-        already held by the widget.
+        ``export_kind="interactive"`` packages raw 4D data into the standalone
+        browser-compute widget. ``export_kind="report"`` writes a compact static
+        virtual-image report with no raw 4D payload, which is the safe export path
+        for lazy folder-backed viewers. ``det_bin`` bins detector pixels by mean
+        over ``det_bin x det_bin`` blocks. ``scan_bin`` (or alias
+        ``real_space_bin``) bins scan pixels by mean over ``scan_bin x scan_bin``
+        blocks. ``dtype`` may be ``"uint8"`` or ``"uint16"``.
         """
         if self._data is None:
-            raise ValueError("Cannot export HTML after free(); rebuild the widget first.")
-        dtype, det_bin = self._normalise_html_export_options(
+            raise ValueError(
+                "Cannot export HTML after free(); rebuild the widget first."
+            )
+        dtype, det_bin, scan_bin = self._normalise_html_export_options(
             mode=mode,
             encoding=encoding,
             downsample=downsample,
             dtype=dtype,
             det_bin=det_bin,
+            scan_bin=scan_bin,
+            real_space_bin=real_space_bin,
         )
-        export_path = pathlib.Path(path) if path is not None else self._default_html_export_path(dtype, det_bin)
-        self._write_html_export(export_path, dtype=dtype, det_bin=det_bin, title=title)
+        kind = self._normalise_html_export_kind(export_kind)
+        export_path = (
+            pathlib.Path(path)
+            if path is not None
+            else self._default_html_export_path(
+                dtype,
+                det_bin,
+                scan_bin,
+                export_kind=kind,
+            )
+        )
+        if kind == "report":
+            self._write_html_report_export(
+                export_path,
+                dtype=dtype,
+                det_bin=det_bin,
+                scan_bin=scan_bin,
+                dataset_scope=dataset_scope,
+                title=title,
+            )
+        else:
+            self._write_html_export(
+                export_path,
+                dtype=dtype,
+                det_bin=det_bin,
+                scan_bin=scan_bin,
+                title=title,
+            )
         size_mb = export_path.stat().st_size / (1024 * 1024)
-        self.export_status = f"Exported {export_path.name} ({size_mb:.1f} MB, {self._export_mode_label(dtype, det_bin)})"
+        self.export_status = (
+            f"Exported {export_path.name} "
+            f"({size_mb:.1f} MB, {self._export_mode_label(dtype, det_bin, scan_bin, export_kind=kind)})"
+        )
         return export_path
 
     def _on_export_request_change(self, change: dict) -> None:
@@ -1179,26 +1416,55 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
                 self.export_payload_id = ""
                 self.export_filename = ""
                 return
-            dtype, det_bin = self._normalise_html_export_options(
+            export_kind = self._normalise_html_export_kind(
+                payload.get("export_kind", payload.get("kind", "interactive"))
+            )
+            dtype, det_bin, scan_bin = self._normalise_html_export_options(
                 mode=mode,
                 encoding=payload.get("encoding"),
                 downsample=payload.get("downsample"),
                 dtype=str(payload.get("dtype", "uint8")),
                 det_bin=int(payload.get("det_bin", 1)),
+                scan_bin=int(payload.get("scan_bin", 1)),
+                real_space_bin=payload.get("real_space_bin"),
             )
             if payload.get("download"):
-                filename = str(payload.get("filename") or self._default_html_export_path(dtype, det_bin).name)
+                filename = str(
+                    payload.get("filename")
+                    or self._default_html_export_path(
+                        dtype, det_bin, scan_bin, export_kind=export_kind
+                    ).name
+                )
                 request_id = str(payload.get("id") or "")
                 self.export_status = f"Preparing {filename}..."
-                html = self._html_export_bytes(dtype=dtype, det_bin=det_bin)
+                dataset_scope = str(payload.get("dataset_scope", "unhidden"))
+                if export_kind == "report":
+                    html = self._html_report_export_bytes(
+                        dtype=dtype,
+                        det_bin=det_bin,
+                        scan_bin=scan_bin,
+                        dataset_scope=dataset_scope,
+                    )
+                else:
+                    html = self._html_export_bytes(
+                        dtype=dtype, det_bin=det_bin, scan_bin=scan_bin
+                    )
                 self.export_filename = filename
                 self.export_payload = html
                 self.export_payload_id = request_id
                 size_mb = len(html) / (1024 * 1024)
-                self.export_status = f"Ready {filename} ({size_mb:.1f} MB, {self._export_mode_label(dtype, det_bin)})"
+                self.export_status = (
+                    f"Ready {filename} "
+                    f"({size_mb:.1f} MB, {self._export_mode_label(dtype, det_bin, scan_bin, export_kind=export_kind)})"
+                )
             else:
                 self.export_status = f"Exporting {mode} HTML..."
-                self.export_html(dtype=dtype, det_bin=det_bin)
+                self.export_html(
+                    dtype=dtype,
+                    det_bin=det_bin,
+                    scan_bin=scan_bin,
+                    export_kind=export_kind,
+                )
         except Exception as exc:
             self.export_status = f"Export failed: {exc}"
 
@@ -1210,7 +1476,9 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         downsample: int | str | None = None,
         dtype: str = "uint8",
         det_bin: int = 1,
-    ) -> tuple[str, int]:
+        scan_bin: int = 1,
+        real_space_bin: int | str | None = None,
+    ) -> tuple[str, int, int]:
         raw_mode = str(mode or "single").strip().lower().replace("_", "-")
         if "-bin" in raw_mode:
             parsed_dtype, parsed_bin = self._parse_export_mode(raw_mode)
@@ -1218,9 +1486,13 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             dtype = parsed_dtype
             det_bin = parsed_bin
         if raw_mode not in {"single", "folder"}:
-            raise ValueError("Show4DSTEM HTML export supports mode='single' or mode='folder'")
+            raise ValueError(
+                "Show4DSTEM HTML export supports mode='single' or mode='folder'"
+            )
         if raw_mode == "folder" and not self._offline_bslz4:
-            raise ValueError("folder export is only available for Show4DSTEM widgets with a companion data folder")
+            raise ValueError(
+                "folder export is only available for Show4DSTEM widgets with a companion data folder"
+            )
 
         if encoding is not None:
             raw_encoding = str(encoding or "uint8").strip().lower().replace("_", "-")
@@ -1231,14 +1503,41 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             elif raw_encoding == "auto":
                 dtype = str(dtype or "uint8")
             else:
-                raise ValueError(f"unknown Show4DSTEM export encoding {encoding!r}; expected 'full', 'uint8', or 'auto'")
+                raise ValueError(
+                    f"unknown Show4DSTEM export encoding {encoding!r}; expected 'full', 'uint8', or 'auto'"
+                )
 
         if downsample not in (None, "", 0, "0"):
             requested_bin = int(downsample)
             if det_bin not in (1, requested_bin):
-                raise ValueError("Specify either downsample or det_bin, not conflicting values")
+                raise ValueError(
+                    "Specify either downsample or det_bin, not conflicting values"
+                )
             det_bin = requested_bin
-        return self._parse_export_mode(f"{dtype}-bin{det_bin}")
+        if real_space_bin not in (None, "", 0, "0"):
+            requested_scan_bin = int(real_space_bin)
+            if scan_bin not in (1, requested_scan_bin):
+                raise ValueError(
+                    "Specify either real_space_bin or scan_bin, not conflicting values"
+                )
+            scan_bin = requested_scan_bin
+        dtype, det_bin = self._parse_export_mode(f"{dtype}-bin{det_bin}")
+        scan_bin = int(scan_bin)
+        if scan_bin not in (1, 2, 4, 8):
+            raise ValueError(f"scan_bin must be 1, 2, 4, or 8, got {scan_bin}")
+        if self.shape_rows % scan_bin != 0 or self.shape_cols % scan_bin != 0:
+            raise ValueError(
+                f"Scan shape {self.shape_rows}x{self.shape_cols} is not divisible by scan_bin={scan_bin}"
+            )
+        return dtype, det_bin, scan_bin
+
+    def _normalise_html_export_kind(self, export_kind: Any) -> str:
+        kind = str(export_kind or "interactive").strip().lower().replace("_", "-")
+        if kind in {"interactive", "raw", "raw-4d", "widget"}:
+            return "interactive"
+        if kind in {"report", "static", "summary"}:
+            return "report"
+        raise ValueError("export_kind must be 'interactive' or 'report'")
 
     def _parse_export_mode(self, mode: str) -> tuple[str, int]:
         parts = mode.split("-bin")
@@ -1254,11 +1553,30 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             raise ValueError(f"det_bin must be 1, 2, 4, or 8, got {det_bin}")
         return dtype, det_bin
 
-    def _export_mode_label(self, dtype: str, det_bin: int) -> str:
+    def _export_mode_label(
+        self,
+        dtype: str,
+        det_bin: int,
+        scan_bin: int = 1,
+        *,
+        export_kind: str = "interactive",
+    ) -> str:
         label = "uint8" if dtype == "uint8" else "uint16"
-        return f"{label}, bin {det_bin}x" if det_bin > 1 else label
+        parts = [("report" if export_kind == "report" else "interactive raw 4D"), label]
+        if scan_bin > 1:
+            parts.append(f"scan bin {scan_bin}x")
+        if det_bin > 1:
+            parts.append(f"detector bin {det_bin}x")
+        return ", ".join(parts)
 
-    def _default_html_export_path(self, dtype: str, det_bin: int) -> pathlib.Path:
+    def _default_html_export_path(
+        self,
+        dtype: str,
+        det_bin: int,
+        scan_bin: int = 1,
+        *,
+        export_kind: str = "interactive",
+    ) -> pathlib.Path:
         label = self.title.strip() or "show4dstem"
         slug = "".join(ch.lower() if ch.isalnum() else "_" for ch in label).strip("_")
         while "__" in slug:
@@ -1266,11 +1584,16 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         if not slug:
             slug = "show4dstem"
         shape = (
-            f"{self.n_frames}x{self.shape_rows}x{self.shape_cols}x{self.det_rows // det_bin}x{self.det_cols // det_bin}"
+            f"{self.n_frames}x{self.shape_rows // scan_bin}x{self.shape_cols // scan_bin}"
+            f"x{self.det_rows // det_bin}x{self.det_cols // det_bin}"
             if self.n_frames > 1
-            else f"{self.shape_rows}x{self.shape_cols}x{self.det_rows // det_bin}x{self.det_cols // det_bin}"
+            else (
+                f"{self.shape_rows // scan_bin}x{self.shape_cols // scan_bin}"
+                f"x{self.det_rows // det_bin}x{self.det_cols // det_bin}"
+            )
         )
-        suffix = f"{dtype}_bin{det_bin}"
+        prefix = "report" if export_kind == "report" else dtype
+        suffix = f"{prefix}_rbin{scan_bin}_kbin{det_bin}"
         return pathlib.Path.cwd() / f"{slug}_{shape}_{suffix}.html"
 
     def _write_html_export(
@@ -1279,6 +1602,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         *,
         dtype: str,
         det_bin: int,
+        scan_bin: int = 1,
         title: str | None = None,
     ) -> pathlib.Path:
         from ipywidgets.embed import dependency_state, embed_minimal_html
@@ -1288,6 +1612,12 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         out = pathlib.Path(path)
         out.parent.mkdir(parents=True, exist_ok=True)
         if self._offline_bslz4:
+            if det_bin != 1 or scan_bin != 1:
+                raise ValueError(
+                    "Binned interactive raw export is not available for bslz4 companion-folder "
+                    "Show4DSTEM exports. Use export_kind='report' for a compact page-aware "
+                    "sharing export, or export an in-memory widget for binned raw 4D HTML."
+                )
             # Already packed to a bslz4 companion (the multi-volume / large path):
             # the data lives in the companion dir, so re-packing via a clone would
             # try to reshape one volume into the full 5D stack and fail. Embed this
@@ -1310,7 +1640,9 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
                 self._save_state = prev_save_state
             ensure_mobile_viewport(out)
             return out
-        export_widget = self._clone_for_html_export(dtype=dtype, det_bin=det_bin)
+        export_widget = self._clone_for_html_export(
+            dtype=dtype, det_bin=det_bin, scan_bin=scan_bin
+        )
         try:
             embed_minimal_html(
                 str(out),
@@ -1324,29 +1656,39 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         ensure_mobile_viewport(out)
         return out
 
-    def _html_export_bytes(self, *, dtype: str, det_bin: int) -> bytes:
+    def _html_export_bytes(
+        self, *, dtype: str, det_bin: int, scan_bin: int = 1
+    ) -> bytes:
         with tempfile.TemporaryDirectory(prefix="show4dstem-export-") as tmp:
-            path = pathlib.Path(tmp) / self._default_html_export_path(dtype, det_bin).name
-            self._write_html_export(path, dtype=dtype, det_bin=det_bin)
+            path = (
+                pathlib.Path(tmp)
+                / self._default_html_export_path(dtype, det_bin, scan_bin).name
+            )
+            self._write_html_export(
+                path, dtype=dtype, det_bin=det_bin, scan_bin=scan_bin
+            )
             return path.read_bytes()
 
-    def _clone_for_html_export(self, *, dtype: str, det_bin: int) -> Self:
-        data = self._export_data_array(dtype=dtype, det_bin=det_bin)
-        scale = float(det_bin)
+    def _clone_for_html_export(
+        self, *, dtype: str, det_bin: int, scan_bin: int = 1
+    ) -> Self:
+        data = self._export_data_array(dtype=dtype, det_bin=det_bin, scan_bin=scan_bin)
+        k_scale = float(det_bin)
+        scan_scale = float(scan_bin)
         sampling = (
-            self.pixel_size,
-            self.pixel_size,
-            self.k_pixel_size * scale,
-            self.k_pixel_size * scale,
+            self.pixel_size * scan_scale,
+            self.pixel_size * scan_scale,
+            self.k_pixel_size * k_scale,
+            self.k_pixel_size * k_scale,
         )
         units = [self.pixel_unit, self.pixel_unit, self.k_pixel_unit, self.k_pixel_unit]
-        center = (self.center_row / scale, self.center_col / scale)
+        center = (self.center_row / k_scale, self.center_col / k_scale)
         clone = type(self)(
             data,
             sampling=sampling,
             units=units,
             center=center,
-            bf_radius=max(1.0, self.bf_radius / scale),
+            bf_radius=max(1.0, self.bf_radius / k_scale),
             precompute_virtual_images=False,
             frame_dim_label=self.frame_dim_label,
             frame_labels=list(self.frame_labels),
@@ -1366,10 +1708,11 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             compare_grid_width_px=self.compare_grid_width_px,
             compare_panel_gap_px=self.compare_panel_gap_px,
             compare_max_panels=self.compare_max_panels,
+            compare_group_mode=self.compare_group_mode,
             compare_dp_mode=self.compare_dp_mode,
             verbose=False,
         )
-        clone.load_state_dict(self._export_state_for_bin(det_bin))
+        clone.load_state_dict(self._export_state_for_bin(det_bin, scan_bin=scan_bin))
         clone._pack_export_inline(dtype=dtype)
         clone.export_enabled = False
         clone.export_status = ""
@@ -1379,14 +1722,26 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         clone._save_state = True
         return clone
 
-    def _export_data_array(self, *, dtype: str, det_bin: int) -> np.ndarray:
+    def _export_data_array(
+        self, *, dtype: str, det_bin: int, scan_bin: int = 1
+    ) -> np.ndarray:
         if self.det_rows % det_bin != 0 or self.det_cols % det_bin != 0:
-            raise ValueError(f"Detector shape {self.det_rows}x{self.det_cols} is not divisible by det_bin={det_bin}")
+            raise ValueError(
+                f"Detector shape {self.det_rows}x{self.det_cols} is not divisible by det_bin={det_bin}"
+            )
+        if self.shape_rows % scan_bin != 0 or self.shape_cols % scan_bin != 0:
+            raise ValueError(
+                f"Scan shape {self.shape_rows}x{self.shape_cols} is not divisible by scan_bin={scan_bin}"
+            )
         data = self._data
         if dtype not in {"uint8", "uint16"}:
             raise ValueError(f"unknown export dtype {dtype!r}")
 
-        def _finish_export_chunk(chunk: np.ndarray) -> np.ndarray:
+        def _finish_export_chunk(
+            chunk: np.ndarray, *, round_values: bool = True
+        ) -> np.ndarray:
+            if round_values:
+                chunk = np.round(chunk)
             if dtype == "uint8":
                 return np.clip(chunk, 0, 255).astype(np.uint8, copy=False)
             return np.clip(chunk, 0, 65535).astype(np.uint16, copy=False)
@@ -1395,14 +1750,18 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             frame4 = (
                 frame
                 if frame.ndim == 4
-                else frame.reshape(self.shape_rows, self.shape_cols, self.det_rows, self.det_cols)
+                else frame.reshape(
+                    self.shape_rows, self.shape_cols, self.det_rows, self.det_cols
+                )
             )
             if det_bin <= 1:
-                return _finish_export_chunk(frame4.detach().to("cpu").numpy())
+                arr = frame4.detach().to("cpu").numpy()
+                arr = Show4DSTEM._mean_scan_bin_array(arr, scan_bin)
+                return _finish_export_chunk(arr, round_values=scan_bin > 1)
             rows_per = self._chunk_rows()
             chunks: list[np.ndarray] = []
             for r0 in range(0, self.shape_rows, rows_per):
-                slab = frame4[r0:r0 + rows_per]
+                slab = frame4[r0 : r0 + rows_per]
                 if not torch.is_floating_point(slab):
                     slab = slab.float()
                 binned = slab.reshape(
@@ -1412,17 +1771,27 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
                     det_bin,
                     self.det_cols // det_bin,
                     det_bin,
-                ).mean(dim=(3, 5)).round()
-                chunks.append(_finish_export_chunk(binned.detach().to("cpu").numpy()))
-            return np.concatenate(chunks, axis=0)
+                ).mean(dim=(3, 5))
+                chunks.append(binned.detach().to("cpu").numpy())
+            arr = np.concatenate(chunks, axis=0)
+            arr = Show4DSTEM._mean_scan_bin_array(arr, scan_bin)
+            return _finish_export_chunk(arr)
 
         if type(data).__name__ == "Dataset5dstem" and hasattr(data, "frames"):
-            frames = [_tensor_frame_to_export_array(data[i]) for i in range(self.n_frames)]
+            frames = [
+                _tensor_frame_to_export_array(data[i]) for i in range(self.n_frames)
+            ]
             arr = np.stack(frames, axis=0) if self.n_frames > 1 else frames[0]
             return np.ascontiguousarray(arr)
         if isinstance(data, torch.Tensor):
             if self.n_frames > 1:
-                arr = np.stack([_tensor_frame_to_export_array(data[i]) for i in range(self.n_frames)], axis=0)
+                arr = np.stack(
+                    [
+                        _tensor_frame_to_export_array(data[i])
+                        for i in range(self.n_frames)
+                    ],
+                    axis=0,
+                )
             else:
                 arr = _tensor_frame_to_export_array(data)
             return np.ascontiguousarray(arr)
@@ -1437,10 +1806,16 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             volumes = []
             for dataset in datasets:
                 if hasattr(dataset, "chunks"):
-                    flat = np.concatenate([np.asarray(chunk) for chunk in dataset.chunks], axis=0)
+                    flat = np.concatenate(
+                        [np.asarray(chunk) for chunk in dataset.chunks], axis=0
+                    )
                 else:
                     flat = np.asarray(dataset)
-                volumes.append(flat.reshape(self.shape_rows, self.shape_cols, self.det_rows, self.det_cols))
+                volumes.append(
+                    flat.reshape(
+                        self.shape_rows, self.shape_cols, self.det_rows, self.det_cols
+                    )
+                )
             arr = np.stack(volumes, axis=0)
         elif hasattr(data, "chunks"):
             # MacBook MPS path: data is a zero-copy ChunkedFrames (numpy views over
@@ -1450,7 +1825,13 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         else:
             arr = np.asarray(data)
         target_shape = (
-            (self.n_frames, self.shape_rows, self.shape_cols, self.det_rows, self.det_cols)
+            (
+                self.n_frames,
+                self.shape_rows,
+                self.shape_cols,
+                self.det_rows,
+                self.det_cols,
+            )
             if self.n_frames > 1
             else (self.shape_rows, self.shape_cols, self.det_rows, self.det_cols)
         )
@@ -1462,40 +1843,460 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             # it always fits uint8. Round so the average count is the nearest integer.
             if arr.ndim == 5:
                 nf, sr, sc, dr, dc = arr.shape
-                arr = arr.reshape(nf, sr, sc, dr // det_bin, det_bin, dc // det_bin, det_bin).mean(axis=(4, 6))
+                arr = arr.reshape(
+                    nf, sr, sc, dr // det_bin, det_bin, dc // det_bin, det_bin
+                ).mean(axis=(4, 6))
             else:
                 sr, sc, dr, dc = arr.shape
-                arr = arr.reshape(sr, sc, dr // det_bin, det_bin, dc // det_bin, det_bin).mean(axis=(3, 5))
-            arr = np.round(arr)
+                arr = arr.reshape(
+                    sr, sc, dr // det_bin, det_bin, dc // det_bin, det_bin
+                ).mean(axis=(3, 5))
+        arr = Show4DSTEM._mean_scan_bin_array(arr, scan_bin)
+        arr = np.round(arr) if det_bin > 1 or scan_bin > 1 else arr
         if dtype == "uint8":
             arr = np.clip(arr, 0, 255).astype(np.uint8, copy=False)
         elif dtype == "uint16":
             arr = np.clip(arr, 0, 65535).astype(np.uint16, copy=False)
         return np.ascontiguousarray(arr)
 
-    def _export_state_for_bin(self, det_bin: int) -> dict:
-        state = self.state_dict()
+    @staticmethod
+    def _mean_scan_bin_array(arr: np.ndarray, scan_bin: int) -> np.ndarray:
+        arr = np.asarray(arr)
+        if scan_bin <= 1:
+            return arr
+        if arr.ndim == 5:
+            nf, sr, sc, dr, dc = arr.shape
+            return arr.reshape(
+                nf, sr // scan_bin, scan_bin, sc // scan_bin, scan_bin, dr, dc
+            ).mean(axis=(2, 4))
+        if arr.ndim == 4:
+            sr, sc, dr, dc = arr.shape
+            return arr.reshape(
+                sr // scan_bin, scan_bin, sc // scan_bin, scan_bin, dr, dc
+            ).mean(axis=(1, 3))
+        if arr.ndim == 2:
+            sr, sc = arr.shape
+            return arr.reshape(sr // scan_bin, scan_bin, sc // scan_bin, scan_bin).mean(
+                axis=(1, 3)
+            )
+        raise ValueError(f"Cannot scan-bin array with shape {arr.shape}")
+
+    @staticmethod
+    def _mean_detector_bin_image(arr: np.ndarray, det_bin: int) -> np.ndarray:
+        arr = np.asarray(arr)
         if det_bin <= 1:
-            return state
-        scale_keys = [
-            "center_row", "center_col", "bf_radius",
-            "roi_center_row", "roi_center_col", "roi_radius",
-            "roi_radius_inner", "roi_width", "roi_height",
+            return arr
+        dr, dc = arr.shape
+        return arr.reshape(dr // det_bin, det_bin, dc // det_bin, det_bin).mean(
+            axis=(1, 3)
+        )
+
+    def _export_state_for_bin(self, det_bin: int, *, scan_bin: int = 1) -> dict:
+        state = self.state_dict()
+        detector_scale_keys = [
+            "center_row",
+            "center_col",
+            "bf_radius",
+            "roi_center_row",
+            "roi_center_col",
+            "roi_radius",
+            "roi_radius_inner",
+            "roi_width",
+            "roi_height",
         ]
-        for key in scale_keys:
-            if state.get(key) is not None:
-                state[key] = float(state[key]) / det_bin
-        state["k_pixel_size"] = float(state["k_pixel_size"]) * det_bin
-        state["dp_vmin"] = None
-        state["dp_vmax"] = None
+        if det_bin > 1:
+            for key in detector_scale_keys:
+                if state.get(key) is not None:
+                    state[key] = float(state[key]) / det_bin
+            state["k_pixel_size"] = float(state["k_pixel_size"]) * det_bin
+            state["dp_vmin"] = None
+            state["dp_vmax"] = None
+        scan_scale_keys = [
+            "pos_row",
+            "pos_col",
+            "vi_roi_center_row",
+            "vi_roi_center_col",
+            "vi_roi_radius",
+            "vi_roi_width",
+            "vi_roi_height",
+        ]
+        if scan_bin > 1:
+            for key in scan_scale_keys:
+                if state.get(key) is not None:
+                    state[key] = float(state[key]) / scan_bin
+            state["pixel_size"] = float(state["pixel_size"]) * scan_bin
+            state["vi_vmin"] = None
+            state["vi_vmax"] = None
         return state
+
+    def _write_html_report_export(
+        self,
+        path: str | pathlib.Path,
+        *,
+        dtype: str,
+        det_bin: int,
+        scan_bin: int,
+        dataset_scope: str,
+        title: str | None = None,
+    ) -> pathlib.Path:
+        from .export import ensure_mobile_viewport
+
+        out = pathlib.Path(path)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(
+            self._html_report_export_bytes(
+                dtype=dtype,
+                det_bin=det_bin,
+                scan_bin=scan_bin,
+                dataset_scope=dataset_scope,
+                title=title,
+            )
+        )
+        ensure_mobile_viewport(out)
+        return out
+
+    def _html_report_export_bytes(
+        self,
+        *,
+        dtype: str,
+        det_bin: int,
+        scan_bin: int,
+        dataset_scope: str = "unhidden",
+        title: str | None = None,
+    ) -> bytes:
+        dtype, det_bin, scan_bin = self._normalise_html_export_options(
+            dtype=dtype,
+            det_bin=det_bin,
+            scan_bin=scan_bin,
+        )
+        indices = self._report_export_indices(dataset_scope)
+        if not indices:
+            raise ValueError(
+                "No datasets are available for the requested report export scope"
+            )
+
+        report_title = title or self.title or "Show4DSTEM Report"
+        max_panels = max(1, int(self.compare_max_panels))
+        pages = [
+            indices[i : i + max_panels] for i in range(0, len(indices), max_panels)
+        ]
+        cols = (
+            int(self.compare_cols)
+            if int(self.compare_cols) > 0
+            else int(math.ceil(math.sqrt(min(max_panels, len(indices)))))
+        )
+        cols = max(1, min(cols, max_panels, len(indices)))
+        gap_px = max(0, int(self.compare_panel_gap_px))
+        preset_masks = self._report_preset_masks()
+        data = getattr(self, "_data", None)
+        initial_loaded = (
+            set(int(idx) for idx in data.loaded_indices())
+            if type(data).__name__ == "Dataset5dstem"
+            and hasattr(data, "loaded_indices")
+            else set()
+        )
+
+        dp_uri = self._report_diffraction_png(det_bin=det_bin)
+        page_sections: list[str] = []
+        for page_idx, page_indices in enumerate(pages):
+            try:
+                for preset_name, preset_label, mask in preset_masks:
+                    tiles = self._report_virtual_tiles(
+                        page_indices,
+                        mask,
+                        scan_bin=scan_bin,
+                    )
+                    tile_html = "\n".join(
+                        self._report_tile_html(
+                            title=self._compare_panel_title_for_index(panel_idx),
+                            uri=uri,
+                            panel_idx=panel_idx,
+                            page_idx=page_idx,
+                            preset_label=preset_label,
+                        )
+                        for panel_idx, uri in zip(page_indices, tiles, strict=True)
+                    )
+                    page_sections.append(
+                        (
+                            f'<section class="report-page" data-preset="{preset_name}" '
+                            f'data-page="{page_idx}"><div class="grid">{tile_html}</div></section>'
+                        )
+                    )
+            finally:
+                self._release_report_export_page_data(page_indices, initial_loaded)
+
+        metadata = {
+            "scope": self._normalise_report_dataset_scope(dataset_scope),
+            "datasets": len(indices),
+            "pages": len(pages),
+            "page_size": max_panels,
+            "scan_bin": scan_bin,
+            "det_bin": det_bin,
+            "dtype": dtype,
+            "scan_shape": [self.shape_rows, self.shape_cols],
+            "detector_shape": [self.det_rows, self.det_cols],
+        }
+        summary_line = (
+            f"{metadata['datasets']} dataset(s) · {metadata['pages']} page(s) · "
+            f"scope {metadata['scope']} · rbin {scan_bin} · kbin {det_bin}"
+        )
+        page_options = "\n".join(
+            f'<option value="{idx}">Page {idx + 1} / {len(pages)}</option>'
+            for idx in range(len(pages))
+        )
+        preset_options = "\n".join(
+            f'<option value="{name}">{label}</option>'
+            for name, label, _ in preset_masks
+        )
+        css = f"""
+        :root {{ --cols: {cols}; --gap: {gap_px}px; color-scheme: light; }}
+        body {{ margin: 0; font: 13px/1.35 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #202124; background: #fff; }}
+        main {{ padding: 14px; max-width: 1600px; }}
+        h1 {{ margin: 0 0 6px; color: #0759c9; font-size: 20px; }}
+        .sub {{ margin: 0 0 12px; color: #5f6368; max-width: 980px; }}
+        .toolbar {{ display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 10px 0 12px; }}
+        .toolbar label {{ font-size: 11px; color: #5f6368; }}
+        select, button {{ font: inherit; height: 28px; border: 1px solid #d7dce2; border-radius: 4px; background: #f8f9fa; padding: 0 8px; }}
+        .layout {{ display: grid; grid-template-columns: minmax(220px, 360px) minmax(0, 1fr); gap: 12px; align-items: start; }}
+        .dp img {{ width: 100%; image-rendering: pixelated; background: #000; display: block; }}
+        .meta {{ margin-top: 8px; font-size: 11px; color: #5f6368; }}
+        details.meta summary {{ cursor: pointer; color: #0759c9; }}
+        details.meta code {{ display: block; white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 4px; }}
+        .grid {{ display: grid; grid-template-columns: repeat(var(--cols), minmax(0, 1fr)); gap: var(--gap); align-items: start; }}
+        .tile {{ position: relative; margin: 0; min-width: 0; background: #000; overflow: hidden; }}
+        .tile img {{ width: 100%; display: block; image-rendering: pixelated; }}
+        .tile figcaption {{ position: absolute; top: 3px; left: 4px; right: 4px; color: #fff; font-weight: 700; font-size: 11px; text-shadow: 0 1px 2px #000; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
+        .report-page {{ display: none; }}
+        .report-page.active {{ display: block; }}
+        @media (max-width: 700px) {{
+          main {{ padding: 8px; }}
+          .layout {{ display: block; }}
+          .dp {{ margin-bottom: 8px; }}
+          .grid {{ grid-template-columns: repeat(min(var(--cols), 2), minmax(0, 1fr)); }}
+        }}
+        """
+        js = """
+        const preset = document.getElementById("preset");
+        const page = document.getElementById("page");
+        const prev = document.getElementById("prev");
+        const next = document.getElementById("next");
+        const status = document.getElementById("page-status");
+        const maxPage = Number(page.dataset.max || "1");
+        function sync() {
+          const p = preset.value;
+          const pageIdx = Number(page.value || "0");
+          document.querySelectorAll(".report-page").forEach((el) => {
+            el.classList.toggle("active", el.dataset.preset === p && Number(el.dataset.page || "0") === pageIdx);
+          });
+          status.textContent = `Page ${pageIdx + 1} / ${maxPage}`;
+          prev.disabled = pageIdx <= 0;
+          next.disabled = pageIdx >= maxPage - 1;
+        }
+        preset.addEventListener("change", sync);
+        page.addEventListener("change", sync);
+        prev.addEventListener("click", () => { page.value = String(Math.max(0, Number(page.value) - 1)); sync(); });
+        next.addEventListener("click", () => { page.value = String(Math.min(maxPage - 1, Number(page.value) + 1)); sync(); });
+        sync();
+        """
+        body = f"""<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{html.escape(report_title)}</title>
+  <style>{css}</style>
+</head>
+<body>
+  <main>
+    <h1>{html.escape(report_title)}</h1>
+    <p class="sub">Static report export: virtual-image PNGs only. Raw interactive 4D data is not embedded.</p>
+    <div class="toolbar">
+      <label for="preset">Virtual image</label>
+      <select id="preset">{preset_options}</select>
+      <button id="prev" type="button">Prev</button>
+      <label for="page">Page</label>
+      <select id="page" data-max="{len(pages)}">{page_options}</select>
+      <button id="next" type="button">Next</button>
+      <span id="page-status" class="meta"></span>
+    </div>
+    <div class="layout">
+      <aside class="dp">
+        <img alt="Representative diffraction pattern" src="{dp_uri}">
+        <div class="meta">DP at ({int(self.pos_row)}, {int(self.pos_col)}) · detector bin {det_bin}x</div>
+        <div class="meta">{html.escape(summary_line)}</div>
+        <details class="meta">
+          <summary>Details</summary>
+          <code>{html.escape(json.dumps(metadata, separators=(",", ":")))}</code>
+        </details>
+      </aside>
+      <div class="pages">
+        {"".join(page_sections)}
+      </div>
+    </div>
+  </main>
+  <script>{js}</script>
+</body>
+</html>"""
+        return body.encode("utf-8")
+
+    def _normalise_report_dataset_scope(self, dataset_scope: str) -> str:
+        scope = str(dataset_scope or "unhidden").strip().lower().replace("_", "-")
+        aliases = {
+            "visible": "unhidden",
+            "current": "current-page",
+            "page": "current-page",
+            "current-page": "current-page",
+            "star": "starred",
+            "stars": "starred",
+            "starred": "starred",
+            "all": "all",
+            "unhidden": "unhidden",
+        }
+        if scope not in aliases:
+            raise ValueError(
+                "dataset_scope must be 'unhidden', 'current_page', 'starred', or 'all'"
+            )
+        return aliases[scope]
+
+    def _report_export_indices(self, dataset_scope: str) -> list[int]:
+        scope = self._normalise_report_dataset_scope(dataset_scope)
+        if int(self.n_frames) <= 1:
+            return [0]
+        ordered = self.compare_ordered_panels
+        visible = self.compare_visible_panels
+        if scope == "all":
+            return ordered
+        if scope == "starred":
+            starred = {
+                int(idx)
+                for idx in self.compare_starred_panels
+                if not isinstance(idx, bool) and 0 <= int(idx) < int(self.n_frames)
+            }
+            return [idx for idx in ordered if idx in starred]
+        if scope == "current-page":
+            max_panels = max(1, int(self.compare_max_panels))
+            start = max(0, int(self.compare_page_idx)) * max_panels
+            hidden = {
+                int(idx)
+                for idx in self.compare_hidden_panels
+                if not isinstance(idx, bool) and 0 <= int(idx) < int(self.n_frames)
+            }
+            page = ordered[start : start + max_panels]
+            return [idx for idx in page if idx not in hidden]
+        return visible
+
+    def _report_preset_masks(self) -> list[tuple[str, str, Any]]:
+        cx, cy, bf = self.center_col, self.center_row, max(1.0, float(self.bf_radius))
+        return [
+            ("bf", "BF", self._create_circular_mask(cx, cy, bf)),
+            ("abf", "ABF", self._create_annular_mask(cx, cy, bf * 0.5, bf)),
+            ("adf", "ADF", self._create_annular_mask(cx, cy, bf, bf * 2.0)),
+            ("haadf", "HAADF", self._create_annular_mask(cx, cy, bf * 2.0, bf * 4.0)),
+        ]
+
+    def _report_diffraction_png(self, *, det_bin: int) -> str:
+        raw = self._get_frame(int(self.pos_row), int(self.pos_col)).astype(
+            np.float32, copy=False
+        )
+        if det_bin > 1:
+            raw = self._mean_detector_bin_image(raw, det_bin).astype(
+                np.float32, copy=False
+            )
+        scaled = self._apply_scale_mode(raw, self.dp_scale_mode)
+        data_min = float(scaled.min()) if scaled.size else 0.0
+        data_max = float(scaled.max()) if scaled.size else 0.0
+        vmin, vmax = self._slider_range(
+            data_min, data_max, self.dp_vmin_pct, self.dp_vmax_pct
+        )
+        rgb = self._render_colormap_rgb(scaled, self.dp_colormap, vmin, vmax)
+        return self._png_data_uri_from_rgb(rgb)
+
+    def _report_virtual_tiles(
+        self,
+        indices: Sequence[int],
+        mask,
+        *,
+        scan_bin: int,
+    ) -> list[str]:
+        images = self._compare_virtual_images_for_indices(indices, mask)
+        return [self._report_virtual_png(image, scan_bin=scan_bin) for image in images]
+
+    def _report_virtual_png(self, image: np.ndarray, *, scan_bin: int) -> str:
+        raw = self._mean_scan_bin_array(
+            np.asarray(image, dtype=np.float32), scan_bin
+        ).astype(np.float32, copy=False)
+        scaled = self._apply_scale_mode(raw, self.vi_scale_mode)
+        data_min = float(scaled.min()) if scaled.size else 0.0
+        data_max = float(scaled.max()) if scaled.size else 0.0
+        vmin, vmax = self._slider_range(
+            data_min, data_max, self.vi_vmin_pct, self.vi_vmax_pct
+        )
+        rgb = self._render_colormap_rgb(scaled, self.vi_colormap, vmin, vmax)
+        return self._png_data_uri_from_rgb(rgb)
+
+    @staticmethod
+    def _png_data_uri_from_rgb(rgb: np.ndarray) -> str:
+        from PIL import Image
+
+        image = Image.fromarray(np.asarray(rgb, dtype=np.uint8), mode="RGB")
+        buf = io.BytesIO()
+        image.save(buf, format="PNG", optimize=True)
+        return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode(
+            "ascii"
+        )
+
+    def _report_tile_html(
+        self,
+        *,
+        title: str,
+        uri: str,
+        panel_idx: int,
+        page_idx: int,
+        preset_label: str,
+    ) -> str:
+        label = html.escape(title)
+        return (
+            f'<figure class="tile" data-panel="{int(panel_idx)}" data-page="{int(page_idx)}">'
+            f'<img alt="{html.escape(preset_label)} virtual image for {label}" src="{uri}">'
+            f"<figcaption>{label}</figcaption></figure>"
+        )
+
+    def _release_report_export_page_data(
+        self,
+        page_indices: Sequence[int],
+        initial_loaded: set[int],
+    ) -> None:
+        data = getattr(self, "_data", None)
+        if type(data).__name__ != "Dataset5dstem" or not getattr(
+            data, "is_lazy", False
+        ):
+            return
+        to_release = [
+            int(idx)
+            for idx in page_indices
+            if int(idx) not in initial_loaded and int(idx) != int(self.frame_idx)
+        ]
+        if not to_release:
+            return
+        self._compute_backend = None
+        self._compute_for = None
+        try:
+            data.release(idx=to_release)
+        finally:
+            self._update_gpu_memory_status()
 
     def _pack_export_inline(self, *, dtype: str) -> None:
         import gzip
 
         arr = self._data.detach().to("cpu").numpy()
         target_shape = (
-            (self.n_frames, self.shape_rows, self.shape_cols, self.det_rows, self.det_cols)
+            (
+                self.n_frames,
+                self.shape_rows,
+                self.shape_cols,
+                self.det_rows,
+                self.det_cols,
+            )
             if self.n_frames > 1
             else (self.shape_rows, self.shape_cols, self.det_rows, self.det_cols)
         )
@@ -1506,7 +2307,9 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             packed = np.clip(arr, 0, 65535).astype(np.uint16, copy=False)
         else:
             raise ValueError(f"unknown export dtype {dtype!r}")
-        self._offline_stack = gzip.compress(np.ascontiguousarray(packed).tobytes(), compresslevel=6)
+        self._offline_stack = gzip.compress(
+            np.ascontiguousarray(packed).tobytes(), compresslevel=6
+        )
         self._offline_gzip = True
         self._offline_url = ""
         self._offline_chunks = ""
@@ -1514,7 +2317,9 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         self._offline_bad_px = ""
         self.offline = True
 
-    def _pack_offline_bslz4_volume(self, data, data_url: str) -> tuple[list[dict], list[int], int, int]:
+    def _pack_offline_bslz4_volume(
+        self, data, data_url: str
+    ) -> tuple[list[dict], list[int], int, int]:
         """One-call bslz4 offline pack: encode the 4D stack to native bitshuffle+LZ4
         (the Arina/HDF5 codec) and write a CHUNKED companion folder the browser
         decompresses on the GPU into a uint8 stack (~6x smaller than uint16, near-CUDA
@@ -1528,8 +2333,11 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         ``data_url`` is a DIRECTORY; chunk_NN.bin + chunk_NN.meta + index.json land
         there, and the browser fetches them relative to the exported HTML.
         """
-        import json, pathlib, struct, tempfile, os
-        import hdf5plugin, h5py
+        import struct
+
+        import hdf5plugin
+        import h5py
+
         if hasattr(data, "detach"):
             data = data.detach().to("cpu").numpy()
         else:
@@ -1554,14 +2362,22 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             # 8-bit-plane companion decodes ~2x faster on the GPU than uint16 (16
             # planes) at the SAME size (uint16's all-zero high byte was free). Dead
             # px are auto-filtered; real counts <=255 -> near-lossless for signal.
-            hf.create_dataset("d", data=np.clip(data, 0, 255).astype(np.uint8), chunks=(1, self.det_rows, self.det_cols),
-                              **hdf5plugin.Bitshuffle(nelems=block_elems, cname="lz4"))
-        out = pathlib.Path(data_url); out.mkdir(parents=True, exist_ok=True)
+            hf.create_dataset(
+                "d",
+                data=np.clip(data, 0, 255).astype(np.uint8),
+                chunks=(1, self.det_rows, self.det_cols),
+                **hdf5plugin.Bitshuffle(nelems=block_elems, cname="lz4"),
+            )
+        out = pathlib.Path(data_url)
+        out.mkdir(parents=True, exist_ok=True)
         # scan-row chunks so each decoded uint8 buffer stays <= ~0.95 GB (1 GB cap).
-        rows_per = max(1, min(self.shape_rows, (950 * 1024 * 1024) // max(1, scan_cols * det_size)))
+        rows_per = max(
+            1, min(self.shape_rows, (950 * 1024 * 1024) // max(1, scan_cols * det_size))
+        )
         index, total = [], 0
         try:
-            hf = h5py.File(tmp_h5, "r"); ds = hf["d"]
+            hf = h5py.File(tmp_h5, "r")
+            ds = hf["d"]
             cidx = 0
             for r0 in range(0, self.shape_rows, rows_per):
                 r1 = min(self.shape_rows, r0 + rows_per)
@@ -1569,27 +2385,39 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
                 raw, meta = bytearray(), []
                 for gf in range(f_lo, f_hi):
                     _, chunk = ds.id.read_direct_chunk((gf, 0, 0))
-                    base = len(raw); pos = 12
+                    base = len(raw)
+                    pos = 12
                     for b in range(n_blocks):
-                        clen = struct.unpack(">I", chunk[pos:pos + 4])[0]
+                        clen = struct.unpack(">I", chunk[pos : pos + 4])[0]
                         meta += [base + pos + 4, clen]
                         pos += 4 + clen
                     raw += chunk + b"\x00" * ((-len(raw)) % 4)
                 (out / f"chunk_{cidx:02d}.bin").write_bytes(bytes(raw))
                 np.array(meta, dtype=np.uint32).tofile(out / f"chunk_{cidx:02d}.meta")
-                index.append({"bin": f"chunk_{cidx:02d}.bin", "meta": f"chunk_{cidx:02d}.meta",
-                              "startScan": f_lo, "nScan": f_hi - f_lo,
-                              "nBlocksPerFrame": n_blocks, "blockElems": block_elems})
-                total += len(raw); cidx += 1
+                index.append(
+                    {
+                        "bin": f"chunk_{cidx:02d}.bin",
+                        "meta": f"chunk_{cidx:02d}.meta",
+                        "startScan": f_lo,
+                        "nScan": f_hi - f_lo,
+                        "nBlocksPerFrame": n_blocks,
+                        "blockElems": block_elems,
+                    }
+                )
+                total += len(raw)
+                cidx += 1
             hf.close()
         finally:
             os.unlink(tmp_h5)
-        (out / "index.json").write_text(json.dumps({"chunks": index, "nFrames": n_frames}))
+        (out / "index.json").write_text(
+            json.dumps({"chunks": index, "nFrames": n_frames})
+        )
         return index, bad_list, total, n_blocks
 
     def _pack_offline_bslz4(self, data_url: str) -> None:
-        import json, pathlib
-        index, bad, total, n_blocks = self._pack_offline_bslz4_volume(self._data, data_url)
+        index, bad, total, n_blocks = self._pack_offline_bslz4_volume(
+            self._data, data_url
+        )
         out = pathlib.Path(data_url)
         n_frames = self.shape_rows * self.shape_cols
         self.offline = True
@@ -1597,14 +2425,23 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         self._offline_stack = b""
         self._offline_chunks = ""
         self._offline_bad_px = json.dumps(bad)
-        self._offline_bslz4 = json.dumps({"base": out.name + "/", "chunks": index, "nFrames": n_frames, "srcDtype": "uint8"})
+        self._offline_bslz4 = json.dumps(
+            {
+                "base": out.name + "/",
+                "chunks": index,
+                "nFrames": n_frames,
+                "srcDtype": "uint8",
+            }
+        )
         if getattr(self, "_verbose", True) and len(bad):
             print(f"  offline auto-filter: {len(bad)} hot/dead px masked")
         if getattr(self, "_verbose", True):
             det_size = self.det_rows * self.det_cols
             ratio = (n_frames * det_size * 2) / max(1, total)
-            print(f"  offline bslz4 (chunked): {data_url}/ {total/1e6:.0f} MB "
-                  f"({ratio:.1f}x vs uint16), {n_blocks} blocks/frame, GPU-decoded to uint8")
+            print(
+                f"  offline bslz4 (chunked): {data_url}/ {total / 1e6:.0f} MB "
+                f"({ratio:.1f}x vs uint16), {n_blocks} blocks/frame, GPU-decoded to uint8"
+            )
 
     def _pack_offline_bslz4_volumes(self, data_url: str) -> None:
         """Pack a 5D stack as lazy browser WebGPU volumes.
@@ -1614,7 +2451,6 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         path directly instead of requiring callers to mutate ``self._data`` and
         call the single-volume private packer repeatedly.
         """
-        import json, pathlib
         out = pathlib.Path(data_url)
         out.mkdir(parents=True, exist_ok=True)
         volumes = []
@@ -1629,12 +2465,16 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             # data_url dir name: "widget-data/vol0/", not "vol0/". Without the parent
             # prefix the browser fetches vol0/chunk_*.bin (404) -> decode returns null
             # -> the offline compute backend bails -> presets and dataset-flip go dead.
-            volumes.append({"base": f"{out.name}/{vdir.name}/", "chunks": index, "badPx": bad})
+            volumes.append(
+                {"base": f"{out.name}/{vdir.name}/", "chunks": index, "badPx": bad}
+            )
             total += nbytes
             n_blocks = blocks
             if getattr(self, "_verbose", True):
-                print(f"  offline bslz4 volume {idx}: {nbytes/1e6:.0f} MB, "
-                      f"{len(index)} chunks, {len(bad)} hot/dead px masked")
+                print(
+                    f"  offline bslz4 volume {idx}: {nbytes / 1e6:.0f} MB, "
+                    f"{len(index)} chunks, {len(bad)} hot/dead px masked"
+                )
         self.offline = True
         self._offline_url = ""
         self._offline_stack = b""
@@ -1645,9 +2485,11 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             n_frames = int(self.n_frames) * self.shape_rows * self.shape_cols
             det_size = self.det_rows * self.det_cols
             ratio = (n_frames * det_size * 2) / max(1, total)
-            print(f"  offline bslz4 volumes: {data_url}/ {total/1e6:.0f} MB "
-                  f"({ratio:.1f}x vs uint16), {n_blocks} blocks/frame, "
-                  "GPU-decoded to uint8")
+            print(
+                f"  offline bslz4 volumes: {data_url}/ {total / 1e6:.0f} MB "
+                f"({ratio:.1f}x vs uint16), {n_blocks} blocks/frame, "
+                "GPU-decoded to uint8"
+            )
 
     def __repr__(self) -> str:
         shape = (
@@ -1655,7 +2497,11 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             if self.n_frames > 1
             else f"({self.shape_rows}, {self.shape_cols}, {self.det_rows}, {self.det_cols})"
         )
-        frame_info = f", {self.frame_dim_label.lower()}={self.frame_idx}" if self.n_frames > 1 else ""
+        frame_info = (
+            f", {self.frame_dim_label.lower()}={self.frame_idx}"
+            if self.n_frames > 1
+            else ""
+        )
         title_info = f", title='{self.title}'" if self.title else ""
         return (
             f"Show4DSTEM(shape={shape}, "
@@ -1685,11 +2531,15 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         """
         state = super().get_state(key=key, drop_defaults=drop_defaults)
         if key is None and not getattr(self, "_save_state", False):
-            if not self._static_fallback_jpeg:
+            if not self._static_fallback_enabled():
+                state.pop("_static_fallback_jpeg", None)
+                state.pop("_static_fallback_mime", None)
+            elif not self._static_fallback_jpeg:
                 png = self._static_png_b64()
                 if png:
                     self._store_static_fallback_preview(png)
                     state["_static_fallback_jpeg"] = self._static_fallback_jpeg
+                    state["_static_fallback_mime"] = self._static_fallback_mime
             for heavy_key in self._UNSAVED_HEAVY_KEYS:
                 state.pop(heavy_key, None)
         return state
@@ -1718,7 +2568,9 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             raise ValueError(f"Unsupported static panel {panel_key!r}")
         panel = Image.fromarray(rgb, mode="RGB")
         panel = self._resize_static_panel(panel, panel_px)
-        return self._decorate_panel(panel, panel_key, include_overlays=True, include_scalebar=True)
+        return self._decorate_panel(
+            panel, panel_key, include_overlays=True, include_scalebar=True
+        )
 
     def _static_png_b64(self, *, max_px: int = 384, dpi: int = 160) -> str | None:
         """Base64 PNG of the current virtual-image + diffraction view.
@@ -1769,7 +2621,14 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         """Store a compact saved-notebook preview inside lightweight state."""
         if getattr(self, "_save_state", False):
             return
-        self._static_fallback_jpeg = self._png_to_jpeg_b64(png_b64)
+        encoded = self._encode_static_fallback_b64(png_b64)
+        if encoded is None:
+            self._static_fallback_jpeg = ""
+            self._static_fallback_mime = ""
+            return
+        mime, image_b64 = encoded
+        self._static_fallback_jpeg = image_b64
+        self._static_fallback_mime = mime
 
     def state_dict(self):
         return {
@@ -1834,6 +2693,8 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             "compare_grid_width_px": self.compare_grid_width_px,
             "compare_panel_gap_px": self.compare_panel_gap_px,
             "compare_max_panels": self.compare_max_panels,
+            "compare_group_mode": self.compare_group_mode,
+            "compare_page_idx": self.compare_page_idx,
             "compare_dp_mode": self.compare_dp_mode,
             "compare_panel_order": list(self.compare_panel_order),
             "compare_hidden_panels": list(self.compare_hidden_panels),
@@ -1869,6 +2730,8 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
                     val = self._normalise_compare_layout(val)
                 elif key == "compare_dp_mode":
                     val = self._normalise_compare_dp_mode(val)
+                elif key == "compare_group_mode":
+                    val = self._normalise_compare_group_mode(val)
                 setattr(self, key, val)
         if pending_frame_idx is not None:
             self.frame_idx = int(max(0, min(int(pending_frame_idx), self.n_frames - 1)))
@@ -1913,6 +2776,10 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         >>> w.free()          # release the full stack from VRAM
         >>> del result        # free the source array
         """
+        self.stop_folder_watch()
+        self.stop_dataset_preload(wait=True)
+        self.stop_compare_cache_warm(wait=True)
+
         import gc
 
         data = self._data
@@ -1987,7 +2854,9 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         name = self.title if self.title else "Show4DSTEM"
         lines = [name, "═" * 32]
         if self.n_frames > 1:
-            parts = [f"{self.n_frames} ({self.frame_dim_label}), current: {self.frame_idx}"]
+            parts = [
+                f"{self.n_frames} ({self.frame_dim_label}), current: {self.frame_idx}"
+            ]
             parts.append(f"{self.frame_fps} fps")
             if self.frame_loop:
                 parts.append("loop")
@@ -2000,15 +2869,27 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
                 if len(self._frame_labels) <= 4:
                     lines.append(f"Labels:   {self._frame_labels}")
                 else:
-                    lines.append(f"Labels:   {self._frame_labels[:3]} ... ({len(self._frame_labels)} total)")
-        lines.append(f"Scan:     {self.shape_rows}×{self.shape_cols} ({self.pixel_size:.2f} {self.pixel_unit}/px)")
-        lines.append(f"Detector: {self.det_rows}×{self.det_cols} ({self.k_pixel_size:.4f} {self.k_pixel_unit}/px)")
+                    lines.append(
+                        f"Labels:   {self._frame_labels[:3]} ... ({len(self._frame_labels)} total)"
+                    )
+        lines.append(
+            f"Scan:     {self.shape_rows}×{self.shape_cols} ({self.pixel_size:.2f} {self.pixel_unit}/px)"
+        )
+        lines.append(
+            f"Detector: {self.det_rows}×{self.det_cols} ({self.k_pixel_size:.4f} {self.k_pixel_unit}/px)"
+        )
         lines.append(f"Position: ({self.pos_row}, {self.pos_col})")
-        lines.append(f"Center:   ({self.center_row:.1f}, {self.center_col:.1f})  BF r={self.bf_radius:.1f} px")
+        lines.append(
+            f"Center:   ({self.center_row:.1f}, {self.center_col:.1f})  BF r={self.bf_radius:.1f} px"
+        )
         if self.roi_active:
-            lines.append(f"ROI:      {self.roi_mode} at ({self.roi_center_row:.1f}, {self.roi_center_col:.1f}) r={self.roi_radius:.1f}")
+            lines.append(
+                f"ROI:      {self.roi_mode} at ({self.roi_center_row:.1f}, {self.roi_center_col:.1f}) r={self.roi_radius:.1f}"
+            )
         if self.vi_roi_mode != "off":
-            lines.append(f"VI ROI:   {self.vi_roi_mode} at ({self.vi_roi_center_row:.1f}, {self.vi_roi_center_col:.1f}) r={self.vi_roi_radius:.1f}")
+            lines.append(
+                f"VI ROI:   {self.vi_roi_mode} at ({self.vi_roi_center_row:.1f}, {self.vi_roi_center_col:.1f}) r={self.vi_roi_radius:.1f}"
+            )
         dp_contrast = f"{self.dp_vmin_pct:.1f}-{self.dp_vmax_pct:.1f}%"
         if self.dp_vmin is not None and self.dp_vmax is not None:
             dp_contrast += f", dp_vmin={self.dp_vmin:.4g}, dp_vmax={self.dp_vmax:.4g}"
@@ -2022,13 +2903,17 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             f"VI view:  {self.vi_colormap}, {self.vi_scale_mode}, {vi_contrast}"
         )
         if self.show_fft:
-            fft_parts = [f"{self.fft_colormap}, {self.fft_scale_mode}, {self.fft_vmin_pct:.1f}-{self.fft_vmax_pct:.1f}%, auto={self.fft_auto}"]
+            fft_parts = [
+                f"{self.fft_colormap}, {self.fft_scale_mode}, {self.fft_vmin_pct:.1f}-{self.fft_vmax_pct:.1f}%, auto={self.fft_auto}"
+            ]
             if not self.fft_window:
                 fft_parts.append("no window")
             lines.append(f"FFT view: {', '.join(fft_parts)}")
         if self.profile_line and len(self.profile_line) == 2:
             p0, p1 = self.profile_line[0], self.profile_line[1]
-            lines.append(f"Profile:  ({p0['row']:.0f}, {p0['col']:.0f}) -> ({p1['row']:.0f}, {p1['col']:.0f}) width={self.profile_width}")
+            lines.append(
+                f"Profile:  ({p0['row']:.0f}, {p0['col']:.0f}) -> ({p1['row']:.0f}, {p1['col']:.0f}) width={self.profile_width}"
+            )
         print("\n".join(lines))
 
     # =========================================================================
@@ -2088,6 +2973,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         fd = self._frame_data
         if getattr(self, "_compute_for", None) is not fd:
             from quantem.widget.kernels.compute.backends import compute_backend
+
             self._compute_backend = compute_backend(fd)
             self._compute_for = fd
         return self._compute_backend
@@ -2161,7 +3047,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
     # =========================================================================
     # Path Animation Methods
     # =========================================================================
-    
+
     def set_path(
         self,
         points: list[tuple[int, int]],
@@ -2201,30 +3087,30 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         if autoplay and self.path_length > 0:
             self.path_playing = True
         return self
-    
+
     def play(self) -> Self:
         """Start playing the path animation."""
         if self.path_length > 0:
             self.path_playing = True
         return self
-    
+
     def pause(self) -> Self:
         """Pause the path animation."""
         self.path_playing = False
         return self
-    
+
     def stop(self) -> Self:
         """Stop and reset path animation to beginning."""
         self.path_playing = False
         self.path_index = 0
         return self
-    
+
     def goto(self, index: int) -> Self:
         """Jump to a specific index in the path."""
         if 0 <= index < self.path_length:
             self.path_index = index
         return self
-    
+
     def _on_path_index_change(self, change):
         """Called when path_index changes (from frontend timer)."""
         idx = change["new"]
@@ -2243,12 +3129,21 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
 
     def _on_compare_config_change(self, change=None) -> None:
         """Refresh compare-grid payload after relevant config/readiness changes."""
+        if getattr(self, "_suppress_folder_append_refresh", False):
+            return
         if change and change.get("name") == "view_mode":
             self.view_mode = self._normalise_view_mode(change.get("new", "single"))
+        if change and change.get("name") == "compare_group_mode":
+            self.compare_group_mode = self._normalise_compare_group_mode(
+                change.get("new", "paged")
+            )
         if change and change.get("name") == "compare_hidden_panels":
-            self._handle_compare_hidden_change(change.get("old", []), change.get("new", []))
+            self._handle_compare_hidden_change(
+                change.get("old", []), change.get("new", [])
+            )
         self._refresh_compare_virtual_images()
         if self.view_mode == "multiple":
+            self._ensure_current_compare_frame_visible()
             self._update_frame()
         else:
             self._compute_virtual_image_from_roi()
@@ -2257,7 +3152,9 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
     def _on_compare_dp_mode_change(self, change=None) -> None:
         """Normalize and apply compare DP source mode changes."""
         if change:
-            self.compare_dp_mode = self._normalise_compare_dp_mode(change.get("new", "average"))
+            self.compare_dp_mode = self._normalise_compare_dp_mode(
+                change.get("new", "average")
+            )
         if self.view_mode == "multiple":
             self._update_frame()
 
@@ -2274,6 +3171,8 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         self._cached_abf_virtual = None
         self._cached_adf_virtual = None
         self._cached_haadf_virtual = None
+        if self.view_mode == "multiple":
+            self._sync_compare_page_to_frame_idx()
         # Recompute virtual image only when it is visible. In multiple mode the
         # visible virtual-image surface is the compare grid; switching back to
         # single recomputes the per-frame virtual image in _on_compare_config_change.
@@ -2326,29 +3225,29 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             for c in cols:
                 points.append((r, c))
         return self.set_path(points=points, interval_ms=interval_ms, loop=loop)
-    
+
     # =========================================================================
     # ROI Mode Methods
     # =========================================================================
-    
+
     def roi_circle(self, radius: float | None = None) -> Self:
         """
         Switch to circle ROI mode for virtual imaging.
-        
+
         In circle mode, the virtual image integrates over a circular region
         centered at the current ROI position (like a virtual bright field detector).
-        
+
         Parameters
         ----------
         radius : float, optional
             Radius of the circle in pixels. If not provided, uses current value
             or defaults to half the BF radius.
-            
+
         Returns
         -------
         Show4DSTEM
             Self for method chaining.
-            
+
         Examples
         --------
         >>> widget.roi_circle(20)  # 20px radius circle
@@ -2358,14 +3257,14 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         if radius is not None:
             self.roi_radius = float(radius)
         return self
-    
+
     def roi_point(self) -> Self:
         """
         Switch to point ROI mode (single-pixel indexing).
-        
+
         In point mode, the virtual image shows intensity at the exact ROI position.
         This is the default mode.
-        
+
         Returns
         -------
         Show4DSTEM
@@ -2408,19 +3307,19 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
     ) -> Self:
         """
         Set ROI mode to annular (donut-shaped) for ADF/HAADF imaging.
-        
+
         Parameters
         ----------
         inner_radius : float, optional
             Inner radius in pixels. If not provided, uses current roi_radius_inner.
         outer_radius : float, optional
             Outer radius in pixels. If not provided, uses current roi_radius.
-            
+
         Returns
         -------
         Show4DSTEM
             Self for method chaining.
-            
+
         Examples
         --------
         >>> widget.roi_annular(20, 50)  # ADF: inner=20px, outer=50px
@@ -2433,24 +3332,22 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             self.roi_radius = float(outer_radius)
         return self
 
-    def roi_rect(
-        self, width: float | None = None, height: float | None = None
-    ) -> Self:
+    def roi_rect(self, width: float | None = None, height: float | None = None) -> Self:
         """
         Set ROI mode to rectangular.
-        
+
         Parameters
         ----------
         width : float, optional
             Width in pixels. If not provided, uses current roi_width.
         height : float, optional
             Height in pixels. If not provided, uses current roi_height.
-            
+
         Returns
         -------
         Show4DSTEM
             Self for method chaining.
-            
+
         Examples
         --------
         >>> widget.roi_rect(30, 20)  # 30px wide, 20px tall
@@ -2636,14 +3533,20 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         data_min = float(scaled.min()) if scaled.size else 0.0
         data_max = float(scaled.max()) if scaled.size else 0.0
         if self.dp_vmin is not None and self.dp_vmax is not None:
-            vmin = float(self._apply_scale_mode(
-                np.array([max(self.dp_vmin, 0)], dtype=np.float32), scale_mode
-            )[0])
-            vmax = float(self._apply_scale_mode(
-                np.array([max(self.dp_vmax, 0)], dtype=np.float32), scale_mode
-            )[0])
+            vmin = float(
+                self._apply_scale_mode(
+                    np.array([max(self.dp_vmin, 0)], dtype=np.float32), scale_mode
+                )[0]
+            )
+            vmax = float(
+                self._apply_scale_mode(
+                    np.array([max(self.dp_vmax, 0)], dtype=np.float32), scale_mode
+                )[0]
+            )
         else:
-            vmin, vmax = self._slider_range(data_min, data_max, self.dp_vmin_pct, self.dp_vmax_pct)
+            vmin, vmax = self._slider_range(
+                data_min, data_max, self.dp_vmin_pct, self.dp_vmax_pct
+            )
         rgb = self._render_colormap_rgb(scaled, self.dp_colormap, vmin, vmax)
         metadata = {
             "source": source,
@@ -2662,14 +3565,22 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         data_min = float(scaled.min()) if scaled.size else 0.0
         data_max = float(scaled.max()) if scaled.size else 0.0
         if self.vi_vmin is not None and self.vi_vmax is not None:
-            vmin = float(self._apply_scale_mode(
-                np.array([max(self.vi_vmin, 0)], dtype=np.float32), self.vi_scale_mode
-            )[0])
-            vmax = float(self._apply_scale_mode(
-                np.array([max(self.vi_vmax, 0)], dtype=np.float32), self.vi_scale_mode
-            )[0])
+            vmin = float(
+                self._apply_scale_mode(
+                    np.array([max(self.vi_vmin, 0)], dtype=np.float32),
+                    self.vi_scale_mode,
+                )[0]
+            )
+            vmax = float(
+                self._apply_scale_mode(
+                    np.array([max(self.vi_vmax, 0)], dtype=np.float32),
+                    self.vi_scale_mode,
+                )[0]
+            )
         else:
-            vmin, vmax = self._slider_range(data_min, data_max, self.vi_vmin_pct, self.vi_vmax_pct)
+            vmin, vmax = self._slider_range(
+                data_min, data_max, self.vi_vmin_pct, self.vi_vmax_pct
+            )
         rgb = self._render_colormap_rgb(scaled, self.vi_colormap, vmin, vmax)
         metadata = {
             "colormap": self.vi_colormap,
@@ -2691,7 +3602,9 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         else:
             display_min = float(scaled.min()) if scaled.size else 0.0
             display_max = float(scaled.max()) if scaled.size else 0.0
-        vmin, vmax = self._slider_range(display_min, display_max, self.fft_vmin_pct, self.fft_vmax_pct)
+        vmin, vmax = self._slider_range(
+            display_min, display_max, self.fft_vmin_pct, self.fft_vmax_pct
+        )
         rgb = self._render_colormap_rgb(scaled, self.fft_colormap, vmin, vmax)
         metadata = {
             "colormap": self.fft_colormap,
@@ -2710,7 +3623,9 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
     def _validate_export_view(self, view: str | None) -> str:
         view_key = (view or "all").strip().lower()
         if view_key not in self._EXPORT_VIEWS:
-            raise ValueError(f"Unsupported view '{view}'. Supported: {', '.join(self._EXPORT_VIEWS)}")
+            raise ValueError(
+                f"Unsupported view '{view}'. Supported: {', '.join(self._EXPORT_VIEWS)}"
+            )
         return view_key
 
     def _validate_frame_idx(self, frame_idx: int | None) -> int:
@@ -2742,7 +3657,9 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
     def _resolve_export_format(self, path: pathlib.Path, fmt: str | None) -> str:
         resolved = (fmt or path.suffix.lstrip(".") or "png").strip().lower()
         if resolved not in self._EXPORT_FORMATS:
-            raise ValueError(f"Unsupported format '{resolved}'. Supported: {', '.join(self._EXPORT_FORMATS)}")
+            raise ValueError(
+                f"Unsupported format '{resolved}'. Supported: {', '.join(self._EXPORT_FORMATS)}"
+            )
         return resolved
 
     @staticmethod
@@ -2778,7 +3695,9 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         return f"{nice:.1f} px"
 
     @staticmethod
-    def _draw_crosshair(draw, x: float, y: float, size: float, color, width: int) -> None:
+    def _draw_crosshair(
+        draw, x: float, y: float, size: float, color, width: int
+    ) -> None:
         draw.line([(x - size, y), (x + size, y)], fill=color, width=width)
         draw.line([(x, y - size), (x, y + size)], fill=color, width=width)
 
@@ -2840,15 +3759,30 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             if self.roi_mode == "circle":
                 rx = float(self.roi_radius) * scale_x
                 ry = float(self.roi_radius) * scale_y
-                draw.ellipse([(cx - rx, cy - ry), (cx + rx, cy + ry)], outline=stroke, fill=fill, width=2)
+                draw.ellipse(
+                    [(cx - rx, cy - ry), (cx + rx, cy + ry)],
+                    outline=stroke,
+                    fill=fill,
+                    width=2,
+                )
             elif self.roi_mode == "square":
                 rx = float(self.roi_radius) * scale_x
                 ry = float(self.roi_radius) * scale_y
-                draw.rectangle([(cx - rx, cy - ry), (cx + rx, cy + ry)], outline=stroke, fill=fill, width=2)
+                draw.rectangle(
+                    [(cx - rx, cy - ry), (cx + rx, cy + ry)],
+                    outline=stroke,
+                    fill=fill,
+                    width=2,
+                )
             elif self.roi_mode == "rect":
                 rx = (float(self.roi_width) / 2.0) * scale_x
                 ry = (float(self.roi_height) / 2.0) * scale_y
-                draw.rectangle([(cx - rx, cy - ry), (cx + rx, cy + ry)], outline=stroke, fill=fill, width=2)
+                draw.rectangle(
+                    [(cx - rx, cy - ry), (cx + rx, cy + ry)],
+                    outline=stroke,
+                    fill=fill,
+                    width=2,
+                )
             elif self.roi_mode == "annular":
                 outer_rx = float(self.roi_radius) * scale_x
                 outer_ry = float(self.roi_radius) * scale_y
@@ -2868,7 +3802,14 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
                 )
 
         marker_color = (0, 220, 0, 255) if self.roi_active else (255, 100, 100, 255)
-        self._draw_crosshair(draw, cx, cy, size=max(6, int(min(width, height) * 0.03)), color=marker_color, width=2)
+        self._draw_crosshair(
+            draw,
+            cx,
+            cy,
+            size=max(6, int(min(width, height) * 0.03)),
+            color=marker_color,
+            width=2,
+        )
 
         if len(self.profile_line) == 2:
             p0, p1 = self.profile_line[0], self.profile_line[1]
@@ -2876,7 +3817,11 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             y0 = float(p0["row"]) * scale_y
             x1 = float(p1["col"]) * scale_x
             y1 = float(p1["row"]) * scale_y
-            draw.line([(x0, y0), (x1, y1)], fill=(0, 200, 255, 240), width=max(1, int(self.profile_width)))
+            draw.line(
+                [(x0, y0), (x1, y1)],
+                fill=(0, 200, 255, 240),
+                width=max(1, int(self.profile_width)),
+            )
             r = 3
             draw.ellipse([(x0 - r, y0 - r), (x0 + r, y0 + r)], fill=(0, 200, 255, 255))
             draw.ellipse([(x1 - r, y1 - r), (x1 + r, y1 + r)], fill=(0, 200, 255, 255))
@@ -2910,15 +3855,30 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         if self.vi_roi_mode == "circle":
             rx = float(self.vi_roi_radius) * scale_x
             ry = float(self.vi_roi_radius) * scale_y
-            draw.ellipse([(cx - rx, cy - ry), (cx + rx, cy + ry)], outline=stroke, fill=fill, width=2)
+            draw.ellipse(
+                [(cx - rx, cy - ry), (cx + rx, cy + ry)],
+                outline=stroke,
+                fill=fill,
+                width=2,
+            )
         elif self.vi_roi_mode == "square":
             rx = float(self.vi_roi_radius) * scale_x
             ry = float(self.vi_roi_radius) * scale_y
-            draw.rectangle([(cx - rx, cy - ry), (cx + rx, cy + ry)], outline=stroke, fill=fill, width=2)
+            draw.rectangle(
+                [(cx - rx, cy - ry), (cx + rx, cy + ry)],
+                outline=stroke,
+                fill=fill,
+                width=2,
+            )
         elif self.vi_roi_mode == "rect":
             rx = (float(self.vi_roi_width) / 2.0) * scale_x
             ry = (float(self.vi_roi_height) / 2.0) * scale_y
-            draw.rectangle([(cx - rx, cy - ry), (cx + rx, cy + ry)], outline=stroke, fill=fill, width=2)
+            draw.rectangle(
+                [(cx - rx, cy - ry), (cx + rx, cy + ry)],
+                outline=stroke,
+                fill=fill,
+                width=2,
+            )
 
         self._draw_crosshair(
             draw,
@@ -2965,10 +3925,14 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         elif panel_key == "fft":
             rgb, render_meta = self._render_fft_rgb()
         else:
-            raise ValueError(f"Unsupported panel {panel_key!r}. Valid options: 'diffraction', 'virtual', 'fft', 'all'.")
+            raise ValueError(
+                f"Unsupported panel {panel_key!r}. Valid options: 'diffraction', 'virtual', 'fft', 'all'."
+            )
 
         panel = Image.fromarray(rgb, mode="RGB")
-        panel = self._decorate_panel(panel, panel_key, include_overlays, include_scalebar)
+        panel = self._decorate_panel(
+            panel, panel_key, include_overlays, include_scalebar
+        )
         return panel, render_meta
 
     def _compose_horizontal(self, panels: list[Any]):
@@ -3244,23 +4208,30 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         self._refresh_compare_virtual_images()
         return self
 
-
     def _normalize_frame(self, frame: np.ndarray) -> np.ndarray:
         mode = self.dp_scale_mode
         scaled = self._apply_scale_mode(frame, mode)
         if self.dp_vmin is not None and self.dp_vmax is not None:
-            fmin = float(self._apply_scale_mode(
-                np.array([max(self.dp_vmin, 0)], dtype=np.float32), mode
-            )[0])
-            fmax = float(self._apply_scale_mode(
-                np.array([max(self.dp_vmax, 0)], dtype=np.float32), mode
-            )[0])
+            fmin = float(
+                self._apply_scale_mode(
+                    np.array([max(self.dp_vmin, 0)], dtype=np.float32), mode
+                )[0]
+            )
+            fmax = float(
+                self._apply_scale_mode(
+                    np.array([max(self.dp_vmax, 0)], dtype=np.float32), mode
+                )[0]
+            )
         else:
             fmin = float(scaled.min())
             fmax = float(scaled.max())
-            fmin, fmax = self._slider_range(fmin, fmax, self.dp_vmin_pct, self.dp_vmax_pct)
+            fmin, fmax = self._slider_range(
+                fmin, fmax, self.dp_vmin_pct, self.dp_vmax_pct
+            )
         if fmax > fmin:
-            return np.clip((scaled - fmin) / (fmax - fmin) * 255, 0, 255).astype(np.uint8)
+            return np.clip((scaled - fmin) / (fmax - fmin) * 255, 0, 255).astype(
+                np.uint8
+            )
         return np.zeros(frame.shape, dtype=np.uint8)
 
     def _on_gif_export(self, change=None):
@@ -3314,7 +4285,9 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             "n_frames": int(len(pil_frames)),
             "duration_ms": int(duration_ms),
             "path_loop": bool(self.path_loop),
-            "path_points": [{"row": int(row), "col": int(col)} for row, col in self._path_points],
+            "path_points": [
+                {"row": int(row), "col": int(col)} for row, col in self._path_points
+            ],
             "frame_idx": int(self.frame_idx),
             "n_frames_total": int(self.n_frames),
             "scan_shape": {"rows": int(self.shape_rows), "cols": int(self.shape_cols)},
@@ -3384,28 +4357,160 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             return data[idx]
         return data[self.pos_row, self.pos_col]
 
-    def _average_compare_diffraction_frame(self):
-        """Average ready visible compare-panel diffraction patterns."""
-        acc = None
-        count = 0
-        target_device = None
-        for idx in self._compare_ready_indices():
-            frame = self._diffraction_frame_for_index(idx)
-            if not isinstance(frame, torch.Tensor):
-                frame = torch.as_tensor(np.asarray(frame))
-            if target_device is None:
-                target_device = frame.device
-            elif frame.device != target_device:
-                frame = frame.to(target_device, non_blocking=True)
+    def _compare_diffraction_cache_key(
+        self, frame_idx: int
+    ) -> tuple[int, int, int, int, int]:
+        return (
+            int(frame_idx),
+            int(self.pos_row),
+            int(self.pos_col),
+            int(self.det_rows),
+            int(self.det_cols),
+        )
+
+    def _store_compare_diffraction_cache(self, frame_idx: int, frame) -> None:
+        """Cache one small DP for average compare mode without retaining raw 4D data."""
+        if self._compare_cache_pages <= 0:
+            return
+        key = self._compare_diffraction_cache_key(frame_idx)
+        try:
+            if isinstance(frame, torch.Tensor):
+                if frame.ndim == 4:
+                    dp = frame[int(self.pos_row), int(self.pos_col)]
+                elif frame.ndim == 3:
+                    flat_idx = int(self.pos_row) * int(self.shape_cols) + int(
+                        self.pos_col
+                    )
+                    dp = frame[flat_idx]
+                else:
+                    dp = frame
+                if dp.dtype != torch.float32:
+                    dp = dp.float()
+                arr = np.ascontiguousarray(dp.detach().cpu().numpy(), dtype=np.float32)
+            else:
+                arr0 = np.asarray(frame)
+                if arr0.ndim == 4:
+                    arr0 = arr0[int(self.pos_row), int(self.pos_col)]
+                elif arr0.ndim == 3:
+                    flat_idx = int(self.pos_row) * int(self.shape_cols) + int(
+                        self.pos_col
+                    )
+                    arr0 = arr0[flat_idx]
+                arr = np.ascontiguousarray(arr0, dtype=np.float32)
+        except Exception:
+            return
+        if arr.shape != (int(self.det_rows), int(self.det_cols)):
+            return
+        existing = self._compare_diffraction_cache.pop(key, None)
+        if existing is not None:
+            self._compare_diffraction_cache_bytes -= existing[1]
+        payload = arr.tobytes()
+        self._compare_diffraction_cache[key] = (payload, len(payload))
+        self._compare_diffraction_cache_bytes += len(payload)
+        self._trim_compare_diffraction_cache()
+
+    def _get_cached_compare_diffraction_frame(
+        self, frame_idx: int
+    ) -> np.ndarray | None:
+        key = self._compare_diffraction_cache_key(frame_idx)
+        cached = self._compare_diffraction_cache.get(key)
+        if cached is None:
+            return None
+        self._compare_diffraction_cache.move_to_end(key)
+        payload, _ = cached
+        return np.frombuffer(payload, dtype=np.float32).reshape(
+            self.det_rows, self.det_cols
+        )
+
+    def _trim_compare_diffraction_cache(self) -> None:
+        max_entries = max(0, int(self._compare_cache_pages)) * max(
+            1, int(self.compare_max_panels)
+        )
+        while (
+            self._compare_diffraction_cache
+            and len(self._compare_diffraction_cache) > max_entries
+        ):
+            _, old = self._compare_diffraction_cache.popitem(last=False)
+            self._compare_diffraction_cache_bytes -= old[1]
+
+    def _reclaim_compare_allocation_failure(self) -> None:
+        """Release unreferenced GPU pools after a failed compare DP load."""
+        data = getattr(self, "_data", None)
+        reclaim = getattr(data, "_reclaim", None)
+        known_devices = getattr(data, "_known_reclaim_devices", None)
+        if callable(reclaim) and callable(known_devices):
+            try:
+                reclaim(known_devices())
+            except Exception:
+                pass
+        gc.collect()
+
+    def _diffraction_frame_as_numpy(self, frame) -> np.ndarray:
+        """Return one DP as contiguous float32 CPU data."""
+        if isinstance(frame, torch.Tensor):
+            if frame.ndim == 4:
+                frame = frame[int(self.pos_row), int(self.pos_col)]
+            elif frame.ndim == 3:
+                flat_idx = int(self.pos_row) * int(self.shape_cols) + int(self.pos_col)
+                frame = frame[flat_idx]
             if frame.dtype != torch.float32:
                 frame = frame.float()
-            acc = frame.clone() if acc is None else acc.add_(frame)
+            arr = frame.detach().cpu().numpy()
+        else:
+            arr = np.asarray(frame)
+            if arr.ndim == 4:
+                arr = arr[int(self.pos_row), int(self.pos_col)]
+            elif arr.ndim == 3:
+                flat_idx = int(self.pos_row) * int(self.shape_cols) + int(self.pos_col)
+                arr = arr[flat_idx]
+        return np.ascontiguousarray(arr, dtype=np.float32)
+
+    def _average_compare_diffraction_frame(self):
+        """Average ready visible compare-panel diffraction patterns."""
+        indices = self._compare_current_page_indices()
+        acc_np: np.ndarray | None = None
+        count = 0
+        for idx in indices:
+            frame = self._get_cached_compare_diffraction_frame(idx)
+            if frame is None:
+                try:
+                    frame = self._diffraction_frame_for_index(idx)
+                except BaseException as exc:
+                    if not _is_recoverable_allocation_error(exc):
+                        raise
+                    self._reclaim_compare_allocation_failure()
+                    self._set_gpu_memory_warning(
+                        action="average diffraction patterns for the visible panels",
+                        requested=len(indices),
+                        shown=count,
+                    )
+                    break
+                self._store_compare_diffraction_cache(idx, frame)
+            frame_np = self._diffraction_frame_as_numpy(frame)
+            if frame_np.shape != (int(self.det_rows), int(self.det_cols)):
+                continue
+            acc_np = frame_np.copy() if acc_np is None else acc_np + frame_np
             count += 1
-        if acc is None:
-            return self._diffraction_frame_for_index(self.frame_idx)
+        if acc_np is None:
+            try:
+                frame = self._diffraction_frame_for_index(self.frame_idx)
+                self._store_compare_diffraction_cache(int(self.frame_idx), frame)
+                return self._diffraction_frame_as_numpy(frame)
+            except BaseException as exc:
+                if not _is_recoverable_allocation_error(exc):
+                    raise
+                self._reclaim_compare_allocation_failure()
+                self._set_gpu_memory_warning(
+                    action="load a diffraction pattern for the selected panel",
+                    requested=len(indices) if indices else 1,
+                    shown=0,
+                )
+                return np.zeros(
+                    (int(self.det_rows), int(self.det_cols)), dtype=np.float32
+                )
         if count > 1:
-            acc.div_(count)
-        return acc
+            acc_np /= float(count)
+        return acc_np
 
     def _on_roi_change(self, change=None):
         """Recompute virtual image when individual ROI params change.
@@ -3433,10 +4538,14 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         if change and "new" in change:
             row, col = change["new"]
             # Sync to individual traits (without triggering _on_roi_change observers)
-            self.unobserve(self._on_roi_change, names=["roi_center_col", "roi_center_row"])
+            self.unobserve(
+                self._on_roi_change, names=["roi_center_col", "roi_center_row"]
+            )
             self.roi_center_row = row
             self.roi_center_col = col
-            self.observe(self._on_roi_change, names=["roi_center_col", "roi_center_row"])
+            self.observe(
+                self._on_roi_change, names=["roi_center_col", "roi_center_row"]
+            )
         if self.view_mode != "multiple":
             self._compute_virtual_image_from_roi()
         self._refresh_compare_virtual_images()
@@ -3445,10 +4554,14 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         """Apply compound (row, col) update atomically (avoids split-trait race)."""
         if change and "new" in change:
             row, col = change["new"]
-            self.unobserve(self._on_vi_roi_change, names=["vi_roi_center_row", "vi_roi_center_col"])
+            self.unobserve(
+                self._on_vi_roi_change, names=["vi_roi_center_row", "vi_roi_center_col"]
+            )
             self.vi_roi_center_row = float(row)
             self.vi_roi_center_col = float(col)
-            self.observe(self._on_vi_roi_change, names=["vi_roi_center_row", "vi_roi_center_col"])
+            self.observe(
+                self._on_vi_roi_change, names=["vi_roi_center_row", "vi_roi_center_col"]
+            )
         if self.vi_roi_mode == "off":
             self.vi_roi_dp_bytes = b""
             return
@@ -3472,14 +4585,20 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         if self._data is None:
             return
         if self.vi_roi_mode == "circle":
-            mask = (self._scan_row_coords - self.vi_roi_center_row) ** 2 + (self._scan_col_coords - self.vi_roi_center_col) ** 2 <= self.vi_roi_radius ** 2
+            mask = (self._scan_row_coords - self.vi_roi_center_row) ** 2 + (
+                self._scan_col_coords - self.vi_roi_center_col
+            ) ** 2 <= self.vi_roi_radius**2
         elif self.vi_roi_mode == "square":
             half_size = self.vi_roi_radius
-            mask = (torch.abs(self._scan_row_coords - self.vi_roi_center_row) <= half_size) & (torch.abs(self._scan_col_coords - self.vi_roi_center_col) <= half_size)
+            mask = (
+                torch.abs(self._scan_row_coords - self.vi_roi_center_row) <= half_size
+            ) & (torch.abs(self._scan_col_coords - self.vi_roi_center_col) <= half_size)
         elif self.vi_roi_mode == "rect":
             half_w = self.vi_roi_width / 2
             half_h = self.vi_roi_height / 2
-            mask = (torch.abs(self._scan_row_coords - self.vi_roi_center_row) <= half_h) & (torch.abs(self._scan_col_coords - self.vi_roi_center_col) <= half_w)
+            mask = (
+                torch.abs(self._scan_row_coords - self.vi_roi_center_row) <= half_h
+            ) & (torch.abs(self._scan_col_coords - self.vi_roi_center_col) <= half_w)
         else:
             return
 
@@ -3491,31 +4610,39 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         # backend (torch gather on tensor data, Metal mean_frames on chunk-backed
         # frames). One path for every backend; gives consistent results across
         # CUDA / MPS instead of the old torch-vs-subclass index-math divergence.
-        indices = torch.nonzero(mask.reshape(-1), as_tuple=False).flatten().cpu().numpy()
+        indices = (
+            torch.nonzero(mask.reshape(-1), as_tuple=False).flatten().cpu().numpy()
+        )
         dp = self._compute.reduce_frames(indices, self.vi_roi_reduce)
         self.vi_roi_dp_bytes = np.ascontiguousarray(dp, dtype=np.float32).tobytes()
 
     def _create_circular_mask(self, cx: float, cy: float, radius: float):
         """Create circular mask (boolean tensor on device)."""
-        mask = (self._det_col_coords - cx) ** 2 + (self._det_row_coords - cy) ** 2 <= radius ** 2
+        mask = (self._det_col_coords - cx) ** 2 + (
+            self._det_row_coords - cy
+        ) ** 2 <= radius**2
         return mask
 
     def _create_square_mask(self, cx: float, cy: float, half_size: float):
         """Create square mask (boolean tensor on device)."""
-        mask = (torch.abs(self._det_col_coords - cx) <= half_size) & (torch.abs(self._det_row_coords - cy) <= half_size)
+        mask = (torch.abs(self._det_col_coords - cx) <= half_size) & (
+            torch.abs(self._det_row_coords - cy) <= half_size
+        )
         return mask
 
-    def _create_annular_mask(
-        self, cx: float, cy: float, inner: float, outer: float
-    ):
+    def _create_annular_mask(self, cx: float, cy: float, inner: float, outer: float):
         """Create annular (donut) mask (boolean tensor on device)."""
         dist_sq = (self._det_col_coords - cx) ** 2 + (self._det_row_coords - cy) ** 2
-        mask = (dist_sq >= inner ** 2) & (dist_sq <= outer ** 2)
+        mask = (dist_sq >= inner**2) & (dist_sq <= outer**2)
         return mask
 
-    def _create_rect_mask(self, cx: float, cy: float, half_width: float, half_height: float):
+    def _create_rect_mask(
+        self, cx: float, cy: float, half_width: float, half_height: float
+    ):
         """Create rectangular mask (boolean tensor on device)."""
-        mask = (torch.abs(self._det_col_coords - cx) <= half_width) & (torch.abs(self._det_row_coords - cy) <= half_height)
+        mask = (torch.abs(self._det_col_coords - cx) <= half_width) & (
+            torch.abs(self._det_row_coords - cy) <= half_height
+        )
         return mask
 
     def _current_detector_mask(self):
@@ -3526,9 +4653,13 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         if self.roi_mode == "square" and self.roi_radius > 0:
             return self._create_square_mask(cx, cy, self.roi_radius)
         if self.roi_mode == "annular" and self.roi_radius > 0:
-            return self._create_annular_mask(cx, cy, self.roi_radius_inner, self.roi_radius)
+            return self._create_annular_mask(
+                cx, cy, self.roi_radius_inner, self.roi_radius
+            )
         if self.roi_mode == "rect" and self.roi_width > 0 and self.roi_height > 0:
-            return self._create_rect_mask(cx, cy, self.roi_width / 2, self.roi_height / 2)
+            return self._create_rect_mask(
+                cx, cy, self.roi_width / 2, self.roi_height / 2
+            )
 
         row = int(max(0, min(round(cy), self._det_shape[0] - 1)))
         col = int(max(0, min(round(cx), self._det_shape[1] - 1)))
@@ -3552,7 +4683,10 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
                 return idx
             raise ValueError(f"panel index {idx} out of range [0, {self.n_frames})")
         if isinstance(panel, str):
-            titles = [self._compare_panel_title_for_index(i) for i in range(int(self.n_frames))]
+            titles = [
+                self._compare_panel_title_for_index(i)
+                for i in range(int(self.n_frames))
+            ]
             matches = [i for i, title in enumerate(titles) if title == panel]
             if len(matches) == 1:
                 return matches[0]
@@ -3561,7 +4695,9 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
                     f"panel label {panel!r} is not unique; use a zero-based panel index instead"
                 )
             available = ", ".join(repr(title) for title in titles)
-            raise ValueError(f"unknown panel label {panel!r}; available labels: {available}")
+            raise ValueError(
+                f"unknown panel label {panel!r}; available labels: {available}"
+            )
         raise TypeError(
             f"panel must be an integer index or exact label, got {type(panel).__name__}"
         )
@@ -3601,16 +4737,21 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
     def compare_visible_panels(self) -> list[int]:
         """Frame/dataset indices currently visible in compare mode."""
         hidden = {
-            int(idx) for idx in self.compare_hidden_panels
+            int(idx)
+            for idx in self.compare_hidden_panels
             if not isinstance(idx, bool) and 0 <= int(idx) < int(self.n_frames)
         }
         return [idx for idx in self.compare_ordered_panels if idx not in hidden]
 
-    def set_compare_hidden_panels(self, panels: Sequence[int | str] | int | str) -> Self:
+    def set_compare_hidden_panels(
+        self, panels: Sequence[int | str] | int | str
+    ) -> Self:
         """Replace the hidden compare panel set by index or exact label."""
         hidden = self._normalize_compare_panel_refs(panels, allow_empty=True)
         if len(hidden) >= int(self.n_frames):
-            raise ValueError("set_compare_hidden_panels would hide every panel; leave at least one visible")
+            raise ValueError(
+                "set_compare_hidden_panels would hide every panel; leave at least one visible"
+            )
         self.compare_hidden_panels = sorted(hidden)
         return self
 
@@ -3619,7 +4760,9 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         to_hide = set(self.compare_hidden_panels)
         to_hide.update(self._normalize_compare_panel_refs(list(panels)))
         if len(to_hide) >= int(self.n_frames):
-            raise ValueError("hide_compare_panel would hide every panel; leave at least one visible")
+            raise ValueError(
+                "hide_compare_panel would hide every panel; leave at least one visible"
+            )
         self.compare_hidden_panels = sorted(to_hide)
         return self
 
@@ -3648,6 +4791,10 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         ready_only: bool,
         known_masters: Sequence,
         make_loader,
+        validate_master=None,
+        register_master=None,
+        preload_all_if_fits: bool = True,
+        warm_cache: bool = False,
     ) -> Self:
         """Attach lazy-folder metadata used by poll_folder/watch_folder."""
         self._folder_source = {
@@ -3657,65 +4804,259 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             "scan_shape": scan_shape,
             "ready_only": bool(ready_only),
             "make_loader": make_loader,
+            "validate_master": validate_master,
+            "register_master": register_master,
+            "preload_all_if_fits": bool(preload_all_if_fits),
+            "warm_cache": bool(warm_cache),
         }
         self._folder_known_masters = {
             self._master_key(master) for master in known_masters
         }
         self._folder_watch_stop = None
         self._folder_watch_thread = None
+        self._folder_poll_lock = threading.Lock()
+        self._compare_folder_refresh_pending = False
+        return self
+
+    def preload_all_datasets(self, *, background: bool = True) -> Self:
+        """Keep every unhidden lazy dataset in VRAM when the full set fits.
+
+        The decision uses :meth:`Dataset5dstem.residency_plan`, which knows each
+        frame's shape and dtype without reading it. If memory becomes unavailable
+        after planning, Show4DSTEM retains full-resolution paging and reports the
+        fallback without surfacing a raw backend allocation error.
+        """
+        data = getattr(self, "_data", None)
+        if type(data).__name__ != "Dataset5dstem" or not getattr(
+            data, "is_lazy", False
+        ):
+            return self
+        hidden = {
+            int(idx)
+            for idx in self.compare_hidden_panels
+            if not isinstance(idx, bool) and 0 <= int(idx) < int(self.n_frames)
+        }
+        wanted = [idx for idx in range(int(self.n_frames)) if idx not in hidden]
+        plan = data.residency_plan(wanted)
+        self._raw_residency_plan = plan
+        if not bool(plan.get("fits", False)):
+            self._raw_preload_status = "paged"
+            self._update_gpu_memory_status()
+            return self
+
+        thread = getattr(self, "_full_residency_preload_thread", None)
+        if thread is not None and thread.is_alive():
+            self._full_residency_preload_retry = True
+            return self
+
+        self._raw_preload_status = "loading"
+        stop = threading.Event()
+        self._dataset_preload_stop = stop
+        self._update_gpu_memory_status()
+
+        def _worker() -> None:
+            try:
+                result = data.preload_all_if_fits(wanted, cancelled=stop.is_set)
+                current_hidden = {
+                    int(idx)
+                    for idx in self.compare_hidden_panels
+                    if not isinstance(idx, bool)
+                    and 0 <= int(idx) < int(self.n_frames)
+                }
+                if current_hidden:
+                    data.release(idx=sorted(current_hidden))
+                current_wanted = [
+                    idx for idx in range(int(self.n_frames)) if idx not in current_hidden
+                ]
+                resident = set(data.vram_resident())
+                complete = all(idx in resident for idx in current_wanted)
+                result["resident"] = complete
+                result["resident_count"] = sum(
+                    idx in resident for idx in current_wanted
+                )
+                self._raw_residency_plan = result
+                self._raw_preload_status = "resident" if complete else "paged"
+                if complete:
+                    self._clear_gpu_memory_warning()
+                elif bool(result.get("fits", False)) and not stop.is_set():
+                    self.memory_warning = (
+                        "GPU memory limited: available memory changed while loading "
+                        "the complete dataset series. Continuing with full-resolution "
+                        "paging; close other GPU work or choose more GPUs to keep every "
+                        "dataset resident."
+                    )
+            except BaseException:
+                self._raw_preload_status = "paged"
+                self.memory_warning = (
+                    "GPU memory limited: the complete dataset preload could not finish. "
+                    "Continuing with full-resolution paging; close other GPU work or "
+                    "choose more GPUs to retry."
+                )
+            finally:
+                self._full_residency_preload_thread = None
+                self._dataset_preload_stop = None
+                self._update_gpu_memory_status()
+                if not stop.is_set() and bool(
+                    getattr(self, "_full_residency_preload_retry", False)
+                ):
+                    self._full_residency_preload_retry = False
+                    self.preload_all_datasets(background=True)
+
+        if background:
+            thread = threading.Thread(
+                target=_worker,
+                name="Show4DSTEM-preload-all",
+                daemon=True,
+            )
+            self._full_residency_preload_thread = thread
+            thread.start()
+        else:
+            _worker()
+        return self
+
+    def stop_dataset_preload(self, *, wait: bool = False) -> Self:
+        """Stop automatic all-dataset loading after the current file read."""
+        stop = getattr(self, "_dataset_preload_stop", None)
+        if stop is not None:
+            stop.set()
+        thread = getattr(self, "_full_residency_preload_thread", None)
+        if wait and thread is not None and thread is not threading.current_thread():
+            thread.join()
+        return self
+
+    def wait_for_dataset_preload(self, timeout: float | None = None) -> Self:
+        """Wait for an automatic all-dataset preload, primarily for verification."""
+        deadline = None if timeout is None else time.monotonic() + float(timeout)
+        while True:
+            thread = getattr(self, "_full_residency_preload_thread", None)
+            if thread is None:
+                break
+            remaining = (
+                None if deadline is None else max(0.0, deadline - time.monotonic())
+            )
+            thread.join(timeout=remaining)
+            if thread.is_alive() or (
+                deadline is not None and time.monotonic() >= deadline
+            ):
+                break
         return self
 
     def poll_folder(self) -> list[int]:
         """Append newly ready folder masters as lazy frames.
 
         Only widgets created by ``Show4DSTEM.from_folder(...)`` have a folder
-        source attached. New masters are added as cold lazy slots; they allocate
-        GPU memory only when selected or included in the visible multiple grid.
+        source attached. New masters start as lazy slots, then join the complete
+        series preload when the updated shape/dtype footprint still fits.
         """
         source = getattr(self, "_folder_source", None)
         if source is None:
-            raise RuntimeError("poll_folder() is available only on Show4DSTEM.from_folder(...) widgets.")
+            raise RuntimeError(
+                "poll_folder() is available only on Show4DSTEM.from_folder(...) widgets."
+            )
         if type(getattr(self, "_data", None)).__name__ != "Dataset5dstem":
             raise RuntimeError("poll_folder() requires a lazy Dataset5dstem backing.")
         from quantem.widget.io import discover_masters, is_master_ready
 
-        masters = discover_masters(
-            str(source["folder"]),
-            pattern=source["pattern"],
-            recursive=source["recursive"],
-            scan_shape=source["scan_shape"],
-            verbose=False,
-        )
-        if source["ready_only"]:
-            masters = [master for master in masters if is_master_ready(master)]
-        known = set(getattr(self, "_folder_known_masters", set()))
-        added: list[int] = []
-        labels = list(self.frame_labels)
-        for master in masters:
-            key = self._master_key(master)
-            if key in known:
-                continue
-            idx = int(self.n_frames)
-            label, loader = source["make_loader"](master, idx)
-            self._data.append_lazy_frame(loader)
-            labels.append(str(label))
-            self.n_frames = len(self._data)
-            known.add(key)
-            added.append(idx)
-        self._folder_known_masters = known
-        if added:
-            self.frame_labels = labels
-            if self.view_mode == "multiple":
-                self._refresh_compare_virtual_images()
-                self._update_frame()
+        poll_lock = getattr(self, "_folder_poll_lock", None)
+        if poll_lock is None:
+            poll_lock = threading.Lock()
+            self._folder_poll_lock = poll_lock
+        with poll_lock:
+            masters = discover_masters(
+                str(source["folder"]),
+                pattern=source["pattern"],
+                recursive=source["recursive"],
+                scan_shape=source["scan_shape"],
+                verbose=False,
+            )
+            if source["ready_only"]:
+                masters = [master for master in masters if is_master_ready(master)]
+            known = set(getattr(self, "_folder_known_masters", set()))
+            added: list[int] = []
+            labels = list(self.frame_labels)
+            old_n_frames = int(self.n_frames)
+            old_order = list(self.compare_panel_order or [])
+            custom_order = (
+                len(old_order) == old_n_frames
+                and sorted(int(idx) for idx in old_order) == list(range(old_n_frames))
+            )
+            candidates = []
+            for master in masters:
+                key = self._master_key(master)
+                if key in known:
+                    continue
+                try:
+                    validator = source.get("validate_master")
+                    if callable(validator):
+                        validator(master)
+                    idx = len(self._data) + len(candidates)
+                    label, loader = source["make_loader"](master, idx)
+                except Exception:
+                    # Incomplete or incompatible files remain unknown so a
+                    # subsequent poll can retry after acquisition finishes.
+                    continue
+                candidates.append((master, key, idx, str(label), loader))
+            for master, key, idx, label, loader in candidates:
+                self._data.append_lazy_frame(loader)
+                labels.append(label)
+            if old_n_frames <= 1 < len(self._data):
+                page_config = getattr(self, "_dataset_page_config", None)
+                if page_config is not None:
+                    self._data.page(**page_config)
+            registrar = source.get("register_master")
+            if callable(registrar):
+                for master, _, idx, _, _ in candidates:
+                    registrar(master, idx)
+            for _, key, idx, _, _ in candidates:
+                known.add(key)
+                added.append(idx)
+            self._folder_known_masters = known
+            if not added:
+                return []
+
+            # n_frames normally triggers a compare-grid render. A watched master
+            # must first remain a cold lazy slot, so publish only lightweight
+            # metadata here. Page selection or cache warming performs the first
+            # raw load explicitly.
+            self._suppress_folder_append_refresh = True
+            try:
+                with self.hold_trait_notifications():
+                    self.n_frames = len(self._data)
+                    self.frame_labels = labels
+                    if custom_order:
+                        self.compare_panel_order = [*old_order, *added]
+                    if self.view_mode == "multiple":
+                        ordered = self._compare_ordered_ready_indices()
+                        self._compare_visible_total = len(ordered)
+                        self._update_compare_page_state(ordered)
+                        self.compare_status = self._compare_status_for_indices(
+                            self.compare_panel_indices,
+                            all_groups=(
+                                self._normalise_compare_group_mode(
+                                    self.compare_group_mode
+                                )
+                                == "all"
+                            ),
+                        )
+            finally:
+                self._suppress_folder_append_refresh = False
+
+            self._raw_preload_status = "paged"
             self._update_gpu_memory_status()
-        return added
+            if bool(source.get("preload_all_if_fits", False)):
+                self.preload_all_datasets(background=True)
+            if bool(source.get("warm_cache", False)):
+                self._compare_folder_refresh_pending = True
+                self.warm_compare_cache(background=True)
+            return added
 
     def watch_folder(self, *, interval: float = 2.0) -> Self:
         """Poll the attached folder in the background and append ready masters."""
         source = getattr(self, "_folder_source", None)
         if source is None:
-            raise RuntimeError("watch_folder() is available only on Show4DSTEM.from_folder(...) widgets.")
+            raise RuntimeError(
+                "watch_folder() is available only on Show4DSTEM.from_folder(...) widgets."
+            )
         self.stop_folder_watch()
         import threading
 
@@ -3742,10 +5083,22 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
     def stop_folder_watch(self) -> None:
         """Stop the background folder watcher, if one was started."""
         stop = getattr(self, "_folder_watch_stop", None)
+        thread = getattr(self, "_folder_watch_thread", None)
         if stop is not None:
             stop.set()
-        self._folder_watch_stop = None
-        self._folder_watch_thread = None
+        if thread is not None and thread is not threading.current_thread():
+            thread.join()
+        if getattr(self, "_folder_watch_stop", None) is stop:
+            self._folder_watch_stop = None
+        if getattr(self, "_folder_watch_thread", None) is thread:
+            self._folder_watch_thread = None
+
+    def close(self) -> None:
+        """Stop background work and close the widget comm."""
+        self.stop_folder_watch()
+        self.stop_dataset_preload(wait=True)
+        self.stop_compare_cache_warm(wait=True)
+        super().close()
 
     def _candidate_cuda_memory_devices(self) -> list[int]:
         """CUDA device indices relevant to this widget's data."""
@@ -3755,7 +5108,9 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             if value is None:
                 return
             try:
-                device = torch.device(value.device if isinstance(value, torch.Tensor) else value)
+                device = torch.device(
+                    value.device if isinstance(value, torch.Tensor) else value
+                )
             except Exception:
                 return
             if device.type == "cuda":
@@ -3781,7 +5136,9 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             if value is None:
                 return
             try:
-                device = torch.device(value.device if isinstance(value, torch.Tensor) else value)
+                device = torch.device(
+                    value.device if isinstance(value, torch.Tensor) else value
+                )
             except Exception:
                 return
             if device.type == "mps":
@@ -3807,9 +5164,34 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
                     with torch.cuda.device(idx):
                         free, total = torch.cuda.mem_get_info(idx)
                     used = int(total - free)
-                    parts.append(f"cuda:{idx} {_format_memory(used)}/{_format_memory(int(total))}")
+                    parts.append(
+                        f"cuda:{idx} {_format_memory(used)}/{_format_memory(int(total))}"
+                    )
                 if parts:
-                    return "GPU " + " | ".join(parts)
+                    label = "GPU " + " | ".join(parts)
+                    data = getattr(self, "_data", None)
+                    if type(data).__name__ == "Dataset5dstem" and getattr(
+                        data, "is_lazy", False
+                    ):
+                        hidden = {
+                            int(idx)
+                            for idx in self.compare_hidden_panels
+                            if not isinstance(idx, bool)
+                            and 0 <= int(idx) < int(self.n_frames)
+                        }
+                        wanted = [
+                            idx
+                            for idx in range(int(self.n_frames))
+                            if idx not in hidden
+                        ]
+                        resident = set(data.vram_resident())
+                        resident_count = sum(idx in resident for idx in wanted)
+                        status = str(getattr(self, "_raw_preload_status", ""))
+                        suffix = " loading" if status == "loading" else ""
+                        label += (
+                            f" · raw {resident_count}/{len(wanted)} resident{suffix}"
+                        )
+                    return label
             mps_available = bool(
                 getattr(torch.backends, "mps", None)
                 and torch.backends.mps.is_available()
@@ -3836,26 +5218,67 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         if label != self.gpu_memory_label:
             self.gpu_memory_label = label
 
+    def _clear_gpu_memory_warning(self) -> None:
+        if self.memory_warning.startswith("GPU memory limited:"):
+            self.memory_warning = ""
+
+    def _set_gpu_memory_warning(
+        self,
+        *,
+        action: str,
+        requested: int | None = None,
+        shown: int | None = None,
+    ) -> None:
+        """Set a user-facing memory warning without leaking backend OOM text."""
+        self._update_gpu_memory_status()
+        shown_text = ""
+        if requested is not None and shown is not None:
+            shown_text = f" Showing {shown}/{requested} requested panels."
+        memory_text = (
+            f" Current memory: {self.gpu_memory_label}."
+            if self.gpu_memory_label
+            else ""
+        )
+        self.memory_warning = (
+            f"GPU memory limited: not enough free VRAM to {action}.{shown_text}{memory_text} "
+            "Free memory with w.free() or cleanup(w), close other GPU jobs, restart the kernel, "
+            "or reopen with a smaller page_budget/compare_max_panels."
+        )
+
     def _ensure_current_compare_frame_visible(self) -> None:
-        """Keep selected-DP mode from pointing at a hidden compare panel."""
+        """Keep selected-DP mode pointing at a visible compare-page panel."""
         if self.n_frames <= 1:
             return
-        hidden = {
-            int(idx) for idx in self.compare_hidden_panels
-            if not isinstance(idx, bool) and 0 <= int(idx) < int(self.n_frames)
-        }
-        if int(self.frame_idx) not in hidden:
+        visible_page = self._compare_ready_indices()
+        if int(self.frame_idx) in visible_page:
             return
-        visible = [idx for idx in self.compare_ordered_panels if idx not in hidden]
-        if visible:
-            self.frame_idx = int(visible[0])
+        if visible_page:
+            self.frame_idx = int(visible_page[0])
+
+    def _sync_compare_page_to_frame_idx(self) -> None:
+        """Show the compare-grid page that contains the active frame."""
+        if self.n_frames <= 1 or self.view_mode != "multiple":
+            return
+        visible = self._compare_ordered_ready_indices()
+        frame_idx = int(self.frame_idx)
+        if frame_idx not in visible:
+            return
+        if frame_idx in self._compare_hidden_panel_set():
+            return
+        max_panels = max(1, int(self.compare_max_panels))
+        page_idx = visible.index(frame_idx) // max_panels
+        page_idx = int(max(0, min(page_idx, max(1, int(self.compare_page_count)) - 1)))
+        if int(self.compare_page_idx) != page_idx:
+            self.compare_page_idx = page_idx
 
     def _release_hidden_compare_panel_data(self, panels: Sequence[int]) -> None:
         """Drop lazy frame tensors for hidden compare panels without renumbering."""
         data = getattr(self, "_data", None)
         if not panels or data is None:
             return
-        if type(data).__name__ != "Dataset5dstem" or not getattr(data, "is_lazy", False):
+        if type(data).__name__ != "Dataset5dstem" or not getattr(
+            data, "is_lazy", False
+        ):
             return
         # Drop compute views first; they may be the last reference to a frame that
         # is about to become a cold lazy slot.
@@ -3870,15 +5293,19 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
 
     def _handle_compare_hidden_change(self, old, new) -> None:
         old_hidden = {
-            int(idx) for idx in (old or [])
+            int(idx)
+            for idx in (old or [])
             if not isinstance(idx, bool) and 0 <= int(idx) < int(self.n_frames)
         }
         new_hidden = {
-            int(idx) for idx in (new or [])
+            int(idx)
+            for idx in (new or [])
             if not isinstance(idx, bool) and 0 <= int(idx) < int(self.n_frames)
         }
         if len(new_hidden) >= int(self.n_frames):
-            keep = next((idx for idx in self.compare_ordered_panels if idx not in old_hidden), 0)
+            keep = next(
+                (idx for idx in self.compare_ordered_panels if idx not in old_hidden), 0
+            )
             new_hidden.discard(int(keep))
             self.compare_hidden_panels = sorted(new_hidden)
         self._ensure_current_compare_frame_visible()
@@ -3892,7 +5319,9 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             return self
         expected = set(range(int(self.n_frames)))
         if len(order) != int(self.n_frames) or set(order) != expected:
-            raise ValueError("set_compare_panel_order requires every compare panel exactly once")
+            raise ValueError(
+                "set_compare_panel_order requires every compare panel exactly once"
+            )
         self.compare_panel_order = order
         return self
 
@@ -3911,7 +5340,33 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         self.compare_panel_order = order
         return self
 
-    def set_compare_starred_panels(self, panels: Sequence[int | str] | int | str) -> Self:
+    def set_compare_page(self, page: int) -> Self:
+        """Show a zero-based page of compare-grid panels."""
+        page_count = max(1, int(self.compare_page_count))
+        self.compare_page_idx = int(max(0, min(int(page), page_count - 1)))
+        return self
+
+    def next_compare_page(self) -> Self:
+        """Advance the compare grid by one page."""
+        return self.set_compare_page(int(self.compare_page_idx) + 1)
+
+    def previous_compare_page(self) -> Self:
+        """Move the compare grid back by one page."""
+        return self.set_compare_page(int(self.compare_page_idx) - 1)
+
+    def show_compare_paged_groups(self) -> Self:
+        """Show one compare-grid group/page at a time."""
+        self.compare_group_mode = "paged"
+        return self
+
+    def show_compare_all_groups(self) -> Self:
+        """Collapse all visible compare-grid groups into one dense grid."""
+        self.compare_group_mode = "all"
+        return self
+
+    def set_compare_starred_panels(
+        self, panels: Sequence[int | str] | int | str
+    ) -> Self:
         """Replace the set of starred compare panels by index or exact label."""
         self.compare_starred_panels = sorted(
             self._normalize_compare_panel_refs(panels, allow_empty=True)
@@ -3930,46 +5385,108 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         self.compare_starred_panels = sorted(set(self.compare_starred_panels) - {idx})
         return self
 
-    def _clear_compare_virtual_images(self) -> None:
+    def _clear_compare_virtual_images(self, status: str = "") -> None:
         with self.hold_trait_notifications():
             self.compare_virtual_image_bytes = b""
             self.compare_panel_count = 0
             self.compare_panel_indices = []
-            self.compare_status = ""
+            self.compare_status = status
 
-    def _compare_ready_indices(self) -> list[int]:
+    def _empty_compare_page_status(self) -> str:
+        """Status for a valid compare page that has no visible panels."""
+        if self.view_mode != "multiple" or self.n_frames <= 1:
+            return ""
+        ordered_ready = self._compare_ordered_ready_indices()
+        if not ordered_ready:
+            return ""
+        page_idx, page_count, max_panels = self._update_compare_page_state(
+            ordered_ready
+        )
+        start = page_idx * max_panels
+        page = ordered_ready[start : start + max_panels]
+        if not page:
+            return ""
+        hidden = self._compare_hidden_panel_set()
+        if any(idx not in hidden for idx in page):
+            return ""
+        page_suffix = f" · page {page_idx + 1}/{page_count}" if page_count > 1 else ""
+        return f"0/{len(ordered_ready)} {self.frame_dim_label.lower()} panels · hidden{page_suffix}"
+
+    def _compare_hidden_panel_set(self) -> set[int]:
+        """Hidden compare panels as a validated set of frame indices."""
+        return {
+            int(idx)
+            for idx in self.compare_hidden_panels
+            if not isinstance(idx, bool) and 0 <= int(idx) < int(self.n_frames)
+        }
+
+    def _compare_ordered_ready_indices(self) -> list[int]:
+        """Ready compare panels after user ordering, before hidden filtering."""
         if self.n_frames <= 1:
+            self.compare_page_count = 1
+            self.compare_page_idx = 0
             return []
-        max_panels = max(1, int(self.compare_max_panels))
         data = getattr(self, "_data", None)
         datasets = getattr(data, "datasets", None)
         if datasets is not None:
             ready = [
-                idx
-                for idx, dataset in enumerate(list(datasets))
-                if dataset is not None
+                idx for idx, dataset in enumerate(list(datasets)) if dataset is not None
             ]
         else:
             ready = list(range(int(self.n_frames)))
         ready_set = set(ready)
-        ordered_ready = [idx for idx in self.compare_ordered_panels if idx in ready_set]
-        hidden = {
-            int(idx) for idx in self.compare_hidden_panels
-            if not isinstance(idx, bool) and 0 <= int(idx) < int(self.n_frames)
-        }
+        return [idx for idx in self.compare_ordered_panels if idx in ready_set]
+
+    def _compare_visible_ready_indices(self) -> list[int]:
+        """Ready compare panels after ordering and hidden-panel filtering."""
+        ordered_ready = self._compare_ordered_ready_indices()
+        hidden = self._compare_hidden_panel_set()
         visible = [idx for idx in ordered_ready if idx not in hidden]
         if not visible and ordered_ready:
             # Frontend/state load should not be able to leave compare mode blank.
             keep = ordered_ready[0]
             self.compare_hidden_panels = sorted(idx for idx in hidden if idx != keep)
             visible = [keep]
-        return visible[:max_panels]
+        self._compare_visible_total = len(visible)
+        return visible
+
+    def _update_compare_page_state(
+        self, visible: Sequence[int]
+    ) -> tuple[int, int, int]:
+        """Clamp compare page traits and return ``(page_idx, page_count, page_size)``."""
+        max_panels = max(1, int(self.compare_max_panels))
+        page_count = max(1, int(np.ceil(len(visible) / max_panels))) if visible else 1
+        if int(self.compare_page_count) != page_count:
+            self.compare_page_count = page_count
+        page_idx = int(max(0, min(int(self.compare_page_idx), page_count - 1)))
+        if int(self.compare_page_idx) != page_idx:
+            self.compare_page_idx = page_idx
+        return page_idx, page_count, max_panels
+
+    def _compare_current_page_indices(self) -> list[int]:
+        """Ready visible compare panels on the active page."""
+        ordered_ready = self._compare_ordered_ready_indices()
+        self._compare_visible_total = len(ordered_ready)
+        page_idx, _, max_panels = self._update_compare_page_state(ordered_ready)
+        start = page_idx * max_panels
+        page = ordered_ready[start : start + max_panels]
+        hidden = self._compare_hidden_panel_set()
+        return [idx for idx in page if idx not in hidden]
+
+    def _compare_ready_indices(self) -> list[int]:
+        if self._normalise_compare_group_mode(self.compare_group_mode) == "all":
+            visible = self._compare_visible_ready_indices()
+            self._update_compare_page_state(self._compare_ordered_ready_indices())
+            return list(visible)
+        return self._compare_current_page_indices()
 
     def _virtual_image_for_chunked_dataset(self, dataset, mask) -> np.ndarray:
         """Compute one compare tile for a chunked MPS dataset slot."""
         from quantem.widget.kernels.compute.backends import compute_backend
 
-        mask_np = mask.detach().cpu().numpy() if hasattr(mask, "detach") else np.asarray(mask)
+        mask_np = (
+            mask.detach().cpu().numpy() if hasattr(mask, "detach") else np.asarray(mask)
+        )
         backend = compute_backend(dataset)
         return np.asarray(backend.masked_sum(mask_np), dtype=np.float32)
 
@@ -3980,6 +5497,20 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         else:
             area = float(np.asarray(mask, dtype=np.float32).sum())
         return max(1.0, area)
+
+    def _preload_compare_page(self, indices: Sequence[int]) -> None:
+        """Ask a lazy backing series to load the visible compare page together."""
+        data = getattr(self, "_data", None)
+        if type(data).__name__ != "Dataset5dstem" or not hasattr(data, "preload"):
+            return
+        # Drop cached compute views before the backing series releases old page
+        # frames. Otherwise _compute_for can keep an evicted 18 GB frame alive.
+        self._compute_backend = None
+        self._compute_for = None
+        try:
+            data.preload([int(idx) for idx in indices])
+        except AttributeError:
+            return
 
     def _compare_virtual_image_for_frame(self, idx: int, mask) -> np.ndarray:
         # Compare panels are visual previews across many datasets. Normalize by
@@ -3998,6 +5529,119 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             vi = self._virtual_image_for_frame(int(idx))
         return np.asarray(vi, dtype=np.float32) / mask_area
 
+    def _compare_status_for_indices(
+        self,
+        indices: Sequence[int],
+        *,
+        all_groups: bool,
+        partial_reason: str | None = None,
+    ) -> str:
+        """Human-readable compare-grid status for the current visible selection."""
+        visible_total = int(getattr(self, "_compare_visible_total", self.n_frames))
+        label = self.frame_dim_label.lower()
+        if all_groups:
+            suffix = (
+                f" · {partial_reason}"
+                if partial_reason
+                else " ready"
+                if len(indices) < visible_total
+                else ""
+            )
+            group_suffix = " · all groups" if int(self.compare_page_count) > 1 else ""
+            return (
+                f"{len(indices)}/{visible_total} {label} panels{suffix}{group_suffix}"
+            )
+
+        max_panels = max(1, int(self.compare_max_panels))
+        page_idx = max(0, int(self.compare_page_idx))
+        ordered_ready = self._compare_ordered_ready_indices()
+        start = page_idx * max_panels
+        expected_on_page = len(ordered_ready[start : start + max_panels])
+        suffix = (
+            f" · {partial_reason}"
+            if partial_reason
+            else ""
+            if len(indices) >= expected_on_page
+            else " · hidden"
+        )
+        page_suffix = (
+            f" · page {int(self.compare_page_idx) + 1}/{int(self.compare_page_count)}"
+            if int(self.compare_page_count) > 1
+            else ""
+        )
+        return f"{len(indices)}/{visible_total} {label} panels{page_suffix}{suffix}"
+
+    def _compare_virtual_images_for_display_indices(
+        self,
+        indices: Sequence[int],
+        mask,
+    ) -> list[np.ndarray]:
+        """Compute compare-grid virtual images without overloading lazy backing data."""
+        data = getattr(self, "_data", None)
+        batch_builder = getattr(data, "preload_batches", None)
+        if callable(batch_builder):
+            batches = batch_builder(indices)
+        elif self._normalise_compare_group_mode(self.compare_group_mode) == "all":
+            batch_size = max(1, int(self.compare_max_panels))
+            batches = [
+                [int(idx) for idx in indices[start : start + batch_size]]
+                for start in range(0, len(indices), batch_size)
+            ]
+        else:
+            batches = [[int(idx) for idx in indices]]
+
+        images: list[np.ndarray] = []
+        for batch in batches:
+            cached = self._get_cached_compare_preset(batch)
+            if cached is not None:
+                payload, cached_indices, _ = cached
+                batch_stack = np.frombuffer(payload, dtype=np.float32).reshape(
+                    len(cached_indices),
+                    self.shape_rows,
+                    self.shape_cols,
+                )
+                images.extend(
+                    np.ascontiguousarray(image, dtype=np.float32)
+                    for image in batch_stack
+                )
+                continue
+            with self._compare_compute_lock:
+                # A background warmer may have filled this page while the UI
+                # waited for the GPU compute lock.
+                cached = self._get_cached_compare_preset(batch)
+                if cached is not None:
+                    payload, cached_indices, _ = cached
+                    batch_stack = np.frombuffer(payload, dtype=np.float32).reshape(
+                        len(cached_indices),
+                        self.shape_rows,
+                        self.shape_cols,
+                    )
+                    images.extend(
+                        np.ascontiguousarray(image, dtype=np.float32)
+                        for image in batch_stack
+                    )
+                    continue
+
+                self._preload_compare_page(batch)
+                batch_images = self._compare_virtual_images_for_indices(batch, mask)
+                if not batch_images:
+                    continue
+                batch_indices = tuple(batch[: len(batch_images)])
+                batch_stack = np.ascontiguousarray(
+                    np.stack(batch_images, axis=0),
+                    dtype=np.float32,
+                )
+                self._store_cached_compare_preset(
+                    batch_stack.tobytes(),
+                    batch_indices,
+                    self._compare_status_for_indices(
+                        batch_indices,
+                        all_groups=False,
+                    ),
+                )
+            images.extend(batch_images)
+        return images
+
     def _refresh_compare_virtual_images(self) -> None:
         """Build the lightweight virtual-image stack used by compare mode."""
         if getattr(self, "_data", None) is None:
@@ -4009,7 +5653,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             return
         indices = self._compare_ready_indices()
         if not indices:
-            self._clear_compare_virtual_images()
+            self._clear_compare_virtual_images(self._empty_compare_page_status())
             return
         if getattr(self, "_suppress_compare_recompute", False):
             return
@@ -4017,39 +5661,98 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         data = getattr(self, "_data", None)
         loaded_before = (
             tuple(data.loaded_indices())
-            if type(data).__name__ == "Dataset5dstem" and hasattr(data, "loaded_indices")
+            if type(data).__name__ == "Dataset5dstem"
+            and hasattr(data, "loaded_indices")
             else None
         )
         try:
             cached = self._get_cached_compare_preset(indices)
             if cached is not None:
-                payload, cached_indices, cached_status = cached
+                payload, cached_indices, _ = cached
+                cached_partial_reason = None
+                if len(cached_indices) < len(indices):
+                    cached_partial_reason = "memory limited"
+                    self._set_gpu_memory_warning(
+                        action="show the requested multiple-panel page",
+                        requested=len(indices),
+                        shown=len(cached_indices),
+                    )
+                else:
+                    self._clear_gpu_memory_warning()
                 with self.hold_trait_notifications():
                     self.compare_virtual_image_bytes = payload
                     self.compare_panel_count = len(cached_indices)
                     self.compare_panel_indices = list(cached_indices)
-                    self.compare_status = cached_status
+                    self.compare_status = self._compare_status_for_indices(
+                        cached_indices,
+                        all_groups=(
+                            self._normalise_compare_group_mode(self.compare_group_mode)
+                            == "all"
+                        ),
+                        partial_reason=cached_partial_reason,
+                    )
                 return
             mask = self._current_detector_mask()
-            images = self._compare_virtual_images_for_indices(indices, mask)
+            images = self._compare_virtual_images_for_display_indices(indices, mask)
+            if not images:
+                self._set_gpu_memory_warning(
+                    action="compute any multiple-panel virtual images",
+                    requested=len(indices),
+                    shown=0,
+                )
+                with self.hold_trait_notifications():
+                    self.compare_virtual_image_bytes = b""
+                    self.compare_panel_count = 0
+                    self.compare_panel_indices = []
+                    self.compare_status = (
+                        "GPU memory limited: multiple grid page was not computed."
+                    )
+                return
+            shown_indices = [int(idx) for idx in indices[: len(images)]]
+            partial_reason = None
+            if len(shown_indices) < len(indices):
+                partial_reason = "memory limited"
+                self._set_gpu_memory_warning(
+                    action="show the requested multiple-panel page",
+                    requested=len(indices),
+                    shown=len(shown_indices),
+                )
+            else:
+                self._clear_gpu_memory_warning()
             stack = np.ascontiguousarray(np.stack(images, axis=0), dtype=np.float32)
             with self.hold_trait_notifications():
                 self.compare_virtual_image_bytes = stack.tobytes()
-                self.compare_panel_count = len(indices)
-                self.compare_panel_indices = [int(idx) for idx in indices]
-                suffix = "" if len(indices) >= min(self.n_frames, self.compare_max_panels) else " ready"
-                self.compare_status = f"{len(indices)}/{self.n_frames} {self.frame_dim_label.lower()} panels{suffix}"
+                self.compare_panel_count = len(shown_indices)
+                self.compare_panel_indices = shown_indices
+                self.compare_status = self._compare_status_for_indices(
+                    shown_indices,
+                    all_groups=self._normalise_compare_group_mode(
+                        self.compare_group_mode
+                    )
+                    == "all",
+                    partial_reason=partial_reason,
+                )
             self._store_cached_compare_preset(
                 stack.tobytes(),
-                tuple(int(idx) for idx in indices),
+                tuple(shown_indices),
                 self.compare_status,
             )
-        except Exception as exc:
+        except BaseException as exc:
+            if _is_recoverable_allocation_error(exc):
+                self._reclaim_compare_allocation_failure()
+                self._set_gpu_memory_warning(
+                    action="compute the multiple-panel page",
+                    requested=len(indices),
+                    shown=0,
+                )
+                status = "GPU memory limited: multiple grid page was not computed."
+            else:
+                status = f"Multiple grid unavailable: {exc}"
             with self.hold_trait_notifications():
                 self.compare_virtual_image_bytes = b""
                 self.compare_panel_count = 0
                 self.compare_panel_indices = []
-                self.compare_status = f"Multiple grid unavailable: {exc}"
+                self.compare_status = status
         finally:
             if loaded_before is not None:
                 loaded_after = tuple(data.loaded_indices())
@@ -4062,10 +5765,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         self._cached_abf_virtual = None
         self._cached_adf_virtual = None
         self._cached_haadf_virtual = None
-        self._cached_compare_bf_virtual = None
-        self._cached_compare_abf_virtual = None
-        self._cached_compare_adf_virtual = None
-        self._cached_compare_haadf_virtual = None
+        self._clear_compare_virtual_page_cache()
 
     def _precompute_common_virtual_images(self):
         """Pre-compute BF/ABF/ADF/HAADF virtual image bytes. Annular ranges match
@@ -4087,31 +5787,40 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
     def _get_cached_preset(self) -> bytes | None:
         """Return cached preset bytes if current ROI matches BF/ABF/ADF preset shape."""
         # Must be centered on detector center
-        if abs(self.roi_center_col - self.center_col) >= 1 or abs(self.roi_center_row - self.center_row) >= 1:
+        if (
+            abs(self.roi_center_col - self.center_col) >= 1
+            or abs(self.roi_center_row - self.center_row) >= 1
+        ):
             return None
 
         bf = self.bf_radius
 
         # BF: circle at bf_radius
-        if (self.roi_mode == "circle" and abs(self.roi_radius - bf) < 1):
+        if self.roi_mode == "circle" and abs(self.roi_radius - bf) < 1:
             return self._cached_bf_virtual
 
         # ABF: annular at 0.5*bf to bf
-        if (self.roi_mode == "annular" and
-            abs(self.roi_radius_inner - bf * 0.5) < 1 and
-            abs(self.roi_radius - bf) < 1):
+        if (
+            self.roi_mode == "annular"
+            and abs(self.roi_radius_inner - bf * 0.5) < 1
+            and abs(self.roi_radius - bf) < 1
+        ):
             return self._cached_abf_virtual
 
         # ADF: annular at bf to 2*bf
-        if (self.roi_mode == "annular" and
-            abs(self.roi_radius_inner - bf) < 1 and
-            abs(self.roi_radius - bf * 2.0) < 1):
+        if (
+            self.roi_mode == "annular"
+            and abs(self.roi_radius_inner - bf) < 1
+            and abs(self.roi_radius - bf * 2.0) < 1
+        ):
             return self._cached_adf_virtual
 
         # HAADF: annular at 2*bf to 4*bf
-        if (self.roi_mode == "annular" and
-            abs(self.roi_radius_inner - bf * 2.0) < 1 and
-            abs(self.roi_radius - bf * 4.0) < 1):
+        if (
+            self.roi_mode == "annular"
+            and abs(self.roi_radius_inner - bf * 2.0) < 1
+            and abs(self.roi_radius - bf * 4.0) < 1
+        ):
             return self._cached_haadf_virtual
 
         return None
@@ -4147,43 +5856,274 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             return "haadf"
         return None
 
-    def _compare_preset_cache_attr(self) -> str | None:
-        preset = self._preset_cache_name()
-        return f"_cached_compare_{preset}_virtual" if preset is not None else None
+    def _clear_compare_virtual_page_cache(self) -> None:
+        """Drop cached compare-grid virtual-image pages."""
+        self.stop_compare_cache_warm()
+        with self._compare_compute_lock:
+            self._compare_cache_generation += 1
+            with self._compare_cache_lock:
+                self._compare_virtual_page_cache.clear()
+                self._compare_virtual_page_cache_bytes = 0
 
     def _get_cached_compare_preset(
         self,
         indices: Sequence[int],
+        *,
+        preset_name: str | None = None,
     ) -> tuple[bytes, tuple[int, ...], str] | None:
-        attr = self._compare_preset_cache_attr()
-        if attr is None:
+        key = self._compare_preset_cache_key(indices, preset_name=preset_name)
+        if key is None:
             return None
-        cached = getattr(self, attr, None)
-        if cached is None:
-            return None
-        payload, cached_indices, status = cached
-        if tuple(int(idx) for idx in indices) != cached_indices:
-            return None
-        return payload, cached_indices, status
+        with self._compare_cache_lock:
+            cached = self._compare_virtual_page_cache.get(key)
+            if cached is None:
+                return None
+            self._compare_virtual_page_cache.move_to_end(key)
+            payload, cached_indices, status, _ = cached
+            return payload, cached_indices, status
 
     def _store_cached_compare_preset(
         self,
         payload: bytes,
         indices: tuple[int, ...],
         status: str,
+        *,
+        preset_name: str | None = None,
     ) -> None:
-        attr = self._compare_preset_cache_attr()
-        if attr is not None:
-            setattr(self, attr, (payload, indices, status))
+        key = self._compare_preset_cache_key(indices, preset_name=preset_name)
+        if key is None:
+            return
+        with self._compare_cache_lock:
+            existing = self._compare_virtual_page_cache.pop(key, None)
+            if existing is not None:
+                self._compare_virtual_page_cache_bytes -= existing[3]
+            nbytes = len(payload)
+            self._compare_virtual_page_cache[key] = (payload, indices, status, nbytes)
+            self._compare_virtual_page_cache_bytes += nbytes
+            self._trim_compare_virtual_page_cache()
+
+    def _compare_preset_cache_key(
+        self,
+        indices: Sequence[int],
+        *,
+        preset_name: str | None = None,
+    ) -> tuple[Any, ...] | None:
+        preset = self._preset_cache_name() if preset_name is None else preset_name
+        if preset is None or self._compare_cache_pages <= 0:
+            return None
+        if self._compare_cache_max_bytes == 0:
+            return None
+        return (
+            preset,
+            tuple(int(idx) for idx in indices),
+            int(self.shape_rows),
+            int(self.shape_cols),
+            int(self.compare_max_panels),
+            str(self.frame_dim_label),
+        )
+
+    def _trim_compare_virtual_page_cache(self) -> None:
+        max_entries = max(0, int(self._compare_cache_pages))
+        max_bytes = self._compare_cache_max_bytes
+        while (
+            self._compare_virtual_page_cache
+            and len(self._compare_virtual_page_cache) > max_entries
+        ):
+            _, old = self._compare_virtual_page_cache.popitem(last=False)
+            self._compare_virtual_page_cache_bytes -= old[3]
+        while (
+            self._compare_virtual_page_cache
+            and max_bytes is not None
+            and self._compare_virtual_page_cache_bytes > int(max_bytes)
+        ):
+            _, old = self._compare_virtual_page_cache.popitem(last=False)
+            self._compare_virtual_page_cache_bytes -= old[3]
+
+    def warm_compare_cache(
+        self,
+        presets: Sequence[str] = ("bf", "abf", "adf", "haadf"),
+        *,
+        background: bool = True,
+    ) -> Self:
+        """Cache standard detector views without retaining every raw 4D master.
+
+        Folder-backed data are loaded in memory-aware batches. All requested
+        detector presets are reduced while each batch is resident, then only the
+        small 2D virtual images remain in host memory.
+        """
+        if self.view_mode != "multiple" or self.n_frames <= 1:
+            return self
+        names = tuple(dict.fromkeys(str(name).strip().lower() for name in presets))
+        allowed = {"bf", "abf", "adf", "haadf"}
+        unknown = [name for name in names if name not in allowed]
+        if unknown:
+            raise ValueError(
+                "presets must contain only 'bf', 'abf', 'adf', or 'haadf'; "
+                f"got {unknown!r}"
+            )
+        if not names or self._compare_cache_max_bytes == 0:
+            return self
+
+        self.stop_compare_cache_warm()
+        stop = threading.Event()
+        self._compare_cache_warm_stop = stop
+        generation = int(self._compare_cache_generation)
+
+        ordered = self._compare_ordered_ready_indices()
+        hidden = self._compare_hidden_panel_set()
+        page_size = max(1, int(self.compare_max_panels))
+        pages = [
+            [idx for idx in ordered[start : start + page_size] if idx not in hidden]
+            for start in range(0, len(ordered), page_size)
+        ]
+        pages = [page for page in pages if page]
+        if not pages:
+            return self
+        current = min(max(0, int(self.compare_page_idx)), len(pages) - 1)
+        pages = pages[current:] + pages[:current]
+        self._compare_cache_pages = max(
+            int(self._compare_cache_pages),
+            len(pages) * len(names),
+        )
+
+        masks = {
+            name: mask
+            for name, _, mask in self._report_preset_masks()
+            if name in names
+        }
+
+        def worker() -> None:
+            self._compare_cache_warm_status = "warming"
+            try:
+                data = getattr(self, "_data", None)
+                batch_builder = getattr(data, "preload_batches", None)
+                for page in pages:
+                    if stop.is_set() or generation != self._compare_cache_generation:
+                        self._compare_cache_warm_status = "stopped"
+                        return
+                    missing = [
+                        name
+                        for name in names
+                        if self._get_cached_compare_preset(
+                            page,
+                            preset_name=name,
+                        )
+                        is None
+                    ]
+                    if not missing:
+                        continue
+                    if background:
+                        # Yield the compute lock between masters so page clicks
+                        # and detector changes stay responsive during a long
+                        # full-resolution cache warm.
+                        batches = [[int(idx)] for idx in page]
+                    else:
+                        batches = (
+                            batch_builder(page)
+                            if callable(batch_builder)
+                            else [list(page)]
+                        )
+                    accumulated: dict[str, list[np.ndarray]] = {
+                        name: [] for name in missing
+                    }
+                    for batch in batches:
+                        if stop.is_set() or generation != self._compare_cache_generation:
+                            self._compare_cache_warm_status = "stopped"
+                            return
+                        with self._compare_compute_lock:
+                            self._preload_compare_page(batch)
+                            for name in missing:
+                                cached = self._get_cached_compare_preset(
+                                    batch,
+                                    preset_name=name,
+                                )
+                                if cached is not None:
+                                    payload, cached_indices, _ = cached
+                                    stack = np.frombuffer(
+                                        payload,
+                                        dtype=np.float32,
+                                    ).reshape(
+                                        len(cached_indices),
+                                        self.shape_rows,
+                                        self.shape_cols,
+                                    )
+                                    batch_images = [
+                                        np.ascontiguousarray(image, dtype=np.float32)
+                                        for image in stack
+                                    ]
+                                else:
+                                    batch_images = self._compare_virtual_images_for_indices(
+                                        batch,
+                                        masks[name],
+                                    )
+                                accumulated[name].extend(batch_images)
+                    if stop.is_set() or generation != self._compare_cache_generation:
+                        self._compare_cache_warm_status = "stopped"
+                        return
+                    for name, images in accumulated.items():
+                        if len(images) != len(page):
+                            continue
+                        stack = np.ascontiguousarray(
+                            np.stack(images, axis=0),
+                            dtype=np.float32,
+                        )
+                        self._store_cached_compare_preset(
+                            stack.tobytes(),
+                            tuple(page),
+                            "cached",
+                            preset_name=name,
+                        )
+                if stop.is_set() or generation != self._compare_cache_generation:
+                    self._compare_cache_warm_status = "stopped"
+                    return
+                self._compare_cache_warm_status = "ready"
+                if bool(getattr(self, "_compare_folder_refresh_pending", False)):
+                    self._compare_folder_refresh_pending = False
+                    active = self._compare_ready_indices()
+                    if self._get_cached_compare_preset(active) is not None:
+                        self._refresh_compare_virtual_images()
+            except BaseException:
+                self._compare_cache_warm_status = "failed"
+            finally:
+                if self._compare_cache_warm_stop is stop:
+                    self._compare_cache_warm_stop = None
+
+        if background:
+            thread = threading.Thread(
+                target=worker,
+                name="Show4DSTEM-compare-cache",
+                daemon=True,
+            )
+            self._compare_cache_warm_thread = thread
+            thread.start()
+        else:
+            worker()
+        return self
+
+    def stop_compare_cache_warm(self, *, wait: bool = False) -> None:
+        """Stop background detector-preset caching after the current GPU batch."""
+        stop = getattr(self, "_compare_cache_warm_stop", None)
+        thread = getattr(self, "_compare_cache_warm_thread", None)
+        if stop is not None:
+            stop.set()
+        if wait and thread is not None and thread is not threading.current_thread():
+            thread.join()
+        if self._compare_cache_warm_stop is stop:
+            self._compare_cache_warm_stop = None
+        if thread is None or not thread.is_alive():
+            if self._compare_cache_warm_thread is thread:
+                self._compare_cache_warm_thread = None
 
     def _frame_data_for_index(self, frame_idx: int):
         if type(self._data).__name__ == "Dataset5dstem":
-            return self._data.frame(frame_idx)   # paging-aware (see _frame_data)
+            return self._data.frame(frame_idx)  # paging-aware (see _frame_data)
         if self.n_frames > 1:
             return self._data[frame_idx]
         return self._data
 
-    def _sparse_masked_sum_tensor_for_frame_data(self, data, mask) -> torch.Tensor | None:
+    def _sparse_masked_sum_tensor_for_frame_data(
+        self, data, mask
+    ) -> torch.Tensor | None:
         """Compute a frame VI tensor by summing only selected detector pixels.
 
         Dense tensordot is simple but reads every detector pixel, so it is slow
@@ -4192,17 +6132,23 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         """
         if not isinstance(data, torch.Tensor):
             return None
-        data_4d = data if data.ndim == 4 else data.reshape(
-            self._scan_shape[0],
-            self._scan_shape[1],
-            *self._det_shape,
+        data_4d = (
+            data
+            if data.ndim == 4
+            else data.reshape(
+                self._scan_shape[0],
+                self._scan_shape[1],
+                *self._det_shape,
+            )
         )
         det_pixels = int(self._det_shape[0] * self._det_shape[1])
         target_device = data_4d.device
         mask_bool = mask.to(device=target_device, dtype=torch.bool).reshape(-1)
         selected = int(mask_bool.sum().item())
         if selected <= 0:
-            return torch.zeros(self._scan_shape, dtype=torch.float32, device=target_device)
+            return torch.zeros(
+                self._scan_shape, dtype=torch.float32, device=target_device
+            )
         # Above this, dense contiguous tensordot avoids index-gather overhead.
         if selected > det_pixels // 4:
             return None
@@ -4228,20 +6174,26 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             return sparse
         if not isinstance(data, torch.Tensor):
             return None
-        data_4d = data if data.ndim == 4 else data.reshape(
-            self._scan_shape[0],
-            self._scan_shape[1],
-            *self._det_shape,
+        data_4d = (
+            data
+            if data.ndim == 4
+            else data.reshape(
+                self._scan_shape[0],
+                self._scan_shape[1],
+                *self._det_shape,
+            )
         )
         target_device = data_4d.device
         mask_f = mask.to(target_device).float()
         rows_per_chunk = self._chunk_rows()
         out = torch.zeros(self._scan_shape, dtype=torch.float32, device=target_device)
         for i in range(0, data_4d.shape[0], rows_per_chunk):
-            chunk = data_4d[i:i + rows_per_chunk]
+            chunk = data_4d[i : i + rows_per_chunk]
             if not torch.is_floating_point(chunk):
                 chunk = chunk.float()
-            out[i:i + rows_per_chunk] = torch.tensordot(chunk, mask_f, dims=([2, 3], [0, 1]))
+            out[i : i + rows_per_chunk] = torch.tensordot(
+                chunk, mask_f, dims=([2, 3], [0, 1])
+            )
         return out
 
     def _sparse_masked_sum_for_frame_data(self, data, mask) -> np.ndarray | None:
@@ -4251,22 +6203,36 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             return None
         return result.cpu().numpy().astype(np.float32, copy=False)
 
-    def _compare_virtual_image_tensor_for_frame(self, idx: int, mask) -> torch.Tensor | None:
+    def _compare_virtual_image_tensor_for_frame(
+        self, idx: int, mask
+    ) -> torch.Tensor | None:
         data = getattr(self, "_data", None)
         if getattr(data, "datasets", None) is not None:
             return None
         frame = self._frame_data_for_index(int(idx))
         return self._masked_sum_tensor_for_frame_data(frame, mask)
 
-    def _compare_virtual_images_for_indices(self, indices: Sequence[int], mask) -> list[np.ndarray]:
+    def _compare_virtual_images_for_indices(
+        self, indices: Sequence[int], mask
+    ) -> list[np.ndarray]:
         mask_area = self._detector_mask_area(mask)
         tensor_images: list[torch.Tensor] = []
+        allocation_failed = False
+        needs_fallback = False
         for idx in indices:
-            image = self._compare_virtual_image_tensor_for_frame(int(idx), mask)
+            try:
+                image = self._compare_virtual_image_tensor_for_frame(int(idx), mask)
+            except BaseException as exc:
+                if not _is_recoverable_allocation_error(exc):
+                    raise
+                self._reclaim_compare_allocation_failure()
+                allocation_failed = True
+                break
             if image is None:
+                needs_fallback = True
                 break
             tensor_images.append(image / mask_area)
-        if len(tensor_images) == len(indices):
+        if tensor_images and (allocation_failed or len(tensor_images) == len(indices)):
             # Enqueue every panel reduction before copying results back. For
             # Dataset5dstem sharded across cuda:0/cuda:1, this lets both GPUs
             # work concurrently instead of synchronizing after each panel.
@@ -4277,13 +6243,26 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
                 ).reshape(self.shape_rows, self.shape_cols)
                 for image in tensor_images
             ]
-        return [
-            np.ascontiguousarray(
-                self._compare_virtual_image_for_frame(idx, mask),
-                dtype=np.float32,
-            ).reshape(self.shape_rows, self.shape_cols)
-            for idx in indices
-        ]
+        if allocation_failed:
+            return []
+        if tensor_images and not needs_fallback:
+            return []
+        images: list[np.ndarray] = []
+        for idx in indices:
+            try:
+                image = self._compare_virtual_image_for_frame(idx, mask)
+            except BaseException as exc:
+                if not _is_recoverable_allocation_error(exc):
+                    raise
+                self._reclaim_compare_allocation_failure()
+                break
+            images.append(
+                np.ascontiguousarray(
+                    image,
+                    dtype=np.float32,
+                ).reshape(self.shape_rows, self.shape_cols)
+            )
+        return [image / mask_area for image in images]
 
     def _virtual_image_for_frame(self, frame_idx: int) -> np.ndarray:
         """Compute virtual image for a specific 5D frame without mutating traits.
@@ -4297,9 +6276,13 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         elif self.roi_mode == "square" and self.roi_radius > 0:
             mask = self._create_square_mask(cx, cy, self.roi_radius)
         elif self.roi_mode == "annular" and self.roi_radius > 0:
-            mask = self._create_annular_mask(cx, cy, self.roi_radius_inner, self.roi_radius)
+            mask = self._create_annular_mask(
+                cx, cy, self.roi_radius_inner, self.roi_radius
+            )
         elif self.roi_mode == "rect" and self.roi_width > 0 and self.roi_height > 0:
-            mask = self._create_rect_mask(cx, cy, self.roi_width / 2, self.roi_height / 2)
+            mask = self._create_rect_mask(
+                cx, cy, self.roi_width / 2, self.roi_height / 2
+            )
         else:
             row = int(max(0, min(round(cy), self._det_shape[0] - 1)))
             col = int(max(0, min(round(cx), self._det_shape[1] - 1)))
@@ -4331,7 +6314,9 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         Returns numpy (scan_r, scan_c) float32; the only consumer is
         `_to_float32_bytes`. Verified bit-identical to the old inline tensordot
         (tests/kernels/test_backend_parity.py + frozen widget baseline)."""
-        mask_np = mask.detach().cpu().numpy() if hasattr(mask, "detach") else np.asarray(mask)
+        mask_np = (
+            mask.detach().cpu().numpy() if hasattr(mask, "detach") else np.asarray(mask)
+        )
         return self._compute.masked_sum(mask_np)
 
     def _to_float32_bytes(self, arr: torch.Tensor) -> bytes:
@@ -4367,9 +6352,13 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         elif self.roi_mode == "square" and self.roi_radius > 0:
             mask = self._create_square_mask(cx, cy, self.roi_radius)
         elif self.roi_mode == "annular" and self.roi_radius > 0:
-            mask = self._create_annular_mask(cx, cy, self.roi_radius_inner, self.roi_radius)
+            mask = self._create_annular_mask(
+                cx, cy, self.roi_radius_inner, self.roi_radius
+            )
         elif self.roi_mode == "rect" and self.roi_width > 0 and self.roi_height > 0:
-            mask = self._create_rect_mask(cx, cy, self.roi_width / 2, self.roi_height / 2)
+            mask = self._create_rect_mask(
+                cx, cy, self.roi_width / 2, self.roi_height / 2
+            )
         else:
             # Point mode: single detector pixel via a one-hot mask through the same
             # backend (sum of data[:, :, row, col] * one-hot == that pixel). One path
@@ -4378,7 +6367,9 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             col = int(max(0, min(round(cx), self._det_shape[1] - 1)))
             point_mask = np.zeros(self._det_shape, dtype=np.float32)
             point_mask[row, col] = 1.0
-            self.virtual_image_bytes = self._to_float32_bytes(self._fast_masked_sum(point_mask))
+            self.virtual_image_bytes = self._to_float32_bytes(
+                self._fast_masked_sum(point_mask)
+            )
             return
 
         self.virtual_image_bytes = self._to_float32_bytes(self._fast_masked_sum(mask))

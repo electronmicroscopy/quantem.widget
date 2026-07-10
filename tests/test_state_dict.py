@@ -78,6 +78,7 @@ def test_show4dstem_state_dict_keys(show4dstem_widget):
         "controls_collapsed",
         "show_stats",
         "show_scale_bar",
+        "compare_group_mode",
     ):
         assert required in s, f"state_dict missing key {required!r}"
 
@@ -109,6 +110,7 @@ def test_show4dstem_state_dict_roundtrip_mutated(show4dstem_widget):
         "view_mode",
         "compare_layout",
         "compare_dp_mode",
+        "compare_group_mode",
     }
     original = show4dstem_widget.state_dict()
     mutated = _mutate_state(original)

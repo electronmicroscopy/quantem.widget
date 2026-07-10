@@ -187,10 +187,19 @@ def test_show4dstem_compare_grid_builds_virtual_image_stack() -> None:
         assert widget.compare_grid_width_px == 720
         assert widget.compare_panel_gap_px == 3
         assert widget.compare_dp_mode == "average"
+        assert widget.compare_group_mode == "paged"
         assert widget.compare_panel_count == 4
         assert widget.compare_panel_indices == [0, 1, 2, 3]
         assert len(widget.compare_virtual_image_bytes) == 4 * 3 * 4 * 4
         assert "4/5 dataset panels" in widget.compare_status
+        widget.show_compare_all_groups()
+        assert widget.compare_group_mode == "all"
+        assert widget.compare_panel_count == 5
+        assert widget.compare_panel_indices == [0, 1, 2, 3, 4]
+        assert "all groups" in widget.compare_status
+        widget.show_compare_paged_groups()
+        assert widget.compare_group_mode == "paged"
+        assert widget.compare_panel_indices == [0, 1, 2, 3]
         average_dp = widget.frame_bytes
         widget.compare_dp_mode = "selected"
         assert widget.compare_dp_mode == "selected"
@@ -205,9 +214,10 @@ def test_show4dstem_compare_grid_builds_virtual_image_stack() -> None:
 
         widget.hide_compare_panel("scan-0")
         assert widget.compare_hidden_panels == [0]
-        assert widget.compare_panel_indices == [3, 1, 2, 4]
+        assert widget.compare_panel_indices == [3, 1, 2]
         widget.show_compare_panel("scan-0")
         assert widget.compare_hidden_panels == []
+        assert widget.compare_panel_indices == [3, 0, 1, 2]
 
         widget.star_compare_panel("scan-3")
         widget.star_compare_panel(1)
@@ -240,6 +250,7 @@ def test_show4dstem_compare_grid_builds_virtual_image_stack() -> None:
         try:
             restored.load_state_dict(state)
             assert restored.compare_dp_mode == widget.compare_dp_mode
+            assert restored.compare_group_mode == widget.compare_group_mode
             assert restored.compare_grid_width_px == widget.compare_grid_width_px
             assert restored.compare_panel_gap_px == widget.compare_panel_gap_px
             assert restored.compare_panel_order == widget.compare_panel_order
@@ -279,6 +290,77 @@ def test_show4dstem_5d_offline_save_state_embeds_inline_stack() -> None:
         state = widget.get_state(drop_defaults=False)
         assert state["offline"] is True
         assert state["_offline_stack"] == widget._offline_stack
+    finally:
+        widget.close()
+
+
+def test_show4dstem_compare_grid_pages_panels() -> None:
+    from quantem.widget import Show4DSTEM
+
+    data = np.arange(7 * 3 * 4 * 6 * 6, dtype=np.uint16).reshape(7, 3, 4, 6, 6)
+    widget = Show4DSTEM(
+        data,
+        view_mode="multiple",
+        compare_max_panels=3,
+        frame_dim_label="Dataset",
+        precompute_virtual_images=False,
+        verbose=False,
+    )
+
+    try:
+        assert widget.compare_page_count == 3
+        assert widget.compare_page_idx == 0
+        assert widget.compare_panel_indices == [0, 1, 2]
+        assert "page 1/3" in widget.compare_status
+
+        widget.set_compare_page(1)
+
+        assert widget.compare_page_idx == 1
+        assert widget.compare_panel_indices == [3, 4, 5]
+        assert widget.frame_idx == 3
+        assert "page 2/3" in widget.compare_status
+
+        widget.next_compare_page()
+        assert widget.compare_panel_indices == [6]
+        assert widget.compare_page_idx == 2
+        assert widget.frame_idx == 6
+
+        widget.next_compare_page()
+        assert widget.compare_page_idx == 2
+
+        widget.previous_compare_page()
+        assert widget.compare_panel_indices == [3, 4, 5]
+        assert widget.frame_idx == 3
+
+        widget.frame_idx = 6
+        assert widget.compare_page_idx == 2
+        assert widget.compare_panel_indices == [6]
+
+        widget.frame_idx = 1
+        assert widget.compare_page_idx == 0
+        assert widget.compare_panel_indices == [0, 1, 2]
+
+        widget.show_compare_all_groups()
+        assert widget.compare_group_mode == "all"
+        assert widget.compare_page_count == 3
+        assert widget.compare_panel_count == 7
+        assert widget.compare_panel_indices == [0, 1, 2, 3, 4, 5, 6]
+        assert "all groups" in widget.compare_status
+
+        widget.show_compare_paged_groups()
+        assert widget.compare_group_mode == "paged"
+        assert widget.compare_page_idx == 0
+        assert widget.compare_panel_indices == [0, 1, 2]
+
+        widget.hide_compare_panel(1)
+        assert widget.compare_page_idx == 0
+        assert widget.compare_page_count == 3
+        assert widget.compare_panel_indices == [0, 2]
+        assert widget.frame_idx == 0
+        assert "hidden" in widget.compare_status
+
+        widget.set_compare_page(1)
+        assert widget.compare_panel_indices == [3, 4, 5]
     finally:
         widget.close()
 
@@ -553,6 +635,7 @@ def test_show4dstem_compare_grid_validates_api() -> None:
         ({"compare_grid_width_px": -1}, "compare_grid_width_px"),
         ({"compare_panel_gap_px": -1}, "compare_panel_gap_px"),
         ({"compare_max_panels": 0}, "compare_max_panels"),
+        ({"compare_group_mode": "merged"}, "compare_group_mode"),
         ({"compare_dp_mode": "median"}, "compare_dp_mode"),
     ]:
         try:

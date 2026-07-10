@@ -30,7 +30,7 @@ import { decodeBslz4ToStack, type Bslz4Spec } from "../engine/bslz4";
 import { LazyShow4DSTEM } from "../engine/lazy";
 import { drawScaleBarHiDPI, drawColorbar, roundToNiceValue } from "../figure";
 import { findDataRange, sliderRange, computeStats, computeHistogramFromBytes, percentileClip } from "../stats";
-import { downloadBlob, extractBytes, formatNumber, downloadDataView, preserveRestoredWidgetModelsOnSave } from "../format";
+import { downloadBlob, extractBytes, formatNumber, preserveRestoredWidgetModelsOnSave } from "../format";
 import { useHideStaticFallback } from "../staticFallback";
 import { MetadataSection } from "../widgetInfo";
 
@@ -191,7 +191,7 @@ function DebugPerfBadge({
     <Box
       component="span"
       data-quantem-debug-badge={widget}
-      title={`${widget} debug browser FPS`}
+      title={`${widget} debug browser UI FPS`}
       sx={{
         ml: 0.75,
         px: 0.5,
@@ -207,7 +207,7 @@ function DebugPerfBadge({
         verticalAlign: "middle",
       }}
     >
-      Debug FPS {fpsText}
+      Debug UI FPS {fpsText}
     </Box>
   );
 }
@@ -230,19 +230,45 @@ type Show4DSTEMWindow = Window & typeof globalThis & {
   showSaveFilePicker?: (options?: Show4DSTEMSavePickerOptions) => Promise<Show4DSTEMFileHandle>;
 };
 
-function makeHtmlExportFilename(title: string, nFrames: number, scanRows: number, scanCols: number, detRows: number, detCols: number, dtype: string, detBin: number): string {
+type HtmlExportKind = "interactive" | "report";
+type HtmlDatasetScope = "unhidden" | "current_page" | "starred" | "all";
+type HtmlExportDtype = "uint8" | "uint16";
+type HtmlInteractivePreset = {
+  label: string;
+  dtype: HtmlExportDtype;
+  detBin: number;
+  scanBin: number;
+  estimatedBytes: number;
+};
+
+function makeHtmlExportFilename(
+  title: string,
+  nFrames: number,
+  scanRows: number,
+  scanCols: number,
+  detRows: number,
+  detCols: number,
+  dtype: string,
+  detBin: number,
+  scanBin: number,
+  exportKind: HtmlExportKind,
+  datasetScope: HtmlDatasetScope,
+): string {
   let slug = (title || "show4dstem")
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "_")
     .replace(/^_+|_+$/g, "");
   while (slug.includes("__")) slug = slug.replace(/__/g, "_");
   if (!slug) slug = "show4dstem";
+  const binnedScanRows = Math.max(1, Math.floor(scanRows / scanBin));
+  const binnedScanCols = Math.max(1, Math.floor(scanCols / scanBin));
   const binnedRows = Math.max(1, Math.floor(detRows / detBin));
   const binnedCols = Math.max(1, Math.floor(detCols / detBin));
   const shape = nFrames > 1
-    ? `${nFrames}x${scanRows}x${scanCols}x${binnedRows}x${binnedCols}`
-    : `${scanRows}x${scanCols}x${binnedRows}x${binnedCols}`;
-  return `${slug}_${shape}_${dtype}_bin${detBin}.html`;
+    ? `${nFrames}x${binnedScanRows}x${binnedScanCols}x${binnedRows}x${binnedCols}`
+    : `${binnedScanRows}x${binnedScanCols}x${binnedRows}x${binnedCols}`;
+  const prefix = exportKind === "report" ? `report_${datasetScope}` : dtype;
+  return `${slug}_${shape}_${prefix}_rbin${scanBin}_kbin${detBin}.html`;
 }
 
 function formatSavedBytes(bytes: number): string {
@@ -252,13 +278,35 @@ function formatSavedBytes(bytes: number): string {
   return `${mb.toFixed(2)} MB`;
 }
 
-function formatEstimatedHtmlSize(payloadBytes: number): string {
-  const htmlBytes = Math.max(0, payloadBytes) * 4 / 3 + HTML_EXPORT_OVERHEAD_BYTES;
+function formatEstimatedHtmlBytes(htmlBytes: number): string {
   const mb = htmlBytes / (1024 * 1024);
   if (mb >= 1000) return `~${(mb / 1024).toFixed(1)} GB`;
   if (mb >= 100) return `~${Math.round(mb)} MB`;
   if (mb >= 10) return `~${mb.toFixed(1)} MB`;
   return `~${mb.toFixed(2)} MB`;
+}
+
+function estimateInteractiveHtmlBytes(
+  nFrames: number,
+  scanRows: number,
+  scanCols: number,
+  detRows: number,
+  detCols: number,
+  dtype: HtmlExportDtype,
+  detBin: number,
+  scanBin: number,
+): number {
+  const binnedScanRows = Math.max(1, Math.floor(scanRows / scanBin));
+  const binnedScanCols = Math.max(1, Math.floor(scanCols / scanBin));
+  const binnedRows = Math.max(1, Math.floor(detRows / detBin));
+  const binnedCols = Math.max(1, Math.floor(detCols / detBin));
+  const bytesPerPixel = dtype === "uint16" ? 2 : 1;
+  const payloadBytes = Math.max(0, nFrames) * binnedScanRows * binnedScanCols * binnedRows * binnedCols * bytesPerPixel;
+  return Math.max(0, payloadBytes) * 4 / 3 + HTML_EXPORT_OVERHEAD_BYTES;
+}
+
+function formatEstimatedHtmlSize(payloadBytes: number): string {
+  return formatEstimatedHtmlBytes(Math.max(0, payloadBytes) * 4 / 3 + HTML_EXPORT_OVERHEAD_BYTES);
 }
 
 function isAbortLikeError(err: unknown): boolean {
@@ -1453,7 +1501,7 @@ function CompareVirtualGrid({
   const autoCols = displayCount >= 8 ? 4 : displayCount >= 5 ? 3 : displayCount >= 2 ? 2 : 1;
   const requestedMaxCols = cols > 0 ? Math.max(1, Math.floor(cols)) : autoCols;
   const gridCols = Math.max(1, Math.min(displayCount, requestedMaxCols));
-  const mobileGridCols = cols > 0 ? gridCols : Math.max(1, Math.min(gridCols, 2));
+  const mobileGridCols = Math.max(1, Math.min(gridCols, 2));
   const gridGapPx = Math.max(0, Math.floor(Number.isFinite(panelGapPx) ? panelGapPx : 0));
   const resizeGripSx = React.useMemo(() => ({
     position: "absolute",
@@ -1948,7 +1996,11 @@ function CompareVirtualGrid({
               )}
               {panelChromeVisible && onResizeStart && !reorderMode && (
                 <Box
-                  onPointerDown={(event) => onResizeStart(event, gridCols)}
+                  onPointerDown={(event) => {
+                    const view = event.currentTarget.ownerDocument.defaultView;
+                    const activeGridCols = view && view.innerWidth <= 700 ? mobileGridCols : gridCols;
+                    onResizeStart(event, activeGridCols);
+                  }}
                   aria-label={`Resize Show4DSTEM multiple panel ${frame + 1}`}
                   role="button"
                   tabIndex={-1}
@@ -1993,6 +2045,7 @@ function Show4DSTEM() {
   const [title] = useModelState<string>("title");
   const [showTitle] = useModelState<boolean>("show_title");
   const [gpuMemoryLabel] = useModelState<string>("gpu_memory_label");
+  const [memoryWarning] = useModelState<string>("memory_warning");
 
   const [frameBytes] = useModelState<DataView>("frame_bytes");
   const [virtualImageBytes] = useModelState<DataView>("virtual_image_bytes");
@@ -2042,7 +2095,11 @@ function Show4DSTEM() {
   const [comparePanelIndices] = useModelState<number[]>("compare_panel_indices");
   const [compareStatus] = useModelState<string>("compare_status");
   const [compareDpMode, setCompareDpMode] = useModelState<string>("compare_dp_mode");
+  const [compareGroupMode, setCompareGroupMode] = useModelState<string>("compare_group_mode");
+  const [comparePageIdx, setComparePageIdx] = useModelState<number>("compare_page_idx");
+  const [comparePageCount] = useModelState<number>("compare_page_count");
   const [comparePanelGapPx] = useModelState<number>("compare_panel_gap_px");
+  const [compareMaxPanels] = useModelState<number>("compare_max_panels");
   const [comparePanelOrder, setComparePanelOrder] = useModelState<number[]>("compare_panel_order");
   const [compareHiddenPanels, setCompareHiddenPanels] = useModelState<number[]>("compare_hidden_panels");
   const [compareStarredPanels, setCompareStarredPanels] = useModelState<number[]>("compare_starred_panels");
@@ -2434,10 +2491,12 @@ function Show4DSTEM() {
         model.set("virtual_image_bytes", new DataView(vi.buffer));
       };
       let compareViGen = 0;
-      const compareVisibleIndices = () => {
+      const comparePageState = () => {
         const total = Math.max(0, Number(model.get("n_frames") || 0));
         const mode = String(model.get("view_mode") || "single");
-        if (total <= 1 || (mode !== "multiple" && mode !== "compare")) return [] as number[];
+        if (total <= 1 || (mode !== "multiple" && mode !== "compare")) {
+          return { visible: [] as number[], page: [] as number[] };
+        }
         const maxPanels = Math.max(1, Number(model.get("compare_max_panels") || total));
         const natural = Array.from({ length: total }, (_, idx) => idx);
         const rawOrder = Array.isArray(model.get("compare_panel_order")) ? model.get("compare_panel_order") as number[] : [];
@@ -2454,7 +2513,24 @@ function Show4DSTEM() {
             .filter((idx) => Number.isInteger(idx) && idx >= 0 && idx < total)
             .map((idx) => Number(idx)),
         );
-        return ordered.filter((idx) => !hidden.has(idx)).slice(0, maxPanels);
+        const visible = ordered.filter((idx) => !hidden.has(idx));
+        const pageCount = Math.max(1, Math.ceil(ordered.length / maxPanels));
+        const rawPage = Math.round(Number(model.get("compare_page_idx") || 0));
+        const pageIdx = Math.max(0, Math.min(pageCount - 1, rawPage));
+        if (Number(model.get("compare_page_count") || 1) !== pageCount) model.set("compare_page_count", pageCount);
+        if (rawPage !== pageIdx) model.set("compare_page_idx", pageIdx);
+        const start = pageIdx * maxPanels;
+        return {
+          visible,
+          page: ordered.slice(start, start + maxPanels).filter((idx) => !hidden.has(idx)),
+        };
+      };
+      const compareVisibleIndices = () => {
+        const state = comparePageState();
+        return String(model.get("compare_group_mode") || "paged") === "all" ? state.visible : state.page;
+      };
+      const compareAverageDpIndices = () => {
+        return comparePageState().page;
       };
       const recomputeCompareVI = async () => {
         const indices = compareVisibleIndices();
@@ -2504,7 +2580,7 @@ function Show4DSTEM() {
         const mode = String(model.get("view_mode") || "single");
         const dpMode = String(model.get("compare_dp_mode") || "average");
         if ((mode === "multiple" || mode === "compare") && dpMode !== "selected" && getVol) {
-          const indices = compareVisibleIndices();
+          const indices = compareAverageDpIndices();
           if (indices.length) {
             const averaged = new Float32Array(detSize);
             let count = 0;
@@ -2533,6 +2609,7 @@ function Show4DSTEM() {
       const onDP = () => { void recomputeDP(); };
       const onPos = () => { void recomputeFrame(); };
       const onCompareFrameSource = () => { void recomputeFrame(); };
+      const onCompareGridSource = () => { void recomputeCompareVI(); void recomputeFrame(); };
       const activateCurrentVolume = async () => {
         if (!getVol) return true;
         const nVolumes = volumeCount || volMetas.length || 1;
@@ -2603,9 +2680,11 @@ function Show4DSTEM() {
       model.on("change:pos_row", onPos);
       model.on("change:pos_col", onPos);
       model.on("change:compare_dp_mode", onCompareFrameSource);
-      model.on("change:compare_max_panels", onCompareFrameSource);
-      model.on("change:compare_panel_order", onCompareFrameSource);
-      model.on("change:compare_hidden_panels", onCompareFrameSource);
+      model.on("change:compare_max_panels", onCompareGridSource);
+      model.on("change:compare_group_mode", onCompareGridSource);
+      model.on("change:compare_page_idx", onCompareGridSource);
+      model.on("change:compare_panel_order", onCompareGridSource);
+      model.on("change:compare_hidden_panels", onCompareGridSource);
       detach = () => {
         viTraits.forEach((t) => model.off("change:" + t, onVI));
         dpTraits.forEach((t) => model.off("change:" + t, onDP));
@@ -2615,9 +2694,11 @@ function Show4DSTEM() {
         model.off("change:pos_row", onPos);
         model.off("change:pos_col", onPos);
         model.off("change:compare_dp_mode", onCompareFrameSource);
-        model.off("change:compare_max_panels", onCompareFrameSource);
-        model.off("change:compare_panel_order", onCompareFrameSource);
-        model.off("change:compare_hidden_panels", onCompareFrameSource);
+        model.off("change:compare_max_panels", onCompareGridSource);
+        model.off("change:compare_group_mode", onCompareGridSource);
+        model.off("change:compare_page_idx", onCompareGridSource);
+        model.off("change:compare_panel_order", onCompareGridSource);
+        model.off("change:compare_hidden_panels", onCompareGridSource);
         model.off("change:frame_idx", onFrame);
         model.off("change:view_mode", recomputeActiveView);
         computes.forEach((c) => c.dispose());          // single / non-lazy resident set
@@ -2665,16 +2746,45 @@ function Show4DSTEM() {
   const effectiveShowFft = showFft;
   const displayViewMode = viewMode === "compare" ? "multiple" : viewMode === "temporal" ? "single" : (viewMode || "single");
   const compareMode = (displayViewMode === "multiple" || viewMode === "compare") && nFrames > 1;
+  const compareAllGroups = String(compareGroupMode || "paged") === "all";
+  const activeComparePageCount = Math.max(1, Math.round(Number(comparePageCount || 1)));
+  const activeComparePageIdx = Math.max(0, Math.min(activeComparePageCount - 1, Math.round(Number(comparePageIdx || 0))));
+  const comparePageStatus = compareAllGroups ? "All groups" : `${activeComparePageIdx + 1}/${activeComparePageCount}`;
+  const comparePageButtonItems = React.useMemo<(number | "gap")[]>(() => {
+    if (activeComparePageCount <= 8) {
+      return Array.from({ length: activeComparePageCount }, (_, idx) => idx);
+    }
+    const pages = Array.from(new Set([
+      0,
+      activeComparePageIdx - 1,
+      activeComparePageIdx,
+      activeComparePageIdx + 1,
+      activeComparePageCount - 1,
+    ].filter((idx) => idx >= 0 && idx < activeComparePageCount))).sort((a, b) => a - b);
+    const items: (number | "gap")[] = [];
+    pages.forEach((page, idx) => {
+      if (idx > 0 && page - pages[idx - 1] > 1) items.push("gap");
+      items.push(page);
+    });
+    return items;
+  }, [activeComparePageCount, activeComparePageIdx]);
+  const frameSliderLabel = compareMode ? "Panel" : frameDimLabel;
+  const frameSliderAriaLabel = compareMode ? "Show4DSTEM active multiple panel" : `Show4DSTEM ${frameDimLabel.toLowerCase()}`;
+  const [comparePagePlaying, setComparePagePlaying] = React.useState(false);
   const compareGridWidth = compareGridPreviewWidth ?? (compareGridWidthPx > 0 ? compareGridWidthPx : COMPARE_GRID_DEFAULT_WIDTH);
   React.useEffect(() => {
-    if (!compareMode) {
+    if (!compareMode || compareAllGroups) {
       setCompareReorderMode(false);
       setCompareDraggingFrame(null);
       setComparePendingMoveFrame(null);
       setCompareGridPreviewWidth(null);
+      setComparePagePlaying(false);
       compareGridResizeCleanupRef.current?.();
     }
-  }, [compareMode]);
+  }, [compareAllGroups, compareMode]);
+  React.useEffect(() => {
+    if (activeComparePageCount <= 1 || compareAllGroups) setComparePagePlaying(false);
+  }, [activeComparePageCount, compareAllGroups]);
   const compareHiddenCount = React.useMemo(() => {
     const seen = new Set<number>();
     (compareHiddenPanels || []).forEach((idx) => {
@@ -2742,10 +2852,13 @@ function Show4DSTEM() {
     setComparePanelOrder([]);
     setCompareHiddenPanels([]);
     setCompareStarredPanels([]);
+    setCompareGroupMode("paged");
+    setComparePageIdx(0);
+    setComparePagePlaying(false);
     setComparePendingMoveFrame(null);
     setCompareDraggingFrame(null);
     setCompareHiddenMenuAnchor(null);
-  }, [setCompareHiddenPanels, setComparePanelOrder, setCompareStarredPanels]);
+  }, [setCompareGroupMode, setCompareHiddenPanels, setComparePageIdx, setComparePanelOrder, setCompareStarredPanels]);
 
   // ROI FFT state (VI ROI crops virtual image for FFT)
   const [fftCropDims, setFftCropDims] = React.useState<{ cropWidth: number; cropHeight: number; fftWidth: number; fftHeight: number } | null>(null);
@@ -2761,10 +2874,6 @@ function Show4DSTEM() {
   const [resizeCanvasStart, setResizeCanvasStart] = React.useState<{ x: number; y: number; size: number } | null>(null);
 
   // Export
-  const [, setGifExportRequested] = useModelState<boolean>("_gif_export_requested");
-  const [gifData] = useModelState<DataView>("_gif_data");
-  const [gifMetadataJson] = useModelState<string>("_gif_metadata_json");
-  const [exporting, setExporting] = React.useState(false);
   const [dpExportAnchor, setDpExportAnchor] = React.useState<HTMLElement | null>(null);
   const [, setExportRequest] = useModelState<string>("export_request");
   const [exportStatus] = useModelState<string>("export_status");
@@ -2789,19 +2898,69 @@ function Show4DSTEM() {
       setHtmlExportBusy(false);
     }
   }, [exportStatus]);
-  const estimateHtmlExportSize = React.useCallback((dtype: string, detBin: number) => {
+  const reportDatasetCount = React.useCallback((datasetScope: HtmlDatasetScope) => {
+    const hidden = new Set((compareHiddenPanels || []).filter((idx) => Number.isInteger(idx) && idx >= 0 && idx < nFrames));
+    const unhidden = Math.max(1, nFrames - hidden.size);
+    if (datasetScope === "all") return Math.max(1, nFrames);
+    if (datasetScope === "starred") {
+      return (compareStarredPanels || []).filter((idx) => Number.isInteger(idx) && idx >= 0 && idx < nFrames && !hidden.has(idx)).length;
+    }
+    if (datasetScope === "current_page") {
+      const pageSize = Math.max(1, Math.round(Number(compareMaxPanels || comparePanelCount || unhidden || 1)));
+      const start = Math.max(0, Math.round(Number(comparePageIdx || 0))) * pageSize;
+      return normalizedCompareOrder()
+        .slice(start, start + pageSize)
+        .filter((idx) => !hidden.has(idx)).length;
+    }
+    return unhidden;
+  }, [compareHiddenPanels, compareMaxPanels, comparePageIdx, comparePanelCount, compareStarredPanels, nFrames, normalizedCompareOrder]);
+
+  const estimateHtmlExportSize = React.useCallback((
+    exportKind: HtmlExportKind,
+    dtype: string,
+    detBin: number,
+    scanBin: number,
+    datasetScope: HtmlDatasetScope = "unhidden",
+  ) => {
+    const binnedScanRows = Math.max(1, Math.floor(shapeRows / scanBin));
+    const binnedScanCols = Math.max(1, Math.floor(shapeCols / scanBin));
+    if (exportKind === "report") {
+      const datasetCount = reportDatasetCount(datasetScope);
+      const presetCount = 4;
+      const rgbBytes = datasetCount * presetCount * binnedScanRows * binnedScanCols * 3;
+      return formatEstimatedHtmlSize(rgbBytes);
+    }
     const binnedRows = Math.max(1, Math.floor(detRows / detBin));
     const binnedCols = Math.max(1, Math.floor(detCols / detBin));
     const bytesPerPixel = dtype === "uint16" ? 2 : 1;
-    const payloadBytes = Math.max(0, nFrames) * Math.max(0, shapeRows) * Math.max(0, shapeCols) * binnedRows * binnedCols * bytesPerPixel;
+    const payloadBytes = Math.max(0, nFrames) * binnedScanRows * binnedScanCols * binnedRows * binnedCols * bytesPerPixel;
     return formatEstimatedHtmlSize(payloadBytes);
-  }, [detCols, detRows, nFrames, shapeCols, shapeRows]);
+  }, [detCols, detRows, nFrames, reportDatasetCount, shapeCols, shapeRows]);
 
-  const handleHtmlExportSelect = async (dtype: string, detBin: number) => {
+  const handleHtmlExportSelect = async (
+    exportKind: HtmlExportKind,
+    dtype: string,
+    detBin: number,
+    scanBin: number,
+    datasetScope: HtmlDatasetScope = "unhidden",
+  ) => {
     setDpExportAnchor(null);
-    if (!["uint8", "uint16"].includes(dtype) || ![1, 2, 4, 8].includes(detBin)) return;
+    if (!["uint8", "uint16"].includes(dtype) || ![1, 2, 4, 8].includes(detBin) || ![1, 2, 4, 8].includes(scanBin)) return;
+    if (detRows % detBin !== 0 || detCols % detBin !== 0 || shapeRows % scanBin !== 0 || shapeCols % scanBin !== 0) return;
     const mode = `${dtype}-bin${detBin}`;
-    const filename = makeHtmlExportFilename(title, nFrames, shapeRows, shapeCols, detRows, detCols, dtype, detBin);
+    const filename = makeHtmlExportFilename(
+      title,
+      nFrames,
+      shapeRows,
+      shapeCols,
+      detRows,
+      detCols,
+      dtype,
+      detBin,
+      scanBin,
+      exportKind,
+      datasetScope,
+    );
     const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
     setHtmlExportBusy(true);
     setLocalHtmlExportStatus("Choose export location...");
@@ -2826,8 +2985,101 @@ function Show4DSTEM() {
     }
     pendingHtmlExportRef.current = { id, filename, mode, handle };
     setLocalHtmlExportStatus(`Preparing ${filename}...`);
-    setExportRequest(JSON.stringify({ mode, id, filename, download: true }));
+    setExportRequest(JSON.stringify({
+      export_kind: exportKind,
+      mode,
+      dtype,
+      det_bin: detBin,
+      scan_bin: scanBin,
+      dataset_scope: datasetScope,
+      id,
+      filename,
+      download: true,
+    }));
   };
+
+  const reportScanBin = React.useMemo(() => (
+    [4, 2, 1].find((bin) => shapeRows % bin === 0 && shapeCols % bin === 0) || 1
+  ), [shapeCols, shapeRows]);
+  const detailedReportScanBin = React.useMemo(() => (
+    [2, 1].find((bin) => shapeRows % bin === 0 && shapeCols % bin === 0) || 1
+  ), [shapeCols, shapeRows]);
+  const reportDetBin = React.useMemo(() => (
+    [8, 4, 2, 1].find((bin) => detRows % bin === 0 && detCols % bin === 0) || 1
+  ), [detCols, detRows]);
+  const interactiveHtmlPresets = React.useMemo<HtmlInteractivePreset[]>(() => {
+    const desired: Array<Omit<HtmlInteractivePreset, "estimatedBytes">> = [
+      { label: "Tiny preview", dtype: "uint8", scanBin: 8, detBin: 8 },
+      { label: "Small preview", dtype: "uint8", scanBin: 4, detBin: 8 },
+      { label: "Compact", dtype: "uint8", scanBin: 4, detBin: 4 },
+      { label: "Balanced", dtype: "uint8", scanBin: 2, detBin: 4 },
+      { label: "Detector detail", dtype: "uint8", scanBin: 1, detBin: 8 },
+      { label: "Detailed", dtype: "uint8", scanBin: 2, detBin: 2 },
+      { label: "Fine detector", dtype: "uint8", scanBin: 1, detBin: 2 },
+      { label: "Full uint8", dtype: "uint8", scanBin: 1, detBin: 1 },
+      { label: "Exact raw", dtype: "uint16", scanBin: 1, detBin: 1 },
+    ];
+    const out: HtmlInteractivePreset[] = [];
+    const seen = new Set<string>();
+    const add = (preset: Omit<HtmlInteractivePreset, "estimatedBytes">) => {
+      if (![1, 2, 4, 8].includes(preset.scanBin) || ![1, 2, 4, 8].includes(preset.detBin)) return;
+      if (shapeRows % preset.scanBin !== 0 || shapeCols % preset.scanBin !== 0) return;
+      if (detRows % preset.detBin !== 0 || detCols % preset.detBin !== 0) return;
+      const key = `${preset.dtype}:${preset.scanBin}:${preset.detBin}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      out.push({
+        ...preset,
+        estimatedBytes: estimateInteractiveHtmlBytes(
+          nFrames,
+          shapeRows,
+          shapeCols,
+          detRows,
+          detCols,
+          preset.dtype,
+          preset.detBin,
+          preset.scanBin,
+        ),
+      });
+    };
+    desired.forEach(add);
+    if (out.length < 9) {
+      const fallback: Array<Omit<HtmlInteractivePreset, "estimatedBytes">> = [];
+      (["uint8", "uint16"] as HtmlExportDtype[]).forEach((dtype) => {
+        [8, 4, 2, 1].forEach((scanBin) => {
+          [8, 4, 2, 1].forEach((detBin) => {
+            fallback.push({
+              label: dtype === "uint16" ? "16-bit option" : "8-bit option",
+              dtype,
+              scanBin,
+              detBin,
+            });
+          });
+        });
+      });
+      fallback
+        .map((preset) => ({
+          ...preset,
+          estimatedBytes: estimateInteractiveHtmlBytes(
+            nFrames,
+            shapeRows,
+            shapeCols,
+            detRows,
+            detCols,
+            preset.dtype,
+            preset.detBin,
+            preset.scanBin,
+          ),
+        }))
+        .sort((a, b) => a.estimatedBytes - b.estimatedBytes)
+        .forEach((preset) => {
+          if (out.length < 9) add(preset);
+        });
+    }
+    return out.sort((a, b) => a.estimatedBytes - b.estimatedBytes);
+  }, [detCols, detRows, nFrames, shapeCols, shapeRows]);
+  const starredReportCount = reportDatasetCount("starred");
+  const currentPageReportCount = reportDatasetCount("current_page");
 
   React.useEffect(() => {
     const pending = pendingHtmlExportRef.current;
@@ -3025,6 +3277,23 @@ function Show4DSTEM() {
 
     return () => clearInterval(timer);
   }, [framePlaying, nFrames, frameFps, frameLoop, frameReverse, frameBoomerang, setFrameIdx, setFramePlaying]);
+
+  React.useEffect(() => {
+    if (!comparePagePlaying || activeComparePageCount <= 1) return;
+    const timer = setInterval(() => {
+      setComparePageIdx((prev: number) => {
+        const current = Math.max(0, Math.min(activeComparePageCount - 1, Math.round(Number(prev) || 0)));
+        const next = current + 1;
+        if (next >= activeComparePageCount) {
+          setComparePagePlaying(false);
+          return current;
+        }
+        return next;
+      });
+    }, 700);
+
+    return () => clearInterval(timer);
+  }, [activeComparePageCount, comparePagePlaying, setComparePageIdx]);
 
   // Initialize WebGPU FFT on mount
   React.useEffect(() => {
@@ -5459,24 +5728,6 @@ function Show4DSTEM() {
   // Render
   // ─────────────────────────────────────────────────────────────────────────
 
-  const handleDpExportGif = () => {
-    setDpExportAnchor(null);
-    setExporting(true);
-    setGifExportRequested(true);
-  };
-
-  // Download GIF when data arrives from Python
-  React.useEffect(() => {
-    if (!gifData || gifData.byteLength === 0) return;
-    downloadDataView(gifData, "show4dstem_dp_animation.gif", "image/gif");
-    const metaText = (gifMetadataJson || "").trim();
-    if (metaText) {
-      downloadBlob(new Blob([metaText], { type: "application/json" }), "show4dstem_dp_animation.json");
-    }
-    setExporting(false);
-  }, [gifData, gifMetadataJson]);
-
-
   // Theme-aware select style
   const themedSelect = {
     ...controlPanel.select,
@@ -5522,6 +5773,25 @@ function Show4DSTEM() {
     flexShrink: 0,
   };
   const statsValueSx = { color: themeColors.accent };
+  const memoryWarningSx = {
+    mb: `${SPACING.SM}px`,
+    px: 1,
+    py: 0.75,
+    border: `1px solid ${themeColors.border}`,
+    borderLeft: `3px solid ${themeColors.accent}`,
+    bgcolor: themeInfo.theme === "dark" ? "rgba(245, 158, 11, 0.14)" : "rgba(245, 158, 11, 0.12)",
+    color: themeColors.text,
+    fontSize: 11,
+    lineHeight: 1.35,
+    maxWidth: "100%",
+    boxSizing: "border-box",
+    "@media (max-width: 700px)": {
+      mb: "2px",
+      px: 0.75,
+      py: 0.5,
+      fontSize: 10,
+    },
+  };
 
   const keyboardShortcutItems: [string, string][] = [
     ["↑ / ↓", "Move scan row"],
@@ -5671,6 +5941,11 @@ function Show4DSTEM() {
           <KeyboardShortcuts items={keyboardShortcutItems} />
         </Box>} theme={themeInfo.theme} />}
       </Typography>}
+      {memoryWarning && (
+        <Box role="status" data-testid="show4dstem-memory-warning" sx={memoryWarningSx}>
+          {memoryWarning}
+        </Box>
+      )}
       {/* MAIN CONTENT: DP | VI | FFT (three columns when FFT shown) */}
       <Stack
         direction={mainStackDirection}
@@ -5699,7 +5974,13 @@ function Show4DSTEM() {
               DP at ({Math.round(localPosRow)}, {Math.round(localPosCol)})
               <span style={{ color: roiColors.textColor, marginLeft: SPACING.SM }}>k: ({Math.round(localKRow)}, {Math.round(localKCol)})</span>
             </Typography>
-            {controlsVisible && <Stack direction="row" spacing={`${SPACING.SM}px`} alignItems="center">
+            {controlsVisible && <Stack
+              direction="row"
+              spacing={`${SPACING.SM}px`}
+              alignItems="center"
+              justifyContent="flex-end"
+              sx={{ flexWrap: "wrap", rowGap: 0.5 }}
+            >
               <Typography sx={{ ...typo.label, fontSize: 10 }}>Profile</Typography>
               <Switch checked={profileActive} onChange={(e) => {
                 const on = e.target.checked;
@@ -5726,21 +6007,40 @@ function Show4DSTEM() {
                 size="small"
                 sx={{ ...compactButton, color: themeColors.accent }}
                 onClick={(e) => setDpExportAnchor(e.currentTarget)}
-                disabled={exporting || htmlExportBusy}
-                title={localHtmlExportStatus || exportStatus || "Export images or standalone HTML"}
+                disabled={htmlExportBusy}
+                title={localHtmlExportStatus || exportStatus || "Export standalone HTML"}
               >
-                {exporting || htmlExportBusy ? "..." : "Export"}
+                {htmlExportBusy ? "..." : "HTML"}
               </Button>}
               {exportEnabled && <Menu anchorEl={dpExportAnchor} open={Boolean(dpExportAnchor)} onClose={() => setDpExportAnchor(null)} anchorOrigin={{ vertical: "bottom", horizontal: "left" }} transformOrigin={{ vertical: "top", horizontal: "left" }} sx={{ zIndex: 9999 }}>
-                <MenuItem onClick={() => handleHtmlExportSelect("uint8", 1)} sx={{ fontSize: 12 }}>Quantized uint8 ({estimateHtmlExportSize("uint8", 1)})</MenuItem>
-                {detRows % 2 === 0 && detCols % 2 === 0 && <MenuItem onClick={() => handleHtmlExportSelect("uint8", 2)} sx={{ fontSize: 12 }}>Binned 2x uint8 ({estimateHtmlExportSize("uint8", 2)})</MenuItem>}
-                {detRows % 4 === 0 && detCols % 4 === 0 && <MenuItem onClick={() => handleHtmlExportSelect("uint8", 4)} sx={{ fontSize: 12 }}>Binned 4x uint8 ({estimateHtmlExportSize("uint8", 4)})</MenuItem>}
-                {detRows % 8 === 0 && detCols % 8 === 0 && <MenuItem onClick={() => handleHtmlExportSelect("uint8", 8)} sx={{ fontSize: 12 }}>Binned 8x uint8 ({estimateHtmlExportSize("uint8", 8)})</MenuItem>}
-                <MenuItem onClick={() => handleHtmlExportSelect("uint16", 1)} sx={{ fontSize: 12 }}>Exact uint16 ({estimateHtmlExportSize("uint16", 1)})</MenuItem>
-                {detRows % 2 === 0 && detCols % 2 === 0 && <MenuItem onClick={() => handleHtmlExportSelect("uint16", 2)} sx={{ fontSize: 12 }}>Binned 2x uint16 ({estimateHtmlExportSize("uint16", 2)})</MenuItem>}
-                {detRows % 4 === 0 && detCols % 4 === 0 && <MenuItem onClick={() => handleHtmlExportSelect("uint16", 4)} sx={{ fontSize: 12 }}>Binned 4x uint16 ({estimateHtmlExportSize("uint16", 4)})</MenuItem>}
-                {detRows % 8 === 0 && detCols % 8 === 0 && <MenuItem onClick={() => handleHtmlExportSelect("uint16", 8)} sx={{ fontSize: 12 }}>Binned 8x uint16 ({estimateHtmlExportSize("uint16", 8)})</MenuItem>}
-                {pathLength > 0 && <MenuItem onClick={handleDpExportGif} sx={{ fontSize: 12 }}>GIF (path animation)</MenuItem>}
+                <Box sx={{ px: 1.5, pt: 1, pb: 0.25, fontSize: 11, color: themeColors.textMuted, fontWeight: 700 }}>
+                  HTML report: static PNG, no raw 4D
+                </Box>
+                <MenuItem onClick={() => handleHtmlExportSelect("report", "uint8", reportDetBin, reportScanBin, "unhidden")} sx={{ fontSize: 12 }}>
+                  Unhidden · rbin {reportScanBin} · DP kbin {reportDetBin} ({estimateHtmlExportSize("report", "uint8", reportDetBin, reportScanBin, "unhidden")})
+                </MenuItem>
+                {currentPageReportCount > 0 && (
+                  <MenuItem onClick={() => handleHtmlExportSelect("report", "uint8", reportDetBin, detailedReportScanBin, "current_page")} sx={{ fontSize: 12 }}>
+                    Current page · rbin {detailedReportScanBin} · DP kbin {reportDetBin} ({estimateHtmlExportSize("report", "uint8", reportDetBin, detailedReportScanBin, "current_page")})
+                  </MenuItem>
+                )}
+                {starredReportCount > 0 && (
+                  <MenuItem onClick={() => handleHtmlExportSelect("report", "uint8", reportDetBin, detailedReportScanBin, "starred")} sx={{ fontSize: 12 }}>
+                    Starred · rbin {detailedReportScanBin} · DP kbin {reportDetBin} ({estimateHtmlExportSize("report", "uint8", reportDetBin, detailedReportScanBin, "starred")})
+                  </MenuItem>
+                )}
+                <Box sx={{ px: 1.5, pt: 1, pb: 0.25, fontSize: 11, color: themeColors.textMuted, fontWeight: 700 }}>
+                  HTML interactive raw 4D
+                </Box>
+                {interactiveHtmlPresets.map((preset) => (
+                  <MenuItem
+                    key={`${preset.dtype}-${preset.scanBin}-${preset.detBin}`}
+                    onClick={() => handleHtmlExportSelect("interactive", preset.dtype, preset.detBin, preset.scanBin, "unhidden")}
+                    sx={{ fontSize: 12 }}
+                  >
+                    {preset.label} · {preset.dtype} · rbin {preset.scanBin} · kbin {preset.detBin} ({formatEstimatedHtmlBytes(preset.estimatedBytes)})
+                  </MenuItem>
+                ))}
               </Menu>}
               {exportEnabled && (localHtmlExportStatus || exportStatus) && (
                 <Typography
@@ -5919,10 +6219,160 @@ function Show4DSTEM() {
         <Box sx={{ width: viPanelWidth, maxWidth: "100%", ...mobilePanelSx }}>
           {/* VI Header */}
           <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ ...panelHeaderSx, ...hideBetweenPanelsOnMobileSx }}>
-            <Typography sx={{ ...typo.label, color: themeColors.textMuted }}>
-              {compareMode ? `Multiple grid | ${shapeRows}×${shapeCols}` : `${shapeRows}×${shapeCols} | ${detRows}×${detCols}`}
-            </Typography>
-            {controlsVisible && <Stack direction="row" spacing={`${SPACING.SM}px`} alignItems="center">
+            <Stack direction="row" alignItems="center" spacing={`${SPACING.SM}px`} sx={{ minWidth: 0, flexWrap: "wrap", rowGap: 0.5 }}>
+              <Typography sx={{ ...typo.label, color: themeColors.textMuted, flexShrink: 0 }}>
+                {compareMode ? `Multiple grid | ${shapeRows}×${shapeCols}` : `${shapeRows}×${shapeCols} | ${detRows}×${detCols}`}
+              </Typography>
+              {controlsVisible && compareMode && activeComparePageCount > 1 && (
+                <Box sx={{ display: "flex", alignItems: "center", gap: 0.35, flexShrink: 0 }}>
+                  <Typography sx={{ ...typo.label, fontSize: 10, flexShrink: 0 }}>Group</Typography>
+                  <Box
+                    role="group"
+                    aria-label="Show4DSTEM multiple group mode"
+                    sx={{
+                      display: "flex",
+                      alignItems: "center",
+                      border: `1px solid ${themeColors.border}`,
+                      bgcolor: themeColors.controlBg,
+                      height: 22,
+                      overflow: "hidden",
+                    }}
+                  >
+                    {[
+                      ["paged", "Paged"],
+                      ["all", "All"],
+                    ].map(([value, label]) => {
+                      const active = compareAllGroups ? value === "all" : value === "paged";
+                      return (
+                        <Button
+                          key={value}
+                          size="small"
+                          aria-label={`Use ${label.toLowerCase()} Show4DSTEM multiple groups`}
+                          aria-pressed={active}
+                          onClick={() => {
+                            setComparePagePlaying(false);
+                            setCompareGroupMode(value);
+                          }}
+                          sx={{
+                            ...compactButton,
+                            minWidth: 38,
+                            height: 20,
+                            px: 0.5,
+                            borderRadius: 0,
+                            color: active ? "#fff" : themeColors.textMuted,
+                            bgcolor: active ? themeColors.accent : "transparent",
+                            "&:hover": { bgcolor: active ? themeColors.accent : themeColors.bgAlt },
+                          }}
+                        >
+                          {label}
+                        </Button>
+                      );
+                    })}
+                  </Box>
+                  {!compareAllGroups && <>
+                  <IconButton
+                    size="small"
+                    aria-label="Previous Show4DSTEM multiple group"
+                    disabled={activeComparePageIdx <= 0}
+                    onClick={() => {
+                      setComparePagePlaying(false);
+                      setComparePageIdx(Math.max(0, activeComparePageIdx - 1));
+                    }}
+                    sx={{ color: activeComparePageIdx <= 0 ? themeColors.textMuted : themeColors.accent, p: 0.2 }}
+                  >
+                    <FastRewindIcon sx={{ fontSize: 15 }} />
+                  </IconButton>
+                  <IconButton
+                    size="small"
+                    aria-label={comparePagePlaying ? "Pause Show4DSTEM multiple groups" : "Play Show4DSTEM multiple groups"}
+                    onClick={() => {
+                      if (comparePagePlaying) {
+                        setComparePagePlaying(false);
+                        return;
+                      }
+                      if (activeComparePageIdx >= activeComparePageCount - 1) {
+                        setComparePageIdx(0);
+                      }
+                      setComparePagePlaying(true);
+                    }}
+                    sx={{ color: comparePagePlaying ? themeColors.accent : themeColors.textMuted, p: 0.2 }}
+                  >
+                    {comparePagePlaying ? <PauseIcon sx={{ fontSize: 15 }} /> : <PlayArrowIcon sx={{ fontSize: 15 }} />}
+                  </IconButton>
+                  <Box
+                    role="group"
+                    aria-label="Show4DSTEM multiple groups"
+                    sx={{
+                      display: "flex",
+                      alignItems: "center",
+                      border: `1px solid ${themeColors.border}`,
+                      bgcolor: themeColors.controlBg,
+                      height: 22,
+                      overflow: "hidden",
+                    }}
+                  >
+                    {comparePageButtonItems.map((item, idx) => {
+                      if (item === "gap") {
+                        return (
+                          <Typography
+                            key={`gap-${idx}`}
+                            sx={{ ...typo.value, width: 16, textAlign: "center", color: themeColors.textMuted, lineHeight: "20px" }}
+                          >
+                            …
+                          </Typography>
+                        );
+                      }
+                      const active = item === activeComparePageIdx;
+                      return (
+                        <Button
+                          key={item}
+                          size="small"
+                          aria-label={`Show Show4DSTEM multiple group ${item + 1}`}
+                          aria-pressed={active}
+                          onClick={() => {
+                            setComparePagePlaying(false);
+                            setComparePageIdx(item);
+                          }}
+                          sx={{
+                            ...compactButton,
+                            minWidth: 23,
+                            height: 20,
+                            px: 0.4,
+                            borderRadius: 0,
+                            color: active ? "#fff" : themeColors.textMuted,
+                            bgcolor: active ? themeColors.accent : "transparent",
+                            "&:hover": { bgcolor: active ? themeColors.accent : themeColors.bgAlt },
+                          }}
+                        >
+                          {item + 1}
+                        </Button>
+                      );
+                    })}
+                  </Box>
+                  <IconButton
+                    size="small"
+                    aria-label="Next Show4DSTEM multiple group"
+                    disabled={activeComparePageIdx >= activeComparePageCount - 1}
+                    onClick={() => {
+                      setComparePagePlaying(false);
+                      setComparePageIdx(Math.min(activeComparePageCount - 1, activeComparePageIdx + 1));
+                    }}
+                    sx={{ color: activeComparePageIdx >= activeComparePageCount - 1 ? themeColors.textMuted : themeColors.accent, p: 0.2 }}
+                  >
+                    <FastForwardIcon sx={{ fontSize: 15 }} />
+                  </IconButton>
+                  </>}
+                  <Typography sx={{ ...typo.value, minWidth: compareAllGroups ? 58 : activeComparePageCount > 99 ? 52 : 34, textAlign: "left", flexShrink: 0 }}>{comparePageStatus}</Typography>
+                </Box>
+              )}
+            </Stack>
+            {controlsVisible && <Stack
+              direction="row"
+              spacing={`${SPACING.SM}px`}
+              alignItems="center"
+              justifyContent="flex-end"
+              sx={{ flexWrap: "wrap", rowGap: 0.5 }}
+            >
               {compareMode && <>
                 <Typography sx={{ ...typo.label, fontSize: 10 }}>Cols</Typography>
                 <Select
@@ -6366,17 +6816,18 @@ function Show4DSTEM() {
                 <MenuItem value="average">Average</MenuItem>
                 <MenuItem value="selected">Selected</MenuItem>
               </Select>
-              <Tooltip title={compareReorderMode ? "Finish reordering" : "Reorder multiple panels"}>
+              <Tooltip title={compareAllGroups ? "Switch to Paged to reorder panels" : compareReorderMode ? "Finish reordering" : "Reorder multiple panels"}>
                 <IconButton
                   size="small"
                   aria-label="Show4DSTEM multiple reorder"
                   className="show4dstem-compare-reorder"
+                  disabled={compareAllGroups}
                   onClick={() => {
                     setCompareReorderMode((value) => !value);
                     setComparePendingMoveFrame(null);
                     setCompareDraggingFrame(null);
                   }}
-                  sx={{ color: compareReorderMode ? themeColors.accent : themeColors.textMuted, p: 0.25 }}
+                  sx={{ color: compareAllGroups ? themeColors.textMuted : compareReorderMode ? themeColors.accent : themeColors.textMuted, p: 0.25 }}
                 >
                   <DragIndicatorIcon sx={{ fontSize: 17 }} />
                 </IconButton>
@@ -6389,6 +6840,8 @@ function Show4DSTEM() {
                   !(comparePanelOrder || []).length
                   && !(compareHiddenPanels || []).length
                   && !(compareStarredPanels || []).length
+                  && !compareAllGroups
+                  && activeComparePageIdx === 0
                 }
                 onClick={resetComparePanelState}
               >
@@ -6396,7 +6849,7 @@ function Show4DSTEM() {
               </Button>
             </>
           )}
-          <Typography sx={{ ...typo.label, fontSize: 10, flexShrink: 0 }}>{frameDimLabel}:</Typography>
+          <Typography sx={{ ...typo.label, fontSize: 10, flexShrink: 0 }}>{frameSliderLabel}:</Typography>
           <Stack direction="row" spacing={0} sx={{ flexShrink: 0 }}>
             <IconButton size="small" onClick={() => { setFrameReverse(true); setFramePlaying(true); }} sx={{ color: frameReverse && framePlaying ? themeColors.accent : themeColors.textMuted, p: 0.25 }}>
               <FastRewindIcon sx={{ fontSize: 18 }} />
@@ -6411,7 +6864,7 @@ function Show4DSTEM() {
               <StopIcon sx={{ fontSize: 16 }} />
             </IconButton>
           </Stack>
-          <Slider value={frameIdx} onChange={(_, v) => { setFramePlaying(false); setFrameIdx(v as number); }} min={0} max={Math.max(0, nFrames - 1)} size="small" sx={{ flex: 1, minWidth: 60, "& .MuiSlider-thumb": { width: 10, height: 10 } }} />
+          <Slider value={frameIdx} onChange={(_, v) => { setFramePlaying(false); setFrameIdx(v as number); }} min={0} max={Math.max(0, nFrames - 1)} size="small" aria-label={frameSliderAriaLabel} sx={{ flex: 1, minWidth: 60, "& .MuiSlider-thumb": { width: 10, height: 10 } }} />
           <Typography sx={{ ...typo.value, minWidth: 50, textAlign: "right", flexShrink: 0 }}>{frameLabels && frameLabels.length > frameIdx ? frameLabels[frameIdx] : `${frameIdx + 1}/${nFrames}`}</Typography>
         </Box>
         <Box sx={{ ...controlRow, mt: `${SPACING.XS}px`, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>

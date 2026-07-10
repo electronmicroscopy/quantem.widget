@@ -797,7 +797,7 @@ def test_exported_show4dstem_real_data_visual_smoke(tmp_path: Path) -> None:
                 mobile = context.new_page()
                 mobile.set_viewport_size({"width": 390, "height": 844})
                 _open_page(mobile, f"http://127.0.0.1:{port}/{pages['multiple-cols4'].name}", multiple4_title, 12)
-                mobile_layout = _assert_multiple_grid_layout(mobile, expected_cols=4, max_gap_above_grid=80)
+                mobile_layout = _assert_multiple_grid_layout(mobile, expected_cols=2, max_gap_above_grid=80)
                 _drag_multiple_panel(mobile, panel_number=1)
                 mobile_pixels = _assert_canvas_pixels(mobile)
                 mobile.screenshot(path=str(artifacts / "multiple-cols4-mobile.png"), full_page=False)

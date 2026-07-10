@@ -1508,12 +1508,13 @@ def _discover_chunk_names(filepath: str) -> list[str]:
 
 
 def is_master_ready(filepath: str) -> bool:
-    """Check if a master H5 file and all its data files are present on disk.
+    """Check if a master H5 file and all its data files are ready to browse.
 
     The master file links to ``data_000001.h5``, ``data_000002.h5``, etc.
-    This function checks that all linked data files exist - without reading
-    any actual data. Use this before calling :func:`load` on files that may
-    still be in the process of being written by the detector.
+    This function checks that all linked data files exist and that their HDF5
+    headers can be opened. It does not read detector data into memory. Use this
+    before calling :func:`load` on files that may still be in the process of
+    being written by the detector.
 
     Parameters
     ----------
@@ -1546,8 +1547,11 @@ def is_master_ready(filepath: str) -> bool:
                     data_path = data_group[chunk_name].file.filename
                 if not os.path.exists(data_path) or os.path.getsize(data_path) == 0:
                     return False
+                with h5py.File(data_path, "r") as data_file:
+                    if "entry/data/data" not in data_file:
+                        return False
         return True
-    except (OSError, KeyError):
+    except (OSError, KeyError, ValueError):
         return False
 
 
@@ -2119,6 +2123,11 @@ def _browse_dtype_advise_and_cast(data, dtype, verbose):
     Raw uint16 stays the source for reconstruction; uint8 is screening-only.
     """
     sel = (dtype or "").lower()
+    if not verbose and sel in {"u16", "uint16", "native", "full", "exact"}:
+        # The caller explicitly requested count-preserving data. Sampling four
+        # million pixels cannot change that decision and can trigger needless
+        # peer-device synchronization for multi-GPU folder browsing.
+        return data
     if data.dtype != np.uint8 and data.dtype.kind == "u":
         try:
             # Estimate the count range from a strided ~4M-element SAMPLE, not a
