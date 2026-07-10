@@ -22,6 +22,8 @@ import numpy as np
 
 _MAG_RE = re.compile(r"HAADF\s*(.*?)\s*Nano", re.IGNORECASE)
 _FALLBACK_MAG_RE = re.compile(r"(\d+(?:\.\d+)?\s*[kmg]?x)", re.IGNORECASE)
+_ACQUISITION_PREFIX_RE = re.compile(r"^(\d+[-_]\d{8}_\d{4})")
+_SHOWFOLDER_CACHE_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -37,6 +39,7 @@ class SurveyItem:
     thumbnail_downsample: int | None
     scan_rotation_deg: float | None
     is_eds: bool
+    dwell_time_us: float | None = None
     stage_position_m: tuple[float, float, float] | None = None
     field_of_view_nm: tuple[float, float] | None = None
     fov_group: str | None = None
@@ -150,6 +153,7 @@ class ShowFolderBrowser:
                 "shape": "" if item.shape is None else f"{item.shape[0]}x{item.shape[1]}",
                 "downsample": item.thumbnail_downsample,
                 "pixel_size": _format_sampling(item),
+                "dwell_time_us": item.dwell_time_us,
                 "scan_rotation_deg": item.scan_rotation_deg,
                 "fov_group": item.fov_group or "",
                 "status": item.error or "ok",
@@ -1028,6 +1032,7 @@ def build_showfolder(
     if not root.is_dir():
         raise FileNotFoundError(f"not a folder: {root}")
     files = sorted(p for p in root.glob(glob) if p.is_file() and not p.name.startswith("."))
+    metadata_sources = _metadata_sources_for_files(root, files)
     master_files = sorted(p for p in root.glob("*_master.h5") if p.is_file() and not p.name.startswith("."))
     master_qc = inspect_master_folder(root, master_files=master_files)
     if not files:
@@ -1065,9 +1070,11 @@ def build_showfolder(
     cache_misses = 0
     next_cache_entries: list[dict[str, Any]] = []
     next_cache_thumbnails: dict[str, np.ndarray] = {}
+    metadata_by_source: dict[Path, dict[str, Any]] = {}
     for path in files:
         rel = path.relative_to(root).as_posix()
-        signature = _file_signature(path, root)
+        metadata_source = metadata_sources.get(path)
+        signature = _file_signature(path, root, metadata_source=metadata_source)
         cached_entry = cache_entries.get(rel)
         cached_thumbnail = None
         if cached_entry is not None and _cache_signature_matches(cached_entry, signature):
@@ -1099,7 +1106,12 @@ def build_showfolder(
             continue
         cache_misses += 1
         is_eds = has_eds(path)
-        metadata = _file_metadata(path)
+        if metadata_source is None:
+            metadata = {}
+        else:
+            if metadata_source not in metadata_by_source:
+                metadata_by_source[metadata_source] = _file_metadata(metadata_source)
+            metadata = metadata_by_source[metadata_source]
         shape = None
         sampling = None
         units = None
@@ -1127,6 +1139,7 @@ def build_showfolder(
             thumbnail_downsample=thumbnail_downsample,
             scan_rotation_deg=_scan_rotation_from_metadata(metadata),
             is_eds=is_eds,
+            dwell_time_us=_dwell_time_us_from_metadata(metadata),
             stage_position_m=_stage_position_m(metadata),
             field_of_view_nm=_field_of_view_nm(metadata),
             error=err,
@@ -1815,6 +1828,67 @@ def _file_metadata(path: str | Path) -> dict[str, Any]:
     return {}
 
 
+def _metadata_sources_for_files(root: Path, files: list[Path]) -> dict[Path, Path]:
+    """Resolve each image to a trustworthy Velox metadata source.
+
+    Velox AutoExport TIFFs do not carry acquisition metadata.  Their stem starts
+    with the source EMD stem, so a TIFF inside ``AutoExport`` can inherit metadata
+    from the exact sibling EMD in its parent folder.  Unmatched files stay blank
+    rather than receiving metadata from a merely nearby acquisition.
+    """
+    candidates = {
+        candidate.resolve()
+        for directory in (root, root.parent)
+        for candidate in directory.glob("*.emd")
+        if candidate.is_file() and not candidate.name.startswith(".")
+    }
+    stems = sorted(
+        ((candidate.stem, candidate) for candidate in candidates),
+        key=lambda item: len(item[0]),
+        reverse=True,
+    )
+    prefixes: dict[str, list[Path]] = {}
+    for stem, candidate in stems:
+        match = _ACQUISITION_PREFIX_RE.match(stem)
+        if match:
+            prefixes.setdefault(match.group(1), []).append(candidate)
+
+    resolved: dict[Path, Path] = {}
+    for path in files:
+        if path.suffix.lower() == ".emd":
+            resolved[path] = path
+            continue
+        for stem, candidate in stems:
+            remainder = path.stem[len(stem):] if path.stem.startswith(stem) else None
+            if remainder is not None and (not remainder or remainder[0] in " _-"):
+                resolved[path] = candidate
+                break
+        else:
+            match = _ACQUISITION_PREFIX_RE.match(path.stem)
+            matches = [] if match is None else prefixes.get(match.group(1), [])
+            if len(matches) == 1:
+                resolved[path] = matches[0]
+    return resolved
+
+
+def _dwell_time_us_from_metadata(meta: dict[str, Any]) -> float | None:
+    """Return explicit per-pixel dwell time in microseconds when available."""
+    dwell_s = _metadata_number(meta, "Scan", "DwellTime")
+    if dwell_s is None:
+        dwell_s = _metadata_number(meta, "scan", "dwell_time_s")
+    if dwell_s is None:
+        dwell_s = _metadata_number(meta, "dwell_time_s")
+    if dwell_s is not None and dwell_s >= 0:
+        return float(dwell_s) * 1_000_000.0
+
+    dwell_us = _metadata_number(meta, "scan", "dwell_time_us")
+    if dwell_us is None:
+        dwell_us = _metadata_number(meta, "dwell_time_us")
+    if dwell_us is not None and dwell_us >= 0:
+        return float(dwell_us)
+    return None
+
+
 def _scan_rotation_from_metadata(meta: dict[str, Any]) -> float | None:
     value = _metadata_number(meta, "Scan", "ScanRotation")
     if value is None:
@@ -2093,7 +2167,7 @@ def _load_survey_cache(
         return {"mode": mode, "cache_path": cache_path, "entries_by_rel": {}, "thumbnails": {}}
     try:
         manifest = json.loads(manifest_path.read_text())
-        if int(manifest.get("version", 0)) != 1:
+        if int(manifest.get("version", 0)) != _SHOWFOLDER_CACHE_VERSION:
             raise ValueError("unsupported cache version")
         if int(manifest.get("thumb", 0)) != int(thumb):
             raise ValueError("cache thumbnail size mismatch")
@@ -2124,7 +2198,7 @@ def _write_survey_cache(
 ) -> None:
     cache_path.mkdir(parents=True, exist_ok=True)
     manifest = {
-        "version": 1,
+        "version": _SHOWFOLDER_CACHE_VERSION,
         "kind": "quantem.widget.showfolder",
         "folder": str(folder),
         "glob": glob,
@@ -2169,7 +2243,7 @@ def _survey_cache_path(
             "folder": str(folder),
             "glob": glob,
             "thumb": int(thumb),
-            "version": 1,
+            "version": _SHOWFOLDER_CACHE_VERSION,
         },
         sort_keys=True,
     ).encode()
@@ -2177,13 +2251,26 @@ def _survey_cache_path(
     return root / key, mode
 
 
-def _file_signature(path: Path, root: Path) -> dict[str, Any]:
+def _file_signature(
+    path: Path,
+    root: Path,
+    *,
+    metadata_source: Path | None = None,
+) -> dict[str, Any]:
     stat = path.stat()
-    return {
+    signature = {
         "relative_path": path.relative_to(root).as_posix(),
         "size": int(stat.st_size),
         "mtime_ns": int(stat.st_mtime_ns),
     }
+    if metadata_source is not None and metadata_source != path:
+        source_stat = metadata_source.stat()
+        signature["metadata_source"] = {
+            "path": str(metadata_source),
+            "size": int(source_stat.st_size),
+            "mtime_ns": int(source_stat.st_mtime_ns),
+        }
+    return signature
 
 
 def _cache_signature_matches(entry: dict[str, Any], signature: dict[str, Any]) -> bool:
@@ -2192,6 +2279,7 @@ def _cache_signature_matches(entry: dict[str, Any], signature: dict[str, Any]) -
         str(cached.get("relative_path")) == str(signature.get("relative_path"))
         and int(cached.get("size", -1)) == int(signature.get("size", -2))
         and int(cached.get("mtime_ns", -1)) == int(signature.get("mtime_ns", -2))
+        and cached.get("metadata_source") == signature.get("metadata_source")
     )
 
 
@@ -2207,6 +2295,7 @@ def _survey_item_to_cache(item: SurveyItem, *, root: Path, signature: dict[str, 
         "units": None if item.units is None else list(item.units),
         "thumbnail_downsample": item.thumbnail_downsample,
         "scan_rotation_deg": item.scan_rotation_deg,
+        "dwell_time_us": item.dwell_time_us,
         "is_eds": item.is_eds,
         "stage_position_m": None if item.stage_position_m is None else list(item.stage_position_m),
         "field_of_view_nm": None if item.field_of_view_nm is None else list(item.field_of_view_nm),
@@ -2227,6 +2316,7 @@ def _survey_item_from_cache(path: Path, entry: dict[str, Any]) -> SurveyItem:
         thumbnail_downsample=entry.get("thumbnail_downsample"),
         scan_rotation_deg=entry.get("scan_rotation_deg"),
         is_eds=bool(entry.get("is_eds", False)),
+        dwell_time_us=entry.get("dwell_time_us"),
         stage_position_m=_tuple3_float(entry.get("stage_position_m")),
         field_of_view_nm=_tuple2_float(entry.get("field_of_view_nm")),
         fov_group=entry.get("fov_group"),
@@ -2295,6 +2385,7 @@ def _inventory_html(items: list[SurveyItem]) -> str:
         shape = "" if item.shape is None else f"{item.shape[0]}x{item.shape[1]}"
         downsample = "" if item.thumbnail_downsample in (None, 1) else f"{item.thumbnail_downsample}x"
         sampling = _format_sampling(item)
+        dwell = "" if item.dwell_time_us is None else f"{item.dwell_time_us:.4g}"
         fov_group = item.fov_group or ""
         rows.append(
             "<tr>"
@@ -2306,6 +2397,7 @@ def _inventory_html(items: list[SurveyItem]) -> str:
             f"<td>{shape}</td>"
             f"<td>{downsample}</td>"
             f"<td>{html.escape(sampling)}</td>"
+            f"<td>{dwell}</td>"
             f"<td>{rot}</td>"
             f"<td style=\"color:{status_color};font-weight:600\">{html.escape(status)}</td>"
             "</tr>"
@@ -2324,6 +2416,7 @@ def _inventory_html(items: list[SurveyItem]) -> str:
         <th style="text-align:left;padding:4px 8px;border-bottom:2px solid #444">shape</th>
         <th style="text-align:left;padding:4px 8px;border-bottom:2px solid #444">downsample</th>
         <th style="text-align:left;padding:4px 8px;border-bottom:2px solid #444">pixel size</th>
+        <th style="text-align:left;padding:4px 8px;border-bottom:2px solid #444">dwell µs</th>
         <th style="text-align:left;padding:4px 8px;border-bottom:2px solid #444">rot deg</th>
         <th style="text-align:left;padding:4px 8px;border-bottom:2px solid #444">status</th>
       </tr>

@@ -13,7 +13,7 @@ from quantem.widget.showfolder_core import (
 )
 
 
-def _metadata(rotation: float, *, stage=None, fov=None):
+def _metadata(rotation: float, *, stage=None, fov=None, dwell_time_s=None):
     metadata = {
         "Scan": {"ScanRotation": str(rotation)},
         "BinaryResult": {"PixelSize": {"height": 1e-9, "width": 1e-9}},
@@ -24,24 +24,48 @@ def _metadata(rotation: float, *, stage=None, fov=None):
         metadata["Optics"] = {
             "FullScanFieldOfView": {"height": fov[0], "width": fov[1]},
         }
+    if dwell_time_s is not None:
+        metadata["Scan"]["DwellTime"] = str(dwell_time_s)
     text = json.dumps(metadata).encode()
     arr = np.zeros((len(text) + 1, 1), dtype=np.uint8)
     arr[:len(text), 0] = np.frombuffer(text, dtype=np.uint8)
     return arr
 
 
-def _image_emd(path: Path, *, shape=(16, 16), rotation=0.0, stage=None, fov=None):
+def _image_emd(
+    path: Path,
+    *,
+    shape=(16, 16),
+    rotation=0.0,
+    stage=None,
+    fov=None,
+    dwell_time_s=None,
+):
     with h5py.File(path, "w") as h:
         group = h.create_group("Data/Image/uid")
         group.create_dataset("Data", data=np.arange(shape[0] * shape[1], dtype=np.float32).reshape(*shape))
-        group.create_dataset("Metadata", data=_metadata(rotation, stage=stage, fov=fov))
+        group.create_dataset(
+            "Metadata",
+            data=_metadata(rotation, stage=stage, fov=fov, dwell_time_s=dwell_time_s),
+        )
 
 
-def _eds_emd(path: Path, *, shape=(8, 8), rotation=1.57079632679, stage=None, fov=None):
+def _eds_emd(
+    path: Path,
+    *,
+    shape=(8, 8),
+    rotation=1.57079632679,
+    stage=None,
+    fov=None,
+    dwell_time_s=None,
+):
     with h5py.File(path, "w") as h:
         group = h.create_group("Data/SpectrumImage/uid")
         group.create_dataset("Data", data=np.zeros((*shape, 4), dtype=np.uint16))
-        group.create_dataset("Metadata", data=_metadata(rotation, stage=stage, fov=fov))
+        group.create_dataset(
+            "Metadata",
+            data=_metadata(rotation, stage=stage, fov=fov, dwell_time_s=dwell_time_s),
+        )
         h.create_group("Data/SpectrumStream")
 
 
@@ -117,6 +141,33 @@ def test_showfolder_builds_image_gallery_and_inventory(tmp_path):
     assert result.inventory_rows[0]["downsample"] == 2
     assert result.inventory_rows[0]["pixel_size"] == "2 nm/px"
     assert result.inventory_rows[2]["kind"] == "EDS"
+
+
+def test_showfolder_inventory_includes_dwell_time_from_emd_and_autoexport_tiff(tmp_path):
+    import tifffile
+
+    source = tmp_path / "0025-20260709_1114_SI_HAADF_15.0_Mx_6.74_nm_Diffraction.emd"
+    _image_emd(source, dwell_time_s=50e-6)
+
+    emd_result = build_showfolder(tmp_path, thumb=8, group_by="none", cache=False)
+    assert emd_result.inventory_rows[0]["dwell_time_us"] == 50.0
+    assert "dwell µs" in emd_result.inventory.value
+
+    autoexport = tmp_path / "AutoExport"
+    autoexport.mkdir()
+    tifffile.imwrite(
+        autoexport / "0025-20260709_1114_SI_HAADF_15.0_Mx_6.74_nm_Diffraction HAADF.tif",
+        np.arange(64, dtype=np.uint16).reshape(8, 8),
+    )
+    tiff_result = build_showfolder(
+        autoexport,
+        glob="*.tif",
+        thumb=8,
+        group_by="none",
+        cache=False,
+    )
+    assert tiff_result.inventory_rows[0]["dwell_time_us"] == 50.0
+    assert ">50</td>" in tiff_result.inventory.value
 
 
 def test_survey_save_state_is_opt_in_for_docs(tmp_path):
