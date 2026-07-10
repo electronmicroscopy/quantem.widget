@@ -80,6 +80,7 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r docs/requirements.txt
           python -m pip install -e ".[test]"
+          python -m pip install huggingface_hub h5py tifffile
 
       - name: Install frontend dependencies
         run: npm ci
