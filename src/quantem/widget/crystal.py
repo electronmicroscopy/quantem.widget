@@ -44,6 +44,53 @@ def _allow_rhombohedral_c(h: int, k: int, ell: int) -> bool:
     return _allow_rhombohedral(h, k, ell)
 
 
+def _allow_spinel(h: int, k: int, ell: int) -> bool:
+    if not _allow_fcc(h, k, ell):
+        return False
+    low, mid, high = sorted((abs(h), abs(k), abs(ell)))
+    if mid == 0:  # h00
+        return high % 4 == 0
+    if low == 0:  # hk0
+        return (mid + high) % 4 == 0
+    return True
+
+
+def _allow_i41amd(h: int, k: int, ell: int) -> bool:
+    if (h + k + ell) % 2 != 0:
+        return False
+    if ell % 2 == 1:
+        return True
+    if ell % 4 == 0:  # includes hk0
+        return h % 2 == 0
+    return h % 2 == 1  # l = 4n+2
+
+
+def _allow_rutile(h: int, k: int, ell: int) -> bool:
+    if h == 0 and (k + ell) % 2 == 1:
+        return False
+    if k == 0 and (h + ell) % 2 == 1:
+        return False
+    return True
+
+
+def _allow_bixbyite(h: int, k: int, ell: int) -> bool:
+    if (h + k + ell) % 2 != 0:
+        return False
+    if h == 0 and (k % 2 == 1 or ell % 2 == 1):
+        return False
+    if k == 0 and (h % 2 == 1 or ell % 2 == 1):
+        return False
+    if ell == 0 and (h % 2 == 1 or k % 2 == 1):
+        return False
+    return True
+
+
+def _allow_cuprite(h: int, k: int, ell: int) -> bool:
+    if (h + k + ell) % 2 == 0:
+        return True
+    return h % 2 == k % 2 == ell % 2
+
+
 _ABSENCE_RULES = {
     "none": _allow_all,
     "fcc": _allow_fcc,
@@ -53,6 +100,11 @@ _ABSENCE_RULES = {
     "wurtzite": _allow_hcp,  # 2b wurtzite sites zero the same reflections as hcp
     "rhombohedral": _allow_rhombohedral,
     "rhombohedral-c": _allow_rhombohedral_c,
+    "spinel": _allow_spinel,  # Fd-3m d-glide: h00 needs h=4n, hk0 needs h+k=4n
+    "i41amd": _allow_i41amd,  # I4_1/amd 4a/8e sites: 002, 110, 222 absent
+    "rutile": _allow_rutile,  # P4_2/mnm n-glide: 0kl needs k+l even
+    "bixbyite": _allow_bixbyite,  # Ia-3 a-glide: 0kl needs k, l even
+    "cuprite": _allow_cuprite,  # Pn-3m 2a/4b sites: mixed parity with odd sum absent
 }
 
 # Built-in standards: room-temperature lattice parameters in Å, each taken from
@@ -114,13 +166,13 @@ PHASE_LIBRARY = {
     "3C-SiC": {"a": 4.3596, "absences": "fcc"},  # Sultan et al. 2022, Materials 15 6229
     "CuI": {"a": 6.0630, "absences": "fcc"},  # COD 9004456 (Cooper & Hawthorne 1997)
     # spinel
-    "Fe3O4": {"a": 8.3967, "absences": "fcc"},  # COD 9013529 (Bosi et al. 2009)
-    "γ-Fe2O3": {"a": 8.3474, "absences": "fcc"},  # COD 9017489 (Shmakov et al. 1995)
-    "MgAl2O4": {"a": 8.0836, "absences": "fcc"},  # COD 9002044 (Redfern et al. 1999)
-    "Co3O4": {"a": 8.0821, "absences": "fcc"},  # COD 9005887 (Liu & Prewitt 1990)
-    "CoFe2O4": {"a": 8.3806, "absences": "fcc"},  # COD 1533163 (Ferreira et al. 2003)
-    "NiFe2O4": {"a": 8.3597, "absences": "fcc"},  # COD 2300289 (Kremenović et al. 2010)
-    "ZnFe2O4": {"a": 8.4421, "absences": "fcc"},  # COD 9005102 (O'Neill 1992)
+    "Fe3O4": {"a": 8.3967, "absences": "spinel"},  # COD 9013529 (Bosi et al. 2009)
+    "γ-Fe2O3": {"a": 8.3474, "absences": "spinel"},  # COD 9017489 (Shmakov et al. 1995)
+    "MgAl2O4": {"a": 8.0836, "absences": "spinel"},  # COD 9002044 (Redfern et al. 1999)
+    "Co3O4": {"a": 8.0821, "absences": "spinel"},  # COD 9005887 (Liu & Prewitt 1990)
+    "CoFe2O4": {"a": 8.3806, "absences": "spinel"},  # COD 1533163 (Ferreira et al. 2003)
+    "NiFe2O4": {"a": 8.3597, "absences": "spinel"},  # COD 2300289 (Kremenović et al. 2010)
+    "ZnFe2O4": {"a": 8.4421, "absences": "spinel"},  # COD 9005102 (O'Neill 1992)
     # primitive cubic
     "SrTiO3": {"a": 3.9050, "absences": "none"},  # NBS Circ. 539 v3 (Swanson et al. 1954)
     "CsCl": {"a": 4.1230, "absences": "none"},  # NBS Circ. 539 v2 (Swanson & Fuyat 1953)
@@ -143,20 +195,20 @@ PHASE_LIBRARY = {
     "InSb": {"a": 6.4794, "absences": "fcc"},  # Straumanis & Kim 1965, J. Appl. Phys. 36 3822
     "ZnTe": {"a": 6.1026, "absences": "fcc"},  # COD 1540103 (Holland & Beck 1968)
     "c-BN": {"a": 3.6153, "absences": "fcc"},  # Kurdyumov et al. 1995, J. Appl. Cryst. 28 540
-    "γ-Al2O3": {"a": 7.9140, "absences": "fcc"},  # COD 2107301 (Zhou & Snyder 1991)
-    "Y2O3": {"a": 10.6040, "absences": "bcc"},  # COD 1513300 (Ferreira et al. 2005)
-    "In2O3": {"a": 10.1170, "absences": "bcc"},  # COD 2310009 (Marezio 1966)
+    "γ-Al2O3": {"a": 7.9140, "absences": "spinel"},  # COD 2107301 (Zhou & Snyder 1991)
+    "Y2O3": {"a": 10.6040, "absences": "bixbyite"},  # COD 1513300 (Ferreira et al. 2005)
+    "In2O3": {"a": 10.1170, "absences": "bixbyite"},  # COD 2310009 (Marezio 1966)
     "LaB6": {"a": 4.1568, "absences": "none"},  # NIST SRM 660c
-    "Cu2O": {"a": 4.2696, "absences": "none"},  # NBS Circ. 539 v2 (Swanson & Fuyat 1953)
+    "Cu2O": {"a": 4.2696, "absences": "cuprite"},  # NBS Circ. 539 v2 (Swanson & Fuyat 1953)
     # tetragonal
     # NIST SRM 674b
-    "TiO2 (rutile)": {"a": 4.5940, "c": 2.9589, "gamma": 90.0, "absences": "none"},
+    "TiO2 (rutile)": {"a": 4.5940, "c": 2.9589, "gamma": 90.0, "absences": "rutile"},
     # NBS Mono. 25 Sec. 7 (1969)
-    "TiO2 (anatase)": {"a": 3.7852, "c": 9.5139, "gamma": 90.0, "absences": "bcc"},
+    "TiO2 (anatase)": {"a": 3.7852, "c": 9.5139, "gamma": 90.0, "absences": "i41amd"},
     # COD 2101853 (Bolzan et al. 1997)
-    "SnO2": {"a": 4.7374, "c": 3.1864, "gamma": 90.0, "absences": "none"},
+    "SnO2": {"a": 4.7374, "c": 3.1864, "gamma": 90.0, "absences": "rutile"},
     # COD 1534488 (Lee & Raynor 1954)
-    "β-Sn": {"a": 5.8317, "c": 3.1813, "gamma": 90.0, "absences": "bcc"},
+    "β-Sn": {"a": 5.8317, "c": 3.1813, "gamma": 90.0, "absences": "i41amd"},
     # COD 1513252 (Yasuda et al. 2009)
     "BaTiO3": {"a": 3.9905, "c": 4.0412, "gamma": 90.0, "absences": "none"},
     # primitive hexagonal
