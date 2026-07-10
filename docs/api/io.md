@@ -41,7 +41,7 @@ Show4DSTEM(data)
 the underlying `quantem.data` API and will be aligned in a future release —
 for now, drop the prefix.
 
-The gold reference scans (`gold_512`, `gold_128_npy_bin8`, etc.) are 1-5 GB
+The gold reference scans (`gold_512` and friends) are 1-5 GB
 compressed and load in seconds on any modern GPU or Mac. Once this works
 end-to-end, swap `download(...)` for `Path("/data/session")` and everything
 downstream is identical.
@@ -539,11 +539,20 @@ upload protocol is three steps:
    hf auth login   # paste the write token
    ```
 
-2. **Upload with the bucket + sidecar convention.** A folder of Arina
-   `*_master.h5` files goes under `4dstem/`, a single image file under
-   `haadf/` (those are also the defaults for a directory vs a file). Always
-   pass `meta=` so downstream widgets get calibration — it is written as a
-   `meta.json` sidecar next to your data:
+2. **Upload with the bucket + sidecar convention.** The repo has two trees:
+
+   - `widget-tutorials/<widget>/<dataset>/<size>/` — the baseline tutorial
+     bundles behind `quantem.widget.datasets` (sizes `small`/`medium`/
+     `large`/`full`). To contribute a tutorial bundle, pass
+     `folder="widget-tutorials/<widget>"` and `name="<dataset>/full"`.
+     Datasets shared by several widgets (the gold HAADF feeds both Show2D
+     and Show3D) live under `widget-tutorials/shared/`.
+   - `4dstem/` and `haadf/` — full-size originals for power users. A folder
+     of Arina `*_master.h5` files goes under `4dstem/`, a single image file
+     under `haadf/` (those are also the defaults for a directory vs a file).
+
+   Always pass `meta=` so downstream widgets get calibration — it is written
+   as a `meta.json` sidecar next to your data:
 
    ```python
    from quantem.widget.io import upload

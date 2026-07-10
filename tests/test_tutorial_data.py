@@ -12,7 +12,7 @@ def test_load_tutorial_show2d_uses_calibrated_preview(tmp_path, monkeypatch):
     data_dir.mkdir()
     np.save(data_dir / "data.npy", np.arange(16, dtype=np.float32).reshape(4, 4))
     (data_dir / "meta.json").write_text(json.dumps({"name": "gold_haadf_npy", "sampling": [0.2, 0.2], "units": ["nm", "nm"]}))
-    monkeypatch.setattr(tutorials, "download", lambda *args, **kwargs: data_dir)
+    monkeypatch.setattr(tutorials, "_download_widget_tutorial_folder", lambda *args, **kwargs: data_dir)
 
     dataset = tutorials.load_tutorial_show2d(stride=2, verbose=False)
 
@@ -90,7 +90,7 @@ def test_load_tutorial_show3d_uses_real_image_crops(tmp_path, monkeypatch):
     image = np.arange(30 * 30, dtype=np.float32).reshape(30, 30)
     np.save(data_dir / "data.npy", image)
     (data_dir / "meta.json").write_text(json.dumps({"name": "gold_haadf_npy", "sampling": [0.2, 0.2], "units": ["nm", "nm"]}))
-    monkeypatch.setattr(tutorials, "download", lambda *args, **kwargs: data_dir)
+    monkeypatch.setattr(tutorials, "_download_widget_tutorial_folder", lambda *args, **kwargs: data_dir)
 
     dataset = tutorials.load_tutorial_show3d(n_frames=3, stride=1, crop_size=16, verbose=False)
 
@@ -117,7 +117,7 @@ def test_load_tutorial_show4dstem_preserves_uint16_counts(tmp_path, monkeypatch)
             }
         )
     )
-    monkeypatch.setattr(tutorials, "download", lambda *args, **kwargs: data_dir)
+    monkeypatch.setattr(tutorials, "_download_widget_tutorial_folder", lambda *args, **kwargs: data_dir)
 
     dataset = tutorials.load_tutorial_show4dstem(scan_stride=2, verbose=False)
 

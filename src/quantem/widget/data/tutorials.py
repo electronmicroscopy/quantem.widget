@@ -10,7 +10,6 @@ from pathlib import Path
 import numpy as np
 from quantem.core.datastructures import Dataset2d, Dataset3d, Dataset4dstem
 
-download = None
 snapshot_download = None
 TUTORIAL_DATA_REPO_ID = "bobleesj/quantem-data"
 TUTORIAL_DATA_ROOT = "widget-tutorials"
@@ -41,15 +40,6 @@ _GOLD_4DSTEM_NAME = "gold-128-bin8"
 _GOLD_4DSTEM_SOURCE_SIZE = "full"
 _SHOWFOLDER_GOLD_VIEWER = "showfolder"
 _SHOWFOLDER_GOLD_NAME = "gold-haadf-session"
-
-
-def _download_dataset(name: str, *, verbose: bool = False) -> Path:
-    global download
-    if download is None:
-        from quantem.widget.io import download as _download  # noqa: PLC0415
-
-        download = _download
-    return Path(download(name, verbose=verbose))
 
 
 def _snapshot_download_dataset(**kwargs) -> Path:
@@ -554,7 +544,9 @@ def load_tutorial_show2d(*, stride: int = 8, verbose: bool = True) -> Dataset2d:
 
     if stride < 1:
         raise ValueError(f"stride must be >= 1, got {stride}")
-    data_dir = _download_dataset("gold_haadf_npy", verbose=False)
+    data_dir = _download_widget_tutorial_folder(
+        _GOLD_HAADF_VIEWER, _GOLD_HAADF_NAME, size=_GOLD_HAADF_SOURCE_SIZE
+    )
     return _gold_haadf_2d_from_folder(data_dir, stride=stride, verbose=verbose)
 
 
@@ -596,7 +588,9 @@ def load_tutorial_show3d(
     if crop_size < 16:
         raise ValueError(f"crop_size must be >= 16, got {crop_size}")
 
-    data_dir = _download_dataset("gold_haadf_npy", verbose=False)
+    data_dir = _download_widget_tutorial_folder(
+        _GOLD_HAADF_VIEWER, _GOLD_HAADF_NAME, size=_GOLD_HAADF_SOURCE_SIZE
+    )
     return _gold_haadf_3d_from_folder(
         data_dir,
         n_frames=n_frames,
@@ -625,5 +619,7 @@ def load_tutorial_show4dstem(*, scan_stride: int = 2, verbose: bool = True) -> D
 
     if scan_stride < 1:
         raise ValueError(f"scan_stride must be >= 1, got {scan_stride}")
-    data_dir = _download_dataset("gold_128_npy_bin8", verbose=False)
+    data_dir = _download_widget_tutorial_folder(
+        _GOLD_4DSTEM_VIEWER, _GOLD_4DSTEM_NAME, size=_GOLD_4DSTEM_SOURCE_SIZE
+    )
     return _gold_4dstem_from_folder(data_dir, scan_stride=scan_stride, verbose=verbose)
