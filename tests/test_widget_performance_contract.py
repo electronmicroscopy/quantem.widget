@@ -91,6 +91,164 @@ def test_show3d_standalone_export_has_bounded_frame_prewarm_contract():
     assert "offlineFramePrewarmDone" in show3d
 
 
+def test_show3d_offline_gpu_playback_owns_canvas_contract():
+    """Standalone Show3D playback should not race a static canvas repaint."""
+    show3d = (ROOT / "js" / "show3d" / "index.tsx").read_text(encoding="utf-8")
+
+    assert "const offlineGpuPlaybackOwnsCanvas" in show3d
+    assert show3d.count("if (offlineGpuPlaybackOwnsCanvas) return;") >= 2
+
+
+def test_show3d_playback_row_bookmarks_current_frame_contract():
+    """Show3D playback controls should let users star the current frame."""
+    show3d = (ROOT / "js" / "show3d" / "index.tsx").read_text(encoding="utf-8")
+
+    assert (
+        'const [bookmarkedFrames, setBookmarkedFrames] = '
+        'useModelState<number[]>("bookmarked_frames")'
+    ) in show3d
+    assert "const normalizedBookmarkedFrames" in show3d
+    assert "const toggleCurrentFrameBookmark" in show3d
+    assert "aria-pressed={currentFrameBookmarked}" in show3d
+    assert 'currentFrameBookmarked ? "Unstar" : "Star"' in show3d
+
+
+def test_show3d_offline_packed_panel_playback_uses_per_panel_contrast_contract():
+    """Packed multi-panel HTML playback must not fall back to global contrast."""
+    show3d = (ROOT / "js" / "show3d" / "index.tsx").read_text(encoding="utf-8")
+    performance = (
+        ROOT / "docs" / "maintainer" / "widget-performance.md"
+    ).read_text(encoding="utf-8")
+    performance_text = " ".join(performance.split())
+
+    assert "const renderOfflinePackedPanels2D" in show3d
+    assert '"offline-packed-panels-2d-per-panel"' in show3d
+    assert "resolvePanelRenderRange(panel, panelRange, sharedAutoRange" in show3d
+    assert "const offlinePackedPanelPlaybackUsesStaticCanvas" in show3d
+    assert "!offlinePackedPanelPlaybackUsesStaticCanvas" in show3d
+    assert "Show3D standalone HTML WebGPU playback blank" in performance
+    assert "offlinePackedPanelPlaybackUsesStaticCanvas" in performance
+    assert "active playback stays nonblank" in performance_text
+    assert "not only after pause" in performance_text
+
+
+def test_show3d_fft_cache_ignores_frame_delivery_counter():
+    """Show3D FFT cache keys must survive repeated frame_bytes delivery."""
+    show3d = (ROOT / "js" / "show3d" / "index.tsx").read_text(encoding="utf-8")
+
+    assert "frame_seq can tick every time Python sends frame_bytes" in show3d
+    assert "`data=${frameServerVersion || 0}`" in show3d
+    assert "`seq=${frameSeq || 0}`" not in show3d
+    assert "fftCacheInvalidations" in show3d
+    assert "fftCacheHits" in show3d
+
+
+def test_show1d_trace_hover_links_matching_snapshot_group():
+    """Show1D point inspection should preview and pin matching image groups."""
+    show1d = (ROOT / "js" / "show1d" / "index.tsx").read_text(encoding="utf-8")
+    api = (ROOT / "docs" / "api" / "show1d.md").read_text(encoding="utf-8")
+
+    assert "snapshotGroupForPoint" in show1d
+    assert "scheduleHover(point, snapshotGroupForPoint(point))" in show1d
+    assert "selectSnapshotGroup(snapshotGroup)" in show1d
+    assert 'data-testid="show1d-snapshot-group-label"' in show1d
+    assert 'flexWrap: { xs: "wrap", md: "nowrap" }' in show1d
+    assert "its images and group label preview in the side panel" in api
+
+
+def test_widget_performance_docs_cover_widget_stories_and_fft_cache():
+    """Maintainer docs should keep the widget-wise performance story explicit."""
+    performance = (ROOT / "docs" / "maintainer" / "widget-performance.md").read_text(
+        encoding="utf-8"
+    )
+    automation = (ROOT / "docs" / "maintainer" / "automation.md").read_text(
+        encoding="utf-8"
+    )
+    ui_testing = (
+        ROOT / "docs" / "maintainer" / "performance-ui-testing.md"
+    ).read_text(encoding="utf-8")
+    performance_text = " ".join(performance.split())
+    ui_testing_text = " ".join(ui_testing.split())
+
+    assert "## Widget Performance Stories" in performance
+    for widget in (
+        "Show1D",
+        "Show2D",
+        "Show3D",
+        "Show3DSlices",
+        "Show4DSTEM",
+        "ShowEDS",
+        "ShowDiffraction",
+        "ShowFolder",
+    ):
+        assert f"| {widget} |" in performance
+
+    assert "cloud/CI" in performance_text
+    assert "local heavy signoff" in performance_text
+    assert "returning" in performance
+    assert "cache hit" in performance
+    assert "frame_seq" in performance
+
+    assert "return-scrub cache" in automation
+    assert "misses/computes" in automation
+    assert "return scrub" in ui_testing_text
+    assert "misses and computes stay unchanged" in ui_testing_text
+
+
+def test_show3dslices_oblique_line_drag_contract_is_documented():
+    """Show3DSlices oblique line editing should stay a maintained interaction."""
+    show3dslices_js = (ROOT / "js" / "show3dslices" / "index.tsx").read_text(
+        encoding="utf-8"
+    )
+    show3dslices_py = (
+        ROOT / "src" / "quantem" / "widget" / "show3dslices.py"
+    ).read_text(encoding="utf-8")
+    api = (ROOT / "docs" / "api" / "show3dslices.md").read_text(encoding="utf-8")
+    storyboard = (
+        ROOT / "docs" / "maintainer" / "storyboard-show3dslices.md"
+    ).read_text(encoding="utf-8")
+    performance = (
+        ROOT / "docs" / "maintainer" / "widget-performance.md"
+    ).read_text(encoding="utf-8")
+    performance_text = " ".join(performance.split())
+
+    assert 'useModelState<{ row: number; col: number }[]>("oblique_profile_line")' in show3dslices_js
+    assert "obliqueHandleDragRef" in show3dslices_js
+    assert 'mode: "endpoint"' in show3dslices_js
+    assert 'mode: "line"' in show3dslices_js
+    assert "updateObliqueFromEndpoints" in show3dslices_js
+    assert "updateObliqueFromLineDrag" in show3dslices_js
+    assert "translateSegmentInsideImage" in show3dslices_js
+    assert "const dxRaw = point.col - drag.origin.x" in show3dslices_js
+    assert "const dyRaw = point.row - drag.origin.y" in show3dslices_js
+    assert "liveFftSchedulerRef" in show3dslices_js
+    assert "const scheduleLiveFft" in show3dslices_js
+    assert "computeLiveFftAxis" in show3dslices_js
+    assert "fftResultCacheRef" in show3dslices_js
+    assert "makeFftResultCacheKey" in show3dslices_js
+    assert "SHOW3DSLICES_FFT_RESULT_CACHE_MAX_BYTES" in show3dslices_js
+    assert "fftCacheHits" in show3dslices_js
+    assert "fftCacheMisses" in show3dslices_js
+    assert "scheduleLiveFft([1], { segment: { start, stop } })" in show3dslices_js
+    assert "scheduleLiveFft([0], { sliceZ: next[0] })" in show3dslices_js
+    assert "const liveObliqueEditing = obliqueHandleDragRef.current !== null" in show3dslices_js
+    assert "const debounceMs = liveObliqueEditing ? 16 : 80" in show3dslices_js
+    assert "pausePlaybackForEdit" in show3dslices_js
+    assert "oblique_profile_line" in show3dslices_py
+    assert "_validate_oblique_profile_line" in show3dslices_py
+
+    assert "Oblique line drag" in api
+    assert "Drag either endpoint" in api
+    assert "translate the whole cut freely in row/col" in api
+    assert "Drag the oblique line endpoints" in storyboard
+    assert "Drag the oblique line body" in storyboard
+    assert "translates in row and col" in storyboard
+    assert "oblique FFT panel follows" in storyboard
+    assert "oblique line endpoint/body drags" in performance_text
+    assert "oblique FFT redraw during line drag" in performance_text
+    assert "FFT return-scrub cache hits" in performance_text
+
+
 def test_debug_overlay_trait_round_trips_through_state_dict():
     """Debug overlay is a normal saved widget state, not a one-off frontend flag."""
     show2d = Show2D(np.zeros((8, 8), dtype=np.float32), debug=True, verbose=False)

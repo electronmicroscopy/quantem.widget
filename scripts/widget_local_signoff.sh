@@ -180,6 +180,15 @@ if [[ "$performance" -eq 1 ]]; then
   echo "== real-data performance smoke =="
   PYTHONPATH=src:. python scripts/widget_performance_smoke.py --artifact-dir "$artifact_dir/performance"
 
+  if [[ "$browser" -eq 1 ]]; then
+    echo "== browser-drive real-data performance smoke =="
+    perf_browser_args=(--artifact-dir "$artifact_dir/performance")
+    if [[ "$mobile" -eq 1 ]]; then
+      perf_browser_args+=(--mobile)
+    fi
+    PYTHONPATH=src:. python scripts/widget_browser_smoke.py "${perf_browser_args[@]}"
+  fi
+
   echo "== post-performance browser artifact cleanup =="
   python scripts/cleanup_browser_artifacts.py
 fi

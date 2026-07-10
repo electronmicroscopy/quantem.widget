@@ -146,6 +146,9 @@ def test_automation_documentation_names_entrypoints() -> None:
         "browser-smoke.html",
         "--mobile",
         "--min-fps",
+        "--full --browser --performance",
+        "performance/browser-smoke.html",
+        "Real-data Show2D/Show3D browser smoke",
         "storyboard IDs",
         "390x844",
         "never normal CI",
@@ -162,6 +165,9 @@ def test_automation_documentation_names_entrypoints() -> None:
         "Do Not Do This",
         "Report Artifacts",
         "signoff-dashboard.json",
+        "everything dashboard",
+        "failed gates",
+        "next recommended",
         "actions/upload-artifact",
         "workflow_dispatch",
         "http://127.0.0.1:8779/index.html",
@@ -243,10 +249,17 @@ def test_signoff_dashboard_summarizes_available_reports(tmp_path: Path) -> None:
     html_smoke.mkdir(parents=True)
     showfolder_live = artifact_dir / "showfolder-live"
     showfolder_live.mkdir()
+    performance = artifact_dir / "performance"
+    performance.mkdir()
+    external = artifact_dir / "external-html-profile"
+    external.mkdir()
+    gif = artifact_dir / "show3d-gif"
+    gif.mkdir()
     (artifact_dir / "signoff-manifest.json").write_text(
         json.dumps({
             "status": "pass",
             "commit": "abc123",
+            "branch": "main",
             "mode": "quick",
             "browser_smoke": True,
             "duration_seconds": 12,
@@ -254,15 +267,87 @@ def test_signoff_dashboard_summarizes_available_reports(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     (html_smoke / "index.html").write_text("<html>matrix</html>", encoding="utf-8")
-    (html_smoke / "report.json").write_text(json.dumps({"exports": [{"widget": "show2d"}]}), encoding="utf-8")
+    (html_smoke / "report.json").write_text(
+        json.dumps({
+            "total_size_mb": 2.0,
+            "exports": [
+                {"widget": "show2d", "variant": "show2d-single", "seconds": 0.2, "size_mb": 1.25},
+                {"widget": "show3d", "variant": "show3d-stack", "seconds": 0.4, "size_mb": 0.75},
+            ],
+        }),
+        encoding="utf-8",
+    )
     (html_smoke / "browser-smoke.html").write_text("<html>browser</html>", encoding="utf-8")
     (html_smoke / "browser-smoke-report.json").write_text(
-        json.dumps({"passed": 1, "pages": [{"passed": True}]}),
+        json.dumps({
+            "passed": 2,
+            "mobile": True,
+            "pages": [
+                {"passed": True, "fps": 61.0, "screenshot": "screenshots/show2d.png"},
+                {"passed": True, "fps": 58.4, "screenshot": "screenshots/show3d.png"},
+            ],
+        }),
         encoding="utf-8",
     )
     (showfolder_live / "index.html").write_text("<html>live</html>", encoding="utf-8")
     (showfolder_live / "report.json").write_text(
         json.dumps({"passed": True, "steps": [{"name": "live", "passed": True}]}),
+        encoding="utf-8",
+    )
+    (performance / "index.html").write_text("<html>performance</html>", encoding="utf-8")
+    (performance / "report.json").write_text(
+        json.dumps({
+            "timings": [{"case": "load_show3d_real_derived_stack", "seconds": 1.25}],
+            "exports": [{"widget": "show3d", "variant": "real", "seconds": 2.5, "size_mb": 12.5}],
+            "too_large": [],
+        }),
+        encoding="utf-8",
+    )
+    (performance / "browser-smoke.html").write_text("<html>performance browser</html>", encoding="utf-8")
+    (performance / "browser-smoke-report.json").write_text(
+        json.dumps({
+            "passed": 1,
+            "pages": [
+                {"passed": True, "fps": 55.0, "screenshot": "screenshots/show3d-real.png"},
+            ],
+        }),
+        encoding="utf-8",
+    )
+    (external / "index.html").write_text("<html>profile</html>", encoding="utf-8")
+    (external / "metrics.json").write_text(
+        json.dumps({
+            "passed": True,
+            "url": "http://127.0.0.1:8779/example.html",
+            "load_to_ready_s": 1.1,
+            "initial_fps": 59.5,
+            "final_fps": 58.8,
+            "initial_canvas_count": 3,
+            "steps": [{"name": "page_autoplay", "fps": 58.2}],
+        }),
+        encoding="utf-8",
+    )
+    (gif / "index.html").write_text("<html>gif</html>", encoding="utf-8")
+    (gif / "report.json").write_text(
+        json.dumps({
+            "source": {"kind": "synthetic CI fallback"},
+            "input_shape": [5, 64, 64],
+            "fps": 5,
+            "panel_gap": 0,
+            "planned_exports": [{"quality": "medium"}],
+            "playback": "bounce",
+            "total_size_mb": 0.4,
+            "exports": [{"quality": "medium", "size_mb": 0.4}],
+        }),
+        encoding="utf-8",
+    )
+    (artifact_dir / "heavy-signoff-report.json").write_text(
+        json.dumps({
+            "passed": True,
+            "browser": {"passed": 1, "pages": [{"passed": True, "fps": 55.0}]},
+            "show2d_paged_scrub": {"passed": True, "page_scrub_max_ms": 120.0},
+            "show3d_paged_scrub": {"passed": True, "page_scrub_max_ms": 180.0},
+            "show3d_fft_idle": {"passed": True, "fps": 57.5},
+        }),
         encoding="utf-8",
     )
 
@@ -271,13 +356,37 @@ def test_signoff_dashboard_summarizes_available_reports(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stdout
     dashboard = (artifact_dir / "index.html").read_text(encoding="utf-8")
     dashboard_json = json.loads((artifact_dir / "signoff-dashboard.json").read_text(encoding="utf-8"))
-    assert "quantem.widget signoff dashboard: PASS" in dashboard
+    assert "quantem.widget everything dashboard: PASS" in dashboard
     assert "HTML export smoke" in dashboard
     assert "Browser HTML smoke" in dashboard
     assert "ShowFolder live-folder smoke" in dashboard
+    assert "Real-data Show2D/Show3D performance smoke" in dashboard
+    assert "Real-data Show2D/Show3D browser smoke" in dashboard
+    assert "External exported HTML profile(s)" in dashboard
+    assert "Show3D GIF/MP4 presentation smoke" in dashboard
+    assert "Heavy Show2D/Show3D signoff" in dashboard
+    assert "Measured Performance" in dashboard
+    assert "Evidence Gates</div><div class='kpi-value'>" in dashboard
+    assert "Min FPS: 58.4" in dashboard
+    assert "Slowest backend step: load_show3d_real_derived_stack 1.25 s" in dashboard
+    assert "Show2D page max" in dashboard
     assert "showfolder-live/index.html" in dashboard
     assert "html-smoke/browser-smoke.html" in dashboard
+    assert "performance/index.html" in dashboard
+    assert "performance/browser-smoke.html" in dashboard
+    assert "external-html-profile/index.html" in dashboard
+    assert "show3d-gif/index.html" in dashboard
     assert dashboard_json["manifest"]["commit"] == "abc123"
+    assert dashboard_json["summary"]["status_counts"]["pass"] >= 7
+    assert not dashboard_json["summary"]["failed_gates"]
+
+
+def test_local_signoff_drives_performance_exports_when_browser_enabled() -> None:
+    script = (ROOT / "scripts/widget_local_signoff.sh").read_text(encoding="utf-8")
+
+    assert 'echo "== browser-drive real-data performance smoke =="' in script
+    assert 'perf_browser_args=(--artifact-dir "$artifact_dir/performance")' in script
+    assert 'python scripts/widget_browser_smoke.py "${perf_browser_args[@]}"' in script
 
 
 def test_maintained_automation_docs_use_generic_backend_names() -> None:
@@ -487,7 +596,7 @@ def test_widget_show3d_animation_smoke_writes_gif_report(tmp_path: Path) -> None
     assert report["source"]["kind"] == "synthetic CI fallback"
     assert report["input_shape"] == [5, 64, 64]
     assert report["panels"] == ["Raw", "Smoothed", "Change"]
-    assert report["panel_gap"] == 10
+    assert report["panel_gap"] == 0
     assert report["panel_labels"] is True
     assert report["scale_bar"] == {"visible": True, "sampling_nm": 0.05}
     assert report["zoom_indicator"] is True

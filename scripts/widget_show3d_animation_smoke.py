@@ -387,7 +387,7 @@ def main() -> int:
     parser.add_argument("--fps", type=float, default=4.0)
     parser.add_argument("--playback", choices=["forward", "bounce"], default="bounce")
     parser.add_argument("--qualities", nargs="+", default=["low", "medium", "high"])
-    parser.add_argument("--panel-gap", type=int, default=10, help="Pixel gap between panels in the exported GIF grid. Use 0 for edge-to-edge panels.")
+    parser.add_argument("--panel-gap", type=int, default=0, help="Pixel gap between panels in the exported GIF grid. Use 0 for edge-to-edge panels.")
     parser.add_argument("--sampling-nm", type=float, default=0.05, help="Display sampling used for the GIF report scale bar.")
     parser.add_argument("--panel-labels", dest="panel_labels", action="store_true", default=True, help="Burn live-style panel labels into the GIF.")
     parser.add_argument("--no-panel-labels", dest="panel_labels", action="store_false", help="Do not burn top panel labels into the GIF.")

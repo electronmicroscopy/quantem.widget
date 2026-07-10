@@ -1,6 +1,12 @@
 import numpy as np
 
-from quantem.widget import Show2D, Show3D, profile_widget, widget_timing_report
+from quantem.widget import (
+    Show2D,
+    Show3D,
+    Show4DSTEM,
+    profile_widget,
+    widget_timing_report,
+)
 from quantem.widget._timing import (
     format_bytes,
     format_ms,
@@ -95,6 +101,15 @@ def test_show3d_first_render_uses_timing_table_and_honors_verbose(capsys):
     assert "2x8x8 | float32 | 512 B" in out
     assert "Frame server" in out
     assert "Offline stack" in out
+
+
+def test_show4dstem_constructor_is_quiet_by_default(capsys):
+    widget = Show4DSTEM(np.zeros((4, 4, 8, 8), dtype=np.float32))
+
+    try:
+        assert capsys.readouterr().out == ""
+    finally:
+        widget.close()
 
 
 def test_widget_timing_report_after_first_render():

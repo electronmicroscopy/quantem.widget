@@ -20,13 +20,14 @@ change needs them.
 
 | File | What it proves | Main checks | When to run | Output |
 | --- | --- | --- | --- | --- |
-| `scripts/widget_local_signoff.sh` | The repository is generally ready. | Size guards, frontend build, Python tests, HTML export smoke, optional browser/mobile/performance gates. | Default before saying a widget change is ready; `--quick --browser --mobile` for exported UI work. | Top-level `index.html` report under `/tmp/quantem-widget-local-signoff/...` or `--artifact-dir`. |
+| `scripts/widget_local_signoff.sh` | The repository is generally ready. | Size guards, frontend build, Python tests, HTML export smoke, optional browser/mobile/performance gates; when `--browser --performance` are combined, it also drives the real-data performance exports in Chromium. | Default before saying a widget change is ready; `--quick --browser --mobile` for exported UI work; `--full --browser --performance` for release-facing real-data export UI proof. | Top-level `index.html` report under `/tmp/quantem-widget-local-signoff/...` or `--artifact-dir`. |
+| `scripts/widget_signoff_dashboard.py` | The generated evidence can be reviewed from one page. | Pass/fail/skipped gate summary, failed gate list, next recommended runs, extracted FPS/load/export metrics, and links to raw reports. | Runs through local signoff/CI; rerun manually after dropping additional reports into the same artifact directory. | Top-level `index.html` everything dashboard plus `signoff-dashboard.json`. |
 | `.github/workflows/widget-ci.yml` | CI can repeat the normal local signoff on clean Linux. | Same default local signoff path: build, tests, export smoke, docs build when not quick. | Automatically on PRs and pushes touching widget code/docs/tests. | GitHub Actions logs. |
 | `scripts/widget_html_smoke.py` | Every export-capable widget can write standalone HTML with state. | `export_html()`, expected markers, file size, widget coverage matrix, browser-drive plan, small MoS2-like Show2D/Show3D lattice examples for meaningful visual review. | CI/default signoff; update when a widget gains or changes HTML export. | `index.html`, `report.json`, `browser-plan.json`, exported widget HTML files. |
 | `scripts/widget_showfolder_live_smoke.py` | ShowFolder live-folder handoff stays centralized and functional. | Adds image files and `*_master.h5` markers, calls `watch_once()`, verifies active Show2D/Show3D/Show4DSTEM refresh, writes reviewable exports. | CI/default signoff; update when ShowFolder watcher or selection handoff changes. | `showfolder-live/index.html`, `showfolder-live/report.json`, final ShowFolder/Show2D/Show3D/Show4DSTEM exports. |
 | `scripts/widget_show3d_animation_smoke.py` | Show3D GIF exports are presentation-ready. | Dry-run size plan, multi-panel low/medium/high GIF previews, panel-gap control, live-style labels, scale bar, zoom readout, export seconds, file sizes, dimensions, frame count, frame-delta metric, optional local Caitlyn time-series source. | When GIF/MP4 animation export, PowerPoint sharing, or Show3D movie quality changes. | `index.html`, `report.json`, `show3d-caitlyn-timeseries-*.gif` unless `--dry-run`. |
 | `scripts/widget_browser_smoke.py` | Exported HTML actually renders and responds in Chromium. | Nonblank canvases, wheel/drag interaction, switches, sliders, console/page/HTTP errors, `requestAnimationFrame` FPS, FFT state, storyboard IDs, optional mobile viewport. | `scripts/widget_local_signoff.sh --quick --browser`; add `--mobile` for narrow/touch layout changes. | `browser-smoke.html`, `browser-smoke-report.json`, screenshots. |
-| `scripts/widget_performance_smoke.py` | Backend export packing and small real-data Show2D/Show3D payloads are measurable. | Real-data discovery, export time, output size, browser-drive plan. | `--performance` signoff or when checking export size/time trends. | `index.html`, `report.json`, `browser-plan.json`, exported real-data HTML. |
+| `scripts/widget_performance_smoke.py` | Backend export packing and small real-data Show2D/Show3D payloads are measurable. | Real-data discovery, export time, output size, browser-drive plan. | `--performance` signoff or when checking export size/time trends. Add `--browser` to local signoff when those exports also need automated Chromium interaction/FPS proof. | `index.html`, `report.json`, `browser-plan.json`, exported real-data HTML; plus `browser-smoke.html` when driven through local signoff with `--browser`. |
 | `scripts/widget_external_html_profile.py` | A standalone exported HTML report that already exists outside the repo remains interactive and fast. | Opens a provided URL, checks nonblank canvases, samples FPS, drives common Show3D page/play/hide controls when present, captures screenshots and console/page errors. | Local-only review of Tailscale-served or hosted real-data reports, especially when a user points to an existing exported HTML file. | `index.html`, `metrics.json`, screenshots under `/tmp` or `--artifact-dir`. |
 | `scripts/widget_heavy_perf_signoff.py` | Heavy Show2D/Show3D real-data browser performance is acceptable on lab data. | Local real-data discovery, paged heavy exports, browser FPS, nonblank render, screenshots, page-scrub latency, hidden-panel persistence across page swaps, Show3D offline frame-cache/prewarm counters, Show3D FFT overlay idle-cache guard, and FFT metric stats-toggle cache guard. | Local-only HPC/workstation performance claims; never normal CI. | `index.html`, `heavy-signoff-report.json`, `browser-smoke-report.json`, screenshots under `/tmp`. |
 | `scripts/widget_show4dstem_heavy_signoff.py` | Heavy Show4DSTEM real-data loading, NVIDIA/CUDA backend memory, append/stack-growth, export, and browser interaction are acceptable on lab data. | Local 4D-STEM master discovery, CUDA first-load timing, backend memory report, append/stack-growth timing, dataset/frame flip FPS, virtual-detector drag FPS, scan-position FPS, browser WebGPU/backend split, GPU memory before/after. | Local-only Show4DSTEM performance claims; never normal CI. | `index.html`, `show4dstem-heavy-signoff-report.json`, exported Show4DSTEM HTML, browser screenshot under `/tmp`. |
@@ -133,19 +134,51 @@ Measure the interactions users feel. Unit tests and Python timers are not
 enough.
 
 Show2D, Show3D, and Show4DSTEM support an internal debug overlay with
-`debug=True`. It shows a compact `Debug FPS` badge in the widget title row and
-is meant for live diagnosis in Jupyter and exported HTML. Agents should turn it
-on when they need a quick, visible performance signal while driving a widget:
+`debug=True`. It shows a compact `Debug UI FPS` badge in the widget title row
+and is meant for live diagnosis in Jupyter and exported HTML. Agents should
+turn it on when they need a quick, visible performance signal while driving a
+widget:
 
 ```python
 Show3D(stack, debug=True)
 ```
 
 Keep it off by default, keep the sampler browser-local, and do not update
-Python traits from the animation loop. The badge is an in-browser smoke signal
-for AI/human review, not a release benchmark. A performance claim still needs
-browser smoke, external HTML profile, or heavy signoff evidence with the report
-path recorded in the final handoff.
+Python traits from the animation loop. The badge is one common metric: browser
+paint-loop responsiveness. It does not measure Python load, GPU kernels, FFT
+work, data decode, export packing, or cache behavior. A performance claim still
+needs browser smoke, external HTML profile, or heavy signoff evidence with the
+report path recorded in the final handoff.
+
+Debug should scale as a telemetry protocol, not as one global number. New
+widget-specific debug metrics should fit one of these buckets:
+
+- UI: paint-loop FPS, dropped-frame count, pointer-to-preview latency.
+- Decode: bytes read, transfer/decode time, frame fetch time, cache hit/miss.
+- Draw: colormap, histogram, canvas/WebGL/WebGPU draw, overlay/layout time.
+- Compute: FFT, virtual detector, EDS map/spectrum, Show1D profile, or other
+  scientific computation time; separate CPU worker and GPU/WebGPU paths.
+- Cache and memory: prewarm status, cache size, hit/miss counters, GPU memory
+  label when available.
+- Export/notebook: export packing time, HTML size, saved-output preview format,
+  and notebook state size when relevant.
+
+Expose these metrics in stable browser-local debug objects so agents can read
+them without scraping text. Existing examples include
+`window.__quantemShow3DPerf`, `window.__quantemShowEDSPerf`, and
+`window.__quantemShow3DSlicesPerf`. Keep payloads small: latest value, rolling
+average or last N samples, max, and counters are enough. The visible HUD should
+show only the highest-signal summary; detailed values belong in the browser
+object and the generated report.
+
+FFT caching is part of the interaction contract for Show2D and Show3D. The
+first FFT for a frame, panel set, ROI, and windowing state can be slow, but
+returning to that same scientific input must reuse the cached magnitude so
+slider scrub, page playback, zoom, pan, and metric labels stay real-time. Cache
+keys should describe the FFT input (`frame`, data version, dimensions, visible
+panels, layout, ROI, and windowing) and must not include delivery counters such
+as traitlet frame-byte sequence numbers. Data-source changes should invalidate
+the cache explicitly.
 
 For Show2D, drive and record:
 
@@ -301,6 +334,12 @@ Result:
 - Remaining risk:
 ```
 
+For any automated run that writes multiple reports, open the top-level
+everything dashboard first. It is the decision surface: failed gates, skipped
+stronger gates, extracted metrics, and links to raw artifacts. The raw report
+JSON remains the source of truth for exact numbers, but the dashboard is where a
+human or agent should decide whether the claim is adequately proven.
+
 Release rule:
 
 - `PASS`: all affected gates were driven after the last code change.
@@ -395,6 +434,9 @@ The heavy signoff:
 - checks that standalone Show3D exports expose bounded offline frame-cache and
   prewarm counters in `window.__quantemShow3DPerf`,
 - checks that Show3D FFT cache counters do not grow while the page is idle,
+- checks that a new Show3D FFT frame increments misses/computes once, then a
+  return scrub to a previously computed frame increments hits while misses and
+  computes stay unchanged,
 - checks that Show3D FFT and FFT metric counters do not grow while toggling the
   Stats UI. Stats are display chrome; they must not invalidate cached FFT
   magnitudes or metric summaries,

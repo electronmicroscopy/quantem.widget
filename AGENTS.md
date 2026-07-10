@@ -74,9 +74,13 @@ WebGPU, notebook-state, or export change that can affect a widget interaction,
 drive the affected widget in JupyterLab or standalone HTML and verify that the
 change did not regress responsiveness. For Show2D, Show3D, and Show4DSTEM, use
 `debug=True` when an internal browser-side FPS badge would help an agent or
-human reviewer see responsiveness while driving the widget. Report the measured
-FPS/latency and the browser report path in the handoff or final summary. Do not
-rely only on unit tests or the debug badge for interaction-heavy changes.
+human reviewer see responsiveness while driving the widget. Treat that badge as
+`Debug UI FPS`, not complete performance proof. When the issue involves a
+specific widget path, also inspect or add widget-specific debug counters for
+decode, draw, compute, cache, memory, and interaction latency. Report the
+measured FPS/latency, the relevant widget-specific counters, and the browser
+report path in the handoff or final summary. Do not rely only on unit tests or
+the debug badge for interaction-heavy changes.
 
 For UI performance patterns and known interaction mistakes, read
 `docs/maintainer/widget-performance.md`. In particular, cursor labels, hover
@@ -144,6 +148,15 @@ Whenever an agent finishes a concrete task, the final update must clearly state:
 - **Missing / not verified**: anything still untested, blocked, unstaged,
   uncommitted, unpushed, or needing user confirmation. If nothing is missing,
   say that explicitly.
+- **Review URL**: for widget UI, docs, export, browser, notebook, or visual
+  testing work, include the served HTML/docs/report URL or the exact
+  `index.html` path so the user can inspect it directly. Prefer a local
+  browser-openable URL when a server is running.
+
+For UI work, open the latest review target in the Codex in-app browser before
+handoff; do not only print the URL. If browser control is unavailable, update
+the URL already open in the in-app browser to serve the latest artifact and
+state that a refresh is required.
 
 Keep this short, but do it every time. The goal is that a user can leave and
 come back knowing exactly where the work stands and what should happen next.
@@ -161,6 +174,19 @@ introduce Git LFS just to support routine widget docs. Prefer source notebooks,
 small real rendered examples, and generated docs output. Use public data hosting
 only when real tutorial data or standalone HTML would make normal clones
 unnecessarily large.
+
+## Scientific Verification Data
+
+For end-to-end widget, browser, visual, and performance signoff, prefer real
+reconstructed experimental data that matches the scientist workflow. Use the
+available Samsung ptychography reconstructions for relevant Show3DSlices and
+Show3D checks. Record the source path, shape, dtype, transforms, and any
+binning in the test report.
+
+Synthetic data is appropriate for focused unit tests and controlled failure
+cases, but it does not establish real-workflow signoff. Use synthetic workflows
+such as Ducky iterative ptychography only when the user explicitly requests
+them or when no suitable real reconstruction exists, and label that limitation.
 
 ## Tutorial Data Generation
 
