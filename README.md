@@ -239,6 +239,11 @@ A. Yang, T. Zhang, Y. Xiao, and S. J. L. Billinge, *Digital Discovery*, 2026).
 - [ ] Histogram UI matches the existing Show2D-style interaction: compact panel,
   no extra whitespace, draggable min/max handles, fast center drag, and no
   visible lag.
+- [ ] New or changed widget interactions have a matching storyboard story in
+  [docs/maintainer/storyboard-\<widget\>.md](docs/maintainer/storyboard.md)
+  (add stories for new behavior, update stale ones), and the storyboard
+  drive-test was run for the affected widget with the driven story IDs
+  reported.
 - [ ] Any draggable selector has live preview separate from committed widget
   state; use refs/CSS transforms or an equivalent fast path during drag. See
   [performance notes](docs/maintainer/widget-performance.md).
@@ -304,6 +309,11 @@ A. Yang, T. Zhang, Y. Xiao, and S. J. L. Billinge, *Digital Discovery*, 2026).
   when a public widget or loader is added.
 - [ ] Tutorial notebooks avoid unnecessary `display(...)` and extra display
   imports; let the returned widget render naturally.
+- [ ] Synthetic-data generation cells in tutorial notebooks are collapsed with
+  the `hide-input` cell tag and a descriptive toggle label via cell metadata
+  `mystnb.code_prompt_show` (for example "Show synthetic data generation
+  code"), never the default "Show code cell source". Keep widget-construction
+  code and real-data loader calls visible; split a cell that mixes the two.
 - [ ] The change includes focused tests for Python state/export behavior and
   frontend build coverage where possible; start with `PYTHONPATH=src pytest -q`
   and `npm run build`, or run `scripts/widget_local_signoff.sh`.

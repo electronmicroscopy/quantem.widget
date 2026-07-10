@@ -49,6 +49,11 @@ https://doi.org/10.1039/d6dd00121a
   when a public widget or loader is added.
 - [ ] Tutorial notebooks avoid unnecessary `display(...)` and extra display
   imports; let the returned widget render naturally.
+- [ ] Synthetic-data generation cells in tutorial notebooks are collapsed with
+  the `hide-input` cell tag and a descriptive toggle label via cell metadata
+  `mystnb.code_prompt_show` (for example "Show synthetic data generation
+  code"), never the default "Show code cell source". Keep widget-construction
+  code and real-data loader calls visible; split a cell that mixes the two.
 
 </details>
 
@@ -84,6 +89,11 @@ https://doi.org/10.1039/d6dd00121a
 - [ ] Histogram UI matches the existing Show2D-style interaction: compact panel,
   no extra whitespace, draggable min/max handles, fast center drag, and no
   visible lag.
+- [ ] New or changed widget interactions have a matching storyboard story in
+  [docs/maintainer/storyboard-&lt;widget&gt;.md](https://github.com/bobleesj/quantem.widget/blob/main/docs/maintainer/storyboard.md)
+  (add stories for new behavior, update stale ones), and the storyboard
+  drive-test was run for the affected widget with the driven story IDs
+  reported.
 
 </details>
 
