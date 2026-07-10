@@ -1,6 +1,6 @@
 import pytest
 
-from quantem.widget.phasedb import match_candidate, match_sort_key
+from quantem.widget.showdiffraction import match_candidate, match_sort_key
 
 
 def _lines(entries):

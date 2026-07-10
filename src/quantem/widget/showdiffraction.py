@@ -2,49 +2,1582 @@
 showdiffraction: Interactive d-spacing analysis for 2D/3D diffraction patterns.
 """
 
+import csv
 import json
 import math
 import pathlib
+import re
 import tempfile
 import time
-from collections.abc import Sequence
+import warnings
+from collections.abc import Iterable, Sequence
 from typing import Self
 
 import anywidget
 import numpy as np
 import torch
 import traitlets
+from scipy import ndimage
+from scipy.optimize import linear_sum_assignment
+from scipy.signal.windows import tukey
 
-from quantem.widget.crystal import PHASE_LIBRARY, Phase, library_phase
-from quantem.widget.diffraction import (
-    BF_RADIUS_FRACTION,
-    azimuthal_profile_from_frame,
-    build_analysis_mask,
-    build_measurement_records,
-    corrected_radius,
-    element_symbols,
-    empty_index_fields,
-    fit_ellipse_from_sectors,
-    fit_gaussian_spot,
-    fit_radial_background,
-    fit_ring_peaks,
-    format_zone_axis,
-    index_assignment,
-    measurement_metadata,
-    next_record_id,
-    normalize_data_input,
-    pack_float32_halves,
-    parse_elements,
-    radial_profile_px,
-    ring_sectors,
-    texture_from_profile,
-    write_measurement_file,
-)
 from quantem.widget.export import ensure_mobile_viewport
 from quantem.widget.utils.array import to_numpy
 from quantem.widget.utils.state_io import resolve_widget_version, save_state_file, unwrap_state_payload
 from quantem.widget.utils.ui import UiMode, resolve_ui_mode
 
+
+# ========================= Crystal phases =========================
+def _allow_all(*_) -> bool:
+    return True
+
+
+def _allow_fcc(h: int, k: int, ell: int) -> bool:
+    return (h % 2) == (k % 2) == (ell % 2)
+
+
+def _allow_bcc(h: int, k: int, ell: int) -> bool:
+    return (h + k + ell) % 2 == 0
+
+
+def _allow_diamond(h: int, k: int, ell: int) -> bool:
+    return (h % 2 == k % 2 == ell % 2 == 1) or (
+        h % 2 == k % 2 == ell % 2 == 0 and (h + k + ell) % 4 == 0
+    )
+
+
+def _allow_hcp(h: int, k: int, ell: int) -> bool:
+    return not ((h + 2 * k) % 3 == 0 and ell % 2 == 1)
+
+
+def _allow_rhombohedral(h: int, k: int, ell: int) -> bool:
+    return (-h + k + ell) % 3 == 0
+
+
+def _allow_rhombohedral_c(h: int, k: int, ell: int) -> bool:
+    if (h == 0 or k == 0 or h == -k) and ell % 2 == 1:
+        return False
+    return _allow_rhombohedral(h, k, ell)
+
+
+def _allow_spinel(h: int, k: int, ell: int) -> bool:
+    if not _allow_fcc(h, k, ell):
+        return False
+    low, mid, high = sorted((abs(h), abs(k), abs(ell)))
+    if mid == 0:  # h00
+        return high % 4 == 0
+    if low == 0:  # hk0
+        return (mid + high) % 4 == 0
+    return True
+
+
+def _allow_i41amd(h: int, k: int, ell: int) -> bool:
+    if (h + k + ell) % 2 != 0:
+        return False
+    if ell % 2 == 1:
+        return True
+    if ell % 4 == 0:  # includes hk0
+        return h % 2 == 0
+    return h % 2 == 1  # l = 4n+2
+
+
+def _allow_rutile(h: int, k: int, ell: int) -> bool:
+    if h == 0 and (k + ell) % 2 == 1:
+        return False
+    if k == 0 and (h + ell) % 2 == 1:
+        return False
+    return True
+
+
+def _allow_bixbyite(h: int, k: int, ell: int) -> bool:
+    if (h + k + ell) % 2 != 0:
+        return False
+    if h == 0 and (k % 2 == 1 or ell % 2 == 1):
+        return False
+    if k == 0 and (h % 2 == 1 or ell % 2 == 1):
+        return False
+    if ell == 0 and (h % 2 == 1 or k % 2 == 1):
+        return False
+    return True
+
+
+def _allow_cuprite(h: int, k: int, ell: int) -> bool:
+    if (h + k + ell) % 2 == 0:
+        return True
+    return h % 2 == k % 2 == ell % 2
+
+
+_ABSENCE_RULES = {
+    "none": _allow_all,
+    "fcc": _allow_fcc,
+    "bcc": _allow_bcc,
+    "diamond": _allow_diamond,
+    "hcp": _allow_hcp,
+    "wurtzite": _allow_hcp,  # 2b wurtzite sites zero the same reflections as hcp
+    "rhombohedral": _allow_rhombohedral,
+    "rhombohedral-c": _allow_rhombohedral_c,
+    "spinel": _allow_spinel,  # Fd-3m d-glide: h00 needs h=4n, hk0 needs h+k=4n
+    "i41amd": _allow_i41amd,  # I4_1/amd 4a/8e sites: 002, 110, 222 absent
+    "rutile": _allow_rutile,  # P4_2/mnm n-glide: 0kl needs k+l even
+    "bixbyite": _allow_bixbyite,  # Ia-3 a-glide: 0kl needs k, l even
+    "cuprite": _allow_cuprite,  # Pn-3m 2a/4b sites: mixed parity with odd sum absent
+}
+
+# Built-in standards: room-temperature lattice parameters in Å, each taken from
+# the license-clean source cited on its line (non-cubic entries: line above) —
+# NIST SRM certificates and NBS circulars/monographs (US public domain), the
+# Crystallography Open Database (COD, CC0), or primary literature (numerical
+# facts, cited for provenance). No values from proprietary compilations
+# (ICDD PDF, Pearson's Handbook).
+PHASE_LIBRARY = {
+    # fcc metals
+    "Au": {"a": 4.0782, "absences": "fcc"},  # COD 9008463 (Wyckoff 1963)
+    "Ag": {"a": 4.0855, "absences": "fcc"},  # COD 1100136 (Spreadborough & Christian 1959)
+    "Al": {"a": 4.0494, "absences": "fcc"},  # NBS Circ. 539 v1 (Swanson & Tatge 1953)
+    "Cu": {"a": 3.6149, "absences": "fcc"},  # Lu & Chang 1941 (NBS Circ. 539 v1)
+    "Ni": {"a": 3.5238, "absences": "fcc"},  # NBS Circ. 539 v1 (Swanson & Tatge 1953)
+    "Pt": {"a": 3.9236, "absences": "fcc"},  # Arblaster 1997, Platin. Met. Rev. 41 12
+    "Pd": {"a": 3.8902, "absences": "fcc"},  # Arblaster 2012, Platin. Met. Rev. 56 181
+    "Pb": {"a": 4.9508, "absences": "fcc"},  # Klug 1946 (NBS Circ. 539 v1)
+    "Ir": {"a": 3.8392, "absences": "fcc"},  # Arblaster 2010, Platin. Met. Rev. 54 93
+    "Rh": {"a": 3.8034, "absences": "fcc"},  # Arblaster 1997, Platin. Met. Rev. 41 184
+    # bcc metals
+    "α-Fe": {"a": 2.8665, "absences": "bcc"},  # COD 9008536 (Wyckoff 1963)
+    "W": {"a": 3.1652, "absences": "bcc"},  # NBS Mono. 25 Sec. 13 (internal standard)
+    "Cr": {"a": 2.8839, "absences": "bcc"},  # NBS Circ. 539 v5 (1955), COD 5000220
+    "Mo": {"a": 3.1472, "absences": "bcc"},  # NBS Circ. 539 v1 (Swanson & Tatge 1953)
+    "Nb": {"a": 3.3004, "absences": "bcc"},  # COD 9008546 (Wyckoff 1963)
+    "Ta": {"a": 3.3058, "absences": "bcc"},  # COD 9008552 (Wyckoff 1963)
+    "V": {"a": 3.0241, "absences": "bcc"},  # COD 9012770 (James & Straumanis 1960)
+    # diamond cubic
+    "Si": {"a": 5.4311, "absences": "diamond"},  # NIST SRM 640f
+    "Ge": {"a": 5.6578, "absences": "diamond"},  # COD 9011999 (Hom et al. 1975)
+    "C (diamond)": {"a": 3.5668, "absences": "diamond"},  # COD 9008564 (Wyckoff 1963)
+    "α-Sn": {"a": 6.4912, "absences": "diamond"},  # COD 9008568 (Wyckoff 1963)
+    # rocksalt
+    "MgO": {"a": 4.2117, "absences": "fcc"},  # NBS Circ. 539 v1 (Swanson & Tatge 1953)
+    "NaCl": {"a": 5.6402, "absences": "fcc"},  # NBS Circ. 539 v2 (Swanson & Fuyat 1953)
+    "LiF": {"a": 4.0270, "absences": "fcc"},  # NBS Circ. 539 v1 (Swanson & Tatge 1953)
+    "TiN": {"a": 4.2390, "absences": "fcc"},  # COD 1100037 (Christensen 1978)
+    "TiC": {"a": 4.3280, "absences": "fcc"},  # COD 9012564 (Christensen 1978)
+    "NiO": {"a": 4.1771, "absences": "fcc"},  # COD 4329325 (Malingowski et al. 2012)
+    "CaO": {"a": 4.8107, "absences": "fcc"},  # COD 7200686 (Verbraeken et al. 2009)
+    "ZrN": {"a": 4.5780, "absences": "fcc"},  # COD 1538058 (Gatterer et al. 1975)
+    "CrN": {"a": 4.1480, "absences": "fcc"},  # COD 1008956 (Nasr Eddine et al. 1977)
+    "TaC": {"a": 4.4540, "absences": "fcc"},  # COD 9008731 (Wyckoff 1963)
+    "NbC": {"a": 4.4691, "absences": "fcc"},  # COD 9008682 (Wyckoff 1963)
+    "ZrC": {"a": 4.7004, "absences": "fcc"},  # COD 1562921 (Chinthaka Silva et al. 2012)
+    # fluorite
+    "CaF2": {"a": 5.4630, "absences": "fcc"},  # COD 9009005 (Wyckoff 1963)
+    "CeO2": {"a": 5.4115, "absences": "fcc"},  # NIST SRM 674b
+    "UO2": {"a": 5.4704, "absences": "fcc"},  # Grønvold 1955, J. Inorg. Nucl. Chem. 1 357
+    # zincblende
+    "GaAs": {"a": 5.6533, "absences": "fcc"},  # Straumanis & Kim 1965, J. Appl. Phys. 36 3822
+    "GaP": {"a": 5.4505, "absences": "fcc"},  # COD 9008846 (Wyckoff 1963)
+    "InP": {"a": 5.8687, "absences": "fcc"},  # COD 9008852 (Wyckoff 1963)
+    "InAs": {"a": 6.0580, "absences": "fcc"},  # NBS Mono. 25 Sec. 3 (1964)
+    "ZnS": {"a": 5.4093, "absences": "fcc"},  # COD 9000107 (Skinner 1961)
+    "ZnSe": {"a": 5.6676, "absences": "fcc"},  # COD 9008857 (Wyckoff 1963)
+    "CdTe": {"a": 6.4810, "absences": "fcc"},  # NBS Mono. 25 Sec. 3 (1964)
+    "3C-SiC": {"a": 4.3596, "absences": "fcc"},  # Sultan et al. 2022, Materials 15 6229
+    "CuI": {"a": 6.0630, "absences": "fcc"},  # COD 9004456 (Cooper & Hawthorne 1997)
+    # spinel
+    "Fe3O4": {"a": 8.3967, "absences": "spinel"},  # COD 9013529 (Bosi et al. 2009)
+    "γ-Fe2O3": {"a": 8.3474, "absences": "spinel"},  # COD 9017489 (Shmakov et al. 1995)
+    "MgAl2O4": {"a": 8.0836, "absences": "spinel"},  # COD 9002044 (Redfern et al. 1999)
+    "Co3O4": {"a": 8.0821, "absences": "spinel"},  # COD 9005887 (Liu & Prewitt 1990)
+    "CoFe2O4": {"a": 8.3806, "absences": "spinel"},  # COD 1533163 (Ferreira et al. 2003)
+    "NiFe2O4": {"a": 8.3597, "absences": "spinel"},  # COD 2300289 (Kremenović et al. 2010)
+    "ZnFe2O4": {"a": 8.4421, "absences": "spinel"},  # COD 9005102 (O'Neill 1992)
+    # primitive cubic
+    "SrTiO3": {"a": 3.9050, "absences": "none"},  # NBS Circ. 539 v3 (Swanson et al. 1954)
+    "CsCl": {"a": 4.1230, "absences": "none"},  # NBS Circ. 539 v2 (Swanson & Fuyat 1953)
+    # additional cubic phases
+    "Th": {"a": 5.0843, "absences": "fcc"},  # COD 9008485 (Wyckoff 1963)
+    "KCl": {"a": 6.2917, "absences": "fcc"},  # NBS Circ. 539 v1 (Swanson & Tatge 1953)
+    "KBr": {"a": 6.6000, "absences": "fcc"},  # COD 9008650 (Wyckoff 1963)
+    "CoO": {"a": 4.2630, "absences": "fcc"},  # COD 1533087 (Sasaki et al. 1979)
+    "MnO": {"a": 4.4449, "absences": "fcc"},  # COD 9005946 (Pacalo & Graham 1991)
+    "PbS": {"a": 5.9362, "absences": "fcc"},  # NBS Circ. 539 v2 (Swanson & Fuyat 1953)
+    "PbSe": {"a": 6.1243, "absences": "fcc"},  # COD 9008695 (Wyckoff 1963)
+    "PbTe": {"a": 6.4541, "absences": "fcc"},  # COD 9011358 (Noda et al. 1987)
+    "AgCl": {"a": 5.5491, "absences": "fcc"},  # NBS Circ. 539 v4 (Swanson et al. 1955)
+    "AgBr": {"a": 5.7745, "absences": "fcc"},  # NBS Circ. 539 v4 (Swanson et al. 1955)
+    "ThO2": {"a": 5.5997, "absences": "fcc"},  # COD 9009046 (Wyckoff 1963)
+    "BaF2": {"a": 6.2001, "absences": "fcc"},  # COD 9009004 (Wyckoff 1963)
+    "SrF2": {"a": 5.7996, "absences": "fcc"},  # COD 9009043 (Wyckoff 1963)
+    "AlAs": {"a": 5.6608, "absences": "fcc"},  # COD 1540257 (Leszczynski et al. 1992)
+    "GaSb": {"a": 6.0959, "absences": "fcc"},  # Straumanis & Kim 1965, J. Appl. Phys. 36 3822
+    "InSb": {"a": 6.4794, "absences": "fcc"},  # Straumanis & Kim 1965, J. Appl. Phys. 36 3822
+    "ZnTe": {"a": 6.1026, "absences": "fcc"},  # COD 1540103 (Holland & Beck 1968)
+    "c-BN": {"a": 3.6153, "absences": "fcc"},  # Kurdyumov et al. 1995, J. Appl. Cryst. 28 540
+    "γ-Al2O3": {"a": 7.9140, "absences": "spinel"},  # COD 2107301 (Zhou & Snyder 1991)
+    "Y2O3": {"a": 10.6040, "absences": "bixbyite"},  # COD 1513300 (Ferreira et al. 2005)
+    "In2O3": {"a": 10.1170, "absences": "bixbyite"},  # COD 2310009 (Marezio 1966)
+    "LaB6": {"a": 4.1568, "absences": "none"},  # NIST SRM 660c
+    "Cu2O": {"a": 4.2696, "absences": "cuprite"},  # NBS Circ. 539 v2 (Swanson & Fuyat 1953)
+    # tetragonal
+    # NIST SRM 674b
+    "TiO2 (rutile)": {"a": 4.5940, "c": 2.9589, "gamma": 90.0, "absences": "rutile"},
+    # NBS Mono. 25 Sec. 7 (1969)
+    "TiO2 (anatase)": {"a": 3.7852, "c": 9.5139, "gamma": 90.0, "absences": "i41amd"},
+    # COD 2101853 (Bolzan et al. 1997)
+    "SnO2": {"a": 4.7374, "c": 3.1864, "gamma": 90.0, "absences": "rutile"},
+    # COD 1534488 (Lee & Raynor 1954)
+    "β-Sn": {"a": 5.8317, "c": 3.1813, "gamma": 90.0, "absences": "i41amd"},
+    # COD 1513252 (Yasuda et al. 2009)
+    "BaTiO3": {"a": 3.9905, "c": 4.0412, "gamma": 90.0, "absences": "none"},
+    # primitive hexagonal
+    # COD 1501516 (Litasov et al. 2010)
+    "WC": {"a": 2.9059, "c": 2.8377, "gamma": 120.0, "absences": "none"},
+    # COD 2002799 (Möhr et al. 1996)
+    "TiB2": {"a": 3.0292, "c": 3.2284, "gamma": 120.0, "absences": "none"},
+    # wurtzite
+    # NIST SRM 674b
+    "ZnO": {"a": 3.2499, "c": 5.2067, "gamma": 120.0, "absences": "wurtzite"},
+    # Detchprohm et al. 1992, Jpn. J. Appl. Phys. 31 L1454
+    "GaN": {"a": 3.1892, "c": 5.1850, "gamma": 120.0, "absences": "wurtzite"},
+    # Schulz & Thiemann 1977, Solid State Commun. 23 815
+    "AlN": {"a": 3.1100, "c": 4.9800, "gamma": 120.0, "absences": "wurtzite"},
+    # Paszkowicz 1999, Powder Diffr. 14 258
+    "InN": {"a": 3.5378, "c": 5.7033, "gamma": 120.0, "absences": "wurtzite"},
+    # COD 9011663 (Xu & Ching 1993)
+    "CdS (wurtzite)": {"a": 4.1370, "c": 6.7144, "gamma": 120.0, "absences": "wurtzite"},
+    # COD 9011664 (Xu & Ching 1993)
+    "CdSe (wurtzite)": {"a": 4.2985, "c": 7.0152, "gamma": 120.0, "absences": "wurtzite"},
+    # COD 1100044 (Kisi & Elcombe 1989)
+    "ZnS (wurtzite)": {"a": 3.8227, "c": 6.2607, "gamma": 120.0, "absences": "wurtzite"},
+    # COD 1529745 (Cava et al. 1977)
+    "β-AgI": {"a": 4.5980, "c": 7.5140, "gamma": 120.0, "absences": "wurtzite"},
+    # rhombohedral, R-3c/R3c (c glide)
+    # NIST SRM 676a
+    "α-Al2O3": {"a": 4.7594, "c": 12.9923, "gamma": 120.0, "absences": "rhombohedral-c"},
+    # NBS Mono. 25 Sec. 18 (1981)
+    "α-Fe2O3 (hematite)": {
+        "a": 5.0356,
+        "c": 13.7489,
+        "gamma": 120.0,
+        "absences": "rhombohedral-c",
+    },
+    # NIST SRM 674b
+    "Cr2O3": {"a": 4.9586, "c": 13.5965, "gamma": 120.0, "absences": "rhombohedral-c"},
+    # NBS Circ. 539 v2 (Swanson & Fuyat 1953)
+    "CaCO3 (calcite)": {"a": 4.9890, "c": 17.0620, "gamma": 120.0, "absences": "rhombohedral-c"},
+    # COD 1541936 (Abrahams et al. 1966)
+    "LiNbO3": {"a": 5.1483, "c": 13.8631, "gamma": 120.0, "absences": "rhombohedral-c"},
+    # rhombohedral, R-3m
+    # COD 2310889 (Cucka & Barrett 1962)
+    "Bi": {"a": 4.5460, "c": 11.8620, "gamma": 120.0, "absences": "rhombohedral"},
+    # COD 5000214 (Barrett et al. 1963)
+    "Sb": {"a": 4.3084, "c": 11.2740, "gamma": 120.0, "absences": "rhombohedral"},
+    # hcp metals + graphite
+    # NBS Circ. 539 v3 (Swanson et al. 1954)
+    "Ti": {"a": 2.9500, "c": 4.6860, "gamma": 120.0, "absences": "hcp"},
+    # Jette & Foote 1935 (NBS Circ. 539 v1)
+    "Zn": {"a": 2.6649, "c": 4.9468, "gamma": 120.0, "absences": "hcp"},
+    # NBS Circ. 539 v1 (Swanson & Tatge 1953)
+    "Mg": {"a": 3.2094, "c": 5.2103, "gamma": 120.0, "absences": "hcp"},
+    # COD 9008492 (Wyckoff 1963)
+    "Co": {"a": 2.5071, "c": 4.0686, "gamma": 120.0, "absences": "hcp"},
+    # NBS Circ. 539 v2 (Swanson & Fuyat 1953)
+    "Zr": {"a": 3.2320, "c": 5.1470, "gamma": 120.0, "absences": "hcp"},
+    # NBS Circ. 539 v4 (Swanson et al. 1955)
+    "Ru": {"a": 2.7058, "c": 4.2819, "gamma": 120.0, "absences": "hcp"},
+    # Mackay & Hill 1963 (NBS Mono. 25 Sec. 9)
+    "Be": {"a": 2.2858, "c": 3.5843, "gamma": 120.0, "absences": "hcp"},
+    # NBS Circ. 539 v3 (Swanson et al. 1954)
+    "Cd": {"a": 2.9793, "c": 5.6181, "gamma": 120.0, "absences": "hcp"},
+    # COD 9008512 (Wyckoff 1963)
+    "Re": {"a": 2.7608, "c": 4.4582, "gamma": 120.0, "absences": "hcp"},
+    # NBS Circ. 539 v4 (Swanson et al. 1955)
+    "Os": {"a": 2.7341, "c": 4.3197, "gamma": 120.0, "absences": "hcp"},
+    # Russell 1953 (COD 1539076)
+    "Hf": {"a": 3.1964, "c": 5.0511, "gamma": 120.0, "absences": "hcp"},
+    # Spedding et al. 1956 (COD 9010984)
+    "Y": {"a": 3.6474, "c": 5.7306, "gamma": 120.0, "absences": "hcp"},
+    # Trucano & Chen 1975 (COD 9011577)
+    "C (graphite)": {"a": 2.4640, "c": 6.7110, "gamma": 120.0, "absences": "hcp"},
+}
+
+
+def library_phase(name: str) -> "Phase":
+    """Build a :class:`Phase` from the built-in standards library."""
+    if name not in PHASE_LIBRARY:
+        raise ValueError(f"unknown library phase {name!r}; available: {sorted(PHASE_LIBRARY)}")
+    entry = PHASE_LIBRARY[name]
+    a, absences = entry["a"], entry["absences"]
+    if "c" in entry:
+        gamma = entry.get("gamma", 90.0)
+        return Phase(name, a, a, entry["c"], 90.0, 90.0, gamma, absences=absences)
+    return Phase.from_cubic(name, a, absences=absences)
+
+
+def _format_hkl(hkl: Sequence[float]) -> str:
+    indices = tuple(int(i) for i in hkl)
+    if all(0 <= i < 10 for i in indices):
+        return "".join(str(i) for i in indices)
+    return "(" + ",".join(str(i) for i in indices) + ")"
+
+
+def _parse_hkl_label(label: str) -> tuple[int, int, int] | None:
+    body = label.strip().strip("()")
+    try:
+        if "," in body:
+            parts = [int(p) for p in body.split(",")]
+        else:
+            parts = [int(c) for c in body]
+    except ValueError:
+        return None
+    return tuple(parts) if len(parts) == 3 else None
+
+
+def _is_cubic_lattice(lattice: tuple[float, float, float, float, float, float] | None) -> bool:
+    if lattice is None:
+        return False
+    a, b, c, alpha, beta, gamma = lattice
+    return (
+        math.isclose(a, b)
+        and math.isclose(b, c)
+        and math.isclose(alpha, 90.0)
+        and math.isclose(beta, 90.0)
+        and math.isclose(gamma, 90.0)
+    )
+
+
+def _is_orthogonal_lattice(lattice: tuple[float, float, float, float, float, float]) -> bool:
+    return (
+        math.isclose(lattice[3], 90.0)
+        and math.isclose(lattice[4], 90.0)
+        and math.isclose(lattice[5], 90.0)
+    )
+
+
+def _canonical_hkl(
+    hkl: Sequence[float],
+    lattice: tuple[float, float, float, float, float, float] | None,
+) -> tuple[int, int, int]:
+    indices = tuple(int(i) for i in hkl)
+    if _is_cubic_lattice(lattice):
+        return tuple(sorted((abs(i) for i in indices), reverse=True))
+    if lattice is not None and _is_orthogonal_lattice(lattice):
+        h, k, ell = (abs(i) for i in indices)
+        if math.isclose(lattice[0], lattice[1]):
+            h, k = sorted((h, k), reverse=True)
+        return (h, k, ell)
+    for value in indices:
+        if value < 0:
+            return tuple(-i for i in indices)
+        if value > 0:
+            return indices
+    return indices
+
+
+def _label_preference(hkl: tuple[int, int, int]) -> tuple[int, tuple[int, int, int]]:
+    """Sort key preferring the conventional family label: fewest negative
+    indices, then lexicographically largest (h before k before l)."""
+    return (sum(1 for i in hkl if i < 0), tuple(-i for i in hkl))
+
+
+class Phase:
+    """A crystalline phase: lattice parameters (Å, degrees) + absence rule for
+    geometry-aware indexing, or a reference d-spacing card for pure matching.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        a: float,
+        b: float,
+        c: float,
+        alpha: float = 90.0,
+        beta: float = 90.0,
+        gamma: float = 90.0,
+        absences: str = "none",
+        _reference_lines: list[tuple[float, str, float | None]] | None = None,
+    ) -> None:
+        self.name = name
+        self.absences = absences
+        if absences not in _ABSENCE_RULES:
+            raise ValueError(f"unknown absence rule {absences!r}; use {list(_ABSENCE_RULES)}")
+        self._allowed_rule = _ABSENCE_RULES[absences]
+        self._reference_lines = _reference_lines
+        self._reflection_cache: list[dict] | None = None
+
+        if _reference_lines is None:
+            if min(a, b, c) <= 0:
+                raise ValueError("lattice edge lengths must be positive")
+            self.lattice = (float(a), float(b), float(c), float(alpha), float(beta), float(gamma))
+            ca, cb, cg = (math.cos(math.radians(x)) for x in (alpha, beta, gamma))
+            g = np.array(
+                [
+                    [a * a, a * b * cg, a * c * cb],
+                    [a * b * cg, b * b, b * c * ca],
+                    [a * c * cb, b * c * ca, c * c],
+                ],
+                dtype=np.float64,
+            )
+            self._g_star = np.linalg.inv(g)
+        else:
+            self.lattice = None
+            self._g_star = None
+
+    # --- Constructors ---
+    @classmethod
+    def from_cubic(cls, name: str, a: float, absences: str = "fcc") -> "Phase":
+        """Cubic phase with edge ``a`` (Å) and a systematic-absence rule."""
+        return cls(name, a, a, a, 90.0, 90.0, 90.0, absences=absences)
+
+    @classmethod
+    def from_dspacings(cls, name: str, entries: Iterable[Sequence]) -> "Phase":
+        """Phase from reference entries: ``(d_Å, hkl_label[, intensity])``."""
+        reference_lines = []
+        for entry in entries:
+            spacing, label = entry[0], entry[1]
+            intensity = float(entry[2]) if len(entry) > 2 else None
+            reference_lines.append((float(spacing), str(label), intensity))
+        return cls(name, 1.0, 1.0, 1.0, _reference_lines=reference_lines)
+
+    # --- Geometry ---
+    def d_spacing(self, hkl: Sequence[float]) -> float:
+        """Interplanar spacing d_hkl in Å."""
+        if self._g_star is None:
+            raise ValueError("d_spacing requires a lattice-based Phase, not a d-spacing table")
+        indices = np.asarray(hkl, dtype=np.float64)
+        inverse_d_squared = float(indices @ self._g_star @ indices)
+        if inverse_d_squared <= 0:
+            raise ValueError("invalid reflection (000)")
+        return 1.0 / math.sqrt(inverse_d_squared)
+
+    def plane_angle(self, hkl1: Sequence[float], hkl2: Sequence[float]) -> float:
+        """Angle in degrees between plane normals (hkl1) and (hkl2)."""
+        if self._g_star is None:
+            raise ValueError("plane_angle requires a lattice-based Phase, not a d-spacing table")
+        indices1 = np.asarray(hkl1, dtype=np.float64)
+        indices2 = np.asarray(hkl2, dtype=np.float64)
+        numerator = float(indices1 @ self._g_star @ indices2)
+        denominator = math.sqrt(
+            float(indices1 @ self._g_star @ indices1) * float(indices2 @ self._g_star @ indices2)
+        )
+        if denominator == 0:
+            return 0.0
+        return math.degrees(math.acos(max(-1.0, min(1.0, numerator / denominator))))
+
+    def is_allowed(self, hkl: Sequence[float]) -> bool:
+        """Whether (hkl) is a non-origin reflection permitted by the absence rule."""
+        h, k, ell = (int(i) for i in hkl)
+        if h == 0 and k == 0 and ell == 0:
+            return False
+        return bool(self._allowed_rule(h, k, ell))
+
+    # --- Reflections ---
+    def reflections(self, d_min: float = 0.5, max_index: int | None = None) -> list[dict]:
+        """Allowed reflection families, largest d first.
+
+        By default ``max_index`` is sized so every family above ``d_min`` is
+        enumerated.
+        """
+        if self._reference_lines is not None:
+            reflections = [
+                {
+                    "hkl": _parse_hkl_label(label),
+                    "hkl_str": label,
+                    "d": spacing,
+                    "multiplicity": None,
+                    "intensity": intensity,
+                }
+                for spacing, label, intensity in self._reference_lines
+                if spacing >= d_min
+            ]
+            return sorted(reflections, key=lambda reflection: -reflection["d"])
+
+        if max_index is None:
+            max_index = math.ceil(max(self.lattice[:3]) / d_min)
+        families_by_d: dict[int, dict] = {}
+        for h in range(-max_index, max_index + 1):
+            for k in range(-max_index, max_index + 1):
+                for ell in range(-max_index, max_index + 1):
+                    hkl = (h, k, ell)
+                    if not self.is_allowed(hkl):
+                        continue
+                    spacing = self.d_spacing(hkl)
+                    if spacing < d_min:
+                        continue
+                    d_key = int(round(spacing * 1e4))
+                    representative = _canonical_hkl(hkl, self.lattice)
+                    family = families_by_d.get(d_key)
+                    if family is None:
+                        families_by_d[d_key] = {
+                            "hkl": representative,
+                            "hkl_str": _format_hkl(representative),
+                            "d": spacing,
+                            "multiplicity": 1,
+                            "intensity": None,
+                        }
+                    else:
+                        family["multiplicity"] += 1
+                        if _label_preference(representative) < _label_preference(family["hkl"]):
+                            family["hkl"] = representative
+                            family["hkl_str"] = _format_hkl(representative)
+        return sorted(families_by_d.values(), key=lambda reflection: -reflection["d"])
+
+    def _all_reflections(self) -> list[dict]:
+        if self._reflection_cache is None:
+            self._reflection_cache = self.reflections()
+        return self._reflection_cache
+
+    def match_d(self, d: float, tol: float = 0.03) -> list[dict]:
+        """Reflections within fractional ``tol`` of ``d``, closest first."""
+        if d <= 0:
+            return []
+        matches = []
+        for reflection in self._all_reflections():
+            error = abs(reflection["d"] - d) / d
+            if error <= tol:
+                matches.append({**reflection, "d_error": error})
+        return sorted(matches, key=lambda reflection: reflection["d_error"])
+
+
+# ========================= Center estimation =========================
+# --- Internal helpers ---
+def _bandpass(frame: np.ndarray, mask: np.ndarray | None = None) -> np.ndarray:
+    work = np.log1p(frame - frame.min())
+    sigma = max(5.0, 0.02 * min(work.shape))
+    work = work - ndimage.gaussian_filter(work, sigma=sigma)
+    if mask is not None:
+        work[mask] = 0.0
+    return work - work.mean()
+
+
+def _parabolic_offset(values: np.ndarray, p: int, n: int) -> float:
+    lo, hi = values[(p - 1) % n], values[(p + 1) % n]
+    denom = 2.0 * values[p] - lo - hi
+    if denom <= 0:
+        return 0.0
+    delta = 0.5 * (hi - lo) / denom
+    return delta if abs(delta) <= 1.0 else 0.0
+
+
+def _peak_to_sidelobe(corr: np.ndarray, p_row: int, p_col: int, exclude: float = 5.0) -> float:
+    n_rows, n_cols = corr.shape
+    row_dist = np.abs(np.arange(n_rows) - p_row)
+    col_dist = np.abs(np.arange(n_cols) - p_col)
+    row_dist = np.minimum(row_dist, n_rows - row_dist)
+    col_dist = np.minimum(col_dist, n_cols - col_dist)
+    outside = (row_dist[:, None] > exclude) | (col_dist[None, :] > exclude)
+    side = corr[outside]
+    spread = side.std()
+    if spread <= 0:
+        return 0.0
+    return float((corr[p_row, p_col] - side.mean()) / spread)
+
+
+def _upsampled_peak(
+    cross: np.ndarray, row0: float, col0: float, upsample: int
+) -> tuple[float, float]:
+    n_rows, n_cols = cross.shape
+    f_row = np.fft.fftfreq(n_rows)
+    f_col = np.fft.fftfreq(n_cols)
+    offsets = np.arange(-int(np.ceil(1.5 * upsample)), int(np.ceil(1.5 * upsample)) + 1) / upsample
+    rows = row0 + offsets
+    cols = col0 + offsets
+    e_row = np.exp(2j * np.pi * rows[:, None] * f_row[None, :])
+    e_col = np.exp(2j * np.pi * f_col[:, None] * cols[None, :])
+    local = (e_row @ cross @ e_col).real
+    p_row, p_col = np.unravel_index(int(np.argmax(local)), local.shape)
+    d_row = _parabolic_offset(local[:, p_col], p_row, local.shape[0]) / upsample
+    d_col = _parabolic_offset(local[p_row, :], p_col, local.shape[1]) / upsample
+    return float(rows[p_row] + d_row), float(cols[p_col] + d_col)
+
+
+def _phase_shift(
+    ref: np.ndarray, moving: np.ndarray, upsample: int = 1
+) -> tuple[float, float, float]:
+    window = tukey(ref.shape[0], 0.2)[:, None] * tukey(ref.shape[1], 0.2)[None, :]
+    ref = ref * window
+    moving = moving * window
+    cross = np.fft.fft2(ref) * np.conj(np.fft.fft2(moving))
+    cross = cross / np.maximum(np.abs(cross), 1e-12)
+    f_row = np.fft.fftfreq(ref.shape[0])[:, None]
+    f_col = np.fft.fftfreq(ref.shape[1])[None, :]
+    cross = cross * np.exp(-(f_row**2 + f_col**2) / (2.0 * 0.15**2))
+    corr = np.fft.ifft2(cross).real
+    n_rows, n_cols = corr.shape
+    p_row, p_col = np.unravel_index(int(np.argmax(corr)), corr.shape)
+    psr = _peak_to_sidelobe(corr, p_row, p_col)
+    if upsample > 1:
+        s_row, s_col = _upsampled_peak(cross, float(p_row), float(p_col), upsample)
+    else:
+        s_row = p_row + _parabolic_offset(corr[:, p_col], p_row, n_rows)
+        s_col = p_col + _parabolic_offset(corr[p_row, :], p_col, n_cols)
+    return float(s_row), float(s_col), psr
+
+
+def _wrap_signed(shift: float, n: int) -> float:
+    shift = shift % n
+    return shift - n if shift > n / 2 else shift
+
+
+# --- Center estimation ---
+def center_symmetry(
+    frame: np.ndarray,
+    guess: tuple[float, float] | None = None,
+    search_radius: float = 8.0,
+    mask: np.ndarray | None = None,
+) -> tuple[float, float]:
+    """Refine a center guess by local Friedel-symmetry autocorrelation."""
+    frame = np.asarray(frame, dtype=np.float64)
+    n_rows, n_cols = frame.shape
+    if guess is None:
+        guess = ((n_rows - 1) / 2.0, (n_cols - 1) / 2.0)
+
+    work = _bandpass(frame, mask)
+    spectrum = np.fft.fft2(work)
+    corr = np.fft.ifft2(spectrum * spectrum).real
+    target_row = (2.0 * guess[0]) % n_rows
+    target_col = (2.0 * guess[1]) % n_cols
+    row_idx = np.arange(n_rows, dtype=np.float64)
+    col_idx = np.arange(n_cols, dtype=np.float64)
+    row_dist = np.minimum(np.abs(row_idx - target_row), n_rows - np.abs(row_idx - target_row))
+    col_dist = np.minimum(np.abs(col_idx - target_col), n_cols - np.abs(col_idx - target_col))
+    near = (row_dist[:, None] <= 2.0 * search_radius) & (col_dist[None, :] <= 2.0 * search_radius)
+    p_row, p_col = np.unravel_index(int(np.argmax(np.where(near, corr, -np.inf))), corr.shape)
+    row2 = p_row + _parabolic_offset(corr[:, p_col], p_row, n_rows)
+    col2 = p_col + _parabolic_offset(corr[p_row, :], p_col, n_cols)
+    row = min(((row2 + offset) / 2.0 for offset in (0.0, n_rows)), key=lambda c: abs(c - guess[0]))
+    col = min(((col2 + offset) / 2.0 for offset in (0.0, n_cols)), key=lambda c: abs(c - guess[1]))
+    return float(row), float(col)
+
+
+def center_phase_correlation(
+    frame: np.ndarray, mask: np.ndarray | None = None, upsample: int = 20
+) -> tuple[float, float]:
+    """Estimate the inversion center by phase correlation."""
+    frame = np.asarray(frame, dtype=np.float64)
+    n_rows, n_cols = frame.shape
+    work = _bandpass(frame, mask)
+    rot = work[::-1, ::-1]
+    d_row, d_col, _ = _phase_shift(work, rot, upsample=upsample)
+    # Inversion center
+    row_cands = [(n_rows - 1 + d) / 2.0 for d in (d_row % n_rows, d_row % n_rows - n_rows)]
+    col_cands = [(n_cols - 1 + d) / 2.0 for d in (d_col % n_cols, d_col % n_cols - n_cols)]
+    candidates = [
+        (r, c)
+        for r in row_cands
+        for c in col_cands
+        if 0.0 <= r <= n_rows - 1 and 0.0 <= c <= n_cols - 1
+    ]
+    if not candidates:
+        candidates = [((n_rows - 1) / 2.0, (n_cols - 1) / 2.0)]
+    row, col = max(candidates, key=lambda rc: _symmetry(frame, rc, mask=mask))
+    return float(row), float(col)
+
+
+# --- Quality metrics ---
+def _symmetry(
+    frame: np.ndarray, center: tuple[float, float], mask: np.ndarray | None = None
+) -> float:
+    # Friedel symmetry
+    frame = np.asarray(frame, dtype=np.float64)
+    n_rows, n_cols = frame.shape
+    work = _bandpass(frame)
+    rows, cols = np.indices((n_rows, n_cols), dtype=np.float64)
+    rot_rows = 2.0 * center[0] - rows
+    rot_cols = 2.0 * center[1] - cols
+    valid = (
+        (rot_rows >= 0.0) & (rot_rows <= n_rows - 1) & (rot_cols >= 0.0) & (rot_cols <= n_cols - 1)
+    )
+    rotated = ndimage.map_coordinates(work, [rot_rows, rot_cols], order=1, mode="nearest")
+    if mask is not None:
+        mask = np.asarray(mask, dtype=bool)
+        rot_mask = ndimage.map_coordinates(
+            mask.astype(np.float64), [rot_rows, rot_cols], order=1, mode="constant", cval=1.0
+        )
+        valid &= ~mask & (rot_mask < 0.5)
+    a = work[valid]
+    b = rotated[valid]
+    if a.size < 16:
+        return 0.0
+    a = a - a.mean()
+    b = b - b.mean()
+    denom = float(np.sqrt((a * a).sum() * (b * b).sum()))
+    if denom <= 0:
+        return 0.0
+    return float(max(0.0, (a * b).sum() / denom))
+
+
+def ring_uniformity(
+    frame: np.ndarray,
+    center: tuple[float, float],
+    radius: float,
+    half_width: float = 4.0,
+    n_theta: int = 180,
+) -> dict:
+    """Azimuthal uniformity QC for one ring."""
+    frame = np.asarray(frame, dtype=np.float64)
+    rows, cols = np.indices(frame.shape, dtype=np.float64)
+    d_row = rows - center[0]
+    d_col = cols - center[1]
+    annulus = np.abs(np.hypot(d_row, d_col) - radius) <= half_width
+    theta = np.arctan2(d_row[annulus], d_col[annulus])
+    sector = np.clip(((theta + np.pi) / (2.0 * np.pi) * n_theta).astype(int), 0, n_theta - 1)
+    sums = np.bincount(sector, weights=frame[annulus], minlength=n_theta)
+    counts = np.bincount(sector, minlength=n_theta)
+    profile = np.where(counts > 0, sums / np.maximum(counts, 1), 0.0)
+    mean = float(profile.mean())
+    std = float(profile.std())
+    cv = std / mean if mean > 0 else 0.0
+    positive = profile[profile > 0]
+    coverage = float(np.mean(profile > 0.5 * np.median(positive))) if positive.size else 0.0
+    snr = min(mean / std, 999.0) if std > 0 else 999.0
+    return {"cv": float(cv), "coverage": float(coverage), "snr": float(snr)}
+
+
+# --- Dispatch ---
+def pick_center(
+    frame: np.ndarray,
+    method: str = "auto",
+    mask: np.ndarray | None = None,
+    guess: tuple[float, float] | None = None,
+    search_radius: float = 8.0,
+) -> dict:
+    """Estimate the pattern center with one method or an automatic pick."""
+    frame = np.asarray(frame, dtype=np.float64)
+    if method == "symmetry":
+        row, col = center_symmetry(frame, guess=guess, search_radius=search_radius, mask=mask)
+        name = "symmetry"
+    elif method == "phase_corr":
+        row, col = center_phase_correlation(frame, mask=mask)
+        name = "phase_corr"
+    elif method == "auto":
+        p_row, p_col = center_phase_correlation(frame, mask=mask)
+        s_row, s_col = center_symmetry(frame, guess=guess, search_radius=search_radius, mask=mask)
+        candidates = [
+            ("phase_corr", p_row, p_col, _symmetry(frame, (p_row, p_col), mask=mask)),
+            ("symmetry", s_row, s_col, _symmetry(frame, (s_row, s_col), mask=mask)),
+        ]
+        name, row, col, _ = max(candidates, key=lambda c: c[3])
+    else:
+        raise ValueError(f"unknown method {method!r}; use auto, symmetry, or phase_corr")
+    return {"row": float(row), "col": float(col), "method": name}
+
+
+# --- Stack alignment ---
+def align_frames(
+    frames: np.ndarray,
+    reference: np.ndarray | None = None,
+    max_shift: float = 8.0,
+) -> tuple[np.ndarray, list[tuple[float, float]], list[bool]]:
+    """Align a stack of patterns by subpixel phase correlation."""
+    frames = np.asarray(frames, dtype=np.float64)
+    n_frames, n_rows, n_cols = frames.shape
+    ref = frames[0] if reference is None else np.asarray(reference, dtype=np.float64)
+    ref = _bandpass(ref)
+    aligned = np.empty_like(frames)
+    shifts: list[tuple[float, float]] = []
+    used: list[bool] = []
+    for i in range(n_frames):
+        s_row, s_col, psr = _phase_shift(ref, _bandpass(frames[i]))
+        s_row = _wrap_signed(s_row, n_rows)
+        s_col = _wrap_signed(s_col, n_cols)
+        peak_quality = psr / (psr + 10.0) if psr > 0 else 0.0
+        ok = np.hypot(s_row, s_col) <= max_shift and peak_quality >= 0.2
+        shifts.append((float(s_row), float(s_col)))
+        used.append(bool(ok))
+        aligned[i] = ndimage.shift(frames[i], (s_row, s_col), order=1) if ok else frames[i]
+    return aligned, shifts, used
+
+
+# ========================= Reference-line matching =========================
+# out-of-tolerance pad cost
+_NO_MATCH_COST = 1.0e6
+
+
+def match_candidate(observed_d: Sequence[float], lines: Sequence[dict], tol: float = 0.03) -> dict:
+    """Match measured d-spacings against one reference phase."""
+    observed = [float(spacing) for spacing in observed_d if spacing and float(spacing) > 0]
+    references = [
+        (float(line["d"]), float(line.get("i_rel", line.get("intensity")) or 0.0))
+        for line in lines
+        if float(line["d"]) > 0
+    ]
+    has_intensity = any(rel_intensity > 0 for _, rel_intensity in references)
+    n_observed = len(observed)
+    if n_observed == 0 or not references:
+        return {
+            "matched": 0,
+            "n_obs": n_observed,
+            "mean_err": None,
+            "n_missing_strong": 0 if has_intensity else None,
+            "assignments": [],
+        }
+    observed_g = [1.0 / spacing for spacing in observed]
+    reference_g = [1.0 / spacing for spacing, _ in references]
+
+    # in-tolerance pair costs
+    cost = np.full((n_observed, len(references)), _NO_MATCH_COST)
+    d_errors = np.zeros_like(cost)
+    for obs_index, observed_value in enumerate(observed_g):
+        for ref_index, reference_value in enumerate(reference_g):
+            error = abs(reference_value - observed_value) / observed_value
+            if error <= tol:
+                cost[obs_index, ref_index] = error
+                d_errors[obs_index, ref_index] = (
+                    abs(1.0 / observed_value - references[ref_index][0]) / references[ref_index][0]
+                )
+
+    # maximum matches first, then lowest total error
+    assignments = [(obs_index, None) for obs_index in range(n_observed)]
+    errors = []
+    matched_refs = set()
+    for obs_index, ref_index in zip(*linear_sum_assignment(cost)):
+        if cost[obs_index, ref_index] >= _NO_MATCH_COST:
+            continue
+        assignments[obs_index] = (int(obs_index), int(ref_index))
+        errors.append(float(d_errors[obs_index, ref_index]))
+        matched_refs.add(int(ref_index))
+
+    n_matched = len(errors)
+    n_missing_strong = None
+    if has_intensity:
+        g_min, g_max = min(observed_g), max(observed_g)
+        n_missing_strong = sum(
+            1
+            for ref_index, (_, rel_intensity) in enumerate(references)
+            if rel_intensity >= 25.0
+            and g_min <= reference_g[ref_index] <= g_max
+            and ref_index not in matched_refs
+        )
+
+    return {
+        "matched": n_matched,
+        "n_obs": n_observed,
+        "mean_err": (float(sum(errors) / n_matched) if n_matched else None),
+        "n_missing_strong": n_missing_strong,
+        "assignments": assignments,
+    }
+
+
+def match_sort_key(report: dict) -> tuple:
+    """Sort phase reports from strongest to weakest match."""
+    return (
+        -report["matched"],
+        report["n_missing_strong"] or 0,
+        report["mean_err"] if report["mean_err"] is not None else 1.0,
+    )
+
+
+# ========================= Diffraction analysis =========================
+BF_RADIUS_FRACTION = 0.125
+RING_FIT_MODELS = ("gaussian", "pseudo_voigt")
+
+MEASUREMENT_COLUMNS = [
+    "id",
+    "kind",
+    "raw_row",
+    "raw_col",
+    "row",
+    "col",
+    "row_err",
+    "col_err",
+    "r_pixels",
+    "r_pixels_err",
+    "g_inv_angstrom",
+    "g_inv_angstrom_err",
+    "d_angstrom",
+    "d_angstrom_err",
+    "angle_deg",
+    "angle_deg_err",
+    "intensity",
+    "fit_quality",
+    "fwhm_px",
+    "fwhm_inv_angstrom",
+    "intensity_integrated",
+    "hkl",
+    "note",
+]
+
+
+# --- Records and formatting ---
+def element_symbols(text: str) -> set[str]:
+    """Element symbols found in a formula-like string."""
+    return set(re.findall(r"[A-Z][a-z]?", text or ""))
+
+
+def parse_elements(value) -> set[str] | None:
+    """Element-symbol set from a string or iterable, or None if empty."""
+    if not value:
+        return None
+    if isinstance(value, str):
+        value = re.split(r"[,\s]+", value.strip())
+    return {symbol.strip().capitalize() for symbol in value if symbol.strip()} or None
+
+
+def index_assignment(candidate: dict | None) -> dict:
+    """Indexing fields for a matched reflection candidate."""
+    if candidate is None:
+        return {"hkl": "", "d_ref": None, "d_error": None}
+    return {
+        "hkl": candidate["hkl_str"],
+        "d_ref": candidate["d"],
+        "d_error": candidate["d_error"],
+    }
+
+
+def empty_index_fields() -> dict:
+    """Blank indexing fields for a spot or ring record."""
+    return {
+        "hkl": "",
+        "hkl_candidates": [],
+        "d_ref": None,
+        "d_error": None,
+        "note": "",
+    }
+
+
+def next_record_id(records) -> int:
+    """Next one-based id for a list of record dicts."""
+    return max((int(record["id"]) for record in records), default=0) + 1
+
+
+def format_zone_axis(hkl1: tuple[int, int, int], hkl2: tuple[int, int, int]) -> str:
+    """Zone-axis label ``[uvw]`` from two indexed reflections."""
+    h1, k1, l1 = hkl1
+    h2, k2, l2 = hkl2
+    u = k1 * l2 - l1 * k2
+    v = l1 * h2 - h1 * l2
+    w = h1 * k2 - k1 * h2
+    divisor = math.gcd(math.gcd(abs(u), abs(v)), abs(w))
+    if divisor == 0:
+        return ""
+    u, v, w = u // divisor, v // divisor, w // divisor
+    for axis in (u, v, w):
+        if axis != 0:
+            if axis < 0:
+                u, v, w = -u, -v, -w
+            break
+    return "[" + "".join(str(axis) for axis in (u, v, w)) + "]"
+
+
+# --- Input and masking ---
+def normalize_data_input(
+    data,
+    *,
+    title: str = "",
+    pixel_size: float | None = None,
+    k_pixel_size: float | None = None,
+    replace_title: bool = False,
+):
+    """Unwrap Dataset-like input into array, title, and calibrations."""
+    k_calibrated = False
+    if hasattr(data, "_fields") and "data" in getattr(data, "_fields", ()):
+        metadata = data.metadata or {}
+        if pixel_size is None and metadata.get("pixel_size") is not None:
+            pixel_size = float(metadata["pixel_size"])
+        data = data.data
+
+    if hasattr(data, "sampling") and hasattr(data, "array"):
+        if (replace_title or not title) and getattr(data, "name", ""):
+            title = str(data.name)
+        units = list(getattr(data, "units", ["pixels"] * 4))
+        if pixel_size is None and units and units[0] in ("Å", "angstrom", "A", "nm"):
+            pixel_size = float(data.sampling[0])
+            if units[0] == "nm":
+                pixel_size *= 10
+        if k_pixel_size is None and len(units) > 2 and units[2] in ("1/Å", "1/A"):
+            k_pixel_size = float(data.sampling[2])
+            k_calibrated = True
+        data = data.array
+    return data, title, pixel_size, k_pixel_size, k_calibrated
+
+
+def pack_float32_halves(x: np.ndarray, y: np.ndarray) -> bytes:
+    """Two arrays packed as concatenated float32 bytes."""
+    return np.concatenate([x, y]).astype(np.float32).tobytes()
+
+
+def build_analysis_mask(
+    shape: tuple[int, int],
+    regions: list[dict],
+    center: tuple[float, float],
+) -> np.ndarray | None:
+    """Boolean exclusion mask from disk and wedge regions."""
+    if not regions:
+        return None
+    n_rows, n_cols = shape
+    rows = np.arange(n_rows, dtype=np.float64)[:, None]
+    cols = np.arange(n_cols, dtype=np.float64)[None, :]
+    center_row, center_col = center
+    mask = np.zeros((n_rows, n_cols), dtype=bool)
+    for region in regions:
+        kind = region.get("kind")
+        if kind == "disk":
+            mask |= np.hypot(rows - region["row"], cols - region["col"]) <= region["radius"]
+        elif kind == "wedge":
+            theta = np.degrees(np.arctan2(rows - center_row, cols - center_col)) % 360.0
+            start = float(region["start_deg"]) % 360.0
+            end = float(region["end_deg"]) % 360.0
+            mask |= (
+                (theta >= start) & (theta <= end)
+                if start <= end
+                else ((theta >= start) | (theta <= end))
+            )
+    return mask
+
+
+# --- Radial and azimuthal profiles ---
+def corrected_radius(
+    d_row,
+    d_col,
+    *,
+    ellipse_ratio: float = 1.0,
+    ellipse_angle: float = 0.0,
+    ellipse_corrected: bool = False,
+):
+    """Radius with optional elliptical-distortion correction.
+
+    The correction is mean-preserving: an ellipse of semi-axes A, B maps to a
+    circle of radius sqrt(A*B) (the mean radius), so a calibration set before
+    the correction stays valid after it.
+    """
+    if not ellipse_corrected or ellipse_ratio == 1.0:
+        return np.hypot(d_row, d_col)
+    angle = math.radians(ellipse_angle)
+    major = d_col * math.cos(angle) + d_row * math.sin(angle)
+    minor = -d_col * math.sin(angle) + d_row * math.cos(angle)
+    root_ratio = math.sqrt(ellipse_ratio)
+    return np.hypot(major / root_ratio, minor * root_ratio)
+
+
+def radial_profile_px(
+    frame: np.ndarray,
+    *,
+    center: tuple[float, float],
+    n_bins: int | None = None,
+    max_radius: float | None = None,
+    mask: np.ndarray | None = None,
+    angular_range: tuple[float, float] | None = None,
+    ellipse_ratio: float = 1.0,
+    ellipse_angle: float = 0.0,
+    ellipse_corrected: bool = False,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Radial intensity profile in detector pixels."""
+    n_rows, n_cols = frame.shape
+    center_row, center_col = float(center[0]), float(center[1])
+    if max_radius is None:
+        max_radius = float(
+            min(center_row, center_col, (n_rows - 1) - center_row, (n_cols - 1) - center_col)
+        )
+    max_radius = float(max(1.0, max_radius))
+    n_bins = max(1, int(round(max_radius))) if n_bins is None else int(max(1, n_bins))
+
+    rows = np.arange(n_rows, dtype=np.float64)[:, None]
+    cols = np.arange(n_cols, dtype=np.float64)[None, :]
+    d_row, d_col = rows - center_row, cols - center_col
+    radii = corrected_radius(
+        d_row,
+        d_col,
+        ellipse_ratio=ellipse_ratio,
+        ellipse_angle=ellipse_angle,
+        ellipse_corrected=ellipse_corrected,
+    )
+    flat_r = radii.ravel()
+    flat_i = frame.astype(np.float64).ravel()
+    keep = None if mask is None else ~mask.ravel()
+    if angular_range is not None:
+        start, end = float(angular_range[0]) % 360.0, float(angular_range[1]) % 360.0
+        span = abs(float(angular_range[1]) - float(angular_range[0]))
+        # full-circle span: no angular restriction
+        if span < 360.0 and start != end:
+            theta = np.degrees(np.arctan2(d_row, d_col)).ravel() % 360.0
+            wedge = (
+                (theta >= start) & (theta <= end)
+                if start <= end
+                else ((theta >= start) | (theta <= end))
+            )
+            keep = wedge if keep is None else keep & wedge
+    if keep is not None:
+        flat_r, flat_i = flat_r[keep], flat_i[keep]
+
+    edges = np.linspace(0.0, max_radius, n_bins + 1)
+    indices = np.digitize(flat_r, edges) - 1
+    inside = (indices >= 0) & (indices < n_bins)
+    indices = indices[inside]
+    values = flat_i[inside]
+
+    counts = np.bincount(indices, minlength=n_bins).astype(np.float64)
+    sums = np.bincount(indices, weights=values, minlength=n_bins)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        intensity = np.where(counts > 0, sums / counts, 0.0)
+    bin_centers = 0.5 * (edges[:-1] + edges[1:])
+    return bin_centers.astype(np.float32), intensity.astype(np.float32)
+
+
+def ring_sectors(
+    frame: np.ndarray,
+    *,
+    center: tuple[float, float],
+    radius_px: float,
+    half_width: float,
+    n_theta: int,
+    mask: np.ndarray | None = None,
+    use_corrected_radius: bool = True,
+    ellipse_ratio: float = 1.0,
+    ellipse_angle: float = 0.0,
+    ellipse_corrected: bool = False,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Per-sector counts and intensity sums around one ring."""
+    frame = frame.astype(np.float64)
+    center_row, center_col = center
+    n_rows, n_cols = frame.shape
+    rows = np.arange(n_rows, dtype=np.float64)[:, None]
+    cols = np.arange(n_cols, dtype=np.float64)[None, :]
+    d_row, d_col = rows - center_row, cols - center_col
+    if use_corrected_radius:
+        radii = corrected_radius(
+            d_row,
+            d_col,
+            ellipse_ratio=ellipse_ratio,
+            ellipse_angle=ellipse_angle,
+            ellipse_corrected=ellipse_corrected,
+        )
+    else:
+        radii = np.hypot(d_row, d_col)
+
+    theta_centers = (np.arange(n_theta) + 0.5) * (360.0 / n_theta)
+    selected = np.abs(radii - radius_px) <= half_width
+    if mask is not None:
+        selected &= ~mask
+    if not selected.any():
+        zero = np.zeros(n_theta)
+        return theta_centers, zero.copy(), zero.copy(), zero.copy(), zero.copy()
+
+    theta = np.degrees(np.arctan2(d_row, d_col)) % 360.0
+    sector = np.minimum((theta[selected] / (360.0 / n_theta)).astype(int), n_theta - 1)
+    intensity = frame[selected]
+    # median pedestal, negatives clipped
+    weight = np.clip(intensity - np.median(intensity), 0.0, None)
+    counts = np.bincount(sector, minlength=n_theta).astype(np.float64)
+    intensity_sum = np.bincount(sector, weights=intensity, minlength=n_theta)
+    weight_sum = np.bincount(sector, weights=weight, minlength=n_theta)
+    weighted_radius_sum = np.bincount(sector, weights=weight * radii[selected], minlength=n_theta)
+    return theta_centers, counts, intensity_sum, weight_sum, weighted_radius_sum
+
+
+def azimuthal_profile_from_frame(
+    frame: np.ndarray,
+    *,
+    center: tuple[float, float],
+    radius_px: float,
+    half_width: float,
+    n_theta: int,
+    mask: np.ndarray | None = None,
+    ellipse_ratio: float = 1.0,
+    ellipse_angle: float = 0.0,
+    ellipse_corrected: bool = False,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Azimuthal intensity profile I(theta) around one ring."""
+    theta, counts, intensity_sum, _, _ = ring_sectors(
+        frame,
+        center=center,
+        radius_px=radius_px,
+        half_width=half_width,
+        n_theta=n_theta,
+        mask=mask,
+        use_corrected_radius=True,
+        ellipse_ratio=ellipse_ratio,
+        ellipse_angle=ellipse_angle,
+        ellipse_corrected=ellipse_corrected,
+    )
+    intensity = np.where(counts > 0, intensity_sum / np.maximum(counts, 1.0), 0.0)
+    return theta.astype(np.float32), intensity.astype(np.float32)
+
+
+def texture_from_profile(
+    theta_deg: np.ndarray, intensity: np.ndarray, *, return_profile: bool = False
+) -> dict:
+    """Texture strength and preferred angle from an azimuthal profile."""
+    values = intensity.astype(np.float64)
+    # empty sectors (masked or off-detector) come back as exactly zero; a
+    # uniform ring with a missing wedge would otherwise read as textured
+    covered = values != 0.0
+    if covered.sum() < 3:
+        strength, angle = 0.0, 0.0
+    else:
+        theta = np.radians(theta_deg)[covered]
+        pedestal_free = values[covered] - float(values[covered].min())
+        total = pedestal_free.sum()
+        if total <= 0:
+            strength, angle = 0.0, 0.0
+        else:
+            component = np.sum(pedestal_free * np.exp(2j * theta))
+            strength = float(abs(component) / total)
+            angle = float(np.degrees(np.angle(component)) / 2.0 % 180.0)
+    report = {"strength": strength, "angle_deg": angle}
+    if return_profile:
+        report["profile"] = (theta_deg, intensity)
+    return report
+
+
+# --- Ellipse and background fitting ---
+def fit_ellipse_from_sectors(
+    theta_centers: np.ndarray,
+    counts: np.ndarray,
+    weight_sum: np.ndarray,
+    weighted_radius_sum: np.ndarray,
+) -> dict:
+    """Ellipse ratio and angle from ring-sector radii."""
+    valid = (counts >= 10) & (weight_sum > 0)
+    if valid.sum() < 8:
+        raise ValueError(
+            f"could not fit ellipse: ring found in {int(valid.sum())} sectors, need >= 8; "
+            "check the ring radius and center"
+        )
+    radii_by_theta = weighted_radius_sum[valid] / weight_sum[valid]
+    theta = np.radians(theta_centers)[valid]
+    design = np.column_stack([np.ones_like(theta), np.cos(2 * theta), np.sin(2 * theta)])
+    (mean_radius, cosine, sine), *_ = np.linalg.lstsq(design, radii_by_theta, rcond=None)
+    epsilon = math.hypot(cosine, sine) / mean_radius
+    ratio = (1.0 + epsilon) / (1.0 - epsilon) if epsilon < 1.0 else float("inf")
+    angle = (0.5 * math.degrees(math.atan2(sine, cosine))) % 180.0
+    residual = radii_by_theta - design @ np.array([mean_radius, cosine, sine])
+    return {
+        "ratio": float(ratio),
+        "angle_deg": float(angle),
+        "r_mean": float(mean_radius),
+        "residual_px": float(np.sqrt(np.mean(residual**2))),
+        "n_sectors": int(valid.sum()),
+    }
+
+
+def fit_radial_background(
+    radii_px: np.ndarray,
+    intensity: np.ndarray,
+    *,
+    peak_windows: list[tuple[float, float]],
+    exclude_radius: float,
+    method: str = "power",
+    poly_order: int = 3,
+) -> np.ndarray:
+    """Smooth background under a radial profile, excluding peak windows."""
+    if method not in ("power", "poly"):
+        raise ValueError(f"method must be 'power' or 'poly', got {method!r}")
+    if poly_order < 0:
+        raise ValueError(f"poly_order must be non-negative, got {poly_order}")
+
+    radii = radii_px.astype(np.float64)
+    values = intensity.astype(np.float64)
+    keep = radii > float(exclude_radius)
+    for lo, hi in peak_windows:
+        keep &= ~((radii >= lo) & (radii <= hi))
+    if method == "power":
+        keep &= values > 0
+
+    min_points = 2 if method == "power" else max(2, poly_order + 1)
+    if keep.sum() < min_points:
+        raise ValueError(
+            "not enough background bins to fit; widen the profile or narrow peak_windows"
+        )
+
+    if method == "power":
+        coefficients = np.polyfit(np.log(radii[keep]), np.log(values[keep]), 1)
+        positive_radii = radii[radii > 0]
+        eval_radii = np.maximum(radii, positive_radii.min())
+        background = np.exp(np.polyval(coefficients, np.log(eval_radii)))
+    else:
+        coefficients = np.polyfit(radii[keep], values[keep], poly_order)
+        background = np.polyval(coefficients, radii)
+    return background.astype(np.float32)
+
+
+# --- Peak fitting ---
+def fit_gaussian_spot(
+    frame: np.ndarray,
+    row: float,
+    col: float,
+    *,
+    half_window: int,
+) -> dict | None:
+    """Subpixel 2D Gaussian fit around a spot."""
+    frame = np.asarray(frame, dtype=np.float32)
+    half = max(4, int(half_window))
+    row0, col0 = int(round(row)), int(round(col))
+    row_lo, row_hi = max(0, row0 - half), min(frame.shape[0], row0 + half + 1)
+    col_lo, col_hi = max(0, col0 - half), min(frame.shape[1], col0 + half + 1)
+    patch = frame[row_lo:row_hi, col_lo:col_hi].astype(np.float64)
+    if patch.shape[0] < 5 or patch.shape[1] < 5:
+        return None
+    try:
+        from scipy.optimize import OptimizeWarning, curve_fit
+    except Exception:
+        return None
+
+    n_rows, n_cols = patch.shape
+    row_grid, col_grid = np.meshgrid(np.arange(n_rows), np.arange(n_cols), indexing="ij")
+
+    def gaussian_2d(coords, amplitude, row_center, col_center, sigma_row, sigma_col, offset):
+        rows, cols = coords
+        exponent = ((rows - row_center) / sigma_row) ** 2
+        exponent += ((cols - col_center) / sigma_col) ** 2
+        return (amplitude * np.exp(-0.5 * exponent) + offset).ravel()
+
+    peak = np.unravel_index(int(np.argmax(patch)), patch.shape)
+    initial = (
+        float(patch.max() - patch.min()),
+        float(peak[0]),
+        float(peak[1]),
+        2.0,
+        2.0,
+        float(patch.min()),
+    )
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", OptimizeWarning)
+            fit_params, covariance = curve_fit(
+                gaussian_2d,
+                (row_grid, col_grid),
+                patch.ravel(),
+                p0=initial,
+                maxfev=5000,
+            )
+    except Exception:
+        return None
+
+    _, fit_row, fit_col, sigma_row, sigma_col, _ = fit_params
+    if not (0 <= fit_row < n_rows and 0 <= fit_col < n_cols):
+        return None
+
+    parameter_errors = np.sqrt(np.abs(np.diag(covariance)))
+    residual = patch.ravel() - gaussian_2d((row_grid, col_grid), *fit_params)
+    ss_res = float(np.sum(residual**2))
+    ss_tot = float(np.sum((patch.ravel() - patch.mean()) ** 2))
+    r_squared = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
+    return {
+        "row": float(row_lo + fit_row),
+        "col": float(col_lo + fit_col),
+        "row_err": float(parameter_errors[1]) if np.isfinite(parameter_errors[1]) else 0.0,
+        "col_err": float(parameter_errors[2]) if np.isfinite(parameter_errors[2]) else 0.0,
+        "sigma_row": float(abs(sigma_row)),
+        "sigma_col": float(abs(sigma_col)),
+        "fit_quality": float(r_squared),
+    }
+
+
+def _gaussian_peak(radius, amplitude, center, sigma, offset):
+    return amplitude * np.exp(-0.5 * ((radius - center) / sigma) ** 2) + offset
+
+
+def _pseudo_voigt_peak(radius, amplitude, center, sigma, offset, eta):
+    gamma = sigma * 2.3548 / 2.0
+    lorentzian = 1.0 / (1.0 + ((radius - center) / gamma) ** 2)
+    gaussian_part = np.exp(-0.5 * ((radius - center) / sigma) ** 2)
+    return amplitude * (eta * lorentzian + (1.0 - eta) * gaussian_part) + offset
+
+
+def _ring_fit_window(radius_guess: float, centers: list[float], window: float | None) -> float:
+    if window is not None:
+        return float(window)
+    gaps = [abs(radius_guess - center) for center in centers if center != radius_guess]
+    return max(6.0, min(gaps) / 2.0) if gaps else max(6.0, 0.2 * radius_guess)
+
+
+def _fit_ring_peak(
+    radii_px: np.ndarray,
+    intensity: np.ndarray,
+    *,
+    radius_guess: float,
+    half_width: float,
+    model: str,
+) -> dict | None:
+    from scipy.optimize import OptimizeWarning, curve_fit
+
+    in_window = (radii_px >= radius_guess - half_width) & (radii_px <= radius_guess + half_width)
+    radius_window = radii_px[in_window].astype(np.float64)
+    intensity_window = intensity[in_window].astype(np.float64)
+    if radius_window.size < 5:
+        return None
+
+    initial = [
+        max(float(intensity_window.max() - intensity_window.min()), 1e-6),
+        radius_guess,
+        2.0,
+        float(intensity_window.min()),
+    ]
+    bounds = (
+        [0.0, radius_guess - half_width, 0.1, -np.inf],
+        [np.inf, radius_guess + half_width, half_width, np.inf],
+    )
+    if model == "pseudo_voigt":
+        initial = initial + [0.5]
+        bounds = (bounds[0] + [0.0], bounds[1] + [1.0])
+    peak_model = _gaussian_peak if model == "gaussian" else _pseudo_voigt_peak
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", OptimizeWarning)
+        fit_params, _ = curve_fit(
+            peak_model,
+            radius_window,
+            intensity_window,
+            p0=initial,
+            bounds=bounds,
+            maxfev=5000,
+        )
+
+    residual = intensity_window - peak_model(radius_window, *fit_params)
+    ss_tot = float(np.sum((intensity_window - intensity_window.mean()) ** 2))
+    r_squared = 1.0 - float(np.sum(residual**2)) / ss_tot if ss_tot > 0 else 0.0
+    amplitude = float(fit_params[0])
+    fit_radius = float(fit_params[1])
+    sigma = float(abs(fit_params[2]))
+    if model == "pseudo_voigt":
+        eta = float(fit_params[4])
+        gamma = sigma * 2.3548 / 2.0
+        integrated = amplitude * (
+            eta * math.pi * gamma + (1.0 - eta) * sigma * math.sqrt(2.0 * math.pi)
+        )
+    else:
+        integrated = amplitude * sigma * math.sqrt(2.0 * math.pi)
+    return {
+        "raw_radius_px": float(radius_guess),
+        "radius_px": fit_radius,
+        "intensity": amplitude,
+        "fwhm_px": 2.3548 * sigma,
+        "intensity_integrated": integrated,
+        "fit_quality": float(r_squared),
+    }
+
+
+def fit_ring_peaks(
+    radii_px: np.ndarray,
+    intensity: np.ndarray,
+    rings,
+    *,
+    model: str = "gaussian",
+    window: float | None = None,
+) -> list[dict | None]:
+    """Fit one radial peak for each ring record."""
+    if model not in RING_FIT_MODELS:
+        raise ValueError(f"model must be one of {RING_FIT_MODELS}, got {model!r}")
+    if window is not None and window <= 0:
+        raise ValueError(f"window must be positive, got {window}")
+    try:
+        import scipy.optimize  # noqa: F401
+    except ImportError as exc:
+        raise ImportError("fit_ring_peaks needs scipy; install it to fit ring peaks") from exc
+
+    centers = sorted(float(ring["radius_px"]) for ring in rings)
+    updates = []
+    for ring in rings:
+        radius_guess = float(ring["radius_px"])
+        half_width = _ring_fit_window(radius_guess, centers, window)
+        try:
+            updates.append(
+                _fit_ring_peak(
+                    radii_px,
+                    intensity,
+                    radius_guess=radius_guess,
+                    half_width=half_width,
+                    model=model,
+                )
+            )
+        except Exception:
+            updates.append(None)
+    return updates
+
+
+# --- Measurement export ---
+def spot_measurement_record(spot: dict) -> dict:
+    """Export row for one spot record."""
+    return {
+        "id": spot.get("id"),
+        "kind": "spot",
+        "raw_row": spot.get("raw_row"),
+        "raw_col": spot.get("raw_col"),
+        "row": spot.get("row"),
+        "col": spot.get("col"),
+        "row_err": spot.get("row_err"),
+        "col_err": spot.get("col_err"),
+        "r_pixels": spot.get("r_pixels"),
+        "r_pixels_err": spot.get("r_pixels_err"),
+        "g_inv_angstrom": spot.get("g_magnitude"),
+        "g_inv_angstrom_err": spot.get("g_magnitude_err"),
+        "d_angstrom": spot.get("d_spacing"),
+        "d_angstrom_err": spot.get("d_spacing_err"),
+        "angle_deg": spot.get("angle_deg"),
+        "angle_deg_err": spot.get("angle_deg_err"),
+        "intensity": spot.get("intensity"),
+        "fit_quality": spot.get("fit_quality"),
+        "fwhm_px": None,
+        "fwhm_inv_angstrom": None,
+        "intensity_integrated": None,
+        "hkl": spot.get("hkl", ""),
+        "note": spot.get("note", ""),
+    }
+
+
+def ring_measurement_record(ring: dict) -> dict:
+    """Export row for one ring record."""
+    return {
+        "id": ring.get("id"),
+        "kind": "ring",
+        "raw_row": None,
+        "raw_col": None,
+        "row": None,
+        "col": None,
+        "row_err": None,
+        "col_err": None,
+        "r_pixels": ring.get("radius_px"),
+        "r_pixels_err": None,
+        "g_inv_angstrom": ring.get("g_magnitude"),
+        "g_inv_angstrom_err": None,
+        "d_angstrom": ring.get("d_spacing"),
+        "d_angstrom_err": None,
+        "angle_deg": None,
+        "angle_deg_err": None,
+        "intensity": ring.get("intensity"),
+        "fit_quality": ring.get("fit_quality"),
+        "fwhm_px": ring.get("fwhm_px"),
+        "fwhm_inv_angstrom": ring.get("fwhm_inv_angstrom"),
+        "intensity_integrated": ring.get("intensity_integrated"),
+        "hkl": ring.get("hkl", ""),
+        "note": ring.get("note", ""),
+    }
+
+
+def build_measurement_records(spots, rings) -> list[dict]:
+    """Export rows for all spots and rings."""
+    return [spot_measurement_record(spot) for spot in spots] + [
+        ring_measurement_record(ring) for ring in rings
+    ]
+
+
+def measurement_metadata(state) -> dict:
+    """Export metadata block from widget state values."""
+    return {
+        "widget_name": "ShowDiffraction",
+        "center_row": state.get("center_row"),
+        "center_col": state.get("center_col"),
+        "center_method": state.get("center_method", ""),
+        "k_pixel_size_inv_angstrom_per_px": state.get("k_pixel_size"),
+        "calibrated": bool(state.get("k_calibrated")),
+        "calibration_source": state.get("calibration_source", "none"),
+        "calibration_ref_d_angstrom": state.get("calibration_ref_d", 0.0),
+        "calibration_ref_radius_px": state.get("calibration_ref_radius", 0.0),
+        "mask_regions": state.get("mask_regions", []),
+        "background_subtracted": bool(state.get("profile_subtract_background")),
+    }
+
+
+def write_measurement_file(path, records, metadata) -> pathlib.Path:
+    """Write measurement records to CSV or JSON."""
+    path = pathlib.Path(path)
+    if path.suffix.lower() == ".json":
+        path.write_text(json.dumps({"metadata": metadata, "measurements": records}, indent=2))
+    else:
+        with open(path, "w", newline="") as output:
+            writer = csv.DictWriter(output, fieldnames=MEASUREMENT_COLUMNS)
+            writer.writeheader()
+            writer.writerows(records)
+    return path
 
 class ShowDiffraction(anywidget.AnyWidget):
     """
@@ -566,9 +2099,7 @@ class ShowDiffraction(anywidget.AnyWidget):
         if method not in self._CENTER_METHODS:
             raise ValueError(f"unknown refine method {method!r}")
 
-        from quantem.widget import centering
-
-        picked = centering.pick_center(
+        picked = pick_center(
             self._displayed_frame().astype(np.float64),
             method=method,
             mask=self._analysis_mask(),
@@ -1253,11 +2784,9 @@ class ShowDiffraction(anywidget.AnyWidget):
             raise ValueError("merge_frames needs a multi-frame stack")
         if statistic not in ("mean", "median", "max"):
             raise ValueError(f"statistic must be mean, median or max, got {statistic!r}")
-        from quantem.widget import centering
-
         frames = self._data.cpu().numpy().astype(np.float64)
         if align:
-            aligned, shifts, used = centering.align_frames(frames, max_shift=max_shift)
+            aligned, shifts, used = align_frames(frames, max_shift=max_shift)
         else:
             aligned, shifts, used = frames, [(0.0, 0.0)] * len(frames), [True] * len(frames)
         if not any(used):
@@ -1273,8 +2802,8 @@ class ShowDiffraction(anywidget.AnyWidget):
         if self.rings:
             r0 = max(r["radius_px"] for r in self.rings)
             center = (self.center_row, self.center_col)
-            report["before"] = centering.ring_uniformity(frames[self.frame_idx], center, r0)
-            report["after"] = centering.ring_uniformity(merged, center, r0)
+            report["before"] = ring_uniformity(frames[self.frame_idx], center, r0)
+            report["after"] = ring_uniformity(merged, center, r0)
         self._ingest_data(np.concatenate([frames, merged[None]], axis=0).astype(np.float32))
         self.frame_idx = self.n_frames - 1
         self._update_frame()
@@ -1305,15 +2834,10 @@ class ShowDiffraction(anywidget.AnyWidget):
             "mask_coverage_pct": float(mask.mean() * 100.0) if mask is not None else 0.0,
         }
         if self.rings:
-            try:
-                from quantem.widget import centering
-
-                r0 = max(r["radius_px"] for r in self.rings)
-                report["ring_snr"] = centering.ring_uniformity(
-                    frame, (self.center_row, self.center_col), r0
-                )
-            except ImportError:
-                pass
+            r0 = max(r["radius_px"] for r in self.rings)
+            report["ring_snr"] = ring_uniformity(
+                frame, (self.center_row, self.center_col), r0
+            )
         self._quality = report
         return report
 
@@ -1574,7 +3098,7 @@ class ShowDiffraction(anywidget.AnyWidget):
         """Rank an explicit list of candidate phases against measured d-spacings.
 
         This is the primary verification workflow: build the candidates you
-        expect (:func:`~quantem.widget.crystal.library_phase`,
+        expect (:func:`~quantem.widget.library_phase`,
         :meth:`Phase.from_cubic`, :meth:`Phase.from_dspacings`, ...) and rank
         only those. Use :meth:`search_phases` when you have no candidates in
         mind.
@@ -1641,8 +3165,6 @@ class ShowDiffraction(anywidget.AnyWidget):
         ]
 
     def _rank_phases(self, observed, phases, tol, top_n) -> list[dict]:
-        from quantem.widget.phasedb import match_candidate, match_sort_key
-
         reports = []
         d_min = min(observed) * 0.8
         for phase in phases:

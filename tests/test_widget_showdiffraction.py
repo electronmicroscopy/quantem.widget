@@ -6,8 +6,8 @@ import pytest
 import torch
 
 from quantem.widget import ShowDiffraction
-from quantem.widget.crystal import Phase
-from quantem.widget.diffraction import build_measurement_records, measurement_metadata
+from quantem.widget import Phase
+from quantem.widget.showdiffraction import build_measurement_records, measurement_metadata
 from quantem.widget.io import LoadResult
 
 
@@ -990,7 +990,7 @@ def test_profile_panel(monkeypatch):
 
 
 def _library_ring_widget(name="Au", k=0.01, size=256, uncalibrated=False):
-    from quantem.widget.crystal import library_phase
+    from quantem.widget import library_phase
 
     ph, cen = library_phase(name), (size // 2, size // 2)
     kwargs = {} if uncalibrated else {"k_pixel_size": k}
@@ -1030,7 +1030,7 @@ def test_phase_and_indexing_request_channels():
 
 def test_search_phases_and_identify_request():
     # identify channel ranks the spinel family from Fe3O4 rings
-    from quantem.widget.crystal import library_phase
+    from quantem.widget import library_phase
 
     ph = library_phase("Fe3O4")
     w = ShowDiffraction(
@@ -1050,7 +1050,7 @@ def test_search_phases_and_identify_request():
     # library search matches Au from its own rings, with a per-line match table
     w = _library_ring_widget("Au")
     reports = w.search_phases()
-    from quantem.widget.phasedb import match_sort_key
+    from quantem.widget.showdiffraction import match_sort_key
 
     keys = [match_sort_key(rep) for rep in reports]
     assert keys == sorted(keys)
@@ -1073,7 +1073,7 @@ def test_search_phases_and_identify_request():
 
 def test_custom_phases():
     # entries accept a full lattice, defaulting b=a, c=a, angles 90
-    from quantem.widget.crystal import library_phase
+    from quantem.widget import library_phase
 
     w = _library_ring_widget("Zr", uncalibrated=True)
     w.custom_phases = [
@@ -1114,7 +1114,7 @@ def test_custom_phases():
 
 def test_run_auto():
     # full pipeline in one call
-    from quantem.widget.crystal import library_phase
+    from quantem.widget import library_phase
 
     au = library_phase("Au")
     size, cenpx = 512, 255.5

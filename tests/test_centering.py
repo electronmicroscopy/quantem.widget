@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 from scipy import ndimage
 
-from quantem.widget.centering import (
+from quantem.widget.showdiffraction import (
     align_frames,
     center_phase_correlation,
     center_symmetry,

@@ -3,7 +3,7 @@ import math
 import numpy as np
 import pytest
 
-from quantem.widget.crystal import Phase
+from quantem.widget import Phase
 
 # Gold: FCC, a = 4.078 Å. d_hkl and plane angles are analytic for a cubic cell.
 AU_A = 4.078
@@ -168,7 +168,8 @@ def test_structure_absence_rules():
 
 
 def test_phase_library():
-    from quantem.widget.crystal import PHASE_LIBRARY, library_phase
+    from quantem.widget import library_phase
+    from quantem.widget.showdiffraction import PHASE_LIBRARY
 
     # core names + per-phase metadata and d-spacings
     assert {"Au", "Al", "Si", "α-Fe", "MgO", "Fe3O4"} <= set(PHASE_LIBRARY)
@@ -254,7 +255,8 @@ def test_phase_library():
 
 
 def test_library_absence_reassignments():
-    from quantem.widget.crystal import PHASE_LIBRARY, library_phase
+    from quantem.widget import library_phase
+    from quantem.widget.showdiffraction import PHASE_LIBRARY
 
     spinels = ["Fe3O4", "γ-Fe2O3", "MgAl2O4", "Co3O4", "CoFe2O4", "ZnFe2O4", "γ-Al2O3"]
     for name in spinels + ["NiFe2O4"]:
