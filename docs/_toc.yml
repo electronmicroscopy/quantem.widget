@@ -20,10 +20,17 @@ parts:
       - file: tutorials/showdiffraction
       - file: tutorials/io_gpu
         title: IO/GPU
+  # Advanced tutorials are nested under one expandable parent (same pattern as
+  # API reference / Maintainers) so the sidebar stays short for new users.
   - caption: Advanced tutorials
     chapters:
-      - file: tutorials/showfolder
-      - file: tutorials/widget_export
+      - file: tutorials/advanced
+        title: Advanced tutorials
+        sections:
+          - file: tutorials/showfolder
+          - file: tutorials/widget_export
+          - file: tutorials/memory_management
+            title: Memory management
   # API reference and Maintainers are nested under a single expandable parent
   # page so the left sidebar stays short for tutorial users; the chevron
   # expands the full list on demand.
