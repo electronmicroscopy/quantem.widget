@@ -118,7 +118,7 @@ need a Python round trip.
 
 Saving a notebook stores the interactive widget state: current band, ROI, scroll
 zoom, scale-bar calibration, log toggle, overlay opacity, contrast limits, panel sizes, and export metadata. For
-small cubes stored with exact data, the saved notebook also contains the exact cube bytes. For
+small cubes constructed with `save_state=True`, the saved notebook also contains the exact cube bytes. For
 large `from_emd(...)` widgets, the saved notebook contains only startup arrays
 and the data folder URL, so reopening stays lightweight and the data folder must
 remain available.
