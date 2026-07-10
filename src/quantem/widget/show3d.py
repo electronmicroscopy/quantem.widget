@@ -5,11 +5,9 @@ For viewing a stack of 2D images (e.g., defocus sweep, time series, z-stack, mov
 Includes playback controls, statistics, ROI selection, FFT, and more.
 """
 
-import base64
 import gc
 import html
 import http.server
-import io
 import json
 import math
 import os
@@ -31,6 +29,11 @@ import ipywidgets
 import numpy as np
 import traitlets
 
+from quantem.widget._image_folder import (
+    ImageFolderRecord,
+    WatchedImageFolder,
+    WatchedImageFolderMixin,
+)
 from quantem.widget.utils.array import to_numpy
 from quantem.widget.utils.recon_config import (
     _config_float,
@@ -495,7 +498,7 @@ class _Show3DFrameHTTPServer(http.server.ThreadingHTTPServer):
     daemon_threads = True
 
 
-class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
+class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     """
     Interactive 3D stack viewer for sequential 2D images.
 
@@ -512,6 +515,7 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
     - Diff mode (vs first frame or vs previous frame) for delta visualization
     - ROI tools (circle / square / rectangle / annular) with per-frame timeseries
     - Line profiles sampled across the full stack
+    - Page-aware depth/time kymographs for matched single-panel comparisons
     - FFT panel with compact quality labels and optional Hann window
     - Side-by-side multi-panel mode with linked or independent zoom / pan / contrast
     - Panel visibility controls by index or title without removing data
@@ -564,6 +568,11 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
         Use log scale for intensity mapping.
     auto_contrast : bool, default True
         Use percentile-based contrast (ignores vmin/vmax).
+    link_contrast : bool, optional
+        Share one contrast range across panels. Paged data defaults to
+        ``False`` so each reconstruction uses its own automatic percentile
+        range; ordinary multi-panel data defaults to ``True``. Pass ``True``
+        for a matched physical scale across every page and panel.
     percentile_low : float, default 0.5
         Lower percentile for auto-contrast.
     percentile_high : float, default 99.5
@@ -601,7 +610,7 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
         13"–16" laptop screen; bump to ``6`` on wide monitors or drop to ``3``
         for a portrait split layout.  Empty trailing cells in a partial last
         row are not rendered (transparent, non-interactive).
-    panel_gap : int, default 10
+    panel_gap : int, default 0
         Gap in CSS pixels between adjacent panels.  ``0`` = flush (panels share
         an edge - useful for tiled montages), ``20`` = roomy (clear separation
         for slides).  Single-panel widgets ignore this.
@@ -808,7 +817,7 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
     show_zoom_indicator = traitlets.Bool(True).tag(sync=True)
     show_panel_titles = traitlets.Bool(True).tag(sync=True)
     panel_title_font_size = traitlets.Int(11).tag(sync=True)
-    panel_gap = traitlets.Int(10).tag(sync=True)
+    panel_gap = traitlets.Int(0).tag(sync=True)
     # Hover-x hide feature: enables UI to drop frames from scrubber without
     # rebuilding the widget. hidden_indices is the live state; visible_indices
     # is derived (read-only).
@@ -1505,6 +1514,84 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
             kwargs.setdefault("labels", list(frame_labels))
         return cls(ds, **kwargs)
 
+    @classmethod
+    def from_folder(
+        cls,
+        path: str | pathlib.Path,
+        *,
+        pattern: str = "*",
+        recursive: bool = False,
+        watch: bool = True,
+        watch_interval: float = 1.0,
+        **kwargs,
+    ) -> Self:
+        """Play naturally ordered, full-resolution folder images as one stack.
+
+        Stable additions update this widget in place. Every file is decoded
+        through :func:`quantem.widget.io.read_image`; failed or partially
+        written files remain pending for a later poll.
+        """
+        if "labels" in kwargs:
+            raise TypeError(
+                "Show3D.from_folder() derives frame labels from file paths so "
+                "watched additions remain identifiable; remove labels= or "
+                "construct Show3D directly."
+            )
+        source = WatchedImageFolder(
+            path,
+            pattern=pattern,
+            recursive=recursive,
+            interval=watch_interval,
+            mode="frames",
+        )
+        arrays, records = source.read_initial()
+        explicit_calibration = any(
+            key in kwargs
+            for key in ("sampling", "units", "pixel_size", "pixel_unit")
+        )
+
+        config_data = _load_quantem_config(kwargs.get("config"))
+        apply_config_transforms = bool(kwargs.get("apply_config_transforms", True))
+        rotation_deg = kwargs.get("rotation_deg")
+        if rotation_deg is None and config_data is not None and apply_config_transforms:
+            rotation_deg = _config_float(config_data, "data", "rotation_deg") or 0.0
+        config_rotation = (
+            _normalize_rotation_deg(rotation_deg) if rotation_deg is not None else 0.0
+        )
+        post_crop = kwargs.get("post_crop")
+        post_crop_was_set = post_crop is not None
+        crop = _normalize_crop(kwargs.get("crop", 0))
+        padding = _normalize_padding(kwargs.get("padding", 0))
+        pad_mode = str(kwargs.get("pad_mode", "median"))
+
+        def folder_transform(frame: np.ndarray) -> np.ndarray:
+            stack = np.asarray(frame)[None, ...]
+            if config_rotation:
+                stack = _rotate_stack_inplane(stack, config_rotation)
+            if post_crop_was_set:
+                crop_spec = post_crop
+            elif config_data is not None and apply_config_transforms:
+                crop_spec = _post_crop_from_quantem_config(stack.shape, config_data)
+            else:
+                crop_spec = 0
+            stack = _crop_stack(stack, _normalize_crop(crop_spec))
+            stack = _pad_stack(_crop_stack(stack, crop), padding, pad_mode)
+            return np.asarray(stack[0])
+
+        kwargs.setdefault("title", source.folder.name)
+        kwargs.setdefault("offline", False)
+        kwargs.setdefault("verbose", False)
+        widget = cls(
+            np.stack(arrays, axis=0),
+            labels=[source.label(record.path) for record in records],
+            **kwargs,
+        )
+        widget._folder_input_transform = folder_transform
+        source.attach(widget, explicit_calibration=explicit_calibration)
+        if watch:
+            widget.watch_folder(interval=watch_interval)
+        return widget
+
     def __init__(
         self,
         *data_args,
@@ -1530,6 +1617,7 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
         image_rotation: int = 0,
         log_scale: bool = False,
         auto_contrast: bool = True,
+        link_contrast: bool | None = None,
         image_vmin_pct: float = 0.0,
         image_vmax_pct: float = 100.0,
         percentile_low: float = 0.5,
@@ -1686,6 +1774,9 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
             panel_titles=panel_titles,
             page_labels=page_labels,
         )
+        if link_contrast is None:
+            link_contrast = n_pages <= 1
+        kwargs["link_contrast"] = bool(link_contrast)
         _t0 = time.perf_counter()
         # Reject unknown kwargs so typos raise instead of being silently ignored.
         _reject_unknown_kwargs(type(self), kwargs)
@@ -2653,6 +2744,79 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
         self._bump_frame_server_version()
         self._refresh_auto_contrast_ranges()
         self._update_all()
+
+    def _apply_folder_image_records(
+        self,
+        old_records: list[ImageFolderRecord],
+        new_records: list[ImageFolderRecord],
+        changed_arrays: dict[pathlib.Path, np.ndarray],
+    ) -> None:
+        """Replace folder frames while preserving path-addressed viewer state."""
+        old_paths = [record.path for record in old_records]
+        new_paths = [record.path for record in new_records]
+        old_index = {path: idx for idx, path in enumerate(old_paths)}
+        new_index = {path: idx for idx, path in enumerate(new_paths)}
+        transform = getattr(self, "_folder_input_transform", np.asarray)
+
+        frames: list[np.ndarray] = []
+        for path in new_paths:
+            if path in changed_arrays:
+                frames.append(transform(changed_arrays[path]))
+            else:
+                frames.append(np.asarray(self._data[old_index[path]]))
+        stack = np.stack(frames, axis=0)
+
+        selected_path = (
+            old_paths[int(self.slice_idx)]
+            if old_paths and 0 <= int(self.slice_idx) < len(old_paths)
+            else old_paths[0]
+        )
+        bookmark_paths = {
+            old_paths[idx]
+            for idx in self.bookmarked_frames
+            if 0 <= int(idx) < len(old_paths)
+        }
+        starred_path = None
+        if self.starred and 0 <= int(self.starred[0]) < len(old_paths):
+            starred_path = old_paths[int(self.starred[0])]
+        loop_start_path = old_paths[min(max(int(self.loop_start), 0), len(old_paths) - 1)]
+        loop_end_path = None if int(self.loop_end) < 0 else old_paths[int(self.loop_end)]
+        was_playing = bool(self.playing)
+        roi_active = bool(self.roi_active)
+        roi_list = list(self.roi_list)
+        roi_selected_idx = int(self.roi_selected_idx)
+        profile_line = list(self.profile_line)
+
+        # Frames above are already transformed exactly once. Temporarily bypass
+        # set_image's ordinary crop/pad step for this replacement.
+        old_crop = self._crop
+        old_padding = self._padding
+        self._crop = (0, 0, 0, 0)
+        self._padding = (0, 0)
+        try:
+            with self.hold_sync():
+                self.set_image(
+                    stack,
+                    labels=[self._folder_source.label(path) for path in new_paths],
+                )
+                self.slice_idx = new_index.get(selected_path, 0)
+                self.bookmarked_frames = sorted(
+                    new_index[path] for path in bookmark_paths if path in new_index
+                )
+                self.starred = [new_index[starred_path] if starred_path in new_index else -1]
+                mapped_start = new_index.get(loop_start_path, 0)
+                mapped_end = -1 if loop_end_path is None else new_index.get(loop_end_path, -1)
+                self.loop_start = 0
+                self.loop_end = mapped_end
+                self.loop_start = mapped_start
+                self.roi_active = roi_active
+                self.roi_list = roi_list
+                self.roi_selected_idx = roi_selected_idx
+                self.profile_line = profile_line
+                self.playing = was_playing
+        finally:
+            self._crop = old_crop
+            self._padding = old_padding
 
     def __repr__(self) -> str:
         parts = f"Show3D({self.n_slices}×{self.height}×{self.width}, frame={self.slice_idx}, cmap={self.cmap}"
@@ -3782,7 +3946,7 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
 
     @property
     def profile_values(self):
-        """Get intensity values along the profile line for the current frame."""
+        """Get profile values for the current frame and active single-panel page."""
         if len(self.profile_line) < 2:
             return None
         p0, p1 = self.profile_line
@@ -3824,7 +3988,51 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
         self.profile_line = []
         return self
 
-    def profile_all_frames(self, start: tuple[float, float] | None = None, end: tuple[float, float] | None = None) -> np.ndarray:
+    def _resolve_profile_panel(
+        self,
+        *,
+        panel: int | None = None,
+        page: int | None = None,
+    ) -> int:
+        """Resolve a profile source panel, defaulting to the active page."""
+        if panel is not None and page is not None:
+            raise ValueError("Pass either panel or page for a profile, not both")
+        if page is not None:
+            if int(self.n_pages) <= 1 or int(self.panels_per_page) <= 0:
+                raise ValueError("page is only valid for a paged Show3D widget")
+            page_idx = int(page)
+            if page_idx < 0 or page_idx >= int(self.n_pages):
+                raise IndexError(f"page {page_idx} out of range [0, {self.n_pages})")
+            panel_idx = page_idx * int(self.panels_per_page)
+        elif panel is not None:
+            panel_idx = int(panel)
+        elif int(self.n_pages) > 1 and int(self.panels_per_page) > 0:
+            panel_idx = int(self.page_idx) * int(self.panels_per_page)
+        else:
+            panel_idx = 0
+        if panel_idx < 0 or panel_idx >= int(self.n_panels):
+            raise IndexError(f"panel {panel_idx} out of range [0, {self.n_panels})")
+        return panel_idx
+
+    def _raw_profile_stack(self, panel: int) -> np.ndarray:
+        """Return one display-resolution panel stack without diff processing."""
+        if self.separate_panel_frames and self._separate_panel_data is not None:
+            return np.asarray(self._separate_panel_data[panel], dtype=np.float32)
+        data = np.asarray(self._display_data, dtype=np.float32)
+        if int(self.n_panels) <= 1 or self.shared_panel_source:
+            return data
+        panel_width = int(self.panel_width_px) or data.shape[2] // int(self.n_panels)
+        start = panel * panel_width
+        return data[:, :, start : start + panel_width]
+
+    def profile_all_frames(
+        self,
+        start: tuple[float, float] | None = None,
+        end: tuple[float, float] | None = None,
+        *,
+        panel: int | None = None,
+        page: int | None = None,
+    ) -> np.ndarray:
         """Extract the line profile from every frame, returning (n_slices, n_points).
 
         Uses the current profile_line unless start/end are provided.
@@ -3836,6 +4044,12 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
             Start point. Overrides current profile_line.
         end : tuple of (row, col), optional
             End point. Overrides current profile_line.
+        panel : int, optional
+            Absolute source-panel index. Defaults to the first panel on the
+            active page, or panel 0 for a non-paged widget.
+        page : int, optional
+            Page index for a paged widget. The first panel on that page is
+            sampled. Pass ``panel`` instead when a page contains several panels.
 
         Returns
         -------
@@ -3853,10 +4067,43 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
             raise ValueError(
                 "No profile line set. Call set_profile() first or pass start/end."
             )
+        panel_idx = self._resolve_profile_panel(panel=panel, page=page)
+        stack = self._raw_profile_stack(panel_idx)
         rows = []
         for i in range(self.n_slices):
-            rows.append(self._sample_profile_on(self._data[i], row0, col0, row1, col1))
+            rows.append(self._sample_profile_on(stack[i], row0, col0, row1, col1))
         return np.stack(rows)
+
+    def profile_all_pages(
+        self,
+        start: tuple[float, float] | None = None,
+        end: tuple[float, float] | None = None,
+        *,
+        panel_slot: int = 0,
+    ) -> np.ndarray:
+        """Extract one spatially matched profile stack from every page.
+
+        Returns an array shaped ``(n_pages, n_slices, n_points)``. The same
+        profile endpoints and panel slot are used on every page, which makes
+        raw/corrected or method-to-method depth comparisons directly aligned.
+        """
+        if int(self.n_pages) <= 1 or int(self.panels_per_page) <= 0:
+            raise ValueError("profile_all_pages requires a paged Show3D widget")
+        slot = int(panel_slot)
+        if slot < 0 or slot >= int(self.panels_per_page):
+            raise IndexError(
+                f"panel_slot {slot} out of range [0, {self.panels_per_page})"
+            )
+        return np.stack(
+            [
+                self.profile_all_frames(
+                    start,
+                    end,
+                    panel=page * int(self.panels_per_page) + slot,
+                )
+                for page in range(int(self.n_pages))
+            ]
+        )
 
     def save_image(self, path: str | pathlib.Path, *, frame_idx: int | None = None,
                    format: str | None = None, dpi: int = 150) -> pathlib.Path:
@@ -4218,6 +4465,7 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
           observers are still pinned but ``_data`` is ``None``); construct a
           new ``Show3D`` if you need to re-display something.
         """
+        self.stop_folder_watch()
         self._stop_frame_server()
         if self._data is None:
             return
@@ -5403,4 +5651,6 @@ class Show3D(StaticFallbackMixin, anywidget.AnyWidget):
     def _sample_profile(self, row0: float, col0: float, row1: float, col1: float) -> np.ndarray:
         """Sample the line profile on the current display frame (binned, diff-aware)
         so the returned profile matches what the user sees."""
-        return self._sample_profile_on(self._get_display_frame(), row0, col0, row1, col1)
+        panel = self._resolve_profile_panel()
+        frame = self._get_display_panel_frame(panel, int(self.slice_idx))
+        return self._sample_profile_on(frame, row0, col0, row1, col1)

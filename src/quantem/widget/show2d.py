@@ -1,14 +1,13 @@
 """
-show2d: Static 2D image viewer with optional FFT and histogram analysis.
+show2d: 2D comparison viewer with optional FFT and histogram analysis.
 
-For displaying a single image or a static gallery of multiple images.
-Unlike Show3D (interactive), Show2D focuses on static visualization.
+For displaying a single image or a gallery of multiple images. Individual list
+items may be local frame stacks; unlike Show3D, Show2D does not impose one
+shared frame axis across the whole gallery.
 """
 
-import io
 import json
 import math
-import os
 import pathlib
 import tempfile
 import warnings
@@ -23,6 +22,11 @@ import matplotlib.patheffects
 import matplotlib.pyplot as plt
 import numpy as np
 import traitlets
+from quantem.widget._image_folder import (
+    ImageFolderRecord,
+    WatchedImageFolder,
+    WatchedImageFolderMixin,
+)
 from quantem.widget.utils.array import _b64_safe, _resize_image, to_numpy
 from quantem.widget.utils.state_io import resolve_widget_version, save_state_file, unwrap_state_payload
 from quantem.widget.utils.static_fallback import StaticFallbackMixin
@@ -316,6 +320,87 @@ def _normalize_rgb(item: np.ndarray) -> np.ndarray:
     return np.clip(rgb.astype(np.float32), 0.0, 1.0)
 
 
+def _normalize_grayscale_panel_items(
+    images: Sequence[np.ndarray],
+    panel_frame_indices: Sequence[int] | None = None,
+) -> tuple[list[np.ndarray], list[int], np.ndarray]:
+    """Normalize a mixed static/stack gallery to per-panel ``(F, H, W)`` arrays.
+
+    A 2-D item is a static one-frame panel. A 3-D item is a local frame stack
+    for that panel. Spatial shapes are center-padded to one common gallery size,
+    while frame counts remain independent.
+    """
+    if not images:
+        raise ValueError("Show2D requires at least one image panel")
+
+    stacks: list[np.ndarray] = []
+    for panel, image in enumerate(images):
+        arr = np.asarray(image)
+        if arr.ndim == 2:
+            arr = arr[np.newaxis, ...]
+        elif arr.ndim != 3:
+            raise ValueError(
+                "Show2D list items must be 2D images or 3D (frames, rows, cols) "
+                f"stacks; panel {panel} has shape {arr.shape}"
+            )
+        if 0 in arr.shape:
+            raise ValueError(
+                f"Show2D panel {panel} is empty (shape {arr.shape}); all dimensions must be >= 1"
+            )
+        if np.iscomplexobj(arr):
+            raise TypeError(
+                f"Show2D panel {panel} contains complex data. Convert first with "
+                "np.abs(arr) for magnitude or np.angle(arr) for phase."
+            )
+        stack = np.array(arr, dtype=np.float32, copy=True)
+        if not np.isfinite(stack).all():
+            raise ValueError(
+                f"Show2D panel {panel} contains NaN or inf. Clean first with "
+                "np.nan_to_num(arr, nan=0, posinf=0, neginf=0)."
+            )
+        stacks.append(stack)
+
+    target_h = max(int(stack.shape[-2]) for stack in stacks)
+    target_w = max(int(stack.shape[-1]) for stack in stacks)
+    normalized: list[np.ndarray] = []
+    for stack in stacks:
+        if stack.shape[-2:] == (target_h, target_w):
+            normalized.append(stack)
+        else:
+            normalized.append(
+                np.stack(
+                    [_resize_image(frame, target_h, target_w) for frame in stack],
+                    axis=0,
+                ).astype(np.float32, copy=False)
+            )
+
+    if panel_frame_indices is None:
+        indices = [0] * len(normalized)
+    else:
+        if len(panel_frame_indices) != len(normalized):
+            raise ValueError(
+                "panel_frame_indices length "
+                f"({len(panel_frame_indices)}) must match panel count ({len(normalized)})"
+            )
+        indices = []
+        for panel, (raw_index, stack) in enumerate(zip(panel_frame_indices, normalized)):
+            index = int(raw_index)
+            if index < 0:
+                index += int(stack.shape[0])
+            if index < 0 or index >= int(stack.shape[0]):
+                raise ValueError(
+                    f"panel_frame_indices[{panel}]={raw_index} is outside the valid "
+                    f"range [0, {stack.shape[0]})"
+                )
+            indices.append(index)
+
+    current = np.stack(
+        [stack[index] for stack, index in zip(normalized, indices)],
+        axis=0,
+    ).astype(np.float32, copy=False)
+    return normalized, indices, current
+
+
 def _compose_overlay_pair(reference: np.ndarray, moving: np.ndarray, mode: str) -> np.ndarray:
     """Color overlay of two grayscale images for checking alignment.
 
@@ -362,12 +447,14 @@ class Colormap(StrEnum):
     GRAY = "gray"
 
 
-class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
+class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     """
-    Static 2D image viewer with optional FFT and histogram analysis.
+    2D image comparison viewer with optional local panel stacks and analysis.
 
-    Display a single image or multiple images in a gallery layout.
-    For interactive stack viewing with playback, use Show3D instead.
+    Display a single image or multiple images in a gallery layout. A 3-D item
+    inside a list is an independent local stack for that panel, with its own
+    in-panel slider and playback. A bare 3-D array remains a static gallery;
+    use Show3D when every panel should share one global frame axis.
 
     Parameters
     ----------
@@ -435,6 +522,10 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
         diff panel of the pair.
     ncols : int, default 3
         Number of columns in gallery mode.
+    panel_frame_indices : sequence of int, optional
+        Initial frame for every panel when ``data`` is a list containing local
+        3-D stacks. Static 2-D panels accept only ``0``. Negative indices follow
+        Python indexing, so ``-1`` starts a stack on its final frame.
     size : int, default 0
         Canvas rendering size in CSS pixels (the on-screen width of each image).
         ``0`` uses the frontend default: 500 px for a single image, 300 px per
@@ -491,6 +582,12 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
     List of arrays with different shapes (center-padded to a common canvas):
 
     >>> Show2D([np.random.rand(256, 256), np.random.rand(300, 400)])
+
+    One static map beside an independently scrubbed HAADF stack:
+
+    >>> haadf = np.random.rand(26, 256, 256)
+    >>> Show2D([np.random.rand(256, 256), haadf],
+    ...        labels=["EDS map", "HAADF"], panel_frame_indices=[0, -1])
 
     quantem ``Dataset2d``: title, sampling, units auto-extracted:
 
@@ -580,6 +677,14 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
     # Used by the Python-side truthful timing print (end-to-end wall clock, not just __init__).
     _js_rendered = traitlets.Bool(False).tag(sync=True)
     frame_bytes = traitlets.Bytes(b"").tag(sync=True)
+    # Optional per-panel frame stacks. Static panels keep count=1 and are not
+    # duplicated in panel_stack_bytes; offsets are -1 for those panels.
+    panel_frame_counts = traitlets.List(traitlets.Int(), default_value=[]).tag(sync=True)
+    panel_frame_indices = traitlets.List(traitlets.Int(), default_value=[]).tag(sync=True)
+    panel_stack_offsets = traitlets.List(traitlets.Int(), default_value=[]).tag(sync=True)
+    panel_stack_bytes = traitlets.Bytes(b"").tag(sync=True)
+    _panel_stack_mins = traitlets.List(trait=traitlets.Float(), default_value=[]).tag(sync=True)
+    _panel_stack_maxs = traitlets.List(trait=traitlets.Float(), default_value=[]).tag(sync=True)
     # Offline mode: stack quantized to uint8 against global (min, max). 4x
     # smaller than float32 — drops standalone HTML from ~200 MB to ~110 MB.
     # JS dequantizes on read. Eye can't tell uint8 from float32 after colormap
@@ -746,6 +851,69 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
             **kwargs,
         )
 
+    @classmethod
+    def from_folder(
+        cls,
+        path: str | pathlib.Path,
+        *,
+        pattern: str = "*",
+        recursive: bool = False,
+        watch: bool = True,
+        watch_interval: float = 1.0,
+        **kwargs,
+    ) -> Self:
+        """Display every readable folder image as a full-resolution panel.
+
+        Files are ordered naturally (``image_2`` before ``image_10``) and read
+        through :func:`quantem.widget.io.read_image`, including EMD, TIFF, PNG,
+        NPY, and DM calibration paths. The same widget is updated when stable
+        files are added. Unreadable files remain retryable.
+
+        Parameters
+        ----------
+        path : str or pathlib.Path
+            Folder containing independent 2D image files.
+        pattern : str, default "*"
+            Glob selecting files within ``path``.
+        recursive : bool, default False
+            Search matching files below subdirectories as well.
+        watch : bool, default True
+            Start background polling immediately.
+        watch_interval : float, default 1.0
+            Seconds between background polls.
+        **kwargs
+            Normal :class:`Show2D` options. File-derived labels and data are
+            managed by the folder source.
+        """
+        if "labels" in kwargs:
+            raise TypeError(
+                "Show2D.from_folder() derives labels from file paths so new files "
+                "remain identifiable; remove labels= or construct Show2D directly."
+            )
+        source = WatchedImageFolder(
+            path,
+            pattern=pattern,
+            recursive=recursive,
+            interval=watch_interval,
+            mode="panels",
+        )
+        arrays, records = source.read_initial()
+        explicit_calibration = any(
+            key in kwargs
+            for key in ("sampling", "units", "pixel_size", "pixel_sizes", "pixel_unit")
+        )
+        kwargs.setdefault("title", source.folder.name)
+        kwargs.setdefault("verbose", False)
+        widget = cls(
+            arrays,
+            labels=[source.label(record.path) for record in records],
+            **kwargs,
+        )
+        source.attach(widget, explicit_calibration=explicit_calibration)
+        if watch:
+            widget.watch_folder(interval=watch_interval)
+        return widget
+
     def __init__(
         self,
         data: np.ndarray | list[np.ndarray],
@@ -773,6 +941,7 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
         vmin: float | list | None = None,
         vmax: float | list | None = None,
         ncols: int = 3,
+        panel_frame_indices: Sequence[int] | None = None,
         size: int = 0,
         panel_width_px: int = 0,
         smooth: bool = False,
@@ -886,7 +1055,8 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
                 show_stats=show_stats, debug=debug,
                 log_scale=log_scale, auto_contrast=auto_contrast, offline=offline,
                 vmin=vmin, vmax=vmax,
-                ncols=ncols, size=size, smooth=smooth, zoom=zoom,
+                ncols=ncols, panel_frame_indices=panel_frame_indices,
+                size=size, smooth=smooth, zoom=zoom,
                 zoom_row=zoom_row, zoom_col=zoom_col,
                 link_zoom=link_zoom, link_pan=link_pan, link_contrast=link_contrast,
                 diff_mode=diff_mode, overlay=overlay, view_box=view_box,
@@ -901,7 +1071,7 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
                    scale_bar_visible, show_fft, fft_window, fft_metrics,
                    show_controls, controls_collapsed, show_stats, debug, log_scale, auto_contrast, offline,
                    vmin, vmax,
-                   ncols, size, smooth, zoom, zoom_row, zoom_col,
+                   ncols, panel_frame_indices, size, smooth, zoom, zoom_row, zoom_col,
                    link_zoom, link_pan, link_contrast, diff_mode, overlay, view_box,
                    display_bin, hidden_panels, starred, panel_order, show_panel_titles,
                    panel_title_font_size, gallery_gap_px, verbose, state, _t0):
@@ -960,7 +1130,9 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
         # otherwise it keeps the historical (N, H, W) stack semantics.
         rgb_flags: list[bool] = []
         rgb_frames: list[np.ndarray | None] = []
-        if isinstance(data, list):
+        panel_stacks: list[np.ndarray] | None = None
+        resolved_panel_frame_indices: list[int] | None = None
+        if isinstance(data, (list, tuple)):
             images = [to_numpy(d) for d in data]
             rgb_flags = [_is_rgb_item(img) for img in images]
         else:
@@ -971,6 +1143,16 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
                 images, rgb_flags = None, []
                 data = arr
         if images is not None and any(rgb_flags):
+            stack_panels = [
+                idx for idx, (img, is_rgb) in enumerate(zip(images, rgb_flags))
+                if not is_rgb and img.ndim == 3
+            ]
+            if stack_panels:
+                raise NotImplementedError(
+                    "Show2D does not yet mix RGB panels with local grayscale frame "
+                    f"stacks (stack panel indices: {stack_panels}). Convert the RGB "
+                    "panel to grayscale or use a separate Show2D."
+                )
             # Mixed gallery: normalize RGB items to display-ready [0, 1] and
             # reduce them to Rec. 709 luminance for the grayscale machinery
             # (stats, histogram, FFT, profile all read the luminance plane).
@@ -989,14 +1171,10 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
             data = np.stack([img @ _RGB_LUMA if flag else img
                              for img, flag in zip(normalized, rgb_flags)])
         elif images is not None:
-            # Check if all images have the same shape
-            shapes = [img.shape for img in images]
-            if len(set(shapes)) > 1:
-                # Different sizes - resize all to the largest
-                max_h = max(s[0] for s in shapes)
-                max_w = max(s[1] for s in shapes)
-                images = [_resize_image(img, max_h, max_w) for img in images]
-            data = np.stack(images)
+            panel_stacks, resolved_panel_frame_indices, data = _normalize_grayscale_panel_items(
+                images,
+                panel_frame_indices,
+            )
 
         # Ensure 3D shape (N, H, W)
         if data.ndim == 2:
@@ -1009,10 +1187,35 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
             self._data = np.asarray(data, dtype=np.float32)
         self._rgb_frames = rgb_frames or [None] * int(data.shape[0])
         self.is_rgb = [f is not None for f in self._rgb_frames]
+        if panel_stacks is None:
+            panel_stacks = [self._data[i:i + 1] for i in range(int(self._data.shape[0]))]
+            if panel_frame_indices is None:
+                resolved_panel_frame_indices = [0] * len(panel_stacks)
+            else:
+                if len(panel_frame_indices) != len(panel_stacks):
+                    raise ValueError(
+                        "panel_frame_indices length "
+                        f"({len(panel_frame_indices)}) must match panel count ({len(panel_stacks)})"
+                    )
+                resolved_panel_frame_indices = []
+                for panel, raw_index in enumerate(panel_frame_indices):
+                    index = int(raw_index)
+                    if index == -1:
+                        index = 0
+                    if index != 0:
+                        raise ValueError(
+                            f"panel_frame_indices[{panel}]={raw_index} is outside the valid range [0, 1)"
+                        )
+                    resolved_panel_frame_indices.append(0)
         # overlay sugar (mirrors diff_mode): compose an alignment overlay panel
         # from the two grayscale inputs so users never hand-build (H, W, 3).
         overlay_label = None
         if overlay:
+            if any(stack.shape[0] > 1 for stack in panel_stacks):
+                raise NotImplementedError(
+                    "overlay= is not supported with local frame-stack panels because "
+                    "the composed overlay would not follow frame changes"
+                )
             if overlay is not True and str(overlay) not in ("green-magenta", "rgb"):
                 raise ValueError(f"overlay must be True, 'green-magenta', or 'rgb', got {overlay!r}")
             if self._data.shape[0] != 2 or any(self.is_rgb):
@@ -1028,6 +1231,8 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
             self._data = np.concatenate([self._data, (composed @ _RGB_LUMA)[None]], axis=0)
             self._rgb_frames = [None, None, composed]
             self.is_rgb = [False, False, True]
+            panel_stacks = [self._data[i:i + 1] for i in range(int(self._data.shape[0]))]
+            resolved_panel_frame_indices = [0] * len(panel_stacks)
             overlay_label = f"overlay ({mode})"
             data = self._data  # n_images/height/width below read `data`
         if offline and any(self.is_rgb):
@@ -1040,6 +1245,12 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
         self._data_original = [self._data[i] for i in range(self._data.shape[0])]
         self._originals_are_views = True
         self.n_images = int(data.shape[0])
+        self._panel_stacks = panel_stacks
+        self._panel_stacks_original = [stack for stack in panel_stacks]
+        self._panel_stack_originals_are_views = True
+        self.panel_frame_counts = [int(stack.shape[0]) for stack in panel_stacks]
+        self.panel_frame_indices = list(resolved_panel_frame_indices or [0] * self.n_images)
+        self.panel_stack_offsets = [-1] * self.n_images
         self.height = int(data.shape[1])
         self.width = int(data.shape[2])
         self.image_rotations = [0] * self.n_images
@@ -1241,12 +1452,17 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
                 bin2d(f.transpose(2, 0, 1), factor=self._display_bin, mode="mean").transpose(1, 2, 0)
                 for f in self._rgb_frames
             ]
+            self._display_panel_stacks = [
+                bin2d(stack, factor=self._display_bin, mode="mean")
+                for stack in self._panel_stacks
+            ]
             if verbose:
                 print(f"  Display bin {self._display_bin}×: {orig_h}×{orig_w} → {self.height}×{self.width} ({self._display_data.nbytes // 1024 // 1024} MB preview; full-res detail streams on zoom)")
         else:
             self._display_data = self._data
             self._display_bin_factor = 1
             self._display_rgb = self._rgb_frames
+            self._display_panel_stacks = self._panel_stacks
 
         # Compute initial stats (from full-res data)
         self._compute_all_stats()
@@ -1289,6 +1505,61 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
                 f"starred length ({len(val)}) must equal n_images ({n_img})"
             )
         return [1 if int(v) else 0 for v in val]
+
+    @traitlets.validate("panel_frame_indices")
+    def _validate_panel_frame_indices(self, proposal: dict) -> list[int]:
+        """Validate one independent frame index for every source panel."""
+        values = list(proposal["value"])
+        counts = list(getattr(self, "panel_frame_counts", []))
+        n_images = int(getattr(self, "n_images", 0))
+        if not values and n_images > 0:
+            return [0] * n_images
+        if len(values) != n_images:
+            raise traitlets.TraitError(
+                f"panel_frame_indices length ({len(values)}) must equal n_images ({n_images})"
+            )
+        if len(counts) != n_images:
+            counts = [1] * n_images
+        normalized: list[int] = []
+        for panel, (raw_index, count) in enumerate(zip(values, counts)):
+            index = int(raw_index)
+            count = max(1, int(count))
+            if index < 0 or index >= count:
+                raise traitlets.TraitError(
+                    f"panel_frame_indices[{panel}]={index} is outside the valid range [0, {count})"
+                )
+            normalized.append(index)
+        return normalized
+
+    @traitlets.observe("panel_frame_indices")
+    def _on_panel_frame_indices_changed(self, change) -> None:
+        """Keep Python analysis/detail state aligned with browser-local scrubbing."""
+        if getattr(self, "_updating_panel_frames", False):
+            return
+        stacks = getattr(self, "_panel_stacks", None)
+        if not stacks or len(stacks) != int(getattr(self, "n_images", 0)):
+            return
+        indices = list(change.get("new") or [])
+        if len(indices) != len(stacks):
+            return
+        self._data = np.stack(
+            [stack[index] for stack, index in zip(stacks, indices)],
+            axis=0,
+        ).astype(np.float32, copy=False)
+        display_stacks = getattr(self, "_display_panel_stacks", None)
+        if display_stacks and len(display_stacks) == len(stacks):
+            self._display_data = np.stack(
+                [stack[index] for stack, index in zip(display_stacks, indices)],
+                axis=0,
+            ).astype(np.float32, copy=False)
+        elif int(getattr(self, "_display_bin", 1)) <= 1:
+            self._display_data = self._data
+        if hasattr(self, "stats_mean"):
+            self._compute_all_stats()
+        if hasattr(self, "_detail_meta"):
+            self._detail_request = ""
+            self._detail_meta = ""
+            self._detail_bytes = b""
 
     @traitlets.validate("page_idx")
     def _validate_page_idx(self, proposal: dict) -> int:
@@ -1474,12 +1745,13 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
         self.render_total_ms = int(total_ms)
         self.render_python_build_ms = int(py_ms)
         self.render_wire_js_ms = int(total_ms - py_ms)
-        if not getattr(self, "_save_state", False) and self.frame_bytes:
+        if not getattr(self, "_save_state", False) and (self.frame_bytes or self.panel_stack_bytes):
             # The frontend has decoded and painted the pixels by the time it
             # flips ``_js_rendered``. Clear the synced model buffer so a later
             # notebook save stores the static PNG fallback, not the full 4k
             # array, while targeted initial sync remains intact.
             self.frame_bytes = b""
+            self.panel_stack_bytes = b""
         if not getattr(self, "_verbose", True):
             pass
         else:
@@ -1501,7 +1773,13 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
         except (ValueError, KeyError):
             pass
 
-    def set_image(self, data, labels: list[str | None] | None = None) -> None:
+    def set_image(
+        self,
+        data,
+        labels: list[str | None] | None = None,
+        *,
+        panel_frame_indices: Sequence[int] | None = None,
+    ) -> None:
         """Replace the displayed image stack without rebuilding the widget.
 
         This is the light-weight live-update path used by ShowFolder watched
@@ -1509,80 +1787,212 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
         FFT/profile toggles, and gallery layout, while resetting per-panel state
         tied to the previous image count or dimensions.
         """
-        if hasattr(data, "array") and hasattr(data, "name") and hasattr(data, "sampling"):
-            data = data.array
-        data = to_numpy(data)
-        if data.ndim == 2:
-            data = data[np.newaxis, ...]
-        if data.ndim != 3:
-            raise ValueError(f"Show2D.set_image expects a 2D image or 3D stack, got {data.ndim}D")
-        if 0 in data.shape:
-            raise ValueError(f"Empty image stack: shape {data.shape}. All dims must be >= 1.")
-        if np.iscomplexobj(data):
-            raise TypeError(
-                "Show2D does not accept complex data. Convert first: "
-                "np.abs(arr) for magnitude or np.angle(arr) for phase."
+        if isinstance(data, (list, tuple)):
+            images = [
+                to_numpy(item.array if hasattr(item, "array") else item)
+                for item in data
+            ]
+            rgb_panels = [idx for idx, image in enumerate(images) if _is_rgb_item(image)]
+            if rgb_panels:
+                raise NotImplementedError(
+                    "Show2D.set_image does not yet replace RGB panels; "
+                    f"RGB panel indices: {rgb_panels}"
+                )
+            panel_stacks, resolved_indices, data = _normalize_grayscale_panel_items(
+                images,
+                panel_frame_indices,
             )
-        data = np.asarray(data, dtype=np.float32)
-        if not np.isfinite(data).all():
-            raise ValueError(
-                "Data contains NaN or inf. Clean first: "
-                "np.nan_to_num(arr, nan=0, posinf=0, neginf=0)."
-            )
+        else:
+            if hasattr(data, "array") and hasattr(data, "name") and hasattr(data, "sampling"):
+                data = data.array
+            data = to_numpy(data)
+            if data.ndim == 2:
+                data = data[np.newaxis, ...]
+            if data.ndim != 3:
+                raise ValueError(f"Show2D.set_image expects a 2D image or 3D stack, got {data.ndim}D")
+            if 0 in data.shape:
+                raise ValueError(f"Empty image stack: shape {data.shape}. All dims must be >= 1.")
+            if np.iscomplexobj(data):
+                raise TypeError(
+                    "Show2D does not accept complex data. Convert first: "
+                    "np.abs(arr) for magnitude or np.angle(arr) for phase."
+                )
+            data = np.asarray(data, dtype=np.float32)
+            if not np.isfinite(data).all():
+                raise ValueError(
+                    "Data contains NaN or inf. Clean first: "
+                    "np.nan_to_num(arr, nan=0, posinf=0, neginf=0)."
+                )
+            panel_stacks = [data[i:i + 1] for i in range(int(data.shape[0]))]
+            if panel_frame_indices is None:
+                resolved_indices = [0] * len(panel_stacks)
+            else:
+                _, resolved_indices, data = _normalize_grayscale_panel_items(
+                    [data[i] for i in range(int(data.shape[0]))],
+                    panel_frame_indices,
+                )
 
         previous_shape = (int(self.n_images), int(self.height), int(self.width))
+        self._updating_panel_frames = True
+        try:
+            with self.hold_sync():
+                self._data = data
+                self._panel_stacks = panel_stacks
+                self._panel_stacks_original = [stack for stack in panel_stacks]
+                self._panel_stack_originals_are_views = True
+                self.panel_frame_counts = [int(stack.shape[0]) for stack in panel_stacks]
+                self.n_images = int(data.shape[0])
+                self.panel_frame_indices = list(resolved_indices)
+                self.panel_stack_offsets = [-1] * self.n_images
+                self._data_original = [self._data[i] for i in range(self._data.shape[0])]
+                self._originals_are_views = True
+                self._rgb_frames = [None] * int(data.shape[0])
+                self._display_rgb = self._rgb_frames
+                self.is_rgb = [False] * int(data.shape[0])
+                self.n_pages = 1
+                self.page_idx = 0
+                self.panels_per_page = 0
+                self.page_labels = []
+                self.page_starred = [0]
+                self.image_rotations = [0] * self.n_images
+                self.starred = [0] * self.n_images
+                self.hidden_panels = []
+                self.panel_order = []
+                if labels is None:
+                    self.labels = [f"Image {i + 1}" for i in range(self.n_images)]
+                else:
+                    if len(labels) != self.n_images:
+                        raise ValueError(
+                            f"labels length ({len(labels)}) must match n_images ({self.n_images})"
+                        )
+                    self.labels = ["" if label is None else str(label) for label in labels]
+                self.selected_idx = min(int(self.selected_idx), self.n_images - 1)
+                self.roi_list = []
+                self.roi_selected_idx = -1
+                self.profile_line = []
+                self._detail_request = ""
+                self._detail_meta = ""
+                self._detail_bytes = b""
+                self.vmins = None
+                self.vmaxs = None
+
+                self._display_bin = max(1, int(getattr(self, "_display_bin", 1)))
+                if self._display_bin > 1:
+                    from quantem.widget.utils.array import bin2d
+
+                    self._display_panel_stacks = [
+                        bin2d(stack, factor=self._display_bin, mode="mean")
+                        for stack in self._panel_stacks
+                    ]
+                else:
+                    self._display_panel_stacks = self._panel_stacks
+                self._display_data = np.stack(
+                    [stack[index] for stack, index in zip(self._display_panel_stacks, resolved_indices)],
+                    axis=0,
+                ).astype(np.float32, copy=False)
+                display = self._display_data
+                self.height = int(display.shape[1])
+                self.width = int(display.shape[2])
+                self._display_bin_factor = self._display_bin
+                if (self.n_images, self.height, self.width) != previous_shape:
+                    self.view_box = []
+                    self.zoom_row = None
+                    self.zoom_col = None
+                self._compute_all_stats()
+                self._update_all_frames()
+        finally:
+            self._updating_panel_frames = False
+
+    def _apply_folder_image_records(
+        self,
+        old_records: list[ImageFolderRecord],
+        new_records: list[ImageFolderRecord],
+        changed_arrays: dict[pathlib.Path, np.ndarray],
+    ) -> None:
+        """Replace folder panels while remapping panel state through file paths."""
+        old_paths = [record.path for record in old_records]
+        new_paths = [record.path for record in new_records]
+        old_index = {path: idx for idx, path in enumerate(old_paths)}
+        new_index = {path: idx for idx, path in enumerate(new_paths)}
+
+        originals = list(getattr(self, "_panel_stacks_original", []))
+        arrays: list[np.ndarray] = []
+        for path in new_paths:
+            if path in changed_arrays:
+                arrays.append(changed_arrays[path])
+                continue
+            idx = old_index[path]
+            stack = originals[idx]
+            arrays.append(np.asarray(stack[0]))
+
+        selected_path = (
+            old_paths[int(self.selected_idx)]
+            if old_paths and 0 <= int(self.selected_idx) < len(old_paths)
+            else old_paths[0]
+        )
+        starred_by_path = {
+            path: bool(self.starred[idx])
+            for idx, path in enumerate(old_paths)
+            if idx < len(self.starred)
+        }
+        hidden_paths = {
+            old_paths[idx]
+            for idx in self.hidden_panels
+            if 0 <= int(idx) < len(old_paths)
+        }
+        rotations_by_path = {
+            path: int(self.image_rotations[idx])
+            for idx, path in enumerate(old_paths)
+            if idx < len(self.image_rotations)
+        }
+
+        ordered_paths: list[pathlib.Path] = []
+        if self.panel_order:
+            ordered_paths.extend(
+                old_paths[idx]
+                for idx in self.panel_order
+                if 0 <= int(idx) < len(old_paths)
+            )
+            ordered_paths.extend(path for path in new_paths if path not in ordered_paths)
+
+        roi_active = bool(self.roi_active)
+        roi_list = list(self.roi_list)
+        roi_selected_idx = int(self.roi_selected_idx)
+        profile_line = list(self.profile_line)
+        view_box = list(self.view_box)
+        zoom_row = self.zoom_row
+        zoom_col = self.zoom_col
+
+        def remap_panel_values(values):
+            if values is None or len(values) != len(old_paths):
+                return None
+            by_path = {path: values[idx] for idx, path in enumerate(old_paths)}
+            return [by_path.get(path) for path in new_paths]
+
+        vmins = remap_panel_values(self.vmins)
+        vmaxs = remap_panel_values(self.vmaxs)
+
         with self.hold_sync():
-            self._data = data
-            self._data_original = [self._data[i] for i in range(self._data.shape[0])]
-            self._originals_are_views = True
-            self._rgb_frames = [None] * int(data.shape[0])
-            self._display_rgb = self._rgb_frames
-            self.is_rgb = [False] * int(data.shape[0])
-            self.n_images = int(data.shape[0])
-            self.n_pages = 1
-            self.page_idx = 0
-            self.panels_per_page = 0
-            self.page_labels = []
-            self.page_starred = [0]
-            self.image_rotations = [0] * self.n_images
-            self.starred = [0] * self.n_images
-            self.hidden_panels = []
-            self.panel_order = []
-            if labels is None:
-                self.labels = [f"Image {i + 1}" for i in range(self.n_images)]
-            else:
-                if len(labels) != self.n_images:
-                    raise ValueError(
-                        f"labels length ({len(labels)}) must match n_images ({self.n_images})"
-                    )
-                self.labels = ["" if label is None else str(label) for label in labels]
-            self.selected_idx = min(int(self.selected_idx), self.n_images - 1)
-            self.roi_list = []
-            self.roi_selected_idx = -1
-            self.profile_line = []
-            self._detail_request = ""
-            self._detail_meta = ""
-            self._detail_bytes = b""
-            self.vmins = None
-            self.vmaxs = None
-
-            self._display_bin = max(1, int(getattr(self, "_display_bin", 1)))
-            if self._display_bin > 1:
-                from quantem.widget.utils.array import bin2d
-
-                self._display_data = bin2d(self._data, factor=self._display_bin, mode="mean")
-            else:
-                self._display_data = self._data
-            display = self._display_data if self._display_data is not None else self._data
-            self.height = int(display.shape[1])
-            self.width = int(display.shape[2])
-            self._display_bin_factor = self._display_bin
-            if (self.n_images, self.height, self.width) != previous_shape:
-                self.view_box = []
-                self.zoom_row = None
-                self.zoom_col = None
-            self._compute_all_stats()
-            self._update_all_frames()
+            self.set_image(
+                arrays,
+                labels=[self._folder_source.label(path) for path in new_paths],
+            )
+            self.image_rotations = [rotations_by_path.get(path, 0) for path in new_paths]
+            self.starred = [int(starred_by_path.get(path, False)) for path in new_paths]
+            self.hidden_panels = sorted(new_index[path] for path in hidden_paths if path in new_index)
+            self.panel_order = [new_index[path] for path in ordered_paths if path in new_index]
+            self.selected_idx = new_index.get(selected_path, 0)
+            self.roi_active = roi_active
+            self.roi_list = roi_list
+            self.roi_selected_idx = roi_selected_idx
+            self.profile_line = profile_line
+            self.view_box = view_box
+            self.zoom_row = zoom_row
+            self.zoom_col = zoom_col
+            if vmins is not None:
+                self.vmins = vmins
+            if vmaxs is not None:
+                self.vmaxs = vmaxs
 
     def __repr__(self) -> str:
         if self.n_images > 1:
@@ -1858,7 +2268,12 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
 
     # Traits that carry the bulk pixel payload. Dropped from the saved-notebook
     # snapshot when save_state is False so a plain display stays a few MB, not GB.
-    _UNSAVED_HEAVY_KEYS = ("frame_bytes", "export_payload", "_detail_bytes")
+    _UNSAVED_HEAVY_KEYS = (
+        "frame_bytes",
+        "panel_stack_bytes",
+        "export_payload",
+        "_detail_bytes",
+    )
 
     def get_state(self, key=None, drop_defaults=False):
         """Trait state for comm sync and notebook embedding.
@@ -2332,6 +2747,7 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
             "hidden_panels": list(self.hidden_panels),
             "hidden_page_slots": list(self.hidden_page_slots),
             "panel_order": list(self.panel_order),
+            "panel_frame_indices": list(self.panel_frame_indices),
             "show_panel_titles": self.show_panel_titles,
             "panel_title_font_size": self.panel_title_font_size,
             "show_stats": self.show_stats,
@@ -2541,8 +2957,19 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
         data = self._display_data if self._display_data is not None else self._data
         if data is None:
             raise ValueError("Cannot export HTML after free(); rebuild the widget first.")
+        has_local_stacks = any(count > 1 for count in self.panel_frame_counts)
+        if has_local_stacks:
+            display_stacks = getattr(self, "_display_panel_stacks", None)
+            if not display_stacks:
+                raise ValueError("Cannot export local panel stacks after their data has been freed")
+            export_data = [
+                np.ascontiguousarray(stack if stack.shape[0] > 1 else stack[0], dtype=np.float32)
+                for stack in display_stacks
+            ]
+        else:
+            export_data = np.ascontiguousarray(data, dtype=np.float32)
         clone = type(self)(
-            np.ascontiguousarray(data, dtype=np.float32),
+            export_data,
             labels=list(self.labels),
             page_labels=list(self.page_labels) if self.n_pages > 1 else None,
             title=self.title,
@@ -2565,6 +2992,7 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
             vmin=self.vmin if self.vmin is not None else self.vmins,
             vmax=self.vmax if self.vmax is not None else self.vmaxs,
             ncols=self.ncols,
+            panel_frame_indices=list(self.panel_frame_indices),
             size=self.size,
             smooth=self.smooth,
             zoom=self.initial_zoom,
@@ -2654,6 +3082,23 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
                 state.pop("panel_order")
             else:
                 state["panel_order"] = order
+        if "panel_frame_indices" in state and isinstance(state["panel_frame_indices"], list):
+            counts = list(self.panel_frame_counts)
+            raw_indices = state["panel_frame_indices"]
+            try:
+                indices = [
+                    int(value) if not isinstance(value, bool) else -1
+                    for value in raw_indices
+                ]
+            except (TypeError, ValueError):
+                indices = []
+            if len(indices) != int(self.n_images) or any(
+                value < 0 or value >= max(1, int(counts[panel]))
+                for panel, value in enumerate(indices)
+            ):
+                state.pop("panel_frame_indices")
+            else:
+                state["panel_frame_indices"] = indices
         for key, val in state.items():
             # Silent migrations for renamed keys in older saved state files.
             if key == "pixel_size_angstrom":
@@ -2928,6 +3373,32 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
         self.panel_order = order
         return self
 
+    def set_panel_frame(self, panel: int | str, frame: int) -> Self:
+        """Set the displayed frame for one local stack panel.
+
+        Static panels have one frame and therefore only accept frame ``0``.
+        Negative indices follow normal Python indexing, so ``-1`` selects the
+        final frame (useful for Velox/EDS acquisitions whose exported HAADF is
+        the last survey frame).
+        """
+        panel_idx = self._resolve_panel_ref(panel)
+        count = int(self.panel_frame_counts[panel_idx])
+        frame_idx = int(frame)
+        if frame_idx < 0:
+            frame_idx += count
+        if frame_idx < 0 or frame_idx >= count:
+            if count == 1:
+                raise IndexError(
+                    f"panel {panel_idx} is static and has one frame; only frame 0 is valid"
+                )
+            raise IndexError(
+                f"frame index {frame} out of range for panel {panel_idx} with {count} frame(s)"
+            )
+        indices = list(self.panel_frame_indices)
+        indices[panel_idx] = frame_idx
+        self.panel_frame_indices = indices
+        return self
+
     def collapse_controls(self) -> Self:
         """Collapse the live control UI while leaving the GUI toggle available."""
         self.controls_collapsed = True
@@ -3097,6 +3568,48 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
             self.frame_bytes = _b64_safe(out.tobytes())
         else:
             self.frame_bytes = _b64_safe(data.tobytes())
+        self._update_panel_stack_bytes()
+
+    def _update_panel_stack_bytes(self) -> None:
+        """Pack only multi-frame panel data for browser-local frame changes."""
+        stacks = getattr(self, "_display_panel_stacks", None)
+        if not stacks or not any(int(stack.shape[0]) > 1 for stack in stacks):
+            self.panel_stack_offsets = [-1] * int(getattr(self, "n_images", 0))
+            self.panel_stack_bytes = b""
+            self._panel_stack_mins = []
+            self._panel_stack_maxs = []
+            return
+
+        offsets: list[int] = []
+        blocks: list[bytes] = []
+        mins = [0.0] * len(stacks)
+        maxs = [1.0] * len(stacks)
+        float_offset = 0
+        for panel, stack in enumerate(stacks):
+            if int(stack.shape[0]) <= 1:
+                offsets.append(-1)
+                continue
+            arr = np.ascontiguousarray(stack, dtype=np.float32)
+            offsets.append(float_offset)
+            float_offset += int(arr.size)
+            if self.offline:
+                finite = arr[np.isfinite(arr)]
+                lo = float(finite.min()) if finite.size else 0.0
+                hi = float(finite.max()) if finite.size else 1.0
+                rng = hi - lo if hi > lo else 1.0
+                blocks.append(
+                    np.clip((arr - lo) * (255.0 / rng), 0, 255)
+                    .astype(np.uint8)
+                    .tobytes()
+                )
+                mins[panel] = lo
+                maxs[panel] = hi
+            else:
+                blocks.append(arr.tobytes())
+        self.panel_stack_offsets = offsets
+        self._panel_stack_mins = mins if self.offline else []
+        self._panel_stack_maxs = maxs if self.offline else []
+        self.panel_stack_bytes = _b64_safe(b"".join(blocks))
 
     def _apply_rotations(self):
         """Re-rotate each displayed image from its original by ``image_rotations[i] * 90°``.
@@ -3108,6 +3621,71 @@ class Show2D(StaticFallbackMixin, anywidget.AnyWidget):
         unrotated source rather than accumulating interpolation error.
         Mixed shapes after rotation are center-padded to a common size.
         """
+        has_local_stacks = any(
+            count > 1 for count in getattr(self, "panel_frame_counts", [])
+        )
+        if has_local_stacks:
+            has_rotation = any(
+                (self.image_rotations[i] if i < len(self.image_rotations) else 0) % 4 != 0
+                for i in range(len(self._panel_stacks_original))
+            )
+            if not has_rotation and self._panel_stack_originals_are_views:
+                return
+            if self._panel_stack_originals_are_views and has_rotation:
+                self._panel_stacks_original = [
+                    stack.copy() for stack in self._panel_stacks_original
+                ]
+                self._panel_stack_originals_are_views = False
+            rotated_stacks = []
+            for panel, original in enumerate(self._panel_stacks_original):
+                k = (
+                    self.image_rotations[panel]
+                    if panel < len(self.image_rotations)
+                    else 0
+                ) % 4
+                rotated_stacks.append(
+                    original if k == 0 else np.rot90(original, k=k, axes=(-2, -1))
+                )
+            target_h = max(int(stack.shape[-2]) for stack in rotated_stacks)
+            target_w = max(int(stack.shape[-1]) for stack in rotated_stacks)
+            normalized_stacks = []
+            for stack in rotated_stacks:
+                if stack.shape[-2:] == (target_h, target_w):
+                    normalized_stacks.append(np.asarray(stack, dtype=np.float32))
+                else:
+                    normalized_stacks.append(
+                        np.stack(
+                            [_resize_image(frame, target_h, target_w) for frame in stack],
+                            axis=0,
+                        ).astype(np.float32, copy=False)
+                    )
+            self._panel_stacks = normalized_stacks
+            indices = list(self.panel_frame_indices)
+            self._data = np.stack(
+                [stack[index] for stack, index in zip(normalized_stacks, indices)],
+                axis=0,
+            ).astype(np.float32, copy=False)
+            if self._display_bin > 1:
+                from quantem.widget.utils.array import bin2d
+
+                self._display_panel_stacks = [
+                    bin2d(stack, factor=self._display_bin, mode="mean")
+                    for stack in normalized_stacks
+                ]
+            else:
+                self._display_panel_stacks = normalized_stacks
+            self._display_data = np.stack(
+                [stack[index] for stack, index in zip(self._display_panel_stacks, indices)],
+                axis=0,
+            ).astype(np.float32, copy=False)
+            self._data_original = [self._data[i] for i in range(self._data.shape[0])]
+            self._originals_are_views = True
+            self.height = int(self._display_data.shape[1])
+            self.width = int(self._display_data.shape[2])
+            self._compute_all_stats()
+            self._update_all_frames()
+            return
+
         # Materialize originals as independent copies only when a non-zero
         # rotation exists (they start as views into _data to avoid 800MB copy at init)
         has_rotation = any(

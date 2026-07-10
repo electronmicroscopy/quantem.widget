@@ -44,6 +44,33 @@ def test_show3d_accepts_5d_paged_panels() -> None:
     assert np.all(widget._get_display_panel_frame(9, 4) == 214)
 
 
+def test_show3d_pages_default_to_independent_auto_contrast() -> None:
+    paged = Show3D(
+        _paged_stack(),
+        panel_titles=["raw", "filtered", "residual", "probe"],
+        page_labels=["lambda 0.01", "lambda 0.03", "lambda 0.10"],
+        verbose=False,
+    )
+    shared_pages = Show3D(
+        _paged_stack(),
+        panel_titles=["raw", "filtered", "residual", "probe"],
+        page_labels=["lambda 0.01", "lambda 0.03", "lambda 0.10"],
+        link_contrast=True,
+        verbose=False,
+    )
+    ordinary_panels = Show3D(
+        _paged_stack()[0, 0],
+        _paged_stack()[0, 1],
+        panel_titles=["raw", "filtered"],
+        verbose=False,
+    )
+
+    assert paged.auto_contrast is True
+    assert paged.link_contrast is False
+    assert shared_pages.link_contrast is True
+    assert ordinary_panels.link_contrast is True
+
+
 def test_show3d_accepts_dict_pages_and_page_stars() -> None:
     base = _paged_stack()
     widget = Show3D(
@@ -102,6 +129,9 @@ def test_show3d_paged_state_and_html_roundtrip(tmp_path: pathlib.Path) -> None:
     assert "page_starred" in html
     assert "hidden_page_slots" in html
     assert "lambda 0.03" in html
+    assert '"link_contrast":false' in html.replace(" ", "")
+    assert "data-show3d-page-controls" in html
+    assert "data-show3d-tool-controls" in html
 
 
 def test_show3d_paged_to_show2d_uses_current_visible_page() -> None:
@@ -121,3 +151,52 @@ def test_show3d_paged_to_show2d_uses_current_visible_page() -> None:
     assert np.all(show2d._data[0] == 204)
     assert np.all(show2d._data[1] == 224)
     assert np.all(show2d._data[2] == 234)
+
+
+def test_show3d_profiles_follow_single_panel_pages() -> None:
+    rows = np.arange(4, dtype=np.float32)[None, :, None]
+    cols = np.arange(5, dtype=np.float32)[None, None, :]
+    depth = np.arange(3, dtype=np.float32)[:, None, None]
+    first = depth * 10 + rows * 2 + cols
+    pages = np.stack([first, first + 100], axis=0)[:, None, ...]
+    widget = Show3D(
+        pages,
+        page_labels=["raw", "corrected"],
+        panel_titles=["object"],
+        verbose=False,
+    )
+    widget.set_profile((1, 0), (1, 4))
+
+    profiles = widget.profile_all_pages()
+
+    assert profiles.shape[:2] == (2, 3)
+    np.testing.assert_allclose(profiles[1] - profiles[0], 100)
+    widget.page_idx = 1
+    widget.slice_idx = 2
+    np.testing.assert_allclose(widget.profile_values, profiles[1, 2])
+
+
+def test_show3d_single_panel_page_kymograph_frontend_contract() -> None:
+    source = (
+        pathlib.Path(__file__).resolve().parents[1] / "js" / "show3d" / "index.tsx"
+    ).read_text(encoding="utf-8")
+
+    assert "const singlePanelPageProfile" in source
+    assert "setProfilePanelIdx((current) => current === activePageStart" in source
+    assert "((nPanels || 1) === 1 || singlePanelPageProfile)" in source
+    assert 'Kymograph{singlePanelPageProfile ? ` · ${pageControlLabel}`' in source
+    assert "const profileSampleColOffset = singlePanelPageProfile" in source
+    assert "const screenToProfileImg" in source
+    assert 'const profileColor = "#00e5ff"' in source
+    assert 'drawEndpoint(ax, ay, "1")' in source
+    assert 'drawEndpoint(bx, by, "2")' in source
+    assert "[profileActive, profileData, profilePoints" in source
+    assert 'data-show3d-page-controls="true"' in source
+    assert 'data-show3d-page-status="true"' in source
+    assert 'data-show3d-tool-controls="true"' in source
+    assert source.index('data-show3d-page-controls="true"') < source.index(
+        'data-show3d-tool-controls="true"'
+    )
+    assert "const hasPanelChoices = panelMenuTotal > 1" in source
+    assert source.count("{hasPanelChoices && (") >= 2
+    assert "panelChromeVisible && hasPanelChoices" in source

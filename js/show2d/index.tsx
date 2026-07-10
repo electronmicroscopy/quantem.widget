@@ -164,7 +164,7 @@ function DebugPerfBadge({
     <Box
       component="span"
       data-quantem-debug-badge={widget}
-      title={`${widget} debug browser FPS`}
+      title={`${widget} debug browser UI FPS`}
       sx={{
         ml: 0.6,
         px: 0.5,
@@ -180,7 +180,7 @@ function DebugPerfBadge({
         verticalAlign: "baseline",
       }}
     >
-      Debug FPS {fpsText}
+      Debug UI FPS {fpsText}
     </Box>
   );
 }
@@ -955,6 +955,12 @@ function Show2D() {
   const [width] = useModelState<number>("width");
   const [height] = useModelState<number>("height");
   const [frameBytes] = useModelState<DataView>("frame_bytes");
+  const [panelFrameCounts] = useModelState<number[]>("panel_frame_counts");
+  const [panelFrameIndices, setPanelFrameIndices] = useModelState<number[]>("panel_frame_indices");
+  const [panelStackOffsets] = useModelState<number[]>("panel_stack_offsets");
+  const [panelStackBytes] = useModelState<DataView>("panel_stack_bytes");
+  const [panelStackMins] = useModelState<number[]>("_panel_stack_mins");
+  const [panelStackMaxs] = useModelState<number[]>("_panel_stack_maxs");
   const [staticFallbackJpeg] = useModelState<string>("_static_fallback_jpeg");
   const [staticFallbackMime] = useModelState<string>("_static_fallback_mime");
   const hasLiveFrameBytes = !!frameBytes && frameBytes.byteLength > 0;
@@ -1050,6 +1056,7 @@ function Show2D() {
   const [statsMin] = useModelState<number[]>("stats_min");
   const [statsMax] = useModelState<number[]>("stats_max");
   const [statsStd] = useModelState<number[]>("stats_std");
+  const [localPanelFrameStats, setLocalPanelFrameStats] = React.useState<Map<number, { mean: number; min: number; max: number; std: number }>>(new Map());
 
   // Analysis Panels (FFT + Histogram)
   const [showFft, setShowFft] = useModelState<boolean>("show_fft");
@@ -1059,6 +1066,94 @@ function Show2D() {
 
   // Selection
   const [selectedIdx, setSelectedIdx] = useModelState<number>("selected_idx");
+  const hasLocalPanelStacks = React.useMemo(
+    () => Array.from({ length: nImages }, (_, i) => panelFrameCounts?.[i] || 1).some(count => count > 1),
+    [nImages, panelFrameCounts]
+  );
+  const normalizedPanelFrameIndices = React.useMemo(
+    () => Array.from({ length: nImages }, (_, panel) => {
+      const count = Math.max(1, panelFrameCounts?.[panel] || 1);
+      return Math.max(0, Math.min(count - 1, panelFrameIndices?.[panel] || 0));
+    }),
+    [nImages, panelFrameCounts, panelFrameIndices]
+  );
+  const [panelFramePreviewIndices, setPanelFramePreviewIndices] = React.useState<number[]>([]);
+  const [playingPanelFrames, setPlayingPanelFrames] = React.useState<Set<number>>(new Set());
+  const pendingPanelFrameIndicesRef = React.useRef<number[] | null>(null);
+  const panelFrameCommitRafRef = React.useRef(0);
+  React.useEffect(() => {
+    setPanelFramePreviewIndices(normalizedPanelFrameIndices);
+  }, [normalizedPanelFrameIndices]);
+  React.useEffect(() => {
+    setPlayingPanelFrames(previous => {
+      const next = new Set(
+        Array.from(previous).filter(panel => (panelFrameCounts?.[panel] || 1) > 1)
+      );
+      return next.size === previous.size ? previous : next;
+    });
+  }, [panelFrameCounts]);
+  const commitPanelFrameIndex = React.useCallback((panel: number, frame: number, immediate = false) => {
+    const count = Math.max(1, panelFrameCounts?.[panel] || 1);
+    const nextFrame = Math.max(0, Math.min(count - 1, Math.round(frame)));
+    const next = [...(pendingPanelFrameIndicesRef.current || normalizedPanelFrameIndices)];
+    while (next.length < nImages) next.push(0);
+    next[panel] = nextFrame;
+    pendingPanelFrameIndicesRef.current = next;
+    const flush = () => {
+      panelFrameCommitRafRef.current = 0;
+      const pending = pendingPanelFrameIndicesRef.current;
+      pendingPanelFrameIndicesRef.current = null;
+      if (pending) setPanelFrameIndices(pending);
+    };
+    if (immediate) {
+      if (panelFrameCommitRafRef.current) window.cancelAnimationFrame(panelFrameCommitRafRef.current);
+      flush();
+    } else if (!panelFrameCommitRafRef.current) {
+      panelFrameCommitRafRef.current = window.requestAnimationFrame(flush);
+    }
+  }, [nImages, normalizedPanelFrameIndices, panelFrameCounts, setPanelFrameIndices]);
+  const setPanelFrameIndex = React.useCallback((panel: number, frame: number, immediate = false) => {
+    const count = Math.max(1, panelFrameCounts?.[panel] || 1);
+    const nextFrame = Math.max(0, Math.min(count - 1, Math.round(frame)));
+    setPanelFramePreviewIndices(previous => {
+      const next = previous.length === nImages ? [...previous] : [...normalizedPanelFrameIndices];
+      next[panel] = nextFrame;
+      return next;
+    });
+    commitPanelFrameIndex(panel, nextFrame, immediate);
+  }, [commitPanelFrameIndex, nImages, normalizedPanelFrameIndices, panelFrameCounts]);
+  const stopPanelPlayback = React.useCallback((panel: number) => {
+    setPlayingPanelFrames(previous => {
+      if (!previous.has(panel)) return previous;
+      const next = new Set(previous);
+      next.delete(panel);
+      return next;
+    });
+  }, []);
+  const togglePanelPlayback = React.useCallback((panel: number) => {
+    setPlayingPanelFrames(previous => {
+      const next = new Set(previous);
+      if (next.has(panel)) next.delete(panel);
+      else next.add(panel);
+      return next;
+    });
+  }, []);
+  React.useEffect(() => {
+    if (playingPanelFrames.size === 0) return;
+    const timeout = window.setTimeout(() => {
+      const next = [...normalizedPanelFrameIndices];
+      playingPanelFrames.forEach(panel => {
+        const count = Math.max(1, panelFrameCounts?.[panel] || 1);
+        if (count > 1) next[panel] = (next[panel] + 1) % count;
+      });
+      setPanelFramePreviewIndices(next);
+      setPanelFrameIndices(next);
+    }, 100);
+    return () => window.clearTimeout(timeout);
+  }, [normalizedPanelFrameIndices, panelFrameCounts, playingPanelFrames, setPanelFrameIndices]);
+  React.useEffect(() => () => {
+    if (panelFrameCommitRafRef.current) window.cancelAnimationFrame(panelFrameCommitRafRef.current);
+  }, []);
 
   // ROI
   const [roiActive, setRoiActive] = useModelState<boolean>("roi_active");
@@ -1551,6 +1646,7 @@ function Show2D() {
   const gpuFFTRef = React.useRef<WebGPUFFT | null>(null);
   const gpuReadyRef = React.useRef(false);
   const rawDataRef = React.useRef<Float32Array[] | null>(null);
+  const lastAppliedPanelFrameIndicesRef = React.useRef<number[]>([]);
   // Interleaved (r, g, b) floats for RGB panels; null for grayscale panels.
   // rawDataRef holds the Rec. 709 luminance of RGB panels so every grayscale
   // consumer (FFT, histogram, profile, diff, stats) works unchanged.
@@ -1591,6 +1687,7 @@ function Show2D() {
   const fftCanvasRefs = React.useRef<(HTMLCanvasElement | null)[]>([]);
   const fftOffscreensRef = React.useRef<(HTMLCanvasElement | null)[]>([]);
   const fftMagCacheGalleryRef = React.useRef<(Float32Array | null)[]>([]);
+  const galleryFftSourceConfigRef = React.useRef("");
   const galleryFftDimsRef = React.useRef<{ w: number; h: number } | null>(null);
   const galleryFftOverviewRef = React.useRef<{ downsample: number; sourceW: number; sourceH: number; fftW: number; fftH: number } | null>(null);
   const [galleryFftMagVersion, setGalleryFftMagVersion] = React.useState(0);
@@ -2053,6 +2150,63 @@ function Show2D() {
     return decoded;
   }, [frameBytes, offline, offlineMin, offlineMax, offlineMins, offlineMaxs, nImages, width, height, panelFloatOffsets]);
 
+  const panelStackFloatCount = React.useMemo(() => {
+    const perImage = width * height;
+    return Array.from({ length: nImages }, (_, panel) => {
+      const count = panelFrameCounts?.[panel] || 1;
+      return count > 1 ? count * perImage : 0;
+    }).reduce((sum, value) => sum + value, 0);
+  }, [height, nImages, panelFrameCounts, width]);
+  const decodedPanelStacksRef = React.useRef<Float32Array | null>(null);
+  const allPanelStackFloats = React.useMemo(() => {
+    if (panelStackFloatCount <= 0) return new Float32Array(0);
+    if (!panelStackBytes || panelStackBytes.byteLength === 0) {
+      const cached = decodedPanelStacksRef.current;
+      return cached !== null && cached.length === panelStackFloatCount
+        ? cached
+        : new Float32Array(panelStackFloatCount);
+    }
+    let decoded: Float32Array;
+    if (offline) {
+      const u8 = new Uint8Array(
+        panelStackBytes.buffer,
+        panelStackBytes.byteOffset,
+        panelStackBytes.byteLength
+      );
+      const f32 = new Float32Array(panelStackFloatCount);
+      const perImage = width * height;
+      for (let panel = 0; panel < nImages; panel++) {
+        const count = panelFrameCounts?.[panel] || 1;
+        const offset = panelStackOffsets?.[panel] ?? -1;
+        if (count <= 1 || offset < 0) continue;
+        const lo = panelStackMins?.[panel] ?? 0;
+        const hi = panelStackMaxs?.[panel] ?? 1;
+        const scale = (hi - lo) / 255.0;
+        const length = count * perImage;
+        for (let k = 0; k < length && offset + k < u8.length; k++) {
+          f32[offset + k] = u8[offset + k] * scale + lo;
+        }
+      }
+      decoded = f32;
+    } else {
+      decoded = extractFloat32(panelStackBytes, panelStackFloatCount)
+        ?? new Float32Array(panelStackFloatCount);
+    }
+    decodedPanelStacksRef.current = decoded;
+    return decoded;
+  }, [
+    panelStackBytes,
+    panelStackFloatCount,
+    offline,
+    width,
+    height,
+    nImages,
+    panelFrameCounts,
+    panelStackOffsets,
+    panelStackMins,
+    panelStackMaxs,
+  ]);
+
   const [dataVersion, setDataVersion] = React.useState(0);
   const [gpuCmapVersion, setGpuCmapVersion] = React.useState(0);
   // autoContrastVersion declared earlier (forward declaration for histogram thumbs).
@@ -2278,11 +2432,23 @@ function Show2D() {
         dataArrays.push(luminance);
       } else {
         rgbArrays.push(null);
-        dataArrays.push(new Float32Array(allFloats.subarray(start, start + perImage)));
+        const frameCount = panelFrameCounts?.[i] || 1;
+        const stackOffset = panelStackOffsets?.[i] ?? -1;
+        const requestedFrame = normalizedPanelFrameIndices[i] || 0;
+        const frameIndex = Math.max(0, Math.min(frameCount - 1, requestedFrame));
+        if (frameCount > 1 && stackOffset >= 0 && allPanelStackFloats.length >= stackOffset + (frameIndex + 1) * perImage) {
+          const frameStart = stackOffset + frameIndex * perImage;
+          dataArrays.push(new Float32Array(allPanelStackFloats.subarray(frameStart, frameStart + perImage)));
+        } else {
+          dataArrays.push(new Float32Array(allFloats.subarray(start, start + perImage)));
+        }
       }
     }
     rawDataRef.current = dataArrays;
     rgbDataRef.current = rgbArrays;
+    lastAppliedPanelFrameIndicesRef.current = [...normalizedPanelFrameIndices];
+    fftMagCacheGalleryRef.current = new Array(nImages).fill(null);
+    galleryFftPipelineRef.current = new Array(nImages).fill(null);
     // New pixels (fresh frame_bytes, rotation, ...) invalidate every fetched
     // detail tile; the request effect refetches for the current view.
     detailTilesRef.current.clear();
@@ -2296,7 +2462,99 @@ function Show2D() {
       setGpuCmapVersion(v => v + 1);
     }
     setDataVersion(v => v + 1);
-  }, [allFloats, nImages, width, height, panelFloatOffsets, isRgbFlags]);
+  }, [
+    allFloats,
+    allPanelStackFloats,
+    nImages,
+    width,
+    height,
+    panelFloatOffsets,
+    isRgbFlags,
+    panelFrameCounts,
+    panelStackOffsets,
+  ]);
+
+  React.useEffect(() => {
+    const raw = rawDataRef.current;
+    if (!raw || !hasLocalPanelStacks || allPanelStackFloats.length === 0) return;
+    const previous = lastAppliedPanelFrameIndicesRef.current;
+    const perImage = width * height;
+    const changedPanels: number[] = [];
+    for (let panel = 0; panel < nImages; panel++) {
+      const frameCount = panelFrameCounts?.[panel] || 1;
+      const stackOffset = panelStackOffsets?.[panel] ?? -1;
+      const frameIndex = normalizedPanelFrameIndices[panel] || 0;
+      if (frameCount <= 1 || stackOffset < 0 || previous[panel] === frameIndex) continue;
+      const frameStart = stackOffset + frameIndex * perImage;
+      if (allPanelStackFloats.length < frameStart + perImage) continue;
+      raw[panel] = new Float32Array(
+        allPanelStackFloats.subarray(frameStart, frameStart + perImage)
+      );
+      changedPanels.push(panel);
+      if (fftMagCacheGalleryRef.current.length === nImages) {
+        fftMagCacheGalleryRef.current[panel] = null;
+      }
+      if (galleryFftPipelineRef.current.length === nImages) {
+        galleryFftPipelineRef.current[panel] = null;
+      }
+    }
+    lastAppliedPanelFrameIndicesRef.current = [...normalizedPanelFrameIndices];
+    if (changedPanels.length === 0) return;
+    detailTilesRef.current.clear();
+    detailSentKeysRef.current.clear();
+    setDetailStreamStatus("preview");
+    const engine = gpuCmapRef.current;
+    if (engine && gpuCmapReadyRef.current) {
+      changedPanels.forEach(panel => engine.uploadData(panel, raw[panel], width, height));
+      gpuDataVersionRef.current++;
+      setGpuCmapVersion(version => version + 1);
+    }
+    setDataVersion(version => version + 1);
+  }, [
+    allPanelStackFloats,
+    hasLocalPanelStacks,
+    height,
+    nImages,
+    normalizedPanelFrameIndices,
+    panelFrameCounts,
+    panelStackOffsets,
+    width,
+  ]);
+
+  React.useEffect(() => {
+    const raw = rawDataRef.current;
+    if (!raw || !hasLocalPanelStacks) {
+      setLocalPanelFrameStats(previous => previous.size === 0 ? previous : new Map());
+      return;
+    }
+    const next = new Map<number, { mean: number; min: number; max: number; std: number }>();
+    for (let panel = 0; panel < nImages; panel++) {
+      if ((panelFrameCounts?.[panel] || 1) <= 1 || !raw[panel]) continue;
+      const values = raw[panel];
+      let min = Infinity;
+      let max = -Infinity;
+      let sum = 0;
+      let sumSquares = 0;
+      for (let i = 0; i < values.length; i++) {
+        const value = values[i];
+        if (!Number.isFinite(value)) continue;
+        min = Math.min(min, value);
+        max = Math.max(max, value);
+        sum += value;
+        sumSquares += value * value;
+      }
+      const count = values.length;
+      const mean = count > 0 ? sum / count : 0;
+      const variance = count > 0 ? Math.max(0, sumSquares / count - mean * mean) : 0;
+      next.set(panel, {
+        mean,
+        min: Number.isFinite(min) ? min : 0,
+        max: Number.isFinite(max) ? max : 0,
+        std: Math.sqrt(variance),
+      });
+    }
+    setLocalPanelFrameStats(next);
+  }, [dataVersion, hasLocalPanelStacks, nImages, panelFrameCounts]);
 
   // Initialize reusable offscreen canvases (one per image, resized when dimensions change)
   React.useEffect(() => {
@@ -3825,6 +4083,12 @@ function Show2D() {
       if (fftMagCacheGalleryRef.current.length !== nImages) {
         fftMagCacheGalleryRef.current = new Array(nImages).fill(null);
       }
+      const sourceConfig = `${nImages}:${width}x${height}:${roiFftKey}:${fftWindow ? 1 : 0}`;
+      if (galleryFftSourceConfigRef.current !== sourceConfig) {
+        galleryFftSourceConfigRef.current = sourceConfig;
+        fftMagCacheGalleryRef.current = new Array(nImages).fill(null);
+        galleryFftPipelineRef.current = new Array(nImages).fill(null);
+      }
       setFftComputing(true);
       const useGPU = !!(gpuFFTRef.current && gpuReadyRef.current);
       const backend = useGPU ? "WebGPU" : "CPU Worker";
@@ -3877,6 +4141,10 @@ function Show2D() {
       const inputs: { real: Float32Array; imag: Float32Array }[] = [];
       let fftW = width, fftH = height;
       for (let idx = 0; idx < nImages; idx++) {
+        if (fftMagCacheGalleryRef.current[idx]) {
+          inputs.push({ real: new Float32Array(0), imag: new Float32Array(0) });
+          continue;
+        }
         const input = prepOne(idx);
         if (input) {
           fftW = input.w; fftH = input.h;
@@ -3899,6 +4167,7 @@ function Show2D() {
         if (cancelled) { setFftComputing(false); return; }
         const batchEnd = Math.min(batchStart + BATCH_SIZE, nImages);
         const batchInputs = inputs.slice(batchStart, batchEnd).filter(inp => inp.real.length > 0);
+        if (batchInputs.length === 0) continue;
         setFftProgress(`FFT ${batchStart + 1}–${batchEnd}/${nImages} (${backend})`);
 
         if (useGPU && batchInputs.length > 1) {
@@ -5247,14 +5516,22 @@ function Show2D() {
     }
     switch (e.key) {
       case "ArrowLeft":
-        if (isGallery) {
+        if ((panelFrameCounts?.[selectedIdx] || 1) > 1) {
+          e.preventDefault();
+          stopPanelPlayback(selectedIdx);
+          setPanelFrameIndex(selectedIdx, (panelFramePreviewIndices[selectedIdx] || 0) - 1, true);
+        } else if (isGallery) {
           e.preventDefault();
           const pos = visibleImageIndices.indexOf(selectedIdx);
           setSelectedIdx(visibleImageIndices[Math.max(0, pos - 1)] ?? 0);
         }
         break;
       case "ArrowRight":
-        if (isGallery) {
+        if ((panelFrameCounts?.[selectedIdx] || 1) > 1) {
+          e.preventDefault();
+          stopPanelPlayback(selectedIdx);
+          setPanelFrameIndex(selectedIdx, (panelFramePreviewIndices[selectedIdx] || 0) + 1, true);
+        } else if (isGallery) {
           e.preventDefault();
           const pos = visibleImageIndices.indexOf(selectedIdx);
           setSelectedIdx(visibleImageIndices[Math.min(visibleImageIndices.length - 1, pos + 1)] ?? 0);
@@ -5317,6 +5594,7 @@ function Show2D() {
   // -------------------------------------------------------------------------
   const needsReset = getZoomState(isGallery ? selectedIdx : 0).zoom !== 1 || getZoomState(isGallery ? selectedIdx : 0).panX !== 0 || getZoomState(isGallery ? selectedIdx : 0).panY !== 0;
   const statsIdx = isGallery ? selectedIdx : 0;
+  const currentFrameStats = localPanelFrameStats.get(statsIdx);
 
   // Calibrated cursor position - unit is whatever the user passed via sampling/units.
   const calibratedUnit = pixelSize > 0 ? pixelUnit : "";
@@ -5420,11 +5698,12 @@ function Show2D() {
               {isGallery && <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>Link Zoom / Contrast: Sync zoom or histogram range across all gallery images.</Typography>}
               {isGallery && <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>Cols / Panels: Change the gallery grid or hide panels without changing the source data.</Typography>}
               {isGallery && <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>Pinning: Click a panel to select or pin it for keyboard actions, per-panel zoom, ROI edits, and delete shortcuts.</Typography>}
+              {hasLocalPanelStacks && <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>Local stacks: A 3D item inside a list gets its own in-panel slider and play button. Select it and use left/right arrows to change only that panel; hiding or reordering it preserves its frame.</Typography>}
               <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>Pan: With Pan enabled, drag the image to move the zoomed view. With Link Zoom on, pan and zoom move together across gallery panels.</Typography>
               <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>Large data: A binned preview is shown first. When you zoom in, Show2D requests full-resolution detail only for the visible window; small high-zoom windows use native pixels, while larger windows stay lightly binned to keep each reply responsive. The title badge shows whether you are seeing preview, streaming detail, or detail-ready data. Cursor row/column are reported in native full-resolution coordinates; the value is tagged preview/detail/native. The full native stack is not sent to the browser at once. Reduce columns, hide panels, turn off FFT/Profile/Stats, or zoom less to keep interaction faster.</Typography>
               <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>Export / Copy: Save or copy the current panel view using the toolbar actions.</Typography>
               <Typography sx={{ fontSize: 11, fontWeight: "bold", mt: 0.5 }}>Keyboard</Typography>
-              <KeyboardShortcuts items={isGallery ? [["← / →", "Prev / Next image"], ["1 – 9", "Select image"], ["] / [", "Rotate CW / CCW 90°"], ["Del / ⌫", "Delete selected ROI"], ["M", "Measure distance"], ["Esc", "Exit measure"], ["R", "Reset zoom"], ["Scroll", "Zoom"], ["Dbl-click", "Reset view"]] : [["] / [", "Rotate CW / CCW 90°"], ["Del / ⌫", "Delete selected ROI"], ["M", "Measure distance"], ["Esc", "Exit measure"], ["R", "Reset zoom"], ["Scroll", "Zoom"], ["Dbl-click", "Reset view"]]} />
+              <KeyboardShortcuts items={isGallery ? [["← / →", hasLocalPanelStacks ? "Prev / Next frame in a selected stack; otherwise select panel" : "Prev / Next image"], ["1 – 9", "Select image"], ["] / [", "Rotate CW / CCW 90°"], ["Del / ⌫", "Delete selected ROI"], ["M", "Measure distance"], ["Esc", "Exit measure"], ["R", "Reset zoom"], ["Scroll", "Zoom"], ["Dbl-click", "Reset view"]] : [["← / →", hasLocalPanelStacks ? "Prev / Next frame" : "No action"], ["] / [", "Rotate CW / CCW 90°"], ["Del / ⌫", "Delete selected ROI"], ["M", "Measure distance"], ["Esc", "Exit measure"], ["R", "Reset zoom"], ["Scroll", "Zoom"], ["Dbl-click", "Reset view"]]} />
 	            </Box>} theme={themeInfo.theme} />}
 	            {showControls && (
 	              <Button
@@ -5907,6 +6186,97 @@ function Show2D() {
                         {panelLabel(i)}
                       </Box>
                     )}
+                    {panelChromeVisible && (panelFrameCounts?.[i] || 1) > 1 && (
+                      <Box
+                        data-show2d-panel-frame-controls={i}
+                        onPointerDown={(event: React.PointerEvent) => {
+                          event.stopPropagation();
+                          setSelectedIdx(i);
+                        }}
+                        onMouseDown={(event: React.MouseEvent) => event.stopPropagation()}
+                        onTouchStart={(event: React.TouchEvent) => event.stopPropagation()}
+                        onWheel={(event: React.WheelEvent) => event.stopPropagation()}
+                        sx={{
+                          position: "absolute",
+                          left: 7,
+                          right: 7,
+                          bottom: 24,
+                          minHeight: 24,
+                          px: 0.5,
+                          display: "flex",
+                          alignItems: "center",
+                          gap: "8px",
+                          borderRadius: 0.75,
+                          bgcolor: "rgba(0,0,0,0.58)",
+                          boxShadow: "0 1px 3px rgba(0,0,0,0.35)",
+                          zIndex: 4,
+                        }}
+                      >
+                        <IconButton
+                          size="small"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            togglePanelPlayback(i);
+                          }}
+                          title={playingPanelFrames.has(i) ? `Pause ${panelLabel(i)} frames` : `Play ${panelLabel(i)} frames`}
+                          aria-label={playingPanelFrames.has(i) ? `Pause frames for ${panelLabel(i)}` : `Play frames for ${panelLabel(i)}`}
+                          sx={{
+                            width: 20,
+                            height: 20,
+                            p: 0,
+                            flex: "0 0 20px",
+                            zIndex: 1,
+                            color: "rgba(255,255,255,0.92)",
+                            "&:hover": { bgcolor: "rgba(255,255,255,0.14)" },
+                          }}
+                        >
+                          {playingPanelFrames.has(i)
+                            ? <PauseIcon sx={{ fontSize: 14 }} />
+                            : <PlayArrowIcon sx={{ fontSize: 14 }} />}
+                        </IconButton>
+                        <Slider
+                          value={panelFramePreviewIndices[i] ?? normalizedPanelFrameIndices[i] ?? 0}
+                          min={0}
+                          max={Math.max(1, (panelFrameCounts?.[i] || 1) - 1)}
+                          step={1}
+                          onPointerDownCapture={() => stopPanelPlayback(i)}
+                          onKeyDown={() => stopPanelPlayback(i)}
+                          onChange={(_, value) => {
+                            const raw = Array.isArray(value) ? value[0] : value;
+                            setPanelFrameIndex(i, Number(raw));
+                          }}
+                          onChangeCommitted={(_, value) => {
+                            const raw = Array.isArray(value) ? value[0] : value;
+                            setPanelFrameIndex(i, Number(raw), true);
+                          }}
+                          size="small"
+                          sx={{
+                            ...sliderStyles.small,
+                            minWidth: 34,
+                            mx: 0.25,
+                            flex: "1 1 auto",
+                            color: "rgba(255,255,255,0.92)",
+                            "& .MuiSlider-rail": { opacity: 0.45 },
+                          }}
+                          aria-label={`Frame for ${panelLabel(i)}`}
+                        />
+                        <Typography
+                          component="span"
+                          sx={{
+                            minWidth: "4.8ch",
+                            flex: "0 0 auto",
+                            color: "rgba(255,255,255,0.9)",
+                            fontSize: 9,
+                            lineHeight: 1,
+                            fontVariantNumeric: "tabular-nums",
+                            textAlign: "right",
+                            textShadow: "0 1px 2px rgba(0,0,0,0.8)",
+                          }}
+                        >
+                          {(panelFramePreviewIndices[i] ?? normalizedPanelFrameIndices[i] ?? 0) + 1}/{panelFrameCounts?.[i] || 1}
+                        </Typography>
+                      </Box>
+                    )}
                     {panelChromeVisible && reorderMode && (
                       <Box
                         sx={{
@@ -6183,6 +6553,67 @@ function Show2D() {
                   <Typography sx={{ fontSize: 9, fontFamily: "monospace", color: "rgba(255,255,255,0.7)", whiteSpace: "nowrap", lineHeight: 1.2 }}>
                     ({cursorInfo.row}, {cursorInfo.col}){nativePixelSize > 0 ? ` = (${(cursorInfo.row * nativePixelSize).toFixed(1)}, ${(cursorInfo.col * nativePixelSize).toFixed(1)} ${calibratedUnit})` : ""} {cursorInfo.rgb ? `(${cursorInfo.rgb[0].toFixed(2)}, ${cursorInfo.rgb[1].toFixed(2)}, ${cursorInfo.rgb[2].toFixed(2)})` : `${formatNumber(cursorInfo.value)}${cursorValueSuffix}`}
                   </Typography>
+	                </Box>
+	              )}
+              {panelChromeVisible && (panelFrameCounts?.[0] || 1) > 1 && (
+                <Box
+                  data-show2d-panel-frame-controls={0}
+                  onPointerDown={(event: React.PointerEvent) => event.stopPropagation()}
+                  onMouseDown={(event: React.MouseEvent) => event.stopPropagation()}
+                  onTouchStart={(event: React.TouchEvent) => event.stopPropagation()}
+                  onWheel={(event: React.WheelEvent) => event.stopPropagation()}
+                  sx={{
+                    position: "absolute",
+                    left: 7,
+                    right: 7,
+                    bottom: 24,
+                    minHeight: 24,
+                    px: 0.5,
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "8px",
+                    borderRadius: 0.75,
+                    bgcolor: "rgba(0,0,0,0.58)",
+                    boxShadow: "0 1px 3px rgba(0,0,0,0.35)",
+                    zIndex: 4,
+                  }}
+                >
+                  <IconButton
+                    size="small"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      togglePanelPlayback(0);
+                    }}
+                    title={playingPanelFrames.has(0) ? `Pause ${panelLabel(0)} frames` : `Play ${panelLabel(0)} frames`}
+                    aria-label={playingPanelFrames.has(0) ? `Pause frames for ${panelLabel(0)}` : `Play frames for ${panelLabel(0)}`}
+                    sx={{ width: 20, height: 20, p: 0, flex: "0 0 20px", zIndex: 1, color: "rgba(255,255,255,0.92)", "&:hover": { bgcolor: "rgba(255,255,255,0.14)" } }}
+                  >
+                    {playingPanelFrames.has(0)
+                      ? <PauseIcon sx={{ fontSize: 14 }} />
+                      : <PlayArrowIcon sx={{ fontSize: 14 }} />}
+                  </IconButton>
+                  <Slider
+                    value={panelFramePreviewIndices[0] ?? normalizedPanelFrameIndices[0] ?? 0}
+                    min={0}
+                    max={Math.max(1, (panelFrameCounts?.[0] || 1) - 1)}
+                    step={1}
+                    onPointerDownCapture={() => stopPanelPlayback(0)}
+                    onKeyDown={() => stopPanelPlayback(0)}
+                    onChange={(_, value) => {
+                      const raw = Array.isArray(value) ? value[0] : value;
+                      setPanelFrameIndex(0, Number(raw));
+                    }}
+                    onChangeCommitted={(_, value) => {
+                      const raw = Array.isArray(value) ? value[0] : value;
+                      setPanelFrameIndex(0, Number(raw), true);
+                    }}
+                    size="small"
+                    sx={{ ...sliderStyles.small, minWidth: 34, mx: 0.25, flex: "1 1 auto", color: "rgba(255,255,255,0.92)", "& .MuiSlider-rail": { opacity: 0.45 } }}
+                    aria-label={`Frame for ${panelLabel(0)}`}
+                  />
+                  <Typography component="span" sx={{ minWidth: "4.8ch", flex: "0 0 auto", color: "rgba(255,255,255,0.9)", fontSize: 9, lineHeight: 1, fontVariantNumeric: "tabular-nums", textAlign: "right", textShadow: "0 1px 2px rgba(0,0,0,0.8)" }}>
+                    {(panelFramePreviewIndices[0] ?? normalizedPanelFrameIndices[0] ?? 0) + 1}/{panelFrameCounts?.[0] || 1}
+                  </Typography>
                 </Box>
               )}
               {showResizeControls && (
@@ -6197,10 +6628,10 @@ function Show2D() {
               {isGallery && (
                 <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>{labels?.[statsIdx] || `#${statsIdx + 1}`}</Typography>
               )}
-              <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Mean <Box component="span" sx={{ color: themeColors.accent }}>{formatNumber(statsMean?.[statsIdx] ?? 0)}</Box></Typography>
-              <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Min <Box component="span" sx={{ color: themeColors.accent }}>{formatNumber(statsMin?.[statsIdx] ?? 0)}</Box></Typography>
-              <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Max <Box component="span" sx={{ color: themeColors.accent }}>{formatNumber(statsMax?.[statsIdx] ?? 0)}</Box></Typography>
-              <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Std <Box component="span" sx={{ color: themeColors.accent }}>{formatNumber(statsStd?.[statsIdx] ?? 0)}</Box></Typography>
+              <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Mean <Box component="span" sx={{ color: themeColors.accent }}>{formatNumber(currentFrameStats?.mean ?? statsMean?.[statsIdx] ?? 0)}</Box></Typography>
+              <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Min <Box component="span" sx={{ color: themeColors.accent }}>{formatNumber(currentFrameStats?.min ?? statsMin?.[statsIdx] ?? 0)}</Box></Typography>
+              <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Max <Box component="span" sx={{ color: themeColors.accent }}>{formatNumber(currentFrameStats?.max ?? statsMax?.[statsIdx] ?? 0)}</Box></Typography>
+              <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Std <Box component="span" sx={{ color: themeColors.accent }}>{formatNumber(currentFrameStats?.std ?? statsStd?.[statsIdx] ?? 0)}</Box></Typography>
               {measureActive && (
                 <>
                   <Box sx={{ borderLeft: `1px solid ${themeColors.border}`, height: 14 }} />

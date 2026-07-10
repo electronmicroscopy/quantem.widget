@@ -276,7 +276,7 @@ data = load(masters, det_bin=4, dtype="u8")
 Show4DSTEM(data)
 ```
 
-Result shape: `(n_files, scan_y, scan_x, det_y, det_x)`. Filenames become
+Result shape: `(n_files, scan_row, scan_col, det_row, det_col)`. Filenames become
 slider labels.
 
 On a CUDA workstation with multiple GPUs, keep large browse series sharded
@@ -297,6 +297,52 @@ The sharded path is disk-aware. If masters live on independent NVMe devices,
 file is on one disk, sharding still increases GPU capacity and keeps flipping
 bounded, but cold loading stays limited by that disk.
 
+## I want a viewer to follow a growing folder.
+
+Show2D, Show3D, and Show4DSTEM share one folder-watching lifecycle. Watching is
+enabled by default, and every viewer can be paused, polled, resumed, and closed
+without constructing a replacement widget.
+
+| Viewer | What a new file becomes | Data and memory behavior |
+|---|---|---|
+| `Show2D.from_folder(...)` | One new gallery panel | Reads only the new full-resolution source file; preserves the existing widget and panel state |
+| `Show3D.from_folder(...)` | One new frame in a single displayed stack | Reads only the new full-resolution source file; preserves the existing widget and frame state |
+| `Show4DSTEM.from_folder(...)` | One cold lazy 4D-STEM dataset | Loads raw data only when visible; a bounded GPU cache evicts older raw pages as needed |
+
+```python
+from quantem.widget import Show2D, Show3D, Show4DSTEM
+
+images = Show2D.from_folder("/data/session/images", pattern="*.tif")
+movie = Show3D.from_folder("/data/session/frames", pattern="frame_*.tif")
+scans = Show4DSTEM.from_folder(
+    "/data/session/4dstem",
+    pattern="*_master.h5",
+    det_bin=1,
+    page_size=5,
+)
+```
+
+The common lifecycle is:
+
+```python
+added = images.poll_folder()          # one immediate scan
+images.stop_folder_watch()            # idempotent pause
+images.watch_folder(interval=1.0)     # resume
+images.close()                        # stop background work and close the comm
+```
+
+The same methods apply to all three viewers. `poll_folder()` returns the
+zero-based indices appended by that scan. Pass `watch=False` to any
+`from_folder(...)` call for deterministic manual polling. Watching is
+append-only: known files are not duplicated, transiently incomplete files wait
+for a later poll, and deletions do not remove already displayed scientific data.
+
+These APIs load source data for scientific display. `ShowFolder` serves a
+different purpose: it uses cached WebP thumbnails and metadata so a large
+session can be browsed and selected quickly. Thumbnail pixels must never be
+substituted for the full-resolution arrays opened by Show2D or Show3D, or for
+the lazy raw masters opened by Show4DSTEM.
+
 ## I want to load every master file in a folder.
 
 Use `Show4DSTEM.from_folder(...)` when the folder can grow or when you want a
@@ -310,17 +356,19 @@ w = Show4DSTEM.from_folder(
     backend="cuda",
     gpus=[0, 1],
     det_bin=1,
-    dtype="u8",
+    dtype="auto",       # keep real counts; use "u8" only for clipped fast preview
     page_budget="auto",
     view_mode="multiple",
     compare_cols=3,
-    watch=True,
 )
 ```
 
-The first ready master paints the viewer. Other masters stay as lazy slots and
-new ready masters append through `poll_folder()` / `watch_folder()` without
-rebuilding the widget.
+CUDA multi-GPU multiple views preload only the initial visible page with the
+optimized multi-file loader. Other masters stay as lazy slots, and new ready
+masters append through `poll_folder()` / `watch_folder()` without rebuilding the
+widget. Watching starts by default. Raw masters enter as cold lazy datasets;
+they use GPU memory only when selected or included in a visible page, and older
+raw pages are evicted when the resident budget requires it.
 
 Use explicit discovery plus `load(...)` when the file list is fixed and you want
 to control exactly what enters the stack:

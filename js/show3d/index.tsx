@@ -174,7 +174,7 @@ function DebugPerfBadge({
     <Box
       component="span"
       data-quantem-debug-badge={widget}
-      title={`${widget} debug browser FPS`}
+      title={`${widget} debug browser UI FPS`}
       sx={{
         ml: 0.6,
         px: 0.5,
@@ -190,7 +190,7 @@ function DebugPerfBadge({
         verticalAlign: "baseline",
       }}
     >
-      Debug FPS {fpsText}
+      Debug UI FPS {fpsText}
     </Box>
   );
 }
@@ -1898,6 +1898,7 @@ function Show3D() {
   );
   const visiblePanelCount = visiblePanelIndices.length;
   const panelMenuTotal = isPaged ? activePanelCount : totalPanelCount;
+  const hasPanelChoices = panelMenuTotal > 1;
   const panelLabel = React.useCallback((panel: number) => (
     (panelTitles && panelTitles[panel]) || `Panel ${panel + 1}`
   ), [panelTitles]);
@@ -2294,7 +2295,7 @@ function Show3D() {
   const [loop, setLoop] = useModelState<boolean>("loop");
   const [loopStart, setLoopStart] = useModelState<number>("loop_start");
   const [loopEnd, setLoopEnd] = useModelState<number>("loop_end");
-  const [bookmarkedFrames] = useModelState<number[]>("bookmarked_frames");
+  const [bookmarkedFrames, setBookmarkedFrames] = useModelState<number[]>("bookmarked_frames");
   const [playbackPath] = useModelState<number[]>("playback_path");
 
   // Boomerang direction ref (avoids stale closure in setInterval)
@@ -3918,6 +3919,11 @@ function Show3D() {
   const [profilePanelIdx, setProfilePanelIdx] = React.useState(0);
   const profileCanvasRef = React.useRef<HTMLCanvasElement>(null);
   const profilePoints = profileLine || [];
+  const singlePanelPageProfile = isPaged && Math.max(1, panelsPerPage || 0) === 1;
+  React.useEffect(() => {
+    if (!singlePanelPageProfile) return;
+    setProfilePanelIdx((current) => current === activePageStart ? current : activePageStart);
+  }, [activePageStart, singlePanelPageProfile]);
   // Kymograph (space-time) panel: static (nFrames, lineLen) image built by
   // sampling the profile line on every frame from the offline stack. Recompute
   // is cold-path (on line / width change only), not per render tick.
@@ -4096,6 +4102,27 @@ function Show3D() {
   const panelGlobalColOffset = (panelIdx: number) => (totalPanelCount > 1 && !sharedPanelSource) ? panelIdx * sourcePanelWidth : 0;
   const panelLocalCol = (globalCol: number, panelIdx: number) => globalCol - panelGlobalColOffset(panelIdx);
   const panelGlobalCol = (localCol: number, panelIdx: number) => localCol + panelGlobalColOffset(panelIdx);
+  // A single-panel page reuses one spatial profile on every page. Keep the
+  // trait coordinates page-local, then add the active page's packed-frame
+  // offset only when sampling the concatenated source frame.
+  const profileSampleColOffset = singlePanelPageProfile
+    ? panelGlobalColOffset(activePageStart)
+    : 0;
+  const sampleProfileForActivePage = React.useCallback((
+    data: Float32Array,
+    p0: { row: number; col: number },
+    p1: { row: number; col: number },
+    widthPx: number = profileWidth,
+  ) => sampleLineProfile(
+    data,
+    width,
+    height,
+    p0.row,
+    p0.col + profileSampleColOffset,
+    p1.row,
+    p1.col + profileSampleColOffset,
+    widthPx,
+  ), [height, profileSampleColOffset, profileWidth, width]);
   const getImageHitRadius = (panelIdx: number) => {
     const geom = getPanelGeometry(panelIdx);
     if (!geom) return RESIZE_HIT_AREA_PX / Math.max(1e-6, displayScale * zoom);
@@ -4286,7 +4313,7 @@ function Show3D() {
     panelStates, vminPerPanel, vmaxPerPanel,
     visiblePanelIndices,
     zoom, panX, panY, playbackPath,
-    profileActive, profilePoints, profileWidth,
+    profileActive, profilePoints, profileWidth, profileColOffset: profileSampleColOffset,
     traitVmin, traitVmax, smooth, imageRotation, showStats,
     diffMode, avgWindow,
   });
@@ -4312,7 +4339,7 @@ function Show3D() {
       panelStates: livePanelStates, vminPerPanel, vmaxPerPanel,
       visiblePanelIndices,
       zoom, panX, panY, playbackPath,
-      profileActive, profilePoints, profileWidth,
+      profileActive, profilePoints, profileWidth, profileColOffset: profileSampleColOffset,
       traitVmin, traitVmax, smooth, imageRotation, showStats,
       diffMode, avgWindow,
     };
@@ -4322,7 +4349,7 @@ function Show3D() {
     dataMin, dataMax, cmap, imageVminPct, imageVmaxPct,
     autoVmins, autoVmaxs, linkContrast, linkedState, linkPanels, panelStates, vminPerPanel, vmaxPerPanel, visiblePanelIndices,
     zoom, panX, panY, playbackPath,
-    profileActive, profilePoints, profileWidth,
+    profileActive, profilePoints, profileWidth, profileSampleColOffset,
     traitVmin, traitVmax, smooth, imageRotation, showStats, diffMode, avgWindow]);
 
   const updatePlaybackLiveControls = React.useCallback((idx: number) => {
@@ -5005,7 +5032,18 @@ function Show3D() {
         frame = displayFrameForIndex(next, frame) ?? frame;
       }
       if (frame) rawFrameDataRef.current = frame;
-      const offlineDirectRender = offline && !!frame && !!gpuCmapRef.current && gpuCmapReadyRef.current;
+      const offlinePackedPanelPlaybackUsesStaticCanvas = (
+        offline &&
+        Math.max(1, nPanels || 1) > 1 &&
+        !sharedPanelSource
+      );
+      const offlineDirectRender = (
+        offline &&
+        !offlinePackedPanelPlaybackUsesStaticCanvas &&
+        !!frame &&
+        !!gpuCmapRef.current &&
+        gpuCmapReadyRef.current
+      );
       // Static offline paint is driven by liveSliceIdx. When WebGPU is ready we
       // render offline frames directly in the rAF hot path and throttle React
       // state updates below so large 2k/4k exports do not double-paint.
@@ -5172,6 +5210,40 @@ function Show3D() {
             ctx.drawImage(bitmap, slotX, slotY, outPanelW, outPanelH);
           }
         };
+        const renderOfflinePackedPanels2D = (): boolean => {
+          if (!offline || panelCountForGrid <= 1 || c.linkContrast || sharedPanelSource || !frame) return false;
+          const offscreen = mainOffscreenRef.current;
+          const canvas = canvasRef.current;
+          const offCtx = offscreen?.getContext("2d");
+          const ctx = canvas?.getContext("2d");
+          if (!offscreen || !offCtx || !ctx) return false;
+          const panelW = Math.max(1, Math.floor(c.width / panelCountForGrid));
+          const panelImg = offCtx.createImageData(panelW, c.height);
+          const sharedAutoRange = c.autoContrast ? { vmin, vmax } : null;
+          offCtx.clearRect(0, 0, offscreen.width, offscreen.height);
+          for (const panel of c.visiblePanelIndices) {
+            if (panel < 0 || panel >= panelCountForGrid) continue;
+            const panelData = extractPanelSlice(frame, panel, c.logScale);
+            if (!panelData) continue;
+            const pdr = panelDataRanges[panel];
+            const panelRange = panelData.length > 0
+              ? findDataRange(panelData)
+              : ((perPanelHistogramEnabled && pdr && pdr.max > pdr.min)
+                  ? pdr
+                  : resolveDisplayBounds(c.dataMin, c.dataMax, c.traitVmin, c.traitVmax, c.logScale));
+            const range = resolvePanelRenderRange(panel, panelRange, sharedAutoRange, panelData, c.autoContrast, c.percentileLow, c.percentileHigh);
+            applyColormap(panelData, panelImg.data, lut, range.vmin, range.vmax);
+            offCtx.putImageData(panelImg, panel * panelW, 0);
+          }
+          drawMain(ctx, offscreen);
+          setGpuDisplayVisible(false);
+          if (dbg) dbg.lastRenderPath = "offline-packed-panels-2d-per-panel";
+          return true;
+        };
+        if (!rendered && renderOfflinePackedPanels2D()) {
+          rendered = true;
+          drewDisplayDirect = true;
+        }
         const engine = gpuCmapRef.current;
         const preferGpuScaledPlayback = !!engine && gpuCmapReadyRef.current;
         if (frame && canScaledDirect && !canSharedPanelScaledDirect && !c.smooth && !preferGpuScaledPlayback) {
@@ -5428,7 +5500,16 @@ function Show3D() {
         if (frame && c.showStats) setLocalStats(computeStats(frame));
         if (frame && c.profileActive && c.profilePoints.length === 2) {
           const p0 = c.profilePoints[0], p1 = c.profilePoints[1];
-          setProfileData(sampleLineProfile(frame, c.width, c.height, p0.row, p0.col, p1.row, p1.col, c.profileWidth));
+          setProfileData(sampleLineProfile(
+            frame,
+            c.width,
+            c.height,
+            p0.row,
+            p0.col + c.profileColOffset,
+            p1.row,
+            p1.col + c.profileColOffset,
+            c.profileWidth,
+          ));
         }
         // Histogram refresh during playback. The non-playback effect path is keyed on
         // frameBytes/frameSeq which DON'T change during rAF playback (frames come from
@@ -5786,6 +5867,20 @@ function Show3D() {
     const frameData = rawFrameDataRef.current;
     if (!frameData || frameData.length === 0) return;
     if (!mainOffscreenRef.current || !mainImgDataRef.current) return;
+    const offlinePackedPanelPlaybackUsesStaticCanvas = (
+      offline &&
+      playing &&
+      Math.max(1, nPanels || 1) > 1 &&
+      !sharedPanelSource
+    );
+    const offlineGpuPlaybackOwnsCanvas = (
+      offline &&
+      playing &&
+      !offlinePackedPanelPlaybackUsesStaticCanvas &&
+      !!gpuCmapRef.current &&
+      gpuCmapReadyRef.current
+    );
+    if (offlineGpuPlaybackOwnsCanvas) return;
     // Apply log scale using reusable buffer
     const processed = logScale && logBufferRef.current
       ? applyLogScaleInPlace(frameData, logBufferRef.current)
@@ -6144,7 +6239,16 @@ function Show3D() {
     if (c.showStats) setLocalStats(computeStats(frame));
     if (c.profileActive && c.profilePoints.length === 2) {
       const p0 = c.profilePoints[0], p1 = c.profilePoints[1];
-      setProfileData(sampleLineProfile(frame, c.width, c.height, p0.row, p0.col, p1.row, p1.col, c.profileWidth));
+      setProfileData(sampleLineProfile(
+        frame,
+        c.width,
+        c.height,
+        p0.row,
+        p0.col + c.profileColOffset,
+        p1.row,
+        p1.col + c.profileColOffset,
+        c.profileWidth,
+      ));
     }
     return true;
   };
@@ -6290,6 +6394,20 @@ function Show3D() {
 
   React.useLayoutEffect(() => {
     if (!mainOffscreenRef.current || !canvasRef.current) return;
+    const offlinePackedPanelPlaybackUsesStaticCanvas = (
+      offline &&
+      playing &&
+      Math.max(1, nPanels || 1) > 1 &&
+      !sharedPanelSource
+    );
+    const offlineGpuPlaybackOwnsCanvas = (
+      offline &&
+      playing &&
+      !offlinePackedPanelPlaybackUsesStaticCanvas &&
+      !!gpuCmapRef.current &&
+      gpuCmapReadyRef.current
+    );
+    if (offlineGpuPlaybackOwnsCanvas) return;
     const preserveGpuDisplay = playing && gpuDisplayVisibleRef.current === true && imageRotation % 4 === 0;
     if (preserveGpuDisplay && separatePanelFrames) return;
     const ctx = canvasRef.current.getContext("2d");
@@ -6381,12 +6499,35 @@ function Show3D() {
     // Line profile overlay. Use the same slot, clip, zoom, pan, and rotation
     // transform as drawMain so profiles stay attached to their panel.
     if (profileActive && profilePoints.length > 0) {
-      const ownerPanel = Math.max(0, Math.min(_nPanelsLocal - 1, profilePanelIdx));
+      const ownerPanel = singlePanelPageProfile
+        ? activePageStart
+        : Math.max(0, Math.min(totalPanelCount - 1, profilePanelIdx));
       const geom = getPanelGeometry(ownerPanel);
       if (geom) {
-        const toPanelX = (col: number) => panelLocalCol(col, ownerPanel) * geom.scaleX;
+        const profileLocalCol = (col: number) => singlePanelPageProfile
+          ? col
+          : panelLocalCol(col, ownerPanel);
+        const toPanelX = (col: number) => profileLocalCol(col) * geom.scaleX;
         const toPanelY = (row: number) => row * geom.scaleY;
-        const markerR = 4 / Math.max(1, geom.state.zoom);
+        const inverseZoom = 1 / Math.max(1, geom.state.zoom);
+        const markerR = 8 * inverseZoom;
+        const profileColor = "#00e5ff";
+        const profileHalo = "rgba(0, 0, 0, 0.88)";
+        const drawEndpoint = (x: number, y: number, label: string) => {
+          ctx.fillStyle = profileHalo;
+          ctx.beginPath();
+          ctx.arc(x, y, markerR + 2 * inverseZoom, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = profileColor;
+          ctx.beginPath();
+          ctx.arc(x, y, markerR, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = "#001018";
+          ctx.font = `700 ${10 * inverseZoom}px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif`;
+          ctx.textAlign = "center";
+          ctx.textBaseline = "middle";
+          ctx.fillText(label, x, y + 0.5 * inverseZoom);
+        };
         ctx.save();
         ctx.beginPath();
         ctx.rect(geom.slotX, geom.slotY, geom.slotW, geom.slotH);
@@ -6401,13 +6542,8 @@ function Show3D() {
           ctx.translate(-geom.slotW / 2, -geom.slotH / 2);
         }
 
-        // Draw point A
         const ax = toPanelX(profilePoints[0].col);
         const ay = toPanelY(profilePoints[0].row);
-        ctx.fillStyle = themeColors.accent;
-        ctx.beginPath();
-        ctx.arc(ax, ay, markerR, 0, Math.PI * 2);
-        ctx.fill();
 
         if (profilePoints.length === 2) {
           const bx = toPanelX(profilePoints[1].col);
@@ -6422,10 +6558,9 @@ function Show3D() {
               const halfW = (profileWidth - 1) / 2;
               const perpR = -dc / lineLen * halfW;
               const perpC = dr / lineLen * halfW;
-              ctx.fillStyle = themeColors.accent + "20";
-              ctx.strokeStyle = themeColors.accent;
-              ctx.lineWidth = 1 / Math.max(1, geom.state.zoom);
-              ctx.setLineDash([3 / Math.max(1, geom.state.zoom), 3 / Math.max(1, geom.state.zoom)]);
+              ctx.fillStyle = "rgba(0, 229, 255, 0.22)";
+              ctx.strokeStyle = "rgba(0, 0, 0, 0.72)";
+              ctx.lineWidth = 2 * inverseZoom;
               ctx.beginPath();
               ctx.moveTo(toPanelX(profilePoints[0].col + perpC), toPanelY(profilePoints[0].row + perpR));
               ctx.lineTo(toPanelX(profilePoints[1].col + perpC), toPanelY(profilePoints[1].row + perpR));
@@ -6434,27 +6569,32 @@ function Show3D() {
               ctx.closePath();
               ctx.fill();
               ctx.stroke();
-              ctx.setLineDash([]);
             }
           }
 
-          ctx.strokeStyle = themeColors.accent;
-          ctx.lineWidth = 1.5 / Math.max(1, geom.state.zoom);
-          ctx.setLineDash([4 / Math.max(1, geom.state.zoom), 3 / Math.max(1, geom.state.zoom)]);
+          ctx.strokeStyle = profileHalo;
+          ctx.lineWidth = 6 * inverseZoom;
           ctx.beginPath();
           ctx.moveTo(ax, ay);
           ctx.lineTo(bx, by);
           ctx.stroke();
-          ctx.setLineDash([]);
-          ctx.fillStyle = themeColors.accent;
+
+          ctx.strokeStyle = profileColor;
+          ctx.lineWidth = 2.5 * inverseZoom;
           ctx.beginPath();
-          ctx.arc(bx, by, markerR, 0, Math.PI * 2);
-          ctx.fill();
+          ctx.moveTo(ax, ay);
+          ctx.lineTo(bx, by);
+          ctx.stroke();
+
+          drawEndpoint(ax, ay, "1");
+          drawEndpoint(bx, by, "2");
+        } else {
+          drawEndpoint(ax, ay, "1");
         }
         ctx.restore();
       }
     }
-  }, [effectiveRoiActive, roiItems, roiSelectedIdx, isDraggingROI, canvasW, canvasH, displayScale, zoom, panX, panY, themeColors, profileActive, profilePoints, profileWidth, profilePanelIdx, nPanels, panelTitles, imageRotation, width, height, panelStates, linkedState, linkPanels, panelGapTrait, sourcePanelWidth, sourcePanelHeight, sharedPanelSource]);
+  }, [activePageStart, effectiveRoiActive, roiItems, roiSelectedIdx, isDraggingROI, canvasW, canvasH, displayScale, zoom, panX, panY, themeColors, profileActive, profilePoints, profileWidth, profilePanelIdx, nPanels, panelTitles, imageRotation, width, height, panelStates, linkedState, linkPanels, panelGapTrait, sourcePanelWidth, sourcePanelHeight, sharedPanelSource, singlePanelPageProfile, totalPanelCount]);
 
   // Lens inset rendering
   React.useEffect(() => {
@@ -6631,11 +6771,11 @@ function Show3D() {
     if (profilePoints.length === 2 && rawFrameDataRef.current) {
       const p0 = profilePoints[0], p1 = profilePoints[1];
       const data = rawFrameDataRef.current;
-      setProfileData(sampleLineProfile(data, width, height, p0.row, p0.col, p1.row, p1.col, profileWidth));
+      setProfileData(sampleProfileForActivePage(data, p0, p1));
     } else {
       setProfileData(null);
     }
-  }, [profilePoints, profileWidth, frameBytes]);
+  }, [frameBytes, profilePoints, profileWidth, sampleProfileForActivePage]);
 
   // Render profile sparkline
   React.useEffect(() => {
@@ -6660,7 +6800,13 @@ function Show3D() {
       ctx.fillStyle = isDark ? "#555" : "#999";
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
-      ctx.fillText("Click two points on the image to draw a profile", cssW / 2, cssH / 2);
+      ctx.fillText(
+        profilePoints.length === 1
+          ? "Choose point 2 on the image"
+          : "Click point 1, then point 2, to draw a profile",
+        cssW / 2,
+        cssH / 2,
+      );
       return;
     }
 
@@ -6751,7 +6897,7 @@ function Show3D() {
     // Save base rendering + layout for hover overlay
     profileBaseImageRef.current = ctx.getImageData(0, 0, canvas.width, canvas.height);
     profileLayoutRef.current = { padLeft, plotW, padTop, plotH, gMin, gMax, totalDist, xUnit };
-  }, [profileData, profilePoints, pixelSize, canvasW, themeInfo.theme, themeColors.accent, profileHeight]);
+  }, [profileActive, profileData, profilePoints, pixelSize, canvasW, themeInfo.theme, themeColors.accent, profileHeight]);
 
   // Profile hover handler - draws crosshair + value readout
   const handleProfileMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -7002,6 +7148,28 @@ function Show3D() {
   const [fftMagVersion, setFftMagVersion] = React.useState(0);
 
   React.useEffect(() => {
+    fftMagnitudeCacheRef.current.clear();
+    fftActiveCacheKeyRef.current = null;
+    fftMagRef.current = null;
+    fftMagCacheRef.current = null;
+    fftPanelGridRef.current = null;
+    fftCropDimsRef.current = null;
+    fftOffscreenRef.current = null;
+    fftQualityKeyRef.current = "";
+    setFftCropDims(null);
+    setFftHistogramData(null);
+    setFftQuality(null);
+    setFftOffscreenVersion(v => v + 1);
+    setFftBackendInfo(prev => ({ ...prev, source: "", ms: null, panels: null, grid: "" }));
+    const dbg = show3dPerfDebug();
+    if (dbg) {
+      dbg.fftCacheSize = 0;
+      dbg.fftCacheBytes = 0;
+      dbg.fftCacheInvalidations = Number(dbg.fftCacheInvalidations || 0) + 1;
+    }
+  }, [frameServerVersion, offline, width, height, nSlices, nPanels, sourcePanelWidth, sharedPanelSource]);
+
+  React.useEffect(() => {
     if (!effectiveShowFft) return;
     // FFT is useful context, but for heavy multi-panel stacks it is far more
     // expensive than showing the next image frame. During playback keep the
@@ -7042,11 +7210,15 @@ function Show3D() {
         })
         : "none";
       const fftGridCols = multiPanelFft ? panelColsForCount(Math.max(1, visiblePanelIndices.length || 1)) : 1;
+      // Cache identity is the rendered FFT source, not the traitlet delivery.
+      // frame_seq can tick every time Python sends frame_bytes during live
+      // scrubbing, so including it here makes already-computed FFTs miss.
+      // frameServerVersion is bumped only when the underlying data stack
+      // changes; the effect above clears old FFTs at that boundary.
       const fftCacheKey = [
         offline ? "offline" : "live",
         `frame=${fftFrameIdx}`,
-        `seq=${frameSeq || 0}`,
-        `server=${frameServerVersion || 0}`,
+        `data=${frameServerVersion || 0}`,
         `dims=${width}x${height}`,
         `panels=${panelCount}`,
         `visible=${visiblePanelIndices.join(",")}`,
@@ -7063,24 +7235,7 @@ function Show3D() {
       if (cached) {
         cache.delete(fftCacheKey);
         cache.set(fftCacheKey, cached);
-        if (fftActiveCacheKeyRef.current === fftCacheKey) {
-          return;
-        }
-        fftActiveCacheKeyRef.current = fftCacheKey;
-        fftMagRef.current = cached.mag;
-        fftMagCacheRef.current = cached.mag;
-        fftPanelGridRef.current = cached.grid;
-        fftCropDimsRef.current = cached.cropDims;
-        setFftCropDims(cached.cropDims);
-        setFftMagVersion(v => v + 1);
         const dbg = show3dPerfDebug();
-        setFftBackendInfo(prev => ({
-          ...prev,
-          source: `${cached.source}-cache`,
-          ms: 0,
-          panels: cached.panels,
-          grid: cached.gridLabel || "",
-        }));
         if (dbg) {
           dbg.lastFftMs = 0;
           dbg.lastFftSource = `${cached.source}-cache`;
@@ -7091,6 +7246,23 @@ function Show3D() {
           dbg.fftCacheSize = cache.size;
           dbg.fftCacheBytes = Array.from(cache.values()).reduce((total, item) => total + item.mag.byteLength, 0);
         }
+        if (fftActiveCacheKeyRef.current === fftCacheKey) {
+          return;
+        }
+        fftActiveCacheKeyRef.current = fftCacheKey;
+        fftMagRef.current = cached.mag;
+        fftMagCacheRef.current = cached.mag;
+        fftPanelGridRef.current = cached.grid;
+        fftCropDimsRef.current = cached.cropDims;
+        setFftCropDims(cached.cropDims);
+        setFftMagVersion(v => v + 1);
+        setFftBackendInfo(prev => ({
+          ...prev,
+          source: `${cached.source}-cache`,
+          ms: 0,
+          panels: cached.panels,
+          grid: cached.gridLabel || "",
+        }));
         return;
       }
       const rememberFft = (entry: FftMagnitudeCacheEntry) => {
@@ -7658,7 +7830,7 @@ function Show3D() {
   const kymoQuantizedStackReady = offline && !!offlineStack && offlineStack.byteLength > 0;
   const kymoOfflineStackReady = kymoExactStackReady || kymoQuantizedStackReady;
   const kymoLiveStackReady = !offline && !!frameServerUrl;
-  const kymographAvailable = (nPanels || 1) === 1
+  const kymographAvailable = ((nPanels || 1) === 1 || singlePanelPageProfile)
     && (kymoOfflineStackReady || kymoLiveStackReady)
     && width > 0 && height > 0 && nSlices > 1;
   const canKymograph = kymographAvailable && profileActive && profilePoints.length === 2;
@@ -7670,8 +7842,10 @@ function Show3D() {
     if (!kymoReady) { kymoDataRef.current = null; return; }
     const p0 = profilePoints[0], p1 = profilePoints[1];
     const pixelCount = width * height;
-    const panelIdx = Math.max(0, Math.min(_nPanelsLocal - 1, profilePanelIdx));
-    const colOffset = panelGlobalColOffset(panelIdx);
+    const panelIdx = singlePanelPageProfile
+      ? activePageStart
+      : Math.max(0, Math.min(totalPanelCount - 1, profilePanelIdx));
+    const colOffset = singlePanelPageProfile ? panelGlobalColOffset(panelIdx) : 0;
     const row0 = p0.row, col0 = p0.col + colOffset;
     const row1 = p1.row, col1 = p1.col + colOffset;
     let cancelled = false;
@@ -7756,7 +7930,8 @@ function Show3D() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [kymoReady, kymoExactStackReady, kymoQuantizedStackReady, kymoLiveStackReady, offlineStack, offlineFloatStack, offlineMin, offlineMax, width, height, nSlices,
       profileWidth, profilePoints[0]?.row, profilePoints[0]?.col,
-      profilePoints[1]?.row, profilePoints[1]?.col, profilePanelIdx, fetchFrameFromServer]);
+      profilePoints[1]?.row, profilePoints[1]?.col, profilePanelIdx, activePageStart,
+      singlePanelPageProfile, totalPanelCount, fetchFrameFromServer]);
 
   // Process kymograph data → histogram + colormap rendering (cheap, sync).
   // Mirrors the FFT pipeline: range → log scale → histogram/stats → slider
@@ -8427,6 +8602,13 @@ function Show3D() {
     }
     return { imgCol: panelGlobalCol(localCol, panelIdx), imgRow: row, panelIdx, panelCol: localCol };
   };
+  const profileCoordinateWidth = singlePanelPageProfile ? sourcePanelWidth : width;
+  const screenToProfileImg = (e: React.MouseEvent): { imgCol: number; imgRow: number; panelIdx: number; panelCol: number } => {
+    const point = screenToImg(e);
+    return singlePanelPageProfile && point.panelIdx >= 0
+      ? { ...point, imgCol: point.panelCol }
+      : point;
+  };
 
   const hitTestROI = (imgCol: number, imgRow: number): number => {
     if (!effectiveRoiActive || roiItems.length === 0) return -1;
@@ -8527,7 +8709,7 @@ function Show3D() {
       }
     }
     if (profileActive) {
-      const { imgCol, imgRow, panelIdx } = screenToImg(e);
+      const { imgCol, imgRow, panelIdx } = screenToProfileImg(e);
       if (profilePoints.length === 2) {
         if (panelIdx !== profilePanelIdx) {
           beginPan(e);
@@ -8809,7 +8991,7 @@ function Show3D() {
     }
 
     if (profileActive && profilePoints.length === 2) {
-      const { imgCol, imgRow, panelIdx } = screenToImg(e);
+      const { imgCol, imgRow, panelIdx } = screenToProfileImg(e);
       const p0 = profilePoints[0];
       const p1 = profilePoints[1];
       const hitRadius = getImageHitRadius(profilePanelIdx);
@@ -8819,13 +9001,13 @@ function Show3D() {
       if (draggingProfileEndpoint !== null) {
         if (!rawFrameDataRef.current || panelIdx !== profilePanelIdx) return;
         const clampedRow = Math.max(0, Math.min(height - 1, imgRow));
-        const clampedCol = Math.max(0, Math.min(width - 1, imgCol));
+        const clampedCol = Math.max(0, Math.min(profileCoordinateWidth - 1, imgCol));
         const next = [
           draggingProfileEndpoint === 0 ? { row: clampedRow, col: clampedCol } : profilePoints[0],
           draggingProfileEndpoint === 1 ? { row: clampedRow, col: clampedCol } : profilePoints[1],
         ];
         setProfileLine(next);
-        setProfileData(sampleLineProfile(rawFrameDataRef.current, width, height, next[0].row, next[0].col, next[1].row, next[1].col, profileWidth));
+        setProfileData(sampleProfileForActivePage(rawFrameDataRef.current, next[0], next[1]));
         return;
       }
       if (isDraggingProfileLine && profileDragStartRef.current) {
@@ -8840,13 +9022,13 @@ function Show3D() {
         deltaRow = Math.max(deltaRow, -minRow);
         deltaRow = Math.min(deltaRow, (height - 1) - maxRow);
         deltaCol = Math.max(deltaCol, -minCol);
-        deltaCol = Math.min(deltaCol, (width - 1) - maxCol);
+        deltaCol = Math.min(deltaCol, (profileCoordinateWidth - 1) - maxCol);
         const next = [
           { row: drag.p0.row + deltaRow, col: drag.p0.col + deltaCol },
           { row: drag.p1.row + deltaRow, col: drag.p1.col + deltaCol },
         ];
         setProfileLine(next);
-        setProfileData(sampleLineProfile(rawFrameDataRef.current, width, height, next[0].row, next[0].col, next[1].row, next[1].col, profileWidth));
+        setProfileData(sampleProfileForActivePage(rawFrameDataRef.current, next[0], next[1]));
         return;
       }
       const nextHoveredEndpoint: 0 | 1 | null = d0 <= hitRadius ? 0 : d1 <= hitRadius ? 1 : null;
@@ -8931,8 +9113,8 @@ function Show3D() {
       const dy = e.clientY - clickStartRef.current.y;
       if (Math.sqrt(dx * dx + dy * dy) < 3) {
         if (rawFrameDataRef.current) {
-          const { imgCol, imgRow, panelIdx } = screenToImg(e);
-          if (panelIdx >= 0 && imgCol >= 0 && imgCol < width && imgRow >= 0 && imgRow < height) {
+          const { imgCol, imgRow, panelIdx } = screenToProfileImg(e);
+          if (panelIdx >= 0 && imgCol >= 0 && imgCol < profileCoordinateWidth && imgRow >= 0 && imgRow < height) {
             const pt = { row: imgRow, col: imgCol };
             if (profilePoints.length === 0 || profilePoints.length === 2 || panelIdx !== profilePanelIdx) {
               setProfilePanelIdx(panelIdx);
@@ -8941,7 +9123,7 @@ function Show3D() {
             } else {
               const p0 = profilePoints[0];
               setProfileLine([p0, pt]);
-              setProfileData(sampleLineProfile(rawFrameDataRef.current, width, height, p0.row, p0.col, pt.row, pt.col, profileWidth));
+              setProfileData(sampleProfileForActivePage(rawFrameDataRef.current, p0, pt));
             }
           }
         }
@@ -9828,6 +10010,26 @@ function Show3D() {
   React.useLayoutEffect(() => {
     updatePlaybackLiveControls(visibleSliceIdx);
   }, [updatePlaybackLiveControls, visibleSliceIdx]);
+  const normalizedBookmarkedFrames = React.useMemo(() => {
+    const seen = new Set<number>();
+    for (const raw of bookmarkedFrames || []) {
+      const value = Math.round(Number(raw));
+      if (Number.isFinite(value) && value >= 0 && value < nSlices) seen.add(value);
+    }
+    return Array.from(seen).sort((a, b) => a - b);
+  }, [bookmarkedFrames, nSlices]);
+  const bookmarkedFrameMarks = React.useMemo(
+    () => normalizedBookmarkedFrames.map((value) => ({ value })),
+    [normalizedBookmarkedFrames]
+  );
+  const currentFrameBookmarked = normalizedBookmarkedFrames.includes(visibleSliceIdx);
+  const toggleCurrentFrameBookmark = React.useCallback(() => {
+    const frame = visibleSliceIdx;
+    const next = new Set(normalizedBookmarkedFrames);
+    if (next.has(frame)) next.delete(frame);
+    else next.add(frame);
+    setBookmarkedFrames(Array.from(next).sort((a, b) => a - b));
+  }, [normalizedBookmarkedFrames, setBookmarkedFrames, visibleSliceIdx]);
   const currentPlaybackIndex = () => (
     Number.isFinite(playbackIdxRef.current)
       ? playbackIdxRef.current
@@ -10161,99 +10363,118 @@ function Show3D() {
 	              </Button>
 	            )}
 	          </Typography>}
-	          {/* Controls row */}
+	          {/* Page navigation sits above the analysis toolbar so a long page
+	              label never competes with Profile / Stats / FFT controls. */}
+	          {controlsVisible && isPaged && (
+	            <Box
+	              data-show3d-page-controls="true"
+	              aria-label="Page navigation"
+	              sx={{
+	                display: "flex",
+	                alignItems: "center",
+	                flexWrap: "wrap",
+	                columnGap: "8px",
+	                rowGap: "3px",
+	                mb: "3px",
+	                minHeight: 26,
+	                pb: "3px",
+	                borderBottom: `1px solid ${themeColors.border}`,
+	              }}
+	            >
+	              <Box sx={{ display: "flex", alignItems: "baseline", gap: "5px", flex: "1 1 240px", minWidth: 0 }}>
+	                <Typography sx={{ ...typography.label, fontSize: 10, flexShrink: 0 }}>Page</Typography>
+	                <Typography
+	                  data-show3d-page-status="true"
+	                  title={pageControlStatus}
+	                  sx={{
+	                    ...typography.label,
+	                    fontSize: 10,
+	                    lineHeight: 1.25,
+	                    color: themeColors.accent,
+	                    minWidth: 0,
+	                    whiteSpace: "normal",
+	                    overflowWrap: "anywhere",
+	                    fontVariantNumeric: "tabular-nums",
+	                  }}
+	                >
+	                  {pageControlStatus}
+	                </Typography>
+	              </Box>
+	              <Box sx={{ display: "flex", alignItems: "center", gap: "4px", flex: "0 1 auto", minWidth: 0 }}>
+	                <Slider
+	                  value={pageControlIdx}
+	                  min={0}
+	                  max={Math.max(0, (nPages || 1) - 1)}
+	                  step={1}
+	                  onPointerDownCapture={() => {
+	                    stopPagePlayback();
+	                    setPageSliderPreviewIdx(currentPageIdx);
+	                  }}
+	                  onKeyDown={() => stopPagePlayback()}
+	                  onChange={(_, value) => {
+	                    const raw = Array.isArray(value) ? value[0] : value;
+	                    const next = clampPageIdx(Number(raw));
+	                    setPageSliderPreviewIdx(next);
+	                    commitPageIdx(next);
+	                  }}
+	                  onChangeCommitted={(_, value) => {
+	                    const raw = Array.isArray(value) ? value[0] : value;
+	                    const next = clampPageIdx(Number(raw));
+	                    stopPagePlayback();
+	                    setPageSliderPreviewIdx(next);
+	                    commitPageIdx(next, true);
+	                  }}
+	                  size="small"
+	                  sx={{ ...sliderStyles.small, width: 150, flex: "0 1 150px", minWidth: 92, color: themeColors.accent }}
+	                  aria-label="Page"
+	                />
+	                <IconButton
+	                  size="small"
+	                  onClick={() => setPagePlaying((value) => !value)}
+	                  title={pagePlaying ? "Pause page playback" : "Play pages"}
+	                  aria-label={pagePlaying ? "Pause page playback" : "Play pages"}
+	                  sx={{ width: 24, height: 24, p: 0, color: themeColors.accent }}
+	                >
+	                  {pagePlaying ? <PauseIcon sx={{ fontSize: 16 }} /> : <PlayArrowIcon sx={{ fontSize: 16 }} />}
+	                </IconButton>
+	                <Select
+	                  value={String(pagePlayFps)}
+	                  onChange={(e) => setPagePlayFps(Number(e.target.value) || 2)}
+	                  size="small"
+	                  sx={{ ...themedSelect, minWidth: 48, fontSize: 10 }}
+	                  MenuProps={themedMenuProps}
+	                  inputProps={{ "aria-label": "Page playback frames per second" }}
+	                  title="Page playback speed"
+	                >
+	                  {PAGE_PLAY_FPS_OPTIONS.map((fps) => (
+	                    <MenuItem key={fps} value={String(fps)}>{fps} fps</MenuItem>
+	                  ))}
+	                </Select>
+	                <IconButton
+	                  size="small"
+	                  onClick={() => {
+	                    const next = Array.from({ length: Math.max(1, nPages || 1) }, (_, idx) => pageStarred?.[idx] ? 1 : 0);
+	                    next[pageControlIdx] = next[pageControlIdx] ? 0 : 1;
+	                    setPageStarred(next);
+	                  }}
+	                  title={(pageStarred?.[pageControlIdx] ? "Unstar " : "Star ") + pageControlLabel}
+	                  aria-label={(pageStarred?.[pageControlIdx] ? "Unstar " : "Star ") + pageControlLabel}
+	                  sx={{
+	                    width: 24,
+	                    height: 24,
+	                    p: 0,
+	                    color: pageStarred?.[pageControlIdx] ? "#ffc107" : themeColors.textMuted,
+	                    "&:hover": { color: pageStarred?.[pageControlIdx] ? "#ffc107" : themeColors.text },
+	                  }}
+	                >
+	                  {pageStarred?.[pageControlIdx] ? "★" : "☆"}
+	                </IconButton>
+	              </Box>
+	            </Box>
+	          )}
+	          {/* Analysis and display controls row. */}
 	          {controlsVisible && (
-	          <Box sx={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: "4px", mb: `${SPACING.XS}px`, minHeight: 28 }}>
-            {isPaged && (
-              <>
-                <Typography sx={{ ...typography.label, fontSize: 10, ml: "2px", flexShrink: 0 }}>Page</Typography>
-                <Typography
-                  title={pageControlStatus}
-                  sx={{
-                    ...typography.label,
-                    fontSize: 10,
-                    color: themeColors.accent,
-                    flex: "0 1 14ch",
-                    minWidth: "8ch",
-                    maxWidth: { xs: "11ch", sm: "16ch", md: "20ch" },
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                    whiteSpace: "nowrap",
-                    fontVariantNumeric: "tabular-nums",
-                  }}
-                >
-                  {pageControlStatus}
-                </Typography>
-                <Slider
-                  value={pageControlIdx}
-                  min={0}
-                  max={Math.max(0, (nPages || 1) - 1)}
-                  step={1}
-                  onPointerDownCapture={() => {
-                    stopPagePlayback();
-                    setPageSliderPreviewIdx(currentPageIdx);
-                  }}
-                  onKeyDown={() => stopPagePlayback()}
-                  onChange={(_, value) => {
-                    const raw = Array.isArray(value) ? value[0] : value;
-                    const next = clampPageIdx(Number(raw));
-                    setPageSliderPreviewIdx(next);
-                    commitPageIdx(next);
-                  }}
-                  onChangeCommitted={(_, value) => {
-                    const raw = Array.isArray(value) ? value[0] : value;
-                    const next = clampPageIdx(Number(raw));
-                    stopPagePlayback();
-                    setPageSliderPreviewIdx(next);
-                    commitPageIdx(next, true);
-                  }}
-                  size="small"
-                  sx={{ ...sliderStyles.small, width: 120, flex: "0 0 120px", color: themeColors.accent, ml: "2px" }}
-                  aria-label="Page"
-                />
-                <IconButton
-                  size="small"
-                  onClick={() => setPagePlaying((value) => !value)}
-                  title={pagePlaying ? "Pause page playback" : "Play pages"}
-                  aria-label={pagePlaying ? "Pause page playback" : "Play pages"}
-                  sx={{ width: 24, height: 24, p: 0, color: themeColors.accent }}
-                >
-                  {pagePlaying ? <PauseIcon sx={{ fontSize: 16 }} /> : <PlayArrowIcon sx={{ fontSize: 16 }} />}
-                </IconButton>
-                <Select
-                  value={String(pagePlayFps)}
-                  onChange={(e) => setPagePlayFps(Number(e.target.value) || 2)}
-                  size="small"
-                  sx={{ ...themedSelect, minWidth: 48, fontSize: 10 }}
-                  MenuProps={themedMenuProps}
-                  inputProps={{ "aria-label": "Page playback frames per second" }}
-                  title="Page playback speed"
-                >
-                  {PAGE_PLAY_FPS_OPTIONS.map((fps) => (
-                    <MenuItem key={fps} value={String(fps)}>{fps} fps</MenuItem>
-                  ))}
-                </Select>
-                <IconButton
-                  size="small"
-                  onClick={() => {
-                    const next = Array.from({ length: Math.max(1, nPages || 1) }, (_, idx) => pageStarred?.[idx] ? 1 : 0);
-                    next[pageControlIdx] = next[pageControlIdx] ? 0 : 1;
-                    setPageStarred(next);
-                  }}
-                  title={(pageStarred?.[pageControlIdx] ? "Unstar " : "Star ") + pageControlLabel}
-                  aria-label={(pageStarred?.[pageControlIdx] ? "Unstar " : "Star ") + pageControlLabel}
-                  sx={{
-                    width: 24,
-                    height: 24,
-                    p: 0,
-                    color: pageStarred?.[pageControlIdx] ? "#ffc107" : themeColors.textMuted,
-                    "&:hover": { color: pageStarred?.[pageControlIdx] ? "#ffc107" : themeColors.text },
-                  }}
-                >
-                  {pageStarred?.[pageControlIdx] ? "★" : "☆"}
-                </IconButton>
-              </>
-            )}
+	          <Box data-show3d-tool-controls="true" sx={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: "4px", mb: `${SPACING.XS}px`, minHeight: 28 }}>
             {visiblePanelCount > 1 && (
               <>
                 <Typography sx={{ ...typography.label, fontSize: 10, ml: "2px" }}>Cols</Typography>
@@ -10340,7 +10561,7 @@ function Show3D() {
               <Typography sx={{ ...typography.label, fontSize: 10, ml: "2px" }}>Stats</Typography>
               <Switch checked={showStats} onChange={(e) => setShowStats(e.target.checked)} size="small" sx={switchStyles.small} slotProps={{ input: { "aria-label": "Toggle statistics readout" } }} />
             </>
-            {(nPanels || 1) > 1 && (
+            {hasPanelChoices && (
               <>
                 <Typography sx={{ ...typography.label, fontSize: 10, ml: "2px" }}>Link</Typography>
                 <Typography sx={{ ...typography.label, fontSize: 10, ml: "2px" }}>Zoom</Typography>
@@ -10392,7 +10613,7 @@ function Show3D() {
             <Box sx={{ flex: 1 }} />
             <Box sx={{ display: "flex", alignItems: "center", gap: "6px" }}>
               <Button size="small" sx={compactButton} onClick={handleCopy} aria-label="Copy current frame to clipboard as PNG">Copy</Button>
-              {(nPanels || 1) > 1 && (
+              {hasPanelChoices && (
                 <>
                   {!isPaged && (
                     <Button
@@ -10752,7 +10973,7 @@ function Show3D() {
                 </button>
               );
             })}
-            {panelChromeVisible && (nPanels || 1) > 1 && visiblePanelIndices.map((panel, slot) => {
+            {panelChromeVisible && hasPanelChoices && visiblePanelIndices.map((panel, slot) => {
               const n = Math.max(1, visiblePanelCount || 1);
               const cols = panelColsForCount(n);
               const gap = n > 1 ? (panelGapTrait ?? 10) : 0;
@@ -11252,11 +11473,14 @@ function Show3D() {
                       </IconButton>
                     </Stack>
                     {loop ? (
-                      <Slider ref={playbackSliderRef} value={[loopStart, activeIdx, effectiveLoopEnd]} onMouseDown={handleLoopSliderMouseDown} onPointerDownCapture={handleLoopSliderPointerDownCapture} onChange={(_, v) => { const vals = v as number[]; setLoopStart(vals[0]); scrubToSlice(vals[1]); setLoopEnd(vals[2]); }} onChangeCommitted={(_, v) => { const vals = v as number[]; setLoopStart(vals[0]); commitSlice(vals[1]); setLoopEnd(vals[2]); }} disableSwap min={0} max={nSlices - 1} size="small" valueLabelDisplay="auto" valueLabelFormat={(v) => formatFrameValueLabel(v)} marks={bookmarkedFrames.map(f => ({ value: f }))} aria-label={`Loop range and current ${dimLabel.toLowerCase()} (frame ${activeIdx + 1} of ${nSlices}, loop ${loopStart + 1} to ${effectiveLoopEnd + 1})`} sx={{ ...sliderStyles.small, width: 150, flex: "0 1 150px", minWidth: 90, "& .MuiSlider-thumb[data-index='0']": { width: 8, height: 8, bgcolor: themeColors.textMuted }, "& .MuiSlider-thumb[data-index='1']": { width: 12, height: 12 }, "& .MuiSlider-thumb[data-index='2']": { width: 8, height: 8, bgcolor: themeColors.textMuted }, "& .MuiSlider-mark": { bgcolor: themeColors.accent, width: 4, height: 4, borderRadius: "50%", top: "50%", transform: "translate(-50%, -50%)" }, "& .MuiSlider-valueLabel": { fontSize: 10, padding: "2px 4px", maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }} />
+                      <Slider ref={playbackSliderRef} value={[loopStart, activeIdx, effectiveLoopEnd]} onMouseDown={handleLoopSliderMouseDown} onPointerDownCapture={handleLoopSliderPointerDownCapture} onChange={(_, v) => { const vals = v as number[]; setLoopStart(vals[0]); scrubToSlice(vals[1]); setLoopEnd(vals[2]); }} onChangeCommitted={(_, v) => { const vals = v as number[]; setLoopStart(vals[0]); commitSlice(vals[1]); setLoopEnd(vals[2]); }} disableSwap min={0} max={nSlices - 1} size="small" valueLabelDisplay="auto" valueLabelFormat={(v) => formatFrameValueLabel(v)} marks={bookmarkedFrameMarks} aria-label={`Loop range and current ${dimLabel.toLowerCase()} (frame ${activeIdx + 1} of ${nSlices}, loop ${loopStart + 1} to ${effectiveLoopEnd + 1})`} sx={{ ...sliderStyles.small, width: 150, flex: "0 1 150px", minWidth: 90, "& .MuiSlider-thumb[data-index='0']": { width: 8, height: 8, bgcolor: themeColors.textMuted }, "& .MuiSlider-thumb[data-index='1']": { width: 12, height: 12 }, "& .MuiSlider-thumb[data-index='2']": { width: 8, height: 8, bgcolor: themeColors.textMuted }, "& .MuiSlider-mark": { bgcolor: "#ffc107", width: 5, height: 5, borderRadius: "50%", top: "50%", transform: "translate(-50%, -50%)" }, "& .MuiSlider-valueLabel": { fontSize: 10, padding: "2px 4px", maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }} />
                     ) : (
-                      <Slider ref={playbackSliderRef} value={activeIdx} onChange={(_, v) => scrubToSlice(v as number)} onChangeCommitted={(_, v) => commitSlice(v as number)} min={0} max={nSlices - 1} size="small" valueLabelDisplay="auto" valueLabelFormat={(v) => formatFrameValueLabel(v)} marks={bookmarkedFrames.map(f => ({ value: f }))} aria-label={`Current ${dimLabel.toLowerCase()} (${activeIdx + 1} of ${nSlices})`} sx={{ ...sliderStyles.small, width: 150, flex: "0 1 150px", minWidth: 90, "& .MuiSlider-mark": { bgcolor: themeColors.accent, width: 4, height: 4, borderRadius: "50%", top: "50%", transform: "translate(-50%, -50%)" }, "& .MuiSlider-valueLabel": { maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }} />
+                      <Slider ref={playbackSliderRef} value={activeIdx} onChange={(_, v) => scrubToSlice(v as number)} onChangeCommitted={(_, v) => commitSlice(v as number)} min={0} max={nSlices - 1} size="small" valueLabelDisplay="auto" valueLabelFormat={(v) => formatFrameValueLabel(v)} marks={bookmarkedFrameMarks} aria-label={`Current ${dimLabel.toLowerCase()} (${activeIdx + 1} of ${nSlices})`} sx={{ ...sliderStyles.small, width: 150, flex: "0 1 150px", minWidth: 90, "& .MuiSlider-mark": { bgcolor: "#ffc107", width: 5, height: 5, borderRadius: "50%", top: "50%", transform: "translate(-50%, -50%)" }, "& .MuiSlider-valueLabel": { maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }} />
                     )}
                     <Typography ref={playbackLiveCountRef} sx={{ ...typography.value, color: themeColors.textMuted, minWidth: hiddenSet.size ? `${String(nSlices).length * 2 + String(visibleCount).length + 5}ch` : `${String(nSlices).length * 2 + 1}ch`, fontVariantNumeric: "tabular-nums", textAlign: "right", flexShrink: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{hiddenSet.size ? `${activeIdx + 1}/${visibleCount} (${nSlices})` : `${activeIdx + 1}/${nSlices}`}</Typography>
+                    <IconButton size="small" onClick={toggleCurrentFrameBookmark} aria-pressed={currentFrameBookmarked} aria-label={`${currentFrameBookmarked ? "Unstar" : "Star"} frame ${activeIdx + 1}`} title={`${currentFrameBookmarked ? "Unstar" : "Star"} frame ${activeIdx + 1}`} sx={{ color: currentFrameBookmarked ? "#ffc107" : themeColors.textMuted, p: 0.25, width: 22, height: 22, flexShrink: 0, "&:hover": { color: currentFrameBookmarked ? "#ffc107" : themeColors.text } }}>
+                      <Box component="span" sx={{ fontSize: 18, lineHeight: "18px" }}>{currentFrameBookmarked ? "★" : "☆"}</Box>
+                    </IconButton>
                   </Box>
                   <Box sx={{ ...controlRow, ...mobileControlRowSx, width: "fit-content", maxWidth: "100%", flexWrap: "wrap", border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, boxSizing: "border-box" }}>
                     <Box sx={{ display: "flex", alignItems: "center", gap: isMobileViewport ? "4px" : `${SPACING.SM}px`, flexShrink: 0 }}>
@@ -11745,7 +11969,7 @@ function Show3D() {
             {/* Controls row - title on left, Reset on right */}
             <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: `${SPACING.XS}px`, minHeight: 28, height: "auto", flexWrap: "wrap", gap: `${SPACING.XS}px` }}>
               <Typography sx={{ ...typography.label, color: themeColors.accentGreen }}>
-                Kymograph ({kymoDataRef.current?.nFrames ?? nSlices} {dimUnit ? unitSymbol(dimUnit) : "frames"} &times; {kymoDataRef.current?.lineLen ?? 0} px)
+                Kymograph{singlePanelPageProfile ? ` · ${pageControlLabel}` : ""} ({kymoDataRef.current?.nFrames ?? nSlices} {dimUnit ? unitSymbol(dimUnit) : "frames"} &times; {kymoDataRef.current?.lineLen ?? 0} px)
               </Typography>
               <Button size="small" sx={compactButton} disabled={!kymoNeedsReset} onClick={handleKymoReset} aria-label="Reset kymograph zoom and pan">Reset</Button>
             </Stack>
@@ -11773,7 +11997,7 @@ function Show3D() {
               onTouchEnd={handleKymoTouchEnd}
               onTouchCancel={handleKymoTouchEnd}
             >
-              <canvas ref={kymoCanvasRef} width={canvasW} height={canvasH} style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", imageRendering: "pixelated", touchAction: "none" }} role="img" aria-label="Kymograph space-time image: distance along profile line versus frame index" />
+              <canvas ref={kymoCanvasRef} width={canvasW} height={canvasH} style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", imageRendering: "pixelated", touchAction: "none" }} role="img" aria-label={`Kymograph${singlePanelPageProfile ? ` for ${pageControlLabel}` : ""}: distance along profile line versus frame index`} />
               <canvas ref={kymoOverlayRef} width={Math.round(canvasW * DPR)} height={Math.round(canvasH * DPR)} style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", pointerEvents: "none" }} aria-hidden="true" />
             </Box>
             {/* Axis labels - kymograph-specific footer */}

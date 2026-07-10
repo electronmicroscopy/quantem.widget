@@ -314,3 +314,33 @@ real-derived gallery.
   the notebook-sized view.
 - Return to a normal notebook viewport and verify the layout contracts without
   clipped controls, wrapped labels, or stale full-screen sizing.
+
+### S2D-16: Compare Static EDS Maps With Local HAADF Frames
+
+**User story**: As a microscopist reviewing an EDS acquisition, I want static
+elemental maps beside the acquisition's HAADF frame stack so I can inspect
+drift or damage without forcing every comparison panel onto one global frame.
+
+**Primary widgets**: Show2D.
+
+**Data to use**: one real Velox/EDS acquisition containing multiple HAADF
+frames plus at least three static elemental maps. Keep private microscope data
+outside git and record only shape, dtype, frame count, and timings.
+
+**Acceptance checks**:
+
+- Pass a list containing 2D maps and one or more `(frames, rows, cols)` items;
+  verify only stack panels get an in-panel slider and play button.
+- Scrub and play each stack independently. Verify pixels, histogram, stats,
+  profile, diff, and FFT follow the current frame without changing static maps.
+- Sustain a 30 Hz rAF-paced slider input stream on a normal-size EDS frame, or
+  record the browser/data limit. Confirm the final canvas, not only the slider
+  label, reaches the requested frame.
+- Hide, restore, and reorder a stack panel; verify its frame index is unchanged.
+- Select a stack panel and verify left/right arrows scrub it. Select a static
+  panel and verify arrows retain ordinary gallery navigation.
+- Save a notebook with `save_state=True`, close it, and reopen without running
+  the cell. Verify the slider, current frame, and pixels restore.
+- Export exact float32 and quantized uint8 HTML, open both without a kernel,
+  and repeat scrub, play/pause, stats, FFT, hide/restore, and narrow-viewport
+  checks with no browser errors.

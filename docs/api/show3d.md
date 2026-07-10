@@ -48,6 +48,10 @@ The metrics reuse the cached FFT magnitude used for rendering, so frame
 playback, zoom, and pan do not trigger an extra FFT for the label. Set
 `fft_metrics=False` for a clean FFT image.
 
+The first FFT for a frame or ROI may take a moment on large data. After that,
+Show3D reuses the cached FFT magnitude when you return to the same frame and
+when you redraw, zoom, pan, scrub, or show metric labels.
+
 ## Live stack updates
 
 Use `set_image()` to replace the stack in an already displayed widget while a
@@ -90,6 +94,46 @@ updates. Small stacks may auto-enable the offline notebook representation, which
 is intended for saved notebooks and static exports. Pass `offline=False` when the
 stack will grow over time.
 ```
+
+## Watch a growing frame folder
+
+Use `Show3D.from_folder(...)` when each matching image file is the next frame
+in one time series, focal series, or reconstruction history. New files append
+to the single displayed stack; they do not create additional gallery panels or
+replace frames that are already loaded.
+
+```python
+from quantem.widget import Show3D
+
+w = Show3D.from_folder(
+    "/data/session/reconstruction",
+    pattern="frame_*.tif",
+    watch_interval=2.0,
+    title="Live reconstruction",
+)
+w
+```
+
+`watch=True` is the default. The first folder scan establishes deterministic
+frame order, then the watcher appends newly readable files without rebuilding
+the widget or rereading unchanged source files. Use Show2D instead when each
+file should be a separate comparison panel.
+
+```python
+new_frames = w.poll_folder()       # scan now; return newly appended indices
+w.stop_folder_watch()             # pause background scans
+w.watch_folder(interval=1.0)      # resume with a different interval
+w.close()                         # stop watching and close the widget
+```
+
+Folder watching is append-only. Files already represented in the stack are not
+duplicated, incomplete files wait for a later poll, and source removals or
+rewrites do not alter existing frames silently. Pass `watch=False` when a fixed
+folder must remain fixed.
+
+`Show3D.from_folder(...)` reads full-resolution source frames. `ShowFolder`
+uses cached thumbnails to browse and select a session quickly; those thumbnails
+are not the data used by the folder-backed Show3D stack.
 
 ## Panel visibility
 
@@ -167,11 +211,46 @@ and FPS menu; the lower frame playback controls still scrub time or depth
 inside the active page. Manual page scrubbing pauses page playback, and Show3D
 keeps rendering work scoped to the active visible page.
 
+Paged views use independent automatic percentile clipping by default because
+separate reconstructions often have different numerical ranges. This preserves
+structure on every page instead of letting one high-amplitude reconstruction
+set the contrast for all others. Pass `link_contrast=True` when identical color
+limits are scientifically required for direct amplitude comparison. Ordinary
+non-paged multi-panel views keep linked contrast by default.
+
 ```python
 w.page_idx = 2
 w.star_page(2)
 show2d_page = w.to_show2d(frame=w.slice_idx)
 ```
+
+### Compare depth profiles across pages
+
+When every page contains one panel, the line-profile kymograph follows the
+active page. Draw the profile once, enable **Kymograph**, and scrub the page row
+to compare the same spatial line through raw/corrected volumes, reconstruction
+methods, or experimental conditions. The kymograph title includes the active
+page label; its horizontal line coordinate and depth/time axis stay matched.
+
+```python
+# Shape: pages, 1 panel per page, depth, rows, cols
+comparison = np.stack([single_slice, multislice], axis=0)[:, None]
+w = Show3D(
+    comparison,
+    page_labels=["single-slice", "multislice"],
+    panel_titles=["object phase"],
+    dim_label="Depth",
+)
+w.set_profile((row0, col0), (row1, col1))
+
+# Numerical form: page, depth, distance along the line
+matched_profiles = w.profile_all_pages()
+```
+
+For pages containing several panels, pass `panel_slot=` to
+`profile_all_pages()` or `panel=` to `profile_all_frames()` when extracting a
+specific numerical profile. The interactive kymograph intentionally remains a
+single-panel-page tool so its line and depth axes are unambiguous.
 
 ## Animation exports
 
