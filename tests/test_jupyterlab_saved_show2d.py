@@ -125,6 +125,18 @@ image = rng.normal(size=(96, 96)).astype("float32")
 image[30:66, 24:72] += 5
 display(Show2D(image, title="Saved Show2D Reopen", size=420, verbose=False))
 
+haadf_stack = np.stack([image + frame * 0.25 for frame in range(4)], axis=0)
+display(Show2D(
+    [image, haadf_stack],
+    labels=["EDS map", "HAADF stack"],
+    panel_frame_indices=[0, 2],
+    title="Saved Mixed-Stack Show2D Reopen",
+    ncols=2,
+    size=280,
+    save_state=True,
+    verbose=False,
+))
+
 z, y, x = np.indices((18, 48, 48))
 volume = (
     np.exp(-(((z - 8) / 4) ** 2 + ((y - 22) / 10) ** 2 + ((x - 24) / 9) ** 2))
@@ -205,13 +217,21 @@ def test_saved_widgets_reopen_interactive_without_cell_execution(tmp_path):
                 page.wait_for_selector(".jp-Notebook", timeout=120_000)
                 page.wait_for_function(
                     """() => document.body.innerText.includes('Saved Show2D Reopen')
+                      && document.body.innerText.includes('Saved Mixed-Stack Show2D Reopen')
                       && document.body.innerText.includes('Saved Show3D Reopen')
                       && document.body.innerText.includes('Saved Show3DSlices Reopen')
+                      && document.querySelector('[aria-label="Frame for HAADF stack"]')
                       && document.querySelectorAll('canvas').length >= 1""",
                     timeout=180_000,
                 )
                 body_text = page.evaluate("document.body.innerText")
                 assert "model not found" not in body_text.lower()
+                stack_slider = page.locator('[aria-label="Frame for HAADF stack"]')
+                assert stack_slider.get_attribute("aria-valuenow") == "2"
+                stack_slider.focus()
+                stack_slider.press("Home")
+                page.wait_for_timeout(300)
+                assert stack_slider.get_attribute("aria-valuenow") == "0"
 
                 box = page.evaluate(
                     """() => {

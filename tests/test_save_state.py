@@ -245,6 +245,27 @@ def test_notebook_preview_format_none_disables_static_preview():
     assert "frame_bytes" not in state
 
 
+def test_show4dstem_notebook_preview_format_none_disables_static_preview():
+    """A live-only Show4DSTEM notebook can suppress the static sibling."""
+    widget = Show4DSTEM(
+        np.ones((4, 4, 8, 8), dtype=np.float32),
+        notebook_preview_format=None,
+        precompute_virtual_images=False,
+        save_state=False,
+        verbose=False,
+    )
+    try:
+        bundle = widget._repr_mimebundle_()
+        data = bundle[0] if isinstance(bundle, tuple) else bundle
+
+        assert not [key for key in IMAGE_MIME_KEYS if key in (data or {})]
+        state = widget.get_state()
+        assert "_static_fallback_jpeg" not in state
+        assert "_static_fallback_mime" not in state
+    finally:
+        widget.close()
+
+
 @pytest.mark.parametrize(
     ("kwargs", "message"),
     [
@@ -443,6 +464,23 @@ def test_show4dstem_bslz4_html_export_embeds_self_with_bulk_state(monkeypatch, t
 
     assert captured == {"save_state": True, "has_stack": True, "stack_size": len(b"offline-stack")}
     assert widget._save_state is False
+
+
+def test_show4dstem_bslz4_binned_interactive_export_has_clear_error(tmp_path):
+    widget = Show4DSTEM(
+        np.random.default_rng(12).integers(0, 100, (4, 4, 8, 8), dtype=np.uint16),
+        save_state=False,
+        verbose=False,
+    )
+    widget._offline_bslz4 = "{}"
+
+    try:
+        with pytest.raises(ValueError, match="Binned interactive raw export"):
+            widget._write_html_export(tmp_path / "binned.html", dtype="uint8", det_bin=2)
+        with pytest.raises(ValueError, match="Binned interactive raw export"):
+            widget._write_html_export(tmp_path / "scan-binned.html", dtype="uint8", det_bin=1, scan_bin=2)
+    finally:
+        widget.close()
 
 
 def test_export_html_size_scales_with_embedded_data(tmp_path):

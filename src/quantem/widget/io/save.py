@@ -803,7 +803,7 @@ def save(
         Output master HDF5 path. External data files are written next to it
         with the same prefix.
     data : np.ndarray | cp.ndarray
-        4D-STEM data. Shape (N, det_row, det_col) or (scan_y, scan_x,
+        4D-STEM data. Shape (N, det_row, det_col) or (scan_row, scan_col,
         det_row, det_col). CuPy arrays save without a host copy.
     scan_shape : tuple[int, int] | None
         Scan grid shape. Required for 3D inputs; inferred from 4D inputs.
