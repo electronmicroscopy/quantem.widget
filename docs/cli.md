@@ -12,6 +12,8 @@ quantem show4dstem ./masters/                  # *_master.h5        -> live Show
 quantem show4dstem a_master.h5 b_master.h5     # several masters    -> one 5D multi-tilt viewer
 quantem show4dstem ./masters/ --html           # 4D-STEM            -> shareable offline HTML
 quantem showfolder ./session/                  # microscopy folder  -> ShowFolder notebook/HTML
+quantem showdiffraction pattern.npy            # diffraction        -> analyzed ShowDiffraction HTML
+quantem showdiffraction --demo                 # real Fe3O4 SAED    -> the full pipeline, no data needed
 quantem data-transfer plan ./raw/ /ssd0/run /ssd1/run --manifest run.json
 quantem data-transfer show4dstem --manifest run.json --gpus 0,1 --dtype u8 --bin 1
 quantem html tutorial.ipynb                    # a notebook         -> standalone interactive HTML
@@ -27,6 +29,7 @@ quantem github tutorial_github.ipynb --no-execute # optional static copy for Git
 | `quantem show3d <folder>` | a folder of same-size frames | a Show3D scrub HTML; with `--watch`, a live ShowFolder notebook |
 | `quantem show4dstem <master(s) / folder>` | one or more `*_master.h5` | a live Show4DSTEM notebook (or `--html`) |
 | `quantem showfolder <folder>` | microscopy session folder | a ShowFolder notebook (or `--html`) |
+| `quantem showdiffraction <pattern>` | a diffraction pattern (`.npy`, `.emd`, `.dm3`/`.dm4`, or a raster image), or `--demo` | an analyzed ShowDiffraction HTML: center, rings, and profile fits; with `--phase`, also calibration and hkl indexing |
 | `quantem data-transfer plan/inspect/copy/update/masters/show4dstem` | `*_master.h5` folder plus target roots | manifest-backed transfer planning, state inspection, explicit copy, resume/update, ready-master listing, and Show4DSTEM notebook handoff |
 | `quantem html <notebook.ipynb>` | a notebook you wrote | runs it, or with `--no-execute` exports saved outputs/state, into one standalone interactive HTML |
 | `quantem github <notebook.ipynb>` | an optional static copy of a notebook | strips widget state and embeds compressed pictures for GitHub's notebook preview |
@@ -41,6 +44,28 @@ Dataset slider** to flip between scans. `--combined --html` writes that as one
 offline file (served locally, since a `file://` page can't fetch its companion).
 
 Everything lands in `~/Downloads` and opens automatically.
+
+## ShowDiffraction
+
+One command takes a SAED or powder pattern to a fully analyzed, shareable page:
+center refinement, ring detection, and profile fitting run automatically, and
+`--phase` (or `--demo`) adds phase calibration and hkl indexing. The standalone
+HTML then opens with the interactive analyzer and measurement tables.
+
+```bash
+quantem showdiffraction pattern.npy                  # detect + fit rings, no phase
+quantem showdiffraction pattern.npy --phase Au       # calibrate + index against a library phase
+quantem showdiffraction pattern.dm4 --exclude-radius 70   # skip an amorphous halo
+quantem showdiffraction --demo                       # real Fe3O4 nanoparticle SAED end-to-end
+```
+
+`--demo` downloads the tutorial pattern from the public dataset hub (or uses a
+packaged copy) and runs the pipeline against the Fe3O4 library phase. Use
+`--k-pixel-size` when the detector calibration is already known (it is kept even
+with `--phase`, which then only indexes), `--no-auto` to open the raw pattern
+untouched, and `--max-rings` to cap detection. Reading `.dm3`/`.dm4` needs the
+optional `ncempy` reader (`pip install ncempy`). A printed summary reports the
+calibration, rings, and matched phase before the page opens.
 
 ## DataTransfer
 

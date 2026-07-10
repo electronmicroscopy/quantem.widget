@@ -4,6 +4,7 @@ masters becomes a rendered, standalone HTML viewer in one command, no notebook.
     quantem show ./frames/                # PNG/TIFF folder -> Show3D scrub HTML
     quantem show scan.png                 # single image    -> Show2D HTML
     quantem show ./masters/ --bin 8       # *_master.h5     -> offline WebGPU Show4DSTEM
+    quantem showdiffraction pattern.npy   # diffraction     -> analyzed ShowDiffraction HTML
     quantem html tutorial.ipynb           # run a notebook  -> standalone shareable HTML
 
 The CLI only orchestrates existing pieces: ``io.read_image`` / ``read_image_stack``
@@ -63,6 +64,9 @@ def main(argv: list[str] | None = None) -> int:
         "github", help="Make a widget notebook GitHub-displayable (strip offline state, snapshots to JPEG)."))
     _add_showfolder_args(sub.add_parser(
         "showfolder", help="Browse a microscopy folder with ShowFolder: inventory, thumbnails, and selection state."))
+    _add_showdiffraction_args(sub.add_parser(
+        "showdiffraction",
+        help="Analyze a diffraction pattern with ShowDiffraction: auto rings, phase, standalone HTML."))
     _add_data_transfer_args(sub.add_parser(
         "data-transfer", help="Plan, inspect, and copy microscopy data layouts across folders/disks."))
     args = parser.parse_args(argv)
@@ -75,6 +79,8 @@ def main(argv: list[str] | None = None) -> int:
             return _prepare_github(args)
         if args.command == "showfolder":
             return _showfolder(args)
+        if args.command == "showdiffraction":
+            return _showdiffraction(args)
         if args.command == "data-transfer":
             return _data_transfer(args)
         if args.command not in forced:
@@ -423,6 +429,105 @@ def _showfolder(args: argparse.Namespace) -> int:
     size_mb = html_out.stat().st_size / 1e6
     print(f"HTML: {size_mb:.1f} MB")
     _open_html(html_out, serve=False, no_open=args.no_open)
+    return 0
+
+
+def _add_showdiffraction_args(parser: argparse.ArgumentParser) -> None:
+    """Attach options for the ``showdiffraction`` subcommand."""
+    parser.add_argument("path", nargs="?", default=None,
+                        help="A diffraction pattern: .npy (2D, or a 3D stack), .emd/.dm3/.dm4, or a raster image.")
+    parser.add_argument("--demo", action="store_true",
+                        help="Analyze the real Fe3O4 nanoparticle SAED tutorial pattern instead of a file.")
+    parser.add_argument("--phase", default=None,
+                        help="Library phase for calibration and hkl indexing, e.g. Au or Fe3O4.")
+    parser.add_argument("--no-auto", action="store_true",
+                        help="Skip the Auto pipeline (center, rings, calibration, fit, indexing).")
+    parser.add_argument("--max-rings", type=int, default=8,
+                        help="Ring detection cap for the Auto pipeline (default 8).")
+    parser.add_argument("--exclude-radius", type=float, default=None,
+                        help="Ignore rings inside this radius in px, e.g. an amorphous halo.")
+    parser.add_argument("--k-pixel-size", type=float, default=None,
+                        help="Known detector calibration in 1/Å per pixel (kept even with --phase).")
+    parser.add_argument("--out", default=None,
+                        help="Output path or directory for the HTML. Default: ~/Downloads.")
+    parser.add_argument("--title", default=None, help="Viewer page title.")
+    parser.add_argument("--no-open", action="store_true", help="Write the HTML but do not open it.")
+    parser.add_argument("--serve", action="store_true",
+                        help="Open via a local HTTP server (tunnelable URL).")
+    parser.add_argument("-v", "--verbose", action="store_true", help="Verbose progress.")
+
+
+def _showdiffraction(args: argparse.Namespace) -> int:
+    """Render one diffraction pattern as an analyzed ShowDiffraction HTML.
+
+    The Auto pipeline (center, rings, profile fit) runs by default; ``--phase``
+    adds calibration and hkl indexing, and an explicit ``--k-pixel-size`` is kept
+    so the phase then only indexes. ``--demo`` analyzes the bundled Fe3O4 SAED
+    with tutorial defaults."""
+    import numpy as np
+    from quantem.widget import ShowDiffraction
+
+    if args.demo:
+        if args.path is not None:
+            raise ValueError("give either a pattern file or --demo, not both")
+        from quantem.widget.data import tutorials
+        try:
+            data = tutorials.showdiffraction_fe3o4(verbose=args.verbose)
+        except (OSError, ImportError) as err:
+            raise ValueError(f"tutorial data unavailable ({err}); check access to huggingface.co")
+        src = pathlib.Path("fe3o4_saed")
+        args.title = args.title or "Fe3O4 nanoparticle SAED"
+        args.phase = args.phase or "Fe3O4"
+        if args.exclude_radius is None:
+            args.exclude_radius = 70.0  # amorphous carbon support halo
+    elif args.path is None:
+        raise ValueError("provide a diffraction pattern file, or use --demo")
+    else:
+        src = pathlib.Path(args.path).expanduser().resolve()
+        if not src.exists():
+            raise FileNotFoundError(f"path does not exist: {src}")
+        if not src.is_file():
+            raise ValueError(f"not a file: {src}")
+        if src.suffix.lower() not in IMAGE_EXTS:
+            raise ValueError(
+                f"unsupported file type {src.suffix!r}; expected .npy, .emd, .dm3/.dm4, or a raster image")
+        try:
+            data = np.load(src) if src.suffix.lower() == ".npy" else _load_2d(src)
+        except ImportError as err:
+            raise ValueError(f"reading {src.suffix} needs an optional dependency ({err})")
+        except (OSError, EOFError) as err:
+            raise ValueError(f"could not read {src.name}: {err}")
+
+    phase = None
+    if args.phase is not None:
+        from quantem.widget.crystal import library_phase
+        phase = library_phase(args.phase)
+
+    widget = ShowDiffraction(
+        data,
+        k_pixel_size=args.k_pixel_size,
+        title=args.title or src.stem,
+        offline=True,
+        verbose=args.verbose,
+    )
+    if not args.no_auto:
+        if phase is not None and args.k_pixel_size is not None:
+            # explicit calibration wins; the phase indexes only
+            widget.run_auto(max_rings=args.max_rings, exclude_radius=args.exclude_radius)
+            if widget.rings:
+                widget.index_rings(phase)
+        else:
+            widget.run_auto(phase, max_rings=args.max_rings, exclude_radius=args.exclude_radius)
+        if widget.analysis_status:
+            print(widget.analysis_status)
+    if args.phase is not None:
+        widget.phase_name = args.phase
+    if not args.no_auto:
+        widget.summary()
+
+    out = _out_path(args.out, src, suffix="showdiffraction")
+    widget.export_html(out, title=args.title or src.stem)
+    _open_html(out, serve=args.serve, no_open=args.no_open)
     return 0
 
 

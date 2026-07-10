@@ -3,7 +3,9 @@
 Interactive d-spacing analysis for a single 2D diffraction pattern or a 3D
 stack (tilt/time series). Find the beam center, pick Bragg spots and rings,
 read calibrated d-spacings, and calibrate k-space from a known reflection. See the
-[ShowDiffraction tutorial](../tutorials/showdiffraction) for a worked example.
+[ShowDiffraction tutorial](../tutorials/showdiffraction) for a worked example,
+or run `quantem showdiffraction <pattern>` from the [command line](../cli) for a
+one-command analyzed HTML.
 
 The primary phase workflow is candidate verification: you usually know which
 phases to expect, so build them (`library_phase`, `Phase.from_cubic`,

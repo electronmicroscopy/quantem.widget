@@ -15,6 +15,7 @@ _TUTORIAL_EXPORTS = {
     "show2d_gold",
     "show3d_gold",
     "show4dstem_gold",
+    "showdiffraction_fe3o4",
     "showfolder_gold",
 }
 
@@ -28,6 +29,7 @@ __all__ = [
     "show2d_gold",
     "show3d_gold",
     "show4dstem_gold",
+    "showdiffraction_fe3o4",
     "showfolder_gold",
 ]
 

@@ -11,6 +11,7 @@ from quantem.widget.datasets import (
     show2d_gold,
     show3d_gold,
     show4dstem_gold,
+    showdiffraction_fe3o4,
     showfolder_gold,
 )
 ```
@@ -65,6 +66,7 @@ widget-tutorials/show1d/ducky/small/show1d_monitor.jsonl
 widget-tutorials/show1d/ducky/small/snapshots/*.npy
 widget-tutorials/shared/gold-haadf/full/data.npy
 widget-tutorials/show4dstem/gold-128-bin8/full/data.npy
+widget-tutorials/showdiffraction/fe3o4-saed/small/data.npy
 widget-tutorials/showfolder/gold-haadf-session/small/*.emd
 ```
 
