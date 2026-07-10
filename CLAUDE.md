@@ -3,6 +3,12 @@
 This file records repository conventions that coding agents should follow when
 making commits.
 
+These conventions follow the scikit-package standards for reproducible
+scientific software (https://doi.org/10.1039/d6dd00121a). See the
+"Coding Standards (scikit-package)" section in [AGENTS.md](AGENTS.md) for the
+full list: issue-first PRs, one themed PR per issue, NumPy-style docstrings,
+and no force-pushing a branch under active review.
+
 ## Commit Messages
 
 Use a short Conventional Commit-style first line:

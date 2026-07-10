@@ -2,6 +2,24 @@
 
 Interactive Jupyter widgets and standalone browser GUI for electron microscopy.
 
+## Coding Standards (scikit-package)
+
+This repository follows the scikit-package standards for reproducible
+scientific software (S. Lee et al., *Digital Discovery*, 2026,
+https://doi.org/10.1039/d6dd00121a; practical docs:
+https://scikit-package.github.io/scikit-package/). Agents and humans apply
+them to code, commits, issues, and PRs:
+
+- Issue-first: every nontrivial PR closes a GitHub issue that states the
+  problem and intended behavior before the technique.
+- One themed branch and PR per issue; keep PRs small and single-purpose.
+- Conventional Commit-style single-line messages (see Commit Messages below).
+- NumPy-style docstrings for public Python APIs; pytest tests with
+  case comments in the `# C1: condition, expect ...` style.
+- Never force-push a branch under active review; append commits and use
+  `git revert` to undo. Self-review the diff before requesting review.
+- Use `git mv` for moves and never commit OS junk (`.DS_Store`, `._*`).
+
 ## Commit Messages
 
 Use short Conventional Commit-style first lines for routine commits:
