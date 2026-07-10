@@ -522,6 +522,62 @@ torch.cuda.empty_cache()
 If memory is still occupied, another object or another Jupyter kernel still
 owns it. Shut down that kernel from JupyterLab or stop the Python process.
 
+## I have data others should use. How do I upload it?
+
+The shared Hugging Face dataset repo
+([bobleesj/quantem-data](https://huggingface.co/datasets/bobleesj/quantem-data),
+MIT license) is the one place tutorial and reference data lives — its dataset
+card intentionally holds no instructions and points back to this page. The
+upload protocol is three steps:
+
+1. **Install the hub extra and log in once.** Uploading needs a Hugging Face
+   account and a write token from
+   [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens):
+
+   ```bash
+   pip install "quantem.widget[hub]"
+   hf auth login   # paste the write token
+   ```
+
+2. **Upload with the bucket + sidecar convention.** A folder of Arina
+   `*_master.h5` files goes under `4dstem/`, a single image file under
+   `haadf/` (those are also the defaults for a directory vs a file). Always
+   pass `meta=` so downstream widgets get calibration — it is written as a
+   `meta.json` sidecar next to your data:
+
+   ```python
+   from quantem.widget.io import upload
+
+   upload(
+       "/data/session/gold_512/",          # folder -> 4dstem/gold_512/*
+       name="gold_512",
+       folder="4dstem",
+       meta={"sampling": [0.5, 0.5], "units": ["A", "A"],
+             "voltage_kV": 300, "probe_mrad": 30, "camera_length_mm": 91},
+   )
+   ```
+
+   No write access to the shared repo? Either open an issue on
+   [quantem.widget](https://github.com/bobleesj/quantem.widget/issues) to get
+   added, or pass `repo="you/your-data"` to use your own HF dataset repo with
+   the same layout — every download helper accepts the same `repo=` override.
+
+3. **Verify like a user would.** List, download to a fresh path, and open it
+   in the widget before announcing the dataset:
+
+   ```python
+   from quantem.widget.io import list_datasets, download, status
+
+   list_datasets()            # '4dstem/gold_512' should appear
+   folder = download("gold_512")
+   status()                   # repo-wide file/size snapshot
+   ```
+
+Remove a mistake with `delete("name")` — it deletes every file under the
+dataset's folder, so double-check `list_datasets()` first. Uploads to the
+shared repo are published under its MIT license; only upload data you have
+the right to share.
+
 ## Function reference
 
 ```{eval-rst}
@@ -559,6 +615,15 @@ owns it. Shut down that kernel from JupyterLab or stop the Python process.
 ```
 ```{eval-rst}
 .. autofunction:: quantem.widget.io.hub.download
+```
+```{eval-rst}
+.. autofunction:: quantem.widget.io.hub.upload
+```
+```{eval-rst}
+.. autofunction:: quantem.widget.io.hub.status
+```
+```{eval-rst}
+.. autofunction:: quantem.widget.io.hub.delete
 ```
 
 ### Save
