@@ -37,7 +37,7 @@ path: Path = widget.export_html(
     path=None,          # str | pathlib.Path | None
     title=None,         # optional browser page title when supported
     mode="single",      # "single" or "folder"
-    encoding="full",    # "full", "uint8", "float16", or widget-specific
+    encoding="full",    # "full", "uint8", or widget-specific
     downsample=None,    # None, 2, 4, or widget-specific
 )
 ```
@@ -106,7 +106,7 @@ Use the same three option names across widgets:
 | Option | Meaning | Preferred values |
 |---|---|---|
 | `mode` | where the data lives | `single`, `folder` |
-| `encoding` | how the data is stored | `full`, `uint8`, `float16`, widget-specific |
+| `encoding` | how the data is stored | `full`, `uint8`, widget-specific |
 | `downsample` | whether dimensions are reduced before export | `None`, `2`, `4`, widget-specific |
 
 `mode` is packaging. It should not imply lower precision or a smaller shape.

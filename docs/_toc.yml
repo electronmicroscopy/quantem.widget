@@ -24,59 +24,70 @@ parts:
     chapters:
       - file: tutorials/showfolder
       - file: tutorials/widget_export
+  # API reference and Maintainers are nested under a single expandable parent
+  # page so the left sidebar stays short for tutorial users; the chevron
+  # expands the full list on demand.
   - caption: API reference
     chapters:
       - file: api/index
-      - file: api/datasets
-      - file: api/viewer-ui
-      - file: api/show1d
-      - file: api/show2d
-      - file: api/show3d
-      - file: api/show3dslices
-      - file: api/show4dstem
-      - file: api/showeds
-      - file: api/showdiffraction
-      - file: api/showfolder
-      - file: api/html-export
-      - file: api/io
+        title: API reference
+        sections:
+          - file: api/datasets
+          - file: api/viewer-ui
+          - file: api/show1d
+          - file: api/show2d
+          - file: api/show3d
+          - file: api/show3dslices
+          - file: api/show4dstem
+          - file: api/showeds
+          - file: api/showdiffraction
+          - file: api/showfolder
+          - file: api/html-export
+          - file: api/io
+          - file: api/load
   - caption: Developers
     chapters:
       - file: developer/ui-guide
         title: UI Guide
+      - file: developer/save-state-and-notebook-size
+        title: Save state & notebook size
   - caption: Maintainers
     chapters:
-      - file: changelog
-        title: Changelog
-      - file: maintainer/widget-release
-        title: Release
-      - file: maintainer/automation
-        title: Automation
-      - file: maintainer/viewing-html-on-mobile
-        title: Mobile HTML
-      - file: maintainer/widget-agent-signoff
-        title: Agent signoff
-      - file: maintainer/widget-review-matrix
-        title: Review matrix
-      - file: maintainer/widget-ui-protocol
-        title: UI protocol
-      - file: maintainer/performance-ui-testing
-        title: Performance UI testing
-      - file: maintainer/storyboard
-        title: Storyboard
+      - file: maintainer/index
+        title: Maintainer guide
         sections:
-          - file: maintainer/storyboard-show2d
-            title: Show2D
-          - file: maintainer/storyboard-show3d
-            title: Show3D
-          - file: maintainer/storyboard-show3dslices
-            title: Show3DSlices
-          - file: maintainer/storyboard-show4dstem
-            title: Show4DSTEM
-          - file: maintainer/storyboard-showeds
-            title: ShowEDS
-          - file: maintainer/storyboard-showfolder
-            title: ShowFolder
-          - file: maintainer/storyboard-data-transfer
-            title: DataTransfer
-      - file: maintainer/widget-performance
-        title: Performance
+          - file: changelog
+            title: Changelog
+          - file: maintainer/widget-release
+            title: Release
+          - file: maintainer/automation
+            title: Automation
+          - file: maintainer/viewing-html-on-mobile
+            title: Mobile HTML
+          - file: maintainer/widget-agent-signoff
+            title: Agent signoff
+          - file: maintainer/widget-review-matrix
+            title: Review matrix
+          - file: maintainer/widget-ui-protocol
+            title: UI protocol
+          - file: maintainer/performance-ui-testing
+            title: Performance UI testing
+          - file: maintainer/storyboard
+            title: Storyboard
+            sections:
+              - file: maintainer/storyboard-show2d
+                title: Show2D
+              - file: maintainer/storyboard-show3d
+                title: Show3D
+              - file: maintainer/storyboard-show3dslices
+                title: Show3DSlices
+              - file: maintainer/storyboard-show4dstem
+                title: Show4DSTEM
+              - file: maintainer/storyboard-showeds
+                title: ShowEDS
+              - file: maintainer/storyboard-showfolder
+                title: ShowFolder
+              - file: maintainer/storyboard-data-transfer
+                title: DataTransfer
+          - file: maintainer/widget-performance
+            title: Performance

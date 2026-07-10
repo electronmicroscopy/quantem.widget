@@ -27,8 +27,9 @@ dependencies = [
     # decode uses cupy, but we do NOT pin a cupy wheel: a fixed cuda13x/cuda12x would
     # collide with a cupy the environment already ships (Colab pre-installs cupy-cuda12x ->
     # "multiple CuPy packages" warning + breakage). A real CUDA workflow already has the
-    # matching cupy; if not, detect_backend() raises with the exact install command (never
-    # a silent CPU fallback). So pip install stays one line without a cupy conflict.
+    # matching cupy; if not, the GPU-only decode path (kernels.detect()) raises with the
+    # exact install command. Widget display itself still routes cuda > mps > cpu via
+    # detect_backend(). So pip install stays one line without a cupy conflict.
     "pyobjc-framework-Metal>=10.0 ; sys_platform == 'darwin'",
 ]
 

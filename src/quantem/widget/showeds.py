@@ -3027,7 +3027,7 @@ class ShowEDS(StaticFallbackMixin, anywidget.AnyWidget):
 
         Estimates the continuum background, finds significant peaks, and ranks
         elements whose characteristic lines explain them (see
-        :func:`quantem.widget.eds.match_elements`). Results are advisory and
+        :func:`quantem.widget.showeds.match_elements`). Results are advisory and
         fill the ``element_candidates`` trait shown in the periodic-table menu.
 
         Parameters

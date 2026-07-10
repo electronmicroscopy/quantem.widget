@@ -25,16 +25,21 @@ python -c "import quantem.widget; print(quantem.widget.__version__)"
 
 | Widget | Input | Shows |
 |---|---|---|
+| `Show1D` | 1D trace / stack / live monitor | line plot with stats, snapshots, and live append |
 | `Show2D` | 2D image or stack | image + contrast, FFT, line profiles, scale bar |
 | `Show3D` | 3D stack | scrub / play through frames |
 | `Show3DSlices` | 3D volume | orthogonal-slice viewer |
-| `Show4DSTEM` | 4D-STEM array | live virtual detectors (BF / ABF / ADF), CoM / iCoM / DPC |
-| `ShowEDS` | EDS/EELS spectrum image | experimental linked element map, spectrum, energy band, and real-space ROI |
+| `Show4DSTEM` | 4D-STEM array, or 5D stack | live virtual detectors (BF / ABF / ADF), CoM / iCoM / DPC, dataset slider + compare grid, offline WebGPU export |
+| `ShowDiffraction` | 2D pattern or 3D stack | d-spacing, g-vector, and angle measurement on Bragg spots and rings |
+| `ShowEDS` | EDS/EELS spectrum image | linked element map, spectrum, energy band, real-space ROI, and automatic element identification |
 | `ShowFolder` | microscopy session folder | fast thumbnail browser, grouping, and file selection |
 
 ```python
 import numpy as np
-from quantem.widget import Show2D, Show3D, Show3DSlices, Show4DSTEM, ShowEDS, ShowFolder
+from quantem.widget import (
+    Show1D, Show2D, Show3D, Show3DSlices,
+    Show4DSTEM, ShowDiffraction, ShowEDS, ShowFolder,
+)
 
 Show2D(np.random.rand(512, 512))
 Show4DSTEM(np.random.rand(64, 64, 128, 128))
@@ -54,13 +59,21 @@ eds = load_eds("spectrum_image.emd")  # Velox/RSCIIO EDS/EELS -> energy-last Spe
 ShowEDS(eds, energy=8.04, width=0.24)
 ```
 
+No data at hand? The tutorial datasets download and cache themselves:
+
+```python
+from quantem.widget.datasets import show2d_gold, show4dstem_gold
+
+Show4DSTEM(show4dstem_gold())
+```
+
 `quantem.widget.io` also provides `read_image`, `bin`, `download`, and more -
 see the docs.
 
 ## Command line
 
 Point `quantem` at a file or folder and it renders the right viewer - no notebook, no
-Python. Installing the package adds the `quantem` command.
+Python. Installing the package adds the `quantem` command (and a short `qw` alias).
 
 ```bash
 quantem show ./anything/                     # auto-detect content, pick the viewer
@@ -82,8 +95,9 @@ quantem html tutorial.ipynb                  # a notebook          -> standalone
 | `quantem show3d <folder>` | a folder of same-size frames | Show3D scrub HTML; with `--watch`, a live ShowFolder notebook |
 | `quantem show4dstem <master(s) / folder>` | one or more `*_master.h5` | live Show4DSTEM notebook (or `--html`) |
 | `quantem showfolder <folder>` | microscopy session folder | ShowFolder notebook (or `--html`) |
-| `quantem data-transfer plan/inspect/copy` | `*_master.h5` folder plus target roots | manifest-backed transfer planning, state inspection, and explicit copy |
+| `quantem data-transfer plan/inspect/copy/update/masters/show4dstem` | `*_master.h5` folder plus target roots | manifest-backed transfer planning, state inspection, explicit copy, resume/update, ready-master listing, and Show4DSTEM handoff |
 | `quantem html <notebook.ipynb>` | a notebook you wrote | runs it, bakes outputs into one offline HTML |
+| `quantem github <notebook.ipynb>` | a notebook copy for GitHub | strips widget state, embeds compressed pictures for GitHub's preview |
 
 **Images** save a standalone HTML and open in your browser. **4D-STEM** opens a live,
 kernel-backed notebook by default (full real-time interaction); `--html` instead bakes a
@@ -110,14 +124,15 @@ For GitHub notebook previews, make a copy and run
 this command keeps compressed pictures of each widget UI and removes heavy widget state.
 See the HTML export docs for the widget capability table and folder-export guidance.
 
-Everything lands in `~/Downloads` and opens automatically.
+Everything lands in `~/Downloads` (or the current directory on machines without
+one) and opens automatically on a desktop.
 
 | Option | Effect |
 |---|---|
-| `--bin N` | detector mean-bin factor for 4D-STEM (default 8) |
+| `--bin N` | detector mean-bin factor for 4D-STEM (default 8 for `show*`; `data-transfer` defaults to 1) |
 | `--html` | 4D-STEM: write the offline-WebGPU HTML instead of a notebook |
+| `--watch` | show2d/show3d/show4dstem folders: keep appending new files to a live notebook |
 | `--combined` | many masters -> one 5D HTML viewer (served locally) |
-| `--widget {2d,3d,4dstem}` | force a widget instead of auto-detect |
 | `--out PATH` | output file or directory (default `~/Downloads`) |
 | `--no-open` | write the file(s) without launching a browser or Jupyter |
 | `--title`, `-v/--verbose` | page title; verbose progress |
