@@ -6,6 +6,7 @@ new `rcN` heading when that rc is published to TestPyPI.
 
 ## Unreleased
 
+- Add the `showdiffraction_fe3o4` tutorial dataset loader: the ShowDiffraction tutorial downloads its real Fe3O4 SAED pattern from the public dataset hub (packaged fallback for offline runs).
 - Fix ShowDiffraction systematic absences for spinel, bixbyite, cuprite, rutile-type, and I41/amd phases: new structure-verified rules remove symmetry-forbidden lines (for example Fe3O4 200 and anatase 002) from predicted reflection lists.
 - Improve ShowDiffraction phase matching: optimal line assignment replaces the greedy pass, missing-strong counts read n/a when a phase carries no intensities, full-circle radial wedges no longer collapse to zero width, and the ellipse fit's sector weighting is de-biased on noisy patterns.
 - ShowDiffraction mobile/touch support: fluid layout at phone widths, pointer-event canvas interactions (tap, drag, two-finger pinch/pan, double-tap reset), and a dual-thumb contrast histogram slider that syncs traits once per gesture.

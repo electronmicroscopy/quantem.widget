@@ -251,3 +251,65 @@ def test_load_tutorial_showfolder_folder_can_require_real_download(monkeypatch):
         assert "offline" in str(exc)
     else:
         raise AssertionError("expected real-data tutorial loader to raise when download fails")
+
+
+def test_showdiffraction_fe3o4_uses_widget_tutorial_source(tmp_path, monkeypatch):
+    root = tmp_path / "hf-cache"
+    data_dir = root / "widget-tutorials" / "showdiffraction" / "fe3o4-saed" / "small"
+    data_dir.mkdir(parents=True)
+    np.save(data_dir / "data.npy", np.arange(16, dtype=np.float32).reshape(4, 4))
+    (data_dir / "meta.json").write_text(json.dumps({"name": "fe3o4-saed"}))
+    calls = []
+
+    def fake_snapshot_download(**kwargs):
+        calls.append(kwargs)
+        return root
+
+    monkeypatch.setattr(tutorials, "snapshot_download", fake_snapshot_download, raising=False)
+
+    pattern = datasets.showdiffraction_fe3o4(verbose=False)
+
+    assert pattern.shape == (4, 4)
+    assert pattern.dtype == np.float32
+    assert calls == [
+        {
+            "repo_id": "bobleesj/quantem-data",
+            "repo_type": "dataset",
+            "allow_patterns": ["widget-tutorials/showdiffraction/fe3o4-saed/small/*"],
+            "force_download": False,
+        }
+    ]
+
+
+def test_showdiffraction_fe3o4_falls_back_to_packaged_file(tmp_path, monkeypatch):
+    # a failed download, and a snapshot without data.npy, both use the packaged copy
+    packaged = tmp_path / "fe3o4_saed_512.npy"
+    np.save(packaged, np.ones((6, 6), dtype=np.float32))
+    monkeypatch.setattr(tutorials, "_FE3O4_PACKAGED_PATH", packaged)
+
+    def fail_download(*args, **kwargs):
+        raise OSError("offline")
+
+    monkeypatch.setattr(tutorials, "snapshot_download", fail_download, raising=False)
+    assert tutorials.showdiffraction_fe3o4(verbose=False).shape == (6, 6)
+
+    root = tmp_path / "hf-cache"
+    (root / "widget-tutorials" / "showdiffraction" / "fe3o4-saed" / "small").mkdir(parents=True)
+    monkeypatch.setattr(tutorials, "snapshot_download", lambda **kwargs: root, raising=False)
+    assert tutorials.showdiffraction_fe3o4(verbose=False).shape == (6, 6)
+
+
+def test_showdiffraction_fe3o4_raises_without_usable_source(tmp_path, monkeypatch):
+    def fail_download(*args, **kwargs):
+        raise OSError("offline")
+
+    monkeypatch.setattr(tutorials, "snapshot_download", fail_download, raising=False)
+    monkeypatch.setattr(tutorials, "_FE3O4_PACKAGED_PATH", tmp_path / "missing.npy")
+
+    for kwargs in ({"allow_fallback": False}, {}):
+        try:
+            tutorials.showdiffraction_fe3o4(verbose=False, **kwargs)
+        except OSError as exc:
+            assert "offline" in str(exc)
+        else:
+            raise AssertionError("expected diffraction tutorial loader to raise")
