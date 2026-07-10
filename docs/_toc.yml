@@ -20,10 +20,11 @@ parts:
       - file: tutorials/showdiffraction
       - file: tutorials/io_gpu
         title: IO/GPU
-  # Advanced tutorials are nested under one expandable parent (same pattern as
-  # API reference / Maintainers) so the sidebar stays short for new users.
-  - caption: Advanced tutorials
-    chapters:
+  # Advanced tutorials, API reference, and Maintainers are each one expandable
+  # parent link (chevron) so the sidebar stays short. These parts deliberately
+  # have NO caption: the parent link is the label, and a caption would render a
+  # duplicate header right above it.
+  - chapters:
       - file: tutorials/advanced
         title: Advanced tutorials
         sections:
@@ -31,11 +32,11 @@ parts:
           - file: tutorials/widget_export
           - file: tutorials/memory_management
             title: Memory management
-  # API reference and Maintainers are nested under a single expandable parent
-  # page so the left sidebar stays short for tutorial users; the chevron
-  # expands the full list on demand.
-  - caption: API reference
-    chapters:
+          - file: tutorials/watch_folder
+            title: Live folder watching
+          - file: tutorials/compare_reconstructions
+            title: Comparing reconstructions
+  - chapters:
       - file: api/index
         title: API reference
         sections:
@@ -58,8 +59,7 @@ parts:
         title: UI Guide
       - file: developer/save-state-and-notebook-size
         title: Save state & notebook size
-  - caption: Maintainers
-    chapters:
+  - chapters:
       - file: maintainer/index
         title: Maintainer guide
         sections:
