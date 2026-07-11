@@ -2401,6 +2401,18 @@ function Show3D() {
   // updates on release so scrubbing sigma stays smooth on large stacks.
   const [sigmaDraft, setSigmaDraft] = React.useState<number | null>(null);
   const displayFilterOff = resolveDenoiseMode(displayFilter || "none").mode === "none";
+  // Enabling the "Denoise" section must actually denoise (else pressing it does
+  // nothing until you also pick a method): default an off mode to gaussian
+  // (σ default 4.0 is a visible low-pass); disabling returns the display to raw.
+  const toggleDenoise = () => {
+    const next = !showDenoise;
+    setShowDenoise(next);
+    if (next) {
+      if (displayFilterOff) setDisplayFilter("gaussian");
+    } else {
+      setDisplayFilter("none");
+    }
+  };
   const [pixelUnit] = useModelState<string>("pixel_unit");
   const [imageRotation] = useModelState<number>("image_rotation");
 
@@ -11968,7 +11980,7 @@ function Show3D() {
                   <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted }}>Smooth</Typography>
                   <Switch checked={smooth} onChange={(e) => setSmooth(e.target.checked)} size="small" sx={switchStyles.small} slotProps={{ input: { "aria-label": "Toggle bilinear smoothing" } }} />
                   <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted }} title="Show the display-only denoise controls (method, σ, bin). Raw data and stats keep original counts.">Denoise</Typography>
-                  <Switch checked={showDenoise ?? false} onChange={() => setShowDenoise(!showDenoise)} size="small" sx={switchStyles.small} slotProps={{ input: { "aria-label": "Show denoise controls" } }} />
+                  <Switch checked={showDenoise ?? false} onChange={toggleDenoise} size="small" sx={switchStyles.small} slotProps={{ input: { "aria-label": "Show denoise controls" } }} />
                   {!showDenoise && displayFilterBanner && (
                     /* House rule: an active reduction is never invisible,
                        even with the denoise controls row hidden. */

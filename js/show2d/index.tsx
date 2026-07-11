@@ -1123,6 +1123,19 @@ function Show2D() {
   const filterOff = denoiseBaseMode === "none";
   // Denoise controls row visibility (its own compact toggle, FFT-style).
   const [showDenoise, setShowDenoise] = useModelState<boolean>("show_denoise");
+  // Toggling the "Denoise" section on must actually denoise: a feature by that
+  // name doing nothing until you also pick a method reads as "pressing denoise
+  // does nothing". So enabling it defaults an off mode to gaussian (σ default
+  // 4.0 gives a visible low-pass); disabling returns the display to raw.
+  const toggleDenoise = () => {
+    const next = !showDenoise;
+    setShowDenoise(next);
+    if (next) {
+      if (denoiseBaseMode === "none") setDisplayFilter("gaussian");
+    } else {
+      setDisplayFilter("none");
+    }
+  };
   const [denoiseScope, setDenoiseScope] = useModelState<string>("denoise_scope");
   const denoiseScopeAll = denoiseScope !== "panel";
   // Reversible view ops (single panel): view_crop commits a viewport as the
@@ -6797,14 +6810,14 @@ function Show2D() {
                 )}
                 <MenuItem
                   dense
-                  onClick={() => setShowDenoise(!showDenoise)}
+                  onClick={toggleDenoise}
                   sx={{ fontSize: 12, gap: 1, color: showDenoise ? themeColors.accent : themeColors.text }}
                 >
-                  <Typography sx={{ flex: 1, fontSize: 12, color: "inherit" }} title="Show the display-only denoise controls (method, σ, bin). Raw data, stats, and exports keep original counts.">Denoise</Typography>
+                  <Typography sx={{ flex: 1, fontSize: 12, color: "inherit" }} title="Denoise the display only (gaussian σ, or Poisson/Anscombe, plus spatial bin). Raw data, stats, and exports keep original counts.">Denoise</Typography>
                   <Switch
                     checked={showDenoise ?? false}
                     onClick={(e) => e.stopPropagation()}
-                    onChange={() => setShowDenoise(!showDenoise)}
+                    onChange={toggleDenoise}
                     size="small"
                     sx={switchStyles.small}
                     slotProps={{ input: { "aria-label": "Toggle denoise controls" } }}
