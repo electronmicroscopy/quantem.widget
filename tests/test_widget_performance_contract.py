@@ -149,9 +149,28 @@ def test_show1d_trace_hover_links_matching_snapshot_group():
     api = (ROOT / "docs" / "api" / "show1d.md").read_text(encoding="utf-8")
 
     assert "snapshotGroupForPoint" in show1d
-    assert "scheduleHover(point, snapshotGroupForPoint(point))" in show1d
+    assert "scheduleHoverAtPointer" in show1d
+    assert "window.requestAnimationFrame(flushHoverFrame)" in show1d
+    assert "commitScheduledHover(point, snapshotGroupForPoint(point))" in show1d
     assert "selectSnapshotGroup(snapshotGroup)" in show1d
     assert 'data-testid="show1d-snapshot-group-label"' in show1d
+    assert 'data-testid="show1d-hover-readout"' in show1d
+    assert 'data-testid="show1d-perf-telemetry"' in show1d
+    assert "methodTickCharBudget" in show1d
+    assert "__quantemShow1DPerf" in show1d
+    assert "SNAPSHOT_FFT_CACHE_MAX_BYTES" in show1d
+    assert 'useModelState<boolean>("controls_collapsed")' in show1d
+    assert 'useModelState<boolean>("show_review")' in show1d
+    assert 'useModelState<boolean>("show_trial_notes")' in show1d
+    assert 'useModelState<boolean>("show_snapshot_histogram")' in show1d
+    assert 'useModelState<string>("review_mode")' in show1d
+    assert "optionalFiniteNumber" in show1d
+    assert "snapshotFftGenerationRef.current !== generation" in show1d
+    assert "snapshotFftPrewarmQueueRef" in show1d
+    assert "visibleTraceSet.has(trace)" in show1d
+    assert 'COLORMAPS.viridis' in show1d
+    assert "csvAxisHeader" in show1d
+    assert ">FFT:</Typography>" not in show1d
     assert 'flexWrap: { xs: "wrap", md: "nowrap" }' in show1d
     assert "its images and group label preview in the side panel" in api
 

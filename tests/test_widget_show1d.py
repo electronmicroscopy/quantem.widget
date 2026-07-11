@@ -116,6 +116,21 @@ def test_show1d_live_extend_batches_reactive_trace_updates() -> None:
         widget.extend([5, 6], loss=[0.4])
 
 
+def test_show1d_plain_numeric_list_is_one_trace_but_nested_lists_remain_multiple() -> None:
+    single = Show1D([1.0, 2.0, 3.0])
+    multiple = Show1D([[1.0, 2.0], [3.0, 4.0]])
+
+    assert single.n_traces == 1
+    assert single.n_points == 3
+    assert single.labels == ["Data"]
+    np.testing.assert_allclose(single._data, [[1.0, 2.0, 3.0]])
+
+    assert multiple.n_traces == 2
+    assert multiple.n_points == 2
+    assert multiple.labels == ["Data 1", "Data 2"]
+    np.testing.assert_allclose(multiple._data, [[1.0, 2.0], [3.0, 4.0]])
+
+
 def test_show1d_from_loss_runs_flattens_nested_loss_families() -> None:
     widget = Show1D.from_loss_runs(
         {
@@ -183,6 +198,49 @@ def test_show1d_from_image_embeds_profile_context() -> None:
     assert widget.profile_image_width == 5
     assert widget.profile_line == [{"row": 1.0, "col": 0.0}, {"row": 1.0, "col": 4.0}]
     np.testing.assert_allclose(widget._data[0], [5, 6, 7, 8, 9])
+
+
+def test_show1d_from_image_preserves_physical_profile_coordinates() -> None:
+    image = np.arange(20, dtype=np.float32).reshape(4, 5)
+
+    widget = Show1D.from_image(
+        image,
+        line=((1, 0), (1, 4)),
+        sampling=0.25,
+        x_unit="nm",
+    )
+
+    np.testing.assert_allclose(widget._x, [0.0, 0.25, 0.5, 0.75, 1.0])
+    np.testing.assert_allclose(widget._data[0], [5, 6, 7, 8, 9])
+    assert widget.pixel_size == 0.25
+    assert widget.pixel_unit == "nm"
+    assert widget.profile_line == [{"row": 1.0, "col": 0.0}, {"row": 1.0, "col": 4.0}]
+
+
+def test_show1d_profile_distance_uses_geometric_diagonal_and_fractional_length() -> None:
+    image = np.arange(64, dtype=np.float32).reshape(8, 8)
+    widget = Show1D.from_image(
+        image,
+        line=((0.0, 0.0), (3.0, 4.0)),
+        sampling=0.2,
+        x_unit="nm",
+    )
+
+    assert widget.n_points == 6
+    np.testing.assert_allclose(widget._x, np.linspace(0.0, 1.0, 6))
+
+    fractional_line = ((0.5, 1.25), (3.0, 4.75))
+    widget.set_profile_image(image, line=fractional_line)
+    expected_length_nm = np.hypot(2.5, 3.5) * 0.2
+    np.testing.assert_allclose(
+        widget._x,
+        np.linspace(0.0, expected_length_nm, widget.n_points),
+    )
+    assert widget._x[-1] == np.float32(expected_length_nm)
+    assert widget.profile_line == [
+        {"row": 0.5, "col": 1.25},
+        {"row": 3.0, "col": 4.75},
+    ]
 
 
 def test_show1d_snapshots_keep_iteration_labels() -> None:
@@ -444,6 +502,11 @@ def test_show1d_display_public_api_state_and_validation() -> None:
         Show1D(np.arange(4, dtype=np.float32), sampling=-1.0)
 
 
+def test_show1d_real_space_colormap_defaults_to_viridis_and_preserves_override() -> None:
+    assert Show1D(np.arange(4, dtype=np.float32)).image_cmap == "viridis"
+    assert Show1D(np.arange(4, dtype=np.float32), image_cmap="cividis").image_cmap == "cividis"
+
+
 def test_show1d_trial_review_helpers_persist_state() -> None:
     widget = Show1D({"lambda 10": [3.0, 2.0], "lambda 300": [4.0, 4.5]})
 
@@ -466,6 +529,132 @@ def test_show1d_trial_review_helpers_persist_state() -> None:
     restored.unstar_trial("lambda_10").show_all_trials().clear_starred_trials()
     assert restored.hidden_snapshot_image_labels == []
     assert restored.starred_snapshot_image_labels == []
+
+
+def test_show1d_scientific_trace_review_does_not_rank_values_as_losses() -> None:
+    widget = Show1D(
+        {
+            "3.6Mx C10": [20.0, -80.0],
+            "5.1Mx C10": [30.0, -120.0],
+        },
+        y_label="C10 defocus",
+        y_unit="nm",
+    )
+
+    assert widget.review_mode == "trace"
+    assert widget.trial_sort_key == "label"
+    assert widget.best_trial_label == ""
+    assert widget.run_summary["best_trial"] == ""
+    assert widget.run_summary["review_mode"] == "trace"
+    assert [row["label"] for row in widget.trial_rankings] == [
+        "3.6Mx C10",
+        "5.1Mx C10",
+    ]
+    assert all(row["score"] is None for row in widget.trial_rankings)
+    assert all(row["final_loss"] is None for row in widget.trial_rankings)
+    assert not any(
+        alert["kind"] in {"nonfinite", "worse_final", "flat_loss"}
+        for alert in widget.trial_alerts
+    )
+
+    with np.testing.assert_raises_regex(ValueError, "review_mode='optimization'"):
+        widget.set_trial_sort("final_loss")
+    with np.testing.assert_raises_regex(ValueError, r"star_trial\(label\)"):
+        widget.star_best_trial()
+    with np.testing.assert_raises_regex(ValueError, r"hide_trial\(label\)"):
+        widget.hide_worst_trials()
+
+
+def test_show1d_explicit_loss_sort_selects_optimization_review() -> None:
+    widget = Show1D(
+        {"lambda 1": [4.0, 1.0], "lambda 10": [3.0, 2.0]},
+        trial_sort_key="final_loss",
+    )
+
+    assert widget.review_mode == "optimization"
+    assert widget.best_trial_label == "lambda 1"
+    assert [row["label"] for row in widget.trial_rankings] == [
+        "lambda 1",
+        "lambda 10",
+    ]
+
+
+def test_show1d_best_and_worst_helpers_ignore_descending_presentation() -> None:
+    widget = Show1D(
+        {
+            "best": [4.0, 1.0],
+            "middle": [4.0, 2.0],
+            "worst": [4.0, 3.0],
+        },
+        trial_sort_key="final_loss",
+        trial_sort_descending=True,
+    )
+
+    assert [row["label"] for row in widget.trial_rankings] == [
+        "worst",
+        "middle",
+        "best",
+    ]
+    assert widget.best_trial_label == "best"
+    assert widget.run_summary["best_trial"] == "best"
+
+    widget.star_best_trial().hide_worst_trials()
+
+    assert widget.starred_snapshot_image_labels == ["best"]
+    assert widget.hidden_snapshot_image_labels == ["worst"]
+
+
+def test_show1d_review_mode_and_sort_are_validated_at_all_boundaries() -> None:
+    with np.testing.assert_raises_regex(ValueError, "review_mode='trace'"):
+        Show1D(
+            np.arange(4, dtype=np.float32),
+            review_mode="trace",
+            trial_sort_key="final_loss",
+        )
+
+    trace = Show1D(np.arange(4, dtype=np.float32))
+    with np.testing.assert_raises_regex(ValueError, "review_mode='trace'"):
+        trace.trial_sort_key = "rmse"
+
+    optimization = Show1D(
+        np.arange(4, dtype=np.float32),
+        review_mode="optimization",
+    )
+    with np.testing.assert_raises_regex(ValueError, "review_mode='trace'"):
+        optimization.review_mode = "trace"
+
+    contradictory = optimization.state_dict()
+    contradictory["review_mode"] = "trace"
+    contradictory["trial_sort_key"] = "final_loss"
+    with np.testing.assert_raises_regex(ValueError, "review_mode='trace'"):
+        optimization.load_state_dict(contradictory)
+    assert optimization.review_mode == "optimization"
+    assert optimization.trial_sort_key == "final_loss"
+
+
+def test_show1d_legacy_state_migrates_metrics_and_live_review_modes() -> None:
+    legacy_metric = Show1D(
+        [[0.4, 0.2], [2.0, 1.5]],
+        labels=["RMSE", "elapsed"],
+        title="Joint-Time Ptychography Metrics",
+        y_label="metric",
+    ).state_dict()
+    legacy_metric.pop("review_mode")
+    legacy_metric["trial_sort_key"] = "final_loss"
+    legacy_metric["report_metadata"] = {"frame_by_frame": False}
+
+    metric = Show1D(np.zeros((2, 2), dtype=np.float32))
+    metric.load_state_dict(legacy_metric)
+    assert metric.review_mode == "trace"
+    assert metric.trial_sort_key == "label"
+    assert metric.best_trial_label == ""
+
+    legacy_live = Show1D.live(["loss"]).state_dict()
+    legacy_live.pop("review_mode")
+    live = Show1D(np.zeros((1, 1), dtype=np.float32))
+    live.load_state_dict(legacy_live)
+    assert live.review_mode == "optimization"
+    assert live.trial_sort_key == "final_loss"
 
 
 def test_show1d_ranking_notes_tags_alerts_and_summary_export(tmp_path: pathlib.Path) -> None:
@@ -825,6 +1014,72 @@ def test_show1d_html_export_configures_anywidget_requirejs(tmp_path: pathlib.Pat
 
     assert 'id="quantem-widget-anywidget-requirejs"' in html
     assert "anywidget@0.11.0/dist/index.min" in html
+
+
+def test_show1d_html_export_downsamples_only_linked_images(tmp_path: pathlib.Path) -> None:
+    trace = np.asarray([10.0, 11.0, 12.0, 13.0, 14.0], dtype=np.float32)
+    x = np.asarray([0.0, 0.25, 0.5, 0.75, 1.0], dtype=np.float32)
+    image = np.arange(35, dtype=np.float32).reshape(5, 7)
+    widget = Show1D(
+        trace,
+        x=x,
+        sampling=0.25,
+        units="nm",
+        snapshot_real_space_center=(4.0, 6.0),
+        snapshot_fft_center=(2.0, 4.0),
+        snapshot_profile_line=((0.0, 0.0), (4.0, 6.0)),
+    )
+    widget.snapshot(0, image=image, label="phase")
+    widget.set_profile_image(image, line=None)
+    widget.profile_line = [{"row": 0.0, "col": 0.0}, {"row": 4.0, "col": 6.0}]
+
+    clone = widget._clone_for_html_export(downsample=2)
+    try:
+        np.testing.assert_allclose(clone._data, widget._data)
+        np.testing.assert_allclose(clone._x, widget._x)
+        assert clone.snapshot_heights == [3]
+        assert clone.snapshot_widths == [4]
+        assert clone.profile_image_height == 3
+        assert clone.profile_image_width == 4
+        assert clone.pixel_size == 0.5
+        assert clone.snapshot_real_space_center == [2.0, 3.0]
+        assert clone.snapshot_fft_center == [1.0, 2.0]
+        assert clone.snapshot_profile_line == [
+            {"row": 0.0, "col": 0.0},
+            {"row": 2.0, "col": 3.0},
+        ]
+        assert clone.profile_line == [
+            {"row": 0.0, "col": 0.0},
+            {"row": 2.0, "col": 3.0},
+        ]
+        assert clone.report_metadata["html_export"] == {
+            "mode": "single",
+            "encoding": "full",
+            "downsample": 2,
+            "trace_samples_preserved": True,
+        }
+    finally:
+        clone.close()
+
+    output = widget.export_html(tmp_path / "show1d-downsampled.html", downsample=2)
+    assert output.exists()
+    assert "2x downsampled images" in widget.export_status
+    assert widget.snapshot_heights == [5]
+    assert widget.snapshot_widths == [7]
+
+
+def test_show1d_html_export_rejects_unimplemented_storage_and_encoding() -> None:
+    widget = Show1D(np.arange(4, dtype=np.float32))
+
+    with np.testing.assert_raises_regex(NotImplementedError, "mode='single'.*downsample"):
+        widget.export_html(mode="folder")
+    with np.testing.assert_raises_regex(NotImplementedError, "frontend decoder"):
+        widget.export_html(encoding="uint8")
+    with np.testing.assert_raises_regex(ValueError, "one of 1, 2, 4, or 8"):
+        widget.export_html(downsample=3)
+    for value in (2.5, np.nan, np.inf, -np.inf):
+        with np.testing.assert_raises_regex(ValueError, "finite integer factor"):
+            widget.export_html(downsample=value)
 
 
 def test_show1d_watch_run_polls_joint_ptycho_monitor_with_object_probe_snapshots(tmp_path: pathlib.Path) -> None:
