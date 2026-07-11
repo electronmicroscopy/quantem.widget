@@ -165,6 +165,34 @@ def test_show3d_filter_knobs_rerender_and_never_mutate(capsys):
     assert state["display_filter"] == "none" and state["display_sigma"] == 12.0
 
 
+def test_show2d_per_panel_filter_lists():
+    """A raw-vs-filtered A/B gallery from ONE constructor call: per-panel
+    filter/sigma lists, panel 0 stays bit-identical raw while panel 1 is
+    denoised, and UI edits scope to the selected panel."""
+    from quantem.widget import Show2D
+
+    counts = _sparse_eds_map(shape=(64, 64))
+    widget = Show2D(
+        [counts, counts],
+        display_filter=["none", "bin2_anscombe"],
+        display_sigma=[0.0, 8.0],
+        verbose=False,
+    )
+    assert widget.filter_per_panel is False  # sequence => per-panel scope
+    n = counts.size
+    sent = np.frombuffer(widget.frame_bytes[: 2 * n * 4], dtype=np.float32).reshape(2, 64, 64)
+    np.testing.assert_array_equal(sent[0], counts)  # panel 0: raw, bit-identical
+    assert not np.array_equal(sent[1], counts)  # panel 1: filtered view
+    assert "p1:bin2_anscombe" in widget.display_filter_banner
+    # Panel scope: editing the knob touches only the selected panel
+    widget.selected_idx = 0
+    assert widget.display_filter == "none"  # editor mirrors the selected panel
+    widget.display_filter = "gaussian"
+    assert widget.display_filters == ["gaussian", "bin2_anscombe"]
+    widget.selected_idx = 1
+    assert widget.display_filter == "bin2_anscombe"
+
+
 def test_show2d_underlay_composes_chemistry_on_haadf():
     """underlay=True on (haadf, map) adds the blend as a third RGB panel:
     haadf gray | map | map-on-HAADF, with bright columns colored (not white),

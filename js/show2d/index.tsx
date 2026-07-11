@@ -1017,6 +1017,7 @@ function Show2D() {
   // updates on release so scrubbing sigma stays smooth on large galleries.
   const [sigmaDraft, setSigmaDraft] = React.useState<number | null>(null);
   const filterOff = !displayFilter || displayFilter === "none";
+  const [filterPerPanel, setFilterPerPanel] = useModelState<boolean>("filter_per_panel");
   // Chemistry-on-structure blend panel (underlay=True): live sliders re-blend
   // in Python; commit on release so dragging stays smooth.
   const [underlayActive] = useModelState<boolean>("underlay");
@@ -6775,6 +6776,12 @@ function Show2D() {
                           {[1, 2, 4].map((b) => (<MenuItem key={b} value={String(b)}>{b}</MenuItem>))}
                         </Select>
                       </Box>
+                      {isGallery && (
+                        <Box sx={controlPairSx}>
+                          <Typography sx={{ ...typography.label, fontSize: 10 }} title="On: Filter/σ/Bin edits apply to every panel. Off: edits apply only to the selected panel.">All</Typography>
+                          <Switch checked={filterPerPanel ?? true} onChange={() => setFilterPerPanel(!filterPerPanel)} size="small" sx={switchStyles.small} />
+                        </Box>
+                      )}
                       {displayFilterBanner && (
                         <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.accent }} title={displayFilterBanner}>
                           {displayFilterBanner.split(" (")[0]} · raw: display_filter='none'

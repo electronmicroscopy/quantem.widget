@@ -547,24 +547,30 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     notebook_preview_max_px : int, default 512
         Longest panel side for the saved-notebook preview. Lower values make
         notebooks smaller; higher values make the static fallback sharper.
-    display_filter : str, default "none"
+    display_filter : str or sequence of str, default "none"
         Display-only denoise for sparse maps (EDS, low dose): ``"none"``,
         ``"gaussian"``, ``"bin2"``, ``"anscombe"``, ``"bin2_anscombe"``
         (recommended for sparse EDS), ``"bin4_anscombe"``, ``"tv"``, or
-        ``"denova*"`` when the denova package is installed. Pure view
-        transform: the stored array, the stats row, and every export of raw
-        data keep the original counts, and the lossless default is ``"none"``.
-        When active, a one-line banner announces the reduction and how to get
-        raw counts back. RGB panels are never filtered. Independent of
-        ``display_bin`` (the GPU display budget knob).
-    display_sigma : float, default 4.0
+        ``"denova*"`` when the denova package is installed. A scalar applies
+        to every panel; a sequence (one entry per panel) gives each panel its
+        own filter, e.g. ``["none", "bin2_anscombe"]`` for a raw vs filtered
+        A/B gallery. Pure view transform: the stored array, the stats row,
+        and every export of raw data keep the original counts, and the
+        lossless default is ``"none"``. When active, a one-line banner
+        announces the reduction and how to get raw counts back. RGB panels
+        are never filtered. Independent of ``display_bin`` (the GPU display
+        budget knob).
+    display_sigma : float or sequence of float, default 4.0
         Smoothing scale in pixels for the Gaussian/Anscombe display filters.
-    spatial_bin : {1, 2, 4}, default 1
+        A sequence sets one sigma per panel.
+    spatial_bin : {1, 2, 4} or sequence, default 1
         Extra display-side 2x bin passes for SNR, applied before
-        ``display_filter``. ``1`` (the default) is lossless.
+        ``display_filter``. ``1`` (the default) is lossless. A sequence sets
+        one bin factor per panel.
     filter_per_panel : bool, default True
-        In a gallery, filter every scalar panel (True) or only the selected
-        panel (False) for a live raw-vs-filtered comparison.
+        UI knob scope: True applies Filter/σ/Bin edits to every panel ("All"),
+        False edits only the selected panel. Passing any per-panel sequence
+        switches to the per-panel scope automatically.
     Attributes
     ----------
     render_total_ms : int or None
@@ -697,6 +703,13 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     display_filter = traitlets.Unicode("none").tag(sync=True)
     display_sigma = traitlets.Float(4.0).tag(sync=True)
     spatial_bin = traitlets.Int(1).tag(sync=True)
+    # Per-panel resolved knobs: one entry per panel, the packing source of
+    # truth. Constructed from scalar (broadcast) or sequence kwargs; the
+    # scalar traits above are the UI-facing editor whose scope is controlled
+    # by filter_per_panel ("All" broadcast vs selected "Panel" only).
+    display_filters = traitlets.List(traitlets.Unicode(), default_value=[]).tag(sync=True)
+    display_sigmas = traitlets.List(traitlets.Float(), default_value=[]).tag(sync=True)
+    spatial_bins = traitlets.List(traitlets.Int(), default_value=[]).tag(sync=True)
     filter_per_panel = traitlets.Bool(True).tag(sync=True)
     display_filter_banner = traitlets.Unicode("").tag(sync=True)
     # Chemistry-on-structure view: HAADF-modulated blend of an element map on
@@ -1000,9 +1013,9 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         notebook_preview_format: str | None = "jpeg",
         notebook_preview_quality: int = 88,
         notebook_preview_max_px: int = 512,
-        display_filter: str = "none",
-        display_sigma: float = 4.0,
-        spatial_bin: int = 1,
+        display_filter: str | Sequence[str] = "none",
+        display_sigma: float | Sequence[float] = 4.0,
+        spatial_bin: int | Sequence[int] = 1,
         filter_per_panel: bool = True,
         underlay: bool | str = False,
         underlay_alpha: float = 0.95,
@@ -1546,13 +1559,42 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             self._display_panel_stacks = self._panel_stacks
 
         # Display-only filter knobs (view transforms; the stored raw data and
-        # the stats row stay untouched). Set before the first frame pack so
-        # a constructor-selected filter shows from the first paint.
+        # the stats row stay untouched). Scalars broadcast to every panel; a
+        # sequence gives each panel its own filter/sigma/bin (e.g. a raw vs
+        # filtered A/B gallery). Set before the first frame pack so a
+        # constructor-selected filter shows from the first paint.
         self._display_filter_ready = False
-        self.display_filter = str(display_filter)
-        self.display_sigma = float(display_sigma)
-        self.spatial_bin = int(spatial_bin)
-        self.filter_per_panel = bool(filter_per_panel)
+        self._filter_knob_sync = False
+        n_panels = int(self._data.shape[0])
+
+        def per_panel(value, kind, cast):
+            if isinstance(value, (list, tuple, np.ndarray)):
+                values = [cast(v) for v in value]
+                if len(values) != n_panels:
+                    raise ValueError(
+                        f"{kind} sequence length ({len(values)}) must equal the "
+                        f"panel count ({n_panels})"
+                    )
+                return values, False
+            return [cast(value)] * n_panels, True
+
+        filters, filters_scalar = per_panel(display_filter, "display_filter", str)
+        sigmas, sigmas_scalar = per_panel(display_sigma, "display_sigma", float)
+        bins, bins_scalar = per_panel(spatial_bin, "spatial_bin", int)
+        self.display_filters = filters
+        self.display_sigmas = sigmas
+        self.spatial_bins = bins
+        # Scalar traits are the UI editor, mirroring the selected panel.
+        self._filter_knob_sync = True
+        self.display_filter = self.display_filters[0]
+        self.display_sigma = float(sigmas[0])
+        self.spatial_bin = int(bins[0])
+        self._filter_knob_sync = False
+        # A sequence means independent per-panel knobs, so UI edits scope to
+        # the selected panel; scalars keep the broadcast "All" scope.
+        self.filter_per_panel = (
+            bool(filter_per_panel) and filters_scalar and sigmas_scalar and bins_scalar
+        )
         self._display_filter_ready = True
         self._refresh_display_filter_banner(announce=True)
 
@@ -2347,13 +2389,11 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             crop = self._data[panel, row0:row1, col0:col1]  # view: never copies the full array
             tile = bin2d(crop, factor=bin_factor, mode="mean") if bin_factor > 1 else crop
             tile = np.ascontiguousarray(tile, dtype=np.float32)
-            if self._display_filter_active() and (
-                self.filter_per_panel or panel == int(self.selected_idx)
-            ):
+            if self._panel_filter_active(panel):
                 # A raw full-res tile over a filtered preview would silently
                 # un-filter the zoomed view. Filtering the crop is edge-
                 # approximate near the tile border, but honest about the knobs.
-                tile = np.ascontiguousarray(self._filter_display_frame(tile))
+                tile = np.ascontiguousarray(self._filter_display_frame(tile, panel=panel))
             blocks.append(tile.tobytes())
             tiles.append({"panel": panel, "row0": row0, "col0": col0,
                           "rows": int(tile.shape[0]), "cols": int(tile.shape[1]),
@@ -2884,6 +2924,9 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             "display_sigma": self.display_sigma,
             "spatial_bin": self.spatial_bin,
             "filter_per_panel": self.filter_per_panel,
+            "display_filters": list(self.display_filters),
+            "display_sigmas": list(self.display_sigmas),
+            "spatial_bins": list(self.spatial_bins),
             "underlay_alpha": self.underlay_alpha,
             "underlay_haadf_gain": self.underlay_haadf_gain,
         }
@@ -3655,70 +3698,162 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             raise traitlets.TraitError(f"spatial_bin must be 1, 2, or 4; got {value}")
         return value
 
-    @traitlets.observe("display_filter", "display_sigma", "spatial_bin", "filter_per_panel", "selected_idx")
+    @traitlets.validate("display_filters")
+    def _validate_display_filters(self, proposal: dict) -> list[str]:
+        from quantem.widget.utils.display_filter import DISPLAY_FILTER_MODES, _normalize_mode
+
+        modes = [_normalize_mode(value) for value in proposal["value"]]
+        for mode in modes:
+            if mode != "none" and mode not in DISPLAY_FILTER_MODES:
+                raise traitlets.TraitError(
+                    "display_filters entries must be one of "
+                    + "|".join(DISPLAY_FILTER_MODES)
+                    + f" (or 'off'/'raw'); got {mode!r}"
+                )
+        return modes
+
+    @traitlets.validate("spatial_bins")
+    def _validate_spatial_bins(self, proposal: dict) -> list[int]:
+        values = [int(value) for value in proposal["value"]]
+        for value in values:
+            if value not in (1, 2, 4):
+                raise traitlets.TraitError(
+                    f"spatial_bins entries must be 1, 2, or 4; got {value}"
+                )
+        return values
+
+    @traitlets.observe("display_filter", "display_sigma", "spatial_bin")
+    def _on_display_filter_scalar_change(self, change: dict) -> None:
+        """UI editor knobs write through to the per-panel lists.
+
+        Scope follows ``filter_per_panel``: True broadcasts the edit to every
+        panel, False edits only the selected panel.
+        """
+        if not getattr(self, "_display_filter_ready", False) or self._filter_knob_sync:
+            return
+        idx = min(int(self.selected_idx), max(0, int(self.n_images) - 1))
+        n_panels = int(self.n_images)
+
+        def updated(current, value):
+            values = list(current)
+            if len(values) != n_panels:
+                values = [value] * n_panels
+            if self.filter_per_panel:
+                return [value] * n_panels
+            values[idx] = value
+            return values
+
+        name = change["name"]
+        if name == "display_filter":
+            self.display_filters = updated(self.display_filters, str(change["new"]))
+        elif name == "display_sigma":
+            self.display_sigmas = updated(self.display_sigmas, float(change["new"]))
+        else:
+            self.spatial_bins = updated(self.spatial_bins, int(change["new"]))
+
+    @traitlets.observe("display_filters", "display_sigmas", "spatial_bins")
     def _on_display_filter_change(self, change: dict) -> None:
-        """Repack the display frames when a filter knob changes (no disk I/O)."""
+        """Repack the display frames when per-panel knobs change (no disk I/O)."""
         if not getattr(self, "_display_filter_ready", False):
             return
-        if change["name"] == "selected_idx" and (
-            self.filter_per_panel or not self._display_filter_active()
-        ):
-            return
-        self._refresh_display_filter_banner(announce=change["name"] != "selected_idx")
+        self._refresh_display_filter_banner(announce=True)
         self._update_all_frames()
 
-    def _display_filter_active(self) -> bool:
+    @traitlets.observe("selected_idx")
+    def _on_selected_panel_filter_sync(self, change: dict) -> None:
+        """Panel scope: the scalar editor knobs mirror the selected panel."""
+        if not getattr(self, "_display_filter_ready", False) or self.filter_per_panel:
+            return
+        idx = int(change["new"])
+        if not (0 <= idx < len(self.display_filters)):
+            return
+        self._filter_knob_sync = True
+        try:
+            self.display_filter = self.display_filters[idx]
+            self.display_sigma = float(self.display_sigmas[idx])
+            self.spatial_bin = int(self.spatial_bins[idx])
+        finally:
+            self._filter_knob_sync = False
+
+    def _panel_filter_knobs(self, panel: int) -> tuple[str, float, int]:
+        filters = self.display_filters
+        if not filters or panel >= len(filters):
+            return str(self.display_filter), float(self.display_sigma), int(self.spatial_bin)
+        return (
+            str(filters[panel]),
+            float(self.display_sigmas[panel]),
+            int(self.spatial_bins[panel]),
+        )
+
+    def _panel_filter_active(self, panel: int) -> bool:
         from quantem.widget.utils.display_filter import _normalize_mode
 
-        return _normalize_mode(self.display_filter) != "none" or int(self.spatial_bin) > 1
+        mode, _sigma, spatial_bin = self._panel_filter_knobs(panel)
+        return _normalize_mode(mode) != "none" or spatial_bin > 1
+
+    def _display_filter_active(self) -> bool:
+        return any(self._panel_filter_active(i) for i in range(int(self.n_images)))
 
     def _refresh_display_filter_banner(self, *, announce: bool) -> None:
         """Sync the one-line reduction notice; print it when it changes.
 
         Announcing an active reduction is a house rule: the user must always
         know the view is filtered and that ``display_filter='none'`` restores
-        raw counts.
+        raw counts. Mixed per-panel setups summarize which panels are filtered.
         """
         from quantem.widget.utils.display_filter import format_display_filter_banner
 
-        banner = format_display_filter_banner(
-            self.display_filter, float(self.display_sigma), int(self.spatial_bin)
-        )
-        if banner and not self.filter_per_panel and int(self.n_images) > 1:
-            banner += f" · panel {int(self.selected_idx)} only"
+        knobs = [self._panel_filter_knobs(i) for i in range(int(self.n_images))]
+        active = [i for i in range(int(self.n_images)) if self._panel_filter_active(i)]
+        if not active:
+            banner = ""
+        elif len(set(knobs)) == 1:
+            mode, sigma, spatial_bin = knobs[0]
+            banner = format_display_filter_banner(mode, sigma, spatial_bin)
+        else:
+            per_panel = ", ".join(
+                f"p{i}:{knobs[i][0]} σ={knobs[i][1]:g}"
+                + (f" bin{knobs[i][2]}" if knobs[i][2] > 1 else "")
+                for i in active
+            )
+            banner = f"display: {per_panel} (set display_filter='none' for raw counts)"
         changed = banner != self.display_filter_banner
         self.display_filter_banner = banner
         if announce and banner and changed:
             print(banner)
 
-    def _filter_display_frame(self, frame: np.ndarray) -> np.ndarray:
+    def _filter_display_frame(self, frame: np.ndarray, panel: int | None = None) -> np.ndarray:
         from quantem.widget.utils.display_filter import apply_display_filter
 
+        if panel is None:
+            mode, sigma, spatial_bin = (
+                str(self.display_filter),
+                float(self.display_sigma),
+                int(self.spatial_bin),
+            )
+        else:
+            mode, sigma, spatial_bin = self._panel_filter_knobs(panel)
         return apply_display_filter(
-            np.asarray(frame),
-            filter=self.display_filter,
-            sigma=float(self.display_sigma),
-            spatial_bin=int(self.spatial_bin),
+            np.asarray(frame), filter=mode, sigma=sigma, spatial_bin=spatial_bin
         )
 
     def _filtered_frames(self, data: np.ndarray) -> np.ndarray:
         """Filtered VIEW of the display stack; the input arrays are never touched.
 
-        RGB panels are skipped: per-channel filtering of composed color panels
-        changes hue balance, so only 2D scalar panels are filtered. With
-        ``filter_per_panel=False`` only the selected panel is filtered, which
-        gives a live raw-vs-filtered comparison in a gallery of copies.
+        Each panel uses its own knobs from the per-panel lists. RGB panels are
+        skipped: per-channel filtering of composed color panels changes hue
+        balance, so only 2D scalar panels are filtered.
         """
         if not self._display_filter_active():
             return data
         frames = []
         for i in range(int(data.shape[0])):
             rgb = bool(self.is_rgb[i]) if i < len(self.is_rgb) else False
-            skip = rgb or (not self.filter_per_panel and i != int(self.selected_idx))
+            skip = rgb or not self._panel_filter_active(i)
             frames.append(
                 np.asarray(data[i], dtype=np.float32)
                 if skip
-                else self._filter_display_frame(data[i])
+                else self._filter_display_frame(data[i], panel=i)
             )
         return np.stack(frames, axis=0)
 
@@ -3735,7 +3870,9 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         haadf = np.asarray(self._data[self._underlay_haadf_idx], dtype=np.float32)
         map_raw = np.asarray(self._data[self._underlay_map_idx], dtype=np.float32)
         map_view = (
-            self._filter_display_frame(map_raw) if self._display_filter_active() else map_raw
+            self._filter_display_frame(map_raw, panel=self._underlay_map_idx)
+            if self._panel_filter_active(self._underlay_map_idx)
+            else map_raw
         )
 
         def norm01(image, lo_pct, hi_pct):
@@ -3850,12 +3987,15 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 offsets.append(-1)
                 continue
             rgb = bool(self.is_rgb[panel]) if panel < len(self.is_rgb) else False
-            skip = rgb or (not self.filter_per_panel and panel != int(self.selected_idx))
+            skip = rgb or not self._panel_filter_active(panel)
             if filter_active and not skip:
                 # Per-frame filtered VIEW so browser-local frame scrubbing shows
                 # the same filter as the main frame; the stored stack is untouched.
                 stack = np.stack(
-                    [self._filter_display_frame(stack[k]) for k in range(int(stack.shape[0]))],
+                    [
+                        self._filter_display_frame(stack[k], panel=panel)
+                        for k in range(int(stack.shape[0]))
+                    ],
                     axis=0,
                 )
             arr = np.ascontiguousarray(stack, dtype=np.float32)
