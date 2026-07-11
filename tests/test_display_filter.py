@@ -263,6 +263,57 @@ def test_show2d_underlay_composes_chemistry_on_haadf():
     np.testing.assert_array_equal(widget._data[1], eds_map)
 
 
+def test_underlay_slider_repacks_the_synced_rgb_block_the_browser_reads():
+    """Moving a blend slider must repaint the browser, not just the Python-side
+    ``_rgb_frames``. The canvas decodes the synced ``frame_bytes`` trait, so the
+    regression this guards is a blend that re-blends internally yet ships the
+    stale RGB block: turning the alpha or HAADF-gain knob has to change both the
+    ``frame_bytes`` buffer and the last-panel RGB block decoded out of it.
+    """
+    from quantem.widget import Show2D
+
+    rng = np.random.default_rng(11)
+    haadf = rng.random((128, 128)).astype(np.float32)
+    eds_map = _sparse_eds_map(shape=(128, 128))
+    widget = Show2D(
+        [haadf, eds_map],
+        underlay=True,
+        denoise="anscombe",
+        denoise_bin=2,
+        denoise_sigma=8,
+        cmap="magenta",
+        verbose=False,
+    )
+    per = 128 * 128
+    rgb_start = 2 * per  # panels 0,1 are one grayscale block each; blend is last
+    rgb_floats = 3 * per
+
+    def rgb_block(widget):
+        floats = np.frombuffer(
+            widget.frame_bytes[: (rgb_start + rgb_floats) * 4], dtype=np.float32
+        )
+        return floats[rgb_start : rgb_start + rgb_floats].reshape(128, 128, 3).copy()
+
+    before_bytes = bytes(widget.frame_bytes)
+    before_block = rgb_block(widget)
+    before_blend = widget._compute_underlay_blend().copy()
+
+    widget.underlay_alpha = 0.2
+    assert bytes(widget.frame_bytes) != before_bytes  # synced buffer changed
+    assert not np.array_equal(rgb_block(widget), before_block)  # decoded block changed
+    assert not np.array_equal(widget._compute_underlay_blend(), before_blend)
+
+    # The HAADF-gain knob is the second blend control and must repaint too.
+    gain_bytes = bytes(widget.frame_bytes)
+    gain_block = rgb_block(widget)
+    widget.underlay_haadf_gain = 0.9
+    assert bytes(widget.frame_bytes) != gain_bytes
+    assert not np.array_equal(rgb_block(widget), gain_block)
+
+    np.testing.assert_array_equal(widget._data[0], haadf)  # sources untouched
+    np.testing.assert_array_equal(widget._data[1], eds_map)
+
+
 def test_show2d_webgpu_negotiation_ships_raw_frames():
     """The browser reports a real WebGPU adapter (_webgpu_filter_ok=True): the
     widget ships raw counts for the WGSL port to filter client-side, keeps
