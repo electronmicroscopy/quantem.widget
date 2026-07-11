@@ -39,6 +39,13 @@ export. See the [Show3D tutorial](../tutorials/show3d).
 | FFT window toggle | `fft_window` | Apodization on/off before FFT rendering |
 | Resize / zoom chrome | `show_resize_handles`, `show_zoom_indicator` | Resize handles and zoom readouts show/hide; the zoom setting covers every real-space panel and FFT tile/inset |
 | FFT layout and initial view | `fft_layout`, `fft_overlay_position`, `fft_overlay_size`, `fft_overlay_zoom` | Places FFTs below, right, or inside every panel and initializes their shared zoom |
+| Denoise | `denoise`, `denoise_sigma`, `denoise_bin`, `show_denoise` | Display-only denoise (`none` / `gaussian` / `anscombe`) applied to every playback frame; also reshapes the FFT view. `show_denoise` reveals the hidden controls row; the stored stack, stats, and exports stay lossless (`none` is the default) |
+
+The denoise family matches Show2D. See
+[Which denoise filter should I use?](show2d.md#which-denoise-filter-should-i-use)
+for the recommendation ladder (sparse EDS, very sparse, decent-dose HAADF,
+quantitative). An active denoise reshapes the FFT magnitude too, so set
+`denoise="none"` for quantitative FFT work.
 
 ## FFT quality labels
 

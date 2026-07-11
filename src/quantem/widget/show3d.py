@@ -690,6 +690,36 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     notebook_preview_max_px : int, default 512
         Longest panel side for the saved-notebook preview. Lower values make
         notebooks smaller; higher values make the static fallback sharper.
+    denoise : str, default "none"
+        Display-only denoise method for sparse map stacks (EDS, low dose),
+        applied to every playback frame and to the FFT view. Three orthogonal
+        choices: ``"none"``, ``"gaussian"``, or ``"anscombe"`` (Poisson
+        count-respecting smoothing); binning is the separate ``denoise_bin``
+        knob. Recommendation ladder: sparse EDS -> ``"anscombe"`` with
+        ``denoise_bin=2`` and sigma 6-10; very sparse -> ``"anscombe"`` with
+        ``denoise_bin=4`` and sigma 8-12; decent-dose HAADF -> ``"gaussian"``
+        sigma 1-2 or ``"none"``; anything quantitative -> ``"none"``. The
+        compound spellings ``"bin2"``, ``"bin2_anscombe"`` and
+        ``"bin4_anscombe"`` stay accepted as aliases that fold into (mode, bin);
+        ``"tv"``/``"denova*"`` remain available from Python (not in the UI
+        menu). Pure view transform: the stored stack, the stats row, and every
+        export of raw data keep the original counts, and the lossless default is
+        ``"none"``. When active, a one-line banner announces the reduction and
+        how to get raw counts back. An active filter also reshapes the FFT view,
+        so set ``denoise="none"`` for quantitative FFT work.
+    denoise_sigma : float, default 4.0
+        Smoothing scale in pixels for the Gaussian/Anscombe display filters.
+    denoise_bin : {1, 2, 4}, default 1
+        Display-side 2x bin passes for SNR, combined with ``denoise``. ``1``
+        (the default) is lossless. Independent of ``display_bin`` (the GPU
+        display budget knob).
+    show_denoise : bool, default False
+        Show the denoise controls row. Hidden by default to keep the widget
+        clean; auto-enabled when the stack starts with an active denoise. An
+        active reduction always shows its banner, even with the row hidden. The
+        deprecated aliases ``display_filter``, ``display_sigma`` and
+        ``spatial_bin`` are still accepted for one release and map onto
+        ``denoise``, ``denoise_sigma`` and ``denoise_bin``.
     Attributes
     ----------
     render_total_ms : int or None
