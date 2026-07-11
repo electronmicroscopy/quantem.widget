@@ -730,12 +730,16 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     # per frame at every display wire-out (buffer window, frame_bytes, offline
     # pack, frame server); the stored stack is never modified and the lossless
     # default is "none". The FFT panel computes from the displayed frame, so
-    # an active filter also affects the FFT view; set display_filter="none"
+    # an active filter also affects the FFT view; set denoise="none"
     # for a raw FFT. Independent of display_bin (the GPU budget knob).
-    display_filter = traitlets.Unicode("none").tag(sync=True)
-    display_sigma = traitlets.Float(4.0).tag(sync=True)
-    spatial_bin = traitlets.Int(1).tag(sync=True)
-    display_filter_banner = traitlets.Unicode("").tag(sync=True)
+    denoise = traitlets.Unicode("none").tag(sync=True)
+    denoise_sigma = traitlets.Float(4.0).tag(sync=True)
+    denoise_bin = traitlets.Int(1).tag(sync=True)
+    denoise_banner = traitlets.Unicode("").tag(sync=True)
+    # The denoise controls row is hidden by default; auto-enabled when the
+    # widget starts with an active denoise (house rule: knobs that explain a
+    # reduced view must be discoverable).
+    show_denoise = traitlets.Bool(False).tag(sync=True)
     frame_bytes = traitlets.Bytes(b"").tag(sync=True)
     # Monotonic counter incremented each time frame_bytes is written. Defensive
     # against the case where traitlets.Bytes identity-compares to suppress the
@@ -1669,9 +1673,13 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         notebook_preview_format: str | None = "jpeg",
         notebook_preview_quality: int = 88,
         notebook_preview_max_px: int = 512,
-        display_filter: str = "none",
-        display_sigma: float = 4.0,
-        spatial_bin: int = 1,
+        denoise: str = "none",
+        denoise_sigma: float = 4.0,
+        denoise_bin: int = 1,
+        display_filter: str | None = None,
+        display_sigma: float | None = None,
+        spatial_bin: int | None = None,
+        show_denoise: bool = False,
         verbose: bool = True,
         max_cols: int | None = None,
         panel_gap: int | None = None,
@@ -1793,6 +1801,13 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         _t0 = time.perf_counter()
         # Reject unknown kwargs so typos raise instead of being silently ignored.
         _reject_unknown_kwargs(type(self), kwargs)
+        # Deprecated display_filter-era aliases (one rc of compatibility).
+        if display_filter is not None and denoise == "none":
+            denoise = display_filter
+        if display_sigma is not None and denoise_sigma == 4.0:
+            denoise_sigma = display_sigma
+        if spatial_bin is not None and denoise_bin == 1:
+            denoise_bin = spatial_bin
         # save_state controls whether the heavy pixel buffers are persisted into
         # the notebook's metadata.widgets on save. Default False: a plain display
         # embeds only light traits + a static image preview, so a large z-stack
@@ -1850,8 +1865,8 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                             dim_label=dim_label, use_torch=use_torch, device=device,
                             display_bin=display_bin, offline=offline,
                             state=state, dedupe_identical_panels=dedupe_identical_panels,
-                            display_filter=display_filter, display_sigma=display_sigma,
-                            spatial_bin=spatial_bin,
+                            denoise=denoise, denoise_sigma=denoise_sigma,
+                            denoise_bin=denoise_bin, show_denoise=show_denoise,
                             _t0=_t0)
             if panel_order is not None:
                 self.set_panel_order(panel_order)
@@ -1887,8 +1902,8 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                    display_bin: int | str, offline: bool | None,
                    state: dict | str | pathlib.Path | None,
                    dedupe_identical_panels: bool, _t0: float,
-                   display_filter: str = "none", display_sigma: float = 4.0,
-                   spatial_bin: int = 1) -> None:
+                   denoise: str = "none", denoise_sigma: float = 4.0,
+                   denoise_bin: int = 1, show_denoise: bool = False) -> None:
         """Heavy setup called synchronously by `__init__` inside `hold_sync()`.
         Validates panels, allocates frame_bytes, wires observers, and applies
         optional `state`. Split out from `__init__` so the construction surface
@@ -2393,11 +2408,17 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         # constructor-selected filter shows from the first paint.
         self._display_filter_ready = False
         self._display_filter_cache = {}
-        self.display_filter = str(display_filter)
-        self.display_sigma = float(display_sigma)
-        self.spatial_bin = int(spatial_bin)
+        # Compound spellings (bin2, bin2_anscombe, bin4_anscombe) are aliases
+        # for (mode, bin); the traits always hold the canonical trio.
+        from quantem.widget.utils.display_filter import resolve_denoise_mode
+
+        resolved_mode, resolved_bin = resolve_denoise_mode(str(denoise), int(denoise_bin))
+        self.denoise = resolved_mode
+        self.denoise_sigma = float(denoise_sigma)
+        self.denoise_bin = int(resolved_bin)
         self._display_filter_ready = True
         self._refresh_display_filter_banner(announce=True)
+        self.show_denoise = bool(show_denoise) or self._display_filter_active()
         frame_bytes = self.height * self.width * 4  # float32
         # Exact float32 sliding window. Do not ship the whole stack when it
         # would cross the browser/Jupyter ~2 GB Comm cliff (36×4k×4k is 2.4 GB).
@@ -2923,9 +2944,10 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             "profile_line": self.profile_line,
             "profile_width": self.profile_width,
             "diff_mode": self.diff_mode,
-            "display_filter": self.display_filter,
-            "display_sigma": self.display_sigma,
-            "spatial_bin": self.spatial_bin,
+            "denoise": self.denoise,
+            "show_denoise": self.show_denoise,
+            "denoise_sigma": self.denoise_sigma,
+            "denoise_bin": self.denoise_bin,
             "dim_label": self.dim_label,
             "dim_sampling": self.dim_sampling,
             "dim_unit": self.dim_unit,
@@ -3141,6 +3163,15 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         unknown = []
         if "canvas_size" in state:
             state["size"] = state.pop("canvas_size")
+        # display_filter-era saved states: migrate onto the denoise family.
+        for old_key, new_key in (
+            ("display_filter", "denoise"),
+            ("display_sigma", "denoise_sigma"),
+            ("spatial_bin", "denoise_bin"),
+            ("display_filter_banner", "denoise_banner"),
+        ):
+            if old_key in state and new_key not in state:
+                state[new_key] = state.pop(old_key)
         # `display_bin` is constructor/data dependent. Loading only the private
         # integer leaves display_data/height/width stale, so ignore saved values.
         state.pop("display_bin", None)
@@ -5626,7 +5657,7 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         self.roi_list = rois
         self.roi_active = True
 
-    @traitlets.validate("display_filter")
+    @traitlets.validate("denoise")
     def _validate_display_filter(self, proposal: dict) -> str:
         """Normalize and reject unknown display filter modes early."""
         from quantem.widget.utils.display_filter import DISPLAY_FILTER_MODES, _normalize_mode
@@ -5634,24 +5665,35 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         mode = _normalize_mode(proposal["value"])
         if mode != "none" and mode not in DISPLAY_FILTER_MODES:
             raise traitlets.TraitError(
-                "display_filter must be one of "
+                "denoise must be one of "
                 + "|".join(DISPLAY_FILTER_MODES)
                 + f" (or 'off'/'raw'); got {proposal['value']!r}"
             )
         return mode
 
-    @traitlets.validate("spatial_bin")
+    @traitlets.validate("denoise_bin")
     def _validate_spatial_bin(self, proposal: dict) -> int:
         value = int(proposal["value"])
         if value not in (1, 2, 4):
-            raise traitlets.TraitError(f"spatial_bin must be 1, 2, or 4; got {value}")
+            raise traitlets.TraitError(f"denoise_bin must be 1, 2, or 4; got {value}")
         return value
 
-    @traitlets.observe("display_filter", "display_sigma", "spatial_bin")
+    @traitlets.observe("denoise", "denoise_sigma", "denoise_bin")
     def _on_display_filter_change(self, change: dict) -> None:
         """Invalidate the filtered-frame cache and resend the view (no disk I/O)."""
         if not getattr(self, "_display_filter_ready", False):
             return
+        if change["name"] == "denoise":
+            from quantem.widget.utils.display_filter import resolve_denoise_mode
+
+            mode, extra_bin = resolve_denoise_mode(str(change["new"]))
+            if mode != str(change["new"]):
+                # Compound alias: rewrite to the canonical (mode, bin) pair;
+                # each set re-enters this observer with a canonical value.
+                self.denoise = mode
+                if extra_bin > 1:
+                    self.denoise_bin = max(int(self.denoise_bin), extra_bin)
+                return
         self._display_filter_cache = {}
         self._refresh_display_filter_banner(announce=True)
         if self.offline:
@@ -5663,22 +5705,22 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     def _display_filter_active(self) -> bool:
         from quantem.widget.utils.display_filter import _normalize_mode
 
-        return _normalize_mode(self.display_filter) != "none" or int(self.spatial_bin) > 1
+        return _normalize_mode(self.denoise) != "none" or int(self.denoise_bin) > 1
 
     def _refresh_display_filter_banner(self, *, announce: bool) -> None:
         """Sync the one-line reduction notice; print it when it changes.
 
         Announcing an active reduction is a house rule: the user must always
-        know the view is filtered and that ``display_filter='none'`` restores
+        know the view is filtered and that ``denoise='none'`` restores
         raw counts.
         """
         from quantem.widget.utils.display_filter import format_display_filter_banner
 
         banner = format_display_filter_banner(
-            self.display_filter, float(self.display_sigma), int(self.spatial_bin)
+            self.denoise, float(self.denoise_sigma), int(self.denoise_bin)
         )
-        changed = banner != self.display_filter_banner
-        self.display_filter_banner = banner
+        changed = banner != self.denoise_banner
+        self.denoise_banner = banner
         if announce and banner and changed:
             print(banner)
 
@@ -5724,9 +5766,9 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
 
         filtered = apply_display_filter(
             np.asarray(frame),
-            filter=self.display_filter,
-            sigma=float(self.display_sigma),
-            spatial_bin=int(self.spatial_bin),
+            mode=self.denoise,
+            sigma=float(self.denoise_sigma),
+            spatial_bin=int(self.denoise_bin),
         )
         if cache_key is not None:
             self._display_filter_cache[cache_key] = filtered

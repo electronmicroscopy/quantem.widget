@@ -28,7 +28,7 @@ def test_default_filter_is_lossless_identity():
     """The default view shows exactly the stored counts (house rule 2)."""
     counts = _sparse_eds_map()
     for mode in ("none", "off", "raw"):
-        view = apply_display_filter(counts, filter=mode)
+        view = apply_display_filter(counts, mode=mode)
         np.testing.assert_allclose(view, counts)
         assert view.dtype == np.float32
     assert counts.base is None and counts.dtype == np.float32  # input untouched
@@ -40,7 +40,7 @@ def test_bin2_anscombe_suppresses_speckle_keeps_shape():
     from scipy import ndimage
 
     counts = _sparse_eds_map()
-    view = apply_display_filter(counts, filter="bin2_anscombe", sigma=8)
+    view = apply_display_filter(counts, mode="bin2_anscombe", sigma=8)
     assert view.shape == counts.shape
 
     def high_freq_energy(a):
@@ -52,7 +52,7 @@ def test_bin2_anscombe_suppresses_speckle_keeps_shape():
 def test_bin2_zoom_back_preserves_odd_shapes():
     """Odd-sized survey crops keep their shape through the bin2 round trip."""
     counts = _sparse_eds_map(shape=(257, 255))
-    view = apply_display_filter(counts, filter="bin2", sigma=4)
+    view = apply_display_filter(counts, mode="bin2", sigma=4)
     assert view.shape == (257, 255)
 
 
@@ -74,7 +74,7 @@ def test_banner_announces_active_reduction_only():
     """The one-line notice appears when a reduction is active and tells the
     user how to get native counts back; the lossless default stays silent."""
     banner = format_display_filter_banner("bin2_anscombe", 8)
-    assert banner == "display: bin2_anscombe σ=8 (set display_filter='none' for raw counts)"
+    assert banner == "denoise: bin2_anscombe σ=8 (set denoise='none' for raw counts)"
     assert format_display_filter_banner("none", 4) == ""
     assert "bin2" in format_display_filter_banner("none", 0, spatial_bin=2)
 
@@ -86,8 +86,8 @@ def test_show2d_default_view_bit_identical_and_raw_untouched(capsys):
 
     counts = _sparse_eds_map(shape=(64, 64))
     widget = Show2D(counts, verbose=False)
-    assert widget.display_filter == "none"
-    assert widget.display_filter_banner == ""
+    assert widget.denoise == "none"
+    assert widget.denoise_banner == ""
     assert "display:" not in capsys.readouterr().out
     # frame_bytes is the raw float32 pack (zero-padded to a multiple of 3)
     sent = np.frombuffer(widget.frame_bytes, dtype=np.float32, count=counts.size)
@@ -104,15 +104,17 @@ def test_show2d_filter_knobs_rerender_live(capsys):
     kept = counts.copy()
     widget = Show2D(counts, verbose=False)
     raw_bytes = widget.frame_bytes
-    widget.display_filter = "bin2_anscombe"
+    widget.denoise = "bin2_anscombe"  # compound alias -> (anscombe, bin 2)
     assert widget.frame_bytes != raw_bytes
     out = capsys.readouterr().out
-    assert out.count("display: bin2_anscombe") == 1
-    assert "display_filter='none'" in out
+    assert out.count("denoise: anscombe σ=4 bin2") == 1
+    assert "denoise='none'" in out
     sigma_bytes = widget.frame_bytes
-    widget.display_sigma = 10.0
+    widget.denoise_sigma = 10.0
     assert widget.frame_bytes != sigma_bytes  # sigma change re-filters too
-    widget.display_filter = "none"
+    # The compound alias raised the bin knob; raw needs both knobs reset.
+    widget.denoise = "none"
+    widget.denoise_bin = 1
     assert widget.frame_bytes == raw_bytes
     np.testing.assert_array_equal(widget._data[0], kept)  # raw counts intact
 
@@ -125,17 +127,17 @@ def test_show2d_gallery_filters_scalar_panels_and_persists_state():
     counts = _sparse_eds_map(shape=(64, 64))
     widget = Show2D(
         [counts, counts],
-        display_filter="bin2_anscombe",
-        display_sigma=8,
+        denoise="bin2_anscombe",
+        denoise_sigma=8,
         verbose=False,
     )
     state = widget.state_dict()
-    assert state["display_filter"] == "bin2_anscombe"
-    assert state["display_sigma"] == 8.0
-    assert state["spatial_bin"] == 1
+    assert state["denoise"] == "anscombe"  # compound kwarg normalized
+    assert state["denoise_bin"] == 2
+    assert state["denoise_sigma"] == 8.0
     restored = Show2D([counts, counts], verbose=False)
     restored.load_state_dict(state)
-    assert restored.display_filter == "bin2_anscombe"
+    assert restored.denoise == "anscombe"
     assert restored.frame_bytes == widget.frame_bytes
 
 
@@ -148,21 +150,23 @@ def test_show3d_filter_knobs_rerender_and_never_mutate(capsys):
     stack = np.stack([_sparse_eds_map(seed=s, shape=(64, 64)) for s in range(3)])
     kept = stack.copy()
     widget = Show3D(stack, verbose=False, offline=False)
-    assert widget.display_filter == "none"
+    assert widget.denoise == "none"
     widget._send_buffer(0)  # what the browser's first prefetch triggers
     raw_buffer = widget._buffer_bytes
     assert raw_buffer
-    widget.display_filter = "bin2_anscombe"
+    widget.denoise = "bin2_anscombe"  # compound alias -> (anscombe, bin 2)
     assert widget._buffer_bytes != raw_buffer
-    assert "display: bin2_anscombe" in capsys.readouterr().out
+    assert "denoise: anscombe" in capsys.readouterr().out
     sigma_buffer = widget._buffer_bytes
-    widget.display_sigma = 12.0
+    widget.denoise_sigma = 12.0
     assert widget._buffer_bytes != sigma_buffer
-    widget.display_filter = "none"
+    # The compound alias raised the bin knob; raw needs both knobs reset.
+    widget.denoise = "none"
+    widget.denoise_bin = 1
     assert widget._buffer_bytes == raw_buffer
     np.testing.assert_array_equal(widget._data, kept)
     state = widget.state_dict()
-    assert state["display_filter"] == "none" and state["display_sigma"] == 12.0
+    assert state["denoise"] == "none" and state["denoise_sigma"] == 12.0
 
 
 def test_show2d_per_panel_filter_lists():
@@ -174,23 +178,23 @@ def test_show2d_per_panel_filter_lists():
     counts = _sparse_eds_map(shape=(64, 64))
     widget = Show2D(
         [counts, counts],
-        display_filter=["none", "bin2_anscombe"],
-        display_sigma=[0.0, 8.0],
+        denoise=["none", "bin2_anscombe"],
+        denoise_sigma=[0.0, 8.0],
         verbose=False,
     )
-    assert widget.filter_per_panel is False  # sequence => per-panel scope
+    assert widget.denoise_scope == "panel"  # sequence => per-panel scope
     n = counts.size
     sent = np.frombuffer(widget.frame_bytes[: 2 * n * 4], dtype=np.float32).reshape(2, 64, 64)
     np.testing.assert_array_equal(sent[0], counts)  # panel 0: raw, bit-identical
     assert not np.array_equal(sent[1], counts)  # panel 1: filtered view
-    assert "p1:bin2_anscombe" in widget.display_filter_banner
+    assert "p1:anscombe" in widget.denoise_banner and "bin2" in widget.denoise_banner
     # Panel scope: editing the knob touches only the selected panel
     widget.selected_idx = 0
-    assert widget.display_filter == "none"  # editor mirrors the selected panel
-    widget.display_filter = "gaussian"
-    assert widget.display_filters == ["gaussian", "bin2_anscombe"]
+    assert widget.denoise == "none"  # editor mirrors the selected panel
+    widget.denoise = "gaussian"
+    assert widget.denoise_modes == ["gaussian", "anscombe"]
     widget.selected_idx = 1
-    assert widget.display_filter == "bin2_anscombe"
+    assert widget.denoise == "anscombe"
 
 
 def test_show2d_underlay_composes_chemistry_on_haadf():
@@ -205,8 +209,8 @@ def test_show2d_underlay_composes_chemistry_on_haadf():
     widget = Show2D(
         [haadf, eds_map],
         underlay=True,
-        display_filter="bin2_anscombe",
-        display_sigma=8,
+        denoise="bin2_anscombe",
+        denoise_sigma=8,
         cmap="magenta",
         verbose=False,
     )
@@ -232,14 +236,14 @@ def test_show2d_webgpu_negotiation_ships_raw_frames():
     from quantem.widget import Show2D
 
     counts = _sparse_eds_map(shape=(64, 64))
-    widget = Show2D(counts, display_filter="bin2_anscombe", display_sigma=8, verbose=False)
+    widget = Show2D(counts, denoise="bin2_anscombe", denoise_sigma=8, verbose=False)
     n_bytes = counts.size * 4
     python_view = np.frombuffer(widget.frame_bytes[:n_bytes], dtype=np.float32).reshape(64, 64).copy()
     assert not np.array_equal(python_view, counts)  # kernel-filtered by default
     widget._webgpu_filter_ok = True  # JS negotiation: real adapter present
     sent = np.frombuffer(widget.frame_bytes[:n_bytes], dtype=np.float32).reshape(64, 64)
     np.testing.assert_array_equal(sent, counts)  # raw counts ship, browser filters
-    assert "bin2_anscombe" in widget.display_filter_banner  # reduction still announced
+    assert "anscombe" in widget.denoise_banner  # reduction still announced
     widget._webgpu_filter_ok = False  # reopened without WebGPU: Python fallback
     back = np.frombuffer(widget.frame_bytes[:n_bytes], dtype=np.float32).reshape(64, 64)
     np.testing.assert_array_equal(back, python_view)
@@ -251,13 +255,13 @@ def test_show2d_html_export_ships_raw_frames_and_knobs():
     from quantem.widget import Show2D
 
     counts = _sparse_eds_map(shape=(64, 64))
-    widget = Show2D(counts, display_filter="anscombe", display_sigma=6, verbose=False)
+    widget = Show2D(counts, denoise="anscombe", denoise_sigma=6, verbose=False)
     clone = widget._clone_for_html_export(quantized=False)
     try:
         assert clone._webgpu_filter_ok is True
         sent = np.frombuffer(clone.frame_bytes[: counts.size * 4], dtype=np.float32).reshape(64, 64)
         np.testing.assert_array_equal(sent, counts)
-        assert list(clone.display_filters) == ["anscombe"]
-        assert list(clone.display_sigmas) == [6.0]
+        assert list(clone.denoise_modes) == ["anscombe"]
+        assert list(clone.denoise_sigmas) == [6.0]
     finally:
         clone.close()
