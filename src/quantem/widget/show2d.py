@@ -1353,8 +1353,20 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             denoise_sigma = 4.0
         if not denoise_bin_supplied:
             denoise_bin = 1
+        def _is_panel_seq(v):
+            return isinstance(v, (list, tuple)) and not isinstance(v, str)
+        _per_panel_denoise = (
+            (denoise_supplied and _is_panel_seq(denoise))
+            or (denoise_sigma_supplied and _is_panel_seq(denoise_sigma))
+            or (denoise_bin_supplied and _is_panel_seq(denoise_bin))
+        )
         if not denoise_scope_supplied:
-            denoise_scope = "all"
+            # Per-panel denoise specified at construction implies per-panel
+            # editing: the single denoise control edits the SELECTED panel
+            # rather than broadcasting to all (which would clobber the author's
+            # per-panel setup on the first interactive edit). Explicit
+            # denoise_scope / filter_per_panel below still win.
+            denoise_scope = "panel" if _per_panel_denoise else "all"
         if display_filter is not None:
             warnings.warn(
                 "display_filter is deprecated; use denoise= instead.",
