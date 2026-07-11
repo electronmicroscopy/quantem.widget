@@ -1007,6 +1007,16 @@ function Show2D() {
   const [canvasSizeTrait, setCanvasSizeTrait] = useModelState<number>("size");
   const [smooth, setSmooth] = useModelState<boolean>("smooth");
   const imageRenderingStyle = smooth ? "auto" : "pixelated";
+  // Display-only filter knobs for sparse maps (EDS, low dose). Python owns
+  // the math and repacks frame_bytes on change; raw data is never modified.
+  const [displayFilter, setDisplayFilter] = useModelState<string>("display_filter");
+  const [displaySigma, setDisplaySigma] = useModelState<number>("display_sigma");
+  const [spatialBin, setSpatialBin] = useModelState<number>("spatial_bin");
+  const [displayFilterBanner] = useModelState<string>("display_filter_banner");
+  // Local slider value during drag; the model (and the Python refilter) only
+  // updates on release so scrubbing sigma stays smooth on large galleries.
+  const [sigmaDraft, setSigmaDraft] = React.useState<number | null>(null);
+  const filterOff = !displayFilter || displayFilter === "none";
 
   // Scale bar
   const [pixelSize] = useModelState<number>("pixel_size");
@@ -6727,6 +6737,41 @@ function Show2D() {
                       )}
                       {getZoomState(isGallery ? selectedIdx : 0).zoom !== 1 && (
                         <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.accent, fontWeight: "bold" }}>{getZoomState(isGallery ? selectedIdx : 0).zoom.toFixed(1)}x</Typography>
+                      )}
+                    </Box>
+                  )}
+                  {/* Row 3: display-only filter for sparse maps (EDS, low dose) */}
+                  {(
+                    <Box sx={{ ...controlRow, ...mobileControlRowSx, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, opacity: 1, pointerEvents: "auto" }}>
+                      <Box sx={controlPairSx}>
+                        <Typography sx={{ ...typography.label, fontSize: 10 }} title="Display-only denoise for sparse maps (EDS, low dose). Raw data, stats, and exports keep original counts; 'none' shows raw.">Filter</Typography>
+                        <Select size="small" value={displayFilter || "none"} onChange={(e) => setDisplayFilter(e.target.value)} MenuProps={themedMenuProps} sx={{ ...themedSelect, minWidth: 88 }}>
+                          {["none", "gaussian", "bin2", "anscombe", "bin2_anscombe", "bin4_anscombe", "tv"].map((mode) => (
+                            <MenuItem key={mode} value={mode}>{mode}</MenuItem>
+                          ))}
+                        </Select>
+                      </Box>
+                      <Box sx={controlPairSx}>
+                        <Typography sx={{ ...typography.label, fontSize: 10, opacity: filterOff ? 0.5 : 1 }}>σ {(sigmaDraft ?? Number(displaySigma ?? 4)).toFixed(1)}</Typography>
+                        <Slider
+                          value={sigmaDraft ?? Number(displaySigma ?? 4)}
+                          min={0} max={20} step={0.5}
+                          disabled={filterOff}
+                          onChange={(_, v) => setSigmaDraft(v as number)}
+                          onChangeCommitted={(_, v) => { setDisplaySigma(v as number); setSigmaDraft(null); }}
+                          size="small" sx={{ ...sliderStyles.small, width: 60 }}
+                        />
+                      </Box>
+                      <Box sx={controlPairSx}>
+                        <Typography sx={{ ...typography.label, fontSize: 10 }} title="Extra display-side 2x bin passes for SNR, before the filter. 1 is lossless.">Bin</Typography>
+                        <Select size="small" value={String(spatialBin || 1)} onChange={(e) => setSpatialBin(parseInt(e.target.value, 10))} MenuProps={themedMenuProps} sx={{ ...themedSelect, minWidth: 40 }}>
+                          {[1, 2, 4].map((b) => (<MenuItem key={b} value={String(b)}>{b}</MenuItem>))}
+                        </Select>
+                      </Box>
+                      {displayFilterBanner && (
+                        <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.accent }} title={displayFilterBanner}>
+                          {displayFilterBanner.split(" (")[0]} · raw: display_filter='none'
+                        </Typography>
                       )}
                     </Box>
                   )}

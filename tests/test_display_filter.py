@@ -77,3 +77,63 @@ def test_banner_announces_active_reduction_only():
     assert banner == "display: bin2_anscombe σ=8 (set display_filter='none' for raw counts)"
     assert format_display_filter_banner("none", 4) == ""
     assert "bin2" in format_display_filter_banner("none", 0, spatial_bin=2)
+
+
+def test_show2d_default_view_bit_identical_and_raw_untouched(capsys):
+    """A plain Show2D(map) shows exactly the stored counts: no banner, and
+    the wire bytes match a raw float32 pack of the data."""
+    from quantem.widget import Show2D
+
+    counts = _sparse_eds_map(shape=(64, 64))
+    widget = Show2D(counts, verbose=False)
+    assert widget.display_filter == "none"
+    assert widget.display_filter_banner == ""
+    assert "display:" not in capsys.readouterr().out
+    # frame_bytes is the raw float32 pack (zero-padded to a multiple of 3)
+    sent = np.frombuffer(widget.frame_bytes, dtype=np.float32, count=counts.size)
+    np.testing.assert_array_equal(sent.reshape(counts.shape), counts)
+
+
+def test_show2d_filter_knobs_rerender_live(capsys):
+    """Turning on bin2_anscombe re-filters the view in place (no reload),
+    announces the reduction once, and going back to none restores raw bytes
+    while the stored array never changes."""
+    from quantem.widget import Show2D
+
+    counts = _sparse_eds_map(shape=(64, 64))
+    kept = counts.copy()
+    widget = Show2D(counts, verbose=False)
+    raw_bytes = widget.frame_bytes
+    widget.display_filter = "bin2_anscombe"
+    assert widget.frame_bytes != raw_bytes
+    out = capsys.readouterr().out
+    assert out.count("display: bin2_anscombe") == 1
+    assert "display_filter='none'" in out
+    sigma_bytes = widget.frame_bytes
+    widget.display_sigma = 10.0
+    assert widget.frame_bytes != sigma_bytes  # sigma change re-filters too
+    widget.display_filter = "none"
+    assert widget.frame_bytes == raw_bytes
+    np.testing.assert_array_equal(widget._data[0], kept)  # raw counts intact
+
+
+def test_show2d_gallery_filters_scalar_panels_and_persists_state():
+    """A raw-vs-filtered A/B gallery: per-panel filtering applies to every
+    scalar panel, and the three knobs round-trip through saved state."""
+    from quantem.widget import Show2D
+
+    counts = _sparse_eds_map(shape=(64, 64))
+    widget = Show2D(
+        [counts, counts],
+        display_filter="bin2_anscombe",
+        display_sigma=8,
+        verbose=False,
+    )
+    state = widget.state_dict()
+    assert state["display_filter"] == "bin2_anscombe"
+    assert state["display_sigma"] == 8.0
+    assert state["spatial_bin"] == 1
+    restored = Show2D([counts, counts], verbose=False)
+    restored.load_state_dict(state)
+    assert restored.display_filter == "bin2_anscombe"
+    assert restored.frame_bytes == widget.frame_bytes
