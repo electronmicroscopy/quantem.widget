@@ -152,7 +152,10 @@ class WatchedImageFolder:
                 continue
             if candidate.suffix.casefold() not in _SUPPORTED_IMAGE_SUFFIXES:
                 continue
-            unique.setdefault(_canonical_path(candidate), None)
+            # Keep the path as named in the folder: resolving through a final
+            # symlink can land on an extension-less target (Hugging Face hub
+            # cache blobs), which the format readers cannot dispatch on.
+            unique.setdefault(candidate, None)
         return sorted(unique, key=lambda path: _natural_path_key(path, self.folder))
 
     def _read_stable(self, path: Path) -> _ReadImage | None:

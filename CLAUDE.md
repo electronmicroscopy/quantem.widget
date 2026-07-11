@@ -50,3 +50,17 @@ CI executes tutorials at build time (`execute_notebooks: force` in
 commit a re-executed notebook with stored widget state, and never switch the
 docs build to `cache` mode — jupyter-cache silently drops widget state and
 every widget on the docs site goes blank.
+
+Colab bootstrap cells (the `try: import google.colab` / pip-install block) are
+plumbing for Colab users only: keep the install strictly inside the
+`google.colab` success branch, put the bootstrap in its OWN cell tagged
+`remove-cell`, and never mix it with tutorial code. The tag strips it from
+built docs pages while the Colab badge notebook keeps it.
+
+Built docs pages must show exactly ONE output per widget cell: the interactive
+widget. Every docs build sets `QUANTEM_WIDGET_STATIC_FALLBACK=0` (see
+widget-docs.yml and widget_local_signoff.sh) so the saved-notebook static
+preview sibling is never emitted — it would render as a duplicate image under
+the live widget. Set the same variable in any new docs/CI build path, and
+after changing widget display or save-state code, check built pages for zero
+`img.quantem-static-fallback` occurrences.

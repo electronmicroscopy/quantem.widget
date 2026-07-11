@@ -10,7 +10,18 @@ pip install -i https://test.pypi.org/simple/ \
     quantem.widget
 ```
 
-That works on every backend; the widget picks the fastest path it finds at runtime.
+That works on every backend; the widget picks the fastest path it finds at
+runtime. Requires Python 3.11 or newer.
+
+To upload or download shared datasets through the Hugging Face helpers
+(`quantem.widget.io.upload` / `download` — see [Load and I/O](api/io)), add
+the `[hub]` extra, which pulls in `quantem.data`:
+
+```bash
+pip install -i https://test.pypi.org/simple/ \
+    --extra-index-url https://pypi.org/simple/ \
+    "quantem.widget[hub]"
+```
 
 ## Google Colab
 

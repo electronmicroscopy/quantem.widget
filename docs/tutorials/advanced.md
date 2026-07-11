@@ -1,4 +1,4 @@
-# Advanced tutorials
+# Advanced
 
 Deeper workflows for when the basic tutorials are not enough - each one built
 around a real question from the microscope room:

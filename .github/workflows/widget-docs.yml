@@ -53,7 +53,14 @@ jobs:
         with:
           path: ~/.cache/huggingface
           key: docs-hf-tutorial-data-v1
+      # Docs pages bake live widget state, so skip the saved-notebook static
+      # preview sibling — it would render as a duplicate image under each widget.
       - run: jupyter-book build docs
+        env:
+          # Silence the "unauthenticated requests" warning that otherwise gets
+          # baked into tutorial outputs on the published pages.
+          HF_HUB_VERBOSITY: error
+          QUANTEM_WIDGET_STATIC_FALLBACK: "0"
       - uses: actions/upload-pages-artifact@v5
         with:
           path: docs/_build/html
