@@ -861,6 +861,10 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     # widget starts with an active denoise (house rule: knobs that explain a
     # reduced view must be discoverable).
     show_denoise = traitlets.Bool(False).tag(sync=True)
+    # Set True by the frontend when a real (non-software) WebGPU adapter is
+    # available: denoise then runs in the browser (WGSL, live sigma scrub) and
+    # Python ships RAW frames. False keeps the scipy path (e.g. SwiftShader).
+    _webgpu_filter_ok = traitlets.Bool(False).tag(sync=True)
     frame_bytes = traitlets.Bytes(b"").tag(sync=True)
     # True when the stack is true-color RGB (PNG figure frames, color composites).
     # frame_bytes then carries (H*W*3) float32 RGB in [0, 1] instead of gray H*W.
@@ -6334,6 +6338,20 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         self._send_buffer(int(self._buffer_start))
         self._update_all()
 
+    @traitlets.observe("_webgpu_filter_ok")
+    def _on_webgpu_filter_ok_change(self, change: dict) -> None:
+        """Re-ship the view when browser filtering is negotiated on/off.
+
+        Flipping the flag changes whether Python bakes the denoise or ships raw,
+        so the cached filtered frames are stale and the buffer must re-send.
+        """
+        if not getattr(self, "_display_filter_ready", False):
+            return
+        self._display_filter_cache = {}
+        self.frame_server_version = int(self.frame_server_version) + 1
+        self._send_buffer(int(self._buffer_start))
+        self._update_all()
+
     def _display_filter_active(self) -> bool:
         from quantem.widget.utils.display_filter import _normalize_mode
 
@@ -6374,9 +6392,11 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         if self.separate_panel_frames and self._separate_panel_data is not None:
             panels = self._separate_panel_data
             if self._display_filter_active():
+                # Offline export always bakes the filter in Python (no live
+                # kernel in the HTML), independent of _webgpu_filter_ok.
                 panels = [
                     np.stack(
-                        [self._wire_frame(stack[k]) for k in range(int(stack.shape[0]))],
+                        [self._filter_frame(stack[k]) for k in range(int(stack.shape[0]))],
                         axis=0,
                     )
                     for stack in panels
@@ -6385,7 +6405,7 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         data = self._display_data
         if self._display_filter_active():
             data = np.stack(
-                [self._wire_frame(data[k], cache_key=("off", k)) for k in range(int(data.shape[0]))],
+                [self._filter_frame(data[k], cache_key=("off", k)) for k in range(int(data.shape[0]))],
                 axis=0,
             )
         return data
@@ -6393,11 +6413,23 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     def _wire_frame(self, frame: np.ndarray, cache_key=None) -> np.ndarray:
         """Filtered VIEW copy of one display-bound frame; raw data untouched.
 
-        Frames leaving Python for display (buffer window, frame_bytes, offline
-        pack, frame server) pass through here. ROI stats keep reading the raw
-        frame so reported numbers never come from a filtered view. Filtered
-        frames are cached per index so scrubbing stays browser-fast; the cache
-        clears whenever a knob changes.
+        Live frames leaving Python for display (buffer window, frame_bytes,
+        frame server) pass through here. When the frontend negotiated
+        ``_webgpu_filter_ok`` (a real GPU adapter), the denoise runs in the
+        browser (WGSL, live sigma scrub) instead, so we ship RAW frames and
+        skip the scipy path entirely. Offline packing calls ``_filter_frame``
+        directly so exported HTML always carries the filtered pixels.
+        """
+        if bool(self._webgpu_filter_ok):
+            return frame
+        return self._filter_frame(frame, cache_key)
+
+    def _filter_frame(self, frame: np.ndarray, cache_key=None) -> np.ndarray:
+        """Apply the display denoise to one frame in Python (scipy path).
+
+        ROI stats keep reading the raw frame so reported numbers never come from
+        a filtered view. Filtered frames are cached per index so scrubbing stays
+        browser-fast; the cache clears whenever a knob changes.
         """
         if not self._display_filter_active():
             return frame
@@ -6417,7 +6449,9 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
 
     def _send_buffer(self, start_idx: int) -> None:
         end_idx = start_idx + self._buffer_size
-        if self.diff_mode == "off" and not self._display_filter_active():
+        # Ship raw display frames directly when denoise is off OR when the
+        # browser owns filtering (_webgpu_filter_ok): the WGSL port applies it.
+        if self.diff_mode == "off" and (not self._display_filter_active() or bool(self._webgpu_filter_ok)):
             data = self._display_data
             if end_idx <= self.n_slices:
                 chunk = data[start_idx:end_idx]
