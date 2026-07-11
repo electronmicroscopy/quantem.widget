@@ -389,6 +389,161 @@ def test_show4dstem_live_append_paints_active_partial_page_before_green(
         widget.close()
 
 
+def test_show4dstem_mounted_watch_waits_for_fresh_browser_paint_ack(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import quantem.widget.io as widget_io
+
+    widget, initial, materialized, _ = _folder_widget(
+        tmp_path,
+        view_mode="multiple",
+    )
+    arriving = tmp_path / "scan_01_master.h5"
+    monkeypatch.setattr(
+        widget_io,
+        "discover_masters",
+        lambda *args, **kwargs: [str(initial), str(arriving)],
+    )
+    monkeypatch.setattr(
+        widget_io,
+        "inspect_master_readiness",
+        lambda master, **kwargs: _report(ready=True, revision="stable"),
+    )
+    widget.watch_folder(interval=60)
+    try:
+        # C0: two notebook views can share one widget model, expect one view
+        # unmounting not to disable paint proof for the remaining mounted view.
+        for client_id in ("view-a", "view-b"):
+            widget._handle_compare_page_paint_msg(
+                widget,
+                {
+                    "type": "compare_page_paint_capability",
+                    "version": 1,
+                    "active": True,
+                    "client_id": client_id,
+                },
+                [],
+            )
+        widget._handle_compare_page_paint_msg(
+            widget,
+            {
+                "type": "compare_page_paint_capability",
+                "version": 1,
+                "active": False,
+                "client_id": "view-a",
+            },
+            [],
+        )
+        assert widget._compare_page_paint_clients == {"view-b"}
+        assert widget._compare_page_paint_ack_enabled is True
+
+        # C1: a mounted browser advertises paint acknowledgements, expect the
+        # successful backend publication to remain amber until fresh pixels
+        # have crossed the browser's double-animation-frame paint boundary.
+        assert widget.poll_folder() == []
+        assert widget.poll_folder() == [1]
+        widget.wait_for_compare_page(timeout=2)
+        assert materialized == [str(arriving)]
+        assert widget.compare_page_loading is False
+        assert widget.folder_watch_state == "updating"
+        assert widget._folder_update_pending is True
+        generation = int(widget.compare_page_generation)
+        page_idx = int(widget.compare_page_idx)
+        expected = list(widget.compare_page_expected_indices)
+        assert expected == [0, 1]
+
+        # C2: stale generation, wrong page, incomplete pixels, and non-fresh
+        # acknowledgements are not authoritative, expect all to be ignored.
+        invalid_messages = [
+            {
+                "generation": generation - 1,
+                "page_idx": page_idx,
+                "painted_indices": expected,
+                "paint_kind": "fresh",
+            },
+            {
+                "generation": generation,
+                "page_idx": page_idx + 1,
+                "painted_indices": expected,
+                "paint_kind": "fresh",
+            },
+            {
+                "generation": generation,
+                "page_idx": page_idx,
+                "painted_indices": expected[:-1],
+                "paint_kind": "fresh",
+            },
+            {
+                "generation": generation,
+                "page_idx": page_idx,
+                "painted_indices": expected,
+                "paint_kind": "cached",
+            },
+        ]
+        for message in invalid_messages:
+            widget._handle_compare_page_paint_msg(
+                widget,
+                {
+                    "type": "compare_page_paint_ack",
+                    "version": 1,
+                    **message,
+                },
+                [],
+            )
+            assert widget.folder_watch_state == "updating"
+            assert widget._folder_update_pending is True
+
+        # C3: the exact fresh-visible generation/page/slot set is acknowledged,
+        # expect the live badge to turn green exactly after that browser proof.
+        widget._handle_compare_page_paint_msg(
+            widget,
+            {
+                "type": "compare_page_paint_ack",
+                "version": 1,
+                "generation": str(generation),
+                "page_idx": page_idx,
+                "painted_indices": expected,
+                "paint_kind": "fresh",
+            },
+            [],
+        )
+        assert widget.folder_watch_state == "watching"
+        assert widget._folder_update_pending is False
+
+        # C4: a lost acknowledgement has a bounded failure state, expect an
+        # actionable Watch error instead of permanent Updating or false green.
+        timeout_generation = generation + 1
+        widget._folder_update_paint_timeout_seconds = 0.02
+        widget._folder_update_pending = True
+        widget._folder_update_generation = timeout_generation
+        widget._folder_update_page_idx = page_idx
+        widget._folder_update_expected_indices = tuple(expected)
+        widget._folder_update_painted_generation = 0
+        widget._folder_update_painted_page_idx = -1
+        widget._finish_folder_page_update(timeout_generation)
+        _wait_until(lambda: widget.folder_watch_state == "error")
+        assert "did not confirm fresh visible pixels" in widget.folder_watch_detail
+        assert widget._folder_update_pending is False
+        assert widget._folder_update_paint_timeout is None
+
+        # C5: worker failures remain terminal for the pending update even when
+        # a mounted frontend supports paint acknowledgements.
+        error_generation = timeout_generation + 1
+        widget._folder_update_pending = True
+        widget._folder_update_generation = error_generation
+        widget._folder_update_page_idx = page_idx
+        widget._folder_update_expected_indices = tuple(expected)
+        widget._finish_folder_page_update(
+            error_generation,
+            error="The visible page refresh failed.",
+        )
+        assert widget.folder_watch_state == "error"
+        assert widget._folder_update_pending is False
+    finally:
+        widget.close()
+
+
 def test_public_show4dstem_from_folder_paints_real_external_arrival(
     tmp_path: Path,
 ) -> None:

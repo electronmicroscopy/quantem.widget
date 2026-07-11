@@ -40,6 +40,20 @@ export type ComparePageMessage = {
   cache_state?: string;
 };
 
+export type ComparePagePaintAck = {
+  type: "compare_page_paint_ack";
+  version: 1;
+  generation: ComparePageGeneration;
+  page_idx: number;
+  painted_indices: number[];
+  paint_kind: "fresh";
+};
+
+export type ComparePagePaintAckResult = {
+  key: string;
+  message: ComparePagePaintAck;
+};
+
 export type ProgressiveCompareCacheBadge = {
   label: string;
   tone: "loading" | "cached" | "fresh" | "warning";
@@ -608,6 +622,37 @@ export function recordComparePageVisiblePaint(
     markComparePagePaint(`${kind}-visible`);
   }
   return kind;
+}
+
+/**
+ * Build the one-shot browser acknowledgement for a fully fresh visible page.
+ *
+ * The caller retains ``lastAcknowledgedKey`` so repeated effects or animation
+ * frames cannot acknowledge the same generation/page twice. Cached or mixed
+ * pages never produce this authoritative fresh-paint acknowledgement.
+ */
+export function freshVisibleComparePagePaintAck(
+  state: ProgressiveComparePage,
+  paintedIndices: Iterable<number>,
+  lastAcknowledgedKey: string | null,
+): ComparePagePaintAckResult | null {
+  if (state.expectedIndices.length === 0) return null;
+  if (state.expectedIndices.some((frame) => state.cachedIndices.has(frame))) return null;
+  const painted = new Set(paintedIndices);
+  if (!state.expectedIndices.every((frame) => painted.has(frame))) return null;
+  const key = `${state.generation}:${state.page}`;
+  if (key === lastAcknowledgedKey) return null;
+  return {
+    key,
+    message: {
+      type: "compare_page_paint_ack",
+      version: 1,
+      generation: state.generation,
+      page_idx: state.page,
+      painted_indices: [...state.expectedIndices],
+      paint_kind: "fresh",
+    },
+  };
 }
 
 function markComparePagePaint(kind: string): void {

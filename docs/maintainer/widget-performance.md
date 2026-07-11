@@ -151,8 +151,8 @@ an append path, not as a periodic full rebuild.
 
 | Viewer | Required append behavior | Work that must not repeat |
 |---|---|---|
-| Show2D | Add each new full-resolution image as one panel | Reread existing source files; rebuild the widget; replace full-resolution data with ShowFolder thumbnails |
-| Show3D | Add each new full-resolution image as a frame in one panel | Reread existing source files or rebuild the widget |
+| Show2D | Add each new full-resolution image as one panel; automatically render folder pages of at most `page_size` panels (default 20) | Reread existing source files; rebuild the widget; replace full-resolution data with ShowFolder thumbnails; render every folder panel at once after paging activates |
+| Show3D | Add each new full-resolution image as a frame in one unpaged stack | Reread existing source files; rebuild the widget; infer Show2D-style pages from frame count |
 | Show4DSTEM | Add each ready master as a cold lazy dataset | Load every new master into VRAM immediately; clear unrelated reduced-page caches |
 
 For Show4DSTEM, raw 4D residency and reduced virtual-image caching are separate
@@ -163,6 +163,7 @@ should invalidate or warm only the comparison pages whose membership changed.
 
 The canonical folder-paging behaviors are
 [S2D-18](storyboard-show2d.md#s2d-18-watch-a-live-emd-folder-in-place),
+[S2D-20](storyboard-show2d.md#s2d-20-page-a-growing-folder-gallery-automatically),
 [S3D-17](storyboard-show3d.md#s3d-17-watch-a-live-emd-frame-series-in-place),
 [S4D-14](storyboard-show4dstem.md#s4d-14-watch-a-live-4d-stem-acquisition-folder-in-place),
 [S4D-17](storyboard-show4dstem.md#s4d-17-page-a-folder-safely-on-one-cuda-gpu)

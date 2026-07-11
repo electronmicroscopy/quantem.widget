@@ -509,3 +509,60 @@ slice and total count.
 - On real reconstruction data, record first paint, memory and payload size,
   slider latency, and canvas repaint rate. Confirm the final canvas, not only
   the slider label, reaches every requested slice.
+
+### S2D-20: Page A Growing Folder Gallery Automatically
+
+**User story**: As a microscopist whose acquisition or reconstruction folder
+may grow to hundreds of independent images, I want Show2D to show a bounded
+number of panels at once and create additional pages automatically, so the
+notebook remains readable while every full-resolution source image stays
+available. I want a useful default and an explicit override rather than having
+to reorganize files manually.
+
+**Primary widgets**: ``Show2D.from_folder(...)``. This is sequential item
+paging: each file is one independently curated panel. It is distinct from
+S2D-17 comparison pages, where the same logical slots repeat across parameter
+settings. ``Show3D.from_folder(...)`` deliberately does not use this behavior;
+its files extend one frame axis.
+
+**Data to use**: at least 45 naturally named, same-shape real or real-derived
+images so the default layout contains 20, 20, and 5 panels. Also start with 20
+files and append the 21st through an atomic rename while the widget is mounted.
+Include a small deterministic NPY fixture for CI and genuine EMD images for
+browser signoff.
+
+**Acceptance checks**:
+
+- ``Show2D.from_folder(folder)`` defaults to ``page_size=20``. Exactly 20 ready
+  images remain one ordinary gallery; the 21st creates two pages without
+  replacing the widget. ``page_size=N`` changes the limit and ``None`` disables
+  automatic folder paging. ``set_folder_page_size(...)`` regroups the mounted
+  widget in place. Reject booleans, zero, negatives, and non-integers with a
+  corrective message.
+- Show compact labels such as ``Images 1–20`` and ``Images 41–45`` plus a
+  bounded, tabular ``current/total`` page readout. The final page contains only
+  real source panels: never pad it with fake scientific images.
+- Keep folder pages as independent items. Hiding, starring, selecting, or
+  rotating one file must remain keyed to that file and must not affect the same
+  numerical slot on another page. Preserve a valid global panel order when
+  paging activates after a live arrival.
+- Append across 20 -> 21 and later page boundaries while the user is browsing
+  an older page. Preserve the Python object, widget model, browser container,
+  selected source path, active page, ROI/profile, FFT, contrast, zoom, and
+  curation state. Do not jump to the newest page unless the user follows it.
+- Drive page 1, page 2, the last partial page, and page 1 again. Verify the DOM
+  contains no more than ``page_size`` scientific canvases, current-page
+  histograms and FFT panels match the visible files, number shortcuts select a
+  slot on the active page, and rapid page changes cannot leave stale canvases.
+- Verify page controls stay grouped on a narrow viewport, use the shared MUI
+  control language, and remain keyboard accessible. Capture light/dark browser
+  screenshots and console logs.
+- Keep the folder watcher append-only: only the new source file is read from
+  disk and existing scientific files are not reread. ``Updating`` must remain
+  truthful until the newly visible panel paints, then return to ``Watching``.
+- Record initial scan, append, page-switch, histogram/FFT, browser memory, comm
+  payload, and paint timings for 20, 45, and 100+ images. The first
+  implementation limits visible React panels but still retains and transports
+  the full gallery; do not claim bounded Python/browser memory until an
+  active-page transport, cache, and generation-safe prefetch path is separately
+  implemented and verified.

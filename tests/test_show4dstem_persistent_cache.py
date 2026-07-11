@@ -592,6 +592,7 @@ def test_running_folder_reloads_replaced_master_instead_of_host_cache(
     )
     try:
         widget.wait_for_compare_page(timeout=10)
+        widget._compare_preview_cache.flush()
         masters[1].write_bytes(bytes([9]))
 
         widget._refresh_compare_virtual_images()

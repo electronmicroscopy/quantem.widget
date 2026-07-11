@@ -305,14 +305,18 @@ without constructing a replacement widget.
 
 | Viewer | What a new file becomes | Data and memory behavior |
 |---|---|---|
-| `Show2D.from_folder(...)` | One new gallery panel | Reads only the new full-resolution source file; preserves the existing widget and panel state |
-| `Show3D.from_folder(...)` | One new frame in a single displayed stack | Reads only the new full-resolution source file; preserves the existing widget and frame state |
+| `Show2D.from_folder(...)` | One new gallery panel; visible pages default to 20 panels | Reads only the new full-resolution source file; preserves the existing widget and per-file panel state |
+| `Show3D.from_folder(...)` | One new frame in a single unpaged stack | Reads only the new full-resolution source file; preserves the existing widget and frame state |
 | `Show4DSTEM.from_folder(...)` | One cold lazy 4D-STEM dataset | Loads raw data only when visible; a bounded GPU cache evicts older raw pages as needed |
 
 ```python
 from quantem.widget import Show2D, Show3D, Show4DSTEM
 
-images = Show2D.from_folder("/data/session/images", pattern="*.tif")
+images = Show2D.from_folder(
+    "/data/session/images",
+    pattern="*.tif",
+    page_size=20,  # another positive integer, or None for one gallery
+)
 movie = Show3D.from_folder("/data/session/frames", pattern="frame_*.tif")
 scans = Show4DSTEM.from_folder(
     "/data/session/4dstem",
@@ -336,6 +340,11 @@ zero-based indices appended by that scan. Pass `watch=False` to any
 `from_folder(...)` call for deterministic manual polling. Watching is
 append-only: known files are not duplicated, transiently incomplete files wait
 for a later poll, and deletions do not remove already displayed scientific data.
+
+Show2D folder pages are sequential independent files, not the repeated-slot
+comparison pages accepted by direct `Show2D(...)`. Show3D folder files never
+cross a page threshold: they always extend one frame axis, even when the folder
+contains hundreds of frames.
 
 These APIs load source data for scientific display. `ShowFolder` serves a
 different purpose: it uses cached WebP thumbnails and metadata so a large

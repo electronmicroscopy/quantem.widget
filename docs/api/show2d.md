@@ -263,6 +263,7 @@ w = Show2D.from_folder(
     "/data/session/haadf",
     pattern="*.tif",
     watch_interval=2.0,
+    page_size=20,
     title="Live HAADF images",
 )
 w
@@ -270,6 +271,26 @@ w
 
 `watch=True` is the default. Pass `watch=False` for a fixed folder or a
 reproducible script that should update only when you call `poll_folder()`.
+Folder galleries default to `page_size=20`: page controls appear automatically
+when the 21st ready image arrives. Use another positive integer to change the
+visible limit, or `page_size=None` to keep one unpaged gallery. The final page
+contains only real files, so 45 images form pages of 20, 20, and 5 panels.
+Folder pages keep selection, stars, hidden state, and ordering keyed to each
+source file rather than sharing a hidden slot across pages.
+
+Change the grouping later without rebuilding the widget:
+
+```python
+w.set_folder_page_size(50)   # regroup the same source panels
+w.set_folder_page_size(None) # show one unpaged gallery
+```
+
+Paging limits the panels, histograms, and FFT views rendered at one time. The
+current folder implementation still retains the complete full-resolution
+gallery in Python and transports its display previews to the browser; it is not
+yet a lazy, bounded-memory source-page cache. Use `ShowFolder` for lightweight
+thumbnail discovery when the full scientific arrays need not all be opened.
+
 An empty watched folder remains mounted with a waiting view and becomes the
 real gallery in the same widget model when its first stable file arrives.
 The compact title-area badge reports `Watching`, `Updating`, `Waiting for file
@@ -302,10 +323,14 @@ browser canvas paints each full-resolution panel.
 
 ## Paged galleries
 
-Use paged galleries when each view contains the same panel grid across several
+Direct `Show2D(...)` pages are comparison pages. Use them when each view
+contains the same panel grid across several
 analysis settings, iterations, or parameter values. A common example is a
 4-by-4 reconstruction sweep where each page is one iteration or one denoising
 parameter, and the panels within the page are the related output images.
+
+These repeated-slot comparison pages are distinct from the sequential item
+pages created by `Show2D.from_folder(..., page_size=20)`.
 
 Pass a 4D array with shape `(pages, panels_per_page, rows, cols)`:
 

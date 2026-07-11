@@ -696,3 +696,115 @@ cancellation cases.
   a fresh Python process to prove persistence, then clear the cache and prove the
   next open is a true miss. Leave cache artifacts and real-data reports outside
   git unless deliberately promoted into a maintainer fixture or runbook.
+
+### S4D-20: Prove Folder Paging And Cache Behavior Overnight
+
+**User story**: As a scientist leaving a large acquisition folder open
+overnight, I want automatic paging, cached previews, live arrivals, and fresh
+raw-backed replacement to remain truthful and responsive on either one or two
+NVIDIA GPUs, so an ended runner or a green badge cannot hide a stalled,
+memory-leaking, or stale scientific view.
+
+**Primary widgets**: ``Show4DSTEM.from_folder(...)`` in a real JupyterLab
+session and its browser frontend. This story is the endurance composition of
+S4D-14, S4D-17, S4D-18, and S4D-19; those stories remain the canonical source
+for watch-state, scheduler, generation, and cache correctness rather than being
+repeated here.
+
+**Data to use**: One compatible real acquisition series large enough to exceed
+the safe raw-residency budget of one selected GPU, with linked detector chunks
+when present. Use a staged watched-folder view of the real files for arrival
+tests so the source acquisition is never rewritten. Add a separate real
+full-detector control using ``det_bin=1`` and a count-preserving dtype, with at
+least seven masters and enough masters to exceed the selected raw budget when
+the source permits. Synthetic data is a CI control only.
+
+**Acceptance checks**:
+
+- Run an explicit, serial matrix so the topologies do not contend: one selected
+  physical NVIDIA GPU, then the same workflow on two selected physical NVIDIA
+  GPUs. Give each topology at least four clock hours and 100 completed canonical
+  navigation cycles, for at least eight hours total. A canonical cycle requests
+  page 1, page 2, the last page, and page 1 again; performs a rapid page 1 -> 2
+  -> 3 cancellation check; and exercises selected/average diffraction, hide,
+  star, scan movement, detector movement, diffraction zoom, and pan. A partial
+  or restarted cycle does not count as completed.
+- Hold source, ready-master set, page size, ``page_budget="auto"``, detector
+  bin, dtype, detector preset, cache budget, and page sequence constant for the
+  matched one-GPU/two-GPU comparison. Run cold cache-disabled, cache-populating,
+  and matching cache-enabled phases in fresh Python processes. Reopen the
+  matching cache at least five times per topology, and include the partial-hit,
+  changed-master/chunk, corrupt-entry, forced-rebuild, disabled-cache, and clear
+  cases from S4D-19 without corrupting source data or the canonical cache copy.
+- During both topologies, introduce at least one real master with a required
+  chunk withheld, then make the complete acquisition visible atomically. Prove
+  it remains waiting while incomplete, appears exactly once when ready, keeps a
+  valid cached preview visible when one exists, and reaches green ``Watching``
+  only after a current-generation fresh tile receives the browser paint
+  acknowledgement required by S4D-14 and S4D-19. A Python trait publication,
+  cached paint, or backend worker completion is not fresh-paint proof.
+- Exercise the viewer in actual JupyterLab through a controlled browser for each
+  topology, not only through Python traits or an exported snapshot. Capture the
+  stable loading slots, cached-first paint, fresh replacement in the same slot,
+  every watch-badge state, page cancellation, and representative scientific
+  interactions. Preserve timestamped screenshots, browser console output, model
+  and kernel errors, and the receipt-versus-after-paint fields from
+  ``window.__quantemShow4DSTEMPerf.comparePage``.
+- Record a topology and provenance snapshot before every process: host, UTC
+  start time, widget commit and dirty-diff identity, Python/Torch/CUDA/driver
+  versions, ``CUDA_VISIBLE_DEVICES``, and each logical index's physical UUID,
+  PCI bus ID, model, total memory, and free memory. Record source/cache canonical
+  paths, filesystem and storage device, locality, compression, linked-chunk
+  count, source fingerprint, ready-master count, shapes, dtype, detector bin,
+  and cache schema/compute version. Repeat GPU memory and filesystem snapshots
+  after each phase and at cleanup.
+- Apply the cache latency and no-more-than-10-percent fresh-refresh regression
+  gates in S4D-19 to each topology, including median and p95 over the required
+  fresh-process reopens. For the matched GPU comparison, require two-GPU median
+  fresh-first latency to be no more than 110% of one-GPU latency and median
+  fresh-visible and complete-page latency to be no slower than one GPU. Prove
+  both GPUs receive work. If storage/decode saturation prevents scaling, retain
+  the measurements and mark the scaling gate limited or failed; do not convert
+  an explanation into a pass.
+- Divide each topology's completed endurance cycles into first and last
+  quartiles. Require no more than 20% regression in p95 fresh-visible and
+  complete-page latency, no monotonic resident host/GPU/cache growth after
+  warm-up, zero stale-generation paints, zero unhandled browser/kernel errors,
+  zero CUDA illegal-address/OOM errors, and zero stuck page, preload, watch, or
+  cache workers. Report cache hits/misses/invalidations/evictions, raw
+  evictions/reloads, stale drops, bytes read/written, throughput, per-GPU
+  residency, and memory high-water marks even when the gate fails.
+- Write an atomic run manifest after every phase and completed cycle. Include a
+  monotonically advancing checkpoint, active topology/phase, cache namespace,
+  owned process IDs, last successful page generation, and artifact paths. Emit
+  a timestamped heartbeat at least every five minutes with progress, worker
+  liveness, GPU memory/utilization, and the most recent error. A watchdog treats
+  three missed heartbeats or 15 minutes without forward progress as a failure,
+  captures stacks/logs/GPU state, stops only owned processes, and resumes from
+  the last complete checkpoint in a fresh process.
+- Prove resume behavior once with a controlled child-process interruption. The
+  resumed run must preserve valid cache entries, avoid duplicate live arrivals
+  and stale page paint, and distinguish pre-interruption, resumed, and fully
+  continuous time in the report. Automatic restart attempts are bounded and
+  visible; exhausting them fails the run instead of leaving it indefinitely
+  ``running`` or declaring success because the launcher exited.
+- Run the separate real no-bin leg on one GPU and then two GPUs with automatic
+  paging and the same provenance/cleanup capture. At minimum, browse first,
+  second, last, and warm-return pages and compare one virtual image and one
+  diffraction result with a CPU reference. If one processed master cannot fit,
+  or the available series cannot exceed the selected raw budget, record that
+  exact capacity boundary as an unmet gate rather than inferring support from a
+  detector-binned run.
+- On normal completion, interruption, and failure, call the public cleanup path
+  and prove the watcher, page, preload, cache, notebook, browser, tunnel, and
+  watchdog processes owned by the run are gone. Record final GPU memory against
+  baseline and preserve corrective evidence for any residual allocation. Never
+  delete the real source; clear or corrupt only a run-owned cache/staging copy.
+- Produce one durable top-level ``index.html`` plus machine-readable JSON
+  summary, atomic manifest, phase/cycle timing table, GPU samples, source/cache
+  provenance, browser screenshots and console log, kernel/worker logs, cache
+  inventory, parity results, failure/restart timeline, and exact commands. Keep
+  artifacts outside git, publish the exact report path and review URL, and mark
+  every gate pass, fail, limited, skipped, or unavailable. A run is complete
+  only when the report is readable and all required artifacts are present; an
+  old report, an ended task, or a missing heartbeat is not current signoff.

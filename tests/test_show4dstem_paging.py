@@ -38,7 +38,7 @@ def _wait_until(predicate, *, timeout: float = 3.0) -> None:
     raise AssertionError("timed out waiting for background Show4DSTEM work")
 
 
-def _ready_master_report(path):
+def _ready_master_report(path, *, scan_shape=None, **kwargs):
     """Header-only ready report for mocked folder masters."""
     return SimpleNamespace(
         ready=True,
@@ -1564,9 +1564,11 @@ def test_show4dstem_from_folder_accepts_simple_grid_names(monkeypatch, tmp_path)
     )
 
     try:
-        thread = widget._compare_cache_warm_thread
-        if thread is not None:
-            thread.join(timeout=5)
+        widget.wait_for_compare_page(timeout=5)
+        _wait_until(
+            lambda: widget._compare_cache_warm_status in {"ready", "failed"},
+            timeout=5,
+        )
         assert widget.compare_cols == 2
         assert widget.compare_max_panels == 2
         assert widget._compare_cache_warm_status == "ready"
@@ -1959,6 +1961,7 @@ def test_show4dstem_from_folder_one_gpu_auto_pages_with_independent_loads(
         precompute_virtual_images=False,
     )
     try:
+        widget.wait_for_compare_page(timeout=10)
         assert widget._raw_preload_status == "paged"
         assert widget.compare_page_count == 2
         assert widget.compare_panel_indices == [0, 1, 2]

@@ -364,6 +364,13 @@ source data and generated reports outside git.
 
 **Acceptance checks**:
 
+- Keep folder arrivals on one frame axis regardless of file count. Crossing
+  Show2D's default 20-panel threshold must leave ``n_panels == 1``,
+  ``n_pages == 1``, and the page controls absent; the frame slider and playback
+  are the navigation. Reject ``page_size=`` and ``page_labels=`` with a
+  corrective suggestion to use ``Show2D.from_folder(...)`` when files should
+  become independent gallery panels. Preserve explicit 5-D/list-of-page
+  Show3D comparisons as a separate constructor workflow.
 - In live JupyterLab, display exactly one ``Show3D.from_folder(folder,
   pattern="*.emd", watch=True, watch_interval=1.0, debug=True)`` object and
   capture its Python identity, widget model ID, and browser container before

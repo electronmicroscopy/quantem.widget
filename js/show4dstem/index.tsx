@@ -41,6 +41,7 @@ import {
   completeProgressiveComparePage,
   mergeProgressiveComparePanel,
   mergeProgressiveCompareCacheMetadata,
+  freshVisibleComparePagePaintAck,
   progressiveCompareCacheBadge,
   progressiveComparePanelPresentation,
   recordComparePageClick,
@@ -1369,6 +1370,10 @@ interface CompareVirtualGridProps {
   onDragFrameChange: (idx: number | null) => void;
   onPendingMoveFrameChange: (idx: number | null) => void;
   onPositionChange: (row: number, col: number, commit?: boolean) => void;
+  onFreshVisiblePaint?: (
+    page: ProgressiveComparePage,
+    paintedIndices: number[],
+  ) => void;
 }
 
 function CompareVirtualGrid({
@@ -1411,6 +1416,7 @@ function CompareVirtualGrid({
   onDragFrameChange,
   onPendingMoveFrameChange,
   onPositionChange,
+  onFreshVisiblePaint,
 }: CompareVirtualGridProps) {
   const canvasRefs = React.useRef<(HTMLCanvasElement | null)[]>([]);
   const canvasDrawCacheRef = React.useRef(new Map<number, {
@@ -1578,11 +1584,15 @@ function CompareVirtualGrid({
             return Boolean(currentPanel && drawn?.panel === currentPanel && drawn.canvas.isConnected);
           });
           recordComparePageFirstPanelPaint(currentPage, paintedIndices);
+          // Performance telemetry is optional and may not be initialized when
+          // a notebook view reconnects from trait state. Scientific paint
+          // acknowledgement must therefore be validated independently.
           recordComparePageVisiblePaint(currentPage, paintedIndices);
+          onFreshVisiblePaint?.(currentPage, paintedIndices);
         });
       });
     }
-  }, [autoContrast, colormap, renderEntries, scaleMode, shapeCols, shapeRows, smooth, vmaxPct, vminPct]);
+  }, [autoContrast, colormap, onFreshVisiblePaint, renderEntries, scaleMode, shapeCols, shapeRows, smooth, vmaxPct, vminPct]);
 
   React.useEffect(() => {
     return () => {
@@ -2288,6 +2298,53 @@ function Show4DSTEM() {
   const progressiveCompareGenerationRef = React.useRef<string | null>(null);
   const progressiveCompareLastNumericGenerationRef = React.useRef<number | null>(null);
   const progressiveComparePendingGenerationRef = React.useRef(0);
+  const comparePagePaintAckKeyRef = React.useRef<string | null>(null);
+  const comparePagePaintClientIdRef = React.useRef(
+    `show4dstem-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`,
+  );
+
+  React.useEffect(() => {
+    try {
+      model.send({
+        type: "compare_page_paint_capability",
+        version: 1,
+        active: true,
+        client_id: comparePagePaintClientIdRef.current,
+      });
+    } catch {
+      // A closing notebook comm has no mounted UI left to acknowledge.
+    }
+    return () => {
+      try {
+        model.send({
+          type: "compare_page_paint_capability",
+          version: 1,
+          active: false,
+          client_id: comparePagePaintClientIdRef.current,
+        });
+      } catch {
+        // The comm can already be gone during notebook teardown.
+      }
+    };
+  }, [model]);
+
+  const acknowledgeFreshComparePagePaint = React.useCallback((
+    page: ProgressiveComparePage,
+    paintedIndices: number[],
+  ) => {
+    const acknowledgement = freshVisibleComparePagePaintAck(
+      page,
+      paintedIndices,
+      comparePagePaintAckKeyRef.current,
+    );
+    if (!acknowledgement) return;
+    try {
+      model.send(acknowledgement.message);
+      comparePagePaintAckKeyRef.current = acknowledgement.key;
+    } catch {
+      // The delayed after-paint callback may outlive a closing notebook comm.
+    }
+  }, [model]);
 
   React.useEffect(() => {
     const handler = (
@@ -6932,6 +6989,7 @@ function Show4DSTEM() {
               onDragFrameChange={setCompareDraggingFrame}
               onPendingMoveFrameChange={setComparePendingMoveFrame}
               onPositionChange={updateScanPosition}
+              onFreshVisiblePaint={acknowledgeFreshComparePagePaint}
             />
           ) : (
             <Box sx={{ ...container.imageBox, width: "100%", maxWidth: viCanvasWidth, aspectRatio: `${shapeCols} / ${shapeRows}`, height: "auto", touchAction: "none", ...mobileImageBoxSx }}>

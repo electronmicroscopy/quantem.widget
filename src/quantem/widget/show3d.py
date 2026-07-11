@@ -1778,13 +1778,20 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
 
         Stable additions update this widget in place. Every file is decoded
         through :func:`quantem.widget.io.read_image`; failed or partially
-        written files remain pending for a later poll.
+        written files remain pending for a later poll. Folder size never creates
+        pages: every matching file extends the frame axis of this one stack.
         """
         if "labels" in kwargs:
             raise TypeError(
                 "Show3D.from_folder() derives frame labels from file paths so "
                 "watched additions remain identifiable; remove labels= or "
                 "construct Show3D directly."
+            )
+        if "page_size" in kwargs or "page_labels" in kwargs:
+            raise TypeError(
+                "Show3D.from_folder() appends every file as a frame in one stack "
+                "and does not accept page_size=/page_labels=. Use Show2D.from_folder("
+                "..., page_size=...) when each file should be a paged gallery panel."
             )
         source = WatchedImageFolder(
             path,

@@ -12,7 +12,7 @@ import pathlib
 import tempfile
 import warnings
 from enum import StrEnum
-from typing import Any, Self, Sequence
+from typing import Any, Iterable, Self, Sequence
 
 import anywidget
 import ipywidgets
@@ -68,6 +68,8 @@ _DENOISE_STATE_ALIASES = {
     "display_filter_banner": "denoise_banner",
 }
 
+_DEFAULT_FOLDER_PAGE_SIZE = 20
+
 
 def _reject_unknown_kwargs(cls, kwargs: dict) -> None:
     """Raise TypeError if kwargs contains any key that isn't a declared trait.
@@ -85,6 +87,27 @@ def _reject_unknown_kwargs(cls, kwargs: dict) -> None:
             f"Check for typos or a renamed parameter (e.g. canvas_size → size, "
             f"image_width_px → size, pixel_size_angstrom → pixel_size)."
         )
+
+
+def _validate_folder_page_size(page_size: int | None) -> int | None:
+    """Return a normalized Show2D folder page size."""
+    if page_size is None:
+        return None
+    if isinstance(page_size, (bool, np.bool_)) or not isinstance(
+        page_size,
+        (int, np.integer),
+    ):
+        raise TypeError(
+            "page_size must be a positive integer or None; "
+            "use None to display the folder as one unpaged gallery"
+        )
+    value = int(page_size)
+    if value < 1:
+        raise ValueError(
+            f"page_size must be >= 1 or None, got {page_size!r}; "
+            "use None to disable folder paging"
+        )
+    return value
 
 
 def _is_show2d_page_dict(value: object) -> bool:
@@ -867,6 +890,10 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     n_pages = traitlets.Int(1).tag(sync=True)
     page_idx = traitlets.Int(0).tag(sync=True)
     panels_per_page = traitlets.Int(0).tag(sync=True)
+    page_kind = traitlets.Enum(
+        ["comparison", "items"],
+        default_value="comparison",
+    ).tag(sync=True)
     page_labels = traitlets.List(traitlets.Unicode(), default_value=[]).tag(sync=True)
     page_starred = traitlets.List(traitlets.Int(), default_value=[]).tag(sync=True)
     height = traitlets.Int(1).tag(sync=True)
@@ -1120,14 +1147,17 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         recursive: bool = False,
         watch: bool = True,
         watch_interval: float = 1.0,
+        page_size: int | None = _DEFAULT_FOLDER_PAGE_SIZE,
         **kwargs,
     ) -> Self:
-        """Display every readable folder image as a full-resolution panel.
+        """Display readable folder images as a paged full-resolution gallery.
 
         Files are ordered naturally (``image_2`` before ``image_10``) and read
         through :func:`quantem.widget.io.read_image`, including EMD, TIFF, PNG,
         NPY, and DM calibration paths. The same widget is updated when stable
-        files are added. Unreadable files remain retryable.
+        files are added. Unreadable files remain retryable. At most
+        ``page_size`` panels are visible at once; pass ``None`` to keep one
+        unpaged gallery.
 
         Parameters
         ----------
@@ -1141,6 +1171,10 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             Start background polling immediately.
         watch_interval : float, default 1.0
             Seconds between background polls.
+        page_size : int or None, default 20
+            Maximum visible panels per page. Paging appears only after the
+            ready image count exceeds this value. Pass ``None`` to disable
+            automatic folder paging.
         **kwargs
             Normal :class:`Show2D` options. File-derived labels and data are
             managed by the folder source.
@@ -1150,6 +1184,13 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 "Show2D.from_folder() derives labels from file paths so new files "
                 "remain identifiable; remove labels= or construct Show2D directly."
             )
+        if "page_labels" in kwargs or "page_kind" in kwargs:
+            raise TypeError(
+                "Show2D.from_folder() manages page labels and folder-page "
+                "semantics as files arrive; remove page_labels=/page_kind= and "
+                "use page_size= to configure the gallery"
+            )
+        resolved_page_size = _validate_folder_page_size(page_size)
         source = WatchedImageFolder(
             path,
             pattern=pattern,
@@ -1181,12 +1222,42 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             initial_labels = [""]
         widget = cls(initial_data, labels=initial_labels, **kwargs)
         widget._folder_display_bin_request = kwargs.get("display_bin", "auto")
-        if not arrays:
-            widget._set_folder_waiting_empty_state()
+        widget._folder_page_size = resolved_page_size
+        with widget.hold_sync():
+            widget.page_kind = "items"
+            if not arrays:
+                widget._set_folder_waiting_empty_state()
+            widget._sync_folder_pages(anchor_panel=0)
         source.attach(widget, explicit_calibration=explicit_calibration)
         if watch:
             widget.watch_folder(interval=watch_interval)
         return widget
+
+    @property
+    def folder_page_size(self) -> int | None:
+        """Maximum visible panels per page for this folder-backed gallery."""
+        self._require_folder_source()
+        value = getattr(self, "_folder_page_size", None)
+        return None if value is None else int(value)
+
+    def set_folder_page_size(self, page_size: int | None) -> Self:
+        """Change automatic folder pagination without rebuilding the widget.
+
+        Parameters
+        ----------
+        page_size : int or None
+            Maximum visible panels per page, or ``None`` for one unpaged
+            gallery.
+
+        Returns
+        -------
+        Show2D
+            This widget, for method chaining.
+        """
+        self._require_folder_source()
+        self._folder_page_size = _validate_folder_page_size(page_size)
+        self._sync_folder_pages(anchor_panel=int(self.selected_idx))
+        return self
 
     def __init__(
         self,
@@ -2088,7 +2159,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             raise traitlets.TraitError(
                 "hidden_panels cannot hide every panel; at least one panel must remain visible"
             )
-        return clean
+        return self._normalize_item_page_hidden(clean)
 
     def _normalize_hidden_page_slots(
         self,
@@ -2097,7 +2168,11 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         drop_if_full: bool = False,
     ) -> list[int]:
         """Normalize reusable hidden panel slots for paged galleries."""
-        if int(self.n_pages) <= 1 or int(self.panels_per_page) <= 0:
+        if (
+            int(self.n_pages) <= 1
+            or int(self.panels_per_page) <= 0
+            or str(self.page_kind) == "items"
+        ):
             return []
         n_slots = int(self.panels_per_page)
         clean_set: set[int] = set()
@@ -2127,7 +2202,11 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         drop_if_full: bool = False,
     ) -> list[int]:
         """Map absolute hidden image indices to reusable page slots."""
-        if int(self.n_pages) <= 1 or int(self.panels_per_page) <= 0:
+        if (
+            int(self.n_pages) <= 1
+            or int(self.panels_per_page) <= 0
+            or str(self.page_kind) == "items"
+        ):
             return []
         n_img = int(self.n_images)
         per_page = int(self.panels_per_page)
@@ -2265,6 +2344,115 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         except (ValueError, KeyError):
             pass
 
+    def _folder_ordered_panel_indices(self) -> list[int]:
+        """Return the complete path-stable order for a folder item gallery."""
+        n_images = int(getattr(self, "n_images", 0))
+        order = list(getattr(self, "panel_order", []) or [])
+        if (
+            len(order) == n_images
+            and sorted(order) == list(range(n_images))
+        ):
+            return order
+        return list(range(n_images))
+
+    def _normalize_item_page_hidden(
+        self,
+        values: Sequence[int],
+        *,
+        drop_if_full: bool = False,
+    ) -> list[int]:
+        """Keep at least one concrete item visible on every folder page."""
+        hidden = {int(value) for value in values}
+        if (
+            int(getattr(self, "n_pages", 1)) <= 1
+            or int(getattr(self, "panels_per_page", 0)) <= 0
+            or str(getattr(self, "page_kind", "comparison")) != "items"
+        ):
+            return sorted(hidden)
+        order = self._folder_ordered_panel_indices()
+        page_size = int(self.panels_per_page)
+        for start in range(0, len(order), page_size):
+            page = order[start : start + page_size]
+            if page and all(panel in hidden for panel in page):
+                if not drop_if_full:
+                    raise traitlets.TraitError(
+                        "hidden_panels cannot hide every item on a folder page; "
+                        "leave at least one source image visible"
+                    )
+                hidden.discard(page[-1])
+        return sorted(hidden)
+
+    def _validate_folder_item_pages_visible(
+        self,
+        hidden: Iterable[int],
+        operation: str,
+    ) -> None:
+        """Reject item-page state that would make any folder page empty."""
+        if str(self.page_kind) != "items" or int(self.panels_per_page) <= 0:
+            return
+        hidden_set = {int(panel) for panel in hidden}
+        page_size = int(self.panels_per_page)
+        order = self._folder_ordered_panel_indices()
+        for page_idx, start in enumerate(range(0, len(order), page_size)):
+            panels = order[start : start + page_size]
+            if panels and all(panel in hidden_set for panel in panels):
+                raise ValueError(
+                    f"{operation} would hide every panel on folder page "
+                    f"{page_idx + 1}; leave at least one visible per page"
+                )
+
+    def _sync_folder_pages(
+        self,
+        *,
+        anchor_panel: int | None = None,
+        preferred_page: int | None = None,
+    ) -> None:
+        """Recompute sequential folder pages without rebuilding the widget."""
+        page_size = getattr(self, "_folder_page_size", None)
+        n_images = int(getattr(self, "n_images", 0))
+        old_page = (
+            int(getattr(self, "page_idx", 0))
+            if preferred_page is None
+            else int(preferred_page)
+        )
+        old_starred = list(getattr(self, "page_starred", []) or [])
+
+        if page_size is None or n_images <= int(page_size):
+            n_pages = 1
+            panels_per_page = 0
+            page_labels: list[str] = []
+            next_page = 0
+        else:
+            panels_per_page = int(page_size)
+            n_pages = int(math.ceil(n_images / panels_per_page))
+            page_labels = [
+                f"Images {start + 1}\u2013{min(n_images, start + panels_per_page)}"
+                for start in range(0, n_images, panels_per_page)
+            ]
+            next_page = max(0, min(old_page, n_pages - 1))
+            if anchor_panel is not None:
+                order = self._folder_ordered_panel_indices()
+                try:
+                    position = order.index(int(anchor_panel))
+                except (TypeError, ValueError):
+                    pass
+                else:
+                    next_page = min(n_pages - 1, position // panels_per_page)
+
+        next_starred = [0] * n_pages
+        for index in range(min(len(old_starred), n_pages)):
+            next_starred[index] = 1 if int(old_starred[index]) else 0
+
+        with self.hold_sync():
+            self.page_kind = "items"
+            self.n_pages = n_pages
+            self.panels_per_page = panels_per_page
+            self.page_labels = page_labels
+            self.page_starred = next_starred
+            self.page_idx = next_page
+            # Folder pages hide concrete files, not a repeated comparison slot.
+            self.hidden_page_slots = []
+
     def _set_folder_waiting_empty_state(self) -> None:
         """Represent an acquisition folder with no readable image yet."""
         empty = np.empty((0, 0, 0), dtype=np.float32)
@@ -2284,6 +2472,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             self.is_rgb = []
             self.starred = []
             self.hidden_panels = []
+            self.hidden_page_slots = []
             self.panel_order = []
             self.image_rotations = []
             self.panel_frame_counts = []
@@ -2301,6 +2490,11 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             self._offline_maxs = []
             self._static_fallback_jpeg = ""
             self.selected_idx = 0
+            self.n_pages = 1
+            self.page_idx = 0
+            self.panels_per_page = 0
+            self.page_labels = []
+            self.page_starred = [0]
             self.folder_waiting = True
 
     def set_image(
@@ -2450,6 +2644,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         """Replace folder panels while remapping panel state through file paths."""
         old_paths = [record.path for record in old_records]
         new_paths = [record.path for record in new_records]
+        old_page_idx = int(getattr(self, "page_idx", 0))
         old_index = {path: idx for idx, path in enumerate(old_paths)}
         new_index = {path: idx for idx, path in enumerate(new_paths)}
         old_display_bin = max(1, int(getattr(self, "_display_bin", 1)))
@@ -2471,6 +2666,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 [changed_arrays[path] for path in new_paths],
                 labels=[self._folder_source.label(path) for path in new_paths],
             )
+            self._sync_folder_pages(anchor_panel=0)
             return
 
         originals = list(getattr(self, "_panel_stacks_original", []))
@@ -2541,9 +2737,19 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             )
             self.image_rotations = [rotations_by_path.get(path, 0) for path in new_paths]
             self.starred = [int(starred_by_path.get(path, False)) for path in new_paths]
-            self.hidden_panels = sorted(new_index[path] for path in hidden_paths if path in new_index)
             self.panel_order = [new_index[path] for path in ordered_paths if path in new_index]
             self.selected_idx = new_index.get(selected_path, 0)
+            # ``set_image`` resets paging traits. Keep the page the scientist
+            # was reviewing even when selection lives on a different page.
+            self._sync_folder_pages(preferred_page=old_page_idx)
+            self.hidden_panels = self._normalize_item_page_hidden(
+                [
+                    new_index[path]
+                    for path in hidden_paths
+                    if path in new_index
+                ],
+                drop_if_full=True,
+            )
             self.roi_active = roi_active
             self.roi_list = roi_list
             self.roi_selected_idx = roi_selected_idx
@@ -3398,6 +3604,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             "n_pages": int(self.n_pages),
             "page_idx": int(self.page_idx),
             "panels_per_page": int(self.panels_per_page),
+            "page_kind": str(self.page_kind),
             "page_labels": list(self.page_labels),
             "page_starred": list(self.page_starred),
             "hidden_panels": list(self.hidden_panels),
@@ -3692,6 +3899,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             display_bin=1,
         )
         clone.pixel_sizes = list(self.pixel_sizes)
+        clone.page_kind = str(self.page_kind)
         clone.n_pages = int(self.n_pages)
         clone.panels_per_page = int(self.panels_per_page)
         clone.page_labels = list(self.page_labels)
@@ -3722,6 +3930,9 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
 
     def load_state_dict(self, state):
         state = dict(state)
+        if state.get("page_kind") in {"comparison", "items"}:
+            # Hidden-state normalization below depends on the page semantics.
+            self.page_kind = str(state["page_kind"])
         # A crop saved from a single-panel session cannot apply to a gallery.
         if int(self.n_images) != 1:
             state.pop("view_crop", None)
@@ -3753,7 +3964,10 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             clean = sorted(clean_set)
             if len(clean) >= n_img:
                 clean = clean[:-1]
-            state["hidden_panels"] = clean
+            state["hidden_panels"] = self._normalize_item_page_hidden(
+                clean,
+                drop_if_full=True,
+            )
         if "hidden_page_slots" in state and isinstance(state["hidden_page_slots"], list):
             state["hidden_page_slots"] = self._normalize_hidden_page_slots(
                 state["hidden_page_slots"],
@@ -4136,7 +4350,10 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         """Zero-based image panel indices in the current display order."""
         if int(self.n_pages) > 1 and int(self.panels_per_page) > 0:
             start = int(self.page_idx) * int(self.panels_per_page)
-            return list(range(start, min(start + int(self.panels_per_page), int(self.n_images))))
+            stop = min(start + int(self.panels_per_page), int(self.n_images))
+            if str(self.page_kind) == "items":
+                return self._folder_ordered_panel_indices()[start:stop]
+            return list(range(start, stop))
         order = list(self.panel_order or [])
         if len(order) == int(self.n_images) and sorted(order) == list(range(int(self.n_images))):
             return order
@@ -4146,6 +4363,9 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     def visible_panels(self) -> list[int]:
         """Zero-based image panel indices currently visible in the gallery."""
         if int(self.n_pages) > 1 and int(self.panels_per_page) > 0:
+            if str(self.page_kind) == "items":
+                hidden = set(self.hidden_panels)
+                return [panel for panel in self.ordered_panels if panel not in hidden]
             hidden_slots = set(
                 self.hidden_page_slots
                 or self._hidden_page_slots_from_panels(self.hidden_panels, drop_if_full=True)
@@ -4173,7 +4393,9 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         must stay visible.
         """
         hidden = self._normalize_panel_refs(panels, allow_empty=True)
-        if int(self.n_pages) > 1:
+        if int(self.n_pages) > 1 and str(self.page_kind) == "items":
+            self._validate_folder_item_pages_visible(hidden, "set_hidden_panels")
+        if int(self.n_pages) > 1 and str(self.page_kind) != "items":
             try:
                 hidden_page_slots = self._hidden_page_slots_from_panels(hidden)
             except traitlets.TraitError as exc:
@@ -4182,6 +4404,14 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 ) from exc
         else:
             hidden_page_slots = []
+            if int(self.n_pages) > 1 and str(self.page_kind) == "items":
+                try:
+                    hidden = self._normalize_item_page_hidden(hidden)
+                except traitlets.TraitError as exc:
+                    raise ValueError(
+                        "set_hidden_panels would hide every item on a folder page; "
+                        "leave at least one source image visible"
+                    ) from exc
         if len(hidden) >= int(self.n_images):
             raise ValueError("set_hidden_panels would hide every panel; leave at least one visible")
         self.hidden_panels = sorted(hidden)
@@ -4192,13 +4422,23 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         """Hide one or more image panels by zero-based index or exact label."""
         to_hide = set(self.hidden_panels)
         to_hide.update(self._normalize_panel_refs(list(panels)))
-        if int(self.n_pages) > 1:
+        if int(self.n_pages) > 1 and str(self.page_kind) == "items":
+            self._validate_folder_item_pages_visible(to_hide, "hide_panel")
+        if int(self.n_pages) > 1 and str(self.page_kind) != "items":
             try:
                 hidden_page_slots = self._hidden_page_slots_from_panels(sorted(to_hide))
             except traitlets.TraitError as exc:
                 raise ValueError("hide_panel would hide every page slot; leave at least one visible") from exc
         else:
             hidden_page_slots = []
+            if int(self.n_pages) > 1 and str(self.page_kind) == "items":
+                try:
+                    to_hide = set(self._normalize_item_page_hidden(sorted(to_hide)))
+                except traitlets.TraitError as exc:
+                    raise ValueError(
+                        "hide_panel would hide every item on a folder page; "
+                        "leave at least one source image visible"
+                    ) from exc
         if len(to_hide) >= int(self.n_images):
             raise ValueError("hide_panel would hide every panel; leave at least one visible")
         self.hidden_panels = sorted(to_hide)
@@ -4243,7 +4483,11 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     def move_panel(self, panel: int | str, position: int) -> Self:
         """Move one panel to a zero-based display position."""
         idx = self._resolve_panel_ref(panel)
-        order = self.ordered_panels
+        order = (
+            self._folder_ordered_panel_indices()
+            if int(self.n_pages) > 1 and str(self.page_kind) == "items"
+            else self.ordered_panels
+        )
         order.remove(idx)
         pos = int(position)
         if pos < 0:

@@ -1067,6 +1067,18 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         self._compare_page_last_send_error = ""
         self._compare_page_fresh_indices: set[int] = set()
         self._compare_page_working_images: dict[int, np.ndarray] = {}
+        self._compare_page_paint_clients: set[str] = set()
+        self._compare_page_paint_legacy_active = False
+        self._compare_page_paint_ack_enabled = False
+        self._folder_update_page_idx = -1
+        self._folder_update_expected_indices: tuple[int, ...] = ()
+        self._folder_update_backend_complete_generation = 0
+        self._folder_update_painted_generation = 0
+        self._folder_update_painted_page_idx = -1
+        self._folder_update_paint_timeout_seconds = 30.0
+        self._folder_update_paint_timeout: threading.Timer | None = None
+        self._folder_update_paint_timeout_generation = 0
+        self.on_msg(self._handle_compare_page_paint_msg)
         self._compare_cache_pages = max(0, int(compare_cache_pages))
         self._compare_cache_max_bytes = (
             None
@@ -5125,10 +5137,21 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         pending_generation = int(
             getattr(self, "_folder_update_generation", generation)
         )
-        if int(generation) < pending_generation:
+        if int(generation) != pending_generation:
             return
-        self._folder_update_pending = False
-        self._folder_update_generation = 0
+        if not error and bool(
+            getattr(self, "_compare_page_paint_ack_enabled", False)
+        ):
+            self._folder_update_backend_complete_generation = int(generation)
+            if (
+                int(getattr(self, "_folder_update_painted_generation", 0))
+                != int(generation)
+                or int(getattr(self, "_folder_update_painted_page_idx", -1))
+                != int(getattr(self, "_folder_update_page_idx", -1))
+            ):
+                self._schedule_folder_page_paint_timeout(int(generation))
+                return
+        self._reset_folder_page_update_tracking()
         if not self._folder_watch_is_alive():
             return
         if error:
@@ -5151,6 +5174,187 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             )
         else:
             set_folder_watch_status(self, "watching", "")
+
+    def _cancel_folder_page_paint_timeout(self) -> None:
+        """Cancel the generation-scoped browser paint deadline, if any."""
+        timer = getattr(self, "_folder_update_paint_timeout", None)
+        self._folder_update_paint_timeout = None
+        self._folder_update_paint_timeout_generation = 0
+        if timer is not None:
+            timer.cancel()
+
+    def _reset_folder_page_update_tracking(self) -> None:
+        """Clear one watched append's backend/browser paint lifecycle."""
+        self._cancel_folder_page_paint_timeout()
+        self._folder_update_pending = False
+        self._folder_update_generation = 0
+        self._folder_update_page_idx = -1
+        self._folder_update_expected_indices = ()
+        self._folder_update_backend_complete_generation = 0
+        self._folder_update_painted_generation = 0
+        self._folder_update_painted_page_idx = -1
+
+    def _schedule_folder_page_paint_timeout(self, generation: int) -> None:
+        """Turn a lost mounted-browser paint acknowledgement into Watch error."""
+        current = getattr(self, "_folder_update_paint_timeout", None)
+        if (
+            current is not None
+            and current.is_alive()
+            and int(getattr(self, "_folder_update_paint_timeout_generation", 0))
+            == int(generation)
+        ):
+            return
+        self._cancel_folder_page_paint_timeout()
+        delay = max(
+            0.01,
+            float(getattr(self, "_folder_update_paint_timeout_seconds", 30.0)),
+        )
+
+        def expired() -> None:
+            if getattr(self, "_folder_update_paint_timeout", None) is not timer:
+                return
+            self._folder_update_paint_timeout = None
+            self._folder_update_paint_timeout_generation = 0
+            if (
+                bool(getattr(self, "_folder_update_pending", False))
+                and bool(getattr(self, "_compare_page_paint_ack_enabled", False))
+                and int(getattr(self, "_folder_update_generation", 0))
+                == int(generation)
+                and int(
+                    getattr(
+                        self,
+                        "_folder_update_backend_complete_generation",
+                        0,
+                    )
+                )
+                == int(generation)
+            ):
+                self._finish_folder_page_update(
+                    int(generation),
+                    error=(
+                        "The browser did not confirm fresh visible pixels before "
+                        "the paint deadline. Keep the notebook tab open, verify "
+                        "the kernel connection, then retry or reload the page."
+                    ),
+                )
+
+        timer = threading.Timer(delay, expired)
+        timer.name = f"Show4DSTEM-paint-{int(generation)}"
+        timer.daemon = True
+        self._folder_update_paint_timeout = timer
+        self._folder_update_paint_timeout_generation = int(generation)
+        timer.start()
+
+    def _handle_compare_page_paint_msg(
+        self,
+        _widget: Any,
+        content: dict[str, Any],
+        _buffers: list[Any],
+    ) -> None:
+        """Resolve watched page updates only after a mounted browser paints."""
+        if not isinstance(content, dict):
+            return
+        message_type = str(content.get("type", ""))
+        if message_type == "compare_page_paint_capability":
+            if content.get("version") != 1 or not isinstance(
+                content.get("active", True), bool
+            ):
+                return
+            active = bool(content.get("active", True))
+            client_id = content.get("client_id")
+            if client_id is None:
+                # Compatibility with frontend bundles predating per-view IDs.
+                self._compare_page_paint_legacy_active = active
+            elif (
+                isinstance(client_id, str)
+                and bool(client_id)
+                and len(client_id) <= 128
+            ):
+                if active:
+                    self._compare_page_paint_clients.add(client_id)
+                else:
+                    self._compare_page_paint_clients.discard(client_id)
+            else:
+                return
+            self._compare_page_paint_ack_enabled = bool(
+                self._compare_page_paint_legacy_active
+                or self._compare_page_paint_clients
+            )
+            if not self._compare_page_paint_ack_enabled and bool(
+                getattr(self, "_folder_update_pending", False)
+            ):
+                generation = int(getattr(self, "_folder_update_generation", 0))
+                if generation and int(
+                    getattr(
+                        self,
+                        "_folder_update_backend_complete_generation",
+                        0,
+                    )
+                ) == generation:
+                    # The frontend unmounted after backend completion. There is
+                    # no visible UI left to paint, so restore headless behavior.
+                    self._finish_folder_page_update(generation)
+            return
+        if message_type != "compare_page_paint_ack":
+            return
+        if (
+            not bool(getattr(self, "_compare_page_paint_ack_enabled", False))
+            or content.get("version") != 1
+            or content.get("paint_kind") != "fresh"
+            or not bool(getattr(self, "_folder_update_pending", False))
+        ):
+            return
+
+        def message_int(value: Any) -> int | None:
+            if isinstance(value, bool):
+                return None
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError, OverflowError):
+                return None
+            if isinstance(value, float) and not value.is_integer():
+                return None
+            return parsed
+
+        generation = message_int(content.get("generation"))
+        page_idx = message_int(content.get("page_idx"))
+        pending_generation = int(getattr(self, "_folder_update_generation", 0))
+        pending_page_idx = int(getattr(self, "_folder_update_page_idx", -1))
+        if (
+            generation is None
+            or page_idx is None
+            or generation != pending_generation
+            or generation != int(self.compare_page_generation)
+            or page_idx != pending_page_idx
+            or page_idx != int(self.compare_page_idx)
+        ):
+            return
+
+        painted_values = content.get("painted_indices")
+        if not isinstance(painted_values, (list, tuple)):
+            return
+        painted: list[int] = []
+        for value in painted_values:
+            parsed = message_int(value)
+            if parsed is None:
+                return
+            painted.append(parsed)
+        expected = tuple(
+            int(value)
+            for value in getattr(self, "_folder_update_expected_indices", ())
+        )
+        current_expected = tuple(
+            int(value) for value in self.compare_page_expected_indices
+        )
+        if not expected or tuple(painted) != expected or current_expected != expected:
+            return
+
+        self._folder_update_painted_generation = generation
+        self._folder_update_painted_page_idx = page_idx
+        if int(
+            getattr(self, "_folder_update_backend_complete_generation", 0)
+        ) == generation:
+            self._finish_folder_page_update(generation)
 
     def _attach_folder_source(
         self,
@@ -5193,9 +5397,14 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         self._folder_watch_started = False
         self._folder_ready_probation: dict[str, str] = {}
         self._folder_poll_lock = threading.Lock()
+        # Folder-backed lazy data starts paged until the optional complete-
+        # series preload proves every unhidden master fits. Publish that state
+        # synchronously so status/debug consumers never observe a missing
+        # residency value while the first progressive page is still loading.
+        self._raw_preload_status = "paged"
+        self._raw_residency_plan = {}
         self._compare_folder_refresh_pending = False
-        self._folder_update_pending = False
-        self._folder_update_generation = 0
+        self._reset_folder_page_update_tracking()
         self._folder_poll_waiting = ""
         self._folder_poll_error = ""
         set_folder_watch_status(self, "hidden", "")
@@ -5530,9 +5739,17 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
                         # until the progressive worker publishes authoritative
                         # current pixels for that stable slot.
                         self._folder_update_pending = True
+                        self._cancel_folder_page_paint_timeout()
                         self._folder_update_generation = int(
                             self._compare_page_generation_counter
                         ) + 1
+                        self._folder_update_page_idx = int(self.compare_page_idx)
+                        self._folder_update_expected_indices = tuple(
+                            int(idx) for idx in active
+                        )
+                        self._folder_update_backend_complete_generation = 0
+                        self._folder_update_painted_generation = 0
+                        self._folder_update_painted_page_idx = -1
                         self._refresh_compare_virtual_images()
                     else:
                         # Off-page arrivals remain cold. Optional maintenance can
@@ -5554,8 +5771,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
                 )
                 return added
         except Exception as exc:
-            self._folder_update_pending = False
-            self._folder_update_generation = 0
+            self._reset_folder_page_update_tracking()
             if self._folder_watch_is_alive():
                 set_folder_watch_status(
                     self,
@@ -5640,6 +5856,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
 
     def stop_folder_watch(self) -> None:
         """Stop the background folder watcher, if one was started."""
+        self._reset_folder_page_update_tracking()
         stop = getattr(self, "_folder_watch_stop", None)
         thread = getattr(self, "_folder_watch_thread", None)
         if stop is not None:
@@ -5655,6 +5872,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
 
     def close(self) -> None:
         """Stop background work and close the widget comm."""
+        self._cancel_folder_page_paint_timeout()
         self.stop_folder_watch()
         self.stop_compare_page_load(wait=True)
         self.stop_compare_maintenance(wait=True)
@@ -7354,6 +7572,17 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
                 prior.set()
             self._compare_page_generation_counter += 1
             generation = int(self._compare_page_generation_counter)
+            if bool(getattr(self, "_folder_update_pending", False)):
+                # A page/config change supersedes the generation that first
+                # carried the watched append. Retarget the proof to the new
+                # visible page and cancel the old generation's deadline.
+                self._cancel_folder_page_paint_timeout()
+                self._folder_update_generation = generation
+                self._folder_update_page_idx = page_idx
+                self._folder_update_expected_indices = requested
+                self._folder_update_backend_complete_generation = 0
+                self._folder_update_painted_generation = 0
+                self._folder_update_painted_page_idx = -1
             stop = threading.Event()
             self._compare_page_stop = stop
             self._compare_page_last_error = ""
@@ -7415,6 +7644,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
 
     def stop_compare_page_load(self, *, wait: bool = False) -> Self:
         """Cancel progressive visible/prefetch work after its current GPU wave."""
+        canceled_folder_update = False
         with self._compare_page_request_lock:
             stop = getattr(self, "_compare_page_stop", None)
             thread = getattr(self, "_compare_page_thread", None)
@@ -7426,6 +7656,9 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
                     self._compare_page_generation_counter
                 )
                 self.compare_page_loading = False
+                if bool(getattr(self, "_folder_update_pending", False)):
+                    self._reset_folder_page_update_tracking()
+                    canceled_folder_update = True
             if getattr(self, "_compare_page_stop", None) is stop:
                 self._compare_page_stop = None
         if wait and thread is not None and thread is not threading.current_thread():
@@ -7434,6 +7667,19 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         if thread is None or not thread.is_alive():
             if getattr(self, "_compare_page_thread", None) is thread:
                 self._compare_page_thread = None
+        if canceled_folder_update:
+            self._finish_folder_poll_status(
+                waiting=(
+                    [str(self._folder_poll_waiting)]
+                    if getattr(self, "_folder_poll_waiting", "")
+                    else []
+                ),
+                errors=(
+                    [str(self._folder_poll_error)]
+                    if getattr(self, "_folder_poll_error", "")
+                    else []
+                ),
+            )
         return self
 
     def wait_for_compare_page(self, timeout: float | None = None) -> Self:

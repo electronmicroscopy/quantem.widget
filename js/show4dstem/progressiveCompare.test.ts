@@ -3,6 +3,7 @@ import {
   beginPendingProgressiveComparePage,
   beginProgressiveComparePage,
   completeProgressiveComparePage,
+  freshVisibleComparePagePaintAck,
   mergeProgressiveCompareCacheMetadata,
   mergeProgressiveComparePanel,
   progressiveCompareCacheBadge,
@@ -184,6 +185,37 @@ describe("progressive Show4DSTEM compare pages", () => {
       startToFreshVisiblePaintMs: 50,
       clickToFreshVisiblePaintMs: 60,
     });
+  });
+
+  it("builds exactly one acknowledgement for each fully fresh visible page", () => {
+    const fresh = beginProgressiveComparePage({
+      generation: 31,
+      page_idx: 2,
+      expected_indices: [8, 9],
+    }, 10)!;
+
+    expect(freshVisibleComparePagePaintAck(fresh, [8], null)).toBeNull();
+    const ack = freshVisibleComparePagePaintAck(fresh, [8, 9], null);
+    expect(ack).toEqual({
+      key: "31:2",
+      message: {
+        type: "compare_page_paint_ack",
+        version: 1,
+        generation: "31",
+        page_idx: 2,
+        painted_indices: [8, 9],
+        paint_kind: "fresh",
+      },
+    });
+    expect(freshVisibleComparePagePaintAck(fresh, [8, 9], ack!.key)).toBeNull();
+
+    const cached = beginProgressiveComparePage({
+      generation: 32,
+      page_idx: 2,
+      expected_indices: [8, 9],
+      cached_indices: [8],
+    }, 20)!;
+    expect(freshVisibleComparePagePaintAck(cached, [8, 9], ack!.key)).toBeNull();
   });
 
   it("rejects stale generations and malformed panel buffers", () => {

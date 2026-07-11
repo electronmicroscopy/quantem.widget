@@ -71,6 +71,173 @@ def test_show2d_folder_poll_remaps_panel_state_by_path(tmp_path: Path) -> None:
         widget.close()
 
 
+def test_show2d_folder_defaults_to_twenty_item_panels_per_page(
+    tmp_path: Path,
+) -> None:
+    for index in range(45):
+        _save(tmp_path / f"frame_{index:03d}.npy", index)
+
+    widget = Show2D.from_folder(tmp_path, watch=False)
+    try:
+        # C1: a large folder opens as sequential item pages, expect 20/20/5
+        # real panels with no padded scientific data.
+        assert widget.page_kind == "items"
+        assert widget.n_images == 45
+        assert widget.n_pages == 3
+        assert widget.panels_per_page == 20
+        assert widget.page_labels == [
+            "Images 1\u201320",
+            "Images 21\u201340",
+            "Images 41\u201345",
+        ]
+        assert widget.visible_panels == list(range(20))
+        widget.page_idx = 2
+        assert widget.visible_panels == [40, 41, 42, 43, 44]
+
+        # C2: hiding one file on the partial page, expect absolute per-file
+        # state rather than hiding the same slot on unrelated pages.
+        widget.hide_panel(40)
+        assert widget.visible_panels == [41, 42, 43, 44]
+        with pytest.raises(ValueError, match="every panel on folder page 3"):
+            widget.hide_panel(41, 42, 43, 44)
+        with pytest.raises(ValueError, match="every panel on folder page 1"):
+            widget.set_hidden_panels(list(range(20)))
+        widget.page_idx = 0
+        assert widget.visible_panels == list(range(20))
+        assert widget.hidden_page_slots == []
+    finally:
+        widget.close()
+
+
+def test_show2d_folder_default_threshold_crosses_twenty_to_twenty_one(
+    tmp_path: Path,
+) -> None:
+    for index in range(20):
+        _save(tmp_path / f"frame_{index:03d}.npy", index)
+    widget = Show2D.from_folder(tmp_path, watch=False)
+    try:
+        widget_id = id(widget)
+        # C1: exactly the default limit remains an ordinary unpaged gallery.
+        assert (widget.n_images, widget.n_pages, widget.panels_per_page) == (
+            20,
+            1,
+            0,
+        )
+
+        _save(tmp_path / "frame_020.npy", 20)
+        assert widget.poll_folder() == []
+        assert widget.poll_folder() == [20]
+
+        # C2: the 21st stable file activates a partial second page in place.
+        assert id(widget) == widget_id
+        assert (widget.n_images, widget.n_pages, widget.panels_per_page) == (
+            21,
+            2,
+            20,
+        )
+        assert widget.page_labels == ["Images 1\u201320", "Images 21\u201321"]
+        assert widget.page_idx == 0
+        widget.page_idx = 1
+        assert widget.visible_panels == [20]
+    finally:
+        widget.close()
+
+
+def test_show2d_folder_page_size_override_disable_and_validation(
+    tmp_path: Path,
+) -> None:
+    for index in range(5):
+        _save(tmp_path / f"frame_{index:03d}.npy", index)
+
+    paged = Show2D.from_folder(tmp_path, watch=False, page_size=2)
+    unpaged = Show2D.from_folder(tmp_path, watch=False, page_size=None)
+    try:
+        # C1: an explicit positive page size controls the visible grouping.
+        assert paged.folder_page_size == 2
+        assert (paged.n_pages, paged.panels_per_page) == (3, 2)
+        paged.page_idx = 2
+        assert paged.visible_panels == [4]
+        assert paged.set_folder_page_size(4) is paged
+        assert paged.folder_page_size == 4
+        assert (paged.n_pages, paged.panels_per_page) == (2, 4)
+
+        # C2: None deliberately disables automatic folder paging.
+        assert unpaged.folder_page_size is None
+        assert (unpaged.n_pages, unpaged.panels_per_page) == (1, 0)
+        assert unpaged.visible_panels == [0, 1, 2, 3, 4]
+    finally:
+        paged.close()
+        unpaged.close()
+
+    # C3: invalid sizes fail with a corrective next step.
+    with pytest.raises(ValueError, match="use None to disable folder paging"):
+        Show2D.from_folder(tmp_path, watch=False, page_size=0)
+    with pytest.raises(TypeError, match="positive integer or None"):
+        Show2D.from_folder(tmp_path, watch=False, page_size=True)
+
+
+def test_show2d_folder_live_append_crosses_page_boundary_in_place(
+    tmp_path: Path,
+) -> None:
+    _save(tmp_path / "frame_2.npy", 2)
+    _save(tmp_path / "frame_10.npy", 10)
+    widget = Show2D.from_folder(tmp_path, watch=False, page_size=2)
+    try:
+        widget_id = id(widget)
+        widget.selected_idx = 1
+        widget.star_panel(0)
+        widget.hide_panel(0)
+        widget.set_panel_order([1, 0])
+
+        _save(tmp_path / "frame_1.npy", 1)
+        assert widget.poll_folder() == []
+        assert widget.poll_folder() == [0]
+
+        # C1: crossing 2 -> 3 files activates paging on the same widget while
+        # path-keyed selection, star, hide, and order state survive insertion.
+        assert id(widget) == widget_id
+        assert widget.n_pages == 2
+        assert widget.panels_per_page == 2
+        assert widget.page_labels == ["Images 1\u20132", "Images 3\u20133"]
+        assert widget.selected_idx == 2
+        assert widget.starred == [0, 1, 0]
+        assert widget.hidden_panels == [1]
+        assert widget.hidden_page_slots == []
+        assert widget.panel_order == [2, 1, 0]
+        assert widget.page_idx == 0
+        assert widget.visible_panels == [2]
+
+        # C2: the second page contains the remaining real file; hiding slot 2
+        # on page 1 does not bleed into it.
+        widget.page_idx = 1
+        assert widget.visible_panels == [0]
+    finally:
+        widget.close()
+
+
+def test_show2d_folder_live_append_preserves_the_reviewed_page(
+    tmp_path: Path,
+) -> None:
+    for index in range(3):
+        _save(tmp_path / f"frame_{index}.npy", index)
+    widget = Show2D.from_folder(tmp_path, watch=False, page_size=2)
+    try:
+        widget.selected_idx = 0
+        widget.page_idx = 1
+
+        _save(tmp_path / "frame_3.npy", 3)
+        assert widget.poll_folder() == []
+        assert widget.poll_folder() == [3]
+
+        # C1: selection and the reviewed page are independent, expect a live
+        # append not to jump back to the page containing the selected panel.
+        assert widget.selected_idx == 0
+        assert widget.page_idx == 1
+        assert widget.visible_panels == [2, 3]
+    finally:
+        widget.close()
+
+
 def test_show3d_folder_poll_remaps_frame_state_without_stopping_playback(
     tmp_path: Path,
 ) -> None:
@@ -110,6 +277,37 @@ def test_show3d_folder_poll_remaps_frame_state_without_stopping_playback(
         assert widget.show_fft is True
     finally:
         widget.close()
+
+
+def test_show3d_folder_many_files_remain_one_unpaged_stack(
+    tmp_path: Path,
+) -> None:
+    for index in range(25):
+        _save(tmp_path / f"frame_{index:03d}.npy", index)
+
+    widget = Show3D.from_folder(tmp_path, watch=False)
+    try:
+        # C1: crossing Show2D's default page threshold extends one frame axis;
+        # Show3D folder navigation remains its frame slider and playback.
+        assert widget.n_slices == 25
+        assert widget.n_panels == 1
+        assert widget.n_pages == 1
+        assert widget.page_idx == 0
+        assert widget.panels_per_page == 0
+        assert widget.page_labels == []
+        assert widget.visible_panels == [0]
+        assert widget.labels[0] == "frame_000"
+        assert widget.labels[-1] == "frame_024"
+        np.testing.assert_array_equal(widget._data[:, 0, 0], np.arange(25))
+    finally:
+        widget.close()
+
+    # C2: folder page arguments fail explicitly instead of silently changing
+    # the scientific meaning from frames to gallery panels.
+    with pytest.raises(TypeError, match="appends every file as a frame"):
+        Show3D.from_folder(tmp_path, watch=False, page_size=20)
+    with pytest.raises(TypeError, match="does not accept"):
+        Show3D.from_folder(tmp_path, watch=False, page_labels=["Page 1"])
 
 
 @pytest.mark.parametrize(
@@ -287,7 +485,12 @@ def test_folder_worker_baseexception_replaces_stale_green(
         widget.watch_folder(interval=0.01)
         thread = source._watch_thread
         assert thread is not None
-        _wait_until(lambda: source._watch_thread is None)
+        # The worker clears its ownership fields in ``finally`` immediately
+        # before Python marks the Thread object stopped. Wait for both sides of
+        # that lifecycle boundary instead of racing the final return.
+        _wait_until(
+            lambda: source._watch_thread is None and not thread.is_alive()
+        )
         assert not thread.is_alive()
         assert source._watch_stop is None
         assert widget.folder_watch_state == "error"

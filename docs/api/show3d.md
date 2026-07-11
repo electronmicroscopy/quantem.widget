@@ -131,7 +131,16 @@ w
 `watch=True` is the default. The first folder scan establishes deterministic
 frame order, then the watcher appends newly readable files without rebuilding
 the widget or rereading unchanged source files. Use Show2D instead when each
-file should be a separate comparison panel. An empty watched folder stays
+file should be a separate comparison panel.
+
+Folder size never creates Show3D pages. Whether the folder has 2, 20, or 200
+files, each file extends the frame axis of one stack and the frame
+slider/playback controls remain its navigation. `page_size=` and `page_labels=`
+are therefore rejected by `Show3D.from_folder(...)`; use
+`Show2D.from_folder(..., page_size=20)` for independent paged images. Explicit
+5-D or list-of-page Show3D comparison data remain a separate constructor mode.
+
+An empty watched folder stays
 mounted and changes into the real stack in the same widget model after the
 first stable frame. The compact title-area badge reports `Watching`,
 `Updating`, `Waiting for file completion`, `Watch error`, or `Stopped`; fixed
