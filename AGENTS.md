@@ -120,15 +120,24 @@ bug unless the limitation is explicitly documented and accepted.
 
 ## Runtime and Backend Choice
 
-Do not run heavy widget workloads in the local Codex bundled runtime, system
-Python, or a laptop CPU-only environment. Those are acceptable only for
-lightweight inspections, small unit tests, and quick syntax/type checks.
+Split work by what it is, not by how big it is: rendering versus computation.
 
-For large tutorial data generation, exported-HTML browser reports, real-data
-performance probes, long notebook runs, or GPU/WebGPU stress tests, use the
-project development backend or an HPC/GPU-capable backend so the user's laptop
-does not freeze. Keep generated reports and scratch artifacts outside the repo
-unless they are intentionally promoted into a documented maintainer workflow.
+**Widget development and testing runs on the Mac.** The primary dev MacBook
+(128 GB RAM, fast Apple GPU) is the DEFAULT and preferred surface for anything
+that renders or drives a widget: unit tests, driving the live widget in a local
+JupyterLab or the in-app Browser pane, and working with real data of any size.
+This is faster than a remote round-trip and is the retina (devicePixelRatio 2)
+context real users see, where Mac-only WebGPU render bugs surface. A widget
+showing a large dataset is still tested here.
+
+**Heavy scientific computation runs on the remote backend.** Reserve the project
+development backend / HPC (mjgoat) for number-crunching that genuinely exceeds
+the laptop: drift correction, merging many 4D-STEM datasets, tomography,
+ptychography, large tutorial-data generation, long processing jobs, and
+CUDA-kernel-specific work the Mac's Metal path cannot cover. Send the compute
+there even when the eventual output is small. Keep generated reports and scratch
+artifacts outside the repo unless they are intentionally promoted into a
+documented maintainer workflow.
 
 ## Widget UI Consistency
 
