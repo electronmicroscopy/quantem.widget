@@ -879,7 +879,7 @@ const upwardMenuProps = {
   sx: { zIndex: 9999 },
 };
 
-import { resolveDenoiseMode } from "../displayFilter";
+import { resolveDenoiseMode, applyDisplayFilterBrowser, browserFilterSupported, filterKnobsActive, getGPUDisplayFilterEngine } from "../displayFilter";
 import { COLORMAPS, COLORMAP_NAMES, applyColormap, renderToOffscreen, renderToOffscreenReuse, createGPUColormapEngine, GPUColormapEngine } from "../colormaps";
 
 const DPR = window.devicePixelRatio || 1;
@@ -2405,6 +2405,53 @@ function Show3D() {
   // updates on release so scrubbing sigma stays smooth on large stacks.
   const [sigmaDraft, setSigmaDraft] = React.useState<number | null>(null);
   const displayFilterOff = resolveDenoiseMode(displayFilter || "none").mode === "none";
+  // Browser-side denoise negotiation (mirrors Show2D). With _webgpu_filter_ok
+  // Python ships RAW frames and the WGSL port applies gaussian/bin/anscombe
+  // here, so dragging sigma is LIVE (zero kernel round-trips). Only a real
+  // (non-software) adapter flips it, so SwiftShader-class fallbacks keep the
+  // Python path. Offline pages keep their Python-baked frames.
+  const [webgpuFilterOk, setWebgpuFilterOk] = useModelState<boolean>("_webgpu_filter_ok");
+  const browserFilterActive = !!webgpuFilterOk && !offline && !isRgb;
+  const denoiseResolved = resolveDenoiseMode(displayFilter || "none", spatialBin || 1);
+  const denoiseSigmaLive = sigmaDraft ?? Number(displaySigma ?? 4);
+  const browserFilterKnobsOn = browserFilterActive
+    && filterKnobsActive(denoiseResolved.mode, denoiseResolved.bin)
+    && browserFilterSupported(denoiseResolved.mode);
+  // Filtered-frame cache keyed on (idx, mode, sigma, bin, avg): a live sigma
+  // drag changes the key, so it re-filters the shown frame every tick.
+  const browserFilterCacheRef = React.useRef<Map<string, Float32Array>>(new Map());
+  const [browserFilterTick, setBrowserFilterTick] = React.useState(0);
+  // Live gate read inside memoized render ticks (avoids stale closures): when on,
+  // denoise is treated as a client frame transform so every path routes through
+  // displayFrameForIndex and skips the raw GPU-slot cache.
+  const browserFilterOnRef = React.useRef(false);
+  browserFilterOnRef.current = browserFilterKnobsOn;
+  React.useEffect(() => {
+    let disposed = false;
+    getGPUDisplayFilterEngine().then((engine) => {
+      if (!disposed && !offline) setWebgpuFilterOk(!!engine);
+    });
+    return () => { disposed = true; };
+  }, [offline, setWebgpuFilterOk]);
+  // Return a filtered copy of `frame` for DISPLAY only, keyed on the live knobs.
+  // The GPU filter is async, so on a cache miss we return the raw frame now and
+  // repaint once the filtered result lands (setBrowserFilterTick). Stats/ROI
+  // keep reading raw frames (frame_bytes ships raw), so numbers stay honest.
+  const browserFilterFrame = React.useCallback((idx: number, frame: Float32Array | null): Float32Array | null => {
+    if (!frame || !browserFilterKnobsOn) return frame;
+    const key = `${Math.round(idx)}:${denoiseResolved.mode}:${denoiseSigmaLive}:${denoiseResolved.bin}:${normalizedAverageWindow(playRef.current.avgWindow)}:${playRef.current.diffMode}`;
+    const cache = browserFilterCacheRef.current;
+    const hit = cache.get(key);
+    if (hit) return hit;
+    applyDisplayFilterBrowser(frame, width, height, denoiseResolved.mode, denoiseSigmaLive, denoiseResolved.bin)
+      .then((filtered) => {
+        cache.set(key, filtered);
+        if (cache.size > 48) cache.delete(cache.keys().next().value as string);
+        setBrowserFilterTick((t) => t + 1);
+      })
+      .catch(() => {});
+    return frame;
+  }, [browserFilterKnobsOn, denoiseResolved.mode, denoiseResolved.bin, denoiseSigmaLive, width, height]);
   // Enabling the "Denoise" section must actually denoise (else pressing it does
   // nothing until you also pick a method): default an off mode to gaussian
   // (σ default 4.0 is a visible low-pass); disabling returns the display to raw.
@@ -4492,7 +4539,7 @@ function Show3D() {
     offline,
     diffMode: playRef.current.diffMode,
     avgWindow: playRef.current.avgWindow,
-  });
+  }) || browserFilterOnRef.current;
 
   const rawFrameForIndex = (idx: number, currentIdx: number, currentFrame: Float32Array | null): Float32Array | null => {
     const n = Math.max(1, nSlices || 1);
@@ -4606,14 +4653,19 @@ function Show3D() {
   const displayFrameForIndex = (idx: number, currentFrame: Float32Array | null): Float32Array | null => {
     const frame = averagedFrameForIndex(idx, idx, currentFrame);
     const activeDiffMode = playRef.current.diffMode;
-    if (!frame || !shouldApplyClientDifference(offline, activeDiffMode)) return frame;
-    const refIdx = activeDiffMode === "first" ? 0 : Math.max(0, Math.round(idx) - 1);
-    const ref = averagedFrameForIndex(refIdx, idx, currentFrame);
-    if (!ref) return frame;
-    const frameSize = width * height;
-    const out = new Float32Array(frameSize);
-    for (let k = 0; k < frameSize; k++) out[k] = frame[k] - ref[k];
-    return out;
+    let result: Float32Array | null = frame;
+    if (frame && shouldApplyClientDifference(offline, activeDiffMode)) {
+      const refIdx = activeDiffMode === "first" ? 0 : Math.max(0, Math.round(idx) - 1);
+      const ref = averagedFrameForIndex(refIdx, idx, currentFrame);
+      if (ref) {
+        const frameSize = width * height;
+        const out = new Float32Array(frameSize);
+        for (let k = 0; k < frameSize; k++) out[k] = frame[k] - ref[k];
+        result = out;
+      }
+    }
+    // Browser-side denoise (WGSL) applied to the display frame with LIVE sigma.
+    return browserFilterFrame(idx, result);
   };
 
   const renderGpuPanelSlice = (idx: number, updateDisplayState = true): boolean => {
@@ -4806,7 +4858,7 @@ function Show3D() {
         offline,
         diffMode: c.diffMode,
         avgWindow: c.avgWindow,
-      });
+      }) || browserFilterOnRef.current;
       const rawForRanges = rawFrameForIndex(normalized, normalized, rawFrameDataRef.current);
       const frameForRanges = rawForRanges && transformActive
         ? (displayFrameForIndex(normalized, rawForRanges) ?? rawForRanges)
@@ -5131,7 +5183,7 @@ function Show3D() {
         offline,
         diffMode: c.diffMode,
         avgWindow: c.avgWindow,
-      });
+      }) || browserFilterOnRef.current;
       let frame: Float32Array | null = null;
       let frameSource = "buffer";
       // The GPU-cache fast paths (renderGpuPanelSlice / direct-grid) only handle
@@ -6333,7 +6385,7 @@ function Show3D() {
       const ctx = canvas.getContext("2d");
       if (ctx && mainOffscreenRef.current) drawMain(ctx, mainOffscreenRef.current);
     }
-  }, [frameBytes, frameSeq, width, height, cmap, displayScale, canvasW, canvasH, imageVminPct, imageVmaxPct, logScale, autoContrast, percentileLow, percentileHigh, traitVmin, traitVmax, dataMin, dataMax, autoVmins, autoVmaxs, smooth, imageRotation, nPanels, linkContrast, panelStates, panelDataRanges, vminPerPanel, vmaxPerPanel, offline, liveSliceIdx, sliceIdx, diffMode, avgWindow, playing, gpuCmapReady, canvasRepaintSignal, isRgb]);
+  }, [frameBytes, frameSeq, width, height, cmap, displayScale, canvasW, canvasH, imageVminPct, imageVmaxPct, logScale, autoContrast, percentileLow, percentileHigh, traitVmin, traitVmax, dataMin, dataMax, autoVmins, autoVmaxs, smooth, imageRotation, nPanels, linkContrast, panelStates, panelDataRanges, vminPerPanel, vmaxPerPanel, offline, liveSliceIdx, sliceIdx, diffMode, avgWindow, playing, gpuCmapReady, canvasRepaintSignal, isRgb, browserFilterTick, denoiseSigmaLive, displayFilter, spatialBin, browserFilterKnobsOn]);
 
   // Per-panel render: each slot gets its own zoom/pan transform. 2px gap
   // between slots painted as the canvas bg (transparent through clearRect).
@@ -6467,7 +6519,7 @@ function Show3D() {
       offline,
       diffMode: c.diffMode,
       avgWindow: c.avgWindow,
-    });
+    }) || browserFilterOnRef.current;
     const frame = transformActive ? (displayFrameForIndex(idx, inputFrame) ?? inputFrame) : inputFrame;
 
     gpuRenderSerialRef.current++;
@@ -6577,7 +6629,7 @@ function Show3D() {
   };
 
   const renderFetchedSlice = async (idx: number): Promise<boolean> => {
-    const transformActive = requiresClientFrameTransform({ offline, diffMode, avgWindow });
+    const transformActive = requiresClientFrameTransform({ offline, diffMode, avgWindow }) || browserFilterOnRef.current;
     if (!transformActive && renderGpuCachedSliceDirect(idx)) return true;
     if (separatePanelFrames) {
       // Neighbor-frame averaging is intentionally clamped off for this mode;
@@ -6659,6 +6711,7 @@ function Show3D() {
       offline
       || imageRotation % 4 !== 0
       || requiresClientFrameTransform({ offline, diffMode, avgWindow })
+      || browserFilterOnRef.current
     ) return false;
     const n = Math.max(1, nSlices || 1);
     const idx = ((Math.round(playbackIdxRef.current) % n) + n) % n;
@@ -6758,7 +6811,7 @@ function Show3D() {
       }
       return;
     }
-    const transformActive = requiresClientFrameTransform({ offline, diffMode, avgWindow });
+    const transformActive = requiresClientFrameTransform({ offline, diffMode, avgWindow }) || browserFilterOnRef.current;
     if (!offline && !transformActive && gpuDisplayVisibleRef.current) {
       try {
         restoredGpu = renderGpuCachedSliceDirect(frameIdx, false);
@@ -10624,7 +10677,7 @@ function Show3D() {
     const next = clampSlice(idx);
     if (playing) setPlaying(false);
     setPlaybackUiSliceIdx(next);
-    const transformActive = requiresClientFrameTransform({ offline, diffMode, avgWindow });
+    const transformActive = requiresClientFrameTransform({ offline, diffMode, avgWindow }) || browserFilterOnRef.current;
     if (!transformActive && renderGpuCachedSliceDirect(next)) return;
     setLiveSliceIdx(next);
     if (renderBufferedSlice(next)) return;
