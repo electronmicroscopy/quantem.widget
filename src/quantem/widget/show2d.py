@@ -4024,7 +4024,9 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             except KeyError:
                 cmap = magenta_cmap()
         return blend_map_on_haadf(
-            norm01(map_view, 2.0, 99.5),
+            # (4, 99) matches the dominant stretch of the drift-paper Fig4
+            # sweep; sparse maps normalized at (2, 99.5) render far too dark.
+            norm01(map_view, 4.0, 99.0),
             norm01(haadf, 1.0, 99.9),
             alpha=float(self.underlay_alpha),
             haadf_gain=float(self.underlay_haadf_gain),
