@@ -503,6 +503,12 @@ class _Show3DFrameHTTPServer(http.server.ThreadingHTTPServer):
     daemon_threads = True
 
 
+# Rec. 709 luminance weights. A true-color stack keeps its RGB in _rgb_data and
+# a single luminance plane in _data so stats, FFT, ROI, and scale bars have one
+# scalar channel to work on.
+_RGB_LUMA = np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
+
+
 class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     """
     Interactive 3D stack viewer for sequential 2D images.
@@ -2128,11 +2134,7 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         if not is_rgb:
             data = _apply_config_transform(data)
         self.is_rgb = bool(is_rgb)
-        self._rgb_data = data if is_rgb else None
-        if is_rgb:
-            # Luminance plane drives stats / FFT / ROI; color ships separately.
-            _RGB_LUMA = np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
-            data = np.tensordot(data, _RGB_LUMA, axes=([-1], [0])).astype(np.float32)
+        data = self._establish_rgb_luminance(data, is_rgb=is_rgb)
 
         # Multi-panel: convert remaining args, validate shapes, concatenate.
         # If the caller repeats the same stack object across panels, keep the
@@ -2843,6 +2845,10 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 "Show3D does not accept complex data. Convert first: "
                 "np.abs(arr) for magnitude or np.angle(arr) for phase."
             )
+        # Same split as __init__: color to _rgb_data, luminance to _data. Without
+        # this, a live RGB update leaves _rgb_data stale (or None on gray->color)
+        # so the browser, HTML export, and raster export all read the wrong frame.
+        data = self._establish_rgb_luminance(data, is_rgb=is_rgb)
         with np.errstate(over="ignore", invalid="ignore"):
             self._data = data.astype(np.float32, copy=False)
         # Pre-cast check ran on the source dtype; if float64 values exceed float32
@@ -2939,8 +2945,9 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             # Kernel-less consumers (docs pages, exported HTML, saved widget
             # state) slice frames straight out of _offline_stack. Without a
             # repack it still holds the PREVIOUS stack, and any slice index
-            # past its end renders blank after reopen.
-            self._pack_offline_u8_stack(self._display_data)
+            # past its end renders blank after reopen. Pack from the color
+            # source so RGB stacks keep true color (_display_data is luminance).
+            self._pack_offline_u8_stack(self._offline_pack_source())
         self._bump_frame_server_version()
         self._refresh_auto_contrast_ranges()
         self._update_all()
@@ -2979,12 +2986,16 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 self._padding = old_padding
             return
 
+        # For a color folder, existing frames must come from the (N, H, W, 3)
+        # color stack, not the luminance plane in _data, or np.stack mixes
+        # (H, W, 3) new frames with (H, W) old ones and raises inhomogeneous.
+        existing = self._rgb_data if (self.is_rgb and self._rgb_data is not None) else self._data
         frames: list[np.ndarray] = []
         for path in new_paths:
             if path in changed_arrays:
                 frames.append(transform(changed_arrays[path]))
             else:
-                frames.append(np.asarray(self._data[old_index[path]]))
+                frames.append(np.asarray(existing[old_index[path]]))
         stack = np.stack(frames, axis=0)
 
         selected_path = (
@@ -4396,15 +4407,21 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         if idx < 0 or idx >= self.n_slices:
             raise IndexError(f"Frame index {idx} out of range [0, {self.n_slices})")
 
-        # Respect diff_mode so saved frame matches what user sees.
-        frame = self._data[idx]
-        if self.diff_mode == "previous":
-            frame = frame - self._data[idx - 1] if idx > 0 else np.zeros_like(frame)
-        elif self.diff_mode == "first":
-            frame = frame - self._data[0]
-        normalized = self._normalize_frame(frame)
-        cmap_fn = colormaps.get_cmap(self.cmap)
-        rgba = (cmap_fn(normalized / 255.0) * 255).astype(np.uint8)
+        # True color: save the RGB frame directly (no colormap), matching what
+        # the browser paints. diff_mode is a scalar-intensity tool, so it stays
+        # on the luminance path only.
+        if self.is_rgb and self._rgb_data is not None:
+            rgba = np.clip(self._rgb_data[idx] * 255.0, 0, 255).astype(np.uint8)
+        else:
+            # Respect diff_mode so saved frame matches what user sees.
+            frame = self._data[idx]
+            if self.diff_mode == "previous":
+                frame = frame - self._data[idx - 1] if idx > 0 else np.zeros_like(frame)
+            elif self.diff_mode == "first":
+                frame = frame - self._data[0]
+            normalized = self._normalize_frame(frame)
+            cmap_fn = colormaps.get_cmap(self.cmap)
+            rgba = (cmap_fn(normalized / 255.0) * 255).astype(np.uint8)
 
         img = Image.fromarray(rgba)
         if fmt == "pdf":
@@ -5094,6 +5111,41 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 )
         return (_bin_gray(self._display_data),)
 
+    def _establish_rgb_luminance(self, data: np.ndarray, *, is_rgb: bool) -> np.ndarray:
+        """Store the color stack and return the luminance plane that drives stats.
+
+        Show3D keeps true color in ``_rgb_data`` (``(N, H, W, 3)``) for the
+        browser to paint, and a Rec. 709 luminance plane in ``_data`` for stats,
+        FFT, ROI, and scale bars. ``__init__`` and :meth:`set_image` both route
+        their normalized stack through here, so the two paths cannot drift - the
+        source of the fig4 RGB export bug where a live update left ``_rgb_data``
+        stale and ``_data`` four-dimensional.
+
+        Parameters
+        ----------
+        data : np.ndarray
+            Normalized stack. ``(N, H, W, 3)`` in ``[0, 1]`` when ``is_rgb``,
+            otherwise ``(N, H, W)``.
+        is_rgb : bool
+            Whether ``data`` is a true-color stack.
+
+        Returns
+        -------
+        np.ndarray
+            The luminance plane ``(N, H, W)`` to assign to ``_data``. Grayscale
+            input passes through unchanged.
+
+        Examples
+        --------
+        >>> luma = widget._establish_rgb_luminance(rgb_stack, is_rgb=True)  # doctest: +SKIP
+        >>> widget._data = luma  # doctest: +SKIP
+        """
+        if is_rgb:
+            self._rgb_data = data
+            return np.tensordot(data, _RGB_LUMA, axes=([-1], [0])).astype(np.float32)
+        self._rgb_data = None
+        return data
+
     def _offline_stack_source(self) -> np.ndarray:
         """Return the stack shape that the offline frontend indexes per frame."""
         if self._display_data is None:
@@ -5686,7 +5738,12 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         if idx is None:
             idx = int(self.slice_idx)
         idx = max(0, min(int(idx), int(self.n_slices) - 1))
-        frames = [np.asarray(self._get_display_panel_frame(panel, idx), dtype=np.float32) for panel in panels]
+        # True color: hand Show2D the RGB frame so the cold-reopen preview shows
+        # real color, not a colormapped luminance plane. RGB is single-panel.
+        if self.is_rgb and self._rgb_data is not None:
+            frames = [np.ascontiguousarray(self._rgb_data[idx], dtype=np.float32)]
+        else:
+            frames = [np.asarray(self._get_display_panel_frame(panel, idx), dtype=np.float32) for panel in panels]
         labels = [self._static_panel_title(panel, idx) for panel in panels]
         if not frames:
             return None

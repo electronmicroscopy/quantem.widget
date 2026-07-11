@@ -365,7 +365,7 @@ def test_folder_empty_snapshot_without_watch_still_raises(
 ) -> None:
     # C1: a fixed empty snapshot has no future arrival path, expect the legacy
     # actionable error instead of returning a permanently empty viewer.
-    with pytest.raises(FileNotFoundError, match="No readable 2D images"):
+    with pytest.raises(FileNotFoundError, match="No readable 2D"):
         viewer.from_folder(tmp_path, watch=False)
 
 
@@ -551,7 +551,7 @@ def test_watched_folder_empty_opt_in_anchors_shape_and_prunes_errors(
 
     # C1: the legacy initial-read call sees no valid image, expect its existing
     # FileNotFoundError while the explicit empty path returns no records.
-    with pytest.raises(FileNotFoundError, match="No readable 2D images"):
+    with pytest.raises(FileNotFoundError, match="No readable 2D"):
         source.read_initial()
     arrays, records = source.read_initial(allow_empty=True)
     assert arrays == []

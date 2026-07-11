@@ -4,6 +4,17 @@ import numpy as np
 
 from quantem.widget import Show3D
 
+_RGB_LUMA = np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
+
+
+def _color_stack(n: int, h: int = 8, w: int = 8) -> np.ndarray:
+    """A stack whose frame k is a unique flat color: red fades out, blue in."""
+    src = np.zeros((n, h, w, 3), dtype=np.float32)
+    for k in range(n):
+        t = k / max(1, n - 1)
+        src[k] = [1.0 - t, 0.4, t]
+    return src
+
 
 def test_set_image_repacks_offline_stack():
     # Docs pages, exported HTML, and saved widget state slice frames straight
@@ -24,36 +35,51 @@ def test_set_image_repacks_offline_stack():
 def test_rgb_offline_stack_frames_decode_at_rgb_stride():
     # RGB stacks pack 3 bytes/px; frame k must live at k*3*H*W. A grayscale
     # stride here scrambles every frame after the first on kernel-less reopen
-    # (the fig4 RGB export bug).
-    n, h, w = 6, 12, 12
-    src = np.zeros((n, h, w, 3), dtype=np.float32)
-    for k in range(n):
-        src[k] = [k / n, 0.5, 1.0 - k / n]
+    # (the fig4 RGB export bug). This is the uint8-path parity lock.
+    src = _color_stack(6, 12, 12)
     widget = Show3D(src)
     assert widget.is_rgb and widget.offline
-    stack = np.frombuffer(widget._offline_stack, dtype=np.uint8).reshape(n, h, w, 3)
-    for k in range(n):
+    stack = np.frombuffer(widget._offline_stack, dtype=np.uint8).reshape(6, 12, 12, 3)
+    for k in range(6):
         expected = np.clip(src[k] * 255.0, 0, 255).astype(np.uint8)
         assert np.array_equal(stack[k], expected), f"RGB frame {k} scrambled"
 
 
-def test_set_image_accepts_rgb_and_repacks():
-    # Live color-stack growth: set_image must keep RGB mode and repack the
-    # offline stack at the RGB stride, including gray<->RGB swaps.
-    n, h, w = 6, 12, 12
-    rgb = np.random.rand(n, h, w, 3).astype("float32")
-    widget = Show3D(rgb)
+def test_set_image_gray_rgb_swap_keeps_color_content_and_luminance():
+    # A scientist iterates a color figure in place: gray stack, then a color
+    # composite, then back. set_image must reconfigure the whole contract each
+    # time - color into _rgb_data (what the browser paints), a luminance plane
+    # into _data (what stats/FFT/ROI read) - not leave a stale or 4-D _data.
+    widget = Show3D(np.random.rand(4, 8, 8).astype("float32"))
+    assert not widget.is_rgb and widget._rgb_data is None
 
-    grown = np.random.rand(n + 4, h, w, 3).astype("float32")
+    rgb = _color_stack(3)
+    widget.set_image(rgb)
+    assert widget.is_rgb and widget._rgb_data is not None
+    assert widget._rgb_data.shape == (3, 8, 8, 3)
+    assert widget._data.shape == (3, 8, 8)  # luminance, not 4-D color
+    np.testing.assert_allclose(widget._rgb_data, rgb, atol=1e-6)
+    np.testing.assert_allclose(widget._data, rgb @ _RGB_LUMA, atol=1e-5)
+    # the offline stack the browser slices carries the color, not the luminance
+    stack = np.frombuffer(widget._offline_stack, dtype=np.uint8).reshape(3, 8, 8, 3)
+    np.testing.assert_allclose(stack[0] / 255.0, rgb[0], atol=1.5 / 255)
+
+    widget.set_image(np.random.rand(5, 8, 8).astype("float32"))
+    assert not widget.is_rgb and widget._rgb_data is None
+    assert len(widget._offline_stack) == 5 * 8 * 8  # gray stride, color cleared
+
+
+def test_rgb_export_source_and_raster_stay_true_color_after_set_image():
+    # Exporting an RGB figure the scientist just updated in place: the HTML
+    # export source, the offline stack, and a saved PNG must all reflect the
+    # NEW color frames, never a stale stack or a colormapped luminance plane.
+    widget = Show3D(_color_stack(6))
+    grown = _color_stack(10)
     widget.set_image(grown)
-    assert widget.is_rgb
-    assert widget.n_slices == n + 4
-    assert len(widget._offline_stack) == (n + 4) * h * w * 3
-    stack = np.frombuffer(widget._offline_stack, dtype=np.uint8).reshape(n + 4, h, w, 3)
-    assert np.array_equal(
-        stack[-1], np.clip(grown[-1] * 255.0, 0, 255).astype(np.uint8)
-    )
 
-    widget.set_image(np.random.rand(3, h, w).astype("float32"))
-    assert not widget.is_rgb
-    assert len(widget._offline_stack) == 3 * h * w
+    export_source = widget._offline_pack_source()
+    assert export_source.shape == (10, 8, 8, 3)
+    np.testing.assert_allclose(export_source[9], grown[9], atol=1e-6)
+
+    preview = widget._static_show2d_preview(idx=5)
+    assert preview.is_rgb == [True]  # cold-reopen preview is true color
