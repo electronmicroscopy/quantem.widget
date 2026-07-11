@@ -28,7 +28,10 @@ export function useHideStaticFallback(
     let cancelled = false;
     const hideFallback = () => {
       if (cancelled) return;
-      const cell = rootRef.current?.closest(".jp-Cell") ?? null;
+      // .jp-Cell covers JupyterLab and nbconvert HTML; .cell covers
+      // jupyter-book / myst-nb docs pages, where model_id is unavailable and
+      // the structural scope is the only way to find this widget's sibling.
+      const cell = rootRef.current?.closest(".jp-Cell, .cell") ?? null;
       const scope: ParentNode = cell ?? document;
       scope.querySelectorAll("img.quantem-static-fallback").forEach((img) => {
         if (!cell) {

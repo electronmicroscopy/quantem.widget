@@ -10,6 +10,12 @@ function Harness({ shouldHide }: { shouldHide: boolean }) {
   return React.createElement("div", { ref, className: "show2d-root" }, "live widget");
 }
 
+function HarnessNoModelId({ shouldHide }: { shouldHide: boolean }) {
+  const ref = React.useRef<HTMLDivElement | null>(null);
+  useHideStaticFallback({}, ref, shouldHide);
+  return React.createElement("div", { ref, className: "show2d-root" }, "live widget");
+}
+
 let root: Root | null = null;
 
 afterEach(() => {
@@ -54,5 +60,32 @@ describe("useHideStaticFallback", () => {
     act(() => root?.render(React.createElement(Harness, { shouldHide: true })));
 
     expect(document.getElementById("fallback-output")?.style.display).toBe("none");
+  });
+
+  it("hides the static output on docs pages (.cell scope, no model_id)", () => {
+    // jupyter-book / myst-nb pages wrap outputs in .cell (no .jp-Cell), and
+    // the html-manager model exposes no model_id — only the structural scope
+    // can find the sibling there.
+    document.body.innerHTML = `
+      <div class="cell">
+        <div id="mount"></div>
+        <div class="cell_output">
+          <img
+            id="fallback-img"
+            class="quantem-static-fallback"
+            data-quantem-model-id="model-1"
+            src="data:image/jpeg;base64,abc"
+            alt="Show2D static render"
+          >
+        </div>
+      </div>
+    `;
+    const mount = document.getElementById("mount");
+    if (!mount) throw new Error("missing mount node");
+    root = createRoot(mount);
+
+    act(() => root?.render(React.createElement(HarnessNoModelId, { shouldHide: true })));
+
+    expect(document.getElementById("fallback-img")?.style.display).toBe("none");
   });
 });

@@ -315,7 +315,7 @@ A. Yang, T. Zhang, Y. Xiao, and S. J. L. Billinge, *Digital Discovery*, 2026).
   code"), never the default "Show code cell source". Keep widget-construction
   code and real-data loader calls visible; split a cell that mixes the two.
 - [ ] The change includes focused tests for Python state/export behavior and
-  frontend build coverage where possible; start with `PYTHONPATH=src pytest -q`
+  frontend build coverage where possible; start with `PYTHONPATH=src:. pytest -q`
   and `npm run build`, or run `scripts/widget_local_signoff.sh`.
 - [ ] Before committing, inspect `git status --short` and `git diff --stat`;
   do not commit generated HTML, docs builds, screenshots, local notebooks,

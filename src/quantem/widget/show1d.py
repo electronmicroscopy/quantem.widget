@@ -27,6 +27,7 @@ import traitlets
 from quantem.widget.export import ensure_mobile_viewport
 from quantem.widget.utils.array import _b64_safe, to_numpy
 from quantem.widget.utils.state_io import resolve_widget_version, save_state_file, unwrap_state_payload
+from quantem.widget.utils.static_fallback import StaticFallbackMixin
 from quantem.widget.utils.ui import UiMode, resolve_ui_mode
 
 _DEFAULT_COLORS = [
@@ -235,7 +236,7 @@ def _profile_distance_axis(
     return np.linspace(0.0, length, max(0, int(n_points)), dtype=np.float32)
 
 
-class Show1D(anywidget.AnyWidget):
+class Show1D(StaticFallbackMixin, anywidget.AnyWidget):
     """Interactive 1D viewer for traces, line profiles, and live reconstruction.
 
     Parameters
@@ -476,8 +477,107 @@ class Show1D(anywidget.AnyWidget):
     export_status = traitlets.Unicode("").tag(sync=True)
     export_enabled = traitlets.Bool(True).tag(sync=True)
     export_payload = traitlets.Bytes(b"").tag(sync=True)
+    # Compact saved-notebook preview (see utils/static_fallback.py); lets a
+    # cold rehydrate show the render even though the heavy buffers are trimmed.
+    _static_fallback_jpeg = traitlets.Unicode("").tag(sync=True)
+    _static_fallback_mime = traitlets.Unicode("image/jpeg").tag(sync=True)
     export_payload_id = traitlets.Unicode("").tag(sync=True)
     export_filename = traitlets.Unicode("").tag(sync=True)
+
+    # Bulk sync=True buffers dropped from the full save snapshot when
+    # save_state=False (see docs/developer/save-state-and-notebook-size.md).
+    # y_bytes / x_bytes stay: they are the trace itself (normally KBs) and let
+    # a cold reopen paint the plot. snapshot_bytes is the whale - a monitor
+    # run's full snapshot stack (tens of MB); profile_image_bytes can be a
+    # full-resolution image in from_image mode.
+    _UNSAVED_HEAVY_KEYS = (
+        "snapshot_bytes",
+        "profile_image_bytes",
+        "export_payload",
+    )
+
+    def get_state(self, key=None, drop_defaults=False):
+        """Trait state for comm sync and notebook embedding.
+
+        ipywidgets calls this with ``key=None`` to snapshot the FULL state that
+        gets written into the saved notebook's ``metadata.widgets``. When
+        ``save_state`` is False we drop the heavy buffers from that snapshot so
+        a plain Show1D does not bake a monitor run's snapshot stack into the
+        .ipynb. Targeted syncs (``key`` is a name or set, used by hold_sync /
+        send_state during live rendering) are untouched, so the frontend still
+        receives every buffer normally. ``save_state=True`` embeds everything
+        so a reopened notebook restores the interactive widget without a
+        kernel.
+        """
+        state = super().get_state(key=key, drop_defaults=drop_defaults)
+        if key is None and not getattr(self, "_save_state", False):
+            if not self._static_fallback_enabled():
+                state.pop("_static_fallback_jpeg", None)
+                state.pop("_static_fallback_mime", None)
+            elif not self._static_fallback_jpeg:
+                png = self._static_fallback_png_b64()
+                if png:
+                    self._store_static_fallback_preview(png)
+                    state["_static_fallback_jpeg"] = self._static_fallback_jpeg
+                    state["_static_fallback_mime"] = self._static_fallback_mime
+            for heavy_key in self._UNSAVED_HEAVY_KEYS:
+                state.pop(heavy_key, None)
+        return state
+
+    def _static_png_b64(self, max_px: int = 512) -> str | None:
+        """Matplotlib render of the current traces for the saved-notebook preview.
+
+        The preview mirrors what the live plot shows on mount: every visible
+        trace (capped at 8 so a wide lambda sweep stays legible), the log-scale
+        setting, and the axis labels. Points are stride-decimated to keep the
+        render fast; this is a human-facing reopen preview, not analysis data.
+        """
+        data = getattr(self, "_data", None)
+        if data is None or getattr(data, "size", 0) == 0:
+            return None
+        import base64 as _base64
+        import io as _io
+
+        from matplotlib.figure import Figure
+
+        traces = np.atleast_2d(np.asarray(data, dtype=np.float32))
+        x = np.asarray(getattr(self, "_x", np.arange(traces.shape[1])), dtype=np.float32)
+        stride = max(1, traces.shape[1] // 4096)
+        fig = Figure(figsize=(max_px / 100.0, max_px * 0.62 / 100.0), dpi=100)
+        ax = fig.add_subplot(111)
+        labels = list(self.labels) if self.labels else []
+        shown = min(len(traces), 8)
+        for idx in range(shown):
+            label = labels[idx] if idx < len(labels) and str(labels[idx]).strip() else None
+            ax.plot(x[::stride], traces[idx][::stride], linewidth=1.0, label=label)
+        if getattr(self, "log_scale", False):
+            ax.set_yscale("log")
+        if self.title:
+            ax.set_title(str(self.title), fontsize=9)
+        if self.x_label:
+            ax.set_xlabel(str(self.x_label), fontsize=8)
+        if self.y_label:
+            ax.set_ylabel(str(self.y_label), fontsize=8)
+        ax.tick_params(labelsize=7)
+        if any(line.get_label() and not line.get_label().startswith("_") for line in ax.lines):
+            ax.legend(fontsize=7, loc="best")
+        fig.tight_layout()
+        buffer = _io.BytesIO()
+        fig.savefig(buffer, format="png")
+        return _base64.b64encode(buffer.getvalue()).decode("ascii")
+
+    def _store_static_fallback_preview(self, png_b64: str) -> None:
+        """Store a compact saved-notebook preview inside lightweight state."""
+        if getattr(self, "_save_state", False):
+            return
+        encoded = self._encode_static_fallback_b64(png_b64)
+        if not encoded:
+            self._static_fallback_jpeg = ""
+            self._static_fallback_mime = ""
+            return
+        mime, image_b64 = encoded
+        self._static_fallback_jpeg = image_b64
+        self._static_fallback_mime = mime
 
     def __init__(
         self,
@@ -550,6 +650,10 @@ class Show1D(anywidget.AnyWidget):
         prefer_webgpu: bool = True,
         monitor_path: str | pathlib.Path | None = None,
         monitor_refresh_s: float = 0.0,
+        save_state: bool = False,
+        notebook_preview_format: str | None = "jpeg",
+        notebook_preview_quality: int = 88,
+        notebook_preview_max_px: int = 512,
         state: dict[str, Any] | str | pathlib.Path | None = None,
         **kwargs: Any,
     ) -> None:
@@ -559,7 +663,15 @@ class Show1D(anywidget.AnyWidget):
             and bool(scale_bar_visible) != bool(show_scale_bar)
         ):
             raise ValueError("Use either show_scale_bar or scale_bar_visible, not conflicting values")
+        # Before super().__init__ so any get_state during comm-open sees it.
+        self._save_state = bool(save_state)
+        self._configure_static_fallback(
+            notebook_preview_format=notebook_preview_format,
+            notebook_preview_quality=notebook_preview_quality,
+            notebook_preview_max_px=notebook_preview_max_px,
+        )
         super().__init__(**kwargs)
+        self._static_fallback_mime = self._static_fallback_mime_type()
         self.widget_version = resolve_widget_version()
         self._data, inferred_labels = self._normalise_data(data)
         inferred_title = self.title

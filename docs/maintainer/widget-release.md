@@ -20,7 +20,7 @@ widget-vX.Y.Z.postN
 For testing, prefer release-candidate tags such as:
 
 ```bash
-widget-v0.0.8rc1
+widget-v0.0.1rc1
 ```
 
 ## Before tagging
@@ -42,14 +42,14 @@ continuing.
 Run the full Python and frontend checks:
 
 ```bash
-PYTHONPATH=src pytest -q
+PYTHONPATH=src:. pytest -q
 npm run build
 ```
 
 For widget/export changes, also run:
 
 ```bash
-PYTHONPATH=src pytest -q tests/test_html_export_protocol.py tests/test_showeds.py
+PYTHONPATH=src:. pytest -q tests/test_html_export_protocol.py tests/test_showeds.py
 ```
 
 For release packaging, run:
@@ -114,8 +114,8 @@ runbook.
 After the local gates pass, create and push the release-candidate tag:
 
 ```bash
-git tag widget-v0.0.8rc1
-git push origin widget-v0.0.8rc1
+git tag widget-v0.0.1rc1
+git push origin widget-v0.0.1rc1
 ```
 
 GitHub Actions will:
@@ -141,7 +141,7 @@ python -m pip install --upgrade pip
 python -m pip install \
   --index-url https://test.pypi.org/simple/ \
   --extra-index-url https://pypi.org/simple/ \
-  quantem-widget==0.0.8rc1
+  quantem-widget==0.0.1rc1
 python - <<'PY'
 import quantem.widget as qw
 print(qw.__version__)
@@ -158,7 +158,7 @@ promoting the release.
 Do not overwrite a published tag. Create a new release-candidate tag instead:
 
 ```bash
-widget-v0.0.8rc2
+widget-v0.0.1rc2
 ```
 
 Fix the issue on a normal branch, merge through a PR, pull updated `main`, rerun
