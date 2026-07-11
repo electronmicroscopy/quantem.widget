@@ -93,6 +93,9 @@ jobs:
         run: npm ci
 
       - name: Run local signoff
+        env:
+          # Silence the HF "unauthenticated requests" warning in baked outputs.
+          HF_HUB_VERBOSITY: error
         run: |
           args=(--artifact-dir /tmp/quantem-widget-ci-signoff)
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
