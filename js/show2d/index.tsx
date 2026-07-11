@@ -6737,7 +6737,9 @@ function Show2D() {
                   <Box sx={{ display: "flex", flexDirection: "column", alignItems: "flex-start", justifyContent: "flex-start", gap: 0.5, flex: "0 1 auto", maxWidth: "100%", opacity: 1, pointerEvents: "auto" }}>
                     {(!linkedContrast && isGallery && rawDataRef.current) ? (
                       <Box sx={{ display: "grid", gridTemplateColumns: histogramGridColumns, gap: `${histogramGapPx}px`, width: "100%", maxWidth: histogramGridMaxWidth, justifyContent: "start" }}>
-                        {Array.from({ length: nImages }).map((_, i) => {
+                        {/* Only the panels on screen get a histogram: the current
+                            page's slice when paged, hidden panels skipped. */}
+                        {visibleImageIndices.map((i) => {
                           const cs = contrastStates.get(i) || { vminPct: 0, vmaxPct: 100 };
                           const raw = rawDataRef.current?.[i] || null;
                           const histData = raw && logScale ? applyLogScale(raw) : raw;
@@ -6929,7 +6931,8 @@ function Show2D() {
                   {fftHistogramData && (
                     !fftLinkedContrast && isGallery ? (
                       <Box sx={{ display: "grid", gridTemplateColumns: histogramGridColumns, gap: `${histogramGapPx}px`, width: "100%", maxWidth: histogramGridMaxWidth, justifyContent: "start" }}>
-                        {Array.from({ length: nImages }).map((_, i) => {
+                        {/* Match the image-histogram grid: current page only, hidden panels skipped. */}
+                        {visibleImageIndices.map((i) => {
                           const fc = fftContrastFor(i);
                           const cache = galleryFftPipelineRef.current[i];
                           const perData = cache?.displayData || null;

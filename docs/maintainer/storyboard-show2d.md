@@ -344,3 +344,34 @@ outside git and record only shape, dtype, frame count, and timings.
 - Export exact float32 and quantized uint8 HTML, open both without a kernel,
   and repeat scrub, play/pause, stats, FFT, hide/restore, and narrow-viewport
   checks with no browser errors.
+
+### S2D-17: Scrub A Paged Comparison Gallery
+
+**User story**: As a user comparing a parameter sweep organized as pages (for
+example lambda values, each page holding the same panel set), I want the page
+slider and page playback to swap the whole panel grid at once while every
+per-panel control - histograms, labels, hide state - follows the page I am
+looking at, not the union of all pages.
+
+**Primary widgets**: Show2D.
+
+**Data to use**: a real or real-derived `(pages, panels, rows, cols)` stack
+with at least 3 pages x 4 panels, per-page distinct intensity ranges so
+histogram mismatches are visible at a glance.
+
+**Acceptance checks**:
+
+- Construct with 4D pages plus `page_labels`; verify the page slider shows
+  `1/N`, the label text, and play/pause advances pages at the configured fps.
+- With `link_contrast=False`, verify exactly `panels_per_page` histograms are
+  shown - never one per panel across ALL pages - and that their ranges change
+  when the page changes. Repeat with the FFT histogram grid.
+- Hide a panel on one page; verify the histogram grid drops that panel's
+  histogram, and other pages' hide state is independent.
+- Drag one page's histogram thumbs; verify only the current page's matching
+  panel changes and the setting is still applied when scrubbing back to that
+  page.
+- Verify stats, hover readout, and selection follow the current page's panels
+  after several slider scrubs and one full playback loop.
+- Export offline HTML and repeat the histogram-count and page-scrub checks
+  without a kernel.
