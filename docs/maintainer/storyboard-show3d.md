@@ -404,3 +404,53 @@ source data and generated reports outside git.
 - Verify idle polls do no decode, transfer, repaint, or state-reset work.
   Exercise idempotent stop/resume, then call ``close()`` or ``free()`` and prove
   no watcher thread can mutate the stack afterward.
+
+### S3D-18: Browse A True-Color Figure Gallery And Pick The Best
+
+**User story**: As a user comparing candidate result figures (a lambda sweep,
+competing reconstructions, before/after variants, RGB composites), I want to
+load them as one labeled stack, scrub or keyboard through them in true color,
+and identify the best one without exporting a manual contact sheet.
+
+**Primary widgets**: Show3D.
+
+**Data to use**: a real set of 3 or more same-shape figures, at least one in
+true color `(H, W, 3)`. Build with `Show3D.from_figure_gallery({label: image})`,
+`Show3D.from_rgb(stack)`, or a plain `(N, H, W, 3)` array.
+
+**Acceptance checks**:
+
+- Construct via `from_figure_gallery` with a `{label: image}` mapping and with a
+  sequence plus `labels=`; verify each figure's name appears in the frame label
+  and `n_slices` equals the figure count.
+- Mix grayscale and color figures; verify the gallery unifies to true color
+  (`is_rgb`) and every frame still shows the right content.
+- Scrub and keyboard-arrow through all frames; verify each renders in true color
+  with no scramble (decode uses the RGB stride, not a grayscale stride).
+- Construct with `rgb=True` / `from_rgb` on a short color stack (<= 4 frames) the
+  auto-detector cannot call, and `rgb=False` on an ambiguous `(3, H, W)` gray
+  stack; verify the forced interpretation holds.
+- Load a color figure with a recon `rotation_deg`; verify it rotates in true
+  color (previously blocked) and stats read a re-derived luminance plane.
+
+### S3D-19: Export A Shareable Color Movie Without A Dead File
+
+**User story**: As a user sharing a color result movie, I want a single HTML
+that actually opens in a browser, and a clear refusal (not a silently broken
+700 MB file) when the movie is too big to embed.
+
+**Primary widgets**: Show3D.
+
+**Data to use**: a real RGB stack large enough that the float32 single-file
+embed exceeds the safe limit, plus a small one that fits.
+
+**Acceptance checks**:
+
+- Export the small stack with default options; open the HTML over a local http
+  server and verify true color renders and every frame decodes correctly.
+- Export the large float32 stack; verify `export_html` refuses with a message
+  naming the estimated size, the safe limit, and the smaller options
+  (`encoding='uint8'`, `downsample=`, explicit `max_mb=`).
+- Re-export the large stack with `encoding='uint8'`; verify it now fits and
+  opens, and the color is visually faithful.
+- Confirm `max_mb=<larger>` overrides the refusal for a deliberate big export.
