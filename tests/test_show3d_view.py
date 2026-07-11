@@ -83,3 +83,18 @@ def test_rgb_export_source_and_raster_stay_true_color_after_set_image():
 
     preview = widget._static_show2d_preview(idx=5)
     assert preview.is_rgb == [True]  # cold-reopen preview is true color
+
+
+def test_from_rgb_forces_color_the_heuristic_cannot_call():
+    # A scientist has a short 2-frame color composite. The (N > 4) auto-detect
+    # heuristic cannot tell it from a scalar stack, so from_rgb is the explicit
+    # color path; rgb=False likewise forces gray on an ambiguous shape.
+    two_frame = _color_stack(2)
+    widget = Show3D.from_rgb(two_frame)
+    assert widget.is_rgb
+    assert widget._rgb_data.shape == (2, 8, 8, 3)
+    assert widget._data.shape == (2, 8, 8)  # luminance plane for stats
+
+    ambiguous_gray = np.random.rand(3, 8, 3).astype("float32")  # trailing 3
+    gray = Show3D(ambiguous_gray, rgb=False)
+    assert not gray.is_rgb and gray._data.shape == (3, 8, 3)

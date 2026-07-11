@@ -377,6 +377,60 @@ def _crop_stack(data: np.ndarray, crop: tuple[int, int, int, int]) -> np.ndarray
     return data[:, top:row_stop, left:col_stop, ...]
 
 
+def _resolve_rgb_stack(data: np.ndarray, rgb: bool | None) -> tuple[np.ndarray, bool]:
+    """Decide whether a stack is true color and reshape it canonically.
+
+    Returns ``(data, is_rgb)`` where color is ``(N, H, W, 3)`` and grayscale is
+    ``(N, H, W)``. ``rgb`` forces the interpretation so the caller is never at
+    the mercy of the heuristic:
+
+    - ``None`` (default): auto-detect. A trailing axis of 3 or 4 means color -
+      any ``(N, H, W, 3)`` stack, or a single ``(H, W, 3)`` frame (told apart
+      from a 3-frame gray stack by ``H > 4``).
+    - ``True``: treat as color; raise if there is no trailing color axis.
+    - ``False``: treat as grayscale ``(N, H, W)``; raise if 4-D.
+
+    Reach for ``rgb=`` (or :meth:`Show3D.from_rgb`) on the cases the heuristic
+    cannot call: a short color stack of 4 or fewer frames, or an
+    ``(N, H, W, 3)`` array that is really a scalar field shown frame-by-frame.
+
+    Examples
+    --------
+    >>> _resolve_rgb_stack(np.zeros((6, 8, 8, 3)), None)[1]
+    True
+    >>> _resolve_rgb_stack(np.zeros((3, 8, 8)), None)[1]
+    False
+    """
+    trailing_color = data.shape[-1] in (3, 4)
+    if rgb is True:
+        if data.ndim == 3 and trailing_color:
+            return data[None, ..., :3], True
+        if data.ndim == 4 and trailing_color:
+            return data[..., :3], True
+        raise ValueError(
+            "rgb=True needs a (H, W, 3) frame or (N, H, W, 3) stack (trailing "
+            f"color axis of 3 or 4); got shape {data.shape}. Drop rgb= for a "
+            "grayscale stack."
+        )
+    if rgb is False:
+        if data.ndim != 3:
+            raise ValueError(
+                "rgb=False needs a grayscale (N, H, W) stack; got shape "
+                f"{data.shape}. Pass rgb=True (or Show3D.from_rgb) for color."
+            )
+        return data, False
+    if data.ndim == 3 and trailing_color and int(data.shape[0]) > 4:
+        return data[None, ..., :3], True
+    if data.ndim == 4 and trailing_color:
+        return data[..., :3], True
+    if data.ndim != 3:
+        raise ValueError(
+            f"Expected (N, H, W) gray stack or (N, H, W, 3) RGB stack, got "
+            f"{data.ndim}D shape {data.shape}"
+        )
+    return data, False
+
+
 def _json_safe_metadata_value(value: Any) -> Any:
     """Convert common scientific scalar/container values to JSON-safe objects."""
     if isinstance(value, np.generic):
@@ -1570,6 +1624,37 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     # === Construction ===
 
     @classmethod
+    def from_rgb(cls, stack, **kwargs) -> Self:
+        """Play a true-color stack, bypassing grayscale/color auto-detection.
+
+        The plain constructor treats a trailing axis of 3 or 4 as color only
+        when it is unambiguous (``N > 4`` frames). ``from_rgb`` is the explicit
+        path for the cases it cannot call: a short color stack of 4 or fewer
+        frames, or an ``(N, H, W, 3)`` array the heuristic might read as a
+        scalar field. Color ships to the browser in full; a Rec. 709 luminance
+        plane drives stats, FFT, and ROI.
+
+        Parameters
+        ----------
+        stack : np.ndarray
+            Color frames as ``(N, H, W, 3)``, ``(N, H, W, 4)``, or a single
+            ``(H, W, 3)`` frame. ``uint8`` or float in ``[0, 1]``.
+        **kwargs
+            Any other :class:`Show3D` option (``title``, ``fps``, ``sampling``, ...).
+
+        Returns
+        -------
+        Show3D
+            A viewer painting the stack in true color.
+
+        Examples
+        --------
+        >>> import numpy as np  # doctest: +SKIP
+        >>> Show3D.from_rgb(np.stack([frame_a, frame_b]))  # 2-frame color  # doctest: +SKIP
+        """
+        return cls(stack, rgb=True, **kwargs)
+
+    @classmethod
     def from_gif(
         cls,
         path: str | pathlib.Path,
@@ -1764,6 +1849,7 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         rotation_deg: float | None = None,
         post_crop: int | tuple[int, int] | tuple[int, int, int, int] | None = None,
         apply_config_transforms: bool = True,
+        rgb: bool | None = None,
         diff_mode: str = "off",
         buffer_size: int = 64,
         dim_label: str = "Frame",
@@ -1965,6 +2051,7 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                             config=config, rotation_deg=rotation_deg,
                             post_crop=post_crop,
                             apply_config_transforms=apply_config_transforms,
+                            rgb=rgb,
                             diff_mode=diff_mode, buffer_size=buffer_size,
                             dim_label=dim_label, use_torch=use_torch, device=device,
                             display_bin=display_bin, offline=offline,
@@ -2001,6 +2088,7 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                    size: int, crop: int | tuple[int, int] | tuple[int, int, int, int],
                    padding: int | tuple[int, int], pad_mode: str,
                    config, rotation_deg, post_crop, apply_config_transforms: bool,
+                   rgb: bool | None,
                    diff_mode: str, buffer_size: int, dim_label: str,
                    use_torch: bool | None, device: str | None,
                    display_bin: int | str, offline: bool | None,
@@ -2123,20 +2211,7 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         data = to_numpy(data)
         if data.ndim == 2:
             data = data[None, ...]
-        # True-color stack: (N, H, W, 3) or a single RGB frame (H, W, 3) with H>4.
-        is_rgb = False
-        if data.ndim == 3 and data.shape[-1] in (3, 4) and int(data.shape[0]) > 4:
-            # Single RGB image → one-frame color stack.
-            data = data[None, ..., :3]
-            is_rgb = True
-        elif data.ndim == 4 and data.shape[-1] in (3, 4):
-            data = data[..., :3]
-            is_rgb = True
-        elif data.ndim != 3:
-            raise ValueError(
-                f"Expected (N, H, W) gray stack or (N, H, W, 3) RGB stack, got {data.ndim}D "
-                f"shape {data.shape}"
-            )
+        data, is_rgb = _resolve_rgb_stack(data, rgb)
         if 0 in data.shape:
             raise ValueError(f"Empty stack: shape {data.shape}. All dims must be >= 1.")
         if np.iscomplexobj(data):
@@ -2767,6 +2842,7 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         data,
         labels: list[str] | None = None,
         *,
+        rgb: bool | None = None,
         display_bin: int | None = None,
     ) -> None:
         """Replace the stack data in place without rebuilding the widget.
@@ -2825,21 +2901,9 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         data = to_numpy(data)
         if data.ndim == 2:
             data = data[None, ...]
-        # Mirror __init__'s true-color normalization: an (N, H, W, 3/4) stack
-        # (or a single (H, W, 3/4) frame with H > 4) stays RGB through live
-        # updates, so a growing color stack keeps rendering after set_image.
-        is_rgb = False
-        if data.ndim == 3 and data.shape[-1] in (3, 4) and int(data.shape[0]) > 4:
-            data = data[None, ..., :3]
-            is_rgb = True
-        elif data.ndim == 4 and data.shape[-1] in (3, 4):
-            data = data[..., :3]
-            is_rgb = True
-        elif data.ndim != 3:
-            raise ValueError(
-                f"Expected (N, H, W) gray stack or (N, H, W, 3) RGB stack, got {data.ndim}D "
-                f"shape {data.shape}"
-            )
+        # Same detection as __init__ so a growing color stack keeps rendering
+        # after set_image; rgb= forces the interpretation for ambiguous shapes.
+        data, is_rgb = _resolve_rgb_stack(data, rgb)
         if is_rgb:
             data = data.astype(np.float32, copy=False)
             if data.size and float(np.nanmax(data)) > 1.5:
