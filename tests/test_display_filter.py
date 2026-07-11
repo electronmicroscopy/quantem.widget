@@ -7,6 +7,7 @@ blend chemistry on HAADF without white atom cores.
 """
 
 import numpy as np
+import pytest
 
 from quantem.widget.utils.display_filter import (
     apply_display_filter,
@@ -283,6 +284,31 @@ def test_show2d_webgpu_negotiation_ships_raw_frames():
     np.testing.assert_array_equal(back, python_view)
 
 
+def test_deprecated_display_filter_kwargs_warn_and_still_apply():
+    """The display_filter-era kwargs still work for one release but warn: a
+    microscopist reopening an old notebook sees the map denoised and a clear
+    pointer to the new denoise= name."""
+    from quantem.widget import Show2D
+
+    counts = _sparse_eds_map(shape=(64, 64))
+    with pytest.warns(DeprecationWarning, match="display_filter is deprecated"):
+        widget = Show2D(counts, display_filter="anscombe", display_sigma=8, verbose=False)
+    assert widget.denoise == "anscombe"  # deprecated alias filled the new kwarg
+    assert widget.denoise_sigma == 8.0
+
+
+def test_new_denoise_kwarg_wins_over_deprecated_alias_and_still_warns():
+    """Passing both the new denoise= and its deprecated display_filter= alias:
+    the new kwarg wins the value (even at its "none" default) while the
+    deprecated alias still raises its warning."""
+    from quantem.widget import Show2D
+
+    counts = _sparse_eds_map(shape=(64, 64))
+    with pytest.warns(DeprecationWarning, match="display_filter is deprecated"):
+        widget = Show2D(counts, denoise="none", display_filter="anscombe", verbose=False)
+    assert widget.denoise == "none"  # explicit new kwarg wins even at its default
+
+
 def test_show2d_html_export_ships_raw_frames_and_knobs():
     """An exported HTML clone carries raw counts plus the filter knobs, so the
     kernel-less page scrubs filter/sigma live through the browser port."""
@@ -299,3 +325,77 @@ def test_show2d_html_export_ships_raw_frames_and_knobs():
         assert list(clone.denoise_sigmas) == [6.0]
     finally:
         clone.close()
+
+
+def test_gallery_rejects_pad_ratio_and_never_claims_a_phantom_border():
+    """pad is a single-panel display window: a 2-panel gallery rejects
+    pad_ratio outright (clear NotImplementedError) and a plain gallery never
+    announces a border it did not draw."""
+    from quantem.widget import Show2D
+
+    a = _sparse_eds_map(shape=(64, 64))
+    b = _sparse_eds_map(seed=9, shape=(64, 64))
+    with pytest.raises(NotImplementedError, match="single panel"):
+        Show2D([a, b], pad_ratio=0.1, verbose=False)
+    gallery = Show2D([a, b], verbose=False)
+    assert "pad" not in gallery.view_banner
+
+
+def test_diff_reference_survives_state_round_trip():
+    """A drift A/B gallery in diff mode: point the diff at panel 1, save, then
+    reload into a fresh widget -> the saved reference comes back instead of
+    silently reverting to panel 0."""
+    from quantem.widget import Show2D
+
+    a = _sparse_eds_map(shape=(64, 64))
+    b = _sparse_eds_map(seed=9, shape=(64, 64))
+    widget = Show2D([a, b], diff_mode=True, verbose=False)
+    widget.diff_reference = 1
+    restored = Show2D([a, b], verbose=False)
+    restored.load_state_dict(widget.state_dict())
+    assert restored.diff_reference == 1
+
+
+def test_set_denoise_applies_to_all_panels_by_default():
+    """set_denoise is the imperative twin of denoise=: on a 2-panel gallery a
+    bare call denoises both panels, folds the bin knob, and chains."""
+    from quantem.widget import Show2D
+
+    a = _sparse_eds_map(shape=(64, 64))
+    b = _sparse_eds_map(seed=9, shape=(64, 64))
+    widget = Show2D([a, b], verbose=False)
+    returned = widget.set_denoise("anscombe", sigma=8, bin=2)
+    assert returned is widget  # chainable, like crop_to_view / set_roi
+    assert widget.denoise_modes == ["anscombe", "anscombe"]
+    assert widget.denoise_bins == [2, 2]
+    assert widget.denoise_sigmas == [8.0, 8.0]
+
+
+def test_set_denoise_scoped_to_one_panel_leaves_others_raw():
+    """Passing panels=[1] builds a raw-vs-denoised A/B from one imperative
+    call: only panel 1 changes, denoise_scope switches to per-panel, and panel
+    0 stays bit-identical raw while the stored arrays never change."""
+    from quantem.widget import Show2D
+
+    a = _sparse_eds_map(shape=(64, 64))
+    b = _sparse_eds_map(seed=9, shape=(64, 64))
+    widget = Show2D([a, b], verbose=False)
+    widget.set_denoise("anscombe", sigma=8, panels=[1])
+    assert widget.denoise_modes == ["none", "anscombe"]
+    assert widget.denoise_scope == "panel"
+    n = a.size
+    sent = np.frombuffer(widget.frame_bytes[: 2 * n * 4], dtype=np.float32).reshape(2, 64, 64)
+    np.testing.assert_array_equal(sent[0], a)  # panel 0: raw, bit-identical
+    assert not np.array_equal(sent[1], b)  # panel 1: filtered view
+    np.testing.assert_array_equal(widget._data[1], b)  # stored counts intact
+
+
+def test_explicit_all_scope_with_per_panel_sequence_is_rejected():
+    """denoise_scope='all' broadcasts one setting, so pairing it with a
+    per-panel sequence is a contradiction: the widget raises instead of
+    silently dropping the explicit scope."""
+    from quantem.widget import Show2D
+
+    a = _sparse_eds_map(shape=(64, 64))
+    with pytest.raises(ValueError, match="broadcasts one setting"):
+        Show2D([a, a], denoise=["none", "anscombe"], denoise_scope="all", verbose=False)

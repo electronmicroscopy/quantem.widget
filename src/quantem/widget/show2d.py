@@ -51,6 +51,11 @@ def _core_image_dataset_types() -> tuple[type[Any], ...]:
     return _CORE_IMAGE_DATASET_TYPES
 
 
+# Sentinel for "caller did not pass this kwarg", so a deprecated alias can
+# fill an unset denoise kwarg while an explicitly passed new kwarg wins even
+# when its value equals the trait default (e.g. denoise="none").
+_UNSET = object()
+
 # Saved-state keys from the display_filter-era API mapped onto the denoise
 # family, so old .qwstate files and notebooks keep loading.
 _DENOISE_STATE_ALIASES = {
@@ -533,6 +538,17 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         for A/B visual comparison.
     vmax : float, optional
         Absolute maximum intensity for color mapping.
+    diff_mode : bool, default False
+        Append a live signed-difference panel to a grayscale gallery (mirrors
+        ``overlay``): the gallery becomes ``[a, b, a - b]`` for a pair, using a
+        symmetric diverging colormap centered on zero so positive and negative
+        residuals read with equal weight. The reference frame defaults to panel
+        0 (change it with the ``diff_reference`` trait); the diff recomputes
+        whenever either frame or the reference changes, so it tracks scrubbing
+        stacks live. With more than two frames one diff panel is appended per
+        non-reference grayscale frame (``#ref - #other``). RGB panels never get
+        a diff panel. Combine with ``overlay=True`` for ``[a, b, overlay]`` plus
+        the diff panel.
     overlay : bool or str, default False
         Compose an alignment overlay panel from a 2-image grayscale gallery
         (mirrors ``diff_mode``): the gallery becomes ``[a, b, overlay]`` with
@@ -543,6 +559,24 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         yellow). Requires exactly 2 grayscale images. Combine with
         ``diff_mode=True`` for ``[a, b, overlay]`` plus the dynamic signed
         diff panel of the pair.
+    underlay : bool or str, default False
+        Compose chemistry-on-structure from exactly two grayscale inputs
+        ``[haadf, map]``: the gallery becomes ``[haadf, map, map on HAADF]``,
+        blending the element map (magenta) onto the HAADF (gray structure) as
+        a third RGB panel so sparse EDS signal reads against the lattice
+        without washing bright columns to white. Pass ``True`` or ``"haadf"``.
+        Requires exactly two single-frame grayscale images (no per-panel frame
+        stacks) and is mutually exclusive with ``overlay``. The two sources are
+        never modified; only the composed panel is added. See ``underlay_alpha``
+        and ``underlay_haadf_gain`` to tune the blend.
+    underlay_alpha : float, default 0.95
+        Opacity of the element map over the HAADF in the ``underlay`` blend, in
+        ``[0, 1]``. Higher means more chemistry, less structure; the slider
+        re-blends live without touching the sources.
+    underlay_haadf_gain : float, default 0.35
+        Brightness of the HAADF structure showing through the ``underlay``
+        blend, in ``[0, 1]``. Lower keeps the map colors saturated over a dim
+        lattice; higher lets more of the gray structure through.
     ncols : int, default 3
         Number of columns in gallery mode.
     panel_frame_indices : sequence of int, optional
@@ -593,34 +627,51 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         data keep the original counts, and the lossless default is
         ``"none"``. When active, a one-line banner announces the reduction
         and how to get raw counts back. RGB panels are never filtered.
-        Independent of ``display_bin`` (the GPU display budget knob).
+        Independent of ``display_bin`` (the GPU display budget knob). The
+        per-panel ``denoise_modes`` / ``denoise_sigmas`` / ``denoise_bins``
+        lists are the source of truth; the scalar ``denoise`` /
+        ``denoise_sigma`` / ``denoise_bin`` traits are the UI editor and,
+        while ``denoise_scope == "panel"``, mirror only the selected panel.
+        Set per-panel values imperatively with :meth:`set_denoise`.
     denoise_sigma : float or sequence of float, default 4.0
         Smoothing scale in pixels for the Gaussian/Anscombe display filters.
         A sequence sets one sigma per panel.
     denoise_bin : {1, 2, 4} or sequence, default 1
         Display-side 2x bin passes for SNR, combined with ``denoise``.
         ``1`` (the default) is lossless. A sequence sets one bin factor per
-        panel.
+        panel. This is the SNR knob for sparse maps (EDS, low dose): it trades
+        resolution for counts. It is orthogonal to ``display_bin``, which is a
+        performance-only downsample to fit the GPU display budget and does not
+        change reported intensities. Reach for ``denoise_bin`` to see faint
+        chemistry, ``display_bin`` only to render a huge gallery faster.
     show_denoise : bool, default False
-        Show the denoise controls row. Hidden by default to keep the widget
-        clean; auto-enabled when any panel starts with an active denoise. An
-        active reduction always shows its banner, even with the row hidden.
+        Shows the denoise controls row; does not itself denoise - use
+        ``denoise=`` for that. Hidden by default to keep the widget clean;
+        auto-enabled when any panel starts with an active denoise. An active
+        reduction always shows its banner, even with the row hidden.
     denoise_scope : {"all", "panel"}, default "all"
         UI knob scope: "all" applies Denoise/σ/Bin edits to every panel,
         "panel" edits only the selected panel. Passing any per-panel sequence
         switches to the "panel" scope automatically. In gallery mode the
         toggle lives in the Link group (Link Zoom / Pan / Contrast / Denoise):
         checked means linked ("all"), unchecked means per panel.
+
+        .. deprecated::
+            The ``display_filter``-era kwargs ``display_filter``,
+            ``display_sigma``, ``spatial_bin`` and ``filter_per_panel`` are
+            still accepted for one release and map onto ``denoise``,
+            ``denoise_sigma``, ``denoise_bin`` and ``denoise_scope``
+            respectively. Passing any of them emits a ``DeprecationWarning``;
+            if both a new kwarg and its deprecated alias are given, the new
+            kwarg wins. In particular ``spatial_bin`` maps onto ``denoise_bin``
+            (the SNR knob), not ``display_bin`` (the performance downsample).
     pad_ratio : float, default 0.0
         Ratio-based border added on each side of the displayed frame, as a
         fraction of the image's max(rows, cols). Valid range 0 to 1. The
         border value is the frame minimum, which keeps the colormap floor.
         Display-only and reversible (single-panel widgets only): combine
         with :meth:`crop_to_view` and undo with :meth:`reset_view_ops`.
-        When active, a one-line ``view:`` banner announces the reduction. The deprecated aliases
-        ``display_filter``, ``display_sigma``, ``spatial_bin`` and
-        ``filter_per_panel`` are still accepted for one release and map onto
-        ``denoise``, ``denoise_sigma``, ``denoise_bin`` and ``denoise_scope``.
+        When active, a one-line ``view:`` banner announces the reduction.
     Attributes
     ----------
     render_total_ms : int or None
@@ -726,6 +777,26 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
 
     >>> w = Show2D(np.random.rand(512, 512), sampling=0.5, units="nm")
     >>> w.save_image("figure.pdf", dpi=150)
+
+    Denoise a sparse EDS map for display (raw counts stay untouched):
+
+    >>> eds_map = np.random.poisson(0.3, (256, 256)).astype(np.float32)
+    >>> Show2D(eds_map, denoise="anscombe", denoise_bin=2, denoise_sigma=8)
+
+    Raw vs denoised A/B gallery from one call (per-panel ``denoise`` list):
+
+    >>> Show2D([eds_map, eds_map], denoise=["none", "anscombe"], denoise_sigma=8)
+
+    Chemistry on structure: blend an element map onto HAADF (magenta on gray):
+
+    >>> haadf = np.random.rand(256, 256).astype(np.float32)
+    >>> Show2D([haadf, eds_map], underlay=True)
+
+    Zoom into a feature, commit that window as the display, then undo it:
+
+    >>> w = Show2D(eds_map, view_box=(64, 64, 96))  # zoom to a 96x96 region
+    >>> w.crop_to_view()      # the window becomes the whole displayed frame
+    >>> w.reset_view_ops()    # back to the full frame, bit-identical
     """
 
     _esm = pathlib.Path(__file__).parent / "static" / "show2d.js"
@@ -1126,10 +1197,10 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         notebook_preview_format: str | None = "jpeg",
         notebook_preview_quality: int = 88,
         notebook_preview_max_px: int = 512,
-        denoise: str | Sequence[str] = "none",
-        denoise_sigma: float | Sequence[float] = 4.0,
-        denoise_bin: int | Sequence[int] = 1,
-        denoise_scope: str = "all",
+        denoise: str | Sequence[str] = _UNSET,
+        denoise_sigma: float | Sequence[float] = _UNSET,
+        denoise_bin: int | Sequence[int] = _UNSET,
+        denoise_scope: str = _UNSET,
         show_denoise: bool = False,
         display_filter: str | Sequence[str] | None = None,
         display_sigma: float | Sequence[float] | None = None,
@@ -1147,16 +1218,57 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         # pixel_size_angstrom bug in show2d_all_features.ipynb for months.
         _reject_unknown_kwargs(type(self), kwargs)
         # Deprecated aliases from the display_filter-era API (one rc of
-        # compatibility): map to the denoise family when the new kwarg was
-        # left at its default.
-        if display_filter is not None and denoise == "none":
-            denoise = display_filter
-        if display_sigma is not None and denoise_sigma == 4.0:
-            denoise_sigma = display_sigma
-        if spatial_bin is not None and denoise_bin == 1:
-            denoise_bin = spatial_bin
-        if filter_per_panel is not None and denoise_scope == "all":
-            denoise_scope = "all" if filter_per_panel else "panel"
+        # compatibility). Key off "was this kwarg supplied" via the _UNSET
+        # sentinel so an explicit new kwarg wins even when its value equals the
+        # trait default; a deprecated alias only fills an unset new kwarg. Each
+        # supplied alias warns regardless of who wins the value.
+        denoise_supplied = denoise is not _UNSET
+        denoise_sigma_supplied = denoise_sigma is not _UNSET
+        denoise_bin_supplied = denoise_bin is not _UNSET
+        denoise_scope_supplied = denoise_scope is not _UNSET
+        if not denoise_supplied:
+            denoise = "none"
+        if not denoise_sigma_supplied:
+            denoise_sigma = 4.0
+        if not denoise_bin_supplied:
+            denoise_bin = 1
+        if not denoise_scope_supplied:
+            denoise_scope = "all"
+        if display_filter is not None:
+            warnings.warn(
+                "display_filter is deprecated; use denoise= instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            if not denoise_supplied:
+                denoise = display_filter
+        if display_sigma is not None:
+            warnings.warn(
+                "display_sigma is deprecated; use denoise_sigma= instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            if not denoise_sigma_supplied:
+                denoise_sigma = display_sigma
+        if spatial_bin is not None:
+            warnings.warn(
+                "spatial_bin is deprecated; use denoise_bin= instead (the SNR "
+                "knob for sparse maps, not the display_bin performance "
+                "downsample).",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            if not denoise_bin_supplied:
+                denoise_bin = spatial_bin
+        if filter_per_panel is not None:
+            warnings.warn(
+                "filter_per_panel is deprecated; use denoise_scope='all' or "
+                "denoise_scope='panel' instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            if not denoise_scope_supplied:
+                denoise_scope = "all" if filter_per_panel else "panel"
         data, labels, n_pages, panels_per_page, resolved_page_labels, resolved_page_starred = _normalise_show2d_pages(
             data,
             labels=labels,
@@ -1251,6 +1363,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 verbose=verbose, state=state, _t0=_t0,
                 denoise=denoise, denoise_sigma=denoise_sigma,
                 denoise_bin=denoise_bin, denoise_scope=denoise_scope,
+                denoise_scope_explicit=denoise_scope_supplied,
                 show_denoise=show_denoise,
                 underlay=underlay, underlay_alpha=underlay_alpha,
                 underlay_haadf_gain=underlay_haadf_gain)
@@ -1265,7 +1378,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                    pad_ratio, display_bin, hidden_panels, starred, panel_order, show_panel_titles,
                    panel_title_font_size, gallery_gap_px, verbose, state, _t0,
                    denoise="none", denoise_sigma=4.0, denoise_bin=1,
-                   denoise_scope="all", show_denoise=False,
+                   denoise_scope="all", denoise_scope_explicit=False, show_denoise=False,
                    underlay=False, underlay_alpha=0.95,
                    underlay_haadf_gain=0.35):
         import time as _time
@@ -1732,8 +1845,19 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         self.denoise_bin = int(bins[0])
         self._filter_knob_sync = False
         # A sequence means independent per-panel knobs, so UI edits scope to
-        # the selected panel; scalars keep the broadcast "all" scope.
-        broadcast = denoise_scope != "panel" and filters_scalar and sigmas_scalar and bins_scalar
+        # the selected panel; scalars keep the broadcast "all" scope. Passing a
+        # per-panel sequence AND an explicit denoise_scope="all" is a
+        # contradiction ("all" broadcasts one value, the sequence gives each
+        # panel its own), so reject it instead of silently forcing "panel".
+        scalar_knobs = filters_scalar and sigmas_scalar and bins_scalar
+        if denoise_scope_explicit and denoise_scope == "all" and not scalar_knobs:
+            raise ValueError(
+                "denoise_scope='all' broadcasts one setting to every panel, but "
+                "a per-panel denoise/denoise_sigma/denoise_bin sequence was also "
+                "given. Pass scalar denoise knobs with denoise_scope='all', or "
+                "drop denoise_scope and let the sequence select per-panel scope."
+            )
+        broadcast = denoise_scope != "panel" and scalar_knobs
         self.denoise_scope = "all" if broadcast else "panel"
         self._display_filter_ready = True
         self._refresh_display_filter_banner(announce=True)
@@ -3242,6 +3366,9 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             "view_crop": list(self.view_crop),
             "pad_ratio": float(self.pad_ratio),
             "diff_mode": self.diff_mode,
+            # Which panel the signed-diff panel subtracts from; without it a
+            # saved non-default diff reference silently reverts to panel 0.
+            "diff_reference": int(self.diff_reference),
             "ncols": self.ncols,
             "selected_idx": self.selected_idx,
             "roi_active": self.roi_active,
@@ -3258,6 +3385,11 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             "denoise_modes": list(self.denoise_modes),
             "denoise_sigmas": list(self.denoise_sigmas),
             "denoise_bins": list(self.denoise_bins),
+            # underlay= is construction-time sugar: the composed "map on HAADF"
+            # RGB panel is rebuilt from the kernel, not stored, so it is NOT
+            # restored on a kernel-less reopen. These two blend knobs are kept
+            # so a live (kernel-backed) widget re-blends to the saved look; on a
+            # cold reopen they are inert (there is no underlay panel to tune).
             "underlay_alpha": self.underlay_alpha,
             "underlay_haadf_gain": self.underlay_haadf_gain,
         }
@@ -3714,6 +3846,122 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             self.pad_ratio = 0.0
         return self
 
+    def set_denoise(
+        self,
+        mode: str,
+        *,
+        sigma: float | None = None,
+        bin: int | None = None,
+        panels: Sequence[int] | int | None = None,
+    ) -> Self:
+        """Set the display denoise for every panel, or a chosen panel subset.
+
+        The imperative twin of the ``denoise=`` constructor kwarg, chainable
+        like :meth:`crop_to_view` and :meth:`set_roi`. Denoise is a pure view
+        transform: the stored array, the stats row, and every raw-data export
+        keep the original counts, and an active reduction still announces
+        itself with the one-line banner. The per-panel ``denoise_modes`` /
+        ``denoise_sigmas`` / ``denoise_bins`` lists are the source of truth;
+        the scalar ``denoise`` / ``denoise_sigma`` / ``denoise_bin`` traits
+        mirror only the selected panel while ``denoise_scope == "panel"``.
+
+        Parameters
+        ----------
+        mode : str
+            Denoise method for the targeted panels: ``"none"``, ``"gaussian"``,
+            or ``"anscombe"``. The compound spellings ``"bin2"``,
+            ``"bin2_anscombe"`` and ``"bin4_anscombe"`` fold into a (mode, bin)
+            pair; ``"tv"``/``"denova*"`` stay available from Python.
+        sigma : float or None, optional
+            Smoothing scale in pixels. ``None`` leaves each targeted panel's
+            current sigma unchanged.
+        bin : int or None, optional
+            Display-side SNR bin factor (1, 2, or 4). ``None`` leaves each
+            targeted panel's current bin unchanged, unless a compound ``mode``
+            (e.g. ``"bin2_anscombe"``) sets it.
+        panels : int, sequence of int, or None, optional
+            Panel indices to change. ``None`` (the default) targets every
+            panel and applies one uniform setting; passing a subset edits only
+            those panels and switches ``denoise_scope`` to ``"panel"`` so later
+            UI edits stay per panel.
+
+        Returns
+        -------
+        Self
+            The widget, for chaining.
+
+        Raises
+        ------
+        ValueError
+            When a ``panels`` index is out of range for the widget.
+
+        Examples
+        --------
+        >>> import numpy as np
+        >>> from quantem.widget import Show2D
+        >>> a = np.random.poisson(0.3, (256, 256)).astype("float32")
+        >>> b = np.random.poisson(0.3, (256, 256)).astype("float32")
+        >>> w = Show2D([a, b])                             # a raw A/B gallery
+        >>> _ = w.set_denoise("anscombe", sigma=8, bin=2)  # denoise both panels
+        >>> _ = w.set_denoise("none", panels=[0])          # keep panel 0 raw
+        """
+        from quantem.widget.utils.display_filter import resolve_denoise_mode
+
+        n_panels = int(self.n_images)
+        if panels is None:
+            targets = list(range(n_panels))
+            subset = False
+        else:
+            if isinstance(panels, (int, np.integer)):
+                panels = [int(panels)]
+            targets = [int(p) for p in panels]
+            for p in targets:
+                if not (0 <= p < n_panels):
+                    raise ValueError(
+                        f"set_denoise panels index {p} is out of range for a "
+                        f"{n_panels}-panel widget (valid 0..{n_panels - 1})."
+                    )
+            subset = True
+        resolved_mode, resolved_bin = resolve_denoise_mode(
+            str(mode), 1 if bin is None else int(bin)
+        )
+        modes = list(self.denoise_modes) or [str(self.denoise)] * n_panels
+        sigmas = list(self.denoise_sigmas) or [float(self.denoise_sigma)] * n_panels
+        bins = list(self.denoise_bins) or [int(self.denoise_bin)] * n_panels
+        for p in targets:
+            modes[p] = resolved_mode
+            if sigma is not None:
+                sigmas[p] = float(sigma)
+            if bin is not None or resolved_bin > 1:
+                bins[p] = int(resolved_bin)
+        # Write the per-panel lists in one batch: suppress the per-list repack
+        # observer and the scalar mirror during the write, then repack once
+        # (mirrors the constructor). The scalar knobs re-sync to the selected
+        # panel so the editor keeps showing what is on screen.
+        with self.hold_sync():
+            prev_ready = getattr(self, "_display_filter_ready", False)
+            self._display_filter_ready = False
+            self._filter_knob_sync = True
+            try:
+                if subset:
+                    self.denoise_scope = "panel"
+                self.denoise_modes = modes
+                self.denoise_sigmas = sigmas
+                self.denoise_bins = bins
+                sel = min(int(self.selected_idx), max(0, n_panels - 1))
+                self.denoise = modes[sel]
+                self.denoise_sigma = float(sigmas[sel])
+                self.denoise_bin = int(bins[sel])
+            finally:
+                self._display_filter_ready = prev_ready
+                self._filter_knob_sync = False
+            if prev_ready:
+                if self._display_filter_active():
+                    self.show_denoise = True
+                self._refresh_display_filter_banner(announce=True)
+                self._update_all_frames()
+        return self
+
     def to_show3d(
         self,
         panels: Sequence[int | str] | int | str | None = None,
@@ -4154,6 +4402,21 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 f"pad_ratio must be between 0 and 1 (border as a fraction of "
                 f"max(rows, cols)); got {value}"
             )
+        # pad is a single-panel display window, like crop_to_view(): a gallery
+        # or an RGB panel cannot pad, so reject it loudly instead of silently
+        # ignoring the border (and announcing one that never happened). 0.0
+        # always passes, so reset_view_ops() and the default stay valid.
+        if value > 0 and getattr(self, "_data", None) is not None:
+            if int(self.n_images) != 1:
+                raise NotImplementedError(
+                    f"pad_ratio supports a single panel; this widget shows "
+                    f"{int(self.n_images)} panels. Pad the array before display "
+                    f"for galleries."
+                )
+            if any(self.is_rgb):
+                raise NotImplementedError(
+                    "pad_ratio supports grayscale panels; this panel is RGB."
+                )
         return value
 
     @traitlets.validate("view_crop")
@@ -4256,7 +4519,13 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         if len(self.view_crop) == 4:
             r0, r1, c0, c1 = (int(v) for v in self.view_crop)
             parts.append(f"cropped to ({r0},{c0})-({r1},{c1})")
-        if float(self.pad_ratio) > 0:
+        # Announce the pad only when it was actually applied. The geometry
+        # gates the pad on single_scalar, so pad > 0 (not pad_ratio > 0) is the
+        # honest test: a gallery/RGB widget never pads, so it must never claim
+        # a border in the banner. Constructing such a widget with pad_ratio > 0
+        # raises in _validate_pad_ratio, but a later trait assignment could
+        # still reach here.
+        if pad > 0:
             parts.append(f"pad {float(self.pad_ratio):.0%}")
         banner = (
             f"view: {' · '.join(parts)} (reset_view_ops() restores full frame)"
