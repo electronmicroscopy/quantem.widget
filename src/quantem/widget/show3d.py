@@ -726,6 +726,16 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     n_slices = traitlets.Int(1).tag(sync=True)
     height = traitlets.Int(1).tag(sync=True)
     width = traitlets.Int(1).tag(sync=True)
+    # Display-only denoise/bin for sparse map stacks (EDS, low dose). Applied
+    # per frame at every display wire-out (buffer window, frame_bytes, offline
+    # pack, frame server); the stored stack is never modified and the lossless
+    # default is "none". The FFT panel computes from the displayed frame, so
+    # an active filter also affects the FFT view; set display_filter="none"
+    # for a raw FFT. Independent of display_bin (the GPU budget knob).
+    display_filter = traitlets.Unicode("none").tag(sync=True)
+    display_sigma = traitlets.Float(4.0).tag(sync=True)
+    spatial_bin = traitlets.Int(1).tag(sync=True)
+    display_filter_banner = traitlets.Unicode("").tag(sync=True)
     frame_bytes = traitlets.Bytes(b"").tag(sync=True)
     # Monotonic counter incremented each time frame_bytes is written. Defensive
     # against the case where traitlets.Bytes identity-compares to suppress the
@@ -1659,6 +1669,9 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         notebook_preview_format: str | None = "jpeg",
         notebook_preview_quality: int = 88,
         notebook_preview_max_px: int = 512,
+        display_filter: str = "none",
+        display_sigma: float = 4.0,
+        spatial_bin: int = 1,
         verbose: bool = True,
         max_cols: int | None = None,
         panel_gap: int | None = None,
@@ -1837,6 +1850,8 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                             dim_label=dim_label, use_torch=use_torch, device=device,
                             display_bin=display_bin, offline=offline,
                             state=state, dedupe_identical_panels=dedupe_identical_panels,
+                            display_filter=display_filter, display_sigma=display_sigma,
+                            spatial_bin=spatial_bin,
                             _t0=_t0)
             if panel_order is not None:
                 self.set_panel_order(panel_order)
@@ -1871,7 +1886,9 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                    use_torch: bool | None, device: str | None,
                    display_bin: int | str, offline: bool | None,
                    state: dict | str | pathlib.Path | None,
-                   dedupe_identical_panels: bool, _t0: float) -> None:
+                   dedupe_identical_panels: bool, _t0: float,
+                   display_filter: str = "none", display_sigma: float = 4.0,
+                   spatial_bin: int = 1) -> None:
         """Heavy setup called synchronously by `__init__` inside `hold_sync()`.
         Validates panels, allocates frame_bytes, wires observers, and applies
         optional `state`. Split out from `__init__` so the construction surface
@@ -2371,6 +2388,16 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         self.controls_collapsed = bool(controls_collapsed)
         self.debug = bool(debug)
         self.size = size
+        # Display-only filter knobs (view transforms; the stored stack stays
+        # intact). Set before the offline pack and first buffer send so a
+        # constructor-selected filter shows from the first paint.
+        self._display_filter_ready = False
+        self._display_filter_cache = {}
+        self.display_filter = str(display_filter)
+        self.display_sigma = float(display_sigma)
+        self.spatial_bin = int(spatial_bin)
+        self._display_filter_ready = True
+        self._refresh_display_filter_banner(announce=True)
         frame_bytes = self.height * self.width * 4  # float32
         # Exact float32 sliding window. Do not ship the whole stack when it
         # would cross the browser/Jupyter ~2 GB Comm cliff (36×4k×4k is 2.4 GB).
@@ -2391,10 +2418,7 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         # indexes by (sliceIdx * width * height) where `width` is the trait
         # value (= total concat width). Otherwise `_display_data` already holds
         # the concatenated or single-panel stack.
-        if self.separate_panel_frames and self._separate_panel_data is not None:
-            offline_source = np.concatenate(self._separate_panel_data, axis=2)
-        else:
-            offline_source = self._display_data
+        offline_source = self._offline_pack_source()
         stack_bytes = int(np.prod(offline_source.shape))  # uint8 = 1 B/px
         if offline is None:
             offline = stack_bytes <= 1 * 1024 * 1024 * 1024
@@ -2899,6 +2923,9 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             "profile_line": self.profile_line,
             "profile_width": self.profile_width,
             "diff_mode": self.diff_mode,
+            "display_filter": self.display_filter,
+            "display_sigma": self.display_sigma,
+            "spatial_bin": self.spatial_bin,
             "dim_label": self.dim_label,
             "dim_sampling": self.dim_sampling,
             "dim_unit": self.dim_unit,
@@ -5116,6 +5143,7 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             frame = np.asarray(self._get_display_panel_frame(panel, idx), dtype=np.float32)
         else:
             frame = np.asarray(self._get_display_frame(idx), dtype=np.float32)
+        frame = self._wire_frame(frame, cache_key=("http", idx, panel, self.diff_mode))
         if not frame.flags.c_contiguous:
             frame = np.ascontiguousarray(frame)
         return 200, frame
@@ -5480,7 +5508,10 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             else:
                 self.roi_stats = {}
             if not self.offline and not self.separate_panel_frames:
-                self.frame_bytes = display_frame.tobytes()
+                wire = self._wire_frame(
+                    display_frame, cache_key=("buf", int(self.slice_idx), self.diff_mode)
+                )
+                self.frame_bytes = wire.tobytes()
             self.frame_seq = self.frame_seq + 1
 
     def _update_roi_stats(self, frame: np.ndarray) -> None:
@@ -5595,9 +5626,115 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         self.roi_list = rois
         self.roi_active = True
 
+    @traitlets.validate("display_filter")
+    def _validate_display_filter(self, proposal: dict) -> str:
+        """Normalize and reject unknown display filter modes early."""
+        from quantem.widget.utils.display_filter import DISPLAY_FILTER_MODES, _normalize_mode
+
+        mode = _normalize_mode(proposal["value"])
+        if mode != "none" and mode not in DISPLAY_FILTER_MODES:
+            raise traitlets.TraitError(
+                "display_filter must be one of "
+                + "|".join(DISPLAY_FILTER_MODES)
+                + f" (or 'off'/'raw'); got {proposal['value']!r}"
+            )
+        return mode
+
+    @traitlets.validate("spatial_bin")
+    def _validate_spatial_bin(self, proposal: dict) -> int:
+        value = int(proposal["value"])
+        if value not in (1, 2, 4):
+            raise traitlets.TraitError(f"spatial_bin must be 1, 2, or 4; got {value}")
+        return value
+
+    @traitlets.observe("display_filter", "display_sigma", "spatial_bin")
+    def _on_display_filter_change(self, change: dict) -> None:
+        """Invalidate the filtered-frame cache and resend the view (no disk I/O)."""
+        if not getattr(self, "_display_filter_ready", False):
+            return
+        self._display_filter_cache = {}
+        self._refresh_display_filter_banner(announce=True)
+        if self.offline:
+            self._pack_offline_u8_stack(self._offline_pack_source())
+        self.frame_server_version = int(self.frame_server_version) + 1
+        self._send_buffer(int(self._buffer_start))
+        self._update_all()
+
+    def _display_filter_active(self) -> bool:
+        from quantem.widget.utils.display_filter import _normalize_mode
+
+        return _normalize_mode(self.display_filter) != "none" or int(self.spatial_bin) > 1
+
+    def _refresh_display_filter_banner(self, *, announce: bool) -> None:
+        """Sync the one-line reduction notice; print it when it changes.
+
+        Announcing an active reduction is a house rule: the user must always
+        know the view is filtered and that ``display_filter='none'`` restores
+        raw counts.
+        """
+        from quantem.widget.utils.display_filter import format_display_filter_banner
+
+        banner = format_display_filter_banner(
+            self.display_filter, float(self.display_sigma), int(self.spatial_bin)
+        )
+        changed = banner != self.display_filter_banner
+        self.display_filter_banner = banner
+        if announce and banner and changed:
+            print(banner)
+
+    def _offline_pack_source(self) -> np.ndarray:
+        """Offline pack source with the display filter applied per panel frame.
+
+        Separate panels are filtered before the horizontal concat so the
+        filter never bleeds across panel boundaries.
+        """
+        if self.separate_panel_frames and self._separate_panel_data is not None:
+            panels = self._separate_panel_data
+            if self._display_filter_active():
+                panels = [
+                    np.stack(
+                        [self._wire_frame(stack[k]) for k in range(int(stack.shape[0]))],
+                        axis=0,
+                    )
+                    for stack in panels
+                ]
+            return np.concatenate(panels, axis=2)
+        data = self._display_data
+        if self._display_filter_active():
+            data = np.stack(
+                [self._wire_frame(data[k], cache_key=("off", k)) for k in range(int(data.shape[0]))],
+                axis=0,
+            )
+        return data
+
+    def _wire_frame(self, frame: np.ndarray, cache_key=None) -> np.ndarray:
+        """Filtered VIEW copy of one display-bound frame; raw data untouched.
+
+        Frames leaving Python for display (buffer window, frame_bytes, offline
+        pack, frame server) pass through here. ROI stats keep reading the raw
+        frame so reported numbers never come from a filtered view. Filtered
+        frames are cached per index so scrubbing stays browser-fast; the cache
+        clears whenever a knob changes.
+        """
+        if not self._display_filter_active():
+            return frame
+        if cache_key is not None and cache_key in self._display_filter_cache:
+            return self._display_filter_cache[cache_key]
+        from quantem.widget.utils.display_filter import apply_display_filter
+
+        filtered = apply_display_filter(
+            np.asarray(frame),
+            filter=self.display_filter,
+            sigma=float(self.display_sigma),
+            spatial_bin=int(self.spatial_bin),
+        )
+        if cache_key is not None:
+            self._display_filter_cache[cache_key] = filtered
+        return filtered
+
     def _send_buffer(self, start_idx: int) -> None:
         end_idx = start_idx + self._buffer_size
-        if self.diff_mode == "off":
+        if self.diff_mode == "off" and not self._display_filter_active():
             data = self._display_data
             if end_idx <= self.n_slices:
                 chunk = data[start_idx:end_idx]
@@ -5609,7 +5746,8 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             frames = []
             for j in range(self._buffer_size):
                 idx = (start_idx + j) % self.n_slices
-                frames.append(self._get_display_frame(idx))
+                key = ("buf", idx, self.diff_mode)
+                frames.append(self._wire_frame(self._get_display_frame(idx), cache_key=key))
             chunk = np.stack(frames)
         with self.hold_sync():
             self._buffer_start = int(start_idx)

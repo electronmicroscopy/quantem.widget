@@ -2343,6 +2343,17 @@ function Show3D() {
   const [pixelSize] = useModelState<number>("pixel_size");
   const [scaleBarVisible] = useModelState<boolean>("scale_bar_visible");
   const [smooth, setSmooth] = useModelState<boolean>("smooth");
+  // Display-only filter knobs for sparse map stacks (EDS, low dose). Python
+  // owns the math and re-sends the playback buffer on change; raw data is
+  // never modified.
+  const [displayFilter, setDisplayFilter] = useModelState<string>("display_filter");
+  const [displaySigma, setDisplaySigma] = useModelState<number>("display_sigma");
+  const [spatialBin, setSpatialBin] = useModelState<number>("spatial_bin");
+  const [displayFilterBanner] = useModelState<string>("display_filter_banner");
+  // Local slider value during drag; the model (and the Python refilter) only
+  // updates on release so scrubbing sigma stays smooth on large stacks.
+  const [sigmaDraft, setSigmaDraft] = React.useState<number | null>(null);
+  const displayFilterOff = !displayFilter || displayFilter === "none";
   const [pixelUnit] = useModelState<string>("pixel_unit");
   const [imageRotation] = useModelState<number>("image_rotation");
 
@@ -11452,6 +11463,34 @@ function Show3D() {
                     <MenuItem value="first">First</MenuItem>
                   </Select>
                   {/* zoom indicator moved onto the canvas overlay */}
+                </Box>
+                {/* Row 3: display-only filter for sparse map stacks (EDS, low dose) */}
+                <Box sx={{ ...controlRow, ...mobileControlRowSx, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>
+                  <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted }} title="Display-only denoise per frame (EDS, low dose). Raw data and stats keep original counts; 'none' shows raw. FFT follows the displayed frame.">Filter</Typography>
+                  <Select size="small" value={displayFilter || "none"} onChange={(e) => setDisplayFilter(e.target.value)} MenuProps={themedMenuProps} sx={{ ...themedSelect, minWidth: 88, fontSize: 10 }} inputProps={{ "aria-label": "Display-only denoise filter" }}>
+                    {["none", "gaussian", "bin2", "anscombe", "bin2_anscombe", "bin4_anscombe", "tv"].map((mode) => (
+                      <MenuItem key={mode} value={mode}>{mode}</MenuItem>
+                    ))}
+                  </Select>
+                  <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted, opacity: displayFilterOff ? 0.5 : 1 }}>σ {(sigmaDraft ?? Number(displaySigma ?? 4)).toFixed(1)}</Typography>
+                  <Slider
+                    value={sigmaDraft ?? Number(displaySigma ?? 4)}
+                    min={0} max={20} step={0.5}
+                    disabled={displayFilterOff}
+                    onChange={(_, v) => setSigmaDraft(v as number)}
+                    onChangeCommitted={(_, v) => { setDisplaySigma(v as number); setSigmaDraft(null); }}
+                    size="small" sx={{ ...sliderStyles.small, width: 60 }}
+                    aria-label="Display filter sigma in pixels"
+                  />
+                  <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted }} title="Extra display-side 2x bin passes for SNR, before the filter. 1 is lossless.">Bin</Typography>
+                  <Select size="small" value={String(spatialBin || 1)} onChange={(e) => setSpatialBin(parseInt(e.target.value, 10))} MenuProps={themedMenuProps} sx={{ ...themedSelect, minWidth: 40, fontSize: 10 }} inputProps={{ "aria-label": "Display spatial bin factor" }}>
+                    {[1, 2, 4].map((b) => (<MenuItem key={b} value={String(b)}>{b}</MenuItem>))}
+                  </Select>
+                  {displayFilterBanner && (
+                    <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.accent }} title={displayFilterBanner}>
+                      {displayFilterBanner.split(" (")[0]} · raw: display_filter='none'
+                    </Typography>
+                  )}
                 </Box>
               </Box>
               {/* Playback: 2 rows side-by-side with Display + Histogram. */}

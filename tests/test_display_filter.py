@@ -137,3 +137,29 @@ def test_show2d_gallery_filters_scalar_panels_and_persists_state():
     restored.load_state_dict(state)
     assert restored.display_filter == "bin2_anscombe"
     assert restored.frame_bytes == widget.frame_bytes
+
+
+def test_show3d_filter_knobs_rerender_and_never_mutate(capsys):
+    """A scrubbable EDS stack: default playback buffer is raw, turning the
+    filter on re-sends a filtered buffer (with the banner), sigma re-filters,
+    and none restores the identical raw buffer while .array stays intact."""
+    from quantem.widget import Show3D
+
+    stack = np.stack([_sparse_eds_map(seed=s, shape=(64, 64)) for s in range(3)])
+    kept = stack.copy()
+    widget = Show3D(stack, verbose=False, offline=False)
+    assert widget.display_filter == "none"
+    widget._send_buffer(0)  # what the browser's first prefetch triggers
+    raw_buffer = widget._buffer_bytes
+    assert raw_buffer
+    widget.display_filter = "bin2_anscombe"
+    assert widget._buffer_bytes != raw_buffer
+    assert "display: bin2_anscombe" in capsys.readouterr().out
+    sigma_buffer = widget._buffer_bytes
+    widget.display_sigma = 12.0
+    assert widget._buffer_bytes != sigma_buffer
+    widget.display_filter = "none"
+    assert widget._buffer_bytes == raw_buffer
+    np.testing.assert_array_equal(widget._data, kept)
+    state = widget.state_dict()
+    assert state["display_filter"] == "none" and state["display_sigma"] == 12.0
