@@ -7,6 +7,7 @@ blend chemistry on HAADF without white atom cores.
 """
 
 import numpy as np
+import pytest
 
 from quantem.widget.utils.display_filter import (
     apply_display_filter,
@@ -281,6 +282,31 @@ def test_show2d_webgpu_negotiation_ships_raw_frames():
     widget._webgpu_filter_ok = False  # reopened without WebGPU: Python fallback
     back = np.frombuffer(widget.frame_bytes[:n_bytes], dtype=np.float32).reshape(64, 64)
     np.testing.assert_array_equal(back, python_view)
+
+
+def test_deprecated_display_filter_kwargs_warn_and_still_apply():
+    """The display_filter-era kwargs still work for one release but warn: a
+    microscopist reopening an old notebook sees the map denoised and a clear
+    pointer to the new denoise= name."""
+    from quantem.widget import Show2D
+
+    counts = _sparse_eds_map(shape=(64, 64))
+    with pytest.warns(DeprecationWarning, match="display_filter is deprecated"):
+        widget = Show2D(counts, display_filter="anscombe", display_sigma=8, verbose=False)
+    assert widget.denoise == "anscombe"  # deprecated alias filled the new kwarg
+    assert widget.denoise_sigma == 8.0
+
+
+def test_new_denoise_kwarg_wins_over_deprecated_alias_and_still_warns():
+    """Passing both the new denoise= and its deprecated display_filter= alias:
+    the new kwarg wins the value (even at its "none" default) while the
+    deprecated alias still raises its warning."""
+    from quantem.widget import Show2D
+
+    counts = _sparse_eds_map(shape=(64, 64))
+    with pytest.warns(DeprecationWarning, match="display_filter is deprecated"):
+        widget = Show2D(counts, denoise="none", display_filter="anscombe", verbose=False)
+    assert widget.denoise == "none"  # explicit new kwarg wins even at its default
 
 
 def test_show2d_html_export_ships_raw_frames_and_knobs():
