@@ -87,6 +87,51 @@ Keep existing widget-specific exceptions only when the scientific workflow
 depends on them. If changing the order, compare the result against Show2D,
 Show3D, Show4DSTEM, and ShowEDS before committing.
 
+## Overflow (More) menu + always-visible active-reduction badge
+
+Dense widgets outgrow a single toolbar. Tier the controls instead of wrapping
+them off screen. Show2D is the reference implementation; Show3D, Show4DSTEM,
+and ShowEDS should mirror this pattern.
+
+**Tiering.** Keep the everyday viewer toggles top-level and push occasional
+tools into a `More` overflow menu in the right action cluster (next to `View`,
+`Export`, `Copy`).
+
+- Top-level (Show2D): `Profile`, `FFT`, `Lens`, `Colorbar`, panel `Reorder`,
+  `Panels`, and the per-panel hide/star controls.
+- Inside `More` (Show2D): `ROI`, `Denoise` (`show_denoise`), and `Diff`.
+
+Move controls into `More` by relocating the existing control and its
+handlers/side-effects. Do not duplicate the toggle logic, and preserve each
+control's render guard (for example, `ROI` only when not a gallery; `Diff`
+under its existing availability condition). Render each moved control inline in
+the menu with its real control type (a mode select stays a select, a toggle
+stays a switch); never downgrade a mode to a bare on/off just because it moved.
+Use the shared MUI `Select`/`Menu` with `themedSelect`/`themedMenuProps`; never
+a native `<select>`.
+
+**Active badge (MUST).** An active reduction or tool must never be invisible.
+Compute a count of the active items inside `More` and show it as an MUI `Badge`
+on the button; accent the button and the active menu items so a collapsed-away
+tool is still discoverable. Reuse the existing accent idioms (the `Panels N/M`
+count and the reorder-button accent).
+
+```text
+moreActiveCount = (roiActive ? 1 : 0) + (diffActive ? 1 : 0) + (showDenoise ? 1 : 0)
+```
+
+**Collapse banner (MUST).** Reduction banners (denoise, crop/pad) normally live
+inside the controls block and disappear when the user collapses controls. That
+would hide an active reduction, which the house rule forbids. When controls are
+collapsed and a denoise or view banner is non-empty, render a compact accent
+badge in the always-visible title row, mirroring the surviving `2× binned`
+badge. Strip the trailing "how to undo" hint for the compact label and keep the
+full banner text in the `title` tooltip.
+
+**Collapse toggle affordance.** Give the `Controls` collapse toggle a
+chevron/open-state indicator (and `aria-expanded`) so its state is legible at a
+glance.
+
 ## Dynamic labels
 
 Scientific labels can be long and data-dependent: page labels, run names, file

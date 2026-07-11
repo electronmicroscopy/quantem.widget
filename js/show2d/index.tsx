@@ -22,11 +22,13 @@ import Slider from "@mui/material/Slider";
 import Button from "@mui/material/Button";
 import IconButton from "@mui/material/IconButton";
 import Tooltip from "@mui/material/Tooltip";
+import Badge from "@mui/material/Badge";
 import PlayArrowIcon from "@mui/icons-material/PlayArrow";
 import PauseIcon from "@mui/icons-material/Pause";
 import VisibilityIcon from "@mui/icons-material/Visibility";
 import VisibilityOffIcon from "@mui/icons-material/VisibilityOff";
 import DragIndicatorIcon from "@mui/icons-material/DragIndicator";
+import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import { useTheme } from "../theme";
 import { useCanvasRepaintSignal } from "../canvasLifecycle";
 import { drawScaleBarHiDPI, drawColorbar, formatZoomLabel, roundToNiceValue } from "../figure";
@@ -1298,6 +1300,7 @@ function Show2D() {
   const [exportAnchor, setExportAnchor] = React.useState<HTMLElement | null>(null);
   const [panelMenuAnchor, setPanelMenuAnchor] = React.useState<HTMLElement | null>(null);
   const [viewMenuAnchor, setViewMenuAnchor] = React.useState<HTMLElement | null>(null);
+  const [moreMenuAnchor, setMoreMenuAnchor] = React.useState<HTMLElement | null>(null);
   const [reorderMode, setReorderMode] = React.useState(false);
   const [dragOverPanel, setDragOverPanel] = React.useState<number | null>(null);
   const draggedPanelRef = React.useRef<number | null>(null);
@@ -6234,6 +6237,38 @@ function Show2D() {
         : "";
   const galleryFftDebug = show2dPerfDebug();
 
+  // "More" overflow menu: ROI, Denoise, and Diff live here to keep the primary
+  // toolbar uncrowded. moreActiveCount drives the badge + per-item accent so an
+  // active tool stays legible with the menu closed (house rule: a live
+  // reduction is never hidden). ROI honors its !isGallery guard; Diff honors
+  // the same availability condition it used inline.
+  const roiControlAvailable = !isGallery;
+  const diffControlAvailable = !isPaged && nImages >= 2 && (visibleGrayscaleIndices.length === 2 || diffMode);
+  const moreActiveCount =
+    (roiControlAvailable && roiActive ? 1 : 0) + (diffMode ? 1 : 0) + (showDenoise ? 1 : 0);
+  // Collapse-safe reduction badge: when the controls (and their inline denoise
+  // / view banners) are hidden, surface any active reduction in the always-on
+  // title row. Strip the trailing "how to undo" hint for the compact label and
+  // keep the full text in the tooltip.
+  const collapsedBannerParts = [
+    filterBannerText ? filterBannerText.split(" (")[0] : "",
+    viewBanner ? viewBanner.replace(/ \(reset_view_ops\(\).*$/, "") : "",
+  ].filter(Boolean);
+  const collapsedBannerLabel = collapsedBannerParts.join(" · ");
+  const collapsedBannerTitle = [filterBannerText, viewBanner].filter(Boolean).join("   |   ");
+  const handleToggleRoi = (on: boolean) => {
+    setRoiActive(on);
+    if (on) {
+      setProfileActive(false);
+      setProfilePoints([]);
+      setProfileDataAll([]);
+      setHoveredProfileEndpoint(null);
+      setIsHoveringProfileLine(false);
+    } else {
+      setRoiSelectedIdx(-1);
+    }
+  };
+
   return (
     <Box
       className="show2d-root"
@@ -6327,6 +6362,14 @@ function Show2D() {
                 {displayBinFactor}× binned
               </Box>
             )}
+            {controlsCollapsed && collapsedBannerLabel && (
+              /* House rule: an active reduction is never invisible. The denoise
+                 / view banners live inside the (now-hidden) controls block, so
+                 mirror the surviving "× binned" badge here while collapsed. */
+              <Box component="span" title={collapsedBannerTitle} sx={{ ml: 0.5, px: 0.5, py: 0, fontSize: 9, fontWeight: 600, borderRadius: "3px", backgroundColor: themeColors.accent + "22", color: themeColors.accent, border: `1px solid ${themeColors.accent}44` }}>
+                {collapsedBannerLabel}
+              </Box>
+            )}
             {displayBinFactor > 1 && (
               <Box component="span" sx={{ ml: 0.4, px: 0.5, py: 0, fontSize: 9, fontWeight: 500, borderRadius: "3px", backgroundColor: detailStreamStatus === "streaming" ? "rgba(255,193,7,0.18)" : themeColors.controlBg, color: detailStreamStatus === "streaming" ? "#b26a00" : themeColors.textMuted, border: `1px solid ${detailStreamStatus === "streaming" ? "rgba(255,193,7,0.45)" : themeColors.border}` }}>
                 {detailStreamStatus === "streaming" ? "streaming detail..." : detailStreamStatus === "ready" ? "detail ready" : "preview; streams on zoom"}
@@ -6382,11 +6425,14 @@ function Show2D() {
 	                  minHeight: 16,
 	                  lineHeight: "16px",
 	                  verticalAlign: "baseline",
+	                  "& .MuiButton-endIcon": { ml: 0.25 },
 	                }}
 	                onClick={() => setControlsCollapsed(!controlsCollapsed)}
 	                aria-label={controlsCollapsed ? "Show controls" : "Hide controls"}
 	                aria-pressed={!controlsCollapsed}
+	                aria-expanded={!controlsCollapsed}
 	                title={controlsCollapsed ? "Show controls" : "Hide controls"}
+	                endIcon={<ExpandMoreIcon sx={{ fontSize: 14, transform: controlsCollapsed ? "rotate(-90deg)" : "rotate(0deg)", transition: "transform 0.15s ease" }} />}
 	              >
 	                Controls
 	              </Button>
@@ -6523,29 +6569,6 @@ function Show2D() {
             />
             {!isGallery && (
               <>
-                <Typography sx={{ ...typography.label, fontSize: 10 }}>ROI</Typography>
-                <Switch
-                  checked={roiActive}
-                  onChange={(e) => {
-                    const on = e.target.checked;
-                    setRoiActive(on);
-                    if (on) {
-                      setProfileActive(false);
-                      setProfilePoints([]);
-                      setProfileDataAll([]);
-                      setHoveredProfileEndpoint(null);
-                      setIsHoveringProfileLine(false);
-                    } else {
-                      setRoiSelectedIdx(-1);
-                    }
-                  }}
-                  size="small"
-                  sx={switchStyles.small}
-                />
-              </>
-            )}
-            {!isGallery && (
-              <>
                 <Typography sx={{ ...typography.label, fontSize: 10 }}>Lens</Typography>
                 <Switch
                   checked={showLens}
@@ -6576,19 +6599,6 @@ function Show2D() {
               size="small"
               sx={switchStyles.small}
             />
-            {!isPaged && nImages >= 2 && (visibleGrayscaleIndices.length === 2 || diffMode) && (
-              <>
-                <Typography sx={{ ...typography.label, fontSize: 10 }} title="Show visible reference − comparison as a derived panel">Diff</Typography>
-                <Switch
-                  checked={diffMode}
-                  disabled={!diffMode && visibleGrayscaleIndices.length < 2}
-                  onChange={() => { setDiffMode(!diffMode); }}
-                  size="small"
-                  sx={switchStyles.small}
-                  slotProps={{ input: { "aria-label": "Toggle difference of visible panels" } }}
-                />
-              </>
-            )}
             <Box sx={{ flex: "1 1 24px", minWidth: 8 }} />
             <Box sx={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: `${SPACING.SM}px`, flexWrap: "wrap", flex: "0 0 auto", ml: "auto" }}>
               {isGallery && (
@@ -6673,6 +6683,87 @@ function Show2D() {
                   </Menu>
                 </>
               )}
+              {/* Overflow "More" menu: ROI, Denoise, and Diff. The badge keeps
+                  an active tool legible while the menu is closed; active items
+                  are accented inside (reuses the Panels N/M + reorder idioms). */}
+              <Badge
+                badgeContent={moreActiveCount}
+                invisible={moreActiveCount === 0}
+                sx={{ "& .MuiBadge-badge": { bgcolor: themeColors.accent, color: "#fff", fontSize: 9, fontWeight: 600, minWidth: 14, height: 14, px: 0.25 } }}
+              >
+                <Button
+                  size="small"
+                  sx={{ ...compactButton, color: moreActiveCount > 0 ? themeColors.accent : themeColors.text }}
+                  onClick={(e) => setMoreMenuAnchor(e.currentTarget)}
+                  aria-label="More tools"
+                  aria-controls={moreMenuAnchor ? "show2d-more-menu" : undefined}
+                  aria-expanded={moreMenuAnchor ? "true" : undefined}
+                  aria-haspopup="menu"
+                  title="More tools: ROI, Denoise, Diff"
+                >
+                  More
+                </Button>
+              </Badge>
+              <Menu
+                id="show2d-more-menu"
+                anchorEl={moreMenuAnchor}
+                open={Boolean(moreMenuAnchor)}
+                onClose={() => setMoreMenuAnchor(null)}
+                MenuListProps={{ "aria-label": "More tools" }}
+                {...themedTopMenuProps}
+              >
+                {roiControlAvailable && (
+                  <MenuItem
+                    dense
+                    onClick={() => handleToggleRoi(!roiActive)}
+                    sx={{ fontSize: 12, gap: 1, color: roiActive ? themeColors.accent : themeColors.text }}
+                  >
+                    <Typography sx={{ flex: 1, fontSize: 12, color: "inherit" }} title="Region of Interest: click to place, drag to move.">ROI</Typography>
+                    <Switch
+                      checked={roiActive}
+                      onClick={(e) => e.stopPropagation()}
+                      onChange={(e) => handleToggleRoi(e.target.checked)}
+                      size="small"
+                      sx={switchStyles.small}
+                      slotProps={{ input: { "aria-label": "Toggle region of interest" } }}
+                    />
+                  </MenuItem>
+                )}
+                <MenuItem
+                  dense
+                  onClick={() => setShowDenoise(!showDenoise)}
+                  sx={{ fontSize: 12, gap: 1, color: showDenoise ? themeColors.accent : themeColors.text }}
+                >
+                  <Typography sx={{ flex: 1, fontSize: 12, color: "inherit" }} title="Show the display-only denoise controls (method, σ, bin). Raw data, stats, and exports keep original counts.">Denoise</Typography>
+                  <Switch
+                    checked={showDenoise ?? false}
+                    onClick={(e) => e.stopPropagation()}
+                    onChange={() => setShowDenoise(!showDenoise)}
+                    size="small"
+                    sx={switchStyles.small}
+                    slotProps={{ input: { "aria-label": "Toggle denoise controls" } }}
+                  />
+                </MenuItem>
+                {diffControlAvailable && (
+                  <MenuItem
+                    dense
+                    disabled={!diffMode && visibleGrayscaleIndices.length < 2}
+                    onClick={() => setDiffMode(!diffMode)}
+                    sx={{ fontSize: 12, gap: 1, color: diffMode ? themeColors.accent : themeColors.text }}
+                  >
+                    <Typography sx={{ flex: 1, fontSize: 12, color: "inherit" }} title="Show visible reference − comparison as a derived panel">Diff</Typography>
+                    <Switch
+                      checked={diffMode}
+                      disabled={!diffMode && visibleGrayscaleIndices.length < 2}
+                      onClick={(e) => e.stopPropagation()}
+                      onChange={() => setDiffMode(!diffMode)}
+                      size="small"
+                      sx={switchStyles.small}
+                      slotProps={{ input: { "aria-label": "Toggle difference of visible panels" } }}
+                    />
+                  </MenuItem>
+                )}
+              </Menu>
               {(handoffEnabled || viewOpsAvailable) && (
                 <>
                   <Button
@@ -7442,10 +7533,6 @@ function Show2D() {
                       <Box sx={controlPairSx}>
                         <Typography sx={{ ...typography.label, fontSize: 10 }} title="CSS bilinear interpolation. Same data, browser smooths visually — useful when upscaling small images on a large canvas.">Smooth</Typography>
                         <Switch checked={smooth} onChange={() => { setSmooth(!smooth); }} size="small" sx={switchStyles.small} />
-                      </Box>
-                      <Box sx={controlPairSx}>
-                        <Typography sx={{ ...typography.label, fontSize: 10 }} title="Show the display-only denoise controls (method, σ, bin). Raw data, stats, and exports keep original counts.">Denoise</Typography>
-                        <Switch checked={showDenoise ?? false} onChange={() => setShowDenoise(!showDenoise)} size="small" sx={switchStyles.small} />
                       </Box>
                       {!showDenoise && filterBannerText && (
                         /* House rule: an active reduction is never invisible,
