@@ -2793,8 +2793,27 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         data = to_numpy(data)
         if data.ndim == 2:
             data = data[None, ...]
-        if data.ndim != 3:
-            raise ValueError(f"Expected 3D array, got {data.ndim}D")
+        # Mirror __init__'s true-color normalization: an (N, H, W, 3/4) stack
+        # (or a single (H, W, 3/4) frame with H > 4) stays RGB through live
+        # updates, so a growing color stack keeps rendering after set_image.
+        is_rgb = False
+        if data.ndim == 3 and data.shape[-1] in (3, 4) and int(data.shape[0]) > 4:
+            data = data[None, ..., :3]
+            is_rgb = True
+        elif data.ndim == 4 and data.shape[-1] in (3, 4):
+            data = data[..., :3]
+            is_rgb = True
+        elif data.ndim != 3:
+            raise ValueError(
+                f"Expected (N, H, W) gray stack or (N, H, W, 3) RGB stack, got {data.ndim}D "
+                f"shape {data.shape}"
+            )
+        if is_rgb:
+            data = data.astype(np.float32, copy=False)
+            if data.size and float(np.nanmax(data)) > 1.5:
+                data = data / 255.0
+            data = np.clip(data, 0.0, 1.0)
+        self.is_rgb = bool(is_rgb)
         if 0 in data.shape:
             raise ValueError(f"Empty stack: shape {data.shape}. All dims must be >= 1.")
         if not _all_finite(data):
