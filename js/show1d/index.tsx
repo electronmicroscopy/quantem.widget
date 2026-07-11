@@ -1,5 +1,6 @@
 import * as React from "react";
 import { createRender, useModel, useModelState } from "@anywidget/react";
+import { useHideStaticFallback } from "../staticFallback";
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
 import IconButton from "@mui/material/IconButton";
@@ -2709,6 +2710,8 @@ function Show1DWidget() {
     [hiddenTraceSet, nTraces, sortedTrialRows],
   );
   const rootRef = React.useRef<HTMLDivElement>(null);
+  // Hide the saved-notebook static-image sibling while the live view is mounted.
+  useHideStaticFallback(model, rootRef);
   const mainGridRef = React.useRef<HTMLDivElement>(null);
   const plotPanelRef = React.useRef<HTMLDivElement>(null);
   const plotHostRef = React.useRef<HTMLDivElement>(null);

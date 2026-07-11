@@ -1,4 +1,4 @@
-"""Regression shield for the ``save_state`` contract (Show2D / Show3D / Show4DSTEM).
+"""Regression shield for the ``save_state`` contract (Show1D / Show2D / Show3D / Show4DSTEM / ShowEDS).
 
 Background: an anywidget syncs its pixel buffers as ``sync=True`` traits. On
 notebook save, ipywidgets serializes those buffers into ``metadata.widgets`` -
@@ -22,7 +22,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from quantem.widget import Show2D, Show3D, Show4DSTEM, ShowEDS
+from quantem.widget import Show1D, Show2D, Show3D, Show4DSTEM, ShowEDS
 
 
 IMAGE_MIME_KEYS = ("image/jpeg", "image/webp", "image/png")
@@ -70,6 +70,11 @@ def _mos2_like_stack(frames: int, rows: int, cols: int) -> np.ndarray:
 def _make(widget, *, save_state):
     """Construct a small instance of each widget plus the trait key that carries
     its live-render pixels (the one that must survive the targeted send path)."""
+    if widget is Show1D:
+        # snapshot_bytes is empty on a plain trace widget but the KEY must
+        # still survive the targeted path (it streams when a monitor attaches).
+        return Show1D(np.random.rand(64).astype("float32"),
+                      save_state=save_state), "snapshot_bytes"
     if widget is Show2D:
         data = [np.random.rand(128, 128).astype("float32") for _ in range(2)]
         return Show2D(data, save_state=save_state), "frame_bytes"
@@ -83,7 +88,7 @@ def _make(widget, *, save_state):
                       save_state=save_state), "virtual_image_bytes"
 
 
-WIDGETS = [Show2D, Show3D, Show4DSTEM, ShowEDS]
+WIDGETS = [Show1D, Show2D, Show3D, Show4DSTEM, ShowEDS]
 
 
 @pytest.mark.parametrize("widget", WIDGETS)
@@ -1262,39 +1267,10 @@ def test_sibling_not_emitted_with_save_state_true(widget, monkeypatch):
     assert len(displayed) == 1, f"{widget.__name__}: sibling emitted despite save_state=True"
 
 
-# Show1D implements the anti-bloat half of the contract (trim + opt-in
-# save_state). It is not in WIDGETS above because the static-JPEG fallback is
-# not implemented yet - a cold reopen paints the plot from the kept y/x trace
-# buffers instead.
-
-
-def _make_show1d(**kwargs):
+def test_show1d_save_state_true_keeps_buffers():
     from quantem.widget import Show1D
 
-    return Show1D(np.random.rand(64).astype("float32"), **kwargs)
-
-
-def test_show1d_default_full_snapshot_trims_bulk_buffers():
-    w = _make_show1d()
-    assert w._save_state is False
-    full = w.get_state()
-    leaked = [k for k in w._UNSAVED_HEAVY_KEYS if k in full]
-    assert not leaked, f"Show1D: bulk buffers {leaked} leaked into saved state"
-    # The trace itself must stay so a cold reopen still paints the plot.
-    assert "y_bytes" in full
-
-
-def test_show1d_targeted_send_state_never_trimmed():
-    w = _make_show1d()
-    for render_key in ("snapshot_bytes", "y_bytes"):
-        assert render_key in w.get_state(render_key), (
-            f"Show1D: targeted get_state({render_key!r}) dropped the key "
-            "- live render would go blank")
-    assert "snapshot_bytes" in w.get_state({"snapshot_bytes", "widget_version"})
-
-
-def test_show1d_save_state_true_keeps_buffers():
-    w = _make_show1d(save_state=True)
+    w = Show1D(np.random.rand(64).astype("float32"), save_state=True)
     full = w.get_state()
     assert "snapshot_bytes" in full
     assert "export_payload" in full
