@@ -59,7 +59,7 @@ odd_cases = [("gaussian", 3.0, 1), ("bin2", 4.0, 1), ("bin2_anscombe", 6.0, 1)]
 
 
 def run(img, mode, sigma, spatial_bin):
-    out = apply_display_filter(img, filter=mode, sigma=sigma, spatial_bin=spatial_bin)
+    out = apply_display_filter(img, mode=mode, sigma=sigma, spatial_bin=spatial_bin)
     return out.ravel().tolist()
 
 

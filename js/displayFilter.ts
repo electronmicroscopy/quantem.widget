@@ -55,6 +55,20 @@ export function browserFilterSupported(mode: string): boolean {
   return BROWSER_FILTER_MODES.has(normalizeFilterMode(mode));
 }
 
+/**
+ * Mirror of display_filter.resolve_denoise_mode: the canonical menu is three
+ * orthogonal methods (none/gaussian/anscombe) with binning as its own knob;
+ * compound spellings fold into (mode, bin).
+ */
+export function resolveDenoiseMode(mode: string, spatialBin = 1): { mode: string; bin: number } {
+  const normalized = normalizeFilterMode(mode);
+  const bin = spatialBin | 0 || 1;
+  if (normalized === "bin2") return { mode: "gaussian", bin: Math.max(bin, 2) };
+  if (normalized === "bin2_anscombe") return { mode: "anscombe", bin: Math.max(bin, 2) };
+  if (normalized === "bin4_anscombe") return { mode: "anscombe", bin: Math.max(bin, 4) };
+  return { mode: normalized, bin };
+}
+
 /** True when the (mode, spatialBin) knobs change pixels at all. */
 export function filterKnobsActive(mode: string, spatialBin: number): boolean {
   return normalizeFilterMode(mode) !== "none" || (spatialBin | 0) > 1;
@@ -194,19 +208,25 @@ export function applyDisplayFilterCPU(
   data: Float32Array, width: number, height: number,
   mode: string, sigma: number, spatialBin = 1,
 ): Float32Array {
-  const normalized = normalizeFilterMode(mode);
+  const resolved = resolveDenoiseMode(mode, spatialBin);
   let plane: Plane = { data: Float32Array.from(data), width, height };
-  if (spatialBin >= 2) plane = bin2CPU(plane, null);
-  if (spatialBin === 4) plane = bin2CPU(plane, null);
-  if (normalized === "none") return plane.data;
-  if (normalized === "gaussian") return gaussianBlurCPU(plane.data, plane.width, plane.height, sigma);
-  if (normalized === "bin2") return bin2CPU(plane, sigma).data;
-  if (normalized === "anscombe") return anscombeGaussCPU(plane, sigma).data;
-  if (normalized === "bin2_anscombe") {
-    return anscombeGaussCPU(bin2CPU(plane, null), Math.max(2.0, sigma * 0.75)).data;
+  if (resolved.mode === "gaussian") {
+    // Binned gaussian keeps the reference _bin2 semantics: smooth on the
+    // binned grid with the lighter max(1, sigma/2.5) kernel, zoom back.
+    if (resolved.bin === 4) return bin2CPU(bin2CPU(plane, null), sigma).data;
+    if (resolved.bin === 2) return bin2CPU(plane, sigma).data;
+    return gaussianBlurCPU(plane.data, plane.width, plane.height, sigma);
   }
-  if (normalized === "bin4_anscombe") {
-    return anscombeGaussCPU(bin2CPU(bin2CPU(plane, null), null), Math.max(2.0, sigma * 0.75)).data;
+  if (resolved.mode === "anscombe") {
+    if (resolved.bin >= 2) plane = bin2CPU(plane, null);
+    if (resolved.bin === 4) plane = bin2CPU(plane, null);
+    const binnedSigma = resolved.bin >= 2 ? Math.max(2.0, sigma * 0.75) : sigma;
+    return anscombeGaussCPU(plane, binnedSigma).data;
+  }
+  if (resolved.mode === "none") {
+    if (resolved.bin >= 2) plane = bin2CPU(plane, null);
+    if (resolved.bin === 4) plane = bin2CPU(plane, null);
+    return plane.data;
   }
   throw new Error(`display filter mode not supported in the browser: ${mode}`);
 }
@@ -559,28 +579,29 @@ export class GPUDisplayFilterEngine {
     data: Float32Array, width: number, height: number,
     mode: string, sigma: number, spatialBin = 1,
   ): Promise<Float32Array> {
-    const normalized = normalizeFilterMode(mode);
-    if (!BROWSER_FILTER_MODES.has(normalized)) {
+    const resolved = resolveDenoiseMode(mode, spatialBin);
+    if (!BROWSER_FILTER_MODES.has(resolved.mode)) {
       throw new Error(`display filter mode not supported in the browser: ${mode}`);
     }
     try {
       let plane: GPUPlane = this.uploadPlane(data, width, height);
-      // cpuShadow: CPU copy of the current plane while it still equals the raw
-      // input, so anscombe's percentile can skip a GPU readback.
-      let cpuShadow: Float32Array | null = data;
-      if (spatialBin >= 2) { plane = this.stageBin2(plane, null); cpuShadow = null; }
-      if (spatialBin === 4) { plane = this.stageBin2(plane, null); }
-      if (normalized === "gaussian") {
-        plane = this.stageGaussian(plane, sigma);
-      } else if (normalized === "bin2") {
-        plane = this.stageBin2(plane, sigma);
-      } else if (normalized === "anscombe") {
-        plane = await this.stageAnscombeGauss(plane, sigma, cpuShadow);
-      } else if (normalized === "bin2_anscombe") {
-        plane = await this.stageAnscombeGauss(this.stageBin2(plane, null), Math.max(2.0, sigma * 0.75));
-      } else if (normalized === "bin4_anscombe") {
-        plane = await this.stageAnscombeGauss(
-          this.stageBin2(this.stageBin2(plane, null), null), Math.max(2.0, sigma * 0.75));
+      if (resolved.mode === "gaussian") {
+        // Binned gaussian = the reference _bin2 semantics (light smooth on
+        // the binned grid); plain separable gaussian otherwise.
+        if (resolved.bin === 4) plane = this.stageBin2(this.stageBin2(plane, null), sigma);
+        else if (resolved.bin === 2) plane = this.stageBin2(plane, sigma);
+        else plane = this.stageGaussian(plane, sigma);
+      } else if (resolved.mode === "anscombe") {
+        // cpuShadow: at bin 1 the plane still equals the raw input, so the
+        // percentile skips a GPU readback.
+        let cpuShadow: Float32Array | null = data;
+        if (resolved.bin >= 2) { plane = this.stageBin2(plane, null); cpuShadow = null; }
+        if (resolved.bin === 4) { plane = this.stageBin2(plane, null); }
+        const binnedSigma = resolved.bin >= 2 ? Math.max(2.0, sigma * 0.75) : sigma;
+        plane = await this.stageAnscombeGauss(plane, binnedSigma, cpuShadow);
+      } else if (resolved.bin >= 2) {
+        plane = this.stageBin2(plane, null);
+        if (resolved.bin === 4) plane = this.stageBin2(plane, null);
       }
       // stageBin2 zooms back to the input shape, so this is a safety net only.
       if (plane.width !== width || plane.height !== height) {

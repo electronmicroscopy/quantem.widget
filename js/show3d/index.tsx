@@ -867,6 +867,7 @@ const upwardMenuProps = {
   sx: { zIndex: 9999 },
 };
 
+import { resolveDenoiseMode } from "../displayFilter";
 import { COLORMAPS, COLORMAP_NAMES, applyColormap, renderToOffscreen, renderToOffscreenReuse, createGPUColormapEngine, GPUColormapEngine } from "../colormaps";
 
 const DPR = window.devicePixelRatio || 1;
@@ -2346,14 +2347,15 @@ function Show3D() {
   // Display-only filter knobs for sparse map stacks (EDS, low dose). Python
   // owns the math and re-sends the playback buffer on change; raw data is
   // never modified.
-  const [displayFilter, setDisplayFilter] = useModelState<string>("display_filter");
-  const [displaySigma, setDisplaySigma] = useModelState<number>("display_sigma");
-  const [spatialBin, setSpatialBin] = useModelState<number>("spatial_bin");
-  const [displayFilterBanner] = useModelState<string>("display_filter_banner");
+  const [displayFilter, setDisplayFilter] = useModelState<string>("denoise");
+  const [displaySigma, setDisplaySigma] = useModelState<number>("denoise_sigma");
+  const [spatialBin, setSpatialBin] = useModelState<number>("denoise_bin");
+  const [displayFilterBanner] = useModelState<string>("denoise_banner");
+  const [showDenoise, setShowDenoise] = useModelState<boolean>("show_denoise");
   // Local slider value during drag; the model (and the Python refilter) only
   // updates on release so scrubbing sigma stays smooth on large stacks.
   const [sigmaDraft, setSigmaDraft] = React.useState<number | null>(null);
-  const displayFilterOff = !displayFilter || displayFilter === "none";
+  const displayFilterOff = resolveDenoiseMode(displayFilter || "none").mode === "none";
   const [pixelUnit] = useModelState<string>("pixel_unit");
   const [imageRotation] = useModelState<number>("image_rotation");
 
@@ -11456,6 +11458,15 @@ function Show3D() {
                   </Select>
                   <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted }}>Smooth</Typography>
                   <Switch checked={smooth} onChange={(e) => setSmooth(e.target.checked)} size="small" sx={switchStyles.small} slotProps={{ input: { "aria-label": "Toggle bilinear smoothing" } }} />
+                  <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted }} title="Show the display-only denoise controls (method, σ, bin). Raw data and stats keep original counts.">Denoise</Typography>
+                  <Switch checked={showDenoise ?? false} onChange={() => setShowDenoise(!showDenoise)} size="small" sx={switchStyles.small} slotProps={{ input: { "aria-label": "Show denoise controls" } }} />
+                  {!showDenoise && displayFilterBanner && (
+                    /* House rule: an active reduction is never invisible,
+                       even with the denoise controls row hidden. */
+                    <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.accent }} title={displayFilterBanner}>
+                      {displayFilterBanner.split(" (")[0]}
+                    </Typography>
+                  )}
                   <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted }}>Diff</Typography>
                   <Select value={diffMode} onChange={(e) => setDiffMode(e.target.value)} size="small" sx={{ ...themedSelect, minWidth: 45, fontSize: 10 }} MenuProps={themedMenuProps} inputProps={{ "aria-label": "Difference mode (off, previous frame, first frame)" }}>
                     <MenuItem value="off">Off</MenuItem>
@@ -11464,12 +11475,13 @@ function Show3D() {
                   </Select>
                   {/* zoom indicator moved onto the canvas overlay */}
                 </Box>
-                {/* Row 3: display-only filter for sparse map stacks (EDS, low dose) */}
+                {/* Row 3 (toggle-gated): display-only denoise for sparse map stacks (EDS, low dose) */}
+                {showDenoise && (
                 <Box sx={{ ...controlRow, ...mobileControlRowSx, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>
-                  <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted }} title="Display-only denoise per frame (EDS, low dose). Raw data and stats keep original counts; 'none' shows raw. FFT follows the displayed frame.">Filter</Typography>
-                  <Select size="small" value={displayFilter || "none"} onChange={(e) => setDisplayFilter(e.target.value)} MenuProps={themedMenuProps} sx={{ ...themedSelect, minWidth: 88, fontSize: 10 }} inputProps={{ "aria-label": "Display-only denoise filter" }}>
-                    {["none", "gaussian", "bin2", "anscombe", "bin2_anscombe", "bin4_anscombe", "tv"].map((mode) => (
-                      <MenuItem key={mode} value={mode}>{mode}</MenuItem>
+                  <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted }} title="Poisson (Anscombe): count-respecting smoothing for sparse EDS/counting data - recommended with Bin 2, sigma 6-10. Gaussian: simple smooth for decent-dose images. None: raw counts (use for anything quantitative).">Denoise</Typography>
+                  <Select size="small" value={resolveDenoiseMode(displayFilter || "none").mode} onChange={(e) => setDisplayFilter(e.target.value)} MenuProps={themedMenuProps} sx={{ ...themedSelect, minWidth: 88, fontSize: 10 }} inputProps={{ "aria-label": "Display-only denoise method" }}>
+                    {[["none", "None"], ["gaussian", "Gaussian"], ["anscombe", "Poisson (Anscombe)"]].map(([mode, label]) => (
+                      <MenuItem key={mode} value={mode}>{label}</MenuItem>
                     ))}
                   </Select>
                   <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted, opacity: displayFilterOff ? 0.5 : 1 }}>σ {(sigmaDraft ?? Number(displaySigma ?? 4)).toFixed(1)}</Typography>
@@ -11482,16 +11494,17 @@ function Show3D() {
                     size="small" sx={{ ...sliderStyles.small, width: 60 }}
                     aria-label="Display filter sigma in pixels"
                   />
-                  <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted }} title="Extra display-side 2x bin passes for SNR, before the filter. 1 is lossless.">Bin</Typography>
+                  <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted }} title="Display-side 2x bin passes for SNR, combined with the denoise method. 1 is lossless.">Bin</Typography>
                   <Select size="small" value={String(spatialBin || 1)} onChange={(e) => setSpatialBin(parseInt(e.target.value, 10))} MenuProps={themedMenuProps} sx={{ ...themedSelect, minWidth: 40, fontSize: 10 }} inputProps={{ "aria-label": "Display spatial bin factor" }}>
                     {[1, 2, 4].map((b) => (<MenuItem key={b} value={String(b)}>{b}</MenuItem>))}
                   </Select>
                   {displayFilterBanner && (
                     <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.accent }} title={displayFilterBanner}>
-                      {displayFilterBanner.split(" (")[0]} · raw: display_filter='none'
+                      {displayFilterBanner.split(" (")[0]} · raw: denoise='none'
                     </Typography>
                   )}
                 </Box>
+                )}
               </Box>
               {/* Playback: 2 rows side-by-side with Display + Histogram. */}
               {(() => { const activeIdx = visibleSliceIdx; return (

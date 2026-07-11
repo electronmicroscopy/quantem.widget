@@ -37,7 +37,7 @@ import { EmbeddedWidgetView } from "../embeddedWidget";
 import { getWebGPUFFT, WebGPUFFT, fft2d, fft2dAsync, fftshift, computeMagnitude, autoEnhanceFFT, nextPow2, applyHannWindow2D, getGPUInfo } from "../fft";
 import { computeFftQualityMetrics, formatFftQualityLabel, type FftQualityMetrics } from "../fftMetrics";
 import { COLORMAPS, COLORMAP_NAMES, renderToOffscreen, renderToOffscreenReuse, GPUColormapEngine, getGPUColormapEngine, getGPUMaxBufferSize } from "../colormaps";
-import { applyDisplayFilterBrowser, browserFilterSupported, filterKnobsActive, getGPUDisplayFilterEngine, normalizeFilterMode } from "../displayFilter";
+import { applyDisplayFilterBrowser, browserFilterSupported, filterKnobsActive, getGPUDisplayFilterEngine, normalizeFilterMode, resolveDenoiseMode } from "../displayFilter";
 
 const SHOW2D_TO_SHOW3D_LINKED_TRAITS = [
   { source: "cmap" },
@@ -1010,19 +1010,25 @@ function Show2D() {
   const imageRenderingStyle = smooth ? "auto" : "pixelated";
   // Display-only filter knobs for sparse maps (EDS, low dose). Python owns
   // the math and repacks frame_bytes on change; raw data is never modified.
-  const [displayFilter, setDisplayFilter] = useModelState<string>("display_filter");
-  const [displaySigma, setDisplaySigma] = useModelState<number>("display_sigma");
-  const [spatialBin, setSpatialBin] = useModelState<number>("spatial_bin");
-  const [displayFilterBanner] = useModelState<string>("display_filter_banner");
+  const [displayFilter, setDisplayFilter] = useModelState<string>("denoise");
+  const [displaySigma, setDisplaySigma] = useModelState<number>("denoise_sigma");
+  const [spatialBin, setSpatialBin] = useModelState<number>("denoise_bin");
+  const [displayFilterBanner] = useModelState<string>("denoise_banner");
   // Local slider value during drag; the model (and the Python refilter) only
   // updates on release so scrubbing sigma stays smooth on large galleries.
   const [sigmaDraft, setSigmaDraft] = React.useState<number | null>(null);
-  const filterOff = !displayFilter || displayFilter === "none";
-  const [filterPerPanel, setFilterPerPanel] = useModelState<boolean>("filter_per_panel");
+  // Canonical method for the UI menu; compound aliases (bin2_anscombe, ...)
+  // from older saved states resolve to their base method for display.
+  const denoiseBaseMode = resolveDenoiseMode(displayFilter || "none", spatialBin || 1).mode;
+  const filterOff = denoiseBaseMode === "none";
+  // Denoise controls row visibility (its own compact toggle, FFT-style).
+  const [showDenoise, setShowDenoise] = useModelState<boolean>("show_denoise");
+  const [denoiseScope, setDenoiseScope] = useModelState<string>("denoise_scope");
+  const denoiseScopeAll = denoiseScope !== "panel";
   // Per-panel resolved knobs (the packing source of truth in Python).
-  const [displayFilters, setDisplayFilters] = useModelState<string[]>("display_filters");
-  const [displaySigmas, setDisplaySigmas] = useModelState<number[]>("display_sigmas");
-  const [spatialBins, setSpatialBins] = useModelState<number[]>("spatial_bins");
+  const [displayFilters, setDisplayFilters] = useModelState<string[]>("denoise_modes");
+  const [displaySigmas, setDisplaySigmas] = useModelState<number[]>("denoise_sigmas");
+  const [spatialBins, setSpatialBins] = useModelState<number[]>("denoise_bins");
   // Browser-side filter negotiation: True means frames ship RAW and the WGSL
   // port in ../displayFilter.ts applies gaussian/bin2/anscombe client-side
   // (live sigma scrub during drag, working knobs on kernel-less HTML pages).
@@ -2466,12 +2472,12 @@ function Show2D() {
       ? Number(displaySigmas[panel]) : Number(displaySigma ?? 4);
     const bin = (spatialBins && spatialBins.length > panel)
       ? Number(spatialBins[panel]) : Number(spatialBin || 1);
-    if (sigmaDraftForFilter !== null && (filterPerPanel || panel === selectedIdx)) {
+    if (sigmaDraftForFilter !== null && (denoiseScopeAll || panel === selectedIdx)) {
       sigma = sigmaDraftForFilter;
     }
     return { mode, sigma, bin };
   }, [displayFilters, displaySigmas, spatialBins, displayFilter, displaySigma, spatialBin,
-      sigmaDraftForFilter, filterPerPanel, selectedIdx]);
+      sigmaDraftForFilter, denoiseScopeAll, selectedIdx]);
   const filterFrameForPanel = React.useCallback(async (panel: number, frame: Float32Array): Promise<Float32Array> => {
     if (!browserFilterActive || (isRgbFlags && isRgbFlags[panel])) return frame;
     const { mode, sigma, bin } = panelFilterKnobs(panel);
@@ -2495,7 +2501,7 @@ function Show2D() {
     if (!browserFilterActive || nImages <= 0) return;
     const idx = Math.min(Math.max(0, selectedIdx || 0), nImages - 1);
     const updated = <T,>(current: T[] | undefined | null, v: T): T[] => {
-      if (filterPerPanel ?? true) return new Array<T>(nImages).fill(v);
+      if (denoiseScopeAll) return new Array<T>(nImages).fill(v);
       const values = (current && current.length === nImages)
         ? [...current] : new Array<T>(nImages).fill(v);
       values[idx] = v;
@@ -2504,7 +2510,7 @@ function Show2D() {
     if (name === "mode") setDisplayFilters(updated(displayFilters, String(value)));
     else if (name === "sigma") setDisplaySigmas(updated(displaySigmas, Number(value)));
     else setSpatialBins(updated(spatialBins, Number(value)));
-  }, [browserFilterActive, nImages, selectedIdx, filterPerPanel, displayFilters, displaySigmas,
+  }, [browserFilterActive, nImages, selectedIdx, denoiseScopeAll, displayFilters, displaySigmas,
       spatialBins, setDisplayFilters, setDisplaySigmas, setSpatialBins]);
   // Local banner (format_display_filter_banner port): announcing an active
   // reduction is a house rule, and kernel-less pages have no Python to
@@ -2514,7 +2520,7 @@ function Show2D() {
     const knobs = Array.from({ length: nImages }, (_, i) => panelFilterKnobs(i));
     const activeIdx = knobs.map((_, i) => i).filter(i => filterKnobsActive(knobs[i].mode, knobs[i].bin));
     if (activeIdx.length === 0) return "";
-    const suffix = " (set display_filter='none' for raw counts)";
+    const suffix = " (set denoise='none' for raw counts)";
     const uniform = knobs.every(k =>
       normalizeFilterMode(k.mode) === normalizeFilterMode(knobs[0].mode)
       && k.sigma === knobs[0].sigma && k.bin === knobs[0].bin);
@@ -2523,12 +2529,12 @@ function Show2D() {
       const parts = [mode === "none" ? "raw" : mode];
       if (mode !== "none") parts.push(`σ=${Number(knobs[0].sigma)}`);
       if (knobs[0].bin > 1) parts.push(`bin${knobs[0].bin}`);
-      return `display: ${parts.join(" ")}${suffix}`;
+      return `denoise: ${parts.join(" ")}${suffix}`;
     }
     const perPanel = activeIdx.map(i =>
       `p${i}:${normalizeFilterMode(knobs[i].mode)} σ=${Number(knobs[i].sigma)}`
       + (knobs[i].bin > 1 ? ` bin${knobs[i].bin}` : "")).join(", ");
-    return `display: ${perPanel}${suffix}`;
+    return `denoise: ${perPanel}${suffix}`;
   }, [browserFilterActive, nImages, panelFilterKnobs]);
   const filterBannerText = browserFilterActive ? (browserFilterBanner ?? "") : (displayFilterBanner || "");
 
@@ -6848,6 +6854,17 @@ function Show2D() {
                         <Typography sx={{ ...typography.label, fontSize: 10 }} title="CSS bilinear interpolation. Same data, browser smooths visually — useful when upscaling small images on a large canvas.">Smooth</Typography>
                         <Switch checked={smooth} onChange={() => { setSmooth(!smooth); }} size="small" sx={switchStyles.small} />
                       </Box>
+                      <Box sx={controlPairSx}>
+                        <Typography sx={{ ...typography.label, fontSize: 10 }} title="Show the display-only denoise controls (method, σ, bin). Raw data, stats, and exports keep original counts.">Denoise</Typography>
+                        <Switch checked={showDenoise ?? false} onChange={() => setShowDenoise(!showDenoise)} size="small" sx={switchStyles.small} />
+                      </Box>
+                      {!showDenoise && filterBannerText && (
+                        /* House rule: an active reduction is never invisible,
+                           even with the denoise controls row hidden. */
+                        <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.accent }} title={filterBannerText}>
+                          {filterBannerText.split(" (")[0]}
+                        </Typography>
+                      )}
                       {!isGallery && showLens && (
                         <>
                           <Typography sx={{ ...typography.label, fontSize: 10 }}>Lens {lensMag}×</Typography>
@@ -6878,14 +6895,14 @@ function Show2D() {
                       )}
                     </Box>
                   )}
-                  {/* Row 3: display-only filter for sparse maps (EDS, low dose) */}
-                  {(
+                  {/* Row 3 (toggle-gated): display-only denoise for sparse maps (EDS, low dose) */}
+                  {showDenoise && (
                     <Box sx={{ ...controlRow, ...mobileControlRowSx, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, opacity: 1, pointerEvents: "auto" }}>
                       <Box sx={controlPairSx}>
-                        <Typography sx={{ ...typography.label, fontSize: 10 }} title="Display-only denoise for sparse maps (EDS, low dose). Raw data, stats, and exports keep original counts; 'none' shows raw.">Filter</Typography>
-                        <Select size="small" value={displayFilter || "none"} onChange={(e) => { setDisplayFilter(e.target.value); mirrorFilterKnobEdit("mode", e.target.value); }} MenuProps={themedMenuProps} sx={{ ...themedSelect, minWidth: 88 }}>
-                          {["none", "gaussian", "bin2", "anscombe", "bin2_anscombe", "bin4_anscombe", "tv"].map((mode) => (
-                            <MenuItem key={mode} value={mode}>{mode}</MenuItem>
+                        <Typography sx={{ ...typography.label, fontSize: 10 }} title="Poisson (Anscombe): count-respecting smoothing for sparse EDS/counting data - recommended with Bin 2, sigma 6-10. Gaussian: simple smooth for decent-dose images. None: raw counts (use for anything quantitative).">Denoise</Typography>
+                        <Select size="small" value={denoiseBaseMode} onChange={(e) => { setDisplayFilter(e.target.value); mirrorFilterKnobEdit("mode", e.target.value); }} MenuProps={themedMenuProps} sx={{ ...themedSelect, minWidth: 88 }}>
+                          {[["none", "None"], ["gaussian", "Gaussian"], ["anscombe", "Poisson (Anscombe)"]].map(([mode, label]) => (
+                            <MenuItem key={mode} value={mode}>{label}</MenuItem>
                           ))}
                         </Select>
                       </Box>
@@ -6901,20 +6918,20 @@ function Show2D() {
                         />
                       </Box>
                       <Box sx={controlPairSx}>
-                        <Typography sx={{ ...typography.label, fontSize: 10 }} title="Extra display-side 2x bin passes for SNR, before the filter. 1 is lossless.">Bin</Typography>
+                        <Typography sx={{ ...typography.label, fontSize: 10 }} title="Display-side 2x bin passes for SNR, combined with the denoise method. 1 is lossless.">Bin</Typography>
                         <Select size="small" value={String(spatialBin || 1)} onChange={(e) => { setSpatialBin(parseInt(e.target.value, 10)); mirrorFilterKnobEdit("bin", parseInt(e.target.value, 10)); }} MenuProps={themedMenuProps} sx={{ ...themedSelect, minWidth: 40 }}>
                           {[1, 2, 4].map((b) => (<MenuItem key={b} value={String(b)}>{b}</MenuItem>))}
                         </Select>
                       </Box>
                       {isGallery && (
                         <Box sx={controlPairSx}>
-                          <Typography sx={{ ...typography.label, fontSize: 10 }} title="On: Filter/σ/Bin edits apply to every panel. Off: edits apply only to the selected panel.">All</Typography>
-                          <Switch checked={filterPerPanel ?? true} onChange={() => setFilterPerPanel(!filterPerPanel)} size="small" sx={switchStyles.small} />
+                          <Typography sx={{ ...typography.label, fontSize: 10 }} title="Denoise scope. On (all): Denoise/σ/Bin edits apply to every panel. Off (panel): edits apply only to the selected panel.">All</Typography>
+                          <Switch checked={denoiseScopeAll} onChange={() => setDenoiseScope(denoiseScopeAll ? "panel" : "all")} size="small" sx={switchStyles.small} />
                         </Box>
                       )}
                       {filterBannerText && (
                         <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.accent }} title={filterBannerText}>
-                          {filterBannerText.split(" (")[0]} · raw: display_filter='none'
+                          {filterBannerText.split(" (")[0]} · raw: denoise='none'
                         </Typography>
                       )}
                     </Box>
