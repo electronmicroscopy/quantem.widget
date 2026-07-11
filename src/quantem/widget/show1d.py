@@ -459,6 +459,37 @@ class Show1D(anywidget.AnyWidget):
     export_payload_id = traitlets.Unicode("").tag(sync=True)
     export_filename = traitlets.Unicode("").tag(sync=True)
 
+    # Bulk sync=True buffers dropped from the full save snapshot when
+    # save_state=False (see docs/developer/save-state-and-notebook-size.md).
+    # y_bytes / x_bytes stay: they are the trace itself (normally KBs) and let
+    # a cold reopen paint the plot. snapshot_bytes is the whale - a monitor
+    # run's full snapshot stack (tens of MB); profile_image_bytes can be a
+    # full-resolution image in from_image mode.
+    _UNSAVED_HEAVY_KEYS = (
+        "snapshot_bytes",
+        "profile_image_bytes",
+        "export_payload",
+    )
+
+    def get_state(self, key=None, drop_defaults=False):
+        """Trait state for comm sync and notebook embedding.
+
+        ipywidgets calls this with ``key=None`` to snapshot the FULL state that
+        gets written into the saved notebook's ``metadata.widgets``. When
+        ``save_state`` is False we drop the heavy buffers from that snapshot so
+        a plain Show1D does not bake a monitor run's snapshot stack into the
+        .ipynb. Targeted syncs (``key`` is a name or set, used by hold_sync /
+        send_state during live rendering) are untouched, so the frontend still
+        receives every buffer normally. ``save_state=True`` embeds everything
+        so a reopened notebook restores the interactive widget without a
+        kernel.
+        """
+        state = super().get_state(key=key, drop_defaults=drop_defaults)
+        if key is None and not getattr(self, "_save_state", False):
+            for heavy_key in self._UNSAVED_HEAVY_KEYS:
+                state.pop(heavy_key, None)
+        return state
+
     def __init__(
         self,
         data: Any = None,
@@ -529,6 +560,7 @@ class Show1D(anywidget.AnyWidget):
         prefer_webgpu: bool = True,
         monitor_path: str | pathlib.Path | None = None,
         monitor_refresh_s: float = 0.0,
+        save_state: bool = False,
         state: dict[str, Any] | str | pathlib.Path | None = None,
         **kwargs: Any,
     ) -> None:
@@ -538,6 +570,8 @@ class Show1D(anywidget.AnyWidget):
             and bool(scale_bar_visible) != bool(show_scale_bar)
         ):
             raise ValueError("Use either show_scale_bar or scale_bar_visible, not conflicting values")
+        # Before super().__init__ so any get_state during comm-open sees it.
+        self._save_state = bool(save_state)
         super().__init__(**kwargs)
         self.widget_version = resolve_widget_version()
         self._data, inferred_labels = self._normalise_data(data)

@@ -1260,3 +1260,41 @@ def test_sibling_not_emitted_with_save_state_true(widget, monkeypatch):
 
     w._ipython_display_()
     assert len(displayed) == 1, f"{widget.__name__}: sibling emitted despite save_state=True"
+
+
+# Show1D implements the anti-bloat half of the contract (trim + opt-in
+# save_state). It is not in WIDGETS above because the static-JPEG fallback is
+# not implemented yet - a cold reopen paints the plot from the kept y/x trace
+# buffers instead.
+
+
+def _make_show1d(**kwargs):
+    from quantem.widget import Show1D
+
+    return Show1D(np.random.rand(64).astype("float32"), **kwargs)
+
+
+def test_show1d_default_full_snapshot_trims_bulk_buffers():
+    w = _make_show1d()
+    assert w._save_state is False
+    full = w.get_state()
+    leaked = [k for k in w._UNSAVED_HEAVY_KEYS if k in full]
+    assert not leaked, f"Show1D: bulk buffers {leaked} leaked into saved state"
+    # The trace itself must stay so a cold reopen still paints the plot.
+    assert "y_bytes" in full
+
+
+def test_show1d_targeted_send_state_never_trimmed():
+    w = _make_show1d()
+    for render_key in ("snapshot_bytes", "y_bytes"):
+        assert render_key in w.get_state(render_key), (
+            f"Show1D: targeted get_state({render_key!r}) dropped the key "
+            "- live render would go blank")
+    assert "snapshot_bytes" in w.get_state({"snapshot_bytes", "widget_version"})
+
+
+def test_show1d_save_state_true_keeps_buffers():
+    w = _make_show1d(save_state=True)
+    full = w.get_state()
+    assert "snapshot_bytes" in full
+    assert "export_payload" in full
