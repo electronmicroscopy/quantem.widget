@@ -33,6 +33,19 @@ DISPLAY_FILTER_MODES = (
     "denova_tv",
     "denova_tv12",
 )
+# Modes with a browser-side WebGPU/TypeScript port (js/displayFilter.ts).
+# Panels on these modes can ship raw pixels and filter client-side, which
+# keeps the sigma slider live during drag and makes kernel-less offline HTML
+# exports scrubbable. tv and denova* depend on scikit-image / the denova
+# package and are Python-only: those panels always bake their filtered view.
+BROWSER_DISPLAY_FILTER_MODES = (
+    "none",
+    "gaussian",
+    "bin2",
+    "anscombe",
+    "bin2_anscombe",
+    "bin4_anscombe",
+)
 _IDENTITY_MODES = {"none", "off", "raw", ""}
 
 
@@ -50,6 +63,34 @@ def _normalize_mode(filter: str) -> str:
         "denova_tv1_2": "denova_tv12",
     }
     return aliases.get(mode, mode)
+
+
+def resolve_denoise_mode(mode: str, spatial_bin: int = 1) -> tuple[str, int]:
+    """Resolve a denoise mode plus bin knob to the canonical (mode, bin) pair.
+
+    The public menu is three orthogonal methods: ``"none"``, ``"gaussian"``
+    and ``"anscombe"``; binning is its own knob. The compound spellings from
+    the drift-paper pipeline stay accepted as aliases and fold their binning
+    into the bin knob: ``"bin2"`` -> ``("gaussian", max(bin, 2))`` with the
+    reference ``_bin2`` light smooth, ``"bin2_anscombe"`` ->
+    ``("anscombe", max(bin, 2))``, ``"bin4_anscombe"`` ->
+    ``("anscombe", max(bin, 4))``. ``tv``/``denova*`` pass through unchanged.
+
+    Examples
+    --------
+    >>> from quantem.widget.utils.display_filter import resolve_denoise_mode
+    >>> resolve_denoise_mode("bin2_anscombe")
+    ('anscombe', 2)
+    >>> resolve_denoise_mode("gaussian", 4)
+    ('gaussian', 4)
+    """
+    normalized = _normalize_mode(mode)
+    spatial_bin = int(spatial_bin)
+    compound = {"bin2": ("gaussian", 2), "bin2_anscombe": ("anscombe", 2), "bin4_anscombe": ("anscombe", 4)}
+    if normalized in compound:
+        base, extra_bin = compound[normalized]
+        return base, max(spatial_bin, extra_bin)
+    return normalized, spatial_bin
 
 
 def _anscombe_gauss(image: np.ndarray, sigma: float) -> np.ndarray:
@@ -95,39 +136,49 @@ def _denova(image: np.ndarray, method: str = "tv") -> np.ndarray:
 def apply_display_filter(
     image: np.ndarray,
     *,
-    filter: str = "none",
+    mode: str | None = None,
     sigma: float = 4.0,
     spatial_bin: int = 1,
+    filter: str | None = None,
 ) -> np.ndarray:
     """Display-only denoise/smooth for a 2D map. Does not invent counts.
 
     The input array is never modified: the return value is a new float32
     array intended for the display path only (before contrast/colormap).
     Reconstruction and analysis must keep using the raw stored data.
+    ``filter=`` is the deprecated spelling of ``mode=`` and stays accepted.
 
     Parameters
     ----------
     image
         2D map, shape ``(n_rows, n_cols)``. Any numeric dtype.
-    filter
-        Display filter mode:
+    mode
+        Denoise method; three orthogonal choices plus optional extras:
 
         - ``"none"`` (also ``"off"``/``"raw"``): identity, the default.
-        - ``"gaussian"``: plain Gaussian smooth of width ``sigma``.
-        - ``"bin2"``: 2x spatial bin for SNR, light smooth, zoom back.
+        - ``"gaussian"``: Gaussian smooth of width ``sigma``. With
+          ``spatial_bin`` >= 2 it smooths on the binned grid with the lighter
+          ``max(1, sigma/2.5)`` kernel (the reference ``_bin2`` behavior).
         - ``"anscombe"``: Anscombe transform, Gaussian, inverse; respects
-          Poisson statistics of count data.
-        - ``"bin2_anscombe"``: bin2 then Anscombe; the recommended stack for
-          sparse EDS maps.
-        - ``"bin4_anscombe"``: two bin2 passes then Anscombe.
+          Poisson statistics of count data. With ``spatial_bin`` >= 2 the
+          smoothing width becomes ``max(2, sigma*0.75)`` on the binned map.
         - ``"tv"``: total-variation denoise (requires scikit-image).
         - ``"denova"`` / ``"denova_tv"`` / ``"denova_tv12"``: lab denova
           denoiser when the optional package is installed.
+
+        Compound aliases from the drift-paper pipeline stay accepted and
+        normalize through :func:`resolve_denoise_mode`: ``"bin2"`` ->
+        gaussian at bin 2, ``"bin2_anscombe"`` -> anscombe at bin 2,
+        ``"bin4_anscombe"`` -> anscombe at bin 4.
+
+        Recommendation ladder: sparse EDS -> ``anscombe`` with bin 2 and
+        sigma 6-10; very sparse maps -> ``anscombe`` with bin 4 and sigma
+        8-12; decent-dose HAADF -> ``gaussian`` sigma 1-2 or ``none``;
+        anything quantitative -> ``none``.
     sigma
         Smoothing scale in pixels for the Gaussian/Anscombe modes.
     spatial_bin
-        Extra 2x bin passes applied BEFORE the filter mode: 1 (off), 2, or 4.
-        Independent of the binning already inside ``bin2*`` modes.
+        2x bin passes for SNR: 1 (off), 2, or 4.
 
     Returns
     -------
@@ -139,7 +190,7 @@ def apply_display_filter(
     >>> import numpy as np
     >>> from quantem.widget.utils.display_filter import apply_display_filter
     >>> counts = np.random.poisson(0.3, (256, 256)).astype(np.float32)
-    >>> view = apply_display_filter(counts, filter="bin2_anscombe", sigma=8)
+    >>> view = apply_display_filter(counts, mode="bin2_anscombe", sigma=8)
     >>> view.shape == counts.shape
     True
     """
@@ -151,28 +202,39 @@ def apply_display_filter(
         )
     if spatial_bin not in (1, 2, 4):
         raise ValueError(f"spatial_bin must be 1, 2, or 4; got {spatial_bin!r}")
-    mode = _normalize_mode(filter)
+    requested = mode if mode is not None else (filter if filter is not None else "none")
+    # Three orthogonal methods (none/gaussian/anscombe) with binning as its
+    # own knob; compound spellings (bin2, bin2_anscombe, bin4_anscombe) fold
+    # into (mode, bin) here so the drift-paper calls replay verbatim.
+    mode, spatial_bin = resolve_denoise_mode(requested, spatial_bin)
     out = image.astype(np.float32, copy=True)
+    sigma = float(sigma)
+    if mode == "gaussian":
+        # Binned gaussian keeps the reference _bin2 semantics: smooth on the
+        # binned grid with the lighter max(1, sigma/2.5) kernel, zoom back.
+        if spatial_bin == 4:
+            return _bin2(_bin2(out, None), sigma)
+        if spatial_bin == 2:
+            return _bin2(out, sigma)
+        from scipy import ndimage
+
+        return ndimage.gaussian_filter(out, sigma).astype(np.float32)
+    if mode == "anscombe":
+        # Best practical stack for sparse EDS: bin for SNR, then Poisson VST
+        if spatial_bin >= 2:
+            out = _bin2(out, None)
+        if spatial_bin == 4:
+            out = _bin2(out, None)
+        binned_sigma = max(2.0, sigma * 0.75) if spatial_bin >= 2 else sigma
+        return _anscombe_gauss(out, binned_sigma)
+    # Remaining modes (none, tv, denova*) apply the bin knob as plain
+    # pre-passes before the method itself.
     if spatial_bin >= 2:
         out = _bin2(out, None)
     if spatial_bin == 4:
         out = _bin2(out, None)
-    sigma = float(sigma)
     if mode == "none":
         return out
-    if mode == "gaussian":
-        from scipy import ndimage
-
-        return ndimage.gaussian_filter(out, sigma).astype(np.float32)
-    if mode == "bin2":
-        return _bin2(out, sigma)
-    if mode == "anscombe":
-        return _anscombe_gauss(out, sigma)
-    if mode == "bin2_anscombe":
-        # Best practical stack for sparse EDS: bin for SNR, then Poisson VST
-        return _anscombe_gauss(_bin2(out, None), max(2.0, sigma * 0.75))
-    if mode == "bin4_anscombe":
-        return _anscombe_gauss(_bin2(_bin2(out, None), None), max(2.0, sigma * 0.75))
     if mode == "tv":
         try:
             from skimage.restoration import denoise_tv_chambolle
@@ -187,14 +249,14 @@ def apply_display_filter(
     if mode == "denova_tv12":
         return _denova(out, method="tv12")
     raise ValueError(
-        "filter must be one of "
+        "mode must be one of "
         + "|".join(DISPLAY_FILTER_MODES)
-        + f" (or 'off'/'raw'); got {filter!r}"
+        + f" (or 'off'/'raw'); got {requested!r}"
     )
 
 
 def format_display_filter_banner(
-    filter: str,
+    mode: str,
     sigma: float,
     spatial_bin: int = 1,
 ) -> str:
@@ -208,11 +270,11 @@ def format_display_filter_banner(
     --------
     >>> from quantem.widget.utils.display_filter import format_display_filter_banner
     >>> format_display_filter_banner("bin2_anscombe", 8)
-    "display: bin2_anscombe σ=8 (set display_filter='none' for raw counts)"
+    "denoise: bin2_anscombe σ=8 (set denoise='none' for raw counts)"
     >>> format_display_filter_banner("none", 4)
     ''
     """
-    mode = _normalize_mode(filter)
+    mode = _normalize_mode(mode)
     if mode == "none" and int(spatial_bin) == 1:
         return ""
     parts = [mode if mode != "none" else "raw"]
@@ -221,7 +283,7 @@ def format_display_filter_banner(
         parts.append(f"σ={sigma_text}")
     if int(spatial_bin) > 1:
         parts.append(f"bin{int(spatial_bin)}")
-    return "display: " + " ".join(parts) + " (set display_filter='none' for raw counts)"
+    return "denoise: " + " ".join(parts) + " (set denoise='none' for raw counts)"
 
 
 def magenta_cmap():
