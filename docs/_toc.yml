@@ -20,13 +20,13 @@ parts:
       - file: tutorials/showdiffraction
       - file: tutorials/io_gpu
         title: IO/GPU
-  # Advanced tutorials, API reference, and Maintainers are each one expandable
-  # parent link (chevron) so the sidebar stays short. These parts deliberately
-  # have NO caption: the parent link is the label, and a caption would render a
-  # duplicate header right above it.
+  # Advanced and Maintainers are each one expandable parent link (chevron) so
+  # the sidebar stays short. These parts deliberately have NO caption: the
+  # parent link is the label, and a caption would render a duplicate header
+  # right above it.
   - chapters:
       - file: tutorials/advanced
-        title: Advanced tutorials
+        title: Advanced
         sections:
           - file: tutorials/showfolder
           - file: tutorials/widget_export
@@ -36,7 +36,9 @@ parts:
             title: Live folder watching
           - file: tutorials/compare_reconstructions
             title: Comparing reconstructions
-  - chapters:
+  # API reference lives under Developers, separate from the tutorials.
+  - caption: Developers
+    chapters:
       - file: api/index
         title: API reference
         sections:
@@ -53,8 +55,6 @@ parts:
           - file: api/html-export
           - file: api/io
           - file: api/load
-  - caption: Developers
-    chapters:
       - file: developer/ui-guide
         title: UI Guide
       - file: developer/save-state-and-notebook-size

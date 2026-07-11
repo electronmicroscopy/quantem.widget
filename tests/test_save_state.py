@@ -1,4 +1,4 @@
-"""Regression shield for the ``save_state`` contract (Show2D / Show3D / Show4DSTEM).
+"""Regression shield for the ``save_state`` contract (Show1D / Show2D / Show3D / Show4DSTEM / ShowEDS).
 
 Background: an anywidget syncs its pixel buffers as ``sync=True`` traits. On
 notebook save, ipywidgets serializes those buffers into ``metadata.widgets`` -
@@ -22,7 +22,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from quantem.widget import Show2D, Show3D, Show4DSTEM, ShowEDS
+from quantem.widget import Show1D, Show2D, Show3D, Show4DSTEM, ShowEDS
 
 
 IMAGE_MIME_KEYS = ("image/jpeg", "image/webp", "image/png")
@@ -70,6 +70,11 @@ def _mos2_like_stack(frames: int, rows: int, cols: int) -> np.ndarray:
 def _make(widget, *, save_state):
     """Construct a small instance of each widget plus the trait key that carries
     its live-render pixels (the one that must survive the targeted send path)."""
+    if widget is Show1D:
+        # snapshot_bytes is empty on a plain trace widget but the KEY must
+        # still survive the targeted path (it streams when a monitor attaches).
+        return Show1D(np.random.rand(64).astype("float32"),
+                      save_state=save_state), "snapshot_bytes"
     if widget is Show2D:
         data = [np.random.rand(128, 128).astype("float32") for _ in range(2)]
         return Show2D(data, save_state=save_state), "frame_bytes"
@@ -83,7 +88,7 @@ def _make(widget, *, save_state):
                       save_state=save_state), "virtual_image_bytes"
 
 
-WIDGETS = [Show2D, Show3D, Show4DSTEM, ShowEDS]
+WIDGETS = [Show1D, Show2D, Show3D, Show4DSTEM, ShowEDS]
 
 
 @pytest.mark.parametrize("widget", WIDGETS)
@@ -809,6 +814,36 @@ def test_show2d_display_defers_static_png_render(monkeypatch):
     assert fill_meta == {"quantem.widget": {"static_fallback": True}}
 
 
+def test_static_fallback_env_kill_switch(monkeypatch):
+    """QUANTEM_WIDGET_STATIC_FALLBACK=0 (docs/CI builds) must emit ONLY the
+    interactive widget output: no in-bundle preview image and no static
+    sibling display, so built docs pages show a single widget, not a
+    duplicate image under it."""
+    import IPython
+
+    monkeypatch.setenv("QUANTEM_WIDGET_STATIC_FALLBACK", "0")
+    frame = np.random.default_rng(9).random((32, 32)).astype(np.float32)
+    widget = Show2D(frame, verbose=False)
+
+    bundle = widget._repr_mimebundle_()
+    data = bundle[0] if isinstance(bundle, tuple) else bundle
+    assert "image/jpeg" not in data
+    assert "image/webp" not in data
+
+    displayed = []
+
+    class ZMQInteractiveShell:  # name is what the kernel check looks at
+        pass
+
+    def fake_display(data, raw=False, metadata=None, display_id=None, **kw):
+        displayed.append((data, metadata, display_id))
+
+    monkeypatch.setattr(IPython, "get_ipython", lambda: ZMQInteractiveShell())
+    monkeypatch.setattr("IPython.display.display", fake_display)
+    widget._ipython_display_()
+    assert len(displayed) == 1, "static sibling was emitted despite kill switch"
+
+
 def test_show2d_sibling_static_output_via_nbconvert(tmp_path):
     """Executing a notebook must leave a saved preview on the Show2D cell.
 
@@ -1230,3 +1265,12 @@ def test_sibling_not_emitted_with_save_state_true(widget, monkeypatch):
 
     w._ipython_display_()
     assert len(displayed) == 1, f"{widget.__name__}: sibling emitted despite save_state=True"
+
+
+def test_show1d_save_state_true_keeps_buffers():
+    from quantem.widget import Show1D
+
+    w = Show1D(np.random.rand(64).astype("float32"), save_state=True)
+    full = w.get_state()
+    assert "snapshot_bytes" in full
+    assert "export_payload" in full

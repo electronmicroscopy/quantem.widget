@@ -359,8 +359,11 @@ def _velox_scan_rotation_deg(meta: dict):
 
 # --- folder-of-frames stack reader (parallel decode) ----------------------
 
-_IMAGE_EXTS = {".png", ".tif", ".tiff", ".bmp", ".jpg", ".jpeg"}
+_IMAGE_EXTS = {".png", ".tif", ".tiff", ".bmp", ".jpg", ".jpeg", ".emd", ".dm3", ".dm4", ".npy"}
 _TIFF_EXTS = {".tif", ".tiff"}
+# Formats PIL cannot open; routed through read_image (which also carries their
+# calibration metadata).
+_METADATA_EXTS = {".emd", ".dm3", ".dm4", ".npy"}
 _NATURAL_RE = re.compile(r"(\d+)")
 
 
@@ -374,13 +377,16 @@ def read_image_stack(
 ) -> Dataset3d:
     """Decode a folder of image frames into a :class:`Dataset3d` in parallel.
 
-    A directory of PNG/TIFF frames - an in-situ time series, a tilt series, a
-    reconstruction sweep - is read with a thread pool into one contiguous
-    ``(N, H, W)`` float32 array, then wrapped so ``Show3D(read_image_stack(dir))``
-    scrubs the frames with no extra arguments. Frames are sorted naturally
-    (``frame_2`` before ``frame_10``). Decode is threaded because PIL/tifffile
-    release the GIL during the C decode, so N threads give near-linear speedup
-    until I/O or memory bandwidth saturates; ~8 workers is optimal on most disks.
+    A directory of PNG/TIFF/EMD/DM/NPY frames - an in-situ time series, a tilt
+    series, a reconstruction sweep - is read with a thread pool into one
+    contiguous ``(N, H, W)`` float32 array, then wrapped so
+    ``Show3D(read_image_stack(dir))`` scrubs the frames with no extra
+    arguments. Frames are sorted naturally (``frame_2`` before ``frame_10``).
+    Decode is threaded because PIL/tifffile release the GIL during the C
+    decode, so N threads give near-linear speedup until I/O or memory
+    bandwidth saturates; ~8 workers is optimal on most disks. When the first
+    frame is a calibrated format (EMD/DM), its pixel sampling and units carry
+    onto the stack's spatial axes so ``Show3D`` draws a physical scale bar.
 
     Parameters
     ----------
@@ -452,6 +458,17 @@ def read_image_stack(
             else:
                 for _ in results:
                     pass
+    if files[0].suffix.lower() in _METADATA_EXTS:
+        first_dataset = read_image(files[0])
+        sampling = getattr(first_dataset, "sampling", None)
+        units = getattr(first_dataset, "units", None)
+        if sampling is not None and units is not None and len(sampling) >= 2:
+            return Dataset3d.from_array(
+                stack,
+                sampling=(1.0, float(sampling[-2]), float(sampling[-1])),
+                units=("frame", str(units[-2]), str(units[-1])),
+                name=path.name,
+            )
     return Dataset3d.from_array(stack, name=path.name)
 
 
@@ -479,6 +496,8 @@ def _read_frame(path: Path) -> np.ndarray:
     if path.suffix.lower() in _TIFF_EXTS:
         import tifffile
         arr = np.asarray(tifffile.imread(str(path)))
+    elif path.suffix.lower() in _METADATA_EXTS:
+        arr = np.asarray(read_image(path).array)
     else:
         from PIL import Image
         with Image.open(path) as img:

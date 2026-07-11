@@ -183,7 +183,7 @@ class WatchedImageFolder:
         return value
 
     def discover(self) -> list[Path]:
-        """Return supported files in canonical natural path order."""
+        """Return supported folder-visible paths in total natural order."""
         candidates = self.folder.rglob(self.pattern) if self.recursive else self.folder.glob(self.pattern)
         unique: dict[Path, None] = {}
         for candidate in candidates:
@@ -191,7 +191,10 @@ class WatchedImageFolder:
                 continue
             if candidate.suffix.casefold() not in _SUPPORTED_IMAGE_SUFFIXES:
                 continue
-            unique.setdefault(_canonical_path(candidate), None)
+            # Keep the path as named in the folder: resolving through a final
+            # symlink can land on an extension-less target (Hugging Face hub
+            # cache blobs), which the format readers cannot dispatch on.
+            unique.setdefault(candidate, None)
         return sorted(unique, key=lambda path: _total_natural_path_key(path, self.folder))
 
     def _read_stable(self, path: Path) -> _ReadImage | None:

@@ -48,6 +48,7 @@ docs/examples/
 tests/screenshots/
 tests/_browse_smoke_data/
 tests/_debug_before_click.png
+*_focus_test.ipynb
 
 # agent artifacts
 .agents/

@@ -39,6 +39,7 @@ import { FolderWatchBadge, useFolderWatchModelLive } from "../folderWatchStatus"
 import { getWebGPUFFT, WebGPUFFT, fft2dAsync, fftshift, computeMagnitude, autoEnhanceFFT, nextPow2, applyHannWindow2D, getGPUInfo } from "../fft";
 import { computeFftQualityMetrics, formatFftQualityLabel, type FftQualityMetrics } from "../fftMetrics";
 import { COLORMAPS, COLORMAP_NAMES, renderToOffscreen, renderToOffscreenReuse, GPUColormapEngine, createGPUColormapEngine, getGPUMaxBufferSize } from "../colormaps";
+import { applyDisplayFilterBrowser, browserFilterSupported, filterKnobsActive, getGPUDisplayFilterEngine, normalizeFilterMode, resolveDenoiseMode } from "../displayFilter";
 import {
   GALLERY_FFT_CACHE_MAX_BYTES,
   GALLERY_FFT_CACHE_MAX_ENTRIES,
@@ -1074,6 +1075,41 @@ function Show2D() {
   const [canvasSizeTrait, setCanvasSizeTrait] = useModelState<number>("size");
   const [smooth, setSmooth] = useModelState<boolean>("smooth");
   const imageRenderingStyle = smooth ? "auto" : "pixelated";
+  // Display-only filter knobs for sparse maps (EDS, low dose). Python owns
+  // the math and repacks frame_bytes on change; raw data is never modified.
+  const [displayFilter, setDisplayFilter] = useModelState<string>("denoise");
+  const [displaySigma, setDisplaySigma] = useModelState<number>("denoise_sigma");
+  const [spatialBin, setSpatialBin] = useModelState<number>("denoise_bin");
+  const [displayFilterBanner] = useModelState<string>("denoise_banner");
+  // Local slider value during drag; the model (and the Python refilter) only
+  // updates on release so scrubbing sigma stays smooth on large galleries.
+  const [sigmaDraft, setSigmaDraft] = React.useState<number | null>(null);
+  // Canonical method for the UI menu; compound aliases (bin2_anscombe, ...)
+  // from older saved states resolve to their base method for display.
+  const denoiseBaseMode = resolveDenoiseMode(displayFilter || "none", spatialBin || 1).mode;
+  const filterOff = denoiseBaseMode === "none";
+  // Denoise controls row visibility (its own compact toggle, FFT-style).
+  const [showDenoise, setShowDenoise] = useModelState<boolean>("show_denoise");
+  const [denoiseScope, setDenoiseScope] = useModelState<string>("denoise_scope");
+  const denoiseScopeAll = denoiseScope !== "panel";
+  // Per-panel resolved knobs (the packing source of truth in Python).
+  const [displayFilters, setDisplayFilters] = useModelState<string[]>("denoise_modes");
+  const [displaySigmas, setDisplaySigmas] = useModelState<number[]>("denoise_sigmas");
+  const [spatialBins, setSpatialBins] = useModelState<number[]>("denoise_bins");
+  // Browser-side filter negotiation: True means frames ship RAW and the WGSL
+  // port in ../displayFilter.ts applies gaussian/bin2/anscombe client-side
+  // (live sigma scrub during drag, working knobs on kernel-less HTML pages).
+  // Live sessions set it from the adapter probe below; offline pages inherit
+  // the exported value and fall back to the CPU port without WebGPU.
+  const [webgpuFilterOk, setWebgpuFilterOk] = useModelState<boolean>("_webgpu_filter_ok");
+  const browserFilterActive = !!webgpuFilterOk;
+  // Chemistry-on-structure blend panel (underlay=True): live sliders re-blend
+  // in Python; commit on release so dragging stays smooth.
+  const [underlayActive] = useModelState<boolean>("underlay");
+  const [underlayAlpha, setUnderlayAlpha] = useModelState<number>("underlay_alpha");
+  const [underlayGain, setUnderlayGain] = useModelState<number>("underlay_haadf_gain");
+  const [alphaDraft, setAlphaDraft] = React.useState<number | null>(null);
+  const [gainDraft, setGainDraft] = React.useState<number | null>(null);
 
   // Scale bar
   const [pixelSize] = useModelState<number>("pixel_size");
@@ -2326,6 +2362,13 @@ function Show2D() {
         console.log("[Show2D] WebGPU unavailable — using CPU Worker fallback");
       }
     });
+    // Display-filter negotiation: only a real (non software) adapter flips
+    // _webgpu_filter_ok, so Python keeps its scipy path on SwiftShader-class
+    // fallbacks. Offline pages keep the exported trait value: their frames
+    // are already raw and the CPU port covers browsers without WebGPU.
+    getGPUDisplayFilterEngine().then(engine => {
+      if (!disposed && !offline) setWebgpuFilterOk(!!engine);
+    });
     createGPUColormapEngine().then(engine => {
       if (disposed) {
         engine?.destroy();
@@ -2560,6 +2603,88 @@ function Show2D() {
   }, [showDiffPanel, diffOtherIndices, effectiveDiffReference, nImages, dataVersion, width, height, cmap, smooth, canvasW, canvasH,
       alignDy, alignDx, getZoomState, linkedZoom, linkPan, linkedZoomState, zoomStates, canvasRepaintSignal]);
 
+  // --- Browser-side display filtering -------------------------------------
+  // With _webgpu_filter_ok the kernel ships RAW frames; the WGSL compute port
+  // (../displayFilter.ts, CPU fallback without WebGPU) applies the per-panel
+  // gaussian/bin2/anscombe knobs here, right before the arrays feed the
+  // colormap/FFT/histogram paths. sigmaDraft feeds the filter DIRECTLY during
+  // drag, so scrubbing sigma is live with zero kernel round trips; the model
+  // commit still happens on release. tv/denova* panels arrive Python-filtered
+  // and are passed through untouched (browserFilterSupported is false).
+  const sigmaDraftForFilter = browserFilterActive ? sigmaDraft : null;
+  const panelFilterKnobs = React.useCallback((panel: number) => {
+    const mode = (displayFilters && displayFilters.length > panel)
+      ? displayFilters[panel] : (displayFilter || "none");
+    let sigma = (displaySigmas && displaySigmas.length > panel)
+      ? Number(displaySigmas[panel]) : Number(displaySigma ?? 4);
+    const bin = (spatialBins && spatialBins.length > panel)
+      ? Number(spatialBins[panel]) : Number(spatialBin || 1);
+    if (sigmaDraftForFilter !== null && (denoiseScopeAll || panel === selectedIdx)) {
+      sigma = sigmaDraftForFilter;
+    }
+    return { mode, sigma, bin };
+  }, [displayFilters, displaySigmas, spatialBins, displayFilter, displaySigma, spatialBin,
+      sigmaDraftForFilter, denoiseScopeAll, selectedIdx]);
+  const filterFrameForPanel = React.useCallback(async (panel: number, frame: Float32Array): Promise<Float32Array> => {
+    if (!browserFilterActive || (isRgbFlags && isRgbFlags[panel])) return frame;
+    const { mode, sigma, bin } = panelFilterKnobs(panel);
+    if (!filterKnobsActive(mode, bin) || !browserFilterSupported(mode)) return frame;
+    try {
+      return await applyDisplayFilterBrowser(frame, width, height, mode, sigma, bin);
+    } catch (err) {
+      console.warn("[Show2D] browser display filter failed; showing raw frame", err);
+      return frame;
+    }
+  }, [browserFilterActive, isRgbFlags, panelFilterKnobs, width, height]);
+  // Generation token: any newer decode/scrub run invalidates pending async
+  // filter commits, so a stale sigma never overwrites a fresher frame.
+  const browserFilterGenerationRef = React.useRef(0);
+  // Mirror of Python's _on_display_filter_scalar_change write-through, so
+  // kernel-less pages (offline exports, saved notebooks) keep the per-panel
+  // lists coherent when the scalar editor knobs change. With a kernel
+  // attached Python performs the same update and converges to identical
+  // lists, producing no extra change events.
+  const mirrorFilterKnobEdit = React.useCallback((name: "mode" | "sigma" | "bin", value: string | number) => {
+    if (!browserFilterActive || nImages <= 0) return;
+    const idx = Math.min(Math.max(0, selectedIdx || 0), nImages - 1);
+    const updated = <T,>(current: T[] | undefined | null, v: T): T[] => {
+      if (denoiseScopeAll) return new Array<T>(nImages).fill(v);
+      const values = (current && current.length === nImages)
+        ? [...current] : new Array<T>(nImages).fill(v);
+      values[idx] = v;
+      return values;
+    };
+    if (name === "mode") setDisplayFilters(updated(displayFilters, String(value)));
+    else if (name === "sigma") setDisplaySigmas(updated(displaySigmas, Number(value)));
+    else setSpatialBins(updated(spatialBins, Number(value)));
+  }, [browserFilterActive, nImages, selectedIdx, denoiseScopeAll, displayFilters, displaySigmas,
+      spatialBins, setDisplayFilters, setDisplaySigmas, setSpatialBins]);
+  // Local banner (format_display_filter_banner port): announcing an active
+  // reduction is a house rule, and kernel-less pages have no Python to
+  // refresh the synced banner trait. Live it also tracks sigmaDraft mid drag.
+  const browserFilterBanner = React.useMemo(() => {
+    if (!browserFilterActive || nImages <= 0) return null;
+    const knobs = Array.from({ length: nImages }, (_, i) => panelFilterKnobs(i));
+    const activeIdx = knobs.map((_, i) => i).filter(i => filterKnobsActive(knobs[i].mode, knobs[i].bin));
+    if (activeIdx.length === 0) return "";
+    const suffix = " (set denoise='none' for raw counts)";
+    const uniform = knobs.every(k =>
+      normalizeFilterMode(k.mode) === normalizeFilterMode(knobs[0].mode)
+      && k.sigma === knobs[0].sigma && k.bin === knobs[0].bin);
+    if (uniform) {
+      const mode = normalizeFilterMode(knobs[0].mode);
+      const parts = [mode === "none" ? "raw" : mode];
+      if (mode !== "none") parts.push(`σ=${Number(knobs[0].sigma)}`);
+      if (knobs[0].bin > 1) parts.push(`bin${knobs[0].bin}`);
+      return `denoise: ${parts.join(" ")}${suffix}`;
+    }
+    const perPanel = activeIdx.map(i =>
+      `p${i}:${normalizeFilterMode(knobs[i].mode)} σ=${Number(knobs[i].sigma)}`
+      + (knobs[i].bin > 1 ? ` bin${knobs[i].bin}` : "")).join(", ");
+    return `denoise: ${perPanel}${suffix}`;
+  }, [browserFilterActive, nImages, panelFilterKnobs]);
+  const filterBannerText = browserFilterActive ? (browserFilterBanner ?? "") : (displayFilterBanner || "");
+
   React.useEffect(() => {
     if (!allFloats || allFloats.length === 0) return;
     const dataArrays: Float32Array[] = [];
@@ -2591,38 +2716,50 @@ function Show2D() {
         }
       }
     }
-    rawDataRef.current = dataArrays;
-    rgbDataRef.current = rgbArrays;
-    lastAppliedPanelFrameIndicesRef.current = [...normalizedPanelFrameIndices];
-    galleryFftDataEpochRef.current += 1;
-    galleryFftMagnitudeLruRef.current.clear();
-    galleryFftActiveKeysRef.current = new Array(nImages).fill(null);
-    galleryFftTargetKeysRef.current = new Array(nImages).fill(null);
-    fftMagCacheGalleryRef.current = new Array(nImages).fill(null);
-    fftOffscreensRef.current = new Array(nImages).fill(null);
-    galleryFftPipelineRef.current = new Array(nImages).fill(null);
-    const perf = show2dPerfDebug();
-    if (perf) {
-      perf.galleryFftCacheInvalidations += 1;
-      perf.galleryFftPending = 0;
-    }
-    updateGalleryFftCacheDebug(
-      galleryFftMagnitudeLruRef.current,
-      galleryFftActiveKeysRef.current,
-    );
-    // New pixels (fresh frame_bytes, rotation, ...) invalidate every fetched
-    // detail tile; the request effect refetches for the current view.
-    detailTilesRef.current.clear();
-    detailSentKeysRef.current.clear();
-    setDetailStreamStatus("preview");
-    // Upload to GPU colormap engine if available (ref check, no state trigger)
-    const engine = gpuCmapRef.current;
-    if (engine && gpuCmapReadyRef.current) {
-      for (let i = 0; i < dataArrays.length; i++) engine.uploadData(i, dataArrays[i], width, height);
-      gpuDataVersionRef.current++;
-      setGpuCmapVersion(v => v + 1);
-    }
-    setDataVersion(v => v + 1);
+    const generation = ++browserFilterGenerationRef.current;
+    const commit = (arrays: Float32Array[]) => {
+      rawDataRef.current = arrays;
+      rgbDataRef.current = rgbArrays;
+      lastAppliedPanelFrameIndicesRef.current = [...normalizedPanelFrameIndices];
+      galleryFftDataEpochRef.current += 1;
+      galleryFftMagnitudeLruRef.current.clear();
+      galleryFftActiveKeysRef.current = new Array(nImages).fill(null);
+      galleryFftTargetKeysRef.current = new Array(nImages).fill(null);
+      fftMagCacheGalleryRef.current = new Array(nImages).fill(null);
+      fftOffscreensRef.current = new Array(nImages).fill(null);
+      galleryFftPipelineRef.current = new Array(nImages).fill(null);
+      const perf = show2dPerfDebug();
+      if (perf) {
+        perf.galleryFftCacheInvalidations += 1;
+        perf.galleryFftPending = 0;
+      }
+      updateGalleryFftCacheDebug(
+        galleryFftMagnitudeLruRef.current,
+        galleryFftActiveKeysRef.current,
+      );
+      // New pixels (fresh frame_bytes, rotation, ...) invalidate every fetched
+      // detail tile; the request effect refetches for the current view.
+      detailTilesRef.current.clear();
+      detailSentKeysRef.current.clear();
+      setDetailStreamStatus("preview");
+      // Upload to GPU colormap engine if available (ref check, no state trigger)
+      const engine = gpuCmapRef.current;
+      if (engine && gpuCmapReadyRef.current) {
+        for (let i = 0; i < arrays.length; i++) engine.uploadData(i, arrays[i], width, height);
+        gpuDataVersionRef.current++;
+        setGpuCmapVersion(v => v + 1);
+      }
+      setDataVersion(v => v + 1);
+    };
+    const needsBrowserFilter = browserFilterActive && dataArrays.some((_, i) => {
+      if (isRgbFlags && isRgbFlags[i]) return false;
+      const { mode, bin } = panelFilterKnobs(i);
+      return filterKnobsActive(mode, bin) && browserFilterSupported(mode);
+    });
+    if (!needsBrowserFilter) { commit(dataArrays); return; }
+    Promise.all(dataArrays.map((frame, i) => filterFrameForPanel(i, frame))).then(filtered => {
+      if (browserFilterGenerationRef.current === generation) commit(filtered);
+    });
   }, [
     allFloats,
     allPanelStackFloats,
@@ -2633,6 +2770,9 @@ function Show2D() {
     isRgbFlags,
     panelFrameCounts,
     panelStackOffsets,
+    browserFilterActive,
+    panelFilterKnobs,
+    filterFrameForPanel,
   ]);
 
   React.useEffect(() => {
@@ -2640,7 +2780,7 @@ function Show2D() {
     if (!raw || !hasLocalPanelStacks || allPanelStackFloats.length === 0) return;
     const previous = lastAppliedPanelFrameIndicesRef.current;
     const perImage = width * height;
-    const changedPanels: number[] = [];
+    const changedFrames: { panel: number; frame: Float32Array }[] = [];
     for (let panel = 0; panel < nImages; panel++) {
       const frameCount = panelFrameCounts?.[panel] || 1;
       const stackOffset = panelStackOffsets?.[panel] ?? -1;
@@ -2648,23 +2788,42 @@ function Show2D() {
       if (frameCount <= 1 || stackOffset < 0 || previous[panel] === frameIndex) continue;
       const frameStart = stackOffset + frameIndex * perImage;
       if (allPanelStackFloats.length < frameStart + perImage) continue;
-      raw[panel] = new Float32Array(
-        allPanelStackFloats.subarray(frameStart, frameStart + perImage)
-      );
-      changedPanels.push(panel);
+      changedFrames.push({
+        panel,
+        frame: new Float32Array(allPanelStackFloats.subarray(frameStart, frameStart + perImage)),
+      });
     }
     lastAppliedPanelFrameIndicesRef.current = [...normalizedPanelFrameIndices];
-    if (changedPanels.length === 0) return;
-    detailTilesRef.current.clear();
-    detailSentKeysRef.current.clear();
-    setDetailStreamStatus("preview");
-    const engine = gpuCmapRef.current;
-    if (engine && gpuCmapReadyRef.current) {
-      changedPanels.forEach(panel => engine.uploadData(panel, raw[panel], width, height));
-      gpuDataVersionRef.current++;
-      setGpuCmapVersion(version => version + 1);
-    }
-    setDataVersion(version => version + 1);
+    if (changedFrames.length === 0) return;
+    // Stack frames ship raw when the browser owns the filter; apply the
+    // panel's knobs before commit so scrubbing a filtered stack panel shows
+    // the same view as the main frame. The decode effect re-runs on any newer
+    // data, so a bumped generation just drops this pending commit.
+    const generation = browserFilterGenerationRef.current;
+    Promise.all(changedFrames.map(({ panel, frame }) =>
+      filterFrameForPanel(panel, frame).then(filtered => ({ panel, filtered }))
+    )).then(results => {
+      if (browserFilterGenerationRef.current !== generation) return;
+      for (const { panel, filtered } of results) {
+        raw[panel] = filtered;
+        if (fftMagCacheGalleryRef.current.length === nImages) {
+          fftMagCacheGalleryRef.current[panel] = null;
+        }
+        if (galleryFftPipelineRef.current.length === nImages) {
+          galleryFftPipelineRef.current[panel] = null;
+        }
+      }
+      detailTilesRef.current.clear();
+      detailSentKeysRef.current.clear();
+      setDetailStreamStatus("preview");
+      const engine = gpuCmapRef.current;
+      if (engine && gpuCmapReadyRef.current) {
+        results.forEach(({ panel }) => engine.uploadData(panel, raw[panel], width, height));
+        gpuDataVersionRef.current++;
+        setGpuCmapVersion(version => version + 1);
+      }
+      setDataVersion(version => version + 1);
+    });
   }, [
     allPanelStackFloats,
     hasLocalPanelStacks,
@@ -2674,6 +2833,7 @@ function Show2D() {
     panelFrameCounts,
     panelStackOffsets,
     width,
+    filterFrameForPanel,
   ]);
 
   React.useEffect(() => {
@@ -7200,6 +7360,17 @@ function Show2D() {
                         <Typography sx={{ ...typography.label, fontSize: 10 }} title="CSS bilinear interpolation. Same data, browser smooths visually — useful when upscaling small images on a large canvas.">Smooth</Typography>
                         <Switch checked={smooth} onChange={() => { setSmooth(!smooth); }} size="small" sx={switchStyles.small} />
                       </Box>
+                      <Box sx={controlPairSx}>
+                        <Typography sx={{ ...typography.label, fontSize: 10 }} title="Show the display-only denoise controls (method, σ, bin). Raw data, stats, and exports keep original counts.">Denoise</Typography>
+                        <Switch checked={showDenoise ?? false} onChange={() => setShowDenoise(!showDenoise)} size="small" sx={switchStyles.small} />
+                      </Box>
+                      {!showDenoise && filterBannerText && (
+                        /* House rule: an active reduction is never invisible,
+                           even with the denoise controls row hidden. */
+                        <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.accent }} title={filterBannerText}>
+                          {filterBannerText.split(" (")[0]}
+                        </Typography>
+                      )}
                       {!isGallery && showLens && (
                         <>
                           <Typography sx={{ ...typography.label, fontSize: 10 }}>Lens {lensMag}×</Typography>
@@ -7230,6 +7401,74 @@ function Show2D() {
                       )}
                     </Box>
                   )}
+                  {/* Row 3 (toggle-gated): display-only denoise for sparse maps (EDS, low dose) */}
+                  {showDenoise && (
+                    <Box sx={{ ...controlRow, ...mobileControlRowSx, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, opacity: 1, pointerEvents: "auto" }}>
+                      <Box sx={controlPairSx}>
+                        <Typography sx={{ ...typography.label, fontSize: 10 }} title="Poisson (Anscombe): count-respecting smoothing for sparse EDS/counting data - recommended with Bin 2, sigma 6-10. Gaussian: simple smooth for decent-dose images. None: raw counts (use for anything quantitative).">Denoise</Typography>
+                        <Select size="small" value={denoiseBaseMode} onChange={(e) => { setDisplayFilter(e.target.value); mirrorFilterKnobEdit("mode", e.target.value); }} MenuProps={themedMenuProps} sx={{ ...themedSelect, minWidth: 88 }}>
+                          {[["none", "None"], ["gaussian", "Gaussian"], ["anscombe", "Poisson (Anscombe)"]].map(([mode, label]) => (
+                            <MenuItem key={mode} value={mode}>{label}</MenuItem>
+                          ))}
+                        </Select>
+                      </Box>
+                      <Box sx={controlPairSx}>
+                        <Typography sx={{ ...typography.label, fontSize: 10, opacity: filterOff ? 0.5 : 1 }}>σ {(sigmaDraft ?? Number(displaySigma ?? 4)).toFixed(1)}</Typography>
+                        <Slider
+                          value={sigmaDraft ?? Number(displaySigma ?? 4)}
+                          min={0} max={20} step={0.5}
+                          disabled={filterOff}
+                          onChange={(_, v) => setSigmaDraft(v as number)}
+                          onChangeCommitted={(_, v) => { setDisplaySigma(v as number); mirrorFilterKnobEdit("sigma", v as number); setSigmaDraft(null); }}
+                          size="small" sx={{ ...sliderStyles.small, width: 60 }}
+                        />
+                      </Box>
+                      <Box sx={controlPairSx}>
+                        <Typography sx={{ ...typography.label, fontSize: 10 }} title="Display-side 2x bin passes for SNR, combined with the denoise method. 1 is lossless.">Bin</Typography>
+                        <Select size="small" value={String(spatialBin || 1)} onChange={(e) => { setSpatialBin(parseInt(e.target.value, 10)); mirrorFilterKnobEdit("bin", parseInt(e.target.value, 10)); }} MenuProps={themedMenuProps} sx={{ ...themedSelect, minWidth: 40 }}>
+                          {[1, 2, 4].map((b) => (<MenuItem key={b} value={String(b)}>{b}</MenuItem>))}
+                        </Select>
+                      </Box>
+                      {isGallery && (
+                        <Box sx={controlPairSx}>
+                          <Typography sx={{ ...typography.label, fontSize: 10 }} title="Denoise scope. On (all): Denoise/σ/Bin edits apply to every panel. Off (panel): edits apply only to the selected panel.">All</Typography>
+                          <Switch checked={denoiseScopeAll} onChange={() => setDenoiseScope(denoiseScopeAll ? "panel" : "all")} size="small" sx={switchStyles.small} />
+                        </Box>
+                      )}
+                      {filterBannerText && (
+                        <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.accent }} title={filterBannerText}>
+                          {filterBannerText.split(" (")[0]} · raw: denoise='none'
+                        </Typography>
+                      )}
+                    </Box>
+                  )}
+                  {/* Row 4 (underlay only): chemistry-on-HAADF blend sliders */}
+                  {underlayActive && (
+                    <Box sx={{ ...controlRow, ...mobileControlRowSx, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, opacity: 1, pointerEvents: "auto" }}>
+                      <Box sx={controlPairSx}>
+                        <Typography sx={{ ...typography.label, fontSize: 10 }} title="Chemistry opacity in the map-on-HAADF blend panel.">Blend {(alphaDraft ?? Number(underlayAlpha ?? 0.95)).toFixed(2)}</Typography>
+                        <Slider
+                          value={alphaDraft ?? Number(underlayAlpha ?? 0.95)}
+                          min={0} max={1} step={0.05}
+                          onChange={(_, v) => setAlphaDraft(v as number)}
+                          onChangeCommitted={(_, v) => { setUnderlayAlpha(v as number); setAlphaDraft(null); }}
+                          size="small" sx={{ ...sliderStyles.small, width: 60 }}
+                          aria-label="Underlay blend opacity"
+                        />
+                      </Box>
+                      <Box sx={controlPairSx}>
+                        <Typography sx={{ ...typography.label, fontSize: 10 }} title="Strength of the dim HAADF lattice ghost where the map is empty.">HAADF {(gainDraft ?? Number(underlayGain ?? 0.35)).toFixed(2)}</Typography>
+                        <Slider
+                          value={gainDraft ?? Number(underlayGain ?? 0.35)}
+                          min={0} max={1} step={0.05}
+                          onChange={(_, v) => setGainDraft(v as number)}
+                          onChangeCommitted={(_, v) => { setUnderlayGain(v as number); setGainDraft(null); }}
+                          size="small" sx={{ ...sliderStyles.small, width: 60 }}
+                          aria-label="Underlay HAADF ghost gain"
+                        />
+                      </Box>
+                    </Box>
+                  )}
                 </Box>
                 {/* Right: histograms. Unlinked + gallery → grid matching gallery layout
                     (same effectiveNcols × rows). Linked or single image → one histogram. */}
@@ -7237,6 +7476,8 @@ function Show2D() {
                   <Box sx={{ display: "flex", flexDirection: "column", alignItems: "flex-start", justifyContent: "flex-start", gap: 0.5, flex: "0 1 auto", maxWidth: "100%", opacity: 1, pointerEvents: "auto" }}>
                     {(!linkedContrast && isGallery && rawDataRef.current) ? (
                       <Box sx={{ display: "grid", gridTemplateColumns: histogramGridColumns, gap: `${histogramGapPx}px`, width: "100%", maxWidth: histogramGridMaxWidth, justifyContent: "start" }}>
+                        {/* Only the panels on screen get a histogram: the current
+                            page's slice when paged, hidden panels skipped. */}
                         {visibleImageIndices.map((i) => {
                           const cs = contrastStates.get(i) || { vminPct: 0, vmaxPct: 100 };
                           const raw = rawDataRef.current?.[i] || null;
@@ -7429,6 +7670,7 @@ function Show2D() {
                   {fftHistogramData && (
                     !fftLinkedContrast && isGallery ? (
                       <Box sx={{ display: "grid", gridTemplateColumns: histogramGridColumns, gap: `${histogramGapPx}px`, width: "100%", maxWidth: histogramGridMaxWidth, justifyContent: "start" }}>
+                        {/* Match the image-histogram grid: current page only, hidden panels skipped. */}
                         {visibleImageIndices.map((i) => {
                           const fc = fftContrastFor(i);
                           const cache = galleryFftPipelineRef.current[i];

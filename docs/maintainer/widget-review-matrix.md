@@ -39,7 +39,7 @@ or request browser signoff.
 | Scientific logic | diffraction, DPC, FFT, virtual detector, EDS, calibration, units | Real workflow behavior, numerical parity, units, coordinate convention, tolerance defaults | Focused scientific tests using realistic arrays plus docs examples |
 | Scientific data and constants | hard-coded tables, bundled `.npy/.npz/.h5`, tutorial data, reference values | DOI/source/database, license/redistribution, assumptions such as voltage or temperature | Provenance note in docs/code plus tests that do not depend on unlicensed data |
 | Packaging | `pyproject.toml`, static assets, data files, wheel/sdist contents | Required vs optional dependencies, wheel contents, stale artifacts, fresh install | `scripts/widget_release_check.sh` or wheel-content check for release paths |
-| Docs and notebooks | `docs/api`, `docs/tutorials`, `docs/maintainer` | Interactive docs remain interactive, outputs intentional, no giant notebook state | notebook size guard, docs build for broad docs changes |
+| Docs and notebooks | `docs/api`, `docs/tutorials`, `docs/maintainer` | Interactive docs remain interactive, outputs intentional, no giant notebook state, exactly one output per widget cell (no static-fallback duplicate under the live widget) | notebook size guard, docs build for broad docs changes, zero `img.quantem-static-fallback` on built pages |
 | Repo hygiene | `._*`, `__pycache__`, generated screenshots, scratch files | No AppleDouble metadata, generated caches, huge artifacts, or unrelated experiments | `git status --short`, `scripts/check_large_files.py`, `scripts/check_notebook_sizes.py` |
 
 ## Widget-Specific Checklist

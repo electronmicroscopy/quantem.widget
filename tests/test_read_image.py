@@ -211,3 +211,25 @@ def test_unsupported_extension_raises(tmp_path):
     path.write_bytes(b"\x00")
     with pytest.raises(ValueError, match="unsupported extension"):
         read_image(path)
+
+
+def test_read_image_stack_reads_npy_frames(tmp_path):
+    # .npy (and EMD/DM) frames route through read_image instead of PIL.
+    for idx in range(3):
+        np.save(tmp_path / f"frame_{idx}.npy", np.full((4, 5), idx, dtype=np.uint16))
+
+    ds = read_image_stack(tmp_path, progress=False)
+
+    assert ds.array.shape == (3, 4, 5)
+    assert ds.array.dtype == np.float32
+    np.testing.assert_array_equal(ds.array[2], np.full((4, 5), 2, dtype=np.float32))
+
+
+def test_read_image_stack_mixed_default_scan_includes_metadata_formats(tmp_path):
+    # Default (no filter) folder scan picks up .npy alongside PNG-style frames.
+    np.save(tmp_path / "frame_0.npy", np.zeros((4, 5), dtype=np.uint8))
+    np.save(tmp_path / "frame_1.npy", np.ones((4, 5), dtype=np.uint8))
+
+    ds = read_image_stack(tmp_path, pattern="frame_*.npy", progress=False)
+
+    assert ds.array.shape == (2, 4, 5)

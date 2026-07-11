@@ -757,6 +757,20 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     folder_watch_detail = traitlets.Unicode("").tag(sync=True)
     height = traitlets.Int(1).tag(sync=True)
     width = traitlets.Int(1).tag(sync=True)
+    # Display-only denoise/bin for sparse map stacks (EDS, low dose). Applied
+    # per frame at every display wire-out (buffer window, frame_bytes, offline
+    # pack, frame server); the stored stack is never modified and the lossless
+    # default is "none". The FFT panel computes from the displayed frame, so
+    # an active filter also affects the FFT view; set denoise="none"
+    # for a raw FFT. Independent of display_bin (the GPU budget knob).
+    denoise = traitlets.Unicode("none").tag(sync=True)
+    denoise_sigma = traitlets.Float(4.0).tag(sync=True)
+    denoise_bin = traitlets.Int(1).tag(sync=True)
+    denoise_banner = traitlets.Unicode("").tag(sync=True)
+    # The denoise controls row is hidden by default; auto-enabled when the
+    # widget starts with an active denoise (house rule: knobs that explain a
+    # reduced view must be discoverable).
+    show_denoise = traitlets.Bool(False).tag(sync=True)
     frame_bytes = traitlets.Bytes(b"").tag(sync=True)
     # True when the stack is true-color RGB (PNG figure frames, color composites).
     # frame_bytes then carries (H*W*3) float32 RGB in [0, 1] instead of gray H*W.
@@ -1727,6 +1741,13 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         notebook_preview_format: str | None = "jpeg",
         notebook_preview_quality: int = 88,
         notebook_preview_max_px: int = 512,
+        denoise: str = "none",
+        denoise_sigma: float = 4.0,
+        denoise_bin: int = 1,
+        display_filter: str | None = None,
+        display_sigma: float | None = None,
+        spatial_bin: int | None = None,
+        show_denoise: bool = False,
         verbose: bool = True,
         max_cols: int | None = None,
         panel_gap: int | None = None,
@@ -1848,6 +1869,13 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         _t0 = time.perf_counter()
         # Reject unknown kwargs so typos raise instead of being silently ignored.
         _reject_unknown_kwargs(type(self), kwargs)
+        # Deprecated display_filter-era aliases (one rc of compatibility).
+        if display_filter is not None and denoise == "none":
+            denoise = display_filter
+        if display_sigma is not None and denoise_sigma == 4.0:
+            denoise_sigma = display_sigma
+        if spatial_bin is not None and denoise_bin == 1:
+            denoise_bin = spatial_bin
         # save_state controls whether the heavy pixel buffers are persisted into
         # the notebook's metadata.widgets on save. Default False: a plain display
         # embeds only light traits + a static image preview, so a large z-stack
@@ -1905,6 +1933,8 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                             dim_label=dim_label, use_torch=use_torch, device=device,
                             display_bin=display_bin, offline=offline,
                             state=state, dedupe_identical_panels=dedupe_identical_panels,
+                            denoise=denoise, denoise_sigma=denoise_sigma,
+                            denoise_bin=denoise_bin, show_denoise=show_denoise,
                             _t0=_t0)
             if panel_order is not None:
                 self.set_panel_order(panel_order)
@@ -1939,7 +1969,9 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                    use_torch: bool | None, device: str | None,
                    display_bin: int | str, offline: bool | None,
                    state: dict | str | pathlib.Path | None,
-                   dedupe_identical_panels: bool, _t0: float) -> None:
+                   dedupe_identical_panels: bool, _t0: float,
+                   denoise: str = "none", denoise_sigma: float = 4.0,
+                   denoise_bin: int = 1, show_denoise: bool = False) -> None:
         """Heavy setup called synchronously by `__init__` inside `hold_sync()`.
         Validates panels, allocates frame_bytes, wires observers, and applies
         optional `state`. Split out from `__init__` so the construction surface
@@ -2474,6 +2506,26 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         self.controls_collapsed = bool(controls_collapsed)
         self.debug = bool(debug)
         self.size = size
+        # Display-only filter knobs (view transforms; the stored stack stays
+        # intact). Set before the offline pack and first buffer send so a
+        # constructor-selected filter shows from the first paint.
+        self._display_filter_ready = False
+        self._display_filter_cache = {}
+        # Compound spellings (bin2, bin2_anscombe, bin4_anscombe) are aliases
+        # for (mode, bin); the traits always hold the canonical trio.
+        from quantem.widget.utils.display_filter import resolve_denoise_mode
+
+        resolved_mode, resolved_bin = resolve_denoise_mode(str(denoise), int(denoise_bin))
+        self.denoise = resolved_mode
+        self.denoise_sigma = float(denoise_sigma)
+        self.denoise_bin = int(resolved_bin)
+        self._display_filter_ready = True
+        self._refresh_display_filter_banner(announce=True)
+        self.show_denoise = (
+            False
+            if self.is_rgb
+            else bool(show_denoise) or self._display_filter_active()
+        )
         frame_bytes = self.height * self.width * 4  # float32
         # Exact float32 sliding window. Do not ship the whole stack when it
         # would cross the browser/Jupyter ~2 GB Comm cliff (36×4k×4k is 2.4 GB).
@@ -2494,51 +2546,13 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         # indexes by (sliceIdx * width * height) where `width` is the trait
         # value (= total concat width). Otherwise `_display_data` already holds
         # the concatenated or single-panel stack.
-        if self.separate_panel_frames and self._separate_panel_data is not None:
-            offline_source = np.concatenate(self._separate_panel_data, axis=2)
-        else:
-            offline_source = self._display_data
+        offline_source = self._offline_pack_source()
         stack_bytes = int(np.prod(offline_source.shape))  # uint8 = 1 B/px
         if offline is None:
             offline = stack_bytes <= 1 * 1024 * 1024 * 1024
         if offline:
             self.offline = True
-            arr = np.ascontiguousarray(offline_source, dtype=np.float32)
-            finite = arr[np.isfinite(arr)]
-            if finite.size == 0:
-                lo, hi = 0.0, 1.0
-            else:
-                lo = float(finite.min())
-                hi = float(finite.max())
-            rng = hi - lo if hi > lo else 1.0
-            self._offline_min = lo
-            self._offline_max = hi
-            self._offline_mins = []
-            self._offline_maxs = []
-            panel_count = int(self.n_panels)
-            panel_w = int(self.panel_width_px) if int(self.panel_width_px) > 0 else 0
-            if panel_count > 1 and panel_w > 0 and arr.ndim == 3 and arr.shape[2] == panel_w * panel_count:
-                q_panels = []
-                mins: list[float] = []
-                maxs: list[float] = []
-                for panel in range(panel_count):
-                    panel_arr = arr[:, :, panel * panel_w : (panel + 1) * panel_w]
-                    panel_finite = panel_arr[np.isfinite(panel_arr)]
-                    if panel_finite.size == 0:
-                        p_lo, p_hi = 0.0, 1.0
-                    else:
-                        p_lo = float(panel_finite.min())
-                        p_hi = float(panel_finite.max())
-                    p_rng = p_hi - p_lo if p_hi > p_lo else 1.0
-                    q_panels.append(np.clip((panel_arr - p_lo) * (255.0 / p_rng), 0, 255).astype(np.uint8))
-                    mins.append(p_lo)
-                    maxs.append(p_hi)
-                quantized = np.concatenate(q_panels, axis=2)
-                self._offline_mins = mins
-                self._offline_maxs = maxs
-            else:
-                quantized = np.clip((arr - lo) * (255.0 / rng), 0, 255).astype(np.uint8)
-            self._offline_stack = quantized.tobytes()
+            self._pack_offline_u8_stack(offline_source)
 
         # Observers
         self.observe(self._on_slice_change, names=["slice_idx"])
@@ -2902,6 +2916,12 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         max_frames = max(1, _MAX_PLAYBACK_CHUNK_BYTES // max(1, frame_bytes_n))
         self._buffer_size = min(self._buffer_size, self.n_slices, max_frames)
         self._buffer_bytes = b""
+        if self.offline:
+            # Kernel-less consumers (docs pages, exported HTML, saved widget
+            # state) slice frames straight out of _offline_stack. Without a
+            # repack it still holds the PREVIOUS stack, and any slice index
+            # past its end renders blank after reopen.
+            self._pack_offline_u8_stack(self._display_data)
         self._bump_frame_server_version()
         self._refresh_auto_contrast_ranges()
         self._update_all()
@@ -3112,6 +3132,10 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             "profile_line": self.profile_line,
             "profile_width": self.profile_width,
             "diff_mode": self.diff_mode,
+            "denoise": self.denoise,
+            "show_denoise": self.show_denoise,
+            "denoise_sigma": self.denoise_sigma,
+            "denoise_bin": self.denoise_bin,
             "dim_label": self.dim_label,
             "dim_sampling": self.dim_sampling,
             "dim_unit": self.dim_unit,
@@ -3204,28 +3228,15 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         """
         if self._data is None:
             raise ValueError("Cannot export HTML after free(); rebuild the widget first.")
-        if self.is_rgb and quantized is not False:
-            # RGB offline HTML uses exact float32 (H,W,3) frames; uint8 pack is gray-only.
-            if quantized is True or (
-                encoding is not None
-                and str(encoding).strip().lower().replace("_", "-") in {"uint8", "u8", "quantized"}
-            ):
-                raise NotImplementedError(
-                    "Show3D RGB HTML export supports encoding='full' (float32) only; "
-                    "uint8 offline pack is grayscale. Use encoding='full' and optional "
-                    "downsample on a pre-resized stack, or export gray separately."
-                )
-
         quantized, downsample_factor = self._normalise_html_export_options(
             mode=mode,
             encoding=encoding,
             downsample=downsample,
             quantized=quantized,
         )
-        if self.is_rgb and quantized:
-            raise NotImplementedError(
-                "Show3D RGB HTML export supports encoding='full' (float32) only."
-            )
+        # RGB figure stacks: prefer uint8 offline (display-ready [0,1] → 0–255).
+        # Float32 RGB of many full-panel figures is hundreds of MB and often fails
+        # to open under file:// in Chrome.
         export_path = pathlib.Path(path) if path is not None else self._default_html_export_path(
             quantized,
             downsample=downsample_factor,
@@ -3342,6 +3353,15 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         unknown = []
         if "canvas_size" in state:
             state["size"] = state.pop("canvas_size")
+        # display_filter-era saved states: migrate onto the denoise family.
+        for old_key, new_key in (
+            ("display_filter", "denoise"),
+            ("display_sigma", "denoise_sigma"),
+            ("spatial_bin", "denoise_bin"),
+            ("display_filter_banner", "denoise_banner"),
+        ):
+            if old_key in state and new_key not in state:
+                state[new_key] = state.pop(old_key)
         # `display_bin` is constructor/data dependent. Loading only the private
         # integer leaves display_data/height/width stale, so ignore saved values.
         state.pop("display_bin", None)
@@ -5066,6 +5086,70 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             return np.concatenate(self._separate_panel_data, axis=2)
         return np.ascontiguousarray(self._display_data, dtype=np.float32)
 
+    def _pack_offline_u8_stack(self, offline_source: np.ndarray) -> None:
+        """Quantize the display stack into ``_offline_stack`` (+ min/max traits).
+
+        This is what kernel-less consumers (docs pages, exported HTML, saved
+        widget state) slice frames from. Every path that replaces the stack
+        (``__init__``, ``set_image``) must repack, or indices past the old
+        stack's end render blank.
+
+        True-color RGB stacks are ``(N, H, W, 3)`` display-ready floats in
+        ``[0, 1]`` (or 0–255); they pack to uint8 RGB without a gray colormap
+        range so offline HTML stays small enough for Chrome ``file://``.
+        """
+        arr = np.ascontiguousarray(offline_source, dtype=np.float32)
+        # RGB true-color path: (N, H, W, 3)
+        if getattr(self, "is_rgb", False) and arr.ndim == 4 and arr.shape[-1] == 3:
+            self._offline_min = 0.0
+            self._offline_max = 1.0
+            self._offline_mins = []
+            self._offline_maxs = []
+            self._offline_float_stack = b""
+            mx = float(np.nanmax(arr)) if arr.size else 1.0
+            if mx > 1.5:
+                quantized = np.clip(arr, 0, 255).astype(np.uint8)
+            else:
+                quantized = np.clip(arr * 255.0, 0, 255).astype(np.uint8)
+            self._offline_stack = np.ascontiguousarray(quantized).tobytes()
+            return
+
+        finite = arr[np.isfinite(arr)]
+        if finite.size == 0:
+            lo, hi = 0.0, 1.0
+        else:
+            lo = float(finite.min())
+            hi = float(finite.max())
+        rng = hi - lo if hi > lo else 1.0
+        self._offline_min = lo
+        self._offline_max = hi
+        self._offline_mins = []
+        self._offline_maxs = []
+        panel_count = int(self.n_panels)
+        panel_w = int(self.panel_width_px) if int(self.panel_width_px) > 0 else 0
+        if panel_count > 1 and panel_w > 0 and arr.ndim == 3 and arr.shape[2] == panel_w * panel_count:
+            q_panels = []
+            mins: list[float] = []
+            maxs: list[float] = []
+            for panel in range(panel_count):
+                panel_arr = arr[:, :, panel * panel_w : (panel + 1) * panel_w]
+                panel_finite = panel_arr[np.isfinite(panel_arr)]
+                if panel_finite.size == 0:
+                    p_lo, p_hi = 0.0, 1.0
+                else:
+                    p_lo = float(panel_finite.min())
+                    p_hi = float(panel_finite.max())
+                p_rng = p_hi - p_lo if p_hi > p_lo else 1.0
+                q_panels.append(np.clip((panel_arr - p_lo) * (255.0 / p_rng), 0, 255).astype(np.uint8))
+                mins.append(p_lo)
+                maxs.append(p_hi)
+            quantized = np.concatenate(q_panels, axis=2)
+            self._offline_mins = mins
+            self._offline_maxs = maxs
+        else:
+            quantized = np.clip((arr - lo) * (255.0 / rng), 0, 255).astype(np.uint8)
+        self._offline_stack = quantized.tobytes()
+
     def _pack_exact_offline_stack(self) -> None:
         """Embed the full display stack as float32 for exact standalone HTML."""
         arr = np.ascontiguousarray(self._offline_stack_source(), dtype=np.float32)
@@ -5319,6 +5403,7 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             frame = np.asarray(self._get_display_panel_frame(panel, idx), dtype=np.float32)
         else:
             frame = np.asarray(self._get_display_frame(idx), dtype=np.float32)
+        frame = self._wire_frame(frame, cache_key=("http", idx, panel, self.diff_mode))
         if not frame.flags.c_contiguous:
             frame = np.ascontiguousarray(frame)
         return 200, frame
@@ -5714,7 +5799,10 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                     rgb_frame = np.ascontiguousarray(self._rgb_data[idx], dtype=np.float32)
                     self.frame_bytes = rgb_frame.tobytes()
                 else:
-                    self.frame_bytes = display_frame.tobytes()
+                    wire = self._wire_frame(
+                        display_frame, cache_key=("buf", int(self.slice_idx), self.diff_mode)
+                    )
+                    self.frame_bytes = wire.tobytes()
             self.frame_seq = self.frame_seq + 1
 
     def _update_roi_stats(self, frame: np.ndarray) -> None:
@@ -5829,9 +5917,145 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         self.roi_list = rois
         self.roi_active = True
 
+    @traitlets.validate("denoise")
+    def _validate_display_filter(self, proposal: dict) -> str:
+        """Normalize and reject unknown display filter modes early."""
+        from quantem.widget.utils.display_filter import DISPLAY_FILTER_MODES, _normalize_mode
+
+        mode = _normalize_mode(proposal["value"])
+        if mode != "none" and mode not in DISPLAY_FILTER_MODES:
+            raise traitlets.TraitError(
+                "denoise must be one of "
+                + "|".join(DISPLAY_FILTER_MODES)
+                + f" (or 'off'/'raw'); got {proposal['value']!r}"
+            )
+        if mode != "none" and bool(getattr(self, "is_rgb", False)):
+            raise traitlets.TraitError(
+                "Show3D RGB stacks are display-ready true color and do not support "
+                "denoise; use denoise='none'."
+            )
+        return mode
+
+    @traitlets.validate("denoise_bin")
+    def _validate_spatial_bin(self, proposal: dict) -> int:
+        value = int(proposal["value"])
+        if value not in (1, 2, 4):
+            raise traitlets.TraitError(f"denoise_bin must be 1, 2, or 4; got {value}")
+        if value != 1 and bool(getattr(self, "is_rgb", False)):
+            raise traitlets.TraitError(
+                "Show3D RGB stacks are display-ready true color and do not support "
+                "denoise_bin; use denoise_bin=1."
+            )
+        return value
+
+    @traitlets.observe("denoise", "denoise_sigma", "denoise_bin")
+    def _on_display_filter_change(self, change: dict) -> None:
+        """Invalidate the filtered-frame cache and resend the view (no disk I/O)."""
+        if not getattr(self, "_display_filter_ready", False):
+            return
+        if change["name"] == "denoise":
+            from quantem.widget.utils.display_filter import resolve_denoise_mode
+
+            mode, extra_bin = resolve_denoise_mode(str(change["new"]))
+            if mode != str(change["new"]):
+                # Compound alias: rewrite to the canonical (mode, bin) pair;
+                # each set re-enters this observer with a canonical value.
+                self.denoise = mode
+                if extra_bin > 1:
+                    self.denoise_bin = max(int(self.denoise_bin), extra_bin)
+                return
+        self._display_filter_cache = {}
+        self._refresh_display_filter_banner(announce=True)
+        if self.offline:
+            self._pack_offline_u8_stack(self._offline_pack_source())
+        self.frame_server_version = int(self.frame_server_version) + 1
+        self._send_buffer(int(self._buffer_start))
+        self._update_all()
+
+    def _display_filter_active(self) -> bool:
+        from quantem.widget.utils.display_filter import _normalize_mode
+
+        if bool(getattr(self, "is_rgb", False)):
+            return False
+        return _normalize_mode(self.denoise) != "none" or int(self.denoise_bin) > 1
+
+    def _refresh_display_filter_banner(self, *, announce: bool) -> None:
+        """Sync the one-line reduction notice; print it when it changes.
+
+        Announcing an active reduction is a house rule: the user must always
+        know the view is filtered and that ``denoise='none'`` restores
+        raw counts.
+        """
+        from quantem.widget.utils.display_filter import format_display_filter_banner
+
+        banner = (
+            ""
+            if bool(getattr(self, "is_rgb", False))
+            else format_display_filter_banner(
+                self.denoise, float(self.denoise_sigma), int(self.denoise_bin)
+            )
+        )
+        changed = banner != self.denoise_banner
+        self.denoise_banner = banner
+        if announce and banner and changed:
+            print(banner)
+
+    def _offline_pack_source(self) -> np.ndarray:
+        """Offline pack source with the display filter applied per panel frame.
+
+        Separate panels are filtered before the horizontal concat so the
+        filter never bleeds across panel boundaries.
+        """
+        # True-color stacks pack RGB, not the luminance plane used for stats.
+        if self.is_rgb and getattr(self, "_rgb_data", None) is not None:
+            return np.ascontiguousarray(self._rgb_data, dtype=np.float32)
+        if self.separate_panel_frames and self._separate_panel_data is not None:
+            panels = self._separate_panel_data
+            if self._display_filter_active():
+                panels = [
+                    np.stack(
+                        [self._wire_frame(stack[k]) for k in range(int(stack.shape[0]))],
+                        axis=0,
+                    )
+                    for stack in panels
+                ]
+            return np.concatenate(panels, axis=2)
+        data = self._display_data
+        if self._display_filter_active():
+            data = np.stack(
+                [self._wire_frame(data[k], cache_key=("off", k)) for k in range(int(data.shape[0]))],
+                axis=0,
+            )
+        return data
+
+    def _wire_frame(self, frame: np.ndarray, cache_key=None) -> np.ndarray:
+        """Filtered VIEW copy of one display-bound frame; raw data untouched.
+
+        Frames leaving Python for display (buffer window, frame_bytes, offline
+        pack, frame server) pass through here. ROI stats keep reading the raw
+        frame so reported numbers never come from a filtered view. Filtered
+        frames are cached per index so scrubbing stays browser-fast; the cache
+        clears whenever a knob changes.
+        """
+        if not self._display_filter_active():
+            return frame
+        if cache_key is not None and cache_key in self._display_filter_cache:
+            return self._display_filter_cache[cache_key]
+        from quantem.widget.utils.display_filter import apply_display_filter
+
+        filtered = apply_display_filter(
+            np.asarray(frame),
+            mode=self.denoise,
+            sigma=float(self.denoise_sigma),
+            spatial_bin=int(self.denoise_bin),
+        )
+        if cache_key is not None:
+            self._display_filter_cache[cache_key] = filtered
+        return filtered
+
     def _send_buffer(self, start_idx: int) -> None:
         end_idx = start_idx + self._buffer_size
-        if self.diff_mode == "off":
+        if self.diff_mode == "off" and not self._display_filter_active():
             data = self._display_data
             if end_idx <= self.n_slices:
                 chunk = data[start_idx:end_idx]
@@ -5843,7 +6067,8 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             frames = []
             for j in range(self._buffer_size):
                 idx = (start_idx + j) % self.n_slices
-                frames.append(self._get_display_frame(idx))
+                key = ("buf", idx, self.diff_mode)
+                frames.append(self._wire_frame(self._get_display_frame(idx), cache_key=key))
             chunk = np.stack(frames)
         with self.hold_sync():
             self._buffer_start = int(start_idx)

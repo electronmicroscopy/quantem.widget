@@ -353,69 +353,36 @@ outside git and record only shape, dtype, frame count, and timings.
   without a kernel, and repeat scrub, play/pause, stats, FFT, hide/restore, and
   narrow-viewport checks with no browser errors.
 
-### S2D-17: Compare Independent Slice Stacks Across Reconstructions
+### S2D-17: Scrub A Paged Comparison Gallery
 
-**User story**: As a tomography or multislice reconstruction scientist, I want
-each Show2D gallery panel to hold a different reconstruction volume with its own
-slice slider and play/pause control, so I can browse each result at its own
-depth while keeping all reconstruction alternatives side by side in one
-viewer.
+**User story**: As a user comparing a parameter sweep organized as pages (for
+example lambda values, each page holding the same panel set), I want the page
+slider and page playback to swap the whole panel grid at once while every
+per-panel control - histograms, labels, hide state - follows the page I am
+looking at, not the union of all pages.
 
-**Why this matters scientifically**: One study may produce four reconstructions
-with different slice counts, slice thicknesses, regularization settings,
-alignment choices, or reconstruction methods. A feature or failure can be
-clearest at a different depth in each result. Independent local slice controls
-let the scientist stop each panel at the informative depth while linked zoom,
-pan, and contrast preserve the spatial comparison. This avoids opening several
-widgets or forcing every reconstruction onto one global slice index.
+**Primary widgets**: Show2D.
 
-**Primary widgets**: Show2D. Use Show3D instead when every panel should advance
-on one shared frame or slice axis.
-
-**Data to use**: four real or real-derived tomography or multislice
-reconstructions, each shaped `(slices, rows, cols)`. Include different slice
-counts or slice thicknesses when scientifically meaningful, plus an optional
-static 2-D reference. Record source, shape, dtype, slice count, slice thickness,
-display binning, and timings. Put the reconstruction method and slice thickness
-in each panel label because the compact slider readout reports only the current
-slice and total count.
+**Data to use**: a real or real-derived `(pages, panels, rows, cols)` stack
+with at least 3 pages x 4 panels, per-page distinct intensity ranges so
+histogram mismatches are visible at a glance.
 
 **Acceptance checks**:
 
-- Pass a Python list of at least four 3-D reconstruction arrays; verify every
-  stack panel gets its own slider, play/pause button, and `current/total`
-  readout. Verify an optional 2-D panel gets no slice controls.
-- Start panels at different `panel_frame_indices`, including a negative index,
-  and verify each index resolves against that panel's own slice count.
-- Scrub one panel and verify only that panel's index and canvas change. Its
-  histogram, stats, FFT, profile, ROI, and diff inputs must follow the selected
-  slice while neighboring panels remain unchanged.
-- Play two stacks simultaneously, pause one, and verify the other continues;
-  verify each stack wraps against its own slice count.
-- Construct with `panel_playback_fps=4`, measure several slice transitions,
-  and verify the shared local-stack cadence is approximately 4 fps without a
-  new toolbar control. Verify the configured value survives state restore and
-  standalone HTML export.
-- With FFT visible, traverse every slice twice. After the initial FFT is
-  visible, verify first-time slice computations retain the previous valid FFT
-  instead of showing a full dark loading veil; on the second traversal, cache
-  hits increase while misses and computes stay unchanged.
-- Pause every local stack on a different slice, switch browser tabs, and return.
-  Verify all real-space and FFT canvases restore without pressing Play, every
-  local slice index is unchanged, and no cached FFT magnitude is recomputed.
-- Verify linked zoom, pan, and contrast preserve spatial comparison without
-  linking the local slice indices.
-- Select each stack and scrub with left/right arrows. From Python, use
-  `set_panel_frame(panel, slice_index)` with either a source index or unique
-  panel label.
-- Hide, restore, reorder, and responsively wrap panels; verify each local slice
-  index remains keyed to its source reconstruction and controls do not overlap.
-- Save and reopen with `save_state=True`. Export single HTML with
-  `encoding="full"` and `encoding="uint8"`, then repeat independent scrub,
-  play/pause, FFT, and narrow-layout checks without a kernel.
-- On real reconstruction data, record first paint, memory and payload size,
-  slider latency, and canvas repaint rate. Confirm the final canvas, not only
-  the slider label, reaches every requested slice.
+- Construct with 4D pages plus `page_labels`; verify the page slider shows
+  `1/N`, the label text, and play/pause advances pages at the configured fps.
+- With `link_contrast=False`, verify exactly `panels_per_page` histograms are
+  shown - never one per panel across ALL pages - and that their ranges change
+  when the page changes. Repeat with the FFT histogram grid.
+- Hide a panel on one page; verify the histogram grid drops that panel's
+  histogram, and other pages' hide state is independent.
+- Drag one page's histogram thumbs; verify only the current page's matching
+  panel changes and the setting is still applied when scrubbing back to that
+  page.
+- Verify stats, hover readout, and selection follow the current page's panels
+  after several slider scrubs and one full playback loop.
+- Export offline HTML and repeat the histogram-count and page-scrub checks
+  without a kernel.
 
 ### S2D-18: Watch A Live EMD Folder In Place
 
@@ -478,3 +445,67 @@ outside git.
 - Verify idle polls perform no reread, transfer, canvas repaint, or state reset.
   Exercise idempotent stop/resume, then call ``close()`` and prove no watcher
   thread can mutate the widget afterward.
+
+### S2D-19: Compare Independent Slice Stacks Across Reconstructions
+
+**User story**: As a tomography or multislice reconstruction scientist, I want
+each Show2D gallery panel to hold a different reconstruction volume with its own
+slice slider and play/pause control, so I can browse each result at its own
+depth while keeping all reconstruction alternatives side by side in one
+viewer.
+
+**Why this matters scientifically**: One study may produce four reconstructions
+with different slice counts, slice thicknesses, regularization settings,
+alignment choices, or reconstruction methods. A feature or failure can be
+clearest at a different depth in each result. Independent local slice controls
+let the scientist stop each panel at the informative depth while linked zoom,
+pan, and contrast preserve the spatial comparison. This avoids opening several
+widgets or forcing every reconstruction onto one global slice index.
+
+**Primary widgets**: Show2D. Use Show3D instead when every panel should advance
+on one shared frame or slice axis.
+
+**Data to use**: four real or real-derived tomography or multislice
+reconstructions, each shaped `(slices, rows, cols)`. Include different slice
+counts or slice thicknesses when scientifically meaningful, plus an optional
+static 2-D reference. Record source, shape, dtype, slice count, slice thickness,
+display binning, and timings. Put the reconstruction method and slice thickness
+in each panel label because the compact slider readout reports only the current
+slice and total count.
+
+**Acceptance checks**:
+
+- Pass a Python list of at least four 3-D reconstruction arrays; verify every
+  stack panel gets its own slider, play/pause button, and `current/total`
+  readout. Verify an optional 2-D panel gets no slice controls.
+- Start panels at different `panel_frame_indices`, including a negative index,
+  and verify each index resolves against that panel's own slice count.
+- Scrub one panel and verify only that panel's index and canvas change. Its
+  histogram, stats, FFT, profile, ROI, and diff inputs must follow the selected
+  slice while neighboring panels remain unchanged.
+- Play two stacks simultaneously, pause one, and verify the other continues;
+  verify each stack wraps against its own slice count.
+- Construct with `panel_playback_fps=4`, measure several slice transitions,
+  and verify the shared local-stack cadence is approximately 4 fps without a
+  new toolbar control. Verify the configured value survives state restore and
+  standalone HTML export.
+- With FFT visible, traverse every slice twice. After the initial FFT is
+  visible, verify first-time slice computations retain the previous valid FFT
+  instead of showing a full dark loading veil; on the second traversal, cache
+  hits increase while misses and computes stay unchanged.
+- Pause every local stack on a different slice, switch browser tabs, and return.
+  Verify all real-space and FFT canvases restore without pressing Play, every
+  local slice index is unchanged, and no cached FFT magnitude is recomputed.
+- Verify linked zoom, pan, and contrast preserve spatial comparison without
+  linking the local slice indices.
+- Select each stack and scrub with left/right arrows. From Python, use
+  `set_panel_frame(panel, slice_index)` with either a source index or unique
+  panel label.
+- Hide, restore, reorder, and responsively wrap panels; verify each local slice
+  index remains keyed to its source reconstruction and controls do not overlap.
+- Save and reopen with `save_state=True`. Export single HTML with
+  `encoding="full"` and `encoding="uint8"`, then repeat independent scrub,
+  play/pause, FFT, and narrow-layout checks without a kernel.
+- On real reconstruction data, record first paint, memory and payload size,
+  slider latency, and canvas repaint rate. Confirm the final canvas, not only
+  the slider label, reaches every requested slice.

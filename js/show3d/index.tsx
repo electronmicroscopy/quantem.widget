@@ -336,6 +336,15 @@ function float32FrameFromDataView(stack: DataView, frameIdx: number, pixelCount:
   return copy ? new Float32Array(view) : view;
 }
 
+function rgbFrameToLuminance(rgb: Float32Array, pixelCount: number): Float32Array {
+  const luminance = new Float32Array(pixelCount);
+  const n = Math.min(pixelCount, Math.floor(rgb.length / 3));
+  for (let k = 0; k < n; k++) {
+    luminance[k] = 0.2126 * rgb[3 * k] + 0.7152 * rgb[3 * k + 1] + 0.0722 * rgb[3 * k + 2];
+  }
+  return luminance;
+}
+
 const clampPct = (x: number): number => Math.max(0, Math.min(100, x));
 const valueToPct = (value: number | null | undefined, min: number, max: number, fallback: number): number => {
   if (value == null || !Number.isFinite(value) || max <= min) return fallback;
@@ -869,6 +878,7 @@ const upwardMenuProps = {
   sx: { zIndex: 9999 },
 };
 
+import { resolveDenoiseMode } from "../displayFilter";
 import { COLORMAPS, COLORMAP_NAMES, applyColormap, renderToOffscreen, renderToOffscreenReuse, createGPUColormapEngine, GPUColormapEngine } from "../colormaps";
 
 const DPR = window.devicePixelRatio || 1;
@@ -1492,7 +1502,7 @@ function Show3D() {
   const [sharedPanelSource] = useModelState<boolean>("shared_panel_source");
   const [separatePanelFrames] = useModelState<boolean>("separate_panel_frames");
   // Reused scratch Float32Array sized to one frame so per-scrub dequant
-  // doesn't re-allocate. Indexed by (width, height) since reshape resets it.
+  // doesn't re-allocate. Indexed by (RGB, width, height) since reshape resets it.
   const offlineScratch = React.useRef<Float32Array | null>(null);
   const offlineScratchKey = React.useRef<number>(-1);
   const offlineFrameCacheRef = React.useRef<Map<number, Float32Array>>(new Map());
@@ -1511,13 +1521,13 @@ function Show3D() {
     const pixelCount = Math.max(1, Math.round(width || 0) * Math.round(height || 0));
     if (!offline || pixelCount <= 0) return 0;
     if (offlineFloatStack && offlineFloatStack.byteLength > 0) return n;
-    const frameBytes = Math.max(1, pixelCount * 4);
+    const frameBytes = Math.max(1, pixelCount * (isRgb ? 3 : 1) * 4);
     const budgetFrames = Math.max(1, Math.floor(OFFLINE_FRAME_CACHE_BYTES / frameBytes));
     const minFrames = frameBytes <= OFFLINE_FRAME_CACHE_BYTES / OFFLINE_FRAME_CACHE_MIN_FRAMES
       ? OFFLINE_FRAME_CACHE_MIN_FRAMES
       : 1;
     return Math.max(1, Math.min(n, Math.max(minFrames, budgetFrames)));
-  }, [offline, offlineFloatStack, width, height, nSlices]);
+  }, [offline, offlineFloatStack, width, height, nSlices, isRgb]);
   React.useEffect(() => {
     offlineFrameCacheRef.current.clear();
     offlineFramePrewarmSerialRef.current++;
@@ -1544,6 +1554,7 @@ function Show3D() {
     nPanels,
     panelWidthPx,
     nSlices,
+    isRgb,
     offlineFrameCacheLimit,
   ]);
   const putOfflineFrameCache = React.useCallback((idx: number, frame: Float32Array) => {
@@ -1564,38 +1575,45 @@ function Show3D() {
   }, [offline, offlineFrameCacheLimit]);
   const frameBytes = React.useMemo<DataView>(() => {
     // Gray: H*W floats. True-color RGB: H*W*3 floats packed channel-last.
-    const floatsPerFrame = (isRgb ? 3 : 1) * width * height;
+    const ch = isRgb ? 3 : 1;
+    const floatsPerFrame = ch * width * height;
     const pixelCount = width * height;
     if (offline && offlineFloatStack && offlineFloatStack.byteLength > 0 && floatsPerFrame > 0) {
       const f32 = float32FrameFromDataView(offlineFloatStack, liveSliceIdx, floatsPerFrame, false);
       if (f32) return new DataView(f32.buffer, f32.byteOffset, f32.byteLength);
     }
     if (offline && offlineStack && offlineStack.byteLength > 0 && width > 0 && height > 0) {
-      const start = liveSliceIdx * pixelCount;
-      if (start + pixelCount <= offlineStack.byteLength) {
-        const u8 = new Uint8Array(offlineStack.buffer, offlineStack.byteOffset + start, pixelCount);
-        const key = (width << 16) | height;
+      // RGB uint8 pack is H*W*3 bytes per frame (display-ready 0–255 → /255).
+      const bytesPerFrame = ch * pixelCount;
+      const start = liveSliceIdx * bytesPerFrame;
+      if (start + bytesPerFrame <= offlineStack.byteLength) {
+        const u8 = new Uint8Array(offlineStack.buffer, offlineStack.byteOffset + start, bytesPerFrame);
+        const key = ((isRgb ? 1 : 0) << 30) | (width << 15) | height;
         if (offlineScratchKey.current !== key || offlineScratch.current === null) {
-          offlineScratch.current = new Float32Array(pixelCount);
+          offlineScratch.current = new Float32Array(floatsPerFrame);
           offlineScratchKey.current = key;
         }
         const f32 = offlineScratch.current;
-        const panelCount = Math.max(1, nPanels || 1);
-        const panelRanges = panelCount > 1 && offlineMins?.length >= panelCount && offlineMaxs?.length >= panelCount;
-        const panelW = Math.max(1, panelWidthPx || Math.floor(width / panelCount) || width);
-        if (panelRanges) {
-          for (let r = 0; r < height; r++) {
-            const rowOffset = r * width;
-            for (let c = 0; c < width; c++) {
-              const panel = Math.max(0, Math.min(panelCount - 1, Math.floor(c / panelW)));
-              const lo = offlineMins[panel] ?? offlineMin;
-              const hi = offlineMaxs[panel] ?? offlineMax;
-              f32[rowOffset + c] = u8[rowOffset + c] * ((hi - lo) / 255.0) + lo;
-            }
-          }
+        if (isRgb) {
+          for (let i = 0; i < floatsPerFrame; i++) f32[i] = u8[i] / 255.0;
         } else {
-          const scale = (offlineMax - offlineMin) / 255.0;
-          for (let i = 0; i < pixelCount; i++) f32[i] = u8[i] * scale + offlineMin;
+          const panelCount = Math.max(1, nPanels || 1);
+          const panelRanges = panelCount > 1 && offlineMins?.length >= panelCount && offlineMaxs?.length >= panelCount;
+          const panelW = Math.max(1, panelWidthPx || Math.floor(width / panelCount) || width);
+          if (panelRanges) {
+            for (let r = 0; r < height; r++) {
+              const rowOffset = r * width;
+              for (let c = 0; c < width; c++) {
+                const panel = Math.max(0, Math.min(panelCount - 1, Math.floor(c / panelW)));
+                const lo = offlineMins[panel] ?? offlineMin;
+                const hi = offlineMaxs[panel] ?? offlineMax;
+                f32[rowOffset + c] = u8[rowOffset + c] * ((hi - lo) / 255.0) + lo;
+              }
+            }
+          } else {
+            const scale = (offlineMax - offlineMin) / 255.0;
+            for (let i = 0; i < pixelCount; i++) f32[i] = u8[i] * scale + offlineMin;
+          }
         }
         return new DataView(f32.buffer);
       }
@@ -1624,7 +1642,8 @@ function Show3D() {
     if (dbg) {
       dbg.offlineFrameCacheMisses = ((dbg.offlineFrameCacheMisses as number | undefined) ?? 0) + 1;
     }
-    const floatsPerFrame = (isRgb ? 3 : 1) * width * height;
+    const ch = isRgb ? 3 : 1;
+    const floatsPerFrame = ch * width * height;
     const pixelCount = width * height;
     if (offlineFloatStack && offlineFloatStack.byteLength > 0) {
       const frame = float32FrameFromDataView(offlineFloatStack, normalized, floatsPerFrame, false);
@@ -1632,10 +1651,16 @@ function Show3D() {
       return frame;
     }
     if (!offlineStack || offlineStack.byteLength === 0) return null;
-    const start = normalized * pixelCount;
-    if (start < 0 || start + pixelCount > offlineStack.byteLength) return null;
-    const u8 = new Uint8Array(offlineStack.buffer, offlineStack.byteOffset + start, pixelCount);
-    const f32 = new Float32Array(pixelCount);
+    const bytesPerFrame = ch * pixelCount;
+    const start = normalized * bytesPerFrame;
+    if (start < 0 || start + bytesPerFrame > offlineStack.byteLength) return null;
+    const u8 = new Uint8Array(offlineStack.buffer, offlineStack.byteOffset + start, bytesPerFrame);
+    const f32 = new Float32Array(floatsPerFrame);
+    if (isRgb) {
+      for (let i = 0; i < floatsPerFrame; i++) f32[i] = u8[i] / 255.0;
+      putOfflineFrameCache(normalized, f32);
+      return f32;
+    }
     const panelCount = Math.max(1, nPanels || 1);
     const panelRanges = panelCount > 1 && offlineMins?.length >= panelCount && offlineMaxs?.length >= panelCount;
     const panelW = Math.max(1, panelWidthPx || Math.floor(width / panelCount) || width);
@@ -2364,6 +2389,18 @@ function Show3D() {
   const [pixelSize] = useModelState<number>("pixel_size");
   const [scaleBarVisible] = useModelState<boolean>("scale_bar_visible");
   const [smooth, setSmooth] = useModelState<boolean>("smooth");
+  // Display-only filter knobs for sparse map stacks (EDS, low dose). Python
+  // owns the math and re-sends the playback buffer on change; raw data is
+  // never modified.
+  const [displayFilter, setDisplayFilter] = useModelState<string>("denoise");
+  const [displaySigma, setDisplaySigma] = useModelState<number>("denoise_sigma");
+  const [spatialBin, setSpatialBin] = useModelState<number>("denoise_bin");
+  const [displayFilterBanner] = useModelState<string>("denoise_banner");
+  const [showDenoise, setShowDenoise] = useModelState<boolean>("show_denoise");
+  // Local slider value during drag; the model (and the Python refilter) only
+  // updates on release so scrubbing sigma stays smooth on large stacks.
+  const [sigmaDraft, setSigmaDraft] = React.useState<number | null>(null);
+  const displayFilterOff = resolveDenoiseMode(displayFilter || "none").mode === "none";
   const [pixelUnit] = useModelState<string>("pixel_unit");
   const [imageRotation] = useModelState<number>("image_rotation");
 
@@ -2380,11 +2417,13 @@ function Show3D() {
   // Diff mode
   const [diffMode, setDiffMode] = useModelState<string>("diff_mode");
   const [avgWindow, setAvgWindow] = useModelState<number>("avg_window");
-  const averageSupported = supportsClientAverage(separatePanelFrames);
+  const averageSupported = !isRgb && supportsClientAverage(separatePanelFrames);
   React.useEffect(() => {
     if (averageSupported || normalizedAverageWindow(avgWindow) <= 1) return;
     console.warn(
-      "[Show3D] Moving average is unavailable for separate full-resolution panel streams; using avg=1",
+      isRgb
+        ? "[Show3D] Moving average is unavailable for true-color RGB stacks; using avg=1"
+        : "[Show3D] Moving average is unavailable for separate full-resolution panel streams; using avg=1",
     );
     setAvgWindow(1);
   }, [averageSupported, avgWindow, setAvgWindow]);
@@ -3690,6 +3729,19 @@ function Show3D() {
   const [fftShowColorbar, setFftShowColorbar] = React.useState(false);
   const [fftOffscreenVersion, setFftOffscreenVersion] = React.useState(0);
   const [showColorbar, setShowColorbar] = React.useState(false);
+  // True-color RGB figures: no colormap / intensity tools; pixelated (no smooth).
+  React.useEffect(() => {
+    if (isRgb) {
+      setShowColorbar(false);
+      if (autoContrast) setAutoContrast(false);
+      if (logScale) setLogScale(false);
+      if (diffMode && diffMode !== "off") setDiffMode("off");
+      if (!displayFilterOff) setDisplayFilter("none");
+      if (Number(spatialBin || 1) !== 1) setSpatialBin(1);
+      if (showDenoise) setShowDenoise(false);
+      if (smooth) setSmooth(false);
+    }
+  }, [isRgb]); // eslint-disable-line react-hooks/exhaustive-deps -- one-shot mode switch
 
   // Histogram state for kymograph (mirrors FFT contrast/colormap controls)
   const [kymoVminPct, setKymoVminPct] = React.useState(0);
@@ -5116,10 +5168,15 @@ function Show3D() {
 
       playbackIdxRef.current = next;
       updatePlaybackLiveControls(next);
-      if (frame && transformActive) {
+      if (frame && transformActive && !isRgb) {
         frame = displayFrameForIndex(next, frame) ?? frame;
       }
-      if (frame) rawFrameDataRef.current = frame;
+      if (frame && isRgb && offline && frame.length >= c.width * c.height * 3) {
+        rgbFrameDataRef.current = frame;
+        rawFrameDataRef.current = rgbFrameToLuminance(frame, c.width * c.height);
+      } else if (frame) {
+        rawFrameDataRef.current = frame;
+      }
       const offlinePackedPanelPlaybackUsesStaticCanvas = (
         offline &&
         Math.max(1, nPanels || 1) > 1 &&
@@ -5127,6 +5184,7 @@ function Show3D() {
       );
       const offlineDirectRender = (
         offline &&
+        !isRgb &&
         !offlinePackedPanelPlaybackUsesStaticCanvas &&
         !!frame &&
         !!gpuCmapRef.current &&
@@ -5681,11 +5739,7 @@ function Show3D() {
     if (isRgb) {
       // Keep color plane for paint; expose Rec. 709 luminance for stats/FFT.
       rgbFrameDataRef.current = parsed;
-      const luma = new Float32Array(width * height);
-      for (let k = 0; k < luma.length; k++) {
-        luma[k] = 0.2126 * parsed[3 * k] + 0.7152 * parsed[3 * k + 1] + 0.0722 * parsed[3 * k + 2];
-      }
-      rawFrameDataRef.current = luma;
+      rawFrameDataRef.current = rgbFrameToLuminance(parsed, width * height);
     } else {
       rgbFrameDataRef.current = null;
       const displayFrame = displayFrameForIndex(offline ? liveSliceIdx : sliceIdx, parsed) ?? parsed;
@@ -5731,6 +5785,7 @@ function Show3D() {
   const histogramRefreshPendingIdxRef = React.useRef<number | null>(null);
   const histogramRefreshSerialRef = React.useRef(0);
   const refreshHistogram = React.useCallback(async (idxArg?: number) => {
+    if (isRgb) return;
     const renderIdx = clampSlice(idxArg ?? displaySliceIdx);
     if (histogramRefreshInFlightRef.current) {
       histogramRefreshPendingIdxRef.current = renderIdx;
@@ -5865,7 +5920,7 @@ function Show3D() {
         window.setTimeout(() => { void refreshHistogram(pending); }, 0);
       }
     }
-  }, [logScale, dataMin, dataMax, perPanelHistogramEnabled, nPanels, visiblePanelIndices, extractPanelSlice, displaySliceIdx, separatePanelFrames, canvasW, canvasH, ensurePanelFrameGpu]);
+  }, [logScale, dataMin, dataMax, perPanelHistogramEnabled, nPanels, visiblePanelIndices, extractPanelSlice, displaySliceIdx, separatePanelFrames, canvasW, canvasH, ensurePanelFrameGpu, isRgb]);
   refreshHistogramRef.current = refreshHistogram;
   React.useEffect(() => {
     if (playing) {
@@ -6340,11 +6395,13 @@ function Show3D() {
     const c = playRef.current;
     if (!mainOffscreenRef.current || !mainImgDataRef.current) return false;
     // True-color stack: paint RGB as-is (no colormap).
-    if (isRgb && rgbFrameDataRef.current && rgbFrameDataRef.current.length >= width * height * 3) {
+    if (isRgb && inputFrame.length >= width * height * 3) {
       gpuRenderSerialRef.current++;
       playbackIdxRef.current = idx;
       setDisplaySliceIdx(idx);
-      return paintRgbFrame(rgbFrameDataRef.current);
+      rgbFrameDataRef.current = inputFrame;
+      rawFrameDataRef.current = rgbFrameToLuminance(inputFrame, width * height);
+      return paintRgbFrame(inputFrame);
     }
     const transformActive = requiresClientFrameTransform({
       offline,
@@ -11841,6 +11898,9 @@ function Show3D() {
 	          {controlsVisible && (
             <Box sx={{ mt: `${SPACING.SM}px`, display: "flex", columnGap: `${SPACING.SM}px`, rowGap: `${SPACING.XS}px`, alignItems: "flex-start", justifyContent: "flex-start", width: "fit-content", maxWidth: "100%", boxSizing: "border-box", flexWrap: "wrap" }}>
               <Box sx={{ display: "flex", flexDirection: "column", gap: `${SPACING.XS}px`, flex: "0 0 auto", justifyContent: "center" }}>
+                {/* True-color figure stacks: hide colormap / intensity / Smooth —
+                    paper figures are already final pixels. */}
+                {!isRgb && (<>
                 {/* Row 1: Scale + Auto + Color */}
                 <Box sx={{ ...controlRow, ...mobileControlRowSx, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>
                   <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted }}>Scale</Typography>
@@ -11863,6 +11923,15 @@ function Show3D() {
                   </Select>
                   <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted }}>Smooth</Typography>
                   <Switch checked={smooth} onChange={(e) => setSmooth(e.target.checked)} size="small" sx={switchStyles.small} slotProps={{ input: { "aria-label": "Toggle bilinear smoothing" } }} />
+                  <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted }} title="Show the display-only denoise controls (method, σ, bin). Raw data and stats keep original counts.">Denoise</Typography>
+                  <Switch checked={showDenoise ?? false} onChange={() => setShowDenoise(!showDenoise)} size="small" sx={switchStyles.small} slotProps={{ input: { "aria-label": "Show denoise controls" } }} />
+                  {!showDenoise && displayFilterBanner && (
+                    /* House rule: an active reduction is never invisible,
+                       even with the denoise controls row hidden. */
+                    <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.accent }} title={displayFilterBanner}>
+                      {displayFilterBanner.split(" (")[0]}
+                    </Typography>
+                  )}
                   <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted }}>Diff</Typography>
                   <Select value={diffMode} onChange={(e) => setDiffMode(e.target.value)} size="small" sx={{ ...themedSelect, minWidth: 45, fontSize: 10 }} MenuProps={themedMenuProps} inputProps={{ "aria-label": "Difference mode (off, previous frame, first frame)" }}>
                     <MenuItem value="off">Off</MenuItem>
@@ -11871,6 +11940,37 @@ function Show3D() {
                   </Select>
                   {/* zoom indicator moved onto the canvas overlay */}
                 </Box>
+                {/* Row 3 (toggle-gated): display-only denoise for sparse map stacks (EDS, low dose) */}
+                {showDenoise && (
+                <Box sx={{ ...controlRow, ...mobileControlRowSx, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>
+                  <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted }} title="Poisson (Anscombe): count-respecting smoothing for sparse EDS/counting data - recommended with Bin 2, sigma 6-10. Gaussian: simple smooth for decent-dose images. None: raw counts (use for anything quantitative).">Denoise</Typography>
+                  <Select size="small" value={resolveDenoiseMode(displayFilter || "none").mode} onChange={(e) => setDisplayFilter(e.target.value)} MenuProps={themedMenuProps} sx={{ ...themedSelect, minWidth: 88, fontSize: 10 }} inputProps={{ "aria-label": "Display-only denoise method" }}>
+                    {[["none", "None"], ["gaussian", "Gaussian"], ["anscombe", "Poisson (Anscombe)"]].map(([mode, label]) => (
+                      <MenuItem key={mode} value={mode}>{label}</MenuItem>
+                    ))}
+                  </Select>
+                  <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted, opacity: displayFilterOff ? 0.5 : 1 }}>σ {(sigmaDraft ?? Number(displaySigma ?? 4)).toFixed(1)}</Typography>
+                  <Slider
+                    value={sigmaDraft ?? Number(displaySigma ?? 4)}
+                    min={0} max={20} step={0.5}
+                    disabled={displayFilterOff}
+                    onChange={(_, v) => setSigmaDraft(v as number)}
+                    onChangeCommitted={(_, v) => { setDisplaySigma(v as number); setSigmaDraft(null); }}
+                    size="small" sx={{ ...sliderStyles.small, width: 60 }}
+                    aria-label="Display filter sigma in pixels"
+                  />
+                  <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted }} title="Display-side 2x bin passes for SNR, combined with the denoise method. 1 is lossless.">Bin</Typography>
+                  <Select size="small" value={String(spatialBin || 1)} onChange={(e) => setSpatialBin(parseInt(e.target.value, 10))} MenuProps={themedMenuProps} sx={{ ...themedSelect, minWidth: 40, fontSize: 10 }} inputProps={{ "aria-label": "Display spatial bin factor" }}>
+                    {[1, 2, 4].map((b) => (<MenuItem key={b} value={String(b)}>{b}</MenuItem>))}
+                  </Select>
+                  {displayFilterBanner && (
+                    <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.accent }} title={displayFilterBanner}>
+                      {displayFilterBanner.split(" (")[0]} · raw: denoise='none'
+                    </Typography>
+                  )}
+                </Box>
+                )}
+                </>)}
               </Box>
               {/* Playback: 2 rows side-by-side with Display + Histogram. */}
               {(() => { const activeIdx = visibleSliceIdx; return (
@@ -11944,7 +12044,8 @@ function Show3D() {
                   </Box>
                 </Box>
               ); })()}
-              {(() => {
+              {/* Intensity histogram + clip sliders are gray-only (colormap window). */}
+              {!isRgb && (() => {
                 // Global stack range from Python (data_min/data_max trait), not per-frame.
                 // Log mode: log1p the range so bins line up with the log-scaled frame data.
                 const { min: histMin, max: histMax } = resolveDisplayBounds(dataMin, dataMax, traitVmin, traitVmax, logScale);

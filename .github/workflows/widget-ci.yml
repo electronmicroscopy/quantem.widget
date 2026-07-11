@@ -76,15 +76,26 @@ jobs:
           cache-dependency-path: package-lock.json
 
       - name: Install Python dependencies
+        # .[hub] + huggingface_hub/h5py/tifffile mirror widget-docs.yml: the
+        # signoff docs build executes tutorials, which download HF tutorial data.
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r docs/requirements.txt
-          python -m pip install -e ".[test]"
+          python -m pip install --extra-index-url https://test.pypi.org/simple/ -e ".[test,hub]" huggingface_hub h5py tifffile
+
+      - name: Cache Hugging Face tutorial data
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: ci-hf-tutorial-data-v1
 
       - name: Install frontend dependencies
         run: npm ci
 
       - name: Run local signoff
+        env:
+          # Silence the HF "unauthenticated requests" warning in baked outputs.
+          HF_HUB_VERBOSITY: error
         run: |
           args=(--artifact-dir /tmp/quantem-widget-ci-signoff)
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then

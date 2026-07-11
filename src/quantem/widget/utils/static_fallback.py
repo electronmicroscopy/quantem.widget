@@ -15,6 +15,7 @@ class supplies ``_static_png_b64()`` (its own widget-format render) and
 """
 
 import base64
+import os
 
 
 class StaticFallbackMixin:
@@ -78,6 +79,13 @@ class StaticFallbackMixin:
         return fmt
 
     def _static_fallback_enabled(self) -> bool:
+        # Docs/CI builds bake full interactive widget state into the published
+        # HTML, so the saved-notebook preview would only render as a duplicate
+        # image under the live widget. QUANTEM_WIDGET_STATIC_FALLBACK=0 lets
+        # those builds emit the interactive output alone.
+        env = os.environ.get("QUANTEM_WIDGET_STATIC_FALLBACK", "").strip().lower()
+        if env in {"0", "off", "false", "none"}:
+            return False
         return getattr(self, "_notebook_preview_format", "jpeg") is not None
 
     def _static_fallback_mime_type(self) -> str:

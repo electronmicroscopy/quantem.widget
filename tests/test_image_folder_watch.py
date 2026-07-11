@@ -787,3 +787,23 @@ def test_folder_calibration_is_preserved_until_files_disagree(
         assert "different sampling or units" in widget._folder_calibration_status
     finally:
         widget.close()
+
+
+def test_folder_reads_symlinked_files_with_extensionless_targets(
+    tmp_path: Path,
+) -> None:
+    # Hugging Face hub cache folders store files as symlinks to extension-less
+    # blobs; format dispatch must use the symlink's own name, not its target.
+    blobs = tmp_path / "blobs"
+    blobs.mkdir()
+    named = blobs / "blob.npy"
+    _save(named, 2.5)
+    blob = blobs / "abc123"
+    named.rename(blob)
+    session = tmp_path / "session"
+    session.mkdir()
+    (session / "frame_000.npy").symlink_to(blob)
+
+    widget = Show2D.from_folder(session, watch=False)
+    assert widget.labels == ["frame_000"]
+    assert widget._data.shape == (1, 6, 8)

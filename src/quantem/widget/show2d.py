@@ -51,6 +51,19 @@ def _core_image_dataset_types() -> tuple[type[Any], ...]:
     return _CORE_IMAGE_DATASET_TYPES
 
 
+# Saved-state keys from the display_filter-era API mapped onto the denoise
+# family, so old .qwstate files and notebooks keep loading.
+_DENOISE_STATE_ALIASES = {
+    "display_filter": "denoise",
+    "display_sigma": "denoise_sigma",
+    "spatial_bin": "denoise_bin",
+    "display_filters": "denoise_modes",
+    "display_sigmas": "denoise_sigmas",
+    "spatial_bins": "denoise_bins",
+    "display_filter_banner": "denoise_banner",
+}
+
+
 def _reject_unknown_kwargs(cls, kwargs: dict) -> None:
     """Raise TypeError if kwargs contains any key that isn't a declared trait.
 
@@ -562,6 +575,43 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     notebook_preview_max_px : int, default 512
         Longest panel side for the saved-notebook preview. Lower values make
         notebooks smaller; higher values make the static fallback sharper.
+    denoise : str or sequence of str, default "none"
+        Display-only denoise method for sparse maps (EDS, low dose). Three
+        orthogonal choices: ``"none"``, ``"gaussian"``, or ``"anscombe"``
+        (Poisson count-respecting smoothing); binning is the separate
+        ``denoise_bin`` knob. Recommendation ladder: sparse EDS ->
+        ``"anscombe"`` with ``denoise_bin=2`` and sigma 6-10; very sparse ->
+        ``"anscombe"`` with ``denoise_bin=4`` and sigma 8-12; decent-dose
+        HAADF -> ``"gaussian"`` sigma 1-2 or ``"none"``; anything
+        quantitative -> ``"none"``. The compound spellings ``"bin2"``,
+        ``"bin2_anscombe"`` and ``"bin4_anscombe"`` stay accepted as aliases
+        that fold into (mode, bin); ``"tv"``/``"denova*"`` remain available
+        from Python (not in the UI menu). A scalar applies to every panel; a
+        sequence (one entry per panel) gives each panel its own method, e.g.
+        ``["none", "anscombe"]`` for a raw vs denoised A/B gallery. Pure view
+        transform: the stored array, the stats row, and every export of raw
+        data keep the original counts, and the lossless default is
+        ``"none"``. When active, a one-line banner announces the reduction
+        and how to get raw counts back. RGB panels are never filtered.
+        Independent of ``display_bin`` (the GPU display budget knob).
+    denoise_sigma : float or sequence of float, default 4.0
+        Smoothing scale in pixels for the Gaussian/Anscombe display filters.
+        A sequence sets one sigma per panel.
+    denoise_bin : {1, 2, 4} or sequence, default 1
+        Display-side 2x bin passes for SNR, combined with ``denoise``.
+        ``1`` (the default) is lossless. A sequence sets one bin factor per
+        panel.
+    show_denoise : bool, default False
+        Show the denoise controls row. Hidden by default to keep the widget
+        clean; auto-enabled when any panel starts with an active denoise. An
+        active reduction always shows its banner, even with the row hidden.
+    denoise_scope : {"all", "panel"}, default "all"
+        UI knob scope: "all" applies Denoise/σ/Bin edits to every panel,
+        "panel" edits only the selected panel. Passing any per-panel sequence
+        switches to the "panel" scope automatically. The deprecated aliases
+        ``display_filter``, ``display_sigma``, ``spatial_bin`` and
+        ``filter_per_panel`` are still accepted for one release and map onto
+        ``denoise``, ``denoise_sigma``, ``denoise_bin`` and ``denoise_scope``.
     Attributes
     ----------
     render_total_ms : int or None
@@ -706,6 +756,40 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     height = traitlets.Int(1).tag(sync=True)
     width = traitlets.Int(1).tag(sync=True)
     _display_bin_factor = traitlets.Int(1).tag(sync=True)  # 1 = full-res, 2/4/8 = binned
+    # Display-only denoise/bin for sparse maps (EDS, low dose). View transform
+    # applied while packing frame_bytes; the stored data is never modified and
+    # the lossless default is "none". Independent of _display_bin_factor (GPU
+    # budget); denoise_bin here is the EDS bin-for-SNR knob.
+    denoise = traitlets.Unicode("none").tag(sync=True)
+    denoise_sigma = traitlets.Float(4.0).tag(sync=True)
+    denoise_bin = traitlets.Int(1).tag(sync=True)
+    # Per-panel resolved knobs: one entry per panel, the packing source of
+    # truth. Constructed from scalar (broadcast) or sequence kwargs; the
+    # scalar traits above are the UI-facing editor whose scope is controlled
+    # by denoise_scope ("all" broadcasts, "panel" edits the selected panel).
+    denoise_modes = traitlets.List(traitlets.Unicode(), default_value=[]).tag(sync=True)
+    denoise_sigmas = traitlets.List(traitlets.Float(), default_value=[]).tag(sync=True)
+    denoise_bins = traitlets.List(traitlets.Int(), default_value=[]).tag(sync=True)
+    denoise_scope = traitlets.Unicode("all").tag(sync=True)
+    denoise_banner = traitlets.Unicode("").tag(sync=True)
+    # The denoise controls row is hidden by default; this toggle shows it.
+    # Auto-enabled at construction when any panel starts with an active
+    # denoise so the knobs that explain the view are immediately visible.
+    show_denoise = traitlets.Bool(False).tag(sync=True)
+    # Browser-side filter negotiation: JS sets this True when a real (non
+    # software) WebGPU adapter is available. Python then ships RAW frames for
+    # panels whose mode the browser can evaluate (gaussian/bin2/anscombe
+    # stacks; see BROWSER_DISPLAY_FILTER_MODES) and the WGSL compute port in
+    # js/displayFilter.ts filters client-side, so the sigma slider scrubs live
+    # with no kernel round trip and kernel-less HTML exports keep working
+    # knobs. tv/denova* panels always stay on this Python path.
+    _webgpu_filter_ok = traitlets.Bool(False).tag(sync=True)
+    # Chemistry-on-structure view: HAADF-modulated blend of an element map on
+    # the HAADF lattice as a third RGB panel (haadf | map | blend). Enabled at
+    # construction with underlay=True on exactly two grayscale inputs.
+    underlay = traitlets.Bool(False).tag(sync=True)
+    underlay_alpha = traitlets.Float(0.95).tag(sync=True)
+    underlay_haadf_gain = traitlets.Float(0.35).tag(sync=True)
     _gpu_max_buffer_mb = traitlets.Int(0).tag(sync=True)  # GPU reports maxBufferSize (JS→Python)
     # Flipped True by JS after the first colormap pass has painted to canvas.
     # Used by the Python-side truthful timing print (end-to-end wall clock, not just __init__).
@@ -1017,6 +1101,18 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         notebook_preview_format: str | None = "jpeg",
         notebook_preview_quality: int = 88,
         notebook_preview_max_px: int = 512,
+        denoise: str | Sequence[str] = "none",
+        denoise_sigma: float | Sequence[float] = 4.0,
+        denoise_bin: int | Sequence[int] = 1,
+        denoise_scope: str = "all",
+        show_denoise: bool = False,
+        display_filter: str | Sequence[str] | None = None,
+        display_sigma: float | Sequence[float] | None = None,
+        spatial_bin: int | Sequence[int] | None = None,
+        filter_per_panel: bool | None = None,
+        underlay: bool | str = False,
+        underlay_alpha: float = 0.95,
+        underlay_haadf_gain: float = 0.35,
         **kwargs,
     ):
         import time as _time
@@ -1025,6 +1121,17 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         # anywidget/traitlets silently ignores unknown keys, which hid the
         # pixel_size_angstrom bug in show2d_all_features.ipynb for months.
         _reject_unknown_kwargs(type(self), kwargs)
+        # Deprecated aliases from the display_filter-era API (one rc of
+        # compatibility): map to the denoise family when the new kwarg was
+        # left at its default.
+        if display_filter is not None and denoise == "none":
+            denoise = display_filter
+        if display_sigma is not None and denoise_sigma == 4.0:
+            denoise_sigma = display_sigma
+        if spatial_bin is not None and denoise_bin == 1:
+            denoise_bin = spatial_bin
+        if filter_per_panel is not None and denoise_scope == "all":
+            denoise_scope = "all" if filter_per_panel else "panel"
         data, labels, n_pages, panels_per_page, resolved_page_labels, resolved_page_starred = _normalise_show2d_pages(
             data,
             labels=labels,
@@ -1115,7 +1222,12 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 panel_order=panel_order,
                 show_panel_titles=show_panel_titles, panel_title_font_size=panel_title_font_size,
                 gallery_gap_px=gallery_gap_px,
-                verbose=verbose, state=state, _t0=_t0)
+                verbose=verbose, state=state, _t0=_t0,
+                denoise=denoise, denoise_sigma=denoise_sigma,
+                denoise_bin=denoise_bin, denoise_scope=denoise_scope,
+                show_denoise=show_denoise,
+                underlay=underlay, underlay_alpha=underlay_alpha,
+                underlay_haadf_gain=underlay_haadf_gain)
 
     def _init_sync(self, *, data, labels, title, cmap, n_pages, panels_per_page,
                    page_labels, page_starred, show_title, sampling, units,
@@ -1125,7 +1237,11 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                    ncols, panel_frame_indices, panel_playback_fps, size, smooth, zoom, zoom_row, zoom_col,
                    link_zoom, link_pan, link_contrast, diff_mode, overlay, view_box,
                    display_bin, hidden_panels, starred, panel_order, show_panel_titles,
-                   panel_title_font_size, gallery_gap_px, verbose, state, _t0):
+                   panel_title_font_size, gallery_gap_px, verbose, state, _t0,
+                   denoise="none", denoise_sigma=4.0, denoise_bin=1,
+                   denoise_scope="all", show_denoise=False,
+                   underlay=False, underlay_alpha=0.95,
+                   underlay_haadf_gain=0.35):
         import time as _time
         self._verbose = verbose
         self.widget_version = resolve_widget_version()
@@ -1286,6 +1402,40 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             resolved_panel_frame_indices = [0] * len(panel_stacks)
             overlay_label = f"overlay ({mode})"
             data = self._data  # n_images/height/width below read `data`
+        # underlay sugar: chemistry-on-structure. Blend the element map onto
+        # the HAADF lattice as a third RGB panel so bright columns render in
+        # the map color, never as white HAADF cores.
+        if underlay:
+            if overlay:
+                raise ValueError("Use either overlay or underlay, not both")
+            if str(underlay).lower() not in ("true", "1", "haadf"):
+                raise ValueError(f"underlay must be True or 'haadf', got {underlay!r}")
+            if self._data.shape[0] != 2 or any(self.is_rgb):
+                raise ValueError(
+                    "underlay requires exactly 2 grayscale images (haadf, map); got "
+                    f"{self._data.shape[0]} image(s)"
+                    + (" including RGB panels" if any(self.is_rgb) else "")
+                )
+            if any(stack.shape[0] > 1 for stack in panel_stacks):
+                raise NotImplementedError(
+                    "underlay does not support per-panel frame stacks; pass single frames"
+                )
+            self.underlay = True
+            self.underlay_alpha = float(underlay_alpha)
+            self.underlay_haadf_gain = float(underlay_haadf_gain)
+            self.cmap = str(cmap)
+            self._underlay_haadf_idx = 0
+            self._underlay_map_idx = 1
+            # Raw blend now; the display-filtered blend is recomputed in
+            # _update_all_frames once the filter knobs are set below.
+            composed = self._compute_underlay_blend()
+            self._data = np.concatenate([self._data, (composed @ _RGB_LUMA)[None]], axis=0)
+            self._rgb_frames = [None, None, composed]
+            self.is_rgb = [False, False, True]
+            panel_stacks = [self._data[i:i + 1] for i in range(int(self._data.shape[0]))]
+            resolved_panel_frame_indices = [0] * len(panel_stacks)
+            overlay_label = "map on HAADF"  # reuses the overlay label plumbing
+            data = self._data
         if offline and any(self.is_rgb):
             raise NotImplementedError(
                 "offline=True is not supported for RGB panels; RGB frames are "
@@ -1515,6 +1665,55 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             self._display_bin_factor = 1
             self._display_rgb = self._rgb_frames
             self._display_panel_stacks = self._panel_stacks
+
+        # Display-only filter knobs (view transforms; the stored raw data and
+        # the stats row stay untouched). Scalars broadcast to every panel; a
+        # sequence gives each panel its own filter/sigma/bin (e.g. a raw vs
+        # filtered A/B gallery). Set before the first frame pack so a
+        # constructor-selected filter shows from the first paint.
+        self._display_filter_ready = False
+        self._filter_knob_sync = False
+        n_panels = int(self._data.shape[0])
+
+        def per_panel(value, kind, cast):
+            if isinstance(value, (list, tuple, np.ndarray)):
+                values = [cast(v) for v in value]
+                if len(values) != n_panels:
+                    raise ValueError(
+                        f"{kind} sequence length ({len(values)}) must equal the "
+                        f"panel count ({n_panels})"
+                    )
+                return values, False
+            return [cast(value)] * n_panels, True
+
+        filters, filters_scalar = per_panel(denoise, "denoise", str)
+        sigmas, sigmas_scalar = per_panel(denoise_sigma, "denoise_sigma", float)
+        bins, bins_scalar = per_panel(denoise_bin, "denoise_bin", int)
+        # Compound spellings (bin2, bin2_anscombe, bin4_anscombe) are aliases
+        # for (mode, bin); the traits always hold the canonical trio.
+        from quantem.widget.utils.display_filter import resolve_denoise_mode
+
+        resolved = [resolve_denoise_mode(m, b) for m, b in zip(filters, bins)]
+        filters = [m for m, _ in resolved]
+        bins = [b for _, b in resolved]
+        self.denoise_modes = filters
+        self.denoise_sigmas = sigmas
+        self.denoise_bins = bins
+        # Scalar traits are the UI editor, mirroring the selected panel.
+        self._filter_knob_sync = True
+        self.denoise = self.denoise_modes[0]
+        self.denoise_sigma = float(sigmas[0])
+        self.denoise_bin = int(bins[0])
+        self._filter_knob_sync = False
+        # A sequence means independent per-panel knobs, so UI edits scope to
+        # the selected panel; scalars keep the broadcast "all" scope.
+        broadcast = denoise_scope != "panel" and filters_scalar and sigmas_scalar and bins_scalar
+        self.denoise_scope = "all" if broadcast else "panel"
+        self._display_filter_ready = True
+        self._refresh_display_filter_banner(announce=True)
+        # Denoise controls stay hidden on a clean widget; an active denoise
+        # (or an explicit request) reveals them from the first paint.
+        self.show_denoise = bool(show_denoise) or self._display_filter_active()
 
         # Compute initial stats (from full-res data)
         self._compute_all_stats()
@@ -2422,6 +2621,15 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             crop = self._data[panel, row0:row1, col0:col1]  # view: never copies the full array
             tile = bin2d(crop, factor=bin_factor, mode="mean") if bin_factor > 1 else crop
             tile = np.ascontiguousarray(tile, dtype=np.float32)
+            if self._panel_filter_active(panel):
+                # A raw full-res tile over a filtered preview would silently
+                # un-filter the zoomed view. Filtering the crop is edge-
+                # approximate near the tile border, but honest about the knobs.
+                # Detail tiles stay on this Python path even when the browser
+                # filters the preview (_webgpu_filter_ok): tiles only exist in
+                # kernel sessions and already round-trip, and the committed
+                # knobs here match the browser's committed knobs.
+                tile = np.ascontiguousarray(self._filter_display_frame(tile, panel=panel))
             blocks.append(tile.tobytes())
             tiles.append({"panel": panel, "row0": row0, "col0": col0,
                           "rows": int(tile.shape[0]), "cols": int(tile.shape[1]),
@@ -2989,6 +3197,16 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             "profile_line": self.profile_line,
             "image_rotations": list(self.image_rotations),
             "display_bin": self._display_bin,
+            "denoise": self.denoise,
+            "denoise_sigma": self.denoise_sigma,
+            "denoise_bin": self.denoise_bin,
+            "denoise_scope": self.denoise_scope,
+            "show_denoise": self.show_denoise,
+            "denoise_modes": list(self.denoise_modes),
+            "denoise_sigmas": list(self.denoise_sigmas),
+            "denoise_bins": list(self.denoise_bins),
+            "underlay_alpha": self.underlay_alpha,
+            "underlay_haadf_gain": self.underlay_haadf_gain,
         }
 
     def save(self, path: str):
@@ -3238,6 +3456,12 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         clone.handoff_request = ""
         clone.prepared_view = None
         clone.prepared_view_widget = None
+        # Exported pages ship RAW frames plus the filter knobs: the browser
+        # port (WGSL compute, CPU fallback without WebGPU) filters client-side
+        # so sigma scrubs live with no kernel. Panels on non portable modes
+        # (tv, denova*) still bake their Python-filtered pixels because
+        # _panel_browser_filtered is per panel.
+        clone._webgpu_filter_ok = True
         clone._update_all_frames()
         return clone
 
@@ -3314,6 +3538,10 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 key = "pixel_size"
             elif key == "canvas_size":
                 key = "size"
+            elif key in _DENOISE_STATE_ALIASES:
+                key = _DENOISE_STATE_ALIASES[key]
+            elif key == "filter_per_panel":
+                key, val = "denoise_scope", ("all" if val else "panel")
             if key == "display_bin":
                 self._display_bin = val
                 continue
@@ -3738,9 +3966,312 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         self.stats_max = np.max(self._data, axis=axes).ravel().tolist()
         self.stats_std = np.std(self._data, axis=axes).ravel().tolist()
 
+    @traitlets.validate("denoise")
+    def _validate_display_filter(self, proposal: dict) -> str:
+        """Normalize and reject unknown display filter modes early."""
+        from quantem.widget.utils.display_filter import DISPLAY_FILTER_MODES, _normalize_mode
+
+        mode = _normalize_mode(proposal["value"])
+        if mode != "none" and mode not in DISPLAY_FILTER_MODES:
+            raise traitlets.TraitError(
+                "denoise must be one of "
+                + "|".join(DISPLAY_FILTER_MODES)
+                + f" (or 'off'/'raw'); got {proposal['value']!r}"
+            )
+        return mode
+
+    @traitlets.validate("denoise_scope")
+    def _validate_denoise_scope(self, proposal: dict) -> str:
+        value = str(proposal["value"]).strip().lower()
+        if value not in ("all", "panel"):
+            raise traitlets.TraitError(
+                f"denoise_scope must be 'all' or 'panel'; got {proposal['value']!r}"
+            )
+        return value
+
+    @traitlets.validate("denoise_bin")
+    def _validate_spatial_bin(self, proposal: dict) -> int:
+        value = int(proposal["value"])
+        if value not in (1, 2, 4):
+            raise traitlets.TraitError(f"denoise_bin must be 1, 2, or 4; got {value}")
+        return value
+
+    @traitlets.validate("denoise_modes")
+    def _validate_display_filters(self, proposal: dict) -> list[str]:
+        from quantem.widget.utils.display_filter import DISPLAY_FILTER_MODES, _normalize_mode
+
+        modes = [_normalize_mode(value) for value in proposal["value"]]
+        for mode in modes:
+            if mode != "none" and mode not in DISPLAY_FILTER_MODES:
+                raise traitlets.TraitError(
+                    "denoise_modes entries must be one of "
+                    + "|".join(DISPLAY_FILTER_MODES)
+                    + f" (or 'off'/'raw'); got {mode!r}"
+                )
+        return modes
+
+    @traitlets.validate("denoise_bins")
+    def _validate_spatial_bins(self, proposal: dict) -> list[int]:
+        values = [int(value) for value in proposal["value"]]
+        for value in values:
+            if value not in (1, 2, 4):
+                raise traitlets.TraitError(
+                    f"denoise_bins entries must be 1, 2, or 4; got {value}"
+                )
+        return values
+
+    @traitlets.observe("denoise", "denoise_sigma", "denoise_bin")
+    def _on_display_filter_scalar_change(self, change: dict) -> None:
+        """UI editor knobs write through to the per-panel lists.
+
+        Scope follows ``denoise_scope``: "all" broadcasts the edit to every
+        panel, "panel" edits only the selected panel.
+        """
+        if not getattr(self, "_display_filter_ready", False) or self._filter_knob_sync:
+            return
+        idx = min(int(self.selected_idx), max(0, int(self.n_images) - 1))
+        n_panels = int(self.n_images)
+
+        def updated(current, value):
+            values = list(current)
+            if len(values) != n_panels:
+                values = [value] * n_panels
+            if self.denoise_scope != "panel":
+                return [value] * n_panels
+            values[idx] = value
+            return values
+
+        name = change["name"]
+        if name == "denoise":
+            from quantem.widget.utils.display_filter import resolve_denoise_mode
+
+            mode, extra_bin = resolve_denoise_mode(str(change["new"]))
+            if mode != str(change["new"]):
+                # Compound alias: rewrite the scalar knobs to the canonical
+                # (mode, bin) pair; the recursive observer runs write the
+                # per-panel lists for each.
+                self.denoise = mode
+                if extra_bin > 1:
+                    self.denoise_bin = max(int(self.denoise_bin), extra_bin)
+                return
+            self.denoise_modes = updated(self.denoise_modes, mode)
+        elif name == "denoise_sigma":
+            self.denoise_sigmas = updated(self.denoise_sigmas, float(change["new"]))
+        else:
+            self.denoise_bins = updated(self.denoise_bins, int(change["new"]))
+
+    @traitlets.observe("denoise_modes", "denoise_sigmas", "denoise_bins")
+    def _on_display_filter_change(self, change: dict) -> None:
+        """Repack the display frames when per-panel knobs change (no disk I/O)."""
+        if not getattr(self, "_display_filter_ready", False):
+            return
+        self._refresh_display_filter_banner(announce=True)
+        self._update_all_frames()
+
+    @traitlets.observe("selected_idx")
+    def _on_selected_panel_filter_sync(self, change: dict) -> None:
+        """Panel scope: the scalar editor knobs mirror the selected panel."""
+        if not getattr(self, "_display_filter_ready", False) or self.denoise_scope != "panel":
+            return
+        idx = int(change["new"])
+        if not (0 <= idx < len(self.denoise_modes)):
+            return
+        self._filter_knob_sync = True
+        try:
+            self.denoise = self.denoise_modes[idx]
+            self.denoise_sigma = float(self.denoise_sigmas[idx])
+            self.denoise_bin = int(self.denoise_bins[idx])
+        finally:
+            self._filter_knob_sync = False
+
+    def _panel_filter_knobs(self, panel: int) -> tuple[str, float, int]:
+        filters = self.denoise_modes
+        if not filters or panel >= len(filters):
+            return str(self.denoise), float(self.denoise_sigma), int(self.denoise_bin)
+        return (
+            str(filters[panel]),
+            float(self.denoise_sigmas[panel]),
+            int(self.denoise_bins[panel]),
+        )
+
+    def _panel_filter_active(self, panel: int) -> bool:
+        from quantem.widget.utils.display_filter import _normalize_mode
+
+        mode, _sigma, denoise_bin = self._panel_filter_knobs(panel)
+        return _normalize_mode(mode) != "none" or denoise_bin > 1
+
+    def _display_filter_active(self) -> bool:
+        return any(self._panel_filter_active(i) for i in range(int(self.n_images)))
+
+    def _panel_browser_filtered(self, panel: int) -> bool:
+        """True when this panel's display filter runs in the browser.
+
+        The WGSL port (js/displayFilter.ts) covers the gaussian/bin2/anscombe
+        modes; when the frontend negotiated ``_webgpu_filter_ok`` those panels
+        ship raw pixels and the browser filters. Non portable modes (tv,
+        denova*) keep the Python path even in a WebGPU session.
+        """
+        from quantem.widget.utils.display_filter import (
+            BROWSER_DISPLAY_FILTER_MODES,
+            _normalize_mode,
+        )
+
+        if not bool(self._webgpu_filter_ok):
+            return False
+        mode, _sigma, _spatial_bin = self._panel_filter_knobs(panel)
+        return _normalize_mode(mode) in BROWSER_DISPLAY_FILTER_MODES
+
+    @traitlets.observe("_webgpu_filter_ok")
+    def _on_webgpu_filter_ok_change(self, change: dict) -> None:
+        """Repack frames when the browser filter negotiation flips.
+
+        True: portable panels repack raw (the browser filters them). False
+        (e.g. reopening in a browser without WebGPU): Python filtering packs
+        the view again, so the fallback shows identical pixels.
+        """
+        if not getattr(self, "_display_filter_ready", False):
+            return
+        if self._display_filter_active():
+            self._update_all_frames()
+
+    def _refresh_display_filter_banner(self, *, announce: bool) -> None:
+        """Sync the one-line reduction notice; print it when it changes.
+
+        Announcing an active reduction is a house rule: the user must always
+        know the view is filtered and that ``denoise='none'`` restores
+        raw counts. Mixed per-panel setups summarize which panels are filtered.
+        """
+        from quantem.widget.utils.display_filter import format_display_filter_banner
+
+        knobs = [self._panel_filter_knobs(i) for i in range(int(self.n_images))]
+        active = [i for i in range(int(self.n_images)) if self._panel_filter_active(i)]
+        if not active:
+            banner = ""
+        elif len(set(knobs)) == 1:
+            mode, sigma, denoise_bin = knobs[0]
+            banner = format_display_filter_banner(mode, sigma, denoise_bin)
+        else:
+            per_panel = ", ".join(
+                f"p{i}:{knobs[i][0]} σ={knobs[i][1]:g}"
+                + (f" bin{knobs[i][2]}" if knobs[i][2] > 1 else "")
+                for i in active
+            )
+            banner = f"denoise: {per_panel} (set denoise='none' for raw counts)"
+        changed = banner != self.denoise_banner
+        self.denoise_banner = banner
+        if announce and banner and changed:
+            print(banner)
+
+    def _filter_display_frame(self, frame: np.ndarray, panel: int | None = None) -> np.ndarray:
+        from quantem.widget.utils.display_filter import apply_display_filter
+
+        if panel is None:
+            mode, sigma, denoise_bin = (
+                str(self.denoise),
+                float(self.denoise_sigma),
+                int(self.denoise_bin),
+            )
+        else:
+            mode, sigma, denoise_bin = self._panel_filter_knobs(panel)
+        return apply_display_filter(
+            np.asarray(frame), mode=mode, sigma=sigma, spatial_bin=denoise_bin
+        )
+
+    def _filtered_frames(self, data: np.ndarray) -> np.ndarray:
+        """Filtered VIEW of the display stack; the input arrays are never touched.
+
+        Each panel uses its own knobs from the per-panel lists. RGB panels are
+        skipped: per-channel filtering of composed color panels changes hue
+        balance, so only 2D scalar panels are filtered.
+        """
+        if not self._display_filter_active():
+            return data
+        frames = []
+        for i in range(int(data.shape[0])):
+            rgb = bool(self.is_rgb[i]) if i < len(self.is_rgb) else False
+            # Browser-filtered panels ship raw: the WGSL port applies the same
+            # math client-side (live sigma scrub, kernel-less HTML exports).
+            skip = rgb or not self._panel_filter_active(i) or self._panel_browser_filtered(i)
+            frames.append(
+                np.asarray(data[i], dtype=np.float32)
+                if skip
+                else self._filter_display_frame(data[i], panel=i)
+            )
+        return np.stack(frames, axis=0)
+
+    def _compute_underlay_blend(self) -> np.ndarray:
+        """HAADF-modulated chemistry blend from the two source panels.
+
+        The map goes through the active display filter first, so the blend
+        panel always matches the filtered map panel next to it. Both inputs
+        are percentile-normalized for display; the stored arrays keep raw
+        counts.
+        """
+        from quantem.widget.utils.display_filter import blend_map_on_haadf, magenta_cmap
+
+        haadf = np.asarray(self._data[self._underlay_haadf_idx], dtype=np.float32)
+        map_raw = np.asarray(self._data[self._underlay_map_idx], dtype=np.float32)
+        map_view = (
+            self._filter_display_frame(map_raw, panel=self._underlay_map_idx)
+            if self._panel_filter_active(self._underlay_map_idx)
+            else map_raw
+        )
+
+        def norm01(image, lo_pct, hi_pct):
+            lo, hi = np.percentile(image, [lo_pct, hi_pct])
+            span = hi - lo if hi > lo else 1.0
+            return np.clip((image - lo) / span, 0.0, 1.0)
+
+        cmap_name = str(self.cmap).lower()
+        if cmap_name in ("magenta", "eds_magenta", "mag"):
+            cmap = magenta_cmap()
+        else:
+            import matplotlib.pyplot as plt
+
+            try:
+                cmap = plt.colormaps[str(self.cmap)]
+            except KeyError:
+                cmap = magenta_cmap()
+        return blend_map_on_haadf(
+            # (4, 99) matches the dominant stretch of the drift-paper Fig4
+            # sweep; sparse maps normalized at (2, 99.5) render far too dark.
+            norm01(map_view, 4.0, 99.0),
+            norm01(haadf, 1.0, 99.9),
+            alpha=float(self.underlay_alpha),
+            haadf_gain=float(self.underlay_haadf_gain),
+            cmap=cmap,
+        ).astype(np.float32)
+
+    @traitlets.observe("underlay_alpha", "underlay_haadf_gain")
+    def _on_underlay_change(self, change: dict) -> None:
+        """Re-blend the chemistry panel live when a slider moves."""
+        if getattr(self, "_underlay_map_idx", None) is None or not getattr(
+            self, "_display_filter_ready", False
+        ):
+            return
+        self._update_all_frames()
+
     def _update_all_frames(self):
         """Send display data to JS (possibly binned for large galleries)."""
+        if getattr(self, "_underlay_map_idx", None) is not None and getattr(
+            self, "_display_filter_ready", False
+        ):
+            # The blend depends on filter knobs + underlay sliders; recompute
+            # the RGB panel here so every knob path repacks a fresh blend.
+            composed = self._compute_underlay_blend()
+            self._rgb_frames[-1] = composed
+            display_rgb = list(getattr(self, "_display_rgb", self._rgb_frames))
+            if self._display_bin > 1:
+                from quantem.widget.utils.array import bin2d
+
+                display_rgb[-1] = bin2d(
+                    composed.transpose(2, 0, 1), factor=self._display_bin, mode="mean"
+                ).transpose(1, 2, 0)
+            else:
+                display_rgb[-1] = composed
+            self._display_rgb = display_rgb
         data = self._display_data if self._display_data is not None else self._data
+        data = self._filtered_frames(data)
         if any(self.is_rgb):
             # Mixed packing: each panel is one contiguous float32 block, W*H
             # floats for grayscale, 3*W*H interleaved floats for RGB. JS derives
@@ -3794,10 +4325,25 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         mins = [0.0] * len(stacks)
         maxs = [1.0] * len(stacks)
         float_offset = 0
+        filter_active = self._display_filter_active()
         for panel, stack in enumerate(stacks):
             if int(stack.shape[0]) <= 1:
                 offsets.append(-1)
                 continue
+            rgb = bool(self.is_rgb[panel]) if panel < len(self.is_rgb) else False
+            # Browser-filtered panels ship raw stacks; JS filters each frame
+            # on scrub with the same per-panel knobs.
+            skip = rgb or not self._panel_filter_active(panel) or self._panel_browser_filtered(panel)
+            if filter_active and not skip:
+                # Per-frame filtered VIEW so browser-local frame scrubbing shows
+                # the same filter as the main frame; the stored stack is untouched.
+                stack = np.stack(
+                    [
+                        self._filter_display_frame(stack[k], panel=panel)
+                        for k in range(int(stack.shape[0]))
+                    ],
+                    axis=0,
+                )
             arr = np.ascontiguousarray(stack, dtype=np.float32)
             offsets.append(float_offset)
             float_offset += int(arr.size)

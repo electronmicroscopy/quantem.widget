@@ -44,6 +44,26 @@ no console error, no NaN frame).
 | Panel reorder | `panel_order`; `set_panel_order()`, `move_panel()`, `reset_panel_order()` | Reorders gallery display without changing source data, labels, stars, or hidden state |
 | Diff mode | `diff_mode`, `diff_reference` | Panels render as difference vs the reference |
 
+## Which denoise filter should I use?
+
+The Denoise controls are hidden behind their own toggle by default; everything
+here is display-only (the stored array, the stats row, and raw exports keep
+the original counts, and an active denoise always announces itself with a
+one-line banner). Three methods cover the space; binning is a separate knob,
+so there is no "bin2_anscombe" menu entry: pick **Poisson (Anscombe)** and set
+**Bin 2**.
+
+| Your data | Use | Why |
+|---|---|---|
+| Sparse EDS / counting maps | **Poisson (Anscombe), Bin 2, sigma 6-10** | Respects Poisson count statistics; the standard choice for element maps |
+| Very sparse maps (single counts) | Poisson (Anscombe), Bin 4, sigma 8-12 | More SNR from binning before smoothing |
+| HAADF / decent-dose images | Gaussian, Bin 1, sigma 1-2 (or nothing) | The data is not count-starved; a light smooth is enough |
+| Anything quantitative (FFT, intensities, stats) | None | Measure on raw counts; the stats row is always computed from raw data |
+
+From Python, the same ladder is `denoise="anscombe", denoise_bin=2,
+denoise_sigma=8` (per-panel lists supported for A/B galleries); legacy
+spellings like `display_filter="bin2_anscombe"` keep working as aliases.
+
 ## FFT quality labels
 
 Pass `show_fft=True` to show the FFT panel. By default, `fft_metrics=True`
