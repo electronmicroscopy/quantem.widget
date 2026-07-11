@@ -68,6 +68,26 @@ together. Do not allow a label to remain on one line while its switch or menu
 wraps to the next line. Use an inline-flex pair wrapper or an equivalent stable
 layout primitive with small fixed gaps.
 
+Every compact label that names a live control (`Scale`, `Color`, `Colorbar`,
+`Profile`, `FFT`, `Lens`, `Auto`, `Smooth`, and the `Link` toggles) must render
+inside a pair wrapper, not as a bare sibling of its control. A bare label is the
+one that drifts away from its switch or menu when the toolbar wraps. Give these
+labels full-strength text (`themeColors.text`); reserve the muted text color for
+status text only (export status, page status, zoom readout), never for a label
+that names a control the user can toggle.
+
+**Scoped sub-groups.** When several toggles share one governing word (for
+example `Link` scoping `Zoom`, `Pan`, `Contrast`, and `Denoise`), wrap the whole
+set in a single bordered sub-group led by that word. Repeating or bordering the
+scope keeps it legible when the group wraps; a lone `Pan` switch that wraps away
+from a distant `Link` label reads as an unscoped control.
+
+**Mode-gated knobs get their own row.** Occasional sliders that appear only when
+a mode is on (lens magnification and window size, the denoise method/σ/bin knobs,
+the underlay blend/stretch knobs) belong on their own conditional row, not
+appended to an always-visible row. This keeps the everyday rows short and stops a
+toggled-on tool from forcing the base controls to wrap.
+
 Browser signoff for dense controls must include at least one narrow viewport.
 For Show2D and Show3D, check the main image controls, FFT controls, playback
 controls, linked zoom/pan/contrast controls, and any page/column controls that
