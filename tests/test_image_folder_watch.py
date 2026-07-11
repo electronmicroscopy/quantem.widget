@@ -310,6 +310,37 @@ def test_show3d_folder_many_files_remain_one_unpaged_stack(
         Show3D.from_folder(tmp_path, watch=False, page_labels=["Page 1"])
 
 
+def test_show3d_folder_live_append_crosses_twenty_without_pages(
+    tmp_path: Path,
+) -> None:
+    for index in range(20):
+        _save(tmp_path / f"frame_{index:03d}.npy", index)
+    widget = Show3D.from_folder(tmp_path, watch=False)
+    try:
+        widget_id = id(widget)
+        widget.slice_idx = 19
+        widget.playing = True
+        widget.bookmarked_frames = [19]
+
+        _save(tmp_path / "frame_020.npy", 20)
+        assert widget.poll_folder() == []
+        assert widget.poll_folder() == [20]
+
+        # C1: the 21st live file extends one stack in place and preserves frame
+        # navigation state; no Show2D-style page is inferred.
+        assert id(widget) == widget_id
+        assert widget.n_slices == 21
+        assert widget.n_panels == 1
+        assert widget.n_pages == 1
+        assert widget.panels_per_page == 0
+        assert widget.page_idx == 0
+        assert widget.slice_idx == 19
+        assert widget.bookmarked_frames == [19]
+        assert widget.playing is True
+    finally:
+        widget.close()
+
+
 @pytest.mark.parametrize(
     ("viewer", "count_attr"),
     [(Show2D, "n_images"), (Show3D, "n_slices")],
@@ -527,7 +558,12 @@ def test_folder_empty_launch_arrival_restart_and_close_lifecycle(
     # exactly one append on the same widget model while the watcher survives.
     first = tmp_path / "frame_1.npy"
     first.write_bytes(b"incomplete npy")
-    _wait_until(lambda: first.resolve() in widget.folder_errors)
+    _wait_until(
+        lambda: (
+            first.resolve() in widget.folder_errors
+            and widget.folder_watch_state == "waiting"
+        )
+    )
     assert int(getattr(widget, count_attr)) == 0
     assert widget.folder_watch_state == "waiting"
     assert "pending file" in widget.folder_watch_detail

@@ -2371,12 +2371,13 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             return sorted(hidden)
         order = self._folder_ordered_panel_indices()
         page_size = int(self.panels_per_page)
-        for start in range(0, len(order), page_size):
+        for page_index, start in enumerate(range(0, len(order), page_size)):
             page = order[start : start + page_size]
             if page and all(panel in hidden for panel in page):
                 if not drop_if_full:
                     raise traitlets.TraitError(
-                        "hidden_panels cannot hide every item on a folder page; "
+                        "hidden_panels cannot hide every panel on folder page "
+                        f"{page_index + 1}; "
                         "leave at least one source image visible"
                     )
                 hidden.discard(page[-1])
@@ -3605,6 +3606,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             "page_idx": int(self.page_idx),
             "panels_per_page": int(self.panels_per_page),
             "page_kind": str(self.page_kind),
+            "folder_page_size": getattr(self, "_folder_page_size", None),
             "page_labels": list(self.page_labels),
             "page_starred": list(self.page_starred),
             "hidden_panels": list(self.hidden_panels),
@@ -3930,9 +3932,48 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
 
     def load_state_dict(self, state):
         state = dict(state)
-        if state.get("page_kind") in {"comparison", "items"}:
-            # Hidden-state normalization below depends on the page semantics.
-            self.page_kind = str(state["page_kind"])
+        page_kind = str(state.get("page_kind", self.page_kind))
+        if page_kind not in {"comparison", "items"}:
+            page_kind = str(self.page_kind)
+            state.pop("page_kind", None)
+        try:
+            saved_n_pages = max(1, int(state.get("n_pages", self.n_pages)))
+            saved_panels_per_page = max(
+                0,
+                int(state.get("panels_per_page", self.panels_per_page)),
+            )
+        except (TypeError, ValueError):
+            saved_n_pages = int(self.n_pages)
+            saved_panels_per_page = int(self.panels_per_page)
+            state.pop("n_pages", None)
+            state.pop("panels_per_page", None)
+        n_images = int(self.n_images)
+        valid_pages = saved_n_pages == 1 and saved_panels_per_page == 0
+        if saved_n_pages > 1 and saved_panels_per_page > 0:
+            if page_kind == "items":
+                valid_pages = (
+                    saved_n_pages == math.ceil(n_images / saved_panels_per_page)
+                )
+            else:
+                valid_pages = n_images == saved_n_pages * saved_panels_per_page
+        if valid_pages:
+            # Page index, labels, and hidden-state normalization below all need
+            # the saved layout installed before they are validated.
+            self.page_kind = page_kind
+            self.n_pages = saved_n_pages
+            self.panels_per_page = saved_panels_per_page
+        else:
+            state.pop("n_pages", None)
+            state.pop("panels_per_page", None)
+            state.pop("page_kind", None)
+        folder_page_size = state.pop("folder_page_size", None)
+        if page_kind == "items" and hasattr(self, "_folder_source"):
+            try:
+                self._folder_page_size = _validate_folder_page_size(
+                    folder_page_size,
+                )
+            except (TypeError, ValueError):
+                pass
         # A crop saved from a single-panel session cannot apply to a gallery.
         if int(self.n_images) != 1:
             state.pop("view_crop", None)
@@ -4408,10 +4449,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 try:
                     hidden = self._normalize_item_page_hidden(hidden)
                 except traitlets.TraitError as exc:
-                    raise ValueError(
-                        "set_hidden_panels would hide every item on a folder page; "
-                        "leave at least one source image visible"
-                    ) from exc
+                    raise ValueError(str(exc)) from exc
         if len(hidden) >= int(self.n_images):
             raise ValueError("set_hidden_panels would hide every panel; leave at least one visible")
         self.hidden_panels = sorted(hidden)
@@ -4435,10 +4473,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 try:
                     to_hide = set(self._normalize_item_page_hidden(sorted(to_hide)))
                 except traitlets.TraitError as exc:
-                    raise ValueError(
-                        "hide_panel would hide every item on a folder page; "
-                        "leave at least one source image visible"
-                    ) from exc
+                    raise ValueError(str(exc)) from exc
         if len(to_hide) >= int(self.n_images):
             raise ValueError("hide_panel would hide every panel; leave at least one visible")
         self.hidden_panels = sorted(to_hide)
