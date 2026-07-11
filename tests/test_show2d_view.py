@@ -190,3 +190,94 @@ def test_set_image_replaces_stack_in_place_and_resets_stale_view_state():
     assert w.stats_mean == [2.0, 4.0, 6.0]
     assert bytes(w.frame_bytes) != old_frame_bytes
     assert len(w.frame_bytes) == data.nbytes
+
+
+# ---------------------------------------------------------------------------
+# Reversible view ops: crop_to_view() + pad_ratio (display window, single panel)
+# ---------------------------------------------------------------------------
+
+def test_crop_to_view_commits_viewport_and_raw_data_stays():
+    """Zoom into a feature with view_box, commit it with crop_to_view(): the
+    displayed extent shrinks to the window while the stored array, and the
+    stats computed from it, never change."""
+    image = _image(256)
+    kept = image.copy()
+    w = Show2D(image, view_box=(64, 64, 96), verbose=False)
+    stats_before = (list(w.stats_mean), list(w.stats_min), list(w.stats_max))
+    w.crop_to_view()
+    assert w.view_crop == [64, 160, 64, 160]
+    assert (w.height, w.width) == (96, 96)
+    sent = np.frombuffer(w.frame_bytes, dtype=np.float32, count=96 * 96).reshape(96, 96)
+    np.testing.assert_array_equal(sent, image[64:160, 64:160])
+    np.testing.assert_array_equal(w._data[0], kept)  # display-only: raw intact
+    assert (list(w.stats_mean), list(w.stats_min), list(w.stats_max)) == stats_before
+    assert "view: cropped to (64,64)-(160,160)" in w.view_banner
+    # Cursor readouts stay full-image: JS adds this native-pixel offset.
+    assert w._view_crop_offset == [64, 64]
+
+
+def test_crop_applies_before_denoise():
+    """Denoise operates on the cropped region: the packed frame equals
+    filtering the cropped window, not cropping a full-frame filter result."""
+    from quantem.widget.utils.display_filter import apply_display_filter
+
+    image = _image(256)
+    w = Show2D(image, denoise="gaussian", denoise_sigma=3, view_box=(32, 32, 64), verbose=False)
+    w.crop_to_view()
+    sent = np.frombuffer(w.frame_bytes, dtype=np.float32, count=64 * 64).reshape(64, 64)
+    expected = apply_display_filter(image[32:96, 32:96], mode="gaussian", sigma=3.0)
+    np.testing.assert_allclose(sent, expected, rtol=1e-6)
+
+
+def test_pad_ratio_adds_min_valued_border():
+    """pad_ratio=0.1 grows the packed frame by the border on each side and
+    fills it with the image minimum so the colormap floor is unchanged."""
+    image = _image(128)
+    w = Show2D(image, pad_ratio=0.1, verbose=False)
+    pad = round(0.1 * 128)
+    assert (w.height, w.width) == (128 + 2 * pad, 128 + 2 * pad)
+    n = w.height * w.width
+    sent = np.frombuffer(w.frame_bytes, dtype=np.float32, count=n).reshape(w.height, w.width)
+    np.testing.assert_array_equal(sent[pad:-pad, pad:-pad], image)
+    assert sent[0, 0] == image.min()  # border keeps the colormap floor
+    assert "pad 10%" in w.view_banner
+
+
+def test_reset_view_ops_restores_bit_identical_frame():
+    """Crop + pad, then reset_view_ops(): the frame bytes match the original
+    pack exactly, proving both ops are reversible display windows."""
+    image = _image(128)
+    w = Show2D(image, verbose=False)
+    original = bytes(w.frame_bytes)
+    w.view_box = [32.0, 96.0, 32.0, 96.0]  # what a browser zoom would sync
+    w.crop_to_view()
+    w.pad_ratio = 0.1
+    assert bytes(w.frame_bytes) != original
+    w.reset_view_ops()
+    assert bytes(w.frame_bytes) == original
+    assert (w.height, w.width) == (128, 128)
+    assert w.view_banner == ""
+    assert w._view_crop_offset == [0, 0]
+
+
+def test_view_ops_survive_state_round_trip():
+    """Save a cropped + padded session, load it into a fresh widget on the
+    same data: the committed window and border come back identically."""
+    image = _image(128)
+    w = Show2D(image, view_box=(16, 16, 64), verbose=False)
+    w.crop_to_view()
+    w.pad_ratio = 0.05
+    state = w.state_dict()
+    restored = Show2D(image, verbose=False)
+    restored.load_state_dict(state)
+    assert restored.view_crop == w.view_crop
+    assert restored.pad_ratio == 0.05
+    assert bytes(restored.frame_bytes) == bytes(w.frame_bytes)
+
+
+def test_crop_to_view_raises_for_galleries():
+    """Crop-to-view is single panel only in this release; a gallery gets a
+    clear NotImplementedError instead of a silently wrong window."""
+    w = Show2D([_image(64), _image(64)], verbose=False)
+    with pytest.raises(NotImplementedError, match="single panel"):
+        w.crop_to_view()

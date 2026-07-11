@@ -593,7 +593,16 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     denoise_scope : {"all", "panel"}, default "all"
         UI knob scope: "all" applies Denoise/σ/Bin edits to every panel,
         "panel" edits only the selected panel. Passing any per-panel sequence
-        switches to the "panel" scope automatically. The deprecated aliases
+        switches to the "panel" scope automatically. In gallery mode the
+        toggle lives in the Link group (Link Zoom / Pan / Contrast / Denoise):
+        checked means linked ("all"), unchecked means per panel.
+    pad_ratio : float, default 0.0
+        Ratio-based border added on each side of the displayed frame, as a
+        fraction of the image's max(rows, cols). Valid range 0 to 1. The
+        border value is the frame minimum, which keeps the colormap floor.
+        Display-only and reversible (single-panel widgets only): combine
+        with :meth:`crop_to_view` and undo with :meth:`reset_view_ops`.
+        When active, a one-line ``view:`` banner announces the reduction. The deprecated aliases
         ``display_filter``, ``display_sigma``, ``spatial_bin`` and
         ``filter_per_panel`` are still accepted for one release and map onto
         ``denoise``, ``denoise_sigma``, ``denoise_bin`` and ``denoise_scope``.
@@ -852,6 +861,21 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     # ~100 ms), so current_view always reflects what is on screen. The box is
     # axis-aligned: two corners (row0, col0)/(row1, col1) define all four.
     view_box = traitlets.List(trait=traitlets.Float(), default_value=[]).tag(sync=True)
+    # Reversible display-window ops (single panel only). view_crop holds the
+    # committed crop (row0, row1, col0, col1) in FULL-RESOLUTION image pixels
+    # (empty = no crop); pad_ratio adds a constant border (value = frame
+    # minimum) around the displayed frame. Both are display-only view
+    # transforms applied while packing frame_bytes: the stored data is never
+    # modified and reset_view_ops() restores the full frame bit-identically.
+    view_crop = traitlets.List(trait=traitlets.Int(), default_value=[]).tag(sync=True)
+    pad_ratio = traitlets.Float(0.0).tag(sync=True)
+    # One-line announcement of an active crop/pad. Same house rule as
+    # denoise_banner: an active view reduction is never silent.
+    view_banner = traitlets.Unicode("").tag(sync=True)
+    # (row, col) native-pixel offset of the packed frame's origin relative to
+    # the full image. JS adds it to cursor readouts so displayed coordinates
+    # stay full-image while a crop or pad is active.
+    _view_crop_offset = traitlets.List(trait=traitlets.Int(), default_value=[0, 0]).tag(sync=True)
     link_zoom = traitlets.Bool(False).tag(sync=True)
     link_pan = traitlets.Bool(False).tag(sync=True)
     link_contrast = traitlets.Bool(True).tag(sync=True)
@@ -1039,6 +1063,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         diff_mode: bool = False,
         overlay: bool | str = False,
         view_box: tuple | list | None = None,
+        pad_ratio: float = 0.0,
         display_bin: int | str = "auto",
         hidden_panels: Sequence[int | str] | int | str | None = None,
         starred: Sequence[int | str] | int | str | None = None,
@@ -1167,6 +1192,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 zoom_row=zoom_row, zoom_col=zoom_col,
                 link_zoom=link_zoom, link_pan=link_pan, link_contrast=link_contrast,
                 diff_mode=diff_mode, overlay=overlay, view_box=view_box,
+                pad_ratio=pad_ratio,
                 display_bin=display_bin, hidden_panels=hidden_panels, starred=starred,
                 panel_order=panel_order,
                 show_panel_titles=show_panel_titles, panel_title_font_size=panel_title_font_size,
@@ -1185,7 +1211,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                    vmin, vmax,
                    ncols, panel_frame_indices, size, smooth, zoom, zoom_row, zoom_col,
                    link_zoom, link_pan, link_contrast, diff_mode, overlay, view_box,
-                   display_bin, hidden_panels, starred, panel_order, show_panel_titles,
+                   pad_ratio, display_bin, hidden_panels, starred, panel_order, show_panel_titles,
                    panel_title_font_size, gallery_gap_px, verbose, state, _t0,
                    denoise="none", denoise_sigma=4.0, denoise_bin=1,
                    denoise_scope="all", show_denoise=False,
@@ -1663,6 +1689,15 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         # (or an explicit request) reveals them from the first paint.
         self.show_denoise = bool(show_denoise) or self._display_filter_active()
 
+        # Reversible view ops: a crop is committed later via crop_to_view(),
+        # but the pad kwarg can start active. Geometry (frame extent, cursor
+        # offset, banner) is synced before the first frame pack; the observer
+        # stays inert until _view_ops_ready so the constructor zoom survives.
+        self._view_ops_ready = False
+        self.pad_ratio = float(pad_ratio)
+        self._refresh_view_ops(announce=True)
+        self._view_ops_ready = True
+
         # Compute initial stats (from full-res data)
         self._compute_all_stats()
 
@@ -2097,6 +2132,14 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                     self.view_box = []
                     self.zoom_row = None
                     self.zoom_col = None
+                if list(self.view_crop) or float(self.pad_ratio) > 0.0:
+                    # Replacing the pixels invalidates a committed crop/pad:
+                    # the window described a view of the OLD data.
+                    self._view_ops_ready = False
+                    self.view_crop = []
+                    self.pad_ratio = 0.0
+                    self._view_ops_ready = True
+                    self._refresh_view_ops(announce=False)
                 self._compute_all_stats()
                 self._update_all_frames()
         finally:
@@ -2433,6 +2476,14 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             return
         factor = max(1, int(self._display_bin_factor))
         full_h, full_w = int(self._data.shape[1]), int(self._data.shape[2])
+        # With a crop/pad active, JS coordinates are frame-local: shift into
+        # full-image pixels here, clamp to the committed crop window so a
+        # tile never un-crops the view, and reply in frame-local coordinates.
+        offset_row, offset_col = (int(v) for v in self._view_crop_offset)
+        if len(self.view_crop) == 4:
+            win_row0, win_row1, win_col0, win_col1 = (int(v) for v in self.view_crop)
+        else:
+            win_row0, win_row1, win_col0, win_col1 = 0, full_h, 0, full_w
         tiles: list[dict] = []
         blocks: list[bytes] = []
         offset = 0
@@ -2445,10 +2496,10 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             bin_factor = max(1, int(spec.get("bin", 1)))
             # Snap the window outward to bin multiples anchored at the image
             # origin so mean-binning blocks tile the crop with no partial edges.
-            row0 = max(0, math.floor(float(spec["row0"]) * factor / bin_factor) * bin_factor)
-            col0 = max(0, math.floor(float(spec["col0"]) * factor / bin_factor) * bin_factor)
-            row1 = min(full_h, math.ceil(float(spec["row1"]) * factor / bin_factor) * bin_factor)
-            col1 = min(full_w, math.ceil(float(spec["col1"]) * factor / bin_factor) * bin_factor)
+            row0 = max(win_row0, math.floor((float(spec["row0"]) * factor + offset_row) / bin_factor) * bin_factor)
+            col0 = max(win_col0, math.floor((float(spec["col0"]) * factor + offset_col) / bin_factor) * bin_factor)
+            row1 = min(win_row1, math.ceil((float(spec["row1"]) * factor + offset_row) / bin_factor) * bin_factor)
+            col1 = min(win_col1, math.ceil((float(spec["col1"]) * factor + offset_col) / bin_factor) * bin_factor)
             if row1 <= row0 or col1 <= col0:
                 continue
             crop = self._data[panel, row0:row1, col0:col1]  # view: never copies the full array
@@ -2464,7 +2515,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 # knobs here match the browser's committed knobs.
                 tile = np.ascontiguousarray(self._filter_display_frame(tile, panel=panel))
             blocks.append(tile.tobytes())
-            tiles.append({"panel": panel, "row0": row0, "col0": col0,
+            tiles.append({"panel": panel, "row0": row0 - offset_row, "col0": col0 - offset_col,
                           "rows": int(tile.shape[0]), "cols": int(tile.shape[1]),
                           "bin": bin_factor, "offset": offset})
             offset += tile.nbytes
@@ -2980,6 +3031,8 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             "zoom_row": self.zoom_row,
             "zoom_col": self.zoom_col,
             "view_box": list(self.view_box),
+            "view_crop": list(self.view_crop),
+            "pad_ratio": float(self.pad_ratio),
             "diff_mode": self.diff_mode,
             "ncols": self.ncols,
             "selected_idx": self.selected_idx,
@@ -3258,6 +3311,9 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
 
     def load_state_dict(self, state):
         state = dict(state)
+        # A crop saved from a single-panel session cannot apply to a gallery.
+        if int(self.n_images) != 1:
+            state.pop("view_crop", None)
         if "page_idx" in state:
             try:
                 state["page_idx"] = int(max(0, min(int(state["page_idx"]), int(self.n_pages) - 1)))
@@ -3378,6 +3434,76 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                          "height_cal": (row1 - row0) * scale, "width_cal": (col1 - col0) * scale,
                          "unit": self.pixel_unit})
         return view
+
+    def crop_to_view(self) -> Self:
+        """Commit the current browser viewport as the display extent.
+
+        Zoom into a feature (mouse wheel, or ``view_box=`` at construction),
+        then call this to make that window the whole displayed frame: the
+        widget repacks only the committed region, so an active denoise
+        operates on the cropped view. Display-only and reversible: the
+        stored array is never modified, the stats row keeps reporting the
+        full raw data, and cursor coordinates stay full-image (row, col).
+        :meth:`reset_view_ops` restores the full frame bit-identically.
+
+        Returns
+        -------
+        Self
+            The widget, for chaining.
+
+        Raises
+        ------
+        NotImplementedError
+            For galleries (crop-to-view is single panel only in this
+            release) and for RGB panels.
+
+        Examples
+        --------
+        >>> w = Show2D(image, view_box=(64, 64, 96))  # zoom into a feature
+        >>> w.crop_to_view()      # the 96x96 window becomes the display extent
+        >>> w.reset_view_ops()    # back to the full frame, bit-identical
+        """
+        if int(self.n_images) != 1:
+            raise NotImplementedError(
+                f"crop_to_view() supports a single panel; this widget shows "
+                f"{int(self.n_images)} panels. Crop the arrays before display for galleries."
+            )
+        if any(self.is_rgb):
+            raise NotImplementedError(
+                "crop_to_view() supports grayscale panels; this panel is RGB."
+            )
+        view = self.current_view
+        factor = max(1, int(self._display_bin_factor))
+        offset_row, offset_col = (int(v) for v in self._view_crop_offset)
+        self.view_crop = [
+            int(math.floor(view["row0"])) * factor + offset_row,
+            int(math.ceil(view["row1"])) * factor + offset_row,
+            int(math.floor(view["col0"])) * factor + offset_col,
+            int(math.ceil(view["col1"])) * factor + offset_col,
+        ]
+        return self
+
+    def reset_view_ops(self) -> Self:
+        """Restore the uncropped, unpadded display.
+
+        Undoes :meth:`crop_to_view` and ``pad_ratio`` in one call. Both ops
+        are display-only view transforms, so resetting returns the exact
+        original frame bytes; the stored data was never touched.
+
+        Returns
+        -------
+        Self
+            The widget, for chaining.
+
+        Examples
+        --------
+        >>> w = Show2D(image, pad_ratio=0.1)
+        >>> w.reset_view_ops()  # full frame again, no border
+        """
+        with self.hold_sync():
+            self.view_crop = []
+            self.pad_ratio = 0.0
+        return self
 
     def to_show3d(
         self,
@@ -3811,6 +3937,143 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 )
         return values
 
+    @traitlets.validate("pad_ratio")
+    def _validate_pad_ratio(self, proposal: dict) -> float:
+        value = float(proposal["value"])
+        if not 0.0 <= value <= 1.0:
+            raise traitlets.TraitError(
+                f"pad_ratio must be between 0 and 1 (border as a fraction of "
+                f"max(rows, cols)); got {value}"
+            )
+        return value
+
+    @traitlets.validate("view_crop")
+    def _validate_view_crop(self, proposal: dict) -> list[int]:
+        values = [int(v) for v in proposal["value"]]
+        if not values:
+            return []
+        if len(values) != 4:
+            raise traitlets.TraitError(
+                f"view_crop must be empty or (row0, row1, col0, col1) in "
+                f"full-resolution image pixels; got {len(values)} values"
+            )
+        if getattr(self, "_data", None) is None:
+            return values
+        if int(self.n_images) != 1:
+            raise traitlets.TraitError(
+                f"view_crop supports a single panel; this widget shows "
+                f"{int(self.n_images)} panels"
+            )
+        full_h, full_w = int(self._data.shape[1]), int(self._data.shape[2])
+        row0, row1, col0, col1 = values
+        row0, col0 = max(0, row0), max(0, col0)
+        row1, col1 = min(full_h, row1), min(full_w, col1)
+        if row1 - row0 < 2 or col1 - col0 < 2:
+            raise traitlets.TraitError(
+                f"view_crop window must span at least 2x2 pixels inside the "
+                f"{full_h}x{full_w} image; got {values}"
+            )
+        return [row0, row1, col0, col1]
+
+    # =========================================================================
+    # Reversible view ops: crop-to-view + pad (display window, single panel)
+    # =========================================================================
+    def _view_ops_geometry(self) -> tuple[tuple[int, int, int, int], int]:
+        """Active crop window and pad width in DISPLAY pixels.
+
+        The view_crop trait holds full-resolution coordinates while the
+        packed frames live in display pixels (after any _display_bin), so
+        the window is rescaled here. No crop returns the full display frame.
+        RGB panels bypass view ops (the mixed packing path ships display
+        RGB pixels that these helpers never see).
+        """
+        data = self._display_data if self._display_data is not None else self._data
+        full_h, full_w = int(data.shape[1]), int(data.shape[2])
+        single_scalar = int(self.n_images) == 1 and not any(self.is_rgb)
+        factor = max(1, int(self._display_bin_factor))
+        if len(self.view_crop) == 4 and single_scalar:
+            row0, row1, col0, col1 = (int(v) for v in self.view_crop)
+            crop = (
+                max(0, row0 // factor),
+                min(full_h, -(-row1 // factor)),
+                max(0, col0 // factor),
+                min(full_w, -(-col1 // factor)),
+            )
+        else:
+            crop = (0, full_h, 0, full_w)
+        pad = 0
+        if float(self.pad_ratio) > 0 and single_scalar:
+            # Border width is a fraction of the image's max(rows, cols) so
+            # the same ratio reads the same at any aspect; the border value
+            # is the frame minimum, which keeps the colormap floor.
+            pad = max(1, round(float(self.pad_ratio) * max(full_h, full_w)))
+        return crop, pad
+
+    def _view_ops_active(self) -> bool:
+        crop, pad = self._view_ops_geometry()
+        data = self._display_data if self._display_data is not None else self._data
+        return pad > 0 or crop != (0, int(data.shape[1]), 0, int(data.shape[2]))
+
+    def _crop_view_stack(self, data: np.ndarray) -> np.ndarray:
+        """Crop VIEW of the display stack (before denoise); never copies."""
+        (row0, row1, col0, col1), _pad = self._view_ops_geometry()
+        return data[:, row0:row1, col0:col1]
+
+    def _pad_view_stack(self, data: np.ndarray) -> np.ndarray:
+        """Constant border around each frame (after denoise); value = frame min."""
+        _crop, pad = self._view_ops_geometry()
+        if pad <= 0:
+            return data
+        frames = []
+        for frame in np.asarray(data, dtype=np.float32):
+            finite = frame[np.isfinite(frame)]
+            fill = float(finite.min()) if finite.size else 0.0
+            frames.append(np.pad(frame, pad, constant_values=fill))
+        return np.stack(frames, axis=0)
+
+    def _refresh_view_ops(self, *, announce: bool) -> None:
+        """Sync the frame extent, cursor offset, and crop/pad notice.
+
+        An active view reduction is never silent (house rule): the banner
+        names the crop window in full-image coordinates and the pad ratio,
+        and says that reset_view_ops() restores the full frame.
+        """
+        (row0, row1, col0, col1), pad = self._view_ops_geometry()
+        factor = max(1, int(self._display_bin_factor))
+        self.height = (row1 - row0) + 2 * pad
+        self.width = (col1 - col0) + 2 * pad
+        self._view_crop_offset = [(row0 - pad) * factor, (col0 - pad) * factor]
+        parts = []
+        if len(self.view_crop) == 4:
+            r0, r1, c0, c1 = (int(v) for v in self.view_crop)
+            parts.append(f"cropped to ({r0},{c0})-({r1},{c1})")
+        if float(self.pad_ratio) > 0:
+            parts.append(f"pad {float(self.pad_ratio):.0%}")
+        banner = (
+            f"view: {' · '.join(parts)} (reset_view_ops() restores full frame)"
+            if parts
+            else ""
+        )
+        changed = banner != self.view_banner
+        self.view_banner = banner
+        if announce and banner and changed:
+            print(banner)
+
+    @traitlets.observe("view_crop", "pad_ratio")
+    def _on_view_ops_change(self, change: dict) -> None:
+        """Repack the display frames when the crop window or pad changes."""
+        if not getattr(self, "_view_ops_ready", False):
+            return
+        with self.hold_sync():
+            self._refresh_view_ops(announce=True)
+            # The committed window now fills the frame: clear the stale
+            # zoom/viewport so the browser paints the new extent at 1x.
+            self.view_box = []
+            self.initial_zoom = 1.0
+            self.zoom_row = None
+            self.zoom_col = None
+            self._update_all_frames()
+
     @traitlets.observe("denoise", "denoise_sigma", "denoise_bin")
     def _on_display_filter_scalar_change(self, change: dict) -> None:
         """UI editor knobs write through to the per-panel lists.
@@ -4062,7 +4325,12 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 display_rgb[-1] = composed
             self._display_rgb = display_rgb
         data = self._display_data if self._display_data is not None else self._data
+        # Reversible view ops: crop the display window BEFORE denoise (so the
+        # filter operates on the cropped region) and pad AFTER it (so the
+        # border stays a flat minimum instead of smearing into the filter).
+        data = self._crop_view_stack(data)
         data = self._filtered_frames(data)
+        data = self._pad_view_stack(data)
         if any(self.is_rgb):
             # Mixed packing: each panel is one contiguous float32 block, W*H
             # floats for grayscale, 3*W*H interleaved floats for RGB. JS derives
@@ -4122,6 +4390,10 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 offsets.append(-1)
                 continue
             rgb = bool(self.is_rgb[panel]) if panel < len(self.is_rgb) else False
+            if not rgb:
+                # View ops track the main frame so browser-local frame
+                # scrubbing shows the same committed crop window.
+                stack = self._crop_view_stack(stack)
             # Browser-filtered panels ship raw stacks; JS filters each frame
             # on scrub with the same per-panel knobs.
             skip = rgb or not self._panel_filter_active(panel) or self._panel_browser_filtered(panel)
@@ -4135,6 +4407,8 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                     ],
                     axis=0,
                 )
+            if not rgb:
+                stack = self._pad_view_stack(stack)
             arr = np.ascontiguousarray(stack, dtype=np.float32)
             offsets.append(float_offset)
             float_offset += int(arr.size)

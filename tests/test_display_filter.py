@@ -197,6 +197,40 @@ def test_show2d_per_panel_filter_lists():
     assert widget.denoise == "anscombe"
 
 
+def test_show2d_eight_panel_eds_gallery_scoped_and_linked_edits():
+    """An 8-panel EDS gallery (4 sparse maps denoised, 4 raw references):
+    each panel packs with its own knobs, clicking a panel and turning a knob
+    edits only that panel while unlinked, and relinking the Denoise switch
+    (denoise_scope="all") broadcasts the next edit to every panel."""
+    from quantem.widget import Show2D
+
+    maps = [_sparse_eds_map(seed=s, shape=(64, 64)) for s in range(8)]
+    widget = Show2D(
+        maps,
+        denoise=["anscombe"] * 4 + ["none"] * 4,
+        denoise_sigma=[6.0, 8.0, 10.0, 12.0] + [4.0] * 4,
+        verbose=False,
+    )
+    assert widget.denoise_scope == "panel"  # per-panel lists => unlinked
+    n = 64 * 64
+    sent = np.frombuffer(widget.frame_bytes[: 8 * n * 4], dtype=np.float32).reshape(8, 64, 64)
+    for panel in range(4):  # denoised maps: filtered view, raw data intact
+        assert not np.array_equal(sent[panel], maps[panel])
+        np.testing.assert_array_equal(widget._data[panel], maps[panel])
+    for panel in range(4, 8):  # reference panels: bit-identical raw
+        np.testing.assert_array_equal(sent[panel], maps[panel])
+    # Click panel 5 (a raw reference), turn on gaussian: only panel 5 changes.
+    widget.selected_idx = 5
+    assert widget.denoise == "none"  # editor knobs mirror the clicked panel
+    widget.denoise = "gaussian"
+    assert widget.denoise_modes == ["anscombe"] * 4 + ["none", "gaussian", "none", "none"]
+    # Relink through the Denoise switch in the Link group: the next edit
+    # broadcasts to every panel.
+    widget.denoise_scope = "all"
+    widget.denoise = "anscombe"
+    assert widget.denoise_modes == ["anscombe"] * 8
+
+
 def test_show2d_underlay_composes_chemistry_on_haadf():
     """underlay=True on (haadf, map) adds the blend as a third RGB panel:
     haadf gray | map | map-on-HAADF, with bright columns colored (not white),

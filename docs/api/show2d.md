@@ -42,6 +42,10 @@ no console error, no NaN frame).
 | Gallery page controls | `page_idx`, `n_pages`, `panels_per_page`, `page_labels`, `page_starred` | Switch, star, or play through panel pages without changing the source stack |
 | Panel reorder | `panel_order`; `set_panel_order()`, `move_panel()`, `reset_panel_order()` | Reorders gallery display without changing source data, labels, stars, or hidden state |
 | Diff mode | `diff_mode`, `diff_reference` | Panels render as difference vs the reference |
+| Link Denoise switch (gallery) | `denoise_scope` | Linked ("all"): denoise edits apply to every panel; unlinked ("panel"): edits apply to the selected panel only |
+| View menu: Crop to view | `view_crop`; `crop_to_view()` | Commits the current viewport as the display extent (single panel, display-only, reversible) |
+| View menu: Pad 5% / 10% / 20% | `pad_ratio` | Adds a border on each side, filled with the image minimum |
+| View menu: Reset view | `reset_view_ops()` | Restores the uncropped, unpadded display bit-identically |
 
 ## Which denoise filter should I use?
 
@@ -62,6 +66,38 @@ so there is no "bin2_anscombe" menu entry: pick **Poisson (Anscombe)** and set
 From Python, the same ladder is `denoise="anscombe", denoise_bin=2,
 denoise_sigma=8` (per-panel lists supported for A/B galleries); legacy
 spellings like `display_filter="bin2_anscombe"` keep working as aliases.
+
+## Crop and pad the view (advanced)
+
+Single-panel widgets can commit the current browser viewport as the display
+extent and add a ratio-based border, either from the toolbar's **View** menu
+(Crop to view, Pad 5% / 10% / 20%, Reset view) or from Python:
+
+```python
+w = Show2D(image, view_box=(64, 64, 96))  # zoom into a feature
+w.crop_to_view()          # the 96x96 window becomes the displayed frame
+w.pad_ratio = 0.1         # border on each side, 10% of max(rows, cols)
+w.reset_view_ops()        # full frame again, bit-identical
+```
+
+Both ops honor the display-only contract:
+
+- The stored array is never modified; `reset_view_ops()` returns the exact
+  original frame bytes.
+- The crop applies in the display pipeline **before** denoise, so an active
+  denoise operates on the cropped region; the pad (filled with the image
+  minimum, keeping the colormap floor) applies after it.
+- The stats row keeps reporting the full raw data, and cursor coordinates
+  remain full-image (row, col) while a crop or pad is active: the crop is a
+  display window, not a new coordinate system.
+- An active crop or pad is never silent: a one-line `view:` banner names the
+  window and the ratio, e.g.
+  `view: cropped to (64,64)-(160,160) · pad 10% (reset_view_ops() restores full frame)`.
+- Both persist through `state_dict()` / `load_state_dict()`.
+
+Galleries are not supported in this release; `crop_to_view()` raises
+`NotImplementedError` so a multi-panel session never gets a silently wrong
+window. Crop the arrays before display instead.
 
 ## FFT quality labels
 

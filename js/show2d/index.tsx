@@ -1025,6 +1025,19 @@ function Show2D() {
   const [showDenoise, setShowDenoise] = useModelState<boolean>("show_denoise");
   const [denoiseScope, setDenoiseScope] = useModelState<string>("denoise_scope");
   const denoiseScopeAll = denoiseScope !== "panel";
+  // Reversible view ops (single panel): view_crop commits a viewport as the
+  // display extent (full-resolution image pixels), pad_ratio adds a border.
+  // Python repacks the frames; _view_crop_offset keeps cursor readouts in
+  // full-image coordinates while a crop or pad is active.
+  const [viewCrop, setViewCrop] = useModelState<number[]>("view_crop");
+  const [padRatio, setPadRatio] = useModelState<number>("pad_ratio");
+  const [viewBanner] = useModelState<string>("view_banner");
+  const [viewCropOffset] = useModelState<number[]>("_view_crop_offset");
+  const viewOpsActive = (viewCrop?.length === 4) || (padRatio || 0) > 0;
+  // View-op menu entries need a kernel to repack the frame: hide them in
+  // galleries (single panel only in this release) and on kernel-less pages
+  // (offline quantized exports and _export_light float32 exports alike).
+  const viewOpsAvailable = !isGallery && !offlineForTheme;
   // Per-panel resolved knobs (the packing source of truth in Python).
   const [displayFilters, setDisplayFilters] = useModelState<string[]>("denoise_modes");
   const [displaySigmas, setDisplaySigmas] = useModelState<number[]>("denoise_sigmas");
@@ -4734,6 +4747,42 @@ function Show2D() {
     setFftPanY(0);
   };
 
+  // Crop-to-view (View menu): commit the on-screen viewport as the display
+  // extent. Coordinates go to Python in full-resolution image pixels (the
+  // offset trait already accounts for an earlier crop/pad); Python repacks
+  // the frame with the crop applied before denoise.
+  const handleCropToView = () => {
+    setViewMenuAnchor(null);
+    const zs = getZoomState(0);
+    const cx = canvasW / 2;
+    const cy = canvasH / 2;
+    const row0 = Math.max(0, ((0 - cy - zs.panY) / zs.zoom + cy) / displayScale);
+    const row1 = Math.min(height, ((canvasH - cy - zs.panY) / zs.zoom + cy) / displayScale);
+    const col0 = Math.max(0, ((0 - cx - zs.panX) / zs.zoom + cx) / displayScale);
+    const col1 = Math.min(width, ((canvasW - cx - zs.panX) / zs.zoom + cx) / displayScale);
+    const f = Math.max(1, displayBinFactor || 1);
+    const offRow = viewCropOffset?.[0] || 0;
+    const offCol = viewCropOffset?.[1] || 0;
+    setViewCrop([
+      Math.floor(row0) * f + offRow,
+      Math.ceil(row1) * f + offRow,
+      Math.floor(col0) * f + offCol,
+      Math.ceil(col1) * f + offCol,
+    ]);
+  };
+
+  // Committing a crop/pad rebuilds the frame extent: clear the stale local
+  // zoom so the new frame paints at 1x (Python cleared its zoom traits too).
+  const viewOpsKey = `${(viewCrop || []).join(",")}|${padRatio || 0}`;
+  const prevViewOpsKeyRef = React.useRef(viewOpsKey);
+  React.useEffect(() => {
+    if (prevViewOpsKeyRef.current === viewOpsKey) return;
+    prevViewOpsKeyRef.current = viewOpsKey;
+    const resetState = resetViewState();
+    setZoomStates(new Map(Array.from({ length: nImages }, (_, i) => [i, resetState])));
+    setLinkedZoomState(resetState);
+  }, [viewOpsKey, nImages, resetViewState]);
+
   // FFT zoom/pan — cursor-anchored zoom matching FFT's own canvas transform.
   // FFT render: translate(centerOffsetX, centerOffsetY) → scale(zoom) where
   //   centerOffsetX = (canvasW - canvasW*zoom)/2 + panX
@@ -5286,7 +5335,9 @@ function Show2D() {
           const rgbData = isRgbPanel(idx) ? rgbDataRef.current[idx] : null;
           const rgbOffset = (imgY * width + imgX) * 3;
           setCursorInfo({
-            idx, row: nativeRow, col: nativeCol, value, valueSource,
+            // Cursor readout stays in FULL-image coordinates while a crop or
+            // pad is active: the offset trait shifts frame-local pixels back.
+            idx, row: nativeRow + (viewCropOffset?.[0] || 0), col: nativeCol + (viewCropOffset?.[1] || 0), value, valueSource,
             rgb: rgbData ? [rgbData[rgbOffset], rgbData[rgbOffset + 1], rgbData[rgbOffset + 2]] : null,
           });
         }
@@ -6154,7 +6205,7 @@ function Show2D() {
                   </Menu>
                 </>
               )}
-              {handoffEnabled && (
+              {(handoffEnabled || viewOpsAvailable) && (
                 <>
                   <Button
                     size="small"
@@ -6176,9 +6227,29 @@ function Show2D() {
                     MenuListProps={{ "aria-label": "View options" }}
                     {...themedTopMenuProps}
                   >
-                    <MenuItem onClick={handleHandoffToShow3D} sx={{ fontSize: 12 }}>
-                      View as 3D
-                    </MenuItem>
+                    {handoffEnabled && (
+                      <MenuItem onClick={handleHandoffToShow3D} sx={{ fontSize: 12 }}>
+                        View as 3D
+                      </MenuItem>
+                    )}
+                    {/* Reversible view ops (single panel, kernel-backed):
+                        crop commits the viewport, pad adds a border, reset
+                        restores the full frame. Display-only by contract. */}
+                    {viewOpsAvailable && (
+                      <MenuItem onClick={handleCropToView} sx={{ fontSize: 12 }} title="Commit the current viewport as the display extent. Display-only and reversible; Reset view restores the full frame.">
+                        Crop to view
+                      </MenuItem>
+                    )}
+                    {viewOpsAvailable && [0.05, 0.1, 0.2].map((ratio) => (
+                      <MenuItem key={ratio} onClick={() => { setPadRatio(ratio); setViewMenuAnchor(null); }} sx={{ fontSize: 12 }} title="Border on each side as a fraction of max(rows, cols), filled with the image minimum.">
+                        Pad {Math.round(ratio * 100)}%
+                      </MenuItem>
+                    ))}
+                    {viewOpsAvailable && (
+                      <MenuItem disabled={!viewOpsActive} onClick={() => { setViewCrop([]); setPadRatio(0); setViewMenuAnchor(null); }} sx={{ fontSize: 12 }}>
+                        Reset view
+                      </MenuItem>
+                    )}
                   </Menu>
                 </>
               )}
@@ -6865,6 +6936,15 @@ function Show2D() {
                           {filterBannerText.split(" (")[0]}
                         </Typography>
                       )}
+                      {viewBanner && (
+                        /* Same rule for view ops: an active crop/pad announces
+                           itself; the tooltip carries the reset hint. The label
+                           drops only the trailing hint (the crop window itself
+                           contains parentheses). */
+                        <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.accent }} title={viewBanner}>
+                          {viewBanner.replace(/ \(reset_view_ops\(\).*$/, "")}
+                        </Typography>
+                      )}
                       {!isGallery && showLens && (
                         <>
                           <Typography sx={{ ...typography.label, fontSize: 10 }}>Lens {lensMag}×</Typography>
@@ -6887,6 +6967,10 @@ function Show2D() {
                           <Box sx={controlPairSx}>
                             <Typography sx={{ ...typography.label, fontSize: 10 }} title="Share contrast slider across panels.">Contrast</Typography>
                             <Switch checked={linkedContrast} onChange={() => { setLinkedContrast(!linkedContrast); }} size="small" sx={switchStyles.small} />
+                          </Box>
+                          <Box sx={controlPairSx}>
+                            <Typography sx={{ ...typography.label, fontSize: 10 }} title="Linked: denoise edits apply to every panel. Unlinked: edits apply to the selected panel only.">Denoise</Typography>
+                            <Switch checked={denoiseScopeAll} onChange={() => setDenoiseScope(denoiseScopeAll ? "panel" : "all")} size="small" sx={switchStyles.small} />
                           </Box>
                         </>
                       )}
@@ -6923,12 +7007,6 @@ function Show2D() {
                           {[1, 2, 4].map((b) => (<MenuItem key={b} value={String(b)}>{b}</MenuItem>))}
                         </Select>
                       </Box>
-                      {isGallery && (
-                        <Box sx={controlPairSx}>
-                          <Typography sx={{ ...typography.label, fontSize: 10 }} title="Denoise scope. On (all): Denoise/σ/Bin edits apply to every panel. Off (panel): edits apply only to the selected panel.">All</Typography>
-                          <Switch checked={denoiseScopeAll} onChange={() => setDenoiseScope(denoiseScopeAll ? "panel" : "all")} size="small" sx={switchStyles.small} />
-                        </Box>
-                      )}
                       {filterBannerText && (
                         <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.accent }} title={filterBannerText}>
                           {filterBannerText.split(" (")[0]} · raw: denoise='none'
