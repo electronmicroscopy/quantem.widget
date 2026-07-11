@@ -37,7 +37,8 @@ export. See the [Show3D tutorial](../tutorials/show3d).
 | FFT toggle | `show_fft` | Shows the FFT view for the current frame or visible panel grid |
 | FFT quality labels | `fft_metrics` | Compact in-panel label reports FFT sharpness, peak count, and peak SNR from the cached FFT magnitude |
 | FFT window toggle | `fft_window` | Apodization on/off before FFT rendering |
-| Resize / zoom chrome | `show_resize_handles`, `show_zoom_indicator` | Resize handles and zoom readout show/hide |
+| Resize / zoom chrome | `show_resize_handles`, `show_zoom_indicator` | Resize handles and zoom readouts show/hide; the zoom setting covers every real-space panel and FFT tile/inset |
+| FFT layout and initial view | `fft_layout`, `fft_overlay_position`, `fft_overlay_size`, `fft_overlay_zoom` | Places FFTs below, right, or inside every panel and initializes their shared zoom |
 
 ## FFT quality labels
 
@@ -51,6 +52,12 @@ playback, zoom, and pan do not trigger an extra FFT for the label. Set
 The first FFT for a frame or ROI may take a moment on large data. After that,
 Show3D reuses the cached FFT magnitude when you return to the same frame and
 when you redraw, zoom, pan, scrub, or show metric labels.
+
+Every visible FFT tile or overlay inset shows the shared live magnification as
+an `N.N×` badge, even for uncalibrated arrays. Wheel or pinch zoom updates it;
+double-click, double-tap, or Reset returns to `1.0×`. Pass
+`fft_overlay_zoom=2.0` to initialize any FFT layout at `2.0×`, and set
+`show_zoom_indicator=False` to hide both real-space and FFT zoom badges.
 
 ## Live stack updates
 
@@ -117,7 +124,11 @@ w
 `watch=True` is the default. The first folder scan establishes deterministic
 frame order, then the watcher appends newly readable files without rebuilding
 the widget or rereading unchanged source files. Use Show2D instead when each
-file should be a separate comparison panel.
+file should be a separate comparison panel. An empty watched folder stays
+mounted and changes into the real stack in the same widget model after the
+first stable frame. The compact title-area badge reports `Watching`,
+`Updating`, `Waiting for file completion`, `Watch error`, or `Stopped`; fixed
+`watch=False` snapshots do not show it.
 
 ```python
 new_frames = w.poll_folder()       # scan now; return newly appended indices
@@ -128,12 +139,18 @@ w.close()                         # stop watching and close the widget
 
 Folder watching is append-only. Files already represented in the stack are not
 duplicated, incomplete files wait for a later poll, and source removals or
-rewrites do not alter existing frames silently. Pass `watch=False` when a fixed
-folder must remain fixed.
+rewrites do not alter existing frames silently. An incompatible shape is
+reported without blocking a later compatible frame. Pass `watch=False` when a
+fixed folder must remain fixed.
 
 `Show3D.from_folder(...)` reads full-resolution source frames. `ShowFolder`
 uses cached thumbnails to browse and select a session quickly; those thumbnails
 are not the data used by the folder-backed Show3D stack.
+
+Maintainer real-time signoff follows
+[S3D-17](../maintainer/storyboard-show3d.md#s3d-17-watch-a-live-emd-frame-series-in-place):
+append genuine EMD frames after the stack is visibly mounted and verify the
+same browser canvas, playback state, and frame controls update.
 
 ## Panel visibility
 

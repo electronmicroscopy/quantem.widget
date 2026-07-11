@@ -151,10 +151,22 @@ def _master_file_contract(master: Any) -> dict[str, Any]:
     """Read the raw shape and dtype needed to validate a watched master."""
     import h5py
     import numpy as np
-    from quantem.widget.io import get_metadata
+    from quantem.widget.io import get_metadata, inspect_master_readiness
 
     metadata = get_metadata(str(master))
+    scan_shape = metadata.get("scan_shape")
+    detector_shape = metadata.get("detector_shape")
+    n_frames = metadata.get("n_frames")
     dtype = metadata.get("dtype")
+    if detector_shape is None or n_frames is None or dtype is None:
+        # Some valid external-link masters omit the optional microscope
+        # metadata tree even though their HDF5 source headers are complete.
+        # Reuse the header-only readiness inspector rather than rejecting a
+        # source that the public readiness API has already proven readable.
+        readiness = inspect_master_readiness(master, scan_shape=scan_shape)
+        detector_shape = detector_shape or readiness.detector_shape
+        n_frames = n_frames or readiness.actual_frames
+        dtype = dtype or readiness.dtype
     if dtype is None:
         with h5py.File(master, "r") as handle:
             data_group = handle.get("entry/data")
@@ -168,9 +180,9 @@ def _master_file_contract(master: Any) -> dict[str, Any]:
                 raise ValueError(f"{master!s} has no readable 4D-STEM data dataset.")
             dtype = dataset.dtype
     return {
-        "scan_shape": metadata.get("scan_shape"),
-        "detector_shape": metadata.get("detector_shape"),
-        "n_frames": metadata.get("n_frames"),
+        "scan_shape": scan_shape,
+        "detector_shape": detector_shape,
+        "n_frames": n_frames,
         "dtype": np.dtype(dtype).str,
     }
 
@@ -429,6 +441,22 @@ def _attach_mps_folder_methods(
     ready_only: bool,
 ) -> Any:
     """Expose the from_folder polling API on an MPS lazy viewer instance."""
+    from quantem.widget._folder_watch_status import set_folder_watch_status
+
+    viewer._mps_folder_live = live
+
+    def publish_status(state: str, detail: str = "") -> None:
+        publisher = getattr(viewer, "_publish_mps_folder_watch_status", None)
+        if callable(publisher):
+            publisher(state, detail)
+        else:
+            set_folder_watch_status(viewer, state, detail)
+
+    status_setter = getattr(live, "set_status_callback", None)
+    if callable(status_setter):
+        status_setter(publish_status)
+    else:
+        set_folder_watch_status(viewer, "hidden", "")
 
     def poll_folder(self, *, async_: bool = True) -> list[int]:
         return live.poll_master_folder(
@@ -438,6 +466,7 @@ def _attach_mps_folder_methods(
             scan_size=scan_size,
             ready_only=ready_only,
             async_=async_,
+            require_stable=True,
         )
 
     def watch_folder(self, *, interval: float = 2.0) -> Any:
@@ -483,6 +512,10 @@ def from_folder(
     page_size: int | None = None,
     preload_all_if_fits: bool = True,
     warm_cache: bool = False,
+    preview_cache: bool | str = "auto",
+    preview_cache_dir: str | pathlib.Path | None = None,
+    preview_cache_max_bytes: int | None = 4 << 30,
+    rebuild_preview_cache: bool = False,
     verbose: bool = False,
     **viewer_kwargs: Any,
 ) -> Any:
@@ -504,8 +537,10 @@ def from_folder(
     ``columns`` controls the grid width and ``page_size`` controls how many
     datasets are shown and preloaded together. The older ``compare_cols`` and
     ``compare_max_panels`` keywords remain accepted for compatibility. Set
-    ``warm_cache=True`` to populate BF/ABF/ADF/HAADF page previews in bounded
-    background batches while keeping raw 4D data lazy.
+    ``preview_cache="auto"`` persists exact reduced BF/ABF/ADF/HAADF previews
+    in the user cache so a later widget can paint them while current raw data
+    refreshes. ``warm_cache=True`` proactively fills all four standard presets
+    in bounded background batches while keeping raw 4D data lazy.
     """
     import torch
     from quantem.widget.data import Dataset5dstem
@@ -537,6 +572,11 @@ def from_folder(
         raise ValueError(f"columns must be >= 0, got {compare_cols}")
     if compare_max_panels < 1:
         raise ValueError(f"page_size must be >= 1, got {compare_max_panels}")
+    if preview_cache_max_bytes is not None and int(preview_cache_max_bytes) < 0:
+        raise ValueError(
+            "preview_cache_max_bytes must be >= 0 or None, got "
+            f"{preview_cache_max_bytes}"
+        )
     if page_size is not None and preload_initial_page is True:
         preload_initial_page = compare_max_panels
 
@@ -583,6 +623,47 @@ def from_folder(
             list(masters),
             verbose=bool(verbose),
         )
+        expected_contract = _master_file_contract(masters[0])
+
+        def validate_mps_master(master: Any) -> None:
+            candidate = _master_file_contract(master)
+            mismatches = [
+                name
+                for name in ("scan_shape", "detector_shape", "n_frames", "dtype")
+                if candidate.get(name) != expected_contract.get(name)
+            ]
+            if mismatches:
+                observed = ", ".join(
+                    f"{name}={candidate.get(name)!r}" for name in mismatches
+                )
+                expected = ", ".join(
+                    f"{name}={expected_contract.get(name)!r}" for name in mismatches
+                )
+                raise ValueError(
+                    f"Incompatible 4D-STEM master {_master_label(master)!r}: "
+                    f"{observed}; expected {expected}. Use scan_size= or a "
+                    "narrower pattern= for a uniform folder."
+                )
+
+        compatible_masters: list[Any] = []
+        skipped_contracts: list[Any] = []
+        for master in masters:
+            try:
+                validate_mps_master(master)
+            except ValueError:
+                skipped_contracts.append(master)
+            else:
+                compatible_masters.append(master)
+        if skipped_contracts and verbose:
+            warnings.warn(
+                "Show4DSTEM.from_folder skipped "
+                f"{len(skipped_contracts)} MPS master file"
+                f"{'s' if len(skipped_contracts) != 1 else ''} whose scan, detector, "
+                "frame-count, or dtype contract differs from the first ready master.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        masters = compatible_masters
         if warm_cache:
             viewer_kwargs.setdefault(
                 "compare_cache_pages",
@@ -595,6 +676,7 @@ def from_folder(
             scan_size=scan_size,
             verbose=verbose,
             skip_mps_memory_check=skip_mps_memory_check,
+            validate_master=validate_mps_master,
         )
         viewer = Show4DSTEM(
             live,
@@ -657,16 +739,52 @@ def from_folder(
         )
 
     load_options = dict(load_kwargs or {})
+    placement_conflicts = sorted(
+        key for key in ("device", "devices", "gpus") if key in load_options
+    )
+    if gpu_ids is not None and placement_conflicts:
+        raise ValueError(
+            "gpus= controls Show4DSTEM.from_folder CUDA placement; remove "
+            f"{placement_conflicts!r} from load_kwargs so each worker decodes "
+            "on its capacity-planned GPU."
+        )
     if backend is None and gpu_ids is not None:
         backend = "cuda"
     if backend is not None:
         load_options.setdefault("backend", backend)
     load_dtype = "u16" if _dtype_token(dtype) == "auto" else dtype
+    from quantem.widget.show4dstem_preview_cache import Show4DSTEMPreviewCache
+
+    loaded_source_signatures: dict[int, dict[str, Any]] = {}
+    preview_cache_enabled = bool(
+        preview_cache is not False
+        and str(preview_cache).strip().lower() not in {"false", "off", "none", "0"}
+        and preview_cache_max_bytes != 0
+    )
+
+    # Lazy loaders are created before Dataset5dstem configures paging, so keep a
+    # late-bound series reference. Once page("auto") selects capacity-aware
+    # targets, cold reloads follow that authoritative placement instead of
+    # recomputing a fixed idx % n_gpus assignment in the factory.
+    series_ref: dict[str, Any] = {}
+
+    def target_gpu(idx: int) -> int | None:
+        if gpu_ids is None:
+            return None
+        series = series_ref.get("series")
+        page_devices = list(getattr(series, "_page_devices", []) or [])
+        if idx < len(page_devices):
+            device = torch.device(page_devices[idx])
+            if device.type == "cuda":
+                return int(0 if device.index is None else device.index)
+        return int(gpu_ids[idx % len(gpu_ids)])
 
     def load_master(master, idx: int) -> torch.Tensor:
+        signature_before = Show4DSTEMPreviewCache.source_signature(master)
+        gpu = target_gpu(idx)
         single_options = dict(load_options)
-        if gpu_ids is not None:
-            single_options.setdefault("device", int(gpu_ids[idx % len(gpu_ids)]))
+        if gpu is not None:
+            single_options.setdefault("device", gpu)
         result = load(
             master,
             det_bin=det_bin,
@@ -680,15 +798,53 @@ def from_folder(
             else result
         )
         tensor = data if isinstance(data, torch.Tensor) else torch.from_dlpack(data)
-        if gpu_ids is not None:
-            tensor = tensor.to(f"cuda:{gpu_ids[idx % len(gpu_ids)]}")
+        if gpu is not None:
+            tensor = tensor.to(f"cuda:{gpu}")
+        signature_after = Show4DSTEMPreviewCache.source_signature(master)
+        if signature_after != signature_before:
+            raise RuntimeError(
+                f"{master!s} changed while Show4DSTEM was loading it. "
+                "Wait for the master and linked chunks to become stable, then retry."
+            )
+        loaded_source_signatures[int(idx)] = signature_after
         return tensor
 
-    def _tensor_from_dlpack(value):
-        return value if isinstance(value, torch.Tensor) else torch.from_dlpack(value)
+    def load_independent_batch(items) -> dict[int, torch.Tensor]:
+        """Load independent frames concurrently across, but not within, GPUs.
+
+        One worker owns each selected CUDA device and decodes that device's
+        files serially. Different cards can make progress together, while every
+        returned frame owns an independent allocation that LRU eviction can
+        actually reclaim. This also keeps the capacity planner's per-index
+        target authoritative for folders spread across multiple disks.
+        """
+        from concurrent.futures import ThreadPoolExecutor
+
+        grouped: dict[int, list[tuple[int, Any]]] = {}
+        for idx, master in items:
+            gpu = target_gpu(int(idx))
+            if gpu is None:
+                return {}
+            grouped.setdefault(gpu, []).append((int(idx), master))
+
+        def worker(group: list[tuple[int, Any]]) -> dict[int, torch.Tensor]:
+            return {idx: load_master(master, idx) for idx, master in group}
+
+        if len(grouped) == 1:
+            return worker(next(iter(grouped.values())))
+        loaded: dict[int, torch.Tensor] = {}
+        with ThreadPoolExecutor(max_workers=max(1, len(grouped))) as pool:
+            for result in pool.map(worker, grouped.values()):
+                loaded.update(result)
+        return loaded
 
     def _initial_page_target() -> int:
         if not preload_initial_page or not _multiple_view_requested(view_mode):
+            return 1
+        # A durable preview cache can paint every visible BF/DF tile after the
+        # unavoidable first-master calibration load.  Loading a larger raw page
+        # before the cache is consulted defeats fast repeat-open behavior.
+        if preview_cache_enabled:
             return 1
         # One unbinned 512x512x192x192 uint16 master is about 18 GiB. Load the
         # first master safely, let Dataset5dstem establish per-GPU byte budgets,
@@ -714,19 +870,10 @@ def from_folder(
         backend_name = str(load_options.get("backend", "")).lower()
         if backend_name not in {"cuda", "cupy"}:
             return {}
-        batch_options = dict(load_options)
-        batch_options.pop("device", None)
-        batch_options.pop("gpus", None)
-        batch_options["backend"] = "cuda"
-        batch_options["devices"] = list(gpu_ids)
         load_failed = False
         try:
-            result = load(
-                masters[:target],
-                det_bin=det_bin,
-                dtype=load_dtype,
-                verbose=False,
-                **batch_options,
+            initial = load_independent_batch(
+                [(idx, master) for idx, master in enumerate(masters[:target])]
             )
         except BaseException as exc:
             if _is_recoverable_allocation_error(exc):
@@ -738,32 +885,6 @@ def from_folder(
             # no longer holds partial CuPy arrays from the failed batch.
             _reclaim_failed_load_memory(torch, gpu_ids)
             return {}
-        data = result.data if _is_load_result(result) else result
-        metadata = getattr(result, "metadata", {}) if _is_load_result(result) else {}
-        initial: dict[int, torch.Tensor] = {}
-        if isinstance(data, dict):
-            shard_order = metadata.get("shard_order") or {}
-            for device, array in data.items():
-                tensor = _tensor_from_dlpack(array)
-                order = shard_order.get(device)
-                if order is None:
-                    try:
-                        order = shard_order.get(int(device), [])
-                    except (TypeError, ValueError):
-                        order = []
-                order = list(order)
-                if not order:
-                    continue
-                for local_pos, original_idx in enumerate(order):
-                    if int(original_idx) < target and local_pos < int(tensor.shape[0]):
-                        initial[int(original_idx)] = tensor[local_pos]
-        else:
-            tensor = _tensor_from_dlpack(data)
-            for idx in range(min(target, int(tensor.shape[0]))):
-                frame = tensor[idx]
-                if gpu_ids is not None and frame.device.type != "cuda":
-                    frame = frame.to(f"cuda:{gpu_ids[idx % len(gpu_ids)]}")
-                initial[idx] = frame
         if 0 not in initial:
             return {}
         return initial
@@ -899,42 +1020,7 @@ def from_folder(
         backend_name = str(load_options.get("backend", "")).lower()
         if backend_name not in {"cuda", "cupy"}:
             return {}
-        batch_options = dict(load_options)
-        batch_options.pop("device", None)
-        batch_options.pop("gpus", None)
-        batch_options["backend"] = "cuda"
-        batch_options["devices"] = list(gpu_ids)
-        result = load(
-            selected_masters,
-            det_bin=det_bin,
-            dtype=load_dtype,
-            verbose=False,
-            **batch_options,
-        )
-        data = result.data if _is_load_result(result) else result
-        metadata = getattr(result, "metadata", {}) if _is_load_result(result) else {}
-        loaded: dict[int, torch.Tensor] = {}
-        if isinstance(data, dict):
-            shard_order = metadata.get("shard_order") or {}
-            for device, array in data.items():
-                tensor = _tensor_from_dlpack(array)
-                order = shard_order.get(device)
-                if order is None:
-                    try:
-                        order = shard_order.get(int(device), [])
-                    except (TypeError, ValueError):
-                        order = []
-                for local_pos, selected_pos in enumerate(list(order)):
-                    if local_pos < int(tensor.shape[0]):
-                        loaded[requested[int(selected_pos)]] = tensor[local_pos]
-        else:
-            tensor = _tensor_from_dlpack(data)
-            for local_pos, original_idx in enumerate(requested[: int(tensor.shape[0])]):
-                frame = tensor[local_pos]
-                if gpu_ids is not None and frame.device.type != "cuda":
-                    frame = frame.to(f"cuda:{gpu_ids[original_idx % len(gpu_ids)]}")
-                loaded[int(original_idx)] = frame
-        return loaded
+        return load_independent_batch(zip(requested, selected_masters, strict=True))
 
     def make_loader(master, idx: int):
         label = _master_label(master)
@@ -956,12 +1042,51 @@ def from_folder(
         shape=(len(loaders), *tuple(first_tensor.shape)),
         dtype=first_tensor.dtype,
         initial_frames=initial_frames,
-        # Full 192x192 detector masters are ~18 GiB each. Their single-file
-        # loaders pin directly to the target GPU and cooperate with paging;
-        # a page-level CuPy batch can retain a large failed allocation pool.
-        batch_loader=None if int(det_bin) == 1 else load_master_batch,
+        # Each device worker decodes serially into independent allocations, so
+        # exact no-bin masters can use the same multi-GPU progressive waves
+        # without a shared page-sized CuPy stack blocking LRU reclamation.
+        batch_loader=load_master_batch,
         name=f"Show4DSTEM folder: {folder_path.name}",
     )
+    def cache_contract_value(value):
+        if value is None or isinstance(value, (bool, int, float, str)):
+            return value
+        if isinstance(value, (list, tuple)):
+            return [cache_contract_value(item) for item in value]
+        if isinstance(value, dict):
+            return {
+                str(key): cache_contract_value(item)
+                for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+            }
+        return repr(value)
+
+    value_options = {
+        str(key): cache_contract_value(value)
+        for key, value in sorted(load_options.items())
+        if str(key) not in {"backend", "device", "verbose"}
+    }
+    preview_store = Show4DSTEMPreviewCache(
+        folder_path,
+        cache=preview_cache if preview_cache_enabled else False,
+        cache_dir=preview_cache_dir,
+        max_bytes=preview_cache_max_bytes,
+        rebuild=rebuild_preview_cache and preview_cache_enabled,
+        load_contract={
+            "det_bin": int(det_bin),
+            "dtype": str(load_dtype),
+            "scan_shape": None
+            if scan_shape is None
+            else [int(value) for value in scan_shape],
+            "options": value_options,
+        },
+    )
+    # Internal handoff lets cache-enabled construction consult disk previews
+    # before _attach_folder_source(), and lets the host page cache retain source
+    # provenance even when persistent writes are explicitly disabled.
+    series._compare_preview_cache = preview_store
+    series._compare_preview_sources = folder_masters
+    series._compare_loaded_source_signatures = loaded_source_signatures
+    series_ref["series"] = series
     viewer_kwargs.setdefault("frame_dim_label", "Dataset")
     viewer_kwargs.setdefault("frame_labels", names)
     viewer_kwargs.setdefault("view_mode", view_mode)
@@ -995,10 +1120,15 @@ def from_folder(
     )
     if watch:
         widget.watch_folder(interval=watch_interval)
-    if preload_all_if_fits:
-        widget.preload_all_datasets(background=not warm_cache)
-    if warm_cache:
-        widget.warm_compare_cache(background=True)
+    initial_page_thread = getattr(widget, "_compare_page_thread", None)
+    if initial_page_thread is None or not initial_page_thread.is_alive():
+        # If the constructor's cache/progressive page worker is active, its
+        # _resume_folder_compare_maintenance() path starts these sequentially
+        # after visible work. Launching here would race the same CUDA contexts.
+        if preload_all_if_fits:
+            widget.preload_all_datasets(background=not warm_cache)
+        if warm_cache:
+            widget.warm_compare_cache(background=True)
     return widget
 
 

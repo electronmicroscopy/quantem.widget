@@ -222,6 +222,20 @@ def sample_line_profile(
     return acc / width if acc is not None else np.empty(0, dtype=np.float32)
 
 
+def _profile_distance_axis(
+    line: Sequence[Sequence[float]],
+    n_points: int,
+    *,
+    sampling: float,
+) -> np.ndarray:
+    """Return physical distances along a ``(row, col)`` profile line."""
+
+    (row0, col0), (row1, col1) = line
+    length_px = math.hypot(float(row1) - float(row0), float(col1) - float(col0))
+    length = length_px * float(sampling)
+    return np.linspace(0.0, length, max(0, int(n_points)), dtype=np.float32)
+
+
 class Show1D(StaticFallbackMixin, anywidget.AnyWidget):
     """Interactive 1D viewer for traces, line profiles, and live reconstruction.
 
@@ -251,8 +265,13 @@ class Show1D(StaticFallbackMixin, anywidget.AnyWidget):
         button in the frontend.
     plot_height_px, side_panel_width_px : int, optional
         Initial plot height and snapshot/stats side-panel width in pixels.
-    image_cmap : str, default "cividis"
+    image_cmap : str, default "viridis"
         Colormap used for profile and snapshot images.
+    review_mode : {"trace", "optimization"}, optional
+        Scientific traces default to ``"trace"``, which preserves review
+        annotations without treating the final numeric value as a loss score.
+        Optimization factories select ``"optimization"`` so trial ranking and
+        loss-specific alerts remain available for reconstruction sweeps.
     snapshot_contrast_preset : {"full", "0.5-99.5", "1-99", "2-98", "5-95"}, default "full"
         Percentile contrast preset used for snapshot images and plot thumbnails.
     snapshot_contrast_range : sequence of 2 floats, optional
@@ -388,7 +407,8 @@ class Show1D(StaticFallbackMixin, anywidget.AnyWidget):
     trial_tags = traitlets.Dict().tag(sync=True)
     show_trial_notes = traitlets.Bool(False).tag(sync=True)
     show_starred_only = traitlets.Bool(False).tag(sync=True)
-    trial_sort_key = traitlets.Unicode("final_loss").tag(sync=True)
+    review_mode = traitlets.Unicode("trace").tag(sync=True)
+    trial_sort_key = traitlets.Unicode("label").tag(sync=True)
     trial_sort_descending = traitlets.Bool(False).tag(sync=True)
     trial_filter_text = traitlets.Unicode("").tag(sync=True)
     top_trial_count = traitlets.Int(0).tag(sync=True)
@@ -425,7 +445,7 @@ class Show1D(StaticFallbackMixin, anywidget.AnyWidget):
     snapshot_real_space_center = traitlets.List(traitlets.Float(), default_value=[]).tag(sync=True)
     snapshot_fft_zoom = traitlets.Float(1.0).tag(sync=True)
     snapshot_fft_center = traitlets.List(traitlets.Float(), default_value=[]).tag(sync=True)
-    image_cmap = traitlets.Unicode("cividis").tag(sync=True)
+    image_cmap = traitlets.Unicode("viridis").tag(sync=True)
     pixel_size = traitlets.Float(0.0).tag(sync=True)
     pixel_unit = traitlets.Unicode("px").tag(sync=True)
     scale_bar_visible = traitlets.Bool(True).tag(sync=True)
@@ -586,7 +606,7 @@ class Show1D(StaticFallbackMixin, anywidget.AnyWidget):
         profile_image: Any = None,
         profile_line: Sequence[Sequence[float]] | None = None,
         profile_width: int = 1,
-        image_cmap: str = "cividis",
+        image_cmap: str = "viridis",
         snapshot_contrast_preset: str = "full",
         snapshot_contrast_range: Sequence[float] | None = None,
         snapshot_thumbnail_size: int = 48,
@@ -622,7 +642,8 @@ class Show1D(StaticFallbackMixin, anywidget.AnyWidget):
         trial_tags: Mapping[str, Sequence[str]] | None = None,
         show_trial_notes: bool = False,
         show_starred_only: bool = False,
-        trial_sort_key: str = "final_loss",
+        review_mode: str | None = None,
+        trial_sort_key: str | None = None,
         trial_sort_descending: bool = False,
         trial_filter_text: str = "",
         top_trial_count: int = 0,
@@ -750,7 +771,29 @@ class Show1D(StaticFallbackMixin, anywidget.AnyWidget):
         self.trial_tags = self._normalise_trial_tags(trial_tags or {})
         self.show_trial_notes = bool(show_trial_notes)
         self.show_starred_only = bool(show_starred_only)
-        self.trial_sort_key = self._normalise_trial_sort_key(trial_sort_key)
+        if review_mode is None:
+            requested_sort = (
+                self._normalise_trial_sort_key(trial_sort_key)
+                if trial_sort_key is not None
+                else "label"
+            )
+            review_mode = (
+                "optimization"
+                if requested_sort not in {"default", "label"}
+                else "trace"
+            )
+        if trial_sort_key is None:
+            trial_sort_key = (
+                "final_loss"
+                if self._normalise_review_mode(review_mode) == "optimization"
+                else "label"
+            )
+        resolved_review_mode, resolved_sort_key = self._normalise_review_sort_pair(
+            review_mode,
+            trial_sort_key,
+        )
+        self.review_mode = resolved_review_mode
+        self.trial_sort_key = resolved_sort_key
         self.trial_sort_descending = bool(trial_sort_descending)
         self.trial_filter_text = str(trial_filter_text or "")
         self.top_trial_count = max(0, int(top_trial_count))
@@ -870,7 +913,19 @@ class Show1D(StaticFallbackMixin, anywidget.AnyWidget):
 
     @traitlets.validate("trial_sort_key")
     def _validate_trial_sort_key(self, proposal: dict[str, Any]) -> str:
-        return self._normalise_trial_sort_key(str(proposal["value"]))
+        _, sort_key = self._normalise_review_sort_pair(
+            getattr(self, "review_mode", "trace"),
+            str(proposal["value"]),
+        )
+        return sort_key
+
+    @traitlets.validate("review_mode")
+    def _validate_review_mode(self, proposal: dict[str, Any]) -> str:
+        review_mode, _ = self._normalise_review_sort_pair(
+            str(proposal["value"]),
+            getattr(self, "trial_sort_key", "label"),
+        )
+        return review_mode
 
     @traitlets.validate("top_trial_count")
     def _validate_top_trial_count(self, proposal: dict[str, Any]) -> int:
@@ -898,6 +953,12 @@ class Show1D(StaticFallbackMixin, anywidget.AnyWidget):
 
         labels = [str(v) for v in (traces or [])]
         data = np.empty((len(labels), 0), dtype=np.float32)
+        kwargs.setdefault("review_mode", "optimization")
+        resolved_review_mode = cls._normalise_review_mode(str(kwargs["review_mode"]))
+        kwargs.setdefault(
+            "trial_sort_key",
+            "final_loss" if resolved_review_mode == "optimization" else "label",
+        )
         return cls(
             data,
             labels=labels,
@@ -956,6 +1017,12 @@ class Show1D(StaticFallbackMixin, anywidget.AnyWidget):
 
         if not traces:
             raise ValueError("from_loss_runs requires at least one loss trace")
+        kwargs.setdefault("review_mode", "optimization")
+        resolved_review_mode = cls._normalise_review_mode(str(kwargs["review_mode"]))
+        kwargs.setdefault(
+            "trial_sort_key",
+            "final_loss" if resolved_review_mode == "optimization" else "label",
+        )
         return cls(
             traces,
             x=x,
@@ -981,8 +1048,14 @@ class Show1D(StaticFallbackMixin, anywidget.AnyWidget):
         """Build a line-profile viewer from a 2D image and a ``(row, col)`` line."""
 
         profile = sample_line_profile(image, line, profile_width=profile_width)
-        distance = np.arange(profile.size, dtype=np.float32) * float(sampling)
-        return cls(
+        distance = _profile_distance_axis(
+            line,
+            profile.size,
+            sampling=float(sampling),
+        )
+        kwargs.setdefault("sampling", sampling)
+        kwargs.setdefault("units", x_unit)
+        widget = cls(
             profile,
             x=distance,
             labels=["profile"],
@@ -991,10 +1064,11 @@ class Show1D(StaticFallbackMixin, anywidget.AnyWidget):
             x_unit=x_unit,
             y_label=y_label,
             profile_image=image,
-            profile_line=line,
             profile_width=profile_width,
             **kwargs,
         )
+        widget.profile_line = widget._normalise_profile_line(line)
+        return widget
 
     @classmethod
     def from_joint_time_report(
@@ -1020,6 +1094,12 @@ class Show1D(StaticFallbackMixin, anywidget.AnyWidget):
             raise ValueError("summary JSON must contain a non-empty 'metrics' dict")
         methods = sorted(metrics, key=_method_sort_key)
         if frame_by_frame:
+            kwargs.setdefault("review_mode", "optimization")
+            resolved_review_mode = cls._normalise_review_mode(str(kwargs["review_mode"]))
+            kwargs.setdefault(
+                "trial_sort_key",
+                "final_loss" if resolved_review_mode == "optimization" else "label",
+            )
             traces_by_label: dict[str, np.ndarray] = {}
             n_frames = 0
             for method in methods:
@@ -1045,6 +1125,12 @@ class Show1D(StaticFallbackMixin, anywidget.AnyWidget):
             )
             widget.method_labels = [str(idx) for idx in range(n_frames)]
         else:
+            kwargs.setdefault("review_mode", "trace")
+            resolved_review_mode = cls._normalise_review_mode(str(kwargs["review_mode"]))
+            kwargs.setdefault(
+                "trial_sort_key",
+                "final_loss" if resolved_review_mode == "optimization" else "label",
+            )
             keys = list(metric_keys or (
                 "rmse_per_frame_mask",
                 "rmse_time_average_mask",
@@ -1221,7 +1307,7 @@ class Show1D(StaticFallbackMixin, anywidget.AnyWidget):
             verbose=False,
         )
         kwargs.setdefault("snapshot_columns", 4)
-        kwargs.setdefault("image_cmap", "cividis")
+        kwargs.setdefault("image_cmap", "viridis")
         kwargs.setdefault("snapshot_contrast_preset", "1-99")
         kwargs.setdefault("show_snapshot_fft", True)
         kwargs.setdefault("snapshot_fft_layout", "overlay")
@@ -1542,7 +1628,13 @@ class Show1D(StaticFallbackMixin, anywidget.AnyWidget):
                 {"row": float(line[1][0]), "col": float(line[1][1])},
             ]
             values = sample_line_profile(arr, line, profile_width=self.profile_width)
-            self.set_data(values, x=np.arange(values.size, dtype=np.float32), labels=["profile"])
+            sampling = self.pixel_size if self.pixel_size > 0 else 1.0
+            distance = _profile_distance_axis(
+                line,
+                values.size,
+                sampling=sampling,
+            )
+            self.set_data(values, x=distance, labels=["profile"])
         return self
 
     def set_data(self, data: Any, *, x: Any = None, labels: Sequence[str] | None = None) -> Self:
@@ -2049,7 +2141,7 @@ class Show1D(StaticFallbackMixin, anywidget.AnyWidget):
 
     def set_trial_sort(
         self,
-        key: str = "final_loss",
+        key: str | None = None,
         *,
         descending: bool | None = None,
         top: int | None = None,
@@ -2057,7 +2149,10 @@ class Show1D(StaticFallbackMixin, anywidget.AnyWidget):
     ) -> Self:
         """Set ranking/sorting controls used by the frontend review panel."""
 
-        self.trial_sort_key = self._normalise_trial_sort_key(key)
+        if key is None:
+            key = "final_loss" if self.review_mode == "optimization" else "label"
+        _, normalised_key = self._normalise_review_sort_pair(self.review_mode, key)
+        self.trial_sort_key = normalised_key
         if descending is not None:
             self.trial_sort_descending = bool(descending)
         if top is not None:
@@ -2071,13 +2166,18 @@ class Show1D(StaticFallbackMixin, anywidget.AnyWidget):
         """Recompute and return reconstruction ranking rows."""
 
         if key is not None:
-            self.trial_sort_key = self._normalise_trial_sort_key(key)
+            self.set_trial_sort(key)
         self._update_trial_analysis()
         return [dict(row) for row in self.trial_rankings]
 
     def star_best_trial(self) -> Self:
         """Star the current best ranked non-hidden trial."""
 
+        if self.review_mode != "optimization":
+            raise ValueError(
+                "star_best_trial() is only valid for loss-ranked optimization review. "
+                "Use star_trial(label) for scientific traces."
+            )
         self._update_trial_analysis()
         if self.best_trial_label:
             self.star_trial(self.best_trial_label)
@@ -2086,12 +2186,28 @@ class Show1D(StaticFallbackMixin, anywidget.AnyWidget):
     def hide_worst_trials(self, count: int = 1) -> Self:
         """Hide the worst ranked non-starred trials."""
 
+        if self.review_mode != "optimization":
+            raise ValueError(
+                "hide_worst_trials() is only valid for loss-ranked optimization review. "
+                "Use hide_trial(label) for scientific traces."
+            )
         self._update_trial_analysis()
         visible = [
             row for row in self.trial_rankings
-            if not row.get("hidden") and not row.get("starred") and row.get("label") != self.best_trial_label
+            if (
+                not row.get("hidden")
+                and not row.get("starred")
+                and row.get("label") != self.best_trial_label
+                and math.isfinite(_as_float(row.get("score")))
+            )
         ]
-        for row in visible[-max(0, int(count)):]:
+        visible.sort(
+            key=lambda row: (
+                -_as_float(row.get("score")),
+                str(row.get("label") or "").lower(),
+            )
+        )
+        for row in visible[:max(0, int(count))]:
             label = str(row.get("label") or "")
             if label:
                 self.hide_trial(label)
@@ -2154,6 +2270,7 @@ class Show1D(StaticFallbackMixin, anywidget.AnyWidget):
             "trial_notes": dict(self.trial_notes),
             "trial_tags": dict(self.trial_tags),
             "show_starred_only": self.show_starred_only,
+            "review_mode": self.review_mode,
             "trial_sort_key": self.trial_sort_key,
             "trial_sort_descending": self.trial_sort_descending,
             "trial_filter_text": self.trial_filter_text,
@@ -2360,6 +2477,7 @@ class Show1D(StaticFallbackMixin, anywidget.AnyWidget):
             "trial_tags": {str(k): list(v) for k, v in self.trial_tags.items()},
             "show_trial_notes": self.show_trial_notes,
             "show_starred_only": self.show_starred_only,
+            "review_mode": self.review_mode,
             "trial_sort_key": self.trial_sort_key,
             "trial_sort_descending": self.trial_sort_descending,
             "trial_filter_text": self.trial_filter_text,
@@ -2402,7 +2520,33 @@ class Show1D(StaticFallbackMixin, anywidget.AnyWidget):
         save_state_file(path, "Show1D", self.state_dict())
 
     def load_state_dict(self, state: Mapping[str, Any]) -> None:
+        if "review_mode" in state:
+            target_review_mode = self._normalise_review_mode(str(state["review_mode"]))
+            raw_sort_key = state.get(
+                "trial_sort_key",
+                "final_loss" if target_review_mode == "optimization" else "label",
+            )
+            target_review_mode, target_sort_key = self._normalise_review_sort_pair(
+                target_review_mode,
+                str(raw_sort_key),
+            )
+        else:
+            target_review_mode = self._legacy_review_mode_from_state(state)
+            raw_sort_key = state.get(
+                "trial_sort_key",
+                "final_loss" if target_review_mode == "optimization" else "label",
+            )
+            target_sort_key = self._normalise_trial_sort_key(str(raw_sort_key))
+            if target_review_mode == "trace" and target_sort_key not in {"default", "label"}:
+                target_sort_key = "label"
+            target_review_mode, target_sort_key = self._normalise_review_sort_pair(
+                target_review_mode,
+                target_sort_key,
+            )
+
         for key, value in state.items():
+            if key in {"review_mode", "trial_sort_key"}:
+                continue
             if hasattr(self, key):
                 if key in {"starred_snapshot_image_labels", "hidden_snapshot_image_labels"}:
                     value = self._normalise_trial_labels(value or [])
@@ -2410,8 +2554,6 @@ class Show1D(StaticFallbackMixin, anywidget.AnyWidget):
                     value = self._normalise_trial_notes(value or {})
                 elif key == "trial_tags":
                     value = self._normalise_trial_tags(value or {})
-                elif key == "trial_sort_key":
-                    value = self._normalise_trial_sort_key(str(value))
                 elif key == "top_trial_count":
                     value = max(0, int(value))
                 elif key == "snapshot_fps":
@@ -2435,6 +2577,13 @@ class Show1D(StaticFallbackMixin, anywidget.AnyWidget):
                 elif key in {"snapshot_real_space_center", "snapshot_fft_center"}:
                     value = self._normalise_snapshot_view_center(value)
                 setattr(self, key, value)
+        if target_review_mode == "trace":
+            self.trial_sort_key = "label"
+            self.review_mode = target_review_mode
+            self.trial_sort_key = target_sort_key
+        else:
+            self.review_mode = target_review_mode
+            self.trial_sort_key = target_sort_key
         self._update_trial_analysis()
 
     def export_html(
@@ -2447,13 +2596,35 @@ class Show1D(StaticFallbackMixin, anywidget.AnyWidget):
         downsample: int | None = None,
         **_: Any,
     ) -> pathlib.Path:
-        """Write a standalone interactive HTML viewer."""
+        """Write a kernel-free interactive HTML viewer.
 
-        self._normalise_html_export_options(mode=mode, encoding=encoding, downsample=downsample)
-        export_path = pathlib.Path(path) if path is not None else self._default_html_export_path()
-        self._write_html_export(export_path, title=title)
+        ``mode="single"`` with ``encoding="full"`` preserves float32 values.
+        ``downsample=2``, ``4``, or ``8`` reduces only linked 2D profile and
+        snapshot panels; scientific line coordinates and trace samples remain
+        exact. Folder storage and uint8 encoding require a frontend data-loader
+        contract and are rejected with corrective guidance.
+        """
+
+        downsample_factor = self._normalise_html_export_options(
+            mode=mode,
+            encoding=encoding,
+            downsample=downsample,
+        )
+        export_path = (
+            pathlib.Path(path)
+            if path is not None
+            else self._default_html_export_path(downsample=downsample_factor)
+        )
+        self._write_html_export(
+            export_path,
+            title=title,
+            downsample=downsample_factor,
+        )
         size_mb = export_path.stat().st_size / (1024 * 1024)
-        self.export_status = f"Exported {export_path.name} ({size_mb:.1f} MB, full float32)"
+        label = "full float32"
+        if downsample_factor > 1:
+            label += f", {downsample_factor}x downsampled images"
+        self.export_status = f"Exported {export_path.name} ({size_mb:.1f} MB, {label})"
         return export_path
 
     def summary(self) -> None:
@@ -2492,6 +2663,9 @@ class Show1D(StaticFallbackMixin, anywidget.AnyWidget):
             arrays = [np.asarray(to_numpy(v), dtype=np.float32).ravel() for v in data.values()]
             return self._stack_equal_length(arrays), labels
         if isinstance(data, list):
+            if data and all(np.asarray(to_numpy(value)).ndim == 0 for value in data):
+                arr = np.asarray(to_numpy(data), dtype=np.float32)
+                return arr.reshape(1, -1), ["Data"]
             arrays = [np.asarray(to_numpy(v), dtype=np.float32).ravel() for v in data]
             return self._stack_equal_length(arrays), [f"Data {i + 1}" for i in range(len(arrays))]
         arr = np.asarray(to_numpy(data), dtype=np.float32)
@@ -2871,6 +3045,24 @@ class Show1D(StaticFallbackMixin, anywidget.AnyWidget):
         return out
 
     @staticmethod
+    def _normalise_review_mode(mode: str) -> str:
+        name = str(mode or "trace").strip().lower().replace("-", "_").replace(" ", "_")
+        aliases = {
+            "scientific": "trace",
+            "series": "trace",
+            "loss": "optimization",
+            "optimisation": "optimization",
+            "trial": "optimization",
+        }
+        name = aliases.get(name, name)
+        if name not in {"trace", "optimization"}:
+            raise ValueError(
+                f"Unknown review_mode {mode!r}. Use 'trace' for scientific series "
+                "or 'optimization' for loss-ranked trials."
+            )
+        return name
+
+    @staticmethod
     def _normalise_trial_sort_key(key: str) -> str:
         name = str(key or "final_loss").strip().lower().replace("-", "_").replace(" ", "_")
         aliases = {
@@ -2898,6 +3090,42 @@ class Show1D(StaticFallbackMixin, anywidget.AnyWidget):
         if name not in valid:
             raise ValueError(f"Unknown trial_sort_key {key!r}. Valid: {sorted(valid)}")
         return name
+
+    @classmethod
+    def _normalise_review_sort_pair(
+        cls,
+        review_mode: str,
+        trial_sort_key: str,
+    ) -> tuple[str, str]:
+        mode = cls._normalise_review_mode(review_mode)
+        sort_key = cls._normalise_trial_sort_key(trial_sort_key)
+        if mode == "trace" and sort_key not in {"default", "label"}:
+            raise ValueError(
+                "review_mode='trace' cannot use loss or trial-quality sorting. "
+                "Use trial_sort_key='label', or set review_mode='optimization'."
+            )
+        return mode, sort_key
+
+    @classmethod
+    def _legacy_review_mode_from_state(cls, state: Mapping[str, Any]) -> str:
+        """Infer pre-``review_mode`` state without treating metrics as losses."""
+
+        metadata = state.get("report_metadata", {})
+        metadata = metadata if isinstance(metadata, Mapping) else {}
+        y_label = str(state.get("y_label", "") or "").lower()
+        title = str(state.get("title", "") or "").lower()
+        monitor_path = str(state.get("monitor_path", "") or "")
+        reconstruction_monitor = "reconstruction" in title and (
+            "live" in title or "monitor" in title
+        )
+        is_optimization = bool(
+            monitor_path
+            or "loss" in y_label
+            or metadata.get("loss_type")
+            or metadata.get("frame_by_frame") is True
+            or reconstruction_monitor
+        )
+        return "optimization" if is_optimization else "trace"
 
     @staticmethod
     def _parse_lambda_from_label(label: str) -> float:
@@ -2979,10 +3207,9 @@ class Show1D(StaticFallbackMixin, anywidget.AnyWidget):
                 return _as_float(value)
         return float("nan")
 
-    @staticmethod
-    def _score_for_ranking(row: Mapping[str, Any], key: str) -> float:
+    def _score_for_ranking(self, row: Mapping[str, Any], key: str) -> float:
         if key == "default":
-            key = "final_loss"
+            key = "final_loss" if self.review_mode == "optimization" else "label"
         if key == "label":
             return float("nan")
         if key == "object_quality":
@@ -2993,8 +3220,28 @@ class Show1D(StaticFallbackMixin, anywidget.AnyWidget):
             return -value if math.isfinite(value) else float("nan")
         return _as_float(row.get(key))
 
+    @staticmethod
+    def _best_optimization_row(
+        rankings: Sequence[Mapping[str, Any]],
+    ) -> dict[str, Any] | None:
+        candidates = [
+            dict(row)
+            for row in rankings
+            if not row.get("hidden") and math.isfinite(_as_float(row.get("score")))
+        ]
+        if not candidates:
+            return None
+        return min(
+            candidates,
+            key=lambda row: (
+                _as_float(row.get("score")),
+                str(row.get("label") or "").lower(),
+            ),
+        )
+
     def _compute_trial_rankings(self) -> list[dict[str, Any]]:
         image_quality = self._snapshot_quality_by_label()
+        optimization_review = self.review_mode == "optimization"
         rows: list[dict[str, Any]] = []
         for idx, label in enumerate(self.labels):
             y = np.asarray(self._data[idx], dtype=np.float32) if idx < self._data.shape[0] else np.empty(0, dtype=np.float32)
@@ -3014,11 +3261,16 @@ class Show1D(StaticFallbackMixin, anywidget.AnyWidget):
                 "label": str(label),
                 "trace_index": idx,
                 "lambda": self._parse_lambda_from_label(label),
-                "first_loss": first,
-                "final_loss": final,
-                "min_loss": min_loss,
-                "mean_loss": float(np.nanmean(finite)) if finite.size else float("nan"),
-                "std_loss": float(np.nanstd(finite)) if finite.size else float("nan"),
+                "first_value": first,
+                "final_value": final,
+                "min_value": min_loss,
+                "mean_value": float(np.nanmean(finite)) if finite.size else float("nan"),
+                "std_value": float(np.nanstd(finite)) if finite.size else float("nan"),
+                "first_loss": first if optimization_review else float("nan"),
+                "final_loss": final if optimization_review else float("nan"),
+                "min_loss": min_loss if optimization_review else float("nan"),
+                "mean_loss": float(np.nanmean(finite)) if optimization_review and finite.size else float("nan"),
+                "std_loss": float(np.nanstd(finite)) if optimization_review and finite.size else float("nan"),
                 "rmse": rmse,
                 "flicker": flicker if math.isfinite(flicker) else _as_float(quality.get("image_flicker")),
                 "object_quality": object_quality,
@@ -3040,6 +3292,8 @@ class Show1D(StaticFallbackMixin, anywidget.AnyWidget):
             if label:
                 alert_counts[label] = alert_counts.get(label, 0) + 1
         sort_key = self._normalise_trial_sort_key(self.trial_sort_key)
+        if not optimization_review and sort_key not in {"default", "label"}:
+            sort_key = "label"
         for row in rows:
             row["alert_count"] = alert_counts.get(str(row["label"]), 0)
             row["score"] = self._score_for_ranking(row, sort_key)
@@ -3061,6 +3315,7 @@ class Show1D(StaticFallbackMixin, anywidget.AnyWidget):
 
     def _compute_trial_alerts_from_rows(self, rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
         alerts: list[dict[str, Any]] = []
+        optimization_review = self.review_mode == "optimization"
         for row in rows:
             label = str(row.get("label") or "")
             idx = int(row.get("trace_index", -1))
@@ -3068,9 +3323,9 @@ class Show1D(StaticFallbackMixin, anywidget.AnyWidget):
                 continue
             y = np.asarray(self._data[idx], dtype=np.float32)
             finite = y[np.isfinite(y)]
-            if int(row.get("nan_count", 0)) > 0:
+            if optimization_review and int(row.get("nan_count", 0)) > 0:
                 alerts.append({"label": label, "kind": "nonfinite", "severity": "error", "message": "contains NaN/inf values"})
-            if finite.size >= 2:
+            if optimization_review and finite.size >= 2:
                 first = float(finite[0])
                 final = float(finite[-1])
                 if math.isfinite(first) and math.isfinite(final):
@@ -3079,7 +3334,7 @@ class Show1D(StaticFallbackMixin, anywidget.AnyWidget):
                         alerts.append({"label": label, "kind": "worse_final", "severity": "warning", "message": "final loss is worse than initial loss"})
                     if np.nanmax(np.abs(finite)) > 10 * max(np.nanmedian(np.abs(finite)), 1e-12):
                         alerts.append({"label": label, "kind": "spike", "severity": "warning", "message": "large loss spike detected"})
-            if finite.size >= 8:
+            if optimization_review and finite.size >= 8:
                 q = max(2, finite.size // 4)
                 start = float(np.nanmedian(finite[:q]))
                 end = float(np.nanmedian(finite[-q:]))
@@ -3101,9 +3356,14 @@ class Show1D(StaticFallbackMixin, anywidget.AnyWidget):
         return alerts
 
     def _build_run_summary(self, rankings: Sequence[Mapping[str, Any]], alerts: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-        best = next((dict(row) for row in rankings if not row.get("hidden")), {})
+        best = (
+            self._best_optimization_row(rankings) or {}
+            if self.review_mode == "optimization"
+            else {}
+        )
         return {
             "title": self.title,
+            "review_mode": self.review_mode,
             "best_trial": best.get("label", ""),
             "best_score": best.get("score", float("nan")),
             "sort_key": self.trial_sort_key,
@@ -3122,7 +3382,11 @@ class Show1D(StaticFallbackMixin, anywidget.AnyWidget):
         alerts = self._compute_trial_alerts_from_rows(rankings)
         self.trial_rankings = _json_safe([dict(row) for row in rankings])
         self.trial_alerts = _json_safe([dict(alert) for alert in alerts])
-        best = next((row for row in rankings if not row.get("hidden")), None)
+        best = (
+            self._best_optimization_row(rankings)
+            if self.review_mode == "optimization"
+            else None
+        )
         self.best_trial_label = str(best.get("label", "")) if best else ""
         self.run_summary = _json_safe(self._build_run_summary(rankings, alerts))
 
@@ -3343,27 +3607,67 @@ class Show1D(StaticFallbackMixin, anywidget.AnyWidget):
         mode: str,
         encoding: str,
         downsample: int | None,
-    ) -> None:
+    ) -> int:
         raw_mode = str(mode or "single").strip().lower().replace("_", "-")
+        if raw_mode in {"exact", "full"}:
+            raw_mode = "single"
+            encoding = "full"
         raw_encoding = str(encoding or "full").strip().lower().replace("_", "-")
-        if raw_mode not in {"single", "exact", "full"}:
+        if raw_mode == "folder":
+            raise NotImplementedError(
+                "Show1D folder export is not available yet. Use mode='single' with "
+                "downsample=2, 4, or 8 to reduce linked image panels."
+            )
+        if raw_mode != "single":
             raise ValueError("Show1D HTML export supports mode='single'")
         if raw_encoding not in {"full", "exact", "float32", "f32"}:
-            raise ValueError("Show1D HTML export currently supports encoding='full'")
-        if downsample not in (None, 1, "1", "", 0, "0"):
-            raise NotImplementedError("Show1D HTML export does not support downsample")
+            if raw_encoding in {"uint8", "u8", "quantized"}:
+                raise NotImplementedError(
+                    "Show1D encoding='uint8' needs a frontend decoder and is not "
+                    "available yet. Use encoding='full' with downsample=2, 4, or 8."
+                )
+            raise ValueError(
+                f"unknown Show1D export encoding {encoding!r}; expected 'full'"
+            )
+        if downsample in (None, "", 0, "0"):
+            return 1
+        if isinstance(downsample, bool):
+            raise ValueError("Show1D HTML export downsample must be an integer factor, not bool")
+        try:
+            numeric_factor = float(downsample)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(
+                "Show1D HTML export downsample must be a finite integer factor "
+                f"from 1, 2, 4, or 8, got {downsample!r}"
+            ) from exc
+        if not math.isfinite(numeric_factor) or not numeric_factor.is_integer():
+            raise ValueError(
+                "Show1D HTML export downsample must be a finite integer factor "
+                f"from 1, 2, 4, or 8, got {downsample!r}"
+            )
+        factor = int(numeric_factor)
+        if factor not in {1, 2, 4, 8}:
+            raise ValueError("Show1D HTML export downsample must be one of 1, 2, 4, or 8")
+        return factor
 
-    def _default_html_export_path(self) -> pathlib.Path:
+    def _default_html_export_path(self, *, downsample: int = 1) -> pathlib.Path:
         label = _slug(self.title or "show1d")
         shape = f"{self.n_traces}x{self.n_points}"
-        return pathlib.Path.cwd() / f"{label}_{shape}_single.html"
+        suffix = f"_{int(downsample)}xdownsampled" if int(downsample) > 1 else ""
+        return pathlib.Path.cwd() / f"{label}_{shape}{suffix}_single.html"
 
-    def _write_html_export(self, path: str | pathlib.Path, *, title: str | None = None) -> pathlib.Path:
+    def _write_html_export(
+        self,
+        path: str | pathlib.Path,
+        *,
+        title: str | None = None,
+        downsample: int = 1,
+    ) -> pathlib.Path:
         from ipywidgets.embed import dependency_state, embed_minimal_html
 
         export_path = pathlib.Path(path)
         export_path.parent.mkdir(parents=True, exist_ok=True)
-        export_widget = self._clone_for_html_export()
+        export_widget = self._clone_for_html_export(downsample=downsample)
         try:
             state = dependency_state([export_widget], drop_defaults=False)
             embed_minimal_html(
@@ -3378,13 +3682,58 @@ class Show1D(StaticFallbackMixin, anywidget.AnyWidget):
         ensure_mobile_viewport(export_path)
         return export_path
 
-    def _html_export_bytes(self) -> bytes:
+    def _html_export_bytes(self, *, downsample: int = 1) -> bytes:
         with tempfile.TemporaryDirectory(prefix="show1d-export-") as tmp:
-            path = pathlib.Path(tmp) / self._default_html_export_path().name
-            self._write_html_export(path)
+            path = pathlib.Path(tmp) / self._default_html_export_path(
+                downsample=downsample
+            ).name
+            self._write_html_export(path, downsample=downsample)
             return path.read_bytes()
 
-    def _clone_for_html_export(self) -> Self:
+    @staticmethod
+    def _downsample_image_for_export(image: np.ndarray, factor: int) -> np.ndarray:
+        """Mean-downsample a 2D panel while retaining partial edge blocks."""
+
+        arr = np.ascontiguousarray(image, dtype=np.float32)
+        factor = int(factor)
+        if factor <= 1 or arr.size == 0:
+            return arr.copy()
+        height, width = arr.shape
+        out_height = (height + factor - 1) // factor
+        out_width = (width + factor - 1) // factor
+        pad_height = out_height * factor - height
+        pad_width = out_width * factor - width
+        padded = np.pad(
+            arr,
+            ((0, pad_height), (0, pad_width)),
+            mode="constant",
+            constant_values=np.nan,
+        )
+        blocks = padded.reshape(out_height, factor, out_width, factor)
+        finite = np.isfinite(blocks)
+        sums = np.where(finite, blocks, 0.0).sum(axis=(1, 3), dtype=np.float64)
+        counts = finite.sum(axis=(1, 3))
+        out = np.full((out_height, out_width), np.nan, dtype=np.float32)
+        np.divide(sums, counts, out=out, where=counts > 0)
+        return np.ascontiguousarray(out, dtype=np.float32)
+
+    @staticmethod
+    def _scale_profile_line_for_export(
+        line: Sequence[Mapping[str, Any]], factor: int
+    ) -> list[dict[str, float]]:
+        return [
+            {
+                "row": float(point.get("row", 0.0)) / factor,
+                "col": float(point.get("col", 0.0)) / factor,
+            }
+            for point in line
+        ]
+
+    def _clone_for_html_export(self, *, downsample: int = 1) -> Self:
+        downsample = int(downsample)
+        export_pixel_size = (
+            self.pixel_size * downsample if self.pixel_size > 0 else self.pixel_size
+        )
         clone = type(self)(
             np.ascontiguousarray(self._data, dtype=np.float32),
             x=None if self._x is None else np.ascontiguousarray(self._x, dtype=np.float32),
@@ -3415,20 +3764,25 @@ class Show1D(StaticFallbackMixin, anywidget.AnyWidget):
             snapshot_overlay_position=self.snapshot_overlay_position,
             snapshot_fft_layout=self.snapshot_fft_layout,
             snapshot_real_space_zoom=self.snapshot_real_space_zoom,
-            snapshot_real_space_center=list(self.snapshot_real_space_center),
+            snapshot_real_space_center=[
+                float(value) / downsample for value in self.snapshot_real_space_center
+            ],
             snapshot_fft_zoom=self.snapshot_fft_zoom,
-            snapshot_fft_center=list(self.snapshot_fft_center),
+            snapshot_fft_center=[
+                float(value) / downsample for value in self.snapshot_fft_center
+            ],
             starred_snapshot_image_labels=list(self.starred_snapshot_image_labels),
             hidden_snapshot_image_labels=list(self.hidden_snapshot_image_labels),
             trial_notes=dict(self.trial_notes),
             trial_tags={str(k): list(v) for k, v in self.trial_tags.items()},
             show_trial_notes=self.show_trial_notes,
             show_starred_only=self.show_starred_only,
+            review_mode=self.review_mode,
             trial_sort_key=self.trial_sort_key,
             trial_sort_descending=self.trial_sort_descending,
             trial_filter_text=self.trial_filter_text,
             top_trial_count=self.top_trial_count,
-            pixel_size=self.pixel_size,
+            pixel_size=export_pixel_size,
             pixel_unit=self.pixel_unit,
             show_scale_bar=self.scale_bar_visible,
             show_snapshot_histogram=self.show_snapshot_histogram,
@@ -3443,9 +3797,33 @@ class Show1D(StaticFallbackMixin, anywidget.AnyWidget):
             prefer_webgpu=self.prefer_webgpu,
         )
         clone.load_state_dict(self.state_dict())
+        clone.pixel_size = export_pixel_size
+        clone.snapshot_real_space_center = [
+            float(value) / downsample for value in self.snapshot_real_space_center
+        ]
+        clone.snapshot_fft_center = [
+            float(value) / downsample for value in self.snapshot_fft_center
+        ]
+        clone.snapshot_profile_line = self._scale_profile_line_for_export(
+            self.snapshot_profile_line,
+            downsample,
+        )
         clone.method_labels = list(self.method_labels)
-        clone.report_metadata = _json_safe(dict(self.report_metadata))
-        clone._snapshots = [snap.copy() for snap in self._snapshots]
+        clone.report_metadata = _json_safe(
+            {
+                **dict(self.report_metadata),
+                "html_export": {
+                    "mode": "single",
+                    "encoding": "full",
+                    "downsample": downsample,
+                    "trace_samples_preserved": True,
+                },
+            }
+        )
+        clone._snapshots = [
+            self._downsample_image_for_export(snap, downsample)
+            for snap in self._snapshots
+        ]
         clone.snapshot_iterations = list(self.snapshot_iterations)
         clone.snapshot_labels = list(self.snapshot_labels)
         clone.snapshot_image_labels = list(self.snapshot_image_labels)
@@ -3455,6 +3833,7 @@ class Show1D(StaticFallbackMixin, anywidget.AnyWidget):
         clone.trial_tags = {str(k): list(v) for k, v in self.trial_tags.items()}
         clone.show_trial_notes = self.show_trial_notes
         clone.show_starred_only = self.show_starred_only
+        clone.review_mode = self.review_mode
         clone.trial_sort_key = self.trial_sort_key
         clone.trial_sort_descending = self.trial_sort_descending
         clone.trial_filter_text = self.trial_filter_text
@@ -3479,10 +3858,14 @@ class Show1D(StaticFallbackMixin, anywidget.AnyWidget):
         clone.snapshot_overlay_position = self.snapshot_overlay_position
         clone.snapshot_fft_layout = self.snapshot_fft_layout
         clone.snapshot_real_space_zoom = self.snapshot_real_space_zoom
-        clone.snapshot_real_space_center = list(self.snapshot_real_space_center)
+        clone.snapshot_real_space_center = [
+            float(value) / downsample for value in self.snapshot_real_space_center
+        ]
         clone.snapshot_fft_zoom = self.snapshot_fft_zoom
-        clone.snapshot_fft_center = list(self.snapshot_fft_center)
-        clone.pixel_size = self.pixel_size
+        clone.snapshot_fft_center = [
+            float(value) / downsample for value in self.snapshot_fft_center
+        ]
+        clone.pixel_size = export_pixel_size
         clone.pixel_unit = self.pixel_unit
         clone.scale_bar_visible = self.scale_bar_visible
         clone.snapshot_playing = self.snapshot_playing
@@ -3490,15 +3873,24 @@ class Show1D(StaticFallbackMixin, anywidget.AnyWidget):
         clone.snapshot_loop = self.snapshot_loop
         clone.snapshot_bounce = self.snapshot_bounce
         clone.show_snapshot_profile = self.show_snapshot_profile
-        clone.snapshot_profile_line = list(self.snapshot_profile_line)
+        clone.snapshot_profile_line = self._scale_profile_line_for_export(
+            self.snapshot_profile_line,
+            downsample,
+        )
         clone.snapshot_profile_height = self.snapshot_profile_height
         clone.snapshot_histogram_width = self.snapshot_histogram_width
         clone.snapshot_histogram_height = self.snapshot_histogram_height
         clone._update_snapshot_bytes()
         if self._profile_image is not None:
-            clone.set_profile_image(self._profile_image, line=None)
-            clone.profile_line = list(self.profile_line)
-            clone.profile_width = self.profile_width
+            clone.set_profile_image(
+                self._downsample_image_for_export(self._profile_image, downsample),
+                line=None,
+            )
+            clone.profile_line = self._scale_profile_line_for_export(
+                self.profile_line,
+                downsample,
+            )
+            clone.profile_width = max(1, math.ceil(self.profile_width / downsample))
         clone._export_light = True
         clone.export_enabled = False
         clone.export_status = ""
@@ -3555,24 +3947,38 @@ class Show1D(StaticFallbackMixin, anywidget.AnyWidget):
                 self.export_payload_id = ""
                 self.export_filename = ""
                 return
-            self._normalise_html_export_options(
+            encoding = str(payload.get("encoding", "full"))
+            requested_downsample = payload.get("downsample")
+            downsample_factor = self._normalise_html_export_options(
                 mode=mode,
-                encoding=str(payload.get("encoding", "full")),
-                downsample=payload.get("downsample"),
+                encoding=encoding,
+                downsample=requested_downsample,
             )
             if payload.get("download"):
-                filename = str(payload.get("filename") or self._default_html_export_path().name)
+                filename = str(
+                    payload.get("filename")
+                    or self._default_html_export_path(
+                        downsample=downsample_factor
+                    ).name
+                )
                 request_id = str(payload.get("id") or "")
                 self.export_status = f"Preparing {filename}..."
-                html = self._html_export_bytes()
+                html = self._html_export_bytes(downsample=downsample_factor)
                 self.export_filename = filename
                 self.export_payload = html
                 self.export_payload_id = request_id
                 size_mb = len(html) / (1024 * 1024)
-                self.export_status = f"Ready {filename} ({size_mb:.1f} MB, full float32)"
+                label = "full float32"
+                if downsample_factor > 1:
+                    label += f", {downsample_factor}x downsampled images"
+                self.export_status = f"Ready {filename} ({size_mb:.1f} MB, {label})"
             else:
                 self.export_status = f"Exporting {mode} HTML..."
-                self.export_html()
+                self.export_html(
+                    mode=mode,
+                    encoding=encoding,
+                    downsample=requested_downsample,
+                )
         except Exception as exc:
             self.export_status = f"Export failed: {exc}"
 

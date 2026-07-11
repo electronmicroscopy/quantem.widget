@@ -1,6 +1,9 @@
 # Re-include the pre-baked tutorial notebooks (the repo root ignores *.ipynb).
 !*.ipynb
 
+# Keep macOS AppleDouble metadata ignored after the notebook re-include rule.
+._*
+
 # Jupyter Book build output + autodoc2 generated API stubs (regenerated per build).
 _build/
 apidocs/

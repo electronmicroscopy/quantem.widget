@@ -308,6 +308,7 @@ def test_show4dstem_compare_grid_pages_panels() -> None:
     )
 
     try:
+        assert widget.compare_page_progressive_enabled is False
         assert widget.compare_page_count == 3
         assert widget.compare_page_idx == 0
         assert widget.compare_panel_indices == [0, 1, 2]

@@ -11,6 +11,8 @@ from typing import Any, Literal, Self
 
 import numpy as np
 
+from quantem.widget._folder_watch_status import set_folder_watch_status
+
 
 _SUPPORTED_IMAGE_SUFFIXES = {
     ".bmp",
@@ -43,6 +45,18 @@ def _natural_path_key(path: Path, root: Path) -> tuple[tuple[tuple[int, object],
             tokens.append((0, int(token)) if token.isdigit() else (1, token))
         parts.append(tuple(tokens))
     return tuple(parts)
+
+
+def _total_natural_path_key(
+    path: Path,
+    root: Path,
+) -> tuple[tuple[tuple[tuple[int, object], ...], ...], str]:
+    """Return a total natural-order key with an exact-path tie breaker."""
+    try:
+        relative = path.relative_to(root)
+    except ValueError:
+        relative = path
+    return _natural_path_key(path, root), relative.as_posix()
 
 
 def _canonical_path(path: Path) -> Path:
@@ -104,6 +118,26 @@ def _calibration_matches(
     return bool(np.allclose(first.sampling, other.sampling, rtol=1e-7, atol=0.0))
 
 
+def _safe_set_widget_status(widget: Any, name: str, value: Any) -> None:
+    """Publish optional folder status without requiring a widget trait."""
+    try:
+        setattr(widget, name, value)
+    except Exception:
+        # Status is advisory. Strict/slotted test or downstream widgets may not
+        # expose these optional attributes, which must not break data updates.
+        pass
+
+
+def _display_bin_factor(widget: Any) -> int:
+    """Return the active display-space bin factor for either image viewer."""
+    for name in ("_display_bin_factor", "_display_bin"):
+        try:
+            return max(1, int(getattr(widget, name)))
+        except (AttributeError, TypeError, ValueError):
+            continue
+    return 1
+
+
 class WatchedImageFolder:
     """Append-only folder source that retries unstable files in place."""
 
@@ -126,8 +160,11 @@ class WatchedImageFolder:
         self.interval = self._validate_interval(interval)
         self.mode = mode
         self.expected_shape: tuple[int, int] | None = None
+        # 1 = grayscale (H, W); 3 = RGB (H, W, 3). Used for Show3D frame stacks.
+        self.expected_channels: int | None = None
         self.records: list[ImageFolderRecord] = []
         self.errors: dict[Path, str] = {}
+        self._ready_probation: dict[Path, _FileFingerprint] = {}
         self.calibration_status = ""
         self._explicit_calibration = False
         self._scale_bar_requested = True
@@ -135,6 +172,8 @@ class WatchedImageFolder:
         self._watch_stop: threading.Event | None = None
         self._watch_thread: threading.Thread | None = None
         self._widget_ref: weakref.ReferenceType[Any] | None = None
+        self._watch_enabled = False
+        self._watch_started = False
 
     @staticmethod
     def _validate_interval(interval: float) -> float:
@@ -144,7 +183,7 @@ class WatchedImageFolder:
         return value
 
     def discover(self) -> list[Path]:
-        """Return supported files in canonical natural path order."""
+        """Return supported folder-visible paths in total natural order."""
         candidates = self.folder.rglob(self.pattern) if self.recursive else self.folder.glob(self.pattern)
         unique: dict[Path, None] = {}
         for candidate in candidates:
@@ -156,7 +195,7 @@ class WatchedImageFolder:
             # symlink can land on an extension-less target (Hugging Face hub
             # cache blobs), which the format readers cannot dispatch on.
             unique.setdefault(candidate, None)
-        return sorted(unique, key=lambda path: _natural_path_key(path, self.folder))
+        return sorted(unique, key=lambda path: _total_natural_path_key(path, self.folder))
 
     def _read_stable(self, path: Path) -> _ReadImage | None:
         """Read one unchanged file through the canonical image reader."""
@@ -165,7 +204,8 @@ class WatchedImageFolder:
             from quantem.widget import io as widget_io  # noqa: PLC0415
 
             dataset = widget_io.read_image(path)
-            array = np.asarray(dataset.array)
+            # RgbImage and Dataset2d both expose .array; bare arrays pass through.
+            array = np.asarray(getattr(dataset, "array", dataset))
             after = _fingerprint(path)
         except Exception as exc:
             self.errors[path] = f"{type(exc).__name__}: {exc}"
@@ -173,18 +213,39 @@ class WatchedImageFolder:
         if before != after:
             self.errors[path] = "file changed while it was being read; retrying on the next poll"
             return None
-        if array.ndim != 2:
-            self.errors[path] = f"expected a 2D image, got shape {tuple(int(v) for v in array.shape)}"
+        # Accept grayscale (H, W) and true-color RGB(A) (H, W, 3/4).
+        if array.ndim == 3 and array.shape[-1] in (3, 4):
+            array = array[..., :3]
+        elif array.ndim != 2:
+            self.errors[path] = (
+                f"expected a 2D gray or RGB image, got shape "
+                f"{tuple(int(v) for v in array.shape)}"
+            )
             return None
         actual_shape = (int(array.shape[0]), int(array.shape[1]))
         if self.expected_shape is not None and actual_shape != self.expected_shape:
             message = (
-                f"Incompatible image shape for {path}: expected {self.expected_shape}, "
+                f"Incompatible image shape for {self.label(path)}: "
+                f"expected {self.expected_shape}, "
                 f"got {actual_shape}. Show2D.from_folder and Show3D.from_folder "
                 "keep every file at full resolution and do not resize mismatched images."
             )
             self.errors[path] = message
-            raise ValueError(message)
+            return None
+        # Color vs gray mix is allowed for Show2D panels, but Show3D stacks must
+        # share channel layout. Store spatial shape only in expected_shape;
+        # channel mismatch is checked when stacking frames.
+        if getattr(self, "expected_channels", None) is None:
+            self.expected_channels = int(array.shape[2]) if array.ndim == 3 else 1
+        else:
+            channels = int(array.shape[2]) if array.ndim == 3 else 1
+            if channels != int(self.expected_channels) and self.mode == "frames":
+                self.errors[path] = (
+                    f"Incompatible channel layout for {self.label(path)}: "
+                    f"expected {self.expected_channels}-channel frames, got {channels}. "
+                    "Show3D.from_folder cannot mix gray and RGB frames in one stack."
+                )
+                return None
         sampling, units = _spatial_metadata(dataset)
         self.errors.pop(path, None)
         return _ReadImage(
@@ -192,7 +253,12 @@ class WatchedImageFolder:
             array,
         )
 
-    def read_initial(self) -> tuple[list[np.ndarray], list[ImageFolderRecord]]:
+    def read_initial(
+        self,
+        *,
+        allow_empty: bool = False,
+        require_unchanged_followup: bool = False,
+    ) -> tuple[list[np.ndarray], list[ImageFolderRecord]]:
         """Read the initial stable image set, leaving failed files retryable."""
         arrays: list[np.ndarray] = []
         records: list[ImageFolderRecord] = []
@@ -200,17 +266,30 @@ class WatchedImageFolder:
             read = self._read_stable(path)
             if read is None:
                 continue
+            if require_unchanged_followup:
+                # A readable file can still be paused mid-write. A live mount
+                # starts immediately, but its initial candidates use the same
+                # two-poll fingerprint probation as later arrivals.
+                self._ready_probation[path] = read.record.fingerprint
+                continue
             if self.expected_shape is None:
-                self.expected_shape = tuple(int(v) for v in read.array.shape)
+                self.expected_shape = (int(read.array.shape[0]), int(read.array.shape[1]))
+            if self.expected_channels is None:
+                self.expected_channels = (
+                    int(read.array.shape[2]) if read.array.ndim == 3 else 1
+                )
             records.append(read.record)
             arrays.append(read.array)
         if not arrays:
+            self.records = []
+            if allow_empty or require_unchanged_followup:
+                return [], []
             detail = ""
             if self.errors:
                 path, error = next(iter(self.errors.items()))
                 detail = f" First unreadable candidate: {path} ({error})."
             raise FileNotFoundError(
-                f"No readable 2D images matching {self.pattern!r} in {self.folder}."
+                f"No readable 2D gray/RGB images matching {self.pattern!r} in {self.folder}."
                 f"{detail} Partially written files are retried by a running watcher "
                 "after at least one valid image is available."
             )
@@ -229,6 +308,7 @@ class WatchedImageFolder:
         self._scale_bar_requested = bool(getattr(widget, "scale_bar_visible", True))
         widget._folder_source = self
         self._apply_calibration(widget, self.records)
+        self._sync_widget_status(widget)
         return self
 
     def label(self, path: Path) -> str:
@@ -244,52 +324,123 @@ class WatchedImageFolder:
         return [record.path for record in self.records]
 
     def poll(self, widget: Any) -> list[int]:
-        """Append stable new files and return their zero-based widget indices."""
-        with self._poll_lock:
-            old_records = list(self.records)
-            old_by_path = {record.path: record for record in old_records}
-            changed: dict[Path, _ReadImage] = {}
-            for path in self.discover():
-                previous = old_by_path.get(path)
-                if previous is not None:
-                    # Folder-backed viewers are append-only. Rewriting a source
-                    # path must not silently replace scientific data that the
-                    # user may already have curated, starred, or measured.
-                    continue
-                try:
-                    _fingerprint(path)
-                except OSError as exc:
-                    self.errors[path] = f"{type(exc).__name__}: {exc}"
-                    continue
-                read = self._read_stable(path)
-                if read is not None:
-                    changed[path] = read
-            if not changed:
-                return []
+        """Append stable new files and return their zero-based widget indices.
 
-            merged = dict(old_by_path)
-            merged.update({path: read.record for path, read in changed.items()})
-            new_records = sorted(
-                merged.values(),
-                key=lambda record: _natural_path_key(record.path, self.folder),
+        A concurrent manual/background poll returns immediately. New decoded
+        paths remain probationary until a later poll sees the same file
+        fingerprint; no polling thread sleeps while holding this lock.
+        """
+        if not self._poll_lock.acquire(blocking=False):
+            return []
+        try:
+            return self._poll_once(widget)
+        finally:
+            self._poll_lock.release()
+
+    def _poll_once(self, widget: Any) -> list[int]:
+        """Run one caller-owned folder scan while the poll lock is held."""
+        if self._watch_enabled:
+            set_folder_watch_status(
+                widget,
+                "updating",
+                f"Scanning {self.folder.name or 'watched folder'}.",
             )
-            widget._apply_folder_image_records(
-                old_records,
-                new_records,
-                {path: read.array for path, read in changed.items()},
+        old_records = list(self.records)
+        old_by_path = {record.path: record for record in old_records}
+        changed: dict[Path, _ReadImage] = {}
+        discovered = self.discover()
+        discovered_set = set(discovered)
+        self.errors = {
+            path: message
+            for path, message in self.errors.items()
+            if path in discovered_set
+        }
+        self._ready_probation = {
+            path: fingerprint
+            for path, fingerprint in self._ready_probation.items()
+            if path in discovered_set and path not in old_by_path
+        }
+        if not old_records and not self._ready_probation:
+            # A provisional first candidate may disappear before its confirming
+            # poll. Let the next readable candidate establish the real shape.
+            self.expected_shape = None
+
+        for path in discovered:
+            previous = old_by_path.get(path)
+            if previous is not None:
+                # Folder-backed viewers are append-only. Rewriting a source
+                # path must not silently replace scientific data that the user
+                # may already have curated, starred, or measured.
+                self._ready_probation.pop(path, None)
+                continue
+            read = self._read_stable(path)
+            if read is None:
+                self._ready_probation.pop(path, None)
+                continue
+            if self.expected_shape is None:
+                self.expected_shape = tuple(int(v) for v in read.array.shape)
+
+            fingerprint = read.record.fingerprint
+            if self._ready_probation.get(path) != fingerprint:
+                # The decoded file is readable, but acquisition software may
+                # still append or rewrite it. A later caller-owned poll must
+                # decode the same fingerprint again before it becomes visible.
+                self._ready_probation[path] = fingerprint
+                continue
+            self._ready_probation.pop(path, None)
+            changed[path] = read
+
+        if not changed:
+            self._sync_widget_status(widget)
+            return []
+
+        merged = dict(old_by_path)
+        merged.update({path: read.record for path, read in changed.items()})
+        new_records = sorted(
+            merged.values(),
+            key=lambda record: _total_natural_path_key(record.path, self.folder),
+        )
+        if self._watch_enabled:
+            set_folder_watch_status(
+                widget,
+                "updating",
+                f"Applying {len(changed)} stable image file"
+                f"{'s' if len(changed) != 1 else ''}.",
             )
-            self.records = new_records
-            self._apply_calibration(widget, new_records)
-            return [
-                index
-                for index, record in enumerate(new_records)
-                if record.path in changed
-            ]
+        widget._apply_folder_image_records(
+            old_records,
+            new_records,
+            {path: read.array for path, read in changed.items()},
+        )
+        self.records = new_records
+        self._apply_calibration(widget, new_records)
+        self._sync_widget_status(widget)
+        return [
+            index
+            for index, record in enumerate(new_records)
+            if record.path in changed
+        ]
 
     def _apply_calibration(self, widget: Any, records: list[ImageFolderRecord]) -> None:
         if self._explicit_calibration:
             self.calibration_status = "explicit sampling/units override"
-            widget._folder_calibration_status = self.calibration_status
+            _safe_set_widget_status(
+                widget,
+                "_folder_calibration_status",
+                self.calibration_status,
+            )
+            return
+        if not records:
+            widget.pixel_size = 0.0
+            if hasattr(widget, "pixel_sizes"):
+                widget.pixel_sizes = []
+            widget.scale_bar_visible = False
+            self.calibration_status = "waiting for the first readable image"
+            _safe_set_widget_status(
+                widget,
+                "_folder_calibration_status",
+                self.calibration_status,
+            )
             return
         first = records[0]
         uniform = all(_calibration_matches(first, record) for record in records[1:])
@@ -301,14 +452,22 @@ class WatchedImageFolder:
             self.calibration_status = (
                 "Scale bar disabled because watched files have different sampling or units."
             )
-            widget._folder_calibration_status = self.calibration_status
+            _safe_set_widget_status(
+                widget,
+                "_folder_calibration_status",
+                self.calibration_status,
+            )
             return
         if first.sampling is not None and first.units is not None:
             # The scale bar is horizontal, so it uses the final (column) axis.
-            widget.pixel_size = float(first.sampling[-1])
+            display_bin = _display_bin_factor(widget)
+            widget.pixel_size = float(first.sampling[-1]) * display_bin
             widget.pixel_unit = str(first.units[-1])
             if hasattr(widget, "pixel_sizes"):
-                widget.pixel_sizes = [float(record.sampling[-1]) for record in records]
+                widget.pixel_sizes = [
+                    float(record.sampling[-1]) * display_bin
+                    for record in records
+                ]
             widget.scale_bar_visible = self._scale_bar_requested
             self.calibration_status = (
                 f"uniform: {first.sampling[-1]:g} {first.units[-1]}/pixel"
@@ -317,31 +476,179 @@ class WatchedImageFolder:
             widget.pixel_size = 0.0
             if hasattr(widget, "pixel_sizes"):
                 widget.pixel_sizes = []
+            widget.scale_bar_visible = self._scale_bar_requested
             self.calibration_status = "files do not provide spatial calibration"
-        widget._folder_calibration_status = self.calibration_status
+        _safe_set_widget_status(
+            widget,
+            "_folder_calibration_status",
+            self.calibration_status,
+        )
+
+    def _sync_widget_status(
+        self,
+        widget: Any,
+        *,
+        watch_error: str | None = None,
+        worker_failed: bool = False,
+    ) -> None:
+        """Publish advisory source state without requiring synced traits."""
+        waiting = not self.records
+        unexpected_error = watch_error is not None and bool(watch_error)
+        if watch_error is None:
+            pending_paths = set(self.errors) | set(self._ready_probation)
+            if pending_paths:
+                path = min(
+                    pending_paths,
+                    key=lambda item: _total_natural_path_key(item, self.folder),
+                )
+                count = len(pending_paths)
+                prefix = f"{count} pending file{'s' if count != 1 else ''}"
+                issue = self.errors.get(
+                    path,
+                    "decoded successfully; waiting for one unchanged follow-up poll",
+                )
+                watch_error = (
+                    f"{prefix}; first: {self.label(path)} ({issue})"
+                )
+            else:
+                watch_error = ""
+        watch_error = self._compact_watch_detail(watch_error)
+        ready_count = len(self.records)
+        item_label = "panel" if self.mode == "panels" else "frame"
+        if waiting:
+            folder_status = (
+                f"Waiting for the first stable {item_label} matching "
+                f"{self.pattern!r} in {self.folder.name or self.folder}."
+            )
+            if watch_error:
+                folder_status = f"{folder_status} {watch_error}"
+        else:
+            folder_status = (
+                f"{ready_count} ready {item_label}"
+                f"{'s' if ready_count != 1 else ''}"
+            )
+            if watch_error:
+                folder_status = f"{folder_status}; {watch_error}"
+        _safe_set_widget_status(widget, "_folder_waiting", waiting)
+        _safe_set_widget_status(widget, "folder_waiting", waiting)
+        _safe_set_widget_status(widget, "folder_status", folder_status)
+        _safe_set_widget_status(widget, "_folder_watch_error", watch_error)
+        _safe_set_widget_status(
+            widget,
+            "_folder_calibration_status",
+            self.calibration_status,
+        )
+        if not self._watch_enabled:
+            state = "stopped" if self._watch_started else "hidden"
+            detail = "Folder watcher stopped" if self._watch_started else ""
+        elif worker_failed:
+            state = "error"
+            detail = (
+                f"{watch_error}. The watch worker stopped unexpectedly; "
+                "call watch_folder() to restart it."
+            )
+        elif unexpected_error:
+            state = "error"
+            detail = (
+                f"{watch_error}. The watcher is still alive and will retry; "
+                "call stop_folder_watch() if the error persists."
+            )
+        elif self.errors or self._ready_probation:
+            error_text = " ".join(self.errors.values()).casefold()
+            incompatible = "incompatible image shape" in error_text
+            if incompatible:
+                state = "error"
+                detail = watch_error
+            else:
+                state = "waiting"
+                detail = watch_error or "Waiting for file completion"
+        else:
+            thread = self._watch_thread
+            if thread is not None and thread.is_alive():
+                state = "watching"
+                detail = ""
+            else:
+                state = "error"
+                detail = (
+                    "Watch worker is not running. Call watch_folder() to restart it."
+                )
+        set_folder_watch_status(widget, state, detail)
+
+    def _compact_watch_detail(self, detail: str, *, limit: int = 480) -> str:
+        """Bound synced detail and remove host-specific absolute paths."""
+        text = " ".join(str(detail).split())
+        root = str(self.folder)
+        variants = {root, str(self.folder.resolve(strict=False))}
+        variants.update(
+            value[len("/private") :]
+            for value in tuple(variants)
+            if value.startswith("/private/")
+        )
+        for value in sorted(variants, key=len, reverse=True):
+            text = text.replace(f"{value}/", "")
+            text = text.replace(value, self.folder.name or "watched folder")
+        compact: list[str] = []
+        for token in text.split(" "):
+            stripped = token.strip("()[]{}<>,.;:")
+            if stripped.startswith("/") and "/" in stripped[1:]:
+                token = token.replace(
+                    stripped,
+                    Path(stripped).name or "source file",
+                )
+            compact.append(token)
+        text = " ".join(compact)
+        if len(text) > int(limit):
+            text = f"{text[: max(0, int(limit) - 1)].rstrip()}…"
+        return text
 
     def start(self, widget: Any, *, interval: float | None = None) -> Self:
         """Start an idempotent daemon watcher for this source."""
+        next_interval = (
+            self.interval
+            if interval is None
+            else self._validate_interval(interval)
+        )
         self.stop()
-        if interval is not None:
-            self.interval = self._validate_interval(interval)
+        self.interval = next_interval
         stop = threading.Event()
         self._watch_stop = stop
+        self._watch_enabled = True
+        self._watch_started = True
         widget_ref = weakref.ref(widget)
 
         def worker() -> None:
-            while not stop.wait(self.interval):
-                current_widget = widget_ref()
-                if current_widget is None:
-                    break
-                try:
-                    self.poll(current_widget)
-                except Exception as exc:
-                    # Direct poll_folder() raises actionable errors. A background
-                    # microscope watcher stays alive and retries the same file.
-                    current_widget._folder_watch_error = f"{type(exc).__name__}: {exc}"
-                else:
-                    current_widget._folder_watch_error = ""
+            fatal_error: str | None = None
+            try:
+                while not stop.wait(self.interval):
+                    current_widget = widget_ref()
+                    if current_widget is None:
+                        break
+                    try:
+                        self.poll(current_widget)
+                    except Exception as exc:
+                        # Unexpected per-poll failures must not stop a microscope
+                        # watcher; ordinary unreadable/mismatched files are
+                        # reported non-fatally through ``folder_errors``.
+                        self._sync_widget_status(
+                            current_widget,
+                            watch_error=f"{type(exc).__name__}: {exc}",
+                        )
+            except BaseException as exc:
+                fatal_error = f"{type(exc).__name__}: {exc}"
+            finally:
+                current = threading.current_thread()
+                if self._watch_stop is stop:
+                    self._watch_stop = None
+                if self._watch_thread is current:
+                    self._watch_thread = None
+                if fatal_error is not None and not stop.is_set():
+                    current_widget = widget_ref()
+                    if current_widget is not None:
+                        self._sync_widget_status(
+                            current_widget,
+                            watch_error=fatal_error,
+                            worker_failed=True,
+                        )
 
         thread = threading.Thread(
             target=worker,
@@ -349,7 +656,21 @@ class WatchedImageFolder:
             daemon=True,
         )
         self._watch_thread = thread
-        thread.start()
+        try:
+            thread.start()
+        except Exception:
+            self._watch_enabled = False
+            if self._watch_stop is stop:
+                self._watch_stop = None
+            if self._watch_thread is thread:
+                self._watch_thread = None
+            set_folder_watch_status(
+                widget,
+                "error",
+                "Watch worker could not start. Check the notebook kernel and retry.",
+            )
+            raise
+        self._sync_widget_status(widget)
         return self
 
     def stop(self) -> None:
@@ -360,10 +681,14 @@ class WatchedImageFolder:
             stop.set()
         if thread is not None and thread is not threading.current_thread():
             thread.join()
+        self._watch_enabled = False
         if self._watch_stop is stop:
             self._watch_stop = None
         if self._watch_thread is thread:
             self._watch_thread = None
+        widget = self._widget_ref() if self._widget_ref is not None else None
+        if widget is not None:
+            self._sync_widget_status(widget)
 
 
 class WatchedImageFolderMixin:

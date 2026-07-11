@@ -155,8 +155,7 @@ def main() -> None:
             snapshot_columns=4,
             snapshot_thumbnail_size=44,
             side_panel_width_px=760,
-            side_panel_width_user_adjusted=True,
-            image_cmap="cividis",
+            image_cmap="viridis",
             snapshot_contrast_preset="1-99",
             trial_sort_key="final_loss",
         )

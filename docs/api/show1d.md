@@ -208,6 +208,38 @@ The simulated monitor writes multi-lambda losses, object/probe snapshots,
 warnings, notes/tags, hidden trials, and a starred candidate so the overnight
 review UI can be tested without waiting for a real reconstruction.
 
+## HTML export
+
+Show1D follows the package export signature, with a deliberately narrower set
+of supported values:
+
+```python
+path = widget.export_html(
+    "defocus-review.html",
+    mode="single",
+    encoding="full",
+    downsample=4,
+)
+```
+
+`mode="single"` and `encoding="full"` are the only supported packaging and
+encoding choices. `downsample` may be `None`, `1`, `2`, `4`, or `8`. It
+preserves every 1D trace sample and x coordinate while applying a NaN-aware
+area mean only to linked 2D snapshots and profile images. Calibrated pixel size,
+snapshot view centers, and profile coordinates are rescaled with the image, so
+the downsampled review remains physically calibrated.
+
+Show1D does not yet provide `mode="folder"` or `encoding="uint8"`. Those values
+raise `NotImplementedError` with guidance to use a full single export and an
+image downsample factor. A full export can be large when hundreds of
+full-resolution snapshots are linked, so choose `downsample=2`, `4`, or `8`
+when one-file portability matters more than preserving every image pixel.
+
+The generated file is kernel-free, but the current embed loads RequireJS,
+AnyWidget, and the Jupyter HTML manager from public CDNs. Treat it as a
+standalone review file with a network dependency, not as proof of network-
+offline operation.
+
 ## Reference
 
 ```{eval-rst}

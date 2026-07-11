@@ -13,6 +13,7 @@ To reduce data size, bin k-space at the dataset level before viewing:
 
 import base64
 import gc
+import hashlib
 import html
 import io
 import json
@@ -23,7 +24,7 @@ import tempfile
 import threading
 import time
 from collections import OrderedDict
-from typing import TYPE_CHECKING, Any, Self, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Self, Sequence
 
 if TYPE_CHECKING:
     from quantem.core.datastructures import Dataset4dstem
@@ -32,6 +33,10 @@ import anywidget
 import numpy as np
 import torch
 import traitlets
+from quantem.widget._folder_watch_status import (
+    FOLDER_WATCH_STATE_VALUES,
+    set_folder_watch_status,
+)
 from quantem.widget.utils.array import to_numpy
 from quantem.widget.utils.state_io import (
     build_json_header,
@@ -238,6 +243,11 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
     widget_version = traitlets.Unicode("unknown").tag(sync=True)
     title = traitlets.Unicode("").tag(sync=True)
     show_title = traitlets.Bool(True).tag(sync=True)
+    folder_watch_state = traitlets.Enum(
+        values=FOLDER_WATCH_STATE_VALUES,
+        default_value="hidden",
+    ).tag(sync=True)
+    folder_watch_detail = traitlets.Unicode("").tag(sync=True)
     pos_row = traitlets.Int(0).tag(sync=True)
     pos_col = traitlets.Int(0).tag(sync=True)
 
@@ -480,6 +490,31 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         sync=True
     )
     compare_status = traitlets.Unicode("").tag(sync=True)
+    # Progressive folder-page telemetry. The full stacked payload above remains
+    # the durable widget state; these small traits let the live frontend reserve
+    # stable slots and report useful cold-page latency while panels stream in.
+    compare_page_progressive_enabled = traitlets.Bool(False).tag(sync=True)
+    compare_page_expected_indices = traitlets.List(
+        traitlets.Int(), default_value=[]
+    ).tag(sync=True)
+    compare_page_loading = traitlets.Bool(False).tag(sync=True)
+    compare_page_loaded_count = traitlets.Int(0).tag(sync=True)
+    compare_page_cached_indices = traitlets.List(
+        traitlets.Int(), default_value=[]
+    ).tag(sync=True)
+    compare_page_cache_state = traitlets.Unicode("off").tag(sync=True)
+    compare_page_generation = traitlets.Int(0).tag(sync=True)
+    compare_page_first_panel_ms = traitlets.Float(0.0).tag(sync=True)
+    compare_page_first_fresh_ms = traitlets.Float(0.0).tag(sync=True)
+    compare_page_total_ms = traitlets.Float(0.0).tag(sync=True)
+    # Reliable trait-synced copy of the latest progressive tile. Custom binary
+    # comm messages remain the fast path, while this sequence-backed payload
+    # covers notebook frontends that drop custom buffers from daemon threads.
+    compare_page_panel_bytes = traitlets.Bytes(b"").tag(sync=True)
+    compare_page_panel_frame_idx = traitlets.Int(-1).tag(sync=True)
+    compare_page_panel_slot = traitlets.Int(-1).tag(sync=True)
+    compare_page_panel_cached = traitlets.Bool(False).tag(sync=True)
+    compare_page_panel_sequence = traitlets.Int(0).tag(sync=True)
     gpu_memory_label = traitlets.Unicode("").tag(sync=True)
     memory_warning = traitlets.Unicode("").tag(sync=True)
 
@@ -631,6 +666,19 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         show_stats = bool(ui["show_stats"])
         show_scale_bar = bool(ui["show_scale_bar"])
         super().__init__(**kwargs)
+        # ``from_folder`` attaches these private objects to its lazy
+        # Dataset5dstem before construction. Capturing them here lets the
+        # initial compare refresh paint persistent previews before the factory
+        # attaches its polling metadata.
+        self._compare_preview_cache = getattr(data, "_compare_preview_cache", None)
+        self._compare_preview_sources = getattr(
+            data, "_compare_preview_sources", None
+        )
+        self._compare_loaded_source_signatures = getattr(
+            data,
+            "_compare_loaded_source_signatures",
+            {},
+        )
         self._static_fallback_mime = self._static_fallback_mime_type()
         self.widget_version = resolve_widget_version()
         panel_width_px = int(panel_width_px)
@@ -995,7 +1043,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         self._cached_adf_virtual = None
         self._cached_haadf_virtual = None
         self._compare_virtual_page_cache: OrderedDict[
-            tuple[Any, ...], tuple[bytes, tuple[int, ...], str, int]
+            tuple[Any, ...], tuple[bytes, tuple[int, ...], str, int, str | None]
         ] = OrderedDict()
         self._compare_virtual_page_cache_bytes = 0
         self._compare_diffraction_cache: OrderedDict[
@@ -1008,12 +1056,30 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         self._compare_cache_warm_stop: threading.Event | None = None
         self._compare_cache_warm_thread: threading.Thread | None = None
         self._compare_cache_warm_status = "idle"
+        self._compare_page_stop: threading.Event | None = None
+        self._compare_page_thread: threading.Thread | None = None
+        self._compare_maintenance_stop: threading.Event | None = None
+        self._compare_maintenance_thread: threading.Thread | None = None
+        self._compare_page_worker_lock = threading.Lock()
+        self._compare_page_request_lock = threading.RLock()
+        self._compare_page_generation_counter = 0
+        self._compare_page_last_error = ""
+        self._compare_page_last_send_error = ""
+        self._compare_page_fresh_indices: set[int] = set()
+        self._compare_page_working_images: dict[int, np.ndarray] = {}
         self._compare_cache_pages = max(0, int(compare_cache_pages))
         self._compare_cache_max_bytes = (
             None
             if compare_cache_max_bytes is None
             else max(0, int(compare_cache_max_bytes))
         )
+        preview_cache = getattr(self, "_compare_preview_cache", None)
+        if preview_cache is not None and bool(getattr(preview_cache, "enabled", False)):
+            self.compare_page_cache_state = "miss"
+            self.compare_page_progressive_enabled = bool(
+                type(self._data).__name__ == "Dataset5dstem"
+                and getattr(self._data, "is_lazy", False)
+            )
         if precompute_virtual_images and self.n_frames == 1:
             self._precompute_common_virtual_images()
 
@@ -1065,7 +1131,18 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         _tc = time.perf_counter()
         self._compute_virtual_image_from_roi()
         self._refresh_compare_virtual_images()
-        self._update_frame()
+        if self._uses_progressive_compare_pages():
+            # The selected first master is already resident for calibration.
+            # Paint its diffraction pattern now; the page worker replaces this
+            # with the requested average after it has loaded/cached each wave.
+            frame = self._diffraction_frame_for_index(int(self.frame_idx))
+            self._store_compare_diffraction_cache(int(self.frame_idx), frame)
+            self.frame_bytes = np.ascontiguousarray(
+                self._diffraction_frame_as_numpy(frame),
+                dtype=np.float32,
+            ).tobytes()
+        else:
+            self._update_frame()
         if _verbose:
             print(f"  virtual image + frame: {time.perf_counter() - _tc:.2f}s")
 
@@ -2546,7 +2623,42 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
                     state["_static_fallback_mime"] = self._static_fallback_mime
             for heavy_key in self._UNSAVED_HEAVY_KEYS:
                 state.pop(heavy_key, None)
+        if (
+            key is None
+            and not getattr(self, "_initial_live_mount_state", False)
+            and state.get("folder_watch_state") in {
+            "watching",
+            "updating",
+            "waiting",
+            "error",
+            }
+        ):
+            # A saved or exported widget model cannot retain this Python daemon.
+            # Never serialize a live green/blue/amber/red badge that will be
+            # untrue when the notebook is reopened without the current kernel.
+            state["folder_watch_state"] = "stopped"
+            state["folder_watch_detail"] = (
+                "Folder watcher is not running in saved widget state. "
+                "Re-run the cell to resume live folder updates."
+            )
         return state
+
+    def _with_initial_live_mount_state(self, fn, *args, **kwargs):
+        """Keep live watcher state truthful during the display handshake."""
+        self._initial_live_mount_state = True
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            self._initial_live_mount_state = False
+
+    def _repr_mimebundle_(self, **kwargs):
+        return self._with_initial_live_mount_state(
+            super()._repr_mimebundle_,
+            **kwargs,
+        )
+
+    def _ipython_display_(self):
+        return self._with_initial_live_mount_state(super()._ipython_display_)
 
     @staticmethod
     def _resize_static_panel(panel, panel_px: int):
@@ -2781,8 +2893,13 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         >>> del result        # free the source array
         """
         self.stop_folder_watch()
+        self.stop_compare_page_load(wait=True)
+        self.stop_compare_maintenance(wait=True)
         self.stop_dataset_preload(wait=True)
         self.stop_compare_cache_warm(wait=True)
+        preview_cache = getattr(self, "_compare_preview_cache", None)
+        if preview_cache is not None:
+            preview_cache.close()
 
         import gc
 
@@ -2822,6 +2939,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         if type(data).__name__ == "Dataset5dstem" and hasattr(data, "free"):
             data.free()
         self._data = None
+        self.compare_page_progressive_enabled = False
         self._clear_compare_virtual_images()
         self.compare_status = (
             "Show4DSTEM data was freed. Re-run the load/display cell to restore "
@@ -3145,10 +3263,19 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             self._handle_compare_hidden_change(
                 change.get("old", []), change.get("new", [])
             )
+        progressive = self._uses_progressive_compare_pages()
         self._refresh_compare_virtual_images()
         if self.view_mode == "multiple":
-            self._ensure_current_compare_frame_visible()
-            self._update_frame()
+            # A page change normally moves the selected diffraction panel to
+            # the first visible slot. Suppress that observer's legacy eager
+            # frame load while a folder page is being streamed in the worker.
+            self._suppress_progressive_frame_update = progressive
+            try:
+                self._ensure_current_compare_frame_visible()
+            finally:
+                self._suppress_progressive_frame_update = False
+            if not progressive:
+                self._update_frame()
         else:
             self._compute_virtual_image_from_roi()
             self._update_frame()
@@ -3177,6 +3304,11 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         self._cached_haadf_virtual = None
         if self.view_mode == "multiple":
             self._sync_compare_page_to_frame_idx()
+            if getattr(self, "_suppress_progressive_frame_update", False) or (
+                self._uses_progressive_compare_pages()
+                and bool(self.compare_page_loading)
+            ):
+                return
         # Recompute virtual image only when it is visible. In multiple mode the
         # visible virtual-image surface is the compare grid; switching back to
         # single recomputes the per-frame virtual image in _on_compare_config_change.
@@ -4310,16 +4442,21 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             self._gif_metadata_json = json.dumps(metadata, indent=2)
             self._gif_data = buf.getvalue()
 
-    def _update_frame(self, change=None):
-        """Send raw float32 frame to frontend (JS handles scale/colormap)."""
+    def _current_frame_bytes(self) -> bytes | None:
+        """Build the current diffraction payload without mutating widget state."""
         if self._data is None:
-            return
+            return None
         if (
             self.view_mode == "multiple"
             and self.n_frames > 1
             and self._normalise_compare_dp_mode(self.compare_dp_mode) == "average"
         ):
             frame = self._average_compare_diffraction_frame()
+        elif self.view_mode == "multiple" and self.n_frames > 1:
+            frame = self._get_cached_compare_diffraction_frame(int(self.frame_idx))
+            if frame is None:
+                frame = self._diffraction_frame_for_index(self.frame_idx)
+                self._store_compare_diffraction_cache(int(self.frame_idx), frame)
         else:
             frame = self._diffraction_frame_for_index(self.frame_idx)
 
@@ -4327,13 +4464,23 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         # stays in native dtype; only this single 192×192 (~144 KB) frame
         # gets promoted.
         if not isinstance(frame, torch.Tensor):
-            frame = torch.as_tensor(np.asarray(frame))
+            # Cached diffraction payloads are often read-only np.frombuffer
+            # views. Copy this tiny frame before handing it to Torch so later
+            # consumers never inherit undefined write semantics or warnings.
+            frame = torch.from_numpy(np.array(frame, copy=True))
         if frame.dtype != torch.float32:
             frame = frame.float()
+        return frame.detach().cpu().numpy().tobytes()
+
+    def _update_frame(self, change=None):
+        """Send raw float32 frame to frontend (JS handles scale/colormap)."""
+        payload = self._current_frame_bytes()
+        if payload is None:
+            return
         # Stats compute moved to JS (frontend has frame_bytes; computeStats() in
         # js/stats.ts does mean/min/max/std on the Float32Array directly,
         # avoiding 4 sync trait round-trips per scan-position click).
-        self.frame_bytes = frame.detach().cpu().numpy().tobytes()
+        self.frame_bytes = payload
 
     def _diffraction_frame_for_index(self, frame_idx: int):
         """Return one diffraction pattern at the current scan position."""
@@ -4783,9 +4930,227 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         self.compare_hidden_panels = []
         return self
 
+    @property
+    def preview_cache_info(self) -> dict[str, Any]:
+        """Persistent reduced-preview cache status for this folder viewer."""
+        cache = getattr(self, "_compare_preview_cache", None)
+        if cache is None:
+            return {
+                "enabled": False,
+                "mode": "off",
+                "path": None,
+                "max_bytes": None,
+                "entries": 0,
+                "current_bytes": 0,
+                "pending_writes": 0,
+                "closed": False,
+                "errors": 0,
+                "hits": 0,
+                "misses": 0,
+                "invalidations": 0,
+                "corruptions": 0,
+                "writes": 0,
+                "write_errors": 0,
+                "evictions": 0,
+                "bytes_read": 0,
+                "bytes_written": 0,
+                "lookup_ms": 0.0,
+                "read_ms": 0.0,
+                "write_ms": 0.0,
+            }
+        return dict(cache.info)
+
+    def clear_preview_cache(self) -> Self:
+        """Delete this viewer's derived disk previews, never raw 4D data."""
+        cache = getattr(self, "_compare_preview_cache", None)
+        if cache is not None:
+            cache.clear()
+        return self
+
     @staticmethod
     def _master_key(master) -> str:
         return str(pathlib.Path(master).expanduser().resolve())
+
+    @staticmethod
+    def _validate_folder_watch_interval(interval: float) -> float:
+        """Return a finite positive folder polling interval."""
+        value = float(interval)
+        if not np.isfinite(value) or value <= 0:
+            raise ValueError(
+                "watch interval must be a finite value > 0 seconds, "
+                f"got {interval!r}"
+            )
+        return value
+
+    def _folder_watch_is_alive(self) -> bool:
+        """Return whether this widget's folder worker is actually running."""
+        thread = getattr(self, "_folder_watch_thread", None)
+        return bool(thread is not None and thread.is_alive())
+
+    @staticmethod
+    def _folder_readiness_signature(report: Any) -> str:
+        """Canonicalize one header-only readiness signature for probation."""
+        return json.dumps(
+            report.source_signature,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+
+    @staticmethod
+    def _folder_readiness_is_waiting(report: Any) -> bool:
+        """Classify transient acquisition states separately from bad data."""
+        actual = getattr(report, "actual_frames", None)
+        expected = getattr(report, "expected_frames", None)
+        if actual is not None and expected is not None:
+            if int(actual) < int(expected):
+                return True
+            if int(actual) > int(expected):
+                return False
+        reason = str(getattr(report, "reason", "")).casefold()
+        action = str(getattr(report, "action", "")).strip().casefold()
+        permanent_markers = (
+            "inconsistent detector",
+            "inconsistent dtype",
+            "inconsistent scan_shape",
+            "incompatible",
+            "does not match",
+            "conflicting",
+            "expected at least (frame, det_row, det_col)",
+        )
+        corrective_prefixes = ("fix ", "repair ", "use ", "pass ")
+        if any(marker in reason for marker in permanent_markers) or action.startswith(
+            corrective_prefixes
+        ):
+            return False
+        if action.startswith("wait "):
+            return True
+        transient_markers = (
+            "missing",
+            "empty",
+            "zero stored frames",
+            "not readable hdf5",
+            "cannot be inspected",
+            "changed during readiness inspection",
+            "headers are incomplete",
+            "header to finish writing",
+            "no entry/data",
+            "has no entry/data/data",
+        )
+        return any(marker in reason for marker in transient_markers)
+
+    def _compact_folder_watch_detail(self, detail: str, *, limit: int = 480) -> str:
+        """Keep synced status text bounded and free of the watched root path."""
+        text = " ".join(str(detail).split())
+        source = getattr(self, "_folder_source", None) or {}
+        folder = source.get("folder")
+        if folder is not None:
+            root = str(pathlib.Path(folder))
+            variants = {root, os.path.realpath(root)}
+            variants.update(
+                path[len("/private") :]
+                for path in tuple(variants)
+                if path.startswith("/private/")
+            )
+            for path in sorted(variants, key=len, reverse=True):
+                text = text.replace(f"{path}{os.sep}", "")
+                text = text.replace(
+                    path,
+                    pathlib.Path(path).name or "watched folder",
+                )
+        # Readiness libraries can surface a linked source outside the watched
+        # root. Reduce any remaining whitespace-delimited absolute path to its
+        # basename so a badge never exposes a host filesystem layout.
+        compact_tokens: list[str] = []
+        for token in text.split(" "):
+            leading = token[: len(token) - len(token.lstrip("([{<"))]
+            candidate = token[len(leading) :]
+            trailing = candidate[len(candidate.rstrip(".,;:)]}>")) :]
+            if trailing:
+                candidate = candidate[: len(candidate) - len(trailing)]
+            if candidate.startswith(os.sep) and os.sep in candidate[1:]:
+                candidate = pathlib.Path(candidate).name or "source file"
+            compact_tokens.append(f"{leading}{candidate}{trailing}")
+        text = " ".join(compact_tokens)
+        if len(text) > int(limit):
+            text = f"{text[: max(0, int(limit) - 1)].rstrip()}…"
+        return text
+
+    def _folder_issue_detail(
+        self,
+        master: Any,
+        reason: str,
+        action: str = "",
+    ) -> str:
+        """Build compact, corrective detail for the synced watch badge."""
+        name = pathlib.Path(master).name or str(master)
+        reason = str(reason).strip().rstrip(".")
+        action = str(action).strip()
+        detail = f"{name}: {reason}." if reason else f"{name}: not ready."
+        return self._compact_folder_watch_detail(f"{detail} {action}".strip())
+
+    def _finish_folder_poll_status(
+        self,
+        *,
+        waiting: Sequence[str],
+        errors: Sequence[str],
+    ) -> None:
+        """Publish the final state of one successful poll while still alive."""
+        self._folder_poll_waiting = str(waiting[0]) if waiting else ""
+        self._folder_poll_error = str(errors[0]) if errors else ""
+        if not self._folder_watch_is_alive():
+            return
+        if errors:
+            set_folder_watch_status(self, "error", str(errors[0]))
+        elif waiting:
+            set_folder_watch_status(self, "waiting", str(waiting[0]))
+        elif bool(getattr(self, "_folder_update_pending", False)):
+            set_folder_watch_status(
+                self,
+                "updating",
+                "Loading the newly arrived data on the visible page.",
+            )
+        else:
+            set_folder_watch_status(self, "watching", "")
+
+    def _finish_folder_page_update(
+        self,
+        generation: int,
+        *,
+        error: str = "",
+    ) -> None:
+        """Resolve a watched append only after its visible page is authoritative."""
+        if not bool(getattr(self, "_folder_update_pending", False)):
+            return
+        pending_generation = int(
+            getattr(self, "_folder_update_generation", generation)
+        )
+        if int(generation) < pending_generation:
+            return
+        self._folder_update_pending = False
+        self._folder_update_generation = 0
+        if not self._folder_watch_is_alive():
+            return
+        if error:
+            set_folder_watch_status(
+                self,
+                "error",
+                self._compact_folder_watch_detail(error),
+            )
+        elif getattr(self, "_folder_poll_error", ""):
+            set_folder_watch_status(
+                self,
+                "error",
+                str(self._folder_poll_error),
+            )
+        elif getattr(self, "_folder_poll_waiting", ""):
+            set_folder_watch_status(
+                self,
+                "waiting",
+                str(self._folder_poll_waiting),
+            )
+        else:
+            set_folder_watch_status(self, "watching", "")
 
     def _attach_folder_source(
         self,
@@ -4815,13 +5180,25 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             "preload_all_if_fits": bool(preload_all_if_fits),
             "warm_cache": bool(warm_cache),
         }
+        data = getattr(self, "_data", None)
+        self.compare_page_progressive_enabled = bool(
+            type(data).__name__ == "Dataset5dstem"
+            and getattr(data, "is_lazy", False)
+        )
         self._folder_known_masters = {
             self._master_key(master) for master in known_masters
         }
         self._folder_watch_stop = None
         self._folder_watch_thread = None
+        self._folder_watch_started = False
+        self._folder_ready_probation: dict[str, str] = {}
         self._folder_poll_lock = threading.Lock()
         self._compare_folder_refresh_pending = False
+        self._folder_update_pending = False
+        self._folder_update_generation = 0
+        self._folder_poll_waiting = ""
+        self._folder_poll_error = ""
+        set_folder_watch_status(self, "hidden", "")
         return self
 
     def preload_all_datasets(self, *, background: bool = True) -> Self:
@@ -4951,8 +5328,10 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         """Append newly ready folder masters as lazy frames.
 
         Only widgets created by ``Show4DSTEM.from_folder(...)`` have a folder
-        source attached. New masters start as lazy slots, then join the complete
-        series preload when the updated shape/dtype footprint still fits.
+        source attached. A newly discovered master must produce the same complete
+        header/source signature on two consecutive polls before it is appended.
+        New masters start as cold lazy slots, then join the complete series
+        preload when the updated shape/dtype footprint still fits.
         """
         source = getattr(self, "_folder_source", None)
         if source is None:
@@ -4961,100 +5340,233 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             )
         if type(getattr(self, "_data", None)).__name__ != "Dataset5dstem":
             raise RuntimeError("poll_folder() requires a lazy Dataset5dstem backing.")
-        from quantem.widget.io import discover_masters, is_master_ready
+        from quantem.widget.io import discover_masters, inspect_master_readiness
 
         poll_lock = getattr(self, "_folder_poll_lock", None)
         if poll_lock is None:
             poll_lock = threading.Lock()
             self._folder_poll_lock = poll_lock
-        with poll_lock:
-            masters = discover_masters(
-                str(source["folder"]),
-                pattern=source["pattern"],
-                recursive=source["recursive"],
-                scan_shape=source["scan_shape"],
-                verbose=False,
-            )
-            if source["ready_only"]:
-                masters = [master for master in masters if is_master_ready(master)]
-            known = set(getattr(self, "_folder_known_masters", set()))
-            added: list[int] = []
-            labels = list(self.frame_labels)
-            old_n_frames = int(self.n_frames)
-            old_order = list(self.compare_panel_order or [])
-            custom_order = (
-                len(old_order) == old_n_frames
-                and sorted(int(idx) for idx in old_order) == list(range(old_n_frames))
-            )
-            candidates = []
-            for master in masters:
-                key = self._master_key(master)
-                if key in known:
-                    continue
+        watch_active = self._folder_watch_is_alive()
+        waiting_issues: list[str] = []
+        error_issues: list[str] = []
+        try:
+            with poll_lock:
+                if watch_active:
+                    set_folder_watch_status(
+                        self,
+                        "updating",
+                        "Checking the folder for new 4D-STEM data.",
+                    )
                 try:
-                    validator = source.get("validate_master")
-                    if callable(validator):
-                        validator(master)
-                    idx = len(self._data) + len(candidates)
-                    label, loader = source["make_loader"](master, idx)
-                except Exception:
-                    # Incomplete or incompatible files remain unknown so a
-                    # subsequent poll can retry after acquisition finishes.
-                    continue
-                candidates.append((master, key, idx, str(label), loader))
-            for master, key, idx, label, loader in candidates:
-                self._data.append_lazy_frame(loader)
-                labels.append(label)
-            if old_n_frames <= 1 < len(self._data):
-                page_config = getattr(self, "_dataset_page_config", None)
-                if page_config is not None:
-                    self._data.page(**page_config)
-            registrar = source.get("register_master")
-            if callable(registrar):
-                for master, _, idx, _, _ in candidates:
-                    registrar(master, idx)
-            for _, key, idx, _, _ in candidates:
-                known.add(key)
-                added.append(idx)
-            self._folder_known_masters = known
-            if not added:
-                return []
+                    # Do not pre-filter on frame count: incomplete candidates must
+                    # stay visible to the readiness protocol so users see why a
+                    # matching master has not appeared yet.
+                    masters = discover_masters(
+                        str(source["folder"]),
+                        pattern=source["pattern"],
+                        recursive=source["recursive"],
+                        scan_shape=None,
+                        verbose=False,
+                    )
+                except ValueError as exc:
+                    if "No files matching" not in str(exc):
+                        raise
+                    masters = []
 
-            # n_frames normally triggers a compare-grid render. A watched master
-            # must first remain a cold lazy slot, so publish only lightweight
-            # metadata here. Page selection or cache warming performs the first
-            # raw load explicitly.
-            self._suppress_folder_append_refresh = True
-            try:
-                with self.hold_trait_notifications():
-                    self.n_frames = len(self._data)
-                    self.frame_labels = labels
-                    if custom_order:
-                        self.compare_panel_order = [*old_order, *added]
-                    if self.view_mode == "multiple":
-                        ordered = self._compare_ordered_ready_indices()
-                        self._compare_visible_total = len(ordered)
-                        self._update_compare_page_state(ordered)
-                        self.compare_status = self._compare_status_for_indices(
-                            self.compare_panel_indices,
-                            all_groups=(
-                                self._normalise_compare_group_mode(
-                                    self.compare_group_mode
-                                )
-                                == "all"
-                            ),
+                known = set(getattr(self, "_folder_known_masters", set()))
+                probation = dict(
+                    getattr(self, "_folder_ready_probation", {})
+                )
+                discovered_keys = {self._master_key(master) for master in masters}
+                probation = {
+                    key: signature
+                    for key, signature in probation.items()
+                    if key in discovered_keys and key not in known
+                }
+                added: list[int] = []
+                labels = list(self.frame_labels)
+                old_n_frames = int(self.n_frames)
+                old_order = list(self.compare_panel_order or [])
+                custom_order = (
+                    len(old_order) == old_n_frames
+                    and sorted(int(idx) for idx in old_order)
+                    == list(range(old_n_frames))
+                )
+                candidates = []
+                for master in masters:
+                    key = self._master_key(master)
+                    if key in known:
+                        continue
+
+                    try:
+                        report = inspect_master_readiness(
+                            master,
+                            scan_shape=source["scan_shape"],
                         )
-            finally:
-                self._suppress_folder_append_refresh = False
+                    except Exception as exc:
+                        probation.pop(key, None)
+                        error_issues.append(
+                            self._folder_issue_detail(
+                                master,
+                                f"readiness inspection failed ({type(exc).__name__}: {exc})",
+                                "Check file permissions and HDF5 integrity, then retry.",
+                            )
+                        )
+                        continue
 
-            self._raw_preload_status = "paged"
-            self._update_gpu_memory_status()
-            if bool(source.get("preload_all_if_fits", False)):
-                self.preload_all_datasets(background=True)
-            if bool(source.get("warm_cache", False)):
-                self._compare_folder_refresh_pending = True
-                self.warm_compare_cache(background=True)
-            return added
+                    if not bool(report.ready):
+                        probation.pop(key, None)
+                        detail = self._folder_issue_detail(
+                            master,
+                            report.reason,
+                            report.action,
+                        )
+                        if self._folder_readiness_is_waiting(report):
+                            waiting_issues.append(detail)
+                        else:
+                            error_issues.append(detail)
+                        continue
+
+                    signature = self._folder_readiness_signature(report)
+                    if probation.get(key) != signature:
+                        probation[key] = signature
+                        waiting_issues.append(
+                            self._folder_issue_detail(
+                                master,
+                                "complete headers found; waiting for one unchanged "
+                                "follow-up readiness poll",
+                                "Keep the master and linked detector files in place.",
+                            )
+                        )
+                        continue
+
+                    try:
+                        validator = source.get("validate_master")
+                        if callable(validator):
+                            validator(master)
+                        idx = len(self._data) + len(candidates)
+                        label, loader = source["make_loader"](master, idx)
+                    except Exception as exc:
+                        error_issues.append(
+                            self._folder_issue_detail(
+                                master,
+                                f"incompatible master ({type(exc).__name__}: {exc})",
+                                "Use a matching scan shape, detector shape, and "
+                                "dtype, or move this file out of the watched folder.",
+                            )
+                        )
+                        # Keep the confirmed signature so a corrected contract can
+                        # be retried immediately without hiding later valid files.
+                        continue
+                    candidates.append((master, key, idx, str(label), loader))
+
+                self._folder_ready_probation = probation
+                if candidates and watch_active:
+                    set_folder_watch_status(
+                        self,
+                        "updating",
+                        "Registering newly completed 4D-STEM data.",
+                    )
+                for master, key, idx, label, loader in candidates:
+                    self._data.append_lazy_frame(loader)
+                    labels.append(label)
+                if old_n_frames <= 1 < len(self._data):
+                    page_config = getattr(self, "_dataset_page_config", None)
+                    if page_config is not None:
+                        self._data.page(**page_config)
+                registrar = source.get("register_master")
+                if callable(registrar):
+                    for master, _, idx, _, _ in candidates:
+                        registrar(master, idx)
+                for _, key, idx, _, _ in candidates:
+                    known.add(key)
+                    probation.pop(key, None)
+                    added.append(idx)
+                self._folder_ready_probation = probation
+                self._folder_known_masters = known
+
+                if added:
+                    # n_frames normally triggers a compare-grid render. A watched
+                    # master must first remain a cold lazy slot, so publish only
+                    # lightweight metadata here. Page selection or cache warming
+                    # performs the first raw load explicitly.
+                    self._suppress_folder_append_refresh = True
+                    try:
+                        with self.hold_trait_notifications():
+                            self.n_frames = len(self._data)
+                            self.frame_labels = labels
+                            if custom_order:
+                                self.compare_panel_order = [*old_order, *added]
+                            if self.view_mode == "multiple":
+                                ordered = self._compare_ordered_ready_indices()
+                                self._compare_visible_total = len(ordered)
+                                self._update_compare_page_state(ordered)
+                                self.compare_status = (
+                                    self._compare_status_for_indices(
+                                        self.compare_panel_indices,
+                                        all_groups=(
+                                            self._normalise_compare_group_mode(
+                                                self.compare_group_mode
+                                            )
+                                            == "all"
+                                        ),
+                                    )
+                                )
+                    finally:
+                        self._suppress_folder_append_refresh = False
+
+                    self._raw_preload_status = "paged"
+                    self._update_gpu_memory_status()
+                    active = (
+                        self._compare_ready_indices()
+                        if self.view_mode == "multiple"
+                        else []
+                    )
+                    refresh_active_page = bool(set(added).intersection(active))
+                    if refresh_active_page:
+                        # The append observer above is deliberately suppressed so
+                        # a new master starts cold. Explicitly schedule only the
+                        # affected visible page, then keep the badge in Updating
+                        # until the progressive worker publishes authoritative
+                        # current pixels for that stable slot.
+                        self._folder_update_pending = True
+                        self._folder_update_generation = int(
+                            self._compare_page_generation_counter
+                        ) + 1
+                        self._refresh_compare_virtual_images()
+                    else:
+                        # Off-page arrivals remain cold. Optional maintenance can
+                        # warm them without blocking or repainting the page the
+                        # scientist is currently inspecting.
+                        if bool(source.get("preload_all_if_fits", False)):
+                            self.preload_all_datasets(background=True)
+                        if bool(source.get("warm_cache", False)):
+                            self.warm_compare_cache(background=True)
+
+                if not masters and not known:
+                    waiting_issues.append(
+                        "No matching 4D-STEM master has arrived yet. Keep the "
+                        "watcher running or check the folder and filename pattern."
+                    )
+                self._finish_folder_poll_status(
+                    waiting=waiting_issues,
+                    errors=error_issues,
+                )
+                return added
+        except Exception as exc:
+            self._folder_update_pending = False
+            self._folder_update_generation = 0
+            if self._folder_watch_is_alive():
+                set_folder_watch_status(
+                    self,
+                    "error",
+                    self._compact_folder_watch_detail(
+                        f"{type(exc).__name__}: {exc}. The watcher is still alive "
+                        "and will retry; check the folder, storage, and file "
+                        "permissions."
+                    ),
+                )
+            raise
 
     def watch_folder(self, *, interval: float = 2.0) -> Self:
         """Poll the attached folder in the background and append ready masters."""
@@ -5063,27 +5575,67 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             raise RuntimeError(
                 "watch_folder() is available only on Show4DSTEM.from_folder(...) widgets."
             )
+        next_interval = self._validate_folder_watch_interval(interval)
         self.stop_folder_watch()
-        import threading
 
         stop = threading.Event()
         self._folder_watch_stop = stop
+        self._folder_watch_started = True
 
         def _worker() -> None:
-            while not stop.wait(float(interval)):
-                try:
-                    self.poll_folder()
-                except Exception:
-                    # A live microscope folder can be transiently inconsistent
-                    # while files are being copied. Keep the mounted viewer alive.
-                    continue
+            try:
+                while not stop.wait(next_interval):
+                    try:
+                        self.poll_folder()
+                    except Exception:
+                        # poll_folder publishes a corrective error and the next
+                        # cycle retries without killing the mounted viewer.
+                        continue
+            finally:
+                current = threading.current_thread()
+                if getattr(self, "_folder_watch_stop", None) is stop:
+                    self._folder_watch_stop = None
+                if getattr(self, "_folder_watch_thread", None) is current:
+                    self._folder_watch_thread = None
+                if stop.is_set():
+                    set_folder_watch_status(self, "stopped", "Folder watcher stopped.")
+                else:
+                    set_folder_watch_status(
+                        self,
+                        "error",
+                        "Folder watch worker stopped unexpectedly. Call "
+                        "watch_folder() to restart it.",
+                    )
 
-        self._folder_watch_thread = threading.Thread(
+        thread = threading.Thread(
             target=_worker,
             name="Show4DSTEM-folder-watch",
             daemon=True,
         )
-        self._folder_watch_thread.start()
+        self._folder_watch_thread = thread
+        try:
+            thread.start()
+        except Exception as exc:
+            if getattr(self, "_folder_watch_stop", None) is stop:
+                self._folder_watch_stop = None
+            if getattr(self, "_folder_watch_thread", None) is thread:
+                self._folder_watch_thread = None
+            set_folder_watch_status(
+                self,
+                "error",
+                f"Folder watch worker could not start ({type(exc).__name__}: {exc}). "
+                "Check the notebook kernel and retry.",
+            )
+            raise
+        if thread.is_alive():
+            set_folder_watch_status(self, "watching", "")
+        else:
+            set_folder_watch_status(
+                self,
+                "error",
+                "Folder watch worker stopped before it could start polling. "
+                "Call watch_folder() to retry.",
+            )
         return self
 
     def stop_folder_watch(self) -> None:
@@ -5098,12 +5650,19 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             self._folder_watch_stop = None
         if getattr(self, "_folder_watch_thread", None) is thread:
             self._folder_watch_thread = None
+        if bool(getattr(self, "_folder_watch_started", False)):
+            set_folder_watch_status(self, "stopped", "Folder watcher stopped.")
 
     def close(self) -> None:
         """Stop background work and close the widget comm."""
         self.stop_folder_watch()
+        self.stop_compare_page_load(wait=True)
+        self.stop_compare_maintenance(wait=True)
         self.stop_dataset_preload(wait=True)
         self.stop_compare_cache_warm(wait=True)
+        preview_cache = getattr(self, "_compare_preview_cache", None)
+        if preview_cache is not None:
+            preview_cache.close()
         super().close()
 
     def _candidate_cuda_memory_devices(self) -> list[int]:
@@ -5397,6 +5956,22 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             self.compare_panel_count = 0
             self.compare_panel_indices = []
             self.compare_status = status
+            self.compare_page_expected_indices = []
+            self.compare_page_loading = False
+            self.compare_page_loaded_count = 0
+            self.compare_page_cached_indices = []
+            self.compare_page_cache_state = (
+                "miss"
+                if getattr(self, "_compare_preview_cache", None) is not None
+                else "off"
+            )
+            self.compare_page_first_panel_ms = 0.0
+            self.compare_page_first_fresh_ms = 0.0
+            self.compare_page_total_ms = 0.0
+            self.compare_page_panel_bytes = b""
+            self.compare_page_panel_frame_idx = -1
+            self.compare_page_panel_slot = -1
+            self.compare_page_panel_cached = False
 
     def _empty_compare_page_status(self) -> str:
         """Status for a valid compare page that has no visible panels."""
@@ -5648,7 +6223,1255 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             images.extend(batch_images)
         return images
 
+    def _compare_preview_contract(
+        self,
+        preset_name: str,
+        *,
+        mask=None,
+    ) -> dict[str, Any]:
+        """Scientific processing contract for one persistent preview entry."""
+        preset = str(preset_name).lower()
+        # Build standard masks on the host. Cache lookup must not allocate CUDA
+        # memory merely to validate a derived preview.
+        rows = np.arange(self.det_rows, dtype=np.float32)[:, None]
+        cols = np.arange(self.det_cols, dtype=np.float32)[None, :]
+        dist_sq = (cols - np.float32(self.center_col)) ** 2 + (
+            rows - np.float32(self.center_row)
+        ) ** 2
+        bf = np.float32(max(1.0, float(self.bf_radius)))
+        if preset == "bf":
+            mask_array = dist_sq <= bf**2
+        elif preset == "abf":
+            mask_array = (dist_sq >= (bf * np.float32(0.5)) ** 2) & (
+                dist_sq <= bf**2
+            )
+        elif preset == "adf":
+            mask_array = (dist_sq >= bf**2) & (
+                dist_sq <= (bf * np.float32(2.0)) ** 2
+            )
+        elif preset == "haadf":
+            mask_array = (dist_sq >= (bf * np.float32(2.0)) ** 2) & (
+                dist_sq <= (bf * np.float32(4.0)) ** 2
+            )
+        elif mask is not None:
+            mask_array = (
+                mask.detach().to("cpu").numpy()
+                if hasattr(mask, "detach")
+                else np.asarray(mask)
+            )
+        else:
+            raise ValueError(f"unsupported persistent preview preset {preset_name!r}")
+        mask_bytes = np.ascontiguousarray(mask_array.astype(np.uint8)).tobytes()
+        return {
+            "preset": preset,
+            "shape": [int(self.shape_rows), int(self.shape_cols)],
+            "detector_shape": [int(self.det_rows), int(self.det_cols)],
+            "center": [float(self.center_row), float(self.center_col)],
+            "bf_radius": float(self.bf_radius),
+            "mask_sha256": hashlib.sha256(mask_bytes).hexdigest(),
+            "normalization": "detector-mean-v1",
+            "output_dtype": "<f4",
+        }
+
+    def _compare_preview_source(self, idx: int):
+        sources = getattr(self, "_compare_preview_sources", None)
+        if sources is None or int(idx) < 0 or int(idx) >= len(sources):
+            return None
+        return sources[int(idx)]
+
+    def _compare_source_signature_token(
+        self,
+        indices: Sequence[int],
+        signatures: dict[int, dict[str, Any]] | None = None,
+    ) -> str | None:
+        """Stable source-provenance token for one host-memory page entry."""
+        cache = getattr(self, "_compare_preview_cache", None)
+        sources = getattr(self, "_compare_preview_sources", None)
+        if cache is None or sources is None:
+            return None
+        values: list[dict[str, Any]] = []
+        try:
+            for value in indices:
+                idx = int(value)
+                source = self._compare_preview_source(idx)
+                if source is None:
+                    return None
+                signature = (signatures or {}).get(idx)
+                if signature is None:
+                    signature = cache.source_signature(source)
+                values.append({"index": idx, "source": signature})
+        except OSError:
+            return "unavailable"
+        return hashlib.sha256(
+            json.dumps(values, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+
+    def _release_changed_compare_sources(self, indices: Sequence[int]) -> list[int]:
+        """Drop resident raw/DP state when a known master or chunk changed."""
+        cache = getattr(self, "_compare_preview_cache", None)
+        data = getattr(self, "_data", None)
+        signatures = getattr(self, "_compare_loaded_source_signatures", None)
+        if (
+            cache is None
+            or signatures is None
+            or data is None
+            or not hasattr(data, "loaded_indices")
+            or not hasattr(data, "release")
+        ):
+            return []
+        loaded = set(int(idx) for idx in data.loaded_indices())
+        changed: list[int] = []
+        for value in indices:
+            idx = int(value)
+            if idx not in loaded:
+                continue
+            source = self._compare_preview_source(idx)
+            previous = signatures.get(idx)
+            if source is None or previous is None:
+                continue
+            try:
+                current = cache.source_signature(source)
+            except OSError:
+                current = None
+            if current == previous:
+                continue
+            data.release(idx)
+            changed.append(idx)
+            for key in list(self._compare_diffraction_cache):
+                if int(key[0]) != idx:
+                    continue
+                payload = self._compare_diffraction_cache.pop(key)
+                self._compare_diffraction_cache_bytes -= payload[1]
+        return changed
+
+    def _persistent_compare_preset_name(self) -> str | None:
+        """Return a preset only when the current ROI is exactly canonical."""
+        if (
+            float(self.roi_center_col) != float(self.center_col)
+            or float(self.roi_center_row) != float(self.center_row)
+        ):
+            return None
+        bf = float(self.bf_radius)
+        if self.roi_mode == "circle" and float(self.roi_radius) == bf:
+            return "bf"
+        if (
+            self.roi_mode == "annular"
+            and float(self.roi_radius_inner) == bf * 0.5
+            and float(self.roi_radius) == bf
+        ):
+            return "abf"
+        if (
+            self.roi_mode == "annular"
+            and float(self.roi_radius_inner) == bf
+            and float(self.roi_radius) == bf * 2.0
+        ):
+            return "adf"
+        if (
+            self.roi_mode == "annular"
+            and float(self.roi_radius_inner) == bf * 2.0
+            and float(self.roi_radius) == bf * 4.0
+        ):
+            return "haadf"
+        return None
+
+    def _load_persistent_compare_previews(
+        self,
+        indices: Sequence[int],
+        *,
+        preset_name: str | None = None,
+        mask=None,
+        on_hit: Callable[[int, np.ndarray, int], bool | None] | None = None,
+        source_signatures: dict[int, dict[str, Any]] | None = None,
+        continue_if: Callable[[], bool] | None = None,
+    ) -> dict[int, np.ndarray]:
+        """Load individually validated disk previews for the current preset."""
+        cache = getattr(self, "_compare_preview_cache", None)
+        preset = (
+            self._persistent_compare_preset_name()
+            if preset_name is None
+            else preset_name
+        )
+        if cache is None or not cache.enabled or preset is None:
+            return {}
+        contract = self._compare_preview_contract(preset, mask=mask)
+        hits: dict[int, np.ndarray] = {}
+        for value in indices:
+            if continue_if is not None and not continue_if():
+                break
+            idx = int(value)
+            source = self._compare_preview_source(idx)
+            if source is None:
+                continue
+            image = cache.load(
+                source,
+                preset,
+                contract,
+                source_signature=(source_signatures or {}).get(idx),
+            )
+            if image is not None:
+                hits[idx] = np.ascontiguousarray(image, dtype=np.float32)
+                if callable(on_hit) and on_hit(idx, hits[idx], len(hits)) is False:
+                    break
+        return hits
+
+    def _persist_compare_previews(
+        self,
+        payload: bytes,
+        indices: Sequence[int],
+        *,
+        preset_name: str | None = None,
+        source_signatures: dict[int, dict[str, Any]] | None = None,
+    ) -> None:
+        """Queue per-master standard previews without delaying panel paint."""
+        cache = getattr(self, "_compare_preview_cache", None)
+        preset = (
+            self._persistent_compare_preset_name()
+            if preset_name is None
+            else preset_name
+        )
+        if cache is None or not cache.enabled or preset is None or not indices:
+            return
+        try:
+            stack = np.frombuffer(payload, dtype=np.float32).reshape(
+                len(indices),
+                self.shape_rows,
+                self.shape_cols,
+            )
+            contract = self._compare_preview_contract(str(preset))
+        except (TypeError, ValueError):
+            return
+        for value, image in zip(indices, stack, strict=True):
+            idx = int(value)
+            source = self._compare_preview_source(idx)
+            if source is None:
+                continue
+            cache.store(
+                source,
+                str(preset),
+                contract,
+                image,
+                source_signature=(source_signatures or {}).get(idx),
+            )
+
+    def _uses_progressive_compare_pages(self) -> bool:
+        """Whether live page/config changes should use the folder scheduler."""
+        data = getattr(self, "_data", None)
+        return bool(
+            (
+                getattr(self, "_folder_source", None) is not None
+                or bool(
+                    getattr(
+                        getattr(self, "_compare_preview_cache", None),
+                        "enabled",
+                        False,
+                    )
+                )
+            )
+            and type(data).__name__ == "Dataset5dstem"
+            and getattr(data, "is_lazy", False)
+            and self.view_mode == "multiple"
+        )
+
+    def _compare_page_request_is_current(
+        self,
+        generation: int,
+        stop: threading.Event,
+    ) -> bool:
+        """Return False once a newer page/config request supersedes this worker."""
+        return bool(
+            not stop.is_set()
+            and getattr(self, "_data", None) is not None
+            and int(generation) == int(self._compare_page_generation_counter)
+            and getattr(self, "_compare_page_stop", None) is stop
+        )
+
+    def _send_compare_page_message(
+        self,
+        content: dict[str, Any],
+        *,
+        buffer: bytes | memoryview | None = None,
+    ) -> None:
+        """Send progressive-page messages without making comm loss fatal."""
+        try:
+            self.send(content, buffers=[] if buffer is None else [buffer])
+            self._compare_page_last_send_error = ""
+        except Exception as exc:
+            # A notebook may close its comm while a daemon worker is finishing.
+            # The final synced payload remains authoritative when a comm exists.
+            self._compare_page_last_send_error = (
+                f"{type(exc).__name__}: {str(exc)[:1800]}"
+            )
+
+    def _progressive_compare_batches(
+        self,
+        indices: Sequence[int],
+    ) -> list[list[int]]:
+        """Memory/device-aware waves, with safe one-frame fallback."""
+        requested = [int(idx) for idx in indices]
+        data = getattr(self, "_data", None)
+        builder = getattr(data, "progressive_batches", None)
+        if not callable(builder):
+            return [[idx] for idx in requested]
+        try:
+            proposed = list(builder(requested))
+        except Exception:
+            return [[idx] for idx in requested]
+
+        requested_set = set(requested)
+        seen: set[int] = set()
+        waves: list[list[int]] = []
+        for proposed_wave in proposed:
+            try:
+                values = list(proposed_wave)
+            except TypeError:
+                values = [proposed_wave]
+            wave: list[int] = []
+            for value in values:
+                if isinstance(value, bool):
+                    continue
+                idx = int(value)
+                if idx in requested_set and idx not in seen:
+                    wave.append(idx)
+                    seen.add(idx)
+            if wave:
+                waves.append(wave)
+        waves.extend([[idx] for idx in requested if idx not in seen])
+        return waves
+
+    def _emit_progressive_compare_panel(
+        self,
+        *,
+        generation: int,
+        stop: threading.Event,
+        page_idx: int,
+        frame_idx: int,
+        slot: int,
+        image: np.ndarray,
+        started: float,
+        loaded_count: int,
+        cached: bool = False,
+    ) -> float | None:
+        """Publish one ready panel when its request is still current."""
+        panel = np.ascontiguousarray(image, dtype=np.float32).reshape(
+            self.shape_rows,
+            self.shape_cols,
+        )
+        elapsed_ms = max(0.0, (time.perf_counter() - started) * 1000.0)
+        with self._compare_page_request_lock:
+            if not self._compare_page_request_is_current(generation, stop):
+                return None
+            fresh_indices = self._compare_page_fresh_indices
+            if cached and int(frame_idx) in fresh_indices:
+                # A slow cache read must never replace a current-generation
+                # raw result for the same stable slot.
+                return elapsed_ms
+            if not cached:
+                fresh_indices.add(int(frame_idx))
+            self._compare_page_working_images[int(frame_idx)] = panel
+            if float(self.compare_page_first_panel_ms) <= 0:
+                self.compare_page_first_panel_ms = elapsed_ms
+            if not cached and float(self.compare_page_first_fresh_ms) <= 0:
+                self.compare_page_first_fresh_ms = elapsed_ms
+            cached_indices = set(int(idx) for idx in self.compare_page_cached_indices)
+            if cached:
+                cached_indices.add(int(frame_idx))
+            else:
+                cached_indices.discard(int(frame_idx))
+            with self.hold_trait_notifications():
+                if not cached:
+                    self.compare_page_loaded_count = int(loaded_count)
+                self.compare_page_cached_indices = sorted(cached_indices)
+                self.compare_page_panel_bytes = panel.tobytes()
+                self.compare_page_panel_frame_idx = int(frame_idx)
+                self.compare_page_panel_slot = int(slot)
+                self.compare_page_panel_cached = bool(cached)
+                self.compare_page_panel_sequence = (
+                    int(self.compare_page_panel_sequence) + 1
+                )
+            self._send_compare_page_message(
+                {
+                    "type": "compare_panel",
+                    "generation": int(generation),
+                    "frame_idx": int(frame_idx),
+                    "slot": int(slot),
+                    "page_idx": int(page_idx),
+                    # Compatibility aliases keep the protocol self-describing
+                    # outside the widget frontend.
+                    "index": int(frame_idx),
+                    "position": int(slot),
+                    "page": int(page_idx),
+                    "elapsed_ms": float(elapsed_ms),
+                    "cached": bool(cached),
+                },
+                # ipywidgets' binary comm path expects an explicit byte view;
+                # plain ``bytes`` can arrive as an empty/missing buffer in a
+                # live anywidget custom-message callback.
+                buffer=memoryview(panel).cast("B"),
+            )
+        return elapsed_ms
+
+    def _publish_persistent_compare_previews(
+        self,
+        images: dict[int, np.ndarray],
+        *,
+        generation: int,
+        stop: threading.Event,
+        page_idx: int,
+        indices: tuple[int, ...],
+        started: float,
+        emit: bool = True,
+    ) -> bool:
+        """Paint validated disk previews while authoritative CUDA work runs."""
+        shown = [idx for idx in indices if idx in images]
+        if not shown:
+            return False
+        if emit:
+            for idx in shown:
+                if not self._compare_page_request_is_current(generation, stop):
+                    return False
+                self._emit_progressive_compare_panel(
+                    generation=generation,
+                    stop=stop,
+                    page_idx=page_idx,
+                    frame_idx=idx,
+                    slot=indices.index(idx),
+                    image=images[idx],
+                    started=started,
+                    loaded_count=len(shown),
+                    cached=True,
+                )
+        with self._compare_page_request_lock:
+            if not self._compare_page_request_is_current(generation, stop):
+                return False
+            if not bool(self.compare_page_loading):
+                return False
+            merged = {
+                idx: self._compare_page_working_images[idx]
+                for idx in indices
+                if idx in self._compare_page_working_images
+            }
+            shown = [idx for idx in indices if idx in merged]
+            if not shown:
+                return False
+            cached_now = sorted(
+                int(idx) for idx in self.compare_page_cached_indices if idx in merged
+            )
+            stack = np.ascontiguousarray(
+                np.stack([merged[idx] for idx in shown], axis=0),
+                dtype=np.float32,
+            )
+            state = (
+                "cached"
+                if len(cached_now) == len(indices)
+                else "partial"
+                if cached_now
+                else "miss"
+            )
+            with self.hold_trait_notifications():
+                # This is a valid durable fallback. Fresh panels later replace
+                # the same stable frontend slots and the final full stack.
+                self.compare_virtual_image_bytes = stack.tobytes()
+                self.compare_panel_count = len(shown)
+                self.compare_panel_indices = shown
+                self.compare_page_cached_indices = cached_now
+                self.compare_page_cache_state = state
+                self.compare_status = (
+                    f"Cached preview · refreshing current data "
+                    f"{len(cached_now)}/{len(indices)}"
+                    if cached_now
+                    else f"Refreshing current data {len(shown)}/{len(indices)}"
+                )
+        return bool(cached_now)
+
+    def _load_progressive_compare_page(
+        self,
+        indices: Sequence[int],
+        mask,
+        *,
+        generation: int,
+        stop: threading.Event,
+        page_idx: int,
+        started: float,
+        emit: bool,
+    ) -> dict[int, np.ndarray] | None:
+        """Reduce a page in waves; optionally stream each completed panel."""
+        requested = [int(idx) for idx in indices]
+        slot_for = {idx: slot for slot, idx in enumerate(requested)}
+        images_by_index: dict[int, np.ndarray] = {}
+        self._release_changed_compare_sources(requested)
+
+        cached = self._get_cached_compare_preset(requested)
+        if cached is not None:
+            payload, cached_indices, _ = cached
+            stack = np.frombuffer(payload, dtype=np.float32).reshape(
+                len(cached_indices),
+                self.shape_rows,
+                self.shape_cols,
+            )
+            for frame_idx, image in zip(cached_indices, stack, strict=True):
+                if not self._compare_page_request_is_current(generation, stop):
+                    return None
+                idx = int(frame_idx)
+                panel = np.ascontiguousarray(image, dtype=np.float32)
+                images_by_index[idx] = panel
+                if emit:
+                    self._emit_progressive_compare_panel(
+                        generation=generation,
+                        stop=stop,
+                        page_idx=page_idx,
+                        frame_idx=idx,
+                        slot=slot_for[idx],
+                        image=panel,
+                        started=started,
+                        loaded_count=len(images_by_index),
+                    )
+            return images_by_index
+
+        for wave in self._progressive_compare_batches(requested):
+            if not self._compare_page_request_is_current(generation, stop):
+                return None
+            source_signatures: dict[int, dict[str, Any]] = {}
+            preview_cache = getattr(self, "_compare_preview_cache", None)
+            if (
+                preview_cache is not None
+                and preview_cache.enabled
+                and self._persistent_compare_preset_name() is not None
+            ):
+                for idx in wave:
+                    source = self._compare_preview_source(idx)
+                    if source is None:
+                        continue
+                    try:
+                        source_signatures[int(idx)] = preview_cache.source_signature(
+                            source
+                        )
+                    except OSError:
+                        continue
+            pending_cache_payload: tuple[bytes, tuple[int, ...]] | None = None
+            with self._compare_compute_lock:
+                if not self._compare_page_request_is_current(generation, stop):
+                    return None
+                cached_wave = self._get_cached_compare_preset(wave)
+                if cached_wave is not None:
+                    payload, cached_indices, _ = cached_wave
+                    stack = np.frombuffer(payload, dtype=np.float32).reshape(
+                        len(cached_indices),
+                        self.shape_rows,
+                        self.shape_cols,
+                    )
+                    wave_indices = [int(idx) for idx in cached_indices]
+                    wave_images = [
+                        np.ascontiguousarray(image, dtype=np.float32)
+                        for image in stack
+                    ]
+                else:
+                    self._preload_compare_page(wave)
+                    # Preserve each wave's tiny current-position diffraction
+                    # pattern before a later wave evicts its raw 4D frame. The
+                    # page-average DP can then finish without a second cold read.
+                    for idx in wave:
+                        if self._get_cached_compare_diffraction_frame(idx) is None:
+                            try:
+                                self._store_compare_diffraction_cache(
+                                    idx,
+                                    self._frame_data_for_index(idx),
+                                )
+                            except BaseException:
+                                pass
+                    wave_images = self._compare_virtual_images_for_indices(wave, mask)
+                    wave_indices = [int(idx) for idx in wave[: len(wave_images)]]
+                    if wave_images and self._compare_page_request_is_current(
+                        generation, stop
+                    ):
+                        wave_stack = np.ascontiguousarray(
+                            np.stack(wave_images, axis=0),
+                            dtype=np.float32,
+                        )
+                        pending_cache_payload = (
+                            wave_stack.tobytes(),
+                            tuple(wave_indices),
+                        )
+            for frame_idx, image in zip(wave_indices, wave_images, strict=True):
+                if not self._compare_page_request_is_current(generation, stop):
+                    return None
+                panel = np.ascontiguousarray(image, dtype=np.float32).reshape(
+                    self.shape_rows,
+                    self.shape_cols,
+                )
+                images_by_index[frame_idx] = panel
+                if emit:
+                    self._emit_progressive_compare_panel(
+                        generation=generation,
+                        stop=stop,
+                        page_idx=page_idx,
+                        frame_idx=frame_idx,
+                        slot=slot_for[frame_idx],
+                        image=panel,
+                        started=started,
+                        loaded_count=len(images_by_index),
+                        cached=False,
+                    )
+            if (
+                pending_cache_payload is not None
+                and self._compare_page_request_is_current(generation, stop)
+            ):
+                self._store_cached_compare_preset(
+                    pending_cache_payload[0],
+                    pending_cache_payload[1],
+                    "cached",
+                    source_signatures=source_signatures,
+                )
+        return images_by_index
+
+    def _prefetch_neighbor_compare_pages(
+        self,
+        *,
+        generation: int,
+        stop: threading.Event,
+        page_idx: int,
+        mask,
+    ) -> None:
+        """Warm next, then previous, current-preset pages without UI messages."""
+        if (
+            self._normalise_compare_group_mode(self.compare_group_mode) != "paged"
+            or self._preset_cache_name() is None
+            or self._compare_cache_pages <= 0
+        ):
+            return
+        ordered = self._compare_ordered_ready_indices()
+        hidden = self._compare_hidden_panel_set()
+        page_size = max(1, int(self.compare_max_panels))
+        pages = [
+            [idx for idx in ordered[start : start + page_size] if idx not in hidden]
+            for start in range(0, len(ordered), page_size)
+        ]
+        neighbors: list[tuple[int, list[int]]] = []
+        if page_idx + 1 < len(pages) and pages[page_idx + 1]:
+            neighbors.append((page_idx + 1, pages[page_idx + 1]))
+        if page_idx - 1 >= 0 and pages[page_idx - 1]:
+            neighbors.append((page_idx - 1, pages[page_idx - 1]))
+
+        for neighbor_idx, indices in neighbors:
+            if not self._compare_page_request_is_current(generation, stop):
+                return
+            if self._get_cached_compare_preset(indices) is not None:
+                continue
+            images = self._load_progressive_compare_page(
+                indices,
+                mask,
+                generation=generation,
+                stop=stop,
+                page_idx=neighbor_idx,
+                started=time.perf_counter(),
+                emit=False,
+            )
+            if images is None or not self._compare_page_request_is_current(
+                generation, stop
+            ):
+                return
+            shown = [idx for idx in indices if idx in images]
+            if len(shown) != len(indices):
+                continue
+            stack = np.ascontiguousarray(
+                np.stack([images[idx] for idx in shown], axis=0),
+                dtype=np.float32,
+            )
+            self._store_cached_compare_preset(
+                stack.tobytes(),
+                tuple(shown),
+                "cached",
+                source_signatures={
+                    idx: self._compare_loaded_source_signatures[idx]
+                    for idx in shown
+                    if idx in self._compare_loaded_source_signatures
+                },
+                persist=False,
+            )
+
+    def _publish_progressive_compare_page(
+        self,
+        images: dict[int, np.ndarray],
+        *,
+        generation: int,
+        stop: threading.Event,
+        page_idx: int,
+        indices: tuple[int, ...],
+        all_groups: bool,
+        started: float,
+    ) -> bool:
+        """Atomically publish the durable stack and page-complete message."""
+        shown = [idx for idx in indices if idx in images]
+        if not shown:
+            raise MemoryError("compare page produced no panels")
+        partial_reason = "memory limited" if len(shown) < len(indices) else None
+        stack = np.ascontiguousarray(
+            np.stack([images[idx] for idx in shown], axis=0),
+            dtype=np.float32,
+        )
+        status = self._compare_status_for_indices(
+            shown,
+            all_groups=all_groups,
+            partial_reason=partial_reason,
+        )
+        total_ms = max(0.0, (time.perf_counter() - started) * 1000.0)
+        first_panel_ms = float(self.compare_page_first_panel_ms)
+        payload = stack.tobytes()
+        # Scheduling and final publication share this lock, making the
+        # generation check plus writes atomic with respect to a new page.
+        with self._compare_page_request_lock:
+            if not self._compare_page_request_is_current(generation, stop):
+                return False
+            if partial_reason is not None:
+                self._set_gpu_memory_warning(
+                    action="show the requested multiple-panel page",
+                    requested=len(indices),
+                    shown=len(shown),
+                )
+            else:
+                self._clear_gpu_memory_warning()
+            self._store_cached_compare_preset(
+                payload,
+                tuple(shown),
+                status,
+                source_signatures={
+                    idx: self._compare_loaded_source_signatures[idx]
+                    for idx in shown
+                    if idx in self._compare_loaded_source_signatures
+                },
+                persist=False,
+            )
+            with self.hold_trait_notifications():
+                self.compare_virtual_image_bytes = payload
+                self.compare_panel_count = len(shown)
+                self.compare_panel_indices = shown
+                self.compare_status = status
+                self.compare_page_loading = False
+                self.compare_page_loaded_count = len(shown)
+                self.compare_page_cached_indices = []
+                self.compare_page_cache_state = "fresh"
+                self.compare_page_total_ms = total_ms
+            self._send_compare_page_message(
+                {
+                    "type": "compare_page_complete",
+                    "generation": int(generation),
+                    "page_idx": int(page_idx),
+                    "loaded_count": len(shown),
+                    "status": status,
+                    "first_panel_ms": first_panel_ms,
+                    "total_ms": total_ms,
+                    "page": int(page_idx),
+                    "indices": shown,
+                    "cached_indices": [],
+                    "cache_state": "fresh",
+                    "elapsed_ms": total_ms,
+                }
+            )
+        self._finish_folder_page_update(generation)
+        return True
+
+    def _resume_folder_compare_maintenance(
+        self,
+        *,
+        generation: int,
+        stop: threading.Event,
+    ) -> None:
+        """Resume configured folder maintenance sequentially after prefetch."""
+        source = getattr(self, "_folder_source", None) or {}
+        preload = bool(source.get("preload_all_if_fits", False))
+        warm = bool(source.get("warm_cache", False))
+        if not preload and not warm:
+            return
+
+        # A prior generation may still be between starting and joining its
+        # managed preload/warmer. Retire that wrapper before installing a new
+        # one so close() and the next foreground page have one joinable owner.
+        self.stop_compare_maintenance(wait=True)
+        maintenance_stop = threading.Event()
+
+        def active() -> bool:
+            return bool(
+                not stop.is_set()
+                and not maintenance_stop.is_set()
+                and getattr(self, "_data", None) is not None
+                and int(generation) == int(self._compare_page_generation_counter)
+            )
+
+        def worker() -> None:
+            try:
+                if preload and active():
+                    self.preload_all_datasets(background=True)
+                    self.wait_for_dataset_preload()
+                if warm and active():
+                    # The preload above is fully joined before cache warming
+                    # starts; a new foreground page stops/joins this warmer.
+                    self.warm_compare_cache(background=True)
+            finally:
+                current = threading.current_thread()
+                with self._compare_page_request_lock:
+                    if self._compare_maintenance_thread is current:
+                        self._compare_maintenance_thread = None
+                    if self._compare_maintenance_stop is maintenance_stop:
+                        self._compare_maintenance_stop = None
+
+        thread = threading.Thread(
+            target=worker,
+            name=f"Show4DSTEM-maintenance-{generation}",
+            daemon=True,
+        )
+        with self._compare_page_request_lock:
+            if not self._compare_page_request_is_current(generation, stop):
+                return
+            self._compare_maintenance_stop = maintenance_stop
+            self._compare_maintenance_thread = thread
+            thread.start()
+
+    def stop_compare_maintenance(self, *, wait: bool = False) -> Self:
+        """Stop and optionally join folder preload/cache maintenance."""
+        with self._compare_page_request_lock:
+            stop = self._compare_maintenance_stop
+            thread = self._compare_maintenance_thread
+            if stop is not None:
+                stop.set()
+
+        # The wrapper can be blocked waiting for either managed child. Stop the
+        # children before joining their owner, otherwise close() can deadlock.
+        self.stop_dataset_preload(wait=wait)
+        self.stop_compare_cache_warm(wait=wait)
+        if wait and thread is not None and thread is not threading.current_thread():
+            thread.join()
+        with self._compare_page_request_lock:
+            if self._compare_maintenance_stop is stop:
+                self._compare_maintenance_stop = None
+            if (
+                self._compare_maintenance_thread is thread
+                and (thread is None or not thread.is_alive())
+            ):
+                self._compare_maintenance_thread = None
+        return self
+
+    def _run_progressive_compare_page(
+        self,
+        *,
+        generation: int,
+        stop: threading.Event,
+        page_idx: int,
+        indices: tuple[int, ...],
+        all_groups: bool,
+        started: float,
+    ) -> None:
+        """Daemon-worker body for one cancellable visible-page request."""
+        visible_complete = False
+        cache_thread: threading.Thread | None = None
+
+        def join_cache_lookup() -> None:
+            if (
+                cache_thread is not None
+                and cache_thread is not threading.current_thread()
+            ):
+                cache_thread.join()
+
+        try:
+            # A fully reduced host-cached page has no GPU dependency. Publish it
+            # before waiting for an unrelated preload/warmer to stop so warm
+            # page navigation stays effectively immediate.
+            cached_visible = self._get_cached_compare_preset(indices) is not None
+            preview_cache = getattr(self, "_compare_preview_cache", None)
+            if (
+                not cached_visible
+                and preview_cache is not None
+                and preview_cache.enabled
+                and self._persistent_compare_preset_name() is not None
+            ):
+                # Disk validation/read and authoritative raw refresh run in
+                # parallel. Each validated hit paints as soon as it is read;
+                # fresh-generation emissions win if both finish the same slot.
+                def load_disk_previews() -> None:
+                    def emit_disk_hit(
+                        idx: int,
+                        image: np.ndarray,
+                        count: int,
+                    ) -> bool:
+                        return (
+                            self._emit_progressive_compare_panel(
+                                generation=generation,
+                                stop=stop,
+                                page_idx=page_idx,
+                                frame_idx=idx,
+                                slot=indices.index(idx),
+                                image=image,
+                                started=started,
+                                loaded_count=count,
+                                cached=True,
+                            )
+                            is not None
+                        )
+
+                    try:
+                        persistent_images = self._load_persistent_compare_previews(
+                            indices,
+                            on_hit=emit_disk_hit,
+                            continue_if=lambda: self._compare_page_request_is_current(
+                                generation,
+                                stop,
+                            ),
+                        )
+                        if persistent_images:
+                            self._publish_persistent_compare_previews(
+                                persistent_images,
+                                generation=generation,
+                                stop=stop,
+                                page_idx=page_idx,
+                                indices=indices,
+                                started=started,
+                                emit=False,
+                            )
+                    except BaseException:
+                        return
+
+                cache_thread = threading.Thread(
+                    target=load_disk_previews,
+                    name=f"Show4DSTEM-preview-read-{generation}",
+                    daemon=True,
+                )
+                cache_thread.start()
+            if cached_visible:
+                images = self._load_progressive_compare_page(
+                    indices,
+                    None,
+                    generation=generation,
+                    stop=stop,
+                    page_idx=page_idx,
+                    started=started,
+                    emit=True,
+                )
+                if images is None or not self._publish_progressive_compare_page(
+                    images,
+                    generation=generation,
+                    stop=stop,
+                    page_idx=page_idx,
+                    indices=indices,
+                    all_groups=all_groups,
+                    started=started,
+                ):
+                    return
+                visible_complete = True
+
+            # Only one page worker may prepare/use GPU state at a time. A newer
+            # request still returns immediately; it sets this worker's stop flag
+            # and waits here until the current wave reaches a cancellation point.
+            with self._compare_page_worker_lock:
+                if not self._compare_page_request_is_current(generation, stop):
+                    return
+                # Full-series preload and cache warming also read/decode into the
+                # same CUDA contexts. Stop and join both before foreground access
+                # to avoid allocator/decompressor races near VRAM capacity.
+                self.stop_compare_maintenance(wait=True)
+                self.stop_dataset_preload(wait=True)
+                self.stop_compare_cache_warm(wait=True)
+                if not self._compare_page_request_is_current(generation, stop):
+                    return
+
+                loaded_before = None
+                data = getattr(self, "_data", None)
+                if hasattr(data, "loaded_indices"):
+                    loaded_before = tuple(data.loaded_indices())
+                mask = self._current_detector_mask()
+                if not cached_visible:
+                    images = self._load_progressive_compare_page(
+                        indices,
+                        mask,
+                        generation=generation,
+                        stop=stop,
+                        page_idx=page_idx,
+                        started=started,
+                        emit=True,
+                    )
+                    if images is None or not self._publish_progressive_compare_page(
+                        images,
+                        generation=generation,
+                        stop=stop,
+                        page_idx=page_idx,
+                        indices=indices,
+                        all_groups=all_groups,
+                        started=started,
+                    ):
+                        return
+                    visible_complete = True
+                    # Visible traits/canvases are already complete. Join the
+                    # bounded lookup before secondary DP/neighbor prefetch so
+                    # background cache validation does not contend with them.
+                    join_cache_lookup()
+
+                # The VI page is already complete and timed. Update the shared
+                # DP as secondary state; wave-time DP caching normally makes this
+                # host-only and it can never overwrite a newer generation.
+                frame_payload = None
+                try:
+                    with self._compare_compute_lock:
+                        if self._compare_page_request_is_current(generation, stop):
+                            frame_payload = self._current_frame_bytes()
+                except BaseException:
+                    pass
+                if frame_payload is not None:
+                    with self._compare_page_request_lock:
+                        if self._compare_page_request_is_current(generation, stop):
+                            self.frame_bytes = frame_payload
+                if loaded_before is not None and (
+                    tuple(data.loaded_indices()) != loaded_before
+                ):
+                    with self._compare_page_request_lock:
+                        if self._compare_page_request_is_current(generation, stop):
+                            self._update_gpu_memory_status()
+
+                # Visible work is complete. Use remaining idle time to reduce the
+                # most likely navigation targets; cancellation remains checked at
+                # every wave and these background results never emit UI messages.
+                try:
+                    self._prefetch_neighbor_compare_pages(
+                        generation=generation,
+                        stop=stop,
+                        page_idx=page_idx,
+                        mask=mask,
+                    )
+                except BaseException:
+                    pass
+            if self._compare_page_request_is_current(generation, stop):
+                self._resume_folder_compare_maintenance(
+                    generation=generation,
+                    stop=stop,
+                )
+        except BaseException as exc:
+            join_cache_lookup()
+            if visible_complete:
+                return
+            if not self._compare_page_request_is_current(generation, stop):
+                return
+            total_ms = max(0.0, (time.perf_counter() - started) * 1000.0)
+            with self._compare_page_request_lock:
+                if not self._compare_page_request_is_current(generation, stop):
+                    return
+                self._compare_page_last_error = (
+                    f"{type(exc).__name__}: {str(exc)[:1800]}"
+                )
+                if _is_recoverable_allocation_error(exc):
+                    self._reclaim_compare_allocation_failure()
+                    self._set_gpu_memory_warning(
+                        action="compute the multiple-panel page",
+                        requested=len(indices),
+                        shown=int(self.compare_page_loaded_count),
+                    )
+                    status = (
+                        "GPU memory limited: multiple grid page was not computed."
+                    )
+                else:
+                    status = "Multiple grid unavailable: page could not be loaded."
+                shown = [
+                    idx
+                    for idx in indices
+                    if idx in self._compare_page_working_images
+                ]
+                merged_payload = (
+                    np.ascontiguousarray(
+                        np.stack(
+                            [self._compare_page_working_images[idx] for idx in shown],
+                            axis=0,
+                        ),
+                        dtype=np.float32,
+                    ).tobytes()
+                    if shown
+                    else b""
+                )
+                has_cached_fallback = bool(self.compare_page_cached_indices)
+                with self.hold_trait_notifications():
+                    if shown:
+                        # Trait fallback/reconnect receives the same merged
+                        # cached+fresh pixels that were last painted, never the
+                        # original stale disk-only stack with fresh labels.
+                        self.compare_virtual_image_bytes = merged_payload
+                        self.compare_panel_count = len(shown)
+                        self.compare_panel_indices = shown
+                    self.compare_page_loading = False
+                    self.compare_page_total_ms = total_ms
+                    if has_cached_fallback:
+                        self.compare_page_cache_state = "warning"
+                        self.compare_status = (
+                            "Cached preview · refresh failed; retained validated "
+                            "derived images. Retry when the source/GPU is available."
+                        )
+                    elif shown:
+                        self.compare_page_cache_state = "warning"
+                        self.compare_status = (
+                            "Partial current page · refresh failed; retry when "
+                            "the source/GPU is available."
+                        )
+                    else:
+                        self.compare_page_cache_state = "miss"
+                        self.compare_status = status
+                self._send_compare_page_message(
+                    {
+                        "type": "compare_page_complete",
+                        "generation": int(generation),
+                        "page_idx": int(page_idx),
+                        "loaded_count": int(self.compare_page_loaded_count),
+                        "status": self.compare_status,
+                        "first_panel_ms": float(self.compare_page_first_panel_ms),
+                        "total_ms": total_ms,
+                        "page": int(page_idx),
+                        "indices": [],
+                        "cached_indices": list(self.compare_page_cached_indices),
+                        "cache_state": str(self.compare_page_cache_state),
+                        "elapsed_ms": total_ms,
+                    }
+                )
+            self._finish_folder_page_update(
+                generation,
+                error=(
+                    "The newly arrived data could not refresh the visible page. "
+                    "A validated cached preview was retained; check the source "
+                    "files and GPU memory, then retry."
+                    if has_cached_fallback
+                    else "The newly arrived data could not load on the visible "
+                    "page; check the source files and GPU memory, then retry."
+                ),
+            )
+        finally:
+            join_cache_lookup()
+            current = threading.current_thread()
+            if getattr(self, "_compare_page_thread", None) is current:
+                self._compare_page_thread = None
+
+    def _schedule_progressive_compare_page(self, indices: Sequence[int]) -> None:
+        """Cancel the prior request and start a daemon worker for this page."""
+        requested = tuple(int(idx) for idx in indices)
+        page_idx = int(self.compare_page_idx)
+        all_groups = (
+            self._normalise_compare_group_mode(self.compare_group_mode) == "all"
+        )
+        started = time.perf_counter()
+        with self._compare_page_request_lock:
+            prior = getattr(self, "_compare_page_stop", None)
+            if prior is not None:
+                prior.set()
+            self._compare_page_generation_counter += 1
+            generation = int(self._compare_page_generation_counter)
+            stop = threading.Event()
+            self._compare_page_stop = stop
+            self._compare_page_last_error = ""
+            self._compare_page_last_send_error = ""
+            self._compare_page_fresh_indices = set()
+            self._compare_page_working_images = {}
+            with self.hold_trait_notifications():
+                self.compare_page_expected_indices = list(requested)
+                self.compare_page_loading = True
+                self.compare_page_loaded_count = 0
+                self.compare_page_cached_indices = []
+                self.compare_page_cache_state = (
+                    "miss"
+                    if getattr(self, "_compare_preview_cache", None) is not None
+                    else "off"
+                )
+                self.compare_page_generation = generation
+                self.compare_page_first_panel_ms = 0.0
+                self.compare_page_first_fresh_ms = 0.0
+                self.compare_page_total_ms = 0.0
+                self.compare_page_panel_bytes = b""
+                self.compare_page_panel_frame_idx = -1
+                self.compare_page_panel_slot = -1
+                self.compare_page_panel_cached = False
+                self.compare_status = (
+                    f"Loading {len(requested)} {self.frame_dim_label.lower()} panels"
+                )
+            self._send_compare_page_message(
+                {
+                    "type": "compare_page_start",
+                    "generation": generation,
+                    "page_idx": page_idx,
+                    "indices": list(requested),
+                    "panel_count": len(requested),
+                    "shape_rows": int(self.shape_rows),
+                    "shape_cols": int(self.shape_cols),
+                    "page": page_idx,
+                    "index": None,
+                    "cached_indices": [],
+                    "cache_state": str(self.compare_page_cache_state),
+                    "elapsed_ms": 0.0,
+                }
+            )
+            thread = threading.Thread(
+                target=self._run_progressive_compare_page,
+                kwargs={
+                    "generation": generation,
+                    "stop": stop,
+                    "page_idx": page_idx,
+                    "indices": requested,
+                    "all_groups": all_groups,
+                    "started": started,
+                },
+                name=f"Show4DSTEM-page-{generation}",
+                daemon=True,
+            )
+            self._compare_page_thread = thread
+            thread.start()
+
+    def stop_compare_page_load(self, *, wait: bool = False) -> Self:
+        """Cancel progressive visible/prefetch work after its current GPU wave."""
+        with self._compare_page_request_lock:
+            stop = getattr(self, "_compare_page_stop", None)
+            thread = getattr(self, "_compare_page_thread", None)
+            if stop is not None:
+                stop.set()
+            if stop is not None or (thread is not None and thread.is_alive()):
+                self._compare_page_generation_counter += 1
+                self.compare_page_generation = int(
+                    self._compare_page_generation_counter
+                )
+                self.compare_page_loading = False
+            if getattr(self, "_compare_page_stop", None) is stop:
+                self._compare_page_stop = None
+        if wait and thread is not None and thread is not threading.current_thread():
+            thread.join()
+        self.stop_compare_maintenance(wait=wait)
+        if thread is None or not thread.is_alive():
+            if getattr(self, "_compare_page_thread", None) is thread:
+                self._compare_page_thread = None
+        return self
+
+    def wait_for_compare_page(self, timeout: float | None = None) -> Self:
+        """Wait for visible completion and neighbor prefetch, for verification."""
+        deadline = None if timeout is None else time.monotonic() + float(timeout)
+        while True:
+            thread = getattr(self, "_compare_page_thread", None)
+            if thread is None:
+                break
+            remaining = (
+                None if deadline is None else max(0.0, deadline - time.monotonic())
+            )
+            thread.join(timeout=remaining)
+            if thread.is_alive() or (
+                deadline is not None and time.monotonic() >= deadline
+            ):
+                break
+        return self
+
     def _refresh_compare_virtual_images(self) -> None:
+        """Refresh compare data synchronously or stream a lazy folder page."""
+        if self._uses_progressive_compare_pages():
+            indices = self._compare_ready_indices()
+            if not indices:
+                self.stop_compare_page_load()
+                self._clear_compare_virtual_images(self._empty_compare_page_status())
+                return
+            if getattr(self, "_suppress_compare_recompute", False):
+                return
+            self._schedule_progressive_compare_page(indices)
+            return
+        # Leaving multiple mode must invalidate a worker before clearing the
+        # durable payload, otherwise a late generation could repaint the grid.
+        if getattr(self, "_compare_page_stop", None) is not None:
+            self.stop_compare_page_load()
+        self._refresh_compare_virtual_images_sync()
+
+    def _refresh_compare_virtual_images_sync(self) -> None:
         """Build the lightweight virtual-image stack used by compare mode."""
         if getattr(self, "_data", None) is None:
             self._clear_compare_virtual_images()
@@ -5884,8 +7707,20 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             cached = self._compare_virtual_page_cache.get(key)
             if cached is None:
                 return None
+        payload, cached_indices, status, _, source_token = cached
+        if source_token is not None:
+            current_token = self._compare_source_signature_token(cached_indices)
+            if current_token != source_token:
+                with self._compare_cache_lock:
+                    current = self._compare_virtual_page_cache.get(key)
+                    if current is cached:
+                        self._compare_virtual_page_cache.pop(key, None)
+                        self._compare_virtual_page_cache_bytes -= cached[3]
+                return None
+        with self._compare_cache_lock:
+            if self._compare_virtual_page_cache.get(key) is not cached:
+                return None
             self._compare_virtual_page_cache.move_to_end(key)
-            payload, cached_indices, status, _ = cached
             return payload, cached_indices, status
 
     def _store_cached_compare_preset(
@@ -5895,18 +7730,36 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         status: str,
         *,
         preset_name: str | None = None,
+        source_signatures: dict[int, dict[str, Any]] | None = None,
+        persist: bool = True,
     ) -> None:
         key = self._compare_preset_cache_key(indices, preset_name=preset_name)
-        if key is None:
-            return
-        with self._compare_cache_lock:
-            existing = self._compare_virtual_page_cache.pop(key, None)
-            if existing is not None:
-                self._compare_virtual_page_cache_bytes -= existing[3]
-            nbytes = len(payload)
-            self._compare_virtual_page_cache[key] = (payload, indices, status, nbytes)
-            self._compare_virtual_page_cache_bytes += nbytes
-            self._trim_compare_virtual_page_cache()
+        if key is not None:
+            source_token = self._compare_source_signature_token(
+                indices,
+                source_signatures,
+            )
+            with self._compare_cache_lock:
+                existing = self._compare_virtual_page_cache.pop(key, None)
+                if existing is not None:
+                    self._compare_virtual_page_cache_bytes -= existing[3]
+                nbytes = len(payload)
+                self._compare_virtual_page_cache[key] = (
+                    payload,
+                    indices,
+                    status,
+                    nbytes,
+                    source_token,
+                )
+                self._compare_virtual_page_cache_bytes += nbytes
+                self._trim_compare_virtual_page_cache()
+        if persist:
+            self._persist_compare_previews(
+                payload,
+                indices,
+                preset_name=preset_name,
+                source_signatures=source_signatures,
+            )
 
     def _compare_preset_cache_key(
         self,
@@ -5967,7 +7820,14 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
                 "presets must contain only 'bf', 'abf', 'adf', or 'haadf'; "
                 f"got {unknown!r}"
             )
-        if not names or self._compare_cache_max_bytes == 0:
+        preview_cache = getattr(self, "_compare_preview_cache", None)
+        persistent_enabled = bool(
+            preview_cache is not None and preview_cache.enabled
+        )
+        host_enabled = bool(
+            self._compare_cache_pages > 0 and self._compare_cache_max_bytes != 0
+        )
+        if not names or (not host_enabled and not persistent_enabled):
             return self
 
         self.stop_compare_cache_warm()
@@ -5987,10 +7847,11 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             return self
         current = min(max(0, int(self.compare_page_idx)), len(pages) - 1)
         pages = pages[current:] + pages[:current]
-        self._compare_cache_pages = max(
-            int(self._compare_cache_pages),
-            len(pages) * len(names),
-        )
+        if host_enabled:
+            self._compare_cache_pages = max(
+                int(self._compare_cache_pages),
+                len(pages) * len(names),
+            )
 
         masks = {
             name: mask
@@ -6007,10 +7868,39 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
                     if stop.is_set() or generation != self._compare_cache_generation:
                         self._compare_cache_warm_status = "stopped"
                         return
+                    page_source_signatures: dict[int, dict[str, Any]] = {}
+                    if persistent_enabled:
+                        for idx in page:
+                            source = self._compare_preview_source(idx)
+                            if source is None:
+                                continue
+                            try:
+                                page_source_signatures[int(idx)] = (
+                                    preview_cache.source_signature(source)
+                                )
+                            except OSError:
+                                continue
+                    disk_complete: set[str] = set()
+                    for name in names:
+                        if self._get_cached_compare_preset(
+                            page,
+                            preset_name=name,
+                        ) is not None:
+                            continue
+                        disk_images = self._load_persistent_compare_previews(
+                            page,
+                            preset_name=name,
+                            mask=masks[name],
+                            source_signatures=page_source_signatures,
+                        )
+                        if len(disk_images) != len(page):
+                            continue
+                        disk_complete.add(name)
                     missing = [
                         name
                         for name in names
-                        if self._get_cached_compare_preset(
+                        if name not in disk_complete
+                        and self._get_cached_compare_preset(
                             page,
                             preset_name=name,
                         )
@@ -6078,6 +7968,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
                             tuple(page),
                             "cached",
                             preset_name=name,
+                            source_signatures=page_source_signatures,
                         )
                 if stop.is_set() or generation != self._compare_cache_generation:
                     self._compare_cache_warm_status = "stopped"

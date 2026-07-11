@@ -10,6 +10,7 @@ import Select from "@mui/material/Select";
 import Slider from "@mui/material/Slider";
 import Stack from "@mui/material/Stack";
 import Switch from "@mui/material/Switch";
+import TextField from "@mui/material/TextField";
 import Tooltip from "@mui/material/Tooltip";
 import Typography from "@mui/material/Typography";
 import DownloadIcon from "@mui/icons-material/Download";
@@ -105,6 +106,28 @@ type SnapshotFftCacheEntry = {
 
 type SnapshotFftCacheRef = React.MutableRefObject<Map<string, SnapshotFftCacheEntry>>;
 type SnapshotFftPendingRef = React.MutableRefObject<Map<string, Promise<SnapshotFftCacheEntry>>>;
+type SnapshotFftGenerationRef = React.MutableRefObject<number>;
+
+type Show1DPerfCounters = {
+  pointerEvents: number;
+  pointerFrames: number;
+  pointsScanned: number;
+  lastPointerLatencyMs: number;
+  maxPointerLatencyMs: number;
+  lastNearestPointMs: number;
+  basePlotDraws: number;
+  lastBasePlotDrawMs: number;
+  hoverOverlayDraws: number;
+  lastHoverOverlayDrawMs: number;
+  fftCacheHits: number;
+  fftCacheMisses: number;
+  fftPendingHits: number;
+  fftComputes: number;
+  lastFftComputeMs: number;
+  fftCacheEntries: number;
+  fftCacheBytes: number;
+  fftCacheEvictions: number;
+};
 
 type PlotThumbnailCacheEntry = {
   canvas: HTMLCanvasElement;
@@ -140,6 +163,12 @@ type TrialRanking = {
   tags?: string[];
 };
 
+type TrialAlert = {
+  label?: string;
+  kind?: string;
+  message?: string;
+};
+
 type Show1DWritableFile = {
   write: (data: BlobPart) => Promise<void>;
   close: () => Promise<void>;
@@ -156,12 +185,24 @@ type Show1DSavePickerOptions = {
 
 type Show1DWindow = Window & typeof globalThis & {
   showSaveFilePicker?: (options?: Show1DSavePickerOptions) => Promise<Show1DFileHandle>;
+  __quantemShow1DPerf?: Show1DPerfCounters;
 };
 
 type Show1DInitialInteractiveState = {
+  controlsCollapsed: boolean;
   logScale: boolean;
   showStats: boolean;
+  showReview: boolean;
   showLegend: boolean;
+  starredSnapshotImageLabels: string[];
+  trialNotes: Record<string, string>;
+  trialTags: Record<string, string[]>;
+  showTrialNotes: boolean;
+  showStarredOnly: boolean;
+  trialSortKey: string;
+  trialSortDescending: boolean;
+  trialFilterText: string;
+  topTrialCount: number;
   plotHeightPx: number;
   sidePanelWidthPx: number;
   snapshotPanelWidthPx: number;
@@ -172,6 +213,7 @@ type Show1DInitialInteractiveState = {
   selectedSnapshotGroupIdx: number;
   bookmarkedSnapshotGroups: number[];
   hiddenSnapshotImageLabels: string[];
+  showSnapshotHistogram: boolean;
   showSnapshotFft: boolean;
   snapshotFftLayout: string;
   snapshotFftWindow: boolean;
@@ -197,6 +239,9 @@ const EMPTY_BYTES = new Uint8Array(0);
 const DEFAULT_SIZE = { width: 820, height: 380 };
 const DEFAULT_PLOT_HEIGHT = 390;
 const SNAPSHOT_PLAYBACK_CONTROL_WIDTH = 620;
+const SNAPSHOT_FFT_CACHE_MAX_ENTRIES = 32;
+const SNAPSHOT_FFT_CACHE_MAX_BYTES = 96 * 1024 * 1024;
+const SNAPSHOT_FFT_PREWARM_MAX_IMAGES = 16;
 const SNAPSHOT_OVERLAY_POSITIONS: SnapshotOverlayPosition[] = ["top-left", "top-right", "bottom-left", "bottom-right"];
 const PROFILE_COLORS = ["#4fc3f7", "#81c784", "#ffb74d", "#ce93d8", "#ef5350", "#ffd54f", "#90a4ae", "#a1887f"];
 const controlRow = {
@@ -224,6 +269,80 @@ const compactButton = {
     borderColor: "#444",
   },
 };
+
+function getShow1DPerfCounters(): Show1DPerfCounters | null {
+  if (typeof window === "undefined") return null;
+  const host = window as Show1DWindow;
+  if (!host.__quantemShow1DPerf) {
+    host.__quantemShow1DPerf = {
+      pointerEvents: 0,
+      pointerFrames: 0,
+      pointsScanned: 0,
+      lastPointerLatencyMs: 0,
+      maxPointerLatencyMs: 0,
+      lastNearestPointMs: 0,
+      basePlotDraws: 0,
+      lastBasePlotDrawMs: 0,
+      hoverOverlayDraws: 0,
+      lastHoverOverlayDrawMs: 0,
+      fftCacheHits: 0,
+      fftCacheMisses: 0,
+      fftPendingHits: 0,
+      fftComputes: 0,
+      lastFftComputeMs: 0,
+      fftCacheEntries: 0,
+      fftCacheBytes: 0,
+      fftCacheEvictions: 0,
+    };
+  }
+  return host.__quantemShow1DPerf;
+}
+
+function updateSnapshotFftCacheMetrics(cache: Map<string, SnapshotFftCacheEntry>): void {
+  const perf = getShow1DPerfCounters();
+  if (!perf) return;
+  let bytes = 0;
+  for (const entry of cache.values()) bytes += entry.data.byteLength;
+  perf.fftCacheEntries = cache.size;
+  perf.fftCacheBytes = bytes;
+}
+
+function readSnapshotFftCache(
+  cache: Map<string, SnapshotFftCacheEntry>,
+  cacheKey: string,
+  countHit = true,
+): SnapshotFftCacheEntry | null {
+  const entry = cache.get(cacheKey) ?? null;
+  if (!entry) return null;
+  cache.delete(cacheKey);
+  cache.set(cacheKey, entry);
+  const perf = getShow1DPerfCounters();
+  if (perf && countHit) perf.fftCacheHits += 1;
+  updateSnapshotFftCacheMetrics(cache);
+  return entry;
+}
+
+function enforceSnapshotFftCacheBudget(
+  cache: Map<string, SnapshotFftCacheEntry>,
+  protectedKey: string,
+): void {
+  let bytes = 0;
+  for (const entry of cache.values()) bytes += entry.data.byteLength;
+  const perf = getShow1DPerfCounters();
+  while (cache.size > SNAPSHOT_FFT_CACHE_MAX_ENTRIES || bytes > SNAPSHOT_FFT_CACHE_MAX_BYTES) {
+    const oldestKey = cache.keys().next().value as string | undefined;
+    if (!oldestKey) break;
+    if (oldestKey === protectedKey && cache.size === 1) break;
+    const entry = cache.get(oldestKey);
+    cache.delete(oldestKey);
+    bytes -= entry?.data.byteLength ?? 0;
+    if (perf) perf.fftCacheEvictions += 1;
+  }
+  if (perf) {
+    perf.fftCacheEntries = cache.size;
+    perf.fftCacheBytes = Math.max(0, bytes);
+  }
+}
 const upwardMenuProps = {
   anchorOrigin: { vertical: "top" as const, horizontal: "left" as const },
   transformOrigin: { vertical: "bottom" as const, horizontal: "left" as const },
@@ -311,6 +430,18 @@ function copyProfileLine(value: ProfilePoint[] | null | undefined): ProfilePoint
   return value
     .map((point) => ({ row: Number(point?.row), col: Number(point?.col) }))
     .filter((point) => Number.isFinite(point.row) && Number.isFinite(point.col));
+}
+
+function copyStringRecord(value: Record<string, string> | null | undefined): Record<string, string> {
+  return { ...(value ?? {}) };
+}
+
+function copyStringArrayRecord(value: Record<string, string[]> | null | undefined): Record<string, string[]> {
+  return Object.fromEntries(Object.entries(value ?? {}).map(([key, items]) => [key, [...items]]));
+}
+
+function jsonValuesEqual(a: unknown, b: unknown): boolean {
+  return JSON.stringify(a ?? {}) === JSON.stringify(b ?? {});
 }
 
 function numberArraysEqual(a: number[] | null | undefined, b: number[] | null | undefined): boolean {
@@ -500,7 +631,10 @@ function shortMethodLabel(label: string): string {
 }
 
 function trialKey(label: string): string {
-  return String(label || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+  return String(label || "")
+    .normalize("NFKC")
+    .toLocaleLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, "");
 }
 
 function uniqueStrings(values: string[]): string[] {
@@ -515,6 +649,14 @@ function uniqueStrings(values: string[]): string[] {
   return out;
 }
 
+function lookupTrialValue<T>(values: Record<string, T> | null | undefined, label: string): T | undefined {
+  const target = trialKey(label);
+  for (const [key, value] of Object.entries(values ?? {})) {
+    if (trialKey(key) === target) return value;
+  }
+  return undefined;
+}
+
 function parseLambdaLabel(label: string): number {
   const match = String(label || "").replace(/_/g, " ").match(/lambda\s+([-+]?\d*\.?\d+(?:e[-+]?\d+)?)/i);
   if (!match) return Number.NaN;
@@ -525,14 +667,19 @@ function isReferenceLabel(label: string): boolean {
   return trialKey(label).includes("reference");
 }
 
+function optionalFiniteNumber(value: unknown): number {
+  if (value === null || value === undefined || value === "") return Number.NaN;
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(parsed) ? parsed : Number.NaN;
+}
+
 function rankingNumber(row: TrialRanking, key: string): number {
   const clean = key === "default" ? "final_loss" : key;
   if (clean === "object_quality" || clean === "probe_quality") {
-    const value = Number(row[clean]);
+    const value = optionalFiniteNumber(row[clean]);
     return Number.isFinite(value) ? -value : Number.NaN;
   }
-  const value = Number((row as Record<string, unknown>)[clean]);
-  return Number.isFinite(value) ? value : Number.NaN;
+  return optionalFiniteNumber((row as Record<string, unknown>)[clean]);
 }
 
 function trimTrailingZeros(value: string): string {
@@ -594,9 +741,34 @@ function isAbortLikeError(err: unknown): boolean {
   return err instanceof DOMException && err.name === "AbortError";
 }
 
-function csvForTraces(xData: Float32Array, yData: Float32Array, labels: string[], nTraces: number, nPoints: number): string {
-  const header = ["x", ...Array.from({ length: nTraces }, (_, idx) => labels[idx] || `trace ${idx + 1}`)];
-  const rows = [header.join(",")];
+function csvCell(value: string): string {
+  return /[",\n]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
+}
+
+function csvAxisHeader(label: string, fallback: string, unit: string): string {
+  const name = String(label || "").trim() || fallback;
+  const cleanUnit = String(unit || "").trim();
+  return cleanUnit ? `${name} (${cleanUnit})` : name;
+}
+
+function csvForTraces(
+  xData: Float32Array,
+  yData: Float32Array,
+  labels: string[],
+  nTraces: number,
+  nPoints: number,
+  xLabel: string,
+  xUnit: string,
+  yLabel: string,
+  yUnit: string,
+): string {
+  const xHeader = csvAxisHeader(xLabel, "x", xUnit);
+  const yHeader = csvAxisHeader(yLabel, "y", yUnit);
+  const header = [xHeader, ...Array.from({ length: nTraces }, (_, idx) => {
+    const traceLabel = labels[idx] || `trace ${idx + 1}`;
+    return `${traceLabel} [${yHeader}]`;
+  })];
+  const rows = [header.map(csvCell).join(",")];
   for (let point = 0; point < nPoints; point += 1) {
     const row = [xData.length > point ? xData[point] : point];
     for (let trace = 0; trace < nTraces; trace += 1) row.push(yData[trace * nPoints + point]);
@@ -883,13 +1055,14 @@ async function computeSnapshotFft(
 }
 
 function snapshotFftCacheKey(
+  generation: number,
   imageIndex: number,
   width: number,
   height: number,
   useWindow: boolean,
   preferWebgpu: boolean,
 ): string {
-  return `${imageIndex}:${width}x${height}:${useWindow ? "hann" : "raw"}:${preferWebgpu ? "gpu" : "cpu"}`;
+  return `${generation}:${imageIndex}:${width}x${height}:${useWindow ? "hann" : "raw"}:${preferWebgpu ? "gpu" : "cpu"}`;
 }
 
 function computeSnapshotFftCached(
@@ -902,18 +1075,32 @@ function computeSnapshotFftCached(
   cacheRef: SnapshotFftCacheRef,
   pendingRef: SnapshotFftPendingRef,
   gpuFftRef: React.MutableRefObject<WebGPUFFT | null>,
+  generationRef: SnapshotFftGenerationRef,
+  generation: number,
 ): Promise<SnapshotFftCacheEntry> {
-  const cached = cacheRef.current.get(cacheKey);
+  const cached = readSnapshotFftCache(cacheRef.current, cacheKey);
+  const perf = getShow1DPerfCounters();
   if (cached) return Promise.resolve(cached);
   const pending = pendingRef.current.get(cacheKey);
-  if (pending) return pending;
+  if (pending) {
+    if (perf) perf.fftPendingHits += 1;
+    return pending;
+  }
+  if (perf) perf.fftCacheMisses += 1;
+  const computeStartedAt = typeof performance === "undefined" ? 0 : performance.now();
   const promise = computeSnapshotFft(image, width, height, useWindow, preferWebgpu, gpuFftRef)
     .then((entry) => {
+      if (generationRef.current !== generation) return entry;
       cacheRef.current.set(cacheKey, entry);
+      enforceSnapshotFftCacheBudget(cacheRef.current, cacheKey);
+      if (perf) {
+        perf.fftComputes += 1;
+        perf.lastFftComputeMs = computeStartedAt > 0 ? performance.now() - computeStartedAt : 0;
+      }
       return entry;
     })
     .finally(() => {
-      pendingRef.current.delete(cacheKey);
+      if (pendingRef.current.get(cacheKey) === promise) pendingRef.current.delete(cacheKey);
     });
   pendingRef.current.set(cacheKey, promise);
   return promise;
@@ -1699,6 +1886,8 @@ function SnapshotImageCanvas({
   fftPendingRef,
   fftGpuRef,
   fftCacheVersion,
+  fftGenerationRef,
+  fftGeneration,
   onImageViewChange,
   onFftViewChange,
   onProfileLineChange,
@@ -1737,6 +1926,8 @@ function SnapshotImageCanvas({
   fftPendingRef: SnapshotFftPendingRef;
   fftGpuRef: React.MutableRefObject<WebGPUFFT | null>;
   fftCacheVersion: number;
+  fftGenerationRef: SnapshotFftGenerationRef;
+  fftGeneration: number;
   onImageViewChange: (view: ImageViewApiState) => void;
   onFftViewChange: (view: ImageViewApiState) => void;
   onProfileLineChange: (line: ProfilePoint[]) => void;
@@ -1768,15 +1959,15 @@ function SnapshotImageCanvas({
     [contrastPreset, contrastRange, image],
   );
   const fftCacheKey = React.useMemo(
-    () => snapshotFftCacheKey(imageIndex, imageWidth, imageHeight, fftWindow, preferWebgpu),
-    [fftWindow, imageHeight, imageIndex, imageWidth, preferWebgpu],
+    () => snapshotFftCacheKey(fftGeneration, imageIndex, imageWidth, imageHeight, fftWindow, preferWebgpu),
+    [fftGeneration, fftWindow, imageHeight, imageIndex, imageWidth, preferWebgpu],
   );
   const cachedFftEntry = React.useMemo(
-    () => fftCacheRef.current.get(fftCacheKey) ?? null,
+    () => readSnapshotFftCache(fftCacheRef.current, fftCacheKey),
     [fftCacheKey, fftCacheRef, fftCacheVersion],
   );
   const [fftEntryState, setFftEntryState] = React.useState<{ key: string; entry: SnapshotFftCacheEntry } | null>(() => {
-    const entry = fftCacheRef.current.get(fftCacheKey);
+    const entry = readSnapshotFftCache(fftCacheRef.current, fftCacheKey);
     return entry ? { key: fftCacheKey, entry } : null;
   });
   const [fftLoading, setFftLoading] = React.useState(false);
@@ -1791,7 +1982,7 @@ function SnapshotImageCanvas({
       setFftLoading(false);
       return;
     }
-    const cached = fftCacheRef.current.get(fftCacheKey);
+    const cached = readSnapshotFftCache(fftCacheRef.current, fftCacheKey);
     if (cached) {
       setFftEntryState({ key: fftCacheKey, entry: cached });
       setFftLoading(false);
@@ -1813,6 +2004,8 @@ function SnapshotImageCanvas({
       fftCacheRef,
       fftPendingRef,
       fftGpuRef,
+      fftGenerationRef,
+      fftGeneration,
     )
       .then((entry) => {
         if (canceled) return;
@@ -1835,6 +2028,8 @@ function SnapshotImageCanvas({
     fftCacheKey,
     fftCacheRef,
     fftGpuRef,
+    fftGeneration,
+    fftGenerationRef,
     fftPendingRef,
     fftWindow,
     image,
@@ -2493,10 +2688,14 @@ function Show1DWidget() {
   const [yUnit] = useModelState<string>("y_unit");
   const [logScale, setLogScale] = useModelState<boolean>("log_scale");
   const [showStats, setShowStats] = useModelState<boolean>("show_stats");
+  const [showReview, setShowReview] = useModelState<boolean>("show_review");
+  const [reviewMode] = useModelState<string>("review_mode");
+  const optimizationReview = String(reviewMode || "trace") === "optimization";
   const [showLegend, setShowLegend] = useModelState<boolean>("show_legend");
   const [showGrid] = useModelState<boolean>("show_grid");
   const [showControls] = useModelState<boolean>("show_controls");
-  const controlsVisible = Boolean(showControls);
+  const [controlsCollapsed, setControlsCollapsed] = useModelState<boolean>("controls_collapsed");
+  const controlsVisible = Boolean(showControls) && !Boolean(controlsCollapsed);
   const [lineWidth] = useModelState<number>("line_width");
   const [plotHeightPx, setPlotHeightPx] = useModelState<number>("plot_height_px");
   const [sidePanelWidthPx, setSidePanelWidthPx] = useModelState<number>("side_panel_width_px");
@@ -2517,10 +2716,19 @@ function Show1DWidget() {
   const [snapshotHeights] = useModelState<number[]>("snapshot_heights");
   const [snapshotWidths] = useModelState<number[]>("snapshot_widths");
   const [snapshotImageLabels] = useModelState<string[]>("snapshot_image_labels");
+  const [starredSnapshotImageLabels, setStarredSnapshotImageLabels] = useModelState<string[]>("starred_snapshot_image_labels");
   const [hiddenSnapshotImageLabels, setHiddenSnapshotImageLabels] = useModelState<string[]>("hidden_snapshot_image_labels");
-  const [trialSortKey] = useModelState<string>("trial_sort_key");
-  const [trialSortDescending] = useModelState<boolean>("trial_sort_descending");
+  const [trialNotes, setTrialNotes] = useModelState<Record<string, string>>("trial_notes");
+  const [trialTags, setTrialTags] = useModelState<Record<string, string[]>>("trial_tags");
+  const [showTrialNotes, setShowTrialNotes] = useModelState<boolean>("show_trial_notes");
+  const [showStarredOnly, setShowStarredOnly] = useModelState<boolean>("show_starred_only");
+  const [trialSortKey, setTrialSortKey] = useModelState<string>("trial_sort_key");
+  const [trialSortDescending, setTrialSortDescending] = useModelState<boolean>("trial_sort_descending");
+  const [trialFilterText, setTrialFilterText] = useModelState<string>("trial_filter_text");
+  const [topTrialCount, setTopTrialCount] = useModelState<number>("top_trial_count");
   const [trialRankings] = useModelState<TrialRanking[]>("trial_rankings");
+  const [trialAlerts] = useModelState<TrialAlert[]>("trial_alerts");
+  const [bestTrialLabel] = useModelState<string>("best_trial_label");
   const [snapshotGroupIndices] = useModelState<number[]>("snapshot_group_indices");
   const [snapshotGroupIterations] = useModelState<number[]>("snapshot_group_iterations");
   const [snapshotGroupLabels] = useModelState<string[]>("snapshot_group_labels");
@@ -2530,6 +2738,7 @@ function Show1DWidget() {
   const [bookmarkedSnapshotGroups, setBookmarkedSnapshotGroups] = useModelState<number[]>("bookmarked_snapshot_groups");
   const [showSnapshots] = useModelState<boolean>("show_snapshots");
   const [showSnapshotThumbnails] = useModelState<boolean>("show_snapshot_thumbnails");
+  const [showSnapshotHistogram, setShowSnapshotHistogram] = useModelState<boolean>("show_snapshot_histogram");
   const [showSnapshotFft, setShowSnapshotFft] = useModelState<boolean>("show_snapshot_fft");
   const [snapshotFftLayout, setSnapshotFftLayout] = useModelState<string>("snapshot_fft_layout");
   const [snapshotFftWindow, setSnapshotFftWindow] = useModelState<boolean>("snapshot_fft_window");
@@ -2619,7 +2828,12 @@ function Show1DWidget() {
   );
   const hiddenTrialLabels = React.useMemo(() => uniqueStrings(hiddenSnapshotImageLabels ?? []), [hiddenSnapshotImageLabels]);
   const hiddenTrialKeys = React.useMemo(() => new Set(hiddenTrialLabels.map(trialKey)), [hiddenTrialLabels]);
-  const normalisedSortKey = React.useMemo(() => String(trialSortKey || "final_loss"), [trialSortKey]);
+  const starredTrialLabels = React.useMemo(() => uniqueStrings(starredSnapshotImageLabels ?? []), [starredSnapshotImageLabels]);
+  const starredTrialKeys = React.useMemo(() => new Set(starredTrialLabels.map(trialKey)), [starredTrialLabels]);
+  const normalisedSortKey = React.useMemo(
+    () => optimizationReview ? String(trialSortKey || "final_loss") : "label",
+    [optimizationReview, trialSortKey],
+  );
   const baseTrialRows = React.useMemo<TrialRanking[]>(() => {
     const rowsByKey = new Map<string, TrialRanking>();
     for (const row of trialRankings ?? []) {
@@ -2631,8 +2845,8 @@ function Show1DWidget() {
       const key = trialKey(label);
       const existing = rowsByKey.get(key) ?? {};
       const offset = idx * nPoints;
-      let finalLoss = Number(existing.final_loss);
-      let minLoss = Number(existing.min_loss);
+      let finalLoss = optionalFiniteNumber(existing.final_loss);
+      let minLoss = optionalFiniteNumber(existing.min_loss);
       if (!Number.isFinite(finalLoss) || !Number.isFinite(minLoss)) {
         finalLoss = Number.NaN;
         minLoss = Number.POSITIVE_INFINITY;
@@ -2648,18 +2862,18 @@ function Show1DWidget() {
         ...existing,
         label,
         trace_index: idx,
-        lambda: Number.isFinite(Number(existing.lambda)) ? Number(existing.lambda) : parseLambdaLabel(label),
+        lambda: Number.isFinite(optionalFiniteNumber(existing.lambda)) ? optionalFiniteNumber(existing.lambda) : parseLambdaLabel(label),
         final_loss: finalLoss,
         min_loss: minLoss,
-        rmse: Number(existing.rmse),
-        flicker: Number(existing.flicker),
-        object_quality: Number(existing.object_quality),
-        probe_quality: Number(existing.probe_quality),
-        alert_count: Number(existing.alert_count) || 0,
+        rmse: optionalFiniteNumber(existing.rmse),
+        flicker: optionalFiniteNumber(existing.flicker),
+        object_quality: optionalFiniteNumber(existing.object_quality),
+        probe_quality: optionalFiniteNumber(existing.probe_quality),
+        alert_count: optionalFiniteNumber(existing.alert_count),
         hidden: hiddenTrialKeys.has(key),
       });
     }
-    return Array.from(rowsByKey.values()).filter((row) => Number.isFinite(Number(row.trace_index)));
+    return Array.from(rowsByKey.values()).filter((row) => Number.isFinite(optionalFiniteNumber(row.trace_index)));
   }, [hiddenTrialKeys, labels, nPoints, nTraces, trialRankings, yData]);
   const sortedTrialRows = React.useMemo(() => {
     const rows = [...baseTrialRows];
@@ -2674,9 +2888,13 @@ function Show1DWidget() {
         return String(a.label || "").localeCompare(String(b.label || ""));
       });
     }
-    if (trialSortDescending) rows.reverse();
-    return rows.map((row, idx) => ({ ...row, rank: idx + 1, score: rankingNumber(row, normalisedSortKey) }));
-  }, [baseTrialRows, normalisedSortKey, trialSortDescending]);
+    if (optimizationReview && trialSortDescending) rows.reverse();
+    return rows.map((row, idx) => ({
+      ...row,
+      rank: optimizationReview ? idx + 1 : undefined,
+      score: optimizationReview ? rankingNumber(row, normalisedSortKey) : Number.NaN,
+    }));
+  }, [baseTrialRows, normalisedSortKey, optimizationReview, trialSortDescending]);
   const trialRowByKey = React.useMemo(() => {
     const out = new Map<string, TrialRanking>();
     for (const row of sortedTrialRows) {
@@ -2684,6 +2902,41 @@ function Show1DWidget() {
     }
     return out;
   }, [sortedTrialRows]);
+  const reviewRows = React.useMemo(() => {
+    if (!showReview) return sortedTrialRows;
+    const filter = String(trialFilterText || "").trim().toLowerCase();
+    let rows = sortedTrialRows.filter((row) => {
+      const label = String(row.label || "");
+      const key = trialKey(label);
+      if (hiddenTrialKeys.has(key)) return false;
+      if (showStarredOnly && !starredTrialKeys.has(key) && !isReferenceLabel(label)) return false;
+      if (!filter) return true;
+      const note = String(lookupTrialValue(trialNotes, label) ?? "");
+      const tags = optimizationReview ? (lookupTrialValue(trialTags, label) ?? []) : [];
+      return `${label} ${note} ${tags.join(" ")}`.toLowerCase().includes(filter);
+    });
+    const top = optimizationReview ? Math.max(0, Math.round(optionalFiniteNumber(topTrialCount) || 0)) : 0;
+    if (top > 0) {
+      const references = rows.filter((row) => isReferenceLabel(String(row.label || "")));
+      rows = [...references, ...rows.filter((row) => !isReferenceLabel(String(row.label || ""))).slice(0, top)];
+    }
+    return rows;
+  }, [
+    hiddenTrialKeys,
+    optimizationReview,
+    showReview,
+    showStarredOnly,
+    sortedTrialRows,
+    starredTrialKeys,
+    topTrialCount,
+    trialFilterText,
+    trialNotes,
+    trialTags,
+  ]);
+  const reviewVisibleTrialKeys = React.useMemo(
+    () => new Set(reviewRows.map((row) => trialKey(String(row.label || "")))),
+    [reviewRows],
+  );
   const imageLabelForIndex = React.useCallback(
     (imageIdx: number) => snapshotImageLabels?.[imageIdx] || snapshotLabels?.[imageIdx] || `image ${imageIdx + 1}`,
     [snapshotImageLabels, snapshotLabels],
@@ -2695,6 +2948,12 @@ function Show1DWidget() {
     },
     [hiddenTrialKeys, imageLabelForIndex],
   );
+  const isSnapshotImageVisible = React.useCallback((imageIdx: number) => {
+    if (isSnapshotImageHidden(imageIdx)) return false;
+    if (!showReview) return true;
+    const key = trialKey(imageLabelForIndex(imageIdx));
+    return !trialRowByKey.has(key) || reviewVisibleTrialKeys.has(key);
+  }, [imageLabelForIndex, isSnapshotImageHidden, reviewVisibleTrialKeys, showReview, trialRowByKey]);
   const hiddenTraceIndices = React.useMemo(
     () => Array.from({ length: nTraces }, (_, idx) => idx).filter((idx) => {
       const label = labels?.[idx] || `Trace ${idx + 1}`;
@@ -2704,10 +2963,15 @@ function Show1DWidget() {
   );
   const hiddenTraceSet = React.useMemo(() => new Set(hiddenTraceIndices), [hiddenTraceIndices]);
   const visibleTraceIndices = React.useMemo(
-    () => sortedTrialRows
-      .map((row) => Number(row.trace_index))
+    () => (showReview ? reviewRows : sortedTrialRows)
+      .map((row) => optionalFiniteNumber(row.trace_index))
       .filter((idx) => Number.isInteger(idx) && idx >= 0 && idx < nTraces && !hiddenTraceSet.has(idx)),
-    [hiddenTraceSet, nTraces, sortedTrialRows],
+    [hiddenTraceSet, nTraces, reviewRows, showReview, sortedTrialRows],
+  );
+  const visibleTraceSet = React.useMemo(() => new Set(visibleTraceIndices), [visibleTraceIndices]);
+  const excludedTraceSet = React.useMemo(
+    () => new Set(Array.from({ length: nTraces }, (_, idx) => idx).filter((idx) => !visibleTraceSet.has(idx))),
+    [nTraces, visibleTraceSet],
   );
   const rootRef = React.useRef<HTMLDivElement>(null);
   // Hide the saved-notebook static-image sibling while the live view is mounted.
@@ -2716,6 +2980,7 @@ function Show1DWidget() {
   const plotPanelRef = React.useRef<HTMLDivElement>(null);
   const plotHostRef = React.useRef<HTMLDivElement>(null);
   const canvasRef = React.useRef<HTMLCanvasElement>(null);
+  const plotHoverCanvasRef = React.useRef<HTMLCanvasElement>(null);
   const profileCanvasRef = React.useRef<HTMLCanvasElement>(null);
   const snapshotGridRef = React.useRef<HTMLDivElement>(null);
   const viewportSize = useViewportSize();
@@ -2724,6 +2989,7 @@ function Show1DWidget() {
     height: Math.max(360, viewportSize.height),
   });
   const plotSize = useElementSize(plotHostRef, DEFAULT_SIZE);
+  const plotDpr = typeof window === "undefined" ? 1 : (window.devicePixelRatio || 1);
   const geomRef = React.useRef<PlotGeometry | null>(null);
   const plotThumbnailHitAreasRef = React.useRef<PlotThumbnailHitArea[]>([]);
   const [hover, setHover] = React.useState<HoverPoint | null>(null);
@@ -2760,11 +3026,23 @@ function Show1DWidget() {
   const snapshotFftCacheRef = React.useRef<Map<string, SnapshotFftCacheEntry>>(new Map());
   const snapshotFftPendingRef = React.useRef<Map<string, Promise<SnapshotFftCacheEntry>>>(new Map());
   const snapshotFftGpuRef = React.useRef<WebGPUFFT | null>(null);
+  const snapshotFftGenerationRef = React.useRef(0);
+  const snapshotFftGeneration = React.useMemo(() => {
+    snapshotFftGenerationRef.current += 1;
+    snapshotFftCacheRef.current.clear();
+    snapshotFftPendingRef.current.clear();
+    updateSnapshotFftCacheMetrics(snapshotFftCacheRef.current);
+    return snapshotFftGenerationRef.current;
+  }, [snapshotData, snapshotHeight, snapshotHeights, snapshotWidth, snapshotWidths]);
   const [snapshotFftCacheVersion, setSnapshotFftCacheVersion] = React.useState(0);
+  const snapshotFftPrewarmRunRef = React.useRef(0);
+  const snapshotFftPrewarmQueueRef = React.useRef<Promise<void>>(Promise.resolve());
   const snapshotBounceDirectionRef = React.useRef<1 | -1>(1);
   const hoverRafRef = React.useRef<number | null>(null);
   const pendingHoverRef = React.useRef<HoverPoint | null>(null);
   const pendingHoverSnapshotGroupRef = React.useRef<number | null | undefined>(undefined);
+  const pendingHoverPointerRef = React.useRef<{ clientX: number; clientY: number; queuedAt: number } | null>(null);
+  const perfTelemetryRef = React.useRef<HTMLOutputElement>(null);
   const [exportAnchor, setExportAnchor] = React.useState<HTMLElement | null>(null);
   const [viewMenuAnchor, setViewMenuAnchor] = React.useState<HTMLElement | null>(null);
   const [exportBusy, setExportBusy] = React.useState(false);
@@ -2772,6 +3050,18 @@ function Show1DWidget() {
   const pendingExportRef = React.useRef<{ id: string; filename: string; handle: Show1DFileHandle | null } | null>(null);
 
   const fullXRange = React.useMemo(() => xExtent(xData, nPoints), [xData, nPoints]);
+
+  React.useEffect(() => {
+    const publish = () => {
+      if (perfTelemetryRef.current) {
+        perfTelemetryRef.current.textContent = JSON.stringify(getShow1DPerfCounters());
+      }
+    };
+    publish();
+    const id = window.setInterval(publish, 250);
+    return () => window.clearInterval(id);
+  }, []);
+
   const effectiveXRange: [number, number] = React.useMemo(() => {
     if (xRange?.length === 2 && Number.isFinite(xRange[0]) && Number.isFinite(xRange[1]) && xRange[0] < xRange[1]) {
       return [xRange[0], xRange[1]];
@@ -2779,8 +3069,8 @@ function Show1DWidget() {
     return fullXRange;
   }, [xRange, fullXRange]);
   const fullYRange = React.useMemo(
-    () => yExtent(yData, nTraces, nPoints, xData, effectiveXRange, logScale, hiddenTraceSet),
-    [yData, nTraces, nPoints, xData, effectiveXRange, logScale, hiddenTraceSet],
+    () => yExtent(yData, nTraces, nPoints, xData, effectiveXRange, logScale, excludedTraceSet),
+    [yData, nTraces, nPoints, xData, effectiveXRange, logScale, excludedTraceSet],
   );
   const effectiveYRange: [number, number] = React.useMemo(() => {
     if (yRange?.length === 2 && Number.isFinite(yRange[0]) && Number.isFinite(yRange[1]) && yRange[0] < yRange[1]) {
@@ -2831,19 +3121,29 @@ function Show1DWidget() {
       groupCount - 1,
     )
     : -1;
+  const committedSnapshotGroup = groupCount > 0
+    ? clampValue(Math.round(modelSelectedSnapshotGroup), 0, groupCount - 1)
+    : -1;
+  const [snapshotFftPrewarmAnchor, setSnapshotFftPrewarmAnchor] = React.useState(committedSnapshotGroup);
+  React.useEffect(() => {
+    const timer = window.setTimeout(() => setSnapshotFftPrewarmAnchor(committedSnapshotGroup), 120);
+    return () => window.clearTimeout(timer);
+  }, [committedSnapshotGroup]);
   const selectedGroupLabel = selectedGroup >= 0
     ? snapshotGroupLabels?.[selectedGroup] || `Snapshot ${selectedGroup + 1}`
     : "";
   const selectedGroupAllImageIndices = selectedGroup >= 0 ? (snapshotGroups[selectedGroup] ?? []) : [];
   const selectedGroupImageIndices = selectedGroupAllImageIndices
-    .filter((imageIdx) => !isSnapshotImageHidden(imageIdx))
+    .filter((imageIdx) => isSnapshotImageVisible(imageIdx))
     .sort((a, b) => {
       const aLabel = imageLabelForIndex(a);
       const bLabel = imageLabelForIndex(b);
       if (isReferenceLabel(aLabel) !== isReferenceLabel(bLabel)) return isReferenceLabel(aLabel) ? -1 : 1;
-      const ar = Number(trialRowByKey.get(trialKey(aLabel))?.rank ?? Number.MAX_SAFE_INTEGER);
-      const br = Number(trialRowByKey.get(trialKey(bLabel))?.rank ?? Number.MAX_SAFE_INTEGER);
-      return ar - br || aLabel.localeCompare(bLabel);
+      const ar = optionalFiniteNumber(trialRowByKey.get(trialKey(aLabel))?.rank);
+      const br = optionalFiniteNumber(trialRowByKey.get(trialKey(bLabel))?.rank);
+      const aRank = Number.isFinite(ar) ? ar : Number.MAX_SAFE_INTEGER;
+      const bRank = Number.isFinite(br) ? br : Number.MAX_SAFE_INTEGER;
+      return aRank - bRank || aLabel.localeCompare(bLabel);
     });
   const selectedSnapshot = selectedGroupImageIndices.includes(legacySelectedSnapshot)
     ? legacySelectedSnapshot
@@ -2863,7 +3163,7 @@ function Show1DWidget() {
   }, [bookmarkedSnapshotGroups, groupCount]);
   const currentSnapshotGroupBookmarked = selectedGroup >= 0
     && normalisedBookmarkedSnapshotGroups.includes(selectedGroup);
-  const sidePanelVisible = (showSnapshots && hasSnapshots) || hasProfileImage || showStats;
+  const sidePanelVisible = (showSnapshots && hasSnapshots) || hasProfileImage || showStats || showReview;
   const plotTitleVisible = false;
   const htmlSize = formatEstimatedHtmlSize((nTraces * nPoints + nSnapshots * snapshotHeight * snapshotWidth + profileImageHeight * profileImageWidth) * 4);
   const thumbnailSize = clampThumbnailSize(snapshotThumbnailSize);
@@ -2904,7 +3204,10 @@ function Show1DWidget() {
   const resolvedSnapshotOverlayPosition = normaliseSnapshotOverlayPosition(snapshotOverlayPosition);
   const resolvedSnapshotFftLayout = normaliseSnapshotFftLayout(snapshotFftLayout);
   const viewportShellHeight = { xs: "none", md: "calc(100vh - 8px)" };
-  const mainGridViewportHeight = { xs: "auto", md: controlsVisible ? "calc(100vh - 82px)" : "calc(100vh - 8px)" };
+  const mainGridViewportHeight = {
+    xs: "auto",
+    md: controlsVisible ? "calc(100vh - 82px)" : showControls ? "calc(100vh - 42px)" : "calc(100vh - 8px)",
+  };
   const mainGridTemplateColumns = sidePanelVisible
     ? {
       xs: "1fr",
@@ -2916,7 +3219,7 @@ function Show1DWidget() {
     () => normaliseSnapshotContrastRange(snapshotContrastRange),
     [snapshotContrastRange],
   );
-  const imageLut = React.useMemo(() => COLORMAPS[imageCmap] || COLORMAPS.cividis || COLORMAPS.gray, [imageCmap]);
+  const imageLut = React.useMemo(() => COLORMAPS[imageCmap] || COLORMAPS.viridis || COLORMAPS.gray, [imageCmap]);
   const snapshotFftLut = React.useMemo(
     () => COLORMAPS[snapshotFftCmap] || COLORMAPS.magma || imageLut,
     [imageLut, snapshotFftCmap],
@@ -2934,13 +3237,15 @@ function Show1DWidget() {
     const cache = new Map<number, PlotThumbnailCacheEntry>();
     if (!showSnapshotThumbnails || !hasSnapshots || groupCount <= 0) return cache;
     for (let groupIdx = 0; groupIdx < groupCount; groupIdx += 1) {
-      const imageIndices = (snapshotGroups[groupIdx] ?? []).filter((idx) => !isSnapshotImageHidden(idx)).sort((a, b) => {
+      const imageIndices = (snapshotGroups[groupIdx] ?? []).filter((idx) => isSnapshotImageVisible(idx)).sort((a, b) => {
         const aLabel = imageLabelForIndex(a);
         const bLabel = imageLabelForIndex(b);
         if (isReferenceLabel(aLabel) !== isReferenceLabel(bLabel)) return isReferenceLabel(aLabel) ? -1 : 1;
-        const ar = Number(trialRowByKey.get(trialKey(aLabel))?.rank ?? Number.MAX_SAFE_INTEGER);
-        const br = Number(trialRowByKey.get(trialKey(bLabel))?.rank ?? Number.MAX_SAFE_INTEGER);
-        return ar - br || aLabel.localeCompare(bLabel);
+        const ar = optionalFiniteNumber(trialRowByKey.get(trialKey(aLabel))?.rank);
+        const br = optionalFiniteNumber(trialRowByKey.get(trialKey(bLabel))?.rank);
+        return (Number.isFinite(ar) ? ar : Number.MAX_SAFE_INTEGER)
+          - (Number.isFinite(br) ? br : Number.MAX_SAFE_INTEGER)
+          || aLabel.localeCompare(bLabel);
       });
       const firstImageIdx = imageIndices[0];
       if (firstImageIdx === undefined) continue;
@@ -2979,7 +3284,7 @@ function Show1DWidget() {
     hasSnapshots,
     imageLabelForIndex,
     imageLut,
-    isSnapshotImageHidden,
+    isSnapshotImageVisible,
     normalisedSnapshotContrastPreset,
     plotThumbnailColors,
     showSnapshotThumbnails,
@@ -3038,9 +3343,9 @@ function Show1DWidget() {
     }
     setTransientSnapshotGroupIdx(null);
     setSelectedSnapshotGroupIdx(groupIdx);
-    const imageIdx = snapshotGroups[groupIdx]?.find((idx) => !isSnapshotImageHidden(idx)) ?? -1;
+    const imageIdx = snapshotGroups[groupIdx]?.find((idx) => isSnapshotImageVisible(idx)) ?? -1;
     setSelectedSnapshotIdx(imageIdx);
-  }, [groupCount, isSnapshotImageHidden, setSelectedSnapshotGroupIdx, setSelectedSnapshotIdx, snapshotGroups]);
+  }, [groupCount, isSnapshotImageVisible, setSelectedSnapshotGroupIdx, setSelectedSnapshotIdx, snapshotGroups]);
 
   const selectSnapshotImage = React.useCallback((imageIdx: number) => {
     if (imageIdx < 0 || imageIdx >= nSnapshots) return;
@@ -3109,6 +3414,39 @@ function Show1DWidget() {
     setHiddenSnapshotImageLabels([]);
   }, [setHiddenSnapshotImageLabels]);
 
+  const toggleStarTrial = React.useCallback((label: string) => {
+    const clean = String(label || "").trim();
+    if (!clean) return;
+    const key = trialKey(clean);
+    const next = uniqueStrings(starredSnapshotImageLabels ?? []);
+    const existing = next.findIndex((value) => trialKey(value) === key);
+    if (existing >= 0) next.splice(existing, 1);
+    else next.push(clean);
+    setStarredSnapshotImageLabels(next);
+  }, [setStarredSnapshotImageLabels, starredSnapshotImageLabels]);
+
+  const updateTrialNote = React.useCallback((label: string, note: string) => {
+    const next = { ...(trialNotes ?? {}) };
+    for (const key of Object.keys(next)) {
+      if (trialKey(key) === trialKey(label)) delete next[key];
+    }
+    if (note.trim()) next[label] = note;
+    setTrialNotes(next);
+  }, [setTrialNotes, trialNotes]);
+
+  const toggleTrialTag = React.useCallback((label: string, tag: string) => {
+    const next = { ...(trialTags ?? {}) };
+    for (const key of Object.keys(next)) {
+      if (trialKey(key) === trialKey(label)) delete next[key];
+    }
+    const values = uniqueStrings(lookupTrialValue(trialTags, label) ?? []);
+    const existing = values.indexOf(tag);
+    if (existing >= 0) values.splice(existing, 1);
+    else values.push(tag);
+    if (values.length) next[label] = values;
+    setTrialTags(next);
+  }, [setTrialTags, trialTags]);
+
   const toggleCurrentSnapshotGroupBookmark = React.useCallback(() => {
     if (selectedGroup < 0 || selectedGroup >= groupCount) return;
     const next = new Set(normalisedBookmarkedSnapshotGroups);
@@ -3116,25 +3454,6 @@ function Show1DWidget() {
     else next.add(selectedGroup);
     setBookmarkedSnapshotGroups(Array.from(next).sort((a, b) => a - b));
   }, [groupCount, normalisedBookmarkedSnapshotGroups, selectedGroup, setBookmarkedSnapshotGroups]);
-
-  const scheduleHover = React.useCallback((value: HoverPoint | null, snapshotGroupIdx?: number | null) => {
-    pendingHoverRef.current = value;
-    pendingHoverSnapshotGroupRef.current = snapshotGroupIdx;
-    if (hoverRafRef.current !== null) return;
-    hoverRafRef.current = window.requestAnimationFrame(() => {
-      hoverRafRef.current = null;
-      setHover(pendingHoverRef.current);
-      const nextGroup = pendingHoverSnapshotGroupRef.current;
-      if (nextGroup !== undefined && hoverSnapshotGroupRef.current !== nextGroup) {
-        hoverSnapshotGroupRef.current = nextGroup;
-        setHoverSnapshotGroupIdx(nextGroup);
-      }
-    });
-  }, []);
-
-  React.useEffect(() => () => {
-    if (hoverRafRef.current !== null) window.cancelAnimationFrame(hoverRafRef.current);
-  }, []);
 
   React.useEffect(() => () => {
     plotResizeCleanupRef.current?.();
@@ -3314,8 +3633,8 @@ function Show1DWidget() {
   }, [rawSnapshotColumnCount, setSnapshotColumns, snapshotColumns]);
 
   React.useEffect(() => {
-    if (focusedTrace >= 0 && hiddenTraceSet.has(focusedTrace)) setFocusedTrace(-1);
-  }, [focusedTrace, hiddenTraceSet, setFocusedTrace]);
+    if (focusedTrace >= 0 && !visibleTraceSet.has(focusedTrace)) setFocusedTrace(-1);
+  }, [focusedTrace, setFocusedTrace, visibleTraceSet]);
 
   React.useEffect(() => {
     if (plotHeightPx !== plotHeight) setPlotHeightPx(plotHeight);
@@ -3326,7 +3645,7 @@ function Show1DWidget() {
   }, [sidePanelWidth, sidePanelWidthPx, setSidePanelWidthPx]);
 
   React.useEffect(() => {
-    if (!COLORMAPS[imageCmap]) setImageCmap("cividis");
+    if (!COLORMAPS[imageCmap]) setImageCmap("viridis");
   }, [imageCmap, setImageCmap]);
 
   React.useEffect(() => {
@@ -3344,9 +3663,20 @@ function Show1DWidget() {
     const timeout = window.setTimeout(() => {
       if (initialInteractiveStateRef.current !== null) return;
       initialInteractiveStateRef.current = {
+        controlsCollapsed: Boolean(controlsCollapsed),
         logScale: Boolean(logScale),
         showStats: Boolean(showStats),
+        showReview: Boolean(showReview),
         showLegend: Boolean(showLegend),
+        starredSnapshotImageLabels: copyStringArray(starredSnapshotImageLabels),
+        trialNotes: copyStringRecord(trialNotes),
+        trialTags: copyStringArrayRecord(trialTags),
+        showTrialNotes: Boolean(showTrialNotes),
+        showStarredOnly: Boolean(showStarredOnly),
+        trialSortKey: String(trialSortKey || (optimizationReview ? "final_loss" : "label")),
+        trialSortDescending: Boolean(trialSortDescending),
+        trialFilterText: String(trialFilterText || ""),
+        topTrialCount: Math.max(0, Math.round(optionalFiniteNumber(topTrialCount) || 0)),
         plotHeightPx: Number.isFinite(plotHeightPx) ? plotHeightPx : DEFAULT_PLOT_HEIGHT,
         sidePanelWidthPx: Number.isFinite(sidePanelWidthPx) ? sidePanelWidthPx : 360,
         snapshotPanelWidthPx: Number.isFinite(snapshotPanelWidthPx) ? snapshotPanelWidthPx : 0,
@@ -3357,6 +3687,7 @@ function Show1DWidget() {
         selectedSnapshotGroupIdx: Number.isFinite(selectedSnapshotGroupIdx) ? selectedSnapshotGroupIdx : -1,
         bookmarkedSnapshotGroups: copyNumberArray(bookmarkedSnapshotGroups),
         hiddenSnapshotImageLabels: copyStringArray(hiddenSnapshotImageLabels),
+        showSnapshotHistogram: Boolean(showSnapshotHistogram),
         showSnapshotFft: Boolean(showSnapshotFft),
         snapshotFftLayout: String(snapshotFftLayout || "overlay"),
         snapshotFftWindow: Boolean(snapshotFftWindow),
@@ -3365,7 +3696,7 @@ function Show1DWidget() {
         snapshotContrastRange: copyNumberArray(snapshotContrastRange),
         snapshotThumbnailSize: Number.isFinite(snapshotThumbnailSize) ? snapshotThumbnailSize : 48,
         snapshotOverlayPosition: String(snapshotOverlayPosition || "top-right"),
-        imageCmap: String(imageCmap || "cividis"),
+        imageCmap: String(imageCmap || "viridis"),
         snapshotRealSpaceZoom: Number.isFinite(snapshotRealSpaceZoom) ? snapshotRealSpaceZoom : 1,
         snapshotRealSpaceCenter: copyNumberArray(snapshotRealSpaceCenter),
         snapshotFftZoom: Number.isFinite(snapshotFftZoom) ? snapshotFftZoom : 1,
@@ -3468,34 +3799,38 @@ function Show1DWidget() {
   }, [clearPlotThumbnailPreview, hoverSnapshotGroupIdx]);
 
   React.useEffect(() => {
-    snapshotFftCacheRef.current.clear();
-    snapshotFftPendingRef.current.clear();
-    setSnapshotFftCacheVersion((value) => value + 1);
-  }, [snapshotData, snapshotHeight, snapshotHeights, snapshotWidth, snapshotWidths]);
-
-  React.useEffect(() => {
     if (!showSnapshotFft || !hasSnapshots || groupCount <= 0 || nSnapshots <= 0 || snapshotData.length === 0) return;
     let canceled = false;
-    const anchorGroup = selectedGroup >= 0 ? selectedGroup : 0;
+    const runId = snapshotFftPrewarmRunRef.current + 1;
+    snapshotFftPrewarmRunRef.current = runId;
+    const generation = snapshotFftGeneration;
+    const anchorGroup = snapshotFftPrewarmAnchor >= 0 ? snapshotFftPrewarmAnchor : 0;
     const orderedGroups = Array.from({ length: groupCount }, (_, groupIdx) => groupIdx)
       .sort((a, b) => Math.abs(a - anchorGroup) - Math.abs(b - anchorGroup) || a - b);
 
     const warmSnapshotFftCache = async () => {
+      let warmedImages = 0;
       for (const groupIdx of orderedGroups) {
         const imageIndices = snapshotGroups[groupIdx] ?? [];
         for (const imageIdx of imageIndices) {
-          if (canceled) return;
+          if (
+            canceled
+            || snapshotFftPrewarmRunRef.current !== runId
+            || snapshotFftGenerationRef.current !== generation
+            || warmedImages >= SNAPSHOT_FFT_PREWARM_MAX_IMAGES
+          ) return;
           const imageHeight = snapshotHeights?.[imageIdx] || snapshotHeight;
           const imageWidth = snapshotWidths?.[imageIdx] || snapshotWidth;
           if (imageIdx < 0 || imageHeight <= 0 || imageWidth <= 0) continue;
           const cacheKey = snapshotFftCacheKey(
+            generation,
             imageIdx,
             imageWidth,
             imageHeight,
             Boolean(snapshotFftWindow),
             Boolean(preferWebgpu),
           );
-          if (snapshotFftCacheRef.current.has(cacheKey)) continue;
+          if (readSnapshotFftCache(snapshotFftCacheRef.current, cacheKey)) continue;
           const image = extractPackedImage(snapshotData, imageIdx, snapshotHeight, snapshotWidth, imageHeight, imageWidth);
           if (!image.length) continue;
           try {
@@ -3509,8 +3844,17 @@ function Show1DWidget() {
               snapshotFftCacheRef,
               snapshotFftPendingRef,
               snapshotFftGpuRef,
+              snapshotFftGenerationRef,
+              generation,
             );
-            if (!canceled && groupIdx === anchorGroup && entry.data.length > 0) {
+            warmedImages += 1;
+            if (
+              !canceled
+              && snapshotFftPrewarmRunRef.current === runId
+              && snapshotFftGenerationRef.current === generation
+              && groupIdx === anchorGroup
+              && entry.data.length > 0
+            ) {
               setSnapshotFftCacheVersion((value) => value + 1);
             }
           } catch {
@@ -3521,16 +3865,20 @@ function Show1DWidget() {
       }
     };
 
-    void warmSnapshotFftCache();
+    const queued = snapshotFftPrewarmQueueRef.current
+      .catch(() => undefined)
+      .then(warmSnapshotFftCache);
+    snapshotFftPrewarmQueueRef.current = queued;
     return () => { canceled = true; };
   }, [
     groupCount,
     hasSnapshots,
     nSnapshots,
     preferWebgpu,
-    selectedGroup,
     showSnapshotFft,
     snapshotData,
+    snapshotFftGeneration,
+    snapshotFftPrewarmAnchor,
     snapshotFftWindow,
     snapshotGroups,
     snapshotHeight,
@@ -3555,11 +3903,11 @@ function Show1DWidget() {
     const groupIdx = clampValue(Math.round(transientSnapshotGroupIdx), 0, groupCount - 1);
     setTransientSnapshotGroupIdx(null);
     setSelectedSnapshotGroupIdx(groupIdx);
-    const imageIdx = snapshotGroups[groupIdx]?.find((idx) => !isSnapshotImageHidden(idx)) ?? -1;
+    const imageIdx = snapshotGroups[groupIdx]?.find((idx) => isSnapshotImageVisible(idx)) ?? -1;
     setSelectedSnapshotIdx(imageIdx);
   }, [
     groupCount,
-    isSnapshotImageHidden,
+    isSnapshotImageVisible,
     setSelectedSnapshotGroupIdx,
     setSelectedSnapshotIdx,
     snapshotGroups,
@@ -3568,7 +3916,7 @@ function Show1DWidget() {
   ]);
 
   React.useEffect(() => {
-    if (snapshotPlaying) return;
+    if (!showSnapshotHistogram || snapshotPlaying) return;
     if (!hasSnapshots || selectedSnapshot < 0) {
       setSnapshotHistogramBins(new Array(256).fill(0));
       setSnapshotHistogramRange([0, 1]);
@@ -3613,6 +3961,7 @@ function Show1DWidget() {
     hasSnapshots,
     preferWebgpu,
     selectedSnapshot,
+    showSnapshotHistogram,
     snapshotPlaying,
     snapshotData,
     snapshotHeight,
@@ -3622,7 +3971,7 @@ function Show1DWidget() {
   ]);
 
   React.useEffect(() => {
-    if (snapshotPlaying) return;
+    if (!showSnapshotHistogram || snapshotPlaying) return;
     if (!hasSnapshots || selectedSnapshot < 0) {
       setSnapshotHistogramClipRange([0, 1]);
       return;
@@ -3636,6 +3985,7 @@ function Show1DWidget() {
     hasSnapshots,
     normalisedSnapshotContrastPreset,
     selectedSnapshot,
+    showSnapshotHistogram,
     snapshotPlaying,
     snapshotData,
     snapshotHeight,
@@ -3772,6 +4122,7 @@ function Show1DWidget() {
       plotThumbnailHitAreasRef.current = [];
       return;
     }
+    const drawStartedAt = performance.now();
     const nextPlotThumbnailHitAreas: PlotThumbnailHitArea[] = [];
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.fillStyle = themeColors.bg;
@@ -3867,7 +4218,7 @@ function Show1DWidget() {
     }
 
     for (let trace = 0; trace < nTraces; trace += 1) {
-      if (hiddenTraceSet.has(trace)) continue;
+      if (!visibleTraceSet.has(trace)) continue;
       const isFocused = focusedTrace < 0 || focusedTrace === trace;
       ctx.strokeStyle = cssColor(colors ?? [], trace);
       ctx.lineWidth = Math.max(1, lineWidth) * (focusedTrace === trace ? 1.8 : 1);
@@ -3922,34 +4273,23 @@ function Show1DWidget() {
       }
     }
 
-    if (hover) {
-      ctx.strokeStyle = themeColors.textMuted;
-      ctx.globalAlpha = 0.45;
-      ctx.setLineDash([2, 4]);
-      ctx.beginPath();
-      ctx.moveTo(hover.px, geom.top);
-      ctx.lineTo(hover.px, geom.top + geom.plotH);
-      ctx.moveTo(geom.left, hover.py);
-      ctx.lineTo(geom.left + geom.plotW, hover.py);
-      ctx.stroke();
-      ctx.setLineDash([]);
-      ctx.globalAlpha = 1;
-      ctx.fillStyle = cssColor(colors ?? [], hover.trace);
-      ctx.beginPath();
-      ctx.arc(hover.px, hover.py, 3.5, 0, Math.PI * 2);
-      ctx.fill();
-    }
-
     ctx.restore();
     ctx.fillStyle = themeColors.text;
     ctx.font = "12px system-ui, sans-serif";
     ctx.textAlign = "center";
+    const methodTickCharBudget = Math.max(
+      4,
+      Math.floor(geom.plotW / Math.max(1, xTicks.length) / 7),
+    );
     for (const tick of xTicks) {
       const x = dataToX(tick, geom);
       let label = formatAxisValue(tick);
       if (methodLabels?.length) {
         const idx = Math.round(tick);
-        if (Math.abs(idx - tick) < 0.05 && idx >= 0 && idx < methodLabels.length) label = shortMethodLabel(methodLabels[idx]);
+        if (Math.abs(idx - tick) < 0.05 && idx >= 0 && idx < methodLabels.length) {
+          const methodTick = shortMethodLabel(methodLabels[idx]);
+          if (methodTick.length <= methodTickCharBudget) label = methodTick;
+        }
       }
       ctx.fillText(label, x, geom.top + geom.plotH + 18);
     }
@@ -3982,6 +4322,11 @@ function Show1DWidget() {
       ctx.fillText("No data", geom.left + geom.plotW / 2, geom.top + geom.plotH / 2);
     }
     plotThumbnailHitAreasRef.current = nextPlotThumbnailHitAreas;
+    const perf = getShow1DPerfCounters();
+    if (perf) {
+      perf.basePlotDraws += 1;
+      perf.lastBasePlotDrawMs = performance.now() - drawStartedAt;
+    }
   }, [
     plotSize,
     themeColors,
@@ -4002,11 +4347,10 @@ function Show1DWidget() {
     showGrid,
     lineWidth,
     focusedTrace,
-    hiddenTraceSet,
+    visibleTraceSet,
     effectiveXRange,
     effectiveYRange,
     markers,
-    hover,
     selectedSnapshotIteration,
     showSnapshotThumbnails,
     hasSnapshots,
@@ -4016,20 +4360,69 @@ function Show1DWidget() {
     thumbnailSize,
   ]);
 
+  React.useEffect(() => {
+    const canvas = plotHoverCanvasRef.current;
+    if (!canvas) return;
+    canvas.width = Math.round(plotSize.width * plotDpr);
+    canvas.height = Math.round(plotSize.height * plotDpr);
+    canvas.style.width = `${plotSize.width}px`;
+    canvas.style.height = `${plotSize.height}px`;
+  }, [plotDpr, plotSize.height, plotSize.width]);
+
+  React.useEffect(() => {
+    const canvas = plotHoverCanvasRef.current;
+    if (!canvas) return;
+    const drawStartedAt = performance.now();
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.setTransform(plotDpr, 0, 0, plotDpr, 0, 0);
+    ctx.clearRect(0, 0, plotSize.width, plotSize.height);
+    const geom = geomRef.current;
+    if (hover && geom) {
+      ctx.save();
+      ctx.rect(geom.left, geom.top, geom.plotW, geom.plotH);
+      ctx.clip();
+      ctx.strokeStyle = themeColors.textMuted;
+      ctx.globalAlpha = 0.45;
+      ctx.setLineDash([2, 4]);
+      ctx.beginPath();
+      ctx.moveTo(hover.px, geom.top);
+      ctx.lineTo(hover.px, geom.top + geom.plotH);
+      ctx.moveTo(geom.left, hover.py);
+      ctx.lineTo(geom.left + geom.plotW, hover.py);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = cssColor(colors ?? [], hover.trace);
+      ctx.beginPath();
+      ctx.arc(hover.px, hover.py, 3.5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+    const perf = getShow1DPerfCounters();
+    if (perf) {
+      perf.hoverOverlayDraws += 1;
+      perf.lastHoverOverlayDrawMs = performance.now() - drawStartedAt;
+    }
+  }, [colors, hover, plotDpr, plotSize.height, plotSize.width, themeColors.textMuted]);
+
   const nearestPoint = React.useCallback((clientX: number, clientY: number): HoverPoint | null => {
     const canvas = canvasRef.current;
     const geom = geomRef.current;
     if (!canvas || !geom || nPoints <= 0 || nTraces <= 0) return null;
+    const startedAt = performance.now();
     const rect = canvas.getBoundingClientRect();
     const px = clientX - rect.left;
     const py = clientY - rect.top;
     if (px < geom.left || px > geom.left + geom.plotW || py < geom.top || py > geom.top + geom.plotH) return null;
     let best: HoverPoint | null = null;
     let bestDist = 24 * 24;
+    let pointsScanned = 0;
     for (let trace = 0; trace < nTraces; trace += 1) {
-      if (hiddenTraceSet.has(trace)) continue;
+      if (!visibleTraceSet.has(trace)) continue;
       const offset = trace * nPoints;
       for (let point = 0; point < nPoints; point += 1) {
+        pointsScanned += 1;
         const x = xData.length > point ? xData[point] : point;
         const y = yData[offset + point];
         if (!Number.isFinite(x) || !Number.isFinite(y) || (logScale && y <= 0)) continue;
@@ -4043,8 +4436,13 @@ function Show1DWidget() {
         }
       }
     }
+    const perf = getShow1DPerfCounters();
+    if (perf) {
+      perf.pointsScanned += pointsScanned;
+      perf.lastNearestPointMs = performance.now() - startedAt;
+    }
     return best;
-  }, [hiddenTraceSet, nPoints, nTraces, xData, yData, logScale]);
+  }, [logScale, nPoints, nTraces, visibleTraceSet, xData, yData]);
 
   const snapshotGroupForPoint = React.useCallback((point: HoverPoint | null): number | null => {
     if (!point || !hasSnapshots || groupCount <= 0) return null;
@@ -4063,14 +4461,68 @@ function Show1DWidget() {
     return bestGroup;
   }, [groupCount, hasSnapshots, snapshotGroupIterations]);
 
-  const handlePointerMove = React.useCallback((event: React.PointerEvent<HTMLCanvasElement>) => {
-    if (previewPlotThumbnailAtPointer(event.clientX, event.clientY)) {
-      scheduleHover(null);
+  const commitScheduledHover = React.useCallback((value: HoverPoint | null, snapshotGroupIdx?: number | null) => {
+    setHover(value);
+    if (snapshotGroupIdx !== undefined && hoverSnapshotGroupRef.current !== snapshotGroupIdx) {
+      hoverSnapshotGroupRef.current = snapshotGroupIdx;
+      setHoverSnapshotGroupIdx(snapshotGroupIdx);
+    }
+  }, []);
+
+  const flushHoverFrame = React.useCallback(() => {
+    hoverRafRef.current = null;
+    const pointer = pendingHoverPointerRef.current;
+    pendingHoverPointerRef.current = null;
+    if (pointer) {
+      const perf = getShow1DPerfCounters();
+      if (perf) perf.pointerFrames += 1;
+      const recordVisibleLatency = () => {
+        if (!perf) return;
+        window.requestAnimationFrame(() => {
+          const latency = performance.now() - pointer.queuedAt;
+          perf.lastPointerLatencyMs = latency;
+          perf.maxPointerLatencyMs = Math.max(perf.maxPointerLatencyMs, latency);
+        });
+      };
+      if (previewPlotThumbnailAtPointer(pointer.clientX, pointer.clientY)) {
+        commitScheduledHover(null);
+        recordVisibleLatency();
+        return;
+      }
+      const point = nearestPoint(pointer.clientX, pointer.clientY);
+      commitScheduledHover(point, snapshotGroupForPoint(point));
+      recordVisibleLatency();
       return;
     }
-    const point = nearestPoint(event.clientX, event.clientY);
-    scheduleHover(point, snapshotGroupForPoint(point));
-  }, [nearestPoint, previewPlotThumbnailAtPointer, scheduleHover, snapshotGroupForPoint]);
+    commitScheduledHover(pendingHoverRef.current, pendingHoverSnapshotGroupRef.current);
+  }, [commitScheduledHover, nearestPoint, previewPlotThumbnailAtPointer, snapshotGroupForPoint]);
+
+  const requestHoverFrame = React.useCallback(() => {
+    if (hoverRafRef.current !== null) return;
+    hoverRafRef.current = window.requestAnimationFrame(flushHoverFrame);
+  }, [flushHoverFrame]);
+
+  const scheduleHover = React.useCallback((value: HoverPoint | null, snapshotGroupIdx?: number | null) => {
+    pendingHoverPointerRef.current = null;
+    pendingHoverRef.current = value;
+    pendingHoverSnapshotGroupRef.current = snapshotGroupIdx;
+    requestHoverFrame();
+  }, [requestHoverFrame]);
+
+  const scheduleHoverAtPointer = React.useCallback((clientX: number, clientY: number) => {
+    const perf = getShow1DPerfCounters();
+    if (perf) perf.pointerEvents += 1;
+    pendingHoverPointerRef.current = { clientX, clientY, queuedAt: performance.now() };
+    requestHoverFrame();
+  }, [requestHoverFrame]);
+
+  React.useEffect(() => () => {
+    if (hoverRafRef.current !== null) window.cancelAnimationFrame(hoverRafRef.current);
+  }, []);
+
+  const handlePointerMove = React.useCallback((event: React.PointerEvent<HTMLCanvasElement>) => {
+    scheduleHoverAtPointer(event.clientX, event.clientY);
+  }, [scheduleHoverAtPointer]);
 
   const handlePointerLeave = React.useCallback(() => {
     clearPlotThumbnailPreview();
@@ -4111,9 +4563,20 @@ function Show1DWidget() {
   const resetToInitialState = React.useCallback(() => {
     const initial = initialInteractiveStateRef.current;
     if (!initial) return;
+    setControlsCollapsed(initial.controlsCollapsed);
     setLogScale(initial.logScale);
     setShowStats(initial.showStats);
+    setShowReview(initial.showReview);
     setShowLegend(initial.showLegend);
+    setStarredSnapshotImageLabels([...initial.starredSnapshotImageLabels]);
+    setTrialNotes(copyStringRecord(initial.trialNotes));
+    setTrialTags(copyStringArrayRecord(initial.trialTags));
+    setShowTrialNotes(initial.showTrialNotes);
+    setShowStarredOnly(initial.showStarredOnly);
+    setTrialSortKey(initial.trialSortKey);
+    setTrialSortDescending(initial.trialSortDescending);
+    setTrialFilterText(initial.trialFilterText);
+    setTopTrialCount(initial.topTrialCount);
     setPlotHeightPx(initial.plotHeightPx);
     setSidePanelWidthPx(initial.sidePanelWidthPx);
     setSnapshotPanelWidthPx(initial.snapshotPanelWidthPx);
@@ -4130,12 +4593,14 @@ function Show1DWidget() {
     hoverSnapshotGroupRef.current = null;
     if (canvasRef.current) canvasRef.current.style.cursor = "crosshair";
     setHiddenSnapshotImageLabels([...initial.hiddenSnapshotImageLabels]);
+    setShowSnapshotHistogram(initial.showSnapshotHistogram);
     setShowSnapshotFft(initial.showSnapshotFft);
     setSnapshotFftLayout(initial.snapshotFftLayout);
     setSnapshotFftWindow(initial.snapshotFftWindow);
     setSnapshotFftCmap(initial.snapshotFftCmap);
     snapshotFftCacheRef.current.clear();
     snapshotFftPendingRef.current.clear();
+    updateSnapshotFftCacheMetrics(snapshotFftCacheRef.current);
     setSnapshotFftCacheVersion((value) => value + 1);
     setSnapshotContrastPreset(initial.snapshotContrastPreset);
     setSnapshotContrastRange([...initial.snapshotContrastRange]);
@@ -4197,8 +4662,19 @@ function Show1DWidget() {
     if (!initial) return false;
     return (
       logScale !== initial.logScale
+      || controlsCollapsed !== initial.controlsCollapsed
       || showStats !== initial.showStats
+      || showReview !== initial.showReview
       || showLegend !== initial.showLegend
+      || !stringArraysEqual(starredSnapshotImageLabels, initial.starredSnapshotImageLabels)
+      || !jsonValuesEqual(trialNotes, initial.trialNotes)
+      || !jsonValuesEqual(trialTags, initial.trialTags)
+      || showTrialNotes !== initial.showTrialNotes
+      || showStarredOnly !== initial.showStarredOnly
+      || trialSortKey !== initial.trialSortKey
+      || trialSortDescending !== initial.trialSortDescending
+      || trialFilterText !== initial.trialFilterText
+      || topTrialCount !== initial.topTrialCount
       || plotHeightPx !== initial.plotHeightPx
       || sidePanelWidthPx !== initial.sidePanelWidthPx
       || snapshotPanelWidthPx !== initial.snapshotPanelWidthPx
@@ -4210,6 +4686,7 @@ function Show1DWidget() {
       || selectedSnapshotGroupIdx !== initial.selectedSnapshotGroupIdx
       || !numberArraysEqual(bookmarkedSnapshotGroups, initial.bookmarkedSnapshotGroups)
       || !stringArraysEqual(hiddenSnapshotImageLabels, initial.hiddenSnapshotImageLabels)
+      || showSnapshotHistogram !== initial.showSnapshotHistogram
       || showSnapshotFft !== initial.showSnapshotFft
       || snapshotFftLayout !== initial.snapshotFftLayout
       || snapshotFftWindow !== initial.snapshotFftWindow
@@ -4292,7 +4769,9 @@ function Show1DWidget() {
     setExportAnchor(null);
     if (kind === "csv") {
       const filename = makeExportFilename(title, nTraces, nPoints, "csv");
-      const blob = new Blob([csvForTraces(xData, yData, labels ?? [], nTraces, nPoints)], { type: "text/csv;charset=utf-8" });
+      const blob = new Blob([
+        csvForTraces(xData, yData, labels ?? [], nTraces, nPoints, xLabel, xUnit, yLabel, yUnit),
+      ], { type: "text/csv;charset=utf-8" });
       downloadBlob(blob, filename);
       setLocalExportStatus(`Saved ${filename} (${formatSavedBytes(blob.size)})`);
       return;
@@ -4339,7 +4818,7 @@ function Show1DWidget() {
     pendingExportRef.current = { id, filename, handle };
     setLocalExportStatus(`Preparing ${filename}...`);
     setExportRequest(JSON.stringify({ mode: "single", encoding: "full", id, filename, download: true }));
-  }, [exportEnabled, labels, nPoints, nTraces, setExportRequest, title, xData, yData]);
+  }, [exportEnabled, labels, nPoints, nTraces, setExportRequest, title, xData, xLabel, xUnit, yData, yLabel, yUnit]);
 
   const handleHandoffToShow2D = React.useCallback(() => {
     const images = selectedGroupImageIndices.map((idx) => imageLabelForIndex(idx));
@@ -4435,7 +4914,7 @@ function Show1DWidget() {
     ? snapshotGridHeight
       + 58
       + (showSnapshotProfile ? snapshotProfilePlotHeight : 0)
-      + (selectedSnapshot >= 0 ? snapshotHistogramDisplayHeight + 42 : 0)
+      + (showSnapshotHistogram && selectedSnapshot >= 0 ? snapshotHistogramDisplayHeight + 42 : 0)
       + (showStats ? 130 : 0)
     : 0;
   const plotNonCanvasHeightEstimate = showLegend && visibleTraceIndices.length > 0 ? 54 : 12;
@@ -4488,6 +4967,119 @@ function Show1DWidget() {
     </Box>
   ) : null;
 
+  const selectedTopTrialCount = Math.max(0, Math.round(optionalFiniteNumber(topTrialCount) || 0));
+  const topTrialOptions = Array.from(new Set([0, 1, 3, 5, 10, selectedTopTrialCount])).sort((a, b) => a - b);
+  const reviewPanel = showReview ? (
+    <Box data-testid="show1d-review-panel" sx={{ width: "100%", p: 0.75, boxSizing: "border-box", border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>
+      <Stack direction="row" alignItems="center" spacing={0.75} useFlexGap sx={{ flexWrap: "wrap", mb: 0.75 }}>
+        <Typography sx={{ fontSize: 11, fontWeight: 700, flexShrink: 0 }}>Review</Typography>
+        <TextField
+          size="small"
+          value={trialFilterText || ""}
+          onChange={(event) => setTrialFilterText(event.target.value)}
+          placeholder="Filter trials"
+          inputProps={{ "aria-label": "Filter review trials" }}
+          sx={{ width: 112, "& .MuiInputBase-input": { py: 0.45, px: 0.75, fontSize: 10.5 } }}
+        />
+        {optimizationReview && <Select
+          size="small"
+          value={normalisedSortKey}
+          onChange={(event) => setTrialSortKey(String(event.target.value))}
+          sx={{ ...themedSelect, minWidth: 94, fontSize: 10 }}
+          MenuProps={snapshotControlMenuProps}
+          inputProps={{ "aria-label": "Review ranking objective" }}
+        >
+          <MenuItem value="final_loss">Final loss</MenuItem>
+          <MenuItem value="min_loss">Min loss</MenuItem>
+          <MenuItem value="rmse">RMSE</MenuItem>
+          <MenuItem value="flicker">Flicker</MenuItem>
+          <MenuItem value="lambda">Lambda</MenuItem>
+          <MenuItem value="object_quality">Object quality</MenuItem>
+          <MenuItem value="probe_quality">Probe quality</MenuItem>
+          <MenuItem value="alert_count">Alerts</MenuItem>
+          <MenuItem value="label">Label</MenuItem>
+        </Select>}
+        {optimizationReview && <Button size="small" sx={compactButton} onClick={() => setTrialSortDescending(!trialSortDescending)}>
+          {trialSortDescending ? "Descending" : "Ascending"}
+        </Button>}
+        <Stack direction="row" alignItems="center" spacing={0.25} sx={{ flexShrink: 0 }}>
+          <Typography sx={toolbarLabelSx}>Starred</Typography>
+          <Switch size="small" checked={Boolean(showStarredOnly)} onChange={(_, checked) => setShowStarredOnly(checked)} sx={switchStyles.small} slotProps={{ input: { "aria-label": "Show starred trials only" } }} />
+        </Stack>
+        <Stack direction="row" alignItems="center" spacing={0.25} sx={{ flexShrink: 0 }}>
+          <Typography sx={toolbarLabelSx}>Notes</Typography>
+          <Switch size="small" checked={Boolean(showTrialNotes)} onChange={(_, checked) => setShowTrialNotes(checked)} sx={switchStyles.small} slotProps={{ input: { "aria-label": "Show trial note editor" } }} />
+        </Stack>
+        {optimizationReview && <Stack direction="row" alignItems="center" spacing={0.25} sx={{ flexShrink: 0 }}>
+          <Typography sx={toolbarLabelSx}>Top</Typography>
+          <Select size="small" value={selectedTopTrialCount} onChange={(event) => setTopTrialCount(Number(event.target.value))} sx={{ ...themedSelect, minWidth: 54, fontSize: 10 }} MenuProps={snapshotControlMenuProps} inputProps={{ "aria-label": "Top ranked trial count" }}>
+            {topTrialOptions.map((value) => <MenuItem key={value} value={value}>{value === 0 ? "All" : value}</MenuItem>)}
+          </Select>
+        </Stack>}
+      </Stack>
+      <Typography sx={{ fontSize: 10, color: themeColors.textMuted, mb: 0.5 }}>
+        {optimizationReview && bestTrialLabel ? `Best ${compactScienceLabel(bestTrialLabel)}` : `${reviewRows.length} visible traces`}
+      </Typography>
+      <Stack spacing={0.35} sx={{ maxHeight: 260, overflowY: "auto" }}>
+        {reviewRows.map((row) => {
+          const traceIndex = optionalFiniteNumber(row.trace_index);
+          const label = String(row.label || `Trace ${Number.isFinite(traceIndex) ? traceIndex + 1 : ""}`);
+          const starred = starredTrialKeys.has(trialKey(label));
+          const note = String(lookupTrialValue(trialNotes, label) ?? "");
+          const tags = lookupTrialValue(trialTags, label) ?? [];
+          const rowAlerts = optimizationReview
+            ? (trialAlerts ?? []).filter((alert) => trialKey(String(alert.label || "")) === trialKey(label))
+            : [];
+          const parsedAlertCount = optionalFiniteNumber(row.alert_count);
+          const alertCount = optimizationReview ? Math.max(Number.isFinite(parsedAlertCount) ? parsedAlertCount : 0, rowAlerts.length) : 0;
+          const score = optionalFiniteNumber(row.score);
+          return (
+            <Box key={label} sx={{ p: 0.5, border: `1px solid ${themeColors.border}`, minWidth: 0 }}>
+              <Stack direction="row" alignItems="center" spacing={0.5} sx={{ minWidth: 0 }}>
+                <IconButton size="small" onClick={() => toggleStarTrial(label)} aria-label={`${starred ? "Unstar" : "Star"} ${label}`} sx={{ p: 0, color: starred ? "#ffc107" : themeColors.textMuted }}>
+                  <Box component="span" sx={{ fontSize: 15 }}>{starred ? "★" : "☆"}</Box>
+                </IconButton>
+                <Typography title={label} sx={{ fontSize: 10.5, fontWeight: 600, flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {row.rank ? `${row.rank}. ` : ""}{compactScienceLabel(label)}
+                </Typography>
+                <Typography sx={{ fontSize: 10, color: themeColors.textMuted, fontVariantNumeric: "tabular-nums" }}>
+                  {Number.isFinite(score) ? formatCompactValue(score, 3) : ""}{alertCount ? ` · ${alertCount} alert${alertCount === 1 ? "" : "s"}` : ""}
+                </Typography>
+                {optimizationReview && <Button size="small" sx={compactButton} onClick={() => hideTrial(label)} aria-label={`Hide trial ${label}`} title={`Hide trial ${label}`}>Hide</Button>}
+              </Stack>
+              {rowAlerts.map((alert, idx) => (
+                <Typography key={`${alert.kind || "alert"}-${idx}`} role="status" sx={{ mt: 0.25, fontSize: 9.5, color: "#b91c1c" }}>
+                  {compactScienceLabel(String(alert.kind || "alert"))}{alert.message ? `: ${alert.message}` : ""}
+                </Typography>
+              ))}
+              {showTrialNotes && (
+                <>
+                  <TextField
+                    size="small"
+                    value={note}
+                    onChange={(event) => updateTrialNote(label, event.target.value)}
+                    placeholder="Review note"
+                    inputProps={{ "aria-label": `Review note for ${label}` }}
+                    sx={{ width: "100%", mt: 0.35, "& .MuiInputBase-input": { py: 0.4, px: 0.65, fontSize: 10 } }}
+                  />
+                  {optimizationReview && <Stack direction="row" spacing={0.35} useFlexGap sx={{ flexWrap: "wrap", mt: 0.35 }}>
+                    {["best", "bad start", "probe drift", "object issue"].map((tag) => (
+                      <Button key={tag} size="small" variant={tags.includes(tag) ? "contained" : "outlined"} onClick={() => toggleTrialTag(label, tag)} sx={{ ...compactButton, fontSize: 9, color: tags.includes(tag) ? "#fff" : themeColors.text, borderColor: themeColors.border }}>
+                        {tag}
+                      </Button>
+                    ))}
+                  </Stack>}
+                </>
+              )}
+            </Box>
+          );
+        })}
+        {reviewRows.length === 0 && <Typography sx={{ fontSize: 10.5, color: themeColors.textMuted }}>No trials match the review filters.</Typography>}
+      </Stack>
+      {hiddenTrialLabels.length > 0 && <Button size="small" sx={{ ...compactButton, mt: 0.5 }} onClick={showAllTrials}>Show All Hidden</Button>}
+    </Box>
+  ) : null;
+
   const snapshotPanelControls = (
     <Box
       data-testid="show1d-panel-controls"
@@ -4506,39 +5098,45 @@ function Show1DWidget() {
         minHeight: 28,
       }}
     >
-      <Typography sx={{ ...toolbarLabelSx, flexShrink: 0 }}>cols</Typography>
-      <Select
-        size="small"
-        value={rawSnapshotColumnCount}
-        onChange={(event) => setSnapshotColumns(Number(event.target.value))}
-        sx={{ ...themedSelect, minWidth: 58, fontSize: 10 }}
-        MenuProps={snapshotControlMenuProps}
-        inputProps={{ "aria-label": "Snapshot image columns" }}
-      >
-        <MenuItem value={0}>auto</MenuItem>
-        {[1, 2, 3, 4, 5, 6, 7, 8].map((value) => (
-          <MenuItem key={value} value={value}>{value}</MenuItem>
-        ))}
-      </Select>
-      <Typography sx={{ ...toolbarLabelSx, flexShrink: 0 }}>Profile</Typography>
-      <Switch
-        size="small"
-        checked={Boolean(showSnapshotProfile)}
-        onChange={(_, checked) => {
-          setShowSnapshotProfile(checked);
-          if (!checked) setSnapshotProfileLine([]);
-        }}
-        sx={{ ...switchStyles.small, flexShrink: 0 }}
-        slotProps={{ input: { "aria-label": "Show snapshot line profile" } }}
-      />
-      <Typography sx={{ ...toolbarLabelSx, flexShrink: 0 }}>FFT:</Typography>
-      <Switch
-        size="small"
-        checked={Boolean(showSnapshotFft)}
-        onChange={(_, checked) => setShowSnapshotFft(checked)}
-        sx={{ ...switchStyles.small, flexShrink: 0 }}
-        slotProps={{ input: { "aria-label": "Show snapshot FFT panels" } }}
-      />
+      <Stack direction="row" alignItems="center" spacing={0.5} sx={{ flexShrink: 0 }}>
+        <Typography sx={toolbarLabelSx}>Columns</Typography>
+        <Select
+          size="small"
+          value={rawSnapshotColumnCount}
+          onChange={(event) => setSnapshotColumns(Number(event.target.value))}
+          sx={{ ...themedSelect, minWidth: 58, fontSize: 10 }}
+          MenuProps={snapshotControlMenuProps}
+          inputProps={{ "aria-label": "Snapshot image columns" }}
+        >
+          <MenuItem value={0}>auto</MenuItem>
+          {[1, 2, 3, 4, 5, 6, 7, 8].map((value) => (
+            <MenuItem key={value} value={value}>{value}</MenuItem>
+          ))}
+        </Select>
+      </Stack>
+      <Stack direction="row" alignItems="center" spacing={0.5} sx={{ flexShrink: 0 }}>
+        <Typography sx={toolbarLabelSx}>Profile</Typography>
+        <Switch
+          size="small"
+          checked={Boolean(showSnapshotProfile)}
+          onChange={(_, checked) => {
+            setShowSnapshotProfile(checked);
+            if (!checked) setSnapshotProfileLine([]);
+          }}
+          sx={switchStyles.small}
+          slotProps={{ input: { "aria-label": "Show snapshot line profile" } }}
+        />
+      </Stack>
+      <Stack direction="row" alignItems="center" spacing={0.5} sx={{ flexShrink: 0 }}>
+        <Typography sx={toolbarLabelSx}>FFT</Typography>
+        <Switch
+          size="small"
+          checked={Boolean(showSnapshotFft)}
+          onChange={(_, checked) => setShowSnapshotFft(checked)}
+          sx={switchStyles.small}
+          slotProps={{ input: { "aria-label": "Show snapshot FFT panels" } }}
+        />
+      </Stack>
       {showSnapshotFft && (
         <>
           <Select
@@ -4566,14 +5164,16 @@ function Show1DWidget() {
               <MenuItem key={name} value={name}>{name}</MenuItem>
             ))}
           </Select>
-          <Typography sx={{ ...toolbarLabelSx, flexShrink: 0 }}>win</Typography>
-          <Switch
-            size="small"
-            checked={Boolean(snapshotFftWindow)}
-            onChange={(_, checked) => setSnapshotFftWindow(checked)}
-            sx={{ ...switchStyles.small, flexShrink: 0 }}
-            slotProps={{ input: { "aria-label": "Apply Hann window before snapshot FFT" } }}
-          />
+          <Stack direction="row" alignItems="center" spacing={0.5} sx={{ flexShrink: 0 }}>
+            <Typography sx={toolbarLabelSx}>Window</Typography>
+            <Switch
+              size="small"
+              checked={Boolean(snapshotFftWindow)}
+              onChange={(_, checked) => setSnapshotFftWindow(checked)}
+              sx={switchStyles.small}
+              slotProps={{ input: { "aria-label": "Apply Hann window before snapshot FFT" } }}
+            />
+          </Stack>
         </>
       )}
     </Box>
@@ -4607,6 +5207,16 @@ function Show1DWidget() {
           onChange={(_, checked) => setShowStats(checked)}
           sx={switchStyles.small}
           slotProps={{ input: { "aria-label": "Show stats panel" } }}
+        />
+      </Stack>
+      <Stack direction="row" alignItems="center" spacing={0.5}>
+        <Typography sx={toolbarLabelSx}>Review</Typography>
+        <Switch
+          size="small"
+          checked={Boolean(showReview)}
+          onChange={(_, checked) => setShowReview(checked)}
+          sx={switchStyles.small}
+          slotProps={{ input: { "aria-label": "Show review panel" } }}
         />
       </Stack>
       <Stack direction="row" alignItems="center" spacing={0.5}>
@@ -4735,16 +5345,34 @@ function Show1DWidget() {
         fontFamily: "system-ui, sans-serif",
       }}
     >
-      {controlsVisible && (
+      <output
+        ref={perfTelemetryRef}
+        data-testid="show1d-perf-telemetry"
+        aria-hidden="true"
+        style={{ display: "none" }}
+      />
+      {showControls && (
         <Box sx={{ px: 0, py: 0.75, bgcolor: themeColors.bg }}>
-          <Stack direction="row" alignItems="center" spacing={0.75} sx={{ minWidth: 0, mb: 0.75, px: 1.25 }}>
+          <Stack direction="row" alignItems="center" spacing={0.75} sx={{ minWidth: 0, mb: controlsVisible ? 0.75 : 0, px: 1.25 }}>
             <ShowChartIcon sx={{ fontSize: 18, color: themeColors.accent, flexShrink: 0 }} />
             {showTitle && (
               <Typography sx={{ fontWeight: 600, fontSize: 13, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                 {title || "Show1D"}
               </Typography>
             )}
+            <Box sx={{ flex: 1 }} />
+            <Button
+              size="small"
+              sx={compactButton}
+              onClick={() => setControlsCollapsed(!controlsCollapsed)}
+              aria-label={controlsCollapsed ? "Show controls" : "Hide controls"}
+              aria-pressed={!controlsCollapsed}
+              title={controlsCollapsed ? "Show controls" : "Hide controls"}
+            >
+              Controls
+            </Button>
           </Stack>
+          {controlsVisible && (
           <Box
             data-testid="show1d-toolbar-grid"
             sx={{
@@ -4798,6 +5426,7 @@ function Show1DWidget() {
               </Box>
             )}
           </Box>
+          )}
         </Box>
       )}
       <Box
@@ -4829,33 +5458,47 @@ function Show1DWidget() {
               onWheel={handleWheel}
               style={{ display: "block", width: "100%", height: "100%", cursor: "crosshair", touchAction: "none" }}
             />
-            {hover && (
-              <Box
-                sx={{
-                  position: "absolute",
-                  left: Math.min(Math.max(hover.px + 12, 8), Math.max(8, plotSize.width - 190)),
-                  top: Math.min(Math.max(hover.py - 12, 8), Math.max(8, plotSize.height - 70)),
-                  bgcolor: themeColors.bgAlt,
-                  color: themeColors.text,
-                  border: `1px solid ${themeColors.border}`,
-                  borderRadius: 1,
-                  px: 0.75,
-                  py: 0.5,
-                  fontSize: 11,
-                  pointerEvents: "none",
-                  boxShadow: "0 4px 14px rgba(0,0,0,0.18)",
-                  maxWidth: 180,
-                }}
-              >
-                <Typography sx={{ fontSize: 11, fontWeight: 600, color: cssColor(colors ?? [], hover.trace), lineHeight: 1.25 }}>
-                  {compactScienceLabel(labels?.[hover.trace] || `Trace ${hover.trace + 1}`)}
-                </Typography>
-                <Typography sx={{ fontSize: 11, lineHeight: 1.25 }}>
-                  {methodLabels?.[hover.point] ? shortMethodLabel(methodLabels[hover.point]) : axisPositionText(hover.x, xLabel, xUnit)}
-                </Typography>
-                <Typography sx={{ fontSize: 11, lineHeight: 1.25 }}>y {formatNumber(hover.y, 4)}</Typography>
-              </Box>
-            )}
+            <canvas
+              ref={plotHoverCanvasRef}
+              aria-hidden="true"
+              style={{ position: "absolute", inset: 0, width: "100%", height: "100%", display: "block", pointerEvents: "none" }}
+            />
+            <Box
+              data-testid="show1d-hover-readout"
+              aria-hidden={!hover}
+              sx={{
+                position: "absolute",
+                left: hover ? Math.min(Math.max(hover.px + 12, 8), Math.max(8, plotSize.width - 190)) : 8,
+                top: hover ? Math.min(Math.max(hover.py - 12, 8), Math.max(8, plotSize.height - 70)) : 8,
+                bgcolor: themeColors.bgAlt,
+                color: themeColors.text,
+                border: `1px solid ${themeColors.border}`,
+                borderRadius: 1,
+                px: 0.75,
+                py: 0.5,
+                fontSize: 11,
+                pointerEvents: "none",
+                boxShadow: "0 4px 14px rgba(0,0,0,0.18)",
+                width: 180,
+                maxWidth: "calc(100% - 16px)",
+                boxSizing: "border-box",
+                opacity: hover ? 1 : 0,
+                transform: hover ? "translateY(0)" : "translateY(2px)",
+                transition: "opacity 80ms linear, transform 80ms ease-out",
+                fontVariantNumeric: "tabular-nums",
+                willChange: "left, top, opacity, transform",
+              }}
+            >
+              <Typography sx={{ fontSize: 11, fontWeight: 600, color: cssColor(colors ?? [], hover?.trace ?? 0), lineHeight: 1.25, minHeight: 14 }}>
+                {hover ? compactScienceLabel(labels?.[hover.trace] || `Trace ${hover.trace + 1}`) : "\u00a0"}
+              </Typography>
+              <Typography sx={{ fontSize: 11, lineHeight: 1.25, minHeight: 14 }}>
+                {hover ? (methodLabels?.[hover.point] ? shortMethodLabel(methodLabels[hover.point]) : axisPositionText(hover.x, xLabel, xUnit)) : "\u00a0"}
+              </Typography>
+              <Typography sx={{ fontSize: 11, lineHeight: 1.25, minHeight: 14 }}>
+                {hover ? axisPositionText(hover.y, yLabel, yUnit) : "\u00a0"}
+              </Typography>
+            </Box>
           </Box>
           {showLegend && visibleTraceIndices.length > 0 && (
             <Stack
@@ -4948,6 +5591,7 @@ function Show1DWidget() {
               overscrollBehavior: "contain",
             }}
           >
+            {reviewPanel}
             {hasProfileImage && (
               <Box>
                 <Typography sx={{ fontSize: 12, fontWeight: 600, mb: 0.5 }}>Profile Image</Typography>
@@ -5067,6 +5711,8 @@ function Show1DWidget() {
                           fftPendingRef={snapshotFftPendingRef}
                           fftGpuRef={snapshotFftGpuRef}
                           fftCacheVersion={snapshotFftCacheVersion}
+                          fftGenerationRef={snapshotFftGenerationRef}
+                          fftGeneration={snapshotFftGeneration}
                           onImageViewChange={setSnapshotRealSpaceView}
                           onFftViewChange={setSnapshotFftView}
                           onProfileLineChange={setSnapshotProfileLine}
@@ -5228,38 +5874,44 @@ function Show1DWidget() {
                       </IconButton>
                     </Tooltip>
                   </Stack>
-                  <Typography sx={{ ...typography.label, color: themeColors.textMuted, flexShrink: 0 }}>fps</Typography>
-                  <Slider
-                    size="small"
-                    value={clampSnapshotFps(snapshotFps)}
-                    min={1}
-                    max={24}
-                    step={1}
-                    onChange={(_, value) => setSnapshotFps(clampSnapshotFps(Array.isArray(value) ? value[0] : value))}
-                    sx={{ ...sliderStyles.small, width: 54, flexShrink: 0, color: themeColors.accent }}
-                    aria-label="Snapshot playback frames per second"
-                    valueLabelDisplay="auto"
-                    valueLabelFormat={(value) => String(clampSnapshotFps(Number(value)))}
-                  />
-                  <Typography sx={{ ...typography.value, color: themeColors.textMuted, minWidth: 18, textAlign: "right", flexShrink: 0 }}>
-                    {clampSnapshotFps(snapshotFps)}
-                  </Typography>
-                  <Typography sx={{ ...typography.label, color: themeColors.textMuted, flexShrink: 0 }}>loop</Typography>
-                  <Switch
-                    size="small"
-                    checked={Boolean(snapshotLoop)}
-                    onChange={() => setSnapshotLoop(!snapshotLoop)}
-                    sx={{ ...switchStyles.small, flexShrink: 0 }}
-                    slotProps={{ input: { "aria-label": "Toggle loop playback" } }}
-                  />
-                  <Typography sx={{ ...typography.label, color: themeColors.textMuted, flexShrink: 0 }}>bounce</Typography>
-                  <Switch
-                    size="small"
-                    checked={Boolean(snapshotBounce)}
-                    onChange={() => setSnapshotBounce(!snapshotBounce)}
-                    sx={{ ...switchStyles.small, flexShrink: 0 }}
-                    slotProps={{ input: { "aria-label": "Toggle bounce playback" } }}
-                  />
+                  <Stack direction="row" alignItems="center" spacing={0.5} sx={{ flexShrink: 0 }}>
+                    <Typography sx={{ ...typography.label, color: themeColors.textMuted }}>fps</Typography>
+                    <Slider
+                      size="small"
+                      value={clampSnapshotFps(snapshotFps)}
+                      min={1}
+                      max={24}
+                      step={1}
+                      onChange={(_, value) => setSnapshotFps(clampSnapshotFps(Array.isArray(value) ? value[0] : value))}
+                      sx={{ ...sliderStyles.small, width: 54, flexShrink: 0, color: themeColors.accent }}
+                      aria-label="Snapshot playback frames per second"
+                      valueLabelDisplay="auto"
+                      valueLabelFormat={(value) => String(clampSnapshotFps(Number(value)))}
+                    />
+                    <Typography sx={{ ...typography.value, color: themeColors.textMuted, minWidth: 18, textAlign: "right" }}>
+                      {clampSnapshotFps(snapshotFps)}
+                    </Typography>
+                  </Stack>
+                  <Stack direction="row" alignItems="center" spacing={0.5} sx={{ flexShrink: 0 }}>
+                    <Typography sx={{ ...typography.label, color: themeColors.textMuted }}>Loop</Typography>
+                    <Switch
+                      size="small"
+                      checked={Boolean(snapshotLoop)}
+                      onChange={() => setSnapshotLoop(!snapshotLoop)}
+                      sx={switchStyles.small}
+                      slotProps={{ input: { "aria-label": "Toggle loop playback" } }}
+                    />
+                  </Stack>
+                  <Stack direction="row" alignItems="center" spacing={0.5} sx={{ flexShrink: 0 }}>
+                    <Typography sx={{ ...typography.label, color: themeColors.textMuted }}>Bounce</Typography>
+                    <Switch
+                      size="small"
+                      checked={Boolean(snapshotBounce)}
+                      onChange={() => setSnapshotBounce(!snapshotBounce)}
+                      sx={switchStyles.small}
+                      slotProps={{ input: { "aria-label": "Toggle bounce playback" } }}
+                    />
+                  </Stack>
                   <Slider
                     size="small"
                     value={Math.max(0, selectedGroup)}
@@ -5303,7 +5955,7 @@ function Show1DWidget() {
                     </Box>
                   </IconButton>
                 </Box>
-                {selectedSnapshot >= 0 && (
+                {showSnapshotHistogram && selectedSnapshot >= 0 && (
                   <Box sx={{ mb: 0.75, width: "fit-content", maxWidth: "100%", alignSelf: "flex-start" }}>
                     <MiniHistogram
                       bins={snapshotHistogramBins}
@@ -5320,7 +5972,7 @@ function Show1DWidget() {
                       <Typography sx={{ ...typography.label, color: themeColors.textMuted, flexShrink: 0 }}>cmap</Typography>
                       <Select
                         size="small"
-                        value={COLORMAPS[imageCmap] ? imageCmap : "cividis"}
+                        value={COLORMAPS[imageCmap] ? imageCmap : "viridis"}
                         onChange={(event) => setImageCmap(event.target.value)}
                         sx={{ ...themedSelect, minWidth: 65, fontSize: 10 }}
                         MenuProps={themedMenuProps}

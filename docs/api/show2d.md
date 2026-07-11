@@ -1,8 +1,8 @@
 # Show2D
 
-One or many 2D images with contrast control, FFT, ROIs, line profiles, and a
-calibrated scale bar. See the [Show2D tutorial](../tutorials/show2d) for a
-worked example.
+One or many 2D images, including gallery panels with independent local slice
+stacks, plus contrast control, FFT, ROIs, line profiles, and a calibrated scale
+bar. See the [Show2D tutorial](../tutorials/show2d) for worked examples.
 
 ## Reference
 
@@ -27,6 +27,7 @@ no console error, no NaN frame).
 | FFT toggle | `show_fft` | Canvas shows the power spectrum; lattice spots appear |
 | FFT window toggle | `fft_window` | Apodization on/off (ringing at edges differs) |
 | FFT quality labels | `fft_metrics` | Compact in-panel label reports FFT sharpness, peak count, and peak SNR from the cached FFT magnitude |
+| FFT zoom / pan | Browser-local per FFT panel; FFT `Link Zoom` and `Link Pan` controls | Wheel or pinch zoom updates an always-visible `N.N×` badge in that FFT panel; reset returns Show2D's `2.0×` FFT default |
 | Viewer chrome preset | `ui_mode` plus explicit `show_*` kwargs | Applies shared display presets; see [Viewer UI controls](viewer-ui) |
 | Control visibility | `show_controls`, `controls_collapsed`; `collapse_controls()`, `expand_controls()`, `toggle_controls()` | Permanently remove controls or temporarily collapse them behind the top GUI toggle |
 | Title visibility | `show_title` | Top title row shows/hides |
@@ -38,7 +39,7 @@ no console error, no NaN frame).
 | Smooth toggle | `smooth` | Bilinear vs nearest sampling |
 | ROI add / drag | `roi_active`, `roi_list`, `roi_selected_idx` | Region overlay; stats panel reports the ROI |
 | Gallery select | `selected_idx` | Highlights the active panel |
-| Local stack slider / play | `panel_frame_indices`, `panel_frame_counts`; `set_panel_frame()` | Scrubs only the selected 3D list item; static neighboring panels do not move |
+| Local stack slider / play | `panel_frame_indices`, `panel_frame_counts`, `panel_playback_fps`; `set_panel_frame()` | Every grayscale 3D list item gets independent slider/play controls; changing one panel does not move another, and constructor-configured playback speed adds no toolbar clutter |
 | Gallery page controls | `page_idx`, `n_pages`, `panels_per_page`, `page_labels`, `page_starred` | Switch, star, or play through panel pages without changing the source stack |
 | Panel reorder | `panel_order`; `set_panel_order()`, `move_panel()`, `reset_panel_order()` | Reorders gallery display without changing source data, labels, stars, or hidden state |
 | Diff mode | `diff_mode`, `diff_reference` | Panels render as difference vs the reference |
@@ -108,9 +109,17 @@ magnitude already used for rendering, so the label does not trigger a second
 FFT. Set `fft_metrics=False` when a clean FFT image is more important than the
 readout.
 
-The first FFT for an image or ROI may take a moment on large data. After that,
-Show2D reuses the cached FFT magnitude for redraws, zoom/pan, contrast changes,
-and metric labels.
+The first FFT for an image, local panel frame, ROI, or window configuration may
+take a moment on large data. After that, Show2D reuses that bounded cache entry
+for redraws, zoom/pan, contrast changes, metric labels, and return visits to the
+same slice. During a first-time slice computation, the previous valid FFT stays
+visible instead of flashing to a dark loading panel.
+
+Each interactive FFT panel also carries its own bottom-left zoom multiplier.
+It starts at `2.0×`, follows wheel and touch-pinch zoom immediately, and returns
+to `2.0×` on double-click, double-tap, or Reset. In a gallery, unlinked FFTs
+report independent values; enabling FFT `Link Zoom` makes their values move
+together without changing the real-space zoom.
 
 ```python
 w = Show2D(images, labels=["raw", "filtered", "residual"])
@@ -150,15 +159,56 @@ w.set_image(
 )
 ```
 
-## Mixed static and local stack panels
+## Independent local stack panels
 
-A bare 3D array still means a static gallery of `N` images. To put an
-independent stack inside one gallery panel, pass a list whose item is shaped
-`(frames, rows, cols)`. Other list items can remain ordinary 2D images:
+A bare 3D array still means a static gallery of `N` images. To give gallery
+panels their own frame or slice axes, pass a Python list whose 3D items are each
+shaped `(frames, rows, cols)`. Every grayscale 3D list item becomes one panel
+with its own slider, play/pause control, frame count, and current frame. Counts
+may differ between panels. RGB(A) list items keep the color-image behavior
+described in the constructor reference.
+
+This is useful for tomography or multislice studies that produce several
+reconstruction volumes. The scientist can keep four methods, regularization
+settings, or slice thicknesses side by side, stop each one at the depth where a
+feature or artifact is clearest, and retain linked spatial context without
+forcing all panels onto one global slice index:
 
 ```python
 from quantem.widget import Show2D
 
+reconstructions = [
+    recon_8_slices_20A,
+    recon_16_slices_10A,
+    recon_regularized,
+    recon_alternative,
+]
+
+w = Show2D(
+    reconstructions,
+    labels=[
+        "8 slices x 20 A",
+        "16 slices x 10 A",
+        "regularized",
+        "alternative",
+    ],
+    panel_frame_indices=[3, 7, -1, 0],
+    panel_playback_fps=4,
+    ncols=2,
+    link_zoom=True,
+    link_pan=True,
+)
+w.set_panel_frame("16 slices x 10 A", 8)
+w
+```
+
+Use a list even when all reconstructions happen to have the same slice count;
+the outer list is what declares independent local stacks. Use Show3D instead
+when all panels should advance together on one global frame or slice axis.
+
+The list may also mix stack panels with ordinary 2D images:
+
+```python
 w = Show2D(
     [eds_sum_map, haadf_stack, ti_map, o_map],
     labels=["EDS sum", "HAADF", "Ti", "O"],
@@ -169,15 +219,23 @@ w = Show2D(
 w
 ```
 
-Only the HAADF panel gets an in-panel slider and play button. Its frame index
-is independent of every other panel and remains keyed to that source panel
-when panels are hidden or reordered. Click the stack panel and use the left or
-right arrow key to scrub it. From Python, use
-`w.set_panel_frame("HAADF", -1)`.
+Only the HAADF panel gets an in-panel slider and play button. Each local frame
+index remains keyed to its source panel when panels are hidden or reordered.
+Click a stack panel and use the left or right arrow key to scrub it. From
+Python, use `w.set_panel_frame("HAADF", -1)`.
 
-`state_dict()` records `panel_frame_indices`, and both exact-float32 and
-quantized-uint8 HTML exports contain every local frame. For an interactively
-restored notebook output, construct with `save_state=True`; the default
+Set `panel_playback_fps` when constructing the widget to choose the cadence for
+all local-stack play buttons without adding another compact control. The
+default is 10 fps; values above the 30 fps browser budget are capped. The
+setting is saved in widget state and carried into standalone HTML exports,
+while the per-panel playing/paused state remains browser-local so reopening a
+report does not start playback unexpectedly.
+
+The active panel's histogram, stats, and FFT follow its current local frame;
+scrubbing it does not change neighboring panels. `state_dict()` records
+`panel_frame_indices`, and single HTML exports using either `encoding="full"`
+or `encoding="uint8"` contain every local frame. For an interactively restored
+notebook output, construct with `save_state=True`; the default
 `save_state=False` deliberately stores only a compact static preview rather
 than embedding the stack payload in the notebook.
 
@@ -212,6 +270,11 @@ w
 
 `watch=True` is the default. Pass `watch=False` for a fixed folder or a
 reproducible script that should update only when you call `poll_folder()`.
+An empty watched folder remains mounted with a waiting view and becomes the
+real gallery in the same widget model when its first stable file arrives.
+The compact title-area badge reports `Watching`, `Updating`, `Waiting for file
+completion`, `Watch error`, or `Stopped`; fixed `watch=False` snapshots do not
+show the badge.
 
 ```python
 new_panels = w.poll_folder()       # scan now; return newly appended indices
@@ -223,13 +286,19 @@ w.close()                         # stop watching and close the widget
 Folder watching is append-only. A file already represented in the gallery is
 not duplicated, an incomplete file is deferred until a later poll, and removing
 or rewriting a source file does not silently remove or replace an existing
-panel. Close long-running widgets when the notebook no longer needs them.
+panel. An incompatible shape is reported without blocking a later compatible
+file. Close long-running widgets when the notebook no longer needs them.
 
 `Show2D.from_folder(...)` reads the scientific image data at its source
 resolution. It is different from `ShowFolder`, which intentionally uses small
 cached thumbnails for fast folder discovery and selection. Use `ShowFolder`
 to decide what to open; use `Show2D.from_folder(...)` when the displayed pixel
 data and live panel append behavior matter.
+
+Maintainer real-time signoff follows
+[S2D-18](../maintainer/storyboard-show2d.md#s2d-18-watch-a-live-emd-folder-in-place):
+add genuine EMD files after the widget is visibly mounted and verify the same
+browser canvas paints each full-resolution panel.
 
 ## Paged galleries
 

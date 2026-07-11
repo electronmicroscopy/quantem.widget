@@ -178,6 +178,13 @@ Whenever an agent finishes a concrete task, the final update must clearly state:
   `index.html` path so the user can inspect it directly. Prefer a local
   browser-openable URL when a server is running.
 
+For every recommended next step or action item, state the decision context as
+a paired **Problem** and **Action**. Keep **Problem** to one sentence that
+explains what is wrong, missing, or uncertain, then use **Action** to describe
+the concrete next step. Apply this pairing to each action item so the user can
+review recent handoffs and decide priorities without reconstructing why an
+action was proposed.
+
 For UI work, open the latest review target in the Codex in-app browser before
 handoff; do not only print the URL. If browser control is unavailable, update
 the URL already open in the in-app browser to serve the latest artifact and

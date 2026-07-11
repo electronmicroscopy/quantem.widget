@@ -4810,7 +4810,7 @@ function Show3DSlices() {
   // Render
   // -------------------------------------------------------------------------
   return (
-    <Box className="show3dslices-root" tabIndex={0} onKeyDown={handleKeyDown} sx={{ ...container.root, position: "relative", bgcolor: tc.bg, color: tc.text, outline: "none", "&:focus": { outline: "2px solid #0af", outlineOffset: 2 }, "& canvas": { display: "block" } }}>
+    <Box className="show3dslices-root" tabIndex={0} onKeyDown={handleKeyDown} sx={{ ...container.root, position: "relative", bgcolor: tc.bg, color: tc.text, outline: "none", "&:focus::after": { content: '""', position: "absolute", inset: 0, pointerEvents: "none", zIndex: 20, boxShadow: "inset 0 0 0 2px #0af" }, "& canvas": { display: "block" } }}>
       {/* 3D volume on the LEFT, slice toolbar + projected slice panels on the RIGHT.
           Side-by-side layout keeps the whole widget within a 13" laptop viewport. */}
       <Box sx={{ display: "flex", flexDirection: { xs: "column", md: "row" }, flexWrap: "wrap", alignItems: "flex-start", gap: `${SPACING.SM}px`, width: "100%" }}>
