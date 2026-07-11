@@ -25,7 +25,7 @@ python -c "import quantem.widget; print(quantem.widget.__version__)"
 
 | Widget | Input | Shows |
 |---|---|---|
-| `Show1D` | 1D trace / stack / live monitor | line plot with stats, snapshots, and live append |
+| `Show1D` | 1D trace / stack / live monitor with optional linked images | scientific traces, stats, jump markers, snapshots, playback, and live append |
 | `Show2D` | 2D image or stack | image + contrast, FFT, line profiles, scale bar |
 | `Show3D` | 3D stack | scrub / play through frames |
 | `Show3DSlices` | 3D volume | orthogonal-slice viewer |
@@ -41,6 +41,7 @@ from quantem.widget import (
     Show4DSTEM, ShowDiffraction, ShowEDS, ShowFolder,
 )
 
+Show1D(np.random.rand(100), x_label="frame", y_label="defocus", y_unit="nm")
 Show2D(np.random.rand(512, 512))
 Show4DSTEM(np.random.rand(64, 64, 128, 128))
 ShowEDS(np.random.poisson(2, (64, 64, 256)).astype("uint16"))
