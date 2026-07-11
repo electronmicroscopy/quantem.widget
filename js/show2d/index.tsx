@@ -1119,10 +1119,22 @@ function Show2D() {
   // Chemistry-on-structure blend panel (underlay=True): live sliders re-blend
   // in Python; commit on release so dragging stays smooth.
   const [underlayActive] = useModelState<boolean>("underlay");
+  const [underlayMode] = useModelState<string>("underlay_mode");
   const [underlayAlpha, setUnderlayAlpha] = useModelState<number>("underlay_alpha");
   const [underlayGain, setUnderlayGain] = useModelState<number>("underlay_haadf_gain");
+  const [displayGamma, setDisplayGamma] = useModelState<number>("display_gamma");
+  const [stretchPercentiles, setStretchPercentiles] = useModelState<number[]>("stretch_percentiles");
+  const [dualGain, setDualGain] = useModelState<number[]>("dual_gain");
   const [alphaDraft, setAlphaDraft] = React.useState<number | null>(null);
   const [gainDraft, setGainDraft] = React.useState<number | null>(null);
+  const [gammaDraft, setGammaDraft] = React.useState<number | null>(null);
+  const [stretchDraft, setStretchDraft] = React.useState<number[] | null>(null);
+  const [dualGainDraft, setDualGainDraft] = React.useState<number[] | null>(null);
+  const isDualUnderlay = String(underlayMode) === "dual";
+  const stretchValue = stretchDraft ?? (Array.isArray(stretchPercentiles) && stretchPercentiles.length === 2
+    ? stretchPercentiles : [4, 99]);
+  const dualGainValue = dualGainDraft ?? (Array.isArray(dualGain) && dualGain.length === 2
+    ? dualGain : [1, 1]);
 
   // Scale bar
   const [pixelSize] = useModelState<number>("pixel_size");
@@ -7520,31 +7532,91 @@ function Show2D() {
                       )}
                     </Box>
                   )}
-                  {/* Row 4 (underlay only): chemistry-on-HAADF blend sliders */}
+                  {/* Row 4 (underlay only): Fig4 blend / stretch / composite knobs.
+                      HAADF mode shows blend opacity, HAADF ghost gain and the
+                      presence gamma; dual mode swaps those for two per-channel
+                      gains. The map stretch percentiles apply in both modes. */}
                   {underlayActive && (
                     <Box sx={{ ...controlRow, ...mobileControlRowSx, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, opacity: 1, pointerEvents: "auto" }}>
+                      {!isDualUnderlay && (
+                        <>
+                          <Box sx={controlPairSx}>
+                            <Typography sx={{ ...typography.label, fontSize: 10 }} title="Chemistry opacity in the map-on-HAADF blend panel.">Blend {(alphaDraft ?? Number(underlayAlpha ?? 0.95)).toFixed(2)}</Typography>
+                            <Slider
+                              value={alphaDraft ?? Number(underlayAlpha ?? 0.95)}
+                              min={0} max={1} step={0.05}
+                              onChange={(_, v) => setAlphaDraft(v as number)}
+                              onChangeCommitted={(_, v) => { setUnderlayAlpha(v as number); setAlphaDraft(null); }}
+                              size="small" sx={{ ...sliderStyles.small, width: 60 }}
+                              aria-label="Underlay blend opacity"
+                            />
+                          </Box>
+                          <Box sx={controlPairSx}>
+                            <Typography sx={{ ...typography.label, fontSize: 10 }} title="Strength of the dim HAADF lattice ghost where the map is empty.">HAADF {(gainDraft ?? Number(underlayGain ?? 0.35)).toFixed(2)}</Typography>
+                            <Slider
+                              value={gainDraft ?? Number(underlayGain ?? 0.35)}
+                              min={0} max={1} step={0.05}
+                              onChange={(_, v) => setGainDraft(v as number)}
+                              onChangeCommitted={(_, v) => { setUnderlayGain(v as number); setGainDraft(null); }}
+                              size="small" sx={{ ...sliderStyles.small, width: 60 }}
+                              aria-label="Underlay HAADF ghost gain"
+                            />
+                          </Box>
+                          <Box sx={controlPairSx}>
+                            <Typography sx={{ ...typography.label, fontSize: 10 }} title="Presence gamma: below 1 lifts mid-count columns into color, above 1 keeps only the brightest lit.">Gamma {(gammaDraft ?? Number(displayGamma ?? 0.75)).toFixed(2)}</Typography>
+                            <Slider
+                              value={gammaDraft ?? Number(displayGamma ?? 0.75)}
+                              min={0.3} max={1.5} step={0.05}
+                              onChange={(_, v) => setGammaDraft(v as number)}
+                              onChangeCommitted={(_, v) => { setDisplayGamma(v as number); setGammaDraft(null); }}
+                              size="small" sx={{ ...sliderStyles.small, width: 60 }}
+                              aria-label="Underlay presence gamma"
+                            />
+                          </Box>
+                        </>
+                      )}
                       <Box sx={controlPairSx}>
-                        <Typography sx={{ ...typography.label, fontSize: 10 }} title="Chemistry opacity in the map-on-HAADF blend panel.">Blend {(alphaDraft ?? Number(underlayAlpha ?? 0.95)).toFixed(2)}</Typography>
+                        <Typography sx={{ ...typography.label, fontSize: 10 }} title="Low/high display-stretch percentiles applied to the element map(s).">Stretch {stretchValue[0].toFixed(0)}–{stretchValue[1].toFixed(0)}%</Typography>
                         <Slider
-                          value={alphaDraft ?? Number(underlayAlpha ?? 0.95)}
-                          min={0} max={1} step={0.05}
-                          onChange={(_, v) => setAlphaDraft(v as number)}
-                          onChangeCommitted={(_, v) => { setUnderlayAlpha(v as number); setAlphaDraft(null); }}
-                          size="small" sx={{ ...sliderStyles.small, width: 60 }}
-                          aria-label="Underlay blend opacity"
+                          value={stretchValue}
+                          min={0} max={100} step={1}
+                          onChange={(_, v) => setStretchDraft(v as number[])}
+                          onChangeCommitted={(_, v) => {
+                            let [lo, hi] = v as number[];
+                            if (lo >= hi) lo = Math.max(0, hi - 1);
+                            setStretchPercentiles([lo, hi]);
+                            setStretchDraft(null);
+                          }}
+                          size="small" sx={{ ...sliderStyles.small, width: 80 }}
+                          aria-label="Underlay stretch percentiles"
                         />
                       </Box>
-                      <Box sx={controlPairSx}>
-                        <Typography sx={{ ...typography.label, fontSize: 10 }} title="Strength of the dim HAADF lattice ghost where the map is empty.">HAADF {(gainDraft ?? Number(underlayGain ?? 0.35)).toFixed(2)}</Typography>
-                        <Slider
-                          value={gainDraft ?? Number(underlayGain ?? 0.35)}
-                          min={0} max={1} step={0.05}
-                          onChange={(_, v) => setGainDraft(v as number)}
-                          onChangeCommitted={(_, v) => { setUnderlayGain(v as number); setGainDraft(null); }}
-                          size="small" sx={{ ...sliderStyles.small, width: 60 }}
-                          aria-label="Underlay HAADF ghost gain"
-                        />
-                      </Box>
+                      {isDualUnderlay && (
+                        <>
+                          <Box sx={controlPairSx}>
+                            <Typography sx={{ ...typography.label, fontSize: 10 }} title="Brightness gain for map A (magenta channel).">A gain {dualGainValue[0].toFixed(2)}</Typography>
+                            <Slider
+                              value={dualGainValue[0]}
+                              min={0} max={2} step={0.1}
+                              onChange={(_, v) => setDualGainDraft([v as number, dualGainValue[1]])}
+                              onChangeCommitted={(_, v) => { setDualGain([v as number, dualGainValue[1]]); setDualGainDraft(null); }}
+                              size="small" sx={{ ...sliderStyles.small, width: 60 }}
+                              aria-label="Dual composite map A gain"
+                            />
+                          </Box>
+                          <Box sx={controlPairSx}>
+                            <Typography sx={{ ...typography.label, fontSize: 10 }} title="Brightness gain for map B (green channel).">B gain {dualGainValue[1].toFixed(2)}</Typography>
+                            <Slider
+                              value={dualGainValue[1]}
+                              min={0} max={2} step={0.1}
+                              onChange={(_, v) => setDualGainDraft([dualGainValue[0], v as number])}
+                              onChangeCommitted={(_, v) => { setDualGain([dualGainValue[0], v as number]); setDualGainDraft(null); }}
+                              size="small" sx={{ ...sliderStyles.small, width: 60 }}
+                              aria-label="Dual composite map B gain"
+                            />
+                          </Box>
+                        </>
+                      )}
                     </Box>
                   )}
                 </Box>

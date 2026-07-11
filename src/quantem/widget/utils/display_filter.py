@@ -324,6 +324,7 @@ def blend_map_on_haadf(
     *,
     alpha: float = 0.95,
     haadf_gain: float = 0.35,
+    gamma: float = 0.75,
     cmap=None,
 ) -> np.ndarray:
     """HAADF-modulated chemistry: bright lattice sites go colored, not white.
@@ -345,6 +346,10 @@ def blend_map_on_haadf(
         Overall chemistry opacity in [0, 1].
     haadf_gain
         Strength of the dim structural ghost in map-empty regions, in [0, 1].
+    gamma
+        Presence exponent applied to the normalized map before colorizing, > 0.
+        Values below 1 lift mid-count columns into color (the drift-paper Fig4
+        default is 0.75); values above 1 keep only the brightest columns lit.
     cmap
         Matplotlib colormap for the map hue. Default: :func:`magenta_cmap`.
 
@@ -369,7 +374,7 @@ def blend_map_on_haadf(
         cmap = magenta_cmap()
     color = np.asarray(cmap(map_01)[..., :3], dtype=np.float32)
     # Map presence (slight gamma so mid counts still colorize columns)
-    presence = np.power(map_01, 0.75) * opacity
+    presence = np.power(map_01, max(float(gamma), 1e-6)) * opacity
     # Structure: never a pure white base; HAADF only brightens the color
     structure = 0.30 + 0.70 * haadf_01
     chemistry = color * (presence * structure)[..., None]
