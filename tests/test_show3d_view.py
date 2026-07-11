@@ -1,6 +1,7 @@
 """Show3D data-replacement invariants for kernel-less viewing surfaces."""
 
 import numpy as np
+import pytest
 
 from quantem.widget import Show3D
 
@@ -98,3 +99,45 @@ def test_from_rgb_forces_color_the_heuristic_cannot_call():
     ambiguous_gray = np.random.rand(3, 8, 3).astype("float32")  # trailing 3
     gray = Show3D(ambiguous_gray, rgb=False)
     assert not gray.is_rgb and gray._data.shape == (3, 8, 3)
+
+
+def test_rgb_config_rotation_keeps_true_color():
+    # A scientist loads a color figure with a recon rotation. Rotation used to
+    # be blocked for RGB; now each channel rotates together, so the figure keeps
+    # its true color and a re-derived luminance plane drives stats.
+    rgb = np.zeros((3, 20, 20, 3), dtype=np.float32)
+    rgb[:, 5:15, 9:11, 0] = 1.0  # a red vertical bar
+    widget = Show3D(rgb, rotation_deg=90, apply_config_transforms=True)
+    assert widget.is_rgb
+    assert widget._rgb_data.shape == (3, 20, 20, 3)
+    assert widget._data.shape == (3, 20, 20)  # luminance, re-derived after rotation
+    assert widget._rgb_data[0][..., 0].max() > 0.9  # red survived the rotation
+
+
+def test_from_figure_gallery_labels_and_unifies_color():
+    # A scientist collects candidate figures to pick the best. A dict keeps the
+    # names; a mix of grayscale and color is unified to one true-color viewer.
+    sweep = {
+        "lambda 0.3": np.random.rand(16, 16).astype("float32"),
+        "lambda 3": np.random.rand(16, 16).astype("float32"),
+    }
+    gallery = Show3D.from_figure_gallery(sweep, title="sweep")
+    assert gallery.n_slices == 2
+    assert list(gallery.labels) == ["lambda 0.3", "lambda 3"]
+
+    gray_frame = np.random.rand(16, 16).astype("float32")
+    color_frame = np.random.rand(16, 16, 3).astype("float32")
+    mixed = Show3D.from_figure_gallery([gray_frame, color_frame], labels=["gray", "color"])
+    assert mixed.is_rgb and mixed.n_slices == 2
+
+
+def test_export_html_refuses_oversized_single_file(tmp_path):
+    # A scientist exports a big float32 color movie. A single HTML that large
+    # fails to open under Chrome file://, so export_html refuses and names the
+    # smaller-encoding options instead of writing a doomed file.
+    widget = Show3D(np.random.rand(20, 128, 128, 3).astype("float32"), verbose=False)
+    with pytest.raises(ValueError, match="safe limit"):
+        widget.export_html(tmp_path / "nope.html", max_mb=5)
+    # the smaller uint8 encoding gets under the same limit and writes fine
+    out = widget.export_html(tmp_path / "ok.html", encoding="uint8", max_mb=5)
+    assert out.exists()

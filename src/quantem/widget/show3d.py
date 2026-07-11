@@ -1655,6 +1655,86 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         return cls(stack, rgb=True, **kwargs)
 
     @classmethod
+    def from_figure_gallery(
+        cls,
+        figures: "Mapping[str, np.ndarray] | Sequence[np.ndarray]",
+        *,
+        labels: Sequence[str] | None = None,
+        **kwargs,
+    ) -> Self:
+        """Browse a set of named result figures as one labeled, scrubbable stack.
+
+        Built for figure selection - hand it the candidate figures (a lambda
+        sweep, competing reconstructions, before/after variants) and scrub or
+        keyboard through them to pick the best, with each figure's name in the
+        frame label. Grayscale and true-color figures can be mixed: if any
+        figure is color, all are promoted to RGB so one viewer shows them
+        together. Every figure must share the same height and width.
+
+        Parameters
+        ----------
+        figures : mapping or sequence of np.ndarray
+            A ``{label: image}`` mapping (labels come from the keys), or a
+            sequence of images. Each image is ``(H, W)`` grayscale or
+            ``(H, W, 3)`` / ``(H, W, 4)`` color.
+        labels : sequence of str, optional
+            Frame labels when ``figures`` is a sequence. Defaults to
+            ``figure 1``, ``figure 2``, ... .
+        **kwargs
+            Any other :class:`Show3D` option (``title``, ``fps``, ``cmap``, ...).
+
+        Returns
+        -------
+        Show3D
+            A viewer scrubbing through the labeled figures.
+
+        Raises
+        ------
+        ValueError
+            If ``figures`` is empty, or the figures do not all share one
+            ``(H, W)``.
+
+        Examples
+        --------
+        >>> Show3D.from_figure_gallery({"lambda 0.3": fig_a, "lambda 3": fig_b})  # doctest: +SKIP
+        >>> Show3D.from_figure_gallery([recon_1, recon_2], labels=["adam", "lbfgs"])  # doctest: +SKIP
+        """
+        if isinstance(figures, Mapping):
+            labels = list(figures.keys())
+            images = [to_numpy(v) for v in figures.values()]
+        else:
+            images = [to_numpy(v) for v in figures]
+        if not images:
+            raise ValueError("from_figure_gallery needs at least one figure; got an empty collection.")
+        if labels is None:
+            labels = [f"figure {i + 1}" for i in range(len(images))]
+        elif len(labels) != len(images):
+            raise ValueError(
+                f"labels has {len(labels)} entries but there are {len(images)} figures; "
+                "pass one label per figure or omit labels."
+            )
+        spatial = {img.shape[:2] for img in images}
+        if len(spatial) != 1:
+            raise ValueError(
+                f"from_figure_gallery needs every figure at one (H, W); got shapes "
+                f"{sorted(img.shape for img in images)}. Crop or pad them to match first."
+            )
+        any_color = any(img.ndim == 3 and img.shape[-1] in (3, 4) for img in images)
+        if any_color:
+            promoted = []
+            for img in images:
+                if img.ndim == 2:  # grayscale figure -> gray RGB so it stacks with color
+                    lo, hi = float(img.min()), float(img.max())
+                    norm = (img - lo) / (hi - lo) if hi > lo else np.zeros_like(img, dtype=np.float32)
+                    promoted.append(np.repeat(norm[..., None].astype(np.float32), 3, axis=-1))
+                else:
+                    promoted.append(img[..., :3])
+            stack = np.stack(promoted, axis=0)
+            return cls(stack, labels=list(labels), rgb=True, **kwargs)
+        stack = np.stack(images, axis=0)
+        return cls(stack, labels=list(labels), rgb=False, **kwargs)
+
+    @classmethod
     def from_gif(
         cls,
         path: str | pathlib.Path,
@@ -2127,9 +2207,21 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         config_rotation = _normalize_rotation_deg(rotation_deg) if rotation_deg is not None else 0.0
 
         def _apply_config_transform(arr):
-            """Rotate then post-crop a (N, H, W) stack per config / explicit args."""
+            """Rotate then post-crop a (N, H, W) or RGB (N, H, W, 3) stack.
+
+            RGB rotates each color channel with the same geometry so a rotated
+            color figure keeps its true color (the underlying rotate helper is
+            2D-plane only).
+            """
             if config_rotation:
-                arr = _rotate_stack_inplane(arr, config_rotation)
+                if arr.ndim == 4:
+                    arr = np.stack(
+                        [_rotate_stack_inplane(arr[..., c], config_rotation)
+                         for c in range(arr.shape[-1])],
+                        axis=-1,
+                    )
+                else:
+                    arr = _rotate_stack_inplane(arr, config_rotation)
             if post_crop_was_set:
                 crop_spec = post_crop
             elif config_data is not None and apply_config_transforms:
@@ -2231,13 +2323,9 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 data = data / 255.0
             data = np.clip(data, 0.0, 1.0)
         data = _pad_stack(_crop_stack(data, self._crop), self._padding, self._pad_mode)
-        if is_rgb and config_rotation:
-            raise ValueError(
-                "Show3D RGB stacks do not support config in-plane rotation yet; "
-                "pass rotation_deg=0 / apply_config_transforms=False for color PNGs."
-            )
-        if not is_rgb:
-            data = _apply_config_transform(data)
+        # Rotation/post-crop applies to color and grayscale alike; the transform
+        # rotates each RGB channel so true color survives (previously blocked).
+        data = _apply_config_transform(data)
         self.is_rgb = bool(is_rgb)
         data = self._establish_rgb_luminance(data, is_rgb=is_rgb)
 
@@ -3308,6 +3396,25 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         """
         save_state_file(path, "Show3D", self.state_dict())
 
+    # A single HTML much larger than this often fails to open under Chrome
+    # file:// (the ~700 MB float32 RGB movie is the motivating case). export_html
+    # refuses past it and names the smaller-encoding options; raise it explicitly
+    # to force a large single-file export.
+    _HTML_EXPORT_SAFE_MB = 80.0
+
+    def _estimate_html_export_mb(self, *, quantized: bool, downsample: int) -> float:
+        """Rough MB an embedded single-file HTML would occupy before writing.
+
+        The stack bytes dominate: base64 in the embedded widget state inflates
+        them ~4/3, plus a small fixed runtime. Good enough to refuse a doomed
+        export before spending minutes building it.
+        """
+        source = self._offline_pack_source()
+        elements = int(np.prod(source.shape)) // max(1, int(downsample) ** 2)
+        bytes_per = 1 if quantized else 4
+        payload_mb = elements * bytes_per * (4.0 / 3.0) / (1024 * 1024)
+        return payload_mb + 2.0  # ipywidgets html-manager runtime
+
     def export_html(
         self,
         path: str | pathlib.Path | None = None,
@@ -3317,6 +3424,7 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         encoding: str = "full",
         downsample: int | None = None,
         quantized: bool | None = None,
+        max_mb: float | None = _HTML_EXPORT_SAFE_MB,
     ) -> pathlib.Path:
         """Write a standalone HTML viewer for sharing.
 
@@ -3358,6 +3466,20 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             downsample=downsample,
             quantized=quantized,
         )
+        # Refuse a single-file export that would be too big to open reliably
+        # (the 700 MB float32 RGB movie is the motivating case). Name the way
+        # out: uint8 encoding, spatial downsample, or an explicit max_mb.
+        if max_mb is not None:
+            estimate_mb = self._estimate_html_export_mb(quantized=quantized, downsample=downsample_factor)
+            if estimate_mb > float(max_mb):
+                uint8_mb = self._estimate_html_export_mb(quantized=True, downsample=downsample_factor)
+                raise ValueError(
+                    f"This export would embed about {estimate_mb:.0f} MB into one HTML file, "
+                    f"above the {float(max_mb):.0f} MB safe limit (large single-file exports often "
+                    f"fail to open under Chrome file://). Options: encoding='uint8' "
+                    f"(about {uint8_mb:.0f} MB), downsample=2 or 4 to shrink spatially, or pass "
+                    f"max_mb={estimate_mb:.0f} to force this size."
+                )
         # RGB figure stacks: prefer uint8 offline (display-ready [0,1] → 0–255).
         # Float32 RGB of many full-panel figures is hundreds of MB and often fails
         # to open under file:// in Chrome.
