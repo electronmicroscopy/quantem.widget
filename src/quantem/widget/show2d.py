@@ -712,6 +712,14 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     spatial_bins = traitlets.List(traitlets.Int(), default_value=[]).tag(sync=True)
     filter_per_panel = traitlets.Bool(True).tag(sync=True)
     display_filter_banner = traitlets.Unicode("").tag(sync=True)
+    # Browser-side filter negotiation: JS sets this True when a real (non
+    # software) WebGPU adapter is available. Python then ships RAW frames for
+    # panels whose mode the browser can evaluate (gaussian/bin2/anscombe
+    # stacks; see BROWSER_DISPLAY_FILTER_MODES) and the WGSL compute port in
+    # js/displayFilter.ts filters client-side, so the sigma slider scrubs live
+    # with no kernel round trip and kernel-less HTML exports keep working
+    # knobs. tv/denova* panels always stay on this Python path.
+    _webgpu_filter_ok = traitlets.Bool(False).tag(sync=True)
     # Chemistry-on-structure view: HAADF-modulated blend of an element map on
     # the HAADF lattice as a third RGB panel (haadf | map | blend). Enabled at
     # construction with underlay=True on exactly two grayscale inputs.
@@ -2393,6 +2401,10 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 # A raw full-res tile over a filtered preview would silently
                 # un-filter the zoomed view. Filtering the crop is edge-
                 # approximate near the tile border, but honest about the knobs.
+                # Detail tiles stay on this Python path even when the browser
+                # filters the preview (_webgpu_filter_ok): tiles only exist in
+                # kernel sessions and already round-trip, and the committed
+                # knobs here match the browser's committed knobs.
                 tile = np.ascontiguousarray(self._filter_display_frame(tile, panel=panel))
             blocks.append(tile.tobytes())
             tiles.append({"panel": panel, "row0": row0, "col0": col0,
@@ -3177,6 +3189,12 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         clone.handoff_request = ""
         clone.prepared_view = None
         clone.prepared_view_widget = None
+        # Exported pages ship RAW frames plus the filter knobs: the browser
+        # port (WGSL compute, CPU fallback without WebGPU) filters client-side
+        # so sigma scrubs live with no kernel. Panels on non portable modes
+        # (tv, denova*) still bake their Python-filtered pixels because
+        # _panel_browser_filtered is per panel.
+        clone._webgpu_filter_ok = True
         clone._update_all_frames()
         return clone
 
@@ -3794,6 +3812,37 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     def _display_filter_active(self) -> bool:
         return any(self._panel_filter_active(i) for i in range(int(self.n_images)))
 
+    def _panel_browser_filtered(self, panel: int) -> bool:
+        """True when this panel's display filter runs in the browser.
+
+        The WGSL port (js/displayFilter.ts) covers the gaussian/bin2/anscombe
+        modes; when the frontend negotiated ``_webgpu_filter_ok`` those panels
+        ship raw pixels and the browser filters. Non portable modes (tv,
+        denova*) keep the Python path even in a WebGPU session.
+        """
+        from quantem.widget.utils.display_filter import (
+            BROWSER_DISPLAY_FILTER_MODES,
+            _normalize_mode,
+        )
+
+        if not bool(self._webgpu_filter_ok):
+            return False
+        mode, _sigma, _spatial_bin = self._panel_filter_knobs(panel)
+        return _normalize_mode(mode) in BROWSER_DISPLAY_FILTER_MODES
+
+    @traitlets.observe("_webgpu_filter_ok")
+    def _on_webgpu_filter_ok_change(self, change: dict) -> None:
+        """Repack frames when the browser filter negotiation flips.
+
+        True: portable panels repack raw (the browser filters them). False
+        (e.g. reopening in a browser without WebGPU): Python filtering packs
+        the view again, so the fallback shows identical pixels.
+        """
+        if not getattr(self, "_display_filter_ready", False):
+            return
+        if self._display_filter_active():
+            self._update_all_frames()
+
     def _refresh_display_filter_banner(self, *, announce: bool) -> None:
         """Sync the one-line reduction notice; print it when it changes.
 
@@ -3849,7 +3898,9 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         frames = []
         for i in range(int(data.shape[0])):
             rgb = bool(self.is_rgb[i]) if i < len(self.is_rgb) else False
-            skip = rgb or not self._panel_filter_active(i)
+            # Browser-filtered panels ship raw: the WGSL port applies the same
+            # math client-side (live sigma scrub, kernel-less HTML exports).
+            skip = rgb or not self._panel_filter_active(i) or self._panel_browser_filtered(i)
             frames.append(
                 np.asarray(data[i], dtype=np.float32)
                 if skip
@@ -3987,7 +4038,9 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 offsets.append(-1)
                 continue
             rgb = bool(self.is_rgb[panel]) if panel < len(self.is_rgb) else False
-            skip = rgb or not self._panel_filter_active(panel)
+            # Browser-filtered panels ship raw stacks; JS filters each frame
+            # on scrub with the same per-panel knobs.
+            skip = rgb or not self._panel_filter_active(panel) or self._panel_browser_filtered(panel)
             if filter_active and not skip:
                 # Per-frame filtered VIEW so browser-local frame scrubbing shows
                 # the same filter as the main frame; the stored stack is untouched.

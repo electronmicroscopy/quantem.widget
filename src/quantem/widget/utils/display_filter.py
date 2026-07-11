@@ -33,6 +33,19 @@ DISPLAY_FILTER_MODES = (
     "denova_tv",
     "denova_tv12",
 )
+# Modes with a browser-side WebGPU/TypeScript port (js/displayFilter.ts).
+# Panels on these modes can ship raw pixels and filter client-side, which
+# keeps the sigma slider live during drag and makes kernel-less offline HTML
+# exports scrubbable. tv and denova* depend on scikit-image / the denova
+# package and are Python-only: those panels always bake their filtered view.
+BROWSER_DISPLAY_FILTER_MODES = (
+    "none",
+    "gaussian",
+    "bin2",
+    "anscombe",
+    "bin2_anscombe",
+    "bin4_anscombe",
+)
 _IDENTITY_MODES = {"none", "off", "raw", ""}
 
 

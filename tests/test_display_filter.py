@@ -222,3 +222,42 @@ def test_show2d_underlay_composes_chemistry_on_haadf():
     assert not np.array_equal(widget._rgb_frames[-1], before)  # live re-blend
     np.testing.assert_array_equal(widget._data[0], haadf)  # sources untouched
     np.testing.assert_array_equal(widget._data[1], eds_map)
+
+
+def test_show2d_webgpu_negotiation_ships_raw_frames():
+    """The browser reports a real WebGPU adapter (_webgpu_filter_ok=True): the
+    widget ships raw counts for the WGSL port to filter client-side, keeps
+    announcing the reduction, and repacks the Python-filtered view when the
+    flag drops again (browser without WebGPU)."""
+    from quantem.widget import Show2D
+
+    counts = _sparse_eds_map(shape=(64, 64))
+    widget = Show2D(counts, display_filter="bin2_anscombe", display_sigma=8, verbose=False)
+    n_bytes = counts.size * 4
+    python_view = np.frombuffer(widget.frame_bytes[:n_bytes], dtype=np.float32).reshape(64, 64).copy()
+    assert not np.array_equal(python_view, counts)  # kernel-filtered by default
+    widget._webgpu_filter_ok = True  # JS negotiation: real adapter present
+    sent = np.frombuffer(widget.frame_bytes[:n_bytes], dtype=np.float32).reshape(64, 64)
+    np.testing.assert_array_equal(sent, counts)  # raw counts ship, browser filters
+    assert "bin2_anscombe" in widget.display_filter_banner  # reduction still announced
+    widget._webgpu_filter_ok = False  # reopened without WebGPU: Python fallback
+    back = np.frombuffer(widget.frame_bytes[:n_bytes], dtype=np.float32).reshape(64, 64)
+    np.testing.assert_array_equal(back, python_view)
+
+
+def test_show2d_html_export_ships_raw_frames_and_knobs():
+    """An exported HTML clone carries raw counts plus the filter knobs, so the
+    kernel-less page scrubs filter/sigma live through the browser port."""
+    from quantem.widget import Show2D
+
+    counts = _sparse_eds_map(shape=(64, 64))
+    widget = Show2D(counts, display_filter="anscombe", display_sigma=6, verbose=False)
+    clone = widget._clone_for_html_export(quantized=False)
+    try:
+        assert clone._webgpu_filter_ok is True
+        sent = np.frombuffer(clone.frame_bytes[: counts.size * 4], dtype=np.float32).reshape(64, 64)
+        np.testing.assert_array_equal(sent, counts)
+        assert list(clone.display_filters) == ["anscombe"]
+        assert list(clone.display_sigmas) == [6.0]
+    finally:
+        clone.close()
