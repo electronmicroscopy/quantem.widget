@@ -23,7 +23,7 @@ https://doi.org/10.1039/d6dd00121a
 ## Core checklist (every PR)
 
 - [ ] The change includes focused tests for Python state/export behavior and
-  frontend build coverage where possible; start with `PYTHONPATH=src pytest -q`
+  frontend build coverage where possible; start with `PYTHONPATH=src:. pytest -q`
   and `npm run build`, or run `scripts/widget_local_signoff.sh`.
 - [ ] Before committing, inspect `git status --short` and `git diff --stat`;
   do not commit generated HTML, docs builds, screenshots, local notebooks,
