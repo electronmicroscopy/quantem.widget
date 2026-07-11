@@ -314,6 +314,62 @@ def test_underlay_slider_repacks_the_synced_rgb_block_the_browser_reads():
     np.testing.assert_array_equal(widget._data[1], eds_map)
 
 
+def test_underlay_fig4_knobs_restretch_the_synced_blend():
+    """The Fig4 parity knobs (display_gamma, stretch_percentiles) re-blend live
+    just like the alpha/gain sliders: each turns the synced frame_bytes buffer
+    and the computed blend, and the two raw sources stay untouched."""
+    from quantem.widget import Show2D
+
+    rng = np.random.default_rng(21)
+    haadf = rng.random((96, 96)).astype(np.float32)
+    eds_map = _sparse_eds_map(shape=(96, 96))
+    widget = Show2D(
+        [haadf, eds_map], underlay=True, cmap="magenta", verbose=False
+    )
+    gamma_bytes = bytes(widget.frame_bytes)
+    gamma_blend = widget._compute_underlay_blend().copy()
+    widget.display_gamma = 1.3
+    assert bytes(widget.frame_bytes) != gamma_bytes
+    assert not np.array_equal(widget._compute_underlay_blend(), gamma_blend)
+
+    stretch_bytes = bytes(widget.frame_bytes)
+    widget.stretch_percentiles = [10.0, 95.0]
+    assert bytes(widget.frame_bytes) != stretch_bytes
+
+    np.testing.assert_array_equal(widget._data[0], haadf)  # sources untouched
+    np.testing.assert_array_equal(widget._data[1], eds_map)
+
+
+def test_show2d_dual_composite_is_magenta_plus_green_and_gain_scrubs():
+    """underlay_mode='dual' on two maps composes a magenta+green RGB panel:
+    map A -> magenta (R, B), map B -> green (G). The per-channel dual_gain
+    sliders re-blend live and never touch the stored maps."""
+    from quantem.widget import Show2D
+
+    map_a = np.zeros((32, 32), np.float32)
+    map_a[8, 8] = 12.0  # A-only site -> should read magenta
+    map_b = np.zeros((32, 32), np.float32)
+    map_b[24, 24] = 12.0  # B-only site -> should read green
+    widget = Show2D(
+        [map_a, map_b], underlay=True, underlay_mode="dual", verbose=False
+    )
+    assert widget.n_images == 3
+    assert widget.is_rgb == [False, False, True]
+    assert widget.labels[-1] == "dual composite"
+    blend = widget._rgb_frames[-1]
+    assert blend.shape == (32, 32, 3)
+    a_site = blend[8, 8]
+    assert a_site[0] > a_site[1] and a_site[2] > a_site[1], "A site should read magenta"
+    b_site = blend[24, 24]
+    assert b_site[1] > b_site[0] and b_site[1] > b_site[2], "B site should read green"
+
+    before_bytes = bytes(widget.frame_bytes)
+    widget.dual_gain = [2.0, 0.5]
+    assert bytes(widget.frame_bytes) != before_bytes
+    np.testing.assert_array_equal(widget._data[0], map_a)  # sources untouched
+    np.testing.assert_array_equal(widget._data[1], map_b)
+
+
 def test_show2d_webgpu_negotiation_ships_raw_frames():
     """The browser reports a real WebGPU adapter (_webgpu_filter_ok=True): the
     widget ships raw counts for the WGSL port to filter client-side, keeps

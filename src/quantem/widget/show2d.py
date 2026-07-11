@@ -442,6 +442,22 @@ def _compose_overlay_pair(reference: np.ndarray, moving: np.ndarray, mode: str) 
     return np.stack([ref, mov, ref], -1)                     # reference magenta, moving green, aligned white
 
 
+def _compose_dual(
+    map_a_01: np.ndarray, map_b_01: np.ndarray, gain: Sequence[float]
+) -> np.ndarray:
+    """Two-map magenta+green composite for underlay ``mode='dual'``.
+
+    Same colorblind-safe convention as :func:`_compose_overlay_pair`
+    ``green-magenta``: map A -> magenta (red+blue), map B -> green, co-located
+    signal -> white. The inputs are already display-normalized to [0, 1]; each
+    channel is then scaled by its own ``gain`` so a weak element can be lifted
+    against a strong one. The stored arrays are never touched.
+    """
+    a = np.clip(np.asarray(map_a_01, dtype=np.float32) * float(gain[0]), 0.0, 1.0)
+    b = np.clip(np.asarray(map_b_01, dtype=np.float32) * float(gain[1]), 0.0, 1.0)
+    return np.stack([a, b, a], axis=-1).astype(np.float32)  # A magenta, B green, both -> white
+
+
 _OVERLAY_FONT: list[str] | None = None
 
 
@@ -577,6 +593,26 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         Brightness of the HAADF structure showing through the ``underlay``
         blend, in ``[0, 1]``. Lower keeps the map colors saturated over a dim
         lattice; higher lets more of the gray structure through.
+    underlay_mode : {"haadf", "dual"}, default "haadf"
+        Composite recipe for the third ``underlay`` panel. ``"haadf"`` blends a
+        single element map (magenta) onto the HAADF lattice. ``"dual"`` takes
+        two grayscale maps ``[map A, map B]`` (no HAADF) and composes a
+        colorblind-safe magenta+green panel: map A -> magenta, map B -> green,
+        co-located signal -> white. Both modes need exactly two single-frame
+        grayscale inputs.
+    stretch_percentiles : sequence of float, default (4.0, 99.0)
+        Low/high display-stretch percentiles applied to the element map(s)
+        before colorizing, matching the drift-paper Fig4 sweep. The slider
+        re-stretches live without touching the stored counts; must satisfy
+        ``0 <= low < high <= 100``.
+    display_gamma : float, default 0.75
+        Presence gamma inside the ``"haadf"`` blend, > 0. Below 1 lifts
+        mid-count columns into color; above 1 keeps only the brightest lit.
+        Ignored in ``"dual"`` mode (the magenta+green composite has no ghost).
+    dual_gain : sequence of float, default (1.0, 1.0)
+        Per-channel brightness ``[gain A, gain B]`` for the ``"dual"`` composite,
+        each >= 0. Raise one channel to balance a weak element against a strong
+        one; ignored in ``"haadf"`` mode.
     ncols : int, default 3
         Number of columns in gallery mode.
     panel_frame_indices : sequence of int, optional
@@ -870,6 +906,16 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     underlay = traitlets.Bool(False).tag(sync=True)
     underlay_alpha = traitlets.Float(0.95).tag(sync=True)
     underlay_haadf_gain = traitlets.Float(0.35).tag(sync=True)
+    # Fig4 parity knobs, all live-scrubbable: the map's display stretch
+    # (low/high percentile), the presence gamma inside the HAADF blend, the
+    # composite mode ('haadf' = map-on-HAADF, 'dual' = two-map magenta+green),
+    # and per-channel gains for the dual composite.
+    stretch_percentiles = traitlets.List(
+        traitlets.Float(), default_value=[4.0, 99.0]
+    ).tag(sync=True)
+    display_gamma = traitlets.Float(0.75).tag(sync=True)
+    underlay_mode = traitlets.Unicode("haadf").tag(sync=True)
+    dual_gain = traitlets.List(traitlets.Float(), default_value=[1.0, 1.0]).tag(sync=True)
     _gpu_max_buffer_mb = traitlets.Int(0).tag(sync=True)  # GPU reports maxBufferSize (JS→Python)
     # Flipped True by JS after the first colormap pass has painted to canvas.
     # Used by the Python-side truthful timing print (end-to-end wall clock, not just __init__).
@@ -1209,6 +1255,10 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         underlay: bool | str = False,
         underlay_alpha: float = 0.95,
         underlay_haadf_gain: float = 0.35,
+        underlay_mode: str = "haadf",
+        stretch_percentiles: Sequence[float] = (4.0, 99.0),
+        display_gamma: float = 0.75,
+        dual_gain: Sequence[float] = (1.0, 1.0),
         **kwargs,
     ):
         import time as _time
@@ -1366,7 +1416,9 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 denoise_scope_explicit=denoise_scope_supplied,
                 show_denoise=show_denoise,
                 underlay=underlay, underlay_alpha=underlay_alpha,
-                underlay_haadf_gain=underlay_haadf_gain)
+                underlay_haadf_gain=underlay_haadf_gain,
+                underlay_mode=underlay_mode, stretch_percentiles=stretch_percentiles,
+                display_gamma=display_gamma, dual_gain=dual_gain)
 
     def _init_sync(self, *, data, labels, title, cmap, n_pages, panels_per_page,
                    page_labels, page_starred, show_title, sampling, units,
@@ -1380,7 +1432,9 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                    denoise="none", denoise_sigma=4.0, denoise_bin=1,
                    denoise_scope="all", denoise_scope_explicit=False, show_denoise=False,
                    underlay=False, underlay_alpha=0.95,
-                   underlay_haadf_gain=0.35):
+                   underlay_haadf_gain=0.35, underlay_mode="haadf",
+                   stretch_percentiles=(4.0, 99.0), display_gamma=0.75,
+                   dual_gain=(1.0, 1.0)):
         import time as _time
         self._verbose = verbose
         self.widget_version = resolve_widget_version()
@@ -1549,9 +1603,17 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 raise ValueError("Use either overlay or underlay, not both")
             if str(underlay).lower() not in ("true", "1", "haadf"):
                 raise ValueError(f"underlay must be True or 'haadf', got {underlay!r}")
+            mode = str(underlay_mode).strip().lower()
+            if mode not in ("haadf", "dual"):
+                raise ValueError(
+                    f"underlay_mode must be 'haadf' or 'dual', got {underlay_mode!r}"
+                )
+            # Both modes need exactly two single-frame grayscale inputs: haadf
+            # mode reads them as (haadf, map), dual mode as (map A, map B).
+            inputs_desc = "(map A, map B)" if mode == "dual" else "(haadf, map)"
             if self._data.shape[0] != 2 or any(self.is_rgb):
                 raise ValueError(
-                    "underlay requires exactly 2 grayscale images (haadf, map); got "
+                    f"underlay requires exactly 2 grayscale images {inputs_desc}; got "
                     f"{self._data.shape[0]} image(s)"
                     + (" including RGB panels" if any(self.is_rgb) else "")
                 )
@@ -1560,8 +1622,12 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                     "underlay does not support per-panel frame stacks; pass single frames"
                 )
             self.underlay = True
+            self.underlay_mode = mode
             self.underlay_alpha = float(underlay_alpha)
             self.underlay_haadf_gain = float(underlay_haadf_gain)
+            self.stretch_percentiles = [float(stretch_percentiles[0]), float(stretch_percentiles[1])]
+            self.display_gamma = float(display_gamma)
+            self.dual_gain = [float(dual_gain[0]), float(dual_gain[1])]
             self.cmap = str(cmap)
             self._underlay_haadf_idx = 0
             self._underlay_map_idx = 1
@@ -1573,7 +1639,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             self.is_rgb = [False, False, True]
             panel_stacks = [self._data[i:i + 1] for i in range(int(self._data.shape[0]))]
             resolved_panel_frame_indices = [0] * len(panel_stacks)
-            overlay_label = "map on HAADF"  # reuses the overlay label plumbing
+            overlay_label = "dual composite" if mode == "dual" else "map on HAADF"
             data = self._data
         if offline and any(self.is_rgb):
             raise NotImplementedError(
@@ -3387,11 +3453,15 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             "denoise_bins": list(self.denoise_bins),
             # underlay= is construction-time sugar: the composed "map on HAADF"
             # RGB panel is rebuilt from the kernel, not stored, so it is NOT
-            # restored on a kernel-less reopen. These two blend knobs are kept
-            # so a live (kernel-backed) widget re-blends to the saved look; on a
-            # cold reopen they are inert (there is no underlay panel to tune).
+            # restored on a kernel-less reopen. These blend knobs are kept so a
+            # live (kernel-backed) widget re-blends to the saved look; on a cold
+            # reopen they are inert (there is no underlay panel to tune).
             "underlay_alpha": self.underlay_alpha,
             "underlay_haadf_gain": self.underlay_haadf_gain,
+            "underlay_mode": self.underlay_mode,
+            "stretch_percentiles": list(self.stretch_percentiles),
+            "display_gamma": self.display_gamma,
+            "dual_gain": list(self.dual_gain),
         }
 
     def save(self, path: str):
@@ -4370,6 +4440,47 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             raise traitlets.TraitError(f"denoise_bin must be 1, 2, or 4; got {value}")
         return value
 
+    @traitlets.validate("underlay_mode")
+    def _validate_underlay_mode(self, proposal: dict) -> str:
+        value = str(proposal["value"]).strip().lower()
+        if value not in ("haadf", "dual"):
+            raise traitlets.TraitError(
+                f"underlay_mode must be 'haadf' or 'dual'; got {proposal['value']!r}"
+            )
+        return value
+
+    @traitlets.validate("stretch_percentiles")
+    def _validate_stretch_percentiles(self, proposal: dict) -> list[float]:
+        value = [float(v) for v in proposal["value"]]
+        if len(value) != 2:
+            raise traitlets.TraitError(
+                "stretch_percentiles must be [low, high]; got "
+                f"{proposal['value']!r}"
+            )
+        lo, hi = value
+        if not (0.0 <= lo < hi <= 100.0):
+            raise traitlets.TraitError(
+                f"stretch_percentiles must satisfy 0 <= low < high <= 100; got [{lo}, {hi}]"
+            )
+        return value
+
+    @traitlets.validate("display_gamma")
+    def _validate_display_gamma(self, proposal: dict) -> float:
+        value = float(proposal["value"])
+        if not math.isfinite(value) or value <= 0:
+            raise traitlets.TraitError(f"display_gamma must be > 0; got {value}")
+        return value
+
+    @traitlets.validate("dual_gain")
+    def _validate_dual_gain(self, proposal: dict) -> list[float]:
+        value = [float(v) for v in proposal["value"]]
+        if len(value) != 2 or any((not math.isfinite(v)) or v < 0 for v in value):
+            raise traitlets.TraitError(
+                "dual_gain must be two non-negative finite values [gain_a, gain_b]; "
+                f"got {proposal['value']!r}"
+            )
+        return value
+
     @traitlets.validate("denoise_modes")
     def _validate_display_filters(self, proposal: dict) -> list[str]:
         from quantem.widget.utils.display_filter import DISPLAY_FILTER_MODES, _normalize_mode
@@ -4731,28 +4842,46 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             )
         return np.stack(frames, axis=0)
 
-    def _compute_underlay_blend(self) -> np.ndarray:
-        """HAADF-modulated chemistry blend from the two source panels.
+    def _filtered_underlay_input(self, panel: int) -> np.ndarray:
+        """A source panel with its active display filter applied, if any.
 
-        The map goes through the active display filter first, so the blend
-        panel always matches the filtered map panel next to it. Both inputs
-        are percentile-normalized for display; the stored arrays keep raw
-        counts.
+        The underlay/dual composite always matches the filtered map panels next
+        to it; the stored arrays keep raw counts.
+        """
+        raw = np.asarray(self._data[panel], dtype=np.float32)
+        if self._panel_filter_active(panel):
+            return self._filter_display_frame(raw, panel=panel)
+        return raw
+
+    def _compute_underlay_blend(self) -> np.ndarray:
+        """Chemistry composite from the two source panels, dispatched by mode.
+
+        ``underlay_mode='haadf'`` blends one element map (magenta) onto the
+        HAADF lattice; ``'dual'`` composes two maps into a magenta+green panel.
+        Both stretch each map with ``stretch_percentiles`` for display; the
+        stored arrays keep raw counts.
         """
         from quantem.widget.utils.display_filter import blend_map_on_haadf, magenta_cmap
 
-        haadf = np.asarray(self._data[self._underlay_haadf_idx], dtype=np.float32)
-        map_raw = np.asarray(self._data[self._underlay_map_idx], dtype=np.float32)
-        map_view = (
-            self._filter_display_frame(map_raw, panel=self._underlay_map_idx)
-            if self._panel_filter_active(self._underlay_map_idx)
-            else map_raw
-        )
+        lo_pct = float(self.stretch_percentiles[0])
+        hi_pct = float(self.stretch_percentiles[1])
 
-        def norm01(image, lo_pct, hi_pct):
-            lo, hi = np.percentile(image, [lo_pct, hi_pct])
+        def norm01(image, low, high):
+            lo, hi = np.percentile(image, [low, high])
             span = hi - lo if hi > lo else 1.0
             return np.clip((image - lo) / span, 0.0, 1.0)
+
+        if str(self.underlay_mode).lower() == "dual":
+            map_a = self._filtered_underlay_input(0)
+            map_b = self._filtered_underlay_input(1)
+            return _compose_dual(
+                norm01(map_a, lo_pct, hi_pct),
+                norm01(map_b, lo_pct, hi_pct),
+                gain=(float(self.dual_gain[0]), float(self.dual_gain[1])),
+            )
+
+        haadf = np.asarray(self._data[self._underlay_haadf_idx], dtype=np.float32)
+        map_view = self._filtered_underlay_input(self._underlay_map_idx)
 
         cmap_name = str(self.cmap).lower()
         if cmap_name in ("magenta", "eds_magenta", "mag"):
@@ -4765,18 +4894,22 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             except KeyError:
                 cmap = magenta_cmap()
         return blend_map_on_haadf(
-            # (4, 99) matches the dominant stretch of the drift-paper Fig4
-            # sweep; sparse maps normalized at (2, 99.5) render far too dark.
-            norm01(map_view, 4.0, 99.0),
+            # stretch_percentiles defaults to (4, 99), the dominant stretch of
+            # the drift-paper Fig4 sweep; sparse maps at (2, 99.5) render dark.
+            norm01(map_view, lo_pct, hi_pct),
             norm01(haadf, 1.0, 99.9),
             alpha=float(self.underlay_alpha),
             haadf_gain=float(self.underlay_haadf_gain),
+            gamma=float(self.display_gamma),
             cmap=cmap,
         ).astype(np.float32)
 
-    @traitlets.observe("underlay_alpha", "underlay_haadf_gain")
+    @traitlets.observe(
+        "underlay_alpha", "underlay_haadf_gain", "underlay_mode",
+        "stretch_percentiles", "display_gamma", "dual_gain",
+    )
     def _on_underlay_change(self, change: dict) -> None:
-        """Re-blend the chemistry panel live when a slider moves."""
+        """Re-blend the chemistry panel live when a Fig4 knob moves."""
         if getattr(self, "_underlay_map_idx", None) is None or not getattr(
             self, "_display_filter_ready", False
         ):
