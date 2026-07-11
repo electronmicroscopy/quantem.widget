@@ -10,6 +10,7 @@ least-recently-used datasets to RAM. This guards both fixed-count paging and
 from __future__ import annotations
 
 from collections import namedtuple
+from types import SimpleNamespace
 import threading
 import time
 import warnings
@@ -35,6 +36,18 @@ def _wait_until(predicate, *, timeout: float = 3.0) -> None:
             return
         time.sleep(0.01)
     raise AssertionError("timed out waiting for background Show4DSTEM work")
+
+
+def _ready_master_report(path):
+    """Header-only ready report for mocked folder masters."""
+    return SimpleNamespace(
+        ready=True,
+        reason="complete",
+        action="Ready to open with Show4DSTEM.",
+        actual_frames=9,
+        expected_frames=9,
+        source_signature={"path": str(path), "revision": "stable"},
+    )
 
 
 def _series(n=4, scan=32, det=48):
@@ -988,6 +1001,7 @@ def test_showfolder_open_show4dstem_preserves_loader_device_when_gpus_none(
 
     monkeypatch.setattr(wio, "discover_masters", fake_discover)
     monkeypatch.setattr(wio, "is_master_ready", fake_ready)
+    monkeypatch.setattr(wio, "inspect_master_readiness", _ready_master_report)
     monkeypatch.setattr(qw, "load", fake_load)
 
     sf = _stub_browser(tmp_path)
@@ -1077,6 +1091,7 @@ def test_show4dstem_from_folder_builds_lazy_widget_and_poll_appends(
 
     monkeypatch.setattr(wio, "discover_masters", fake_discover)
     monkeypatch.setattr(wio, "is_master_ready", fake_ready)
+    monkeypatch.setattr(wio, "inspect_master_readiness", _ready_master_report)
     monkeypatch.setattr(
         wio,
         "get_metadata",
@@ -1102,10 +1117,13 @@ def test_show4dstem_from_folder_builds_lazy_widget_and_poll_appends(
 
     try:
         assert widget.n_frames == 1
+        assert widget.compare_page_progressive_enabled is True
         assert list(widget.frame_labels) == ["scan_00"]
         assert calls == [masters[0]]
 
         discovered.append(masters[1])
+        # C1: a new ready master needs one unchanged follow-up signature.
+        assert widget.poll_folder() == []
         added = widget.poll_folder()
 
         assert added == [1]
@@ -1135,6 +1153,7 @@ def test_show4dstem_from_folder_watches_by_default_and_appends_cold(
         wio, "discover_masters", lambda *args, **kwargs: list(discovered)
     )
     monkeypatch.setattr(wio, "is_master_ready", lambda path: True)
+    monkeypatch.setattr(wio, "inspect_master_readiness", _ready_master_report)
     monkeypatch.setattr(
         wio,
         "get_metadata",
@@ -1220,6 +1239,7 @@ def test_show4dstem_watched_master_contract_retries_and_registers_batch_paths(
         wio, "discover_masters", lambda *args, **kwargs: list(discovered)
     )
     monkeypatch.setattr(wio, "is_master_ready", lambda path: True)
+    monkeypatch.setattr(wio, "inspect_master_readiness", _ready_master_report)
     monkeypatch.setattr(wio, "get_metadata", lambda path: dict(contracts[str(path)]))
 
     def fake_load(path, *, det_bin=4, dtype="u8", verbose=False, **kwargs):
@@ -1242,6 +1262,8 @@ def test_show4dstem_watched_master_contract_retries_and_registers_batch_paths(
 
     try:
         discovered.extend(masters[1:3])
+        # C1: both arrivals first enter signature probation, then append cold.
+        assert widget.poll_folder() == []
         assert widget.poll_folder() == [1, 2]
         assert widget.n_frames == 3
         assert calls == [masters[0]]
@@ -1257,6 +1279,7 @@ def test_show4dstem_watched_master_contract_retries_and_registers_batch_paths(
         labels_before = list(widget.frame_labels)
         known_before = set(widget._folder_known_masters)
 
+        assert widget.poll_folder() == []
         assert widget.poll_folder() == []
         assert widget.n_frames == 3
         assert list(widget.frame_labels) == labels_before
@@ -1288,6 +1311,7 @@ def test_show4dstem_watcher_warms_only_new_pages_without_blocking_cached_page(
         wio, "discover_masters", lambda *args, **kwargs: list(discovered)
     )
     monkeypatch.setattr(wio, "is_master_ready", lambda path: True)
+    monkeypatch.setattr(wio, "inspect_master_readiness", _ready_master_report)
     monkeypatch.setattr(
         wio,
         "get_metadata",
@@ -1724,7 +1748,7 @@ def test_lazy_residency_plan_keeps_paging_when_one_gpu_is_over_budget():
     assert data.residency_plan()["fits"] is False
 
 
-def test_auto_vram_budget_uses_adaptive_margin_instead_of_fixed_four_gib(
+def test_auto_vram_budget_reserves_workspace_and_one_incoming_frame(
     monkeypatch,
 ):
     frame_shape = (1, 1, 1024, 1024)
@@ -1749,7 +1773,8 @@ def test_auto_vram_budget_uses_adaptive_margin_instead_of_fixed_four_gib(
     data.page("auto", device=["cuda:0"])
 
     budget = data._page_max_vram_bytes[torch.device("cuda:0")]
-    assert budget == free - 1024**3
+    frame_bytes = int(np.prod(frame_shape))
+    assert budget == free - 1024**3 - frame_bytes
     assert budget > free - 4 * 1024**3
 
 
@@ -1887,6 +1912,79 @@ def test_show4dstem_from_folder_does_not_preload_series_over_budget(
         assert widget._raw_preload_status == "paged"
         assert widget._data.vram_resident() == [0]
         assert calls == [masters[0]]
+    finally:
+        widget.close()
+
+
+@cuda_required
+def test_show4dstem_from_folder_one_gpu_auto_pages_with_independent_loads(
+    monkeypatch, tmp_path
+):
+    """One GPU streams a folder page while raw residency remains bounded."""
+    import quantem.widget as qw
+    import quantem.widget.io as wio
+
+    masters = [str(tmp_path / f"scan_{idx:02d}_master.h5") for idx in range(6)]
+    frame_shape = (8, 8, 12, 12)
+    frame_bytes = int(np.prod(frame_shape))
+    calls = []
+
+    monkeypatch.setattr(wio, "discover_masters", lambda *args, **kwargs: list(masters))
+    monkeypatch.setattr(wio, "is_master_ready", lambda path: True)
+
+    def fake_load(path, *, det_bin=4, dtype="u8", verbose=False, **kwargs):
+        assert isinstance(path, str)
+        calls.append(path)
+        value = int(path.split("scan_")[1][:2]) + 1
+        data = torch.full(
+            frame_shape,
+            value,
+            dtype=torch.uint8,
+            device="cuda:0",
+        )
+        return LoadResult(data, {})
+
+    monkeypatch.setattr(qw, "load", fake_load)
+
+    widget = Show4DSTEM.from_folder(
+        tmp_path,
+        gpus=[0],
+        page_budget="auto",
+        page_max_vram_bytes=frame_bytes * 2 + 1,
+        page_size=3,
+        det_bin=4,
+        dtype="u8",
+        view_mode="multiple",
+        watch=False,
+        precompute_virtual_images=False,
+    )
+    try:
+        assert widget._raw_preload_status == "paged"
+        assert widget.compare_page_count == 2
+        assert widget.compare_panel_indices == [0, 1, 2]
+        assert len(widget._data.vram_resident()) <= 2
+        assert widget._data.preload_batches([0, 1, 2]) == [[0, 1], [2]]
+        assert calls and all(isinstance(path, str) for path in calls)
+
+        messages = []
+        monkeypatch.setattr(
+            widget,
+            "send",
+            lambda content, buffers=None: messages.append((dict(content), buffers)),
+        )
+
+        widget.set_compare_page(1)
+        widget.wait_for_compare_page(timeout=10)
+
+        resident = widget._data.vram_resident()
+        assert widget.compare_panel_indices == [3, 4, 5]
+        assert len(resident) <= 2
+        types = [content["type"] for content, _ in messages]
+        assert types[0] == "compare_page_start"
+        assert types.count("compare_panel") == 3
+        assert "compare_page_complete" in types
+        assert "out of memory" not in widget.memory_warning.lower()
+        assert "out of memory" not in widget.compare_status.lower()
     finally:
         widget.close()
 

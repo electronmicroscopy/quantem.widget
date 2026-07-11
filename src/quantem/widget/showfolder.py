@@ -2,10 +2,68 @@
 from __future__ import annotations
 
 import html
+import math
 from pathlib import Path
 import threading
 import time
 from typing import Any
+
+
+def _nested_widget_models(value: Any):
+    """Yield widget models nested in common trait container values."""
+    try:
+        from ipywidgets import Widget
+    except ModuleNotFoundError:  # pragma: no cover - package dependency
+        return
+    if isinstance(value, Widget):
+        yield value
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from _nested_widget_models(item)
+    elif isinstance(value, (list, tuple, set, frozenset)):
+        for item in value:
+            yield from _nested_widget_models(item)
+
+
+def _collect_widget_models(roots: Any) -> list[Any]:
+    """Return widget models reachable from ``roots``, dependencies first."""
+    ordered: list[Any] = []
+    seen: set[int] = set()
+
+    def visit(value: Any) -> None:
+        for widget in _nested_widget_models(value):
+            key = id(widget)
+            if key in seen:
+                continue
+            seen.add(key)
+            for name in widget.traits():
+                try:
+                    visit(getattr(widget, name))
+                except Exception:
+                    continue
+            ordered.append(widget)
+
+    visit(roots)
+    return ordered
+
+
+def _close_widget_models(models: Any, *, preserve: Any = ()) -> None:
+    """Close widget models except identities reachable from ``preserve``."""
+    preserve_ids = {id(widget) for widget in _collect_widget_models(preserve)}
+    seen: set[int] = set()
+    # Close parents before their Layout/Style/children dependencies so no live
+    # parent model briefly references a child whose comm has already closed.
+    for widget in reversed(_collect_widget_models(models)):
+        key = id(widget)
+        if key in seen or key in preserve_ids:
+            continue
+        seen.add(key)
+        close = getattr(widget, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
 
 
 class ShowFolder:
@@ -49,6 +107,9 @@ class ShowFolder:
         self._watch_thread = None
         self._watch_signature = None
         self._watch_status = None
+        self._watch_lock = threading.Lock()
+        self._watch_pending = None
+        self._closed = False
 
         if self.path is not None:
             self.refresh(self.path)
@@ -179,6 +240,18 @@ class ShowFolder:
             raise ValueError("No folder has been browsed yet.")
         return self.browser.open_show3d(all_images=all_images)
 
+    def open_both(self, *, all_images: bool = False):
+        """Open live Show2D and Show3D viewers in the selection panel."""
+        if self.browser is None:
+            raise ValueError("No folder has been browsed yet.")
+        return self.browser.open_both(all_images=all_images)
+
+    def open_show4dstem(self, **kwargs: Any):
+        """Open folder masters as one lazy Show4DSTEM viewer."""
+        if self.browser is None:
+            raise ValueError("No folder has been browsed yet.")
+        return self.browser.open_show4dstem(**kwargs)
+
     def watch(
         self,
         interval: float = 2.0,
@@ -192,26 +265,60 @@ class ShowFolder:
         read, and files removed from disk disappear from the in-memory browser
         and from the next cache manifest.
         """
+        interval_value = float(interval)
+        if not math.isfinite(interval_value) or interval_value <= 0:
+            raise ValueError(
+                "watch interval must be a finite value > 0 seconds, "
+                f"got {interval!r}"
+            )
         if self.path is None:
             raise ValueError("No folder path is selected.")
         if self.browser is None:
             self.refresh(self.path)
-        if start:
-            self.stop_watch()
+        self.stop_watch()
         self._ensure_watch_status()
         self._watch_signature = self._folder_signature()
-        self._set_watch_status("watching", interval=float(interval))
+        self._set_watch_status("watching", interval=interval_value)
         if not start:
             return self
         stop = threading.Event()
+        pending = threading.Event()
         self._watch_stop = stop
+        self._watch_pending = pending
+        loop = self._watch_ioloop()
+
+        def _poll() -> None:
+            try:
+                if stop.is_set():
+                    return
+                self.watch_once()
+            except Exception as exc:  # pragma: no cover - defensive UI path
+                self._set_watch_status(f"watch error: {exc}")
+            finally:
+                pending.clear()
 
         def _loop() -> None:
-            while not stop.wait(float(interval)):
-                try:
-                    self.watch_once()
-                except Exception as exc:  # pragma: no cover - defensive UI path
-                    self._set_watch_status(f"watch error: {exc}")
+            try:
+                while not stop.wait(interval_value):
+                    if pending.is_set():
+                        continue
+                    pending.set()
+                    if loop is None:
+                        _poll()
+                        continue
+                    try:
+                        loop.add_callback(_poll)
+                    except Exception:
+                        pending.clear()
+                        stop.set()
+            finally:
+                current = threading.current_thread()
+                if self._watch_thread is current:
+                    self._watch_thread = None
+                if self._watch_stop is stop:
+                    self._watch_stop = None
+                if self._watch_pending is pending:
+                    self._watch_pending = None
 
         thread = threading.Thread(target=_loop, name="ShowFolderWatch", daemon=True)
         self._watch_thread = thread
@@ -224,10 +331,17 @@ class ShowFolder:
         if stop is not None:
             stop.set()
         thread = self._watch_thread
-        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
-            thread.join(timeout=1.0)
-        self._watch_stop = None
-        self._watch_thread = None
+        current = threading.current_thread()
+        if thread is not None and thread.is_alive() and thread is not current:
+            thread.join()
+        if thread is current and thread.is_alive():
+            if self._watch_status is not None:
+                self._set_watch_status("watch stopping")
+            return self
+        if self._watch_stop is stop:
+            self._watch_stop = None
+        if self._watch_thread is thread:
+            self._watch_thread = None
         if self._watch_status is not None:
             self._set_watch_status("watch stopped")
         return self
@@ -236,36 +350,45 @@ class ShowFolder:
         """Poll once and update the displayed browser if the folder changed."""
         if self.path is None:
             raise ValueError("No folder path is selected.")
-        before = self._watch_signature or self._folder_signature()
-        after = self._folder_signature()
-        if after == before:
-            self._set_watch_status("watching", interval=None)
-            return False
-        old_ids = {item.file_id for item in self.items}
-        old_selection = self.selection()
-        selected_ids = {
-            str(row.get("id"))
-            for row in old_selection.get("selected_files", [])
-            if row.get("kind") == "image"
-        }
-        hidden_ids = set(old_selection.get("hidden_image_ids", []))
-        started = time.perf_counter()
-        self._set_watch_status("reading changed folder...")
-        self._replace_browser(selected_image_ids=selected_ids, hidden_image_ids=hidden_ids)
-        self._watch_signature = self._folder_signature()
-        new_ids = {item.file_id for item in self.items}
-        added = sorted(new_ids - old_ids)
-        removed = sorted(old_ids - new_ids)
-        cache = self.cache_info
-        self._set_watch_status(
-            "updated",
-            added=added,
-            removed=removed,
-            hits=int(cache.get("hits", 0)),
-            misses=int(cache.get("misses", 0)),
-            seconds=time.perf_counter() - started,
-        )
-        return True
+        with self._watch_lock:
+            before = self._watch_signature
+            if before is None:
+                before = self._folder_signature()
+            after = self._folder_signature()
+            if after == before:
+                self._set_watch_status("watching", interval=None)
+                return False
+            old_ids = {item.file_id for item in self.items}
+            old_selection = self.selection()
+            selected_ids = {
+                str(row.get("id"))
+                for row in old_selection.get("selected_files", [])
+                if row.get("kind") == "image"
+            }
+            hidden_ids = set(old_selection.get("hidden_image_ids", []))
+            started = time.perf_counter()
+            self._set_watch_status("reading changed folder...")
+            self._replace_browser(
+                selected_image_ids=selected_ids,
+                hidden_image_ids=hidden_ids,
+            )
+            # A writer may change the folder while thumbnails are being read.
+            # Acknowledge only the snapshot that triggered this rebuild so the
+            # next poll observes and retries any during-build change.
+            self._watch_signature = after
+            new_ids = {item.file_id for item in self.items}
+            added = sorted(new_ids - old_ids)
+            removed = sorted(old_ids - new_ids)
+            cache = self.cache_info
+            self._set_watch_status(
+                "updated",
+                added=added,
+                removed=removed,
+                hits=int(cache.get("hits", 0)),
+                misses=int(cache.get("misses", 0)),
+                seconds=time.perf_counter() - started,
+            )
+            return True
 
     def refresh(self, path: str | Path | None = None) -> "ShowFolder":
         """Run or rerun the microscopy folder browser."""
@@ -281,9 +404,10 @@ class ShowFolder:
             cache = _load_cache()
             cache[self.key] = str(self.path)
             _save_cache(cache)
+        previous = self.browser
         new_browser = build_showfolder(self.path, **self.browser_kwargs)
         if self.widget is not None and self.browser is not None:
-            self._install_browser(new_browser)
+            self._install_browser(new_browser, previous_browser=previous)
         else:
             self.browser = new_browser
             self.widget = new_browser.widget
@@ -312,10 +436,41 @@ class ShowFolder:
             hidden_image_ids=hidden_image_ids,
         )
         if previous is not None:
-            new_browser.inherit_selected_viewers_from(previous)
-        self._install_browser(new_browser)
+            # Publish the new inventory before preserved viewer traits notify
+            # observers about their new panel/frame counts.
+            self.browser = new_browser
+            try:
+                new_browser.inherit_selected_viewers_from(previous)
+            except Exception:
+                self.browser = previous
+                _close_widget_models(new_browser.widget, preserve=self.widget)
+                raise
+        self._install_browser(new_browser, previous_browser=previous)
 
-    def _install_browser(self, new_browser: Any) -> None:
+    def _install_browser(
+        self,
+        new_browser: Any,
+        *,
+        previous_browser: Any = None,
+    ) -> None:
+        temporary_root = new_browser.widget
+        old_children = tuple(self.widget.children) if self.widget is not None else ()
+        old_viewers = ()
+        if previous_browser is not None:
+            old_viewers = tuple(
+                getattr(previous_browser, name, None)
+                for name in (
+                    "_selected_show2d_widget",
+                    "_selected_show3d_widget",
+                    "_selected_show4dstem_widget",
+                )
+            )
+        discarded = tuple(getattr(new_browser, "_discarded_widgets", ()))
+        cleanup_candidates = (old_children, old_viewers, discarded, temporary_root)
+
+        # Publish Python-side inventory before the stable root notifies any
+        # children observers about its replacement.
+        self.browser = new_browser
         if self.widget is not None:
             self.widget.children = tuple(new_browser.widget.children)
             new_browser.widget = self.widget
@@ -324,6 +479,44 @@ class ShowFolder:
         self.browser = new_browser
         if self._watch_status is not None:
             self._insert_watch_status()
+        if hasattr(new_browser, "_discarded_widgets"):
+            new_browser._discarded_widgets = []
+        _close_widget_models(cleanup_candidates, preserve=self.widget)
+
+    def _watch_ioloop(self):
+        """Return the active Jupyter kernel IOLoop, if one is running."""
+        try:
+            from IPython import get_ipython
+
+            shell = get_ipython()
+            loop = getattr(getattr(shell, "kernel", None), "io_loop", None)
+            if loop is None:
+                return None
+            asyncio_loop = getattr(loop, "asyncio_loop", None)
+            if asyncio_loop is not None and not asyncio_loop.is_running():
+                return None
+            return loop
+        except Exception:
+            return None
+
+    def close(self) -> None:
+        """Stop background work and close this ShowFolder widget tree."""
+        self.stop_watch()
+        if self._closed:
+            return
+        self._closed = True
+        browser = self.browser
+        selected = ()
+        if browser is not None:
+            selected = tuple(
+                getattr(browser, name, None)
+                for name in (
+                    "_selected_show2d_widget",
+                    "_selected_show3d_widget",
+                    "_selected_show4dstem_widget",
+                )
+            )
+        _close_widget_models((self.widget, selected))
 
     def _folder_signature(self) -> tuple[tuple[str, int, int], ...]:
         if self.path is None:

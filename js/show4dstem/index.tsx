@@ -33,6 +33,27 @@ import { findDataRange, sliderRange, computeStats, computeHistogramFromBytes, pe
 import { downloadBlob, extractBytes, formatNumber, preserveRestoredWidgetModelsOnSave } from "../format";
 import { useHideStaticFallback } from "../staticFallback";
 import { MetadataSection } from "../widgetInfo";
+import { FolderWatchBadge, useFolderWatchModelLive } from "../folderWatchStatus";
+import {
+  beginPendingProgressiveComparePage,
+  beginProgressiveComparePage,
+  compareMessageGeneration,
+  completeProgressiveComparePage,
+  mergeProgressiveComparePanel,
+  mergeProgressiveCompareCacheMetadata,
+  progressiveCompareCacheBadge,
+  progressiveComparePanelPresentation,
+  recordComparePageClick,
+  recordComparePageFirstPanelPaint,
+  recordComparePageStaleDrop,
+  recordComparePageVisiblePaint,
+  reconcileCompletedCompareIndices,
+  reconcileProgressiveComparePanels,
+  retainCachedProgressiveComparePanels,
+  shouldClearProgressiveComparePage,
+  type ComparePageMessage,
+  type ProgressiveComparePage,
+} from "./progressiveCompare";
 
 // Detector mask for the offline WebGPU virtual-image sum. Mirrors the Python
 // mask geometry exactly (show4dstem.py _create_*_mask): cx pairs with column,
@@ -1312,6 +1333,7 @@ interface CompareVirtualGridProps {
   bytes: DataView | null | undefined;
   count: number;
   indices: number[];
+  progressivePage?: ProgressiveComparePage | null;
   labels: string[];
   activeIdx: number;
   shapeRows: number;
@@ -1353,6 +1375,7 @@ function CompareVirtualGrid({
   bytes,
   count,
   indices,
+  progressivePage,
   labels,
   activeIdx,
   shapeRows,
@@ -1390,6 +1413,14 @@ function CompareVirtualGrid({
   onPositionChange,
 }: CompareVirtualGridProps) {
   const canvasRefs = React.useRef<(HTMLCanvasElement | null)[]>([]);
+  const canvasDrawCacheRef = React.useRef(new Map<number, {
+    canvas: HTMLCanvasElement;
+    panel: Float32Array;
+    styleKey: string;
+  }>());
+  const progressivePageForPaintRef = React.useRef<ProgressiveComparePage | null>(progressivePage ?? null);
+  const visiblePanelByFrameRef = React.useRef(new Map<number, Float32Array>());
+  const visiblePaintRafRef = React.useRef({ beforePaint: 0, afterPaint: 0 });
   const overlayRefs = React.useRef<(HTMLCanvasElement | null)[]>([]);
   const tileRefs = React.useRef<(HTMLDivElement | null)[]>([]);
   const isDraggingPositionRef = React.useRef(false);
@@ -1410,17 +1441,24 @@ function CompareVirtualGrid({
       return raw.slice(start, start + panelPixels);
     });
   }, [bytes, count, panelPixels]);
+  const sourceIndices = progressivePage ? progressivePage.expectedIndices : (indices || []);
   const [previewIndices, setPreviewIndices] = React.useState<number[] | null>(null);
-  const panelByFrame = React.useMemo(() => {
-    const out = new Map<number, Float32Array>();
-    (indices || []).forEach((frame, idx) => {
-      const panel = panels[idx];
-      if (panel) out.set(frame, panel);
-    });
-    return out;
-  }, [indices, panels]);
+  const panelByFrame = React.useMemo(
+    () => reconcileProgressiveComparePanels(
+      progressivePage ?? null,
+      indices || [],
+      panels,
+    ),
+    [indices, panels, progressivePage],
+  );
+  progressivePageForPaintRef.current = progressivePage ?? null;
+  visiblePanelByFrameRef.current = panelByFrame;
+  const cacheBadge = React.useMemo(
+    () => progressiveCompareCacheBadge(progressivePage ?? null, panelByFrame),
+    [panelByFrame, progressivePage],
+  );
   const displayIndices = React.useMemo(() => {
-    const available = new Set(indices || []);
+    const available = new Set(sourceIndices);
     const hiddenSet = new Set((hidden || []).filter((idx) => Number.isInteger(idx) && available.has(idx)));
     const ordered: number[] = [];
     const seen = new Set<number>();
@@ -1430,11 +1468,11 @@ function CompareVirtualGrid({
         seen.add(idx);
       }
     });
-    (indices || []).forEach((idx) => {
+    sourceIndices.forEach((idx) => {
       if (!hiddenSet.has(idx) && !seen.has(idx)) ordered.push(idx);
     });
     return ordered;
-  }, [hidden, indices, panelOrder]);
+  }, [hidden, panelOrder, sourceIndices]);
   const orderKey = displayIndices.join("|");
 
   React.useEffect(() => {
@@ -1449,8 +1487,8 @@ function CompareVirtualGrid({
   const renderEntries = React.useMemo(() => {
     return (renderIndices || [])
       .map((frame) => ({ frame, panel: panelByFrame.get(frame) }))
-      .filter((entry): entry is { frame: number; panel: Float32Array } => entry.panel !== undefined);
-  }, [panelByFrame, renderIndices]);
+      .filter((entry) => Boolean(progressivePage) || entry.panel !== undefined);
+  }, [panelByFrame, progressivePage, renderIndices]);
 
   const movePreviewFrame = React.useCallback((dragFrame: number, targetFrame: number) => {
     if (dragFrame === targetFrame) return;
@@ -1466,13 +1504,35 @@ function CompareVirtualGrid({
 
   React.useEffect(() => {
     const lut = COLORMAPS[colormap] || COLORMAPS.inferno;
-    renderEntries.forEach(({ panel }, idx) => {
+    const styleKey = [
+      colormap,
+      scaleMode,
+      vminPct,
+      vmaxPct,
+      autoContrast ? 1 : 0,
+      smooth ? 1 : 0,
+      shapeRows,
+      shapeCols,
+    ].join("|");
+    const visibleFrames = new Set(renderEntries.map(({ frame }) => frame));
+    canvasDrawCacheRef.current.forEach((_, frame) => {
+      if (!visibleFrames.has(frame)) canvasDrawCacheRef.current.delete(frame);
+    });
+    renderEntries.forEach(({ frame, panel }, idx) => {
       const canvas = canvasRefs.current[idx];
       if (!canvas) return;
+      const resized = canvas.width !== shapeCols || canvas.height !== shapeRows;
       if (canvas.width !== shapeCols) canvas.width = shapeCols;
       if (canvas.height !== shapeRows) canvas.height = shapeRows;
       const ctx = canvas.getContext("2d");
       if (!ctx) return;
+      if (!panel) {
+        ctx.clearRect(0, 0, shapeCols, shapeRows);
+        canvasDrawCacheRef.current.delete(frame);
+        return;
+      }
+      const previous = canvasDrawCacheRef.current.get(frame);
+      if (!resized && previous?.canvas === canvas && previous.panel === panel && previous.styleKey === styleKey) return;
       ctx.imageSmoothingEnabled = smooth;
       if (smooth) ctx.imageSmoothingQuality = "high";
 
@@ -1494,8 +1554,45 @@ function CompareVirtualGrid({
       const imageData = ctx.createImageData(shapeCols, shapeRows);
       applyColormap(scaled, imageData.data, lut, vmin, vmax);
       ctx.putImageData(imageData, 0, 0);
+      canvasDrawCacheRef.current.set(frame, { canvas, panel, styleKey });
     });
+
+    const expected = progressivePage?.expectedIndices ?? [];
+    const drawnExpectedIndices = expected.filter((frame) => {
+      const currentPanel = panelByFrame.get(frame);
+      const drawn = canvasDrawCacheRef.current.get(frame);
+      return Boolean(currentPanel && drawn?.panel === currentPanel && drawn.canvas.isConnected);
+    });
+    const paintRaf = visiblePaintRafRef.current;
+    if (drawnExpectedIndices.length > 0 && paintRaf.beforePaint === 0 && paintRaf.afterPaint === 0) {
+      paintRaf.beforePaint = requestAnimationFrame(() => {
+        paintRaf.beforePaint = 0;
+        paintRaf.afterPaint = requestAnimationFrame(() => {
+          paintRaf.afterPaint = 0;
+          const currentPage = progressivePageForPaintRef.current;
+          if (!currentPage) return;
+          const currentPanels = visiblePanelByFrameRef.current;
+          const paintedIndices = currentPage.expectedIndices.filter((frame) => {
+            const currentPanel = currentPanels.get(frame);
+            const drawn = canvasDrawCacheRef.current.get(frame);
+            return Boolean(currentPanel && drawn?.panel === currentPanel && drawn.canvas.isConnected);
+          });
+          recordComparePageFirstPanelPaint(currentPage, paintedIndices);
+          recordComparePageVisiblePaint(currentPage, paintedIndices);
+        });
+      });
+    }
   }, [autoContrast, colormap, renderEntries, scaleMode, shapeCols, shapeRows, smooth, vmaxPct, vminPct]);
+
+  React.useEffect(() => {
+    return () => {
+      const paintRaf = visiblePaintRafRef.current;
+      if (paintRaf.beforePaint) cancelAnimationFrame(paintRaf.beforePaint);
+      if (paintRaf.afterPaint) cancelAnimationFrame(paintRaf.afterPaint);
+      paintRaf.beforePaint = 0;
+      paintRaf.afterPaint = 0;
+    };
+  }, []);
 
   const displayCount = Math.max(1, renderEntries.length);
   const autoCols = displayCount >= 8 ? 4 : displayCount >= 5 ? 3 : displayCount >= 2 ? 2 : 1;
@@ -1623,7 +1720,7 @@ function CompareVirtualGrid({
 
   React.useEffect(() => {
     const dpr = typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1;
-    renderEntries.forEach((_, idx) => {
+    renderEntries.forEach(({ panel }, idx) => {
       const overlay = overlayRefs.current[idx];
       const tile = tileRefs.current[idx];
       if (!overlay || !tile) return;
@@ -1635,6 +1732,7 @@ function CompareVirtualGrid({
       if (overlay.height !== height) overlay.height = height;
       const ctx = overlay.getContext("2d");
       ctx?.clearRect(0, 0, overlay.width, overlay.height);
+      if (!panel) return;
       if (showScaleBar) {
         const unit = pixelSize > 0 ? pixelUnit || "px" : "px";
         const pxSize = pixelSize > 0 ? pixelSize : 1;
@@ -1668,6 +1766,39 @@ function CompareVirtualGrid({
 
   return (
     <Box sx={{ width: "100%", maxWidth: maxWidthPx > 0 ? `${maxWidthPx}px` : "100%", position: "relative", "@media (max-width: 700px)": { maxWidth: "100%" } }}>
+      {cacheBadge && (
+        <Box
+          role="status"
+          aria-live="polite"
+          data-testid="show4dstem-compare-cache-status"
+          data-show4dstem-cache-tone={cacheBadge.tone}
+          sx={{
+            display: "inline-flex",
+            alignItems: "center",
+            minHeight: 20,
+            mb: 0.5,
+            px: 0.75,
+            py: 0.25,
+            border: `1px solid ${cacheBadge.tone === "warning" ? "#d97706" : cacheBadge.tone === "fresh" ? "#16a34a" : themeColors.border}`,
+            borderRadius: "10px",
+            bgcolor: cacheBadge.tone === "warning"
+              ? "rgba(217,119,6,0.12)"
+              : cacheBadge.tone === "fresh"
+                ? "rgba(22,163,74,0.1)"
+                : themeColors.controlBg,
+            color: cacheBadge.tone === "warning"
+              ? "#d97706"
+              : cacheBadge.tone === "fresh"
+                ? "#16a34a"
+                : themeColors.textMuted,
+            fontSize: 10,
+            fontWeight: 600,
+            lineHeight: 1.2,
+          }}
+        >
+          {cacheBadge.label}
+        </Box>
+      )}
       <Box
         sx={{
           display: "grid",
@@ -1680,7 +1811,15 @@ function CompareVirtualGrid({
           },
         }}
       >
-        {renderEntries.map(({ frame }, localIdx) => {
+        {renderEntries.map(({ frame, panel }, localIdx) => {
+          const loaded = panel !== undefined;
+          const panelPresentation = progressiveComparePanelPresentation(
+            progressivePage ?? null,
+            frame,
+            loaded,
+          );
+          const waiting = !loaded && (progressivePage?.loading ?? false);
+          const placeholderText = waiting ? "Loading" : "Unavailable";
           const active = frame === activeIdx;
           const label = labels && labels.length > frame ? labels[frame] : `Dataset ${frame + 1}`;
           const isStarred = (starred || []).includes(frame);
@@ -1696,13 +1835,16 @@ function CompareVirtualGrid({
               key={`${frame}-${localIdx}`}
               ref={(node: HTMLDivElement | null) => { tileRefs.current[localIdx] = node; }}
               role="button"
-              aria-label={`Show4DSTEM multiple panel ${frame + 1}`}
+              aria-label={`Show4DSTEM multiple panel ${frame + 1}${panelPresentation.labelSuffix}`}
+              aria-busy={panelPresentation.busy}
+              aria-disabled={panelPresentation.disabled}
+              data-show4dstem-panel-cache={panelPresentation.cached ? "cached" : loaded ? "fresh" : "empty"}
               tabIndex={0}
-              draggable={reorderMode}
+              draggable={loaded && reorderMode}
               onDoubleClick={handleCompareDoubleClick}
               onPointerDown={(event) => {
                 const target = event.target instanceof Element ? event.target : null;
-                if (reorderMode || target?.closest("button")) return;
+                if (!loaded || reorderMode || target?.closest("button")) return;
                 try { event.currentTarget.setPointerCapture(event.pointerId); } catch {}
                 isDraggingPositionRef.current = true;
                 setIsDraggingPosition(true);
@@ -1727,6 +1869,7 @@ function CompareVirtualGrid({
                 setIsDraggingPosition(false);
               }}
               onClick={() => {
+                if (!loaded) return;
                 if (!reorderMode) {
                   onSelect(frame);
                   return;
@@ -1743,6 +1886,7 @@ function CompareVirtualGrid({
                 onPendingMoveFrameChange(null);
               }}
               onKeyDown={(event) => {
+                if (!loaded) return;
                 if (event.key === "Enter" || event.key === " ") {
                   event.preventDefault();
                   if (reorderMode) {
@@ -1760,24 +1904,24 @@ function CompareVirtualGrid({
                 }
               }}
               onDragStart={(event) => {
-                if (!reorderMode) return;
+                if (!loaded || !reorderMode) return;
                 event.dataTransfer.effectAllowed = "move";
                 event.dataTransfer.setData("text/plain", String(frame));
                 setPreviewIndices([...displayIndices]);
                 onDragFrameChange(frame);
               }}
               onDragEnter={(event) => {
-                if (!reorderMode || draggingFrame == null || draggingFrame === frame) return;
+                if (!loaded || !reorderMode || draggingFrame == null || draggingFrame === frame) return;
                 event.preventDefault();
                 movePreviewFrame(draggingFrame, frame);
               }}
               onDragOver={(event) => {
-                if (!reorderMode) return;
+                if (!loaded || !reorderMode) return;
                 event.preventDefault();
                 event.dataTransfer.dropEffect = "move";
               }}
               onDrop={(event) => {
-                if (!reorderMode) return;
+                if (!loaded || !reorderMode) return;
                 event.preventDefault();
                 const rawFrame = event.dataTransfer.getData("text/plain");
                 const dragFrame = rawFrame ? Number(rawFrame) : draggingFrame;
@@ -1798,7 +1942,7 @@ function CompareVirtualGrid({
                 border: "none",
                 boxSizing: "border-box",
                 outline: "none",
-                cursor: reorderMode ? "grab" : "crosshair",
+                cursor: loaded ? (reorderMode ? "grab" : "crosshair") : waiting ? "progress" : "default",
                 overflow: "hidden",
                 touchAction: reorderMode ? "auto" : "none",
                 opacity: isDragging ? 0.45 : 1,
@@ -1852,8 +1996,31 @@ function CompareVirtualGrid({
                   height: imageHeight,
                   imageRendering: smooth ? "auto" : "pixelated",
                   pointerEvents: "none",
+                  opacity: loaded ? 1 : 0,
+                  transition: "opacity 160ms ease",
                 }}
               />
+              <Box
+                aria-hidden="true"
+                data-show4dstem-panel-loading={loaded ? "false" : "true"}
+                sx={{
+                  position: "absolute",
+                  inset: 0,
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  bgcolor: themeColors.bgAlt,
+                  color: themeColors.textMuted,
+                  fontSize: 10,
+                  letterSpacing: "0.02em",
+                  opacity: loaded ? 0 : 1,
+                  transition: "opacity 160ms ease",
+                  pointerEvents: "none",
+                  zIndex: 1,
+                }}
+              >
+                {placeholderText}
+              </Box>
               <canvas
                 ref={(node) => { overlayRefs.current[localIdx] = node; }}
                 style={{
@@ -1889,7 +2056,7 @@ function CompareVirtualGrid({
               >
                 {label}
               </Box>
-              {panelChromeVisible && reorderMode && (
+              {loaded && panelChromeVisible && reorderMode && (
                 <Box
                   sx={{
                     position: "absolute",
@@ -1911,7 +2078,7 @@ function CompareVirtualGrid({
                   <DragIndicatorIcon sx={{ fontSize: 18 }} />
                 </Box>
               )}
-              {panelChromeVisible && (
+              {loaded && panelChromeVisible && (
                 <Tooltip title={(isStarred ? "Unstar " : "Star ") + label}>
                   <IconButton
                     size="small"
@@ -1956,7 +2123,7 @@ function CompareVirtualGrid({
                   </IconButton>
                 </Tooltip>
               )}
-              {panelChromeVisible && (
+              {loaded && panelChromeVisible && (
                 <Tooltip title={renderEntries.length <= 1 ? "Cannot hide the last visible panel" : `Hide ${label}`}>
                   <IconButton
                     size="small"
@@ -2023,6 +2190,7 @@ function CompareVirtualGrid({
 function Show4DSTEM() {
   // Direct model access for batched updates
   const model = useModel();
+  const folderWatchLive = useFolderWatchModelLive(model);
   React.useEffect(() => preserveRestoredWidgetModelsOnSave(model), [model]);
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -2044,6 +2212,8 @@ function Show4DSTEM() {
   const [kCalibrated] = useModelState<boolean>("k_calibrated");
   const [title] = useModelState<string>("title");
   const [showTitle] = useModelState<boolean>("show_title");
+  const [folderWatchState] = useModelState<string>("folder_watch_state");
+  const [folderWatchDetail] = useModelState<string>("folder_watch_detail");
   const [gpuMemoryLabel] = useModelState<string>("gpu_memory_label");
   const [memoryWarning] = useModelState<string>("memory_warning");
 
@@ -2103,6 +2273,216 @@ function Show4DSTEM() {
   const [comparePanelOrder, setComparePanelOrder] = useModelState<number[]>("compare_panel_order");
   const [compareHiddenPanels, setCompareHiddenPanels] = useModelState<number[]>("compare_hidden_panels");
   const [compareStarredPanels, setCompareStarredPanels] = useModelState<number[]>("compare_starred_panels");
+  const [comparePageProgressiveEnabled] = useModelState<boolean>("compare_page_progressive_enabled");
+  const [comparePageExpectedIndices] = useModelState<number[]>("compare_page_expected_indices");
+  const [comparePageLoading] = useModelState<boolean>("compare_page_loading");
+  const [comparePageGeneration] = useModelState<number>("compare_page_generation");
+  const [comparePagePanelBytes] = useModelState<DataView>("compare_page_panel_bytes");
+  const [comparePagePanelFrameIdx] = useModelState<number>("compare_page_panel_frame_idx");
+  const [comparePagePanelSlot] = useModelState<number>("compare_page_panel_slot");
+  const [comparePagePanelSequence] = useModelState<number>("compare_page_panel_sequence");
+  const [comparePagePanelCached] = useModelState<boolean>("compare_page_panel_cached");
+  const [comparePageCachedIndices] = useModelState<number[]>("compare_page_cached_indices");
+  const [comparePageCacheState] = useModelState<string>("compare_page_cache_state");
+  const [progressiveComparePage, setProgressiveComparePage] = React.useState<ProgressiveComparePage | null>(null);
+  const progressiveCompareGenerationRef = React.useRef<string | null>(null);
+  const progressiveCompareLastNumericGenerationRef = React.useRef<number | null>(null);
+  const progressiveComparePendingGenerationRef = React.useRef(0);
+
+  React.useEffect(() => {
+    const handler = (
+      content: ComparePageMessage,
+      buffers?: Array<DataView | ArrayBuffer | Uint8Array>,
+    ) => {
+      const type = String(content?.type || "");
+      if (type === "compare_page_start") {
+        const incomingGeneration = compareMessageGeneration(content);
+        if (incomingGeneration === null) return;
+        const incomingPageValue = content.page_idx ?? content.page;
+        const incomingPage = Number(incomingPageValue);
+        const currentPage = Math.max(0, Math.round(Number(model.get("compare_page_idx")) || 0));
+        if (incomingPageValue !== undefined && Number.isFinite(incomingPage) && Math.round(incomingPage) !== currentPage) {
+          recordComparePageStaleDrop();
+          return;
+        }
+        const nextNumber = Number(incomingGeneration);
+        const lastNumber = progressiveCompareLastNumericGenerationRef.current;
+        if (
+          Number.isFinite(nextNumber)
+          && lastNumber !== null
+          && nextNumber <= lastNumber
+        ) {
+          recordComparePageStaleDrop();
+          return;
+        }
+        const next = beginProgressiveComparePage(content);
+        if (!next) return;
+        progressiveCompareGenerationRef.current = next.generation;
+        if (Number.isFinite(nextNumber)) progressiveCompareLastNumericGenerationRef.current = nextNumber;
+        setProgressiveComparePage((current) => retainCachedProgressiveComparePanels(next, current));
+        return;
+      }
+
+      if (type !== "compare_panel" && type !== "compare_page_complete") return;
+      const generation = compareMessageGeneration(content);
+      if (generation === null || generation !== progressiveCompareGenerationRef.current) {
+        recordComparePageStaleDrop();
+        return;
+      }
+      setProgressiveComparePage((current) => {
+        if (!current || current.generation !== generation) return current;
+        if (type === "compare_panel") {
+          return mergeProgressiveComparePanel(
+            current,
+            content,
+            buffers,
+            Math.max(1, shapeRows * shapeCols),
+          ) ?? current;
+        }
+        return completeProgressiveComparePage(current, content) ?? current;
+      });
+    };
+    model.on("msg:custom", handler);
+    return () => model.off("msg:custom", handler);
+  }, [model, shapeCols, shapeRows]);
+
+  React.useEffect(() => {
+    const sequence = Math.max(0, Math.round(Number(comparePagePanelSequence) || 0));
+    const frame = Math.round(Number(comparePagePanelFrameIdx));
+    if (sequence <= 0 || frame < 0 || !comparePagePanelBytes || comparePagePanelBytes.byteLength === 0) return;
+    const generation = String(Math.round(Number(comparePageGeneration) || 0));
+    const page = Math.max(0, Math.round(Number(model.get("compare_page_idx")) || 0));
+    setProgressiveComparePage((current) => {
+      const expected = Array.isArray(comparePageExpectedIndices) ? comparePageExpectedIndices : [];
+      const base = current && current.generation === generation
+        ? current
+        : {
+            generation,
+            page,
+            expectedIndices: [...expected],
+            panels: new Map<number, Float32Array>(),
+            cachedIndices: new Set<number>(),
+            cacheState: "off" as const,
+            loading: true,
+            complete: false,
+          };
+      const withCacheMetadata = mergeProgressiveCompareCacheMetadata(
+        base,
+        comparePageCachedIndices,
+        comparePageCacheState,
+      );
+      return mergeProgressiveComparePanel(
+        withCacheMetadata,
+        {
+          type: "compare_panel",
+          generation,
+          page_idx: page,
+          frame_idx: frame,
+          slot: Math.round(Number(comparePagePanelSlot) || 0),
+          cached: Boolean(comparePagePanelCached),
+        },
+        [comparePagePanelBytes],
+        Math.max(1, shapeRows * shapeCols),
+      ) ?? withCacheMetadata;
+    });
+  }, [
+    comparePageCachedIndices,
+    comparePageCacheState,
+    comparePageExpectedIndices,
+    comparePageGeneration,
+    comparePagePanelBytes,
+    comparePagePanelCached,
+    comparePagePanelFrameIdx,
+    comparePagePanelSequence,
+    comparePagePanelSlot,
+    model,
+    shapeCols,
+    shapeRows,
+  ]);
+
+  React.useEffect(() => {
+    if (!comparePageProgressiveEnabled) {
+      progressiveCompareGenerationRef.current = null;
+      setProgressiveComparePage(null);
+    }
+  }, [comparePageProgressiveEnabled]);
+
+  React.useEffect(() => {
+    if (!comparePageProgressiveEnabled) return;
+    const generation = String(Math.round(Number(comparePageGeneration) || 0));
+    const expected = Array.isArray(comparePageExpectedIndices) ? comparePageExpectedIndices : [];
+    const page = Math.max(0, Math.round(Number(model.get("compare_page_idx")) || 0));
+    setProgressiveComparePage((current) => {
+      if (current?.generation.startsWith("pending:") && current.generation !== generation) {
+        return current;
+      }
+      if (!current && expected.length === 0) return current;
+      const base = current && current.generation === generation
+        ? {
+            ...current,
+            expectedIndices: expected.length > 0 ? [...expected] : current.expectedIndices,
+          }
+        : {
+            generation,
+            page,
+            expectedIndices: [...expected],
+            panels: new Map<number, Float32Array>(),
+            cachedIndices: new Set<number>(),
+            cacheState: "off" as const,
+            loading: Boolean(comparePageLoading),
+            complete: false,
+          };
+      progressiveCompareGenerationRef.current = generation;
+      return mergeProgressiveCompareCacheMetadata(
+        base,
+        comparePageCachedIndices,
+        comparePageCacheState,
+      );
+    });
+  }, [
+    comparePageCachedIndices,
+    comparePageCacheState,
+    comparePageExpectedIndices,
+    comparePageGeneration,
+    comparePageLoading,
+    comparePageProgressiveEnabled,
+    model,
+  ]);
+
+  React.useEffect(() => {
+    if (comparePageLoading) return;
+    const generation = String(Math.round(Number(comparePageGeneration) || 0));
+    const expected = Array.isArray(comparePageExpectedIndices) ? comparePageExpectedIndices : [];
+    const durable = Array.isArray(comparePanelIndices) ? comparePanelIndices : [];
+    if (shouldClearProgressiveComparePage(false, expected, durable)) {
+      progressiveCompareGenerationRef.current = null;
+      setProgressiveComparePage(null);
+      return;
+    }
+    setProgressiveComparePage((current) => {
+      if (!current || current.generation !== generation || current.complete) return current;
+      return {
+        ...mergeProgressiveCompareCacheMetadata(
+          current,
+          comparePageCachedIndices,
+          comparePageCacheState,
+        ),
+        expectedIndices: reconcileCompletedCompareIndices(
+          current.expectedIndices,
+          durable,
+        ),
+        loading: false,
+        complete: true,
+      };
+    });
+  }, [
+    comparePageCachedIndices,
+    comparePageCacheState,
+    comparePageExpectedIndices,
+    comparePageGeneration,
+    comparePageLoading,
+    comparePanelIndices,
+  ]);
 
   // Profile line state (synced with Python)
   const [profileLine, setProfileLine] = useModelState<{row: number; col: number}[]>("profile_line");
@@ -2803,6 +3183,39 @@ function Show4DSTEM() {
     }
     return [...order];
   }, [comparePanelOrder, nFrames]);
+  const requestComparePage = React.useCallback((page: number) => {
+    const next = Math.max(0, Math.min(activeComparePageCount - 1, Math.round(Number(page) || 0)));
+    if (next === activeComparePageIdx) return;
+    const hidden = new Set(
+      (compareHiddenPanels || []).filter((idx) => Number.isInteger(idx) && idx >= 0 && idx < nFrames),
+    );
+    const ordered = normalizedCompareOrder();
+    const pageSize = Math.max(1, Math.round(Number(compareMaxPanels || ordered.length || 1)));
+    const pendingGeneration = comparePageProgressiveEnabled
+      ? `pending:${++progressiveComparePendingGenerationRef.current}`
+      : "";
+    const pending = beginPendingProgressiveComparePage(
+      Boolean(comparePageProgressiveEnabled),
+      pendingGeneration,
+      next,
+      ordered,
+      [...hidden],
+      pageSize,
+    );
+    progressiveCompareGenerationRef.current = pending?.generation ?? null;
+    setProgressiveComparePage(pending);
+    if (pending) recordComparePageClick(next);
+    setComparePageIdx(next);
+  }, [
+    activeComparePageCount,
+    activeComparePageIdx,
+    compareHiddenPanels,
+    compareMaxPanels,
+    comparePageProgressiveEnabled,
+    nFrames,
+    normalizedCompareOrder,
+    setComparePageIdx,
+  ]);
   const comparePanelLabel = React.useCallback((idx: number) => {
     return frameLabels && frameLabels.length > idx && frameLabels[idx]
       ? frameLabels[idx]
@@ -5907,6 +6320,11 @@ function Show4DSTEM() {
       onMouseDownCapture={handleRootMouseDownCapture}
       sx={{ p: 2, bgcolor: themeColors.bg, color: themeColors.text, outline: "none", borderRadius: "2px", width: "100%", maxWidth: "100%", boxSizing: "border-box", "@media (max-width: 700px)": { p: 0, overflowX: "hidden", ".jp-OutputArea-output &, .jp-OutputArea-child &": { width: "calc(100vw - 96px)", maxWidth: "calc(100vw - 96px)" } } }}
     >
+      <FolderWatchBadge
+        state={folderWatchState}
+        detail={folderWatchDetail}
+        live={folderWatchLive}
+      />
       {/* HEADER */}
       {showTitle && <Typography variant="h6" sx={{ ...typo.title, mb: `${SPACING.SM}px` }}>
         {title || "4D-STEM Explorer"}
@@ -6276,7 +6694,7 @@ function Show4DSTEM() {
                     disabled={activeComparePageIdx <= 0}
                     onClick={() => {
                       setComparePagePlaying(false);
-                      setComparePageIdx(Math.max(0, activeComparePageIdx - 1));
+                      requestComparePage(activeComparePageIdx - 1);
                     }}
                     sx={{ color: activeComparePageIdx <= 0 ? themeColors.textMuted : themeColors.accent, p: 0.2 }}
                   >
@@ -6291,7 +6709,7 @@ function Show4DSTEM() {
                         return;
                       }
                       if (activeComparePageIdx >= activeComparePageCount - 1) {
-                        setComparePageIdx(0);
+                        requestComparePage(0);
                       }
                       setComparePagePlaying(true);
                     }}
@@ -6331,7 +6749,7 @@ function Show4DSTEM() {
                           aria-pressed={active}
                           onClick={() => {
                             setComparePagePlaying(false);
-                            setComparePageIdx(item);
+                            requestComparePage(item);
                           }}
                           sx={{
                             ...compactButton,
@@ -6355,7 +6773,7 @@ function Show4DSTEM() {
                     disabled={activeComparePageIdx >= activeComparePageCount - 1}
                     onClick={() => {
                       setComparePagePlaying(false);
-                      setComparePageIdx(Math.min(activeComparePageCount - 1, activeComparePageIdx + 1));
+                      requestComparePage(activeComparePageIdx + 1);
                     }}
                     sx={{ color: activeComparePageIdx >= activeComparePageCount - 1 ? themeColors.textMuted : themeColors.accent, p: 0.2 }}
                   >
@@ -6474,6 +6892,7 @@ function Show4DSTEM() {
               bytes={compareVirtualImageBytes}
               count={comparePanelCount || 0}
               indices={comparePanelIndices || []}
+              progressivePage={progressiveComparePage}
               labels={frameLabels || []}
               activeIdx={frameIdx}
               shapeRows={shapeRows}

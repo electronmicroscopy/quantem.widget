@@ -27,6 +27,7 @@ from quantem.widget._image_folder import (
     WatchedImageFolder,
     WatchedImageFolderMixin,
 )
+from quantem.widget._folder_watch_status import FOLDER_WATCH_STATE_VALUES
 from quantem.widget.utils.array import _b64_safe, _resize_image, to_numpy
 from quantem.widget.utils.state_io import resolve_widget_version, save_state_file, unwrap_state_payload
 from quantem.widget.utils.static_fallback import StaticFallbackMixin
@@ -447,6 +448,9 @@ class Colormap(StrEnum):
     GRAY = "gray"
 
 
+_MAX_PANEL_PLAYBACK_FPS = 30.0
+
+
 class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     """
     2D image comparison viewer with optional local panel stacks and analysis.
@@ -461,6 +465,10 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     data : array_like
         2D array (height, width) for single image, or
         3D array (N, height, width) for multiple images displayed as gallery.
+        A Python list may mix 2D images with 3D ``(frames, height, width)``
+        arrays. Each grayscale 3D list item is one gallery panel with an
+        independent slider, playback state, frame count, and current frame;
+        local frame counts do not need to match between panels.
         RGB images are first-class: inside a LIST input, any item shaped
         ``(H, W, 3)`` / ``(H, W, 4)`` is treated as an RGB(A) color image
         (uint8 or float in [0, 1]; alpha is dropped). A bare 3-D ARRAY keeps
@@ -485,7 +493,9 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         Unit string per axis. Scalar broadcasts to both. Common: ``"A"``,
         ``"nm"``, ``"pixels"``. Defaults to ``["pixels", "pixels"]``.
     show_fft : bool, default False
-        Show FFT and histogram panels.
+        Show FFT and histogram panels. Every interactive FFT panel includes its
+        current browser-side zoom multiplier (for example ``2.0×`` or
+        ``5.0×``), including independently zoomed gallery FFTs.
     fft_metrics : bool, default True
         Show compact FFT quality labels inside FFT panels when FFT is visible.
         The frontend computes these labels from the cached FFT magnitude and
@@ -524,8 +534,13 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         Number of columns in gallery mode.
     panel_frame_indices : sequence of int, optional
         Initial frame for every panel when ``data`` is a list containing local
-        3-D stacks. Static 2-D panels accept only ``0``. Negative indices follow
-        Python indexing, so ``-1`` starts a stack on its final frame.
+        3-D stacks. Each value is resolved against that panel's own frame count.
+        Static 2-D panels accept only ``0``. Negative indices follow Python
+        indexing, so ``-1`` starts a stack on its final frame.
+    panel_playback_fps : float, default 10
+        Playback speed shared by the independent local-stack play buttons.
+        Configure it at construction without adding another toolbar control.
+        Values above 30 are capped at the browser playback budget.
     size : int, default 0
         Canvas rendering size in CSS pixels (the on-screen width of each image).
         ``0`` uses the frontend default: 500 px for a single image, 300 px per
@@ -588,6 +603,18 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     >>> haadf = np.random.rand(26, 256, 256)
     >>> Show2D([np.random.rand(256, 256), haadf],
     ...        labels=["EDS map", "HAADF"], panel_frame_indices=[0, -1])
+
+    Four tomography reconstructions with independent slice counts and sliders:
+
+    >>> reconstructions = [
+    ...     np.random.rand(n_slices, 64, 64)
+    ...     for n_slices in (8, 12, 16, 20)
+    ... ]
+    >>> labels = ["baseline", "regularized", "fine z", "alternative"]
+    >>> w = Show2D(reconstructions, labels=labels,
+    ...            panel_frame_indices=[3, 5, 7, -1],
+    ...            panel_playback_fps=4, ncols=2, show_fft=True)
+    >>> _ = w.set_panel_frame("fine z", 8)
 
     quantem ``Dataset2d``: title, sampling, units auto-extracted:
 
@@ -664,6 +691,13 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     # =========================================================================
     widget_version = traitlets.Unicode("unknown").tag(sync=True)
     n_images = traitlets.Int(1).tag(sync=True)
+    folder_waiting = traitlets.Bool(False).tag(sync=True)
+    folder_status = traitlets.Unicode("").tag(sync=True)
+    folder_watch_state = traitlets.Enum(
+        values=FOLDER_WATCH_STATE_VALUES,
+        default_value="hidden",
+    ).tag(sync=True)
+    folder_watch_detail = traitlets.Unicode("").tag(sync=True)
     n_pages = traitlets.Int(1).tag(sync=True)
     page_idx = traitlets.Int(0).tag(sync=True)
     panels_per_page = traitlets.Int(0).tag(sync=True)
@@ -681,6 +715,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     # duplicated in panel_stack_bytes; offsets are -1 for those panels.
     panel_frame_counts = traitlets.List(traitlets.Int(), default_value=[]).tag(sync=True)
     panel_frame_indices = traitlets.List(traitlets.Int(), default_value=[]).tag(sync=True)
+    panel_playback_fps = traitlets.Float(10.0).tag(sync=True)
     panel_stack_offsets = traitlets.List(traitlets.Int(), default_value=[]).tag(sync=True)
     panel_stack_bytes = traitlets.Bytes(b"").tag(sync=True)
     _panel_stack_mins = traitlets.List(trait=traitlets.Float(), default_value=[]).tag(sync=True)
@@ -897,18 +932,32 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             interval=watch_interval,
             mode="panels",
         )
-        arrays, records = source.read_initial()
+        arrays, records = source.read_initial(
+            allow_empty=watch,
+            require_unchanged_followup=watch,
+        )
         explicit_calibration = any(
             key in kwargs
             for key in ("sampling", "units", "pixel_size", "pixel_sizes", "pixel_unit")
         )
         kwargs.setdefault("title", source.folder.name)
         kwargs.setdefault("verbose", False)
-        widget = cls(
-            arrays,
-            labels=[source.label(record.path) for record in records],
-            **kwargs,
-        )
+        if arrays:
+            initial_data = arrays
+            initial_labels = [source.label(record.path) for record in records]
+        else:
+            display_bin = kwargs.get("display_bin", "auto")
+            placeholder_side = (
+                max(1, int(display_bin))
+                if isinstance(display_bin, int) and not isinstance(display_bin, bool)
+                else 1
+            )
+            initial_data = [np.zeros((placeholder_side, placeholder_side), dtype=np.float32)]
+            initial_labels = [""]
+        widget = cls(initial_data, labels=initial_labels, **kwargs)
+        widget._folder_display_bin_request = kwargs.get("display_bin", "auto")
+        if not arrays:
+            widget._set_folder_waiting_empty_state()
         source.attach(widget, explicit_calibration=explicit_calibration)
         if watch:
             widget.watch_folder(interval=watch_interval)
@@ -942,6 +991,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         vmax: float | list | None = None,
         ncols: int = 3,
         panel_frame_indices: Sequence[int] | None = None,
+        panel_playback_fps: float = 10.0,
         size: int = 0,
         panel_width_px: int = 0,
         smooth: bool = False,
@@ -1056,6 +1106,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 log_scale=log_scale, auto_contrast=auto_contrast, offline=offline,
                 vmin=vmin, vmax=vmax,
                 ncols=ncols, panel_frame_indices=panel_frame_indices,
+                panel_playback_fps=panel_playback_fps,
                 size=size, smooth=smooth, zoom=zoom,
                 zoom_row=zoom_row, zoom_col=zoom_col,
                 link_zoom=link_zoom, link_pan=link_pan, link_contrast=link_contrast,
@@ -1071,7 +1122,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                    scale_bar_visible, show_fft, fft_window, fft_metrics,
                    show_controls, controls_collapsed, show_stats, debug, log_scale, auto_contrast, offline,
                    vmin, vmax,
-                   ncols, panel_frame_indices, size, smooth, zoom, zoom_row, zoom_col,
+                   ncols, panel_frame_indices, panel_playback_fps, size, smooth, zoom, zoom_row, zoom_col,
                    link_zoom, link_pan, link_contrast, diff_mode, overlay, view_box,
                    display_bin, hidden_panels, starred, panel_order, show_panel_titles,
                    panel_title_font_size, gallery_gap_px, verbose, state, _t0):
@@ -1380,6 +1431,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             self.vmin = vmin
             self.vmax = vmax
         self.ncols = ncols
+        self.panel_playback_fps = panel_playback_fps
 
         # Auto-bin for display: keep full-res in _data, send binned to JS.
         # GPU memory budget: ~2 GB for display buffers (128 MB per image at 4K).
@@ -1531,6 +1583,20 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             normalized.append(index)
         return normalized
 
+    @traitlets.validate("panel_playback_fps")
+    def _validate_panel_playback_fps(self, proposal: dict) -> float:
+        """Reject invalid local-stack playback rates and cap browser work."""
+        value = float(proposal["value"])
+        if not math.isfinite(value):
+            raise traitlets.TraitError(
+                f"panel_playback_fps must be finite, got {value}"
+            )
+        if value <= 0:
+            raise traitlets.TraitError(
+                f"panel_playback_fps must be > 0, got {value}"
+            )
+        return min(value, _MAX_PANEL_PLAYBACK_FPS)
+
     @traitlets.observe("panel_frame_indices")
     def _on_panel_frame_indices_changed(self, change) -> None:
         """Keep Python analysis/detail state aligned with browser-local scrubbing."""
@@ -1584,6 +1650,8 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     def _validate_hidden_panels(self, proposal: dict) -> list[int]:
         """Normalize hidden image indices and keep at least one image visible."""
         n_img = int(self.n_images)
+        if n_img <= 0:
+            return []
         clean: list[int] = []
         seen: set[int] = set()
         for value in proposal["value"]:
@@ -1773,6 +1841,44 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         except (ValueError, KeyError):
             pass
 
+    def _set_folder_waiting_empty_state(self) -> None:
+        """Represent an acquisition folder with no readable image yet."""
+        empty = np.empty((0, 0, 0), dtype=np.float32)
+        with self.hold_sync():
+            self._data = empty
+            self._display_data = empty
+            self._data_original = []
+            self._panel_stacks = []
+            self._panel_stacks_original = []
+            self._display_panel_stacks = []
+            self._rgb_frames = []
+            self._display_rgb = []
+            self.n_images = 0
+            self.height = 0
+            self.width = 0
+            self.labels = []
+            self.is_rgb = []
+            self.starred = []
+            self.hidden_panels = []
+            self.panel_order = []
+            self.image_rotations = []
+            self.panel_frame_counts = []
+            self.panel_frame_indices = []
+            self.panel_stack_offsets = []
+            self.panel_stack_bytes = b""
+            self._panel_stack_mins = []
+            self._panel_stack_maxs = []
+            self.frame_bytes = b""
+            self.stats_mean = []
+            self.stats_min = []
+            self.stats_max = []
+            self.stats_std = []
+            self._offline_mins = []
+            self._offline_maxs = []
+            self._static_fallback_jpeg = ""
+            self.selected_idx = 0
+            self.folder_waiting = True
+
     def set_image(
         self,
         data,
@@ -1914,6 +2020,26 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         new_paths = [record.path for record in new_records]
         old_index = {path: idx for idx, path in enumerate(old_paths)}
         new_index = {path: idx for idx, path in enumerate(new_paths)}
+        old_display_bin = max(1, int(getattr(self, "_display_bin", 1)))
+        if getattr(self, "_folder_display_bin_request", None) == "auto":
+            sample = changed_arrays.get(new_paths[0])
+            if sample is None and old_paths:
+                sample = np.asarray(self._panel_stacks_original[old_index[new_paths[0]]][0])
+            if sample is not None:
+                self._display_bin = self._folder_auto_display_bin(
+                    len(new_paths),
+                    int(sample.shape[-2]),
+                    int(sample.shape[-1]),
+                )
+        new_display_bin = max(1, int(getattr(self, "_display_bin", 1)))
+        coordinate_scale = old_display_bin / new_display_bin
+
+        if not old_paths:
+            self.set_image(
+                [changed_arrays[path] for path in new_paths],
+                labels=[self._folder_source.label(path) for path in new_paths],
+            )
+            return
 
         originals = list(getattr(self, "_panel_stacks_original", []))
         arrays: list[np.ndarray] = []
@@ -1959,9 +2085,13 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         roi_list = list(self.roi_list)
         roi_selected_idx = int(self.roi_selected_idx)
         profile_line = list(self.profile_line)
-        view_box = list(self.view_box)
-        zoom_row = self.zoom_row
-        zoom_col = self.zoom_col
+        view_box = [float(value) * coordinate_scale for value in self.view_box]
+        zoom_row = (
+            None if self.zoom_row is None else float(self.zoom_row) * coordinate_scale
+        )
+        zoom_col = (
+            None if self.zoom_col is None else float(self.zoom_col) * coordinate_scale
+        )
 
         def remap_panel_values(values):
             if values is None or len(values) != len(old_paths):
@@ -1993,6 +2123,43 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 self.vmins = vmins
             if vmaxs is not None:
                 self.vmaxs = vmaxs
+
+    def _folder_auto_display_bin(
+        self,
+        n_images: int,
+        height: int,
+        width: int,
+    ) -> int:
+        """Resolve ``display_bin='auto'`` for the current watched inventory."""
+        factor = 1
+        per_image_mb = (height * width * 4 * 3) / (1024 * 1024)
+        total_mb = int(n_images) * per_image_mb
+        if total_mb > self._GPU_DISPLAY_BUDGET_MB:
+            for candidate in (2, 4, 8):
+                if total_mb / (candidate * candidate) <= self._GPU_DISPLAY_BUDGET_MB:
+                    factor = candidate
+                    break
+            else:
+                factor = 8
+        panel_bytes = height * width * 4
+        if panel_bytes > self._WIRE_BUDGET_BYTES_PER_PANEL:
+            preview_floor_px = 512.0 if int(n_images) >= 16 else 1024.0
+            canvas_css_px = (
+                float(self.size)
+                if int(self.size) > 0
+                else 300.0
+                if int(n_images) > 1
+                else 500.0
+            )
+            preview_px = max(preview_floor_px, 2.0 * canvas_css_px)
+            wire_bin = max(2, math.ceil(max(height, width) / preview_px))
+            while (
+                panel_bytes / (wire_bin * wire_bin)
+                > self._WIRE_BUDGET_BYTES_PER_PANEL
+            ):
+                wire_bin += 1
+            factor = max(factor, wire_bin)
+        return factor
 
     def __repr__(self) -> str:
         if self.n_images > 1:
@@ -2300,7 +2467,47 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                     state["_static_fallback_mime"] = self._static_fallback_mime
             for heavy_key in self._UNSAVED_HEAVY_KEYS:
                 state.pop(heavy_key, None)
+        if (
+            key is None
+            and not getattr(self, "_initial_live_mount_state", False)
+            and state.get("folder_watch_state") in {
+            "watching",
+            "updating",
+            "waiting",
+            "error",
+            }
+        ):
+            # Saved widget state retains pixels, not the Python watcher thread.
+            # Keep snapshots truthful even when exported while acquisition is
+            # still running in the current kernel.
+            state["folder_watch_state"] = "stopped"
+            state["folder_watch_detail"] = (
+                "Folder watcher is not running in saved widget state. "
+                "Re-run the cell to resume live folder updates."
+            )
+            if state.get("folder_waiting"):
+                state["folder_status"] = (
+                    "No completed image was captured in this saved widget. "
+                    "Re-run the cell to resume folder watching."
+                )
         return state
+
+    def _with_initial_live_mount_state(self, fn, *args, **kwargs):
+        """Keep live watcher state truthful during the first display handshake."""
+        self._initial_live_mount_state = True
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            self._initial_live_mount_state = False
+
+    def _repr_mimebundle_(self, **kwargs):
+        return self._with_initial_live_mount_state(
+            super()._repr_mimebundle_,
+            **kwargs,
+        )
+
+    def _ipython_display_(self):
+        return self._with_initial_live_mount_state(super()._ipython_display_)
 
     # Colormaps the frontend treats as sequential; a signed diff panel switches
     # to a diverging map (RdBu) because zero must sit at the visual midpoint.
@@ -2748,6 +2955,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             "hidden_page_slots": list(self.hidden_page_slots),
             "panel_order": list(self.panel_order),
             "panel_frame_indices": list(self.panel_frame_indices),
+            "panel_playback_fps": float(self.panel_playback_fps),
             "show_panel_titles": self.show_panel_titles,
             "panel_title_font_size": self.panel_title_font_size,
             "show_stats": self.show_stats,
@@ -2993,6 +3201,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             vmax=self.vmax if self.vmax is not None else self.vmaxs,
             ncols=self.ncols,
             panel_frame_indices=list(self.panel_frame_indices),
+            panel_playback_fps=self.panel_playback_fps,
             size=self.size,
             smooth=self.smooth,
             zoom=self.initial_zoom,

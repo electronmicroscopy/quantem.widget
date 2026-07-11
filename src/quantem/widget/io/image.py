@@ -102,28 +102,35 @@ def read_images(
         return list(results)
 
 
-def read_image(path: str | Path) -> Dataset2d:
-    """Return a :class:`Dataset2d` from a single 2D image, any common format.
+def read_image(path: str | Path) -> Dataset2d | RgbImage:
+    """Return a single image from disk (grayscale or true-color RGB).
 
-    One reader for every survey-image format the lab produces, so loading is
-    always ``ds = io.read_image(path)`` and the result is a calibrated
-    :class:`Dataset2d` you carry around (``ds.array``, ``ds.sampling``):
+    One reader for every survey-image format the lab produces:
 
     - ``.npy`` - raw array, no calibration.
     - ``.emd`` - Velox HAADF (image under ``Data/Image/<hash>/Data`` with a JSON
       metadata blob carrying the pixel size); falls back to the largest 2D
       dataset for non-Velox EMD layouts (e.g. a ``data/drift/data`` series).
     - ``.tif`` / ``.tiff`` / ``.png`` / ``.jpg`` / ``.bmp`` / ``.gif`` - via Pillow.
+      **Color PNG/JPEG/TIFF keep RGB** (``RgbImage`` with shape ``(H, W, 3)``);
+      they are not converted to a single gray channel. Pass the result to
+      ``Show2D`` or ``Show3D`` to display true color.
     - ``.dm3`` / ``.dm4`` - Gatan, via ncempy.
 
-    A 3D result (a multi-frame container) is reduced to its first frame so the
-    return is always a single 2D image.
+    Grayscale results are :class:`Dataset2d`. Color results are :class:`RgbImage`
+    (duck-types the ``.array`` / ``.name`` / ``.sampling`` surface Show2D already
+    unwraps). A multi-frame container is reduced to its first frame.
+
+    Examples
+    --------
+    >>> from quantem.widget import Show2D, io  # doctest: +SKIP
+    >>> Show2D(io.read_image("figure_rgb.png"))  # true color, not gray  # doctest: +SKIP
     """
     Dataset2d, _ = _core_dataset_classes()
     p = Path(path)
     ext = p.suffix.lower()
     if ext == ".npy":
-        return Dataset2d.from_array(_first_frame(np.load(p)), name=p.stem)
+        return _wrap_image_array(_normalize_image_array(np.load(p)), name=p.stem)
     if ext == ".emd":
         return _read_emd(p)
     if ext == ".gif":
@@ -132,15 +139,111 @@ def read_image(path: str | Path) -> Dataset2d:
     if ext in (".tif", ".tiff", ".png", ".jpg", ".jpeg", ".bmp"):
         from PIL import Image  # noqa: PLC0415  (lazy: keep io import cheap)
         with Image.open(p) as img:
-            arr = np.asarray(img)
-        return Dataset2d.from_array(_first_frame(arr), name=p.stem)
+            arr = _pil_to_array(img)
+        return _wrap_image_array(_normalize_image_array(arr), name=p.stem)
     if ext in (".dm3", ".dm4"):
         from ncempy.io import dm  # noqa: PLC0415
         arr = np.asarray(dm.dmReader(str(p))["data"])
-        return Dataset2d.from_array(_first_frame(arr), name=p.stem)
+        return _wrap_image_array(_normalize_image_array(arr), name=p.stem)
     raise ValueError(
         f"read_image: unsupported extension {ext!r} "
         "(use .npy, .emd, .tif/.tiff, .png, .jpg, .bmp, .gif, .dm3/.dm4)")
+
+
+class RgbImage:
+    """True-color image from disk: display-ready ``(H, W, 3)`` for Show2D/Show3D.
+
+    Duck-types the ``Dataset2d`` surface (``.array``, ``.name``, ``.sampling``,
+    ``.units``) so ``Show2D(io.read_image("color.png"))`` works without an
+    extra conversion. Grayscale EM formats still return ``Dataset2d``.
+    """
+
+    def __init__(
+        self,
+        array: np.ndarray,
+        *,
+        name: str = "",
+        sampling: tuple[float, float] = (1.0, 1.0),
+        units: tuple[str, str] = ("pixels", "pixels"),
+    ) -> None:
+        arr = np.asarray(array)
+        if arr.ndim != 3 or arr.shape[-1] not in (3, 4):
+            raise ValueError(
+                f"RgbImage expects shape (H, W, 3) or (H, W, 4); got {arr.shape}"
+            )
+        if arr.shape[-1] == 4:
+            arr = arr[..., :3]
+        self.array = np.ascontiguousarray(arr)
+        self.name = str(name)
+        self.sampling = (float(sampling[0]), float(sampling[1]))
+        self.units = (str(units[0]), str(units[1]))
+
+    def __array__(self, dtype=None):
+        return np.asarray(self.array, dtype=dtype)
+
+
+def _is_rgb_array(arr: np.ndarray) -> bool:
+    """True for a single color image with channel-last RGB(A)."""
+    return arr.ndim == 3 and arr.shape[-1] in (3, 4)
+
+
+def _is_rgb_stack(arr: np.ndarray) -> bool:
+    """True for a stack of color frames ``(N, H, W, 3/4)``."""
+    return arr.ndim == 4 and arr.shape[-1] in (3, 4)
+
+
+def _pil_to_array(img) -> np.ndarray:
+    """Decode a PIL image, preserving RGB instead of collapsing to gray."""
+    mode = img.mode
+    if mode in ("P", "PA"):
+        # Palette files often encode true color; expand before asarray.
+        img = img.convert("RGBA" if "A" in mode else "RGB")
+    elif mode in ("CMYK", "YCbCr", "LAB", "HSV"):
+        img = img.convert("RGB")
+    elif mode == "1":
+        img = img.convert("L")
+    return np.asarray(img)
+
+
+def _normalize_image_array(arr: np.ndarray) -> np.ndarray:
+    """Keep RGB color; reduce multi-frame containers to the first frame.
+
+    Historical bug: ``_first_frame`` treated ``(H, W, 3)`` as a 3-frame stack and
+    returned the first *row* as ``(W, 3)``, destroying color PNGs. Channel-last
+    RGB(A) is now detected and preserved.
+    """
+    arr = np.asarray(arr)
+    if arr.ndim == 2:
+        return arr
+    if _is_rgb_array(arr):
+        return arr[..., :3]
+    if _is_rgb_stack(arr):
+        # Multi-page color TIFF / multi-frame container → first color frame.
+        return arr[0, ..., :3]
+    if arr.ndim == 3:
+        # Grayscale multi-frame (N, H, W) → first frame.
+        return arr[0]
+    if arr.ndim == 4:
+        # Unusual (N, H, W, C) already handled; other 4D → first plane.
+        return arr[0]
+    raise ValueError(
+        f"Unsupported image array shape {arr.shape}; expected (H, W), "
+        "(H, W, 3/4), (N, H, W), or (N, H, W, 3/4)."
+    )
+
+
+def _wrap_image_array(
+    arr: np.ndarray,
+    *,
+    name: str = "",
+    sampling: tuple[float, float] = (1.0, 1.0),
+    units: tuple[str, str] = ("pixels", "pixels"),
+) -> Dataset2d | RgbImage:
+    """Wrap a normalized array as Dataset2d (gray) or RgbImage (color)."""
+    Dataset2d, _ = _core_dataset_classes()
+    if _is_rgb_array(arr):
+        return RgbImage(arr, name=name, sampling=sampling, units=units)
+    return Dataset2d.from_array(arr, name=name)
 
 
 def read_gif(path: str | Path) -> Dataset3d:
@@ -188,8 +291,12 @@ def read_gif(path: str | Path) -> Dataset3d:
 
 
 def _first_frame(arr: np.ndarray) -> np.ndarray:
-    """Reduce a 3D stack to its first frame; pass a 2D array through unchanged."""
-    return arr[0] if arr.ndim == 3 else arr
+    """Reduce multi-frame arrays to the first frame; preserve RGB(A).
+
+    Prefer :func:`_normalize_image_array` for new code. Kept for callers that
+    already import ``_first_frame``.
+    """
+    return _normalize_image_array(arr)
 
 
 def _read_emd(p: Path) -> Dataset2d:
@@ -303,10 +410,31 @@ def read_image_stack(
     if not files:
         raise FileNotFoundError(f"No image frames in {path}")
     first = _read_frame(files[0])
+    count = len(files)
+    if _is_rgb_array(first):
+        # Color frame stack for Show3D true-color scrubbing: (N, H, W, 3).
+        height, width = int(first.shape[0]), int(first.shape[1])
+        stack = np.empty((count, height, width, 3), dtype=np.float32)
+        stack[0] = first[..., :3]
+        if count > 1:
+            for idx in range(1, count):
+                frame = _read_frame(files[idx])
+                if not _is_rgb_array(frame):
+                    raise ValueError(
+                        f"Mixed gray/RGB frames in {path}: {files[0].name} is RGB "
+                        f"but {files[idx].name} has shape {frame.shape}."
+                    )
+                if frame.shape[:2] != (height, width):
+                    raise ValueError(
+                        f"Frame {files[idx].name} spatial shape {frame.shape[:2]} "
+                        f"!= {(height, width)} from {files[0].name}."
+                    )
+                stack[idx] = frame[..., :3]
+        # Dataset3d is gray-only; return a bare RGB stack. Show3D accepts it.
+        return stack  # type: ignore[return-value]
     if first.ndim != 2:
         raise ValueError(f"Expected 2D frames, got shape {first.shape} from {files[0].name}")
     height, width = first.shape
-    count = len(files)
     stack = np.empty((count, height, width), dtype=np.float32)
     stack[0] = first
     if count > 1:
@@ -347,13 +475,22 @@ def _natural_key(p: Path) -> list:
 
 
 def _read_frame(path: Path) -> np.ndarray:
-    """Decode a single frame to a float32 array (tifffile for TIFF, PIL otherwise)."""
+    """Decode a single frame (gray ``(H,W)`` or RGB ``(H,W,3)``) as float32."""
     if path.suffix.lower() in _TIFF_EXTS:
         import tifffile
-        return tifffile.imread(str(path)).astype(np.float32)
-    from PIL import Image
-    with Image.open(path) as img:
-        return np.array(img, dtype=np.float32)
+        arr = np.asarray(tifffile.imread(str(path)))
+    else:
+        from PIL import Image
+        with Image.open(path) as img:
+            arr = _pil_to_array(img)
+    arr = _normalize_image_array(arr)
+    if _is_rgb_array(arr):
+        # uint8 color PNGs → unit-range float; float color stays clipped later in Show*.
+        out = arr.astype(np.float32, copy=False)
+        if arr.dtype == np.uint8:
+            out = out / 255.0
+        return out
+    return arr.astype(np.float32, copy=False)
 
 
 def _read_frame_into(args: tuple[int, Path, np.ndarray]) -> None:

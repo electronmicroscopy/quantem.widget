@@ -17,10 +17,12 @@ __version__ = "0.0.3"
 _HDF5_EXPORTS = {
     "H5Writer",
     "LoadResult",
+    "MasterReadiness",
     "bin",
     "discover_masters",
     "find_emd_sibling",
     "get_metadata",
+    "inspect_master_readiness",
     "is_master_ready",
     "load",
     "load_parallel",
@@ -44,7 +46,7 @@ _HUB_EXPORTS = {
 }
 
 # 2D image reader (Velox EMD HAADF / .npy) - separate from the 4D-STEM loader.
-_IMAGE_EXPORTS = {"read_gif", "read_image", "read_image_stack", "read_images"}
+_IMAGE_EXPORTS = {"read_gif", "read_image", "read_image_stack", "read_images", "RgbImage"}
 
 # Memory profiler (disk staging + RAM + per-GPU VRAM).
 _MEMORY_EXPORTS = {"memory"}
@@ -86,6 +88,7 @@ _MPS_EXPORTS = {"MPSChunked4DSTEM", "load_mps_4dstem", "clear_mps_cache"}
 __all__ = [
     "H5Writer",
     "LoadResult",
+    "MasterReadiness",
     "MPSChunked4DSTEM",
     "bin",
     "clear_mps_cache",
@@ -95,6 +98,7 @@ __all__ = [
     "download",
     "find_emd_sibling",
     "get_metadata",
+    "inspect_master_readiness",
     "is_master_ready",
     "list_datasets",
     "load",
@@ -127,6 +131,7 @@ __all__ = [
     "read_image",
     "read_image_stack",
     "read_images",
+    "RgbImage",
     "read_pixel_mask",
     "save",
     "status",

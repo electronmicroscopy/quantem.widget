@@ -79,9 +79,15 @@ directory.
 
 **User story**: A user is collecting or generating microscopy files while a
 notebook is open and wants ShowFolder to show new results without rerunning the
-cell or losing their current selection.
+cell or losing their current selection. When every new image matters, the user
+also wants one normal control to keep both the all-image Show2D gallery and
+Show3D stack visibly synchronized.
 
-**Primary widgets**: ShowFolder watcher, cache status banner, image gallery.
+**Primary widgets**: ShowFolder watcher, cache status banner, image gallery,
+and the ShowFolder-managed Show2D/Show3D preview handoffs. Direct
+``Show2D.from_folder(...)``, ``Show3D.from_folder(...)``, and
+``Show4DSTEM.from_folder(...)`` are separate full-resolution scientific-data
+watchers covered by S2D-18, S3D-17, and S4D-14.
 
 **Data to use**: A real or real-derived folder where files can be copied in and
 removed during the test. Prefer lab data from an HPC/workstation or microscope
@@ -89,17 +95,36 @@ backend; keep the raw files outside the widget repository.
 
 **Acceptance checks**:
 
-- `ShowFolder(path).watch(interval=...)` inserts a visible status line.
+- `ShowFolder(path).watch(interval=...)` inserts a visible accessible status
+  line. Green ``Watching`` means the actual ShowFolder worker is alive;
+  ``Updating`` appears only after a real arrival or removal is detected, not on
+  idle polls. Use amber ``Waiting for file completion`` for an incomplete file,
+  red ``Watch error`` with corrective detail for an unreadable source or worker
+  failure, and gray ``Stopped`` or ``Not watching`` after stop/close or when
+  liveness cannot be established.
+- A direct Show2D, Show3D, or Show4DSTEM snapshot handoff created with
+  ``watch=False`` has no watch badge. Restored notebook state, a static fallback,
+  exported HTML, or another non-live ShowFolder snapshot must never show green
+  ``Watching`` without an actually alive worker.
 - Adding a file updates the already displayed browser in place.
 - The status line reports cached versus newly read files.
 - Existing stars/hidden panels are preserved when those files still exist.
 - Removing a file removes it from the browser, selection, and next cache
   manifest so stale files are not retained in memory or cache state.
 - New `*_master.h5` 4D-STEM files trigger the same watch path and refresh the
-  active lazy Show4DSTEM handoff without preloading every master.
+  active lazy Show4DSTEM handoff without preloading every master. This
+  ShowFolder handoff may rebuild its owned viewer; it does not replace the
+  same-widget guarantee required of direct ``Show4DSTEM.from_folder(...)``.
 - When the all-image viewers are open (`open_show2d(all_images=True)` or
   `open_show3d(all_images=True)`), new readable image files append to the same
   Show2D/Show3D widget instance on the next poll.
+- `Open All Both` and ``open_both(all_images=True)`` activate both all-image
+  viewers through public paths. With both visible, background ``watch()`` and a
+  genuine EMD arrival update the same two widget model IDs without private
+  ``_active_selected_modes`` or ``_selected_*`` assignments.
+- The browser test clicks the real control, copies an EMD after watching starts,
+  and verifies both canvases repaint. Calling ``watch_once()`` and inspecting
+  Python counts remains useful automation, but it is not the full user story.
 - `watch_once()` performs one deterministic poll for tests and automation.
 - `stop_watch()` stops the background watcher before kernel shutdown.
 
@@ -141,8 +166,13 @@ not commit those raw files to the widget repository.
 - `Open Show2D` renders a compact Show2D gallery below ShowFolder.
 - `Open Show3D` renders the same starred images as a frame stack below
   ShowFolder.
-- `Open all Show2D` and `Open all Show3D` render every readable image in the
+- `Open Both` renders the starred images in both viewers, and `Open All Both`
+  renders every readable image in both viewers through one normal user action.
+- `Open All Show2D` and `Open All Show3D` render every readable image in the
   folder and live-append new files while the watcher is running.
+- ``open_both(all_images=False)`` and ``open_both(all_images=True)`` expose the
+  same selected/all behavior for notebook authors without requiring private
+  mode manipulation.
 - The explicit Python methods `show_selected()` and `show_selected_stack()`
   return the same widgets for notebook authors who prefer code.
 - Scale bars and labels are preserved when all selected previews share a
@@ -152,8 +182,10 @@ not commit those raw files to the widget repository.
 - ShowFolder keeps its maintained thumbnail cache as numeric arrays
   (`thumbnails.npz`) because selected Show2D/Show3D handoff needs array data.
   WebP thumbnails are only for human review pages and dashboards.
-- ShowFolder owns live folder watching. Show2D and Show3D receive refreshed
-  selected preview data; they do not watch microscope folders directly.
+- ShowFolder owns watching for viewers opened from its cached preview and
+  selection workflow. Direct ``Show2D.from_folder(...)`` and
+  ``Show3D.from_folder(...)`` own independent full-resolution watchers and do
+  not use ShowFolder thumbnails.
 
 ## SF-7: Notebook and Documentation Behavior
 

@@ -44,6 +44,8 @@ w = Show4DSTEM.from_folder(
     columns=5,
     page_size=5,
     compare_dp_mode="selected",
+    preview_cache="auto",
+    preview_cache_max_bytes=4 << 30,
     warm_cache=True,
     watch=True,
 )
@@ -111,6 +113,8 @@ widget = Show4DSTEM.from_folder(
     columns=5,
     page_size=5,
     compare_dp_mode="selected",
+    preview_cache="auto",
+    preview_cache_max_bytes=4 << 30,
     warm_cache=True,
     watch_interval=2.0,
 )
@@ -118,9 +122,10 @@ widget
 ```
 
 `from_folder(...)` keeps the folder as lazy slots instead of materializing a full
-5D stack before first paint. The initial page loads first, then the default
-`preload_all_if_fits=True` policy calculates the complete raw footprint from the
-known frame shape and dtype. If that footprint fits the selected GPUs, every
+5D stack before first paint. The initial visible page is scheduled first; valid
+persistent previews may paint before its raw masters finish loading. The default
+`preload_all_if_fits=True` policy then calculates the complete raw footprint from
+the known frame shape and dtype. If that footprint fits the selected GPUs, every
 unhidden dataset loads in the background across those GPUs. If it does not fit,
 the viewer keeps full-resolution lazy paging; it does not silently detector-bin,
 real-space-bin, or narrow the dtype. Set `preload_all_if_fits=False` to keep the
@@ -131,8 +136,11 @@ The title row reports both GPU allocation and raw residency, for example
 manually with `widget.poll_folder()` or by the default folder watcher. Each
 append re-evaluates whether the complete unhidden series still fits. Use
 `watch=False` for a fixed folder or a script that calls `poll_folder()`
-explicitly. Hidden multiple-grid panels are released from the raw resident cache
-and skipped by compare computes until unhidden.
+explicitly. A compact title-area badge distinguishes a live `Watching` worker,
+`Updating`, incomplete/stability probation as `Waiting for file completion`, a
+corrective `Watch error`, and `Stopped`; a fixed snapshot has no badge. Hidden
+multiple-grid panels are released from the raw resident cache and skipped by
+compare computes until unhidden.
 
 Discovery and metadata do not copy raw 4D arrays to a GPU. A newly appended
 master starts lazy, then joins the background full-series preload only when the
@@ -155,11 +163,18 @@ Folder watching is append-only. Known masters are not duplicated, incomplete
 or externally linked masters wait until they are readable, and removing a file
 does not silently delete a dataset from an active scientific view.
 
+Maintainer real-time signoff follows
+[S4D-14](../maintainer/storyboard-show4dstem.md#s4d-14-watch-a-live-4d-stem-acquisition-folder-in-place):
+introduce genuine master/chunk files while one Jupyter widget is mounted and
+measure both discovery/control paint and requested virtual-image/diffraction
+paint.
+
 `warm_cache=True` preserves the original detector data. It loads raw masters in
 memory-aware batches, computes the standard BF/ABF/ADF/HAADF virtual images,
-keeps only those small 2D results in host memory, and releases raw pages as the
-worker advances when full residency is unavailable. Cold pages still pay real
-disk/decompression cost; warmed page and preset changes reuse cached results.
+keeps only those small 2D results in host memory and the configured persistent
+preview cache, and releases raw pages as the worker advances when full residency
+is unavailable. Cold pages still pay real disk/decompression cost; warmed page,
+preset, and matching future-process opens reuse cached results.
 `compare_dp_mode="selected"` keeps scan-position movement responsive without
 loading every master just to average the diffraction panel.
 
@@ -168,7 +183,9 @@ It does not use ShowFolder's cached thumbnails. Set `det_bin=1` and keep the
 count-preserving dtype when full detector resolution is required.
 
 For folders with tens or hundreds of masters, `page_size` is the number of
-datasets shown and preloaded together. `columns` controls the grid width:
+datasets shown together. It is deliberately independent from raw GPU residency:
+the loader divides a visible page into safe progressive waves. `columns`
+controls the grid width:
 
 ```python
 widget = Show4DSTEM.from_folder(
@@ -192,23 +209,37 @@ widget.wait_for_dataset_preload(timeout=120)  # deterministic scripts/tests
 ```
 
 The page control appears in the multiple-grid header whenever the visible
-dataset count exceeds `page_size`. `compare_group_mode="paged"` shows
-one group at a time with precise group buttons plus a compact play/pause
-control. `compare_group_mode="all"` collapses all visible groups into one dense
-grid for screening tens or hundreds of reduced virtual images. All mode computes
-lazy folder data in `page_size` batches when the complete raw series does not
-fit. When it does fit, display pages reuse the already resident raw frames.
-Hidden panels remain hidden and are not recomputed. Use `page_budget` for the
-raw resident cache policy and `page_size` for the compute/display batch size.
-Existing code may continue to use `compare_cols` and `compare_max_panels`; new
-folder-browse code should use the shorter names.
+dataset count exceeds `page_size`. `compare_group_mode="paged"` shows one group
+at a time with precise group buttons plus a compact play/pause control.
+`compare_group_mode="all"` collapses all visible groups into one dense grid for
+screening tens or hundreds of reduced virtual images.
 
-Automatic residency uses 98% as an upper data fraction, then keeps a bounded
-adaptive workspace margin for reductions and allocator metadata. Unlike the old
-fixed 4 GiB reserve, the margin scales from the known frame size and GPU size.
-Pass `page_reserve_vram_bytes=` or `page_max_vram_bytes=` for an explicit policy.
-Pass `gpus=[0, 1]` to spread frames round-robin over specific cards, or
-`gpus="all"` to use every CUDA device visible to the process.
+For a cold lazy page, the grid reserves every requested panel slot immediately.
+Each selected GPU loads at most one new master in a wave, different GPUs can make
+progress together, and each virtual image fades into its stable slot as soon as
+it is ready. A newer page request cancels obsolete work after its current safe
+wave; late results from an older page cannot overwrite the new page. Once the
+visible page is complete, the current detector preset is prefetched for the next
+and previous pages while foreground work is idle. Hidden panels remain hidden
+and are not recomputed.
+
+Use `page_budget` for the raw resident-cache policy and `page_size` for the
+display grouping. Existing code may continue to use `compare_cols` and
+`compare_max_panels`; new folder-browse code should use the shorter names.
+
+Automatic residency uses 98% as an upper data fraction. It then reserves one
+largest processed master plus bounded reduction/allocator workspace before
+deciding that the complete series fits. This prevents a nominally full resident
+set from consuming the transient memory needed to decode the next master. Pass
+`page_reserve_vram_bytes=` or `page_max_vram_bytes=` for an explicit policy.
+
+Pass `gpus=[0, 1]` to use specific cards, or `gpus="all"` to use every CUDA
+device visible to the process. Lazy masters are placed according to each card's
+safe byte budget, while already resident CUDA frames stay on their owning card.
+Equal budgets naturally alternate; a larger or freer card receives a larger
+share instead of leaving usable memory stranded behind fixed round-robin
+placement. Per-device decoding remains serialized, and separate cards may load
+and reduce their wave concurrently.
 
 The multiple-grid BF/ABF/ADF/HAADF previews are cached as reduced float32
 virtual-image pages. This lets page 1 -> page 2 -> page 1 return the already
@@ -217,6 +248,90 @@ computed thumbnails without keeping page 1's raw 4D tensors in VRAM. Tune
 `compare_cache_max_bytes` for the host-memory cap. This cache is separate from
 `page_budget`: `page_budget` controls raw 4D GPU residency, while
 `compare_cache_pages` controls small rendered page previews.
+
+## Persistent folder preview cache
+
+The bounded host-memory cache above lasts only for the current widget. Folder
+viewers also keep a persistent cache of standard scientific previews so a new
+widget or Python process can show prior BF/ABF/ADF/HAADF results while raw data
+loads:
+
+```python
+widget = Show4DSTEM.from_folder(
+    "/data/session",
+    gpus=[0],
+    page_size=12,
+    preview_cache="auto",
+    preview_cache_dir=None,
+    preview_cache_max_bytes=4 << 30,
+    rebuild_preview_cache=False,
+)
+
+widget.preview_cache_info
+# {'enabled': True, 'hits': ..., 'misses': ..., 'current_bytes': ...,
+#  'max_bytes': ..., 'bytes_read': ..., 'bytes_written': ..., 'path': ...}
+```
+
+`preview_cache="auto"` uses the QuantEM user cache, honoring
+`QUANTEM_WIDGET_CACHE` when it is set. `True` is equivalent to automatic user
+caching, `"folder"` selects a project-local `.quantem` cache, and `False`
+disables persistent reads and writes. `preview_cache_dir="/fast/ssd/cache"`
+overrides the location. Use `rebuild_preview_cache=True` to ignore entries from
+an earlier run and repopulate them. The default disk limit is 4 GiB; least
+recently used complete entries are evicted when `preview_cache_max_bytes` is
+exceeded.
+
+This cache contains reduced float32 virtual images for the recognized BF, ABF,
+ADF, and HAADF presets only. It never stores raw 4D tensors, CUDA allocations,
+or diffraction patterns. Standard presets computed during normal browsing are
+written on demand; `warm_cache=True` proactively computes them in memory-aware
+batches. The three relevant limits remain independent:
+
+- `page_budget` and the VRAM options bound authoritative raw 4D CUDA residency;
+- `compare_cache_max_bytes` bounds reduced pages in host memory for this widget;
+- `preview_cache_max_bytes` bounds persistent reduced previews on disk.
+
+Entries are keyed per source master rather than per display page, so page-size,
+order, star, and hidden-panel changes can reuse the same result. Validation
+includes the master and all linked detector chunks (path, size, nanosecond
+modification/change time, device, and inode), processing/cache version,
+requested dtype and detector bin, processed shape, scan override, detector
+center, and preset mask geometry. A changed or new master/chunk therefore
+invalidates only the affected master's previews.
+Unreadable source chunks and corrupt or partial cache files are misses, never
+unverified scientific hits.
+
+On a matching reopen, valid panels appear in their stable slots with an honest
+status such as `Cached preview · loading raw data`. The normal capacity-aware
+CUDA scheduler continues loading authoritative raw data, and fresh panels
+replace cached pixels in place. Partial pages mix immediate cache hits with
+loading placeholders. A failed refresh leaves the valid cached image visible
+with a refresh error; cached pixels are never silently called fresh. Custom
+detector ROIs and diffraction inspection wait for raw data and continue to use
+the requested source dtype and resolution.
+
+The current CUDA-first implementation still loads one raw master before the
+widget is ready so it can establish detector shape, calibration, and the
+selected diffraction pattern. Persistent previews remove the black wait for the
+rest of the page and accelerate later page/preset returns; they do not yet make
+initial construction metadata-only. Performance reports therefore split
+API-call-to-model-ready from model-ready-to-cached-canvas paint.
+
+Inspect or clear the persistent cache explicitly:
+
+```python
+info = widget.preview_cache_info  # read-only snapshot
+widget.clear_preview_cache()
+```
+
+`clear_preview_cache()` removes this folder/configuration's persistent preview
+namespace. It does not clear ShowFolder's thumbnail cache and does not free raw
+GPU memory. An active widget may repopulate the namespace when another standard
+preset or page is computed; construct it with `preview_cache=False` when the
+namespace must stay disabled. Maintainer verification follows
+[S4D-19](../maintainer/storyboard-show4dstem.md#s4d-19-reopen-a-folder-with-persistent-scientific-previews)
+and records cached-first, fresh-first, visible-page, complete-page, and prefetch
+timing separately.
 
 For folder-backed multi-master browsing, `dtype="auto"` is resolved to a stable
 `u16` load dtype. A lazy series needs every page to share shape and dtype; using

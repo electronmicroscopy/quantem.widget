@@ -135,6 +135,12 @@ bottom, right, or overlay without changing real-space interaction semantics.
 - Toggle FFT right layout and verify vertical height aligns with real-space
   panels and controls remain reachable.
 - Toggle FFT overlay and verify every visible panel receives one overlay.
+- In every layout, verify each FFT tile or inset shows the current shared
+  `N.N×` multiplier, including uncalibrated data and narrow/mobile layouts;
+  `show_zoom_indicator=False` must hide the FFT badges.
+- Pause on a known frame, switch browser tabs, and return. Bottom, right, and
+  overlay FFT layouts must restore their image pixels and multiplier without
+  changing the frame or playback state and without another FFT computation.
 
 ### S3D-08: Control FFT Overlays Independently
 
@@ -152,6 +158,8 @@ cached, independently zoomable, pannable, and draggable with corner snap.
   panel grid.
 - Drag overlay and release near each corner; verify snap-to-corner works.
 - Wheel over overlay and verify FFT zooms, not the underlying real-space image.
+- Verify the inset multiplier updates with FFT zoom and reset restores `1.0×`
+  without changing the real-space multiplier.
 - Use the documented pan gesture over the overlay and verify FFT panning works
   when zoomed.
 - Verify cached/display-sized FFT does not recompute unnecessarily during
@@ -209,6 +217,9 @@ sizes to match the Show2D export vocabulary.
 - Export HTML exact and quantized where supported.
 - Open exported files and drive playback, frame slider, columns, hide panels,
   FFT overlay, histogram, and reset.
+- In each standalone file, pause with FFT visible, switch away and back, and
+  verify the main image plus bottom/right/overlay FFT canvases restore without
+  pressing Play or moving the frame slider.
 
 ### S3D-12: Save And Reopen A Notebook
 
@@ -327,5 +338,69 @@ record skipped maximum cases explicitly.
   can be moved away from scale bars or important image features.
 - Confirm no stale frame, stale FFT, white/yellow flash, blank overlay, or
   delayed slider state remains after rapid interaction.
+- Repeat the paused tab-away/tab-return path after FFT zoom and pan. Require
+  cached display repaint counters to increase while FFT miss, compute, and
+  metric-compute counters remain unchanged.
 - Add timing and failure notes to the performance log with exact data path,
   backend host, browser, adapter, shape, frame count, and panel count.
+
+### S3D-17: Watch A Live EMD Frame Series In Place
+
+**User story**: As a microscopist collecting an in-situ, focal, tilt, or
+reconstruction series, I want one already displayed Show3D stack to append each
+completed EMD as a frame, without rerunning the cell, creating another widget,
+or interrupting inspection and playback.
+
+**Primary widgets**: ``Show3D.from_folder(...)`` in live JupyterLab. Every
+matching file is one frame in a single stack; it is not a new Show3D widget or
+an additional gallery panel.
+
+**Data to use**: Genuine same-shape Velox image EMD files from one real series,
+added through atomic rename. Use at least three files for routine verification
+and ten for release signoff. Include an incomplete EMD, an incompatible-shape
+EMD, and a later compatible EMD. Record source path, shape, dtype, sampling,
+native bytes, backend host, browser, widget commit, and watch interval. Keep
+source data and generated reports outside git.
+
+**Acceptance checks**:
+
+- In live JupyterLab, display exactly one ``Show3D.from_folder(folder,
+  pattern="*.emd", watch=True, watch_interval=1.0, debug=True)`` object and
+  capture its Python identity, widget model ID, and browser container before
+  later files arrive.
+- Start once with a valid EMD and separately before the first acquisition. The
+  empty-folder case must remain visibly mounted and accept the first stable EMD
+  without a cell rerun; mark it ``Fail`` until that behavior exists.
+- Keep one compact accessible watch badge near the folder/title area in stable
+  DOM. Require green-dot ``Watching`` only while the actual background worker
+  is alive. Enter ``Updating`` while a discovery poll is active and keep it
+  through real candidate validation, append, and authoritative frame/canvas
+  paint. An idle poll may briefly show ``Updating`` but must return to
+  ``Watching`` without decode, transfer, or repaint. Use amber ``Waiting for
+  file completion`` for an incomplete EMD, red ``Watch error`` plus corrective
+  detail for a bad shape or
+  worker failure, and gray ``Stopped`` or ``Not watching`` after stop/close or
+  when liveness cannot be established. A ``watch=False`` snapshot has no badge.
+  A restored notebook model, static fallback, or standalone snapshot must never
+  restore a green ``Watching`` state without a live worker. Capture browser
+  assertions and screenshots for every state; color alone is insufficient.
+- Complete a genuine EMD after the widget is visible. Verify the frame count,
+  label, slider range, and canvas update automatically without calling
+  ``poll_folder()``. Compare source shape, calibration, representative pixels,
+  and the new frame canvas checksum against ``read_image(path).array``.
+- Preserve the Python object, widget model, browser container, selected source
+  path, bookmarks, starred frame, loop bounds, playback state, FFT, ROI,
+  profile, zoom, pan, contrast, and calibration when natural ordering inserts a
+  new filename before existing frames.
+- Append while Play is active. Verify playback remains active and the image,
+  slider, label, histogram, and frame cache remain synchronized without a blank
+  or stale frame.
+- Defer and retry an incomplete EMD without stopping the watcher or duplicating
+  the frame. Report an incompatible shape without resizing it or blocking a
+  subsequent compatible frame.
+- Measure stable-file-to-Python-append and stable-file-to-first-canvas-paint
+  separately for every arrival; report median and p95 with the poll interval.
+  Backend state alone is not visible-user proof.
+- Verify idle polls do no decode, transfer, repaint, or state-reset work.
+  Exercise idempotent stop/resume, then call ``close()`` or ``free()`` and prove
+  no watcher thread can mutate the stack afterward.
