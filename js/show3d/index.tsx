@@ -23,6 +23,7 @@ import Menu from "@mui/material/Menu";
 import MenuItem from "@mui/material/MenuItem";
 import Switch from "@mui/material/Switch";
 import Button from "@mui/material/Button";
+import Badge from "@mui/material/Badge";
 import Tooltip from "@mui/material/Tooltip";
 import PlayArrowIcon from "@mui/icons-material/PlayArrow";
 import PauseIcon from "@mui/icons-material/Pause";
@@ -2349,6 +2350,9 @@ function Show3D() {
 
   // Stats
   const [showStats, setShowStats] = useModelState<boolean>("show_stats");
+  // "More" overflow menu (mirrors Show2D): tucks Stats + Denoise off the crowded
+  // top toolbar. Badge shows how many of its tools are active.
+  const [moreMenuAnchor, setMoreMenuAnchor] = React.useState<HTMLElement | null>(null);
   const [showControls] = useModelState<boolean>("show_controls");
   const [controlsCollapsed, setControlsCollapsed] = useModelState<boolean>("controls_collapsed");
   const [debug] = useModelState<boolean>("debug");
@@ -11059,10 +11063,40 @@ function Show3D() {
                 }} size="small" sx={switchStyles.small} slotProps={{ input: { "aria-label": "Toggle ROI selection tool" } }} />
               </>
             )}
-            <>
-              <Typography sx={{ ...typography.label, fontSize: 10, ml: "2px" }}>Stats</Typography>
-              <Switch checked={showStats} onChange={(e) => setShowStats(e.target.checked)} size="small" sx={switchStyles.small} slotProps={{ input: { "aria-label": "Toggle statistics readout" } }} />
-            </>
+            {/* "More" overflow: Stats + Denoise live here (mirrors Show2D) to
+                keep the top toolbar calm. */}
+            <Badge
+              badgeContent={(showStats ? 1 : 0) + (showDenoise ? 1 : 0)}
+              invisible={!showStats && !showDenoise}
+              sx={{ "& .MuiBadge-badge": { bgcolor: themeColors.accent, color: "#fff", fontSize: 9, fontWeight: 600, minWidth: 14, height: 14, px: 0.25 } }}
+            >
+              <Button
+                size="small"
+                sx={{ minWidth: 0, px: 0.75, fontSize: 10, textTransform: "none", color: (showStats || showDenoise) ? themeColors.accent : themeColors.text }}
+                onClick={(e) => setMoreMenuAnchor(e.currentTarget)}
+                aria-label="More tools"
+                aria-haspopup="menu"
+                title="More tools: Stats, Denoise"
+              >
+                More
+              </Button>
+            </Badge>
+            <Menu
+              anchorEl={moreMenuAnchor}
+              open={Boolean(moreMenuAnchor)}
+              onClose={() => setMoreMenuAnchor(null)}
+              MenuListProps={{ "aria-label": "More tools" }}
+              {...themedMenuProps}
+            >
+              <MenuItem dense onClick={() => setShowStats(!showStats)} sx={{ fontSize: 12, gap: 1, color: showStats ? themeColors.accent : themeColors.text }}>
+                <Typography sx={{ flex: 1, fontSize: 12, color: "inherit" }} title="Mean / min / max / std readout under the image.">Stats</Typography>
+                <Switch checked={showStats} onClick={(e) => e.stopPropagation()} onChange={(e) => setShowStats(e.target.checked)} size="small" sx={switchStyles.small} slotProps={{ input: { "aria-label": "Toggle statistics readout" } }} />
+              </MenuItem>
+              <MenuItem dense onClick={toggleDenoise} sx={{ fontSize: 12, gap: 1, color: showDenoise ? themeColors.accent : themeColors.text }}>
+                <Typography sx={{ flex: 1, fontSize: 12, color: "inherit" }} title="Display-only denoise (gaussian σ, or Poisson/Anscombe, plus bin). Raw data and stats keep original counts.">Denoise</Typography>
+                <Switch checked={showDenoise ?? false} onClick={(e) => e.stopPropagation()} onChange={toggleDenoise} size="small" sx={switchStyles.small} slotProps={{ input: { "aria-label": "Toggle denoise controls" } }} />
+              </MenuItem>
+            </Menu>
             {hasPanelChoices && (
               <>
                 <Typography sx={{ ...typography.label, fontSize: 10, ml: "2px" }}>Link</Typography>
@@ -11979,8 +12013,7 @@ function Show3D() {
                   </Select>
                   <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted }}>Smooth</Typography>
                   <Switch checked={smooth} onChange={(e) => setSmooth(e.target.checked)} size="small" sx={switchStyles.small} slotProps={{ input: { "aria-label": "Toggle bilinear smoothing" } }} />
-                  <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted }} title="Show the display-only denoise controls (method, σ, bin). Raw data and stats keep original counts.">Denoise</Typography>
-                  <Switch checked={showDenoise ?? false} onChange={toggleDenoise} size="small" sx={switchStyles.small} slotProps={{ input: { "aria-label": "Show denoise controls" } }} />
+                  {/* Denoise on/off moved to the "More" menu (top toolbar). */}
                   {!showDenoise && displayFilterBanner && (
                     /* House rule: an active reduction is never invisible,
                        even with the denoise controls row hidden. */
