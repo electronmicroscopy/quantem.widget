@@ -6888,6 +6888,10 @@ function Show2D() {
                             <Typography sx={{ ...typography.label, fontSize: 10 }} title="Share contrast slider across panels.">Contrast</Typography>
                             <Switch checked={linkedContrast} onChange={() => { setLinkedContrast(!linkedContrast); }} size="small" sx={switchStyles.small} />
                           </Box>
+                          <Box sx={controlPairSx}>
+                            <Typography sx={{ ...typography.label, fontSize: 10 }} title="Linked: denoise edits apply to every panel. Unlinked: edits apply to the selected panel only.">Denoise</Typography>
+                            <Switch checked={denoiseScopeAll} onChange={() => setDenoiseScope(denoiseScopeAll ? "panel" : "all")} size="small" sx={switchStyles.small} />
+                          </Box>
                         </>
                       )}
                       {getZoomState(isGallery ? selectedIdx : 0).zoom !== 1 && (
@@ -6923,12 +6927,6 @@ function Show2D() {
                           {[1, 2, 4].map((b) => (<MenuItem key={b} value={String(b)}>{b}</MenuItem>))}
                         </Select>
                       </Box>
-                      {isGallery && (
-                        <Box sx={controlPairSx}>
-                          <Typography sx={{ ...typography.label, fontSize: 10 }} title="Denoise scope. On (all): Denoise/σ/Bin edits apply to every panel. Off (panel): edits apply only to the selected panel.">All</Typography>
-                          <Switch checked={denoiseScopeAll} onChange={() => setDenoiseScope(denoiseScopeAll ? "panel" : "all")} size="small" sx={switchStyles.small} />
-                        </Box>
-                      )}
                       {filterBannerText && (
                         <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.accent }} title={filterBannerText}>
                           {filterBannerText.split(" (")[0]} · raw: denoise='none'

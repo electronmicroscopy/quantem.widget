@@ -593,7 +593,9 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     denoise_scope : {"all", "panel"}, default "all"
         UI knob scope: "all" applies Denoise/σ/Bin edits to every panel,
         "panel" edits only the selected panel. Passing any per-panel sequence
-        switches to the "panel" scope automatically. The deprecated aliases
+        switches to the "panel" scope automatically. In gallery mode the
+        toggle lives in the Link group (Link Zoom / Pan / Contrast / Denoise):
+        checked means linked ("all"), unchecked means per panel. The deprecated aliases
         ``display_filter``, ``display_sigma``, ``spatial_bin`` and
         ``filter_per_panel`` are still accepted for one release and map onto
         ``denoise``, ``denoise_sigma``, ``denoise_bin`` and ``denoise_scope``.
