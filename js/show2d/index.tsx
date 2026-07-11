@@ -915,6 +915,23 @@ function Show2D() {
     gap: isMobileViewport ? "4px" : `${SPACING.XS}px`,
     flexShrink: 0,
   } as const;
+  // Primary compact control labels read at full strength; textMuted is
+  // reserved for status text (export/page status), never for a label that
+  // names a live control.
+  const compactLabelSx = { ...typography.label, fontSize: 10, color: themeColors.text } as const;
+  // Bordered wrapper for a scoped sub-group (e.g. the Link toggles) so the
+  // governing word stays with its switches when the row wraps on narrow
+  // viewports.
+  const controlSubGroupSx = {
+    display: "inline-flex",
+    alignItems: "center",
+    flexWrap: "wrap" as const,
+    gap: isMobileViewport ? "4px" : `${SPACING.XS}px`,
+    border: `1px solid ${themeColors.border}`,
+    borderRadius: "3px",
+    px: 0.5,
+    py: 0.125,
+  } as const;
 
   const themedSelect = {
     fontSize: 10,
@@ -6532,8 +6549,8 @@ function Show2D() {
               </>
             )}
             {isGallery && (
-              <>
-                <Typography sx={{ ...typography.label, fontSize: 10 }}>Cols</Typography>
+              <Box sx={controlPairSx}>
+                <Typography sx={compactLabelSx}>Cols</Typography>
                 <Select
                   value={String(clampedNcols)}
                   onChange={(e) => setNcols(Math.max(1, Math.min(Number(e.target.value) || 1, isPaged ? activePanelCount : nImages, MAX_PANEL_COLUMNS)))}
@@ -6547,29 +6564,31 @@ function Show2D() {
                     <MenuItem key={cols} value={String(cols)}>{cols}</MenuItem>
                   ))}
                 </Select>
-              </>
+              </Box>
             )}
-            <Typography sx={{ ...typography.label, fontSize: 10 }}>Profile</Typography>
-            <Switch
-              checked={profileActive}
-              onChange={(e) => {
-                const on = e.target.checked;
-                setProfileActive(on);
-                if (on) {
-                  setRoiActive(false);
-                } else {
-                  setProfilePoints([]);
-                  setProfileDataAll([]);
-                  setHoveredProfileEndpoint(null);
-                  setIsHoveringProfileLine(false);
-                }
-              }}
-              size="small"
-              sx={switchStyles.small}
-            />
+            <Box sx={controlPairSx}>
+              <Typography sx={compactLabelSx} title="Line profile: draw a line on the image and read intensity along it.">Profile</Typography>
+              <Switch
+                checked={profileActive}
+                onChange={(e) => {
+                  const on = e.target.checked;
+                  setProfileActive(on);
+                  if (on) {
+                    setRoiActive(false);
+                  } else {
+                    setProfilePoints([]);
+                    setProfileDataAll([]);
+                    setHoveredProfileEndpoint(null);
+                    setIsHoveringProfileLine(false);
+                  }
+                }}
+                size="small"
+                sx={switchStyles.small}
+              />
+            </Box>
             {!isGallery && (
-              <>
-                <Typography sx={{ ...typography.label, fontSize: 10 }}>Lens</Typography>
+              <Box sx={controlPairSx}>
+                <Typography sx={compactLabelSx} title="Magnifier lens: hover the image to zoom a small region.">Lens</Typography>
                 <Switch
                   checked={showLens}
                   onChange={() => {
@@ -6584,21 +6603,23 @@ function Show2D() {
                   size="small"
                   sx={switchStyles.small}
                 />
-              </>
+              </Box>
             )}
-            <Typography sx={{ ...typography.label, fontSize: 10 }}>FFT</Typography>
-            <Switch
-              checked={showFft}
-              onChange={(e) => {
-                const on = e.target.checked;
-                if (on && width * height > 2048 * 2048) {
-                  console.warn(`Show2D: FFT on ${width}×${height} image (${(width * height / 1e6).toFixed(1)}M pixels) may be slow`);
-                }
-                setShowFft(on);
-              }}
-              size="small"
-              sx={switchStyles.small}
-            />
+            <Box sx={controlPairSx}>
+              <Typography sx={compactLabelSx} title="Fourier transform view of the current image.">FFT</Typography>
+              <Switch
+                checked={showFft}
+                onChange={(e) => {
+                  const on = e.target.checked;
+                  if (on && width * height > 2048 * 2048) {
+                    console.warn(`Show2D: FFT on ${width}×${height} image (${(width * height / 1e6).toFixed(1)}M pixels) may be slow`);
+                  }
+                  setShowFft(on);
+                }}
+                size="small"
+                sx={switchStyles.small}
+              />
+            </Box>
             <Box sx={{ flex: "1 1 24px", minWidth: 8 }} />
             <Box sx={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: `${SPACING.SM}px`, flexWrap: "wrap", flex: "0 0 auto", ml: "auto" }}>
               {isGallery && (
@@ -7506,20 +7527,24 @@ function Show2D() {
                   {/* Row 1: Scale + Color */}
                   {(
                     <Box sx={{ ...controlRow, ...mobileControlRowSx, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, opacity: 1, pointerEvents: "auto" }}>
-                      <Typography sx={{ ...typography.label, fontSize: 10 }}>Scale</Typography>
-                      <Select value={logScale ? "log" : "linear"} onChange={(e) => setLogScale(e.target.value === "log")} size="small" sx={{ ...themedSelect, minWidth: 45 }} MenuProps={themedMenuProps}>
-                        <MenuItem value="linear">Lin</MenuItem>
-                        <MenuItem value="log">Log</MenuItem>
-                      </Select>
-                      <Typography sx={{ ...typography.label, fontSize: 10 }}>Color</Typography>
-                      <Select size="small" value={cmap} onChange={(e) => setCmap(e.target.value)} MenuProps={themedMenuProps} sx={{ ...themedSelect, minWidth: 60 }}>
-                        {COLORMAP_NAMES.map((name) => (<MenuItem key={name} value={name}>{name.charAt(0).toUpperCase() + name.slice(1)}</MenuItem>))}
-                      </Select>
+                      <Box sx={controlPairSx}>
+                        <Typography sx={compactLabelSx}>Scale</Typography>
+                        <Select value={logScale ? "log" : "linear"} onChange={(e) => setLogScale(e.target.value === "log")} size="small" sx={{ ...themedSelect, minWidth: 45 }} MenuProps={themedMenuProps}>
+                          <MenuItem value="linear">Lin</MenuItem>
+                          <MenuItem value="log">Log</MenuItem>
+                        </Select>
+                      </Box>
+                      <Box sx={controlPairSx}>
+                        <Typography sx={compactLabelSx}>Color</Typography>
+                        <Select size="small" value={cmap} onChange={(e) => setCmap(e.target.value)} MenuProps={themedMenuProps} sx={{ ...themedSelect, minWidth: 60 }}>
+                          {COLORMAP_NAMES.map((name) => (<MenuItem key={name} value={name}>{name.charAt(0).toUpperCase() + name.slice(1)}</MenuItem>))}
+                        </Select>
+                      </Box>
                       {!isGallery && (
-                        <>
-                          <Typography sx={{ ...typography.label, fontSize: 10 }}>Colorbar</Typography>
+                        <Box sx={controlPairSx}>
+                          <Typography sx={compactLabelSx}>Colorbar</Typography>
                           <Switch checked={showColorbar} onChange={() => { setShowColorbar(!showColorbar); }} size="small" sx={switchStyles.small} />
-                        </>
+                        </Box>
                       )}
                     </Box>
                   )}
@@ -7527,11 +7552,11 @@ function Show2D() {
                   {(
                     <Box sx={{ ...controlRow, ...mobileControlRowSx, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, opacity: 1, pointerEvents: "auto" }}>
                       <Box sx={controlPairSx}>
-                        <Typography sx={{ ...typography.label, fontSize: 10 }}>Auto</Typography>
+                        <Typography sx={compactLabelSx} title="Auto-contrast: recompute the display range from the current view's percentiles. Turn off to set the histogram range by hand.">Auto</Typography>
                         <Switch checked={autoContrast} onChange={() => { setAutoContrast(!autoContrast); }} size="small" sx={switchStyles.small} />
                       </Box>
                       <Box sx={controlPairSx}>
-                        <Typography sx={{ ...typography.label, fontSize: 10 }} title="CSS bilinear interpolation. Same data, browser smooths visually — useful when upscaling small images on a large canvas.">Smooth</Typography>
+                        <Typography sx={compactLabelSx} title="CSS bilinear interpolation. Same data, the browser smooths visually, useful when upscaling small images on a large canvas.">Smooth</Typography>
                         <Switch checked={smooth} onChange={() => { setSmooth(!smooth); }} size="small" sx={switchStyles.small} />
                       </Box>
                       {!showDenoise && filterBannerText && (
@@ -7550,45 +7575,54 @@ function Show2D() {
                           {viewBanner.replace(/ \(reset_view_ops\(\).*$/, "")}
                         </Typography>
                       )}
-                      {!isGallery && showLens && (
-                        <>
-                          <Typography sx={{ ...typography.label, fontSize: 10 }}>Lens {lensMag}×</Typography>
-                          <Slider value={lensMag} min={2} max={8} step={1} onChange={(_, v) => setLensMag(v as number)} size="small" sx={{ ...sliderStyles.small, width: 35 }} />
-                          <Typography sx={{ ...typography.label, fontSize: 10 }}>{lensDisplaySize}px</Typography>
-                          <Slider value={lensDisplaySize} min={64} max={256} step={16} onChange={(_, v) => setLensDisplaySize(v as number)} size="small" sx={{ ...sliderStyles.small, width: 35 }} />
-                        </>
-                      )}
                       {isGallery && (
-                        <>
+                        /* All link toggles live in one bordered "Link" sub-group so
+                           the governing word stays with Zoom/Pan/Contrast/Denoise
+                           when the row wraps on a narrow viewport. */
+                        <Box sx={controlSubGroupSx}>
+                          <Typography sx={compactLabelSx}>Link</Typography>
                           <Box sx={controlPairSx}>
-                            <Typography sx={{ ...typography.label, fontSize: 10 }}>Link</Typography>
-                            <Typography sx={{ ...typography.label, fontSize: 10 }} title="Zoom together across panels.">Zoom</Typography>
+                            <Typography sx={compactLabelSx} title="Zoom together across panels.">Zoom</Typography>
                             <Switch checked={linkedZoom} onChange={() => { setLinkedZoom(!linkedZoom); }} size="small" sx={switchStyles.small} />
                           </Box>
                           <Box sx={controlPairSx}>
-                            <Typography sx={{ ...typography.label, fontSize: 10 }} title="Pan together (independent of zoom).">Pan</Typography>
+                            <Typography sx={compactLabelSx} title="Pan together (independent of zoom).">Pan</Typography>
                             <Switch checked={linkPan} onChange={() => { setLinkPan(!linkPan); }} size="small" sx={switchStyles.small} />
                           </Box>
                           <Box sx={controlPairSx}>
-                            <Typography sx={{ ...typography.label, fontSize: 10 }} title="Share contrast slider across panels.">Contrast</Typography>
+                            <Typography sx={compactLabelSx} title="Share contrast slider across panels.">Contrast</Typography>
                             <Switch checked={linkedContrast} onChange={() => { setLinkedContrast(!linkedContrast); }} size="small" sx={switchStyles.small} />
                           </Box>
                           <Box sx={controlPairSx}>
-                            <Typography sx={{ ...typography.label, fontSize: 10 }} title="Linked: denoise edits apply to every panel. Unlinked: edits apply to the selected panel only.">Denoise</Typography>
+                            <Typography sx={compactLabelSx} title="Linked: denoise edits apply to every panel. Unlinked: edits apply to the selected panel only.">Denoise</Typography>
                             <Switch checked={denoiseScopeAll} onChange={() => setDenoiseScope(denoiseScopeAll ? "panel" : "all")} size="small" sx={switchStyles.small} />
                           </Box>
-                        </>
+                        </Box>
                       )}
                       {getZoomState(isGallery ? selectedIdx : 0).zoom !== 1 && (
                         <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.accent, fontWeight: "bold" }}>{getZoomState(isGallery ? selectedIdx : 0).zoom.toFixed(1)}x</Typography>
                       )}
                     </Box>
                   )}
+                  {/* Lens row (toggle-gated): magnifier strength + window size on
+                      their own line so Row 2 stays clean, mirroring the denoise row. */}
+                  {!isGallery && showLens && (
+                    <Box sx={{ ...controlRow, ...mobileControlRowSx, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, opacity: 1, pointerEvents: "auto" }}>
+                      <Box sx={controlPairSx}>
+                        <Typography sx={compactLabelSx} title="Magnifier zoom factor.">Lens {lensMag}×</Typography>
+                        <Slider value={lensMag} min={2} max={8} step={1} onChange={(_, v) => setLensMag(v as number)} size="small" sx={{ ...sliderStyles.small, width: 60 }} aria-label="Lens magnification" />
+                      </Box>
+                      <Box sx={controlPairSx}>
+                        <Typography sx={compactLabelSx} title="Magnifier window size in display pixels.">Size {lensDisplaySize}px</Typography>
+                        <Slider value={lensDisplaySize} min={64} max={256} step={16} onChange={(_, v) => setLensDisplaySize(v as number)} size="small" sx={{ ...sliderStyles.small, width: 60 }} aria-label="Lens window size" />
+                      </Box>
+                    </Box>
+                  )}
                   {/* Row 3 (toggle-gated): display-only denoise for sparse maps (EDS, low dose) */}
                   {showDenoise && (
                     <Box sx={{ ...controlRow, ...mobileControlRowSx, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, opacity: 1, pointerEvents: "auto" }}>
                       <Box sx={controlPairSx}>
-                        <Typography sx={{ ...typography.label, fontSize: 10 }} title="Poisson (Anscombe): count-respecting smoothing for sparse EDS/counting data - recommended with Bin 2, sigma 6-10. Gaussian: simple smooth for decent-dose images. None: raw counts (use for anything quantitative).">Denoise</Typography>
+                        <Typography sx={compactLabelSx} title="Poisson (Anscombe): count-respecting smoothing for sparse EDS/counting data - recommended with Bin 2, sigma 6-10. Gaussian: simple smooth for decent-dose images. None: raw counts (use for anything quantitative).">Denoise</Typography>
                         <Select size="small" value={denoiseBaseMode} onChange={(e) => { setDisplayFilter(e.target.value); mirrorFilterKnobEdit("mode", e.target.value); }} MenuProps={themedMenuProps} sx={{ ...themedSelect, minWidth: 88 }}>
                           {[["none", "None"], ["gaussian", "Gaussian"], ["anscombe", "Poisson (Anscombe)"]].map(([mode, label]) => (
                             <MenuItem key={mode} value={mode}>{label}</MenuItem>
@@ -7596,7 +7630,7 @@ function Show2D() {
                         </Select>
                       </Box>
                       <Box sx={controlPairSx}>
-                        <Typography sx={{ ...typography.label, fontSize: 10, opacity: filterOff ? 0.5 : 1 }}>σ {(sigmaDraft ?? Number(displaySigma ?? 4)).toFixed(1)}</Typography>
+                        <Typography sx={{ ...compactLabelSx, opacity: filterOff ? 0.5 : 1 }}>σ {(sigmaDraft ?? Number(displaySigma ?? 4)).toFixed(1)}</Typography>
                         <Slider
                           value={sigmaDraft ?? Number(displaySigma ?? 4)}
                           min={0} max={20} step={0.5}
@@ -7607,7 +7641,7 @@ function Show2D() {
                         />
                       </Box>
                       <Box sx={controlPairSx}>
-                        <Typography sx={{ ...typography.label, fontSize: 10 }} title="Display-side 2x bin passes for SNR, combined with the denoise method. 1 is lossless.">Bin</Typography>
+                        <Typography sx={compactLabelSx} title="Display-side 2x bin passes for SNR, combined with the denoise method. 1 is lossless.">Bin</Typography>
                         <Select size="small" value={String(spatialBin || 1)} onChange={(e) => { setSpatialBin(parseInt(e.target.value, 10)); mirrorFilterKnobEdit("bin", parseInt(e.target.value, 10)); }} MenuProps={themedMenuProps} sx={{ ...themedSelect, minWidth: 40 }}>
                           {[1, 2, 4].map((b) => (<MenuItem key={b} value={String(b)}>{b}</MenuItem>))}
                         </Select>
