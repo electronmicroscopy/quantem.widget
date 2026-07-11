@@ -2417,13 +2417,11 @@ function Show3D() {
   // Diff mode
   const [diffMode, setDiffMode] = useModelState<string>("diff_mode");
   const [avgWindow, setAvgWindow] = useModelState<number>("avg_window");
-  const averageSupported = !isRgb && supportsClientAverage(separatePanelFrames);
+  const averageSupported = supportsClientAverage(separatePanelFrames);
   React.useEffect(() => {
     if (averageSupported || normalizedAverageWindow(avgWindow) <= 1) return;
     console.warn(
-      isRgb
-        ? "[Show3D] Moving average is unavailable for true-color RGB stacks; using avg=1"
-        : "[Show3D] Moving average is unavailable for separate full-resolution panel streams; using avg=1",
+      "[Show3D] Moving average is unavailable for separate full-resolution panel streams; using avg=1",
     );
     setAvgWindow(1);
   }, [averageSupported, avgWindow, setAvgWindow]);
@@ -4561,6 +4559,34 @@ function Show3D() {
     return out;
   };
 
+  // Temporal mean of an RGB window: the color twin of averagedFrameForIndex.
+  // Averages 3-channel frames straight from the offline color stack so avg
+  // denoises true-color playback without collapsing to luminance.
+  const averagedRgbFrameForIndex = (idx: number, fallback: Float32Array): Float32Array => {
+    const win = normalizedAverageWindow(playRef.current.avgWindow);
+    if (win <= 1) return fallback;
+    const n = Math.max(1, nSlices || 1);
+    const center = Math.max(0, Math.min(n - 1, Math.round(idx)));
+    const half = Math.floor(win / 2);
+    let start = center - half;
+    let end = start + win - 1;
+    if (start < 0) { end = Math.min(n - 1, end - start); start = 0; }
+    if (end >= n) { start = Math.max(0, start - (end - n + 1)); end = n - 1; }
+    const size = width * height * 3;
+    const out = new Float32Array(size);
+    let count = 0;
+    for (let j = start; j <= end; j++) {
+      const frame = j === center ? fallback : getOfflineFrame(j);
+      if (!frame || frame.length < size) continue;
+      for (let k = 0; k < size; k++) out[k] += frame[k];
+      count++;
+    }
+    if (count === 0) return fallback;
+    const inv = 1 / count;
+    for (let k = 0; k < size; k++) out[k] *= inv;
+    return out;
+  };
+
   const displayFrameForIndex = (idx: number, currentFrame: Float32Array | null): Float32Array | null => {
     const frame = averagedFrameForIndex(idx, idx, currentFrame);
     const activeDiffMode = playRef.current.diffMode;
@@ -6033,21 +6059,15 @@ function Show3D() {
     const frameData = rawFrameDataRef.current;
     if (!frameData || frameData.length === 0) return;
     if (!mainOffscreenRef.current || !mainImgDataRef.current) return;
-    // True-color RGB: paint display-ready pixels, skip colormap path entirely.
+    // True-color RGB: paint on the GPU (paintRgbFrame), applying the moving
+    // average across color frames when avg > 1 so an avg change re-denoises the
+    // static frame, not just live playback.
     if (isRgb && rgbFrameDataRef.current && rgbFrameDataRef.current.length >= width * height * 3) {
-      const rgb = rgbFrameDataRef.current;
-      const px = mainImgDataRef.current.data;
-      const n = Math.min(width * height, Math.floor(rgb.length / 3));
-      for (let k = 0; k < n; k++) {
-        px[4 * k] = Math.max(0, Math.min(255, Math.round(rgb[3 * k] * 255)));
-        px[4 * k + 1] = Math.max(0, Math.min(255, Math.round(rgb[3 * k + 1] * 255)));
-        px[4 * k + 2] = Math.max(0, Math.min(255, Math.round(rgb[3 * k + 2] * 255)));
-        px[4 * k + 3] = 255;
-      }
-      mainOffscreenRef.current.getContext("2d")!.putImageData(mainImgDataRef.current, 0, 0);
-      const canvas = canvasRef.current;
-      const ctx = canvas?.getContext("2d");
-      if (ctx) drawMain(ctx, mainOffscreenRef.current);
+      const idx = offline ? liveSliceIdx : displaySliceIdx;
+      const rgb = normalizedAverageWindow(avgWindow) > 1
+        ? averagedRgbFrameForIndex(idx, rgbFrameDataRef.current)
+        : rgbFrameDataRef.current;
+      paintRgbFrame(rgb);
       return;
     }
     const offlinePackedPanelPlaybackUsesStaticCanvas = (
@@ -6375,7 +6395,27 @@ function Show3D() {
   };
 
   const paintRgbFrame = (rgb: Float32Array): boolean => {
-    if (!mainOffscreenRef.current || !mainImgDataRef.current) return false;
+    if (!mainOffscreenRef.current) return false;
+    // WebGPU passthrough: pack the RGB channels on the GPU and blit, keeping the
+    // per-pixel loop off the UI thread. Falls back to the CPU loop when the
+    // engine is unavailable or the frame exceeds the storage-buffer limit.
+    const engine = gpuCmapRef.current;
+    if (engine && gpuCmapReadyRef.current) {
+      const bitmap = engine.renderRgbToImageBitmap(rgb, width, height);
+      if (bitmap) {
+        try {
+          const octx = mainOffscreenRef.current.getContext("2d");
+          if (octx) octx.drawImage(bitmap, 0, 0);
+        } finally {
+          bitmap.close();
+        }
+        const canvas = canvasRef.current;
+        const ctx = canvas?.getContext("2d");
+        if (ctx) drawMain(ctx, mainOffscreenRef.current);
+        return true;
+      }
+    }
+    if (!mainImgDataRef.current) return false;
     const px = mainImgDataRef.current.data;
     const n = Math.min(width * height, Math.floor(rgb.length / 3));
     for (let k = 0; k < n; k++) {
@@ -6394,14 +6434,18 @@ function Show3D() {
   const renderFloatFrameSlice = (inputFrame: Float32Array, idx: number): boolean => {
     const c = playRef.current;
     if (!mainOffscreenRef.current || !mainImgDataRef.current) return false;
-    // True-color stack: paint RGB as-is (no colormap).
+    // True-color stack: paint RGB as-is (no colormap), applying the moving
+    // average across color frames when avg > 1.
     if (isRgb && inputFrame.length >= width * height * 3) {
       gpuRenderSerialRef.current++;
       playbackIdxRef.current = idx;
       setDisplaySliceIdx(idx);
-      rgbFrameDataRef.current = inputFrame;
-      rawFrameDataRef.current = rgbFrameToLuminance(inputFrame, width * height);
-      return paintRgbFrame(inputFrame);
+      const toPaint = normalizedAverageWindow(c.avgWindow) > 1
+        ? averagedRgbFrameForIndex(idx, inputFrame)
+        : inputFrame;
+      rgbFrameDataRef.current = toPaint;
+      rawFrameDataRef.current = rgbFrameToLuminance(toPaint, width * height);
+      return paintRgbFrame(toPaint);
     }
     const transformActive = requiresClientFrameTransform({
       offline,

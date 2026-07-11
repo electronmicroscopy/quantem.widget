@@ -619,6 +619,27 @@ struct VSOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f };
 }
 `;
 
+// True-color passthrough: interleaved RGB float [0,1] -> packed rgba u32 (same
+// packing the blit shader reads), no colormap. This is the GPU twin of the CPU
+// per-pixel RGB pack loop, moving that work off the UI thread.
+const RGB_PASSTHROUGH_SHADER = /* wgsl */ `
+struct Params { width: u32, height: u32, _p0: u32, _p1: u32 };
+@group(0) @binding(0) var<uniform> params: Params;
+@group(0) @binding(1) var<storage, read> rgb: array<f32>;
+@group(0) @binding(2) var<storage, read_write> rgba: array<u32>;
+
+@compute @workgroup_size(16, 16)
+fn main(@builtin(global_invocation_id) gid: vec3u) {
+  if (gid.x >= params.width || gid.y >= params.height) { return; }
+  let idx = gid.y * params.width + gid.x;
+  let base = idx * 3u;
+  let r = u32(clamp(rgb[base] * 255.0, 0.0, 255.0));
+  let g = u32(clamp(rgb[base + 1u] * 255.0, 0.0, 255.0));
+  let b = u32(clamp(rgb[base + 2u] * 255.0, 0.0, 255.0));
+  rgba[idx] = r | (g << 8u) | (b << 16u) | 0xFF000000u;
+}
+`;
+
 // Volume-resident orthogonal slice + colormap in ONE compute pass. The whole 3D
 // volume lives in a GPU storage buffer (uploaded once); per scrub only a tiny
 // uniform (axis + slice index + vmin/vmax) changes, so there is NO per-frame CPU
@@ -862,6 +883,14 @@ export class GPUColormapEngine {
   private avgScratch: GPUBuffer | null = null;
   private avgScratchSize = 0;
   private avgParamsBuffer: GPUBuffer | null = null;
+  // True-color passthrough state: an RGB->rgba compute pipeline plus reused
+  // input/output buffers, so RGB frames paint on the GPU like grayscale.
+  private rgbPipeline: GPUComputePipeline | null = null;
+  private rgbDataBuffer: GPUBuffer | null = null;
+  private rgbDataCapacity = 0;
+  private rgbRgbaBuffer: GPUBuffer | null = null;
+  private rgbRgbaCapacity = 0;
+  private rgbParamsBuffer: GPUBuffer | null = null;
   // Per-image GPU state: persistent buffers (data, rgba, read, params, histogram)
   private slots: GPUSlot[] = [];
   private lutBuffer: GPUBuffer | null = null;
@@ -1446,6 +1475,110 @@ export class GPUColormapEngine {
     const canvases = this._encodeSlotsToOffscreen(indices, ranges, logScale);
     if (!canvases) return null;
     return this._transferOffscreens(canvases);
+  }
+
+  private ensureRgbPipeline(): void {
+    if (this.rgbPipeline) return;
+    const module = this.device.createShaderModule({ code: RGB_PASSTHROUGH_SHADER });
+    this.rgbPipeline = this.device.createComputePipeline({
+      layout: "auto",
+      compute: { module, entryPoint: "main" },
+    });
+  }
+
+  /**
+   * Paint an interleaved RGB float frame (3 channels in [0, 1]) to an
+   * ImageBitmap entirely on the GPU: a passthrough compute shader packs the
+   * channels into rgba, then the existing blit renders it. Returns null (so the
+   * caller falls back to the CPU pack loop) if WebGPU is unavailable, the frame
+   * is too large for the device's storage-buffer limit, or a validation error
+   * fires. The device already requests the adapter's max buffer limits, so a 4K
+   * color slot fits where the 128 MB default would have silently failed.
+   */
+  renderRgbToImageBitmap(rgb: Float32Array, width: number, height: number): ImageBitmap | null {
+    if (width <= 0 || height <= 0) return null;
+    const count = width * height;
+    if (rgb.length < count * 3) return null;
+    const rgbBytes = count * 3 * 4;
+    const rgbaBytes = count * 4;
+    const maxBind = this.device.limits.maxStorageBufferBindingSize;
+    if (rgbBytes > maxBind || rgbaBytes > maxBind) return null;  // too big for one buffer -> CPU path
+    try {
+      this.ensureRgbPipeline();
+      const fmt = navigator.gpu.getPreferredCanvasFormat();
+      this.ensureBlitPipeline(fmt);
+      if (!this.rgbPipeline || !this.blitPipeline) return null;
+
+      if (!this.rgbDataBuffer || this.rgbDataCapacity < rgbBytes) {
+        this.rgbDataBuffer?.destroy();
+        this.rgbDataBuffer = this.device.createBuffer({
+          size: rgbBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+        });
+        this.rgbDataCapacity = rgbBytes;
+      }
+      if (!this.rgbRgbaBuffer || this.rgbRgbaCapacity < rgbaBytes) {
+        this.rgbRgbaBuffer?.destroy();
+        this.rgbRgbaBuffer = this.device.createBuffer({
+          size: rgbaBytes, usage: GPUBufferUsage.STORAGE,
+        });
+        this.rgbRgbaCapacity = rgbaBytes;
+      }
+      if (!this.rgbParamsBuffer) {
+        this.rgbParamsBuffer = this.device.createBuffer({
+          size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        });
+      }
+      const src = rgb.length === count * 3 ? rgb : rgb.subarray(0, count * 3);
+      this.device.queue.writeBuffer(this.rgbDataBuffer, 0, src.buffer, src.byteOffset, count * 3 * 4);
+      this.device.queue.writeBuffer(this.rgbParamsBuffer, 0, new Uint32Array([width, height, 0, 0]));
+
+      const encoder = this.device.createCommandEncoder();
+      const computeGroup = this.device.createBindGroup({
+        layout: this.rgbPipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: this.rgbParamsBuffer } },
+          { binding: 1, resource: { buffer: this.rgbDataBuffer } },
+          { binding: 2, resource: { buffer: this.rgbRgbaBuffer } },
+        ],
+      });
+      const computePass = encoder.beginComputePass();
+      computePass.setPipeline(this.rgbPipeline);
+      computePass.setBindGroup(0, computeGroup);
+      computePass.dispatchWorkgroups(Math.ceil(width / 16), Math.ceil(height / 16));
+      computePass.end();
+
+      const oc = new OffscreenCanvas(width, height);
+      const ctx = oc.getContext("webgpu") as GPUCanvasContext;
+      ctx.configure({ device: this.device, format: fmt, alphaMode: "opaque" });
+      const blitParams = this.device.createBuffer({
+        size: 8, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+      });
+      this.device.queue.writeBuffer(blitParams, 0, new Uint32Array([width, height]));
+      const blitGroup = this.device.createBindGroup({
+        layout: this.blitPipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: blitParams } },
+          { binding: 1, resource: { buffer: this.rgbRgbaBuffer } },
+        ],
+      });
+      const renderPass = encoder.beginRenderPass({
+        colorAttachments: [{
+          view: ctx.getCurrentTexture().createView(),
+          loadOp: "clear" as GPULoadOp,
+          storeOp: "store" as GPUStoreOp,
+          clearValue: { r: 0, g: 0, b: 0, a: 1 },
+        }],
+      });
+      renderPass.setPipeline(this.blitPipeline);
+      renderPass.setBindGroup(0, blitGroup);
+      renderPass.draw(3);
+      renderPass.end();
+      this.device.queue.submit([encoder.finish()]);
+      blitParams.destroy();
+      return oc.transferToImageBitmap();
+    } catch {
+      return null;
+    }
   }
 
   /**
