@@ -3349,6 +3349,9 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             "view_crop": list(self.view_crop),
             "pad_ratio": float(self.pad_ratio),
             "diff_mode": self.diff_mode,
+            # Which panel the signed-diff panel subtracts from; without it a
+            # saved non-default diff reference silently reverts to panel 0.
+            "diff_reference": int(self.diff_reference),
             "ncols": self.ncols,
             "selected_idx": self.selected_idx,
             "roi_active": self.roi_active,
@@ -3365,6 +3368,11 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             "denoise_modes": list(self.denoise_modes),
             "denoise_sigmas": list(self.denoise_sigmas),
             "denoise_bins": list(self.denoise_bins),
+            # underlay= is construction-time sugar: the composed "map on HAADF"
+            # RGB panel is rebuilt from the kernel, not stored, so it is NOT
+            # restored on a kernel-less reopen. These two blend knobs are kept
+            # so a live (kernel-backed) widget re-blends to the saved look; on a
+            # cold reopen they are inert (there is no underlay panel to tune).
             "underlay_alpha": self.underlay_alpha,
             "underlay_haadf_gain": self.underlay_haadf_gain,
         }
@@ -4261,6 +4269,21 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 f"pad_ratio must be between 0 and 1 (border as a fraction of "
                 f"max(rows, cols)); got {value}"
             )
+        # pad is a single-panel display window, like crop_to_view(): a gallery
+        # or an RGB panel cannot pad, so reject it loudly instead of silently
+        # ignoring the border (and announcing one that never happened). 0.0
+        # always passes, so reset_view_ops() and the default stay valid.
+        if value > 0 and getattr(self, "_data", None) is not None:
+            if int(self.n_images) != 1:
+                raise NotImplementedError(
+                    f"pad_ratio supports a single panel; this widget shows "
+                    f"{int(self.n_images)} panels. Pad the array before display "
+                    f"for galleries."
+                )
+            if any(self.is_rgb):
+                raise NotImplementedError(
+                    "pad_ratio supports grayscale panels; this panel is RGB."
+                )
         return value
 
     @traitlets.validate("view_crop")
@@ -4363,7 +4386,13 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         if len(self.view_crop) == 4:
             r0, r1, c0, c1 = (int(v) for v in self.view_crop)
             parts.append(f"cropped to ({r0},{c0})-({r1},{c1})")
-        if float(self.pad_ratio) > 0:
+        # Announce the pad only when it was actually applied. The geometry
+        # gates the pad on single_scalar, so pad > 0 (not pad_ratio > 0) is the
+        # honest test: a gallery/RGB widget never pads, so it must never claim
+        # a border in the banner. Constructing such a widget with pad_ratio > 0
+        # raises in _validate_pad_ratio, but a later trait assignment could
+        # still reach here.
+        if pad > 0:
             parts.append(f"pad {float(self.pad_ratio):.0%}")
         banner = (
             f"view: {' · '.join(parts)} (reset_view_ops() restores full frame)"

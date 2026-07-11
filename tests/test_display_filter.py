@@ -325,3 +325,32 @@ def test_show2d_html_export_ships_raw_frames_and_knobs():
         assert list(clone.denoise_sigmas) == [6.0]
     finally:
         clone.close()
+
+
+def test_gallery_rejects_pad_ratio_and_never_claims_a_phantom_border():
+    """pad is a single-panel display window: a 2-panel gallery rejects
+    pad_ratio outright (clear NotImplementedError) and a plain gallery never
+    announces a border it did not draw."""
+    from quantem.widget import Show2D
+
+    a = _sparse_eds_map(shape=(64, 64))
+    b = _sparse_eds_map(seed=9, shape=(64, 64))
+    with pytest.raises(NotImplementedError, match="single panel"):
+        Show2D([a, b], pad_ratio=0.1, verbose=False)
+    gallery = Show2D([a, b], verbose=False)
+    assert "pad" not in gallery.view_banner
+
+
+def test_diff_reference_survives_state_round_trip():
+    """A drift A/B gallery in diff mode: point the diff at panel 1, save, then
+    reload into a fresh widget -> the saved reference comes back instead of
+    silently reverting to panel 0."""
+    from quantem.widget import Show2D
+
+    a = _sparse_eds_map(shape=(64, 64))
+    b = _sparse_eds_map(seed=9, shape=(64, 64))
+    widget = Show2D([a, b], diff_mode=True, verbose=False)
+    widget.diff_reference = 1
+    restored = Show2D([a, b], verbose=False)
+    restored.load_state_dict(widget.state_dict())
+    assert restored.diff_reference == 1
