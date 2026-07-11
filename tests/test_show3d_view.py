@@ -141,3 +141,41 @@ def test_export_html_refuses_oversized_single_file(tmp_path):
     # the smaller uint8 encoding gets under the same limit and writes fine
     out = widget.export_html(tmp_path / "ok.html", encoding="uint8", max_mb=5)
     assert out.exists()
+
+
+def test_multi_panel_rgb_packs_independent_color_panels():
+    # A scientist compares two color results side by side (e.g. two channel
+    # composites). Each panel is its own (N, H, W, 3) stack; Show3D concatenates
+    # them into one wide color frame and the offline stack keeps each panel's
+    # true color, sliced by panel_width_px.
+    red = np.zeros((5, 12, 16, 3), dtype=np.float32)
+    red[..., 0] = 1.0
+    blue = np.zeros((5, 12, 16, 3), dtype=np.float32)
+    blue[..., 2] = 1.0
+    widget = Show3D(red, blue, panel_titles=["red", "blue"])
+    assert widget.is_rgb and widget.n_panels == 2
+    assert widget.panel_width_px == 16
+    assert widget._rgb_data.shape == (5, 12, 32, 3)
+    assert widget._data.shape == (5, 12, 32)  # luminance concat drives stats
+    assert not widget.separate_panel_frames
+
+    stack = np.frombuffer(widget._offline_stack, dtype=np.uint8).reshape(5, 12, 32, 3)
+    assert (stack[0, :, :16, 0] == 255).all()   # left panel red
+    assert (stack[0, :, 16:, 2] == 255).all()   # right panel blue
+
+
+def test_multi_panel_rgb_export_clone_keeps_panels():
+    # The HTML export clone must rebuild the same panel count, not collapse the
+    # wide color concat into one panel.
+    red = np.zeros((4, 16, 16, 3), dtype=np.float32)
+    red[..., 0] = 1.0
+    green = np.zeros((4, 16, 16, 3), dtype=np.float32)
+    green[..., 1] = 1.0
+    widget = Show3D(red, green)
+    clone = widget._clone_for_html_export(quantized=True)
+    try:
+        assert clone.n_panels == 2 and clone.panel_width_px == 16 and clone.is_rgb
+        cs = np.frombuffer(clone._offline_stack, dtype=np.uint8).reshape(4, 16, 32, 3)
+        assert (cs[0, :, :16, 0] == 255).all() and (cs[0, :, 16:, 1] == 255).all()
+    finally:
+        clone.close()

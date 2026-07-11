@@ -2334,19 +2334,72 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         # rotates each RGB channel so true color survives (previously blocked).
         data = _apply_config_transform(data)
         self.is_rgb = bool(is_rgb)
-        data = self._establish_rgb_luminance(data, is_rgb=is_rgb)
+        # Multi-panel RGB establishes the color/luminance split AFTER the panels
+        # are concatenated (below), so panel 0's color survives to be joined.
+        # Every other case splits here on the single processed stack.
+        multi_panel_rgb = is_rgb and len(data_args) > 1
+        if not multi_panel_rgb:
+            data = self._establish_rgb_luminance(data, is_rgb=is_rgb)
 
         # Multi-panel: convert remaining args, validate shapes, concatenate.
         # If the caller repeats the same stack object across panels, keep the
         # data once and let JS draw that exact frame into multiple panel slots.
         # This is the "36 full-res frames across 9 panels" stress case: no
         # pre-binning, no 9x Python copy, no 604 MB synthetic browser frame.
-        if len(data_args) > 1:
-            if is_rgb:
-                raise NotImplementedError(
-                    "Show3D multi-panel mode does not yet support RGB color stacks. "
-                    "Pass one RGB stack, or use Show2D for a color gallery."
+        if len(data_args) > 1 and is_rgb:
+            # Multi-panel true color: each panel is an independent (N, H, W, 3)
+            # stack, concatenated horizontally into one wide color frame. The
+            # luminance plane comes from the concat; JS slices panels by
+            # panel_width_px and the RGB paint path reads the full color strip.
+            self.n_panels = len(data_args)
+            self.panel_titles = (
+                list(panel_titles) if panel_titles is not None
+                else [f"Panel {i + 1}" for i in range(self.n_panels)]
+            )
+            self.starred = [-1] * self.n_panels
+            self.panel_order = []
+            panels = [np.ascontiguousarray(data, dtype=np.float32)]  # panel 0, already color-processed
+            for i, extra in enumerate(data_args[1:], 1):
+                if hasattr(extra, "array"):
+                    extra = extra.array
+                arr = to_numpy(extra)
+                if arr.ndim == 2:
+                    arr = arr[None, ...]
+                arr, _ = _resolve_rgb_stack(arr, True)  # force color for a gallery panel
+                arr = arr.astype(np.float32, copy=False)
+                if arr.size and float(np.nanmax(arr)) > 1.5:
+                    arr = arr / 255.0
+                arr = np.clip(arr, 0.0, 1.0)
+                arr = _apply_config_transform(
+                    _pad_stack(_crop_stack(arr, self._crop), self._padding, self._pad_mode)
                 )
+                if arr.shape[1:3] != panels[0].shape[1:3]:
+                    raise ValueError(
+                        f"Panel {i} image shape {arr.shape[1:3]} must match panel 0 "
+                        f"{panels[0].shape[1:3]}; crop or pad the panels to one (H, W) first."
+                    )
+                panels.append(arr)
+            self.n_panels = len(panels)
+            # Compare trials with different iteration counts: pad short stacks to
+            # the longest by repeating the last frame (visually obvious, stable range).
+            real_n = [p.shape[0] for p in panels]
+            max_n = max(real_n)
+            if any(n != max_n for n in real_n):
+                panels = [
+                    p if n == max_n
+                    else np.concatenate([p, np.broadcast_to(p[-1:], (max_n - n, *p.shape[1:]))], axis=0)
+                    for p, n in zip(panels, real_n)
+                ]
+                if not self.panel_real_frames:
+                    self.panel_real_frames = real_n
+            self._panel_width = panels[0].shape[2]
+            self.panel_width_px = self._panel_width
+            self._multi_panel_bin = 0
+            self.shared_panel_source = False
+            self.separate_panel_frames = False  # RGB uses the concat path, not the gray-LUT frame server
+            concat_color = np.concatenate(panels, axis=2)  # (N, H, W * n_panels, 3)
+            data = self._establish_rgb_luminance(concat_color, is_rgb=True)
+        elif len(data_args) > 1:
             def _raw_array_obj(obj):
                 return obj.array if hasattr(obj, "array") else obj
 
@@ -5311,7 +5364,17 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             return np.ascontiguousarray(np.stack(frames, axis=0), dtype=np.float32)
 
         # True-color: export the RGB stack so offline HTML paints without a colormap.
+        # Multi-panel splits the wide concat back into per-panel color stacks so the
+        # export clone rebuilds the same panel count (a single wide array would
+        # collapse to one panel and mismatch panel_titles / n_panels).
         if self.is_rgb and getattr(self, "_rgb_data", None) is not None:
+            n_panels = int(self.n_panels)
+            if n_panels > 1:
+                panel_w = int(self.panel_width_px) or self._rgb_data.shape[2] // n_panels
+                return tuple(
+                    _bin_rgb_stack(self._rgb_data[:, :, i * panel_w:(i + 1) * panel_w])
+                    for i in range(n_panels)
+                )
             return (_bin_rgb_stack(self._rgb_data),)
 
         n_panels = int(self.n_panels)
