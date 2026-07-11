@@ -627,7 +627,12 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         data keep the original counts, and the lossless default is
         ``"none"``. When active, a one-line banner announces the reduction
         and how to get raw counts back. RGB panels are never filtered.
-        Independent of ``display_bin`` (the GPU display budget knob).
+        Independent of ``display_bin`` (the GPU display budget knob). The
+        per-panel ``denoise_modes`` / ``denoise_sigmas`` / ``denoise_bins``
+        lists are the source of truth; the scalar ``denoise`` /
+        ``denoise_sigma`` / ``denoise_bin`` traits are the UI editor and,
+        while ``denoise_scope == "panel"``, mirror only the selected panel.
+        Set per-panel values imperatively with :meth:`set_denoise`.
     denoise_sigma : float or sequence of float, default 4.0
         Smoothing scale in pixels for the Gaussian/Anscombe display filters.
         A sequence sets one sigma per panel.
@@ -1358,6 +1363,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 verbose=verbose, state=state, _t0=_t0,
                 denoise=denoise, denoise_sigma=denoise_sigma,
                 denoise_bin=denoise_bin, denoise_scope=denoise_scope,
+                denoise_scope_explicit=denoise_scope_supplied,
                 show_denoise=show_denoise,
                 underlay=underlay, underlay_alpha=underlay_alpha,
                 underlay_haadf_gain=underlay_haadf_gain)
@@ -1372,7 +1378,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                    pad_ratio, display_bin, hidden_panels, starred, panel_order, show_panel_titles,
                    panel_title_font_size, gallery_gap_px, verbose, state, _t0,
                    denoise="none", denoise_sigma=4.0, denoise_bin=1,
-                   denoise_scope="all", show_denoise=False,
+                   denoise_scope="all", denoise_scope_explicit=False, show_denoise=False,
                    underlay=False, underlay_alpha=0.95,
                    underlay_haadf_gain=0.35):
         import time as _time
@@ -1839,8 +1845,19 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         self.denoise_bin = int(bins[0])
         self._filter_knob_sync = False
         # A sequence means independent per-panel knobs, so UI edits scope to
-        # the selected panel; scalars keep the broadcast "all" scope.
-        broadcast = denoise_scope != "panel" and filters_scalar and sigmas_scalar and bins_scalar
+        # the selected panel; scalars keep the broadcast "all" scope. Passing a
+        # per-panel sequence AND an explicit denoise_scope="all" is a
+        # contradiction ("all" broadcasts one value, the sequence gives each
+        # panel its own), so reject it instead of silently forcing "panel".
+        scalar_knobs = filters_scalar and sigmas_scalar and bins_scalar
+        if denoise_scope_explicit and denoise_scope == "all" and not scalar_knobs:
+            raise ValueError(
+                "denoise_scope='all' broadcasts one setting to every panel, but "
+                "a per-panel denoise/denoise_sigma/denoise_bin sequence was also "
+                "given. Pass scalar denoise knobs with denoise_scope='all', or "
+                "drop denoise_scope and let the sequence select per-panel scope."
+            )
+        broadcast = denoise_scope != "panel" and scalar_knobs
         self.denoise_scope = "all" if broadcast else "panel"
         self._display_filter_ready = True
         self._refresh_display_filter_banner(announce=True)
@@ -3827,6 +3844,122 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         with self.hold_sync():
             self.view_crop = []
             self.pad_ratio = 0.0
+        return self
+
+    def set_denoise(
+        self,
+        mode: str,
+        *,
+        sigma: float | None = None,
+        bin: int | None = None,
+        panels: Sequence[int] | int | None = None,
+    ) -> Self:
+        """Set the display denoise for every panel, or a chosen panel subset.
+
+        The imperative twin of the ``denoise=`` constructor kwarg, chainable
+        like :meth:`crop_to_view` and :meth:`set_roi`. Denoise is a pure view
+        transform: the stored array, the stats row, and every raw-data export
+        keep the original counts, and an active reduction still announces
+        itself with the one-line banner. The per-panel ``denoise_modes`` /
+        ``denoise_sigmas`` / ``denoise_bins`` lists are the source of truth;
+        the scalar ``denoise`` / ``denoise_sigma`` / ``denoise_bin`` traits
+        mirror only the selected panel while ``denoise_scope == "panel"``.
+
+        Parameters
+        ----------
+        mode : str
+            Denoise method for the targeted panels: ``"none"``, ``"gaussian"``,
+            or ``"anscombe"``. The compound spellings ``"bin2"``,
+            ``"bin2_anscombe"`` and ``"bin4_anscombe"`` fold into a (mode, bin)
+            pair; ``"tv"``/``"denova*"`` stay available from Python.
+        sigma : float or None, optional
+            Smoothing scale in pixels. ``None`` leaves each targeted panel's
+            current sigma unchanged.
+        bin : int or None, optional
+            Display-side SNR bin factor (1, 2, or 4). ``None`` leaves each
+            targeted panel's current bin unchanged, unless a compound ``mode``
+            (e.g. ``"bin2_anscombe"``) sets it.
+        panels : int, sequence of int, or None, optional
+            Panel indices to change. ``None`` (the default) targets every
+            panel and applies one uniform setting; passing a subset edits only
+            those panels and switches ``denoise_scope`` to ``"panel"`` so later
+            UI edits stay per panel.
+
+        Returns
+        -------
+        Self
+            The widget, for chaining.
+
+        Raises
+        ------
+        ValueError
+            When a ``panels`` index is out of range for the widget.
+
+        Examples
+        --------
+        >>> import numpy as np
+        >>> from quantem.widget import Show2D
+        >>> a = np.random.poisson(0.3, (256, 256)).astype("float32")
+        >>> b = np.random.poisson(0.3, (256, 256)).astype("float32")
+        >>> w = Show2D([a, b])                             # a raw A/B gallery
+        >>> _ = w.set_denoise("anscombe", sigma=8, bin=2)  # denoise both panels
+        >>> _ = w.set_denoise("none", panels=[0])          # keep panel 0 raw
+        """
+        from quantem.widget.utils.display_filter import resolve_denoise_mode
+
+        n_panels = int(self.n_images)
+        if panels is None:
+            targets = list(range(n_panels))
+            subset = False
+        else:
+            if isinstance(panels, (int, np.integer)):
+                panels = [int(panels)]
+            targets = [int(p) for p in panels]
+            for p in targets:
+                if not (0 <= p < n_panels):
+                    raise ValueError(
+                        f"set_denoise panels index {p} is out of range for a "
+                        f"{n_panels}-panel widget (valid 0..{n_panels - 1})."
+                    )
+            subset = True
+        resolved_mode, resolved_bin = resolve_denoise_mode(
+            str(mode), 1 if bin is None else int(bin)
+        )
+        modes = list(self.denoise_modes) or [str(self.denoise)] * n_panels
+        sigmas = list(self.denoise_sigmas) or [float(self.denoise_sigma)] * n_panels
+        bins = list(self.denoise_bins) or [int(self.denoise_bin)] * n_panels
+        for p in targets:
+            modes[p] = resolved_mode
+            if sigma is not None:
+                sigmas[p] = float(sigma)
+            if bin is not None or resolved_bin > 1:
+                bins[p] = int(resolved_bin)
+        # Write the per-panel lists in one batch: suppress the per-list repack
+        # observer and the scalar mirror during the write, then repack once
+        # (mirrors the constructor). The scalar knobs re-sync to the selected
+        # panel so the editor keeps showing what is on screen.
+        with self.hold_sync():
+            prev_ready = getattr(self, "_display_filter_ready", False)
+            self._display_filter_ready = False
+            self._filter_knob_sync = True
+            try:
+                if subset:
+                    self.denoise_scope = "panel"
+                self.denoise_modes = modes
+                self.denoise_sigmas = sigmas
+                self.denoise_bins = bins
+                sel = min(int(self.selected_idx), max(0, n_panels - 1))
+                self.denoise = modes[sel]
+                self.denoise_sigma = float(sigmas[sel])
+                self.denoise_bin = int(bins[sel])
+            finally:
+                self._display_filter_ready = prev_ready
+                self._filter_knob_sync = False
+            if prev_ready:
+                if self._display_filter_active():
+                    self.show_denoise = True
+                self._refresh_display_filter_banner(announce=True)
+                self._update_all_frames()
         return self
 
     def to_show3d(
