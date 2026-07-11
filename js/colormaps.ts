@@ -20,6 +20,12 @@ const COLORMAP_POINTS: Record<string, number[][]> = {
     [0, 0, 4], [28, 16, 68], [79, 18, 123], [129, 37, 129],
     [181, 54, 122], [229, 80, 100], [251, 135, 97], [254, 194, 135], [252, 253, 191],
   ],
+  // EDS magenta: high end stays pink-magenta, never white, so bright
+  // chemistry columns read as chemistry rather than HAADF structure.
+  magenta: [
+    [5, 0, 8], [74, 0, 56], [154, 0, 120], [208, 32, 168],
+    [255, 64, 208], [255, 144, 232],
+  ],
   hot: [
     [0, 0, 0], [87, 0, 0], [173, 0, 0], [255, 0, 0],
     [255, 87, 0], [255, 173, 0], [255, 255, 0], [255, 255, 128], [255, 255, 255],

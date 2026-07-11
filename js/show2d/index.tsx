@@ -1017,6 +1017,13 @@ function Show2D() {
   // updates on release so scrubbing sigma stays smooth on large galleries.
   const [sigmaDraft, setSigmaDraft] = React.useState<number | null>(null);
   const filterOff = !displayFilter || displayFilter === "none";
+  // Chemistry-on-structure blend panel (underlay=True): live sliders re-blend
+  // in Python; commit on release so dragging stays smooth.
+  const [underlayActive] = useModelState<boolean>("underlay");
+  const [underlayAlpha, setUnderlayAlpha] = useModelState<number>("underlay_alpha");
+  const [underlayGain, setUnderlayGain] = useModelState<number>("underlay_haadf_gain");
+  const [alphaDraft, setAlphaDraft] = React.useState<number | null>(null);
+  const [gainDraft, setGainDraft] = React.useState<number | null>(null);
 
   // Scale bar
   const [pixelSize] = useModelState<number>("pixel_size");
@@ -6773,6 +6780,33 @@ function Show2D() {
                           {displayFilterBanner.split(" (")[0]} · raw: display_filter='none'
                         </Typography>
                       )}
+                    </Box>
+                  )}
+                  {/* Row 4 (underlay only): chemistry-on-HAADF blend sliders */}
+                  {underlayActive && (
+                    <Box sx={{ ...controlRow, ...mobileControlRowSx, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, opacity: 1, pointerEvents: "auto" }}>
+                      <Box sx={controlPairSx}>
+                        <Typography sx={{ ...typography.label, fontSize: 10 }} title="Chemistry opacity in the map-on-HAADF blend panel.">Blend {(alphaDraft ?? Number(underlayAlpha ?? 0.95)).toFixed(2)}</Typography>
+                        <Slider
+                          value={alphaDraft ?? Number(underlayAlpha ?? 0.95)}
+                          min={0} max={1} step={0.05}
+                          onChange={(_, v) => setAlphaDraft(v as number)}
+                          onChangeCommitted={(_, v) => { setUnderlayAlpha(v as number); setAlphaDraft(null); }}
+                          size="small" sx={{ ...sliderStyles.small, width: 60 }}
+                          aria-label="Underlay blend opacity"
+                        />
+                      </Box>
+                      <Box sx={controlPairSx}>
+                        <Typography sx={{ ...typography.label, fontSize: 10 }} title="Strength of the dim HAADF lattice ghost where the map is empty.">HAADF {(gainDraft ?? Number(underlayGain ?? 0.35)).toFixed(2)}</Typography>
+                        <Slider
+                          value={gainDraft ?? Number(underlayGain ?? 0.35)}
+                          min={0} max={1} step={0.05}
+                          onChange={(_, v) => setGainDraft(v as number)}
+                          onChangeCommitted={(_, v) => { setUnderlayGain(v as number); setGainDraft(null); }}
+                          size="small" sx={{ ...sliderStyles.small, width: 60 }}
+                          aria-label="Underlay HAADF ghost gain"
+                        />
+                      </Box>
                     </Box>
                   )}
                 </Box>

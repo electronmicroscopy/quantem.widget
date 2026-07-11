@@ -699,6 +699,12 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     spatial_bin = traitlets.Int(1).tag(sync=True)
     filter_per_panel = traitlets.Bool(True).tag(sync=True)
     display_filter_banner = traitlets.Unicode("").tag(sync=True)
+    # Chemistry-on-structure view: HAADF-modulated blend of an element map on
+    # the HAADF lattice as a third RGB panel (haadf | map | blend). Enabled at
+    # construction with underlay=True on exactly two grayscale inputs.
+    underlay = traitlets.Bool(False).tag(sync=True)
+    underlay_alpha = traitlets.Float(0.95).tag(sync=True)
+    underlay_haadf_gain = traitlets.Float(0.35).tag(sync=True)
     _gpu_max_buffer_mb = traitlets.Int(0).tag(sync=True)  # GPU reports maxBufferSize (JS→Python)
     # Flipped True by JS after the first colormap pass has painted to canvas.
     # Used by the Python-side truthful timing print (end-to-end wall clock, not just __init__).
@@ -998,6 +1004,9 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         display_sigma: float = 4.0,
         spatial_bin: int = 1,
         filter_per_panel: bool = True,
+        underlay: bool | str = False,
+        underlay_alpha: float = 0.95,
+        underlay_haadf_gain: float = 0.35,
         **kwargs,
     ):
         import time as _time
@@ -1097,7 +1106,9 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 gallery_gap_px=gallery_gap_px,
                 verbose=verbose, state=state, _t0=_t0,
                 display_filter=display_filter, display_sigma=display_sigma,
-                spatial_bin=spatial_bin, filter_per_panel=filter_per_panel)
+                spatial_bin=spatial_bin, filter_per_panel=filter_per_panel,
+                underlay=underlay, underlay_alpha=underlay_alpha,
+                underlay_haadf_gain=underlay_haadf_gain)
 
     def _init_sync(self, *, data, labels, title, cmap, n_pages, panels_per_page,
                    page_labels, page_starred, show_title, sampling, units,
@@ -1109,7 +1120,8 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                    display_bin, hidden_panels, starred, panel_order, show_panel_titles,
                    panel_title_font_size, gallery_gap_px, verbose, state, _t0,
                    display_filter="none", display_sigma=4.0, spatial_bin=1,
-                   filter_per_panel=True):
+                   filter_per_panel=True, underlay=False, underlay_alpha=0.95,
+                   underlay_haadf_gain=0.35):
         import time as _time
         self._verbose = verbose
         self.widget_version = resolve_widget_version()
@@ -1270,6 +1282,40 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             resolved_panel_frame_indices = [0] * len(panel_stacks)
             overlay_label = f"overlay ({mode})"
             data = self._data  # n_images/height/width below read `data`
+        # underlay sugar: chemistry-on-structure. Blend the element map onto
+        # the HAADF lattice as a third RGB panel so bright columns render in
+        # the map color, never as white HAADF cores.
+        if underlay:
+            if overlay:
+                raise ValueError("Use either overlay or underlay, not both")
+            if str(underlay).lower() not in ("true", "1", "haadf"):
+                raise ValueError(f"underlay must be True or 'haadf', got {underlay!r}")
+            if self._data.shape[0] != 2 or any(self.is_rgb):
+                raise ValueError(
+                    "underlay requires exactly 2 grayscale images (haadf, map); got "
+                    f"{self._data.shape[0]} image(s)"
+                    + (" including RGB panels" if any(self.is_rgb) else "")
+                )
+            if any(stack.shape[0] > 1 for stack in panel_stacks):
+                raise NotImplementedError(
+                    "underlay does not support per-panel frame stacks; pass single frames"
+                )
+            self.underlay = True
+            self.underlay_alpha = float(underlay_alpha)
+            self.underlay_haadf_gain = float(underlay_haadf_gain)
+            self.cmap = str(cmap)
+            self._underlay_haadf_idx = 0
+            self._underlay_map_idx = 1
+            # Raw blend now; the display-filtered blend is recomputed in
+            # _update_all_frames once the filter knobs are set below.
+            composed = self._compute_underlay_blend()
+            self._data = np.concatenate([self._data, (composed @ _RGB_LUMA)[None]], axis=0)
+            self._rgb_frames = [None, None, composed]
+            self.is_rgb = [False, False, True]
+            panel_stacks = [self._data[i:i + 1] for i in range(int(self._data.shape[0]))]
+            resolved_panel_frame_indices = [0] * len(panel_stacks)
+            overlay_label = "map on HAADF"  # reuses the overlay label plumbing
+            data = self._data
         if offline and any(self.is_rgb):
             raise NotImplementedError(
                 "offline=True is not supported for RGB panels; RGB frames are "
@@ -2838,6 +2884,8 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             "display_sigma": self.display_sigma,
             "spatial_bin": self.spatial_bin,
             "filter_per_panel": self.filter_per_panel,
+            "underlay_alpha": self.underlay_alpha,
+            "underlay_haadf_gain": self.underlay_haadf_gain,
         }
 
     def save(self, path: str):
@@ -3674,8 +3722,73 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             )
         return np.stack(frames, axis=0)
 
+    def _compute_underlay_blend(self) -> np.ndarray:
+        """HAADF-modulated chemistry blend from the two source panels.
+
+        The map goes through the active display filter first, so the blend
+        panel always matches the filtered map panel next to it. Both inputs
+        are percentile-normalized for display; the stored arrays keep raw
+        counts.
+        """
+        from quantem.widget.utils.display_filter import blend_map_on_haadf, magenta_cmap
+
+        haadf = np.asarray(self._data[self._underlay_haadf_idx], dtype=np.float32)
+        map_raw = np.asarray(self._data[self._underlay_map_idx], dtype=np.float32)
+        map_view = (
+            self._filter_display_frame(map_raw) if self._display_filter_active() else map_raw
+        )
+
+        def norm01(image, lo_pct, hi_pct):
+            lo, hi = np.percentile(image, [lo_pct, hi_pct])
+            span = hi - lo if hi > lo else 1.0
+            return np.clip((image - lo) / span, 0.0, 1.0)
+
+        cmap_name = str(self.cmap).lower()
+        if cmap_name in ("magenta", "eds_magenta", "mag"):
+            cmap = magenta_cmap()
+        else:
+            import matplotlib.pyplot as plt
+
+            try:
+                cmap = plt.colormaps[str(self.cmap)]
+            except KeyError:
+                cmap = magenta_cmap()
+        return blend_map_on_haadf(
+            norm01(map_view, 2.0, 99.5),
+            norm01(haadf, 1.0, 99.9),
+            alpha=float(self.underlay_alpha),
+            haadf_gain=float(self.underlay_haadf_gain),
+            cmap=cmap,
+        ).astype(np.float32)
+
+    @traitlets.observe("underlay_alpha", "underlay_haadf_gain")
+    def _on_underlay_change(self, change: dict) -> None:
+        """Re-blend the chemistry panel live when a slider moves."""
+        if getattr(self, "_underlay_map_idx", None) is None or not getattr(
+            self, "_display_filter_ready", False
+        ):
+            return
+        self._update_all_frames()
+
     def _update_all_frames(self):
         """Send display data to JS (possibly binned for large galleries)."""
+        if getattr(self, "_underlay_map_idx", None) is not None and getattr(
+            self, "_display_filter_ready", False
+        ):
+            # The blend depends on filter knobs + underlay sliders; recompute
+            # the RGB panel here so every knob path repacks a fresh blend.
+            composed = self._compute_underlay_blend()
+            self._rgb_frames[-1] = composed
+            display_rgb = list(getattr(self, "_display_rgb", self._rgb_frames))
+            if self._display_bin > 1:
+                from quantem.widget.utils.array import bin2d
+
+                display_rgb[-1] = bin2d(
+                    composed.transpose(2, 0, 1), factor=self._display_bin, mode="mean"
+                ).transpose(1, 2, 0)
+            else:
+                display_rgb[-1] = composed
+            self._display_rgb = display_rgb
         data = self._display_data if self._display_data is not None else self._data
         data = self._filtered_frames(data)
         if any(self.is_rgb):

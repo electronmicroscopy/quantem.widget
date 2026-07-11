@@ -163,3 +163,34 @@ def test_show3d_filter_knobs_rerender_and_never_mutate(capsys):
     np.testing.assert_array_equal(widget._data, kept)
     state = widget.state_dict()
     assert state["display_filter"] == "none" and state["display_sigma"] == 12.0
+
+
+def test_show2d_underlay_composes_chemistry_on_haadf():
+    """underlay=True on (haadf, map) adds the blend as a third RGB panel:
+    haadf gray | map | map-on-HAADF, with bright columns colored (not white),
+    and the alpha slider re-blends live without touching the sources."""
+    from quantem.widget import Show2D
+
+    rng = np.random.default_rng(3)
+    haadf = rng.random((64, 64)).astype(np.float32)
+    eds_map = _sparse_eds_map(shape=(64, 64))
+    widget = Show2D(
+        [haadf, eds_map],
+        underlay=True,
+        display_filter="bin2_anscombe",
+        display_sigma=8,
+        cmap="magenta",
+        verbose=False,
+    )
+    assert widget.n_images == 3
+    assert widget.is_rgb == [False, False, True]
+    assert widget.labels[-1] == "map on HAADF"
+    blend = widget._rgb_frames[-1]
+    assert blend.shape == (64, 64, 3)
+    bright = blend[blend.max(axis=-1) > 0.5]
+    assert bright.size == 0 or not np.any(np.all(bright > 0.9, axis=-1)), "white cores in blend"
+    before = blend.copy()
+    widget.underlay_alpha = 0.5
+    assert not np.array_equal(widget._rgb_frames[-1], before)  # live re-blend
+    np.testing.assert_array_equal(widget._data[0], haadf)  # sources untouched
+    np.testing.assert_array_equal(widget._data[1], eds_map)
