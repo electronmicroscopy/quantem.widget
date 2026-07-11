@@ -2400,42 +2400,7 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             offline = stack_bytes <= 1 * 1024 * 1024 * 1024
         if offline:
             self.offline = True
-            arr = np.ascontiguousarray(offline_source, dtype=np.float32)
-            finite = arr[np.isfinite(arr)]
-            if finite.size == 0:
-                lo, hi = 0.0, 1.0
-            else:
-                lo = float(finite.min())
-                hi = float(finite.max())
-            rng = hi - lo if hi > lo else 1.0
-            self._offline_min = lo
-            self._offline_max = hi
-            self._offline_mins = []
-            self._offline_maxs = []
-            panel_count = int(self.n_panels)
-            panel_w = int(self.panel_width_px) if int(self.panel_width_px) > 0 else 0
-            if panel_count > 1 and panel_w > 0 and arr.ndim == 3 and arr.shape[2] == panel_w * panel_count:
-                q_panels = []
-                mins: list[float] = []
-                maxs: list[float] = []
-                for panel in range(panel_count):
-                    panel_arr = arr[:, :, panel * panel_w : (panel + 1) * panel_w]
-                    panel_finite = panel_arr[np.isfinite(panel_arr)]
-                    if panel_finite.size == 0:
-                        p_lo, p_hi = 0.0, 1.0
-                    else:
-                        p_lo = float(panel_finite.min())
-                        p_hi = float(panel_finite.max())
-                    p_rng = p_hi - p_lo if p_hi > p_lo else 1.0
-                    q_panels.append(np.clip((panel_arr - p_lo) * (255.0 / p_rng), 0, 255).astype(np.uint8))
-                    mins.append(p_lo)
-                    maxs.append(p_hi)
-                quantized = np.concatenate(q_panels, axis=2)
-                self._offline_mins = mins
-                self._offline_maxs = maxs
-            else:
-                quantized = np.clip((arr - lo) * (255.0 / rng), 0, 255).astype(np.uint8)
-            self._offline_stack = quantized.tobytes()
+            self._pack_offline_u8_stack(offline_source)
 
         # Observers
         self.observe(self._on_slice_change, names=["slice_idx"])
@@ -2741,6 +2706,12 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         max_frames = max(1, _MAX_PLAYBACK_CHUNK_BYTES // max(1, frame_bytes_n))
         self._buffer_size = min(self._buffer_size, self.n_slices, max_frames)
         self._buffer_bytes = b""
+        if self.offline:
+            # Kernel-less consumers (docs pages, exported HTML, saved widget
+            # state) slice frames straight out of _offline_stack. Without a
+            # repack it still holds the PREVIOUS stack, and any slice index
+            # past its end renders blank after reopen.
+            self._pack_offline_u8_stack(self._display_data)
         self._bump_frame_server_version()
         self._refresh_auto_contrast_ranges()
         self._update_all()
@@ -4846,6 +4817,51 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         if self.separate_panel_frames and self._separate_panel_data is not None:
             return np.concatenate(self._separate_panel_data, axis=2)
         return np.ascontiguousarray(self._display_data, dtype=np.float32)
+
+    def _pack_offline_u8_stack(self, offline_source: np.ndarray) -> None:
+        """Quantize the display stack into ``_offline_stack`` (+ min/max traits).
+
+        This is what kernel-less consumers (docs pages, exported HTML, saved
+        widget state) slice frames from. Every path that replaces the stack
+        (``__init__``, ``set_image``) must repack, or indices past the old
+        stack's end render blank.
+        """
+        arr = np.ascontiguousarray(offline_source, dtype=np.float32)
+        finite = arr[np.isfinite(arr)]
+        if finite.size == 0:
+            lo, hi = 0.0, 1.0
+        else:
+            lo = float(finite.min())
+            hi = float(finite.max())
+        rng = hi - lo if hi > lo else 1.0
+        self._offline_min = lo
+        self._offline_max = hi
+        self._offline_mins = []
+        self._offline_maxs = []
+        panel_count = int(self.n_panels)
+        panel_w = int(self.panel_width_px) if int(self.panel_width_px) > 0 else 0
+        if panel_count > 1 and panel_w > 0 and arr.ndim == 3 and arr.shape[2] == panel_w * panel_count:
+            q_panels = []
+            mins: list[float] = []
+            maxs: list[float] = []
+            for panel in range(panel_count):
+                panel_arr = arr[:, :, panel * panel_w : (panel + 1) * panel_w]
+                panel_finite = panel_arr[np.isfinite(panel_arr)]
+                if panel_finite.size == 0:
+                    p_lo, p_hi = 0.0, 1.0
+                else:
+                    p_lo = float(panel_finite.min())
+                    p_hi = float(panel_finite.max())
+                p_rng = p_hi - p_lo if p_hi > p_lo else 1.0
+                q_panels.append(np.clip((panel_arr - p_lo) * (255.0 / p_rng), 0, 255).astype(np.uint8))
+                mins.append(p_lo)
+                maxs.append(p_hi)
+            quantized = np.concatenate(q_panels, axis=2)
+            self._offline_mins = mins
+            self._offline_maxs = maxs
+        else:
+            quantized = np.clip((arr - lo) * (255.0 / rng), 0, 255).astype(np.uint8)
+        self._offline_stack = quantized.tobytes()
 
     def _pack_exact_offline_stack(self) -> None:
         """Embed the full display stack as float32 for exact standalone HTML."""
