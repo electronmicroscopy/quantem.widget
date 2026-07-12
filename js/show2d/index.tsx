@@ -41,7 +41,7 @@ import { FolderWatchBadge, useFolderWatchModelLive } from "../folderWatchStatus"
 import { getWebGPUFFT, WebGPUFFT, fft2dAsync, fftshift, computeMagnitude, autoEnhanceFFT, nextPow2, applyHannWindow2D, getGPUInfo } from "../fft";
 import { computeFftQualityMetrics, formatFftQualityLabel, type FftQualityMetrics } from "../fftMetrics";
 import { COLORMAPS, COLORMAP_NAMES, renderToOffscreen, renderToOffscreenReuse, GPUColormapEngine, createGPUColormapEngine, getGPUMaxBufferSize } from "../colormaps";
-import { applyDisplayFilterBrowser, browserFilterSupported, filterKnobsActive, getGPUDisplayFilterEngine, normalizeFilterMode, resolveDenoiseMode } from "../displayFilter";
+import { applyDisplayFilterBrowser, browserFilterSupported, filterKnobsActive, getGPUDisplayFilterEngine, normalizeFilterMode, resolveDenoiseMode, resolvePanelDenoiseKnobs } from "../displayFilter";
 import { applyFrequencyFilterBrowser, frequencyFilterActive, getFrequencyFilterBackend, normalizeFrequencyFilterMode } from "../frequencyFilter";
 import {
   GALLERY_FFT_CACHE_MAX_BYTES,
@@ -1261,6 +1261,30 @@ function Show2D() {
 
   // Selection
   const [selectedIdx, setSelectedIdx] = useModelState<number>("selected_idx");
+  // In panel scope the scalar traits are the editor for the selected panel,
+  // while the arrays remain the render/source of truth for every panel. Keep
+  // the editor pointed at the newly selected panel without continuously
+  // mirroring array updates back into an in-progress slider edit.
+  const denoiseEditorPanelRef = React.useRef<number | null>(null);
+  React.useEffect(() => {
+    if (!isGallery || denoiseScopeAll || nImages <= 0) {
+      denoiseEditorPanelRef.current = null;
+      return;
+    }
+    const idx = Math.min(Math.max(0, selectedIdx || 0), nImages - 1);
+    if (denoiseEditorPanelRef.current === idx) return;
+    denoiseEditorPanelRef.current = idx;
+    const { mode: nextMode, sigma: nextSigma, bin: nextBin } = resolvePanelDenoiseKnobs(
+      idx, displayFilters, displaySigmas, spatialBins,
+      { mode: "none", sigma: 4, bin: 1 },
+    );
+    if (displayFilter !== nextMode) setDisplayFilter(nextMode);
+    if (Number(displaySigma ?? 4) !== nextSigma) setDisplaySigma(nextSigma);
+    if (Number(spatialBin || 1) !== nextBin) setSpatialBin(nextBin);
+    setSigmaDraft(null);
+  }, [isGallery, denoiseScopeAll, nImages, selectedIdx, displayFilters,
+      displaySigmas, spatialBins, displayFilter, displaySigma, spatialBin,
+      setDisplayFilter, setDisplaySigma, setSpatialBin]);
   const hasLocalPanelStacks = React.useMemo(
     () => Array.from({ length: nImages }, (_, i) => panelFrameCounts?.[i] || 1).some(count => count > 1),
     [nImages, panelFrameCounts]
@@ -2713,12 +2737,11 @@ function Show2D() {
   const sigmaDraftForFilter = browserFilterActive ? sigmaDraft : null;
   const sigmaDraftPanel = sigmaDraftForFilter === null ? -1 : selectedIdx;
   const panelFilterKnobs = React.useCallback((panel: number) => {
-    const mode = (displayFilters && displayFilters.length > panel)
-      ? displayFilters[panel] : (displayFilter || "none");
-    let sigma = (displaySigmas && displaySigmas.length > panel)
-      ? Number(displaySigmas[panel]) : Number(displaySigma ?? 4);
-    const bin = (spatialBins && spatialBins.length > panel)
-      ? Number(spatialBins[panel]) : Number(spatialBin || 1);
+    const { mode, sigma: resolvedSigma, bin } = resolvePanelDenoiseKnobs(
+      panel, displayFilters, displaySigmas, spatialBins,
+      { mode: displayFilter || "none", sigma: Number(displaySigma ?? 4), bin: Number(spatialBin || 1) },
+    );
+    let sigma = resolvedSigma;
     if (sigmaDraftForFilter !== null && (denoiseScopeAll || panel === sigmaDraftPanel)) {
       sigma = sigmaDraftForFilter;
     }

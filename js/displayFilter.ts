@@ -74,6 +74,22 @@ export function filterKnobsActive(mode: string, spatialBin: number): boolean {
   return normalizeFilterMode(mode) !== "none" || (spatialBin | 0) > 1;
 }
 
+/** Resolve the denoise editor/render knobs owned by one gallery panel. */
+export function resolvePanelDenoiseKnobs(
+  panel: number,
+  modes: string[] | null | undefined,
+  sigmas: number[] | null | undefined,
+  bins: number[] | null | undefined,
+  fallback: { mode: string; sigma: number; bin: number },
+): { mode: string; sigma: number; bin: number } {
+  const idx = Math.max(0, Math.round(panel));
+  return {
+    mode: modes && idx < modes.length ? modes[idx] : fallback.mode,
+    sigma: Number(sigmas && idx < sigmas.length ? sigmas[idx] : fallback.sigma),
+    bin: Number(bins && idx < bins.length ? bins[idx] : fallback.bin),
+  };
+}
+
 /** scipy _gaussian_kernel1d(order=0): radius int(truncate*sigma + 0.5), normalized. */
 export function gaussianKernel1d(sigma: number, truncate = 4.0): Float32Array {
   const radius = Math.max(0, Math.trunc(truncate * sigma + 0.5));

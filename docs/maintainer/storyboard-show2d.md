@@ -105,8 +105,8 @@ to see.
 
 ### S2D-06: Link And Unlink Comparison State
 
-**User story**: As a user comparing related panels, I want linked zoom, pan, and
-contrast to be optional and reversible.
+**User story**: As a user comparing related panels, I want linked zoom, pan,
+contrast, denoise, and frequency-filter edits to be optional and reversible.
 
 **Primary widgets**: Show2D.
 
@@ -116,6 +116,11 @@ contrast to be optional and reversible.
 
 - Enable linked zoom, pan, and contrast; verify panels move together.
 - Disable each link mode; verify independent panel state works.
+- [x] **S2D-PANEL-DN-1**: With denoise edits unlinked, select panels configured
+  as raw, Gaussian σ2, and Gaussian σ8. Change only the σ2 panel to σ20, then
+  revisit all three panels. The editor and canvas must retain `None/4`,
+  `Gaussian/20`, and `Gaussian/8`; the two neighboring canvases must be
+  pixel-identical before and after the edit.
 - Resize the grid and verify view anchors do not jump.
 
 ### S2D-07: Use FFT To Inspect Periodicity

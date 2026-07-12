@@ -12,7 +12,27 @@
 import { execFileSync } from "node:child_process";
 import * as path from "node:path";
 import { describe, expect, it } from "vitest";
-import { applyDisplayFilterCPU } from "./displayFilter";
+import { applyDisplayFilterCPU, resolvePanelDenoiseKnobs } from "./displayFilter";
+
+describe("per-panel denoise knobs", () => {
+  it("returns the selected panel's independent mode, sigma, and bin", () => {
+    const fallback = { mode: "none", sigma: 4, bin: 1 };
+    expect(resolvePanelDenoiseKnobs(
+      1,
+      ["none", "gaussian", "anscombe"],
+      [4, 2, 8],
+      [1, 1, 2],
+      fallback,
+    )).toEqual({ mode: "gaussian", sigma: 2, bin: 1 });
+    expect(resolvePanelDenoiseKnobs(
+      2,
+      ["none", "gaussian", "anscombe"],
+      [4, 20, 8],
+      [1, 1, 2],
+      fallback,
+    )).toEqual({ mode: "anscombe", sigma: 8, bin: 2 });
+  });
+});
 
 type FixtureCase = {
   mode: string;
