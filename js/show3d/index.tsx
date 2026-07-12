@@ -11239,17 +11239,17 @@ function Show3D() {
             {/* "More" overflow: Stats + Denoise live here (mirrors Show2D) to
                 keep the top toolbar calm. */}
             <Badge
-              badgeContent={(showStats ? 1 : 0) + (denoiseEnabled ? 1 : 0)}
-              invisible={!showStats && !showDenoise}
+              badgeContent={(showStats ? 1 : 0) + (denoiseEnabled ? 1 : 0) + (!isRgb && frequencyFilterIsActive ? 1 : 0)}
+              invisible={!showStats && !showDenoise && !(!isRgb && frequencyFilterIsActive)}
               sx={{ "& .MuiBadge-badge": { bgcolor: themeColors.accent, color: "#fff", fontSize: 9, fontWeight: 600, minWidth: 14, height: 14, px: 0.25 } }}
             >
               <Button
                 size="small"
-                sx={{ minWidth: 0, px: 0.75, fontSize: 10, textTransform: "none", color: (showStats || showDenoise) ? themeColors.accent : themeColors.text }}
+                sx={{ minWidth: 0, px: 0.75, fontSize: 10, textTransform: "none", color: (showStats || showDenoise || (!isRgb && frequencyFilterIsActive)) ? themeColors.accent : themeColors.text }}
                 onClick={(e) => setMoreMenuAnchor(e.currentTarget)}
                 aria-label="More tools"
                 aria-haspopup="menu"
-                title="More tools: Stats, Denoise"
+                title="More tools: Stats, Denoise, Filter"
               >
                 More
               </Button>
@@ -11269,6 +11269,12 @@ function Show3D() {
                 <Typography sx={{ flex: 1, fontSize: 12, color: "inherit" }} title="Display-only denoise: ON shows the denoised view, OFF shows raw (config preserved). Raw data and stats keep original counts.">Denoise</Typography>
                 <Switch checked={denoiseEnabled ?? false} onClick={(e) => e.stopPropagation()} onChange={toggleDenoise} size="small" sx={switchStyles.small} slotProps={{ input: { "aria-label": "Toggle denoise on/off" } }} />
               </MenuItem>
+              {!isRgb && (
+                <MenuItem dense onClick={() => setFrequencyMaster(!frequencyFilterEnabled)} sx={{ fontSize: 12, gap: 1, color: frequencyFilterIsActive ? themeColors.accent : themeColors.text }}>
+                  <Typography sx={{ flex: 1, fontSize: 12, color: "inherit" }} title="Off by default. Turn on to remove a background or isolate a periodicity; raw counts remain unchanged.">Filter</Typography>
+                  <Switch checked={frequencyFilterEnabled ?? false} onClick={(e) => e.stopPropagation()} onChange={() => setFrequencyMaster(!frequencyFilterEnabled)} size="small" sx={switchStyles.small} slotProps={{ input: { "aria-label": "Toggle frequency filter effect" } }} />
+                </MenuItem>
+              )}
             </Menu>
             {hasPanelChoices && (
               <>
@@ -11405,50 +11411,6 @@ function Show3D() {
                         <Typography sx={{ fontSize: 11 }}>Reset order</Typography>
                       </MenuItem>
                     )}
-                  </Menu>
-                </>
-              )}
-              {!isRgb && (
-                <>
-                  <Badge
-                    badgeContent={frequencyFilterIsActive ? 1 : 0}
-                    invisible={!frequencyFilterIsActive}
-                    sx={{ "& .MuiBadge-badge": { bgcolor: themeColors.accent, color: "#fff", fontSize: 9, fontWeight: 600, minWidth: 14, height: 14, px: 0.25 } }}
-                  >
-                    <Button
-                      size="small"
-                      sx={{ ...compactButton, color: frequencyFilterIsActive ? themeColors.accent : themeColors.text }}
-                      onClick={(event) => setMoreMenuAnchor(event.currentTarget)}
-                      aria-label="More tools"
-                      aria-controls={moreMenuAnchor ? "show3d-more-menu" : undefined}
-                      aria-expanded={moreMenuAnchor ? "true" : undefined}
-                      aria-haspopup="menu"
-                      title="More tools: Filter"
-                    >More</Button>
-                  </Badge>
-                  <Menu
-                    id="show3d-more-menu"
-                    anchorEl={moreMenuAnchor}
-                    open={Boolean(moreMenuAnchor)}
-                    onClose={() => setMoreMenuAnchor(null)}
-                    MenuListProps={{ "aria-label": "More tools" }}
-                    {...themedMenuProps}
-                  >
-                    <MenuItem
-                      dense
-                      onClick={() => setFrequencyMaster(!frequencyFilterEnabled)}
-                      sx={{ fontSize: 12, gap: 1, color: frequencyFilterIsActive ? themeColors.accent : themeColors.text }}
-                    >
-                      <Typography sx={{ flex: 1, fontSize: 12, color: "inherit" }} title="Off by default. Turn on to remove a background or isolate a periodicity; raw counts remain unchanged.">Filter</Typography>
-                      <Switch
-                        checked={frequencyFilterEnabled ?? false}
-                        onClick={(event) => event.stopPropagation()}
-                        onChange={() => setFrequencyMaster(!frequencyFilterEnabled)}
-                        size="small"
-                        sx={switchStyles.small}
-                        slotProps={{ input: { "aria-label": "Toggle frequency filter effect" } }}
-                      />
-                    </MenuItem>
                   </Menu>
                 </>
               )}
