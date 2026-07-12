@@ -130,6 +130,19 @@ because collaborators often review time series outside Jupyter.
   pressing Play; verify transitions stay visibly filtered and smooth, the
   slider remains honest, and the viewer does not flash raw/noisy frames while
   cached filtered frames warm.
+- Run at least one organic notebook trial that starts from a plain
+  `Show3D(stack)` or similarly minimal call. A reviewer should turn Denoise,
+  Filter, FFT, Loop/Bounce, playback style, and speed/range controls on from
+  the widget UI itself, not by preloading every behavior through kwargs.
+- While that organic trial is playing, behave like a real reviewer: scrub the
+  frame slider, pause/resume, drag denoise sigma, drag filter cutoff or band
+  controls, accidentally or intentionally change a nearby display control such
+  as colormap/Smooth, then keep playing. Verify the canvas remains filtered,
+  the frame counter stays honest, and the image does not twitch from competing
+  repaint paths.
+- Use kwargs-heavy repro notebooks only as focused bug reproducers. They do not
+  replace the organic UI-drive trial because they skip the user behavior that
+  often exposes menu, focus, cache, and repaint races.
 - Save state and export HTML; reopen and verify `fps`, `loop`, `boomerang`,
   range, and `playback_path` survive, but playback does not unexpectedly start
   unless explicitly requested.
