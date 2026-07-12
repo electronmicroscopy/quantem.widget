@@ -7975,7 +7975,7 @@ function Show2D() {
                         </Select>
                       </Box>
                       <Box sx={controlPairSx}>
-                        <Typography sx={{ ...compactLabelSx, opacity: filterOff ? 0.5 : 1 }}>σ {(sigmaDraft ?? Number(displaySigma ?? 4)).toFixed(1)}</Typography>
+                        <Typography sx={{ ...compactLabelSx, opacity: filterOff ? 0.5 : 1, minWidth: 40, display: "inline-block" }}>σ {(sigmaDraft ?? Number(displaySigma ?? 4)).toFixed(1)}</Typography>
                         <Slider
                           value={sigmaDraft ?? Number(displaySigma ?? 4)}
                           min={0} max={20} step={0.5}
@@ -7991,11 +7991,6 @@ function Show2D() {
                           {[1, 2, 4].map((b) => (<MenuItem key={b} value={String(b)}>{b}</MenuItem>))}
                         </Select>
                       </Box>
-                      {filterBannerText && (
-                        <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.accent }} title={filterBannerText}>
-                          {filterBannerText.split(" (")[0]} · raw: denoise='none'
-                        </Typography>
-                      )}
                     </Box>
                   )}
                   {showFrequencyFilter && (
@@ -8012,21 +8007,20 @@ function Show2D() {
                       {frequencyUiKnobs.mode === "bandpass" ? (
                         <>
                           <Box sx={controlPairSx}>
-                            <Typography sx={compactLabelSx}>Center {frequencyValueLabel(frequencyUiKnobs.center)}</Typography>
+                            <Typography sx={{ ...compactLabelSx, minWidth: 84, display: "inline-block" }}>Center {frequencyValueLabel(frequencyUiKnobs.center)}</Typography>
                             <Slider value={frequencyUiKnobs.center} min={0} max={1} step={0.005} onChange={(_, value) => setFrequencyDraft(value as number)} onChangeCommitted={(_, value) => { setFrequencyFilterCenter(value as number); mirrorFrequencyKnobEdit("center", value as number); setFrequencyDraft(null); }} size="small" sx={{ ...sliderStyles.small, width: 72 }} aria-label="Band-pass center as fraction of Nyquist" />
                           </Box>
                           <Box sx={controlPairSx}>
-                            <Typography sx={compactLabelSx}>Width {frequencyValueLabel(frequencyUiKnobs.width)}</Typography>
+                            <Typography sx={{ ...compactLabelSx, minWidth: 80, display: "inline-block" }}>Width {frequencyValueLabel(frequencyUiKnobs.width)}</Typography>
                             <Slider value={frequencyUiKnobs.width} min={0.01} max={1} step={0.005} onChange={(_, value) => { setFrequencyFilterWidth(value as number); mirrorFrequencyKnobEdit("width", value as number); }} size="small" sx={{ ...sliderStyles.small, width: 72 }} aria-label="Band-pass width as fraction of Nyquist" />
                           </Box>
                         </>
                       ) : (
                         <Box sx={controlPairSx}>
-                          <Typography sx={compactLabelSx}>Cutoff {frequencyValueLabel(frequencyUiKnobs.cutoff)}</Typography>
+                          <Typography sx={{ ...compactLabelSx, minWidth: 84, display: "inline-block" }}>Cutoff {frequencyValueLabel(frequencyUiKnobs.cutoff)}</Typography>
                           <Slider value={frequencyUiKnobs.cutoff} min={0} max={1} step={0.005} disabled={!frequencyFilterActive(frequencyUiKnobs.mode)} onChange={(_, value) => setFrequencyDraft(value as number)} onChangeCommitted={(_, value) => { setFrequencyFilterCutoff(value as number); mirrorFrequencyKnobEdit("cutoff", value as number); setFrequencyDraft(null); }} size="small" sx={{ ...sliderStyles.small, width: 72 }} aria-label="Frequency cutoff as fraction of Nyquist" />
                         </Box>
                       )}
-                      {frequencyBannerText && <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.accent }} title={frequencyBannerText}>{frequencyBannerText.split(" (")[0]}</Typography>}
                     </Box>
                   )}
                   {/* Row 4 (underlay only): Fig4 blend / stretch / composite knobs.

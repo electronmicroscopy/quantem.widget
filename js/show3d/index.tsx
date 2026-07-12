@@ -2431,11 +2431,6 @@ function Show3D() {
     if (pixelSize > 0 && (unit === "a" || unit === "å" || unit.includes("angstrom"))) return `${(value * 10 / (2 * pixelSize)).toFixed(3)} nm⁻¹`;
     return `${value.toFixed(3)} Nyq`;
   }, [pixelSize, pixelUnit]);
-  const frequencyBannerText = frequencyFilterIsActive
-    ? (frequencyOptions.mode === "bandpass"
-      ? `Filter: Band-pass center ${frequencyValueLabel(frequencyOptions.center)}, width ${frequencyValueLabel(frequencyOptions.width)} (view only; raw counts unchanged)`
-      : `Filter: ${frequencyOptions.mode === "lowpass" ? "Low-pass" : "High-pass"} cutoff ${frequencyValueLabel(frequencyOptions.cutoff)} (view only; raw counts unchanged)`)
-    : "";
   const setFrequencyMaster = (enabled: boolean) => {
     if (enabled && !frequencyFilterActive(frequencyFilter)) setFrequencyFilter("lowpass");
     setFrequencyFilterEnabled(enabled);
@@ -12265,7 +12260,7 @@ function Show3D() {
                       <MenuItem key={mode} value={mode}>{label}</MenuItem>
                     ))}
                   </Select>
-                  <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted, opacity: displayFilterOff ? 0.5 : 1 }}>σ {(sigmaDraft ?? Number(displaySigma ?? 4)).toFixed(1)}</Typography>
+                  <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted, opacity: displayFilterOff ? 0.5 : 1, minWidth: 38, display: "inline-block" }}>σ {(sigmaDraft ?? Number(displaySigma ?? 4)).toFixed(1)}</Typography>
                   <Slider
                     value={sigmaDraft ?? Number(displaySigma ?? 4)}
                     min={0} max={20} step={0.5}
@@ -12279,11 +12274,6 @@ function Show3D() {
                   <Select size="small" value={String(spatialBin || 1)} onChange={(e) => { const b = parseInt(e.target.value, 10); setSpatialBin(b); if (b > 1 || resolveDenoiseMode(displayFilter || "none").mode !== "none") setDenoiseEnabled(true); }} MenuProps={themedMenuProps} sx={{ ...themedSelect, minWidth: 40, fontSize: 10 }} inputProps={{ "aria-label": "Display spatial bin factor" }}>
                     {[1, 2, 4].map((b) => (<MenuItem key={b} value={String(b)}>{b}</MenuItem>))}
                   </Select>
-                  {displayFilterBanner && (
-                    <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.accent }} title={displayFilterBanner}>
-                      {displayFilterBanner.split(" (")[0]} · raw: denoise='none'
-                    </Typography>
-                  )}
                 </Box>
                 )}
                 {showFrequencyFilter && (
@@ -12299,20 +12289,19 @@ function Show3D() {
                   </Box>
                   {normalizeFrequencyFilterMode(frequencyFilter) === "bandpass" ? (<>
                     <Box sx={{ display: "inline-flex", alignItems: "center", gap: `${SPACING.XS}px`, flexWrap: "nowrap" }}>
-                      <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted }}>Center {frequencyValueLabel(frequencyDraft ?? frequencyFilterCenter)}</Typography>
+                      <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted, minWidth: 84, display: "inline-block" }}>Center {frequencyValueLabel(frequencyDraft ?? frequencyFilterCenter)}</Typography>
                       <Slider value={frequencyDraft ?? frequencyFilterCenter} min={0} max={1} step={0.005} onChange={(_, value) => setFrequencyDraft(value as number)} onChangeCommitted={(_, value) => { setFrequencyFilterCenter(value as number); setFrequencyDraft(null); }} size="small" sx={{ ...sliderStyles.small, width: 72 }} aria-label="Band-pass center as fraction of Nyquist" />
                     </Box>
                     <Box sx={{ display: "inline-flex", alignItems: "center", gap: `${SPACING.XS}px`, flexWrap: "nowrap" }}>
-                      <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted }}>Width {frequencyValueLabel(frequencyFilterWidth)}</Typography>
+                      <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted, minWidth: 80, display: "inline-block" }}>Width {frequencyValueLabel(frequencyFilterWidth)}</Typography>
                       <Slider value={frequencyFilterWidth} min={0.01} max={1} step={0.005} onChange={(_, value) => setFrequencyFilterWidth(value as number)} size="small" sx={{ ...sliderStyles.small, width: 72 }} aria-label="Band-pass width as fraction of Nyquist" />
                     </Box>
                   </>) : (<>
                     <Box sx={{ display: "inline-flex", alignItems: "center", gap: `${SPACING.XS}px`, flexWrap: "nowrap" }}>
-                      <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted }}>Cutoff {frequencyValueLabel(frequencyDraft ?? frequencyFilterCutoff)}</Typography>
+                      <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted, minWidth: 84, display: "inline-block" }}>Cutoff {frequencyValueLabel(frequencyDraft ?? frequencyFilterCutoff)}</Typography>
                       <Slider value={frequencyDraft ?? frequencyFilterCutoff} min={0} max={1} step={0.005} disabled={!frequencyFilterActive(frequencyFilter)} onChange={(_, value) => setFrequencyDraft(value as number)} onChangeCommitted={(_, value) => { setFrequencyFilterCutoff(value as number); setFrequencyDraft(null); }} size="small" sx={{ ...sliderStyles.small, width: 72 }} aria-label="Frequency cutoff as fraction of Nyquist" />
                     </Box>
                   </>)}
-                  {frequencyBannerText && <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.accent }} title={frequencyBannerText}>{frequencyBannerText.split(" (")[0]}</Typography>}
                 </Box>
                 )}
                 </>)}
