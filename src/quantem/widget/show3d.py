@@ -45,6 +45,7 @@ from quantem.widget.utils.recon_config import (
     _rotate_stack_inplane,
 )
 from quantem.widget.show2d import _reject_unknown_kwargs
+from quantem.widget.utils.roi_geometry import roi_geometries
 from quantem.widget.utils.state_io import (
     resolve_widget_version,
     save_state_file,
@@ -750,6 +751,14 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     notebook_preview_max_px : int, default 512
         Longest panel side for the saved-notebook preview. Lower values make
         notebooks smaller; higher values make the static fallback sharper.
+    notebook_preview_frames : sequence of int, optional
+        Zero-based frame indices to render into the saved-notebook static
+        preview for single-panel Show3D. When omitted, the preview shows the
+        current ``slice_idx`` only. Use this for compact cold-reopen contact
+        sheets such as frames ``[0, 12, 25, 80]``.
+    notebook_preview_ncols : int, optional
+        Number of columns for ``notebook_preview_frames``. ``None`` or ``0``
+        uses the widget column setting, capped by the number of preview frames.
     denoise : str, default "none"
         Display-only denoise method for sparse map stacks (EDS, low dose),
         applied to every playback frame and to the FFT view. Three orthogonal
@@ -898,6 +907,8 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     _export_light = traitlets.Bool(False).tag(sync=True)
     _static_fallback_jpeg = traitlets.Unicode("").tag(sync=True)
     _static_fallback_mime = traitlets.Unicode("image/jpeg").tag(sync=True)
+    notebook_preview_frames = traitlets.List(traitlets.Int(), default_value=[]).tag(sync=True)
+    notebook_preview_ncols = traitlets.CInt(0).tag(sync=True)
     _offline_stack = traitlets.Bytes(b"").tag(sync=True)
     _offline_float_stack = traitlets.Bytes(b"").tag(sync=True)
     _offline_min = traitlets.Float(0.0).tag(sync=True)
@@ -1192,6 +1203,57 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         # raw out-of-range values caused offscreen / negative positions.
         n = max(1, int(self.n_slices))
         return [int(i) for i in proposal["value"] if 0 <= int(i) < n]
+
+    @traitlets.validate("notebook_preview_frames")
+    def _validate_notebook_preview_frames(self, proposal: dict) -> list[int]:
+        """Keep saved-preview frame indices unique and in stack range."""
+        return self._normalize_notebook_preview_frames(proposal["value"], strict=False)
+
+    @traitlets.validate("notebook_preview_ncols")
+    def _validate_notebook_preview_ncols(self, proposal: dict) -> int:
+        """Require a non-negative saved-preview contact-sheet column count."""
+        value = int(proposal["value"])
+        if value < 0:
+            raise traitlets.TraitError("notebook_preview_ncols must be >= 0")
+        return value
+
+    def _normalize_notebook_preview_frames(
+        self,
+        frames: Sequence[int] | int | None,
+        *,
+        strict: bool,
+    ) -> list[int]:
+        """Normalize explicit saved-preview frame indices."""
+        if frames is None:
+            return []
+        if isinstance(frames, (str, bytes)):
+            raise TypeError("notebook_preview_frames must be a sequence of integer frame indices")
+        raw_values = [frames] if isinstance(frames, int) and not isinstance(frames, bool) else list(frames)
+        clean: list[int] = []
+        seen: set[int] = set()
+        n_slices = int(getattr(self, "n_slices", 0))
+        for value in raw_values:
+            if isinstance(value, bool):
+                if strict:
+                    raise ValueError("notebook_preview_frames must contain integer frame indices, not bools")
+                continue
+            try:
+                idx = int(value)
+            except (TypeError, ValueError):
+                if strict:
+                    raise ValueError(f"notebook_preview_frames contains a non-integer value: {value!r}") from None
+                continue
+            if not 0 <= idx < n_slices:
+                if strict:
+                    raise ValueError(
+                        "notebook_preview_frames values must be in "
+                        f"[0, {max(0, n_slices - 1)}]; got {idx}"
+                    )
+                continue
+            if idx not in seen:
+                clean.append(idx)
+                seen.add(idx)
+        return clean
 
     @traitlets.validate("loop_end")
     def _validate_loop_end(self, proposal: dict) -> int:
@@ -1966,6 +2028,8 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         notebook_preview_format: str | None = "jpeg",
         notebook_preview_quality: int = 88,
         notebook_preview_max_px: int = 512,
+        notebook_preview_frames: Sequence[int] | int | None = None,
+        notebook_preview_ncols: int | None = None,
         denoise: str = "none",
         denoise_sigma: float = 4.0,
         denoise_bin: int = 1,
@@ -2165,6 +2229,8 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                             dim_label=dim_label, use_torch=use_torch, device=device,
                             display_bin=display_bin, offline=offline,
                             state=state, dedupe_identical_panels=dedupe_identical_panels,
+                            notebook_preview_frames=notebook_preview_frames,
+                            notebook_preview_ncols=notebook_preview_ncols,
                             denoise=denoise, denoise_sigma=denoise_sigma,
                             denoise_bin=denoise_bin, show_denoise=show_denoise,
                             frequency_filter=frequency_filter,
@@ -2209,6 +2275,8 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                    display_bin: int | str, offline: bool | None,
                    state: dict | str | pathlib.Path | None,
                    dedupe_identical_panels: bool, _t0: float,
+                   notebook_preview_frames: Sequence[int] | int | None = None,
+                   notebook_preview_ncols: int | None = None,
                    denoise: str = "none", denoise_sigma: float = 4.0,
                    denoise_bin: int = 1, show_denoise: bool = False,
                    frequency_filter: str = "none",
@@ -2848,6 +2916,11 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
 
         # Initial position at middle
         self.slice_idx = int(self.n_slices // 2)
+        self.notebook_preview_frames = self._normalize_notebook_preview_frames(
+            notebook_preview_frames,
+            strict=True,
+        )
+        self.notebook_preview_ncols = 0 if notebook_preview_ncols is None else int(notebook_preview_ncols)
         self._roi_plot_timer = None
 
         # Offline mode stores the quantized uint8 stack for kernel-free scrub.
@@ -3461,6 +3534,8 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             "hidden_page_slots": list(self.hidden_page_slots),
             "playback_path": self.playback_path,
             "slice_idx": self.slice_idx,
+            "notebook_preview_frames": list(self.notebook_preview_frames),
+            "notebook_preview_ncols": int(self.notebook_preview_ncols),
             "roi_active": self.roi_active,
             "roi_list": self.roi_list,
             "roi_selected_idx": self.roi_selected_idx,
@@ -4503,6 +4578,61 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             if not rois:
                 self.roi_active = False
         return self
+
+    def get_roi_geometries(self, *, visible_only: bool = True) -> list[dict[str, Any]]:
+        """Return normalized ROI geometry in image ``(row, col)`` coordinates.
+
+        The raw ``roi_list`` trait remains synced for widget state, while this
+        helper gives notebooks, reports, and agents a stable public shape for
+        downstream measurements across the scrubbed stack. Circle ROIs include
+        ``center`` and ``radius``. Rectangles and squares include clockwise
+        ``corners``. Annular ROIs include ``radius_inner`` and
+        ``radius_outer``.
+        """
+        return roi_geometries(
+            list(self.roi_list),
+            height=self.height,
+            width=self.width,
+            visible_only=visible_only,
+        )
+
+    roi_geometries = get_roi_geometries
+
+    def set_notebook_preview_frames(
+        self,
+        frames: Sequence[int] | int | None,
+        *,
+        ncols: int | None = None,
+    ) -> Self:
+        """Choose Show3D frames for the saved-notebook static preview.
+
+        Parameters
+        ----------
+        frames : sequence of int, int, or None
+            Zero-based frame indices to show when a lightweight saved notebook
+            is reopened without a running kernel. ``None`` or an empty sequence
+            restores the default current-frame preview.
+        ncols : int, optional
+            Contact-sheet column count. ``None`` leaves the current setting
+            unchanged; ``0`` uses the widget's column setting.
+
+        Returns
+        -------
+        Show3D
+            The widget, for chaining.
+        """
+        with self.hold_sync():
+            self.notebook_preview_frames = self._normalize_notebook_preview_frames(
+                frames,
+                strict=True,
+            )
+            if ncols is not None:
+                self.notebook_preview_ncols = int(ncols)
+        return self
+
+    def clear_notebook_preview_frames(self) -> Self:
+        """Restore the default saved preview: the current frame only."""
+        return self.set_notebook_preview_frames(None, ncols=0)
 
     def set_roi(self, row: int, col: int, radius: int = 10) -> Self:
         """Set selected ROI position and size (creates one if needed)."""
@@ -6076,6 +6206,17 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             return []
         return preview._static_overlay_texts(css_px=css_px)
 
+    def _static_preview_frame_indices(self, idx: int | None = None) -> list[int]:
+        """Frame indices to render in the saved-notebook static preview."""
+        if int(self.n_panels) != 1:
+            frame = int(self.slice_idx if idx is None else idx)
+            return [max(0, min(frame, int(self.n_slices) - 1))]
+        frames = list(self.notebook_preview_frames)
+        if not frames:
+            frame = int(self.slice_idx if idx is None else idx)
+            frames = [frame]
+        return [max(0, min(int(frame), int(self.n_slices) - 1)) for frame in frames]
+
     def _static_show2d_preview(
         self,
         *,
@@ -6102,13 +6243,27 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         if idx is None:
             idx = int(self.slice_idx)
         idx = max(0, min(int(idx), int(self.n_slices) - 1))
+        preview_frames = self._static_preview_frame_indices(idx)
+        if len(panels) != 1:
+            preview_frames = [idx]
         # True color: hand Show2D the RGB frame so the cold-reopen preview shows
         # real color, not a colormapped luminance plane. RGB is single-panel.
         if self.is_rgb and self._rgb_data is not None:
-            frames = [np.ascontiguousarray(self._rgb_data[idx], dtype=np.float32)]
+            frames = [
+                np.ascontiguousarray(self._rgb_data[frame_idx], dtype=np.float32)
+                for frame_idx in preview_frames
+            ]
         else:
-            frames = [np.asarray(self._get_display_panel_frame(panel, idx), dtype=np.float32) for panel in panels]
-        labels = [self._static_panel_title(panel, idx) for panel in panels]
+            frames = [
+                np.asarray(self._get_display_panel_frame(panel, frame_idx), dtype=np.float32)
+                for panel in panels
+                for frame_idx in preview_frames
+            ]
+        labels = [
+            self._static_panel_title(panel, frame_idx)
+            for panel in panels
+            for frame_idx in preview_frames
+        ]
         if not frames:
             return None
 
@@ -6118,6 +6273,7 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             vmin = [
                 self.vmin_per_panel[p] if p < len(self.vmin_per_panel) else None
                 for p in panels
+                for _ in preview_frames
             ]
         elif self.vmin is not None:
             vmin = self.vmin
@@ -6125,11 +6281,15 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             vmax = [
                 self.vmax_per_panel[p] if p < len(self.vmax_per_panel) else None
                 for p in panels
+                for _ in preview_frames
             ]
         elif self.vmax is not None:
             vmax = self.vmax
 
-        return Show2D(
+        preview_ncols = int(self.notebook_preview_ncols)
+        if preview_ncols <= 0:
+            preview_ncols = int(self.max_cols) if int(self.max_cols) > 0 else len(frames)
+        preview = Show2D(
             frames,
             labels=labels,
             title=self.title,
@@ -6145,7 +6305,7 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             auto_contrast=self.auto_contrast,
             vmin=vmin,
             vmax=vmax,
-            ncols=max(1, min(int(self.max_cols) if int(self.max_cols) > 0 else len(frames), len(frames))),
+            ncols=max(1, min(preview_ncols, len(frames))),
             size=int(self.size or 0),
             smooth=self.smooth,
             zoom=1.0,
@@ -6156,6 +6316,15 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             gallery_gap_px=max(0, int(self.panel_gap)),
             save_state=False,
         )
+        if (
+            self.roi_active
+            and self.roi_list
+            and len(panels) == 1
+        ):
+            preview.roi_active = True
+            preview.roi_list = [dict(roi) for roi in self.roi_list]
+            preview.roi_selected_idx = int(self.roi_selected_idx)
+        return preview
 
     def _static_png_b64(self, *, max_px: int = 512, dpi: int = 160) -> str | None:
         """Base64 PNG of the current Show3D frame using Show2D's renderer.
@@ -6404,6 +6573,8 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 if extra_bin > 1:
                     self.denoise_bin = max(int(self.denoise_bin), extra_bin)
                 return
+        if self._has_denoise_config():
+            self.denoise_enabled = True
         self._display_filter_cache = {}
         self._refresh_display_filter_banner(announce=True)
         if self.offline:

@@ -104,6 +104,42 @@ label, histogram, and slider to stay synchronized at the selected FPS.
 - Toggle Loop and Bounce and verify end-of-stack behavior.
 - Verify no background flash, stale frame, or delayed label appears.
 
+### S3D-05B: Explore Time-Series Dynamics With Playback Presets
+
+**User story**: As a scientist inspecting time-series Show3D data, I want
+playback dynamics that act like temporal lenses, so I can slow down subtle
+changes, bounce through reversible motion, focus on an event range, or hold key
+frames without rewriting the notebook.
+
+**Primary widgets**: Show3D.
+
+**Data to use**: a real or real-derived time series with a visible event,
+motion, relaxation, or reconstruction change. Include one exported HTML report
+because collaborators often review time series outside Jupyter.
+
+**Acceptance checks**:
+
+- Keep the main toolbar simple. Put advanced playback dynamics in More or a
+  compact Playback Dynamics flyout; the always-visible playback row should stay
+  readable on desktop and mobile.
+- Linear preset: play through the current loop range at constant `fps`; verify
+  frame label, slider, histogram, FFT, and scale bar stay synchronized.
+- Slow preset: lower the cadence and verify no frames are skipped while a user
+  watches a subtle event.
+- Bounce preset: enable `boomerang` and verify the sequence reverses at the
+  end without flashing, duplicating, or losing the terminal frame.
+- Focus-range preset: set `loop_start` and `loop_end` around an event; verify
+  playback never leaves the selected interval and manual scrubbing still works.
+- Hold-key-frame preset or custom path: populate `playback_path` with repeated
+  event frames and verify the image visibly pauses on those frames while labels
+  and slider positions remain honest.
+- Save state and export HTML; reopen and verify `fps`, `loop`, `boomerang`,
+  range, and `playback_path` survive, but playback does not unexpectedly start
+  unless explicitly requested.
+- Drive the same presets with FFT visible, denoise/filter enabled, and hidden
+  panels in a multi-panel movie; verify cache counters do not grow while idle
+  and hidden panels do not keep doing work.
+
 ### S3D-06: Compare Dynamics Across Panels
 
 **User story**: As a user comparing dynamics across panels, I want linked zoom
@@ -241,6 +277,24 @@ compact Show3D fallback that is pixel-matched to a Show2D current-frame gallery.
 - Press ``Cmd+S`` in JupyterLab and reload/reopen the notebook.
 - Verify saved Show3D static output is visible.
 - Compare fallback against Show2D current-frame gallery in controlled tests.
+- For a single-panel stack, set ``notebook_preview_frames=[0, mid, last]`` and
+  ``notebook_preview_ncols=3``, save, and reopen without rerunning the cell.
+  The saved PNG fallback must be a compact contact sheet of exactly those
+  frame indices with the same frame labels, scale bar, colormap, and contrast
+  language as the live current-frame preview.
+- Repeat the save with no ``notebook_preview_frames`` and verify the default
+  remains the current frame only.
+- In multi-panel Show3D, set ``notebook_preview_frames`` and verify the saved
+  preview intentionally stays one current frame per visible panel rather than
+  multiplying panels by saved-frame count.
+- Draw one circular ROI and then multiple visible ROIs on a single-panel stack,
+  scrub to a representative frame, save, and reopen the notebook without
+  rerunning the cell. The saved PNG fallback must show the current frame with
+  all ROI overlays plus one ROI zoom/crop panel per visible ROI.
+- After drawing circle, rectangle, square, and annular ROIs, call
+  ``get_roi_geometries()`` and verify the returned ``(row, col)`` center,
+  radius, corners, bounds, visibility, and colors match the visible overlays and
+  survive ``state_dict()`` / ``load_state_dict()`` while the user scrubs frames.
 - Check ``metadata.widgets`` or ``get_state()`` for heavy-buffer leaks:
   ``frame_bytes``, ``_buffer_bytes``, offline stacks, and export payloads must
   not be present when ``save_state=False``.

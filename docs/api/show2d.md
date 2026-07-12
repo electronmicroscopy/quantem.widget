@@ -37,7 +37,7 @@ no console error, no NaN frame).
 | Pan (drag) | per-image pan | Image translates; with `link_pan` all panels move together |
 | Zoom (wheel) | `initial_zoom`, `zoom_row`, `zoom_col` | Zooms about the cursor |
 | Smooth toggle | `smooth` | Bilinear vs nearest sampling |
-| ROI add / drag | `roi_active`, `roi_list`, `roi_selected_idx` | Region overlay; stats panel reports the ROI |
+| ROI add / drag | `roi_active`, `roi_list`, `roi_selected_idx`; `get_roi_geometries()` | Region overlay; stats panel reports the ROI; saved notebook previews include all ROI overlays and one comparable right-side zoom crop per visible ROI; Python can read circle centers/radii and rectangle/square corners in `(row, col)` coordinates |
 | Gallery select | `selected_idx` | Highlights the active panel |
 | Local stack slider / play | `panel_frame_indices`, `panel_frame_counts`, `panel_playback_fps`; `set_panel_frame()` | Every grayscale 3D list item gets independent slider/play controls; changing one panel does not move another, and constructor-configured playback speed adds no toolbar clutter |
 | Gallery page controls | `page_idx`, `n_pages`, `panels_per_page`, `page_labels`, `page_starred` | Switch, star, or play through panel pages without changing the source stack |
@@ -48,8 +48,9 @@ no console error, no NaN frame).
 | Denoise Settings | `show_denoise` | Expands/collapses the Method, sigma, and bin editor without changing whether the effect is active |
 | Filter master | `frequency_filter_enabled` | Turns frequency filtering on/off without discarding cutoff or band settings |
 | Filter Settings | `show_frequency_filter` | Chooses None, Low-pass, High-pass, or Band-pass and exposes the FFT-ring parameters |
+| More menu: Save State | `saved_view_states`, `saved_view_request`, `saved_view_status`; `save_view_state()`, `load_view_state()`, `delete_view_state()`, `clear_view_states()` | Save named lightweight inspection bookmarks, then load/update/delete them without storing another copy of the image data |
 | View menu: Crop to view | `view_crop`; `crop_to_view()` | Commits the current viewport as the display extent (single panel, display-only, reversible) |
-| View menu: Pad 5% / 10% / 20% | `pad_ratio` | Adds a border on each side, filled with the image minimum |
+| View menu: Padding | `pad_ratio`, `pad_ratios`, `pad_fill_mode`, `pad_fill_modes`, `pad_scope`; `set_padding()` | Adds a ratio-based display border with min/median/mean fill; gallery edits can apply to all panels or the selected panel |
 | View menu: Reset view | `reset_view_ops()` | Restores the uncropped, unpadded display bit-identically |
 
 ## Which denoise filter should I use?
@@ -71,6 +72,57 @@ so there is no "bin2_anscombe" menu entry: pick **Poisson (Anscombe)** and set
 From Python, the same ladder is `denoise="anscombe", denoise_bin=2,
 denoise_sigma=8` (per-panel lists supported for A/B galleries); legacy
 spellings like `display_filter="bin2_anscombe"` keep working as aliases.
+
+## Reuse ROI coordinates in notebooks and agents
+
+ROIs are synced in `roi_list` and saved in `state_dict()`. For analysis code,
+prefer `get_roi_geometries()` so the shape-specific coordinates are explicit:
+
+```python
+w = Show2D(img).set_roi(row=72, col=65, radius=12)
+roi = w.get_roi_geometries()[0]
+roi["center"]  # {"row": 72.0, "col": 65.0}
+roi["radius"]  # 12.0
+```
+
+Rectangle and square ROIs include clockwise `corners`; annular ROIs include
+`radius_inner` and `radius_outer`. Every ROI also includes `bounds` and
+`bounds_clipped`, which lets an agent crop an array safely while preserving the
+user's exact visible selection.
+
+## Save microscope-stage view states
+
+Show2D can store named lightweight inspection bookmarks. This is useful when a
+scientist explores a notebook interactively — for example drawing an ROI around
+a defect, turning on FFT, hiding panels, changing contrast, adding padding for a
+drift check, and then wanting to come back to exactly that view later without
+writing export code.
+
+The GUI path is **More → Save State**. Existing states can be loaded, updated,
+deleted one at a time, or deleted all at once. The Python API uses the same
+state model:
+
+```python
+w = Show2D([raw, corrected, residual], labels=["raw", "corrected", "residual"])
+w.add_roi(row=72, col=65).set_padding(0.2, fill="median")
+w.show_fft = True
+
+w.save_view_state("defect A drift check")
+w.hidden_panels = [2]
+w.save_view_state("raw vs corrected")
+
+w.load_view_state("defect A drift check")
+w.delete_view_state("raw vs corrected")
+w.clear_view_states()
+```
+
+Saved view states include UI/view traits such as ROI list, selected ROI,
+selected panel, hidden panels, panel order, local stack frame indices, contrast,
+colormap, FFT, denoise/filter, crop, padding, zoom/view box, and scale-bar
+settings. They do **not** store another copy of `frame_bytes`,
+`panel_stack_bytes`, or raw source arrays. `state_dict()` includes the named
+bookmarks so a saved notebook can reopen with the same list of microscope-stage
+positions.
 
 ## Remove a background or isolate a periodicity
 
@@ -108,14 +160,22 @@ and retains the bounded cache for later return visits.
 ## Crop and pad the view (advanced)
 
 Single-panel widgets can commit the current browser viewport as the display
-extent and add a ratio-based border, either from the toolbar's **View** menu
-(Crop to view, Pad 5% / 10% / 20%, Reset view) or from Python:
+extent. Single-panel and gallery widgets can add a ratio-based display border,
+either from the toolbar's **View** menu or from Python:
 
 ```python
 w = Show2D(image, view_box=(64, 64, 96))  # zoom into a feature
 w.crop_to_view()          # the 96x96 window becomes the displayed frame
-w.pad_ratio = 0.1         # border on each side, 10% of max(rows, cols)
+w.set_padding(0.1, fill="median")  # 10% border on each side
 w.reset_view_ops()        # full frame again, bit-identical
+```
+
+For a drift-correction gallery, use per-panel padding to compare candidate
+margins without rebuilding another notebook cell:
+
+```python
+w = Show2D([raw, corrected, residual], ncols=3)
+w.set_padding(0.20, fill="mean", panels=[1])  # only corrected panel
 ```
 
 Both ops honor the display-only contract:
@@ -123,19 +183,22 @@ Both ops honor the display-only contract:
 - The stored array is never modified; `reset_view_ops()` returns the exact
   original frame bytes.
 - The crop applies in the display pipeline **before** denoise, so an active
-  denoise operates on the cropped region; the pad (filled with the image
-  minimum, keeping the colormap floor) applies after it.
+  denoise operates on the cropped region; the pad applies after it and uses the
+  selected fill mode (`min`, `median`, or `mean`).
 - The stats row keeps reporting the full raw data, and cursor coordinates
   remain full-image (row, col) while a crop or pad is active: the crop is a
   display window, not a new coordinate system.
+- The histogram and canvas are repacked from the padded display frame, so the
+  border contribution is visible while the raw data remain unchanged.
 - An active crop or pad is never silent: a one-line `view:` banner names the
   window and the ratio, e.g.
-  `view: cropped to (64,64)-(160,160) · pad 10% (reset_view_ops() restores full frame)`.
+  `view: cropped to (64,64)-(160,160) · pad 10% median (reset_view_ops() restores full frame)`.
 - Both persist through `state_dict()` / `load_state_dict()`.
 
-Galleries are not supported in this release; `crop_to_view()` raises
-`NotImplementedError` so a multi-panel session never gets a silently wrong
-window. Crop the arrays before display instead.
+Crop-to-view remains single-panel in this release because it changes the
+coordinate origin. Padding is gallery-safe: panels share the largest padded
+canvas so comparisons stay aligned, while each panel can still have its own
+ratio/fill mode.
 
 ## FFT quality labels
 
@@ -275,6 +338,13 @@ or `encoding="uint8"` contain every local frame. For an interactively restored
 notebook output, construct with `save_state=True`; the default
 `save_state=False` deliberately stores only a compact static preview rather
 than embedding the stack payload in the notebook.
+
+For single-image ROI review, that compact saved-notebook preview keeps the
+scientific marks visible: the fallback PNG draws every visible ROI on the full
+image and adds one right-side zoom crop per ROI. The zoom crops use a common
+crop size where image boundaries allow it, so multiple ROIs remain visually
+comparable. A reader who opens the notebook or report without rerunning the cell
+can still see the marked features.
 
 `set_image()` accepts the same mixed list form:
 

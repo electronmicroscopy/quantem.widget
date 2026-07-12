@@ -288,6 +288,15 @@ type Show2DWindow = Window & typeof globalThis & {
   showSaveFilePicker?: (options?: Show2DSavePickerOptions) => Promise<Show2DFileHandle>;
 };
 
+type SavedViewState = {
+  id: string;
+  name: string;
+  created_at?: string;
+  updated_at?: string;
+  summary?: string;
+  state?: Record<string, unknown>;
+};
+
 function makeHtmlExportFilename(title: string, nImages: number, height: number, width: number, mode: string): string {
   let slug = (title || "show2d")
     .toLowerCase()
@@ -1163,13 +1172,21 @@ function Show2D() {
   // full-image coordinates while a crop or pad is active.
   const [viewCrop, setViewCrop] = useModelState<number[]>("view_crop");
   const [padRatio, setPadRatio] = useModelState<number>("pad_ratio");
+  const [padRatios, setPadRatios] = useModelState<number[]>("pad_ratios");
+  const [padFillMode, setPadFillMode] = useModelState<string>("pad_fill_mode");
+  const [padFillModes, setPadFillModes] = useModelState<string[]>("pad_fill_modes");
+  const [padScope, setPadScope] = useModelState<string>("pad_scope");
   const [viewBanner] = useModelState<string>("view_banner");
   const [viewCropOffset] = useModelState<number[]>("_view_crop_offset");
-  const viewOpsActive = (viewCrop?.length === 4) || (padRatio || 0) > 0;
+  const padScopeAll = padScope !== "panel";
+  const viewOpsActive = (viewCrop?.length === 4) || (padRatio || 0) > 0 || (padRatios || []).some(v => (v || 0) > 0);
   // View-op menu entries need a kernel to repack the frame: hide them in
-  // galleries (single panel only in this release) and on kernel-less pages
-  // (offline quantized exports and _export_light float32 exports alike).
-  const viewOpsAvailable = !isGallery && !offlineForTheme;
+  // kernel-less pages (offline quantized exports and _export_light float32
+  // exports alike). Crop remains single-panel; padding supports galleries.
+  const viewOpsAvailable = !offlineForTheme;
+  const cropOpsAvailable = viewOpsAvailable && !isGallery;
+  const padOpsAvailable = viewOpsAvailable && !(isRgbFlags || []).some(Boolean);
+  const padFillLabel = padFillMode === "median" ? "Median" : padFillMode === "mean" ? "Mean" : "Min";
   // Per-panel resolved knobs (the packing source of truth in Python).
   const [displayFilters, setDisplayFilters] = useModelState<string[]>("denoise_modes");
   const [displaySigmas, setDisplaySigmas] = useModelState<number[]>("denoise_sigmas");
@@ -1408,6 +1425,9 @@ function Show2D() {
   const [exportPayload] = useModelState<DataView>("export_payload");
   const [exportPayloadId] = useModelState<string>("export_payload_id");
   const [exportPayloadFilename] = useModelState<string>("export_filename");
+  const [savedViewStates] = useModelState<SavedViewState[]>("saved_view_states");
+  const [, setSavedViewRequest] = useModelState<string>("saved_view_request");
+  const [savedViewStatus] = useModelState<string>("saved_view_status");
   const [, setHandoffRequest] = useModelState<string>("handoff_request");
   const [handoffStatus] = useModelState<string>("handoff_status");
   const [handoffEnabled] = useModelState<boolean>("handoff_enabled");
@@ -1491,6 +1511,38 @@ function Show2D() {
     setLocalExportStatus(`Preparing ${filename}...`);
     setExportRequest(JSON.stringify({ mode, id, filename, download: true }));
   };
+
+  const sendSavedViewRequest = React.useCallback((action: string, payload: Record<string, unknown> = {}) => {
+    setSavedViewRequest(JSON.stringify({
+      action,
+      request_id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      ...payload,
+    }));
+  }, [setSavedViewRequest]);
+
+  const handleSaveViewState = React.useCallback(() => {
+    const suggested = `View ${(savedViewStates || []).length + 1}`;
+    const name = window.prompt("Name this Show2D state", suggested);
+    if (name === null) return;
+    sendSavedViewRequest("save", { name });
+  }, [savedViewStates, sendSavedViewRequest]);
+
+  const handleUpdateViewState = React.useCallback((entry: SavedViewState) => {
+    if (!entry?.id) return;
+    sendSavedViewRequest("update", { id: entry.id, name: entry.name });
+  }, [sendSavedViewRequest]);
+
+  const handleDeleteViewState = React.useCallback((entry: SavedViewState) => {
+    if (!entry?.id) return;
+    if (!window.confirm(`Delete saved Show2D state "${entry.name || entry.id}"?`)) return;
+    sendSavedViewRequest("delete", { id: entry.id });
+  }, [sendSavedViewRequest]);
+
+  const handleDeleteAllViewStates = React.useCallback(() => {
+    if (!(savedViewStates || []).length) return;
+    if (!window.confirm(`Delete all ${(savedViewStates || []).length} saved Show2D states?`)) return;
+    sendSavedViewRequest("delete_all");
+  }, [savedViewStates, sendSavedViewRequest]);
 
   React.useEffect(() => {
     const pending = pendingHtmlExportRef.current;
@@ -5429,7 +5481,7 @@ function Show2D() {
 
   // Committing a crop/pad rebuilds the frame extent: clear the stale local
   // zoom so the new frame paints at 1x (Python cleared its zoom traits too).
-  const viewOpsKey = `${(viewCrop || []).join(",")}|${padRatio || 0}`;
+  const viewOpsKey = `${(viewCrop || []).join(",")}|${padRatio || 0}|${(padRatios || []).join(",")}|${padFillMode || "min"}|${(padFillModes || []).join(",")}`;
   const prevViewOpsKeyRef = React.useRef(viewOpsKey);
   React.useEffect(() => {
     if (prevViewOpsKeyRef.current === viewOpsKey) return;
@@ -7087,6 +7139,61 @@ function Show2D() {
                 MenuListProps={{ "aria-label": "More tools" }}
                 {...themedTopMenuProps}
               >
+                <MenuItem dense onClick={handleSaveViewState} sx={{ fontSize: 12 }}>
+                  Save State
+                </MenuItem>
+                {(savedViewStates || []).length > 0 && (
+                  <Box sx={{ px: 1.5, py: 1, minWidth: 260, maxWidth: 340 }} onClick={(event) => event.stopPropagation()}>
+                    <Typography sx={{ ...typography.label, fontWeight: 700, mb: 0.75 }}>
+                      Saved states ({savedViewStates.length})
+                    </Typography>
+                    <Stack spacing={0.75}>
+                      {savedViewStates.map((entry) => (
+                        <Box
+                          key={entry.id}
+                          sx={{
+                            p: 0.75,
+                            borderRadius: 1,
+                            border: `1px solid ${themeColors.border}`,
+                            bgcolor: themeColors.controlBg,
+                          }}
+                        >
+                          <Typography sx={{ fontSize: 11, fontWeight: 700, color: themeColors.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }} title={entry.name}>
+                            {entry.name || entry.id}
+                          </Typography>
+                          <Typography sx={{ fontSize: 10, color: themeColors.textMuted, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", mb: 0.5 }} title={entry.summary || ""}>
+                            {entry.summary || "saved view"}
+                          </Typography>
+                          <Box sx={{ display: "flex", gap: 0.5, flexWrap: "wrap" }}>
+                            <Button size="small" sx={{ ...compactButton, minHeight: 20, py: 0, px: 0.75 }} onClick={() => { sendSavedViewRequest("load", { id: entry.id }); setMoreMenuAnchor(null); }}>
+                              Load
+                            </Button>
+                            <Button size="small" sx={{ ...compactButton, minHeight: 20, py: 0, px: 0.75 }} onClick={() => handleUpdateViewState(entry)}>
+                              Update
+                            </Button>
+                            <Button size="small" sx={{ ...compactButton, minHeight: 20, py: 0, px: 0.75 }} onClick={() => handleDeleteViewState(entry)}>
+                              Delete
+                            </Button>
+                          </Box>
+                        </Box>
+                      ))}
+                    </Stack>
+                    <Button
+                      size="small"
+                      sx={{ ...compactButton, mt: 0.75, minHeight: 22, color: themeColors.textMuted }}
+                      onClick={handleDeleteAllViewStates}
+                    >
+                      Delete All
+                    </Button>
+                  </Box>
+                )}
+                {savedViewStatus && (
+                  <Box sx={{ px: 1.5, pb: 0.75, maxWidth: 300 }}>
+                    <Typography sx={{ fontSize: 10, color: savedViewStatus.startsWith("State action failed") ? "#d32f2f" : themeColors.textMuted }}>
+                      {savedViewStatus}
+                    </Typography>
+                  </Box>
+                )}
                 {roiControlAvailable && (
                   <MenuItem
                     dense
@@ -7184,18 +7291,51 @@ function Show2D() {
                     {/* Reversible view ops (single panel, kernel-backed):
                         crop commits the viewport, pad adds a border, reset
                         restores the full frame. Display-only by contract. */}
-                    {viewOpsAvailable && (
+                    {cropOpsAvailable && (
                       <MenuItem onClick={handleCropToView} sx={{ fontSize: 12 }} title="Commit the current viewport as the display extent. Display-only and reversible; Reset view restores the full frame.">
                         Crop to view
                       </MenuItem>
                     )}
-                    {viewOpsAvailable && [0.05, 0.1, 0.2].map((ratio) => (
-                      <MenuItem key={ratio} onClick={() => { setPadRatio(ratio); setViewMenuAnchor(null); }} sx={{ fontSize: 12 }} title="Border on each side as a fraction of max(rows, cols), filled with the image minimum.">
-                        Pad {Math.round(ratio * 100)}%
-                      </MenuItem>
-                    ))}
+                    {padOpsAvailable && (
+                      <Box sx={{ px: 1.5, py: 1, minWidth: 230 }} onClick={(e) => e.stopPropagation()}>
+                        <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 1, mb: 0.5 }}>
+                          <Typography sx={{ ...typography.label, fontWeight: 700 }}>Padding {Math.round((padRatio || 0) * 100)}%</Typography>
+                          {isGallery && (
+                            <Box sx={{ display: "flex", alignItems: "center", gap: 0.5 }}>
+                              <Typography sx={compactLabelSx} title="Linked: padding edits apply to every panel. Unlinked: edits apply to the selected panel only.">All</Typography>
+                              <Switch checked={padScopeAll} onChange={() => setPadScope(padScopeAll ? "panel" : "all")} size="small" sx={switchStyles.small} />
+                            </Box>
+                          )}
+                        </Box>
+                        <Slider
+                          value={Number(padRatio || 0)}
+                          min={0}
+                          max={1}
+                          step={0.01}
+                          size="small"
+                          onChange={(_, v) => setPadRatio(v as number)}
+                          sx={sliderStyles.small}
+                          aria-label="Padding ratio"
+                        />
+                        <Box sx={{ display: "flex", alignItems: "center", gap: 1, mt: 0.5 }}>
+                          <Typography sx={compactLabelSx}>Fill</Typography>
+                          <Select
+                            size="small"
+                            value={padFillMode || "min"}
+                            onChange={(e) => setPadFillMode(String(e.target.value))}
+                            MenuProps={themedMenuProps}
+                            sx={{ ...themedSelect, minWidth: 92 }}
+                            title={`Padding fill: ${padFillLabel}`}
+                          >
+                            <MenuItem value="min">Min</MenuItem>
+                            <MenuItem value="median">Median</MenuItem>
+                            <MenuItem value="mean">Mean</MenuItem>
+                          </Select>
+                        </Box>
+                      </Box>
+                    )}
                     {viewOpsAvailable && (
-                      <MenuItem disabled={!viewOpsActive} onClick={() => { setViewCrop([]); setPadRatio(0); setViewMenuAnchor(null); }} sx={{ fontSize: 12 }}>
+                      <MenuItem disabled={!viewOpsActive} onClick={() => { setViewCrop([]); setPadRatio(0); setPadRatios(new Array(nImages).fill(0)); setPadFillMode("min"); setPadFillModes(new Array(nImages).fill("min")); setPadScope("all"); setViewMenuAnchor(null); }} sx={{ fontSize: 12 }}>
                         Reset view
                       </MenuItem>
                     )}

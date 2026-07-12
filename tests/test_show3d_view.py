@@ -131,6 +131,32 @@ def test_from_figure_gallery_labels_and_unifies_color():
     assert mixed.is_rgb and mixed.n_slices == 2
 
 
+def test_playback_dynamics_state_round_trips():
+    # A time-series reviewer can use playback dynamics like microscope temporal
+    # lenses: slow cadence, focus range, bounce, and held key frames.  These are
+    # lightweight state, not resampled data.
+    stack = np.random.default_rng(8).random((12, 16, 16), dtype=np.float32)
+    widget = Show3D(stack, fps=6, verbose=False)
+    widget.loop = True
+    widget.boomerang = True
+    widget.loop_start = 2
+    widget.loop_end = 9
+    widget.playback_path = [2, 3, 4, 4, 4, 5, 6, 7, 8, 9, 8, 7]
+    widget.slice_idx = 4
+
+    restored = Show3D(stack, verbose=False)
+    restored.load_state_dict(widget.state_dict())
+
+    assert restored.fps == pytest.approx(6.0)
+    assert restored.loop is True
+    assert restored.boomerang is True
+    assert restored.loop_start == 2
+    assert restored.loop_end == 9
+    assert restored.playback_path == [2, 3, 4, 4, 4, 5, 6, 7, 8, 9, 8, 7]
+    assert restored.slice_idx == 4
+    assert restored._data.shape == stack.shape
+
+
 def test_export_html_refuses_oversized_single_file(tmp_path):
     # A scientist exports a big float32 color movie. A single HTML that large
     # fails to open under Chrome file://, so export_html refuses and names the

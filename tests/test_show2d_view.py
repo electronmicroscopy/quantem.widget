@@ -240,7 +240,61 @@ def test_pad_ratio_adds_min_valued_border():
     sent = np.frombuffer(w.frame_bytes, dtype=np.float32, count=n).reshape(w.height, w.width)
     np.testing.assert_array_equal(sent[pad:-pad, pad:-pad], image)
     assert sent[0, 0] == image.min()  # border keeps the colormap floor
-    assert "pad 10%" in w.view_banner
+    assert "pad 10% min" in w.view_banner
+
+
+def test_pad_ratio_fill_modes_change_border_value():
+    """A drift-reviewer can choose min, median, or mean border intensity."""
+    image = _image(64)
+    w = Show2D(image, pad_ratio=0.25, pad_fill_mode="median", verbose=False)
+    pad = round(0.25 * 64)
+    sent = np.frombuffer(
+        w.frame_bytes,
+        dtype=np.float32,
+        count=w.height * w.width,
+    ).reshape(w.height, w.width)
+    assert sent[0, 0] == pytest.approx(float(np.median(image)))
+    np.testing.assert_array_equal(sent[pad:-pad, pad:-pad], image)
+
+    w.pad_fill_mode = "mean"
+    sent = np.frombuffer(
+        w.frame_bytes,
+        dtype=np.float32,
+        count=w.height * w.width,
+    ).reshape(w.height, w.width)
+    assert sent[0, 0] == pytest.approx(float(np.mean(image)))
+
+
+def test_padding_keeps_fft_and_scale_bar_geometry_compatible():
+    """Padding grows the same display frame that FFT and scale bars inspect.
+
+    A drift reviewer should not get a stale scale bar or FFT dimensions after
+    adding a margin: the packed frame, public width/height traits, static
+    preview overlays, and FFT toggle all describe one displayed canvas.
+    """
+    image = _image(100)
+    w = Show2D(
+        image,
+        pad_ratio=0.2,
+        pad_fill_mode="median",
+        sampling=0.2,
+        units="nm",
+        show_fft=True,
+        verbose=False,
+    )
+    pad = round(0.2 * 100)
+    assert (w.height, w.width) == (100 + 2 * pad, 100 + 2 * pad)
+    assert w.show_fft is True
+
+    sent = np.frombuffer(w.frame_bytes, dtype=np.float32, count=w.height * w.width).reshape(w.height, w.width)
+    np.testing.assert_array_equal(sent[pad:-pad, pad:-pad], image)
+
+    specs = w._static_panel_specs()
+    assert specs[0]["frame"].shape == (w.height, w.width)
+    _label, zoom_text, bar_text, bar_px = w._static_overlay_texts(specs)[0]
+    assert zoom_text == "1.0×"
+    assert bar_text.endswith("nm")
+    assert bar_px > 0
 
 
 def test_reset_view_ops_restores_bit_identical_frame():
@@ -258,6 +312,8 @@ def test_reset_view_ops_restores_bit_identical_frame():
     assert (w.height, w.width) == (128, 128)
     assert w.view_banner == ""
     assert w._view_crop_offset == [0, 0]
+    assert w.pad_ratios == [0.0]
+    assert w.pad_fill_modes == ["min"]
 
 
 def test_view_ops_survive_state_round_trip():
@@ -272,6 +328,48 @@ def test_view_ops_survive_state_round_trip():
     restored.load_state_dict(state)
     assert restored.view_crop == w.view_crop
     assert restored.pad_ratio == 0.05
+    assert restored.pad_ratios == [0.05]
+    assert restored.pad_fill_mode == "min"
+    assert bytes(restored.frame_bytes) == bytes(w.frame_bytes)
+
+
+def test_gallery_padding_can_apply_to_all_panels():
+    """A gallery can grow its display canvas with a shared padding ratio."""
+    a = _image(32)
+    b = _image(32) + 100
+    w = Show2D([a, b], pad_ratio=0.25, pad_fill_mode="median", verbose=False)
+    pad = round(0.25 * 32)
+    assert (w.height, w.width) == (32 + 2 * pad, 32 + 2 * pad)
+    arr = np.frombuffer(w.frame_bytes, dtype=np.float32).reshape(2, w.height, w.width)
+    np.testing.assert_array_equal(arr[0, pad:-pad, pad:-pad], a)
+    np.testing.assert_array_equal(arr[1, pad:-pad, pad:-pad], b)
+    assert arr[0, 0, 0] == pytest.approx(float(np.median(a)))
+    assert arr[1, 0, 0] == pytest.approx(float(np.median(b)))
+
+
+def test_gallery_padding_can_target_one_panel_with_common_canvas():
+    """Per-panel padding lets a user compare one drift-margin choice at a time."""
+    a = _image(32)
+    b = _image(32) + 100
+    w = Show2D([a, b], verbose=False)
+    returned = w.set_padding(0.25, fill="mean", panels=[1])
+    assert returned is w
+    assert w.pad_scope == "panel"
+    assert w.pad_ratios == [0.0, 0.25]
+    assert w.pad_fill_modes == ["min", "mean"]
+    pad = round(0.25 * 32)
+    assert (w.height, w.width) == (32 + 2 * pad, 32 + 2 * pad)
+    arr = np.frombuffer(w.frame_bytes, dtype=np.float32).reshape(2, w.height, w.width)
+    # Both panels share the larger canvas; the selected panel's fill mode is
+    # mean, while the untouched panel uses the default min fill in its margin.
+    assert arr[0, 0, 0] == pytest.approx(float(np.min(a)))
+    assert arr[1, 0, 0] == pytest.approx(float(np.mean(b)))
+    np.testing.assert_array_equal(arr[1, pad:-pad, pad:-pad], b)
+
+    restored = Show2D([a, b], verbose=False)
+    restored.load_state_dict(w.state_dict())
+    assert restored.pad_ratios == w.pad_ratios
+    assert restored.pad_fill_modes == w.pad_fill_modes
     assert bytes(restored.frame_bytes) == bytes(w.frame_bytes)
 
 

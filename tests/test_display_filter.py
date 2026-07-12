@@ -455,18 +455,16 @@ def test_show3d_html_export_enables_browser_filter_for_raw_stack():
         widget.close()
 
 
-def test_gallery_rejects_pad_ratio_and_never_claims_a_phantom_border():
-    """pad is a single-panel display window: a 2-panel gallery rejects
-    pad_ratio outright (clear NotImplementedError) and a plain gallery never
-    announces a border it did not draw."""
+def test_gallery_pad_ratio_announces_a_real_border():
+    """A gallery can use display padding without claiming a phantom border."""
     from quantem.widget import Show2D
 
     a = _sparse_eds_map(shape=(64, 64))
     b = _sparse_eds_map(seed=9, shape=(64, 64))
-    with pytest.raises(NotImplementedError, match="single panel"):
-        Show2D([a, b], pad_ratio=0.1, verbose=False)
-    gallery = Show2D([a, b], verbose=False)
-    assert "pad" not in gallery.view_banner
+    gallery = Show2D([a, b], pad_ratio=0.1, verbose=False)
+    assert "pad 10%" in gallery.view_banner
+    assert gallery.height > 64
+    assert gallery.width > 64
 
 
 def test_diff_reference_survives_state_round_trip():

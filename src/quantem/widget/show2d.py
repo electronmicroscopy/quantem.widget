@@ -11,6 +11,7 @@ import math
 import pathlib
 import tempfile
 import warnings
+from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Any, Iterable, Self, Sequence
 
@@ -29,6 +30,7 @@ from quantem.widget._image_folder import (
 )
 from quantem.widget._folder_watch_status import FOLDER_WATCH_STATE_VALUES
 from quantem.widget.utils.array import _b64_safe, _resize_image, to_numpy
+from quantem.widget.utils.roi_geometry import roi_geometries
 from quantem.widget.utils.state_io import resolve_widget_version, save_state_file, unwrap_state_payload
 from quantem.widget.utils.static_fallback import StaticFallbackMixin
 from quantem.widget.utils.ui import UiMode, resolve_ui_mode
@@ -495,6 +497,21 @@ def _static_overlay_font() -> list[str]:
         preferred = ("Helvetica Neue", "Segoe UI", "Arial", "Liberation Sans")
         _OVERLAY_FONT = [f for f in preferred if f in installed] + ["DejaVu Sans"]
     return _OVERLAY_FONT
+
+
+def _hex_to_rgb01(value: str | None, fallback: str = "#4fc3f7") -> tuple[float, float, float]:
+    """Convert a widget hex color to matplotlib RGB floats."""
+    color = (value or fallback).strip()
+    if color.startswith("#"):
+        color = color[1:]
+    if len(color) == 3:
+        color = "".join(ch * 2 for ch in color)
+    if len(color) != 6:
+        color = fallback.lstrip("#")
+    try:
+        return tuple(int(color[i:i + 2], 16) / 255.0 for i in (0, 2, 4))
+    except ValueError:
+        return (0.31, 0.76, 0.97)
 
 
 class Colormap(StrEnum):
@@ -1012,6 +1029,9 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     export_payload = traitlets.Bytes(b"").tag(sync=True)
     export_payload_id = traitlets.Unicode("").tag(sync=True)
     export_filename = traitlets.Unicode("").tag(sync=True)
+    saved_view_states = traitlets.List([]).tag(sync=True)
+    saved_view_request = traitlets.Unicode("").tag(sync=True)
+    saved_view_status = traitlets.Unicode("").tag(sync=True)
     handoff_request = traitlets.Unicode("").tag(sync=True)
     handoff_status = traitlets.Unicode("").tag(sync=True)
     handoff_enabled = traitlets.Bool(True).tag(sync=True)
@@ -1065,12 +1085,16 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     view_box = traitlets.List(trait=traitlets.Float(), default_value=[]).tag(sync=True)
     # Reversible display-window ops (single panel only). view_crop holds the
     # committed crop (row0, row1, col0, col1) in FULL-RESOLUTION image pixels
-    # (empty = no crop); pad_ratio adds a constant border (value = frame
-    # minimum) around the displayed frame. Both are display-only view
+    # (empty = no crop); pad_ratio adds a constant border around the displayed
+    # frame. The fill value follows pad_fill_mode (min/median/mean). Both are display-only view
     # transforms applied while packing frame_bytes: the stored data is never
     # modified and reset_view_ops() restores the full frame bit-identically.
     view_crop = traitlets.List(trait=traitlets.Int(), default_value=[]).tag(sync=True)
     pad_ratio = traitlets.Float(0.0).tag(sync=True)
+    pad_ratios = traitlets.List(trait=traitlets.Float(), default_value=[]).tag(sync=True)
+    pad_fill_mode = traitlets.Unicode("min").tag(sync=True)
+    pad_fill_modes = traitlets.List(trait=traitlets.Unicode(), default_value=[]).tag(sync=True)
+    pad_scope = traitlets.Unicode("all").tag(sync=True)
     # One-line announcement of an active crop/pad. Same house rule as
     # denoise_banner: an active view reduction is never silent.
     view_banner = traitlets.Unicode("").tag(sync=True)
@@ -1324,7 +1348,9 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         diff_mode: bool = False,
         overlay: bool | str = False,
         view_box: tuple | list | None = None,
-        pad_ratio: float = 0.0,
+        pad_ratio: float | Sequence[float] = 0.0,
+        pad_fill_mode: str | Sequence[str] = "min",
+        pad_scope: str = "all",
         display_bin: int | str = "auto",
         hidden_panels: Sequence[int | str] | int | str | None = None,
         starred: Sequence[int | str] | int | str | None = None,
@@ -1517,7 +1543,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 zoom_row=zoom_row, zoom_col=zoom_col,
                 link_zoom=link_zoom, link_pan=link_pan, link_contrast=link_contrast,
                 diff_mode=diff_mode, overlay=overlay, view_box=view_box,
-                pad_ratio=pad_ratio,
+                pad_ratio=pad_ratio, pad_fill_mode=pad_fill_mode, pad_scope=pad_scope,
                 display_bin=display_bin, hidden_panels=hidden_panels, starred=starred,
                 panel_order=panel_order,
                 show_panel_titles=show_panel_titles, panel_title_font_size=panel_title_font_size,
@@ -1545,7 +1571,8 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                    vmin, vmax,
                    ncols, panel_frame_indices, panel_playback_fps, size, smooth, zoom, zoom_row, zoom_col,
                    link_zoom, link_pan, link_contrast, diff_mode, overlay, view_box,
-                   pad_ratio, display_bin, hidden_panels, starred, panel_order, show_panel_titles,
+                   pad_ratio, pad_fill_mode, pad_scope,
+                   display_bin, hidden_panels, starred, panel_order, show_panel_titles,
                    panel_title_font_size, gallery_gap_px, verbose, state, _t0,
                    denoise="none", denoise_sigma=4.0, denoise_bin=1,
                    denoise_scope="all", denoise_scope_explicit=False,
@@ -2016,6 +2043,20 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         filters, filters_scalar = per_panel(denoise, "denoise", str)
         sigmas, sigmas_scalar = per_panel(denoise_sigma, "denoise_sigma", float)
         bins, bins_scalar = per_panel(denoise_bin, "denoise_bin", int)
+        pad_ratios, pad_ratio_scalar = per_panel(pad_ratio, "pad_ratio", float)
+        pad_modes, pad_mode_scalar = per_panel(pad_fill_mode, "pad_fill_mode", str)
+        invalid_pad_ratio = next((value for value in pad_ratios if not 0.0 <= value <= 1.0), None)
+        if invalid_pad_ratio is not None:
+            raise ValueError(f"pad_ratio must be between 0 and 1; got {invalid_pad_ratio}")
+        pad_modes = [mode.strip().lower() for mode in pad_modes]
+        invalid_pad_mode = next((mode for mode in pad_modes if mode not in {"min", "median", "mean"}), None)
+        if invalid_pad_mode is not None:
+            raise ValueError(
+                "pad_fill_mode must be one of 'min', 'median', or 'mean'; "
+                f"got {invalid_pad_mode!r}"
+            )
+        if any(pad_ratios) and any(self.is_rgb):
+            raise NotImplementedError("pad_ratio supports grayscale panels; RGB panels are not padded.")
         # Compound spellings (bin2, bin2_anscombe, bin4_anscombe) are aliases
         # for (mode, bin); the traits always hold the canonical trio.
         from quantem.widget.utils.display_filter import resolve_denoise_mode
@@ -2105,7 +2146,12 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         # offset, banner) is synced before the first frame pack; the observer
         # stays inert until _view_ops_ready so the constructor zoom survives.
         self._view_ops_ready = False
-        self.pad_ratio = float(pad_ratio)
+        self._pad_knob_sync = False
+        self.pad_ratios = pad_ratios
+        self.pad_fill_modes = pad_modes
+        self.pad_ratio = float(pad_ratios[0])
+        self.pad_fill_mode = pad_modes[0]
+        self.pad_scope = "all" if pad_ratio_scalar and pad_mode_scalar and str(pad_scope).lower() != "panel" else "panel"
         self._refresh_view_ops(announce=True)
         self._view_ops_ready = True
 
@@ -2135,6 +2181,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         self._init_py_elapsed_ms = (_time.perf_counter() - _t0) * 1000
         self.observe(self._on_first_render, names=["_js_rendered"])
         self.observe(self._on_export_request_change, names=["export_request"])
+        self.observe(self._on_saved_view_request_change, names=["saved_view_request"])
         self.observe(self._on_handoff_request_change, names=["handoff_request"])
         self.observe(self._on_detail_request_change, names=["_detail_request"])
 
@@ -3404,6 +3451,13 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             frames_source = getattr(self, "_data", None)
         if frames_source is None or len(frames_source) == 0:
             return []
+        if not any(self.is_rgb):
+            # Mirror the live canvas/view transport.  Padding and crop are
+            # display-only view ops, but saved notebook previews must show the
+            # same canvas a user saved after reviewing drift margins.
+            frames_source = self._crop_view_stack(np.asarray(frames_source))
+            frames_source = self._filtered_frames(frames_source)
+            frames_source = self._pad_view_stack(frames_source)
         frames = [frames_source[i] for i in range(len(frames_source))]
         ranges = self._resolve_panel_display_ranges(frames)
         def stats_line(mean: float, lo: float, hi: float, std: float) -> str:
@@ -3473,6 +3527,110 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 })
         return specs
 
+    def _static_roi_items(self) -> list[dict[str, Any]]:
+        """Return visible ROI dictionaries with defaults for static rendering."""
+        if not self.roi_active:
+            return []
+        rois: list[dict[str, Any]] = []
+        defaults = {
+            "shape": "circle",
+            "row": float(self.height) / 2.0,
+            "col": float(self.width) / 2.0,
+            "radius": 10.0,
+            "radius_inner": 5.0,
+            "width": 20.0,
+            "height": 20.0,
+            "line_width": 2.0,
+            "color": "#4fc3f7",
+            "visible": True,
+        }
+        for roi in self.roi_list:
+            if not isinstance(roi, dict):
+                continue
+            item = {**defaults, **roi}
+            if item.get("visible") is False:
+                continue
+            rois.append(item)
+        return rois
+
+    @staticmethod
+    def _static_roi_extent(roi: dict[str, Any]) -> tuple[float, float]:
+        """Return ROI half-height and half-width in source pixels."""
+        shape = str(roi.get("shape", "circle")).lower()
+        if shape == "rectangle":
+            return (
+                max(1.0, float(roi.get("height", 20.0)) / 2.0),
+                max(1.0, float(roi.get("width", 20.0)) / 2.0),
+            )
+        radius = max(1.0, float(roi.get("radius", 10.0)))
+        return radius, radius
+
+    @staticmethod
+    def _static_roi_crop_slices(
+        roi: dict[str, Any],
+        height: int,
+        width: int,
+        *,
+        half_shape: tuple[float, float] | None = None,
+    ) -> tuple[slice, slice]:
+        """Crop around an ROI for the saved-notebook zoom panel."""
+        center_row = float(roi.get("row", height / 2.0))
+        center_col = float(roi.get("col", width / 2.0))
+        half_h, half_w = half_shape or Show2D._static_roi_extent(roi)
+        # The saved zoom panel should show the ROI evidence itself, not the
+        # whole surrounding field. Keep a small outline margin so the ROI border
+        # is visible while most pixels come from the selected region.
+        pad_h = max(2.0, half_h * 1.08)
+        pad_w = max(2.0, half_w * 1.08)
+        crop_h = max(1, int(math.ceil(2.0 * pad_h)))
+        crop_w = max(1, int(math.ceil(2.0 * pad_w)))
+        row0 = int(round(center_row - crop_h / 2.0))
+        col0 = int(round(center_col - crop_w / 2.0))
+        row0 = min(max(0, row0), max(0, height - crop_h))
+        col0 = min(max(0, col0), max(0, width - crop_w))
+        row1 = min(height, row0 + crop_h)
+        col1 = min(width, col0 + crop_w)
+        return slice(row0, row1), slice(col0, col1)
+
+    def _static_roi_zoom_specs(self, specs: list[dict]) -> list[dict]:
+        """Build one right-side zoom panel per visible ROI."""
+        if len(specs) != 1 or len(self.visible_panels) != 1 or self.diff_mode:
+            return []
+        rois = self._static_roi_items()
+        if not rois:
+            return []
+        source = specs[0]
+        frame = source["frame"]
+        if frame.ndim < 2:
+            return []
+        extents = [self._static_roi_extent(roi) for roi in rois]
+        common_half_extent = max(max(half_h, half_w) for half_h, half_w in extents)
+        common_half_shape = (common_half_extent, common_half_extent)
+        zooms: list[dict] = []
+        for idx, roi in enumerate(rois, start=1):
+            rows, cols = self._static_roi_crop_slices(
+                roi,
+                frame.shape[0],
+                frame.shape[1],
+                half_shape=common_half_shape,
+            )
+            crop = frame[rows, cols] if not source.get("rgb") else frame[rows, cols, :]
+            if crop.size == 0:
+                continue
+            zoom_roi = dict(roi)
+            zoom_roi["row"] = float(zoom_roi.get("row", 0.0)) - rows.start
+            zoom_roi["col"] = float(zoom_roi.get("col", 0.0)) - cols.start
+            zooms.append({
+                **source,
+                "frame": crop,
+                "label": f"ROI {idx} zoom",
+                "stats": "",
+                "roi_items": [zoom_roi],
+                "roi_zoom_panel": True,
+                "source_crop": (rows.start, cols.start, rows.stop, cols.stop),
+            })
+        return zooms
+
     @staticmethod
     def _center_crop_slices(height: int, width: int, zoom: float) -> tuple[slice, slice]:
         """Central 1/zoom crop, matching the live widget's zoomed viewport.
@@ -3540,6 +3698,87 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                           _format_scale_label(nice, unit), bar_px))
         return texts
 
+    @staticmethod
+    def _draw_static_roi(
+        ax: matplotlib.axes.Axes,
+        roi: dict[str, Any],
+        *,
+        source_rows: slice,
+        source_cols: slice,
+        bin_h: int,
+        bin_w: int,
+        point: float,
+    ) -> None:
+        """Draw one ROI in the saved PNG's image-pixel coordinate system."""
+        crop_h = max(1, source_rows.stop - source_rows.start)
+        crop_w = max(1, source_cols.stop - source_cols.start)
+        scale_y = bin_h / crop_h
+        scale_x = bin_w / crop_w
+        row = float(roi.get("row", 0.0))
+        col = float(roi.get("col", 0.0))
+        x = (col - source_cols.start) * scale_x - 0.5
+        y = (row - source_rows.start) * scale_y - 0.5
+        if x < -bin_w or x > 2 * bin_w or y < -bin_h or y > 2 * bin_h:
+            return
+        color = _hex_to_rgb01(str(roi.get("color", "#4fc3f7")))
+        line_width = max(1.0, float(roi.get("line_width", 2.0))) * point
+        stroke = [matplotlib.patheffects.withStroke(
+            linewidth=line_width + 1.5 * point,
+            foreground=(0, 0, 0, 0.65),
+        )]
+        shape = str(roi.get("shape", "circle")).lower()
+        if shape == "rectangle":
+            half_h = max(1.0, float(roi.get("height", 20.0)) / 2.0) * scale_y
+            half_w = max(1.0, float(roi.get("width", 20.0)) / 2.0) * scale_x
+            patch = matplotlib.patches.Rectangle(
+                (x - half_w, y - half_h),
+                2 * half_w,
+                2 * half_h,
+                fill=False,
+                edgecolor=color,
+                linewidth=line_width,
+                path_effects=stroke,
+            )
+            ax.add_patch(patch)
+            return
+        radius = max(1.0, float(roi.get("radius", 10.0)))
+        width = 2 * radius * scale_x
+        height = 2 * radius * scale_y
+        if shape == "square":
+            patch = matplotlib.patches.Rectangle(
+                (x - width / 2.0, y - height / 2.0),
+                width,
+                height,
+                fill=False,
+                edgecolor=color,
+                linewidth=line_width,
+                path_effects=stroke,
+            )
+            ax.add_patch(patch)
+            return
+        outer = matplotlib.patches.Ellipse(
+            (x, y),
+            width,
+            height,
+            fill=False,
+            edgecolor=color,
+            linewidth=line_width,
+            path_effects=stroke,
+        )
+        ax.add_patch(outer)
+        if shape == "annular":
+            inner = max(0.5, float(roi.get("radius_inner", 5.0)))
+            ax.add_patch(matplotlib.patches.Ellipse(
+                (x, y),
+                2 * inner * scale_x,
+                2 * inner * scale_y,
+                fill=False,
+                edgecolor=color,
+                linewidth=line_width,
+                linestyle="--",
+                path_effects=stroke,
+            ))
+
     def _static_png_b64(self, *, max_px: int = 512, dpi: int = 160) -> str | None:
         """Base64 PNG of all panels, attached to the cell output.
 
@@ -3561,6 +3800,11 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         specs = self._static_panel_specs()
         if not specs:
             return None
+        base_roi_items = self._static_roi_items()
+        if base_roi_items:
+            specs = [{**spec, "roi_items": base_roi_items} for spec in specs]
+            if len(specs) == 1:
+                specs.extend(self._static_roi_zoom_specs(specs))
         num = len(specs)
         # Total-pixel budget: a large survey gallery (e.g. 38 panels) at a fixed
         # 512 px/panel produced a ~27 MB PNG and a ~73 MB notebook (noisy STEM
@@ -3574,7 +3818,8 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         css_w = self._static_canvas_css_px()
         overlays = self._static_overlay_texts(specs, css_px=css_w)
         zoom = min(max(float(self.initial_zoom) or 1.0, 0.5), 20.0)
-        ncols = max(1, min(self.ncols, num))
+        has_roi_zoom = any(bool(spec.get("roi_zoom_panel")) for spec in specs)
+        ncols = min(num, 4) if has_roi_zoom else max(1, min(self.ncols, num))
         nrows = (num + ncols - 1) // ncols
         # cells sized to the panels' cropped aspect so every image fills its
         # cell exactly: a taller cell would pad panels with white and make the
@@ -3630,6 +3875,16 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             ax.imshow(rgb, interpolation="nearest")
             bin_h, bin_w = rgb.shape[:2]
             ax.set(xlim=(-0.5, bin_w - 0.5), ylim=(bin_h - 0.5, -0.5))
+            for roi in spec.get("roi_items", []):
+                self._draw_static_roi(
+                    ax,
+                    roi,
+                    source_rows=rows,
+                    source_cols=cols,
+                    bin_h=bin_h,
+                    bin_w=bin_w,
+                    point=point,
+                )
             # CSS px -> data px: the panel canvas is css_w CSS px wide showing
             # bin_w image pixels, so overlay geometry scales by bin_w / css_w
             css_h = css_w * bin_h / bin_w
@@ -3700,6 +3955,159 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         self._static_fallback_jpeg = image_b64
         self._static_fallback_mime = mime
 
+    @staticmethod
+    def _utc_timestamp() -> str:
+        return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+    def _saved_view_snapshot(self) -> dict[str, Any]:
+        """Lightweight inspection state, excluding raw data and nested bookmarks."""
+        state = dict(self.state_dict())
+        state.pop("saved_view_states", None)
+        return state
+
+    def _saved_view_summary(self, state: dict[str, Any] | None = None) -> str:
+        """Short microscope-stage style summary shown in menus and notebooks."""
+        state = self.state_dict() if state is None else state
+        parts: list[str] = []
+        if state.get("roi_active") and state.get("roi_list"):
+            parts.append(f"ROI {len(state.get('roi_list') or [])}")
+        if state.get("show_fft"):
+            parts.append("FFT")
+        ratios = state.get("pad_ratios") if isinstance(state.get("pad_ratios"), list) else []
+        pad = max([float(state.get("pad_ratio") or 0.0)] + [float(v or 0.0) for v in ratios])
+        if pad > 0:
+            parts.append(f"pad {pad:.0%}")
+        if state.get("denoise_enabled") and state.get("denoise") not in (None, "", "none"):
+            parts.append(f"denoise {state.get('denoise')}")
+        if state.get("frequency_filter_enabled") and state.get("frequency_filter") not in (None, "", "none"):
+            parts.append(f"filter {state.get('frequency_filter')}")
+        hidden = state.get("hidden_panels") if isinstance(state.get("hidden_panels"), list) else []
+        if hidden:
+            parts.append(f"{len(hidden)} hidden")
+        selected = state.get("selected_idx")
+        try:
+            parts.append(f"panel {int(selected) + 1}")
+        except (TypeError, ValueError):
+            pass
+        return " · ".join(parts) if parts else "current view"
+
+    @staticmethod
+    def _saved_view_name(value: Any) -> str:
+        name = str(value or "").strip()
+        return name if name else "Untitled view"
+
+    def _normalize_saved_view_states(self, states: Any) -> list[dict[str, Any]]:
+        """Return JSON-safe named view states with stable ids and summaries."""
+        if not isinstance(states, list):
+            return []
+        clean: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for index, item in enumerate(states):
+            if not isinstance(item, dict):
+                continue
+            state = item.get("state")
+            if not isinstance(state, dict):
+                continue
+            state = dict(state)
+            state.pop("saved_view_states", None)
+            raw_id = str(item.get("id") or "").strip()
+            entry_id = raw_id if raw_id and raw_id not in seen else f"view-{index + 1}"
+            while entry_id in seen:
+                entry_id = f"{entry_id}-copy"
+            seen.add(entry_id)
+            created = str(item.get("created_at") or item.get("updated_at") or self._utc_timestamp())
+            updated = str(item.get("updated_at") or created)
+            clean.append({
+                "id": entry_id,
+                "name": self._saved_view_name(item.get("name")),
+                "created_at": created,
+                "updated_at": updated,
+                "summary": str(item.get("summary") or self._saved_view_summary(state)),
+                "state": state,
+            })
+        return clean
+
+    def _saved_view_index(self, name_or_index: str | int) -> int:
+        states = self._normalize_saved_view_states(self.saved_view_states)
+        if isinstance(name_or_index, int):
+            if 0 <= name_or_index < len(states):
+                return name_or_index
+            raise KeyError(f"no saved Show2D view at index {name_or_index}")
+        key = str(name_or_index)
+        for idx, entry in enumerate(states):
+            if entry["id"] == key or entry["name"] == key:
+                return idx
+        raise KeyError(f"no saved Show2D view named {key!r}")
+
+    def save_view_state(self, name: str | None = None, *, update: bool = False) -> dict[str, Any]:
+        """Save the current lightweight Show2D inspection state.
+
+        This is the programmatic version of the More → Save State button. It
+        stores widget/view settings such as ROI, zoom/view box, padding,
+        denoise/filter, FFT, selected panel, hidden panels, contrast, and frame
+        indices. It never stores raw image arrays.
+        """
+        states = self._normalize_saved_view_states(self.saved_view_states)
+        view_name = self._saved_view_name(name or f"View {len(states) + 1}")
+        now = self._utc_timestamp()
+        state = self._saved_view_snapshot()
+        entry = {
+            "id": "",
+            "name": view_name,
+            "created_at": now,
+            "updated_at": now,
+            "summary": self._saved_view_summary(state),
+            "state": state,
+        }
+        target_idx = next((idx for idx, item in enumerate(states) if item["name"] == view_name), None)
+        if update and target_idx is not None:
+            entry["id"] = states[target_idx]["id"]
+            entry["created_at"] = states[target_idx].get("created_at", now)
+            states[target_idx] = entry
+            self.saved_view_status = f"Updated state {view_name}"
+        else:
+            slug = "".join(ch.lower() if ch.isalnum() else "-" for ch in view_name).strip("-") or "view"
+            existing = {item["id"] for item in states}
+            entry_id = slug
+            suffix = 2
+            while entry_id in existing:
+                entry_id = f"{slug}-{suffix}"
+                suffix += 1
+            entry["id"] = entry_id
+            states.append(entry)
+            self.saved_view_status = f"Saved state {view_name}"
+        self.saved_view_states = states
+        return dict(entry)
+
+    def load_view_state(self, name_or_index: str | int) -> Self:
+        """Restore a named saved inspection state on the current data."""
+        states = self._normalize_saved_view_states(self.saved_view_states)
+        idx = self._saved_view_index(name_or_index)
+        entry = states[idx]
+        state = dict(entry.get("state") or {})
+        state.pop("saved_view_states", None)
+        self.load_state_dict(state)
+        self.saved_view_states = states
+        self.saved_view_status = f"Loaded state {entry['name']}"
+        return self
+
+    def delete_view_state(self, name_or_index: str | int) -> Self:
+        """Delete one saved inspection state."""
+        states = self._normalize_saved_view_states(self.saved_view_states)
+        idx = self._saved_view_index(name_or_index)
+        name = states[idx]["name"]
+        del states[idx]
+        self.saved_view_states = states
+        self.saved_view_status = f"Deleted state {name}"
+        return self
+
+    def clear_view_states(self) -> Self:
+        """Delete all saved inspection states."""
+        count = len(self._normalize_saved_view_states(self.saved_view_states))
+        self.saved_view_states = []
+        self.saved_view_status = f"Deleted {count} saved state{'s' if count != 1 else ''}"
+        return self
+
     def state_dict(self):
         return {
             "title": self.title,
@@ -3749,6 +4157,10 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             "view_box": list(self.view_box),
             "view_crop": list(self.view_crop),
             "pad_ratio": float(self.pad_ratio),
+            "pad_ratios": list(self.pad_ratios),
+            "pad_fill_mode": self.pad_fill_mode,
+            "pad_fill_modes": list(self.pad_fill_modes),
+            "pad_scope": self.pad_scope,
             "diff_mode": self.diff_mode,
             # Which panel the signed-diff panel subtracts from; without it a
             # saved non-default diff reference silently reverts to panel 0.
@@ -3792,6 +4204,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             "stretch_percentiles": list(self.stretch_percentiles),
             "display_gamma": self.display_gamma,
             "dual_gain": list(self.dual_gain),
+            "saved_view_states": self._normalize_saved_view_states(self.saved_view_states),
         }
 
     def save(self, path: str):
@@ -3909,6 +4322,30 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 self.export_html(quantized=quantized)
         except Exception as exc:
             self.export_status = f"Export failed: {exc}"
+
+    def _on_saved_view_request_change(self, change: dict) -> None:
+        raw = str(change.get("new") or "")
+        if not raw:
+            return
+        try:
+            payload = json.loads(raw)
+            action = str(payload.get("action", "")).lower()
+            name = payload.get("name")
+            key = payload.get("id") or name
+            if action == "save":
+                self.save_view_state(str(name or ""), update=False)
+            elif action == "update":
+                self.save_view_state(str(name or key or ""), update=True)
+            elif action == "load":
+                self.load_view_state(str(key))
+            elif action in {"delete", "remove"}:
+                self.delete_view_state(str(key))
+            elif action in {"clear", "delete_all"}:
+                self.clear_view_states()
+            else:
+                self.saved_view_status = f"State action failed: unknown action {action!r}"
+        except Exception as exc:
+            self.saved_view_status = f"State action failed: {exc}"
 
     def _default_html_export_path(self, quantized: bool) -> pathlib.Path:
         label = self.title.strip() or "show2d"
@@ -4098,6 +4535,11 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         # A crop saved from a single-panel session cannot apply to a gallery.
         if int(self.n_images) != 1:
             state.pop("view_crop", None)
+        for key in ("pad_ratios", "pad_fill_modes"):
+            if key in state and isinstance(state[key], list) and len(state[key]) != int(self.n_images):
+                state.pop(key)
+        if "saved_view_states" in state:
+            state["saved_view_states"] = self._normalize_saved_view_states(state["saved_view_states"])
         if "page_idx" in state:
             try:
                 state["page_idx"] = int(max(0, min(int(state["page_idx"]), int(self.n_pages) - 1)))
@@ -4290,6 +4732,66 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         with self.hold_sync():
             self.view_crop = []
             self.pad_ratio = 0.0
+            self.pad_ratios = [0.0] * int(self.n_images)
+            self.pad_fill_mode = "min"
+            self.pad_fill_modes = ["min"] * int(self.n_images)
+            self.pad_scope = "all"
+        return self
+
+    def set_padding(
+        self,
+        ratio: float,
+        *,
+        fill: str = "min",
+        panels: Sequence[int] | int | None = None,
+    ) -> Self:
+        """Set display padding for every panel, or a chosen panel subset.
+
+        Padding is a reversible display transform: the stored arrays are never
+        modified, while frame bytes, histograms, saved state, and exports use
+        the padded display frame. ``ratio`` is a fraction of the current display
+        canvas size (0 to 1). ``fill`` chooses the constant border value from
+        each panel: ``"min"``, ``"median"``, or ``"mean"``.
+        """
+        ratio = float(ratio)
+        if not 0.0 <= ratio <= 1.0:
+            raise ValueError(f"ratio must be between 0 and 1; got {ratio}")
+        fill = str(fill).strip().lower()
+        if fill not in {"min", "median", "mean"}:
+            raise ValueError(f"fill must be 'min', 'median', or 'mean'; got {fill!r}")
+        if any(self.is_rgb) and ratio > 0:
+            raise NotImplementedError("set_padding() supports grayscale panels; RGB panels are not padded.")
+
+        n_panels = int(self.n_images)
+        if panels is None:
+            target = list(range(n_panels))
+            scope = "all"
+        elif isinstance(panels, int) and not isinstance(panels, bool):
+            target = [int(panels)]
+            scope = "panel"
+        else:
+            target = [int(panel) for panel in panels]
+            scope = "panel"
+        invalid = [panel for panel in target if not 0 <= panel < n_panels]
+        if invalid:
+            raise ValueError(f"panels must be in [0, {n_panels - 1}]; got {invalid[0]}")
+
+        ratios = list(self.pad_ratios) if len(self.pad_ratios) == n_panels else [float(self.pad_ratio)] * n_panels
+        modes = list(self.pad_fill_modes) if len(self.pad_fill_modes) == n_panels else [str(self.pad_fill_mode)] * n_panels
+        for panel in target:
+            ratios[panel] = ratio
+            modes[panel] = fill
+        self._pad_knob_sync = True
+        try:
+            with self.hold_sync():
+                self.pad_scope = scope
+                self.pad_ratios = ratios
+                self.pad_fill_modes = modes
+                mirror_panel = target[0] if scope == "panel" and target else 0
+                self.pad_ratio = ratios[mirror_panel]
+                self.pad_fill_mode = modes[mirror_panel]
+        finally:
+            self._pad_knob_sync = False
         return self
 
     def set_denoise(
@@ -4402,6 +4904,8 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 self._display_filter_ready = prev_ready
                 self._filter_knob_sync = False
             if prev_ready:
+                if any(mode != "none" for mode in modes):
+                    self.denoise_enabled = True
                 if self._display_filter_active():
                     self.show_denoise = True
                 self._refresh_display_filter_banner(announce=True)
@@ -4913,21 +5417,55 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 f"pad_ratio must be between 0 and 1 (border as a fraction of "
                 f"max(rows, cols)); got {value}"
             )
-        # pad is a single-panel display window, like crop_to_view(): a gallery
-        # or an RGB panel cannot pad, so reject it loudly instead of silently
-        # ignoring the border (and announcing one that never happened). 0.0
-        # always passes, so reset_view_ops() and the default stay valid.
+        # RGB panels use a separate packed representation; keep pad scalar
+        # grayscale-only until color-frame padding has a dedicated path.
         if value > 0 and getattr(self, "_data", None) is not None:
-            if int(self.n_images) != 1:
-                raise NotImplementedError(
-                    f"pad_ratio supports a single panel; this widget shows "
-                    f"{int(self.n_images)} panels. Pad the array before display "
-                    f"for galleries."
-                )
             if any(self.is_rgb):
                 raise NotImplementedError(
-                    "pad_ratio supports grayscale panels; this panel is RGB."
+                    "pad_ratio supports grayscale panels; RGB panels are not padded."
                 )
+        return value
+
+    @traitlets.validate("pad_ratios")
+    def _validate_pad_ratios(self, proposal: dict) -> list[float]:
+        values = [float(value) for value in proposal["value"]]
+        if getattr(self, "_data", None) is not None and values and len(values) != int(self.n_images):
+            raise traitlets.TraitError(
+                f"pad_ratios length ({len(values)}) must equal panel count ({int(self.n_images)})"
+            )
+        invalid = next((value for value in values if not 0.0 <= value <= 1.0), None)
+        if invalid is not None:
+            raise traitlets.TraitError(f"pad_ratios entries must be between 0 and 1; got {invalid}")
+        if any(values) and getattr(self, "_data", None) is not None and any(self.is_rgb):
+            raise NotImplementedError("pad_ratios supports grayscale panels; RGB panels are not padded.")
+        return values
+
+    @traitlets.validate("pad_fill_mode")
+    def _validate_pad_fill_mode(self, proposal: dict) -> str:
+        value = str(proposal["value"]).strip().lower()
+        if value not in {"min", "median", "mean"}:
+            raise traitlets.TraitError(
+                f"pad_fill_mode must be 'min', 'median', or 'mean'; got {proposal['value']!r}"
+            )
+        return value
+
+    @traitlets.validate("pad_fill_modes")
+    def _validate_pad_fill_modes(self, proposal: dict) -> list[str]:
+        values = [str(value).strip().lower() for value in proposal["value"]]
+        if getattr(self, "_data", None) is not None and values and len(values) != int(self.n_images):
+            raise traitlets.TraitError(
+                f"pad_fill_modes length ({len(values)}) must equal panel count ({int(self.n_images)})"
+            )
+        invalid = next((value for value in values if value not in {"min", "median", "mean"}), None)
+        if invalid is not None:
+            raise traitlets.TraitError(f"pad_fill_modes entries must be 'min', 'median', or 'mean'; got {invalid!r}")
+        return values
+
+    @traitlets.validate("pad_scope")
+    def _validate_pad_scope(self, proposal: dict) -> str:
+        value = str(proposal["value"]).strip().lower()
+        if value not in {"all", "panel"}:
+            raise traitlets.TraitError(f"pad_scope must be 'all' or 'panel'; got {proposal['value']!r}")
         return value
 
     @traitlets.validate("view_crop")
@@ -4961,14 +5499,12 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     # =========================================================================
     # Reversible view ops: crop-to-view + pad (display window, single panel)
     # =========================================================================
-    def _view_ops_geometry(self) -> tuple[tuple[int, int, int, int], int]:
-        """Active crop window and pad width in DISPLAY pixels.
+    def _view_crop_geometry(self) -> tuple[int, int, int, int]:
+        """Active crop window in DISPLAY pixels.
 
         The view_crop trait holds full-resolution coordinates while the
         packed frames live in display pixels (after any _display_bin), so
         the window is rescaled here. No crop returns the full display frame.
-        RGB panels bypass view ops (the mixed packing path ships display
-        RGB pixels that these helpers never see).
         """
         data = self._display_data if self._display_data is not None else self._data
         full_h, full_w = int(data.shape[1]), int(data.shape[2])
@@ -4976,42 +5512,70 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         factor = max(1, int(self._display_bin_factor))
         if len(self.view_crop) == 4 and single_scalar:
             row0, row1, col0, col1 = (int(v) for v in self.view_crop)
-            crop = (
+            return (
                 max(0, row0 // factor),
                 min(full_h, -(-row1 // factor)),
                 max(0, col0 // factor),
                 min(full_w, -(-col1 // factor)),
             )
-        else:
-            crop = (0, full_h, 0, full_w)
-        pad = 0
-        if float(self.pad_ratio) > 0 and single_scalar:
-            # Border width is a fraction of the image's max(rows, cols) so
-            # the same ratio reads the same at any aspect; the border value
-            # is the frame minimum, which keeps the colormap floor.
-            pad = max(1, round(float(self.pad_ratio) * max(full_h, full_w)))
-        return crop, pad
+        return (0, full_h, 0, full_w)
+
+    def _panel_pad_ratio(self, panel: int) -> float:
+        ratios = list(self.pad_ratios)
+        if 0 <= panel < len(ratios):
+            return float(ratios[panel])
+        return float(self.pad_ratio)
+
+    def _panel_pad_fill_mode(self, panel: int) -> str:
+        modes = list(self.pad_fill_modes)
+        if 0 <= panel < len(modes):
+            return str(modes[panel]).lower()
+        return str(self.pad_fill_mode).lower()
+
+    @staticmethod
+    def _pad_fill_value(frame: np.ndarray, mode: str) -> float:
+        finite = np.asarray(frame, dtype=np.float32)
+        finite = finite[np.isfinite(finite)]
+        if not finite.size:
+            return 0.0
+        if mode == "mean":
+            return float(np.mean(finite))
+        if mode == "median":
+            return float(np.median(finite))
+        return float(np.min(finite))
 
     def _view_ops_active(self) -> bool:
-        crop, pad = self._view_ops_geometry()
         data = self._display_data if self._display_data is not None else self._data
-        return pad > 0 or crop != (0, int(data.shape[1]), 0, int(data.shape[2]))
+        crop = self._view_crop_geometry()
+        any_pad = any(self._panel_pad_ratio(panel) > 0 for panel in range(int(self.n_images)))
+        return any_pad or crop != (0, int(data.shape[1]), 0, int(data.shape[2]))
 
     def _crop_view_stack(self, data: np.ndarray) -> np.ndarray:
         """Crop VIEW of the display stack (before denoise); never copies."""
-        (row0, row1, col0, col1), _pad = self._view_ops_geometry()
+        row0, row1, col0, col1 = self._view_crop_geometry()
         return data[:, row0:row1, col0:col1]
 
     def _pad_view_stack(self, data: np.ndarray) -> np.ndarray:
-        """Constant border around each frame (after denoise); value = frame min."""
-        _crop, pad = self._view_ops_geometry()
-        if pad <= 0:
+        """Constant border around each frame after denoise/filter display ops."""
+        if not any(self._panel_pad_ratio(panel) > 0 for panel in range(int(data.shape[0]))):
             return data
+        base_h, base_w = int(data.shape[1]), int(data.shape[2])
+        pads = [
+            max(1, round(self._panel_pad_ratio(panel) * max(base_h, base_w)))
+            if self._panel_pad_ratio(panel) > 0
+            else 0
+            for panel in range(int(data.shape[0]))
+        ]
+        target_h = max(base_h + 2 * pad for pad in pads)
+        target_w = max(base_w + 2 * pad for pad in pads)
         frames = []
-        for frame in np.asarray(data, dtype=np.float32):
-            finite = frame[np.isfinite(frame)]
-            fill = float(finite.min()) if finite.size else 0.0
-            frames.append(np.pad(frame, pad, constant_values=fill))
+        for panel, frame in enumerate(np.asarray(data, dtype=np.float32)):
+            fill = self._pad_fill_value(frame, self._panel_pad_fill_mode(panel))
+            out = np.full((target_h, target_w), fill, dtype=np.float32)
+            top = (target_h - base_h) // 2
+            left = (target_w - base_w) // 2
+            out[top:top + base_h, left:left + base_w] = frame
+            frames.append(out)
         return np.stack(frames, axis=0)
 
     def _refresh_view_ops(self, *, announce: bool) -> None:
@@ -5021,11 +5585,20 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         names the crop window in full-image coordinates and the pad ratio,
         and says that reset_view_ops() restores the full frame.
         """
-        (row0, row1, col0, col1), pad = self._view_ops_geometry()
+        row0, row1, col0, col1 = self._view_crop_geometry()
         factor = max(1, int(self._display_bin_factor))
-        self.height = (row1 - row0) + 2 * pad
-        self.width = (col1 - col0) + 2 * pad
-        self._view_crop_offset = [(row0 - pad) * factor, (col0 - pad) * factor]
+        base_h = row1 - row0
+        base_w = col1 - col0
+        pads = [
+            max(1, round(self._panel_pad_ratio(panel) * max(base_h, base_w)))
+            if self._panel_pad_ratio(panel) > 0
+            else 0
+            for panel in range(int(self.n_images))
+        ]
+        max_pad = max(pads) if pads else 0
+        self.height = base_h + 2 * max_pad
+        self.width = base_w + 2 * max_pad
+        self._view_crop_offset = [(row0 - max_pad) * factor, (col0 - max_pad) * factor]
         parts = []
         if len(self.view_crop) == 4:
             r0, r1, c0, c1 = (int(v) for v in self.view_crop)
@@ -5036,8 +5609,12 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         # a border in the banner. Constructing such a widget with pad_ratio > 0
         # raises in _validate_pad_ratio, but a later trait assignment could
         # still reach here.
-        if pad > 0:
-            parts.append(f"pad {float(self.pad_ratio):.0%}")
+        active_ratios = [self._panel_pad_ratio(panel) for panel, pad in enumerate(pads) if pad > 0]
+        if active_ratios:
+            if len(set(round(value, 6) for value in active_ratios)) == 1:
+                parts.append(f"pad {active_ratios[0]:.0%} {self.pad_fill_mode}")
+            else:
+                parts.append("pad per-panel")
         banner = (
             f"view: {' · '.join(parts)} (reset_view_ops() restores full frame)"
             if parts
@@ -5048,7 +5625,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         if announce and banner and changed:
             print(banner)
 
-    @traitlets.observe("view_crop", "pad_ratio")
+    @traitlets.observe("view_crop", "pad_ratio", "pad_ratios", "pad_fill_mode", "pad_fill_modes")
     def _on_view_ops_change(self, change: dict) -> None:
         """Repack the display frames when the crop window or pad changes."""
         if not getattr(self, "_view_ops_ready", False):
@@ -5062,6 +5639,69 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             self.zoom_row = None
             self.zoom_col = None
             self._update_all_frames()
+
+    @traitlets.observe("pad_ratio", "pad_fill_mode")
+    def _on_pad_scalar_change(self, change: dict) -> None:
+        """Mirror scalar pad edits to all panels or to the selected panel."""
+        if not getattr(self, "_view_ops_ready", False) or getattr(self, "_pad_knob_sync", False):
+            return
+        n_panels = int(self.n_images)
+        if n_panels <= 0:
+            return
+        idx = max(0, min(int(self.selected_idx), n_panels - 1))
+
+        def updated(values, value):
+            current = list(values) if len(values) == n_panels else [value] * n_panels
+            if self.pad_scope == "panel":
+                current[idx] = value
+            else:
+                current = [value] * n_panels
+            return current
+
+        self._pad_knob_sync = True
+        try:
+            if change["name"] == "pad_ratio":
+                value = float(change["new"])
+                self.pad_ratios = updated(self.pad_ratios, value)
+            elif change["name"] == "pad_fill_mode":
+                value = str(change["new"]).lower()
+                self.pad_fill_modes = updated(self.pad_fill_modes, value)
+        finally:
+            self._pad_knob_sync = False
+
+    @traitlets.observe("pad_ratios", "pad_fill_modes")
+    def _on_pad_panel_knobs_change(self, change: dict) -> None:
+        """Mirror selected per-panel pad knobs back to scalar editor traits."""
+        if not getattr(self, "_view_ops_ready", False) or getattr(self, "_pad_knob_sync", False):
+            return
+        if self.pad_scope != "panel":
+            return
+        idx = max(0, min(int(self.selected_idx), int(self.n_images) - 1))
+        self._pad_knob_sync = True
+        try:
+            if 0 <= idx < len(self.pad_ratios):
+                self.pad_ratio = float(self.pad_ratios[idx])
+            if 0 <= idx < len(self.pad_fill_modes):
+                self.pad_fill_mode = str(self.pad_fill_modes[idx]).lower()
+        finally:
+            self._pad_knob_sync = False
+
+    @traitlets.observe("selected_idx")
+    def _on_pad_selected_panel_change(self, change: dict) -> None:
+        """Keep scalar padding editor traits aligned to the selected panel."""
+        if not getattr(self, "_view_ops_ready", False) or getattr(self, "_pad_knob_sync", False):
+            return
+        if self.pad_scope != "panel":
+            return
+        idx = max(0, min(int(self.selected_idx), int(self.n_images) - 1))
+        self._pad_knob_sync = True
+        try:
+            if 0 <= idx < len(self.pad_ratios):
+                self.pad_ratio = float(self.pad_ratios[idx])
+            if 0 <= idx < len(self.pad_fill_modes):
+                self.pad_fill_mode = str(self.pad_fill_modes[idx]).lower()
+        finally:
+            self._pad_knob_sync = False
 
     @traitlets.observe("denoise", "denoise_sigma", "denoise_bin")
     def _on_display_filter_scalar_change(self, change: dict) -> None:
@@ -5102,6 +5742,8 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             self.denoise_sigmas = updated(self.denoise_sigmas, float(change["new"]))
         else:
             self.denoise_bins = updated(self.denoise_bins, int(change["new"]))
+        if self._has_denoise_config():
+            self.denoise_enabled = True
 
     @traitlets.observe("denoise_modes", "denoise_sigmas", "denoise_bins")
     def _on_display_filter_change(self, change: dict) -> None:
@@ -5718,6 +6360,37 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             if not rois:
                 self.roi_active = False
         return self
+
+    def get_roi_geometries(self, *, visible_only: bool = True) -> list[dict[str, Any]]:
+        """Return normalized ROI geometry in image ``(row, col)`` coordinates.
+
+        The raw ``roi_list`` trait remains synced for widget state, while this
+        helper gives notebooks, reports, and agents a stable public shape for
+        downstream measurements. Bounds are reported in the image coordinate
+        system; ``bounds_clipped`` is clamped to the current image extent for
+        code that wants to slice arrays safely.
+
+        Parameters
+        ----------
+        visible_only : bool, default=True
+            If ``True``, omit ROIs whose synced state has ``visible=False``.
+
+        Returns
+        -------
+        list of dict
+            JSON-friendly ROI descriptions. Circle ROIs include ``center`` and
+            ``radius``. Rectangles and squares include ``corners`` in clockwise
+            order from the top-left. Annular ROIs include ``radius_inner`` and
+            ``radius_outer``.
+        """
+        return roi_geometries(
+            list(self.roi_list),
+            height=self.height,
+            width=self.width,
+            visible_only=visible_only,
+        )
+
+    roi_geometries = get_roi_geometries
 
     def set_roi(self, row: int, col: int, radius: int = 10) -> Self:
         with self.hold_sync():

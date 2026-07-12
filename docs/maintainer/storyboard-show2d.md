@@ -106,7 +106,8 @@ to see.
 ### S2D-06: Link And Unlink Comparison State
 
 **User story**: As a user comparing related panels, I want linked zoom, pan,
-contrast, denoise, and frequency-filter edits to be optional and reversible.
+contrast, denoise, frequency-filter, and padding edits to be optional and
+reversible.
 
 **Primary widgets**: Show2D.
 
@@ -116,6 +117,15 @@ contrast, denoise, and frequency-filter edits to be optional and reversible.
 
 - Enable linked zoom, pan, and contrast; verify panels move together.
 - Disable each link mode; verify independent panel state works.
+- In the View menu, set Padding to 10%, choose Median fill, and verify the
+  canvas and histogram update while the stored raw arrays remain unchanged.
+- In a drift-correction gallery, toggle Padding from All to selected-panel
+  scope, set one panel to 20% Mean fill, and verify only that panel's
+  ``pad_ratios`` / ``pad_fill_modes`` entry changes while every panel shares
+  the larger comparison canvas.
+- Save and restore the state; verify ``pad_ratio``, ``pad_ratios``,
+  ``pad_fill_mode``, ``pad_fill_modes``, and ``pad_scope`` round-trip and
+  ``reset_view_ops()`` clears the border bit-identically.
 - [x] **S2D-PANEL-DN-1**: With denoise edits unlinked, select panels configured
   as raw, Gaussian σ2, and Gaussian σ8. Change only the σ2 panel to σ20, then
   revisit all three panels. The editor and canvas must retain `None/4`,
@@ -163,6 +173,10 @@ overlays to remain stable while I draw and drag them.
 
 - Toggle Profile; draw, move, and delete a line profile.
 - Toggle ROI tools; draw, drag, resize, save, restore, and delete ROIs.
+- After drawing circle, rectangle, square, and annular ROIs, call
+  ``get_roi_geometries()`` and verify the returned ``(row, col)`` center,
+  radius, corners, bounds, visibility, and colors match the visible overlays and
+  survive ``state_dict()`` / ``load_state_dict()``.
 - Verify high-frequency pointer labels do not pop or lag.
 - Use keyboard navigation for previous/next panel, reset zoom, and delete ROI.
 
@@ -201,9 +215,47 @@ visible compact output without embedding huge pixel buffers.
 
 - Press ``Cmd+S`` in JupyterLab and reload/reopen the notebook.
 - Verify the saved static output is visible and compact.
+- Draw one circular ROI and then multiple ROIs on a single image, then save and
+  reopen the notebook without rerunning the cell. The saved PNG fallback must
+  show the full image with all ROI overlays plus one right-side ROI zoom/crop
+  panel per visible ROI. Multiple ROI zoom panels should use comparable crop
+  width/height where image boundaries allow it, so a report reader can compare
+  marked features without mistaking crop scale for scientific size.
 - Check ``metadata.widgets`` or ``get_state()`` for heavy-buffer leaks:
   ``frame_bytes``, ``_detail_bytes``, offline stacks, and export payloads must
   not be present when ``save_state=False``.
+
+### S2D-10B: Save Microscope-Stage Inspection States
+
+**User story**: As a scientist driving Show2D interactively in a notebook, I
+want to save named view states like microscope stage positions, so I can return
+to an ROI, FFT, contrast, padding, or panel-selection view without writing
+programmatic export code.
+
+**Primary widgets**: Show2D first; later extend the same pattern to Show3D.
+
+**Data to use**: a single real or real-derived image with one defect ROI, plus a
+3-panel comparison gallery with raw/corrected/residual-style labels.
+
+**Acceptance checks**:
+
+- From the More menu, save a state named `defect A ROI` after drawing an ROI,
+  zooming, enabling FFT, and adding padding. Verify `saved_view_states` gains
+  exactly one lightweight entry with a readable summary.
+- Save a second state with different hidden panels, selected panel, contrast,
+  and padding. Load the first and second states repeatedly; verify ROI,
+  selected panel, hidden panels, FFT toggle, padding, contrast, and view box
+  restore without changing the source arrays.
+- Use Update on an existing state after moving the ROI or changing padding;
+  verify the state keeps one entry and later loads the updated view.
+- Delete one state and verify the other remains loadable. Then Delete All and
+  verify the list is empty and the widget stays usable.
+- Run the same actions from Python with `save_view_state()`,
+  `load_view_state()`, `delete_view_state()`, and `clear_view_states()`.
+- Save and reopen a notebook or round-trip `state_dict()` / `load_state_dict()`;
+  verify the named states survive but heavy buffers (`frame_bytes`,
+  `_detail_bytes`, `panel_stack_bytes`, standalone HTML payloads) are not
+  duplicated inside each saved state.
 
 ### S2D-11: Use The Widget On A Phone Or Narrow View
 
