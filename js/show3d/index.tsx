@@ -2345,7 +2345,7 @@ function Show3D() {
   const [loopStart, setLoopStart] = useModelState<number>("loop_start");
   const [loopEnd, setLoopEnd] = useModelState<number>("loop_end");
   const [bookmarkedFrames, setBookmarkedFrames] = useModelState<number[]>("bookmarked_frames");
-  const [playbackPath] = useModelState<number[]>("playback_path");
+  const [playbackPath, setPlaybackPath] = useModelState<number[]>("playback_path");
 
   // Boomerang direction ref (avoids stale closure in setInterval)
   const bounceDirRef = React.useRef<1 | -1>(1);
@@ -10679,6 +10679,73 @@ function Show3D() {
     setSliceIdx(home);
     setPlaying(false);
   };
+  const playbackPathLength = Array.isArray(playbackPath) ? playbackPath.length : 0;
+  const playbackDynamicsSummary = playbackPathLength > 0
+    ? `Path ${playbackPathLength} steps`
+    : boomerang
+      ? "Bounce"
+      : loop
+        ? `Loop ${Math.max(0, loopStart) + 1}-${Math.min(effectiveLoopEnd, nSlices - 1) + 1}`
+        : "Linear";
+  const clampFrameIndex = React.useCallback(
+    (value: number) => Math.max(0, Math.min(Math.max(0, nSlices - 1), Math.round(value))),
+    [nSlices],
+  );
+  const setPlaybackRangeAroundCurrent = React.useCallback((halfWidth: number) => {
+    const current = clampFrameIndex(currentPlaybackIndex());
+    const start = clampFrameIndex(current - halfWidth);
+    const end = clampFrameIndex(current + halfWidth);
+    setLoop(true);
+    setLoopStart(Math.min(start, end));
+    setLoopEnd(Math.max(start, end));
+    setPlaybackPath([]);
+    setPlaying(false);
+  }, [clampFrameIndex, currentPlaybackIndex, setLoop, setLoopEnd, setLoopStart, setPlaybackPath, setPlaying]);
+  const setHoldKeyFramePlaybackPath = React.useCallback(() => {
+    const current = clampFrameIndex(currentPlaybackIndex());
+    const start = loop ? Math.max(0, Math.min(loopStart, nSlices - 1)) : 0;
+    const end = loop ? Math.max(start, Math.min(effectiveLoopEnd, nSlices - 1)) : Math.max(0, nSlices - 1);
+    const before = Array.from({ length: Math.max(0, current - start) }, (_, idx) => start + idx);
+    const after = Array.from({ length: Math.max(0, end - current) }, (_, idx) => current + idx + 1);
+    setPlaybackPath([...before, current, current, current, current, ...after]);
+    setLoop(true);
+    setBoomerang(false);
+    setPlaying(false);
+  }, [clampFrameIndex, currentPlaybackIndex, effectiveLoopEnd, loop, loopStart, nSlices, setBoomerang, setLoop, setPlaybackPath, setPlaying]);
+  const applyPlaybackDynamicsPreset = React.useCallback((preset: "linear" | "slow" | "bounce" | "focus" | "hold" | "clear") => {
+    if (preset === "linear") {
+      setLoop(true);
+      setBoomerang(false);
+      setPlaybackPath([]);
+      setPlaying(false);
+      return;
+    }
+    if (preset === "slow") {
+      setPlaybackFps(Math.min(6, playbackFps));
+      setLoop(true);
+      setBoomerang(false);
+      setPlaybackPath([]);
+      setPlaying(false);
+      return;
+    }
+    if (preset === "bounce") {
+      setLoop(true);
+      setBoomerang(true);
+      setPlaybackPath([]);
+      setPlaying(false);
+      return;
+    }
+    if (preset === "focus") {
+      setPlaybackRangeAroundCurrent(Math.max(2, Math.min(8, Math.floor(nSlices / 6))));
+      return;
+    }
+    if (preset === "hold") {
+      setHoldKeyFramePlaybackPath();
+      return;
+    }
+    setPlaybackPath([]);
+    setPlaying(false);
+  }, [nSlices, playbackFps, setBoomerang, setHoldKeyFramePlaybackPath, setLoop, setPlaybackFps, setPlaybackPath, setPlaybackRangeAroundCurrent, setPlaying]);
 
   // Keyboard
   const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
@@ -11254,20 +11321,20 @@ function Show3D() {
                 }} size="small" sx={switchStyles.small} slotProps={{ input: { "aria-label": "Toggle ROI selection tool" } }} />
               </>
             )}
-            {/* "More" overflow: Stats + Denoise live here (mirrors Show2D) to
+            {/* "More" overflow: Stats + Denoise + Playback Dynamics live here (mirrors Show2D) to
                 keep the top toolbar calm. */}
             <Badge
-              badgeContent={(showStats ? 1 : 0) + (denoiseEnabled ? 1 : 0) + (!isRgb && frequencyFilterIsActive ? 1 : 0)}
-              invisible={!showStats && !showDenoise && !(!isRgb && frequencyFilterIsActive)}
+              badgeContent={(showStats ? 1 : 0) + (denoiseEnabled ? 1 : 0) + (!isRgb && frequencyFilterIsActive ? 1 : 0) + (playbackPathLength > 0 || boomerang ? 1 : 0)}
+              invisible={!showStats && !showDenoise && !(!isRgb && frequencyFilterIsActive) && playbackPathLength === 0 && !boomerang}
               sx={{ "& .MuiBadge-badge": { bgcolor: themeColors.accent, color: "#fff", fontSize: 9, fontWeight: 600, minWidth: 14, height: 14, px: 0.25 } }}
             >
               <Button
                 size="small"
-                sx={{ minWidth: 0, px: 0.75, fontSize: 10, textTransform: "none", color: (showStats || showDenoise || (!isRgb && frequencyFilterIsActive)) ? themeColors.accent : themeColors.text }}
+                sx={{ minWidth: 0, px: 0.75, fontSize: 10, textTransform: "none", color: (showStats || showDenoise || (!isRgb && frequencyFilterIsActive) || playbackPathLength > 0 || boomerang) ? themeColors.accent : themeColors.text }}
                 onClick={(e) => setMoreMenuAnchor(e.currentTarget)}
                 aria-label="More tools"
                 aria-haspopup="menu"
-                title="More tools: Stats, Denoise, Filter"
+                title="More tools: Stats, Denoise, Filter, Playback Dynamics"
               >
                 More
               </Button>
@@ -11293,6 +11360,20 @@ function Show3D() {
                   <Switch checked={frequencyFilterEnabled ?? false} onClick={(e) => e.stopPropagation()} onChange={() => setFrequencyMaster(!frequencyFilterEnabled)} size="small" sx={switchStyles.small} slotProps={{ input: { "aria-label": "Toggle frequency filter effect" } }} />
                 </MenuItem>
               )}
+              <Box sx={{ px: 1.5, py: 0.75, borderTop: `1px solid ${themeColors.border}`, mt: 0.5, minWidth: 260 }}>
+                <Typography sx={{ fontSize: 11, fontWeight: 700, color: themeColors.text, mb: 0.5 }}>Playback Dynamics</Typography>
+                <Typography sx={{ fontSize: 10, color: themeColors.textMuted, mb: 0.75 }} title="Saved as fps, loop, boomerang, loop_start, loop_end, and playback_path.">
+                  {playbackDynamicsSummary} · {Math.round(playbackFps)} fps
+                </Typography>
+                <Box sx={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 0.5 }}>
+                  <Button size="small" sx={{ ...compactButton, justifyContent: "flex-start" }} onClick={() => applyPlaybackDynamicsPreset("linear")} title="Play forward through the current loop range at constant speed.">Linear</Button>
+                  <Button size="small" sx={{ ...compactButton, justifyContent: "flex-start" }} onClick={() => applyPlaybackDynamicsPreset("slow")} title="Slow playback so subtle frame-to-frame changes are easier to see.">Slow</Button>
+                  <Button size="small" sx={{ ...compactButton, justifyContent: "flex-start" }} onClick={() => applyPlaybackDynamicsPreset("bounce")} title="Ping-pong through the loop range.">Bounce</Button>
+                  <Button size="small" sx={{ ...compactButton, justifyContent: "flex-start" }} onClick={() => applyPlaybackDynamicsPreset("focus")} title="Set a short loop range around the current frame.">Focus Range</Button>
+                  <Button size="small" sx={{ ...compactButton, justifyContent: "flex-start" }} onClick={() => applyPlaybackDynamicsPreset("hold")} title="Repeat the current frame inside playback_path so the eye can settle on a key event.">Hold Key Frame</Button>
+                  <Button size="small" sx={{ ...compactButton, justifyContent: "flex-start" }} onClick={() => applyPlaybackDynamicsPreset("clear")} title="Clear custom playback_path while keeping ordinary playback controls.">Clear Path</Button>
+                </Box>
+              </Box>
             </Menu>
             {hasPanelChoices && (
               <>

@@ -373,6 +373,21 @@ def test_gallery_padding_can_target_one_panel_with_common_canvas():
     assert bytes(restored.frame_bytes) == bytes(w.frame_bytes)
 
 
+def test_show2d_set_padding_accepts_all_alias_for_scientist_notebooks():
+    """C1: user writes panels='all', expect every panel to update."""
+    a = _image(16)
+    b = _image(16) + 10
+    w = Show2D([a, b], verbose=False)
+
+    returned = w.set_padding(0.1, fill="median", panels="all")
+
+    assert returned is w
+    assert w.pad_scope == "all"
+    assert w.pad_ratio == pytest.approx(0.1)
+    assert w.pad_ratios == [pytest.approx(0.1), pytest.approx(0.1)]
+    assert w.pad_fill_modes == ["median", "median"]
+
+
 def test_crop_to_view_raises_for_galleries():
     """Crop-to-view is single panel only in this release; a gallery gets a
     clear NotImplementedError instead of a silently wrong window."""

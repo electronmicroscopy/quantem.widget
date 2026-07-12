@@ -101,6 +101,23 @@ def test_show2d_local_stack_fft_cache_and_playback_contract():
     assert "protectedKeys" in local_stack
 
 
+def test_show3d_playback_dynamics_menu_uses_saved_state_traits():
+    """Show3D time-series presets must be UI-accessible and state-backed."""
+    show3d = (ROOT / "js" / "show3d" / "index.tsx").read_text(encoding="utf-8")
+
+    # C1: a scientist can create playback dynamics from the More menu, expect
+    # the UI to write the durable API traits rather than keeping hidden local
+    # browser-only state.
+    assert "Playback Dynamics" in show3d
+    assert "applyPlaybackDynamicsPreset" in show3d
+    assert "Hold Key Frame" in show3d
+    assert "Focus Range" in show3d
+    assert 'useModelState<number[]>("playback_path")' in show3d
+    assert "setPlaybackPath([...before, current, current, current, current, ...after])" in show3d
+    assert "setLoopStart(Math.min(start, end))" in show3d
+    assert "setBoomerang(true)" in show3d
+
+
 def test_show2d_and_show3d_fft_zoom_labels_cover_every_interactive_fft():
     """FFT views expose their live multiplier in every supported layout."""
     figure = (ROOT / "js" / "figure.ts").read_text(encoding="utf-8")

@@ -71,9 +71,9 @@ appears slowly, a reconstruction accelerates, a relaxation comes back, or only
 a short sub-range matters. The lightweight API already exposes the core pieces:
 `fps`, `loop`, `boomerang`, `loop_start`, `loop_end`, and `playback_path`.
 
-The recommended UI path is a compact **More → Playback Dynamics** section, not
-another crowded toolbar row. A first implementation should offer presets that
-write those existing traits:
+The UI path is a compact **More → Playback Dynamics** section, not another
+crowded toolbar row. The presets write those existing traits, so the same
+behavior remains scriptable and serializable:
 
 | Preset | Intended user behavior |
 |---|---|

@@ -4743,7 +4743,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         ratio: float,
         *,
         fill: str = "min",
-        panels: Sequence[int] | int | None = None,
+        panels: Sequence[int] | int | str | None = None,
     ) -> Self:
         """Set display padding for every panel, or a chosen panel subset.
 
@@ -4763,9 +4763,14 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             raise NotImplementedError("set_padding() supports grayscale panels; RGB panels are not padded.")
 
         n_panels = int(self.n_images)
-        if panels is None:
+        if panels is None or (isinstance(panels, str) and panels.strip().lower() == "all"):
             target = list(range(n_panels))
             scope = "all"
+        elif isinstance(panels, str):
+            raise ValueError(
+                "panels must be None, 'all', an integer panel index, "
+                f"or a sequence of panel indices; got {panels!r}"
+            )
         elif isinstance(panels, int) and not isinstance(panels, bool):
             target = [int(panels)]
             scope = "panel"
