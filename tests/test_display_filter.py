@@ -434,6 +434,27 @@ def test_show2d_html_export_ships_raw_frames_and_knobs():
         clone.close()
 
 
+def test_show3d_html_export_enables_browser_filter_for_raw_stack():
+    """A full-precision Show3D export keeps raw frames and tells the offline
+    browser to apply its restored denoise settings before painting the canvas."""
+    from quantem.widget import Show3D
+
+    counts = np.stack([_sparse_eds_map(shape=(32, 32)) for _ in range(3)])
+    widget = Show3D(counts, denoise="gaussian", denoise_sigma=6, offline=False)
+    clone = widget._clone_for_html_export(quantized=False)
+    try:
+        # C1: full export is packed after construction, expect browser ownership.
+        assert clone._webgpu_filter_ok is True
+        sent = np.frombuffer(clone._offline_float_stack, dtype=np.float32).reshape(counts.shape)
+        np.testing.assert_array_equal(sent, counts)
+        assert clone.denoise == "gaussian"
+        assert clone.denoise_sigma == 6.0
+        assert clone.denoise_enabled is True
+    finally:
+        clone.close()
+        widget.close()
+
+
 def test_gallery_rejects_pad_ratio_and_never_claims_a_phantom_border():
     """pad is a single-panel display window: a 2-panel gallery rejects
     pad_ratio outright (clear NotImplementedError) and a plain gallery never

@@ -5662,6 +5662,14 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         clone.page_starred = list(self.page_starred)
         clone.page_idx = int(self.page_idx)
         clone.load_state_dict(self.state_dict())
+        # Standalone exports always carry raw stack pixels so the browser can
+        # re-apply display-only denoise when the user changes sigma or binning.
+        # Exact exports are constructed with ``offline=False`` above, so they
+        # do not pass through the constructor branch that enables the browser
+        # filter owner. Preserve that negotiation explicitly before packing the
+        # exact stack; otherwise the controls restore as enabled while the
+        # canvas keeps showing the raw frames.
+        clone._webgpu_filter_ok = not clone.is_rgb
         if downsample > 1 and clone.pixel_size > 0:
             clone.pixel_size = export_pixel_size
         if quantized:

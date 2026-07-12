@@ -176,6 +176,9 @@ say exactly what they will save and produce files that reopen correctly.
 - Verify the single-HTML choices distinguish `encoding="full"` from
   `encoding="uint8"` and show approximate sizes when known.
 - Export single HTML with both encodings where supported.
+- [x] **EX-2**: Export a denoised view and a frequency-filtered view, then
+  open each standalone page without touching a control. The first canvas must
+  already show the filtered pixels; the histogram and canvas must not disagree.
 - Open both files and drive columns, hide panels, FFT, histogram, zoom, and
   reset.
 - Use Copy and verify output corresponds to the current visible state.

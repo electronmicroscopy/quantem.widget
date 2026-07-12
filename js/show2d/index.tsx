@@ -2455,6 +2455,7 @@ function Show2D() {
 
   const [dataVersion, setDataVersion] = React.useState(0);
   const [gpuCmapVersion, setGpuCmapVersion] = React.useState(0);
+  const [gpuCmapReadyVersion, setGpuCmapReadyVersion] = React.useState(0);
   // autoContrastVersion declared earlier (forward declaration for histogram thumbs).
 
   // Initialize WebGPU FFT + a widget-owned colormap engine on mount. Colormap
@@ -2490,27 +2491,12 @@ function Show2D() {
       if (engine) {
         gpuCmapRef.current = engine;
         gpuCmapReadyRef.current = true;
+        setGpuCmapReadyVersion(v => v + 1);
         console.log("[Show2D] WebGPU colormap engine initialized");
         // Report GPU memory to Python for auto-bin budget
         getGPUMaxBufferSize().then(bytes => {
           if (bytes > 0) setGpuMaxBufferMB(Math.floor(bytes / (1024 * 1024)));
         });
-        // Upload data if already parsed (GPU init may be slower than data arrival).
-        // Do NOT call setState — that would re-trigger effects and cause double
-        // computation. Instead, upload data and do a warm-up render via rAF.
-        // This compiles the GPU pipeline in the background so the first user
-        // interaction is fast (~100ms instead of ~750ms cold start).
-        if (rawDataRef.current && rawDataRef.current.length > 0) {
-          const nImg = rawDataRef.current.length;
-          for (let i = 0; i < nImg; i++) {
-            const d = rawDataRef.current[i];
-            if (d) engine.uploadData(i, d, width, height);
-          }
-          const lut = COLORMAPS[cmap] || COLORMAPS.inferno;
-          engine.uploadLUT(cmap, lut);
-          gpuDataVersionRef.current++;
-          setGpuCmapVersion(v => v + 1);
-        }
       }
     });
     return () => {
@@ -3212,6 +3198,25 @@ function Show2D() {
   }, [canvasReady, effectiveShowFft, isGallery, selectedIdx, linkedZoom]);
 
   const gpuDataVersionRef = React.useRef(0);
+  // Reconcile the two independent async prerequisites for offline first paint:
+  // parsed/filtered data and the widget-owned GPU colormap engine. Whichever
+  // becomes ready second uploads the CURRENT rawDataRef (which is the
+  // display-filtered view when Denoise/Filter is active) and triggers repaint.
+  // This prevents an early raw upload from winning deterministically when the
+  // filter commit completed before/after engine initialization.
+  React.useEffect(() => {
+    const engine = gpuCmapRef.current;
+    const arrays = rawDataRef.current;
+    if (!engine || !gpuCmapReadyRef.current || !arrays || arrays.length === 0) return;
+    for (let i = 0; i < arrays.length; i++) {
+      const data = arrays[i];
+      if (data) engine.uploadData(i, data, width, height);
+    }
+    const lut = COLORMAPS[cmapRef.current] || COLORMAPS.inferno;
+    engine.uploadLUT(cmapRef.current, lut);
+    gpuDataVersionRef.current++;
+    setGpuCmapVersion(v => v + 1);
+  }, [dataVersion, gpuCmapReadyVersion, width, height]);
   // Generation counter for colormap — coalesces rapid slider events to ≤1 render per frame
   // Cached per-image data ranges — only recomputed when data or logScale changes, NOT on slider drag
   const dataRangesRef = React.useRef<{ min: number; max: number }[]>([]);

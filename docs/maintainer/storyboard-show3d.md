@@ -96,6 +96,9 @@ label, histogram, and slider to stay synchronized at the selected FPS.
 - Press Play/Pause at 30 FPS and verify image and slider stay synchronized.
 - Increase FPS and record whether the slider lags the image.
 - Drag the frame slider slowly and quickly.
+- [x] **S3-DN-3**: Start with browser-side Gaussian denoise enabled, scrub from
+  the initial frame to a later frame, and verify both canvases remain visibly
+  smooth rather than briefly or permanently showing raw pixels.
 - Use keyboard frame stepping.
 - Change averaging window during playback.
 - Toggle Loop and Bounce and verify end-of-stack behavior.
@@ -215,6 +218,9 @@ sizes to match the Show2D export vocabulary.
   sizes.
 - Verify cancellation/status text clears after the documented timeout.
 - Export HTML exact and quantized where supported.
+- [x] **S3-EX-2**: Open an exact standalone export with display-only denoise
+  enabled. Before any interaction, verify the canvas is denoised; then scrub to
+  another frame and verify the denoise remains applied.
 - Open exported files and drive playback, frame slider, columns, hide panels,
   FFT overlay, histogram, and reset.
 - In each standalone file, pause with FFT visible, switch away and back, and
