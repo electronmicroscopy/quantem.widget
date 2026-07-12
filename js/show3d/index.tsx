@@ -2434,6 +2434,7 @@ function Show3D() {
   const setFrequencyMaster = (enabled: boolean) => {
     if (enabled && !frequencyFilterActive(frequencyFilter)) setFrequencyFilter("lowpass");
     setFrequencyFilterEnabled(enabled);
+    setShowFrequencyFilter(enabled); // reveal the settings row while filtering; hide it when off (mirrors Denoise)
   };
   // Local slider value during drag; the model (and the Python refilter) only
   // updates on release so scrubbing sigma stays smooth on large stacks.
@@ -11439,12 +11440,6 @@ function Show3D() {
                       sx={{ fontSize: 12, gap: 1, color: frequencyFilterIsActive ? themeColors.accent : themeColors.text }}
                     >
                       <Typography sx={{ flex: 1, fontSize: 12, color: "inherit" }} title="Off by default. Turn on to remove a background or isolate a periodicity; raw counts remain unchanged.">Filter</Typography>
-                      <Button
-                        size="small"
-                        onClick={(event) => { event.stopPropagation(); setShowFrequencyFilter(!showFrequencyFilter); }}
-                        sx={{ ...compactButton, minWidth: 48, fontSize: 10 }}
-                        aria-label={showFrequencyFilter ? "Hide frequency filter settings" : "Show frequency filter settings"}
-                      >Settings</Button>
                       <Switch
                         checked={frequencyFilterEnabled ?? false}
                         onClick={(event) => event.stopPropagation()}

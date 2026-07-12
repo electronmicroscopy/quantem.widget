@@ -6477,6 +6477,7 @@ function Show2D() {
       mirrorFrequencyKnobEdit("mode", "lowpass");
     }
     setFrequencyFilterEnabled(enabled);
+    setShowFrequencyFilter(enabled); // reveal the settings row while filtering; hide it when off (mirrors Denoise)
   };
   // Collapse-safe reduction badge: when the controls (and their inline denoise
   // / view banners) are hidden, surface any active reduction in the always-on
@@ -7090,12 +7091,6 @@ function Show2D() {
                   sx={{ fontSize: 12, gap: 1, color: frequencyFilterEnabled && frequencyFilterActive(frequencyFilter) ? themeColors.accent : themeColors.text }}
                 >
                   <Typography sx={{ flex: 1, fontSize: 12, color: "inherit" }} title="Off by default. Turn on to remove a background or isolate a periodicity; raw counts remain unchanged.">Filter</Typography>
-                  <Button
-                    size="small"
-                    onClick={(event) => { event.stopPropagation(); setShowFrequencyFilter(!showFrequencyFilter); }}
-                    sx={{ ...compactButton, minWidth: 48, fontSize: 10 }}
-                    aria-label={showFrequencyFilter ? "Hide frequency filter settings" : "Show frequency filter settings"}
-                  >Settings</Button>
                   <Switch
                     checked={frequencyFilterEnabled ?? false}
                     onClick={(event) => event.stopPropagation()}
