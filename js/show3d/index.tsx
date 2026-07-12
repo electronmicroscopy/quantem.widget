@@ -12255,13 +12255,12 @@ function Show3D() {
                       <MenuItem key={mode} value={mode}>{label}</MenuItem>
                     ))}
                   </Select>
-                  <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted, opacity: displayFilterOff ? 0.5 : 1, minWidth: 40, display: "inline-block" }}>σ {(sigmaDraft ?? Number(displaySigma ?? 4)).toFixed(1)}</Typography>
+                  <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted, minWidth: 40, display: "inline-block" }}>σ {(sigmaDraft ?? Number(displaySigma ?? 4)).toFixed(1)}</Typography>
                   <Slider
                     value={sigmaDraft ?? Number(displaySigma ?? 4)}
                     min={0} max={20} step={0.5}
-                    disabled={displayFilterOff}
-                    onChange={(_, v) => setSigmaDraft(v as number)}
-                    onChangeCommitted={(_, v) => { setDisplaySigma(v as number); setSigmaDraft(null); if (resolveDenoiseMode(displayFilter || "none").mode !== "none" || (spatialBin || 1) > 1) setDenoiseEnabled(true); }}
+                    onChange={(_, v) => { if (displayFilterOff) setDisplayFilter("gaussian"); setSigmaDraft(v as number); }}
+                    onChangeCommitted={(_, v) => { setDisplaySigma(v as number); setSigmaDraft(null); if (displayFilterOff) setDisplayFilter("gaussian"); setDenoiseEnabled(true); }}
                     size="small" sx={{ ...sliderStyles.small, width: 60 }}
                     aria-label="Display filter sigma in pixels"
                   />

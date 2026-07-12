@@ -1121,7 +1121,6 @@ function Show2D() {
   // Canonical method for the UI menu; compound aliases (bin2_anscombe, ...)
   // from older saved states resolve to their base method for display.
   const denoiseBaseMode = resolveDenoiseMode(displayFilter || "none", spatialBin || 1).mode;
-  const filterOff = denoiseBaseMode === "none";
   // Denoise controls row visibility (the editor; secondary to the on/off).
   const [showDenoise, setShowDenoise] = useModelState<boolean>("show_denoise");
   // Master ON/OFF of the denoise EFFECT. Off shows the RAW view (nothing of the
@@ -7970,13 +7969,12 @@ function Show2D() {
                         </Select>
                       </Box>
                       <Box sx={controlPairSx}>
-                        <Typography sx={{ ...compactLabelSx, opacity: filterOff ? 0.5 : 1, minWidth: 40, display: "inline-block" }}>σ {(sigmaDraft ?? Number(displaySigma ?? 4)).toFixed(1)}</Typography>
+                        <Typography sx={{ ...compactLabelSx, minWidth: 40, display: "inline-block" }}>σ {(sigmaDraft ?? Number(displaySigma ?? 4)).toFixed(1)}</Typography>
                         <Slider
                           value={sigmaDraft ?? Number(displaySigma ?? 4)}
                           min={0} max={20} step={0.5}
-                          disabled={filterOff}
-                          onChange={(_, v) => setSigmaDraft(v as number)}
-                          onChangeCommitted={(_, v) => { setDisplaySigma(v as number); mirrorFilterKnobEdit("sigma", v as number); setSigmaDraft(null); if (resolveDenoiseMode(denoiseBaseMode).mode !== "none" || (spatialBin || 1) > 1) setDenoiseEnabled(true); }}
+                          onChange={(_, v) => { if (denoiseBaseMode === "none") { setDisplayFilter("gaussian"); mirrorFilterKnobEdit("mode", "gaussian"); } setSigmaDraft(v as number); }}
+                          onChangeCommitted={(_, v) => { setDisplaySigma(v as number); mirrorFilterKnobEdit("sigma", v as number); setSigmaDraft(null); if (denoiseBaseMode === "none") { setDisplayFilter("gaussian"); mirrorFilterKnobEdit("mode", "gaussian"); } setDenoiseEnabled(true); }}
                           size="small" sx={{ ...sliderStyles.small, width: 60 }}
                         />
                       </Box>
