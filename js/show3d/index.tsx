@@ -2355,6 +2355,7 @@ function Show3D() {
   // "More" overflow menu (mirrors Show2D): tucks Stats + Denoise off the crowded
   // top toolbar. Badge shows how many of its tools are active.
   const [moreMenuAnchor, setMoreMenuAnchor] = React.useState<HTMLElement | null>(null);
+  const [playbackStyleMenuAnchor, setPlaybackStyleMenuAnchor] = React.useState<HTMLElement | null>(null);
   const [showControls] = useModelState<boolean>("show_controls");
   const [controlsCollapsed, setControlsCollapsed] = useModelState<boolean>("controls_collapsed");
   const [debug] = useModelState<boolean>("debug");
@@ -10728,72 +10729,43 @@ function Show3D() {
     setPlaying(false);
   };
   const playbackPathLength = Array.isArray(playbackPath) ? playbackPath.length : 0;
-  const playbackDynamicsSummary = playbackPathLength > 0
-    ? `Path ${playbackPathLength} steps`
-    : boomerang
-      ? "Bounce"
-      : loop
-        ? `Loop ${Math.max(0, loopStart) + 1}-${Math.min(effectiveLoopEnd, nSlices - 1) + 1}`
-        : "Linear";
+  const playbackStyleSummary = playbackPathLength > 0 ? `Path ${playbackPathLength}` : "Linear";
   const clampFrameIndex = React.useCallback(
     (value: number) => Math.max(0, Math.min(Math.max(0, nSlices - 1), Math.round(value))),
     [nSlices],
   );
-  const setPlaybackRangeAroundCurrent = React.useCallback((halfWidth: number) => {
-    const current = clampFrameIndex(currentPlaybackIndex());
-    const start = clampFrameIndex(current - halfWidth);
-    const end = clampFrameIndex(current + halfWidth);
-    setLoop(true);
-    setLoopStart(Math.min(start, end));
-    setLoopEnd(Math.max(start, end));
-    setPlaybackPath([]);
-    setPlaying(false);
-  }, [clampFrameIndex, currentPlaybackIndex, setLoop, setLoopEnd, setLoopStart, setPlaybackPath, setPlaying]);
-  const setHoldKeyFramePlaybackPath = React.useCallback(() => {
-    const current = clampFrameIndex(currentPlaybackIndex());
+  const makePlaybackStylePath = React.useCallback((style: "power-in" | "power-out" | "ease-in-out") => {
     const start = loop ? Math.max(0, Math.min(loopStart, nSlices - 1)) : 0;
-    const end = loop ? Math.max(start, Math.min(effectiveLoopEnd, nSlices - 1)) : Math.max(0, nSlices - 1);
-    const before = Array.from({ length: Math.max(0, current - start) }, (_, idx) => start + idx);
-    const after = Array.from({ length: Math.max(0, end - current) }, (_, idx) => current + idx + 1);
-    setPlaybackPath([...before, current, current, current, current, ...after]);
-    setLoop(true);
-    setBoomerang(false);
+    const loopEndCandidate = loop ? Math.min(effectiveLoopEnd, nSlices - 1) : Math.max(0, nSlices - 1);
+    // A one-frame loop is meaningful for manual review but not for choosing a
+    // temporal curve. If the range is still hydrating or collapsed, style
+    // buttons fall back to the full stack instead of producing "Path 1".
+    const end = loopEndCandidate > start ? loopEndCandidate : Math.max(start, nSlices - 1);
+    const span = Math.max(0, end - start);
+    if (span <= 0) return [start];
+    const steps = Math.max(span + 1, Math.min(96, Math.round((span + 1) * 1.75)));
+    const path: number[] = [];
+    for (let i = 0; i < steps; i++) {
+      const t = steps <= 1 ? 1 : i / (steps - 1);
+      let eased = t;
+      if (style === "power-in") eased = t * t;
+      else if (style === "power-out") eased = 1 - ((1 - t) * (1 - t));
+      else eased = 0.5 - 0.5 * Math.cos(Math.PI * t);
+      path.push(clampFrameIndex(start + eased * span));
+    }
+    if (path[0] !== start) path.unshift(start);
+    if (path[path.length - 1] !== end) path.push(end);
+    return path;
+  }, [clampFrameIndex, effectiveLoopEnd, loop, loopStart, nSlices]);
+  const applyPlaybackStylePreset = React.useCallback((style: "linear" | "power-in" | "power-out" | "ease-in-out") => {
+    if (style === "linear") {
+      setPlaybackPath([]);
+    } else {
+      setPlaybackPath(makePlaybackStylePath(style));
+    }
     setPlaying(false);
-  }, [clampFrameIndex, currentPlaybackIndex, effectiveLoopEnd, loop, loopStart, nSlices, setBoomerang, setLoop, setPlaybackPath, setPlaying]);
-  const applyPlaybackDynamicsPreset = React.useCallback((preset: "linear" | "slow" | "bounce" | "focus" | "hold" | "clear") => {
-    if (preset === "linear") {
-      setLoop(true);
-      setBoomerang(false);
-      setPlaybackPath([]);
-      setPlaying(false);
-      return;
-    }
-    if (preset === "slow") {
-      setPlaybackFps(Math.min(6, playbackFps));
-      setLoop(true);
-      setBoomerang(false);
-      setPlaybackPath([]);
-      setPlaying(false);
-      return;
-    }
-    if (preset === "bounce") {
-      setLoop(true);
-      setBoomerang(true);
-      setPlaybackPath([]);
-      setPlaying(false);
-      return;
-    }
-    if (preset === "focus") {
-      setPlaybackRangeAroundCurrent(Math.max(2, Math.min(8, Math.floor(nSlices / 6))));
-      return;
-    }
-    if (preset === "hold") {
-      setHoldKeyFramePlaybackPath();
-      return;
-    }
-    setPlaybackPath([]);
-    setPlaying(false);
-  }, [nSlices, playbackFps, setBoomerang, setHoldKeyFramePlaybackPath, setLoop, setPlaybackFps, setPlaybackPath, setPlaybackRangeAroundCurrent, setPlaying]);
+    setPlaybackStyleMenuAnchor(null);
+  }, [makePlaybackStylePath, setPlaybackPath, setPlaying]);
 
   // Keyboard
   const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
@@ -11369,20 +11341,20 @@ function Show3D() {
                 }} size="small" sx={switchStyles.small} slotProps={{ input: { "aria-label": "Toggle ROI selection tool" } }} />
               </>
             )}
-            {/* "More" overflow: Stats + Denoise + Playback Dynamics live here (mirrors Show2D) to
+            {/* "More" overflow: Stats + Denoise + Filter live here (mirrors Show2D) to
                 keep the top toolbar calm. */}
             <Badge
-              badgeContent={(showStats ? 1 : 0) + (denoiseEnabled ? 1 : 0) + (!isRgb && frequencyFilterIsActive ? 1 : 0) + (playbackPathLength > 0 || boomerang ? 1 : 0)}
-              invisible={!showStats && !showDenoise && !(!isRgb && frequencyFilterIsActive) && playbackPathLength === 0 && !boomerang}
+              badgeContent={(showStats ? 1 : 0) + (denoiseEnabled ? 1 : 0) + (!isRgb && frequencyFilterIsActive ? 1 : 0)}
+              invisible={!showStats && !showDenoise && !(!isRgb && frequencyFilterIsActive)}
               sx={{ "& .MuiBadge-badge": { bgcolor: themeColors.accent, color: "#fff", fontSize: 9, fontWeight: 600, minWidth: 14, height: 14, px: 0.25 } }}
             >
               <Button
                 size="small"
-                sx={{ minWidth: 0, px: 0.75, fontSize: 10, textTransform: "none", color: (showStats || showDenoise || (!isRgb && frequencyFilterIsActive) || playbackPathLength > 0 || boomerang) ? themeColors.accent : themeColors.text }}
+                sx={{ minWidth: 0, px: 0.75, fontSize: 10, textTransform: "none", color: (showStats || showDenoise || (!isRgb && frequencyFilterIsActive)) ? themeColors.accent : themeColors.text }}
                 onClick={(e) => setMoreMenuAnchor(e.currentTarget)}
                 aria-label="More tools"
                 aria-haspopup="menu"
-                title="More tools: Stats, Denoise, Filter, Playback Dynamics"
+                title="More tools: Stats, Denoise, Filter"
               >
                 More
               </Button>
@@ -11408,20 +11380,6 @@ function Show3D() {
                   <Switch checked={frequencyFilterEnabled ?? false} onClick={(e) => e.stopPropagation()} onChange={() => setFrequencyMaster(!frequencyFilterEnabled)} size="small" sx={switchStyles.small} slotProps={{ input: { "aria-label": "Toggle frequency filter effect" } }} />
                 </MenuItem>
               )}
-              <Box sx={{ px: 1.5, py: 0.75, borderTop: `1px solid ${themeColors.border}`, mt: 0.5, minWidth: 260 }}>
-                <Typography sx={{ fontSize: 11, fontWeight: 700, color: themeColors.text, mb: 0.5 }}>Playback Dynamics</Typography>
-                <Typography sx={{ fontSize: 10, color: themeColors.textMuted, mb: 0.75 }} title="Saved as fps, loop, boomerang, loop_start, loop_end, and playback_path.">
-                  {playbackDynamicsSummary} · {Math.round(playbackFps)} fps
-                </Typography>
-                <Box sx={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 0.5 }}>
-                  <Button size="small" sx={{ ...compactButton, justifyContent: "flex-start" }} onClick={() => applyPlaybackDynamicsPreset("linear")} title="Play forward through the current loop range at constant speed.">Linear</Button>
-                  <Button size="small" sx={{ ...compactButton, justifyContent: "flex-start" }} onClick={() => applyPlaybackDynamicsPreset("slow")} title="Slow playback so subtle frame-to-frame changes are easier to see.">Slow</Button>
-                  <Button size="small" sx={{ ...compactButton, justifyContent: "flex-start" }} onClick={() => applyPlaybackDynamicsPreset("bounce")} title="Ping-pong through the loop range.">Bounce</Button>
-                  <Button size="small" sx={{ ...compactButton, justifyContent: "flex-start" }} onClick={() => applyPlaybackDynamicsPreset("focus")} title="Set a short loop range around the current frame.">Focus Range</Button>
-                  <Button size="small" sx={{ ...compactButton, justifyContent: "flex-start" }} onClick={() => applyPlaybackDynamicsPreset("hold")} title="Repeat the current frame inside playback_path so the eye can settle on a key event.">Hold Key Frame</Button>
-                  <Button size="small" sx={{ ...compactButton, justifyContent: "flex-start" }} onClick={() => applyPlaybackDynamicsPreset("clear")} title="Clear custom playback_path while keeping ordinary playback controls.">Clear Path</Button>
-                </Box>
-              </Box>
             </Menu>
             {hasPanelChoices && (
               <>
@@ -12436,6 +12394,42 @@ function Show3D() {
                     <IconButton size="small" onClick={toggleCurrentFrameBookmark} aria-pressed={currentFrameBookmarked} aria-label={`${currentFrameBookmarked ? "Unstar" : "Star"} frame ${activeIdx + 1}`} title={`${currentFrameBookmarked ? "Unstar" : "Star"} frame ${activeIdx + 1}`} sx={{ color: currentFrameBookmarked ? "#ffc107" : themeColors.textMuted, p: 0.25, width: 22, height: 22, flexShrink: 0, "&:hover": { color: currentFrameBookmarked ? "#ffc107" : themeColors.text } }}>
                       <Box component="span" sx={{ fontSize: 18, lineHeight: "18px" }}>{currentFrameBookmarked ? "★" : "☆"}</Box>
                     </IconButton>
+                    <Badge
+                      badgeContent={playbackPathLength > 0 ? 1 : 0}
+                      invisible={playbackPathLength === 0}
+                      sx={{ "& .MuiBadge-badge": { bgcolor: themeColors.accent, color: "#fff", fontSize: 9, fontWeight: 600, minWidth: 12, height: 12, px: 0.25 } }}
+                    >
+                      <Button
+                        size="small"
+                        sx={{ minWidth: 0, px: 0.6, py: 0.1, fontSize: 10, lineHeight: 1.2, textTransform: "none", color: playbackPathLength > 0 ? themeColors.accent : themeColors.textMuted, flexShrink: 0 }}
+                        onClick={(e) => setPlaybackStyleMenuAnchor(e.currentTarget)}
+                        aria-label="More playback style options"
+                        aria-haspopup="menu"
+                        title={`Playback style: ${playbackStyleSummary}`}
+                      >
+                        More
+                      </Button>
+                    </Badge>
+                    <Menu
+                      anchorEl={playbackStyleMenuAnchor}
+                      open={Boolean(playbackStyleMenuAnchor)}
+                      onClose={() => setPlaybackStyleMenuAnchor(null)}
+                      MenuListProps={{ "aria-label": "Playback style options" }}
+                      {...themedMenuProps}
+                    >
+                      <Box sx={{ px: 1.5, py: 0.75, minWidth: 240 }}>
+                        <Typography sx={{ fontSize: 11, fontWeight: 700, color: themeColors.text, mb: 0.5 }}>Play Style</Typography>
+                        <Typography sx={{ fontSize: 10, color: themeColors.textMuted, mb: 0.75 }} title="Changes only playback_path. Loop, Bounce, fps, and range stay user-controlled in the playback row.">
+                          {playbackStyleSummary} · uses current range
+                        </Typography>
+                        <Box sx={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 0.5 }}>
+                          <Button size="small" sx={{ ...compactButton, justifyContent: "flex-start" }} onClick={() => applyPlaybackStylePreset("linear")} title="Use the current loop range at constant frame spacing.">Linear</Button>
+                          <Button size="small" sx={{ ...compactButton, justifyContent: "flex-start" }} onClick={() => applyPlaybackStylePreset("power-in")} title="Start slowly, then accelerate through the current range.">Power In</Button>
+                          <Button size="small" sx={{ ...compactButton, justifyContent: "flex-start" }} onClick={() => applyPlaybackStylePreset("power-out")} title="Move quickly at first, then settle near the end of the current range.">Power Out</Button>
+                          <Button size="small" sx={{ ...compactButton, justifyContent: "flex-start" }} onClick={() => applyPlaybackStylePreset("ease-in-out")} title="Smoothly accelerate, then decelerate through the current range.">Ease In/Out</Button>
+                        </Box>
+                      </Box>
+                    </Menu>
                   </Box>
                   <Box sx={{ ...controlRow, ...mobileControlRowSx, width: "fit-content", maxWidth: "100%", flexWrap: "wrap", border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, boxSizing: "border-box" }}>
                     <Box sx={{ display: "flex", alignItems: "center", gap: isMobileViewport ? "4px" : `${SPACING.SM}px`, flexShrink: 0 }}>

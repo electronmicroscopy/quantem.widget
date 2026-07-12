@@ -119,20 +119,13 @@ because collaborators often review time series outside Jupyter.
 
 **Acceptance checks**:
 
-- Keep the main toolbar simple. Put advanced playback dynamics in More or a
-  compact Playback Dynamics flyout; the always-visible playback row should stay
-  readable on desktop and mobile.
-- Linear preset: play through the current loop range at constant `fps`; verify
+- Keep the main toolbar simple. Put playback style in the playback row next to
+  the frame star, not in the top toolbar More menu.
+- Linear style: play through the current loop range at constant `fps`; verify
   frame label, slider, histogram, FFT, and scale bar stay synchronized.
-- Slow preset: lower the cadence and verify no frames are skipped while a user
-  watches a subtle event.
-- Bounce preset: enable `boomerang` and verify the sequence reverses at the
-  end without flashing, duplicating, or losing the terminal frame.
-- Focus-range preset: set `loop_start` and `loop_end` around an event; verify
-  playback never leaves the selected interval and manual scrubbing still works.
-- Hold-key-frame preset or custom path: populate `playback_path` with repeated
-  event frames and verify the image visibly pauses on those frames while labels
-  and slider positions remain honest.
+- Power In, Power Out, and Ease In/Out styles: generate `playback_path` from
+  the current loop range; verify users still control `fps`, `loop`,
+  `boomerang`, and range from the existing playback row controls.
 - Configure denoise plus a low-pass, high-pass, or band-pass FFT filter before
   pressing Play; verify transitions stay visibly filtered and smooth, the
   slider remains honest, and the viewer does not flash raw/noisy frames while

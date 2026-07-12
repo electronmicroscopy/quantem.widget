@@ -101,21 +101,25 @@ def test_show2d_local_stack_fft_cache_and_playback_contract():
     assert "protectedKeys" in local_stack
 
 
-def test_show3d_playback_dynamics_menu_uses_saved_state_traits():
-    """Show3D time-series presets must be UI-accessible and state-backed."""
+def test_show3d_playback_style_menu_stays_next_to_playback_controls():
+    """Show3D play-style choices belong in the playback row, not top More."""
     show3d = (ROOT / "js" / "show3d" / "index.tsx").read_text(encoding="utf-8")
 
-    # C1: a scientist can create playback dynamics from the More menu, expect
-    # the UI to write the durable API traits rather than keeping hidden local
-    # browser-only state.
-    assert "Playback Dynamics" in show3d
-    assert "applyPlaybackDynamicsPreset" in show3d
-    assert "Hold Key Frame" in show3d
-    assert "Focus Range" in show3d
+    # C1: a scientist chooses how time moves while watching playback, expect
+    # the button next to the frame star and only curve-style options inside.
+    assert "More playback style options" in show3d
+    assert "Play Style" in show3d
+    assert "applyPlaybackStylePreset" in show3d
+    assert "Power In" in show3d
+    assert "Power Out" in show3d
+    assert "Ease In/Out" in show3d
     assert 'useModelState<number[]>("playback_path")' in show3d
-    assert "setPlaybackPath([...before, current, current, current, current, ...after])" in show3d
-    assert "setLoopStart(Math.min(start, end))" in show3d
-    assert "setBoomerang(true)" in show3d
+    assert 'producing "Path 1"' in show3d
+    assert "Loop, Bounce, fps, and range stay user-controlled" in show3d
+    assert "title=\"More tools: Stats, Denoise, Filter\"" in show3d
+    assert "Playback Dynamics" not in show3d
+    assert "Hold Key Frame" not in show3d
+    assert "Focus Range" not in show3d
 
 
 def test_show3d_filtered_playback_waits_for_cached_display_frames():
