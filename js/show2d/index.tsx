@@ -1096,7 +1096,12 @@ function Show2D() {
   const [displayBinFactor] = useModelState<number>("_display_bin_factor");
   const [, setGpuMaxBufferMB] = useModelState<number>("_gpu_max_buffer_mb");
   const [cmap, setCmap] = useModelState<string>("cmap");
+  const [panelCmaps, setPanelCmaps] = useModelState<string[]>("panel_cmaps");
   const [ncols, setNcols] = useModelState<number>("ncols");
+  const panelCmapFor = React.useCallback((idx: number) => {
+    const value = panelCmaps && idx >= 0 && idx < panelCmaps.length ? panelCmaps[idx] : "";
+    return value || cmap || "inferno";
+  }, [panelCmaps, cmap]);
 
   // Display options
   const [logScale, setLogScale] = useModelState<boolean>("log_scale");
@@ -1278,6 +1283,20 @@ function Show2D() {
 
   // Selection
   const [selectedIdx, setSelectedIdx] = useModelState<number>("selected_idx");
+  const selectedCmap = panelCmapFor(selectedIdx);
+  const setSelectedCmap = React.useCallback((value: string) => {
+    if (isGallery || (panelCmaps && panelCmaps.length > 0)) {
+      const next = panelCmaps && panelCmaps.length === nImages
+        ? panelCmaps.slice()
+        : Array.from({ length: nImages }, (_, i) => (i === selectedIdx ? value : cmap));
+      next[selectedIdx] = value;
+      setPanelCmaps(next);
+      if (!cmap) setCmap(value);
+    } else {
+      setCmap(value);
+      setPanelCmaps([]);
+    }
+  }, [isGallery, panelCmaps, nImages, selectedIdx, cmap, setPanelCmaps, setCmap]);
   // In panel scope the scalar traits are the editor for the selected panel,
   // while the arrays remain the render/source of truth for every panel. Keep
   // the editor pointed at the newly selected panel without continuously
@@ -3466,7 +3485,9 @@ function Show2D() {
       && renderGeneration === mainCmapGenerationRef.current
       && (typeof document === "undefined" || !document.hidden)
     );
-    const lut = COLORMAPS[cmap] || COLORMAPS.inferno;
+    const panelCmapNames = Array.from({ length: nImages }, (_, i) => panelCmapFor(i));
+    const hasMixedPanelCmaps = panelCmapNames.some(name => name !== panelCmapNames[0]);
+    const lut = COLORMAPS[panelCmapNames[0] || cmap] || COLORMAPS.inferno;
 
     // RGB panels bypass the LUT + contrast pipeline entirely: paint their
     // display-ready (r, g, b) floats straight into the offscreen once per data
@@ -3591,7 +3612,8 @@ function Show2D() {
         const raw = rawDataRef.current?.[i];
         if (!raw) continue;
         const processed = logScale ? applyLogScale(raw) : raw;
-        renderToOffscreenReuse(processed, lut, ranges[i].vmin, ranges[i].vmax, offscreen, imgData);
+        const panelLut = COLORMAPS[panelCmapNames[i]] || COLORMAPS.inferno;
+        renderToOffscreenReuse(processed, panelLut, ranges[i].vmin, ranges[i].vmax, offscreen, imgData);
       }
       if (isCurrentRender()) setOffscreenVersion(v => v + 1);
     };
@@ -3601,7 +3623,7 @@ function Show2D() {
     // commit into the retained offscreens. This also prevents a late black GPU
     // clear frame from overwriting a newer foreground repaint.
     const engine = gpuCmapRef.current;
-    const gpuReady = engine && gpuCmapReadyRef.current && engine.slotCount >= nImages;
+    const gpuReady = !hasMixedPanelCmaps && engine && gpuCmapReadyRef.current && engine.slotCount >= nImages;
     if (gpuReady) {
       engine!.uploadLUT(cmap, lut);
       const capturedRanges = ranges.slice();
@@ -3667,7 +3689,7 @@ function Show2D() {
       cancelled = true;
       if (renderRaf !== null) window.cancelAnimationFrame(renderRaf);
     };
-  }, [dataVersion, gpuCmapVersion, autoContrastVersion, nImages, width, height, cmap, logScale, autoContrast, linkedContrast, linkedContrastState, contrastStates, traitVmin, traitVmax, traitVmins, traitVmaxs, diffMode, isRgbFlags, canvasRepaintSignal]);
+  }, [dataVersion, gpuCmapVersion, autoContrastVersion, nImages, width, height, cmap, panelCmaps, panelCmapFor, logScale, autoContrast, linkedContrast, linkedContrastState, contrastStates, traitVmin, traitVmax, traitVmins, traitVmaxs, diffMode, isRgbFlags, canvasRepaintSignal]);
 
   // -------------------------------------------------------------------------
   // Maps-style detail fetch (preview binned only, _display_bin_factor > 1).
@@ -8046,7 +8068,7 @@ function Show2D() {
                       </Box>
                       <Box sx={controlPairSx}>
                         <Typography sx={compactLabelSx}>Color</Typography>
-                        <Select size="small" value={cmap} onChange={(e) => setCmap(e.target.value)} MenuProps={themedMenuProps} sx={{ ...themedSelect, minWidth: 60 }}>
+                        <Select size="small" value={selectedCmap} onChange={(e) => setSelectedCmap(String(e.target.value))} MenuProps={themedMenuProps} sx={{ ...themedSelect, minWidth: 60 }}>
                           {COLORMAP_NAMES.map((name) => (<MenuItem key={name} value={name}>{name.charAt(0).toUpperCase() + name.slice(1)}</MenuItem>))}
                         </Select>
                       </Box>

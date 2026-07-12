@@ -117,6 +117,11 @@ reversible.
 
 - Enable linked zoom, pan, and contrast; verify panels move together.
 - Disable each link mode; verify independent panel state works.
+- Pass ``cmap=["gray", "inferno", "RdBu", ...]`` for a multi-panel gallery and
+  verify each panel keeps its requested colormap in the live UI, saved state,
+  static notebook preview, and standalone HTML export. Select each panel and
+  change Color from the UI; verify only that panel changes unless the user has
+  explicitly chosen a linked/all-panel operation.
 - In the View menu, set Padding to 10%, choose Median fill, and verify the
   canvas and histogram update while the stored raw arrays remain unchanged.
 - In a drift-correction gallery, toggle Padding from All to selected-panel
@@ -221,6 +226,10 @@ visible compact output without embedding huge pixel buffers.
   panel per visible ROI. Multiple ROI zoom panels should use comparable crop
   width/height where image boundaries allow it, so a report reader can compare
   marked features without mistaking crop scale for scientific size.
+- [x] **S2D-ROI-SAVE-1**: Execute and save a notebook containing one circular
+  ROI and one rectangular ROI. Reopen the saved output without rerunning the
+  cell and verify the PNG fallback shows the full field plus separate ROI crop
+  panels, with crop-panel scale bars recalculated for the smaller field of view.
 - Check ``metadata.widgets`` or ``get_state()`` for heavy-buffer leaks:
   ``frame_bytes``, ``_detail_bytes``, offline stacks, and export payloads must
   not be present when ``save_state=False``.

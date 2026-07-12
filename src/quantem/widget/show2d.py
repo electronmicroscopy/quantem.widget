@@ -522,6 +522,16 @@ class Colormap(StrEnum):
     GRAY = "gray"
 
 
+def _cmap_name(value: str | Colormap) -> str:
+    """Return the frontend colormap name for a string or Colormap enum."""
+    return value.value if isinstance(value, Colormap) else str(value)
+
+
+def _is_cmap_sequence(value: object) -> bool:
+    """Return True when ``value`` is a per-panel colormap sequence."""
+    return isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray))
+
+
 _MAX_PANEL_PLAYBACK_FPS = 30.0
 
 
@@ -558,8 +568,10 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         Labels for each image in gallery mode.
     title : str, optional
         Title to display above the image(s).
-    cmap : str, default "inferno"
+    cmap : str or sequence of str, default "inferno"
         Colormap name ("magma", "viridis", "gray", "inferno", "plasma").
+        A sequence assigns one colormap per panel while preserving the first
+        entry as the fallback/global colormap for older saved states.
     sampling : float or tuple of float, optional
         Pixel size per axis ``(row, col)``. Scalar broadcasts to both axes.
         Used for scale bar display. Defaults to ``(1, 1)``.
@@ -1053,6 +1065,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     title = traitlets.Unicode("").tag(sync=True)
     show_title = traitlets.Bool(True).tag(sync=True)
     cmap = traitlets.Unicode("inferno").tag(sync=True)
+    panel_cmaps = traitlets.List(traitlets.Unicode(), default_value=[]).tag(sync=True)
     ncols = traitlets.Int(3).tag(sync=True)
 
     # =========================================================================
@@ -1314,7 +1327,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         title: str = "",
         ui_mode: UiMode = "interactive",
         show_title: bool | None = None,
-        cmap: str | Colormap = Colormap.INFERNO,
+        cmap: str | Colormap | Sequence[str | Colormap] = Colormap.INFERNO,
         sampling: float | tuple[float, float] | list[float] | None = None,
         units: str | list[str] | None = None,
         scale_bar_visible: bool | None = None,
@@ -1389,6 +1402,12 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     ):
         import time as _time
         _t0 = _time.perf_counter()
+        requested_panel_cmaps = (
+            [_cmap_name(item) for item in cmap]
+            if _is_cmap_sequence(cmap)
+            else []
+        )
+        base_cmap = requested_panel_cmaps[0] if requested_panel_cmaps else _cmap_name(cmap)
         # Reject typos and stale kwargs (e.g. image_width_px, pixel_size_angstrom).
         # anywidget/traitlets silently ignores unknown keys, which hid the
         # pixel_size_angstrom bug in show2d_all_features.ipynb for months.
@@ -1527,7 +1546,8 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             zoom_row, zoom_col = float(center[0]), float(center[1])
         with self.hold_sync():
             self._init_sync(
-                data=data, labels=labels, title=title, cmap=cmap,
+                data=data, labels=labels, title=title, cmap=base_cmap,
+                panel_cmaps=requested_panel_cmaps,
                 n_pages=n_pages, panels_per_page=panels_per_page,
                 page_labels=resolved_page_labels, page_starred=resolved_page_starred,
                 show_title=show_title,
@@ -1564,7 +1584,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 underlay_mode=underlay_mode, stretch_percentiles=stretch_percentiles,
                 display_gamma=display_gamma, dual_gain=dual_gain)
 
-    def _init_sync(self, *, data, labels, title, cmap, n_pages, panels_per_page,
+    def _init_sync(self, *, data, labels, title, cmap, panel_cmaps, n_pages, panels_per_page,
                    page_labels, page_starred, show_title, sampling, units,
                    scale_bar_visible, show_fft, fft_window, fft_metrics,
                    show_controls, controls_collapsed, show_stats, debug, log_scale, auto_contrast, offline,
@@ -1853,7 +1873,19 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         # Options
         self.title = title
         self.show_title = bool(show_title)
-        self.cmap = cmap
+        self.cmap = str(cmap)
+        if panel_cmaps:
+            cmaps = [str(item) for item in panel_cmaps]
+            if len(cmaps) == 1:
+                cmaps = cmaps * self.n_images
+            elif len(cmaps) != self.n_images:
+                raise ValueError(
+                    f"cmap sequence length ({len(cmaps)}) must be 1 or match "
+                    f"the number of Show2D panels ({self.n_images})"
+                )
+            self.panel_cmaps = cmaps
+        else:
+            self.panel_cmaps = []
         # Resolve sampling + units to scalar pixel_size + pixel_unit (column axis).
         # Scalar shorthand: sampling=0.5 → (0.5, 0.5). units="nm" → ["nm", "nm"].
         if sampling is None:
@@ -3496,14 +3528,15 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 "rgb": panel_rgb is not None,
                 "vmin": ranges[i][0],
                 "vmax": ranges[i][1],
-                "cmap": self.cmap,
+                "cmap": self._panel_cmap_for_index(i),
                 "apply_log": self.log_scale and panel_rgb is None,
                 "label": label,
                 "stats": panel_stats_line(i, frame),
             })
         if self.diff_mode and len(frames) >= 2:
             ref = int(self.diff_reference)
-            diff_cmap = "RdBu" if self.cmap in self._SEQUENTIAL_CMAPS else self.cmap
+            ref_cmap = self._panel_cmap_for_index(ref)
+            diff_cmap = "RdBu" if ref_cmap in self._SEQUENTIAL_CMAPS else ref_cmap
             for other in range(len(frames)):
                 # RGB panels never get a diff panel: a signed residual against
                 # a display-ready color composite is meaningless.
@@ -3526,6 +3559,14 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                                         float(diff.max()), float(diff.std())),
                 })
         return specs
+
+    def _panel_cmap_for_index(self, panel: int) -> str:
+        """Return a panel-specific colormap or the widget fallback colormap."""
+        if 0 <= int(panel) < len(self.panel_cmaps):
+            value = str(self.panel_cmaps[int(panel)])
+            if value:
+                return value
+        return str(self.cmap)
 
     def _static_roi_items(self) -> list[dict[str, Any]]:
         """Return visible ROI dictionaries with defaults for static rendering."""
@@ -4113,6 +4154,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             "title": self.title,
             "show_title": self.show_title,
             "cmap": self.cmap,
+            "panel_cmaps": list(self.panel_cmaps),
             "log_scale": self.log_scale,
             "auto_contrast": self.auto_contrast,
             "vmin": self.vmin,
@@ -4422,7 +4464,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             page_labels=list(self.page_labels) if self.n_pages > 1 else None,
             title=self.title,
             show_title=self.show_title,
-            cmap=self.cmap,
+            cmap=list(self.panel_cmaps) if self.panel_cmaps else self.cmap,
             sampling=self.pixel_size if self.pixel_size > 0 else None,
             units=self.pixel_unit,
             scale_bar_visible=self.scale_bar_visible,
@@ -4553,6 +4595,9 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 state.pop("page_labels")
         if "starred" in state and isinstance(state["starred"], list) and len(state["starred"]) != int(self.n_images):
             state.pop("starred")
+        if "panel_cmaps" in state and isinstance(state["panel_cmaps"], list):
+            if len(state["panel_cmaps"]) not in (0, int(self.n_images)):
+                state.pop("panel_cmaps")
         if "hidden_panels" in state and isinstance(state["hidden_panels"], list):
             n_img = int(self.n_images)
             clean_set: set[int] = set()

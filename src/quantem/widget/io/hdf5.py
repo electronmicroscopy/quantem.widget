@@ -3775,49 +3775,70 @@ def _load_gpu_decompressed(
 
 
 def bin(
-    data: cp.ndarray,
+    data,
     factor: int = 2,
-    axes: Literal["detector", "k", "scan", "r", "all"] = "detector",
-    dtype: type | np.dtype | None = None,
-    reduction: Literal["sum", "mean"] = "sum",
-) -> cp.ndarray:
-    """Apply spatial binning to 4D-STEM data on GPU.
+    axes: str = "detector",
+    dtype=None,
+    reduction: str = "sum",
+):
+    """Apply spatial binning on GPU: CuPy or Torch (same type out).
+
+    Pass ``cupy.ndarray`` and get ``cupy.ndarray`` back. Pass ``torch.Tensor``
+    and get ``torch.Tensor`` back. NumPy is not accepted.
+
+    Spatial sizes that are not multiples of ``factor`` are cropped to the
+    largest multiple (trailing rows/cols dropped). Callers do not need to
+    pre-slice.
 
     Parameters
     ----------
-    data : cp.ndarray
-        CuPy array with one of these shapes:
+    data : cupy.ndarray or torch.Tensor
+        One of:
 
         - 4D: ``(scan_row, scan_col, k_row, k_col)`` for full 4D-STEM.
-        - 3D: ``(n_frames, k_row, k_col)`` for flattened scan data.
-        - 2D: ``(k_row, k_col)`` for a single diffraction pattern.
-    factor : int, optional
-        Binning factor (2 for 2x2, 4 for 4x4, etc.), by default 2.
-    axes : str, optional
+        - 3D: ``(n_frames, k_row, k_col)`` for flattened scan / time series.
+        - 2D: ``(k_row, k_col)`` for a single diffraction pattern or image.
+    factor : int
+        Binning factor (2 for 2x2, 4 for 4x4, etc.). Default 2.
+    axes : str
         Which axes to bin:
 
-        - ``"detector"`` or ``"k"``: bin ``k_row`` and ``k_col``.
+        - ``"detector"`` or ``"k"``: bin ``k_row`` and ``k_col`` (last two dims
+          on 2D/3D stacks of STEM frames).
         - ``"scan"`` or ``"r"``: bin ``scan_row`` and ``scan_col``.
         - ``"all"``: bin all four dimensions (4D data only).
-    dtype : type or np.dtype, optional
-        Output dtype. If None, uses uint32 for int input (sum), float32 for mean.
-    reduction : str, optional
-        Reduction method - 'sum' (default) or 'mean'.
+    dtype :
+        Output dtype in the input library. Default: float32 for mean; integer
+        sum uses uint32 (CuPy) or int64 (Torch); otherwise float32.
+    reduction : str
+        ``"sum"`` (default) or ``"mean"``.
 
     Returns
     -------
-    cp.ndarray
-        Binned CuPy array with reduced dimensions.
+    cupy.ndarray or torch.Tensor
+        Binned array, same library as ``data``.
 
     Examples
     --------
-    >>> data_4d = data.reshape(256, 256, 192, 192)
-    >>> binned = bin(data_4d, factor=2, axes="detector")
-    >>> binned = bin(data_4d, factor=2, axes="scan")
-    >>> binned = bin(data_3d, factor=2)
+    >>> from quantem.widget.io import bin
+    >>> stack = bin(stack, factor=4, axes="detector", reduction="sum")  # (N,H,W)
+    >>> binned = bin(cupy_4d, factor=2, axes="detector")
     """
+    import torch
+
     if reduction not in ("sum", "mean"):
-        raise ValueError(f"reduction must be 'sum' or 'mean', got '{reduction}'")
+        raise ValueError(f"reduction must be 'sum' or 'mean', got {reduction!r}")
+
+    is_torch = isinstance(data, torch.Tensor)
+    is_cupy = cp is not None and isinstance(data, cp.ndarray)
+    if not is_torch and not is_cupy:
+        kind = type(data).__name__
+        raise TypeError(
+            f"bin expects cupy.ndarray or torch.Tensor (GPU), got {kind}. "
+            "NumPy is not supported - convert with "
+            "torch.as_tensor(..., device=...) or cupy.asarray(...)."
+        )
+
     if factor == 1:
         return data
 
@@ -3829,92 +3850,131 @@ def bin(
     elif axes == "all":
         axes = "all"
     else:
-        raise ValueError(f"axes must be 'detector', 'scan', or 'all', got '{axes}'")
-
-    # Determine output dtype
-    if dtype is None:
-        dtype = cp.float32 if reduction == "mean" else (
-            cp.uint32 if cp.issubdtype(data.dtype, cp.integer) else cp.float32
+        raise ValueError(
+            f"axes must be 'detector', 'scan', or 'all', got {axes!r}"
         )
 
-    # Handle different input dimensions
+    if dtype is None:
+        if reduction == "mean":
+            dtype = torch.float32 if is_torch else cp.float32
+        elif is_torch:
+            dtype = (
+                torch.int64
+                if data.dtype
+                in (
+                    torch.uint8,
+                    torch.int8,
+                    torch.int16,
+                    torch.int32,
+                    torch.int64,
+                )
+                else torch.float32
+            )
+        else:
+            dtype = (
+                cp.uint32
+                if cp.issubdtype(data.dtype, cp.integer)
+                else cp.float32
+            )
+
+    def _reduce(arr, dims):
+        if is_torch:
+            if reduction == "mean":
+                out = arr.mean(dim=dims)
+            else:
+                out = arr.sum(dim=dims)
+            return out.to(dtype=dtype) if dtype is not None else out
+        if reduction == "mean":
+            return arr.mean(axis=dims, dtype=dtype)
+        return arr.sum(axis=dims, dtype=dtype)
+
+    def _fit(size):
+        return (size // factor) * factor
+
+    if is_torch and not data.is_contiguous():
+        data = data.contiguous()
+
     if data.ndim == 2:
-        # Single 2D image (k_row, k_col)
         if axes == "scan":
             raise ValueError("Cannot bin scan axes on 2D data")
         h, w = data.shape
-        if h % factor != 0 or w % factor != 0:
-            raise ValueError(f"Dimensions ({h}, {w}) not divisible by factor {factor}")
-        reshaped = data.reshape(h // factor, factor, w // factor, factor)
-        if reduction == "mean":
-            return reshaped.mean(axis=(1, 3), dtype=dtype)
-        return reshaped.sum(axis=(1, 3), dtype=dtype)
+        h2, w2 = _fit(h), _fit(w)
+        if h2 == 0 or w2 == 0:
+            raise ValueError(
+                f"Dimensions ({h}, {w}) too small for factor {factor}"
+            )
+        data = data[:h2, :w2]
+        reshaped = data.reshape(h2 // factor, factor, w2 // factor, factor)
+        return _reduce(reshaped, (1, 3))
 
-    elif data.ndim == 3:
-        # 3D stack (n_frames, k_row, k_col)
+    if data.ndim == 3:
         if axes == "scan":
-            raise ValueError("Cannot bin scan axes on 3D data. Reshape to 4D first: data.reshape(Ry, Rx, k_row, k_col)")
+            raise ValueError(
+                "Cannot bin scan axes on 3D data. Reshape to 4D first: "
+                "data.reshape(Ry, Rx, k_row, k_col)"
+            )
         n, h, w = data.shape
-        if h % factor != 0 or w % factor != 0:
-            raise ValueError(f"Dimensions ({h}, {w}) not divisible by factor {factor}")
-        reshaped = data.reshape(n, h // factor, factor, w // factor, factor)
-        if reduction == "mean":
-            return reshaped.mean(axis=(2, 4), dtype=dtype)
-        return reshaped.sum(axis=(2, 4), dtype=dtype)
+        h2, w2 = _fit(h), _fit(w)
+        if h2 == 0 or w2 == 0:
+            raise ValueError(
+                f"Dimensions ({h}, {w}) too small for factor {factor}"
+            )
+        data = data[:, :h2, :w2]
+        reshaped = data.reshape(n, h2 // factor, factor, w2 // factor, factor)
+        return _reduce(reshaped, (2, 4))
 
-    elif data.ndim == 4:
-        # Full 4D-STEM (scan_row, scan_col, k_row, k_col)
+    if data.ndim == 4:
         sr, sc, kr, kc = data.shape
 
         if axes == "detector":
-            if kr % factor != 0 or kc % factor != 0:
-                raise ValueError(f"Detector dims ({kr}, {kc}) not divisible by factor {factor}")
-            reshaped = data.reshape(sr, sc, kr // factor, factor, kc // factor, factor)
-            if reduction == "mean":
-                return reshaped.mean(axis=(3, 5), dtype=dtype)
-            return reshaped.sum(axis=(3, 5), dtype=dtype)
-
-        elif axes == "scan":
-            if sr % factor != 0 or sc % factor != 0:
-                raise ValueError(f"Scan dims ({sr}, {sc}) not divisible by factor {factor}")
-            reshaped = data.reshape(sr // factor, factor, sc // factor, factor, kr, kc)
-            if reduction == "mean":
-                return reshaped.mean(axis=(1, 3), dtype=dtype)
-            return reshaped.sum(axis=(1, 3), dtype=dtype)
-
-        else:  # all
-            if sr % factor != 0 or sc % factor != 0:
-                raise ValueError(f"Scan dims ({sr}, {sc}) not divisible by factor {factor}")
-            if kr % factor != 0 or kc % factor != 0:
-                raise ValueError(f"Detector dims ({kr}, {kc}) not divisible by factor {factor}")
-            # Bin all 4 dimensions
+            kr2, kc2 = _fit(kr), _fit(kc)
+            if kr2 == 0 or kc2 == 0:
+                raise ValueError(
+                    f"Detector dims ({kr}, {kc}) too small for factor {factor}"
+                )
+            data = data[:, :, :kr2, :kc2]
             reshaped = data.reshape(
-                sr // factor, factor, sc // factor, factor,
-                kr // factor, factor, kc // factor, factor
+                sr, sc, kr2 // factor, factor, kc2 // factor, factor
             )
-            if reduction == "mean":
-                return reshaped.mean(axis=(1, 3, 5, 7), dtype=dtype)
-            return reshaped.sum(axis=(1, 3, 5, 7), dtype=dtype)
+            return _reduce(reshaped, (3, 5))
 
-    else:
-        raise ValueError(f"Expected 2D, 3D, or 4D array, got {data.ndim}D. "
-                         f"For multi-file data, use load(..., det_bin=2) instead.")
+        if axes == "scan":
+            sr2, sc2 = _fit(sr), _fit(sc)
+            if sr2 == 0 or sc2 == 0:
+                raise ValueError(
+                    f"Scan dims ({sr}, {sc}) too small for factor {factor}"
+                )
+            data = data[:sr2, :sc2]
+            reshaped = data.reshape(
+                sr2 // factor, factor, sc2 // factor, factor, kr, kc
+            )
+            return _reduce(reshaped, (1, 3))
+
+        sr2, sc2, kr2, kc2 = _fit(sr), _fit(sc), _fit(kr), _fit(kc)
+        if min(sr2, sc2, kr2, kc2) == 0:
+            raise ValueError(
+                f"Shape {(sr, sc, kr, kc)} too small for factor {factor}"
+            )
+        data = data[:sr2, :sc2, :kr2, :kc2]
+        reshaped = data.reshape(
+            sr2 // factor,
+            factor,
+            sc2 // factor,
+            factor,
+            kr2 // factor,
+            factor,
+            kc2 // factor,
+            factor,
+        )
+        return _reduce(reshaped, (1, 3, 5, 7))
+
+    raise ValueError(
+        f"Expected 2D, 3D, or 4D array, got {data.ndim}D. "
+        "For multi-file data, use load(..., det_bin=2) instead."
+    )
 
 
-def _clear_memory() -> None:
-    """Release GPU memory pools and decompressor buffers (internal use)."""
-    global _default_decompressor
-    _default_decompressor = None
-    # free_all_blocks() raises MemoryError / RuntimeError on genuine GPU
-    # failures (OOM, CUDA driver error). Let those propagate so callers can
-    # detect a dirty GPU state and stop processing rather than cascading into
-    # every subsequent file (#130). Only swallow AttributeError in case CuPy
-    # was never initialised (no-GPU environment).
-    try:
-        cp.get_default_memory_pool().free_all_blocks()
-        cp.get_default_pinned_memory_pool().free_all_blocks()
-    except AttributeError:
-        pass
+
 bin2d = bin
 
 
