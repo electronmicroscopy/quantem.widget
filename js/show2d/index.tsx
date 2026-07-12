@@ -42,6 +42,7 @@ import { getWebGPUFFT, WebGPUFFT, fft2dAsync, fftshift, computeMagnitude, autoEn
 import { computeFftQualityMetrics, formatFftQualityLabel, type FftQualityMetrics } from "../fftMetrics";
 import { COLORMAPS, COLORMAP_NAMES, renderToOffscreen, renderToOffscreenReuse, GPUColormapEngine, createGPUColormapEngine, getGPUMaxBufferSize } from "../colormaps";
 import { applyDisplayFilterBrowser, browserFilterSupported, filterKnobsActive, getGPUDisplayFilterEngine, normalizeFilterMode, resolveDenoiseMode } from "../displayFilter";
+import { applyFrequencyFilterBrowser, frequencyFilterActive, normalizeFrequencyFilterMode } from "../frequencyFilter";
 import {
   GALLERY_FFT_CACHE_MAX_BYTES,
   GALLERY_FFT_CACHE_MAX_ENTRIES,
@@ -1141,6 +1142,19 @@ function Show2D() {
     }
     // Turning OFF preserves the config; the render gate (denoiseEnabled) hides it.
   };
+  const [frequencyFilter, setFrequencyFilter] = useModelState<string>("frequency_filter");
+  const [frequencyFilterEnabled, setFrequencyFilterEnabled] = useModelState<boolean>("frequency_filter_enabled");
+  const [frequencyFilterCutoff, setFrequencyFilterCutoff] = useModelState<number>("frequency_filter_cutoff");
+  const [frequencyFilterCenter, setFrequencyFilterCenter] = useModelState<number>("frequency_filter_center");
+  const [frequencyFilterWidth, setFrequencyFilterWidth] = useModelState<number>("frequency_filter_width");
+  const [frequencyFilterModes, setFrequencyFilterModes] = useModelState<string[]>("frequency_filter_modes");
+  const [frequencyFilterCutoffs, setFrequencyFilterCutoffs] = useModelState<number[]>("frequency_filter_cutoffs");
+  const [frequencyFilterCenters, setFrequencyFilterCenters] = useModelState<number[]>("frequency_filter_centers");
+  const [frequencyFilterWidths, setFrequencyFilterWidths] = useModelState<number[]>("frequency_filter_widths");
+  const [frequencyFilterScope, setFrequencyFilterScope] = useModelState<string>("frequency_filter_scope");
+  const frequencyFilterScopeAll = frequencyFilterScope !== "panel";
+  const [showFrequencyFilter, setShowFrequencyFilter] = useModelState<boolean>("show_frequency_filter");
+  const [frequencyDraft, setFrequencyDraft] = React.useState<number | null>(null);
   const [denoiseScope, setDenoiseScope] = useModelState<string>("denoise_scope");
   const denoiseScopeAll = denoiseScope !== "panel";
   // Reversible view ops (single panel): view_crop commits a viewport as the
@@ -2713,17 +2727,40 @@ function Show2D() {
     return { mode, sigma, bin };
   }, [displayFilters, displaySigmas, spatialBins, displayFilter, displaySigma, spatialBin,
       sigmaDraftForFilter, denoiseScopeAll, selectedIdx]);
+  const panelFrequencyKnobs = React.useCallback((panel: number) => {
+    const mode = frequencyFilterModes?.[panel] ?? frequencyFilter ?? "none";
+    let cutoff = Number(frequencyFilterCutoffs?.[panel] ?? frequencyFilterCutoff ?? 0.15);
+    let center = Number(frequencyFilterCenters?.[panel] ?? frequencyFilterCenter ?? 0.30);
+    const width = Number(frequencyFilterWidths?.[panel] ?? frequencyFilterWidth ?? 0.12);
+    if (frequencyDraft !== null && (frequencyFilterScopeAll || panel === selectedIdx)) {
+      if (normalizeFrequencyFilterMode(mode) === "bandpass") center = frequencyDraft;
+      else cutoff = frequencyDraft;
+    }
+    return { mode: normalizeFrequencyFilterMode(mode), cutoff, center, width };
+  }, [frequencyFilterModes, frequencyFilterCutoffs, frequencyFilterCenters, frequencyFilterWidths,
+      frequencyFilter, frequencyFilterCutoff, frequencyFilterCenter, frequencyFilterWidth,
+      frequencyDraft, frequencyFilterScopeAll, selectedIdx]);
   const filterFrameForPanel = React.useCallback(async (panel: number, frame: Float32Array): Promise<Float32Array> => {
-    if (!browserFilterActive || (isRgbFlags && isRgbFlags[panel])) return frame;
-    const { mode, sigma, bin } = panelFilterKnobs(panel);
-    if (!filterKnobsActive(mode, bin) || !browserFilterSupported(mode)) return frame;
+    if (isRgbFlags && isRgbFlags[panel]) return frame;
+    let displayed = frame;
     try {
-      return await applyDisplayFilterBrowser(frame, width, height, mode, sigma, bin);
+      if (browserFilterActive) {
+        const { mode, sigma, bin } = panelFilterKnobs(panel);
+        if (filterKnobsActive(mode, bin) && browserFilterSupported(mode)) {
+          displayed = await applyDisplayFilterBrowser(displayed, width, height, mode, sigma, bin);
+        }
+      }
+      const frequency = panelFrequencyKnobs(panel);
+      if (frequencyFilterEnabled && frequencyFilterActive(frequency.mode)) {
+        displayed = await applyFrequencyFilterBrowser(displayed, width, height, frequency);
+      }
+      return displayed;
     } catch (err) {
-      console.warn("[Show2D] browser display filter failed; showing raw frame", err);
+      console.warn("[Show2D] browser view pipeline failed; showing raw frame", err);
       return frame;
     }
-  }, [browserFilterActive, isRgbFlags, panelFilterKnobs, width, height]);
+  }, [browserFilterActive, isRgbFlags, panelFilterKnobs, width, height, frequencyFilterEnabled,
+      panelFrequencyKnobs]);
   // Generation token: any newer decode/scrub run invalidates pending async
   // filter commits, so a stale sigma never overwrites a fresher frame.
   const browserFilterGenerationRef = React.useRef(0);
@@ -2747,6 +2784,22 @@ function Show2D() {
     else setSpatialBins(updated(spatialBins, Number(value)));
   }, [browserFilterActive, nImages, selectedIdx, denoiseScopeAll, displayFilters, displaySigmas,
       spatialBins, setDisplayFilters, setDisplaySigmas, setSpatialBins]);
+  const mirrorFrequencyKnobEdit = React.useCallback((name: "mode" | "cutoff" | "center" | "width", value: string | number) => {
+    if (nImages <= 0) return;
+    const idx = Math.min(Math.max(0, selectedIdx || 0), nImages - 1);
+    const updated = <T,>(current: T[] | undefined | null, v: T): T[] => {
+      if (frequencyFilterScopeAll) return new Array<T>(nImages).fill(v);
+      const values = current?.length === nImages ? [...current] : new Array<T>(nImages).fill(v);
+      values[idx] = v;
+      return values;
+    };
+    if (name === "mode") setFrequencyFilterModes(updated(frequencyFilterModes, String(value)));
+    else if (name === "cutoff") setFrequencyFilterCutoffs(updated(frequencyFilterCutoffs, Number(value)));
+    else if (name === "center") setFrequencyFilterCenters(updated(frequencyFilterCenters, Number(value)));
+    else setFrequencyFilterWidths(updated(frequencyFilterWidths, Number(value)));
+  }, [nImages, selectedIdx, frequencyFilterScopeAll, frequencyFilterModes, frequencyFilterCutoffs,
+      frequencyFilterCenters, frequencyFilterWidths, setFrequencyFilterModes, setFrequencyFilterCutoffs,
+      setFrequencyFilterCenters, setFrequencyFilterWidths]);
   // Local banner (format_display_filter_banner port): announcing an active
   // reduction is a house rule, and kernel-less pages have no Python to
   // refresh the synced banner trait. Live it also tracks sigmaDraft mid drag.
@@ -2839,11 +2892,13 @@ function Show2D() {
       }
       setDataVersion(v => v + 1);
     };
-    const needsBrowserFilter = browserFilterActive && dataArrays.some((_, i) => {
+    const needsDenoise = browserFilterActive && dataArrays.some((_, i) => {
       if (isRgbFlags && isRgbFlags[i]) return false;
       const { mode, bin } = panelFilterKnobs(i);
       return filterKnobsActive(mode, bin) && browserFilterSupported(mode);
     });
+    const needsFrequencyFilter = !!frequencyFilterEnabled && dataArrays.some((_, panel) => frequencyFilterActive(panelFrequencyKnobs(panel).mode));
+    const needsBrowserFilter = needsDenoise || needsFrequencyFilter;
     if (!needsBrowserFilter) { commit(dataArrays); return; }
     Promise.all(dataArrays.map((frame, i) => filterFrameForPanel(i, frame))).then(filtered => {
       if (browserFilterGenerationRef.current === generation) commit(filtered);
@@ -2861,6 +2916,8 @@ function Show2D() {
     browserFilterActive,
     panelFilterKnobs,
     filterFrameForPanel,
+    frequencyFilterEnabled,
+    panelFrequencyKnobs,
   ]);
 
   React.useEffect(() => {
@@ -6310,17 +6367,110 @@ function Show2D() {
   const roiControlAvailable = !isGallery;
   const diffControlAvailable = !isPaged && nImages >= 2 && (visibleGrayscaleIndices.length === 2 || diffMode);
   const moreActiveCount =
-    (roiControlAvailable && roiActive ? 1 : 0) + (diffMode ? 1 : 0) + (denoiseEnabled ? 1 : 0);
+    (roiControlAvailable && roiActive ? 1 : 0) + (diffMode ? 1 : 0) + (denoiseEnabled ? 1 : 0)
+    + (frequencyFilterEnabled && Array.from({ length: nImages }, (_, panel) => panelFrequencyKnobs(panel)).some(knobs => frequencyFilterActive(knobs.mode)) ? 1 : 0);
+  const frequencyUiKnobs = panelFrequencyKnobs(Math.min(Math.max(0, selectedIdx || 0), Math.max(0, nImages - 1)));
+  const frequencyValueLabel = (value: number, panel = selectedIdx) => {
+    const sampling = pixelSizeForPanel(Math.min(Math.max(0, panel || 0), Math.max(0, nImages - 1)));
+    const unit = String(pixelUnit || "").trim().toLowerCase();
+    if (sampling > 0 && (unit === "nm" || unit.includes("nanometer"))) return `${(value / (2 * sampling)).toFixed(3)} nm⁻¹`;
+    if (sampling > 0 && (unit === "a" || unit === "å" || unit.includes("angstrom"))) return `${(value * 10 / (2 * sampling)).toFixed(3)} nm⁻¹`;
+    return `${value.toFixed(3)} Nyq`;
+  };
+  const frequencyBannerText = frequencyFilterEnabled
+    ? (frequencyUiKnobs.mode === "none" ? "" : frequencyUiKnobs.mode === "bandpass"
+      ? `Filter: Band-pass center ${frequencyValueLabel(frequencyUiKnobs.center)}, width ${frequencyValueLabel(frequencyUiKnobs.width)} (view only; raw counts unchanged)`
+      : `Filter: ${frequencyUiKnobs.mode === "lowpass" ? "Low-pass" : "High-pass"} cutoff ${frequencyValueLabel(frequencyUiKnobs.cutoff)} (view only; raw counts unchanged)`)
+    : "";
   // Collapse-safe reduction badge: when the controls (and their inline denoise
   // / view banners) are hidden, surface any active reduction in the always-on
   // title row. Strip the trailing "how to undo" hint for the compact label and
   // keep the full text in the tooltip.
   const collapsedBannerParts = [
     filterBannerText ? filterBannerText.split(" (")[0] : "",
+    frequencyBannerText ? frequencyBannerText.split(" (")[0] : "",
     viewBanner ? viewBanner.replace(/ \(reset_view_ops\(\).*$/, "") : "",
   ].filter(Boolean);
   const collapsedBannerLabel = collapsedBannerParts.join(" · ");
-  const collapsedBannerTitle = [filterBannerText, viewBanner].filter(Boolean).join("   |   ");
+  const collapsedBannerTitle = [filterBannerText, frequencyBannerText, viewBanner].filter(Boolean).join("   |   ");
+  const commitFrequencyRing = (panel: number, mode: string, value: number) => {
+    const updatePanel = (values: number[] | undefined, fallback: number) => {
+      if (frequencyFilterScopeAll) return new Array<number>(nImages).fill(value);
+      const next = values?.length === nImages ? [...values] : new Array<number>(nImages).fill(fallback);
+      next[panel] = value;
+      return next;
+    };
+    setSelectedIdx(panel);
+    if (mode === "bandpass") {
+      setFrequencyFilterCenter(value);
+      setFrequencyFilterCenters(updatePanel(frequencyFilterCenters, frequencyUiKnobs.center));
+    } else {
+      setFrequencyFilterCutoff(value);
+      setFrequencyFilterCutoffs(updatePanel(frequencyFilterCutoffs, frequencyUiKnobs.cutoff));
+    }
+    setFrequencyDraft(null);
+  };
+  const frequencyRingOverlayForPanel = (panel: number) => {
+    const knobs = panelFrequencyKnobs(panel);
+    const ringValue = knobs.mode === "bandpass" ? knobs.center : knobs.cutoff;
+    return frequencyFilterEnabled && frequencyFilterActive(knobs.mode) ? (
+    <Box
+      className="quantem-frequency-filter-ring"
+      data-frequency-filter={knobs.mode}
+      aria-label={`Draggable ${knobs.mode} frequency ring at ${frequencyValueLabel(ringValue, panel)}`}
+      title="Drag the ring to choose a frequency from the FFT"
+      onMouseDown={(event: React.MouseEvent<HTMLDivElement>) => {
+        event.preventDefault();
+        event.stopPropagation();
+        const parent = event.currentTarget.parentElement;
+        if (!parent) return;
+        const rect = parent.getBoundingClientRect();
+        const valueAt = (clientX: number, clientY: number) => Math.max(0, Math.min(1, Math.hypot(clientX - (rect.left + rect.width / 2), clientY - (rect.top + rect.height / 2)) / (Math.min(rect.width, rect.height) / 2)));
+        setSelectedIdx(panel);
+        const onMove = (moveEvent: MouseEvent) => setFrequencyDraft(valueAt(moveEvent.clientX, moveEvent.clientY));
+        const onUp = (upEvent: MouseEvent) => {
+          document.removeEventListener("mousemove", onMove);
+          document.removeEventListener("mouseup", onUp);
+          commitFrequencyRing(panel, knobs.mode, valueAt(upEvent.clientX, upEvent.clientY));
+        };
+        document.addEventListener("mousemove", onMove);
+        document.addEventListener("mouseup", onUp);
+      }}
+      onPointerDown={(event: React.PointerEvent<HTMLDivElement>) => {
+        event.stopPropagation();
+        event.currentTarget.setPointerCapture(event.pointerId);
+      }}
+      onPointerMove={(event: React.PointerEvent<HTMLDivElement>) => {
+        if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
+        const parent = event.currentTarget.parentElement;
+        if (!parent) return;
+        const rect = parent.getBoundingClientRect();
+        const value = Math.max(0, Math.min(1, Math.hypot(event.clientX - (rect.left + rect.width / 2), event.clientY - (rect.top + rect.height / 2)) / (Math.min(rect.width, rect.height) / 2)));
+        setFrequencyDraft(value);
+      }}
+      onPointerUp={(event: React.PointerEvent<HTMLDivElement>) => {
+        event.stopPropagation();
+        if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+        commitFrequencyRing(panel, knobs.mode, ringValue);
+      }}
+      sx={{
+        position: "absolute", left: "50%", top: "50%",
+        width: `${ringValue * 100}%`, height: `${ringValue * 100}%`,
+        transform: "translate(-50%, -50%)", borderRadius: "50%",
+        border: "2px solid rgba(0, 229, 255, 0.95)",
+        boxShadow: "0 0 0 1px rgba(0,0,0,0.75)",
+        cursor: "crosshair", touchAction: "none", zIndex: 6,
+      }}
+    >
+      {knobs.mode === "bandpass" && [
+        Math.max(0, knobs.center - knobs.width / 2),
+        Math.min(1, knobs.center + knobs.width / 2),
+      ].map((radius, index) => (
+        <Box key={index} sx={{ position: "absolute", left: "50%", top: "50%", width: `${radius / Math.max(0.001, ringValue) * 100}%`, height: `${radius / Math.max(0.001, ringValue) * 100}%`, transform: "translate(-50%, -50%)", borderRadius: "50%", border: "1px dashed rgba(255,255,255,0.9)", pointerEvents: "none" }} />
+      ))}
+    </Box>
+    ) : null;
+  };
   const handleToggleRoi = (on: boolean) => {
     setRoiActive(on);
     if (on) {
@@ -6830,6 +6980,27 @@ function Show2D() {
                     slotProps={{ input: { "aria-label": "Toggle denoise on/off" } }}
                   />
                 </MenuItem>
+                <MenuItem
+                  dense
+                  onClick={() => setFrequencyFilterEnabled(!frequencyFilterEnabled)}
+                  sx={{ fontSize: 12, gap: 1, color: frequencyFilterEnabled && frequencyFilterActive(frequencyFilter) ? themeColors.accent : themeColors.text }}
+                >
+                  <Typography sx={{ flex: 1, fontSize: 12, color: "inherit" }} title="Remove a background or isolate a periodicity. View only; raw counts remain unchanged.">Filter</Typography>
+                  <Button
+                    size="small"
+                    onClick={(event) => { event.stopPropagation(); setShowFrequencyFilter(!showFrequencyFilter); }}
+                    sx={{ ...compactButton, minWidth: 48, fontSize: 10 }}
+                    aria-label={showFrequencyFilter ? "Hide frequency filter settings" : "Show frequency filter settings"}
+                  >Settings</Button>
+                  <Switch
+                    checked={frequencyFilterEnabled ?? false}
+                    onClick={(event) => event.stopPropagation()}
+                    onChange={() => setFrequencyFilterEnabled(!frequencyFilterEnabled)}
+                    size="small"
+                    sx={switchStyles.small}
+                    slotProps={{ input: { "aria-label": "Toggle frequency filter effect" } }}
+                  />
+                </MenuItem>
                 {diffControlAvailable && (
                   <MenuItem
                     dense
@@ -7314,6 +7485,7 @@ function Show2D() {
                         width={canvasW} height={canvasH}
                         style={responsiveCanvasStyle}
                       />
+                      {frequencyRingOverlayForPanel(i)}
                       <Box
                         className="quantem-fft-zoom-label"
                         data-show2d-fft-zoom-indicator={i}
@@ -7662,6 +7834,10 @@ function Show2D() {
                             <Typography sx={compactLabelSx} title="Linked: denoise edits apply to every panel. Unlinked: edits apply to the selected panel only.">Denoise</Typography>
                             <Switch checked={denoiseScopeAll} onChange={() => setDenoiseScope(denoiseScopeAll ? "panel" : "all")} size="small" sx={switchStyles.small} />
                           </Box>
+                          <Box sx={controlPairSx}>
+                            <Typography sx={compactLabelSx} title="Linked: frequency-filter edits apply to every panel. Unlinked: edits apply to the selected panel only.">Filter edits</Typography>
+                            <Switch checked={frequencyFilterScopeAll} onChange={() => setFrequencyFilterScope(frequencyFilterScopeAll ? "panel" : "all")} size="small" sx={switchStyles.small} />
+                          </Box>
                         </Box>
                       )}
                       {getZoomState(isGallery ? selectedIdx : 0).zoom !== 1 && (
@@ -7716,6 +7892,37 @@ function Show2D() {
                           {filterBannerText.split(" (")[0]} · raw: denoise='none'
                         </Typography>
                       )}
+                    </Box>
+                  )}
+                  {showFrequencyFilter && (
+                    <Box sx={{ ...controlRow, ...mobileControlRowSx, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, opacity: 1, pointerEvents: "auto" }}>
+                      <Box sx={controlPairSx}>
+                        <Typography sx={compactLabelSx} title="Low-pass removes fine detail; High-pass removes slow background; Band-pass isolates a periodicity.">Filter</Typography>
+                        <Select size="small" value={frequencyUiKnobs.mode} onChange={(event) => { setFrequencyFilter(String(event.target.value)); mirrorFrequencyKnobEdit("mode", String(event.target.value)); }} MenuProps={themedMenuProps} sx={{ ...themedSelect, minWidth: 84 }}>
+                          <MenuItem value="none">None</MenuItem>
+                          <MenuItem value="lowpass">Low-pass</MenuItem>
+                          <MenuItem value="highpass">High-pass</MenuItem>
+                          <MenuItem value="bandpass">Band-pass</MenuItem>
+                        </Select>
+                      </Box>
+                      {frequencyUiKnobs.mode === "bandpass" ? (
+                        <>
+                          <Box sx={controlPairSx}>
+                            <Typography sx={compactLabelSx}>Center {frequencyValueLabel(frequencyUiKnobs.center)}</Typography>
+                            <Slider value={frequencyUiKnobs.center} min={0} max={1} step={0.005} onChange={(_, value) => setFrequencyDraft(value as number)} onChangeCommitted={(_, value) => { setFrequencyFilterCenter(value as number); mirrorFrequencyKnobEdit("center", value as number); setFrequencyDraft(null); }} size="small" sx={{ ...sliderStyles.small, width: 72 }} aria-label="Band-pass center as fraction of Nyquist" />
+                          </Box>
+                          <Box sx={controlPairSx}>
+                            <Typography sx={compactLabelSx}>Width {frequencyValueLabel(frequencyUiKnobs.width)}</Typography>
+                            <Slider value={frequencyUiKnobs.width} min={0.01} max={1} step={0.005} onChange={(_, value) => { setFrequencyFilterWidth(value as number); mirrorFrequencyKnobEdit("width", value as number); }} size="small" sx={{ ...sliderStyles.small, width: 72 }} aria-label="Band-pass width as fraction of Nyquist" />
+                          </Box>
+                        </>
+                      ) : (
+                        <Box sx={controlPairSx}>
+                          <Typography sx={compactLabelSx}>Cutoff {frequencyValueLabel(frequencyUiKnobs.cutoff)}</Typography>
+                          <Slider value={frequencyUiKnobs.cutoff} min={0} max={1} step={0.005} disabled={!frequencyFilterActive(frequencyUiKnobs.mode)} onChange={(_, value) => setFrequencyDraft(value as number)} onChangeCommitted={(_, value) => { setFrequencyFilterCutoff(value as number); mirrorFrequencyKnobEdit("cutoff", value as number); setFrequencyDraft(null); }} size="small" sx={{ ...sliderStyles.small, width: 72 }} aria-label="Frequency cutoff as fraction of Nyquist" />
+                        </Box>
+                      )}
+                      {frequencyBannerText && <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.accent }} title={frequencyBannerText}>{frequencyBannerText.split(" (")[0]}</Typography>}
                     </Box>
                   )}
                   {/* Row 4 (underlay only): Fig4 blend / stretch / composite knobs.
@@ -8081,6 +8288,7 @@ function Show2D() {
             >
               <canvas ref={fftCanvasRef} width={canvasW} height={canvasH} style={responsiveCanvasStyle} />
               <canvas ref={fftOverlayRef} width={Math.round(canvasW * DPR)} height={Math.round(canvasH * DPR)} style={responsiveOverlayStyle} />
+              {frequencyRingOverlayForPanel(0)}
               <Box
                 className="quantem-fft-zoom-label"
                 data-show2d-fft-zoom-indicator="single"

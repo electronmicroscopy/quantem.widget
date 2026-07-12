@@ -868,6 +868,15 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     # available: denoise then runs in the browser (WGSL, live sigma scrub) and
     # Python ships RAW frames. False keeps the scipy path (e.g. SwiftShader).
     _webgpu_filter_ok = traitlets.Bool(False).tag(sync=True)
+    frequency_filter = traitlets.Enum(
+        ["none", "lowpass", "highpass", "bandpass"], default_value="none"
+    ).tag(sync=True)
+    frequency_filter_enabled = traitlets.Bool(False).tag(sync=True)
+    frequency_filter_cutoff = traitlets.Float(0.15).tag(sync=True)
+    frequency_filter_center = traitlets.Float(0.30).tag(sync=True)
+    frequency_filter_width = traitlets.Float(0.12).tag(sync=True)
+    frequency_filter_banner = traitlets.Unicode("").tag(sync=True)
+    show_frequency_filter = traitlets.Bool(False).tag(sync=True)
     frame_bytes = traitlets.Bytes(b"").tag(sync=True)
     # True when the stack is true-color RGB (PNG figure frames, color composites).
     # frame_bytes then carries (H*W*3) float32 RGB in [0, 1] instead of gray H*W.
@@ -1964,6 +1973,12 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         display_sigma: float | None = None,
         spatial_bin: int | None = None,
         show_denoise: bool = False,
+        frequency_filter: str = "none",
+        frequency_filter_enabled: bool | None = None,
+        frequency_filter_cutoff: float = 0.15,
+        frequency_filter_center: float = 0.30,
+        frequency_filter_width: float = 0.12,
+        show_frequency_filter: bool = False,
         verbose: bool = True,
         max_cols: int | None = None,
         panel_gap: int | None = None,
@@ -2152,6 +2167,12 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                             state=state, dedupe_identical_panels=dedupe_identical_panels,
                             denoise=denoise, denoise_sigma=denoise_sigma,
                             denoise_bin=denoise_bin, show_denoise=show_denoise,
+                            frequency_filter=frequency_filter,
+                            frequency_filter_enabled=frequency_filter_enabled,
+                            frequency_filter_cutoff=frequency_filter_cutoff,
+                            frequency_filter_center=frequency_filter_center,
+                            frequency_filter_width=frequency_filter_width,
+                            show_frequency_filter=show_frequency_filter,
                             _t0=_t0)
             if panel_order is not None:
                 self.set_panel_order(panel_order)
@@ -2189,7 +2210,13 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                    state: dict | str | pathlib.Path | None,
                    dedupe_identical_panels: bool, _t0: float,
                    denoise: str = "none", denoise_sigma: float = 4.0,
-                   denoise_bin: int = 1, show_denoise: bool = False) -> None:
+                   denoise_bin: int = 1, show_denoise: bool = False,
+                   frequency_filter: str = "none",
+                   frequency_filter_enabled: bool | None = None,
+                   frequency_filter_cutoff: float = 0.15,
+                   frequency_filter_center: float = 0.30,
+                   frequency_filter_width: float = 0.12,
+                   show_frequency_filter: bool = False) -> None:
         """Heavy setup called synchronously by `__init__` inside `hold_sync()`.
         Validates panels, allocates frame_bytes, wires observers, and applies
         optional `state`. Split out from `__init__` so the construction surface
@@ -2790,6 +2817,29 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             if self.is_rgb
             else bool(show_denoise) or self._display_filter_active()
         )
+        normalized_frequency_filter = str(frequency_filter).strip().lower().replace("-", "")
+        if normalized_frequency_filter not in {"none", "lowpass", "highpass", "bandpass"}:
+            raise ValueError(
+                "frequency_filter must be 'none', 'lowpass', 'highpass', or "
+                f"'bandpass'; got {frequency_filter!r}"
+            )
+        for name, value in {
+            "frequency_filter_cutoff": frequency_filter_cutoff,
+            "frequency_filter_center": frequency_filter_center,
+            "frequency_filter_width": frequency_filter_width,
+        }.items():
+            if not 0.0 <= float(value) <= 1.0:
+                raise ValueError(f"{name} must be between 0 and 1 (Nyquist); got {value}")
+        self.frequency_filter = normalized_frequency_filter
+        self.frequency_filter_enabled = (
+            normalized_frequency_filter != "none"
+            if frequency_filter_enabled is None
+            else bool(frequency_filter_enabled)
+        )
+        self.frequency_filter_cutoff = float(frequency_filter_cutoff)
+        self.frequency_filter_center = float(frequency_filter_center)
+        self.frequency_filter_width = float(frequency_filter_width)
+        self.show_frequency_filter = False if self.is_rgb else bool(show_frequency_filter)
         frame_bytes = self.height * self.width * 4  # float32
         # Exact float32 sliding window. Do not ship the whole stack when it
         # would cross the browser/Jupyter ~2 GB Comm cliff (36×4k×4k is 2.4 GB).
@@ -3421,6 +3471,12 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             "show_denoise": self.show_denoise,
             "denoise_sigma": self.denoise_sigma,
             "denoise_bin": self.denoise_bin,
+            "frequency_filter": self.frequency_filter,
+            "frequency_filter_enabled": self.frequency_filter_enabled,
+            "frequency_filter_cutoff": self.frequency_filter_cutoff,
+            "frequency_filter_center": self.frequency_filter_center,
+            "frequency_filter_width": self.frequency_filter_width,
+            "show_frequency_filter": self.show_frequency_filter,
             "dim_label": self.dim_label,
             "dim_sampling": self.dim_sampling,
             "dim_unit": self.dim_unit,

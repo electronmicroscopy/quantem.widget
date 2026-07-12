@@ -44,6 +44,10 @@ no console error, no NaN frame).
 | Panel reorder | `panel_order`; `set_panel_order()`, `move_panel()`, `reset_panel_order()` | Reorders gallery display without changing source data, labels, stars, or hidden state |
 | Diff mode | `diff_mode`, `diff_reference` | Panels render as difference vs the reference |
 | Link Denoise switch (gallery) | `denoise_scope` | Linked ("all"): denoise edits apply to every panel; unlinked ("panel"): edits apply to the selected panel only |
+| Denoise master | `denoise_enabled` | Off shows raw pixels and hides the banner without discarding method, sigma, bin, or per-panel settings |
+| Denoise Settings | `show_denoise` | Expands/collapses the Method, sigma, and bin editor without changing whether the effect is active |
+| Filter master | `frequency_filter_enabled` | Turns frequency filtering on/off without discarding cutoff or band settings |
+| Filter Settings | `show_frequency_filter` | Chooses None, Low-pass, High-pass, or Band-pass and exposes the FFT-ring parameters |
 | View menu: Crop to view | `view_crop`; `crop_to_view()` | Commits the current viewport as the display extent (single panel, display-only, reversible) |
 | View menu: Pad 5% / 10% / 20% | `pad_ratio` | Adds a border on each side, filled with the image minimum |
 | View menu: Reset view | `reset_view_ops()` | Restores the uncropped, unpadded display bit-identically |
@@ -67,6 +71,31 @@ so there is no "bin2_anscombe" menu entry: pick **Poisson (Anscombe)** and set
 From Python, the same ladder is `denoise="anscombe", denoise_bin=2,
 denoise_sigma=8` (per-panel lists supported for A/B galleries); legacy
 spellings like `display_filter="bin2_anscombe"` keep working as aliases.
+
+## Remove a background or isolate a periodicity
+
+Frequency Filter is deliberately separate from Denoise. Denoise promises a
+cleaner view of the measurement; High-pass and Band-pass deliberately remove
+real signal, so their displayed pixels must not be treated as measurable raw
+counts. The stored array, statistics row, and raw exports remain unchanged.
+
+```python
+# Flatten a slow brightness gradient.
+Show2D(eds_map, show_fft=True,
+       frequency_filter="highpass", frequency_filter_cutoff=0.08)
+
+# Isolate a lattice-frequency ring.
+Show2D(lattice, show_fft=True,
+       frequency_filter="bandpass",
+       frequency_filter_center=0.32,
+       frequency_filter_width=0.08)
+```
+
+Parameters are fractions of Nyquist from 0 to 1. Drag the cyan FFT ring to
+select the cutoff or band center by eye. Denoise and Filter are chainable in
+the fixed order Denoise then Filter; each active operation has its own banner.
+Turn the Filter master off or choose None to restore the unfiltered view
+without losing the settings.
 
 ## Crop and pad the view (advanced)
 

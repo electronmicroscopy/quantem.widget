@@ -26,7 +26,7 @@ python -c "import quantem.widget; print(quantem.widget.__version__)"
 | Widget | Input | Shows |
 |---|---|---|
 | `Show1D` | 1D trace / stack / live monitor with optional linked images | scientific traces, stats, jump markers, snapshots, playback, and live append |
-| `Show2D` | 2D image or stack | image + contrast, FFT, line profiles, scale bar, display-side denoise (none/gaussian/anscombe) |
+| `Show2D` | 2D image or stack | image + contrast, FFT, line profiles, scale bar, display-side denoise, view-only low/high/band-pass frequency filters |
 | `Show3D` | 3D stack | scrub / play through frames |
 | `Show3DSlices` | 3D volume | orthogonal-slice viewer |
 | `Show4DSTEM` | 4D-STEM array, or 5D stack | live virtual detectors (BF / ABF / ADF), CoM / iCoM / DPC, dataset slider + compare grid, offline WebGPU export |

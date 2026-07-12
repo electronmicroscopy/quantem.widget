@@ -924,6 +924,24 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     # gated, so toggling back on restores it. Distinct from show_denoise, which
     # is only the editor-row visibility.
     denoise_enabled = traitlets.Bool(True).tag(sync=True)
+    # Frequency-domain view filter. Unlike Denoise this deliberately removes
+    # real signal, so it has a separate master, settings row, and honest banner.
+    # Frequencies are normalized to Nyquist (0..1) until physical sampling is
+    # available in the browser; raw arrays/stats/exports never use these traits.
+    frequency_filter = traitlets.Enum(
+        ["none", "lowpass", "highpass", "bandpass"], default_value="none"
+    ).tag(sync=True)
+    frequency_filter_enabled = traitlets.Bool(False).tag(sync=True)
+    frequency_filter_cutoff = traitlets.Float(0.15).tag(sync=True)
+    frequency_filter_center = traitlets.Float(0.30).tag(sync=True)
+    frequency_filter_width = traitlets.Float(0.12).tag(sync=True)
+    frequency_filter_modes = traitlets.List(traitlets.Unicode(), default_value=[]).tag(sync=True)
+    frequency_filter_cutoffs = traitlets.List(traitlets.Float(), default_value=[]).tag(sync=True)
+    frequency_filter_centers = traitlets.List(traitlets.Float(), default_value=[]).tag(sync=True)
+    frequency_filter_widths = traitlets.List(traitlets.Float(), default_value=[]).tag(sync=True)
+    frequency_filter_scope = traitlets.Enum(["all", "panel"], default_value="all").tag(sync=True)
+    frequency_filter_banner = traitlets.Unicode("").tag(sync=True)
+    show_frequency_filter = traitlets.Bool(False).tag(sync=True)
     # Browser-side filter negotiation: JS sets this True when a real (non
     # software) WebGPU adapter is available. Python then ships RAW frames for
     # panels whose mode the browser can evaluate (gaussian/bin2/anscombe
@@ -1324,6 +1342,12 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         denoise_bin: int | Sequence[int] = _UNSET,
         denoise_scope: str = _UNSET,
         show_denoise: bool = False,
+        frequency_filter: str | Sequence[str] = "none",
+        frequency_filter_enabled: bool | None = None,
+        frequency_filter_cutoff: float | Sequence[float] = 0.15,
+        frequency_filter_center: float | Sequence[float] = 0.30,
+        frequency_filter_width: float | Sequence[float] = 0.12,
+        show_frequency_filter: bool = False,
         display_filter: str | Sequence[str] | None = None,
         display_sigma: float | Sequence[float] | None = None,
         spatial_bin: int | Sequence[int] | None = None,
@@ -1503,6 +1527,12 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 denoise_bin=denoise_bin, denoise_scope=denoise_scope,
                 denoise_scope_explicit=denoise_scope_supplied,
                 show_denoise=show_denoise,
+                frequency_filter=frequency_filter,
+                frequency_filter_enabled=frequency_filter_enabled,
+                frequency_filter_cutoff=frequency_filter_cutoff,
+                frequency_filter_center=frequency_filter_center,
+                frequency_filter_width=frequency_filter_width,
+                show_frequency_filter=show_frequency_filter,
                 underlay=underlay, underlay_alpha=underlay_alpha,
                 underlay_haadf_gain=underlay_haadf_gain,
                 underlay_mode=underlay_mode, stretch_percentiles=stretch_percentiles,
@@ -1518,7 +1548,11 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                    pad_ratio, display_bin, hidden_panels, starred, panel_order, show_panel_titles,
                    panel_title_font_size, gallery_gap_px, verbose, state, _t0,
                    denoise="none", denoise_sigma=4.0, denoise_bin=1,
-                   denoise_scope="all", denoise_scope_explicit=False, show_denoise=False,
+                   denoise_scope="all", denoise_scope_explicit=False,
+                   show_denoise=False,
+                   frequency_filter="none", frequency_filter_enabled=None,
+                   frequency_filter_cutoff=0.15, frequency_filter_center=0.30,
+                   frequency_filter_width=0.12, show_frequency_filter=False,
                    underlay=False, underlay_alpha=0.95,
                    underlay_haadf_gain=0.35, underlay_mode="haadf",
                    stretch_percentiles=(4.0, 99.0), display_gamma=0.75,
@@ -2021,6 +2055,48 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         # Denoise controls stay hidden on a clean widget; an active denoise
         # (or an explicit request) reveals them from the first paint.
         self.show_denoise = bool(show_denoise) or self._display_filter_active()
+        frequency_modes, modes_scalar = per_panel(frequency_filter, "frequency_filter", str)
+        frequency_cutoffs, cutoffs_scalar = per_panel(
+            frequency_filter_cutoff, "frequency_filter_cutoff", float
+        )
+        frequency_centers, centers_scalar = per_panel(
+            frequency_filter_center, "frequency_filter_center", float
+        )
+        frequency_widths, widths_scalar = per_panel(
+            frequency_filter_width, "frequency_filter_width", float
+        )
+        frequency_modes = [mode.strip().lower().replace("-", "") for mode in frequency_modes]
+        invalid_modes = [mode for mode in frequency_modes if mode not in {"none", "lowpass", "highpass", "bandpass"}]
+        if invalid_modes:
+            raise ValueError(
+                "frequency_filter must contain only 'none', 'lowpass', "
+                f"'highpass', or 'bandpass'; got {invalid_modes[0]!r}"
+            )
+        for name, values in {
+            "frequency_filter_cutoff": frequency_cutoffs,
+            "frequency_filter_center": frequency_centers,
+            "frequency_filter_width": frequency_widths,
+        }.items():
+            invalid = next((value for value in values if not 0.0 <= value <= 1.0), None)
+            if invalid is not None:
+                raise ValueError(f"{name} must be between 0 and 1 (Nyquist); got {invalid}")
+        self.frequency_filter_modes = frequency_modes
+        self.frequency_filter_cutoffs = frequency_cutoffs
+        self.frequency_filter_centers = frequency_centers
+        self.frequency_filter_widths = frequency_widths
+        self.frequency_filter = frequency_modes[0]
+        self.frequency_filter_enabled = (
+            any(mode != "none" for mode in frequency_modes)
+            if frequency_filter_enabled is None
+            else bool(frequency_filter_enabled)
+        )
+        self.frequency_filter_cutoff = frequency_cutoffs[0]
+        self.frequency_filter_center = frequency_centers[0]
+        self.frequency_filter_width = frequency_widths[0]
+        self.frequency_filter_scope = (
+            "all" if modes_scalar and cutoffs_scalar and centers_scalar and widths_scalar else "panel"
+        )
+        self.show_frequency_filter = bool(show_frequency_filter)
 
         # Reversible view ops: a crop is committed later via crop_to_view(),
         # but the pad kwarg can start active. Geometry (frame extent, cursor
@@ -3691,6 +3767,17 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             "denoise_modes": list(self.denoise_modes),
             "denoise_sigmas": list(self.denoise_sigmas),
             "denoise_bins": list(self.denoise_bins),
+            "frequency_filter": self.frequency_filter,
+            "frequency_filter_enabled": self.frequency_filter_enabled,
+            "frequency_filter_cutoff": self.frequency_filter_cutoff,
+            "frequency_filter_center": self.frequency_filter_center,
+            "frequency_filter_width": self.frequency_filter_width,
+            "frequency_filter_modes": list(self.frequency_filter_modes),
+            "frequency_filter_cutoffs": list(self.frequency_filter_cutoffs),
+            "frequency_filter_centers": list(self.frequency_filter_centers),
+            "frequency_filter_widths": list(self.frequency_filter_widths),
+            "frequency_filter_scope": self.frequency_filter_scope,
+            "show_frequency_filter": self.show_frequency_filter,
             # underlay= is construction-time sugar: the composed "map on HAADF"
             # RGB panel is rebuilt from the kernel, not stored, so it is NOT
             # restored on a kernel-less reopen. These blend knobs are kept so a

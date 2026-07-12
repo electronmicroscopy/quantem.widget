@@ -39,13 +39,24 @@ export. See the [Show3D tutorial](../tutorials/show3d).
 | FFT window toggle | `fft_window` | Apodization on/off before FFT rendering |
 | Resize / zoom chrome | `show_resize_handles`, `show_zoom_indicator` | Resize handles and zoom readouts show/hide; the zoom setting covers every real-space panel and FFT tile/inset |
 | FFT layout and initial view | `fft_layout`, `fft_overlay_position`, `fft_overlay_size`, `fft_overlay_zoom` | Places FFTs below, right, or inside every panel and initializes their shared zoom |
-| Denoise | `denoise`, `denoise_sigma`, `denoise_bin`, `show_denoise` | Display-only denoise (`none` / `gaussian` / `anscombe`) applied to every playback frame; also reshapes the FFT view. `show_denoise` reveals the hidden controls row; the stored stack, stats, and exports stay lossless (`none` is the default) |
+| Denoise | `denoise_enabled`, `denoise`, `denoise_sigma`, `denoise_bin`, `show_denoise` | The master swaps raw/denoised frames without losing settings; Settings expands the Method/σ/bin editor; an active filter also reshapes FFT |
+| Filter | `frequency_filter_enabled`, `frequency_filter`, `frequency_filter_cutoff`, `frequency_filter_center`, `frequency_filter_width`, `show_frequency_filter` | View-only low/high/band-pass filtering with a draggable FFT ring; stored frames, statistics, and raw exports remain unchanged |
 
 The denoise family matches Show2D. See
 [Which denoise filter should I use?](show2d.md#which-denoise-filter-should-i-use)
 for the recommendation ladder (sparse EDS, very sparse, decent-dose HAADF,
 quantitative). An active denoise reshapes the FFT magnitude too, so set
 `denoise="none"` for quantitative FFT work.
+
+Frequency Filter follows the same scientist-facing contract as Show2D while
+remaining a separate control from Denoise. For example, a reconstruction stack
+with a slow background can start as `Show3D(stack, show_fft=True,
+frequency_filter="highpass", frequency_filter_cutoff=0.08)`. A lattice stack
+can use `"bandpass"` with `frequency_filter_center` and
+`frequency_filter_width`. Values are fractions of Nyquist from 0 to 1, and the
+cyan FFT ring can be dragged during scrubbing or playback. The browser applies
+Denoise first and Filter second; the raw stack and quantitative exports are
+never replaced by the view.
 
 ## FFT quality labels
 
