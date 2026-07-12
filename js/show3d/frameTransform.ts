@@ -33,3 +33,24 @@ export function requiresClientFrameTransform({
 export function supportsClientAverage(separatePanelFrames: boolean): boolean {
   return !separatePanelFrames;
 }
+
+/** Cache identity for an asynchronously browser-filtered live frame. */
+export function browserFilterCacheKey({
+  frameIndex,
+  frameSeq,
+  mode,
+  sigma,
+  bin,
+  avgWindow,
+  diffMode,
+}: {
+  frameIndex: number;
+  frameSeq: number;
+  mode: string;
+  sigma: number;
+  bin: number;
+  avgWindow: unknown;
+  diffMode: string;
+}): string {
+  return `${Math.round(frameIndex)}:${frameSeq}:${mode}:${sigma}:${bin}:${normalizedAverageWindow(avgWindow)}:${diffMode}`;
+}

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  browserFilterCacheKey,
   normalizedAverageWindow,
   requiresClientFrameTransform,
   shouldApplyClientDifference,
@@ -25,5 +26,18 @@ describe("Show3D frame transform ownership", () => {
   it("marks separate-panel averaging unsupported until neighbor frames are fetched", () => {
     expect(supportsClientAverage(false)).toBe(true);
     expect(supportsClientAverage(true)).toBe(false);
+  });
+
+  it("separates replacement frame bytes at the same scrub index", () => {
+    const base = {
+      frameIndex: 3,
+      mode: "gaussian",
+      sigma: 8,
+      bin: 1,
+      avgWindow: 1,
+      diffMode: "off",
+    };
+    expect(browserFilterCacheKey({ ...base, frameSeq: 11 }))
+      .not.toBe(browserFilterCacheKey({ ...base, frameSeq: 12 }));
   });
 });

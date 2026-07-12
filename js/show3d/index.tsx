@@ -952,6 +952,7 @@ function drawROI(
 import { WebGPUFFT, getWebGPUFFT, getGPUInfo, fft2d, fft2dAsync, fftshift, computeMagnitude, autoEnhanceFFT, nextPow2, applyHannWindow2D } from "../fft";
 import { computeFftQualityMetrics, formatFftQualityLabel, summarizeFftQualityMetrics, type FftQualityMetrics } from "../fftMetrics";
 import {
+  browserFilterCacheKey,
   normalizedAverageWindow,
   requiresClientFrameTransform,
   shouldApplyClientDifference,
@@ -2456,9 +2457,13 @@ function Show3D() {
   const browserFilterKnobsOn = browserFilterActive
     && filterKnobsActive(denoiseResolved.mode, denoiseResolved.bin)
     && browserFilterSupported(denoiseResolved.mode);
-  // Filtered-frame cache keyed on (idx, mode, sigma, bin, avg): a live sigma
-  // drag changes the key, so it re-filters the shown frame every tick.
+  // Filtered-frame cache keyed on the Python frame sequence as well as the
+  // logical index and view knobs. During a live scrub, slice_idx can arrive
+  // before the replacement frame_bytes. Without frameSeq, that old byte view
+  // can populate the new index's cache key and the repaint keeps reading the
+  // wrong generation (often leaving the newly arrived raw frame visible).
   const browserFilterCacheRef = React.useRef<Map<string, Float32Array>>(new Map());
+  const browserFilterPendingRef = React.useRef<Set<string>>(new Set());
   const [browserFilterTick, setBrowserFilterTick] = React.useState(0);
   // Live gate read inside memoized render ticks (avoids stale closures): when on,
   // denoise is treated as a client frame transform so every path routes through
@@ -2478,19 +2483,30 @@ function Show3D() {
   // keep reading raw frames (frame_bytes ships raw), so numbers stay honest.
   const browserFilterFrame = React.useCallback((idx: number, frame: Float32Array | null): Float32Array | null => {
     if (!frame || !browserFilterKnobsOn) return frame;
-    const key = `${Math.round(idx)}:${denoiseResolved.mode}:${denoiseSigmaLive}:${denoiseResolved.bin}:${normalizedAverageWindow(playRef.current.avgWindow)}:${playRef.current.diffMode}`;
+    const key = browserFilterCacheKey({
+      frameIndex: idx,
+      frameSeq,
+      mode: denoiseResolved.mode,
+      sigma: denoiseSigmaLive,
+      bin: denoiseResolved.bin,
+      avgWindow: playRef.current.avgWindow,
+      diffMode: playRef.current.diffMode,
+    });
     const cache = browserFilterCacheRef.current;
     const hit = cache.get(key);
     if (hit) return hit;
+    if (browserFilterPendingRef.current.has(key)) return frame;
+    browserFilterPendingRef.current.add(key);
     applyDisplayFilterBrowser(frame, width, height, denoiseResolved.mode, denoiseSigmaLive, denoiseResolved.bin)
       .then((filtered) => {
+        browserFilterPendingRef.current.delete(key);
         cache.set(key, filtered);
         if (cache.size > 48) cache.delete(cache.keys().next().value as string);
         setBrowserFilterTick((t) => t + 1);
       })
-      .catch(() => {});
+      .catch(() => { browserFilterPendingRef.current.delete(key); });
     return frame;
-  }, [browserFilterKnobsOn, denoiseResolved.mode, denoiseResolved.bin, denoiseSigmaLive, width, height]);
+  }, [browserFilterKnobsOn, denoiseResolved.mode, denoiseResolved.bin, denoiseSigmaLive, frameSeq, width, height]);
   // The "Denoise" toggle is the master ON/OFF of the EFFECT: ON shows the
   // denoised view, OFF shows raw (nothing of the denoised view leaks through).
   // The config (mode/sigma/bin) is PRESERVED across the toggle; a clean widget
@@ -5914,7 +5930,7 @@ function Show3D() {
     } else {
       setLocalPanelStats(null);
     }
-  }, [frameBytes, frameSeq, nPanels, visiblePanelIndices, width, height, showStats, diffMode, avgWindow, offline, liveSliceIdx, sliceIdx, isRgb, frequencyFilterIsActive, frequencyOptions]);
+  }, [frameBytes, frameSeq, nPanels, visiblePanelIndices, width, height, showStats, diffMode, avgWindow, offline, liveSliceIdx, sliceIdx, isRgb, frequencyFilterIsActive, frequencyOptions, browserFilterTick]);
 
   // Histogram bins are computed on the GPU via `engine.computeHistogramWithRange`
   // when the colormap engine is ready. CPU fallback (computeHistogramFromBytes
@@ -6350,11 +6366,13 @@ function Show3D() {
       }
       ensureGpuUpload();
       const capturedVmin = vmin, capturedVmax = vmax;
-      const blitAndDraw = async (): Promise<boolean> => {
+      const blitAndDraw = async (forceReadback = false): Promise<boolean> => {
         if (renderSerial !== gpuRenderSerialRef.current) return false;
         if (!mainOffscreenRef.current) return false;
         // Zero-copy: GPU → OffscreenCanvas → ImageBitmap → drawImage
-        const bitmaps = engine.renderSlotsToImageBitmap([0], [{ vmin: capturedVmin, vmax: capturedVmax }], false);
+        const bitmaps = forceReadback
+          ? null
+          : engine.renderSlotsToImageBitmap([0], [{ vmin: capturedVmin, vmax: capturedVmax }], false);
         if (bitmaps && bitmaps[0]) {
           try {
             const ctx = mainOffscreenRef.current.getContext("2d");
@@ -6416,7 +6434,7 @@ function Show3D() {
         // a static offline mount has no follow-up frame, so the panels stay black
         // (D6). Re-blit on a confirming second rAF when NOT playing - by the next
         // frame the GPU work has flushed and the bitmap is valid. Idempotent.
-        if (ok && !playing) requestAnimationFrame(() => { void blitAndDraw(); });
+        if (ok && !playing) requestAnimationFrame(() => { void blitAndDraw(true); });
       });
     } else {
       // WebGPU-only per CLAUDE.md "WebGPU is THE pipeline" rule.
