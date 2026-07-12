@@ -12259,7 +12259,6 @@ function Show3D() {
                 {/* Row 3 (toggle-gated): display-only denoise for sparse map stacks (EDS, low dose) */}
                 {showDenoise && (
                 <Box sx={{ ...controlRow, ...mobileControlRowSx, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>
-                  <Switch checked={denoiseEnabled ?? false} onChange={(e) => setDenoiseEnabled(e.target.checked)} size="small" sx={switchStyles.small} slotProps={{ input: { "aria-label": "Toggle denoise on/off" } }} />
                   <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted }} title="Poisson (Anscombe): count-respecting smoothing for sparse EDS/counting data - recommended with Bin 2, sigma 6-10. Gaussian: simple smooth for decent-dose images. None: raw counts (use for anything quantitative).">Denoise</Typography>
                   <Select size="small" value={resolveDenoiseMode(displayFilter || "none").mode} onChange={(e) => { setDisplayFilter(e.target.value); if (resolveDenoiseMode(e.target.value).mode !== "none" || (spatialBin || 1) > 1) setDenoiseEnabled(true); }} MenuProps={themedMenuProps} sx={{ ...themedSelect, minWidth: 88, fontSize: 10 }} inputProps={{ "aria-label": "Display-only denoise method" }}>
                     {[["none", "None"], ["gaussian", "Gaussian"], ["anscombe", "Poisson (Anscombe)"]].map(([mode, label]) => (
@@ -12290,7 +12289,6 @@ function Show3D() {
                 {showFrequencyFilter && (
                 <Box sx={{ ...controlRow, ...mobileControlRowSx, width: "100%", maxWidth: "100%", border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>
                   <Box sx={{ display: "inline-flex", alignItems: "center", gap: `${SPACING.XS}px`, flexWrap: "nowrap" }}>
-                    <Switch checked={frequencyFilterEnabled ?? false} onChange={(e) => setFrequencyFilterEnabled(e.target.checked)} size="small" sx={switchStyles.small} slotProps={{ input: { "aria-label": "Toggle filter on/off" } }} />
                     <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted }} title="Low-pass removes fine detail; High-pass removes slow background; Band-pass isolates a periodicity.">Filter</Typography>
                     <Select size="small" value={normalizeFrequencyFilterMode(frequencyFilter)} onChange={(event) => { const mode = String(event.target.value); setFrequencyFilter(mode); if (mode !== "none") setFrequencyFilterEnabled(true); }} MenuProps={themedMenuProps} sx={{ ...themedSelect, minWidth: 84, fontSize: 10 }} inputProps={{ "aria-label": "Frequency filter mode" }}>
                       <MenuItem value="none">None</MenuItem>

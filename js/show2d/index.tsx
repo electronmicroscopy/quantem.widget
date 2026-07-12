@@ -7966,7 +7966,6 @@ function Show2D() {
                   {/* Row 3 (toggle-gated): display-only denoise for sparse maps (EDS, low dose) */}
                   {showDenoise && (
                     <Box sx={{ ...controlRow, ...mobileControlRowSx, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, opacity: 1, pointerEvents: "auto" }}>
-                      <Switch checked={denoiseEnabled ?? false} onChange={(e) => setDenoiseEnabled(e.target.checked)} size="small" sx={switchStyles.small} slotProps={{ input: { "aria-label": "Toggle denoise on/off" } }} />
                       <Box sx={controlPairSx}>
                         <Typography sx={compactLabelSx} title="Poisson (Anscombe): count-respecting smoothing for sparse EDS/counting data - recommended with Bin 2, sigma 6-10. Gaussian: simple smooth for decent-dose images. None: raw counts (use for anything quantitative).">Denoise</Typography>
                         <Select size="small" value={denoiseBaseMode} onChange={(e) => { const v = e.target.value; setDisplayFilter(v); mirrorFilterKnobEdit("mode", v); if (resolveDenoiseMode(v).mode !== "none" || (spatialBin || 1) > 1) setDenoiseEnabled(true); }} MenuProps={themedMenuProps} sx={{ ...themedSelect, minWidth: 88 }}>
@@ -8001,7 +8000,6 @@ function Show2D() {
                   )}
                   {showFrequencyFilter && (
                     <Box sx={{ ...controlRow, ...mobileControlRowSx, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, opacity: 1, pointerEvents: "auto" }}>
-                      <Switch checked={frequencyFilterEnabled ?? false} onChange={(e) => setFrequencyFilterEnabled(e.target.checked)} size="small" sx={switchStyles.small} slotProps={{ input: { "aria-label": "Toggle filter on/off" } }} />
                       <Box sx={controlPairSx}>
                         <Typography sx={compactLabelSx} title="Low-pass removes fine detail; High-pass removes slow background; Band-pass isolates a periodicity.">Filter</Typography>
                         <Select size="small" value={frequencyUiKnobs.mode} onChange={(event) => { const mode = String(event.target.value); setFrequencyFilter(mode); mirrorFrequencyKnobEdit("mode", mode); if (mode !== "none") setFrequencyFilterEnabled(true); }} MenuProps={themedMenuProps} sx={{ ...themedSelect, minWidth: 84 }}>
