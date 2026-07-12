@@ -3490,8 +3490,20 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         cell_w_in = max_px / dpi  # cell width in inches so 1 panel = max_px device px
         cell_h_in = cell_w_in * aspect
         gap_in = gap_frac * cell_w_in
-        fig = plt.figure(figsize=(ncols * cell_w_in + (ncols - 1) * gap_in,
-                                  nrows * cell_h_in + (nrows - 1) * gap_in))
+        # Build an unmanaged Figure rather than registering one through
+        # pyplot. In a live Jupyter kernel this renderer runs from a
+        # ``post_execute`` callback, alongside matplotlib-inline's own figure
+        # flushing callback. A pyplot-managed multi-panel figure can be
+        # cleared by that callback before ``savefig`` draws it, leaving a
+        # correctly sized but completely white saved-notebook preview. A
+        # standalone Figure has the same Agg rendering path without entering
+        # Jupyter's global figure-manager lifecycle.
+        fig = matplotlib.figure.Figure(
+            figsize=(
+                ncols * cell_w_in + (ncols - 1) * gap_in,
+                nrows * cell_h_in + (nrows - 1) * gap_in,
+            )
+        )
         # wspace/hspace are fractions of cell width/height; both resolve to
         # the same gap_in inches so the white gutters match to the pixel
         grid = fig.add_gridspec(nrows, ncols, wspace=gap_frac,
@@ -3564,7 +3576,6 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         buf = _io.BytesIO()
         fig.savefig(buf, format="png", dpi=dpi, facecolor="white",
                     bbox_inches="tight", pad_inches=0.05)
-        plt.close(fig)
         return base64.b64encode(buf.getvalue()).decode("ascii")
 
     # _repr_mimebundle_ / _ipython_display_ / static-fallback sibling plumbing

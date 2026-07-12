@@ -1063,6 +1063,37 @@ def test_show3d_static_png_pixel_matches_show2d_current_frame_gallery():
     np.testing.assert_array_equal(show3d_rgb, show2d_rgb)
 
 
+def test_show2d_static_gallery_avoids_pyplot_figure_manager(monkeypatch):
+    """A saved gallery must not join Jupyter's inline figure lifecycle.
+
+    The fallback is rendered from a ``post_execute`` callback. Registering
+    its figure through pyplot lets matplotlib-inline's neighboring callback
+    flush or clear the gallery before ``savefig``, producing a correctly sized
+    but all-white JPEG after notebook save/reopen.
+    """
+    import matplotlib.pyplot as plt
+
+    def fail_pyplot_figure(*args, **kwargs):
+        raise AssertionError("saved Show2D previews must use an unmanaged Figure")
+
+    monkeypatch.setattr(plt, "figure", fail_pyplot_figure)
+    rng = np.random.default_rng(181)
+    widget = Show2D(
+        [rng.random((96, 96), dtype=np.float32) for _ in range(4)],
+        labels=["Ba", "Ti", "O", "Sr"],
+        ncols=2,
+        cmap="inferno",
+        save_state=False,
+        verbose=False,
+    )
+
+    png = widget._static_png_b64(max_px=192)
+    image = np.asarray(Image.open(io.BytesIO(base64.b64decode(png))).convert("RGB"))
+
+    assert image.shape[0] > 100 and image.shape[1] > 100
+    assert image.std() > 5
+
+
 @pytest.mark.parametrize(
     ("n_panels", "max_cols", "size", "panel_gap", "hidden", "scale_bar"),
     [
