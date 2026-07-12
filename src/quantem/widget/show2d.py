@@ -2055,14 +2055,14 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         # Denoise controls stay hidden on a clean widget; an active denoise
         # (or an explicit request) reveals them from the first paint.
         self.show_denoise = bool(show_denoise) or self._display_filter_active()
-        frequency_modes, modes_scalar = per_panel(frequency_filter, "frequency_filter", str)
-        frequency_cutoffs, cutoffs_scalar = per_panel(
+        frequency_modes, _ = per_panel(frequency_filter, "frequency_filter", str)
+        frequency_cutoffs, _ = per_panel(
             frequency_filter_cutoff, "frequency_filter_cutoff", float
         )
-        frequency_centers, centers_scalar = per_panel(
+        frequency_centers, _ = per_panel(
             frequency_filter_center, "frequency_filter_center", float
         )
-        frequency_widths, widths_scalar = per_panel(
+        frequency_widths, _ = per_panel(
             frequency_filter_width, "frequency_filter_width", float
         )
         frequency_modes = [mode.strip().lower().replace("-", "") for mode in frequency_modes]
@@ -2093,9 +2093,11 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         self.frequency_filter_cutoff = frequency_cutoffs[0]
         self.frequency_filter_center = frequency_centers[0]
         self.frequency_filter_width = frequency_widths[0]
-        self.frequency_filter_scope = (
-            "all" if modes_scalar and cutoffs_scalar and centers_scalar and widths_scalar else "panel"
-        )
+        # A scientist comparing multiple panels normally adjusts one result at
+        # a time. Linking remains available in the UI, but it must be explicit:
+        # scalar constructor values are broadcast as initial settings, not as
+        # permission for later edits to modify every panel.
+        self.frequency_filter_scope = "panel" if self.n_images > 1 else "all"
         self.show_frequency_filter = bool(show_frequency_filter)
 
         # Reversible view ops: a crop is committed later via crop_to_view(),

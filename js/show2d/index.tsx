@@ -1854,6 +1854,14 @@ function Show2D() {
   const gpuReadyRef = React.useRef(false);
   const rawDataRef = React.useRef<Float32Array[] | null>(null);
   const lastAppliedPanelFrameIndicesRef = React.useRef<number[]>([]);
+  const filterInputSourceRef = React.useRef<{
+    allFloats: Float32Array | null;
+    allPanelStackFloats: Float32Array | null;
+    width: number;
+    height: number;
+    nImages: number;
+  } | null>(null);
+  const appliedPanelViewSignaturesRef = React.useRef<string[]>([]);
   // Interleaved (r, g, b) floats for RGB panels; null for grayscale panels.
   // rawDataRef holds the Rec. 709 luminance of RGB panels so every grayscale
   // consumer (FFT, histogram, profile, diff, stats) works unchanged.
@@ -1901,7 +1909,10 @@ function Show2D() {
   const galleryFftMagnitudeLruRef = React.useRef<Map<string, GalleryFftCacheEntry>>(new Map());
   const galleryFftActiveKeysRef = React.useRef<(string | null)[]>([]);
   const galleryFftTargetKeysRef = React.useRef<(string | null)[]>([]);
-  const galleryFftDataEpochRef = React.useRef(0);
+  // Each panel owns its source epoch. A view-only filter edit in panel A must
+  // not evict panel B's FFT or make it flash through an unnecessary recompute.
+  const galleryFftPanelEpochsRef = React.useRef<number[]>([]);
+  const galleryFftLastInvalidatedPanelsRef = React.useRef<number[]>([]);
   const galleryFftComputeSerialRef = React.useRef(0);
   const galleryFftSourceConfigRef = React.useRef("");
   const galleryFftDimsRef = React.useRef<{ w: number; h: number } | null>(null);
@@ -2862,17 +2873,72 @@ function Show2D() {
       }
     }
     const generation = ++browserFilterGenerationRef.current;
+    const previousSource = filterInputSourceRef.current;
+    const sourceChanged = !previousSource
+      || previousSource.allFloats !== allFloats
+      || previousSource.allPanelStackFloats !== allPanelStackFloats
+      || previousSource.width !== width
+      || previousSource.height !== height
+      || previousSource.nImages !== nImages;
+    const panelViewSignatures = Array.from({ length: nImages }, (_, panel) => {
+      if (isRgbFlags && isRgbFlags[panel]) return "rgb";
+      const denoise = panelFilterKnobs(panel);
+      const frequency = panelFrequencyKnobs(panel);
+      const denoiseSignature = browserFilterActive && filterKnobsActive(denoise.mode, denoise.bin)
+        ? `${normalizeFilterMode(denoise.mode)}:${denoise.sigma}:${denoise.bin}`
+        : "off";
+      const frequencySignature = frequencyFilterEnabled && frequencyFilterActive(frequency.mode)
+        ? `${frequency.mode}:${frequency.cutoff}:${frequency.center}:${frequency.width}`
+        : "off";
+      return `${denoiseSignature}|${frequencySignature}`;
+    });
+    const changedPanels = sourceChanged
+      ? Array.from({ length: nImages }, (_, panel) => panel)
+      : panelViewSignatures
+        .map((signature, panel) => signature !== appliedPanelViewSignaturesRef.current[panel] ? panel : -1)
+        .filter(panel => panel >= 0);
+    if (changedPanels.length === 0) return;
+    const changedPanelSet = new Set(changedPanels);
     const commit = (arrays: Float32Array[]) => {
       rawDataRef.current = arrays;
       rgbDataRef.current = rgbArrays;
       lastAppliedPanelFrameIndicesRef.current = [...normalizedPanelFrameIndices];
-      galleryFftDataEpochRef.current += 1;
-      galleryFftMagnitudeLruRef.current.clear();
-      galleryFftActiveKeysRef.current = new Array(nImages).fill(null);
-      galleryFftTargetKeysRef.current = new Array(nImages).fill(null);
-      fftMagCacheGalleryRef.current = new Array(nImages).fill(null);
-      fftOffscreensRef.current = new Array(nImages).fill(null);
-      galleryFftPipelineRef.current = new Array(nImages).fill(null);
+      filterInputSourceRef.current = { allFloats, allPanelStackFloats, width, height, nImages };
+      appliedPanelViewSignaturesRef.current = panelViewSignatures;
+      const epochs = galleryFftPanelEpochsRef.current.length === nImages
+        ? [...galleryFftPanelEpochsRef.current]
+        : new Array(nImages).fill(0);
+      const activeKeys = galleryFftActiveKeysRef.current.length === nImages
+        ? [...galleryFftActiveKeysRef.current]
+        : new Array(nImages).fill(null);
+      const targetKeys = galleryFftTargetKeysRef.current.length === nImages
+        ? [...galleryFftTargetKeysRef.current]
+        : new Array(nImages).fill(null);
+      const magnitudes = fftMagCacheGalleryRef.current.length === nImages
+        ? [...fftMagCacheGalleryRef.current]
+        : new Array(nImages).fill(null);
+      const offscreens = fftOffscreensRef.current.length === nImages
+        ? [...fftOffscreensRef.current]
+        : new Array(nImages).fill(null);
+      const pipelines = galleryFftPipelineRef.current.length === nImages
+        ? [...galleryFftPipelineRef.current]
+        : new Array(nImages).fill(null);
+      for (const panel of changedPanels) {
+        epochs[panel] += 1;
+        activeKeys[panel] = null;
+        targetKeys[panel] = null;
+        magnitudes[panel] = null;
+        offscreens[panel] = null;
+        pipelines[panel] = null;
+      }
+      galleryFftPanelEpochsRef.current = epochs;
+      galleryFftLastInvalidatedPanelsRef.current = changedPanels;
+      galleryFftActiveKeysRef.current = activeKeys;
+      galleryFftTargetKeysRef.current = targetKeys;
+      fftMagCacheGalleryRef.current = magnitudes;
+      fftOffscreensRef.current = offscreens;
+      galleryFftPipelineRef.current = pipelines;
+      if (sourceChanged) galleryFftMagnitudeLruRef.current.clear();
       const perf = show2dPerfDebug();
       if (perf) {
         perf.galleryFftCacheInvalidations += 1;
@@ -2904,7 +2970,10 @@ function Show2D() {
     const needsFrequencyFilter = !!frequencyFilterEnabled && dataArrays.some((_, panel) => frequencyFilterActive(panelFrequencyKnobs(panel).mode));
     const needsBrowserFilter = needsDenoise || needsFrequencyFilter;
     if (!needsBrowserFilter) { commit(dataArrays); return; }
-    Promise.all(dataArrays.map((frame, i) => filterFrameForPanel(i, frame))).then(filtered => {
+    const previousArrays = rawDataRef.current;
+    Promise.all(dataArrays.map((frame, i) => changedPanelSet.has(i)
+      ? filterFrameForPanel(i, frame)
+      : Promise.resolve(previousArrays?.[i] ?? frame))).then(filtered => {
       if (browserFilterGenerationRef.current === generation) commit(filtered);
     });
   }, [
@@ -4638,11 +4707,13 @@ function Show2D() {
       }
       const sourceConfig = `${fftPanelIndices.join(",")}:${width}x${height}:${roiFftKey}:${fftWindow ? 1 : 0}:${overviewDownsample}`;
       galleryFftSourceConfigRef.current = sourceConfig;
-      const dataEpoch = galleryFftDataEpochRef.current;
+      const dataEpochs = galleryFftPanelEpochsRef.current.length === nImages
+        ? [...galleryFftPanelEpochsRef.current]
+        : new Array(nImages).fill(0);
       const targetKeys: (string | null)[] = new Array(nImages).fill(null);
       for (const idx of fftPanelIndices) {
         targetKeys[idx] = makeGalleryFftCacheKey({
-          dataEpoch,
+          dataEpoch: dataEpochs[idx],
           panel: idx,
           frame: normalizedPanelFrameIndices[idx] || 0,
           width,
@@ -4809,7 +4880,7 @@ function Show2D() {
           debug.galleryFftCacheEvictions += stats.evictions;
         }
         if (
-          galleryFftDataEpochRef.current !== dataEpoch
+          galleryFftPanelEpochsRef.current[idx] !== dataEpochs[idx]
           || galleryFftTargetKeysRef.current[idx] !== targetKey
           || serial !== galleryFftComputeSerialRef.current
         ) {
@@ -6529,6 +6600,7 @@ function Show2D() {
       data-show2d-fft-cache-entries={galleryFftDebug?.galleryFftCacheEntries ?? 0}
       data-show2d-fft-cache-bytes={galleryFftDebug?.galleryFftCacheBytes ?? 0}
       data-show2d-fft-active-keys={(galleryFftDebug?.galleryFftActiveKeys ?? []).join(",")}
+      data-show2d-fft-last-invalidated-panels={galleryFftLastInvalidatedPanelsRef.current.join(",")}
       data-frequency-filter-backend={frequencyFilterEnabled ? frequencyFilterBackend : "off"}
       sx={{ p: 2, bgcolor: themeColors.bg, color: themeColors.text, width: "100%", maxWidth: "100%", boxSizing: "border-box", fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif", "& canvas": { display: "block" }, "@media (max-width: 700px)": { p: 0, ".jp-OutputArea-output &, .jp-OutputArea-child &": { width: "calc(100vw - 96px)", maxWidth: "calc(100vw - 96px)" } } }}
     >

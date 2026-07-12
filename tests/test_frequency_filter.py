@@ -72,8 +72,33 @@ def test_show2d_frequency_filter_accepts_per_panel_settings():
     assert widget.frequency_filter_widths == pytest.approx([0.1, 0.06])
 
 
+def test_show2d_multi_panel_scalar_filter_starts_unlinked():
+    # C5: A/B gallery with one initial recipe, expect later edits to stay local.
+    widget = Show2D(
+        [np.ones((8, 8), dtype=np.float32), np.eye(8, dtype=np.float32)],
+        frequency_filter="lowpass",
+        frequency_filter_cutoff=0.2,
+        verbose=False,
+    )
+
+    assert widget.frequency_filter_modes == ["lowpass", "lowpass"]
+    assert widget.frequency_filter_cutoffs == pytest.approx([0.2, 0.2])
+    assert widget.frequency_filter_scope == "panel"
+
+
+def test_show2d_single_panel_filter_starts_linked():
+    # C6: one panel has no independent peer, expect the scalar editor path.
+    widget = Show2D(
+        np.ones((8, 8), dtype=np.float32),
+        frequency_filter="highpass",
+        verbose=False,
+    )
+
+    assert widget.frequency_filter_scope == "all"
+
+
 def test_show3d_frequency_filter_state_round_trip():
-    # C5: stack filter state, expect saved state keeps the exact view settings.
+    # C7: stack filter state, expect saved state keeps the exact view settings.
     data = np.arange(3 * 8 * 8, dtype=np.float32).reshape(3, 8, 8)
     widget = Show3D(
         data,
@@ -94,7 +119,7 @@ def test_show3d_frequency_filter_state_round_trip():
 
 @pytest.mark.parametrize("viewer", [Show2D, Show3D])
 def test_frequency_filter_rejects_invalid_normalized_cutoff(viewer):
-    # C6: cutoff outside normalized Nyquist, expect a corrective error.
+    # C8: cutoff outside normalized Nyquist, expect a corrective error.
     data = np.ones((8, 8), dtype=np.float32) if viewer is Show2D else np.ones((3, 8, 8), dtype=np.float32)
     with pytest.raises(ValueError, match="between 0 and 1"):
         viewer(data, frequency_filter="highpass", frequency_filter_cutoff=1.2, verbose=False)
