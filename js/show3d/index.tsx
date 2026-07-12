@@ -12260,7 +12260,7 @@ function Show3D() {
                       <MenuItem key={mode} value={mode}>{label}</MenuItem>
                     ))}
                   </Select>
-                  <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted, opacity: displayFilterOff ? 0.5 : 1, minWidth: 38, display: "inline-block" }}>σ {(sigmaDraft ?? Number(displaySigma ?? 4)).toFixed(1)}</Typography>
+                  <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted, opacity: displayFilterOff ? 0.5 : 1, minWidth: 40, display: "inline-block" }}>σ {(sigmaDraft ?? Number(displaySigma ?? 4)).toFixed(1)}</Typography>
                   <Slider
                     value={sigmaDraft ?? Number(displaySigma ?? 4)}
                     min={0} max={20} step={0.5}
