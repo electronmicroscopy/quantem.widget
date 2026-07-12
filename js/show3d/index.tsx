@@ -11038,7 +11038,7 @@ function Show3D() {
         spacing={`${SPACING.SM}px`}
         alignItems="flex-start"
         sx={{
-          flexWrap: effectiveShowFft && fftLayoutBottom && (nPanels || 1) > 1 ? "wrap" : "nowrap",
+          flexWrap: effectiveShowFft && fftLayoutBottom ? "wrap" : "nowrap",
           width: "100%",
           maxWidth: "100%",
           minWidth: 0,
@@ -11054,7 +11054,7 @@ function Show3D() {
           },
         }}
       >
-        <Box sx={{ width: mainPanelWidth, maxWidth: "100%", flexShrink: effectiveShowFft && fftLayoutBottom && (nPanels || 1) > 1 ? 0 : 1, boxSizing: "border-box" }}>
+        <Box sx={{ width: mainPanelWidth, maxWidth: "100%", flexShrink: effectiveShowFft && fftLayoutBottom ? 0 : 1, boxSizing: "border-box" }}>
           {/* Title row */}
           {showTitle && <Typography variant="caption" sx={{ ...typography.label, color: themeColors.accent, mb: `${SPACING.XS}px`, display: "block", height: 16, lineHeight: "16px", overflow: "hidden" }}>
             {title || "Image"}
@@ -12700,10 +12700,10 @@ function Show3D() {
         {effectiveShowFft && !fftLayoutOverlay && (
           <Box sx={{
             width: "100%",
-            maxWidth: fftLayoutBottom && (nPanels || 1) > 1 ? "100%" : canvasW,
-            flex: fftLayoutBottom && (nPanels || 1) > 1 ? "1 0 100%" : `0 1 min(100%, ${canvasW}px)`,
-            minWidth: fftLayoutBottom && (nPanels || 1) > 1 ? "100%" : undefined,
-            ml: fftLayoutBottom && (nPanels || 1) > 1 ? "0 !important" : undefined,
+            maxWidth: fftLayoutBottom ? "100%" : canvasW,
+            flex: fftLayoutBottom ? "1 0 100%" : `0 1 min(100%, ${canvasW}px)`,
+            minWidth: fftLayoutBottom ? "100%" : undefined,
+            ml: fftLayoutBottom ? "0 !important" : undefined,
             mt: fftLayoutBottom ? "0 !important" : undefined,
             boxSizing: "border-box",
           }}>

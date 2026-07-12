@@ -118,6 +118,16 @@ def test_show3d_playback_dynamics_menu_uses_saved_state_traits():
     assert "setBoomerang(true)" in show3d
 
 
+def test_show3d_bottom_fft_layout_always_stacks_below_main_panel():
+    """C1: user selects FFT Bottom, expect FFT below even for one panel."""
+    show3d = (ROOT / "js" / "show3d" / "index.tsx").read_text(encoding="utf-8")
+
+    assert 'flexWrap: effectiveShowFft && fftLayoutBottom ? "wrap" : "nowrap"' in show3d
+    assert 'flex: fftLayoutBottom ? "1 0 100%"' in show3d
+    assert 'maxWidth: fftLayoutBottom ? "100%"' in show3d
+    assert 'fftLayoutBottom && (nPanels || 1) > 1' not in show3d
+
+
 def test_show2d_and_show3d_fft_zoom_labels_cover_every_interactive_fft():
     """FFT views expose their live multiplier in every supported layout."""
     figure = (ROOT / "js" / "figure.ts").read_text(encoding="utf-8")
