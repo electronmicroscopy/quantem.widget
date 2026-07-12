@@ -2401,6 +2401,8 @@ function Show3D() {
   const [spatialBin, setSpatialBin] = useModelState<number>("denoise_bin");
   const [displayFilterBanner] = useModelState<string>("denoise_banner");
   const [showDenoise, setShowDenoise] = useModelState<boolean>("show_denoise");
+  // Master ON/OFF of the denoise EFFECT (off -> raw, config preserved & gated).
+  const [denoiseEnabled, setDenoiseEnabled] = useModelState<boolean>("denoise_enabled");
   // Local slider value during drag; the model (and the Python refilter) only
   // updates on release so scrubbing sigma stays smooth on large stacks.
   const [sigmaDraft, setSigmaDraft] = React.useState<number | null>(null);
@@ -2415,7 +2417,7 @@ function Show3D() {
   // browser: Python ships the offline stack RAW and sets _webgpu_filter_ok, so the WGSL
   // port applies denoise here with live sigma - same as the live-kernel path. (Was
   // gated `&& !offline`, which disabled real-time denoise for the common offline case.)
-  const browserFilterActive = !!webgpuFilterOk && !isRgb;
+  const browserFilterActive = !!webgpuFilterOk && !isRgb && (denoiseEnabled ?? true);
   const denoiseResolved = resolveDenoiseMode(displayFilter || "none", spatialBin || 1);
   const denoiseSigmaLive = sigmaDraft ?? Number(displaySigma ?? 4);
   const browserFilterKnobsOn = browserFilterActive
@@ -2456,17 +2458,16 @@ function Show3D() {
       .catch(() => {});
     return frame;
   }, [browserFilterKnobsOn, denoiseResolved.mode, denoiseResolved.bin, denoiseSigmaLive, width, height]);
-  // Enabling the "Denoise" section must actually denoise (else pressing it does
-  // nothing until you also pick a method): default an off mode to gaussian
-  // (σ default 4.0 is a visible low-pass); disabling returns the display to raw.
+  // The "Denoise" toggle is the master ON/OFF of the EFFECT: ON shows the
+  // denoised view, OFF shows raw (nothing of the denoised view leaks through).
+  // The config (mode/sigma/bin) is PRESERVED across the toggle; a clean widget
+  // gets a visible gaussian (σ 4) the first time it is enabled.
   const toggleDenoise = () => {
-    const next = !showDenoise;
-    setShowDenoise(next);
-    if (next) {
-      if (displayFilterOff) setDisplayFilter("gaussian");
-    } else {
-      setDisplayFilter("none");
-    }
+    const next = !denoiseEnabled;
+    setDenoiseEnabled(next);
+    setShowDenoise(next); // editor follows: shown while denoising, hidden when raw
+    if (next && displayFilterOff) setDisplayFilter("gaussian");
+    // Turning OFF preserves the config; browserFilterActive gates the display.
   };
   const [pixelUnit] = useModelState<string>("pixel_unit");
   const [imageRotation] = useModelState<number>("image_rotation");
@@ -11123,7 +11124,7 @@ function Show3D() {
             {/* "More" overflow: Stats + Denoise live here (mirrors Show2D) to
                 keep the top toolbar calm. */}
             <Badge
-              badgeContent={(showStats ? 1 : 0) + (showDenoise ? 1 : 0)}
+              badgeContent={(showStats ? 1 : 0) + (denoiseEnabled ? 1 : 0)}
               invisible={!showStats && !showDenoise}
               sx={{ "& .MuiBadge-badge": { bgcolor: themeColors.accent, color: "#fff", fontSize: 9, fontWeight: 600, minWidth: 14, height: 14, px: 0.25 } }}
             >
@@ -11149,9 +11150,9 @@ function Show3D() {
                 <Typography sx={{ flex: 1, fontSize: 12, color: "inherit" }} title="Mean / min / max / std readout under the image.">Stats</Typography>
                 <Switch checked={showStats} onClick={(e) => e.stopPropagation()} onChange={(e) => setShowStats(e.target.checked)} size="small" sx={switchStyles.small} slotProps={{ input: { "aria-label": "Toggle statistics readout" } }} />
               </MenuItem>
-              <MenuItem dense onClick={toggleDenoise} sx={{ fontSize: 12, gap: 1, color: showDenoise ? themeColors.accent : themeColors.text }}>
-                <Typography sx={{ flex: 1, fontSize: 12, color: "inherit" }} title="Display-only denoise (gaussian σ, or Poisson/Anscombe, plus bin). Raw data and stats keep original counts.">Denoise</Typography>
-                <Switch checked={showDenoise ?? false} onClick={(e) => e.stopPropagation()} onChange={toggleDenoise} size="small" sx={switchStyles.small} slotProps={{ input: { "aria-label": "Toggle denoise controls" } }} />
+              <MenuItem dense onClick={toggleDenoise} sx={{ fontSize: 12, gap: 1, color: denoiseEnabled ? themeColors.accent : themeColors.text }}>
+                <Typography sx={{ flex: 1, fontSize: 12, color: "inherit" }} title="Display-only denoise: ON shows the denoised view, OFF shows raw (config preserved). Raw data and stats keep original counts.">Denoise</Typography>
+                <Switch checked={denoiseEnabled ?? false} onClick={(e) => e.stopPropagation()} onChange={toggleDenoise} size="small" sx={switchStyles.small} slotProps={{ input: { "aria-label": "Toggle denoise on/off" } }} />
               </MenuItem>
             </Menu>
             {hasPanelChoices && (

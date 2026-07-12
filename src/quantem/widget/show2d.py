@@ -919,6 +919,11 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     # Auto-enabled at construction when any panel starts with an active
     # denoise so the knobs that explain the view are immediately visible.
     show_denoise = traitlets.Bool(False).tag(sync=True)
+    # Master ON/OFF of the denoise EFFECT (the "Denoise" toggle). Off shows the
+    # raw view; the per-panel config (modes/sigmas/bins) is PRESERVED, just
+    # gated, so toggling back on restores it. Distinct from show_denoise, which
+    # is only the editor-row visibility.
+    denoise_enabled = traitlets.Bool(True).tag(sync=True)
     # Browser-side filter negotiation: JS sets this True when a real (non
     # software) WebGPU adapter is available. Python then ships RAW frames for
     # panels whose mode the browser can evaluate (gaussian/bin2/anscombe
@@ -2010,6 +2015,9 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         self.denoise_scope = "all" if broadcast else "panel"
         self._display_filter_ready = True
         self._refresh_display_filter_banner(announce=True)
+        # The master denoise switch starts ON iff the widget was built with an
+        # active denoise config; a clean widget starts OFF (the toggle enables it).
+        self.denoise_enabled = self._has_denoise_config()
         # Denoise controls stay hidden on a clean widget; an active denoise
         # (or an explicit request) reveals them from the first paint.
         self.show_denoise = bool(show_denoise) or self._display_filter_active()
@@ -5045,8 +5053,15 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         mode, _sigma, denoise_bin = self._panel_filter_knobs(panel)
         return _normalize_mode(mode) != "none" or denoise_bin > 1
 
-    def _display_filter_active(self) -> bool:
+    def _has_denoise_config(self) -> bool:
+        """Any panel carries an active denoise config, regardless of the master
+        on/off. This is the CONFIG check (used to seed denoise_enabled)."""
         return any(self._panel_filter_active(i) for i in range(int(self.n_images)))
+
+    def _display_filter_active(self) -> bool:
+        """Denoise is actually applied: has a config AND the master switch is on.
+        Turning denoise_enabled off shows raw while preserving the config."""
+        return self._has_denoise_config() and bool(self.denoise_enabled)
 
     def _panel_browser_filtered(self, panel: int) -> bool:
         """True when this panel's display filter runs in the browser.

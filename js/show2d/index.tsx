@@ -1121,20 +1121,25 @@ function Show2D() {
   // from older saved states resolve to their base method for display.
   const denoiseBaseMode = resolveDenoiseMode(displayFilter || "none", spatialBin || 1).mode;
   const filterOff = denoiseBaseMode === "none";
-  // Denoise controls row visibility (its own compact toggle, FFT-style).
+  // Denoise controls row visibility (the editor; secondary to the on/off).
   const [showDenoise, setShowDenoise] = useModelState<boolean>("show_denoise");
-  // Toggling the "Denoise" section on must actually denoise: a feature by that
-  // name doing nothing until you also pick a method reads as "pressing denoise
-  // does nothing". So enabling it defaults an off mode to gaussian (σ default
-  // 4.0 gives a visible low-pass); disabling returns the display to raw.
+  // Master ON/OFF of the denoise EFFECT. Off shows the RAW view (nothing of the
+  // denoised view "underneath" leaks through); the per-panel config is PRESERVED
+  // (just gated), so toggling back on restores exactly what was there. A clean
+  // widget with no config gets a visible gaussian (σ 4) the first time it's
+  // enabled so the toggle always does something.
+  const [denoiseEnabled, setDenoiseEnabled] = useModelState<boolean>("denoise_enabled");
   const toggleDenoise = () => {
-    const next = !showDenoise;
-    setShowDenoise(next);
+    const next = !denoiseEnabled;
+    setDenoiseEnabled(next);
+    setShowDenoise(next); // reveal the editor while denoising; hide it when raw
     if (next) {
-      if (denoiseBaseMode === "none") setDisplayFilter("gaussian");
-    } else {
-      setDisplayFilter("none");
+      const hasConfig = (displayFilters && displayFilters.some((m) => resolveDenoiseMode(m || "none").mode !== "none"))
+        || (spatialBins && spatialBins.some((b) => (b || 1) > 1))
+        || denoiseBaseMode !== "none";
+      if (!hasConfig) setDisplayFilter("gaussian");
     }
+    // Turning OFF preserves the config; the render gate (denoiseEnabled) hides it.
   };
   const [denoiseScope, setDenoiseScope] = useModelState<string>("denoise_scope");
   const denoiseScopeAll = denoiseScope !== "panel";
@@ -1161,7 +1166,9 @@ function Show2D() {
   // Live sessions set it from the adapter probe below; offline pages inherit
   // the exported value and fall back to the CPU port without WebGPU.
   const [webgpuFilterOk, setWebgpuFilterOk] = useModelState<boolean>("_webgpu_filter_ok");
-  const browserFilterActive = !!webgpuFilterOk;
+  // The master denoise switch gates the browser filter: off -> no WGSL pass ->
+  // raw frames shown (config preserved for when it's turned back on).
+  const browserFilterActive = !!webgpuFilterOk && (denoiseEnabled ?? true);
   // Chemistry-on-structure blend panel (underlay=True): live sliders re-blend
   // in Python; commit on release so dragging stays smooth.
   const [underlayActive] = useModelState<boolean>("underlay");
@@ -6303,7 +6310,7 @@ function Show2D() {
   const roiControlAvailable = !isGallery;
   const diffControlAvailable = !isPaged && nImages >= 2 && (visibleGrayscaleIndices.length === 2 || diffMode);
   const moreActiveCount =
-    (roiControlAvailable && roiActive ? 1 : 0) + (diffMode ? 1 : 0) + (showDenoise ? 1 : 0);
+    (roiControlAvailable && roiActive ? 1 : 0) + (diffMode ? 1 : 0) + (denoiseEnabled ? 1 : 0);
   // Collapse-safe reduction badge: when the controls (and their inline denoise
   // / view banners) are hidden, surface any active reduction in the always-on
   // title row. Strip the trailing "how to undo" hint for the compact label and
@@ -6811,16 +6818,16 @@ function Show2D() {
                 <MenuItem
                   dense
                   onClick={toggleDenoise}
-                  sx={{ fontSize: 12, gap: 1, color: showDenoise ? themeColors.accent : themeColors.text }}
+                  sx={{ fontSize: 12, gap: 1, color: denoiseEnabled ? themeColors.accent : themeColors.text }}
                 >
-                  <Typography sx={{ flex: 1, fontSize: 12, color: "inherit" }} title="Denoise the display only (gaussian σ, or Poisson/Anscombe, plus spatial bin). Raw data, stats, and exports keep original counts.">Denoise</Typography>
+                  <Typography sx={{ flex: 1, fontSize: 12, color: "inherit" }} title="Denoise the display only: ON shows the denoised view, OFF shows raw. Config is preserved across the toggle. Raw data, stats, and exports keep original counts.">Denoise</Typography>
                   <Switch
-                    checked={showDenoise ?? false}
+                    checked={denoiseEnabled ?? false}
                     onClick={(e) => e.stopPropagation()}
                     onChange={toggleDenoise}
                     size="small"
                     sx={switchStyles.small}
-                    slotProps={{ input: { "aria-label": "Toggle denoise controls" } }}
+                    slotProps={{ input: { "aria-label": "Toggle denoise on/off" } }}
                   />
                 </MenuItem>
                 {diffControlAvailable && (

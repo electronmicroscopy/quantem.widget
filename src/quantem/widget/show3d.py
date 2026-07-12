@@ -861,6 +861,9 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     # widget starts with an active denoise (house rule: knobs that explain a
     # reduced view must be discoverable).
     show_denoise = traitlets.Bool(False).tag(sync=True)
+    # Master ON/OFF of the denoise EFFECT (the "Denoise" toggle). Off shows raw;
+    # the config (mode/sigma/bin) is preserved (just gated) so on restores it.
+    denoise_enabled = traitlets.Bool(True).tag(sync=True)
     # Set True by the frontend when a real (non-software) WebGPU adapter is
     # available: denoise then runs in the browser (WGSL, live sigma scrub) and
     # Python ships RAW frames. False keeps the scipy path (e.g. SwiftShader).
@@ -2779,6 +2782,8 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         self.denoise_sigma = float(denoise_sigma)
         self.denoise_bin = int(resolved_bin)
         self._display_filter_ready = True
+        # Master switch starts ON iff built with an active denoise config.
+        self.denoise_enabled = self._has_denoise_config()
         self._refresh_display_filter_banner(announce=True)
         self.show_denoise = (
             False
@@ -6356,12 +6361,19 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         self._send_buffer(int(self._buffer_start))
         self._update_all()
 
-    def _display_filter_active(self) -> bool:
+    def _has_denoise_config(self) -> bool:
+        """A denoise config is present, regardless of the master on/off (used to
+        seed denoise_enabled)."""
         from quantem.widget.utils.display_filter import _normalize_mode
 
         if bool(getattr(self, "is_rgb", False)):
             return False
         return _normalize_mode(self.denoise) != "none" or int(self.denoise_bin) > 1
+
+    def _display_filter_active(self) -> bool:
+        """Denoise is actually applied: has a config AND the master switch is on.
+        denoise_enabled off shows raw while preserving the config."""
+        return self._has_denoise_config() and bool(getattr(self, "denoise_enabled", True))
 
     def _refresh_display_filter_banner(self, *, announce: bool) -> None:
         """Sync the one-line reduction notice; print it when it changes.
