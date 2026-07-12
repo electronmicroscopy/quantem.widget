@@ -42,7 +42,7 @@ import { findDataRange, applyLogScale, applyLogScaleInPlace, percentileClip, sli
 import { MetadataSection } from "../widgetInfo";
 import { EmbeddedWidgetView } from "../embeddedWidget";
 import { FolderWatchBadge, useFolderWatchModelLive } from "../folderWatchStatus";
-import { applyFrequencyFilterBrowser, frequencyFilterActive, normalizeFrequencyFilterMode } from "../frequencyFilter";
+import { applyFrequencyFilterBrowser, frequencyFilterActive, getFrequencyFilterBackend, normalizeFrequencyFilterMode } from "../frequencyFilter";
 
 const SHOW3D_TO_SHOW2D_LINKED_TRAITS = [
   { source: "cmap" },
@@ -2413,6 +2413,7 @@ function Show3D() {
   const [showFrequencyFilter, setShowFrequencyFilter] = useModelState<boolean>("show_frequency_filter");
   const [frequencyDraft, setFrequencyDraft] = React.useState<number | null>(null);
   const [frequencyRenderVersion, setFrequencyRenderVersion] = React.useState(0);
+  const [frequencyFilterBackend, setFrequencyFilterBackend] = React.useState("off");
   const frequencyGenerationRef = React.useRef(0);
   const frequencyFilterIsActive = !!frequencyFilterEnabled && frequencyFilterActive(frequencyFilter) && !isRgb;
   const frequencyOptions = React.useMemo(() => {
@@ -2435,6 +2436,10 @@ function Show3D() {
       ? `Filter: Band-pass center ${frequencyValueLabel(frequencyOptions.center)}, width ${frequencyValueLabel(frequencyOptions.width)} (view only; raw counts unchanged)`
       : `Filter: ${frequencyOptions.mode === "lowpass" ? "Low-pass" : "High-pass"} cutoff ${frequencyValueLabel(frequencyOptions.cutoff)} (view only; raw counts unchanged)`)
     : "";
+  const setFrequencyMaster = (enabled: boolean) => {
+    if (enabled && !frequencyFilterActive(frequencyFilter)) setFrequencyFilter("lowpass");
+    setFrequencyFilterEnabled(enabled);
+  };
   // Local slider value during drag; the model (and the Python refilter) only
   // updates on release so scrubbing sigma stays smooth on large stacks.
   const [sigmaDraft, setSigmaDraft] = React.useState<number | null>(null);
@@ -2591,6 +2596,7 @@ function Show3D() {
   const [exportMenuAnchor, setExportMenuAnchor] = React.useState<HTMLElement | null>(null);
   const [panelMenuAnchor, setPanelMenuAnchor] = React.useState<HTMLElement | null>(null);
   const [viewMenuAnchor, setViewMenuAnchor] = React.useState<HTMLElement | null>(null);
+  const [moreMenuAnchor, setMoreMenuAnchor] = React.useState<HTMLElement | null>(null);
   const [exportBusy, setExportBusy] = React.useState(false);
   const [localExportStatus, setLocalExportStatus] = React.useState("");
   const fftOverlayDragRef = React.useRef<{
@@ -5881,6 +5887,7 @@ function Show3D() {
       void applyFrequencyFilterBrowser(displayFrame, width, height, frequencyOptions).then((filtered) => {
         if (frequencyGenerationRef.current !== generation) return;
         rawFrameDataRef.current = filtered;
+        setFrequencyFilterBackend(getFrequencyFilterBackend());
         gpuUploadRef.current = null;
         setFrequencyRenderVersion((value) => value + 1);
       }).catch((error) => console.warn("[Show3D] frequency filter failed; showing unfiltered frame", error));
@@ -6574,6 +6581,7 @@ function Show3D() {
         if (frequencyGenerationRef.current !== generation) return;
         playbackIdxRef.current = idx;
         rawFrameDataRef.current = filtered;
+        setFrequencyFilterBackend(getFrequencyFilterBackend());
         gpuUploadRef.current = null;
         setDisplaySliceIdx(idx);
         setFrequencyRenderVersion((value) => value + 1);
@@ -10875,12 +10883,15 @@ function Show3D() {
         else setFrequencyFilterCutoff(frequencyRingValue);
         setFrequencyDraft(null);
       }}
-      sx={{ position: "absolute", left: "50%", top: "50%", width: `${frequencyRingValue * 100}%`, height: `${frequencyRingValue * 100}%`, transform: "translate(-50%, -50%)", borderRadius: "50%", border: "2px solid rgba(0,229,255,0.95)", boxShadow: "0 0 0 1px rgba(0,0,0,0.75)", cursor: "crosshair", touchAction: "none", zIndex: 6 }}
+      sx={{ position: "absolute", left: "50%", top: "50%", width: `${frequencyRingValue * 100}%`, height: `${frequencyRingValue * 100}%`, transform: "translate(-50%, -50%)", borderRadius: "50%", border: "2px solid rgba(0,229,255,0.95)", bgcolor: normalizeFrequencyFilterMode(frequencyFilter) === "highpass" ? "rgba(0,0,0,0.55)" : "transparent", boxShadow: normalizeFrequencyFilterMode(frequencyFilter) === "lowpass" ? "0 0 0 1px rgba(0,0,0,0.75), 0 0 0 9999px rgba(0,0,0,0.55)" : "0 0 0 1px rgba(0,0,0,0.75)", cursor: "crosshair", touchAction: "none", zIndex: 6 }}
     >
       {normalizeFrequencyFilterMode(frequencyFilter) === "bandpass" && [
         Math.max(0, frequencyFilterCenter - frequencyFilterWidth / 2),
         Math.min(1, frequencyFilterCenter + frequencyFilterWidth / 2),
-      ].map((radius, index) => <Box key={index} sx={{ position: "absolute", left: "50%", top: "50%", width: `${radius / Math.max(0.001, frequencyRingValue) * 100}%`, height: `${radius / Math.max(0.001, frequencyRingValue) * 100}%`, transform: "translate(-50%, -50%)", borderRadius: "50%", border: "1px dashed rgba(255,255,255,0.9)", pointerEvents: "none" }} />)}
+      ].map((radius, index) => <Box key={index} sx={{ position: "absolute", left: "50%", top: "50%", width: `${radius / Math.max(0.001, frequencyRingValue) * 100}%`, height: `${radius / Math.max(0.001, frequencyRingValue) * 100}%`, transform: "translate(-50%, -50%)", borderRadius: "50%", border: "1px dashed rgba(255,255,255,0.95)", bgcolor: index === 0 ? "rgba(0,0,0,0.55)" : "transparent", boxShadow: index === 1 ? "0 0 0 9999px rgba(0,0,0,0.55)" : "none", pointerEvents: "none" }} />)}
+      <Box sx={{ position: "absolute", left: "50%", top: -24, transform: "translateX(-50%)", px: 0.75, py: 0.25, borderRadius: 0.75, bgcolor: "rgba(0,0,0,0.78)", color: "rgba(200,250,255,0.98)", fontSize: 9, lineHeight: 1.2, fontWeight: 700, whiteSpace: "nowrap", pointerEvents: "none", textShadow: "0 1px 1px #000" }}>
+        {normalizeFrequencyFilterMode(frequencyFilter) === "lowpass" ? "Inside kept" : normalizeFrequencyFilterMode(frequencyFilter) === "highpass" ? "Outside kept" : "Band kept"}
+      </Box>
     </Box>
   ) : null;
   return (
@@ -10888,6 +10899,7 @@ function Show3D() {
       ref={rootRef}
       className="show3d-root"
       data-show3d-canvas-repaint-signal={canvasRepaintSignal}
+      data-frequency-filter-backend={frequencyFilterIsActive ? frequencyFilterBackend : "off"}
       tabIndex={0}
       onKeyDown={handleKeyDown}
       onMouseDownCapture={handleRootMouseDownCapture}
@@ -11398,6 +11410,56 @@ function Show3D() {
                         <Typography sx={{ fontSize: 11 }}>Reset order</Typography>
                       </MenuItem>
                     )}
+                  </Menu>
+                </>
+              )}
+              {!isRgb && (
+                <>
+                  <Badge
+                    badgeContent={frequencyFilterIsActive ? 1 : 0}
+                    invisible={!frequencyFilterIsActive}
+                    sx={{ "& .MuiBadge-badge": { bgcolor: themeColors.accent, color: "#fff", fontSize: 9, fontWeight: 600, minWidth: 14, height: 14, px: 0.25 } }}
+                  >
+                    <Button
+                      size="small"
+                      sx={{ ...compactButton, color: frequencyFilterIsActive ? themeColors.accent : themeColors.text }}
+                      onClick={(event) => setMoreMenuAnchor(event.currentTarget)}
+                      aria-label="More tools"
+                      aria-controls={moreMenuAnchor ? "show3d-more-menu" : undefined}
+                      aria-expanded={moreMenuAnchor ? "true" : undefined}
+                      aria-haspopup="menu"
+                      title="More tools: Filter"
+                    >More</Button>
+                  </Badge>
+                  <Menu
+                    id="show3d-more-menu"
+                    anchorEl={moreMenuAnchor}
+                    open={Boolean(moreMenuAnchor)}
+                    onClose={() => setMoreMenuAnchor(null)}
+                    MenuListProps={{ "aria-label": "More tools" }}
+                    {...themedMenuProps}
+                  >
+                    <MenuItem
+                      dense
+                      onClick={() => setFrequencyMaster(!frequencyFilterEnabled)}
+                      sx={{ fontSize: 12, gap: 1, color: frequencyFilterIsActive ? themeColors.accent : themeColors.text }}
+                    >
+                      <Typography sx={{ flex: 1, fontSize: 12, color: "inherit" }} title="Off by default. Turn on to remove a background or isolate a periodicity; raw counts remain unchanged.">Filter</Typography>
+                      <Button
+                        size="small"
+                        onClick={(event) => { event.stopPropagation(); setShowFrequencyFilter(!showFrequencyFilter); }}
+                        sx={{ ...compactButton, minWidth: 48, fontSize: 10 }}
+                        aria-label={showFrequencyFilter ? "Hide frequency filter settings" : "Show frequency filter settings"}
+                      >Settings</Button>
+                      <Switch
+                        checked={frequencyFilterEnabled ?? false}
+                        onClick={(event) => event.stopPropagation()}
+                        onChange={() => setFrequencyMaster(!frequencyFilterEnabled)}
+                        size="small"
+                        sx={switchStyles.small}
+                        slotProps={{ input: { "aria-label": "Toggle frequency filter effect" } }}
+                      />
+                    </MenuItem>
                   </Menu>
                 </>
               )}
@@ -12187,10 +12249,6 @@ function Show3D() {
                       {displayFilterBanner.split(" (")[0]}
                     </Typography>
                   )}
-                  <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted }} title="Remove a background or isolate a periodicity. View only; raw counts remain unchanged.">Filter</Typography>
-                  <Switch checked={frequencyFilterEnabled ?? false} onChange={() => setFrequencyFilterEnabled(!frequencyFilterEnabled)} size="small" sx={switchStyles.small} slotProps={{ input: { "aria-label": "Toggle frequency filter effect" } }} />
-                  <Button size="small" sx={{ ...compactButton, minWidth: 48, fontSize: 10 }} onClick={() => setShowFrequencyFilter(!showFrequencyFilter)} aria-label={showFrequencyFilter ? "Hide frequency filter settings" : "Show frequency filter settings"}>Settings</Button>
-                  {!showFrequencyFilter && frequencyBannerText && <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.accent }} title={frequencyBannerText}>{frequencyBannerText.split(" (")[0]}</Typography>}
                   <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted }}>Diff</Typography>
                   <Select value={diffMode} onChange={(e) => setDiffMode(e.target.value)} size="small" sx={{ ...themedSelect, minWidth: 45, fontSize: 10 }} MenuProps={themedMenuProps} inputProps={{ "aria-label": "Difference mode (off, previous frame, first frame)" }}>
                     <MenuItem value="off">Off</MenuItem>
@@ -12233,7 +12291,7 @@ function Show3D() {
                 <Box sx={{ ...controlRow, ...mobileControlRowSx, width: "100%", maxWidth: "100%", border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>
                   <Box sx={{ display: "inline-flex", alignItems: "center", gap: `${SPACING.XS}px`, flexWrap: "nowrap" }}>
                     <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted }} title="Low-pass removes fine detail; High-pass removes slow background; Band-pass isolates a periodicity.">Filter</Typography>
-                    <Select size="small" value={normalizeFrequencyFilterMode(frequencyFilter)} onChange={(event) => setFrequencyFilter(String(event.target.value))} MenuProps={themedMenuProps} sx={{ ...themedSelect, minWidth: 84, fontSize: 10 }} inputProps={{ "aria-label": "Frequency filter mode" }}>
+                    <Select size="small" value={normalizeFrequencyFilterMode(frequencyFilter)} onChange={(event) => { const mode = String(event.target.value); setFrequencyFilter(mode); if (mode !== "none") setFrequencyFilterEnabled(true); }} MenuProps={themedMenuProps} sx={{ ...themedSelect, minWidth: 84, fontSize: 10 }} inputProps={{ "aria-label": "Frequency filter mode" }}>
                       <MenuItem value="none">None</MenuItem>
                       <MenuItem value="lowpass">Low-pass</MenuItem>
                       <MenuItem value="highpass">High-pass</MenuItem>

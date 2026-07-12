@@ -12,6 +12,13 @@ export interface FrequencyFilterOptions {
   edge?: number;
 }
 
+export type FrequencyFilterBackend = "off" | "WebGPU" | "CPU fallback";
+let lastFrequencyFilterBackend: FrequencyFilterBackend = "off";
+
+export function getFrequencyFilterBackend(): FrequencyFilterBackend {
+  return lastFrequencyFilterBackend;
+}
+
 export function normalizeFrequencyFilterMode(mode: string): FrequencyFilterMode {
   const value = String(mode ?? "none").trim().toLowerCase().replace(/[ _-]/g, "");
   if (value === "low" || value === "lowpass") return "lowpass";
@@ -208,11 +215,18 @@ export async function applyFrequencyFilterBrowser(
 ): Promise<Float32Array> {
   if (!frequencyFilterActive(options.mode)) return Float32Array.from(data);
   const fft = await getWebGPUFFT();
-  if (!fft) return applyFrequencyFilterCPU(data, width, height, options);
+  if (!fft) {
+    lastFrequencyFilterBackend = "CPU fallback";
+    return applyFrequencyFilterCPU(data, width, height, options);
+  }
   const forward = await fft.fft2D(Float32Array.from(data), new Float32Array(data.length), width, height, false);
   const masked = await applyMaskGPU(forward.real, forward.imag, width, height, options);
-  if (!masked) return applyFrequencyFilterCPU(data, width, height, options);
+  if (!masked) {
+    lastFrequencyFilterBackend = "CPU fallback";
+    return applyFrequencyFilterCPU(data, width, height, options);
+  }
   const inverse = await fft.fft2D(masked.real, masked.imag, width, height, true);
+  lastFrequencyFilterBackend = "WebGPU";
   return inverse.real;
 }
 

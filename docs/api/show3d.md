@@ -56,7 +56,9 @@ can use `"bandpass"` with `frequency_filter_center` and
 `frequency_filter_width`. Values are fractions of Nyquist from 0 to 1, and the
 cyan FFT ring can be dragged during scrubbing or playback. The browser applies
 Denoise first and Filter second; the raw stack and quantitative exports are
-never replaced by the view.
+never replaced by the view. Filter lives under More and is off by default. Its
+FFT overlay dims rejected frequencies and labels the clear region as Inside
+kept, Outside kept, or Band kept.
 
 ## FFT quality labels
 

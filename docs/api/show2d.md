@@ -92,10 +92,18 @@ Show2D(lattice, show_fft=True,
 ```
 
 Parameters are fractions of Nyquist from 0 to 1. Drag the cyan FFT ring to
-select the cutoff or band center by eye. Denoise and Filter are chainable in
+select the cutoff or band center by eye. The FFT overlay dims rejected
+frequencies: Low-pass keeps the clear area inside the ring, High-pass keeps the
+clear area outside, and Band-pass keeps only the clear annulus. Filter and its
+More-menu toggle are off by default; turning the master on with no remembered
+mode starts with Low-pass. Denoise and Filter are chainable in
 the fixed order Denoise then Filter; each active operation has its own banner.
 Turn the Filter master off or choose None to restore the unfiltered view
 without losing the settings.
+
+For paged galleries, FFT work is demand-driven: only panels visible on the
+current page are transformed. Visiting another page computes that page once
+and retains the bounded cache for later return visits.
 
 ## Crop and pad the view (advanced)
 

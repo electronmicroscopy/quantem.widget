@@ -42,7 +42,7 @@ import { getWebGPUFFT, WebGPUFFT, fft2dAsync, fftshift, computeMagnitude, autoEn
 import { computeFftQualityMetrics, formatFftQualityLabel, type FftQualityMetrics } from "../fftMetrics";
 import { COLORMAPS, COLORMAP_NAMES, renderToOffscreen, renderToOffscreenReuse, GPUColormapEngine, createGPUColormapEngine, getGPUMaxBufferSize } from "../colormaps";
 import { applyDisplayFilterBrowser, browserFilterSupported, filterKnobsActive, getGPUDisplayFilterEngine, normalizeFilterMode, resolveDenoiseMode } from "../displayFilter";
-import { applyFrequencyFilterBrowser, frequencyFilterActive, normalizeFrequencyFilterMode } from "../frequencyFilter";
+import { applyFrequencyFilterBrowser, frequencyFilterActive, getFrequencyFilterBackend, normalizeFrequencyFilterMode } from "../frequencyFilter";
 import {
   GALLERY_FFT_CACHE_MAX_BYTES,
   GALLERY_FFT_CACHE_MAX_ENTRIES,
@@ -1155,6 +1155,7 @@ function Show2D() {
   const frequencyFilterScopeAll = frequencyFilterScope !== "panel";
   const [showFrequencyFilter, setShowFrequencyFilter] = useModelState<boolean>("show_frequency_filter");
   const [frequencyDraft, setFrequencyDraft] = React.useState<number | null>(null);
+  const [frequencyFilterBackend, setFrequencyFilterBackend] = React.useState("off");
   const [denoiseScope, setDenoiseScope] = useModelState<string>("denoise_scope");
   const denoiseScopeAll = denoiseScope !== "panel";
   // Reversible view ops (single panel): view_crop commits a viewport as the
@@ -2714,6 +2715,7 @@ function Show2D() {
   // commit still happens on release. tv/denova* panels arrive Python-filtered
   // and are passed through untouched (browserFilterSupported is false).
   const sigmaDraftForFilter = browserFilterActive ? sigmaDraft : null;
+  const sigmaDraftPanel = sigmaDraftForFilter === null ? -1 : selectedIdx;
   const panelFilterKnobs = React.useCallback((panel: number) => {
     const mode = (displayFilters && displayFilters.length > panel)
       ? displayFilters[panel] : (displayFilter || "none");
@@ -2721,25 +2723,26 @@ function Show2D() {
       ? Number(displaySigmas[panel]) : Number(displaySigma ?? 4);
     const bin = (spatialBins && spatialBins.length > panel)
       ? Number(spatialBins[panel]) : Number(spatialBin || 1);
-    if (sigmaDraftForFilter !== null && (denoiseScopeAll || panel === selectedIdx)) {
+    if (sigmaDraftForFilter !== null && (denoiseScopeAll || panel === sigmaDraftPanel)) {
       sigma = sigmaDraftForFilter;
     }
     return { mode, sigma, bin };
   }, [displayFilters, displaySigmas, spatialBins, displayFilter, displaySigma, spatialBin,
-      sigmaDraftForFilter, denoiseScopeAll, selectedIdx]);
+      sigmaDraftForFilter, sigmaDraftPanel, denoiseScopeAll]);
+  const frequencyDraftPanel = frequencyDraft === null ? -1 : selectedIdx;
   const panelFrequencyKnobs = React.useCallback((panel: number) => {
     const mode = frequencyFilterModes?.[panel] ?? frequencyFilter ?? "none";
     let cutoff = Number(frequencyFilterCutoffs?.[panel] ?? frequencyFilterCutoff ?? 0.15);
     let center = Number(frequencyFilterCenters?.[panel] ?? frequencyFilterCenter ?? 0.30);
     const width = Number(frequencyFilterWidths?.[panel] ?? frequencyFilterWidth ?? 0.12);
-    if (frequencyDraft !== null && (frequencyFilterScopeAll || panel === selectedIdx)) {
+    if (frequencyDraft !== null && (frequencyFilterScopeAll || panel === frequencyDraftPanel)) {
       if (normalizeFrequencyFilterMode(mode) === "bandpass") center = frequencyDraft;
       else cutoff = frequencyDraft;
     }
     return { mode: normalizeFrequencyFilterMode(mode), cutoff, center, width };
   }, [frequencyFilterModes, frequencyFilterCutoffs, frequencyFilterCenters, frequencyFilterWidths,
       frequencyFilter, frequencyFilterCutoff, frequencyFilterCenter, frequencyFilterWidth,
-      frequencyDraft, frequencyFilterScopeAll, selectedIdx]);
+      frequencyDraft, frequencyFilterScopeAll, frequencyDraftPanel]);
   const filterFrameForPanel = React.useCallback(async (panel: number, frame: Float32Array): Promise<Float32Array> => {
     if (isRgbFlags && isRgbFlags[panel]) return frame;
     let displayed = frame;
@@ -2753,6 +2756,7 @@ function Show2D() {
       const frequency = panelFrequencyKnobs(panel);
       if (frequencyFilterEnabled && frequencyFilterActive(frequency.mode)) {
         displayed = await applyFrequencyFilterBrowser(displayed, width, height, frequency);
+        setFrequencyFilterBackend(getFrequencyFilterBackend());
       }
       return displayed;
     } catch (err) {
@@ -4623,25 +4627,38 @@ function Show2D() {
       const useRoiCrop = roiFftActive && roiList && roiSelectedIdx >= 0 && roiSelectedIdx < roiList.length;
       const roi = useRoiCrop ? roiList[roiSelectedIdx] : null;
       const overviewDownsample = roi ? 1 : Math.max(1, Math.ceil(Math.max(width, height) / GALLERY_FFT_OVERVIEW_MAX_DIM));
-      const sourceConfig = `${nImages}:${width}x${height}:${roiFftKey}:${fftWindow ? 1 : 0}:${overviewDownsample}`;
+      const fftPanelIndices = visibleImageIndices;
+      const visibleFftSet = new Set(fftPanelIndices);
+      for (let idx = 0; idx < nImages; idx++) {
+        if (visibleFftSet.has(idx)) continue;
+        fftMagCacheGalleryRef.current[idx] = null;
+        galleryFftActiveKeysRef.current[idx] = null;
+        galleryFftPipelineRef.current[idx] = null;
+        fftOffscreensRef.current[idx] = null;
+      }
+      const sourceConfig = `${fftPanelIndices.join(",")}:${width}x${height}:${roiFftKey}:${fftWindow ? 1 : 0}:${overviewDownsample}`;
       galleryFftSourceConfigRef.current = sourceConfig;
       const dataEpoch = galleryFftDataEpochRef.current;
-      const targetKeys = Array.from({ length: nImages }, (_, idx) => makeGalleryFftCacheKey({
-        dataEpoch,
-        panel: idx,
-        frame: normalizedPanelFrameIndices[idx] || 0,
-        width,
-        height,
-        roiKey: roiFftKey,
-        fftWindow,
-        overviewDownsample,
-      }));
+      const targetKeys: (string | null)[] = new Array(nImages).fill(null);
+      for (const idx of fftPanelIndices) {
+        targetKeys[idx] = makeGalleryFftCacheKey({
+          dataEpoch,
+          panel: idx,
+          frame: normalizedPanelFrameIndices[idx] || 0,
+          width,
+          height,
+          roiKey: roiFftKey,
+          fftWindow,
+          overviewDownsample,
+        });
+      }
       galleryFftTargetKeysRef.current = targetKeys;
 
       const missingIndices: number[] = [];
       let activatedCachedResult = false;
-      for (let idx = 0; idx < nImages; idx++) {
+      for (const idx of fftPanelIndices) {
         const targetKey = targetKeys[idx];
+        if (!targetKey) continue;
         if (
           galleryFftActiveKeysRef.current[idx] === targetKey
           && fftMagCacheGalleryRef.current[idx]
@@ -4767,6 +4784,7 @@ function Show2D() {
 
       const rememberResult = (idx: number, mag: Float32Array): boolean => {
         const targetKey = targetKeys[idx];
+        if (!targetKey) return false;
         const protectedKeys = new Set(
           [...galleryFftActiveKeysRef.current, targetKey]
             .filter((key): key is string => !!key),
@@ -4814,12 +4832,12 @@ function Show2D() {
       // ── Batched progressive FFT: batch BATCH_SIZE at a time, display after each batch ──
       const BATCH_SIZE = 4;
       const tFFT0 = performance.now();
-      for (let batchStart = 0; batchStart < nImages; batchStart += BATCH_SIZE) {
+      for (let batchStart = 0; batchStart < missingIndices.length; batchStart += BATCH_SIZE) {
         if (cancelled || serial !== galleryFftComputeSerialRef.current) return;
-        const batchEnd = Math.min(batchStart + BATCH_SIZE, nImages);
-        const batchInputs = inputs.slice(batchStart, batchEnd).filter(inp => inp.real.length > 0);
+        const batchIndices = missingIndices.slice(batchStart, batchStart + BATCH_SIZE);
+        const batchInputs = batchIndices.map(idx => inputs[idx]).filter(inp => inp.real.length > 0);
         if (batchInputs.length === 0) continue;
-        setFftProgress(`FFT ${batchStart + 1}–${batchEnd}/${nImages} (${backend})`);
+        setFftProgress(`FFT ${batchStart + 1}–${Math.min(batchStart + BATCH_SIZE, missingIndices.length)}/${missingIndices.length} visible (${backend})`);
         let activatedBatchResult = false;
 
         if (useGPU && batchInputs.length > 1) {
@@ -4828,8 +4846,8 @@ function Show2D() {
             const batchResults = await gpuFFTRef.current!.fft2DBatch(batchInputs, fftW, fftH);
             if (cancelled || serial !== galleryFftComputeSerialRef.current) return;
             let ri = 0;
-            for (let idx = batchStart; idx < batchEnd; idx++) {
-              if (inputs[idx].real.length === 0) continue;
+            for (const idx of batchIndices) {
+              if (!inputs[idx] || inputs[idx].real.length === 0) continue;
               fftshift(batchResults[ri].real, fftW, fftH);
               fftshift(batchResults[ri].imag, fftW, fftH);
               const mag = computeMagnitude(batchResults[ri].real, batchResults[ri].imag);
@@ -4843,16 +4861,16 @@ function Show2D() {
             )));
             if (cancelled || serial !== galleryFftComputeSerialRef.current) return;
             let ri = 0;
-            for (let idx = batchStart; idx < batchEnd; idx++) {
-              if (inputs[idx].real.length === 0) continue;
+            for (const idx of batchIndices) {
+              if (!inputs[idx] || inputs[idx].real.length === 0) continue;
               activatedBatchResult = rememberResult(idx, workerResults[ri].magnitude) || activatedBatchResult;
               ri++;
             }
           }
         } else {
           // Single GPU FFT or CPU-worker fallback.
-          for (let idx = batchStart; idx < batchEnd; idx++) {
-            if (inputs[idx].real.length === 0) continue;
+          for (const idx of batchIndices) {
+            if (!inputs[idx] || inputs[idx].real.length === 0) continue;
             if (cancelled || serial !== galleryFftComputeSerialRef.current) return;
             const { real, imag } = inputs[idx];
             if (useGPU) {
@@ -4886,7 +4904,7 @@ function Show2D() {
       const tTotal = performance.now() - t0;
       if (!cancelled && serial === galleryFftComputeSerialRef.current) {
         const overview = overviewDownsample > 1 ? ` overview=${overviewDownsample}×` : "";
-        console.log(`[Show2D FFT] Gallery ${missingIndices.length}/${nImages} cache misses × ${fftW}×${fftH}${overview}: prep=${tPrep.toFixed(0)}ms fft=${tFFT.toFixed(0)}ms total=${tTotal.toFixed(0)}ms (${backend} batch=${BATCH_SIZE})`);
+        console.log(`[Show2D FFT] Gallery ${missingIndices.length}/${fftPanelIndices.length} visible cache misses × ${fftW}×${fftH}${overview}: prep=${tPrep.toFixed(0)}ms fft=${tFFT.toFixed(0)}ms total=${tTotal.toFixed(0)}ms (${backend} batch=${BATCH_SIZE})`);
         const debug = show2dPerfDebug();
         if (debug) debug.lastGalleryFftMs = tTotal;
       }
@@ -4906,7 +4924,7 @@ function Show2D() {
       if (serial === galleryFftComputeSerialRef.current) finishCurrentCompute();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [effectiveShowFft, isGallery, nImages, width, height, dataVersion, roiFftKey, fftWindow]);
+  }, [effectiveShowFft, isGallery, nImages, width, height, dataVersion, roiFftKey, fftWindow, visibleImageIndices]);
 
   // Gallery FFT data effect: normalize + colormap → cached offscreen canvases
   // (does NOT depend on gallery zoom/pan states)
@@ -4927,7 +4945,7 @@ function Show2D() {
     const slots: number[] = [];
     const uploadSlots: number[] = [];
 
-    for (let idx = 0; idx < nImages; idx++) {
+    for (const idx of visibleImageIndices) {
       const magnitude = fftMagCacheGalleryRef.current[idx];
       if (!magnitude) continue;
       const sourceKey = galleryFftActiveKeysRef.current[idx]
@@ -5040,7 +5058,7 @@ function Show2D() {
 
       // CPU fallback: still uses cached transformed data/ranges, so contrast
       // drag never recomputes FFT magnitudes.
-      for (let idx = 0; idx < nImages; idx++) {
+      for (const idx of visibleImageIndices) {
         const cache = galleryFftPipelineRef.current[idx];
         if (!cache) continue;
         const fc = fftContrastFor(idx);
@@ -5053,7 +5071,7 @@ function Show2D() {
 
     renderGalleryFft();
     return () => { cancelled = true; };
-  }, [effectiveShowFft, isGallery, nImages, width, height, galleryFftMagVersion, fftColormap, fftScaleMode, fftAuto, fftVminPct, fftVmaxPct, selectedIdx, fftLinkedContrast, fftContrastStates, canvasRepaintSignal]);
+  }, [effectiveShowFft, isGallery, nImages, width, height, galleryFftMagVersion, fftColormap, fftScaleMode, fftAuto, fftVminPct, fftVmaxPct, selectedIdx, fftLinkedContrast, fftContrastStates, canvasRepaintSignal, visibleImageIndices]);
 
   React.useEffect(() => {
     if (!effectiveShowFft || !isGallery || !fftMetricsEnabled) {
@@ -5063,7 +5081,7 @@ function Show2D() {
     const fftW = galleryFftDimsRef.current?.w ?? width;
     const fftH = galleryFftDimsRef.current?.h ?? height;
     const next = new Array<FftQualityMetrics | null>(nImages).fill(null);
-    for (let idx = 0; idx < nImages; idx++) {
+    for (const idx of visibleImageIndices) {
       const mag = fftMagCacheGalleryRef.current[idx];
       if (!mag) continue;
       next[idx] = computeFftQualityMetrics(mag, fftW, fftH, {
@@ -5072,7 +5090,7 @@ function Show2D() {
       });
     }
     setGalleryFftQuality(next);
-  }, [effectiveShowFft, isGallery, fftMetricsEnabled, galleryFftMagVersion, nImages, width, height, pixelSizeForPanel, pixelUnit]);
+  }, [effectiveShowFft, isGallery, fftMetricsEnabled, galleryFftMagVersion, nImages, width, height, pixelSizeForPanel, pixelUnit, visibleImageIndices]);
 
   // Gallery FFT draw effect: cheap drawImage from cached offscreens (zoom/pan changes)
   React.useLayoutEffect(() => {
@@ -5080,7 +5098,7 @@ function Show2D() {
     const fftW = galleryFftDimsRef.current?.w ?? width;
     const fftH = galleryFftDimsRef.current?.h ?? height;
 
-    for (let idx = 0; idx < nImages; idx++) {
+    for (const idx of visibleImageIndices) {
       const offscreen = fftOffscreensRef.current[idx];
       const canvas = fftCanvasRefs.current[idx];
       if (!offscreen || !canvas) continue;
@@ -5099,7 +5117,7 @@ function Show2D() {
       ctx.drawImage(offscreen, 0, 0, fftW, fftH, 0, 0, canvasW, canvasH);
       ctx.restore();
     }
-  }, [effectiveShowFft, isGallery, nImages, canvasW, canvasH, width, height, galleryFftOffscreenVersion, galleryFftStates, fftLinkedZoom, linkedFftZoomState, fftSmooth, canvasRepaintSignal]);
+  }, [effectiveShowFft, isGallery, nImages, canvasW, canvasH, width, height, galleryFftOffscreenVersion, galleryFftStates, fftLinkedZoom, linkedFftZoomState, fftSmooth, canvasRepaintSignal, visibleImageIndices]);
 
   // -------------------------------------------------------------------------
   // Mouse Handlers for Zoom/Pan
@@ -6382,6 +6400,13 @@ function Show2D() {
       ? `Filter: Band-pass center ${frequencyValueLabel(frequencyUiKnobs.center)}, width ${frequencyValueLabel(frequencyUiKnobs.width)} (view only; raw counts unchanged)`
       : `Filter: ${frequencyUiKnobs.mode === "lowpass" ? "Low-pass" : "High-pass"} cutoff ${frequencyValueLabel(frequencyUiKnobs.cutoff)} (view only; raw counts unchanged)`)
     : "";
+  const setFrequencyMaster = (enabled: boolean) => {
+    if (enabled && !Array.from({ length: nImages }, (_, panel) => panelFrequencyKnobs(panel)).some(knobs => frequencyFilterActive(knobs.mode))) {
+      setFrequencyFilter("lowpass");
+      mirrorFrequencyKnobEdit("mode", "lowpass");
+    }
+    setFrequencyFilterEnabled(enabled);
+  };
   // Collapse-safe reduction badge: when the controls (and their inline denoise
   // / view banners) are hidden, surface any active reduction in the always-on
   // title row. Strip the trailing "how to undo" hint for the compact label and
@@ -6458,7 +6483,10 @@ function Show2D() {
         width: `${ringValue * 100}%`, height: `${ringValue * 100}%`,
         transform: "translate(-50%, -50%)", borderRadius: "50%",
         border: "2px solid rgba(0, 229, 255, 0.95)",
-        boxShadow: "0 0 0 1px rgba(0,0,0,0.75)",
+        bgcolor: knobs.mode === "highpass" ? "rgba(0,0,0,0.55)" : "transparent",
+        boxShadow: knobs.mode === "lowpass"
+          ? "0 0 0 1px rgba(0,0,0,0.75), 0 0 0 9999px rgba(0,0,0,0.55)"
+          : "0 0 0 1px rgba(0,0,0,0.75)",
         cursor: "crosshair", touchAction: "none", zIndex: 6,
       }}
     >
@@ -6466,8 +6494,11 @@ function Show2D() {
         Math.max(0, knobs.center - knobs.width / 2),
         Math.min(1, knobs.center + knobs.width / 2),
       ].map((radius, index) => (
-        <Box key={index} sx={{ position: "absolute", left: "50%", top: "50%", width: `${radius / Math.max(0.001, ringValue) * 100}%`, height: `${radius / Math.max(0.001, ringValue) * 100}%`, transform: "translate(-50%, -50%)", borderRadius: "50%", border: "1px dashed rgba(255,255,255,0.9)", pointerEvents: "none" }} />
+        <Box key={index} sx={{ position: "absolute", left: "50%", top: "50%", width: `${radius / Math.max(0.001, ringValue) * 100}%`, height: `${radius / Math.max(0.001, ringValue) * 100}%`, transform: "translate(-50%, -50%)", borderRadius: "50%", border: "1px dashed rgba(255,255,255,0.95)", bgcolor: index === 0 ? "rgba(0,0,0,0.55)" : "transparent", boxShadow: index === 1 ? "0 0 0 9999px rgba(0,0,0,0.55)" : "none", pointerEvents: "none" }} />
       ))}
+      <Box sx={{ position: "absolute", left: "50%", top: -24, transform: "translateX(-50%)", px: 0.75, py: 0.25, borderRadius: 0.75, bgcolor: "rgba(0,0,0,0.78)", color: "rgba(200,250,255,0.98)", fontSize: 9, lineHeight: 1.2, fontWeight: 700, whiteSpace: "nowrap", pointerEvents: "none", textShadow: "0 1px 1px #000" }}>
+        {knobs.mode === "lowpass" ? "Inside kept" : knobs.mode === "highpass" ? "Outside kept" : "Band kept"}
+      </Box>
     </Box>
     ) : null;
   };
@@ -6498,6 +6529,7 @@ function Show2D() {
       data-show2d-fft-cache-entries={galleryFftDebug?.galleryFftCacheEntries ?? 0}
       data-show2d-fft-cache-bytes={galleryFftDebug?.galleryFftCacheBytes ?? 0}
       data-show2d-fft-active-keys={(galleryFftDebug?.galleryFftActiveKeys ?? []).join(",")}
+      data-frequency-filter-backend={frequencyFilterEnabled ? frequencyFilterBackend : "off"}
       sx={{ p: 2, bgcolor: themeColors.bg, color: themeColors.text, width: "100%", maxWidth: "100%", boxSizing: "border-box", fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif", "& canvas": { display: "block" }, "@media (max-width: 700px)": { p: 0, ".jp-OutputArea-output &, .jp-OutputArea-child &": { width: "calc(100vw - 96px)", maxWidth: "calc(100vw - 96px)" } } }}
     >
       <FolderWatchBadge
@@ -6935,7 +6967,7 @@ function Show2D() {
                   aria-controls={moreMenuAnchor ? "show2d-more-menu" : undefined}
                   aria-expanded={moreMenuAnchor ? "true" : undefined}
                   aria-haspopup="menu"
-                  title="More tools: ROI, Denoise, Diff"
+                  title="More tools: ROI, Denoise, Filter, Diff"
                 >
                   More
                 </Button>
@@ -6982,10 +7014,10 @@ function Show2D() {
                 </MenuItem>
                 <MenuItem
                   dense
-                  onClick={() => setFrequencyFilterEnabled(!frequencyFilterEnabled)}
+                  onClick={() => setFrequencyMaster(!frequencyFilterEnabled)}
                   sx={{ fontSize: 12, gap: 1, color: frequencyFilterEnabled && frequencyFilterActive(frequencyFilter) ? themeColors.accent : themeColors.text }}
                 >
-                  <Typography sx={{ flex: 1, fontSize: 12, color: "inherit" }} title="Remove a background or isolate a periodicity. View only; raw counts remain unchanged.">Filter</Typography>
+                  <Typography sx={{ flex: 1, fontSize: 12, color: "inherit" }} title="Off by default. Turn on to remove a background or isolate a periodicity; raw counts remain unchanged.">Filter</Typography>
                   <Button
                     size="small"
                     onClick={(event) => { event.stopPropagation(); setShowFrequencyFilter(!showFrequencyFilter); }}
@@ -6995,7 +7027,7 @@ function Show2D() {
                   <Switch
                     checked={frequencyFilterEnabled ?? false}
                     onClick={(event) => event.stopPropagation()}
-                    onChange={() => setFrequencyFilterEnabled(!frequencyFilterEnabled)}
+                    onChange={() => setFrequencyMaster(!frequencyFilterEnabled)}
                     size="small"
                     sx={switchStyles.small}
                     slotProps={{ input: { "aria-label": "Toggle frequency filter effect" } }}
@@ -7898,7 +7930,7 @@ function Show2D() {
                     <Box sx={{ ...controlRow, ...mobileControlRowSx, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, opacity: 1, pointerEvents: "auto" }}>
                       <Box sx={controlPairSx}>
                         <Typography sx={compactLabelSx} title="Low-pass removes fine detail; High-pass removes slow background; Band-pass isolates a periodicity.">Filter</Typography>
-                        <Select size="small" value={frequencyUiKnobs.mode} onChange={(event) => { setFrequencyFilter(String(event.target.value)); mirrorFrequencyKnobEdit("mode", String(event.target.value)); }} MenuProps={themedMenuProps} sx={{ ...themedSelect, minWidth: 84 }}>
+                        <Select size="small" value={frequencyUiKnobs.mode} onChange={(event) => { const mode = String(event.target.value); setFrequencyFilter(mode); mirrorFrequencyKnobEdit("mode", mode); if (mode !== "none") setFrequencyFilterEnabled(true); }} MenuProps={themedMenuProps} sx={{ ...themedSelect, minWidth: 84 }}>
                           <MenuItem value="none">None</MenuItem>
                           <MenuItem value="lowpass">Low-pass</MenuItem>
                           <MenuItem value="highpass">High-pass</MenuItem>

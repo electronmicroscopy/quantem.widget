@@ -6,8 +6,19 @@ import pytest
 from quantem.widget import Show2D, Show3D
 
 
+@pytest.mark.parametrize("viewer", [Show2D, Show3D])
+def test_frequency_filter_is_off_by_default(viewer):
+    # C1: ordinary viewer construction, expect no hidden frequency operation.
+    data = np.ones((8, 8), dtype=np.float32) if viewer is Show2D else np.ones((3, 8, 8), dtype=np.float32)
+    widget = viewer(data, verbose=False)
+
+    assert widget.frequency_filter == "none"
+    assert widget.frequency_filter_enabled is False
+    assert widget.frequency_filter_banner == ""
+
+
 def test_show2d_frequency_filter_is_view_only():
-    # C1: active high-pass at construction, expect raw data/stats unchanged.
+    # C2: active high-pass at construction, expect raw data/stats unchanged.
     data = np.arange(64, dtype=np.float32).reshape(8, 8)
     widget = Show2D(
         data,
@@ -23,7 +34,7 @@ def test_show2d_frequency_filter_is_view_only():
 
 
 def test_show2d_frequency_filter_master_preserves_settings():
-    # C2: master is off, expect configured band retained for exact re-enable.
+    # C3: master is off, expect configured band retained for exact re-enable.
     widget = Show2D(
         np.ones((8, 8), dtype=np.float32),
         frequency_filter="bandpass",
@@ -40,7 +51,7 @@ def test_show2d_frequency_filter_master_preserves_settings():
 
 
 def test_show2d_frequency_filter_accepts_per_panel_settings():
-    # C3: A/B gallery, expect each panel to keep an independent scientific goal.
+    # C4: A/B gallery, expect each panel to keep an independent scientific goal.
     data = [
         np.ones((8, 8), dtype=np.float32),
         np.eye(8, dtype=np.float32),
@@ -62,7 +73,7 @@ def test_show2d_frequency_filter_accepts_per_panel_settings():
 
 
 def test_show3d_frequency_filter_state_round_trip():
-    # C4: stack filter state, expect saved state keeps the exact view settings.
+    # C5: stack filter state, expect saved state keeps the exact view settings.
     data = np.arange(3 * 8 * 8, dtype=np.float32).reshape(3, 8, 8)
     widget = Show3D(
         data,
@@ -83,7 +94,7 @@ def test_show3d_frequency_filter_state_round_trip():
 
 @pytest.mark.parametrize("viewer", [Show2D, Show3D])
 def test_frequency_filter_rejects_invalid_normalized_cutoff(viewer):
-    # C5: cutoff outside normalized Nyquist, expect a corrective error.
+    # C6: cutoff outside normalized Nyquist, expect a corrective error.
     data = np.ones((8, 8), dtype=np.float32) if viewer is Show2D else np.ones((3, 8, 8), dtype=np.float32)
     with pytest.raises(ValueError, match="between 0 and 1"):
         viewer(data, frequency_filter="highpass", frequency_filter_cutoff=1.2, verbose=False)
