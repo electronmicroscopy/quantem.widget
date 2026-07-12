@@ -7,6 +7,8 @@ around a real question from the microscope room:
   star the good fields of view, open them directly.
 - **HTML and file export** - hand a collaborator one interactive HTML file, a
   figure, or a full report package.
+- **Saving GIF and MP4 movies** - write raw arrays or widget-rendered views to
+  GIF and MP4, with CUDA MP4 compression on NVIDIA workstations.
 - **Memory management** - know what a load will cost in RAM/VRAM, pick the
   GPU, and give the memory back.
 - **Live folder watching** - keep one widget open at the scope and let new

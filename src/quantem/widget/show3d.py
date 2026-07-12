@@ -5196,7 +5196,7 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         frame is exported). FFT overlays and analysis panels are intentionally
         omitted so the GIF contains only the scientific image panels.
         """
-        from quantem.widget.render import gif as gif_utils
+        from quantem.widget import movie
         fps = float(self.fps) if fps is None else float(fps)
         frames = self._render_animation_frames(
             quality=quality,
@@ -5204,7 +5204,7 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             show_frame_labels=bool(show_frame_labels),
             background=background,
         )
-        return gif_utils.write_gif(frames, path, fps)
+        return movie.save_gif(frames, path, fps=fps)
 
     def save_mp4(self, path: str | pathlib.Path, *, quality: str = "high",
                  fps: float | None = None, playback: str = "forward",
@@ -5240,7 +5240,7 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         pathlib.Path
             The written MP4 path.
         """
-        from quantem.widget.render import gif as gif_utils
+        from quantem.widget import movie
         fps = float(self.fps) if fps is None else float(fps)
         frames = self._render_animation_frames(
             quality=quality,
@@ -5248,7 +5248,7 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             show_frame_labels=bool(show_frame_labels),
             background=background,
         )
-        return gif_utils.write_mp4(frames, path, fps, crf=crf)
+        return movie.save_mp4(frames, path, fps=fps, crf=crf)
 
     def save_animation_preview(
         self,

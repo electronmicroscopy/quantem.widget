@@ -279,7 +279,12 @@ def write_mp4(frames: list, path: str | pathlib.Path, fps: float, *, crf: int = 
         raise ValueError("write_mp4 requires at least one frame")
     path = pathlib.Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    ffmpeg = "ffmpeg"
+    try:
+        import imageio_ffmpeg
+    except ImportError:
+        ffmpeg = "ffmpeg"
+    else:
+        ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
     arrays = [_even_rgb_array(frame) for frame in frames]
     height, width = arrays[0].shape[:2]
     for i, arr in enumerate(arrays[1:], start=1):

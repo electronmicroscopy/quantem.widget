@@ -381,6 +381,9 @@ w.save_gif("movie.gif", quality="medium", fps=6)
 w.save_mp4("movie.mp4", quality="high", fps=12)
 ```
 
+For array-first workflows that do not need to construct a widget, use
+`quantem.widget.movie.save_gif(...)` or `quantem.widget.movie.save_mp4(...)`.
+
 `quality="low"`, `"medium"`, and `"high"` control the exported spatial
 resolution. GIF is always palette-limited, so medium is usually the practical
 slide/email choice; high is sharper but larger. Pass `show_frame_labels=True`

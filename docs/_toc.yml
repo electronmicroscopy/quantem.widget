@@ -30,6 +30,8 @@ parts:
         sections:
           - file: tutorials/showfolder
           - file: tutorials/widget_export
+          - file: tutorials/movie_export
+            title: Saving GIF and MP4 movies
           - file: tutorials/memory_management
             title: Memory management
           - file: tutorials/watch_folder
