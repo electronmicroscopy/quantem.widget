@@ -6275,6 +6275,13 @@ function Show3D() {
       gpuCmapReadyRef.current
     );
     if (offlineGpuPlaybackOwnsCanvas) return;
+    // During live playback with browser-side transforms (denoise, diff/avg, or
+    // FFT filter), the rAF playback loop owns the canvas and waits until the
+    // final transformed display frame is cached before advancing. Letting this
+    // static effect repaint on browserFilterTick/frequencyRenderVersion races
+    // the loop and produces the visible "twitch" scientists saw after enabling
+    // denoise + band/high/low-pass filters.
+    if (!offline && playing && frameTransformActive()) return;
     // Apply log scale using reusable buffer
     const processed = logScale && logBufferRef.current
       ? applyLogScaleInPlace(frameData, logBufferRef.current)

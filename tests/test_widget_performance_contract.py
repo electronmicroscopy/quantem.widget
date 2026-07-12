@@ -147,6 +147,8 @@ def test_show3d_filtered_playback_waits_for_cached_display_frames():
     assert "Do not clamp this live DOM update to loop handles" in show3d
     assert "users see \"1/18\" while the canvas was already showing a later frame" in show3d
     assert 'data-show3d-playback-count="true"' in show3d
+    assert "if (!offline && playing && frameTransformActive()) return;" in show3d
+    assert "visible \"twitch\"" in show3d
 
 
 def test_show3d_bottom_fft_layout_always_stacks_below_main_panel():
