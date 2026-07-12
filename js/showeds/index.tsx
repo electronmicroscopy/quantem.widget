@@ -3794,9 +3794,10 @@ function ShowEDS() {
                   width: 16,
                   height: 16,
                   cursor: "nwse-resize",
-                  opacity: 0.65,
+                  opacity: 0.6,
                   zIndex: 4,
-                  background: `linear-gradient(135deg, transparent 50%, ${themeColors.resize} 50%)`,
+                  background: `linear-gradient(135deg, transparent 50%, ${themeColors.accent} 50%)`,
+                  touchAction: "none",
                   "&:hover": { opacity: 1 },
                 }}
               />
@@ -3847,8 +3848,9 @@ function ShowEDS() {
                   width: 16,
                   height: 16,
                   cursor: "nwse-resize",
-                  opacity: 0.65,
-                  background: `linear-gradient(135deg, transparent 50%, ${themeColors.resize} 50%)`,
+                  opacity: 0.6,
+                  background: `linear-gradient(135deg, transparent 50%, ${themeColors.accent} 50%)`,
+                  touchAction: "none",
                   "&:hover": { opacity: 1 },
                 }}
               />

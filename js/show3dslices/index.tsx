@@ -4918,9 +4918,11 @@ function Show3DSlices() {
                 <Box
                   onMouseDown={handleVolumeResizeStart}
                   sx={{
-                    position: "absolute", bottom: 2, right: 2, width: 12, height: 12,
-                    cursor: "nwse-resize", opacity: 0.4,
-                    background: `linear-gradient(135deg, transparent 50%, ${tc.textMuted} 50%)`,
+                    position: "absolute", bottom: 0, right: 0, width: 16, height: 16,
+                    cursor: "nwse-resize", opacity: 0.6,
+                    background: `linear-gradient(135deg, transparent 50%, ${tc.accent} 50%)`,
+                    touchAction: "none",
+                    zIndex: 5,
                     "&:hover": { opacity: 1 },
                   }}
                 />
@@ -5048,9 +5050,11 @@ function Show3DSlices() {
                 <Box
                   onMouseDown={(e) => handleResizeStart(e, a)}
                   sx={{
-                    position: "absolute", bottom: 2, right: 2, width: 12, height: 12,
-                    cursor: "nwse-resize", opacity: 0.4,
-                    background: `linear-gradient(135deg, transparent 50%, ${tc.textMuted} 50%)`,
+                    position: "absolute", bottom: 0, right: 0, width: 16, height: 16,
+                    cursor: "nwse-resize", opacity: 0.6,
+                    background: `linear-gradient(135deg, transparent 50%, ${tc.accent} 50%)`,
+                    touchAction: "none",
+                    zIndex: 5,
                     "&:hover": { opacity: 1 },
                   }}
                 />

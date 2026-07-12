@@ -12451,8 +12451,9 @@ function Show3D() {
                       height: 16,
                       cursor: "nwse-resize",
                       opacity: 0.6,
-                      background: `linear-gradient(135deg, transparent 50%, ${themeColors.border} 50%)`,
-                      borderRadius: "0 0 4px 0",
+                      background: `linear-gradient(135deg, transparent 50%, ${themeColors.accent} 50%)`,
+                      touchAction: "none",
+                      zIndex: 5,
                       "&:hover": { opacity: 1 },
                     }}
                   />
@@ -13111,7 +13112,7 @@ function Show3D() {
               <canvas ref={previewCanvasRef} width={previewCanvasDims.w} height={previewCanvasDims.h} style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", imageRendering: "pixelated" }} role="img" aria-label={`ROI preview crop${previewCropDims ? ` (${previewCropDims.w} by ${previewCropDims.h} pixels)` : ""}`} />
               <canvas ref={previewOverlayRef} width={Math.round(previewCanvasDims.w * DPR)} height={Math.round(previewCanvasDims.h * DPR)} style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", pointerEvents: "none" }} aria-hidden="true" />
               {showResizeControls && (
-                <Box onMouseDown={handleMainResizeStart} sx={{ position: "absolute", bottom: 0, right: 0, width: 28, height: 28, cursor: "nwse-resize", opacity: 0.95, background: `linear-gradient(135deg, transparent 50%, ${themeColors.border} 50%)`, "&:hover": { opacity: 1 } }} />
+                <Box onMouseDown={handleMainResizeStart} sx={{ position: "absolute", bottom: 0, right: 0, width: 16, height: 16, cursor: "nwse-resize", opacity: 0.6, background: `linear-gradient(135deg, transparent 50%, ${themeColors.accent} 50%)`, touchAction: "none", zIndex: 5, "&:hover": { opacity: 1 } }} />
               )}
             </Box>
             {/* All-ROI Stats - one row per ROI, same style as main stats bar */}
@@ -13276,9 +13277,9 @@ function Show3D() {
                         height: 16,
                         cursor: "nwse-resize",
                         opacity: 0.6,
-                        background: `linear-gradient(135deg, transparent 50%, ${themeColors.border} 50%)`,
-                        borderRadius: "0 0 4px 0",
-                        zIndex: 3,
+                        background: `linear-gradient(135deg, transparent 50%, ${themeColors.accent} 50%)`,
+                        touchAction: "none",
+                        zIndex: 5,
                         "&:hover": { opacity: 1 },
                       }}
                     />
