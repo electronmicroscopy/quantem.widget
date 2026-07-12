@@ -2786,31 +2786,38 @@ function Show2D() {
   const mirrorFilterKnobEdit = React.useCallback((name: "mode" | "sigma" | "bin", value: string | number) => {
     if (!browserFilterActive || nImages <= 0) return;
     const idx = Math.min(Math.max(0, selectedIdx || 0), nImages - 1);
-    const updated = <T,>(current: T[] | undefined | null, v: T): T[] => {
+    // Panel scope: preserve every other panel's own value; fill any missing
+    // entry with a NEUTRAL (mode "none" = off), never the new value — otherwise
+    // a stale/short array would broadcast the edit to every panel.
+    const updated = <T,>(current: T[] | undefined | null, v: T, neutral: T): T[] => {
       if (denoiseScopeAll) return new Array<T>(nImages).fill(v);
-      const values = (current && current.length === nImages)
-        ? [...current] : new Array<T>(nImages).fill(v);
+      const values = Array.from({ length: nImages }, (_, i) =>
+        (current && i < current.length) ? current[i] : neutral);
       values[idx] = v;
       return values;
     };
-    if (name === "mode") setDisplayFilters(updated(displayFilters, String(value)));
-    else if (name === "sigma") setDisplaySigmas(updated(displaySigmas, Number(value)));
-    else setSpatialBins(updated(spatialBins, Number(value)));
+    if (name === "mode") setDisplayFilters(updated(displayFilters, String(value), "none"));
+    else if (name === "sigma") setDisplaySigmas(updated(displaySigmas, Number(value), 4));
+    else setSpatialBins(updated(spatialBins, Number(value), 1));
   }, [browserFilterActive, nImages, selectedIdx, denoiseScopeAll, displayFilters, displaySigmas,
       spatialBins, setDisplayFilters, setDisplaySigmas, setSpatialBins]);
   const mirrorFrequencyKnobEdit = React.useCallback((name: "mode" | "cutoff" | "center" | "width", value: string | number) => {
     if (nImages <= 0) return;
     const idx = Math.min(Math.max(0, selectedIdx || 0), nImages - 1);
-    const updated = <T,>(current: T[] | undefined | null, v: T): T[] => {
+    // Panel scope: preserve every other panel's own value; fill any missing
+    // entry with a NEUTRAL (mode "none" = off), never the new value — otherwise
+    // a stale/short array would broadcast the filter edit to every panel.
+    const updated = <T,>(current: T[] | undefined | null, v: T, neutral: T): T[] => {
       if (frequencyFilterScopeAll) return new Array<T>(nImages).fill(v);
-      const values = current?.length === nImages ? [...current] : new Array<T>(nImages).fill(v);
+      const values = Array.from({ length: nImages }, (_, i) =>
+        (current && i < current.length) ? current[i] : neutral);
       values[idx] = v;
       return values;
     };
-    if (name === "mode") setFrequencyFilterModes(updated(frequencyFilterModes, String(value)));
-    else if (name === "cutoff") setFrequencyFilterCutoffs(updated(frequencyFilterCutoffs, Number(value)));
-    else if (name === "center") setFrequencyFilterCenters(updated(frequencyFilterCenters, Number(value)));
-    else setFrequencyFilterWidths(updated(frequencyFilterWidths, Number(value)));
+    if (name === "mode") setFrequencyFilterModes(updated(frequencyFilterModes, String(value), "none"));
+    else if (name === "cutoff") setFrequencyFilterCutoffs(updated(frequencyFilterCutoffs, Number(value), 0.15));
+    else if (name === "center") setFrequencyFilterCenters(updated(frequencyFilterCenters, Number(value), 0.30));
+    else setFrequencyFilterWidths(updated(frequencyFilterWidths, Number(value), 0.12));
   }, [nImages, selectedIdx, frequencyFilterScopeAll, frequencyFilterModes, frequencyFilterCutoffs,
       frequencyFilterCenters, frequencyFilterWidths, setFrequencyFilterModes, setFrequencyFilterCutoffs,
       setFrequencyFilterCenters, setFrequencyFilterWidths]);
