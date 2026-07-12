@@ -2811,6 +2811,10 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             offline = stack_bytes <= 1 * 1024 * 1024 * 1024
         if offline:
             self.offline = True
+            # The offline stack is packed RAW (see _offline_pack_source); the browser
+            # owns denoise (WGSL, live sigma), so flag it. A no-WebGPU viewer falls back
+            # to the CPU filter port. Matches Show2D's offline behaviour.
+            self._webgpu_filter_ok = True
             self._pack_offline_u8_stack(offline_source)
 
         # Observers
@@ -6381,34 +6385,19 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             print(banner)
 
     def _offline_pack_source(self) -> np.ndarray:
-        """Offline pack source with the display filter applied per panel frame.
+        """Offline pack source, RAW (unfiltered).
 
-        Separate panels are filtered before the horizontal concat so the
-        filter never bleeds across panel boundaries.
+        The offline uint8 stack ships raw and the browser applies denoise (WGSL,
+        with live sigma; CPU fallback without WebGPU), so a σ change re-filters the
+        packed frames client-side instead of being baked in here. ``_webgpu_filter_ok``
+        is set alongside the pack so the frontend knows to filter. Matches Show2D.
         """
         # True-color stacks pack RGB, not the luminance plane used for stats.
         if self.is_rgb and getattr(self, "_rgb_data", None) is not None:
             return np.ascontiguousarray(self._rgb_data, dtype=np.float32)
         if self.separate_panel_frames and self._separate_panel_data is not None:
-            panels = self._separate_panel_data
-            if self._display_filter_active():
-                # Offline export always bakes the filter in Python (no live
-                # kernel in the HTML), independent of _webgpu_filter_ok.
-                panels = [
-                    np.stack(
-                        [self._filter_frame(stack[k]) for k in range(int(stack.shape[0]))],
-                        axis=0,
-                    )
-                    for stack in panels
-                ]
-            return np.concatenate(panels, axis=2)
-        data = self._display_data
-        if self._display_filter_active():
-            data = np.stack(
-                [self._filter_frame(data[k], cache_key=("off", k)) for k in range(int(data.shape[0]))],
-                axis=0,
-            )
-        return data
+            return np.concatenate(self._separate_panel_data, axis=2)
+        return self._display_data
 
     def _wire_frame(self, frame: np.ndarray, cache_key=None) -> np.ndarray:
         """Filtered VIEW copy of one display-bound frame; raw data untouched.

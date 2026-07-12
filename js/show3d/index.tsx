@@ -2411,7 +2411,11 @@ function Show3D() {
   // (non-software) adapter flips it, so SwiftShader-class fallbacks keep the
   // Python path. Offline pages keep their Python-baked frames.
   const [webgpuFilterOk, setWebgpuFilterOk] = useModelState<boolean>("_webgpu_filter_ok");
-  const browserFilterActive = !!webgpuFilterOk && !offline && !isRgb;
+  // Offline (the auto-enabled uint8-pack path for stacks <1GB) ALSO filters in the
+  // browser: Python ships the offline stack RAW and sets _webgpu_filter_ok, so the WGSL
+  // port applies denoise here with live sigma - same as the live-kernel path. (Was
+  // gated `&& !offline`, which disabled real-time denoise for the common offline case.)
+  const browserFilterActive = !!webgpuFilterOk && !isRgb;
   const denoiseResolved = resolveDenoiseMode(displayFilter || "none", spatialBin || 1);
   const denoiseSigmaLive = sigmaDraft ?? Number(displaySigma ?? 4);
   const browserFilterKnobsOn = browserFilterActive
