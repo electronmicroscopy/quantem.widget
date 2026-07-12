@@ -11,6 +11,7 @@ from pathlib import Path
 import time
 
 import numpy as np
+from PIL import Image
 
 from quantem.widget import Show2D, Show3D, Show4DSTEM
 
@@ -58,6 +59,67 @@ def test_show3d_lightweight_save_snapshot_is_fast_and_compact():
     assert "_offline_stack" not in state
     assert "_offline_float_stack" not in state
     assert "export_payload" not in state
+
+
+def test_show3d_frame_server_mount_defers_initial_native_frame_wire():
+    """C1: remote users see controls before the first full frame payload."""
+    rng = np.random.default_rng(921)
+    widget = Show3D(
+        rng.random((4, 128, 128), dtype=np.float32),
+        offline=False,
+        save_state=False,
+        title="defer initial frame wire",
+    )
+
+    assert widget.frame_server_url
+    assert widget.frame_bytes == b""
+    assert widget.frame_seq == 0
+
+    widget.goto(1)
+
+    assert len(widget.frame_bytes) == 128 * 128 * 4
+    assert widget.frame_seq == 1
+
+
+def test_show3d_lazy_panel_folders_mount_without_preloading_stack(tmp_path):
+    """C1: remote real-data panels mount from disk paths, frames fetch native."""
+    panel_dirs = []
+    for panel in range(2):
+        folder = tmp_path / f"panel_{panel}"
+        folder.mkdir()
+        panel_dirs.append(folder)
+        for idx in range(3):
+            frame = np.full((8, 10), panel * 100 + idx, dtype=np.uint16)
+            Image.fromarray(frame).save(folder / f"frame_{idx:03d}.png")
+
+    widget = Show3D.from_panel_folders(
+        panel_dirs,
+        offline=False,
+        save_state=False,
+        title="lazy panel folders",
+    )
+
+    assert widget.n_slices == 3
+    assert widget.n_panels == 2
+    assert widget.separate_panel_frames
+    assert widget.frame_server_url
+    assert widget.frame_bytes == b""
+    assert widget.width == 20
+    assert widget.height == 8
+
+    widget.goto(2)
+
+    assert widget.frame_bytes == b""
+    assert widget.frame_seq >= 1
+
+    status, frame = widget._frame_for_http(2, widget.frame_server_version, panel=1)
+
+    assert status == 200
+    assert isinstance(frame, np.ndarray)
+    assert frame.shape == (8, 10)
+    assert frame.dtype == np.float32
+    assert frame.nbytes == 8 * 10 * 4
+    assert float(frame[0, 0]) == 102.0
 
 
 def test_show2d_and_show3d_paged_sliders_use_local_preview_contract():
@@ -149,6 +211,42 @@ def test_show3d_filtered_playback_waits_for_cached_display_frames():
     assert 'data-show3d-playback-count="true"' in show3d
     assert "if (!offline && playing && frameTransformActive()) return;" in show3d
     assert "visible \"twitch\"" in show3d
+
+
+def test_show3d_remote_scrub_transport_instrumentation_contract():
+    """Remote scrub measurements must split Python, Comm, decode, and paint."""
+    show3d_py = (ROOT / "src" / "quantem" / "widget" / "show3d.py").read_text(
+        encoding="utf-8"
+    )
+    show3d_js = (ROOT / "js" / "show3d" / "index.tsx").read_text(encoding="utf-8")
+
+    assert "frame_transport_timing" in show3d_py
+    assert "buffer_transport_timing" in show3d_py
+    assert "_scrub_preview_request" in show3d_py
+    assert "_scrub_preview_bytes" in show3d_py
+    assert "_scrub_preview_info" in show3d_py
+    assert "[Show3D scrub preview]" in show3d_py
+    assert "release the slider or zoom/settle the view to request native full resolution" in show3d_py
+    assert "pythonPrepareMs" in show3d_py
+    assert "pythonEncodeMs" in show3d_py
+    assert "pythonTraitSetMs" in show3d_py
+    assert "sendTimeMs" in show3d_py
+
+    assert 'mode === "scrubTransport"' in show3d_js
+    assert 'mode === "scrubPreviewTransport"' in show3d_js
+    assert 'setScrubPreviewRequest(JSON.stringify({' in show3d_js
+    assert 'kind: "scrubPreview"' in show3d_js
+    assert 'if (!transformActive && requestScrubPreview(next)) return;' in show3d_js
+    assert "release the slider or zoom/settle the view to request native full resolution" in show3d_js
+    assert "const commitSlice = (idx: number) =>" in show3d_js
+    assert "setSliceIdx(next);" in show3d_js
+    assert "browserReceiveLatencyMs" in show3d_js
+    assert "jsDecodeMs" in show3d_js
+    assert "endToEndUiLatencyMs" in show3d_js
+    assert "__quantemShow3DPerf" in show3d_js
+    assert "_defer_initial_frame_wire" in show3d_py
+    assert "can mount controls immediately" in show3d_py
+    assert "if (offline || !frameServerUrl || playing) return;" in show3d_js
 
 
 def test_show3d_bottom_fft_layout_always_stacks_below_main_panel():

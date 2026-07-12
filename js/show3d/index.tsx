@@ -2328,6 +2328,36 @@ function Show3D() {
   const [panelGapTrait] = useModelState<number>("panel_gap");
   const [linkContrast, setLinkContrast] = useModelState<boolean>("link_contrast");
   const [cmap, setCmap] = useModelState<string>("cmap");
+  const [panelCmaps, setPanelCmaps] = useModelState<string[]>("panel_cmaps");
+  const normalizedPanelCmaps = React.useMemo(
+    () => Array.isArray(panelCmaps) ? panelCmaps : [],
+    [panelCmaps],
+  );
+  const panelCmapFor = React.useCallback((panelIdx: number) => {
+    const value = normalizedPanelCmaps[panelIdx];
+    return (value && COLORMAPS[value]) ? value : (cmap || "inferno");
+  }, [normalizedPanelCmaps, cmap]);
+  const hasMixedPanelCmaps = React.useMemo(() => {
+    if (Math.max(1, nPanels || 1) <= 1) return false;
+    if (normalizedPanelCmaps.length !== Math.max(1, nPanels || 1)) return false;
+    const first = panelCmapFor(0);
+    return normalizedPanelCmaps.some((_, idx) => panelCmapFor(idx) !== first);
+  }, [normalizedPanelCmaps, nPanels, panelCmapFor]);
+  const setCmapForPanel = React.useCallback((panelIdx: number, value: string) => {
+    const n = Math.max(1, nPanels || 1);
+    if (n <= 1) {
+      setCmap(value);
+      setPanelCmaps([]);
+      return;
+    }
+    const idx = Math.max(0, Math.min(n - 1, Math.round(panelIdx)));
+    const next = normalizedPanelCmaps.length === n
+      ? [...normalizedPanelCmaps]
+      : Array.from({ length: n }, () => cmap || "inferno");
+    next[idx] = value;
+    setPanelCmaps(next);
+    if (idx === 0) setCmap(value);
+  }, [cmap, normalizedPanelCmaps, nPanels, setCmap, setPanelCmaps]);
 
   // Playback
   const [playing, setPlaying] = useModelState<boolean>("playing");
@@ -2467,6 +2497,33 @@ function Show3D() {
   const browserFilterCacheRef = React.useRef<Map<string, Float32Array>>(new Map());
   const browserFilterPendingRef = React.useRef<Set<string>>(new Set());
   const [browserFilterTick, setBrowserFilterTick] = React.useState(0);
+  const applyPackedPanelTransform = React.useCallback(async (
+    frame: Float32Array,
+    transform: (panelFrame: Float32Array, panelWidth: number, panelHeight: number) => Promise<Float32Array>,
+  ): Promise<Float32Array> => {
+    const panelCount = Math.max(1, nPanels || 1);
+    if (panelCount <= 1 || sharedPanelSource || width % panelCount !== 0) {
+      return transform(frame, width, height);
+    }
+    const panelWidth = width / panelCount;
+    const output = new Float32Array(frame.length);
+    for (let panel = 0; panel < panelCount; panel++) {
+      const panelFrame = new Float32Array(panelWidth * height);
+      const srcX0 = panel * panelWidth;
+      for (let row = 0; row < height; row++) {
+        const srcOffset = row * width + srcX0;
+        const dstOffset = row * panelWidth;
+        panelFrame.set(frame.subarray(srcOffset, srcOffset + panelWidth), dstOffset);
+      }
+      const filtered = await transform(panelFrame, panelWidth, height);
+      for (let row = 0; row < height; row++) {
+        const srcOffset = row * panelWidth;
+        const dstOffset = row * width + srcX0;
+        output.set(filtered.subarray(srcOffset, srcOffset + panelWidth), dstOffset);
+      }
+    }
+    return output;
+  }, [height, nPanels, sharedPanelSource, width]);
   // Live gate read inside memoized render ticks (avoids stale closures): when on,
   // denoise is treated as a client frame transform so every path routes through
   // displayFrameForIndex and skips the raw GPU-slot cache.
@@ -2494,13 +2551,17 @@ function Show3D() {
       bin: denoiseResolved.bin,
       avgWindow: playRef.current.avgWindow,
       diffMode: playRef.current.diffMode,
+      panels: (Math.max(1, nPanels || 1) > 1 && !sharedPanelSource) ? Math.max(1, nPanels || 1) : 1,
     });
     const cache = browserFilterCacheRef.current;
     const hit = cache.get(key);
     if (hit) return hit;
     if (browserFilterPendingRef.current.has(key)) return allowRawOnMiss ? frame : null;
     browserFilterPendingRef.current.add(key);
-    applyDisplayFilterBrowser(frame, width, height, denoiseResolved.mode, denoiseSigmaLive, denoiseResolved.bin)
+    applyPackedPanelTransform(
+      frame,
+      (panelFrame, panelWidth, panelHeight) => applyDisplayFilterBrowser(panelFrame, panelWidth, panelHeight, denoiseResolved.mode, denoiseSigmaLive, denoiseResolved.bin),
+    )
       .then((filtered) => {
         browserFilterPendingRef.current.delete(key);
         cache.set(key, filtered);
@@ -2509,7 +2570,7 @@ function Show3D() {
       })
       .catch(() => { browserFilterPendingRef.current.delete(key); });
     return allowRawOnMiss ? frame : null;
-  }, [browserFilterKnobsOn, denoiseResolved.mode, denoiseResolved.bin, denoiseSigmaLive, frameSeq, width, height]);
+  }, [applyPackedPanelTransform, browserFilterKnobsOn, denoiseResolved.mode, denoiseResolved.bin, denoiseSigmaLive, frameSeq, height, nPanels, sharedPanelSource, width]);
   // The "Denoise" toggle is the master ON/OFF of the EFFECT: ON shows the
   // denoised view, OFF shows raw (nothing of the denoised view leaks through).
   // The config (mode/sigma/bin) is PRESERVED across the toggle; a clean widget
@@ -2571,6 +2632,11 @@ function Show3D() {
   const [frameServerVersion] = useModelState<number>("frame_server_version");
   const [benchmarkRequest] = useModelState<Record<string, unknown>>("benchmark_request");
   const [, setBenchmarkResult] = useModelState<Record<string, unknown>>("benchmark_result");
+  const [frameTransportTiming] = useModelState<Record<string, unknown>>("frame_transport_timing");
+  const [bufferTransportTiming] = useModelState<Record<string, unknown>>("buffer_transport_timing");
+  const [scrubPreviewBytes] = useModelState<DataView>("_scrub_preview_bytes");
+  const [scrubPreviewInfo] = useModelState<Record<string, unknown>>("_scrub_preview_info");
+  const [, setScrubPreviewRequest] = useModelState<string>("_scrub_preview_request");
   const [, setExportRequest] = useModelState<string>("export_request");
   const [exportStatus] = useModelState<string>("export_status");
   const [exportEnabled] = useModelState<boolean>("export_enabled");
@@ -2589,6 +2655,32 @@ function Show3D() {
   const hasOfflineFloatStack = !!offlineFloatStack && offlineFloatStack.byteLength > 0;
   const hasFrameServer = !offline && !!frameServerUrl;
   const canRenderLive = hasLiveFrameBytes || hasOfflineStack || hasOfflineFloatStack || hasFrameServer;
+  const transportSamplesRef = React.useRef<Record<string, unknown>[]>([]);
+  const pendingTransportPaintRef = React.useRef<Record<string, unknown> | null>(null);
+  const scrubPreviewRafRef = React.useRef<number | null>(null);
+  const scrubPreviewPendingIdxRef = React.useRef<number | null>(null);
+  const scrubPreviewTokenRef = React.useRef(0);
+  const scrubPreviewLoggedFactorRef = React.useRef<number | null>(null);
+  const recordTransportSample = React.useCallback((sample: Record<string, unknown>) => {
+    const next = [...transportSamplesRef.current, sample];
+    transportSamplesRef.current = next.length > 200 ? next.slice(next.length - 200) : next;
+    const dbg = show3dPerfDebug();
+    if (dbg) {
+      dbg.lastTransportSample = sample;
+      dbg.transportSamples = transportSamplesRef.current;
+    }
+  }, []);
+  const markTransportPaintProxy = React.useCallback((paintAt: number = performance.now()) => {
+    const pending = pendingTransportPaintRef.current;
+    if (!pending) return;
+    pendingTransportPaintRef.current = null;
+    const sendTimeMs = typeof pending.sendTimeMs === "number" ? pending.sendTimeMs : null;
+    recordTransportSample({
+      ...pending,
+      paintProxyAtMs: Number(paintAt.toFixed(3)),
+      endToEndUiLatencyMs: sendTimeMs === null ? null : Number((Date.now() - sendTimeMs).toFixed(3)),
+    });
+  }, [recordTransportSample]);
   const staticFallbackUrl = staticFallbackJpeg
     ? `data:${staticFallbackMime || "image/jpeg"};base64,${staticFallbackJpeg}`
     : "";
@@ -3558,8 +3650,20 @@ function Show3D() {
   // Parse incoming playback buffer (double-buffer to avoid overwrite stalls)
   React.useEffect(() => {
     if (!bufferBytes || bufferBytes.byteLength === 0) return;
+    const receiveAt = performance.now();
+    const decodeStart = performance.now();
     const parsed = extractFloat32(bufferBytes, Math.max(0, bufferCount) * width * height);
+    const decodeMs = performance.now() - decodeStart;
     if (!parsed) return;
+    const transport = bufferTransportTiming ?? {};
+    const sendTimeMs = typeof transport.sendTimeMs === "number" ? transport.sendTimeMs : null;
+    recordTransportSample({
+      ...transport,
+      kind: "buffer",
+      receiveAtMs: Number(receiveAt.toFixed(3)),
+      jsDecodeMs: Number(decodeMs.toFixed(3)),
+      browserReceiveLatencyMs: sendTimeMs === null ? null : Number((Date.now() - sendTimeMs).toFixed(3)),
+    });
     const dbg = show3dPerfDebug();
     if (dbg) {
       dbg.lastBufferByteLength = bufferBytes.byteLength;
@@ -3607,7 +3711,7 @@ function Show3D() {
       }
     }
     return () => { autoRangeComputeTokenRef.current++; };
-  }, [bufferBytes, bufferStart, bufferCount, autoContrast, logScale, width, height, nSlices, autoVmins, autoVmaxs, percentileLow, percentileHigh, ensureLocalAutoRange]);
+  }, [bufferBytes, bufferStart, bufferCount, autoContrast, logScale, width, height, nSlices, autoVmins, autoVmaxs, percentileLow, percentileHigh, ensureLocalAutoRange, bufferTransportTiming, recordTransportSample]);
 
   // Sync displaySliceIdx with model when not playing
   React.useEffect(() => {
@@ -3882,7 +3986,7 @@ function Show3D() {
     const req = benchmarkRequest ?? {};
     const token = req.token;
     const mode = typeof req.mode === "string" ? req.mode : "playback";
-    if ((typeof token !== "string" && typeof token !== "number") || mode === "renderBurst" || lastBenchmarkTokenRef.current === token) return;
+    if ((typeof token !== "string" && typeof token !== "number") || mode === "renderBurst" || mode === "scrubTransport" || mode === "scrubPreviewTransport" || lastBenchmarkTokenRef.current === token) return;
     lastBenchmarkTokenRef.current = token;
 
     let cancelled = false;
@@ -4012,6 +4116,123 @@ function Show3D() {
       benchmarkPlaybackFpsRef.current = null;
     };
   }, [benchmarkRequest, playbackFps, nSlices, separatePanelFrames, setBenchmarkResult, setPlaybackFps, setPlaying]);
+
+  const lastScrubTransportBenchmarkTokenRef = React.useRef<unknown>(null);
+  React.useEffect(() => {
+    const req = benchmarkRequest ?? {};
+    const token = req.token;
+    const mode = typeof req.mode === "string" ? req.mode : "playback";
+    const previewMode = mode === "scrubPreviewTransport";
+    if ((typeof token !== "string" && typeof token !== "number") || (mode !== "scrubTransport" && !previewMode) || lastScrubTransportBenchmarkTokenRef.current === token) return;
+    lastScrubTransportBenchmarkTokenRef.current = token;
+
+    let cancelled = false;
+    const sleep = (ms: number) => new Promise<void>(resolve => window.setTimeout(resolve, ms));
+    const numberFromReq = (key: string, fallback: number) => {
+      const value = req[key];
+      return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+    };
+    const sampleCount = Math.max(1, Math.floor(numberFromReq("sampleCount", Math.min(12, nSlices))));
+    const settleMs = Math.max(0, numberFromReq("settleMs", 80));
+    const timeoutMs = Math.max(250, numberFromReq("timeoutMs", 8000));
+    const label = typeof req.label === "string" ? req.label : "show3d scrub transport";
+    const reportUrl = typeof req.reportUrl === "string" ? req.reportUrl : "";
+
+    const summarize = (samples: Record<string, unknown>[]) => {
+      const numeric = (key: string) => samples
+        .map(sample => sample[key])
+        .filter((value): value is number => typeof value === "number" && Number.isFinite(value))
+        .sort((a, b) => a - b);
+      const stats = (key: string) => {
+        const values = numeric(key);
+        if (values.length === 0) return null;
+        const avg = values.reduce((acc, value) => acc + value, 0) / values.length;
+        const p95 = values[Math.min(values.length - 1, Math.floor(values.length * 0.95))];
+        return {
+          avgMs: Number(avg.toFixed(3)),
+          p95Ms: Number(p95.toFixed(3)),
+          maxMs: Number(values[values.length - 1].toFixed(3)),
+        };
+      };
+      return {
+        pythonPrepare: stats("pythonPrepareMs"),
+        pythonWire: stats("pythonWireMs"),
+        pythonEncode: stats("pythonEncodeMs"),
+        pythonTraitSet: stats("pythonTraitSetMs"),
+        browserReceive: stats("browserReceiveLatencyMs"),
+        jsDecode: stats("jsDecodeMs"),
+        uiLatency: stats("endToEndUiLatencyMs"),
+      };
+    };
+
+    void (async () => {
+      const startedAt = performance.now();
+      const firstSample = transportSamplesRef.current.length;
+      const frames: number[] = [];
+      for (let i = 0; i < sampleCount; i++) {
+        const idx = nSlices <= 1 ? 0 : Math.round((i / Math.max(1, sampleCount - 1)) * (nSlices - 1));
+        frames.push(idx);
+      }
+      try {
+        setBenchmarkResult({ token, label, status: "sampling", mode, sampleCount, frames });
+        setPlaying(false);
+        await sleep(settleMs);
+        for (const [sampleIndex, idx] of frames.entries()) {
+          if (cancelled) return;
+          if (previewMode) {
+            setDisplaySliceIdx(idx);
+            setPlaybackUiSliceIdx(idx);
+            setScrubPreviewRequest(JSON.stringify({
+              token: `${String(token)}-${idx}-${sampleIndex}`,
+              idx,
+              maxBytes: numberFromReq("maxBytes", 16 * 1024 * 1024),
+            }));
+          } else {
+            setSliceIdx(idx);
+          }
+          const deadline = performance.now() + timeoutMs;
+          while (!cancelled && performance.now() < deadline) {
+            const latest = transportSamplesRef.current[transportSamplesRef.current.length - 1];
+            if (
+              latest &&
+              latest.kind === (previewMode ? "scrubPreview" : "frame") &&
+              Number(previewMode ? latest.idx : latest.slice) === idx &&
+              typeof latest.endToEndUiLatencyMs === "number"
+            ) break;
+            await sleep(16);
+          }
+          await sleep(settleMs);
+        }
+        if (cancelled) return;
+        const expectedKind = previewMode ? "scrubPreview" : "frame";
+        const samples = transportSamplesRef.current
+          .slice(firstSample)
+          .filter(sample => sample.kind === expectedKind);
+        const result = {
+          token,
+          label,
+          status: "done",
+          mode,
+          sampleCount,
+          receivedSamples: samples.length,
+          frames,
+          summary: summarize(samples),
+          samples,
+          totalMs: Number((performance.now() - startedAt).toFixed(1)),
+        };
+        setBenchmarkResult(result);
+        if (reportUrl) {
+          void fetch(reportUrl, { method: "POST", mode: "no-cors", body: JSON.stringify(result) }).catch(() => {});
+        }
+      } catch (err) {
+        setBenchmarkResult({ token, label, status: "error", mode, error: err instanceof Error ? err.message : String(err) });
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [benchmarkRequest, nSlices, setBenchmarkResult, setPlaying, setSliceIdx, setScrubPreviewRequest]);
 
   // FFT d-spacing measurement
   const [fftClickInfo, setFftClickInfo] = React.useState<{
@@ -4712,6 +4933,7 @@ function Show3D() {
 
   const frequencyFilterKeyForIndex = React.useCallback((idx: number) => {
     const mode = normalizeFrequencyFilterMode(frequencyFilter);
+    const packedPanels = (Math.max(1, nPanels || 1) > 1 && !sharedPanelSource) ? Math.max(1, nPanels || 1) : 1;
     return [
       Math.round(idx),
       frameSeq,
@@ -4719,8 +4941,9 @@ function Show3D() {
       Number(frequencyOptions.cutoff ?? 0).toFixed(4),
       Number(frequencyOptions.center ?? 0).toFixed(4),
       Number(frequencyOptions.width ?? 0).toFixed(4),
+      `panels${packedPanels}`,
     ].join(":");
-  }, [frameSeq, frequencyFilter, frequencyOptions]);
+  }, [frameSeq, frequencyFilter, frequencyOptions, nPanels, sharedPanelSource]);
 
   const frequencyFilterFrameForDisplay = React.useCallback((idx: number, frame: Float32Array | null, options: { allowRawOnMiss?: boolean } = {}): Float32Array | null => {
     if (!frame || !frequencyFilterIsActive) return frame;
@@ -4731,7 +4954,10 @@ function Show3D() {
     if (hit) return hit;
     if (frequencyFilterPendingRef.current.has(key)) return allowRawOnMiss ? frame : null;
     frequencyFilterPendingRef.current.add(key);
-    applyFrequencyFilterBrowser(frame, width, height, frequencyOptions)
+    applyPackedPanelTransform(
+      frame,
+      (panelFrame, panelWidth, panelHeight) => applyFrequencyFilterBrowser(panelFrame, panelWidth, panelHeight, frequencyOptions),
+    )
       .then((filtered) => {
         frequencyFilterPendingRef.current.delete(key);
         cache.set(key, filtered);
@@ -4744,7 +4970,7 @@ function Show3D() {
         console.warn("[Show3D] frequency filter failed; showing unfiltered frame", error);
       });
     return allowRawOnMiss ? frame : null;
-  }, [frequencyFilterIsActive, frequencyFilterKeyForIndex, frequencyOptions, height, width]);
+  }, [applyPackedPanelTransform, frequencyFilterIsActive, frequencyFilterKeyForIndex, frequencyOptions, height, width]);
 
   const displayFrameForIndex = (idx: number, currentFrame: Float32Array | null, options: { allowRawOnMiss?: boolean } = {}): Float32Array | null => {
     const frame = averagedFrameForIndex(idx, idx, currentFrame);
@@ -5950,8 +6176,21 @@ function Show3D() {
   React.useEffect(() => {
     // RGB frames ship as H*W*3 float32; gray remains H*W.
     const expectedFloats = isRgb ? width * height * 3 : width * height;
+    const receiveAt = performance.now();
+    const decodeStart = performance.now();
     const parsed = extractFloat32(frameBytes, expectedFloats);
+    const decodeMs = performance.now() - decodeStart;
     if (!parsed || parsed.length === 0) return;
+    const transport = frameTransportTiming ?? {};
+    const sendTimeMs = typeof transport.sendTimeMs === "number" ? transport.sendTimeMs : null;
+    pendingTransportPaintRef.current = {
+      ...transport,
+      kind: "frame",
+      receiveAtMs: Number(receiveAt.toFixed(3)),
+      jsDecodeMs: Number(decodeMs.toFixed(3)),
+      browserReceiveLatencyMs: sendTimeMs === null ? null : Number((Date.now() - sendTimeMs).toFixed(3)),
+    };
+    requestAnimationFrame(() => requestAnimationFrame(() => markTransportPaintProxy()));
     if (isRgb) {
       // Keep color plane for paint; expose Rec. 709 luminance for stats/FFT.
       rgbFrameDataRef.current = parsed;
@@ -5989,7 +6228,7 @@ function Show3D() {
     } else {
       setLocalPanelStats(null);
     }
-  }, [frameBytes, frameSeq, nPanels, visiblePanelIndices, width, height, showStats, diffMode, avgWindow, offline, liveSliceIdx, sliceIdx, isRgb, frequencyFilterIsActive, frequencyOptions, browserFilterTick]);
+  }, [frameBytes, frameSeq, nPanels, visiblePanelIndices, width, height, showStats, diffMode, avgWindow, offline, liveSliceIdx, sliceIdx, isRgb, frequencyFilterIsActive, frequencyOptions, browserFilterTick, frameTransportTiming, markTransportPaintProxy]);
 
   // Histogram bins are computed on the GPU via `engine.computeHistogramWithRange`
   // when the colormap engine is ready. CPU fallback (computeHistogramFromBytes
@@ -6326,6 +6565,33 @@ function Show3D() {
     }
 
     const lut = COLORMAPS[cmap] || COLORMAPS.inferno;
+    const mixedPanelCmaps = hasMixedPanelCmaps && nP > 1 && !sharedPanelSource && width % nP === 0 && height > 0;
+    const renderPackedPanelsCpu = (
+      offscreen: HTMLCanvasElement | OffscreenCanvas,
+      offCtx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+      sharedAutoRange: { vmin: number; vmax: number } | null,
+    ) => {
+      offCtx.clearRect(0, 0, offscreen.width, offscreen.height);
+      const panelW = Math.max(1, Math.floor(width / nP));
+      const panelImg = offCtx.createImageData(panelW, height);
+      for (const p of visiblePanelIndices) {
+        if (p < 0 || p >= nP) continue;
+        const panelData = extractPanelSlice(frameData, p, logScale);
+        if (!panelData) continue;
+        const pdr = panelDataRanges[p];
+        const panelRange = panelData.length > 0
+          ? findDataRange(panelData)
+          : ((perPanelHistogramEnabled && pdr && pdr.max > pdr.min)
+              ? pdr
+              : resolveDisplayBounds(dataMin, dataMax, traitVmin, traitVmax, logScale));
+        const range = perPanelContrast
+          ? resolvePanelRenderRange(p, panelRange, sharedAutoRange, panelData, autoContrast, percentileLow, percentileHigh)
+          : { vmin, vmax };
+        const panelLut = COLORMAPS[panelCmapFor(p)] || lut;
+        applyColormap(panelData, panelImg.data, panelLut, range.vmin, range.vmax);
+        offCtx.putImageData(panelImg, p * panelW, 0);
+      }
+    };
 
     if (offline) {
       const canvas = canvasRef.current;
@@ -6334,27 +6600,24 @@ function Show3D() {
       const ctx = canvas?.getContext("2d");
       const offCtx = offscreen?.getContext("2d");
       if (!canvas || !offscreen || !imgData || !ctx || !offCtx) return;
-      if (perPanelContrast) {
-        offCtx.clearRect(0, 0, offscreen.width, offscreen.height);
-        const panelW = Math.max(1, Math.floor(width / nP));
-        const panelImg = offCtx.createImageData(panelW, height);
+      if (perPanelContrast || mixedPanelCmaps) {
         const sharedAutoRange = autoContrast ? { vmin, vmax } : null;
-        for (const p of visiblePanelIndices) {
-          const panelData = extractPanelSlice(frameData, p, logScale);
-          if (!panelData) continue;
-          const pdr = panelDataRanges[p];
-          const panelRange = panelData.length > 0
-            ? findDataRange(panelData)
-            : ((perPanelHistogramEnabled && pdr && pdr.max > pdr.min)
-                ? pdr
-                : resolveDisplayBounds(dataMin, dataMax, traitVmin, traitVmax, logScale));
-          const range = resolvePanelRenderRange(p, panelRange, sharedAutoRange, panelData, autoContrast, percentileLow, percentileHigh);
-          applyColormap(panelData, panelImg.data, lut, range.vmin, range.vmax);
-          offCtx.putImageData(panelImg, p * panelW, 0);
-        }
+        renderPackedPanelsCpu(offscreen, offCtx, sharedAutoRange);
       } else {
         renderToOffscreenReuse(processed, lut, vmin, vmax, offscreen, imgData);
       }
+      drawMain(ctx, offscreen);
+      return;
+    }
+
+    if (mixedPanelCmaps) {
+      const canvas = canvasRef.current;
+      const offscreen = mainOffscreenRef.current;
+      const ctx = canvas?.getContext("2d");
+      const offCtx = offscreen?.getContext("2d");
+      if (!canvas || !offscreen || !ctx || !offCtx) return;
+      const sharedAutoRange = autoContrast ? { vmin, vmax } : null;
+      renderPackedPanelsCpu(offscreen, offCtx, sharedAutoRange);
       drawMain(ctx, offscreen);
       return;
     }
@@ -6517,14 +6780,14 @@ function Show3D() {
       const ctx = canvas.getContext("2d");
       if (ctx && mainOffscreenRef.current) drawMain(ctx, mainOffscreenRef.current);
     }
-  }, [frameBytes, frameSeq, width, height, cmap, displayScale, canvasW, canvasH, imageVminPct, imageVmaxPct, logScale, autoContrast, percentileLow, percentileHigh, traitVmin, traitVmax, dataMin, dataMax, autoVmins, autoVmaxs, smooth, imageRotation, nPanels, linkContrast, panelStates, panelDataRanges, vminPerPanel, vmaxPerPanel, offline, liveSliceIdx, sliceIdx, diffMode, avgWindow, playing, gpuCmapReady, canvasRepaintSignal, isRgb, browserFilterTick, denoiseSigmaLive, displayFilter, spatialBin, browserFilterKnobsOn, frequencyRenderVersion, frequencyFilterIsActive]);
+  }, [frameBytes, frameSeq, width, height, cmap, panelCmapFor, hasMixedPanelCmaps, displayScale, canvasW, canvasH, imageVminPct, imageVmaxPct, logScale, autoContrast, percentileLow, percentileHigh, traitVmin, traitVmax, dataMin, dataMax, autoVmins, autoVmaxs, smooth, imageRotation, nPanels, sharedPanelSource, visiblePanelIndices, perPanelHistogramEnabled, linkContrast, panelStates, panelDataRanges, vminPerPanel, vmaxPerPanel, offline, liveSliceIdx, sliceIdx, diffMode, avgWindow, playing, gpuCmapReady, canvasRepaintSignal, isRgb, browserFilterTick, denoiseSigmaLive, displayFilter, spatialBin, browserFilterKnobsOn, frequencyRenderVersion, frequencyFilterIsActive]);
 
   // Per-panel render: each slot gets its own zoom/pan transform. 2px gap
   // between slots painted as the canvas bg (transparent through clearRect).
   const drawMain = (
     ctx: CanvasRenderingContext2D,
     offscreen: HTMLCanvasElement | OffscreenCanvas,
-    options: { preserveGpuDisplay?: boolean } = {},
+    options: { preserveGpuDisplay?: boolean; sourcePanelWidth?: number } = {},
   ) => {
     const drawSliceIdx = offline ? liveSliceIdx : displaySliceIdx;
     const keepDirectGpuVisible =
@@ -6550,7 +6813,9 @@ function Show3D() {
     const sourcePanelCount = Math.max(1, nPanels || 1);
     const cols = panelColsForCount(n);
     const rows = Math.ceil(n / cols);
-    const srcPanelW = sharedPanelSource
+    const srcPanelW = options.sourcePanelWidth
+      ? Math.max(1, options.sourcePanelWidth)
+      : sharedPanelSource
       ? offscreen.width
       : Math.max(1, panelWidthPx || offscreen.width / sourcePanelCount);
     const srcH = offscreen.height;
@@ -6593,6 +6858,101 @@ function Show3D() {
       // No end badge - blur alone signals past-real-frame.
     }
   };
+
+  React.useEffect(() => {
+    if (!scrubPreviewBytes || scrubPreviewBytes.byteLength === 0) return;
+    const info = scrubPreviewInfo ?? {};
+    const token = String(info.token ?? "");
+    const idx = Number(info.idx);
+    const previewW = Number(info.width);
+    const previewH = Number(info.height);
+    const fullW = Number(info.fullWidth ?? width);
+    const channels = Math.max(1, Number(info.channels ?? 1));
+    if (!token || !Number.isFinite(idx) || previewW <= 0 || previewH <= 0) return;
+    const receiveAt = performance.now();
+    const decodeStart = performance.now();
+    const preview = extractFloat32(scrubPreviewBytes, previewW * previewH * channels);
+    const decodeMs = performance.now() - decodeStart;
+    if (!preview || preview.length === 0) return;
+    const previewCanvas = document.createElement("canvas");
+    previewCanvas.width = previewW;
+    previewCanvas.height = previewH;
+    const previewCtx = previewCanvas.getContext("2d");
+    const canvas = canvasRef.current;
+    const ctx = canvas?.getContext("2d");
+    if (!previewCtx || !ctx) return;
+    const image = previewCtx.createImageData(previewW, previewH);
+    if (channels === 3) {
+      const n = previewW * previewH;
+      for (let i = 0; i < n; i++) {
+        const src = i * 3;
+        const dst = i * 4;
+        image.data[dst] = Math.max(0, Math.min(255, Math.round(preview[src] * 255)));
+        image.data[dst + 1] = Math.max(0, Math.min(255, Math.round(preview[src + 1] * 255)));
+        image.data[dst + 2] = Math.max(0, Math.min(255, Math.round(preview[src + 2] * 255)));
+        image.data[dst + 3] = 255;
+      }
+    } else {
+      const lut = COLORMAPS[cmap] || COLORMAPS.inferno;
+      let vmin: number;
+      let vmax: number;
+      if (traitVmin != null || traitVmax != null) {
+        ({ vmin, vmax } = resolveDisplayRange(
+          dataMin,
+          dataMax,
+          traitVmin,
+          traitVmax,
+          logScale,
+          imageVminPct,
+          imageVmaxPct,
+        ));
+      } else if (autoContrast) {
+        ({ vmin, vmax } = percentileClip(preview, percentileLow, percentileHigh));
+      } else {
+        const lo = logScale ? (dataMin >= 0 ? Math.log1p(dataMin) : -Math.log1p(-dataMin)) : dataMin;
+        const hi = logScale ? (dataMax >= 0 ? Math.log1p(dataMax) : -Math.log1p(-dataMax)) : dataMax;
+        ({ vmin, vmax } = sliderRange(lo, hi, imageVminPct, imageVmaxPct));
+      }
+      renderFramePlayback(preview, image.data, lut, vmin, vmax, logScale);
+    }
+    previewCtx.putImageData(image, 0, 0);
+    const factor = Math.max(1, Number(info.factor ?? 1));
+    if (factor > 1 && scrubPreviewLoggedFactorRef.current !== factor) {
+      console.log(
+        `[Show3D scrub preview] displaying ${factor}x reduced frames during slider drag; ` +
+        "release the slider or zoom/settle the view to request native full resolution.",
+      );
+      scrubPreviewLoggedFactorRef.current = factor;
+    }
+    setGpuDisplayVisible(false);
+    setDisplaySliceIdx(idx);
+    setPlaybackUiSliceIdx(idx);
+    playbackIdxRef.current = idx;
+    const sourcePanelWidth = sharedPanelSource
+      ? undefined
+      : Math.max(1, Math.round((panelWidthPx || fullW / Math.max(1, nPanels || 1)) / factor));
+    drawMain(ctx, previewCanvas, { sourcePanelWidth });
+    requestAnimationFrame(() => requestAnimationFrame((paintAt) => {
+      const sendTimeMs = typeof info.sendTimeMs === "number" ? info.sendTimeMs : null;
+      recordTransportSample({
+        ...info,
+        kind: "scrubPreview",
+        receiveAtMs: Number(receiveAt.toFixed(3)),
+        jsDecodeMs: Number(decodeMs.toFixed(3)),
+        paintAtMs: Number(paintAt.toFixed(3)),
+        browserReceiveLatencyMs: sendTimeMs === null ? null : Number((Date.now() - sendTimeMs).toFixed(3)),
+        endToEndUiLatencyMs: sendTimeMs === null ? null : Number((Date.now() - sendTimeMs).toFixed(3)),
+      });
+    }));
+    const dbg = show3dPerfDebug();
+    if (dbg) {
+      dbg.lastFrame = idx;
+      dbg.lastFrameSource = "scrub-preview";
+      dbg.scrubPreviewFactor = factor;
+      dbg.scrubPreviewBytes = Number(info.bytes ?? scrubPreviewBytes.byteLength);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scrubPreviewBytes, scrubPreviewInfo, width, height, nPanels, panelWidthPx, sharedPanelSource, cmap, logScale, autoContrast, percentileLow, percentileHigh, traitVmin, traitVmax, dataMin, dataMax, imageVminPct, imageVmaxPct, canvasW, canvasH, smooth, imageRotation, panelStates, linkContrast, linkedState, visiblePanelIndices, hiddenPanelSet, panelGapTrait, maxCols]);
 
   const paintRgbFrame = (rgb: Float32Array): boolean => {
     if (!mainOffscreenRef.current) return false;
@@ -6887,7 +7247,7 @@ function Show3D() {
   }, []);
 
   React.useEffect(() => {
-    if (offline || !separatePanelFrames || !frameServerUrl || playing) return;
+    if (offline || !frameServerUrl || playing) return;
     void renderFetchedSlice(sliceIdx);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [offline, separatePanelFrames, frameServerUrl, frameServerVersion, sliceIdx, playing, canvasW, canvasH, cmap, imageVminPct, imageVmaxPct, autoContrast, logScale, panelStates, linkedState, linkPanels, panelGapTrait, maxCols]);
@@ -10847,6 +11207,24 @@ function Show3D() {
 
   // Check if view needs reset
   const needsReset = zoom !== 1 || panX !== 0 || panY !== 0;
+  const requestScrubPreview = (idx: number): boolean => {
+    if (offline || width <= 0 || height <= 0 || nSlices <= 0) return false;
+    scrubPreviewPendingIdxRef.current = clampSlice(idx);
+    if (scrubPreviewRafRef.current !== null) return true;
+    scrubPreviewRafRef.current = window.requestAnimationFrame(() => {
+      scrubPreviewRafRef.current = null;
+      const pendingIdx = scrubPreviewPendingIdxRef.current;
+      scrubPreviewPendingIdxRef.current = null;
+      if (pendingIdx == null) return;
+      const token = `${Date.now()}-${++scrubPreviewTokenRef.current}`;
+      setScrubPreviewRequest(JSON.stringify({
+        token,
+        idx: pendingIdx,
+        maxBytes: 16 * 1024 * 1024,
+      }));
+    });
+    return true;
+  };
   const scrubToSlice = (idx: number) => {
     const next = clampSlice(idx);
     if (playing) setPlaying(false);
@@ -10858,12 +11236,15 @@ function Show3D() {
     if (!offline && frameServerUrl) {
       setDisplaySliceIdx(next);
       setPlaybackUiSliceIdx(next);
-      void renderFetchedSlice(next);
+      void renderFetchedSlice(next).then((ok) => {
+        if (!ok && !transformActive) requestScrubPreview(next);
+      });
       prefetchServerFrames(next, false, false);
       return;
     }
     setDisplaySliceIdx(next);
     setPlaybackUiSliceIdx(next);
+    if (!transformActive && requestScrubPreview(next)) return;
     setSliceIdx(next);
   };
   const commitSlice = (idx: number) => {
@@ -12299,7 +12680,17 @@ function Show3D() {
                 {/* Row 2: Color + Smooth + Diff + zoom indicator */}
                 <Box sx={{ ...controlRow, ...mobileControlRowSx, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg }}>
                   <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted }}>Color</Typography>
-                  <Select size="small" value={cmap} onChange={(e) => setCmap(e.target.value)} MenuProps={themedMenuProps} sx={{ ...themedSelect, minWidth: 60, fontSize: 10 }} inputProps={{ "aria-label": "Image colormap" }}>
+                  <Select
+                    size="small"
+                    value={panelCmapFor(nPanels > 1 ? Math.max(0, cursorInfo?.panelIdx ?? visiblePanelIndices[0] ?? 0) : 0)}
+                    onChange={(e) => setCmapForPanel(
+                      nPanels > 1 ? Math.max(0, cursorInfo?.panelIdx ?? visiblePanelIndices[0] ?? 0) : 0,
+                      e.target.value,
+                    )}
+                    MenuProps={themedMenuProps}
+                    sx={{ ...themedSelect, minWidth: 60, fontSize: 10 }}
+                    inputProps={{ "aria-label": nPanels > 1 ? "Current panel colormap" : "Image colormap" }}
+                  >
                     {COLORMAP_NAMES.map((name) => (<MenuItem key={name} value={name}>{name.charAt(0).toUpperCase() + name.slice(1)}</MenuItem>))}
                   </Select>
                   <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted }}>Smooth</Typography>

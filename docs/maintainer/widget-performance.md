@@ -114,7 +114,9 @@ one common metric plus widget-specific metrics:
 - **Show2D**: image decode/draw, histogram draw, FFT prep/worker/GPU/post time,
   ROI/profile time, page scrub latency, and panel cache state.
 - **Show3D**: frame fetch/decode, frame cache hit/miss, prewarm status, play
-  FPS, frame scrub latency, FFT/FFT-metric time, and panel/page cache state.
+  FPS, frame scrub latency, remote Comm/tunnel receive latency,
+  scrub-preview factor/bytes when active, FFT/FFT-metric time, and panel/page
+  cache state.
 - **Show4DSTEM**: diffraction-pattern fetch, virtual-detector compute, detector
   ROI drag latency, compare-grid cache, WebGPU/backend path, and GPU memory.
 - **ShowEDS**: map compute/draw, spectrum compute/draw, backend path, and sparse
@@ -136,7 +138,7 @@ evidence.
 | --- | --- | --- | --- |
 | Show1D | Inspect scalar traces, losses, spectra, or per-iteration diagnostics while deciding which image view to open. | Cursor/readout movement, snapshot selection, and handoff to Show2D. | Lightweight state tests plus browser story when handoff or snapshot rendering changes. |
 | Show2D | Compare one image or many related images, often 4K microscopy outputs, with zoom, pan, histogram, FFT, profile, pages, and export. | Zoom/pan, histogram controls, page slider/play, hidden panels, FFT redraws after first compute, and HTML reopen. | `scripts/widget_browser_smoke.py` for exported HTML; `scripts/widget_heavy_perf_signoff.py` for 4K real-data panels. |
-| Show3D | Scrub or play time series, focal stacks, iterative reconstructions, and multi-panel comparisons without rebuilding the widget. | Frame scrub/play, page slider/play, hidden panels, frame cache/prewarm, FFT return-scrub cache, FFT metric labels, GIF/MP4/HTML export. | `scripts/widget_heavy_perf_signoff.py`; exported HTML profile for existing reports; animation smoke for GIF/MP4. |
+| Show3D | Scrub or play time series, focal stacks, iterative reconstructions, and multi-panel comparisons without rebuilding the widget. | Frame scrub/play, remote-tunnel drag preview with native restoration, page slider/play, hidden panels, frame cache/prewarm, FFT return-scrub cache, FFT metric labels, GIF/MP4/HTML export. | `scripts/widget_heavy_perf_signoff.py`; [S3D-20](storyboard-show3d.md#s3d-20-scrub-full-resolution-movies-over-a-remote-jupyter-tunnel) live Jupyter tunnel proof; exported HTML profile for existing reports; animation smoke for GIF/MP4. |
 | Show3DSlices | Browse volume slices and orthogonal views with synchronized crosshair/plane controls. | Slice sliders, crosshair movement, oblique line endpoint/body drags, side-plane redraw, oblique FFT redraw during line drag, FFT return-scrub cache hits for slice/oblique sliders, histogram controls, FFT/log/smooth toggles, and export reopen. | Browser smoke plus focused visual story when slice/crosshair/oblique-line behavior changes. |
 | Show4DSTEM | Inspect diffraction patterns and virtual images from real 4D-STEM datasets without loading unnecessary data. | Scan-position movement, detector drag, BF/ABF/ADF updates, compare pages, cache-backed folder reopen, lazy folder sessions, and export reopen. | `scripts/widget_show4dstem_heavy_signoff.py` covers direct backend/export interaction only. S4D-19 additionally requires a recorded fresh-process folder-paging/cache runner and browser report; do not infer that signoff from the heavy script. Lightweight CI checks only the protocol. |
 | ShowEDS | Explore spectral maps, ROIs, energy bands, element lines, and sparse/folder-backed EDS cubes. | Band dragging, map/spectrum sync, ROI changes, periodic table selection, sparse lookup/cache, and export reopen. | Browser story plus EDS-specific real-data smoke when backend or map/spectrum logic changes. |
@@ -148,6 +150,30 @@ evidence.
 `Show2D.from_folder(...)`, `Show3D.from_folder(...)`, and
 `Show4DSTEM.from_folder(...)` start watching by default. Treat their watcher as
 an append path, not as a periodic full rebuild.
+
+## Show3D remote tunnel scrub contract
+
+Remote Jupyter is a first-class production path for Show3D: the browser may be
+on a laptop while the kernel, data, CUDA device, and any Python frame server
+live on a workstation reached through `ssh -L`.
+
+A kernel-local frame server on `127.0.0.1` is only fast if the browser can reach
+that exact endpoint. Across an SSH tunnel, the browser's localhost is the
+laptop; use measurement to prove whether frame fetches are actually reaching
+the backend endpoint before assuming the fast path works.
+
+Full-resolution movie data must remain full resolution. Do not solve remote
+scrub latency by silently binning, cropping, or replacing the source array.
+During active frame-slider drag, Show3D may use a bounded display preview to
+avoid shipping one native frame per pointer tick over Jupyter Comm. That
+preview is a transport/display optimization only, not a data reduction.
+
+Any preview factor greater than 1 must announce itself once in Python output or
+browser logs and say how to get native pixels, for example by releasing the
+slider or zooming/settling the view. Release, keyboard step, playback settle,
+zoom/detail inspection, and explicit native fetch paths must keep native pixels
+reachable. Reports should list native bytes, preview bytes, factor, Python
+encode time, browser receive time, decode time, and paint/UI latency.
 
 | Viewer | Required append behavior | Work that must not repeat |
 |---|---|---|

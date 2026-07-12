@@ -43,6 +43,7 @@ export function browserFilterCacheKey({
   bin,
   avgWindow,
   diffMode,
+  panels = 1,
 }: {
   frameIndex: number;
   frameSeq: number;
@@ -51,6 +52,7 @@ export function browserFilterCacheKey({
   bin: number;
   avgWindow: unknown;
   diffMode: string;
+  panels?: number;
 }): string {
-  return `${Math.round(frameIndex)}:${frameSeq}:${mode}:${sigma}:${bin}:${normalizedAverageWindow(avgWindow)}:${diffMode}`;
+  return `${Math.round(frameIndex)}:${frameSeq}:${mode}:${sigma}:${bin}:${normalizedAverageWindow(avgWindow)}:${diffMode}:${Math.max(1, Math.round(panels))}`;
 }

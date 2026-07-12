@@ -40,4 +40,18 @@ describe("Show3D frame transform ownership", () => {
     expect(browserFilterCacheKey({ ...base, frameSeq: 11 }))
       .not.toBe(browserFilterCacheKey({ ...base, frameSeq: 12 }));
   });
+
+  it("separates packed multi-panel browser filter cache entries", () => {
+    const base = {
+      frameIndex: 3,
+      frameSeq: 11,
+      mode: "gaussian",
+      sigma: 8,
+      bin: 1,
+      avgWindow: 1,
+      diffMode: "off",
+    };
+    expect(browserFilterCacheKey({ ...base, panels: 1 }))
+      .not.toBe(browserFilterCacheKey({ ...base, panels: 3 }));
+  });
 });

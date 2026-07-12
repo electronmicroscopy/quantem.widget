@@ -40,6 +40,15 @@ for parity.
 
 - Compare labels, scale bars, color maps, panel borders, stats, and histogram
   controls against Show2D.
+- Pass ``cmap=["RdBu", "viridis", ...]`` for a multi-panel Show3D comparison
+  and verify every panel keeps its own colormap in the Python API, live UI,
+  saved state, static notebook fallback, and standalone HTML export. Hover or
+  select each panel and confirm the Color dropdown reports that panel's map
+  without changing neighboring panels.
+- [x] **S3D-CMAP-1**: On a real MoS2 two-panel stack, verify the SSB phase
+  panel renders with ``RdBu`` while the DPC phase panel renders with
+  ``viridis``; scrub to another frame and confirm the frame label/canvas update
+  while the panel-specific Color dropdown follows the hovered panel.
 - Compare saved Show3D fallback pixels against a Show2D current-frame gallery
   for controlled parity tests.
 - Verify one label per panel and no duplicated MP4/GIF labels.
@@ -531,3 +540,53 @@ embed exceeds the safe limit, plus a small one that fits.
 - Re-export the large stack with `encoding='uint8'`; verify it now fits and
   opens, and the color is visually faithful.
 - Confirm `max_mb=<larger>` overrides the refusal for a deliberate big export.
+
+### S3D-20: Scrub Full-Resolution Movies Over A Remote Jupyter Tunnel
+
+**User story**: As a scientist running Jupyter on a GPU workstation but
+viewing Show3D from my local laptop browser over an SSH tunnel, I want the
+frame slider to feel real-time even for 3x3 grids of native 2048 x 2048 movie
+panels, so I can judge dynamics without copying the dataset to the laptop or
+waiting one to two seconds per slider tick.
+
+**Primary widgets**: Show3D first; Show2D should follow the same remote
+transport rule for comparable paged or stacked image review paths.
+
+**Data to use**: A real or real-derived multi-panel movie on the backend. The
+canonical stress case is a 3x3 grid of 2048 x 2048 float32 panels, where one
+native concatenated frame is 150,994,944 bytes. Use the actual lab deployment
+when possible: laptop browser on phil, Jupyter kernel and data on mjgoat, and
+an `ssh -L` tunnel. Synthetic data may be used only as a post-fix control when
+it preserves the same native spatial shape and per-frame payload.
+
+**Acceptance checks**:
+
+- Measure before optimizing. Record Python prepare/wire/encode/trait-set time,
+  browser receive/decode/paint-proxy time, and end-to-end UI latency as
+  `now - sendTime`, over the real ssh tunnel rather than localhost.
+- Verify the frame-server fast path is actually reachable from the local
+  browser. A kernel-side `127.0.0.1` frame server is not enough when the browser
+  runs on another machine; the browser's localhost is the laptop, not the GPU
+  workstation.
+- During active slider drag, avoid sending one full native frame through
+  Jupyter Comm for every pointer tick. Prefer local cache, frame-server, or a
+  bounded scrub-preview transport before falling back to native `slice_idx`
+  commits.
+- Preserve the full-resolution source arrays and committed frame path. Do not
+  bin, crop, overwrite, or silently replace the scientific data to make the
+  interaction faster.
+- If drag-time display uses a reduced preview, print or log one explicit line
+  naming the reduction factor and how to get native resolution. The expected
+  language is equivalent to: `displaying {factor}x reduced frames during slider
+  drag; release the slider or zoom/settle the view to request native full
+  resolution`.
+- Release the slider and verify native full-resolution pixels remain
+  reachable. The committed frame path must still send or fetch the native frame
+  and zoom/detail inspection must not be limited to the drag preview.
+- Drive the live widget in JupyterLab from the laptop browser: drag slowly,
+  drag quickly, step with keyboard, press Play/Pause, toggle loop/bounce, and
+  verify the image, frame label, histogram, and slider stay synchronized.
+- Record the story result as `Pass`, `Fail`, or `Not verified` with the
+  backend host, browser host, tunnel port, data path, shape, dtype, native
+  bytes, preview bytes/factor if any, debug counters, console errors, and
+  report or notebook URL.

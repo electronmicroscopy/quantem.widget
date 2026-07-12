@@ -20,6 +20,7 @@ import tempfile
 import urllib.parse
 import warnings
 import weakref
+from collections import OrderedDict
 from collections.abc import Callable, Mapping, Sequence
 from enum import Enum
 from typing import Any, Self
@@ -544,6 +545,16 @@ _VALID_CMAPS = frozenset({
     "cividis", "RdBu", "RdBu_r", "seismic", "twilight", "twilight_shifted",
 })
 
+
+def _cmap_name(value: str | Colormap) -> str:
+    """Return the frontend colormap name for a string or ``Colormap`` enum."""
+    return value.value if isinstance(value, Colormap) else str(value)
+
+
+def _is_cmap_sequence(value: object) -> bool:
+    """Return True for per-panel colormap inputs, excluding single strings."""
+    return isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray))
+
 # Keep a single synced playback chunk small enough for the Jupyter/AnyWidget
 # Comm path to survive. The data is still exact float32; large stacks move as
 # sliding windows instead of browser-hostile 256 MB+ messages.
@@ -941,6 +952,7 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     title = traitlets.Unicode("").tag(sync=True)
     show_title = traitlets.Bool(True).tag(sync=True)
     cmap = traitlets.Unicode("plasma").tag(sync=True)
+    panel_cmaps = traitlets.List(traitlets.Unicode(), default_value=[]).tag(sync=True)
     dim_label = traitlets.Unicode("Frame").tag(sync=True)
     dim_sampling = traitlets.Float(1.0).tag(sync=True)
     dim_unit = traitlets.Unicode("").tag(sync=True)
@@ -1110,6 +1122,11 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     _prefetch_request = traitlets.Int(-1).tag(sync=True)
     frame_server_url = traitlets.Unicode("").tag(sync=True)
     frame_server_version = traitlets.Int(0).tag(sync=True)
+    frame_transport_timing = traitlets.Dict({}).tag(sync=True)
+    buffer_transport_timing = traitlets.Dict({}).tag(sync=True)
+    _scrub_preview_request = traitlets.Unicode("").tag(sync=True)
+    _scrub_preview_bytes = traitlets.Bytes(b"").tag(sync=True)
+    _scrub_preview_info = traitlets.Dict({}).tag(sync=True)
 
     # Browser-side benchmark hook. Setting benchmark_request from Python starts
     # an in-widget measurement in the visible frontend; benchmark_result is
@@ -1195,6 +1212,22 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 f"Unknown cmap {val!r}. Valid: {sorted(_VALID_CMAPS)}"
             )
         return val
+
+    @traitlets.validate("panel_cmaps")
+    def _validate_panel_cmaps(self, proposal: dict) -> list[str]:
+        """Reject unknown or length-mismatched per-panel colormap names."""
+        values = [str(value) for value in proposal["value"]]
+        for value in values:
+            if value not in _VALID_CMAPS:
+                raise traitlets.TraitError(
+                    f"Unknown panel cmap {value!r}. Valid: {sorted(_VALID_CMAPS)}"
+                )
+        if values and len(values) != int(self.n_panels):
+            raise traitlets.TraitError(
+                "panel_cmaps length must match n_panels "
+                f"({int(self.n_panels)}), got {len(values)}"
+            )
+        return values
 
     @traitlets.validate("bookmarked_frames")
     def _validate_bookmarks(self, proposal: dict) -> list:
@@ -1960,6 +1993,96 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             widget.watch_folder(interval=watch_interval)
         return widget
 
+    @classmethod
+    def from_panel_folders(
+        cls,
+        panel_paths: Sequence[str | pathlib.Path],
+        *,
+        pattern: str | None = None,
+        file_type: str | None = None,
+        frame_count: int | None = None,
+        labels: Sequence[str] | None = None,
+        panel_frame_labels: Sequence[Sequence[str]] | None = None,
+        panel_titles: Sequence[str] | None = None,
+        **kwargs,
+    ) -> Self:
+        """Open same-shape image folders as lazy full-resolution panels.
+
+        Only the first frame from each panel is decoded during construction so
+        remote notebooks can mount promptly. The frame server decodes requested
+        native frames on demand; source pixels remain full resolution.
+        """
+        if not panel_paths:
+            raise ValueError("Show3D.from_panel_folders() needs at least one panel folder.")
+
+        from quantem.widget.io.image import _collect_frames, _read_frame  # noqa: PLC0415
+
+        paths_by_panel: list[list[pathlib.Path]] = []
+        first_frames: list[np.ndarray] = []
+        for panel_path in panel_paths:
+            folder = pathlib.Path(panel_path)
+            files = _collect_frames(folder, file_type, pattern)
+            if frame_count is not None:
+                files = files[: max(0, int(frame_count))]
+            if not files:
+                raise FileNotFoundError(f"No image frames in {folder}")
+            first = np.asarray(_read_frame(files[0]), dtype=np.float32)
+            if first.ndim != 2:
+                raise ValueError(
+                    "Show3D.from_panel_folders() currently supports grayscale "
+                    f"2D panel frames; got shape {first.shape} from {files[0]}"
+                )
+            if first_frames and first.shape != first_frames[0].shape:
+                raise ValueError(
+                    f"Panel folder {folder} first-frame shape {first.shape} "
+                    f"does not match panel 0 shape {first_frames[0].shape}."
+                )
+            paths_by_panel.append(files)
+            first_frames.append(np.ascontiguousarray(first, dtype=np.float32))
+
+        real_n = [len(files) for files in paths_by_panel]
+        max_n = max(real_n)
+        if labels is None:
+            resolved_labels = [str(i) for i in range(max_n)]
+        else:
+            resolved_labels = list(labels)
+            if len(resolved_labels) != max_n:
+                raise ValueError(
+                    f"labels length ({len(resolved_labels)}) must match lazy frame count ({max_n})."
+                )
+        if panel_frame_labels is None:
+            resolved_panel_frame_labels = [
+                [path.stem for path in files] for files in paths_by_panel
+            ]
+        else:
+            resolved_panel_frame_labels = [list(values) for values in panel_frame_labels]
+        if panel_titles is None:
+            resolved_panel_titles = [pathlib.Path(path).name for path in panel_paths]
+        else:
+            resolved_panel_titles = list(panel_titles)
+
+        kwargs.setdefault("offline", False)
+        kwargs.setdefault("save_state", False)
+        bootstrap_panel_labels = [
+            [values[0] if values else files[0].stem]
+            for values, files in zip(resolved_panel_frame_labels, paths_by_panel)
+        ]
+        widget = cls(
+            *[frame[None, ...] for frame in first_frames],
+            labels=["0"],
+            panel_frame_labels=bootstrap_panel_labels,
+            panel_titles=resolved_panel_titles,
+            panel_real_frames=[1] * len(first_frames),
+            **kwargs,
+        )
+        widget._install_lazy_panel_source(
+            paths_by_panel,
+            labels=resolved_labels,
+            panel_frame_labels=resolved_panel_frame_labels,
+            panel_real_frames=real_n,
+        )
+        return widget
+
     def __init__(
         self,
         *data_args,
@@ -1976,7 +2099,7 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         title: str = "",
         ui_mode: UiMode = "interactive",
         show_title: bool | None = None,
-        cmap: str | Colormap = Colormap.PLASMA,
+        cmap: str | Colormap | Sequence[str | Colormap] = Colormap.PLASMA,
         vmin: float | None = None,
         vmax: float | None = None,
         sampling: float | tuple[float, float] | list[float] | None = None,
@@ -2164,6 +2287,12 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         _t0 = time.perf_counter()
         # Reject unknown kwargs so typos raise instead of being silently ignored.
         _reject_unknown_kwargs(type(self), kwargs)
+        requested_panel_cmaps = (
+            [_cmap_name(item) for item in cmap]
+            if _is_cmap_sequence(cmap)
+            else []
+        )
+        base_cmap = requested_panel_cmaps[0] if requested_panel_cmaps else _cmap_name(cmap)
         # Deprecated display_filter-era aliases (one rc of compatibility).
         if display_filter is not None and denoise == "none":
             denoise = display_filter
@@ -2199,7 +2328,9 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                             frame_metadata=frame_metadata,
                             panel_frame_metadata=panel_frame_metadata,
                             frame_label_format=frame_label_format,
-                            title=title, cmap=cmap, vmin=vmin, vmax=vmax,
+                            title=title, cmap=base_cmap,
+                            panel_cmaps=requested_panel_cmaps,
+                            vmin=vmin, vmax=vmax,
                             n_pages=n_pages, panels_per_page=panels_per_page,
                             page_labels=resolved_page_labels, page_starred=resolved_page_starred,
                             pixel_size=pixel_size, pixel_unit=pixel_unit,
@@ -2254,7 +2385,9 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                    title: str,
                    n_pages: int, panels_per_page: int,
                    page_labels: list[str], page_starred: list[int],
-                   cmap: str | Colormap, vmin: float | None, vmax: float | None,
+                   cmap: str | Colormap,
+                   panel_cmaps: Sequence[str | Colormap] | None,
+                   vmin: float | None, vmax: float | None,
                    pixel_size: float, pixel_unit: str | None, smooth: bool, image_rotation: int,
                    log_scale: bool, auto_contrast: bool,
                    image_vmin_pct: float, image_vmax_pct: float,
@@ -2294,6 +2427,11 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         self._frame_server_thread = None
         self._frame_server_token = secrets.token_urlsafe(18)
         self._separate_panel_data = None
+        self._lazy_panel_paths = None
+        self._lazy_panel_cache = OrderedDict()
+        self._lazy_panel_cache_bytes = 0
+        self._lazy_panel_cache_limit_bytes = 512 * 1024 * 1024
+        self._lazy_panel_lock = threading.RLock()
         self._crop = _normalize_crop(crop)
         self._padding = _normalize_padding(padding)
         self.n_pages = int(max(1, n_pages))
@@ -2793,7 +2931,19 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
 
         # Title and colormap - use extracted title if not explicitly provided
         self.title = title if title else (_extracted_title or "")
-        self.cmap = str(cmap)  # Convert Colormap enum to string
+        self.cmap = _cmap_name(cmap)
+        requested_panel_cmaps = [_cmap_name(item) for item in (panel_cmaps or [])]
+        if requested_panel_cmaps:
+            if len(requested_panel_cmaps) == 1:
+                requested_panel_cmaps = requested_panel_cmaps * int(self.n_panels)
+            if len(requested_panel_cmaps) != int(self.n_panels):
+                raise ValueError(
+                    "Show3D cmap list length must be 1 or match n_panels "
+                    f"({int(self.n_panels)}), got {len(requested_panel_cmaps)}"
+                )
+            self.panel_cmaps = requested_panel_cmaps
+        else:
+            self.panel_cmaps = []
 
         # Config sampling wins over a Dataset3d's default [1,1,1] sampling when
         # the user did not pass pixel_size explicitly: a ptycho config carries
@@ -2953,14 +3103,21 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         )
         self.observe(self._on_playing_change, names=["playing"])
         self.observe(self._on_prefetch, names=["_prefetch_request"])
+        self.observe(self._on_scrub_preview_request, names=["_scrub_preview_request"])
         self.observe(self._on_diff_mode_change, names=["diff_mode"])
         self.observe(self._on_export_request_change, names=["export_request"])
         self.observe(self._on_handoff_request_change, names=["handoff_request"])
 
         self._start_frame_server()
 
-        # Initial update
-        self._update_all()
+        # Initial paint should not block the widget shell behind a full native
+        # frame payload. When the detail frame server is available, the browser
+        # can mount controls immediately and fetch the first full-resolution
+        # frame asynchronously.
+        if self._defer_initial_frame_wire():
+            self.roi_stats = {}
+        else:
+            self._update_all()
 
         if state is not None:
             if isinstance(state, (str, pathlib.Path)):
@@ -3034,7 +3191,7 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             frames,
             labels=labels,
             title=title if title is not None else self.title,
-            cmap=self.cmap,
+            cmap=list(self.panel_cmaps) if self.panel_cmaps else self.cmap,
             sampling=self.pixel_size if self.pixel_size > 0 else None,
             units=self.pixel_unit,
             scale_bar_visible=self.scale_bar_visible,
@@ -3478,6 +3635,7 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             "_widget": "Show3D",
             "title": self.title,
             "cmap": self.cmap,
+            "panel_cmaps": list(self.panel_cmaps),
             "log_scale": self.log_scale,
             "auto_contrast": self.auto_contrast,
             # percentile_high before percentile_low so cross-validator doesn't reject mid-load.
@@ -3869,6 +4027,12 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             state.pop("starred")
         if "panel_titles" in state and isinstance(state["panel_titles"], list) and len(state["panel_titles"]) != int(self.n_panels):
             state.pop("panel_titles")
+        if "panel_cmaps" in state and isinstance(state["panel_cmaps"], list):
+            panel_cmaps = [str(value) for value in state["panel_cmaps"]]
+            if panel_cmaps and len(panel_cmaps) != int(self.n_panels):
+                state.pop("panel_cmaps")
+            else:
+                state["panel_cmaps"] = panel_cmaps
         if "hidden_panels" in state and isinstance(state["hidden_panels"], list):
             n_pan = int(self.n_panels)
             clean_set: set[int] = set()
@@ -5329,6 +5493,11 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         computed JS-side from frame_bytes; Python only ships the raw bytes."""
         if self.playing:
             return
+        if self._lazy_panel_paths is not None and self.frame_server_url and not self.roi_active:
+            with self.hold_sync():
+                self.roi_stats = {}
+                self.frame_seq = self.frame_seq + 1
+            return
         self._update_all()
 
     def _on_playing_change(self, change: dict | None = None) -> None:
@@ -5352,6 +5521,77 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             return
         if self._prefetch_request >= 0 and self.playing:
             self._send_buffer(self._prefetch_request % self.n_slices)
+
+    def _on_scrub_preview_request(self, change: dict | None = None) -> None:
+        """Ship a drag-time display preview when full frames are too large.
+
+        This never mutates or replaces the source/display stack. It only caps
+        the transient pixels used while the slider thumb is moving; committing a
+        slice still sends the native full-resolution frame through ``frame_bytes``.
+        """
+        request_raw = str(self._scrub_preview_request or "")
+        if not request_raw:
+            return
+        try:
+            request = json.loads(request_raw)
+        except json.JSONDecodeError:
+            return
+        token = str(request.get("token") or "")
+        if not token or self.n_slices <= 0:
+            return
+        idx = int(request.get("idx", self.slice_idx)) % int(self.n_slices)
+        max_bytes = int(request.get("maxBytes", 16 * 1024 * 1024))
+        max_bytes = max(1 * 1024 * 1024, min(128 * 1024 * 1024, max_bytes))
+
+        timing_t0 = time.perf_counter()
+        if self.is_rgb and self._rgb_data is not None:
+            frame = np.ascontiguousarray(self._rgb_data[idx], dtype=np.float32)
+            full_height, full_width = int(frame.shape[0]), int(frame.shape[1])
+            channels = 3
+        else:
+            frame = self._wire_frame(
+                self._get_display_frame(idx),
+                cache_key=("scrub-preview", idx, self.diff_mode),
+            )
+            full_height, full_width = int(frame.shape[0]), int(frame.shape[1])
+            channels = 1
+        full_bytes = int(frame.nbytes)
+        factor = max(1, int(math.ceil(math.sqrt(full_bytes / max_bytes))))
+        if factor > 1:
+            if channels == 3:
+                preview = np.ascontiguousarray(frame[::factor, ::factor, :], dtype=np.float32)
+            else:
+                preview = np.ascontiguousarray(frame[::factor, ::factor], dtype=np.float32)
+            if getattr(self, "_last_scrub_preview_factor", None) != factor:
+                print(
+                    "[Show3D scrub preview] "
+                    f"displaying {factor}x reduced frames during slider drag; "
+                    "release the slider or zoom/settle the view to request native full resolution."
+                )
+                self._last_scrub_preview_factor = factor
+        else:
+            preview = np.ascontiguousarray(frame, dtype=np.float32)
+        timing_after_prepare = time.perf_counter()
+        payload = preview.tobytes()
+        timing_after_encode = time.perf_counter()
+        send_wall_ms = time.time() * 1000.0
+        with self.hold_sync():
+            self._scrub_preview_info = {
+                "token": token,
+                "idx": idx,
+                "factor": factor,
+                "height": int(preview.shape[0]),
+                "width": int(preview.shape[1]),
+                "fullHeight": full_height,
+                "fullWidth": full_width,
+                "channels": channels,
+                "bytes": len(payload),
+                "fullBytes": full_bytes,
+                "sendTimeMs": send_wall_ms,
+                "pythonPrepareMs": round((timing_after_prepare - timing_t0) * 1000.0, 3),
+                "pythonEncodeMs": round((timing_after_encode - timing_after_prepare) * 1000.0, 3),
+            }
+            self._scrub_preview_bytes = payload
 
     def _on_roi_change(self, change: dict | None = None) -> None:
         """Handle ROI change. Stats for current frame are instant.
@@ -5974,6 +6214,15 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         return 200, frame
 
     def _get_display_panel_frame(self, panel: int, idx: int) -> np.ndarray:
+        if self._lazy_panel_paths is not None:
+            frame = self._lazy_panel_frame(panel, idx)
+            if self.diff_mode == "previous":
+                if idx == 0:
+                    return np.zeros_like(frame)
+                return frame - self._lazy_panel_frame(panel, idx - 1)
+            if self.diff_mode == "first":
+                return frame - self._lazy_panel_frame(panel, 0)
+            return frame
         panels = getattr(self, "_separate_panel_data", None)
         if not self.separate_panel_frames or panels is None:
             frame = self._get_display_frame(idx)
@@ -6009,6 +6258,99 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             return frame - data[0]
         return frame
 
+    def _install_lazy_panel_source(
+        self,
+        paths_by_panel: Sequence[Sequence[pathlib.Path]],
+        *,
+        labels: Sequence[str],
+        panel_frame_labels: Sequence[Sequence[str]],
+        panel_real_frames: Sequence[int],
+    ) -> None:
+        """Attach on-demand panel files after the first-frame bootstrap."""
+        if not paths_by_panel:
+            raise ValueError("lazy panel source needs at least one panel")
+        max_n = max(len(files) for files in paths_by_panel)
+        if max_n <= 0:
+            raise ValueError("lazy panel source needs at least one frame")
+        self._lazy_panel_paths = [
+            [pathlib.Path(path) for path in files] for files in paths_by_panel
+        ]
+        self._lazy_panel_cache = OrderedDict()
+        self._lazy_panel_cache_bytes = 0
+        first_panel = self._lazy_panel_frame(0, 0)
+        height, panel_width = int(first_panel.shape[0]), int(first_panel.shape[1])
+        for panel in range(len(self._lazy_panel_paths)):
+            frame = self._lazy_panel_frame(panel, 0)
+            if frame.shape != first_panel.shape:
+                raise ValueError(
+                    f"Lazy panel {panel} first-frame shape {frame.shape} "
+                    f"does not match panel 0 shape {first_panel.shape}."
+                )
+        stack_min = min(float(self._lazy_panel_frame(panel, 0).min()) for panel in range(len(self._lazy_panel_paths)))
+        stack_max = max(float(self._lazy_panel_frame(panel, 0).max()) for panel in range(len(self._lazy_panel_paths)))
+        with self.hold_sync():
+            self.separate_panel_frames = True
+            self.n_panels = len(self._lazy_panel_paths)
+            self.n_slices = int(max_n)
+            self.panel_real_frames = [int(value) for value in panel_real_frames]
+            self.labels = list(labels)
+            self.panel_frame_labels = [list(values) for values in panel_frame_labels]
+            self.height = height
+            self.panel_width_px = panel_width
+            self._panel_width = panel_width
+            self.width = panel_width * int(self.n_panels)
+            self._buffer_size = min(int(getattr(self, "_buffer_size", 1)) or 1, int(max_n))
+            self.data_min = stack_min
+            self.data_max = stack_max
+            self._data_min_off = stack_min
+            self._data_max_off = stack_max
+            if self._vmin_user is None:
+                self._vmin = stack_min
+                self.vmin = stack_min
+            if self._vmax_user is None:
+                self._vmax = stack_max
+                self.vmax = stack_max
+            self.auto_vmins = [self._vmin] * int(max_n) if self.auto_contrast else []
+            self.auto_vmaxs = [self._vmax] * int(max_n) if self.auto_contrast else []
+            self.frame_bytes = b""
+            self._buffer_bytes = b""
+            self._buffer_start = 0
+            self._buffer_count = 0
+            self._bump_frame_server_version()
+
+    def _lazy_panel_frame(self, panel: int, idx: int) -> np.ndarray:
+        """Decode one lazy panel frame at native resolution with a small LRU."""
+        paths_by_panel = self._lazy_panel_paths
+        if paths_by_panel is None:
+            raise RuntimeError("lazy panel source is not installed")
+        panel = max(0, min(int(panel), len(paths_by_panel) - 1))
+        files = paths_by_panel[panel]
+        if not files:
+            raise RuntimeError(f"lazy panel {panel} has no frames")
+        frame_idx = max(0, min(int(idx), len(files) - 1))
+        key = (panel, frame_idx, str(files[frame_idx]))
+        with self._lazy_panel_lock:
+            cached = self._lazy_panel_cache.get(key)
+            if cached is not None:
+                self._lazy_panel_cache.move_to_end(key)
+                return cached
+
+        from quantem.widget.io.image import _read_frame  # noqa: PLC0415
+
+        frame = np.ascontiguousarray(_read_frame(files[frame_idx]), dtype=np.float32)
+        if frame.ndim != 2:
+            raise ValueError(f"Lazy panel frame must be 2D; got {frame.shape} from {files[frame_idx]}")
+        with self._lazy_panel_lock:
+            self._lazy_panel_cache[key] = frame
+            self._lazy_panel_cache_bytes += int(frame.nbytes)
+            while (
+                self._lazy_panel_cache_bytes > int(self._lazy_panel_cache_limit_bytes)
+                and len(self._lazy_panel_cache) > 1
+            ):
+                _, old = self._lazy_panel_cache.popitem(last=False)
+                self._lazy_panel_cache_bytes -= int(old.nbytes)
+        return frame
+
     def _refresh_auto_contrast_ranges(self) -> None:
         """Precompute one stack-level auto-contrast range for JS playback.
 
@@ -6024,6 +6366,10 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         if not self.auto_contrast:
             self.auto_vmins = []
             self.auto_vmaxs = []
+            return
+        if self._lazy_panel_paths is not None:
+            self.auto_vmins = [float(self._vmin)] * int(self.n_slices)
+            self.auto_vmaxs = [float(self._vmax)] * int(self.n_slices)
             return
 
         low_target = self.percentile_low / 100.0
@@ -6264,6 +6610,11 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             for panel in panels
             for frame_idx in preview_frames
         ]
+        panel_cmaps = [
+            self.panel_cmaps[panel] if panel < len(self.panel_cmaps) else self.cmap
+            for panel in panels
+            for _ in preview_frames
+        ]
         if not frames:
             return None
 
@@ -6293,7 +6644,7 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             frames,
             labels=labels,
             title=self.title,
-            cmap=self.cmap,
+            cmap=panel_cmaps if self.panel_cmaps else self.cmap,
             sampling=self.pixel_size if self.pixel_size > 0 else None,
             units=self.pixel_unit,
             scale_bar_visible=self.scale_bar_visible,
@@ -6391,28 +6742,76 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         ROI stats stay on Python because the mask logic + per-ROI bookkeeping
         lives here. In offline mode JS slices from _offline_stack directly,
         so frame_bytes is dead weight in the HTML state - skip the write."""
+        timing_t0 = time.perf_counter()
         display_frame = None
         if self.roi_active or not self.separate_panel_frames:
             display_frame = self._get_display_frame()
+        timing_after_prepare = time.perf_counter()
+        frame_timing: dict[str, object] | None = None
         with self.hold_sync():
             if self.roi_active and display_frame is not None:
                 self._update_roi_stats(display_frame)
             else:
                 self.roi_stats = {}
             if not self.offline and not self.separate_panel_frames:
+                timing_after_wire = time.perf_counter()
+                timing_after_encode = timing_after_wire
+                payload: bytes | None = None
                 if self.is_rgb and self._rgb_data is not None:
                     # Ship display-ready RGB float32 (H, W, 3) so JS paints true color
                     # without applying a colormap.
                     idx = int(self.slice_idx) if hasattr(self, "slice_idx") else 0
                     idx = max(0, min(idx, int(self._rgb_data.shape[0]) - 1))
                     rgb_frame = np.ascontiguousarray(self._rgb_data[idx], dtype=np.float32)
-                    self.frame_bytes = rgb_frame.tobytes()
+                    timing_after_wire = time.perf_counter()
+                    payload = rgb_frame.tobytes()
+                    timing_after_encode = time.perf_counter()
                 else:
                     wire = self._wire_frame(
                         display_frame, cache_key=("buf", int(self.slice_idx), self.diff_mode)
                     )
-                    self.frame_bytes = wire.tobytes()
+                    timing_after_wire = time.perf_counter()
+                    payload = wire.tobytes()
+                    timing_after_encode = time.perf_counter()
+                send_wall_ms = time.time() * 1000.0
+                send_perf = time.perf_counter()
+                self.frame_bytes = payload
+                timing_after_trait = time.perf_counter()
+                frame_timing = {
+                    "kind": "frame",
+                    "seq": int(self.frame_seq) + 1,
+                    "slice": int(self.slice_idx),
+                    "bytes": len(payload or b""),
+                    "sendTimeMs": send_wall_ms,
+                    "pythonPrepareMs": round((timing_after_prepare - timing_t0) * 1000.0, 3),
+                    "pythonWireMs": round((timing_after_wire - timing_after_prepare) * 1000.0, 3),
+                    "pythonEncodeMs": round((timing_after_encode - timing_after_wire) * 1000.0, 3),
+                    "pythonTraitSetMs": round((timing_after_trait - send_perf) * 1000.0, 3),
+                }
+                self.frame_transport_timing = frame_timing
             self.frame_seq = self.frame_seq + 1
+        if frame_timing and bool(getattr(self, "debug", False)):
+            print(
+                "[Show3D transport] frame "
+                f"slice={frame_timing['slice']} bytes={frame_timing['bytes']} "
+                f"prepare={frame_timing['pythonPrepareMs']}ms "
+                f"wire={frame_timing['pythonWireMs']}ms "
+                f"encode={frame_timing['pythonEncodeMs']}ms"
+            )
+
+    def _defer_initial_frame_wire(self) -> bool:
+        """Return True when JS can fetch the initial native frame after mount.
+
+        This keeps remote notebooks responsive: the controls and canvas mount
+        first, then the browser fetches native pixels through the frame server.
+        Source arrays stay full resolution; only the initial transport ordering
+        changes.
+        """
+        return (
+            not bool(getattr(self, "offline", False))
+            and bool(getattr(self, "frame_server_url", ""))
+            and not bool(getattr(self, "roi_active", False))
+        )
 
     def _update_roi_stats(self, frame: np.ndarray) -> None:
         """Compute mean/min/max/std/area of the currently-selected ROI on `frame`
@@ -6685,6 +7084,7 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         return filtered
 
     def _send_buffer(self, start_idx: int) -> None:
+        timing_t0 = time.perf_counter()
         end_idx = start_idx + self._buffer_size
         # Ship raw display frames directly when denoise is off OR when the
         # browser owns filtering (_webgpu_filter_ok): the WGSL port applies it.
@@ -6703,10 +7103,26 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 key = ("buf", idx, self.diff_mode)
                 frames.append(self._wire_frame(self._get_display_frame(idx), cache_key=key))
             chunk = np.stack(frames)
+        timing_after_prepare = time.perf_counter()
+        payload = chunk.tobytes()
+        timing_after_encode = time.perf_counter()
         with self.hold_sync():
             self._buffer_start = int(start_idx)
             self._buffer_count = int(chunk.shape[0])
-            self._buffer_bytes = chunk.tobytes()
+            send_wall_ms = time.time() * 1000.0
+            send_perf = time.perf_counter()
+            self._buffer_bytes = payload
+            timing_after_trait = time.perf_counter()
+            self.buffer_transport_timing = {
+                "kind": "buffer",
+                "start": int(start_idx),
+                "count": int(chunk.shape[0]),
+                "bytes": len(payload),
+                "sendTimeMs": send_wall_ms,
+                "pythonPrepareMs": round((timing_after_prepare - timing_t0) * 1000.0, 3),
+                "pythonEncodeMs": round((timing_after_encode - timing_after_prepare) * 1000.0, 3),
+                "pythonTraitSetMs": round((timing_after_trait - send_perf) * 1000.0, 3),
+            }
 
     def _sample_line(self, img: np.ndarray, row0: float, col0: float, row1: float, col1: float) -> np.ndarray:
         """Sample one pixel line between two endpoints via bilinear interpolation.

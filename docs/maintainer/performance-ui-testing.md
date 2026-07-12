@@ -186,6 +186,9 @@ For Show2D, drive and record:
 - wheel zoom and drag pan at native/detail zoom,
 - histogram min/max drag and center drag,
 - linked zoom/pan/contrast across panels,
+- per-panel colormaps: pass a list of cmaps at construction, select/hover each
+  panel, change one Color control, and verify saved state plus standalone HTML
+  preserve independent panel maps,
 - column reflow through 1, 2, 4, 6, 8, and 12 columns,
 - paged panel sweeps: dragging or keyboard-stepping the Page slider should
   update the visible page from local browser state immediately, then commit the
@@ -207,11 +210,20 @@ For Show3D, drive and record:
   synchronized,
 - high-FPS playback stress and slider lag,
 - frame slider scrub, keyboard frame step, loop, bounce, and averaging,
+- remote Jupyter tunnel scrub for
+  [S3D-20](storyboard-show3d.md#s3d-20-scrub-full-resolution-movies-over-a-remote-jupyter-tunnel):
+  measure Python prepare/wire/encode/trait-set, browser receive/decode/paint,
+  and UI latency over the real laptop-to-backend ssh tunnel; verify any
+  drag-time preview announces its factor and that release restores native
+  full-resolution pixels,
 - paged panel sweeps: Page slider scrubs and Page play should not wait for a
   Python trait round trip before the rendered page changes,
 - hidden panels in paged views should be page-slot based and must remain hidden
   after Page slider scrubs, Page play, and page-label changes,
 - wheel zoom and drag pan with linked zoom on/off,
+- per-panel colormaps: pass a list of cmaps at construction, hover/select each
+  panel, change one Color control, scrub frames, and verify saved state plus
+  standalone HTML preserve independent panel maps without recoloring neighbors,
 - column reflow through 1, 2, 4, 6, 8, and 12 columns,
 - FFT bottom/right/overlay layouts,
 - FFT overlay drag, corner snap, independent zoom, and pan,
@@ -234,6 +246,10 @@ Targets:
   the report must say which interaction, dataset, browser, and likely cause.
 - Playback/sliders: target 30 FPS for heavy practical views. Slider and image
   must stay synchronized at the selected FPS.
+- Remote tunnel scrub: target immediate visual feedback during active drag.
+  Native pixels must remain available after release or zoom/detail inspection.
+  If a reduced preview is used during drag, the report must include the factor,
+  preview bytes, native bytes, announcement text, and native-restoration check.
 - Page sliders: target a visible page update within one animation frame. In
   heavy local signoff, page-scrub latency above 500 ms is treated as a failure
   unless the report documents a hardware or browser limitation.
