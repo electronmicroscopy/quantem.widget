@@ -118,6 +118,15 @@ For ShowEDS real-data work, keep band, ROI, zoom, contrast, and smooth/auto
 display interactions at real-time speed. Treat loss of 30 FPS interaction as a
 bug unless the limitation is explicitly documented and accepted.
 
+When testing widgets, prefer organic user paths over heavily preconfigured
+constructor calls. Start from a minimal call such as `Show2D(data)` or
+`Show3D(stack)` and use the widget UI to turn on controls, change modes, scrub,
+play, zoom, pan, save, and export like a scientist exploring a notebook. Use
+many constructor parameters only when the behavior under test is specifically
+that API-start state or when reproducing a precise historical bug that requires
+those initial conditions. A kwargs-heavy repro notebook is useful evidence, but
+it does not replace at least one organic UI-drive trial for interaction bugs.
+
 ## Runtime and Backend Choice
 
 Split work by what it is, not by how big it is: rendering versus computation.
