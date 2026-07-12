@@ -7968,7 +7968,7 @@ function Show2D() {
                     <Box sx={{ ...controlRow, ...mobileControlRowSx, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, opacity: 1, pointerEvents: "auto" }}>
                       <Box sx={controlPairSx}>
                         <Typography sx={compactLabelSx} title="Poisson (Anscombe): count-respecting smoothing for sparse EDS/counting data - recommended with Bin 2, sigma 6-10. Gaussian: simple smooth for decent-dose images. None: raw counts (use for anything quantitative).">Denoise</Typography>
-                        <Select size="small" value={denoiseBaseMode} onChange={(e) => { setDisplayFilter(e.target.value); mirrorFilterKnobEdit("mode", e.target.value); }} MenuProps={themedMenuProps} sx={{ ...themedSelect, minWidth: 88 }}>
+                        <Select size="small" value={denoiseBaseMode} onChange={(e) => { const v = e.target.value; setDisplayFilter(v); mirrorFilterKnobEdit("mode", v); if (resolveDenoiseMode(v).mode !== "none" || (spatialBin || 1) > 1) setDenoiseEnabled(true); }} MenuProps={themedMenuProps} sx={{ ...themedSelect, minWidth: 88 }}>
                           {[["none", "None"], ["gaussian", "Gaussian"], ["anscombe", "Poisson (Anscombe)"]].map(([mode, label]) => (
                             <MenuItem key={mode} value={mode}>{label}</MenuItem>
                           ))}
@@ -7981,13 +7981,13 @@ function Show2D() {
                           min={0} max={20} step={0.5}
                           disabled={filterOff}
                           onChange={(_, v) => setSigmaDraft(v as number)}
-                          onChangeCommitted={(_, v) => { setDisplaySigma(v as number); mirrorFilterKnobEdit("sigma", v as number); setSigmaDraft(null); }}
+                          onChangeCommitted={(_, v) => { setDisplaySigma(v as number); mirrorFilterKnobEdit("sigma", v as number); setSigmaDraft(null); if (resolveDenoiseMode(denoiseBaseMode).mode !== "none" || (spatialBin || 1) > 1) setDenoiseEnabled(true); }}
                           size="small" sx={{ ...sliderStyles.small, width: 60 }}
                         />
                       </Box>
                       <Box sx={controlPairSx}>
                         <Typography sx={compactLabelSx} title="Display-side 2x bin passes for SNR, combined with the denoise method. 1 is lossless.">Bin</Typography>
-                        <Select size="small" value={String(spatialBin || 1)} onChange={(e) => { setSpatialBin(parseInt(e.target.value, 10)); mirrorFilterKnobEdit("bin", parseInt(e.target.value, 10)); }} MenuProps={themedMenuProps} sx={{ ...themedSelect, minWidth: 40 }}>
+                        <Select size="small" value={String(spatialBin || 1)} onChange={(e) => { const b = parseInt(e.target.value, 10); setSpatialBin(b); mirrorFilterKnobEdit("bin", b); if (b > 1 || resolveDenoiseMode(denoiseBaseMode).mode !== "none") setDenoiseEnabled(true); }} MenuProps={themedMenuProps} sx={{ ...themedSelect, minWidth: 40 }}>
                           {[1, 2, 4].map((b) => (<MenuItem key={b} value={String(b)}>{b}</MenuItem>))}
                         </Select>
                       </Box>
