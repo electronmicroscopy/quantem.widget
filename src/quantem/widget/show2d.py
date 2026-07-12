@@ -3766,6 +3766,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             "denoise_bin": self.denoise_bin,
             "denoise_scope": self.denoise_scope,
             "show_denoise": self.show_denoise,
+            "denoise_enabled": self.denoise_enabled,
             "denoise_modes": list(self.denoise_modes),
             "denoise_sigmas": list(self.denoise_sigmas),
             "denoise_bins": list(self.denoise_bins),

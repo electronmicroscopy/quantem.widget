@@ -3469,6 +3469,7 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             "diff_mode": self.diff_mode,
             "denoise": self.denoise,
             "show_denoise": self.show_denoise,
+            "denoise_enabled": self.denoise_enabled,
             "denoise_sigma": self.denoise_sigma,
             "denoise_bin": self.denoise_bin,
             "frequency_filter": self.frequency_filter,
