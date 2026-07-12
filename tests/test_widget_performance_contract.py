@@ -118,6 +118,33 @@ def test_show3d_playback_dynamics_menu_uses_saved_state_traits():
     assert "setBoomerang(true)" in show3d
 
 
+def test_show3d_filtered_playback_waits_for_cached_display_frames():
+    """Filtered playback must not flash raw frames while async filters settle."""
+    show3d = (ROOT / "js" / "show3d" / "index.tsx").read_text(encoding="utf-8")
+
+    # C1: a user configures denoise or FFT filtering, presses Play, and expects
+    # every transition to remain in the configured filtered view.
+    assert "frequencyFilterCacheRef" in show3d
+    assert "frequencyFilterPendingRef" in show3d
+    assert "allowRawOnMiss" in show3d
+    assert (
+        "displayAndFrequencyFrameForIndex(next, frame, { allowRawOnMiss: false })"
+        in show3d
+    )
+    assert "warmPlaybackDisplayFrame(next + warmDirection, next, frame)" in show3d
+    assert (
+        "}) || browserFilterOnRef.current || frequencyFilterIsActive"
+        in show3d
+    )
+    assert (
+        "if (frequencyFilterPendingRef.current.has(key)) "
+        "return allowRawOnMiss ? frame : null;"
+    ) in show3d
+    assert "Do not clamp this live DOM update to loop handles" in show3d
+    assert "users see \"1/18\" while the canvas was already showing a later frame" in show3d
+    assert 'data-show3d-playback-count="true"' in show3d
+
+
 def test_show3d_bottom_fft_layout_always_stacks_below_main_panel():
     """C1: user selects FFT Bottom, expect FFT below even for one panel."""
     show3d = (ROOT / "js" / "show3d" / "index.tsx").read_text(encoding="utf-8")

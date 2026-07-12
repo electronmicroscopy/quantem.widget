@@ -133,6 +133,10 @@ because collaborators often review time series outside Jupyter.
 - Hold-key-frame preset or custom path: populate `playback_path` with repeated
   event frames and verify the image visibly pauses on those frames while labels
   and slider positions remain honest.
+- Configure denoise plus a low-pass, high-pass, or band-pass FFT filter before
+  pressing Play; verify transitions stay visibly filtered and smooth, the
+  slider remains honest, and the viewer does not flash raw/noisy frames while
+  cached filtered frames warm.
 - Save state and export HTML; reopen and verify `fps`, `loop`, `boomerang`,
   range, and `playback_path` survive, but playback does not unexpectedly start
   unless explicitly requested.

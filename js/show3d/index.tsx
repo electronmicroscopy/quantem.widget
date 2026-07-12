@@ -2415,7 +2415,8 @@ function Show3D() {
   const [frequencyDraft, setFrequencyDraft] = React.useState<number | null>(null);
   const [frequencyRenderVersion, setFrequencyRenderVersion] = React.useState(0);
   const [frequencyFilterBackend, setFrequencyFilterBackend] = React.useState("off");
-  const frequencyGenerationRef = React.useRef(0);
+  const frequencyFilterCacheRef = React.useRef<Map<string, Float32Array>>(new Map());
+  const frequencyFilterPendingRef = React.useRef<Set<string>>(new Set());
   const frequencyFilterIsActive = !!frequencyFilterEnabled && frequencyFilterActive(frequencyFilter) && !isRgb;
   const frequencyOptions = React.useMemo(() => {
     const mode = normalizeFrequencyFilterMode(frequencyFilter);
@@ -2481,8 +2482,9 @@ function Show3D() {
   // The GPU filter is async, so on a cache miss we return the raw frame now and
   // repaint once the filtered result lands (setBrowserFilterTick). Stats/ROI
   // keep reading raw frames (frame_bytes ships raw), so numbers stay honest.
-  const browserFilterFrame = React.useCallback((idx: number, frame: Float32Array | null): Float32Array | null => {
+  const browserFilterFrame = React.useCallback((idx: number, frame: Float32Array | null, options: { allowRawOnMiss?: boolean } = {}): Float32Array | null => {
     if (!frame || !browserFilterKnobsOn) return frame;
+    const allowRawOnMiss = options.allowRawOnMiss !== false;
     const key = browserFilterCacheKey({
       frameIndex: idx,
       frameSeq,
@@ -2495,7 +2497,7 @@ function Show3D() {
     const cache = browserFilterCacheRef.current;
     const hit = cache.get(key);
     if (hit) return hit;
-    if (browserFilterPendingRef.current.has(key)) return frame;
+    if (browserFilterPendingRef.current.has(key)) return allowRawOnMiss ? frame : null;
     browserFilterPendingRef.current.add(key);
     applyDisplayFilterBrowser(frame, width, height, denoiseResolved.mode, denoiseSigmaLive, denoiseResolved.bin)
       .then((filtered) => {
@@ -2505,7 +2507,7 @@ function Show3D() {
         setBrowserFilterTick((t) => t + 1);
       })
       .catch(() => { browserFilterPendingRef.current.delete(key); });
-    return frame;
+    return allowRawOnMiss ? frame : null;
   }, [browserFilterKnobsOn, denoiseResolved.mode, denoiseResolved.bin, denoiseSigmaLive, frameSeq, width, height]);
   // The "Denoise" toggle is the master ON/OFF of the EFFECT: ON shows the
   // denoised view, OFF shows raw (nothing of the denoised view leaks through).
@@ -4567,15 +4569,19 @@ function Show3D() {
   const updatePlaybackLiveControls = React.useCallback((idx: number) => {
     const c = playRef.current;
     const total = Math.max(1, c.nSlices || nSlices || 1);
-    const rangeStart = c.loop ? Math.max(0, Math.min(c.loopStart, total - 1)) : 0;
-    const rangeEnd = c.loop ? Math.max(rangeStart, Math.min(c.loopEnd, total - 1)) : total - 1;
-    const clamped = Math.max(rangeStart, Math.min(rangeEnd, Math.round(idx)));
+    // The playback row is an honesty indicator for the frame actually drawn.
+    // Do not clamp this live DOM update to loop handles: custom playback paths,
+    // transient trait hydration, and direct-frame filter retries can legitimately
+    // display a frame outside the current loop-handle span. Clamping here made
+    // users see "1/18" while the canvas was already showing a later frame.
+    const clamped = Math.max(0, Math.min(total - 1, Math.round(idx)));
     const pct = total > 1 ? (clamped / (total - 1)) * 100 : 0;
     const slider = playbackSliderRef.current;
     const activeThumb = slider?.querySelector(c.loop ? ".MuiSlider-thumb[data-index='1']" : ".MuiSlider-thumb") as HTMLElement | null;
     const track = slider?.querySelector(".MuiSlider-track") as HTMLElement | null;
     const input = activeThumb?.querySelector("input") as HTMLInputElement | null;
-    const count = playbackLiveCountRef.current;
+    const count = playbackLiveCountRef.current
+      ?? playbackSliderRef.current?.parentElement?.querySelector("[data-show3d-playback-count]");
     if (activeThumb) {
       activeThumb.style.left = `${pct}%`;
       activeThumb.setAttribute("aria-valuenow", String(clamped));
@@ -4592,7 +4598,7 @@ function Show3D() {
     offline,
     diffMode: playRef.current.diffMode,
     avgWindow: playRef.current.avgWindow,
-  }) || browserFilterOnRef.current;
+  }) || browserFilterOnRef.current || frequencyFilterIsActive;
 
   const rawFrameForIndex = (idx: number, currentIdx: number, currentFrame: Float32Array | null): Float32Array | null => {
     const n = Math.max(1, nSlices || 1);
@@ -4703,7 +4709,43 @@ function Show3D() {
     return out;
   };
 
-  const displayFrameForIndex = (idx: number, currentFrame: Float32Array | null): Float32Array | null => {
+  const frequencyFilterKeyForIndex = React.useCallback((idx: number) => {
+    const mode = normalizeFrequencyFilterMode(frequencyFilter);
+    return [
+      Math.round(idx),
+      frameSeq,
+      mode,
+      Number(frequencyOptions.cutoff ?? 0).toFixed(4),
+      Number(frequencyOptions.center ?? 0).toFixed(4),
+      Number(frequencyOptions.width ?? 0).toFixed(4),
+    ].join(":");
+  }, [frameSeq, frequencyFilter, frequencyOptions]);
+
+  const frequencyFilterFrameForDisplay = React.useCallback((idx: number, frame: Float32Array | null, options: { allowRawOnMiss?: boolean } = {}): Float32Array | null => {
+    if (!frame || !frequencyFilterIsActive) return frame;
+    const allowRawOnMiss = options.allowRawOnMiss !== false;
+    const key = frequencyFilterKeyForIndex(idx);
+    const cache = frequencyFilterCacheRef.current;
+    const hit = cache.get(key);
+    if (hit) return hit;
+    if (frequencyFilterPendingRef.current.has(key)) return allowRawOnMiss ? frame : null;
+    frequencyFilterPendingRef.current.add(key);
+    applyFrequencyFilterBrowser(frame, width, height, frequencyOptions)
+      .then((filtered) => {
+        frequencyFilterPendingRef.current.delete(key);
+        cache.set(key, filtered);
+        if (cache.size > 48) cache.delete(cache.keys().next().value as string);
+        setFrequencyFilterBackend(getFrequencyFilterBackend());
+        setFrequencyRenderVersion((value) => value + 1);
+      })
+      .catch((error) => {
+        frequencyFilterPendingRef.current.delete(key);
+        console.warn("[Show3D] frequency filter failed; showing unfiltered frame", error);
+      });
+    return allowRawOnMiss ? frame : null;
+  }, [frequencyFilterIsActive, frequencyFilterKeyForIndex, frequencyOptions, height, width]);
+
+  const displayFrameForIndex = (idx: number, currentFrame: Float32Array | null, options: { allowRawOnMiss?: boolean } = {}): Float32Array | null => {
     const frame = averagedFrameForIndex(idx, idx, currentFrame);
     const activeDiffMode = playRef.current.diffMode;
     let result: Float32Array | null = frame;
@@ -4718,7 +4760,18 @@ function Show3D() {
       }
     }
     // Browser-side denoise (WGSL) applied to the display frame with LIVE sigma.
-    return browserFilterFrame(idx, result);
+    return browserFilterFrame(idx, result, options);
+  };
+
+  const displayAndFrequencyFrameForIndex = (idx: number, currentFrame: Float32Array | null, options: { allowRawOnMiss?: boolean } = {}): Float32Array | null => {
+    const display = displayFrameForIndex(idx, currentFrame, options);
+    return frequencyFilterFrameForDisplay(idx, display, options);
+  };
+
+  const warmPlaybackDisplayFrame = (idx: number, currentIdx: number, currentFrame: Float32Array | null) => {
+    const raw = rawFrameForIndex(idx, currentIdx, currentFrame);
+    if (!raw) return;
+    void displayAndFrequencyFrameForIndex(idx, raw, { allowRawOnMiss: true });
   };
 
   const renderGpuPanelSlice = (idx: number, updateDisplayState = true): boolean => {
@@ -4911,10 +4964,10 @@ function Show3D() {
         offline,
         diffMode: c.diffMode,
         avgWindow: c.avgWindow,
-      }) || browserFilterOnRef.current;
+      }) || browserFilterOnRef.current || frequencyFilterIsActive;
       const rawForRanges = rawFrameForIndex(normalized, normalized, rawFrameDataRef.current);
       const frameForRanges = rawForRanges && transformActive
-        ? (displayFrameForIndex(normalized, rawForRanges) ?? rawForRanges)
+        ? (displayAndFrequencyFrameForIndex(normalized, rawForRanges) ?? rawForRanges)
         : rawForRanges;
       const ranges = Array.from({ length: n }, (_, panel) => {
         const stack = resolveDisplayBounds(c.dataMin, c.dataMax, c.traitVmin, c.traitVmax, c.logScale);
@@ -5236,7 +5289,7 @@ function Show3D() {
         offline,
         diffMode: c.diffMode,
         avgWindow: c.avgWindow,
-      }) || browserFilterOnRef.current;
+      }) || browserFilterOnRef.current || frequencyFilterIsActive;
       let frame: Float32Array | null = null;
       let frameSource = "buffer";
       // The GPU-cache fast paths (renderGpuPanelSlice / direct-grid) only handle
@@ -5313,11 +5366,21 @@ function Show3D() {
         dbg.lastFrameSource = frameSource;
       }
 
+      if (frame && transformActive && !isRgb) {
+        const filteredFrame = displayAndFrequencyFrameForIndex(next, frame, { allowRawOnMiss: false });
+        if (!filteredFrame) {
+          warmPlaybackDisplayFrame(next, playbackIdxRef.current, frame);
+          if (dbg) {
+            dbg.missingFrame = next;
+            dbg.lastFrameSource = `${frameSource}-filter-pending`;
+          }
+          scheduleTick();
+          return;
+        }
+        frame = filteredFrame;
+      }
       playbackIdxRef.current = next;
       updatePlaybackLiveControls(next);
-      if (frame && transformActive && !isRgb) {
-        frame = displayFrameForIndex(next, frame) ?? frame;
-      }
       if (frame && isRgb && offline && frame.length >= c.width * c.height * 3) {
         rgbFrameDataRef.current = frame;
         rawFrameDataRef.current = rgbFrameToLuminance(frame, c.width * c.height);
@@ -5843,6 +5906,11 @@ function Show3D() {
           }
         }
       }
+      if (!isRgb && transformActive) {
+        const warmDirection = c.reverse ? -1 : 1;
+        warmPlaybackDisplayFrame(next + warmDirection, next, frame);
+        warmPlaybackDisplayFrame(next + warmDirection * 2, next, frame);
+      }
 
       // Prefetch at 25% buffer consumed - only if no next buffer is already queued.
       // Respect loop range so we don't fetch frames outside [loop_start, loop_end].
@@ -5889,20 +5957,10 @@ function Show3D() {
       rawFrameDataRef.current = rgbFrameToLuminance(parsed, width * height);
     } else {
       rgbFrameDataRef.current = null;
-      const displayFrame = displayFrameForIndex(offline ? liveSliceIdx : sliceIdx, parsed) ?? parsed;
+      const displayFrame = displayAndFrequencyFrameForIndex(offline ? liveSliceIdx : sliceIdx, parsed) ?? parsed;
       rawFrameDataRef.current = displayFrame;
     }
     const displayFrame = rawFrameDataRef.current;
-    const generation = ++frequencyGenerationRef.current;
-    if (frequencyFilterIsActive) {
-      void applyFrequencyFilterBrowser(displayFrame, width, height, frequencyOptions).then((filtered) => {
-        if (frequencyGenerationRef.current !== generation) return;
-        rawFrameDataRef.current = filtered;
-        setFrequencyFilterBackend(getFrequencyFilterBackend());
-        gpuUploadRef.current = null;
-        setFrequencyRenderVersion((value) => value + 1);
-      }).catch((error) => console.warn("[Show3D] frequency filter failed; showing unfiltered frame", error));
-    }
     gpuUploadRef.current = null;
     if (!showStats) {
       setLocalStats(null);
@@ -6585,22 +6643,11 @@ function Show3D() {
       offline,
       diffMode: c.diffMode,
       avgWindow: c.avgWindow,
-    }) || browserFilterOnRef.current;
-    const frame = transformActive ? (displayFrameForIndex(idx, inputFrame) ?? inputFrame) : inputFrame;
-
-    if (frequencyFilterIsActive) {
-      const generation = ++frequencyGenerationRef.current;
-      void applyFrequencyFilterBrowser(frame, width, height, frequencyOptions).then((filtered) => {
-        if (frequencyGenerationRef.current !== generation) return;
-        playbackIdxRef.current = idx;
-        rawFrameDataRef.current = filtered;
-        setFrequencyFilterBackend(getFrequencyFilterBackend());
-        gpuUploadRef.current = null;
-        setDisplaySliceIdx(idx);
-        setFrequencyRenderVersion((value) => value + 1);
-      }).catch((error) => console.warn("[Show3D] playback frequency filter failed", error));
-      return true;
-    }
+    }) || browserFilterOnRef.current || frequencyFilterIsActive;
+    const frame = transformActive
+      ? displayAndFrequencyFrameForIndex(idx, inputFrame, { allowRawOnMiss: !playing })
+      : inputFrame;
+    if (!frame) return false;
 
     gpuRenderSerialRef.current++;
     playbackIdxRef.current = idx;
@@ -6709,7 +6756,7 @@ function Show3D() {
   };
 
   const renderFetchedSlice = async (idx: number): Promise<boolean> => {
-    const transformActive = requiresClientFrameTransform({ offline, diffMode, avgWindow }) || browserFilterOnRef.current;
+    const transformActive = requiresClientFrameTransform({ offline, diffMode, avgWindow }) || browserFilterOnRef.current || frequencyFilterIsActive;
     if (!transformActive && renderGpuCachedSliceDirect(idx)) return true;
     if (separatePanelFrames) {
       // Neighbor-frame averaging is intentionally clamped off for this mode;
@@ -6792,6 +6839,7 @@ function Show3D() {
       || imageRotation % 4 !== 0
       || requiresClientFrameTransform({ offline, diffMode, avgWindow })
       || browserFilterOnRef.current
+      || frequencyFilterIsActive
     ) return false;
     const n = Math.max(1, nSlices || 1);
     const idx = ((Math.round(playbackIdxRef.current) % n) + n) % n;
@@ -6891,7 +6939,7 @@ function Show3D() {
       }
       return;
     }
-    const transformActive = requiresClientFrameTransform({ offline, diffMode, avgWindow }) || browserFilterOnRef.current;
+    const transformActive = requiresClientFrameTransform({ offline, diffMode, avgWindow }) || browserFilterOnRef.current || frequencyFilterIsActive;
     if (!offline && !transformActive && gpuDisplayVisibleRef.current) {
       try {
         restoredGpu = renderGpuCachedSliceDirect(frameIdx, false);
@@ -7693,7 +7741,7 @@ function Show3D() {
       const offlineFrame = offline ? getOfflineFrame(idx) : null;
       const parsed = offlineFrame ?? extractFloat32(frameBytes, width * height);
       const frame = parsed
-        ? (displayFrameForIndex(idx, parsed) ?? parsed)
+        ? (displayAndFrequencyFrameForIndex(idx, parsed) ?? parsed)
         : null;
       if (frame) rawFrameDataRef.current = frame;
     }
@@ -10824,7 +10872,7 @@ function Show3D() {
     const next = clampSlice(idx);
     if (playing) setPlaying(false);
     setPlaybackUiSliceIdx(next);
-    const transformActive = requiresClientFrameTransform({ offline, diffMode, avgWindow }) || browserFilterOnRef.current;
+    const transformActive = requiresClientFrameTransform({ offline, diffMode, avgWindow }) || browserFilterOnRef.current || frequencyFilterIsActive;
     if (!transformActive && renderGpuCachedSliceDirect(next)) return;
     setLiveSliceIdx(next);
     if (renderBufferedSlice(next)) return;
@@ -12384,7 +12432,7 @@ function Show3D() {
                     ) : (
                       <Slider ref={playbackSliderRef} value={activeIdx} onChange={(_, v) => scrubToSlice(v as number)} onChangeCommitted={(_, v) => commitSlice(v as number)} min={0} max={nSlices - 1} size="small" valueLabelDisplay="auto" valueLabelFormat={(v) => formatFrameValueLabel(v)} marks={bookmarkedFrameMarks} aria-label={`Current ${dimLabel.toLowerCase()} (${activeIdx + 1} of ${nSlices})`} sx={{ ...sliderStyles.small, width: 150, flex: "0 1 150px", minWidth: 90, "& .MuiSlider-mark": { bgcolor: "#ffc107", width: 5, height: 5, borderRadius: "50%", top: "50%", transform: "translate(-50%, -50%)" }, "& .MuiSlider-valueLabel": { maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }} />
                     )}
-                    <Typography ref={playbackLiveCountRef} sx={{ ...typography.value, color: themeColors.textMuted, minWidth: hiddenSet.size ? `${String(nSlices).length * 2 + String(visibleCount).length + 5}ch` : `${String(nSlices).length * 2 + 1}ch`, fontVariantNumeric: "tabular-nums", textAlign: "right", flexShrink: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{hiddenSet.size ? `${activeIdx + 1}/${visibleCount} (${nSlices})` : `${activeIdx + 1}/${nSlices}`}</Typography>
+                    <Typography component="span" ref={playbackLiveCountRef} data-show3d-playback-count="true" sx={{ ...typography.value, color: themeColors.textMuted, minWidth: hiddenSet.size ? `${String(nSlices).length * 2 + String(visibleCount).length + 5}ch` : `${String(nSlices).length * 2 + 1}ch`, fontVariantNumeric: "tabular-nums", textAlign: "right", flexShrink: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{hiddenSet.size ? `${activeIdx + 1}/${visibleCount} (${nSlices})` : `${activeIdx + 1}/${nSlices}`}</Typography>
                     <IconButton size="small" onClick={toggleCurrentFrameBookmark} aria-pressed={currentFrameBookmarked} aria-label={`${currentFrameBookmarked ? "Unstar" : "Star"} frame ${activeIdx + 1}`} title={`${currentFrameBookmarked ? "Unstar" : "Star"} frame ${activeIdx + 1}`} sx={{ color: currentFrameBookmarked ? "#ffc107" : themeColors.textMuted, p: 0.25, width: 22, height: 22, flexShrink: 0, "&:hover": { color: currentFrameBookmarked ? "#ffc107" : themeColors.text } }}>
                       <Box component="span" sx={{ fontSize: 18, lineHeight: "18px" }}>{currentFrameBookmarked ? "★" : "☆"}</Box>
                     </IconButton>
