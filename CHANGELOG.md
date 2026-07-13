@@ -6,6 +6,7 @@ new `rcN` heading when that rc is published to TestPyPI.
 
 ## Unreleased
 
+- Fix ShowEDS spectrum line markers so major lines (Fe Ka, Cu Ka, Au La) keep markers across the full energy range.
 - Harden ShowDiffraction analysis: calibration assignment and exactness, ring/ellipse/texture fit guards, zone-axis variants, stack frame provenance, per-axis canvas overlays, and hostile-input handling.
 - Add the `showdiffraction_fe3o4` tutorial dataset loader: the ShowDiffraction tutorial downloads its real Fe3O4 SAED pattern from the public dataset hub (packaged fallback for offline runs).
 - Fix ShowDiffraction systematic absences for spinel, bixbyite, cuprite, rutile-type, and I41/amd phases: new structure-verified rules remove symmetry-forbidden lines (for example Fe3O4 200 and anatase 002) from predicted reflection lists.
