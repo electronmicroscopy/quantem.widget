@@ -1,6 +1,11 @@
 # Jupyter Book 1.x config for the quantem.widget docs site.
-# Notebooks are PRE-BAKED before the docs build (outputs + widget state committed); the
-# CI runner is CPU-only and just assembles HTML, so execution stays off here.
+# Tutorial notebooks are EXECUTED at build time ("force"): tutorial data
+# downloads from Hugging Face and myst-nb bakes the resulting widget state into
+# the HTML, so the published widgets stay interactive offline. Committed
+# notebooks carry no baked state (repo stays small). "force" (not "cache") is
+# deliberate: jupyter-cache does not preserve metadata.widgets, which would
+# silently blank every widget. Building locally needs the package installed
+# with data extras and `npm run build` done first (see widget-docs.yml).
 title: quantem.widget
 author: Sangjoon Bob Lee, et al
 logo: ""
@@ -9,7 +14,8 @@ exclude_patterns:
   - "**/._*"
 
 execute:
-  execute_notebooks: "off"
+  execute_notebooks: "force"
+  timeout: 900
 
 # Embedded anywidget views need the ipywidgets HTML manager in the static page.
 # myst-nb writes the widget state baked into each notebook; this pulls the JS
@@ -19,6 +25,8 @@ sphinx:
     - sphinx.ext.autodoc
     - sphinx.ext.napoleon
   config:
+    # A tutorial that errors must fail the docs build, not publish a half-blank page.
+    nb_execution_raise_on_error: true
     # napoleon parses the NumPy-style docstrings into proper Parameters / Returns
     # field lists (autodoc2's raw render flattened them into a wall of text).
     napoleon_numpy_docstring: true

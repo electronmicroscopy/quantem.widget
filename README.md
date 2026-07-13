@@ -25,20 +25,27 @@ python -c "import quantem.widget; print(quantem.widget.__version__)"
 
 | Widget | Input | Shows |
 |---|---|---|
-| `Show2D` | 2D image or stack | image + contrast, FFT, line profiles, scale bar |
+| `Show1D` | 1D trace / stack / live monitor with optional linked images | scientific traces, stats, jump markers, snapshots, playback, and live append |
+| `Show2D` | 2D image or stack | image + contrast, FFT, line profiles, scale bar, display-side denoise, view-only low/high/band-pass frequency filters |
 | `Show3D` | 3D stack | scrub / play through frames |
 | `Show3DSlices` | 3D volume | orthogonal-slice viewer |
 | `Show4DSTEM` | 4D-STEM array | live virtual detectors (BF / ABF / ADF), CoM / iCoM / DPC |
 | `ShowDiffraction` | 2D diffraction pattern or 3D stack | spot/ring d-spacings, center refinement, calibration, phase indexing |
 | `ShowEDS` | EDS/EELS spectrum image | experimental linked element map, spectrum, energy band, and real-space ROI |
+| `Show4DSTEM` | 4D-STEM array, or 5D stack | live virtual detectors (BF / ABF / ADF), CoM / iCoM / DPC, dataset slider + compare grid, offline WebGPU export |
+| `ShowDiffraction` | 2D pattern or 3D stack | d-spacing, g-vector, and angle measurement on Bragg spots and rings |
+| `ShowEDS` | EDS/EELS spectrum image | linked element map, spectrum, energy band, real-space ROI, and automatic element identification |
 | `ShowFolder` | microscopy session folder | fast thumbnail browser, grouping, and file selection |
 
 ```python
 import numpy as np
 from quantem.widget import (
     Show2D, Show3D, Show3DSlices, Show4DSTEM, ShowDiffraction, ShowEDS, ShowFolder
+    Show1D, Show2D, Show3D, Show3DSlices,
+    Show4DSTEM, ShowDiffraction, ShowEDS, ShowFolder,
 )
 
+Show1D(np.random.rand(100), x_label="frame", y_label="defocus", y_unit="nm")
 Show2D(np.random.rand(512, 512))
 Show4DSTEM(np.random.rand(64, 64, 128, 128))
 ShowDiffraction(np.random.rand(512, 512))
@@ -58,13 +65,21 @@ eds = load_eds("spectrum_image.emd")  # Velox/RSCIIO EDS/EELS -> energy-last Spe
 ShowEDS(eds, energy=8.04, width=0.24)
 ```
 
+No data at hand? The tutorial datasets download and cache themselves:
+
+```python
+from quantem.widget.datasets import show2d_gold, show4dstem_gold
+
+Show4DSTEM(show4dstem_gold())
+```
+
 `quantem.widget.io` also provides `read_image`, `bin`, `download`, and more -
 see the docs.
 
 ## Command line
 
 Point `quantem` at a file or folder and it renders the right viewer - no notebook, no
-Python. Installing the package adds the `quantem` command.
+Python. Installing the package adds the `quantem` command (and a short `qw` alias).
 
 ```bash
 quantem show ./anything/                     # auto-detect content, pick the viewer
@@ -89,7 +104,9 @@ quantem html tutorial.ipynb                  # a notebook          -> standalone
 | `quantem showfolder <folder>` | microscopy session folder | ShowFolder notebook (or `--html`) |
 | `quantem showdiffraction <pattern>` | a diffraction pattern, or `--demo` | analyzed ShowDiffraction HTML: rings and fits; with `--phase`, calibration and hkl |
 | `quantem data-transfer plan/inspect/copy` | `*_master.h5` folder plus target roots | manifest-backed transfer planning, state inspection, and explicit copy |
+| `quantem data-transfer plan/inspect/copy/update/masters/show4dstem` | `*_master.h5` folder plus target roots | manifest-backed transfer planning, state inspection, explicit copy, resume/update, ready-master listing, and Show4DSTEM handoff |
 | `quantem html <notebook.ipynb>` | a notebook you wrote | runs it, bakes outputs into one offline HTML |
+| `quantem github <notebook.ipynb>` | a notebook copy for GitHub | strips widget state, embeds compressed pictures for GitHub's preview |
 
 **Images** save a standalone HTML and open in your browser. **4D-STEM** opens a live,
 kernel-backed notebook by default (full real-time interaction); `--html` instead bakes a
@@ -116,14 +133,15 @@ For GitHub notebook previews, make a copy and run
 this command keeps compressed pictures of each widget UI and removes heavy widget state.
 See the HTML export docs for the widget capability table and folder-export guidance.
 
-Everything lands in `~/Downloads` and opens automatically.
+Everything lands in `~/Downloads` (or the current directory on machines without
+one) and opens automatically on a desktop.
 
 | Option | Effect |
 |---|---|
-| `--bin N` | detector mean-bin factor for 4D-STEM (default 8) |
+| `--bin N` | detector mean-bin factor for 4D-STEM (default 8 for `show*`; `data-transfer` defaults to 1) |
 | `--html` | 4D-STEM: write the offline-WebGPU HTML instead of a notebook |
+| `--watch` | show2d/show3d/show4dstem folders: keep appending new files to a live notebook |
 | `--combined` | many masters -> one 5D HTML viewer (served locally) |
-| `--widget {2d,3d,4dstem}` | force a widget instead of auto-detect |
 | `--out PATH` | output file or directory (default `~/Downloads`) |
 | `--no-open` | write the file(s) without launching a browser or Jupyter |
 | `--title`, `-v/--verbose` | page title; verbose progress |
@@ -144,6 +162,24 @@ can be opened directly in Colab. To make a GitHub-readable preview copy, see
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, checks, widget export
 expectations, agent signoff, and release-candidate guidance.
+
+This repository follows the
+[scikit-package](https://scikit-package.github.io/scikit-package/) standards
+for reproducible scientific software: issue-first development (a PR closes a
+GitHub issue that states the problem), one small themed PR per issue,
+Conventional Commit-style messages, NumPy-style docstrings, self-reviewed
+PRs, and no force-pushing a branch under active review (rewritten commits
+detach the reviewer's inline comments and destroy the incremental
+"changes since last review" diff — append commits and `git revert` instead;
+we squash-merge, so branch tidiness costs nothing). Human contributors
+and coding agents/LLMs alike should apply these standards when writing code,
+commits, issues, and PRs — the same rules are mirrored in
+[AGENTS.md](AGENTS.md) and [CLAUDE.md](CLAUDE.md) so automated contributors
+pick them up. Reference: S. Lee, C. Myers, A. Yang, T. Zhang, Y. Xiao, and
+S. J. L. Billinge, *Digital Discovery*, 2026,
+[doi:10.1039/d6dd00121a](https://doi.org/10.1039/d6dd00121a). For Git/GitHub
+tutorials and workflow onboarding, see
+[ophusgroup/dev](https://github.com/ophusgroup/dev).
 
 ### Commit messages
 
@@ -211,6 +247,11 @@ A. Yang, T. Zhang, Y. Xiao, and S. J. L. Billinge, *Digital Discovery*, 2026).
 - [ ] Histogram UI matches the existing Show2D-style interaction: compact panel,
   no extra whitespace, draggable min/max handles, fast center drag, and no
   visible lag.
+- [ ] New or changed widget interactions have a matching storyboard story in
+  [docs/maintainer/storyboard-\<widget\>.md](docs/maintainer/storyboard.md)
+  (add stories for new behavior, update stale ones), and the storyboard
+  drive-test was run for the affected widget with the driven story IDs
+  reported.
 - [ ] Any draggable selector has live preview separate from committed widget
   state; use refs/CSS transforms or an equivalent fast path during drag. See
   [performance notes](docs/maintainer/widget-performance.md).
@@ -276,12 +317,23 @@ A. Yang, T. Zhang, Y. Xiao, and S. J. L. Billinge, *Digital Discovery*, 2026).
   when a public widget or loader is added.
 - [ ] Tutorial notebooks avoid unnecessary `display(...)` and extra display
   imports; let the returned widget render naturally.
+- [ ] Synthetic-data generation cells in tutorial notebooks are collapsed with
+  the `hide-input` cell tag and a descriptive toggle label via cell metadata
+  `mystnb.code_prompt_show` (for example "Show synthetic data generation
+  code"), never the default "Show code cell source". Keep widget-construction
+  code and real-data loader calls visible; split a cell that mixes the two.
 - [ ] The change includes focused tests for Python state/export behavior and
-  frontend build coverage where possible; start with `PYTHONPATH=src pytest -q`
+  frontend build coverage where possible; start with `PYTHONPATH=src:. pytest -q`
   and `npm run build`, or run `scripts/widget_local_signoff.sh`.
 - [ ] Before committing, inspect `git status --short` and `git diff --stat`;
   do not commit generated HTML, docs builds, screenshots, local notebooks,
   private data, or machine-specific notes.
+- [ ] Committed notebooks carry NO baked widget state (`metadata.widgets`) and
+  pass `scripts/check_notebook_sizes.py`. The docs CI executes tutorials at
+  build time (`execute_notebooks: force` in `docs/_config.yml`) and bakes
+  widget state into the published HTML only — never commit a re-executed
+  notebook with stored widget state, and never switch the docs build to
+  `cache` mode (it silently drops widget state and blanks every widget).
 
 ## Issues
 

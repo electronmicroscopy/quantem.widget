@@ -68,6 +68,26 @@ together. Do not allow a label to remain on one line while its switch or menu
 wraps to the next line. Use an inline-flex pair wrapper or an equivalent stable
 layout primitive with small fixed gaps.
 
+Every compact label that names a live control (`Scale`, `Color`, `Colorbar`,
+`Profile`, `FFT`, `Lens`, `Auto`, `Smooth`, and the `Link` toggles) must render
+inside a pair wrapper, not as a bare sibling of its control. A bare label is the
+one that drifts away from its switch or menu when the toolbar wraps. Give these
+labels full-strength text (`themeColors.text`); reserve the muted text color for
+status text only (export status, page status, zoom readout), never for a label
+that names a control the user can toggle.
+
+**Scoped sub-groups.** When several toggles share one governing word (for
+example `Link` scoping `Zoom`, `Pan`, `Contrast`, and `Denoise`), wrap the whole
+set in a single bordered sub-group led by that word. Repeating or bordering the
+scope keeps it legible when the group wraps; a lone `Pan` switch that wraps away
+from a distant `Link` label reads as an unscoped control.
+
+**Mode-gated knobs get their own row.** Occasional sliders that appear only when
+a mode is on (lens magnification and window size, the denoise method/σ/bin knobs,
+the underlay blend/stretch knobs) belong on their own conditional row, not
+appended to an always-visible row. This keeps the everyday rows short and stops a
+toggled-on tool from forcing the base controls to wrap.
+
 Browser signoff for dense controls must include at least one narrow viewport.
 For Show2D and Show3D, check the main image controls, FFT controls, playback
 controls, linked zoom/pan/contrast controls, and any page/column controls that
@@ -86,6 +106,51 @@ When a widget has these actions, prefer this order:
 Keep existing widget-specific exceptions only when the scientific workflow
 depends on them. If changing the order, compare the result against Show2D,
 Show3D, Show4DSTEM, and ShowEDS before committing.
+
+## Overflow (More) menu + always-visible active-reduction badge
+
+Dense widgets outgrow a single toolbar. Tier the controls instead of wrapping
+them off screen. Show2D is the reference implementation; Show3D, Show4DSTEM,
+and ShowEDS should mirror this pattern.
+
+**Tiering.** Keep the everyday viewer toggles top-level and push occasional
+tools into a `More` overflow menu in the right action cluster (next to `View`,
+`Export`, `Copy`).
+
+- Top-level (Show2D): `Profile`, `FFT`, `Lens`, `Colorbar`, panel `Reorder`,
+  `Panels`, and the per-panel hide/star controls.
+- Inside `More` (Show2D): `ROI`, `Denoise` (`show_denoise`), and `Diff`.
+
+Move controls into `More` by relocating the existing control and its
+handlers/side-effects. Do not duplicate the toggle logic, and preserve each
+control's render guard (for example, `ROI` only when not a gallery; `Diff`
+under its existing availability condition). Render each moved control inline in
+the menu with its real control type (a mode select stays a select, a toggle
+stays a switch); never downgrade a mode to a bare on/off just because it moved.
+Use the shared MUI `Select`/`Menu` with `themedSelect`/`themedMenuProps`; never
+a native `<select>`.
+
+**Active badge (MUST).** An active reduction or tool must never be invisible.
+Compute a count of the active items inside `More` and show it as an MUI `Badge`
+on the button; accent the button and the active menu items so a collapsed-away
+tool is still discoverable. Reuse the existing accent idioms (the `Panels N/M`
+count and the reorder-button accent).
+
+```text
+moreActiveCount = (roiActive ? 1 : 0) + (diffActive ? 1 : 0) + (showDenoise ? 1 : 0)
+```
+
+**Collapse banner (MUST).** Reduction banners (denoise, crop/pad) normally live
+inside the controls block and disappear when the user collapses controls. That
+would hide an active reduction, which the house rule forbids. When controls are
+collapsed and a denoise or view banner is non-empty, render a compact accent
+badge in the always-visible title row, mirroring the surviving `2× binned`
+badge. Strip the trailing "how to undo" hint for the compact label and keep the
+full banner text in the `title` tooltip.
+
+**Collapse toggle affordance.** Give the `Controls` collapse toggle a
+chevron/open-state indicator (and `aria-expanded`) so its state is legible at a
+glance.
 
 ## Dynamic labels
 

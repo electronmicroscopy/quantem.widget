@@ -542,15 +542,18 @@ def test_widget_showfolder_live_smoke_writes_report(tmp_path: Path) -> None:
 
     assert result.returncode == 0, result.stdout
     report = json.loads((artifact_dir / "report.json").read_text(encoding="utf-8"))
+    plan = json.loads(
+        (artifact_dir / "browser-plan.json").read_text(encoding="utf-8")
+    )
     index = (artifact_dir / "index.html").read_text(encoding="utf-8")
 
     assert report["passed"] is True
-    assert len(report["steps"]) == 2
+    assert len(report["steps"]) == 5
     image_step = report["steps"][0]
     master_step = report["steps"][1]
     assert image_step["watch_changed"] is True
-    assert image_step["show2d_panels"] == 2
-    assert image_step["show3d_slices"] == 2
+    assert image_step["show2d_panels"] == 3
+    assert image_step["show3d_slices"] == 3
     assert len(image_step["thumbnail_previews"]) == 3
     for preview in image_step["thumbnail_previews"]:
         assert (artifact_dir / preview["webp"]).exists()
@@ -558,12 +561,77 @@ def test_widget_showfolder_live_smoke_writes_report(tmp_path: Path) -> None:
     assert master_step["after_frames"] == 2
     assert master_step["frame_labels"] == ["scan_000", "scan_001"]
     assert [row["status"] for row in master_step["master_qc"]] == ["ready", "ready"]
+    assert master_step["uses_monkeypatch"] is True
+
+    direct_steps = report["steps"][2:]
+    assert [step["kind"] for step in direct_steps] == [
+        "direct_public_from_folder",
+        "direct_public_from_folder",
+        "direct_public_from_folder",
+    ]
+    assert all(step["uses_monkeypatch"] is False for step in direct_steps)
+    direct_show2d, direct_show3d, direct_show4d = direct_steps
+    for step in (direct_show2d, direct_show3d):
+        # C1: public image viewers mount before accepting their initial file,
+        # expect probation, one stable append, later arrival, and one model ID.
+        assert step["same_mounted_model"] is True
+        assert step["initial_probation_added"] == [0]
+        assert step["arrival_probation_added"] == []
+        assert step["stable_arrival_added"] == [1]
+        assert step["final_count"] == 2
+        assert step["static_watch_contract"] == {
+            "embedded_states": ["hidden"],
+            "watching_embedded": False,
+            "hidden_snapshot": True,
+        }
+        states = [point["state"] for point in step["timeline"]]
+        for required in ("waiting", "updating", "watching", "stopped"):
+            assert required in states
+
+    # C2: direct production CPU Show4DSTEM appends after header probation,
+    # expect fresh visible-page pixels before its final green state.
+    assert direct_show4d["same_mounted_model"] is True
+    assert direct_show4d["arrival_probation_added"] == []
+    assert direct_show4d["stable_arrival_added"] == [1]
+    assert direct_show4d["authoritative_before_green"] is True
+    assert direct_show4d["active_page_indices"] == [0, 1]
+    assert direct_show4d["active_page_loaded_count"] == 2
+    assert direct_show4d["virtual_image_means"][1] > direct_show4d[
+        "virtual_image_means"
+    ][0]
+    green = [
+        point
+        for point in direct_show4d["timeline"]
+        if point["state"] == "watching" and point["count"] == 2
+    ][-1]
+    assert green["compare_page_loading"] is False
+    assert green["compare_page_loaded_count"] == 2
+    assert green["compare_panel_indices"] == [0, 1]
+    assert direct_show4d["static_watch_contract"]["watching_embedded"] is False
+
+    assert len(report["exports"]) == 7
+    assert len(plan["pages"]) == len(report["exports"])
+    assert {
+        row["variant"]
+        for row in report["exports"]
+        if row["variant"].endswith("folder-watch-static")
+    } == {
+        "show2d-folder-watch-static",
+        "show3d-folder-watch-static",
+        "show4dstem-folder-watch-static",
+    }
+    for row in report["exports"]:
+        assert Path(row["path"]).exists()
     assert "ShowFolder live-folder smoke: PASS" in index
     assert "<img" in index
     assert "4D-STEM Master QC" in index
+    assert "Direct Viewer Lifecycle Timeline" in index
     assert (artifact_dir / "showfolder-live-show2d.html").exists()
     assert (artifact_dir / "showfolder-live-show3d.html").exists()
     assert (artifact_dir / "showfolder-live-show4dstem.html").exists()
+    assert (artifact_dir / "show2d-from-folder-stopped.html").exists()
+    assert (artifact_dir / "show3d-from-folder-stopped.html").exists()
+    assert (artifact_dir / "show4dstem-from-folder-stopped.html").exists()
 
 
 def test_widget_show3d_animation_smoke_writes_gif_report(tmp_path: Path) -> None:

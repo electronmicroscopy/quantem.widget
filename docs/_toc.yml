@@ -20,63 +20,83 @@ parts:
       - file: tutorials/showdiffraction
       - file: tutorials/io_gpu
         title: IO/GPU
-  - caption: Advanced tutorials
-    chapters:
-      - file: tutorials/showfolder
-      - file: tutorials/widget_export
-  - caption: API reference
-    chapters:
-      - file: api/index
-      - file: api/datasets
-      - file: api/viewer-ui
-      - file: api/show1d
-      - file: api/show2d
-      - file: api/show3d
-      - file: api/show3dslices
-      - file: api/show4dstem
-      - file: api/showeds
-      - file: api/showdiffraction
-      - file: api/showfolder
-      - file: api/html-export
-      - file: api/io
+  # Advanced and Maintainers are each one expandable parent link (chevron) so
+  # the sidebar stays short. These parts deliberately have NO caption: the
+  # parent link is the label, and a caption would render a duplicate header
+  # right above it.
+  - chapters:
+      - file: tutorials/advanced
+        title: Advanced
+        sections:
+          - file: tutorials/showfolder
+          - file: tutorials/widget_export
+          - file: tutorials/movie_export
+            title: Saving GIF and MP4 movies
+          - file: tutorials/memory_management
+            title: Memory management
+          - file: tutorials/watch_folder
+            title: Live folder watching
+          - file: tutorials/compare_reconstructions
+            title: Comparing reconstructions
+  # API reference lives under Developers, separate from the tutorials.
   - caption: Developers
     chapters:
+      - file: api/index
+        title: API reference
+        sections:
+          - file: api/datasets
+          - file: api/viewer-ui
+          - file: api/show1d
+          - file: api/show2d
+          - file: api/show3d
+          - file: api/show3dslices
+          - file: api/show4dstem
+          - file: api/showeds
+          - file: api/showdiffraction
+          - file: api/showfolder
+          - file: api/html-export
+          - file: api/io
+          - file: api/load
       - file: developer/ui-guide
         title: UI Guide
-  - caption: Maintainers
-    chapters:
-      - file: changelog
-        title: Changelog
-      - file: maintainer/widget-release
-        title: Release
-      - file: maintainer/automation
-        title: Automation
-      - file: maintainer/viewing-html-on-mobile
-        title: Mobile HTML
-      - file: maintainer/widget-agent-signoff
-        title: Agent signoff
-      - file: maintainer/widget-review-matrix
-        title: Review matrix
-      - file: maintainer/widget-ui-protocol
-        title: UI protocol
-      - file: maintainer/performance-ui-testing
-        title: Performance UI testing
-      - file: maintainer/storyboard
-        title: Storyboard
+      - file: developer/save-state-and-notebook-size
+        title: Save state & notebook size
+  - chapters:
+      - file: maintainer/index
+        title: Maintainer guide
         sections:
-          - file: maintainer/storyboard-show2d
-            title: Show2D
-          - file: maintainer/storyboard-show3d
-            title: Show3D
-          - file: maintainer/storyboard-show3dslices
-            title: Show3DSlices
-          - file: maintainer/storyboard-show4dstem
-            title: Show4DSTEM
-          - file: maintainer/storyboard-showeds
-            title: ShowEDS
-          - file: maintainer/storyboard-showfolder
-            title: ShowFolder
-          - file: maintainer/storyboard-data-transfer
-            title: DataTransfer
-      - file: maintainer/widget-performance
-        title: Performance
+          - file: changelog
+            title: Changelog
+          - file: maintainer/widget-release
+            title: Release
+          - file: maintainer/automation
+            title: Automation
+          - file: maintainer/viewing-html-on-mobile
+            title: Mobile HTML
+          - file: maintainer/widget-agent-signoff
+            title: Agent signoff
+          - file: maintainer/widget-review-matrix
+            title: Review matrix
+          - file: maintainer/widget-ui-protocol
+            title: UI protocol
+          - file: maintainer/performance-ui-testing
+            title: Performance UI testing
+          - file: maintainer/storyboard
+            title: Storyboard
+            sections:
+              - file: maintainer/storyboard-show2d
+                title: Show2D
+              - file: maintainer/storyboard-show3d
+                title: Show3D
+              - file: maintainer/storyboard-show3dslices
+                title: Show3DSlices
+              - file: maintainer/storyboard-show4dstem
+                title: Show4DSTEM
+              - file: maintainer/storyboard-showeds
+                title: ShowEDS
+              - file: maintainer/storyboard-showfolder
+                title: ShowFolder
+              - file: maintainer/storyboard-data-transfer
+                title: DataTransfer
+          - file: maintainer/widget-performance
+            title: Performance

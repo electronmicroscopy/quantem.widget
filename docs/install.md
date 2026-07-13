@@ -10,7 +10,18 @@ pip install -i https://test.pypi.org/simple/ \
     quantem.widget
 ```
 
-That works on every backend; the widget picks the fastest path it finds at runtime.
+That works on every backend; the widget picks the fastest path it finds at
+runtime. Requires Python 3.11 or newer.
+
+To upload or download shared datasets through the Hugging Face helpers
+(`quantem.widget.io.upload` / `download` — see [Load and I/O](api/io)), add
+the `[hub]` extra, which pulls in `quantem.data`:
+
+```bash
+pip install -i https://test.pypi.org/simple/ \
+    --extra-index-url https://pypi.org/simple/ \
+    "quantem.widget[hub]"
+```
 
 ## Google Colab
 
@@ -39,7 +50,7 @@ Common entry points:
 | ShowEDS | [Open in Colab](https://colab.research.google.com/github/bobleesj/quantem.widget/blob/main/docs/tutorials/showeds.ipynb) | [GitHub](https://github.com/bobleesj/quantem.widget/blob/main/docs/tutorials/showeds.ipynb) |
 | ShowDiffraction | [Open in Colab](https://colab.research.google.com/github/bobleesj/quantem.widget/blob/main/docs/tutorials/showdiffraction.ipynb) | [GitHub](https://github.com/bobleesj/quantem.widget/blob/main/docs/tutorials/showdiffraction.ipynb) |
 | ShowFolder | [Open in Colab](https://colab.research.google.com/github/bobleesj/quantem.widget/blob/main/docs/tutorials/showfolder.ipynb) | [GitHub](https://github.com/bobleesj/quantem.widget/blob/main/docs/tutorials/showfolder.ipynb) |
-| Saving and sharing | [Open in Colab](https://colab.research.google.com/github/bobleesj/quantem.widget/blob/main/docs/tutorials/widget_export.ipynb) | [GitHub](https://github.com/bobleesj/quantem.widget/blob/main/docs/tutorials/widget_export.ipynb) |
+| HTML and file export | [Open in Colab](https://colab.research.google.com/github/bobleesj/quantem.widget/blob/main/docs/tutorials/widget_export.ipynb) | [GitHub](https://github.com/bobleesj/quantem.widget/blob/main/docs/tutorials/widget_export.ipynb) |
 
 ## Backends
 

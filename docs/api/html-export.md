@@ -3,8 +3,8 @@
 `quantem.widget` has three sharing paths:
 
 1. **Widget-level HTML**: `widget.export_html(...)` writes one standalone widget
-   viewer. Use this when a single Show2D / Show3D / Show3DSlices / Show4DSTEM /
-   ShowEDS view is the artifact.
+   viewer. Use this when a single Show1D / Show2D / Show3D / Show3DSlices /
+   Show4DSTEM / ShowEDS view is the artifact.
 2. **Notebook-level HTML**: `quantem html notebook.ipynb --no-execute` exports a
    whole notebook with its saved widget state. Use this for reports and
    tutorials that combine text, figures, and multiple widgets.
@@ -37,7 +37,7 @@ path: Path = widget.export_html(
     path=None,          # str | pathlib.Path | None
     title=None,         # optional browser page title when supported
     mode="single",      # "single" or "folder"
-    encoding="full",    # "full", "uint8", "float16", or widget-specific
+    encoding="full",    # "full", "uint8", or widget-specific
     downsample=None,    # None, 2, 4, or widget-specific
 )
 ```
@@ -106,7 +106,7 @@ Use the same three option names across widgets:
 | Option | Meaning | Preferred values |
 |---|---|---|
 | `mode` | where the data lives | `single`, `folder` |
-| `encoding` | how the data is stored | `full`, `uint8`, `float16`, widget-specific |
+| `encoding` | how the data is stored | `full`, `uint8`, widget-specific |
 | `downsample` | whether dimensions are reduced before export | `None`, `2`, `4`, widget-specific |
 
 `mode` is packaging. It should not imply lower precision or a smaller shape.
@@ -120,6 +120,7 @@ browse-quality or count-preserving.
 
 | Widget | HTML export | Mode | Encoding | Downsample | Folder export | Reducer / notes |
 |---|---|---|---|---|---|---|
+| Show1D | yes | `single` | `full` | `1`, `2`, `4`, `8` | no | preserves every trace/x sample; linked 2D snapshot and profile panels use a NaN-aware area mean, with pixel size and panel/profile coordinates rescaled |
 | Show2D | yes | `single` | `full`, `uint8` | planned | no | `uint8` stores display-scaled image data |
 | Show3D | yes | `single` | `full`, `uint8` | planned | no | `uint8` stores display-scaled volume data |
 | Show3DSlices | yes | `single` | `full`, `uint8` | planned | no | `uint8` stores display-scaled volume data |
@@ -130,6 +131,7 @@ The public Python calls are:
 
 | Widget | Python API |
 |---|---|
+| Show1D | `export_html(path=None, title=None, mode="single", encoding="full", downsample=None)` |
 | Show2D | `export_html(path=None, title=None, mode="single", encoding="full", downsample=None)` |
 | Show3D | `export_html(path=None, title=None, mode="single", encoding="full", downsample=None)` |
 | Show3DSlices | `export_html(path=None, title=None, mode="single", encoding="full", downsample=None)` |

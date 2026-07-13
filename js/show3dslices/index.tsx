@@ -4810,7 +4810,7 @@ function Show3DSlices() {
   // Render
   // -------------------------------------------------------------------------
   return (
-    <Box className="show3dslices-root" tabIndex={0} onKeyDown={handleKeyDown} sx={{ ...container.root, position: "relative", bgcolor: tc.bg, color: tc.text, outline: "none", "&:focus": { outline: "2px solid #0af", outlineOffset: 2 }, "& canvas": { display: "block" } }}>
+    <Box className="show3dslices-root" tabIndex={0} onKeyDown={handleKeyDown} sx={{ ...container.root, position: "relative", bgcolor: tc.bg, color: tc.text, outline: "none", "&:focus::after": { content: '""', position: "absolute", inset: 0, pointerEvents: "none", zIndex: 20, boxShadow: "inset 0 0 0 2px #0af" }, "& canvas": { display: "block" } }}>
       {/* 3D volume on the LEFT, slice toolbar + projected slice panels on the RIGHT.
           Side-by-side layout keeps the whole widget within a 13" laptop viewport. */}
       <Box sx={{ display: "flex", flexDirection: { xs: "column", md: "row" }, flexWrap: "wrap", alignItems: "flex-start", gap: `${SPACING.SM}px`, width: "100%" }}>
@@ -4918,9 +4918,11 @@ function Show3DSlices() {
                 <Box
                   onMouseDown={handleVolumeResizeStart}
                   sx={{
-                    position: "absolute", bottom: 2, right: 2, width: 12, height: 12,
-                    cursor: "nwse-resize", opacity: 0.4,
-                    background: `linear-gradient(135deg, transparent 50%, ${tc.textMuted} 50%)`,
+                    position: "absolute", bottom: 0, right: 0, width: 16, height: 16,
+                    cursor: "nwse-resize", opacity: 0.6,
+                    background: `linear-gradient(135deg, transparent 50%, ${tc.accent} 50%)`,
+                    touchAction: "none",
+                    zIndex: 5,
                     "&:hover": { opacity: 1 },
                   }}
                 />
@@ -5048,9 +5050,11 @@ function Show3DSlices() {
                 <Box
                   onMouseDown={(e) => handleResizeStart(e, a)}
                   sx={{
-                    position: "absolute", bottom: 2, right: 2, width: 12, height: 12,
-                    cursor: "nwse-resize", opacity: 0.4,
-                    background: `linear-gradient(135deg, transparent 50%, ${tc.textMuted} 50%)`,
+                    position: "absolute", bottom: 0, right: 0, width: 16, height: 16,
+                    cursor: "nwse-resize", opacity: 0.6,
+                    background: `linear-gradient(135deg, transparent 50%, ${tc.accent} 50%)`,
+                    touchAction: "none",
+                    zIndex: 5,
                     "&:hover": { opacity: 1 },
                   }}
                 />

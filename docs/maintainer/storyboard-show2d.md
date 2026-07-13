@@ -105,8 +105,9 @@ to see.
 
 ### S2D-06: Link And Unlink Comparison State
 
-**User story**: As a user comparing related panels, I want linked zoom, pan, and
-contrast to be optional and reversible.
+**User story**: As a user comparing related panels, I want linked zoom, pan,
+contrast, denoise, frequency-filter, and padding edits to be optional and
+reversible.
 
 **Primary widgets**: Show2D.
 
@@ -116,6 +117,25 @@ contrast to be optional and reversible.
 
 - Enable linked zoom, pan, and contrast; verify panels move together.
 - Disable each link mode; verify independent panel state works.
+- Pass ``cmap=["gray", "inferno", "RdBu", ...]`` for a multi-panel gallery and
+  verify each panel keeps its requested colormap in the live UI, saved state,
+  static notebook preview, and standalone HTML export. Select each panel and
+  change Color from the UI; verify only that panel changes unless the user has
+  explicitly chosen a linked/all-panel operation.
+- In the View menu, set Padding to 10%, choose Median fill, and verify the
+  canvas and histogram update while the stored raw arrays remain unchanged.
+- In a drift-correction gallery, toggle Padding from All to selected-panel
+  scope, set one panel to 20% Mean fill, and verify only that panel's
+  ``pad_ratios`` / ``pad_fill_modes`` entry changes while every panel shares
+  the larger comparison canvas.
+- Save and restore the state; verify ``pad_ratio``, ``pad_ratios``,
+  ``pad_fill_mode``, ``pad_fill_modes``, and ``pad_scope`` round-trip and
+  ``reset_view_ops()`` clears the border bit-identically.
+- [x] **S2D-PANEL-DN-1**: With denoise edits unlinked, select panels configured
+  as raw, Gaussian σ2, and Gaussian σ8. Change only the σ2 panel to σ20, then
+  revisit all three panels. The editor and canvas must retain `None/4`,
+  `Gaussian/20`, and `Gaussian/8`; the two neighboring canvases must be
+  pixel-identical before and after the edit.
 - Resize the grid and verify view anchors do not jump.
 
 ### S2D-07: Use FFT To Inspect Periodicity
@@ -135,6 +155,14 @@ reference comparison.
   correct.
 - Zoom and pan in FFT mode; verify events target FFT, not stale real-space
   layers.
+- Verify every interactive FFT panel always shows its own accurate multiplier,
+  including the default `2.0×`; independent and linked wheel/pinch zoom must
+  update the correct labels, and reset must restore `2.0×` without changing
+  real-space zoom.
+- While the viewer is paused, switch to another browser tab and return. Every
+  real-space and FFT canvas must repaint automatically with the same zoom,
+  pan, multiplier, and selected panel. FFT cache-hit state may change, but FFT
+  miss and compute counters must not increase merely because the tab returned.
 - Compare one suspicious FFT against NumPy or a known reference.
 
 ### S2D-08: Measure Features With Overlays
@@ -150,6 +178,10 @@ overlays to remain stable while I draw and drag them.
 
 - Toggle Profile; draw, move, and delete a line profile.
 - Toggle ROI tools; draw, drag, resize, save, restore, and delete ROIs.
+- After drawing circle, rectangle, square, and annular ROIs, call
+  ``get_roi_geometries()`` and verify the returned ``(row, col)`` center,
+  radius, corners, bounds, visibility, and colors match the visible overlays and
+  survive ``state_dict()`` / ``load_state_dict()``.
 - Verify high-frequency pointer labels do not pop or lag.
 - Use keyboard navigation for previous/next panel, reset zoom, and delete ROI.
 
@@ -165,9 +197,12 @@ say exactly what they will save and produce files that reopen correctly.
 **Acceptance checks**:
 
 - Open Export in live Jupyter and standalone HTML.
-- Verify labels say ``HTML exact float32`` and/or ``HTML quantized uint8`` and
-  show approximate sizes when known.
-- Export exact and quantized HTML where supported.
+- Verify the single-HTML choices distinguish `encoding="full"` from
+  `encoding="uint8"` and show approximate sizes when known.
+- Export single HTML with both encodings where supported.
+- [x] **EX-2**: Export a denoised view and a frequency-filtered view, then
+  open each standalone page without touching a control. The first canvas must
+  already show the filtered pixels; the histogram and canvas must not disagree.
 - Open both files and drive columns, hide panels, FFT, histogram, zoom, and
   reset.
 - Use Copy and verify output corresponds to the current visible state.
@@ -185,9 +220,51 @@ visible compact output without embedding huge pixel buffers.
 
 - Press ``Cmd+S`` in JupyterLab and reload/reopen the notebook.
 - Verify the saved static output is visible and compact.
+- Draw one circular ROI and then multiple ROIs on a single image, then save and
+  reopen the notebook without rerunning the cell. The saved PNG fallback must
+  show the full image with all ROI overlays plus one right-side ROI zoom/crop
+  panel per visible ROI. Multiple ROI zoom panels should use comparable crop
+  width/height where image boundaries allow it, so a report reader can compare
+  marked features without mistaking crop scale for scientific size.
+- [x] **S2D-ROI-SAVE-1**: Execute and save a notebook containing one circular
+  ROI and one rectangular ROI. Reopen the saved output without rerunning the
+  cell and verify the PNG fallback shows the full field plus separate ROI crop
+  panels, with crop-panel scale bars recalculated for the smaller field of view.
 - Check ``metadata.widgets`` or ``get_state()`` for heavy-buffer leaks:
   ``frame_bytes``, ``_detail_bytes``, offline stacks, and export payloads must
   not be present when ``save_state=False``.
+
+### S2D-10B: Save Microscope-Stage Inspection States
+
+**User story**: As a scientist driving Show2D interactively in a notebook, I
+want to save named view states like microscope stage positions, so I can return
+to an ROI, FFT, contrast, padding, or panel-selection view without writing
+programmatic export code.
+
+**Primary widgets**: Show2D first; later extend the same pattern to Show3D.
+
+**Data to use**: a single real or real-derived image with one defect ROI, plus a
+3-panel comparison gallery with raw/corrected/residual-style labels.
+
+**Acceptance checks**:
+
+- From the More menu, save a state named `defect A ROI` after drawing an ROI,
+  zooming, enabling FFT, and adding padding. Verify `saved_view_states` gains
+  exactly one lightweight entry with a readable summary.
+- Save a second state with different hidden panels, selected panel, contrast,
+  and padding. Load the first and second states repeatedly; verify ROI,
+  selected panel, hidden panels, FFT toggle, padding, contrast, and view box
+  restore without changing the source arrays.
+- Use Update on an existing state after moving the ROI or changing padding;
+  verify the state keeps one entry and later loads the updated view.
+- Delete one state and verify the other remains loadable. Then Delete All and
+  verify the list is empty and the widget stays usable.
+- Run the same actions from Python with `save_view_state()`,
+  `load_view_state()`, `delete_view_state()`, and `clear_view_states()`.
+- Save and reopen a notebook or round-trip `state_dict()` / `load_state_dict()`;
+  verify the named states survive but heavy buffers (`frame_bytes`,
+  `_detail_bytes`, `panel_stack_bytes`, standalone HTML payloads) are not
+  duplicated inside each saved state.
 
 ### S2D-11: Use The Widget On A Phone Or Narrow View
 
@@ -254,8 +331,8 @@ backend files.
   than serializing every native pixel into widget state.
 - Press ``Cmd+S``, reload the notebook, and verify the saved output is visible,
   compact, and labeled as preview/detail/offline as appropriate.
-- Open Export and verify exact float32 and quantized uint8 HTML labels follow
-  the Show3D wording and show approximate file sizes when known.
+- Open Export and verify the single-HTML `full` and `uint8` encoding choices
+  follow the Show3D wording and show approximate file sizes when known.
 - Confirm saved notebook state and exported HTML payload sizes are recorded in
   the signoff report.
 
@@ -341,6 +418,220 @@ outside git and record only shape, dtype, frame count, and timings.
   panel and verify arrows retain ordinary gallery navigation.
 - Save a notebook with `save_state=True`, close it, and reopen without running
   the cell. Verify the slider, current frame, and pixels restore.
-- Export exact float32 and quantized uint8 HTML, open both without a kernel,
-  and repeat scrub, play/pause, stats, FFT, hide/restore, and narrow-viewport
-  checks with no browser errors.
+- Export single HTML with `encoding="full"` and `encoding="uint8"`, open both
+  without a kernel, and repeat scrub, play/pause, stats, FFT, hide/restore, and
+  narrow-viewport checks with no browser errors.
+
+### S2D-17: Scrub A Paged Comparison Gallery
+
+**User story**: As a user comparing a parameter sweep organized as pages (for
+example lambda values, each page holding the same panel set), I want the page
+slider and page playback to swap the whole panel grid at once while every
+per-panel control - histograms, labels, hide state - follows the page I am
+looking at, not the union of all pages.
+
+**Primary widgets**: Show2D.
+
+**Data to use**: a real or real-derived `(pages, panels, rows, cols)` stack
+with at least 3 pages x 4 panels, per-page distinct intensity ranges so
+histogram mismatches are visible at a glance.
+
+**Acceptance checks**:
+
+- Construct with 4D pages plus `page_labels`; verify the page slider shows
+  `1/N`, the label text, and play/pause advances pages at the configured fps.
+- With `link_contrast=False`, verify exactly `panels_per_page` histograms are
+  shown - never one per panel across ALL pages - and that their ranges change
+  when the page changes. Repeat with the FFT histogram grid.
+- Hide a panel on one page; verify the histogram grid drops that panel's
+  histogram, and other pages' hide state is independent.
+- Drag one page's histogram thumbs; verify only the current page's matching
+  panel changes and the setting is still applied when scrubbing back to that
+  page.
+- Verify stats, hover readout, and selection follow the current page's panels
+  after several slider scrubs and one full playback loop.
+- Export offline HTML and repeat the histogram-count and page-scrub checks
+  without a kernel.
+
+### S2D-18: Watch A Live EMD Folder In Place
+
+**User story**: As a microscopist collecting survey images, I want one already
+displayed Show2D gallery to add each completed EMD as a full-resolution panel,
+without rerunning the cell, creating another widget, or losing the curation and
+measurement state of images already present.
+
+**Primary widgets**: ``Show2D.from_folder(...)`` in live JupyterLab. ShowFolder
+is a separate cached-preview and selection workflow; a ShowFolder refresh or a
+standalone HTML snapshot does not prove this direct full-resolution watcher.
+
+**Data to use**: Genuine compatible Velox image EMD files from one acquisition
+session, copied through atomic rename into a temporary watched folder. Use at
+least three files for routine verification and ten for release signoff. Include
+an incomplete file, an incompatible-shape file, and a later compatible file.
+Record source path, shape, dtype, sampling, native bytes, backend host, browser,
+widget commit, and watch interval. Keep the source data and generated report
+outside git.
+
+**Acceptance checks**:
+
+- In live JupyterLab, display exactly one ``Show2D.from_folder(folder,
+  pattern="*.emd", watch=True, watch_interval=1.0, debug=True)`` object and
+  capture its Python identity, widget model ID, and browser container before
+  any later file arrives.
+- Start once with a valid EMD and separately start before the first acquisition.
+  The empty-folder case must show a visible waiting state and accept the first
+  stable EMD without rerunning the cell; until that works, mark this check
+  ``Fail`` rather than substituting a prepopulated folder.
+- Keep one compact accessible watch badge near the folder/title area in stable
+  DOM. Require green-dot ``Watching`` only while the actual background worker
+  is alive. Enter ``Updating`` while a discovery poll is active and keep it
+  through real candidate validation, append, and authoritative full-resolution
+  paint. An idle poll may briefly show ``Updating`` but must return to
+  ``Watching`` without decode, transfer, or repaint. Use amber ``Waiting for
+  file completion`` for an incomplete EMD, red ``Watch error`` with corrective
+  detail for a bad shape or worker failure, and gray ``Stopped`` or
+  ``Not watching`` after stop/close
+  or when liveness cannot be established. A ``watch=False`` snapshot has no
+  badge. A restored notebook model, static fallback, or standalone snapshot
+  must never restore a green ``Watching`` state without a live worker. Capture
+  browser assertions and screenshots for every state; color alone is not the
+  status signal.
+- Atomically complete a genuine EMD after the widget is visible. Verify one new
+  labeled panel paints automatically without calling ``poll_folder()``. Compare
+  its shape, calibration, representative pixels, and canvas checksum against
+  ``read_image(path).array`` at source resolution.
+- Verify the Python object, widget model, and browser container remain the same.
+  Preserve selected source path, stars, hidden panels, panel order, rotations,
+  contrast, FFT, ROI/profile state, view box, and zoom when a naturally sorted
+  filename is inserted before existing files.
+- Leave an incomplete EMD in place and then complete it. Verify it remains
+  retryable, appends exactly once when stable, and never stops the watcher.
+- Add an incompatible-shape EMD followed by a compatible EMD. Report the
+  mismatch without resizing scientific data or blocking the later valid append.
+- Measure stable-file-to-Python-append and stable-file-to-first-canvas-paint
+  separately for every arrival; report median and p95 with the poll interval.
+  A trait/count change without visible paint is not a pass.
+- Verify idle polls perform no reread, transfer, canvas repaint, or state reset.
+  Exercise idempotent stop/resume, then call ``close()`` and prove no watcher
+  thread can mutate the widget afterward.
+
+### S2D-19: Compare Independent Slice Stacks Across Reconstructions
+
+**User story**: As a tomography or multislice reconstruction scientist, I want
+each Show2D gallery panel to hold a different reconstruction volume with its own
+slice slider and play/pause control, so I can browse each result at its own
+depth while keeping all reconstruction alternatives side by side in one
+viewer.
+
+**Why this matters scientifically**: One study may produce four reconstructions
+with different slice counts, slice thicknesses, regularization settings,
+alignment choices, or reconstruction methods. A feature or failure can be
+clearest at a different depth in each result. Independent local slice controls
+let the scientist stop each panel at the informative depth while linked zoom,
+pan, and contrast preserve the spatial comparison. This avoids opening several
+widgets or forcing every reconstruction onto one global slice index.
+
+**Primary widgets**: Show2D. Use Show3D instead when every panel should advance
+on one shared frame or slice axis.
+
+**Data to use**: four real or real-derived tomography or multislice
+reconstructions, each shaped `(slices, rows, cols)`. Include different slice
+counts or slice thicknesses when scientifically meaningful, plus an optional
+static 2-D reference. Record source, shape, dtype, slice count, slice thickness,
+display binning, and timings. Put the reconstruction method and slice thickness
+in each panel label because the compact slider readout reports only the current
+slice and total count.
+
+**Acceptance checks**:
+
+- Pass a Python list of at least four 3-D reconstruction arrays; verify every
+  stack panel gets its own slider, play/pause button, and `current/total`
+  readout. Verify an optional 2-D panel gets no slice controls.
+- Start panels at different `panel_frame_indices`, including a negative index,
+  and verify each index resolves against that panel's own slice count.
+- Scrub one panel and verify only that panel's index and canvas change. Its
+  histogram, stats, FFT, profile, ROI, and diff inputs must follow the selected
+  slice while neighboring panels remain unchanged.
+- Play two stacks simultaneously, pause one, and verify the other continues;
+  verify each stack wraps against its own slice count.
+- Construct with `panel_playback_fps=4`, measure several slice transitions,
+  and verify the shared local-stack cadence is approximately 4 fps without a
+  new toolbar control. Verify the configured value survives state restore and
+  standalone HTML export.
+- With FFT visible, traverse every slice twice. After the initial FFT is
+  visible, verify first-time slice computations retain the previous valid FFT
+  instead of showing a full dark loading veil; on the second traversal, cache
+  hits increase while misses and computes stay unchanged.
+- Pause every local stack on a different slice, switch browser tabs, and return.
+  Verify all real-space and FFT canvases restore without pressing Play, every
+  local slice index is unchanged, and no cached FFT magnitude is recomputed.
+- Verify linked zoom, pan, and contrast preserve spatial comparison without
+  linking the local slice indices.
+- Select each stack and scrub with left/right arrows. From Python, use
+  `set_panel_frame(panel, slice_index)` with either a source index or unique
+  panel label.
+- Hide, restore, reorder, and responsively wrap panels; verify each local slice
+  index remains keyed to its source reconstruction and controls do not overlap.
+- Save and reopen with `save_state=True`. Export single HTML with
+  `encoding="full"` and `encoding="uint8"`, then repeat independent scrub,
+  play/pause, FFT, and narrow-layout checks without a kernel.
+- On real reconstruction data, record first paint, memory and payload size,
+  slider latency, and canvas repaint rate. Confirm the final canvas, not only
+  the slider label, reaches every requested slice.
+
+### S2D-20: Page A Growing Folder Gallery Automatically
+
+**User story**: As a microscopist whose acquisition or reconstruction folder
+may grow to hundreds of independent images, I want Show2D to show a bounded
+number of panels at once and create additional pages automatically, so the
+notebook remains readable while every full-resolution source image stays
+available. I want a useful default and an explicit override rather than having
+to reorganize files manually.
+
+**Primary widgets**: ``Show2D.from_folder(...)``. This is sequential item
+paging: each file is one independently curated panel. It is distinct from
+S2D-17 comparison pages, where the same logical slots repeat across parameter
+settings. ``Show3D.from_folder(...)`` deliberately does not use this behavior;
+its files extend one frame axis.
+
+**Data to use**: at least 45 naturally named, same-shape real or real-derived
+images so the default layout contains 20, 20, and 5 panels. Also start with 20
+files and append the 21st through an atomic rename while the widget is mounted.
+Include a small deterministic NPY fixture for CI and genuine EMD images for
+browser signoff.
+
+**Acceptance checks**:
+
+- ``Show2D.from_folder(folder)`` defaults to ``page_size=20``. Exactly 20 ready
+  images remain one ordinary gallery; the 21st creates two pages without
+  replacing the widget. ``page_size=N`` changes the limit and ``None`` disables
+  automatic folder paging. ``set_folder_page_size(...)`` regroups the mounted
+  widget in place. Reject booleans, zero, negatives, and non-integers with a
+  corrective message.
+- Show compact labels such as ``Images 1–20`` and ``Images 41–45`` plus a
+  bounded, tabular ``current/total`` page readout. The final page contains only
+  real source panels: never pad it with fake scientific images.
+- Keep folder pages as independent items. Hiding, starring, selecting, or
+  rotating one file must remain keyed to that file and must not affect the same
+  numerical slot on another page. Preserve a valid global panel order when
+  paging activates after a live arrival.
+- Append across 20 -> 21 and later page boundaries while the user is browsing
+  an older page. Preserve the Python object, widget model, browser container,
+  selected source path, active page, ROI/profile, FFT, contrast, zoom, and
+  curation state. Do not jump to the newest page unless the user follows it.
+- Drive page 1, page 2, the last partial page, and page 1 again. Verify the DOM
+  contains no more than ``page_size`` scientific canvases, current-page
+  histograms and FFT panels match the visible files, number shortcuts select a
+  slot on the active page, and rapid page changes cannot leave stale canvases.
+- Verify page controls stay grouped on a narrow viewport, use the shared MUI
+  control language, and remain keyboard accessible. Capture light/dark browser
+  screenshots and console logs.
+- Keep the folder watcher append-only: only the new source file is read from
+  disk and existing scientific files are not reread. ``Updating`` must remain
+  truthful until the newly visible panel paints, then return to ``Watching``.
+- Record initial scan, append, page-switch, histogram/FFT, browser memory, comm
+  payload, and paint timings for 20, 45, and 100+ images. The first
+  implementation limits visible React panels but still retains and transports
+  the full gallery; do not claim bounded Python/browser memory until an
+  active-page transport, cache, and generation-safe prefetch path is separately
+  implemented and verified.

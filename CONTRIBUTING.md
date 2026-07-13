@@ -4,6 +4,17 @@
 enough. A good contribution should keep the Python API, frontend bundle, saved
 widget state, standalone HTML export, and documentation in sync.
 
+## Branches and review
+
+Work on a small themed branch per issue and open the PR from it. Once a PR is
+under review, **do not force-push the branch**: rewriting history detaches the
+reviewer's inline comments to "outdated", removes GitHub's "changes since your
+last review" diff so the reviewer must re-read the whole PR, and breaks any
+local checkout of the branch. Push ordinary follow-up commits instead and use
+`git revert` to undo; the merge is squashed, so a messy branch history costs
+nothing. New to the Git/GitHub workflow? Start with the tutorials in
+[ophusgroup/dev](https://github.com/ophusgroup/dev).
+
 ## Setup
 
 Use Python 3.11 or newer and Node.js 22 when possible:
@@ -25,7 +36,7 @@ python -m pip install -e .
 Run the smallest checks that match the change:
 
 ```bash
-PYTHONPATH=src pytest -q
+PYTHONPATH=src:. pytest -q
 npm run typecheck
 npm test
 npm run build
@@ -34,7 +45,7 @@ npm run build
 For HTML export or widget-state changes:
 
 ```bash
-PYTHONPATH=src pytest -q tests/test_html_export_protocol.py
+PYTHONPATH=src:. pytest -q tests/test_html_export_protocol.py
 ```
 
 For exported-HTML UI changes, also run the browser-drive smoke:
@@ -46,13 +57,13 @@ scripts/widget_local_signoff.sh --quick --browser
 For ShowEDS changes:
 
 ```bash
-PYTHONPATH=src pytest -q tests/test_showeds.py tests/test_html_export_protocol.py
+PYTHONPATH=src:. pytest -q tests/test_showeds.py tests/test_html_export_protocol.py
 ```
 
 For Show4DSTEM/WebGPU-sensitive changes:
 
 ```bash
-QT_RUN_BROWSER_TESTS=1 PYTHONPATH=src pytest -q tests/test_show4dstem_webgpu_browser.py -s
+QT_RUN_BROWSER_TESTS=1 PYTHONPATH=src:. pytest -q tests/test_show4dstem_webgpu_browser.py -s
 ```
 
 For a quick visual smoke before a broad widget PR:

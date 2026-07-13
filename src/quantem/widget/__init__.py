@@ -24,6 +24,7 @@ from quantem.widget.show4dstem_factory import Show4DSTEM
 from quantem.widget.showdiffraction import ShowDiffraction
 from quantem.widget.showfolder import ShowFolder, prebuild_showfolder_cache, show_folder
 from quantem.widget.io import load, read_gif, read_image, read_image_stack, read_images
+from . import movie
 from quantem.widget.paths import first_existing
 from quantem.widget.backend import detect_backend, resolve_backend
 from quantem.widget.gpu import gpu_info
@@ -177,6 +178,7 @@ __all__ = [
     "read_image",
     "read_image_stack",
     "read_images",
+    "movie",
     "HTML_EXPORT_TRAITS",
     "SupportsFrontendHtmlExport",
     "SupportsHtmlExport",
