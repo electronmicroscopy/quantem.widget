@@ -11,6 +11,17 @@ new `rcN` heading when that rc is published to TestPyPI.
 - Improve ShowDiffraction phase matching: optimal line assignment replaces the greedy pass, missing-strong counts read n/a when a phase carries no intensities, full-circle radial wedges no longer collapse to zero width, and the ellipse fit's sector weighting is de-biased on noisy patterns.
 - ShowDiffraction mobile/touch support: fluid layout at phone widths, pointer-event canvas interactions (tap, drag, two-finger pinch/pan, double-tap reset), and a dual-thumb contrast histogram slider that syncs traits once per gesture.
 - ShowDiffraction phase library: pymatgen removed entirely (no more `phaseid` extra or CIF/Structure loaders); built-in lattice constants now carry per-entry source citations (NIST SRM / COD / primary literature).
+- Keep display filtering consistent throughout review: Show3D reapplies denoise when a user scrubs to another frame, standalone Show2D/Show3D HTML paints denoised and frequency-filtered pixels on first load, and unlinked Show2D galleries show and edit each selected panel's own denoise mode, sigma, and bin without changing neighboring panels.
+- Add display-side denoise for sparse maps (EDS, low dose) to Show2D and Show3D: a Denoise menu (`none` / `gaussian` / `anscombe`, the count-respecting Anscombe smoother) with `denoise_sigma` and `denoise_bin` knobs, a `show_denoise` gate that keeps the controls row hidden until needed, and an always-on banner whenever a reduction is active. It is purely a view transform: the stored array, the stats row, and every export of raw data keep the original counts, and `none` is the lossless default. Show2D adds per-panel lists for raw-vs-denoised A/B galleries and runs the filter through a browser-side WebGPU pipeline, so exported HTML denoises without a kernel. Replaces the earlier `display_filter` / `display_sigma` / `spatial_bin` kwargs, which stay accepted as aliases for one release.
+- Add a Show2D HAADF underlay: `underlay=True` on a `(haadf, map)` pair adds a third panel blending the map onto the HAADF lattice, with a `magenta` colormap so bright atomic columns render magenta instead of clipping to white. Tune with `underlay_alpha` and `underlay_haadf_gain`.
+- Add reversible crop-to-view and pad view ops to single-panel Show2D: `crop_to_view()` commits the browser viewport as the display extent (crop applies before denoise), the `pad_ratio` kwarg/trait adds a minimum-valued border, the toolbar View menu gains Crop to view / Pad 5-20% / Reset view entries, an always-on `view:` banner announces any active reduction, and `reset_view_ops()` restores the full frame bit-identically.
+- Move the gallery denoise scope toggle into the Link group (Link Zoom / Pan / Contrast / Denoise): checked applies denoise edits to every panel, unchecked scopes them to the selected panel; the denoise row keeps only the Filter / sigma / Bin knobs.
+
+## rc30 - 2026-07-10
+
+- Serve all tutorial data from the widget-organized `widget-tutorials/` tree on Hugging Face (`show2d_gold`, `show4dstem_gold`, ... — one call per dataset), retarget the Colab workshop notebooks to it, and document the upload protocol so contributors can share datasets the same way.
+- Keep docs pages single-widget: docs/CI builds set `QUANTEM_WIDGET_STATIC_FALLBACK=0` so the saved-notebook static preview never duplicates the live widget, and Colab bootstrap cells are hidden from built pages via `remove-cell` tags.
+- Adopt the scikit-package contribution standards (issue-first, one themed PR per issue, no force-push under review) in README/AGENTS/CONTRIBUTING, and reorganize the docs sidebar (Advanced section, API reference under Developers).
 - Refresh docs for accuracy: README lists all eight widgets (Show1D, ShowDiffraction added) and the tutorial dataset downloaders, the CLI reference drops the nonexistent `--widget` flag and documents `jupyter`/`qw`/`github`, the HTML export contract drops the unimplemented `float16` encoding, performance notes describe the shipped Show4DSTEM paging and MPS lazy multi-dataset path, and the orphaned load / save-state pages are back in the docs sidebar.
 - Add kernel-side element detection to ShowEDS: `detect_elements()` finds significant peaks above a SNIP continuum background and ranks candidate elements with plain per-element reports (matched peaks, missing strong lines, energy error); a Detect button in the periodic-table menu fills the Auto-ID candidate chips, replacing the band-local single-channel heuristic.
 - Add ShowFolder as the session browser for microscopy folders, with live refresh, thumbnail/QC previews, metadata tooltips, and lazy paged Show4DSTEM loading for folders of master files.
@@ -21,6 +32,14 @@ new `rcN` heading when that rc is published to TestPyPI.
 - Add Show1D live review workflows for loss curves and reconstruction snapshots, including snapshot thumbnails, hide/star review controls, resizable plots, compact histograms, and a tutorial/API update.
 - Improve notebook/HTML sharing and maintainer automation: static widget fallbacks, WebP thumbnail guidance, browser smoke reports, timing/performance signoff, issue templates, and clearer agent/contributor commit guidance.
 - Improve I/O and real-data performance paths with GPU image-loading docs, generic helpers from quantem.live, direct uint8 HDF5 browsing, disk-aware Show4DSTEM loader benchmarks, and DataTransfer handoff guidance.
+
+## rc29 - 2026-07-03
+
+- Dead-code sweep: drop unused imports and add `__future__` annotations across the package (no behavior change; the feature bullets accumulated between rc27 and rc30 are listed under rc30).
+
+## rc28 - 2026-06-30
+
+- Add real-data widget tutorials and offline 4D-STEM support.
 
 ## rc27 - 2026-06-30
 

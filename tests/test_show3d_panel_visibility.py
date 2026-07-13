@@ -208,6 +208,7 @@ def test_show3d_fft_layout_validates_and_roundtrips(tmp_path: pathlib.Path) -> N
         fft_overlay_position="bottom-left",
         fft_overlay_size=0.5,
         fft_overlay_zoom=2.0,
+        show_zoom_indicator=False,
         show_controls=False,
     )
 
@@ -215,11 +216,15 @@ def test_show3d_fft_layout_validates_and_roundtrips(tmp_path: pathlib.Path) -> N
     assert widget.fft_overlay_position == "bottom-left"
     assert widget.fft_overlay_size == 0.5
     assert widget.fft_overlay_zoom == 2.0
+    # C1: hidden zoom chrome with an initialized FFT view, expect both values
+    # to survive state and standalone HTML round trips independently.
+    assert widget.show_zoom_indicator is False
     state = widget.state_dict()
     assert state["fft_layout"] == "overlay"
     assert state["fft_overlay_position"] == "bottom-left"
     assert state["fft_overlay_size"] == 0.5
     assert state["fft_overlay_zoom"] == 2.0
+    assert state["show_zoom_indicator"] is False
 
     restored = Show3D(*_panels()[:2], panel_titles=["SSB", "Mean DP"], show_controls=False)
     restored.load_state_dict(state)
@@ -227,6 +232,7 @@ def test_show3d_fft_layout_validates_and_roundtrips(tmp_path: pathlib.Path) -> N
     assert restored.fft_overlay_position == "bottom-left"
     assert restored.fft_overlay_size == 0.5
     assert restored.fft_overlay_zoom == 2.0
+    assert restored.show_zoom_indicator is False
 
     out = widget.export_html(tmp_path / "show3d_fft_layout.html", encoding="full")
     exported = out.read_text()
@@ -234,6 +240,7 @@ def test_show3d_fft_layout_validates_and_roundtrips(tmp_path: pathlib.Path) -> N
     assert "fft_overlay_position" in exported
     assert "fft_overlay_size" in exported
     assert "fft_overlay_zoom" in exported
+    assert "show_zoom_indicator" in exported
 
     with pytest.raises(ValueError, match="fft_layout"):
         Show3D(np.zeros((3, 4, 5), dtype=np.float32), fft_layout="floating")

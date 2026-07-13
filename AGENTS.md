@@ -118,17 +118,35 @@ For ShowEDS real-data work, keep band, ROI, zoom, contrast, and smooth/auto
 display interactions at real-time speed. Treat loss of 30 FPS interaction as a
 bug unless the limitation is explicitly documented and accepted.
 
+When testing widgets, prefer organic user paths over heavily preconfigured
+constructor calls. Start from a minimal call such as `Show2D(data)` or
+`Show3D(stack)` and use the widget UI to turn on controls, change modes, scrub,
+play, zoom, pan, save, and export like a scientist exploring a notebook. Use
+many constructor parameters only when the behavior under test is specifically
+that API-start state or when reproducing a precise historical bug that requires
+those initial conditions. A kwargs-heavy repro notebook is useful evidence, but
+it does not replace at least one organic UI-drive trial for interaction bugs.
+
 ## Runtime and Backend Choice
 
-Do not run heavy widget workloads in the local Codex bundled runtime, system
-Python, or a laptop CPU-only environment. Those are acceptable only for
-lightweight inspections, small unit tests, and quick syntax/type checks.
+Split work by what it is, not by how big it is: rendering versus computation.
 
-For large tutorial data generation, exported-HTML browser reports, real-data
-performance probes, long notebook runs, or GPU/WebGPU stress tests, use the
-project development backend or an HPC/GPU-capable backend so the user's laptop
-does not freeze. Keep generated reports and scratch artifacts outside the repo
-unless they are intentionally promoted into a documented maintainer workflow.
+**Widget development and testing runs on the Mac.** The primary dev MacBook
+(128 GB RAM, fast Apple GPU) is the DEFAULT and preferred surface for anything
+that renders or drives a widget: unit tests, driving the live widget in a local
+JupyterLab or the in-app Browser pane, and working with real data of any size.
+This is faster than a remote round-trip and is the retina (devicePixelRatio 2)
+context real users see, where Mac-only WebGPU render bugs surface. A widget
+showing a large dataset is still tested here.
+
+**Heavy scientific computation runs on the remote backend.** Reserve the project
+development backend / HPC (mjgoat) for number-crunching that genuinely exceeds
+the laptop: drift correction, merging many 4D-STEM datasets, tomography,
+ptychography, large tutorial-data generation, long processing jobs, and
+CUDA-kernel-specific work the Mac's Metal path cannot cover. Send the compute
+there even when the eventual output is small. Keep generated reports and scratch
+artifacts outside the repo unless they are intentionally promoted into a
+documented maintainer workflow.
 
 ## Widget UI Consistency
 
@@ -177,6 +195,13 @@ Whenever an agent finishes a concrete task, the final update must clearly state:
   testing work, include the served HTML/docs/report URL or the exact
   `index.html` path so the user can inspect it directly. Prefer a local
   browser-openable URL when a server is running.
+
+For every recommended next step or action item, state the decision context as
+a paired **Problem** and **Action**. Keep **Problem** to one sentence that
+explains what is wrong, missing, or uncertain, then use **Action** to describe
+the concrete next step. Apply this pairing to each action item so the user can
+review recent handoffs and decide priorities without reconstructing why an
+action was proposed.
 
 For UI work, open the latest review target in the Codex in-app browser before
 handoff; do not only print the URL. If browser control is unavailable, update

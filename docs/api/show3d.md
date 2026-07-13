@@ -22,6 +22,7 @@ export. See the [Show3D tutorial](../tutorials/show3d).
 | Boomerang | `boomerang` | Ping-pongs at the ends instead of looping |
 | FPS field | `fps` | Playback rate changes |
 | Loop range | `loop_start`, `loop_end` | Playback confined to the sub-range |
+| Playback dynamics | `fps`, `loop`, `boomerang`, `playback_path`; future `playback_preset` | More-menu presets can play a time series linearly, bounce at ends, slow down around key frames, or follow a custom frame path without changing the underlying stack |
 | Colormap dropdown | `cmap` | Canvas recolors |
 | Export button | `export_request`, `export_status` | Writes a standalone HTML viewer |
 | Page controls (paged galleries) | `page_idx`, `n_pages`, `panels_per_page`, `page_starred`; `star_page()`, `unstar_page()` | Shows, stars, or plays through one page of panels at a time |
@@ -34,10 +35,60 @@ export. See the [Show3D tutorial](../tutorials/show3d).
 | Statistics | `show_stats` | Optional mean/min/max/std readout |
 | Panel title visibility | `show_panel_titles`, `panel_title_font_size` | Per-panel labels show/hide and resize |
 | Scale bar visibility | `show_scale_bar` (`scale_bar_visible` in saved state) | Scale bar shows/hides |
+| Saved notebook preview frames | `notebook_preview_frames`, `notebook_preview_ncols`; `set_notebook_preview_frames()` | Single-panel saved notebooks can reopen as a compact contact sheet of selected frame indices instead of only the current frame |
+| ROI add / drag | `roi_active`, `roi_list`, `roi_selected_idx`; `get_roi_geometries()` | Single-panel stack ROI overlays stay visible while scrubbing; saved notebook previews include all visible ROI overlays and right-side zoom crops; Python can read circle centers/radii and rectangle/square corners in `(row, col)` coordinates |
 | FFT toggle | `show_fft` | Shows the FFT view for the current frame or visible panel grid |
 | FFT quality labels | `fft_metrics` | Compact in-panel label reports FFT sharpness, peak count, and peak SNR from the cached FFT magnitude |
 | FFT window toggle | `fft_window` | Apodization on/off before FFT rendering |
-| Resize / zoom chrome | `show_resize_handles`, `show_zoom_indicator` | Resize handles and zoom readout show/hide |
+| Resize / zoom chrome | `show_resize_handles`, `show_zoom_indicator` | Resize handles and zoom readouts show/hide; the zoom setting covers every real-space panel and FFT tile/inset |
+| FFT layout and initial view | `fft_layout`, `fft_overlay_position`, `fft_overlay_size`, `fft_overlay_zoom` | Places FFTs below, right, or inside every panel and initializes their shared zoom |
+| Denoise | `denoise_enabled`, `denoise`, `denoise_sigma`, `denoise_bin`, `show_denoise` | The master swaps raw/denoised frames without losing settings; Settings expands the Method/σ/bin editor; an active filter also reshapes FFT |
+| Filter | `frequency_filter_enabled`, `frequency_filter`, `frequency_filter_cutoff`, `frequency_filter_center`, `frequency_filter_width`, `show_frequency_filter` | View-only low/high/band-pass filtering with a draggable FFT ring; stored frames, statistics, and raw exports remain unchanged |
+
+The denoise family matches Show2D. See
+[Which denoise filter should I use?](show2d.md#which-denoise-filter-should-i-use)
+for the recommendation ladder (sparse EDS, very sparse, decent-dose HAADF,
+quantitative). An active denoise reshapes the FFT magnitude too, so set
+`denoise="none"` for quantitative FFT work.
+
+Frequency Filter follows the same scientist-facing contract as Show2D while
+remaining a separate control from Denoise. For example, a reconstruction stack
+with a slow background can start as `Show3D(stack, show_fft=True,
+frequency_filter="highpass", frequency_filter_cutoff=0.08)`. A lattice stack
+can use `"bandpass"` with `frequency_filter_center` and
+`frequency_filter_width`. Values are fractions of Nyquist from 0 to 1, and the
+cyan FFT ring can be dragged during scrubbing or playback. The browser applies
+Denoise first and Filter second; the raw stack and quantitative exports are
+never replaced by the view. Filter lives under More and is off by default. Its
+FFT overlay dims rejected frequencies and labels the clear region as Inside
+kept, Outside kept, or Band kept.
+
+## Playback dynamics for time-series review
+
+Show3D playback is not only a convenience for movies. For experimental
+time-series data, a scientist often wants to probe temporal behavior: a defect
+appears slowly, a reconstruction accelerates, a relaxation comes back, or only
+a short sub-range matters. The lightweight API already exposes the core pieces:
+`fps`, `loop`, `boomerang`, `loop_start`, `loop_end`, and `playback_path`.
+
+The UI path is a compact **More → Playback Dynamics** section, not another
+crowded toolbar row. The presets write those existing traits, so the same
+behavior remains scriptable and serializable:
+
+| Preset | Intended user behavior |
+|---|---|
+| Linear | Step forward through the loop range at constant `fps` |
+| Slow | Lower `fps` for careful inspection of subtle frame-to-frame changes |
+| Bounce | Ping-pong with `boomerang=True` so reversible dynamics are easy to see |
+| Focus range | Set `loop_start` / `loop_end` around an event and play only that interval |
+| Hold key frames | Populate `playback_path` with repeated important frames so the eye can settle |
+| Custom path | Let a notebook or agent provide exact frame indices for non-uniform timing |
+
+The stored frame stack is never resampled or duplicated. These controls only
+change the order and cadence of frame display. Exported HTML and saved widget
+state should preserve the selected playback dynamics, while a reopened notebook
+should not unexpectedly start playing unless the user explicitly requests that
+behavior.
 
 ## FFT quality labels
 
@@ -51,6 +102,54 @@ playback, zoom, and pan do not trigger an extra FFT for the label. Set
 The first FFT for a frame or ROI may take a moment on large data. After that,
 Show3D reuses the cached FFT magnitude when you return to the same frame and
 when you redraw, zoom, pan, scrub, or show metric labels.
+
+Every visible FFT tile or overlay inset shows the shared live magnification as
+an `N.N×` badge, even for uncalibrated arrays. Wheel or pinch zoom updates it;
+double-click, double-tap, or Reset returns to `1.0×`. Pass
+`fft_overlay_zoom=2.0` to initialize any FFT layout at `2.0×`, and set
+`show_zoom_indicator=False` to hide both real-space and FFT zoom badges.
+
+## Reuse ROI coordinates across a stack
+
+Single-panel Show3D uses the same ROI state contract as Show2D. ROIs are synced
+in `roi_list`, saved by `state_dict()`, and exposed through
+`get_roi_geometries()` for analysis code or agents:
+
+```python
+w = Show3D(stack).set_roi(row=72, col=65, radius=12)
+roi = w.get_roi_geometries()[0]
+roi["center"]  # {"row": 72.0, "col": 65.0}
+roi["radius"]  # 12.0
+```
+
+Rectangle and square ROIs include clockwise `corners`; annular ROIs include
+`radius_inner` and `radius_outer`. Saved notebook previews of a single-panel
+Show3D frame show all visible ROI overlays and one zoom crop per visible ROI,
+so a report reader can compare the marked sites without rerunning the notebook.
+
+## Save a contact sheet of selected frames
+
+By default, a lightweight saved notebook preview shows the current Show3D
+frame. For single-panel stacks, pass explicit zero-based frame indices when a
+cold-reopen report should show several representative frames:
+
+```python
+w = Show3D(
+    stack,
+    notebook_preview_frames=[0, 12, 25, 80],
+    notebook_preview_ncols=3,
+)
+```
+
+A notebook can also decide this interactively before saving:
+
+```python
+w.set_notebook_preview_frames([0, w.slice_idx, stack.shape[0] - 1], ncols=3)
+```
+
+Multi-panel Show3D intentionally keeps the saved preview to the current frame
+of each visible panel; combining many movie panels with many saved frames is
+better handled as an explicit report or animation export.
 
 ## Live stack updates
 
@@ -119,6 +218,19 @@ frame order, then the watcher appends newly readable files without rebuilding
 the widget or rereading unchanged source files. Use Show2D instead when each
 file should be a separate comparison panel.
 
+Folder size never creates Show3D pages. Whether the folder has 2, 20, or 200
+files, each file extends the frame axis of one stack and the frame
+slider/playback controls remain its navigation. `page_size=` and `page_labels=`
+are therefore rejected by `Show3D.from_folder(...)`; use
+`Show2D.from_folder(..., page_size=20)` for independent paged images. Explicit
+5-D or list-of-page Show3D comparison data remain a separate constructor mode.
+
+An empty watched folder stays
+mounted and changes into the real stack in the same widget model after the
+first stable frame. The compact title-area badge reports `Watching`,
+`Updating`, `Waiting for file completion`, `Watch error`, or `Stopped`; fixed
+`watch=False` snapshots do not show it.
+
 ```python
 new_frames = w.poll_folder()       # scan now; return newly appended indices
 w.stop_folder_watch()             # pause background scans
@@ -128,12 +240,18 @@ w.close()                         # stop watching and close the widget
 
 Folder watching is append-only. Files already represented in the stack are not
 duplicated, incomplete files wait for a later poll, and source removals or
-rewrites do not alter existing frames silently. Pass `watch=False` when a fixed
-folder must remain fixed.
+rewrites do not alter existing frames silently. An incompatible shape is
+reported without blocking a later compatible frame. Pass `watch=False` when a
+fixed folder must remain fixed.
 
 `Show3D.from_folder(...)` reads full-resolution source frames. `ShowFolder`
 uses cached thumbnails to browse and select a session quickly; those thumbnails
 are not the data used by the folder-backed Show3D stack.
+
+Maintainer real-time signoff follows
+[S3D-17](../maintainer/storyboard-show3d.md#s3d-17-watch-a-live-emd-frame-series-in-place):
+append genuine EMD frames after the stack is visibly mounted and verify the
+same browser canvas, playback state, and frame controls update.
 
 ## Panel visibility
 
@@ -262,6 +380,9 @@ a static report:
 w.save_gif("movie.gif", quality="medium", fps=6)
 w.save_mp4("movie.mp4", quality="high", fps=12)
 ```
+
+For array-first workflows that do not need to construct a widget, use
+`quantem.widget.movie.save_gif(...)` or `quantem.widget.movie.save_mp4(...)`.
 
 `quality="low"`, `"medium"`, and `"high"` control the exported spatial
 resolution. GIF is always palette-limited, so medium is usually the practical

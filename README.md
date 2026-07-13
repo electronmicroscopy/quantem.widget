@@ -25,8 +25,8 @@ python -c "import quantem.widget; print(quantem.widget.__version__)"
 
 | Widget | Input | Shows |
 |---|---|---|
-| `Show1D` | 1D trace / stack / live monitor | line plot with stats, snapshots, and live append |
-| `Show2D` | 2D image or stack | image + contrast, FFT, line profiles, scale bar |
+| `Show1D` | 1D trace / stack / live monitor with optional linked images | scientific traces, stats, jump markers, snapshots, playback, and live append |
+| `Show2D` | 2D image or stack | image + contrast, FFT, line profiles, scale bar, display-side denoise, view-only low/high/band-pass frequency filters |
 | `Show3D` | 3D stack | scrub / play through frames |
 | `Show3DSlices` | 3D volume | orthogonal-slice viewer |
 | `Show4DSTEM` | 4D-STEM array, or 5D stack | live virtual detectors (BF / ABF / ADF), CoM / iCoM / DPC, dataset slider + compare grid, offline WebGPU export |
@@ -41,6 +41,7 @@ from quantem.widget import (
     Show4DSTEM, ShowDiffraction, ShowEDS, ShowFolder,
 )
 
+Show1D(np.random.rand(100), x_label="frame", y_label="defocus", y_unit="nm")
 Show2D(np.random.rand(512, 512))
 Show4DSTEM(np.random.rand(64, 64, 128, 128))
 ShowDiffraction(np.random.rand(512, 512))
@@ -315,7 +316,7 @@ A. Yang, T. Zhang, Y. Xiao, and S. J. L. Billinge, *Digital Discovery*, 2026).
   code"), never the default "Show code cell source". Keep widget-construction
   code and real-data loader calls visible; split a cell that mixes the two.
 - [ ] The change includes focused tests for Python state/export behavior and
-  frontend build coverage where possible; start with `PYTHONPATH=src pytest -q`
+  frontend build coverage where possible; start with `PYTHONPATH=src:. pytest -q`
   and `npm run build`, or run `scripts/widget_local_signoff.sh`.
 - [ ] Before committing, inspect `git status --short` and `git diff --stat`;
   do not commit generated HTML, docs builds, screenshots, local notebooks,

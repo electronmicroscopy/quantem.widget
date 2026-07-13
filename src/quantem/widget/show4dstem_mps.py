@@ -82,6 +82,7 @@ class Show4DSTEMMPS(Show4DSTEM):
         self._fast_interaction_async = bool(fast_interaction_async)
         self._fast_interaction_thread: threading.Thread | None = None
         self._fast_interaction_error: str | None = None
+        self._mps_folder_shutdown = False
         self.auto_detect_frames = auto_detect_frames
         self._suppress_fast_interaction_observer = False
         self._mps_initializing = True
@@ -163,6 +164,9 @@ class Show4DSTEMMPS(Show4DSTEM):
         self._multi = multi
         self._multi_total = len(multi.datasets)
         self.frame_dim_label = "Dataset"
+        names = list(getattr(multi, "names", []) or [])
+        self._frame_labels = names
+        self.frame_labels = names
         # Keep the full dataset axis visible while background decode fills slots.
         self.n_frames = max(1, self._multi_total)
         self._refresh_multi_title()
@@ -185,13 +189,20 @@ class Show4DSTEMMPS(Show4DSTEM):
         self.title = name if n_ready >= n_total else f"{name}  -  loading {n_ready}/{n_total}"
 
     def _on_multi_dataset_ready(self, idx: int):
+        if self._mps_folder_shutdown:
+            return
         multi = getattr(self, "_multi", None)
         if multi is None:
             return
 
         def _apply():
+            if self._mps_folder_shutdown:
+                return
             self._multi_total = len(getattr(multi, "datasets", []) or [])
             self.n_frames = max(1, self._multi_total)
+            labels = list(getattr(multi, "names", []) or [])
+            self._frame_labels = labels
+            self.frame_labels = labels
             self._refresh_multi_title()
             self._refresh_compare_virtual_images()
 
@@ -657,6 +668,68 @@ class Show4DSTEMMPS(Show4DSTEM):
         else:
             return
         self._set_vi_roi_dp(dp, n_positions)
+
+    # ----------------------------------------------------------------- folder lifecycle
+
+    def _publish_mps_folder_watch_status(self, state: str, detail: str = "") -> None:
+        """Marshal an MPS watcher state change onto the notebook event loop."""
+        from quantem.widget._folder_watch_status import set_folder_watch_status
+
+        def _apply() -> None:
+            if self._mps_folder_shutdown:
+                return
+            set_folder_watch_status(self, state, detail)
+
+        loop = getattr(self, "_ioloop", None)
+        loop_running = False
+        if loop is not None:
+            try:
+                loop_running = bool(loop.asyncio_loop.is_running())
+            except Exception:
+                loop_running = False
+        if loop is not None and loop_running:
+            loop.add_callback(_apply)
+        else:
+            _apply()
+
+    def _shutdown_mps_folder_live(self) -> None:
+        """Join folder work and detach callbacks before data cleanup."""
+        if self._mps_folder_shutdown:
+            return
+        live = getattr(self, "_mps_folder_live", None)
+        if live is not None:
+            watch_started = bool(getattr(live, "_watch_started", False))
+            shutdown = getattr(live, "shutdown", None)
+            if callable(shutdown):
+                shutdown()
+            else:
+                stop = getattr(live, "stop_watch", None)
+                if callable(stop):
+                    stop()
+            from quantem.widget._folder_watch_status import set_folder_watch_status
+
+            if watch_started:
+                set_folder_watch_status(
+                    self,
+                    "stopped",
+                    "Folder watching has stopped.",
+                )
+            else:
+                set_folder_watch_status(self, "hidden", "")
+        self._mps_folder_shutdown = True
+        multi = getattr(self, "_multi", None)
+        if multi is not None:
+            multi.on_ready = None
+
+    def free(self):
+        """Join MPS folder workers before releasing Metal-backed data."""
+        self._shutdown_mps_folder_live()
+        return super().free()
+
+    def close(self) -> None:
+        """Join MPS folder workers before closing the widget comm."""
+        self._shutdown_mps_folder_live()
+        super().close()
 
 
 # =====================================================================

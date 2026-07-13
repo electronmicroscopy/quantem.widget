@@ -1,4 +1,4 @@
-"""Regression shield for the ``save_state`` contract (Show2D / Show3D / Show4DSTEM).
+"""Regression shield for the ``save_state`` contract (Show1D / Show2D / Show3D / Show4DSTEM / ShowEDS).
 
 Background: an anywidget syncs its pixel buffers as ``sync=True`` traits. On
 notebook save, ipywidgets serializes those buffers into ``metadata.widgets`` -
@@ -22,7 +22,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from quantem.widget import Show2D, Show3D, Show4DSTEM, ShowEDS
+from quantem.widget import Show1D, Show2D, Show3D, Show4DSTEM, ShowEDS
 
 
 IMAGE_MIME_KEYS = ("image/jpeg", "image/webp", "image/png")
@@ -70,6 +70,11 @@ def _mos2_like_stack(frames: int, rows: int, cols: int) -> np.ndarray:
 def _make(widget, *, save_state):
     """Construct a small instance of each widget plus the trait key that carries
     its live-render pixels (the one that must survive the targeted send path)."""
+    if widget is Show1D:
+        # snapshot_bytes is empty on a plain trace widget but the KEY must
+        # still survive the targeted path (it streams when a monitor attaches).
+        return Show1D(np.random.rand(64).astype("float32"),
+                      save_state=save_state), "snapshot_bytes"
     if widget is Show2D:
         data = [np.random.rand(128, 128).astype("float32") for _ in range(2)]
         return Show2D(data, save_state=save_state), "frame_bytes"
@@ -83,7 +88,7 @@ def _make(widget, *, save_state):
                       save_state=save_state), "virtual_image_bytes"
 
 
-WIDGETS = [Show2D, Show3D, Show4DSTEM, ShowEDS]
+WIDGETS = [Show1D, Show2D, Show3D, Show4DSTEM, ShowEDS]
 
 
 @pytest.mark.parametrize("widget", WIDGETS)
@@ -177,6 +182,468 @@ def test_show2d_static_png_preserves_sparse_large_content():
         & nonwhite
     )
     assert int(warm_signal.sum()) > 20
+
+
+def test_show2d_static_png_saves_roi_and_zoom_panel():
+    """A scientist's saved notebook preview should keep ROI evidence visible."""
+    y, x = np.mgrid[:128, :128].astype(np.float32)
+    image = (
+        0.1
+        + np.exp(-((x - 64) ** 2 + (y - 64) ** 2) / 400.0)
+        + 0.2 * np.cos(2 * np.pi * x / 12.0) * np.cos(2 * np.pi * y / 12.0)
+    ).astype(np.float32)
+    widget = Show2D(
+        image,
+        title="ROI saved preview",
+        labels=["full reference"],
+        save_state=False,
+        notebook_preview_format="png",
+        verbose=False,
+    )
+    widget.set_roi(64, 64, radius=18)
+
+    bundle = widget._repr_mimebundle_()
+    data = bundle[0] if isinstance(bundle, tuple) else bundle
+    decoded = np.asarray(Image.open(io.BytesIO(base64.b64decode(data["image/png"]))).convert("RGB"))
+
+    assert decoded.shape[1] > decoded.shape[0] * 1.6
+    cyan = (
+        (decoded[..., 0] < 120)
+        & (decoded[..., 1] > 150)
+        & (decoded[..., 2] > 170)
+    )
+    mid = decoded.shape[1] // 2
+    assert int(cyan[:, :mid].sum()) > 40
+    assert int(cyan[:, mid:].sum()) > 40
+    left_y, left_x = np.nonzero(cyan[:, :mid])
+    right_y, right_x = np.nonzero(cyan[:, mid:])
+    left_diameter = max(left_y.max() - left_y.min(), left_x.max() - left_x.min())
+    right_diameter = max(right_y.max() - right_y.min(), right_x.max() - right_x.min())
+    assert right_diameter > left_diameter * 2.0
+    state = widget.get_state()
+    assert state["roi_list"]
+    assert state["_static_fallback_mime"] == "image/png"
+
+
+def test_show2d_static_roi_zoom_updates_scale_bar():
+    """ROI crop preview should recompute scale bars for the cropped field."""
+    image = np.random.default_rng(12).random((160, 160), dtype=np.float32)
+    widget = Show2D(
+        image,
+        save_state=False,
+        notebook_preview_format="png",
+        verbose=False,
+    )
+    widget.set_roi(78, 82, radius=22)
+
+    specs = widget._static_panel_specs()
+    specs[0] = {**specs[0], "roi_items": widget._static_roi_items()}
+    specs.extend(widget._static_roi_zoom_specs(specs))
+    overlays = widget._static_overlay_texts(specs, css_px=widget._static_canvas_css_px())
+
+    assert [overlay[0] for overlay in overlays] == ["Image 1", "ROI 1 zoom"]
+    assert overlays[0][2] == "20 px"
+    assert overlays[1][2] == "5 px"
+    assert overlays[0][3] > overlays[1][3]
+
+
+def test_show2d_static_png_saves_multiple_roi_zoom_panels_with_common_shape():
+    """Each ROI should get its own comparable saved-preview crop."""
+    y, x = np.mgrid[:128, :128].astype(np.float32)
+    image = (
+        0.1
+        + np.exp(-((x - 38) ** 2 + (y - 42) ** 2) / 180.0)
+        + 0.8 * np.exp(-((x - 86) ** 2 + (y - 78) ** 2) / 260.0)
+        + 0.5 * np.exp(-((x - 28) ** 2 + (y - 103) ** 2) / 120.0)
+        + 0.4 * np.exp(-((x - 108) ** 2 + (y - 26) ** 2) / 150.0)
+        + 0.1 * np.cos(2 * np.pi * (x + y) / 14.0)
+    ).astype(np.float32)
+    widget = Show2D(
+        image,
+        title="Multi ROI saved preview",
+        labels=["full reference"],
+        save_state=False,
+        notebook_preview_format="png",
+        verbose=False,
+    )
+    widget.roi_active = True
+    widget.roi_selected_idx = 1
+    widget.roi_list = [
+        {
+            "shape": "circle",
+            "row": 42,
+            "col": 38,
+            "radius": 8,
+            "line_width": 2,
+            "color": "#4fc3f7",
+            "visible": True,
+        },
+        {
+            "shape": "rectangle",
+            "row": 78,
+            "col": 86,
+            "width": 18,
+            "height": 12,
+            "line_width": 2,
+            "color": "#ffb74d",
+            "visible": True,
+        },
+        {
+            "shape": "circle",
+            "row": 94,
+            "col": 35,
+            "radius": 6,
+            "line_width": 2,
+            "color": "#81c784",
+            "visible": True,
+        },
+        {
+            "shape": "square",
+            "row": 103,
+            "col": 28,
+            "radius": 7,
+            "line_width": 2,
+            "color": "#ce93d8",
+            "visible": True,
+        },
+        {
+            "shape": "annular",
+            "row": 26,
+            "col": 108,
+            "radius_inner": 4,
+            "radius": 9,
+            "line_width": 2,
+            "color": "#ef5350",
+            "visible": True,
+        },
+    ]
+
+    specs = widget._static_panel_specs()
+    zooms = widget._static_roi_zoom_specs(specs)
+
+    assert len(zooms) == 5
+    assert [zoom["label"] for zoom in zooms] == [
+        "ROI 1 zoom",
+        "ROI 2 zoom",
+        "ROI 3 zoom",
+        "ROI 4 zoom",
+        "ROI 5 zoom",
+    ]
+    assert len({zoom["frame"].shape for zoom in zooms}) == 1
+    assert zooms[0]["frame"].shape[0] == zooms[0]["frame"].shape[1]
+    assert [zoom["roi_items"][0]["shape"] for zoom in zooms] == [
+        "circle",
+        "rectangle",
+        "circle",
+        "square",
+        "annular",
+    ]
+    assert [zoom["roi_items"][0]["color"] for zoom in zooms] == [
+        "#4fc3f7",
+        "#ffb74d",
+        "#81c784",
+        "#ce93d8",
+        "#ef5350",
+    ]
+
+    png_b64 = widget._static_png_b64()
+    assert png_b64
+    decoded = np.asarray(Image.open(io.BytesIO(base64.b64decode(png_b64))).convert("RGB"))
+    assert decoded.shape[1] > decoded.shape[0] * 1.5
+
+
+def test_show2d_roi_geometries_expose_agent_coordinates():
+    """Scientists and agents should be able to reuse ROI coordinates."""
+    widget = Show2D(
+        np.zeros((100, 120), dtype=np.float32),
+        save_state=False,
+        verbose=False,
+    )
+    widget.roi_active = True
+    widget.roi_list = [
+        {
+            "shape": "circle",
+            "row": 30,
+            "col": 40,
+            "radius": 8,
+            "color": "#4fc3f7",
+            "visible": True,
+        },
+        {
+            "shape": "rectangle",
+            "row": 50,
+            "col": 60,
+            "width": 20,
+            "height": 10,
+            "color": "#ffb74d",
+            "visible": True,
+        },
+        {
+            "shape": "square",
+            "row": 95,
+            "col": 115,
+            "radius": 10,
+            "color": "#81c784",
+            "visible": True,
+        },
+        {
+            "shape": "annular",
+            "row": 20,
+            "col": 25,
+            "radius_inner": 4,
+            "radius": 11,
+            "color": "#ef5350",
+            "visible": True,
+        },
+        {
+            "shape": "circle",
+            "row": 5,
+            "col": 5,
+            "radius": 3,
+            "visible": False,
+        },
+    ]
+
+    rois = widget.get_roi_geometries()
+
+    assert len(rois) == 4
+    assert rois[0]["center"] == {"row": 30.0, "col": 40.0}
+    assert rois[0]["radius"] == 8.0
+    assert rois[0]["bounds"] == {
+        "row_min": 22.0,
+        "row_max": 38.0,
+        "col_min": 32.0,
+        "col_max": 48.0,
+    }
+    assert "corners" not in rois[0]
+
+    assert rois[1]["corners"] == [
+        {"row": 45.0, "col": 50.0},
+        {"row": 45.0, "col": 70.0},
+        {"row": 55.0, "col": 70.0},
+        {"row": 55.0, "col": 50.0},
+    ]
+    assert rois[2]["corners"] == [
+        {"row": 85.0, "col": 105.0},
+        {"row": 85.0, "col": 125.0},
+        {"row": 105.0, "col": 125.0},
+        {"row": 105.0, "col": 105.0},
+    ]
+    assert rois[2]["bounds_clipped"] == {
+        "row_min": 85.0,
+        "row_max": 100.0,
+        "col_min": 105.0,
+        "col_max": 120.0,
+    }
+    assert rois[3]["radius_inner"] == 4.0
+    assert rois[3]["radius_outer"] == 11.0
+
+    all_rois = widget.get_roi_geometries(visible_only=False)
+    assert len(all_rois) == 5
+    assert all_rois[-1]["visible"] is False
+
+    restored = Show2D(
+        np.zeros((100, 120), dtype=np.float32),
+        save_state=False,
+        verbose=False,
+    )
+    restored.load_state_dict(widget.state_dict())
+    assert restored.get_roi_geometries() == rois
+
+
+def test_show3d_roi_geometries_expose_agent_coordinates():
+    """Show3D ROI coordinates should be reusable while users scrub frames."""
+    stack = _mos2_like_stack(4, 100, 120)
+    widget = Show3D(stack, save_state=False, verbose=False)
+    widget.roi_active = True
+    widget.roi_list = [
+        {
+            "shape": "circle",
+            "row": 30,
+            "col": 40,
+            "radius": 8,
+            "color": "#4fc3f7",
+            "visible": True,
+        },
+        {
+            "shape": "rectangle",
+            "row": 50,
+            "col": 60,
+            "width": 20,
+            "height": 10,
+            "color": "#ffb74d",
+            "visible": True,
+        },
+        {
+            "shape": "annular",
+            "row": 20,
+            "col": 25,
+            "radius_inner": 4,
+            "radius": 11,
+            "color": "#ef5350",
+            "visible": False,
+        },
+    ]
+
+    rois = widget.get_roi_geometries()
+
+    assert len(rois) == 2
+    assert rois[0]["center"] == {"row": 30.0, "col": 40.0}
+    assert rois[0]["radius"] == 8.0
+    assert rois[1]["corners"] == [
+        {"row": 45.0, "col": 50.0},
+        {"row": 45.0, "col": 70.0},
+        {"row": 55.0, "col": 70.0},
+        {"row": 55.0, "col": 50.0},
+    ]
+    assert len(widget.get_roi_geometries(visible_only=False)) == 3
+
+    restored = Show3D(stack, save_state=False, verbose=False)
+    restored.load_state_dict(widget.state_dict())
+    assert restored.get_roi_geometries() == rois
+
+
+def test_show3d_static_preview_carries_all_visible_rois_to_saved_frame():
+    """Saved Show3D previews should show the frame plus all visible ROI crops."""
+    stack = _mos2_like_stack(4, 128, 128)
+    widget = Show3D(
+        stack,
+        title="Show3D ROI saved preview",
+        save_state=False,
+        notebook_preview_format="png",
+        verbose=False,
+    )
+    widget.slice_idx = 2
+    widget.roi_active = True
+    widget.roi_selected_idx = 1
+    widget.roi_list = [
+        {
+            "shape": "circle",
+            "row": 42,
+            "col": 38,
+            "radius": 8,
+            "line_width": 2,
+            "color": "#4fc3f7",
+            "visible": True,
+        },
+        {
+            "shape": "rectangle",
+            "row": 78,
+            "col": 86,
+            "width": 18,
+            "height": 12,
+            "line_width": 2,
+            "color": "#ffb74d",
+            "visible": True,
+        },
+        {
+            "shape": "annular",
+            "row": 26,
+            "col": 108,
+            "radius_inner": 4,
+            "radius": 9,
+            "line_width": 2,
+            "color": "#ef5350",
+            "visible": False,
+        },
+    ]
+
+    preview = widget._static_show2d_preview()
+    assert preview is not None
+    assert preview.roi_active is True
+    assert preview.roi_list == widget.roi_list
+    assert preview.roi_selected_idx == widget.roi_selected_idx
+
+    specs = preview._static_panel_specs()
+    zooms = preview._static_roi_zoom_specs(specs)
+    assert [zoom["label"] for zoom in zooms] == ["ROI 1 zoom", "ROI 2 zoom"]
+    assert [zoom["roi_items"][0]["shape"] for zoom in zooms] == ["circle", "rectangle"]
+
+    bundle = widget._repr_mimebundle_()
+    data = bundle[0] if isinstance(bundle, tuple) else bundle
+    decoded = np.asarray(Image.open(io.BytesIO(base64.b64decode(data["image/png"]))).convert("RGB"))
+    assert decoded.shape[1] > decoded.shape[0] * 1.4
+
+
+def test_show3d_notebook_preview_frames_make_single_panel_contact_sheet():
+    """A saved single-panel Show3D notebook preview can show chosen frames."""
+    stack = np.stack([
+        np.full((48, 64), idx, dtype=np.float32)
+        for idx in range(6)
+    ])
+    widget = Show3D(
+        stack,
+        title="Selected saved frames",
+        labels=[f"frame {idx}" for idx in range(6)],
+        notebook_preview_frames=[0, 2, 5],
+        notebook_preview_ncols=2,
+        notebook_preview_format="png",
+        save_state=False,
+        verbose=False,
+    )
+
+    preview = widget._static_show2d_preview()
+    assert preview is not None
+    assert preview.ncols == 2
+    assert [float(np.mean(spec["frame"])) for spec in preview._static_panel_specs()] == [0.0, 2.0, 5.0]
+    assert preview.labels == [
+        "Selected saved frames · frame 0 1/6",
+        "Selected saved frames · frame 2 3/6",
+        "Selected saved frames · frame 5 6/6",
+    ]
+
+    bundle = widget._repr_mimebundle_()
+    data = bundle[0] if isinstance(bundle, tuple) else bundle
+    decoded = np.asarray(Image.open(io.BytesIO(base64.b64decode(data["image/png"]))).convert("RGB"))
+    assert decoded.shape[1] > decoded.shape[0]
+
+
+def test_show3d_notebook_preview_frames_roundtrip_and_validate():
+    """Saved preview frame choices should be explicit state, not hidden UI magic."""
+    stack = _mos2_like_stack(8, 48, 64)
+    widget = Show3D(stack, notebook_preview_frames=[0, 3, 7], notebook_preview_ncols=3, verbose=False)
+
+    assert widget.notebook_preview_frames == [0, 3, 7]
+    assert widget.notebook_preview_ncols == 3
+    assert widget.set_notebook_preview_frames([1, 1, 4], ncols=2) is widget
+    assert widget.notebook_preview_frames == [1, 4]
+    assert widget.notebook_preview_ncols == 2
+
+    restored = Show3D(stack, verbose=False)
+    restored.load_state_dict(widget.state_dict())
+    assert restored.notebook_preview_frames == [1, 4]
+    assert restored.notebook_preview_ncols == 2
+
+    assert restored.clear_notebook_preview_frames() is restored
+    assert restored.notebook_preview_frames == []
+    assert restored.notebook_preview_ncols == 0
+
+    with pytest.raises(ValueError, match="notebook_preview_frames values"):
+        restored.set_notebook_preview_frames([99])
+    with pytest.raises(ValueError, match="not bools"):
+        restored.set_notebook_preview_frames([True])
+
+
+def test_show3d_notebook_preview_frames_stay_single_panel_only():
+    """Multi-panel Show3D saved previews should not multiply panels by frames."""
+    panel_a = np.stack([np.full((32, 32), idx, dtype=np.float32) for idx in range(4)])
+    panel_b = np.stack([np.full((32, 32), idx + 10, dtype=np.float32) for idx in range(4)])
+    widget = Show3D(
+        panel_a,
+        panel_b,
+        panel_titles=["A", "B"],
+        notebook_preview_frames=[0, 2, 3],
+        notebook_preview_ncols=3,
+        verbose=False,
+    )
+    widget.slice_idx = 2
+
+    preview = widget._static_show2d_preview()
+
+    assert preview is not None
+    specs = preview._static_panel_specs()
+    assert len(specs) == 2
+    assert [float(np.mean(spec["frame"])) for spec in specs] == [2.0, 12.0]
 
 
 @pytest.mark.parametrize(
@@ -809,6 +1276,36 @@ def test_show2d_display_defers_static_png_render(monkeypatch):
     assert fill_meta == {"quantem.widget": {"static_fallback": True}}
 
 
+def test_static_fallback_env_kill_switch(monkeypatch):
+    """QUANTEM_WIDGET_STATIC_FALLBACK=0 (docs/CI builds) must emit ONLY the
+    interactive widget output: no in-bundle preview image and no static
+    sibling display, so built docs pages show a single widget, not a
+    duplicate image under it."""
+    import IPython
+
+    monkeypatch.setenv("QUANTEM_WIDGET_STATIC_FALLBACK", "0")
+    frame = np.random.default_rng(9).random((32, 32)).astype(np.float32)
+    widget = Show2D(frame, verbose=False)
+
+    bundle = widget._repr_mimebundle_()
+    data = bundle[0] if isinstance(bundle, tuple) else bundle
+    assert "image/jpeg" not in data
+    assert "image/webp" not in data
+
+    displayed = []
+
+    class ZMQInteractiveShell:  # name is what the kernel check looks at
+        pass
+
+    def fake_display(data, raw=False, metadata=None, display_id=None, **kw):
+        displayed.append((data, metadata, display_id))
+
+    monkeypatch.setattr(IPython, "get_ipython", lambda: ZMQInteractiveShell())
+    monkeypatch.setattr("IPython.display.display", fake_display)
+    widget._ipython_display_()
+    assert len(displayed) == 1, "static sibling was emitted despite kill switch"
+
+
 def test_show2d_sibling_static_output_via_nbconvert(tmp_path):
     """Executing a notebook must leave a saved preview on the Show2D cell.
 
@@ -1028,6 +1525,37 @@ def test_show3d_static_png_pixel_matches_show2d_current_frame_gallery():
     np.testing.assert_array_equal(show3d_rgb, show2d_rgb)
 
 
+def test_show2d_static_gallery_avoids_pyplot_figure_manager(monkeypatch):
+    """A saved gallery must not join Jupyter's inline figure lifecycle.
+
+    The fallback is rendered from a ``post_execute`` callback. Registering
+    its figure through pyplot lets matplotlib-inline's neighboring callback
+    flush or clear the gallery before ``savefig``, producing a correctly sized
+    but all-white JPEG after notebook save/reopen.
+    """
+    import matplotlib.pyplot as plt
+
+    def fail_pyplot_figure(*args, **kwargs):
+        raise AssertionError("saved Show2D previews must use an unmanaged Figure")
+
+    monkeypatch.setattr(plt, "figure", fail_pyplot_figure)
+    rng = np.random.default_rng(181)
+    widget = Show2D(
+        [rng.random((96, 96), dtype=np.float32) for _ in range(4)],
+        labels=["Ba", "Ti", "O", "Sr"],
+        ncols=2,
+        cmap="inferno",
+        save_state=False,
+        verbose=False,
+    )
+
+    png = widget._static_png_b64(max_px=192)
+    image = np.asarray(Image.open(io.BytesIO(base64.b64decode(png))).convert("RGB"))
+
+    assert image.shape[0] > 100 and image.shape[1] > 100
+    assert image.std() > 5
+
+
 @pytest.mark.parametrize(
     ("n_panels", "max_cols", "size", "panel_gap", "hidden", "scale_bar"),
     [
@@ -1230,3 +1758,12 @@ def test_sibling_not_emitted_with_save_state_true(widget, monkeypatch):
 
     w._ipython_display_()
     assert len(displayed) == 1, f"{widget.__name__}: sibling emitted despite save_state=True"
+
+
+def test_show1d_save_state_true_keeps_buffers():
+    from quantem.widget import Show1D
+
+    w = Show1D(np.random.rand(64).astype("float32"), save_state=True)
+    full = w.get_state()
+    assert "snapshot_bytes" in full
+    assert "export_payload" in full

@@ -36,7 +36,7 @@ python -m pip install -e .
 Run the smallest checks that match the change:
 
 ```bash
-PYTHONPATH=src pytest -q
+PYTHONPATH=src:. pytest -q
 npm run typecheck
 npm test
 npm run build
@@ -45,7 +45,7 @@ npm run build
 For HTML export or widget-state changes:
 
 ```bash
-PYTHONPATH=src pytest -q tests/test_html_export_protocol.py
+PYTHONPATH=src:. pytest -q tests/test_html_export_protocol.py
 ```
 
 For exported-HTML UI changes, also run the browser-drive smoke:
@@ -57,13 +57,13 @@ scripts/widget_local_signoff.sh --quick --browser
 For ShowEDS changes:
 
 ```bash
-PYTHONPATH=src pytest -q tests/test_showeds.py tests/test_html_export_protocol.py
+PYTHONPATH=src:. pytest -q tests/test_showeds.py tests/test_html_export_protocol.py
 ```
 
 For Show4DSTEM/WebGPU-sensitive changes:
 
 ```bash
-QT_RUN_BROWSER_TESTS=1 PYTHONPATH=src pytest -q tests/test_show4dstem_webgpu_browser.py -s
+QT_RUN_BROWSER_TESTS=1 PYTHONPATH=src:. pytest -q tests/test_show4dstem_webgpu_browser.py -s
 ```
 
 For a quick visual smoke before a broad widget PR:

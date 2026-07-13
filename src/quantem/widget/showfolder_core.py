@@ -538,9 +538,41 @@ class ShowFolderBrowser:
     def inherit_selected_viewers_from(self, previous: "ShowFolderBrowser") -> None:
         """Carry open selected viewers across a live-folder browser rebuild."""
         self._active_selected_modes = set(getattr(previous, "_active_selected_modes", set()))
-        self._selected_show2d_widget = getattr(previous, "_selected_show2d_widget", None)
-        self._selected_show3d_widget = getattr(previous, "_selected_show3d_widget", None)
+        show2d_active = bool(
+            self._active_selected_modes.intersection({"show2d", "show2d_all"})
+        )
+        show3d_active = bool(
+            self._active_selected_modes.intersection({"show3d", "show3d_all"})
+        )
+        self._selected_show2d_widget = (
+            getattr(previous, "_selected_show2d_widget", None)
+            if show2d_active
+            else None
+        )
+        self._selected_show3d_widget = (
+            getattr(previous, "_selected_show3d_widget", None)
+            if show3d_active
+            else None
+        )
+        # Ownership of active viewers moves to this rebuilt browser. Clearing
+        # the old references keeps orphan cleanup from closing the same model a
+        # second time after an empty transition has already released it.
+        if show2d_active:
+            previous._selected_show2d_widget = None
+        if show3d_active:
+            previous._selected_show3d_widget = None
         self._show4dstem_config = getattr(previous, "_show4dstem_config", None)
+        previous_holder = getattr(previous, "_selection_viewer_output", None)
+        fresh_holder = getattr(self, "_selection_viewer_output", None)
+        if previous_holder is not None and fresh_holder is not None:
+            panel = getattr(self, "selection_panel", None)
+            if panel is not None:
+                panel.children = tuple(
+                    previous_holder if child is fresh_holder else child
+                    for child in panel.children
+                )
+            self._selection_viewer_output = previous_holder
+            self._discarded_widgets = [fresh_holder]
         if "show4dstem" in self._active_selected_modes:
             release = getattr(previous, "_release_selected_show4dstem_widget", None)
             if callable(release):
@@ -562,7 +594,7 @@ class ShowFolderBrowser:
     ):
         data, labels, pixel_sizes_out, pixel_unit = frames
         if data is None:
-            self._selected_show2d_widget = None
+            self._release_selected_viewer("_selected_show2d_widget")
             return None
         widget = getattr(self, "_selected_show2d_widget", None)
         if widget is not None and hasattr(widget, "set_image"):
@@ -593,7 +625,7 @@ class ShowFolderBrowser:
     ):
         data, labels, pixel_sizes_out, pixel_unit = frames
         if data is None:
-            self._selected_show3d_widget = None
+            self._release_selected_viewer("_selected_show3d_widget")
             return None
         widget = getattr(self, "_selected_show3d_widget", None)
         if widget is not None and hasattr(widget, "set_image"):
@@ -621,6 +653,8 @@ class ShowFolderBrowser:
         ``all_images=True`` it tracks every readable image in the watched folder,
         so newly added files append on the next folder poll.
         """
+        self._release_selected_viewer("_selected_show3d_widget")
+        self._release_selected_show4dstem_widget()
         self._active_selected_modes = {"show2d_all" if all_images else "show2d"}
         if getattr(self, "_selection_viewer_output", None) is not None:
             self._refresh_selected_viewers()
@@ -629,11 +663,54 @@ class ShowFolderBrowser:
 
     def open_show3d(self, *, all_images: bool = False):
         """Open a live Show3D stack below the folder browser."""
+        self._release_selected_viewer("_selected_show2d_widget")
+        self._release_selected_show4dstem_widget()
         self._active_selected_modes = {"show3d_all" if all_images else "show3d"}
         if getattr(self, "_selection_viewer_output", None) is not None:
             self._refresh_selected_viewers()
             return getattr(self, "_selected_show3d_widget", None)
         return self._apply_all_show3d() if all_images else self._apply_selected_show3d()
+
+    def open_both(self, *, all_images: bool = False):
+        """Open live Show2D and Show3D views in the selection panel.
+
+        Parameters
+        ----------
+        all_images
+            If ``True``, both viewers track every readable image in the folder,
+            including files discovered by a running ShowFolder watcher. If
+            ``False``, both viewers track the currently starred images.
+
+        Returns
+        -------
+        ipywidgets.VBox
+            A container referencing the two live viewer widgets. The same
+            widget models are also displayed in ShowFolder's selection panel.
+        """
+        suffix = "_all" if all_images else ""
+        self._release_selected_show4dstem_widget()
+        self._active_selected_modes = {f"show2d{suffix}", f"show3d{suffix}"}
+        holder = getattr(self, "_selection_viewer_output", None)
+        if holder is not None:
+            self._refresh_selected_viewers()
+            return holder
+        elif all_images:
+            self._apply_all_show2d()
+            self._apply_all_show3d()
+        else:
+            self._apply_selected_show2d()
+            self._apply_selected_show3d()
+        children = [
+            widget
+            for widget in (
+                getattr(self, "_selected_show2d_widget", None),
+                getattr(self, "_selected_show3d_widget", None),
+            )
+            if widget is not None
+        ]
+        from ipywidgets import VBox
+
+        return VBox(children)
 
     def open_show4dstem(
         self,
@@ -679,6 +756,8 @@ class ShowFolderBrowser:
             page_max_vram_bytes=page_max_vram_bytes,
             preload_all_if_fits=preload_all_if_fits,
         )
+        self._release_selected_viewer("_selected_show2d_widget")
+        self._release_selected_viewer("_selected_show3d_widget")
         self._active_selected_modes = {"show4dstem"}
         if getattr(self, "_selection_viewer_output", None) is not None:
             self._refresh_selected_viewers()
@@ -693,6 +772,25 @@ class ShowFolderBrowser:
             except Exception:
                 pass
         self._selected_show4dstem_widget = None
+
+    def _release_selected_viewer(self, attribute: str) -> None:
+        """Release one inactive selected image viewer and its widget comm."""
+        widget = getattr(self, attribute, None)
+        if widget is None:
+            return
+        free = getattr(widget, "free", None)
+        if callable(free):
+            try:
+                free()
+            except Exception:
+                pass
+        close = getattr(widget, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
+        setattr(self, attribute, None)
 
     def _apply_selected_show4dstem(self):
         """Build a lazy, paged multi-GPU Show4DSTEM over the folder's 4D masters."""
@@ -807,64 +905,109 @@ class ShowFolderBrowser:
         modes = set(getattr(self, "_active_selected_modes", set()))
         if output is None or not modes:
             return
-        from IPython.display import display
         from ipywidgets import HTML
 
-        output.clear_output(wait=True)
-        with output:
-            if "show2d" in modes:
-                widget = self._apply_selected_show2d()
-                display(widget if widget is not None else HTML("<p><b>No starred image panels yet.</b></p>"))
-            if "show2d_all" in modes:
-                widget = self._apply_all_show2d()
-                display(widget if widget is not None else HTML("<p><b>No readable image panels yet.</b></p>"))
-            if "show3d" in modes:
-                widget = self._apply_selected_show3d()
-                display(widget if widget is not None else HTML("<p><b>No starred image panels yet.</b></p>"))
-            if "show3d_all" in modes:
-                widget = self._apply_all_show3d()
-                display(widget if widget is not None else HTML("<p><b>No readable image panels yet.</b></p>"))
-            if "show4dstem" in modes:
-                widget = self._apply_selected_show4dstem()
-                display(widget if widget is not None else HTML("<p><b>No 4D-STEM masters (*_master.h5) in this folder.</b></p>"))
+        old_children = tuple(output.children)
+        children = []
+        if "show2d" in modes:
+            widget = self._apply_selected_show2d()
+            children.append(
+                widget
+                if widget is not None
+                else HTML("<p><b>No starred image panels yet.</b></p>")
+            )
+        if "show2d_all" in modes:
+            widget = self._apply_all_show2d()
+            children.append(
+                widget
+                if widget is not None
+                else HTML("<p><b>No readable image panels yet.</b></p>")
+            )
+        if "show3d" in modes:
+            widget = self._apply_selected_show3d()
+            children.append(
+                widget
+                if widget is not None
+                else HTML("<p><b>No starred image panels yet.</b></p>")
+            )
+        if "show3d_all" in modes:
+            widget = self._apply_all_show3d()
+            children.append(
+                widget
+                if widget is not None
+                else HTML("<p><b>No readable image panels yet.</b></p>")
+            )
+        if "show4dstem" in modes:
+            widget = self._apply_selected_show4dstem()
+            children.append(
+                widget
+                if widget is not None
+                else HTML(
+                    "<p><b>No 4D-STEM masters (*_master.h5) in this folder.</b></p>"
+                )
+            )
+        output.children = tuple(children)
+        retained = {id(child) for child in children}
+        for child in old_children:
+            if id(child) in retained:
+                continue
+            if type(child).__name__ != "HTML":
+                continue
+            try:
+                child.close()
+            except Exception:
+                pass
 
     def attach_selection_panel(self) -> Any:
         """Append the live curation panel below the ShowFolder widget."""
-        from ipywidgets import Button, HBox, HTML, Output, VBox
+        from ipywidgets import Button, HBox, HTML, Layout, VBox
 
         if self.selection_panel is not None:
             return self.selection_panel
 
         summary = HTML()
-        output = Output()
-        viewer_output = Output()
-        refresh = Button(description="Refresh selection", tooltip="Read current stars/checks")
-        save = Button(description="Save selection", tooltip=f"Write {self.selection_file.name}")
+        detail = HTML()
+        # Keep mounted viewer models in a trait-synchronized container. Unlike
+        # an Output capture, VBox children can be replaced safely by the
+        # background folder-watching thread without relying on an active
+        # notebook execution message.
+        viewer_output = VBox()
+        refresh = Button(description="Refresh Selection", tooltip="Read current stars/checks")
+        save = Button(description="Save Selection", tooltip=f"Write {self.selection_file.name}")
         open_show2d = Button(description="Open Show2D", tooltip="Render starred images below")
         open_show3d = Button(description="Open Show3D", tooltip="Render starred images as a frame stack below")
-        open_both = Button(description="Open both", tooltip="Render starred images as Show2D and Show3D below")
-        open_all_show2d = Button(description="Open all Show2D", tooltip="Render every image and live-append new files")
-        open_all_show3d = Button(description="Open all Show3D", tooltip="Render every image as a live frame stack")
+        open_both = Button(description="Open Both", tooltip="Render starred images as Show2D and Show3D below")
+        open_all_show2d = Button(description="Open All Show2D", tooltip="Render every image and live-append new files")
+        open_all_show3d = Button(description="Open All Show3D", tooltip="Render every image as a live frame stack")
+        open_all_both = Button(
+            description="Open All Both",
+            tooltip="Keep every image live in both Show2D and Show3D",
+        )
         open_show4dstem = Button(description="Open Show4DSTEM",
                                  tooltip="Open *_master.h5 files as one lazy Show4DSTEM with paged VRAM")
-        hide = Button(description="Show starred only", tooltip="Hide unstarred image panels")
-        show_all = Button(description="Show all images", tooltip="Restore hidden image panels")
+        hide = Button(description="Show Starred Only", tooltip="Hide unstarred image panels")
+        show_all = Button(description="Show All Images", tooltip="Restore hidden image panels")
 
         def _refresh(_=None):
-            self._refresh_selection_panel(summary=summary, output=output)
+            self._refresh_selection_panel(summary=summary, detail=detail)
 
         def _save(_=None):
             path = self.save()
             _refresh()
-            with output:
-                print(f"saved {path}")
+            detail.value += (
+                "<div style=\"color:#555;margin-top:4px\">Saved "
+                f"<code>{html.escape(str(path))}</code></div>"
+            )
 
         def _hide(_=None):
             try:
                 self.hide_unselected()
             except Exception as exc:
-                with output:
-                    print(exc)
+                detail.value = (
+                    "<div style=\"color:#b42318\">"
+                    f"{html.escape(str(exc))}</div>"
+                )
+                return
             _refresh()
 
         def _show_all(_=None):
@@ -880,8 +1023,7 @@ class ShowFolderBrowser:
             _refresh()
 
         def _open_both(_=None):
-            self._active_selected_modes = {"show2d", "show3d"}
-            _refresh()
+            self.open_both()
 
         def _open_all_show2d(_=None):
             self.open_show2d(all_images=True)
@@ -890,6 +1032,9 @@ class ShowFolderBrowser:
         def _open_all_show3d(_=None):
             self.open_show3d(all_images=True)
             _refresh()
+
+        def _open_all_both(_=None):
+            self.open_both(all_images=True)
 
         def _open_show4dstem(_=None):
             # Memory-sized residency: keep hot datasets until the GPU cache
@@ -908,22 +1053,27 @@ class ShowFolderBrowser:
         open_both.on_click(_open_both)
         open_all_show2d.on_click(_open_all_show2d)
         open_all_show3d.on_click(_open_all_show3d)
+        open_all_both.on_click(_open_all_both)
         open_show4dstem.on_click(_open_show4dstem)
         hide.on_click(_hide)
         show_all.on_click(_show_all)
         panel = VBox([
             HTML("<h3 style=\"margin:12px 0 6px 0\">Selected for downstream analysis</h3>"),
             summary,
-            HBox([
-                refresh, save, open_show2d, open_show3d, open_both,
-                open_all_show2d, open_all_show3d, open_show4dstem, hide, show_all,
-            ]),
-            output,
+            HBox(
+                [
+                    refresh, save, open_show2d, open_show3d, open_both,
+                    open_all_show2d, open_all_show3d, open_all_both,
+                    open_show4dstem, hide, show_all,
+                ],
+                layout=Layout(flex_flow="row wrap"),
+            ),
+            detail,
             viewer_output,
         ])
         self.selection_panel = panel
         self._selection_summary = summary
-        self._selection_output = output
+        self._selection_detail = detail
         self._selection_viewer_output = viewer_output
         self._active_selected_modes = set()
         self._selected_show2d_widget = None
@@ -931,7 +1081,7 @@ class ShowFolderBrowser:
         for gallery, _ in self.image_galleries:
             gallery.observe(lambda _: self._refresh_selection_panel(), names="starred")
             gallery.observe(lambda _: self._refresh_selection_panel(), names="hidden_panels")
-        self._refresh_selection_panel(summary=summary, output=output)
+        self._refresh_selection_panel(summary=summary, detail=detail)
         self.widget.children = tuple(self.widget.children) + (panel,)
         return panel
 
@@ -956,9 +1106,9 @@ class ShowFolderBrowser:
             if emit_sibling is not None and not getattr(gallery_widget, "_save_state", False):
                 emit_sibling()
 
-    def _refresh_selection_panel(self, summary=None, output=None) -> None:
+    def _refresh_selection_panel(self, summary=None, detail=None) -> None:
         summary = summary or getattr(self, "_selection_summary", None)
-        output = output or getattr(self, "_selection_output", None)
+        detail = detail or getattr(self, "_selection_detail", None)
         if summary is None:
             return
         selected_images = self.selected_image_items()
@@ -967,11 +1117,16 @@ class ShowFolderBrowser:
             f"{len(selected_images)} image selected · "
             f"default file <code>{html.escape(str(self.selection_file))}</code></div>"
         )
-        if output is not None:
-            output.clear_output(wait=True)
-            with output:
-                for item in selected_images:
-                    print(f"{item.file_id}\timage\t{item.path.name}")
+        if detail is not None:
+            rows = "".join(
+                f"{html.escape(item.file_id)}\timage\t"
+                f"{html.escape(item.path.name)}\n"
+                for item in selected_images
+            )
+            detail.value = (
+                "" if not rows else
+                f"<pre style=\"margin:0 0 6px 0\">{rows}</pre>"
+            )
         self._refresh_selected_viewers()
 
 
@@ -1035,11 +1190,6 @@ def build_showfolder(
     metadata_sources = _metadata_sources_for_files(root, files)
     master_files = sorted(p for p in root.glob("*_master.h5") if p.is_file() and not p.name.startswith("."))
     master_qc = inspect_master_folder(root, master_files=master_files)
-    if not files:
-        if not master_files:
-            raise FileNotFoundError(f"no files matching {glob!r} in {root}")
-        files = []
-
     thumb = int(thumb)
     if thumb <= 0:
         raise ValueError(f"thumb must be positive, got {thumb}")

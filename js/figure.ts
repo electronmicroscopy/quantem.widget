@@ -69,6 +69,11 @@ export function formatScaleLabel(value: number, unit: string): string {
 
 const FONT = "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
 
+/** Format a zoom multiplier consistently across image and FFT overlays. */
+export function formatZoomLabel(zoom: number): string {
+  return `${zoom.toFixed(1)}×`;
+}
+
 /**
  * Draw scale bar and zoom indicator on a high-DPI UI canvas.
  * Renders crisp text/lines independent of the image resolution.
@@ -122,7 +127,7 @@ export function drawScaleBarHiDPI(
 
   ctx.textAlign = "left";
   ctx.textBaseline = "bottom";
-  ctx.fillText(`${zoom.toFixed(1)}×`, margin, cssHeight - margin + barThickness);
+  ctx.fillText(formatZoomLabel(zoom), margin, cssHeight - margin + barThickness);
 
   ctx.restore();
 }
@@ -138,6 +143,7 @@ export function drawFFTScaleBarHiDPI(
   fftPixelSize: number,
   imageWidth: number,
   unit: string = "1/px",
+  showZoomIndicator: boolean = true,
 ) {
   const ctx = canvas.getContext("2d");
   if (!ctx || fftPixelSize <= 0) return;
@@ -177,9 +183,11 @@ export function drawFFTScaleBarHiDPI(
   ctx.textBaseline = "bottom";
   ctx.fillText(label, barX + barPx / 2, barY - 4);
 
-  ctx.textAlign = "left";
-  ctx.textBaseline = "bottom";
-  ctx.fillText(`${fftZoom.toFixed(1)}×`, margin, cssHeight - margin + barThickness);
+  if (showZoomIndicator) {
+    ctx.textAlign = "left";
+    ctx.textBaseline = "bottom";
+    ctx.fillText(formatZoomLabel(fftZoom), margin, cssHeight - margin + barThickness);
+  }
 
   ctx.restore();
 }
@@ -235,4 +243,3 @@ export function drawColorbar(
     ctx.fillText("log", barX - 4, barY + barH / 2);
   }
 }
-

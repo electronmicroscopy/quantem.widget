@@ -11,6 +11,7 @@ from pathlib import Path
 import time
 
 import numpy as np
+from PIL import Image
 
 from quantem.widget import Show2D, Show3D, Show4DSTEM
 
@@ -60,6 +61,67 @@ def test_show3d_lightweight_save_snapshot_is_fast_and_compact():
     assert "export_payload" not in state
 
 
+def test_show3d_frame_server_mount_defers_initial_native_frame_wire():
+    """C1: remote users see controls before the first full frame payload."""
+    rng = np.random.default_rng(921)
+    widget = Show3D(
+        rng.random((4, 128, 128), dtype=np.float32),
+        offline=False,
+        save_state=False,
+        title="defer initial frame wire",
+    )
+
+    assert widget.frame_server_url
+    assert widget.frame_bytes == b""
+    assert widget.frame_seq == 0
+
+    widget.goto(1)
+
+    assert len(widget.frame_bytes) == 128 * 128 * 4
+    assert widget.frame_seq == 1
+
+
+def test_show3d_lazy_panel_folders_mount_without_preloading_stack(tmp_path):
+    """C1: remote real-data panels mount from disk paths, frames fetch native."""
+    panel_dirs = []
+    for panel in range(2):
+        folder = tmp_path / f"panel_{panel}"
+        folder.mkdir()
+        panel_dirs.append(folder)
+        for idx in range(3):
+            frame = np.full((8, 10), panel * 100 + idx, dtype=np.uint16)
+            Image.fromarray(frame).save(folder / f"frame_{idx:03d}.png")
+
+    widget = Show3D.from_panel_folders(
+        panel_dirs,
+        offline=False,
+        save_state=False,
+        title="lazy panel folders",
+    )
+
+    assert widget.n_slices == 3
+    assert widget.n_panels == 2
+    assert widget.separate_panel_frames
+    assert widget.frame_server_url
+    assert widget.frame_bytes == b""
+    assert widget.width == 20
+    assert widget.height == 8
+
+    widget.goto(2)
+
+    assert widget.frame_bytes == b""
+    assert widget.frame_seq >= 1
+
+    status, frame = widget._frame_for_http(2, widget.frame_server_version, panel=1)
+
+    assert status == 200
+    assert isinstance(frame, np.ndarray)
+    assert frame.shape == (8, 10)
+    assert frame.dtype == np.float32
+    assert frame.nbytes == 8 * 10 * 4
+    assert float(frame[0, 0]) == 102.0
+
+
 def test_show2d_and_show3d_paged_sliders_use_local_preview_contract():
     """Paged slider movement must render locally before the Python trait commit."""
     show2d = (ROOT / "js" / "show2d" / "index.tsx").read_text(encoding="utf-8")
@@ -75,6 +137,147 @@ def test_show2d_and_show3d_paged_sliders_use_local_preview_contract():
     assert "window.requestAnimationFrame" in show3d
     assert "const displayPageIdx = pageSliderPreviewIdx === null" in show3d
     assert "const activePageStart = isPaged ? displayPageIdx" in show3d
+
+
+def test_show2d_local_stack_fft_cache_and_playback_contract():
+    """Local slice playback keeps the prior FFT visible and reuses revisits."""
+    show2d = (ROOT / "js" / "show2d" / "index.tsx").read_text(encoding="utf-8")
+    local_stack = (ROOT / "js" / "show2d" / "localStack.ts").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'useModelState<number>("panel_playback_fps")' in show2d
+    assert "panelPlaybackIntervalMs(panelPlaybackFps)" in show2d
+    assert "galleryFftMagnitudeLruRef" in show2d
+    assert "galleryFftActiveKeysRef" in show2d
+    assert "galleryFftTargetKeysRef" in show2d
+    assert "galleryFftComputeSerialRef" in show2d
+    assert "__quantemShow2DPerf" in show2d
+    assert "data-show2d-panel-playback-fps" in show2d
+    assert "data-show2d-fft-cache-hits" in show2d
+    assert "data-show2d-fft-computes" in show2d
+    assert "fftComputing && !fftOffscreensRef.current[i]" in show2d
+    assert "fftComputing && !fftMagCacheGalleryRef.current[i]" not in show2d
+    assert "makeGalleryFftCacheKey" in local_stack
+    assert "GALLERY_FFT_CACHE_MAX_BYTES" in local_stack
+    assert "protectedKeys" in local_stack
+
+
+def test_show3d_playback_style_menu_stays_next_to_playback_controls():
+    """Show3D play-style choices belong in the playback row, not top More."""
+    show3d = (ROOT / "js" / "show3d" / "index.tsx").read_text(encoding="utf-8")
+
+    # C1: a scientist chooses how time moves while watching playback, expect
+    # the button next to the frame star and only curve-style options inside.
+    assert "More playback style options" in show3d
+    assert "Play Style" in show3d
+    assert "applyPlaybackStylePreset" in show3d
+    assert "Power In" in show3d
+    assert "Power Out" in show3d
+    assert "Ease In/Out" in show3d
+    assert 'useModelState<number[]>("playback_path")' in show3d
+    assert 'producing "Path 1"' in show3d
+    assert "Loop, Bounce, fps, and range stay user-controlled" in show3d
+    assert "title=\"More tools: Stats, Denoise, Filter\"" in show3d
+    assert "Playback Dynamics" not in show3d
+    assert "Hold Key Frame" not in show3d
+    assert "Focus Range" not in show3d
+
+
+def test_show3d_filtered_playback_waits_for_cached_display_frames():
+    """Filtered playback must not flash raw frames while async filters settle."""
+    show3d = (ROOT / "js" / "show3d" / "index.tsx").read_text(encoding="utf-8")
+
+    # C1: a user configures denoise or FFT filtering, presses Play, and expects
+    # every transition to remain in the configured filtered view.
+    assert "frequencyFilterCacheRef" in show3d
+    assert "frequencyFilterPendingRef" in show3d
+    assert "allowRawOnMiss" in show3d
+    assert (
+        "displayAndFrequencyFrameForIndex(next, frame, { allowRawOnMiss: false })"
+        in show3d
+    )
+    assert "warmPlaybackDisplayFrame(next + warmDirection, next, frame)" in show3d
+    assert (
+        "}) || browserFilterOnRef.current || frequencyFilterIsActive"
+        in show3d
+    )
+    assert (
+        "if (frequencyFilterPendingRef.current.has(key)) "
+        "return allowRawOnMiss ? frame : null;"
+    ) in show3d
+    assert "Do not clamp this live DOM update to loop handles" in show3d
+    assert "users see \"1/18\" while the canvas was already showing a later frame" in show3d
+    assert 'data-show3d-playback-count="true"' in show3d
+    assert "if (!offline && playing && frameTransformActive()) return;" in show3d
+    assert "visible \"twitch\"" in show3d
+
+
+def test_show3d_remote_scrub_transport_instrumentation_contract():
+    """Remote scrub measurements must split Python, Comm, decode, and paint."""
+    show3d_py = (ROOT / "src" / "quantem" / "widget" / "show3d.py").read_text(
+        encoding="utf-8"
+    )
+    show3d_js = (ROOT / "js" / "show3d" / "index.tsx").read_text(encoding="utf-8")
+
+    assert "frame_transport_timing" in show3d_py
+    assert "buffer_transport_timing" in show3d_py
+    assert "_scrub_preview_request" in show3d_py
+    assert "_scrub_preview_bytes" in show3d_py
+    assert "_scrub_preview_info" in show3d_py
+    assert "[Show3D scrub preview]" in show3d_py
+    assert "release the slider or zoom/settle the view to request native full resolution" in show3d_py
+    assert "pythonPrepareMs" in show3d_py
+    assert "pythonEncodeMs" in show3d_py
+    assert "pythonTraitSetMs" in show3d_py
+    assert "sendTimeMs" in show3d_py
+
+    assert 'mode === "scrubTransport"' in show3d_js
+    assert 'mode === "scrubPreviewTransport"' in show3d_js
+    assert 'setScrubPreviewRequest(JSON.stringify({' in show3d_js
+    assert 'kind: "scrubPreview"' in show3d_js
+    assert 'if (!transformActive && requestScrubPreview(next)) return;' in show3d_js
+    assert "release the slider or zoom/settle the view to request native full resolution" in show3d_js
+    assert "const commitSlice = (idx: number) =>" in show3d_js
+    assert "setSliceIdx(next);" in show3d_js
+    assert "browserReceiveLatencyMs" in show3d_js
+    assert "jsDecodeMs" in show3d_js
+    assert "endToEndUiLatencyMs" in show3d_js
+    assert "__quantemShow3DPerf" in show3d_js
+    assert "_defer_initial_frame_wire" in show3d_py
+    assert "can mount controls immediately" in show3d_py
+    assert "if (offline || !frameServerUrl || playing) return;" in show3d_js
+
+
+def test_show3d_bottom_fft_layout_always_stacks_below_main_panel():
+    """C1: user selects FFT Bottom, expect FFT below even for one panel."""
+    show3d = (ROOT / "js" / "show3d" / "index.tsx").read_text(encoding="utf-8")
+
+    assert 'flexWrap: effectiveShowFft && fftLayoutBottom ? "wrap" : "nowrap"' in show3d
+    assert 'flex: fftLayoutBottom ? "1 0 100%"' in show3d
+    assert 'maxWidth: fftLayoutBottom ? "100%"' in show3d
+    assert 'fftLayoutBottom && (nPanels || 1) > 1' not in show3d
+
+
+def test_show2d_and_show3d_fft_zoom_labels_cover_every_interactive_fft():
+    """FFT views expose their live multiplier in every supported layout."""
+    figure = (ROOT / "js" / "figure.ts").read_text(encoding="utf-8")
+    show2d = (ROOT / "js" / "show2d" / "index.tsx").read_text(encoding="utf-8")
+    show3d = (ROOT / "js" / "show3d" / "index.tsx").read_text(encoding="utf-8")
+
+    # C1: shared formatter and per-widget markers, expect every interactive FFT
+    # layout to expose the same accessible N.N× zoom label contract.
+    assert "export function formatZoomLabel" in figure
+    assert 'data-show2d-fft-zoom-indicator={i}' in show2d
+    assert 'data-show2d-fft-zoom-indicator="single"' in show2d
+    assert "formatZoomLabel(getGalleryFftState(i).zoom)" in show2d
+    assert "formatZoomLabel(fftZoom)" in show2d
+    assert 'data-show3d-fft-zoom-indicator={panel}' in show3d
+    assert show3d.count('data-show3d-fft-zoom-indicator={panel}') == 2
+    assert "showZoomIndicator !== false && panelChromeVisible" in show3d
+    assert "onTouchStart={handleFftInsetTouchStart}" in show3d
+    assert "scheduleFftViewState({ zoom: newZoom" in show3d
+    assert "`${fftZoom.toFixed(1)}×`" not in show3d
 
 
 def test_show3d_standalone_export_has_bounded_frame_prewarm_contract():
@@ -143,15 +346,116 @@ def test_show3d_fft_cache_ignores_frame_delivery_counter():
     assert "fftCacheHits" in show3d
 
 
+def test_show2d_show3d_foreground_canvas_repaint_uses_cached_fft_contract():
+    """Tab restore must repaint every canvas without recomputing FFT magnitudes."""
+    lifecycle = (ROOT / "js" / "canvasLifecycle.ts").read_text(encoding="utf-8")
+    show2d = (ROOT / "js" / "show2d" / "index.tsx").read_text(encoding="utf-8")
+    show3d = (ROOT / "js" / "show3d" / "index.tsx").read_text(encoding="utf-8")
+
+    # C1: foreground lifecycle events settle and coalesce before repainting.
+    assert 'document.addEventListener("visibilitychange"' in lifecycle
+    assert 'window.addEventListener("pageshow"' in lifecycle
+    assert 'window.addEventListener("focus"' in lifecycle
+    assert lifecycle.count("window.requestAnimationFrame") == 2
+    assert "if (document.hidden) return" in lifecycle
+
+    # C2: Show2D invalidates stale hidden-tab GPU work and rebuilds display
+    # layers from retained image/FFT data.
+    assert "const renderGeneration = ++mainCmapGenerationRef.current" in show2d
+    assert "renderGeneration === mainCmapGenerationRef.current" in show2d
+    assert "bitmaps.forEach(bitmap => bitmap?.close())" in show2d
+    assert "data-show2d-canvas-repaint-signal" in show2d
+    assert show2d.count("canvasRepaintSignal") >= 12
+    show2d_single_fft_compute = show2d.split(
+        "// Compute FFT magnitude (cached", 1
+    )[1].split("// Clear FFT measurement", 1)[0]
+    show2d_gallery_fft_compute = show2d.split(
+        "// Compute FFT magnitudes for gallery mode", 1
+    )[1].split("// Gallery FFT data effect", 1)[0]
+    assert "canvasRepaintSignal" not in show2d_single_fft_compute
+    assert "canvasRepaintSignal" not in show2d_gallery_fft_compute
+    show2d_diff_fft_compute = show2d.split(
+        "// FFT of a single visible diff pair", 1
+    )[1].split("// Re-blit the cached diff FFT", 1)[0]
+    assert "fftColormap" not in show2d_diff_fft_compute
+    assert "canvasW" not in show2d_diff_fft_compute
+    assert "fftSmooth" not in show2d_diff_fft_compute
+    assert "setDiffFftMagVersion" in show2d_diff_fft_compute
+    assert "diffFftOffscreenRef.current = offscreen" in show2d
+    assert "const magnitude = diffFftMagRef.current" in show2d
+    assert "const dims = diffFftDimsRef.current" in show2d
+    assert "autoEnhanceFFT(magnitude, dims.width, dims.height)" in show2d
+    assert "createGPUColormapEngine().then" in show2d
+    assert "getGPUColormapEngine().then" not in show2d
+    assert "Diff WebGPU FFT failed; using CPU worker" in show2d_diff_fft_compute
+    assert "mag = result.magnitude" in show2d_diff_fft_compute
+    assert "Do not shift again: the worker result is already centered" in show2d_diff_fft_compute
+    assert "inputData = data.slice();\n          applyHannWindow2D(inputData, width, height);" in show2d_single_fft_compute
+    assert "applyHannWindow2D(inputData, curW, curH)" in show2d_gallery_fft_compute
+    assert "renderSlotsToImageBitmapAsync([fftSlot]" in show2d
+
+    # C3: Show3D re-presents a live GPU frame or the stable 2D offscreen, while
+    # bottom/inset FFT display effects reuse the cached magnitude.
+    assert "renderGpuCachedSliceDirect(frameIdx, false)" in show3d
+    assert "[temporary], [temporaryImgData], false" in show3d
+    assert "if (renderSerial !== gpuRenderSerialRef.current) return false" in show3d
+    assert 'lastVisibilityResumePath = restoredGpu ? "webgpu-cache"' in show3d
+    assert "data-show3d-canvas-repaint-signal" in show3d
+    assert show3d.count("canvasRepaintSignal") >= 15
+    show3d_fft_compute = show3d.split(
+        "// Compute FFT magnitude (expensive", 1
+    )[1].split("// Clear FFT measurement", 1)[0]
+    show3d_fft_display = show3d.split(
+        "// Process FFT magnitude", 1
+    )[1].split("// === Kymograph", 1)[0]
+    assert "canvasRepaintSignal" not in show3d_fft_compute
+    assert "canvasRepaintSignal" in show3d_fft_display
+    show3d_resume_effect = show3d.split(
+        "// A presented WebGPU texture is not a durable cache", 1
+    )[1].split("// Render overlay (ROI only)", 1)[0]
+    assert "gpuRenderSerialRef.current++" not in show3d_resume_effect
+    assert "visibilityResumeMisses" in show3d_resume_effect
+    assert 'lastVisibilityResumePath = "playback-owner"' in show3d_resume_effect
+    assert "!transformActive && gpuDisplayVisibleRef.current" in show3d_resume_effect
+    assert "shouldApplyClientDifference(offline, activeDiffMode)" in show3d
+    assert "const extractPanelSlice = React.useCallback" in show3d
+    assert "if (offlineGpuInFlight()) return" not in show3d_fft_compute
+    assert "bufferRef.current = null" in show3d
+    assert "nextBufferRef.current = null" in show3d
+    assert "applyHannWindow2D(inputData, width, height)" in show3d_fft_compute
+    assert "applyHannWindow2D(source, fftSourceW, fftSourceH)" in show3d_fft_compute
+    assert "`transform=${diffMode}:${Math.max(1, Math.round(avgWindow || 1))}`" in show3d_fft_compute
+    assert "ensureFftGpu, diffMode, avgWindow]" in show3d_fft_compute
+
+
 def test_show1d_trace_hover_links_matching_snapshot_group():
     """Show1D point inspection should preview and pin matching image groups."""
     show1d = (ROOT / "js" / "show1d" / "index.tsx").read_text(encoding="utf-8")
     api = (ROOT / "docs" / "api" / "show1d.md").read_text(encoding="utf-8")
 
     assert "snapshotGroupForPoint" in show1d
-    assert "scheduleHover(point, snapshotGroupForPoint(point))" in show1d
+    assert "scheduleHoverAtPointer" in show1d
+    assert "window.requestAnimationFrame(flushHoverFrame)" in show1d
+    assert "commitScheduledHover(point, snapshotGroupForPoint(point))" in show1d
     assert "selectSnapshotGroup(snapshotGroup)" in show1d
     assert 'data-testid="show1d-snapshot-group-label"' in show1d
+    assert 'data-testid="show1d-hover-readout"' in show1d
+    assert 'data-testid="show1d-perf-telemetry"' in show1d
+    assert "methodTickCharBudget" in show1d
+    assert "__quantemShow1DPerf" in show1d
+    assert "SNAPSHOT_FFT_CACHE_MAX_BYTES" in show1d
+    assert 'useModelState<boolean>("controls_collapsed")' in show1d
+    assert 'useModelState<boolean>("show_review")' in show1d
+    assert 'useModelState<boolean>("show_trial_notes")' in show1d
+    assert 'useModelState<boolean>("show_snapshot_histogram")' in show1d
+    assert 'useModelState<string>("review_mode")' in show1d
+    assert "optionalFiniteNumber" in show1d
+    assert "snapshotFftGenerationRef.current !== generation" in show1d
+    assert "snapshotFftPrewarmQueueRef" in show1d
+    assert "visibleTraceSet.has(trace)" in show1d
+    assert 'COLORMAPS.viridis' in show1d
+    assert "csvAxisHeader" in show1d
+    assert ">FFT:</Typography>" not in show1d
     assert 'flexWrap: { xs: "wrap", md: "nowrap" }' in show1d
     assert "its images and group label preview in the side panel" in api
 

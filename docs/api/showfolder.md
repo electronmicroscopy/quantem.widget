@@ -77,13 +77,17 @@ fit check does not silently bin or narrow data; `det_bin=` and `dtype=` remain
 explicit scientific choices.
 
 For acquisition folders where every new image should appear immediately, open
-the all-image viewers before starting the watcher:
+both all-image viewers before starting the watcher:
 
 ```python
 w = ShowFolder("/data/live-session", thumb=256, group_by="none")
-w.open_show2d(all_images=True)  # or w.open_show3d(all_images=True)
+w.open_both(all_images=True)  # one live Show2D gallery and one live Show3D stack
 w.watch(interval=2.0)
 ```
+
+Use `open_show2d(all_images=True)` or `open_show3d(all_images=True)` when only
+one view is useful. `Open All Both` in the selection panel performs the same
+dual-view operation without Python calls.
 
 The equivalent CLI shortcuts write that live notebook for you:
 

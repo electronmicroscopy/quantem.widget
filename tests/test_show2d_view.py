@@ -190,3 +190,207 @@ def test_set_image_replaces_stack_in_place_and_resets_stale_view_state():
     assert w.stats_mean == [2.0, 4.0, 6.0]
     assert bytes(w.frame_bytes) != old_frame_bytes
     assert len(w.frame_bytes) == data.nbytes
+
+
+# ---------------------------------------------------------------------------
+# Reversible view ops: crop_to_view() + pad_ratio (display window, single panel)
+# ---------------------------------------------------------------------------
+
+def test_crop_to_view_commits_viewport_and_raw_data_stays():
+    """Zoom into a feature with view_box, commit it with crop_to_view(): the
+    displayed extent shrinks to the window while the stored array, and the
+    stats computed from it, never change."""
+    image = _image(256)
+    kept = image.copy()
+    w = Show2D(image, view_box=(64, 64, 96), verbose=False)
+    stats_before = (list(w.stats_mean), list(w.stats_min), list(w.stats_max))
+    w.crop_to_view()
+    assert w.view_crop == [64, 160, 64, 160]
+    assert (w.height, w.width) == (96, 96)
+    sent = np.frombuffer(w.frame_bytes, dtype=np.float32, count=96 * 96).reshape(96, 96)
+    np.testing.assert_array_equal(sent, image[64:160, 64:160])
+    np.testing.assert_array_equal(w._data[0], kept)  # display-only: raw intact
+    assert (list(w.stats_mean), list(w.stats_min), list(w.stats_max)) == stats_before
+    assert "view: cropped to (64,64)-(160,160)" in w.view_banner
+    # Cursor readouts stay full-image: JS adds this native-pixel offset.
+    assert w._view_crop_offset == [64, 64]
+
+
+def test_crop_applies_before_denoise():
+    """Denoise operates on the cropped region: the packed frame equals
+    filtering the cropped window, not cropping a full-frame filter result."""
+    from quantem.widget.utils.display_filter import apply_display_filter
+
+    image = _image(256)
+    w = Show2D(image, denoise="gaussian", denoise_sigma=3, view_box=(32, 32, 64), verbose=False)
+    w.crop_to_view()
+    sent = np.frombuffer(w.frame_bytes, dtype=np.float32, count=64 * 64).reshape(64, 64)
+    expected = apply_display_filter(image[32:96, 32:96], mode="gaussian", sigma=3.0)
+    np.testing.assert_allclose(sent, expected, rtol=1e-6)
+
+
+def test_pad_ratio_adds_min_valued_border():
+    """pad_ratio=0.1 grows the packed frame by the border on each side and
+    fills it with the image minimum so the colormap floor is unchanged."""
+    image = _image(128)
+    w = Show2D(image, pad_ratio=0.1, verbose=False)
+    pad = round(0.1 * 128)
+    assert (w.height, w.width) == (128 + 2 * pad, 128 + 2 * pad)
+    n = w.height * w.width
+    sent = np.frombuffer(w.frame_bytes, dtype=np.float32, count=n).reshape(w.height, w.width)
+    np.testing.assert_array_equal(sent[pad:-pad, pad:-pad], image)
+    assert sent[0, 0] == image.min()  # border keeps the colormap floor
+    assert "pad 10% min" in w.view_banner
+
+
+def test_pad_ratio_fill_modes_change_border_value():
+    """A drift-reviewer can choose min, median, or mean border intensity."""
+    image = _image(64)
+    w = Show2D(image, pad_ratio=0.25, pad_fill_mode="median", verbose=False)
+    pad = round(0.25 * 64)
+    sent = np.frombuffer(
+        w.frame_bytes,
+        dtype=np.float32,
+        count=w.height * w.width,
+    ).reshape(w.height, w.width)
+    assert sent[0, 0] == pytest.approx(float(np.median(image)))
+    np.testing.assert_array_equal(sent[pad:-pad, pad:-pad], image)
+
+    w.pad_fill_mode = "mean"
+    sent = np.frombuffer(
+        w.frame_bytes,
+        dtype=np.float32,
+        count=w.height * w.width,
+    ).reshape(w.height, w.width)
+    assert sent[0, 0] == pytest.approx(float(np.mean(image)))
+
+
+def test_padding_keeps_fft_and_scale_bar_geometry_compatible():
+    """Padding grows the same display frame that FFT and scale bars inspect.
+
+    A drift reviewer should not get a stale scale bar or FFT dimensions after
+    adding a margin: the packed frame, public width/height traits, static
+    preview overlays, and FFT toggle all describe one displayed canvas.
+    """
+    image = _image(100)
+    w = Show2D(
+        image,
+        pad_ratio=0.2,
+        pad_fill_mode="median",
+        sampling=0.2,
+        units="nm",
+        show_fft=True,
+        verbose=False,
+    )
+    pad = round(0.2 * 100)
+    assert (w.height, w.width) == (100 + 2 * pad, 100 + 2 * pad)
+    assert w.show_fft is True
+
+    sent = np.frombuffer(w.frame_bytes, dtype=np.float32, count=w.height * w.width).reshape(w.height, w.width)
+    np.testing.assert_array_equal(sent[pad:-pad, pad:-pad], image)
+
+    specs = w._static_panel_specs()
+    assert specs[0]["frame"].shape == (w.height, w.width)
+    _label, zoom_text, bar_text, bar_px = w._static_overlay_texts(specs)[0]
+    assert zoom_text == "1.0×"
+    assert bar_text.endswith("nm")
+    assert bar_px > 0
+
+
+def test_reset_view_ops_restores_bit_identical_frame():
+    """Crop + pad, then reset_view_ops(): the frame bytes match the original
+    pack exactly, proving both ops are reversible display windows."""
+    image = _image(128)
+    w = Show2D(image, verbose=False)
+    original = bytes(w.frame_bytes)
+    w.view_box = [32.0, 96.0, 32.0, 96.0]  # what a browser zoom would sync
+    w.crop_to_view()
+    w.pad_ratio = 0.1
+    assert bytes(w.frame_bytes) != original
+    w.reset_view_ops()
+    assert bytes(w.frame_bytes) == original
+    assert (w.height, w.width) == (128, 128)
+    assert w.view_banner == ""
+    assert w._view_crop_offset == [0, 0]
+    assert w.pad_ratios == [0.0]
+    assert w.pad_fill_modes == ["min"]
+
+
+def test_view_ops_survive_state_round_trip():
+    """Save a cropped + padded session, load it into a fresh widget on the
+    same data: the committed window and border come back identically."""
+    image = _image(128)
+    w = Show2D(image, view_box=(16, 16, 64), verbose=False)
+    w.crop_to_view()
+    w.pad_ratio = 0.05
+    state = w.state_dict()
+    restored = Show2D(image, verbose=False)
+    restored.load_state_dict(state)
+    assert restored.view_crop == w.view_crop
+    assert restored.pad_ratio == 0.05
+    assert restored.pad_ratios == [0.05]
+    assert restored.pad_fill_mode == "min"
+    assert bytes(restored.frame_bytes) == bytes(w.frame_bytes)
+
+
+def test_gallery_padding_can_apply_to_all_panels():
+    """A gallery can grow its display canvas with a shared padding ratio."""
+    a = _image(32)
+    b = _image(32) + 100
+    w = Show2D([a, b], pad_ratio=0.25, pad_fill_mode="median", verbose=False)
+    pad = round(0.25 * 32)
+    assert (w.height, w.width) == (32 + 2 * pad, 32 + 2 * pad)
+    arr = np.frombuffer(w.frame_bytes, dtype=np.float32).reshape(2, w.height, w.width)
+    np.testing.assert_array_equal(arr[0, pad:-pad, pad:-pad], a)
+    np.testing.assert_array_equal(arr[1, pad:-pad, pad:-pad], b)
+    assert arr[0, 0, 0] == pytest.approx(float(np.median(a)))
+    assert arr[1, 0, 0] == pytest.approx(float(np.median(b)))
+
+
+def test_gallery_padding_can_target_one_panel_with_common_canvas():
+    """Per-panel padding lets a user compare one drift-margin choice at a time."""
+    a = _image(32)
+    b = _image(32) + 100
+    w = Show2D([a, b], verbose=False)
+    returned = w.set_padding(0.25, fill="mean", panels=[1])
+    assert returned is w
+    assert w.pad_scope == "panel"
+    assert w.pad_ratios == [0.0, 0.25]
+    assert w.pad_fill_modes == ["min", "mean"]
+    pad = round(0.25 * 32)
+    assert (w.height, w.width) == (32 + 2 * pad, 32 + 2 * pad)
+    arr = np.frombuffer(w.frame_bytes, dtype=np.float32).reshape(2, w.height, w.width)
+    # Both panels share the larger canvas; the selected panel's fill mode is
+    # mean, while the untouched panel uses the default min fill in its margin.
+    assert arr[0, 0, 0] == pytest.approx(float(np.min(a)))
+    assert arr[1, 0, 0] == pytest.approx(float(np.mean(b)))
+    np.testing.assert_array_equal(arr[1, pad:-pad, pad:-pad], b)
+
+    restored = Show2D([a, b], verbose=False)
+    restored.load_state_dict(w.state_dict())
+    assert restored.pad_ratios == w.pad_ratios
+    assert restored.pad_fill_modes == w.pad_fill_modes
+    assert bytes(restored.frame_bytes) == bytes(w.frame_bytes)
+
+
+def test_show2d_set_padding_accepts_all_alias_for_scientist_notebooks():
+    """C1: user writes panels='all', expect every panel to update."""
+    a = _image(16)
+    b = _image(16) + 10
+    w = Show2D([a, b], verbose=False)
+
+    returned = w.set_padding(0.1, fill="median", panels="all")
+
+    assert returned is w
+    assert w.pad_scope == "all"
+    assert w.pad_ratio == pytest.approx(0.1)
+    assert w.pad_ratios == [pytest.approx(0.1), pytest.approx(0.1)]
+    assert w.pad_fill_modes == ["median", "median"]
+
+
+def test_crop_to_view_raises_for_galleries():
+    """Crop-to-view is single panel only in this release; a gallery gets a
+    clear NotImplementedError instead of a silently wrong window."""
+    w = Show2D([_image(64), _image(64)], verbose=False)
+    with pytest.raises(NotImplementedError, match="single panel"):
+        w.crop_to_view()

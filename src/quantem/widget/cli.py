@@ -416,6 +416,9 @@ def _showfolder(args: argparse.Namespace) -> int:
         "--output",
         html_out.stem,
         f"--ExecutePreprocessor.timeout={args.timeout}",
+        # explicit store_widget_state: ambient nbconvert config must not strip
+        # the ShowFolder hydration state out of the share artifact
+        "--ExecutePreprocessor.store_widget_state=True",
     ]
     print(f"executing + rendering ShowFolder -> {html_out}")
     if subprocess.run(cmd).returncode != 0:
@@ -449,7 +452,11 @@ def _render_html(args: argparse.Namespace) -> int:
     cmd = ["jupyter", "nbconvert", "--to", "html", str(notebook),
            "--output-dir", str(out_dir), "--output", notebook.stem]
     if not args.no_execute:
-        cmd += ["--execute", f"--ExecutePreprocessor.timeout={args.timeout}"]
+        # explicit store_widget_state: a jupyter_nbconvert_config.py that disables it
+        # for heavy notebook sweeps would otherwise silently strip the hydration state
+        # this share artifact exists to carry
+        cmd += ["--execute", f"--ExecutePreprocessor.timeout={args.timeout}",
+                "--ExecutePreprocessor.store_widget_state=True"]
     print(f"{'rendering' if args.no_execute else 'executing + rendering'} {notebook.name} -> HTML")
     if subprocess.run(cmd).returncode != 0:
         raise ValueError("nbconvert failed (see output above)")

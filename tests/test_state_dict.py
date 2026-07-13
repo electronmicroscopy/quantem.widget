@@ -14,7 +14,7 @@ import json
 
 import numpy as np
 import pytest
-from quantem.widget import Show2D, Show4DSTEM
+from quantem.widget import Show2D, Show3D, Show4DSTEM
 
 
 def _flip_value(default):
@@ -275,3 +275,29 @@ def test_show2d_save_and_load(tmp_path, show2d_widget):
                    state=str(path), verbose=False)
     assert fresh.cmap == "viridis"
     assert fresh.log_scale is True
+
+
+def test_show2d_per_panel_cmap_state_roundtrip():
+    data = np.random.default_rng(1).standard_normal((2, 16, 16)).astype(np.float32)
+    widget = Show2D(data, cmap=["inferno", "viridis"], verbose=False)
+
+    assert widget.cmap == "inferno"
+    assert widget.panel_cmaps == ["inferno", "viridis"]
+
+    fresh = Show2D(data, state=widget.state_dict(), verbose=False)
+    assert fresh.cmap == "inferno"
+    assert fresh.panel_cmaps == ["inferno", "viridis"]
+
+
+def test_show3d_per_panel_cmap_state_roundtrip():
+    rng = np.random.default_rng(2)
+    data_a = rng.standard_normal((3, 16, 16)).astype(np.float32)
+    data_b = rng.standard_normal((3, 16, 16)).astype(np.float32)
+    widget = Show3D(data_a, data_b, cmap=["inferno", "viridis"], verbose=False)
+
+    assert widget.cmap == "inferno"
+    assert widget.panel_cmaps == ["inferno", "viridis"]
+
+    fresh = Show3D(data_a, data_b, state=widget.state_dict(), verbose=False)
+    assert fresh.cmap == "inferno"
+    assert fresh.panel_cmaps == ["inferno", "viridis"]

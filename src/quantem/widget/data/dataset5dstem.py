@@ -231,15 +231,21 @@ class Dataset5dstem:
             value = np.nan if series_value is None else float(series_value)
             self._series = np.concatenate([self._series, np.asarray([value], dtype=float)])
         if hasattr(self, "_page_devices"):
-            page_devices = list(getattr(self, "_page_devices", []))
-            cycle = list(getattr(self, "_page_device_cycle", []) or [])
-            target = (
-                cycle[idx % len(cycle)]
-                if cycle
-                else page_devices[idx % len(page_devices)]
-                if page_devices
-                else torch.device("cpu")
-            )
+            if frame is not None and frame.device.type == "cuda":
+                target = self._canonical_cuda_device(frame.device)
+            elif getattr(self, "_page_auto_config", None):
+                self._refresh_auto_vram_budgets()
+                target = self._next_capacity_aware_page_device(idx)
+            else:
+                page_devices = list(getattr(self, "_page_devices", []))
+                cycle = list(getattr(self, "_page_device_cycle", []) or [])
+                target = (
+                    cycle[idx % len(cycle)]
+                    if cycle
+                    else page_devices[idx % len(page_devices)]
+                    if page_devices
+                    else torch.device("cpu")
+                )
             self._page_devices.append(target)
         return idx
 
@@ -249,14 +255,18 @@ class Dataset5dstem:
         Compare-page browsing commonly needs several adjacent 4D-STEM masters at
         once. Loading them one-by-one loses the optimized multi-file CUDA path,
         so a folder-backed series can provide ``lazy_batch_loader`` to materialize
-        the whole visible page in one operation. Existing resident frames in that
-        page are preserved; lazy frames outside the requested group are released
-        before the batch arrives to avoid transient VRAM spikes.
+        the whole visible page in one operation. Existing resident frames are
+        retained as an LRU cache unless enough of them must be evicted for the
+        incoming batch to fit the configured page limits.
         """
-        frames = self._materialize_frames()
         wanted = self._indices(indices)
         if not wanted:
             return []
+        # Free memory can change after page("auto") was configured. Refresh the
+        # budgets and cold-frame placement before any foreground allocation so
+        # a page never follows a stale assignment onto a newly constrained GPU.
+        self._refresh_auto_vram_plan()
+        frames = self._materialize_frames()
         missing = [idx for idx in wanted if frames[idx] is None]
         if not missing:
             self._lru = [idx for idx in getattr(self, "_lru", []) if idx not in wanted] + list(wanted)
@@ -266,13 +276,18 @@ class Dataset5dstem:
             return [idx for idx in wanted if self.frame(idx) is not None]
 
         loaded: list[int] = []
-        if self._lazy_batch_loader is not None and len(missing) > 1:
-            # Page-level batch loads can allocate several very large frames at
-            # once. Drop non-page lazy frames first so the transient remains
-            # bounded by the visible page rather than old page + new page.
-            self.release(idx=[idx for idx in self.loaded_indices() if idx not in set(wanted)])
-            frames = self._materialize_frames()
-            gc.collect()
+        if (
+            self._lazy_batch_loader is not None
+            and len(missing) > 1
+            and self._incoming_lazy_frames_fit_page_limits(missing)
+        ):
+            evicted = self._evict_for_incoming_lazy_frames(
+                missing,
+                protected=set(wanted) - set(missing),
+                refresh_plan=False,
+            )
+            if evicted:
+                gc.collect()
             batch_failed = False
             try:
                 batch = self._lazy_batch_loader(tuple(missing))
@@ -293,7 +308,7 @@ class Dataset5dstem:
                     if frame is None:
                         continue
                     self._validate_lazy_frame(frame, idx)
-                    frames[idx] = frame
+                    frames[idx] = self._place_newly_loaded_frame(frame, idx)
                     loaded.append(idx)
 
         for idx in missing:
@@ -324,6 +339,7 @@ class Dataset5dstem:
         wanted = self._indices(indices)
         if not wanted:
             return []
+        self._refresh_auto_vram_plan()
 
         fixed_budget = getattr(self, "_page_budget", None)
         byte_budgets = getattr(self, "_page_max_vram_bytes", None) or {}
@@ -366,6 +382,48 @@ class Dataset5dstem:
         if current:
             batches.append(current)
         return batches
+
+    def progressive_batches(
+        self, indices: Sequence[int] | int
+    ) -> list[list[int]]:
+        """Return load waves with at most one cold frame per target device.
+
+        Each target can therefore decode one new master concurrently without
+        competing with a second cold load on the same CUDA context. Requested
+        order is retained within every wave. Already-resident frames join the
+        first wave because they require no storage or device load.
+        """
+        if isinstance(indices, int):
+            values = [indices]
+        else:
+            values = list(indices)
+        wanted: list[int] = []
+        seen: set[int] = set()
+        for value in values:
+            idx = int(value) % len(self)
+            if idx not in seen:
+                wanted.append(idx)
+                seen.add(idx)
+        if not wanted:
+            return []
+
+        self._refresh_auto_vram_plan()
+        frames = self._materialize_frames()
+        waves: list[list[int]] = []
+        cold_count: dict[torch.device, int] = {}
+        for idx in wanted:
+            if frames[idx] is not None:
+                wave_idx = 0
+            else:
+                device = self._page_target_device(idx)
+                wave_idx = cold_count.get(device, 0)
+                cold_count[device] = wave_idx + 1
+            while len(waves) <= wave_idx:
+                waves.append([])
+            waves[wave_idx].append(idx)
+        return [wave for wave in waves if wave]
+
+    progressive_load_waves = progressive_batches
 
     def _validate_lazy_frame(self, frame: torch.Tensor, i: int) -> None:
         if self._lazy_shape is None or self._lazy_dtype is None:
@@ -828,6 +886,144 @@ class Dataset5dstem:
             return device
         return torch.device(f"cuda:{0 if device.index is None else device.index}")
 
+    def _capacity_candidates(
+        self,
+        *,
+        required_bytes: int = 0,
+    ) -> list[torch.device]:
+        """Paging targets that can hold one incoming frame, in stable order."""
+        targets: list[torch.device] = []
+        for value in getattr(self, "_page_device_cycle", []) or []:
+            device = self._canonical_cuda_device(self._as_device(value))
+            if device not in targets:
+                targets.append(device)
+        if not targets:
+            for value in getattr(self, "_page_devices", []) or []:
+                device = self._canonical_cuda_device(self._as_device(value))
+                if device not in targets:
+                    targets.append(device)
+        budgets = getattr(self, "_page_max_vram_bytes", None) or {}
+        required = max(0, int(required_bytes))
+        eligible = [
+            device
+            for device in targets
+            if device.type != "cuda"
+            or int(budgets.get(device, 0)) >= required
+        ]
+        if eligible:
+            return eligible
+        if targets and all(device.type == "cuda" for device in targets):
+            details = ", ".join(
+                f"{device}={int(budgets.get(device, 0))} bytes"
+                for device in targets
+            )
+            raise MemoryError(
+                "No selected CUDA device can hold one processed 4D-STEM frame "
+                f"({required} bytes required; safe budgets: {details}). Free GPU "
+                "memory, increase detector binning, choose a smaller dtype, or "
+                "select a GPU with more free memory."
+            )
+        return targets or [torch.device("cpu")]
+
+    def _select_capacity_aware_device(
+        self,
+        assigned_bytes: dict[torch.device, int],
+        *,
+        cursor: int,
+        required_bytes: int,
+    ) -> tuple[torch.device, int]:
+        """Choose the least-filled target relative to its byte capacity."""
+        candidates = self._capacity_candidates(required_bytes=required_bytes)
+        budgets = getattr(self, "_page_max_vram_bytes", None) or {}
+        weights = {
+            device: max(1, int(budgets.get(device, 1)))
+            for device in candidates
+        }
+        best: list[torch.device] = []
+        for device in candidates:
+            if not best:
+                best = [device]
+                continue
+            current = best[0]
+            left = int(assigned_bytes.get(device, 0)) * weights[current]
+            right = int(assigned_bytes.get(current, 0)) * weights[device]
+            if left < right:
+                best = [device]
+            elif left == right:
+                best.append(device)
+
+        n_targets = len(candidates)
+        positions = {device: pos for pos, device in enumerate(candidates)}
+        selected = min(
+            best,
+            key=lambda device: (positions[device] - cursor) % n_targets,
+        )
+        next_cursor = (positions[selected] + 1) % n_targets
+        return selected, next_cursor
+
+    def _assign_capacity_aware_page_devices(
+        self, frames: Sequence[torch.Tensor | None]
+    ) -> list[torch.device]:
+        """Plan lazy placement while preserving CUDA tensors already loaded."""
+        assigned_bytes: dict[torch.device, int] = {}
+        assignments: list[torch.device | None] = [None] * len(frames)
+        for idx, frame in enumerate(frames):
+            if frame is None or frame.device.type != "cuda":
+                continue
+            device = self._canonical_cuda_device(frame.device)
+            assignments[idx] = device
+            assigned_bytes[device] = (
+                assigned_bytes.get(device, 0) + self._frame_nbytes(frame)
+            )
+
+        cursor = 0
+        for idx in range(len(frames)):
+            if assignments[idx] is not None:
+                continue
+            frame_bytes = self._frame_nbytes_for_index(idx)
+            device, cursor = self._select_capacity_aware_device(
+                assigned_bytes,
+                cursor=cursor,
+                required_bytes=frame_bytes,
+            )
+            assignments[idx] = device
+            assigned_bytes[device] = (
+                assigned_bytes.get(device, 0)
+                + frame_bytes
+            )
+        self._page_device_cursor = cursor
+        return [device for device in assignments if device is not None]
+
+    def _next_capacity_aware_page_device(self, idx: int) -> torch.device:
+        """Choose the capacity-aware target for one appended lazy frame."""
+        assigned_bytes: dict[torch.device, int] = {}
+        for frame_idx, value in enumerate(getattr(self, "_page_devices", []) or []):
+            device = self._canonical_cuda_device(self._as_device(value))
+            assigned_bytes[device] = (
+                assigned_bytes.get(device, 0)
+                + self._frame_nbytes_for_index(frame_idx)
+            )
+        device, cursor = self._select_capacity_aware_device(
+            assigned_bytes,
+            cursor=int(getattr(self, "_page_device_cursor", 0)),
+            required_bytes=self._frame_nbytes_for_index(idx),
+        )
+        self._page_device_cursor = cursor
+        return device
+
+    def _place_newly_loaded_frame(
+        self, frame: torch.Tensor, idx: int
+    ) -> torch.Tensor:
+        """Move a newly loaded frame to its planned paging target if needed."""
+        page_devices = list(getattr(self, "_page_devices", []) or [])
+        if not page_devices:
+            return frame
+        target = self._canonical_cuda_device(
+            self._as_device(page_devices[idx % len(page_devices)])
+        )
+        source = self._canonical_cuda_device(frame.device)
+        return frame if source == target else frame.to(target)
+
     def _page_target_device(self, idx: int) -> torch.device:
         frames = self._materialize_frames()
         frame = frames[idx]
@@ -852,25 +1048,153 @@ class Dataset5dstem:
     def _largest_frame_nbytes_by_device(
         self, devices: Sequence[torch.device]
     ) -> dict[torch.device, int]:
-        largest = {self._canonical_cuda_device(device): 0 for device in devices}
-        for idx in range(len(self)):
-            device = self._page_target_device(idx)
-            if device.type != "cuda":
-                continue
-            largest[device] = max(
-                largest.get(device, 0), self._frame_nbytes_for_index(idx)
-            )
-        return largest
+        # Any selected card can become the target after a free-memory refresh,
+        # so every card needs headroom for the largest processed master. Basing
+        # this on yesterday's placement would under-reserve a newly eligible GPU.
+        largest_frame = max(
+            (self._frame_nbytes_for_index(idx) for idx in range(len(self))),
+            default=0,
+        )
+        return {
+            self._canonical_cuda_device(device): largest_frame
+            for device in devices
+        }
 
     @staticmethod
     def _adaptive_workspace_reserve(total: int, largest_frame: int) -> int:
-        """Return bounded CUDA headroom for reductions and allocator metadata."""
-        requested = max(
+        """Return one-frame headroom plus bounded reduction workspace."""
+        base_workspace = max(
             _MIN_WORKSPACE_RESERVE_BYTES,
             int(total) // 100,
-            int(largest_frame) // 8,
         )
-        return min(requested, _MAX_WORKSPACE_RESERVE_BYTES)
+        return int(largest_frame) + min(
+            base_workspace,
+            _MAX_WORKSPACE_RESERVE_BYTES,
+        )
+
+    def _incoming_lazy_frames_fit_page_limits(
+        self,
+        indices: Sequence[int],
+    ) -> bool:
+        """Whether one batch may allocate every missing frame simultaneously."""
+        frames = self._materialize_frames()
+        incoming = [
+            idx for idx in self._indices(indices)
+            if frames[idx] is None
+        ]
+        fixed_budget = getattr(self, "_page_budget", None)
+        if fixed_budget is not None and len(incoming) > int(fixed_budget):
+            return False
+
+        byte_budgets = getattr(self, "_page_max_vram_bytes", None) or {}
+        if not byte_budgets:
+            return True
+        incoming_by_device: dict[torch.device, int] = {}
+        for idx in incoming:
+            device = self._page_target_device(idx)
+            incoming_by_device[device] = (
+                incoming_by_device.get(device, 0)
+                + self._frame_nbytes_for_index(idx)
+            )
+        return all(
+            device.type != "cuda"
+            or (
+                device in byte_budgets
+                and incoming_bytes <= int(byte_budgets[device])
+            )
+            for device, incoming_bytes in incoming_by_device.items()
+        )
+
+    def _evict_for_incoming_lazy_frames(
+        self,
+        indices: Sequence[int],
+        *,
+        protected: set[int] | None = None,
+        refresh_plan: bool = True,
+    ) -> list[int]:
+        """Evict only the LRU frames needed for a cold batch to fit."""
+        if self._lazy_loaders is None:
+            return []
+        if refresh_plan:
+            self._refresh_auto_vram_plan()
+        frames = self._materialize_frames()
+        incoming = [
+            idx for idx in self._indices(indices)
+            if frames[idx] is None
+        ]
+        if not incoming:
+            return []
+
+        protected = set(protected or ())
+        self._lru = [i for i in getattr(self, "_lru", []) if i < len(frames)]
+        for idx, frame in enumerate(frames):
+            if frame is not None and idx not in self._lru:
+                self._lru.insert(0, idx)
+
+        evicted: list[int] = []
+        reclaimed: set[torch.device] = set()
+
+        def evict(idx: int) -> None:
+            frame = frames[idx]
+            if frame is None:
+                self._lru[:] = [value for value in self._lru if value != idx]
+                return
+            device = frame.device
+            frames[idx] = None
+            evicted.append(idx)
+            if device.type != "cpu":
+                reclaimed.add(device)
+            self._lru[:] = [value for value in self._lru if value != idx]
+
+        def oldest(candidates: list[int]) -> int | None:
+            outside = [idx for idx in candidates if idx not in protected]
+            available = outside or candidates
+            return available[0] if available else None
+
+        budget = getattr(self, "_page_budget", None)
+        if budget is not None:
+            while True:
+                resident = [idx for idx in self._lru if frames[idx] is not None]
+                if len(resident) + len(incoming) <= int(budget):
+                    break
+                candidate = oldest(resident)
+                if candidate is None:
+                    break
+                evict(candidate)
+
+        byte_budgets = getattr(self, "_page_max_vram_bytes", None) or {}
+        incoming_by_device: dict[torch.device, int] = {}
+        for idx in incoming:
+            device = self._page_target_device(idx)
+            incoming_by_device[device] = (
+                incoming_by_device.get(device, 0)
+                + self._frame_nbytes_for_index(idx)
+            )
+        for device, incoming_bytes in incoming_by_device.items():
+            max_bytes = int(byte_budgets.get(device, 0))
+            if device.type != "cuda" or max_bytes <= 0:
+                continue
+            while True:
+                resident = [
+                    idx for idx in self._lru
+                    if frames[idx] is not None
+                    and self._canonical_cuda_device(frames[idx].device) == device
+                ]
+                used = sum(
+                    self._frame_nbytes(frames[idx])
+                    for idx in resident
+                    if frames[idx] is not None
+                )
+                if used + incoming_bytes <= max_bytes:
+                    break
+                candidate = oldest(resident)
+                if candidate is None:
+                    break
+                evict(candidate)
+
+        if reclaimed:
+            self._reclaim(reclaimed)
+        return evicted
 
     def _evict_for_incoming_lazy_frame(
         self,
@@ -879,54 +1203,8 @@ class Dataset5dstem:
         target_device: torch.device,
     ) -> None:
         """Make room before a lazy loader allocates the next frame."""
-        if self._lazy_loaders is None:
-            return
-        frames = self._materialize_frames()
-        self._lru = [i for i in getattr(self, "_lru", []) if i < len(frames)]
-        reclaimed: set[torch.device] = set()
-
-        def evict(idx: int) -> None:
-            frame = frames[idx]
-            if frame is None:
-                self._lru[:] = [x for x in self._lru if x != idx]
-                return
-            dev = frame.device
-            frames[idx] = None
-            if dev.type != "cpu":
-                reclaimed.add(dev)
-            self._lru[:] = [x for x in self._lru if x != idx]
-
-        budget = getattr(self, "_page_budget", None)
-        while budget is not None:
-            resident = [
-                i for i in self._lru
-                if frames[i] is not None
-                and (self._lazy_loaders is not None or frames[i].device.type != "cpu")
-            ]
-            if len(resident) < int(budget):
-                break
-            candidates = [i for i in resident if i != current] or resident
-            evict(candidates[0])
-
-        byte_budgets = getattr(self, "_page_max_vram_bytes", None) or {}
-        target = self._as_device(target_device)
-        if target.type == "cuda":
-            target = torch.device(f"cuda:{0 if target.index is None else target.index}")
-        max_bytes = int(byte_budgets.get(target, 0))
-        incoming = self._frame_nbytes_for_index(current)
-        while target.type == "cuda" and max_bytes > 0:
-            resident = [
-                i for i in self._lru
-                if frames[i] is not None and frames[i].device == target
-            ]
-            used = sum(self._frame_nbytes(frames[i]) for i in resident if frames[i] is not None)
-            if used + incoming <= max_bytes or not resident:
-                break
-            candidates = [i for i in resident if i != current] or resident
-            evict(candidates[0])
-
-        if reclaimed:
-            self._reclaim(reclaimed)
+        del target_device  # target is already recorded in _page_devices.
+        self._evict_for_incoming_lazy_frames([current])
 
     def _auto_vram_budgets(
         self,
@@ -1004,6 +1282,21 @@ class Dataset5dstem:
             max_vram_bytes=config["max_vram_bytes"],
         )
 
+    def _refresh_auto_vram_plan(self) -> None:
+        """Refresh safe budgets, cold placement, and residency before work."""
+        if not getattr(self, "_page_auto_config", None):
+            return
+        if getattr(self, "_refreshing_auto_vram_plan", False):
+            return
+        self._refreshing_auto_vram_plan = True
+        try:
+            self._refresh_auto_vram_budgets()
+            frames = self._materialize_frames()
+            self._page_devices = self._assign_capacity_aware_page_devices(frames)
+            self._evict_to_page_limits()
+        finally:
+            self._refreshing_auto_vram_plan = False
+
     def residency_plan(
         self, indices: Sequence[int] | int | None = None
     ) -> dict[str, object]:
@@ -1014,7 +1307,7 @@ class Dataset5dstem:
         totals are suitable for status displays and deterministic tests.
         """
         wanted = self._indices(indices)
-        self._refresh_auto_vram_budgets()
+        self._refresh_auto_vram_plan()
         required: dict[torch.device, int] = {}
         for idx in wanted:
             device = self._page_target_device(idx)
@@ -1169,12 +1462,13 @@ class Dataset5dstem:
         frames live in host RAM and are paged in on access via :meth:`frame`,
         evicting least-recently-used frames when over budget.
 
-        Lets you scrub or jointly reconstruct a series LARGER than VRAM — only the
-        active window sits on the GPU. (RAM tier today; a disk tier for series bigger
-        than RAM is the next step.) ``device=None`` preserves each frame's current
-        device before offload, so a round-robin multi-GPU series pages frame ``i``
-        back to its original card. Pass one device to page every frame to the same
-        card, or a list/tuple to define a round-robin paging target. Returns self.
+        Lets you scrub or jointly reconstruct a series larger than VRAM: only the
+        active working set sits on the GPU, while lazy folder frames return to
+        disk-backed slots. ``device=None`` preserves already-loaded CUDA frame
+        placement. Pass one device to use one card, or a list/tuple to select the
+        available cards. Automatic paging distributes lazy frames in proportion
+        to their per-device byte budgets (round-robin when capacities match).
+        Fixed-count paging retains round-robin placement. Returns self.
         """
         frames = self._materialize_frames()
         auto = isinstance(vram_frames, str) and vram_frames.lower() == "auto"
@@ -1185,8 +1479,17 @@ class Dataset5dstem:
                 for f in frames
             ]
             self._page_device_cycle = []
+            for frame in frames:
+                if frame is None or frame.device.type != "cuda":
+                    continue
+                target = self._canonical_cuda_device(frame.device)
+                if target not in self._page_device_cycle:
+                    self._page_device_cycle.append(target)
         elif isinstance(device, (list, tuple)):
-            targets = [self._as_device(d) for d in device]
+            targets = [
+                self._canonical_cuda_device(self._as_device(d))
+                for d in device
+            ]
             if not targets:
                 raise ValueError("device list for page() must not be empty.")
             self._page_devices = [
@@ -1209,6 +1512,7 @@ class Dataset5dstem:
                 reserve_vram_bytes=reserve_vram_bytes,
                 max_vram_bytes=max_vram_bytes,
             )
+            self._page_devices = self._assign_capacity_aware_page_devices(frames)
             self._lru = [i for i, f in enumerate(frames) if f is not None and f.device.type != "cpu"]
             self._evict_to_page_limits()
         else:
@@ -1231,7 +1535,8 @@ class Dataset5dstem:
         frames = self._materialize_frames()
         i = i % len(self)
         page_devices = getattr(self, "_page_devices", None)
-        if self._lazy_loaders is not None and frames[i] is None:
+        was_missing = self._lazy_loaders is not None and frames[i] is None
+        if was_missing:
             if not page_devices:
                 raise RuntimeError("Dataset5dstem paging was not initialized correctly.")
             self._evict_for_incoming_lazy_frame(
@@ -1239,10 +1544,10 @@ class Dataset5dstem:
                 target_device=self._as_device(page_devices[i % len(page_devices)]),
             )
         frame = self._ensure_frame_loaded(i)
-        if frame.device.type == "cpu":
+        if frame.device.type == "cpu" or was_missing:
             if not page_devices:
                 raise RuntimeError("Dataset5dstem paging was not initialized correctly.")
-            self._frames[i] = frame.to(page_devices[i % len(page_devices)])
+            self._frames[i] = self._place_newly_loaded_frame(frame, i)
         self._lru = [x for x in self._lru if x != i] + [i]  # most-recent last
         self._evict_to_page_limits(current=i)
         return self._frames[i]

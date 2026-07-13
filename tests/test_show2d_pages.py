@@ -130,3 +130,45 @@ def test_show2d_hidden_page_slots_follow_paged_layout(tmp_path: pathlib.Path) ->
 
     out = widget.export_html(tmp_path / "show2d_hidden_page_slots.html", encoding="uint8")
     assert "hidden_page_slots" in out.read_text()
+
+
+def test_show2d_folder_item_pages_restore_and_export_partial_page(
+    tmp_path: pathlib.Path,
+) -> None:
+    folder = tmp_path / "images"
+    folder.mkdir()
+    arrays = []
+    for index in range(45):
+        array = np.full((8, 9), index, dtype=np.float32)
+        arrays.append(array)
+        np.save(folder / f"frame_{index:03d}.npy", array)
+
+    widget = Show2D.from_folder(folder, watch=False, page_size=20)
+    restored = Show2D(np.stack(arrays), verbose=False)
+    try:
+        widget.page_idx = 2
+        widget.hide_panel(40)
+        state = widget.state_dict()
+        assert state["folder_page_size"] == 20
+
+        # C1: page metadata installs before page_idx and hidden-state
+        # validation, expect the saved final page to survive an unpaged target.
+        restored.load_state_dict(state)
+        assert restored.page_kind == "items"
+        assert (restored.n_pages, restored.panels_per_page) == (3, 20)
+        assert restored.page_idx == 2
+        assert restored.visible_panels == [41, 42, 43, 44]
+
+        # C2: a standalone folder-page export retains item semantics and the
+        # real partial-page label without padded panels.
+        out = widget.export_html(
+            tmp_path / "show2d_folder_item_pages.html",
+            encoding="uint8",
+        )
+        html = out.read_text()
+        assert "page_kind" in html
+        assert r"Images 41\u201345" in html
+        assert "frame_044" in html
+    finally:
+        widget.close()
+        restored.close()

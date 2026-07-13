@@ -1,8 +1,8 @@
 # Show2D
 
-One or many 2D images with contrast control, FFT, ROIs, line profiles, and a
-calibrated scale bar. See the [Show2D tutorial](../tutorials/show2d) for a
-worked example.
+One or many 2D images, including gallery panels with independent local slice
+stacks, plus contrast control, FFT, ROIs, line profiles, and a calibrated scale
+bar. See the [Show2D tutorial](../tutorials/show2d) for worked examples.
 
 ## Reference
 
@@ -27,6 +27,7 @@ no console error, no NaN frame).
 | FFT toggle | `show_fft` | Canvas shows the power spectrum; lattice spots appear |
 | FFT window toggle | `fft_window` | Apodization on/off (ringing at edges differs) |
 | FFT quality labels | `fft_metrics` | Compact in-panel label reports FFT sharpness, peak count, and peak SNR from the cached FFT magnitude |
+| FFT zoom / pan | Browser-local per FFT panel; FFT `Link Zoom` and `Link Pan` controls | Wheel or pinch zoom updates an always-visible `N.N×` badge in that FFT panel; reset returns Show2D's `2.0×` FFT default |
 | Viewer chrome preset | `ui_mode` plus explicit `show_*` kwargs | Applies shared display presets; see [Viewer UI controls](viewer-ui) |
 | Control visibility | `show_controls`, `controls_collapsed`; `collapse_controls()`, `expand_controls()`, `toggle_controls()` | Permanently remove controls or temporarily collapse them behind the top GUI toggle |
 | Title visibility | `show_title` | Top title row shows/hides |
@@ -36,12 +37,168 @@ no console error, no NaN frame).
 | Pan (drag) | per-image pan | Image translates; with `link_pan` all panels move together |
 | Zoom (wheel) | `initial_zoom`, `zoom_row`, `zoom_col` | Zooms about the cursor |
 | Smooth toggle | `smooth` | Bilinear vs nearest sampling |
-| ROI add / drag | `roi_active`, `roi_list`, `roi_selected_idx` | Region overlay; stats panel reports the ROI |
+| ROI add / drag | `roi_active`, `roi_list`, `roi_selected_idx`; `get_roi_geometries()` | Region overlay; stats panel reports the ROI; saved notebook previews include all ROI overlays and one comparable right-side zoom crop per visible ROI; Python can read circle centers/radii and rectangle/square corners in `(row, col)` coordinates |
 | Gallery select | `selected_idx` | Highlights the active panel |
-| Local stack slider / play | `panel_frame_indices`, `panel_frame_counts`; `set_panel_frame()` | Scrubs only the selected 3D list item; static neighboring panels do not move |
+| Local stack slider / play | `panel_frame_indices`, `panel_frame_counts`, `panel_playback_fps`; `set_panel_frame()` | Every grayscale 3D list item gets independent slider/play controls; changing one panel does not move another, and constructor-configured playback speed adds no toolbar clutter |
 | Gallery page controls | `page_idx`, `n_pages`, `panels_per_page`, `page_labels`, `page_starred` | Switch, star, or play through panel pages without changing the source stack |
 | Panel reorder | `panel_order`; `set_panel_order()`, `move_panel()`, `reset_panel_order()` | Reorders gallery display without changing source data, labels, stars, or hidden state |
 | Diff mode | `diff_mode`, `diff_reference` | Panels render as difference vs the reference |
+| Link Denoise switch (gallery) | `denoise_scope` | Linked ("all"): denoise edits apply to every panel; unlinked ("panel"): edits apply to the selected panel only |
+| Denoise master | `denoise_enabled` | Off shows raw pixels and hides the banner without discarding method, sigma, bin, or per-panel settings |
+| Denoise Settings | `show_denoise` | Expands/collapses the Method, sigma, and bin editor without changing whether the effect is active |
+| Filter master | `frequency_filter_enabled` | Turns frequency filtering on/off without discarding cutoff or band settings |
+| Filter Settings | `show_frequency_filter` | Chooses None, Low-pass, High-pass, or Band-pass and exposes the FFT-ring parameters |
+| More menu: Save State | `saved_view_states`, `saved_view_request`, `saved_view_status`; `save_view_state()`, `load_view_state()`, `delete_view_state()`, `clear_view_states()` | Save named lightweight inspection bookmarks, then load/update/delete them without storing another copy of the image data |
+| View menu: Crop to view | `view_crop`; `crop_to_view()` | Commits the current viewport as the display extent (single panel, display-only, reversible) |
+| View menu: Padding | `pad_ratio`, `pad_ratios`, `pad_fill_mode`, `pad_fill_modes`, `pad_scope`; `set_padding()` | Adds a ratio-based display border with min/median/mean fill; gallery edits can apply to all panels or the selected panel |
+| View menu: Reset view | `reset_view_ops()` | Restores the uncropped, unpadded display bit-identically |
+
+## Which denoise filter should I use?
+
+The Denoise controls are hidden behind their own toggle by default; everything
+here is display-only (the stored array, the stats row, and raw exports keep
+the original counts, and an active denoise always announces itself with a
+one-line banner). Three methods cover the space; binning is a separate knob,
+so there is no "bin2_anscombe" menu entry: pick **Poisson (Anscombe)** and set
+**Bin 2**.
+
+| Your data | Use | Why |
+|---|---|---|
+| Sparse EDS / counting maps | **Poisson (Anscombe), Bin 2, sigma 6-10** | Respects Poisson count statistics; the standard choice for element maps |
+| Very sparse maps (single counts) | Poisson (Anscombe), Bin 4, sigma 8-12 | More SNR from binning before smoothing |
+| HAADF / decent-dose images | Gaussian, Bin 1, sigma 1-2 (or nothing) | The data is not count-starved; a light smooth is enough |
+| Anything quantitative (FFT, intensities, stats) | None | Measure on raw counts; the stats row is always computed from raw data |
+
+From Python, the same ladder is `denoise="anscombe", denoise_bin=2,
+denoise_sigma=8` (per-panel lists supported for A/B galleries); legacy
+spellings like `display_filter="bin2_anscombe"` keep working as aliases.
+
+## Reuse ROI coordinates in notebooks and agents
+
+ROIs are synced in `roi_list` and saved in `state_dict()`. For analysis code,
+prefer `get_roi_geometries()` so the shape-specific coordinates are explicit:
+
+```python
+w = Show2D(img).set_roi(row=72, col=65, radius=12)
+roi = w.get_roi_geometries()[0]
+roi["center"]  # {"row": 72.0, "col": 65.0}
+roi["radius"]  # 12.0
+```
+
+Rectangle and square ROIs include clockwise `corners`; annular ROIs include
+`radius_inner` and `radius_outer`. Every ROI also includes `bounds` and
+`bounds_clipped`, which lets an agent crop an array safely while preserving the
+user's exact visible selection.
+
+## Save microscope-stage view states
+
+Show2D can store named lightweight inspection bookmarks. This is useful when a
+scientist explores a notebook interactively — for example drawing an ROI around
+a defect, turning on FFT, hiding panels, changing contrast, adding padding for a
+drift check, and then wanting to come back to exactly that view later without
+writing export code.
+
+The GUI path is **More → Save State**. Existing states can be loaded, updated,
+deleted one at a time, or deleted all at once. The Python API uses the same
+state model:
+
+```python
+w = Show2D([raw, corrected, residual], labels=["raw", "corrected", "residual"])
+w.add_roi(row=72, col=65).set_padding(0.2, fill="median")
+w.show_fft = True
+
+w.save_view_state("defect A drift check")
+w.hidden_panels = [2]
+w.save_view_state("raw vs corrected")
+
+w.load_view_state("defect A drift check")
+w.delete_view_state("raw vs corrected")
+w.clear_view_states()
+```
+
+Saved view states include UI/view traits such as ROI list, selected ROI,
+selected panel, hidden panels, panel order, local stack frame indices, contrast,
+colormap, FFT, denoise/filter, crop, padding, zoom/view box, and scale-bar
+settings. They do **not** store another copy of `frame_bytes`,
+`panel_stack_bytes`, or raw source arrays. `state_dict()` includes the named
+bookmarks so a saved notebook can reopen with the same list of microscope-stage
+positions.
+
+## Remove a background or isolate a periodicity
+
+Frequency Filter is deliberately separate from Denoise. Denoise promises a
+cleaner view of the measurement; High-pass and Band-pass deliberately remove
+real signal, so their displayed pixels must not be treated as measurable raw
+counts. The stored array, statistics row, and raw exports remain unchanged.
+
+```python
+# Flatten a slow brightness gradient.
+Show2D(eds_map, show_fft=True,
+       frequency_filter="highpass", frequency_filter_cutoff=0.08)
+
+# Isolate a lattice-frequency ring.
+Show2D(lattice, show_fft=True,
+       frequency_filter="bandpass",
+       frequency_filter_center=0.32,
+       frequency_filter_width=0.08)
+```
+
+Parameters are fractions of Nyquist from 0 to 1. Drag the cyan FFT ring to
+select the cutoff or band center by eye. The FFT overlay dims rejected
+frequencies: Low-pass keeps the clear area inside the ring, High-pass keeps the
+clear area outside, and Band-pass keeps only the clear annulus. Filter and its
+More-menu toggle are off by default; turning the master on with no remembered
+mode starts with Low-pass. Denoise and Filter are chainable in
+the fixed order Denoise then Filter; each active operation has its own banner.
+Turn the Filter master off or choose None to restore the unfiltered view
+without losing the settings.
+
+For paged galleries, FFT work is demand-driven: only panels visible on the
+current page are transformed. Visiting another page computes that page once
+and retains the bounded cache for later return visits.
+
+## Crop and pad the view (advanced)
+
+Single-panel widgets can commit the current browser viewport as the display
+extent. Single-panel and gallery widgets can add a ratio-based display border,
+either from the toolbar's **View** menu or from Python:
+
+```python
+w = Show2D(image, view_box=(64, 64, 96))  # zoom into a feature
+w.crop_to_view()          # the 96x96 window becomes the displayed frame
+w.set_padding(0.1, fill="median")  # 10% border on each side
+w.reset_view_ops()        # full frame again, bit-identical
+```
+
+For a drift-correction gallery, use per-panel padding to compare candidate
+margins without rebuilding another notebook cell:
+
+```python
+w = Show2D([raw, corrected, residual], ncols=3)
+w.set_padding(0.20, fill="mean", panels=[1])  # only corrected panel
+```
+
+Both ops honor the display-only contract:
+
+- The stored array is never modified; `reset_view_ops()` returns the exact
+  original frame bytes.
+- The crop applies in the display pipeline **before** denoise, so an active
+  denoise operates on the cropped region; the pad applies after it and uses the
+  selected fill mode (`min`, `median`, or `mean`).
+- The stats row keeps reporting the full raw data, and cursor coordinates
+  remain full-image (row, col) while a crop or pad is active: the crop is a
+  display window, not a new coordinate system.
+- The histogram and canvas are repacked from the padded display frame, so the
+  border contribution is visible while the raw data remain unchanged.
+- An active crop or pad is never silent: a one-line `view:` banner names the
+  window and the ratio, e.g.
+  `view: cropped to (64,64)-(160,160) · pad 10% median (reset_view_ops() restores full frame)`.
+- Both persist through `state_dict()` / `load_state_dict()`.
+
+Crop-to-view remains single-panel in this release because it changes the
+coordinate origin. Padding is gallery-safe: panels share the largest padded
+canvas so comparisons stay aligned, while each panel can still have its own
+ratio/fill mode.
 
 ## FFT quality labels
 
@@ -52,9 +209,17 @@ magnitude already used for rendering, so the label does not trigger a second
 FFT. Set `fft_metrics=False` when a clean FFT image is more important than the
 readout.
 
-The first FFT for an image or ROI may take a moment on large data. After that,
-Show2D reuses the cached FFT magnitude for redraws, zoom/pan, contrast changes,
-and metric labels.
+The first FFT for an image, local panel frame, ROI, or window configuration may
+take a moment on large data. After that, Show2D reuses that bounded cache entry
+for redraws, zoom/pan, contrast changes, metric labels, and return visits to the
+same slice. During a first-time slice computation, the previous valid FFT stays
+visible instead of flashing to a dark loading panel.
+
+Each interactive FFT panel also carries its own bottom-left zoom multiplier.
+It starts at `2.0×`, follows wheel and touch-pinch zoom immediately, and returns
+to `2.0×` on double-click, double-tap, or Reset. In a gallery, unlinked FFTs
+report independent values; enabling FFT `Link Zoom` makes their values move
+together without changing the real-space zoom.
 
 ```python
 w = Show2D(images, labels=["raw", "filtered", "residual"])
@@ -94,15 +259,56 @@ w.set_image(
 )
 ```
 
-## Mixed static and local stack panels
+## Independent local stack panels
 
-A bare 3D array still means a static gallery of `N` images. To put an
-independent stack inside one gallery panel, pass a list whose item is shaped
-`(frames, rows, cols)`. Other list items can remain ordinary 2D images:
+A bare 3D array still means a static gallery of `N` images. To give gallery
+panels their own frame or slice axes, pass a Python list whose 3D items are each
+shaped `(frames, rows, cols)`. Every grayscale 3D list item becomes one panel
+with its own slider, play/pause control, frame count, and current frame. Counts
+may differ between panels. RGB(A) list items keep the color-image behavior
+described in the constructor reference.
+
+This is useful for tomography or multislice studies that produce several
+reconstruction volumes. The scientist can keep four methods, regularization
+settings, or slice thicknesses side by side, stop each one at the depth where a
+feature or artifact is clearest, and retain linked spatial context without
+forcing all panels onto one global slice index:
 
 ```python
 from quantem.widget import Show2D
 
+reconstructions = [
+    recon_8_slices_20A,
+    recon_16_slices_10A,
+    recon_regularized,
+    recon_alternative,
+]
+
+w = Show2D(
+    reconstructions,
+    labels=[
+        "8 slices x 20 A",
+        "16 slices x 10 A",
+        "regularized",
+        "alternative",
+    ],
+    panel_frame_indices=[3, 7, -1, 0],
+    panel_playback_fps=4,
+    ncols=2,
+    link_zoom=True,
+    link_pan=True,
+)
+w.set_panel_frame("16 slices x 10 A", 8)
+w
+```
+
+Use a list even when all reconstructions happen to have the same slice count;
+the outer list is what declares independent local stacks. Use Show3D instead
+when all panels should advance together on one global frame or slice axis.
+
+The list may also mix stack panels with ordinary 2D images:
+
+```python
 w = Show2D(
     [eds_sum_map, haadf_stack, ti_map, o_map],
     labels=["EDS sum", "HAADF", "Ti", "O"],
@@ -113,17 +319,32 @@ w = Show2D(
 w
 ```
 
-Only the HAADF panel gets an in-panel slider and play button. Its frame index
-is independent of every other panel and remains keyed to that source panel
-when panels are hidden or reordered. Click the stack panel and use the left or
-right arrow key to scrub it. From Python, use
-`w.set_panel_frame("HAADF", -1)`.
+Only the HAADF panel gets an in-panel slider and play button. Each local frame
+index remains keyed to its source panel when panels are hidden or reordered.
+Click a stack panel and use the left or right arrow key to scrub it. From
+Python, use `w.set_panel_frame("HAADF", -1)`.
 
-`state_dict()` records `panel_frame_indices`, and both exact-float32 and
-quantized-uint8 HTML exports contain every local frame. For an interactively
-restored notebook output, construct with `save_state=True`; the default
+Set `panel_playback_fps` when constructing the widget to choose the cadence for
+all local-stack play buttons without adding another compact control. The
+default is 10 fps; values above the 30 fps browser budget are capped. The
+setting is saved in widget state and carried into standalone HTML exports,
+while the per-panel playing/paused state remains browser-local so reopening a
+report does not start playback unexpectedly.
+
+The active panel's histogram, stats, and FFT follow its current local frame;
+scrubbing it does not change neighboring panels. `state_dict()` records
+`panel_frame_indices`, and single HTML exports using either `encoding="full"`
+or `encoding="uint8"` contain every local frame. For an interactively restored
+notebook output, construct with `save_state=True`; the default
 `save_state=False` deliberately stores only a compact static preview rather
 than embedding the stack payload in the notebook.
+
+For single-image ROI review, that compact saved-notebook preview keeps the
+scientific marks visible: the fallback PNG draws every visible ROI on the full
+image and adds one right-side zoom crop per ROI. The zoom crops use a common
+crop size where image boundaries allow it, so multiple ROIs remain visually
+comparable. A reader who opens the notebook or report without rerunning the cell
+can still see the marked features.
 
 `set_image()` accepts the same mixed list form:
 
@@ -149,6 +370,7 @@ w = Show2D.from_folder(
     "/data/session/haadf",
     pattern="*.tif",
     watch_interval=2.0,
+    page_size=20,
     title="Live HAADF images",
 )
 w
@@ -156,6 +378,31 @@ w
 
 `watch=True` is the default. Pass `watch=False` for a fixed folder or a
 reproducible script that should update only when you call `poll_folder()`.
+Folder galleries default to `page_size=20`: page controls appear automatically
+when the 21st ready image arrives. Use another positive integer to change the
+visible limit, or `page_size=None` to keep one unpaged gallery. The final page
+contains only real files, so 45 images form pages of 20, 20, and 5 panels.
+Folder pages keep selection, stars, hidden state, and ordering keyed to each
+source file rather than sharing a hidden slot across pages.
+
+Change the grouping later without rebuilding the widget:
+
+```python
+w.set_folder_page_size(50)   # regroup the same source panels
+w.set_folder_page_size(None) # show one unpaged gallery
+```
+
+Paging limits the panels, histograms, and FFT views rendered at one time. The
+current folder implementation still retains the complete full-resolution
+gallery in Python and transports its display previews to the browser; it is not
+yet a lazy, bounded-memory source-page cache. Use `ShowFolder` for lightweight
+thumbnail discovery when the full scientific arrays need not all be opened.
+
+An empty watched folder remains mounted with a waiting view and becomes the
+real gallery in the same widget model when its first stable file arrives.
+The compact title-area badge reports `Watching`, `Updating`, `Waiting for file
+completion`, `Watch error`, or `Stopped`; fixed `watch=False` snapshots do not
+show the badge.
 
 ```python
 new_panels = w.poll_folder()       # scan now; return newly appended indices
@@ -167,7 +414,8 @@ w.close()                         # stop watching and close the widget
 Folder watching is append-only. A file already represented in the gallery is
 not duplicated, an incomplete file is deferred until a later poll, and removing
 or rewriting a source file does not silently remove or replace an existing
-panel. Close long-running widgets when the notebook no longer needs them.
+panel. An incompatible shape is reported without blocking a later compatible
+file. Close long-running widgets when the notebook no longer needs them.
 
 `Show2D.from_folder(...)` reads the scientific image data at its source
 resolution. It is different from `ShowFolder`, which intentionally uses small
@@ -175,12 +423,21 @@ cached thumbnails for fast folder discovery and selection. Use `ShowFolder`
 to decide what to open; use `Show2D.from_folder(...)` when the displayed pixel
 data and live panel append behavior matter.
 
+Maintainer real-time signoff follows
+[S2D-18](../maintainer/storyboard-show2d.md#s2d-18-watch-a-live-emd-folder-in-place):
+add genuine EMD files after the widget is visibly mounted and verify the same
+browser canvas paints each full-resolution panel.
+
 ## Paged galleries
 
-Use paged galleries when each view contains the same panel grid across several
+Direct `Show2D(...)` pages are comparison pages. Use them when each view
+contains the same panel grid across several
 analysis settings, iterations, or parameter values. A common example is a
 4-by-4 reconstruction sweep where each page is one iteration or one denoising
 parameter, and the panels within the page are the related output images.
+
+These repeated-slot comparison pages are distinct from the sequential item
+pages created by `Show2D.from_folder(..., page_size=20)`.
 
 Pass a 4D array with shape `(pages, panels_per_page, rows, cols)`:
 

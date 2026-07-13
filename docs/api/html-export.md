@@ -3,8 +3,8 @@
 `quantem.widget` has three sharing paths:
 
 1. **Widget-level HTML**: `widget.export_html(...)` writes one standalone widget
-   viewer. Use this when a single Show2D / Show3D / Show3DSlices / Show4DSTEM /
-   ShowEDS view is the artifact.
+   viewer. Use this when a single Show1D / Show2D / Show3D / Show3DSlices /
+   Show4DSTEM / ShowEDS view is the artifact.
 2. **Notebook-level HTML**: `quantem html notebook.ipynb --no-execute` exports a
    whole notebook with its saved widget state. Use this for reports and
    tutorials that combine text, figures, and multiple widgets.
@@ -120,6 +120,7 @@ browse-quality or count-preserving.
 
 | Widget | HTML export | Mode | Encoding | Downsample | Folder export | Reducer / notes |
 |---|---|---|---|---|---|---|
+| Show1D | yes | `single` | `full` | `1`, `2`, `4`, `8` | no | preserves every trace/x sample; linked 2D snapshot and profile panels use a NaN-aware area mean, with pixel size and panel/profile coordinates rescaled |
 | Show2D | yes | `single` | `full`, `uint8` | planned | no | `uint8` stores display-scaled image data |
 | Show3D | yes | `single` | `full`, `uint8` | planned | no | `uint8` stores display-scaled volume data |
 | Show3DSlices | yes | `single` | `full`, `uint8` | planned | no | `uint8` stores display-scaled volume data |
@@ -130,6 +131,7 @@ The public Python calls are:
 
 | Widget | Python API |
 |---|---|
+| Show1D | `export_html(path=None, title=None, mode="single", encoding="full", downsample=None)` |
 | Show2D | `export_html(path=None, title=None, mode="single", encoding="full", downsample=None)` |
 | Show3D | `export_html(path=None, title=None, mode="single", encoding="full", downsample=None)` |
 | Show3DSlices | `export_html(path=None, title=None, mode="single", encoding="full", downsample=None)` |

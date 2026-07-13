@@ -30,6 +30,31 @@ def _show2d() -> Show2D:
     return Show2D(data, title="Protocol Show2D", cmap="viridis", verbose=False)
 
 
+def test_show2d_html_export_preserves_per_panel_cmaps(tmp_path) -> None:
+    data = np.arange(2 * 4 * 5, dtype=np.float32).reshape(2, 4, 5)
+    widget = Show2D(data, title="Panel Cmaps", cmap=["inferno", "viridis"], verbose=False)
+
+    path = widget.export_html(tmp_path / "panel-cmaps.html")
+    html = path.read_text()
+
+    assert "panel_cmaps" in html
+    assert "inferno" in html
+    assert "viridis" in html
+
+
+def test_show3d_html_export_preserves_per_panel_cmaps(tmp_path) -> None:
+    data_a = np.arange(3 * 4 * 5, dtype=np.float32).reshape(3, 4, 5)
+    data_b = np.flip(data_a, axis=-1).copy()
+    widget = Show3D(data_a, data_b, title="Panel Cmaps", cmap=["inferno", "viridis"], verbose=False)
+
+    path = widget.export_html(tmp_path / "show3d-panel-cmaps.html")
+    html = path.read_text()
+
+    assert "panel_cmaps" in html
+    assert "inferno" in html
+    assert "viridis" in html
+
+
 def _show3d() -> Show3D:
     data = np.arange(3 * 4 * 5, dtype=np.float32).reshape(3, 4, 5)
     return Show3D(data, title="Protocol Show3D", cmap="magma")
