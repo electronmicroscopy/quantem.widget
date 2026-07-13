@@ -6,6 +6,7 @@ new `rcN` heading when that rc is published to TestPyPI.
 
 ## Unreleased
 
+- Harden ShowDiffraction analysis: calibration assignment and exactness, ring/ellipse/texture fit guards, zone-axis variants, stack frame provenance, per-axis canvas overlays, and hostile-input handling.
 - Add the `showdiffraction_fe3o4` tutorial dataset loader: the ShowDiffraction tutorial downloads its real Fe3O4 SAED pattern from the public dataset hub (packaged fallback for offline runs).
 - Fix ShowDiffraction systematic absences for spinel, bixbyite, cuprite, rutile-type, and I41/amd phases: new structure-verified rules remove symmetry-forbidden lines (for example Fe3O4 200 and anatase 002) from predicted reflection lists.
 - Improve ShowDiffraction phase matching: optimal line assignment replaces the greedy pass, missing-strong counts read n/a when a phase carries no intensities, full-circle radial wedges no longer collapse to zero width, and the ellipse fit's sector weighting is de-biased on noisy patterns.

@@ -63,6 +63,47 @@ def test_reflections_and_match_d():
     assert "100" in labels
 
 
+def test_match_d_reference_relative_error():
+    # match_d and match_candidate agree at the tolerance boundary
+    from quantem.widget.showdiffraction import match_candidate
+
+    au = Phase.from_cubic("Au", AU_A, absences="fcc")
+    d_ref = au.d_spacing((1, 1, 1))
+    # 3.05% above the reference line: rejected in both paths
+    d_obs = d_ref * 1.0305
+    assert au.match_d(d_obs, tol=0.03) == []
+    report = match_candidate([d_obs], [{"d": d_ref, "intensity": 100.0}], tol=0.03)
+    assert report["matched"] == 0
+    # 2.95% above: accepted in both paths with the same error
+    d_obs = d_ref * 1.0295
+    cands = au.match_d(d_obs, tol=0.03)
+    assert cands and cands[0]["hkl_str"] == "111"
+    assert cands[0]["d_error"] == pytest.approx(0.0295, abs=1e-4)
+    report = match_candidate([d_obs], [{"d": d_ref, "intensity": 100.0}], tol=0.03)
+    assert report["matched"] == 1
+    assert report["mean_err"] == pytest.approx(0.0295, abs=1e-4)
+
+
+def test_reflections_degenerate_families():
+    # distinct cubic families at one d keep both labels
+    si = Phase.from_cubic("Si", 5.4310, absences="diamond")
+    d27 = 5.4310 / math.sqrt(27)
+    refls = [r for r in si.reflections(d_min=1.0) if abs(r["d"] - d27) < 1e-3]
+    assert len(refls) == 1
+    assert refls[0]["hkl_str"] == "511/333"
+    assert refls[0]["hkl"] == (5, 1, 1)
+    assert refls[0]["multiplicity"] == 32
+    cands = si.match_d(d27, tol=0.005)
+    assert cands and cands[0]["hkl_str"] == "511/333"
+    # hexagonal family members keep a single conventional label
+    from quantem.widget import library_phase
+
+    graphite = library_phase("C (graphite)")
+    labels = {r["hkl_str"] for r in graphite.reflections(d_min=1.2)}
+    assert "100" in labels
+    assert not any("010" in label for label in labels)
+
+
 def test_from_dspacings_and_lattice_validation():
     # reference table keeps its own hkl labels and matches back
     ref = Phase.from_dspacings("Sample", [(2.355, "111"), (2.039, "200"), (1.442, "220")])
@@ -83,6 +124,32 @@ def test_from_dspacings_and_lattice_validation():
         Phase.from_cubic("bad", 0.0)
     with pytest.raises(ValueError):
         Phase.from_cubic("bad", -1.0)
+
+
+def test_degenerate_cell_rejected():
+    # angles outside (0, 180) are invalid
+    for angles in ({"gamma": 180.0}, {"alpha": 0.0}, {"beta": -30.0}, {"gamma": 360.0}):
+        with pytest.raises(ValueError):
+            Phase("bad", 4.0, 4.0, 4.0, **angles)
+    # in-range angles with a negative metric determinant are invalid too
+    with pytest.raises(ValueError):
+        Phase("bad", 4.0, 4.0, 4.0, 150.0, 150.0, 150.0)
+
+
+def test_reflections_bounded():
+    # absurd d_min: the 0.2 A floor and index cap keep enumeration finite
+    import time
+
+    au = Phase.from_cubic("Au", AU_A, absences="fcc")
+    t0 = time.perf_counter()
+    refls = au.reflections(d_min=1e-6)
+    assert time.perf_counter() - t0 < 2.0
+    assert refls
+    assert min(r["d"] for r in refls) >= 0.2
+    # an explicit max_index above the cap is clamped
+    t0 = time.perf_counter()
+    au.reflections(d_min=0.5, max_index=500)
+    assert time.perf_counter() - t0 < 2.0
 
 
 def test_structure_absence_rules():
@@ -240,8 +307,8 @@ def test_phase_library():
         "ZrC": ((2, 0, 0), 2.3502),
         "CuI": ((1, 1, 1), 3.5005),
         "Co3O4": ((3, 1, 1), 2.4368),
-        "NiFe2O4": ((3, 1, 1), 2.5205),
-        "BaTiO3": ((1, 1, 0), 2.8217),
+        "NiFe2O4": ((3, 1, 1), 2.5143),
+        "BaTiO3": ((1, 1, 0), 2.8242),
         "WC": ((0, 0, 1), 2.8377),
         "TiB2": ((1, 0, 1), 2.0359),
         "ZnS (wurtzite)": ((1, 0, 0), 3.3105),

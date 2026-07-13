@@ -79,6 +79,18 @@ def test_match_sort_key_ranking():
     assert match_sort_key(with_data) == match_sort_key(sc_zero)
 
 
+def test_match_candidate_non_finite():
+    # non-finite observed or reference d-spacings are dropped, not fatal
+    refs = _lines([(3.0, 100), (2.3, 80)])
+    sc = match_candidate([float("inf"), 2.3], refs, tol=0.03)
+    assert sc["matched"] == 1 and sc["n_obs"] == 1
+    sc = match_candidate([float("nan"), 2.3], refs, tol=0.03)
+    assert sc["matched"] == 1 and sc["n_obs"] == 1
+    sc = match_candidate([2.3], _lines([(float("inf"), 100), (2.3, 80)]), tol=0.03)
+    assert sc["matched"] == 1
+    assert sc["n_missing_strong"] == 0
+
+
 def test_match_report_shape():
     # plain report keys, even against a dense reference card
     dense = _lines([(1.0 + 0.01 * i, 20) for i in range(200)])  # 200 lines, d 1.0-2.99

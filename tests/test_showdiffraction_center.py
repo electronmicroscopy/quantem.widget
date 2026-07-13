@@ -79,6 +79,22 @@ def test_center_recovery():
         pick_center(frame, method="bogus")
 
 
+def test_center_phase_correlation_integer_shift():
+    # integer inversion shift: the wrap alternate lands on the frame border,
+    # where the symmetry score degenerates, and must not win
+    truth = (255.5, 255.5)
+    rows, cols = np.indices((511, 511), dtype=np.float64)
+    r = np.hypot(rows - truth[0], cols - truth[1])
+    frame = 400.0 / (1.0 + (r / 8.0) ** 1.5)
+    for radius, amp in [(80.0, 300.0), (150.0, 150.0), (250.0, 200.0)]:
+        frame += amp * np.exp(-0.5 * ((r - radius) / 2.0) ** 2)
+    # one unmirrored spot
+    frame += 50.0 * np.exp(-0.5 * (((rows - 150.0) ** 2 + (cols - 350.0) ** 2) / 10.0**2))
+    row, col = center_phase_correlation(frame)
+    assert abs(row - truth[0]) < 0.5
+    assert abs(col - truth[1]) < 0.5
+
+
 def test_align_frames():
     # recovers known sub-pixel drifts
     base = _ring_pattern((96, 96), (47.5, 47.5), [(15.0, 300.0), (28.0, 150.0)])
@@ -103,6 +119,28 @@ def test_align_frames():
     assert abs(shifts[1][1] - 2.0) < 0.3
 
 
+def test_align_frames_external_reference():
+    # Poisson-noisy frames register against a smooth noise-free model
+    center = (47.5, 47.5)
+    rows, cols = np.indices((96, 96), dtype=np.float64)
+    r = np.hypot(rows - center[0], cols - center[1])
+    model = 30.0 + 100.0 * np.exp(-0.5 * (r / 2.0) ** 2)
+    spots = [(0, 20, 90.0), (0, -20, 90.0), (17, -6, 70.0), (-17, 6, 70.0), (12, 24, 50.0)]
+    for d_row, d_col, amp in spots:
+        off = (rows - center[0] - d_row) ** 2 + (cols - center[1] - d_col) ** 2
+        model += amp * np.exp(-0.5 * off / 2.0**2)
+    applied = (1.3, -2.4)
+    shifted = np.clip(ndimage.shift(model, applied, order=3), 0.0, None)
+    frames = np.stack(
+        [np.random.default_rng(seed).poisson(shifted).astype(np.float64) for seed in (0, 1, 8)]
+    )
+    aligned, shifts, used = align_frames(frames, reference=model)
+    assert all(used)
+    for measured in shifts:
+        assert abs(measured[0] + applied[0]) < 0.5
+        assert abs(measured[1] + applied[1]) < 0.5
+
+
 def test_ring_uniformity():
     # a full clean ring reads high coverage, low spread, high SNR
     center = (63.5, 63.5)
@@ -119,3 +157,22 @@ def test_ring_uniformity():
     qc = ring_uniformity(frame, center, 30.0)
     assert qc["coverage"] < 0.4
     assert qc["cv"] > 1.0
+
+
+def test_ring_uniformity_mask_and_empty_annulus():
+    # a dead wedge scores against live sectors only once masked
+    center = (63.5, 63.5)
+    frame = _ring_pattern((128, 128), center, [(30.0, 300.0)], background=False, noise=0.0)
+    rows, cols = np.indices(frame.shape, dtype=np.float64)
+    theta = np.degrees(np.arctan2(rows - center[0], cols - center[1])) % 360.0
+    wedge = (theta >= 0.0) & (theta <= 90.0)
+    dead = np.where(wedge, 0.0, frame)
+    unmasked = ring_uniformity(dead, center, 30.0)
+    masked = ring_uniformity(dead, center, 30.0, mask=wedge)
+    assert masked["coverage"] > unmasked["coverage"]
+    assert masked["cv"] < unmasked["cv"]
+    assert masked["coverage"] > 0.95
+
+    # an annulus entirely off the detector carries no evidence
+    empty = ring_uniformity(frame, center, 500.0)
+    assert empty == {"cv": 0.0, "coverage": 0.0, "snr": 0.0}

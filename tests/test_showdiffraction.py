@@ -115,6 +115,16 @@ def test_showdiffraction_frames_offline_and_hot_pixels():
     assert w._get_frame(0)[3, 5] == 0
 
 
+def test_ingest_sparse_counting_frame():
+    # sparse electron counting: the hot-pixel clamp must not zero real counts
+    rng = np.random.default_rng(0)
+    frame = np.zeros((256, 256), dtype=np.uint16)
+    pixels = rng.choice(frame.size, size=40, replace=False)
+    frame.flat[pixels] = rng.integers(1, 4, size=40)
+    w = ShowDiffraction(frame, verbose=False)
+    assert float(w._get_frame(0).sum()) == float(frame.sum())
+
+
 def test_showdiffraction_center_and_modes():
     # auto-detect finds the bright disk
     data = np.zeros((3, 7, 7), dtype=np.float32)
@@ -263,6 +273,23 @@ def test_showdiffraction_state_dict_and_file(tmp_path):
     assert w2.dp_colormap == "viridis"
 
 
+def test_state_envelope_rejects_other_widget(tmp_path):
+    # a Show2D envelope must not load into ShowDiffraction
+    data = np.random.rand(16, 16).astype(np.float32)
+    w = ShowDiffraction(data, verbose=False)
+    envelope = {"metadata_version": "1.0", "widget_name": "Show2D", "state": w.state_dict()}
+    path = tmp_path / "show2d_state.json"
+    path.write_text(json.dumps(envelope))
+    with pytest.raises(ValueError, match="Show2D"):
+        ShowDiffraction(data, state=str(path), verbose=False)
+    with pytest.raises(ValueError, match="Show2D"):
+        ShowDiffraction(data, state=envelope, verbose=False)
+    with pytest.raises(ValueError, match="Show2D"):
+        ShowDiffraction.measurements_from_state(str(path))
+    with pytest.raises(ValueError, match="Show2D"):
+        ShowDiffraction.measurements_from_state(envelope)
+
+
 def test_showdiffraction_ui_modes_and_summary(capsys):
     data = np.random.rand(16, 16).astype(np.float32)
     # presets
@@ -312,6 +339,25 @@ def test_showdiffraction_ui_modes_and_summary(capsys):
     assert "Spots:" in out
 
 
+def test_summary_uncalibrated_labels(capsys):
+    # uncalibrated: no fake units on the detector or spot lines
+    w = ShowDiffraction(_disk_dp(), spot_refine=False, verbose=False)
+    w.set_center(32, 32)
+    w.add_spot(32, 42)
+    w.summary()
+    out = capsys.readouterr().out
+    assert "(uncalibrated)" in out
+    assert "px/px" not in out
+    assert "r=10.0 px" in out
+    assert "d=" not in out
+    # calibrated: units restored
+    w.calibrate_from_ring(10.0, 2.0)
+    w.summary()
+    out = capsys.readouterr().out
+    assert "1/Å/px" in out
+    assert "d=2.000" in out
+
+
 def test_showdiffraction_ring_calibration_and_picking():
     # calibration recomputes existing spots
     w = ShowDiffraction(_disk_dp(), spot_refine=False, verbose=False)
@@ -331,6 +377,19 @@ def test_showdiffraction_ring_calibration_and_picking():
     w.add_ring(20.0)
     w.undo_ring()
     assert len(w.rings) == 1
+
+
+def test_calibrate_request_channels_report_failure():
+    # at-center spot and bad ring inputs surface a status instead of silence
+    w = ShowDiffraction(_disk_dp(), spot_refine=False, verbose=False)
+    w.set_center(32, 32)
+    w._calibrate_from_spot_request = [32.0, 32.0, 2.0]
+    assert w.analysis_status.startswith("Calibrate failed")
+    assert w._calibrate_from_spot_request == []
+    w.analysis_status = ""
+    w._calibrate_from_ring_request = [10.0, -1.0]
+    assert w.analysis_status.startswith("Calibrate failed")
+    assert w._calibrate_from_ring_request == []
 
 
 def test_showdiffraction_export_and_measurements(tmp_path):
@@ -360,6 +419,21 @@ def test_showdiffraction_export_and_measurements(tmp_path):
     assert records == build_measurement_records(w.spots, w.rings)
     csv_path = ShowDiffraction.measurements_from_state(state_path, tmp_path / "from_state.csv")
     assert csv_path.read_text() == w.export_measurements(tmp_path / "live.csv").read_text()
+
+
+def test_export_ring_hkl_candidates(tmp_path):
+    # near-degenerate assignments stay auditable in the export
+    card = Phase.from_dspacings("card", [(2.00, "a"), (1.97, "b")])
+    w = ShowDiffraction(
+        np.zeros((256, 256), np.float32), center=(128, 128), k_pixel_size=0.01, verbose=False
+    )
+    w.add_ring(1.0 / (1.985 * 0.01))
+    w.index_rings(card)
+    csv_text = w.export_measurements(tmp_path / "m.csv").read_text()
+    assert "hkl_candidates" in csv_text
+    assert "a|b" in csv_text
+    payload = json.loads(w.export_measurements(tmp_path / "m.json").read_text())
+    assert payload["measurements"][0]["hkl_candidates"] == "a|b"
 
 
 def test_showdiffraction_detect_spots_and_rings():
@@ -404,6 +478,14 @@ def test_showdiffraction_detect_spots_and_rings():
     assert len(found) >= 3
     for target in ring_radii:
         assert any(abs(f - target) < 3 for f in found)
+
+
+def test_detect_rings_scipy_import_precedes_clear():
+    # a scipy-less detect click must not wipe manually added rings
+    import inspect
+
+    source = inspect.getsource(ShowDiffraction.detect_rings)
+    assert source.index("from scipy") < source.index("self.clear_rings()")
 
 
 def _dp(
@@ -517,6 +599,20 @@ def test_radial_profile_units_wedges_and_background():
         w.radial_background(method="spline")
 
 
+def test_ingest_non_finite_pixels():
+    # a NaN or inf pixel must not poison ring detection
+    dp, cen = _ring_dp([60.0, 90.0], background="power")
+    clean = ShowDiffraction(dp, center=cen, bf_radius=10, verbose=False)
+    clean.detect_rings(max_rings=2)
+    dirty_dp = dp.copy()
+    dirty_dp[10, 10] = np.nan
+    dirty_dp[200, 200] = np.inf
+    dirty = ShowDiffraction(dirty_dp, center=cen, bf_radius=10, verbose=False)
+    dirty.detect_rings(max_rings=2)
+    assert len(clean.rings) == 2
+    assert [r["radius_px"] for r in dirty.rings] == [r["radius_px"] for r in clean.rings]
+
+
 def test_refine_center_offsets_and_methods():
     # recovers known offsets (second case is far off-midpoint: wrap candidates)
     for true, start, radii in [
@@ -579,6 +675,19 @@ def test_fit_ring_profile():
     assert abs(sizes[60.0] / sizes[30.0] - 2.0) < 0.2
 
 
+def test_fit_ring_peaks_close_pair():
+    # neighboring rings 7.1 px apart: the fit window shrinks below the neighbor
+    from quantem.widget.showdiffraction import fit_ring_peaks
+
+    radii = np.arange(0.25, 120.0, 0.5)
+    intensity = 300.0 * np.exp(-0.5 * ((radii - 60.0) / 1.5) ** 2)
+    intensity += 450.0 * np.exp(-0.5 * ((radii - 67.1) / 1.5) ** 2)
+    rings = [{"radius_px": 60.0}, {"radius_px": 67.1}]
+    for update, amp in zip(fit_ring_peaks(radii, intensity, rings), (300.0, 450.0)):
+        assert abs(update["intensity"] - amp) / amp < 0.08
+        assert update["fit_quality"] > 0.97
+
+
 def test_texture_arc_vs_uniform():
     dp, cen = _arc_ring_dp(theta_lo=10.0, theta_hi=70.0)
     w = ShowDiffraction(dp, center=cen, verbose=False)
@@ -600,6 +709,76 @@ def test_texture_arc_vs_uniform():
     for method in (w3.fit_ring_profile, w3.texture, w3.fit_ellipse):
         with pytest.raises(ValueError):
             method()
+
+
+def test_texture_masked_wedge():
+    # isotropic ring with a masked 90 deg wedge reads untextured
+    from quantem.widget.showdiffraction import texture_from_profile
+
+    theta = (np.arange(72) + 0.5) * 5.0
+    rng = np.random.default_rng(0)
+    intensity = 100.0 + rng.normal(0.0, 1.0, 72)
+    intensity[(theta > 45.0) & (theta < 135.0)] = 0.0
+    report = texture_from_profile(theta.astype(np.float32), intensity.astype(np.float32))
+    assert report["strength"] < 0.05
+
+
+def test_texture_low_coverage_zeroed_and_bounded():
+    # a few clustered live sectors cannot constrain the harmonic fit
+    from quantem.widget.showdiffraction import texture_from_profile
+
+    theta = ((np.arange(72) + 0.5) * 5.0).astype(np.float32)
+    rng = np.random.default_rng(3)
+    for n_live in (3, 4, 6):
+        intensity = np.zeros(72, np.float32)
+        intensity[:n_live] = 100.0 + rng.normal(0.0, 2.0, n_live)
+        report = texture_from_profile(theta, intensity)
+        assert report["strength"] == 0.0
+        assert report["angle_deg"] == 0.0
+    # strength is a fractional modulation, never above 1
+    intensity = np.zeros(72, np.float32)
+    intensity[:24] = 1.0
+    intensity[0] = 1000.0
+    report = texture_from_profile(theta, intensity)
+    assert 0.0 <= report["strength"] <= 1.0
+
+
+def test_fit_ellipse_center_error_partial_coverage():
+    # a 1 px center error on a circle must not alias into ellipticity
+    # when a 90 deg wedge is missing
+    from quantem.widget.showdiffraction import fit_ellipse_from_sectors
+
+    theta_centers = (np.arange(36) + 0.5) * 10.0
+    radii = 60.0 - np.cos(np.radians(theta_centers))
+    counts = np.full(36, 50.0)
+    weight_sum = np.ones(36)
+    wedge = theta_centers > 270.0
+    counts[wedge] = 0.0
+    weight_sum[wedge] = 0.0
+    report = fit_ellipse_from_sectors(theta_centers, counts, weight_sum, weight_sum * radii)
+    assert abs(report["ratio"] - 1.0) < 0.005
+
+
+def test_fit_ellipse_short_arc_rejected():
+    # a short live arc leaves the order-1/order-2 harmonics collinear
+    from quantem.widget.showdiffraction import fit_ellipse_from_sectors
+
+    theta_centers = (np.arange(180) + 0.5) * 2.0
+    radii = np.full(180, 200.0)
+    for n_live in (8, 20, 30):  # 16 / 40 / 60 degree arcs
+        counts = np.zeros(180)
+        weight_sum = np.zeros(180)
+        counts[:n_live] = 50.0
+        weight_sum[:n_live] = 1.0
+        with pytest.raises(ValueError, match="span"):
+            fit_ellipse_from_sectors(theta_centers, counts, weight_sum, weight_sum * radii)
+    # >= 120 degrees of coverage still fits
+    counts = np.zeros(180)
+    weight_sum = np.zeros(180)
+    counts[:65] = 50.0
+    weight_sum[:65] = 1.0
+    report = fit_ellipse_from_sectors(theta_centers, counts, weight_sum, weight_sum * radii)
+    assert abs(report["ratio"] - 1.0) < 0.01
 
 
 def test_fit_ellipse_and_correction():
@@ -647,6 +826,41 @@ def test_fit_ellipse_and_correction():
     d_mean = 1.0 / (60.0 * math.sqrt(1.2) * 0.01)
     assert abs(d_major - d_mean) / d_mean < 0.03
     assert abs(d_minor - d_mean) / d_mean < 0.03
+
+
+def _fe3o4_dp():
+    from quantem.widget.data.tutorials import _FE3O4_PACKAGED_PATH
+
+    return np.load(_FE3O4_PACKAGED_PATH)
+
+
+def test_fit_ellipse_default_width_real_data():
+    # the default annulus stays on the requested ring instead of spanning neighbors
+    w = ShowDiffraction(_fe3o4_dp(), verbose=False)
+    w.run_auto(max_rings=5, exclude_radius=70)
+    for ring in w.rings:
+        report = w.fit_ellipse(ring_id=ring["id"])
+        assert abs(report["r_mean"] - ring["radius_px"]) < 5.0
+
+
+def test_ellipse_corrected_spot_angles():
+    # inter-spot angles use the same ellipse transform as radii
+    ratio, cen = 1.06, (128.0, 128.0)
+    w = ShowDiffraction(
+        np.zeros((256, 256), np.float32),
+        center=cen,
+        k_pixel_size=0.01,
+        spot_refine=False,
+        verbose=False,
+    )
+    root = math.sqrt(ratio)
+    for theta in (52.5, 112.5):  # 60 degrees apart on the circularized pattern
+        a = math.radians(theta)
+        w.add_spot(cen[0] + 80.0 * math.sin(a) / root, cen[1] + 80.0 * math.cos(a) * root)
+    w.ellipse_ratio = ratio
+    w.apply_ellipse_correction()
+    assert abs(w._measured_angle(w.spots[0], w.spots[1]) - 60.0) < 0.3
+    assert abs(w.spots[1]["angle_deg"] - 60.0) < 0.3
 
 
 def _au():
@@ -705,6 +919,48 @@ def test_calibration_from_spot_and_phase():
     assert abs(k_multi - k_true) <= abs(k_single - k_true)
 
 
+def test_calibrate_from_phase_prefers_exact_assignment():
+    # rings at exactly Au 220/311 must not lose to a lower-order near-miss
+    k_true, au = 0.01, _au()
+    w = ShowDiffraction(np.zeros((256, 256), np.float32), center=(128, 128), verbose=False)
+    for hkl in ((2, 2, 0), (3, 1, 1)):
+        w.add_ring(1.0 / (au.d_spacing(hkl) * k_true))
+    w.calibrate_from_phase(au)
+    assert [rng["hkl"] for rng in w.rings] == ["220", "311"]
+    assert abs(w.k_pixel_size - k_true) / k_true < 1e-6
+
+
+def test_calibrate_from_phase_tolerates_ring_jitter():
+    # sub-pixel ring jitter must not flip the assignment to a high-order match
+    from quantem.widget.showdiffraction import library_phase
+
+    spinel = library_phase("MgAl2O4")
+    k_true = 0.0025
+    w = ShowDiffraction(np.zeros((512, 512), np.float32), center=(256, 256), verbose=False)
+    for radius in (139.97, 164.38):  # 220/311 at k=0.0025 with ~0.2 px jitter
+        w.add_ring(radius)
+    w.calibrate_from_phase(spinel)
+    assert [rng["hkl"] for rng in w.rings] == ["220", "311"]
+    assert abs(w.k_pixel_size - k_true) / k_true < 0.01
+
+
+def test_non_positive_ring_rejected():
+    # add_ring rejects non-positive radii
+    au = _au()
+    w = ShowDiffraction(np.zeros((256, 256), np.float32), center=(128, 128), verbose=False)
+    with pytest.raises(ValueError):
+        w.add_ring(-30.0)
+    with pytest.raises(ValueError):
+        w.add_ring(0.0)
+    assert w.rings == []
+    # a corrupt negative radius never anchors a calibration
+    w.add_ring(1.0 / (au.d_spacing((1, 1, 1)) * 0.01))
+    w.rings = list(w.rings) + [{**w.rings[0], "id": 2, "radius_px": -30.0}]
+    with pytest.raises(ValueError):
+        w.calibrate_from_phase(au)
+    assert w.k_calibrated is False
+
+
 def test_index_rings_and_identify_phase():
     # index_rings labels every ring against the phase
     w = _au_ring_widget()
@@ -753,6 +1009,24 @@ def test_index_rings_and_identify_phase():
     assert all(s["hkl"] == "" for s in w.spots)
 
 
+def test_identify_lines_unknown_intensity():
+    # lattice-based phases have no intensities; lines carry None, not 0
+    w = _au_ring_widget()
+    reports = w.identify_phase([_au()])
+    assert all(row["i_rel"] is None for row in reports[0]["lines"])
+
+
+def test_identify_summary_tie():
+    # a runner-up matching the winner's count is annotated
+    w = ShowDiffraction(np.zeros((64, 64), np.float32), verbose=False)
+    reports = [
+        {"name": "Fe3O4", "matched": 6, "n_obs": 6},
+        {"name": "ZnFe2O4", "matched": 6, "n_obs": 6},
+        {"name": "Au", "matched": 3, "n_obs": 6},
+    ]
+    assert w._identify_summary(reports) == "Fe3O4: 6/6 lines; next: ZnFe2O4 (also 6/6), Au"
+
+
 def _au_spot_widget(specs, k=0.01, size=256):
     # specs: [(hkl, angle_deg)] -> spot at radius 1/(d(hkl)*k) px, angle from +col axis
     au, cen = _au(), (size // 2, size // 2)
@@ -796,6 +1070,62 @@ def test_index_spots():
     w2 = _au_spot_widget([((2, 0, 0), 0)])
     with pytest.raises(ValueError, match="lattice-based"):
         w2.index_spots(Phase.from_dspacings("card", [(2.0, "a"), (1.5, "b")]))
+
+
+def _parse_zone(label):
+    values, sign = [], 1
+    for ch in label.strip("[]"):
+        if ch == "-":
+            sign = -1
+        else:
+            values.append(sign * int(ch))
+            sign = 1
+    return tuple(values)
+
+
+def test_index_spots_zone_variants():
+    # a [011]-type pattern: the canonical anchor angle matches, the variant differs
+    from quantem.widget.showdiffraction import _parse_hkl_label
+
+    w = _au_spot_widget(
+        [
+            ((2, 0, 0), 0.0),
+            ((1, 1, -1), 54.7356),
+            ((0, 2, -2), 90.0),
+            ((1, 1, 1), 20.0),  # no 111 variant sits at 20 degrees from (200)
+        ]
+    )
+    w.index_spots(_au())
+    assert w.zone_axis != ""
+    axis = _parse_zone(w.zone_axis)
+    labels = [s["hkl"] for s in w.spots]
+    assert labels[0] and labels[1] and labels[2]
+    assert labels[3] == ""
+    for label in labels[:3]:
+        h, k, ell = _parse_hkl_label(label)
+        assert h * axis[0] + k * axis[1] + ell * axis[2] == 0
+
+
+def test_index_spots_hexagonal_family_closure():
+    # hexagonal {110} images at 90 degrees are not signed permutations of (110)
+    from quantem.widget.showdiffraction import library_phase
+
+    zno, k, cen = library_phase("ZnO"), 0.01, (128, 128)
+    w = ShowDiffraction(
+        np.zeros((256, 256), np.float32),
+        center=cen,
+        k_pixel_size=k,
+        spot_refine=False,
+        verbose=False,
+    )
+    d100, d110 = zno.d_spacing((1, 0, 0)), zno.d_spacing((1, 1, 0))
+    for d, start in ((d100, 0), (d110, 30)):
+        for ang in range(start, start + 360, 60):
+            r, a = 1.0 / (d * k), math.radians(ang)
+            w.add_spot(cen[0] + r * math.sin(a), cen[1] + r * math.cos(a))
+    w.index_spots(zno)
+    assert w.zone_axis == "[001]"
+    assert all(s["hkl"] for s in w.spots)
 
 
 def test_analysis_request_channels():
@@ -895,6 +1225,26 @@ def test_detect_spots_uncapped_and_rejection():
     w2._detect_rings_request = -1
     assert len(w2.rings) >= 9  # all 9 rings, not the old top-8
     assert w2._detect_rings_request == 0
+
+
+def test_detect_spots_close_pair_keeps_strongest():
+    # peaks closer than min_distance: the strongest survives, not neither
+    size = 128
+    rows = np.arange(size, dtype=np.float64)[:, None]
+    cols = np.arange(size, dtype=np.float64)[None, :]
+    for sep in (4.0, 5.0, 6.0):
+        dp = np.zeros((size, size))
+        for r0, c0, amp in ((40.0, 40.0, 100.0), (40.0, 40.0 + sep, 60.0), (90.0, 90.0, 80.0)):
+            dp += amp * np.exp(-0.5 * (((rows - r0) / 1.5) ** 2 + ((cols - c0) / 1.5) ** 2))
+        w = ShowDiffraction(
+            dp.astype(np.float32), center=(64, 64), spot_refine=False, verbose=False
+        )
+        w.detect_spots(min_distance=6, exclude_radius=5)
+        positions = [(round(s["row"]), round(s["col"])) for s in w.spots]
+        assert positions.count((40, 40)) == 1  # strongest of the pair
+        assert (40, 40 + sep) not in positions
+        assert (90, 90) in positions  # isolated control
+        assert len(w.spots) == 2
 
 
 def test_move_spot_repicks_and_resets_index():
@@ -1071,6 +1421,31 @@ def test_search_phases_and_identify_request():
     assert w.search_phases()[0]["name"] == "Au"
 
 
+def test_search_phases_absurd_calibration_bounded():
+    # a wrong calibration must not hang the reflection enumeration
+    import time
+
+    w = ShowDiffraction(
+        np.zeros((256, 256), np.float32), center=(128, 128), k_pixel_size=10.0, verbose=False
+    )
+    w.add_ring(30.0)
+    w.add_ring(50.0)
+    t0 = time.perf_counter()
+    reports = w.search_phases()
+    assert time.perf_counter() - t0 < 30.0
+    assert reports
+
+
+def test_search_phases_skips_degenerate_candidate():
+    # one broken candidate must not abort ranking of the rest
+    w = _library_ring_widget("Au")
+    bad = Phase.from_cubic("Bad", 4.0)
+    bad._g_star = -np.eye(3)  # every d_spacing raises "invalid reflection"
+    reports = w.search_phases(extra=[bad])
+    assert reports[0]["name"] == "Au"
+    assert "Bad" not in {rep["name"] for rep in reports}
+
+
 def test_custom_phases():
     # entries accept a full lattice, defaulting b=a, c=a, angles 90
     from quantem.widget import library_phase
@@ -1110,6 +1485,37 @@ def test_custom_phases():
     w.custom_phases = []
     w._identify_request = True
     assert "Identify failed" in w.analysis_status
+
+
+def test_malformed_custom_phase_request_resets_flag():
+    # KeyError from a malformed entry must not leave the request flag stuck
+    w = _library_ring_widget("Au", uncalibrated=True)
+    w.custom_phases = [{"name": "Broken"}]  # missing "a"
+    w.phase_name = "Broken"
+    w._calibrate_phase_request = True
+    assert w._calibrate_phase_request is False
+    assert "Phase calibration failed" in w.analysis_status
+    w.custom_phases = [{"name": "Broken", "a": None}]  # float(None) raises TypeError
+    w._index_rings_request = True
+    assert w._index_rings_request is False
+    assert "Ring indexing failed" in w.analysis_status
+
+
+def test_export_html_includes_identify_and_quality(tmp_path):
+    # identify table and quality panel survive into the offline export
+    w = _library_ring_widget("Au")
+    w.search_phases()
+    w.quality_report()
+    assert w._identify_results and w._quality
+    clone = w._clone_for_html_export()
+    try:
+        assert clone._identify_results == w._identify_results
+        assert clone._quality == w._quality
+    finally:
+        clone.close()
+    path = w.export_html(tmp_path / "dp.html")
+    html = path.read_text()
+    assert w._identify_results[0]["name"] in html
 
 
 def test_run_auto():
@@ -1159,6 +1565,36 @@ def test_run_auto():
     assert 'calibration failed (phase "NotAPhase" not found)' in w.analysis_status
 
 
+def test_run_auto_calibrates_fitted_radii():
+    # calibration uses profile-refined radii: replaying the least-squares scale
+    # on the stored rings reproduces k exactly
+    from quantem.widget import library_phase
+
+    au = library_phase("Au")
+    size, cenpx = 512, 255.5
+    rows = np.arange(size, dtype=np.float64)[:, None]
+    cols = np.arange(size, dtype=np.float64)[None, :]
+    r = np.hypot(rows - cenpx, cols - cenpx)
+    pat = 300.0 * np.exp(-(r**2) / (2 * 8.0**2)) + 20.0 * np.exp(-r / 40.0)
+    for refl in au.reflections(d_min=1.2):
+        pat += 30.0 * np.exp(-((r - 1.0 / (refl["d"] * 0.004)) ** 2) / (2 * 2.5**2))
+    w = ShowDiffraction(pat.astype(np.float32), verbose=False)
+    w.phase_name = "Au"
+    w.run_auto(max_rings=4)
+    pairs = [(rng["radius_px"], 1.0 / rng["d_ref"]) for rng in w.rings if rng["hkl"]]
+    scale = sum(rp * q for rp, q in pairs) / sum(q * q for _, q in pairs)
+    assert w.k_pixel_size == pytest.approx(1.0 / scale, rel=1e-9)
+    assert all(rng.get("fwhm_inv_angstrom") is not None for rng in w.rings)
+
+
+def test_run_auto_reports_unindexed_rings():
+    # a default run anchored on unexcluded artifacts leaves rings unmatched
+    w = ShowDiffraction(_fe3o4_dp(), verbose=False)
+    w.phase_name = "Fe3O4"
+    w.run_auto()
+    assert "rings unindexed" in w.analysis_status
+
+
 def _drifted_stack(seed=11):
     # same ring pattern rolled by known shifts, plus one pure-noise garbage frame
     base = _dp((60.0,), background="power")[0]
@@ -1190,6 +1626,129 @@ def test_merge_frames():
     w._merge_request = True
     assert w.analysis_status.startswith("Merged")
     assert w._merge_request is False
+
+
+def test_merge_frames_repeat_uses_originals():
+    # a second merge must not fold the appended merged frame back in
+    w = ShowDiffraction(_drifted_stack(), center=(128, 128), verbose=False)
+    w.add_ring(60.0)
+    r1 = w.merge_frames(align=False)
+    first = w._data.cpu().numpy()[-1].copy()
+    r2 = w.merge_frames(align=False)
+    second = w._data.cpu().numpy()[-1].copy()
+    assert r1["n_frames"] == r2["n_frames"] == 5
+    assert w.n_frames == 6  # merged frame replaced, not stacked
+    np.testing.assert_allclose(second, first)
+    # replacing the data resets merge provenance
+    w.set_image(_drifted_stack())
+    assert w.merge_frames(align=False)["n_frames"] == 5
+
+
+def _staggered_ring_stack(size=128, radii=(30.0, 40.0, 50.0), scales=None):
+    rows = np.arange(size, dtype=np.float64)[:, None]
+    cols = np.arange(size, dtype=np.float64)[None, :]
+    r = np.hypot(rows - size / 2, cols - size / 2)
+    scales = scales or [1.0] * len(radii)
+    return np.stack(
+        [s * 1000.0 * np.exp(-((r - rr) ** 2) / (2 * 1.5**2)) for rr, s in zip(radii, scales)]
+    ).astype(np.float32)
+
+
+def test_measurements_keep_source_frame():
+    # records tag their frame; geometry changes resample from that frame
+    stack = _staggered_ring_stack()
+    w = ShowDiffraction(stack, center=(64, 64), spot_refine=False, verbose=False)
+    w.add_ring(30.0)
+    w.add_spot(64.0, 94.0)  # on the frame-0 ring
+    ring_i, spot_i = w.rings[0]["intensity"], w.spots[0]["intensity"]
+    assert w.rings[0]["frame_idx"] == 0
+    assert w.spots[0]["frame_idx"] == 0
+    assert spot_i > 100.0
+    w.frame_idx = 2  # scrub: values persist
+    w.center_row = w.center_row + 1e-9  # geometry nudge must not switch frames
+    # bin-edge pixels may flip bins on the nudge; frame 2 would read ~0 here
+    assert w.rings[0]["intensity"] == pytest.approx(ring_i, rel=0.02)
+    assert w.spots[0]["intensity"] == pytest.approx(spot_i, rel=1e-6)
+    # state roundtrip: saved values survive a restore with non-default geometry
+    w2 = ShowDiffraction(stack, center=(64, 64), spot_refine=False, verbose=False)
+    w2.add_ring(30.0)
+    w2.add_spot(64.0, 94.0)
+    w2.ellipse_ratio = 1.05  # trailing geometry field in the saved state
+    saved_ring_i = w2.rings[0]["intensity"]
+    w2.frame_idx = 2
+    state = json.loads(json.dumps(w2.state_dict()))
+    w3 = ShowDiffraction(stack, center=(64, 64), spot_refine=False, verbose=False)
+    w3.load_state_dict(state)
+    assert w3.frame_idx == 2
+    assert w3.rings[0]["intensity"] == pytest.approx(saved_ring_i, rel=1e-6)
+
+
+def test_merge_repeat_refreshes_profile_panes():
+    # a repeat merge leaves frame_idx unchanged; the panes must still refresh
+    stack = _staggered_ring_stack(radii=(30.0, 30.0, 30.0), scales=(1.0, 2.0, 3.0))
+    w = ShowDiffraction(stack, center=(64, 64), verbose=False)
+    w.add_ring(30.0)
+    w.show_profile = True
+    w.show_azimuthal = True
+    w.merge_frames(align=False)
+    profile_mean, azimuthal_mean = w._profile_data, w._azimuthal_data
+    w.merge_frames(statistic="max", align=False)
+    assert w._profile_data != profile_mean
+    assert w._azimuthal_data != azimuthal_mean
+
+
+def test_state_dict_merge_provenance_and_clamp_warning():
+    stack = _staggered_ring_stack()
+    w = ShowDiffraction(stack, center=(64, 64), verbose=False)
+    w.merge_frames(align=False)
+    state = json.loads(json.dumps(w.state_dict()))
+    assert state["n_source_frames"] == 3
+    # restored onto source+merged data, a re-merge keeps 3 sources
+    data4 = w._data.cpu().numpy()
+    w2 = ShowDiffraction(data4, center=(64, 64), verbose=False)
+    w2.load_state_dict(state)
+    assert w2.merge_frames(align=False)["n_frames"] == 3
+    assert w2.n_frames == 4
+    # restoring onto fewer frames clamps frame_idx and says so
+    w3 = ShowDiffraction(stack, center=(64, 64), verbose=False)
+    w3.load_state_dict(state)
+    assert w3.frame_idx == 2
+    assert "clamp" in w3.analysis_status.lower()
+
+
+def test_set_image_refreshes_profile_panes():
+    # new data with an unchanged auto-detected center must refresh the profile
+    stack = _staggered_ring_stack()
+    w = ShowDiffraction(stack[0], verbose=False)
+    w.show_profile = True
+    before = w._profile_data
+    w.set_image(np.zeros((128, 128), np.float32))  # empty mask: center unchanged
+    after = w._profile_data
+    assert after != before
+    w._update_profile()
+    assert w._profile_data == after  # already fresh
+
+
+def test_quality_report_frame_attribution():
+    # ring_snr follows the ring's source frame; the report names its frame
+    stack = _staggered_ring_stack()
+    w = ShowDiffraction(stack, center=(64, 64), verbose=False)
+    w.add_ring(30.0)
+    snr0 = w.quality_report()["ring_snr"]
+    w.frame_idx = 2
+    report = w.quality_report()
+    assert report["frame_idx"] == 2
+    assert report["ring_snr"] == snr0
+
+
+def test_constructor_frame_idx_kwarg():
+    # frame_idx applies after ingest, not against the default n_frames=1
+    stack = _staggered_ring_stack()
+    w = ShowDiffraction(stack, center=(64, 64), frame_idx=2, verbose=False)
+    assert w.frame_idx == 2
+    np.testing.assert_array_equal(
+        np.frombuffer(w.frame_bytes, dtype=np.float32).reshape(128, 128), stack[2]
+    )
 
 
 def test_quality_report():
@@ -1231,6 +1790,21 @@ def test_quality_report():
     assert w.analysis_status == "Quality updated"
 
 
+def test_quality_report_ring_snr_respects_mask():
+    # dead-wedge pattern: masking the wedge lifts ring coverage
+    dp, cen = _ring_dp([60.0])
+    rows, cols = np.indices(dp.shape, dtype=np.float64)
+    theta = np.degrees(np.arctan2(rows - cen[0], cols - cen[1])) % 360.0
+    dp = np.where((theta >= 0.0) & (theta <= 90.0), 0.0, dp).astype(np.float32)
+    w = ShowDiffraction(dp, center=cen, verbose=False)
+    w.add_ring(60.0)
+    before = w.quality_report()["ring_snr"]
+    w.mask_regions = [{"kind": "wedge", "start_deg": 0.0, "end_deg": 90.0}]
+    after = w.quality_report()["ring_snr"]
+    assert after["coverage"] > before["coverage"]
+    assert after["cv"] < before["cv"]
+
+
 def test_mask_regions():
     # masks exclude from the radial profile
     dp, cen = _arc_ring_dp(theta_lo=10.0, theta_hi=70.0)
@@ -1258,6 +1832,26 @@ def test_mask_regions():
     positions = [(round(s["row"]), round(s["col"])) for s in w.spots]
     assert (90, 90) in positions
     assert (40, 40) not in positions
+
+
+def test_full_circle_wedge_masks_all():
+    # a wedge spanning >= 360 degrees masks every pixel
+    from quantem.widget.showdiffraction import build_analysis_mask
+
+    shape, cen = (64, 64), (31.5, 31.5)
+    for start, end in ((0.0, 360.0), (90.0, 450.0)):
+        mask = build_analysis_mask(
+            shape, [{"kind": "wedge", "start_deg": start, "end_deg": end}], cen
+        )
+        assert mask.all()
+    quarter = build_analysis_mask(
+        shape, [{"kind": "wedge", "start_deg": 0.0, "end_deg": 90.0}], cen
+    )
+    assert abs(quarter.mean() - 0.25) < 0.02
+    wrap = build_analysis_mask(
+        shape, [{"kind": "wedge", "start_deg": 350.0, "end_deg": 20.0}], cen
+    )
+    assert 0.06 < wrap.mean() < 0.11
 
 
 def test_azimuthal_panel_populates():

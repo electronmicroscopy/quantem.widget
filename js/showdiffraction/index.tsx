@@ -18,6 +18,16 @@ import { extractBytes, extractFloat32, formatNumber, downloadBlob, preserveResto
 import { computeHistogramFromBytes, findDataRange, sliderRange, applyLogScaleInPlace } from "../stats";
 import { COLORMAPS, COLORMAP_NAMES, applyColormap } from "../colormaps";
 import { MetadataSection } from "../widgetInfo";
+import {
+  dataAngleToScreen,
+  dataColToScreenX,
+  dataRowToScreenY,
+  frameStats,
+  screenToData,
+  staleFrameNote,
+  viewTransform,
+} from "./overlayGeometry";
+import { buildMeasurementRecords, measurementCsv, measurementMetadata } from "./measurements";
 
 // Style tokens
 
@@ -406,6 +416,10 @@ interface SpotDict {
   id: number;
   row: number;
   col: number;
+  raw_row?: number | null;
+  raw_col?: number | null;
+  row_err?: number | null;
+  col_err?: number | null;
   d_spacing: number | null;
   d_spacing_err?: number | null;
   g_magnitude: number | null;
@@ -417,6 +431,7 @@ interface SpotDict {
   fit_quality?: number | null;
   intensity: number;
   hkl?: string;
+  hkl_candidates?: string[];
   d_ref?: number | null;
   d_error?: number | null;
   note?: string;
@@ -449,10 +464,14 @@ interface RingDict {
   d_spacing: number | null;
   intensity: number;
   hkl?: string;
+  hkl_candidates?: string[];
   d_ref?: number | null;
   d_error?: number | null;
   fwhm_px?: number | null;
+  fwhm_inv_angstrom?: number | null;
+  intensity_integrated?: number | null;
   fit_quality?: number | null;
+  note?: string;
 }
 
 interface IdentifyLine {
@@ -620,42 +639,26 @@ function ShowDiffraction() {
   const [showAzimuthal, setShowAzimuthal] = useModelState<boolean>("show_azimuthal");
   const [azimuthalData] = useModelState<DataView>("_azimuthal_data");
 
-  // Measurement export
+  // Measurement export (schema mirrors Python export_measurements)
   const exportMeasurements = React.useCallback((format: "csv" | "json", kind: "spots" | "rings" | "all" = "all") => {
-    const cols = [
-      "id", "kind", "row", "col", "r_pixels", "r_pixels_err",
-      "g_inv_angstrom", "g_inv_angstrom_err", "d_angstrom", "d_angstrom_err",
-      "angle_deg", "angle_deg_err", "intensity", "fit_quality", "hkl", "note",
-    ];
-    const rows: (string | number | null)[][] = [];
-    if (kind === "spots" || kind === "all") {
-      for (const s of spots || []) {
-        rows.push([s.id, "spot", s.row, s.col, s.r_pixels, s.r_pixels_err ?? null,
-          s.g_magnitude, s.g_magnitude_err ?? null, s.d_spacing, s.d_spacing_err ?? null,
-          s.angle_deg ?? null, s.angle_deg_err ?? null, s.intensity, s.fit_quality ?? null,
-          s.hkl ?? "", s.note ?? ""]);
-      }
-    }
-    if (kind === "rings" || kind === "all") {
-      for (const r of rings || []) {
-        rows.push([r.id, "ring", null, null, r.radius_px, null, r.g_magnitude, null,
-          r.d_spacing, null, null, null, r.intensity, r.fit_quality ?? null, r.hkl ?? "", ""]);
-      }
-    }
+    const records = buildMeasurementRecords(
+      kind === "rings" ? [] : spots || [],
+      kind === "spots" ? [] : rings || [],
+    );
     const basename = kind === "all" ? "measurements" : kind;
     if (format === "json") {
-      const records = rows.map((r) => Object.fromEntries(cols.map((c, i) => [c, r[i]])));
-      const blob = new Blob([JSON.stringify({ measurements: records }, null, 2)], { type: "application/json" });
+      const metadata = measurementMetadata({
+        centerRow, centerCol, centerMethod, kPixelSize, kCalibrated,
+        calibrationSource, calibrationRefD, calibrationRefRadius,
+        maskRegions: maskRegions || [], backgroundSubtracted: profileSubtract,
+      });
+      const blob = new Blob([JSON.stringify({ metadata, measurements: records }, null, 2)], { type: "application/json" });
       downloadBlob(blob, `${basename}.json`);
     } else {
-      const esc = (v: string | number | null) => {
-        const s = v == null ? "" : String(v);
-        return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-      };
-      const csv = [cols.join(","), ...rows.map((r) => r.map(esc).join(","))].join("\n");
-      downloadBlob(new Blob([csv], { type: "text/csv" }), `${basename}.csv`);
+      downloadBlob(new Blob([measurementCsv(records)], { type: "text/csv" }), `${basename}.csv`);
     }
-  }, [spots, rings]);
+  }, [spots, rings, centerRow, centerCol, centerMethod, kPixelSize, kCalibrated,
+    calibrationSource, calibrationRefD, calibrationRefRadius, maskRegions, profileSubtract]);
 
   // Local UI state
   const isMobile = useMobileViewport();
@@ -727,12 +730,12 @@ function ShowDiffraction() {
   // Identify table
   React.useEffect(() => { setIdentifyCollapsed(false); }, [identifyResults]);
 
-  // Center zoom
+  // Center zoom (pixel-center convention)
   const zoomToCenter = React.useCallback(() => {
     const Z = 2.5;
     setDpZoom(Z);
-    setDpPanX(canvasSize * Z * (0.5 - centerCol / Math.max(detCols, 1)));
-    setDpPanY(canvasSize * Z * (0.5 - centerRow / Math.max(detRows, 1)));
+    setDpPanX(canvasSize * Z * (0.5 - (centerCol + 0.5) / Math.max(detCols, 1)));
+    setDpPanY(canvasSize * Z * (0.5 - (centerRow + 0.5) / Math.max(detRows, 1)));
   }, [canvasSize, centerRow, centerCol, detRows, detCols]);
 
   const dpCanvasRef = React.useRef<HTMLCanvasElement>(null);
@@ -944,6 +947,15 @@ function ShowDiffraction() {
     return extractFloat32(frameBytes, frameLen);
   }, [offline, offlineFrames, frameBytes, frameIdx, nFrames, detRows, detCols]);
 
+  // offline stacks: stats recompute in JS; panes flag the baked frame
+  const bakedFrameRef = React.useRef(frameIdx);
+  const offlineStats = React.useMemo(
+    () => (offline && nFrames > 1 && activeFrame ? frameStats(activeFrame) : null),
+    [offline, nFrames, activeFrame],
+  );
+  const displayStats = offlineStats ?? dpStats;
+  const paneStaleNote = staleFrameNote(offline, nFrames, frameIdx, bakedFrameRef.current);
+
   // Frame scaling
   const scaledFrame = React.useMemo(() => {
     const raw = activeFrame;
@@ -1044,14 +1056,13 @@ function ShowDiffraction() {
     ctx.scale(DPR, DPR);
     ctx.clearRect(0, 0, cssW, cssW);
 
-    const scX = (cssW / detCols) * dpZoom;
-    const scY = (cssW / detRows) * dpZoom;
-    const offX = (cssW - cssW * dpZoom) / 2 + dpPanX;
-    const offY = (cssW - cssW * dpZoom) / 2 + dpPanY;
+    // per-axis transform for non-square detectors
+    const view = viewTransform(cssW, dpZoom, dpPanX, dpPanY, detRows, detCols);
+    const { scX, scY } = view;
 
     // Center crosshair
-    const cx = offX + centerCol * scX;
-    const cy = offY + centerRow * scY;
+    const cx = dataColToScreenX(centerCol, view);
+    const cy = dataRowToScreenY(centerRow, view);
     ctx.strokeStyle = "rgba(255,255,255,0.3)";
     ctx.lineWidth = 1;
     ctx.setLineDash([4, 4]);
@@ -1060,9 +1071,8 @@ function ShowDiffraction() {
     ctx.moveTo(cx, cy - 10); ctx.lineTo(cx, cy + 10);
     ctx.stroke();
     // BF disk circle
-    const br = bfRadius * scX;
     ctx.beginPath();
-    ctx.arc(cx, cy, br, 0, 2 * Math.PI);
+    ctx.ellipse(cx, cy, bfRadius * scX, bfRadius * scY, 0, 0, 2 * Math.PI);
     ctx.stroke();
     ctx.setLineDash([]);
 
@@ -1070,8 +1080,8 @@ function ShowDiffraction() {
     if (spots && spots.length > 0) {
       spots.forEach((spot, i) => {
         const dragged = dragPreview?.kind === "spot" && dragPreview.id === spot.id ? dragPreview : null;
-        const sx = offX + (dragged ? dragged.col : spot.col) * scX;
-        const sy = offY + (dragged ? dragged.row : spot.row) * scY;
+        const sx = dataColToScreenX(dragged ? dragged.col : spot.col, view);
+        const sy = dataRowToScreenY(dragged ? dragged.row : spot.row, view);
         const color = spotColorAt(i);
         ctx.strokeStyle = color;
         ctx.lineWidth = 1.5;
@@ -1099,15 +1109,16 @@ function ShowDiffraction() {
         ctx.strokeStyle = selected ? themeColors.accent : ringColor;
         ctx.lineWidth = selected ? 2.5 : 1.2;
         ctx.beginPath();
-        ctx.arc(cx, cy, ring.radius_px * scX, 0, 2 * Math.PI);
+        ctx.ellipse(cx, cy, ring.radius_px * scX, ring.radius_px * scY, 0, 0, 2 * Math.PI);
         ctx.stroke();
         if (showHkl && ring.hkl) {
-          const rr = ring.radius_px * scX * Math.SQRT1_2;
+          const rrX = ring.radius_px * scX * Math.SQRT1_2;
+          const rrY = ring.radius_px * scY * Math.SQRT1_2;
           ctx.fillStyle = selected ? themeColors.accent : ringColor;
           ctx.font = "bold 10px -apple-system, sans-serif";
           ctx.textAlign = "left";
           ctx.textBaseline = "bottom";
-          ctx.fillText(ring.hkl, cx + rr + 4, cy - rr - 4);
+          ctx.fillText(ring.hkl, cx + rrX + 4, cy - rrY - 4);
         }
       }
     }
@@ -1119,13 +1130,16 @@ function ShowDiffraction() {
       for (const region of maskRegions) {
         if (region.kind === "disk" && region.radius != null) {
           ctx.beginPath();
-          ctx.arc(offX + (region.col ?? 0) * scX, offY + (region.row ?? 0) * scY, region.radius * scX, 0, 2 * Math.PI);
+          ctx.ellipse(
+            dataColToScreenX(region.col ?? 0, view), dataRowToScreenY(region.row ?? 0, view),
+            region.radius * scX, region.radius * scY, 0, 0, 2 * Math.PI,
+          );
           ctx.fill();
         } else if (region.kind === "wedge" && region.start_deg != null && region.end_deg != null) {
-          const rBig = Math.hypot(detRows, detCols) * scX;
+          const rBig = Math.hypot(detRows * scY, detCols * scX);
           ctx.beginPath();
           ctx.moveTo(cx, cy);
-          ctx.arc(cx, cy, rBig, (region.start_deg * Math.PI) / 180, (region.end_deg * Math.PI) / 180);
+          ctx.arc(cx, cy, rBig, dataAngleToScreen(region.start_deg, view), dataAngleToScreen(region.end_deg, view));
           ctx.closePath();
           ctx.fill();
         }
@@ -1142,11 +1156,14 @@ function ShowDiffraction() {
       ctx.lineWidth = 1.2;
       ctx.beginPath();
       if (dragPreview.kind === "disk") {
-        ctx.arc(offX + dragPreview.col * scX, offY + dragPreview.row * scY, dragPreview.radius * scX, 0, 2 * Math.PI);
+        ctx.ellipse(
+          dataColToScreenX(dragPreview.col, view), dataRowToScreenY(dragPreview.row, view),
+          dragPreview.radius * scX, dragPreview.radius * scY, 0, 0, 2 * Math.PI,
+        );
       } else {
-        const rBig = Math.hypot(detRows, detCols) * scX;
+        const rBig = Math.hypot(detRows * scY, detCols * scX);
         ctx.moveTo(cx, cy);
-        ctx.arc(cx, cy, rBig, (dragPreview.start_deg * Math.PI) / 180, (dragPreview.end_deg * Math.PI) / 180);
+        ctx.arc(cx, cy, rBig, dataAngleToScreen(dragPreview.start_deg, view), dataAngleToScreen(dragPreview.end_deg, view));
         ctx.closePath();
       }
       ctx.fill();
@@ -1163,7 +1180,12 @@ function ShowDiffraction() {
       ctx.setLineDash([6, 4]);
       ctx.lineWidth = 1.2;
       ctx.beginPath();
-      ctx.ellipse(cx, cy, rMax * s * scX, (rMax / s) * scX, (ellipseAngle * Math.PI) / 180, 0, 2 * Math.PI);
+      // build the path in data units, then stroke with a uniform screen pen
+      ctx.save();
+      ctx.translate(cx, cy);
+      ctx.scale(scX, scY);
+      ctx.ellipse(0, 0, rMax * s, rMax / s, (ellipseAngle * Math.PI) / 180, 0, 2 * Math.PI);
+      ctx.restore();
       ctx.stroke();
       ctx.restore();
     }
@@ -1207,7 +1229,7 @@ function ShowDiffraction() {
     return rect.width > 0 ? canvasSize / rect.width : 1;
   };
 
-  // Canvas to data
+  // canvas to data (pixel-center)
   const dpToImage = (e: { clientX: number; clientY: number }) => {
     const canvas = dpCanvasRef.current;
     if (!canvas) return { row: 0, col: 0 };
@@ -1215,11 +1237,7 @@ function ShowDiffraction() {
     const scale = rect.width > 0 ? canvasSize / rect.width : 1;
     const mx = (e.clientX - rect.left) * scale;
     const my = (e.clientY - rect.top) * scale;
-    const offX = (canvasSize - canvasSize * dpZoom) / 2 + dpPanX;
-    const offY = (canvasSize - canvasSize * dpZoom) / 2 + dpPanY;
-    const col = (mx - offX) / (canvasSize * dpZoom) * detCols;
-    const row = (my - offY) / (canvasSize * dpZoom) * detRows;
-    return { row, col };
+    return screenToData(mx, my, viewTransform(canvasSize, dpZoom, dpPanX, dpPanY, detRows, detCols));
   };
 
   const angleOf = (row: number, col: number) =>
@@ -1299,7 +1317,8 @@ function ShowDiffraction() {
       return;
     }
     const { row, col } = dpToImage(e);
-    if (!(row >= 0 && row < detRows && col >= 0 && col < detCols)) return;
+    // pixel-center coords: the detector spans [-0.5, det - 0.5)
+    if (!(row >= -0.5 && row < detRows - 0.5 && col >= -0.5 && col < detCols - 0.5)) return;
     dragPosRef.current = { row, col };
     if (drawMode === "disk") {
       dragTargetRef.current = { kind: "disk", row, col };
@@ -1313,14 +1332,15 @@ function ShowDiffraction() {
       return;
     }
     if (moveSpots && spots && spots.length > 0) {
+      // per-axis screen distance
+      const { scX, scY } = viewTransform(canvasSize, dpZoom, 0, 0, detRows, detCols);
       let nearest = -1, nearestDist = Infinity;
       spots.forEach((s, i) => {
-        const dist = Math.hypot(s.row - row, s.col - col);
+        const dist = Math.hypot((s.row - row) * scY, (s.col - col) * scX);
         if (dist < nearestDist) { nearestDist = dist; nearest = i; }
       });
-      const scX = (canvasSize / detCols) * dpZoom;
       const hitPx = (e.pointerType === "touch" ? 20 : 12) * dpDisplayScale();
-      if (nearest >= 0 && nearestDist * scX <= hitPx) {
+      if (nearest >= 0 && nearestDist <= hitPx) {
         dragTargetRef.current = { kind: "spot", id: spots[nearest].id };
         setDragPreview({ kind: "spot", id: spots[nearest].id, row, col });
         return;
@@ -1961,10 +1981,13 @@ function ShowDiffraction() {
                 <Typography sx={{ ...typography.label, fontSize: 10 }}>−bg</Typography>
                 <Switch size="small" checked={profileSubtract} onChange={(_, v) => setProfileSubtract(v)} sx={switchStyles.small} />
                 <Typography sx={{ ...typography.value, color: themeColors.textMuted }}>click to add ring</Typography>
+                {paneStaleNote && (
+                  <Typography sx={{ ...typography.value, color: statusColors.warn }}>{paneStaleNote}</Typography>
+                )}
               </Stack>
               <canvas
                 ref={profileCanvasRef}
-                style={{ display: "block", width: "100%", maxWidth: canvasSize, height: PROFILE_H, cursor: "crosshair", border: `1px solid ${themeColors.border}`, boxSizing: "border-box" }}
+                style={{ display: "block", width: "100%", maxWidth: canvasSize, height: PROFILE_H, cursor: "crosshair", border: `1px solid ${themeColors.border}`, boxSizing: "border-box", opacity: paneStaleNote ? 0.4 : 1 }}
                 onPointerDown={handleProfileClick}
               />
             </Box>
@@ -1975,8 +1998,11 @@ function ShowDiffraction() {
             <Box sx={{ mt: `${SPACING.XS}px`, ...panelWidth }}>
               <Typography sx={{ ...typography.label, px: 1, mb: `${SPACING.XS}px` }}>
                 Azimuthal profile (outermost ring)
+                {paneStaleNote && (
+                  <Box component="span" sx={{ ...typography.value, ml: 1, color: statusColors.warn }}>{paneStaleNote}</Box>
+                )}
               </Typography>
-              <canvas ref={azimuthalCanvasRef} style={{ display: "block", width: "100%", maxWidth: canvasSize, height: PROFILE_H, border: `1px solid ${themeColors.border}`, boxSizing: "border-box" }} />
+              <canvas ref={azimuthalCanvasRef} style={{ display: "block", width: "100%", maxWidth: canvasSize, height: PROFILE_H, border: `1px solid ${themeColors.border}`, boxSizing: "border-box", opacity: paneStaleNote ? 0.4 : 1 }} />
             </Box>
           )}
 
@@ -2074,19 +2100,19 @@ function ShowDiffraction() {
           )}
 
           {/* Stats */}
-          {showStats && dpStats && dpStats.length === 4 && (
+          {showStats && displayStats && displayStats.length === 4 && (
             <Box sx={{ mt: `${SPACING.XS}px`, px: 1, py: 0.25, display: "flex", gap: 2 }}>
               <Typography sx={{ ...typography.value, color: themeColors.textMuted }}>
-                Mean <Box component="span" sx={{ color: themeColors.accent }}>{formatStat(dpStats[0])}</Box>
+                Mean <Box component="span" sx={{ color: themeColors.accent }}>{formatStat(displayStats[0])}</Box>
               </Typography>
               <Typography sx={{ ...typography.value, color: themeColors.textMuted }}>
-                Min <Box component="span" sx={{ color: themeColors.accent }}>{formatStat(dpStats[1])}</Box>
+                Min <Box component="span" sx={{ color: themeColors.accent }}>{formatStat(displayStats[1])}</Box>
               </Typography>
               <Typography sx={{ ...typography.value, color: themeColors.textMuted }}>
-                Max <Box component="span" sx={{ color: themeColors.accent }}>{formatStat(dpStats[2])}</Box>
+                Max <Box component="span" sx={{ color: themeColors.accent }}>{formatStat(displayStats[2])}</Box>
               </Typography>
               <Typography sx={{ ...typography.value, color: themeColors.textMuted }}>
-                Std <Box component="span" sx={{ color: themeColors.accent }}>{formatStat(dpStats[3])}</Box>
+                Std <Box component="span" sx={{ color: themeColors.accent }}>{formatStat(displayStats[3])}</Box>
               </Typography>
             </Box>
           )}

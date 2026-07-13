@@ -155,7 +155,7 @@ PHASE_LIBRARY = {
     "C (diamond)": {"a": 3.5668, "absences": "diamond"},  # COD 9008564 (Wyckoff 1963)
     "α-Sn": {"a": 6.4912, "absences": "diamond"},  # COD 9008568 (Wyckoff 1963)
     # rocksalt
-    "MgO": {"a": 4.2117, "absences": "fcc"},  # NBS Circ. 539 v1 (Swanson & Tatge 1953)
+    "MgO": {"a": 4.2130, "absences": "fcc"},  # NBS Circ. 539 v1 (Swanson & Tatge 1953)
     "NaCl": {"a": 5.6402, "absences": "fcc"},  # NBS Circ. 539 v2 (Swanson & Fuyat 1953)
     "LiF": {"a": 4.0270, "absences": "fcc"},  # NBS Circ. 539 v1 (Swanson & Tatge 1953)
     "TiN": {"a": 4.2390, "absences": "fcc"},  # COD 1100037 (Christensen 1978)
@@ -187,14 +187,14 @@ PHASE_LIBRARY = {
     "MgAl2O4": {"a": 8.0836, "absences": "spinel"},  # COD 9002044 (Redfern et al. 1999)
     "Co3O4": {"a": 8.0821, "absences": "spinel"},  # COD 9005887 (Liu & Prewitt 1990)
     "CoFe2O4": {"a": 8.3806, "absences": "spinel"},  # COD 1533163 (Ferreira et al. 2003)
-    "NiFe2O4": {"a": 8.3597, "absences": "spinel"},  # COD 2300289 (Kremenović et al. 2010)
+    "NiFe2O4": {"a": 8.3390, "absences": "spinel"},  # Hill et al. 1979, Phys. Chem. Miner. 4 317
     "ZnFe2O4": {"a": 8.4421, "absences": "spinel"},  # COD 9005102 (O'Neill 1992)
     # primitive cubic
     "SrTiO3": {"a": 3.9050, "absences": "none"},  # NBS Circ. 539 v3 (Swanson et al. 1954)
     "CsCl": {"a": 4.1230, "absences": "none"},  # NBS Circ. 539 v2 (Swanson & Fuyat 1953)
     # additional cubic phases
     "Th": {"a": 5.0843, "absences": "fcc"},  # COD 9008485 (Wyckoff 1963)
-    "KCl": {"a": 6.2917, "absences": "fcc"},  # NBS Circ. 539 v1 (Swanson & Tatge 1953)
+    "KCl": {"a": 6.2931, "absences": "fcc"},  # NBS Circ. 539 v1 (Swanson & Tatge 1953)
     "KBr": {"a": 6.6000, "absences": "fcc"},  # COD 9008650 (Wyckoff 1963)
     "CoO": {"a": 4.2630, "absences": "fcc"},  # COD 1533087 (Sasaki et al. 1979)
     "MnO": {"a": 4.4449, "absences": "fcc"},  # COD 9005946 (Pacalo & Graham 1991)
@@ -225,8 +225,8 @@ PHASE_LIBRARY = {
     "SnO2": {"a": 4.7374, "c": 3.1864, "gamma": 90.0, "absences": "rutile"},
     # COD 1534488 (Lee & Raynor 1954)
     "β-Sn": {"a": 5.8317, "c": 3.1813, "gamma": 90.0, "absences": "i41amd"},
-    # COD 1513252 (Yasuda et al. 2009)
-    "BaTiO3": {"a": 3.9905, "c": 4.0412, "gamma": 90.0, "absences": "none"},
+    # NBS Circ. 539 v3 (Swanson & Fuyat 1954)
+    "BaTiO3": {"a": 3.9940, "c": 4.0380, "gamma": 90.0, "absences": "none"},
     # primitive hexagonal
     # COD 1501516 (Litasov et al. 2010)
     "WC": {"a": 2.9059, "c": 2.8377, "gamma": 120.0, "absences": "none"},
@@ -406,6 +406,8 @@ class Phase:
         if _reference_lines is None:
             if min(a, b, c) <= 0:
                 raise ValueError("lattice edge lengths must be positive")
+            if not all(0.0 < angle < 180.0 for angle in (alpha, beta, gamma)):
+                raise ValueError("cell angles must be strictly between 0 and 180 degrees")
             self.lattice = (float(a), float(b), float(c), float(alpha), float(beta), float(gamma))
             ca, cb, cg = (math.cos(math.radians(x)) for x in (alpha, beta, gamma))
             g = np.array(
@@ -416,6 +418,8 @@ class Phase:
                 ],
                 dtype=np.float64,
             )
+            if np.linalg.det(g) <= 0:
+                raise ValueError("degenerate cell: angles do not form a valid lattice")
             self._g_star = np.linalg.inv(g)
         else:
             self.lattice = None
@@ -474,7 +478,8 @@ class Phase:
         """Allowed reflection families, largest d first.
 
         By default ``max_index`` is sized so every family above ``d_min`` is
-        enumerated.
+        enumerated; ``d_min`` is floored at 0.2 Å and ``max_index`` capped at
+        25 to keep the enumeration bounded.
         """
         if self._reference_lines is not None:
             reflections = [
@@ -490,8 +495,11 @@ class Phase:
             ]
             return sorted(reflections, key=lambda reflection: -reflection["d"])
 
+        d_min = max(float(d_min), 0.2)
         if max_index is None:
             max_index = math.ceil(max(self.lattice[:3]) / d_min)
+        max_index = min(int(max_index), 25)
+        distinct_labels = _is_orthogonal_lattice(self.lattice)
         families_by_d: dict[int, dict] = {}
         for h in range(-max_index, max_index + 1):
             for k in range(-max_index, max_index + 1):
@@ -504,21 +512,31 @@ class Phase:
                         continue
                     d_key = int(round(spacing * 1e4))
                     representative = _canonical_hkl(hkl, self.lattice)
-                    family = families_by_d.get(d_key)
-                    if family is None:
-                        families_by_d[d_key] = {
-                            "hkl": representative,
-                            "hkl_str": _format_hkl(representative),
-                            "d": spacing,
-                            "multiplicity": 1,
-                            "intensity": None,
-                        }
-                    else:
-                        family["multiplicity"] += 1
-                        if _label_preference(representative) < _label_preference(family["hkl"]):
-                            family["hkl"] = representative
-                            family["hkl_str"] = _format_hkl(representative)
-        return sorted(families_by_d.values(), key=lambda reflection: -reflection["d"])
+                    family = families_by_d.setdefault(d_key, {"d": spacing, "labels": {}})
+                    labels = family["labels"]
+                    labels[representative] = labels.get(representative, 0) + 1
+        reflections = []
+        for family in families_by_d.values():
+            labels = family["labels"]
+            if distinct_labels:
+                ordered = sorted(
+                    labels.items(), key=lambda entry: (-entry[1], _label_preference(entry[0]))
+                )
+                representative = ordered[0][0]
+                hkl_str = "/".join(_format_hkl(label) for label, _ in ordered)
+            else:
+                representative = min(labels, key=_label_preference)
+                hkl_str = _format_hkl(representative)
+            reflections.append(
+                {
+                    "hkl": representative,
+                    "hkl_str": hkl_str,
+                    "d": family["d"],
+                    "multiplicity": sum(labels.values()),
+                    "intensity": None,
+                }
+            )
+        return sorted(reflections, key=lambda reflection: -reflection["d"])
 
     def _all_reflections(self) -> list[dict]:
         if self._reflection_cache is None:
@@ -526,12 +544,16 @@ class Phase:
         return self._reflection_cache
 
     def match_d(self, d: float, tol: float = 0.03) -> list[dict]:
-        """Reflections within fractional ``tol`` of ``d``, closest first."""
+        """Reflections within fractional ``tol`` of ``d``, closest first.
+
+        Errors are relative to the reference d, matching
+        :func:`match_candidate`.
+        """
         if d <= 0:
             return []
         matches = []
         for reflection in self._all_reflections():
-            error = abs(reflection["d"] - d) / d
+            error = abs(reflection["d"] - d) / reflection["d"]
             if error <= tol:
                 matches.append({**reflection, "d_error": error})
         return sorted(matches, key=lambda reflection: reflection["d_error"])
@@ -539,8 +561,8 @@ class Phase:
 
 # ========================= Center estimation =========================
 # --- Internal helpers ---
-def _bandpass(frame: np.ndarray, mask: np.ndarray | None = None) -> np.ndarray:
-    work = np.log1p(frame - frame.min())
+def _bandpass(frame: np.ndarray, mask: np.ndarray | None = None, log: bool = True) -> np.ndarray:
+    work = np.log1p(frame - frame.min()) if log else frame - frame.min()
     sigma = max(5.0, 0.02 * min(work.shape))
     work = work - ndimage.gaussian_filter(work, sigma=sigma)
     if mask is not None:
@@ -666,9 +688,19 @@ def center_phase_correlation(
         for c in col_cands
         if 0.0 <= r <= n_rows - 1 and 0.0 <= c <= n_cols - 1
     ]
+    # skip border candidates
+    interior = [(r, c) for r, c in candidates if 1.0 <= r <= n_rows - 2 and 1.0 <= c <= n_cols - 2]
+    if interior:
+        candidates = interior
     if not candidates:
         candidates = [((n_rows - 1) / 2.0, (n_cols - 1) / 2.0)]
-    row, col = max(candidates, key=lambda rc: _symmetry(frame, rc, mask=mask))
+    scored = [(r, c, _symmetry(frame, (r, c), mask=mask)) for r, c in candidates]
+    best = max(score for _, _, score in scored)
+    mid = ((n_rows - 1) / 2.0, (n_cols - 1) / 2.0)
+    row, col, _ = min(
+        (candidate for candidate in scored if candidate[2] >= best - 1e-4),
+        key=lambda candidate: math.hypot(candidate[0] - mid[0], candidate[1] - mid[1]),
+    )
     return float(row), float(col)
 
 
@@ -711,18 +743,24 @@ def ring_uniformity(
     radius: float,
     half_width: float = 4.0,
     n_theta: int = 180,
+    mask: np.ndarray | None = None,
 ) -> dict:
-    """Azimuthal uniformity QC for one ring."""
+    """Azimuthal uniformity QC for one ring; ``mask`` pixels are excluded."""
     frame = np.asarray(frame, dtype=np.float64)
     rows, cols = np.indices(frame.shape, dtype=np.float64)
     d_row = rows - center[0]
     d_col = cols - center[1]
     annulus = np.abs(np.hypot(d_row, d_col) - radius) <= half_width
+    if mask is not None:
+        annulus &= ~np.asarray(mask, dtype=bool)
     theta = np.arctan2(d_row[annulus], d_col[annulus])
     sector = np.clip(((theta + np.pi) / (2.0 * np.pi) * n_theta).astype(int), 0, n_theta - 1)
     sums = np.bincount(sector, weights=frame[annulus], minlength=n_theta)
     counts = np.bincount(sector, minlength=n_theta)
-    profile = np.where(counts > 0, sums / np.maximum(counts, 1), 0.0)
+    live = counts > 0
+    if not live.any():
+        return {"cv": 0.0, "coverage": 0.0, "snr": 0.0}
+    profile = sums[live] / counts[live]
     mean = float(profile.mean())
     std = float(profile.std())
     cv = std / mean if mean > 0 else 0.0
@@ -771,12 +809,13 @@ def align_frames(
     frames = np.asarray(frames, dtype=np.float64)
     n_frames, n_rows, n_cols = frames.shape
     ref = frames[0] if reference is None else np.asarray(reference, dtype=np.float64)
-    ref = _bandpass(ref)
+    # linear bandpass for count statistics
+    ref = _bandpass(ref, log=False)
     aligned = np.empty_like(frames)
     shifts: list[tuple[float, float]] = []
     used: list[bool] = []
     for i in range(n_frames):
-        s_row, s_col, psr = _phase_shift(ref, _bandpass(frames[i]))
+        s_row, s_col, psr = _phase_shift(ref, _bandpass(frames[i], log=False))
         s_row = _wrap_signed(s_row, n_rows)
         s_col = _wrap_signed(s_col, n_cols)
         peak_quality = psr / (psr + 10.0) if psr > 0 else 0.0
@@ -794,11 +833,15 @@ _NO_MATCH_COST = 1.0e6
 
 def match_candidate(observed_d: Sequence[float], lines: Sequence[dict], tol: float = 0.03) -> dict:
     """Match measured d-spacings against one reference phase."""
-    observed = [float(spacing) for spacing in observed_d if spacing and float(spacing) > 0]
+    observed = [
+        float(spacing)
+        for spacing in observed_d
+        if spacing and math.isfinite(float(spacing)) and float(spacing) > 0
+    ]
     references = [
         (float(line["d"]), float(line.get("i_rel", line.get("intensity")) or 0.0))
         for line in lines
-        if float(line["d"]) > 0
+        if math.isfinite(float(line["d"])) and float(line["d"]) > 0
     ]
     has_intensity = any(rel_intensity > 0 for _, rel_intensity in references)
     n_observed = len(observed)
@@ -893,6 +936,7 @@ MEASUREMENT_COLUMNS = [
     "fwhm_inv_angstrom",
     "intensity_integrated",
     "hkl",
+    "hkl_candidates",
     "note",
 ]
 
@@ -1013,6 +1057,10 @@ def build_analysis_mask(
         if kind == "disk":
             mask |= np.hypot(rows - region["row"], cols - region["col"]) <= region["radius"]
         elif kind == "wedge":
+            # full-circle span: every angle masked
+            if abs(float(region["end_deg"]) - float(region["start_deg"])) >= 360.0:
+                mask[:] = True
+                continue
             theta = np.degrees(np.arctan2(rows - center_row, cols - center_col)) % 360.0
             start = float(region["start_deg"]) % 360.0
             end = float(region["end_deg"]) % 360.0
@@ -1046,6 +1094,28 @@ def corrected_radius(
     minor = -d_col * math.sin(angle) + d_row * math.cos(angle)
     root_ratio = math.sqrt(ellipse_ratio)
     return np.hypot(major / root_ratio, minor * root_ratio)
+
+
+def corrected_vector(
+    d_row,
+    d_col,
+    *,
+    ellipse_ratio: float = 1.0,
+    ellipse_angle: float = 0.0,
+    ellipse_corrected: bool = False,
+):
+    """Displacement vector under the same ellipse transform as corrected_radius."""
+    if not ellipse_corrected or ellipse_ratio == 1.0:
+        return d_row, d_col
+    angle = math.radians(ellipse_angle)
+    major = d_col * math.cos(angle) + d_row * math.sin(angle)
+    minor = -d_col * math.sin(angle) + d_row * math.cos(angle)
+    root_ratio = math.sqrt(ellipse_ratio)
+    major, minor = major / root_ratio, minor * root_ratio
+    return (
+        major * math.sin(angle) + minor * math.cos(angle),
+        major * math.cos(angle) - minor * math.sin(angle),
+    )
 
 
 def radial_profile_px(
@@ -1197,22 +1267,25 @@ def texture_from_profile(
 ) -> dict:
     """Texture strength and preferred angle from an azimuthal profile."""
     values = intensity.astype(np.float64)
-    # empty sectors (masked or off-detector) come back as exactly zero; a
-    # uniform ring with a missing wedge would otherwise read as textured
     covered = values != 0.0
-    if covered.sum() < 3:
+    if covered.sum() >= 8:
+        live = np.sort(np.asarray(theta_deg, dtype=np.float64)[covered])
+        gaps = np.diff(np.concatenate([live, live[:1] + 360.0]))
+        span = 360.0 - float(gaps.max())
+    else:
+        span = 0.0
+    if covered.sum() < 8 or span < 90.0:
         strength, angle = 0.0, 0.0
     else:
         theta = np.radians(theta_deg)[covered]
-        pedestal_free = values[covered] - float(values[covered].min())
-        total = pedestal_free.sum()
-        if total <= 0:
+        design = np.column_stack([np.ones_like(theta), np.cos(2 * theta), np.sin(2 * theta)])
+        (mean_level, cosine, sine), *_ = np.linalg.lstsq(design, values[covered], rcond=None)
+        if mean_level <= 0:
             strength, angle = 0.0, 0.0
         else:
-            component = np.sum(pedestal_free * np.exp(2j * theta))
-            strength = float(abs(component) / total)
-            angle = float(np.degrees(np.angle(component)) / 2.0 % 180.0)
-    report = {"strength": strength, "angle_deg": angle}
+            strength = float(min(1.0, math.hypot(cosine, sine) / mean_level))
+            angle = float(math.degrees(math.atan2(sine, cosine)) / 2.0 % 180.0)
+    report = {"strength": strength, "angle_deg": angle, "coverage_deg": span}
     if return_profile:
         report["profile"] = (theta_deg, intensity)
     return report
@@ -1232,14 +1305,33 @@ def fit_ellipse_from_sectors(
             f"could not fit ellipse: ring found in {int(valid.sum())} sectors, need >= 8; "
             "check the ring radius and center"
         )
+    # short arcs leave the order-1/order-2 harmonics collinear
+    live = np.sort(np.asarray(theta_centers, dtype=np.float64)[valid])
+    gaps = np.diff(np.concatenate([live, live[:1] + 360.0]))
+    span = 360.0 - float(gaps.max())
+    if span < 120.0:
+        raise ValueError(
+            f"could not fit ellipse: ring sectors span only {span:.0f} deg, need >= 120; "
+            "reduce the excluded regions or pick a fuller ring"
+        )
     radii_by_theta = weighted_radius_sum[valid] / weight_sum[valid]
     theta = np.radians(theta_centers)[valid]
-    design = np.column_stack([np.ones_like(theta), np.cos(2 * theta), np.sin(2 * theta)])
-    (mean_radius, cosine, sine), *_ = np.linalg.lstsq(design, radii_by_theta, rcond=None)
+    # order-1 terms absorb residual center error
+    design = np.column_stack(
+        [
+            np.ones_like(theta),
+            np.cos(theta),
+            np.sin(theta),
+            np.cos(2 * theta),
+            np.sin(2 * theta),
+        ]
+    )
+    solution, *_ = np.linalg.lstsq(design, radii_by_theta, rcond=None)
+    mean_radius, cosine, sine = solution[0], solution[3], solution[4]
     epsilon = math.hypot(cosine, sine) / mean_radius
     ratio = (1.0 + epsilon) / (1.0 - epsilon) if epsilon < 1.0 else float("inf")
     angle = (0.5 * math.degrees(math.atan2(sine, cosine))) % 180.0
-    residual = radii_by_theta - design @ np.array([mean_radius, cosine, sine])
+    residual = radii_by_theta - design @ solution
     return {
         "ratio": float(ratio),
         "angle_deg": float(angle),
@@ -1377,7 +1469,7 @@ def _ring_fit_window(radius_guess: float, centers: list[float], window: float | 
     if window is not None:
         return float(window)
     gaps = [abs(radius_guess - center) for center in centers if center != radius_guess]
-    return max(6.0, min(gaps) / 2.0) if gaps else max(6.0, 0.2 * radius_guess)
+    return max(3.0, min(gaps) / 2.0) if gaps else max(6.0, 0.2 * radius_guess)
 
 
 def _fit_ring_peak(
@@ -1510,6 +1602,7 @@ def spot_measurement_record(spot: dict) -> dict:
         "fwhm_inv_angstrom": None,
         "intensity_integrated": None,
         "hkl": spot.get("hkl", ""),
+        "hkl_candidates": "|".join(spot.get("hkl_candidates") or []),
         "note": spot.get("note", ""),
     }
 
@@ -1539,6 +1632,7 @@ def ring_measurement_record(ring: dict) -> dict:
         "fwhm_inv_angstrom": ring.get("fwhm_inv_angstrom"),
         "intensity_integrated": ring.get("intensity_integrated"),
         "hkl": ring.get("hkl", ""),
+        "hkl_candidates": "|".join(ring.get("hkl_candidates") or []),
         "note": ring.get("note", ""),
     }
 
@@ -1654,6 +1748,7 @@ class ShowDiffraction(anywidget.AnyWidget):
     _LIST_STATE_FIELDS = {"spots", "rings", "custom_phases", "mask_regions"}
     _STATE_FIELDS = (
         "title",
+        "n_source_frames",
         "frame_idx",
         "panel_width_px",
         "pixel_size",
@@ -1899,6 +1994,8 @@ class ShowDiffraction(anywidget.AnyWidget):
         state=None,
         **kwargs,
     ):
+        # apply after ingest, else clamped against n_frames=1
+        initial_frame_idx = kwargs.pop("frame_idx", None)
         super().__init__(**kwargs)
         t_start = time.perf_counter()
         self.widget_version = resolve_widget_version()
@@ -1912,6 +2009,8 @@ class ShowDiffraction(anywidget.AnyWidget):
 
         self._device = self._best_device()
         self._ingest_data(data)
+        if initial_frame_idx is not None:
+            self.frame_idx = int(initial_frame_idx)
         self._set_initial_calibration(
             pixel_size,
             k_pixel_size,
@@ -2036,21 +2135,24 @@ class ShowDiffraction(anywidget.AnyWidget):
             state = unwrap_state_payload(
                 json.loads(pathlib.Path(state).read_text()),
                 require_envelope=True,
+                expected_widget="ShowDiffraction",
             )
         else:
-            state = unwrap_state_payload(state)
+            state = unwrap_state_payload(state, expected_widget="ShowDiffraction")
         self.load_state_dict(state)
 
     def _ingest_data(self, data):
         array = to_numpy(data)
         is_integer = np.issubdtype(array.dtype, np.integer)
         array = array.astype(np.float32)
+        array = np.nan_to_num(array, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
         if array.size > 2**31 - 1 and self._device.type == "mps":
             self._device = torch.device("cpu")
         if is_integer:
             global_max = float(array.max())
             p999 = float(np.percentile(array, 99.9))
-            if global_max > p999 * 5:
+            # sparse counting frames (p999 = 0)
+            if p999 > 0 and global_max > p999 * 5:
                 array[array > p999 * 3] = 0
         ndim = array.ndim
         if ndim == 2:
@@ -2066,11 +2168,22 @@ class ShowDiffraction(anywidget.AnyWidget):
         self.n_frames = int(array.shape[0])
         self.det_rows = self._det_shape[0]
         self.det_cols = self._det_shape[1]
+        # new stack: reset merge provenance
+        self._n_source_frames = None
 
     @property
     def detector_shape(self) -> tuple[int, int]:
         """Detector shape as ``(rows, cols)``."""
         return self._det_shape
+
+    @property
+    def n_source_frames(self) -> int | None:
+        """Source-frame count before merge_frames appended a merged frame."""
+        return self._n_source_frames
+
+    @n_source_frames.setter
+    def n_source_frames(self, value) -> None:
+        self._n_source_frames = None if value is None else int(value)
 
     def auto_detect_center(self, *, refine: bool = False) -> Self:
         """Find the BF disk center/radius from the summed stack."""
@@ -2164,7 +2277,12 @@ class ShowDiffraction(anywidget.AnyWidget):
             self.offline_frames = b""
 
     def _compute_spot_info(
-        self, row: float, col: float, row_err: float = 0.0, col_err: float = 0.0
+        self,
+        row: float,
+        col: float,
+        row_err: float = 0.0,
+        col_err: float = 0.0,
+        frame_idx: int | None = None,
     ) -> dict:
         d_row = row - self.center_row
         d_col = col - self.center_col
@@ -2184,7 +2302,8 @@ class ShowDiffraction(anywidget.AnyWidget):
         else:
             r_err = math.hypot(row_err, col_err)
 
-        frame = self._displayed_frame()
+        # sample the record's source frame
+        frame = self._get_frame(self.frame_idx if frame_idx is None else frame_idx)
         r_int = max(0, min(self.det_rows - 1, int(round(row))))
         c_int = max(0, min(self.det_cols - 1, int(round(col))))
         intensity = float(frame[r_int, c_int])
@@ -2213,15 +2332,12 @@ class ShowDiffraction(anywidget.AnyWidget):
         if not spots:
             return spots
         reference = spots[0]
-        center_row, center_col = self.center_row, self.center_col
-        ref_row = reference["row"] - center_row
-        ref_col = reference["col"] - center_col
+        ref_row, ref_col = self._spot_vector(reference)
         ref_radius = math.hypot(ref_row, ref_col)
         ref_error = math.hypot(reference.get("row_err", 0.0), reference.get("col_err", 0.0))
         with_angles = []
         for spot in spots:
-            delta_row = spot["row"] - center_row
-            delta_col = spot["col"] - center_col
+            delta_row, delta_col = self._spot_vector(spot)
             radius = math.hypot(delta_row, delta_col)
             if ref_radius > 0 and radius > 0:
                 cos_a = max(
@@ -2281,19 +2397,23 @@ class ShowDiffraction(anywidget.AnyWidget):
         keep = (prominence > 0) & (contrast >= level)
         coords, prominence = coords[keep], prominence[keep]
         if coords.size:
-            # isolated peaks only: a circle around a spot drops on all sides,
-            # around a ring-crest bump it stays high along the ring
+            # min over opposite samples: crests high both sides, lone neighbors one
             angles = np.linspace(0.0, 2.0 * np.pi, 16, endpoint=False)
             ring_r = float(max(3, min_distance))
             rr = np.clip(coords[:, :1] + ring_r * np.sin(angles), 0, n_rows - 1).astype(int)
             cc = np.clip(coords[:, 1:] + ring_r * np.cos(angles), 0, n_cols - 1).astype(int)
             ring_vals = work[rr, cc]
             peak = work[coords[:, 0], coords[:, 1]]
-            hi = np.percentile(ring_vals, 90, axis=1)
+            hi = np.minimum(ring_vals[:, :8], ring_vals[:, 8:]).max(axis=1)
             lo = np.percentile(ring_vals, 10, axis=1)
             isolated = (peak - hi) >= 0.5 * np.maximum(peak - lo, 1e-9)
             coords, prominence = coords[isolated], prominence[isolated]
-        order = np.argsort(-prominence)
+        kept: list[int] = []
+        for idx in np.argsort(-prominence):
+            r0, c0 = coords[idx]
+            if all(np.hypot(r0 - coords[j][0], c0 - coords[j][1]) > min_distance for j in kept):
+                kept.append(int(idx))
+        order = np.asarray(kept, dtype=int)
         if max_spots is not None:
             order = order[: int(max_spots)]
         for r0, c0 in coords[order]:
@@ -2314,15 +2434,16 @@ class ShowDiffraction(anywidget.AnyWidget):
         except Exception:
             return self
         y = np.asarray(intensity, dtype=np.float64)
-        if replace:
-            self.clear_rings()
         if y.size < 5:
             return self
+        # import before clearing picks
         try:
             from scipy.ndimage import gaussian_filter1d
             from scipy.signal import find_peaks
         except Exception:
             return self
+        if replace:
+            self.clear_rings()
         if exclude_radius is None:
             exclude_radius = self.bf_radius
         y_log = np.log1p(np.clip(y - y.min(), 0.0, None))
@@ -2399,6 +2520,8 @@ class ShowDiffraction(anywidget.AnyWidget):
             "row_err": float(row_err),
             "col_err": float(col_err),
             "fit_quality": fit_quality,
+            # source-frame provenance
+            "frame_idx": int(self.frame_idx),
             **empty_index_fields(),
             **info,
         }
@@ -2476,7 +2599,11 @@ class ShowDiffraction(anywidget.AnyWidget):
             {
                 **s,
                 **self._compute_spot_info(
-                    s["row"], s["col"], s.get("row_err", 0.0), s.get("col_err", 0.0)
+                    s["row"],
+                    s["col"],
+                    s.get("row_err", 0.0),
+                    s.get("col_err", 0.0),
+                    frame_idx=s.get("frame_idx"),
                 ),
             }
             for s in self.spots
@@ -2490,13 +2617,14 @@ class ShowDiffraction(anywidget.AnyWidget):
         self._update_profile()
         self._update_azimuthal()
 
-    def _compute_ring_info(self, radius_px: float) -> dict:
+    def _compute_ring_info(self, radius_px: float, frame_idx: int | None = None) -> dict:
         if self.k_calibrated and self.k_pixel_size > 0:
             g_magnitude = float(radius_px) * self.k_pixel_size
             d_spacing = 1.0 / g_magnitude if g_magnitude > 0 else None
         else:
             g_magnitude = d_spacing = None
-        radii_px, intensity = self._radial_profile()
+        # sample the record's source frame
+        radii_px, intensity = self._radial_profile(frame_idx=frame_idx)
         ring_intensity = (
             float(intensity[int(np.argmin(np.abs(radii_px - radius_px)))])
             if radii_px.size
@@ -2511,8 +2639,12 @@ class ShowDiffraction(anywidget.AnyWidget):
 
     def add_ring(self, radius_px: float) -> Self:
         """Add a ring at radius_px from the center (polycrystalline d-spacing pick)."""
+        if radius_px <= 0:
+            raise ValueError(f"radius_px must be positive, got {radius_px}")
         ring = {
             "id": next_record_id(self.rings),
+            # source-frame provenance
+            "frame_idx": int(self.frame_idx),
             **empty_index_fields(),
             **self._compute_ring_info(radius_px),
         }
@@ -2540,7 +2672,16 @@ class ShowDiffraction(anywidget.AnyWidget):
     def _recompute_rings(self):
         if not self.rings:
             return
-        self.rings = [{**r, **self._compute_ring_info(r["radius_px"])} for r in self.rings]
+        calibrated = self.k_calibrated and self.k_pixel_size > 0
+        rings = []
+        for r in self.rings:
+            ring = {**r, **self._compute_ring_info(r["radius_px"], frame_idx=r.get("frame_idx"))}
+            if ring.get("fwhm_px") is not None:
+                ring["fwhm_inv_angstrom"] = (
+                    ring["fwhm_px"] * self.k_pixel_size if calibrated else None
+                )
+            rings.append(ring)
+        self.rings = rings
 
     def fit_ring_profile(
         self,
@@ -2573,6 +2714,8 @@ class ShowDiffraction(anywidget.AnyWidget):
                 continue
             raw_radius = update.pop("raw_radius_px")
             ring.setdefault("raw_radius_px", raw_radius)
+            # fit re-measures on the displayed frame
+            ring["frame_idx"] = int(self.frame_idx)
             ring.update(self._compute_ring_info(update["radius_px"]))
             ring.update(update)
             ring["fwhm_inv_angstrom"] = ring["fwhm_px"] * self.k_pixel_size if calibrated else None
@@ -2583,7 +2726,10 @@ class ShowDiffraction(anywidget.AnyWidget):
     def _on_ring_add_request(self, change=None):
         val = self._ring_add_request
         if val and len(val) == 1:
-            self.add_ring(val[0])
+            try:
+                self.add_ring(val[0])
+            except ValueError:
+                pass
             self._ring_add_request = []
 
     def _on_ring_undo_request(self, change=None):
@@ -2619,10 +2765,12 @@ class ShowDiffraction(anywidget.AnyWidget):
             return
         prefix, method = self._STATUS_REQUESTS[change["name"]]
         try:
+            # KeyError/TypeError cover malformed custom_phases entries
             self.analysis_status = getattr(self, method)()
-        except (ValueError, ImportError) as exc:
+        except (ValueError, ImportError, KeyError, TypeError) as exc:
             self.analysis_status = f"{prefix} failed: {exc}"
-        setattr(self, change["name"], False)
+        finally:
+            setattr(self, change["name"], False)
         try:
             self.quality_report()
         except (ValueError, ImportError):
@@ -2741,7 +2889,7 @@ class ShowDiffraction(anywidget.AnyWidget):
         max_rings: int = 8,
         exclude_radius: float | None = None,
     ) -> Self:
-        """Run center finding, ring detection, calibration, fitting, and indexing.
+        """Run center finding, ring detection, fitting, calibration, and indexing.
 
         Silent on success; ``analysis_status`` only reports steps that failed.
         """
@@ -2751,6 +2899,13 @@ class ShowDiffraction(anywidget.AnyWidget):
         self.detect_rings(max_rings=max_rings, exclude_radius=exclude_radius)
         if not self.rings:
             problems.append("ring detection failed (no rings found)")
+        if self.rings:
+            try:
+                self.fit_ring_profile()
+                if all(r.get("fit_quality") is None for r in self.rings):
+                    problems.append("ring fit failed")
+            except (ValueError, ImportError):
+                problems.append("ring fit failed")
         if phase is None and self.phase_name:
             problems.append(f'calibration failed (phase "{self.phase_name}" not found)')
         if phase is not None and self.rings:
@@ -2759,13 +2914,6 @@ class ShowDiffraction(anywidget.AnyWidget):
             except ValueError as exc:
                 problems.append(f"calibration failed ({exc})")
                 phase = None
-        if self.rings:
-            try:
-                self.fit_ring_profile()
-                if all(r.get("fit_quality") is None for r in self.rings):
-                    problems.append("ring fit failed")
-            except (ValueError, ImportError):
-                problems.append("ring fit failed")
         if phase is not None and self.k_calibrated:
             try:
                 self.index_rings(phase)
@@ -2773,6 +2921,12 @@ class ShowDiffraction(anywidget.AnyWidget):
                     problems.append("indexing failed (no rings matched)")
             except ValueError as exc:
                 problems.append(f"indexing failed ({exc})")
+            unindexed = sum(1 for r in self.rings if not r.get("hkl"))
+            if unindexed and any(r.get("hkl") for r in self.rings):
+                problems.append(
+                    f"calibration left {unindexed} of {len(self.rings)} rings unindexed "
+                    "(check excluded regions)"
+                )
         self.analysis_status = "Auto: " + ", ".join(problems) if problems else ""
         return self
 
@@ -2785,6 +2939,10 @@ class ShowDiffraction(anywidget.AnyWidget):
         if statistic not in ("mean", "median", "max"):
             raise ValueError(f"statistic must be mean, median or max, got {statistic!r}")
         frames = self._data.cpu().numpy().astype(np.float64)
+        # merge original frames only
+        n_source = getattr(self, "_n_source_frames", None)
+        if n_source is not None:
+            frames = frames[:n_source]
         if align:
             aligned, shifts, used = align_frames(frames, max_shift=max_shift)
         else:
@@ -2802,22 +2960,29 @@ class ShowDiffraction(anywidget.AnyWidget):
         if self.rings:
             r0 = max(r["radius_px"] for r in self.rings)
             center = (self.center_row, self.center_col)
-            report["before"] = ring_uniformity(frames[self.frame_idx], center, r0)
-            report["after"] = ring_uniformity(merged, center, r0)
+            mask = self._analysis_mask()
+            before_idx = min(self.frame_idx, len(frames) - 1)
+            report["before"] = ring_uniformity(frames[before_idx], center, r0, mask=mask)
+            report["after"] = ring_uniformity(merged, center, r0, mask=mask)
         self._ingest_data(np.concatenate([frames, merged[None]], axis=0).astype(np.float32))
+        self._n_source_frames = int(len(frames))
         self.frame_idx = self.n_frames - 1
         self._update_frame()
         self._bake_offline_frames()
+        # refresh panes explicitly
+        self._update_profile()
+        self._update_azimuthal()
         return report
 
     def quality_report(self) -> dict:
         """QC snapshot: center method, calibration, ellipse, ring fits,
         unexplained rings, mask coverage, and outermost-ring SNR.
         """
-        frame = self._displayed_frame().astype(np.float64)
         mask = self._analysis_mask()
         indexed = [r for r in self.rings if r.get("hkl")]
         report = {
+            # snapshot attribution
+            "frame_idx": int(self.frame_idx),
             "center": {"method": self.center_method or self.center_mode},
             "calibration": {
                 "source": self.calibration_source,
@@ -2834,9 +2999,14 @@ class ShowDiffraction(anywidget.AnyWidget):
             "mask_coverage_pct": float(mask.mean() * 100.0) if mask is not None else 0.0,
         }
         if self.rings:
-            r0 = max(r["radius_px"] for r in self.rings)
+            outermost = max(self.rings, key=lambda r: r["radius_px"])
+            # SNR on the frame the ring was measured on
+            snr_idx = outermost.get("frame_idx")
+            frame = (
+                self._displayed_frame() if snr_idx is None else self._get_frame(snr_idx)
+            ).astype(np.float64)
             report["ring_snr"] = ring_uniformity(
-                frame, (self.center_row, self.center_col), r0
+                frame, (self.center_row, self.center_col), float(outermost["radius_px"]), mask=mask
             )
         self._quality = report
         return report
@@ -2875,9 +3045,11 @@ class ShowDiffraction(anywidget.AnyWidget):
         max_radius: float | None = None,
         center: tuple[float, float] | None = None,
         angular_range: tuple[float, float] | None = None,
+        frame_idx: int | None = None,
     ) -> tuple[np.ndarray, np.ndarray]:
+        frame = self._displayed_frame() if frame_idx is None else self._get_frame(frame_idx)
         return radial_profile_px(
-            self._displayed_frame(),
+            frame,
             center=center or (self.center_row, self.center_col),
             n_bins=n_bins,
             max_radius=max_radius,
@@ -2955,6 +3127,11 @@ class ShowDiffraction(anywidget.AnyWidget):
             raise ValueError(f"no ring with id {ring_id}; have {[r['id'] for r in self.rings]}")
         return float(matches[0]["radius_px"])
 
+    def _ring_half_width(self, radius_px: float) -> float:
+        """Default annulus half-width that keeps neighboring rings out."""
+        gaps = [abs(radius_px - r["radius_px"]) for r in self.rings if r["radius_px"] != radius_px]
+        return min(6.0, max(3.0, min(gaps) / 2.0)) if gaps else max(6.0, 0.25 * radius_px)
+
     def azimuthal_profile(
         self,
         *,
@@ -2965,7 +3142,7 @@ class ShowDiffraction(anywidget.AnyWidget):
     ) -> tuple[np.ndarray, np.ndarray]:
         """Intensity vs azimuth around a ring."""
         radius = self._ring_radius_for(ring_id, radius_px)
-        half_width = float(width) if width is not None else max(6.0, 0.25 * radius)
+        half_width = float(width) if width is not None else self._ring_half_width(radius)
         return azimuthal_profile_from_frame(
             self._displayed_frame(),
             center=(self.center_row, self.center_col),
@@ -2996,7 +3173,7 @@ class ShowDiffraction(anywidget.AnyWidget):
     def fit_ellipse(self, ring_id: int | None = None, *, n_theta: int = 180) -> dict:
         """Fit ellipse distortion from ring radius vs azimuth."""
         radius = self._ring_radius_for(ring_id, None)
-        half_width = max(6.0, 0.25 * radius)
+        half_width = self._ring_half_width(radius)
         theta_centers, counts, _, weight_sum, weighted_radius_sum = ring_sectors(
             self._displayed_frame(),
             center=(self.center_row, self.center_col),
@@ -3159,7 +3336,7 @@ class ShowDiffraction(anywidget.AnyWidget):
             {
                 "d": reflection["d"],
                 "hkl": reflection["hkl_str"],
-                "i_rel": reflection["intensity"] or 0.0,
+                "i_rel": reflection["intensity"],
             }
             for reflection in phase.reflections(d_min=d_min)
         ]
@@ -3168,7 +3345,11 @@ class ShowDiffraction(anywidget.AnyWidget):
         reports = []
         d_min = min(observed) * 0.8
         for phase in phases:
-            lines = self._phase_lines(phase, d_min=d_min)
+            # skip degenerate candidates
+            try:
+                lines = self._phase_lines(phase, d_min=d_min)
+            except ValueError:
+                continue
             if len(lines) < 2:
                 continue
             report = match_candidate(observed, lines, tol=tol)
@@ -3191,7 +3372,15 @@ class ShowDiffraction(anywidget.AnyWidget):
         status = f"{top['name']}: {top['matched']}/{top['n_obs']} lines"
         if top["n_obs"] < 4:
             status += "; few measured lines"
-        runners = ", ".join(report["name"] for report in reports[1:3])
+        runners = ", ".join(
+            report["name"]
+            + (
+                f" (also {report['matched']}/{report['n_obs']})"
+                if report["matched"] == top["matched"]
+                else ""
+            )
+            for report in reports[1:3]
+        )
         return f"{status}; next: {runners}" if runners else status
 
     def _set_identify_results(self, reports: list[dict]) -> None:
@@ -3247,7 +3436,13 @@ class ShowDiffraction(anywidget.AnyWidget):
         return rows
 
     def _spot_vector(self, spot: dict) -> tuple[float, float]:
-        return spot["row"] - self.center_row, spot["col"] - self.center_col
+        return corrected_vector(
+            spot["row"] - self.center_row,
+            spot["col"] - self.center_col,
+            ellipse_ratio=self.ellipse_ratio,
+            ellipse_angle=self.ellipse_angle,
+            ellipse_corrected=self.ellipse_corrected,
+        )
 
     def _measured_angle(self, s1: dict, s2: dict) -> float:
         dr1, dc1 = self._spot_vector(s1)
@@ -3257,6 +3452,26 @@ class ShowDiffraction(anywidget.AnyWidget):
             return 0.0
         cos_a = max(-1.0, min(1.0, (dr1 * dr2 + dc1 * dc2) / (r1 * r2)))
         return math.degrees(math.acos(cos_a))
+
+    @staticmethod
+    def _hkl_variants(phase: Phase, hkl: Sequence[int]) -> list[tuple[int, int, int]]:
+        """All equal-d images of a reflection, canonical first.
+
+        Signed permutations do not close hexagonal families (the 60-degree
+        images of (110) are (-1,2,0)-type), so the whole index grid within a
+        sum-of-|indices| bound is scanned for reflections at the same d.
+        """
+        d_ref = phase.d_spacing(hkl)
+        bound = max(1, int(sum(abs(int(i)) for i in hkl)))
+        axis = np.arange(-bound, bound + 1)
+        grid = np.stack(np.meshgrid(axis, axis, axis, indexing="ij"), axis=-1).reshape(-1, 3)
+        inv_d_sq = np.einsum("ij,jk,ik->i", grid, phase._g_star, grid)
+        ref = 1.0 / d_ref**2
+        close = np.abs(inv_d_sq - ref) <= 2e-6 * ref  # rel_tol 1e-6 on d
+        variants = {
+            tuple(int(i) for i in row) for row in grid[close] if phase.is_allowed(row)
+        }
+        return sorted(variants, key=_label_preference)
 
     def _find_anchor_pair(
         self,
@@ -3308,21 +3523,40 @@ class ShowDiffraction(anywidget.AnyWidget):
             return self
 
         i, j, ci, cj = anchors
-        ref = {i: ci, j: cj}
+        # zone axis from the second-reflection variant matching the measured angle
+        measured_ij = self._measured_angle(spots[i], spots[j])
+        cj_variant = min(
+            self._hkl_variants(phase, cj["hkl"]),
+            key=lambda v: round(abs(phase.plane_angle(ci["hkl"], v) - measured_ij), 6),
+        )
+        h1, k1, l1 = (int(x) for x in ci["hkl"])
+        h2, k2, l2 = cj_variant
+        axis = (k1 * l2 - l1 * k2, l1 * h2 - h1 * l2, h1 * k2 - k1 * h2)
+
+        def in_zone(hkl):
+            return hkl[0] * axis[0] + hkl[1] * axis[1] + hkl[2] * axis[2] == 0
+
+        # remaining spots: family variant satisfying the zone law and angle
+        anchor_choice = {i: (ci, tuple(int(x) for x in ci["hkl"])), j: (cj, cj_variant)}
         for idx, (s, cands) in enumerate(zip(spots, cand_lists)):
-            if idx in ref:
-                chosen = ref[idx]
-            elif cands:
-                measured = self._measured_angle(spots[i], s)
-                chosen = min(
-                    cands, key=lambda c: abs(phase.plane_angle(ci["hkl"], c["hkl"]) - measured)
-                )
+            if idx in anchor_choice:
+                chosen, variant = anchor_choice[idx]
             else:
-                chosen = None
+                measured = self._measured_angle(spots[i], s)
+                chosen, variant, best_err = None, None, None
+                for c in cands:
+                    for v in self._hkl_variants(phase, c["hkl"]):
+                        if not in_zone(v):
+                            continue
+                        err = round(abs(phase.plane_angle(ci["hkl"], v) - measured), 6)
+                        if err <= angle_tol and (best_err is None or err < best_err):
+                            chosen, variant, best_err = c, v, err
+            if chosen is not None and not in_zone(tuple(int(x) for x in chosen["hkl"])):
+                chosen = {**chosen, "hkl_str": _format_hkl(variant)}
             s.update(index_assignment(chosen))
 
         self.spots = self._with_angles(spots)
-        self.zone_axis = format_zone_axis(ci["hkl"], cj["hkl"])
+        self.zone_axis = format_zone_axis(ci["hkl"], cj_variant)
         self._set_phase_match(
             self._match_report(phase, [s.get("d_spacing") for s in spots], tol), phase.absences
         )
@@ -3382,16 +3616,24 @@ class ShowDiffraction(anywidget.AnyWidget):
             assigned, errs = [], []
             for r in radii:
                 x_pred = r / scale
+                if x_pred <= 0:
+                    assigned.append(None)
+                    errs.append(None)
+                    continue
                 nearest = min(range(len(inv_d)), key=lambda i: abs(inv_d[i] - x_pred))
-                err = abs(inv_d[nearest] - x_pred) / x_pred
+                err = abs(inv_d[nearest] - x_pred) / abs(x_pred)
                 assigned.append(nearest if err <= tol else None)
                 errs.append(err if err <= tol else None)
             used = [a for a in assigned if a is not None]
             n_ok = len(used)
             if n_ok < 2:
                 continue
-            mean_err = float(np.mean([e for e in errs if e is not None]))
-            candidate_key = (n_ok, -sum(inv_d[a] for a in used), -mean_err)
+            in_tol = [e for e in errs if e is not None]
+            mean_err = float(np.mean(in_tol))
+            # only machine-precision assignments outrank the low-order preference
+            worst_px = max(e * r for e, r in zip(errs, radii) if e is not None)
+            exact = 1 if worst_px <= 1e-6 else 0
+            candidate_key = (n_ok, exact, -sum(inv_d[a] for a in used), -mean_err)
             if best is None or candidate_key > best[0]:
                 best = (candidate_key, assigned)
         if best is None:
@@ -3442,8 +3684,8 @@ class ShowDiffraction(anywidget.AnyWidget):
         if val and len(val) == 2:
             try:
                 self.calibrate_from_ring(val[0], val[1])
-            except ValueError:
-                pass
+            except ValueError as exc:
+                self.analysis_status = f"Calibrate failed: {exc}"
             self._calibrate_from_ring_request = []
 
     def _on_calibrate_from_spot_request(self, change=None):
@@ -3451,8 +3693,8 @@ class ShowDiffraction(anywidget.AnyWidget):
         if val and len(val) == 3:
             try:
                 self.calibrate_from_spot(val[0], val[1], val[2])
-            except ValueError:
-                pass
+            except ValueError as exc:
+                self.analysis_status = f"Calibrate failed: {exc}"
             self._calibrate_from_spot_request = []
 
     def export_measurements(self, path: str) -> pathlib.Path:
@@ -3468,10 +3710,12 @@ class ShowDiffraction(anywidget.AnyWidget):
         """Rebuild the measurement table from a saved state."""
         if isinstance(state, (str, pathlib.Path)):
             state = unwrap_state_payload(
-                json.loads(pathlib.Path(state).read_text()), require_envelope=True
+                json.loads(pathlib.Path(state).read_text()),
+                require_envelope=True,
+                expected_widget="ShowDiffraction",
             )
         else:
-            state = unwrap_state_payload(state)
+            state = unwrap_state_payload(state, expected_widget="ShowDiffraction")
         records = build_measurement_records(state.get("spots", []), state.get("rings", []))
         if path is None:
             return records
@@ -3568,6 +3812,9 @@ class ShowDiffraction(anywidget.AnyWidget):
         if not hasattr(self, "_data") or self._data is None:
             raise ValueError("Cannot export HTML after free(); rebuild the widget first.")
         clone = type(self)(to_numpy(self._data), state=self.state_dict(), verbose=False)
+        # derived panels are not state fields
+        clone._identify_results = list(self._identify_results)
+        clone._quality = dict(self._quality)
         clone.offline = True
         clone.export_enabled = False
         clone.export_status = ""
@@ -3599,6 +3846,9 @@ class ShowDiffraction(anywidget.AnyWidget):
         self.auto_detect_center()
         self._update_frame()
         self._bake_offline_frames()
+        # refresh panes explicitly
+        self._update_profile()
+        self._update_azimuthal()
         return self
 
     def state_dict(self):
@@ -3630,18 +3880,34 @@ class ShowDiffraction(anywidget.AnyWidget):
 
     def load_state_dict(self, state):
         """Restore widget state from a dict; unknown keys are ignored."""
+        deferred = {}
         for key, val in state.items():
             # State restore
-            if key in self._STATE_FIELDS:
-                setattr(self, key, val)
+            if key not in self._STATE_FIELDS:
+                continue
+            # measurement records last, so geometry restores do not resample them
+            if key in ("spots", "rings"):
+                deferred[key] = val
+                continue
+            if key == "frame_idx":
+                requested = int(val)
+                self.frame_idx = requested
+                if self.frame_idx != requested:
+                    self.analysis_status = (
+                        f"Saved frame_idx {requested} clamped to {self.frame_idx}: "
+                        f"data has {self.n_frames} frames"
+                    )
+                continue
+            setattr(self, key, val)
+        for key, val in deferred.items():
+            setattr(self, key, val)
 
     def summary(self):
         """Print a text summary of calibration, spots, rings, and indexing."""
         lines = [self.title or "ShowDiffraction", "═" * 32]
         lines.append(f"Frames:   {self.n_frames} (showing #{self.frame_idx})")
-        k_unit = "1/Å" if self.k_calibrated else "px"
-        k_val = f"{self.k_pixel_size:.4f}" if self.k_calibrated else "uncalibrated"
-        lines.append(f"Detector: {self.det_rows}×{self.det_cols} ({k_val} {k_unit}/px)")
+        k_info = f"{self.k_pixel_size:.4f} 1/Å/px" if self.k_calibrated else "uncalibrated"
+        lines.append(f"Detector: {self.det_rows}×{self.det_cols} ({k_info})")
         if self.k_calibrated:
             source = {
                 "from_phase": "phase",
@@ -3671,11 +3937,12 @@ class ShowDiffraction(anywidget.AnyWidget):
                 if s.get("d_spacing"):
                     derr = s.get("d_spacing_err")
                     d = f"{s['d_spacing']:.3f}±{derr:.3f} Å" if derr else f"{s['d_spacing']:.3f} Å"
+                    label = f"d={d}"
                 else:
-                    d = f"{s['r_pixels']:.1f} px"
+                    label = f"r={s['r_pixels']:.1f} px"
                 ang = f"  ∠={s['angle_deg']:.1f}°" if s.get("angle_deg") is not None else ""
                 hkl = f"  {s['hkl']}" if s.get("hkl") else ""
-                lines.append(f"  #{s['id']} ({s['row']:.1f}, {s['col']:.1f}) d={d}{ang}{hkl}")
+                lines.append(f"  #{s['id']} ({s['row']:.1f}, {s['col']:.1f}) {label}{ang}{hkl}")
             if len(self.spots) > 5:
                 lines.append(f"  ... +{len(self.spots) - 5} more")
         lines.append(f"Rings:    {len(self.rings)}")
