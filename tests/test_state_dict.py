@@ -289,6 +289,40 @@ def test_show2d_per_panel_cmap_state_roundtrip():
     assert fresh.panel_cmaps == ["inferno", "viridis"]
 
 
+def test_show2d_inset_plots_state_roundtrip():
+    data = np.random.default_rng(3).standard_normal((2, 16, 16)).astype(np.float32)
+    widget = Show2D(
+        data,
+        inset_plots=[
+            {"x": [0, 1, 2], "y": [0.2, 0.8, 0.5], "point": (1, 0.8), "title": "ACF"},
+            {"x": [0, 1, 2], "y": [0.5, 0.4, 0.7], "point": (2, 0.7), "title": "R"},
+        ],
+        verbose=False,
+    )
+
+    fresh = Show2D(data, state=widget.state_dict(), verbose=False)
+    assert fresh.inset_plots == widget.inset_plots
+
+
+def test_show2d_scale_bar_layout_state_roundtrip():
+    data = np.random.default_rng(4).standard_normal((16, 16)).astype(np.float32)
+    widget = Show2D(
+        data,
+        scale_bar_position="bottom-left",
+        show_zoom_indicator=False,
+        verbose=False,
+    )
+
+    state = widget.state_dict()
+    fresh = Show2D(data, state=state, verbose=False)
+
+    assert state["scale_bar_position"] == "bottom-left"
+    assert state["show_zoom_indicator"] is False
+    assert fresh.scale_bar_position == "bottom-left"
+    assert fresh.show_zoom_indicator is False
+    assert fresh._static_overlay_texts()[0][1] == ""
+
+
 def test_show3d_per_panel_cmap_state_roundtrip():
     rng = np.random.default_rng(2)
     data_a = rng.standard_normal((3, 16, 16)).astype(np.float32)

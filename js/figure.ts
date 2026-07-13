@@ -85,6 +85,10 @@ export function drawScaleBarHiDPI(
   pixelSize: number,
   unit: string,
   imageWidth: number,
+  options: {
+    position?: "bottom-right" | "bottom-left";
+    showZoomIndicator?: boolean;
+  } = {},
 ) {
   const ctx = canvas.getContext("2d");
   if (!ctx) return;
@@ -108,7 +112,8 @@ export function drawScaleBarHiDPI(
   const barPx = (nicePhysical / pixelSize) * effectiveZoom;
 
   const barY = cssHeight - margin;
-  const barX = cssWidth - barPx - margin;
+  const position = options.position || "bottom-right";
+  const barX = position === "bottom-left" ? margin : cssWidth - barPx - margin;
 
   ctx.shadowColor = "rgba(0, 0, 0, 0.5)";
   ctx.shadowBlur = 2;
@@ -125,9 +130,12 @@ export function drawScaleBarHiDPI(
   ctx.textBaseline = "bottom";
   ctx.fillText(label, barX + barPx / 2, barY - 4);
 
-  ctx.textAlign = "left";
-  ctx.textBaseline = "bottom";
-  ctx.fillText(formatZoomLabel(zoom), margin, cssHeight - margin + barThickness);
+  if (options.showZoomIndicator !== false) {
+    const zoomX = position === "bottom-left" ? cssWidth - margin : margin;
+    ctx.textAlign = position === "bottom-left" ? "right" : "left";
+    ctx.textBaseline = "bottom";
+    ctx.fillText(formatZoomLabel(zoom), zoomX, cssHeight - margin + barThickness);
+  }
 
   ctx.restore();
 }

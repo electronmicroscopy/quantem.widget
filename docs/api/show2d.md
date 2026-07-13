@@ -21,8 +21,12 @@ no console error, no NaN frame).
 | Control | Trait | Expected effect |
 |---|---|---|
 | Colormap dropdown | `cmap` | Canvas recolors to the chosen map |
+| More menu: Color shared | `panel_cmaps` | Shared by default. Turn off to let the Color dropdown edit only the selected gallery panel; turn on to return to one colormap for all panels |
+| Panel identity markers | `marker_colors`, `identity_colors` | Optional colored strips make rows/columns/panels easy to reference in notebooks, reports, and agent instructions |
 | Contrast min / max sliders | `vmin`, `vmax` | Display clamp changes; histogram markers move |
 | Auto-contrast toggle | `auto_contrast` | Re-fits `vmin`/`vmax` to the percentile range |
+| Contrast preset dropdown | `contrast_preset` | Applies scientist-friendly percentile ranges such as `1-99`, `2-98`, and `3-97` without opening advanced histogram controls |
+| Advanced histogram toggle | `show_histogram_advanced`, `histogram_advanced` | Keeps the default UI compact, then exposes manual percentile details when a user needs them |
 | Log-scale toggle | `log_scale` | Intensity mapped through log |
 | FFT toggle | `show_fft` | Canvas shows the power spectrum; lattice spots appear |
 | FFT window toggle | `fft_window` | Apodization on/off (ringing at edges differs) |
@@ -52,6 +56,10 @@ no console error, no NaN frame).
 | View menu: Crop to view | `view_crop`; `crop_to_view()` | Commits the current viewport as the display extent (single panel, display-only, reversible) |
 | View menu: Padding | `pad_ratio`, `pad_ratios`, `pad_fill_mode`, `pad_fill_modes`, `pad_scope`; `set_padding()` | Adds a ratio-based display border with min/median/mean fill; gallery edits can apply to all panels or the selected panel |
 | View menu: Reset view | `reset_view_ops()` | Restores the uncropped, unpadded display bit-identically |
+| More menu: Flip | `image_flips_horizontal`, `image_flips_vertical` | Display-only horizontal/vertical flips help compare orientations and point-defect neighborhoods without changing stored arrays |
+| More menu: Rotate | `image_rotations`, `rotation_scope`; `rotation=`, `rotations=` | Display-only 0/90/180/270° rotation for every panel or the selected panel; raw data and `(row, col)` coordinates stay unchanged |
+| Panel inset plots | `inset_plots` | Optional per-panel mini line plots for calibration curves, ACF/R sweeps, or other scientific context; hover reports the nearest plotted coordinate |
+| Scale bar placement | `scale_bar_position`, `show_zoom_indicator` | Move the scale bar between bottom corners and hide the zoom badge when an inset plot needs that space |
 
 ## Which denoise filter should I use?
 
@@ -123,6 +131,52 @@ settings. They do **not** store another copy of `frame_bytes`,
 `panel_stack_bytes`, or raw source arrays. `state_dict()` includes the named
 bookmarks so a saved notebook can reopen with the same list of microscope-stage
 positions.
+
+## Add scientific inset plots to panels
+
+Advanced figure-making sometimes needs a compact plot inside each image panel:
+for example an autocorrelation score versus an `R` ratio while reviewing
+automatic denoising calibration. Use `inset_plots` for that per-panel context.
+The top-level parameter stays singular and readable, while each dictionary keeps
+the plot data, placement, labels, and style together.
+
+```python
+Show2D(
+    denoised_panels,
+    labels=["candidate A", "candidate B", "candidate C"],
+    inset_plots=[
+        {
+            "x": r_values,
+            "y": acf_values_for_panel,
+            "point": (best_r, best_acf),
+            "xlabel": "R",
+            "ylabel": "ACF",
+            "legend": "ACF/R",
+            "annotation": f"R*={best_r:.2f}",
+            "position": "bottom-right",
+            "margin": 24,
+            "size": 0.36,
+            "height": 0.26,
+            "show_ticks": True,
+            "xticks": [0, 1],
+            "yticks": [0, 1],
+            "line_width": 2.6,
+            "background_alpha": 0.58,
+            "border_width": 0,
+        }
+        for acf_values_for_panel, best_r, best_acf in calibration_results
+    ],
+    scale_bar_position="bottom-left",
+    show_zoom_indicator=False,
+)
+```
+
+For normal notebooks, prefer `position` plus `margin`, `size`, and `height`.
+Use `box=[left, top, width, height]` only when a publication figure needs exact
+normalized panel coordinates. `border_width=0` gives a clean no-frame look;
+increase `background_alpha` or use a subtle `border_color` when the underlying
+image is noisy. On hover, the live widget reports the nearest plotted
+coordinate using the axis labels, such as `R 0.465 · ACF 0.48`.
 
 ## Remove a background or isolate a periodicity
 

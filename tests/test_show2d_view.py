@@ -72,6 +72,64 @@ def test_current_view_default_is_full_image():
     assert view["height"] == 128.0 and view["width"] == 128.0
 
 
+def test_inset_plots_normalize_per_panel_and_static_png():
+    """C1: scientist attaches one calibration curve per image panel, expect
+    JSON-safe widget state and a saved-notebook PNG fallback that can render."""
+    data = np.stack([_image(64), _image(64) * 0.5 + 0.2])
+    x = np.linspace(0.0, 1.0, 8)
+    plots = [
+        {
+            "x": x,
+            "y": np.sin(x * np.pi),
+            "point": (0.5, 1.0),
+            "xlabel": "R",
+            "box": (0.58, 0.53, 0.34, 0.22),
+            "show_ticks": True,
+            "xticks": (0, 1),
+            "yticks": (0, 1),
+            "legend": "ACF/R",
+            "annotation": "R*=0.5",
+            "tick_font_size": 8,
+            "label_font_size": 9,
+            "legend_font_size": 10,
+            "border_color": "#ffffff",
+            "border_width": 2,
+            "background_alpha": 0.42,
+            "text_color": "#f8f8ff",
+            "tick_color": "#d0e8ff",
+            "margin": (18, 24),
+        },
+        {"x": x, "y": np.cos(x * np.pi) ** 2, "point": (0.25, 0.5), "ylim": (0, 1)},
+    ]
+    w = Show2D(data, inset_plots=plots, marker_colors=["#2e7d32", "#d81b60"], verbose=False)
+
+    assert len(w.inset_plots) == 2
+    assert w.inset_plots[0]["x"] == pytest.approx(x.tolist())
+    assert w.inset_plots[0]["point"] == pytest.approx([0.5, 1.0])
+    assert w.inset_plots[0]["box"] == pytest.approx([0.58, 0.53, 0.34, 0.22])
+    assert w.inset_plots[0]["show_ticks"] is True
+    assert w.inset_plots[0]["xticks"] == pytest.approx([0.0, 1.0])
+    assert w.inset_plots[0]["legend"] == "ACF/R"
+    assert w.inset_plots[0]["annotation"] == "R*=0.5"
+    assert w.inset_plots[0]["tick_font_size"] == pytest.approx(8.0)
+    assert w.inset_plots[0]["border_color"] == "#ffffff"
+    assert w.inset_plots[0]["border_width"] == pytest.approx(2.0)
+    assert w.inset_plots[0]["background_alpha"] == pytest.approx(0.42)
+    assert w.inset_plots[0]["text_color"] == "#f8f8ff"
+    assert w.inset_plots[0]["tick_color"] == "#d0e8ff"
+    assert w.inset_plots[0]["margin"] == pytest.approx([18.0, 24.0])
+    assert w.inset_plots[1]["ylim"] == pytest.approx([0.0, 1.0])
+    assert "inset_plots" in w.state_dict()
+    assert w._static_png_b64(max_px=220)
+
+
+def test_inset_plot_can_broadcast_single_spec():
+    data = np.stack([_image(32), _image(32), _image(32)])
+    w = Show2D(data, inset_plots={"y": [0, 1, 0], "title": "score"}, verbose=False)
+    assert len(w.inset_plots) == 3
+    assert all(plot["title"] == "score" for plot in w.inset_plots)
+
+
 def test_current_view_uses_zoom_center():
     w = Show2D(_image(128), zoom=4.0, zoom_row=16.0, zoom_col=112.0, verbose=False)
     view = w.current_view
@@ -122,6 +180,33 @@ def test_view_box_survives_state_dict_round_trip():
     w2.load_state_dict(w1.state_dict())
     assert w2.view_box == [8.0, 40.0, 16.0, 48.0]
     assert w2.current_view["box"] == (8.0, 40.0, 16.0, 48.0)
+
+
+def test_show2d_identity_markers_histogram_preset_and_flips_round_trip():
+    # C1: scientist/agent-readable identity markers, contrast preset state,
+    # and display-only flips are lightweight view state and survive save/load.
+    data = np.random.default_rng(169).random((3, 16, 16), dtype=np.float32)
+    w1 = Show2D(
+        data,
+        marker_colors=["green", "red", "magenta"],
+        marker_style="around",
+        contrast_preset="2-98",
+        show_histogram_advanced=True,
+        image_flips_horizontal=[True, False, True],
+        image_flips_vertical=[False, True, False],
+        verbose=False,
+    )
+    w2 = Show2D(data, verbose=False)
+
+    w2.load_state_dict(w1.state_dict())
+
+    assert w2.marker_colors == ["green", "red", "magenta"]
+    assert w2.marker_style == "around"
+    assert w2.contrast_preset == "2-98"
+    assert w2.show_histogram_advanced is True
+    assert w2.image_flips_horizontal == [True, False, True]
+    assert w2.image_flips_vertical == [False, True, False]
+    assert w2._data.shape == data.shape
 
 
 def test_binned_preview_detail_request_returns_full_resolution_crop():

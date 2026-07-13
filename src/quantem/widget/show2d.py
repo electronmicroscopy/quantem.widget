@@ -73,6 +73,164 @@ _DENOISE_STATE_ALIASES = {
 _DEFAULT_FOLDER_PAGE_SIZE = 20
 
 
+def _rotation_to_quarter_turns(value: int | float) -> int:
+    """Normalize a display rotation in degrees or quarter-turn units.
+
+    Public APIs accept scientist-readable degrees (0, 90, 180, 270). For
+    backwards compatibility with existing internal state, small integer values
+    0..3 are also accepted as quarter turns.
+    """
+    angle = float(value)
+    if angle in (0, 1, 2, 3):
+        return int(angle) % 4
+    if not np.isfinite(angle) or abs(angle / 90 - round(angle / 90)) > 1e-9:
+        raise ValueError(
+            f"rotation must be 0, 90, 180, 270, or a quarter-turn 0..3; got {value!r}"
+        )
+    return int(round(angle / 90)) % 4
+
+
+def _normalize_rotation_list(
+    *,
+    n_items: int,
+    rotation: int | float = 0,
+    rotations: Sequence[int | float] | None = None,
+) -> list[int]:
+    """Return one normalized quarter-turn per item."""
+    if rotations is None:
+        return [_rotation_to_quarter_turns(rotation)] * int(n_items)
+    values = [_rotation_to_quarter_turns(value) for value in rotations]
+    if len(values) != int(n_items):
+        raise ValueError(
+            f"rotations length ({len(values)}) must match the number of items ({int(n_items)})"
+        )
+    return values
+
+
+def _normalize_inset_plot_specs(
+    inset_plots: Sequence[dict[str, Any] | None] | dict[str, Any] | None,
+    *,
+    n_items: int,
+) -> list[dict[str, Any]]:
+    """Return JSON-safe per-panel inset plot specifications.
+
+    The public API intentionally mirrors the smallest useful slice of a
+    matplotlib line plot: ``x``, ``y``, optional ``point``, optional
+    ``xlim``/``ylim``, and simple style/placement keys.  Arrays are converted
+    to plain lists so the same trait survives notebook state and HTML export.
+    """
+    if inset_plots is None:
+        return []
+    if isinstance(inset_plots, dict):
+        raw_specs: list[dict[str, Any] | None] = [inset_plots]
+    else:
+        raw_specs = list(inset_plots)
+    if len(raw_specs) == 1 and n_items > 1:
+        raw_specs = raw_specs * n_items
+    if len(raw_specs) != int(n_items):
+        raise ValueError(
+            f"inset_plots length ({len(raw_specs)}) must be 1 or match the "
+            f"number of Show2D panels ({int(n_items)})"
+        )
+
+    normalized: list[dict[str, Any]] = []
+    for panel, spec in enumerate(raw_specs):
+        if spec is None:
+            normalized.append({})
+            continue
+        if not isinstance(spec, dict):
+            raise TypeError(f"inset_plots[{panel}] must be a dict or None")
+        x_raw = spec.get("x")
+        y_raw = spec.get("y")
+        if y_raw is None and "points" in spec:
+            points = np.asarray(spec["points"], dtype=np.float64)
+            if points.ndim != 2 or points.shape[1] != 2:
+                raise ValueError(
+                    f"inset_plots[{panel}]['points'] must have shape (N, 2)"
+                )
+            x = points[:, 0]
+            y = points[:, 1]
+        else:
+            if y_raw is None:
+                raise ValueError(f"inset_plots[{panel}] must include 'y' or 'points'")
+            y = np.asarray(y_raw, dtype=np.float64).ravel()
+            x = (
+                np.arange(y.size, dtype=np.float64)
+                if x_raw is None
+                else np.asarray(x_raw, dtype=np.float64).ravel()
+            )
+        if x.size != y.size or x.size < 2:
+            raise ValueError(
+                f"inset_plots[{panel}] x/y must have the same length >= 2; "
+                f"got {x.size} and {y.size}"
+            )
+        if not np.isfinite(x).all() or not np.isfinite(y).all():
+            raise ValueError(f"inset_plots[{panel}] contains NaN or inf")
+        out: dict[str, Any] = {
+            "x": [float(v) for v in x],
+            "y": [float(v) for v in y],
+        }
+        for key in (
+            "title",
+            "legend",
+            "legend_position",
+            "annotation",
+            "annotation_position",
+            "xlabel",
+            "ylabel",
+            "color",
+            "point_color",
+            "border_color",
+            "text_color",
+            "tick_color",
+            "position",
+            "background",
+        ):
+            if key in spec and spec[key] is not None:
+                out[key] = str(spec[key])
+        for key in ("size", "height", "line_width", "border_width", "background_alpha", "tick_font_size", "label_font_size", "legend_font_size"):
+            if key in spec and spec[key] is not None:
+                out[key] = float(spec[key])
+        for key in ("show_ticks", "show_panel_index"):
+            if key in spec and spec[key] is not None:
+                out[key] = bool(spec[key])
+        for key in ("xlim", "ylim", "point"):
+            if key in spec and spec[key] is not None:
+                vals = np.asarray(spec[key], dtype=np.float64).ravel()
+                if vals.size != 2 or not np.isfinite(vals).all():
+                    raise ValueError(f"inset_plots[{panel}]['{key}'] must contain two finite values")
+                out[key] = [float(vals[0]), float(vals[1])]
+        for key in ("box",):
+            if key in spec and spec[key] is not None:
+                vals = np.asarray(spec[key], dtype=np.float64).ravel()
+                if vals.size != 4 or not np.isfinite(vals).all():
+                    raise ValueError(f"inset_plots[{panel}]['{key}'] must contain four finite values")
+                left, top, width, height = (float(v) for v in vals)
+                out[key] = [
+                    max(0.0, min(1.0, left)),
+                    max(0.0, min(1.0, top)),
+                    max(0.05, min(1.0, width)),
+                    max(0.05, min(1.0, height)),
+                ]
+        for key in ("xticks", "yticks"):
+            if key in spec and spec[key] is not None:
+                vals = np.asarray(spec[key], dtype=np.float64).ravel()
+                if vals.size < 1 or not np.isfinite(vals).all():
+                    raise ValueError(f"inset_plots[{panel}]['{key}'] must contain finite values")
+                out[key] = [float(v) for v in vals]
+        if "margin" in spec and spec["margin"] is not None:
+            vals = np.asarray(spec["margin"], dtype=np.float64).ravel()
+            if vals.size == 1:
+                vals = np.repeat(vals, 2)
+            if vals.size != 2 or not np.isfinite(vals).all():
+                raise ValueError(
+                    f"inset_plots[{panel}]['margin'] must be one number or two finite values"
+                )
+            out["margin"] = [max(0.0, float(vals[0])), max(0.0, float(vals[1]))]
+        normalized.append(out)
+    return normalized
+
+
 def _reject_unknown_kwargs(cls, kwargs: dict) -> None:
     """Raise TypeError if kwargs contains any key that isn't a declared trait.
 
@@ -338,6 +496,7 @@ def _format_scale_label(value: float, unit: str) -> str:
 
 # Rec. 709 luma weights: the standard perceptual grayscale reduction of RGB.
 _RGB_LUMA = np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
+_IDENTITY_PALETTE = ("#2e7d32", "#c62828", "#d81b60", "#1565c0", "#f9a825", "#6a1b9a")
 
 
 def _is_rgb_item(item: np.ndarray) -> bool:
@@ -1073,10 +1232,18 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     # =========================================================================
     log_scale = traitlets.Bool(False).tag(sync=True)
     auto_contrast = traitlets.Bool(False).tag(sync=True)
+    contrast_preset = traitlets.Unicode("custom").tag(sync=True)
+    histogram_advanced = traitlets.Bool(False).tag(sync=True)
+    show_histogram_advanced = traitlets.Bool(False).tag(sync=True)
     vmin = traitlets.Float(None, allow_none=True).tag(sync=True)
     vmax = traitlets.Float(None, allow_none=True).tag(sync=True)
     vmins = traitlets.List(trait=traitlets.Float(allow_none=True), allow_none=True, default_value=None).tag(sync=True)
     vmaxs = traitlets.List(trait=traitlets.Float(allow_none=True), allow_none=True, default_value=None).tag(sync=True)
+    identity_colors = traitlets.List(trait=traitlets.Unicode(), default_value=[]).tag(sync=True)
+    marker_colors = traitlets.List(traitlets.Unicode(), default_value=[]).tag(sync=True)
+    marker_style = traitlets.Enum(["left", "around"], default_value="left").tag(sync=True)
+    selected_panels = traitlets.List(traitlets.Int(), default_value=[]).tag(sync=True)
+    inset_plots = traitlets.List(traitlets.Dict(), default_value=[]).tag(sync=True)
 
     # =========================================================================
     # Scale Bar
@@ -1085,9 +1252,13 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     pixel_sizes = traitlets.List(trait=traitlets.Float(), default_value=[]).tag(sync=True)
     pixel_unit = traitlets.Unicode("pixels").tag(sync=True)
     scale_bar_visible = traitlets.Bool(True).tag(sync=True)
+    scale_bar_position = traitlets.Unicode("bottom-right").tag(sync=True)
+    show_zoom_indicator = traitlets.Bool(True).tag(sync=True)
     size = traitlets.Int(0).tag(sync=True)  # Canvas rendering size in CSS pixels; 0 = frontend default
     smooth = traitlets.Bool(False).tag(sync=True)
     initial_zoom = traitlets.Float(1.0).tag(sync=True)
+    flip_rows = traitlets.Bool(False).tag(sync=True)
+    flip_cols = traitlets.Bool(False).tag(sync=True)
     zoom_row = traitlets.Float(None, allow_none=True).tag(sync=True)
     zoom_col = traitlets.Float(None, allow_none=True).tag(sync=True)
     # Live viewport (row0, row1, col0, col1) in image pixel coordinates.
@@ -1161,6 +1332,9 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     # Per-Image Rotation
     # =========================================================================
     image_rotations = traitlets.List(traitlets.Int(), []).tag(sync=True)
+    rotation_scope = traitlets.Enum(["all", "panel"], default_value="all").tag(sync=True)
+    image_flips_horizontal = traitlets.List(traitlets.Bool(), default_value=[]).tag(sync=True)
+    image_flips_vertical = traitlets.List(traitlets.Bool(), default_value=[]).tag(sync=True)
 
     @classmethod
     def from_gif(
@@ -1332,6 +1506,8 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         units: str | list[str] | None = None,
         scale_bar_visible: bool | None = None,
         show_scale_bar: bool | None = None,
+        scale_bar_position: str = "bottom-right",
+        show_zoom_indicator: bool = True,
         show_fft: bool = False,
         fft_window: bool = True,
         fft_metrics: bool = True,
@@ -1342,9 +1518,15 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         verbose: bool = True,
         log_scale: bool = False,
         auto_contrast: bool = False,
+        contrast_preset: str = "custom",
+        histogram_advanced: bool = False,
         offline: bool = False,
         vmin: float | list | None = None,
         vmax: float | list | None = None,
+        identity_colors: Sequence[str] | None = None,
+        marker_colors: Sequence[str] | None = None,
+        marker_style: str = "left",
+        inset_plots: Sequence[dict[str, Any] | None] | dict[str, Any] | None = None,
         ncols: int = 3,
         panel_frame_indices: Sequence[int] | None = None,
         panel_playback_fps: float = 10.0,
@@ -1352,6 +1534,11 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         panel_width_px: int = 0,
         smooth: bool = False,
         zoom: float = 1.0,
+        rotation: int | float = 0,
+        rotations: Sequence[int | float] | None = None,
+        rotation_scope: str = "all",
+        flip_rows: bool = False,
+        flip_cols: bool = False,
         zoom_row: float | None = None,
         zoom_col: float | None = None,
         center: tuple | list | None = None,
@@ -1360,6 +1547,9 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         link_contrast: bool = True,
         diff_mode: bool = False,
         overlay: bool | str = False,
+        show_histogram_advanced: bool | None = None,
+        image_flips_horizontal: Sequence[bool] | None = None,
+        image_flips_vertical: Sequence[bool] | None = None,
         view_box: tuple | list | None = None,
         pad_ratio: float | Sequence[float] = 0.0,
         pad_fill_mode: str | Sequence[str] = "min",
@@ -1498,6 +1688,11 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             and bool(scale_bar_visible) != bool(show_scale_bar)
         ):
             raise ValueError("Use either show_scale_bar or scale_bar_visible, not conflicting values")
+        if scale_bar_position not in {"bottom-right", "bottom-left"}:
+            raise ValueError(
+                "scale_bar_position must be 'bottom-right' or 'bottom-left'; "
+                f"got {scale_bar_position!r}"
+            )
         ui = resolve_ui_mode(
             ui_mode,
             defaults={
@@ -1544,6 +1739,14 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         if center is not None:
             # center=(row, col) sugar: the friendliest way to say where to look
             zoom_row, zoom_col = float(center[0]), float(center[1])
+        if identity_colors is None and marker_colors is not None:
+            identity_colors = marker_colors
+        if show_histogram_advanced:
+            histogram_advanced = True
+        if image_flips_horizontal:
+            flip_cols = any(bool(value) for value in image_flips_horizontal)
+        if image_flips_vertical:
+            flip_rows = any(bool(value) for value in image_flips_vertical)
         with self.hold_sync():
             self._init_sync(
                 data=data, labels=labels, title=title, cmap=base_cmap,
@@ -1552,14 +1755,23 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 page_labels=resolved_page_labels, page_starred=resolved_page_starred,
                 show_title=show_title,
                 sampling=sampling, units=units, scale_bar_visible=scale_bar_visible,
+                scale_bar_position=scale_bar_position,
+                show_zoom_indicator=show_zoom_indicator,
                 show_fft=show_fft, fft_window=fft_window, fft_metrics=fft_metrics,
                 show_controls=show_controls, controls_collapsed=controls_collapsed,
                 show_stats=show_stats, debug=debug,
                 log_scale=log_scale, auto_contrast=auto_contrast, offline=offline,
-                vmin=vmin, vmax=vmax,
+                contrast_preset=contrast_preset, histogram_advanced=histogram_advanced,
+                show_histogram_advanced=show_histogram_advanced,
+                vmin=vmin, vmax=vmax, identity_colors=identity_colors, marker_colors=marker_colors,
+                marker_style=marker_style, inset_plots=inset_plots,
                 ncols=ncols, panel_frame_indices=panel_frame_indices,
                 panel_playback_fps=panel_playback_fps,
                 size=size, smooth=smooth, zoom=zoom,
+                rotation=rotation, rotations=rotations, rotation_scope=rotation_scope,
+                flip_rows=flip_rows, flip_cols=flip_cols,
+                image_flips_horizontal=image_flips_horizontal,
+                image_flips_vertical=image_flips_vertical,
                 zoom_row=zoom_row, zoom_col=zoom_col,
                 link_zoom=link_zoom, link_pan=link_pan, link_contrast=link_contrast,
                 diff_mode=diff_mode, overlay=overlay, view_box=view_box,
@@ -1586,10 +1798,15 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
 
     def _init_sync(self, *, data, labels, title, cmap, panel_cmaps, n_pages, panels_per_page,
                    page_labels, page_starred, show_title, sampling, units,
-                   scale_bar_visible, show_fft, fft_window, fft_metrics,
+                   scale_bar_visible, scale_bar_position, show_zoom_indicator,
+                   show_fft, fft_window, fft_metrics,
                    show_controls, controls_collapsed, show_stats, debug, log_scale, auto_contrast, offline,
-                   vmin, vmax,
-                   ncols, panel_frame_indices, panel_playback_fps, size, smooth, zoom, zoom_row, zoom_col,
+                   contrast_preset, histogram_advanced, show_histogram_advanced,
+                   vmin, vmax, identity_colors, marker_colors, marker_style, inset_plots,
+                   ncols, panel_frame_indices, panel_playback_fps, size, smooth, zoom,
+                   rotation, rotations, rotation_scope,
+                   flip_rows, flip_cols, image_flips_horizontal, image_flips_vertical,
+                   zoom_row, zoom_col,
                    link_zoom, link_pan, link_contrast, diff_mode, overlay, view_box,
                    pad_ratio, pad_fill_mode, pad_scope,
                    display_bin, hidden_panels, starred, panel_order, show_panel_titles,
@@ -1826,9 +2043,15 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         self.panel_frame_counts = [int(stack.shape[0]) for stack in panel_stacks]
         self.panel_frame_indices = list(resolved_panel_frame_indices or [0] * self.n_images)
         self.panel_stack_offsets = [-1] * self.n_images
+        self.inset_plots = _normalize_inset_plot_specs(inset_plots, n_items=self.n_images)
         self.height = int(data.shape[1])
         self.width = int(data.shape[2])
-        self.image_rotations = [0] * self.n_images
+        self.rotation_scope = str(rotation_scope).lower()
+        self.image_rotations = _normalize_rotation_list(
+            n_items=self.n_images,
+            rotation=rotation,
+            rotations=rotations,
+        )
         if self.n_pages > 1:
             if self.panels_per_page <= 0:
                 raise ValueError("panels_per_page must be > 0 when n_pages > 1")
@@ -1901,9 +2124,29 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         else:
             self.pixel_unit = str(units[-1])
         self.scale_bar_visible = scale_bar_visible
+        self.scale_bar_position = scale_bar_position
+        self.show_zoom_indicator = bool(show_zoom_indicator)
         self.pixel_sizes = []
         self.size = size
         self.smooth = smooth
+        self.contrast_preset = str(contrast_preset)
+        advanced_histogram = bool(histogram_advanced if show_histogram_advanced is None else show_histogram_advanced)
+        self.histogram_advanced = advanced_histogram
+        self.show_histogram_advanced = advanced_histogram
+        marker_source = marker_colors if marker_colors is not None else identity_colors
+        if marker_source is None:
+            colors = []
+        else:
+            colors = [str(value) for value in marker_source]
+            if colors and len(colors) != self.n_images:
+                raise ValueError(
+                    f"marker_colors length ({len(colors)}) must match "
+                    f"the number of Show2D panels ({self.n_images})"
+                )
+        self.identity_colors = colors
+        self.marker_colors = list(colors)
+        self.marker_style = str(marker_style).lower()
+        self.selected_panels = []
         # view_box sugar: sets zoom + zoom_row/col to center on box.
         # Two forms: (r0, r1, c0, c1) explicit bounds, or the friendlier
         # (row0, col0, size) = top-left corner + square size.
@@ -1919,6 +2162,25 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             zoom_col = (c0 + c1) / 2
             self.view_box = [r0, r1, c0, c1]
         self.initial_zoom = zoom
+        self.flip_rows = bool(flip_rows)
+        self.flip_cols = bool(flip_cols)
+        horizontal_flips = (
+            [bool(flip_cols)] * int(self.n_images)
+            if image_flips_horizontal is None
+            else [bool(value) for value in image_flips_horizontal]
+        )
+        vertical_flips = (
+            [bool(flip_rows)] * int(self.n_images)
+            if image_flips_vertical is None
+            else [bool(value) for value in image_flips_vertical]
+        )
+        if len(horizontal_flips) != int(self.n_images) or len(vertical_flips) != int(self.n_images):
+            raise ValueError(
+                "image_flips_horizontal and image_flips_vertical must match "
+                f"the number of Show2D panels ({int(self.n_images)})"
+            )
+        self.image_flips_horizontal = horizontal_flips
+        self.image_flips_vertical = vertical_flips
         self.zoom_row = zoom_row
         self.zoom_col = zoom_col
         # Auto-link zoom + pan in gallery (n_images >= 2) so dragging one panel
@@ -2337,6 +2599,21 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 "hidden_panels cannot hide every panel; at least one panel must remain visible"
             )
         return self._normalize_item_page_hidden(clean)
+
+    @traitlets.validate("selected_panels")
+    def _validate_selected_panels(self, proposal: dict) -> list[int]:
+        """Normalize the UI multi-panel selection to existing panel indices."""
+        n_img = int(getattr(self, "n_images", 0))
+        clean: list[int] = []
+        seen: set[int] = set()
+        for value in proposal["value"]:
+            if isinstance(value, bool):
+                continue
+            idx = int(value)
+            if 0 <= idx < n_img and idx not in seen:
+                clean.append(idx)
+                seen.add(idx)
+        return clean
 
     def _normalize_hidden_page_slots(
         self,
@@ -3532,6 +3809,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 "apply_log": self.log_scale and panel_rgb is None,
                 "label": label,
                 "stats": panel_stats_line(i, frame),
+                "panel_index": i,
             })
         if self.diff_mode and len(frames) >= 2:
             ref = int(self.diff_reference)
@@ -3557,6 +3835,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                     "label": label if self.show_panel_titles else "",
                     "stats": stats_line(float(diff.mean()), float(diff.min()),
                                         float(diff.max()), float(diff.std())),
+                    "panel_index": other,
                 })
         return specs
 
@@ -3721,7 +4000,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             css_px = self._static_canvas_css_px()
         # widget clamps initial_zoom to [MIN_ZOOM, MAX_ZOOM] (index.tsx)
         zoom = min(max(float(self.initial_zoom) or 1.0, 0.5), 20.0)
-        zoom_text = f"{zoom:.1f}×"  # JS: `${zoom.toFixed(1)}×`
+        zoom_text = f"{zoom:.1f}×" if self.show_zoom_indicator else ""  # JS: `${zoom.toFixed(1)}×`
         calibrated = self.pixel_size > 0
         pixel_size = self.pixel_size if calibrated else 1.0
         unit = self.pixel_unit if calibrated else "px"
@@ -3819,6 +4098,167 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 linestyle="--",
                 path_effects=stroke,
             ))
+
+    def _draw_static_inset_plot(
+        self,
+        ax: matplotlib.axes.Axes,
+        spec: dict[str, Any],
+        *,
+        panel_index: int,
+        line_color: str,
+    ) -> None:
+        """Draw a compact per-panel calibration curve in the saved PNG."""
+        if not spec:
+            return
+        try:
+            x = np.asarray(spec.get("x"), dtype=float).ravel()
+            y = np.asarray(spec.get("y"), dtype=float).ravel()
+        except Exception:
+            return
+        if x.size != y.size or x.size < 2:
+            return
+        finite = np.isfinite(x) & np.isfinite(y)
+        if finite.sum() < 2:
+            return
+        x = x[finite]
+        y = y[finite]
+        xlim = tuple(float(v) for v in spec.get("xlim", (float(x.min()), float(x.max()))))
+        ylim = tuple(float(v) for v in spec.get("ylim", (float(y.min()), float(y.max()))))
+        if xlim[1] <= xlim[0]:
+            pad = max(1.0, abs(xlim[0]) * 0.05)
+            xlim = (xlim[0] - pad, xlim[1] + pad)
+        if ylim[1] <= ylim[0]:
+            pad = max(1.0, abs(ylim[0]) * 0.05)
+            ylim = (ylim[0] - pad, ylim[1] + pad)
+        position = str(spec.get("position", "bottom-right"))
+        size = max(0.18, min(0.55, float(spec.get("size", 0.31))))
+        box_w = min(0.62, size)
+        box_h = min(0.55, float(spec.get("height", box_w * 0.68)))
+        if "box" in spec:
+            left, top, width, height = (float(v) for v in spec["box"])
+            box_w = max(0.05, min(0.95, width))
+            box_h = max(0.05, min(0.95, height))
+            x0 = max(0.0, min(1.0 - box_w, left))
+            y0 = max(0.0, min(1.0 - box_h, 1.0 - top - box_h))
+        else:
+            margin = spec.get("margin", (0.035, 0.035))
+            if isinstance(margin, (int, float)):
+                margin_x = margin_y = float(margin) / 300.0
+            else:
+                vals = list(margin)
+                margin_x = float(vals[0]) / 300.0
+                margin_y = float(vals[1]) / 300.0
+            margin_x = max(0.0, min(0.45, margin_x))
+            margin_y = max(0.0, min(0.45, margin_y))
+            if "right" in position:
+                x0 = 1.0 - box_w - margin_x
+            elif "center" in position:
+                x0 = 0.5 - box_w / 2
+            else:
+                x0 = margin_x
+            if "bottom" in position:
+                y0 = margin_y + 0.08
+            elif "center" in position:
+                y0 = 0.5 - box_h / 2
+            else:
+                y0 = 1.0 - box_h - margin_y
+            if self.scale_bar_visible and position == "bottom-right":
+                y0 += 0.10
+        inset = ax.inset_axes([x0, y0, box_w, box_h])
+        background_alpha = max(0.0, min(1.0, float(spec.get("background_alpha", 0.68))))
+        inset.set_facecolor(spec.get("background") or (0.04, 0.05, 0.07, background_alpha))
+        for spine in inset.spines.values():
+            spine.set_color(spec.get("border_color") or (1, 1, 1, 0.35))
+            spine.set_linewidth(max(0.0, min(6.0, float(spec.get("border_width", 1.0)))) * 0.6)
+        inset.plot(
+            x,
+            y,
+            color=spec.get("color") or line_color,
+            linewidth=max(1.4, float(spec.get("line_width", 2.0))),
+            solid_capstyle="round",
+        )
+        if "point" in spec:
+            point = np.asarray(spec["point"], dtype=float).ravel()
+            if point.size == 2 and np.isfinite(point).all():
+                inset.scatter(
+                    [point[0]],
+                    [point[1]],
+                    s=18,
+                    color=spec.get("point_color") or "white",
+                    edgecolor="black",
+                    linewidth=0.4,
+                    zorder=5,
+        )
+        inset.set_xlim(*xlim)
+        inset.set_ylim(*ylim)
+        show_ticks = bool(spec.get("show_ticks", False))
+        tick_font_size = max(4.0, min(12.0, float(spec.get("tick_font_size", 4.5))))
+        label_font_size = max(4.0, min(14.0, float(spec.get("label_font_size", 4.5))))
+        legend_font_size = max(4.0, min(14.0, float(spec.get("legend_font_size", 5.5))))
+        text_color = spec.get("text_color") or "white"
+        tick_color = spec.get("tick_color") or (1, 1, 1, 0.72)
+        if show_ticks:
+            if "xticks" in spec:
+                inset.set_xticks([float(v) for v in spec["xticks"]])
+            else:
+                inset.set_xticks([xlim[0], xlim[1]])
+            if "yticks" in spec:
+                inset.set_yticks([float(v) for v in spec["yticks"]])
+            else:
+                inset.set_yticks([ylim[0], ylim[1]])
+            inset.tick_params(
+                axis="both",
+                colors=tick_color,
+                labelsize=tick_font_size,
+                length=1.5,
+                width=0.4,
+                pad=1,
+            )
+        else:
+            inset.set_xticks([])
+            inset.set_yticks([])
+        if spec.get("title"):
+            inset.set_title(str(spec["title"]), color=text_color, fontsize=legend_font_size, pad=1.5, weight="bold")
+        if spec.get("xlabel"):
+            inset.set_xlabel(str(spec["xlabel"]), color=tick_color, fontsize=label_font_size, labelpad=0.5)
+        if spec.get("ylabel"):
+            inset.set_ylabel(str(spec["ylabel"]), color=tick_color, fontsize=label_font_size, labelpad=0.5)
+        for text_key, pos_key, default_color in (
+            ("legend", "legend_position", spec.get("text_color") or spec.get("color") or line_color),
+            ("annotation", "annotation_position", text_color),
+        ):
+            if spec.get(text_key):
+                pos = str(spec.get(pos_key, "top-left" if text_key == "legend" else "top-right"))
+                x_txt = 0.96 if "right" in pos else 0.04
+                y_txt = 0.07 if "top" in pos else 0.93
+                inset.text(
+                    x_txt,
+                    y_txt,
+                    str(spec[text_key]),
+                    transform=inset.transAxes,
+                    ha="right" if "right" in pos else "left",
+                    va="top" if "top" in pos else "bottom",
+                    color=default_color,
+                    fontsize=legend_font_size,
+                    weight="bold",
+                    path_effects=[
+                        matplotlib.patheffects.withStroke(
+                            linewidth=0.8,
+                            foreground=(0, 0, 0, 0.7),
+                        )
+                    ],
+                )
+        if spec.get("show_panel_index", False):
+            inset.text(
+                0.98,
+                0.03,
+                str(panel_index + 1),
+                transform=inset.transAxes,
+                ha="right",
+                va="bottom",
+                color=(1, 1, 1, 0.42),
+                fontsize=4.0,
+            )
 
     def _static_png_b64(self, *, max_px: int = 512, dpi: int = 160) -> str | None:
         """Base64 PNG of all panels, attached to the cell output.
@@ -3947,11 +4387,12 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                         fontfamily=font_family, ha="center", va="top",
                         path_effects=stroke)
             if self.scale_bar_visible:
-                # drawScaleBarHiDPI (js/figure.ts): margin 12, bar 5 px thick
-                # bottom-right, 16px label centered 4px above the bar, zoom
-                # badge left-aligned at x=12 sharing the bar's bottom edge,
+                # drawScaleBarHiDPI (js/figure.ts): margin 12, bar 5 px thick,
+                # 16px label centered 4px above the bar, optional zoom
+                # badge on the opposite corner sharing the bar's bottom edge,
                 # all under a soft (1,1)-offset half-black shadow
-                bar_x = css_w - bar_css - 12
+                scale_left = self.scale_bar_position == "bottom-left"
+                bar_x = 12 if scale_left else css_w - bar_css - 12
                 bar_y = css_h - 12
                 ax.add_patch(matplotlib.patches.Rectangle(
                     css_xy(bar_x + 1, bar_y + 1), bar_css * k, 5 * k,
@@ -3963,10 +4404,26 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                         color="white", fontsize=16 * point,
                         fontfamily=font_family, ha="center", va="bottom",
                         path_effects=stroke)
-                ax.text(*css_xy(12, css_h - 12 + 5), zoom_text,
-                        color="white", fontsize=16 * point,
-                        fontfamily=font_family, ha="left", va="bottom",
-                        path_effects=stroke)
+                if self.show_zoom_indicator:
+                    zoom_x = css_w - 12 if scale_left else 12
+                    zoom_ha = "right" if scale_left else "left"
+                    ax.text(*css_xy(zoom_x, css_h - 12 + 5), zoom_text,
+                            color="white", fontsize=16 * point,
+                            fontfamily=font_family, ha=zoom_ha, va="bottom",
+                            path_effects=stroke)
+            panel_index = int(spec.get("panel_index", idx))
+            if panel_index < len(self.inset_plots):
+                line_color = (
+                    self.marker_colors[panel_index]
+                    if panel_index < len(self.marker_colors)
+                    else _IDENTITY_PALETTE[panel_index % len(_IDENTITY_PALETTE)]
+                )
+                self._draw_static_inset_plot(
+                    ax,
+                    self.inset_plots[panel_index],
+                    panel_index=panel_index,
+                    line_color=line_color,
+                )
         buf = _io.BytesIO()
         fig.savefig(buf, format="png", dpi=dpi, facecolor="white",
                     bbox_inches="tight", pad_inches=0.05)
@@ -4157,8 +4614,13 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             "panel_cmaps": list(self.panel_cmaps),
             "log_scale": self.log_scale,
             "auto_contrast": self.auto_contrast,
+            "contrast_preset": self.contrast_preset,
+            "histogram_advanced": self.histogram_advanced,
+            "show_histogram_advanced": self.show_histogram_advanced,
             "vmin": self.vmin,
             "vmax": self.vmax,
+            "identity_colors": list(self.identity_colors),
+            "marker_style": self.marker_style,
             "labels": list(self.labels),
             "starred": list(self.starred),
             "n_pages": int(self.n_pages),
@@ -4186,9 +4648,13 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             "pixel_sizes": list(self.pixel_sizes),
             "pixel_unit": self.pixel_unit,
             "scale_bar_visible": self.scale_bar_visible,
+            "scale_bar_position": self.scale_bar_position,
+            "show_zoom_indicator": self.show_zoom_indicator,
             "size": self.size,
             "smooth": self.smooth,
             "initial_zoom": self.initial_zoom,
+            "flip_rows": self.flip_rows,
+            "flip_cols": self.flip_cols,
             "vmins": self.vmins,
             "vmaxs": self.vmaxs,
             "link_zoom": self.link_zoom,
@@ -4209,11 +4675,17 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             "diff_reference": int(self.diff_reference),
             "ncols": self.ncols,
             "selected_idx": self.selected_idx,
+            "marker_colors": list(self.marker_colors),
+            "selected_panels": list(self.selected_panels),
+            "inset_plots": list(self.inset_plots),
             "roi_active": self.roi_active,
             "roi_list": self.roi_list,
             "roi_selected_idx": self.roi_selected_idx,
             "profile_line": self.profile_line,
             "image_rotations": list(self.image_rotations),
+            "rotation_scope": self.rotation_scope,
+            "image_flips_horizontal": list(self.image_flips_horizontal),
+            "image_flips_vertical": list(self.image_flips_vertical),
             "display_bin": self._display_bin,
             "denoise": self.denoise,
             "denoise_sigma": self.denoise_sigma,
@@ -4468,6 +4940,8 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             sampling=self.pixel_size if self.pixel_size > 0 else None,
             units=self.pixel_unit,
             scale_bar_visible=self.scale_bar_visible,
+            scale_bar_position=self.scale_bar_position,
+            show_zoom_indicator=self.show_zoom_indicator,
             show_fft=self.show_fft,
             fft_window=self.fft_window,
             fft_metrics=self.fft_metrics,
@@ -4598,6 +5072,35 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         if "panel_cmaps" in state and isinstance(state["panel_cmaps"], list):
             if len(state["panel_cmaps"]) not in (0, int(self.n_images)):
                 state.pop("panel_cmaps")
+        if "inset_plots" in state:
+            try:
+                state["inset_plots"] = _normalize_inset_plot_specs(
+                    state["inset_plots"],
+                    n_items=int(self.n_images),
+                )
+            except (TypeError, ValueError):
+                state.pop("inset_plots")
+        if state.get("scale_bar_position") not in (None, "bottom-right", "bottom-left"):
+            state.pop("scale_bar_position")
+        for key in ("marker_colors", "image_flips_horizontal", "image_flips_vertical"):
+            if key in state and isinstance(state[key], list) and len(state[key]) not in (0, int(self.n_images)):
+                state.pop(key)
+        if state.get("marker_style") not in (None, "left", "around"):
+            state.pop("marker_style")
+        if "selected_panels" in state and isinstance(state["selected_panels"], list):
+            selected: list[int] = []
+            seen_selected: set[int] = set()
+            for value in state["selected_panels"]:
+                if isinstance(value, bool):
+                    continue
+                try:
+                    idx = int(value)
+                except (TypeError, ValueError):
+                    continue
+                if 0 <= idx < int(self.n_images) and idx not in seen_selected:
+                    selected.append(idx)
+                    seen_selected.add(idx)
+            state["selected_panels"] = selected
         if "hidden_panels" in state and isinstance(state["hidden_panels"], list):
             n_img = int(self.n_images)
             clean_set: set[int] = set()

@@ -136,6 +136,14 @@ const upwardMenuProps = {
   sx: { zIndex: 9999 },
 };
 const PAGE_PLAY_FPS_OPTIONS = [1, 2, 3, 4] as const;
+const CONTRAST_PRESETS = [
+  { value: "manual", label: "Manual", low: 0, high: 100 },
+  { value: "0.5-99.5", label: "0.5–99.5", low: 0.5, high: 99.5 },
+  { value: "1-99", label: "1–99", low: 1, high: 99 },
+  { value: "2-98", label: "2–98", low: 2, high: 98 },
+  { value: "3-97", label: "3–97", low: 3, high: 97 },
+] as const;
+const IDENTITY_PALETTE = ["#2e7d32", "#c62828", "#d81b60", "#1565c0", "#f9a825", "#6a1b9a"] as const;
 
 function useDebugFps(enabled: boolean): number | null {
   const [fps, setFps] = React.useState<number | null>(null);
@@ -741,6 +749,367 @@ function drawROI(
   }
 }
 
+type InsetPlotSpec = {
+  x?: number[];
+  y?: number[];
+  points?: [number, number][];
+  point?: [number, number];
+  xlim?: [number, number];
+  ylim?: [number, number];
+  box?: [number, number, number, number];
+  xticks?: number[];
+  yticks?: number[];
+  show_ticks?: boolean;
+  show_panel_index?: boolean;
+  title?: string;
+  legend?: string;
+  legend_position?: "top-left" | "top-right" | "bottom-left" | "bottom-right";
+  annotation?: string;
+  annotation_position?: "top-left" | "top-right" | "bottom-left" | "bottom-right";
+  xlabel?: string;
+  ylabel?: string;
+  color?: string;
+  point_color?: string;
+  border_color?: string;
+  text_color?: string;
+  tick_color?: string;
+  position?: "bottom-right" | "bottom-left" | "bottom-center" | "top-right" | "top-left" | "top-center" | "center" | "center-left" | "center-right";
+  margin?: number | [number, number];
+  size?: number;
+  height?: number;
+  line_width?: number;
+  border_width?: number;
+  tick_font_size?: number;
+  label_font_size?: number;
+  legend_font_size?: number;
+  background?: string;
+  background_alpha?: number;
+};
+
+type InsetHoverInfo = {
+  idx: number;
+  leftPct: number;
+  topPct: number;
+  text: string;
+};
+
+function finiteMinMax(values: number[]): [number, number] | null {
+  let lo = Infinity;
+  let hi = -Infinity;
+  for (const value of values) {
+    if (!Number.isFinite(value)) continue;
+    if (value < lo) lo = value;
+    if (value > hi) hi = value;
+  }
+  return lo <= hi ? [lo, hi] : null;
+}
+
+function expandFlatRange([lo, hi]: [number, number]): [number, number] {
+  if (hi > lo) return [lo, hi];
+  const pad = Math.max(1, Math.abs(lo) * 0.05);
+  return [lo - pad, hi + pad];
+}
+
+function formatInsetTick(value: number): string {
+  const abs = Math.abs(value);
+  if (abs > 0 && (abs < 0.01 || abs >= 1000)) return value.toExponential(1);
+  if (abs >= 100) return value.toFixed(0);
+  if (abs >= 10) return value.toFixed(1).replace(/\.0$/, "");
+  return value.toFixed(2).replace(/0+$/, "").replace(/\.$/, "");
+}
+
+function formatInsetValue(value: number): string {
+  const abs = Math.abs(value);
+  if (abs > 0 && (abs < 0.001 || abs >= 10000)) return value.toExponential(2);
+  if (abs >= 100) return value.toFixed(1);
+  if (abs >= 10) return value.toFixed(2);
+  return value.toFixed(3).replace(/0+$/, "").replace(/\.$/, "");
+}
+
+function drawInsetCornerText(
+  ctx: CanvasRenderingContext2D,
+  text: string | undefined,
+  position: string | undefined,
+  x0: number,
+  y0: number,
+  boxW: number,
+  boxH: number,
+  fontPx: number,
+  color: string,
+): void {
+  if (!text) return;
+  const pos = position || "top-left";
+  const right = pos.includes("right");
+  const bottom = pos.includes("bottom");
+  ctx.font = `700 ${fontPx}px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif`;
+  ctx.textAlign = right ? "right" : "left";
+  ctx.textBaseline = bottom ? "bottom" : "top";
+  ctx.fillStyle = "rgba(0,0,0,0.45)";
+  const x = right ? x0 + boxW - 6 : x0 + 6;
+  const y = bottom ? y0 + boxH - 4 : y0 + 4;
+  ctx.fillText(text, x + 0.8, y + 0.8);
+  ctx.fillStyle = color;
+  ctx.fillText(text, x, y);
+}
+
+function insetPlotGeometry(
+  spec: InsetPlotSpec | null | undefined,
+  cssW: number,
+  cssH: number,
+  scaleBarVisible: boolean,
+): {
+  finite: [number, number][];
+  xlim: [number, number];
+  ylim: [number, number];
+  x0: number;
+  y0: number;
+  boxW: number;
+  boxH: number;
+  plotX0: number;
+  plotY0: number;
+  plotW: number;
+  plotH: number;
+} | null {
+  if (!spec) return null;
+  const x = Array.isArray(spec.x) ? spec.x.map(Number) : null;
+  const y = Array.isArray(spec.y) ? spec.y.map(Number) : null;
+  if (!y || y.length < 2) return null;
+  const xs = x && x.length === y.length ? x : y.map((_, idx) => idx);
+  const finite = xs.map((xv, idx) => [xv, y[idx]] as [number, number])
+    .filter(([xv, yv]) => Number.isFinite(xv) && Number.isFinite(yv));
+  if (finite.length < 2) return null;
+  const xv = finite.map(([value]) => value);
+  const yv = finite.map(([, value]) => value);
+  const xlim = expandFlatRange((Array.isArray(spec.xlim) && spec.xlim.length >= 2
+    ? [Number(spec.xlim[0]), Number(spec.xlim[1])]
+    : finiteMinMax(xv)) as [number, number]);
+  const ylim = expandFlatRange((Array.isArray(spec.ylim) && spec.ylim.length >= 2
+    ? [Number(spec.ylim[0]), Number(spec.ylim[1])]
+    : finiteMinMax(yv)) as [number, number]);
+  if (!Number.isFinite(xlim[0] + xlim[1] + ylim[0] + ylim[1])) return null;
+
+  const sizeFrac = Math.max(0.18, Math.min(0.62, Number(spec.size ?? 0.31)));
+  let boxW = Math.max(78, Math.min(cssW * 0.62, cssW * sizeFrac));
+  let boxH = Math.max(50, Math.min(cssH * 0.55, cssW * Number(spec.height ?? sizeFrac * 0.68)));
+  const rawMargin = Array.isArray(spec.margin)
+    ? spec.margin.map(Number)
+    : [Number(spec.margin ?? 12), Number(spec.margin ?? 12)];
+  const marginX = Math.max(0, Number.isFinite(rawMargin[0]) ? rawMargin[0] : 12);
+  const marginY = Math.max(0, Number.isFinite(rawMargin[1]) ? rawMargin[1] : marginX);
+  const pos = spec.position || "bottom-right";
+  let x0: number;
+  let y0: number;
+  if (Array.isArray(spec.box) && spec.box.length >= 4) {
+    const [left, top, widthFrac, heightFrac] = spec.box.map(Number);
+    boxW = Math.max(48, Math.min(cssW, cssW * Math.max(0.05, Math.min(1, widthFrac))));
+    boxH = Math.max(34, Math.min(cssH, cssH * Math.max(0.05, Math.min(1, heightFrac))));
+    x0 = Math.max(0, Math.min(cssW - boxW, cssW * Math.max(0, Math.min(1, left))));
+    y0 = Math.max(0, Math.min(cssH - boxH, cssH * Math.max(0, Math.min(1, top))));
+  } else {
+    if (pos.includes("right")) x0 = cssW - boxW - marginX;
+    else if (pos.includes("center")) x0 = cssW / 2 - boxW / 2;
+    else x0 = marginX;
+    const scaleBarOffset = scaleBarVisible && pos === "bottom-right" ? 34 : 0;
+    if (pos.includes("bottom")) y0 = cssH - boxH - marginY - scaleBarOffset;
+    else if (pos.includes("center")) y0 = cssH / 2 - boxH / 2;
+    else y0 = marginY + 18;
+  }
+  const showTicks = Boolean(spec.show_ticks);
+  const tickFont = Math.max(5, Math.min(14, Number(spec.tick_font_size ?? 7)));
+  const labelFont = Math.max(6, Math.min(16, Number(spec.label_font_size ?? 8)));
+  const legendFont = Math.max(6, Math.min(18, Number(spec.legend_font_size ?? 9)));
+  const padL = showTicks || spec.ylabel ? Math.max(22, tickFont * 3.2) : 10;
+  const padR = 7;
+  const padT = spec.title || spec.legend ? Math.max(13, legendFont + 6) : 7;
+  const padB = showTicks || spec.xlabel ? Math.max(16, tickFont + labelFont + 4) : 8;
+  const plotX0 = x0 + padL;
+  const plotY0 = y0 + padT;
+  const plotW = boxW - padL - padR;
+  const plotH = boxH - padT - padB;
+  if (plotW <= 8 || plotH <= 8) return null;
+  return { finite, xlim, ylim, x0, y0, boxW, boxH, plotX0, plotY0, plotW, plotH };
+}
+
+function insetHoverAt(
+  spec: InsetPlotSpec | null | undefined,
+  panel: number,
+  cssW: number,
+  cssH: number,
+  cssX: number,
+  cssY: number,
+  scaleBarVisible: boolean,
+): InsetHoverInfo | null {
+  const geom = insetPlotGeometry(spec, cssW, cssH, scaleBarVisible);
+  if (!geom) return null;
+  const { finite, xlim, ylim, x0, y0, boxW, boxH, plotX0, plotY0, plotW, plotH } = geom;
+  if (cssX < x0 || cssX > x0 + boxW || cssY < y0 || cssY > y0 + boxH) return null;
+  const sx = (value: number) => plotX0 + (value - xlim[0]) / (xlim[1] - xlim[0]) * plotW;
+  const sy = (value: number) => plotY0 + plotH - (value - ylim[0]) / (ylim[1] - ylim[0]) * plotH;
+  let best = finite[0];
+  let bestDist = Infinity;
+  for (const point of finite) {
+    const dx = sx(point[0]) - cssX;
+    const dy = sy(point[1]) - cssY;
+    const dist = dx * dx + dy * dy;
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = point;
+    }
+  }
+  const xName = spec?.xlabel || "x";
+  const yName = spec?.ylabel || "y";
+  return {
+    idx: panel,
+    leftPct: Math.max(3, Math.min(58, (cssX / cssW) * 100 + 2)),
+    topPct: Math.max(5, Math.min(90, (cssY / cssH) * 100 - 6)),
+    text: `${xName} ${formatInsetValue(best[0])} · ${yName} ${formatInsetValue(best[1])}`,
+  };
+}
+
+function drawInsetPlot(
+  ctx: CanvasRenderingContext2D,
+  spec: InsetPlotSpec | null | undefined,
+  panel: number,
+  cssW: number,
+  cssH: number,
+  fallbackColor: string,
+  scaleBarVisible: boolean,
+): void {
+  const geom = insetPlotGeometry(spec, cssW, cssH, scaleBarVisible);
+  if (!geom || !spec) return;
+  const { finite, xlim, ylim, x0, y0, boxW, boxH, plotX0, plotY0, plotW, plotH } = geom;
+  const showTicks = Boolean(spec.show_ticks);
+  const tickFont = Math.max(5, Math.min(14, Number(spec.tick_font_size ?? 7)));
+  const labelFont = Math.max(6, Math.min(16, Number(spec.label_font_size ?? 8)));
+  const legendFont = Math.max(6, Math.min(18, Number(spec.legend_font_size ?? 9)));
+  const sx = (value: number) => plotX0 + (value - xlim[0]) / (xlim[1] - xlim[0]) * plotW;
+  const sy = (value: number) => plotY0 + plotH - (value - ylim[0]) / (ylim[1] - ylim[0]) * plotH;
+  const lineColor = spec.color || fallbackColor;
+  const pointColor = spec.point_color || "#fff";
+  const textColor = spec.text_color || "rgba(255,255,255,0.92)";
+  const tickColor = spec.tick_color || "rgba(255,255,255,0.72)";
+  const backgroundAlpha = Math.max(0, Math.min(1, Number(spec.background_alpha ?? 0.68)));
+
+  ctx.save();
+  ctx.fillStyle = spec.background || `rgba(10, 12, 16, ${backgroundAlpha})`;
+  ctx.strokeStyle = spec.border_color || "rgba(255,255,255,0.34)";
+  ctx.lineWidth = Math.max(0, Math.min(6, Number(spec.border_width ?? 1)));
+  ctx.fillRect(x0, y0, boxW, boxH);
+  if (ctx.lineWidth > 0) ctx.strokeRect(x0, y0, boxW, boxH);
+
+  ctx.strokeStyle = spec.tick_color || "rgba(255,255,255,0.28)";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(plotX0, plotY0);
+  ctx.lineTo(plotX0, plotY0 + plotH);
+  ctx.lineTo(plotX0 + plotW, plotY0 + plotH);
+  ctx.stroke();
+
+  if (showTicks) {
+    const xticks = Array.isArray(spec.xticks) && spec.xticks.length > 0 ? spec.xticks.map(Number) : [xlim[0], xlim[1]];
+    const yticks = Array.isArray(spec.yticks) && spec.yticks.length > 0 ? spec.yticks.map(Number) : [ylim[0], ylim[1]];
+    ctx.font = `${tickFont}px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif`;
+    ctx.fillStyle = tickColor;
+    ctx.strokeStyle = spec.tick_color || "rgba(255,255,255,0.34)";
+    ctx.lineWidth = 1;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "top";
+    for (const value of xticks) {
+      if (!Number.isFinite(value)) continue;
+      const tx = sx(value);
+      if (tx < plotX0 - 0.5 || tx > plotX0 + plotW + 0.5) continue;
+      ctx.beginPath();
+      ctx.moveTo(tx, plotY0 + plotH);
+      ctx.lineTo(tx, plotY0 + plotH + 3);
+      ctx.stroke();
+      ctx.fillText(formatInsetTick(value), tx, plotY0 + plotH + 4);
+    }
+    ctx.textAlign = "right";
+    ctx.textBaseline = "middle";
+    for (const value of yticks) {
+      if (!Number.isFinite(value)) continue;
+      const ty = sy(value);
+      if (ty < plotY0 - 0.5 || ty > plotY0 + plotH + 0.5) continue;
+      ctx.beginPath();
+      ctx.moveTo(plotX0 - 3, ty);
+      ctx.lineTo(plotX0, ty);
+      ctx.stroke();
+      ctx.fillText(formatInsetTick(value), plotX0 - 5, ty);
+    }
+  }
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(plotX0, plotY0, plotW, plotH);
+  ctx.clip();
+  ctx.strokeStyle = lineColor;
+  ctx.lineWidth = Math.max(1.4, Number(spec.line_width ?? 2));
+  ctx.lineJoin = "round";
+  ctx.lineCap = "round";
+  ctx.shadowColor = "rgba(0,0,0,0.55)";
+  ctx.shadowBlur = 2;
+  ctx.beginPath();
+  finite.forEach(([px, py], idx) => {
+    const cx = sx(px);
+    const cy = sy(py);
+    if (idx === 0) ctx.moveTo(cx, cy);
+    else ctx.lineTo(cx, cy);
+  });
+  ctx.stroke();
+  ctx.restore();
+
+  if (Array.isArray(spec.point) && spec.point.length >= 2) {
+    const px = Number(spec.point[0]);
+    const py = Number(spec.point[1]);
+    if (Number.isFinite(px) && Number.isFinite(py)) {
+      const cx = sx(px);
+      const cy = sy(py);
+      if (cx >= plotX0 - 1 && cx <= plotX0 + plotW + 1 && cy >= plotY0 - 1 && cy <= plotY0 + plotH + 1) {
+        ctx.fillStyle = pointColor;
+        ctx.strokeStyle = "rgba(0,0,0,0.75)";
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.arc(cx, cy, 3.4, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+      }
+    }
+  }
+
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = textColor;
+  ctx.font = `700 ${legendFont}px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif`;
+  ctx.textAlign = "left";
+  ctx.textBaseline = "top";
+  if (spec.title) ctx.fillText(spec.title, x0 + 6, y0 + 4);
+  drawInsetCornerText(ctx, spec.legend, spec.legend_position, x0, y0, boxW, boxH, legendFont, spec.text_color || lineColor);
+  drawInsetCornerText(ctx, spec.annotation, spec.annotation_position || "top-right", x0, y0, boxW, boxH, legendFont, textColor);
+  ctx.font = `${labelFont}px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif`;
+  ctx.fillStyle = tickColor;
+  if (spec.xlabel) {
+    ctx.textAlign = "right";
+    ctx.textBaseline = "bottom";
+    ctx.fillText(spec.xlabel, x0 + boxW - 7, y0 + boxH - 3);
+  }
+  if (spec.ylabel) {
+    ctx.save();
+    ctx.translate(x0 + 5, plotY0 + 2);
+    ctx.rotate(-Math.PI / 2);
+    ctx.textAlign = "right";
+    ctx.textBaseline = "top";
+    ctx.fillText(spec.ylabel, 0, 0);
+    ctx.restore();
+  }
+  if (spec.show_panel_index) {
+    ctx.fillStyle = "rgba(255,255,255,0.42)";
+    ctx.font = "7px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+    ctx.textAlign = "right";
+    ctx.textBaseline = "bottom";
+    ctx.fillText(`${panel + 1}`, x0 + boxW - 5, y0 + boxH - 4);
+  }
+  ctx.restore();
+}
+
 // ============================================================================
 // Crop ROI region from raw float32 data for ROI-scoped FFT
 // ============================================================================
@@ -862,6 +1231,25 @@ function meanDownsample2D(data: Float32Array, width: number, height: number, fac
     }
   }
   return { data: out, width: outW, height: outH };
+}
+
+function canvasLooksBlank(canvas: HTMLCanvasElement, maxSamples = 32): boolean {
+  const ctx = canvas.getContext("2d");
+  if (!ctx || canvas.width <= 0 || canvas.height <= 0) return true;
+  try {
+    const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+    const stepX = Math.max(1, Math.floor(canvas.width / maxSamples));
+    const stepY = Math.max(1, Math.floor(canvas.height / maxSamples));
+    for (let y = 0; y < canvas.height; y += stepY) {
+      for (let x = 0; x < canvas.width; x += stepX) {
+        const offset = (y * canvas.width + x) * 4;
+        if (data[offset] > 3 || data[offset + 1] > 3 || data[offset + 2] > 3) return false;
+      }
+    }
+    return true;
+  } catch {
+    return true;
+  }
 }
 
 // ============================================================================
@@ -1102,6 +1490,7 @@ function Show2D() {
     const value = panelCmaps && idx >= 0 && idx < panelCmaps.length ? panelCmaps[idx] : "";
     return value || cmap || "inferno";
   }, [panelCmaps, cmap]);
+  const colorShared = !(panelCmaps && panelCmaps.length === nImages && nImages > 1);
 
   // Display options
   const [logScale, setLogScale] = useModelState<boolean>("log_scale");
@@ -1230,6 +1619,8 @@ function Show2D() {
   const [pixelSizes] = useModelState<number[]>("pixel_sizes");
   const [pixelUnit] = useModelState<string>("pixel_unit");
   const [scaleBarVisible] = useModelState<boolean>("scale_bar_visible");
+  const [scaleBarPosition] = useModelState<string>("scale_bar_position");
+  const [showZoomIndicator] = useModelState<boolean>("show_zoom_indicator");
 
   // UI visibility
   const [showControls] = useModelState<boolean>("show_controls");
@@ -1268,9 +1659,84 @@ function Show2D() {
 
   // Selection
   const [selectedIdx, setSelectedIdx] = useModelState<number>("selected_idx");
-  const selectedCmap = panelCmapFor(selectedIdx);
+  const [markerColors] = useModelState<string[]>("marker_colors");
+  const [markerStyle] = useModelState<string>("marker_style");
+  const [selectedPanels, setSelectedPanels] = useModelState<number[]>("selected_panels");
+  const [insetPlots] = useModelState<InsetPlotSpec[]>("inset_plots");
+  const [contrastPreset, setContrastPreset] = useModelState<string>("contrast_preset");
+  const [showHistogramAdvanced, setShowHistogramAdvanced] = useModelState<boolean>("show_histogram_advanced");
+  const [imageFlipsHorizontal, setImageFlipsHorizontal] = useModelState<boolean[]>("image_flips_horizontal");
+  const [imageFlipsVertical, setImageFlipsVertical] = useModelState<boolean[]>("image_flips_vertical");
+  const [imageRotations, setImageRotations] = useModelState<number[]>("image_rotations");
+  const [rotationScope, setRotationScope] = useModelState<string>("rotation_scope");
+  const panelMarkerColor = React.useCallback((panel: number) => {
+    const value = markerColors?.[panel];
+    return value || IDENTITY_PALETTE[panel % IDENTITY_PALETTE.length];
+  }, [markerColors]);
+  const markerAround = (markerStyle || "left") === "around";
+  const lastSelectedPanelRef = React.useRef<number | null>(null);
+  const normalizeRotation = React.useCallback((value: number) => {
+    const k = Math.round(Number(value) / 90);
+    if (Number.isFinite(k) && Math.abs(Number(value)) > 3) return ((k % 4) + 4) % 4;
+    return ((Math.round(Number(value)) % 4) + 4) % 4;
+  }, []);
+  const rotationForPanel = React.useCallback((panel: number) => {
+    return ((Math.round(imageRotations?.[panel] ?? 0) % 4) + 4) % 4;
+  }, [imageRotations]);
+  const rotationGlyph = React.useCallback((quarterTurns: number) => {
+    const k = ((Math.round(quarterTurns) % 4) + 4) % 4;
+    if (k === 1) return "↺90°";
+    if (k === 2) return "↻180°";
+    if (k === 3) return "↻90°";
+    return "";
+  }, []);
+  const setRotationForPanel = React.useCallback((panel: number, quarterTurns: number) => {
+    const n = Math.max(1, nImages || 1);
+    const next = Array.from({ length: n }, (_, idx) => rotationForPanel(idx));
+    next[Math.max(0, Math.min(n - 1, panel))] = normalizeRotation(quarterTurns);
+    setImageRotations(next);
+  }, [nImages, normalizeRotation, rotationForPanel, setImageRotations]);
+  const setRotationForScope = React.useCallback((quarterTurns: number) => {
+    const n = Math.max(1, nImages || 1);
+    const k = normalizeRotation(quarterTurns);
+    if ((rotationScope || "all") === "panel") {
+      setRotationForPanel(selectedIdx, k);
+    } else {
+      setImageRotations(Array.from({ length: n }, () => k));
+    }
+  }, [nImages, normalizeRotation, rotationScope, selectedIdx, setImageRotations, setRotationForPanel]);
+  const togglePanelFlip = React.useCallback((panel: number, axis: "h" | "v") => {
+    const n = Math.max(1, nImages || 1);
+    const source = axis === "h" ? imageFlipsHorizontal : imageFlipsVertical;
+    const next = Array.from({ length: n }, (_, idx) => Boolean(source?.[idx]));
+    const idx = Math.max(0, Math.min(n - 1, panel));
+    next[idx] = !next[idx];
+    if (axis === "h") setImageFlipsHorizontal(next);
+    else setImageFlipsVertical(next);
+  }, [imageFlipsHorizontal, imageFlipsVertical, nImages, setImageFlipsHorizontal, setImageFlipsVertical]);
+  const setColorShared = React.useCallback((shared: boolean) => {
+    if (shared) {
+      setCmap(panelCmapFor(selectedIdx));
+      setPanelCmaps([]);
+      return;
+    }
+    setPanelCmaps(Array.from({ length: nImages }, (_, i) => panelCmapFor(i)));
+  }, [nImages, panelCmapFor, selectedIdx, setCmap, setPanelCmaps]);
+  const selectedCmap = colorShared ? (cmap || "inferno") : panelCmapFor(selectedIdx);
   const setSelectedCmap = React.useCallback((value: string) => {
-    if (isGallery || (panelCmaps && panelCmaps.length > 0)) {
+    const batchPanels = Array.from(new Set((selectedPanels || [])
+      .map((panel) => Math.round(Number(panel)))
+      .filter((panel) => Number.isFinite(panel) && panel >= 0 && panel < nImages)));
+    if (isGallery && batchPanels.length > 1) {
+      const next = panelCmaps && panelCmaps.length === nImages
+        ? panelCmaps.slice()
+        : Array.from({ length: nImages }, (_, i) => panelCmapFor(i));
+      for (const panel of batchPanels) next[panel] = value;
+      setPanelCmaps(next);
+      if (!cmap) setCmap(value);
+      return;
+    }
+    if (isGallery && !colorShared) {
       const next = panelCmaps && panelCmaps.length === nImages
         ? panelCmaps.slice()
         : Array.from({ length: nImages }, (_, i) => (i === selectedIdx ? value : cmap));
@@ -1281,7 +1747,7 @@ function Show2D() {
       setCmap(value);
       setPanelCmaps([]);
     }
-  }, [isGallery, panelCmaps, nImages, selectedIdx, cmap, setPanelCmaps, setCmap]);
+  }, [colorShared, isGallery, panelCmaps, nImages, selectedIdx, selectedPanels, cmap, panelCmapFor, setPanelCmaps, setCmap]);
   // In panel scope the scalar traits are the editor for the selected panel,
   // while the arrays remain the render/source of truth for every panel. Keep
   // the editor pointed at the newly selected panel without continuously
@@ -1399,7 +1865,6 @@ function Show2D() {
   const [roiActive, setRoiActive] = useModelState<boolean>("roi_active");
   const [roiList, setRoiList] = useModelState<ROIItem[]>("roi_list");
   const [roiSelectedIdx, setRoiSelectedIdx] = useModelState<number>("roi_selected_idx");
-  const [imageRotations, setImageRotations] = useModelState<number[]>("image_rotations");
   const [isDraggingROI, setIsDraggingROI] = React.useState(false);
   const [isDraggingResize, setIsDraggingResize] = React.useState(false);
   const [isDraggingResizeInner, setIsDraggingResizeInner] = React.useState(false);
@@ -1411,6 +1876,7 @@ function Show2D() {
   const [panelMenuAnchor, setPanelMenuAnchor] = React.useState<HTMLElement | null>(null);
   const [viewMenuAnchor, setViewMenuAnchor] = React.useState<HTMLElement | null>(null);
   const [moreMenuAnchor, setMoreMenuAnchor] = React.useState<HTMLElement | null>(null);
+  const [showRotationSettings, setShowRotationSettings] = React.useState(false);
   const [reorderMode, setReorderMode] = React.useState(false);
   const [dragOverPanel, setDragOverPanel] = React.useState<number | null>(null);
   const draggedPanelRef = React.useRef<number | null>(null);
@@ -1705,6 +2171,7 @@ function Show2D() {
   const [contrastStates, setContrastStates] = React.useState<Map<number, { vminPct: number; vmaxPct: number }>>(new Map());
   // Ref mirror for fast slider path (bypass React effect batching)
   const contrastRef = React.useRef<{ linked: { vminPct: number; vmaxPct: number }; perImage: Map<number, { vminPct: number; vmaxPct: number }> }>({ linked: { vminPct: 0, vmaxPct: 100 }, perImage: new Map() });
+  const visibleImageIndicesRef = React.useRef<number[]>([]);
   const sliderRafRef = React.useRef(0);
   const getContrastState = React.useCallback((idx: number) => {
     if (linkedContrast) return linkedContrastState;
@@ -1728,7 +2195,9 @@ function Show2D() {
         if (cachedRanges.length === 0) return;
         const lut = COLORMAPS[cmapRef.current] || COLORMAPS.inferno;
         engine.uploadLUT(cmapRef.current, lut);
-        const indices = Array.from({ length: nImages }, (_, i) => i);
+        const visibleIndices = visibleImageIndicesRef.current.length > 0
+          ? visibleImageIndicesRef.current
+          : Array.from({ length: nImages }, (_, i) => i);
         const ls = logScaleRef.current ?? false;
         const hasAbsoluteRange = traitVmin != null && traitVmax != null;
         const baseRanges: { min: number; max: number }[] = [];
@@ -1769,13 +2238,15 @@ function Show2D() {
           }
         }
         panelRangesRef.current = ranges;  // keep detail tiles on the live contrast window
-        const bitmaps = engine.renderSlotsToImageBitmap(indices, ranges, ls);
+        const bitmapRanges = visibleIndices.map(i => ranges[i] || { vmin: 0, vmax: 1 });
+        const bitmaps = engine.renderSlotsToImageBitmap(visibleIndices, bitmapRanges, ls);
         if (bitmaps && bitmaps[0]) {
           try {
-            for (let i = 0; i < bitmaps.length; i++) {
-              const bitmap = bitmaps[i];
+            for (let k = 0; k < bitmaps.length; k++) {
+              const bitmap = bitmaps[k];
               if (!bitmap) continue;
-              const offscreen = mainOffscreensRef.current[i];
+              const panel = visibleIndices[k];
+              const offscreen = mainOffscreensRef.current[panel];
               if (offscreen) offscreen.getContext("2d")?.drawImage(bitmap, 0, 0);
             }
           } finally {
@@ -1786,6 +2257,24 @@ function Show2D() {
       });
     }
   }, [linkedContrast, nImages, isGallery, traitVmin, traitVmax, traitVmins, traitVmaxs]);
+  const applyContrastPreset = React.useCallback((preset: string) => {
+    setContrastPreset(preset);
+    if (preset === "manual" || preset === "custom") {
+      setAutoContrast(false);
+      return;
+    }
+    const match = preset.match(/^(\d+(?:\.\d+)?)-(\d+(?:\.\d+)?)$/);
+    if (!match) return;
+    const lo = Math.max(0, Math.min(100, Number(match[1])));
+    const hi = Math.max(lo + 0.01, Math.min(100, Number(match[2])));
+    setAutoContrast(false);
+    if (linkedContrast) {
+      setLinkedContrastState({ vminPct: lo, vmaxPct: hi });
+      contrastRef.current.linked = { vminPct: lo, vmaxPct: hi };
+      return;
+    }
+    Array.from({ length: nImages }, (_, i) => setContrastState(i, { vminPct: lo, vmaxPct: hi }, true));
+  }, [linkedContrast, nImages, setAutoContrast, setContrastPreset, setContrastState]);
   // Convenience accessors for active image
   const activeContrastIdx = nImages > 1 ? selectedIdx : 0;
   const imageVminPct = getContrastState(activeContrastIdx).vminPct;
@@ -1838,6 +2327,8 @@ function Show2D() {
 
   // Cursor readout state
   const [cursorInfo, setCursorInfo] = React.useState<{ idx: number; row: number; col: number; value: number; rgb?: [number, number, number] | null; valueSource?: "preview" | "detail" | "native" } | null>(null);
+  const [insetHoverInfo, setInsetHoverInfo] = React.useState<InsetHoverInfo | null>(null);
+  const insetHoverKeyRef = React.useRef<string>("");
 
   // Colorbar state (single image mode only)
   const [showColorbar, setShowColorbar] = React.useState(false);
@@ -2106,6 +2597,20 @@ function Show2D() {
     () => orderedImageIndices.filter(i => !hiddenPanelSet.has(i)),
     [hiddenPanelSet, orderedImageIndices]
   );
+  visibleImageIndicesRef.current = visibleImageIndices;
+  const selectedPanelSet = React.useMemo(() => {
+    const out = new Set<number>();
+    for (const value of selectedPanels || []) {
+      const panel = Math.round(Number(value));
+      if (Number.isFinite(panel) && panel >= 0 && panel < totalPanelCount && !hiddenPanelSet.has(panel)) out.add(panel);
+    }
+    return out;
+  }, [hiddenPanelSet, selectedPanels, totalPanelCount]);
+  const selectedVisiblePanels = React.useMemo(
+    () => visibleImageIndices.filter((panel) => selectedPanelSet.has(panel)),
+    [selectedPanelSet, visibleImageIndices],
+  );
+  const selectedVisibleCount = selectedVisiblePanels.length;
   const visibleDiffPlan = React.useMemo(
     () => resolveVisibleDiffPlan(visibleImageIndices, isRgbFlags, diffReference),
     [diffReference, isRgbFlags, visibleImageIndices],
@@ -2159,6 +2664,77 @@ function Show2D() {
     ) return;
     setHiddenPanels(Array.from(next).sort((a, b) => a - b));
   }, [activePageEnd, activePagePanelIndices, activePageStart, activePanelCount, hiddenPageSlots, hiddenPanels, totalPanelCount, isItemPaged, isPaged, setHiddenPanels, setHiddenPageSlotsTrait]);
+  const setPanelsHidden = React.useCallback((panels: number[], hidden: boolean) => {
+    const panelSet = new Set(
+      panels
+        .map((panel) => Math.round(Number(panel)))
+        .filter((panel) => Number.isFinite(panel) && panel >= 0 && panel < totalPanelCount),
+    );
+    if (panelSet.size === 0) return;
+    if (isPaged && !isItemPaged) {
+      const next = new Set<number>();
+      for (const value of hiddenPageSlots || []) {
+        const slot = Math.trunc(Number(value));
+        if (Number.isFinite(slot) && slot >= 0 && slot < activePanelCount) next.add(slot);
+      }
+      for (const panel of panelSet) {
+        if (panel < activePageStart || panel >= activePageEnd) continue;
+        const slot = panel - activePageStart;
+        if (hidden) next.add(slot);
+        else next.delete(slot);
+      }
+      if (activePanelCount - next.size <= 0) return;
+      const slots = normalizeHiddenPageSlots(Array.from(next), activePanelCount);
+      setHiddenPageSlots(slots);
+      setHiddenPageSlotsTrait(slots);
+      return;
+    }
+    const next = new Set<number>();
+    for (const value of hiddenPanels || []) {
+      const idx = Math.round(Number(value));
+      if (Number.isFinite(idx) && idx >= 0 && idx < totalPanelCount) next.add(idx);
+    }
+    for (const panel of panelSet) {
+      if (hidden) next.add(panel);
+      else next.delete(panel);
+    }
+    if (next.size >= totalPanelCount) return;
+    if (isItemPaged && activePagePanelIndices.every(value => next.has(value))) return;
+    setHiddenPanels(Array.from(next).sort((a, b) => a - b));
+  }, [activePageEnd, activePagePanelIndices, activePageStart, activePanelCount, hiddenPageSlots, hiddenPanels, totalPanelCount, isItemPaged, isPaged, setHiddenPanels, setHiddenPageSlotsTrait]);
+  const handlePanelSelectionMouseDown = React.useCallback((event: React.MouseEvent, panel: number): boolean => {
+    if (!isGallery || reorderMode) return false;
+    const orderedVisible = orderedImageIndices.filter((idx) => visibleImageIndices.includes(idx));
+    const current = new Set(selectedPanelSet);
+    let next: number[];
+    if (event.shiftKey) {
+      const anchor = lastSelectedPanelRef.current !== null && orderedVisible.includes(lastSelectedPanelRef.current)
+        ? lastSelectedPanelRef.current
+        : (selectedVisiblePanels[selectedVisiblePanels.length - 1] ?? selectedIdx);
+      const a = orderedVisible.indexOf(anchor);
+      const b = orderedVisible.indexOf(panel);
+      if (a >= 0 && b >= 0) {
+        const [lo, hi] = a < b ? [a, b] : [b, a];
+        next = orderedVisible.slice(lo, hi + 1);
+      } else {
+        next = [panel];
+      }
+      event.preventDefault();
+      event.stopPropagation();
+    } else if (event.metaKey || event.ctrlKey) {
+      if (current.has(panel) && current.size > 1) current.delete(panel);
+      else current.add(panel);
+      next = orderedVisible.filter((idx) => current.has(idx));
+      event.preventDefault();
+      event.stopPropagation();
+    } else {
+      next = [panel];
+    }
+    lastSelectedPanelRef.current = panel;
+    setSelectedIdx(panel);
+    setSelectedPanels(next);
+    return event.shiftKey || event.metaKey || event.ctrlKey;
+  }, [isGallery, orderedImageIndices, reorderMode, selectedIdx, selectedPanelSet, selectedVisiblePanels, setSelectedIdx, setSelectedPanels, visibleImageIndices]);
   const togglePanelStar = React.useCallback((panel: number) => {
     const next = Array.from({ length: totalPanelCount }, (_, idx) => starred?.[idx] ? 1 : 0);
     next[panel] = next[panel] ? 0 : 1;
@@ -2259,6 +2835,17 @@ function Show2D() {
     if (visibleImageIndices.includes(selectedIdx)) return;
     setSelectedIdx(visibleImageIndices[0] ?? activePageStart);
   }, [activePageStart, isPaged, selectedIdx, setSelectedIdx, visibleImageIndices]);
+  React.useEffect(() => {
+    if (!isGallery) {
+      if ((selectedPanels || []).length > 0) setSelectedPanels([]);
+      return;
+    }
+    const clean = Array.from(new Set((selectedPanels || [])
+      .map((value) => Math.round(Number(value)))
+      .filter((panel) => Number.isFinite(panel) && visibleImageIndices.includes(panel))));
+    if (clean.length === 0 && visibleImageIndices.includes(selectedIdx)) clean.push(selectedIdx);
+    if (!sameNumberArray(selectedPanels, clean)) setSelectedPanels(clean);
+  }, [isGallery, selectedIdx, selectedPanels, setSelectedPanels, visibleImageIndices]);
   const clampedNcols = Math.max(1, Math.min(ncols || 1, visibleImageCount, MAX_PANEL_COLUMNS));
   const effectiveNcols = clampedNcols + diffPanelCount;
   const displayScale = canvasSize / Math.max(width, height);
@@ -2569,6 +3156,13 @@ function Show2D() {
         return;
       }
       if (engine) {
+        const gpuInfo = getGPUInfo().toLowerCase();
+        const nvidiaLinux = gpuInfo.includes("nvidia") && navigator.userAgent.toLowerCase().includes("linux");
+        if (nvidiaLinux) {
+          engine.destroy();
+          console.warn(`[Show2D] WebGPU colormap disabled on ${getGPUInfo()} Linux adapter after headed validation showed black canvas transfers; using CPU colormap fallback`);
+          return;
+        }
         gpuCmapRef.current = engine;
         gpuCmapReadyRef.current = true;
         setGpuCmapReadyVersion(v => v + 1);
@@ -3479,7 +4073,7 @@ function Show2D() {
     // change. The colormap loops below skip these panels so cmap/contrast/log
     // changes never overwrite the color pixels.
     if (isRgbFlags && isRgbFlags.some(Boolean)) {
-      for (let i = 0; i < nImages; i++) {
+      for (const i of visibleImageIndices) {
         if (!isRgbFlags[i]) continue;
         const rgb = rgbDataRef.current[i];
         const offscreen = mainOffscreensRef.current[i];
@@ -3589,7 +4183,7 @@ function Show2D() {
 
     const renderCpuFallback = () => {
       if (!isCurrentRender()) return;
-      for (let i = 0; i < nImages; i++) {
+      for (const i of visibleImageIndices) {
         if (isRgbFlags && isRgbFlags[i]) continue; // painted directly above
         const offscreen = mainOffscreensRef.current[i];
         const imgData = mainImgDatasRef.current[i];
@@ -3618,7 +4212,7 @@ function Show2D() {
       renderRaf = requestAnimationFrame(() => {
         renderRaf = null;
         void (async () => {
-          const indices = Array.from({ length: capturedNImages }, (_, i) => i);
+          const indices = visibleImageIndices.filter(i => i >= 0 && i < capturedNImages);
           let bitmaps: (ImageBitmap | null)[] | null = null;
           const closeBitmaps = () => {
             bitmaps?.forEach(bitmap => bitmap?.close());
@@ -3628,22 +4222,27 @@ function Show2D() {
             if (!isCurrentRender()) return;
             // Await GPU completion before snapshotting so the OffscreenCanvas
             // contains the colormap instead of the render pass's black clear.
-            bitmaps = await engine!.renderSlotsToImageBitmapAsync(indices, capturedRanges, capturedLogScale);
+            const bitmapRanges = indices.map(i => capturedRanges[i] || { vmin: 0, vmax: 1 });
+            bitmaps = await engine!.renderSlotsToImageBitmapAsync(indices, bitmapRanges, capturedLogScale);
             if (!isCurrentRender()) {
               closeBitmaps();
               return;
             }
             let painted = capturedIsRgb.some(Boolean);
             if (bitmaps && bitmaps.length > 0) {
-              for (let i = 0; i < bitmaps.length; i++) {
-                const bitmap = bitmaps[i];
+              for (let k = 0; k < bitmaps.length; k++) {
+                const bitmap = bitmaps[k];
                 if (!bitmap) continue;
+                const i = indices[k];
                 if (capturedIsRgb[i]) continue; // RGB offscreen already holds true color pixels
                 const offscreen = mainOffscreensRef.current[i];
                 const ctx = offscreen?.getContext("2d");
                 if (ctx && isCurrentRender()) {
                   ctx.drawImage(bitmap, 0, 0);
-                  painted = true;
+                  const range = capturedRanges[i] || { vmin: 0, vmax: 1 };
+                  if (range.vmax <= range.vmin || !canvasLooksBlank(offscreen)) {
+                    painted = true;
+                  }
                 }
               }
             }
@@ -3651,6 +4250,20 @@ function Show2D() {
             if (painted && isCurrentRender()) {
               setOffscreenVersion(v => v + 1);
               return;
+            }
+            if (isCurrentRender()) {
+              const offscreens = indices.map(i => mainOffscreensRef.current[i] ?? null);
+              const imgDatas = indices.map(i => mainImgDatasRef.current[i] ?? null);
+              const rendered = await engine!.renderSlots(indices, bitmapRanges, offscreens, imgDatas, capturedLogScale);
+              const readbackPainted = rendered > 0 && indices.some(i => {
+                const offscreen = mainOffscreensRef.current[i];
+                const range = capturedRanges[i] || { vmin: 0, vmax: 1 };
+                return !!offscreen && (range.vmax <= range.vmin || !canvasLooksBlank(offscreen));
+              });
+              if (readbackPainted && isCurrentRender()) {
+                setOffscreenVersion(v => v + 1);
+                return;
+              }
             }
           } catch (err) {
             closeBitmaps();
@@ -3674,7 +4287,7 @@ function Show2D() {
       cancelled = true;
       if (renderRaf !== null) window.cancelAnimationFrame(renderRaf);
     };
-  }, [dataVersion, gpuCmapVersion, autoContrastVersion, nImages, width, height, cmap, panelCmaps, panelCmapFor, logScale, autoContrast, linkedContrast, linkedContrastState, contrastStates, traitVmin, traitVmax, traitVmins, traitVmaxs, diffMode, isRgbFlags, canvasRepaintSignal]);
+  }, [dataVersion, gpuCmapVersion, autoContrastVersion, nImages, width, height, cmap, panelCmaps, panelCmapFor, logScale, autoContrast, linkedContrast, linkedContrastState, contrastStates, traitVmin, traitVmax, traitVmins, traitVmaxs, diffMode, isRgbFlags, canvasRepaintSignal, visibleImageIndices]);
 
   // -------------------------------------------------------------------------
   // Maps-style detail fetch (preview binned only, _display_bin_factor > 1).
@@ -3686,7 +4299,7 @@ function Show2D() {
     if (!displayBinFactor || displayBinFactor <= 1) return null;
     if (canvasW <= 0 || canvasH <= 0 || width <= 0 || height <= 0) return null;
     if (isRgbFlags && isRgbFlags[panel]) return null;
-    if (hiddenPanels && hiddenPanels.includes(panel)) return null;
+    if (hiddenPanelSet.has(panel)) return null;
     const zs = getZoomState(panel);
     // Canvas px painted per preview px: at or below 1 the preview already
     // saturates the screen, so full-res detail adds nothing visible.
@@ -3710,11 +4323,11 @@ function Show2D() {
       fullCol0: col0 * displayBinFactor,
       fullCol1: col1 * displayBinFactor,
     };
-  }, [displayBinFactor, canvasW, canvasH, width, height, isRgbFlags, hiddenPanels, getZoomState, displayScale]);
+  }, [displayBinFactor, canvasW, canvasH, width, height, isRgbFlags, hiddenPanelSet, getZoomState, displayScale]);
 
   React.useEffect(() => {
     if (!displayBinFactor || displayBinFactor <= 1) return;
-    const signature = Array.from({ length: nImages }, (_, i) => {
+    const signature = visibleImageIndices.map((i) => {
       const win = currentDetailWindow(i);
       if (!win) return `${i}:preview`;
       return `${i}:${Math.round(win.fullRow0)},${Math.round(win.fullRow1)},${Math.round(win.fullCol0)},${Math.round(win.fullCol1)},${win.bin}`;
@@ -3725,7 +4338,7 @@ function Show2D() {
     // a sharp rectangular tile over the new preview.
     detailRequestIdRef.current++;
     detailSentKeysRef.current.clear();
-  }, [displayBinFactor, nImages, currentDetailWindow, linkedZoomState, zoomStates, dataVersion]);
+  }, [displayBinFactor, visibleImageIndices, currentDetailWindow, linkedZoomState, zoomStates, dataVersion]);
 
   React.useEffect(() => {
     if (!displayBinFactor || displayBinFactor <= 1 || detailTilesRef.current.size === 0) return;
@@ -3758,7 +4371,7 @@ function Show2D() {
     if (canvasW <= 0 || canvasH <= 0 || width <= 0 || height <= 0) return;
     const timer = window.setTimeout(() => {
       const tiles: { panel: number; row0: number; row1: number; col0: number; col1: number; bin: number }[] = [];
-      for (let i = 0; i < nImages; i++) {
+      for (const i of visibleImageIndices) {
         const win = currentDetailWindow(i);
         if (!win) continue;
         const key = `${Math.round(win.row0)},${Math.round(win.row1)},${Math.round(win.col0)},${Math.round(win.col1)},${win.bin}`;
@@ -3775,7 +4388,7 @@ function Show2D() {
       setDetailRequest(JSON.stringify({ id: String(id), tiles }));
     }, 150);
     return () => window.clearTimeout(timer);
-  }, [displayBinFactor, canvasW, canvasH, width, height, nImages,
+  }, [displayBinFactor, canvasW, canvasH, width, height, visibleImageIndices,
       currentDetailWindow, dataVersion, setDetailRequest]);
 
   // Detail reply: decode the float32 tiles and stash per panel. Replies for
@@ -3828,7 +4441,7 @@ function Show2D() {
   React.useLayoutEffect(() => {
     if (mainOffscreensRef.current.length === 0) return;
 
-    for (let i = 0; i < nImages; i++) {
+    for (const i of visibleImageIndices) {
       const canvas = canvasRefs.current[i];
       const offscreen = mainOffscreensRef.current[i];
       if (!canvas || !offscreen) continue;
@@ -3843,14 +4456,37 @@ function Show2D() {
       const { zoom, panX, panY } = zs;
 
       ctx.save();
+      // Live notebook sessions still apply display rotations on the Python
+      // side so static PNG/state exports see the same orientation. Kernel-less
+      // standalone HTML cannot do that round trip, so it needs the canvas
+      // transform here. Keep this split explicit to avoid double-rotating live
+      // widgets after the backend sends rotated frame bytes.
+      const rotationTurns = offlineForTheme ? rotationForPanel(i) : 0;
+      const rotated = rotationTurns % 2 !== 0;
+      const drawW = rotated ? canvasH : canvasW;
+      const drawH = rotated ? canvasW : canvasH;
+      if (rotationTurns !== 0) {
+        ctx.translate(canvasW / 2, canvasH / 2);
+        // `image_rotations=1` matches Python `np.rot90(..., k=1)`, so keep the
+        // display transform CCW-positive instead of Canvas' default y-down
+        // clockwise visual direction.
+        ctx.rotate(-rotationTurns * Math.PI / 2);
+        ctx.translate(-drawW / 2, -drawH / 2);
+      }
       if (zoom !== 1 || panX !== 0 || panY !== 0) {
-        const cx = canvasW / 2;
-        const cy = canvasH / 2;
+        const cx = drawW / 2;
+        const cy = drawH / 2;
         ctx.translate(cx + panX, cy + panY);
         ctx.scale(zoom, zoom);
         ctx.translate(-cx, -cy);
       }
-      ctx.drawImage(offscreen, 0, 0, width, height, 0, 0, canvasW, canvasH);
+      const flipX = Boolean(imageFlipsHorizontal?.[i]);
+      const flipY = Boolean(imageFlipsVertical?.[i]);
+      if (flipX || flipY) {
+        ctx.translate(flipX ? drawW : 0, flipY ? drawH : 0);
+        ctx.scale(flipX ? -1 : 1, flipY ? -1 : 1);
+      }
+      ctx.drawImage(offscreen, 0, 0, width, height, 0, 0, drawW, drawH);
       // Detail tile on top of the preview (same zoom/pan transform): tile
       // coordinates are full-res pixels, so divide by the preview bin factor
       // to land in the preview's coordinate space. Outside the tile the
@@ -3868,8 +4504,8 @@ function Show2D() {
           && tileCol1 >= win.fullCol1 - eps
           && tile.bin <= win.bin;
         if (coversCurrentView) {
-          const sx = canvasW / width;
-          const sy = canvasH / height;
+          const sx = drawW / width;
+          const sy = drawH / height;
           const f = displayBinFactor;
           ctx.drawImage(tile.canvas, 0, 0, tile.cols, tile.rows,
             (tile.col0 / f) * sx, (tile.row0 / f) * sy,
@@ -3878,13 +4514,13 @@ function Show2D() {
       }
       ctx.restore();
     }
-  }, [offscreenVersion, detailPaintVersion, displayBinFactor, nImages, width, height, displayScale, canvasW, canvasH, canvasReady, linkedZoom, linkedZoomState, zoomStates, smooth, currentDetailWindow, canvasRepaintSignal]);
+  }, [offscreenVersion, detailPaintVersion, displayBinFactor, nImages, width, height, displayScale, canvasW, canvasH, canvasReady, linkedZoom, linkedZoomState, zoomStates, smooth, currentDetailWindow, canvasRepaintSignal, imageFlipsHorizontal, imageFlipsVertical, offlineForTheme, rotationForPanel, visibleImageIndices]);
 
   // -------------------------------------------------------------------------
   // Render Overlays (scale bar, colorbar, zoom indicator)
   // -------------------------------------------------------------------------
   React.useEffect(() => {
-    for (let i = 0; i < nImages; i++) {
+    for (const i of visibleImageIndices) {
       const overlay = overlayRefs.current[i];
       if (!overlay) continue;
       const ctx = overlay.getContext("2d");
@@ -3895,7 +4531,10 @@ function Show2D() {
         const panelPixelSize = pixelSizeForPanel(i);
         const unit = panelPixelSize > 0 ? pixelUnit : "px";
         const pxSize = panelPixelSize > 0 ? panelPixelSize : 1;
-        drawScaleBarHiDPI(overlay, DPR, zs.zoom, pxSize, unit, width);
+        drawScaleBarHiDPI(overlay, DPR, zs.zoom, pxSize, unit, width, {
+          position: scaleBarPosition === "bottom-left" ? "bottom-left" : "bottom-right",
+          showZoomIndicator,
+        });
       } else {
         ctx.clearRect(0, 0, overlay.width, overlay.height);
       }
@@ -3913,6 +4552,19 @@ function Show2D() {
         drawColorbar(ctx, cssW, cssH, lut, vmin, vmax, logScale);
         ctx.restore();
       }
+
+      ctx.save();
+      ctx.scale(DPR, DPR);
+      drawInsetPlot(
+        ctx,
+        insetPlots?.[i],
+        i,
+        overlay.width / DPR,
+        overlay.height / DPR,
+        panelMarkerColor(i),
+        scaleBarVisible,
+      );
+      ctx.restore();
 
       // ROI overlay — draw all ROIs
       if (roiActive && roiList && roiList.length > 0) {
@@ -4095,7 +4747,7 @@ function Show2D() {
         ctx.restore();
       }
     }
-  }, [nImages, pixelSizeForPanel, pixelUnit, scaleBarVisible, selectedIdx, isGallery, canvasW, canvasH, width, displayScale, linkedZoom, linkedZoomState, zoomStates, dataVersion, showColorbar, cmap, offscreenVersion, logScale, profileActive, profilePoints, roiActive, roiList, roiSelectedIdx, isDraggingROI, themeColors, measureActive, measurePoints, canvasRepaintSignal]);
+  }, [nImages, pixelSizeForPanel, pixelUnit, scaleBarVisible, scaleBarPosition, showZoomIndicator, selectedIdx, isGallery, canvasW, canvasH, width, displayScale, linkedZoom, linkedZoomState, zoomStates, dataVersion, showColorbar, cmap, offscreenVersion, logScale, profileActive, profilePoints, roiActive, roiList, roiSelectedIdx, isDraggingROI, themeColors, measureActive, measurePoints, canvasRepaintSignal, insetPlots, panelMarkerColor, visibleImageIndices]);
 
   // -------------------------------------------------------------------------
   // Inset magnifier (lens) — renders magnified region at cursor in bottom-left
@@ -4649,6 +5301,10 @@ function Show2D() {
             const ctx = oc.getContext("2d");
             if (ctx) {
               ctx.drawImage(bitmaps[0], 0, 0);
+              if (vmax > vmin && canvasLooksBlank(oc)) {
+                renderCpu();
+                return;
+              }
               fftOffscreenRef.current = oc;
               setFftOffscreenVersion(v => v + 1);
             }
@@ -5193,6 +5849,7 @@ function Show2D() {
           }
           if (bitmaps && bitmaps.length > 0) {
             let painted = false;
+            let blankBitmap = false;
             try {
               for (let k = 0; k < bitmaps.length; k++) {
                 const bitmap = bitmaps[k];
@@ -5204,13 +5861,18 @@ function Show2D() {
                 const ctx = oc.getContext("2d");
                 if (!ctx) continue;
                 ctx.drawImage(bitmap, 0, 0);
+                const range = ranges[k] || { vmin: 0, vmax: 1 };
+                if (range.vmax > range.vmin && canvasLooksBlank(oc)) {
+                  blankBitmap = true;
+                  continue;
+                }
                 fftOffscreensRef.current[idx] = oc;
                 painted = true;
               }
             } finally {
               bitmaps.forEach(bitmap => bitmap?.close());
             }
-            if (painted) {
+            if (painted && !blankBitmap) {
               setGalleryFftOffscreenVersion(v => v + 1);
               return;
             }
@@ -5895,6 +6557,7 @@ function Show2D() {
       handleDoubleClick(e, idx);
       return;
     }
+    if (handlePanelSelectionMouseDown(e, idx)) return;
     const zs = getZoomState(idx);
     if (isGallery && idx !== selectedIdx) {
       setSelectedIdx(idx);
@@ -6026,6 +6689,22 @@ function Show2D() {
       const rect = canvas.getBoundingClientRect();
       const mouseCanvasX = (e.clientX - rect.left) * (canvas.width / rect.width);
       const mouseCanvasY = (e.clientY - rect.top) * (canvas.height / rect.height);
+      const insetHover = insetHoverAt(
+        insetPlots?.[idx],
+        idx,
+        canvas.width,
+        canvas.height,
+        mouseCanvasX,
+        mouseCanvasY,
+        scaleBarVisible,
+      );
+      const insetHoverKey = insetHover
+        ? `${insetHover.idx}:${insetHover.text}:${insetHover.leftPct.toFixed(1)}:${insetHover.topPct.toFixed(1)}`
+        : "";
+      if (insetHoverKey !== insetHoverKeyRef.current) {
+        insetHoverKeyRef.current = insetHoverKey;
+        setInsetHoverInfo(insetHover);
+      }
       const zs = getZoomState(idx);
       const cx = canvasW / 2;
       const cy = canvasH / 2;
@@ -6298,6 +6977,8 @@ function Show2D() {
 
   const handleMouseLeave = (idx: number) => {
     setCursorInfo(null);
+    insetHoverKeyRef.current = "";
+    setInsetHoverInfo(null);
     // Don't clear lensPos — lens stays at last position when toggle is on
     setIsDraggingLens(false);
     setIsResizingLens(false);
@@ -6550,7 +7231,14 @@ function Show2D() {
   const diffControlAvailable = !isPaged && nImages >= 2 && (visibleGrayscaleIndices.length === 2 || diffMode);
   const moreActiveCount =
     (roiControlAvailable && roiActive ? 1 : 0) + (diffMode ? 1 : 0) + (denoiseEnabled ? 1 : 0)
-    + (frequencyFilterEnabled && Array.from({ length: nImages }, (_, panel) => panelFrequencyKnobs(panel)).some(knobs => frequencyFilterActive(knobs.mode)) ? 1 : 0);
+    + (frequencyFilterEnabled && Array.from({ length: nImages }, (_, panel) => panelFrequencyKnobs(panel)).some(knobs => frequencyFilterActive(knobs.mode)) ? 1 : 0)
+    + (isGallery && !colorShared ? 1 : 0)
+    + (Array.from({ length: nImages }, (_, panel) => rotationForPanel(panel)).some(k => k !== 0) ? 1 : 0);
+  const rotationActive = Array.from({ length: nImages }, (_, panel) => rotationForPanel(panel)).some(k => k !== 0);
+  const clearRotations = React.useCallback(() => {
+    setImageRotations(Array.from({ length: Math.max(1, nImages || 1) }, () => 0));
+    setShowRotationSettings(false);
+  }, [nImages, setImageRotations]);
   const frequencyUiKnobs = panelFrequencyKnobs(Math.min(Math.max(0, selectedIdx || 0), Math.max(0, nImages - 1)));
   const frequencyValueLabel = (value: number, panel = selectedIdx) => {
     const sampling = pixelSizeForPanel(Math.min(Math.max(0, panel || 0), Math.max(0, nImages - 1)));
@@ -6788,21 +7476,6 @@ function Show2D() {
                 {detailStreamStatus === "streaming" ? "streaming detail..." : detailStreamStatus === "ready" ? "detail ready" : "preview; streams on zoom"}
               </Box>
             )}
-            {(() => { const rk = (imageRotations?.[isGallery ? selectedIdx : 0] ?? 0) % 4; return rk !== 0 ? (
-              <Box
-                component="span"
-                onClick={() => {
-                  const ri = isGallery ? selectedIdx : 0;
-                  const rots = [...(imageRotations || [])];
-                  while (rots.length <= ri) rots.push(0);
-                  rots[ri] = (rots[ri] + 3) % 4;
-                  setImageRotations(rots);
-                }}
-                sx={{ ml: 0.5, color: themeColors.accent, cursor: "pointer", fontSize: "inherit", "&:hover": { opacity: 0.7 } }}
-              >
-                ({rk * 90}°)
-              </Box>
-            ) : null; })()}
             {debug && <DebugPerfBadge widget="Show2D" fps={debugFps} themeColors={themeColors} />}
 	            {showControls && <InfoTooltip text={<Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
               <MetadataSection rows={[
@@ -6856,111 +7529,119 @@ function Show2D() {
 	              </Button>
 	            )}
 	          </Typography>}
-	          {/* Controls row: viewer toggles on the left, actions on the right */}
+	          {/* Page navigation sits above the analysis toolbar, matching Show3D. */}
+	          {controlsVisible && isPaged && (
+	            <Box
+	              data-show2d-page-controls={pageKind || "comparison"}
+	              aria-label="Page navigation"
+	              sx={{
+	                display: "flex",
+	                alignItems: "center",
+	                flexWrap: "wrap",
+	                columnGap: "8px",
+	                rowGap: "3px",
+	                mb: "3px",
+	                minHeight: 26,
+	                pb: "3px",
+	                borderBottom: `1px solid ${themeColors.border}`,
+	              }}
+	            >
+	              <Box sx={{ display: "flex", alignItems: "baseline", gap: "5px", flex: "1 1 240px", minWidth: 0 }}>
+	                <Typography sx={{ ...typography.label, fontSize: 10, flexShrink: 0 }}>Page</Typography>
+	                <Typography
+	                  data-show2d-page-status="true"
+	                  title={pageControlStatus}
+	                  sx={{
+	                    ...typography.label,
+	                    fontSize: 10,
+	                    lineHeight: 1.25,
+	                    color: themeColors.accent,
+	                    minWidth: 0,
+	                    whiteSpace: "normal",
+	                    overflowWrap: "anywhere",
+	                    fontVariantNumeric: "tabular-nums",
+	                  }}
+	                >
+	                  {pageControlStatus}
+	                </Typography>
+	              </Box>
+	              <Box sx={{ display: "flex", alignItems: "center", gap: "4px", flex: "0 1 auto", minWidth: 0 }}>
+	                <Slider
+	                  value={pageControlIdx}
+	                  min={0}
+	                  max={Math.max(0, (nPages || 1) - 1)}
+	                  step={1}
+	                  onPointerDownCapture={() => {
+	                    stopPagePlayback();
+	                    setPageSliderPreviewIdx(currentPageIdx);
+	                  }}
+	                  onKeyDown={() => stopPagePlayback()}
+	                  onChange={(_, value) => {
+	                    const raw = Array.isArray(value) ? value[0] : value;
+	                    const next = clampPageIdx(Number(raw));
+	                    setPageSliderPreviewIdx(next);
+	                    commitPageIdx(next);
+	                  }}
+	                  onChangeCommitted={(_, value) => {
+	                    const raw = Array.isArray(value) ? value[0] : value;
+	                    const next = clampPageIdx(Number(raw));
+	                    stopPagePlayback();
+	                    setPageSliderPreviewIdx(next);
+	                    commitPageIdx(next, true);
+	                  }}
+	                  size="small"
+	                  sx={{ ...sliderStyles.small, width: 150, flex: "0 1 150px", minWidth: 92, color: themeColors.accent }}
+	                  aria-label="Page"
+	                />
+	                <IconButton
+	                  size="small"
+	                  onClick={() => setPagePlaying((value) => !value)}
+	                  title={pagePlaying ? "Pause page playback" : "Play pages"}
+	                  aria-label={pagePlaying ? "Pause page playback" : "Play pages"}
+	                  sx={{ width: 24, height: 24, p: 0, color: themeColors.accent }}
+	                >
+	                  {pagePlaying ? <PauseIcon sx={{ fontSize: 16 }} /> : <PlayArrowIcon sx={{ fontSize: 16 }} />}
+	                </IconButton>
+	                <Select
+	                  value={String(pagePlayFps)}
+	                  onChange={(e) => setPagePlayFps(Number(e.target.value) || 2)}
+	                  size="small"
+	                  sx={{ ...themedSelect, minWidth: 48, fontSize: 10 }}
+	                  MenuProps={themedTopMenuProps}
+	                  inputProps={{ "aria-label": "Page playback frames per second" }}
+	                  title="Page playback speed"
+	                >
+	                  {PAGE_PLAY_FPS_OPTIONS.map((fps) => (
+	                    <MenuItem key={fps} value={String(fps)}>{fps} fps</MenuItem>
+	                  ))}
+	                </Select>
+	                {pageKind !== "items" && (
+	                  <IconButton
+	                    size="small"
+	                    onClick={() => {
+	                      const next = Array.from({ length: Math.max(1, nPages || 1) }, (_, idx) => pageStarred?.[idx] ? 1 : 0);
+	                      next[pageControlIdx] = next[pageControlIdx] ? 0 : 1;
+	                      setPageStarred(next);
+	                    }}
+	                    title={(pageStarred?.[pageControlIdx] ? "Unstar " : "Star ") + pageControlLabel}
+	                    aria-label={(pageStarred?.[pageControlIdx] ? "Unstar " : "Star ") + pageControlLabel}
+	                    sx={{
+	                      width: 24,
+	                      height: 24,
+	                      p: 0,
+	                      color: pageStarred?.[pageControlIdx] ? "#ffc107" : themeColors.textMuted,
+	                      "&:hover": { color: pageStarred?.[pageControlIdx] ? "#ffc107" : themeColors.text },
+	                    }}
+	                  >
+	                    {pageStarred?.[pageControlIdx] ? "★" : "☆"}
+	                  </IconButton>
+	                )}
+	              </Box>
+	            </Box>
+	          )}
+	          {/* Analysis and display controls row. */}
 	          {controlsVisible && (
 	          <Stack direction="row" alignItems="center" spacing={`${SPACING.SM}px`} useFlexGap sx={{ mb: `${SPACING.XS}px`, minHeight: 28, flexWrap: "wrap", rowGap: `${SPACING.XS}px`, width: "100%", maxWidth: "100%", boxSizing: "border-box" }}>
-            {isPaged && (
-              <Box
-                data-show2d-page-controls={pageKind || "comparison"}
-                sx={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: `${SPACING.SM}px`,
-                  flex: "0 1 auto",
-                  minWidth: 0,
-                  maxWidth: "100%",
-                }}
-              >
-                <Typography sx={{ ...typography.label, fontSize: 10, flexShrink: 0 }}>Page</Typography>
-                <Typography
-                  title={pageControlStatus}
-                  sx={{
-                    ...typography.label,
-                    fontSize: 10,
-                    color: themeColors.accent,
-                    flex: "0 1 14ch",
-                    minWidth: "8ch",
-                    maxWidth: { xs: "11ch", sm: "16ch", md: "20ch" },
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                    whiteSpace: "nowrap",
-                    fontVariantNumeric: "tabular-nums",
-                  }}
-                >
-                  {pageControlStatus}
-                </Typography>
-                <Slider
-                  value={pageControlIdx}
-                  min={0}
-                  max={Math.max(0, (nPages || 1) - 1)}
-                  step={1}
-                  onPointerDownCapture={() => {
-                    stopPagePlayback();
-                    setPageSliderPreviewIdx(currentPageIdx);
-                  }}
-                  onKeyDown={() => stopPagePlayback()}
-                  onChange={(_, value) => {
-                    const raw = Array.isArray(value) ? value[0] : value;
-                    const next = clampPageIdx(Number(raw));
-                    setPageSliderPreviewIdx(next);
-                    commitPageIdx(next);
-                  }}
-                  onChangeCommitted={(_, value) => {
-                    const raw = Array.isArray(value) ? value[0] : value;
-                    const next = clampPageIdx(Number(raw));
-                    stopPagePlayback();
-                    setPageSliderPreviewIdx(next);
-                    commitPageIdx(next, true);
-                  }}
-                  size="small"
-                  sx={{ ...sliderStyles.small, width: 120, flex: "0 0 120px", color: themeColors.accent }}
-                  aria-label="Page"
-                />
-                <IconButton
-                  size="small"
-                  onClick={() => setPagePlaying((value) => !value)}
-                  title={pagePlaying ? "Pause page playback" : "Play pages"}
-                  aria-label={pagePlaying ? "Pause page playback" : "Play pages"}
-                  sx={{ width: 24, height: 24, p: 0, color: themeColors.accent }}
-                >
-                  {pagePlaying ? <PauseIcon sx={{ fontSize: 16 }} /> : <PlayArrowIcon sx={{ fontSize: 16 }} />}
-                </IconButton>
-                <Select
-                  value={String(pagePlayFps)}
-                  onChange={(e) => setPagePlayFps(Number(e.target.value) || 2)}
-                  size="small"
-                  sx={{ ...themedSelect, minWidth: 48, fontSize: 10 }}
-                  MenuProps={themedTopMenuProps}
-                  inputProps={{ "aria-label": "Page playback frames per second" }}
-                  title="Page playback speed"
-                >
-                  {PAGE_PLAY_FPS_OPTIONS.map((fps) => (
-                    <MenuItem key={fps} value={String(fps)}>{fps} fps</MenuItem>
-                  ))}
-                </Select>
-                {pageKind !== "items" && (
-                  <IconButton
-                    size="small"
-                    onClick={() => {
-                      const next = Array.from({ length: Math.max(1, nPages || 1) }, (_, idx) => pageStarred?.[idx] ? 1 : 0);
-                      next[pageControlIdx] = next[pageControlIdx] ? 0 : 1;
-                      setPageStarred(next);
-                    }}
-                    title={(pageStarred?.[pageControlIdx] ? "Unstar " : "Star ") + pageControlLabel}
-                    aria-label={(pageStarred?.[pageControlIdx] ? "Unstar " : "Star ") + pageControlLabel}
-                    sx={{
-                      width: 24,
-                      height: 24,
-                      p: 0,
-                      color: pageStarred?.[pageControlIdx] ? "#ffc107" : themeColors.textMuted,
-                      "&:hover": { color: pageStarred?.[pageControlIdx] ? "#ffc107" : themeColors.text },
-                    }}
-                  >
-                    {pageStarred?.[pageControlIdx] ? "★" : "☆"}
-                  </IconButton>
-                )}
-              </Box>
-            )}
             {isGallery && (
               <Box sx={controlPairSx}>
                 <Typography sx={compactLabelSx}>Cols</Typography>
@@ -7064,6 +7745,17 @@ function Show2D() {
                   >
                     {allCurrentPanelsVisible ? "Panels" : `Panels ${visibleImageCount}/${panelMenuTotal}`}
                   </Button>
+                  {selectedVisibleCount > 1 && selectedVisibleCount < visibleImageCount && (
+                    <Button
+                      size="small"
+                      sx={compactButton}
+                      onClick={() => setPanelsHidden(selectedVisiblePanels, true)}
+                      aria-label={`Hide ${selectedVisibleCount} selected panels`}
+                      title={`Hide ${selectedVisibleCount} selected panels`}
+                    >
+                      Hide {selectedVisibleCount}
+                    </Button>
+                  )}
                   <Menu
                     id="show2d-panels-menu"
                     anchorEl={panelMenuAnchor}
@@ -7108,6 +7800,23 @@ function Show2D() {
                     </MenuItem>
                     <MenuItem
                       dense
+                      disabled={selectedVisibleCount <= 1 || selectedVisibleCount >= visibleImageCount}
+                      onClick={() => setPanelsHidden(selectedVisiblePanels, true)}
+                      title={selectedVisibleCount >= visibleImageCount ? "At least one panel must remain visible" : undefined}
+                    >
+                      <VisibilityOffIcon sx={{ fontSize: 16, mr: 1, color: themeColors.accent }} />
+                      <Typography sx={{ fontSize: 11 }}>Hide selected ({selectedVisibleCount})</Typography>
+                    </MenuItem>
+                    <MenuItem
+                      dense
+                      disabled={selectedVisibleCount <= 1}
+                      onClick={() => setSelectedPanels([selectedIdx])}
+                    >
+                      <VisibilityIcon sx={{ fontSize: 16, mr: 1, color: themeColors.textMuted }} />
+                      <Typography sx={{ fontSize: 11 }}>Clear selection</Typography>
+                    </MenuItem>
+                    <MenuItem
+                      dense
                       disabled={(panelOrder || []).length === 0}
                       onClick={resetPanelOrder}
                     >
@@ -7133,7 +7842,7 @@ function Show2D() {
                   aria-controls={moreMenuAnchor ? "show2d-more-menu" : undefined}
                   aria-expanded={moreMenuAnchor ? "true" : undefined}
                   aria-haspopup="menu"
-                  title="More tools: ROI, Denoise, Filter, Diff"
+                  title="More tools: ROI, Denoise, Filter, Diff, Color"
                 >
                   More
                 </Button>
@@ -7264,6 +7973,125 @@ function Show2D() {
                       size="small"
                       sx={switchStyles.small}
                       slotProps={{ input: { "aria-label": "Toggle difference of visible panels" } }}
+                    />
+                  </MenuItem>
+                )}
+                <MenuItem
+                  dense
+                  onClick={() => togglePanelFlip(selectedIdx, "h")}
+                  sx={{ fontSize: 12, gap: 1, color: imageFlipsHorizontal?.[selectedIdx] ? themeColors.accent : themeColors.text }}
+                >
+                  <Typography sx={{ flex: 1, fontSize: 12, color: "inherit" }} title="Display-only horizontal flip for the selected panel. Raw data and coordinates stay unchanged.">Flip H</Typography>
+                  <Switch
+                    checked={Boolean(imageFlipsHorizontal?.[selectedIdx])}
+                    onClick={(e) => e.stopPropagation()}
+                    onChange={() => togglePanelFlip(selectedIdx, "h")}
+                    size="small"
+                    sx={switchStyles.small}
+                    slotProps={{ input: { "aria-label": "Toggle horizontal flip for selected panel" } }}
+                  />
+                </MenuItem>
+                <MenuItem
+                  dense
+                  onClick={() => togglePanelFlip(selectedIdx, "v")}
+                  sx={{ fontSize: 12, gap: 1, color: imageFlipsVertical?.[selectedIdx] ? themeColors.accent : themeColors.text }}
+                >
+                  <Typography sx={{ flex: 1, fontSize: 12, color: "inherit" }} title="Display-only vertical flip for the selected panel. Raw data and coordinates stay unchanged.">Flip V</Typography>
+                  <Switch
+                    checked={Boolean(imageFlipsVertical?.[selectedIdx])}
+                    onClick={(e) => e.stopPropagation()}
+                    onChange={() => togglePanelFlip(selectedIdx, "v")}
+                    size="small"
+                    sx={switchStyles.small}
+                    slotProps={{ input: { "aria-label": "Toggle vertical flip for selected panel" } }}
+                  />
+                </MenuItem>
+                <MenuItem
+                  dense
+                  onClick={() => {
+                    if (rotationActive) clearRotations();
+                    else setShowRotationSettings(!showRotationSettings);
+                  }}
+                  sx={{ fontSize: 12, gap: 1, color: (rotationActive || showRotationSettings) ? themeColors.accent : themeColors.text }}
+                >
+                  <Typography sx={{ flex: 1, fontSize: 12, color: "inherit" }} title="Display-only orientation review. Turn on to choose angle and scope.">Rotate</Typography>
+                  <Switch
+                    checked={rotationActive || showRotationSettings}
+                    onClick={(event) => event.stopPropagation()}
+                    onChange={(event) => {
+                      if (event.target.checked) setShowRotationSettings(true);
+                      else clearRotations();
+                    }}
+                    size="small"
+                    sx={switchStyles.small}
+                    slotProps={{ input: { "aria-label": "Toggle rotation settings" } }}
+                  />
+                </MenuItem>
+                {(rotationActive || showRotationSettings) && (
+                  <Box
+                    onClick={(event) => event.stopPropagation()}
+                    sx={{
+                      px: 1.5,
+                      pb: 1,
+                      minWidth: 250,
+                      display: "grid",
+                      gridTemplateColumns: "auto 1fr",
+                      gap: 0.75,
+                      alignItems: "center",
+                    }}
+                  >
+                    <Typography sx={{ fontSize: 12, color: themeColors.textMuted }}>Angle</Typography>
+                    <Select
+                      value={String(((rotationScope || "all") === "panel" ? rotationForPanel(selectedIdx) : rotationForPanel(0)) * 90)}
+                      onChange={(event) => setRotationForScope(Number(event.target.value) / 90)}
+                      size="small"
+                      sx={{ ...themedSelect, minWidth: 92 }}
+                      MenuProps={themedMenuProps}
+                      inputProps={{ "aria-label": "Display rotation" }}
+                      title="Display-only rotation; raw data coordinates stay unchanged"
+                    >
+                      <MenuItem value="0">0°</MenuItem>
+                      <MenuItem value="90">90°</MenuItem>
+                      <MenuItem value="180">180°</MenuItem>
+                      <MenuItem value="270">270°</MenuItem>
+                    </Select>
+                    {isGallery && (
+                      <>
+                        <Typography sx={{ fontSize: 12, color: themeColors.textMuted }}>Scope</Typography>
+                        <Select
+                          value={rotationScope || "all"}
+                          onChange={(event) => setRotationScope(String(event.target.value))}
+                          size="small"
+                          sx={{ ...themedSelect, minWidth: 92 }}
+                          MenuProps={themedMenuProps}
+                          inputProps={{ "aria-label": "Rotation scope" }}
+                        >
+                          <MenuItem value="all">All</MenuItem>
+                          <MenuItem value="panel">Panel</MenuItem>
+                        </Select>
+                      </>
+                    )}
+                    <Typography sx={{ gridColumn: "1 / -1", fontSize: 10, color: themeColors.textMuted }}>
+                      {isGallery && (rotationScope || "all") === "panel"
+                        ? `Selected panel: ${panelLabel(selectedIdx)}`
+                        : "Applies to every visible panel"}
+                    </Typography>
+                  </Box>
+                )}
+                {isGallery && (
+                  <MenuItem
+                    dense
+                    onClick={() => setColorShared(!colorShared)}
+                    sx={{ fontSize: 12, gap: 1, color: !colorShared ? themeColors.accent : themeColors.text }}
+                  >
+                    <Typography sx={{ flex: 1, fontSize: 12, color: "inherit" }} title="Shared keeps one colormap for every panel. Turn off to let the Color dropdown edit only the selected panel.">Color shared</Typography>
+                    <Switch
+                      checked={colorShared}
+                      onClick={(e) => e.stopPropagation()}
+                      onChange={(e) => setColorShared(e.target.checked)}
+                      size="small"
+                      sx={switchStyles.small}
+                      slotProps={{ input: { "aria-label": "Toggle shared panel colormap" } }}
                     />
                   </MenuItem>
                 )}
@@ -7438,11 +8266,14 @@ function Show2D() {
 	                      "&::after": {
 	                        content: '""',
 	                        position: "absolute",
-	                        inset: 0,
-	                        pointerEvents: "none",
+                        inset: 0,
+                        pointerEvents: "none",
 	                        zIndex: 5,
-	                        boxShadow: `inset 0 0 0 2px ${reorderMode && dragOverPanel === i ? themeColors.accent : panelChromeVisible && i === selectedIdx ? themeColors.accent : "transparent"}`,
+	                        boxShadow: `inset 0 0 0 ${selectedPanelSet.has(i) ? 3 : 2}px ${reorderMode && dragOverPanel === i ? themeColors.accent : panelChromeVisible && (i === selectedIdx || selectedPanelSet.has(i)) ? themeColors.accent : "transparent"}`,
 	                      },
+                      "&::before": {
+                        display: "none",
+                      },
                       "&:hover .show2d-panel-hide-button, &:focus-within .show2d-panel-hide-button": {
                         opacity: 1,
                         pointerEvents: "auto",
@@ -7470,6 +8301,38 @@ function Show2D() {
                     onTouchEnd={reorderMode ? undefined : (e) => handleTouchEnd(e, i)}
                     onTouchCancel={reorderMode ? undefined : (e) => handleTouchEnd(e, i)}
                   >
+                    {markerAround ? (
+                      <Box
+                        data-show2d-marker-color={panelMarkerColor(i)}
+                        data-show2d-marker-style="around"
+                        title={`Panel marker ${panelMarkerColor(i)} · ${panelLabel(i)}`}
+                        sx={{
+                          position: "absolute",
+                          inset: 0,
+                          boxSizing: "border-box",
+                          boxShadow: `inset 0 0 0 3px ${panelMarkerColor(i)}, inset 0 0 0 5px rgba(0,0,0,0.9)`,
+                          pointerEvents: "none",
+                          zIndex: 8,
+                        }}
+                      />
+                    ) : (
+                      <Box
+                        data-show2d-marker-color={panelMarkerColor(i)}
+                        data-show2d-marker-style="left"
+                        title={`Panel marker ${panelMarkerColor(i)} · ${panelLabel(i)}`}
+                        sx={{
+                          position: "absolute",
+                          left: 0,
+                          top: 0,
+                          bottom: 0,
+                          width: 5,
+                          bgcolor: panelMarkerColor(i),
+                          boxShadow: "0 0 0 1px rgba(0,0,0,0.45)",
+                          pointerEvents: "none",
+                          zIndex: 8,
+                        }}
+                      />
+                    )}
                     <canvas
                       ref={(el) => { if (el && canvasRefs.current[i] !== el) { canvasRefs.current[i] = el; setCanvasReady(c => c + 1); } }}
                       width={canvasW} height={canvasH}
@@ -7485,6 +8348,28 @@ function Show2D() {
                       <Box sx={{ position: "absolute", top: 28, right: 3, bgcolor: "rgba(0,0,0,0.35)", px: 0.5, py: 0.15, pointerEvents: "none", minWidth: 100, textAlign: "right", zIndex: 2 }}>
                         <Typography sx={{ fontSize: 9, fontFamily: "monospace", color: "rgba(255,255,255,0.7)", whiteSpace: "nowrap", lineHeight: 1.2 }}>
                           ({cursorInfo.row}, {cursorInfo.col}){nativePixelSizeForPanel(i) > 0 ? ` = (${(cursorInfo.row * nativePixelSizeForPanel(i)).toFixed(1)}, ${(cursorInfo.col * nativePixelSizeForPanel(i)).toFixed(1)} ${pixelUnit})` : ""} {cursorInfo.rgb ? `(${cursorInfo.rgb[0].toFixed(2)}, ${cursorInfo.rgb[1].toFixed(2)}, ${cursorInfo.rgb[2].toFixed(2)})` : `${formatNumber(cursorInfo.value)}${cursorValueSuffix}`}
+                        </Typography>
+                      </Box>
+                    )}
+                    {panelChromeVisible && insetHoverInfo && insetHoverInfo.idx === i && (
+                      <Box
+                        sx={{
+                          position: "absolute",
+                          left: `${insetHoverInfo.leftPct}%`,
+                          top: `${insetHoverInfo.topPct}%`,
+                          transform: "translate(-8px, -100%)",
+                          bgcolor: "rgba(0,0,0,0.78)",
+                          color: "rgba(255,255,255,0.94)",
+                          border: "1px solid rgba(255,255,255,0.25)",
+                          px: 0.6,
+                          py: 0.25,
+                          pointerEvents: "none",
+                          zIndex: 12,
+                          boxShadow: "0 1px 3px rgba(0,0,0,0.45)",
+                        }}
+                      >
+                        <Typography sx={{ fontSize: 9, fontFamily: "monospace", whiteSpace: "nowrap", lineHeight: 1.2 }}>
+                          {insetHoverInfo.text}
                         </Typography>
                       </Box>
                     )}
@@ -7714,25 +8599,37 @@ function Show2D() {
                         sx={resizeGripSx}
                       />
                     )}
-                  </Box>
-                  {(imageRotations?.[i] ?? 0) % 4 !== 0 && (
-                    <Typography sx={{ fontSize: 10, color: themeColors.textMuted, textAlign: "center", mt: 0.25 }}>
-                      {panelLabel(i)}
+                    {rotationForPanel(i) !== 0 && (
                       <Box
-                        component="span"
-                        onClick={(e: React.MouseEvent) => {
-                          e.stopPropagation();
-                          const rots = [...(imageRotations || [])];
-                          while (rots.length <= i) rots.push(0);
-                          rots[i] = (rots[i] + 3) % 4;
-                          setImageRotations(rots);
+                        onClick={(event: React.MouseEvent) => {
+                          event.stopPropagation();
+                          setRotationForPanel(i, 0);
                         }}
-                        sx={{ ml: 0.5, color: themeColors.accent, cursor: "pointer", "&:hover": { opacity: 0.7 } }}
+                        title="Display rotation active; click to clear"
+                        aria-label="Clear display rotation"
+                        sx={{
+                          position: "absolute",
+                          left: 43,
+                          bottom: 8,
+                          zIndex: 4,
+                          px: 0.6,
+                          py: 0.15,
+                          borderRadius: "5px",
+                          bgcolor: "rgba(0,0,0,0.50)",
+                          color: "rgba(255,255,255,0.95)",
+                          fontSize: 10,
+                          fontWeight: 700,
+                          lineHeight: 1.25,
+                          cursor: "pointer",
+                          userSelect: "none",
+                          textShadow: "0 1px 1px rgba(0,0,0,0.8)",
+                          "&:hover": { bgcolor: "rgba(0,0,0,0.72)" },
+                        }}
                       >
-                        ({(imageRotations[i] % 4) * 90}°)
+                        {rotationGlyph(rotationForPanel(i))}
                       </Box>
-                    </Typography>
-                  )}
+                    )}
+                  </Box>
                   {effectiveShowFft && (
                     <Box
                       ref={(el: HTMLDivElement | null) => { fftContainerRefs.current[i] = el; }}
@@ -7799,12 +8696,14 @@ function Show2D() {
                             right: 8,
                             display: "flex",
                             flexDirection: "column",
-                            alignItems: "stretch",
+                            alignItems: "flex-start",
                             rowGap: "2px",
                             minWidth: 0,
+                            maxWidth: "calc(100% - 16px)",
+                            overflow: "hidden",
                             pointerEvents: "none",
                             userSelect: "none",
-                            zIndex: 3,
+                            zIndex: 6,
                           }}
                         >
                           {showPanelTitles !== false && (
@@ -7818,12 +8717,15 @@ function Show2D() {
                                 fontSize: Math.max(8, panelTitleFontSize || 11),
                                 fontWeight: 700,
                                 lineHeight: 1.2,
-                                textAlign: "center",
+                                textAlign: "left",
                                 textShadow: "1px 1px 0 rgba(0,0,0,0.85), 0 0 3px rgba(0,0,0,0.75)",
-                                whiteSpace: "normal",
-                                overflow: "visible",
-                                textOverflow: "clip",
-                                overflowWrap: "anywhere",
+                                bgcolor: "rgba(0,0,0,0.42)",
+                                borderRadius: "3px",
+                                maxWidth: "100%",
+                                boxSizing: "border-box",
+                                whiteSpace: "nowrap",
+                                overflow: "hidden",
+                                textOverflow: "ellipsis",
                               }}
                             >
                               FFT · {panelLabel(i)}
@@ -7834,9 +8736,14 @@ function Show2D() {
                               className="quantem-fft-quality-label"
                               aria-label={`FFT quality for ${panelLabel(i)}: ${formatFftQualityLabel(galleryFftQuality[i])}`}
                               sx={{
+                                px: 0.5,
+                                py: 0.15,
                                 minWidth: 0,
                                 maxWidth: "100%",
+                                boxSizing: "border-box",
                                 color: "rgba(255,255,255,0.96)",
+                                bgcolor: "rgba(0,0,0,0.58)",
+                                borderRadius: "3px",
                                 fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
                                 fontSize: Math.max(9, Math.min(12, panelTitleFontSize || 11)),
                                 fontWeight: 700,
@@ -7845,6 +8752,7 @@ function Show2D() {
                                 overflow: "hidden",
                                 textOverflow: "ellipsis",
                                 textShadow: "1px 1px 0 rgba(0,0,0,0.9), 0 0 3px rgba(0,0,0,0.85)",
+                                alignSelf: "flex-start",
                               }}
                             >
                               {formatFftQualityLabel(galleryFftQuality[i])}
@@ -7856,6 +8764,18 @@ function Show2D() {
                         <Box sx={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", bgcolor: "rgba(0,0,0,0.6)", pointerEvents: "none" }}>
                           <Typography sx={{ fontSize: 10, color: "#aaa", fontFamily: "monospace", "@keyframes pulse": { "0%,100%": { opacity: 0.4 }, "50%": { opacity: 1 } }, animation: "pulse 1.2s ease-in-out infinite" }}>FFT…</Typography>
                         </Box>
+                      )}
+                      {showResizeControls && (
+                        <Box
+                          onMouseDown={(e: React.MouseEvent) => {
+                            e.stopPropagation();
+                            handleCanvasResizeStart(e);
+                          }}
+                          title="Resize FFT panels"
+                          aria-label={`Resize FFT panel for ${panelLabel(i)}`}
+                          data-show2d-fft-resize-handle={i}
+                          sx={{ ...resizeGripSx, zIndex: 7 }}
+                        />
                       )}
                     </Box>
                   )}
@@ -7927,6 +8847,28 @@ function Show2D() {
                   </Typography>
 	                </Box>
 	              )}
+              {panelChromeVisible && insetHoverInfo && insetHoverInfo.idx === 0 && (
+                <Box
+                  sx={{
+                    position: "absolute",
+                    left: `${insetHoverInfo.leftPct}%`,
+                    top: `${insetHoverInfo.topPct}%`,
+                    transform: "translate(-8px, -100%)",
+                    bgcolor: "rgba(0,0,0,0.78)",
+                    color: "rgba(255,255,255,0.94)",
+                    border: "1px solid rgba(255,255,255,0.25)",
+                    px: 0.6,
+                    py: 0.25,
+                    pointerEvents: "none",
+                    zIndex: 12,
+                    boxShadow: "0 1px 3px rgba(0,0,0,0.45)",
+                  }}
+                >
+                  <Typography sx={{ fontSize: 9, fontFamily: "monospace", whiteSpace: "nowrap", lineHeight: 1.2 }}>
+                    {insetHoverInfo.text}
+                  </Typography>
+                </Box>
+              )}
               {panelChromeVisible && (panelFrameCounts?.[0] || 1) > 1 && (
                 <Box
                   data-show2d-panel-frame-controls={0}
@@ -8070,8 +9012,38 @@ function Show2D() {
                     <Box sx={{ ...controlRow, ...mobileControlRowSx, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, opacity: 1, pointerEvents: "auto" }}>
                       <Box sx={controlPairSx}>
                         <Typography sx={compactLabelSx} title="Auto-contrast: recompute the display range from the current view's percentiles. Turn off to set the histogram range by hand.">Auto</Typography>
-                        <Switch checked={autoContrast} onChange={() => { setAutoContrast(!autoContrast); }} size="small" sx={switchStyles.small} />
+                        <Switch
+                          checked={autoContrast}
+                          onChange={(event) => {
+                            setAutoContrast(event.target.checked);
+                            if (event.target.checked) setContrastPreset("manual");
+                          }}
+                          size="small"
+                          sx={switchStyles.small}
+                        />
                       </Box>
+                      <Box sx={controlPairSx}>
+                        <Typography sx={compactLabelSx} title="Show percentile preset controls. The histogram itself always stays visible.">Advanced</Typography>
+                        <Switch checked={showHistogramAdvanced} onChange={(e) => setShowHistogramAdvanced(e.target.checked)} size="small" sx={switchStyles.small} slotProps={{ input: { "aria-label": "Toggle advanced histogram controls" } }} />
+                      </Box>
+                      {showHistogramAdvanced && (
+                        <Box sx={controlPairSx}>
+                          <Typography sx={compactLabelSx} title="Apply a percentile contrast window. Choosing one turns Auto off because you are taking manual control.">Preset</Typography>
+                          <Select
+                            size="small"
+                            value={contrastPreset || "manual"}
+                            onChange={(e) => applyContrastPreset(String(e.target.value))}
+                            renderValue={(value) => CONTRAST_PRESETS.find((preset) => preset.value === value)?.label || "Manual"}
+                            MenuProps={themedMenuProps}
+                            sx={{ ...themedSelect, minWidth: 72 }}
+                            inputProps={{ "aria-label": "Contrast percentile preset" }}
+                          >
+                            {CONTRAST_PRESETS.map((preset) => (
+                              <MenuItem key={preset.value} value={preset.value}>{preset.label}</MenuItem>
+                            ))}
+                          </Select>
+                        </Box>
+                      )}
                       <Box sx={controlPairSx}>
                         <Typography sx={compactLabelSx} title="CSS bilinear interpolation. Same data, the browser smooths visually, useful when upscaling small images on a large canvas.">Smooth</Typography>
                         <Switch checked={smooth} onChange={() => { setSmooth(!smooth); }} size="small" sx={switchStyles.small} />
@@ -8304,9 +9276,9 @@ function Show2D() {
                             <Box key={i} sx={isRgbPanel(i) ? { opacity: 0.35, pointerEvents: "none" } : undefined}
                               title={isRgbPanel(i) ? "RGB panel: contrast controls do not apply" : undefined}>
                               <Histogram data={histData} vminPct={cs.vminPct} vmaxPct={cs.vmaxPct}
-                                onRangeChange={(min, max) => { if (autoContrast) setAutoContrast(false); setContrastState(i, { vminPct: min, vmaxPct: max }); }}
-                                onRangePreview={(min, max) => { if (autoContrast) setAutoContrast(false); setContrastState(i, { vminPct: min, vmaxPct: max }, false); }}
-                                onRangeCommit={(min, max) => { if (autoContrast) setAutoContrast(false); setContrastState(i, { vminPct: min, vmaxPct: max }, true); }}
+                                onRangeChange={(min, max) => { if (autoContrast) setAutoContrast(false); setContrastPreset("manual"); setContrastState(i, { vminPct: min, vmaxPct: max }); }}
+                                onRangePreview={(min, max) => { if (autoContrast) setAutoContrast(false); setContrastPreset("manual"); setContrastState(i, { vminPct: min, vmaxPct: max }, false); }}
+                                onRangeCommit={(min, max) => { if (autoContrast) setAutoContrast(false); setContrastPreset("manual"); setContrastState(i, { vminPct: min, vmaxPct: max }, true); }}
                                 width={110} height={58} theme={themeInfo.theme === "dark" ? "dark" : "light"}
                                 dataMin={histRange?.min ?? imageDataRange.min}
                                 dataMax={histRange?.max ?? imageDataRange.max} />
@@ -8315,7 +9287,7 @@ function Show2D() {
                         })}
                       </Box>
                     ) : (
-                      <Histogram data={imageHistogramData} precomputedBins={imageHistogramBins} vminPct={imageVminPct} vmaxPct={imageVmaxPct} onRangeChange={(min, max) => { if (autoContrast) setAutoContrast(false); setContrastState(activeContrastIdx, { vminPct: min, vmaxPct: max }); }} onRangePreview={(min, max) => { if (autoContrast) setAutoContrast(false); setContrastState(activeContrastIdx, { vminPct: min, vmaxPct: max }, false); }} onRangeCommit={(min, max) => { if (autoContrast) setAutoContrast(false); setContrastState(activeContrastIdx, { vminPct: min, vmaxPct: max }, true); }} width={110} height={58} theme={themeInfo.theme === "dark" ? "dark" : "light"} dataMin={traitVmin != null && traitVmax != null ? displayValue(traitVmin, logScale) : imageDataRange.min} dataMax={traitVmin != null && traitVmax != null ? displayValue(traitVmax, logScale) : imageDataRange.max} binMin={imageDataRange.min} binMax={imageDataRange.max} />
+                      <Histogram data={imageHistogramData} precomputedBins={imageHistogramBins} vminPct={imageVminPct} vmaxPct={imageVmaxPct} onRangeChange={(min, max) => { if (autoContrast) setAutoContrast(false); setContrastPreset("manual"); setContrastState(activeContrastIdx, { vminPct: min, vmaxPct: max }); }} onRangePreview={(min, max) => { if (autoContrast) setAutoContrast(false); setContrastPreset("manual"); setContrastState(activeContrastIdx, { vminPct: min, vmaxPct: max }, false); }} onRangeCommit={(min, max) => { if (autoContrast) setAutoContrast(false); setContrastPreset("manual"); setContrastState(activeContrastIdx, { vminPct: min, vmaxPct: max }, true); }} width={110} height={58} theme={themeInfo.theme === "dark" ? "dark" : "light"} dataMin={traitVmin != null && traitVmax != null ? displayValue(traitVmin, logScale) : imageDataRange.min} dataMax={traitVmin != null && traitVmax != null ? displayValue(traitVmax, logScale) : imageDataRange.max} binMin={imageDataRange.min} binMax={imageDataRange.max} />
                     )}
                   </Box>
                 )}
@@ -8594,7 +9566,12 @@ function Show2D() {
                     top: 8,
                     left: 8,
                     maxWidth: "calc(100% - 16px)",
+                    px: 0.5,
+                    py: 0.15,
+                    boxSizing: "border-box",
                     color: "rgba(255,255,255,0.96)",
+                    bgcolor: "rgba(0,0,0,0.58)",
+                    borderRadius: "3px",
                     fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
                     fontSize: 11,
                     fontWeight: 700,

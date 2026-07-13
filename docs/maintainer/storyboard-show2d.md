@@ -119,9 +119,11 @@ reversible.
 - Disable each link mode; verify independent panel state works.
 - Pass ``cmap=["gray", "inferno", "RdBu", ...]`` for a multi-panel gallery and
   verify each panel keeps its requested colormap in the live UI, saved state,
-  static notebook preview, and standalone HTML export. Select each panel and
-  change Color from the UI; verify only that panel changes unless the user has
-  explicitly chosen a linked/all-panel operation.
+  static notebook preview, and standalone HTML export. By default, verify the
+  Color dropdown is shared across panels. Then open More, turn off
+  ``Color shared``, select each panel, and change Color from the UI; verify
+  only that panel changes and no extra Link Color text appears in the main
+  toolbar.
 - In the View menu, set Padding to 10%, choose Median fill, and verify the
   canvas and histogram update while the stored raw arrays remain unchanged.
 - In a drift-correction gallery, toggle Padding from All to selected-panel
@@ -579,7 +581,85 @@ slice and total count.
   slider latency, and canvas repaint rate. Confirm the final canvas, not only
   the slider label, reaches every requested slice.
 
-### S2D-20: Page A Growing Folder Gallery Automatically
+### S2D-20: Mark Panels, Preset Contrast, And Flip Orientation During Review
+
+**User story**: As a scientist comparing several related 2-D maps, I want to
+tag panels with simple colors, choose a shared percentile contrast preset, and
+temporarily flip one panel from the UI so I can tell collaborators and agents
+which map to inspect without rewriting the notebook.
+
+**Primary widgets**: Show2D.
+
+**Acceptance checks**:
+
+- Start from a minimal multi-panel `Show2D([...])` when possible, then use the
+  UI to change contrast presets and open More for advanced controls.
+- Verify `marker_colors` / `identity_colors` paint durable panel strips and
+  survive saved state plus standalone HTML export.
+- Verify `1-99`, `2-98`, and `3-97` contrast presets update all visible panels
+  without forcing the advanced histogram UI open.
+- Turn on advanced histogram controls and verify the UI reveals manual controls
+  without shifting the main image grid.
+- Flip one panel horizontally and vertically from More; verify only the display
+  changes, stored data and ROI coordinates remain in the original `(row, col)`
+  convention, and neighboring panels stay unchanged.
+- Use More → Rotate with Scope = All, then Scope = Panel. Verify 90°, 180°,
+  and 270° rotations survive saved state and standalone HTML export, and that
+  scale bars, FFT labels, ROI overlays, and right-side ROI crops remain legible.
+- Verify the More menu opens compactly: Rotate should appear as a simple switch
+  first, and Angle/Scope controls should appear only after the user turns
+  Rotate on or when an orientation is already active.
+- Verify rotation state never edits the scientific title or panel label. The
+  live viewer may show only a compact direction glyph such as `↺90°` or
+  `↻90°`, preferably over the image chrome, not as another text label above or
+  below the panel.
+- Drive FFT, ROI, pan/zoom, denoise/filter, saved states, and export after the
+  flip/contrast changes so the feature is tested as a real review session.
+
+### S2D-20B: Embed Calibration Inset Plots In Image Panels
+
+**User story**: As a scientist tuning denoise or reconstruction parameters, I
+want each Show2D panel to carry a compact scientific inset plot, such as ACF
+versus `R`, so the image and the calibration evidence stay together in the same
+review figure without another notebook cell.
+
+**Primary widgets**: Show2D.
+
+**Data to use**: a 3 × 3 panel set with different calibration curves per panel.
+Use a real denoise/reconstruction calibration sweep for release signoff; a
+synthetic lattice is acceptable for fast API and hover regression checks.
+
+**Acceptance checks**:
+
+- Construct from `Show2D(..., inset_plots=[...])` with one dictionary per panel.
+  Verify each panel gets a different curve, point marker, legend, annotation,
+  and color.
+- Start from the human API first: `position`, `margin`, `size`, and `height`.
+  Test `bottom-right`, `top-right`, `top-left`, `bottom-center`, and `center`.
+  Use exact `box=[left, top, width, height]` only for the publication-layout
+  control case.
+- Test visual style controls: `line_width`, `background_alpha`,
+  `border_width=0`, nonzero `border_width`, `border_color`, `text_color`, and
+  `tick_color`. Verify no-border and subtle-border cases remain readable on
+  noisy images.
+- Turn on `show_ticks` with explicit `xticks` and `yticks`. Verify tick labels,
+  axis labels, legend, and annotation remain inside the inset and do not cover
+  the selected image feature.
+- Hover over the live inset plot. Verify the tooltip reports the nearest plotted
+  coordinate using axis labels, for example `R 0.465 · ACF 0.48`, and does not
+  clip at panel edges.
+- Move the scale bar with `scale_bar_position="bottom-left"` and hide
+  `show_zoom_indicator` when the inset uses the lower-right corner. Verify the
+  scale bar, inset, panel title, star, hide button, and resize handle do not
+  collide.
+- Verify `state_dict()`, saved notebook static PNG fallback, `export_html()`,
+  panel hide/reorder, responsive wrapping, and linked zoom/contrast preserve the
+  inset plots.
+- On touch/mobile, verify the hover-only readout has an acceptable fallback
+  before claiming iPhone signoff. If not implemented, record it as missing
+  rather than relying on desktop hover evidence.
+
+### S2D-21: Page A Growing Folder Gallery Automatically
 
 **User story**: As a microscopist whose acquisition or reconstruction folder
 may grow to hundreds of independent images, I want Show2D to show a bounded
