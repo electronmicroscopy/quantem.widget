@@ -1153,7 +1153,8 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     reverse = traitlets.Bool(False).tag(sync=True)  # Play in reverse direction
     boomerang = traitlets.Bool(True).tag(sync=True)  # Ping-pong playback
     fps = traitlets.Float(30.0).tag(sync=True)
-    # Moving-window time average (temporal binning for noisy data). 1 = off.
+    # Moving-window time average (temporal denoising for noisy data).
+    # 1 = raw single-frame display; the default keeps averaging on.
     # The displayed frame is the mean of `avg_window` consecutive frames.
     # Edge behavior: the window slides inward to stay FULL-WIDTH rather than
     # shrinking - so frame 0 with window 5 averages frames [0..4], and the last
@@ -1161,7 +1162,7 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     # the stack, at the cost of the average not being centered on the displayed
     # index near the ends (frame 0 shows the mean centered ~2 frames in). Even
     # windows are front-biased (window 4 = [idx-2 .. idx+1]).
-    avg_window = traitlets.Int(1).tag(sync=True)
+    avg_window = traitlets.Int(3).tag(sync=True)
     loop = traitlets.Bool(True).tag(sync=True)
     loop_start = traitlets.Int(0).tag(sync=True)  # Start frame for loop range
     loop_end = traitlets.Int(-1).tag(sync=True)  # End frame for loop (-1 = last)
@@ -2348,7 +2349,7 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         diff_cmap: str = "magenta-green",
         compare_background: str = "dark",
         fps: float = 30.0,
-        avg_window: int = 1,
+        avg_window: int = 3,
         timestamps: list[float] | None = None,
         timestamp_unit: str = "s",
         show_fft: bool = False,

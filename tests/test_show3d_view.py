@@ -392,6 +392,18 @@ def test_show3d_playback_accepts_sixty_fps():
     assert too_high.fps == pytest.approx(60.0)
 
 
+def test_show3d_moving_average_defaults_on_but_can_be_disabled():
+    # C1: a microscopist reviewing a noisy time stack gets temporal averaging
+    # immediately, while raw single-frame review remains an explicit option.
+    stack = np.random.default_rng(63).random((5, 8, 8), dtype=np.float32)
+    widget = Show3D(stack, verbose=False)
+    raw = Show3D(stack, avg_window=1, verbose=False)
+
+    assert widget.avg_window == 3
+    assert widget.state_dict()["avg_window"] == 3
+    assert raw.avg_window == 1
+
+
 def test_show3d_compare_markers_histogram_and_flip_state_round_trip():
     # C1: point-defect comparison controls are public state, not only a
     # transient frontend menu. The raw stack remains unchanged.
