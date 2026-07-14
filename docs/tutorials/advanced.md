@@ -18,11 +18,13 @@ around a real question from the microscope room:
 - **Full-resolution Show3D folder viewers** - keep the microscope/reconstruction
   pixels at native shape while the browser loads a nearby data file instead of
   one giant HTML blob.
-- **Local panel annotations** - label multiple local regions inside Show2D or
-  Show3D panels without turning those notes into whole-panel titles.
+- **Rich math labels and annotations** - use λ, χ², colored spans, and local
+  region labels in Show2D/Show3D panels without exposing raw TeX markup.
 - **Show2D inset plots** - put a small calibration curve inside each image
   panel, so a denoise or reconstruction sweep carries the metric that explains
   why the scientist should trust that panel.
+
+(full-resolution-show3d-folder-viewers)=
 
 ## Full-resolution Show3D folder viewers
 
@@ -159,6 +161,8 @@ Common failure modes:
   rebuild. The current view should update first; background cache can follow.
 - **Fast only because it is smaller**: check `display_bin`, `downsample`, title,
   and report wording. Full-resolution claims must keep shape reduction explicit.
+
+(label-local-regions-inside-panels)=
 
 ## Label local regions inside panels
 
@@ -318,9 +322,13 @@ Common style keys are `bg`, `fg`, `border_color`, `border_width`,
 `max_width`, and `class_name`. `class_name` is useful when exported HTML needs
 project-specific CSS or when a browser test needs a stable selector.
 
-### Math symbols in labels
+(rich-math-labels-and-presentation-exports)=
 
-Plain Unicode symbols work directly in panel titles and annotations:
+## Rich math labels and presentation exports
+
+Scientific comparison panels often need symbols rather than prose: `λ` for a
+regularization sweep, `χ²/pixel` for a residual score, or colored fragments in
+one title. Plain Unicode symbols work directly in panel titles and annotations:
 
 ```python
 Show2D(images, labels=["λ=0.01", "χ² / pixel"])
@@ -359,6 +367,90 @@ Show3D(
     ],
 )
 ```
+
+For richer title chrome, pass `panel_title_spans`. Each span can contain
+`text`, `math`, and optional `color`. The same rendered title is used in the
+panel image, the `Panels` menu, the stats row, saved notebook state, and
+standalone HTML:
+
+```python
+rich_titles = [
+    [{"math": r"\lambda=0.03"}, {"text": " raw"}],
+    [{"text": "denoised", "color": "#34d399"}],
+    [{"math": r"\chi^2"}, {"text": "/pixel residual"}],
+]
+
+Show2D(
+    [raw, denoised, residual],
+    panel_title_spans=rich_titles,
+    ncols=3,
+    show_stats=True,
+)
+
+Show3D(
+    raw_stack,
+    denoised_stack,
+    residual_stack,
+    panel_titles=rich_titles,
+    show_stats=True,
+)
+```
+
+Use `panel_annotations` when the label belongs to a region inside a panel rather
+than to the whole panel. A panel can have several annotations, and each one can
+also use `math` or `spans`:
+
+```python
+Show2D(
+    [raw, residual],
+    panel_title_spans=[
+        [{"math": r"\lambda=0.03"}, {"text": " raw"}],
+        [{"math": r"\chi^2"}, {"text": "/pixel residual"}],
+    ],
+    marker_style="around",
+    marker_colors=["#60a5fa", "#f87171"],
+    panel_annotations={
+        0: [
+            {"math": r"\lambda", "position": "top-left", "variant": "pill"},
+            {
+                "spans": [
+                    {"text": "ROI "},
+                    {"text": "A", "color": "#60a5fa"},
+                ],
+                "box": [0.18, 0.25, 0.30, 0.16],
+                "variant": "callout",
+            },
+        ],
+        1: {
+            "spans": [{"math": r"\chi^2"}, {"text": " high", "color": "#f87171"}],
+            "position": "top-right",
+            "variant": "outline",
+        },
+    },
+)
+```
+
+Presentation mode keeps this same rich label rendering but starts with the
+controls collapsed, which is useful for shared notebooks and exported HTML:
+
+```python
+w = Show3D(
+    raw_stack,
+    residual_stack,
+    panel_titles=[
+        [{"math": r"\lambda=0.03"}, {"text": " raw"}],
+        [{"math": r"\chi^2"}, {"text": "/pixel residual"}],
+    ],
+    ui_mode="presentation",
+)
+w.export_html("regularization_review.html", encoding="uint8")
+```
+
+The collapsed view still shows `Controls` and `Export` in the title chrome.
+In live Jupyter, Show3D's Export menu can write HTML and request GIF/MP4
+animation exports through Python. In standalone HTML, the page can download
+itself as HTML; GIF/MP4 entries are visible but disabled because browser-side
+movie encoding is not implemented yet.
 
 This math support is intentionally compact: use it for labels such as
 `λ`, `χ²`, `σ`, `μ`, `Δ`, subscripts, superscripts, and short units. For a

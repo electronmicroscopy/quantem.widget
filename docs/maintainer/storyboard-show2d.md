@@ -61,6 +61,9 @@ panels while preserving the scientific state of the remaining panels.
 - Hide one panel, multiple panels, and all-but-one panel.
 - Verify layout, labels, stats, histograms, keyboard selection, export, and
   saved state ignore hidden panels.
+- Use labels and title spans containing symbols and inline math such as
+  `\lambda=0.03 raw` and `$\\chi^2$/pixel`; verify the panel menu, stats row,
+  and panel titles render symbols/math and never show raw markup.
 - Restore panels and verify original order and panel state return.
 
 ### S2D-04: Inspect Native Pixels From A Fast Preview
@@ -203,6 +206,8 @@ say exactly what they will save and produce files that reopen correctly.
 - Open Export in live Jupyter and standalone HTML.
 - Verify the single-HTML choices distinguish `encoding="full"` from
   `encoding="uint8"` and show approximate sizes when known.
+- Collapse controls for presentation-style viewing and verify Export remains
+  reachable from the title chrome in live and standalone HTML.
 - Export single HTML with both encodings where supported.
 - [x] **EX-2**: Export a denoised view and a frequency-filtered view, then
   open each standalone page without touching a control. The first canvas must

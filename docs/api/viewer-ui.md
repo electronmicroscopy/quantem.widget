@@ -146,4 +146,4 @@ Show2D(
 ```
 
 For local region labels inside a panel, use `panel_annotations`. Longer
-examples live in the [advanced tutorial](../tutorials/advanced.md#label-local-regions-inside-panels).
+examples live in the [advanced tutorial](../tutorials/advanced.md).

@@ -3950,6 +3950,8 @@ function Show3D() {
   const unavailableStandaloneHtmlLabel = standaloneHtmlMode === "quantized"
     ? "HTML exact float32 (not embedded)"
     : "HTML quantized uint8 (requires backend)";
+  const showAnimationExportOptions = exportEnabled || canDownloadCurrentHtml;
+  const animationExportUnavailableTitle = "GIF and MP4 export require the live Python backend. Standalone HTML can download itself as HTML.";
   const handleExportMenuOpen = (event: React.MouseEvent<HTMLElement>) => {
     setExportMenuAnchor(event.currentTarget);
   };
@@ -14479,6 +14481,54 @@ function Show3D() {
 	                Controls
 	              </Button>
 	            )}
+	            {showControls && controlsCollapsed && (exportEnabled || canDownloadCurrentHtml) && (
+	              <>
+	                <Button
+	                  size="small"
+	                  sx={{
+	                    ...compactButton,
+	                    ml: 0.5,
+	                    py: 0,
+	                    px: 0.5,
+	                    minHeight: 16,
+	                    lineHeight: "16px",
+	                    verticalAlign: "baseline",
+	                  }}
+	                  disabled={exportBusy || (!exportEnabled && !canDownloadCurrentHtml)}
+	                  onClick={handleExportMenuOpen}
+	                  aria-label="Export widget or animation"
+	                  aria-controls={exportMenuAnchor ? "show3d-export-menu-collapsed" : undefined}
+	                  aria-expanded={exportMenuAnchor ? "true" : undefined}
+	                  aria-haspopup="menu"
+	                  title={localExportStatus || exportStatus || (exportEnabled ? "Export HTML, GIF, or MP4 with a save dialog" : "Export this standalone HTML")}
+	                >
+	                  {exportBusy ? "Exporting" : "Export"}
+	                </Button>
+	                <Menu
+	                  id="show3d-export-menu-collapsed"
+	                  anchorEl={exportMenuAnchor}
+	                  open={Boolean(exportMenuAnchor)}
+	                  onClose={handleExportMenuClose}
+	                  MenuListProps={{ "aria-label": "Export options" }}
+	                  {...themedMenuProps}
+	                >
+	                  {exportEnabled && <MenuItem onClick={() => handleExportSelect("exact")}>HTML exact float32 ({exactExportSize})</MenuItem>}
+	                  {exportEnabled && <MenuItem onClick={() => handleExportSelect("quantized")}>HTML quantized uint8 ({quantizedExportSize})</MenuItem>}
+	                  {exportEnabled && height >= 2 && width >= 2 && <MenuItem onClick={() => handleExportSelect("quantized", "medium", 2)}>HTML quantized uint8, 2× binned ({quantizedExportSize2})</MenuItem>}
+	                  {exportEnabled && height >= 4 && width >= 4 && <MenuItem onClick={() => handleExportSelect("quantized", "medium", 4)}>HTML quantized uint8, 4× binned ({quantizedExportSize4})</MenuItem>}
+	                  {exportEnabled && height >= 8 && width >= 8 && <MenuItem onClick={() => handleExportSelect("quantized", "medium", 8)}>HTML quantized uint8, 8× binned ({quantizedExportSize8})</MenuItem>}
+	                  {showAnimationExportOptions && <MenuItem disabled={!exportEnabled} title={!exportEnabled ? animationExportUnavailableTitle : undefined} onClick={() => handleExportSelect("gif", "low")}>GIF low ({gifLowEstimate})</MenuItem>}
+	                  {showAnimationExportOptions && <MenuItem disabled={!exportEnabled} title={!exportEnabled ? animationExportUnavailableTitle : undefined} onClick={() => handleExportSelect("gif", "medium")}>GIF medium ({gifMediumEstimate})</MenuItem>}
+	                  {showAnimationExportOptions && <MenuItem disabled={!exportEnabled} title={!exportEnabled ? animationExportUnavailableTitle : undefined} onClick={() => handleExportSelect("gif", "high")}>GIF high ({gifHighEstimate})</MenuItem>}
+	                  {showAnimationExportOptions && <MenuItem disabled={!exportEnabled} title={!exportEnabled ? animationExportUnavailableTitle : undefined} onClick={() => handleExportSelect("mp4", "low")}>MP4 low ({gifLowEstimate})</MenuItem>}
+	                  {showAnimationExportOptions && <MenuItem disabled={!exportEnabled} title={!exportEnabled ? animationExportUnavailableTitle : undefined} onClick={() => handleExportSelect("mp4", "medium")}>MP4 medium ({gifMediumEstimate})</MenuItem>}
+	                  {showAnimationExportOptions && <MenuItem disabled={!exportEnabled} title={!exportEnabled ? animationExportUnavailableTitle : undefined} onClick={() => handleExportSelect("mp4", "high")}>MP4 high ({gifHighEstimate})</MenuItem>}
+	                  {canDownloadCurrentHtml && standaloneHtmlMode === "quantized" && <MenuItem disabled title="This standalone export contains quantized uint8 data, not the original float32 stack. Open the live widget to export exact float32.">{unavailableStandaloneHtmlLabel}</MenuItem>}
+	                  {canDownloadCurrentHtml && <MenuItem onClick={handleStandaloneHtmlDownload}>{standaloneHtmlLabel}</MenuItem>}
+	                  {canDownloadCurrentHtml && standaloneHtmlMode !== "quantized" && <MenuItem disabled title="Quantized export requires the Python backend to repack the current float32 stack.">{unavailableStandaloneHtmlLabel}</MenuItem>}
+	                </Menu>
+	              </>
+	            )}
 	          </Typography>}
 	          {/* Page navigation sits above the analysis toolbar so a long page
 	              label never competes with Profile / Stats / FFT controls. */}
@@ -15137,7 +15187,7 @@ function Show3D() {
                             ? <VisibilityOffIcon sx={{ fontSize: 16, mr: 1, color: themeColors.textMuted }} />
                             : <VisibilityIcon sx={{ fontSize: 16, mr: 1, color: themeColors.accent }} />}
                           <Typography sx={{ fontSize: 11, color: disabled ? themeColors.textMuted : themeColors.text }}>
-                            {panelLabel(panel)}
+                            {panelTitleContent(panel)}
                           </Typography>
                         </MenuItem>
                       );
@@ -15225,12 +15275,12 @@ function Show3D() {
                     {exportEnabled && height >= 2 && width >= 2 && <MenuItem onClick={() => handleExportSelect("quantized", "medium", 2)}>HTML quantized uint8, 2× binned ({quantizedExportSize2})</MenuItem>}
                     {exportEnabled && height >= 4 && width >= 4 && <MenuItem onClick={() => handleExportSelect("quantized", "medium", 4)}>HTML quantized uint8, 4× binned ({quantizedExportSize4})</MenuItem>}
                     {exportEnabled && height >= 8 && width >= 8 && <MenuItem onClick={() => handleExportSelect("quantized", "medium", 8)}>HTML quantized uint8, 8× binned ({quantizedExportSize8})</MenuItem>}
-                    {exportEnabled && <MenuItem onClick={() => handleExportSelect("gif", "low")}>GIF low ({gifLowEstimate})</MenuItem>}
-                    {exportEnabled && <MenuItem onClick={() => handleExportSelect("gif", "medium")}>GIF medium ({gifMediumEstimate})</MenuItem>}
-                    {exportEnabled && <MenuItem onClick={() => handleExportSelect("gif", "high")}>GIF high ({gifHighEstimate})</MenuItem>}
-                    {exportEnabled && <MenuItem onClick={() => handleExportSelect("mp4", "low")}>MP4 low ({gifLowEstimate})</MenuItem>}
-                    {exportEnabled && <MenuItem onClick={() => handleExportSelect("mp4", "medium")}>MP4 medium ({gifMediumEstimate})</MenuItem>}
-                    {exportEnabled && <MenuItem onClick={() => handleExportSelect("mp4", "high")}>MP4 high ({gifHighEstimate})</MenuItem>}
+                    {showAnimationExportOptions && <MenuItem disabled={!exportEnabled} title={!exportEnabled ? animationExportUnavailableTitle : undefined} onClick={() => handleExportSelect("gif", "low")}>GIF low ({gifLowEstimate})</MenuItem>}
+                    {showAnimationExportOptions && <MenuItem disabled={!exportEnabled} title={!exportEnabled ? animationExportUnavailableTitle : undefined} onClick={() => handleExportSelect("gif", "medium")}>GIF medium ({gifMediumEstimate})</MenuItem>}
+                    {showAnimationExportOptions && <MenuItem disabled={!exportEnabled} title={!exportEnabled ? animationExportUnavailableTitle : undefined} onClick={() => handleExportSelect("gif", "high")}>GIF high ({gifHighEstimate})</MenuItem>}
+                    {showAnimationExportOptions && <MenuItem disabled={!exportEnabled} title={!exportEnabled ? animationExportUnavailableTitle : undefined} onClick={() => handleExportSelect("mp4", "low")}>MP4 low ({gifLowEstimate})</MenuItem>}
+                    {showAnimationExportOptions && <MenuItem disabled={!exportEnabled} title={!exportEnabled ? animationExportUnavailableTitle : undefined} onClick={() => handleExportSelect("mp4", "medium")}>MP4 medium ({gifMediumEstimate})</MenuItem>}
+                    {showAnimationExportOptions && <MenuItem disabled={!exportEnabled} title={!exportEnabled ? animationExportUnavailableTitle : undefined} onClick={() => handleExportSelect("mp4", "high")}>MP4 high ({gifHighEstimate})</MenuItem>}
                     {canDownloadCurrentHtml && standaloneHtmlMode === "quantized" && <MenuItem disabled title="This standalone export contains quantized uint8 data, not the original float32 stack. Open the live widget to export exact float32.">{unavailableStandaloneHtmlLabel}</MenuItem>}
                     {canDownloadCurrentHtml && <MenuItem onClick={handleStandaloneHtmlDownload}>{standaloneHtmlLabel}</MenuItem>}
                     {canDownloadCurrentHtml && standaloneHtmlMode !== "quantized" && <MenuItem disabled title="Quantized export requires the Python backend to repack the current float32 stack.">{unavailableStandaloneHtmlLabel}</MenuItem>}
@@ -16002,7 +16052,7 @@ function Show3D() {
               <Box sx={{ mt: 0.5, px: 1, py: 0.5, bgcolor: themeColors.bgAlt, display: "flex", flexDirection: "column", gap: 0.25, width: "100%", maxWidth: canvasW, boxSizing: "border-box", fontFamily: "ui-monospace, monospace" }}>
                 {localPanelStats.map((st) => (
                   <Box key={st.panel} sx={{ display: "flex", gap: 2, alignItems: "center", flexWrap: "wrap", maxWidth: "100%" }}>
-                    <Typography sx={{ fontSize: 11, color: themeColors.textMuted, minWidth: 80, fontFamily: "ui-monospace, monospace" }}>{panelLabel(st.panel)}</Typography>
+                    <Typography sx={{ fontSize: 11, color: themeColors.textMuted, minWidth: 80 }}>{panelTitleContent(st.panel)}</Typography>
                     <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Mean <Box component="span" sx={{ color: themeColors.accent }}>{formatNumber(st.mean)}</Box></Typography>
                     <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Min <Box component="span" sx={{ color: themeColors.accent }}>{formatNumber(st.min)}</Box></Typography>
                     <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Max <Box component="span" sx={{ color: themeColors.accent }}>{formatNumber(st.max)}</Box></Typography>

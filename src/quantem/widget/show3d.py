@@ -7029,11 +7029,13 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
 
     def _static_panel_title(self, panel: int, idx: int) -> str:
         """Live-canvas panel title: title, optional frame label, and count."""
-        title_text = (
-            self._panel_title_for_index(panel)
-            if int(self.n_panels) > 1 or (panel < len(self.panel_titles) and self.panel_titles[panel])
-            else (self.title or self._panel_title_for_index(panel))
-        )
+        panel_title = self._panel_title_for_index(panel)
+        if int(self.n_panels) == 1 and self.title and panel_title == "Panel 1":
+            title_text = self.title
+        elif int(self.n_panels) > 1 or (panel < len(self.panel_titles) and self.panel_titles[panel]):
+            title_text = panel_title
+        else:
+            title_text = self.title or panel_title
         frame_label = self._static_panel_frame_label(panel, idx)
         panel_real = self.panel_real_frames[panel] if panel < len(self.panel_real_frames) else 0
         shown = min(idx + 1, int(panel_real)) if panel_real else idx + 1

@@ -28,7 +28,7 @@ export. See the [Show3D tutorial](../tutorials/show3d).
 | Local panel annotations | `panel_annotations` | Optional multiple in-image labels per panel, placed by corner, normalized point, or normalized region box |
 | Contrast preset dropdown | `contrast_preset` | Applies percentile ranges such as `1-99`, `2-98`, and `3-97` while keeping the main histogram UI compact |
 | Advanced histogram toggle | `show_histogram_advanced`, `histogram_advanced` | Exposes detailed histogram controls only when a user asks for them |
-| Export button | `export_request`, `export_status` | Writes a standalone HTML viewer |
+| Export button | `export_request`, `export_status` | Writes standalone HTML from live widgets; live Show3D can also request GIF/MP4 animation exports |
 | Page controls (paged galleries) | `page_idx`, `n_pages`, `panels_per_page`, `page_starred`; `star_page()`, `unstar_page()` | Shows, stars, or plays through one page of panels at a time |
 | Panel layout (multi-panel) | `n_panels`, `link_panels`, `max_cols` | Panels arrange; linked scrub moves all |
 | Panel visibility (multi-panel) | `hidden_panels` | Panels collapse from view without deleting data |
@@ -38,6 +38,7 @@ export. See the [Show3D tutorial](../tutorials/show3d).
 | Title visibility | `show_title` | Top title row shows/hides |
 | Statistics | `show_stats` | Optional mean/min/max/std readout |
 | Panel title visibility | `show_panel_titles`, `panel_title_font_size`, `panel_title_style` | Per-panel labels show/hide, resize, and optionally get title chrome such as background, border, and padding |
+| Rich panel title spans | `panel_title_spans` | Optional structured `text` / `math` / `color` spans for symbols such as `λ` and `χ²` in panel titles, panel menus, stats, animation labels, saved state, and exported HTML |
 | Scale bar visibility | `show_scale_bar` (`scale_bar_visible` in saved state) | Scale bar shows/hides |
 | Saved notebook preview frames | `notebook_preview_frames`, `notebook_preview_ncols`; `set_notebook_preview_frames()` | Single-panel saved notebooks can reopen as a compact contact sheet of selected frame indices instead of only the current frame |
 | ROI add / drag | `roi_active`, `roi_list`, `roi_selected_idx`; `get_roi_geometries()` | Single-panel stack ROI overlays stay visible while scrubbing; saved notebook previews include all visible ROI overlays and right-side zoom crops; Python can read circle centers/radii and rectangle/square corners in `(row, col)` coordinates |
@@ -52,6 +53,87 @@ export. See the [Show3D tutorial](../tutorials/show3d).
 | More menu: Flip | `flip_horizontal`, `flip_vertical`, `flip_rows`, `flip_cols` | Display-only orientation checks for row/column or horizontal/vertical review |
 | More menu: Rotate | `image_rotation`, `rotation_scope`, `frame_rotations`; `rotation=`, `rotations=` | Display-only 0/90/180/270° rotation for the whole stack or the selected frame |
 | More menu: Compare | `compare_mode`, `compare_pair`, `blink_fps`, `diff_cmap`, `compare_background` | Blink, difference, or overlay two frames for point-defect and time-series change detection |
+
+## Rich panel labels and math
+
+Use rich labels when panel titles are scientific variables rather than plain
+names. Show3D accepts inline math strings or structured spans in
+`panel_titles` / `panel_title_spans`:
+
+```python
+from quantem.widget import Show3D
+
+Show3D(
+    raw_stack,
+    residual_stack,
+    panel_titles=[
+        [{"math": r"\lambda=0.03"}, {"text": " raw"}],
+        [{"math": r"\chi^2"}, {"text": "/pixel residual"}],
+    ],
+    show_stats=True,
+)
+```
+
+Plain strings with `$...$` also work:
+
+```python
+Show3D(
+    raw_stack,
+    residual_stack,
+    panel_titles=[r"$\lambda=0.03$ raw", r"$\chi^2$/pixel residual"],
+)
+```
+
+The frontend renders common Greek symbols plus simple superscripts/subscripts
+without MathJax or KaTeX. It also normalizes doubled backslashes from JSON/state
+files, so `\\lambda` displays as `λ`. Panel titles, the `Panels` menu, stats
+rows, animation labels, saved notebook state, and exported HTML all use the
+same rich rendering path.
+
+Use `panel_annotations` when a label belongs to a local feature or region
+inside a panel. Each annotation can use `text`, `math`, or `spans`:
+
+```python
+Show3D(
+    raw_stack,
+    residual_stack,
+    panel_titles=[
+        [{"math": r"\lambda=0.03"}, {"text": " raw"}],
+        [{"math": r"\chi^2"}, {"text": "/pixel"}],
+    ],
+    panel_annotations=[
+        {"panel": 0, "math": r"\lambda", "position": "top-left", "variant": "pill"},
+        {
+            "panel": 1,
+            "spans": [{"math": r"\chi^2"}, {"text": " high", "color": "#f87171"}],
+            "box": [0.56, 0.48, 0.32, 0.16],
+            "variant": "callout",
+        },
+    ],
+)
+```
+
+## Presentation and export chrome
+
+`ui_mode="presentation"` starts Show3D with controls collapsed while preserving
+the top `Controls` button. The `Export` button also remains visible in that
+collapsed title chrome:
+
+```python
+w = Show3D(
+    raw_stack,
+    residual_stack,
+    panel_titles=[r"$\lambda=0.03$ raw", r"$\chi^2$/pixel residual"],
+    ui_mode="presentation",
+)
+w.export_html("lambda_movie.html", encoding="uint8")
+```
+
+In a live Python-backed widget, the Export menu can write HTML and request
+GIF/MP4 animation exports through the Python backend. In standalone HTML, the
+page can download itself as HTML; GIF/MP4 entries remain visible but disabled
+with a backend-required explanation until browser-side animation encoding is
+implemented.
 
 The denoise family matches Show2D. See
 [Which denoise filter should I use?](show2d.md#which-denoise-filter-should-i-use)
@@ -448,8 +530,7 @@ This workflow preserves the source spatial shape used to construct the widget.
 If you intentionally want a smaller browse artifact, make that explicit with a
 separate downsampled/single-file export rather than treating it as the
 full-resolution review copy. For the end-to-end browser checklist and example
-timing report, see
-[Full-resolution Show3D folder viewers](../tutorials/advanced.md#full-resolution-show3d-folder-viewers).
+timing report, see the [advanced tutorial](../tutorials/advanced.md).
 
 ## Animation exports
 

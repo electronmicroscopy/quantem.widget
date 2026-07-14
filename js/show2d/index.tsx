@@ -8308,6 +8308,35 @@ function Show2D() {
 	                Controls
 	              </Button>
 	            )}
+	            {showControls && controlsCollapsed && (exportEnabled || canDownloadCurrentHtml) && (
+	              <>
+	                <Button
+	                  size="small"
+	                  sx={{
+	                    ...compactButton,
+	                    ml: 0.5,
+	                    py: 0,
+	                    px: 0.5,
+	                    minHeight: 16,
+	                    lineHeight: "16px",
+	                    verticalAlign: "baseline",
+	                    color: themeColors.accent,
+	                  }}
+	                  disabled={exportBusy || (!exportEnabled && !canDownloadCurrentHtml)}
+	                  onClick={(e) => { setExportAnchor(e.currentTarget); }}
+	                  title={localExportStatus || exportStatus || (exportEnabled ? "Export standalone HTML" : canDownloadCurrentHtml ? "Export this standalone HTML" : "Export unavailable for this data")}
+	                >
+	                  {exportBusy ? "Exporting" : "Export"}
+	                </Button>
+	                <Menu anchorEl={exportAnchor} open={Boolean(exportAnchor)} onClose={() => setExportAnchor(null)} anchorOrigin={{ vertical: "bottom", horizontal: "right" }} transformOrigin={{ vertical: "top", horizontal: "right" }} {...themedTopMenuProps}>
+	                  {exportEnabled && <MenuItem onClick={() => handleHtmlExportSelect("exact")} sx={{ fontSize: 12 }}>HTML exact float32 ({exactHtmlSize})</MenuItem>}
+	                  {exportEnabled && <MenuItem onClick={() => handleHtmlExportSelect("quantized")} sx={{ fontSize: 12 }}>HTML quantized uint8 ({quantizedHtmlSize})</MenuItem>}
+	                  {canDownloadCurrentHtml && offline && <MenuItem disabled sx={{ fontSize: 12 }} title="This standalone export contains quantized uint8 data, not the original float32 array. Open the live widget to export exact float32.">{unavailableStandaloneHtmlLabel}</MenuItem>}
+	                  {canDownloadCurrentHtml && <MenuItem onClick={handleStandaloneHtmlDownload} sx={{ fontSize: 12 }}>{standaloneHtmlLabel}</MenuItem>}
+	                  {canDownloadCurrentHtml && !offline && <MenuItem disabled sx={{ fontSize: 12 }} title="Quantized export requires the Python backend to repack the current float32 data.">{unavailableStandaloneHtmlLabel}</MenuItem>}
+	                </Menu>
+	              </>
+	            )}
 	          </Typography>}
 	          {/* Page navigation sits above the analysis toolbar, matching Show3D. */}
 	          {controlsVisible && isPaged && (
@@ -8559,7 +8588,7 @@ function Show2D() {
                             ? <VisibilityOffIcon sx={{ fontSize: 16, mr: 1, color: themeColors.textMuted }} />
                             : <VisibilityIcon sx={{ fontSize: 16, mr: 1, color: themeColors.accent }} />}
                           <Typography sx={{ fontSize: 11, color: disabled ? themeColors.textMuted : themeColors.text }}>
-                            {panelLabel(panel)}
+                            {panelTitleContent(panel)}
                           </Typography>
                         </MenuItem>
                       );
@@ -9822,7 +9851,7 @@ function Show2D() {
           {showStats && (
             <Box sx={{ mt: `${SPACING.XS}px`, px: 1, py: 0.5, bgcolor: themeColors.bgAlt, display: "flex", gap: 2, alignItems: "center", flexWrap: "wrap", maxWidth: "100%", boxSizing: "border-box", opacity: 1 }}>
               {isGallery && (
-                <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>{renderTextWithInlineMath(labels?.[statsIdx] || `#${statsIdx + 1}`, `stats-label-${statsIdx}`)}</Typography>
+                <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>{panelTitleContent(statsIdx)}</Typography>
               )}
               <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Mean <Box component="span" sx={{ color: themeColors.accent }}>{formatNumber(currentFrameStats?.mean ?? statsMean?.[statsIdx] ?? 0)}</Box></Typography>
               <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Min <Box component="span" sx={{ color: themeColors.accent }}>{formatNumber(currentFrameStats?.min ?? statsMin?.[statsIdx] ?? 0)}</Box></Typography>

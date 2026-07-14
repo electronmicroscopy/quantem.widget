@@ -227,6 +227,21 @@ def test_show2d_batch_selection_and_marker_frame_contract():
     assert "inset 0 0 0 3px ${color}, inset 0 0 0 5px rgba(0,0,0,0.9)" in show3d
 
 
+def test_show_panel_chrome_uses_rich_labels_and_collapsed_export():
+    """C1: compact menus/stats render symbols/math and presentation keeps export."""
+    show2d = (ROOT / "js" / "show2d" / "index.tsx").read_text(encoding="utf-8")
+    show3d = (ROOT / "js" / "show3d" / "index.tsx").read_text(encoding="utf-8")
+
+    assert "showControls && controlsCollapsed && (exportEnabled || canDownloadCurrentHtml)" in show2d
+    assert "showControls && controlsCollapsed && (exportEnabled || canDownloadCurrentHtml)" in show3d
+    assert "{panelTitleContent(panel)}" in show2d
+    assert "{panelTitleContent(panel)}" in show3d
+    assert "{panelTitleContent(statsIdx)}" in show2d
+    assert "{panelTitleContent(st.panel)}" in show3d
+    assert "showAnimationExportOptions = exportEnabled || canDownloadCurrentHtml" in show3d
+    assert "GIF and MP4 export require the live Python backend" in show3d
+
+
 def test_show2d_fft_gallery_quality_labels_stay_readable():
     """C1: every Show2D FFT panel keeps SNR/peak text visible in-gallery."""
     show2d = (ROOT / "js" / "show2d" / "index.tsx").read_text(encoding="utf-8")

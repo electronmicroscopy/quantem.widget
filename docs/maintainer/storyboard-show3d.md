@@ -255,6 +255,9 @@ sizes.
 - Verify expected frame count, multi-panel layout, live-style labels, scale bar,
   zoom readout, border/background, playback speed, and file size.
 - Verify quality/speed options are visible and have clear labels.
+- Use labels and title spans containing symbols and inline math such as
+  `\lambda=0.03 raw` and `$\\chi^2$/pixel`; verify the panel menu, stats rows,
+  and animation labels render symbols/math and never show raw markup.
 - Run `PYTHONPATH=src:. python scripts/widget_show3d_animation_smoke.py` when
   judging whether a GIF is good enough for PowerPoint/email sharing.
 
@@ -271,6 +274,10 @@ sizes to match the Show2D export vocabulary.
 
 - Open Export and verify HTML exact/quantized/GIF/MP4 labels and approximate
   sizes.
+- Collapse controls for presentation-style viewing and verify Export remains
+  reachable from the title chrome in live and standalone HTML.
+- In standalone HTML, verify GIF/MP4 choices remain visible but disabled with a
+  backend-required explanation until a browser-side animation encoder exists.
 - Verify cancellation/status text clears after the documented timeout.
 - Export HTML exact and quantized where supported.
 - [x] **S3-EX-2**: Open an exact standalone export with display-only denoise

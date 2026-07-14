@@ -589,6 +589,8 @@ def _normalize_panel_annotations(
         return grouped
 
     raw = list(panel_annotations)  # type: ignore[arg-type]
+    if not raw:
+        return []
     flat_with_panel = any(isinstance(item, Mapping) and "panel" in item for item in raw)
     if int(n_items) == 1 and not flat_with_panel:
         for item in raw:

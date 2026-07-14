@@ -21,7 +21,7 @@ no console error, no NaN frame).
 | Control | Trait | Expected effect |
 |---|---|---|
 | Colormap dropdown | `cmap` | Canvas recolors to the chosen map |
-| More menu: Link Color | `panel_cmaps`, `panel_cmaps_memory` | Linked by default. Turn off to let the Color dropdown edit only the selected gallery panel; turn on for one shared colormap, then turn off again to restore the previous individual panel colormaps |
+| More menu: Color shared | `panel_cmaps`, `panel_cmaps_memory` | Shared by default. Turn off to let the Color dropdown edit only the selected gallery panel; turn on for one shared colormap, then turn off again to restore the previous individual panel colormaps |
 | Panel identity markers | `marker_colors`, `identity_colors`, `marker_style`, `row_markers`, `col_markers` | Optional panel colors plus row/column group frames make panels easy to reference in notebooks, reports, and agent instructions |
 | Local panel annotations | `panel_annotations` | Optional multiple in-image labels per panel, placed by corner, normalized point, or normalized region box |
 | Contrast min / max sliders | `vmin`, `vmax` | Display clamp changes; histogram markers move |
@@ -37,6 +37,7 @@ no console error, no NaN frame).
 | Title visibility | `show_title` | Top title row shows/hides |
 | Stats visibility | `show_stats` | Mean/min/max/std readout shows/hides |
 | Panel title visibility | `show_panel_titles`, `panel_title_font_size`, `panel_title_style` | Per-panel labels show/hide, resize, and optionally get title chrome such as background, border, and padding |
+| Rich panel title spans | `panel_title_spans` | Optional structured `text` / `math` / `color` spans for symbols such as `λ` and `χ²` in panel titles, panel menus, stats, saved state, and exported HTML |
 | Scale bar toggle | `show_scale_bar` (`scale_bar_visible` in saved state) | Calibrated bar shows/hides (needs `pixel_size > 0`) |
 | Pan (drag) | per-image pan | Image translates; with `link_pan` all panels move together |
 | Zoom (wheel) | `initial_zoom`, `zoom_row`, `zoom_col` | Zooms about the cursor |
@@ -60,6 +61,91 @@ no console error, no NaN frame).
 | More menu: Rotate | `image_rotations`, `rotation_scope`; `rotation=`, `rotations=` | Display-only 0/90/180/270° rotation for every panel or the selected panel; raw data and `(row, col)` coordinates stay unchanged |
 | Panel inset plots | `inset_plots` | Optional per-panel mini line plots for calibration curves, ACF/R sweeps, or other scientific context; hover reports the nearest plotted coordinate |
 | Scale bar placement | `scale_bar_position`, `show_zoom_indicator` | Move the scale bar between bottom corners and hide the zoom badge when an inset plot needs that space |
+
+## Rich panel labels and math
+
+Panel labels can be plain strings, inline math strings, or structured rich
+spans. Use this for parameter sweeps where the compact panel chrome should say
+`λ`, `χ²`, `σ`, or similar symbols instead of spelling out the word.
+
+```python
+from quantem.widget import Show2D
+
+Show2D(
+    [raw, residual],
+    labels=[
+        r"$\lambda=0.03$ raw",
+        r"$\chi^2$/pixel residual",
+    ],
+    show_stats=True,
+)
+```
+
+The frontend renders common Greek symbols plus simple superscripts/subscripts
+without requiring MathJax or KaTeX. It also normalizes doubled backslashes from
+JSON/state files, so `\\lambda` is rendered as `λ` rather than as raw markup.
+The same rich label path is used by panel titles, the `Panels` menu, the stats
+row, and exported standalone HTML.
+
+For mixed color or explicit math spans, use `panel_title_spans`. Each span can
+contain `text`, `math`, and optional `color`:
+
+```python
+Show2D(
+    [raw, filtered, residual],
+    labels=["raw", "filtered", "residual"],
+    panel_title_spans=[
+        [{"math": r"\lambda=0.03"}, {"text": " raw"}],
+        [{"text": "filtered", "color": "#34d399"}],
+        [{"math": r"\chi^2"}, {"text": "/pixel residual"}],
+    ],
+)
+```
+
+Use `panel_annotations` when the label belongs to a local region inside a panel
+instead of the whole panel. An annotation can also use `math` or `spans`, so a
+panel can have both a rich title and multiple local callouts:
+
+```python
+Show2D(
+    [raw, residual],
+    panel_title_spans=[
+        [{"math": r"\lambda=0.03"}, {"text": " raw"}],
+        [{"math": r"\chi^2"}, {"text": "/pixel"}],
+    ],
+    panel_annotations={
+        0: [
+            {"math": r"\lambda", "position": "top-left", "variant": "pill"},
+            {
+                "spans": [{"text": "ROI "}, {"text": "A", "color": "#60a5fa"}],
+                "box": [0.18, 0.25, 0.30, 0.16],
+                "variant": "callout",
+            },
+        ],
+        1: {"math": r"\chi^2", "position": "top-right", "variant": "outline"},
+    },
+)
+```
+
+## Presentation and export chrome
+
+`ui_mode="presentation"` starts with controls collapsed so the scientific image
+gets the first view. It still leaves a compact `Controls` button for adjusting
+the widget and an `Export` button for saving the current standalone HTML:
+
+```python
+w = Show2D(
+    [raw, residual],
+    labels=[r"$\lambda=0.03$ raw", r"$\chi^2$/pixel"],
+    ui_mode="presentation",
+    show_stats=True,
+)
+w.export_html("lambda_sweep.html", encoding="uint8")
+```
+
+In live Jupyter, the Export menu can request exact or uint8 standalone HTML
+through the Python backend. In standalone HTML, the Export button downloads the
+current embedded page using the representation already present in that file.
 
 ## Which denoise filter should I use?
 
