@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+from io import BytesIO
 
 import numpy as np
 from PIL import Image
@@ -96,6 +97,28 @@ def test_show3d_save_gif_bounce_order_omits_duplicate_endpoints(tmp_path: pathli
 
     with Image.open(out) as img:
         assert img.n_frames == 6
+
+
+def test_show3d_save_gif_respects_frame_cap_and_max_edge(tmp_path: pathlib.Path) -> None:
+    widget = Show3D(
+        _stack(),
+        show_controls=False,
+        show_scale_bar=False,
+        show_panel_titles=False,
+    )
+
+    out = widget.save_gif(
+        tmp_path / "slides.gif",
+        quality="high",
+        frame_start=1,
+        frame_stop=4,
+        max_frames=2,
+        max_edge_px=7,
+    )
+
+    with Image.open(out) as img:
+        assert img.n_frames == 2
+        assert img.size == (7, 6)
 
 
 def test_show3d_save_mp4_uses_panel_only_renderer(
@@ -230,13 +253,22 @@ def test_show3d_frontend_gif_export_request_creates_payload() -> None:
         "mode": "gif",
         "quality": "low",
         "filename": filename,
+        "frame_start": 1,
+        "frame_stop": 4,
+        "max_frames": 2,
+        "fps": 5,
+        "downsample": 2,
         "download": True,
     })
 
     assert widget.export_payload_id == "gif-request"
     assert widget.export_filename == filename
     assert widget.export_payload.startswith(b"GIF")
+    with Image.open(BytesIO(widget.export_payload)) as img:
+        assert img.n_frames == 2
     assert widget.export_status.startswith(f"Ready {filename}")
+    assert "2 frames" in widget.export_status
+    assert "2x downsample" in widget.export_status
 
 
 def test_show3d_frontend_mp4_export_request_creates_payload(monkeypatch) -> None:
@@ -262,6 +294,13 @@ def test_show3d_frontend_mp4_export_request_creates_payload(monkeypatch) -> None
         "mode": "mp4",
         "quality": "low",
         "filename": filename,
+        "frame_start": 1,
+        "frame_stop": 4,
+        "max_frames": 2,
+        "fps": 5,
+        "max_edge_px": 512,
+        "preset": "slides",
+        "slides_preset": True,
         "download": True,
     })
 
@@ -271,6 +310,12 @@ def test_show3d_frontend_mp4_export_request_creates_payload(monkeypatch) -> None
     assert widget.export_status.startswith(f"Ready {filename}")
     assert captured["quality"] == "low"
     assert captured["crf"] == 24
+    assert captured["frame_start"] == 1
+    assert captured["frame_stop"] == 4
+    assert captured["max_frames"] == 2
+    assert captured["fps"] == 5.0
+    assert captured["max_edge_px"] == 512
+    assert captured["slides_preset"] is True
 
 
 def test_show3d_animation_export_rejects_unknown_quality() -> None:

@@ -5605,11 +5605,33 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         img.save(str(path), dpi=(dpi, dpi))
         return path
 
-    def _animation_frame_order(self, playback: str) -> list[int]:
+    def _animation_frame_order(
+        self,
+        playback: str,
+        *,
+        frame_start: int | None = None,
+        frame_stop: int | None = None,
+        every_n: int = 1,
+        max_frames: int | None = None,
+    ) -> list[int]:
         """Return visible frame indices in the requested animation order."""
         visible = list(self.visible_indices)
         if not visible:
             visible = list(range(int(self.n_slices)))
+        n_slices = int(self.n_slices)
+        start = 0 if frame_start is None else int(frame_start)
+        stop = n_slices if frame_stop is None else int(frame_stop)
+        start = max(0, min(n_slices, start))
+        stop = max(start, min(n_slices, stop))
+        every_n = max(1, int(every_n))
+        visible = [idx for idx in visible if start <= int(idx) < stop][::every_n]
+        if max_frames not in (None, 0, "", "0"):
+            max_count = max(1, int(max_frames))
+            if len(visible) > max_count:
+                keep = np.linspace(0, len(visible) - 1, max_count).round().astype(int)
+                visible = [visible[int(i)] for i in keep]
+        if not visible:
+            raise ValueError("animation export frame range does not include any visible frames")
         mode = str(playback).lower()
         if mode == "forward":
             return visible
@@ -5618,6 +5640,28 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 return visible
             return visible + visible[-2:0:-1]
         raise ValueError("playback must be 'forward' or 'bounce'")
+
+    def _normalise_animation_downsample(self, downsample: int | None) -> int:
+        """Validate animation export downsample factors from Python or JS."""
+        if downsample in (None, "", 0, "0"):
+            return 1
+        if isinstance(downsample, bool):
+            raise ValueError("animation export downsample must be an integer factor, not bool")
+        factor = int(downsample)
+        if factor < 1:
+            raise ValueError(f"animation export downsample must be >= 1, got {downsample!r}")
+        if factor not in {1, 2, 4, 8}:
+            raise ValueError("animation export downsample must be one of 1, 2, 4, or 8")
+        return factor
+
+    def _normalise_animation_max_edge(self, max_edge_px: int | None) -> int | None:
+        """Validate optional animation export max-edge sizing."""
+        if max_edge_px in (None, "", 0, "0"):
+            return None
+        edge = int(max_edge_px)
+        if edge < 1:
+            raise ValueError("animation export max_edge_px must be >= 1")
+        return edge
 
     def _animation_panel_indices(self) -> list[int]:
         """Return visible panel indices for panel-only animation export."""
@@ -5643,21 +5687,49 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         playback: str,
         show_frame_labels: bool,
         background: str | tuple[int, int, int],
+        frame_start: int | None = None,
+        frame_stop: int | None = None,
+        every_n: int = 1,
+        max_frames: int | None = None,
+        downsample: int = 1,
+        max_edge_px: int | None = None,
+        show_panel_titles: bool | None = None,
+        show_scale_bar: bool | None = None,
+        show_zoom: bool | None = None,
     ) -> list[Any]:
         """Render panel-only animation frames as RGB PIL images."""
         from quantem.widget.render import gif as gif_utils
 
         if quality not in gif_utils.QUALITY_SCALE:
             raise ValueError(f"quality must be one of {list(gif_utils.QUALITY_SCALE)}, got {quality!r}.")
-        scale = gif_utils.QUALITY_SCALE[quality]
+        downsample = self._normalise_animation_downsample(downsample)
+        max_edge_px = self._normalise_animation_max_edge(max_edge_px)
+        source_w = max(1, int(self.panel_width_px or self.width))
+        source_h = max(1, int(self.height))
+        scale = gif_utils.animation_output_scale(
+            source_w,
+            source_h,
+            quality,
+            downsample=downsample,
+            max_edge_px=max_edge_px,
+        )
         panel_gap = max(0, int(round(float(self.panel_gap) * scale)))
         title_font_size = max(8, int(round(float(self.panel_title_font_size) * scale)))
-        pixel_size = float(self.pixel_size) if bool(self.scale_bar_visible) else 0.0
+        include_scale_bar = bool(self.scale_bar_visible) if show_scale_bar is None else bool(show_scale_bar)
+        include_zoom = bool(self.show_zoom_indicator) if show_zoom is None else bool(show_zoom)
+        include_panel_titles = bool(self.show_panel_titles) if show_panel_titles is None else bool(show_panel_titles)
+        pixel_size = float(self.pixel_size) if include_scale_bar else 0.0
         unit = self.pixel_unit or "A"
         panel_indices = self._animation_panel_indices()
         panel_titles = [self._panel_title_for_index(panel) for panel in panel_indices]
         frames = []
-        for frame_idx in self._animation_frame_order(playback):
+        for frame_idx in self._animation_frame_order(
+            playback,
+            frame_start=frame_start,
+            frame_stop=frame_stop,
+            every_n=every_n,
+            max_frames=max_frames,
+        ):
             panel_images = []
             for panel in panel_indices:
                 data = self._get_display_panel_frame(panel, frame_idx)
@@ -5668,7 +5740,9 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                         quality,
                         pixel_size,
                         unit,
-                        show_zoom_indicator=bool(self.show_zoom_indicator),
+                        show_zoom_indicator=include_zoom,
+                        downsample=downsample,
+                        max_edge_px=max_edge_px,
                     )
                 )
             frame_panel_titles = (
@@ -5681,7 +5755,7 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                     panel_images,
                     panel_titles=frame_panel_titles,
                     frame_labels=None,
-                    show_panel_titles=bool(self.show_panel_titles),
+                    show_panel_titles=include_panel_titles,
                     title_font_size=title_font_size,
                     max_cols=int(self.max_cols),
                     panel_gap=panel_gap,
@@ -5693,7 +5767,18 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     def save_gif(self, path: str | pathlib.Path, *, quality: str = "high",
                  fps: float | None = None, playback: str = "forward",
                  show_frame_labels: bool = False,
-                 background: str | tuple[int, int, int] = "dark") -> pathlib.Path:
+                 background: str | tuple[int, int, int] = "dark",
+                 frame_start: int | None = None,
+                 frame_stop: int | None = None,
+                 every_n: int = 1,
+                 max_frames: int | None = None,
+                 downsample: int = 1,
+                 max_edge_px: int | None = None,
+                 show_panel_titles: bool | None = None,
+                 show_scale_bar: bool | None = None,
+                 show_zoom: bool | None = None,
+                 slides_preset: bool = False,
+                 ppt_preset: bool = False) -> pathlib.Path:
         """Save the z-stack panels as an animated GIF matching the live image view.
 
         Each frame is colorized with the current ``cmap`` and contrast
@@ -5718,6 +5803,25 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             When enabled and no labels were provided, draw ``"i/n"``.
         background : {"dark", "black", "white"} or RGB tuple, default "dark"
             Grid gutter/background color for multi-panel exports.
+        frame_start, frame_stop : int, optional
+            Zero-based Python slice bounds for the exported frame range. The
+            default exports every visible frame.
+        every_n : int, default 1
+            Export every Nth frame from the selected range.
+        max_frames : int, optional
+            Evenly sample at most this many frames from the selected range.
+        downsample : {1, 2, 4, 8}, default 1
+            Display-only spatial downsample for the animation file.
+        max_edge_px : int, optional
+            Cap each source panel's exported edge length in pixels.
+        show_panel_titles, show_scale_bar, show_zoom : bool, optional
+            Override the corresponding live-view overlay settings for the
+            exported animation.
+        slides_preset : bool, default False
+            Convenience preset for slide decks. Unless explicitly
+            overridden, exports at most 40 frames with ``max_edge_px=512``.
+        ppt_preset : bool, default False
+            Deprecated alias for ``slides_preset``.
 
         Returns
         -------
@@ -5732,18 +5836,43 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         """
         from quantem.widget import movie
         fps = float(self.fps) if fps is None else float(fps)
+        if slides_preset or ppt_preset:
+            if max_frames is None:
+                max_frames = 40
+            if max_edge_px is None and int(downsample or 1) == 1:
+                max_edge_px = 512
         frames = self._render_animation_frames(
             quality=quality,
             playback=playback,
             show_frame_labels=bool(show_frame_labels),
             background=background,
+            frame_start=frame_start,
+            frame_stop=frame_stop,
+            every_n=every_n,
+            max_frames=max_frames,
+            downsample=downsample,
+            max_edge_px=max_edge_px,
+            show_panel_titles=show_panel_titles,
+            show_scale_bar=show_scale_bar,
+            show_zoom=show_zoom,
         )
         return movie.save_gif(frames, path, fps=fps)
 
     def save_mp4(self, path: str | pathlib.Path, *, quality: str = "high",
                  fps: float | None = None, playback: str = "forward",
                  crf: int = 18, show_frame_labels: bool = False,
-                 background: str | tuple[int, int, int] = "dark") -> pathlib.Path:
+                 background: str | tuple[int, int, int] = "dark",
+                 frame_start: int | None = None,
+                 frame_stop: int | None = None,
+                 every_n: int = 1,
+                 max_frames: int | None = None,
+                 downsample: int = 1,
+                 max_edge_px: int | None = None,
+                 show_panel_titles: bool | None = None,
+                 show_scale_bar: bool | None = None,
+                 show_zoom: bool | None = None,
+                 slides_preset: bool = False,
+                 ppt_preset: bool = False) -> pathlib.Path:
         """Save the z-stack panels as an H.264 MP4.
 
         The rendered content matches :meth:`save_gif`: image panels only, with
@@ -5768,6 +5897,23 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             When enabled and no labels were provided, draw ``"i/n"``.
         background : {"dark", "black", "white"} or RGB tuple, default "dark"
             Grid gutter/background color for multi-panel exports.
+        frame_start, frame_stop : int, optional
+            Zero-based Python slice bounds for the exported frame range.
+        every_n : int, default 1
+            Export every Nth frame from the selected range.
+        max_frames : int, optional
+            Evenly sample at most this many frames from the selected range.
+        downsample : {1, 2, 4, 8}, default 1
+            Display-only spatial downsample for the animation file.
+        max_edge_px : int, optional
+            Cap each source panel's exported edge length in pixels.
+        show_panel_titles, show_scale_bar, show_zoom : bool, optional
+            Override the corresponding live-view overlay settings.
+        slides_preset : bool, default False
+            Convenience preset for slide decks. Unless explicitly
+            overridden, exports at most 40 frames with ``max_edge_px=512``.
+        ppt_preset : bool, default False
+            Deprecated alias for ``slides_preset``.
 
         Returns
         -------
@@ -5776,11 +5922,25 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         """
         from quantem.widget import movie
         fps = float(self.fps) if fps is None else float(fps)
+        if slides_preset or ppt_preset:
+            if max_frames is None:
+                max_frames = 40
+            if max_edge_px is None and int(downsample or 1) == 1:
+                max_edge_px = 512
         frames = self._render_animation_frames(
             quality=quality,
             playback=playback,
             show_frame_labels=bool(show_frame_labels),
             background=background,
+            frame_start=frame_start,
+            frame_stop=frame_stop,
+            every_n=every_n,
+            max_frames=max_frames,
+            downsample=downsample,
+            max_edge_px=max_edge_px,
+            show_panel_titles=show_panel_titles,
+            show_scale_bar=show_scale_bar,
+            show_zoom=show_zoom,
         )
         return movie.save_mp4(frames, path, fps=fps, crf=crf)
 
@@ -5795,6 +5955,17 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         playback: str = "forward",
         show_frame_labels: bool = False,
         background: str | tuple[int, int, int] = "dark",
+        frame_start: int | None = None,
+        frame_stop: int | None = None,
+        every_n: int = 1,
+        max_frames: int | None = None,
+        downsample: int = 1,
+        max_edge_px: int | None = None,
+        show_panel_titles: bool | None = None,
+        show_scale_bar: bool | None = None,
+        show_zoom: bool | None = None,
+        slides_preset: bool = False,
+        ppt_preset: bool = False,
     ) -> AnimationExportPreview:
         """Save GIF/MP4 animation exports and return a notebook preview.
 
@@ -5822,6 +5993,22 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             Draw per-panel dynamic frame labels from ``panel_frame_labels``.
         background : {"dark", "black", "white"} or RGB tuple, default "dark"
             Grid gutter/background color for multi-panel exports.
+        frame_start, frame_stop : int, optional
+            Zero-based Python slice bounds for the exported frame range.
+        every_n : int, default 1
+            Export every Nth frame from the selected range.
+        max_frames : int, optional
+            Evenly sample at most this many frames from the selected range.
+        downsample : {1, 2, 4, 8}, default 1
+            Display-only spatial downsample for the animation files.
+        max_edge_px : int, optional
+            Cap each source panel's exported edge length in pixels.
+        show_panel_titles, show_scale_bar, show_zoom : bool, optional
+            Override the corresponding live-view overlay settings.
+        slides_preset : bool, default False
+            Convenience preset for slide decks.
+        ppt_preset : bool, default False
+            Deprecated alias for ``slides_preset``.
 
         Returns
         -------
@@ -5845,6 +6032,17 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                     playback=playback,
                     show_frame_labels=show_frame_labels,
                     background=background,
+                    frame_start=frame_start,
+                    frame_stop=frame_stop,
+                    every_n=every_n,
+                    max_frames=max_frames,
+                    downsample=downsample,
+                    max_edge_px=max_edge_px,
+                    show_panel_titles=show_panel_titles,
+                    show_scale_bar=show_scale_bar,
+                    show_zoom=show_zoom,
+                    slides_preset=slides_preset,
+                    ppt_preset=ppt_preset,
                 )
             elif mode == "mp4":
                 path = directory / f"{stem}.mp4"
@@ -5856,6 +6054,17 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                     crf=self._mp4_crf_for_quality(quality),
                     show_frame_labels=show_frame_labels,
                     background=background,
+                    frame_start=frame_start,
+                    frame_stop=frame_stop,
+                    every_n=every_n,
+                    max_frames=max_frames,
+                    downsample=downsample,
+                    max_edge_px=max_edge_px,
+                    show_panel_titles=show_panel_titles,
+                    show_scale_bar=show_scale_bar,
+                    show_zoom=show_zoom,
+                    slides_preset=slides_preset,
+                    ppt_preset=ppt_preset,
                 )
             else:
                 raise ValueError("formats must contain only 'gif' and/or 'mp4'")
@@ -6164,25 +6373,41 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 return
             if mode in {"gif", "mp4"}:
                 quality = self._normalise_animation_quality(payload.get("quality", "medium"))
+                animation_kwargs = self._animation_kwargs_from_payload(payload)
+                detail = self._animation_export_detail(
+                    playback=str(animation_kwargs.get("playback", "forward")),
+                    frame_start=animation_kwargs.get("frame_start"),
+                    frame_stop=animation_kwargs.get("frame_stop"),
+                    every_n=int(animation_kwargs.get("every_n", 1)),
+                    max_frames=animation_kwargs.get("max_frames"),
+                    downsample=int(animation_kwargs.get("downsample", 1)),
+                    max_edge_px=animation_kwargs.get("max_edge_px"),
+                    slides_preset=bool(animation_kwargs.get("slides_preset", False)),
+                )
                 filename = str(payload.get("filename") or self._default_animation_export_path(mode, quality).name)
                 request_id = str(payload.get("id") or "")
                 if payload.get("download"):
-                    self.export_status = f"Preparing {filename}..."
-                    media = self._animation_export_bytes(mode, quality=quality)
+                    self.export_status = f"Preparing {filename} ({detail})..."
+                    media = self._animation_export_bytes(mode, quality=quality, **animation_kwargs)
                     self.export_filename = filename
                     self.export_payload = media
                     self.export_payload_id = request_id
                     size_mb = len(media) / (1024 * 1024)
-                    self.export_status = f"Ready {filename} ({size_mb:.1f} MB)"
+                    self.export_status = f"Ready {filename} ({size_mb:.1f} MB, {detail})"
                 else:
-                    self.export_status = f"Exporting {filename}..."
+                    self.export_status = f"Exporting {filename} ({detail})..."
                     path = self._default_animation_export_path(mode, quality)
                     if mode == "gif":
-                        self.save_gif(path, quality=quality)
+                        self.save_gif(path, quality=quality, **animation_kwargs)
                     else:
-                        self.save_mp4(path, quality=quality, crf=self._mp4_crf_for_quality(quality))
+                        self.save_mp4(
+                            path,
+                            quality=quality,
+                            crf=self._mp4_crf_for_quality(quality),
+                            **animation_kwargs,
+                        )
                     size_mb = path.stat().st_size / (1024 * 1024)
-                    self.export_status = f"Exported {path.name} ({size_mb:.1f} MB)"
+                    self.export_status = f"Exported {path.name} ({size_mb:.1f} MB, {detail})"
                 return
             quantized, downsample_factor = self._normalise_html_export_options(
                 mode=mode,
@@ -6249,12 +6474,87 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         """Map UI quality labels to H.264 compression quality."""
         return {"low": 24, "medium": 21, "high": 18}[self._normalise_animation_quality(quality)]
 
+    def _animation_kwargs_from_payload(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        """Normalize toolbar animation export options."""
+
+        def optional_int(value: Any) -> int | None:
+            if value in (None, "", 0, "0"):
+                return None
+            return int(value)
+
+        def optional_bool(key: str) -> bool | None:
+            if key not in payload:
+                return None
+            value = payload.get(key)
+            if isinstance(value, str):
+                return value.strip().lower() in {"1", "true", "yes", "on"}
+            return bool(value)
+
+        fps_value = payload.get("fps")
+        fps = None if fps_value in (None, "", 0, "0") else float(fps_value)
+        preset = str(payload.get("preset") or "").strip().lower()
+        return {
+            "fps": fps,
+            "playback": str(payload.get("playback") or "forward"),
+            "frame_start": optional_int(payload.get("frame_start")),
+            "frame_stop": optional_int(payload.get("frame_stop")),
+            "every_n": max(1, int(payload.get("every_n", 1) or 1)),
+            "max_frames": optional_int(payload.get("max_frames")),
+            "downsample": self._normalise_animation_downsample(payload.get("downsample", 1)),
+            "max_edge_px": self._normalise_animation_max_edge(payload.get("max_edge_px")),
+            "show_panel_titles": optional_bool("show_panel_titles"),
+            "show_scale_bar": optional_bool("show_scale_bar"),
+            "show_zoom": optional_bool("show_zoom"),
+            "slides_preset": (
+                bool(payload.get("slides_preset"))
+                or bool(payload.get("ppt_preset"))
+                or preset in {"slides", "ppt"}
+            ),
+        }
+
+    def _animation_export_detail(
+        self,
+        *,
+        playback: str,
+        frame_start: int | None,
+        frame_stop: int | None,
+        every_n: int,
+        max_frames: int | None,
+        downsample: int,
+        max_edge_px: int | None,
+        slides_preset: bool,
+    ) -> str:
+        """Build a concise, user-facing status label for animation exports."""
+        order = self._animation_frame_order(
+            playback,
+            frame_start=frame_start,
+            frame_stop=frame_stop,
+            every_n=every_n,
+            max_frames=max_frames,
+        )
+        parts = [f"{len(order)} frames"]
+        if frame_start is not None or frame_stop is not None:
+            start = 1 if frame_start is None else int(frame_start) + 1
+            stop = int(self.n_slices) if frame_stop is None else int(frame_stop)
+            parts.append(f"{start}-{stop}")
+        if int(every_n) > 1:
+            parts.append(f"every {int(every_n)}")
+        if max_frames not in (None, 0):
+            parts.append(f"max {int(max_frames)}")
+        if int(downsample) > 1:
+            parts.append(f"{int(downsample)}x downsample")
+        if max_edge_px is not None:
+            parts.append(f"max edge {int(max_edge_px)} px")
+        if slides_preset:
+            parts.append("Slides preset")
+        return ", ".join(parts)
+
     def _export_mode_label(self, quantized: bool, *, downsample: int = 1) -> str:
         if not quantized:
             return "full float32"
         if int(downsample) > 1:
-            return f"uint8, {int(downsample)}x binned"
-        return "uint8"
+            return f"encoded uint8, {int(downsample)}x downsample"
+        return "encoded uint8"
 
     def _write_html_export(
         self,
@@ -6297,15 +6597,15 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             self._write_html_export(path, quantized=quantized, downsample=downsample)
             return path.read_bytes()
 
-    def _animation_export_bytes(self, mode: str, *, quality: str = "medium") -> bytes:
+    def _animation_export_bytes(self, mode: str, *, quality: str = "medium", **kwargs: Any) -> bytes:
         """Build a GIF or MP4 animation export in a temp directory and return bytes."""
         quality = self._normalise_animation_quality(quality)
         with tempfile.TemporaryDirectory(prefix="show3d-animation-export-") as tmp:
             path = pathlib.Path(tmp) / self._default_animation_export_path(mode, quality).name
             if mode == "gif":
-                self.save_gif(path, quality=quality)
+                self.save_gif(path, quality=quality, **kwargs)
             elif mode == "mp4":
-                self.save_mp4(path, quality=quality, crf=self._mp4_crf_for_quality(quality))
+                self.save_mp4(path, quality=quality, crf=self._mp4_crf_for_quality(quality), **kwargs)
             else:
                 raise ValueError(f"unsupported animation export mode {mode!r}")
             return path.read_bytes()

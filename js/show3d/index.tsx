@@ -1074,7 +1074,15 @@ const FRAME_SERVER_PREFETCH_FRAMES = 8;
 // ============================================================================
 // Inlined components (matches Show2D single-file convention)
 // ============================================================================
-function InfoTooltip({ text, theme = "dark" }: { text: React.ReactNode; theme?: "light" | "dark" }) {
+function InfoTooltip({
+  text,
+  theme = "dark",
+  icon = "ⓘ",
+}: {
+  text: React.ReactNode;
+  theme?: "light" | "dark";
+  icon?: React.ReactNode;
+}) {
   const isDark = theme === "dark";
   const content = typeof text === "string"
     ? <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>{text}</Typography>
@@ -1088,7 +1096,7 @@ function InfoTooltip({ text, theme = "dark" }: { text: React.ReactNode; theme?: 
       }}
     >
       <Typography component="span" sx={{ fontSize: 12, color: isDark ? "#888" : "#666", cursor: "help", ml: 0.5, "&:hover": { color: isDark ? "#aaa" : "#444" } }}>
-        ⓘ
+        {icon}
       </Typography>
     </Tooltip>
   );
@@ -1998,6 +2006,28 @@ const MAX_ZOOM = 30;
 const MAX_PLAYBACK_FPS = 60;
 const HTML_EXPORT_OVERHEAD_BYTES = 700_000;
 const ANIMATION_QUALITY_SCALE: Record<string, number> = { low: 0.35, medium: 0.6, high: 1.0 };
+const ANIMATION_QUALITY_OPTIONS = ["low", "medium", "high"] as const;
+type AnimationQuality = typeof ANIMATION_QUALITY_OPTIONS[number];
+type ExportPanelMode = "home" | "gif" | "html" | "mp4";
+type ExportSpatialPreset = "full" | "down2" | "down4" | "edge512" | "edge1024";
+type GifExportPreset = "slides" | "compact" | "full" | "custom";
+const EXPORT_SPATIAL_OPTIONS: Array<{
+  value: ExportSpatialPreset;
+  label: string;
+  downsample: number;
+  maxEdgePx: number | null;
+}> = [
+  { value: "full", label: "Full", downsample: 1, maxEdgePx: null },
+  { value: "down2", label: "2x downsample", downsample: 2, maxEdgePx: null },
+  { value: "down4", label: "4x downsample", downsample: 4, maxEdgePx: null },
+  { value: "edge512", label: "Max edge 512 px", downsample: 1, maxEdgePx: 512 },
+  { value: "edge1024", label: "Max edge 1024 px", downsample: 1, maxEdgePx: 1024 },
+];
+const GIF_EXPORT_PRESETS: Array<{ value: GifExportPreset; label: string }> = [
+  { value: "slides", label: "Slides" },
+  { value: "compact", label: "Compact" },
+  { value: "full", label: "Full" },
+];
 const PANEL_GPU_READY_TIMEOUT_MS = 1200;
 const INITIAL_NATIVE_PREVIEW_DELAY_MS = 350;
 
@@ -2161,6 +2191,51 @@ function formatEstimatedHtmlSize(payloadBytes: number): string {
   return `~${mb.toFixed(2)} MB`;
 }
 
+function animationOutputScale(
+  width: number,
+  height: number,
+  quality: string,
+  downsample = 1,
+  maxEdgePx: number | null = null,
+): number {
+  const base = ANIMATION_QUALITY_SCALE[quality] ?? ANIMATION_QUALITY_SCALE.medium;
+  const factor = Math.max(1, Math.round(downsample || 1));
+  let scale = Math.min(1, base / factor);
+  if (maxEdgePx && maxEdgePx > 0) {
+    scale = Math.min(scale, maxEdgePx / Math.max(1, width, height));
+  }
+  return Math.max(scale, 1 / Math.max(1, width, height));
+}
+
+function spatialOptionFor(value: ExportSpatialPreset) {
+  return EXPORT_SPATIAL_OPTIONS.find((option) => option.value === value) || EXPORT_SPATIAL_OPTIONS[0];
+}
+
+function buildAnimationFrameIndices(
+  nSlices: number,
+  startOne: number,
+  endOne: number,
+  everyN: number,
+  maxFrames: number,
+): number[] {
+  const total = Math.max(1, Math.floor(nSlices || 1));
+  const start = Math.max(0, Math.min(total - 1, Math.round(startOne || 1) - 1));
+  const end = Math.max(start, Math.min(total - 1, Math.round(endOne || total) - 1));
+  const step = Math.max(1, Math.round(everyN || 1));
+  const frames: number[] = [];
+  for (let idx = start; idx <= end; idx += step) frames.push(idx);
+  const cap = Math.max(0, Math.round(maxFrames || 0));
+  if (cap > 0 && frames.length > cap) {
+    if (cap === 1) return [frames[0]];
+    const sampled: number[] = [];
+    for (let i = 0; i < cap; i++) {
+      sampled.push(frames[Math.round((i * (frames.length - 1)) / (cap - 1))]);
+    }
+    return sampled;
+  }
+  return frames;
+}
+
 function formatEstimatedAnimationWork(
   width: number,
   height: number,
@@ -2169,21 +2244,23 @@ function formatEstimatedAnimationWork(
   maxCols: number,
   panelGap: number,
   quality: string,
+  downsample = 1,
+  maxEdgePx: number | null = null,
 ): string {
-  const scale = ANIMATION_QUALITY_SCALE[quality] ?? ANIMATION_QUALITY_SCALE.medium;
+  const scale = animationOutputScale(width, height, quality, downsample, maxEdgePx);
   const panelW = Math.max(1, Math.floor(Math.max(1, width) * scale));
   const panelH = Math.max(1, Math.floor(Math.max(1, height) * scale));
   const panels = Math.max(1, visiblePanels);
   const cols = maxCols <= 0 ? panels : Math.max(1, Math.min(maxCols, panels));
   const rows = Math.max(1, Math.ceil(panels / cols));
-  const gap = Math.max(0, Math.round(panelGap || 0));
+  const gap = Math.max(0, Math.round((panelGap || 0) * scale));
   const outW = cols * panelW + Math.max(0, cols - 1) * gap;
   const outH = rows * panelH + Math.max(0, rows - 1) * gap;
   const rgbBytes = outW * outH * Math.max(1, nSlices) * 3;
   const mb = rgbBytes / (1024 * 1024);
-  if (mb >= 100) return `~${Math.round(mb)} MB work`;
-  if (mb >= 10) return `~${mb.toFixed(1)} MB work`;
-  return `~${mb.toFixed(2)} MB work`;
+  if (mb >= 100) return `~${Math.round(mb)} MB before compression`;
+  if (mb >= 10) return `~${mb.toFixed(1)} MB before compression`;
+  return `~${mb.toFixed(2)} MB before compression`;
 }
 
 const clampPlaybackFps = (value: number) => {
@@ -4449,6 +4526,15 @@ function Show3D() {
   const [panelMenuAnchor, setPanelMenuAnchor] = React.useState<HTMLElement | null>(null);
   const [viewMenuAnchor, setViewMenuAnchor] = React.useState<HTMLElement | null>(null);
   const [exportBusy, setExportBusy] = React.useState(false);
+  const [exportPanelMode, setExportPanelMode] = React.useState<ExportPanelMode>("home");
+  const [exportQuality, setExportQuality] = React.useState<AnimationQuality>("medium");
+  const [exportFrameStart, setExportFrameStart] = React.useState(1);
+  const [exportFrameEnd, setExportFrameEnd] = React.useState(Math.max(1, nSlices || 1));
+  const [exportEveryN, setExportEveryN] = React.useState(1);
+  const [exportMaxFrames, setExportMaxFrames] = React.useState(40);
+  const [exportFps, setExportFps] = React.useState(Math.max(1, Math.round(playbackFps || 10)));
+  const [exportSpatialPreset, setExportSpatialPreset] = React.useState<ExportSpatialPreset>("edge512");
+  const [exportGifPreset, setExportGifPreset] = React.useState<GifExportPreset>("slides");
   const [localExportStatus, setLocalExportStatus] = React.useState("");
   const fftOverlayDragRef = React.useRef<{
     pointerId: number;
@@ -4486,7 +4572,7 @@ function Show3D() {
     if (localExportStatus.startsWith("Preparing ") || localExportStatus.startsWith("Saving ")) return;
     const id = window.setTimeout(() => {
       setLocalExportStatus((current) => current === localExportStatus ? "" : current);
-    }, 5000);
+    }, 12000);
     return () => window.clearTimeout(id);
   }, [localExportStatus, exportBusy]);
   const voxelCount = Math.max(0, Math.floor(nSlices) * Math.floor(height) * Math.floor(width));
@@ -4495,32 +4581,82 @@ function Show3D() {
   const quantizedExportSize2 = formatEstimatedHtmlSize(Math.ceil(voxelCount / 4));
   const quantizedExportSize4 = formatEstimatedHtmlSize(Math.ceil(voxelCount / 16));
   const quantizedExportSize8 = formatEstimatedHtmlSize(Math.ceil(voxelCount / 64));
-  const gifLowEstimate = formatEstimatedAnimationWork(width, height, nSlices, visiblePanelCount, maxCols, panelGapTrait ?? 10, "low");
-  const gifMediumEstimate = formatEstimatedAnimationWork(width, height, nSlices, visiblePanelCount, maxCols, panelGapTrait ?? 10, "medium");
-  const gifHighEstimate = formatEstimatedAnimationWork(width, height, nSlices, visiblePanelCount, maxCols, panelGapTrait ?? 10, "high");
+  const selectedSpatialOption = spatialOptionFor(exportSpatialPreset);
+  const exportFrameIndices = React.useMemo(
+    () => buildAnimationFrameIndices(nSlices, exportFrameStart, exportFrameEnd, exportEveryN, exportMaxFrames),
+    [nSlices, exportFrameStart, exportFrameEnd, exportEveryN, exportMaxFrames],
+  );
+  const animationWorkEstimate = formatEstimatedAnimationWork(
+    width,
+    height,
+    exportFrameIndices.length,
+    visiblePanelCount,
+    maxCols,
+    panelGapTrait ?? 10,
+    exportQuality,
+    selectedSpatialOption.downsample,
+    selectedSpatialOption.maxEdgePx,
+  );
+  const exportFrameSummary = `${exportFrameIndices.length}/${Math.max(1, nSlices || 1)} frames`;
+  const animationExportRequest = React.useMemo(() => ({
+    fps: Math.max(1, Math.round(exportFps || playbackFps || 10)),
+    frame_start: exportFrameIndices[0] ?? 0,
+    frame_stop: (exportFrameIndices[exportFrameIndices.length - 1] ?? 0) + 1,
+    every_n: Math.max(1, Math.round(exportEveryN || 1)),
+    max_frames: Math.max(0, Math.round(exportMaxFrames || 0)),
+    downsample: selectedSpatialOption.downsample,
+    max_edge_px: selectedSpatialOption.maxEdgePx || null,
+    preset: exportGifPreset === "custom" ? "custom" : exportGifPreset,
+    slides_preset: exportGifPreset === "slides",
+    show_panel_titles: showPanelTitles !== false,
+    show_scale_bar: Boolean(scaleBarVisible),
+    show_zoom: showZoomIndicator !== false,
+  }), [
+    exportFps,
+    playbackFps,
+    exportFrameIndices,
+    exportEveryN,
+    exportMaxFrames,
+    selectedSpatialOption.downsample,
+    selectedSpatialOption.maxEdgePx,
+    exportGifPreset,
+    showPanelTitles,
+    scaleBarVisible,
+    showZoomIndicator,
+  ]);
   const canDownloadCurrentHtml = !exportEnabled && (offline || hasOfflineStack || hasOfflineFloatStack || offlineForTheme);
   const standaloneHtmlMode = offline || hasOfflineStack ? "quantized" : "exact";
   const standaloneHtmlLabel = standaloneHtmlMode === "quantized"
-    ? `HTML quantized uint8 (${quantizedExportSize})`
+    ? `HTML encoded uint8 (${quantizedExportSize})`
     : `HTML exact float32 (${exactExportSize})`;
-  const unavailableStandaloneHtmlLabel = standaloneHtmlMode === "quantized"
-    ? "HTML exact float32 (not embedded)"
-    : "HTML quantized uint8 (requires backend)";
   const canExportStandaloneGif = !exportEnabled && offline && width > 0 && height > 0 && nSlices > 0 && (
     hasOfflineStack || hasOfflineFloatStack || sidecarRamReady
   );
-  const showAnimationExportOptions = exportEnabled || canDownloadCurrentHtml;
   const standaloneGifUnavailableTitle = sidecarMode && !sidecarRamReady
     ? "GIF export becomes available after the folder data finishes loading into RAM."
     : "GIF export needs embedded or loaded standalone image data.";
   const standaloneMp4UnavailableTitle = "MP4 export requires the live Python backend. Standalone HTML can export GIF or download itself as HTML.";
   const handleExportMenuOpen = (event: React.MouseEvent<HTMLElement>) => {
+    setExportPanelMode("home");
     setExportMenuAnchor(event.currentTarget);
   };
   const handleExportMenuClose = () => {
     setExportMenuAnchor(null);
   };
-  const handleExportSelect = async (mode: string, quality = "medium", downsample = 1) => {
+  React.useEffect(() => {
+    const total = Math.max(1, Math.floor(nSlices || 1));
+    setExportFrameStart((current) => Math.max(1, Math.min(total, Math.round(current || 1))));
+    setExportFrameEnd((current) => Math.max(1, Math.min(total, Math.round(current || total))));
+  }, [nSlices]);
+  React.useEffect(() => {
+    setExportFps(Math.max(1, Math.round(playbackFps || 10)));
+  }, [playbackFps]);
+  const handleExportSelect = async (
+    mode: string,
+    quality = "medium",
+    downsample = 1,
+    requestOptions: Record<string, unknown> = {},
+  ) => {
     setExportMenuAnchor(null);
     if (mode !== "exact" && mode !== "quantized" && mode !== "gif" && mode !== "mp4") return;
     const filename = makeExportFilename(title, nSlices, height, width, mode, quality, downsample);
@@ -4548,7 +4684,7 @@ function Show3D() {
     }
     pendingExportRef.current = { id, filename, mode, downsample, handle };
     setLocalExportStatus(`Preparing ${filename}...`);
-    setExportRequest(JSON.stringify({ mode, quality, downsample, id, filename, download: true }));
+    setExportRequest(JSON.stringify({ mode, quality, downsample, ...requestOptions, id, filename, download: true }));
   };
   const handleStandaloneHtmlDownload = () => {
     setExportMenuAnchor(null);
@@ -4561,18 +4697,22 @@ function Show3D() {
       )}`;
       const blob = new Blob([html], { type: "text/html;charset=utf-8" });
       downloadBlob(blob, filename);
-      setLocalExportStatus(`Saved ${filename} (${formatSavedBytes(blob.size)})`);
+      setLocalExportStatus(`Downloaded ${filename} to browser Downloads (${formatSavedBytes(blob.size)})`);
     } catch (err) {
       setLocalExportStatus(`Export failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   };
-  const renderStandaloneGifFrame = (frameIdx: number, quality: string): { width: number; height: number; indices: Uint8Array } | null => {
+  const renderStandaloneGifFrame = (
+    frameIdx: number,
+    quality: string,
+    options: { downsample: number; maxEdgePx: number | null },
+  ): { width: number; height: number; indices: Uint8Array } | null => {
     const frame = getOfflineFrame(frameIdx);
     if (!frame) return null;
-    const scale = ANIMATION_QUALITY_SCALE[quality] ?? ANIMATION_QUALITY_SCALE.medium;
     const sourcePanelCount = Math.max(1, nPanels || 1);
     const panelW = sharedPanelSource ? Math.max(1, width) : Math.max(1, panelWidthPx || Math.floor(width / sourcePanelCount) || width);
     const panelH = Math.max(1, height);
+    const scale = animationOutputScale(panelW, panelH, quality, options.downsample, options.maxEdgePx);
     const panels = (visiblePanelIndices.length ? visiblePanelIndices : [0])
       .filter((panel) => panel >= 0 && panel < sourcePanelCount);
     const activePanels = panels.length ? panels : [0];
@@ -4666,11 +4806,57 @@ function Show3D() {
       }
       outCtx.drawImage(panelCanvas, 0, 0, panelW, panelH, 0, 0, panelOutW, panelOutH);
       outCtx.restore();
+      if (showPanelTitles !== false) {
+        const label = panelTitleText(panel);
+        if (label) {
+          outCtx.save();
+          outCtx.font = `700 ${Math.max(8, Math.round(11 * scale))}px ${UI_FONT}`;
+          outCtx.textAlign = "center";
+          outCtx.textBaseline = "top";
+          outCtx.shadowColor = "rgba(0,0,0,0.75)";
+          outCtx.shadowBlur = 2;
+          outCtx.shadowOffsetX = 1;
+          outCtx.shadowOffsetY = 1;
+          outCtx.fillStyle = "white";
+          outCtx.fillText(label, x + panelOutW / 2, y + Math.max(2, Math.round(3 * scale)));
+          outCtx.restore();
+        }
+      }
+      if (scaleBarVisible && pixelSize > 0) {
+        const outputPixelSize = pixelSize / Math.max(1e-6, scale);
+        const targetBarPx = Math.min(60 * scale, panelOutW * 0.25);
+        const nicePhysical = roundToNiceValue(targetBarPx * outputPixelSize);
+        const barPx = Math.max(1, (nicePhysical / outputPixelSize));
+        const barThickness = Math.max(2, Math.round(5 * scale));
+        const fontSize = Math.max(8, Math.round(16 * scale));
+        const margin = Math.max(6, Math.round(12 * scale));
+        const barX = x + panelOutW - barPx - margin;
+        const barY = y + panelOutH - margin;
+        outCtx.save();
+        outCtx.shadowColor = "rgba(0,0,0,0.75)";
+        outCtx.shadowBlur = 2;
+        outCtx.shadowOffsetX = 1;
+        outCtx.shadowOffsetY = 1;
+        outCtx.fillStyle = "white";
+        outCtx.fillRect(barX, barY, barPx, barThickness);
+        outCtx.font = `${fontSize}px ${UI_FONT}`;
+        outCtx.textAlign = "center";
+        outCtx.textBaseline = "bottom";
+        outCtx.fillText(formatScaleLabel(nicePhysical, pixelUnit || "px"), barX + barPx / 2, barY - Math.max(2, Math.round(4 * scale)));
+        if (showZoomIndicator !== false) {
+          outCtx.textAlign = "left";
+          outCtx.fillText(formatZoomLabel(1), x + margin, y + panelOutH - margin + barThickness);
+        }
+        outCtx.restore();
+      }
     }
     const rgba = outCtx.getImageData(0, 0, outW, outH).data;
     return { width: outW, height: outH, indices: quantizeRgbaForBrowserGif(rgba) };
   };
-  const handleStandaloneGifDownload = async (quality = "medium") => {
+  const handleStandaloneGifDownload = async (
+    quality = "medium",
+    requestOptions: Record<string, unknown> = {},
+  ) => {
     setExportMenuAnchor(null);
     if (!canExportStandaloneGif) {
       setLocalExportStatus(standaloneGifUnavailableTitle);
@@ -4683,35 +4869,206 @@ function Show3D() {
       const frames: Uint8Array[] = [];
       let outW = 0;
       let outH = 0;
-      const total = Math.max(1, nSlices || 1);
-      for (let i = 0; i < total; i++) {
-        const rendered = renderStandaloneGifFrame(i, quality);
-        if (!rendered) throw new Error(`frame ${i + 1}/${total} is not loaded`);
+      const frameIndices = exportFrameIndices.length ? exportFrameIndices : [Math.max(0, Math.min(Math.max(1, nSlices || 1) - 1, sliceIdx || 0))];
+      const spatialOption = {
+        downsample: Number(requestOptions.downsample ?? selectedSpatialOption.downsample),
+        maxEdgePx: requestOptions.max_edge_px == null ? null : Number(requestOptions.max_edge_px),
+      };
+      const total = frameIndices.length;
+      for (let slot = 0; slot < total; slot++) {
+        const frameIdx = frameIndices[slot];
+        const rendered = renderStandaloneGifFrame(frameIdx, quality, spatialOption);
+        if (!rendered) throw new Error(`frame ${frameIdx + 1}/${Math.max(1, nSlices || 1)} is not loaded`);
         outW = rendered.width;
         outH = rendered.height;
         frames.push(rendered.indices);
-        if (i === 0 || i === total - 1 || (i + 1) % 4 === 0) {
-          setLocalExportStatus(`Encoding ${filename}... ${i + 1}/${total}`);
+        if (slot === 0 || slot === total - 1 || (slot + 1) % 4 === 0) {
+          setLocalExportStatus(`Encoding ${filename}... ${slot + 1}/${total}`);
           await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
         }
       }
-      const delayCs = 100 / clampPlaybackFps(fps);
+      const delayCs = 100 / clampPlaybackFps(Number(requestOptions.fps ?? exportFps ?? playbackFps));
       const gif = encodeIndexedGif(outW, outH, frames, delayCs);
       const blob = new Blob([gif as BlobPart], { type: "image/gif" });
       downloadBlob(blob, filename);
-      setLocalExportStatus(`Saved ${filename} (${formatSavedBytes(blob.size)})`);
+      setLocalExportStatus(`Downloaded ${filename} to browser Downloads (${formatSavedBytes(blob.size)})`);
     } catch (err) {
       setLocalExportStatus(`Export failed: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setExportBusy(false);
     }
   };
-  const handleAnimationExportSelect = (mode: "gif" | "mp4", quality: string) => {
+  const handleAnimationExportSelect = (mode: "gif" | "mp4", quality: string, requestOptions = animationExportRequest) => {
     if (mode === "gif" && canExportStandaloneGif) {
-      void handleStandaloneGifDownload(quality);
+      void handleStandaloneGifDownload(quality, requestOptions);
       return;
     }
-    void handleExportSelect(mode, quality);
+    void handleExportSelect(mode, quality, 1, requestOptions);
+  };
+  const applyGifExportPreset = React.useCallback((preset: GifExportPreset) => {
+    setExportPanelMode("gif");
+    setExportGifPreset(preset);
+    setExportFrameStart(1);
+    setExportFrameEnd(Math.max(1, nSlices || 1));
+    if (preset === "slides") {
+      setExportQuality("medium");
+      setExportEveryN(1);
+      setExportMaxFrames(40);
+      setExportFps(Math.min(10, Math.max(1, Math.round(playbackFps || 10))));
+      setExportSpatialPreset("edge512");
+    } else if (preset === "compact") {
+      setExportQuality("low");
+      setExportEveryN(Math.max(1, Math.ceil(Math.max(1, nSlices || 1) / 24)));
+      setExportMaxFrames(24);
+      setExportFps(8);
+      setExportSpatialPreset("down4");
+    } else if (preset === "full") {
+      setExportQuality("high");
+      setExportEveryN(1);
+      setExportMaxFrames(0);
+      setExportFps(Math.max(1, Math.round(playbackFps || 10)));
+      setExportSpatialPreset("full");
+    }
+  }, [nSlices, playbackFps]);
+  const markGifPresetCustom = React.useCallback(() => {
+    setExportGifPreset((preset) => preset === "custom" ? preset : "custom");
+  }, []);
+  const exportNumberFieldSx = {
+    width: 72,
+    "& .MuiInputBase-input": { py: 0.45, px: 0.75, fontSize: 11 },
+  } as const;
+  const exportPanelButtonSx = { ...compactButton, fontSize: 11, border: `1px solid ${themeColors.border}` } as const;
+  const renderAnimationExportPanel = (mode: "gif" | "mp4") => {
+    const isGif = mode === "gif";
+    const disabled = isGif ? !(exportEnabled || canExportStandaloneGif) : !exportEnabled;
+    const disabledTitle = isGif ? standaloneGifUnavailableTitle : standaloneMp4UnavailableTitle;
+    const titleText = isGif ? "GIF" : "MP4 video";
+    return (
+      <Box sx={{ width: 360, maxWidth: "90vw", px: 1.25, py: 1, display: "flex", flexDirection: "column", gap: 0.9 }}>
+        <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 1 }}>
+          <Button size="small" sx={compactButton} onClick={() => setExportPanelMode("home")}>Back</Button>
+          <Box sx={{ display: "flex", alignItems: "center", flex: 1, minWidth: 0 }}>
+            <Typography sx={{ ...typography.title, fontSize: 12 }}>{titleText}</Typography>
+            {isGif && (
+              <InfoTooltip
+                theme={themeInfo.theme}
+                icon="?"
+                text={(
+                  <Box sx={{ fontSize: 11, lineHeight: 1.4 }}>
+                    <b>GIF export lifecycle</b>
+                    <br />1. Pick a preset or adjust frames, fps, quality, and size.
+                    <br />2. Press <b>Export GIF</b>; the widget renders panel-only frames using the current contrast and overlays.
+                    <br />3. In standalone HTML, the browser downloads the GIF to Downloads. In a live notebook, choose a save location when prompted.
+                  </Box>
+                )}
+              />
+            )}
+          </Box>
+        </Box>
+        <Typography sx={{ fontSize: 11, color: themeColors.textMuted, lineHeight: 1.35 }}>
+          {isGif
+            ? "GIF exports the current panel movie without toolbar chrome. Use a preset, then export."
+            : "MP4 is secondary for presentation workflows and requires the live Python backend."}
+        </Typography>
+        {isGif && (
+          <Box sx={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 0.5 }}>
+            {GIF_EXPORT_PRESETS.map((preset) => (
+              <Button
+                key={preset.value}
+                size="small"
+                sx={{
+                  ...compactButton,
+                  minWidth: 0,
+                  border: `1px solid ${exportGifPreset === preset.value ? themeColors.accent : themeColors.border}`,
+                  bgcolor: exportGifPreset === preset.value ? "rgba(25,118,210,0.12)" : "transparent",
+                }}
+                onClick={() => applyGifExportPreset(preset.value)}
+              >
+                {preset.label}
+              </Button>
+            ))}
+          </Box>
+        )}
+        <Box sx={{ display: "grid", gridTemplateColumns: "auto 1fr auto 1fr", alignItems: "center", gap: 0.75 }}>
+          <Typography sx={typography.label}>Frames</Typography>
+          <TextField size="small" type="number" value={exportFrameStart} onChange={(event) => { markGifPresetCustom(); setExportFrameStart(Number(event.target.value)); }} inputProps={{ min: 1, max: Math.max(1, nSlices || 1), "aria-label": "Export first frame" }} sx={exportNumberFieldSx} />
+          <Typography sx={typography.label}>to</Typography>
+          <TextField size="small" type="number" value={exportFrameEnd} onChange={(event) => { markGifPresetCustom(); setExportFrameEnd(Number(event.target.value)); }} inputProps={{ min: 1, max: Math.max(1, nSlices || 1), "aria-label": "Export last frame" }} sx={exportNumberFieldSx} />
+          <Typography sx={typography.label}>Every</Typography>
+          <TextField size="small" type="number" value={exportEveryN} onChange={(event) => { markGifPresetCustom(); setExportEveryN(Math.max(1, Number(event.target.value))); }} inputProps={{ min: 1, max: Math.max(1, nSlices || 1), "aria-label": "Export every Nth frame" }} sx={exportNumberFieldSx} />
+          <Typography sx={typography.label}>Max frames</Typography>
+          <TextField size="small" type="number" value={exportMaxFrames} onChange={(event) => { markGifPresetCustom(); setExportMaxFrames(Math.max(0, Number(event.target.value))); }} inputProps={{ min: 0, max: Math.max(1, nSlices || 1), "aria-label": "Maximum exported frames; zero means all" }} sx={exportNumberFieldSx} />
+        </Box>
+        <Box sx={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 0.75 }}>
+          <Typography sx={typography.label}>fps</Typography>
+          <TextField size="small" type="number" value={exportFps} onChange={(event) => { markGifPresetCustom(); setExportFps(Math.max(1, Number(event.target.value))); }} inputProps={{ min: 1, max: MAX_PLAYBACK_FPS, "aria-label": "Export animation frames per second" }} sx={exportNumberFieldSx} />
+          <Typography sx={typography.label}>Quality</Typography>
+          <Select size="small" value={exportQuality} onChange={(event) => { markGifPresetCustom(); setExportQuality(event.target.value as AnimationQuality); }} sx={{ ...themedSelect, minWidth: 86, fontSize: 11 }} MenuProps={themedMenuProps} inputProps={{ "aria-label": "Animation quality" }}>
+            {ANIMATION_QUALITY_OPTIONS.map((quality) => <MenuItem key={quality} value={quality}>{quality}</MenuItem>)}
+          </Select>
+          <Typography sx={typography.label}>Size</Typography>
+          <Select size="small" value={exportSpatialPreset} onChange={(event) => { markGifPresetCustom(); setExportSpatialPreset(event.target.value as ExportSpatialPreset); }} sx={{ ...themedSelect, minWidth: 144, fontSize: 11 }} MenuProps={themedMenuProps} inputProps={{ "aria-label": "Animation spatial size" }}>
+            {EXPORT_SPATIAL_OPTIONS.map((option) => <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>)}
+          </Select>
+        </Box>
+        <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>
+          {exportFrameSummary} · {animationWorkEstimate}
+          {selectedSpatialOption.downsample > 1 ? ` · ${selectedSpatialOption.downsample}x downsample` : ""}
+          {selectedSpatialOption.maxEdgePx ? ` · max edge ${selectedSpatialOption.maxEdgePx}px` : ""}
+        </Typography>
+        <Button
+          size="small"
+          sx={exportPanelButtonSx}
+          disabled={disabled || exportBusy}
+          title={disabled ? disabledTitle : undefined}
+          onClick={() => handleAnimationExportSelect(mode, exportQuality, animationExportRequest)}
+        >
+          {isGif ? "Export GIF" : "Export MP4"}
+        </Button>
+      </Box>
+    );
+  };
+  const renderHtmlExportPanel = () => (
+    <Box sx={{ width: 340, maxWidth: "86vw", px: 1.25, py: 1, display: "flex", flexDirection: "column", gap: 0.8 }}>
+      <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+        <Button size="small" sx={compactButton} onClick={() => setExportPanelMode("home")}>Back</Button>
+        <Typography sx={{ ...typography.title, fontSize: 12 }}>Interactive HTML</Typography>
+      </Box>
+      <Typography sx={{ fontSize: 11, color: themeColors.textMuted, lineHeight: 1.35 }}>
+        HTML is the primary interactive sharing path. Exact keeps float32 data; encoded uint8 is smaller for visual reports.
+      </Typography>
+      {exportEnabled && <Button size="small" sx={exportPanelButtonSx} onClick={() => handleExportSelect("exact")}>HTML exact float32 ({exactExportSize})</Button>}
+      {exportEnabled && <Button size="small" sx={exportPanelButtonSx} onClick={() => handleExportSelect("quantized")}>HTML encoded uint8 ({quantizedExportSize})</Button>}
+      {exportEnabled && height >= 2 && width >= 2 && <Button size="small" sx={exportPanelButtonSx} onClick={() => handleExportSelect("quantized", "medium", 2)}>HTML encoded uint8, 2x downsample ({quantizedExportSize2})</Button>}
+      {exportEnabled && height >= 4 && width >= 4 && <Button size="small" sx={exportPanelButtonSx} onClick={() => handleExportSelect("quantized", "medium", 4)}>HTML encoded uint8, 4x downsample ({quantizedExportSize4})</Button>}
+      {exportEnabled && height >= 8 && width >= 8 && <Button size="small" sx={exportPanelButtonSx} onClick={() => handleExportSelect("quantized", "medium", 8)}>HTML encoded uint8, 8x downsample ({quantizedExportSize8})</Button>}
+      {canDownloadCurrentHtml && standaloneHtmlMode === "quantized" && <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Exact float32 is not embedded in this standalone page; open the live widget for exact export.</Typography>}
+      {canDownloadCurrentHtml && <Button size="small" sx={exportPanelButtonSx} onClick={handleStandaloneHtmlDownload}>{standaloneHtmlLabel}</Button>}
+      {canDownloadCurrentHtml && standaloneHtmlMode !== "quantized" && <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Encoded uint8 export requires the Python backend to repack the current float32 stack.</Typography>}
+    </Box>
+  );
+  const renderExportMenuContent = () => {
+    if (exportPanelMode === "gif") return renderAnimationExportPanel("gif");
+    if (exportPanelMode === "mp4") return renderAnimationExportPanel("mp4");
+    if (exportPanelMode === "html") return renderHtmlExportPanel();
+    return (
+      <Box sx={{ width: 320, maxWidth: "86vw", py: 0.5 }}>
+        <MenuItem disabled={!(exportEnabled || canExportStandaloneGif)} title={!(exportEnabled || canExportStandaloneGif) ? standaloneGifUnavailableTitle : undefined} onClick={() => setExportPanelMode("gif")}>
+          GIF
+        </MenuItem>
+        <MenuItem disabled={!(exportEnabled || canDownloadCurrentHtml)} onClick={() => setExportPanelMode("html")}>
+          Interactive HTML
+        </MenuItem>
+        <MenuItem disabled={!exportEnabled} title={!exportEnabled ? standaloneMp4UnavailableTitle : undefined} onClick={() => setExportPanelMode("mp4")}>
+          MP4 video (secondary)
+        </MenuItem>
+        <Box sx={{ px: 2, py: 0.75, borderTop: `1px solid ${themeColors.border}` }}>
+          <Typography sx={{ fontSize: 11, color: themeColors.textMuted, lineHeight: 1.35 }}>
+            Use GIF for slides, HTML for interactive review, and MP4 only when a video file is required.
+          </Typography>
+        </Box>
+      </Box>
+    );
   };
 
   React.useEffect(() => {
@@ -4738,7 +5095,11 @@ function Show3D() {
         if (canceled) return;
         pendingExportRef.current = null;
         setExportBusy(false);
-        setLocalExportStatus(`Saved ${filename} (${formatSavedBytes(bytes.byteLength)})`);
+        setLocalExportStatus(
+          pending.handle
+            ? `Saved ${filename} to selected location (${formatSavedBytes(bytes.byteLength)})`
+            : `Downloaded ${filename} to browser Downloads (${formatSavedBytes(bytes.byteLength)})`,
+        );
         setExportRequest(JSON.stringify({ mode: "clear", id: `${pending.id}-clear` }));
       } catch (err) {
         if (canceled) return;
@@ -15589,20 +15950,7 @@ function Show3D() {
 	                  MenuListProps={{ "aria-label": "Export options" }}
 	                  {...themedMenuProps}
 	                >
-	                  {exportEnabled && <MenuItem onClick={() => handleExportSelect("exact")}>HTML exact float32 ({exactExportSize})</MenuItem>}
-	                  {exportEnabled && <MenuItem onClick={() => handleExportSelect("quantized")}>HTML quantized uint8 ({quantizedExportSize})</MenuItem>}
-	                  {exportEnabled && height >= 2 && width >= 2 && <MenuItem onClick={() => handleExportSelect("quantized", "medium", 2)}>HTML quantized uint8, 2× binned ({quantizedExportSize2})</MenuItem>}
-	                  {exportEnabled && height >= 4 && width >= 4 && <MenuItem onClick={() => handleExportSelect("quantized", "medium", 4)}>HTML quantized uint8, 4× binned ({quantizedExportSize4})</MenuItem>}
-	                  {exportEnabled && height >= 8 && width >= 8 && <MenuItem onClick={() => handleExportSelect("quantized", "medium", 8)}>HTML quantized uint8, 8× binned ({quantizedExportSize8})</MenuItem>}
-	                  {showAnimationExportOptions && <MenuItem disabled={!(exportEnabled || canExportStandaloneGif)} title={!(exportEnabled || canExportStandaloneGif) ? standaloneGifUnavailableTitle : undefined} onClick={() => handleAnimationExportSelect("gif", "low")}>GIF low ({gifLowEstimate})</MenuItem>}
-	                  {showAnimationExportOptions && <MenuItem disabled={!(exportEnabled || canExportStandaloneGif)} title={!(exportEnabled || canExportStandaloneGif) ? standaloneGifUnavailableTitle : undefined} onClick={() => handleAnimationExportSelect("gif", "medium")}>GIF medium ({gifMediumEstimate})</MenuItem>}
-	                  {showAnimationExportOptions && <MenuItem disabled={!(exportEnabled || canExportStandaloneGif)} title={!(exportEnabled || canExportStandaloneGif) ? standaloneGifUnavailableTitle : undefined} onClick={() => handleAnimationExportSelect("gif", "high")}>GIF high ({gifHighEstimate})</MenuItem>}
-	                  {showAnimationExportOptions && <MenuItem disabled={!exportEnabled} title={!exportEnabled ? standaloneMp4UnavailableTitle : undefined} onClick={() => handleAnimationExportSelect("mp4", "low")}>MP4 low ({gifLowEstimate})</MenuItem>}
-	                  {showAnimationExportOptions && <MenuItem disabled={!exportEnabled} title={!exportEnabled ? standaloneMp4UnavailableTitle : undefined} onClick={() => handleAnimationExportSelect("mp4", "medium")}>MP4 medium ({gifMediumEstimate})</MenuItem>}
-	                  {showAnimationExportOptions && <MenuItem disabled={!exportEnabled} title={!exportEnabled ? standaloneMp4UnavailableTitle : undefined} onClick={() => handleAnimationExportSelect("mp4", "high")}>MP4 high ({gifHighEstimate})</MenuItem>}
-	                  {canDownloadCurrentHtml && standaloneHtmlMode === "quantized" && <MenuItem disabled title="This standalone export contains quantized uint8 data, not the original float32 stack. Open the live widget to export exact float32.">{unavailableStandaloneHtmlLabel}</MenuItem>}
-	                  {canDownloadCurrentHtml && <MenuItem onClick={handleStandaloneHtmlDownload}>{standaloneHtmlLabel}</MenuItem>}
-	                  {canDownloadCurrentHtml && standaloneHtmlMode !== "quantized" && <MenuItem disabled title="Quantized export requires the Python backend to repack the current float32 stack.">{unavailableStandaloneHtmlLabel}</MenuItem>}
+	                  {renderExportMenuContent()}
 	                </Menu>
 	              </>
 	            )}
@@ -16365,29 +16713,16 @@ function Show3D() {
                     MenuListProps={{ "aria-label": "Export options" }}
                     {...themedMenuProps}
                   >
-                    {exportEnabled && <MenuItem onClick={() => handleExportSelect("exact")}>HTML exact float32 ({exactExportSize})</MenuItem>}
-                    {exportEnabled && <MenuItem onClick={() => handleExportSelect("quantized")}>HTML quantized uint8 ({quantizedExportSize})</MenuItem>}
-                    {exportEnabled && height >= 2 && width >= 2 && <MenuItem onClick={() => handleExportSelect("quantized", "medium", 2)}>HTML quantized uint8, 2× binned ({quantizedExportSize2})</MenuItem>}
-                    {exportEnabled && height >= 4 && width >= 4 && <MenuItem onClick={() => handleExportSelect("quantized", "medium", 4)}>HTML quantized uint8, 4× binned ({quantizedExportSize4})</MenuItem>}
-                    {exportEnabled && height >= 8 && width >= 8 && <MenuItem onClick={() => handleExportSelect("quantized", "medium", 8)}>HTML quantized uint8, 8× binned ({quantizedExportSize8})</MenuItem>}
-                    {showAnimationExportOptions && <MenuItem disabled={!(exportEnabled || canExportStandaloneGif)} title={!(exportEnabled || canExportStandaloneGif) ? standaloneGifUnavailableTitle : undefined} onClick={() => handleAnimationExportSelect("gif", "low")}>GIF low ({gifLowEstimate})</MenuItem>}
-                    {showAnimationExportOptions && <MenuItem disabled={!(exportEnabled || canExportStandaloneGif)} title={!(exportEnabled || canExportStandaloneGif) ? standaloneGifUnavailableTitle : undefined} onClick={() => handleAnimationExportSelect("gif", "medium")}>GIF medium ({gifMediumEstimate})</MenuItem>}
-                    {showAnimationExportOptions && <MenuItem disabled={!(exportEnabled || canExportStandaloneGif)} title={!(exportEnabled || canExportStandaloneGif) ? standaloneGifUnavailableTitle : undefined} onClick={() => handleAnimationExportSelect("gif", "high")}>GIF high ({gifHighEstimate})</MenuItem>}
-                    {showAnimationExportOptions && <MenuItem disabled={!exportEnabled} title={!exportEnabled ? standaloneMp4UnavailableTitle : undefined} onClick={() => handleAnimationExportSelect("mp4", "low")}>MP4 low ({gifLowEstimate})</MenuItem>}
-                    {showAnimationExportOptions && <MenuItem disabled={!exportEnabled} title={!exportEnabled ? standaloneMp4UnavailableTitle : undefined} onClick={() => handleAnimationExportSelect("mp4", "medium")}>MP4 medium ({gifMediumEstimate})</MenuItem>}
-                    {showAnimationExportOptions && <MenuItem disabled={!exportEnabled} title={!exportEnabled ? standaloneMp4UnavailableTitle : undefined} onClick={() => handleAnimationExportSelect("mp4", "high")}>MP4 high ({gifHighEstimate})</MenuItem>}
-                    {canDownloadCurrentHtml && standaloneHtmlMode === "quantized" && <MenuItem disabled title="This standalone export contains quantized uint8 data, not the original float32 stack. Open the live widget to export exact float32.">{unavailableStandaloneHtmlLabel}</MenuItem>}
-                    {canDownloadCurrentHtml && <MenuItem onClick={handleStandaloneHtmlDownload}>{standaloneHtmlLabel}</MenuItem>}
-                    {canDownloadCurrentHtml && standaloneHtmlMode !== "quantized" && <MenuItem disabled title="Quantized export requires the Python backend to repack the current float32 stack.">{unavailableStandaloneHtmlLabel}</MenuItem>}
+                    {renderExportMenuContent()}
                   </Menu>
                 </>
               )}
-              {(exportEnabled || canDownloadCurrentHtml) && (localExportStatus || exportStatus) && (
+              {(exportEnabled || canDownloadCurrentHtml || canExportStandaloneGif) && (localExportStatus || exportStatus) && (
                 <Typography
                   sx={{
                     ...typography.label,
                     fontSize: 10,
-                    maxWidth: 120,
+                    maxWidth: 260,
                     overflow: "hidden",
                     textOverflow: "ellipsis",
                     whiteSpace: "nowrap",

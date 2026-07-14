@@ -127,6 +127,25 @@ def colorize(normalized_uint8: np.ndarray, cmap_name: str):
     return Image.fromarray(rgb, mode="RGB")
 
 
+def animation_output_scale(
+    width: int,
+    height: int,
+    quality: str,
+    *,
+    downsample: int = 1,
+    max_edge_px: int | None = None,
+) -> float:
+    """Return the explicit display scale for an exported animation frame."""
+    width = max(1, int(width))
+    height = max(1, int(height))
+    downsample = max(1, int(downsample))
+    scale = min(1.0, float(QUALITY_SCALE.get(quality, 1.0)) / float(downsample))
+    if max_edge_px is not None:
+        max_edge_px = max(1, int(max_edge_px))
+        scale = min(scale, max_edge_px / float(max(width, height)))
+    return max(scale, 1.0 / float(max(width, height)))
+
+
 def finalize_frame(
     img,
     quality: str,
@@ -135,13 +154,24 @@ def finalize_frame(
     *,
     show_zoom_indicator: bool = False,
     zoom: float = 1.0,
+    downsample: int = 1,
+    max_edge_px: int | None = None,
 ):
-    """Downscale by the quality factor, then draw the scale bar at output res."""
-    scale = QUALITY_SCALE.get(quality, 1.0)
+    """Downscale explicitly, then draw the scale bar at output resolution."""
+    scale = animation_output_scale(
+        img.size[0],
+        img.size[1],
+        quality,
+        downsample=downsample,
+        max_edge_px=max_edge_px,
+    )
     if scale < 1.0:
         from PIL import Image
         width, height = img.size
-        img = img.resize((max(1, int(width * scale)), max(1, int(height * scale))), Image.LANCZOS)
+        img = img.resize(
+            (max(1, int(round(width * scale))), max(1, int(round(height * scale)))),
+            Image.LANCZOS,
+        )
     # Each output pixel spans pixel_size / scale of sample after the downscale.
     return _draw_scalebar(
         img,

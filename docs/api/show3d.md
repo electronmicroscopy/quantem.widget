@@ -601,8 +601,8 @@ helper and open the local URL.
 ## Animation exports
 
 Use HTML when collaborators should keep scrubbing, zooming, and changing
-contrast. Use GIF or MP4 when the result needs to drop into PowerPoint, email, or
-a static report:
+contrast. Use GIF when the result needs to drop into PowerPoint, email, or a
+static report. MP4 is available when a video file is specifically required:
 
 ```python
 w.save_gif("movie.gif", quality="medium", fps=6)
@@ -618,28 +618,35 @@ slide/email choice; high is sharper but larger. Pass `show_frame_labels=True`
 when panel titles should include the same live-style frame label and count that
 the widget canvas shows. GIF/MP4 exports keep the panel labels, scale bar, and
 zoom readout styling consistent with the static/offline widget image output.
-The widget **Export** menu keeps the common path simple: choose `GIF low`,
-`GIF medium`, `GIF high`, or the matching MP4 option. The size shown in that
-menu is estimated uncompressed RGB render work, so the final GIF/MP4 file is
-usually smaller but can vary with image texture and palette compression.
+The widget **Export** menu keeps the common path explicit: choose **GIF**,
+**Interactive HTML**, or secondary **MP4 video**, then set frame range,
+maximum frame count, fps, spatial size, and quality before exporting. The size
+shown in that menu is estimated render size before compression, so the final
+GIF/MP4 file can vary with image texture and palette/video compression.
 
 ```python
-w.save_gif("movie.gif", quality="medium", fps=6, show_frame_labels=True)
+w.save_gif("movie_slides.gif", quality="medium", fps=8, slides_preset=True)
 ```
 
 The GIF/MP4 path exports the full panel frames. Browser-only zoom and pan
 gestures are view state, so use HTML export when collaborators need to continue
 zooming, panning, or changing contrast interactively.
 
-Advanced animation choices stay in Python and the maintainer smoke report
-rather than crowding the widget toolbar. Use the Python API for frame labels,
-background color, bounce playback, and other presentation-specific choices:
+Use the Python API for frame labels, background color, bounce playback, and other
+presentation-specific choices. `frame_start` and `frame_stop` follow normal
+zero-based Python slice bounds, while `max_frames` evenly samples the selected
+range:
 
 ```python
 w.save_gif(
     "movie.gif",
     quality="medium",
     fps=6,
+    frame_start=0,
+    frame_stop=48,
+    every_n=2,
+    max_frames=20,
+    max_edge_px=768,
     playback="bounce",
     show_frame_labels=True,
     background="black",
