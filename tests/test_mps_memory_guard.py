@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 
-mps = pytest.importorskip("quantem.widget.kernels.io.mps")
+mps = pytest.importorskip("quantem.gpu.io.backends.mps")
 
 
 def _plan(

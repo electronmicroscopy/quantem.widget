@@ -89,14 +89,14 @@ print(meta["scan_shape"], meta["detector_shape"])
 
 ## How do I load only a scan ROI without loading the full frame first?
 
-Use `load_scan_region()` for reconstruction or denoise workflows that need a
-scan patch plus halo instead of the full scan plane. It reads only the selected
-HDF5 detector-frame chunks and returns a local CuPy patch:
+Use `load(..., scan_region=...)` for reconstruction or denoise workflows that
+need a scan patch plus halo instead of the full scan plane. It reads only the
+selected HDF5 detector-frame chunks and returns a local CuPy patch:
 
 ```python
-from quantem.widget import load_scan_region
+from quantem.widget import load
 
-result = load_scan_region(
+result = load(
     "/data/session/scan_00_master.h5",
     scan_region=(160, 293, 234, 367),
 )

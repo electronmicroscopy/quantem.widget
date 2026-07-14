@@ -122,3 +122,13 @@ If the interaction is not real time, either fix it or mark the release blocked.
 For Show2D and Show3D, "real time" means the report names the real dataset,
 HPC/workstation backend, browser frontend, first-paint time, interaction
 FPS/latency method, save/reopen result, and export reopen result.
+
+Before any TestPyPI or PyPI upload, the signoff report must also record a
+package privacy check. Build fresh wheel and sdist artifacts in a temporary
+directory, inspect their file lists, and confirm they contain no private
+microscope data, generated reports, screenshots, built docs, caches, or stale
+local `dist/` files. Release artifacts may include Python source, package
+metadata, licenses, tests when intentionally included in the sdist, and built
+widget JavaScript/static assets; they must not include files such as `.h5`,
+`.hdf5`, `.emd`, `.npy`, `.npz`, `.zarr`, `.tif`, `.dm3`, `.dm4`, `.raw`,
+generated tutorial HTML, or private JSON/CSV reports.

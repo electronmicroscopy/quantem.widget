@@ -93,11 +93,12 @@ def free_gpu() -> None:
         cp.fft.config.get_plan_cache().clear()
     except (AttributeError, RuntimeError):
         pass
-    # Clear IO decompressor GPU buffers
+    # Clear quantem.gpu IO decompressor buffers when the CUDA loader was used.
     try:
-        from quantem.live.io import _clear_memory
-        _clear_memory()
-    except (AttributeError, RuntimeError):
+        import quantem.gpu.io.hdf5 as gpu_hdf5
+
+        gpu_hdf5._default_decompressor = None
+    except (AttributeError, ImportError, RuntimeError):
         pass
     gc.collect()
     cp.get_default_memory_pool().free_all_blocks()

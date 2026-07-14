@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from quantem.widget.kernels.compute.mps import MultiChunkedFrames
+from quantem.gpu.compute.mps import MultiChunkedFrames
 from quantem.widget.multidataset_mps import LazyMacbookDatasets
 
 
@@ -194,7 +194,7 @@ def test_lazy_macbook_datasets_poll_master_folder_filters_ready(monkeypatch, tmp
 
     lazy.append_master = _append_master  # type: ignore[method-assign]
 
-    import quantem.widget.io as widget_io
+    import quantem.gpu.io.hdf5 as widget_io
 
     monkeypatch.setattr(widget_io, "discover_masters", lambda *args, **kwargs: [
         str(first),
@@ -461,7 +461,7 @@ def test_lazy_macbook_watch_worker_failure_is_not_green(monkeypatch, tmp_path) -
     )
     lazy.set_status_callback(lambda state, detail: statuses.append((state, detail)))
 
-    import quantem.widget.io as widget_io
+    import quantem.gpu.io.hdf5 as widget_io
 
     def fail_discovery(*args, **kwargs):
         raise SystemExit("simulated worker termination")
@@ -512,7 +512,7 @@ def test_lazy_macbook_watch_requires_two_identical_ready_signatures(
     )
     lazy.set_status_callback(lambda state, detail: statuses.append((state, detail)))
 
-    import quantem.widget.io as widget_io
+    import quantem.gpu.io.hdf5 as widget_io
 
     discovered = [str(first), str(arrival)]
     monkeypatch.setattr(
@@ -606,7 +606,7 @@ def test_lazy_macbook_watch_classifies_readiness_waiting_and_error(
     )
     lazy.set_status_callback(lambda state, detail: statuses.append((state, detail)))
 
-    import quantem.widget.io as widget_io
+    import quantem.gpu.io.hdf5 as widget_io
 
     monkeypatch.setattr(
         widget_io,
@@ -668,7 +668,7 @@ def test_lazy_macbook_watch_distinguishes_empty_discovery_from_bad_request(
     )
     lazy.set_status_callback(lambda state, detail: statuses.append((state, detail)))
 
-    import quantem.widget.io as widget_io
+    import quantem.gpu.io.hdf5 as widget_io
 
     def discover(*args, **kwargs):
         if mode["value"] == "empty":
@@ -731,7 +731,7 @@ def test_lazy_macbook_poll_reports_contract_error_without_blocking_valid_master(
     )
     lazy.set_status_callback(lambda state, detail: statuses.append((state, detail)))
 
-    import quantem.widget.io as widget_io
+    import quantem.gpu.io.hdf5 as widget_io
 
     monkeypatch.setattr(
         widget_io,
@@ -784,7 +784,7 @@ def test_lazy_macbook_poll_decode_failure_does_not_block_later_master(
         decode=decode,
         verbose=False,
     )
-    import quantem.widget.io as widget_io
+    import quantem.gpu.io.hdf5 as widget_io
 
     monkeypatch.setattr(
         widget_io,
@@ -918,7 +918,7 @@ def test_show4dstem_from_folder_mps_honors_public_folder_options(
     monkeypatch,
     tmp_path,
 ) -> None:
-    import quantem.widget.io as widget_io
+    import quantem.gpu.io.hdf5 as widget_io
     import quantem.widget.multidataset_mps as multidataset_mps
     import quantem.widget.show4dstem_factory as factory
 

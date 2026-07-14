@@ -28,7 +28,7 @@ from . import movie
 from quantem.widget.paths import first_existing
 from quantem.widget.backend import detect_backend, resolve_backend
 from quantem.widget.gpu import gpu_info
-from quantem.widget.detector import detect_bf_radius, dp_mean, virtual_image
+from quantem.gpu.detector import detect_bf_radius, dp_mean, virtual_image
 from quantem.widget.folder_picker import FolderPicker, pick_folder
 from quantem.widget.multidataset_mps import load_4dstem_macbook
 from quantem.widget.export import (
@@ -37,9 +37,9 @@ from quantem.widget.export import (
     SupportsHtmlExport,
     supports_html_export,
 )
-from quantem.widget.dpc import idpc, com
+from quantem.gpu.dpc import idpc, com
 from quantem.widget.info import device_info
-from quantem.widget.detector import bf, adf, df
+from quantem.gpu.detector import bf, adf, df
 from quantem.widget._timing import (
     WidgetProfile,
     format_timing_table,

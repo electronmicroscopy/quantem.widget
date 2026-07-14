@@ -8632,6 +8632,20 @@ function Show3D() {
     return () => window.clearInterval(timer);
   }, [blinkFps, compareMode]);
 
+  React.useEffect(() => {
+    if (!sidecarMode) return;
+    if (compareMode === "blink") {
+      invalidateSidecarViewportCache("compare-blink");
+    } else if (compareMode !== "off") {
+      invalidateSidecarViewportCache("compare-mode");
+    }
+  }, [blinkPhase, compareMode, comparePair, sidecarMode, invalidateSidecarViewportCache]);
+
+  React.useEffect(() => {
+    if (!sidecarMode) return;
+    invalidateSidecarViewportCache("visibility-sidecar");
+  }, [sidecarMode, visiblePanelIndices, invalidateSidecarViewportCache]);
+
   // Data effect: normalize + colormap → reusable offscreen canvas, then draw
   React.useEffect(() => {
     // Invalidate any rAF/mapAsync work from the previous render before every

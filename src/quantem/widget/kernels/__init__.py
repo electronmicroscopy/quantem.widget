@@ -1,72 +1,43 @@
-"""GPU kernels for quantem.live — auto-detected CUDA or MPS backend.
+"""Compatibility wrappers for backend detection and kernel dispatch.
 
-quantem.live runs on exactly two hardware targets:
-- Linux + NVIDIA GPU (CUDA) — cupy kernels, the compute/reconstruction box.
-- Apple Silicon MacBook (MPS) — raw Metal kernels, the viewing/screening laptop.
-
-There is no CPU runtime backend (numpy/h5py stays a test oracle only). If neither
-is present, ``detect()`` raises a clear error.
-
-Two concerns, split by change-rate (see
-``docs/dev-notes/2026-06-01-kernels-backend-architecture.md``):
-- ``kernels.io`` — decode + bin + mask + scan-shape (frozen-ish).
-- ``kernels.compute`` — masked-sum / prefix / bin / reduce (churns: BF/DF/DPC).
-
-Flexible module dispatch, NO Protocol yet: ``detect()`` / ``io_backend()`` /
-``compute_backend()`` return the matching submodule and the caller calls
-``backend.decode(...)`` / ``backend.virtual_image(...)`` directly. Same function
-names across ``cuda.py`` and ``mps.py`` by convention; a missing function raises
-``AttributeError`` at the call site. A typing.Protocol contract is the eventual
-target once the MPS op surface stops churning — not now.
+Kernel implementations now live in :mod:`quantem.gpu`. The old
+``quantem.widget.kernels`` namespace remains as a migration shim for existing
+imports.
 """
 from __future__ import annotations
 
 import importlib
-import importlib.util
-from functools import lru_cache
+
+from quantem.gpu.io.backends import _has_cuda, _has_mps
 
 
-@lru_cache(maxsize=1)
 def detect() -> str:
-    """Return the active backend name: ``"cuda"`` or ``"mps"``.
-
-    Order: cupy importable AND a CUDA device present -> ``cuda``; else Metal
-    importable (Apple Silicon) -> ``mps``; else raise. Cached — the hardware does
-    not change within a process.
-    """
+    """Return the available accelerated backend, preserving the old GPU-only API."""
     if _has_cuda():
         return "cuda"
     if _has_mps():
         return "mps"
     raise RuntimeError(
-        "quantem.live needs an NVIDIA GPU (CUDA) or Apple Silicon (MPS); "
-        "no supported backend found."
+        "quantem.widget.kernels needs an NVIDIA GPU (CUDA) or Apple Silicon "
+        "(MPS); no supported accelerated backend found."
     )
 
 
 def io_backend(name: str | None = None):
-    """The io submodule for the active (or named) backend — has ``decode(...)``."""
-    return importlib.import_module(f"{__name__}.io.{name or detect()}")
+    """Return the backend IO module from :mod:`quantem.gpu`."""
+    backend = name or detect()
+    if backend == "cuda":
+        return importlib.import_module("quantem.gpu.io.hdf5")
+    return importlib.import_module(f"quantem.gpu.io.backends.{backend}")
 
 
 def compute_backend(name: str | None = None):
-    """The compute submodule for the active (or named) backend — has the
-    virtual-image / reduction ops."""
-    return importlib.import_module(f"{__name__}.compute.{name or detect()}")
+    """Return the backend compute module from :mod:`quantem.gpu`."""
+    return importlib.import_module(f"quantem.gpu.compute.{name or detect()}")
 
 
-def _has_cuda() -> bool:
-    """True when cupy imports AND a CUDA device is actually present (the cupy
-    wheel can be installed on a box with no GPU)."""
-    if importlib.util.find_spec("cupy") is None:
-        return False
-    try:
-        import cupy as cp
-        return cp.cuda.runtime.getDeviceCount() > 0
-    except Exception:
-        return False
-
-
-def _has_mps() -> bool:
-    """True on Apple Silicon where the Metal toolkit is importable."""
-    return importlib.util.find_spec("Metal") is not None
+__all__ = [
+    "compute_backend",
+    "detect",
+    "io_backend",
+]

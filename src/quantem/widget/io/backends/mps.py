@@ -1,9 +1,11 @@
-"""Back-compat shim. The MPS io backend moved to ``quantem.widget.kernels.io.mps``
-(see docs/dev-notes/2026-06-01-kernels-backend-architecture.md). Re-export so
-existing import paths keep working during the kernels/ migration.
+"""Back-compat shim for the MPS IO backend.
+
+The active Apple-GPU decompression implementation now lives in
+``quantem.gpu.io.backends.mps``. Re-export it here so existing widget import
+paths keep working during the migration.
 """
-from quantem.widget.kernels.io.mps import *  # noqa: F401,F403
-from quantem.widget.kernels.io.mps import (  # noqa: F401  explicit non-public names
+from quantem.gpu.io.backends.mps import *  # noqa: F401,F403
+from quantem.gpu.io.backends.mps import (  # noqa: F401  explicit non-public names
     MPSChunked4DSTEM,
     MPSDecompressor,
     _MtlArray,

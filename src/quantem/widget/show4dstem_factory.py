@@ -147,11 +147,31 @@ def _master_label(master) -> str:
     return name[: -len("_master.h5")] if name.endswith("_master.h5") else name
 
 
+def _io_callable(name: str):
+    """Return a patch-friendly widget IO helper backed by quantem.gpu."""
+    from quantem.gpu.io import hdf5 as gpu_hdf5
+    from quantem.widget import io as widget_io
+
+    widget_value = getattr(widget_io, name)
+    gpu_value = getattr(gpu_hdf5, name, widget_value)
+    widget_module = str(getattr(widget_value, "__module__", ""))
+    gpu_module = str(getattr(gpu_value, "__module__", ""))
+    widget_is_migrated = widget_module.startswith(
+        ("quantem.gpu.", "quantem.widget.io.")
+    )
+    gpu_is_patched = bool(gpu_module) and not gpu_module.startswith("quantem.gpu.")
+    if widget_is_migrated and gpu_is_patched:
+        return gpu_value
+    return widget_value
+
+
 def _master_file_contract(master: Any) -> dict[str, Any]:
     """Read the raw shape and dtype needed to validate a watched master."""
     import h5py
     import numpy as np
-    from quantem.widget.io import get_metadata, inspect_master_readiness
+
+    get_metadata = _io_callable("get_metadata")
+    inspect_master_readiness = _io_callable("inspect_master_readiness")
 
     metadata = get_metadata(str(master))
     scan_shape = metadata.get("scan_shape")
@@ -196,7 +216,7 @@ def _largest_compatible_master_group(
     if len(masters) <= 1:
         return masters
     try:
-        from quantem.widget.io import get_metadata
+        get_metadata = _io_callable("get_metadata")
     except Exception:
         return masters
     groups: dict[tuple[Any, Any, Any], list[Any]] = {}
@@ -544,8 +564,10 @@ def from_folder(
     """
     import torch
     from quantem.widget.data import Dataset5dstem
-    from quantem.widget.io import discover_masters, is_master_ready
     from quantem.widget import load
+
+    discover_masters = _io_callable("discover_masters")
+    is_master_ready = _io_callable("is_master_ready")
 
     legacy_columns = viewer_kwargs.pop("compare_cols", None)
     legacy_page_size = viewer_kwargs.pop("compare_max_panels", None)

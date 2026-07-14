@@ -525,7 +525,7 @@ def test_show4dstem_frame_virtual_image_uses_sparse_detector_mask(monkeypatch) -
 def test_torch_backend_sparse_masked_sum_matches_dense_reference() -> None:
     import torch
 
-    from quantem.widget.kernels.compute.backends import compute_backend
+    from quantem.gpu.compute.backends import compute_backend
 
     data = torch.arange(4 * 4 * 16 * 16, dtype=torch.int32).to(torch.uint16)
     data = data.reshape(4, 4, 16, 16)
