@@ -507,3 +507,106 @@ def test_show2d_rich_panel_titles_keep_plain_labels_and_state():
     restored.load_state_dict(widget.state_dict())
     assert restored.labels == widget.labels
     assert restored.panel_title_spans == widget.panel_title_spans
+
+
+def test_show2d_panel_title_style_and_group_markers_round_trip():
+    """C1: panel title chrome and row/column markers survive saved state."""
+    data = np.random.default_rng(22).random((4, 12, 12), dtype=np.float32)
+    widget = Show2D(
+        data,
+        labels=["A", "B", "C", "D"],
+        ncols=2,
+        panel_title_style={
+            "bg": "rgba(0,0,0,0.72)",
+            "fg": "#ffffff",
+            "border_color": "#60a5fa",
+            "border_width": 1,
+            "pad_x": 6,
+            "pad_y": 2,
+            "radius": 2,
+            "max_width": "hug",
+        },
+        row_markers={0: "#60a5fa"},
+        col_markers={1: "#f59e0b"},
+        verbose=False,
+    )
+
+    restored = Show2D(data, verbose=False)
+    restored.load_state_dict(widget.state_dict())
+
+    assert restored.panel_title_style == widget.panel_title_style
+    assert restored.row_markers == {"0": "#60a5fa"}
+    assert restored.col_markers == {"1": "#f59e0b"}
+
+
+def test_show2d_panel_annotations_accept_multiple_labels_per_panel():
+    """C1: arbitrary panel annotations round-trip as JSON-safe state."""
+    data = np.random.default_rng(24).random((3, 12, 12), dtype=np.float32)
+    widget = Show2D(
+        data,
+        labels=["raw", "filtered", "residual"],
+        panel_annotations={
+            "raw": [
+                {"text": "low dose", "position": "top-left", "variant": "pill"},
+                {
+                    "spans": [{"text": "ROI ", "color": "#fff"}, {"text": "A", "color": "#60a5fa"}],
+                    "box": [0.20, 0.25, 0.32, 0.18],
+                    "class_name": "roi-a-label",
+                    "bg": "rgba(0,0,0,0.55)",
+                    "font_size": 12,
+                },
+            ],
+            2: {"text": "residual", "x": 0.5, "y": 0.85, "anchor": "bottom-center"},
+        },
+        verbose=False,
+    )
+
+    restored = Show2D(data, labels=["raw", "filtered", "residual"], verbose=False)
+    restored.load_state_dict(widget.state_dict())
+
+    assert len(restored.panel_annotations[0]) == 2
+    assert restored.panel_annotations[0][0]["variant"] == "pill"
+    assert restored.panel_annotations[0][1]["class_name"] == "roi-a-label"
+    assert restored.panel_annotations[0][1]["box"] == [0.2, 0.25, 0.32, 0.18]
+    assert restored.panel_annotations[2][0]["anchor"] == "bottom-center"
+
+    single = Show2D(
+        data[0],
+        panel_annotations=[
+            {"text": "first", "position": "top-left"},
+            {"text": "second", "position": "bottom-right"},
+        ],
+        verbose=False,
+    )
+    assert [item["text"] for item in single.panel_annotations[0]] == ["first", "second"]
+
+
+def test_show2d_labels_and_annotations_accept_math_spans():
+    """C1: TeX-style symbols are preserved for frontend math rendering."""
+    data = np.random.default_rng(26).random((2, 12, 12), dtype=np.float32)
+    widget = Show2D(
+        data,
+        labels=[
+            [{"math": r"\lambda=0.03"}, {"text": " raw"}],
+            r"$\chi^2$/px residual",
+        ],
+        panel_annotations={
+            0: {"math": r"\lambda", "position": "top-left"},
+            1: {
+                "spans": [
+                    {"math": r"\chi^2"},
+                    {"text": "/px"},
+                ],
+                "position": "top-right",
+            },
+        },
+        verbose=False,
+    )
+
+    restored = Show2D(data, verbose=False)
+    restored.load_state_dict(widget.state_dict())
+
+    assert restored.panel_title_spans[0][0] == {"math": r"\lambda=0.03"}
+    assert restored.labels[1] == r"$\chi^2$/px residual"
+    assert restored.panel_annotations[0][0]["math"] == r"\lambda"
+    assert restored.panel_annotations[1][0]["spans"][0] == {"math": r"\chi^2"}

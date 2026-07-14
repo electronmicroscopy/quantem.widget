@@ -118,26 +118,309 @@ function InfoTooltip({ text, theme = "dark" }: { text: React.ReactNode; theme?: 
   );
 }
 
-type RichTitleSpan = { text?: unknown; color?: unknown };
+
+type RichTitleSpan = { text?: unknown; math?: unknown; color?: unknown };
+type PanelTitleStyle = Record<string, unknown>;
+type MarkerMap = Record<string, string>;
+type PanelAnnotationSpec = {
+  text?: string;
+  math?: string;
+  spans?: RichTitleSpan[];
+  position?: string;
+  anchor?: string;
+  x?: number;
+  y?: number;
+  box?: [number, number, number, number];
+  variant?: string;
+  class_name?: string;
+  bg?: string;
+  fg?: string;
+  color?: string;
+  border_color?: string;
+  border_width?: number;
+  font_size?: number;
+  font_weight?: string | number;
+  pad_x?: number;
+  pad_y?: number;
+  radius?: number;
+  opacity?: number;
+  align?: string;
+  max_width?: string;
+  offset?: [number, number];
+};
+
+function styleNumber(value: unknown, fallback: number): number {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function styleString(value: unknown, fallback = ""): string {
+  return typeof value === "string" && value.trim() ? value : fallback;
+}
+
+const LATEX_SYMBOLS: Record<string, string> = {
+  alpha: "α", beta: "β", gamma: "γ", delta: "δ", epsilon: "ε", varepsilon: "ε",
+  zeta: "ζ", eta: "η", theta: "θ", vartheta: "ϑ", iota: "ι", kappa: "κ",
+  lambda: "λ", mu: "μ", nu: "ν", xi: "ξ", pi: "π", rho: "ρ", varrho: "ϱ",
+  sigma: "σ", tau: "τ", upsilon: "υ", phi: "φ", varphi: "ϕ", chi: "χ",
+  psi: "ψ", omega: "ω", Gamma: "Γ", Delta: "Δ", Theta: "Θ", Lambda: "Λ",
+  Xi: "Ξ", Pi: "Π", Sigma: "Σ", Phi: "Φ", Psi: "Ψ", Omega: "Ω",
+  pm: "±", times: "×", cdot: "·", degree: "°", angstrom: "Å", le: "≤",
+  ge: "≥", neq: "≠", approx: "≈", infty: "∞",
+};
+
+function readLatexGroup(expr: string, start: number): { text: string; next: number } {
+  if (expr[start] !== "{") return { text: expr[start] || "", next: start + 1 };
+  let depth = 0;
+  for (let i = start; i < expr.length; i += 1) {
+    if (expr[i] === "{") depth += 1;
+    if (expr[i] === "}") depth -= 1;
+    if (depth === 0) return { text: expr.slice(start + 1, i), next: i + 1 };
+  }
+  return { text: expr.slice(start + 1), next: expr.length };
+}
+
+function readLatexAtom(expr: string, start: number): { text: string; next: number } {
+  if (expr[start] === "{") return readLatexGroup(expr, start);
+  if (expr[start] === "\\") {
+    const match = expr.slice(start + 1).match(/^[A-Za-z]+/);
+    if (match) return { text: `\\${match[0]}`, next: start + 1 + match[0].length };
+  }
+  return { text: expr[start] || "", next: start + 1 };
+}
+
+function renderLatexMath(expr: string, keyPrefix: string): React.ReactNode[] {
+  const nodes: React.ReactNode[] = [];
+  let i = 0;
+  let key = 0;
+  while (i < expr.length) {
+    const ch = expr[i];
+    if ((ch === "^" || ch === "_") && i + 1 < expr.length) {
+      const atom = readLatexAtom(expr, i + 1);
+      const Tag = ch === "^" ? "sup" : "sub";
+      nodes.push(
+        <Tag key={`${keyPrefix}-script-${key++}`} style={{ fontSize: "0.72em", lineHeight: 0 }}>
+          {renderLatexMath(atom.text, `${keyPrefix}-script-${key}`)}
+        </Tag>
+      );
+      i = atom.next;
+      continue;
+    }
+    if (ch === "\\") {
+      const match = expr.slice(i + 1).match(/^[A-Za-z]+/);
+      if (match) {
+        const command = match[0];
+        i += command.length + 1;
+        if ((command === "mathrm" || command === "text") && expr[i] === "{") {
+          const group = readLatexGroup(expr, i);
+          nodes.push(<span key={`${keyPrefix}-roman-${key++}`} style={{ fontStyle: "normal" }}>{group.text}</span>);
+          i = group.next;
+          continue;
+        }
+        nodes.push(LATEX_SYMBOLS[command] || command);
+        continue;
+      }
+    }
+    if (ch === "{" || ch === "}") {
+      i += 1;
+      continue;
+    }
+    nodes.push(ch);
+    i += 1;
+  }
+  return nodes;
+}
+
+function renderMathExpression(expr: string, keyPrefix: string): React.ReactNode {
+  const normalized = expr.trim().replace(/\\+(?=[A-Za-z])/g, "\\");
+  return (
+    <span key={keyPrefix} data-quantem-math="true" style={{ fontFamily: "Cambria Math, STIX Two Math, Times New Roman, serif", fontStyle: "italic" }}>
+      {renderLatexMath(normalized, keyPrefix)}
+    </span>
+  );
+}
+
+function findUnescapedDollar(text: string, from = 0): number {
+  for (let i = from; i < text.length; i += 1) {
+    if (text[i] === "$" && text[i - 1] !== "\\") return i;
+  }
+  return -1;
+}
+
+function renderTextWithInlineMath(text: string, keyPrefix: string): React.ReactNode[] {
+  const nodes: React.ReactNode[] = [];
+  let rest = text;
+  let key = 0;
+  while (rest.length) {
+    const dollar = findUnescapedDollar(rest);
+    const paren = rest.indexOf("\\(");
+    const starts = [dollar, paren].filter((idx) => idx >= 0);
+    if (!starts.length) {
+      nodes.push(rest.replace(/\\\$/g, "$"));
+      break;
+    }
+    const start = Math.min(...starts);
+    if (start > 0) nodes.push(rest.slice(0, start).replace(/\\\$/g, "$"));
+    const dollarMode = rest[start] === "$";
+    const close = dollarMode ? findUnescapedDollar(rest, start + 1) - (start + 1) : rest.indexOf("\\)", start + 2) - (start + 2);
+    if (close < 0) {
+      nodes.push(rest.slice(start).replace(/\\\$/g, "$"));
+      break;
+    }
+    const math = rest.slice(start + (dollarMode ? 1 : 2), start + (dollarMode ? 1 : 2) + close);
+    nodes.push(renderMathExpression(math, `${keyPrefix}-math-${key++}`));
+    rest = rest.slice(start + (dollarMode ? 2 : 4) + close);
+  }
+  return nodes;
+}
+
+function panelTitleChromeSx(
+  style: PanelTitleStyle | undefined,
+  defaults: Record<string, unknown> = {},
+): Record<string, unknown> {
+  const s = style || {};
+  const borderWidth = Math.max(0, styleNumber(s.border_width, 0));
+  const bg = styleString(s.bg);
+  const align = styleString(s.align, String(defaults.textAlign || "center"));
+  const maxWidth = s.max_width;
+  const mode = typeof maxWidth === "string" ? maxWidth : "";
+  const sx: Record<string, unknown> = {
+    ...defaults,
+    color: styleString(s.fg, String(defaults.color || "rgba(255,255,255,0.95)")),
+    bgcolor: bg || defaults.bgcolor,
+    border: borderWidth > 0 ? `${borderWidth}px solid ${styleString(s.border_color, "rgba(255,255,255,0.35)")}` : defaults.border,
+    borderRadius: s.radius != null ? `${Math.max(0, styleNumber(s.radius, 0))}px` : defaults.borderRadius,
+    px: s.pad_x != null ? `${Math.max(0, styleNumber(s.pad_x, 0))}px` : defaults.px,
+    py: s.pad_y != null ? `${Math.max(0, styleNumber(s.pad_y, 0))}px` : defaults.py,
+    fontWeight: s.font_weight != null ? s.font_weight : defaults.fontWeight,
+    opacity: s.opacity != null ? Math.max(0, Math.min(1, styleNumber(s.opacity, 1))) : defaults.opacity,
+    textAlign: align,
+    maxWidth: mode && mode !== "panel" && mode !== "hug" ? mode : defaults.maxWidth,
+    width: mode === "panel" ? (defaults.width || "calc(100% - 56px)") : defaults.width,
+    boxSizing: "border-box",
+  };
+  if (mode === "hug") {
+    sx.left = defaults.left != null && defaults.width != null
+      ? `calc(${String(defaults.left)} + (${String(defaults.width)}) / 2)`
+      : "50%";
+    sx.right = "auto";
+    sx.width = "fit-content";
+    sx.maxWidth = "calc(100% - 16px)";
+    sx.transform = defaults.transform
+      ? `${String(defaults.transform)} translateX(-50%)`
+      : "translateX(-50%)";
+  }
+  return sx;
+}
 
 function richTitlePlainText(spans: RichTitleSpan[] | undefined, fallback: string): string {
   if (!Array.isArray(spans) || spans.length === 0) return fallback;
-  const text = spans.map((span) => String(span?.text ?? "")).join("");
+  const text = spans.map((span) => String(span?.text ?? span?.math ?? "")).join("");
+
   return text || fallback;
 }
 
 function renderRichTitle(spans: RichTitleSpan[] | undefined, fallback: string): React.ReactNode {
-  if (!Array.isArray(spans) || spans.length === 0) return fallback;
+
+  if (!Array.isArray(spans) || spans.length === 0) return renderTextWithInlineMath(fallback, "title-fallback");
   return spans.map((span, idx) => {
     const text = String(span?.text ?? "");
+    const math = span?.math == null ? "" : String(span.math);
     const color = typeof span?.color === "string" && span.color.trim() ? span.color : undefined;
     return (
       <span key={`title-span-${idx}`} style={color ? { color } : undefined}>
-        {text}
+        {math ? renderMathExpression(math, `title-span-${idx}`) : renderTextWithInlineMath(text, `title-span-${idx}`)}
+
       </span>
     );
   });
 }
+
+
+function annotationAnchorTransform(anchor: string | undefined): string {
+  const value = anchor || "top-left";
+  const x = value.endsWith("center") || value === "center" ? "-50%" : value.endsWith("right") ? "-100%" : "0";
+  const y = value.startsWith("center") || value === "center" ? "-50%" : value.startsWith("bottom") ? "-100%" : "0";
+  return `translate(${x}, ${y})`;
+}
+
+function annotationPositionSx(spec: PanelAnnotationSpec): Record<string, unknown> {
+  const margin = 8;
+  const position = spec.position || "top-left";
+  const offset = Array.isArray(spec.offset) ? spec.offset : [0, 0];
+  if (Array.isArray(spec.box) && spec.box.length === 4) {
+    const [left, top, width, height] = spec.box;
+    return {
+      left: `calc(${left * 100}% + ${offset[0] || 0}px)`,
+      top: `calc(${top * 100}% + ${offset[1] || 0}px)`,
+      width: `${width * 100}%`,
+      minHeight: `${height * 100}%`,
+    };
+  }
+  if (Number.isFinite(spec.x) && Number.isFinite(spec.y)) {
+    return {
+      left: `calc(${Number(spec.x) * 100}% + ${offset[0] || 0}px)`,
+      top: `calc(${Number(spec.y) * 100}% + ${offset[1] || 0}px)`,
+      transform: annotationAnchorTransform(spec.anchor || "center"),
+    };
+  }
+  const sx: Record<string, unknown> = {};
+  if (position.includes("top")) sx.top = margin + (offset[1] || 0);
+  if (position.includes("bottom")) sx.bottom = margin - (offset[1] || 0);
+  if (position.includes("left")) sx.left = margin + (offset[0] || 0);
+  if (position.includes("right")) sx.right = margin - (offset[0] || 0);
+  if (position === "top-center" || position === "center" || position === "bottom-center") {
+    sx.left = `calc(50% + ${offset[0] || 0}px)`;
+  }
+  if (position === "center-left" || position === "center" || position === "center-right") {
+    sx.top = `calc(50% + ${offset[1] || 0}px)`;
+  }
+  sx.transform = annotationAnchorTransform(spec.anchor || position);
+  return sx;
+}
+
+function panelAnnotationSx(spec: PanelAnnotationSpec): Record<string, unknown> {
+  const variant = spec.variant || "badge";
+  const plain = variant === "plain";
+  const outline = variant === "outline";
+  const callout = variant === "callout";
+  const pill = variant === "pill";
+  const fg = styleString(spec.fg ?? spec.color, plain ? "rgba(255,255,255,0.92)" : "#fff");
+  const bg = styleString(spec.bg, plain ? "transparent" : "rgba(0,0,0,0.72)");
+  const borderWidth = Math.max(0, styleNumber(spec.border_width, outline || callout ? 1 : 0));
+  return {
+    position: "absolute",
+    ...annotationPositionSx(spec),
+    display: "block",
+    boxSizing: "border-box",
+    pointerEvents: "none",
+    zIndex: 7,
+    px: spec.pad_x != null ? `${Math.max(0, styleNumber(spec.pad_x, 0))}px` : (plain ? 0 : "6px"),
+    py: spec.pad_y != null ? `${Math.max(0, styleNumber(spec.pad_y, 0))}px` : (plain ? 0 : "2px"),
+    borderRadius: spec.radius != null ? `${Math.max(0, styleNumber(spec.radius, 0))}px` : (pill ? "999px" : "3px"),
+    background: bg,
+    color: fg,
+    border: borderWidth > 0 ? `${borderWidth}px solid ${styleString(spec.border_color, "rgba(255,255,255,0.5)")}` : "none",
+    opacity: spec.opacity != null ? Math.max(0, Math.min(1, styleNumber(spec.opacity, 1))) : 1,
+    fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+    fontSize: `${Math.max(6, styleNumber(spec.font_size, 10))}px`,
+    fontWeight: spec.font_weight != null ? spec.font_weight : 700,
+    lineHeight: 1.2,
+    textAlign: styleString(spec.align, "center"),
+    whiteSpace: Array.isArray(spec.box) ? "normal" : "nowrap",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    maxWidth: styleString(spec.max_width, Array.isArray(spec.box) ? "100%" : "calc(100% - 16px)"),
+    textShadow: plain ? "0 1px 2px rgba(0,0,0,0.85)" : "none",
+    boxShadow: callout ? "0 1px 4px rgba(0,0,0,0.45)" : "none",
+  };
+}
+
+function renderPanelAnnotation(spec: PanelAnnotationSpec, fallback = ""): React.ReactNode {
+  if (spec.math) return renderMathExpression(spec.math, "panel-annotation-math");
+  return renderRichTitle(spec.spans, spec.text || fallback);
+}
+
 
 function KeyboardShortcuts({ items }: { items: [string, string][] }) {
   return (
@@ -1508,6 +1791,7 @@ function Show2D() {
   const activePagePanelIndices = isItemPaged ? activeItemPageIndices : activePageIndices;
   const [showPanelTitles] = useModelState<boolean>("show_panel_titles");
   const [panelTitleFontSize] = useModelState<number>("panel_title_font_size");
+  const [panelTitleStyle] = useModelState<PanelTitleStyle>("panel_title_style");
   const [galleryGapPxState] = useModelState<number>("gallery_gap_px");
   const [title] = useModelState<string>("title");
   const [showTitle] = useModelState<boolean>("show_title");
@@ -1692,9 +1976,13 @@ function Show2D() {
   const [selectedIdx, setSelectedIdx] = useModelState<number>("selected_idx");
   const [markerColors] = useModelState<string[]>("marker_colors");
   const [markerStyle] = useModelState<string>("marker_style");
+  const [rowMarkers] = useModelState<MarkerMap>("row_markers");
+  const [colMarkers] = useModelState<MarkerMap>("col_markers");
   const [selectedPanels, setSelectedPanels] = useModelState<number[]>("selected_panels");
   const [insetPlots, setInsetPlots] = useModelState<InsetPlotSpec[]>("inset_plots");
   const [showInsetPlots, setShowInsetPlots] = useModelState<boolean>("show_inset_plots");
+  const [panelAnnotations] = useModelState<PanelAnnotationSpec[][]>("panel_annotations");
+
   const [contrastPreset, setContrastPreset] = useModelState<string>("contrast_preset");
   const [imageFlipsHorizontal, setImageFlipsHorizontal] = useModelState<boolean[]>("image_flips_horizontal");
   const [imageFlipsVertical, setImageFlipsVertical] = useModelState<boolean[]>("image_flips_vertical");
@@ -3079,6 +3367,37 @@ function Show2D() {
   }, [nImages, width, height, isRgbFlags]);
   const galleryGridWidth = galleryGridMaxWidth;
   const profileCanvasWidth = galleryGridWidth;
+  const groupMarkerOverlays = React.useMemo(() => {
+    if (!isGallery || visibleImageIndices.length === 0 || canvasW <= 0 || canvasH <= 0) return [];
+    const cols = Math.max(1, effectiveNcols);
+    const gap = Math.max(0, galleryGapPx);
+    const build = (markers: MarkerMap | undefined, axis: "row" | "col") => Object.entries(markers || {})
+      .map(([rawKey, color]) => {
+        const target = Number(rawKey);
+        if (!Number.isFinite(target) || target < 0 || !color) return null;
+        const slots = visibleImageIndices
+          .map((_, slot) => slot)
+          .filter((slot) => (axis === "row" ? Math.floor(slot / cols) : slot % cols) === target);
+        if (slots.length === 0) return null;
+        const rowVals = slots.map((slot) => Math.floor(slot / cols));
+        const colVals = slots.map((slot) => slot % cols);
+        const row0 = Math.min(...rowVals);
+        const row1 = Math.max(...rowVals);
+        const col0 = Math.min(...colVals);
+        const col1 = Math.max(...colVals);
+        return {
+          key: `${axis}-${rawKey}`,
+          axis,
+          color: String(color),
+          left: col0 * (canvasW + gap),
+          top: row0 * (canvasH + gap),
+          width: (col1 - col0 + 1) * canvasW + Math.max(0, col1 - col0) * gap,
+          height: (row1 - row0 + 1) * canvasH + Math.max(0, row1 - row0) * gap,
+        };
+      })
+      .filter(Boolean) as Array<{ key: string; axis: "row" | "col"; color: string; left: number; top: number; width: number; height: number }>;
+    return [...build(rowMarkers, "row"), ...build(colMarkers, "col")];
+  }, [canvasH, canvasW, colMarkers, effectiveNcols, galleryGapPx, isGallery, rowMarkers, visibleImageIndices]);
 
   // ROI FFT active: both ROI and FFT on, with a selected ROI
   const roiFftActive = effectiveShowFft && roiActive && roiSelectedIdx >= 0 && roiSelectedIdx < (roiList?.length ?? 0);
@@ -3449,8 +3768,8 @@ function Show2D() {
   // gaussian/bin2/anscombe knobs here, right before the arrays feed the
   // colormap/FFT/histogram paths. sigmaDraft feeds the filter DIRECTLY during
   // drag, so scrubbing sigma is live with zero kernel round trips; the model
-  // commit still happens on release. tv/denova* panels arrive Python-filtered
-  // and are passed through untouched (browserFilterSupported is false).
+  // commit still happens on release. tv panels arrive Python-filtered and are
+  // passed through untouched (browserFilterSupported is false).
   const sigmaDraftForFilter = browserFilterActive ? sigmaDraft : null;
   const sigmaDraftPanel = sigmaDraftForFilter === null ? -1 : selectedIdx;
   const panelFilterKnobs = React.useCallback((panel: number) => {
@@ -8453,7 +8772,8 @@ function Show2D() {
 
           {isGallery ? (
             /* Gallery mode */
-            <Box sx={{ display: "grid", gridTemplateColumns: galleryGridColumns, gap: `${galleryGapPx}px`, maxWidth: galleryGridWidth, width: "100%", boxSizing: "border-box", justifyContent: "start" }}>
+            <Box sx={{ position: "relative", maxWidth: galleryGridWidth, width: "100%", boxSizing: "border-box" }}>
+            <Box sx={{ display: "grid", gridTemplateColumns: galleryGridColumns, gap: `${galleryGapPx}px`, width: "100%", boxSizing: "border-box", justifyContent: "start" }}>
               {visibleImageIndices.map((i) => (
                 <Box
                   key={i}
@@ -8595,9 +8915,25 @@ function Show2D() {
                         </Typography>
                       </Box>
                     )}
+                    {(panelAnnotations?.[i] || []).map((annotation, annotationIdx) => (
+                      <Box
+                        key={`panel-annotation-${i}-${annotationIdx}`}
+                        className={annotation.class_name}
+                        data-show2d-panel-annotation={i}
+                        data-show2d-panel-annotation-index={annotationIdx}
+                        data-show2d-panel-annotation-position={annotation.position || "top-left"}
+                        data-show2d-panel-annotation-variant={annotation.variant || "badge"}
+                        title={annotation.text}
+                        sx={panelAnnotationSx(annotation)}
+                      >
+                        {renderPanelAnnotation(annotation)}
+                      </Box>
+                    ))}
                     {showPanelTitles !== false && (
                       <Box
+                        data-show2d-panel-title={i}
                         sx={{
+                          ...panelTitleChromeSx(panelTitleStyle, {
                           position: "absolute",
                           top: 6,
                           left: 28,
@@ -8617,6 +8953,7 @@ function Show2D() {
                           textOverflow: "clip",
                           overflowWrap: "anywhere",
                           zIndex: 2,
+                          }),
                         }}
                       >
                         {panelTitleContent(i)}
@@ -8931,7 +9268,9 @@ function Show2D() {
                           {showPanelTitles !== false && (
                             <Box
                               className="quantem-fft-panel-title"
+                              data-show2d-panel-title={i}
                               sx={{
+                                ...panelTitleChromeSx(panelTitleStyle, {
                                 px: 0.5,
                                 minWidth: 0,
                                 color: "rgba(255,255,255,0.95)",
@@ -8948,6 +9287,7 @@ function Show2D() {
                                 whiteSpace: "nowrap",
                                 overflow: "hidden",
                                 textOverflow: "ellipsis",
+                                }),
                               }}
                             >
                               FFT · {panelTitleContent(i)}
@@ -9030,6 +9370,26 @@ function Show2D() {
                 </Box>
               ))}
             </Box>
+            {groupMarkerOverlays.map((marker) => (
+              <Box
+                key={marker.key}
+                data-show2d-row-marker={marker.axis === "row" ? marker.key.slice(4) : undefined}
+                data-show2d-col-marker={marker.axis === "col" ? marker.key.slice(4) : undefined}
+                data-show2d-group-marker-color={marker.color}
+                sx={{
+                  position: "absolute",
+                  left: marker.left,
+                  top: marker.top,
+                  width: marker.width,
+                  height: marker.height,
+                  boxSizing: "border-box",
+                  boxShadow: `inset 0 0 0 3px ${marker.color}, inset 0 0 0 5px rgba(0,0,0,0.9)`,
+                  pointerEvents: "none",
+                  zIndex: 10,
+                }}
+              />
+            ))}
+            </Box>
           ) : (
             /* Single image mode */
             <Box
@@ -9091,6 +9451,20 @@ function Show2D() {
                   </Typography>
                 </Box>
               )}
+              {(panelAnnotations?.[0] || []).map((annotation, annotationIdx) => (
+                <Box
+                  key={`panel-annotation-0-${annotationIdx}`}
+                  className={annotation.class_name}
+                  data-show2d-panel-annotation={0}
+                  data-show2d-panel-annotation-index={annotationIdx}
+                  data-show2d-panel-annotation-position={annotation.position || "top-left"}
+                  data-show2d-panel-annotation-variant={annotation.variant || "badge"}
+                  title={annotation.text}
+                  sx={panelAnnotationSx(annotation)}
+                >
+                  {renderPanelAnnotation(annotation)}
+                </Box>
+              ))}
               {panelChromeVisible && (panelFrameCounts?.[0] || 1) > 1 && (
                 <Box
                   data-show2d-panel-frame-controls={0}
@@ -9162,7 +9536,7 @@ function Show2D() {
           {showStats && (
             <Box sx={{ mt: `${SPACING.XS}px`, px: 1, py: 0.5, bgcolor: themeColors.bgAlt, display: "flex", gap: 2, alignItems: "center", flexWrap: "wrap", maxWidth: "100%", boxSizing: "border-box", opacity: 1 }}>
               {isGallery && (
-                <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>{labels?.[statsIdx] || `#${statsIdx + 1}`}</Typography>
+                <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>{renderTextWithInlineMath(labels?.[statsIdx] || `#${statsIdx + 1}`, `stats-label-${statsIdx}`)}</Typography>
               )}
               <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Mean <Box component="span" sx={{ color: themeColors.accent }}>{formatNumber(currentFrameStats?.mean ?? statsMean?.[statsIdx] ?? 0)}</Box></Typography>
               <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Min <Box component="span" sx={{ color: themeColors.accent }}>{formatNumber(currentFrameStats?.min ?? statsMin?.[statsIdx] ?? 0)}</Box></Typography>

@@ -40,6 +40,10 @@ Show3D(
 | `show_panel_titles` | Show2D, Show3D | Show labels on individual image/volume panels. |
 | `panel_title_font_size` | Show2D, Show3D | Font size for per-panel labels. |
 | `panel_title_spans` | Show2D, Show3D | Optional structured colored text spans for panel-title status words; plain `labels` / `panel_titles` strings still work. |
+| `panel_title_style` | Show2D, Show3D | Optional JSON-safe title chrome, for example background, text color, border color/width, padding, radius, and max width. Defaults preserve the normal transparent title look. |
+| `panel_annotations` | Show2D, Show3D | Optional per-panel in-image labels. Use these for multiple local callouts, ROI labels, dose/status badges, or region notes that are not the panel title. |
+| `marker_colors`, `marker_style` | Show2D, Show3D | Optional per-panel identity colors. `marker_style="around"` draws a color frame with a black inner edge. |
+| `row_markers`, `col_markers` | Show2D, Show3D | Optional row/column group frames keyed by zero-based visible row or column slot. Each group draws one rectangle with no internal dividers. |
 | `show_scale_bar` | Show2D, Show3D, Show3DSlices, Show4DSTEM, ShowEDS | Show or hide scale bars. Some widgets keep the saved-state trait name `scale_bar_visible` for compatibility. |
 | `show_resize_handles` | Show3D | Show or hide resize handles. Show2D hides resize handles automatically when controls are collapsed. |
 | `show_zoom_indicator` | Show3D | Show or hide the zoom readout. |
@@ -112,3 +116,34 @@ Show3D(stack_a, stack_b, stack_c, panel_titles=status_titles)
 The plain fallback text is still synced as the normal panel label/title, so
 panel menus, title-based API lookups, notebook state, and `export_html(...)`
 continue to behave like ordinary strings.
+
+## Panel frames and title chrome
+
+Use per-panel markers for individual identity and row/column markers when a
+whole visual group should share one frame. Row and column keys are zero-based
+visible grid slots, so hidden panels do not leave ghost group borders.
+
+```python
+Show2D(
+    images,
+    labels=status_titles,
+    ncols=3,
+    marker_colors=["#60a5fa", "#34d399", "#f87171"],
+    marker_style="around",
+    row_markers={0: "#60a5fa"},
+    col_markers={2: "#f59e0b"},
+    panel_title_style={
+        "bg": "rgba(0,0,0,0.72)",
+        "fg": "#ffffff",
+        "border_color": "#60a5fa",
+        "border_width": 1,
+        "pad_x": 6,
+        "pad_y": 2,
+        "radius": 2,
+        "max_width": "hug",
+    },
+)
+```
+
+For local region labels inside a panel, use `panel_annotations`. Longer
+examples live in the [advanced tutorial](../tutorials/advanced.md#label-local-regions-inside-panels).

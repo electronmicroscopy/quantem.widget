@@ -20,10 +20,14 @@ export. See the [Show3D tutorial](../tutorials/show3d).
 | Play / pause | `playing` | Auto-advances slices at `fps` |
 | Reverse | `reverse` | Playback direction flips |
 | Boomerang | `boomerang` | Ping-pongs at the ends instead of looping |
-| FPS field | `fps` | Playback rate changes |
+| FPS field | `fps` | Playback rate changes, capped at 60 fps |
 | Loop range | `loop_start`, `loop_end` | Playback confined to the sub-range |
 | Playback dynamics | `fps`, `loop`, `boomerang`, `playback_path`; future `playback_preset` | More-menu presets can play a time series linearly, bounce at ends, slow down around key frames, or follow a custom frame path without changing the underlying stack |
-| Colormap dropdown | `cmap` | Canvas recolors |
+| Colormap dropdown | `cmap`, `panel_cmaps` | Shared by default. More → Color shared can unlock per-panel colormaps for advanced comparisons |
+| Panel identity markers | `marker_colors`, `identity_colors`, `marker_style`, `row_markers`, `col_markers`, `panel_groups` | Optional panel colors plus row, column, or rectangular group frames make panels easy to reference in notebooks, reports, and agent instructions |
+| Local panel annotations | `panel_annotations` | Optional multiple in-image labels per panel, placed by corner, normalized point, or normalized region box |
+| Contrast preset dropdown | `contrast_preset` | Applies percentile ranges such as `1-99`, `2-98`, and `3-97` while keeping the main histogram UI compact |
+| Advanced histogram toggle | `show_histogram_advanced`, `histogram_advanced` | Exposes detailed histogram controls only when a user asks for them |
 | Export button | `export_request`, `export_status` | Writes a standalone HTML viewer |
 | Page controls (paged galleries) | `page_idx`, `n_pages`, `panels_per_page`, `page_starred`; `star_page()`, `unstar_page()` | Shows, stars, or plays through one page of panels at a time |
 | Panel layout (multi-panel) | `n_panels`, `link_panels`, `max_cols` | Panels arrange; linked scrub moves all |
@@ -33,7 +37,7 @@ export. See the [Show3D tutorial](../tutorials/show3d).
 | Control visibility | `show_controls`, `controls_collapsed`; `collapse_controls()`, `expand_controls()`, `toggle_controls()` | Permanently remove controls or temporarily collapse them behind the top GUI toggle |
 | Title visibility | `show_title` | Top title row shows/hides |
 | Statistics | `show_stats` | Optional mean/min/max/std readout |
-| Panel title visibility | `show_panel_titles`, `panel_title_font_size` | Per-panel labels show/hide and resize |
+| Panel title visibility | `show_panel_titles`, `panel_title_font_size`, `panel_title_style` | Per-panel labels show/hide, resize, and optionally get title chrome such as background, border, and padding |
 | Scale bar visibility | `show_scale_bar` (`scale_bar_visible` in saved state) | Scale bar shows/hides |
 | Saved notebook preview frames | `notebook_preview_frames`, `notebook_preview_ncols`; `set_notebook_preview_frames()` | Single-panel saved notebooks can reopen as a compact contact sheet of selected frame indices instead of only the current frame |
 | ROI add / drag | `roi_active`, `roi_list`, `roi_selected_idx`; `get_roi_geometries()` | Single-panel stack ROI overlays stay visible while scrubbing; saved notebook previews include all visible ROI overlays and right-side zoom crops; Python can read circle centers/radii and rectangle/square corners in `(row, col)` coordinates |
@@ -44,6 +48,10 @@ export. See the [Show3D tutorial](../tutorials/show3d).
 | FFT layout and initial view | `fft_layout`, `fft_overlay_position`, `fft_overlay_size`, `fft_overlay_zoom` | Places FFTs below, right, or inside every panel and initializes their shared zoom |
 | Denoise | `denoise_enabled`, `denoise`, `denoise_sigma`, `denoise_bin`, `show_denoise` | The master swaps raw/denoised frames without losing settings; Settings expands the Method/σ/bin editor; an active filter also reshapes FFT |
 | Filter | `frequency_filter_enabled`, `frequency_filter`, `frequency_filter_cutoff`, `frequency_filter_center`, `frequency_filter_width`, `show_frequency_filter` | View-only low/high/band-pass filtering with a draggable FFT ring; stored frames, statistics, and raw exports remain unchanged |
+| Sub-pixel alignment | `subpixel_align_enabled`, `subpixel_align_reference` | More-menu display alignment for a drifting single-panel stack; the browser estimates row/column shifts against the reference frame and keeps raw data unchanged |
+| More menu: Flip | `flip_horizontal`, `flip_vertical`, `flip_rows`, `flip_cols` | Display-only orientation checks for row/column or horizontal/vertical review |
+| More menu: Rotate | `image_rotation`, `rotation_scope`, `frame_rotations`; `rotation=`, `rotations=` | Display-only 0/90/180/270° rotation for the whole stack or the selected frame |
+| More menu: Compare | `compare_mode`, `compare_pair`, `blink_fps`, `diff_cmap`, `compare_background` | Blink, difference, or overlay two frames for point-defect and time-series change detection |
 
 The denoise family matches Show2D. See
 [Which denoise filter should I use?](show2d.md#which-denoise-filter-should-i-use)
@@ -62,6 +70,20 @@ Denoise first and Filter second; the raw stack and quantitative exports are
 never replaced by the view. Filter lives under More and is off by default. Its
 FFT overlay dims rejected frequencies and labels the clear region as Inside
 kept, Outside kept, or Band kept.
+
+## Sub-pixel alignment for drifting stacks
+
+For a single-panel stack that is already available in the browser, use
+`subpixel_align=True` or open **More → Sub-pixel align**. The first version
+aligns the displayed frames to `subpixel_align_reference` (default frame 0) with
+phase-correlation registration and bilinear display shifts. It is intentionally
+view-only: the original stack, raw exports, and quantitative data remain
+unchanged.
+
+The More menu reports the reference frame, the approximate row/column padding
+implied by the shifts, and whether WebGPU or CPU FFT was used. Multi-panel, RGB,
+or streamed-only stacks currently show an explanatory status instead of
+silently aligning the wrong data.
 
 ## Playback dynamics for time-series review
 
@@ -292,6 +314,25 @@ w.reset_panel_order()
 Panel order is saved in widget state and standalone HTML. It is display-only:
 hidden panels, stars, titles, and per-panel contrast remain keyed by the
 original source panel index.
+
+Use `panel_groups` when several panels should be read as one comparison block.
+The group box follows the displayed panel positions, so it still works after
+panel hiding or reordering:
+
+```python
+w = Show3D(
+    bf_raw,
+    df_raw,
+    bf_denoised,
+    df_denoised,
+    panel_titles=["BF raw", "DF raw", "BF denoised", "DF denoised"],
+    max_cols=2,
+    panel_groups=[
+        {"panels": [0, 1], "color": "#2563eb", "label": "raw"},
+        {"start": 2, "end": 3, "color": "#16a34a", "label": "denoised"},
+    ],
+)
+```
 
 The statistics readout is off by default. Turn on `show_stats=True` in Python,
 or use the `Stats` switch in the widget, when mean/min/max/std values are useful.

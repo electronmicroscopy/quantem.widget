@@ -22,7 +22,8 @@ no console error, no NaN frame).
 |---|---|---|
 | Colormap dropdown | `cmap` | Canvas recolors to the chosen map |
 | More menu: Link Color | `panel_cmaps`, `panel_cmaps_memory` | Linked by default. Turn off to let the Color dropdown edit only the selected gallery panel; turn on for one shared colormap, then turn off again to restore the previous individual panel colormaps |
-| Panel identity markers | `marker_colors`, `identity_colors` | Optional colored strips make rows/columns/panels easy to reference in notebooks, reports, and agent instructions |
+| Panel identity markers | `marker_colors`, `identity_colors`, `marker_style`, `row_markers`, `col_markers` | Optional panel colors plus row/column group frames make panels easy to reference in notebooks, reports, and agent instructions |
+| Local panel annotations | `panel_annotations` | Optional multiple in-image labels per panel, placed by corner, normalized point, or normalized region box |
 | Contrast min / max sliders | `vmin`, `vmax` | Display clamp changes; histogram markers move |
 | Auto-contrast toggle | `auto_contrast` | Re-fits `vmin`/`vmax` to the percentile range |
 | More menu: Contrast | `contrast_preset` | Applies scientist-friendly percentile ranges such as `1-99`, `2-98`, and `3-97`; the histogram stays visible below the image |
@@ -35,7 +36,7 @@ no console error, no NaN frame).
 | Control visibility | `show_controls`, `controls_collapsed`; `collapse_controls()`, `expand_controls()`, `toggle_controls()` | Permanently remove controls or temporarily collapse them behind the top GUI toggle |
 | Title visibility | `show_title` | Top title row shows/hides |
 | Stats visibility | `show_stats` | Mean/min/max/std readout shows/hides |
-| Panel title visibility | `show_panel_titles`, `panel_title_font_size` | Per-panel labels show/hide and resize |
+| Panel title visibility | `show_panel_titles`, `panel_title_font_size`, `panel_title_style` | Per-panel labels show/hide, resize, and optionally get title chrome such as background, border, and padding |
 | Scale bar toggle | `show_scale_bar` (`scale_bar_visible` in saved state) | Calibrated bar shows/hides (needs `pixel_size > 0`) |
 | Pan (drag) | per-image pan | Image translates; with `link_pan` all panels move together |
 | Zoom (wheel) | `initial_zoom`, `zoom_row`, `zoom_col` | Zooms about the cursor |

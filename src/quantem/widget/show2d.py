@@ -71,17 +71,87 @@ _DENOISE_STATE_ALIASES = {
 }
 
 _DEFAULT_FOLDER_PAGE_SIZE = 20
+_PANEL_TITLE_STYLE_KEYS = {
+    "bg",
+    "fg",
+    "border_color",
+    "border_width",
+    "pad_x",
+    "pad_y",
+    "max_width",
+    "radius",
+    "font_weight",
+    "align",
+    "opacity",
+}
+
+
+def _normalize_panel_title_style(style: Mapping[str, object] | None) -> dict[str, object]:
+    """Normalize JSON-safe panel-title chrome options."""
+    if style is None:
+        return {}
+    if not isinstance(style, Mapping):
+        raise TypeError(f"panel_title_style must be a mapping, got {type(style).__name__}")
+    out: dict[str, object] = {}
+    for key, value in style.items():
+        key_text = str(key)
+        if key_text not in _PANEL_TITLE_STYLE_KEYS:
+            raise ValueError(
+                "panel_title_style keys must be one of "
+                f"{sorted(_PANEL_TITLE_STYLE_KEYS)}, got {key_text!r}"
+            )
+        if value is None:
+            continue
+        if key_text in {"border_width", "pad_x", "pad_y", "radius", "opacity"}:
+            out[key_text] = float(value)
+        elif key_text == "font_weight":
+            out[key_text] = int(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else str(value)
+        else:
+            out[key_text] = str(value)
+    return out
+
+
+def _normalize_marker_mapping(markers: Mapping[object, object] | None, *, name: str) -> dict[str, str]:
+    """Normalize row/column marker dictionaries to JSON-safe string keys."""
+    if markers is None:
+        return {}
+    if not isinstance(markers, Mapping):
+        raise TypeError(f"{name} must be a mapping from nonnegative index to color")
+    out: dict[str, str] = {}
+    for key, value in markers.items():
+        if value is None or value == "":
+            continue
+        if isinstance(key, bool):
+            raise ValueError(f"{name} index must be a nonnegative integer, got {key!r}")
+        try:
+            idx = int(key)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{name} index must be a nonnegative integer, got {key!r}") from exc
+        if idx < 0:
+            raise ValueError(f"{name} index must be >= 0, got {idx}")
+        out[str(idx)] = str(value)
+    return out
 
 
 def _normalise_title_spans(value: object) -> tuple[str, list[dict[str, str]] | None]:
-    """Return plain fallback text plus optional safe colored text spans."""
+    """Return plain fallback text plus optional safe colored text spans.
+
+    Panel-title spans are structured dictionaries, not HTML. The plain text
+    fallback keeps existing string-based state, panel lookup, exports, and old
+    notebooks unchanged while the synced span payload lets the frontend color
+    status words such as ``low`` / ``cal`` / ``over``.
+    """
     if value is None:
         return "", None
     if isinstance(value, str):
         return value, None
     if isinstance(value, Mapping):
-        text = "" if value.get("text") is None else str(value.get("text"))
-        span: dict[str, str] = {"text": text}
+        if value.get("math") not in (None, ""):
+            text = str(value.get("math"))
+            span: dict[str, str] = {"math": text}
+        else:
+            text = "" if value.get("text") is None else str(value.get("text"))
+            span = {"text": text}
         color = value.get("color")
         if color not in (None, ""):
             span["color"] = str(color)
@@ -96,8 +166,12 @@ def _normalise_title_spans(value: object) -> tuple[str, list[dict[str, str]] | N
                     f"{{'text': 'low', 'color': '#60a5fa'}}, got {type(item).__name__} "
                     f"at span {idx}"
                 )
-            text = "" if item.get("text") is None else str(item.get("text"))
-            span = {"text": text}
+            if item.get("math") not in (None, ""):
+                text = str(item.get("math"))
+                span = {"math": text}
+            else:
+                text = "" if item.get("text") is None else str(item.get("text"))
+                span = {"text": text}
             color = item.get("color")
             if color not in (None, ""):
                 span["color"] = str(color)
@@ -324,6 +398,211 @@ def _normalize_inset_plot_specs(
             out["margin"] = [max(0.0, float(vals[0])), max(0.0, float(vals[1]))]
         normalized.append(out)
     return normalized
+
+
+_ANNOTATION_STYLE_KEYS = {
+    "text",
+    "math",
+    "label",
+    "title",
+    "spans",
+    "panel",
+    "position",
+    "anchor",
+    "x",
+    "y",
+    "box",
+    "region",
+    "variant",
+    "class_name",
+    "class",
+    "bg",
+    "fg",
+    "color",
+    "border_color",
+    "border_width",
+    "font_size",
+    "font_weight",
+    "pad_x",
+    "pad_y",
+    "radius",
+    "opacity",
+    "align",
+    "max_width",
+    "offset",
+}
+_ANNOTATION_POSITIONS = {
+    "top-left",
+    "top-center",
+    "top-right",
+    "center-left",
+    "center",
+    "center-right",
+    "bottom-left",
+    "bottom-center",
+    "bottom-right",
+}
+_ANNOTATION_VARIANTS = {"badge", "pill", "plain", "outline", "callout"}
+_ANNOTATION_ANCHORS = {
+    "top-left",
+    "top-center",
+    "top-right",
+    "center-left",
+    "center",
+    "center-right",
+    "bottom-left",
+    "bottom-center",
+    "bottom-right",
+}
+
+
+def _is_annotation_spec(value: object) -> bool:
+    """Return True when a mapping looks like one annotation spec."""
+    return isinstance(value, Mapping) and any(str(key) in _ANNOTATION_STYLE_KEYS for key in value)
+
+
+def _panel_annotation_index(panel: object, *, labels: Sequence[str] | None, n_items: int) -> int:
+    """Resolve a panel annotation target from integer index or panel label."""
+    if isinstance(panel, bool):
+        raise ValueError(f"panel annotation panel must be an index or label, got {panel!r}")
+    if isinstance(panel, str) and labels is not None and panel in labels:
+        return list(labels).index(panel)
+    try:
+        idx = int(panel)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"panel annotation panel must be an index or label, got {panel!r}") from exc
+    if idx < 0 or idx >= int(n_items):
+        raise ValueError(f"panel annotation panel index {idx} is outside 0..{int(n_items) - 1}")
+    return idx
+
+
+def _normalize_panel_annotation_spec(spec: object, *, panel: int) -> dict[str, Any] | None:
+    """Normalize one panel annotation into JSON-safe display state."""
+    if spec is None:
+        return None
+    if isinstance(spec, str):
+        spec = {"text": spec}
+    if not isinstance(spec, Mapping):
+        raise TypeError(
+            f"panel_annotations[{panel}] entries must be strings or mappings, got {type(spec).__name__}"
+        )
+    unknown = sorted(str(key) for key in spec if str(key) not in _ANNOTATION_STYLE_KEYS)
+    if unknown:
+        raise ValueError(
+            "panel_annotations entries only accept keys "
+            f"{sorted(_ANNOTATION_STYLE_KEYS)}, got {unknown[0]!r}"
+        )
+    raw_text = spec.get("text", spec.get("label", spec.get("title", "")))
+    raw_math = spec.get("math")
+    spans_raw = spec.get("spans")
+    if spans_raw is not None:
+        text, spans = _normalise_title_spans(spans_raw)
+    elif raw_math not in (None, ""):
+        text = str(raw_math)
+        spans = [{"math": text}]
+    else:
+        text, spans = _normalise_title_spans(raw_text)
+    out: dict[str, Any] = {"text": text}
+    if raw_math not in (None, ""):
+        out["math"] = str(raw_math)
+    if spans:
+        out["spans"] = spans
+    for key in ("position", "anchor", "variant", "class_name", "bg", "fg", "color", "border_color", "font_weight", "align", "max_width"):
+        source_key = "class" if key == "class_name" and "class_name" not in spec else key
+        if source_key in spec and spec[source_key] not in (None, ""):
+            out[key] = str(spec[source_key])
+    position = str(out.get("position", "top-left"))
+    if position not in _ANNOTATION_POSITIONS:
+        raise ValueError(f"panel annotation position must be one of {sorted(_ANNOTATION_POSITIONS)}, got {position!r}")
+    out["position"] = position
+    if "anchor" in out and out["anchor"] not in _ANNOTATION_ANCHORS:
+        raise ValueError(f"panel annotation anchor must be one of {sorted(_ANNOTATION_ANCHORS)}, got {out['anchor']!r}")
+    if "variant" in out and out["variant"] not in _ANNOTATION_VARIANTS:
+        raise ValueError(f"panel annotation variant must be one of {sorted(_ANNOTATION_VARIANTS)}, got {out['variant']!r}")
+    else:
+        out.setdefault("variant", "badge")
+    for key in ("x", "y", "border_width", "font_size", "pad_x", "pad_y", "radius", "opacity"):
+        if key in spec and spec[key] is not None:
+            value = float(spec[key])
+            if not np.isfinite(value):
+                raise ValueError(f"panel annotation {key} must be finite, got {value!r}")
+            if key in {"x", "y", "opacity"}:
+                value = max(0.0, min(1.0, value))
+            out[key] = value
+    box_raw = spec.get("box", spec.get("region"))
+    if box_raw is not None:
+        vals = np.asarray(box_raw, dtype=np.float64).ravel()
+        if vals.size != 4 or not np.isfinite(vals).all():
+            raise ValueError("panel annotation box/region must contain four finite values")
+        left, top, width, height = (float(v) for v in vals)
+        out["box"] = [
+            max(0.0, min(1.0, left)),
+            max(0.0, min(1.0, top)),
+            max(0.01, min(1.0, width)),
+            max(0.01, min(1.0, height)),
+        ]
+    if "offset" in spec and spec["offset"] is not None:
+        vals = np.asarray(spec["offset"], dtype=np.float64).ravel()
+        if vals.size != 2 or not np.isfinite(vals).all():
+            raise ValueError("panel annotation offset must contain two finite values")
+        out["offset"] = [float(vals[0]), float(vals[1])]
+    return out
+
+
+def _normalize_panel_annotations(
+    panel_annotations: Sequence[object] | Mapping[object, object] | object | None,
+    *,
+    n_items: int,
+    labels: Sequence[str] | None = None,
+) -> list[list[dict[str, Any]]]:
+    """Normalize per-panel annotation labels.
+
+    Accepted forms are:
+    - one annotation mapping/string, broadcast to all panels;
+    - a per-panel sequence whose entries are an annotation, list of annotations,
+      or ``None``;
+    - a flat sequence of mappings that include ``panel=...``;
+    - a mapping from panel index/label to one annotation or a list of them.
+    """
+    if panel_annotations is None:
+        return []
+    grouped: list[list[dict[str, Any]]] = [[] for _ in range(int(n_items))]
+
+    def add(panel: int, value: object) -> None:
+        values = value if isinstance(value, (list, tuple)) and not _is_annotation_spec(value) else [value]
+        for item in values:
+            normalized = _normalize_panel_annotation_spec(item, panel=panel)
+            if normalized is not None and normalized.get("text", ""):
+                grouped[panel].append(normalized)
+
+    if isinstance(panel_annotations, Mapping) and not _is_annotation_spec(panel_annotations):
+        for raw_panel, value in panel_annotations.items():
+            add(_panel_annotation_index(raw_panel, labels=labels, n_items=n_items), value)
+        return grouped
+    if isinstance(panel_annotations, (str, Mapping)):
+        for panel in range(int(n_items)):
+            add(panel, panel_annotations)
+        return grouped
+
+    raw = list(panel_annotations)  # type: ignore[arg-type]
+    flat_with_panel = any(isinstance(item, Mapping) and "panel" in item for item in raw)
+    if int(n_items) == 1 and not flat_with_panel:
+        for item in raw:
+            add(0, item)
+        return grouped
+    per_panel = len(raw) == int(n_items) and not flat_with_panel
+    if per_panel:
+        for panel, value in enumerate(raw):
+            add(panel, value)
+        return grouped
+    for item in raw:
+        if not isinstance(item, Mapping) or "panel" not in item:
+            raise ValueError(
+                "panel_annotations as a flat list must include panel=... on every entry, "
+                "or pass a per-panel list/dict"
+            )
+        add(_panel_annotation_index(item["panel"], labels=labels, n_items=n_items), item)
+    return grouped
 
 
 def _reject_unknown_kwargs(cls, kwargs: dict) -> None:
@@ -961,8 +1240,8 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         HAADF -> ``"gaussian"`` sigma 1-2 or ``"none"``; anything
         quantitative -> ``"none"``. The compound spellings ``"bin2"``,
         ``"bin2_anscombe"`` and ``"bin4_anscombe"`` stay accepted as aliases
-        that fold into (mode, bin); ``"tv"``/``"denova*"`` remain available
-        from Python (not in the UI menu). A scalar applies to every panel; a
+        that fold into (mode, bin); ``"tv"`` remains available from Python
+        (not in the UI menu). A scalar applies to every panel; a
         sequence (one entry per panel) gives each panel its own method, e.g.
         ``["none", "anscombe"]`` for a raw vs denoised A/B gallery. Pure view
         transform: the stored array, the stats row, and every export of raw
@@ -1231,7 +1510,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     # stacks; see BROWSER_DISPLAY_FILTER_MODES) and the WGSL compute port in
     # js/displayFilter.ts filters client-side, so the sigma slider scrubs live
     # with no kernel round trip and kernel-less HTML exports keep working
-    # knobs. tv/denova* panels always stay on this Python path.
+    # knobs. tv panels always stay on this Python path.
     _webgpu_filter_ok = traitlets.Bool(False).tag(sync=True)
     # Chemistry-on-structure view: HAADF-modulated blend of an element map on
     # the HAADF lattice as a third RGB panel (haadf | map | blend). Enabled at
@@ -1306,6 +1585,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         **ipywidgets.widget_serialization,
     )
     labels = traitlets.List(traitlets.Unicode()).tag(sync=True)
+    panel_title_spans = traitlets.List(default_value=[]).tag(sync=True)
     # Per-panel RGB flag. True panels carry display-ready (H, W, 3) pixels that
     # bypass the colormap/contrast pipeline in JS; False panels are grayscale.
     is_rgb = traitlets.List(traitlets.Bool(), default_value=[]).tag(sync=True)
@@ -1315,7 +1595,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     panel_order = traitlets.List(traitlets.Int(), default_value=[]).tag(sync=True)
     show_panel_titles = traitlets.Bool(True).tag(sync=True)
     panel_title_font_size = traitlets.Int(11).tag(sync=True)
-    panel_title_spans = traitlets.List(default_value=[]).tag(sync=True)
+    panel_title_style = traitlets.Dict(default_value={}).tag(sync=True)
     gallery_gap_px = traitlets.Int(0).tag(sync=True)
     title = traitlets.Unicode("").tag(sync=True)
     show_title = traitlets.Bool(True).tag(sync=True)
@@ -1339,9 +1619,12 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     identity_colors = traitlets.List(trait=traitlets.Unicode(), default_value=[]).tag(sync=True)
     marker_colors = traitlets.List(traitlets.Unicode(), default_value=[]).tag(sync=True)
     marker_style = traitlets.Enum(["left", "around"], default_value="left").tag(sync=True)
+    row_markers = traitlets.Dict(default_value={}).tag(sync=True)
+    col_markers = traitlets.Dict(default_value={}).tag(sync=True)
     selected_panels = traitlets.List(traitlets.Int(), default_value=[]).tag(sync=True)
     inset_plots = traitlets.List(traitlets.Dict(), default_value=[]).tag(sync=True)
     show_inset_plots = traitlets.Bool(True).tag(sync=True)
+    panel_annotations = traitlets.List(traitlets.List(traitlets.Dict()), default_value=[]).tag(sync=True)
 
     # =========================================================================
     # Scale Bar
@@ -1625,8 +1908,11 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         identity_colors: Sequence[str] | None = None,
         marker_colors: Sequence[str] | None = None,
         marker_style: str = "left",
+        row_markers: Mapping[object, object] | None = None,
+        col_markers: Mapping[object, object] | None = None,
         inset_plots: Sequence[dict[str, Any] | None] | dict[str, Any] | None = None,
         show_inset_plots: bool = True,
+        panel_annotations: Sequence[object] | Mapping[object, object] | object | None = None,
         ncols: int = 3,
         panel_frame_indices: Sequence[int] | None = None,
         panel_playback_fps: float = 10.0,
@@ -1660,6 +1946,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         panel_order: Sequence[int | str] | None = None,
         show_panel_titles: bool | None = None,
         panel_title_font_size: int = 11,
+        panel_title_style: Mapping[str, object] | None = None,
         gallery_gap_px: int = 0,
         state=None,
         save_state: bool = False,
@@ -1858,6 +2145,14 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             zoom_row, zoom_col = float(center[0]), float(center[1])
         if identity_colors is None and marker_colors is not None:
             identity_colors = marker_colors
+        panel_title_style = _normalize_panel_title_style(panel_title_style)
+        row_markers = _normalize_marker_mapping(row_markers, name="row_markers")
+        col_markers = _normalize_marker_mapping(col_markers, name="col_markers")
+        panel_annotations = _normalize_panel_annotations(
+            panel_annotations,
+            n_items=int(data.shape[0]) if getattr(data, "ndim", 0) >= 3 else 1,
+            labels=labels,
+        )
         if show_histogram_advanced:
             histogram_advanced = True
         if image_flips_horizontal:
@@ -1866,7 +2161,8 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             flip_rows = any(bool(value) for value in image_flips_vertical)
         with self.hold_sync():
             self._init_sync(
-                data=data, labels=labels, title=title, cmap=base_cmap,
+                data=data, labels=labels, panel_title_spans=resolved_panel_title_spans,
+                title=title, cmap=base_cmap,
                 panel_cmaps=requested_panel_cmaps,
                 n_pages=n_pages, panels_per_page=panels_per_page,
                 page_labels=resolved_page_labels, page_starred=resolved_page_starred,
@@ -1881,8 +2177,10 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 contrast_preset=contrast_preset, histogram_advanced=histogram_advanced,
                 show_histogram_advanced=show_histogram_advanced,
                 vmin=vmin, vmax=vmax, identity_colors=identity_colors, marker_colors=marker_colors,
-                marker_style=marker_style, inset_plots=inset_plots,
+                marker_style=marker_style, row_markers=row_markers,
+                col_markers=col_markers, inset_plots=inset_plots,
                 show_inset_plots=show_inset_plots,
+                panel_annotations=panel_annotations,
                 ncols=ncols, panel_frame_indices=panel_frame_indices,
                 panel_playback_fps=panel_playback_fps,
                 size=size, smooth=smooth, zoom=zoom,
@@ -1897,7 +2195,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 display_bin=display_bin, hidden_panels=hidden_panels, starred=starred,
                 panel_order=panel_order,
                 show_panel_titles=show_panel_titles, panel_title_font_size=panel_title_font_size,
-                panel_title_spans=resolved_panel_title_spans,
+                panel_title_style=panel_title_style,
                 gallery_gap_px=gallery_gap_px,
                 verbose=verbose, state=state, _t0=_t0,
                 denoise=denoise, denoise_sigma=denoise_sigma,
@@ -1915,13 +2213,14 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 underlay_mode=underlay_mode, stretch_percentiles=stretch_percentiles,
                 display_gamma=display_gamma, dual_gain=dual_gain)
 
-    def _init_sync(self, *, data, labels, title, cmap, panel_cmaps, n_pages, panels_per_page,
+    def _init_sync(self, *, data, labels, panel_title_spans, title, cmap, panel_cmaps, n_pages, panels_per_page,
                    page_labels, page_starred, show_title, sampling, units,
                    scale_bar_visible, scale_bar_position, show_zoom_indicator,
                    show_fft, fft_window, fft_metrics,
                    show_controls, controls_collapsed, show_stats, debug, log_scale, auto_contrast, offline,
                    contrast_preset, histogram_advanced, show_histogram_advanced,
-                   vmin, vmax, identity_colors, marker_colors, marker_style, inset_plots,
+                   vmin, vmax, identity_colors, marker_colors, marker_style,
+                   row_markers, col_markers, inset_plots, panel_annotations,
                    show_inset_plots,
                    ncols, panel_frame_indices, panel_playback_fps, size, smooth, zoom,
                    rotation, rotations, rotation_scope,
@@ -1930,7 +2229,8 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                    link_zoom, link_pan, link_contrast, diff_mode, overlay, view_box,
                    pad_ratio, pad_fill_mode, pad_scope,
                    display_bin, hidden_panels, starred, panel_order, show_panel_titles,
-                   panel_title_font_size, panel_title_spans, gallery_gap_px, verbose, state, _t0,
+                   panel_title_font_size, panel_title_style,
+                   gallery_gap_px, verbose, state, _t0,
                    denoise="none", denoise_sigma=4.0, denoise_bin=1,
                    denoise_scope="all", denoise_scope_explicit=False,
                    show_denoise=False,
@@ -2165,6 +2465,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         self.panel_stack_offsets = [-1] * self.n_images
         self.inset_plots = _normalize_inset_plot_specs(inset_plots, n_items=self.n_images)
         self.show_inset_plots = bool(show_inset_plots)
+        self.panel_annotations = list(panel_annotations or [])
         self.height = int(data.shape[1])
         self.width = int(data.shape[2])
         self.rotation_scope = str(rotation_scope).lower()
@@ -2201,15 +2502,19 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             if overlay_label and len(resolved_labels) == self.n_images - 1:
                 resolved_labels.append(overlay_label)
             self.labels = resolved_labels
+        if panel_title_spans and len(panel_title_spans) in (self.n_images - 1, self.n_images):
+            resolved_spans = list(panel_title_spans)
+            if overlay_label and len(resolved_spans) == self.n_images - 1:
+                resolved_spans.append([])
+            self.panel_title_spans = resolved_spans
+        else:
+            self.panel_title_spans = []
         self.starred = [0] * self.n_images
         self.hidden_panels = []
         self.hidden_page_slots = []
         self.show_panel_titles = bool(show_panel_titles)
         self.panel_title_font_size = int(panel_title_font_size)
-        if panel_title_spans and len(panel_title_spans) == int(self.n_images):
-            self.panel_title_spans = list(panel_title_spans)
-        else:
-            self.panel_title_spans = []
+        self.panel_title_style = dict(panel_title_style or {})
         self.gallery_gap_px = int(gallery_gap_px)
         if starred is not None:
             self.set_starred_panels(starred)
@@ -2273,6 +2578,8 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         self.identity_colors = colors
         self.marker_colors = list(colors)
         self.marker_style = str(marker_style).lower()
+        self.row_markers = dict(row_markers or {})
+        self.col_markers = dict(col_markers or {})
         self.selected_panels = []
         # view_box sugar: sets zoom + zoom_row/col to center on box.
         # Two forms: (r0, r1, c0, c1) explicit bounds, or the friendlier
@@ -4749,7 +5056,11 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             "vmax": self.vmax,
             "identity_colors": list(self.identity_colors),
             "marker_style": self.marker_style,
+            "row_markers": dict(self.row_markers),
+            "col_markers": dict(self.col_markers),
             "labels": list(self.labels),
+            "panel_title_spans": list(self.panel_title_spans),
+            "panel_annotations": list(self.panel_annotations),
             "starred": list(self.starred),
             "n_pages": int(self.n_pages),
             "page_idx": int(self.page_idx),
@@ -4766,6 +5077,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             "show_panel_titles": self.show_panel_titles,
             "panel_title_font_size": self.panel_title_font_size,
             "panel_title_spans": list(self.panel_title_spans),
+            "panel_title_style": dict(self.panel_title_style),
             "show_stats": self.show_stats,
             "debug": self.debug,
             "show_fft": self.show_fft,
@@ -5102,6 +5414,10 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             panel_order=list(self.panel_order),
             show_panel_titles=self.show_panel_titles,
             panel_title_font_size=self.panel_title_font_size,
+            panel_title_style=dict(self.panel_title_style),
+            row_markers=dict(self.row_markers),
+            col_markers=dict(self.col_markers),
+            panel_annotations=list(self.panel_annotations),
             display_bin=1,
         )
         clone.pixel_sizes = list(self.pixel_sizes)
@@ -5128,7 +5444,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         # Exported pages ship RAW frames plus the filter knobs: the browser
         # port (WGSL compute, CPU fallback without WebGPU) filters client-side
         # so sigma scrubs live with no kernel. Panels on non portable modes
-        # (tv, denova*) still bake their Python-filtered pixels because
+        # (tv) still bake their Python-filtered pixels because
         # _panel_browser_filtered is per panel.
         clone._webgpu_filter_ok = True
         clone._update_all_frames()
@@ -5187,6 +5503,11 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         if "panel_title_spans" in state and isinstance(state["panel_title_spans"], list):
             if len(state["panel_title_spans"]) not in (0, int(self.n_images)):
                 state.pop("panel_title_spans")
+        if "panel_title_style" in state:
+            try:
+                state["panel_title_style"] = _normalize_panel_title_style(state["panel_title_style"])
+            except (TypeError, ValueError):
+                state.pop("panel_title_style")
         if "saved_view_states" in state:
             state["saved_view_states"] = self._normalize_saved_view_states(state["saved_view_states"])
         if "page_idx" in state:
@@ -5216,6 +5537,15 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 )
             except (TypeError, ValueError):
                 state.pop("inset_plots")
+        if "panel_annotations" in state:
+            try:
+                state["panel_annotations"] = _normalize_panel_annotations(
+                    state["panel_annotations"],
+                    n_items=int(self.n_images),
+                    labels=list(self.labels),
+                )
+            except (TypeError, ValueError):
+                state.pop("panel_annotations")
         if state.get("scale_bar_position") not in (None, "bottom-right", "bottom-left"):
             state.pop("scale_bar_position")
         for key in ("marker_colors", "image_flips_horizontal", "image_flips_vertical"):
@@ -5223,6 +5553,12 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 state.pop(key)
         if state.get("marker_style") not in (None, "left", "around"):
             state.pop("marker_style")
+        for key in ("row_markers", "col_markers"):
+            if key in state:
+                try:
+                    state[key] = _normalize_marker_mapping(state[key], name=key)
+                except (TypeError, ValueError):
+                    state.pop(key)
         if "selected_panels" in state and isinstance(state["selected_panels"], list):
             selected: list[int] = []
             seen_selected: set[int] = set()
@@ -5508,7 +5844,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             Denoise method for the targeted panels: ``"none"``, ``"gaussian"``,
             or ``"anscombe"``. The compound spellings ``"bin2"``,
             ``"bin2_anscombe"`` and ``"bin4_anscombe"`` fold into a (mode, bin)
-            pair; ``"tv"``/``"denova*"`` stay available from Python.
+            pair; ``"tv"`` stays available from Python.
         sigma : float or None, optional
             Smoothing scale in pixels. ``None`` leaves each targeted panel's
             current sigma unchanged.
@@ -6489,8 +6825,8 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
 
         The WGSL port (js/displayFilter.ts) covers the gaussian/bin2/anscombe
         modes; when the frontend negotiated ``_webgpu_filter_ok`` those panels
-        ship raw pixels and the browser filters. Non portable modes (tv,
-        denova*) keep the Python path even in a WebGPU session.
+        ship raw pixels and the browser filters. Non portable modes (tv) keep
+        the Python path even in a WebGPU session.
         """
         from quantem.widget.utils.display_filter import (
             BROWSER_DISPLAY_FILTER_MODES,
