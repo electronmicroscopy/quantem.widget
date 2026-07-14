@@ -1340,6 +1340,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     marker_style = traitlets.Enum(["left", "around"], default_value="left").tag(sync=True)
     selected_panels = traitlets.List(traitlets.Int(), default_value=[]).tag(sync=True)
     inset_plots = traitlets.List(traitlets.Dict(), default_value=[]).tag(sync=True)
+    show_inset_plots = traitlets.Bool(True).tag(sync=True)
 
     # =========================================================================
     # Scale Bar
@@ -1624,6 +1625,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         marker_colors: Sequence[str] | None = None,
         marker_style: str = "left",
         inset_plots: Sequence[dict[str, Any] | None] | dict[str, Any] | None = None,
+        show_inset_plots: bool = True,
         ncols: int = 3,
         panel_frame_indices: Sequence[int] | None = None,
         panel_playback_fps: float = 10.0,
@@ -1879,6 +1881,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 show_histogram_advanced=show_histogram_advanced,
                 vmin=vmin, vmax=vmax, identity_colors=identity_colors, marker_colors=marker_colors,
                 marker_style=marker_style, inset_plots=inset_plots,
+                show_inset_plots=show_inset_plots,
                 ncols=ncols, panel_frame_indices=panel_frame_indices,
                 panel_playback_fps=panel_playback_fps,
                 size=size, smooth=smooth, zoom=zoom,
@@ -1918,6 +1921,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                    show_controls, controls_collapsed, show_stats, debug, log_scale, auto_contrast, offline,
                    contrast_preset, histogram_advanced, show_histogram_advanced,
                    vmin, vmax, identity_colors, marker_colors, marker_style, inset_plots,
+                   show_inset_plots,
                    ncols, panel_frame_indices, panel_playback_fps, size, smooth, zoom,
                    rotation, rotations, rotation_scope,
                    flip_rows, flip_cols, image_flips_horizontal, image_flips_vertical,
@@ -2159,6 +2163,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         self.panel_frame_indices = list(resolved_panel_frame_indices or [0] * self.n_images)
         self.panel_stack_offsets = [-1] * self.n_images
         self.inset_plots = _normalize_inset_plot_specs(inset_plots, n_items=self.n_images)
+        self.show_inset_plots = bool(show_inset_plots)
         self.height = int(data.shape[1])
         self.width = int(data.shape[2])
         self.rotation_scope = str(rotation_scope).lower()
@@ -4798,6 +4803,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             "marker_colors": list(self.marker_colors),
             "selected_panels": list(self.selected_panels),
             "inset_plots": list(self.inset_plots),
+            "show_inset_plots": self.show_inset_plots,
             "roi_active": self.roi_active,
             "roi_list": self.roi_list,
             "roi_selected_idx": self.roi_selected_idx,

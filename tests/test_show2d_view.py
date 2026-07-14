@@ -120,6 +120,7 @@ def test_inset_plots_normalize_per_panel_and_static_png():
     assert w.inset_plots[0]["margin"] == pytest.approx([18.0, 24.0])
     assert w.inset_plots[1]["ylim"] == pytest.approx([0.0, 1.0])
     assert "inset_plots" in w.state_dict()
+    assert w.state_dict()["show_inset_plots"] is True
     assert w._static_png_b64(max_px=220)
 
 

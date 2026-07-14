@@ -91,6 +91,12 @@ Show2D(
 )
 ```
 
+When `inset_plots` is initialized, Show2D adds an `Inset Chart` switch under
+`More`. Use it to hide or restore the charts without changing the data. The
+charts can also be dragged directly inside the panel: while dragging, the chart
+follows the pointer; when released, it snaps to the nearest corner and stores
+that corner plus a margin in widget state.
+
 ### Position, sizing, and publication style
 
 Use `position` when the plot belongs in a corner and `margin` when it needs a

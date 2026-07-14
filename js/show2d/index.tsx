@@ -814,6 +814,14 @@ type InsetHoverInfo = {
   text: string;
 };
 
+type InsetDragState = {
+  idx: number;
+  offsetX: number;
+  offsetY: number;
+  boxW: number;
+  boxH: number;
+};
+
 function finiteMinMax(values: number[]): [number, number] | null {
   let lo = Infinity;
   let hi = -Infinity;
@@ -1684,7 +1692,8 @@ function Show2D() {
   const [markerColors] = useModelState<string[]>("marker_colors");
   const [markerStyle] = useModelState<string>("marker_style");
   const [selectedPanels, setSelectedPanels] = useModelState<number[]>("selected_panels");
-  const [insetPlots] = useModelState<InsetPlotSpec[]>("inset_plots");
+  const [insetPlots, setInsetPlots] = useModelState<InsetPlotSpec[]>("inset_plots");
+  const [showInsetPlots, setShowInsetPlots] = useModelState<boolean>("show_inset_plots");
   const [contrastPreset, setContrastPreset] = useModelState<string>("contrast_preset");
   const [showHistogramAdvanced, setShowHistogramAdvanced] = useModelState<boolean>("show_histogram_advanced");
   const [imageFlipsHorizontal, setImageFlipsHorizontal] = useModelState<boolean[]>("image_flips_horizontal");
@@ -1695,6 +1704,13 @@ function Show2D() {
     const value = markerColors?.[panel];
     return value || IDENTITY_PALETTE[panel % IDENTITY_PALETTE.length];
   }, [markerColors]);
+  const hasInsetPlots = React.useMemo(
+    () => Array.isArray(insetPlots) && insetPlots.some(spec => Array.isArray(spec?.y) && spec.y.length >= 2),
+    [insetPlots],
+  );
+  const insetPlotSpecFor = React.useCallback((panel: number): InsetPlotSpec | undefined => {
+    return insetDragDraftRef.current.get(panel) || insetPlots?.[panel];
+  }, [insetPlots]);
   const markerAround = (markerStyle || "left") === "around";
   const lastSelectedPanelRef = React.useRef<number | null>(null);
   const normalizeRotation = React.useCallback((value: number) => {
@@ -2351,6 +2367,20 @@ function Show2D() {
   const [cursorInfo, setCursorInfo] = React.useState<{ idx: number; row: number; col: number; value: number; rgb?: [number, number, number] | null; valueSource?: "preview" | "detail" | "native" } | null>(null);
   const [insetHoverInfo, setInsetHoverInfo] = React.useState<InsetHoverInfo | null>(null);
   const insetHoverKeyRef = React.useRef<string>("");
+  const insetDragStateRef = React.useRef<InsetDragState | null>(null);
+  const insetDragDraftRef = React.useRef<Map<number, InsetPlotSpec>>(new Map());
+  const insetDragRafRef = React.useRef<number | null>(null);
+  const [insetDragVersion, setInsetDragVersion] = React.useState(0);
+  const scheduleInsetDragPaint = React.useCallback(() => {
+    if (insetDragRafRef.current !== null) return;
+    insetDragRafRef.current = window.requestAnimationFrame(() => {
+      insetDragRafRef.current = null;
+      setInsetDragVersion(v => v + 1);
+    });
+  }, []);
+  React.useEffect(() => () => {
+    if (insetDragRafRef.current !== null) window.cancelAnimationFrame(insetDragRafRef.current);
+  }, []);
 
   // Colorbar state (single image mode only)
   const [showColorbar, setShowColorbar] = React.useState(false);
@@ -4581,18 +4611,20 @@ function Show2D() {
         ctx.restore();
       }
 
-      ctx.save();
-      ctx.scale(DPR, DPR);
-      drawInsetPlot(
-        ctx,
-        insetPlots?.[i],
-        i,
-        overlay.width / DPR,
-        overlay.height / DPR,
-        panelMarkerColor(i),
-        scaleBarVisible,
-      );
-      ctx.restore();
+      if (showInsetPlots !== false) {
+        ctx.save();
+        ctx.scale(DPR, DPR);
+        drawInsetPlot(
+          ctx,
+          insetPlotSpecFor(i),
+          i,
+          overlay.width / DPR,
+          overlay.height / DPR,
+          panelMarkerColor(i),
+          scaleBarVisible,
+        );
+        ctx.restore();
+      }
 
       // ROI overlay — draw all ROIs
       if (roiActive && roiList && roiList.length > 0) {
@@ -4775,7 +4807,7 @@ function Show2D() {
         ctx.restore();
       }
     }
-  }, [nImages, pixelSizeForPanel, pixelUnit, scaleBarVisible, scaleBarPosition, showZoomIndicator, selectedIdx, isGallery, canvasW, canvasH, width, displayScale, linkedZoom, linkedZoomState, zoomStates, dataVersion, showColorbar, cmap, offscreenVersion, logScale, profileActive, profilePoints, roiActive, roiList, roiSelectedIdx, isDraggingROI, themeColors, measureActive, measurePoints, canvasRepaintSignal, insetPlots, panelMarkerColor, visibleImageIndices]);
+  }, [nImages, pixelSizeForPanel, pixelUnit, scaleBarVisible, scaleBarPosition, showZoomIndicator, selectedIdx, isGallery, canvasW, canvasH, width, displayScale, linkedZoom, linkedZoomState, zoomStates, dataVersion, showColorbar, cmap, offscreenVersion, logScale, profileActive, profilePoints, roiActive, roiList, roiSelectedIdx, isDraggingROI, themeColors, measureActive, measurePoints, canvasRepaintSignal, insetPlots, insetPlotSpecFor, insetDragVersion, showInsetPlots, panelMarkerColor, visibleImageIndices]);
 
   // -------------------------------------------------------------------------
   // Inset magnifier (lens) — renders magnified region at cursor in bottom-left
@@ -6580,6 +6612,104 @@ function Show2D() {
     return Math.abs(dist - selectedRoi.radius_inner) < hitArea;
   };
 
+  const beginInsetPlotDrag = React.useCallback((e: React.MouseEvent, idx: number): boolean => {
+    if (showInsetPlots === false || !hasInsetPlots) return false;
+    const canvas = canvasRefs.current[idx];
+    if (!canvas) return false;
+    const spec = insetPlotSpecFor(idx);
+    const rect = canvas.getBoundingClientRect();
+    const cssX = (e.clientX - rect.left) * (canvas.width / Math.max(1, rect.width));
+    const cssY = (e.clientY - rect.top) * (canvas.height / Math.max(1, rect.height));
+    const geom = insetPlotGeometry(spec, canvas.width, canvas.height, scaleBarVisible);
+    if (!geom) return false;
+    const grabPad = 10;
+    if (
+      cssX < geom.x0 - grabPad ||
+      cssX > geom.x0 + geom.boxW + grabPad ||
+      cssY < geom.y0 - grabPad ||
+      cssY > geom.y0 + geom.boxH + grabPad
+    ) {
+      return false;
+    }
+    insetDragStateRef.current = {
+      idx,
+      offsetX: cssX - geom.x0,
+      offsetY: cssY - geom.y0,
+      boxW: geom.boxW,
+      boxH: geom.boxH,
+    };
+    insetDragDraftRef.current.set(idx, {
+      ...(spec || {}),
+      box: [geom.x0 / canvas.width, geom.y0 / canvas.height, geom.boxW / canvas.width, geom.boxH / canvas.height],
+    });
+    insetHoverKeyRef.current = "";
+    setInsetHoverInfo(null);
+    scheduleInsetDragPaint();
+    e.preventDefault();
+    e.stopPropagation();
+    return true;
+  }, [hasInsetPlots, insetPlotSpecFor, scaleBarVisible, scheduleInsetDragPaint, showInsetPlots]);
+
+  const updateInsetPlotDrag = React.useCallback((e: React.MouseEvent, idx: number): boolean => {
+    const drag = insetDragStateRef.current;
+    if (!drag || drag.idx !== idx) return false;
+    const canvas = canvasRefs.current[idx];
+    if (!canvas) return false;
+    const rect = canvas.getBoundingClientRect();
+    const cssX = (e.clientX - rect.left) * (canvas.width / Math.max(1, rect.width));
+    const cssY = (e.clientY - rect.top) * (canvas.height / Math.max(1, rect.height));
+    const x0 = Math.max(0, Math.min(canvas.width - drag.boxW, cssX - drag.offsetX));
+    const y0 = Math.max(0, Math.min(canvas.height - drag.boxH, cssY - drag.offsetY));
+    const base = insetPlotSpecFor(idx) || {};
+    insetDragDraftRef.current.set(idx, {
+      ...base,
+      box: [x0 / canvas.width, y0 / canvas.height, drag.boxW / canvas.width, drag.boxH / canvas.height],
+    });
+    scheduleInsetDragPaint();
+    e.preventDefault();
+    e.stopPropagation();
+    return true;
+  }, [insetPlotSpecFor, scheduleInsetDragPaint]);
+
+  const finishInsetPlotDrag = React.useCallback((e?: React.MouseEvent, idxArg?: number): boolean => {
+    const drag = insetDragStateRef.current;
+    if (!drag) return false;
+    const idx = idxArg ?? drag.idx;
+    const canvas = canvasRefs.current[idx];
+    const draft = insetDragDraftRef.current.get(idx);
+    if (canvas && draft) {
+      const geom = insetPlotGeometry(draft, canvas.width, canvas.height, scaleBarVisible);
+      if (geom) {
+        const right = geom.x0 + geom.boxW / 2 >= canvas.width / 2;
+        const bottom = geom.y0 + geom.boxH / 2 >= canvas.height / 2;
+        const position = `${bottom ? "bottom" : "top"}-${right ? "right" : "left"}` as InsetPlotSpec["position"];
+        const marginX = right ? canvas.width - geom.x0 - geom.boxW : geom.x0;
+        const bottomScaleBarOffset = scaleBarVisible && position === "bottom-right" ? 34 : 0;
+        const marginY = bottom ? canvas.height - geom.y0 - geom.boxH - bottomScaleBarOffset : geom.y0 - 18;
+        const { box: _box, ...rest } = draft;
+        const nextSpec: InsetPlotSpec = {
+          ...rest,
+          position,
+          margin: [
+            Math.max(0, Math.round(marginX)),
+            Math.max(0, Math.round(marginY)),
+          ],
+        };
+        const next = Array.isArray(insetPlots) ? insetPlots.slice() : [];
+        next[idx] = nextSpec;
+        setInsetPlots(next);
+      }
+    }
+    insetDragStateRef.current = null;
+    insetDragDraftRef.current.delete(idx);
+    scheduleInsetDragPaint();
+    if (e) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+    return true;
+  }, [insetPlots, scaleBarVisible, scheduleInsetDragPaint, setInsetPlots]);
+
   const handleMouseDown = (e: React.MouseEvent, idx: number) => {
     if (e.detail >= 2) {
       handleDoubleClick(e, idx);
@@ -6592,6 +6722,7 @@ function Show2D() {
       // Continue to pan setup so click-drag on unselected panel pans immediately
       // (no double-click required to select first then drag).
     }
+    if (beginInsetPlotDrag(e, idx)) return;
     // Check if click is on the lens inset — edge = resize, interior = drag
     if (showLens && !isGallery && idx === 0) {
       const canvas = canvasRefs.current[0];
@@ -6697,6 +6828,7 @@ function Show2D() {
   };
 
   const handleMouseMove = (e: React.MouseEvent, idx: number) => {
+    if (updateInsetPlotDrag(e, idx)) return;
     // Fast path: during pan drag, skip all cursor/hover/lens work — just update pan
     if (isDraggingPan && panStart && panningIdx !== null) {
       const canvas = canvasRefs.current[idx];
@@ -6717,15 +6849,15 @@ function Show2D() {
       const rect = canvas.getBoundingClientRect();
       const mouseCanvasX = (e.clientX - rect.left) * (canvas.width / rect.width);
       const mouseCanvasY = (e.clientY - rect.top) * (canvas.height / rect.height);
-      const insetHover = insetHoverAt(
-        insetPlots?.[idx],
+      const insetHover = showInsetPlots !== false ? insetHoverAt(
+        insetPlotSpecFor(idx),
         idx,
         canvas.width,
         canvas.height,
         mouseCanvasX,
         mouseCanvasY,
         scaleBarVisible,
-      );
+      ) : null;
       const insetHoverKey = insetHover
         ? `${insetHover.idx}:${insetHover.text}:${insetHover.leftPct.toFixed(1)}:${insetHover.topPct.toFixed(1)}`
         : "";
@@ -6905,6 +7037,7 @@ function Show2D() {
   };
 
   const handleMouseUp = (e: React.MouseEvent, idx: number) => {
+    if (finishInsetPlotDrag(e, idx)) return;
     if (isDraggingLens) {
       setIsDraggingLens(false);
       lensDragStartRef.current = null;
@@ -7007,6 +7140,11 @@ function Show2D() {
     setCursorInfo(null);
     insetHoverKeyRef.current = "";
     setInsetHoverInfo(null);
+    if (insetDragStateRef.current?.idx === idx) {
+      insetDragStateRef.current = null;
+      insetDragDraftRef.current.delete(idx);
+      scheduleInsetDragPaint();
+    }
     // Don't clear lensPos — lens stays at last position when toggle is on
     setIsDraggingLens(false);
     setIsResizingLens(false);
@@ -7259,6 +7397,7 @@ function Show2D() {
   const diffControlAvailable = !isPaged && nImages >= 2 && (visibleGrayscaleIndices.length === 2 || diffMode);
   const moreActiveCount =
     (roiControlAvailable && roiActive ? 1 : 0) + (diffMode ? 1 : 0) + (denoiseEnabled ? 1 : 0)
+    + (hasInsetPlots && showInsetPlots !== false ? 1 : 0)
     + (frequencyFilterEnabled && Array.from({ length: nImages }, (_, panel) => panelFrequencyKnobs(panel)).some(knobs => frequencyFilterActive(knobs.mode)) ? 1 : 0)
     + (isGallery && !colorShared ? 1 : 0)
     + (Array.from({ length: nImages }, (_, panel) => rotationForPanel(panel)).some(k => k !== 0) ? 1 : 0);
@@ -7870,7 +8009,7 @@ function Show2D() {
                   aria-controls={moreMenuAnchor ? "show2d-more-menu" : undefined}
                   aria-expanded={moreMenuAnchor ? "true" : undefined}
                   aria-haspopup="menu"
-                  title="More tools: ROI, Denoise, Filter, Diff, Color"
+                  title="More tools: ROI, Inset Chart, Denoise, Filter, Diff, Color"
                 >
                   More
                 </Button>
@@ -7952,6 +8091,23 @@ function Show2D() {
                       size="small"
                       sx={switchStyles.small}
                       slotProps={{ input: { "aria-label": "Toggle region of interest" } }}
+                    />
+                  </MenuItem>
+                )}
+                {hasInsetPlots && (
+                  <MenuItem
+                    dense
+                    onClick={() => setShowInsetPlots(!(showInsetPlots !== false))}
+                    sx={{ fontSize: 12, gap: 1, color: showInsetPlots !== false ? themeColors.accent : themeColors.text }}
+                  >
+                    <Typography sx={{ flex: 1, fontSize: 12, color: "inherit" }} title="Show/hide initialized inset charts. Drag a chart inside the image to move it; release snaps to the nearest corner.">Inset Chart</Typography>
+                    <Switch
+                      checked={showInsetPlots !== false}
+                      onClick={(e) => e.stopPropagation()}
+                      onChange={(e) => setShowInsetPlots(e.target.checked)}
+                      size="small"
+                      sx={switchStyles.small}
+                      slotProps={{ input: { "aria-label": "Toggle inset chart" } }}
                     />
                   </MenuItem>
                 )}

@@ -178,6 +178,12 @@ increase `background_alpha` or use a subtle `border_color` when the underlying
 image is noisy. On hover, the live widget reports the nearest plotted
 coordinate using the axis labels, such as `R 0.465 · ACF 0.48`.
 
+If `inset_plots` is present, the live widget shows an `Inset Chart` switch in
+the `More` menu. A scientist can hide the chart during image inspection, turn
+it back on for reporting, or drag the chart inside the panel. Dragging previews
+freely and then snaps to the closest corner on release, updating `position` and
+`margin` in the widget state.
+
 ## Remove a background or isolate a periodicity
 
 Frequency Filter is deliberately separate from Denoise. Denoise promises a

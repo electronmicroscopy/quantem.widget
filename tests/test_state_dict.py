@@ -297,11 +297,13 @@ def test_show2d_inset_plots_state_roundtrip():
             {"x": [0, 1, 2], "y": [0.2, 0.8, 0.5], "point": (1, 0.8), "title": "ACF"},
             {"x": [0, 1, 2], "y": [0.5, 0.4, 0.7], "point": (2, 0.7), "title": "R"},
         ],
+        show_inset_plots=False,
         verbose=False,
     )
 
     fresh = Show2D(data, state=widget.state_dict(), verbose=False)
     assert fresh.inset_plots == widget.inset_plots
+    assert fresh.show_inset_plots is False
 
 
 def test_show2d_scale_bar_layout_state_roundtrip():
