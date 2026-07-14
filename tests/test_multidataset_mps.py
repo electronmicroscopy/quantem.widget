@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from quantem.widget.kernels.compute.mps import MultiChunkedFrames
+from quantem.gpu.compute.mps import MultiChunkedFrames
 from quantem.widget.multidataset_mps import LazyMacbookDatasets
 
 

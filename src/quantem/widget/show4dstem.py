@@ -820,7 +820,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             data, "frame"
         )
         if hasattr(data, "chunks") and not getattr(data, "_is_gpu_frames", False):
-            from quantem.widget.kernels.compute.mps import ChunkedFrames
+            from quantem.gpu.compute.mps import ChunkedFrames
 
             data = ChunkedFrames(
                 data, row_prefix=bool(getattr(data, "row_prefix", False))
@@ -3106,7 +3106,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         """
         fd = self._frame_data
         if getattr(self, "_compute_for", None) is not fd:
-            from quantem.widget.kernels.compute.backends import compute_backend
+            from quantem.gpu.compute.backends import compute_backend
 
             self._compute_backend = compute_backend(fd)
             self._compute_for = fd
@@ -6281,7 +6281,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
 
     def _virtual_image_for_chunked_dataset(self, dataset, mask) -> np.ndarray:
         """Compute one compare tile for a chunked MPS dataset slot."""
-        from quantem.widget.kernels.compute.backends import compute_backend
+        from quantem.gpu.compute.backends import compute_backend
 
         mask_np = (
             mask.detach().cpu().numpy() if hasattr(mask, "detach") else np.asarray(mask)
