@@ -1695,7 +1695,6 @@ function Show2D() {
   const [insetPlots, setInsetPlots] = useModelState<InsetPlotSpec[]>("inset_plots");
   const [showInsetPlots, setShowInsetPlots] = useModelState<boolean>("show_inset_plots");
   const [contrastPreset, setContrastPreset] = useModelState<string>("contrast_preset");
-  const [showHistogramAdvanced, setShowHistogramAdvanced] = useModelState<boolean>("show_histogram_advanced");
   const [imageFlipsHorizontal, setImageFlipsHorizontal] = useModelState<boolean[]>("image_flips_horizontal");
   const [imageFlipsVertical, setImageFlipsVertical] = useModelState<boolean[]>("image_flips_vertical");
   const [imageRotations, setImageRotations] = useModelState<number[]>("image_rotations");
@@ -8077,6 +8076,35 @@ function Show2D() {
                     </Typography>
                   </Box>
                 )}
+                <Box
+                  onClick={(event) => event.stopPropagation()}
+                  sx={{
+                    px: 1.5,
+                    py: 0.75,
+                    minWidth: 220,
+                    display: "grid",
+                    gridTemplateColumns: "1fr auto",
+                    gap: 1,
+                    alignItems: "center",
+                  }}
+                >
+                  <Typography sx={{ fontSize: 12, color: themeColors.text }} title="Apply a percentile contrast window. The histogram stays visible below the image.">
+                    Contrast
+                  </Typography>
+                  <Select
+                    size="small"
+                    value={contrastPreset || "manual"}
+                    onChange={(event) => applyContrastPreset(String(event.target.value))}
+                    renderValue={(value) => CONTRAST_PRESETS.find((preset) => preset.value === value)?.label || "Manual"}
+                    MenuProps={themedMenuProps}
+                    sx={{ ...themedSelect, minWidth: 76 }}
+                    inputProps={{ "aria-label": "Contrast percentile preset" }}
+                  >
+                    {CONTRAST_PRESETS.map((preset) => (
+                      <MenuItem key={preset.value} value={preset.value}>{preset.label}</MenuItem>
+                    ))}
+                  </Select>
+                </Box>
                 {roiControlAvailable && (
                   <MenuItem
                     dense
@@ -9206,28 +9234,6 @@ function Show2D() {
                           sx={switchStyles.small}
                         />
                       </Box>
-                      <Box sx={controlPairSx}>
-                        <Typography sx={compactLabelSx} title="Show percentile preset controls. The histogram itself always stays visible.">Advanced</Typography>
-                        <Switch checked={showHistogramAdvanced} onChange={(e) => setShowHistogramAdvanced(e.target.checked)} size="small" sx={switchStyles.small} slotProps={{ input: { "aria-label": "Toggle advanced histogram controls" } }} />
-                      </Box>
-                      {showHistogramAdvanced && (
-                        <Box sx={controlPairSx}>
-                          <Typography sx={compactLabelSx} title="Apply a percentile contrast window. Choosing one turns Auto off because you are taking manual control.">Preset</Typography>
-                          <Select
-                            size="small"
-                            value={contrastPreset || "manual"}
-                            onChange={(e) => applyContrastPreset(String(e.target.value))}
-                            renderValue={(value) => CONTRAST_PRESETS.find((preset) => preset.value === value)?.label || "Manual"}
-                            MenuProps={themedMenuProps}
-                            sx={{ ...themedSelect, minWidth: 72 }}
-                            inputProps={{ "aria-label": "Contrast percentile preset" }}
-                          >
-                            {CONTRAST_PRESETS.map((preset) => (
-                              <MenuItem key={preset.value} value={preset.value}>{preset.label}</MenuItem>
-                            ))}
-                          </Select>
-                        </Box>
-                      )}
                       <Box sx={controlPairSx}>
                         <Typography sx={compactLabelSx} title="CSS bilinear interpolation. Same data, the browser smooths visually, useful when upscaling small images on a large canvas.">Smooth</Typography>
                         <Switch checked={smooth} onChange={() => { setSmooth(!smooth); }} size="small" sx={switchStyles.small} />

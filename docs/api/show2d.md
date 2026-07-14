@@ -25,8 +25,7 @@ no console error, no NaN frame).
 | Panel identity markers | `marker_colors`, `identity_colors` | Optional colored strips make rows/columns/panels easy to reference in notebooks, reports, and agent instructions |
 | Contrast min / max sliders | `vmin`, `vmax` | Display clamp changes; histogram markers move |
 | Auto-contrast toggle | `auto_contrast` | Re-fits `vmin`/`vmax` to the percentile range |
-| Contrast preset dropdown | `contrast_preset` | Applies scientist-friendly percentile ranges such as `1-99`, `2-98`, and `3-97` without opening advanced histogram controls |
-| Advanced histogram toggle | `show_histogram_advanced`, `histogram_advanced` | Keeps the default UI compact, then exposes manual percentile details when a user needs them |
+| More menu: Contrast | `contrast_preset` | Applies scientist-friendly percentile ranges such as `1-99`, `2-98`, and `3-97`; the histogram stays visible below the image |
 | Log-scale toggle | `log_scale` | Intensity mapped through log |
 | FFT toggle | `show_fft` | Canvas shows the power spectrum; lattice spots appear |
 | FFT window toggle | `fft_window` | Apodization on/off (ringing at edges differs) |

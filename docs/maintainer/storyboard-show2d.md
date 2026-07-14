@@ -593,13 +593,11 @@ which map to inspect without rewriting the notebook.
 **Acceptance checks**:
 
 - Start from a minimal multi-panel `Show2D([...])` when possible, then use the
-  UI to change contrast presets and open More for advanced controls.
+  UI to open More and change the Contrast preset.
 - Verify `marker_colors` / `identity_colors` paint durable panel strips and
   survive saved state plus standalone HTML export.
 - Verify `1-99`, `2-98`, and `3-97` contrast presets update all visible panels
-  without forcing the advanced histogram UI open.
-- Turn on advanced histogram controls and verify the UI reveals manual controls
-  without shifting the main image grid.
+  while the histogram stays visible below the image.
 - Flip one panel horizontally and vertically from More; verify only the display
   changes, stored data and ROI coordinates remain in the original `(row, col)`
   convention, and neighboring panels stay unchanged.
