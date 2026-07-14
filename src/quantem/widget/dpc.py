@@ -140,7 +140,7 @@ def center_of_mass(data, scan_shape=None, mask=None):
     # MPS raw chunks (MPSChunked4DSTEM or ChunkedFrames) -> Metal CoM kernel
     vi = getattr(data, "vi", None)
     if vi is None and hasattr(data, "chunks"):
-        from quantem.widget.kernels.compute.mps import ChunkedFrames
+        from quantem.gpu.compute.mps import ChunkedFrames
         data = ChunkedFrames(data)
         vi = data.vi
     if vi is not None:

@@ -36,9 +36,9 @@ def _resolve_backend(data):
         data = data.data
     # raw MPS chunks -> wrap so compute_backend sees a _is_gpu_frames source
     if hasattr(data, "chunks") and not getattr(data, "_is_gpu_frames", False):
-        from quantem.widget.kernels.compute.mps import ChunkedFrames
+        from quantem.gpu.compute.mps import ChunkedFrames
         data = ChunkedFrames(data)
-    from quantem.widget.kernels.compute.backends import compute_backend
+    from quantem.gpu.compute.backends import compute_backend
     return compute_backend(data)
 
 
