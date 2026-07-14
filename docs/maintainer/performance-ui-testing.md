@@ -278,12 +278,18 @@ Show2D:
 
 Show3D:
 
-- Current heavy Show3D export does not stream native detail tiles like Show2D.
-- A binned Show3D HTML export is a compact visual report, not a promise that
-  zooming returns exact native pixels.
-- If native Show3D pixels are required, test a live workflow or focused view
-  that can afford the native transfer.
-- Any display bin or export bin must be explicit in the UI/report.
+- Current heavy Show3D single-file export does not stream native detail tiles
+  like Show2D.
+- A Show3D folder export can preserve the native panel shape while keeping the
+  large frame stack beside the HTML. Treat this as the full-shape browser review
+  path, not as exact float32 source preservation unless the encoding says so.
+- A binned/downsampled Show3D HTML export is a compact visual report, not a
+  promise that zooming returns exact native pixels.
+- If exact backend arrays, fresh computation, or non-exported precision are
+  required, test a live workflow or focused view that can afford the native
+  transfer.
+- Any display bin, downsample, or export encoding must be explicit in the UI,
+  report, and final handoff.
 
 Show4DSTEM and ShowEDS:
 
