@@ -479,3 +479,30 @@ def test_crop_to_view_raises_for_galleries():
     w = Show2D([_image(64), _image(64)], verbose=False)
     with pytest.raises(NotImplementedError, match="single panel"):
         w.crop_to_view()
+
+
+def test_show2d_rich_panel_titles_keep_plain_labels_and_state():
+    """C1: rich spans color status words while plain labels stay usable."""
+    data = np.random.default_rng(12).random((2, 16, 16), dtype=np.float32)
+    widget = Show2D(
+        data,
+        labels=[
+            [
+                {"text": "BF denoise  "},
+                {"text": "low", "color": "#60a5fa"},
+                {"text": "  χ²="},
+                {"text": "0.5", "color": "#f59e0b"},
+            ],
+            "BF denoise mid",
+        ],
+        verbose=False,
+    )
+
+    assert widget.labels == ["BF denoise  low  χ²=0.5", "BF denoise mid"]
+    assert widget.panel_title_spans[0][1] == {"text": "low", "color": "#60a5fa"}
+    assert widget._resolve_panel_ref("BF denoise  low  χ²=0.5") == 0
+
+    restored = Show2D(data, verbose=False)
+    restored.load_state_dict(widget.state_dict())
+    assert restored.labels == widget.labels
+    assert restored.panel_title_spans == widget.panel_title_spans

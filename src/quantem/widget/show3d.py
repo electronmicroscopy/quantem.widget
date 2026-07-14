@@ -45,7 +45,12 @@ from quantem.widget.utils.recon_config import (
     _post_crop_from_quantem_config,
     _rotate_stack_inplane,
 )
-from quantem.widget.show2d import _reject_unknown_kwargs
+from quantem.widget.show2d import (
+    _expand_title_spans_for_flattened_labels,
+    _normalise_title_span_sequence,
+    _reject_unknown_kwargs,
+    _title_span_sequence_length,
+)
 from quantem.widget.utils.roi_geometry import roi_geometries
 from quantem.widget.utils.state_io import (
     resolve_widget_version,
@@ -960,6 +965,7 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     # Multi-Panel (side-by-side stacks, independent zoom by default with optional link)
     n_panels = traitlets.Int(1).tag(sync=True)
     panel_titles = traitlets.List(traitlets.Unicode()).tag(sync=True)
+    panel_title_spans = traitlets.List(default_value=[]).tag(sync=True)
     panel_width_px = traitlets.Int(0).tag(sync=True)
     shared_panel_source = traitlets.Bool(False).tag(sync=True)
     separate_panel_frames = traitlets.Bool(False).tag(sync=True)
@@ -2087,7 +2093,8 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         self,
         *data_args,
         labels: list[str] | None = None,
-        panel_titles: list[str] | None = None,
+        panel_titles: Sequence[str | Sequence[Mapping[str, object]] | Mapping[str, object] | None] | None = None,
+        panel_title_spans: Sequence[Sequence[Mapping[str, object]] | Mapping[str, object] | str | None] | None = None,
         panel_frame_labels: list[list[str]] | None = None,
         frame_metadata: Sequence[Mapping[str, Any]] | None = None,
         panel_frame_metadata: Sequence[Sequence[Mapping[str, Any]]] | None = None,
@@ -2276,10 +2283,27 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             pixel_size = float(samp)
         if units is not None:
             pixel_unit = units[0] if isinstance(units, (tuple, list)) else units
+        plain_panel_titles, title_spans_from_titles = _normalise_title_span_sequence(panel_titles)
+        explicit_plain_titles, explicit_title_spans = _normalise_title_span_sequence(panel_title_spans)
+        if plain_panel_titles is None and explicit_plain_titles is not None:
+            plain_panel_titles = explicit_plain_titles
+        raw_title_span_len = (
+            _title_span_sequence_length(panel_title_spans)
+            if panel_title_spans is not None
+            else (len(plain_panel_titles or []) if title_spans_from_titles else 0)
+        )
         data_args, panel_titles, n_pages, panels_per_page, resolved_page_labels, resolved_page_starred = _normalise_show3d_pages(
             data_args,
-            panel_titles=panel_titles,
+            panel_titles=plain_panel_titles,
             page_labels=page_labels,
+        )
+        raw_title_spans = explicit_title_spans or title_spans_from_titles
+        resolved_panel_title_spans = _expand_title_spans_for_flattened_labels(
+            raw_title_spans,
+            original_len=raw_title_span_len,
+            n_panels=len(panel_titles or []),
+            n_pages=n_pages,
+            panels_per_page=panels_per_page,
         )
         if link_contrast is None:
             link_contrast = n_pages <= 1
@@ -2324,6 +2348,7 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             self.panel_real_frames = list(panel_real_frames)
         with self.hold_sync():
             self._init_sync(data_args, labels=labels, panel_titles=panel_titles,
+                            panel_title_spans=resolved_panel_title_spans,
                             panel_frame_labels=panel_frame_labels,
                             frame_metadata=frame_metadata,
                             panel_frame_metadata=panel_frame_metadata,
@@ -2378,6 +2403,7 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
 
     def _init_sync(self, data_args: tuple, *, labels: list[str] | None,
                    panel_titles: list[str] | None,
+                   panel_title_spans: list[list[dict[str, str]]] | None,
                    panel_frame_labels: list[list[str]] | None,
                    frame_metadata: Sequence[Mapping[str, Any]] | None,
                    panel_frame_metadata: Sequence[Sequence[Mapping[str, Any]]] | None,
@@ -2796,6 +2822,13 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 self.panel_titles = list(panel_titles)
             self.starred = [-1]
             self.panel_order = []
+
+        if not self.panel_titles:
+            self.panel_titles = [f"Panel {i + 1}" for i in range(int(self.n_panels))]
+        if panel_title_spans and len(panel_title_spans) == int(self.n_panels):
+            self.panel_title_spans = list(panel_title_spans)
+        else:
+            self.panel_title_spans = []
 
         # Reject complex input - silently dropping the imaginary part on
         # ptychography probes was a real data-loss footgun. User should
@@ -3716,6 +3749,7 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             "dim_unit": self.dim_unit,
             "labels": list(self.labels),
             "panel_titles": list(self.panel_titles),
+            "panel_title_spans": list(self.panel_title_spans),
             "panel_frame_labels": [list(labels) for labels in self.panel_frame_labels],
             "frame_metadata": [dict(metadata) for metadata in self.frame_metadata],
             "panel_frame_metadata": [
@@ -4027,6 +4061,9 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             state.pop("starred")
         if "panel_titles" in state and isinstance(state["panel_titles"], list) and len(state["panel_titles"]) != int(self.n_panels):
             state.pop("panel_titles")
+        if "panel_title_spans" in state and isinstance(state["panel_title_spans"], list):
+            if len(state["panel_title_spans"]) not in (0, int(self.n_panels)):
+                state.pop("panel_title_spans")
         if "panel_cmaps" in state and isinstance(state["panel_cmaps"], list):
             panel_cmaps = [str(value) for value in state["panel_cmaps"]]
             if panel_cmaps and len(panel_cmaps) != int(self.n_panels):

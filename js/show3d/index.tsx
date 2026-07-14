@@ -122,6 +122,28 @@ type ReorderDragVisual = {
   offsetX: number;
   offsetY: number;
 };
+
+type RichTitleSpan = { text?: unknown; color?: unknown };
+
+function richTitlePlainText(spans: RichTitleSpan[] | undefined, fallback: string): string {
+  if (!Array.isArray(spans) || spans.length === 0) return fallback;
+  const text = spans.map((span) => String(span?.text ?? "")).join("");
+  return text || fallback;
+}
+
+function renderRichTitle(spans: RichTitleSpan[] | undefined, fallback: string): React.ReactNode {
+  if (!Array.isArray(spans) || spans.length === 0) return fallback;
+  return spans.map((span, idx) => {
+    const text = String(span?.text ?? "");
+    const color = typeof span?.color === "string" && span.color.trim() ? span.color : undefined;
+    return (
+      <span key={`title-span-${idx}`} style={color ? { color } : undefined}>
+        {text}
+      </span>
+    );
+  });
+}
+
 type ReorderDragStart = {
   x: number;
   y: number;
@@ -1764,6 +1786,7 @@ function Show3D() {
   const [dimSampling] = useModelState<number>("dim_sampling");
   const [dimUnit] = useModelState<string>("dim_unit");
   const [panelTitles] = useModelState<string[]>("panel_titles");
+  const [panelTitleSpans] = useModelState<RichTitleSpan[][]>("panel_title_spans");
   const [panelRealFrames] = useModelState<number[]>("panel_real_frames");
   const [starred, setStarred] = useModelState<number[]>("starred");
   const [hiddenPanels, setHiddenPanels] = useModelState<number[]>("hidden_panels");
@@ -1951,6 +1974,12 @@ function Show3D() {
   const panelLabel = React.useCallback((panel: number) => (
     (panelTitles && panelTitles[panel]) || `Panel ${panel + 1}`
   ), [panelTitles]);
+  const panelTitleContent = React.useCallback((panel: number) => (
+    renderRichTitle(panelTitleSpans?.[panel], panelLabel(panel))
+  ), [panelLabel, panelTitleSpans]);
+  const panelTitleText = React.useCallback((panel: number) => (
+    richTitlePlainText(panelTitleSpans?.[panel], panelLabel(panel))
+  ), [panelLabel, panelTitleSpans]);
   const setPanelHidden = React.useCallback((panel: number, hidden: boolean) => {
     if (panel < 0 || panel >= totalPanelCount) return;
     if (isPaged) {
@@ -12080,7 +12109,7 @@ function Show3D() {
               />
             )}
             {showPanelTitles !== false && (nPanels || 1) > 1 && visiblePanelIndices.map((panel, slot) => {
-              const titleText = panelTitles?.[panel];
+              const titleText = panelTitleText(panel);
               if (!titleText) return null;
               const n = Math.max(1, visiblePanelCount || 1);
               const cols = panelColsForCount(n);
@@ -12121,7 +12150,7 @@ function Show3D() {
                     overflowWrap: "anywhere",
                   }}
                 >
-                  {titleText}{frameLabel ? ` · ${frameLabel}` : ""} {shown}/{total}
+                  {panelTitleContent(panel)}{frameLabel ? ` · ${frameLabel}` : ""} {shown}/{total}
                 </Box>
               );
             })}

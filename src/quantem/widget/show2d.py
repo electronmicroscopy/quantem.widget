@@ -13,7 +13,7 @@ import tempfile
 import warnings
 from datetime import datetime, timezone
 from enum import StrEnum
-from typing import Any, Iterable, Self, Sequence
+from typing import Any, Iterable, Mapping, Self, Sequence
 
 import anywidget
 import ipywidgets
@@ -71,6 +71,101 @@ _DENOISE_STATE_ALIASES = {
 }
 
 _DEFAULT_FOLDER_PAGE_SIZE = 20
+
+
+def _normalise_title_spans(value: object) -> tuple[str, list[dict[str, str]] | None]:
+    """Return plain fallback text plus optional safe colored text spans."""
+    if value is None:
+        return "", None
+    if isinstance(value, str):
+        return value, None
+    if isinstance(value, Mapping):
+        text = "" if value.get("text") is None else str(value.get("text"))
+        span: dict[str, str] = {"text": text}
+        color = value.get("color")
+        if color not in (None, ""):
+            span["color"] = str(color)
+        return text, [span]
+    if isinstance(value, (list, tuple)):
+        spans: list[dict[str, str]] = []
+        plain_parts: list[str] = []
+        for idx, item in enumerate(value):
+            if not isinstance(item, Mapping):
+                raise TypeError(
+                    "rich panel title spans must be dictionaries like "
+                    f"{{'text': 'low', 'color': '#60a5fa'}}, got {type(item).__name__} "
+                    f"at span {idx}"
+                )
+            text = "" if item.get("text") is None else str(item.get("text"))
+            span = {"text": text}
+            color = item.get("color")
+            if color not in (None, ""):
+                span["color"] = str(color)
+            spans.append(span)
+            plain_parts.append(text)
+        return "".join(plain_parts), spans
+    return str(value), None
+
+
+def _normalise_title_span_sequence(
+    values: Sequence[object] | Mapping[str, object] | None,
+) -> tuple[list[str] | None, list[list[dict[str, str]]]]:
+    """Normalize a per-panel title sequence into plain labels plus spans."""
+    if values is None:
+        return None, []
+    if isinstance(values, Mapping):
+        values = [values]
+    elif (
+        isinstance(values, (list, tuple))
+        and values
+        and all(isinstance(item, Mapping) for item in values)
+    ):
+        values = [values]
+    plain: list[str] = []
+    rich: list[list[dict[str, str]]] = []
+    has_rich = False
+    for value in values:
+        text, spans = _normalise_title_spans(value)
+        plain.append(text)
+        rich.append(spans or [])
+        has_rich = has_rich or bool(spans)
+    return plain, rich if has_rich else []
+
+
+def _title_span_sequence_length(values: Sequence[object] | Mapping[str, object] | None) -> int:
+    """Return the number of panel titles represented by a rich-title input."""
+    if values is None:
+        return 0
+    if isinstance(values, Mapping):
+        return 1
+    if (
+        isinstance(values, (list, tuple))
+        and values
+        and all(isinstance(item, Mapping) for item in values)
+    ):
+        return 1
+    return len(values)
+
+
+def _expand_title_spans_for_flattened_labels(
+    spans: list[list[dict[str, str]]],
+    *,
+    original_len: int,
+    n_panels: int,
+    n_pages: int,
+    panels_per_page: int,
+) -> list[list[dict[str, str]]]:
+    """Broadcast rich title spans across paged panel layouts."""
+    if not spans:
+        return []
+    if len(spans) == n_panels:
+        return spans
+    if n_pages > 1 and panels_per_page > 0:
+        if original_len == panels_per_page and len(spans) == panels_per_page:
+            return [list(span) for _ in range(n_pages) for span in spans]
+        if original_len == n_panels and len(spans) == n_panels:
+            return spans
+    return spans
 
 
 def _rotation_to_quarter_turns(value: int | float) -> int:
@@ -1220,6 +1315,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     panel_order = traitlets.List(traitlets.Int(), default_value=[]).tag(sync=True)
     show_panel_titles = traitlets.Bool(True).tag(sync=True)
     panel_title_font_size = traitlets.Int(11).tag(sync=True)
+    panel_title_spans = traitlets.List(default_value=[]).tag(sync=True)
     gallery_gap_px = traitlets.Int(0).tag(sync=True)
     title = traitlets.Unicode("").tag(sync=True)
     show_title = traitlets.Bool(True).tag(sync=True)
@@ -1496,7 +1592,8 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     def __init__(
         self,
         data: np.ndarray | list[np.ndarray],
-        labels: list[str | None] = None,
+        labels: list[str | Sequence[Mapping[str, object]] | None] = None,
+        panel_title_spans: Sequence[Sequence[Mapping[str, object]] | Mapping[str, object] | str | None] | None = None,
         page_labels: Sequence[str | None] | None = None,
         title: str = "",
         ui_mode: UiMode = "interactive",
@@ -1666,10 +1763,27 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             )
             if not denoise_scope_supplied:
                 denoise_scope = "all" if filter_per_panel else "panel"
+        plain_labels, title_spans_from_labels = _normalise_title_span_sequence(labels)
+        explicit_plain_labels, explicit_title_spans = _normalise_title_span_sequence(panel_title_spans)
+        if plain_labels is None and explicit_plain_labels is not None:
+            plain_labels = explicit_plain_labels
+        raw_title_span_len = (
+            _title_span_sequence_length(panel_title_spans)
+            if panel_title_spans is not None
+            else (len(plain_labels or []) if title_spans_from_labels else 0)
+        )
         data, labels, n_pages, panels_per_page, resolved_page_labels, resolved_page_starred = _normalise_show2d_pages(
             data,
-            labels=labels,
+            labels=plain_labels,
             page_labels=page_labels,
+        )
+        raw_title_spans = explicit_title_spans or title_spans_from_labels
+        resolved_panel_title_spans = _expand_title_spans_for_flattened_labels(
+            raw_title_spans,
+            original_len=raw_title_span_len,
+            n_panels=len(labels or []),
+            n_pages=n_pages,
+            panels_per_page=panels_per_page,
         )
         panel_width_px = int(panel_width_px)
         if panel_width_px < 0:
@@ -1779,6 +1893,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 display_bin=display_bin, hidden_panels=hidden_panels, starred=starred,
                 panel_order=panel_order,
                 show_panel_titles=show_panel_titles, panel_title_font_size=panel_title_font_size,
+                panel_title_spans=resolved_panel_title_spans,
                 gallery_gap_px=gallery_gap_px,
                 verbose=verbose, state=state, _t0=_t0,
                 denoise=denoise, denoise_sigma=denoise_sigma,
@@ -1810,7 +1925,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                    link_zoom, link_pan, link_contrast, diff_mode, overlay, view_box,
                    pad_ratio, pad_fill_mode, pad_scope,
                    display_bin, hidden_panels, starred, panel_order, show_panel_titles,
-                   panel_title_font_size, gallery_gap_px, verbose, state, _t0,
+                   panel_title_font_size, panel_title_spans, gallery_gap_px, verbose, state, _t0,
                    denoise="none", denoise_sigma=4.0, denoise_bin=1,
                    denoise_scope="all", denoise_scope_explicit=False,
                    show_denoise=False,
@@ -2085,6 +2200,10 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         self.hidden_page_slots = []
         self.show_panel_titles = bool(show_panel_titles)
         self.panel_title_font_size = int(panel_title_font_size)
+        if panel_title_spans and len(panel_title_spans) == int(self.n_images):
+            self.panel_title_spans = list(panel_title_spans)
+        else:
+            self.panel_title_spans = []
         self.gallery_gap_px = int(gallery_gap_px)
         if starred is not None:
             self.set_starred_panels(starred)
@@ -4637,6 +4756,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             "panel_playback_fps": float(self.panel_playback_fps),
             "show_panel_titles": self.show_panel_titles,
             "panel_title_font_size": self.panel_title_font_size,
+            "panel_title_spans": list(self.panel_title_spans),
             "show_stats": self.show_stats,
             "debug": self.debug,
             "show_fft": self.show_fft,
@@ -5054,6 +5174,9 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         for key in ("pad_ratios", "pad_fill_modes"):
             if key in state and isinstance(state[key], list) and len(state[key]) != int(self.n_images):
                 state.pop(key)
+        if "panel_title_spans" in state and isinstance(state["panel_title_spans"], list):
+            if len(state["panel_title_spans"]) not in (0, int(self.n_images)):
+                state.pop("panel_title_spans")
         if "saved_view_states" in state:
             state["saved_view_states"] = self._normalize_saved_view_states(state["saved_view_states"])
         if "page_idx" in state:

@@ -118,6 +118,27 @@ function InfoTooltip({ text, theme = "dark" }: { text: React.ReactNode; theme?: 
   );
 }
 
+type RichTitleSpan = { text?: unknown; color?: unknown };
+
+function richTitlePlainText(spans: RichTitleSpan[] | undefined, fallback: string): string {
+  if (!Array.isArray(spans) || spans.length === 0) return fallback;
+  const text = spans.map((span) => String(span?.text ?? "")).join("");
+  return text || fallback;
+}
+
+function renderRichTitle(spans: RichTitleSpan[] | undefined, fallback: string): React.ReactNode {
+  if (!Array.isArray(spans) || spans.length === 0) return fallback;
+  return spans.map((span, idx) => {
+    const text = String(span?.text ?? "");
+    const color = typeof span?.color === "string" && span.color.trim() ? span.color : undefined;
+    return (
+      <span key={`title-span-${idx}`} style={color ? { color } : undefined}>
+        {text}
+      </span>
+    );
+  });
+}
+
 function KeyboardShortcuts({ items }: { items: [string, string][] }) {
   return (
     <Box component="table" sx={{ borderCollapse: "collapse", "& td": { py: 0.25, fontSize: 11, lineHeight: 1.3, verticalAlign: "top" }, "& td:first-of-type": { pr: 1.5, opacity: 0.7, fontFamily: "monospace", fontSize: 10, whiteSpace: "nowrap" } }}>
@@ -1467,6 +1488,7 @@ function Show2D() {
   const [isRgbFlags] = useModelState<boolean[]>("is_rgb");
   const isRgbPanel = React.useCallback((i: number) => !!(isRgbFlags && isRgbFlags[i]), [isRgbFlags]);
   const [labels] = useModelState<string[]>("labels");
+  const [panelTitleSpans] = useModelState<RichTitleSpan[][]>("panel_title_spans");
   const [starred, setStarred] = useModelState<number[]>("starred");
   const [hiddenPanels, setHiddenPanels] = useModelState<number[]>("hidden_panels");
   const [hiddenPageSlotsTrait, setHiddenPageSlotsTrait] = useModelState<number[] | undefined>("hidden_page_slots");
@@ -2626,6 +2648,12 @@ function Show2D() {
   const panelMenuTotal = isPaged ? activePanelCount : totalPanelCount;
   const allCurrentPanelsVisible = visibleImageCount === panelMenuTotal;
   const panelLabel = React.useCallback((idx: number) => labels?.[idx] || `Image ${idx + 1}`, [labels]);
+  const panelTitleContent = React.useCallback((idx: number) => (
+    renderRichTitle(panelTitleSpans?.[idx], panelLabel(idx))
+  ), [panelLabel, panelTitleSpans]);
+  const panelTitleText = React.useCallback((idx: number) => (
+    richTitlePlainText(panelTitleSpans?.[idx], panelLabel(idx))
+  ), [panelLabel, panelTitleSpans]);
   const pixelSizeForPanel = React.useCallback((idx: number) => {
     const perPanel = pixelSizes?.[idx];
     return perPanel && perPanel > 0 ? perPanel : pixelSize;
@@ -8305,7 +8333,7 @@ function Show2D() {
                       <Box
                         data-show2d-marker-color={panelMarkerColor(i)}
                         data-show2d-marker-style="around"
-                        title={`Panel marker ${panelMarkerColor(i)} · ${panelLabel(i)}`}
+                        title={`Panel marker ${panelMarkerColor(i)} · ${panelTitleText(i)}`}
                         sx={{
                           position: "absolute",
                           inset: 0,
@@ -8319,7 +8347,7 @@ function Show2D() {
                       <Box
                         data-show2d-marker-color={panelMarkerColor(i)}
                         data-show2d-marker-style="left"
-                        title={`Panel marker ${panelMarkerColor(i)} · ${panelLabel(i)}`}
+                        title={`Panel marker ${panelMarkerColor(i)} · ${panelTitleText(i)}`}
                         sx={{
                           position: "absolute",
                           left: 0,
@@ -8397,7 +8425,7 @@ function Show2D() {
                           zIndex: 2,
                         }}
                       >
-                        {panelLabel(i)}
+                        {panelTitleContent(i)}
                       </Box>
                     )}
                     {panelChromeVisible && (panelFrameCounts?.[i] || 1) > 1 && (
@@ -8728,7 +8756,7 @@ function Show2D() {
                                 textOverflow: "ellipsis",
                               }}
                             >
-                              FFT · {panelLabel(i)}
+                              FFT · {panelTitleContent(i)}
                             </Box>
                           )}
                           {fftMetricsEnabled && galleryFftQuality[i] && (

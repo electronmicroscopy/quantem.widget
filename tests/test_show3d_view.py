@@ -205,3 +205,48 @@ def test_multi_panel_rgb_export_clone_keeps_panels():
         assert (cs[0, :, :16, 0] == 255).all() and (cs[0, :, 16:, 1] == 255).all()
     finally:
         clone.close()
+
+
+def test_show3d_rich_panel_titles_keep_plain_titles_and_state():
+    """C1: Show3D panel title spans preserve plain title fallbacks."""
+    stack_a = np.random.default_rng(13).random((3, 12, 12), dtype=np.float32)
+    stack_b = np.random.default_rng(14).random((3, 12, 12), dtype=np.float32)
+    widget = Show3D(
+        stack_a,
+        stack_b,
+        panel_titles=[
+            [
+                {"text": "BF denoise  "},
+                {"text": "low", "color": "#60a5fa"},
+                {"text": "  χ²="},
+                {"text": "0.5", "color": "#f59e0b"},
+            ],
+            "BF denoise mid",
+        ],
+        verbose=False,
+    )
+
+    assert widget.panel_titles == ["BF denoise  low  χ²=0.5", "BF denoise mid"]
+    assert widget.panel_title_spans[0][1] == {"text": "low", "color": "#60a5fa"}
+
+    restored = Show3D(stack_a, stack_b, verbose=False)
+    restored.load_state_dict(widget.state_dict())
+    assert restored.panel_titles == widget.panel_titles
+    assert restored.panel_title_spans == widget.panel_title_spans
+
+
+def test_show3d_single_panel_title_spans_are_one_title():
+    """C2: a single list of span dictionaries represents one rich title."""
+    stack = np.random.default_rng(15).random((2, 10, 10), dtype=np.float32)
+    widget = Show3D(
+        stack,
+        panel_title_spans=[
+            {"text": "raw vs "},
+            {"text": "denoise", "color": "#34d399"},
+        ],
+        verbose=False,
+    )
+
+    assert widget.panel_titles == ["raw vs denoise"]
+    assert len(widget.panel_title_spans) == 1
+    assert widget.panel_title_spans[0][1] == {"text": "denoise", "color": "#34d399"}

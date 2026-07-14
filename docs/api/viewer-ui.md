@@ -39,6 +39,7 @@ Show3D(
 | `show_stats` | Show1D, Show2D, Show3D, Show3DSlices, Show4DSTEM, ShowDiffraction | Show or hide mean/min/max/std readouts where the widget renders or computes them. |
 | `show_panel_titles` | Show2D, Show3D | Show labels on individual image/volume panels. |
 | `panel_title_font_size` | Show2D, Show3D | Font size for per-panel labels. |
+| `panel_title_spans` | Show2D, Show3D | Optional structured colored text spans for panel-title status words; plain `labels` / `panel_titles` strings still work. |
 | `show_scale_bar` | Show2D, Show3D, Show3DSlices, Show4DSTEM, ShowEDS | Show or hide scale bars. Some widgets keep the saved-state trait name `scale_bar_visible` for compatibility. |
 | `show_resize_handles` | Show3D | Show or hide resize handles. Show2D hides resize handles automatically when controls are collapsed. |
 | `show_zoom_indicator` | Show3D | Show or hide the zoom readout. |
@@ -71,3 +72,43 @@ widget = Show3D(data, ui_mode="minimal")
 Prefer explicit overrides instead of new one-off names. For example, use
 `show_scale_bar=False` rather than widget-specific spellings like
 `hide_scalebar=True`.
+
+## Colored status words in panel titles
+
+Use colored title spans when borders identify a group but the title itself
+needs a status word, such as low / mid / high dose, under / cal / over
+regularization, raw vs denoised, or a χ² value. Spans are structured
+dictionaries, not HTML, so exported offline HTML remains theme-safe and
+XSS-safe.
+
+```python
+from quantem.widget import Show2D, Show3D
+
+status_titles = [
+    [
+        {"text": "BF denoise  "},
+        {"text": "low", "color": "#60a5fa"},
+        {"text": "  χ²="},
+        {"text": "0.5", "color": "#f59e0b"},
+    ],
+    [
+        {"text": "BF denoise  "},
+        {"text": "mid", "color": "#34d399"},
+        {"text": "  χ²="},
+        {"text": "1.0", "color": "#34d399"},
+    ],
+    [
+        {"text": "BF denoise  "},
+        {"text": "high", "color": "#f87171"},
+        {"text": "  χ²="},
+        {"text": "1.8", "color": "#f87171"},
+    ],
+]
+
+Show2D(images, labels=status_titles, marker_colors=["#60a5fa", "#34d399", "#f87171"])
+Show3D(stack_a, stack_b, stack_c, panel_titles=status_titles)
+```
+
+The plain fallback text is still synced as the normal panel label/title, so
+panel menus, title-based API lookups, notebook state, and `export_html(...)`
+continue to behave like ordinary strings.
