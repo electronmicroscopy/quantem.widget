@@ -8,4 +8,9 @@ move to the new package.
 from __future__ import annotations
 
 from quantem.gpu.io.hdf5 import *  # noqa: F401,F403
-from quantem.gpu.io.hdf5 import __all__, __version__  # noqa: F401
+from quantem.gpu.io.hdf5 import (  # noqa: F401
+    __all__,
+    __version__,
+    _clip_to_uint8,
+    _clip_to_uint8_count,
+)
