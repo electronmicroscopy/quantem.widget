@@ -17,7 +17,8 @@ around a real question from the microscope room:
   regularization sweeps, convergence checks, and slice-count comparisons.
 - **Advanced Show2D** - configure dense comparison galleries with rich math
   titles, local annotations, geometric overlays, inset plots, panel identity
-  frames, presentation mode, and export-ready state.
+  frames, publication SVG typography, pixel-perfect gutters, presentation mode,
+  and export-ready state.
 - **Full-resolution Show3D folder viewers** - keep the microscope/reconstruction
   pixels at native shape while the browser loads a nearby data file instead of
   one giant HTML blob.

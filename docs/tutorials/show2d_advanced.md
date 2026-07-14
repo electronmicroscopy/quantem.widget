@@ -260,6 +260,233 @@ Keep inset plots small and use them to support the image, not to replace a
 dedicated analysis figure. If the plot needs axes, legends, or detailed labels,
 put the full plot below the widget and use the inset as the quick panel cue.
 
+## Publication SVG Figures
+
+Use these controls when `Show2D` is the source of a manuscript figure rather
+than only an exploratory viewer. The live widget, exported HTML, and exported
+SVG all use the same state: panel title placement, local labels, scale-bar
+typography, inter-panel gutters, and vector overlays.
+
+### Match The Published PDF Font
+
+The drift-paper figures use a Helvetica-like sans-serif stack. On Linux,
+`Nimbus Sans` or `Liberation Sans` usually substitutes for Helvetica/Arial.
+On macOS, `Helvetica` or `Arial` is normally available. Put the preferred
+family first and include fallbacks:
+
+```python
+PUBLICATION_FONT = (
+    "Nimbus Sans, Helvetica, Arial, "
+    "Liberation Sans, DejaVu Sans, sans-serif"
+)
+```
+
+Use the same stack in every text layer that should match the paper:
+
+```python
+TITLE_STYLE = {
+    "font_family": PUBLICATION_FONT,
+    "font_weight": 700,
+    "fg": "#ffffff",
+    "outline_color": "#000000",
+    "outline_width": 2.2,
+    "align": "left",
+    "x": 0.035,
+    "y": 0.035,
+    "anchor": "top-left",
+}
+
+SCALE_STYLE = {
+    "font_family": PUBLICATION_FONT,
+    "font_size": 16,
+    "font_weight": 700,
+    "color": "#ffffff",
+    "outline_color": "#000000",
+    "outline_width": 1.3,
+    "bar_height": 5,
+    "label_gap": 5,
+    "offset": (0, -8),
+}
+```
+
+`font_family` is a CSS/SVG font-family string. If the published PDF embeds
+editable text, inspect the PDF fonts and put that family first. If the PDF
+text was converted to paths, use the figure-generation notebook or the closest
+installed Helvetica-like family.
+
+To check a published PDF from a terminal:
+
+```bash
+pdffonts path/to/published_figure.pdf
+```
+
+If the PDF reports `Helvetica`, `Arial`, `NimbusSans`, or another embedded
+font, put that font name first in `PUBLICATION_FONT`. If the PDF has no text
+fonts, the labels were probably outlined or rasterized before publication; in
+that case match the source figure script or use the closest installed
+Helvetica-like family. The browser, exported SVG, and Illustrator can only use
+fonts installed on the machine that opens the file, so keep common fallbacks in
+the stack.
+
+You can also ask the local font system which installed font will be used:
+
+```bash
+fc-match "Helvetica"
+fc-match "Nimbus Sans"
+```
+
+### Change The Font Of Panel Labels
+
+Whole-panel labels use `labels` for the text and `panel_title_style` for the
+font and placement:
+
+```python
+w = Show2D(
+    panels,
+    labels=[
+        "a 0° scan",
+        "b 90° scan",
+        "c combined",
+        "d 0° scan corrected",
+        "e 90° scan corrected",
+        "f corrected combined",
+    ],
+    ncols=3,
+    show_panel_titles=True,
+    panel_title_font_size=16,
+    panel_title_style=TITLE_STYLE,
+)
+```
+
+Use `x` and `y` as relative panel coordinates from 0 to 1. With
+`anchor="top-left"`, `x=0.035`, `y=0.035` places the title near the upper-left
+corner like a typical publication panel label. Use `offset=(dx, dy)` for final
+pixel nudges after the relative placement is correct.
+
+### Put Multiple Labels Inside The Same Panel
+
+Use `panel_annotations` for local labels such as `Ba+Ti` and `Sr`. These labels
+are independent from the panel title, so they can sit below the title or over a
+specific region of the image. They are exported as editable SVG text.
+
+```python
+Show2D(
+    panels,
+    labels=[
+        "a 0° XEDS HAADF",
+        "b 0° corrected XEDS HAADF",
+        "c corrected 0°/90° ref",
+        "d 0° Ba+Ti XEDS",
+        "e 0° corrected Ba+Ti XEDS",
+        "f composite on 0° HAADF",
+    ],
+    ncols=3,
+    panel_title_font_size=16,
+    panel_title_style=TITLE_STYLE,
+    panel_annotations={
+        "f composite on 0° HAADF": [
+            {
+                "text": "Ba+Ti",
+                "x": 0.20,
+                "y": 0.15,
+                "anchor": "center",
+                "align": "center",
+                "font_family": PUBLICATION_FONT,
+                "font_size": 15,
+                "font_weight": 800,
+                "fg": "#ff4dff",
+                "outline_color": "#000000",
+                "outline_width": 1.8,
+                "variant": "plain",
+            },
+            {
+                "text": "Sr",
+                "x": 0.80,
+                "y": 0.15,
+                "anchor": "center",
+                "align": "center",
+                "font_family": PUBLICATION_FONT,
+                "font_size": 15,
+                "font_weight": 800,
+                "fg": "#58ff58",
+                "outline_color": "#000000",
+                "outline_width": 1.8,
+                "variant": "plain",
+            },
+        ],
+    },
+)
+```
+
+For local annotations, `x=0.0, y=0.0` is the panel upper-left and
+`x=1.0, y=1.0` is the lower-right. Start by placing labels where the chemistry
+or feature appears, then use `anchor` and `align` to control whether the text
+extends left, right, or centered from that point.
+
+### Match Black Manuscript Gutters And Outer Frame
+
+For pixel-perfect manuscript grids, use the same value for the internal gutter
+and the outside frame. `Show2D` does this automatically when both
+`gallery_gap_px` and `gallery_gap_color` are set:
+
+```python
+w = Show2D(
+    panels,
+    labels=labels,
+    ncols=3,
+    gallery_gap_px=2,
+    gallery_gap_color="#000000",
+)
+```
+
+With `gallery_gap_px=2` and a non-empty `gallery_gap_color`, `Show2D` places
+the first panel at `(2, 2)` in SVG coordinates, inserts 2 pixels between
+panels, and adds a 2-pixel frame around the outside. Panel frame strokes use
+the same color so Illustrator does not show a light seam over the black gutter.
+
+### Put The Scale Bar On Only One Panel
+
+`scale_bar_panels` accepts panel indices or labels. Use this when the paper
+only shows a scale bar on one representative panel:
+
+```python
+w = Show2D(
+    panels,
+    labels=labels,
+    sampling=0.0105,
+    units="nm",
+    scale_bar_panels=["f corrected combined"],
+    scale_bar_length=2.0,
+    scale_bar_label="2 nm",
+    scale_bar_style=SCALE_STYLE,
+    show_zoom_indicator=False,
+)
+```
+
+Use `scale_bar_length` in the same physical units as `sampling`. Use
+`scale_bar_label` when the text should be exactly what appears in the paper,
+for example `"500 pm"` instead of an automatically formatted label.
+
+### Export To Illustrator
+
+```python
+svg_path = w.export_svg("figure2_show2d.svg")
+html_path = w.export_html("figure2_show2d.html", mode="single", encoding="uint8")
+```
+
+In the SVG, microscope image panels are embedded rasters. Labels, scale bars,
+overlays, inset plots, group markers, colorbars, and panel frames are SVG
+objects. In Illustrator, edit text and line work directly; keep the image
+rasters as measured data unless you intentionally replace them.
+
+Use this quick geometry check when exact borders matter:
+
+```python
+svg = svg_path.read_text()
+assert '<image x="2" y="2"' in svg
+assert 'stroke="#000000" stroke-width="1"' in svg
+```
+
 ## Paging And Local Stacks
 
 Use a list of 3D arrays when each panel has its own local frame axis. This is

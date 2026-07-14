@@ -42,6 +42,8 @@ no console error, no NaN frame).
 | Panel title visibility | `show_panel_titles`, `panel_title_font_size`, `panel_title_style` | Per-panel labels show/hide, resize, and optionally get title chrome such as background, border, and padding |
 | Rich panel title spans | `panel_title_spans` | Optional structured `text` / `math` / `color` spans for symbols such as `λ` and `χ²` in panel titles, panel menus, stats, saved state, and exported HTML |
 | Scale bar toggle | `show_scale_bar` (`scale_bar_visible` in saved state) | Calibrated bar shows/hides (needs `pixel_size > 0`) |
+| Scale bar style | `scale_bar_panels`, `scale_bar_length`, `scale_bar_label`, `scale_bar_style` | Restrict scale bars to selected panels and control exact publication text, font, outline, label spacing, offset, and bar thickness |
+| Gallery gutters and frame | `gallery_gap_px`, `gallery_gap_color` | Adds fixed inter-panel gutters; when a color is set, the same thickness is also used as the outside frame and panel-frame stroke for pixel-perfect SVG grids |
 | Pan (drag) | per-image pan | Image translates; with `link_pan` all panels move together |
 | Zoom (wheel) | `initial_zoom`, `zoom_row`, `zoom_col` | Zooms about the cursor |
 | Smooth toggle | `smooth` | Bilinear vs nearest sampling |
@@ -232,6 +234,176 @@ For Illustrator or Inkscape, use the Export menu's `SVG` item or call
 panels remain embedded rasters, while panel titles, annotations, geometric
 overlays, inset plots, scale bars, colorbars, and group markers are editable
 SVG objects that match the current figure state.
+
+## Publication SVG typography and layout keys
+
+Use these keys when `Show2D` should produce a publication figure that can go
+directly to Illustrator or Inkscape.
+
+### Panel title fonts
+
+`labels` set the panel title text. `panel_title_font_size` sets the size, and
+`panel_title_style` controls typography and placement:
+
+```python
+PUBLICATION_FONT = (
+    "Nimbus Sans, Helvetica, Arial, "
+    "Liberation Sans, DejaVu Sans, sans-serif"
+)
+
+Show2D(
+    panels,
+    labels=["a 0° scan", "b 90° scan", "c combined"],
+    panel_title_font_size=16,
+    panel_title_style={
+        "font_family": PUBLICATION_FONT,
+        "font_weight": 700,
+        "fg": "#ffffff",
+        "outline_color": "#000000",
+        "outline_width": 2.2,
+        "x": 0.035,
+        "y": 0.035,
+        "anchor": "top-left",
+        "align": "left",
+    },
+)
+```
+
+To match a published PDF, inspect its embedded fonts and put the matching
+family first:
+
+```bash
+pdffonts path/to/published_figure.pdf
+fc-match "Helvetica"
+```
+
+If the PDF text was outlined or rasterized, no editable text font may be
+reported; use the source figure script or the closest installed Helvetica-like
+family instead.
+
+Accepted `panel_title_style` keys:
+
+| Key | Meaning |
+| --- | --- |
+| `font_family` | CSS/SVG font-family stack, for example `"Helvetica, Arial, sans-serif"` |
+| `font_weight` | Numeric or named weight, for example `700` or `"bold"` |
+| `fg` | Text fill color |
+| `outline_color`, `outline_width` | Text stroke used for publication contrast |
+| `x`, `y` | Relative panel coordinates from 0 to 1 |
+| `anchor` | `top-left`, `top-center`, `top-right`, `center`, `bottom-left`, etc. |
+| `offset` | Pixel nudge `(dx, dy)` after relative placement |
+| `align` | Text alignment fallback when `x`/`y` are not supplied |
+| `bg`, `border_color`, `border_width`, `pad_x`, `pad_y`, `radius`, `opacity`, `max_width` | Optional title chrome |
+
+### Local annotation fonts
+
+Use `panel_annotations` for multiple labels inside the same image panel. Each
+annotation can have its own font, color, outline, and position:
+
+```python
+Show2D(
+    panels,
+    labels=["f composite on 0° HAADF"],
+    panel_annotations={
+        "f composite on 0° HAADF": [
+            {
+                "text": "Ba+Ti",
+                "x": 0.20,
+                "y": 0.15,
+                "anchor": "center",
+                "align": "center",
+                "font_family": PUBLICATION_FONT,
+                "font_size": 15,
+                "font_weight": 800,
+                "fg": "#ff4dff",
+                "outline_color": "#000000",
+                "outline_width": 1.8,
+                "variant": "plain",
+            },
+            {
+                "text": "Sr",
+                "x": 0.80,
+                "y": 0.15,
+                "anchor": "center",
+                "align": "center",
+                "font_family": PUBLICATION_FONT,
+                "font_size": 15,
+                "font_weight": 800,
+                "fg": "#58ff58",
+                "outline_color": "#000000",
+                "outline_width": 1.8,
+                "variant": "plain",
+            },
+        ],
+    },
+)
+```
+
+Use `x` and `y` to attach a label to a physical region of the panel. Use
+`box=[left, top, width, height]` when the label describes an area. Use
+`variant="plain"` for text-only publication labels, or `badge`, `pill`,
+`outline`, and `callout` for report-style labels.
+
+### Scale bar fonts and placement
+
+`scale_bar_panels` limits the bar to one or more panels. Values can be panel
+indices or label strings. `scale_bar_length` is in the physical unit implied by
+`sampling` and `units`; `scale_bar_label` overrides the displayed text.
+
+```python
+Show2D(
+    panels,
+    labels=labels,
+    sampling=0.0105,
+    units="nm",
+    scale_bar_panels=["f corrected combined"],
+    scale_bar_length=2.0,
+    scale_bar_label="2 nm",
+    scale_bar_style={
+        "font_family": PUBLICATION_FONT,
+        "font_size": 16,
+        "font_weight": 700,
+        "color": "#ffffff",
+        "outline_color": "#000000",
+        "outline_width": 1.3,
+        "bar_height": 5,
+        "label_gap": 5,
+        "offset": (0, -8),
+    },
+    show_zoom_indicator=False,
+)
+```
+
+Accepted `scale_bar_style` keys:
+
+| Key | Meaning |
+| --- | --- |
+| `font_family`, `font_size`, `font_weight` | Scale-bar label typography |
+| `color` | Bar and label fill color |
+| `outline_color`, `outline_width` | Label text stroke |
+| `shadow_color` | Fallback label/bar shadow when no outline is used |
+| `bar_height` | Bar thickness in SVG/browser CSS pixels |
+| `label_gap` | Pixels between label baseline and bar |
+| `offset` | Pixel nudge `(dx, dy)` for the whole scale bar |
+
+### Pixel-perfect gutters
+
+Use `gallery_gap_px` and `gallery_gap_color` for manuscript grids:
+
+```python
+Show2D(
+    panels,
+    labels=labels,
+    ncols=3,
+    gallery_gap_px=2,
+    gallery_gap_color="#000000",
+)
+```
+
+When `gallery_gap_color` is non-empty, the SVG and browser layout use the same
+thickness for internal gutters and the outside frame. A 2-pixel black grid puts
+the first image at `(2, 2)`, the next image after `panel_width + 2`, and uses
+black panel-frame strokes so Illustrator does not show a light seam.
 
 ## Which denoise filter should I use?
 
