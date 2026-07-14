@@ -63,9 +63,8 @@ def test_show3d_lightweight_save_snapshot_is_fast_and_compact():
 
 def test_show3d_frame_server_mount_defers_initial_native_frame_wire():
     """C1: remote users see controls before the first full frame payload."""
-    rng = np.random.default_rng(921)
     widget = Show3D(
-        rng.random((4, 128, 128), dtype=np.float32),
+        np.zeros((2, 2049, 2049), dtype=np.float32),
         offline=False,
         save_state=False,
         title="defer initial frame wire",
@@ -75,9 +74,9 @@ def test_show3d_frame_server_mount_defers_initial_native_frame_wire():
     assert widget.frame_bytes == b""
     assert widget.frame_seq == 0
 
-    widget.goto(1)
+    widget.goto(0)
 
-    assert len(widget.frame_bytes) == 128 * 128 * 4
+    assert len(widget.frame_bytes) == 2049 * 2049 * 4
     assert widget.frame_seq == 1
 
 
@@ -106,6 +105,8 @@ def test_show3d_lazy_panel_folders_mount_without_preloading_stack(tmp_path):
     assert widget.frame_bytes == b""
     assert widget.width == 20
     assert widget.height == 8
+    assert widget._lazy_panel_cache_bytes == 0
+    assert len(widget._lazy_panel_cache) == 0
 
     widget.goto(2)
 
@@ -163,6 +164,78 @@ def test_show2d_local_stack_fft_cache_and_playback_contract():
     assert "protectedKeys" in local_stack
 
 
+def test_show2d_hidden_panels_skip_hot_render_paths():
+    """C1: hiding gallery panels removes them from zoom/detail/render work."""
+    show2d = (ROOT / "js" / "show2d" / "index.tsx").read_text(encoding="utf-8")
+
+    assert "visibleImageIndicesRef.current = visibleImageIndices;" in show2d
+    assert "engine.renderSlotsToImageBitmap(visibleIndices, bitmapRanges, ls)" in show2d
+    assert "for (const i of visibleImageIndices) {\n        if (isRgbFlags && isRgbFlags[i]) continue; // painted directly above" in show2d
+    assert "const indices = visibleImageIndices.filter(i => i >= 0 && i < capturedNImages);" in show2d
+    assert "const signature = visibleImageIndices.map((i) => {" in show2d
+    assert "for (const i of visibleImageIndices) {\n        const win = currentDetailWindow(i);" in show2d
+    assert "for (const i of visibleImageIndices) {\n      const canvas = canvasRefs.current[i];" in show2d
+    assert "if (hiddenPanelSet.has(panel)) return null;" in show2d
+    assert "hiddenPanels && hiddenPanels.includes(panel)" not in show2d
+
+
+def test_show2d_batch_selection_and_marker_frame_contract():
+    """C1: users can shift-select panels, batch-hide, and mark full frames."""
+    show2d = (ROOT / "js" / "show2d" / "index.tsx").read_text(encoding="utf-8")
+    show3d = (ROOT / "js" / "show3d" / "index.tsx").read_text(encoding="utf-8")
+
+    assert 'useModelState<number[]>("selected_panels")' in show2d
+    assert "event.shiftKey" in show2d
+    assert "event.metaKey || event.ctrlKey" in show2d
+    assert "setPanelsHidden(selectedVisiblePanels, true)" in show2d
+    assert "for (const panel of batchPanels) next[panel] = value;" in show2d
+    assert 'data-show2d-marker-style="around"' in show2d
+    assert 'data-show3d-marker-style={markerAround ? "around" : "left"}' in show3d
+    assert 'useModelState<PanelTitleStyle>("panel_title_style")' in show2d
+    assert 'useModelState<PanelTitleStyle>("panel_title_style")' in show3d
+    assert 'useModelState<MarkerMap>("row_markers")' in show2d
+    assert 'useModelState<MarkerMap>("row_markers")' in show3d
+    assert 'useModelState<PanelAnnotationSpec[][]>("panel_annotations")' in show2d
+    assert 'useModelState<PanelAnnotationSpec[][]>("panel_annotations")' in show3d
+    assert "data-show2d-row-marker" in show2d
+    assert "data-show2d-col-marker" in show2d
+    assert "data-show2d-panel-title" in show2d
+    assert "data-show2d-panel-annotation" in show2d
+    assert "data-show3d-row-marker" in show3d
+    assert "data-show3d-col-marker" in show3d
+    assert "data-show3d-panel-title" in show3d
+    assert "data-show3d-panel-annotation" in show3d
+    assert "panelAnnotationSx(annotation)" in show2d
+    assert "panelAnnotationSx(annotation)" in show3d
+    assert "canDownloadCurrentHtml" in show3d
+    assert "handleStandaloneHtmlDownload" in show3d
+    assert 'mode === "hug"' in show2d
+    assert 'mode === "hug"' in show3d
+    assert 'sx.width = "fit-content"' in show2d
+    assert 'sx.width = "fit-content"' in show3d
+    assert 'mode === "panel" ? (defaults.width || "calc(100% - 56px)")' in show2d
+    assert 'mode === "panel" ? (defaults.width || "calc(100% - 56px)")' in show3d
+    assert "inset 0 0 0 3px ${panelMarkerColor(i)}, inset 0 0 0 5px rgba(0,0,0,0.9)" in show2d
+    assert "inset 0 0 0 3px ${color}, inset 0 0 0 5px rgba(0,0,0,0.9)" in show3d
+
+
+def test_show2d_fft_gallery_quality_labels_stay_readable():
+    """C1: every Show2D FFT panel keeps SNR/peak text visible in-gallery."""
+    show2d = (ROOT / "js" / "show2d" / "index.tsx").read_text(encoding="utf-8")
+
+    assert "quantem-fft-panel-label-stack" in show2d
+    assert "quantem-fft-quality-label" in show2d
+    assert "FFT quality for ${panelLabel(i)}" in show2d
+    assert 'bgcolor: "rgba(0,0,0,0.58)"' in show2d
+    assert 'maxWidth: "calc(100% - 16px)"' in show2d
+    assert 'textOverflow: "ellipsis"' in show2d
+    assert 'alignItems: "flex-start"' in show2d
+    assert 'zIndex: 6' in show2d
+    assert "data-show2d-fft-resize-handle" in show2d
+    assert "Resize FFT panels" in show2d
+    assert "e.stopPropagation();" in show2d
+
+
 def test_show3d_playback_style_menu_stays_next_to_playback_controls():
     """Show3D play-style choices belong in the playback row, not top More."""
     show3d = (ROOT / "js" / "show3d" / "index.tsx").read_text(encoding="utf-8")
@@ -178,10 +251,30 @@ def test_show3d_playback_style_menu_stays_next_to_playback_controls():
     assert 'useModelState<number[]>("playback_path")' in show3d
     assert 'producing "Path 1"' in show3d
     assert "Loop, Bounce, fps, and range stay user-controlled" in show3d
-    assert "title=\"More tools: Stats, Denoise, Filter\"" in show3d
+    assert "title=\"More tools: Stats, Denoise, Filter, Sub-pixel alignment, Color, Flip, Compare\"" in show3d
     assert "Playback Dynamics" not in show3d
     assert "Hold Key Frame" not in show3d
     assert "Focus Range" not in show3d
+
+
+def test_show3d_loop_off_stops_bounce_playback_contract():
+    """C1: Loop is the only repeat switch, even when Bounce is enabled."""
+    show3d = (ROOT / "js" / "show3d" / "index.tsx").read_text(encoding="utf-8")
+
+    assert "Loop remains the master repeat control" in show3d
+    assert "it must not keep ping-ponging forever" in show3d
+    assert "if (pi >= pp.length) {\n            if (!c.loop) { setPlaying(false); return; }" in show3d
+    assert "if (next > rangeEnd) {\n            if (!c.loop) { setPlaying(false); return; }" in show3d
+    assert "else if (next < rangeStart) {\n            if (!c.loop) { setPlaying(false); return; }" in show3d
+
+
+def test_show3d_frontend_playback_budget_is_sixty_fps():
+    """C1: 60 fps Show3D playback stays reachable in the browser controls."""
+    show3d = (ROOT / "js" / "show3d" / "index.tsx").read_text(encoding="utf-8")
+
+    assert "const MAX_PLAYBACK_FPS = 60;" in show3d
+    assert "effectiveFps >= 60" in show3d
+    assert "Restores 60 fps on the GPU-cached multi-panel path" in show3d
 
 
 def test_show3d_filtered_playback_waits_for_cached_display_frames():
@@ -199,7 +292,7 @@ def test_show3d_filtered_playback_waits_for_cached_display_frames():
     )
     assert "warmPlaybackDisplayFrame(next + warmDirection, next, frame)" in show3d
     assert (
-        "}) || browserFilterOnRef.current || frequencyFilterIsActive"
+        "}) || browserFilterOnRef.current || frequencyFilterIsActive || !!subpixelAlignEnabled"
         in show3d
     )
     assert (
@@ -211,6 +304,66 @@ def test_show3d_filtered_playback_waits_for_cached_display_frames():
     assert 'data-show3d-playback-count="true"' in show3d
     assert "if (!offline && playing && frameTransformActive()) return;" in show3d
     assert "visible \"twitch\"" in show3d
+
+
+def test_show2d_show3d_colormap_sharing_is_advanced_more_menu_state():
+    """Per-panel colormap editing stays discoverable but off by default."""
+    show2d = (ROOT / "js" / "show2d" / "index.tsx").read_text(encoding="utf-8")
+    show3d = (ROOT / "js" / "show3d" / "index.tsx").read_text(encoding="utf-8")
+
+    # C1: a scientist usually wants one colormap across comparison panels, so
+    # the main toolbar should only show Color. Advanced per-panel color is
+    # unlocked from More without adding a noisy "Link Color" toolbar label.
+    for source in (show2d, show3d):
+        assert "Color shared" in source
+        assert "Toggle shared panel colormap" in source
+        assert "Shared keeps one colormap for every panel" in source
+        assert "setPanelCmaps([])" in source
+    assert "const colorShared = !(panelCmaps && panelCmaps.length === nImages" in show2d
+    assert "const colorShared = normalizedPanelCmaps.length !== Math.max(1, nPanels || 1)" in show3d
+    assert "setSelectedCmap(String(e.target.value))" in show2d
+    assert "setCmapForPanel(" in show3d
+    assert "Link Color" not in show2d
+    assert "Link Color" not in show3d
+
+
+def test_show3d_subpixel_alignment_lives_in_more_and_repaints_display_only():
+    """Sub-pixel alignment should be a simple More-menu display transform."""
+    show3d = (ROOT / "js" / "show3d" / "index.tsx").read_text(encoding="utf-8")
+    show3d_py = (ROOT / "src" / "quantem" / "widget" / "show3d.py").read_text(
+        encoding="utf-8"
+    )
+
+    # C1: a scientist reviews a drifting single-panel stack, enables alignment
+    # from More, picks a reference frame, then scrubs/plays without rewriting a
+    # notebook cell or mutating the stored stack.
+    assert 'useModelState<boolean>("subpixel_align_enabled")' in show3d
+    assert 'useModelState<number>("subpixel_align_reference")' in show3d
+    assert "Sub-pixel align" in show3d
+    assert "Needs a single-panel client-side stack" in show3d
+    assert "estimateSubpixelShift(reference, frame, width, height, gpu)" in show3d
+    assert "shiftFrameBilinear(" in show3d
+    assert "subpixelAlignFrameForIndex(idx, averagedFrameForIndex" in show3d
+    assert "subpixelAlignFrameForIndex(refIdx, averagedFrameForIndex" in show3d
+    assert "refreshCurrentDisplayFrameForTransform" in show3d
+    assert "More → Align button can" in show3d
+    assert "Ready · press Align to use frame" in show3d
+    assert "Compute alignment now and repaint the current frame" in show3d
+    assert 'subpixelAlignShiftsRef.current ? "Re-align" : "Align"' in show3d
+    assert "near-zero row shifts on an intentionally drifted stack" in show3d
+    assert "current row" in show3d
+    assert "max ${maxRow.toFixed(1)}/${maxCol.toFixed(1)} px" in show3d
+    assert "const paddedW = nextPow2(width);" in show3d
+    assert "return { real: realCopy, imag: imagCopy, width: paddedW, height: paddedH }" in show3d
+    assert "const row = wrappedPeakOffset(peakRow, corr.height) + rowDelta;" in show3d
+    assert (
+        "}) || browserFilterOnRef.current || frequencyFilterIsActive || !!subpixelAlignEnabled"
+        in show3d
+    )
+    assert "raw data stays unchanged" in show3d
+    assert "subpixel_align_enabled = traitlets.Bool(False).tag(sync=True)" in show3d_py
+    assert "subpixel_align_reference = traitlets.Int(0).tag(sync=True)" in show3d_py
+    assert "subpixel_align: bool = False" in show3d_py
 
 
 def test_show3d_remote_scrub_transport_instrumentation_contract():
@@ -227,6 +380,9 @@ def test_show3d_remote_scrub_transport_instrumentation_contract():
     assert "_scrub_preview_info" in show3d_py
     assert "[Show3D scrub preview]" in show3d_py
     assert "release the slider or zoom/settle the view to request native full resolution" in show3d_py
+    assert "_image_header_shape_and_range" in show3d_py
+    assert "placeholder = np.zeros((1, 1, 1), dtype=np.float32)" in show3d_py
+    assert "source_shape=(height, width)" in show3d_py
     assert "pythonPrepareMs" in show3d_py
     assert "pythonEncodeMs" in show3d_py
     assert "pythonTraitSetMs" in show3d_py
@@ -237,6 +393,9 @@ def test_show3d_remote_scrub_transport_instrumentation_contract():
     assert 'setScrubPreviewRequest(JSON.stringify({' in show3d_js
     assert 'kind: "scrubPreview"' in show3d_js
     assert 'if (!transformActive && requestScrubPreview(next)) return;' in show3d_js
+    assert "requestCommFramePreview" in show3d_js
+    assert 'requestCommFramePreview(normalized, "panel-server-fallback")' in show3d_js
+    assert 'requestCommFramePreview(normalized, "frame-server-fallback")' in show3d_js
     assert "release the slider or zoom/settle the view to request native full resolution" in show3d_js
     assert "const commitSlice = (idx: number) =>" in show3d_js
     assert "setSliceIdx(next);" in show3d_js
@@ -247,6 +406,17 @@ def test_show3d_remote_scrub_transport_instrumentation_contract():
     assert "_defer_initial_frame_wire" in show3d_py
     assert "can mount controls immediately" in show3d_py
     assert "if (offline || !frameServerUrl || playing) return;" in show3d_js
+    assert "data-show3d-native-cache-status" in show3d_js
+    assert "Native cache" in show3d_js
+    assert "Preview ready" in show3d_js
+    assert "Reduced preview frame" in show3d_js
+    assert "INITIAL_NATIVE_PREVIEW_DELAY_MS" in show3d_js
+    assert 'requestCommFramePreview(normalized, "initial-native-preview")' in show3d_js
+    assert "PANEL_GPU_READY_TIMEOUT_MS" in show3d_js
+    assert "fetchSeparatePanelPackedFrameFromServer" in show3d_js
+    assert "cpu-packed-panel-native" in show3d_js
+    assert "if (separatePanelFrames) return false;" in show3d_js
+    assert "mainOffscreenSourcePanelWidthRef.current !== undefined && !rawFrameDataRef.current" in show3d_js
 
 
 def test_show3d_bottom_fft_layout_always_stacks_below_main_panel():

@@ -15,9 +15,169 @@ around a real question from the microscope room:
   acquisitions appear in it.
 - **Comparing reconstructions** - panels with independent frame stacks for
   regularization sweeps, convergence checks, and slice-count comparisons.
+- **Local panel annotations** - label multiple local regions inside Show2D or
+  Show3D panels without turning those notes into whole-panel titles.
 - **Show2D inset plots** - put a small calibration curve inside each image
   panel, so a denoise or reconstruction sweep carries the metric that explains
   why the scientist should trust that panel.
+
+## Label local regions inside panels
+
+Use whole-panel `labels` / `panel_titles` for panel identity, `marker_colors`
+or group frames for visual identity, and `panel_annotations` for local notes
+inside a panel. Annotations are useful for ROI names, dose/status badges,
+χ² labels, residual warnings, and callouts that should stay attached to the
+image when the widget is saved or exported.
+
+Each annotation is JSON-safe and survives notebook state plus
+`export_html(...)`. The default style is a readable badge over scientific
+images. Built-in variants are `badge`, `pill`, `plain`, `outline`, and
+`callout`.
+
+### Show2D: multiple labels on one panel
+
+`panel_annotations` can be a dictionary keyed by panel index or panel label.
+Each value can be one annotation or a list of annotations.
+
+```python
+import numpy as np
+
+from quantem.widget import Show2D
+
+rng = np.random.default_rng(12)
+yy, xx = np.mgrid[-1:1:192j, -1:1:192j]
+base = np.exp(-((xx * 1.3) ** 2 + (yy * 0.9) ** 2) * 3)
+images = np.stack(
+    [
+        base + 0.15 * np.sin(3 * np.pi * xx),
+        base + 0.12 * np.cos(4 * np.pi * yy),
+        base - 0.35,
+    ]
+).astype("float32")
+
+Show2D(
+    images,
+    labels=["raw", "filtered", "residual"],
+    ncols=3,
+    marker_colors=["#60a5fa", "#34d399", "#f87171"],
+    marker_style="around",
+    panel_annotations={
+        "raw": [
+            {"text": "input", "position": "top-left", "variant": "pill"},
+            {
+                "spans": [
+                    {"text": "ROI "},
+                    {"text": "A", "color": "#60a5fa"},
+                ],
+                "box": [0.18, 0.25, 0.30, 0.16],
+                "variant": "callout",
+                "bg": "rgba(0,0,0,0.58)",
+                "border_color": "#60a5fa",
+            },
+            {
+                "text": "same region",
+                "box": [0.18, 0.43, 0.30, 0.12],
+                "variant": "outline",
+                "border_color": "#facc15",
+            },
+        ],
+        "filtered": {
+            "text": "point label",
+            "x": 0.68,
+            "y": 0.32,
+            "anchor": "center",
+            "bg": "rgba(255,255,255,0.55)",
+            "fg": "#111827",
+        },
+        "residual": {
+            "text": "check residual",
+            "position": "bottom-center",
+            "variant": "plain",
+            "font_size": 13,
+        },
+    },
+)
+```
+
+### Show2D: single-panel shorthand
+
+For a single image, pass a list directly. Every item labels the only panel, so
+you do not need to write `panel=0`.
+
+```python
+Show2D(
+    images[0],
+    panel_annotations=[
+        {"text": "single panel", "position": "top-left", "variant": "pill"},
+        {
+            "text": "no panel= needed",
+            "position": "bottom-right",
+            "variant": "outline",
+            "border_color": "#facc15",
+        },
+    ],
+)
+```
+
+### Show3D: target panels by title
+
+For multi-panel Show3D, a flat list is often easiest. Include `panel=` on each
+annotation and target either a panel index or a `panel_titles` value.
+
+```python
+from quantem.widget import Show3D
+
+Show3D(
+    raw_stack,
+    denoised_stack,
+    residual_stack,
+    panel_titles=["raw stack", "denoised stack", "residual stack"],
+    marker_style="around",
+    panel_annotations=[
+        {"panel": "raw stack", "text": "input", "position": "top-left"},
+        {
+            "panel": "raw stack",
+            "text": "same panel",
+            "position": "bottom-left",
+            "variant": "outline",
+            "border_color": "#facc15",
+        },
+        {
+            "panel": "residual stack",
+            "spans": [
+                {"text": "χ² "},
+                {"text": "high", "color": "#f87171"},
+            ],
+            "x": 0.5,
+            "y": 0.18,
+            "anchor": "top-center",
+        },
+        {
+            "panel": "residual stack",
+            "text": "region box",
+            "box": [0.56, 0.48, 0.32, 0.16],
+            "variant": "callout",
+            "bg": "rgba(0,0,0,0.65)",
+        },
+    ],
+)
+```
+
+### Placement and style reference
+
+Use corner placement for badges, normalized points for callouts tied to a
+feature, and normalized boxes when the label should occupy a local region.
+
+```python
+{"text": "corner", "position": "top-left"}
+{"text": "point", "x": 0.62, "y": 0.35, "anchor": "center"}
+{"text": "region", "box": [0.20, 0.25, 0.30, 0.18]}
+```
+
+Common style keys are `bg`, `fg`, `border_color`, `border_width`,
+`font_size`, `font_weight`, `pad_x`, `pad_y`, `radius`, `opacity`, `align`,
+`max_width`, and `class_name`. `class_name` is useful when exported HTML needs
+project-specific CSS or when a browser test needs a stable selector.
 
 ## Add inset plots to Show2D panels
 

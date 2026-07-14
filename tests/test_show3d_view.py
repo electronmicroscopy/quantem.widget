@@ -157,6 +157,210 @@ def test_playback_dynamics_state_round_trips():
     assert restored._data.shape == stack.shape
 
 
+def test_subpixel_alignment_state_round_trips():
+    # A scientist can turn on browser-side drift alignment from the API, save
+    # the notebook/widget state, and reopen with the same reference choice.
+    # The raw stack shape stays unchanged; alignment is a display transform.
+    stack = np.random.default_rng(166).random((6, 16, 16), dtype=np.float32)
+    widget = Show3D(
+        stack,
+        subpixel_align=True,
+        subpixel_align_reference=3,
+        verbose=False,
+    )
+
+    restored = Show3D(stack, verbose=False)
+    restored.load_state_dict(widget.state_dict())
+
+    assert widget.subpixel_align_enabled is True
+    assert widget.subpixel_align_reference == 3
+    assert restored.subpixel_align_enabled is True
+    assert restored.subpixel_align_reference == 3
+    assert restored._data.shape == stack.shape
+
+
+def test_show3d_rich_panel_titles_keep_plain_titles_and_state():
+    """C1: Show3D panel title spans preserve plain title fallbacks."""
+    stack_a = np.random.default_rng(13).random((3, 12, 12), dtype=np.float32)
+    stack_b = np.random.default_rng(14).random((3, 12, 12), dtype=np.float32)
+    widget = Show3D(
+        stack_a,
+        stack_b,
+        panel_titles=[
+            [
+                {"text": "BF denoise  "},
+                {"text": "low", "color": "#60a5fa"},
+                {"text": "  χ²="},
+                {"text": "0.5", "color": "#f59e0b"},
+            ],
+            "BF denoise mid",
+        ],
+        verbose=False,
+    )
+
+    assert widget.panel_titles == ["BF denoise  low  χ²=0.5", "BF denoise mid"]
+    assert widget.panel_title_spans[0][1] == {"text": "low", "color": "#60a5fa"}
+
+    restored = Show3D(stack_a, stack_b, verbose=False)
+    restored.load_state_dict(widget.state_dict())
+    assert restored.panel_titles == widget.panel_titles
+    assert restored.panel_title_spans == widget.panel_title_spans
+
+
+def test_show3d_single_panel_title_spans_are_one_title():
+    """C2: a single list of span dictionaries represents one rich title."""
+    stack = np.random.default_rng(15).random((2, 10, 10), dtype=np.float32)
+    widget = Show3D(
+        stack,
+        panel_title_spans=[
+            {"text": "raw vs "},
+            {"text": "denoise", "color": "#34d399"},
+        ],
+        verbose=False,
+    )
+
+    assert widget.panel_titles == ["raw vs denoise"]
+    assert len(widget.panel_title_spans) == 1
+    assert widget.panel_title_spans[0][1] == {"text": "denoise", "color": "#34d399"}
+
+
+def test_show3d_panel_title_style_and_group_markers_round_trip():
+    """C1: title chrome and group markers are portable Show3D state."""
+    rng = np.random.default_rng(23)
+    panels = [rng.random((3, 10, 10), dtype=np.float32) for _ in range(4)]
+    widget = Show3D(
+        *panels,
+        panel_titles=["A", "B", "C", "D"],
+        max_cols=2,
+        panel_title_style={
+            "bg": "rgba(0,0,0,0.72)",
+            "fg": "#ffffff",
+            "border_color": "#60a5fa",
+            "border_width": 1,
+            "pad_x": 6,
+            "pad_y": 2,
+            "radius": 2,
+            "max_width": "hug",
+        },
+        row_markers={0: "#60a5fa"},
+        col_markers={1: "#f59e0b"},
+        panel_groups=[
+            {"panels": [0, 1], "color": "#22c55e", "label": "raw"},
+            {"start": 2, "end": 3, "color": "#d946ef", "label": "denoised"},
+        ],
+        verbose=False,
+    )
+
+    restored = Show3D(*panels, verbose=False)
+    restored.load_state_dict(widget.state_dict())
+
+    assert restored.panel_title_style == widget.panel_title_style
+    assert restored.row_markers == {"0": "#60a5fa"}
+    assert restored.col_markers == {"1": "#f59e0b"}
+    assert restored.panel_groups == [
+        {"panels": [0, 1], "color": "#22c55e", "label": "raw"},
+        {"panels": [2, 3], "color": "#d946ef", "label": "denoised"},
+    ]
+
+
+def test_show3d_panel_annotations_accept_flat_panel_targets():
+    """C1: multi-panel stack annotations can target the same panel repeatedly."""
+    rng = np.random.default_rng(25)
+    panels = [rng.random((3, 10, 10), dtype=np.float32) for _ in range(3)]
+    widget = Show3D(
+        *panels,
+        panel_titles=["raw", "filtered", "residual"],
+        panel_annotations=[
+            {"panel": "raw", "text": "input", "position": "top-left"},
+            {"panel": 0, "text": "same panel", "position": "bottom-left", "variant": "outline"},
+            {
+                "panel": 2,
+                "spans": [{"text": "χ² ", "color": "#fff"}, {"text": "high", "color": "#f87171"}],
+                "x": 0.5,
+                "y": 0.2,
+                "anchor": "top-center",
+                "class": "chi2-status",
+            },
+        ],
+        verbose=False,
+    )
+
+    restored = Show3D(*panels, panel_titles=["raw", "filtered", "residual"], verbose=False)
+    restored.load_state_dict(widget.state_dict())
+
+    assert len(restored.panel_annotations[0]) == 2
+    assert restored.panel_annotations[0][1]["variant"] == "outline"
+    assert restored.panel_annotations[2][0]["text"] == "χ² high"
+    assert restored.panel_annotations[2][0]["class_name"] == "chi2-status"
+
+
+def test_show3d_panel_groups_validate_panel_indices():
+    """C1: invalid rectangular panel groups fail before export."""
+    rng = np.random.default_rng(24)
+    panels = [rng.random((3, 10, 10), dtype=np.float32) for _ in range(2)]
+
+    with pytest.raises(ValueError, match="outside the Show3D panel range"):
+        Show3D(
+            *panels,
+            panel_groups=[{"panels": [0, 2], "color": "#22c55e"}],
+            verbose=False,
+        )
+
+
+def test_show3d_playback_accepts_sixty_fps():
+    # C1: a remote movie reviewer requests 60 fps playback, expect Show3D to
+    # preserve that target instead of silently clamping to the old 30 fps cap.
+    stack = np.random.default_rng(60).random((3, 8, 8), dtype=np.float32)
+    widget = Show3D(stack, fps=60, verbose=False)
+    too_high = Show3D(stack, fps=120, verbose=False)
+
+    assert widget.fps == pytest.approx(60.0)
+    assert too_high.fps == pytest.approx(60.0)
+
+
+def test_show3d_compare_markers_histogram_and_flip_state_round_trip():
+    # C1: point-defect comparison controls are public state, not only a
+    # transient frontend menu. The raw stack remains unchanged.
+    stack = np.random.default_rng(171).random((5, 12, 12), dtype=np.float32)
+    widget = Show3D(
+        stack,
+        compare_mode="blink",
+        compare_pair=(0, 4),
+        blink_fps=4,
+        diff_cmap="magenta-green",
+        compare_background="dark",
+        marker_colors=["green"],
+        marker_style="around",
+        rotation=90,
+        rotations=[0, 90, 180, 270, 0],
+        rotation_scope="frame",
+        contrast_preset="1-99",
+        show_histogram_advanced=True,
+        flip_horizontal=True,
+        flip_vertical=True,
+        verbose=False,
+    )
+
+    restored = Show3D(stack, verbose=False)
+    restored.load_state_dict(widget.state_dict())
+
+    assert restored.compare_mode == "blink"
+    assert restored.compare_pair == [0, 4]
+    assert restored.blink_fps == pytest.approx(4)
+    assert restored.diff_cmap == "magenta-green"
+    assert restored.compare_background == "dark"
+    assert restored.marker_colors == ["green"]
+    assert restored.marker_style == "around"
+    assert restored.image_rotation == 1
+    assert restored.rotation_scope == "frame"
+    assert restored.frame_rotations == [0, 1, 2, 3, 0]
+    assert restored.contrast_preset == "1-99"
+    assert restored.show_histogram_advanced is True
+    assert restored.flip_horizontal is True
+    assert restored.flip_vertical is True
+    assert restored._data.shape == stack.shape
+
+
 def test_export_html_refuses_oversized_single_file(tmp_path):
     # A scientist exports a big float32 color movie. A single HTML that large
     # fails to open under Chrome file://, so export_html refuses and names the

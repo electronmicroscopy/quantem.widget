@@ -479,3 +479,102 @@ def test_crop_to_view_raises_for_galleries():
     w = Show2D([_image(64), _image(64)], verbose=False)
     with pytest.raises(NotImplementedError, match="single panel"):
         w.crop_to_view()
+
+
+def test_show2d_rich_panel_titles_keep_plain_labels_and_state():
+    """C1: rich spans color status words while plain labels stay usable."""
+    data = np.random.default_rng(12).random((2, 16, 16), dtype=np.float32)
+    widget = Show2D(
+        data,
+        labels=[
+            [
+                {"text": "BF denoise  "},
+                {"text": "low", "color": "#60a5fa"},
+                {"text": "  χ²="},
+                {"text": "0.5", "color": "#f59e0b"},
+            ],
+            "BF denoise mid",
+        ],
+        verbose=False,
+    )
+
+    assert widget.labels == ["BF denoise  low  χ²=0.5", "BF denoise mid"]
+    assert widget.panel_title_spans[0][1] == {"text": "low", "color": "#60a5fa"}
+    assert widget._resolve_panel_ref("BF denoise  low  χ²=0.5") == 0
+
+    restored = Show2D(data, verbose=False)
+    restored.load_state_dict(widget.state_dict())
+    assert restored.labels == widget.labels
+    assert restored.panel_title_spans == widget.panel_title_spans
+
+
+def test_show2d_panel_title_style_and_group_markers_round_trip():
+    """C1: panel title chrome and row/column markers survive saved state."""
+    data = np.random.default_rng(22).random((4, 12, 12), dtype=np.float32)
+    widget = Show2D(
+        data,
+        labels=["A", "B", "C", "D"],
+        ncols=2,
+        panel_title_style={
+            "bg": "rgba(0,0,0,0.72)",
+            "fg": "#ffffff",
+            "border_color": "#60a5fa",
+            "border_width": 1,
+            "pad_x": 6,
+            "pad_y": 2,
+            "radius": 2,
+            "max_width": "hug",
+        },
+        row_markers={0: "#60a5fa"},
+        col_markers={1: "#f59e0b"},
+        verbose=False,
+    )
+
+    restored = Show2D(data, verbose=False)
+    restored.load_state_dict(widget.state_dict())
+
+    assert restored.panel_title_style == widget.panel_title_style
+    assert restored.row_markers == {"0": "#60a5fa"}
+    assert restored.col_markers == {"1": "#f59e0b"}
+
+
+def test_show2d_panel_annotations_accept_multiple_labels_per_panel():
+    """C1: arbitrary panel annotations round-trip as JSON-safe state."""
+    data = np.random.default_rng(24).random((3, 12, 12), dtype=np.float32)
+    widget = Show2D(
+        data,
+        labels=["raw", "filtered", "residual"],
+        panel_annotations={
+            "raw": [
+                {"text": "low dose", "position": "top-left", "variant": "pill"},
+                {
+                    "spans": [{"text": "ROI ", "color": "#fff"}, {"text": "A", "color": "#60a5fa"}],
+                    "box": [0.20, 0.25, 0.32, 0.18],
+                    "class_name": "roi-a-label",
+                    "bg": "rgba(0,0,0,0.55)",
+                    "font_size": 12,
+                },
+            ],
+            2: {"text": "residual", "x": 0.5, "y": 0.85, "anchor": "bottom-center"},
+        },
+        verbose=False,
+    )
+
+    restored = Show2D(data, labels=["raw", "filtered", "residual"], verbose=False)
+    restored.load_state_dict(widget.state_dict())
+
+    assert len(restored.panel_annotations[0]) == 2
+    assert restored.panel_annotations[0][0]["variant"] == "pill"
+    assert restored.panel_annotations[0][1]["class_name"] == "roi-a-label"
+    assert restored.panel_annotations[0][1]["box"] == [0.2, 0.25, 0.32, 0.18]
+    assert restored.panel_annotations[2][0]["anchor"] == "bottom-center"
+
+    single = Show2D(
+        data[0],
+        panel_annotations=[
+            {"text": "first", "position": "top-left"},
+            {"text": "second", "position": "bottom-right"},
+        ],
+        verbose=False,
+    )
+    assert [item["text"] for item in single.panel_annotations[0]] == ["first", "second"]
