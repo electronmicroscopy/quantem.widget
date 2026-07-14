@@ -954,6 +954,8 @@ interface HistogramProps {
   vminPct: number;
   vmaxPct: number;
   onRangeChange: (min: number, max: number) => void;
+  onRangePreview?: (min: number, max: number) => void;
+  commitOnChange?: boolean;
   width?: number;
   height?: number;
   theme?: "light" | "dark";
@@ -968,6 +970,8 @@ interface HistogramProps {
 
 const Histogram = React.memo(function Histogram({
   data, vminPct, vmaxPct, onRangeChange,
+  onRangePreview,
+  commitOnChange = true,
   width = 110, height = 40, theme = "dark",
   dataMin = 0, dataMax = 1, pinBinsToRange = true, ariaHidden = false,
   bins: precomputedBins = null,
@@ -977,7 +981,10 @@ const Histogram = React.memo(function Histogram({
   const minLabelRef = React.useRef<HTMLElement | null>(null);
   const maxLabelRef = React.useRef<HTMLElement | null>(null);
   const onRangeChangeRef = React.useRef(onRangeChange);
+  const onRangePreviewRef = React.useRef(onRangePreview);
   const pendingRangeRef = React.useRef<[number, number] | null>(null);
+  const previewRangeRef = React.useRef<[number, number] | null>(null);
+  const [previewRange, setPreviewRange] = React.useState<[number, number] | null>(null);
   const rangeRafRef = React.useRef<number | null>(null);
   // Bins source priority: GPU-precomputed > CPU memoized scan. The CPU path
   // is an O(N) pass over 16.8 M Float32 at 4k (89% of scrub cost in profiling)
@@ -1061,6 +1068,37 @@ const Histogram = React.memo(function Histogram({
   React.useEffect(() => {
     onRangeChangeRef.current = onRangeChange;
   }, [onRangeChange]);
+  React.useEffect(() => {
+    onRangePreviewRef.current = onRangePreview;
+  }, [onRangePreview]);
+  React.useEffect(() => {
+    if (commitOnChange) return;
+    const active = previewRangeRef.current;
+    if (
+      active &&
+      Math.abs(active[0] - vminPct) < 0.01 &&
+      Math.abs(active[1] - vmaxPct) < 0.01
+    ) {
+      previewRangeRef.current = null;
+      setPreviewRange(null);
+    }
+  }, [commitOnChange, vminPct, vmaxPct]);
+  const updatePreviewRange = React.useCallback((next: [number, number]) => {
+    if (commitOnChange) {
+      onRangeChangeRef.current(next[0], next[1]);
+      return;
+    }
+    previewRangeRef.current = next;
+    setPreviewRange(next);
+    applyRangePreview(next);
+    onRangePreviewRef.current?.(next[0], next[1]);
+  }, [applyRangePreview, commitOnChange]);
+  const commitRangePreview = React.useCallback((next: [number, number]) => {
+    previewRangeRef.current = next;
+    setPreviewRange(next);
+    applyRangePreview(next);
+    onRangeChangeRef.current(next[0], next[1]);
+  }, [applyRangePreview]);
   const flushRangePreview = React.useCallback(() => {
     if (rangeRafRef.current != null) {
       window.cancelAnimationFrame(rangeRafRef.current);
@@ -1069,10 +1107,9 @@ const Histogram = React.memo(function Histogram({
     const pending = pendingRangeRef.current;
     pendingRangeRef.current = null;
     if (pending) {
-      applyRangePreview(pending);
-      onRangeChangeRef.current(pending[0], pending[1]);
+      commitRangePreview(pending);
     }
-  }, [applyRangePreview]);
+  }, [commitRangePreview]);
   React.useEffect(() => () => {
     if (rangeRafRef.current != null) window.cancelAnimationFrame(rangeRafRef.current);
   }, []);
@@ -1093,7 +1130,8 @@ const Histogram = React.memo(function Histogram({
           const pending = pendingRangeRef.current;
           if (pending) {
             applyRangePreview(pending);
-            onRangeChangeRef.current(pending[0], pending[1]);
+            if (commitOnChange) onRangeChangeRef.current(pending[0], pending[1]);
+            else onRangePreviewRef.current?.(pending[0], pending[1]);
           }
         });
       }
@@ -1110,6 +1148,7 @@ const Histogram = React.memo(function Histogram({
 
   const sliderInset = 4;
   const sliderWidth = Math.max(1, width - sliderInset * 2);
+  const sliderValue = previewRange ?? [vminPct, vmaxPct];
 
   return (
     <Box sx={{ display: "flex", flexDirection: "column", gap: 0, width, overflow: "visible" }}>
@@ -1141,10 +1180,21 @@ const Histogram = React.memo(function Histogram({
         sx={{ position: "absolute", left: sliderInset, top: height - 1, width: sliderWidth, height: 8, display: "flex", alignItems: "flex-start", cursor: "grab", zIndex: 2, overflow: "visible" }}
       >
         <Slider
-          value={[vminPct, vmaxPct]}
+          value={sliderValue}
           onChange={(_, v) => {
             const [newMin, newMax] = v as number[];
-            onRangeChange(Math.min(newMin, newMax - 1), Math.max(newMax, newMin + 1));
+            updatePreviewRange([
+              Math.min(newMin, newMax - 1),
+              Math.max(newMax, newMin + 1),
+            ]);
+          }}
+          onChangeCommitted={(_, v) => {
+            if (commitOnChange) return;
+            const [newMin, newMax] = v as number[];
+            commitRangePreview([
+              Math.min(newMin, newMax - 1),
+              Math.max(newMax, newMin + 1),
+            ]);
           }}
           min={0} max={100} size="small"
           valueLabelDisplay="auto" valueLabelFormat={formatValue}
@@ -1948,6 +1998,12 @@ function Show3D() {
   const themedMenuProps = {
     ...upwardMenuProps,
     PaperProps: { sx: { bgcolor: themeColors.controlBg, color: themeColors.text, border: `1px solid ${themeColors.border}`, fontFamily: UI_FONT, "& .MuiMenuItem-root": { fontFamily: "inherit" } } },
+  };
+  const themedFastMenuProps = {
+    ...themedMenuProps,
+    keepMounted: true,
+    transitionDuration: 0,
+    MenuListProps: { dense: true },
   };
 
   // Model state (synced with Python)
@@ -5202,6 +5258,9 @@ function Show3D() {
   const [imageDataRange, setImageDataRange] = React.useState<{ min: number; max: number }>({ min: 0, max: 1 });
   const [panelHistogramData, setPanelHistogramData] = React.useState<(Float32Array | null)[]>([]);
   const [panelDataRanges, setPanelDataRanges] = React.useState<{ min: number; max: number }[]>([]);
+  const imageHistogramPreviewPctRef = React.useRef<[number, number] | null>(null);
+  const panelHistogramPreviewPctRef = React.useRef<Map<number, [number, number]>>(new Map());
+  const histogramPreviewPaintRafRef = React.useRef<number | null>(null);
   const perPanelHistogramEnabled = (nPanels || 1) > 1 && !linkContrast;
 
   const updatePanelState = (panel: number, patch: Partial<PanelState>) => {
@@ -8713,8 +8772,10 @@ function Show3D() {
       const panelStateRange = !linkContrast && Math.max(1, nPanels || 1) > 1
         ? panelState
         : null;
-      const loPct = panelStateRange ? panelStateRange.imageVminPct : imageVminPct;
-      const hiPct = panelStateRange ? panelStateRange.imageVmaxPct : imageVmaxPct;
+      const panelPreview = panelHistogramPreviewPctRef.current.get(panelIdx) ?? null;
+      const sharedPreview = imageHistogramPreviewPctRef.current;
+      const loPct = panelStateRange ? (panelPreview?.[0] ?? panelStateRange.imageVminPct) : (sharedPreview?.[0] ?? imageVminPct);
+      const hiPct = panelStateRange ? (panelPreview?.[1] ?? panelStateRange.imageVmaxPct) : (sharedPreview?.[1] ?? imageVmaxPct);
       const loByte = Math.max(0, Math.min(255, Math.round((Number(loPct) || 0) * 2.55)));
       const hiByte = Math.max(0, Math.min(255, Math.round((Number(hiPct) || 100) * 2.55)));
       const byteSpan = Math.max(1, hiByte - loByte);
@@ -8911,6 +8972,85 @@ function Show3D() {
     paintSidecarU8ViewportToContext,
   ]);
 
+  const paintHistogramPreviewSidecar = React.useCallback((reason = "hist-preview") => {
+    if (
+      !offline ||
+      !sidecarMode ||
+      !sidecarRamReady ||
+      isRgb ||
+      canvasW <= 0 ||
+      canvasH <= 0
+    ) {
+      return;
+    }
+    if (!sidecarCompositeReadyRef.current && !sidecarGpuReadyRef.current) return;
+    sidecarDisplayCacheDirtyRef.current = true;
+    setGpuDisplayVisible(false);
+    const n = Math.max(1, Math.round(nSlices || 1));
+    const drawIdx = ((Math.round(playbackIdxRef.current || liveSliceIdx || 0) % n) + n) % n;
+    drawSidecarBitmapFrame(drawIdx, false, reason);
+    updatePlaybackLiveControls(drawIdx);
+    const debug = show3dPerfDebug();
+    if (debug) {
+      debug.sidecarDisplayStyleDirty = true;
+      debug.sidecarDisplayStyleImmediateFrame = drawIdx;
+      debug.sidecarHistogramPreview = true;
+    }
+  }, [
+    canvasH,
+    canvasW,
+    drawSidecarBitmapFrame,
+    isRgb,
+    liveSliceIdx,
+    nSlices,
+    offline,
+    setGpuDisplayVisible,
+    sidecarMode,
+    sidecarRamReady,
+    updatePlaybackLiveControls,
+  ]);
+
+  const scheduleHistogramPreviewPaint = React.useCallback((reason = "hist-preview") => {
+    if (histogramPreviewPaintRafRef.current !== null) return;
+    histogramPreviewPaintRafRef.current = window.requestAnimationFrame(() => {
+      histogramPreviewPaintRafRef.current = null;
+      paintHistogramPreviewSidecar(reason);
+    });
+  }, [paintHistogramPreviewSidecar]);
+
+  React.useEffect(() => () => {
+    if (histogramPreviewPaintRafRef.current !== null) {
+      window.cancelAnimationFrame(histogramPreviewPaintRafRef.current);
+      histogramPreviewPaintRafRef.current = null;
+    }
+  }, []);
+
+  React.useEffect(() => {
+    const preview = imageHistogramPreviewPctRef.current;
+    if (
+      preview &&
+      Math.abs(preview[0] - imageVminPct) < 0.01 &&
+      Math.abs(preview[1] - imageVmaxPct) < 0.01
+    ) {
+      imageHistogramPreviewPctRef.current = null;
+    }
+  }, [imageVminPct, imageVmaxPct]);
+
+  React.useEffect(() => {
+    const previews = panelHistogramPreviewPctRef.current;
+    if (previews.size === 0) return;
+    for (const [panel, preview] of Array.from(previews.entries())) {
+      const state = panelStates[panel];
+      if (
+        state &&
+        Math.abs(preview[0] - state.imageVminPct) < 0.01 &&
+        Math.abs(preview[1] - state.imageVmaxPct) < 0.01
+      ) {
+        previews.delete(panel);
+      }
+    }
+  }, [panelStates]);
+
   React.useEffect(() => {
     const dbg = show3dPerfDebug();
     if (!dbg) return;
@@ -9094,6 +9234,7 @@ function Show3D() {
           d.sidecarCompositeSource = "u8-viewport";
           d.sidecarDisplayStyleDirty = false;
           d.sidecarDisplayStyleKey = sidecarDisplayStyleKey;
+          d.sidecarHistogramPreview = false;
           d.lastRenderPath = "sidecar-u8-viewport-cache-ready";
         }
       } catch (err) {
@@ -15940,11 +16081,11 @@ function Show3D() {
                       nPanels > 1 ? Math.max(0, cursorInfo?.panelIdx ?? visiblePanelIndices[0] ?? 0) : 0,
                       e.target.value,
                     )}
-                    MenuProps={themedMenuProps}
+                    MenuProps={themedFastMenuProps}
                     sx={{ ...themedSelect, minWidth: 60, fontSize: 10 }}
                     inputProps={{ "aria-label": nPanels > 1 ? "Current panel colormap" : "Image colormap" }}
                   >
-                    {COLORMAP_NAMES.map((name) => (<MenuItem key={name} value={name}>{name.charAt(0).toUpperCase() + name.slice(1)}</MenuItem>))}
+                    {COLORMAP_NAMES.map((name) => (<MenuItem key={name} value={name} dense>{name.charAt(0).toUpperCase() + name.slice(1)}</MenuItem>))}
                   </Select>
                   <Typography sx={{ ...typography.label, fontSize: 10, color: themeColors.textMuted }}>Smooth</Typography>
                   <Switch checked={smooth} onChange={(e) => setSmooth(e.target.checked)} size="small" sx={switchStyles.small} slotProps={{ input: { "aria-label": "Toggle bilinear smoothing" } }} />
@@ -16169,15 +16310,26 @@ function Show3D() {
                             bins={null}
                             vminPct={vminPct}
                             vmaxPct={vmaxPct}
-                            onRangeChange={(min, max) => {
-                              updatePanelState(panel, { imageVminPct: min, imageVmaxPct: max });
-                              setPanelRangeValues(panel, pctToValue(min, panelRange.min, panelRange.max), pctToValue(max, panelRange.min, panelRange.max));
-                              if (autoContrast) {
-                                restorePanelManualClipPcts();
-                                manualImageRangeBeforeAutoRef.current = null;
-                                setAutoContrast(false);
-                              }
+                            onRangePreview={(min, max) => {
+                              panelHistogramPreviewPctRef.current.set(panel, [min, max]);
+                              scheduleHistogramPreviewPaint("hist-preview");
                             }}
+                            onRangeChange={(min, max) => {
+                              panelHistogramPreviewPctRef.current.set(panel, [min, max]);
+                              scheduleHistogramPreviewPaint("hist-commit");
+                              const commitPanelRange = () => {
+                                updatePanelState(panel, { imageVminPct: min, imageVmaxPct: max });
+                                setPanelRangeValues(panel, pctToValue(min, panelRange.min, panelRange.max), pctToValue(max, panelRange.min, panelRange.max));
+                                if (autoContrast) {
+                                  restorePanelManualClipPcts();
+                                  manualImageRangeBeforeAutoRef.current = null;
+                                  setAutoContrast(false);
+                                }
+                              };
+                              if (sidecarMode) window.setTimeout(commitPanelRange, 0);
+                              else commitPanelRange();
+                            }}
+                            commitOnChange={false}
                             width={110}
                             height={58}
                             theme={themeInfo.theme === "dark" ? "dark" : "light"}
@@ -16203,14 +16355,25 @@ function Show3D() {
                     bins={imageHistogramBins}
                     vminPct={imageVminPct}
                     vmaxPct={imageVmaxPct}
-                    onRangeChange={(min, max) => {
-                      setImageVminPct(min);
-                      setImageVmaxPct(max);
-                      if (autoContrast) {
-                        manualImageRangeBeforeAutoRef.current = null;
-                        setAutoContrast(false);
-                      }
+                    onRangePreview={(min, max) => {
+                      imageHistogramPreviewPctRef.current = [min, max];
+                      scheduleHistogramPreviewPaint("hist-preview");
                     }}
+                    onRangeChange={(min, max) => {
+                      imageHistogramPreviewPctRef.current = [min, max];
+                      scheduleHistogramPreviewPaint("hist-commit");
+                      const commitSharedRange = () => {
+                        setImageVminPct(min);
+                        setImageVmaxPct(max);
+                        if (autoContrast) {
+                          manualImageRangeBeforeAutoRef.current = null;
+                          setAutoContrast(false);
+                        }
+                      };
+                      if (sidecarMode) window.setTimeout(commitSharedRange, 0);
+                      else commitSharedRange();
+                    }}
+                    commitOnChange={false}
                     width={110}
                     height={58}
                     theme={themeInfo.theme === "dark" ? "dark" : "light"}

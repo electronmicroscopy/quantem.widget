@@ -122,7 +122,7 @@ browse-quality or count-preserving.
 |---|---|---|---|---|---|---|
 | Show1D | yes | `single` | `full` | `1`, `2`, `4`, `8` | no | preserves every trace/x sample; linked 2D snapshot and profile panels use a NaN-aware area mean, with pixel size and panel/profile coordinates rescaled |
 | Show2D | yes | `single` | `full`, `uint8` | planned | no | `uint8` stores display-scaled image data |
-| Show3D | yes | `single` | `full`, `uint8` | planned | no | `uint8` stores display-scaled volume data |
+| Show3D | yes | `single`; large reviews use `export_sidecar(...)` folder output | `full`, `uint8` | planned | yes, via `export_sidecar(...)` | `uint8` stores display-scaled volume data; folder output keeps the viewer HTML small and loads the stack from a nearby data file. See the [advanced full-resolution folder workflow](../tutorials/advanced.md#full-resolution-show3d-folder-viewers). |
 | Show3DSlices | yes | `single` | `full`, `uint8` | planned | no | `uint8` stores display-scaled volume data |
 | Show4DSTEM | yes | `single`, `folder` when data already uses a companion folder | `uint8`, `full` | `1`, `2`, `4`, `8` | sometimes | `uint8` detector downsample uses mean for compact browse export; full/uint16 export should document whether downsample is count-preserving sum or display-stable mean |
 | ShowEDS | yes | `single`, `folder` | `full` | `2`, `4` | yes | count-preserving sum downsample across spatial and energy axes |
@@ -133,7 +133,7 @@ The public Python calls are:
 |---|---|
 | Show1D | `export_html(path=None, title=None, mode="single", encoding="full", downsample=None)` |
 | Show2D | `export_html(path=None, title=None, mode="single", encoding="full", downsample=None)` |
-| Show3D | `export_html(path=None, title=None, mode="single", encoding="full", downsample=None)` |
+| Show3D | `export_html(path=None, title=None, mode="single", encoding="full", downsample=None)`; multi-GB folder reviews use `export_sidecar(out_dir)` |
 | Show3DSlices | `export_html(path=None, title=None, mode="single", encoding="full", downsample=None)` |
 | Show4DSTEM | `export_html(path=None, title=None, mode="single", encoding="uint8", downsample=1)` |
 | ShowEDS | `export_html(path=None, title=None, mode="single", encoding="full", downsample=None)` |

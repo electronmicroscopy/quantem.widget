@@ -411,6 +411,46 @@ For pages containing several panels, pass `panel_slot=` to
 specific numerical profile. The interactive kymograph intentionally remains a
 single-panel-page tool so its line and depth axes are unambiguous.
 
+## Full-resolution folder export (advanced)
+
+Use the folder export when a microscopist needs to scrub a large stack at the
+native detector/reconstruction size instead of opening a reduced one-file HTML.
+This writes a small `index.html` beside an `offline_stack.u8` data file and a
+`manifest.json`:
+
+```python
+from quantem.widget import Show3D
+
+w = Show3D(stack, title="800C 1.3Mx full-resolution review", debug=True)
+w.export_sidecar("/data/reports/800C_1.3Mx_fullres")
+```
+
+Serve the folder over Range-capable local HTTP; do not open the HTML with
+`file://` because the browser must fetch the data file:
+
+```bash
+# Use your project or lab helper that supports HTTP Range requests.
+python scripts/serve_sidecar_range.py \
+  --dir /data/reports/800C_1.3Mx_fullres \
+  --port 8803 --bind 127.0.0.1
+```
+
+Then open `http://127.0.0.1:8803/index.html`. The viewer shell should appear
+immediately. The browser then loads the full stack into memory, shows the load
+status banner, and swaps to the cached playback path when the stack is ready.
+Changing Color or the histogram range repaints the current microscope view
+immediately, marks the playback cache as updating, and rebuilds the remaining
+frames in the background. Scrubbing during that rebuild should still advance
+the current frame; once the banner clears, playback uses the cached full-stack
+path again.
+
+This workflow preserves the source spatial shape used to construct the widget.
+If you intentionally want a smaller browse artifact, make that explicit with a
+separate downsampled/single-file export rather than treating it as the
+full-resolution review copy. For the end-to-end browser checklist and example
+timing report, see
+[Full-resolution Show3D folder viewers](../tutorials/advanced.md#full-resolution-show3d-folder-viewers).
+
 ## Animation exports
 
 Use HTML when collaborators should keep scrubbing, zooming, and changing
@@ -460,6 +500,8 @@ w.save_gif(
 ```
 
 ```{note}
-`export_html(quantized=True)` writes the smaller uint8 pack; the default writes
-exact float32. See the [widget export tutorial](../tutorials/widget_export).
+`export_html(quantized=True)` writes the smaller single-file uint8 pack; the
+default writes exact float32 into one HTML file. For multi-GB Show3D reviews,
+use the folder export above instead of forcing one huge HTML file. See the
+[widget export tutorial](../tutorials/widget_export).
 ```
