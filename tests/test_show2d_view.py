@@ -28,6 +28,15 @@ def test_view_box_is_a_synced_trait():
     assert w.trait_metadata("view_box", "sync") is True
 
 
+def test_presentation_mode_keeps_controls_recoverable():
+    """C1: presentation starts clean but keeps a Controls affordance."""
+    w = Show2D(_image(), ui_mode="presentation", verbose=False)
+
+    assert w.show_controls is True
+    assert w.controls_collapsed is True
+    assert w.show_stats is False
+
+
 def test_constructor_view_box_populates_trait_and_zoom():
     """Python -> JS: view_box= sugar must both center the zoom (legacy
     behavior) and seed the trait so current_view is correct before any

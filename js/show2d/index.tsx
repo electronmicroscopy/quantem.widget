@@ -1858,8 +1858,8 @@ function svgPanelOverlayElement(
 function svgTextFromRichSpans(spans: RichTitleSpan[] | undefined, fallback: string): { text: string; spans: Array<{ text: string; color?: string }> } {
   if (!spans?.length) return { text: fallback, spans: [{ text: fallback }] };
   const parts = spans.map((span) => ({
-    text: span.math ? renderLatexMathToText(span.math) : String(span.text ?? ""),
-    color: span.color,
+    text: span.math ? renderLatexMathToText(String(span.math)) : String(span.text ?? ""),
+    color: styleString(span.color) || undefined,
   }));
   return { text: parts.map((part) => part.text).join(""), spans: parts };
 }
@@ -1904,7 +1904,7 @@ function svgPanelAnnotationElement(spec: PanelAnnotationSpec, x: number, y: numb
   return chunks.join("");
 }
 
-function svgInsetPlotElement(spec: InsetPlotSpec | null | undefined, panel: number, x: number, y: number, panelW: number, panelH: number, fallbackColor: string, scaleBarVisible: boolean): string {
+function svgInsetPlotElement(spec: InsetPlotSpec | null | undefined, x: number, y: number, panelW: number, panelH: number, fallbackColor: string, scaleBarVisible: boolean): string {
   const geom = insetPlotGeometry(spec, panelW, panelH, scaleBarVisible);
   if (!geom || !spec) return "";
   const { finite, xlim, ylim, x0, y0, boxW, boxH, plotX0, plotY0, plotW, plotH } = geom;
@@ -8246,7 +8246,7 @@ function Show2D() {
 
         const vectorLayer: string[] = [];
         if (showInsetPlots !== false) {
-          vectorLayer.push(svgInsetPlotElement(insetPlotSpecFor(panel), panel, x, y, canvasW, canvasH, markerColor, scaleBarVisible));
+          vectorLayer.push(svgInsetPlotElement(insetPlotSpecFor(panel), x, y, canvasW, canvasH, markerColor, scaleBarVisible));
         }
         const panelOverlaySpecs = panelOverlays?.[panel] || [];
         if (panelOverlaySpecs.length > 0) {
@@ -8815,9 +8815,9 @@ function Show2D() {
         {/* Main panel */}
         <Box sx={{ width: "100%", maxWidth: galleryGridWidth, boxSizing: "border-box" }}>
           {/* Title row */}
-          {showTitle && <Typography variant="caption" sx={{ ...typography.label, color: themeColors.accent, mb: `${SPACING.XS}px`, display: "block", minHeight: 16, lineHeight: "16px", overflow: "visible" }}>
-            {title || (isGallery ? "Gallery" : "Image")}
-            {displayBinFactor > 1 && (
+          {(showTitle || showControls) && <Typography variant="caption" sx={{ ...typography.label, color: themeColors.accent, mb: `${SPACING.XS}px`, display: "block", minHeight: 16, lineHeight: "16px", overflow: "visible" }}>
+            {showTitle && <>{title || (isGallery ? "Gallery" : "Image")}</>}
+            {showTitle && displayBinFactor > 1 && (
               <Box component="span" sx={{ ml: 0.5, px: 0.5, py: 0, fontSize: 9, fontWeight: 600, borderRadius: "3px", backgroundColor: themeColors.accent + "22", color: themeColors.accent, border: `1px solid ${themeColors.accent}44` }}>
                 {displayBinFactor}× binned
               </Box>
@@ -8830,12 +8830,12 @@ function Show2D() {
                 {collapsedBannerLabel}
               </Box>
             )}
-            {displayBinFactor > 1 && (
+            {showTitle && displayBinFactor > 1 && (
               <Box component="span" sx={{ ml: 0.4, px: 0.5, py: 0, fontSize: 9, fontWeight: 500, borderRadius: "3px", backgroundColor: detailStreamStatus === "streaming" ? "rgba(255,193,7,0.18)" : themeColors.controlBg, color: detailStreamStatus === "streaming" ? "#b26a00" : themeColors.textMuted, border: `1px solid ${detailStreamStatus === "streaming" ? "rgba(255,193,7,0.45)" : themeColors.border}` }}>
                 {detailStreamStatus === "streaming" ? "streaming detail..." : detailStreamStatus === "ready" ? "detail ready" : "preview; streams on zoom"}
               </Box>
             )}
-            {debug && <DebugPerfBadge widget="Show2D" fps={debugFps} themeColors={themeColors} />}
+            {showTitle && debug && <DebugPerfBadge widget="Show2D" fps={debugFps} themeColors={themeColors} />}
 	            {showControls && <InfoTooltip text={<Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
               <MetadataSection rows={[
                 ["Shape", isGallery ? `${nImages} x ${height} x ${width}` : `${height} x ${width}`],
@@ -8869,7 +8869,7 @@ function Show2D() {
 	                size="small"
 	                sx={{
 	                  ...compactButton,
-	                  ml: 0.75,
+	                  ml: showTitle ? 0.75 : 0,
 	                  py: 0,
 	                  px: 0.5,
 	                  minHeight: 16,

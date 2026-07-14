@@ -261,6 +261,8 @@ def test_show_panel_chrome_uses_rich_labels_and_collapsed_export():
 
     assert "showControls && controlsCollapsed && (exportEnabled || canDownloadCurrentHtml)" in show2d
     assert "showControls && controlsCollapsed && (exportEnabled || canDownloadCurrentHtml)" in show3d
+    assert "(showTitle || showControls)" in show2d
+    assert "ml: showTitle ? 0.75 : 0" in show2d
     assert "{panelTitleContent(panel)}" in show2d
     assert "{panelTitleContent(panel)}" in show3d
     assert "{panelTitleContent(statsIdx)}" in show2d
