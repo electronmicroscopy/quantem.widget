@@ -691,6 +691,7 @@ def test_show2d_panel_overlays_support_global_and_per_panel_state():
         "radius": 2,
         "stroke": "white",
         "stroke_width": 3,
+        "line_style": "dashed",
     }
     rect = {
         "shape": "rect",
@@ -698,13 +699,16 @@ def test_show2d_panel_overlays_support_global_and_per_panel_state():
         "stroke": "#f87171",
         "fill": "#f87171",
         "fill_opacity": 0.2,
+        "line_dash": [5, 2, 1, 2],
         "z_order": 2,
     }
 
     global_widget = Show2D(data, overlays=[circle, rect], verbose=False)
     assert [len(items) for items in global_widget.panel_overlays] == [2, 2]
     assert global_widget.panel_overlays[0][0]["shape"] == "circle"
+    assert global_widget.panel_overlays[0][0]["line_style"] == "dashed"
     assert global_widget.panel_overlays[1][1]["fill"] == "#f87171"
+    assert global_widget.panel_overlays[1][1]["dash"] == [5.0, 2.0, 1.0, 2.0]
 
     rect_default_fill = dict(rect)
     rect_default_fill.pop("fill_opacity")

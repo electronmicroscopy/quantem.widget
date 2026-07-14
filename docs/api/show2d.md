@@ -26,7 +26,7 @@ no console error, no NaN frame).
 | More menu: Color shared | `panel_cmaps`, `panel_cmaps_memory` | Shared by default. Turn off to let the Color dropdown edit only the selected gallery panel; turn on for one shared colormap, then turn off again to restore the previous individual panel colormaps |
 | Panel identity markers | `marker_colors`, `identity_colors`, `marker_style`, `row_markers`, `col_markers` | Optional panel colors plus row/column group frames make panels easy to reference in notebooks, reports, and agent instructions |
 | Local panel annotations | `panel_annotations` | Optional multiple in-image labels per panel, placed by corner, normalized point, or normalized region box |
-| Geometric panel overlays | `panel_overlays` (`overlays` shorthand) | Optional circle, rectangle, and square overlays in data or relative coordinates, with stroke/fill opacity and z-order; More -> Overlay Edit allows live select, move, resize, delete, and reset |
+| Geometric panel overlays | `panel_overlays` (`overlays` shorthand) | Optional circle, rectangle, and square overlays in data or relative coordinates, with stroke/fill opacity, dashed/dotted line styles, and z-order; More -> Overlay Edit allows live select, move, resize, delete, and reset |
 | Contrast min / max sliders | `vmin`, `vmax` | Display clamp changes; histogram markers move |
 | Auto-contrast toggle | `auto_contrast` | Re-fits `vmin`/`vmax` to the percentile range |
 | More menu: Contrast | `contrast_preset` | Applies scientist-friendly percentile ranges such as `1-99`, `2-98`, and `3-97`; the histogram stays visible below the image |
@@ -152,6 +152,7 @@ Show2D(
                 "radius": 14,
                 "stroke": "#60a5fa",
                 "stroke_width": 3,
+                "line_style": "dashed",
             },
             {
                 "shape": "rect",
@@ -159,6 +160,7 @@ Show2D(
                 "stroke": "#facc15",
                 "fill": "#facc15",
                 "fill_opacity": 0.12,
+                "dash": [6, 2, 1, 2],
                 "z_order": 1,
             },
         ],
@@ -168,10 +170,15 @@ Show2D(
             "size": 42,
             "stroke": "#34d399",
             "stroke_width": 2,
+            "line_style": "dotted",
         },
     },
 )
 ```
+
+Overlay strokes are solid by default. Set `line_style="dashed"`,
+`line_style="dotted"`, or `line_style="dashdot"` for common scientific
+callouts, or pass `dash=[on, off, ...]` for an exact canvas dash pattern.
 
 For a shared overlay on every panel, pass `overlays=[...]` instead of
 `panel_overlays`. Use `coords="relative"` when the geometry should follow

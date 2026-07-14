@@ -853,8 +853,9 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         specific panels; a per-panel list aligns with panel order. Coordinates
         are data pixels by default using ``(row, col)`` conventions, and
         ``coords="relative"`` switches to normalized 0-1 panel coordinates.
-        Style keys include ``stroke``, ``stroke_width``, ``stroke_opacity``,
-        ``fill``, ``fill_opacity``, ``opacity``, and ``z_order``.
+        Style keys include ``stroke``, ``stroke_width``, ``line_style``,
+        ``dash``, ``stroke_opacity``, ``fill``, ``fill_opacity``,
+        ``opacity``, and ``z_order``.
     overlays : mapping or sequence, optional
         Convenience alias for shared geometric overlays. A single overlay or a
         flat list without ``panel=`` is broadcast to every panel. Use either

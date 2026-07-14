@@ -643,6 +643,10 @@ _OVERLAY_STYLE_KEYS = {
     "stroke_width",
     "border_width",
     "line_width",
+    "line_style",
+    "stroke_style",
+    "dash",
+    "line_dash",
     "fill",
     "fill_color",
     "opacity",
@@ -689,6 +693,19 @@ def _finite_float_array(value: object, *, name: str, count: int) -> list[float]:
     if vals.size != count or not np.isfinite(vals).all():
         raise ValueError(f"panel overlay {name} must contain {count} finite values")
     return [float(v) for v in vals]
+
+
+def _finite_float_sequence(value: object, *, name: str) -> list[float]:
+    """Return a non-empty finite float list for custom dash patterns."""
+    vals = np.asarray(value, dtype=np.float64).ravel()
+    if vals.size == 0 or not np.isfinite(vals).all():
+        raise ValueError(f"panel overlay {name} must contain finite values")
+    out = [float(v) for v in vals]
+    if any(v < 0 for v in out):
+        raise ValueError(f"panel overlay {name} values must be >= 0")
+    if all(v == 0 for v in out):
+        raise ValueError(f"panel overlay {name} must contain at least one positive value")
+    return out
 
 
 def _normalize_panel_overlay_spec(spec: object, *, panel: int) -> dict[str, Any] | None:
@@ -768,6 +785,26 @@ def _normalize_panel_overlay_spec(spec: object, *, panel: int) -> dict[str, Any]
     )
     if out["stroke_width"] < 0:
         raise ValueError(f"panel overlay stroke_width must be >= 0, got {out['stroke_width']}")
+    line_style = str(spec.get("line_style", spec.get("stroke_style", "solid"))).lower().replace("_", "-")
+    line_style_aliases = {
+        "solid": "solid",
+        "none": "solid",
+        "dash": "dashed",
+        "dashed": "dashed",
+        "dot": "dotted",
+        "dotted": "dotted",
+        "dash-dot": "dashdot",
+        "dashdot": "dashdot",
+        "dash-dot-dot": "dashdot",
+    }
+    if line_style not in line_style_aliases:
+        raise ValueError(
+            "panel overlay line_style must be one of "
+            "['solid', 'dashed', 'dotted', 'dashdot'] or use dash=[...]"
+        )
+    out["line_style"] = line_style_aliases[line_style]
+    if "dash" in spec or "line_dash" in spec:
+        out["dash"] = _finite_float_sequence(spec.get("dash", spec.get("line_dash")), name="dash")
     opacity = max(0.0, min(1.0, _finite_float(spec.get("opacity", spec.get("alpha", 1.0)), name="opacity")))
     out["opacity"] = opacity
     default_fill_opacity = 1.0 if has_fill else 0.0
@@ -1351,8 +1388,8 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         keyed by panel index or label targets specific panels. Coordinates are
         data pixels by default; pass ``coords="relative"`` for normalized
         0-1 panel coordinates. Style keys include ``stroke``,
-        ``stroke_width``, ``stroke_opacity``, ``fill``, ``fill_opacity``,
-        ``opacity``, and ``z_order``.
+        ``stroke_width``, ``line_style``, ``dash``, ``stroke_opacity``,
+        ``fill``, ``fill_opacity``, ``opacity``, and ``z_order``.
     overlays : mapping or sequence, optional
         Convenience alias for shared geometric overlays. A single overlay or a
         flat list without ``panel=`` is broadcast to every panel. Use either

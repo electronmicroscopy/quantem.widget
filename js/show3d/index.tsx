@@ -174,6 +174,8 @@ type PanelOverlaySpec = {
   col1?: number;
   stroke?: string;
   stroke_width?: number;
+  line_style?: string;
+  dash?: number[];
   fill?: string;
   opacity?: number;
   fill_opacity?: number;
@@ -214,6 +216,19 @@ function withAlpha(color: string | undefined, alpha: number): string | undefined
     }
   }
   return color;
+}
+
+function overlayDashPattern(overlay: PanelOverlaySpec, lineWidth: number): number[] {
+  const custom = Array.isArray(overlay.dash)
+    ? overlay.dash.map((value) => Number(value)).filter((value) => Number.isFinite(value) && value >= 0)
+    : [];
+  if (custom.some((value) => value > 0)) return custom;
+  const w = Math.max(1, lineWidth);
+  const lineStyle = styleString(overlay.line_style, "solid").toLowerCase().replace("_", "-");
+  if (lineStyle === "dashed" || lineStyle === "dash") return [4 * w, 2 * w];
+  if (lineStyle === "dotted" || lineStyle === "dot") return [w, 1.8 * w];
+  if (lineStyle === "dashdot" || lineStyle === "dash-dot") return [4 * w, 2 * w, w, 2 * w];
+  return [];
 }
 
 const LATEX_SYMBOLS: Record<string, string> = {
@@ -1379,6 +1394,8 @@ function drawPanelOverlays(
     const fill = withAlpha(overlay.fill, fillOpacity);
     ctx.save();
     ctx.lineWidth = Math.max(0, styleNumber(overlay.stroke_width, 2));
+    ctx.setLineDash(overlayDashPattern(overlay, ctx.lineWidth));
+    ctx.lineCap = ctx.getLineDash().length ? "round" : "butt";
     if (fill) ctx.fillStyle = fill;
     if (stroke) ctx.strokeStyle = stroke;
     if (shape === "circle") {

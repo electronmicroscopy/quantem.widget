@@ -357,6 +357,7 @@ Show2D(
                 "radius": 14,
                 "stroke": "#60a5fa",
                 "stroke_width": 3,
+                "line_style": "dashed",
             },
             {
                 "shape": "rect",
@@ -364,6 +365,7 @@ Show2D(
                 "stroke": "#facc15",
                 "fill": "#facc15",
                 "fill_opacity": 0.12,
+                "dash": [6, 2, 1, 2],
                 "z_order": 1,
             },
         ],
@@ -374,6 +376,7 @@ Show2D(
                 "radius": 14,
                 "stroke": "#34d399",
                 "stroke_width": 3,
+                "line_style": "dotted",
             },
             {
                 "shape": "square",
@@ -381,6 +384,7 @@ Show2D(
                 "size": 42,
                 "stroke": "#facc15",
                 "stroke_opacity": 0.85,
+                "line_style": "dashdot",
             },
         ],
         "residual": {
@@ -447,9 +451,11 @@ Show2D(
 
 Use `coords="relative"` only when normalized 0-1 panel geometry is more stable
 than pixel geometry, for example when comparing panels with different shapes.
-Style keys include `stroke`, `stroke_width`, `stroke_opacity`, `fill`,
-`fill_opacity`, `opacity`, and `z_order`. A provided `fill` is visible by
-default; set `fill_opacity=0` for stroke-only shapes.
+Style keys include `stroke`, `stroke_width`, `line_style`, `dash`,
+`stroke_opacity`, `fill`, `fill_opacity`, `opacity`, and `z_order`.
+`line_style` accepts `solid`, `dashed`, `dotted`, or `dashdot`; use
+`dash=[on, off, ...]` for a custom canvas dash pattern. A provided `fill` is
+visible by default; set `fill_opacity=0` for stroke-only shapes.
 
 When overlays are present, open `More -> Overlay Edit` in the live widget or
 exported HTML. Click a circle or rectangle to select it, drag inside to move it,

@@ -156,6 +156,7 @@ Show2D(
                 "radius": 14,
                 "stroke": "#60a5fa",
                 "stroke_width": 3,
+                "line_style": "dashed",
             },
             {
                 "shape": "rect",
@@ -163,6 +164,7 @@ Show2D(
                 "stroke": "#facc15",
                 "fill": "#facc15",
                 "fill_opacity": 0.12,
+                "dash": [6, 2, 1, 2],
             },
         ],
         "denoised": {
@@ -171,10 +173,15 @@ Show2D(
             "size": 42,
             "stroke": "#34d399",
             "stroke_width": 2,
+            "line_style": "dotted",
         },
     },
 )
 ```
+
+Overlay strokes are solid by default. Use `line_style="dashed"`,
+`line_style="dotted"`, or `line_style="dashdot"` for common figure styles, or
+pass `dash=[on, off, ...]` for a custom pattern.
 
 Use `overlays=[...]` for one shared guide on every panel, or include `panel=`
 inside a flat list when overlays are generated in a loop:

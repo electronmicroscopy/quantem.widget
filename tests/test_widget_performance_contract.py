@@ -201,6 +201,10 @@ def test_show2d_batch_selection_and_marker_frame_contract():
     assert 'useModelState<PanelOverlaySpec[][]>("panel_overlays")' in show3d
     assert "drawPanelOverlays(ctx, panelOverlaySpecs" in show2d
     assert "drawPanelOverlays(ctx, overlaySpecs" in show3d
+    assert "overlayDashPattern" in show2d
+    assert "overlayDashPattern" in show3d
+    assert "ctx.setLineDash(overlayDashPattern" in show2d
+    assert "ctx.setLineDash(overlayDashPattern" in show3d
     assert "setPanelOverlays" in show2d
     assert "setPanelOverlays" in show3d
     assert "Overlay Edit" in show2d
@@ -525,6 +529,8 @@ def test_show3d_sidecar_zoom_skips_viewport_cache_contract():
     assert "sidecar-u8-viewport-live" in show3d
     assert "if (separatePanelFrames && !sidecarMode && (offline || imageRotation % 4 !== 0)) return false;" in show3d
     assert '"layout-transform"' in show3d
+    assert '"compare-blink"' in show3d
+    assert '"visibility-sidecar"' in show3d
     assert "sidecarViewTransformActive()) return;" in show3d
 
 

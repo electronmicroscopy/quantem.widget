@@ -333,6 +333,7 @@ def test_show3d_panel_overlays_target_panel_titles_and_roundtrip():
         "center": (4, 5),
         "radius": 2,
         "stroke": "#60a5fa",
+        "stroke_style": "dotted",
     }
     rect = {
         "shape": "square",
@@ -342,6 +343,7 @@ def test_show3d_panel_overlays_target_panel_titles_and_roundtrip():
         "fill": "#f87171",
         "fill_opacity": 0.15,
         "stroke_opacity": 0.9,
+        "line_style": "dashdot",
         "z_order": 3,
     }
 
@@ -359,9 +361,11 @@ def test_show3d_panel_overlays_target_panel_titles_and_roundtrip():
 
     assert [len(items) for items in restored.panel_overlays] == [1, 1]
     assert restored.panel_overlays[0][0]["shape"] == "circle"
+    assert restored.panel_overlays[0][0]["line_style"] == "dotted"
     assert restored.panel_overlays[1][0]["shape"] == "square"
     assert restored.panel_overlays[1][0]["row0"] == 3.0
     assert restored.panel_overlays[1][0]["fill_opacity"] == 0.15
+    assert restored.panel_overlays[1][0]["line_style"] == "dashdot"
 
 
 def test_show3d_panel_groups_validate_panel_indices():
