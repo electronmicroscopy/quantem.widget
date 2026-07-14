@@ -140,6 +140,16 @@ def test_show2d_and_show3d_paged_sliders_use_local_preview_contract():
     assert "const activePageStart = isPaged ? displayPageIdx" in show3d
 
 
+def test_show3d_paged_side_panels_align_with_image_canvas():
+    """C1: paged right-side FFT/kymograph panels keep canvas tops aligned."""
+    show3d = (ROOT / "js" / "show3d" / "index.tsx").read_text(encoding="utf-8")
+
+    assert "!fftLayoutBottom && controlsVisible && isPaged" in show3d
+    assert "minHeight: 28" in show3d
+    assert "borderBottom: `1px solid ${themeColors.border}`" in show3d
+    assert "controlsVisible && isPaged" in show3d
+
+
 def test_show3d_histogram_drag_repaints_single_file_exports():
     """C1: normal exported Show3D histograms react while the user drags."""
     show3d = (ROOT / "js" / "show3d" / "index.tsx").read_text(encoding="utf-8")

@@ -18056,6 +18056,17 @@ function Show3D() {
           }}>
             {/* Spacer - matches main panel title row height for canvas alignment */}
             {!fftLayoutBottom && <Box sx={{ mb: `${SPACING.XS}px`, height: 16 }} />}
+            {!fftLayoutBottom && controlsVisible && isPaged && (
+              <Box
+                aria-hidden="true"
+                sx={{
+                  minHeight: 28,
+                  mb: "3px",
+                  pb: "3px",
+                  borderBottom: `1px solid ${themeColors.border}`,
+                }}
+              />
+            )}
             {/* Controls row - matches main panel controls row height */}
             {(!fftLayoutBottom || (roiFftActive && fftCropDims)) && (
               <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: `${SPACING.XS}px`, minHeight: 28, height: "auto", flexWrap: "wrap", gap: `${SPACING.XS}px` }}>
@@ -18269,6 +18280,17 @@ function Show3D() {
           <Box sx={{ width: "100%", maxWidth: canvasW, boxSizing: "border-box" }}>
             {/* Spacer - matches main panel title row height for canvas alignment */}
             <Box sx={{ mb: `${SPACING.XS}px`, height: 16 }} />
+            {controlsVisible && isPaged && (
+              <Box
+                aria-hidden="true"
+                sx={{
+                  minHeight: 28,
+                  mb: "3px",
+                  pb: "3px",
+                  borderBottom: `1px solid ${themeColors.border}`,
+                }}
+              />
+            )}
             {/* Controls row - title on left, Reset on right */}
             <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: `${SPACING.XS}px`, minHeight: 28, height: "auto", flexWrap: "wrap", gap: `${SPACING.XS}px` }}>
               <Typography sx={{ ...typography.label, color: themeColors.accentGreen }}>
