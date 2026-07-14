@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import json
 import os
 import tempfile
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
-from quantem.core.datastructures import Dataset2d, Dataset3d, Dataset4dstem
+
+if TYPE_CHECKING:
+    from quantem.core.datastructures import Dataset2d, Dataset3d, Dataset4dstem
 
 snapshot_download = None
 TUTORIAL_DATA_REPO_ID = "bobleesj/quantem-data"
@@ -40,6 +44,72 @@ _GOLD_4DSTEM_NAME = "gold-128-bin8"
 _GOLD_4DSTEM_SOURCE_SIZE = "full"
 _SHOWFOLDER_GOLD_VIEWER = "showfolder"
 _SHOWFOLDER_GOLD_NAME = "gold-haadf-session"
+
+
+@dataclass(frozen=True)
+class _TutorialDataset:
+    """Small dataset-like object for docs when quantem.core is unavailable."""
+
+    array: np.ndarray
+    sampling: tuple[float, ...]
+    units: tuple[str, ...]
+    name: str
+    signal_units: str = "arb. units"
+
+    @property
+    def shape(self) -> tuple[int, ...]:
+        return tuple(self.array.shape)
+
+    @property
+    def dtype(self) -> np.dtype:
+        return self.array.dtype
+
+    @property
+    def ndim(self) -> int:
+        return self.array.ndim
+
+    def __array__(self, dtype: object | None = None) -> np.ndarray:
+        return np.asarray(self.array, dtype=dtype)
+
+
+def _is_quantem_core_circular_import(exc: ImportError) -> bool:
+    msg = str(exc)
+    return "partially initialized module 'quantem.core" in msg or (
+        "cannot import name 'Dataset'" in msg and "quantem.core" in msg
+    )
+
+
+def _dataset_like_from_array(
+    *,
+    kind: str,
+    array: np.ndarray,
+    sampling: tuple[float, ...],
+    units: tuple[str, ...],
+    name: str,
+):
+    try:
+        from quantem.core.datastructures import Dataset2d, Dataset3d, Dataset4dstem  # noqa: PLC0415
+    except ImportError as exc:
+        if _is_quantem_core_circular_import(exc):
+            return _TutorialDataset(
+                array=np.asarray(array),
+                sampling=tuple(float(v) for v in sampling),
+                units=tuple(str(v) for v in units),
+                name=name,
+            )
+        raise
+
+    classes = {
+        "2d": Dataset2d,
+        "3d": Dataset3d,
+        "4dstem": Dataset4dstem,
+    }
+    return classes[kind].from_array(
+        array,
+        sampling=sampling,
+        units=units,
+        name=name,
+    )
 
 
 def _snapshot_download_dataset(**kwargs) -> Path:
@@ -287,8 +357,9 @@ def _gold_haadf_2d_from_folder(folder: Path, *, stride: int, verbose: bool = Tru
     image = np.asarray(full_image[::stride, ::stride], dtype=np.float32)
     sampling = tuple(float(v) * stride for v in meta["sampling"])
     units = tuple(meta["units"])
-    dataset = Dataset2d.from_array(
-        image,
+    dataset = _dataset_like_from_array(
+        kind="2d",
+        array=image,
         sampling=sampling,
         units=units,
         name="Gold HAADF preview",
@@ -337,8 +408,9 @@ def _gold_haadf_3d_from_folder(
 
     pixel_sampling = float(meta["sampling"][0]) * stride
     units = tuple(meta["units"])
-    dataset = Dataset3d.from_array(
-        stack,
+    dataset = _dataset_like_from_array(
+        kind="3d",
+        array=stack,
         sampling=(1.0, pixel_sampling, pixel_sampling),
         units=("frame", units[0], units[1]),
         name="Gold HAADF moving-crop stack",
@@ -367,8 +439,9 @@ def _gold_4dstem_from_folder(
         float(v) * scan_stride if axis < 2 else float(v)
         for axis, v in enumerate(meta["sampling"])
     )
-    dataset = Dataset4dstem.from_array(
-        stack,
+    dataset = _dataset_like_from_array(
+        kind="4dstem",
+        array=stack,
         sampling=sampling,
         units=tuple(meta["units"]),
         name="Gold 4D-STEM bin8 preview",

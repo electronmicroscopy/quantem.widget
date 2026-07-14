@@ -1,3 +1,14 @@
+---
+jupytext:
+  text_representation:
+    extension: .md
+    format_name: myst
+kernelspec:
+  display_name: Python 3
+  language: python
+  name: python3
+---
+
 # Advanced Show2D
 
 `Show2D` can be a quick image viewer, but it is also the main review surface
@@ -267,6 +278,57 @@ than only an exploratory viewer. The live widget, exported HTML, and exported
 SVG all use the same state: panel title placement, local labels, scale-bar
 typography, inter-panel gutters, and vector overlays.
 
+The examples in this section are executable documentation cells. They build a
+small synthetic lattice so the rendered docs show the actual widget state
+without depending on private publication data.
+
+```{code-cell} python
+:tags: [remove-input]
+
+import numpy as np
+
+from quantem.widget import Show2D
+
+rng = np.random.default_rng(42)
+yy, xx = np.mgrid[-1:1:128j, -1:1:128j]
+
+def lattice(theta=0.0, shear=0.0, noise=0.05):
+    c, s = np.cos(theta), np.sin(theta)
+    xr = c * xx - s * yy + shear * yy
+    yr = s * xx + c * yy
+    atoms = (
+        np.cos(17 * np.pi * xr) * np.cos(13 * np.pi * yr)
+        + 0.45 * np.cos(23 * np.pi * (xr + yr))
+    )
+    envelope = np.exp(-1.5 * (xx**2 + yy**2))
+    image = envelope * atoms
+    image += noise * rng.standard_normal(image.shape)
+    return image.astype("float32")
+
+raw = lattice(theta=0.00, shear=0.00, noise=0.10)
+scan90 = lattice(theta=np.pi / 2, shear=0.00, noise=0.10)
+combined = 0.5 * (raw + scan90)
+corrected0 = lattice(theta=0.04, shear=-0.10, noise=0.05)
+corrected90 = lattice(theta=np.pi / 2 + 0.03, shear=0.08, noise=0.05)
+corrected_combined = 0.5 * (corrected0 + corrected90)
+panels = [
+    raw,
+    scan90,
+    combined,
+    corrected0,
+    corrected90,
+    corrected_combined,
+]
+labels = [
+    "a 0° scan",
+    "b 90° scan",
+    "c combined",
+    "d 0° scan corrected",
+    "e 90° scan corrected",
+    "f corrected combined",
+]
+```
+
 ### Match The Published PDF Font
 
 The drift-paper figures use a Helvetica-like sans-serif stack. On Linux,
@@ -274,7 +336,7 @@ The drift-paper figures use a Helvetica-like sans-serif stack. On Linux,
 On macOS, `Helvetica` or `Arial` is normally available. Put the preferred
 family first and include fallbacks:
 
-```python
+```{code-cell} python
 PUBLICATION_FONT = (
     "Nimbus Sans, Helvetica, Arial, "
     "Liberation Sans, DejaVu Sans, sans-serif"
@@ -283,7 +345,7 @@ PUBLICATION_FONT = (
 
 Use the same stack in every text layer that should match the paper:
 
-```python
+```{code-cell} python
 TITLE_STYLE = {
     "font_family": PUBLICATION_FONT,
     "font_weight": 700,
@@ -340,22 +402,16 @@ fc-match "Nimbus Sans"
 Whole-panel labels use `labels` for the text and `panel_title_style` for the
 font and placement:
 
-```python
+```{code-cell} python
 w = Show2D(
     panels,
-    labels=[
-        "a 0° scan",
-        "b 90° scan",
-        "c combined",
-        "d 0° scan corrected",
-        "e 90° scan corrected",
-        "f corrected combined",
-    ],
+    labels=labels,
     ncols=3,
     show_panel_titles=True,
     panel_title_font_size=16,
     panel_title_style=TITLE_STYLE,
 )
+w
 ```
 
 Use `x` and `y` as relative panel coordinates from 0 to 1. With
@@ -369,17 +425,19 @@ Use `panel_annotations` for local labels such as `Ba+Ti` and `Sr`. These labels
 are independent from the panel title, so they can sit below the title or over a
 specific region of the image. They are exported as editable SVG text.
 
-```python
-Show2D(
+```{code-cell} python
+annotation_labels = [
+    "a 0° XEDS HAADF",
+    "b 0° corrected XEDS HAADF",
+    "c corrected 0°/90° ref",
+    "d 0° Ba+Ti XEDS",
+    "e 0° corrected Ba+Ti XEDS",
+    "f composite on 0° HAADF",
+]
+
+w = Show2D(
     panels,
-    labels=[
-        "a 0° XEDS HAADF",
-        "b 0° corrected XEDS HAADF",
-        "c corrected 0°/90° ref",
-        "d 0° Ba+Ti XEDS",
-        "e 0° corrected Ba+Ti XEDS",
-        "f composite on 0° HAADF",
-    ],
+    labels=annotation_labels,
     ncols=3,
     panel_title_font_size=16,
     panel_title_style=TITLE_STYLE,
@@ -416,6 +474,7 @@ Show2D(
         ],
     },
 )
+w
 ```
 
 For local annotations, `x=0.0, y=0.0` is the panel upper-left and
@@ -429,7 +488,7 @@ For pixel-perfect manuscript grids, use the same value for the internal gutter
 and the outside frame. `Show2D` does this automatically when both
 `gallery_gap_px` and `gallery_gap_color` are set:
 
-```python
+```{code-cell} python
 w = Show2D(
     panels,
     labels=labels,
@@ -437,6 +496,7 @@ w = Show2D(
     gallery_gap_px=2,
     gallery_gap_color="#000000",
 )
+w
 ```
 
 With `gallery_gap_px=2` and a non-empty `gallery_gap_color`, `Show2D` places
@@ -449,7 +509,7 @@ the same color so Illustrator does not show a light seam over the black gutter.
 `scale_bar_panels` accepts panel indices or labels. Use this when the paper
 only shows a scale bar on one representative panel:
 
-```python
+```{code-cell} python
 w = Show2D(
     panels,
     labels=labels,
@@ -461,6 +521,7 @@ w = Show2D(
     scale_bar_style=SCALE_STYLE,
     show_zoom_indicator=False,
 )
+w
 ```
 
 Use `scale_bar_length` in the same physical units as `sampling`. Use
