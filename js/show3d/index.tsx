@@ -245,9 +245,10 @@ function renderLatexMath(expr: string, keyPrefix: string): React.ReactNode[] {
 }
 
 function renderMathExpression(expr: string, keyPrefix: string): React.ReactNode {
+  const normalized = expr.trim().replace(/\\+(?=[A-Za-z])/g, "\\");
   return (
     <span key={keyPrefix} data-quantem-math="true" style={{ fontFamily: "Cambria Math, STIX Two Math, Times New Roman, serif", fontStyle: "italic" }}>
-      {renderLatexMath(expr, keyPrefix)}
+      {renderLatexMath(normalized, keyPrefix)}
     </span>
   );
 }

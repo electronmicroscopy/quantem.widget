@@ -201,6 +201,8 @@ def test_show2d_batch_selection_and_marker_frame_contract():
     assert "LATEX_SYMBOLS" in show3d
     assert "renderTextWithInlineMath" in show2d
     assert "renderTextWithInlineMath" in show3d
+    assert 'expr.trim().replace(/\\\\+(?=[A-Za-z])/g, "\\\\")' in show2d
+    assert 'expr.trim().replace(/\\\\+(?=[A-Za-z])/g, "\\\\")' in show3d
     assert 'data-quantem-math="true"' in show2d
     assert 'data-quantem-math="true"' in show3d
     assert "data-show2d-row-marker" in show2d

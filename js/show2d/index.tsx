@@ -231,9 +231,10 @@ function renderLatexMath(expr: string, keyPrefix: string): React.ReactNode[] {
 }
 
 function renderMathExpression(expr: string, keyPrefix: string): React.ReactNode {
+  const normalized = expr.trim().replace(/\\+(?=[A-Za-z])/g, "\\");
   return (
     <span key={keyPrefix} data-quantem-math="true" style={{ fontFamily: "Cambria Math, STIX Two Math, Times New Roman, serif", fontStyle: "italic" }}>
-      {renderLatexMath(expr, keyPrefix)}
+      {renderLatexMath(normalized, keyPrefix)}
     </span>
   );
 }
@@ -9334,7 +9335,7 @@ function Show2D() {
           {showStats && (
             <Box sx={{ mt: `${SPACING.XS}px`, px: 1, py: 0.5, bgcolor: themeColors.bgAlt, display: "flex", gap: 2, alignItems: "center", flexWrap: "wrap", maxWidth: "100%", boxSizing: "border-box", opacity: 1 }}>
               {isGallery && (
-                <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>{labels?.[statsIdx] || `#${statsIdx + 1}`}</Typography>
+                <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>{renderTextWithInlineMath(labels?.[statsIdx] || `#${statsIdx + 1}`, `stats-label-${statsIdx}`)}</Typography>
               )}
               <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Mean <Box component="span" sx={{ color: themeColors.accent }}>{formatNumber(currentFrameStats?.mean ?? statsMean?.[statsIdx] ?? 0)}</Box></Typography>
               <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Min <Box component="span" sx={{ color: themeColors.accent }}>{formatNumber(currentFrameStats?.min ?? statsMin?.[statsIdx] ?? 0)}</Box></Typography>
