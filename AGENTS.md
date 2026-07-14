@@ -218,6 +218,13 @@ Keep public documentation in durable paths such as `README.md`,
 Do not commit local session notes, one-off benchmark scripts, AppleDouble
 `._*` files, generated docs builds, screenshots, or scratch files unless they
 have been promoted into a documented test, example, or maintainer runbook.
+Do not upload real-data benchmark helpers, local-path scripts, contact sheets,
+scratch smoke scripts, generated E2E reports, generated E2E notebooks, caches,
+or screenshots unless the user explicitly asks to publish that artifact. Keep
+those outputs under `/tmp`, a project scratch directory, or another ignored
+local path. If a local E2E or benchmark script becomes worth keeping, first
+convert it into a durable maintainer tool with environment-configured paths,
+safe defaults, opt-in execution, and no private data paths.
 
 Keep the main branch simple. Do not split documentation into a separate repo or
 introduce Git LFS just to support routine widget docs. Prefer source notebooks,
