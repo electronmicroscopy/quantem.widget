@@ -226,6 +226,21 @@ This math support is intentionally compact: use it for labels such as
 full equation, keep the equation in Markdown/LaTeX near the widget and use a
 short annotation inside the panel.
 
+Prefer Python raw strings for TeX-style labels so the notebook source stays
+readable. If a label comes from JSON, a widget state file, or another exporter
+with doubled backslashes, the frontend normalizes those sequences before
+rendering so `\\lambda` displays as `λ`, not `\λ`.
+
+```python
+math_labels = [
+    r"$\lambda=0.03$ raw",
+    r"$\chi^2$/pixel residual",
+]
+
+Show2D(images[:2], labels=math_labels)
+Show3D(raw_stack, residual_stack, panel_titles=math_labels)
+```
+
 ## Add inset plots to Show2D panels
 
 A common review moment is not only "which image looks best?", but "which image
