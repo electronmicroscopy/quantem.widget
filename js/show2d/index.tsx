@@ -8268,14 +8268,17 @@ function Show2D() {
                     onClick={() => setColorShared(!colorShared)}
                     sx={{ fontSize: 12, gap: 1, color: !colorShared ? themeColors.accent : themeColors.text }}
                   >
-                    <Typography sx={{ flex: 1, fontSize: 12, color: "inherit" }} title="Shared keeps one colormap for every panel. Turn off to let the Color dropdown edit only the selected panel.">Color shared</Typography>
+                    <Typography sx={{ flex: 1, fontSize: 12, color: "inherit" }} title="Linked keeps one colormap for every panel. Turn off to let the Color dropdown edit only the selected panel.">Link Color</Typography>
+                    <Typography sx={{ fontSize: 10, color: colorShared ? themeColors.textMuted : themeColors.accent, minWidth: 48, textAlign: "right" }}>
+                      {colorShared ? "Linked" : "Individual"}
+                    </Typography>
                     <Switch
                       checked={colorShared}
                       onClick={(e) => e.stopPropagation()}
                       onChange={(e) => setColorShared(e.target.checked)}
                       size="small"
                       sx={switchStyles.small}
-                      slotProps={{ input: { "aria-label": "Toggle shared panel colormap" } }}
+                      slotProps={{ input: { "aria-label": "Toggle linked panel colormap" } }}
                     />
                   </MenuItem>
                 )}

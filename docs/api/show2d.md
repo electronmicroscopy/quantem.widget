@@ -21,7 +21,7 @@ no console error, no NaN frame).
 | Control | Trait | Expected effect |
 |---|---|---|
 | Colormap dropdown | `cmap` | Canvas recolors to the chosen map |
-| More menu: Color shared | `panel_cmaps` | Shared by default. Turn off to let the Color dropdown edit only the selected gallery panel; turn on to return to one colormap for all panels |
+| More menu: Link Color | `panel_cmaps` | Linked by default. Turn off to let the Color dropdown edit only the selected gallery panel; turn on to return to one colormap for all panels |
 | Panel identity markers | `marker_colors`, `identity_colors` | Optional colored strips make rows/columns/panels easy to reference in notebooks, reports, and agent instructions |
 | Contrast min / max sliders | `vmin`, `vmax` | Display clamp changes; histogram markers move |
 | Auto-contrast toggle | `auto_contrast` | Re-fits `vmin`/`vmax` to the percentile range |

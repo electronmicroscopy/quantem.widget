@@ -120,8 +120,8 @@ reversible.
 - Pass ``cmap=["gray", "inferno", "RdBu", ...]`` for a multi-panel gallery and
   verify each panel keeps its requested colormap in the live UI, saved state,
   static notebook preview, and standalone HTML export. By default, verify the
-  Color dropdown is shared across panels. Then open More, turn off
-  ``Color shared``, select each panel, and change Color from the UI; verify
+  Color dropdown is linked across panels. Then open More, turn off
+  ``Link Color``, select each panel, and change Color from the UI; verify
   only that panel changes and no extra Link Color text appears in the main
   toolbar.
 - In the View menu, set Padding to 10%, choose Median fill, and verify the
