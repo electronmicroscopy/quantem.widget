@@ -1515,6 +1515,7 @@ function Show2D() {
   const [, setGpuMaxBufferMB] = useModelState<number>("_gpu_max_buffer_mb");
   const [cmap, setCmap] = useModelState<string>("cmap");
   const [panelCmaps, setPanelCmaps] = useModelState<string[]>("panel_cmaps");
+  const [panelCmapsMemory, setPanelCmapsMemory] = useModelState<string[]>("panel_cmaps_memory");
   const [ncols, setNcols] = useModelState<number>("ncols");
   const panelCmapFor = React.useCallback((idx: number) => {
     const value = panelCmaps && idx >= 0 && idx < panelCmaps.length ? panelCmaps[idx] : "";
@@ -1753,12 +1754,19 @@ function Show2D() {
   }, [imageFlipsHorizontal, imageFlipsVertical, nImages, setImageFlipsHorizontal, setImageFlipsVertical]);
   const setColorShared = React.useCallback((shared: boolean) => {
     if (shared) {
+      if (panelCmaps && panelCmaps.length === nImages) {
+        setPanelCmapsMemory(panelCmaps.slice());
+      }
       setCmap(panelCmapFor(selectedIdx));
       setPanelCmaps([]);
       return;
     }
-    setPanelCmaps(Array.from({ length: nImages }, (_, i) => panelCmapFor(i)));
-  }, [nImages, panelCmapFor, selectedIdx, setCmap, setPanelCmaps]);
+    const restored = panelCmapsMemory && panelCmapsMemory.length === nImages
+      ? panelCmapsMemory.slice()
+      : Array.from({ length: nImages }, (_, i) => panelCmapFor(i));
+    setPanelCmaps(restored);
+    setPanelCmapsMemory(restored);
+  }, [nImages, panelCmapFor, panelCmaps, panelCmapsMemory, selectedIdx, setCmap, setPanelCmaps, setPanelCmapsMemory]);
   const selectedCmap = colorShared ? (cmap || "inferno") : panelCmapFor(selectedIdx);
   const setSelectedCmap = React.useCallback((value: string) => {
     const batchPanels = Array.from(new Set((selectedPanels || [])
@@ -1770,6 +1778,7 @@ function Show2D() {
         : Array.from({ length: nImages }, (_, i) => panelCmapFor(i));
       for (const panel of batchPanels) next[panel] = value;
       setPanelCmaps(next);
+      setPanelCmapsMemory(next);
       if (!cmap) setCmap(value);
       return;
     }
@@ -1779,12 +1788,13 @@ function Show2D() {
         : Array.from({ length: nImages }, (_, i) => (i === selectedIdx ? value : cmap));
       next[selectedIdx] = value;
       setPanelCmaps(next);
+      setPanelCmapsMemory(next);
       if (!cmap) setCmap(value);
     } else {
       setCmap(value);
       setPanelCmaps([]);
     }
-  }, [colorShared, isGallery, panelCmaps, nImages, selectedIdx, selectedPanels, cmap, panelCmapFor, setPanelCmaps, setCmap]);
+  }, [colorShared, isGallery, panelCmaps, nImages, selectedIdx, selectedPanels, cmap, panelCmapFor, setPanelCmaps, setPanelCmapsMemory, setCmap]);
   // In panel scope the scalar traits are the editor for the selected panel,
   // while the arrays remain the render/source of truth for every panel. Keep
   // the editor pointed at the newly selected panel without continuously

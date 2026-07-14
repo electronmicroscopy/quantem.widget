@@ -1321,6 +1321,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     show_title = traitlets.Bool(True).tag(sync=True)
     cmap = traitlets.Unicode("inferno").tag(sync=True)
     panel_cmaps = traitlets.List(traitlets.Unicode(), default_value=[]).tag(sync=True)
+    panel_cmaps_memory = traitlets.List(traitlets.Unicode(), default_value=[]).tag(sync=True)
     ncols = traitlets.Int(3).tag(sync=True)
 
     # =========================================================================
@@ -2231,8 +2232,10 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                     f"the number of Show2D panels ({self.n_images})"
                 )
             self.panel_cmaps = cmaps
+            self.panel_cmaps_memory = list(cmaps)
         else:
             self.panel_cmaps = []
+            self.panel_cmaps_memory = []
         # Resolve sampling + units to scalar pixel_size + pixel_unit (column axis).
         # Scalar shorthand: sampling=0.5 → (0.5, 0.5). units="nm" → ["nm", "nm"].
         if sampling is None:
@@ -4736,6 +4739,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             "show_title": self.show_title,
             "cmap": self.cmap,
             "panel_cmaps": list(self.panel_cmaps),
+            "panel_cmaps_memory": list(self.panel_cmaps_memory),
             "log_scale": self.log_scale,
             "auto_contrast": self.auto_contrast,
             "contrast_preset": self.contrast_preset,
@@ -5201,6 +5205,9 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         if "panel_cmaps" in state and isinstance(state["panel_cmaps"], list):
             if len(state["panel_cmaps"]) not in (0, int(self.n_images)):
                 state.pop("panel_cmaps")
+        if "panel_cmaps_memory" in state and isinstance(state["panel_cmaps_memory"], list):
+            if len(state["panel_cmaps_memory"]) not in (0, int(self.n_images)):
+                state.pop("panel_cmaps_memory")
         if "inset_plots" in state:
             try:
                 state["inset_plots"] = _normalize_inset_plot_specs(

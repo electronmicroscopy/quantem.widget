@@ -123,7 +123,9 @@ reversible.
   Color dropdown is linked across panels. Then open More, turn off
   ``Link Color``, select each panel, and change Color from the UI; verify
   only that panel changes and no extra Link Color text appears in the main
-  toolbar.
+  toolbar. Turn ``Link Color`` back on, then off again; verify the previous
+  individual panel colormaps return instead of being replaced by the shared
+  colormap.
 - In the View menu, set Padding to 10%, choose Median fill, and verify the
   canvas and histogram update while the stored raw arrays remain unchanged.
 - In a drift-correction gallery, toggle Padding from All to selected-panel

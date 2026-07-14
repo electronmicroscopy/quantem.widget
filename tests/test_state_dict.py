@@ -283,10 +283,26 @@ def test_show2d_per_panel_cmap_state_roundtrip():
 
     assert widget.cmap == "inferno"
     assert widget.panel_cmaps == ["inferno", "viridis"]
+    assert widget.panel_cmaps_memory == ["inferno", "viridis"]
 
     fresh = Show2D(data, state=widget.state_dict(), verbose=False)
     assert fresh.cmap == "inferno"
     assert fresh.panel_cmaps == ["inferno", "viridis"]
+    assert fresh.panel_cmaps_memory == ["inferno", "viridis"]
+
+
+def test_show2d_panel_cmap_memory_roundtrip_when_linked():
+    data = np.random.default_rng(4).standard_normal((3, 12, 12)).astype(np.float32)
+    widget = Show2D(data, verbose=False)
+    widget.cmap = "gray"
+    widget.panel_cmaps = []
+    widget.panel_cmaps_memory = ["gray", "inferno", "viridis"]
+
+    fresh = Show2D(data, state=widget.state_dict(), verbose=False)
+
+    assert fresh.cmap == "gray"
+    assert fresh.panel_cmaps == []
+    assert fresh.panel_cmaps_memory == ["gray", "inferno", "viridis"]
 
 
 def test_show2d_inset_plots_state_roundtrip():
