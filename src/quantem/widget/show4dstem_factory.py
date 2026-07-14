@@ -151,7 +151,7 @@ def _master_file_contract(master: Any) -> dict[str, Any]:
     """Read the raw shape and dtype needed to validate a watched master."""
     import h5py
     import numpy as np
-    from quantem.widget.io import get_metadata, inspect_master_readiness
+    from quantem.gpu.io import get_metadata, inspect_master_readiness
 
     metadata = get_metadata(str(master))
     scan_shape = metadata.get("scan_shape")
@@ -196,7 +196,7 @@ def _largest_compatible_master_group(
     if len(masters) <= 1:
         return masters
     try:
-        from quantem.widget.io import get_metadata
+        from quantem.gpu.io import get_metadata
     except Exception:
         return masters
     groups: dict[tuple[Any, Any, Any], list[Any]] = {}
@@ -544,7 +544,7 @@ def from_folder(
     """
     import torch
     from quantem.widget.data import Dataset5dstem
-    from quantem.widget.io import discover_masters, is_master_ready
+    from quantem.gpu.io import discover_masters, is_master_ready
     from quantem.widget import load
 
     legacy_columns = viewer_kwargs.pop("compare_cols", None)

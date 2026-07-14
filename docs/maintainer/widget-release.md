@@ -62,6 +62,25 @@ This script runs the frontend typecheck/tests/build, standalone browser build,
 offline browser build, Python compile smoke, local wheel build, and wheel-content
 checks.
 
+Before uploading to TestPyPI or PyPI, build fresh artifacts and inspect the
+actual upload payload. Do not upload stale files from an old local `dist/`
+directory.
+
+```bash
+rm -rf /tmp/quantem-widget-release-audit
+mkdir -p /tmp/quantem-widget-release-audit
+python -m build --outdir /tmp/quantem-widget-release-audit
+tar -tzf /tmp/quantem-widget-release-audit/*.tar.gz | less
+unzip -l /tmp/quantem-widget-release-audit/*.whl | less
+```
+
+Confirm the wheel and sdist contain no private microscope data, generated
+reports, screenshots, built docs, caches, or large local artifacts. In
+particular, no `.h5`, `.hdf5`, `.emd`, `.npy`, `.npz`, `.zarr`, `.tif`, `.dm3`,
+`.dm4`, `.raw`, generated tutorial HTML, or private JSON/CSV report should be
+present. The expected wheel contents are Python source, package metadata,
+licenses, and built widget JavaScript/static assets.
+
 ## Visual signoff
 
 Widgets can import successfully while still rendering blank canvases. Before a
