@@ -539,6 +539,43 @@ def test_show3d_sidecar_zoom_skips_viewport_cache_contract():
     assert '"compare-blink"' in show3d
     assert '"visibility-sidecar"' in show3d
     assert "sidecarViewTransformActive()) return;" in show3d
+    assert "byteRangeSource = \"auto-range\"" in show3d
+    assert "byteRangeSource = \"histogram-preview\"" in show3d
+    assert "valueToPanelByte(autoRange.vmin)" in show3d
+    assert (
+        "React.useLayoutEffect(() => {\n"
+        "    if (\n"
+        "      !offline ||\n"
+        "      !sidecarMode ||\n"
+        "      !sidecarRamReady"
+    ) in show3d
+    assert 'drawSidecarBitmapFrame(drawIdx, false, "immediate");' in show3d
+    assert "debug.sidecarDisplayStyleDirty = true;" in show3d
+
+
+def test_show3d_sidecar_export_preserves_display_contrast_contract():
+    """C1: folder export should preserve microscope contrast state."""
+    show3d = (ROOT / "src" / "quantem" / "widget" / "show3d.py").read_text(encoding="utf-8")
+    export_body = show3d.split("    def export_sidecar(", 1)[1].split(
+        "    def _compress_html_if_requested", 1
+    )[0]
+
+    assert "export_widget.auto_contrast = False" not in export_body
+    assert "export_widget.vmin = 0.0" not in export_body
+    assert "\"auto_contrast\": bool(export_widget.auto_contrast)" in export_body
+    assert "\"offline_mins\": list(export_widget._offline_mins or [])" in export_body
+    assert "serve_sidecar_range.py --dir ." in export_body
+    assert "python3 -m http.server" not in export_body
+
+
+def test_show3d_folder_review_range_server_is_shipped():
+    """C1: collaborators can serve folder exports without private lab scripts."""
+    server = (ROOT / "scripts" / "serve_sidecar_range.py").read_text(encoding="utf-8")
+
+    assert "Accept-Ranges" in server
+    assert "Content-Range" in server
+    assert "206 if partial else 200" in server
+    assert 'parser.add_argument("--dir", required=True' in server
 
 
 def test_show3d_playback_row_bookmarks_current_frame_contract():

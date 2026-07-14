@@ -101,6 +101,45 @@ Then open:
 http://127.0.0.1:8803/index.html
 ```
 
+### Share with a colleague
+
+Share the entire folder export, not only `index.html`. The HTML is the viewer;
+`offline_stack.u8` is the frame data; `manifest.json` records the shape, panel
+count, display metadata, and file names.
+
+For a normal handoff, package or copy the directory as one unit:
+
+```bash
+# Option A: make one archive to upload or send through shared storage.
+tar -C /data/reports -czf 800C_1.3Mx_fullres.tgz 800C_1.3Mx_fullres
+
+# Option B: copy the folder directly to a shared project directory.
+rsync -av /data/reports/800C_1.3Mx_fullres/ \
+  /shared/projects/denoise/800C_1.3Mx_fullres/
+```
+
+Tell the colleague to unpack or open that folder locally, then serve it from the
+folder with the Range helper:
+
+```bash
+cd /path/to/quantem.widget
+python scripts/serve_sidecar_range.py \
+  --dir /path/to/800C_1.3Mx_fullres \
+  --port 8803 --bind 127.0.0.1
+```
+
+They should open `http://127.0.0.1:8803/index.html` in Chrome, Edge, Brave, or
+another modern Chromium-family browser. If they only double-click
+`index.html`, the browser may block or mishandle the nearby multi-GB data file.
+If they see a blank page, stale colors, or a load error, first verify that
+`offline_stack.u8` is next to `index.html`, the server is running from the
+right folder, and the Range probe below returns `206 Partial Content`.
+
+For shared lab storage, keep the source `.npz` or reconstruction output beside
+the review when possible, but mark the folder export as the interactive review
+copy. Do not put private workstation paths, Jupyter tokens, or SSH tunnel
+details into the README you send with the folder.
+
 For a correct full-resolution folder review, the scientist-facing behavior is:
 
 - The viewer shell appears immediately, before all frames are loaded.

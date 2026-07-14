@@ -725,6 +725,7 @@ const valueToPct = (value: number | null | undefined, min: number, max: number, 
   return clampPct(((value - min) / (max - min)) * 100);
 };
 const pctToValue = (pct: number, min: number, max: number): number => min + (max - min) * (clampPct(pct) / 100);
+const clampByte = (x: number): number => Math.max(0, Math.min(255, Math.round(x)));
 
 function shouldIgnoreWidgetShortcut(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false;
@@ -3582,6 +3583,7 @@ function Show3D() {
   const [blinkFps, setBlinkFps] = useModelState<number>("blink_fps");
   const [diffCmap, setDiffCmap] = useModelState<string>("diff_cmap");
   const [compareBackground, setCompareBackground] = useModelState<string>("compare_background");
+  const previousCompareModeRef = React.useRef<string>(compareMode || "off");
   const [blinkPhase, setBlinkPhase] = React.useState(0);
   const panelMarkerColor = React.useCallback((panel: number) => {
     const value = identityColors?.[panel] || markerColors?.[panel];
@@ -4509,9 +4511,15 @@ function Show3D() {
       : Array.from({ length: Math.max(1, nPanels || 1) }, (_, idx) => idx);
     return JSON.stringify({
       cmap,
+      autoContrast,
+      logScale,
+      percentileLow: Number(percentileLow || 0).toFixed(3),
+      percentileHigh: Number(percentileHigh || 100).toFixed(3),
       linkContrast,
       imageVminPct: Number(imageVminPct || 0).toFixed(3),
       imageVmaxPct: Number(imageVmaxPct || 100).toFixed(3),
+      autoVmins: (autoVmins || []).map((value) => Number(value).toFixed(6)),
+      autoVmaxs: (autoVmaxs || []).map((value) => Number(value).toFixed(6)),
       panels: panels.map((panel) => {
         const state = panelStates[panel] || initialState;
         return [
@@ -4519,20 +4527,32 @@ function Show3D() {
           panelCmapFor(panel),
           Number(state.imageVminPct || 0).toFixed(3),
           Number(state.imageVmaxPct || 100).toFixed(3),
+          offlineMins?.[panel] ?? offlineMin ?? null,
+          offlineMaxs?.[panel] ?? offlineMax ?? null,
           vminPerPanel?.[panel] ?? null,
           vmaxPerPanel?.[panel] ?? null,
         ];
       }),
     });
   }, [
+    autoContrast,
+    autoVmins,
+    autoVmaxs,
     cmap,
     imageVminPct,
     imageVmaxPct,
     initialState,
     linkContrast,
+    logScale,
     nPanels,
+    offlineMin,
+    offlineMax,
+    offlineMins,
+    offlineMaxs,
     panelCmapFor,
     panelStates,
+    percentileLow,
+    percentileHigh,
     visiblePanelIndices,
     vminPerPanel,
     vmaxPerPanel,
@@ -4686,6 +4706,17 @@ function Show3D() {
   const [playbackUiSliceIdx, setPlaybackUiSliceIdx] = React.useState(sliceIdx);
   const [localStats, setLocalStats] = React.useState<{ mean: number; min: number; max: number; std: number } | null>(null);
   const [localPanelStats, setLocalPanelStats] = React.useState<PanelStats[] | null>(null);
+  const setCompareActiveFromCurrentFrame = React.useCallback((enabled: boolean) => {
+    if (!enabled) {
+      setCompareMode("off");
+      return;
+    }
+    const n = Math.max(1, Math.round(nSlices || 1));
+    const current = ((Math.round(playbackIdxRef.current || displaySliceIdx || sliceIdx || 0) % n) + n) % n;
+    const neighbor = current < n - 1 ? current + 1 : Math.max(0, current - 1);
+    setComparePair([current, neighbor]);
+    setCompareMode("blink");
+  }, [displaySliceIdx, nSlices, setCompareMode, setComparePair, sliceIdx]);
   const frameRotationFor = React.useCallback((frame: number) => {
     return ((Math.round(frameRotations?.[frame] ?? 0) % 4) + 4) % 4;
   }, [frameRotations]);
@@ -4922,7 +4953,6 @@ function Show3D() {
   }, [frameSeq, height, nSlices, subpixelAlignEnabled, subpixelAlignVersion, width]);
 
   const setGpuDisplayVisible = React.useCallback((visible: boolean) => {
-    if (gpuDisplayVisibleRef.current === visible) return;
     gpuDisplayVisibleRef.current = visible;
     const gpuCanvas = gpuCanvasRef.current;
     const canvas = canvasRef.current;
@@ -9072,9 +9102,10 @@ function Show3D() {
     targetW: number,
     targetH: number,
   ): boolean => {
-    if (isRgb || sharedPanelSource || imageRotation % 4 !== 0 || flipCols || flipRows) return false;
+    if (isRgb || sharedPanelSource) return false;
     const u8 = sidecarU8FrameCacheRef.current.get(drawIdx);
     if (!u8 || u8.byteLength < width * height) return false;
+    const rotation = ((Math.round(imageRotation) % 4) + 4) % 4;
     const visibleCountLocal = Math.max(1, visiblePanelCount || 1);
     const cols = panelColsForCount(visibleCountLocal);
     const rows = Math.ceil(visibleCountLocal / cols);
@@ -9101,7 +9132,7 @@ function Show3D() {
     }
     const outPanelWFloat = (targetW - gap * (cols - 1)) / cols;
     const outPanelHFloat = (targetH - gap * (rows - 1)) / rows;
-    const debugPaintPanels: Array<Record<string, number | boolean | null>> = [];
+    const debugPaintPanels: Array<Record<string, number | string | boolean | null>> = [];
     for (let slot = 0; slot < visibleCountLocal; slot++) {
       const panelIdx = visiblePanelIndices[slot] ?? slot;
       const panelState = stateFor(panelIdx);
@@ -9118,10 +9149,55 @@ function Show3D() {
         : null;
       const panelPreview = panelHistogramPreviewPctRef.current.get(panelIdx) ?? null;
       const sharedPreview = imageHistogramPreviewPctRef.current;
-      const loPct = panelStateRange ? (panelPreview?.[0] ?? panelStateRange.imageVminPct) : (sharedPreview?.[0] ?? imageVminPct);
-      const hiPct = panelStateRange ? (panelPreview?.[1] ?? panelStateRange.imageVmaxPct) : (sharedPreview?.[1] ?? imageVmaxPct);
-      const loByte = Math.max(0, Math.min(255, Math.round((Number(loPct) || 0) * 2.55)));
-      const hiByte = Math.max(0, Math.min(255, Math.round((Number(hiPct) || 100) * 2.55)));
+      const preview = panelStateRange ? panelPreview : sharedPreview;
+      const panelByteMin = (
+        offlineMins?.length >= Math.max(1, nPanels || 1) &&
+        Number.isFinite(offlineMins[panelIdx])
+      )
+        ? offlineMins[panelIdx]
+        : offlineMin;
+      const panelByteMax = (
+        offlineMaxs?.length >= Math.max(1, nPanels || 1) &&
+        Number.isFinite(offlineMaxs[panelIdx])
+      )
+        ? offlineMaxs[panelIdx]
+        : offlineMax;
+      const valueToPanelByte = (value: number): number | null => {
+        if (!Number.isFinite(value) || !Number.isFinite(panelByteMin) || !Number.isFinite(panelByteMax) || panelByteMax <= panelByteMin) {
+          return null;
+        }
+        return clampByte(((value - panelByteMin) / (panelByteMax - panelByteMin)) * 255);
+      };
+      let loByte: number;
+      let hiByte: number;
+      let byteRangeSource = "manual-percent";
+      if (preview) {
+        loByte = clampByte((Number(preview[0]) || 0) * 2.55);
+        hiByte = clampByte((Number(preview[1]) || 100) * 2.55);
+        byteRangeSource = "histogram-preview";
+      } else if (autoContrast) {
+        const autoRange = cachedAutoDisplayRange(autoVmins, autoVmaxs, drawIdx, logScale)
+          || cachedAutoDisplayRange(localAutoVminsRef.current, localAutoVmaxsRef.current, drawIdx, logScale);
+        const mappedLo = autoRange ? valueToPanelByte(autoRange.vmin) : null;
+        const mappedHi = autoRange ? valueToPanelByte(autoRange.vmax) : null;
+        if (mappedLo !== null && mappedHi !== null && mappedHi > mappedLo) {
+          loByte = mappedLo;
+          hiByte = mappedHi;
+          byteRangeSource = "auto-range";
+        } else {
+          loByte = clampByte((Number(percentileLow) || 0) * 2.55);
+          hiByte = clampByte((Number(percentileHigh) || 100) * 2.55);
+          byteRangeSource = "auto-percent-fallback";
+        }
+      } else {
+        const loPct = panelStateRange ? panelStateRange.imageVminPct : imageVminPct;
+        const hiPct = panelStateRange ? panelStateRange.imageVmaxPct : imageVmaxPct;
+        loByte = clampByte((Number(loPct) || 0) * 2.55);
+        hiByte = clampByte((Number(hiPct) || 100) * 2.55);
+      }
+      if (hiByte <= loByte) {
+        hiByte = Math.min(255, loByte + 1);
+      }
       const byteSpan = Math.max(1, hiByte - loByte);
       const srcPanelX = Math.max(0, Math.min(width - 1, panelIdx * sourcePanelW));
       const srcPanelXMax = Math.max(srcPanelX, Math.min(width - 1, srcPanelX + sourcePanelW - 1));
@@ -9132,14 +9208,28 @@ function Show3D() {
       for (let y = slotY0; y < slotY1; y++) {
         const localDrawY = ((y - slotY0) - (panelState.panY || 0)) / Math.max(1e-6, panelState.zoom || 1);
         if (localDrawY < 0 || localDrawY >= outPanelHFloat) continue;
-        const localY = localDrawY / Math.max(1, outPanelHFloat);
-        const srcY = Math.max(0, Math.min(height - 1, Math.floor(localY * height)));
+        let localY = localDrawY / Math.max(1, outPanelHFloat);
+        if (flipRows) localY = 1 - localY;
         let dst = (y * targetW + slotX0) * 4;
         for (let x = slotX0; x < slotX1; x++, dst += 4) {
           const localDrawX = ((x - slotX0) - (panelState.panX || 0)) / Math.max(1e-6, panelState.zoom || 1);
           if (localDrawX < 0 || localDrawX >= outPanelWFloat) continue;
-          const localX = localDrawX / Math.max(1, outPanelWFloat);
-          const srcX = Math.max(srcPanelX, Math.min(srcPanelXMax, srcPanelX + Math.floor(localX * sourcePanelW)));
+          let localX = localDrawX / Math.max(1, outPanelWFloat);
+          if (flipCols) localX = 1 - localX;
+          let srcNormX = localX;
+          let srcNormY = localY;
+          if (rotation === 1) {
+            srcNormX = localY;
+            srcNormY = 1 - localX;
+          } else if (rotation === 2) {
+            srcNormX = 1 - localX;
+            srcNormY = 1 - localY;
+          } else if (rotation === 3) {
+            srcNormX = 1 - localY;
+            srcNormY = localX;
+          }
+          const srcY = Math.max(0, Math.min(height - 1, Math.floor(srcNormY * height)));
+          const srcX = Math.max(srcPanelX, Math.min(srcPanelXMax, srcPanelX + Math.floor(srcNormX * sourcePanelW)));
           const src = srcY * width + srcX;
           const v = Math.max(0, Math.min(255, Math.floor(((u8[src] - loByte) / byteSpan) * 255)));
           const li = v * 3;
@@ -9163,9 +9253,13 @@ function Show3D() {
         srcPanelX,
         loByte,
         hiByte,
+        byteRangeSource,
         zoom: Number((panelState.zoom || 1).toFixed(3)),
         panX: Number((panelState.panX || 0).toFixed(1)),
         panY: Number((panelState.panY || 0).toFixed(1)),
+        rotation,
+        flipCols,
+        flipRows,
         wrote: wrotePanelPixel,
         sampleByte,
         sampleMapped,
@@ -9193,6 +9287,16 @@ function Show3D() {
     panelGapTrait,
     panelWidthPx,
     nPanels,
+    offlineMins,
+    offlineMaxs,
+    offlineMin,
+    offlineMax,
+    autoContrast,
+    autoVmins,
+    autoVmaxs,
+    logScale,
+    percentileLow,
+    percentileHigh,
     imageVminPct,
     imageVmaxPct,
     themeColors.bg,
@@ -9593,7 +9697,9 @@ function Show3D() {
           if (!sidecarCompositeReadyRef.current) {
             sidecarCompositeReadyRef.current = true;
             setSidecarCompositeReady(true);
-            drawSidecarBitmapFrame(idx, false, "viewport-first");
+            if ((compareMode || "off") === "off") {
+              drawSidecarBitmapFrame(idx, false, "viewport-first");
+            }
           }
           if (builtFrames === 1 || builtFrames % 8 === 0 || builtFrames === n) {
             const elapsed = ((performance.now() - started) / 1000).toFixed(1);
@@ -9680,7 +9786,7 @@ function Show3D() {
     sidecarDisplayStyleKey,
   ]);
 
-  React.useEffect(() => {
+  React.useLayoutEffect(() => {
     if (
       !offline ||
       !sidecarMode ||
@@ -9709,6 +9815,7 @@ function Show3D() {
   }, [
     canvasH,
     canvasW,
+    compareMode,
     drawSidecarBitmapFrame,
     isRgb,
     liveSliceIdx,
@@ -9978,8 +10085,63 @@ function Show3D() {
     };
   }, [offline, sidecarMode, enableSidecarGpuTexturePresenter, sidecarCompositeComplete, canvasW, canvasH, nSlices, smooth, sidecarViewTransformActive]);
 
+  React.useLayoutEffect(() => {
+    const previousCompareMode = previousCompareModeRef.current || "off";
+    const activeCompareMode = compareMode || "off";
+    previousCompareModeRef.current = activeCompareMode;
+    if (
+      isRgb ||
+      !offline ||
+      !sidecarMode ||
+      !sidecarRamReady
+    ) {
+      return;
+    }
+    if (activeCompareMode === "off") {
+      if (previousCompareMode !== "off") {
+        const n = Math.max(1, nSlices || 1);
+        const drawIdx = ((Math.round(playbackIdxRef.current || liveSliceIdx || 0) % n) + n) % n;
+        drawSidecarBitmapFrame(drawIdx, false, "compare-off");
+        updatePlaybackLiveControls(drawIdx);
+      }
+      return;
+    }
+    if (activeCompareMode !== "blink") {
+      const debug = show3dPerfDebug();
+      if (debug) debug.lastComparePath = "sidecar-compare-unsupported";
+      return;
+    }
+    const n = Math.max(1, nSlices || 1);
+    const pair = Array.isArray(comparePair) && comparePair.length === 2 ? comparePair : [0, 1];
+    const aIdx = Math.max(0, Math.min(n - 1, Math.round(pair[0] ?? 0)));
+    const bIdx = Math.max(0, Math.min(n - 1, Math.round(pair[1] ?? Math.min(1, n - 1))));
+    const activeIdx = activeCompareMode === "blink" && blinkPhase ? bIdx : aIdx;
+    const ok = drawSidecarBitmapFrame(activeIdx, false, "compare-blink");
+    if (ok) {
+      updatePlaybackLiveControls(activeIdx);
+      const debug = show3dPerfDebug();
+      if (debug) {
+        debug.lastComparePath = "sidecar-blink";
+        debug.lastCompareFrame = activeIdx;
+      }
+    }
+  }, [
+    blinkPhase,
+    compareMode,
+    comparePair,
+    drawSidecarBitmapFrame,
+    isRgb,
+    liveSliceIdx,
+    nSlices,
+    offline,
+    sidecarMode,
+    sidecarRamReady,
+    updatePlaybackLiveControls,
+  ]);
+
   React.useEffect(() => {
     if (compareMode === "off" || isRgb || !canvasRef.current) return;
+    if (offline && sidecarMode) return;
     const canvas = canvasRef.current;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
@@ -10051,7 +10213,7 @@ function Show3D() {
     }
     outCtx.putImageData(pixels, 0, 0);
     drawMain(ctx, out, { sourcePanelWidth: sharedPanelSource ? undefined : panelW });
-  }, [compareMode, comparePair, blinkPhase, blinkFps, compareBackground, diffCmap, isRgb, canvasW, canvasH, width, height, nSlices, nPanels, panelWidthPx, sharedPanelSource, displaySliceIdx, frameBytes, frameSeq, cmap, panelCmaps, percentileLow, percentileHigh, logScale, visiblePanelIndices, canvasRepaintSignal]);
+  }, [compareMode, comparePair, blinkPhase, blinkFps, compareBackground, diffCmap, isRgb, canvasW, canvasH, width, height, nSlices, nPanels, panelWidthPx, sharedPanelSource, displaySliceIdx, frameBytes, frameSeq, cmap, panelCmaps, percentileLow, percentileHigh, logScale, visiblePanelIndices, canvasRepaintSignal, offline, sidecarMode]);
 
   React.useEffect(() => {
     if (!scrubPreviewBytes || scrubPreviewBytes.byteLength === 0) return;
@@ -10563,7 +10725,10 @@ function Show3D() {
         console.warn("[Show3D] Foreground WebGPU re-present failed; using the retained 2D frame", err);
       }
     }
-    if (!restoredGpu) {
+    if (!restoredGpu && offline && sidecarMode && sidecarRamReadyRef.current && !isRgb) {
+      restoredCanvas = drawSidecarBitmapFrame(frameIdx, false, "visibility-sidecar");
+    }
+    if (!restoredGpu && !restoredCanvas) {
       setGpuDisplayVisible(false);
       const canvas = canvasRef.current;
       const offscreen = mainOffscreenRef.current;
@@ -15451,14 +15616,14 @@ function Show3D() {
               </Box>
               <MenuItem
                 dense
-                onClick={() => setCompareMode(compareMode === "off" ? "blink" : "off")}
+                onClick={() => setCompareActiveFromCurrentFrame(compareMode === "off")}
                 sx={{ fontSize: 12, gap: 1, color: compareMode !== "off" ? themeColors.accent : themeColors.text }}
               >
                 <Typography sx={{ flex: 1, fontSize: 12, color: "inherit" }} title="Blink, difference, or overlay two frames for change detection.">Compare</Typography>
                 <Switch
                   checked={compareMode !== "off"}
                   onClick={(event) => event.stopPropagation()}
-                  onChange={(event) => setCompareMode(event.target.checked ? "blink" : "off")}
+                  onChange={(event) => setCompareActiveFromCurrentFrame(event.target.checked)}
                   size="small"
                   sx={switchStyles.small}
                   slotProps={{ input: { "aria-label": "Toggle compare settings" } }}

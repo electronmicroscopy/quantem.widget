@@ -4271,15 +4271,10 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             export_widget._offline_stack_url = stack_name
             export_widget.offline = True
             export_widget.export_enabled = False
-            # Sidecar uint8 packs are already per-panel display-quantized. Fixed
-            # 0–1 display range avoids multi‑million-pixel percentile rescan on
-            # every scrub (was a major FPS killer at full-res multi-panel).
-            export_widget.auto_contrast = False
-            try:
-                export_widget.vmin = 0.0
-                export_widget.vmax = 1.0
-            except Exception:
-                pass
+            # Folder uint8 packs keep raw display bytes plus per-panel source
+            # ranges. Preserve the scientist's contrast state in the HTML; the
+            # browser maps auto/manual/histogram ranges onto those bytes without
+            # rescanning full-resolution panels on each scrub.
 
             html_path = out_path / html_name
             from ipywidgets.embed import dependency_state, embed_minimal_html
@@ -4313,9 +4308,18 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 "offline_max": float(export_widget._offline_max),
                 "offline_mins": list(export_widget._offline_mins or []),
                 "offline_maxs": list(export_widget._offline_maxs or []),
+                "cmap": export_widget.cmap,
+                "panel_cmaps": list(export_widget.panel_cmaps or []),
+                "auto_contrast": bool(export_widget.auto_contrast),
+                "link_contrast": bool(export_widget.link_contrast),
+                "percentile_low": float(export_widget.percentile_low),
+                "percentile_high": float(export_widget.percentile_high),
+                "image_vmin_pct": float(export_widget.image_vmin_pct),
+                "image_vmax_pct": float(export_widget.image_vmax_pct),
+                "log_scale": bool(export_widget.log_scale),
                 "stack_bytes": int(stack_path.stat().st_size),
                 "html_bytes": int(html_path.stat().st_size),
-                "serve": f"python3 -m http.server --bind 127.0.0.1 8801  # from {out_path}",
+                "serve": "python scripts/serve_sidecar_range.py --dir . --port 8801 --bind 127.0.0.1",
             }
             (out_path / manifest_name).write_text(json.dumps(manifest, indent=2) + "\n")
             html_mb = html_path.stat().st_size / (1024 * 1024)

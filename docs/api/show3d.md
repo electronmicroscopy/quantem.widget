@@ -593,6 +593,11 @@ separate downsampled/single-file export rather than treating it as the
 full-resolution review copy. For the end-to-end browser checklist and example
 timing report, see the [advanced tutorial](../tutorials/advanced.md).
 
+When sharing this export, send or copy the whole folder. `index.html` is not a
+standalone result for this mode; it needs `offline_stack.u8` and `manifest.json`
+beside it. The colleague should serve the received folder with the same Range
+helper and open the local URL.
+
 ## Animation exports
 
 Use HTML when collaborators should keep scrubbing, zooming, and changing
