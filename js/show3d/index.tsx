@@ -17048,7 +17048,7 @@ function Show3D() {
                               if (sidecarMode) window.setTimeout(commitPanelRange, 0);
                               else commitPanelRange();
                             }}
-                            commitOnChange={false}
+                            commitOnChange={!sidecarMode}
                             width={110}
                             height={58}
                             theme={themeInfo.theme === "dark" ? "dark" : "light"}
@@ -17092,7 +17092,7 @@ function Show3D() {
                       if (sidecarMode) window.setTimeout(commitSharedRange, 0);
                       else commitSharedRange();
                     }}
-                    commitOnChange={false}
+                    commitOnChange={!sidecarMode}
                     width={110}
                     height={58}
                     theme={themeInfo.theme === "dark" ? "dark" : "light"}

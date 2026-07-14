@@ -140,6 +140,21 @@ def test_show2d_and_show3d_paged_sliders_use_local_preview_contract():
     assert "const activePageStart = isPaged ? displayPageIdx" in show3d
 
 
+def test_show3d_histogram_drag_repaints_single_file_exports():
+    """C1: normal exported Show3D histograms react while the user drags."""
+    show3d = (ROOT / "js" / "show3d" / "index.tsx").read_text(encoding="utf-8")
+
+    assert show3d.count("commitOnChange={!sidecarMode}") == 2
+    assert (
+        "if (sidecarMode) window.setTimeout(commitPanelRange, 0);\n"
+        "                              else commitPanelRange();"
+    ) in show3d
+    assert (
+        "if (sidecarMode) window.setTimeout(commitSharedRange, 0);\n"
+        "                      else commitSharedRange();"
+    ) in show3d
+
+
 def test_show2d_local_stack_fft_cache_and_playback_contract():
     """Local slice playback keeps the prior FFT visible and reuses revisits."""
     show2d = (ROOT / "js" / "show2d" / "index.tsx").read_text(encoding="utf-8")
