@@ -4,7 +4,7 @@ Reads compressed 4D-STEM data straight onto the GPU (CUDA / Apple Metal) or CPU
 and returns a `LoadResult` you hand to [`Show4DSTEM`](show4dstem). Public import:
 
 ```python
-from quantem.widget import load
+from quantem.widget import load, load_scan_region
 ```
 
 ## Reference
@@ -143,3 +143,56 @@ Memory rule of thumb for Sample-scale `512x512x192x192` data:
 
 Use `det_bin=4, dtype="u8"` for first-pass browsing. Use uint16/no-bin only
 when exact diffraction intensities matter and the GPU memory budget is clean.
+
+## Scan-region loading for ROI workflows
+
+Use `load_scan_region()` when a reconstruction or denoise workflow needs only a
+rectangular scan patch, not the full scan plane. This is different from loading
+the full frame and slicing afterward: the loader reads only the selected HDF5
+detector-frame chunks, decompresses them on CUDA, and returns a local patch.
+
+```python
+from quantem.widget import load_scan_region
+
+patch = load_scan_region(
+    "scan_master.h5",
+    scan_region=(160, 293, 234, 367),  # row_start, row_stop, col_start, col_stop
+).data
+
+print(patch.shape)
+# (133, 133, 192, 192)
+```
+
+The returned `LoadResult.data` shape is
+`(region_rows, region_cols, detector_rows, detector_cols)`. Metadata records
+both the original scan grid and the loaded patch:
+
+```python
+result = load_scan_region("scan_master.h5", (160, 293, 234, 367))
+print(result.metadata["full_scan_shape"])  # e.g. (512, 512)
+print(result.metadata["scan_region"])
+```
+
+For drift-corrected time-series work, compute the source scan box from the
+shared specimen ROI plus a small halo, load that patch, then apply your existing
+subpixel sampler in local patch coordinates. Do not save the sampled patch as a
+new raw acquisition; drift is scan-position metadata, and detector counts stay
+physically unchanged.
+
+Measured on a native-detector Pari 5D-STEM ROI loader timing check
+(`10 x 128 x 128 x 192 x 192`, CUDA, no detector binning):
+
+| Path | Loader wall time | Max loaded CuPy buffer |
+|---|---:|---:|
+| `load()` full frame, then crop | `9.66 s` | `18.0 GiB` |
+| `load_scan_region()` patch, then crop | `2.44 s` | `1.215 GiB` |
+
+The patch path is CUDA-only today and targets chunked 4D-STEM masters with one
+detector frame per HDF5 chunk. Use `load()` for full-field browsing and for
+Apple Metal/MPS until the region loader is ported there.
+
+## Region-loader reference
+
+```{eval-rst}
+.. autofunction:: quantem.widget.io.hdf5.load_scan_region
+```

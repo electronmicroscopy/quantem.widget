@@ -60,6 +60,10 @@ eds = load_eds("spectrum_image.emd")  # Velox/RSCIIO EDS/EELS -> energy-last Spe
 ShowEDS(eds, energy=8.04, width=0.24)
 ```
 
+For reconstruction or denoise pipelines that need a scan ROI rather than a
+full field of view, `load_scan_region("scan_master.h5", (r0, r1, c0, c1))`
+loads only that HDF5 scan patch to CUDA before downstream sampling.
+
 No data at hand? The tutorial datasets download and cache themselves:
 
 ```python

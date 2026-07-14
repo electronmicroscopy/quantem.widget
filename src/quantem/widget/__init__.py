@@ -23,7 +23,7 @@ from quantem.widget.showeds import ShowEDS, SpectrumImage, bin_spectrum_image, l
 from quantem.widget.show4dstem_factory import Show4DSTEM
 from quantem.widget.showdiffraction import ShowDiffraction
 from quantem.widget.showfolder import ShowFolder, prebuild_showfolder_cache, show_folder
-from quantem.widget.io import load, read_gif, read_image, read_image_stack, read_images
+from quantem.widget.io import load, load_scan_region, read_gif, read_image, read_image_stack, read_images
 from . import movie
 from quantem.widget.paths import first_existing
 from quantem.widget.backend import detect_backend, resolve_backend
@@ -173,6 +173,7 @@ __all__ = [
     "load_eds",
     "load_emd_spectrum_image",
     "load",
+    "load_scan_region",
     "show_folder",
     "read_gif",
     "read_image",

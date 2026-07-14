@@ -72,7 +72,7 @@ _clip_u32_to_u8_count_kernel = _lazy_kernel("clip_u32_to_u8_count_kernel")
 
 __version__ = "0.0.3"
 __all__ = [
-    "load", "load_parallel", "disk_of", "group_by_disk", "save", "H5Writer", "wait_for_saves", "bin",
+    "load", "load_scan_region", "load_parallel", "disk_of", "group_by_disk", "save", "H5Writer", "wait_for_saves", "bin",
     "discover_masters", "inspect_master_readiness", "is_master_ready",
     "MasterReadiness", "read_pixel_mask", "__version__",
 ]
@@ -298,6 +298,31 @@ def _apply_scan_shape(
         )
     dr, dc = data.shape[-2:]
     return data.reshape(scan_r, scan_c, dr, dc)
+
+
+def _normalize_scan_region(
+    scan_region: tuple[int, int, int, int] | dict[str, int],
+    scan_shape: tuple[int, int],
+) -> tuple[int, int, int, int]:
+    """Validate a scan-space region as ``(row_start, row_stop, col_start, col_stop)``."""
+    if isinstance(scan_region, dict):
+        row_start = int(scan_region["row_start"])
+        row_stop = int(scan_region["row_stop"])
+        col_start = int(scan_region["col_start"])
+        col_stop = int(scan_region["col_stop"])
+    else:
+        row_start, row_stop, col_start, col_stop = (int(v) for v in scan_region)
+
+    scan_r, scan_c = (int(v) for v in scan_shape)
+    if not (0 <= row_start < row_stop <= scan_r):
+        raise ValueError(
+            f"scan row region [{row_start}, {row_stop}) is outside scan height {scan_r}"
+        )
+    if not (0 <= col_start < col_stop <= scan_c):
+        raise ValueError(
+            f"scan column region [{col_start}, {col_stop}) is outside scan width {scan_c}"
+        )
+    return row_start, row_stop, col_start, col_stop
 
 
 def get_metadata(filepath: str) -> dict:
@@ -1132,6 +1157,140 @@ def _prepare_master(
         "dtype": dtype,
         "pixel_mask": pixel_mask,
         "n_chunk_files": len(chunk_names),
+    }
+
+
+def _prepare_master_frames(
+    filepath: str,
+    chunk_names: list[str],
+    frame_indices: np.ndarray,
+    apply_mask: bool = True,
+) -> dict:
+    """Read selected compressed detector frames and index them for GPU decode.
+
+    This is the sparse counterpart to :func:`_prepare_master`: instead of
+    bulk-reading every external ``data_######`` file, it pulls only the HDF5
+    chunks for the requested flattened scan-frame indices. The returned dict is
+    intentionally compatible with :func:`_decompress_prepared`.
+    """
+    import bisect
+
+    selected = np.asarray(frame_indices, dtype=np.int64).reshape(-1)
+    if selected.size == 0:
+        raise ValueError("frame_indices must contain at least one frame")
+    if np.any(selected < 0):
+        raise ValueError("frame_indices must be non-negative")
+
+    master_dir = os.path.dirname(os.path.abspath(filepath))
+    source_infos: list[dict[str, Any]] = []
+    pixel_mask = None
+    with h5py.File(filepath, "r") as f:
+        data_group = f["entry/data"]
+        for chunk_name in chunk_names:
+            link = data_group.get(chunk_name, getlink=True)
+            if isinstance(link, h5py.ExternalLink):
+                data_path = os.path.join(master_dir, link.filename)
+                dataset_path = link.path or "entry/data/data"
+            else:
+                ds = data_group[chunk_name]
+                data_path = ds.file.filename
+                dataset_path = ds.name
+
+            with h5py.File(data_path, "r") as df:
+                ds = df[dataset_path]
+                if ds.ndim != 3:
+                    raise ValueError(
+                        "load_scan_region currently supports flattened "
+                        f"3D detector chunks; got {ds.shape} in {data_path}"
+                    )
+                if ds.chunks is None or int(ds.chunks[0]) != 1:
+                    raise ValueError(
+                        "load_scan_region requires one detector frame per "
+                        f"HDF5 chunk; got chunks={ds.chunks} in {data_path}"
+                    )
+                source_infos.append(
+                    {
+                        "path": data_path,
+                        "dataset_path": dataset_path,
+                        "n_frames": int(ds.shape[0]),
+                        "frame_shape": tuple(int(v) for v in ds.shape[1:]),
+                        "dtype": ds.dtype,
+                    }
+                )
+        if apply_mask:
+            mask_path = "entry/instrument/detector/detectorSpecific/pixel_mask"
+            if mask_path in f:
+                pixel_mask = f[mask_path][:]
+
+    if not source_infos:
+        raise ValueError(f"No detector data chunks found in {filepath}")
+    frame_shape = source_infos[0]["frame_shape"]
+    dtype = source_infos[0]["dtype"]
+    for info in source_infos[1:]:
+        if info["frame_shape"] != frame_shape or np.dtype(info["dtype"]) != np.dtype(dtype):
+            raise ValueError("Detector chunk files have inconsistent shape or dtype")
+
+    source_starts = np.cumsum([0] + [info["n_frames"] for info in source_infos])
+    total_available = int(source_starts[-1])
+    if int(selected.max()) >= total_available:
+        raise ValueError(
+            f"Requested frame {int(selected.max())}, but only {total_available} frames are available"
+        )
+
+    raw_chunks: list[bytes] = []
+    open_files: dict[int, h5py.File] = {}
+    datasets: dict[int, h5py.Dataset] = {}
+    try:
+        for global_idx in selected:
+            source_idx = bisect.bisect_right(source_starts, int(global_idx)) - 1
+            local_idx = int(global_idx) - int(source_starts[source_idx])
+            if source_idx not in datasets:
+                info = source_infos[source_idx]
+                open_files[source_idx] = h5py.File(info["path"], "r")
+                datasets[source_idx] = open_files[source_idx][info["dataset_path"]]
+            _, chunk = datasets[source_idx].id.read_direct_chunk((local_idx, 0, 0))
+            raw_chunks.append(chunk)
+    finally:
+        for handle in open_files.values():
+            handle.close()
+
+    chunk_sizes_arr = np.asarray([len(chunk) for chunk in raw_chunks], dtype=np.uint32)
+    total_compressed = int(chunk_sizes_arr.sum(dtype=np.uint64))
+    read_buffer = _alloc_pinned_fast(total_compressed)
+    chunk_offsets_arr = np.empty(selected.size, dtype=np.uint64)
+    cursor = 0
+    for idx, chunk in enumerate(raw_chunks):
+        chunk_offsets_arr[idx] = cursor
+        nbytes = len(chunk)
+        read_buffer[cursor:cursor + nbytes] = np.frombuffer(chunk, dtype=np.uint8)
+        cursor += nbytes
+
+    frame_bytes = int(np.prod(frame_shape) * np.dtype(dtype).itemsize)
+    n_blocks_per_frame = (frame_bytes + BLOCK_SIZE - 1) // BLOCK_SIZE
+    block_starts_flat = np.zeros(selected.size * n_blocks_per_frame, dtype=np.uint32)
+    block_counts = np.zeros(selected.size, dtype=np.uint32)
+    block_offsets_arr = np.zeros(selected.size + 1, dtype=np.uint32)
+    _parse_headers_bulk(
+        read_buffer, chunk_sizes_arr, chunk_offsets_arr,
+        block_starts_flat, block_counts,
+        int(selected.size), n_blocks_per_frame,
+    )
+    block_offsets_arr[1:selected.size + 1] = np.cumsum(block_counts[:selected.size])
+    total_blocks = int(block_offsets_arr[selected.size])
+
+    return {
+        "read_buffer": read_buffer[:total_compressed],
+        "chunk_offsets": chunk_offsets_arr,
+        "block_starts": block_starts_flat[:total_blocks],
+        "block_counts": block_counts,
+        "block_offsets": block_offsets_arr,
+        "total_frames": int(selected.size),
+        "frame_shape": frame_shape,
+        "frame_bytes": frame_bytes,
+        "dtype": dtype,
+        "pixel_mask": pixel_mask,
+        "n_chunk_files": len(source_infos),
+        "selected_frame_indices": selected,
     }
 
 
@@ -2725,6 +2884,119 @@ def _browse_dtype_advise_and_cast(data, dtype, verbose):
 def _is_uint8_browse_dtype(dtype: str | None) -> bool:
     """Return True when the public browse dtype requests 8-bit unsigned data."""
     return isinstance(dtype, str) and dtype.lower() in ("u8", "uint8")
+
+
+def load_scan_region(
+    filepath: str,
+    scan_region: tuple[int, int, int, int] | dict[str, int],
+    *,
+    scan_shape: tuple[int, int] | None = None,
+    det_bin: int = 1,
+    apply_mask: bool = True,
+    verbose: bool = True,
+    auto_narrow: bool = True,
+    output_dtype: type | np.dtype | None = None,
+) -> LoadResult:
+    """Load only a rectangular scan region from a raw HDF5 master.
+
+    Parameters
+    ----------
+    filepath
+        Dectris/Arina master HDF5 file.
+    scan_region
+        ``(row_start, row_stop, col_start, col_stop)`` in the full scan grid,
+        or a dict with the same keys.
+    scan_shape
+        Full acquisition scan shape. When omitted, it is derived from metadata.
+    det_bin
+        Optional detector binning factor. The scan region is never binned.
+
+    Returns
+    -------
+    LoadResult
+        ``data`` is a CuPy array with shape
+        ``(region_rows, region_cols, det_rows, det_cols)``. Metadata keeps the
+        full acquisition grid in ``full_scan_shape`` and the loaded patch in
+        ``scan_region``.
+    """
+    import time
+
+    if cp is None:
+        raise RuntimeError("load_scan_region requires CuPy/CUDA")
+    if not os.path.isfile(filepath):
+        raise FileNotFoundError(f"HDF5 file not found: {filepath}")
+
+    t0 = time.perf_counter()
+    meta = get_metadata(filepath)
+    full_scan_shape = scan_shape if scan_shape is not None else meta.get("scan_shape")
+    if full_scan_shape is None:
+        raise ValueError(
+            "scan_shape is required because the HDF5 metadata did not expose a "
+            "square scan grid"
+        )
+    full_scan_shape = tuple(int(v) for v in full_scan_shape)
+    row_start, row_stop, col_start, col_stop = _normalize_scan_region(
+        scan_region, full_scan_shape
+    )
+    patch_h = int(row_stop - row_start)
+    patch_w = int(col_stop - col_start)
+    scan_c = int(full_scan_shape[1])
+    rows = np.arange(row_start, row_stop, dtype=np.int64)
+    cols = np.arange(col_start, col_stop, dtype=np.int64)
+    frame_indices = (rows[:, None] * scan_c + cols[None, :]).reshape(-1)
+
+    chunk_names = _discover_chunk_names(filepath)
+    if not chunk_names:
+        with h5py.File(filepath, "r") as f:
+            data_group = f.get("entry/data")
+            if data_group is not None and "data" in data_group:
+                chunk_names = ["data"]
+            else:
+                raise ValueError(
+                    f"{filepath} has no entry/data/data or data_###### detector chunks"
+                )
+
+    prepared = _prepare_master_frames(
+        filepath,
+        chunk_names,
+        frame_indices,
+        apply_mask=apply_mask,
+    )
+    pixel_mask = prepared.get("pixel_mask")
+    data = _decompress_prepared(
+        prepared,
+        verbose=False,
+        auto_narrow=auto_narrow,
+        det_bin=det_bin,
+        streaming_bin=(int(det_bin) > 1),
+        output_dtype=output_dtype,
+    )
+    det_r, det_c = (int(data.shape[-2]), int(data.shape[-1]))
+    data = data.reshape(patch_h, patch_w, det_r, det_c)
+
+    if pixel_mask is not None:
+        meta["pixel_mask"] = pixel_mask
+    meta["full_scan_shape"] = full_scan_shape
+    meta["full_n_frames"] = int(full_scan_shape[0] * full_scan_shape[1])
+    meta["scan_shape"] = (patch_h, patch_w)
+    meta["n_frames"] = int(patch_h * patch_w)
+    meta["scan_region"] = {
+        "row_start": int(row_start),
+        "row_stop": int(row_stop),
+        "col_start": int(col_start),
+        "col_stop": int(col_stop),
+        "shape": [patch_h, patch_w],
+    }
+    meta["det_bin"] = int(det_bin)
+    if verbose:
+        size_gb = data.nbytes / 1e9
+        print(
+            f"  {os.path.basename(filepath)} region "
+            f"[{row_start}:{row_stop}, {col_start}:{col_stop}] "
+            f"→ {tuple(data.shape)} ({size_gb:.2f} GB) "
+            f"in {time.perf_counter() - t0:.2f}s"
+        )
+    return LoadResult(data, meta)
 
 
 def load(filepath, *args, dtype: str | None = None, gpus=None, stack: bool = True,

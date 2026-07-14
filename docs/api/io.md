@@ -87,6 +87,35 @@ print(meta["scan_shape"], meta["detector_shape"])
 # e.g. (512, 512) (192, 192)
 ```
 
+## How do I load only a scan ROI without loading the full frame first?
+
+Use `load_scan_region()` for reconstruction or denoise workflows that need a
+scan patch plus halo instead of the full scan plane. It reads only the selected
+HDF5 detector-frame chunks and returns a local CuPy patch:
+
+```python
+from quantem.widget import load_scan_region
+
+result = load_scan_region(
+    "/data/session/scan_00_master.h5",
+    scan_region=(160, 293, 234, 367),
+)
+patch = result.data
+print(patch.shape)  # (133, 133, 192, 192)
+```
+
+This is for analysis pipelines, not first-pass full-field browsing. For a
+drift-corrected time series, derive `scan_region` from the shared specimen ROI,
+the frame shift, and a small scan halo, then sample the final ROI from the
+local patch. The detector counts remain raw; drift stays as scan-position
+metadata.
+
+On the Pari native-detector ROI loader timing check, loading ten full frames
+before cropping took `9.66 s` and used an `18.0 GiB` temporary per frame.
+Loading the needed `133 x 133` patch took `2.44 s` and used a `1.215 GiB`
+temporary per frame. The current region loader is CUDA-only; use
+`load()` for Apple Metal/MPS until the region path is ported there.
+
 ## Lightweight visual thumbnails
 
 Use `quantem.widget.render.thumbnail` when you need compact visual previews for
@@ -600,6 +629,9 @@ the right to share.
 
 ```{eval-rst}
 .. autofunction:: quantem.widget.io.hdf5.load
+```
+```{eval-rst}
+.. autofunction:: quantem.widget.io.hdf5.load_scan_region
 ```
 
 ### Discover + inspect
