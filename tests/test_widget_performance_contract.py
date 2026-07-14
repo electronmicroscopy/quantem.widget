@@ -524,6 +524,8 @@ def test_show3d_sidecar_zoom_skips_viewport_cache_contract():
     assert "sidecar-u8-viewport-transform" in show3d
     assert "sidecar-u8-viewport-live" in show3d
     assert "if (separatePanelFrames && !sidecarMode && (offline || imageRotation % 4 !== 0)) return false;" in show3d
+    assert '"layout-transform"' in show3d
+    assert "sidecarViewTransformActive()) return;" in show3d
 
 
 def test_show3d_playback_row_bookmarks_current_frame_contract():

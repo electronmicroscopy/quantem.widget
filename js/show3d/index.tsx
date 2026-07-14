@@ -9084,6 +9084,7 @@ function Show3D() {
     }
     const outPanelWFloat = (targetW - gap * (cols - 1)) / cols;
     const outPanelHFloat = (targetH - gap * (rows - 1)) / rows;
+    const debugPaintPanels: Array<Record<string, number | boolean | null>> = [];
     for (let slot = 0; slot < visibleCountLocal; slot++) {
       const panelIdx = visiblePanelIndices[slot] ?? slot;
       const panelState = stateFor(panelIdx);
@@ -9107,6 +9108,10 @@ function Show3D() {
       const byteSpan = Math.max(1, hiByte - loByte);
       const srcPanelX = Math.max(0, Math.min(width - 1, panelIdx * sourcePanelW));
       const srcPanelXMax = Math.max(srcPanelX, Math.min(width - 1, srcPanelX + sourcePanelW - 1));
+      let wrotePanelPixel = false;
+      let sampleByte: number | null = null;
+      let sampleMapped: number | null = null;
+      let sampleRgb: number | null = null;
       for (let y = slotY0; y < slotY1; y++) {
         const localDrawY = ((y - slotY0) - (panelState.panY || 0)) / Math.max(1e-6, panelState.zoom || 1);
         if (localDrawY < 0 || localDrawY >= outPanelHFloat) continue;
@@ -9121,14 +9126,42 @@ function Show3D() {
           const src = srcY * width + srcX;
           const v = Math.max(0, Math.min(255, Math.floor(((u8[src] - loByte) / byteSpan) * 255)));
           const li = v * 3;
+          if (sampleByte === null) {
+            sampleByte = u8[src];
+            sampleMapped = v;
+            sampleRgb = lut[li];
+          }
           rgba[dst] = lut[li];
           rgba[dst + 1] = lut[li + 1];
           rgba[dst + 2] = lut[li + 2];
           rgba[dst + 3] = 255;
+          wrotePanelPixel = true;
         }
       }
+      debugPaintPanels.push({
+        panelIdx,
+        slot,
+        slotX0,
+        slotY0,
+        srcPanelX,
+        loByte,
+        hiByte,
+        zoom: Number((panelState.zoom || 1).toFixed(3)),
+        panX: Number((panelState.panX || 0).toFixed(1)),
+        panY: Number((panelState.panY || 0).toFixed(1)),
+        wrote: wrotePanelPixel,
+        sampleByte,
+        sampleMapped,
+        sampleRgb,
+      });
     }
     ctx.putImageData(img, 0, 0);
+    const debug = show3dPerfDebug();
+    if (debug) {
+      debug.sidecarViewportPaintVisibleCount = visibleCountLocal;
+      debug.sidecarViewportPaintCanvas = { width: targetW, height: targetH };
+      debug.sidecarViewportPaintPanels = debugPaintPanels;
+    }
     return true;
   }, [
     isRgb,
@@ -9531,6 +9564,7 @@ function Show3D() {
             setOfflineStackFetchStatus("Viewport cache needs native fallback for this layout");
             return;
           }
+          if (cancelled || serial !== sidecarCompositeBuildSerialRef.current || sidecarViewTransformActive()) return;
           const retained = document.createElement("canvas");
           retained.width = scratch.width;
           retained.height = scratch.height;
@@ -10455,9 +10489,13 @@ function Show3D() {
       gpuCmapReadyRef.current
     );
     if (offlineGpuPlaybackOwnsCanvas) return;
-    const preserveGpuDisplay = playing && gpuDisplayVisibleRef.current === true && imageRotation % 4 === 0 && !sidecarViewTransformActive();
+    const viewTransformActive = sidecarViewTransformActive();
+    const preserveGpuDisplay = playing && gpuDisplayVisibleRef.current === true && imageRotation % 4 === 0 && !viewTransformActive;
     if (preserveGpuDisplay && separatePanelFrames) return;
-    if (offline && sidecarMode && (sidecarBitmapReadyRef.current || sidecarCompositeReadyRef.current) && !sidecarViewTransformActive()) {
+    if (offline && sidecarMode && viewTransformActive && sidecarRamReadyRef.current) {
+      if (drawSidecarBitmapFrame(playing ? playbackIdxRef.current : liveSliceIdx, false, "layout-transform")) return;
+    }
+    if (offline && sidecarMode && (sidecarBitmapReadyRef.current || sidecarCompositeReadyRef.current) && !viewTransformActive) {
       if (drawSidecarBitmapFrame(playing ? playbackIdxRef.current : liveSliceIdx, false, "layout")) return;
     }
     const ctx = canvasRef.current.getContext("2d");
