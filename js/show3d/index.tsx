@@ -2001,6 +2001,158 @@ const ANIMATION_QUALITY_SCALE: Record<string, number> = { low: 0.35, medium: 0.6
 const PANEL_GPU_READY_TIMEOUT_MS = 1200;
 const INITIAL_NATIVE_PREVIEW_DELAY_MS = 350;
 
+let browserGifPaletteCache: Uint8Array | null = null;
+
+function asciiBytes(value: string): Uint8Array {
+  const out = new Uint8Array(value.length);
+  for (let i = 0; i < value.length; i++) out[i] = value.charCodeAt(i) & 0xff;
+  return out;
+}
+
+function u16Bytes(value: number): Uint8Array {
+  const v = Math.max(0, Math.min(65535, Math.round(value)));
+  return new Uint8Array([v & 0xff, (v >> 8) & 0xff]);
+}
+
+function concatUint8(parts: Uint8Array[]): Uint8Array {
+  let total = 0;
+  for (const part of parts) total += part.byteLength;
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const part of parts) {
+    out.set(part, offset);
+    offset += part.byteLength;
+  }
+  return out;
+}
+
+function browserGifPalette(): Uint8Array {
+  if (browserGifPaletteCache) return browserGifPaletteCache;
+  const palette = new Uint8Array(256 * 3);
+  let idx = 0;
+  for (let r = 0; r < 6; r++) {
+    for (let g = 0; g < 6; g++) {
+      for (let b = 0; b < 6; b++) {
+        const j = idx * 3;
+        palette[j] = r * 51;
+        palette[j + 1] = g * 51;
+        palette[j + 2] = b * 51;
+        idx++;
+      }
+    }
+  }
+  const grayCount = 256 - idx;
+  for (let i = 0; idx < 256; idx++, i++) {
+    const v = grayCount <= 1 ? 0 : Math.round((i / (grayCount - 1)) * 255);
+    const j = idx * 3;
+    palette[j] = v;
+    palette[j + 1] = v;
+    palette[j + 2] = v;
+  }
+  browserGifPaletteCache = palette;
+  return palette;
+}
+
+function quantizeRgbaForBrowserGif(rgba: Uint8ClampedArray): Uint8Array {
+  const out = new Uint8Array(Math.floor(rgba.length / 4));
+  for (let i = 0, j = 0; i < out.length; i++, j += 4) {
+    const a = rgba[j + 3];
+    const r = a === 255 ? rgba[j] : Math.round((rgba[j] * a + 255 * (255 - a)) / 255);
+    const g = a === 255 ? rgba[j + 1] : Math.round((rgba[j + 1] * a + 255 * (255 - a)) / 255);
+    const b = a === 255 ? rgba[j + 2] : Math.round((rgba[j + 2] * a + 255 * (255 - a)) / 255);
+    const rq = Math.max(0, Math.min(5, Math.round(r / 51)));
+    const gq = Math.max(0, Math.min(5, Math.round(g / 51)));
+    const bq = Math.max(0, Math.min(5, Math.round(b / 51)));
+    out[i] = rq * 36 + gq * 6 + bq;
+  }
+  return out;
+}
+
+function gifLzwEncode(indices: Uint8Array): Uint8Array {
+  const minCodeSize = 8;
+  const clearCode = 1 << minCodeSize;
+  const endCode = clearCode + 1;
+  const codeSize = minCodeSize + 1;
+  const bytes: number[] = [];
+  let bitBuffer = 0;
+  let bitCount = 0;
+  const writeCode = (code: number) => {
+    bitBuffer |= code << bitCount;
+    bitCount += codeSize;
+    while (bitCount >= 8) {
+      bytes.push(bitBuffer & 0xff);
+      bitBuffer >>= 8;
+      bitCount -= 8;
+    }
+  };
+
+  // Conservative "clear-block" GIF LZW: emit raw color indices and reset before
+  // the decoder grows past 9-bit codes. It is larger than dictionary-compressed
+  // GIF, but browser-side standalone export values correctness over file size.
+  writeCode(clearCode);
+  let sinceClear = 0;
+  for (let i = 0; i < indices.length; i++) {
+    if (sinceClear >= 250) {
+      writeCode(clearCode);
+      sinceClear = 0;
+    }
+    writeCode(indices[i]);
+    sinceClear++;
+  }
+  writeCode(endCode);
+  if (bitCount > 0) bytes.push(bitBuffer & 0xff);
+  return new Uint8Array(bytes);
+}
+
+function pushGifSubBlocks(parts: Uint8Array[], data: Uint8Array): void {
+  for (let offset = 0; offset < data.length; offset += 255) {
+    const chunk = data.subarray(offset, Math.min(offset + 255, data.length));
+    parts.push(new Uint8Array([chunk.length]));
+    parts.push(chunk);
+  }
+  parts.push(new Uint8Array([0]));
+}
+
+function encodeIndexedGif(
+  width: number,
+  height: number,
+  frames: Uint8Array[],
+  delayCs: number,
+): Uint8Array {
+  if (width <= 0 || height <= 0 || frames.length === 0) {
+    throw new Error("GIF export needs at least one non-empty frame.");
+  }
+  const pixelCount = width * height;
+  for (const frame of frames) {
+    if (frame.length !== pixelCount) {
+      throw new Error(`GIF frame has ${frame.length} pixels; expected ${pixelCount}.`);
+    }
+  }
+  const parts: Uint8Array[] = [
+    asciiBytes("GIF89a"),
+    u16Bytes(width),
+    u16Bytes(height),
+    new Uint8Array([0xf7, 0, 0]),
+    browserGifPalette(),
+    new Uint8Array([0x21, 0xff, 0x0b]),
+    asciiBytes("NETSCAPE2.0"),
+    new Uint8Array([0x03, 0x01, 0x00, 0x00, 0x00]),
+  ];
+  const delay = Math.max(1, Math.min(65535, Math.round(delayCs)));
+  for (const frame of frames) {
+    parts.push(new Uint8Array([0x21, 0xf9, 0x04, 0x04]));
+    parts.push(u16Bytes(delay));
+    parts.push(new Uint8Array([0, 0]));
+    parts.push(new Uint8Array([0x2c, 0, 0, 0, 0]));
+    parts.push(u16Bytes(width));
+    parts.push(u16Bytes(height));
+    parts.push(new Uint8Array([0, 8]));
+    pushGifSubBlocks(parts, gifLzwEncode(frame));
+  }
+  parts.push(new Uint8Array([0x3b]));
+  return concatUint8(parts);
+}
+
 function formatEstimatedHtmlSize(payloadBytes: number): string {
   const htmlBytes = Math.max(0, payloadBytes) * 4 / 3 + HTML_EXPORT_OVERHEAD_BYTES;
   const mb = htmlBytes / (1024 * 1024);
@@ -4354,8 +4506,14 @@ function Show3D() {
   const unavailableStandaloneHtmlLabel = standaloneHtmlMode === "quantized"
     ? "HTML exact float32 (not embedded)"
     : "HTML quantized uint8 (requires backend)";
+  const canExportStandaloneGif = !exportEnabled && offline && width > 0 && height > 0 && nSlices > 0 && (
+    hasOfflineStack || hasOfflineFloatStack || sidecarRamReady
+  );
   const showAnimationExportOptions = exportEnabled || canDownloadCurrentHtml;
-  const animationExportUnavailableTitle = "GIF and MP4 export require the live Python backend. Standalone HTML can download itself as HTML.";
+  const standaloneGifUnavailableTitle = sidecarMode && !sidecarRamReady
+    ? "GIF export becomes available after the folder data finishes loading into RAM."
+    : "GIF export needs embedded or loaded standalone image data.";
+  const standaloneMp4UnavailableTitle = "MP4 export requires the live Python backend. Standalone HTML can export GIF or download itself as HTML.";
   const handleExportMenuOpen = (event: React.MouseEvent<HTMLElement>) => {
     setExportMenuAnchor(event.currentTarget);
   };
@@ -4407,6 +4565,153 @@ function Show3D() {
     } catch (err) {
       setLocalExportStatus(`Export failed: ${err instanceof Error ? err.message : String(err)}`);
     }
+  };
+  const renderStandaloneGifFrame = (frameIdx: number, quality: string): { width: number; height: number; indices: Uint8Array } | null => {
+    const frame = getOfflineFrame(frameIdx);
+    if (!frame) return null;
+    const scale = ANIMATION_QUALITY_SCALE[quality] ?? ANIMATION_QUALITY_SCALE.medium;
+    const sourcePanelCount = Math.max(1, nPanels || 1);
+    const panelW = sharedPanelSource ? Math.max(1, width) : Math.max(1, panelWidthPx || Math.floor(width / sourcePanelCount) || width);
+    const panelH = Math.max(1, height);
+    const panels = (visiblePanelIndices.length ? visiblePanelIndices : [0])
+      .filter((panel) => panel >= 0 && panel < sourcePanelCount);
+    const activePanels = panels.length ? panels : [0];
+    const panelOutW = Math.max(1, Math.round(panelW * scale));
+    const panelOutH = Math.max(1, Math.round(panelH * scale));
+    const cols = panelColsForCount(activePanels.length);
+    const rows = Math.max(1, Math.ceil(activePanels.length / cols));
+    const gap = activePanels.length > 1 ? Math.max(0, Math.round((panelGapTrait ?? 10) * scale)) : 0;
+    const outW = cols * panelOutW + Math.max(0, cols - 1) * gap;
+    const outH = rows * panelOutH + Math.max(0, rows - 1) * gap;
+    const out = document.createElement("canvas");
+    out.width = outW;
+    out.height = outH;
+    const outCtx = out.getContext("2d");
+    if (!outCtx) return null;
+    outCtx.imageSmoothingEnabled = smooth;
+    outCtx.fillStyle = themeColors.bg;
+    outCtx.fillRect(0, 0, outW, outH);
+
+    const panelCanvas = document.createElement("canvas");
+    panelCanvas.width = panelW;
+    panelCanvas.height = panelH;
+    const panelCtx = panelCanvas.getContext("2d");
+    if (!panelCtx) return null;
+    const panelImage = panelCtx.createImageData(panelW, panelH);
+    const fallbackLut = COLORMAPS[cmap] || COLORMAPS.inferno;
+    let sharedAutoRange: { vmin: number; vmax: number } | null = null;
+    if (autoContrast && linkContrast) {
+      sharedAutoRange =
+        cachedAutoDisplayRange(autoVmins, autoVmaxs, frameIdx, logScale) ||
+        cachedAutoDisplayRange(localAutoVminsRef.current, localAutoVmaxsRef.current, frameIdx, logScale);
+      if (!sharedAutoRange) {
+        const data = logScale ? applyLogScale(frame) : frame;
+        sharedAutoRange = percentileClip(data, percentileLow, percentileHigh);
+      }
+    }
+
+    for (let slot = 0; slot < activePanels.length; slot++) {
+      const panel = activePanels[slot];
+      const panelData = extractPanelSlice(frame, panel, logScale);
+      if (!panelData) continue;
+      const lut = COLORMAPS[panelCmapFor(panel)] || fallbackLut;
+      let range: { vmin: number; vmax: number };
+      if (autoContrast) {
+        if (sharedAutoRange && linkContrast) {
+          range = sharedAutoRange;
+        } else {
+          const clipped = percentileClip(panelData, percentileLow, percentileHigh);
+          if (clipped.vmax > clipped.vmin) {
+            range = clipped;
+          } else {
+            const fallback = findDataRange(panelData);
+            range = { vmin: fallback.min, vmax: fallback.max };
+          }
+        }
+      } else if (!linkContrast && activePanels.length > 1) {
+        const stackBounds = resolveDisplayBounds(dataMin, dataMax, traitVmin, traitVmax, logScale);
+        const pdr = panelDataRanges[panel];
+        const bounds = (perPanelHistogramEnabled && pdr && pdr.max > pdr.min) ? pdr : stackBounds;
+        range = resolvePanelRange(panel, bounds);
+      } else {
+        range = resolveDisplayRange(
+          dataMin,
+          dataMax,
+          traitVmin,
+          traitVmax,
+          logScale,
+          imageVminPct,
+          imageVmaxPct,
+        );
+      }
+      renderFramePlayback(panelData, panelImage.data, lut, range.vmin, range.vmax, false);
+      panelCtx.putImageData(panelImage, 0, 0);
+      const col = slot % cols;
+      const row = Math.floor(slot / cols);
+      const x = col * (panelOutW + gap);
+      const y = row * (panelOutH + gap);
+      outCtx.save();
+      outCtx.beginPath();
+      outCtx.rect(x, y, panelOutW, panelOutH);
+      outCtx.clip();
+      outCtx.translate(x, y);
+      if (flipCols || flipRows) {
+        outCtx.translate(flipCols ? panelOutW : 0, flipRows ? panelOutH : 0);
+        outCtx.scale(flipCols ? -1 : 1, flipRows ? -1 : 1);
+      }
+      if (imageRotation % 4 !== 0) {
+        outCtx.translate(panelOutW / 2, panelOutH / 2);
+        outCtx.rotate((imageRotation * Math.PI) / 2);
+        outCtx.translate(-panelOutW / 2, -panelOutH / 2);
+      }
+      outCtx.drawImage(panelCanvas, 0, 0, panelW, panelH, 0, 0, panelOutW, panelOutH);
+      outCtx.restore();
+    }
+    const rgba = outCtx.getImageData(0, 0, outW, outH).data;
+    return { width: outW, height: outH, indices: quantizeRgbaForBrowserGif(rgba) };
+  };
+  const handleStandaloneGifDownload = async (quality = "medium") => {
+    setExportMenuAnchor(null);
+    if (!canExportStandaloneGif) {
+      setLocalExportStatus(standaloneGifUnavailableTitle);
+      return;
+    }
+    const filename = makeExportFilename(title, nSlices, height, width, "gif", quality);
+    setExportBusy(true);
+    setLocalExportStatus(`Preparing ${filename}...`);
+    try {
+      const frames: Uint8Array[] = [];
+      let outW = 0;
+      let outH = 0;
+      const total = Math.max(1, nSlices || 1);
+      for (let i = 0; i < total; i++) {
+        const rendered = renderStandaloneGifFrame(i, quality);
+        if (!rendered) throw new Error(`frame ${i + 1}/${total} is not loaded`);
+        outW = rendered.width;
+        outH = rendered.height;
+        frames.push(rendered.indices);
+        if (i === 0 || i === total - 1 || (i + 1) % 4 === 0) {
+          setLocalExportStatus(`Encoding ${filename}... ${i + 1}/${total}`);
+          await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+        }
+      }
+      const delayCs = 100 / clampPlaybackFps(fps);
+      const gif = encodeIndexedGif(outW, outH, frames, delayCs);
+      const blob = new Blob([gif as BlobPart], { type: "image/gif" });
+      downloadBlob(blob, filename);
+      setLocalExportStatus(`Saved ${filename} (${formatSavedBytes(blob.size)})`);
+    } catch (err) {
+      setLocalExportStatus(`Export failed: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setExportBusy(false);
+    }
+  };
+  const handleAnimationExportSelect = (mode: "gif" | "mp4", quality: string) => {
+    if (mode === "gif" && canExportStandaloneGif) {
+      void handleStandaloneGifDownload(quality);
+      return;
+    }
+    void handleExportSelect(mode, quality);
   };
 
   React.useEffect(() => {
@@ -15289,12 +15594,12 @@ function Show3D() {
 	                  {exportEnabled && height >= 2 && width >= 2 && <MenuItem onClick={() => handleExportSelect("quantized", "medium", 2)}>HTML quantized uint8, 2× binned ({quantizedExportSize2})</MenuItem>}
 	                  {exportEnabled && height >= 4 && width >= 4 && <MenuItem onClick={() => handleExportSelect("quantized", "medium", 4)}>HTML quantized uint8, 4× binned ({quantizedExportSize4})</MenuItem>}
 	                  {exportEnabled && height >= 8 && width >= 8 && <MenuItem onClick={() => handleExportSelect("quantized", "medium", 8)}>HTML quantized uint8, 8× binned ({quantizedExportSize8})</MenuItem>}
-	                  {showAnimationExportOptions && <MenuItem disabled={!exportEnabled} title={!exportEnabled ? animationExportUnavailableTitle : undefined} onClick={() => handleExportSelect("gif", "low")}>GIF low ({gifLowEstimate})</MenuItem>}
-	                  {showAnimationExportOptions && <MenuItem disabled={!exportEnabled} title={!exportEnabled ? animationExportUnavailableTitle : undefined} onClick={() => handleExportSelect("gif", "medium")}>GIF medium ({gifMediumEstimate})</MenuItem>}
-	                  {showAnimationExportOptions && <MenuItem disabled={!exportEnabled} title={!exportEnabled ? animationExportUnavailableTitle : undefined} onClick={() => handleExportSelect("gif", "high")}>GIF high ({gifHighEstimate})</MenuItem>}
-	                  {showAnimationExportOptions && <MenuItem disabled={!exportEnabled} title={!exportEnabled ? animationExportUnavailableTitle : undefined} onClick={() => handleExportSelect("mp4", "low")}>MP4 low ({gifLowEstimate})</MenuItem>}
-	                  {showAnimationExportOptions && <MenuItem disabled={!exportEnabled} title={!exportEnabled ? animationExportUnavailableTitle : undefined} onClick={() => handleExportSelect("mp4", "medium")}>MP4 medium ({gifMediumEstimate})</MenuItem>}
-	                  {showAnimationExportOptions && <MenuItem disabled={!exportEnabled} title={!exportEnabled ? animationExportUnavailableTitle : undefined} onClick={() => handleExportSelect("mp4", "high")}>MP4 high ({gifHighEstimate})</MenuItem>}
+	                  {showAnimationExportOptions && <MenuItem disabled={!(exportEnabled || canExportStandaloneGif)} title={!(exportEnabled || canExportStandaloneGif) ? standaloneGifUnavailableTitle : undefined} onClick={() => handleAnimationExportSelect("gif", "low")}>GIF low ({gifLowEstimate})</MenuItem>}
+	                  {showAnimationExportOptions && <MenuItem disabled={!(exportEnabled || canExportStandaloneGif)} title={!(exportEnabled || canExportStandaloneGif) ? standaloneGifUnavailableTitle : undefined} onClick={() => handleAnimationExportSelect("gif", "medium")}>GIF medium ({gifMediumEstimate})</MenuItem>}
+	                  {showAnimationExportOptions && <MenuItem disabled={!(exportEnabled || canExportStandaloneGif)} title={!(exportEnabled || canExportStandaloneGif) ? standaloneGifUnavailableTitle : undefined} onClick={() => handleAnimationExportSelect("gif", "high")}>GIF high ({gifHighEstimate})</MenuItem>}
+	                  {showAnimationExportOptions && <MenuItem disabled={!exportEnabled} title={!exportEnabled ? standaloneMp4UnavailableTitle : undefined} onClick={() => handleAnimationExportSelect("mp4", "low")}>MP4 low ({gifLowEstimate})</MenuItem>}
+	                  {showAnimationExportOptions && <MenuItem disabled={!exportEnabled} title={!exportEnabled ? standaloneMp4UnavailableTitle : undefined} onClick={() => handleAnimationExportSelect("mp4", "medium")}>MP4 medium ({gifMediumEstimate})</MenuItem>}
+	                  {showAnimationExportOptions && <MenuItem disabled={!exportEnabled} title={!exportEnabled ? standaloneMp4UnavailableTitle : undefined} onClick={() => handleAnimationExportSelect("mp4", "high")}>MP4 high ({gifHighEstimate})</MenuItem>}
 	                  {canDownloadCurrentHtml && standaloneHtmlMode === "quantized" && <MenuItem disabled title="This standalone export contains quantized uint8 data, not the original float32 stack. Open the live widget to export exact float32.">{unavailableStandaloneHtmlLabel}</MenuItem>}
 	                  {canDownloadCurrentHtml && <MenuItem onClick={handleStandaloneHtmlDownload}>{standaloneHtmlLabel}</MenuItem>}
 	                  {canDownloadCurrentHtml && standaloneHtmlMode !== "quantized" && <MenuItem disabled title="Quantized export requires the Python backend to repack the current float32 stack.">{unavailableStandaloneHtmlLabel}</MenuItem>}
@@ -16065,12 +16370,12 @@ function Show3D() {
                     {exportEnabled && height >= 2 && width >= 2 && <MenuItem onClick={() => handleExportSelect("quantized", "medium", 2)}>HTML quantized uint8, 2× binned ({quantizedExportSize2})</MenuItem>}
                     {exportEnabled && height >= 4 && width >= 4 && <MenuItem onClick={() => handleExportSelect("quantized", "medium", 4)}>HTML quantized uint8, 4× binned ({quantizedExportSize4})</MenuItem>}
                     {exportEnabled && height >= 8 && width >= 8 && <MenuItem onClick={() => handleExportSelect("quantized", "medium", 8)}>HTML quantized uint8, 8× binned ({quantizedExportSize8})</MenuItem>}
-                    {showAnimationExportOptions && <MenuItem disabled={!exportEnabled} title={!exportEnabled ? animationExportUnavailableTitle : undefined} onClick={() => handleExportSelect("gif", "low")}>GIF low ({gifLowEstimate})</MenuItem>}
-                    {showAnimationExportOptions && <MenuItem disabled={!exportEnabled} title={!exportEnabled ? animationExportUnavailableTitle : undefined} onClick={() => handleExportSelect("gif", "medium")}>GIF medium ({gifMediumEstimate})</MenuItem>}
-                    {showAnimationExportOptions && <MenuItem disabled={!exportEnabled} title={!exportEnabled ? animationExportUnavailableTitle : undefined} onClick={() => handleExportSelect("gif", "high")}>GIF high ({gifHighEstimate})</MenuItem>}
-                    {showAnimationExportOptions && <MenuItem disabled={!exportEnabled} title={!exportEnabled ? animationExportUnavailableTitle : undefined} onClick={() => handleExportSelect("mp4", "low")}>MP4 low ({gifLowEstimate})</MenuItem>}
-                    {showAnimationExportOptions && <MenuItem disabled={!exportEnabled} title={!exportEnabled ? animationExportUnavailableTitle : undefined} onClick={() => handleExportSelect("mp4", "medium")}>MP4 medium ({gifMediumEstimate})</MenuItem>}
-                    {showAnimationExportOptions && <MenuItem disabled={!exportEnabled} title={!exportEnabled ? animationExportUnavailableTitle : undefined} onClick={() => handleExportSelect("mp4", "high")}>MP4 high ({gifHighEstimate})</MenuItem>}
+                    {showAnimationExportOptions && <MenuItem disabled={!(exportEnabled || canExportStandaloneGif)} title={!(exportEnabled || canExportStandaloneGif) ? standaloneGifUnavailableTitle : undefined} onClick={() => handleAnimationExportSelect("gif", "low")}>GIF low ({gifLowEstimate})</MenuItem>}
+                    {showAnimationExportOptions && <MenuItem disabled={!(exportEnabled || canExportStandaloneGif)} title={!(exportEnabled || canExportStandaloneGif) ? standaloneGifUnavailableTitle : undefined} onClick={() => handleAnimationExportSelect("gif", "medium")}>GIF medium ({gifMediumEstimate})</MenuItem>}
+                    {showAnimationExportOptions && <MenuItem disabled={!(exportEnabled || canExportStandaloneGif)} title={!(exportEnabled || canExportStandaloneGif) ? standaloneGifUnavailableTitle : undefined} onClick={() => handleAnimationExportSelect("gif", "high")}>GIF high ({gifHighEstimate})</MenuItem>}
+                    {showAnimationExportOptions && <MenuItem disabled={!exportEnabled} title={!exportEnabled ? standaloneMp4UnavailableTitle : undefined} onClick={() => handleAnimationExportSelect("mp4", "low")}>MP4 low ({gifLowEstimate})</MenuItem>}
+                    {showAnimationExportOptions && <MenuItem disabled={!exportEnabled} title={!exportEnabled ? standaloneMp4UnavailableTitle : undefined} onClick={() => handleAnimationExportSelect("mp4", "medium")}>MP4 medium ({gifMediumEstimate})</MenuItem>}
+                    {showAnimationExportOptions && <MenuItem disabled={!exportEnabled} title={!exportEnabled ? standaloneMp4UnavailableTitle : undefined} onClick={() => handleAnimationExportSelect("mp4", "high")}>MP4 high ({gifHighEstimate})</MenuItem>}
                     {canDownloadCurrentHtml && standaloneHtmlMode === "quantized" && <MenuItem disabled title="This standalone export contains quantized uint8 data, not the original float32 stack. Open the live widget to export exact float32.">{unavailableStandaloneHtmlLabel}</MenuItem>}
                     {canDownloadCurrentHtml && <MenuItem onClick={handleStandaloneHtmlDownload}>{standaloneHtmlLabel}</MenuItem>}
                     {canDownloadCurrentHtml && standaloneHtmlMode !== "quantized" && <MenuItem disabled title="Quantized export requires the Python backend to repack the current float32 stack.">{unavailableStandaloneHtmlLabel}</MenuItem>}
