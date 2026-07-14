@@ -197,6 +197,12 @@ def test_show2d_batch_selection_and_marker_frame_contract():
     assert 'useModelState<MarkerMap>("row_markers")' in show3d
     assert 'useModelState<PanelAnnotationSpec[][]>("panel_annotations")' in show2d
     assert 'useModelState<PanelAnnotationSpec[][]>("panel_annotations")' in show3d
+    assert "LATEX_SYMBOLS" in show2d
+    assert "LATEX_SYMBOLS" in show3d
+    assert "renderTextWithInlineMath" in show2d
+    assert "renderTextWithInlineMath" in show3d
+    assert 'data-quantem-math="true"' in show2d
+    assert 'data-quantem-math="true"' in show3d
     assert "data-show2d-row-marker" in show2d
     assert "data-show2d-col-marker" in show2d
     assert "data-show2d-panel-title" in show2d

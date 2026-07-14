@@ -294,6 +294,36 @@ def test_show3d_panel_annotations_accept_flat_panel_targets():
     assert restored.panel_annotations[2][0]["class_name"] == "chi2-status"
 
 
+def test_show3d_titles_and_annotations_accept_math_spans():
+    """C1: Show3D preserves math spans for browser-side label rendering."""
+    rng = np.random.default_rng(27)
+    panels = [rng.random((3, 10, 10), dtype=np.float32) for _ in range(2)]
+    widget = Show3D(
+        *panels,
+        panel_titles=[
+            [{"math": r"\lambda=0.01"}, {"text": " object"}],
+            r"$\chi^2$/pixel",
+        ],
+        panel_annotations=[
+            {"panel": 0, "math": r"\lambda", "position": "top-left"},
+            {
+                "panel": 1,
+                "spans": [{"math": r"\chi^2"}, {"text": "/pixel"}],
+                "position": "top-right",
+            },
+        ],
+        verbose=False,
+    )
+
+    restored = Show3D(*panels, verbose=False)
+    restored.load_state_dict(widget.state_dict())
+
+    assert restored.panel_title_spans[0][0] == {"math": r"\lambda=0.01"}
+    assert restored.panel_titles[1] == r"$\chi^2$/pixel"
+    assert restored.panel_annotations[0][0]["math"] == r"\lambda"
+    assert restored.panel_annotations[1][0]["spans"][0] == {"math": r"\chi^2"}
+
+
 def test_show3d_panel_groups_validate_panel_indices():
     """C1: invalid rectangular panel groups fail before export."""
     rng = np.random.default_rng(24)

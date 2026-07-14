@@ -146,8 +146,12 @@ def _normalise_title_spans(value: object) -> tuple[str, list[dict[str, str]] | N
     if isinstance(value, str):
         return value, None
     if isinstance(value, Mapping):
-        text = "" if value.get("text") is None else str(value.get("text"))
-        span: dict[str, str] = {"text": text}
+        if value.get("math") not in (None, ""):
+            text = str(value.get("math"))
+            span: dict[str, str] = {"math": text}
+        else:
+            text = "" if value.get("text") is None else str(value.get("text"))
+            span = {"text": text}
         color = value.get("color")
         if color not in (None, ""):
             span["color"] = str(color)
@@ -162,8 +166,12 @@ def _normalise_title_spans(value: object) -> tuple[str, list[dict[str, str]] | N
                     f"{{'text': 'low', 'color': '#60a5fa'}}, got {type(item).__name__} "
                     f"at span {idx}"
                 )
-            text = "" if item.get("text") is None else str(item.get("text"))
-            span = {"text": text}
+            if item.get("math") not in (None, ""):
+                text = str(item.get("math"))
+                span = {"math": text}
+            else:
+                text = "" if item.get("text") is None else str(item.get("text"))
+                span = {"text": text}
             color = item.get("color")
             if color not in (None, ""):
                 span["color"] = str(color)
@@ -394,6 +402,7 @@ def _normalize_inset_plot_specs(
 
 _ANNOTATION_STYLE_KEYS = {
     "text",
+    "math",
     "label",
     "title",
     "spans",
@@ -484,12 +493,18 @@ def _normalize_panel_annotation_spec(spec: object, *, panel: int) -> dict[str, A
             f"{sorted(_ANNOTATION_STYLE_KEYS)}, got {unknown[0]!r}"
         )
     raw_text = spec.get("text", spec.get("label", spec.get("title", "")))
+    raw_math = spec.get("math")
     spans_raw = spec.get("spans")
     if spans_raw is not None:
         text, spans = _normalise_title_spans(spans_raw)
+    elif raw_math not in (None, ""):
+        text = str(raw_math)
+        spans = [{"math": text}]
     else:
         text, spans = _normalise_title_spans(raw_text)
     out: dict[str, Any] = {"text": text}
+    if raw_math not in (None, ""):
+        out["math"] = str(raw_math)
     if spans:
         out["spans"] = spans
     for key in ("position", "anchor", "variant", "class_name", "bg", "fg", "color", "border_color", "font_weight", "align", "max_width"):

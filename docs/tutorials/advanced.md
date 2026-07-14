@@ -179,6 +179,53 @@ Common style keys are `bg`, `fg`, `border_color`, `border_width`,
 `max_width`, and `class_name`. `class_name` is useful when exported HTML needs
 project-specific CSS or when a browser test needs a stable selector.
 
+### Math symbols in labels
+
+Plain Unicode symbols work directly in panel titles and annotations:
+
+```python
+Show2D(images, labels=["λ=0.01", "χ² / pixel"])
+```
+
+For notebook code that should read like math, use inline TeX between `$...$`
+or a structured `math` span. The widget renders common Greek symbols and
+simple superscripts/subscripts without loading MathJax or KaTeX.
+
+```python
+Show2D(
+    images,
+    labels=[
+        r"$\lambda=0.01$ raw",
+        r"$\chi^2$/pixel residual",
+    ],
+    panel_annotations={
+        0: {"math": r"\lambda", "position": "top-left", "variant": "pill"},
+        1: {
+            "spans": [
+                {"math": r"\chi^2"},
+                {"text": "/pixel"},
+            ],
+            "position": "top-right",
+            "variant": "outline",
+        },
+    },
+)
+
+Show3D(
+    raw_stack,
+    residual_stack,
+    panel_titles=[
+        [{"math": r"\lambda=0.01"}, {"text": " object"}],
+        r"$\chi^2$/pixel",
+    ],
+)
+```
+
+This math support is intentionally compact: use it for labels such as
+`λ`, `χ²`, `σ`, `μ`, `Δ`, subscripts, superscripts, and short units. For a
+full equation, keep the equation in Markdown/LaTeX near the widget and use a
+short annotation inside the panel.
+
 ## Add inset plots to Show2D panels
 
 A common review moment is not only "which image looks best?", but "which image

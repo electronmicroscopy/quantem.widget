@@ -578,3 +578,34 @@ def test_show2d_panel_annotations_accept_multiple_labels_per_panel():
         verbose=False,
     )
     assert [item["text"] for item in single.panel_annotations[0]] == ["first", "second"]
+
+
+def test_show2d_labels_and_annotations_accept_math_spans():
+    """C1: TeX-style symbols are preserved for frontend math rendering."""
+    data = np.random.default_rng(26).random((2, 12, 12), dtype=np.float32)
+    widget = Show2D(
+        data,
+        labels=[
+            [{"math": r"\lambda=0.03"}, {"text": " raw"}],
+            r"$\chi^2$/px residual",
+        ],
+        panel_annotations={
+            0: {"math": r"\lambda", "position": "top-left"},
+            1: {
+                "spans": [
+                    {"math": r"\chi^2"},
+                    {"text": "/px"},
+                ],
+                "position": "top-right",
+            },
+        },
+        verbose=False,
+    )
+
+    restored = Show2D(data, verbose=False)
+    restored.load_state_dict(widget.state_dict())
+
+    assert restored.panel_title_spans[0][0] == {"math": r"\lambda=0.03"}
+    assert restored.labels[1] == r"$\chi^2$/px residual"
+    assert restored.panel_annotations[0][0]["math"] == r"\lambda"
+    assert restored.panel_annotations[1][0]["spans"][0] == {"math": r"\chi^2"}
