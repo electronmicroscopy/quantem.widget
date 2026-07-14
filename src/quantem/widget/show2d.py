@@ -12,6 +12,7 @@ import io as _io
 import json
 import math
 import pathlib
+import re
 import tempfile
 import textwrap
 import warnings
@@ -4445,6 +4446,17 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         def esc_attr(value: object) -> str:
             return html.escape(str(value), quote=True)
 
+        def svg_color(value: object, fallback: str = "") -> str:
+            text = str(value if value not in (None, "") else fallback).strip()
+            match = re.fullmatch(
+                r"rgba\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(?:0|1|0?\.\d+)\s*\)",
+                text,
+                flags=re.IGNORECASE,
+            )
+            if match:
+                return f"rgb({int(match.group(1))}, {int(match.group(2))}, {int(match.group(3))})"
+            return text
+
         def wrap_svg_label(value: object, font_size: int, max_width: float, max_lines: int = 3) -> list[str]:
             text = str(value or "").strip()
             if not text:
@@ -4465,10 +4477,53 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             text = str(value or "").strip().strip("$")
             while "\\\\" in text:
                 text = text.replace("\\\\", "\\")
-            text = text.replace("{", "").replace("}", "")
             for key, symbol in latex_symbols.items():
                 text = text.replace(key, symbol)
-            return text
+            superscript = str.maketrans({
+                "0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴",
+                "5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹",
+                "+": "⁺", "-": "⁻", "=": "⁼", "(": "⁽", ")": "⁾",
+                "n": "ⁿ", "i": "ⁱ",
+            })
+            subscript = str.maketrans({
+                "0": "₀", "1": "₁", "2": "₂", "3": "₃", "4": "₄",
+                "5": "₅", "6": "₆", "7": "₇", "8": "₈", "9": "₉",
+                "+": "₊", "-": "₋", "=": "₌", "(": "₍", ")": "₎",
+                "a": "ₐ", "e": "ₑ", "h": "ₕ", "i": "ᵢ", "j": "ⱼ",
+                "k": "ₖ", "l": "ₗ", "m": "ₘ", "n": "ₙ", "o": "ₒ",
+                "p": "ₚ", "r": "ᵣ", "s": "ₛ", "t": "ₜ", "u": "ᵤ",
+                "v": "ᵥ", "x": "ₓ",
+            })
+
+            def read_group(start: int) -> tuple[str, int]:
+                if start >= len(text) or text[start] != "{":
+                    return (text[start] if start < len(text) else ""), start + 1
+                depth = 0
+                for idx in range(start, len(text)):
+                    if text[idx] == "{":
+                        depth += 1
+                    elif text[idx] == "}":
+                        depth -= 1
+                        if depth == 0:
+                            return text[start + 1:idx], idx + 1
+                return text[start + 1:], len(text)
+
+            out: list[str] = []
+            idx = 0
+            while idx < len(text):
+                char = text[idx]
+                if char in {"^", "_"} and idx + 1 < len(text):
+                    raw, next_idx = read_group(idx + 1)
+                    table = superscript if char == "^" else subscript
+                    out.append(raw.translate(table))
+                    idx = next_idx
+                    continue
+                if char in {"{", "}"}:
+                    idx += 1
+                    continue
+                out.append(char)
+                idx += 1
+            return "".join(out)
 
         def span_text(span: Mapping[str, object]) -> str:
             if span.get("math") not in (None, ""):
@@ -4518,12 +4573,12 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                     return radius * min(panel_w, panel_h)
                 return radius / max(view_w, view_h) * max(panel_w, panel_h)
 
-            stroke = str(spec.get("stroke", "#00e5ff"))
+            stroke = svg_color(spec.get("stroke"), "#00e5ff")
             stroke_width = max(0.0, float(spec.get("stroke_width", 2.0)))
             opacity = max(0.0, min(1.0, float(spec.get("opacity", 1.0))))
             stroke_opacity = opacity * max(0.0, min(1.0, float(spec.get("stroke_opacity", 1.0))))
             fill_value = spec.get("fill", "none")
-            fill = "none" if fill_value in (None, "", "none", "None") else str(fill_value)
+            fill = "none" if fill_value in (None, "", "none", "None") else svg_color(fill_value)
             fill_opacity = opacity * max(0.0, min(1.0, float(spec.get("fill_opacity", 1.0 if fill != "none" else 0.0))))
             common = (
                 f' fill="{esc_attr(fill)}" fill-opacity="{fill_opacity:g}"'
@@ -4537,7 +4592,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 cx = to_x(col)
                 cy = to_y(row)
                 r = to_radius(radius)
-                return f'<circle data-show2d-panel-overlay-svg="true" cx="{cx:g}" cy="{cy:g}" r="{r:g}"{common}/>'
+                return f'<circle cx="{cx:g}" cy="{cy:g}" r="{r:g}"{common}/>'
             spec_row0 = float(spec.get("row0", 0.0))
             spec_col0 = float(spec.get("col0", 0.0))
             spec_row1 = float(spec.get("row1", spec_row0))
@@ -4546,7 +4601,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             sx1 = to_x(max(spec_col0, spec_col1))
             sy0 = to_y(min(spec_row0, spec_row1))
             sy1 = to_y(max(spec_row0, spec_row1))
-            return f'<rect data-show2d-panel-overlay-svg="true" x="{sx0:g}" y="{sy0:g}" width="{max(0, sx1 - sx0):g}" height="{max(0, sy1 - sy0):g}"{common}/>'
+            return f'<rect x="{sx0:g}" y="{sy0:g}" width="{max(0, sx1 - sx0):g}" height="{max(0, sy1 - sy0):g}"{common}/>'
 
         def annotation_anchor(position: str) -> tuple[float, float, str, str]:
             if "left" in position:
@@ -4614,19 +4669,14 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             text_len = max(len(text), sum(len(span_text(span)) for span in spans) if isinstance(spans, Sequence) else 0)
             box_w = text_len * font_size * 0.62 + 2 * pad_x
             box_h = font_size * 1.25 + 2 * pad_y
-            fg = str(spec.get("fg", spec.get("color", "#fff")))
+            fg = svg_color(spec.get("fg", spec.get("color", "#fff")))
             variant = str(spec.get("variant", "badge"))
             outline_width = max(0.0, float(spec.get("outline_width", 0.0)))
-            outline_color = str(spec.get("outline_color", "rgba(0,0,0,0.85)"))
-            outline_attr = (
-                f' stroke="{esc_attr(outline_color)}" stroke-width="{outline_width:g}" '
-                'stroke-linejoin="round" paint-order="stroke fill"'
-                if outline_width > 0 else ""
-            )
-            parts = [f'<g data-show2d-panel-annotation-svg="true" opacity="{opacity:g}">']
+            outline_color = svg_color(spec.get("outline_color"), "rgba(0,0,0,0.85)")
+            parts = [f'<g opacity="{opacity:g}">']
             if variant != "plain":
-                bg = str(spec.get("bg", "rgba(0,0,0,0.72)"))
-                border = str(spec.get("border_color", "rgba(255,255,255,0.5)"))
+                bg = svg_color(spec.get("bg"), "rgba(0,0,0,0.72)")
+                border = svg_color(spec.get("border_color"), "rgba(255,255,255,0.5)")
                 border_width = max(0.0, float(spec.get("border_width", 1.0 if variant in {"outline", "callout"} else 0.0)))
                 rect_x = tx - box_w / 2 if anchor == "middle" else tx - box_w if anchor == "end" else tx
                 rect_y = ty - box_h / 2 if baseline == "middle" else ty - font_size - pad_y if baseline == "baseline" else ty
@@ -4636,21 +4686,28 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                     f'stroke="{esc_attr(border)}" stroke-width="{border_width:g}"/>'
                 )
             text_y = ty + (font_size * 0.4 if baseline == "middle" else 0.0)
-            parts.append(
-                f'<text x="{tx:g}" y="{text_y:g}" text-anchor="{anchor}" '
+            text_attrs = (
+                f'x="{tx:g}" y="{text_y:g}" text-anchor="{anchor}" '
                 f'font-family="{esc_attr(font_family)}" '
-                f'font-size="{font_size:g}" font-weight="{esc_attr(spec.get("font_weight", 700))}" '
-                f'fill="{esc_attr(fg)}"{outline_attr}>'
+                f'font-size="{font_size:g}" font-weight="{esc_attr(spec.get("font_weight", 700))}"'
             )
+            fill_parts = []
             if isinstance(spans, Sequence) and not isinstance(spans, (str, bytes, bytearray)):
                 for span in spans:
                     if not isinstance(span, Mapping):
                         continue
-                    color_attr = f' fill="{esc_attr(span["color"])}"' if span.get("color") else ""
-                    parts.append(f'<tspan{color_attr}>{esc_text(span_text(span))}</tspan>')
+                    color_attr = f' fill="{esc_attr(svg_color(span["color"]))}"' if span.get("color") else ""
+                    fill_parts.append(f'<tspan{color_attr}>{esc_text(span_text(span))}</tspan>')
             else:
-                parts.append(esc_text(text))
-            parts.append("</text></g>")
+                fill_parts.append(esc_text(text))
+            fill_body = "".join(fill_parts)
+            if outline_width > 0:
+                plain = esc_text(text if text else "".join(span_text(span) for span in spans or [] if isinstance(span, Mapping)))
+                parts.append(
+                    f'<text {text_attrs} fill="none" stroke="{esc_attr(outline_color)}" '
+                    f'stroke-width="{outline_width:g}" stroke-linejoin="round">{plain}</text>'
+                )
+            parts.append(f'<text {text_attrs} fill="{esc_attr(fg)}">{fill_body}</text></g>')
             return "".join(parts)
 
         def inset_svg(spec: Mapping[str, object], x: float, y: float, panel_w: float, panel_h: float, fallback_color: str) -> str:
@@ -4704,21 +4761,21 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             sx = lambda value: plot_x0 + (float(value) - xlim[0]) / (xlim[1] - xlim[0]) * plot_w
             sy = lambda value: plot_y0 + plot_h - (float(value) - ylim[0]) / (ylim[1] - ylim[0]) * plot_h
             points = " ".join(f"{sx(px):g},{sy(py):g}" for px, py in zip(xs, ys))
-            line_color = str(spec.get("color", fallback_color))
-            text_color = str(spec.get("text_color", "rgba(255,255,255,0.92)"))
-            tick_color = str(spec.get("tick_color", "rgba(255,255,255,0.72)"))
+            line_color = svg_color(spec.get("color"), fallback_color)
+            text_color = svg_color(spec.get("text_color"), "rgba(255,255,255,0.92)")
+            tick_color = svg_color(spec.get("tick_color"), "rgba(255,255,255,0.72)")
             parts = [
-                '<g data-show2d-inset-plot-svg="true">',
+                "<g>",
                 f'<rect x="{x0:g}" y="{y0:g}" width="{box_w:g}" height="{box_h:g}" '
-                f'fill="{esc_attr(spec.get("background", "#0a0c10"))}" fill-opacity="{max(0.0, min(1.0, float(spec.get("background_alpha", 0.68)))):g}" '
-                f'stroke="{esc_attr(spec.get("border_color", "rgba(255,255,255,0.34)"))}" stroke-width="{float(spec.get("border_width", 1.0)):g}"/>',
+                f'fill="{esc_attr(svg_color(spec.get("background"), "#0a0c10"))}" fill-opacity="{max(0.0, min(1.0, float(spec.get("background_alpha", 0.68)))):g}" '
+                f'stroke="{esc_attr(svg_color(spec.get("border_color"), "rgba(255,255,255,0.34)"))}" stroke-width="{float(spec.get("border_width", 1.0)):g}"/>',
                 f'<path d="M {plot_x0:g} {plot_y0:g} V {plot_y0 + plot_h:g} H {plot_x0 + plot_w:g}" fill="none" stroke="{esc_attr(tick_color)}" stroke-opacity="0.45" stroke-width="1"/>',
                 f'<polyline points="{points}" fill="none" stroke="{esc_attr(line_color)}" stroke-width="{max(1.4, float(spec.get("line_width", 2.0))):g}" stroke-linejoin="round" stroke-linecap="round"/>',
             ]
             if "point" in spec:
                 point = np.asarray(spec["point"], dtype=float).ravel()
                 if point.size == 2 and np.isfinite(point).all():
-                    parts.append(f'<circle cx="{sx(point[0]):g}" cy="{sy(point[1]):g}" r="3.4" fill="{esc_attr(spec.get("point_color", "#fff"))}" stroke="#000" stroke-width="1.5"/>')
+                    parts.append(f'<circle cx="{sx(point[0]):g}" cy="{sy(point[1]):g}" r="3.4" fill="{esc_attr(svg_color(spec.get("point_color"), "#fff"))}" stroke="#000" stroke-width="1.5"/>')
             if spec.get("title"):
                 parts.append(f'<text x="{x0 + 6:g}" y="{y0 + 12:g}" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="{legend_font:g}" font-weight="700" fill="{esc_attr(text_color)}">{esc_text(spec["title"])}</text>')
             if spec.get("legend"):
@@ -4747,7 +4804,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             vmin = float(panel.get("vmin", 0.0))
             vmax = float(panel.get("vmax", 1.0))
             body = [
-                '<g data-show2d-colorbar-svg="true">',
+                "<g>",
                 f'<rect x="{bx - 1:g}" y="{by - 1:g}" width="{bar_w + 2:g}" height="{bar_h + 2:g}" fill="#000" fill-opacity="0.45"/>',
                 f'<rect x="{bx:g}" y="{by:g}" width="{bar_w:g}" height="{bar_h:g}" fill="url(#{grad_id})" stroke="#fff" stroke-opacity="0.75" stroke-width="0.75"/>',
                 f'<text x="{bx - 4:g}" y="{by + 4:g}" text-anchor="end" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="9" fill="#fff">{esc_text(self._format_stat(vmax))}</text>',
@@ -4762,10 +4819,9 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         elements: list[str] = [
             '<?xml version="1.0" encoding="UTF-8"?>',
             (
-                f'<svg xmlns="http://www.w3.org/2000/svg" width="{svg_w}" '
+                f'<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="{svg_w}" '
                 f'height="{svg_h}" viewBox="0 0 {svg_w} {svg_h}" '
-                f'role="img" aria-label="{esc_attr(title_text or "Show2D SVG export")}" '
-                f'data-show2d-svg-export="true" data-raster-scale="{export_scale:g}">'
+                f'role="img" aria-label="{esc_attr(title_text or "Show2D SVG export")}">'
             ),
         ]
         defs: list[str] = []
@@ -4778,16 +4834,16 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         if gap > 0 and gap_color:
             elements.append(
                 f'<rect x="0" y="{title_h:g}" width="{svg_w:g}" height="{max(0, svg_h - title_h):g}" '
-                f'fill="{esc_attr(gap_color)}"/>'
+                f'fill="{esc_attr(svg_color(gap_color))}"/>'
             )
 
         title_style = dict(getattr(self, "panel_title_style", {}) or {})
         title_font_family = str(title_style.get("font_family", "-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif"))
-        title_fg = str(title_style.get("fg", "#fff"))
+        title_fg = svg_color(title_style.get("fg"), "#fff")
         title_opacity = max(0.0, min(1.0, float(title_style.get("opacity", 0.95))))
         title_font_weight = title_style.get("font_weight", 700)
         title_outline_width = max(0.0, float(title_style.get("outline_width", 0.0)))
-        title_outline_color = str(title_style.get("outline_color", "rgba(0,0,0,0.85)"))
+        title_outline_color = svg_color(title_style.get("outline_color"), "rgba(0,0,0,0.85)")
 
         def title_anchor_for(value: str) -> str:
             if "right" in value:
@@ -4827,14 +4883,6 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 return x + panel_w - 28.0, y + 6.0 + font_size, "end"
             return x + panel_w / 2.0, y + 6.0 + font_size, "middle"
 
-        def title_outline_attr() -> str:
-            if title_outline_width <= 0:
-                return ""
-            return (
-                f' stroke="{esc_attr(title_outline_color)}" stroke-width="{title_outline_width:g}" '
-                'stroke-linejoin="round" paint-order="stroke fill"'
-            )
-
         def title_text_attrs(anchor: str, *, shadow: bool = False) -> str:
             if shadow:
                 return (
@@ -4845,7 +4893,16 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             return (
                 f'text-anchor="{anchor}" font-family="{esc_attr(title_font_family)}" '
                 f'font-size="{{font_size}}" font-weight="{esc_attr(title_font_weight)}" '
-                f'fill="{esc_attr(title_fg)}" fill-opacity="{title_opacity:g}"{title_outline_attr()}'
+                f'fill="{esc_attr(title_fg)}" fill-opacity="{title_opacity:g}"'
+            )
+
+        def title_outline_text(x_pos: float, y_pos: float, anchor: str, font_size: float, text: str) -> str:
+            return (
+                f'<text x="{x_pos:g}" y="{y_pos:g}" text-anchor="{anchor}" '
+                f'font-family="{esc_attr(title_font_family)}" font-size="{font_size:g}" '
+                f'font-weight="{esc_attr(title_font_weight)}" fill="none" '
+                f'stroke="{esc_attr(title_outline_color)}" stroke-width="{title_outline_width:g}" '
+                f'stroke-linejoin="round">{esc_text(text)}</text>'
             )
 
         y = title_h + frame
@@ -4859,18 +4916,18 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 defs.append(
                     f'<clipPath id="{clip_id}"><rect x="{x:g}" y="{y:g}" width="{panel_w:g}" height="{panel_h:g}"/></clipPath>'
                 )
-                marker_color = (
+                marker_color = svg_color(
                     self.marker_colors[panel_index]
                     if panel_index < len(self.marker_colors) and self.marker_colors[panel_index]
                     else _IDENTITY_PALETTE[panel_index % len(_IDENTITY_PALETTE)]
                 )
-                panel_stroke = gap_color if gap > 0 and gap_color else "#d0d0d0"
+                panel_stroke = svg_color(gap_color if gap > 0 and gap_color else "#d0d0d0")
                 elements.extend([
-                    f'<g id="show2d-panel-{panel_index}" data-show2d-panel="{panel_index}">',
+                    f'<g id="show2d-panel-{panel_index}">',
                     f'<rect x="{x}" y="{y}" width="{panel_w}" height="{panel_h}" fill="#000"/>',
                     (
                         f'<image x="{x}" y="{y}" width="{panel_w}" height="{panel_h}" '
-                        f'href="data:image/png;base64,{panel["png"]}" preserveAspectRatio="none"/>'
+                        f'xlink:href="data:image/png;base64,{panel["png"]}" preserveAspectRatio="none"/>'
                     ),
                     f'<rect x="{x}" y="{y}" width="{panel_w}" height="{panel_h}" fill="none" stroke="{esc_attr(panel_stroke)}" stroke-width="1"/>',
                 ])
@@ -4898,15 +4955,17 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                                 + title_text_attrs(title_anchor, shadow=True).format(font_size=font_size)
                                 + f'>{esc_text(plain)}</text>'
                             )
+                        else:
+                            elements.append(title_outline_text(title_x, line_y, title_anchor, font_size, plain))
                         elements.append(
                             f'<text x="{title_x:g}" y="{line_y:g}" '
                             + title_text_attrs(title_anchor).format(font_size=font_size)
-                            + ' data-show2d-panel-title-spans-svg="true">'
+                            + ">"
                         )
                         for span in spans:
                             if not isinstance(span, Mapping):
                                 continue
-                            color_attr = f' fill="{esc_attr(span["color"])}"' if span.get("color") else ""
+                            color_attr = f' fill="{esc_attr(svg_color(span["color"]))}"' if span.get("color") else ""
                             elements.append(f'<tspan{color_attr}>{esc_text(span_text(span))}</tspan>')
                         elements.append("</text>")
                     else:
@@ -4918,12 +4977,14 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                                     + title_text_attrs(title_anchor, shadow=True).format(font_size=font_size)
                                     + f'>{esc_text(line)}</text>'
                                 )
+                            else:
+                                elements.append(title_outline_text(title_x, line_y, title_anchor, font_size, line))
                             elements.append(
                                 f'<text x="{title_x:g}" y="{line_y:g}" '
                                 + title_text_attrs(title_anchor).format(font_size=font_size)
                                 + f'>{esc_text(line)}</text>'
                             )
-                elements.append(f'<g clip-path="url(#{clip_id})" data-show2d-vector-layer="true">')
+                elements.append(f'<g clip-path="url(#{clip_id})">')
                 if bool(self.show_inset_plots) and panel_index < len(self.inset_plots):
                     elements.append(inset_svg(self.inset_plots[panel_index], x, y, panel_w, panel_h, marker_color))
                 if panel_index < len(self.panel_overlays):
@@ -4960,10 +5021,10 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                         )
                     )
                     scale_font_weight = scale_style.get("font_weight", "")
-                    scale_color = str(scale_style.get("color", "#fff"))
-                    scale_outline_color = str(scale_style.get("outline_color", "#000"))
+                    scale_color = svg_color(scale_style.get("color"), "#fff")
+                    scale_outline_color = svg_color(scale_style.get("outline_color"), "#000")
                     scale_outline_width = float(scale_style.get("outline_width", 0.0))
-                    shadow_color = str(scale_style.get("shadow_color", "#000"))
+                    shadow_color = svg_color(scale_style.get("shadow_color"), "#000")
                     scale_left = self.scale_bar_position == "bottom-left"
                     bar_x = x + (12 if scale_left else panel_w - bar_px - 12) + offset_x
                     bar_y = y + panel_h - 12 + offset_y
@@ -4975,12 +5036,15 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                     text_x = bar_x + bar_px / 2
                     text_y = bar_y - label_gap
                     if scale_outline_width > 0:
-                        elements.append(
+                        elements.extend([
                             f'<text x="{text_x:g}" y="{text_y:g}" text-anchor="middle" '
                             f'font-family="{esc_attr(scale_font_family)}" font-size="{scale_font_size:g}"{font_weight_attr} '
-                            f'fill="{esc_attr(scale_color)}" stroke="{esc_attr(scale_outline_color)}" '
-                            f'stroke-width="{scale_outline_width:g}" paint-order="stroke fill">{esc_text(bar_text)}</text>'
-                        )
+                            f'fill="none" stroke="{esc_attr(scale_outline_color)}" '
+                            f'stroke-width="{scale_outline_width:g}" stroke-linejoin="round">{esc_text(bar_text)}</text>',
+                            f'<text x="{text_x:g}" y="{text_y:g}" text-anchor="middle" '
+                            f'font-family="{esc_attr(scale_font_family)}" font-size="{scale_font_size:g}"{font_weight_attr} '
+                            f'fill="{esc_attr(scale_color)}">{esc_text(bar_text)}</text>',
+                        ])
                     else:
                         elements.extend([
                             f'<text x="{text_x + 1:g}" y="{text_y + 1:g}" text-anchor="middle" '
@@ -5008,6 +5072,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         marker_top = title_h + frame
         total_grid_h = sum(row_heights) + max(0, len(row_heights) - 1) * gap
         for raw_row, color in dict(self.row_markers or {}).items():
+            color = svg_color(color)
             try:
                 row_idx = int(raw_row)
             except (TypeError, ValueError):
@@ -5018,10 +5083,11 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             row_count = min(ncols, max(0, len(panels) - row_idx * ncols))
             row_w = row_count * panel_w + max(0, row_count - 1) * gap
             elements.extend([
-                f'<rect data-show2d-group-marker-svg="row" x="{frame:g}" y="{row_y:g}" width="{row_w:g}" height="{row_heights[row_idx]:g}" fill="none" stroke="{esc_attr(color)}" stroke-width="3"/>',
+                f'<rect x="{frame:g}" y="{row_y:g}" width="{row_w:g}" height="{row_heights[row_idx]:g}" fill="none" stroke="{esc_attr(color)}" stroke-width="3"/>',
                 f'<rect x="{frame + 3:g}" y="{row_y + 3:g}" width="{max(0, row_w - 6):g}" height="{max(0, row_heights[row_idx] - 6):g}" fill="none" stroke="#000" stroke-opacity="0.9" stroke-width="2"/>',
             ])
         for raw_col, color in dict(self.col_markers or {}).items():
+            color = svg_color(color)
             try:
                 col_idx = int(raw_col)
             except (TypeError, ValueError):
@@ -5037,7 +5103,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             col_y = marker_top + sum(row_heights[:row_min]) + row_min * gap
             col_h = sum(row_heights[row_min:row_max + 1]) + max(0, row_max - row_min) * gap
             elements.extend([
-                f'<rect data-show2d-group-marker-svg="col" x="{col_x:g}" y="{col_y:g}" width="{panel_w:g}" height="{col_h:g}" fill="none" stroke="{esc_attr(color)}" stroke-width="3"/>',
+                f'<rect x="{col_x:g}" y="{col_y:g}" width="{panel_w:g}" height="{col_h:g}" fill="none" stroke="{esc_attr(color)}" stroke-width="3"/>',
                 f'<rect x="{col_x + 3:g}" y="{col_y + 3:g}" width="{max(0, panel_w - 6):g}" height="{max(0, col_h - 6):g}" fill="none" stroke="#000" stroke-opacity="0.9" stroke-width="2"/>',
             ])
 

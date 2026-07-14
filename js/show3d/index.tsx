@@ -37,7 +37,16 @@ import DragIndicatorIcon from "@mui/icons-material/DragIndicator";
 import { useTheme } from "../theme";
 import { useCanvasRepaintSignal } from "../canvasLifecycle";
 import { drawScaleBarHiDPI, drawFFTScaleBarHiDPI, drawColorbar, formatZoomLabel, roundToNiceValue, unitSymbol, formatScaleLabel } from "../figure";
-import { downloadBlob, extractBytes, extractFloat32, formatNumber, preserveRestoredWidgetModelsOnSave } from "../format";
+import {
+  applyStandaloneWidgetViewState,
+  downloadBlob,
+  extractBytes,
+  extractFloat32,
+  formatNumber,
+  preserveRestoredWidgetModelsOnSave,
+  standaloneHtmlWithCurrentWidgetState,
+  standaloneWidgetStaticHtmlFromDocument,
+} from "../format";
 import { useHideStaticFallback } from "../staticFallback";
 import { findDataRange, applyLogScale, applyLogScaleInPlace, percentileClip, sliderRange, computeStats, computeHistogramFromBytes } from "../stats";
 import { MetadataSection } from "../widgetInfo";
@@ -60,6 +69,101 @@ const SHOW3D_TO_SHOW2D_LINKED_TRAITS = [
   { source: "hidden_panels" },
   { source: "hidden_page_slots" },
 ];
+
+const SHOW3D_STANDALONE_VIEW_STATE_KEYS = [
+  "auto_contrast",
+  "avg_window",
+  "blink_fps",
+  "bookmarked_frames",
+  "boomerang",
+  "cmap",
+  "col_markers",
+  "compare_background",
+  "compare_mode",
+  "compare_pair",
+  "contrast_preset",
+  "controls_collapsed",
+  "debug",
+  "denoise",
+  "denoise_bin",
+  "denoise_enabled",
+  "denoise_sigma",
+  "diff_cmap",
+  "diff_mode",
+  "fft_layout",
+  "fft_metrics",
+  "fft_overlay_position",
+  "fft_overlay_size",
+  "fft_overlay_zoom",
+  "fft_window",
+  "flip_horizontal",
+  "flip_vertical",
+  "fps",
+  "frame_rotations",
+  "frequency_filter",
+  "frequency_filter_center",
+  "frequency_filter_cutoff",
+  "frequency_filter_enabled",
+  "frequency_filter_width",
+  "hidden_indices",
+  "hidden_page_slots",
+  "hidden_panels",
+  "identity_colors",
+  "image_rotation",
+  "image_vmax_pct",
+  "image_vmin_pct",
+  "link_contrast",
+  "link_panels",
+  "log_scale",
+  "loop",
+  "loop_end",
+  "loop_start",
+  "marker_colors",
+  "marker_style",
+  "max_cols",
+  "page_idx",
+  "panel_annotations",
+  "panel_cmaps",
+  "panel_gap",
+  "panel_groups",
+  "panel_order",
+  "panel_overlays",
+  "panel_title_font_size",
+  "panel_title_spans",
+  "panel_title_style",
+  "percentile_high",
+  "percentile_low",
+  "playback_path",
+  "playing",
+  "profile_line",
+  "profile_width",
+  "roi_active",
+  "roi_list",
+  "roi_selected_idx",
+  "rotation_scope",
+  "row_markers",
+  "scale_bar_visible",
+  "show_controls",
+  "show_denoise",
+  "show_fft",
+  "show_frequency_filter",
+  "show_kymograph",
+  "show_panel_titles",
+  "show_resize_handles",
+  "show_stats",
+  "show_title",
+  "show_zoom_indicator",
+  "slice_idx",
+  "smooth",
+  "starred",
+  "subpixel_align_enabled",
+  "subpixel_align_reference",
+  "view_state",
+  "vmax",
+  "vmax_per_panel",
+  "vmin",
+  "vmin_per_panel",
+] as const;
 // ============================================================================
 // Style tokens (inlined - matches Show2D/Show4DSTEM single-file convention)
 // ============================================================================
@@ -2246,6 +2350,7 @@ function Show3D() {
   const canvasRepaintSignal = useCanvasRepaintSignal();
   const model = useModel();
   const folderWatchLive = useFolderWatchModelLive(model);
+  React.useLayoutEffect(() => applyStandaloneWidgetViewState(model), [model]);
   React.useEffect(() => preserveRestoredWidgetModelsOnSave(model), [model]);
 
   // Theme detection (offline HTML exports force a light/white background)
@@ -4291,7 +4396,11 @@ function Show3D() {
     setExportMenuAnchor(null);
     const filename = makeExportFilename(title, nSlices, height, width, standaloneHtmlMode);
     try {
-      const html = `<!doctype html>\n${document.documentElement.outerHTML}`;
+      const html = `<!doctype html>\n${standaloneHtmlWithCurrentWidgetState(
+        model,
+        standaloneWidgetStaticHtmlFromDocument(),
+        SHOW3D_STANDALONE_VIEW_STATE_KEYS,
+      )}`;
       const blob = new Blob([html], { type: "text/html;charset=utf-8" });
       downloadBlob(blob, filename);
       setLocalExportStatus(`Saved ${filename} (${formatSavedBytes(blob.size)})`);

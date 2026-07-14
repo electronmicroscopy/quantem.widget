@@ -155,6 +155,36 @@ def test_show3d_histogram_drag_repaints_single_file_exports():
     ) in show3d
 
 
+def test_show2d_show3d_offline_export_bakes_current_view_state():
+    """C1: standalone HTML Export reopens with the scientist's tuned view."""
+    format_ts = (ROOT / "js" / "format.ts").read_text(encoding="utf-8")
+    show2d = (ROOT / "js" / "show2d" / "index.tsx").read_text(encoding="utf-8")
+    show3d = (ROOT / "js" / "show3d" / "index.tsx").read_text(encoding="utf-8")
+
+    assert "quantem-current-widget-view-state" in format_ts
+    assert "standaloneHtmlWithCurrentWidgetState" in format_ts
+    assert "standaloneWidgetStaticHtmlFromDocument" in format_ts
+    assert "application/vnd.jupyter.widget-state+json" in format_ts
+    assert "application/vnd.jupyter.widget-view+json" in format_ts
+    assert "updateEmbeddedWidgetStateScript" in format_ts
+    assert "applyStandaloneWidgetViewState" in format_ts
+    assert "stripCurrentWidgetViewState(html)" in format_ts
+    assert "JSON.stringify(value)" in format_ts
+    assert "replace(/</g" in format_ts
+
+    assert "SHOW2D_STANDALONE_VIEW_STATE_KEYS" in show2d
+    assert "SHOW3D_STANDALONE_VIEW_STATE_KEYS" in show3d
+    for source in (show2d, show3d):
+        assert "React.useLayoutEffect(() => applyStandaloneWidgetViewState(model), [model]);" in source
+        assert "standaloneHtmlWithCurrentWidgetState(" in source
+        assert "standaloneWidgetStaticHtmlFromDocument()" in source
+    for key in ("hidden_panels", "hidden_page_slots", "contrast_preset"):
+        assert f'"{key}"' in show2d
+        assert f'"{key}"' in show3d
+    assert '"selected_idx"' in show2d
+    assert '"slice_idx"' in show3d
+
+
 def test_show2d_local_stack_fft_cache_and_playback_contract():
     """Local slice playback keeps the prior FFT visible and reuses revisits."""
     show2d = (ROOT / "js" / "show2d" / "index.tsx").read_text(encoding="utf-8")

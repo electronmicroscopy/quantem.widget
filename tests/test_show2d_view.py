@@ -158,9 +158,11 @@ def test_export_svg_writes_hybrid_figure(tmp_path):
     svg = out.read_text(encoding="utf-8")
 
     assert out.name == "figure.svg"
-    assert 'data-show2d-svg-export="true"' in svg
-    assert 'data-raster-scale="3"' in svg
+    assert "data-show2d-" not in svg
+    assert "data-raster-scale" not in svg
+    assert 'xmlns:xlink="http://www.w3.org/1999/xlink"' in svg
     assert svg.count("<image ") == 3
+    assert svg.count("xlink:href=") == 3
     assert "data:image/png;base64," in svg
     assert ">Show2D Figure<" in svg
     assert ">raw<" in svg
@@ -180,12 +182,13 @@ def test_export_svg_respects_hidden_panels_and_order(tmp_path):
     out = w.export_svg(tmp_path / "ordered.svg", scale=3, include_scale_bar=False)
     svg = out.read_text(encoding="utf-8")
 
-    assert 'data-raster-scale="3"' in svg
+    assert "data-show2d-" not in svg
+    assert "data-raster-scale" not in svg
     assert svg.count("<image ") == 3
-    assert 'data-show2d-panel="2"' in svg
-    assert 'data-show2d-panel="3"' in svg
-    assert 'data-show2d-panel="1"' in svg
-    assert 'data-show2d-panel="0"' not in svg
+    assert 'id="show2d-panel-2"' in svg
+    assert 'id="show2d-panel-3"' in svg
+    assert 'id="show2d-panel-1"' in svg
+    assert 'id="show2d-panel-0"' not in svg
     assert ">c<" in svg
     assert ">d<" in svg
     assert ">b<" in svg
@@ -253,19 +256,16 @@ def test_export_svg_writes_publication_layers_as_vectors(tmp_path):
     out = w.export_svg(tmp_path / "publication.svg", include_colorbar=True)
     svg = out.read_text(encoding="utf-8")
 
-    assert 'data-show2d-vector-layer="true"' in svg
-    assert 'data-show2d-panel-title-spans-svg="true"' in svg
-    assert 'data-show2d-panel-overlay-svg="true"' in svg
-    assert 'data-show2d-panel-annotation-svg="true"' in svg
-    assert 'data-show2d-inset-plot-svg="true"' in svg
-    assert 'data-show2d-colorbar-svg="true"' in svg
-    assert 'data-show2d-group-marker-svg="row"' in svg
-    assert 'data-show2d-group-marker-svg="col"' in svg
+    assert "data-show2d-" not in svg
+    assert "rgba(" not in svg
     assert "<circle " in svg
+    assert "<rect " in svg
     assert "<polyline " in svg
+    assert "<linearGradient " in svg
     assert "stroke-dasharray" in svg
     assert "λ=0.03" in svg
-    assert "χ^2" in svg
+    assert "χ²" in svg
+    assert "χ^2" not in svg
     assert "ACF" in svg
 
 
@@ -348,7 +348,8 @@ def test_export_svg_respects_publication_text_and_scale_bar_panels(tmp_path):
     assert 'stroke="#111111"' in svg
     assert 'stroke-width="1.25"' in svg
     assert 'stroke="#000000"' in svg
-    assert 'paint-order="stroke fill"' in svg
+    assert 'paint-order=' not in svg
+    assert 'fill="none" stroke="#111111"' in svg
     assert 'text-anchor="start"' in svg
 
 

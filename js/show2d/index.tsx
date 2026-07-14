@@ -32,7 +32,16 @@ import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import { useTheme } from "../theme";
 import { useCanvasRepaintSignal } from "../canvasLifecycle";
 import { drawColorbar, formatScaleLabel, formatZoomLabel, roundToNiceValue } from "../figure";
-import { extractBytes, extractFloat32, formatNumber, downloadBlob, preserveRestoredWidgetModelsOnSave } from "../format";
+import {
+  applyStandaloneWidgetViewState,
+  downloadBlob,
+  extractBytes,
+  extractFloat32,
+  formatNumber,
+  preserveRestoredWidgetModelsOnSave,
+  standaloneHtmlWithCurrentWidgetState,
+  standaloneWidgetStaticHtmlFromDocument,
+} from "../format";
 import { useHideStaticFallback } from "../staticFallback";
 import { computeHistogramFromBytes, findDataRange, applyLogScale, percentileClip, sliderRange, computeStats } from "../stats";
 import { MetadataSection } from "../widgetInfo";
@@ -74,6 +83,108 @@ const SHOW2D_TO_SHOW3D_LINKED_TRAITS = [
   { source: "link_contrast" },
   { source: "show_fft" },
 ];
+
+const SHOW2D_STANDALONE_VIEW_STATE_KEYS = [
+  "auto_contrast",
+  "cmap",
+  "col_markers",
+  "contrast_preset",
+  "controls_collapsed",
+  "debug",
+  "denoise",
+  "denoise_bin",
+  "denoise_bins",
+  "denoise_enabled",
+  "denoise_modes",
+  "denoise_scope",
+  "denoise_sigma",
+  "denoise_sigmas",
+  "diff_mode",
+  "diff_reference",
+  "display_gamma",
+  "dual_gain",
+  "fft_metrics",
+  "fft_window",
+  "frequency_filter",
+  "frequency_filter_center",
+  "frequency_filter_centers",
+  "frequency_filter_cutoff",
+  "frequency_filter_cutoffs",
+  "frequency_filter_enabled",
+  "frequency_filter_modes",
+  "frequency_filter_scope",
+  "frequency_filter_width",
+  "frequency_filter_widths",
+  "gallery_gap_color",
+  "gallery_gap_px",
+  "hidden_page_slots",
+  "hidden_panels",
+  "image_flips_horizontal",
+  "image_flips_vertical",
+  "image_rotations",
+  "initial_zoom",
+  "inset_plots",
+  "link_contrast",
+  "link_pan",
+  "link_zoom",
+  "log_scale",
+  "marker_colors",
+  "marker_style",
+  "ncols",
+  "pad_fill_mode",
+  "pad_fill_modes",
+  "pad_ratio",
+  "pad_ratios",
+  "pad_scope",
+  "page_idx",
+  "panel_annotations",
+  "panel_cmaps",
+  "panel_frame_indices",
+  "panel_order",
+  "panel_overlays",
+  "panel_playback_fps",
+  "panel_title_font_size",
+  "panel_title_spans",
+  "panel_title_style",
+  "profile_line",
+  "roi_active",
+  "roi_list",
+  "roi_selected_idx",
+  "rotation_scope",
+  "row_markers",
+  "scale_bar_label",
+  "scale_bar_length",
+  "scale_bar_panels",
+  "scale_bar_position",
+  "scale_bar_style",
+  "scale_bar_visible",
+  "selected_idx",
+  "selected_panels",
+  "show_controls",
+  "show_denoise",
+  "show_fft",
+  "show_frequency_filter",
+  "show_inset_plots",
+  "show_panel_titles",
+  "show_stats",
+  "show_title",
+  "show_zoom_indicator",
+  "smooth",
+  "starred",
+  "stretch_percentiles",
+  "underlay_alpha",
+  "underlay_haadf_gain",
+  "underlay_mode",
+  "view_banner",
+  "view_box",
+  "view_crop",
+  "vmax",
+  "vmaxs",
+  "vmin",
+  "vmins",
+  "zoom_col",
+  "zoom_row",
+] as const;
 
 function InfoTooltip({ text, theme = "dark" }: { text: React.ReactNode; theme?: "light" | "dark" }) {
   const isDark = theme === "dark";
@@ -182,6 +293,27 @@ type OverlayDragState = {
   startCol: number;
   original: PanelOverlaySpec;
 };
+type AnnotationSelection = { panel: number; annotation: number };
+type AnnotationDragState = {
+  panel: number;
+  annotation: number;
+  startClientX: number;
+  startClientY: number;
+  panelWidth: number;
+  panelHeight: number;
+  original: PanelAnnotationSpec;
+};
+type Show2DSvgExport = {
+  svg: string;
+  width: number;
+  height: number;
+  filename: string;
+  scale: number;
+};
+type Show2DSvgPreview = Show2DSvgExport & {
+  url: string;
+  size: number;
+};
 
 function styleNumber(value: unknown, fallback: number): number {
   const n = Number(value);
@@ -190,6 +322,13 @@ function styleNumber(value: unknown, fallback: number): number {
 
 function styleString(value: unknown, fallback = ""): string {
   return typeof value === "string" && value.trim() ? value : fallback;
+}
+
+function svgColor(value: unknown, fallback = ""): string {
+  return styleString(value, fallback).replace(
+    /rgba\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(?:0|1|0?\.\d+)\s*\)/gi,
+    (_match, r, g, b) => `rgb(${Number(r)}, ${Number(g)}, ${Number(b)})`,
+  );
 }
 
 function withAlpha(color: string | undefined, alpha: number): string | undefined {
@@ -500,6 +639,53 @@ function panelAnnotationSx(spec: PanelAnnotationSpec): Record<string, unknown> {
 function renderPanelAnnotation(spec: PanelAnnotationSpec, fallback = ""): React.ReactNode {
   if (spec.math) return renderMathExpression(spec.math, "panel-annotation-math");
   return renderRichTitle(spec.spans, spec.text || fallback);
+}
+
+function annotationAnchorFractions(anchor: string | undefined): [number, number] {
+  const value = anchor || "top-left";
+  const x = value.endsWith("right") ? 1 : value.endsWith("center") || value === "center" ? 0.5 : 0;
+  const y = value.startsWith("bottom") ? 1 : value.startsWith("center") || value === "center" ? 0.5 : 0;
+  return [x, y];
+}
+
+function draggableAnnotationSpec(
+  spec: PanelAnnotationSpec,
+  element: HTMLElement,
+  container: HTMLElement,
+): PanelAnnotationSpec {
+  if (Array.isArray(spec.box) && spec.box.length === 4) return { ...spec };
+  if (Number.isFinite(spec.x) && Number.isFinite(spec.y)) return { ...spec };
+  const containerRect = container.getBoundingClientRect();
+  const elementRect = element.getBoundingClientRect();
+  const anchor = spec.anchor || spec.position || "top-left";
+  const [fx, fy] = annotationAnchorFractions(anchor);
+  const panelWidth = Math.max(1, containerRect.width);
+  const panelHeight = Math.max(1, containerRect.height);
+  return {
+    ...spec,
+    anchor,
+    x: Math.max(0, Math.min(1, (elementRect.left - containerRect.left + elementRect.width * fx) / panelWidth)),
+    y: Math.max(0, Math.min(1, (elementRect.top - containerRect.top + elementRect.height * fy) / panelHeight)),
+  };
+}
+
+function updateAnnotationFromDrag(drag: AnnotationDragState, clientX: number, clientY: number): PanelAnnotationSpec {
+  const dx = (clientX - drag.startClientX) / Math.max(1, drag.panelWidth);
+  const dy = (clientY - drag.startClientY) / Math.max(1, drag.panelHeight);
+  const next = { ...drag.original };
+  if (Array.isArray(next.box) && next.box.length === 4) {
+    const [left, top, boxW, boxH] = next.box;
+    next.box = [
+      Math.max(0, Math.min(1 - Math.max(0, boxW), left + dx)),
+      Math.max(0, Math.min(1 - Math.max(0, boxH), top + dy)),
+      boxW,
+      boxH,
+    ];
+    return next;
+  }
+  next.x = Math.max(0, Math.min(1, styleNumber(next.x, 0) + dx));
+  next.y = Math.max(0, Math.min(1, styleNumber(next.y, 0) + dy));
+  return next;
 }
 
 
@@ -1879,12 +2065,47 @@ function svgDashAttributes(overlay: PanelOverlaySpec, lineWidth: number): string
 }
 
 function renderLatexMathToText(expr: string): string {
-  return String(expr || "")
+  const superscript: Record<string, string> = {
+    "0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴",
+    "5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹",
+    "+": "⁺", "-": "⁻", "=": "⁼", "(": "⁽", ")": "⁾",
+    n: "ⁿ", i: "ⁱ",
+  };
+  const subscript: Record<string, string> = {
+    "0": "₀", "1": "₁", "2": "₂", "3": "₃", "4": "₄",
+    "5": "₅", "6": "₆", "7": "₇", "8": "₈", "9": "₉",
+    "+": "₊", "-": "₋", "=": "₌", "(": "₍", ")": "₎",
+    a: "ₐ", e: "ₑ", h: "ₕ", i: "ᵢ", j: "ⱼ", k: "ₖ",
+    l: "ₗ", m: "ₘ", n: "ₙ", o: "ₒ", p: "ₚ", r: "ᵣ",
+    s: "ₛ", t: "ₜ", u: "ᵤ", v: "ᵥ", x: "ₓ",
+  };
+  const convertScript = (text: string, table: Record<string, string>, marker: string): string =>
+    text.split("").map((ch) => table[ch] || `${marker}${ch}`).join("");
+  const normalized = String(expr || "")
     .trim()
     .replace(/^\$|\$$/g, "")
     .replace(/\\+(?=[A-Za-z])/g, "\\")
-    .replace(/\\([A-Za-z]+)/g, (_match, command: string) => LATEX_SYMBOLS[command] || command)
-    .replace(/[{}]/g, "");
+    .replace(/\\([A-Za-z]+)/g, (_match, command: string) => LATEX_SYMBOLS[command] || command);
+  let out = "";
+  for (let i = 0; i < normalized.length; i += 1) {
+    const ch = normalized[i];
+    if ((ch === "^" || ch === "_") && i + 1 < normalized.length) {
+      const table = ch === "^" ? superscript : subscript;
+      const marker = ch;
+      if (normalized[i + 1] === "{") {
+        const group = readLatexGroup(normalized, i + 1);
+        out += convertScript(group.text, table, marker);
+        i = group.next - 1;
+      } else {
+        out += convertScript(normalized[i + 1], table, marker);
+        i += 1;
+      }
+      continue;
+    }
+    if (ch === "{" || ch === "}") continue;
+    out += ch;
+  }
+  return out;
 }
 
 function svgPanelOverlayElement(
@@ -1898,21 +2119,21 @@ function svgPanelOverlayElement(
   const opacity = styleNumber(overlay.opacity, 1);
   const strokeOpacity = opacity * styleNumber(overlay.stroke_opacity, 1);
   const fillOpacity = opacity * styleNumber(overlay.fill_opacity, overlay.fill ? 1 : 0);
-  const stroke = styleString(overlay.stroke, "#00e5ff");
-  const fill = overlay.fill ? styleString(overlay.fill, "none") : "none";
+  const stroke = svgColor(overlay.stroke, "#00e5ff");
+  const fill = overlay.fill ? svgColor(overlay.fill, "none") : "none";
   const lineWidth = Math.max(0, styleNumber(overlay.stroke_width, 2));
   const common = `fill="${escapeXmlAttr(fill)}" fill-opacity="${fillOpacity}" stroke="${escapeXmlAttr(stroke)}" stroke-width="${lineWidth}" stroke-opacity="${strokeOpacity}"${svgDashAttributes(overlay, lineWidth)}`;
   if (geom.shape === "circle") {
     const cx = toScreenX(geom.col);
     const cy = toScreenY(geom.row);
     const r = Math.max(0, (Math.abs(toScreenX(geom.col + geom.radius) - cx) + Math.abs(toScreenY(geom.row + geom.radius) - cy)) / 2);
-    return `<circle data-show2d-panel-overlay-svg="true" cx="${cx}" cy="${cy}" r="${r}" ${common}/>`;
+    return `<circle cx="${cx}" cy="${cy}" r="${r}" ${common}/>`;
   }
   const x0 = toScreenX(geom.col0);
   const y0 = toScreenY(geom.row0);
   const x1 = toScreenX(geom.col1);
   const y1 = toScreenY(geom.row1);
-  return `<rect data-show2d-panel-overlay-svg="true" x="${Math.min(x0, x1)}" y="${Math.min(y0, y1)}" width="${Math.abs(x1 - x0)}" height="${Math.abs(y1 - y0)}" ${common}/>`;
+  return `<rect x="${Math.min(x0, x1)}" y="${Math.min(y0, y1)}" width="${Math.abs(x1 - x0)}" height="${Math.abs(y1 - y0)}" ${common}/>`;
 }
 
 function svgTextFromRichSpans(spans: RichTitleSpan[] | undefined, fallback: string): { text: string; spans: Array<{ text: string; color?: string }> } {
@@ -1963,23 +2184,26 @@ function svgPanelAnnotationElement(spec: PanelAnnotationSpec, x: number, y: numb
   const fontSize = Math.max(6, styleNumber(spec.font_size, 10));
   const rich = svgTextFromRichSpans(spec.math ? [{ math: spec.math }] : spec.spans, spec.text || "");
   const variant = spec.variant || "badge";
-  const fg = styleString(spec.fg ?? spec.color, "#fff");
+  const fg = svgColor(spec.fg ?? spec.color, "#fff");
   const opacity = Math.max(0, Math.min(1, styleNumber(spec.opacity, 1)));
   const fontFamily = styleString(spec.font_family, "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif");
   const outlineWidth = Math.max(0, styleNumber(spec.outline_width, 0));
-  const outlineAttrs = outlineWidth > 0
-    ? ` stroke="${escapeXmlAttr(styleString(spec.outline_color, "rgba(0,0,0,0.85)"))}" stroke-width="${outlineWidth}" stroke-linejoin="round" paint-order="stroke fill"`
-    : "";
-  const chunks: string[] = [`<g data-show2d-panel-annotation-svg="true" opacity="${opacity}">`];
+  const outlineColor = svgColor(spec.outline_color, "rgba(0,0,0,0.85)");
+  const chunks: string[] = [`<g opacity="${opacity}">`];
   if (variant !== "plain") {
     const boxW = Math.max(12, rich.text.length * fontSize * 0.62 + 12);
     const boxH = fontSize * 1.25 + 4;
     const rx = anchor === "middle" ? tx - boxW / 2 : anchor === "end" ? tx - boxW : tx;
     const ry = baseline === "middle" ? ty - boxH / 2 : baseline === "baseline" ? ty - boxH : ty;
-    chunks.push(`<rect x="${rx}" y="${ry}" width="${boxW}" height="${boxH}" rx="${styleNumber(spec.radius, 3)}" fill="${escapeXmlAttr(styleString(spec.bg, "rgba(0,0,0,0.72)"))}" stroke="${escapeXmlAttr(styleString(spec.border_color, "rgba(255,255,255,0.5)"))}" stroke-width="${Math.max(0, styleNumber(spec.border_width, variant === "outline" || variant === "callout" ? 1 : 0))}"/>`);
+    chunks.push(`<rect x="${rx}" y="${ry}" width="${boxW}" height="${boxH}" rx="${styleNumber(spec.radius, 3)}" fill="${escapeXmlAttr(svgColor(spec.bg, "rgba(0,0,0,0.72)"))}" stroke="${escapeXmlAttr(svgColor(spec.border_color, "rgba(255,255,255,0.5)"))}" stroke-width="${Math.max(0, styleNumber(spec.border_width, variant === "outline" || variant === "callout" ? 1 : 0))}"/>`);
   }
-  chunks.push(`<text x="${tx}" y="${baseline === "middle" ? ty + fontSize * 0.35 : ty}" text-anchor="${anchor}" font-family="${escapeXmlAttr(fontFamily)}" font-size="${fontSize}" font-weight="${escapeXmlAttr(spec.font_weight ?? 700)}" fill="${escapeXmlAttr(fg)}"${outlineAttrs}>`);
-  rich.spans.forEach((span) => chunks.push(`<tspan${span.color ? ` fill="${escapeXmlAttr(span.color)}"` : ""}>${escapeXmlText(span.text)}</tspan>`));
+  const textY = baseline === "middle" ? ty + fontSize * 0.35 : ty;
+  const textAttrs = `x="${tx}" y="${textY}" text-anchor="${anchor}" font-family="${escapeXmlAttr(fontFamily)}" font-size="${fontSize}" font-weight="${escapeXmlAttr(spec.font_weight ?? 700)}"`;
+  if (outlineWidth > 0) {
+    chunks.push(`<text ${textAttrs} fill="none" stroke="${escapeXmlAttr(outlineColor)}" stroke-width="${outlineWidth}" stroke-linejoin="round">${escapeXmlText(rich.text)}</text>`);
+  }
+  chunks.push(`<text ${textAttrs} fill="${escapeXmlAttr(fg)}">`);
+  rich.spans.forEach((span) => chunks.push(`<tspan${span.color ? ` fill="${escapeXmlAttr(svgColor(span.color))}"` : ""}>${escapeXmlText(span.text)}</tspan>`));
   chunks.push("</text></g>");
   return chunks.join("");
 }
@@ -1991,18 +2215,18 @@ function svgInsetPlotElement(spec: InsetPlotSpec | null | undefined, panel: numb
   const sx = (value: number) => x + plotX0 + (value - xlim[0]) / (xlim[1] - xlim[0]) * plotW;
   const sy = (value: number) => y + plotY0 + plotH - (value - ylim[0]) / (ylim[1] - ylim[0]) * plotH;
   const points = finite.map(([px, py]) => `${sx(px)},${sy(py)}`).join(" ");
-  const lineColor = spec.color || fallbackColor;
-  const textColor = spec.text_color || "rgba(255,255,255,0.92)";
-  const tickColor = spec.tick_color || "rgba(255,255,255,0.72)";
+  const lineColor = svgColor(spec.color, fallbackColor);
+  const textColor = svgColor(spec.text_color, "rgba(255,255,255,0.92)");
+  const tickColor = svgColor(spec.tick_color, "rgba(255,255,255,0.72)");
   const legendFont = Math.max(6, Math.min(18, Number(spec.legend_font_size ?? 9)));
   const chunks = [
-    `<g data-show2d-inset-plot-svg="true">`,
-    `<rect x="${x + x0}" y="${y + y0}" width="${boxW}" height="${boxH}" fill="${escapeXmlAttr(spec.background || "#0a0c10")}" fill-opacity="${Math.max(0, Math.min(1, Number(spec.background_alpha ?? 0.68)))}" stroke="${escapeXmlAttr(spec.border_color || "rgba(255,255,255,0.34)")}" stroke-width="${Number(spec.border_width ?? 1)}"/>`,
+    `<g>`,
+    `<rect x="${x + x0}" y="${y + y0}" width="${boxW}" height="${boxH}" fill="${escapeXmlAttr(svgColor(spec.background, "#0a0c10"))}" fill-opacity="${Math.max(0, Math.min(1, Number(spec.background_alpha ?? 0.68)))}" stroke="${escapeXmlAttr(svgColor(spec.border_color, "rgba(255,255,255,0.34)"))}" stroke-width="${Number(spec.border_width ?? 1)}"/>`,
     `<path d="M ${x + plotX0} ${y + plotY0} V ${y + plotY0 + plotH} H ${x + plotX0 + plotW}" fill="none" stroke="${escapeXmlAttr(tickColor)}" stroke-opacity="0.45" stroke-width="1"/>`,
     `<polyline points="${points}" fill="none" stroke="${escapeXmlAttr(lineColor)}" stroke-width="${Math.max(1.4, Number(spec.line_width ?? 2))}" stroke-linejoin="round" stroke-linecap="round"/>`,
   ];
   if (Array.isArray(spec.point) && spec.point.length >= 2) {
-    chunks.push(`<circle cx="${sx(Number(spec.point[0]))}" cy="${sy(Number(spec.point[1]))}" r="3.4" fill="${escapeXmlAttr(spec.point_color || "#fff")}" stroke="#000" stroke-width="1.5"/>`);
+    chunks.push(`<circle cx="${sx(Number(spec.point[0]))}" cy="${sy(Number(spec.point[1]))}" r="3.4" fill="${escapeXmlAttr(svgColor(spec.point_color, "#fff"))}" stroke="#000" stroke-width="1.5"/>`);
   }
   if (spec.title) chunks.push(`<text x="${x + x0 + 6}" y="${y + y0 + 12}" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="${legendFont}" font-weight="700" fill="${escapeXmlAttr(textColor)}">${escapeXmlText(spec.title)}</text>`);
   if (spec.legend) chunks.push(`<text x="${x + x0 + 6}" y="${y + y0 + boxH - 6}" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="${legendFont}" font-weight="700" fill="${escapeXmlAttr(lineColor)}">${escapeXmlText(spec.legend)}</text>`);
@@ -2022,7 +2246,7 @@ function svgColorbarElements(lut: Uint8Array, x: number, y: number, panelW: numb
   const by = y + 18;
   return {
     def: `<linearGradient id="${id}" x1="0" x2="0" y1="1" y2="0">${stops.join("")}</linearGradient>`,
-    body: `<g data-show2d-colorbar-svg="true"><rect x="${bx - 1}" y="${by - 1}" width="12" height="${barH + 2}" fill="#000" fill-opacity="0.45"/><rect x="${bx}" y="${by}" width="10" height="${barH}" fill="url(#${id})" stroke="#fff" stroke-opacity="0.75" stroke-width="0.75"/><text x="${bx - 4}" y="${by + 4}" text-anchor="end" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="9" fill="#fff">${escapeXmlText(formatNumber(vmax))}</text><text x="${bx - 4}" y="${by + barH}" text-anchor="end" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="9" fill="#fff">${escapeXmlText(formatNumber(vmin))}</text></g>`,
+    body: `<g><rect x="${bx - 1}" y="${by - 1}" width="12" height="${barH + 2}" fill="#000" fill-opacity="0.45"/><rect x="${bx}" y="${by}" width="10" height="${barH}" fill="url(#${id})" stroke="#fff" stroke-opacity="0.75" stroke-width="0.75"/><text x="${bx - 4}" y="${by + 4}" text-anchor="end" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="9" fill="#fff">${escapeXmlText(formatNumber(vmax))}</text><text x="${bx - 4}" y="${by + barH}" text-anchor="end" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="9" fill="#fff">${escapeXmlText(formatNumber(vmin))}</text></g>`,
   };
 }
 
@@ -2214,6 +2438,7 @@ function Show2D() {
   const allowResizeControls = !isMobileViewport;
   const model = useModel();
   const folderWatchLive = useFolderWatchModelLive(model);
+  React.useLayoutEffect(() => applyStandaloneWidgetViewState(model), [model]);
   React.useEffect(() => preserveRestoredWidgetModelsOnSave(model), [model]);
 
   const staticFallbackRootRef = React.useRef<HTMLDivElement | null>(null);
@@ -2590,7 +2815,7 @@ function Show2D() {
   const [selectedPanels, setSelectedPanels] = useModelState<number[]>("selected_panels");
   const [insetPlots, setInsetPlots] = useModelState<InsetPlotSpec[]>("inset_plots");
   const [showInsetPlots, setShowInsetPlots] = useModelState<boolean>("show_inset_plots");
-  const [panelAnnotations] = useModelState<PanelAnnotationSpec[][]>("panel_annotations");
+  const [panelAnnotations, setPanelAnnotations] = useModelState<PanelAnnotationSpec[][]>("panel_annotations");
   const [panelOverlays, setPanelOverlays] = useModelState<PanelOverlaySpec[][]>("panel_overlays");
 
   const [contrastPreset, setContrastPreset] = useModelState<string>("contrast_preset");
@@ -2819,9 +3044,12 @@ function Show2D() {
   const [newRoiShape, setNewRoiShape] = React.useState<"circle" | "square" | "rectangle" | "annular">("square");
   const [overlayEditMode, setOverlayEditMode] = React.useState(false);
   const [overlaySelection, setOverlaySelection] = React.useState<OverlaySelection | null>(null);
+  const [annotationSelection, setAnnotationSelection] = React.useState<AnnotationSelection | null>(null);
   const [isDraggingOverlay, setIsDraggingOverlay] = React.useState(false);
+  const [isDraggingAnnotation, setIsDraggingAnnotation] = React.useState(false);
   const [isHoveringOverlay, setIsHoveringOverlay] = React.useState(false);
   const overlayDragRef = React.useRef<OverlayDragState | null>(null);
+  const annotationDragRef = React.useRef<AnnotationDragState | null>(null);
   const overlayBaselineRef = React.useRef<PanelOverlaySpec[][] | null>(null);
   const [exportAnchor, setExportAnchor] = React.useState<HTMLElement | null>(null);
   const [panelMenuAnchor, setPanelMenuAnchor] = React.useState<HTMLElement | null>(null);
@@ -2855,6 +3083,11 @@ function Show2D() {
   const [preparedViewWidget] = useModelState<unknown>("prepared_view_widget");
   const [exportBusy, setExportBusy] = React.useState(false);
   const [localExportStatus, setLocalExportStatus] = React.useState("");
+  const svgPreviewUrlRef = React.useRef<string | null>(null);
+  const svgPreviewImageRef = React.useRef<HTMLImageElement | null>(null);
+  const svgPreviewSnapRef = React.useRef({ x: 0, y: 0 });
+  const [svgPreview, setSvgPreview] = React.useState<Show2DSvgPreview | null>(null);
+  const [svgPreviewSnap, setSvgPreviewSnap] = React.useState({ x: 0, y: 0 });
   const pendingHtmlExportRef = React.useRef<{
     id: string;
     filename: string;
@@ -2863,6 +3096,8 @@ function Show2D() {
   } | null>(null);
   const selectedRoi = roiSelectedIdx >= 0 && roiSelectedIdx < (roiList?.length ?? 0) ? roiList[roiSelectedIdx] : null;
   const hasPanelOverlays = React.useMemo(() => (panelOverlays || []).some((items) => items && items.length > 0), [panelOverlays]);
+  const hasPanelAnnotations = React.useMemo(() => (panelAnnotations || []).some((items) => items && items.length > 0), [panelAnnotations]);
+  const hasEditablePanelDecorations = hasPanelOverlays || hasPanelAnnotations;
   const scaleBarPanelSet = React.useMemo(() => new Set((scaleBarPanels || []).map((value) => Number(value)).filter((value) => Number.isFinite(value))), [scaleBarPanels]);
   const panelHasScaleBar = React.useCallback((panel: number) => scaleBarVisible && (scaleBarPanelSet.size === 0 || scaleBarPanelSet.has(panel)), [scaleBarPanelSet, scaleBarVisible]);
   React.useEffect(() => {
@@ -2875,6 +3110,11 @@ function Show2D() {
     const exists = Boolean(panelOverlays?.[overlaySelection.panel]?.[overlaySelection.overlay]);
     if (!exists) setOverlaySelection(null);
   }, [overlaySelection, panelOverlays]);
+  React.useEffect(() => {
+    if (!annotationSelection) return;
+    const exists = Boolean(panelAnnotations?.[annotationSelection.panel]?.[annotationSelection.annotation]);
+    if (!exists) setAnnotationSelection(null);
+  }, [annotationSelection, panelAnnotations]);
 
   const updatePanelOverlay = React.useCallback((panel: number, overlay: number, nextSpec: PanelOverlaySpec) => {
     const next = clonePanelOverlays(panelOverlays);
@@ -2883,6 +3123,55 @@ function Show2D() {
     next[panel][overlay] = nextSpec;
     setPanelOverlays(next);
   }, [panelOverlays, setPanelOverlays]);
+
+  const updatePanelAnnotation = React.useCallback((panel: number, annotation: number, nextSpec: PanelAnnotationSpec) => {
+    const next = (panelAnnotations || []).map((items) => (items || []).map((item) => ({ ...item })));
+    while (next.length <= panel) next.push([]);
+    if (!next[panel] || annotation < 0 || annotation >= next[panel].length) return;
+    next[panel][annotation] = nextSpec;
+    setPanelAnnotations(next);
+  }, [panelAnnotations, setPanelAnnotations]);
+
+  const beginPanelAnnotationDrag = React.useCallback((event: React.MouseEvent<HTMLElement>, panel: number, annotation: number) => {
+    if (!overlayEditMode) return;
+    const original = panelAnnotations?.[panel]?.[annotation];
+    const container = imageContainerRefs.current[panel];
+    if (!original || !container) return;
+    const draggableOriginal = draggableAnnotationSpec(original, event.currentTarget, container);
+    const rect = container.getBoundingClientRect();
+    annotationDragRef.current = {
+      panel,
+      annotation,
+      startClientX: event.clientX,
+      startClientY: event.clientY,
+      panelWidth: Math.max(1, rect.width),
+      panelHeight: Math.max(1, rect.height),
+      original: draggableOriginal,
+    };
+    setAnnotationSelection({ panel, annotation });
+    setOverlaySelection(null);
+    setSelectedIdx(panel);
+    setIsDraggingAnnotation(true);
+    setIsDraggingPan(false);
+    setPanStart(null);
+    setPanningIdx(null);
+    const handleDocumentMove = (moveEvent: MouseEvent) => {
+      const drag = annotationDragRef.current;
+      if (!drag) return;
+      updatePanelAnnotation(drag.panel, drag.annotation, updateAnnotationFromDrag(drag, moveEvent.clientX, moveEvent.clientY));
+      moveEvent.preventDefault();
+    };
+    const handleDocumentUp = () => {
+      document.removeEventListener("mousemove", handleDocumentMove);
+      document.removeEventListener("mouseup", handleDocumentUp);
+      annotationDragRef.current = null;
+      setIsDraggingAnnotation(false);
+    };
+    document.addEventListener("mousemove", handleDocumentMove);
+    document.addEventListener("mouseup", handleDocumentUp);
+    event.preventDefault();
+    event.stopPropagation();
+  }, [overlayEditMode, panelAnnotations, setSelectedIdx, updatePanelAnnotation]);
 
   const deleteSelectedOverlay = React.useCallback(() => {
     if (!overlaySelection) return;
@@ -2894,6 +3183,16 @@ function Show2D() {
     setOverlaySelection(null);
   }, [overlaySelection, panelOverlays, setPanelOverlays]);
 
+  const deleteSelectedAnnotation = React.useCallback(() => {
+    if (!annotationSelection) return;
+    const next = (panelAnnotations || []).map((items) => (items || []).map((item) => ({ ...item })));
+    const items = next[annotationSelection.panel];
+    if (!items || annotationSelection.annotation < 0 || annotationSelection.annotation >= items.length) return;
+    items.splice(annotationSelection.annotation, 1);
+    setPanelAnnotations(next);
+    setAnnotationSelection(null);
+  }, [annotationSelection, panelAnnotations, setPanelAnnotations]);
+
   const resetPanelOverlays = React.useCallback(() => {
     if (!overlayBaselineRef.current) return;
     setPanelOverlays(clonePanelOverlays(overlayBaselineRef.current));
@@ -2901,6 +3200,14 @@ function Show2D() {
     overlayDragRef.current = null;
     setIsDraggingOverlay(false);
   }, [setPanelOverlays]);
+
+  const handleOverlayEditMenuToggle = React.useCallback((event?: React.SyntheticEvent) => {
+    event?.preventDefault();
+    event?.stopPropagation();
+    setOverlayEditMode((value) => !value);
+    setMoreMenuAnchor(null);
+    window.setTimeout(() => setMoreMenuAnchor(null), 0);
+  }, []);
 
   const effectiveShowFft = showFft;
   const galleryColumnOptions = React.useMemo(() => {
@@ -2932,7 +3239,11 @@ function Show2D() {
     setExportAnchor(null);
     const filename = makeHtmlExportFilename(title, nImages, height, width, standaloneHtmlMode);
     try {
-      const html = `<!doctype html>\n${document.documentElement.outerHTML}`;
+      const html = `<!doctype html>\n${standaloneHtmlWithCurrentWidgetState(
+        model,
+        standaloneWidgetStaticHtmlFromDocument(),
+        SHOW2D_STANDALONE_VIEW_STATE_KEYS,
+      )}`;
       const blob = new Blob([html], { type: "text/html;charset=utf-8" });
       downloadBlob(blob, filename);
       setLocalExportStatus(`Saved ${filename} (${formatSavedBytes(blob.size)})`);
@@ -7796,6 +8107,7 @@ function Show2D() {
         const original = panelOverlays?.[idx]?.[hit.overlay];
         if (!original) return;
         setOverlaySelection({ panel: idx, overlay: hit.overlay });
+        setAnnotationSelection(null);
         overlayDragRef.current = {
           mode: hit.mode,
           panel: idx,
@@ -7813,6 +8125,7 @@ function Show2D() {
         return;
       }
       setOverlaySelection(null);
+      setAnnotationSelection(null);
     }
     if (profileActive) {
       const { imgCol, imgRow } = screenToImg(e, idx);
@@ -7894,6 +8207,13 @@ function Show2D() {
 
   const handleMouseMove = (e: React.MouseEvent, idx: number) => {
     if (updateInsetPlotDrag(e, idx)) return;
+    if (annotationDragRef.current) {
+      const drag = annotationDragRef.current;
+      if (idx !== drag.panel) return;
+      updatePanelAnnotation(drag.panel, drag.annotation, updateAnnotationFromDrag(drag, e.clientX, e.clientY));
+      e.preventDefault();
+      return;
+    }
     if (overlayDragRef.current) {
       const drag = overlayDragRef.current;
       if (idx !== drag.panel) return;
@@ -8125,6 +8445,11 @@ function Show2D() {
 
   const handleMouseUp = (e: React.MouseEvent, idx: number) => {
     if (finishInsetPlotDrag(e, idx)) return;
+    if (annotationDragRef.current) {
+      annotationDragRef.current = null;
+      setIsDraggingAnnotation(false);
+      return;
+    }
     if (overlayDragRef.current) {
       overlayDragRef.current = null;
       setIsDraggingOverlay(false);
@@ -8279,13 +8604,11 @@ function Show2D() {
     }
   }, [isGallery, selectedIdx, labels]);
 
-  const handleSvgExport = React.useCallback(async (scale: number = 3) => {
-    setExportAnchor(null);
+  const buildSvgExport = React.useCallback((scale: number = 3): Show2DSvgExport => {
     const exportScale = Math.max(1, Math.min(8, Math.round(Number(scale) || 2)));
     const panels = isGallery ? visibleImageIndices : [0];
     if (panels.length === 0 || canvasW <= 0 || canvasH <= 0) {
-      setLocalExportStatus("Export failed: no visible Show2D panels");
-      return;
+      throw new Error("no visible Show2D panels");
     }
     const cols = isGallery ? Math.max(1, Math.min(clampedNcols, panels.length)) : 1;
     const rows = Math.max(1, Math.ceil(panels.length / cols));
@@ -8296,27 +8619,24 @@ function Show2D() {
     const svgHeight = titleHeight + 2 * frame + rows * canvasH + (rows - 1) * gap;
     const filename = makeSvgExportFilename(title, panels.length, height, width, exportScale);
 
-    try {
+    {
       const defs: string[] = [];
       const body: string[] = [];
       if (gap > 0 && galleryGapColor) {
-        body.push(`<rect x="0" y="${titleHeight}" width="${svgWidth}" height="${Math.max(0, svgHeight - titleHeight)}" fill="${escapeXmlAttr(galleryGapColor)}"/>`);
+        body.push(`<rect x="0" y="${titleHeight}" width="${svgWidth}" height="${Math.max(0, svgHeight - titleHeight)}" fill="${escapeXmlAttr(svgColor(galleryGapColor))}"/>`);
       }
       if (titleHeight > 0) {
         body.push(
-          `<text x="${svgWidth / 2}" y="19" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="14" font-weight="700" fill="${escapeXmlAttr(themeColors.text)}">${escapeXmlText(title)}</text>`
+          `<text x="${svgWidth / 2}" y="19" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="14" font-weight="700" fill="${escapeXmlAttr(svgColor(themeColors.text))}">${escapeXmlText(title)}</text>`
         );
       }
 
       const titleFontFamily = styleString(panelTitleStyle?.font_family, "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif");
-      const titleFg = styleString(panelTitleStyle?.fg, "#fff");
+      const titleFg = svgColor(panelTitleStyle?.fg, "#fff");
       const titleWeight = panelTitleStyle?.font_weight ?? 700;
       const titleOpacity = Math.max(0, Math.min(1, styleNumber(panelTitleStyle?.opacity, 0.95)));
       const titleOutlineWidth = Math.max(0, styleNumber(panelTitleStyle?.outline_width, 0));
-      const titleOutlineColor = styleString(panelTitleStyle?.outline_color, "rgba(0,0,0,0.85)");
-      const titleOutlineAttrs = titleOutlineWidth > 0
-        ? ` stroke="${escapeXmlAttr(titleOutlineColor)}" stroke-width="${titleOutlineWidth}" stroke-linejoin="round" paint-order="stroke fill"`
-        : "";
+      const titleOutlineColor = svgColor(panelTitleStyle?.outline_color, "rgba(0,0,0,0.85)");
       const titleTextAnchor = (anchor: string): string => {
         if (anchor.includes("right")) return "end";
         if (anchor.includes("center")) return "middle";
@@ -8344,6 +8664,8 @@ function Show2D() {
         if (align === "right" || align === "end") return { x: px + canvasW - 28, y: py + 6 + fontSize, anchor: "end" };
         return { x: px + canvasW / 2, y: py + 6 + fontSize, anchor: "middle" };
       };
+      const titleOutlineText = (xPos: number, yPos: number, anchor: string, fontSize: number, text: string): string =>
+        `<text x="${xPos}" y="${yPos}" text-anchor="${anchor}" font-family="${escapeXmlAttr(titleFontFamily)}" font-size="${fontSize}" font-weight="${escapeXmlAttr(titleWeight)}" fill="none" stroke="${escapeXmlAttr(titleOutlineColor)}" stroke-width="${titleOutlineWidth}" stroke-linejoin="round">${escapeXmlText(text)}</text>`;
 
       groupMarkerOverlays.forEach((marker) => {
         body.push(
@@ -8363,11 +8685,11 @@ function Show2D() {
         const clipId = `show2d-svg-clip-${slot}`;
         defs.push(`<clipPath id="${clipId}"><rect x="${x}" y="${y}" width="${canvasW}" height="${canvasH}"/></clipPath>`);
         const dataUrl = scaledCanvasPngDataUrl(canvas, exportScale, smooth);
-        const panelStroke = frame > 0 && galleryGapColor ? galleryGapColor : themeColors.border;
+        const panelStroke = svgColor(frame > 0 && galleryGapColor ? galleryGapColor : themeColors.border);
         body.push(
-          `<g id="show2d-panel-${panel}" data-show2d-panel="${panel}">`,
+          `<g id="show2d-panel-${panel}">`,
           `<rect x="${x}" y="${y}" width="${canvasW}" height="${canvasH}" fill="#000"/>`,
-          `<image x="${x}" y="${y}" width="${canvasW}" height="${canvasH}" href="${escapeXmlAttr(dataUrl)}" preserveAspectRatio="none"/>`,
+          `<image x="${x}" y="${y}" width="${canvasW}" height="${canvasH}" xlink:href="${escapeXmlAttr(dataUrl)}" preserveAspectRatio="none"/>`,
           `<rect x="${x}" y="${y}" width="${canvasW}" height="${canvasH}" fill="none" stroke="${escapeXmlAttr(panelStroke)}" stroke-width="1"/>`
         );
         const markerColor = panelMarkerColor(panel);
@@ -8394,9 +8716,11 @@ function Show2D() {
               const lineY = titlePos.y;
               if (titleOutlineWidth <= 0) {
                 body.push(`<text x="${titlePos.x + 1}" y="${lineY + 1}" text-anchor="${titlePos.anchor}" font-family="${escapeXmlAttr(titleFontFamily)}" font-size="${fontSize}" font-weight="${escapeXmlAttr(titleWeight)}" fill="#000" fill-opacity="0.85">${escapeXmlText(rich.text)}</text>`);
+              } else {
+                body.push(titleOutlineText(titlePos.x, lineY, titlePos.anchor, fontSize, rich.text));
               }
-              body.push(`<text x="${titlePos.x}" y="${lineY}" text-anchor="${titlePos.anchor}" font-family="${escapeXmlAttr(titleFontFamily)}" font-size="${fontSize}" font-weight="${escapeXmlAttr(titleWeight)}" fill="${escapeXmlAttr(titleFg)}" fill-opacity="${titleOpacity}"${titleOutlineAttrs} data-show2d-panel-title-spans-svg="true">`);
-              rich.spans.forEach((span) => body.push(`<tspan${span.color ? ` fill="${escapeXmlAttr(span.color)}"` : ""}>${escapeXmlText(span.text)}</tspan>`));
+              body.push(`<text x="${titlePos.x}" y="${lineY}" text-anchor="${titlePos.anchor}" font-family="${escapeXmlAttr(titleFontFamily)}" font-size="${fontSize}" font-weight="${escapeXmlAttr(titleWeight)}" fill="${escapeXmlAttr(titleFg)}" fill-opacity="${titleOpacity}">`);
+              rich.spans.forEach((span) => body.push(`<tspan${span.color ? ` fill="${escapeXmlAttr(svgColor(span.color))}"` : ""}>${escapeXmlText(span.text)}</tspan>`));
               body.push("</text>");
             } else {
               const titleLines = wrapSvgTextLines(label, fontSize, Math.max(24, canvasW - 56), 3);
@@ -8405,8 +8729,10 @@ function Show2D() {
                 const lineY = titlePos.y + lineIdx * fontSize * 1.2;
                 if (titleOutlineWidth <= 0) {
                   body.push(`<text x="${titlePos.x + 1}" y="${lineY + 1}" text-anchor="${titlePos.anchor}" font-family="${escapeXmlAttr(titleFontFamily)}" font-size="${fontSize}" font-weight="${escapeXmlAttr(titleWeight)}" fill="#000" fill-opacity="0.85">${escapeXmlText(line)}</text>`);
+                } else {
+                  body.push(titleOutlineText(titlePos.x, lineY, titlePos.anchor, fontSize, line));
                 }
-                body.push(`<text x="${titlePos.x}" y="${lineY}" text-anchor="${titlePos.anchor}" font-family="${escapeXmlAttr(titleFontFamily)}" font-size="${fontSize}" font-weight="${escapeXmlAttr(titleWeight)}" fill="${escapeXmlAttr(titleFg)}" fill-opacity="${titleOpacity}"${titleOutlineAttrs}>${escapeXmlText(line)}</text>`);
+                body.push(`<text x="${titlePos.x}" y="${lineY}" text-anchor="${titlePos.anchor}" font-family="${escapeXmlAttr(titleFontFamily)}" font-size="${fontSize}" font-weight="${escapeXmlAttr(titleWeight)}" fill="${escapeXmlAttr(titleFg)}" fill-opacity="${titleOpacity}">${escapeXmlText(line)}</text>`);
               });
             }
             body.push(`</g>`);
@@ -8437,7 +8763,7 @@ function Show2D() {
           vectorLayer.push(svgPanelAnnotationElement(annotation, x, y, canvasW, canvasH));
         });
         if (vectorLayer.some(Boolean)) {
-          body.push(`<g clip-path="url(#${clipId})" data-show2d-vector-layer="true">${vectorLayer.join("")}</g>`);
+          body.push(`<g data-show2d-vector-layer="true" clip-path="url(#${clipId})">${vectorLayer.join("")}</g>`);
         }
 
         if (panelHasScaleBar(panel)) {
@@ -8449,9 +8775,9 @@ function Show2D() {
           if (geom) {
             const barY = y + geom.barY;
             const barX = x + geom.barX;
-            const barColor = styleString(scaleBarStyle?.color, "#fff");
-            const shadowColor = styleString(scaleBarStyle?.shadow_color, "#000");
-            const outlineColor = styleString(scaleBarStyle?.outline_color, "#000");
+            const barColor = svgColor(scaleBarStyle?.color, "#fff");
+            const shadowColor = svgColor(scaleBarStyle?.shadow_color, "#000");
+            const outlineColor = svgColor(scaleBarStyle?.outline_color, "#000");
             const outlineWidth = Math.max(0, styleNumber(scaleBarStyle?.outline_width, 0));
             const labelGap = styleNumber(scaleBarStyle?.label_gap, 4);
             const fontAttrs = scaleBarSvgFontAttrs(scaleBarStyle);
@@ -8463,7 +8789,8 @@ function Show2D() {
             );
             if (outlineWidth > 0) {
               body.push(
-                `<text x="${labelX}" y="${labelY}" text-anchor="middle" ${fontAttrs} fill="${escapeXmlAttr(barColor)}" stroke="${escapeXmlAttr(outlineColor)}" stroke-width="${outlineWidth}" stroke-linejoin="round" paint-order="stroke fill">${escapeXmlText(geom.label)}</text>`
+                `<text x="${labelX}" y="${labelY}" text-anchor="middle" ${fontAttrs} fill="none" stroke="${escapeXmlAttr(outlineColor)}" stroke-width="${outlineWidth}" stroke-linejoin="round">${escapeXmlText(geom.label)}</text>`,
+                `<text x="${labelX}" y="${labelY}" text-anchor="middle" ${fontAttrs} fill="${escapeXmlAttr(barColor)}">${escapeXmlText(geom.label)}</text>`
               );
             } else {
               body.push(
@@ -8487,38 +8814,12 @@ function Show2D() {
 
       const svg = [
         `<?xml version="1.0" encoding="UTF-8"?>`,
-        `<svg xmlns="http://www.w3.org/2000/svg" width="${svgWidth}" height="${svgHeight}" viewBox="0 0 ${svgWidth} ${svgHeight}" role="img" aria-label="${escapeXmlAttr(title || "Show2D SVG export")}" data-show2d-svg-export="true" data-raster-scale="${exportScale}">`,
+        `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${svgWidth}" height="${svgHeight}" viewBox="0 0 ${svgWidth} ${svgHeight}" role="img" aria-label="${escapeXmlAttr(title || "Show2D SVG export")}">`,
         `<defs>${defs.join("")}</defs>`,
         body.join(""),
         `</svg>`,
       ].join("\n");
-      const blob = new Blob([svg], { type: "image/svg+xml;charset=utf-8" });
-      const picker = (window as Show2DWindow).showSaveFilePicker;
-      let handle: Show2DFileHandle | null = null;
-      if (picker) {
-        try {
-          handle = await picker({
-            suggestedName: filename,
-            types: [{ description: "SVG image", accept: { "image/svg+xml": [".svg"] } }],
-          });
-        } catch (err) {
-          if (isAbortLikeError(err)) {
-            setLocalExportStatus("Export canceled");
-            return;
-          }
-          throw err;
-        }
-      }
-      if (handle) {
-        const writable = await handle.createWritable();
-        await writable.write(blob);
-        await writable.close();
-      } else {
-        downloadBlob(blob, filename);
-      }
-      setLocalExportStatus(`Saved ${filename} (${formatSavedBytes(blob.size)})`);
-    } catch (err) {
-      setLocalExportStatus(`Export failed: ${err instanceof Error ? err.message : String(err)}`);
+      return { svg, width: svgWidth, height: svgHeight, filename, scale: exportScale };
     }
   }, [
     canvasH,
@@ -8560,6 +8861,102 @@ function Show2D() {
     visibleImageIndices,
     width,
   ]);
+
+  const clearSvgPreview = React.useCallback(() => {
+    if (svgPreviewUrlRef.current) {
+      window.URL.revokeObjectURL(svgPreviewUrlRef.current);
+      svgPreviewUrlRef.current = null;
+    }
+    setSvgPreview(null);
+  }, []);
+
+  React.useEffect(() => () => {
+    if (svgPreviewUrlRef.current) {
+      window.URL.revokeObjectURL(svgPreviewUrlRef.current);
+      svgPreviewUrlRef.current = null;
+    }
+  }, []);
+
+  const snapSvgPreviewToDevicePixels = React.useCallback(() => {
+    const el = svgPreviewImageRef.current;
+    if (!el) return;
+    const dpr = window.devicePixelRatio || 1;
+    const rect = el.getBoundingClientRect();
+    const x = Math.ceil(rect.left * dpr) / dpr - rect.left;
+    const y = Math.ceil(rect.top * dpr) / dpr - rect.top;
+    setSvgPreviewSnap((prev) => (
+      Math.abs(prev.x - x) < 0.001 && Math.abs(prev.y - y) < 0.001
+        ? prev
+        : { x, y }
+    ));
+  }, []);
+
+  React.useLayoutEffect(() => {
+    if (!svgPreview) {
+      setSvgPreviewSnap((prev) => (prev.x === 0 && prev.y === 0 ? prev : { x: 0, y: 0 }));
+      return undefined;
+    }
+    let frame = window.requestAnimationFrame(snapSvgPreviewToDevicePixels);
+    const onResize = () => {
+      window.cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(snapSvgPreviewToDevicePixels);
+    };
+    window.addEventListener("resize", onResize);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      window.removeEventListener("resize", onResize);
+    };
+  }, [snapSvgPreviewToDevicePixels, svgPreview]);
+
+  const handleSvgPreview = React.useCallback((scale: number = 3) => {
+    setExportAnchor(null);
+    try {
+      const built = buildSvgExport(scale);
+      const blob = new Blob([built.svg], { type: "image/svg+xml;charset=utf-8" });
+      if (svgPreviewUrlRef.current) window.URL.revokeObjectURL(svgPreviewUrlRef.current);
+      const url = window.URL.createObjectURL(blob);
+      svgPreviewUrlRef.current = url;
+      setSvgPreview({ ...built, url, size: blob.size });
+      setLocalExportStatus(`Preview ${built.filename} (${formatSavedBytes(blob.size)})`);
+    } catch (err) {
+      setLocalExportStatus(`Preview failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }, [buildSvgExport]);
+
+  const handleSvgExport = React.useCallback(async (scale: number = 3) => {
+    setExportAnchor(null);
+    try {
+      const exportScale = Math.max(1, Math.min(8, Math.round(Number(scale) || 2)));
+      const built = svgPreview && svgPreview.scale === exportScale ? svgPreview : buildSvgExport(exportScale);
+      const blob = new Blob([built.svg], { type: "image/svg+xml;charset=utf-8" });
+      const picker = (window as Show2DWindow).showSaveFilePicker;
+      let handle: Show2DFileHandle | null = null;
+      if (picker) {
+        try {
+          handle = await picker({
+            suggestedName: built.filename,
+            types: [{ description: "SVG image", accept: { "image/svg+xml": [".svg"] } }],
+          });
+        } catch (err) {
+          if (isAbortLikeError(err)) {
+            setLocalExportStatus("Export canceled");
+            return;
+          }
+          throw err;
+        }
+      }
+      if (handle) {
+        const writable = await handle.createWritable();
+        await writable.write(blob);
+        await writable.close();
+      } else {
+        downloadBlob(blob, built.filename);
+      }
+      setLocalExportStatus(`Saved ${built.filename} (${formatSavedBytes(blob.size)})`);
+    } catch (err) {
+      setLocalExportStatus(`Export failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }, [buildSvgExport, svgPreview]);
 
   const handleHandoffToShow3D = React.useCallback(() => {
     const panels = visibleImageIndices;
@@ -8732,7 +9129,10 @@ function Show2D() {
         break;
       case "Delete":
       case "Backspace":
-        if (overlayEditMode && overlaySelection) {
+        if (overlayEditMode && annotationSelection) {
+          e.preventDefault();
+          deleteSelectedAnnotation();
+        } else if (overlayEditMode && overlaySelection) {
           e.preventDefault();
           deleteSelectedOverlay();
         } else if (roiActive && roiSelectedIdx >= 0 && roiList && roiSelectedIdx < roiList.length) {
@@ -8752,6 +9152,7 @@ function Show2D() {
   const statsIdx = isGallery ? selectedIdx : 0;
   const currentFrameStats = localPanelFrameStats.get(statsIdx);
   const svgExportAvailable = canvasW > 0 && canvasH > 0 && visibleImageIndices.length > 0;
+  const isDraggingEditableDecoration = isDraggingOverlay || isDraggingAnnotation;
 
   // Calibrated cursor position - unit is whatever the user passed via sampling/units.
   const calibratedUnit = pixelSize > 0 ? pixelUnit : "";
@@ -8935,6 +9336,11 @@ function Show2D() {
       data-frequency-filter-backend={frequencyFilterEnabled ? frequencyFilterBackend : "off"}
       sx={{ p: 2, bgcolor: themeColors.bg, color: themeColors.text, width: "100%", maxWidth: "100%", boxSizing: "border-box", fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif", "& canvas": { display: "block" }, "@media (max-width: 700px)": { p: 0, ".jp-OutputArea-output &, .jp-OutputArea-child &": { width: "calc(100vw - 96px)", maxWidth: "calc(100vw - 96px)" } } }}
     >
+      {overlayEditMode && (
+        <style>
+          {".MuiModal-backdrop.MuiBackdrop-invisible { pointer-events: none !important; }"}
+        </style>
+      )}
       <FolderWatchBadge
         state={folderWatchState}
         detail={folderWatchDetail}
@@ -9432,6 +9838,9 @@ function Show2D() {
                 onClose={() => setMoreMenuAnchor(null)}
                 MenuListProps={{ "aria-label": "More tools" }}
                 {...themedTopMenuProps}
+                BackdropProps={{
+                  sx: { pointerEvents: overlayEditMode ? "none" : "auto" },
+                }}
               >
                 <MenuItem dense onClick={handleSaveViewState} sx={{ fontSize: 12 }}>
                   Save State
@@ -9488,15 +9897,23 @@ function Show2D() {
                     </Typography>
                   </Box>
                 )}
-                {hasPanelOverlays && (
-                  <MenuItem dense onClick={() => setOverlayEditMode(!overlayEditMode)} sx={{ fontSize: 12, gap: 1, color: overlayEditMode ? themeColors.accent : themeColors.text }}>
-                    <Typography sx={{ flex: 1, fontSize: 12, color: "inherit" }} title="Edit API-defined circles and rectangles: click to select, drag to move, drag an edge to resize.">
+                {hasEditablePanelDecorations && (
+                  <MenuItem
+                    dense
+                    onMouseDown={handleOverlayEditMenuToggle}
+                    onClick={(event) => { event.preventDefault(); event.stopPropagation(); }}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" || event.key === " ") handleOverlayEditMenuToggle(event);
+                    }}
+                    sx={{ fontSize: 12, gap: 1, color: overlayEditMode ? themeColors.accent : themeColors.text }}
+                  >
+                    <Typography sx={{ flex: 1, fontSize: 12, color: "inherit" }} title="Edit API-defined labels, circles, and rectangles. Drag labels or shape interiors to move; drag shape edges to resize.">
                       Overlay Edit
                     </Typography>
                     <Switch
                       checked={overlayEditMode}
-                      onClick={(event) => event.stopPropagation()}
-                      onChange={(event) => setOverlayEditMode(event.target.checked)}
+                      onClick={(event) => { event.preventDefault(); event.stopPropagation(); }}
+                      onChange={(event) => { event.preventDefault(); event.stopPropagation(); }}
                       size="small"
                       sx={switchStyles.small}
                       slotProps={{ input: { "aria-label": "Toggle overlay editing" } }}
@@ -9831,6 +10248,8 @@ function Show2D() {
                 {exportBusy ? "Exporting" : "Export"}
               </Button>
               <Menu anchorEl={exportAnchor} open={Boolean(exportAnchor)} onClose={() => setExportAnchor(null)} anchorOrigin={{ vertical: "bottom", horizontal: "right" }} transformOrigin={{ vertical: "top", horizontal: "right" }} {...themedTopMenuProps}>
+                {svgExportAvailable && !svgPreview && <MenuItem onClick={() => handleSvgPreview(3)} sx={{ fontSize: 12 }}>Preview SVG</MenuItem>}
+                {svgPreview && <MenuItem onClick={() => { setExportAnchor(null); clearSvgPreview(); setLocalExportStatus("Exited SVG preview"); }} sx={{ fontSize: 12 }}>Exit SVG preview</MenuItem>}
                 {svgExportAvailable && <MenuItem onClick={() => handleSvgExport(3)} sx={{ fontSize: 12 }}>SVG</MenuItem>}
                 {exportEnabled && <MenuItem onClick={() => handleHtmlExportSelect("exact")} sx={{ fontSize: 12 }}>HTML exact float32 ({exactHtmlSize})</MenuItem>}
                 {exportEnabled && <MenuItem onClick={() => handleHtmlExportSelect("quantized")} sx={{ fontSize: 12 }}>HTML quantized uint8 ({quantizedHtmlSize})</MenuItem>}
@@ -9874,7 +10293,55 @@ function Show2D() {
 	          </Stack>
 	          )}
 
-          {isGallery ? (
+          {svgPreview ? (
+            <Box
+              data-show2d-svg-preview="true"
+              sx={{
+                width: svgPreview.width,
+                boxSizing: "content-box",
+                bgcolor: "#fff",
+                overflowX: "auto",
+              }}
+            >
+              <Box
+                sx={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  gap: 1,
+                  px: 0.75,
+                  py: 0.4,
+                  bgcolor: themeColors.bgAlt,
+                  borderBottom: `1px solid ${themeColors.border}`,
+                  boxSizing: "border-box",
+                  width: svgPreview.width,
+                }}
+              >
+                <Typography sx={{ ...typography.label, color: themeColors.accent }}>
+                  SVG preview
+                </Typography>
+                <Box sx={{ display: "flex", alignItems: "center", gap: 0.5 }}>
+                  <Button size="small" sx={compactButton} onClick={() => handleSvgPreview(svgPreview.scale)}>Refresh</Button>
+                  <Button size="small" sx={compactButton} onClick={() => { clearSvgPreview(); setLocalExportStatus("Exited SVG preview"); }}>Exit</Button>
+                </Box>
+              </Box>
+              <img
+                ref={svgPreviewImageRef}
+                data-show2d-svg-preview-image="true"
+                src={svgPreview.url}
+                alt={`${title || "Show2D"} SVG preview`}
+                onLoad={snapSvgPreviewToDevicePixels}
+                style={{
+                  display: "block",
+                  width: svgPreview.width,
+                  height: svgPreview.height,
+                  maxWidth: "none",
+                  objectFit: "contain",
+                  transform: `translate(${svgPreviewSnap.x}px, ${svgPreviewSnap.y}px)`,
+                }}
+              />
+            </Box>
+          ) : isGallery ? (
             /* Gallery mode */
             <Box sx={{ position: "relative", maxWidth: galleryGridWidth, width: "100%", boxSizing: "border-box" }}>
             <Box sx={{
@@ -9892,7 +10359,7 @@ function Show2D() {
                   key={i}
                   sx={{
                     minWidth: 0,
-                    cursor: reorderMode ? "grab" : i === selectedIdx ? (overlayEditMode ? (isDraggingOverlay ? "grabbing" : isHoveringOverlay ? "nwse-resize" : "crosshair") : (isDraggingResize || isDraggingResizeInner || isHoveringResize || isHoveringResizeInner) ? "nwse-resize" : isDraggingROI ? "move" : (draggingProfileEndpoint !== null || isDraggingProfileLine) ? "grabbing" : (profileActive && (hoveredProfileEndpoint !== null || isHoveringProfileLine)) ? "grab" : (profileActive || roiActive || measureActive) ? "crosshair" : "grab") : ("pointer"),
+                    cursor: reorderMode ? "grab" : i === selectedIdx ? (overlayEditMode ? (isDraggingEditableDecoration ? "grabbing" : isHoveringOverlay ? "nwse-resize" : "crosshair") : (isDraggingResize || isDraggingResizeInner || isHoveringResize || isHoveringResizeInner) ? "nwse-resize" : isDraggingROI ? "move" : (draggingProfileEndpoint !== null || isDraggingProfileLine) ? "grabbing" : (profileActive && (hoveredProfileEndpoint !== null || isHoveringProfileLine)) ? "grab" : (profileActive || roiActive || measureActive) ? "crosshair" : "grab") : ("pointer"),
                     opacity: draggedPanelRef.current === i ? 0.62 : 1,
                     transform: dragOverPanel === i ? "translateY(-2px)" : "translateY(0)",
                     transition: "transform 120ms ease, opacity 120ms ease",
@@ -10037,7 +10504,16 @@ function Show2D() {
                         data-show2d-panel-annotation-position={annotation.position || "top-left"}
                         data-show2d-panel-annotation-variant={annotation.variant || "badge"}
                         title={annotation.text}
-                        sx={panelAnnotationSx(annotation)}
+                        onMouseDown={(event: React.MouseEvent<HTMLElement>) => beginPanelAnnotationDrag(event, i, annotationIdx)}
+                        sx={{
+                          ...panelAnnotationSx(annotation),
+                          pointerEvents: overlayEditMode ? "auto" : "none",
+                          cursor: overlayEditMode ? (isDraggingAnnotation ? "grabbing" : "grab") : "inherit",
+                          ...(overlayEditMode && annotationSelection?.panel === i && annotationSelection.annotation === annotationIdx ? {
+                            outline: "1px dashed rgba(255,255,255,0.9)",
+                            outlineOffset: 2,
+                          } : {}),
+                        }}
                       >
                         {renderPanelAnnotation(annotation)}
                       </Box>
@@ -10507,7 +10983,7 @@ function Show2D() {
             /* Single image mode */
             <Box
               ref={(el: HTMLDivElement | null) => { imageContainerRefs.current[0] = el; }}
-              sx={{ ...responsivePanelSx, border: `1px solid ${themeColors.border}`, cursor: overlayEditMode ? (isDraggingOverlay ? "grabbing" : isHoveringOverlay ? "nwse-resize" : "crosshair") : isHoveringLensEdge ? "nwse-resize" : isDraggingROI ? "move" : (isDraggingResize || isDraggingResizeInner || isHoveringResize || isHoveringResizeInner) ? "nwse-resize" : (draggingProfileEndpoint !== null || isDraggingProfileLine) ? "grabbing" : (profileActive && (hoveredProfileEndpoint !== null || isHoveringProfileLine)) ? "grab" : (profileActive || roiActive || measureActive) ? "crosshair" : "grab" }}
+              sx={{ ...responsivePanelSx, border: `1px solid ${themeColors.border}`, cursor: overlayEditMode ? (isDraggingEditableDecoration ? "grabbing" : isHoveringOverlay ? "nwse-resize" : "crosshair") : isHoveringLensEdge ? "nwse-resize" : isDraggingROI ? "move" : (isDraggingResize || isDraggingResizeInner || isHoveringResize || isHoveringResizeInner) ? "nwse-resize" : (draggingProfileEndpoint !== null || isDraggingProfileLine) ? "grabbing" : (profileActive && (hoveredProfileEndpoint !== null || isHoveringProfileLine)) ? "grab" : (profileActive || roiActive || measureActive) ? "crosshair" : "grab" }}
               onMouseDown={(e) => handleMouseDown(e, 0)}
               onMouseMove={(e) => handleMouseMove(e, 0)}
               onMouseUp={(e) => handleMouseUp(e, 0)}
@@ -10573,7 +11049,16 @@ function Show2D() {
                   data-show2d-panel-annotation-position={annotation.position || "top-left"}
                   data-show2d-panel-annotation-variant={annotation.variant || "badge"}
                   title={annotation.text}
-                  sx={panelAnnotationSx(annotation)}
+                  onMouseDown={(event: React.MouseEvent<HTMLElement>) => beginPanelAnnotationDrag(event, 0, annotationIdx)}
+                  sx={{
+                    ...panelAnnotationSx(annotation),
+                    pointerEvents: overlayEditMode ? "auto" : "none",
+                    cursor: overlayEditMode ? (isDraggingAnnotation ? "grabbing" : "grab") : "inherit",
+                    ...(overlayEditMode && annotationSelection?.panel === 0 && annotationSelection.annotation === annotationIdx ? {
+                      outline: "1px dashed rgba(255,255,255,0.9)",
+                      outlineOffset: 2,
+                    } : {}),
+                  }}
                 >
                   {renderPanelAnnotation(annotation)}
                 </Box>
