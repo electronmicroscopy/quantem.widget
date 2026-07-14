@@ -545,6 +545,12 @@ svg_path = w.export_svg("figure2_show2d.svg")
 html_path = w.export_html("figure2_show2d.html", mode="single", encoding="uint8")
 ```
 
+In the live widget, use `Export -> Preview SVG` before saving the SVG. This
+replaces the canvas gallery with the generated SVG itself, so the preview is
+the same payload that `Export -> SVG` downloads for Illustrator. Use this mode
+for final panel-title placement, label nudges, gutter checks, scale-bar
+positioning, and border inspection.
+
 In the SVG, microscope image panels are embedded rasters. Labels, scale bars,
 overlays, inset plots, group markers, colorbars, and panel frames are SVG
 objects. In Illustrator, edit text and line work directly; keep the image

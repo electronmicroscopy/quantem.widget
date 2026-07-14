@@ -8882,8 +8882,12 @@ function Show2D() {
     if (!el) return;
     const dpr = window.devicePixelRatio || 1;
     const rect = el.getBoundingClientRect();
-    const x = Math.ceil(rect.left * dpr) / dpr - rect.left;
-    const y = Math.ceil(rect.top * dpr) / dpr - rect.top;
+    const current = svgPreviewSnapRef.current;
+    const layoutLeft = rect.left - current.x;
+    const layoutTop = rect.top - current.y;
+    const x = Math.ceil(layoutLeft * dpr) / dpr - layoutLeft;
+    const y = Math.ceil(layoutTop * dpr) / dpr - layoutTop;
+    svgPreviewSnapRef.current = { x, y };
     setSvgPreviewSnap((prev) => (
       Math.abs(prev.x - x) < 0.001 && Math.abs(prev.y - y) < 0.001
         ? prev
@@ -8893,10 +8897,16 @@ function Show2D() {
 
   React.useLayoutEffect(() => {
     if (!svgPreview) {
+      svgPreviewSnapRef.current = { x: 0, y: 0 };
       setSvgPreviewSnap((prev) => (prev.x === 0 && prev.y === 0 ? prev : { x: 0, y: 0 }));
       return undefined;
     }
     let frame = window.requestAnimationFrame(snapSvgPreviewToDevicePixels);
+    const timers = [
+      window.setTimeout(snapSvgPreviewToDevicePixels, 40),
+      window.setTimeout(snapSvgPreviewToDevicePixels, 160),
+      window.setTimeout(snapSvgPreviewToDevicePixels, 400),
+    ];
     const onResize = () => {
       window.cancelAnimationFrame(frame);
       frame = window.requestAnimationFrame(snapSvgPreviewToDevicePixels);
@@ -8904,6 +8914,7 @@ function Show2D() {
     window.addEventListener("resize", onResize);
     return () => {
       window.cancelAnimationFrame(frame);
+      timers.forEach((timer) => window.clearTimeout(timer));
       window.removeEventListener("resize", onResize);
     };
   }, [snapSvgPreviewToDevicePixels, svgPreview]);
@@ -10337,7 +10348,10 @@ function Show2D() {
                   height: svgPreview.height,
                   maxWidth: "none",
                   objectFit: "contain",
-                  transform: `translate(${svgPreviewSnap.x}px, ${svgPreviewSnap.y}px)`,
+                  marginLeft: svgPreviewSnap.x,
+                  marginTop: svgPreviewSnap.y,
+                  marginRight: -svgPreviewSnap.x,
+                  marginBottom: -svgPreviewSnap.y,
                 }}
               />
             </Box>

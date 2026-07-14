@@ -185,6 +185,19 @@ def test_show2d_show3d_offline_export_bakes_current_view_state():
     assert '"slice_idx"' in show3d
 
 
+def test_show2d_svg_preview_reuses_export_payload_and_snaps_pixels():
+    """C1: publication preview displays the same SVG that Export saves."""
+    show2d = (ROOT / "js" / "show2d" / "index.tsx").read_text(encoding="utf-8")
+
+    assert "type Show2DSvgPreview = Show2DSvgExport" in show2d
+    assert "const buildSvgExport = React.useCallback" in show2d
+    assert "const built = svgPreview && svgPreview.scale === exportScale" in show2d
+    assert 'data-show2d-svg-preview-image="true"' in show2d
+    assert "snapSvgPreviewToDevicePixels" in show2d
+    assert "Math.ceil(layoutTop * dpr) / dpr - layoutTop" in show2d
+    assert "marginTop: svgPreviewSnap.y" in show2d
+
+
 def test_show2d_local_stack_fft_cache_and_playback_contract():
     """Local slice playback keeps the prior FFT visible and reuses revisits."""
     show2d = (ROOT / "js" / "show2d" / "index.tsx").read_text(encoding="utf-8")
