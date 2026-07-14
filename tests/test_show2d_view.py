@@ -269,6 +269,89 @@ def test_export_svg_writes_publication_layers_as_vectors(tmp_path):
     assert "ACF" in svg
 
 
+def test_export_svg_respects_publication_text_and_scale_bar_panels(tmp_path):
+    """C5: paper layout controls, expect styled text and one-panel scale bar."""
+    data = np.random.default_rng(182).random((2, 24, 24), dtype=np.float32)
+    widget = Show2D(
+        data,
+        labels=["left panel", "right panel"],
+        sampling=0.1,
+        units="nm",
+        scale_bar_panels=["right panel"],
+        scale_bar_length=0.5,
+        scale_bar_label="500 pm",
+        scale_bar_style={
+            "offset": (3, -6),
+            "label_gap": 7,
+            "font_family": "Arial",
+            "font_size": 12,
+            "font_weight": 700,
+            "color": "#f8fafc",
+            "outline_color": "#111111",
+            "outline_width": 1.25,
+            "bar_height": 3,
+        },
+        panel_title_font_size=14,
+        panel_title_style={
+            "font_family": "Arial",
+            "align": "left",
+            "x": 0.04,
+            "y": 0.035,
+            "anchor": "top-left",
+            "outline_width": 2,
+            "outline_color": "#111111",
+        },
+        gallery_gap_px=2,
+        gallery_gap_color="#000000",
+        panel_annotations={
+            "left panel": {
+                "text": "aligned",
+                "x": 0.12,
+                "y": 0.34,
+                "anchor": "center-left",
+                "align": "left",
+                "font_family": "Arial",
+                "outline_width": 1.5,
+                "outline_color": "#000000",
+                "variant": "plain",
+            },
+        },
+        ncols=2,
+        verbose=False,
+    )
+
+    restored = Show2D(data, labels=["left panel", "right panel"], verbose=False)
+    restored.load_state_dict(widget.state_dict())
+    assert restored.scale_bar_panels == [1]
+    assert restored.scale_bar_length == pytest.approx(0.5)
+    assert restored.scale_bar_label == "500 pm"
+    assert restored.scale_bar_style["offset"] == [3.0, -6.0]
+    assert restored.scale_bar_style["font_family"] == "Arial"
+    assert restored.scale_bar_style["font_size"] == pytest.approx(12)
+    assert restored.panel_title_style["x"] == pytest.approx(0.04)
+    assert restored.panel_title_style["anchor"] == "top-left"
+    assert restored.gallery_gap_px == 2
+    assert restored.gallery_gap_color == "#000000"
+
+    out = widget.export_svg(tmp_path / "styled.svg")
+    svg = out.read_text(encoding="utf-8")
+
+    assert svg.count('height="3" fill="#f8fafc"') == 1
+    assert ">500 pm<" in svg
+    assert 'font-family="Arial"' in svg
+    assert 'font-size="12"' in svg
+    assert 'font-weight="700"' in svg
+    assert 'fill="#000000"' in svg
+    assert 'stroke="#000000" stroke-width="1"' in svg
+    assert '<image x="2"' in svg
+    assert '<image x="304"' in svg
+    assert 'stroke="#111111"' in svg
+    assert 'stroke-width="1.25"' in svg
+    assert 'stroke="#000000"' in svg
+    assert 'paint-order="stroke fill"' in svg
+    assert 'text-anchor="start"' in svg
+
+
 def test_current_view_uses_zoom_center():
     w = Show2D(_image(128), zoom=4.0, zoom_row=16.0, zoom_col=112.0, verbose=False)
     view = w.current_view

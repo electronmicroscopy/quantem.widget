@@ -31,7 +31,7 @@ import DragIndicatorIcon from "@mui/icons-material/DragIndicator";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import { useTheme } from "../theme";
 import { useCanvasRepaintSignal } from "../canvasLifecycle";
-import { drawScaleBarHiDPI, drawColorbar, formatScaleLabel, formatZoomLabel, roundToNiceValue } from "../figure";
+import { drawColorbar, formatScaleLabel, formatZoomLabel, roundToNiceValue } from "../figure";
 import { extractBytes, extractFloat32, formatNumber, downloadBlob, preserveRestoredWidgetModelsOnSave } from "../format";
 import { useHideStaticFallback } from "../staticFallback";
 import { computeHistogramFromBytes, findDataRange, applyLogScale, percentileClip, sliderRange, computeStats } from "../stats";
@@ -121,6 +121,7 @@ function InfoTooltip({ text, theme = "dark" }: { text: React.ReactNode; theme?: 
 
 type RichTitleSpan = { text?: unknown; math?: unknown; color?: unknown };
 type PanelTitleStyle = Record<string, unknown>;
+type ScaleBarStyle = Record<string, unknown>;
 type MarkerMap = Record<string, string>;
 type PanelAnnotationSpec = {
   text?: string;
@@ -140,6 +141,7 @@ type PanelAnnotationSpec = {
   border_width?: number;
   font_size?: number;
   font_weight?: string | number;
+  font_family?: string;
   pad_x?: number;
   pad_y?: number;
   radius?: number;
@@ -147,6 +149,8 @@ type PanelAnnotationSpec = {
   align?: string;
   max_width?: string;
   offset?: [number, number];
+  outline_color?: string;
+  outline_width?: number;
 };
 type PanelOverlaySpec = {
   shape?: "circle" | "rect" | "rectangle" | "square";
@@ -352,8 +356,11 @@ function panelTitleChromeSx(
     px: s.pad_x != null ? `${Math.max(0, styleNumber(s.pad_x, 0))}px` : defaults.px,
     py: s.pad_y != null ? `${Math.max(0, styleNumber(s.pad_y, 0))}px` : defaults.py,
     fontWeight: s.font_weight != null ? s.font_weight : defaults.fontWeight,
+    fontFamily: styleString(s.font_family, String(defaults.fontFamily || "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif")),
     opacity: s.opacity != null ? Math.max(0, Math.min(1, styleNumber(s.opacity, 1))) : defaults.opacity,
     textAlign: align,
+    WebkitTextStroke: styleNumber(s.outline_width, 0) > 0 ? `${styleNumber(s.outline_width, 0)}px ${styleString(s.outline_color, "rgba(0,0,0,0.85)")}` : undefined,
+    paintOrder: styleNumber(s.outline_width, 0) > 0 ? "stroke fill" : undefined,
     maxWidth: mode && mode !== "panel" && mode !== "hug" ? mode : defaults.maxWidth,
     width: mode === "panel" ? (defaults.width || "calc(100% - 56px)") : defaults.width,
     boxSizing: "border-box",
@@ -368,6 +375,18 @@ function panelTitleChromeSx(
     sx.transform = defaults.transform
       ? `${String(defaults.transform)} translateX(-50%)`
       : "translateX(-50%)";
+  }
+  if (Number.isFinite(Number(s.x)) || Number.isFinite(Number(s.y))) {
+    const offset = Array.isArray(s.offset) ? s.offset.map(Number) : [0, 0];
+    const left = Number.isFinite(Number(s.x)) ? Number(s.x) * 100 : 50;
+    const top = Number.isFinite(Number(s.y)) ? Number(s.y) * 100 : 0;
+    sx.left = `calc(${left}% + ${Number(offset[0] || 0)}px)`;
+    sx.top = `calc(${top}% + ${Number(offset[1] || 0)}px)`;
+    sx.right = "auto";
+    sx.bottom = "auto";
+    sx.width = mode === "panel" ? sx.width : "fit-content";
+    sx.maxWidth = sx.maxWidth || "calc(100% - 16px)";
+    sx.transform = annotationAnchorTransform(styleString(s.anchor, "top-center"));
   }
   return sx;
 }
@@ -462,6 +481,7 @@ function panelAnnotationSx(spec: PanelAnnotationSpec): Record<string, unknown> {
     border: borderWidth > 0 ? `${borderWidth}px solid ${styleString(spec.border_color, "rgba(255,255,255,0.5)")}` : "none",
     opacity: spec.opacity != null ? Math.max(0, Math.min(1, styleNumber(spec.opacity, 1))) : 1,
     fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+    ...(spec.font_family ? { fontFamily: spec.font_family } : {}),
     fontSize: `${Math.max(6, styleNumber(spec.font_size, 10))}px`,
     fontWeight: spec.font_weight != null ? spec.font_weight : 700,
     lineHeight: 1.2,
@@ -470,7 +490,9 @@ function panelAnnotationSx(spec: PanelAnnotationSpec): Record<string, unknown> {
     overflow: "hidden",
     textOverflow: "ellipsis",
     maxWidth: styleString(spec.max_width, Array.isArray(spec.box) ? "100%" : "calc(100% - 16px)"),
-    textShadow: plain ? "0 1px 2px rgba(0,0,0,0.85)" : "none",
+    textShadow: plain && styleNumber(spec.outline_width, 0) <= 0 ? "0 1px 2px rgba(0,0,0,0.85)" : "none",
+    WebkitTextStroke: styleNumber(spec.outline_width, 0) > 0 ? `${styleNumber(spec.outline_width, 0)}px ${styleString(spec.outline_color, "rgba(0,0,0,0.85)")}` : undefined,
+    paintOrder: styleNumber(spec.outline_width, 0) > 0 ? "stroke fill" : undefined,
     boxShadow: callout ? "0 1px 4px rgba(0,0,0,0.45)" : "none",
   };
 }
@@ -777,21 +799,59 @@ function show2dScaleBarGeometry(
   pixelSize: number,
   unit: string,
   position: string,
-): { barX: number; barY: number; barPx: number; label: string; scaleLeft: boolean } | null {
+  requestedPhysical?: number | null,
+  requestedLabel?: string | null,
+  style?: ScaleBarStyle | null,
+): { barX: number; barY: number; barPx: number; barHeight: number; label: string; scaleLeft: boolean } | null {
   if (cssWidth <= 0 || cssHeight <= 0 || imageWidth <= 0 || pixelSize <= 0 || zoom <= 0) return null;
   const scaleX = cssWidth / imageWidth;
   const effectiveZoom = zoom * scaleX;
   if (effectiveZoom <= 0) return null;
-  const nicePhysical = roundToNiceValue((60 / effectiveZoom) * pixelSize);
+  const explicitPhysical = Number(requestedPhysical);
+  const nicePhysical = Number.isFinite(explicitPhysical) && explicitPhysical > 0
+    ? explicitPhysical
+    : roundToNiceValue((60 / effectiveZoom) * pixelSize);
   const barPx = (nicePhysical / pixelSize) * effectiveZoom;
   const scaleLeft = position === "bottom-left";
+  const [offsetX, offsetY] = scaleBarOffset(style);
   return {
-    barX: scaleLeft ? 12 : cssWidth - barPx - 12,
-    barY: cssHeight - 12,
+    barX: (scaleLeft ? 12 : cssWidth - barPx - 12) + offsetX,
+    barY: cssHeight - 12 + offsetY,
     barPx,
-    label: formatScaleLabel(nicePhysical, unit),
+    barHeight: Math.max(0.5, styleNumber(style?.bar_height, 5)),
+    label: requestedLabel && requestedLabel.trim() ? requestedLabel : formatScaleLabel(nicePhysical, unit),
     scaleLeft,
   };
+}
+
+function scaleBarOffset(style?: ScaleBarStyle | null): [number, number] {
+  const raw = style?.offset;
+  if (!Array.isArray(raw) || raw.length < 2) return [0, 0];
+  const x = Number(raw[0]);
+  const y = Number(raw[1]);
+  return [Number.isFinite(x) ? x : 0, Number.isFinite(y) ? y : 0];
+}
+
+function scaleBarFontFamily(style?: ScaleBarStyle | null): string {
+  return styleString(style?.font_family, "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif");
+}
+
+function scaleBarFontSize(style?: ScaleBarStyle | null): number {
+  return Math.max(1, styleNumber(style?.font_size, 16));
+}
+
+function scaleBarCanvasFont(style?: ScaleBarStyle | null): string {
+  const weight = style?.font_weight;
+  const weightText = weight !== undefined && weight !== null && String(weight).trim() ? `${String(weight).trim()} ` : "";
+  return `${weightText}${scaleBarFontSize(style)}px ${scaleBarFontFamily(style)}`;
+}
+
+function scaleBarSvgFontAttrs(style?: ScaleBarStyle | null): string {
+  const weight = style?.font_weight;
+  const weightText = weight !== undefined && weight !== null && String(weight).trim()
+    ? ` font-weight="${escapeXmlAttr(String(weight).trim())}"`
+    : "";
+  return `font-family="${escapeXmlAttr(scaleBarFontFamily(style))}" font-size="${scaleBarFontSize(style)}"${weightText}`;
 }
 
 function formatSavedBytes(bytes: number): string {
@@ -1872,16 +1932,31 @@ function svgPanelAnnotationElement(spec: PanelAnnotationSpec, x: number, y: numb
   let ty = y + margin;
   let anchor = "start";
   let baseline = "hanging";
+  const align = styleString(spec.align, "").toLowerCase();
+  const alignAnchor = align === "left" || align === "start" ? "start"
+    : align === "right" || align === "end" ? "end"
+    : align === "center" || align === "middle" ? "middle"
+    : "";
   if (Array.isArray(spec.box) && spec.box.length >= 4) {
-    tx = x + (Number(spec.box[0]) + Number(spec.box[2]) / 2) * panelW;
+    if (alignAnchor === "start") tx = x + Number(spec.box[0]) * panelW + Math.max(0, styleNumber(spec.pad_x, 0));
+    else if (alignAnchor === "end") tx = x + (Number(spec.box[0]) + Number(spec.box[2])) * panelW - Math.max(0, styleNumber(spec.pad_x, 0));
+    else tx = x + (Number(spec.box[0]) + Number(spec.box[2]) / 2) * panelW;
     ty = y + (Number(spec.box[1]) + Number(spec.box[3]) / 2) * panelH;
-    anchor = "middle";
+    anchor = alignAnchor || "middle";
     baseline = "middle";
+  } else if (Number.isFinite(spec.x) && Number.isFinite(spec.y)) {
+    tx = x + Number(spec.x) * panelW;
+    ty = y + Number(spec.y) * panelH;
+    const anchorValue = spec.anchor || "center";
+    anchor = String(anchorValue).includes("right") ? "end" : String(anchorValue).includes("center") ? "middle" : "start";
+    baseline = String(anchorValue).includes("bottom") ? "baseline" : String(anchorValue).includes("center") ? "middle" : "hanging";
+    if (alignAnchor) anchor = alignAnchor;
   } else {
     if (position.includes("right")) { tx = x + panelW - margin; anchor = "end"; }
     else if (position.includes("center")) { tx = x + panelW / 2; anchor = "middle"; }
     if (position.includes("bottom")) { ty = y + panelH - margin; baseline = "baseline"; }
     else if (position.includes("center")) { ty = y + panelH / 2; baseline = "middle"; }
+    if (alignAnchor) anchor = alignAnchor;
   }
   tx += Number(offset[0] || 0);
   ty += Number(offset[1] || 0);
@@ -1890,6 +1965,11 @@ function svgPanelAnnotationElement(spec: PanelAnnotationSpec, x: number, y: numb
   const variant = spec.variant || "badge";
   const fg = styleString(spec.fg ?? spec.color, "#fff");
   const opacity = Math.max(0, Math.min(1, styleNumber(spec.opacity, 1)));
+  const fontFamily = styleString(spec.font_family, "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif");
+  const outlineWidth = Math.max(0, styleNumber(spec.outline_width, 0));
+  const outlineAttrs = outlineWidth > 0
+    ? ` stroke="${escapeXmlAttr(styleString(spec.outline_color, "rgba(0,0,0,0.85)"))}" stroke-width="${outlineWidth}" stroke-linejoin="round" paint-order="stroke fill"`
+    : "";
   const chunks: string[] = [`<g data-show2d-panel-annotation-svg="true" opacity="${opacity}">`];
   if (variant !== "plain") {
     const boxW = Math.max(12, rich.text.length * fontSize * 0.62 + 12);
@@ -1898,13 +1978,13 @@ function svgPanelAnnotationElement(spec: PanelAnnotationSpec, x: number, y: numb
     const ry = baseline === "middle" ? ty - boxH / 2 : baseline === "baseline" ? ty - boxH : ty;
     chunks.push(`<rect x="${rx}" y="${ry}" width="${boxW}" height="${boxH}" rx="${styleNumber(spec.radius, 3)}" fill="${escapeXmlAttr(styleString(spec.bg, "rgba(0,0,0,0.72)"))}" stroke="${escapeXmlAttr(styleString(spec.border_color, "rgba(255,255,255,0.5)"))}" stroke-width="${Math.max(0, styleNumber(spec.border_width, variant === "outline" || variant === "callout" ? 1 : 0))}"/>`);
   }
-  chunks.push(`<text x="${tx}" y="${baseline === "middle" ? ty + fontSize * 0.35 : ty}" text-anchor="${anchor}" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="${fontSize}" font-weight="${escapeXmlAttr(spec.font_weight ?? 700)}" fill="${escapeXmlAttr(fg)}">`);
+  chunks.push(`<text x="${tx}" y="${baseline === "middle" ? ty + fontSize * 0.35 : ty}" text-anchor="${anchor}" font-family="${escapeXmlAttr(fontFamily)}" font-size="${fontSize}" font-weight="${escapeXmlAttr(spec.font_weight ?? 700)}" fill="${escapeXmlAttr(fg)}"${outlineAttrs}>`);
   rich.spans.forEach((span) => chunks.push(`<tspan${span.color ? ` fill="${escapeXmlAttr(span.color)}"` : ""}>${escapeXmlText(span.text)}</tspan>`));
   chunks.push("</text></g>");
   return chunks.join("");
 }
 
-function svgInsetPlotElement(spec: InsetPlotSpec | null | undefined, x: number, y: number, panelW: number, panelH: number, fallbackColor: string, scaleBarVisible: boolean): string {
+function svgInsetPlotElement(spec: InsetPlotSpec | null | undefined, panel: number, x: number, y: number, panelW: number, panelH: number, fallbackColor: string, scaleBarVisible: boolean): string {
   const geom = insetPlotGeometry(spec, panelW, panelH, scaleBarVisible);
   if (!geom || !spec) return "";
   const { finite, xlim, ylim, x0, y0, boxW, boxH, plotX0, plotY0, plotW, plotH } = geom;
@@ -2317,6 +2397,7 @@ function Show2D() {
   const [panelTitleFontSize] = useModelState<number>("panel_title_font_size");
   const [panelTitleStyle] = useModelState<PanelTitleStyle>("panel_title_style");
   const [galleryGapPxState] = useModelState<number>("gallery_gap_px");
+  const [galleryGapColor] = useModelState<string>("gallery_gap_color");
   const [title] = useModelState<string>("title");
   const [showTitle] = useModelState<boolean>("show_title");
   const [displayBinFactor] = useModelState<number>("_display_bin_factor");
@@ -2459,6 +2540,10 @@ function Show2D() {
   const [pixelUnit] = useModelState<string>("pixel_unit");
   const [scaleBarVisible] = useModelState<boolean>("scale_bar_visible");
   const [scaleBarPosition] = useModelState<string>("scale_bar_position");
+  const [scaleBarPanels] = useModelState<number[]>("scale_bar_panels");
+  const [scaleBarLength] = useModelState<number | null>("scale_bar_length");
+  const [scaleBarLabel] = useModelState<string>("scale_bar_label");
+  const [scaleBarStyle] = useModelState<ScaleBarStyle>("scale_bar_style");
   const [showZoomIndicator] = useModelState<boolean>("show_zoom_indicator");
 
   // UI visibility
@@ -2778,6 +2863,8 @@ function Show2D() {
   } | null>(null);
   const selectedRoi = roiSelectedIdx >= 0 && roiSelectedIdx < (roiList?.length ?? 0) ? roiList[roiSelectedIdx] : null;
   const hasPanelOverlays = React.useMemo(() => (panelOverlays || []).some((items) => items && items.length > 0), [panelOverlays]);
+  const scaleBarPanelSet = React.useMemo(() => new Set((scaleBarPanels || []).map((value) => Number(value)).filter((value) => Number.isFinite(value))), [scaleBarPanels]);
+  const panelHasScaleBar = React.useCallback((panel: number) => scaleBarVisible && (scaleBarPanelSet.size === 0 || scaleBarPanelSet.has(panel)), [scaleBarPanelSet, scaleBarVisible]);
   React.useEffect(() => {
     if (!overlayBaselineRef.current && hasPanelOverlays) {
       overlayBaselineRef.current = clonePanelOverlays(panelOverlays);
@@ -3775,9 +3862,10 @@ function Show2D() {
   const canvasW = Math.round(width * displayScale);
   const canvasH = Math.round(height * displayScale);
   const galleryGapPx = Math.max(0, Number.isFinite(galleryGapPxState) ? galleryGapPxState : 8);
+  const galleryFramePx = isGallery && galleryGapPx > 0 && galleryGapColor ? galleryGapPx : 0;
   const histogramWidthPx = 110;
   const histogramGapPx = 15;
-  const galleryGridMaxWidth = isGallery ? effectiveNcols * canvasW + (effectiveNcols - 1) * galleryGapPx : canvasW;
+  const galleryGridMaxWidth = isGallery ? effectiveNcols * canvasW + (effectiveNcols - 1) * galleryGapPx + 2 * galleryFramePx : canvasW;
   // Wrap against the actual notebook/container width. maxWidth below still
   // enforces the requested column count, while auto-fit avoids viewport-only
   // breakpoints that overflow narrow sidebars in a wide browser window.
@@ -3957,15 +4045,15 @@ function Show2D() {
           key: `${axis}-${rawKey}`,
           axis,
           color: String(color),
-          left: col0 * (canvasW + gap),
-          top: row0 * (canvasH + gap),
+          left: galleryFramePx + col0 * (canvasW + gap),
+          top: galleryFramePx + row0 * (canvasH + gap),
           width: (col1 - col0 + 1) * canvasW + Math.max(0, col1 - col0) * gap,
           height: (row1 - row0 + 1) * canvasH + Math.max(0, row1 - row0) * gap,
         };
       })
       .filter(Boolean) as Array<{ key: string; axis: "row" | "col"; color: string; left: number; top: number; width: number; height: number }>;
     return [...build(rowMarkers, "row"), ...build(colMarkers, "col")];
-  }, [canvasH, canvasW, colMarkers, effectiveNcols, galleryGapPx, isGallery, rowMarkers, visibleImageIndices]);
+  }, [canvasH, canvasW, colMarkers, effectiveNcols, galleryFramePx, galleryGapPx, isGallery, rowMarkers, visibleImageIndices]);
 
   // ROI FFT active: both ROI and FFT on, with a selected ROI
   const roiFftActive = effectiveShowFft && roiActive && roiSelectedIdx >= 0 && roiSelectedIdx < (roiList?.length ?? 0);
@@ -5480,17 +5568,54 @@ function Show2D() {
       const ctx = overlay.getContext("2d");
       if (!ctx) continue;
 
-      if (scaleBarVisible) {
+      ctx.clearRect(0, 0, overlay.width, overlay.height);
+      if (panelHasScaleBar(i)) {
         const zs = getZoomState(i);
         const panelPixelSize = pixelSizeForPanel(i);
         const unit = panelPixelSize > 0 ? pixelUnit : "px";
         const pxSize = panelPixelSize > 0 ? panelPixelSize : 1;
-        drawScaleBarHiDPI(overlay, DPR, zs.zoom, pxSize, unit, width, {
-          position: scaleBarPosition === "bottom-left" ? "bottom-left" : "bottom-right",
-          showZoomIndicator,
-        });
-      } else {
-        ctx.clearRect(0, 0, overlay.width, overlay.height);
+        const geom = show2dScaleBarGeometry(overlay.width / DPR, overlay.height / DPR, width, zs.zoom, pxSize, unit, scaleBarPosition, scaleBarLength, scaleBarLabel, scaleBarStyle);
+        if (geom) {
+          ctx.save();
+          ctx.scale(DPR, DPR);
+          const barColor = styleString(scaleBarStyle?.color, "#fff");
+          const shadowColor = styleString(scaleBarStyle?.shadow_color, "rgba(0,0,0,0.85)");
+          const outlineColor = styleString(scaleBarStyle?.outline_color, "rgba(0,0,0,0.85)");
+          const outlineWidth = Math.max(0, styleNumber(scaleBarStyle?.outline_width, 0));
+          const labelGap = styleNumber(scaleBarStyle?.label_gap, 4);
+          ctx.fillStyle = shadowColor;
+          ctx.globalAlpha = 0.5;
+          ctx.fillRect(geom.barX + 1, geom.barY + 1, geom.barPx, geom.barHeight);
+          ctx.globalAlpha = 1;
+          ctx.fillStyle = barColor;
+          ctx.fillRect(geom.barX, geom.barY, geom.barPx, geom.barHeight);
+          ctx.font = scaleBarCanvasFont(scaleBarStyle);
+          ctx.textAlign = "center";
+          ctx.textBaseline = "bottom";
+          const labelX = geom.barX + geom.barPx / 2;
+          const labelY = geom.barY - labelGap;
+          if (outlineWidth > 0) {
+            ctx.lineJoin = "round";
+            ctx.strokeStyle = outlineColor;
+            ctx.lineWidth = outlineWidth;
+            ctx.strokeText(geom.label, labelX, labelY);
+          } else {
+            ctx.fillStyle = shadowColor;
+            ctx.fillText(geom.label, labelX + 1, labelY + 1);
+          }
+          ctx.fillStyle = barColor;
+          ctx.fillText(geom.label, labelX, labelY);
+          if (showZoomIndicator) {
+            const zoomX = geom.scaleLeft ? overlay.width / DPR - 12 : 12;
+            ctx.textAlign = geom.scaleLeft ? "right" : "left";
+            const zoomText = formatZoomLabel(zs.zoom);
+            ctx.fillStyle = shadowColor;
+            ctx.fillText(zoomText, zoomX + 1, overlay.height / DPR - 6);
+            ctx.fillStyle = barColor;
+            ctx.fillText(zoomText, zoomX, overlay.height / DPR - 7);
+          }
+          ctx.restore();
+        }
       }
 
       // Colorbar (single image mode only) — uses cached vmin/vmax from data effect
@@ -5517,7 +5642,7 @@ function Show2D() {
           overlay.width / DPR,
           overlay.height / DPR,
           panelMarkerColor(i),
-          scaleBarVisible,
+          panelHasScaleBar(i),
         );
         ctx.restore();
       }
@@ -5720,7 +5845,7 @@ function Show2D() {
         ctx.restore();
       }
     }
-  }, [nImages, pixelSizeForPanel, pixelUnit, scaleBarVisible, scaleBarPosition, showZoomIndicator, selectedIdx, isGallery, canvasW, canvasH, width, height, displayScale, linkedZoom, linkedZoomState, zoomStates, dataVersion, showColorbar, cmap, offscreenVersion, logScale, profileActive, profilePoints, roiActive, roiList, roiSelectedIdx, isDraggingROI, themeColors, measureActive, measurePoints, canvasRepaintSignal, insetPlots, insetPlotSpecFor, insetDragVersion, showInsetPlots, panelMarkerColor, visibleImageIndices, panelOverlays, overlaySelection]);
+  }, [nImages, pixelSizeForPanel, pixelUnit, panelHasScaleBar, scaleBarPosition, scaleBarLength, scaleBarLabel, scaleBarStyle, showZoomIndicator, selectedIdx, isGallery, canvasW, canvasH, width, height, displayScale, linkedZoom, linkedZoomState, zoomStates, dataVersion, showColorbar, cmap, offscreenVersion, logScale, profileActive, profilePoints, roiActive, roiList, roiSelectedIdx, isDraggingROI, themeColors, measureActive, measurePoints, canvasRepaintSignal, insetPlots, insetPlotSpecFor, insetDragVersion, showInsetPlots, panelMarkerColor, visibleImageIndices, panelOverlays, overlaySelection]);
 
   // -------------------------------------------------------------------------
   // Inset magnifier (lens) — renders magnified region at cursor in bottom-left
@@ -8165,19 +8290,60 @@ function Show2D() {
     const cols = isGallery ? Math.max(1, Math.min(clampedNcols, panels.length)) : 1;
     const rows = Math.max(1, Math.ceil(panels.length / cols));
     const gap = isGallery ? galleryGapPx : 0;
+    const frame = gap > 0 && galleryGapColor ? gap : 0;
     const titleHeight = showTitle !== false && title ? 30 : 0;
-    const svgWidth = cols * canvasW + (cols - 1) * gap;
-    const svgHeight = titleHeight + rows * canvasH + (rows - 1) * gap;
+    const svgWidth = 2 * frame + cols * canvasW + (cols - 1) * gap;
+    const svgHeight = titleHeight + 2 * frame + rows * canvasH + (rows - 1) * gap;
     const filename = makeSvgExportFilename(title, panels.length, height, width, exportScale);
 
     try {
       const defs: string[] = [];
       const body: string[] = [];
+      if (gap > 0 && galleryGapColor) {
+        body.push(`<rect x="0" y="${titleHeight}" width="${svgWidth}" height="${Math.max(0, svgHeight - titleHeight)}" fill="${escapeXmlAttr(galleryGapColor)}"/>`);
+      }
       if (titleHeight > 0) {
         body.push(
           `<text x="${svgWidth / 2}" y="19" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="14" font-weight="700" fill="${escapeXmlAttr(themeColors.text)}">${escapeXmlText(title)}</text>`
         );
       }
+
+      const titleFontFamily = styleString(panelTitleStyle?.font_family, "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif");
+      const titleFg = styleString(panelTitleStyle?.fg, "#fff");
+      const titleWeight = panelTitleStyle?.font_weight ?? 700;
+      const titleOpacity = Math.max(0, Math.min(1, styleNumber(panelTitleStyle?.opacity, 0.95)));
+      const titleOutlineWidth = Math.max(0, styleNumber(panelTitleStyle?.outline_width, 0));
+      const titleOutlineColor = styleString(panelTitleStyle?.outline_color, "rgba(0,0,0,0.85)");
+      const titleOutlineAttrs = titleOutlineWidth > 0
+        ? ` stroke="${escapeXmlAttr(titleOutlineColor)}" stroke-width="${titleOutlineWidth}" stroke-linejoin="round" paint-order="stroke fill"`
+        : "";
+      const titleTextAnchor = (anchor: string): string => {
+        if (anchor.includes("right")) return "end";
+        if (anchor.includes("center")) return "middle";
+        return "start";
+      };
+      const titleBaselineY = (anchor: string, top: number, fontSize: number): number => {
+        if (anchor.includes("center")) return top + fontSize * 0.35;
+        if (anchor.includes("bottom")) return top;
+        return top + fontSize;
+      };
+      const titlePosition = (px: number, py: number, fontSize: number): { x: number; y: number; anchor: string } => {
+        const rawX = Number(panelTitleStyle?.x);
+        const rawY = Number(panelTitleStyle?.y);
+        const offset = Array.isArray(panelTitleStyle?.offset) ? panelTitleStyle.offset.map(Number) : [0, 0];
+        if (Number.isFinite(rawX) || Number.isFinite(rawY)) {
+          const anchor = styleString(panelTitleStyle?.anchor, "top-center").toLowerCase();
+          return {
+            x: px + (Number.isFinite(rawX) ? rawX : 0.5) * canvasW + Number(offset[0] || 0),
+            y: titleBaselineY(anchor, py + (Number.isFinite(rawY) ? rawY : 0) * canvasH + Number(offset[1] || 0), fontSize),
+            anchor: titleTextAnchor(anchor),
+          };
+        }
+        const align = styleString(panelTitleStyle?.align, "center").toLowerCase();
+        if (align === "left" || align === "start") return { x: px + 28, y: py + 6 + fontSize, anchor: "start" };
+        if (align === "right" || align === "end") return { x: px + canvasW - 28, y: py + 6 + fontSize, anchor: "end" };
+        return { x: px + canvasW / 2, y: py + 6 + fontSize, anchor: "middle" };
+      };
 
       groupMarkerOverlays.forEach((marker) => {
         body.push(
@@ -8192,16 +8358,17 @@ function Show2D() {
         if (!canvas) continue;
         const col = slot % cols;
         const row = Math.floor(slot / cols);
-        const x = col * (canvasW + gap);
-        const y = titleHeight + row * (canvasH + gap);
+        const x = frame + col * (canvasW + gap);
+        const y = titleHeight + frame + row * (canvasH + gap);
         const clipId = `show2d-svg-clip-${slot}`;
         defs.push(`<clipPath id="${clipId}"><rect x="${x}" y="${y}" width="${canvasW}" height="${canvasH}"/></clipPath>`);
         const dataUrl = scaledCanvasPngDataUrl(canvas, exportScale, smooth);
+        const panelStroke = frame > 0 && galleryGapColor ? galleryGapColor : themeColors.border;
         body.push(
           `<g id="show2d-panel-${panel}" data-show2d-panel="${panel}">`,
           `<rect x="${x}" y="${y}" width="${canvasW}" height="${canvasH}" fill="#000"/>`,
           `<image x="${x}" y="${y}" width="${canvasW}" height="${canvasH}" href="${escapeXmlAttr(dataUrl)}" preserveAspectRatio="none"/>`,
-          `<rect x="${x}" y="${y}" width="${canvasW}" height="${canvasH}" fill="none" stroke="${escapeXmlAttr(themeColors.border)}" stroke-width="1"/>`
+          `<rect x="${x}" y="${y}" width="${canvasW}" height="${canvasH}" fill="none" stroke="${escapeXmlAttr(panelStroke)}" stroke-width="1"/>`
         );
         const markerColor = panelMarkerColor(panel);
         if (markerAround) {
@@ -8223,21 +8390,23 @@ function Show2D() {
             );
             if (richTitle?.length) {
               const rich = svgTextFromRichSpans(richTitle, label);
-              const lineY = y + 6 + fontSize;
-              body.push(
-                `<text x="${x + canvasW / 2 + 1}" y="${lineY + 1}" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="${fontSize}" font-weight="700" fill="#000" fill-opacity="0.85">${escapeXmlText(rich.text)}</text>`,
-                `<text x="${x + canvasW / 2}" y="${lineY}" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="${fontSize}" font-weight="700" fill="#fff" fill-opacity="0.95" data-show2d-panel-title-spans-svg="true">`
-              );
+              const titlePos = titlePosition(x, y, fontSize);
+              const lineY = titlePos.y;
+              if (titleOutlineWidth <= 0) {
+                body.push(`<text x="${titlePos.x + 1}" y="${lineY + 1}" text-anchor="${titlePos.anchor}" font-family="${escapeXmlAttr(titleFontFamily)}" font-size="${fontSize}" font-weight="${escapeXmlAttr(titleWeight)}" fill="#000" fill-opacity="0.85">${escapeXmlText(rich.text)}</text>`);
+              }
+              body.push(`<text x="${titlePos.x}" y="${lineY}" text-anchor="${titlePos.anchor}" font-family="${escapeXmlAttr(titleFontFamily)}" font-size="${fontSize}" font-weight="${escapeXmlAttr(titleWeight)}" fill="${escapeXmlAttr(titleFg)}" fill-opacity="${titleOpacity}"${titleOutlineAttrs} data-show2d-panel-title-spans-svg="true">`);
               rich.spans.forEach((span) => body.push(`<tspan${span.color ? ` fill="${escapeXmlAttr(span.color)}"` : ""}>${escapeXmlText(span.text)}</tspan>`));
               body.push("</text>");
             } else {
               const titleLines = wrapSvgTextLines(label, fontSize, Math.max(24, canvasW - 56), 3);
               titleLines.forEach((line, lineIdx) => {
-                const lineY = y + 6 + fontSize + lineIdx * fontSize * 1.2;
-                body.push(
-                  `<text x="${x + canvasW / 2 + 1}" y="${lineY + 1}" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="${fontSize}" font-weight="700" fill="#000" fill-opacity="0.85">${escapeXmlText(line)}</text>`,
-                  `<text x="${x + canvasW / 2}" y="${lineY}" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="${fontSize}" font-weight="700" fill="#fff" fill-opacity="0.95">${escapeXmlText(line)}</text>`
-                );
+                const titlePos = titlePosition(x, y, fontSize);
+                const lineY = titlePos.y + lineIdx * fontSize * 1.2;
+                if (titleOutlineWidth <= 0) {
+                  body.push(`<text x="${titlePos.x + 1}" y="${lineY + 1}" text-anchor="${titlePos.anchor}" font-family="${escapeXmlAttr(titleFontFamily)}" font-size="${fontSize}" font-weight="${escapeXmlAttr(titleWeight)}" fill="#000" fill-opacity="0.85">${escapeXmlText(line)}</text>`);
+                }
+                body.push(`<text x="${titlePos.x}" y="${lineY}" text-anchor="${titlePos.anchor}" font-family="${escapeXmlAttr(titleFontFamily)}" font-size="${fontSize}" font-weight="${escapeXmlAttr(titleWeight)}" fill="${escapeXmlAttr(titleFg)}" fill-opacity="${titleOpacity}"${titleOutlineAttrs}>${escapeXmlText(line)}</text>`);
               });
             }
             body.push(`</g>`);
@@ -8246,7 +8415,7 @@ function Show2D() {
 
         const vectorLayer: string[] = [];
         if (showInsetPlots !== false) {
-          vectorLayer.push(svgInsetPlotElement(insetPlotSpecFor(panel), x, y, canvasW, canvasH, markerColor, scaleBarVisible));
+          vectorLayer.push(svgInsetPlotElement(insetPlotSpecFor(panel), panel, x, y, canvasW, canvasH, markerColor, panelHasScaleBar(panel)));
         }
         const panelOverlaySpecs = panelOverlays?.[panel] || [];
         if (panelOverlaySpecs.length > 0) {
@@ -8271,28 +8440,44 @@ function Show2D() {
           body.push(`<g clip-path="url(#${clipId})" data-show2d-vector-layer="true">${vectorLayer.join("")}</g>`);
         }
 
-        if (scaleBarVisible) {
+        if (panelHasScaleBar(panel)) {
           const zs = getZoomState(panel);
           const panelPixelSize = pixelSizeForPanel(panel);
           const pxSize = panelPixelSize > 0 ? panelPixelSize : 1;
           const unit = panelPixelSize > 0 ? pixelUnit : "px";
-          const geom = show2dScaleBarGeometry(canvasW, canvasH, width, zs.zoom, pxSize, unit, scaleBarPosition);
+          const geom = show2dScaleBarGeometry(canvasW, canvasH, width, zs.zoom, pxSize, unit, scaleBarPosition, scaleBarLength, scaleBarLabel, scaleBarStyle);
           if (geom) {
             const barY = y + geom.barY;
             const barX = x + geom.barX;
+            const barColor = styleString(scaleBarStyle?.color, "#fff");
+            const shadowColor = styleString(scaleBarStyle?.shadow_color, "#000");
+            const outlineColor = styleString(scaleBarStyle?.outline_color, "#000");
+            const outlineWidth = Math.max(0, styleNumber(scaleBarStyle?.outline_width, 0));
+            const labelGap = styleNumber(scaleBarStyle?.label_gap, 4);
+            const fontAttrs = scaleBarSvgFontAttrs(scaleBarStyle);
+            const labelX = barX + geom.barPx / 2;
+            const labelY = barY - labelGap;
             body.push(
-              `<rect x="${barX + 1}" y="${barY + 1}" width="${geom.barPx}" height="5" fill="#000" fill-opacity="0.5"/>`,
-              `<rect x="${barX}" y="${barY}" width="${geom.barPx}" height="5" fill="#fff"/>`,
-              `<text x="${barX + geom.barPx / 2 + 1}" y="${barY - 4 + 1}" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="16" fill="#000" fill-opacity="0.85">${escapeXmlText(geom.label)}</text>`,
-              `<text x="${barX + geom.barPx / 2}" y="${barY - 4}" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="16" fill="#fff">${escapeXmlText(geom.label)}</text>`
+              `<rect x="${barX + 1}" y="${barY + 1}" width="${geom.barPx}" height="${geom.barHeight}" fill="${escapeXmlAttr(shadowColor)}" fill-opacity="0.5"/>`,
+              `<rect x="${barX}" y="${barY}" width="${geom.barPx}" height="${geom.barHeight}" fill="${escapeXmlAttr(barColor)}"/>`
             );
+            if (outlineWidth > 0) {
+              body.push(
+                `<text x="${labelX}" y="${labelY}" text-anchor="middle" ${fontAttrs} fill="${escapeXmlAttr(barColor)}" stroke="${escapeXmlAttr(outlineColor)}" stroke-width="${outlineWidth}" stroke-linejoin="round" paint-order="stroke fill">${escapeXmlText(geom.label)}</text>`
+              );
+            } else {
+              body.push(
+                `<text x="${labelX + 1}" y="${labelY + 1}" text-anchor="middle" ${fontAttrs} fill="${escapeXmlAttr(shadowColor)}" fill-opacity="0.85">${escapeXmlText(geom.label)}</text>`,
+                `<text x="${labelX}" y="${labelY}" text-anchor="middle" ${fontAttrs} fill="${escapeXmlAttr(barColor)}">${escapeXmlText(geom.label)}</text>`
+              );
+            }
             if (showZoomIndicator) {
               const zoomX = geom.scaleLeft ? x + canvasW - 12 : x + 12;
               const anchor = geom.scaleLeft ? "end" : "start";
               const zoomText = formatZoomLabel(zs.zoom);
               body.push(
-                `<text x="${zoomX + 1}" y="${y + canvasH - 12 + 5 + 1}" text-anchor="${anchor}" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="16" fill="#000" fill-opacity="0.85">${escapeXmlText(zoomText)}</text>`,
-                `<text x="${zoomX}" y="${y + canvasH - 12 + 5}" text-anchor="${anchor}" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="16" fill="#fff">${escapeXmlText(zoomText)}</text>`
+                `<text x="${zoomX + 1}" y="${y + canvasH - 12 + 5 + 1}" text-anchor="${anchor}" ${fontAttrs} fill="${escapeXmlAttr(shadowColor)}" fill-opacity="0.85">${escapeXmlText(zoomText)}</text>`,
+                `<text x="${zoomX}" y="${y + canvasH - 12 + 5}" text-anchor="${anchor}" ${fontAttrs} fill="${escapeXmlAttr(barColor)}">${escapeXmlText(zoomText)}</text>`
               );
             }
           }
@@ -8340,6 +8525,7 @@ function Show2D() {
     canvasW,
     clampedNcols,
     cmap,
+    galleryGapColor,
     galleryGapPx,
     getZoomState,
     groupMarkerOverlays,
@@ -8349,15 +8535,19 @@ function Show2D() {
     isGallery,
     markerAround,
     panelMarkerColor,
+    panelHasScaleBar,
     panelAnnotations,
     panelOverlays,
     panelTitleFontSize,
+    panelTitleStyle,
     panelTitleSpans,
     panelTitleText,
     pixelSizeForPanel,
     pixelUnit,
     scaleBarPosition,
-    scaleBarVisible,
+    scaleBarLength,
+    scaleBarLabel,
+    scaleBarStyle,
     showColorbar,
     showInsetPlots,
     showPanelTitles,
@@ -9687,7 +9877,16 @@ function Show2D() {
           {isGallery ? (
             /* Gallery mode */
             <Box sx={{ position: "relative", maxWidth: galleryGridWidth, width: "100%", boxSizing: "border-box" }}>
-            <Box sx={{ display: "grid", gridTemplateColumns: galleryGridColumns, gap: `${galleryGapPx}px`, width: "100%", boxSizing: "border-box", justifyContent: "start" }}>
+            <Box sx={{
+              display: "grid",
+              gridTemplateColumns: galleryGridColumns,
+              gap: `${galleryGapPx}px`,
+              p: galleryFramePx > 0 ? `${galleryFramePx}px` : 0,
+              width: "100%",
+              boxSizing: "border-box",
+              justifyContent: "start",
+              bgcolor: galleryFramePx > 0 ? galleryGapColor : "transparent",
+            }}>
               {visibleImageIndices.map((i) => (
                 <Box
                   key={i}
