@@ -26,6 +26,7 @@ export. See the [Show3D tutorial](../tutorials/show3d).
 | Colormap dropdown | `cmap`, `panel_cmaps` | Shared by default. More → Color shared can unlock per-panel colormaps for advanced comparisons |
 | Panel identity markers | `marker_colors`, `identity_colors`, `marker_style`, `row_markers`, `col_markers`, `panel_groups` | Optional panel colors plus row, column, or rectangular group frames make panels easy to reference in notebooks, reports, and agent instructions |
 | Local panel annotations | `panel_annotations` | Optional multiple in-image labels per panel, placed by corner, normalized point, or normalized region box |
+| Geometric panel overlays | `panel_overlays` (`overlays` shorthand) | Optional circle, rectangle, and square overlays in data or relative coordinates, with stroke/fill opacity and z-order, rendered while scrubbing and in exported HTML; More -> Overlay Edit allows live select, move, resize, delete, and reset |
 | Contrast preset dropdown | `contrast_preset` | Applies percentile ranges such as `1-99`, `2-98`, and `3-97` while keeping the main histogram UI compact |
 | Advanced histogram toggle | `show_histogram_advanced`, `histogram_advanced` | Exposes detailed histogram controls only when a user asks for them |
 | Export button | `export_request`, `export_status` | Writes standalone HTML from live widgets; live Show3D can also request GIF/MP4 animation exports |
@@ -112,6 +113,60 @@ Show3D(
     ],
 )
 ```
+
+## Circle and rectangle overlays
+
+Show3D accepts the same `panel_overlays` API as Show2D. Use it for
+reproducible geometry that should stay fixed while a stack scrubs or plays.
+Coordinates are data pixels by default and follow `(row, col)` ordering.
+
+```python
+from quantem.widget import Show3D
+
+Show3D(
+    raw_stack,
+    denoised_stack,
+    residual_stack,
+    panel_titles=["raw", "denoised", "residual"],
+    panel_overlays={
+        "raw": {
+            "shape": "circle",
+            "center": (96, 88),
+            "radius": 14,
+            "stroke": "#60a5fa",
+            "stroke_width": 3,
+        },
+        "denoised": [
+            {
+                "shape": "rect",
+                "box": (48, 58, 126, 146),
+                "stroke": "#facc15",
+                "fill": "#facc15",
+                "fill_opacity": 0.12,
+            },
+            {
+                "shape": "square",
+                "center": (96, 88),
+                "size": 42,
+                "stroke": "#34d399",
+                "z_order": 1,
+            },
+        ],
+    },
+)
+```
+
+Pass `overlays=[...]` to broadcast the same geometry to every panel, or add
+`panel="raw"` / `panel=0` to each flat-list entry when building the overlay
+list programmatically. Set `coords="relative"` for normalized 0-1 geometry
+that follows panels with different pixel shapes.
+
+When overlays are present, the live widget and exported HTML show
+`More -> Overlay Edit`. Turn it on to select an overlay, drag inside the shape
+to move it, drag an edge to resize it, press Delete to remove the selected
+overlay, or choose `Reset Overlays` to restore the constructor state. Use ROIs
+instead when the geometry should drive statistics, FFT crops, or Python
+readback through `get_roi_geometries()`.
 
 ## Presentation and export chrome
 

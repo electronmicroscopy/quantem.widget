@@ -324,6 +324,46 @@ def test_show3d_titles_and_annotations_accept_math_spans():
     assert restored.panel_annotations[1][0]["spans"][0] == {"math": r"\chi^2"}
 
 
+def test_show3d_panel_overlays_target_panel_titles_and_roundtrip():
+    """C1: Show3D accepts the same per-panel overlay API as Show2D."""
+    rng = np.random.default_rng(29)
+    panels = [rng.random((3, 10, 10), dtype=np.float32) for _ in range(2)]
+    circle = {
+        "shape": "circle",
+        "center": (4, 5),
+        "radius": 2,
+        "stroke": "#60a5fa",
+    }
+    rect = {
+        "shape": "square",
+        "center": (5, 5),
+        "size": 4,
+        "stroke": "#f87171",
+        "fill": "#f87171",
+        "fill_opacity": 0.15,
+        "stroke_opacity": 0.9,
+        "z_order": 3,
+    }
+
+    widget = Show3D(
+        *panels,
+        panel_titles=["raw", "denoised"],
+        panel_overlays={
+            "raw": [circle],
+            "denoised": rect,
+        },
+        verbose=False,
+    )
+    restored = Show3D(*panels, panel_titles=["raw", "denoised"], verbose=False)
+    restored.load_state_dict(widget.state_dict())
+
+    assert [len(items) for items in restored.panel_overlays] == [1, 1]
+    assert restored.panel_overlays[0][0]["shape"] == "circle"
+    assert restored.panel_overlays[1][0]["shape"] == "square"
+    assert restored.panel_overlays[1][0]["row0"] == 3.0
+    assert restored.panel_overlays[1][0]["fill_opacity"] == 0.15
+
+
 def test_show3d_panel_groups_validate_panel_indices():
     """C1: invalid rectangular panel groups fail before export."""
     rng = np.random.default_rng(24)

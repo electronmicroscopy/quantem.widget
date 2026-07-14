@@ -49,6 +49,7 @@ from quantem.widget.show2d import (
     _expand_title_spans_for_flattened_labels,
     _normalize_marker_mapping,
     _normalize_panel_annotations,
+    _normalize_panel_overlays,
     _normalize_panel_title_style,
     _normalize_rotation_list,
     _normalise_title_span_sequence,
@@ -846,6 +847,18 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         Rectangular grouping overlays for related panels. Each dict accepts
         ``{"panels": [0, 1, 2], "color": "#22c55e", "label": "raw"}``
         or contiguous ``{"start": 0, "end": 2, ...}`` panel indices.
+    panel_overlays : mapping or sequence, optional
+        Reproducible per-panel circle, rectangle, and square overlays. A
+        mapping keyed by panel index or ``panel_titles`` value targets
+        specific panels; a per-panel list aligns with panel order. Coordinates
+        are data pixels by default using ``(row, col)`` conventions, and
+        ``coords="relative"`` switches to normalized 0-1 panel coordinates.
+        Style keys include ``stroke``, ``stroke_width``, ``stroke_opacity``,
+        ``fill``, ``fill_opacity``, ``opacity``, and ``z_order``.
+    overlays : mapping or sequence, optional
+        Convenience alias for shared geometric overlays. A single overlay or a
+        flat list without ``panel=`` is broadcast to every panel. Use either
+        ``overlays`` or ``panel_overlays``, not both.
     show_panel_titles : bool, default True
         Draw the top-center per-panel title and frame counter on multi-panel
         canvases. Set ``False`` for clean GIF/video exports.
@@ -1241,6 +1254,7 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     col_markers = traitlets.Dict(default_value={}).tag(sync=True)
     panel_groups = traitlets.List(traitlets.Dict(), default_value=[]).tag(sync=True)
     panel_annotations = traitlets.List(traitlets.List(traitlets.Dict()), default_value=[]).tag(sync=True)
+    panel_overlays = traitlets.List(traitlets.List(traitlets.Dict()), default_value=[]).tag(sync=True)
 
     # =========================================================================
     # Analysis Panels (FFT + Histogram shown together)
@@ -2323,6 +2337,8 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         col_markers: Mapping[object, object] | None = None,
         panel_groups: Sequence[Mapping[str, object]] | None = None,
         panel_annotations: Sequence[object] | Mapping[object, object] | object | None = None,
+        overlays: Sequence[object] | Mapping[object, object] | object | None = None,
+        panel_overlays: Sequence[object] | Mapping[object, object] | object | None = None,
         flip_horizontal: bool = False,
         flip_vertical: bool = False,
         compare_mode: str = "off",
@@ -2530,6 +2546,13 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             n_items=len(panel_titles or data_args or []),
             labels=panel_titles,
         )
+        if overlays is not None and panel_overlays is not None:
+            raise ValueError("Use either overlays= or panel_overlays=, not both")
+        panel_overlays = _normalize_panel_overlays(
+            panel_overlays if panel_overlays is not None else overlays,
+            n_items=len(panel_titles or data_args or []),
+            labels=panel_titles,
+        )
         if link_contrast is None:
             link_contrast = n_pages <= 1
         kwargs["link_contrast"] = bool(link_contrast)
@@ -2642,6 +2665,7 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             self.col_markers = dict(col_markers)
             self.panel_groups = list(panel_groups)
             self.panel_annotations = list(panel_annotations)
+            self.panel_overlays = list(panel_overlays)
             self.flip_cols = bool(flip_horizontal)
             self.flip_rows = bool(flip_vertical)
             self.flip_horizontal = self.flip_cols
@@ -3706,6 +3730,7 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         self.panel_order = []
         self.panel_groups = []
         self.panel_annotations = []
+        self.panel_overlays = []
         self.n_pages = 1
         self.page_idx = 0
         self.panels_per_page = 0
@@ -4031,6 +4056,7 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             "col_markers": dict(self.col_markers),
             "panel_groups": list(self.panel_groups),
             "panel_annotations": list(self.panel_annotations),
+            "panel_overlays": list(self.panel_overlays),
             "denoise": self.denoise,
             "show_denoise": self.show_denoise,
             "denoise_enabled": self.denoise_enabled,
@@ -4515,6 +4541,15 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 )
             except (TypeError, ValueError):
                 state.pop("panel_annotations")
+        if "panel_overlays" in state:
+            try:
+                state["panel_overlays"] = _normalize_panel_overlays(
+                    state["panel_overlays"],
+                    n_items=int(self.n_panels),
+                    labels=list(self.panel_titles),
+                )
+            except (TypeError, ValueError):
+                state.pop("panel_overlays")
         if "frame_rotations" in state and isinstance(state["frame_rotations"], list):
             if len(state["frame_rotations"]) not in (0, int(self.n_slices)):
                 state.pop("frame_rotations")
@@ -6525,6 +6560,7 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             col_markers=dict(self.col_markers),
             panel_groups=list(self.panel_groups),
             panel_annotations=list(self.panel_annotations),
+            panel_overlays=list(self.panel_overlays),
         )
         clone.n_pages = int(self.n_pages)
         clone.panels_per_page = int(self.panels_per_page)

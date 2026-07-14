@@ -611,6 +611,242 @@ def _normalize_panel_annotations(
     return grouped
 
 
+_OVERLAY_SHAPES = {"circle", "rect", "rectangle", "square"}
+_OVERLAY_COORDS = {"data", "relative"}
+_OVERLAY_STYLE_KEYS = {
+    "shape",
+    "type",
+    "kind",
+    "coords",
+    "coordinate_system",
+    "panel",
+    "center",
+    "radius",
+    "r",
+    "size",
+    "row",
+    "col",
+    "x",
+    "y",
+    "row0",
+    "col0",
+    "row1",
+    "col1",
+    "xyxy",
+    "xywh",
+    "box",
+    "region",
+    "stroke",
+    "stroke_color",
+    "border_color",
+    "color",
+    "stroke_width",
+    "border_width",
+    "line_width",
+    "fill",
+    "fill_color",
+    "opacity",
+    "alpha",
+    "fill_opacity",
+    "stroke_opacity",
+    "z_order",
+    "order",
+    "class_name",
+}
+
+
+def _is_overlay_spec(value: object) -> bool:
+    """Return True when a mapping looks like one geometric overlay spec."""
+    return isinstance(value, Mapping) and any(str(key) in _OVERLAY_STYLE_KEYS for key in value)
+
+
+def _panel_overlay_index(panel: object, *, labels: Sequence[str] | None, n_items: int) -> int:
+    """Resolve an overlay target from integer index or panel label."""
+    if isinstance(panel, bool):
+        raise ValueError(f"panel overlay panel must be an index or label, got {panel!r}")
+    if isinstance(panel, str) and labels is not None and panel in labels:
+        return list(labels).index(panel)
+    try:
+        idx = int(panel)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"panel overlay panel must be an index or label, got {panel!r}") from exc
+    if idx < 0 or idx >= int(n_items):
+        raise ValueError(f"panel overlay panel index {idx} is outside 0..{int(n_items) - 1}")
+    return idx
+
+
+def _finite_float(value: object, *, name: str) -> float:
+    """Return one finite float with a useful user-facing error."""
+    out = float(value)
+    if not np.isfinite(out):
+        raise ValueError(f"panel overlay {name} must be finite, got {value!r}")
+    return out
+
+
+def _finite_float_array(value: object, *, name: str, count: int) -> list[float]:
+    """Return a fixed-length finite float list."""
+    vals = np.asarray(value, dtype=np.float64).ravel()
+    if vals.size != count or not np.isfinite(vals).all():
+        raise ValueError(f"panel overlay {name} must contain {count} finite values")
+    return [float(v) for v in vals]
+
+
+def _normalize_panel_overlay_spec(spec: object, *, panel: int) -> dict[str, Any] | None:
+    """Normalize one circle/rect overlay into JSON-safe display state."""
+    if spec is None:
+        return None
+    if not isinstance(spec, Mapping):
+        raise TypeError(f"panel_overlays[{panel}] entries must be mappings, got {type(spec).__name__}")
+    unknown = sorted(str(key) for key in spec if str(key) not in _OVERLAY_STYLE_KEYS)
+    if unknown:
+        raise ValueError(
+            "panel_overlays entries only accept keys "
+            f"{sorted(_OVERLAY_STYLE_KEYS)}, got {unknown[0]!r}"
+        )
+    shape = str(spec.get("shape", spec.get("type", spec.get("kind", "circle")))).lower()
+    if shape not in _OVERLAY_SHAPES:
+        raise ValueError(f"panel overlay shape must be one of {sorted(_OVERLAY_SHAPES)}, got {shape!r}")
+    if shape == "rectangle":
+        shape = "rect"
+    coords = str(spec.get("coords", spec.get("coordinate_system", "data"))).lower()
+    if coords not in _OVERLAY_COORDS:
+        raise ValueError(f"panel overlay coords must be one of {sorted(_OVERLAY_COORDS)}, got {coords!r}")
+
+    out: dict[str, Any] = {"shape": shape, "coords": coords}
+    if shape == "circle":
+        if "center" in spec and spec["center"] is not None:
+            row, col = _finite_float_array(spec["center"], name="center", count=2)
+        elif all(key in spec for key in ("row", "col")):
+            row = _finite_float(spec["row"], name="row")
+            col = _finite_float(spec["col"], name="col")
+        elif all(key in spec for key in ("y", "x")):
+            row = _finite_float(spec["y"], name="y")
+            col = _finite_float(spec["x"], name="x")
+        else:
+            raise ValueError("circle overlays require center=(row, col) or row=... and col=...")
+        radius = _finite_float(spec.get("radius", spec.get("r")), name="radius")
+        if radius <= 0:
+            raise ValueError(f"circle overlay radius must be > 0, got {radius}")
+        out.update({"row": row, "col": col, "radius": radius})
+    else:
+        if "box" in spec or "region" in spec:
+            row0, col0, row1, col1 = _finite_float_array(spec.get("box", spec.get("region")), name="box", count=4)
+        elif "xyxy" in spec:
+            col0, row0, col1, row1 = _finite_float_array(spec["xyxy"], name="xyxy", count=4)
+        elif "xywh" in spec:
+            col0, row0, width, height = _finite_float_array(spec["xywh"], name="xywh", count=4)
+            row1 = row0 + height
+            col1 = col0 + width
+        elif all(key in spec for key in ("row0", "col0", "row1", "col1")):
+            row0 = _finite_float(spec["row0"], name="row0")
+            col0 = _finite_float(spec["col0"], name="col0")
+            row1 = _finite_float(spec["row1"], name="row1")
+            col1 = _finite_float(spec["col1"], name="col1")
+        elif shape == "square" and "center" in spec and "size" in spec:
+            row, col = _finite_float_array(spec["center"], name="center", count=2)
+            half = _finite_float(spec["size"], name="size") / 2.0
+            row0, col0, row1, col1 = row - half, col - half, row + half, col + half
+        else:
+            raise ValueError("rect/square overlays require box=(row0, col0, row1, col1), xyxy=..., or xywh=...")
+        if row1 < row0:
+            row0, row1 = row1, row0
+        if col1 < col0:
+            col0, col1 = col1, col0
+        if row1 == row0 or col1 == col0:
+            raise ValueError("rect/square overlays must have non-zero width and height")
+        out.update({"row0": row0, "col0": col0, "row1": row1, "col1": col1})
+
+    stroke = spec.get("stroke", spec.get("stroke_color", spec.get("border_color", spec.get("color", "#00e5ff"))))
+    fill = spec.get("fill", spec.get("fill_color", None))
+    out["stroke"] = str(stroke)
+    has_fill = fill not in (None, "", "none", "None")
+    if has_fill:
+        out["fill"] = str(fill)
+    out["stroke_width"] = _finite_float(
+        spec.get("stroke_width", spec.get("border_width", spec.get("line_width", 2.0))),
+        name="stroke_width",
+    )
+    if out["stroke_width"] < 0:
+        raise ValueError(f"panel overlay stroke_width must be >= 0, got {out['stroke_width']}")
+    opacity = max(0.0, min(1.0, _finite_float(spec.get("opacity", spec.get("alpha", 1.0)), name="opacity")))
+    out["opacity"] = opacity
+    default_fill_opacity = 1.0 if has_fill else 0.0
+    out["fill_opacity"] = max(
+        0.0,
+        min(1.0, _finite_float(spec.get("fill_opacity", default_fill_opacity), name="fill_opacity")),
+    )
+    out["stroke_opacity"] = max(0.0, min(1.0, _finite_float(spec.get("stroke_opacity", 1.0), name="stroke_opacity")))
+    out["z_order"] = _finite_float(spec.get("z_order", spec.get("order", 0.0)), name="z_order")
+    if "class_name" in spec and spec["class_name"] not in (None, ""):
+        out["class_name"] = str(spec["class_name"])
+    return out
+
+
+def _normalize_panel_overlays(
+    panel_overlays: Sequence[object] | Mapping[object, object] | object | None,
+    *,
+    n_items: int,
+    labels: Sequence[str] | None = None,
+) -> list[list[dict[str, Any]]]:
+    """Normalize per-panel circle/rect overlays.
+
+    Accepted forms mirror ``panel_annotations``:
+    one overlay mapping broadcasts to all panels; a mapping keyed by panel
+    index/label targets specific panels; a per-panel list aligns with panels;
+    and a flat list of mappings with ``panel=...`` can target arbitrary panels.
+    """
+    if panel_overlays is None:
+        return []
+    grouped: list[list[dict[str, Any]]] = [[] for _ in range(int(n_items))]
+
+    def add(panel: int, value: object) -> None:
+        values = value if isinstance(value, (list, tuple)) and not _is_overlay_spec(value) else [value]
+        for item in values:
+            normalized = _normalize_panel_overlay_spec(item, panel=panel)
+            if normalized is not None:
+                grouped[panel].append(normalized)
+
+    if isinstance(panel_overlays, Mapping) and not _is_overlay_spec(panel_overlays):
+        for raw_panel, value in panel_overlays.items():
+            add(_panel_overlay_index(raw_panel, labels=labels, n_items=n_items), value)
+        return grouped
+    if isinstance(panel_overlays, Mapping):
+        if "panel" in panel_overlays:
+            add(_panel_overlay_index(panel_overlays["panel"], labels=labels, n_items=n_items), panel_overlays)
+        else:
+            for panel in range(int(n_items)):
+                add(panel, panel_overlays)
+        return grouped
+
+    raw = list(panel_overlays)  # type: ignore[arg-type]
+    if not raw:
+        return []
+    flat_with_panel = any(isinstance(item, Mapping) and "panel" in item for item in raw)
+    flat_overlay_specs = all(_is_overlay_spec(item) for item in raw)
+    if flat_overlay_specs and not flat_with_panel:
+        for panel in range(int(n_items)):
+            for item in raw:
+                add(panel, item)
+        return grouped
+    if int(n_items) == 1 and not flat_with_panel:
+        for item in raw:
+            add(0, item)
+        return grouped
+    per_panel = len(raw) == int(n_items) and not flat_with_panel
+    if per_panel:
+        for panel, value in enumerate(raw):
+            add(panel, value)
+        return grouped
+    for item in raw:
+        if not isinstance(item, Mapping) or "panel" not in item:
+            raise ValueError(
+                "panel_overlays as a flat list must include panel=... on every entry, "
+                "or pass a per-panel list/dict"
+            )
+        add(_panel_overlay_index(item["panel"], labels=labels, n_items=n_items), item)
+    return grouped
+
+
 def _reject_unknown_kwargs(cls, kwargs: dict) -> None:
     """Raise TypeError if kwargs contains any key that isn't a declared trait.
 
@@ -1105,6 +1341,22 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         supported when RGB panels are present.
     labels : list of str, optional
         Labels for each image in gallery mode.
+    panel_overlays : mapping or sequence, optional
+        Reproducible per-panel geometric overlays. Each overlay is a mapping
+        with ``shape`` equal to ``"circle"``, ``"rect"``/``"rectangle"``, or
+        ``"square"``. Circle geometry uses ``center=(row, col)`` plus
+        ``radius``; rectangles use ``box=(row0, col0, row1, col1)``,
+        ``xyxy=(col0, row0, col1, row1)``, or ``xywh=(col, row, width,
+        height)``; squares may use ``center`` plus ``size``. A dictionary
+        keyed by panel index or label targets specific panels. Coordinates are
+        data pixels by default; pass ``coords="relative"`` for normalized
+        0-1 panel coordinates. Style keys include ``stroke``,
+        ``stroke_width``, ``stroke_opacity``, ``fill``, ``fill_opacity``,
+        ``opacity``, and ``z_order``.
+    overlays : mapping or sequence, optional
+        Convenience alias for shared geometric overlays. A single overlay or a
+        flat list without ``panel=`` is broadcast to every panel. Use either
+        ``overlays`` or ``panel_overlays``, not both.
     title : str, optional
         Title to display above the image(s).
     cmap : str or sequence of str, default "inferno"
@@ -1631,6 +1883,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
     inset_plots = traitlets.List(traitlets.Dict(), default_value=[]).tag(sync=True)
     show_inset_plots = traitlets.Bool(True).tag(sync=True)
     panel_annotations = traitlets.List(traitlets.List(traitlets.Dict()), default_value=[]).tag(sync=True)
+    panel_overlays = traitlets.List(traitlets.List(traitlets.Dict()), default_value=[]).tag(sync=True)
 
     # =========================================================================
     # Scale Bar
@@ -1919,6 +2172,8 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         inset_plots: Sequence[dict[str, Any] | None] | dict[str, Any] | None = None,
         show_inset_plots: bool = True,
         panel_annotations: Sequence[object] | Mapping[object, object] | object | None = None,
+        overlays: Sequence[object] | Mapping[object, object] | object | None = None,
+        panel_overlays: Sequence[object] | Mapping[object, object] | object | None = None,
         ncols: int = 3,
         panel_frame_indices: Sequence[int] | None = None,
         panel_playback_fps: float = 10.0,
@@ -2154,9 +2409,19 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         panel_title_style = _normalize_panel_title_style(panel_title_style)
         row_markers = _normalize_marker_mapping(row_markers, name="row_markers")
         col_markers = _normalize_marker_mapping(col_markers, name="col_markers")
+        n_display_panels = len(labels or []) or (
+            int(data.shape[0]) if getattr(data, "ndim", 0) >= 3 else 1
+        )
         panel_annotations = _normalize_panel_annotations(
             panel_annotations,
-            n_items=int(data.shape[0]) if getattr(data, "ndim", 0) >= 3 else 1,
+            n_items=n_display_panels,
+            labels=labels,
+        )
+        if overlays is not None and panel_overlays is not None:
+            raise ValueError("Use either overlays= or panel_overlays=, not both")
+        panel_overlays = _normalize_panel_overlays(
+            panel_overlays if panel_overlays is not None else overlays,
+            n_items=n_display_panels,
             labels=labels,
         )
         if show_histogram_advanced:
@@ -2187,6 +2452,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 col_markers=col_markers, inset_plots=inset_plots,
                 show_inset_plots=show_inset_plots,
                 panel_annotations=panel_annotations,
+                panel_overlays=panel_overlays,
                 ncols=ncols, panel_frame_indices=panel_frame_indices,
                 panel_playback_fps=panel_playback_fps,
                 size=size, smooth=smooth, zoom=zoom,
@@ -2227,6 +2493,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                    contrast_preset, histogram_advanced, show_histogram_advanced,
                    vmin, vmax, identity_colors, marker_colors, marker_style,
                    row_markers, col_markers, inset_plots, panel_annotations,
+                   panel_overlays,
                    show_inset_plots,
                    ncols, panel_frame_indices, panel_playback_fps, size, smooth, zoom,
                    rotation, rotations, rotation_scope,
@@ -2472,6 +2739,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         self.inset_plots = _normalize_inset_plot_specs(inset_plots, n_items=self.n_images)
         self.show_inset_plots = bool(show_inset_plots)
         self.panel_annotations = list(panel_annotations or [])
+        self.panel_overlays = list(panel_overlays or [])
         self.height = int(data.shape[1])
         self.width = int(data.shape[2])
         self.rotation_scope = str(rotation_scope).lower()
@@ -5287,6 +5555,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             "labels": list(self.labels),
             "panel_title_spans": list(self.panel_title_spans),
             "panel_annotations": list(self.panel_annotations),
+            "panel_overlays": list(self.panel_overlays),
             "starred": list(self.starred),
             "n_pages": int(self.n_pages),
             "page_idx": int(self.page_idx),
@@ -5644,6 +5913,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             row_markers=dict(self.row_markers),
             col_markers=dict(self.col_markers),
             panel_annotations=list(self.panel_annotations),
+            panel_overlays=list(self.panel_overlays),
             display_bin=1,
         )
         clone.pixel_sizes = list(self.pixel_sizes)
@@ -5772,6 +6042,15 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 )
             except (TypeError, ValueError):
                 state.pop("panel_annotations")
+        if "panel_overlays" in state:
+            try:
+                state["panel_overlays"] = _normalize_panel_overlays(
+                    state["panel_overlays"],
+                    n_items=int(self.n_images),
+                    labels=list(self.labels),
+                )
+            except (TypeError, ValueError):
+                state.pop("panel_overlays")
         if state.get("scale_bar_position") not in (None, "bottom-right", "bottom-left"):
             state.pop("scale_bar_position")
         for key in ("marker_colors", "image_flips_horizontal", "image_flips_vertical"):

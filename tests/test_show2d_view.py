@@ -680,3 +680,57 @@ def test_show2d_labels_and_annotations_accept_math_spans():
     assert restored.labels[1] == r"$\chi^2$/px residual"
     assert restored.panel_annotations[0][0]["math"] == r"\lambda"
     assert restored.panel_annotations[1][0]["spans"][0] == {"math": r"\chi^2"}
+
+
+def test_show2d_panel_overlays_support_global_and_per_panel_state():
+    """C1: circle/rect overlays can broadcast globally or target panels."""
+    data = np.random.default_rng(28).random((2, 12, 12), dtype=np.float32)
+    circle = {
+        "shape": "circle",
+        "center": (4, 5),
+        "radius": 2,
+        "stroke": "white",
+        "stroke_width": 3,
+    }
+    rect = {
+        "shape": "rect",
+        "box": (1, 2, 8, 9),
+        "stroke": "#f87171",
+        "fill": "#f87171",
+        "fill_opacity": 0.2,
+        "z_order": 2,
+    }
+
+    global_widget = Show2D(data, overlays=[circle, rect], verbose=False)
+    assert [len(items) for items in global_widget.panel_overlays] == [2, 2]
+    assert global_widget.panel_overlays[0][0]["shape"] == "circle"
+    assert global_widget.panel_overlays[1][1]["fill"] == "#f87171"
+
+    rect_default_fill = dict(rect)
+    rect_default_fill.pop("fill_opacity")
+    list_widget = Show2D(
+        [data[0], data[1]],
+        labels=["raw", "denoised"],
+        panel_overlays={"denoised": rect_default_fill},
+        verbose=False,
+    )
+    assert [len(items) for items in list_widget.panel_overlays] == [0, 1]
+    assert list_widget.panel_overlays[1][0]["shape"] == "rect"
+    assert list_widget.panel_overlays[1][0]["fill_opacity"] == 1.0
+
+    per_panel = Show2D(
+        data,
+        labels=["raw", "denoised"],
+        panel_overlays={
+            "raw": circle,
+            "denoised": [rect],
+        },
+        verbose=False,
+    )
+    restored = Show2D(data, labels=["raw", "denoised"], verbose=False)
+    restored.load_state_dict(per_panel.state_dict())
+
+    assert [len(items) for items in restored.panel_overlays] == [1, 1]
+    assert restored.panel_overlays[0][0]["row"] == 4.0
+    assert restored.panel_overlays[1][0]["row1"] == 8.0
+    assert restored.state_dict()["panel_overlays"][1][0]["z_order"] == 2.0

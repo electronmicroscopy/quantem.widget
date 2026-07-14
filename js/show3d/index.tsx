@@ -162,6 +162,34 @@ type PanelAnnotationSpec = {
   max_width?: string;
   offset?: [number, number];
 };
+type PanelOverlaySpec = {
+  shape?: "circle" | "rect" | "rectangle" | "square";
+  coords?: "data" | "relative";
+  row?: number;
+  col?: number;
+  radius?: number;
+  row0?: number;
+  col0?: number;
+  row1?: number;
+  col1?: number;
+  stroke?: string;
+  stroke_width?: number;
+  fill?: string;
+  opacity?: number;
+  fill_opacity?: number;
+  stroke_opacity?: number;
+  z_order?: number;
+};
+type OverlaySelection = { panel: number; overlay: number };
+type OverlayDragState = {
+  mode: "move" | "resize";
+  panel: number;
+  overlay: number;
+  handle?: string;
+  startRow: number;
+  startCol: number;
+  original: PanelOverlaySpec;
+};
 
 function styleNumber(value: unknown, fallback: number): number {
   const n = Number(value);
@@ -170,6 +198,22 @@ function styleNumber(value: unknown, fallback: number): number {
 
 function styleString(value: unknown, fallback = ""): string {
   return typeof value === "string" && value.trim() ? value : fallback;
+}
+
+function withAlpha(color: string | undefined, alpha: number): string | undefined {
+  if (!color || color === "none") return undefined;
+  const a = Math.max(0, Math.min(1, alpha));
+  if (color.startsWith("#")) {
+    const hex = color.slice(1);
+    if (hex.length === 3 || hex.length === 6) {
+      const full = hex.length === 3 ? hex.split("").map((ch) => ch + ch).join("") : hex;
+      const r = parseInt(full.slice(0, 2), 16);
+      const g = parseInt(full.slice(2, 4), 16);
+      const b = parseInt(full.slice(4, 6), 16);
+      if ([r, g, b].every(Number.isFinite)) return `rgba(${r}, ${g}, ${b}, ${a})`;
+    }
+  }
+  return color;
 }
 
 const LATEX_SYMBOLS: Record<string, string> = {
@@ -1312,6 +1356,221 @@ function drawROI(
   }
 }
 
+function drawPanelOverlays(
+  ctx: CanvasRenderingContext2D,
+  overlays: PanelOverlaySpec[] | undefined,
+  toScreenX: (col: number) => number,
+  toScreenY: (row: number) => number,
+  imageW: number,
+  imageH: number,
+): void {
+  if (!overlays?.length) return;
+  const ordered = [...overlays].sort((a, b) => styleNumber(a.z_order, 0) - styleNumber(b.z_order, 0));
+  for (const overlay of ordered) {
+    const coords = overlay.coords || "data";
+    const shape = overlay.shape === "rectangle" ? "rect" : (overlay.shape || "circle");
+    const scaleRow = coords === "relative" ? imageH : 1;
+    const scaleCol = coords === "relative" ? imageW : 1;
+    const scaleRadius = coords === "relative" ? Math.min(imageW, imageH) : 1;
+    const opacity = styleNumber(overlay.opacity, 1);
+    const strokeOpacity = opacity * styleNumber(overlay.stroke_opacity, 1);
+    const fillOpacity = opacity * styleNumber(overlay.fill_opacity, overlay.fill ? 1 : 0);
+    const stroke = withAlpha(styleString(overlay.stroke, "#00e5ff"), strokeOpacity);
+    const fill = withAlpha(overlay.fill, fillOpacity);
+    ctx.save();
+    ctx.lineWidth = Math.max(0, styleNumber(overlay.stroke_width, 2));
+    if (fill) ctx.fillStyle = fill;
+    if (stroke) ctx.strokeStyle = stroke;
+    if (shape === "circle") {
+      const col = styleNumber(overlay.col, 0) * scaleCol;
+      const row = styleNumber(overlay.row, 0) * scaleRow;
+      const radius = Math.max(0, styleNumber(overlay.radius, 0) * scaleRadius);
+      const x = toScreenX(col);
+      const y = toScreenY(row);
+      const rx = Math.abs(toScreenX(col + radius) - x);
+      const ry = Math.abs(toScreenY(row + radius) - y);
+      const r = Math.max(0, (rx + ry) / 2);
+      ctx.beginPath();
+      ctx.arc(x, y, r, 0, Math.PI * 2);
+      if (fill) ctx.fill();
+      if (stroke && ctx.lineWidth > 0) ctx.stroke();
+    } else {
+      const col0 = styleNumber(overlay.col0, 0) * scaleCol;
+      const row0 = styleNumber(overlay.row0, 0) * scaleRow;
+      const col1 = styleNumber(overlay.col1, col0) * scaleCol;
+      const row1 = styleNumber(overlay.row1, row0) * scaleRow;
+      const x0 = toScreenX(col0);
+      const y0 = toScreenY(row0);
+      const x1 = toScreenX(col1);
+      const y1 = toScreenY(row1);
+      const x = Math.min(x0, x1);
+      const y = Math.min(y0, y1);
+      const w = Math.abs(x1 - x0);
+      const h = Math.abs(y1 - y0);
+      if (fill) ctx.fillRect(x, y, w, h);
+      if (stroke && ctx.lineWidth > 0) ctx.strokeRect(x, y, w, h);
+    }
+    ctx.restore();
+  }
+}
+
+function clonePanelOverlays(overlays: PanelOverlaySpec[][] | undefined): PanelOverlaySpec[][] {
+  return (overlays || []).map((items) => (items || []).map((item) => ({ ...item })));
+}
+
+function overlayGeometry(overlay: PanelOverlaySpec, imageW: number, imageH: number) {
+  const coords = overlay.coords || "data";
+  const scaleRow = coords === "relative" ? imageH : 1;
+  const scaleCol = coords === "relative" ? imageW : 1;
+  const scaleRadius = coords === "relative" ? Math.min(imageW, imageH) : 1;
+  const shape = overlay.shape === "rectangle" ? "rect" : (overlay.shape || "circle");
+  if (shape === "circle") {
+    return {
+      shape,
+      row: styleNumber(overlay.row, 0) * scaleRow,
+      col: styleNumber(overlay.col, 0) * scaleCol,
+      radius: Math.max(0, styleNumber(overlay.radius, 0) * scaleRadius),
+    };
+  }
+  const row0 = styleNumber(overlay.row0, 0) * scaleRow;
+  const col0 = styleNumber(overlay.col0, 0) * scaleCol;
+  const row1 = styleNumber(overlay.row1, row0) * scaleRow;
+  const col1 = styleNumber(overlay.col1, col0) * scaleCol;
+  return {
+    shape,
+    row0: Math.min(row0, row1),
+    col0: Math.min(col0, col1),
+    row1: Math.max(row0, row1),
+    col1: Math.max(col0, col1),
+  };
+}
+
+function panelOverlayHit(
+  overlays: PanelOverlaySpec[] | undefined,
+  row: number,
+  col: number,
+  imageW: number,
+  imageH: number,
+  hitRadius: number,
+): { overlay: number; mode: "move" | "resize"; handle?: string } | null {
+  if (!overlays?.length) return null;
+  const ordered = overlays.map((overlay, index) => ({ overlay, index })).sort((a, b) => styleNumber(a.overlay.z_order, 0) - styleNumber(b.overlay.z_order, 0));
+  for (let orderIdx = ordered.length - 1; orderIdx >= 0; orderIdx -= 1) {
+    const { overlay, index } = ordered[orderIdx];
+    const geom = overlayGeometry(overlay, imageW, imageH);
+    if (geom.shape === "circle") {
+      const dist = Math.hypot(col - geom.col, row - geom.row);
+      if (Math.abs(dist - geom.radius) <= hitRadius) return { overlay: index, mode: "resize" };
+      if (dist <= geom.radius) return { overlay: index, mode: "move" };
+      continue;
+    }
+    const inside = col >= geom.col0 - hitRadius && col <= geom.col1 + hitRadius && row >= geom.row0 - hitRadius && row <= geom.row1 + hitRadius;
+    if (!inside) continue;
+    const nearLeft = Math.abs(col - geom.col0) <= hitRadius;
+    const nearRight = Math.abs(col - geom.col1) <= hitRadius;
+    const nearTop = Math.abs(row - geom.row0) <= hitRadius;
+    const nearBottom = Math.abs(row - geom.row1) <= hitRadius;
+    if (nearLeft || nearRight || nearTop || nearBottom) {
+      return {
+        overlay: index,
+        mode: "resize",
+        handle: `${nearTop ? "t" : ""}${nearBottom ? "b" : ""}${nearLeft ? "l" : ""}${nearRight ? "r" : ""}` || "br",
+      };
+    }
+    return { overlay: index, mode: "move" };
+  }
+  return null;
+}
+
+function updateOverlayFromDrag(
+  original: PanelOverlaySpec,
+  mode: "move" | "resize",
+  startRow: number,
+  startCol: number,
+  row: number,
+  col: number,
+  imageW: number,
+  imageH: number,
+  handle = "br",
+): PanelOverlaySpec {
+  const coords = original.coords || "data";
+  const scaleRow = coords === "relative" ? imageH : 1;
+  const scaleCol = coords === "relative" ? imageW : 1;
+  const scaleRadius = coords === "relative" ? Math.min(imageW, imageH) : 1;
+  const toSpecRow = (value: number) => value / scaleRow;
+  const toSpecCol = (value: number) => value / scaleCol;
+  const toSpecRadius = (value: number) => value / scaleRadius;
+  const geom = overlayGeometry(original, imageW, imageH);
+  const next = { ...original };
+  if (geom.shape === "circle") {
+    if (mode === "move") {
+      next.row = toSpecRow(Math.max(0, Math.min(imageH, geom.row + row - startRow)));
+      next.col = toSpecCol(Math.max(0, Math.min(imageW, geom.col + col - startCol)));
+    } else {
+      next.radius = toSpecRadius(Math.max(1, Math.hypot(col - geom.col, row - geom.row)));
+    }
+    return next;
+  }
+  let row0 = geom.row0;
+  let row1 = geom.row1;
+  let col0 = geom.col0;
+  let col1 = geom.col1;
+  if (mode === "move") {
+    const dr = row - startRow;
+    const dc = col - startCol;
+    const h = row1 - row0;
+    const w = col1 - col0;
+    row0 = Math.max(0, Math.min(imageH - h, row0 + dr));
+    row1 = row0 + h;
+    col0 = Math.max(0, Math.min(imageW - w, col0 + dc));
+    col1 = col0 + w;
+  } else {
+    if (handle.includes("t")) row0 = row;
+    if (handle.includes("b") || (!handle.includes("t") && !handle.includes("l") && !handle.includes("r"))) row1 = row;
+    if (handle.includes("l")) col0 = col;
+    if (handle.includes("r") || (!handle.includes("t") && !handle.includes("b") && !handle.includes("l"))) col1 = col;
+    if (Math.abs(row1 - row0) < 1) row1 = row0 + (row1 >= row0 ? 1 : -1);
+    if (Math.abs(col1 - col0) < 1) col1 = col0 + (col1 >= col0 ? 1 : -1);
+  }
+  next.row0 = toSpecRow(Math.max(0, Math.min(imageH, Math.min(row0, row1))));
+  next.row1 = toSpecRow(Math.max(0, Math.min(imageH, Math.max(row0, row1))));
+  next.col0 = toSpecCol(Math.max(0, Math.min(imageW, Math.min(col0, col1))));
+  next.col1 = toSpecCol(Math.max(0, Math.min(imageW, Math.max(col0, col1))));
+  return next;
+}
+
+function drawPanelOverlaySelection(
+  ctx: CanvasRenderingContext2D,
+  overlay: PanelOverlaySpec | undefined,
+  toScreenX: (col: number) => number,
+  toScreenY: (row: number) => number,
+  imageW: number,
+  imageH: number,
+): void {
+  if (!overlay) return;
+  const geom = overlayGeometry(overlay, imageW, imageH);
+  ctx.save();
+  ctx.setLineDash([5, 3]);
+  ctx.strokeStyle = "#ffffff";
+  ctx.lineWidth = 1.5;
+  if (geom.shape === "circle") {
+    const x = toScreenX(geom.col);
+    const y = toScreenY(geom.row);
+    const r = Math.max(0, (Math.abs(toScreenX(geom.col + geom.radius) - x) + Math.abs(toScreenY(geom.row + geom.radius) - y)) / 2);
+    ctx.beginPath();
+    ctx.arc(x, y, r + 3, 0, Math.PI * 2);
+    ctx.stroke();
+  } else {
+    const x0 = toScreenX(geom.col0);
+    const y0 = toScreenY(geom.row0);
+    const x1 = toScreenX(geom.col1);
+    const y1 = toScreenY(geom.row1);
+    ctx.strokeRect(Math.min(x0, x1) - 3, Math.min(y0, y1) - 3, Math.abs(x1 - x0) + 6, Math.abs(y1 - y0) + 6);
+  }
+  ctx.setLineDash([]);
+  ctx.restore();
+}
+
 import { WebGPUFFT, getWebGPUFFT, getGPUInfo, fft2d, fft2dAsync, fftshift, computeMagnitude, autoEnhanceFFT, nextPow2, applyHannWindow2D } from "../fft";
 import { computeFftQualityMetrics, formatFftQualityLabel, summarizeFftQualityMetrics, type FftQualityMetrics } from "../fftMetrics";
 import {
@@ -2148,6 +2407,26 @@ function Show3D() {
     sidecarGpuReadyRef.current = false;
     setSidecarGpuReady(false);
   }, []);
+  const invalidateSidecarViewportCache = React.useCallback((reason: string) => {
+    sidecarCompositeBuildSerialRef.current += 1;
+    sidecarGpuBuildSerialRef.current += 1;
+    sidecarCompositeStyleKeyRef.current = "";
+    sidecarDisplayCacheDirtyRef.current = false;
+    const hadViewportCache = (
+      sidecarCompositeFrameCacheRef.current.size > 0 ||
+      sidecarCompositeReadyRef.current ||
+      sidecarCompositeCompleteRef.current ||
+      sidecarGpuReadyRef.current ||
+      !!sidecarGpuPresenterRef.current
+    );
+    if (hadViewportCache) clearSidecarCompositeCache();
+    const dbg = show3dPerfDebug();
+    if (dbg) {
+      dbg.sidecarViewportInvalidatedReason = reason;
+      dbg.sidecarCompositeCacheFrames = sidecarCompositeFrameCacheRef.current.size;
+      dbg.sidecarGpuTextureFrames = 0;
+    }
+  }, [clearSidecarCompositeCache]);
   React.useEffect(() => () => {
     if (sidecarSliceCommitTimerRef.current !== null) {
       window.clearTimeout(sidecarSliceCommitTimerRef.current);
@@ -3278,6 +3557,7 @@ function Show3D() {
   const [colMarkers] = useModelState<MarkerMap>("col_markers");
   const [panelGroups] = useModelState<PanelGroup[]>("panel_groups");
   const [panelAnnotations] = useModelState<PanelAnnotationSpec[][]>("panel_annotations");
+  const [panelOverlays, setPanelOverlays] = useModelState<PanelOverlaySpec[][]>("panel_overlays");
   const [flipRows, setFlipRows] = useModelState<boolean>("flip_vertical");
   const [flipCols, setFlipCols] = useModelState<boolean>("flip_horizontal");
   const [compareMode, setCompareMode] = useModelState<string>("compare_mode");
@@ -4049,6 +4329,49 @@ function Show3D() {
   const roiItems = (roiList || []).map((roi, i) => normalizeROI(roi, i));
   const selectedRoi = roiSelectedIdx >= 0 && roiSelectedIdx < roiItems.length ? roiItems[roiSelectedIdx] : null;
   const [showRoiResizeHint, setShowRoiResizeHint] = React.useState(true);
+  const [overlayEditMode, setOverlayEditMode] = React.useState(false);
+  const [overlaySelection, setOverlaySelection] = React.useState<OverlaySelection | null>(null);
+  const [isDraggingOverlay, setIsDraggingOverlay] = React.useState(false);
+  const [isHoveringOverlay, setIsHoveringOverlay] = React.useState(false);
+  const overlayDragRef = React.useRef<OverlayDragState | null>(null);
+  const overlayBaselineRef = React.useRef<PanelOverlaySpec[][] | null>(null);
+  const hasPanelOverlays = React.useMemo(() => (panelOverlays || []).some((items) => items && items.length > 0), [panelOverlays]);
+  React.useEffect(() => {
+    if (!overlayBaselineRef.current && hasPanelOverlays) {
+      overlayBaselineRef.current = clonePanelOverlays(panelOverlays);
+    }
+  }, [hasPanelOverlays, panelOverlays]);
+  React.useEffect(() => {
+    if (!overlaySelection) return;
+    const exists = Boolean(panelOverlays?.[overlaySelection.panel]?.[overlaySelection.overlay]);
+    if (!exists) setOverlaySelection(null);
+  }, [overlaySelection, panelOverlays]);
+
+  const updatePanelOverlay = React.useCallback((panel: number, overlay: number, nextSpec: PanelOverlaySpec) => {
+    const next = clonePanelOverlays(panelOverlays);
+    while (next.length <= panel) next.push([]);
+    if (!next[panel] || overlay < 0 || overlay >= next[panel].length) return;
+    next[panel][overlay] = nextSpec;
+    setPanelOverlays(next);
+  }, [panelOverlays, setPanelOverlays]);
+
+  const deleteSelectedOverlay = React.useCallback(() => {
+    if (!overlaySelection) return;
+    const next = clonePanelOverlays(panelOverlays);
+    const items = next[overlaySelection.panel];
+    if (!items || overlaySelection.overlay < 0 || overlaySelection.overlay >= items.length) return;
+    items.splice(overlaySelection.overlay, 1);
+    setPanelOverlays(next);
+    setOverlaySelection(null);
+  }, [overlaySelection, panelOverlays, setPanelOverlays]);
+
+  const resetPanelOverlays = React.useCallback(() => {
+    if (!overlayBaselineRef.current) return;
+    setPanelOverlays(clonePanelOverlays(overlayBaselineRef.current));
+    setOverlaySelection(null);
+    overlayDragRef.current = null;
+    setIsDraggingOverlay(false);
+  }, [setPanelOverlays]);
   const pendingRoiAddRef = React.useRef<{ row: number; col: number } | null>(null);
 
   // Preview panel state (JS-only, shows ROI crop at full resolution - auto-shows when ROI selected)
@@ -4224,6 +4547,7 @@ function Show3D() {
       c.panelStates = next;
       panelStatesLiveRef.current = next;
     }
+    if (sidecarMode) invalidateSidecarViewportCache("view-transform");
   };
   // Back-compat aliases for the single-panel code paths (ROI, profile, etc.)
   // which still expect plain zoom/panX/panY. Use panel 0's state.
@@ -8841,7 +9165,13 @@ function Show3D() {
     const nSlicesLocal = Math.max(1, Math.round(nSlices || 1));
     const drawIdx = ((Math.round(idx) % nSlicesLocal) + nSlicesLocal) % nSlicesLocal;
     const start = performance.now();
-    if (sidecarViewTransformActive() || sidecarDisplayCacheDirtyRef.current) {
+    const transformActive = sidecarViewTransformActive();
+    const liveViewportPaint = (
+      transformActive ||
+      sidecarDisplayCacheDirtyRef.current ||
+      (!sidecarCompositeReadyRef.current && !sidecarGpuReadyRef.current && sidecarRamReadyRef.current)
+    );
+    if (liveViewportPaint) {
       setGpuDisplayVisible(false);
       const ok = paintSidecarU8ViewportToContext(ctx, drawIdx, canvasW, canvasH);
       if (!ok) return false;
@@ -8852,15 +9182,19 @@ function Show3D() {
       }
       const d = show3dPerfDebug();
       if (d) {
-        d.lastRenderPath = sidecarDisplayCacheDirtyRef.current
+        d.lastRenderPath = transformActive
+          ? `sidecar-u8-viewport-transform-${reason}`
+          : sidecarDisplayCacheDirtyRef.current
           ? `sidecar-u8-viewport-display-style-${reason}`
-          : `sidecar-u8-viewport-transform-${reason}`;
+          : `sidecar-u8-viewport-live-${reason}`;
         d.lastRenderMs = performance.now() - start;
         d.lastPaintMs = d.lastRenderMs;
         d.lastFrame = drawIdx;
-        d.sidecarCompositeSource = sidecarDisplayCacheDirtyRef.current
+        d.sidecarCompositeSource = transformActive
+          ? "u8-viewport-transform"
+          : sidecarDisplayCacheDirtyRef.current
           ? "u8-viewport-display-style"
-          : "u8-viewport-transform";
+          : "u8-viewport-live";
       }
       return true;
     }
@@ -9121,6 +9455,7 @@ function Show3D() {
 
   React.useEffect(() => {
     const d = show3dPerfDebug();
+    const transformActive = sidecarViewTransformActive();
     if (d) {
       d.sidecarViewportEffectSeen = performance.now();
       d.sidecarViewportFlags = {
@@ -9131,6 +9466,7 @@ function Show3D() {
         canvasW,
         canvasH,
         nSlices,
+        transformActive,
       };
     }
     if (
@@ -9139,7 +9475,8 @@ function Show3D() {
       !sidecarRamReady ||
       isRgb ||
       canvasW <= 0 ||
-      canvasH <= 0
+      canvasH <= 0 ||
+      transformActive
     ) {
       if (d) {
         d.sidecarViewportSkipReason = !offline
@@ -9150,9 +9487,16 @@ function Show3D() {
               ? "ram-not-ready"
               : isRgb
                 ? "rgb"
-                : "missing-canvas";
+                : canvasW <= 0 || canvasH <= 0
+                  ? "missing-canvas"
+                  : "view-transform";
       }
-    clearSidecarCompositeCache();
+    if (transformActive) {
+      invalidateSidecarViewportCache("view-transform");
+      setOfflineStackFetchStatus("");
+    } else {
+      clearSidecarCompositeCache();
+    }
     return;
   }
   if (d) d.sidecarViewportSkipReason = "";
@@ -9280,6 +9624,8 @@ function Show3D() {
     paintSidecarU8ViewportToContext,
     drawSidecarBitmapFrame,
     clearSidecarCompositeCache,
+    invalidateSidecarViewportCache,
+    sidecarViewTransformActive,
     sidecarDisplayStyleKey,
   ]);
 
@@ -9466,7 +9812,8 @@ function Show3D() {
       !sidecarCompositeCompleteRef.current ||
       canvasW <= 0 ||
       canvasH <= 0 ||
-      !("gpu" in navigator)
+      !("gpu" in navigator) ||
+      sidecarViewTransformActive()
     ) {
       return;
     }
@@ -9578,7 +9925,7 @@ function Show3D() {
     return () => {
       cancelled = true;
     };
-  }, [offline, sidecarMode, enableSidecarGpuTexturePresenter, sidecarCompositeComplete, canvasW, canvasH, nSlices, smooth]);
+  }, [offline, sidecarMode, enableSidecarGpuTexturePresenter, sidecarCompositeComplete, canvasW, canvasH, nSlices, smooth, sidecarViewTransformActive]);
 
   React.useEffect(() => {
     if (compareMode === "off" || isRgb || !canvasRef.current) return;
@@ -10066,7 +10413,7 @@ function Show3D() {
   };
 
   const scheduleTransformRender = (): boolean => {
-    if (separatePanelFrames && (offline || imageRotation % 4 !== 0)) return false;
+    if (separatePanelFrames && !sidecarMode && (offline || imageRotation % 4 !== 0)) return false;
     if (transformRenderRafRef.current !== null) return true;
     transformRenderRafRef.current = window.requestAnimationFrame(() => {
       transformRenderRafRef.current = null;
@@ -10204,6 +10551,24 @@ function Show3D() {
       ctx.rotate((imageRotation * Math.PI) / 2);
       ctx.translate(-cx, -cy);
     }
+    for (const panel of visiblePanelIndices) {
+      const overlaySpecs = panelOverlays?.[panel] || [];
+      if (!overlaySpecs.length) continue;
+      const geom = getPanelGeometry(panel);
+      if (!geom) continue;
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(geom.slotX, geom.slotY, geom.slotW, geom.slotH);
+      ctx.clip();
+      const toScreenX = (col: number) => geom.slotX + geom.state.panX + col * geom.scaleX * geom.state.zoom;
+      const toScreenY = (row: number) => geom.slotY + geom.state.panY + row * geom.scaleY * geom.state.zoom;
+      drawPanelOverlays(ctx, overlaySpecs, toScreenX, toScreenY, sourcePanelWidth, sourcePanelHeight);
+      if (overlaySelection?.panel === panel) {
+        drawPanelOverlaySelection(ctx, overlaySpecs[overlaySelection.overlay], toScreenX, toScreenY, sourcePanelWidth, sourcePanelHeight);
+      }
+      ctx.restore();
+    }
+
     if (effectiveRoiActive && roiItems.length > 0) {
       const highlightedRois = roiItems.filter(r => r.highlight);
       if (highlightedRois.length > 0) {
@@ -10364,7 +10729,7 @@ function Show3D() {
         ctx.restore();
       }
     }
-  }, [activePageStart, effectiveRoiActive, roiItems, roiSelectedIdx, isDraggingROI, canvasW, canvasH, displayScale, zoom, panX, panY, themeColors, profileActive, profilePoints, profileWidth, profilePanelIdx, nPanels, panelTitles, imageRotation, width, height, panelStates, linkedState, linkPanels, panelGapTrait, sourcePanelWidth, sourcePanelHeight, sharedPanelSource, singlePanelPageProfile, totalPanelCount, canvasRepaintSignal]);
+  }, [activePageStart, effectiveRoiActive, roiItems, roiSelectedIdx, isDraggingROI, canvasW, canvasH, displayScale, zoom, panX, panY, themeColors, profileActive, profilePoints, profileWidth, profilePanelIdx, nPanels, panelTitles, imageRotation, width, height, panelStates, linkedState, linkPanels, panelGapTrait, sourcePanelWidth, sourcePanelHeight, sharedPanelSource, singlePanelPageProfile, totalPanelCount, canvasRepaintSignal, panelOverlays, overlaySelection, visiblePanelIndices]);
 
   // Lens inset rendering
   React.useEffect(() => {
@@ -12279,6 +12644,10 @@ function Show3D() {
     playRef.current.panelStates = resetPanels;
     linkedStateLiveRef.current = resetLinked;
     panelStatesLiveRef.current = resetPanels;
+    if (sidecarMode) {
+      invalidateSidecarViewportCache("view-reset");
+      sidecarDisplayCacheDirtyRef.current = true;
+    }
     setLinkedState(s => ({ ...s, zoom: 1, panX: 0, panY: 0 }));
     setPanelStates(arr => arr.map(s => ({ ...s, zoom: 1, panX: 0, panY: 0 })));
     setViewState({ linked_state: { ...resetLinked }, panel_states: resetPanels.map(v => ({ ...v })) });
@@ -12497,6 +12866,33 @@ function Show3D() {
         }
       }
     }
+    if (overlayEditMode) {
+      const { imgRow, panelIdx, panelCol } = screenToImg(e);
+      if (panelIdx >= 0) {
+        const hitRadius = getImageHitRadius(panelIdx);
+        const hit = panelOverlayHit(panelOverlays?.[panelIdx], imgRow, panelCol, sourcePanelWidth, sourcePanelHeight, hitRadius);
+        if (hit) {
+          const original = panelOverlays?.[panelIdx]?.[hit.overlay];
+          if (!original) return;
+          setOverlaySelection({ panel: panelIdx, overlay: hit.overlay });
+          overlayDragRef.current = {
+            mode: hit.mode,
+            panel: panelIdx,
+            overlay: hit.overlay,
+            handle: hit.handle,
+            startRow: imgRow,
+            startCol: panelCol,
+            original,
+          };
+          setIsDraggingOverlay(true);
+          setIsDraggingPan(false);
+          setPanStart(null);
+          e.preventDefault();
+          return;
+        }
+      }
+      setOverlaySelection(null);
+    }
     if (profileActive) {
       const { imgCol, imgRow, panelIdx } = screenToProfileImg(e);
       if (profilePoints.length === 2) {
@@ -12687,6 +13083,18 @@ function Show3D() {
   };
 
   const handleCanvasMouseMove = (e: React.MouseEvent) => {
+    if (overlayDragRef.current) {
+      const drag = overlayDragRef.current;
+      const { imgRow, panelIdx, panelCol } = screenToImg(e);
+      if (panelIdx !== drag.panel) return;
+      updatePanelOverlay(
+        drag.panel,
+        drag.overlay,
+        updateOverlayFromDrag(drag.original, drag.mode, drag.startRow, drag.startCol, imgRow, panelCol, sourcePanelWidth, sourcePanelHeight, drag.handle),
+      );
+      e.preventDefault();
+      return;
+    }
     // Fast path: during pan drag, skip all cursor/hover/lens work - just update pan
     if (isDraggingPan && panStart) {
       const canvas = canvasRef.current;
@@ -12764,6 +13172,16 @@ function Show3D() {
       }
     } else {
       setIsHoveringLensEdge(false);
+    }
+    if (overlayEditMode && !isDraggingPan) {
+      const { imgRow, panelIdx, panelCol } = screenToImg(e);
+      const hit = panelIdx >= 0
+        ? panelOverlayHit(panelOverlays?.[panelIdx], imgRow, panelCol, sourcePanelWidth, sourcePanelHeight, getImageHitRadius(panelIdx))
+        : null;
+      setIsHoveringOverlay(Boolean(hit));
+      return;
+    } else if (isHoveringOverlay) {
+      setIsHoveringOverlay(false);
     }
 
     // Lens drag
@@ -12878,6 +13296,11 @@ function Show3D() {
   };
 
   const handleCanvasMouseUp = (e: React.MouseEvent) => {
+    if (overlayDragRef.current) {
+      overlayDragRef.current = null;
+      setIsDraggingOverlay(false);
+      return;
+    }
     if (draggingProfileEndpoint !== null || isDraggingProfileLine) {
       setDraggingProfileEndpoint(null);
       setIsDraggingProfileLine(false);
@@ -12955,6 +13378,9 @@ function Show3D() {
     // sibling control - surprising "lens vanished" footgun. User explicitly turns
     // lens off via the Lens switch.
     pendingRoiAddRef.current = null;
+    overlayDragRef.current = null;
+    setIsDraggingOverlay(false);
+    setIsHoveringOverlay(false);
     if (isDraggingPan) commitLivePanelTransforms();
     setIsDraggingROI(false);
     setIsDraggingResize(false);
@@ -14082,7 +14508,10 @@ function Show3D() {
           break;
         case "Delete":
         case "Backspace":
-          if (effectiveRoiActive && roiSelectedIdx >= 0) {
+          if (overlayEditMode && overlaySelection) {
+            deleteSelectedOverlay();
+            handled = true;
+          } else if (effectiveRoiActive && roiSelectedIdx >= 0) {
             deleteSelectedROI();
             handled = true;
           }
@@ -14201,7 +14630,7 @@ function Show3D() {
     window.addEventListener("pointermove", onMove, true);
     window.addEventListener("pointerup", onUp, true);
   };
-  const overlayCanvasVisible = effectiveRoiActive || profileActive;
+  const overlayCanvasVisible = effectiveRoiActive || profileActive || (panelOverlays || []).some((items) => items && items.length > 0);
   const lensCanvasVisible = showLens && lensPos !== null;
   const keyboardShortcutItems: [string, string][] = [
     ["Space", "Play / Pause"],
@@ -14729,13 +15158,13 @@ function Show3D() {
                 Compatibility text for older contract tests:
                 title="More tools: Stats, Denoise, Filter, Sub-pixel alignment, Color, Flip, Compare" */}
             <Badge
-              badgeContent={(showStats ? 1 : 0) + (denoiseEnabled ? 1 : 0) + (!isRgb && frequencyFilterIsActive ? 1 : 0) + (subpixelAlignEnabled ? 1 : 0) + (!isRgb && hasPanelChoices && !colorShared ? 1 : 0) + (flipRows ? 1 : 0) + (flipCols ? 1 : 0) + (compareMode !== "off" ? 1 : 0) + (rotationActive ? 1 : 0)}
-              invisible={!showStats && !showDenoise && !(!isRgb && frequencyFilterIsActive) && !subpixelAlignEnabled && !(!isRgb && hasPanelChoices && !colorShared) && !flipRows && !flipCols && compareMode === "off" && !rotationActive}
+              badgeContent={(showStats ? 1 : 0) + (overlayEditMode ? 1 : 0) + (denoiseEnabled ? 1 : 0) + (!isRgb && frequencyFilterIsActive ? 1 : 0) + (subpixelAlignEnabled ? 1 : 0) + (!isRgb && hasPanelChoices && !colorShared ? 1 : 0) + (flipRows ? 1 : 0) + (flipCols ? 1 : 0) + (compareMode !== "off" ? 1 : 0) + (rotationActive ? 1 : 0)}
+              invisible={!showStats && !overlayEditMode && !showDenoise && !(!isRgb && frequencyFilterIsActive) && !subpixelAlignEnabled && !(!isRgb && hasPanelChoices && !colorShared) && !flipRows && !flipCols && compareMode === "off" && !rotationActive}
               sx={{ "& .MuiBadge-badge": { bgcolor: themeColors.accent, color: "#fff", fontSize: 9, fontWeight: 600, minWidth: 14, height: 14, px: 0.25 } }}
             >
               <Button
                 size="small"
-                sx={{ minWidth: 0, px: 0.75, fontSize: 10, textTransform: "none", color: (showStats || showDenoise || (!isRgb && frequencyFilterIsActive) || subpixelAlignEnabled || (!isRgb && hasPanelChoices && !colorShared) || flipRows || flipCols || compareMode !== "off" || rotationActive) ? themeColors.accent : themeColors.text }}
+                sx={{ minWidth: 0, px: 0.75, fontSize: 10, textTransform: "none", color: (showStats || overlayEditMode || showDenoise || (!isRgb && frequencyFilterIsActive) || subpixelAlignEnabled || (!isRgb && hasPanelChoices && !colorShared) || flipRows || flipCols || compareMode !== "off" || rotationActive) ? themeColors.accent : themeColors.text }}
                 onClick={(e) => setMoreMenuAnchor(e.currentTarget)}
                 aria-label="More tools"
                 aria-haspopup="menu"
@@ -14758,6 +15187,24 @@ function Show3D() {
                 <Typography sx={{ flex: 1, fontSize: 12, color: "inherit" }} title="Mean / min / max / std readout under the image.">Stats</Typography>
                 <Switch checked={showStats} onClick={(e) => e.stopPropagation()} onChange={(e) => setShowStats(e.target.checked)} size="small" sx={switchStyles.small} slotProps={{ input: { "aria-label": "Toggle statistics readout" } }} />
               </MenuItem>
+              {hasPanelOverlays && (
+                <MenuItem dense onClick={() => setOverlayEditMode(!overlayEditMode)} sx={{ fontSize: 12, gap: 1, color: overlayEditMode ? themeColors.accent : themeColors.text }}>
+                  <Typography sx={{ flex: 1, fontSize: 12, color: "inherit" }} title="Edit API-defined circles and rectangles: click to select, drag to move, drag an edge to resize.">Overlay Edit</Typography>
+                  <Switch
+                    checked={overlayEditMode}
+                    onClick={(event) => event.stopPropagation()}
+                    onChange={(event) => setOverlayEditMode(event.target.checked)}
+                    size="small"
+                    sx={switchStyles.small}
+                    slotProps={{ input: { "aria-label": "Toggle overlay editing" } }}
+                  />
+                </MenuItem>
+              )}
+              {hasPanelOverlays && overlayBaselineRef.current && (
+                <MenuItem dense onClick={resetPanelOverlays} sx={{ fontSize: 12, color: overlaySelection ? themeColors.accent : themeColors.text }}>
+                  Reset Overlays
+                </MenuItem>
+              )}
               <Box sx={{ mx: 1.5, my: 0.5, borderTop: `1px solid ${themeColors.border}`, opacity: 0.9 }} />
               <Box sx={{ px: 1.5, pt: 0.35, pb: 0.35 }}>
                 <Typography sx={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.04em", color: themeColors.textMuted, textTransform: "uppercase" }}>Processing</Typography>
@@ -15352,6 +15799,8 @@ function Show3D() {
               } : {}),
               cursor: reorderMode
                 ? "grab"
+                : overlayEditMode
+                ? (isDraggingOverlay ? "grabbing" : isHoveringOverlay ? "nwse-resize" : "crosshair")
                 : isHoveringLensEdge
                 ? "nwse-resize"
                 : (isHoveringResize || isDraggingResize || isHoveringResizeInner || isDraggingResizeInner)

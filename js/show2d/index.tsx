@@ -148,6 +148,34 @@ type PanelAnnotationSpec = {
   max_width?: string;
   offset?: [number, number];
 };
+type PanelOverlaySpec = {
+  shape?: "circle" | "rect" | "rectangle" | "square";
+  coords?: "data" | "relative";
+  row?: number;
+  col?: number;
+  radius?: number;
+  row0?: number;
+  col0?: number;
+  row1?: number;
+  col1?: number;
+  stroke?: string;
+  stroke_width?: number;
+  fill?: string;
+  opacity?: number;
+  fill_opacity?: number;
+  stroke_opacity?: number;
+  z_order?: number;
+};
+type OverlaySelection = { panel: number; overlay: number };
+type OverlayDragState = {
+  mode: "move" | "resize";
+  panel: number;
+  overlay: number;
+  handle?: string;
+  startRow: number;
+  startCol: number;
+  original: PanelOverlaySpec;
+};
 
 function styleNumber(value: unknown, fallback: number): number {
   const n = Number(value);
@@ -156,6 +184,22 @@ function styleNumber(value: unknown, fallback: number): number {
 
 function styleString(value: unknown, fallback = ""): string {
   return typeof value === "string" && value.trim() ? value : fallback;
+}
+
+function withAlpha(color: string | undefined, alpha: number): string | undefined {
+  if (!color || color === "none") return undefined;
+  const a = Math.max(0, Math.min(1, alpha));
+  if (color.startsWith("#")) {
+    const hex = color.slice(1);
+    if (hex.length === 3 || hex.length === 6) {
+      const full = hex.length === 3 ? hex.split("").map((ch) => ch + ch).join("") : hex;
+      const r = parseInt(full.slice(0, 2), 16);
+      const g = parseInt(full.slice(2, 4), 16);
+      const b = parseInt(full.slice(4, 6), 16);
+      if ([r, g, b].every(Number.isFinite)) return `rgba(${r}, ${g}, ${b}, ${a})`;
+    }
+  }
+  return color;
 }
 
 const LATEX_SYMBOLS: Record<string, string> = {
@@ -1167,6 +1211,221 @@ function drawROI(
   }
 }
 
+function drawPanelOverlays(
+  ctx: CanvasRenderingContext2D,
+  overlays: PanelOverlaySpec[] | undefined,
+  toScreenX: (col: number) => number,
+  toScreenY: (row: number) => number,
+  imageW: number,
+  imageH: number,
+): void {
+  if (!overlays?.length) return;
+  const ordered = [...overlays].sort((a, b) => styleNumber(a.z_order, 0) - styleNumber(b.z_order, 0));
+  for (const overlay of ordered) {
+    const coords = overlay.coords || "data";
+    const shape = overlay.shape === "rectangle" ? "rect" : (overlay.shape || "circle");
+    const scaleRow = coords === "relative" ? imageH : 1;
+    const scaleCol = coords === "relative" ? imageW : 1;
+    const scaleRadius = coords === "relative" ? Math.min(imageW, imageH) : 1;
+    const opacity = styleNumber(overlay.opacity, 1);
+    const strokeOpacity = opacity * styleNumber(overlay.stroke_opacity, 1);
+    const fillOpacity = opacity * styleNumber(overlay.fill_opacity, overlay.fill ? 1 : 0);
+    const stroke = withAlpha(styleString(overlay.stroke, "#00e5ff"), strokeOpacity);
+    const fill = withAlpha(overlay.fill, fillOpacity);
+    ctx.save();
+    ctx.lineWidth = Math.max(0, styleNumber(overlay.stroke_width, 2));
+    if (fill) ctx.fillStyle = fill;
+    if (stroke) ctx.strokeStyle = stroke;
+    if (shape === "circle") {
+      const col = styleNumber(overlay.col, 0) * scaleCol;
+      const row = styleNumber(overlay.row, 0) * scaleRow;
+      const radius = Math.max(0, styleNumber(overlay.radius, 0) * scaleRadius);
+      const x = toScreenX(col);
+      const y = toScreenY(row);
+      const rx = Math.abs(toScreenX(col + radius) - x);
+      const ry = Math.abs(toScreenY(row + radius) - y);
+      const r = Math.max(0, (rx + ry) / 2);
+      ctx.beginPath();
+      ctx.arc(x, y, r, 0, Math.PI * 2);
+      if (fill) ctx.fill();
+      if (stroke && ctx.lineWidth > 0) ctx.stroke();
+    } else {
+      const col0 = styleNumber(overlay.col0, 0) * scaleCol;
+      const row0 = styleNumber(overlay.row0, 0) * scaleRow;
+      const col1 = styleNumber(overlay.col1, col0) * scaleCol;
+      const row1 = styleNumber(overlay.row1, row0) * scaleRow;
+      const x0 = toScreenX(col0);
+      const y0 = toScreenY(row0);
+      const x1 = toScreenX(col1);
+      const y1 = toScreenY(row1);
+      const x = Math.min(x0, x1);
+      const y = Math.min(y0, y1);
+      const w = Math.abs(x1 - x0);
+      const h = Math.abs(y1 - y0);
+      if (fill) ctx.fillRect(x, y, w, h);
+      if (stroke && ctx.lineWidth > 0) ctx.strokeRect(x, y, w, h);
+    }
+    ctx.restore();
+  }
+}
+
+function clonePanelOverlays(overlays: PanelOverlaySpec[][] | undefined): PanelOverlaySpec[][] {
+  return (overlays || []).map((items) => (items || []).map((item) => ({ ...item })));
+}
+
+function overlayGeometry(overlay: PanelOverlaySpec, imageW: number, imageH: number) {
+  const coords = overlay.coords || "data";
+  const scaleRow = coords === "relative" ? imageH : 1;
+  const scaleCol = coords === "relative" ? imageW : 1;
+  const scaleRadius = coords === "relative" ? Math.min(imageW, imageH) : 1;
+  const shape = overlay.shape === "rectangle" ? "rect" : (overlay.shape || "circle");
+  if (shape === "circle") {
+    return {
+      shape,
+      row: styleNumber(overlay.row, 0) * scaleRow,
+      col: styleNumber(overlay.col, 0) * scaleCol,
+      radius: Math.max(0, styleNumber(overlay.radius, 0) * scaleRadius),
+    };
+  }
+  const row0 = styleNumber(overlay.row0, 0) * scaleRow;
+  const col0 = styleNumber(overlay.col0, 0) * scaleCol;
+  const row1 = styleNumber(overlay.row1, row0) * scaleRow;
+  const col1 = styleNumber(overlay.col1, col0) * scaleCol;
+  return {
+    shape,
+    row0: Math.min(row0, row1),
+    col0: Math.min(col0, col1),
+    row1: Math.max(row0, row1),
+    col1: Math.max(col0, col1),
+  };
+}
+
+function panelOverlayHit(
+  overlays: PanelOverlaySpec[] | undefined,
+  row: number,
+  col: number,
+  imageW: number,
+  imageH: number,
+  hitRadius: number,
+): { overlay: number; mode: "move" | "resize"; handle?: string } | null {
+  if (!overlays?.length) return null;
+  const ordered = overlays.map((overlay, index) => ({ overlay, index })).sort((a, b) => styleNumber(a.overlay.z_order, 0) - styleNumber(b.overlay.z_order, 0));
+  for (let orderIdx = ordered.length - 1; orderIdx >= 0; orderIdx -= 1) {
+    const { overlay, index } = ordered[orderIdx];
+    const geom = overlayGeometry(overlay, imageW, imageH);
+    if (geom.shape === "circle") {
+      const dist = Math.hypot(col - geom.col, row - geom.row);
+      if (Math.abs(dist - geom.radius) <= hitRadius) return { overlay: index, mode: "resize" };
+      if (dist <= geom.radius) return { overlay: index, mode: "move" };
+      continue;
+    }
+    const inside = col >= geom.col0 - hitRadius && col <= geom.col1 + hitRadius && row >= geom.row0 - hitRadius && row <= geom.row1 + hitRadius;
+    if (!inside) continue;
+    const nearLeft = Math.abs(col - geom.col0) <= hitRadius;
+    const nearRight = Math.abs(col - geom.col1) <= hitRadius;
+    const nearTop = Math.abs(row - geom.row0) <= hitRadius;
+    const nearBottom = Math.abs(row - geom.row1) <= hitRadius;
+    if (nearLeft || nearRight || nearTop || nearBottom) {
+      return {
+        overlay: index,
+        mode: "resize",
+        handle: `${nearTop ? "t" : ""}${nearBottom ? "b" : ""}${nearLeft ? "l" : ""}${nearRight ? "r" : ""}` || "br",
+      };
+    }
+    return { overlay: index, mode: "move" };
+  }
+  return null;
+}
+
+function updateOverlayFromDrag(
+  original: PanelOverlaySpec,
+  mode: "move" | "resize",
+  startRow: number,
+  startCol: number,
+  row: number,
+  col: number,
+  imageW: number,
+  imageH: number,
+  handle = "br",
+): PanelOverlaySpec {
+  const coords = original.coords || "data";
+  const scaleRow = coords === "relative" ? imageH : 1;
+  const scaleCol = coords === "relative" ? imageW : 1;
+  const scaleRadius = coords === "relative" ? Math.min(imageW, imageH) : 1;
+  const toSpecRow = (value: number) => value / scaleRow;
+  const toSpecCol = (value: number) => value / scaleCol;
+  const toSpecRadius = (value: number) => value / scaleRadius;
+  const geom = overlayGeometry(original, imageW, imageH);
+  const next = { ...original };
+  if (geom.shape === "circle") {
+    if (mode === "move") {
+      next.row = toSpecRow(Math.max(0, Math.min(imageH, geom.row + row - startRow)));
+      next.col = toSpecCol(Math.max(0, Math.min(imageW, geom.col + col - startCol)));
+    } else {
+      next.radius = toSpecRadius(Math.max(1, Math.hypot(col - geom.col, row - geom.row)));
+    }
+    return next;
+  }
+  let row0 = geom.row0;
+  let row1 = geom.row1;
+  let col0 = geom.col0;
+  let col1 = geom.col1;
+  if (mode === "move") {
+    const dr = row - startRow;
+    const dc = col - startCol;
+    const h = row1 - row0;
+    const w = col1 - col0;
+    row0 = Math.max(0, Math.min(imageH - h, row0 + dr));
+    row1 = row0 + h;
+    col0 = Math.max(0, Math.min(imageW - w, col0 + dc));
+    col1 = col0 + w;
+  } else {
+    if (handle.includes("t")) row0 = row;
+    if (handle.includes("b") || (!handle.includes("t") && !handle.includes("l") && !handle.includes("r"))) row1 = row;
+    if (handle.includes("l")) col0 = col;
+    if (handle.includes("r") || (!handle.includes("t") && !handle.includes("b") && !handle.includes("l"))) col1 = col;
+    if (Math.abs(row1 - row0) < 1) row1 = row0 + (row1 >= row0 ? 1 : -1);
+    if (Math.abs(col1 - col0) < 1) col1 = col0 + (col1 >= col0 ? 1 : -1);
+  }
+  next.row0 = toSpecRow(Math.max(0, Math.min(imageH, Math.min(row0, row1))));
+  next.row1 = toSpecRow(Math.max(0, Math.min(imageH, Math.max(row0, row1))));
+  next.col0 = toSpecCol(Math.max(0, Math.min(imageW, Math.min(col0, col1))));
+  next.col1 = toSpecCol(Math.max(0, Math.min(imageW, Math.max(col0, col1))));
+  return next;
+}
+
+function drawPanelOverlaySelection(
+  ctx: CanvasRenderingContext2D,
+  overlay: PanelOverlaySpec | undefined,
+  toScreenX: (col: number) => number,
+  toScreenY: (row: number) => number,
+  imageW: number,
+  imageH: number,
+): void {
+  if (!overlay) return;
+  const geom = overlayGeometry(overlay, imageW, imageH);
+  ctx.save();
+  ctx.setLineDash([5, 3]);
+  ctx.strokeStyle = "#ffffff";
+  ctx.lineWidth = 1.5;
+  if (geom.shape === "circle") {
+    const x = toScreenX(geom.col);
+    const y = toScreenY(geom.row);
+    const r = Math.max(0, (Math.abs(toScreenX(geom.col + geom.radius) - x) + Math.abs(toScreenY(geom.row + geom.radius) - y)) / 2);
+    ctx.beginPath();
+    ctx.arc(x, y, r + 3, 0, Math.PI * 2);
+    ctx.stroke();
+  } else {
+    const x0 = toScreenX(geom.col0);
+    const y0 = toScreenY(geom.row0);
+    const x1 = toScreenX(geom.col1);
+    const y1 = toScreenY(geom.row1);
+    ctx.strokeRect(Math.min(x0, x1) - 3, Math.min(y0, y1) - 3, Math.abs(x1 - x0) + 6, Math.abs(y1 - y0) + 6);
+  }
+  ctx.setLineDash([]);
+  ctx.restore();
+}
+
 type InsetPlotSpec = {
   x?: number[];
   y?: number[];
@@ -2096,6 +2355,7 @@ function Show2D() {
   const [insetPlots, setInsetPlots] = useModelState<InsetPlotSpec[]>("inset_plots");
   const [showInsetPlots, setShowInsetPlots] = useModelState<boolean>("show_inset_plots");
   const [panelAnnotations] = useModelState<PanelAnnotationSpec[][]>("panel_annotations");
+  const [panelOverlays, setPanelOverlays] = useModelState<PanelOverlaySpec[][]>("panel_overlays");
 
   const [contrastPreset, setContrastPreset] = useModelState<string>("contrast_preset");
   const [imageFlipsHorizontal, setImageFlipsHorizontal] = useModelState<boolean[]>("image_flips_horizontal");
@@ -2321,6 +2581,12 @@ function Show2D() {
   const [isHoveringResizeInner, setIsHoveringResizeInner] = React.useState(false);
   const resizeAspectRef = React.useRef<number | null>(null);
   const [newRoiShape, setNewRoiShape] = React.useState<"circle" | "square" | "rectangle" | "annular">("square");
+  const [overlayEditMode, setOverlayEditMode] = React.useState(false);
+  const [overlaySelection, setOverlaySelection] = React.useState<OverlaySelection | null>(null);
+  const [isDraggingOverlay, setIsDraggingOverlay] = React.useState(false);
+  const [isHoveringOverlay, setIsHoveringOverlay] = React.useState(false);
+  const overlayDragRef = React.useRef<OverlayDragState | null>(null);
+  const overlayBaselineRef = React.useRef<PanelOverlaySpec[][] | null>(null);
   const [exportAnchor, setExportAnchor] = React.useState<HTMLElement | null>(null);
   const [panelMenuAnchor, setPanelMenuAnchor] = React.useState<HTMLElement | null>(null);
   const [viewMenuAnchor, setViewMenuAnchor] = React.useState<HTMLElement | null>(null);
@@ -2360,6 +2626,43 @@ function Show2D() {
     handle: Show2DFileHandle | null;
   } | null>(null);
   const selectedRoi = roiSelectedIdx >= 0 && roiSelectedIdx < (roiList?.length ?? 0) ? roiList[roiSelectedIdx] : null;
+  const hasPanelOverlays = React.useMemo(() => (panelOverlays || []).some((items) => items && items.length > 0), [panelOverlays]);
+  React.useEffect(() => {
+    if (!overlayBaselineRef.current && hasPanelOverlays) {
+      overlayBaselineRef.current = clonePanelOverlays(panelOverlays);
+    }
+  }, [hasPanelOverlays, panelOverlays]);
+  React.useEffect(() => {
+    if (!overlaySelection) return;
+    const exists = Boolean(panelOverlays?.[overlaySelection.panel]?.[overlaySelection.overlay]);
+    if (!exists) setOverlaySelection(null);
+  }, [overlaySelection, panelOverlays]);
+
+  const updatePanelOverlay = React.useCallback((panel: number, overlay: number, nextSpec: PanelOverlaySpec) => {
+    const next = clonePanelOverlays(panelOverlays);
+    while (next.length <= panel) next.push([]);
+    if (!next[panel] || overlay < 0 || overlay >= next[panel].length) return;
+    next[panel][overlay] = nextSpec;
+    setPanelOverlays(next);
+  }, [panelOverlays, setPanelOverlays]);
+
+  const deleteSelectedOverlay = React.useCallback(() => {
+    if (!overlaySelection) return;
+    const next = clonePanelOverlays(panelOverlays);
+    const items = next[overlaySelection.panel];
+    if (!items || overlaySelection.overlay < 0 || overlaySelection.overlay >= items.length) return;
+    items.splice(overlaySelection.overlay, 1);
+    setPanelOverlays(next);
+    setOverlaySelection(null);
+  }, [overlaySelection, panelOverlays, setPanelOverlays]);
+
+  const resetPanelOverlays = React.useCallback(() => {
+    if (!overlayBaselineRef.current) return;
+    setPanelOverlays(clonePanelOverlays(overlayBaselineRef.current));
+    setOverlaySelection(null);
+    overlayDragRef.current = null;
+    setIsDraggingOverlay(false);
+  }, [setPanelOverlays]);
 
   const effectiveShowFft = showFft;
   const galleryColumnOptions = React.useMemo(() => {
@@ -5068,6 +5371,23 @@ function Show2D() {
         ctx.restore();
       }
 
+      const panelOverlaySpecs = panelOverlays?.[i] || [];
+      if (panelOverlaySpecs.length > 0) {
+        const zs = getZoomState(i);
+        const { zoom, panX, panY } = zs;
+        const cx = canvasW / 2;
+        const cy = canvasH / 2;
+        const toScreenX = (col: number) => (col * displayScale - cx) * zoom + cx + panX;
+        const toScreenY = (row: number) => (row * displayScale - cy) * zoom + cy + panY;
+        ctx.save();
+        ctx.scale(DPR, DPR);
+        drawPanelOverlays(ctx, panelOverlaySpecs, toScreenX, toScreenY, width, height);
+        if (overlaySelection?.panel === i) {
+          drawPanelOverlaySelection(ctx, panelOverlaySpecs[overlaySelection.overlay], toScreenX, toScreenY, width, height);
+        }
+        ctx.restore();
+      }
+
       // ROI overlay — draw all ROIs
       if (roiActive && roiList && roiList.length > 0) {
         const zs = getZoomState(i);
@@ -5249,7 +5569,7 @@ function Show2D() {
         ctx.restore();
       }
     }
-  }, [nImages, pixelSizeForPanel, pixelUnit, scaleBarVisible, scaleBarPosition, showZoomIndicator, selectedIdx, isGallery, canvasW, canvasH, width, displayScale, linkedZoom, linkedZoomState, zoomStates, dataVersion, showColorbar, cmap, offscreenVersion, logScale, profileActive, profilePoints, roiActive, roiList, roiSelectedIdx, isDraggingROI, themeColors, measureActive, measurePoints, canvasRepaintSignal, insetPlots, insetPlotSpecFor, insetDragVersion, showInsetPlots, panelMarkerColor, visibleImageIndices]);
+  }, [nImages, pixelSizeForPanel, pixelUnit, scaleBarVisible, scaleBarPosition, showZoomIndicator, selectedIdx, isGallery, canvasW, canvasH, width, height, displayScale, linkedZoom, linkedZoomState, zoomStates, dataVersion, showColorbar, cmap, offscreenVersion, logScale, profileActive, profilePoints, roiActive, roiList, roiSelectedIdx, isDraggingROI, themeColors, measureActive, measurePoints, canvasRepaintSignal, insetPlots, insetPlotSpecFor, insetDragVersion, showInsetPlots, panelMarkerColor, visibleImageIndices, panelOverlays, overlaySelection]);
 
   // -------------------------------------------------------------------------
   // Inset magnifier (lens) — renders magnified region at cursor in bottom-left
@@ -7191,6 +7511,33 @@ function Show2D() {
       }
     }
     clickStartRef.current = { x: e.clientX, y: e.clientY };
+    if (overlayEditMode) {
+      const { imgCol, imgRow } = screenToImg(e, idx);
+      const activeZoom = linkedZoom ? linkedZoomState.zoom : (zoomStates.get(idx) || initialZoomState).zoom;
+      const hitRadius = 10 / Math.max(0.01, displayScale * activeZoom);
+      const hit = panelOverlayHit(panelOverlays?.[idx], imgRow, imgCol, width, height, hitRadius);
+      if (hit) {
+        const original = panelOverlays?.[idx]?.[hit.overlay];
+        if (!original) return;
+        setOverlaySelection({ panel: idx, overlay: hit.overlay });
+        overlayDragRef.current = {
+          mode: hit.mode,
+          panel: idx,
+          overlay: hit.overlay,
+          handle: hit.handle,
+          startRow: imgRow,
+          startCol: imgCol,
+          original,
+        };
+        setIsDraggingOverlay(true);
+        setIsDraggingPan(false);
+        setPanStart(null);
+        setPanningIdx(null);
+        e.preventDefault();
+        return;
+      }
+      setOverlaySelection(null);
+    }
     if (profileActive) {
       const { imgCol, imgRow } = screenToImg(e, idx);
       if (profilePoints.length === 2) {
@@ -7271,6 +7618,18 @@ function Show2D() {
 
   const handleMouseMove = (e: React.MouseEvent, idx: number) => {
     if (updateInsetPlotDrag(e, idx)) return;
+    if (overlayDragRef.current) {
+      const drag = overlayDragRef.current;
+      if (idx !== drag.panel) return;
+      const { imgCol, imgRow } = screenToImg(e, idx);
+      updatePanelOverlay(
+        drag.panel,
+        drag.overlay,
+        updateOverlayFromDrag(drag.original, drag.mode, drag.startRow, drag.startCol, imgRow, imgCol, width, height, drag.handle),
+      );
+      e.preventDefault();
+      return;
+    }
     // Fast path: during pan drag, skip all cursor/hover/lens work — just update pan
     if (isDraggingPan && panStart && panningIdx !== null) {
       const canvas = canvasRefs.current[idx];
@@ -7457,6 +7816,16 @@ function Show2D() {
     } else {
       setIsHoveringLensEdge(false);
     }
+    if (overlayEditMode && !isDraggingPan) {
+      const { imgCol, imgRow } = screenToImg(e, idx);
+      const activeZoom = linkedZoom ? linkedZoomState.zoom : (zoomStates.get(idx) || initialZoomState).zoom;
+      const hitRadius = 10 / Math.max(0.01, displayScale * activeZoom);
+      const hit = panelOverlayHit(panelOverlays?.[idx], imgRow, imgCol, width, height, hitRadius);
+      setIsHoveringOverlay(Boolean(hit));
+      return;
+    } else if (isHoveringOverlay) {
+      setIsHoveringOverlay(false);
+    }
     // Hover detection for resize handles (show cursor on any ROI edge)
     if (roiActive && !isDraggingPan) {
       const { imgCol: ic, imgRow: ir } = screenToImg(e, idx);
@@ -7480,6 +7849,11 @@ function Show2D() {
 
   const handleMouseUp = (e: React.MouseEvent, idx: number) => {
     if (finishInsetPlotDrag(e, idx)) return;
+    if (overlayDragRef.current) {
+      overlayDragRef.current = null;
+      setIsDraggingOverlay(false);
+      return;
+    }
     if (isDraggingLens) {
       setIsDraggingLens(false);
       lensDragStartRef.current = null;
@@ -7582,6 +7956,9 @@ function Show2D() {
     setCursorInfo(null);
     insetHoverKeyRef.current = "";
     setInsetHoverInfo(null);
+    overlayDragRef.current = null;
+    setIsDraggingOverlay(false);
+    setIsHoveringOverlay(false);
     if (insetDragStateRef.current?.idx === idx) {
       insetDragStateRef.current = null;
       insetDragDraftRef.current.delete(idx);
@@ -7967,7 +8344,10 @@ function Show2D() {
         break;
       case "Delete":
       case "Backspace":
-        if (roiActive && roiSelectedIdx >= 0 && roiList && roiSelectedIdx < roiList.length) {
+        if (overlayEditMode && overlaySelection) {
+          e.preventDefault();
+          deleteSelectedOverlay();
+        } else if (roiActive && roiSelectedIdx >= 0 && roiList && roiSelectedIdx < roiList.length) {
           e.preventDefault();
           const newList = roiList.filter((_, i) => i !== roiSelectedIdx);
           setRoiList(newList);
@@ -8011,6 +8391,7 @@ function Show2D() {
   const moreActiveCount =
     (roiControlAvailable && roiActive ? 1 : 0) + (diffMode ? 1 : 0) + (denoiseEnabled ? 1 : 0)
     + (hasInsetPlots && showInsetPlots !== false ? 1 : 0)
+    + (overlayEditMode ? 1 : 0)
     + (frequencyFilterEnabled && Array.from({ length: nImages }, (_, panel) => panelFrequencyKnobs(panel)).some(knobs => frequencyFilterActive(knobs.mode)) ? 1 : 0)
     + (isGallery && !colorShared ? 1 : 0)
     + (Array.from({ length: nImages }, (_, panel) => rotationForPanel(panel)).some(k => k !== 0) ? 1 : 0);
@@ -8719,6 +9100,26 @@ function Show2D() {
                     </Typography>
                   </Box>
                 )}
+                {hasPanelOverlays && (
+                  <MenuItem dense onClick={() => setOverlayEditMode(!overlayEditMode)} sx={{ fontSize: 12, gap: 1, color: overlayEditMode ? themeColors.accent : themeColors.text }}>
+                    <Typography sx={{ flex: 1, fontSize: 12, color: "inherit" }} title="Edit API-defined circles and rectangles: click to select, drag to move, drag an edge to resize.">
+                      Overlay Edit
+                    </Typography>
+                    <Switch
+                      checked={overlayEditMode}
+                      onClick={(event) => event.stopPropagation()}
+                      onChange={(event) => setOverlayEditMode(event.target.checked)}
+                      size="small"
+                      sx={switchStyles.small}
+                      slotProps={{ input: { "aria-label": "Toggle overlay editing" } }}
+                    />
+                  </MenuItem>
+                )}
+                {hasPanelOverlays && overlayBaselineRef.current && (
+                  <MenuItem dense onClick={resetPanelOverlays} sx={{ fontSize: 12, color: overlaySelection ? themeColors.accent : themeColors.text }}>
+                    Reset Overlays
+                  </MenuItem>
+                )}
                 <Box
                   onClick={(event) => event.stopPropagation()}
                   sx={{
@@ -9094,7 +9495,7 @@ function Show2D() {
                   key={i}
                   sx={{
                     minWidth: 0,
-                    cursor: reorderMode ? "grab" : i === selectedIdx ? ((isDraggingResize || isDraggingResizeInner || isHoveringResize || isHoveringResizeInner) ? "nwse-resize" : isDraggingROI ? "move" : (draggingProfileEndpoint !== null || isDraggingProfileLine) ? "grabbing" : (profileActive && (hoveredProfileEndpoint !== null || isHoveringProfileLine)) ? "grab" : (profileActive || roiActive || measureActive) ? "crosshair" : "grab") : ("pointer"),
+                    cursor: reorderMode ? "grab" : i === selectedIdx ? (overlayEditMode ? (isDraggingOverlay ? "grabbing" : isHoveringOverlay ? "nwse-resize" : "crosshair") : (isDraggingResize || isDraggingResizeInner || isHoveringResize || isHoveringResizeInner) ? "nwse-resize" : isDraggingROI ? "move" : (draggingProfileEndpoint !== null || isDraggingProfileLine) ? "grabbing" : (profileActive && (hoveredProfileEndpoint !== null || isHoveringProfileLine)) ? "grab" : (profileActive || roiActive || measureActive) ? "crosshair" : "grab") : ("pointer"),
                     opacity: draggedPanelRef.current === i ? 0.62 : 1,
                     transform: dragOverPanel === i ? "translateY(-2px)" : "translateY(0)",
                     transition: "transform 120ms ease, opacity 120ms ease",
@@ -9709,7 +10110,7 @@ function Show2D() {
             /* Single image mode */
             <Box
               ref={(el: HTMLDivElement | null) => { imageContainerRefs.current[0] = el; }}
-              sx={{ ...responsivePanelSx, border: `1px solid ${themeColors.border}`, cursor: isHoveringLensEdge ? "nwse-resize" : isDraggingROI ? "move" : (isDraggingResize || isDraggingResizeInner || isHoveringResize || isHoveringResizeInner) ? "nwse-resize" : (draggingProfileEndpoint !== null || isDraggingProfileLine) ? "grabbing" : (profileActive && (hoveredProfileEndpoint !== null || isHoveringProfileLine)) ? "grab" : (profileActive || roiActive || measureActive) ? "crosshair" : "grab" }}
+              sx={{ ...responsivePanelSx, border: `1px solid ${themeColors.border}`, cursor: overlayEditMode ? (isDraggingOverlay ? "grabbing" : isHoveringOverlay ? "nwse-resize" : "crosshair") : isHoveringLensEdge ? "nwse-resize" : isDraggingROI ? "move" : (isDraggingResize || isDraggingResizeInner || isHoveringResize || isHoveringResizeInner) ? "nwse-resize" : (draggingProfileEndpoint !== null || isDraggingProfileLine) ? "grabbing" : (profileActive && (hoveredProfileEndpoint !== null || isHoveringProfileLine)) ? "grab" : (profileActive || roiActive || measureActive) ? "crosshair" : "grab" }}
               onMouseDown={(e) => handleMouseDown(e, 0)}
               onMouseMove={(e) => handleMouseMove(e, 0)}
               onMouseUp={(e) => handleMouseUp(e, 0)}

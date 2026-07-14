@@ -15,11 +15,17 @@ around a real question from the microscope room:
   acquisitions appear in it.
 - **Comparing reconstructions** - panels with independent frame stacks for
   regularization sweeps, convergence checks, and slice-count comparisons.
+- **Advanced Show2D** - configure dense comparison galleries with rich math
+  titles, local annotations, geometric overlays, inset plots, panel identity
+  frames, presentation mode, and export-ready state.
 - **Full-resolution Show3D folder viewers** - keep the microscope/reconstruction
   pixels at native shape while the browser loads a nearby data file instead of
   one giant HTML blob.
 - **Rich math labels and annotations** - use λ, χ², colored spans, and local
   region labels in Show2D/Show3D panels without exposing raw TeX markup.
+- **Geometric panel overlays** - add reproducible circles, rectangles, and
+  squares to specific regions in Show2D/Show3D panels for demos, reports, and
+  figure preparation.
 - **Show2D inset plots** - put a small calibration curve inside each image
   panel, so a denoise or reconstruction sweep carries the metric that explains
   why the scientist should trust that panel.
@@ -321,6 +327,135 @@ Common style keys are `bg`, `fg`, `border_color`, `border_width`,
 `font_size`, `font_weight`, `pad_x`, `pad_y`, `radius`, `opacity`, `align`,
 `max_width`, and `class_name`. `class_name` is useful when exported HTML needs
 project-specific CSS or when a browser test needs a stable selector.
+
+(geometric-panel-overlays)=
+
+## Add geometric overlays to panel regions
+
+Use `panel_overlays` when a circle, rectangle, or square is part of the
+scientific figure specification rather than a hand-drawn ROI. These overlays
+are reproducible from Python, saved in widget state, and rendered in exported
+HTML. They are useful for marking a defect, a crop window, a region reused
+across raw/denoised/residual panels, or a fixed visual guide in a demo.
+
+The default coordinate system is data pixels with QuantEM's user-facing
+`(row, col)` convention:
+
+```python
+from quantem.widget import Show2D
+
+Show2D(
+    [raw, denoised, residual],
+    labels=["raw", "denoised", "residual"],
+    marker_style="around",
+    marker_colors=["#60a5fa", "#34d399", "#f87171"],
+    panel_overlays={
+        "raw": [
+            {
+                "shape": "circle",
+                "center": (96, 88),
+                "radius": 14,
+                "stroke": "#60a5fa",
+                "stroke_width": 3,
+            },
+            {
+                "shape": "rect",
+                "box": (48, 58, 126, 146),
+                "stroke": "#facc15",
+                "fill": "#facc15",
+                "fill_opacity": 0.12,
+                "z_order": 1,
+            },
+        ],
+        "denoised": [
+            {
+                "shape": "circle",
+                "center": (96, 88),
+                "radius": 14,
+                "stroke": "#34d399",
+                "stroke_width": 3,
+            },
+            {
+                "shape": "square",
+                "center": (96, 88),
+                "size": 42,
+                "stroke": "#facc15",
+                "stroke_opacity": 0.85,
+            },
+        ],
+        "residual": {
+            "shape": "rect",
+            "xywh": (58, 48, 88, 78),
+            "stroke": "#f87171",
+            "stroke_width": 2,
+        },
+    },
+)
+```
+
+The same API works on multi-panel Show3D, where the shapes stay attached to the
+panel while the user scrubs or plays the stack:
+
+```python
+from quantem.widget import Show3D
+
+Show3D(
+    raw_stack,
+    denoised_stack,
+    residual_stack,
+    panel_titles=["raw", "denoised", "residual"],
+    panel_overlays={
+        "raw": {"shape": "circle", "center": (96, 88), "radius": 14},
+        "denoised": [
+            {
+                "shape": "rect",
+                "box": (48, 58, 126, 146),
+                "stroke": "#facc15",
+                "fill": "#facc15",
+                "fill_opacity": 0.12,
+            }
+        ],
+    },
+)
+```
+
+For a guide that should appear on every panel, use `overlays=[...]` instead of
+`panel_overlays`. For overlays generated in a loop, a flat list can target
+panels with `panel=0` or `panel="raw"`:
+
+```python
+shared_defect_circle = {
+    "shape": "circle",
+    "center": (0.52, 0.46),
+    "radius": 0.07,
+    "coords": "relative",
+    "stroke": "#60a5fa",
+    "stroke_width": 2,
+}
+
+Show2D([raw, denoised], labels=["raw", "denoised"], overlays=[shared_defect_circle])
+
+Show2D(
+    [raw, denoised],
+    labels=["raw", "denoised"],
+    panel_overlays=[
+        {"panel": "raw", "shape": "circle", "center": (96, 88), "radius": 14},
+        {"panel": "denoised", "shape": "rect", "box": (48, 58, 126, 146)},
+    ],
+)
+```
+
+Use `coords="relative"` only when normalized 0-1 panel geometry is more stable
+than pixel geometry, for example when comparing panels with different shapes.
+Style keys include `stroke`, `stroke_width`, `stroke_opacity`, `fill`,
+`fill_opacity`, `opacity`, and `z_order`. A provided `fill` is visible by
+default; set `fill_opacity=0` for stroke-only shapes.
+
+When overlays are present, open `More -> Overlay Edit` in the live widget or
+exported HTML. Click a circle or rectangle to select it, drag inside to move it,
+drag an edge to resize it, press Delete to remove the selected overlay, and
+choose `Reset Overlays` to restore the constructor state. Use ROI tools when
+the geometry should feed statistics, FFT crops, or Python readback.
 
 (rich-math-labels-and-presentation-exports)=
 

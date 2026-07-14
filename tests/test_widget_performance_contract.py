@@ -197,6 +197,24 @@ def test_show2d_batch_selection_and_marker_frame_contract():
     assert 'useModelState<MarkerMap>("row_markers")' in show3d
     assert 'useModelState<PanelAnnotationSpec[][]>("panel_annotations")' in show2d
     assert 'useModelState<PanelAnnotationSpec[][]>("panel_annotations")' in show3d
+    assert 'useModelState<PanelOverlaySpec[][]>("panel_overlays")' in show2d
+    assert 'useModelState<PanelOverlaySpec[][]>("panel_overlays")' in show3d
+    assert "drawPanelOverlays(ctx, panelOverlaySpecs" in show2d
+    assert "drawPanelOverlays(ctx, overlaySpecs" in show3d
+    assert "setPanelOverlays" in show2d
+    assert "setPanelOverlays" in show3d
+    assert "Overlay Edit" in show2d
+    assert "Overlay Edit" in show3d
+    assert "Reset Overlays" in show2d
+    assert "Reset Overlays" in show3d
+    assert "panelOverlayHit" in show2d
+    assert "panelOverlayHit" in show3d
+    assert "updateOverlayFromDrag" in show2d
+    assert "updateOverlayFromDrag" in show3d
+    assert "drawPanelOverlaySelection" in show2d
+    assert "drawPanelOverlaySelection" in show3d
+    assert "const shape = overlay.shape === \"rectangle\" ? \"rect\"" in show2d
+    assert "const shape = overlay.shape === \"rectangle\" ? \"rect\"" in show3d
     assert "LATEX_SYMBOLS" in show2d
     assert "LATEX_SYMBOLS" in show3d
     assert "renderTextWithInlineMath" in show2d
@@ -493,6 +511,19 @@ def test_show3d_offline_gpu_playback_owns_canvas_contract():
 
     assert "const offlineGpuPlaybackOwnsCanvas" in show3d
     assert show3d.count("if (offlineGpuPlaybackOwnsCanvas) return;") >= 2
+
+
+def test_show3d_sidecar_zoom_skips_viewport_cache_contract():
+    """C1: zoomed sidecar inspection must not present stale viewport cache."""
+    show3d = (ROOT / "js" / "show3d" / "index.tsx").read_text(encoding="utf-8")
+
+    assert "invalidateSidecarViewportCache(\"view-transform\")" in show3d
+    assert "sidecarViewportSkipReason" in show3d
+    assert "\"view-transform\"" in show3d
+    assert "sidecarDisplayCacheDirtyRef.current = true;" in show3d
+    assert "sidecar-u8-viewport-transform" in show3d
+    assert "sidecar-u8-viewport-live" in show3d
+    assert "if (separatePanelFrames && !sidecarMode && (offline || imageRotation % 4 !== 0)) return false;" in show3d
 
 
 def test_show3d_playback_row_bookmarks_current_frame_contract():

@@ -2,7 +2,9 @@
 
 One or many 2D images, including gallery panels with independent local slice
 stacks, plus contrast control, FFT, ROIs, line profiles, and a calibrated scale
-bar. See the [Show2D tutorial](../tutorials/show2d) for worked examples.
+bar. See the [Show2D tutorial](../tutorials/show2d) for worked examples and
+[Advanced Show2D](../tutorials/show2d_advanced) for report-ready galleries,
+rich labels, local annotations, overlays, inset plots, and export patterns.
 
 ## Reference
 
@@ -24,6 +26,7 @@ no console error, no NaN frame).
 | More menu: Color shared | `panel_cmaps`, `panel_cmaps_memory` | Shared by default. Turn off to let the Color dropdown edit only the selected gallery panel; turn on for one shared colormap, then turn off again to restore the previous individual panel colormaps |
 | Panel identity markers | `marker_colors`, `identity_colors`, `marker_style`, `row_markers`, `col_markers` | Optional panel colors plus row/column group frames make panels easy to reference in notebooks, reports, and agent instructions |
 | Local panel annotations | `panel_annotations` | Optional multiple in-image labels per panel, placed by corner, normalized point, or normalized region box |
+| Geometric panel overlays | `panel_overlays` (`overlays` shorthand) | Optional circle, rectangle, and square overlays in data or relative coordinates, with stroke/fill opacity and z-order; More -> Overlay Edit allows live select, move, resize, delete, and reset |
 | Contrast min / max sliders | `vmin`, `vmax` | Display clamp changes; histogram markers move |
 | Auto-contrast toggle | `auto_contrast` | Re-fits `vmin`/`vmax` to the percentile range |
 | More menu: Contrast | `contrast_preset` | Applies scientist-friendly percentile ranges such as `1-99`, `2-98`, and `3-97`; the histogram stays visible below the image |
@@ -126,6 +129,76 @@ Show2D(
     },
 )
 ```
+
+## Circle and rectangle overlays
+
+Use `panel_overlays` when the figure needs reproducible geometric callouts
+in addition to analysis ROIs. Overlay coordinates use microscope image
+coordinates by default: `(row, col)` for centers and `(row0, col0, row1, col1)`
+for boxes. The same state is rendered in live Jupyter widgets, saved notebook
+state, and standalone HTML exports.
+
+```python
+from quantem.widget import Show2D
+
+Show2D(
+    [raw, denoised, residual],
+    labels=["raw", "denoised", "residual"],
+    panel_overlays={
+        "raw": [
+            {
+                "shape": "circle",
+                "center": (96, 88),
+                "radius": 14,
+                "stroke": "#60a5fa",
+                "stroke_width": 3,
+            },
+            {
+                "shape": "rect",
+                "box": (48, 58, 126, 146),
+                "stroke": "#facc15",
+                "fill": "#facc15",
+                "fill_opacity": 0.12,
+                "z_order": 1,
+            },
+        ],
+        "denoised": {
+            "shape": "square",
+            "center": (96, 88),
+            "size": 42,
+            "stroke": "#34d399",
+            "stroke_width": 2,
+        },
+    },
+)
+```
+
+For a shared overlay on every panel, pass `overlays=[...]` instead of
+`panel_overlays`. Use `coords="relative"` when the geometry should follow
+normalized panel coordinates from 0 to 1:
+
+```python
+Show2D(
+    [raw, denoised],
+    labels=["raw", "denoised"],
+    overlays=[
+        {
+            "shape": "circle",
+            "center": (0.5, 0.5),
+            "radius": 0.08,
+            "coords": "relative",
+            "stroke": "#f87171",
+        }
+    ],
+)
+```
+
+The live widget and exported HTML also expose `More -> Overlay Edit` when
+overlays are present. In edit mode, click a circle or rectangle to select it,
+drag inside to move it, drag an edge to resize it, press Delete to remove the
+selected overlay, and choose `Reset Overlays` to restore the constructor state.
+Use ROIs when the shape should drive statistics, FFT crops, or Python
+readback through `get_roi_geometries()`.
 
 ## Presentation and export chrome
 
