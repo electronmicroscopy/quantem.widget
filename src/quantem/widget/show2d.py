@@ -4200,6 +4200,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         *,
         scale: float = 3,
         include_scale_bar: bool = True,
+        include_colorbar: bool = False,
         title: str | None = None,
     ) -> pathlib.Path:
         """Export the current Show2D gallery as a hybrid SVG figure.
@@ -4222,6 +4223,9 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
         include_scale_bar : bool, default True
             Include the current scale bar when scale bars are visible on the
             widget. Set False to omit scale-bar chrome from the SVG.
+        include_colorbar : bool, default False
+            Include an editable SVG colorbar for single-panel exports. The
+            live browser export uses the current Color switch state instead.
         title : str, optional
             Figure title override. Defaults to the widget title.
 
@@ -4289,6 +4293,9 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 "png": base64.b64encode(buf.getvalue()).decode("ascii"),
                 "bar_text": overlay[2] if draw_scale else "",
                 "bar_px": float(overlay[3]) if draw_scale else 0.0,
+                "vmin": float(spec.get("vmin", 0.0)),
+                "vmax": float(spec.get("vmax", 1.0)),
+                "cmap": str(spec.get("cmap", self.cmap)),
             })
 
         row_heights: list[int] = []
@@ -4310,6 +4317,285 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             width = max(1, int(max_width / max(1, font_size * 0.55)))
             return textwrap.wrap(text, width=width, break_long_words=True, max_lines=max_lines)
 
+        latex_symbols = {
+            r"\alpha": "α", r"\beta": "β", r"\gamma": "γ", r"\delta": "δ",
+            r"\lambda": "λ", r"\mu": "μ", r"\sigma": "σ", r"\chi": "χ",
+            r"\omega": "ω", r"\Delta": "Δ", r"\Theta": "Θ", r"\pm": "±",
+            r"\times": "×", r"\cdot": "·", r"\degree": "°", r"\angstrom": "Å",
+            r"\le": "≤", r"\ge": "≥", r"\neq": "≠", r"\approx": "≈",
+            r"\infty": "∞",
+        }
+
+        def math_text(value: object) -> str:
+            text = str(value or "").strip().strip("$")
+            while "\\\\" in text:
+                text = text.replace("\\\\", "\\")
+            text = text.replace("{", "").replace("}", "")
+            for key, symbol in latex_symbols.items():
+                text = text.replace(key, symbol)
+            return text
+
+        def span_text(span: Mapping[str, object]) -> str:
+            if span.get("math") not in (None, ""):
+                return math_text(span.get("math", ""))
+            return str(span.get("text", ""))
+
+        def dash_attr(spec: Mapping[str, object], width: float) -> str:
+            raw_dash = spec.get("dash")
+            if isinstance(raw_dash, Sequence) and not isinstance(raw_dash, (str, bytes, bytearray)):
+                vals = [float(v) for v in raw_dash if float(v) >= 0]
+                if any(vals):
+                    return f' stroke-dasharray="{esc_attr(" ".join(f"{v:g}" for v in vals))}" stroke-linecap="round"'
+            style = str(spec.get("line_style", "solid")).lower().replace("_", "-")
+            w = max(1.0, float(width))
+            patterns = {
+                "dashed": [4 * w, 2 * w],
+                "dash": [4 * w, 2 * w],
+                "dotted": [w, 1.8 * w],
+                "dot": [w, 1.8 * w],
+                "dashdot": [4 * w, 2 * w, w, 2 * w],
+                "dash-dot": [4 * w, 2 * w, w, 2 * w],
+            }
+            if style in patterns:
+                return f' stroke-dasharray="{esc_attr(" ".join(f"{v:g}" for v in patterns[style]))}" stroke-linecap="round"'
+            return ""
+
+        def overlay_svg(spec: Mapping[str, object], x: float, y: float, panel_w: float, panel_h: float) -> str:
+            shape = str(spec.get("shape", "circle")).lower()
+            if shape == "rectangle":
+                shape = "rect"
+            coords = str(spec.get("coords", "data")).lower()
+            view_h = max(1.0, float(row1) - float(row0))
+            view_w = max(1.0, float(col1) - float(col0))
+
+            def to_x(col: float) -> float:
+                if coords == "relative":
+                    return x + col * panel_w
+                return x + (col - float(col0)) / view_w * panel_w
+
+            def to_y(row: float) -> float:
+                if coords == "relative":
+                    return y + row * panel_h
+                return y + (row - float(row0)) / view_h * panel_h
+
+            def to_radius(radius: float) -> float:
+                if coords == "relative":
+                    return radius * min(panel_w, panel_h)
+                return radius / max(view_w, view_h) * max(panel_w, panel_h)
+
+            stroke = str(spec.get("stroke", "#00e5ff"))
+            stroke_width = max(0.0, float(spec.get("stroke_width", 2.0)))
+            opacity = max(0.0, min(1.0, float(spec.get("opacity", 1.0))))
+            stroke_opacity = opacity * max(0.0, min(1.0, float(spec.get("stroke_opacity", 1.0))))
+            fill_value = spec.get("fill", "none")
+            fill = "none" if fill_value in (None, "", "none", "None") else str(fill_value)
+            fill_opacity = opacity * max(0.0, min(1.0, float(spec.get("fill_opacity", 1.0 if fill != "none" else 0.0))))
+            common = (
+                f' fill="{esc_attr(fill)}" fill-opacity="{fill_opacity:g}"'
+                f' stroke="{esc_attr(stroke)}" stroke-width="{stroke_width:g}"'
+                f' stroke-opacity="{stroke_opacity:g}"{dash_attr(spec, stroke_width)}'
+            )
+            if shape == "circle":
+                row = float(spec.get("row", 0.0))
+                col = float(spec.get("col", 0.0))
+                radius = max(0.0, float(spec.get("radius", 0.0)))
+                cx = to_x(col)
+                cy = to_y(row)
+                r = to_radius(radius)
+                return f'<circle data-show2d-panel-overlay-svg="true" cx="{cx:g}" cy="{cy:g}" r="{r:g}"{common}/>'
+            spec_row0 = float(spec.get("row0", 0.0))
+            spec_col0 = float(spec.get("col0", 0.0))
+            spec_row1 = float(spec.get("row1", spec_row0))
+            spec_col1 = float(spec.get("col1", spec_col0))
+            sx0 = to_x(min(spec_col0, spec_col1))
+            sx1 = to_x(max(spec_col0, spec_col1))
+            sy0 = to_y(min(spec_row0, spec_row1))
+            sy1 = to_y(max(spec_row0, spec_row1))
+            return f'<rect data-show2d-panel-overlay-svg="true" x="{sx0:g}" y="{sy0:g}" width="{max(0, sx1 - sx0):g}" height="{max(0, sy1 - sy0):g}"{common}/>'
+
+        def annotation_anchor(position: str) -> tuple[float, float, str, str]:
+            if "left" in position:
+                ax = 0.0
+                anchor = "start"
+            elif "right" in position:
+                ax = 1.0
+                anchor = "end"
+            else:
+                ax = 0.5
+                anchor = "middle"
+            if "top" in position:
+                ay = 0.0
+                baseline = "hanging"
+            elif "bottom" in position:
+                ay = 1.0
+                baseline = "baseline"
+            else:
+                ay = 0.5
+                baseline = "middle"
+            return ax, ay, anchor, baseline
+
+        def annotation_svg(spec: Mapping[str, object], x: float, y: float, panel_w: float, panel_h: float) -> str:
+            position = str(spec.get("position", "top-left"))
+            font_size = max(6.0, float(spec.get("font_size", 10.0)))
+            pad_x = max(0.0, float(spec.get("pad_x", 6.0 if spec.get("variant", "badge") != "plain" else 0.0)))
+            pad_y = max(0.0, float(spec.get("pad_y", 2.0 if spec.get("variant", "badge") != "plain" else 0.0)))
+            opacity = max(0.0, min(1.0, float(spec.get("opacity", 1.0))))
+            offset = spec.get("offset", (0.0, 0.0))
+            off_x, off_y = (float(offset[0]), float(offset[1])) if isinstance(offset, Sequence) and len(offset) >= 2 else (0.0, 0.0)
+            if "box" in spec:
+                left, top, width, height = (float(v) for v in spec["box"])
+                tx = x + (left + width / 2.0) * panel_w + off_x
+                ty = y + (top + height / 2.0) * panel_h + off_y
+                anchor = "middle"
+                baseline = "middle"
+            else:
+                ax, ay, anchor, baseline = annotation_anchor(position)
+                margin = 10.0
+                tx = x + margin + ax * (panel_w - 2 * margin) + off_x
+                ty = y + margin + ay * (panel_h - 2 * margin) + off_y
+            spans = spec.get("spans")
+            text = math_text(spec.get("math")) if spec.get("math") not in (None, "") else str(spec.get("text", ""))
+            text_len = max(len(text), sum(len(span_text(span)) for span in spans) if isinstance(spans, Sequence) else 0)
+            box_w = text_len * font_size * 0.62 + 2 * pad_x
+            box_h = font_size * 1.25 + 2 * pad_y
+            fg = str(spec.get("fg", spec.get("color", "#fff")))
+            variant = str(spec.get("variant", "badge"))
+            parts = [f'<g data-show2d-panel-annotation-svg="true" opacity="{opacity:g}">']
+            if variant != "plain":
+                bg = str(spec.get("bg", "rgba(0,0,0,0.72)"))
+                border = str(spec.get("border_color", "rgba(255,255,255,0.5)"))
+                border_width = max(0.0, float(spec.get("border_width", 1.0 if variant in {"outline", "callout"} else 0.0)))
+                rect_x = tx - box_w / 2 if anchor == "middle" else tx - box_w if anchor == "end" else tx
+                rect_y = ty - box_h / 2 if baseline == "middle" else ty - font_size - pad_y if baseline == "baseline" else ty
+                parts.append(
+                    f'<rect x="{rect_x:g}" y="{rect_y:g}" width="{box_w:g}" height="{box_h:g}" '
+                    f'rx="{float(spec.get("radius", 3.0)):g}" fill="{esc_attr(bg)}" '
+                    f'stroke="{esc_attr(border)}" stroke-width="{border_width:g}"/>'
+                )
+            text_y = ty + (font_size * 0.4 if baseline == "middle" else 0.0)
+            parts.append(
+                f'<text x="{tx:g}" y="{text_y:g}" text-anchor="{anchor}" '
+                'font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" '
+                f'font-size="{font_size:g}" font-weight="{esc_attr(spec.get("font_weight", 700))}" '
+                f'fill="{esc_attr(fg)}">'
+            )
+            if isinstance(spans, Sequence) and not isinstance(spans, (str, bytes, bytearray)):
+                for span in spans:
+                    if not isinstance(span, Mapping):
+                        continue
+                    color_attr = f' fill="{esc_attr(span["color"])}"' if span.get("color") else ""
+                    parts.append(f'<tspan{color_attr}>{esc_text(span_text(span))}</tspan>')
+            else:
+                parts.append(esc_text(text))
+            parts.append("</text></g>")
+            return "".join(parts)
+
+        def inset_svg(spec: Mapping[str, object], x: float, y: float, panel_w: float, panel_h: float, fallback_color: str) -> str:
+            if not spec:
+                return ""
+            xs = np.asarray(spec.get("x", []), dtype=float).ravel()
+            ys = np.asarray(spec.get("y", []), dtype=float).ravel()
+            finite = np.isfinite(xs) & np.isfinite(ys)
+            if xs.size != ys.size or finite.sum() < 2:
+                return ""
+            xs = xs[finite]
+            ys = ys[finite]
+            xlim = tuple(float(v) for v in spec.get("xlim", (float(xs.min()), float(xs.max()))))
+            ylim = tuple(float(v) for v in spec.get("ylim", (float(ys.min()), float(ys.max()))))
+            if xlim[1] <= xlim[0]:
+                xlim = (xlim[0] - 0.5, xlim[0] + 0.5)
+            if ylim[1] <= ylim[0]:
+                ylim = (ylim[0] - 0.5, ylim[0] + 0.5)
+            size = max(0.18, min(0.62, float(spec.get("size", 0.31))))
+            box_w = max(78.0, min(panel_w * 0.62, panel_w * size))
+            box_h = max(50.0, min(panel_h * 0.55, panel_w * float(spec.get("height", size * 0.68))))
+            if "box" in spec:
+                left, top, width, height = (float(v) for v in spec["box"])
+                box_w = max(48.0, min(panel_w, panel_w * width))
+                box_h = max(34.0, min(panel_h, panel_h * height))
+                x0 = x + max(0.0, min(panel_w - box_w, panel_w * left))
+                y0 = y + max(0.0, min(panel_h - box_h, panel_h * top))
+            else:
+                margin_raw = spec.get("margin", (12.0, 12.0))
+                if isinstance(margin_raw, (int, float)):
+                    margin_x = margin_y = float(margin_raw)
+                else:
+                    margin_x, margin_y = (float(v) for v in list(margin_raw)[:2])
+                pos = str(spec.get("position", "bottom-right"))
+                x0 = x + (panel_w - box_w - margin_x if "right" in pos else panel_w / 2 - box_w / 2 if "center" in pos else margin_x)
+                y0 = y + (panel_h - box_h - margin_y - (34.0 if self.scale_bar_visible and pos == "bottom-right" else 0.0) if "bottom" in pos else panel_h / 2 - box_h / 2 if "center" in pos else margin_y + 18.0)
+            show_ticks = bool(spec.get("show_ticks", False))
+            tick_font = max(5.0, min(14.0, float(spec.get("tick_font_size", 7.0))))
+            label_font = max(6.0, min(16.0, float(spec.get("label_font_size", 8.0))))
+            legend_font = max(6.0, min(18.0, float(spec.get("legend_font_size", 9.0))))
+            pad_l = max(22.0, tick_font * 3.2) if show_ticks or spec.get("ylabel") else 10.0
+            pad_r = 7.0
+            pad_t = max(13.0, legend_font + 6.0) if spec.get("title") or spec.get("legend") else 7.0
+            pad_b = max(16.0, tick_font + label_font + 4.0) if show_ticks or spec.get("xlabel") else 8.0
+            plot_x0 = x0 + pad_l
+            plot_y0 = y0 + pad_t
+            plot_w = box_w - pad_l - pad_r
+            plot_h = box_h - pad_t - pad_b
+            if plot_w <= 8 or plot_h <= 8:
+                return ""
+            sx = lambda value: plot_x0 + (float(value) - xlim[0]) / (xlim[1] - xlim[0]) * plot_w
+            sy = lambda value: plot_y0 + plot_h - (float(value) - ylim[0]) / (ylim[1] - ylim[0]) * plot_h
+            points = " ".join(f"{sx(px):g},{sy(py):g}" for px, py in zip(xs, ys))
+            line_color = str(spec.get("color", fallback_color))
+            text_color = str(spec.get("text_color", "rgba(255,255,255,0.92)"))
+            tick_color = str(spec.get("tick_color", "rgba(255,255,255,0.72)"))
+            parts = [
+                '<g data-show2d-inset-plot-svg="true">',
+                f'<rect x="{x0:g}" y="{y0:g}" width="{box_w:g}" height="{box_h:g}" '
+                f'fill="{esc_attr(spec.get("background", "#0a0c10"))}" fill-opacity="{max(0.0, min(1.0, float(spec.get("background_alpha", 0.68)))):g}" '
+                f'stroke="{esc_attr(spec.get("border_color", "rgba(255,255,255,0.34)"))}" stroke-width="{float(spec.get("border_width", 1.0)):g}"/>',
+                f'<path d="M {plot_x0:g} {plot_y0:g} V {plot_y0 + plot_h:g} H {plot_x0 + plot_w:g}" fill="none" stroke="{esc_attr(tick_color)}" stroke-opacity="0.45" stroke-width="1"/>',
+                f'<polyline points="{points}" fill="none" stroke="{esc_attr(line_color)}" stroke-width="{max(1.4, float(spec.get("line_width", 2.0))):g}" stroke-linejoin="round" stroke-linecap="round"/>',
+            ]
+            if "point" in spec:
+                point = np.asarray(spec["point"], dtype=float).ravel()
+                if point.size == 2 and np.isfinite(point).all():
+                    parts.append(f'<circle cx="{sx(point[0]):g}" cy="{sy(point[1]):g}" r="3.4" fill="{esc_attr(spec.get("point_color", "#fff"))}" stroke="#000" stroke-width="1.5"/>')
+            if spec.get("title"):
+                parts.append(f'<text x="{x0 + 6:g}" y="{y0 + 12:g}" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="{legend_font:g}" font-weight="700" fill="{esc_attr(text_color)}">{esc_text(spec["title"])}</text>')
+            if spec.get("legend"):
+                parts.append(f'<text x="{x0 + 6:g}" y="{y0 + box_h - 6:g}" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="{legend_font:g}" font-weight="700" fill="{esc_attr(line_color)}">{esc_text(spec["legend"])}</text>')
+            if spec.get("xlabel"):
+                parts.append(f'<text x="{x0 + box_w - 7:g}" y="{y0 + box_h - 3:g}" text-anchor="end" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="{label_font:g}" fill="{esc_attr(tick_color)}">{esc_text(spec["xlabel"])}</text>')
+            if spec.get("ylabel"):
+                parts.append(f'<text x="{x0 + 5:g}" y="{plot_y0 + 2:g}" transform="rotate(-90 {x0 + 5:g} {plot_y0 + 2:g})" text-anchor="end" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="{label_font:g}" fill="{esc_attr(tick_color)}">{esc_text(spec["ylabel"])}</text>')
+            parts.append("</g>")
+            return "".join(parts)
+
+        def colorbar_svg(panel: Mapping[str, object], x: float, y: float, panel_w: float, panel_h: float, idx: int) -> tuple[str, str]:
+            grad_id = f"show2d-svg-colorbar-{idx}"
+            cmap_obj = matplotlib.colormaps.get_cmap(str(panel.get("cmap", self.cmap)))
+            stops = []
+            for step in range(9):
+                frac = step / 8.0
+                r, g, b, _ = cmap_obj(frac)
+                stops.append(
+                    f'<stop offset="{frac * 100:g}%" stop-color="rgb({int(r * 255)}, {int(g * 255)}, {int(b * 255)})"/>'
+                )
+            bar_h = min(160.0, panel_h * 0.62)
+            bar_w = 10.0
+            bx = x + panel_w - 22.0
+            by = y + 18.0
+            vmin = float(panel.get("vmin", 0.0))
+            vmax = float(panel.get("vmax", 1.0))
+            body = [
+                '<g data-show2d-colorbar-svg="true">',
+                f'<rect x="{bx - 1:g}" y="{by - 1:g}" width="{bar_w + 2:g}" height="{bar_h + 2:g}" fill="#000" fill-opacity="0.45"/>',
+                f'<rect x="{bx:g}" y="{by:g}" width="{bar_w:g}" height="{bar_h:g}" fill="url(#{grad_id})" stroke="#fff" stroke-opacity="0.75" stroke-width="0.75"/>',
+                f'<text x="{bx - 4:g}" y="{by + 4:g}" text-anchor="end" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="9" fill="#fff">{esc_text(self._format_stat(vmax))}</text>',
+                f'<text x="{bx - 4:g}" y="{by + bar_h:g}" text-anchor="end" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="9" fill="#fff">{esc_text(self._format_stat(vmin))}</text>',
+                "</g>",
+            ]
+            return (
+                f'<linearGradient id="{grad_id}" x1="0" x2="0" y1="1" y2="0">{"".join(stops)}</linearGradient>',
+                "".join(body),
+            )
+
         elements: list[str] = [
             '<?xml version="1.0" encoding="UTF-8"?>',
             (
@@ -4319,6 +4605,7 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 f'data-show2d-svg-export="true" data-raster-scale="{export_scale:g}">'
             ),
         ]
+        defs: list[str] = []
         if title_h:
             elements.append(
                 f'<text x="{svg_w / 2:g}" y="19" text-anchor="middle" '
@@ -4333,6 +4620,10 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 x = col_idx * (panel_w + gap)
                 panel_h = int(panel["height"])
                 panel_index = int(panel["panel_index"])
+                clip_id = f"show2d-svg-panel-clip-{panel_index}-{row_idx}-{col_idx}"
+                defs.append(
+                    f'<clipPath id="{clip_id}"><rect x="{x:g}" y="{y:g}" width="{panel_w:g}" height="{panel_h:g}"/></clipPath>'
+                )
                 marker_color = (
                     self.marker_colors[panel_index]
                     if panel_index < len(self.marker_colors) and self.marker_colors[panel_index]
@@ -4360,16 +4651,51 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 label = panel["label"]
                 if label:
                     font_size = max(8, int(self.panel_title_font_size or 11))
-                    for line_idx, line in enumerate(wrap_svg_label(label, font_size, max(24, panel_w - 56), 3)):
-                        line_y = y + 6 + font_size + line_idx * font_size * 1.2
+                    spans = self.panel_title_spans[panel_index] if panel_index < len(self.panel_title_spans) else []
+                    if spans:
+                        line_y = y + 6 + font_size
+                        plain = "".join(span_text(span) for span in spans if isinstance(span, Mapping))
                         elements.extend([
                             f'<text x="{x + panel_w / 2 + 1:g}" y="{line_y + 1:g}" '
                             'text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" '
-                            f'font-size="{font_size}" font-weight="700" fill="#000" fill-opacity="0.85">{esc_text(line)}</text>',
+                            f'font-size="{font_size}" font-weight="700" fill="#000" fill-opacity="0.85">{esc_text(plain)}</text>',
                             f'<text x="{x + panel_w / 2:g}" y="{line_y:g}" '
                             'text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" '
-                            f'font-size="{font_size}" font-weight="700" fill="#fff" fill-opacity="0.95">{esc_text(line)}</text>',
+                            f'font-size="{font_size}" font-weight="700" fill="#fff" fill-opacity="0.95" data-show2d-panel-title-spans-svg="true">'
                         ])
+                        for span in spans:
+                            if not isinstance(span, Mapping):
+                                continue
+                            color_attr = f' fill="{esc_attr(span["color"])}"' if span.get("color") else ""
+                            elements.append(f'<tspan{color_attr}>{esc_text(span_text(span))}</tspan>')
+                        elements.append("</text>")
+                    else:
+                        for line_idx, line in enumerate(wrap_svg_label(label, font_size, max(24, panel_w - 56), 3)):
+                            line_y = y + 6 + font_size + line_idx * font_size * 1.2
+                            elements.extend([
+                                f'<text x="{x + panel_w / 2 + 1:g}" y="{line_y + 1:g}" '
+                                'text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" '
+                                f'font-size="{font_size}" font-weight="700" fill="#000" fill-opacity="0.85">{esc_text(line)}</text>',
+                                f'<text x="{x + panel_w / 2:g}" y="{line_y:g}" '
+                                'text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" '
+                                f'font-size="{font_size}" font-weight="700" fill="#fff" fill-opacity="0.95">{esc_text(line)}</text>',
+                            ])
+                elements.append(f'<g clip-path="url(#{clip_id})" data-show2d-vector-layer="true">')
+                if bool(self.show_inset_plots) and panel_index < len(self.inset_plots):
+                    elements.append(inset_svg(self.inset_plots[panel_index], x, y, panel_w, panel_h, marker_color))
+                if panel_index < len(self.panel_overlays):
+                    for overlay_spec in self.panel_overlays[panel_index]:
+                        if isinstance(overlay_spec, Mapping):
+                            elements.append(overlay_svg(overlay_spec, x, y, panel_w, panel_h))
+                if include_colorbar:
+                    grad, bar = colorbar_svg(panel, x, y, panel_w, panel_h, panel_index)
+                    defs.append(grad)
+                    elements.append(bar)
+                if panel_index < len(self.panel_annotations):
+                    for annotation_spec in self.panel_annotations[panel_index]:
+                        if isinstance(annotation_spec, Mapping):
+                            elements.append(annotation_svg(annotation_spec, x, y, panel_w, panel_h))
+                elements.append("</g>")
                 bar_text = panel["bar_text"]
                 bar_px = float(panel["bar_px"])
                 if bar_text and bar_px > 0:
@@ -4401,6 +4727,44 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                 elements.append("</g>")
             y += row_h + (gap if row_idx < len(row_heights) - 1 else 0)
 
+        marker_top = title_h
+        total_grid_h = sum(row_heights) + max(0, len(row_heights) - 1) * gap
+        for raw_row, color in dict(self.row_markers or {}).items():
+            try:
+                row_idx = int(raw_row)
+            except (TypeError, ValueError):
+                continue
+            if row_idx < 0 or row_idx >= len(row_heights):
+                continue
+            row_y = marker_top + sum(row_heights[:row_idx]) + row_idx * gap
+            row_count = min(ncols, max(0, len(panels) - row_idx * ncols))
+            row_w = row_count * panel_w + max(0, row_count - 1) * gap
+            elements.extend([
+                f'<rect data-show2d-group-marker-svg="row" x="0" y="{row_y:g}" width="{row_w:g}" height="{row_heights[row_idx]:g}" fill="none" stroke="{esc_attr(color)}" stroke-width="3"/>',
+                f'<rect x="3" y="{row_y + 3:g}" width="{max(0, row_w - 6):g}" height="{max(0, row_heights[row_idx] - 6):g}" fill="none" stroke="#000" stroke-opacity="0.9" stroke-width="2"/>',
+            ])
+        for raw_col, color in dict(self.col_markers or {}).items():
+            try:
+                col_idx = int(raw_col)
+            except (TypeError, ValueError):
+                continue
+            if col_idx < 0 or col_idx >= ncols:
+                continue
+            slots = [slot for slot in range(len(panels)) if slot % ncols == col_idx]
+            if not slots:
+                continue
+            row_min = min(slot // ncols for slot in slots)
+            row_max = max(slot // ncols for slot in slots)
+            col_x = col_idx * (panel_w + gap)
+            col_y = marker_top + sum(row_heights[:row_min]) + row_min * gap
+            col_h = sum(row_heights[row_min:row_max + 1]) + max(0, row_max - row_min) * gap
+            elements.extend([
+                f'<rect data-show2d-group-marker-svg="col" x="{col_x:g}" y="{col_y:g}" width="{panel_w:g}" height="{col_h:g}" fill="none" stroke="{esc_attr(color)}" stroke-width="3"/>',
+                f'<rect x="{col_x + 3:g}" y="{col_y + 3:g}" width="{max(0, panel_w - 6):g}" height="{max(0, col_h - 6):g}" fill="none" stroke="#000" stroke-opacity="0.9" stroke-width="2"/>',
+            ])
+
+        if defs:
+            elements.insert(2, f'<defs>{"".join(defs)}</defs>')
         elements.append("</svg>")
         export_path.write_text("\n".join(elements), encoding="utf-8")
         return export_path

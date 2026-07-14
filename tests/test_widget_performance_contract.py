@@ -205,6 +205,11 @@ def test_show2d_batch_selection_and_marker_frame_contract():
     assert "overlayDashPattern" in show3d
     assert "ctx.setLineDash(overlayDashPattern" in show2d
     assert "ctx.setLineDash(overlayDashPattern" in show3d
+    assert "svgPanelOverlayElement" in show2d
+    assert "svgPanelAnnotationElement" in show2d
+    assert "svgInsetPlotElement" in show2d
+    assert "svgColorbarElements" in show2d
+    assert 'data-show2d-vector-layer="true"' in show2d
     assert "setPanelOverlays" in show2d
     assert "setPanelOverlays" in show3d
     assert "Overlay Edit" in show2d

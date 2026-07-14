@@ -201,6 +201,65 @@ def test_export_svg_wraps_long_panel_labels(tmp_path):
     assert ">alpha beta gamma delta epsilon<" not in svg
 
 
+def test_export_svg_writes_publication_layers_as_vectors(tmp_path):
+    """C4: publication callouts, expect editable SVG vector layers."""
+    data = np.stack([_image(32), _image(32) * 0.5])
+    w = Show2D(
+        data,
+        labels=["raw", "denoised"],
+        panel_title_spans=[
+            [{"math": r"\lambda=0.03", "color": "#60a5fa"}, {"text": " raw"}],
+            [{"math": r"\chi^2"}, {"text": "/px"}],
+        ],
+        panel_annotations={
+            "raw": {"math": r"\lambda", "position": "top-right", "variant": "outline"},
+        },
+        panel_overlays={
+            "raw": {
+                "shape": "circle",
+                "center": (15, 16),
+                "radius": 6,
+                "stroke": "#facc15",
+                "line_style": "dashed",
+            },
+            "denoised": {
+                "shape": "rect",
+                "box": (8, 9, 24, 26),
+                "stroke": "#34d399",
+                "dash": [5, 2, 1, 2],
+            },
+        },
+        inset_plots={
+            "x": [0, 1, 2],
+            "y": [0.2, 0.6, 0.4],
+            "legend": "ACF",
+            "point": [1, 0.6],
+        },
+        row_markers={0: "#60a5fa"},
+        col_markers={1: "#f87171"},
+        ncols=2,
+        verbose=False,
+    )
+
+    out = w.export_svg(tmp_path / "publication.svg", include_colorbar=True)
+    svg = out.read_text(encoding="utf-8")
+
+    assert 'data-show2d-vector-layer="true"' in svg
+    assert 'data-show2d-panel-title-spans-svg="true"' in svg
+    assert 'data-show2d-panel-overlay-svg="true"' in svg
+    assert 'data-show2d-panel-annotation-svg="true"' in svg
+    assert 'data-show2d-inset-plot-svg="true"' in svg
+    assert 'data-show2d-colorbar-svg="true"' in svg
+    assert 'data-show2d-group-marker-svg="row"' in svg
+    assert 'data-show2d-group-marker-svg="col"' in svg
+    assert "<circle " in svg
+    assert "<polyline " in svg
+    assert "stroke-dasharray" in svg
+    assert "λ=0.03" in svg
+    assert "χ^2" in svg
+    assert "ACF" in svg
+
+
 def test_current_view_uses_zoom_center():
     w = Show2D(_image(128), zoom=4.0, zoom_row=16.0, zoom_col=112.0, verbose=False)
     view = w.current_view

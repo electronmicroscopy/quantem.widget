@@ -1812,6 +1812,140 @@ function drawInsetPlot(
   ctx.restore();
 }
 
+function svgDashAttributes(overlay: PanelOverlaySpec, lineWidth: number): string {
+  const pattern = overlayDashPattern(overlay, lineWidth);
+  if (!pattern.length) return "";
+  return ` stroke-dasharray="${escapeXmlAttr(pattern.map((v) => `${v}`).join(" "))}" stroke-linecap="round"`;
+}
+
+function renderLatexMathToText(expr: string): string {
+  return String(expr || "")
+    .trim()
+    .replace(/^\$|\$$/g, "")
+    .replace(/\\+(?=[A-Za-z])/g, "\\")
+    .replace(/\\([A-Za-z]+)/g, (_match, command: string) => LATEX_SYMBOLS[command] || command)
+    .replace(/[{}]/g, "");
+}
+
+function svgPanelOverlayElement(
+  overlay: PanelOverlaySpec,
+  toScreenX: (col: number) => number,
+  toScreenY: (row: number) => number,
+  imageW: number,
+  imageH: number,
+): string {
+  const geom = overlayGeometry(overlay, imageW, imageH);
+  const opacity = styleNumber(overlay.opacity, 1);
+  const strokeOpacity = opacity * styleNumber(overlay.stroke_opacity, 1);
+  const fillOpacity = opacity * styleNumber(overlay.fill_opacity, overlay.fill ? 1 : 0);
+  const stroke = styleString(overlay.stroke, "#00e5ff");
+  const fill = overlay.fill ? styleString(overlay.fill, "none") : "none";
+  const lineWidth = Math.max(0, styleNumber(overlay.stroke_width, 2));
+  const common = `fill="${escapeXmlAttr(fill)}" fill-opacity="${fillOpacity}" stroke="${escapeXmlAttr(stroke)}" stroke-width="${lineWidth}" stroke-opacity="${strokeOpacity}"${svgDashAttributes(overlay, lineWidth)}`;
+  if (geom.shape === "circle") {
+    const cx = toScreenX(geom.col);
+    const cy = toScreenY(geom.row);
+    const r = Math.max(0, (Math.abs(toScreenX(geom.col + geom.radius) - cx) + Math.abs(toScreenY(geom.row + geom.radius) - cy)) / 2);
+    return `<circle data-show2d-panel-overlay-svg="true" cx="${cx}" cy="${cy}" r="${r}" ${common}/>`;
+  }
+  const x0 = toScreenX(geom.col0);
+  const y0 = toScreenY(geom.row0);
+  const x1 = toScreenX(geom.col1);
+  const y1 = toScreenY(geom.row1);
+  return `<rect data-show2d-panel-overlay-svg="true" x="${Math.min(x0, x1)}" y="${Math.min(y0, y1)}" width="${Math.abs(x1 - x0)}" height="${Math.abs(y1 - y0)}" ${common}/>`;
+}
+
+function svgTextFromRichSpans(spans: RichTitleSpan[] | undefined, fallback: string): { text: string; spans: Array<{ text: string; color?: string }> } {
+  if (!spans?.length) return { text: fallback, spans: [{ text: fallback }] };
+  const parts = spans.map((span) => ({
+    text: span.math ? renderLatexMathToText(span.math) : String(span.text ?? ""),
+    color: span.color,
+  }));
+  return { text: parts.map((part) => part.text).join(""), spans: parts };
+}
+
+function svgPanelAnnotationElement(spec: PanelAnnotationSpec, x: number, y: number, panelW: number, panelH: number): string {
+  const position = spec.position || "top-left";
+  const offset = Array.isArray(spec.offset) ? spec.offset.map(Number) : [0, 0];
+  const margin = 10;
+  let tx = x + margin;
+  let ty = y + margin;
+  let anchor = "start";
+  let baseline = "hanging";
+  if (Array.isArray(spec.box) && spec.box.length >= 4) {
+    tx = x + (Number(spec.box[0]) + Number(spec.box[2]) / 2) * panelW;
+    ty = y + (Number(spec.box[1]) + Number(spec.box[3]) / 2) * panelH;
+    anchor = "middle";
+    baseline = "middle";
+  } else {
+    if (position.includes("right")) { tx = x + panelW - margin; anchor = "end"; }
+    else if (position.includes("center")) { tx = x + panelW / 2; anchor = "middle"; }
+    if (position.includes("bottom")) { ty = y + panelH - margin; baseline = "baseline"; }
+    else if (position.includes("center")) { ty = y + panelH / 2; baseline = "middle"; }
+  }
+  tx += Number(offset[0] || 0);
+  ty += Number(offset[1] || 0);
+  const fontSize = Math.max(6, styleNumber(spec.font_size, 10));
+  const rich = svgTextFromRichSpans(spec.math ? [{ math: spec.math }] : spec.spans, spec.text || "");
+  const variant = spec.variant || "badge";
+  const fg = styleString(spec.fg ?? spec.color, "#fff");
+  const opacity = Math.max(0, Math.min(1, styleNumber(spec.opacity, 1)));
+  const chunks: string[] = [`<g data-show2d-panel-annotation-svg="true" opacity="${opacity}">`];
+  if (variant !== "plain") {
+    const boxW = Math.max(12, rich.text.length * fontSize * 0.62 + 12);
+    const boxH = fontSize * 1.25 + 4;
+    const rx = anchor === "middle" ? tx - boxW / 2 : anchor === "end" ? tx - boxW : tx;
+    const ry = baseline === "middle" ? ty - boxH / 2 : baseline === "baseline" ? ty - boxH : ty;
+    chunks.push(`<rect x="${rx}" y="${ry}" width="${boxW}" height="${boxH}" rx="${styleNumber(spec.radius, 3)}" fill="${escapeXmlAttr(styleString(spec.bg, "rgba(0,0,0,0.72)"))}" stroke="${escapeXmlAttr(styleString(spec.border_color, "rgba(255,255,255,0.5)"))}" stroke-width="${Math.max(0, styleNumber(spec.border_width, variant === "outline" || variant === "callout" ? 1 : 0))}"/>`);
+  }
+  chunks.push(`<text x="${tx}" y="${baseline === "middle" ? ty + fontSize * 0.35 : ty}" text-anchor="${anchor}" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="${fontSize}" font-weight="${escapeXmlAttr(spec.font_weight ?? 700)}" fill="${escapeXmlAttr(fg)}">`);
+  rich.spans.forEach((span) => chunks.push(`<tspan${span.color ? ` fill="${escapeXmlAttr(span.color)}"` : ""}>${escapeXmlText(span.text)}</tspan>`));
+  chunks.push("</text></g>");
+  return chunks.join("");
+}
+
+function svgInsetPlotElement(spec: InsetPlotSpec | null | undefined, panel: number, x: number, y: number, panelW: number, panelH: number, fallbackColor: string, scaleBarVisible: boolean): string {
+  const geom = insetPlotGeometry(spec, panelW, panelH, scaleBarVisible);
+  if (!geom || !spec) return "";
+  const { finite, xlim, ylim, x0, y0, boxW, boxH, plotX0, plotY0, plotW, plotH } = geom;
+  const sx = (value: number) => x + plotX0 + (value - xlim[0]) / (xlim[1] - xlim[0]) * plotW;
+  const sy = (value: number) => y + plotY0 + plotH - (value - ylim[0]) / (ylim[1] - ylim[0]) * plotH;
+  const points = finite.map(([px, py]) => `${sx(px)},${sy(py)}`).join(" ");
+  const lineColor = spec.color || fallbackColor;
+  const textColor = spec.text_color || "rgba(255,255,255,0.92)";
+  const tickColor = spec.tick_color || "rgba(255,255,255,0.72)";
+  const legendFont = Math.max(6, Math.min(18, Number(spec.legend_font_size ?? 9)));
+  const chunks = [
+    `<g data-show2d-inset-plot-svg="true">`,
+    `<rect x="${x + x0}" y="${y + y0}" width="${boxW}" height="${boxH}" fill="${escapeXmlAttr(spec.background || "#0a0c10")}" fill-opacity="${Math.max(0, Math.min(1, Number(spec.background_alpha ?? 0.68)))}" stroke="${escapeXmlAttr(spec.border_color || "rgba(255,255,255,0.34)")}" stroke-width="${Number(spec.border_width ?? 1)}"/>`,
+    `<path d="M ${x + plotX0} ${y + plotY0} V ${y + plotY0 + plotH} H ${x + plotX0 + plotW}" fill="none" stroke="${escapeXmlAttr(tickColor)}" stroke-opacity="0.45" stroke-width="1"/>`,
+    `<polyline points="${points}" fill="none" stroke="${escapeXmlAttr(lineColor)}" stroke-width="${Math.max(1.4, Number(spec.line_width ?? 2))}" stroke-linejoin="round" stroke-linecap="round"/>`,
+  ];
+  if (Array.isArray(spec.point) && spec.point.length >= 2) {
+    chunks.push(`<circle cx="${sx(Number(spec.point[0]))}" cy="${sy(Number(spec.point[1]))}" r="3.4" fill="${escapeXmlAttr(spec.point_color || "#fff")}" stroke="#000" stroke-width="1.5"/>`);
+  }
+  if (spec.title) chunks.push(`<text x="${x + x0 + 6}" y="${y + y0 + 12}" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="${legendFont}" font-weight="700" fill="${escapeXmlAttr(textColor)}">${escapeXmlText(spec.title)}</text>`);
+  if (spec.legend) chunks.push(`<text x="${x + x0 + 6}" y="${y + y0 + boxH - 6}" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="${legendFont}" font-weight="700" fill="${escapeXmlAttr(lineColor)}">${escapeXmlText(spec.legend)}</text>`);
+  chunks.push("</g>");
+  return chunks.join("");
+}
+
+function svgColorbarElements(lut: Uint8Array, x: number, y: number, panelW: number, panelH: number, vmin: number, vmax: number, id: string): { def: string; body: string } {
+  const stops: string[] = [];
+  for (let step = 0; step <= 8; step += 1) {
+    const frac = step / 8;
+    const idx = Math.max(0, Math.min(255, Math.round(frac * 255))) * 3;
+    stops.push(`<stop offset="${frac * 100}%" stop-color="rgb(${lut[idx]}, ${lut[idx + 1]}, ${lut[idx + 2]})"/>`);
+  }
+  const barH = Math.min(160, panelH * 0.62);
+  const bx = x + panelW - 22;
+  const by = y + 18;
+  return {
+    def: `<linearGradient id="${id}" x1="0" x2="0" y1="1" y2="0">${stops.join("")}</linearGradient>`,
+    body: `<g data-show2d-colorbar-svg="true"><rect x="${bx - 1}" y="${by - 1}" width="12" height="${barH + 2}" fill="#000" fill-opacity="0.45"/><rect x="${bx}" y="${by}" width="10" height="${barH}" fill="url(#${id})" stroke="#fff" stroke-opacity="0.75" stroke-width="0.75"/><text x="${bx - 4}" y="${by + 4}" text-anchor="end" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="9" fill="#fff">${escapeXmlText(formatNumber(vmax))}</text><text x="${bx - 4}" y="${by + barH}" text-anchor="end" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="9" fill="#fff">${escapeXmlText(formatNumber(vmin))}</text></g>`,
+  };
+}
+
 // ============================================================================
 // Crop ROI region from raw float32 data for ROI-scoped FFT
 // ============================================================================
@@ -8083,19 +8217,58 @@ function Show2D() {
           const label = panelTitleText(panel);
           if (label) {
             const fontSize = Math.max(8, panelTitleFontSize || 11);
-            const titleLines = wrapSvgTextLines(label, fontSize, Math.max(24, canvasW - 56), 3);
+            const richTitle = panelTitleSpans?.[panel];
             body.push(
               `<g clip-path="url(#${clipId})">`
             );
-            titleLines.forEach((line, lineIdx) => {
-              const lineY = y + 6 + fontSize + lineIdx * fontSize * 1.2;
+            if (richTitle?.length) {
+              const rich = svgTextFromRichSpans(richTitle, label);
+              const lineY = y + 6 + fontSize;
               body.push(
-                `<text x="${x + canvasW / 2 + 1}" y="${lineY + 1}" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="${fontSize}" font-weight="700" fill="#000" fill-opacity="0.85">${escapeXmlText(line)}</text>`,
-                `<text x="${x + canvasW / 2}" y="${lineY}" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="${fontSize}" font-weight="700" fill="#fff" fill-opacity="0.95">${escapeXmlText(line)}</text>`
+                `<text x="${x + canvasW / 2 + 1}" y="${lineY + 1}" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="${fontSize}" font-weight="700" fill="#000" fill-opacity="0.85">${escapeXmlText(rich.text)}</text>`,
+                `<text x="${x + canvasW / 2}" y="${lineY}" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="${fontSize}" font-weight="700" fill="#fff" fill-opacity="0.95" data-show2d-panel-title-spans-svg="true">`
               );
-            });
+              rich.spans.forEach((span) => body.push(`<tspan${span.color ? ` fill="${escapeXmlAttr(span.color)}"` : ""}>${escapeXmlText(span.text)}</tspan>`));
+              body.push("</text>");
+            } else {
+              const titleLines = wrapSvgTextLines(label, fontSize, Math.max(24, canvasW - 56), 3);
+              titleLines.forEach((line, lineIdx) => {
+                const lineY = y + 6 + fontSize + lineIdx * fontSize * 1.2;
+                body.push(
+                  `<text x="${x + canvasW / 2 + 1}" y="${lineY + 1}" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="${fontSize}" font-weight="700" fill="#000" fill-opacity="0.85">${escapeXmlText(line)}</text>`,
+                  `<text x="${x + canvasW / 2}" y="${lineY}" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="${fontSize}" font-weight="700" fill="#fff" fill-opacity="0.95">${escapeXmlText(line)}</text>`
+                );
+              });
+            }
             body.push(`</g>`);
           }
+        }
+
+        const vectorLayer: string[] = [];
+        if (showInsetPlots !== false) {
+          vectorLayer.push(svgInsetPlotElement(insetPlotSpecFor(panel), panel, x, y, canvasW, canvasH, markerColor, scaleBarVisible));
+        }
+        const panelOverlaySpecs = panelOverlays?.[panel] || [];
+        if (panelOverlaySpecs.length > 0) {
+          const zs = getZoomState(panel);
+          const cx = canvasW / 2;
+          const cy = canvasH / 2;
+          const toScreenX = (imgCol: number) => x + (imgCol * displayScale - cx) * zs.zoom + cx + zs.panX;
+          const toScreenY = (imgRow: number) => y + (imgRow * displayScale - cy) * zs.zoom + cy + zs.panY;
+          panelOverlaySpecs.forEach((overlay) => vectorLayer.push(svgPanelOverlayElement(overlay, toScreenX, toScreenY, width, height)));
+        }
+        if (showColorbar && !isGallery) {
+          const lut = COLORMAPS[cmap] || COLORMAPS.inferno;
+          const colorbarId = `show2d-svg-colorbar-${slot}`;
+          const colorbar = svgColorbarElements(lut, x, y, canvasW, canvasH, colorbarVminRef.current, colorbarVmaxRef.current, colorbarId);
+          defs.push(colorbar.def);
+          vectorLayer.push(colorbar.body);
+        }
+        (panelAnnotations?.[panel] || []).forEach((annotation) => {
+          vectorLayer.push(svgPanelAnnotationElement(annotation, x, y, canvasW, canvasH));
+        });
+        if (vectorLayer.some(Boolean)) {
+          body.push(`<g clip-path="url(#${clipId})" data-show2d-vector-layer="true">${vectorLayer.join("")}</g>`);
         }
 
         if (scaleBarVisible) {
@@ -8166,19 +8339,27 @@ function Show2D() {
     canvasH,
     canvasW,
     clampedNcols,
+    cmap,
     galleryGapPx,
     getZoomState,
     groupMarkerOverlays,
     height,
+    displayScale,
+    insetPlotSpecFor,
     isGallery,
     markerAround,
     panelMarkerColor,
+    panelAnnotations,
+    panelOverlays,
     panelTitleFontSize,
+    panelTitleSpans,
     panelTitleText,
     pixelSizeForPanel,
     pixelUnit,
     scaleBarPosition,
     scaleBarVisible,
+    showColorbar,
+    showInsetPlots,
     showPanelTitles,
     showTitle,
     showZoomIndicator,
