@@ -6,10 +6,14 @@ items may be local frame stacks; unlike Show3D, Show2D does not impose one
 shared frame axis across the whole gallery.
 """
 
+import base64
+import html
+import io as _io
 import json
 import math
 import pathlib
 import tempfile
+import textwrap
 import warnings
 from datetime import datetime, timezone
 from enum import StrEnum
@@ -3882,6 +3886,226 @@ class Show2D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
                     facecolor="white", pad_inches=0.1)
         plt.close(fig)
         return path
+
+    def export_svg(
+        self,
+        path: str | pathlib.Path | None = None,
+        *,
+        scale: float = 3,
+        include_scale_bar: bool = True,
+        title: str | None = None,
+    ) -> pathlib.Path:
+        """Export the current Show2D gallery as a hybrid SVG figure.
+
+        The SVG keeps figure chrome editable as vector elements: panel
+        frames, marker bars, panel labels, title, and scale-bar text/line. The
+        scientific image panels are embedded as PNG images at ``scale`` times
+        the widget display size, which preserves the measured pixels while
+        giving Illustrator or Inkscape sharp panels to place in a manuscript.
+
+        Parameters
+        ----------
+        path : str or pathlib.Path, optional
+            Output SVG path. Defaults to a descriptive filename in the current
+            working directory.
+        scale : float, default 3
+            Embedded image scale relative to the widget display panel size.
+            Values below 1 are clamped to 1; use 3 for the default
+            high-resolution export, or a smaller value when file size matters.
+        include_scale_bar : bool, default True
+            Include the current scale bar when scale bars are visible on the
+            widget. Set False to omit scale-bar chrome from the SVG.
+        title : str, optional
+            Figure title override. Defaults to the widget title.
+
+        Returns
+        -------
+        pathlib.Path
+            The written SVG path.
+        """
+        from PIL import Image
+
+        specs = self._static_panel_specs()
+        if not specs:
+            raise ValueError("Show2D has no visible panels to export")
+
+        export_path = pathlib.Path(path) if path is not None else self._default_svg_export_path()
+        export_path.parent.mkdir(parents=True, exist_ok=True)
+        export_scale = max(1.0, min(8.0, float(scale)))
+        panel_w = int(round(self._static_canvas_css_px()))
+        gap = max(0, int(self.gallery_gap_px))
+        ncols = max(1, min(int(self.ncols), len(specs)))
+        title_text = self.title if title is None else str(title)
+        title_h = 30 if title_text and self.show_title else 0
+        draw_scale = bool(include_scale_bar and self.scale_bar_visible)
+        view = self.current_view
+        row0, row1, col0, col1 = view["box"]
+
+        def crop_slices(frame: np.ndarray) -> tuple[slice, slice]:
+            height, width = frame.shape[:2]
+            r0 = max(0, min(height - 1, int(math.floor(row0))))
+            r1 = max(r0 + 1, min(height, int(math.ceil(row1))))
+            c0 = max(0, min(width - 1, int(math.floor(col0))))
+            c1 = max(c0 + 1, min(width, int(math.ceil(col1))))
+            return slice(r0, r1), slice(c0, c1)
+
+        resample = Image.Resampling.BILINEAR if self.smooth else Image.Resampling.NEAREST
+        panels: list[dict[str, Any]] = []
+        overlays = self._static_overlay_texts(specs, css_px=panel_w)
+        for spec, overlay in zip(specs, overlays):
+            frame = np.asarray(spec["frame"])
+            rows, cols = crop_slices(frame)
+            cropped = frame[rows, cols]
+            if spec.get("rgb"):
+                rgb = (np.clip(cropped[..., :3], 0.0, 1.0) * 255).astype(np.uint8)
+            else:
+                rgb = self._static_panel_rgb(
+                    cropped,
+                    float(spec["vmin"]),
+                    float(spec["vmax"]),
+                    str(spec["cmap"]),
+                    apply_log=bool(spec.get("apply_log")),
+                )
+            panel_h = max(1, int(round(panel_w * rgb.shape[0] / max(1, rgb.shape[1]))))
+            image = Image.fromarray(rgb, mode="RGB")
+            embed_w = max(1, int(round(panel_w * export_scale)))
+            embed_h = max(1, int(round(panel_h * export_scale)))
+            if image.size != (embed_w, embed_h):
+                image = image.resize((embed_w, embed_h), resample=resample)
+            buf = _io.BytesIO()
+            image.save(buf, format="PNG")
+            panel_index = int(spec.get("panel_index", len(panels)))
+            panels.append({
+                "panel_index": panel_index,
+                "label": str(spec.get("label", "")),
+                "height": panel_h,
+                "png": base64.b64encode(buf.getvalue()).decode("ascii"),
+                "bar_text": overlay[2] if draw_scale else "",
+                "bar_px": float(overlay[3]) if draw_scale else 0.0,
+            })
+
+        row_heights: list[int] = []
+        for start in range(0, len(panels), ncols):
+            row_heights.append(max(int(panel["height"]) for panel in panels[start:start + ncols]))
+        svg_w = ncols * panel_w + (ncols - 1) * gap
+        svg_h = title_h + sum(row_heights) + max(0, len(row_heights) - 1) * gap
+
+        def esc_text(value: object) -> str:
+            return html.escape(str(value), quote=False)
+
+        def esc_attr(value: object) -> str:
+            return html.escape(str(value), quote=True)
+
+        def wrap_svg_label(value: object, font_size: int, max_width: float, max_lines: int = 3) -> list[str]:
+            text = str(value or "").strip()
+            if not text:
+                return []
+            width = max(1, int(max_width / max(1, font_size * 0.55)))
+            return textwrap.wrap(text, width=width, break_long_words=True, max_lines=max_lines)
+
+        elements: list[str] = [
+            '<?xml version="1.0" encoding="UTF-8"?>',
+            (
+                f'<svg xmlns="http://www.w3.org/2000/svg" width="{svg_w}" '
+                f'height="{svg_h}" viewBox="0 0 {svg_w} {svg_h}" '
+                f'role="img" aria-label="{esc_attr(title_text or "Show2D SVG export")}" '
+                f'data-show2d-svg-export="true" data-raster-scale="{export_scale:g}">'
+            ),
+        ]
+        if title_h:
+            elements.append(
+                f'<text x="{svg_w / 2:g}" y="19" text-anchor="middle" '
+                'font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" '
+                f'font-size="14" font-weight="700" fill="#111">{esc_text(title_text)}</text>'
+            )
+
+        y = title_h
+        for row_idx, row_h in enumerate(row_heights):
+            row_panels = panels[row_idx * ncols:(row_idx + 1) * ncols]
+            for col_idx, panel in enumerate(row_panels):
+                x = col_idx * (panel_w + gap)
+                panel_h = int(panel["height"])
+                panel_index = int(panel["panel_index"])
+                marker_color = (
+                    self.marker_colors[panel_index]
+                    if panel_index < len(self.marker_colors) and self.marker_colors[panel_index]
+                    else _IDENTITY_PALETTE[panel_index % len(_IDENTITY_PALETTE)]
+                )
+                elements.extend([
+                    f'<g id="show2d-panel-{panel_index}" data-show2d-panel="{panel_index}">',
+                    f'<rect x="{x}" y="{y}" width="{panel_w}" height="{panel_h}" fill="#000"/>',
+                    (
+                        f'<image x="{x}" y="{y}" width="{panel_w}" height="{panel_h}" '
+                        f'href="data:image/png;base64,{panel["png"]}" preserveAspectRatio="none"/>'
+                    ),
+                    f'<rect x="{x}" y="{y}" width="{panel_w}" height="{panel_h}" fill="none" stroke="#d0d0d0" stroke-width="1"/>',
+                ])
+                if str(self.marker_style or "left") == "around":
+                    elements.append(
+                        f'<rect x="{x + 1.5:g}" y="{y + 1.5:g}" width="{max(0, panel_w - 3):g}" '
+                        f'height="{max(0, panel_h - 3):g}" fill="none" '
+                        f'stroke="{esc_attr(marker_color)}" stroke-width="3"/>'
+                    )
+                else:
+                    elements.append(
+                        f'<rect x="{x}" y="{y}" width="5" height="{panel_h}" fill="{esc_attr(marker_color)}"/>'
+                    )
+                label = panel["label"]
+                if label:
+                    font_size = max(8, int(self.panel_title_font_size or 11))
+                    for line_idx, line in enumerate(wrap_svg_label(label, font_size, max(24, panel_w - 56), 3)):
+                        line_y = y + 6 + font_size + line_idx * font_size * 1.2
+                        elements.extend([
+                            f'<text x="{x + panel_w / 2 + 1:g}" y="{line_y + 1:g}" '
+                            'text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" '
+                            f'font-size="{font_size}" font-weight="700" fill="#000" fill-opacity="0.85">{esc_text(line)}</text>',
+                            f'<text x="{x + panel_w / 2:g}" y="{line_y:g}" '
+                            'text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" '
+                            f'font-size="{font_size}" font-weight="700" fill="#fff" fill-opacity="0.95">{esc_text(line)}</text>',
+                        ])
+                bar_text = panel["bar_text"]
+                bar_px = float(panel["bar_px"])
+                if bar_text and bar_px > 0:
+                    scale_left = self.scale_bar_position == "bottom-left"
+                    bar_x = x + (12 if scale_left else panel_w - bar_px - 12)
+                    bar_y = y + panel_h - 12
+                    elements.extend([
+                        f'<rect x="{bar_x + 1:g}" y="{bar_y + 1:g}" width="{bar_px:g}" height="5" fill="#000" fill-opacity="0.5"/>',
+                        f'<rect x="{bar_x:g}" y="{bar_y:g}" width="{bar_px:g}" height="5" fill="#fff"/>',
+                        f'<text x="{bar_x + bar_px / 2 + 1:g}" y="{bar_y - 3:g}" text-anchor="middle" '
+                        'font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" '
+                        f'font-size="16" fill="#000" fill-opacity="0.85">{esc_text(bar_text)}</text>',
+                        f'<text x="{bar_x + bar_px / 2:g}" y="{bar_y - 4:g}" text-anchor="middle" '
+                        'font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" '
+                        f'font-size="16" fill="#fff">{esc_text(bar_text)}</text>',
+                    ])
+                    if self.show_zoom_indicator:
+                        zoom_text = f"{min(max(float(self.initial_zoom) or 1.0, 0.5), 20.0):.1f}×"
+                        zoom_x = x + (panel_w - 12 if scale_left else 12)
+                        anchor = "end" if scale_left else "start"
+                        elements.extend([
+                            f'<text x="{zoom_x + 1:g}" y="{y + panel_h - 6:g}" text-anchor="{anchor}" '
+                            'font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" '
+                            f'font-size="16" fill="#000" fill-opacity="0.85">{esc_text(zoom_text)}</text>',
+                            f'<text x="{zoom_x:g}" y="{y + panel_h - 7:g}" text-anchor="{anchor}" '
+                            'font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" '
+                            f'font-size="16" fill="#fff">{esc_text(zoom_text)}</text>',
+                        ])
+                elements.append("</g>")
+            y += row_h + (gap if row_idx < len(row_heights) - 1 else 0)
+
+        elements.append("</svg>")
+        export_path.write_text("\n".join(elements), encoding="utf-8")
+        return export_path
+
+    def _default_svg_export_path(self) -> pathlib.Path:
+        """Default local filename for scripted Show2D SVG export."""
+        slug = "".join(c.lower() if c.isalnum() else "_" for c in (self.title or "show2d"))
+        while "__" in slug:
+            slug = slug.replace("__", "_")
+        slug = slug.strip("_") or "show2d"
+        shape = f"{self.n_images}x{self.height}x{self.width}" if int(self.n_images) > 1 else f"{self.height}x{self.width}"
+        return pathlib.Path.cwd() / f"{slug}_{shape}.svg"
 
     @property
     def view_corner(self):

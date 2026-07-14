@@ -31,7 +31,7 @@ import DragIndicatorIcon from "@mui/icons-material/DragIndicator";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import { useTheme } from "../theme";
 import { useCanvasRepaintSignal } from "../canvasLifecycle";
-import { drawScaleBarHiDPI, drawColorbar, formatZoomLabel, roundToNiceValue } from "../figure";
+import { drawScaleBarHiDPI, drawColorbar, formatScaleLabel, formatZoomLabel, roundToNiceValue } from "../figure";
 import { extractBytes, extractFloat32, formatNumber, downloadBlob, preserveRestoredWidgetModelsOnSave } from "../format";
 import { useHideStaticFallback } from "../staticFallback";
 import { computeHistogramFromBytes, findDataRange, applyLogScale, percentileClip, sliderRange, computeStats } from "../stats";
@@ -619,6 +619,120 @@ function makeHtmlExportFilename(title: string, nImages: number, height: number, 
   const shape = nImages > 1 ? `${nImages}x${height}x${width}` : `${height}x${width}`;
   const suffix = mode === "quantized" ? "quantized" : mode === "current" ? "current" : "exact";
   return `${slug}_${shape}_${suffix}.html`;
+}
+
+function makeSvgExportFilename(title: string, nImages: number, height: number, width: number, scale: number): string {
+  let slug = (title || "show2d")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  while (slug.includes("__")) slug = slug.replace(/__/g, "_");
+  if (!slug) slug = "show2d";
+  const shape = nImages > 1 ? `${nImages}x${height}x${width}` : `${height}x${width}`;
+  return `${slug}_${shape}_svg_${scale}x.svg`;
+}
+
+function escapeXmlText(value: unknown): string {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function escapeXmlAttr(value: unknown): string {
+  return escapeXmlText(value).replace(/"/g, "&quot;");
+}
+
+function measureSvgTextWidth(text: string, fontSize: number): number {
+  const canvas = document.createElement("canvas");
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return text.length * fontSize * 0.55;
+  ctx.font = `700 ${fontSize}px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif`;
+  return ctx.measureText(text).width;
+}
+
+function wrapSvgTextLines(text: string, fontSize: number, maxWidth: number, maxLines: number = 3): string[] {
+  const words = String(text || "").trim().split(/\s+/).filter(Boolean);
+  if (words.length === 0) return [];
+  const lines: string[] = [];
+  let current = "";
+
+  const pushCurrent = () => {
+    if (current) {
+      lines.push(current);
+      current = "";
+    }
+  };
+
+  const appendLongWord = (word: string) => {
+    let fragment = "";
+    for (const char of word) {
+      const candidate = fragment + char;
+      if (fragment && measureSvgTextWidth(candidate, fontSize) > maxWidth) {
+        lines.push(fragment);
+        fragment = char;
+        if (lines.length >= maxLines) return;
+      } else {
+        fragment = candidate;
+      }
+    }
+    current = fragment;
+  };
+
+  for (const word of words) {
+    if (lines.length >= maxLines) break;
+    const candidate = current ? `${current} ${word}` : word;
+    if (measureSvgTextWidth(candidate, fontSize) <= maxWidth) {
+      current = candidate;
+      continue;
+    }
+    pushCurrent();
+    if (lines.length >= maxLines) break;
+    if (measureSvgTextWidth(word, fontSize) <= maxWidth) {
+      current = word;
+    } else {
+      appendLongWord(word);
+    }
+  }
+  pushCurrent();
+  return lines.slice(0, maxLines);
+}
+
+function scaledCanvasPngDataUrl(canvas: HTMLCanvasElement, scale: number, smooth: boolean): string {
+  const exportScale = Math.max(1, Math.min(8, Number.isFinite(scale) ? scale : 2));
+  const out = document.createElement("canvas");
+  out.width = Math.max(1, Math.round(canvas.width * exportScale));
+  out.height = Math.max(1, Math.round(canvas.height * exportScale));
+  const ctx = out.getContext("2d");
+  if (!ctx) return canvas.toDataURL("image/png");
+  ctx.imageSmoothingEnabled = smooth;
+  ctx.drawImage(canvas, 0, 0, out.width, out.height);
+  return out.toDataURL("image/png");
+}
+
+function show2dScaleBarGeometry(
+  cssWidth: number,
+  cssHeight: number,
+  imageWidth: number,
+  zoom: number,
+  pixelSize: number,
+  unit: string,
+  position: string,
+): { barX: number; barY: number; barPx: number; label: string; scaleLeft: boolean } | null {
+  if (cssWidth <= 0 || cssHeight <= 0 || imageWidth <= 0 || pixelSize <= 0 || zoom <= 0) return null;
+  const scaleX = cssWidth / imageWidth;
+  const effectiveZoom = zoom * scaleX;
+  if (effectiveZoom <= 0) return null;
+  const nicePhysical = roundToNiceValue((60 / effectiveZoom) * pixelSize);
+  const barPx = (nicePhysical / pixelSize) * effectiveZoom;
+  const scaleLeft = position === "bottom-left";
+  return {
+    barX: scaleLeft ? 12 : cssWidth - barPx - 12,
+    barY: cssHeight - 12,
+    barPx,
+    label: formatScaleLabel(nicePhysical, unit),
+    scaleLeft,
+  };
 }
 
 function formatSavedBytes(bytes: number): string {
@@ -7512,6 +7626,176 @@ function Show2D() {
     }
   }, [isGallery, selectedIdx, labels]);
 
+  const handleSvgExport = React.useCallback(async (scale: number = 3) => {
+    setExportAnchor(null);
+    const exportScale = Math.max(1, Math.min(8, Math.round(Number(scale) || 2)));
+    const panels = isGallery ? visibleImageIndices : [0];
+    if (panels.length === 0 || canvasW <= 0 || canvasH <= 0) {
+      setLocalExportStatus("Export failed: no visible Show2D panels");
+      return;
+    }
+    const cols = isGallery ? Math.max(1, Math.min(clampedNcols, panels.length)) : 1;
+    const rows = Math.max(1, Math.ceil(panels.length / cols));
+    const gap = isGallery ? galleryGapPx : 0;
+    const titleHeight = showTitle !== false && title ? 30 : 0;
+    const svgWidth = cols * canvasW + (cols - 1) * gap;
+    const svgHeight = titleHeight + rows * canvasH + (rows - 1) * gap;
+    const filename = makeSvgExportFilename(title, panels.length, height, width, exportScale);
+
+    try {
+      const defs: string[] = [];
+      const body: string[] = [];
+      if (titleHeight > 0) {
+        body.push(
+          `<text x="${svgWidth / 2}" y="19" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="14" font-weight="700" fill="${escapeXmlAttr(themeColors.text)}">${escapeXmlText(title)}</text>`
+        );
+      }
+
+      groupMarkerOverlays.forEach((marker) => {
+        body.push(
+          `<rect x="${marker.left}" y="${titleHeight + marker.top}" width="${marker.width}" height="${marker.height}" fill="none" stroke="${escapeXmlAttr(marker.color)}" stroke-width="3"/>`,
+          `<rect x="${marker.left + 3}" y="${titleHeight + marker.top + 3}" width="${Math.max(0, marker.width - 6)}" height="${Math.max(0, marker.height - 6)}" fill="none" stroke="#000" stroke-opacity="0.9" stroke-width="2"/>`
+        );
+      });
+
+      for (let slot = 0; slot < panels.length; slot += 1) {
+        const panel = panels[slot];
+        const canvas = canvasRefs.current[panel];
+        if (!canvas) continue;
+        const col = slot % cols;
+        const row = Math.floor(slot / cols);
+        const x = col * (canvasW + gap);
+        const y = titleHeight + row * (canvasH + gap);
+        const clipId = `show2d-svg-clip-${slot}`;
+        defs.push(`<clipPath id="${clipId}"><rect x="${x}" y="${y}" width="${canvasW}" height="${canvasH}"/></clipPath>`);
+        const dataUrl = scaledCanvasPngDataUrl(canvas, exportScale, smooth);
+        body.push(
+          `<g id="show2d-panel-${panel}" data-show2d-panel="${panel}">`,
+          `<rect x="${x}" y="${y}" width="${canvasW}" height="${canvasH}" fill="#000"/>`,
+          `<image x="${x}" y="${y}" width="${canvasW}" height="${canvasH}" href="${escapeXmlAttr(dataUrl)}" preserveAspectRatio="none"/>`,
+          `<rect x="${x}" y="${y}" width="${canvasW}" height="${canvasH}" fill="none" stroke="${escapeXmlAttr(themeColors.border)}" stroke-width="1"/>`
+        );
+        const markerColor = panelMarkerColor(panel);
+        if (markerAround) {
+          body.push(
+            `<rect x="${x + 1.5}" y="${y + 1.5}" width="${Math.max(0, canvasW - 3)}" height="${Math.max(0, canvasH - 3)}" fill="none" stroke="${escapeXmlAttr(markerColor)}" stroke-width="3"/>`,
+            `<rect x="${x + 4}" y="${y + 4}" width="${Math.max(0, canvasW - 8)}" height="${Math.max(0, canvasH - 8)}" fill="none" stroke="#000" stroke-opacity="0.9" stroke-width="2"/>`
+          );
+        } else {
+          body.push(`<rect x="${x}" y="${y}" width="5" height="${canvasH}" fill="${escapeXmlAttr(markerColor)}"/>`);
+        }
+
+        if (showPanelTitles !== false) {
+          const label = panelTitleText(panel);
+          if (label) {
+            const fontSize = Math.max(8, panelTitleFontSize || 11);
+            const titleLines = wrapSvgTextLines(label, fontSize, Math.max(24, canvasW - 56), 3);
+            body.push(
+              `<g clip-path="url(#${clipId})">`
+            );
+            titleLines.forEach((line, lineIdx) => {
+              const lineY = y + 6 + fontSize + lineIdx * fontSize * 1.2;
+              body.push(
+                `<text x="${x + canvasW / 2 + 1}" y="${lineY + 1}" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="${fontSize}" font-weight="700" fill="#000" fill-opacity="0.85">${escapeXmlText(line)}</text>`,
+                `<text x="${x + canvasW / 2}" y="${lineY}" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="${fontSize}" font-weight="700" fill="#fff" fill-opacity="0.95">${escapeXmlText(line)}</text>`
+              );
+            });
+            body.push(`</g>`);
+          }
+        }
+
+        if (scaleBarVisible) {
+          const zs = getZoomState(panel);
+          const panelPixelSize = pixelSizeForPanel(panel);
+          const pxSize = panelPixelSize > 0 ? panelPixelSize : 1;
+          const unit = panelPixelSize > 0 ? pixelUnit : "px";
+          const geom = show2dScaleBarGeometry(canvasW, canvasH, width, zs.zoom, pxSize, unit, scaleBarPosition);
+          if (geom) {
+            const barY = y + geom.barY;
+            const barX = x + geom.barX;
+            body.push(
+              `<rect x="${barX + 1}" y="${barY + 1}" width="${geom.barPx}" height="5" fill="#000" fill-opacity="0.5"/>`,
+              `<rect x="${barX}" y="${barY}" width="${geom.barPx}" height="5" fill="#fff"/>`,
+              `<text x="${barX + geom.barPx / 2 + 1}" y="${barY - 4 + 1}" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="16" fill="#000" fill-opacity="0.85">${escapeXmlText(geom.label)}</text>`,
+              `<text x="${barX + geom.barPx / 2}" y="${barY - 4}" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="16" fill="#fff">${escapeXmlText(geom.label)}</text>`
+            );
+            if (showZoomIndicator) {
+              const zoomX = geom.scaleLeft ? x + canvasW - 12 : x + 12;
+              const anchor = geom.scaleLeft ? "end" : "start";
+              const zoomText = formatZoomLabel(zs.zoom);
+              body.push(
+                `<text x="${zoomX + 1}" y="${y + canvasH - 12 + 5 + 1}" text-anchor="${anchor}" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="16" fill="#000" fill-opacity="0.85">${escapeXmlText(zoomText)}</text>`,
+                `<text x="${zoomX}" y="${y + canvasH - 12 + 5}" text-anchor="${anchor}" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="16" fill="#fff">${escapeXmlText(zoomText)}</text>`
+              );
+            }
+          }
+        }
+        body.push("</g>");
+      }
+
+      const svg = [
+        `<?xml version="1.0" encoding="UTF-8"?>`,
+        `<svg xmlns="http://www.w3.org/2000/svg" width="${svgWidth}" height="${svgHeight}" viewBox="0 0 ${svgWidth} ${svgHeight}" role="img" aria-label="${escapeXmlAttr(title || "Show2D SVG export")}" data-show2d-svg-export="true" data-raster-scale="${exportScale}">`,
+        `<defs>${defs.join("")}</defs>`,
+        body.join(""),
+        `</svg>`,
+      ].join("\n");
+      const blob = new Blob([svg], { type: "image/svg+xml;charset=utf-8" });
+      const picker = (window as Show2DWindow).showSaveFilePicker;
+      let handle: Show2DFileHandle | null = null;
+      if (picker) {
+        try {
+          handle = await picker({
+            suggestedName: filename,
+            types: [{ description: "SVG image", accept: { "image/svg+xml": [".svg"] } }],
+          });
+        } catch (err) {
+          if (isAbortLikeError(err)) {
+            setLocalExportStatus("Export canceled");
+            return;
+          }
+          throw err;
+        }
+      }
+      if (handle) {
+        const writable = await handle.createWritable();
+        await writable.write(blob);
+        await writable.close();
+      } else {
+        downloadBlob(blob, filename);
+      }
+      setLocalExportStatus(`Saved ${filename} (${formatSavedBytes(blob.size)})`);
+    } catch (err) {
+      setLocalExportStatus(`Export failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }, [
+    canvasH,
+    canvasW,
+    clampedNcols,
+    galleryGapPx,
+    getZoomState,
+    groupMarkerOverlays,
+    height,
+    isGallery,
+    markerAround,
+    panelMarkerColor,
+    panelTitleFontSize,
+    panelTitleText,
+    pixelSizeForPanel,
+    pixelUnit,
+    scaleBarPosition,
+    scaleBarVisible,
+    showPanelTitles,
+    showTitle,
+    showZoomIndicator,
+    smooth,
+    themeColors.border,
+    themeColors.text,
+    title,
+    visibleImageIndices,
+    width,
+  ]);
+
   const handleHandoffToShow3D = React.useCallback(() => {
     const panels = visibleImageIndices;
     setViewMenuAnchor(null);
@@ -7699,6 +7983,7 @@ function Show2D() {
   const needsReset = getZoomState(isGallery ? selectedIdx : 0).zoom !== 1 || getZoomState(isGallery ? selectedIdx : 0).panX !== 0 || getZoomState(isGallery ? selectedIdx : 0).panY !== 0;
   const statsIdx = isGallery ? selectedIdx : 0;
   const currentFrameStats = localPanelFrameStats.get(statsIdx);
+  const svgExportAvailable = canvasW > 0 && canvasH > 0 && visibleImageIndices.length > 0;
 
   // Calibrated cursor position - unit is whatever the user passed via sampling/units.
   const calibratedUnit = pixelSize > 0 ? pixelUnit : "";
@@ -8721,13 +9006,14 @@ function Show2D() {
               <Button
                 size="small"
                 sx={{ ...compactButton, color: themeColors.accent }}
-                disabled={exportBusy || (!exportEnabled && !canDownloadCurrentHtml)}
+                disabled={exportBusy || (!exportEnabled && !canDownloadCurrentHtml && !svgExportAvailable)}
                 onClick={(e) => { setExportAnchor(e.currentTarget); }}
-                title={localExportStatus || exportStatus || (exportEnabled ? "Export standalone HTML" : canDownloadCurrentHtml ? "Export this standalone HTML" : "Export unavailable for this data")}
+                title={localExportStatus || exportStatus || (svgExportAvailable ? "Export SVG or standalone HTML" : exportEnabled ? "Export standalone HTML" : canDownloadCurrentHtml ? "Export this standalone HTML" : "Export unavailable for this data")}
               >
                 {exportBusy ? "Exporting" : "Export"}
               </Button>
               <Menu anchorEl={exportAnchor} open={Boolean(exportAnchor)} onClose={() => setExportAnchor(null)} anchorOrigin={{ vertical: "bottom", horizontal: "right" }} transformOrigin={{ vertical: "top", horizontal: "right" }} {...themedTopMenuProps}>
+                {svgExportAvailable && <MenuItem onClick={() => handleSvgExport(3)} sx={{ fontSize: 12 }}>SVG</MenuItem>}
                 {exportEnabled && <MenuItem onClick={() => handleHtmlExportSelect("exact")} sx={{ fontSize: 12 }}>HTML exact float32 ({exactHtmlSize})</MenuItem>}
                 {exportEnabled && <MenuItem onClick={() => handleHtmlExportSelect("quantized")} sx={{ fontSize: 12 }}>HTML quantized uint8 ({quantizedHtmlSize})</MenuItem>}
                 {canDownloadCurrentHtml && offline && <MenuItem disabled sx={{ fontSize: 12 }} title="This standalone export contains quantized uint8 data, not the original float32 array. Open the live widget to export exact float32.">{unavailableStandaloneHtmlLabel}</MenuItem>}

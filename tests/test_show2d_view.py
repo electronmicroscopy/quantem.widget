@@ -131,6 +131,76 @@ def test_inset_plot_can_broadcast_single_spec():
     assert all(plot["title"] == "score" for plot in w.inset_plots)
 
 
+def test_export_svg_writes_hybrid_figure(tmp_path):
+    """C1: multipanel figure, expect SVG vector chrome with embedded images."""
+    data = np.stack([_image(32), _image(32) * 0.5, _image(32) + 0.25])
+    w = Show2D(
+        data,
+        labels=["raw", "filtered", "residual"],
+        title="Show2D Figure",
+        ncols=2,
+        sampling=0.2,
+        units="nm",
+        marker_colors=["#2e7d32", "#c62828", "#1565c0"],
+        verbose=False,
+    )
+
+    out = w.export_svg(tmp_path / "figure.svg")
+    svg = out.read_text(encoding="utf-8")
+
+    assert out.name == "figure.svg"
+    assert 'data-show2d-svg-export="true"' in svg
+    assert 'data-raster-scale="3"' in svg
+    assert svg.count("<image ") == 3
+    assert "data:image/png;base64," in svg
+    assert ">Show2D Figure<" in svg
+    assert ">raw<" in svg
+    assert ">filtered<" in svg
+    assert ">residual<" in svg
+    assert "nm<" in svg
+    assert 'fill="#2e7d32"' in svg
+
+
+def test_export_svg_respects_hidden_panels_and_order(tmp_path):
+    """C2: curated gallery state, expect SVG follows visible panel order."""
+    data = np.stack([_image(16) + i for i in range(4)])
+    w = Show2D(data, labels=["a", "b", "c", "d"], ncols=3, verbose=False)
+    w.set_panel_order([2, 0, 3, 1])
+    w.hide_panel(0)
+
+    out = w.export_svg(tmp_path / "ordered.svg", scale=3, include_scale_bar=False)
+    svg = out.read_text(encoding="utf-8")
+
+    assert 'data-raster-scale="3"' in svg
+    assert svg.count("<image ") == 3
+    assert 'data-show2d-panel="2"' in svg
+    assert 'data-show2d-panel="3"' in svg
+    assert 'data-show2d-panel="1"' in svg
+    assert 'data-show2d-panel="0"' not in svg
+    assert ">c<" in svg
+    assert ">d<" in svg
+    assert ">b<" in svg
+
+
+def test_export_svg_wraps_long_panel_labels(tmp_path):
+    """C3: long panel label, expect exported SVG uses multiple text lines."""
+    w = Show2D(
+        _image(32),
+        labels=["alpha beta gamma delta epsilon"],
+        size=120,
+        panel_title_font_size=10,
+        verbose=False,
+    )
+
+    out = w.export_svg(tmp_path / "wrapped.svg")
+    svg = out.read_text(encoding="utf-8")
+
+    assert ">alpha beta<" in svg
+    assert ">gamma delta<" in svg
+    assert ">epsilon<" in svg
+    assert ">alpha beta gamma delta epsilon<" not in svg
+
+
 def test_current_view_uses_zoom_center():
     w = Show2D(_image(128), zoom=4.0, zoom_row=16.0, zoom_col=112.0, verbose=False)
     view = w.current_view
