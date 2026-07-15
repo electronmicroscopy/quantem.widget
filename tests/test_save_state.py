@@ -893,7 +893,7 @@ def test_show3d_quantized_html_export_can_bin_heavy_stacks(tmp_path):
 
     out = widget.export_html(tmp_path / "binned.html", encoding="uint8", downsample=4)
     assert out.exists()
-    assert "4x binned" in widget.export_status
+    assert "4x downsample" in widget.export_status
     with pytest.raises(ValueError, match="exact float32"):
         widget.export_html(tmp_path / "bad.html", encoding="full", downsample=2)
     widget.close()

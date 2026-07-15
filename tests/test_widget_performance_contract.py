@@ -335,8 +335,8 @@ def test_show_panel_chrome_uses_rich_labels_and_collapsed_export():
     assert "{panelTitleContent(panel)}" in show3d
     assert "{panelTitleContent(statsIdx)}" in show2d
     assert "{panelTitleContent(st.panel)}" in show3d
-    assert "showAnimationExportOptions = exportEnabled || canDownloadCurrentHtml" in show3d
-    assert "GIF and MP4 export require the live Python backend" in show3d
+    assert "disabled = isGif ? !(exportEnabled || canExportStandaloneGif) : !exportEnabled" in show3d
+    assert "MP4 export requires the live Python backend" in show3d
 
 
 def test_show2d_fft_gallery_quality_labels_stay_readable():
