@@ -289,6 +289,12 @@ function Histogram({ data, vminPct, vmaxPct, onRangeChange, onRangePreview, onRa
   const emitRangeCommit = React.useCallback((min: number, max: number) => {
     (onRangeCommitRef.current || onRangeChangeRef.current)(min, max);
   }, []);
+  const applySliderValue = (v: number | number[], emit: (min: number, max: number) => void) => {
+    const [newMin, newMax] = v as number[];
+    const next: [number, number] = [Math.min(newMin, newMax - 1), Math.max(newMax, newMin + 1)];
+    setLiveRange(next);
+    emit(next[0], next[1]);
+  };
   const flushRangePreview = React.useCallback(() => {
     if (rangeRafRef.current != null) {
       window.cancelAnimationFrame(rangeRafRef.current);
@@ -368,18 +374,8 @@ function Histogram({ data, vminPct, vmaxPct, onRangeChange, onRangePreview, onRa
         >
           <Slider
             value={liveRange}
-            onChange={(_, v) => {
-              const [newMin, newMax] = v as number[];
-              const next: [number, number] = [Math.min(newMin, newMax - 1), Math.max(newMax, newMin + 1)];
-              setLiveRange(next);
-              emitRangePreview(next[0], next[1]);
-            }}
-            onChangeCommitted={(_, v) => {
-              const [newMin, newMax] = v as number[];
-              const next: [number, number] = [Math.min(newMin, newMax - 1), Math.max(newMax, newMin + 1)];
-              setLiveRange(next);
-              emitRangeCommit(next[0], next[1]);
-            }}
+            onChange={(_, v) => applySliderValue(v, emitRangePreview)}
+            onChangeCommitted={(_, v) => applySliderValue(v, emitRangeCommit)}
             min={0} max={100} size="small" valueLabelDisplay="auto"
             valueLabelFormat={formatValue}
             sx={{
@@ -1351,13 +1347,7 @@ function ShowDiffraction() {
       pendingTapRef.current = { x: e.clientX, y: e.clientY, row, col };
       return;
     }
-    // Manual center
-    if (centerMode === "manual") {
-      setCenterRow(row);
-      setCenterCol(col);
-      return;
-    }
-    setSpotAddRequest([row, col]);
+    commitTapAction(row, col);
   };
 
   const commitTapAction = (row: number, col: number) => {
@@ -1684,7 +1674,7 @@ function ShowDiffraction() {
                   >
                     Export
                   </Button>
-                  <Menu anchorEl={dpExportAnchor} open={Boolean(dpExportAnchor)} onClose={() => setDpExportAnchor(null)} anchorOrigin={{ vertical: "bottom", horizontal: "left" }} transformOrigin={{ vertical: "top", horizontal: "left" }} sx={{ zIndex: 9999 }}>
+                  <Menu anchorEl={dpExportAnchor} open={Boolean(dpExportAnchor)} onClose={() => setDpExportAnchor(null)} {...downwardMenuProps}>
                     <MenuItem onClick={handleExportPng} sx={{ fontSize: 12 }}>PNG</MenuItem>
                     {exportEnabled && <MenuItem onClick={handleExportHtml} sx={{ fontSize: 12 }}>HTML</MenuItem>}
                   </Menu>
@@ -1748,7 +1738,7 @@ function ShowDiffraction() {
             </Stack>
           )}
 
-          <Menu anchorEl={phaseMenuAnchor} open={Boolean(phaseMenuAnchor)} onClose={() => setPhaseMenuAnchor(null)} anchorOrigin={{ vertical: "bottom", horizontal: "left" }} transformOrigin={{ vertical: "top", horizontal: "left" }} sx={{ zIndex: 9999 }}>
+          <Menu anchorEl={phaseMenuAnchor} open={Boolean(phaseMenuAnchor)} onClose={() => setPhaseMenuAnchor(null)} {...downwardMenuProps}>
             <Box sx={{ px: 1.5, py: 0.5, width: "min(300px, calc(100vw - 48px))", boxSizing: "border-box", bgcolor: themeColors.controlBg }}>
               <Typography sx={{ ...typography.label, mb: 0.5 }}>Phase library</Typography>
               <Box sx={{ maxHeight: 180, overflow: "auto", border: `1px solid ${themeColors.border}`, mb: 1 }}>
@@ -1801,7 +1791,7 @@ function ShowDiffraction() {
             </Box>
           </Menu>
 
-          <Menu anchorEl={maskMenuAnchor} open={Boolean(maskMenuAnchor)} onClose={() => setMaskMenuAnchor(null)} anchorOrigin={{ vertical: "bottom", horizontal: "left" }} transformOrigin={{ vertical: "top", horizontal: "left" }} sx={{ zIndex: 9999 }}>
+          <Menu anchorEl={maskMenuAnchor} open={Boolean(maskMenuAnchor)} onClose={() => setMaskMenuAnchor(null)} {...downwardMenuProps}>
             <Box sx={{ px: 1.5, py: 0.5, width: "min(290px, calc(100vw - 48px))", boxSizing: "border-box", bgcolor: themeColors.controlBg }}>
               <Typography sx={{ ...typography.label, mb: 0.5 }}>Excluded regions</Typography>
               {(maskRegions || []).map((region, i) => (
@@ -1837,7 +1827,7 @@ function ShowDiffraction() {
             </Box>
           </Menu>
 
-          <Menu anchorEl={refineMenuAnchor} open={Boolean(refineMenuAnchor)} onClose={() => setRefineMenuAnchor(null)} anchorOrigin={{ vertical: "bottom", horizontal: "left" }} transformOrigin={{ vertical: "top", horizontal: "left" }} sx={{ zIndex: 9999 }}>
+          <Menu anchorEl={refineMenuAnchor} open={Boolean(refineMenuAnchor)} onClose={() => setRefineMenuAnchor(null)} {...downwardMenuProps}>
             <Box sx={{ px: 1.5, py: 0.5, width: "min(210px, calc(100vw - 48px))", boxSizing: "border-box", bgcolor: themeColors.controlBg }}>
               <Typography sx={{ ...typography.label, mb: 0.5 }}>Refine center</Typography>
               <Stack direction="row" spacing={`${SPACING.XS}px`} alignItems="center">

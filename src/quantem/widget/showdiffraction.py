@@ -694,7 +694,7 @@ def center_phase_correlation(
         candidates = interior
     if not candidates:
         candidates = [((n_rows - 1) / 2.0, (n_cols - 1) / 2.0)]
-    scored = [(r, c, _symmetry(frame, (r, c), mask=mask)) for r, c in candidates]
+    scored = [(r, c, _symmetry_score(frame, (r, c), mask=mask)) for r, c in candidates]
     best = max(score for _, _, score in scored)
     mid = ((n_rows - 1) / 2.0, (n_cols - 1) / 2.0)
     row, col, _ = min(
@@ -705,7 +705,7 @@ def center_phase_correlation(
 
 
 # --- Quality metrics ---
-def _symmetry(
+def _symmetry_score(
     frame: np.ndarray, center: tuple[float, float], mask: np.ndarray | None = None
 ) -> float:
     # Friedel symmetry
@@ -790,8 +790,8 @@ def pick_center(
         p_row, p_col = center_phase_correlation(frame, mask=mask)
         s_row, s_col = center_symmetry(frame, guess=guess, search_radius=search_radius, mask=mask)
         candidates = [
-            ("phase_corr", p_row, p_col, _symmetry(frame, (p_row, p_col), mask=mask)),
-            ("symmetry", s_row, s_col, _symmetry(frame, (s_row, s_col), mask=mask)),
+            ("phase_corr", p_row, p_col, _symmetry_score(frame, (p_row, p_col), mask=mask)),
+            ("symmetry", s_row, s_col, _symmetry_score(frame, (s_row, s_col), mask=mask)),
         ]
         name, row, col, _ = max(candidates, key=lambda c: c[3])
     else:
@@ -2128,18 +2128,20 @@ class ShowDiffraction(anywidget.AnyWidget):
         self.observe(self._update_azimuthal, names=["show_azimuthal", "rings", "frame_idx"])
         self.observe(self._on_export_request_change, names=["export_request"])
 
-    def _load_initial_state(self, state) -> None:
-        if state is None:
-            return
+    @staticmethod
+    def _resolve_state(state) -> dict:
         if isinstance(state, (str, pathlib.Path)):
-            state = unwrap_state_payload(
+            return unwrap_state_payload(
                 json.loads(pathlib.Path(state).read_text()),
                 require_envelope=True,
                 expected_widget="ShowDiffraction",
             )
-        else:
-            state = unwrap_state_payload(state, expected_widget="ShowDiffraction")
-        self.load_state_dict(state)
+        return unwrap_state_payload(state, expected_widget="ShowDiffraction")
+
+    def _load_initial_state(self, state) -> None:
+        if state is None:
+            return
+        self.load_state_dict(self._resolve_state(state))
 
     def _ingest_data(self, data):
         array = to_numpy(data)
@@ -2340,11 +2342,7 @@ class ShowDiffraction(anywidget.AnyWidget):
             delta_row, delta_col = self._spot_vector(spot)
             radius = math.hypot(delta_row, delta_col)
             if ref_radius > 0 and radius > 0:
-                cos_a = max(
-                    -1.0,
-                    min(1.0, (ref_row * delta_row + ref_col * delta_col) / (ref_radius * radius)),
-                )
-                angle = math.degrees(math.acos(cos_a))
+                angle = self._measured_angle(reference, spot)
                 spot_error = math.hypot(spot.get("row_err", 0.0), spot.get("col_err", 0.0))
                 angle_err = math.degrees(math.hypot(spot_error / radius, ref_error / ref_radius))
             else:
@@ -3562,6 +3560,14 @@ class ShowDiffraction(anywidget.AnyWidget):
         )
         return self
 
+    def _apply_calibration(self, d_known: float, r_pixels: float, source: str) -> Self:
+        self.k_pixel_size = 1.0 / (d_known * r_pixels)
+        self.k_calibrated = True
+        self.calibration_source = source
+        self.calibration_ref_d = float(d_known)
+        self.calibration_ref_radius = float(r_pixels)
+        return self
+
     def calibrate_from_spot(self, row: float, col: float, d_known: float) -> Self:
         """Calibrate ``k_pixel_size`` from a spot of known d-spacing."""
         if d_known <= 0:
@@ -3577,12 +3583,7 @@ class ShowDiffraction(anywidget.AnyWidget):
         )
         if r_pixels <= 0:
             raise ValueError("calibration point is at the center; no g-vector")
-        self.k_pixel_size = 1.0 / (d_known * r_pixels)
-        self.k_calibrated = True
-        self.calibration_source = "from_spot"
-        self.calibration_ref_d = float(d_known)
-        self.calibration_ref_radius = float(r_pixels)
-        return self
+        return self._apply_calibration(d_known, r_pixels, "from_spot")
 
     def calibrate_from_ring(self, radius_px: float, d_known: float) -> Self:
         """Calibrate ``k_pixel_size`` from a ring of known d-spacing."""
@@ -3590,12 +3591,7 @@ class ShowDiffraction(anywidget.AnyWidget):
             raise ValueError(f"d_known must be positive, got {d_known}")
         if radius_px <= 0:
             raise ValueError(f"radius_px must be positive, got {radius_px}")
-        self.k_pixel_size = 1.0 / (d_known * radius_px)
-        self.k_calibrated = True
-        self.calibration_source = "from_ring"
-        self.calibration_ref_d = float(d_known)
-        self.calibration_ref_radius = float(radius_px)
-        return self
+        return self._apply_calibration(d_known, radius_px, "from_ring")
 
     def calibrate_from_phase(self, phase: Phase, *, tol: float = 0.03, d_min: float = 0.5) -> Self:
         """Fit ``k_pixel_size`` by assigning ring-radius ratios to a known phase."""
@@ -3708,14 +3704,7 @@ class ShowDiffraction(anywidget.AnyWidget):
     @classmethod
     def measurements_from_state(cls, state, path=None):
         """Rebuild the measurement table from a saved state."""
-        if isinstance(state, (str, pathlib.Path)):
-            state = unwrap_state_payload(
-                json.loads(pathlib.Path(state).read_text()),
-                require_envelope=True,
-                expected_widget="ShowDiffraction",
-            )
-        else:
-            state = unwrap_state_payload(state, expected_widget="ShowDiffraction")
+        state = cls._resolve_state(state)
         records = build_measurement_records(state.get("spots", []), state.get("rings", []))
         if path is None:
             return records
