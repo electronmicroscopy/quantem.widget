@@ -1,5 +1,6 @@
 import json
 import math
+import sys
 
 import numpy as np
 import pytest
@@ -480,12 +481,15 @@ def test_showdiffraction_detect_spots_and_rings():
         assert any(abs(f - target) < 3 for f in found)
 
 
-def test_detect_rings_scipy_import_precedes_clear():
-    # a scipy-less detect click must not wipe manually added rings
-    import inspect
-
-    source = inspect.getsource(ShowDiffraction.detect_rings)
-    assert source.index("from scipy") < source.index("self.clear_rings()")
+def test_detect_rings_without_scipy_keeps_manual_rings(monkeypatch):
+    # a scipy-less detect must not wipe manually added rings
+    dp, cen = _ring_dp([60.0], background="power")
+    w = ShowDiffraction(dp, verbose=False)
+    w.set_center(*cen)
+    w.add_ring(60.0)
+    monkeypatch.setitem(sys.modules, "scipy.signal", None)
+    w.detect_rings()
+    assert any(abs(r["radius_px"] - 60.0) < 1.0 for r in w.rings)
 
 
 def _dp(
@@ -1521,19 +1525,22 @@ def test_export_html_includes_identify_and_quality(tmp_path):
     assert w._identify_results[0]["name"] in html
 
 
-def test_run_auto():
-    # full pipeline in one call
+def _au_saed_pattern(size=512, cenpx=255.5, k=0.004):
     from quantem.widget import library_phase
 
     au = library_phase("Au")
-    size, cenpx = 512, 255.5
     rows = np.arange(size, dtype=np.float64)[:, None]
     cols = np.arange(size, dtype=np.float64)[None, :]
     r = np.hypot(rows - cenpx, cols - cenpx)
     pat = 300.0 * np.exp(-(r**2) / (2 * 8.0**2)) + 20.0 * np.exp(-r / 40.0)
     for refl in au.reflections(d_min=1.2):
-        pat += 30.0 * np.exp(-((r - 1.0 / (refl["d"] * 0.004)) ** 2) / (2 * 2.5**2))
-    w = ShowDiffraction(pat.astype(np.float32), verbose=False)
+        pat += 30.0 * np.exp(-((r - 1.0 / (refl["d"] * k)) ** 2) / (2 * 2.5**2))
+    return pat.astype(np.float32)
+
+
+def test_run_auto():
+    # full pipeline in one call
+    w = ShowDiffraction(_au_saed_pattern(), verbose=False)
     w.phase_name = "Au"
     w.run_auto(max_rings=4)
     assert abs(w.k_pixel_size - 0.004) / 0.004 < 0.02
@@ -1571,17 +1578,7 @@ def test_run_auto():
 def test_run_auto_calibrates_fitted_radii():
     # calibration uses profile-refined radii: replaying the least-squares scale
     # on the stored rings reproduces k exactly
-    from quantem.widget import library_phase
-
-    au = library_phase("Au")
-    size, cenpx = 512, 255.5
-    rows = np.arange(size, dtype=np.float64)[:, None]
-    cols = np.arange(size, dtype=np.float64)[None, :]
-    r = np.hypot(rows - cenpx, cols - cenpx)
-    pat = 300.0 * np.exp(-(r**2) / (2 * 8.0**2)) + 20.0 * np.exp(-r / 40.0)
-    for refl in au.reflections(d_min=1.2):
-        pat += 30.0 * np.exp(-((r - 1.0 / (refl["d"] * 0.004)) ** 2) / (2 * 2.5**2))
-    w = ShowDiffraction(pat.astype(np.float32), verbose=False)
+    w = ShowDiffraction(_au_saed_pattern(), verbose=False)
     w.phase_name = "Au"
     w.run_auto(max_rings=4)
     pairs = [(rng["radius_px"], 1.0 / rng["d_ref"]) for rng in w.rings if rng["hkl"]]
