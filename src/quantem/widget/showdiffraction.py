@@ -134,10 +134,10 @@ PHASE_LIBRARY = {
     "Al": {"a": 4.0494, "absences": "fcc"},  # NBS Circ. 539 v1 (Swanson & Tatge 1953)
     "Cu": {"a": 3.6149, "absences": "fcc"},  # Lu & Chang 1941 (NBS Circ. 539 v1)
     "Ni": {"a": 3.5238, "absences": "fcc"},  # NBS Circ. 539 v1 (Swanson & Tatge 1953)
-    "Pt": {"a": 3.9236, "absences": "fcc"},  # Arblaster 1997, Platin. Met. Rev. 41 12
-    "Pd": {"a": 3.8902, "absences": "fcc"},  # Arblaster 2012, Platin. Met. Rev. 56 181
+    "Pt": {"a": 3.9236, "absences": "fcc"},  # Arblaster 1997, Platin. Met. Rev. 41 12, doi:10.1595/003214097X4111221
+    "Pd": {"a": 3.8902, "absences": "fcc"},  # Arblaster 2012, Platin. Met. Rev. 56 181, doi:10.1595/147106712X646113
     "Pb": {"a": 4.9508, "absences": "fcc"},  # Klug 1946 (NBS Circ. 539 v1)
-    "Ir": {"a": 3.8392, "absences": "fcc"},  # Arblaster 2010, Platin. Met. Rev. 54 93
+    "Ir": {"a": 3.8392, "absences": "fcc"},  # Arblaster 2010, Platin. Met. Rev. 54 93, doi:10.1595/147106710X493124
     "Rh": {"a": 3.8034, "absences": "fcc"},  # Arblaster 1997, Platin. Met. Rev. 41 184
     # bcc metals
     "α-Fe": {"a": 2.8665, "absences": "bcc"},  # COD 9008536 (Wyckoff 1963)
@@ -168,7 +168,7 @@ PHASE_LIBRARY = {
     # fluorite
     "CaF2": {"a": 5.4630, "absences": "fcc"},  # COD 9009005 (Wyckoff 1963)
     "CeO2": {"a": 5.4115, "absences": "fcc"},  # NIST SRM 674b
-    "UO2": {"a": 5.4704, "absences": "fcc"},  # Grønvold 1955, J. Inorg. Nucl. Chem. 1 357
+    "UO2": {"a": 5.4704, "absences": "fcc"},  # Grønvold 1955, J. Inorg. Nucl. Chem. 1 357, doi:10.1016/0022-1902(55)80046-2
     # zincblende
     "GaAs": {"a": 5.6533, "absences": "fcc"},  # Straumanis & Kim 1965, J. Appl. Phys. 36 3822
     "GaP": {"a": 5.4505, "absences": "fcc"},  # COD 9008846 (Wyckoff 1963)
@@ -177,7 +177,7 @@ PHASE_LIBRARY = {
     "ZnS": {"a": 5.4093, "absences": "fcc"},  # COD 9000107 (Skinner 1961)
     "ZnSe": {"a": 5.6676, "absences": "fcc"},  # COD 9008857 (Wyckoff 1963)
     "CdTe": {"a": 6.4810, "absences": "fcc"},  # NBS Mono. 25 Sec. 3 (1964)
-    "3C-SiC": {"a": 4.3596, "absences": "fcc"},  # Sultan et al. 2022, Materials 15 6229
+    "3C-SiC": {"a": 4.3596, "absences": "fcc"},  # Sultan et al. 2022, Materials 15 6229, doi:10.3390/ma15186229
     "CuI": {"a": 6.0630, "absences": "fcc"},  # COD 9004456 (Cooper & Hawthorne 1997)
     # spinel
     "Fe3O4": {"a": 8.3967, "absences": "spinel"},  # COD 9013529 (Bosi et al. 2009)
@@ -185,7 +185,7 @@ PHASE_LIBRARY = {
     "MgAl2O4": {"a": 8.0836, "absences": "spinel"},  # COD 9002044 (Redfern et al. 1999)
     "Co3O4": {"a": 8.0821, "absences": "spinel"},  # COD 9005887 (Liu & Prewitt 1990)
     "CoFe2O4": {"a": 8.3806, "absences": "spinel"},  # COD 1533163 (Ferreira et al. 2003)
-    "NiFe2O4": {"a": 8.3390, "absences": "spinel"},  # Hill et al. 1979, Phys. Chem. Miner. 4 317
+    "NiFe2O4": {"a": 8.3390, "absences": "spinel"},  # Hill et al. 1979, Phys. Chem. Miner. 4 317, doi:10.1007/BF00307535
     "ZnFe2O4": {"a": 8.4421, "absences": "spinel"},  # COD 9005102 (O'Neill 1992)
     # primitive cubic
     "SrTiO3": {"a": 3.9050, "absences": "none"},  # NBS Circ. 539 v3 (Swanson et al. 1954)
@@ -208,7 +208,7 @@ PHASE_LIBRARY = {
     "GaSb": {"a": 6.0959, "absences": "fcc"},  # Straumanis & Kim 1965, J. Appl. Phys. 36 3822
     "InSb": {"a": 6.4794, "absences": "fcc"},  # Straumanis & Kim 1965, J. Appl. Phys. 36 3822
     "ZnTe": {"a": 6.1026, "absences": "fcc"},  # COD 1540103 (Holland & Beck 1968)
-    "c-BN": {"a": 3.6153, "absences": "fcc"},  # Kurdyumov et al. 1995, J. Appl. Cryst. 28 540
+    "c-BN": {"a": 3.6153, "absences": "fcc"},  # Kurdyumov et al. 1995, J. Appl. Cryst. 28 540, doi:10.1107/S002188989500197X
     "γ-Al2O3": {"a": 7.9140, "absences": "spinel"},  # COD 2107301 (Zhou & Snyder 1991)
     "Y2O3": {"a": 10.6040, "absences": "bixbyite"},  # COD 1513300 (Ferreira et al. 2005)
     "In2O3": {"a": 10.1170, "absences": "bixbyite"},  # COD 2310009 (Marezio 1966)
@@ -233,9 +233,9 @@ PHASE_LIBRARY = {
     # wurtzite
     # NIST SRM 674b
     "ZnO": {"a": 3.2499, "c": 5.2067, "gamma": 120.0, "absences": "wurtzite"},
-    # Detchprohm et al. 1992, Jpn. J. Appl. Phys. 31 L1454
+    # Detchprohm et al. 1992, Jpn. J. Appl. Phys. 31 L1454, doi:10.1143/JJAP.31.L1454
     "GaN": {"a": 3.1892, "c": 5.1850, "gamma": 120.0, "absences": "wurtzite"},
-    # Schulz & Thiemann 1977, Solid State Commun. 23 815
+    # Schulz & Thiemann 1977, Solid State Commun. 23 815, doi:10.1016/0038-1098(77)90959-0
     "AlN": {"a": 3.1100, "c": 4.9800, "gamma": 120.0, "absences": "wurtzite"},
     # Paszkowicz 1999, Powder Diffr. 14 258
     "InN": {"a": 3.5378, "c": 5.7033, "gamma": 120.0, "absences": "wurtzite"},
