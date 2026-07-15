@@ -23,12 +23,12 @@ from quantem.widget.showeds import ShowEDS, SpectrumImage, bin_spectrum_image, l
 from quantem.widget.show4dstem_factory import Show4DSTEM
 from quantem.widget.showdiffraction import Phase, ShowDiffraction, library_phase
 from quantem.widget.showfolder import ShowFolder, prebuild_showfolder_cache, show_folder
-from quantem.widget.io import load, read_gif, read_image, read_image_stack, read_images
+from quantem.widget.io import load, load_scan_region, read_gif, read_image, read_image_stack, read_images
 from . import movie
 from quantem.widget.paths import first_existing
 from quantem.widget.backend import detect_backend, resolve_backend
 from quantem.widget.gpu import gpu_info
-from quantem.widget.detector import detect_bf_radius, dp_mean, virtual_image
+from quantem.gpu.detector import detect_bf_radius, dp_mean, virtual_image
 from quantem.widget.folder_picker import FolderPicker, pick_folder
 from quantem.widget.multidataset_mps import load_4dstem_macbook
 from quantem.widget.export import (
@@ -37,9 +37,9 @@ from quantem.widget.export import (
     SupportsHtmlExport,
     supports_html_export,
 )
-from quantem.widget.dpc import idpc, com
+from quantem.gpu.dpc import idpc, com
 from quantem.widget.info import device_info
-from quantem.widget.detector import bf, adf, df
+from quantem.gpu.detector import bf, adf, df
 from quantem.widget._timing import (
     WidgetProfile,
     format_timing_table,
@@ -175,6 +175,7 @@ __all__ = [
     "load_eds",
     "load_emd_spectrum_image",
     "load",
+    "load_scan_region",
     "show_folder",
     "read_gif",
     "read_image",

@@ -829,8 +829,11 @@ def test_fit_ellipse_and_correction():
 
 
 def _fe3o4_dp():
+    # real SAED pattern, pending the tutorial dataset upload
     from quantem.widget.data.tutorials import _FE3O4_PACKAGED_PATH
 
+    if not _FE3O4_PACKAGED_PATH.is_file():
+        pytest.skip("real Fe3O4 SAED pattern unavailable")
     return np.load(_FE3O4_PACKAGED_PATH)
 
 

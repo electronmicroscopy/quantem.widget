@@ -10,13 +10,13 @@ modules. The responsibilities split across layers like this:
 * ``show4dstem_factory`` decides whether public ``Show4DSTEM(...)`` should route
   to the base viewer or this MPS adapter.
 * ``kernels/io/mps.py`` owns HDF5/Metal decode and detector binning.
-* ``kernels/compute/backends.py:MetalRawBackend`` owns masked-sum compute,
+* ``quantem.gpu.compute.backends.MetalRawBackend`` owns masked-sum compute,
   fast-sidecar/radial-cache lifecycles, and lazy multi-dataset backend state.
 * ``Show4DSTEMMPS`` owns only widget-facing traitlets, observers, preset caches,
   ROI mask translation, and status updates needed by the frontend.
 
-See ``kernels/compute/backend.py`` for the protocol, ``kernels/compute/
-backends.py:MetalRawBackend`` for the compute implementation.
+See ``quantem.gpu.compute.backend`` for the protocol and
+``quantem.gpu.compute.backends.MetalRawBackend`` for the compute implementation.
 """
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ import traitlets
 
 from quantem.widget.show4dstem import Show4DSTEM
 from quantem.widget.detector import detector_mask
-from quantem.widget.kernels.compute.mps import (
+from quantem.gpu.compute.mps import (
     ChunkedFrames,
     _DEFAULT_COMPACT_TARGET_BYTES,
     _bin_mask,

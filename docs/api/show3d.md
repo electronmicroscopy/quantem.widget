@@ -20,11 +20,16 @@ export. See the [Show3D tutorial](../tutorials/show3d).
 | Play / pause | `playing` | Auto-advances slices at `fps` |
 | Reverse | `reverse` | Playback direction flips |
 | Boomerang | `boomerang` | Ping-pongs at the ends instead of looping |
-| FPS field | `fps` | Playback rate changes |
+| FPS field | `fps` | Playback rate changes, capped at 60 fps |
 | Loop range | `loop_start`, `loop_end` | Playback confined to the sub-range |
 | Playback dynamics | `fps`, `loop`, `boomerang`, `playback_path`; future `playback_preset` | More-menu presets can play a time series linearly, bounce at ends, slow down around key frames, or follow a custom frame path without changing the underlying stack |
-| Colormap dropdown | `cmap` | Canvas recolors |
-| Export button | `export_request`, `export_status` | Writes a standalone HTML viewer |
+| Colormap dropdown | `cmap`, `panel_cmaps` | Shared by default. More → Color shared can unlock per-panel colormaps for advanced comparisons |
+| Panel identity markers | `marker_colors`, `identity_colors`, `marker_style`, `row_markers`, `col_markers`, `panel_groups` | Optional panel colors plus row, column, or rectangular group frames make panels easy to reference in notebooks, reports, and agent instructions |
+| Local panel annotations | `panel_annotations` | Optional multiple in-image labels per panel, placed by corner, normalized point, or normalized region box |
+| Geometric panel overlays | `panel_overlays` (`overlays` shorthand) | Optional circle, rectangle, and square overlays in data or relative coordinates, with stroke/fill opacity, dashed/dotted line styles, and z-order, rendered while scrubbing and in exported HTML; More -> Overlay Edit allows live select, move, resize, delete, and reset |
+| Contrast preset dropdown | `contrast_preset` | Applies percentile ranges such as `1-99`, `2-98`, and `3-97` while keeping the main histogram UI compact |
+| Advanced histogram toggle | `show_histogram_advanced`, `histogram_advanced` | Exposes detailed histogram controls only when a user asks for them |
+| Export button | `export_request`, `export_status` | Writes standalone HTML from live widgets; live Show3D can also request GIF/MP4 animation exports |
 | Page controls (paged galleries) | `page_idx`, `n_pages`, `panels_per_page`, `page_starred`; `star_page()`, `unstar_page()` | Shows, stars, or plays through one page of panels at a time |
 | Panel layout (multi-panel) | `n_panels`, `link_panels`, `max_cols` | Panels arrange; linked scrub moves all |
 | Panel visibility (multi-panel) | `hidden_panels` | Panels collapse from view without deleting data |
@@ -33,7 +38,8 @@ export. See the [Show3D tutorial](../tutorials/show3d).
 | Control visibility | `show_controls`, `controls_collapsed`; `collapse_controls()`, `expand_controls()`, `toggle_controls()` | Permanently remove controls or temporarily collapse them behind the top GUI toggle |
 | Title visibility | `show_title` | Top title row shows/hides |
 | Statistics | `show_stats` | Optional mean/min/max/std readout |
-| Panel title visibility | `show_panel_titles`, `panel_title_font_size` | Per-panel labels show/hide and resize |
+| Panel title visibility | `show_panel_titles`, `panel_title_font_size`, `panel_title_style` | Per-panel labels show/hide, resize, and optionally get title chrome such as background, border, and padding |
+| Rich panel title spans | `panel_title_spans` | Optional structured `text` / `math` / `color` spans for symbols such as `λ` and `χ²` in panel titles, panel menus, stats, animation labels, saved state, and exported HTML |
 | Scale bar visibility | `show_scale_bar` (`scale_bar_visible` in saved state) | Scale bar shows/hides |
 | Saved notebook preview frames | `notebook_preview_frames`, `notebook_preview_ncols`; `set_notebook_preview_frames()` | Single-panel saved notebooks can reopen as a compact contact sheet of selected frame indices instead of only the current frame |
 | ROI add / drag | `roi_active`, `roi_list`, `roi_selected_idx`; `get_roi_geometries()` | Single-panel stack ROI overlays stay visible while scrubbing; saved notebook previews include all visible ROI overlays and right-side zoom crops; Python can read circle centers/radii and rectangle/square corners in `(row, col)` coordinates |
@@ -44,6 +50,151 @@ export. See the [Show3D tutorial](../tutorials/show3d).
 | FFT layout and initial view | `fft_layout`, `fft_overlay_position`, `fft_overlay_size`, `fft_overlay_zoom` | Places FFTs below, right, or inside every panel and initializes their shared zoom |
 | Denoise | `denoise_enabled`, `denoise`, `denoise_sigma`, `denoise_bin`, `show_denoise` | The master swaps raw/denoised frames without losing settings; Settings expands the Method/σ/bin editor; an active filter also reshapes FFT |
 | Filter | `frequency_filter_enabled`, `frequency_filter`, `frequency_filter_cutoff`, `frequency_filter_center`, `frequency_filter_width`, `show_frequency_filter` | View-only low/high/band-pass filtering with a draggable FFT ring; stored frames, statistics, and raw exports remain unchanged |
+| Sub-pixel alignment | `subpixel_align_enabled`, `subpixel_align_reference` | More-menu display alignment for a drifting single-panel stack; the browser estimates row/column shifts against the reference frame and keeps raw data unchanged |
+| More menu: Flip | `flip_horizontal`, `flip_vertical`, `flip_rows`, `flip_cols` | Display-only orientation checks for row/column or horizontal/vertical review |
+| More menu: Rotate | `image_rotation`, `rotation_scope`, `frame_rotations`; `rotation=`, `rotations=` | Display-only 0/90/180/270° rotation for the whole stack or the selected frame |
+| More menu: Compare | `compare_mode`, `compare_pair`, `blink_fps`, `diff_cmap`, `compare_background` | Blink, difference, or overlay two frames for point-defect and time-series change detection |
+
+## Rich panel labels and math
+
+Use rich labels when panel titles are scientific variables rather than plain
+names. Show3D accepts inline math strings or structured spans in
+`panel_titles` / `panel_title_spans`:
+
+```python
+from quantem.widget import Show3D
+
+Show3D(
+    raw_stack,
+    residual_stack,
+    panel_titles=[
+        [{"math": r"\lambda=0.03"}, {"text": " raw"}],
+        [{"math": r"\chi^2"}, {"text": "/pixel residual"}],
+    ],
+    show_stats=True,
+)
+```
+
+Plain strings with `$...$` also work:
+
+```python
+Show3D(
+    raw_stack,
+    residual_stack,
+    panel_titles=[r"$\lambda=0.03$ raw", r"$\chi^2$/pixel residual"],
+)
+```
+
+The frontend renders common Greek symbols plus simple superscripts/subscripts
+without MathJax or KaTeX. It also normalizes doubled backslashes from JSON/state
+files, so `\\lambda` displays as `λ`. Panel titles, the `Panels` menu, stats
+rows, animation labels, saved notebook state, and exported HTML all use the
+same rich rendering path.
+
+Use `panel_annotations` when a label belongs to a local feature or region
+inside a panel. Each annotation can use `text`, `math`, or `spans`:
+
+```python
+Show3D(
+    raw_stack,
+    residual_stack,
+    panel_titles=[
+        [{"math": r"\lambda=0.03"}, {"text": " raw"}],
+        [{"math": r"\chi^2"}, {"text": "/pixel"}],
+    ],
+    panel_annotations=[
+        {"panel": 0, "math": r"\lambda", "position": "top-left", "variant": "pill"},
+        {
+            "panel": 1,
+            "spans": [{"math": r"\chi^2"}, {"text": " high", "color": "#f87171"}],
+            "box": [0.56, 0.48, 0.32, 0.16],
+            "variant": "callout",
+        },
+    ],
+)
+```
+
+## Circle and rectangle overlays
+
+Show3D accepts the same `panel_overlays` API as Show2D. Use it for
+reproducible geometry that should stay fixed while a stack scrubs or plays.
+Coordinates are data pixels by default and follow `(row, col)` ordering.
+
+```python
+from quantem.widget import Show3D
+
+Show3D(
+    raw_stack,
+    denoised_stack,
+    residual_stack,
+    panel_titles=["raw", "denoised", "residual"],
+    panel_overlays={
+        "raw": {
+            "shape": "circle",
+            "center": (96, 88),
+            "radius": 14,
+            "stroke": "#60a5fa",
+            "stroke_width": 3,
+            "line_style": "dashed",
+        },
+        "denoised": [
+            {
+                "shape": "rect",
+                "box": (48, 58, 126, 146),
+                "stroke": "#facc15",
+                "fill": "#facc15",
+                "fill_opacity": 0.12,
+                "line_style": "dotted",
+            },
+            {
+                "shape": "square",
+                "center": (96, 88),
+                "size": 42,
+                "stroke": "#34d399",
+                "dash": [8, 3, 2, 3],
+                "z_order": 1,
+            },
+        ],
+    },
+)
+```
+
+Pass `overlays=[...]` to broadcast the same geometry to every panel, or add
+`panel="raw"` / `panel=0` to each flat-list entry when building the overlay
+list programmatically. Set `coords="relative"` for normalized 0-1 geometry
+that follows panels with different pixel shapes.
+Overlay strokes are solid by default. Set `line_style="dashed"`,
+`line_style="dotted"`, or `line_style="dashdot"`, or pass a custom
+`dash=[on, off, ...]` pattern.
+
+When overlays are present, the live widget and exported HTML show
+`More -> Overlay Edit`. Turn it on to select an overlay, drag inside the shape
+to move it, drag an edge to resize it, press Delete to remove the selected
+overlay, or choose `Reset Overlays` to restore the constructor state. Use ROIs
+instead when the geometry should drive statistics, FFT crops, or Python
+readback through `get_roi_geometries()`.
+
+## Presentation and export chrome
+
+`ui_mode="presentation"` starts Show3D with controls collapsed while preserving
+the top `Controls` button. The `Export` button also remains visible in that
+collapsed title chrome:
+
+```python
+w = Show3D(
+    raw_stack,
+    residual_stack,
+    panel_titles=[r"$\lambda=0.03$ raw", r"$\chi^2$/pixel residual"],
+    ui_mode="presentation",
+)
+w.export_html("lambda_movie.html", encoding="uint8")
+```
+
+In a live Python-backed widget, the Export menu can write HTML and request
+GIF/MP4 animation exports through the Python backend. In standalone HTML, the
+page can download itself as HTML; GIF/MP4 entries remain visible but disabled
+with a backend-required explanation until browser-side animation encoding is
+implemented.
 
 The denoise family matches Show2D. See
 [Which denoise filter should I use?](show2d.md#which-denoise-filter-should-i-use)
@@ -62,6 +213,20 @@ Denoise first and Filter second; the raw stack and quantitative exports are
 never replaced by the view. Filter lives under More and is off by default. Its
 FFT overlay dims rejected frequencies and labels the clear region as Inside
 kept, Outside kept, or Band kept.
+
+## Sub-pixel alignment for drifting stacks
+
+For a single-panel stack that is already available in the browser, use
+`subpixel_align=True` or open **More → Sub-pixel align**. The first version
+aligns the displayed frames to `subpixel_align_reference` (default frame 0) with
+phase-correlation registration and bilinear display shifts. It is intentionally
+view-only: the original stack, raw exports, and quantitative data remain
+unchanged.
+
+The More menu reports the reference frame, the approximate row/column padding
+implied by the shifts, and whether WebGPU or CPU FFT was used. Multi-panel, RGB,
+or streamed-only stacks currently show an explanatory status instead of
+silently aligning the wrong data.
 
 ## Playback dynamics for time-series review
 
@@ -293,6 +458,25 @@ Panel order is saved in widget state and standalone HTML. It is display-only:
 hidden panels, stars, titles, and per-panel contrast remain keyed by the
 original source panel index.
 
+Use `panel_groups` when several panels should be read as one comparison block.
+The group box follows the displayed panel positions, so it still works after
+panel hiding or reordering:
+
+```python
+w = Show3D(
+    bf_raw,
+    df_raw,
+    bf_denoised,
+    df_denoised,
+    panel_titles=["BF raw", "DF raw", "BF denoised", "DF denoised"],
+    max_cols=2,
+    panel_groups=[
+        {"panels": [0, 1], "color": "#2563eb", "label": "raw"},
+        {"start": 2, "end": 3, "color": "#16a34a", "label": "denoised"},
+    ],
+)
+```
+
 The statistics readout is off by default. Turn on `show_stats=True` in Python,
 or use the `Stats` switch in the widget, when mean/min/max/std values are useful.
 
@@ -370,6 +554,50 @@ For pages containing several panels, pass `panel_slot=` to
 specific numerical profile. The interactive kymograph intentionally remains a
 single-panel-page tool so its line and depth axes are unambiguous.
 
+## Full-resolution folder export (advanced)
+
+Use the folder export when a microscopist needs to scrub a large stack at the
+native detector/reconstruction size instead of opening a reduced one-file HTML.
+This writes a small `index.html` beside an `offline_stack.u8` data file and a
+`manifest.json`:
+
+```python
+from quantem.widget import Show3D
+
+w = Show3D(stack, title="800C 1.3Mx full-resolution review", debug=True)
+w.export_sidecar("/data/reports/800C_1.3Mx_fullres")
+```
+
+Serve the folder over Range-capable local HTTP; do not open the HTML with
+`file://` because the browser must fetch the data file:
+
+```bash
+# Use your project or lab helper that supports HTTP Range requests.
+python scripts/serve_sidecar_range.py \
+  --dir /data/reports/800C_1.3Mx_fullres \
+  --port 8803 --bind 127.0.0.1
+```
+
+Then open `http://127.0.0.1:8803/index.html`. The viewer shell should appear
+immediately. The browser then loads the full stack into memory, shows the load
+status banner, and swaps to the cached playback path when the stack is ready.
+Changing Color or the histogram range repaints the current microscope view
+immediately, marks the playback cache as updating, and rebuilds the remaining
+frames in the background. Scrubbing during that rebuild should still advance
+the current frame; once the banner clears, playback uses the cached full-stack
+path again.
+
+This workflow preserves the source spatial shape used to construct the widget.
+If you intentionally want a smaller browse artifact, make that explicit with a
+separate downsampled/single-file export rather than treating it as the
+full-resolution review copy. For the end-to-end browser checklist and example
+timing report, see the [advanced tutorial](../tutorials/advanced.md).
+
+When sharing this export, send or copy the whole folder. `index.html` is not a
+standalone result for this mode; it needs `offline_stack.u8` and `manifest.json`
+beside it. The colleague should serve the received folder with the same Range
+helper and open the local URL.
+
 ## Animation exports
 
 Use HTML when collaborators should keep scrubbing, zooming, and changing
@@ -419,6 +647,8 @@ w.save_gif(
 ```
 
 ```{note}
-`export_html(quantized=True)` writes the smaller uint8 pack; the default writes
-exact float32. See the [widget export tutorial](../tutorials/widget_export).
+`export_html(quantized=True)` writes the smaller single-file uint8 pack; the
+default writes exact float32 into one HTML file. For multi-GB Show3D reviews,
+use the folder export above instead of forcing one huge HTML file. See the
+[widget export tutorial](../tutorials/widget_export).
 ```

@@ -28,6 +28,15 @@ def test_view_box_is_a_synced_trait():
     assert w.trait_metadata("view_box", "sync") is True
 
 
+def test_presentation_mode_keeps_controls_recoverable():
+    """C1: presentation starts clean but keeps a Controls affordance."""
+    w = Show2D(_image(), ui_mode="presentation", verbose=False)
+
+    assert w.show_controls is True
+    assert w.controls_collapsed is True
+    assert w.show_stats is False
+
+
 def test_constructor_view_box_populates_trait_and_zoom():
     """Python -> JS: view_box= sugar must both center the zoom (legacy
     behavior) and seed the trait so current_view is correct before any
@@ -70,6 +79,277 @@ def test_current_view_default_is_full_image():
     view = w.current_view
     assert view["box"] == (0.0, 128.0, 0.0, 128.0)
     assert view["height"] == 128.0 and view["width"] == 128.0
+
+
+def test_inset_plots_normalize_per_panel_and_static_png():
+    """C1: scientist attaches one calibration curve per image panel, expect
+    JSON-safe widget state and a saved-notebook PNG fallback that can render."""
+    data = np.stack([_image(64), _image(64) * 0.5 + 0.2])
+    x = np.linspace(0.0, 1.0, 8)
+    plots = [
+        {
+            "x": x,
+            "y": np.sin(x * np.pi),
+            "point": (0.5, 1.0),
+            "xlabel": "R",
+            "box": (0.58, 0.53, 0.34, 0.22),
+            "show_ticks": True,
+            "xticks": (0, 1),
+            "yticks": (0, 1),
+            "legend": "ACF/R",
+            "annotation": "R*=0.5",
+            "tick_font_size": 8,
+            "label_font_size": 9,
+            "legend_font_size": 10,
+            "border_color": "#ffffff",
+            "border_width": 2,
+            "background_alpha": 0.42,
+            "text_color": "#f8f8ff",
+            "tick_color": "#d0e8ff",
+            "margin": (18, 24),
+        },
+        {"x": x, "y": np.cos(x * np.pi) ** 2, "point": (0.25, 0.5), "ylim": (0, 1)},
+    ]
+    w = Show2D(data, inset_plots=plots, marker_colors=["#2e7d32", "#d81b60"], verbose=False)
+
+    assert len(w.inset_plots) == 2
+    assert w.inset_plots[0]["x"] == pytest.approx(x.tolist())
+    assert w.inset_plots[0]["point"] == pytest.approx([0.5, 1.0])
+    assert w.inset_plots[0]["box"] == pytest.approx([0.58, 0.53, 0.34, 0.22])
+    assert w.inset_plots[0]["show_ticks"] is True
+    assert w.inset_plots[0]["xticks"] == pytest.approx([0.0, 1.0])
+    assert w.inset_plots[0]["legend"] == "ACF/R"
+    assert w.inset_plots[0]["annotation"] == "R*=0.5"
+    assert w.inset_plots[0]["tick_font_size"] == pytest.approx(8.0)
+    assert w.inset_plots[0]["border_color"] == "#ffffff"
+    assert w.inset_plots[0]["border_width"] == pytest.approx(2.0)
+    assert w.inset_plots[0]["background_alpha"] == pytest.approx(0.42)
+    assert w.inset_plots[0]["text_color"] == "#f8f8ff"
+    assert w.inset_plots[0]["tick_color"] == "#d0e8ff"
+    assert w.inset_plots[0]["margin"] == pytest.approx([18.0, 24.0])
+    assert w.inset_plots[1]["ylim"] == pytest.approx([0.0, 1.0])
+    assert "inset_plots" in w.state_dict()
+    assert w.state_dict()["show_inset_plots"] is True
+    assert w._static_png_b64(max_px=220)
+
+
+def test_inset_plot_can_broadcast_single_spec():
+    data = np.stack([_image(32), _image(32), _image(32)])
+    w = Show2D(data, inset_plots={"y": [0, 1, 0], "title": "score"}, verbose=False)
+    assert len(w.inset_plots) == 3
+    assert all(plot["title"] == "score" for plot in w.inset_plots)
+
+
+def test_export_svg_writes_hybrid_figure(tmp_path):
+    """C1: multipanel figure, expect SVG vector chrome with embedded images."""
+    data = np.stack([_image(32), _image(32) * 0.5, _image(32) + 0.25])
+    w = Show2D(
+        data,
+        labels=["raw", "filtered", "residual"],
+        title="Show2D Figure",
+        ncols=2,
+        sampling=0.2,
+        units="nm",
+        marker_colors=["#2e7d32", "#c62828", "#1565c0"],
+        verbose=False,
+    )
+
+    out = w.export_svg(tmp_path / "figure.svg")
+    svg = out.read_text(encoding="utf-8")
+
+    assert out.name == "figure.svg"
+    assert 'data-show2d-svg-export="true"' in svg
+    assert 'data-raster-scale="3"' in svg
+    assert svg.count("<image ") == 3
+    assert "data:image/png;base64," in svg
+    assert ">Show2D Figure<" in svg
+    assert ">raw<" in svg
+    assert ">filtered<" in svg
+    assert ">residual<" in svg
+    assert "nm<" in svg
+    assert 'fill="#2e7d32"' in svg
+
+
+def test_export_svg_respects_hidden_panels_and_order(tmp_path):
+    """C2: curated gallery state, expect SVG follows visible panel order."""
+    data = np.stack([_image(16) + i for i in range(4)])
+    w = Show2D(data, labels=["a", "b", "c", "d"], ncols=3, verbose=False)
+    w.set_panel_order([2, 0, 3, 1])
+    w.hide_panel(0)
+
+    out = w.export_svg(tmp_path / "ordered.svg", scale=3, include_scale_bar=False)
+    svg = out.read_text(encoding="utf-8")
+
+    assert 'data-raster-scale="3"' in svg
+    assert svg.count("<image ") == 3
+    assert 'data-show2d-panel="2"' in svg
+    assert 'data-show2d-panel="3"' in svg
+    assert 'data-show2d-panel="1"' in svg
+    assert 'data-show2d-panel="0"' not in svg
+    assert ">c<" in svg
+    assert ">d<" in svg
+    assert ">b<" in svg
+
+
+def test_export_svg_wraps_long_panel_labels(tmp_path):
+    """C3: long panel label, expect exported SVG uses multiple text lines."""
+    w = Show2D(
+        _image(32),
+        labels=["alpha beta gamma delta epsilon"],
+        size=120,
+        panel_title_font_size=10,
+        verbose=False,
+    )
+
+    out = w.export_svg(tmp_path / "wrapped.svg")
+    svg = out.read_text(encoding="utf-8")
+
+    assert ">alpha beta<" in svg
+    assert ">gamma delta<" in svg
+    assert ">epsilon<" in svg
+    assert ">alpha beta gamma delta epsilon<" not in svg
+
+
+def test_export_svg_writes_publication_layers_as_vectors(tmp_path):
+    """C4: publication callouts, expect editable SVG vector layers."""
+    data = np.stack([_image(32), _image(32) * 0.5])
+    w = Show2D(
+        data,
+        labels=["raw", "denoised"],
+        panel_title_spans=[
+            [{"math": r"\lambda=0.03", "color": "#60a5fa"}, {"text": " raw"}],
+            [{"math": r"\chi^2"}, {"text": "/px"}],
+        ],
+        panel_annotations={
+            "raw": {"math": r"\lambda", "position": "top-right", "variant": "outline"},
+        },
+        panel_overlays={
+            "raw": {
+                "shape": "circle",
+                "center": (15, 16),
+                "radius": 6,
+                "stroke": "#facc15",
+                "line_style": "dashed",
+            },
+            "denoised": {
+                "shape": "rect",
+                "box": (8, 9, 24, 26),
+                "stroke": "#34d399",
+                "dash": [5, 2, 1, 2],
+            },
+        },
+        inset_plots={
+            "x": [0, 1, 2],
+            "y": [0.2, 0.6, 0.4],
+            "legend": "ACF",
+            "point": [1, 0.6],
+        },
+        row_markers={0: "#60a5fa"},
+        col_markers={1: "#f87171"},
+        ncols=2,
+        verbose=False,
+    )
+
+    out = w.export_svg(tmp_path / "publication.svg", include_colorbar=True)
+    svg = out.read_text(encoding="utf-8")
+
+    assert 'data-show2d-vector-layer="true"' in svg
+    assert 'data-show2d-panel-title-spans-svg="true"' in svg
+    assert 'data-show2d-panel-overlay-svg="true"' in svg
+    assert 'data-show2d-panel-annotation-svg="true"' in svg
+    assert 'data-show2d-inset-plot-svg="true"' in svg
+    assert 'data-show2d-colorbar-svg="true"' in svg
+    assert 'data-show2d-group-marker-svg="row"' in svg
+    assert 'data-show2d-group-marker-svg="col"' in svg
+    assert "<circle " in svg
+    assert "<polyline " in svg
+    assert "stroke-dasharray" in svg
+    assert "λ=0.03" in svg
+    assert "χ^2" in svg
+    assert "ACF" in svg
+
+
+def test_export_svg_respects_publication_text_and_scale_bar_panels(tmp_path):
+    """C5: paper layout controls, expect styled text and one-panel scale bar."""
+    data = np.random.default_rng(182).random((2, 24, 24), dtype=np.float32)
+    widget = Show2D(
+        data,
+        labels=["left panel", "right panel"],
+        sampling=0.1,
+        units="nm",
+        scale_bar_panels=["right panel"],
+        scale_bar_length=0.5,
+        scale_bar_label="500 pm",
+        scale_bar_style={
+            "offset": (3, -6),
+            "label_gap": 7,
+            "font_family": "Arial",
+            "font_size": 12,
+            "font_weight": 700,
+            "color": "#f8fafc",
+            "outline_color": "#111111",
+            "outline_width": 1.25,
+            "bar_height": 3,
+        },
+        panel_title_font_size=14,
+        panel_title_style={
+            "font_family": "Arial",
+            "align": "left",
+            "x": 0.04,
+            "y": 0.035,
+            "anchor": "top-left",
+            "outline_width": 2,
+            "outline_color": "#111111",
+        },
+        gallery_gap_px=2,
+        gallery_gap_color="#000000",
+        panel_annotations={
+            "left panel": {
+                "text": "aligned",
+                "x": 0.12,
+                "y": 0.34,
+                "anchor": "center-left",
+                "align": "left",
+                "font_family": "Arial",
+                "outline_width": 1.5,
+                "outline_color": "#000000",
+                "variant": "plain",
+            },
+        },
+        ncols=2,
+        verbose=False,
+    )
+
+    restored = Show2D(data, labels=["left panel", "right panel"], verbose=False)
+    restored.load_state_dict(widget.state_dict())
+    assert restored.scale_bar_panels == [1]
+    assert restored.scale_bar_length == pytest.approx(0.5)
+    assert restored.scale_bar_label == "500 pm"
+    assert restored.scale_bar_style["offset"] == [3.0, -6.0]
+    assert restored.scale_bar_style["font_family"] == "Arial"
+    assert restored.scale_bar_style["font_size"] == pytest.approx(12)
+    assert restored.panel_title_style["x"] == pytest.approx(0.04)
+    assert restored.panel_title_style["anchor"] == "top-left"
+    assert restored.gallery_gap_px == 2
+    assert restored.gallery_gap_color == "#000000"
+
+    out = widget.export_svg(tmp_path / "styled.svg")
+    svg = out.read_text(encoding="utf-8")
+
+    assert svg.count('height="3" fill="#f8fafc"') == 1
+    assert ">500 pm<" in svg
+    assert 'font-family="Arial"' in svg
+    assert 'font-size="12"' in svg
+    assert 'font-weight="700"' in svg
+    assert 'fill="#000000"' in svg
+    assert 'stroke="#000000" stroke-width="1"' in svg
+    assert '<image x="2"' in svg
+    assert '<image x="304"' in svg
+    assert 'stroke="#111111"' in svg
+    assert 'stroke-width="1.25"' in svg
+    assert 'stroke="#000000"' in svg
+    assert 'paint-order="stroke fill"' in svg
+    assert 'text-anchor="start"' in svg
 
 
 def test_current_view_uses_zoom_center():
@@ -122,6 +402,33 @@ def test_view_box_survives_state_dict_round_trip():
     w2.load_state_dict(w1.state_dict())
     assert w2.view_box == [8.0, 40.0, 16.0, 48.0]
     assert w2.current_view["box"] == (8.0, 40.0, 16.0, 48.0)
+
+
+def test_show2d_identity_markers_histogram_preset_and_flips_round_trip():
+    # C1: scientist/agent-readable identity markers, contrast preset state,
+    # and display-only flips are lightweight view state and survive save/load.
+    data = np.random.default_rng(169).random((3, 16, 16), dtype=np.float32)
+    w1 = Show2D(
+        data,
+        marker_colors=["green", "red", "magenta"],
+        marker_style="around",
+        contrast_preset="2-98",
+        show_histogram_advanced=True,
+        image_flips_horizontal=[True, False, True],
+        image_flips_vertical=[False, True, False],
+        verbose=False,
+    )
+    w2 = Show2D(data, verbose=False)
+
+    w2.load_state_dict(w1.state_dict())
+
+    assert w2.marker_colors == ["green", "red", "magenta"]
+    assert w2.marker_style == "around"
+    assert w2.contrast_preset == "2-98"
+    assert w2.show_histogram_advanced is True
+    assert w2.image_flips_horizontal == [True, False, True]
+    assert w2.image_flips_vertical == [False, True, False]
+    assert w2._data.shape == data.shape
 
 
 def test_binned_preview_detail_request_returns_full_resolution_crop():
@@ -394,3 +701,191 @@ def test_crop_to_view_raises_for_galleries():
     w = Show2D([_image(64), _image(64)], verbose=False)
     with pytest.raises(NotImplementedError, match="single panel"):
         w.crop_to_view()
+
+
+def test_show2d_rich_panel_titles_keep_plain_labels_and_state():
+    """C1: rich spans color status words while plain labels stay usable."""
+    data = np.random.default_rng(12).random((2, 16, 16), dtype=np.float32)
+    widget = Show2D(
+        data,
+        labels=[
+            [
+                {"text": "BF denoise  "},
+                {"text": "low", "color": "#60a5fa"},
+                {"text": "  χ²="},
+                {"text": "0.5", "color": "#f59e0b"},
+            ],
+            "BF denoise mid",
+        ],
+        verbose=False,
+    )
+
+    assert widget.labels == ["BF denoise  low  χ²=0.5", "BF denoise mid"]
+    assert widget.panel_title_spans[0][1] == {"text": "low", "color": "#60a5fa"}
+    assert widget._resolve_panel_ref("BF denoise  low  χ²=0.5") == 0
+
+    restored = Show2D(data, verbose=False)
+    restored.load_state_dict(widget.state_dict())
+    assert restored.labels == widget.labels
+    assert restored.panel_title_spans == widget.panel_title_spans
+
+
+def test_show2d_panel_title_style_and_group_markers_round_trip():
+    """C1: panel title chrome and row/column markers survive saved state."""
+    data = np.random.default_rng(22).random((4, 12, 12), dtype=np.float32)
+    widget = Show2D(
+        data,
+        labels=["A", "B", "C", "D"],
+        ncols=2,
+        panel_title_style={
+            "bg": "rgba(0,0,0,0.72)",
+            "fg": "#ffffff",
+            "border_color": "#60a5fa",
+            "border_width": 1,
+            "pad_x": 6,
+            "pad_y": 2,
+            "radius": 2,
+            "max_width": "hug",
+        },
+        row_markers={0: "#60a5fa"},
+        col_markers={1: "#f59e0b"},
+        verbose=False,
+    )
+
+    restored = Show2D(data, verbose=False)
+    restored.load_state_dict(widget.state_dict())
+
+    assert restored.panel_title_style == widget.panel_title_style
+    assert restored.row_markers == {"0": "#60a5fa"}
+    assert restored.col_markers == {"1": "#f59e0b"}
+
+
+def test_show2d_panel_annotations_accept_multiple_labels_per_panel():
+    """C1: arbitrary panel annotations round-trip as JSON-safe state."""
+    data = np.random.default_rng(24).random((3, 12, 12), dtype=np.float32)
+    widget = Show2D(
+        data,
+        labels=["raw", "filtered", "residual"],
+        panel_annotations={
+            "raw": [
+                {"text": "low dose", "position": "top-left", "variant": "pill"},
+                {
+                    "spans": [{"text": "ROI ", "color": "#fff"}, {"text": "A", "color": "#60a5fa"}],
+                    "box": [0.20, 0.25, 0.32, 0.18],
+                    "class_name": "roi-a-label",
+                    "bg": "rgba(0,0,0,0.55)",
+                    "font_size": 12,
+                },
+            ],
+            2: {"text": "residual", "x": 0.5, "y": 0.85, "anchor": "bottom-center"},
+        },
+        verbose=False,
+    )
+
+    restored = Show2D(data, labels=["raw", "filtered", "residual"], verbose=False)
+    restored.load_state_dict(widget.state_dict())
+
+    assert len(restored.panel_annotations[0]) == 2
+    assert restored.panel_annotations[0][0]["variant"] == "pill"
+    assert restored.panel_annotations[0][1]["class_name"] == "roi-a-label"
+    assert restored.panel_annotations[0][1]["box"] == [0.2, 0.25, 0.32, 0.18]
+    assert restored.panel_annotations[2][0]["anchor"] == "bottom-center"
+
+    single = Show2D(
+        data[0],
+        panel_annotations=[
+            {"text": "first", "position": "top-left"},
+            {"text": "second", "position": "bottom-right"},
+        ],
+        verbose=False,
+    )
+    assert [item["text"] for item in single.panel_annotations[0]] == ["first", "second"]
+
+
+def test_show2d_labels_and_annotations_accept_math_spans():
+    """C1: TeX-style symbols are preserved for frontend math rendering."""
+    data = np.random.default_rng(26).random((2, 12, 12), dtype=np.float32)
+    widget = Show2D(
+        data,
+        labels=[
+            [{"math": r"\lambda=0.03"}, {"text": " raw"}],
+            r"$\chi^2$/px residual",
+        ],
+        panel_annotations={
+            0: {"math": r"\lambda", "position": "top-left"},
+            1: {
+                "spans": [
+                    {"math": r"\chi^2"},
+                    {"text": "/px"},
+                ],
+                "position": "top-right",
+            },
+        },
+        verbose=False,
+    )
+
+    restored = Show2D(data, verbose=False)
+    restored.load_state_dict(widget.state_dict())
+
+    assert restored.panel_title_spans[0][0] == {"math": r"\lambda=0.03"}
+    assert restored.labels[1] == r"$\chi^2$/px residual"
+    assert restored.panel_annotations[0][0]["math"] == r"\lambda"
+    assert restored.panel_annotations[1][0]["spans"][0] == {"math": r"\chi^2"}
+
+
+def test_show2d_panel_overlays_support_global_and_per_panel_state():
+    """C1: circle/rect overlays can broadcast globally or target panels."""
+    data = np.random.default_rng(28).random((2, 12, 12), dtype=np.float32)
+    circle = {
+        "shape": "circle",
+        "center": (4, 5),
+        "radius": 2,
+        "stroke": "white",
+        "stroke_width": 3,
+        "line_style": "dashed",
+    }
+    rect = {
+        "shape": "rect",
+        "box": (1, 2, 8, 9),
+        "stroke": "#f87171",
+        "fill": "#f87171",
+        "fill_opacity": 0.2,
+        "line_dash": [5, 2, 1, 2],
+        "z_order": 2,
+    }
+
+    global_widget = Show2D(data, overlays=[circle, rect], verbose=False)
+    assert [len(items) for items in global_widget.panel_overlays] == [2, 2]
+    assert global_widget.panel_overlays[0][0]["shape"] == "circle"
+    assert global_widget.panel_overlays[0][0]["line_style"] == "dashed"
+    assert global_widget.panel_overlays[1][1]["fill"] == "#f87171"
+    assert global_widget.panel_overlays[1][1]["dash"] == [5.0, 2.0, 1.0, 2.0]
+
+    rect_default_fill = dict(rect)
+    rect_default_fill.pop("fill_opacity")
+    list_widget = Show2D(
+        [data[0], data[1]],
+        labels=["raw", "denoised"],
+        panel_overlays={"denoised": rect_default_fill},
+        verbose=False,
+    )
+    assert [len(items) for items in list_widget.panel_overlays] == [0, 1]
+    assert list_widget.panel_overlays[1][0]["shape"] == "rect"
+    assert list_widget.panel_overlays[1][0]["fill_opacity"] == 1.0
+
+    per_panel = Show2D(
+        data,
+        labels=["raw", "denoised"],
+        panel_overlays={
+            "raw": circle,
+            "denoised": [rect],
+        },
+        verbose=False,
+    )
+    restored = Show2D(data, labels=["raw", "denoised"], verbose=False)
+    restored.load_state_dict(per_panel.state_dict())
+
+    assert [len(items) for items in restored.panel_overlays] == [1, 1]
+    assert restored.panel_overlays[0][0]["row"] == 4.0
+    assert restored.panel_overlays[1][0]["row1"] == 8.0
+    assert restored.state_dict()["panel_overlays"][1][0]["z_order"] == 2.0

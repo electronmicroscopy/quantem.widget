@@ -6,8 +6,8 @@ import numpy as np
 from PIL import Image
 
 import quantem.widget as qw
+from quantem.gpu import movie as gpu_movie
 from quantem.widget import movie
-from quantem.widget.render import gif as gif_utils
 
 
 def _stack(offset: float = 0.0) -> np.ndarray:
@@ -51,7 +51,7 @@ def test_save_movie_dispatches_by_suffix(tmp_path: Path, monkeypatch) -> None:
         path.write_bytes(b"mp4")
         return path
 
-    monkeypatch.setattr(gif_utils, "write_mp4", fake_write_mp4)
+    monkeypatch.setattr(gpu_movie, "_write_mp4", fake_write_mp4)
 
     out = movie.save_movie(_stack(), tmp_path / "movie.mp4", fps=7, crf=21, backend="cpu")
 
@@ -68,7 +68,7 @@ def test_save_mp4_accepts_rendered_pil_frames(tmp_path: Path, monkeypatch) -> No
         path.write_bytes(b"mp4")
         return path
 
-    monkeypatch.setattr(gif_utils, "write_mp4", fake_write_mp4)
+    monkeypatch.setattr(gpu_movie, "_write_mp4", fake_write_mp4)
     frames = [Image.new("RGB", (11, 9), (idx, idx, idx)) for idx in range(2)]
 
     out = movie.save_mp4(frames, tmp_path / "frames.mp4", fps=12)
@@ -87,7 +87,7 @@ def test_save_mp4_rejects_unknown_backend(tmp_path: Path) -> None:
 
 
 def test_save_mp4_auto_uses_cuda_backend_when_available(tmp_path: Path, monkeypatch) -> None:
-    from quantem.widget.kernels import cuda_mp4
+    from quantem.gpu.movie import cuda_mp4
 
     captured = {}
 
@@ -109,7 +109,7 @@ def test_save_mp4_auto_uses_cuda_backend_when_available(tmp_path: Path, monkeypa
 
 
 def test_save_mp4_auto_falls_back_when_cuda_unavailable(tmp_path: Path, monkeypatch) -> None:
-    from quantem.widget.kernels import cuda_mp4
+    from quantem.gpu.movie import cuda_mp4
 
     captured = {}
 
@@ -120,7 +120,7 @@ def test_save_mp4_auto_falls_back_when_cuda_unavailable(tmp_path: Path, monkeypa
         return path
 
     monkeypatch.setattr(cuda_mp4, "is_available", lambda: False)
-    monkeypatch.setattr(gif_utils, "write_mp4", fake_write_mp4)
+    monkeypatch.setattr(gpu_movie, "_write_mp4", fake_write_mp4)
 
     out = movie.save_mp4(_stack(), tmp_path / "fallback.mp4")
 

@@ -1,10 +1,11 @@
-"""Public I/O API for quantem.live.
+"""Public I/O API for quantem.widget.
 
 Microscopy workflows import these helpers directly while exploring data at the
 instrument, so keep this package initializer as a small public surface and put
 implementation details in named modules.
 
-The heavy HDF5 loader imports CuPy. Keep these exports lazy so control-plane
+The accelerated HDF5 loader lives in quantem.gpu. Keep these exports lazy so
+control-plane
 CLI commands can import pure helpers like ``quantem.widget.io.schema`` on a
 laptop without a CUDA Python environment.
 """
@@ -25,6 +26,7 @@ _HDF5_EXPORTS = {
     "inspect_master_readiness",
     "is_master_ready",
     "load",
+    "load_scan_region",
     "load_parallel",
     "disk_of",
     "group_by_disk",
@@ -102,6 +104,7 @@ __all__ = [
     "is_master_ready",
     "list_datasets",
     "load",
+    "load_scan_region",
     "load_parallel",
     "disk_of",
     "group_by_disk",

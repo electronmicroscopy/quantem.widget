@@ -19,6 +19,7 @@ or memory bandwidth saturates (~8 workers optimal): ~90 fps vs ~24 fps serial on
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 import json
 import re
 from concurrent.futures import ThreadPoolExecutor
@@ -31,17 +32,92 @@ if TYPE_CHECKING:
     from quantem.core.datastructures import Dataset2d, Dataset3d
 
 
+@dataclass
+class _ImageDataset:
+    """Dataset-like image container used when quantem.core cannot import."""
+
+    array: np.ndarray
+    name: str = ""
+    sampling: tuple[float, ...] = (1.0, 1.0)
+    units: tuple[str, ...] = ("pixels", "pixels")
+    signal_units: str = "arb. units"
+
+    @property
+    def shape(self) -> tuple[int, ...]:
+        return tuple(self.array.shape)
+
+    @property
+    def dtype(self) -> np.dtype:
+        return self.array.dtype
+
+    @property
+    def ndim(self) -> int:
+        return self.array.ndim
+
+    def __array__(self, dtype: object | None = None) -> np.ndarray:
+        return np.asarray(self.array, dtype=dtype)
+
+
+def _is_quantem_core_circular_import(exc: BaseException) -> bool:
+    msg = str(exc)
+    return "partially initialized module 'quantem.core" in msg or (
+        "cannot import name 'Dataset'" in msg and "quantem.core" in msg
+    )
+
+
 def _core_dataset_classes():
     """Return core dataset classes when a reader actually needs them."""
     try:
         from quantem.core.datastructures import Dataset2d, Dataset3d
     except Exception as exc:
+        if _is_quantem_core_circular_import(exc):
+            return None, None
         raise ImportError(
             "quantem.widget.io image readers require quantem.core dataset "
             "classes. Check that quantem.core imports cleanly in this Python "
             "environment."
         ) from exc
     return Dataset2d, Dataset3d
+
+
+def _dataset2d_from_array(
+    arr: np.ndarray,
+    *,
+    name: str = "",
+    sampling: tuple[float, float] | None = None,
+    units: tuple[str, str] | list[str] | None = None,
+):
+    Dataset2d, _ = _core_dataset_classes()
+    sampling_tuple = (1.0, 1.0) if sampling is None else tuple(float(v) for v in sampling)
+    units_tuple = ("pixels", "pixels") if units is None else tuple(str(v) for v in units)
+    if Dataset2d is None:
+        return _ImageDataset(
+            np.asarray(arr),
+            name=str(name),
+            sampling=sampling_tuple,
+            units=units_tuple,
+        )
+    return Dataset2d.from_array(arr, sampling=sampling_tuple, units=units_tuple, name=name)
+
+
+def _dataset3d_from_array(
+    arr: np.ndarray,
+    *,
+    name: str = "",
+    sampling: tuple[float, float, float] | None = None,
+    units: tuple[str, str, str] | list[str] | None = None,
+):
+    _, Dataset3d = _core_dataset_classes()
+    sampling_tuple = (1.0, 1.0, 1.0) if sampling is None else tuple(float(v) for v in sampling)
+    units_tuple = ("frame", "pixels", "pixels") if units is None else tuple(str(v) for v in units)
+    if Dataset3d is None:
+        return _ImageDataset(
+            np.asarray(arr),
+            name=str(name),
+            sampling=sampling_tuple,
+            units=units_tuple,
+        )
+    return Dataset3d.from_array(arr, sampling=sampling_tuple, units=units_tuple, name=name)
 
 
 _IMAGE_SUFFIXES = (".npy", ".emd", ".tif", ".tiff", ".png",
@@ -126,7 +202,6 @@ def read_image(path: str | Path) -> Dataset2d | RgbImage:
     >>> from quantem.widget import Show2D, io  # doctest: +SKIP
     >>> Show2D(io.read_image("figure_rgb.png"))  # true color, not gray  # doctest: +SKIP
     """
-    Dataset2d, _ = _core_dataset_classes()
     p = Path(path)
     ext = p.suffix.lower()
     if ext == ".npy":
@@ -135,7 +210,7 @@ def read_image(path: str | Path) -> Dataset2d | RgbImage:
         return _read_emd(p)
     if ext == ".gif":
         ds = read_gif(p)
-        return Dataset2d.from_array(ds.array[0], name=p.stem)
+        return _dataset2d_from_array(ds.array[0], name=p.stem)
     if ext in (".tif", ".tiff", ".png", ".jpg", ".jpeg", ".bmp"):
         from PIL import Image  # noqa: PLC0415  (lazy: keep io import cheap)
         with Image.open(p) as img:
@@ -240,10 +315,9 @@ def _wrap_image_array(
     units: tuple[str, str] = ("pixels", "pixels"),
 ) -> Dataset2d | RgbImage:
     """Wrap a normalized array as Dataset2d (gray) or RgbImage (color)."""
-    Dataset2d, _ = _core_dataset_classes()
     if _is_rgb_array(arr):
         return RgbImage(arr, name=name, sampling=sampling, units=units)
-    return Dataset2d.from_array(arr, name=name)
+    return _dataset2d_from_array(arr, name=name, sampling=sampling, units=units)
 
 
 def read_gif(path: str | Path) -> Dataset3d:
@@ -287,7 +361,7 @@ def read_gif(path: str | Path) -> Dataset3d:
                 f"GIF frame {idx} has shape {frame.shape}, expected {shape}. "
                 "Use a GIF with same-size frames."
             )
-    return Dataset3d.from_array(np.stack(frames, axis=0), name=p.stem)
+    return _dataset3d_from_array(np.stack(frames, axis=0), name=p.stem)
 
 
 def _first_frame(arr: np.ndarray) -> np.ndarray:
@@ -301,7 +375,6 @@ def _first_frame(arr: np.ndarray) -> np.ndarray:
 
 def _read_emd(p: Path) -> Dataset2d:
     """Read an EMD image: Velox HAADF layout if present, else the largest 2D dataset."""
-    Dataset2d, _ = _core_dataset_classes()
     import h5py  # noqa: PLC0415
     with h5py.File(p, "r") as f:
         if "Data/Image" in f:                       # Velox HAADF
@@ -310,7 +383,7 @@ def _read_emd(p: Path) -> Dataset2d:
             meta = _read_velox_metadata(f, group)
             image = arr[:, :, 0] if arr.ndim == 3 else arr
             sampling, units = _velox_sampling(meta)
-            ds = Dataset2d.from_array(image, sampling=sampling, units=units, name=p.stem)
+            ds = _dataset2d_from_array(image, sampling=sampling, units=units, name=p.stem)
             ds._metadata = meta
             ds.scan_rotation_deg = _velox_scan_rotation_deg(meta)
             return ds
@@ -318,7 +391,7 @@ def _read_emd(p: Path) -> Dataset2d:
         f.visititems(lambda name, obj: biggest.append(obj)
                      if isinstance(obj, h5py.Dataset) and obj.ndim >= 2 else None)
         arr = max(biggest, key=lambda obj: obj.size)[()]
-    ds = Dataset2d.from_array(_first_frame(arr).astype(np.float32), name=p.stem)
+    ds = _dataset2d_from_array(_first_frame(arr).astype(np.float32), name=p.stem)
     ds.scan_rotation_deg = None                       # no Velox metadata to read the angle from
     return ds
 
@@ -408,7 +481,6 @@ def read_image_stack(
         Shape ``(N, H, W)``, dtype float32. Sampling defaults to pixels since a
         bare image folder carries no calibration.
     """
-    _, Dataset3d = _core_dataset_classes()
     path = Path(path)
     if not path.is_dir():
         raise FileNotFoundError(f"Not a directory: {path}")
@@ -463,13 +535,13 @@ def read_image_stack(
         sampling = getattr(first_dataset, "sampling", None)
         units = getattr(first_dataset, "units", None)
         if sampling is not None and units is not None and len(sampling) >= 2:
-            return Dataset3d.from_array(
+            return _dataset3d_from_array(
                 stack,
                 sampling=(1.0, float(sampling[-2]), float(sampling[-1])),
                 units=("frame", str(units[-2]), str(units[-1])),
                 name=path.name,
             )
-    return Dataset3d.from_array(stack, name=path.name)
+    return _dataset3d_from_array(stack, name=path.name)
 
 
 def _collect_frames(path: Path, file_type: str | None, pattern: str | None) -> list[Path]:

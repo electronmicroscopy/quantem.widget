@@ -526,6 +526,9 @@ class Show3DSlices(anywidget.AnyWidget):
     units : str or sequence of str, optional
         Unit(s) for ``sampling`` (e.g. ``"A"``, ``"nm"``). One value applies to
         all axes; a sequence sets each axis.
+    pixel_size : float or sequence of 3 floats, optional
+        Back-compatible scale-bar sampling in Å/pixel. Prefer ``sampling`` and
+        ``units`` for new code. A 3-tuple is interpreted as ``(pz, py, px)``.
     config : mapping or path-like, optional
         Parsed QuantEM reconstruction ``config.json`` data, or a path to it.
         This is only used for the keys listed in "Config Contract" above.
@@ -1032,6 +1035,7 @@ class Show3DSlices(anywidget.AnyWidget):
         cmap: str = "plasma",
         sampling: float | Sequence[float] | None = None,
         units: str | Sequence[str] | None = None,
+        pixel_size: float | Sequence[float] | None = None,
         config: Mapping | str | pathlib.Path | None = None,
         apply_config_transforms: bool = True,
         crop: int | tuple[int, int] | tuple[int, int, int, int] = 0,
@@ -1101,7 +1105,8 @@ class Show3DSlices(anywidget.AnyWidget):
         # `sampling` + `units` is the canonical quantem convention (Dataset.sampling
         # /.units, Show2D, Show4DSTEM). Convert a user-provided sampling to the
         # internal Å `pixel_size` trait the scale bar reads (nm -> 10x).
-        pixel_size: float | Sequence[float] | None = 0.0
+        if pixel_size is None:
+            pixel_size = 0.0
         if sampling is not None:
             _unit_scale = {"": 1.0, "nm": 10.0, "a": 1.0, "å": 1.0, "angstrom": 1.0, "angstroms": 1.0}
             def _scale(unit):

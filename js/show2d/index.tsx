@@ -31,7 +31,7 @@ import DragIndicatorIcon from "@mui/icons-material/DragIndicator";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import { useTheme } from "../theme";
 import { useCanvasRepaintSignal } from "../canvasLifecycle";
-import { drawScaleBarHiDPI, drawColorbar, formatZoomLabel, roundToNiceValue } from "../figure";
+import { drawColorbar, formatScaleLabel, formatZoomLabel, roundToNiceValue } from "../figure";
 import { extractBytes, extractFloat32, formatNumber, downloadBlob, preserveRestoredWidgetModelsOnSave } from "../format";
 import { useHideStaticFallback } from "../staticFallback";
 import { computeHistogramFromBytes, findDataRange, applyLogScale, percentileClip, sliderRange, computeStats } from "../stats";
@@ -118,6 +118,391 @@ function InfoTooltip({ text, theme = "dark" }: { text: React.ReactNode; theme?: 
   );
 }
 
+
+type RichTitleSpan = { text?: unknown; math?: unknown; color?: unknown };
+type PanelTitleStyle = Record<string, unknown>;
+type ScaleBarStyle = Record<string, unknown>;
+type MarkerMap = Record<string, string>;
+type PanelAnnotationSpec = {
+  text?: string;
+  math?: string;
+  spans?: RichTitleSpan[];
+  position?: string;
+  anchor?: string;
+  x?: number;
+  y?: number;
+  box?: [number, number, number, number];
+  variant?: string;
+  class_name?: string;
+  bg?: string;
+  fg?: string;
+  color?: string;
+  border_color?: string;
+  border_width?: number;
+  font_size?: number;
+  font_weight?: string | number;
+  font_family?: string;
+  pad_x?: number;
+  pad_y?: number;
+  radius?: number;
+  opacity?: number;
+  align?: string;
+  max_width?: string;
+  offset?: [number, number];
+  outline_color?: string;
+  outline_width?: number;
+};
+type PanelOverlaySpec = {
+  shape?: "circle" | "rect" | "rectangle" | "square";
+  coords?: "data" | "relative";
+  row?: number;
+  col?: number;
+  radius?: number;
+  row0?: number;
+  col0?: number;
+  row1?: number;
+  col1?: number;
+  stroke?: string;
+  stroke_width?: number;
+  line_style?: string;
+  dash?: number[];
+  fill?: string;
+  opacity?: number;
+  fill_opacity?: number;
+  stroke_opacity?: number;
+  z_order?: number;
+};
+type OverlaySelection = { panel: number; overlay: number };
+type OverlayDragState = {
+  mode: "move" | "resize";
+  panel: number;
+  overlay: number;
+  handle?: string;
+  startRow: number;
+  startCol: number;
+  original: PanelOverlaySpec;
+};
+
+function styleNumber(value: unknown, fallback: number): number {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function styleString(value: unknown, fallback = ""): string {
+  return typeof value === "string" && value.trim() ? value : fallback;
+}
+
+function withAlpha(color: string | undefined, alpha: number): string | undefined {
+  if (!color || color === "none") return undefined;
+  const a = Math.max(0, Math.min(1, alpha));
+  if (color.startsWith("#")) {
+    const hex = color.slice(1);
+    if (hex.length === 3 || hex.length === 6) {
+      const full = hex.length === 3 ? hex.split("").map((ch) => ch + ch).join("") : hex;
+      const r = parseInt(full.slice(0, 2), 16);
+      const g = parseInt(full.slice(2, 4), 16);
+      const b = parseInt(full.slice(4, 6), 16);
+      if ([r, g, b].every(Number.isFinite)) return `rgba(${r}, ${g}, ${b}, ${a})`;
+    }
+  }
+  return color;
+}
+
+function overlayDashPattern(overlay: PanelOverlaySpec, lineWidth: number): number[] {
+  const custom = Array.isArray(overlay.dash)
+    ? overlay.dash.map((value) => Number(value)).filter((value) => Number.isFinite(value) && value >= 0)
+    : [];
+  if (custom.some((value) => value > 0)) return custom;
+  const w = Math.max(1, lineWidth);
+  const lineStyle = styleString(overlay.line_style, "solid").toLowerCase().replace("_", "-");
+  if (lineStyle === "dashed" || lineStyle === "dash") return [4 * w, 2 * w];
+  if (lineStyle === "dotted" || lineStyle === "dot") return [w, 1.8 * w];
+  if (lineStyle === "dashdot" || lineStyle === "dash-dot") return [4 * w, 2 * w, w, 2 * w];
+  return [];
+}
+
+const LATEX_SYMBOLS: Record<string, string> = {
+  alpha: "α", beta: "β", gamma: "γ", delta: "δ", epsilon: "ε", varepsilon: "ε",
+  zeta: "ζ", eta: "η", theta: "θ", vartheta: "ϑ", iota: "ι", kappa: "κ",
+  lambda: "λ", mu: "μ", nu: "ν", xi: "ξ", pi: "π", rho: "ρ", varrho: "ϱ",
+  sigma: "σ", tau: "τ", upsilon: "υ", phi: "φ", varphi: "ϕ", chi: "χ",
+  psi: "ψ", omega: "ω", Gamma: "Γ", Delta: "Δ", Theta: "Θ", Lambda: "Λ",
+  Xi: "Ξ", Pi: "Π", Sigma: "Σ", Phi: "Φ", Psi: "Ψ", Omega: "Ω",
+  pm: "±", times: "×", cdot: "·", degree: "°", angstrom: "Å", le: "≤",
+  ge: "≥", neq: "≠", approx: "≈", infty: "∞",
+};
+
+function readLatexGroup(expr: string, start: number): { text: string; next: number } {
+  if (expr[start] !== "{") return { text: expr[start] || "", next: start + 1 };
+  let depth = 0;
+  for (let i = start; i < expr.length; i += 1) {
+    if (expr[i] === "{") depth += 1;
+    if (expr[i] === "}") depth -= 1;
+    if (depth === 0) return { text: expr.slice(start + 1, i), next: i + 1 };
+  }
+  return { text: expr.slice(start + 1), next: expr.length };
+}
+
+function readLatexAtom(expr: string, start: number): { text: string; next: number } {
+  if (expr[start] === "{") return readLatexGroup(expr, start);
+  if (expr[start] === "\\") {
+    const match = expr.slice(start + 1).match(/^[A-Za-z]+/);
+    if (match) return { text: `\\${match[0]}`, next: start + 1 + match[0].length };
+  }
+  return { text: expr[start] || "", next: start + 1 };
+}
+
+function renderLatexMath(expr: string, keyPrefix: string): React.ReactNode[] {
+  const nodes: React.ReactNode[] = [];
+  let i = 0;
+  let key = 0;
+  while (i < expr.length) {
+    const ch = expr[i];
+    if ((ch === "^" || ch === "_") && i + 1 < expr.length) {
+      const atom = readLatexAtom(expr, i + 1);
+      const Tag = ch === "^" ? "sup" : "sub";
+      nodes.push(
+        <Tag key={`${keyPrefix}-script-${key++}`} style={{ fontSize: "0.72em", lineHeight: 0 }}>
+          {renderLatexMath(atom.text, `${keyPrefix}-script-${key}`)}
+        </Tag>
+      );
+      i = atom.next;
+      continue;
+    }
+    if (ch === "\\") {
+      const match = expr.slice(i + 1).match(/^[A-Za-z]+/);
+      if (match) {
+        const command = match[0];
+        i += command.length + 1;
+        if ((command === "mathrm" || command === "text") && expr[i] === "{") {
+          const group = readLatexGroup(expr, i);
+          nodes.push(<span key={`${keyPrefix}-roman-${key++}`} style={{ fontStyle: "normal" }}>{group.text}</span>);
+          i = group.next;
+          continue;
+        }
+        nodes.push(LATEX_SYMBOLS[command] || command);
+        continue;
+      }
+    }
+    if (ch === "{" || ch === "}") {
+      i += 1;
+      continue;
+    }
+    nodes.push(ch);
+    i += 1;
+  }
+  return nodes;
+}
+
+function renderMathExpression(expr: string, keyPrefix: string): React.ReactNode {
+  const normalized = expr.trim().replace(/\\+(?=[A-Za-z])/g, "\\");
+  return (
+    <span key={keyPrefix} data-quantem-math="true" style={{ fontFamily: "Cambria Math, STIX Two Math, Times New Roman, serif", fontStyle: "italic" }}>
+      {renderLatexMath(normalized, keyPrefix)}
+    </span>
+  );
+}
+
+function findUnescapedDollar(text: string, from = 0): number {
+  for (let i = from; i < text.length; i += 1) {
+    if (text[i] === "$" && text[i - 1] !== "\\") return i;
+  }
+  return -1;
+}
+
+function renderTextWithInlineMath(text: string, keyPrefix: string): React.ReactNode[] {
+  const nodes: React.ReactNode[] = [];
+  let rest = text;
+  let key = 0;
+  while (rest.length) {
+    const dollar = findUnescapedDollar(rest);
+    const paren = rest.indexOf("\\(");
+    const starts = [dollar, paren].filter((idx) => idx >= 0);
+    if (!starts.length) {
+      nodes.push(rest.replace(/\\\$/g, "$"));
+      break;
+    }
+    const start = Math.min(...starts);
+    if (start > 0) nodes.push(rest.slice(0, start).replace(/\\\$/g, "$"));
+    const dollarMode = rest[start] === "$";
+    const close = dollarMode ? findUnescapedDollar(rest, start + 1) - (start + 1) : rest.indexOf("\\)", start + 2) - (start + 2);
+    if (close < 0) {
+      nodes.push(rest.slice(start).replace(/\\\$/g, "$"));
+      break;
+    }
+    const math = rest.slice(start + (dollarMode ? 1 : 2), start + (dollarMode ? 1 : 2) + close);
+    nodes.push(renderMathExpression(math, `${keyPrefix}-math-${key++}`));
+    rest = rest.slice(start + (dollarMode ? 2 : 4) + close);
+  }
+  return nodes;
+}
+
+function panelTitleChromeSx(
+  style: PanelTitleStyle | undefined,
+  defaults: Record<string, unknown> = {},
+): Record<string, unknown> {
+  const s = style || {};
+  const borderWidth = Math.max(0, styleNumber(s.border_width, 0));
+  const bg = styleString(s.bg);
+  const align = styleString(s.align, String(defaults.textAlign || "center"));
+  const maxWidth = s.max_width;
+  const mode = typeof maxWidth === "string" ? maxWidth : "";
+  const sx: Record<string, unknown> = {
+    ...defaults,
+    color: styleString(s.fg, String(defaults.color || "rgba(255,255,255,0.95)")),
+    bgcolor: bg || defaults.bgcolor,
+    border: borderWidth > 0 ? `${borderWidth}px solid ${styleString(s.border_color, "rgba(255,255,255,0.35)")}` : defaults.border,
+    borderRadius: s.radius != null ? `${Math.max(0, styleNumber(s.radius, 0))}px` : defaults.borderRadius,
+    px: s.pad_x != null ? `${Math.max(0, styleNumber(s.pad_x, 0))}px` : defaults.px,
+    py: s.pad_y != null ? `${Math.max(0, styleNumber(s.pad_y, 0))}px` : defaults.py,
+    fontWeight: s.font_weight != null ? s.font_weight : defaults.fontWeight,
+    fontFamily: styleString(s.font_family, String(defaults.fontFamily || "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif")),
+    opacity: s.opacity != null ? Math.max(0, Math.min(1, styleNumber(s.opacity, 1))) : defaults.opacity,
+    textAlign: align,
+    WebkitTextStroke: styleNumber(s.outline_width, 0) > 0 ? `${styleNumber(s.outline_width, 0)}px ${styleString(s.outline_color, "rgba(0,0,0,0.85)")}` : undefined,
+    paintOrder: styleNumber(s.outline_width, 0) > 0 ? "stroke fill" : undefined,
+    maxWidth: mode && mode !== "panel" && mode !== "hug" ? mode : defaults.maxWidth,
+    width: mode === "panel" ? (defaults.width || "calc(100% - 56px)") : defaults.width,
+    boxSizing: "border-box",
+  };
+  if (mode === "hug") {
+    sx.left = defaults.left != null && defaults.width != null
+      ? `calc(${String(defaults.left)} + (${String(defaults.width)}) / 2)`
+      : "50%";
+    sx.right = "auto";
+    sx.width = "fit-content";
+    sx.maxWidth = "calc(100% - 16px)";
+    sx.transform = defaults.transform
+      ? `${String(defaults.transform)} translateX(-50%)`
+      : "translateX(-50%)";
+  }
+  if (Number.isFinite(Number(s.x)) || Number.isFinite(Number(s.y))) {
+    const offset = Array.isArray(s.offset) ? s.offset.map(Number) : [0, 0];
+    const left = Number.isFinite(Number(s.x)) ? Number(s.x) * 100 : 50;
+    const top = Number.isFinite(Number(s.y)) ? Number(s.y) * 100 : 0;
+    sx.left = `calc(${left}% + ${Number(offset[0] || 0)}px)`;
+    sx.top = `calc(${top}% + ${Number(offset[1] || 0)}px)`;
+    sx.right = "auto";
+    sx.bottom = "auto";
+    sx.width = mode === "panel" ? sx.width : "fit-content";
+    sx.maxWidth = sx.maxWidth || "calc(100% - 16px)";
+    sx.transform = annotationAnchorTransform(styleString(s.anchor, "top-center"));
+  }
+  return sx;
+}
+
+function richTitlePlainText(spans: RichTitleSpan[] | undefined, fallback: string): string {
+  if (!Array.isArray(spans) || spans.length === 0) return fallback;
+  const text = spans.map((span) => String(span?.text ?? span?.math ?? "")).join("");
+
+  return text || fallback;
+}
+
+function renderRichTitle(spans: RichTitleSpan[] | undefined, fallback: string): React.ReactNode {
+
+  if (!Array.isArray(spans) || spans.length === 0) return renderTextWithInlineMath(fallback, "title-fallback");
+  return spans.map((span, idx) => {
+    const text = String(span?.text ?? "");
+    const math = span?.math == null ? "" : String(span.math);
+    const color = typeof span?.color === "string" && span.color.trim() ? span.color : undefined;
+    return (
+      <span key={`title-span-${idx}`} style={color ? { color } : undefined}>
+        {math ? renderMathExpression(math, `title-span-${idx}`) : renderTextWithInlineMath(text, `title-span-${idx}`)}
+
+      </span>
+    );
+  });
+}
+
+
+function annotationAnchorTransform(anchor: string | undefined): string {
+  const value = anchor || "top-left";
+  const x = value.endsWith("center") || value === "center" ? "-50%" : value.endsWith("right") ? "-100%" : "0";
+  const y = value.startsWith("center") || value === "center" ? "-50%" : value.startsWith("bottom") ? "-100%" : "0";
+  return `translate(${x}, ${y})`;
+}
+
+function annotationPositionSx(spec: PanelAnnotationSpec): Record<string, unknown> {
+  const margin = 8;
+  const position = spec.position || "top-left";
+  const offset = Array.isArray(spec.offset) ? spec.offset : [0, 0];
+  if (Array.isArray(spec.box) && spec.box.length === 4) {
+    const [left, top, width, height] = spec.box;
+    return {
+      left: `calc(${left * 100}% + ${offset[0] || 0}px)`,
+      top: `calc(${top * 100}% + ${offset[1] || 0}px)`,
+      width: `${width * 100}%`,
+      minHeight: `${height * 100}%`,
+    };
+  }
+  if (Number.isFinite(spec.x) && Number.isFinite(spec.y)) {
+    return {
+      left: `calc(${Number(spec.x) * 100}% + ${offset[0] || 0}px)`,
+      top: `calc(${Number(spec.y) * 100}% + ${offset[1] || 0}px)`,
+      transform: annotationAnchorTransform(spec.anchor || "center"),
+    };
+  }
+  const sx: Record<string, unknown> = {};
+  if (position.includes("top")) sx.top = margin + (offset[1] || 0);
+  if (position.includes("bottom")) sx.bottom = margin - (offset[1] || 0);
+  if (position.includes("left")) sx.left = margin + (offset[0] || 0);
+  if (position.includes("right")) sx.right = margin - (offset[0] || 0);
+  if (position === "top-center" || position === "center" || position === "bottom-center") {
+    sx.left = `calc(50% + ${offset[0] || 0}px)`;
+  }
+  if (position === "center-left" || position === "center" || position === "center-right") {
+    sx.top = `calc(50% + ${offset[1] || 0}px)`;
+  }
+  sx.transform = annotationAnchorTransform(spec.anchor || position);
+  return sx;
+}
+
+function panelAnnotationSx(spec: PanelAnnotationSpec): Record<string, unknown> {
+  const variant = spec.variant || "badge";
+  const plain = variant === "plain";
+  const outline = variant === "outline";
+  const callout = variant === "callout";
+  const pill = variant === "pill";
+  const fg = styleString(spec.fg ?? spec.color, plain ? "rgba(255,255,255,0.92)" : "#fff");
+  const bg = styleString(spec.bg, plain ? "transparent" : "rgba(0,0,0,0.72)");
+  const borderWidth = Math.max(0, styleNumber(spec.border_width, outline || callout ? 1 : 0));
+  return {
+    position: "absolute",
+    ...annotationPositionSx(spec),
+    display: "block",
+    boxSizing: "border-box",
+    pointerEvents: "none",
+    zIndex: 7,
+    px: spec.pad_x != null ? `${Math.max(0, styleNumber(spec.pad_x, 0))}px` : (plain ? 0 : "6px"),
+    py: spec.pad_y != null ? `${Math.max(0, styleNumber(spec.pad_y, 0))}px` : (plain ? 0 : "2px"),
+    borderRadius: spec.radius != null ? `${Math.max(0, styleNumber(spec.radius, 0))}px` : (pill ? "999px" : "3px"),
+    background: bg,
+    color: fg,
+    border: borderWidth > 0 ? `${borderWidth}px solid ${styleString(spec.border_color, "rgba(255,255,255,0.5)")}` : "none",
+    opacity: spec.opacity != null ? Math.max(0, Math.min(1, styleNumber(spec.opacity, 1))) : 1,
+    fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+    ...(spec.font_family ? { fontFamily: spec.font_family } : {}),
+    fontSize: `${Math.max(6, styleNumber(spec.font_size, 10))}px`,
+    fontWeight: spec.font_weight != null ? spec.font_weight : 700,
+    lineHeight: 1.2,
+    textAlign: styleString(spec.align, "center"),
+    whiteSpace: Array.isArray(spec.box) ? "normal" : "nowrap",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    maxWidth: styleString(spec.max_width, Array.isArray(spec.box) ? "100%" : "calc(100% - 16px)"),
+    textShadow: plain && styleNumber(spec.outline_width, 0) <= 0 ? "0 1px 2px rgba(0,0,0,0.85)" : "none",
+    WebkitTextStroke: styleNumber(spec.outline_width, 0) > 0 ? `${styleNumber(spec.outline_width, 0)}px ${styleString(spec.outline_color, "rgba(0,0,0,0.85)")}` : undefined,
+    paintOrder: styleNumber(spec.outline_width, 0) > 0 ? "stroke fill" : undefined,
+    boxShadow: callout ? "0 1px 4px rgba(0,0,0,0.45)" : "none",
+  };
+}
+
+function renderPanelAnnotation(spec: PanelAnnotationSpec, fallback = ""): React.ReactNode {
+  if (spec.math) return renderMathExpression(spec.math, "panel-annotation-math");
+  return renderRichTitle(spec.spans, spec.text || fallback);
+}
+
+
 function KeyboardShortcuts({ items }: { items: [string, string][] }) {
   return (
     <Box component="table" sx={{ borderCollapse: "collapse", "& td": { py: 0.25, fontSize: 11, lineHeight: 1.3, verticalAlign: "top" }, "& td:first-of-type": { pr: 1.5, opacity: 0.7, fontFamily: "monospace", fontSize: 10, whiteSpace: "nowrap" } }}>
@@ -136,6 +521,14 @@ const upwardMenuProps = {
   sx: { zIndex: 9999 },
 };
 const PAGE_PLAY_FPS_OPTIONS = [1, 2, 3, 4] as const;
+const CONTRAST_PRESETS = [
+  { value: "manual", label: "Manual", low: 0, high: 100 },
+  { value: "0.5-99.5", label: "0.5–99.5", low: 0.5, high: 99.5 },
+  { value: "1-99", label: "1–99", low: 1, high: 99 },
+  { value: "2-98", label: "2–98", low: 2, high: 98 },
+  { value: "3-97", label: "3–97", low: 3, high: 97 },
+] as const;
+const IDENTITY_PALETTE = ["#2e7d32", "#c62828", "#d81b60", "#1565c0", "#f9a825", "#6a1b9a"] as const;
 
 function useDebugFps(enabled: boolean): number | null {
   const [fps, setFps] = React.useState<number | null>(null);
@@ -307,6 +700,158 @@ function makeHtmlExportFilename(title: string, nImages: number, height: number, 
   const shape = nImages > 1 ? `${nImages}x${height}x${width}` : `${height}x${width}`;
   const suffix = mode === "quantized" ? "quantized" : mode === "current" ? "current" : "exact";
   return `${slug}_${shape}_${suffix}.html`;
+}
+
+function makeSvgExportFilename(title: string, nImages: number, height: number, width: number, scale: number): string {
+  let slug = (title || "show2d")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  while (slug.includes("__")) slug = slug.replace(/__/g, "_");
+  if (!slug) slug = "show2d";
+  const shape = nImages > 1 ? `${nImages}x${height}x${width}` : `${height}x${width}`;
+  return `${slug}_${shape}_svg_${scale}x.svg`;
+}
+
+function escapeXmlText(value: unknown): string {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function escapeXmlAttr(value: unknown): string {
+  return escapeXmlText(value).replace(/"/g, "&quot;");
+}
+
+function measureSvgTextWidth(text: string, fontSize: number): number {
+  const canvas = document.createElement("canvas");
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return text.length * fontSize * 0.55;
+  ctx.font = `700 ${fontSize}px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif`;
+  return ctx.measureText(text).width;
+}
+
+function wrapSvgTextLines(text: string, fontSize: number, maxWidth: number, maxLines: number = 3): string[] {
+  const words = String(text || "").trim().split(/\s+/).filter(Boolean);
+  if (words.length === 0) return [];
+  const lines: string[] = [];
+  let current = "";
+
+  const pushCurrent = () => {
+    if (current) {
+      lines.push(current);
+      current = "";
+    }
+  };
+
+  const appendLongWord = (word: string) => {
+    let fragment = "";
+    for (const char of word) {
+      const candidate = fragment + char;
+      if (fragment && measureSvgTextWidth(candidate, fontSize) > maxWidth) {
+        lines.push(fragment);
+        fragment = char;
+        if (lines.length >= maxLines) return;
+      } else {
+        fragment = candidate;
+      }
+    }
+    current = fragment;
+  };
+
+  for (const word of words) {
+    if (lines.length >= maxLines) break;
+    const candidate = current ? `${current} ${word}` : word;
+    if (measureSvgTextWidth(candidate, fontSize) <= maxWidth) {
+      current = candidate;
+      continue;
+    }
+    pushCurrent();
+    if (lines.length >= maxLines) break;
+    if (measureSvgTextWidth(word, fontSize) <= maxWidth) {
+      current = word;
+    } else {
+      appendLongWord(word);
+    }
+  }
+  pushCurrent();
+  return lines.slice(0, maxLines);
+}
+
+function scaledCanvasPngDataUrl(canvas: HTMLCanvasElement, scale: number, smooth: boolean): string {
+  const exportScale = Math.max(1, Math.min(8, Number.isFinite(scale) ? scale : 2));
+  const out = document.createElement("canvas");
+  out.width = Math.max(1, Math.round(canvas.width * exportScale));
+  out.height = Math.max(1, Math.round(canvas.height * exportScale));
+  const ctx = out.getContext("2d");
+  if (!ctx) return canvas.toDataURL("image/png");
+  ctx.imageSmoothingEnabled = smooth;
+  ctx.drawImage(canvas, 0, 0, out.width, out.height);
+  return out.toDataURL("image/png");
+}
+
+function show2dScaleBarGeometry(
+  cssWidth: number,
+  cssHeight: number,
+  imageWidth: number,
+  zoom: number,
+  pixelSize: number,
+  unit: string,
+  position: string,
+  requestedPhysical?: number | null,
+  requestedLabel?: string | null,
+  style?: ScaleBarStyle | null,
+): { barX: number; barY: number; barPx: number; barHeight: number; label: string; scaleLeft: boolean } | null {
+  if (cssWidth <= 0 || cssHeight <= 0 || imageWidth <= 0 || pixelSize <= 0 || zoom <= 0) return null;
+  const scaleX = cssWidth / imageWidth;
+  const effectiveZoom = zoom * scaleX;
+  if (effectiveZoom <= 0) return null;
+  const explicitPhysical = Number(requestedPhysical);
+  const nicePhysical = Number.isFinite(explicitPhysical) && explicitPhysical > 0
+    ? explicitPhysical
+    : roundToNiceValue((60 / effectiveZoom) * pixelSize);
+  const barPx = (nicePhysical / pixelSize) * effectiveZoom;
+  const scaleLeft = position === "bottom-left";
+  const [offsetX, offsetY] = scaleBarOffset(style);
+  return {
+    barX: (scaleLeft ? 12 : cssWidth - barPx - 12) + offsetX,
+    barY: cssHeight - 12 + offsetY,
+    barPx,
+    barHeight: Math.max(0.5, styleNumber(style?.bar_height, 5)),
+    label: requestedLabel && requestedLabel.trim() ? requestedLabel : formatScaleLabel(nicePhysical, unit),
+    scaleLeft,
+  };
+}
+
+function scaleBarOffset(style?: ScaleBarStyle | null): [number, number] {
+  const raw = style?.offset;
+  if (!Array.isArray(raw) || raw.length < 2) return [0, 0];
+  const x = Number(raw[0]);
+  const y = Number(raw[1]);
+  return [Number.isFinite(x) ? x : 0, Number.isFinite(y) ? y : 0];
+}
+
+function scaleBarFontFamily(style?: ScaleBarStyle | null): string {
+  return styleString(style?.font_family, "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif");
+}
+
+function scaleBarFontSize(style?: ScaleBarStyle | null): number {
+  return Math.max(1, styleNumber(style?.font_size, 16));
+}
+
+function scaleBarCanvasFont(style?: ScaleBarStyle | null): string {
+  const weight = style?.font_weight;
+  const weightText = weight !== undefined && weight !== null && String(weight).trim() ? `${String(weight).trim()} ` : "";
+  return `${weightText}${scaleBarFontSize(style)}px ${scaleBarFontFamily(style)}`;
+}
+
+function scaleBarSvgFontAttrs(style?: ScaleBarStyle | null): string {
+  const weight = style?.font_weight;
+  const weightText = weight !== undefined && weight !== null && String(weight).trim()
+    ? ` font-weight="${escapeXmlAttr(String(weight).trim())}"`
+    : "";
+  return `font-family="${escapeXmlAttr(scaleBarFontFamily(style))}" font-size="${scaleBarFontSize(style)}"${weightText}`;
 }
 
 function formatSavedBytes(bytes: number): string {
@@ -741,6 +1286,746 @@ function drawROI(
   }
 }
 
+function drawPanelOverlays(
+  ctx: CanvasRenderingContext2D,
+  overlays: PanelOverlaySpec[] | undefined,
+  toScreenX: (col: number) => number,
+  toScreenY: (row: number) => number,
+  imageW: number,
+  imageH: number,
+): void {
+  if (!overlays?.length) return;
+  const ordered = [...overlays].sort((a, b) => styleNumber(a.z_order, 0) - styleNumber(b.z_order, 0));
+  for (const overlay of ordered) {
+    const coords = overlay.coords || "data";
+    const shape = overlay.shape === "rectangle" ? "rect" : (overlay.shape || "circle");
+    const scaleRow = coords === "relative" ? imageH : 1;
+    const scaleCol = coords === "relative" ? imageW : 1;
+    const scaleRadius = coords === "relative" ? Math.min(imageW, imageH) : 1;
+    const opacity = styleNumber(overlay.opacity, 1);
+    const strokeOpacity = opacity * styleNumber(overlay.stroke_opacity, 1);
+    const fillOpacity = opacity * styleNumber(overlay.fill_opacity, overlay.fill ? 1 : 0);
+    const stroke = withAlpha(styleString(overlay.stroke, "#00e5ff"), strokeOpacity);
+    const fill = withAlpha(overlay.fill, fillOpacity);
+    ctx.save();
+    ctx.lineWidth = Math.max(0, styleNumber(overlay.stroke_width, 2));
+    ctx.setLineDash(overlayDashPattern(overlay, ctx.lineWidth));
+    ctx.lineCap = ctx.getLineDash().length ? "round" : "butt";
+    if (fill) ctx.fillStyle = fill;
+    if (stroke) ctx.strokeStyle = stroke;
+    if (shape === "circle") {
+      const col = styleNumber(overlay.col, 0) * scaleCol;
+      const row = styleNumber(overlay.row, 0) * scaleRow;
+      const radius = Math.max(0, styleNumber(overlay.radius, 0) * scaleRadius);
+      const x = toScreenX(col);
+      const y = toScreenY(row);
+      const rx = Math.abs(toScreenX(col + radius) - x);
+      const ry = Math.abs(toScreenY(row + radius) - y);
+      const r = Math.max(0, (rx + ry) / 2);
+      ctx.beginPath();
+      ctx.arc(x, y, r, 0, Math.PI * 2);
+      if (fill) ctx.fill();
+      if (stroke && ctx.lineWidth > 0) ctx.stroke();
+    } else {
+      const col0 = styleNumber(overlay.col0, 0) * scaleCol;
+      const row0 = styleNumber(overlay.row0, 0) * scaleRow;
+      const col1 = styleNumber(overlay.col1, col0) * scaleCol;
+      const row1 = styleNumber(overlay.row1, row0) * scaleRow;
+      const x0 = toScreenX(col0);
+      const y0 = toScreenY(row0);
+      const x1 = toScreenX(col1);
+      const y1 = toScreenY(row1);
+      const x = Math.min(x0, x1);
+      const y = Math.min(y0, y1);
+      const w = Math.abs(x1 - x0);
+      const h = Math.abs(y1 - y0);
+      if (fill) ctx.fillRect(x, y, w, h);
+      if (stroke && ctx.lineWidth > 0) ctx.strokeRect(x, y, w, h);
+    }
+    ctx.restore();
+  }
+}
+
+function clonePanelOverlays(overlays: PanelOverlaySpec[][] | undefined): PanelOverlaySpec[][] {
+  return (overlays || []).map((items) => (items || []).map((item) => ({ ...item })));
+}
+
+function overlayGeometry(overlay: PanelOverlaySpec, imageW: number, imageH: number) {
+  const coords = overlay.coords || "data";
+  const scaleRow = coords === "relative" ? imageH : 1;
+  const scaleCol = coords === "relative" ? imageW : 1;
+  const scaleRadius = coords === "relative" ? Math.min(imageW, imageH) : 1;
+  const shape = overlay.shape === "rectangle" ? "rect" : (overlay.shape || "circle");
+  if (shape === "circle") {
+    return {
+      shape,
+      row: styleNumber(overlay.row, 0) * scaleRow,
+      col: styleNumber(overlay.col, 0) * scaleCol,
+      radius: Math.max(0, styleNumber(overlay.radius, 0) * scaleRadius),
+    };
+  }
+  const row0 = styleNumber(overlay.row0, 0) * scaleRow;
+  const col0 = styleNumber(overlay.col0, 0) * scaleCol;
+  const row1 = styleNumber(overlay.row1, row0) * scaleRow;
+  const col1 = styleNumber(overlay.col1, col0) * scaleCol;
+  return {
+    shape,
+    row0: Math.min(row0, row1),
+    col0: Math.min(col0, col1),
+    row1: Math.max(row0, row1),
+    col1: Math.max(col0, col1),
+  };
+}
+
+function panelOverlayHit(
+  overlays: PanelOverlaySpec[] | undefined,
+  row: number,
+  col: number,
+  imageW: number,
+  imageH: number,
+  hitRadius: number,
+): { overlay: number; mode: "move" | "resize"; handle?: string } | null {
+  if (!overlays?.length) return null;
+  const ordered = overlays.map((overlay, index) => ({ overlay, index })).sort((a, b) => styleNumber(a.overlay.z_order, 0) - styleNumber(b.overlay.z_order, 0));
+  for (let orderIdx = ordered.length - 1; orderIdx >= 0; orderIdx -= 1) {
+    const { overlay, index } = ordered[orderIdx];
+    const geom = overlayGeometry(overlay, imageW, imageH);
+    if (geom.shape === "circle") {
+      const dist = Math.hypot(col - geom.col, row - geom.row);
+      if (Math.abs(dist - geom.radius) <= hitRadius) return { overlay: index, mode: "resize" };
+      if (dist <= geom.radius) return { overlay: index, mode: "move" };
+      continue;
+    }
+    const inside = col >= geom.col0 - hitRadius && col <= geom.col1 + hitRadius && row >= geom.row0 - hitRadius && row <= geom.row1 + hitRadius;
+    if (!inside) continue;
+    const nearLeft = Math.abs(col - geom.col0) <= hitRadius;
+    const nearRight = Math.abs(col - geom.col1) <= hitRadius;
+    const nearTop = Math.abs(row - geom.row0) <= hitRadius;
+    const nearBottom = Math.abs(row - geom.row1) <= hitRadius;
+    if (nearLeft || nearRight || nearTop || nearBottom) {
+      return {
+        overlay: index,
+        mode: "resize",
+        handle: `${nearTop ? "t" : ""}${nearBottom ? "b" : ""}${nearLeft ? "l" : ""}${nearRight ? "r" : ""}` || "br",
+      };
+    }
+    return { overlay: index, mode: "move" };
+  }
+  return null;
+}
+
+function updateOverlayFromDrag(
+  original: PanelOverlaySpec,
+  mode: "move" | "resize",
+  startRow: number,
+  startCol: number,
+  row: number,
+  col: number,
+  imageW: number,
+  imageH: number,
+  handle = "br",
+): PanelOverlaySpec {
+  const coords = original.coords || "data";
+  const scaleRow = coords === "relative" ? imageH : 1;
+  const scaleCol = coords === "relative" ? imageW : 1;
+  const scaleRadius = coords === "relative" ? Math.min(imageW, imageH) : 1;
+  const toSpecRow = (value: number) => value / scaleRow;
+  const toSpecCol = (value: number) => value / scaleCol;
+  const toSpecRadius = (value: number) => value / scaleRadius;
+  const geom = overlayGeometry(original, imageW, imageH);
+  const next = { ...original };
+  if (geom.shape === "circle") {
+    if (mode === "move") {
+      next.row = toSpecRow(Math.max(0, Math.min(imageH, geom.row + row - startRow)));
+      next.col = toSpecCol(Math.max(0, Math.min(imageW, geom.col + col - startCol)));
+    } else {
+      next.radius = toSpecRadius(Math.max(1, Math.hypot(col - geom.col, row - geom.row)));
+    }
+    return next;
+  }
+  let row0 = geom.row0;
+  let row1 = geom.row1;
+  let col0 = geom.col0;
+  let col1 = geom.col1;
+  if (mode === "move") {
+    const dr = row - startRow;
+    const dc = col - startCol;
+    const h = row1 - row0;
+    const w = col1 - col0;
+    row0 = Math.max(0, Math.min(imageH - h, row0 + dr));
+    row1 = row0 + h;
+    col0 = Math.max(0, Math.min(imageW - w, col0 + dc));
+    col1 = col0 + w;
+  } else {
+    if (handle.includes("t")) row0 = row;
+    if (handle.includes("b") || (!handle.includes("t") && !handle.includes("l") && !handle.includes("r"))) row1 = row;
+    if (handle.includes("l")) col0 = col;
+    if (handle.includes("r") || (!handle.includes("t") && !handle.includes("b") && !handle.includes("l"))) col1 = col;
+    if (Math.abs(row1 - row0) < 1) row1 = row0 + (row1 >= row0 ? 1 : -1);
+    if (Math.abs(col1 - col0) < 1) col1 = col0 + (col1 >= col0 ? 1 : -1);
+  }
+  next.row0 = toSpecRow(Math.max(0, Math.min(imageH, Math.min(row0, row1))));
+  next.row1 = toSpecRow(Math.max(0, Math.min(imageH, Math.max(row0, row1))));
+  next.col0 = toSpecCol(Math.max(0, Math.min(imageW, Math.min(col0, col1))));
+  next.col1 = toSpecCol(Math.max(0, Math.min(imageW, Math.max(col0, col1))));
+  return next;
+}
+
+function drawPanelOverlaySelection(
+  ctx: CanvasRenderingContext2D,
+  overlay: PanelOverlaySpec | undefined,
+  toScreenX: (col: number) => number,
+  toScreenY: (row: number) => number,
+  imageW: number,
+  imageH: number,
+): void {
+  if (!overlay) return;
+  const geom = overlayGeometry(overlay, imageW, imageH);
+  ctx.save();
+  ctx.setLineDash([5, 3]);
+  ctx.strokeStyle = "#ffffff";
+  ctx.lineWidth = 1.5;
+  if (geom.shape === "circle") {
+    const x = toScreenX(geom.col);
+    const y = toScreenY(geom.row);
+    const r = Math.max(0, (Math.abs(toScreenX(geom.col + geom.radius) - x) + Math.abs(toScreenY(geom.row + geom.radius) - y)) / 2);
+    ctx.beginPath();
+    ctx.arc(x, y, r + 3, 0, Math.PI * 2);
+    ctx.stroke();
+  } else {
+    const x0 = toScreenX(geom.col0);
+    const y0 = toScreenY(geom.row0);
+    const x1 = toScreenX(geom.col1);
+    const y1 = toScreenY(geom.row1);
+    ctx.strokeRect(Math.min(x0, x1) - 3, Math.min(y0, y1) - 3, Math.abs(x1 - x0) + 6, Math.abs(y1 - y0) + 6);
+  }
+  ctx.setLineDash([]);
+  ctx.restore();
+}
+
+type InsetPlotSpec = {
+  x?: number[];
+  y?: number[];
+  points?: [number, number][];
+  point?: [number, number];
+  xlim?: [number, number];
+  ylim?: [number, number];
+  box?: [number, number, number, number];
+  xticks?: number[];
+  yticks?: number[];
+  show_ticks?: boolean;
+  show_panel_index?: boolean;
+  title?: string;
+  legend?: string;
+  legend_position?: "top-left" | "top-right" | "bottom-left" | "bottom-right";
+  annotation?: string;
+  annotation_position?: "top-left" | "top-right" | "bottom-left" | "bottom-right";
+  xlabel?: string;
+  ylabel?: string;
+  color?: string;
+  point_color?: string;
+  border_color?: string;
+  text_color?: string;
+  tick_color?: string;
+  position?: "bottom-right" | "bottom-left" | "bottom-center" | "top-right" | "top-left" | "top-center" | "center" | "center-left" | "center-right";
+  margin?: number | [number, number];
+  size?: number;
+  height?: number;
+  line_width?: number;
+  border_width?: number;
+  tick_font_size?: number;
+  label_font_size?: number;
+  legend_font_size?: number;
+  background?: string;
+  background_alpha?: number;
+};
+
+type InsetHoverInfo = {
+  idx: number;
+  leftPct: number;
+  topPct: number;
+  text: string;
+};
+
+type InsetDragState = {
+  idx: number;
+  offsetX: number;
+  offsetY: number;
+  boxW: number;
+  boxH: number;
+};
+
+function finiteMinMax(values: number[]): [number, number] | null {
+  let lo = Infinity;
+  let hi = -Infinity;
+  for (const value of values) {
+    if (!Number.isFinite(value)) continue;
+    if (value < lo) lo = value;
+    if (value > hi) hi = value;
+  }
+  return lo <= hi ? [lo, hi] : null;
+}
+
+function expandFlatRange([lo, hi]: [number, number]): [number, number] {
+  if (hi > lo) return [lo, hi];
+  const pad = Math.max(1, Math.abs(lo) * 0.05);
+  return [lo - pad, hi + pad];
+}
+
+function formatInsetTick(value: number): string {
+  const abs = Math.abs(value);
+  if (abs > 0 && (abs < 0.01 || abs >= 1000)) return value.toExponential(1);
+  if (abs >= 100) return value.toFixed(0);
+  if (abs >= 10) return value.toFixed(1).replace(/\.0$/, "");
+  return value.toFixed(2).replace(/0+$/, "").replace(/\.$/, "");
+}
+
+function formatInsetValue(value: number): string {
+  const abs = Math.abs(value);
+  if (abs > 0 && (abs < 0.001 || abs >= 10000)) return value.toExponential(2);
+  if (abs >= 100) return value.toFixed(1);
+  if (abs >= 10) return value.toFixed(2);
+  return value.toFixed(3).replace(/0+$/, "").replace(/\.$/, "");
+}
+
+function drawInsetCornerText(
+  ctx: CanvasRenderingContext2D,
+  text: string | undefined,
+  position: string | undefined,
+  x0: number,
+  y0: number,
+  boxW: number,
+  boxH: number,
+  fontPx: number,
+  color: string,
+): void {
+  if (!text) return;
+  const pos = position || "top-left";
+  const right = pos.includes("right");
+  const bottom = pos.includes("bottom");
+  ctx.font = `700 ${fontPx}px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif`;
+  ctx.textAlign = right ? "right" : "left";
+  ctx.textBaseline = bottom ? "bottom" : "top";
+  ctx.fillStyle = "rgba(0,0,0,0.45)";
+  const x = right ? x0 + boxW - 6 : x0 + 6;
+  const y = bottom ? y0 + boxH - 4 : y0 + 4;
+  ctx.fillText(text, x + 0.8, y + 0.8);
+  ctx.fillStyle = color;
+  ctx.fillText(text, x, y);
+}
+
+function insetPlotGeometry(
+  spec: InsetPlotSpec | null | undefined,
+  cssW: number,
+  cssH: number,
+  scaleBarVisible: boolean,
+): {
+  finite: [number, number][];
+  xlim: [number, number];
+  ylim: [number, number];
+  x0: number;
+  y0: number;
+  boxW: number;
+  boxH: number;
+  plotX0: number;
+  plotY0: number;
+  plotW: number;
+  plotH: number;
+} | null {
+  if (!spec) return null;
+  const x = Array.isArray(spec.x) ? spec.x.map(Number) : null;
+  const y = Array.isArray(spec.y) ? spec.y.map(Number) : null;
+  if (!y || y.length < 2) return null;
+  const xs = x && x.length === y.length ? x : y.map((_, idx) => idx);
+  const finite = xs.map((xv, idx) => [xv, y[idx]] as [number, number])
+    .filter(([xv, yv]) => Number.isFinite(xv) && Number.isFinite(yv));
+  if (finite.length < 2) return null;
+  const xv = finite.map(([value]) => value);
+  const yv = finite.map(([, value]) => value);
+  const xlim = expandFlatRange((Array.isArray(spec.xlim) && spec.xlim.length >= 2
+    ? [Number(spec.xlim[0]), Number(spec.xlim[1])]
+    : finiteMinMax(xv)) as [number, number]);
+  const ylim = expandFlatRange((Array.isArray(spec.ylim) && spec.ylim.length >= 2
+    ? [Number(spec.ylim[0]), Number(spec.ylim[1])]
+    : finiteMinMax(yv)) as [number, number]);
+  if (!Number.isFinite(xlim[0] + xlim[1] + ylim[0] + ylim[1])) return null;
+
+  const sizeFrac = Math.max(0.18, Math.min(0.62, Number(spec.size ?? 0.31)));
+  let boxW = Math.max(78, Math.min(cssW * 0.62, cssW * sizeFrac));
+  let boxH = Math.max(50, Math.min(cssH * 0.55, cssW * Number(spec.height ?? sizeFrac * 0.68)));
+  const rawMargin = Array.isArray(spec.margin)
+    ? spec.margin.map(Number)
+    : [Number(spec.margin ?? 12), Number(spec.margin ?? 12)];
+  const marginX = Math.max(0, Number.isFinite(rawMargin[0]) ? rawMargin[0] : 12);
+  const marginY = Math.max(0, Number.isFinite(rawMargin[1]) ? rawMargin[1] : marginX);
+  const pos = spec.position || "bottom-right";
+  let x0: number;
+  let y0: number;
+  if (Array.isArray(spec.box) && spec.box.length >= 4) {
+    const [left, top, widthFrac, heightFrac] = spec.box.map(Number);
+    boxW = Math.max(48, Math.min(cssW, cssW * Math.max(0.05, Math.min(1, widthFrac))));
+    boxH = Math.max(34, Math.min(cssH, cssH * Math.max(0.05, Math.min(1, heightFrac))));
+    x0 = Math.max(0, Math.min(cssW - boxW, cssW * Math.max(0, Math.min(1, left))));
+    y0 = Math.max(0, Math.min(cssH - boxH, cssH * Math.max(0, Math.min(1, top))));
+  } else {
+    if (pos.includes("right")) x0 = cssW - boxW - marginX;
+    else if (pos.includes("center")) x0 = cssW / 2 - boxW / 2;
+    else x0 = marginX;
+    const scaleBarOffset = scaleBarVisible && pos === "bottom-right" ? 34 : 0;
+    if (pos.includes("bottom")) y0 = cssH - boxH - marginY - scaleBarOffset;
+    else if (pos.includes("center")) y0 = cssH / 2 - boxH / 2;
+    else y0 = marginY + 18;
+  }
+  const showTicks = Boolean(spec.show_ticks);
+  const tickFont = Math.max(5, Math.min(14, Number(spec.tick_font_size ?? 7)));
+  const labelFont = Math.max(6, Math.min(16, Number(spec.label_font_size ?? 8)));
+  const legendFont = Math.max(6, Math.min(18, Number(spec.legend_font_size ?? 9)));
+  const padL = showTicks || spec.ylabel ? Math.max(22, tickFont * 3.2) : 10;
+  const padR = 7;
+  const padT = spec.title || spec.legend ? Math.max(13, legendFont + 6) : 7;
+  const padB = showTicks || spec.xlabel ? Math.max(16, tickFont + labelFont + 4) : 8;
+  const plotX0 = x0 + padL;
+  const plotY0 = y0 + padT;
+  const plotW = boxW - padL - padR;
+  const plotH = boxH - padT - padB;
+  if (plotW <= 8 || plotH <= 8) return null;
+  return { finite, xlim, ylim, x0, y0, boxW, boxH, plotX0, plotY0, plotW, plotH };
+}
+
+function insetHoverAt(
+  spec: InsetPlotSpec | null | undefined,
+  panel: number,
+  cssW: number,
+  cssH: number,
+  cssX: number,
+  cssY: number,
+  scaleBarVisible: boolean,
+): InsetHoverInfo | null {
+  const geom = insetPlotGeometry(spec, cssW, cssH, scaleBarVisible);
+  if (!geom) return null;
+  const { finite, xlim, ylim, x0, y0, boxW, boxH, plotX0, plotY0, plotW, plotH } = geom;
+  if (cssX < x0 || cssX > x0 + boxW || cssY < y0 || cssY > y0 + boxH) return null;
+  const sx = (value: number) => plotX0 + (value - xlim[0]) / (xlim[1] - xlim[0]) * plotW;
+  const sy = (value: number) => plotY0 + plotH - (value - ylim[0]) / (ylim[1] - ylim[0]) * plotH;
+  let best = finite[0];
+  let bestDist = Infinity;
+  for (const point of finite) {
+    const dx = sx(point[0]) - cssX;
+    const dy = sy(point[1]) - cssY;
+    const dist = dx * dx + dy * dy;
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = point;
+    }
+  }
+  const xName = spec?.xlabel || "x";
+  const yName = spec?.ylabel || "y";
+  return {
+    idx: panel,
+    leftPct: Math.max(3, Math.min(58, (cssX / cssW) * 100 + 2)),
+    topPct: Math.max(5, Math.min(90, (cssY / cssH) * 100 - 6)),
+    text: `${xName} ${formatInsetValue(best[0])} · ${yName} ${formatInsetValue(best[1])}`,
+  };
+}
+
+function drawInsetPlot(
+  ctx: CanvasRenderingContext2D,
+  spec: InsetPlotSpec | null | undefined,
+  panel: number,
+  cssW: number,
+  cssH: number,
+  fallbackColor: string,
+  scaleBarVisible: boolean,
+): void {
+  const geom = insetPlotGeometry(spec, cssW, cssH, scaleBarVisible);
+  if (!geom || !spec) return;
+  const { finite, xlim, ylim, x0, y0, boxW, boxH, plotX0, plotY0, plotW, plotH } = geom;
+  const showTicks = Boolean(spec.show_ticks);
+  const tickFont = Math.max(5, Math.min(14, Number(spec.tick_font_size ?? 7)));
+  const labelFont = Math.max(6, Math.min(16, Number(spec.label_font_size ?? 8)));
+  const legendFont = Math.max(6, Math.min(18, Number(spec.legend_font_size ?? 9)));
+  const sx = (value: number) => plotX0 + (value - xlim[0]) / (xlim[1] - xlim[0]) * plotW;
+  const sy = (value: number) => plotY0 + plotH - (value - ylim[0]) / (ylim[1] - ylim[0]) * plotH;
+  const lineColor = spec.color || fallbackColor;
+  const pointColor = spec.point_color || "#fff";
+  const textColor = spec.text_color || "rgba(255,255,255,0.92)";
+  const tickColor = spec.tick_color || "rgba(255,255,255,0.72)";
+  const backgroundAlpha = Math.max(0, Math.min(1, Number(spec.background_alpha ?? 0.68)));
+
+  ctx.save();
+  ctx.fillStyle = spec.background || `rgba(10, 12, 16, ${backgroundAlpha})`;
+  ctx.strokeStyle = spec.border_color || "rgba(255,255,255,0.34)";
+  ctx.lineWidth = Math.max(0, Math.min(6, Number(spec.border_width ?? 1)));
+  ctx.fillRect(x0, y0, boxW, boxH);
+  if (ctx.lineWidth > 0) ctx.strokeRect(x0, y0, boxW, boxH);
+
+  ctx.strokeStyle = spec.tick_color || "rgba(255,255,255,0.28)";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(plotX0, plotY0);
+  ctx.lineTo(plotX0, plotY0 + plotH);
+  ctx.lineTo(plotX0 + plotW, plotY0 + plotH);
+  ctx.stroke();
+
+  if (showTicks) {
+    const xticks = Array.isArray(spec.xticks) && spec.xticks.length > 0 ? spec.xticks.map(Number) : [xlim[0], xlim[1]];
+    const yticks = Array.isArray(spec.yticks) && spec.yticks.length > 0 ? spec.yticks.map(Number) : [ylim[0], ylim[1]];
+    ctx.font = `${tickFont}px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif`;
+    ctx.fillStyle = tickColor;
+    ctx.strokeStyle = spec.tick_color || "rgba(255,255,255,0.34)";
+    ctx.lineWidth = 1;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "top";
+    for (const value of xticks) {
+      if (!Number.isFinite(value)) continue;
+      const tx = sx(value);
+      if (tx < plotX0 - 0.5 || tx > plotX0 + plotW + 0.5) continue;
+      ctx.beginPath();
+      ctx.moveTo(tx, plotY0 + plotH);
+      ctx.lineTo(tx, plotY0 + plotH + 3);
+      ctx.stroke();
+      ctx.fillText(formatInsetTick(value), tx, plotY0 + plotH + 4);
+    }
+    ctx.textAlign = "right";
+    ctx.textBaseline = "middle";
+    for (const value of yticks) {
+      if (!Number.isFinite(value)) continue;
+      const ty = sy(value);
+      if (ty < plotY0 - 0.5 || ty > plotY0 + plotH + 0.5) continue;
+      ctx.beginPath();
+      ctx.moveTo(plotX0 - 3, ty);
+      ctx.lineTo(plotX0, ty);
+      ctx.stroke();
+      ctx.fillText(formatInsetTick(value), plotX0 - 5, ty);
+    }
+  }
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(plotX0, plotY0, plotW, plotH);
+  ctx.clip();
+  ctx.strokeStyle = lineColor;
+  ctx.lineWidth = Math.max(1.4, Number(spec.line_width ?? 2));
+  ctx.lineJoin = "round";
+  ctx.lineCap = "round";
+  ctx.shadowColor = "rgba(0,0,0,0.55)";
+  ctx.shadowBlur = 2;
+  ctx.beginPath();
+  finite.forEach(([px, py], idx) => {
+    const cx = sx(px);
+    const cy = sy(py);
+    if (idx === 0) ctx.moveTo(cx, cy);
+    else ctx.lineTo(cx, cy);
+  });
+  ctx.stroke();
+  ctx.restore();
+
+  if (Array.isArray(spec.point) && spec.point.length >= 2) {
+    const px = Number(spec.point[0]);
+    const py = Number(spec.point[1]);
+    if (Number.isFinite(px) && Number.isFinite(py)) {
+      const cx = sx(px);
+      const cy = sy(py);
+      if (cx >= plotX0 - 1 && cx <= plotX0 + plotW + 1 && cy >= plotY0 - 1 && cy <= plotY0 + plotH + 1) {
+        ctx.fillStyle = pointColor;
+        ctx.strokeStyle = "rgba(0,0,0,0.75)";
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.arc(cx, cy, 3.4, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+      }
+    }
+  }
+
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = textColor;
+  ctx.font = `700 ${legendFont}px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif`;
+  ctx.textAlign = "left";
+  ctx.textBaseline = "top";
+  if (spec.title) ctx.fillText(spec.title, x0 + 6, y0 + 4);
+  drawInsetCornerText(ctx, spec.legend, spec.legend_position, x0, y0, boxW, boxH, legendFont, spec.text_color || lineColor);
+  drawInsetCornerText(ctx, spec.annotation, spec.annotation_position || "top-right", x0, y0, boxW, boxH, legendFont, textColor);
+  ctx.font = `${labelFont}px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif`;
+  ctx.fillStyle = tickColor;
+  if (spec.xlabel) {
+    ctx.textAlign = "right";
+    ctx.textBaseline = "bottom";
+    ctx.fillText(spec.xlabel, x0 + boxW - 7, y0 + boxH - 3);
+  }
+  if (spec.ylabel) {
+    ctx.save();
+    ctx.translate(x0 + 5, plotY0 + 2);
+    ctx.rotate(-Math.PI / 2);
+    ctx.textAlign = "right";
+    ctx.textBaseline = "top";
+    ctx.fillText(spec.ylabel, 0, 0);
+    ctx.restore();
+  }
+  if (spec.show_panel_index) {
+    ctx.fillStyle = "rgba(255,255,255,0.42)";
+    ctx.font = "7px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+    ctx.textAlign = "right";
+    ctx.textBaseline = "bottom";
+    ctx.fillText(`${panel + 1}`, x0 + boxW - 5, y0 + boxH - 4);
+  }
+  ctx.restore();
+}
+
+function svgDashAttributes(overlay: PanelOverlaySpec, lineWidth: number): string {
+  const pattern = overlayDashPattern(overlay, lineWidth);
+  if (!pattern.length) return "";
+  return ` stroke-dasharray="${escapeXmlAttr(pattern.map((v) => `${v}`).join(" "))}" stroke-linecap="round"`;
+}
+
+function renderLatexMathToText(expr: string): string {
+  return String(expr || "")
+    .trim()
+    .replace(/^\$|\$$/g, "")
+    .replace(/\\+(?=[A-Za-z])/g, "\\")
+    .replace(/\\([A-Za-z]+)/g, (_match, command: string) => LATEX_SYMBOLS[command] || command)
+    .replace(/[{}]/g, "");
+}
+
+function svgPanelOverlayElement(
+  overlay: PanelOverlaySpec,
+  toScreenX: (col: number) => number,
+  toScreenY: (row: number) => number,
+  imageW: number,
+  imageH: number,
+): string {
+  const geom = overlayGeometry(overlay, imageW, imageH);
+  const opacity = styleNumber(overlay.opacity, 1);
+  const strokeOpacity = opacity * styleNumber(overlay.stroke_opacity, 1);
+  const fillOpacity = opacity * styleNumber(overlay.fill_opacity, overlay.fill ? 1 : 0);
+  const stroke = styleString(overlay.stroke, "#00e5ff");
+  const fill = overlay.fill ? styleString(overlay.fill, "none") : "none";
+  const lineWidth = Math.max(0, styleNumber(overlay.stroke_width, 2));
+  const common = `fill="${escapeXmlAttr(fill)}" fill-opacity="${fillOpacity}" stroke="${escapeXmlAttr(stroke)}" stroke-width="${lineWidth}" stroke-opacity="${strokeOpacity}"${svgDashAttributes(overlay, lineWidth)}`;
+  if (geom.shape === "circle") {
+    const cx = toScreenX(geom.col);
+    const cy = toScreenY(geom.row);
+    const r = Math.max(0, (Math.abs(toScreenX(geom.col + geom.radius) - cx) + Math.abs(toScreenY(geom.row + geom.radius) - cy)) / 2);
+    return `<circle data-show2d-panel-overlay-svg="true" cx="${cx}" cy="${cy}" r="${r}" ${common}/>`;
+  }
+  const x0 = toScreenX(geom.col0);
+  const y0 = toScreenY(geom.row0);
+  const x1 = toScreenX(geom.col1);
+  const y1 = toScreenY(geom.row1);
+  return `<rect data-show2d-panel-overlay-svg="true" x="${Math.min(x0, x1)}" y="${Math.min(y0, y1)}" width="${Math.abs(x1 - x0)}" height="${Math.abs(y1 - y0)}" ${common}/>`;
+}
+
+function svgTextFromRichSpans(spans: RichTitleSpan[] | undefined, fallback: string): { text: string; spans: Array<{ text: string; color?: string }> } {
+  if (!spans?.length) return { text: fallback, spans: [{ text: fallback }] };
+  const parts = spans.map((span) => ({
+    text: span.math ? renderLatexMathToText(String(span.math)) : String(span.text ?? ""),
+    color: styleString(span.color) || undefined,
+  }));
+  return { text: parts.map((part) => part.text).join(""), spans: parts };
+}
+
+function svgPanelAnnotationElement(spec: PanelAnnotationSpec, x: number, y: number, panelW: number, panelH: number): string {
+  const position = spec.position || "top-left";
+  const offset = Array.isArray(spec.offset) ? spec.offset.map(Number) : [0, 0];
+  const margin = 10;
+  let tx = x + margin;
+  let ty = y + margin;
+  let anchor = "start";
+  let baseline = "hanging";
+  const align = styleString(spec.align, "").toLowerCase();
+  const alignAnchor = align === "left" || align === "start" ? "start"
+    : align === "right" || align === "end" ? "end"
+    : align === "center" || align === "middle" ? "middle"
+    : "";
+  if (Array.isArray(spec.box) && spec.box.length >= 4) {
+    if (alignAnchor === "start") tx = x + Number(spec.box[0]) * panelW + Math.max(0, styleNumber(spec.pad_x, 0));
+    else if (alignAnchor === "end") tx = x + (Number(spec.box[0]) + Number(spec.box[2])) * panelW - Math.max(0, styleNumber(spec.pad_x, 0));
+    else tx = x + (Number(spec.box[0]) + Number(spec.box[2]) / 2) * panelW;
+    ty = y + (Number(spec.box[1]) + Number(spec.box[3]) / 2) * panelH;
+    anchor = alignAnchor || "middle";
+    baseline = "middle";
+  } else if (Number.isFinite(spec.x) && Number.isFinite(spec.y)) {
+    tx = x + Number(spec.x) * panelW;
+    ty = y + Number(spec.y) * panelH;
+    const anchorValue = spec.anchor || "center";
+    anchor = String(anchorValue).includes("right") ? "end" : String(anchorValue).includes("center") ? "middle" : "start";
+    baseline = String(anchorValue).includes("bottom") ? "baseline" : String(anchorValue).includes("center") ? "middle" : "hanging";
+    if (alignAnchor) anchor = alignAnchor;
+  } else {
+    if (position.includes("right")) { tx = x + panelW - margin; anchor = "end"; }
+    else if (position.includes("center")) { tx = x + panelW / 2; anchor = "middle"; }
+    if (position.includes("bottom")) { ty = y + panelH - margin; baseline = "baseline"; }
+    else if (position.includes("center")) { ty = y + panelH / 2; baseline = "middle"; }
+    if (alignAnchor) anchor = alignAnchor;
+  }
+  tx += Number(offset[0] || 0);
+  ty += Number(offset[1] || 0);
+  const fontSize = Math.max(6, styleNumber(spec.font_size, 10));
+  const rich = svgTextFromRichSpans(spec.math ? [{ math: spec.math }] : spec.spans, spec.text || "");
+  const variant = spec.variant || "badge";
+  const fg = styleString(spec.fg ?? spec.color, "#fff");
+  const opacity = Math.max(0, Math.min(1, styleNumber(spec.opacity, 1)));
+  const fontFamily = styleString(spec.font_family, "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif");
+  const outlineWidth = Math.max(0, styleNumber(spec.outline_width, 0));
+  const outlineAttrs = outlineWidth > 0
+    ? ` stroke="${escapeXmlAttr(styleString(spec.outline_color, "rgba(0,0,0,0.85)"))}" stroke-width="${outlineWidth}" stroke-linejoin="round" paint-order="stroke fill"`
+    : "";
+  const chunks: string[] = [`<g data-show2d-panel-annotation-svg="true" opacity="${opacity}">`];
+  if (variant !== "plain") {
+    const boxW = Math.max(12, rich.text.length * fontSize * 0.62 + 12);
+    const boxH = fontSize * 1.25 + 4;
+    const rx = anchor === "middle" ? tx - boxW / 2 : anchor === "end" ? tx - boxW : tx;
+    const ry = baseline === "middle" ? ty - boxH / 2 : baseline === "baseline" ? ty - boxH : ty;
+    chunks.push(`<rect x="${rx}" y="${ry}" width="${boxW}" height="${boxH}" rx="${styleNumber(spec.radius, 3)}" fill="${escapeXmlAttr(styleString(spec.bg, "rgba(0,0,0,0.72)"))}" stroke="${escapeXmlAttr(styleString(spec.border_color, "rgba(255,255,255,0.5)"))}" stroke-width="${Math.max(0, styleNumber(spec.border_width, variant === "outline" || variant === "callout" ? 1 : 0))}"/>`);
+  }
+  chunks.push(`<text x="${tx}" y="${baseline === "middle" ? ty + fontSize * 0.35 : ty}" text-anchor="${anchor}" font-family="${escapeXmlAttr(fontFamily)}" font-size="${fontSize}" font-weight="${escapeXmlAttr(spec.font_weight ?? 700)}" fill="${escapeXmlAttr(fg)}"${outlineAttrs}>`);
+  rich.spans.forEach((span) => chunks.push(`<tspan${span.color ? ` fill="${escapeXmlAttr(span.color)}"` : ""}>${escapeXmlText(span.text)}</tspan>`));
+  chunks.push("</text></g>");
+  return chunks.join("");
+}
+
+function svgInsetPlotElement(spec: InsetPlotSpec | null | undefined, panel: number, x: number, y: number, panelW: number, panelH: number, fallbackColor: string, scaleBarVisible: boolean): string {
+  const geom = insetPlotGeometry(spec, panelW, panelH, scaleBarVisible);
+  if (!geom || !spec) return "";
+  const { finite, xlim, ylim, x0, y0, boxW, boxH, plotX0, plotY0, plotW, plotH } = geom;
+  const sx = (value: number) => x + plotX0 + (value - xlim[0]) / (xlim[1] - xlim[0]) * plotW;
+  const sy = (value: number) => y + plotY0 + plotH - (value - ylim[0]) / (ylim[1] - ylim[0]) * plotH;
+  const points = finite.map(([px, py]) => `${sx(px)},${sy(py)}`).join(" ");
+  const lineColor = spec.color || fallbackColor;
+  const textColor = spec.text_color || "rgba(255,255,255,0.92)";
+  const tickColor = spec.tick_color || "rgba(255,255,255,0.72)";
+  const legendFont = Math.max(6, Math.min(18, Number(spec.legend_font_size ?? 9)));
+  const chunks = [
+    `<g data-show2d-inset-plot-svg="true">`,
+    `<rect x="${x + x0}" y="${y + y0}" width="${boxW}" height="${boxH}" fill="${escapeXmlAttr(spec.background || "#0a0c10")}" fill-opacity="${Math.max(0, Math.min(1, Number(spec.background_alpha ?? 0.68)))}" stroke="${escapeXmlAttr(spec.border_color || "rgba(255,255,255,0.34)")}" stroke-width="${Number(spec.border_width ?? 1)}"/>`,
+    `<path d="M ${x + plotX0} ${y + plotY0} V ${y + plotY0 + plotH} H ${x + plotX0 + plotW}" fill="none" stroke="${escapeXmlAttr(tickColor)}" stroke-opacity="0.45" stroke-width="1"/>`,
+    `<polyline points="${points}" fill="none" stroke="${escapeXmlAttr(lineColor)}" stroke-width="${Math.max(1.4, Number(spec.line_width ?? 2))}" stroke-linejoin="round" stroke-linecap="round"/>`,
+  ];
+  if (Array.isArray(spec.point) && spec.point.length >= 2) {
+    chunks.push(`<circle cx="${sx(Number(spec.point[0]))}" cy="${sy(Number(spec.point[1]))}" r="3.4" fill="${escapeXmlAttr(spec.point_color || "#fff")}" stroke="#000" stroke-width="1.5"/>`);
+  }
+  if (spec.title) chunks.push(`<text x="${x + x0 + 6}" y="${y + y0 + 12}" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="${legendFont}" font-weight="700" fill="${escapeXmlAttr(textColor)}">${escapeXmlText(spec.title)}</text>`);
+  if (spec.legend) chunks.push(`<text x="${x + x0 + 6}" y="${y + y0 + boxH - 6}" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="${legendFont}" font-weight="700" fill="${escapeXmlAttr(lineColor)}">${escapeXmlText(spec.legend)}</text>`);
+  chunks.push("</g>");
+  return chunks.join("");
+}
+
+function svgColorbarElements(lut: Uint8Array, x: number, y: number, panelW: number, panelH: number, vmin: number, vmax: number, id: string): { def: string; body: string } {
+  const stops: string[] = [];
+  for (let step = 0; step <= 8; step += 1) {
+    const frac = step / 8;
+    const idx = Math.max(0, Math.min(255, Math.round(frac * 255))) * 3;
+    stops.push(`<stop offset="${frac * 100}%" stop-color="rgb(${lut[idx]}, ${lut[idx + 1]}, ${lut[idx + 2]})"/>`);
+  }
+  const barH = Math.min(160, panelH * 0.62);
+  const bx = x + panelW - 22;
+  const by = y + 18;
+  return {
+    def: `<linearGradient id="${id}" x1="0" x2="0" y1="1" y2="0">${stops.join("")}</linearGradient>`,
+    body: `<g data-show2d-colorbar-svg="true"><rect x="${bx - 1}" y="${by - 1}" width="12" height="${barH + 2}" fill="#000" fill-opacity="0.45"/><rect x="${bx}" y="${by}" width="10" height="${barH}" fill="url(#${id})" stroke="#fff" stroke-opacity="0.75" stroke-width="0.75"/><text x="${bx - 4}" y="${by + 4}" text-anchor="end" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="9" fill="#fff">${escapeXmlText(formatNumber(vmax))}</text><text x="${bx - 4}" y="${by + barH}" text-anchor="end" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="9" fill="#fff">${escapeXmlText(formatNumber(vmin))}</text></g>`,
+  };
+}
+
 // ============================================================================
 // Crop ROI region from raw float32 data for ROI-scoped FFT
 // ============================================================================
@@ -862,6 +2147,25 @@ function meanDownsample2D(data: Float32Array, width: number, height: number, fac
     }
   }
   return { data: out, width: outW, height: outH };
+}
+
+function canvasLooksBlank(canvas: HTMLCanvasElement, maxSamples = 32): boolean {
+  const ctx = canvas.getContext("2d");
+  if (!ctx || canvas.width <= 0 || canvas.height <= 0) return true;
+  try {
+    const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+    const stepX = Math.max(1, Math.floor(canvas.width / maxSamples));
+    const stepY = Math.max(1, Math.floor(canvas.height / maxSamples));
+    for (let y = 0; y < canvas.height; y += stepY) {
+      for (let x = 0; x < canvas.width; x += stepX) {
+        const offset = (y * canvas.width + x) * 4;
+        if (data[offset] > 3 || data[offset + 1] > 3 || data[offset + 2] > 3) return false;
+      }
+    }
+    return true;
+  } catch {
+    return true;
+  }
 }
 
 // ============================================================================
@@ -1079,6 +2383,7 @@ function Show2D() {
   const [isRgbFlags] = useModelState<boolean[]>("is_rgb");
   const isRgbPanel = React.useCallback((i: number) => !!(isRgbFlags && isRgbFlags[i]), [isRgbFlags]);
   const [labels] = useModelState<string[]>("labels");
+  const [panelTitleSpans] = useModelState<RichTitleSpan[][]>("panel_title_spans");
   const [starred, setStarred] = useModelState<number[]>("starred");
   const [hiddenPanels, setHiddenPanels] = useModelState<number[]>("hidden_panels");
   const [hiddenPageSlotsTrait, setHiddenPageSlotsTrait] = useModelState<number[] | undefined>("hidden_page_slots");
@@ -1090,18 +2395,22 @@ function Show2D() {
   const activePagePanelIndices = isItemPaged ? activeItemPageIndices : activePageIndices;
   const [showPanelTitles] = useModelState<boolean>("show_panel_titles");
   const [panelTitleFontSize] = useModelState<number>("panel_title_font_size");
+  const [panelTitleStyle] = useModelState<PanelTitleStyle>("panel_title_style");
   const [galleryGapPxState] = useModelState<number>("gallery_gap_px");
+  const [galleryGapColor] = useModelState<string>("gallery_gap_color");
   const [title] = useModelState<string>("title");
   const [showTitle] = useModelState<boolean>("show_title");
   const [displayBinFactor] = useModelState<number>("_display_bin_factor");
   const [, setGpuMaxBufferMB] = useModelState<number>("_gpu_max_buffer_mb");
   const [cmap, setCmap] = useModelState<string>("cmap");
   const [panelCmaps, setPanelCmaps] = useModelState<string[]>("panel_cmaps");
+  const [panelCmapsMemory, setPanelCmapsMemory] = useModelState<string[]>("panel_cmaps_memory");
   const [ncols, setNcols] = useModelState<number>("ncols");
   const panelCmapFor = React.useCallback((idx: number) => {
     const value = panelCmaps && idx >= 0 && idx < panelCmaps.length ? panelCmaps[idx] : "";
     return value || cmap || "inferno";
   }, [panelCmaps, cmap]);
+  const colorShared = !(panelCmaps && panelCmaps.length === nImages && nImages > 1);
 
   // Display options
   const [logScale, setLogScale] = useModelState<boolean>("log_scale");
@@ -1230,6 +2539,12 @@ function Show2D() {
   const [pixelSizes] = useModelState<number[]>("pixel_sizes");
   const [pixelUnit] = useModelState<string>("pixel_unit");
   const [scaleBarVisible] = useModelState<boolean>("scale_bar_visible");
+  const [scaleBarPosition] = useModelState<string>("scale_bar_position");
+  const [scaleBarPanels] = useModelState<number[]>("scale_bar_panels");
+  const [scaleBarLength] = useModelState<number | null>("scale_bar_length");
+  const [scaleBarLabel] = useModelState<string>("scale_bar_label");
+  const [scaleBarStyle] = useModelState<ScaleBarStyle>("scale_bar_style");
+  const [showZoomIndicator] = useModelState<boolean>("show_zoom_indicator");
 
   // UI visibility
   const [showControls] = useModelState<boolean>("show_controls");
@@ -1268,20 +2583,116 @@ function Show2D() {
 
   // Selection
   const [selectedIdx, setSelectedIdx] = useModelState<number>("selected_idx");
-  const selectedCmap = panelCmapFor(selectedIdx);
+  const [markerColors] = useModelState<string[]>("marker_colors");
+  const [markerStyle] = useModelState<string>("marker_style");
+  const [rowMarkers] = useModelState<MarkerMap>("row_markers");
+  const [colMarkers] = useModelState<MarkerMap>("col_markers");
+  const [selectedPanels, setSelectedPanels] = useModelState<number[]>("selected_panels");
+  const [insetPlots, setInsetPlots] = useModelState<InsetPlotSpec[]>("inset_plots");
+  const [showInsetPlots, setShowInsetPlots] = useModelState<boolean>("show_inset_plots");
+  const [panelAnnotations] = useModelState<PanelAnnotationSpec[][]>("panel_annotations");
+  const [panelOverlays, setPanelOverlays] = useModelState<PanelOverlaySpec[][]>("panel_overlays");
+
+  const [contrastPreset, setContrastPreset] = useModelState<string>("contrast_preset");
+  const [imageFlipsHorizontal, setImageFlipsHorizontal] = useModelState<boolean[]>("image_flips_horizontal");
+  const [imageFlipsVertical, setImageFlipsVertical] = useModelState<boolean[]>("image_flips_vertical");
+  const [imageRotations, setImageRotations] = useModelState<number[]>("image_rotations");
+  const [rotationScope, setRotationScope] = useModelState<string>("rotation_scope");
+  const panelMarkerColor = React.useCallback((panel: number) => {
+    const value = markerColors?.[panel];
+    return value || IDENTITY_PALETTE[panel % IDENTITY_PALETTE.length];
+  }, [markerColors]);
+  const hasInsetPlots = React.useMemo(
+    () => Array.isArray(insetPlots) && insetPlots.some(spec => Array.isArray(spec?.y) && spec.y.length >= 2),
+    [insetPlots],
+  );
+  const insetPlotSpecFor = React.useCallback((panel: number): InsetPlotSpec | undefined => {
+    return insetDragDraftRef.current.get(panel) || insetPlots?.[panel];
+  }, [insetPlots]);
+  const markerAround = (markerStyle || "left") === "around";
+  const lastSelectedPanelRef = React.useRef<number | null>(null);
+  const normalizeRotation = React.useCallback((value: number) => {
+    const k = Math.round(Number(value) / 90);
+    if (Number.isFinite(k) && Math.abs(Number(value)) > 3) return ((k % 4) + 4) % 4;
+    return ((Math.round(Number(value)) % 4) + 4) % 4;
+  }, []);
+  const rotationForPanel = React.useCallback((panel: number) => {
+    return ((Math.round(imageRotations?.[panel] ?? 0) % 4) + 4) % 4;
+  }, [imageRotations]);
+  const rotationGlyph = React.useCallback((quarterTurns: number) => {
+    const k = ((Math.round(quarterTurns) % 4) + 4) % 4;
+    if (k === 1) return "↺90°";
+    if (k === 2) return "↻180°";
+    if (k === 3) return "↻90°";
+    return "";
+  }, []);
+  const setRotationForPanel = React.useCallback((panel: number, quarterTurns: number) => {
+    const n = Math.max(1, nImages || 1);
+    const next = Array.from({ length: n }, (_, idx) => rotationForPanel(idx));
+    next[Math.max(0, Math.min(n - 1, panel))] = normalizeRotation(quarterTurns);
+    setImageRotations(next);
+  }, [nImages, normalizeRotation, rotationForPanel, setImageRotations]);
+  const setRotationForScope = React.useCallback((quarterTurns: number) => {
+    const n = Math.max(1, nImages || 1);
+    const k = normalizeRotation(quarterTurns);
+    if ((rotationScope || "all") === "panel") {
+      setRotationForPanel(selectedIdx, k);
+    } else {
+      setImageRotations(Array.from({ length: n }, () => k));
+    }
+  }, [nImages, normalizeRotation, rotationScope, selectedIdx, setImageRotations, setRotationForPanel]);
+  const togglePanelFlip = React.useCallback((panel: number, axis: "h" | "v") => {
+    const n = Math.max(1, nImages || 1);
+    const source = axis === "h" ? imageFlipsHorizontal : imageFlipsVertical;
+    const next = Array.from({ length: n }, (_, idx) => Boolean(source?.[idx]));
+    const idx = Math.max(0, Math.min(n - 1, panel));
+    next[idx] = !next[idx];
+    if (axis === "h") setImageFlipsHorizontal(next);
+    else setImageFlipsVertical(next);
+  }, [imageFlipsHorizontal, imageFlipsVertical, nImages, setImageFlipsHorizontal, setImageFlipsVertical]);
+  const setColorShared = React.useCallback((shared: boolean) => {
+    if (shared) {
+      if (panelCmaps && panelCmaps.length === nImages) {
+        setPanelCmapsMemory(panelCmaps.slice());
+      }
+      setCmap(panelCmapFor(selectedIdx));
+      setPanelCmaps([]);
+      return;
+    }
+    const restored = panelCmapsMemory && panelCmapsMemory.length === nImages
+      ? panelCmapsMemory.slice()
+      : Array.from({ length: nImages }, (_, i) => panelCmapFor(i));
+    setPanelCmaps(restored);
+    setPanelCmapsMemory(restored);
+  }, [nImages, panelCmapFor, panelCmaps, panelCmapsMemory, selectedIdx, setCmap, setPanelCmaps, setPanelCmapsMemory]);
+  const selectedCmap = colorShared ? (cmap || "inferno") : panelCmapFor(selectedIdx);
   const setSelectedCmap = React.useCallback((value: string) => {
-    if (isGallery || (panelCmaps && panelCmaps.length > 0)) {
+    const batchPanels = Array.from(new Set((selectedPanels || [])
+      .map((panel) => Math.round(Number(panel)))
+      .filter((panel) => Number.isFinite(panel) && panel >= 0 && panel < nImages)));
+    if (isGallery && batchPanels.length > 1) {
+      const next = panelCmaps && panelCmaps.length === nImages
+        ? panelCmaps.slice()
+        : Array.from({ length: nImages }, (_, i) => panelCmapFor(i));
+      for (const panel of batchPanels) next[panel] = value;
+      setPanelCmaps(next);
+      setPanelCmapsMemory(next);
+      if (!cmap) setCmap(value);
+      return;
+    }
+    if (isGallery && !colorShared) {
       const next = panelCmaps && panelCmaps.length === nImages
         ? panelCmaps.slice()
         : Array.from({ length: nImages }, (_, i) => (i === selectedIdx ? value : cmap));
       next[selectedIdx] = value;
       setPanelCmaps(next);
+      setPanelCmapsMemory(next);
       if (!cmap) setCmap(value);
     } else {
       setCmap(value);
       setPanelCmaps([]);
     }
-  }, [isGallery, panelCmaps, nImages, selectedIdx, cmap, setPanelCmaps, setCmap]);
+  }, [colorShared, isGallery, panelCmaps, nImages, selectedIdx, selectedPanels, cmap, panelCmapFor, setPanelCmaps, setPanelCmapsMemory, setCmap]);
   // In panel scope the scalar traits are the editor for the selected panel,
   // while the arrays remain the render/source of truth for every panel. Keep
   // the editor pointed at the newly selected panel without continuously
@@ -1399,7 +2810,6 @@ function Show2D() {
   const [roiActive, setRoiActive] = useModelState<boolean>("roi_active");
   const [roiList, setRoiList] = useModelState<ROIItem[]>("roi_list");
   const [roiSelectedIdx, setRoiSelectedIdx] = useModelState<number>("roi_selected_idx");
-  const [imageRotations, setImageRotations] = useModelState<number[]>("image_rotations");
   const [isDraggingROI, setIsDraggingROI] = React.useState(false);
   const [isDraggingResize, setIsDraggingResize] = React.useState(false);
   const [isDraggingResizeInner, setIsDraggingResizeInner] = React.useState(false);
@@ -1407,10 +2817,17 @@ function Show2D() {
   const [isHoveringResizeInner, setIsHoveringResizeInner] = React.useState(false);
   const resizeAspectRef = React.useRef<number | null>(null);
   const [newRoiShape, setNewRoiShape] = React.useState<"circle" | "square" | "rectangle" | "annular">("square");
+  const [overlayEditMode, setOverlayEditMode] = React.useState(false);
+  const [overlaySelection, setOverlaySelection] = React.useState<OverlaySelection | null>(null);
+  const [isDraggingOverlay, setIsDraggingOverlay] = React.useState(false);
+  const [isHoveringOverlay, setIsHoveringOverlay] = React.useState(false);
+  const overlayDragRef = React.useRef<OverlayDragState | null>(null);
+  const overlayBaselineRef = React.useRef<PanelOverlaySpec[][] | null>(null);
   const [exportAnchor, setExportAnchor] = React.useState<HTMLElement | null>(null);
   const [panelMenuAnchor, setPanelMenuAnchor] = React.useState<HTMLElement | null>(null);
   const [viewMenuAnchor, setViewMenuAnchor] = React.useState<HTMLElement | null>(null);
   const [moreMenuAnchor, setMoreMenuAnchor] = React.useState<HTMLElement | null>(null);
+  const [showRotationSettings, setShowRotationSettings] = React.useState(false);
   const [reorderMode, setReorderMode] = React.useState(false);
   const [dragOverPanel, setDragOverPanel] = React.useState<number | null>(null);
   const draggedPanelRef = React.useRef<number | null>(null);
@@ -1445,6 +2862,45 @@ function Show2D() {
     handle: Show2DFileHandle | null;
   } | null>(null);
   const selectedRoi = roiSelectedIdx >= 0 && roiSelectedIdx < (roiList?.length ?? 0) ? roiList[roiSelectedIdx] : null;
+  const hasPanelOverlays = React.useMemo(() => (panelOverlays || []).some((items) => items && items.length > 0), [panelOverlays]);
+  const scaleBarPanelSet = React.useMemo(() => new Set((scaleBarPanels || []).map((value) => Number(value)).filter((value) => Number.isFinite(value))), [scaleBarPanels]);
+  const panelHasScaleBar = React.useCallback((panel: number) => scaleBarVisible && (scaleBarPanelSet.size === 0 || scaleBarPanelSet.has(panel)), [scaleBarPanelSet, scaleBarVisible]);
+  React.useEffect(() => {
+    if (!overlayBaselineRef.current && hasPanelOverlays) {
+      overlayBaselineRef.current = clonePanelOverlays(panelOverlays);
+    }
+  }, [hasPanelOverlays, panelOverlays]);
+  React.useEffect(() => {
+    if (!overlaySelection) return;
+    const exists = Boolean(panelOverlays?.[overlaySelection.panel]?.[overlaySelection.overlay]);
+    if (!exists) setOverlaySelection(null);
+  }, [overlaySelection, panelOverlays]);
+
+  const updatePanelOverlay = React.useCallback((panel: number, overlay: number, nextSpec: PanelOverlaySpec) => {
+    const next = clonePanelOverlays(panelOverlays);
+    while (next.length <= panel) next.push([]);
+    if (!next[panel] || overlay < 0 || overlay >= next[panel].length) return;
+    next[panel][overlay] = nextSpec;
+    setPanelOverlays(next);
+  }, [panelOverlays, setPanelOverlays]);
+
+  const deleteSelectedOverlay = React.useCallback(() => {
+    if (!overlaySelection) return;
+    const next = clonePanelOverlays(panelOverlays);
+    const items = next[overlaySelection.panel];
+    if (!items || overlaySelection.overlay < 0 || overlaySelection.overlay >= items.length) return;
+    items.splice(overlaySelection.overlay, 1);
+    setPanelOverlays(next);
+    setOverlaySelection(null);
+  }, [overlaySelection, panelOverlays, setPanelOverlays]);
+
+  const resetPanelOverlays = React.useCallback(() => {
+    if (!overlayBaselineRef.current) return;
+    setPanelOverlays(clonePanelOverlays(overlayBaselineRef.current));
+    setOverlaySelection(null);
+    overlayDragRef.current = null;
+    setIsDraggingOverlay(false);
+  }, [setPanelOverlays]);
 
   const effectiveShowFft = showFft;
   const galleryColumnOptions = React.useMemo(() => {
@@ -1705,6 +3161,7 @@ function Show2D() {
   const [contrastStates, setContrastStates] = React.useState<Map<number, { vminPct: number; vmaxPct: number }>>(new Map());
   // Ref mirror for fast slider path (bypass React effect batching)
   const contrastRef = React.useRef<{ linked: { vminPct: number; vmaxPct: number }; perImage: Map<number, { vminPct: number; vmaxPct: number }> }>({ linked: { vminPct: 0, vmaxPct: 100 }, perImage: new Map() });
+  const visibleImageIndicesRef = React.useRef<number[]>([]);
   const sliderRafRef = React.useRef(0);
   const getContrastState = React.useCallback((idx: number) => {
     if (linkedContrast) return linkedContrastState;
@@ -1728,7 +3185,9 @@ function Show2D() {
         if (cachedRanges.length === 0) return;
         const lut = COLORMAPS[cmapRef.current] || COLORMAPS.inferno;
         engine.uploadLUT(cmapRef.current, lut);
-        const indices = Array.from({ length: nImages }, (_, i) => i);
+        const visibleIndices = visibleImageIndicesRef.current.length > 0
+          ? visibleImageIndicesRef.current
+          : Array.from({ length: nImages }, (_, i) => i);
         const ls = logScaleRef.current ?? false;
         const hasAbsoluteRange = traitVmin != null && traitVmax != null;
         const baseRanges: { min: number; max: number }[] = [];
@@ -1769,13 +3228,15 @@ function Show2D() {
           }
         }
         panelRangesRef.current = ranges;  // keep detail tiles on the live contrast window
-        const bitmaps = engine.renderSlotsToImageBitmap(indices, ranges, ls);
+        const bitmapRanges = visibleIndices.map(i => ranges[i] || { vmin: 0, vmax: 1 });
+        const bitmaps = engine.renderSlotsToImageBitmap(visibleIndices, bitmapRanges, ls);
         if (bitmaps && bitmaps[0]) {
           try {
-            for (let i = 0; i < bitmaps.length; i++) {
-              const bitmap = bitmaps[i];
+            for (let k = 0; k < bitmaps.length; k++) {
+              const bitmap = bitmaps[k];
               if (!bitmap) continue;
-              const offscreen = mainOffscreensRef.current[i];
+              const panel = visibleIndices[k];
+              const offscreen = mainOffscreensRef.current[panel];
               if (offscreen) offscreen.getContext("2d")?.drawImage(bitmap, 0, 0);
             }
           } finally {
@@ -1786,6 +3247,24 @@ function Show2D() {
       });
     }
   }, [linkedContrast, nImages, isGallery, traitVmin, traitVmax, traitVmins, traitVmaxs]);
+  const applyContrastPreset = React.useCallback((preset: string) => {
+    setContrastPreset(preset);
+    if (preset === "manual" || preset === "custom") {
+      setAutoContrast(false);
+      return;
+    }
+    const match = preset.match(/^(\d+(?:\.\d+)?)-(\d+(?:\.\d+)?)$/);
+    if (!match) return;
+    const lo = Math.max(0, Math.min(100, Number(match[1])));
+    const hi = Math.max(lo + 0.01, Math.min(100, Number(match[2])));
+    setAutoContrast(false);
+    if (linkedContrast) {
+      setLinkedContrastState({ vminPct: lo, vmaxPct: hi });
+      contrastRef.current.linked = { vminPct: lo, vmaxPct: hi };
+      return;
+    }
+    Array.from({ length: nImages }, (_, i) => setContrastState(i, { vminPct: lo, vmaxPct: hi }, true));
+  }, [linkedContrast, nImages, setAutoContrast, setContrastPreset, setContrastState]);
   // Convenience accessors for active image
   const activeContrastIdx = nImages > 1 ? selectedIdx : 0;
   const imageVminPct = getContrastState(activeContrastIdx).vminPct;
@@ -1838,6 +3317,22 @@ function Show2D() {
 
   // Cursor readout state
   const [cursorInfo, setCursorInfo] = React.useState<{ idx: number; row: number; col: number; value: number; rgb?: [number, number, number] | null; valueSource?: "preview" | "detail" | "native" } | null>(null);
+  const [insetHoverInfo, setInsetHoverInfo] = React.useState<InsetHoverInfo | null>(null);
+  const insetHoverKeyRef = React.useRef<string>("");
+  const insetDragStateRef = React.useRef<InsetDragState | null>(null);
+  const insetDragDraftRef = React.useRef<Map<number, InsetPlotSpec>>(new Map());
+  const insetDragRafRef = React.useRef<number | null>(null);
+  const [insetDragVersion, setInsetDragVersion] = React.useState(0);
+  const scheduleInsetDragPaint = React.useCallback(() => {
+    if (insetDragRafRef.current !== null) return;
+    insetDragRafRef.current = window.requestAnimationFrame(() => {
+      insetDragRafRef.current = null;
+      setInsetDragVersion(v => v + 1);
+    });
+  }, []);
+  React.useEffect(() => () => {
+    if (insetDragRafRef.current !== null) window.cancelAnimationFrame(insetDragRafRef.current);
+  }, []);
 
   // Colorbar state (single image mode only)
   const [showColorbar, setShowColorbar] = React.useState(false);
@@ -2106,6 +3601,20 @@ function Show2D() {
     () => orderedImageIndices.filter(i => !hiddenPanelSet.has(i)),
     [hiddenPanelSet, orderedImageIndices]
   );
+  visibleImageIndicesRef.current = visibleImageIndices;
+  const selectedPanelSet = React.useMemo(() => {
+    const out = new Set<number>();
+    for (const value of selectedPanels || []) {
+      const panel = Math.round(Number(value));
+      if (Number.isFinite(panel) && panel >= 0 && panel < totalPanelCount && !hiddenPanelSet.has(panel)) out.add(panel);
+    }
+    return out;
+  }, [hiddenPanelSet, selectedPanels, totalPanelCount]);
+  const selectedVisiblePanels = React.useMemo(
+    () => visibleImageIndices.filter((panel) => selectedPanelSet.has(panel)),
+    [selectedPanelSet, visibleImageIndices],
+  );
+  const selectedVisibleCount = selectedVisiblePanels.length;
   const visibleDiffPlan = React.useMemo(
     () => resolveVisibleDiffPlan(visibleImageIndices, isRgbFlags, diffReference),
     [diffReference, isRgbFlags, visibleImageIndices],
@@ -2121,6 +3630,12 @@ function Show2D() {
   const panelMenuTotal = isPaged ? activePanelCount : totalPanelCount;
   const allCurrentPanelsVisible = visibleImageCount === panelMenuTotal;
   const panelLabel = React.useCallback((idx: number) => labels?.[idx] || `Image ${idx + 1}`, [labels]);
+  const panelTitleContent = React.useCallback((idx: number) => (
+    renderRichTitle(panelTitleSpans?.[idx], panelLabel(idx))
+  ), [panelLabel, panelTitleSpans]);
+  const panelTitleText = React.useCallback((idx: number) => (
+    richTitlePlainText(panelTitleSpans?.[idx], panelLabel(idx))
+  ), [panelLabel, panelTitleSpans]);
   const pixelSizeForPanel = React.useCallback((idx: number) => {
     const perPanel = pixelSizes?.[idx];
     return perPanel && perPanel > 0 ? perPanel : pixelSize;
@@ -2159,6 +3674,77 @@ function Show2D() {
     ) return;
     setHiddenPanels(Array.from(next).sort((a, b) => a - b));
   }, [activePageEnd, activePagePanelIndices, activePageStart, activePanelCount, hiddenPageSlots, hiddenPanels, totalPanelCount, isItemPaged, isPaged, setHiddenPanels, setHiddenPageSlotsTrait]);
+  const setPanelsHidden = React.useCallback((panels: number[], hidden: boolean) => {
+    const panelSet = new Set(
+      panels
+        .map((panel) => Math.round(Number(panel)))
+        .filter((panel) => Number.isFinite(panel) && panel >= 0 && panel < totalPanelCount),
+    );
+    if (panelSet.size === 0) return;
+    if (isPaged && !isItemPaged) {
+      const next = new Set<number>();
+      for (const value of hiddenPageSlots || []) {
+        const slot = Math.trunc(Number(value));
+        if (Number.isFinite(slot) && slot >= 0 && slot < activePanelCount) next.add(slot);
+      }
+      for (const panel of panelSet) {
+        if (panel < activePageStart || panel >= activePageEnd) continue;
+        const slot = panel - activePageStart;
+        if (hidden) next.add(slot);
+        else next.delete(slot);
+      }
+      if (activePanelCount - next.size <= 0) return;
+      const slots = normalizeHiddenPageSlots(Array.from(next), activePanelCount);
+      setHiddenPageSlots(slots);
+      setHiddenPageSlotsTrait(slots);
+      return;
+    }
+    const next = new Set<number>();
+    for (const value of hiddenPanels || []) {
+      const idx = Math.round(Number(value));
+      if (Number.isFinite(idx) && idx >= 0 && idx < totalPanelCount) next.add(idx);
+    }
+    for (const panel of panelSet) {
+      if (hidden) next.add(panel);
+      else next.delete(panel);
+    }
+    if (next.size >= totalPanelCount) return;
+    if (isItemPaged && activePagePanelIndices.every(value => next.has(value))) return;
+    setHiddenPanels(Array.from(next).sort((a, b) => a - b));
+  }, [activePageEnd, activePagePanelIndices, activePageStart, activePanelCount, hiddenPageSlots, hiddenPanels, totalPanelCount, isItemPaged, isPaged, setHiddenPanels, setHiddenPageSlotsTrait]);
+  const handlePanelSelectionMouseDown = React.useCallback((event: React.MouseEvent, panel: number): boolean => {
+    if (!isGallery || reorderMode) return false;
+    const orderedVisible = orderedImageIndices.filter((idx) => visibleImageIndices.includes(idx));
+    const current = new Set(selectedPanelSet);
+    let next: number[];
+    if (event.shiftKey) {
+      const anchor = lastSelectedPanelRef.current !== null && orderedVisible.includes(lastSelectedPanelRef.current)
+        ? lastSelectedPanelRef.current
+        : (selectedVisiblePanels[selectedVisiblePanels.length - 1] ?? selectedIdx);
+      const a = orderedVisible.indexOf(anchor);
+      const b = orderedVisible.indexOf(panel);
+      if (a >= 0 && b >= 0) {
+        const [lo, hi] = a < b ? [a, b] : [b, a];
+        next = orderedVisible.slice(lo, hi + 1);
+      } else {
+        next = [panel];
+      }
+      event.preventDefault();
+      event.stopPropagation();
+    } else if (event.metaKey || event.ctrlKey) {
+      if (current.has(panel) && current.size > 1) current.delete(panel);
+      else current.add(panel);
+      next = orderedVisible.filter((idx) => current.has(idx));
+      event.preventDefault();
+      event.stopPropagation();
+    } else {
+      next = [panel];
+    }
+    lastSelectedPanelRef.current = panel;
+    setSelectedIdx(panel);
+    setSelectedPanels(next);
+    return event.shiftKey || event.metaKey || event.ctrlKey;
+  }, [isGallery, orderedImageIndices, reorderMode, selectedIdx, selectedPanelSet, selectedVisiblePanels, setSelectedIdx, setSelectedPanels, visibleImageIndices]);
   const togglePanelStar = React.useCallback((panel: number) => {
     const next = Array.from({ length: totalPanelCount }, (_, idx) => starred?.[idx] ? 1 : 0);
     next[panel] = next[panel] ? 0 : 1;
@@ -2259,15 +3845,27 @@ function Show2D() {
     if (visibleImageIndices.includes(selectedIdx)) return;
     setSelectedIdx(visibleImageIndices[0] ?? activePageStart);
   }, [activePageStart, isPaged, selectedIdx, setSelectedIdx, visibleImageIndices]);
+  React.useEffect(() => {
+    if (!isGallery) {
+      if ((selectedPanels || []).length > 0) setSelectedPanels([]);
+      return;
+    }
+    const clean = Array.from(new Set((selectedPanels || [])
+      .map((value) => Math.round(Number(value)))
+      .filter((panel) => Number.isFinite(panel) && visibleImageIndices.includes(panel))));
+    if (clean.length === 0 && visibleImageIndices.includes(selectedIdx)) clean.push(selectedIdx);
+    if (!sameNumberArray(selectedPanels, clean)) setSelectedPanels(clean);
+  }, [isGallery, selectedIdx, selectedPanels, setSelectedPanels, visibleImageIndices]);
   const clampedNcols = Math.max(1, Math.min(ncols || 1, visibleImageCount, MAX_PANEL_COLUMNS));
   const effectiveNcols = clampedNcols + diffPanelCount;
   const displayScale = canvasSize / Math.max(width, height);
   const canvasW = Math.round(width * displayScale);
   const canvasH = Math.round(height * displayScale);
   const galleryGapPx = Math.max(0, Number.isFinite(galleryGapPxState) ? galleryGapPxState : 8);
+  const galleryFramePx = isGallery && galleryGapPx > 0 && galleryGapColor ? galleryGapPx : 0;
   const histogramWidthPx = 110;
   const histogramGapPx = 15;
-  const galleryGridMaxWidth = isGallery ? effectiveNcols * canvasW + (effectiveNcols - 1) * galleryGapPx : canvasW;
+  const galleryGridMaxWidth = isGallery ? effectiveNcols * canvasW + (effectiveNcols - 1) * galleryGapPx + 2 * galleryFramePx : canvasW;
   // Wrap against the actual notebook/container width. maxWidth below still
   // enforces the requested column count, while auto-fit avoids viewport-only
   // breakpoints that overflow narrow sidebars in a wide browser window.
@@ -2425,6 +4023,37 @@ function Show2D() {
   }, [nImages, width, height, isRgbFlags]);
   const galleryGridWidth = galleryGridMaxWidth;
   const profileCanvasWidth = galleryGridWidth;
+  const groupMarkerOverlays = React.useMemo(() => {
+    if (!isGallery || visibleImageIndices.length === 0 || canvasW <= 0 || canvasH <= 0) return [];
+    const cols = Math.max(1, effectiveNcols);
+    const gap = Math.max(0, galleryGapPx);
+    const build = (markers: MarkerMap | undefined, axis: "row" | "col") => Object.entries(markers || {})
+      .map(([rawKey, color]) => {
+        const target = Number(rawKey);
+        if (!Number.isFinite(target) || target < 0 || !color) return null;
+        const slots = visibleImageIndices
+          .map((_, slot) => slot)
+          .filter((slot) => (axis === "row" ? Math.floor(slot / cols) : slot % cols) === target);
+        if (slots.length === 0) return null;
+        const rowVals = slots.map((slot) => Math.floor(slot / cols));
+        const colVals = slots.map((slot) => slot % cols);
+        const row0 = Math.min(...rowVals);
+        const row1 = Math.max(...rowVals);
+        const col0 = Math.min(...colVals);
+        const col1 = Math.max(...colVals);
+        return {
+          key: `${axis}-${rawKey}`,
+          axis,
+          color: String(color),
+          left: galleryFramePx + col0 * (canvasW + gap),
+          top: galleryFramePx + row0 * (canvasH + gap),
+          width: (col1 - col0 + 1) * canvasW + Math.max(0, col1 - col0) * gap,
+          height: (row1 - row0 + 1) * canvasH + Math.max(0, row1 - row0) * gap,
+        };
+      })
+      .filter(Boolean) as Array<{ key: string; axis: "row" | "col"; color: string; left: number; top: number; width: number; height: number }>;
+    return [...build(rowMarkers, "row"), ...build(colMarkers, "col")];
+  }, [canvasH, canvasW, colMarkers, effectiveNcols, galleryFramePx, galleryGapPx, isGallery, rowMarkers, visibleImageIndices]);
 
   // ROI FFT active: both ROI and FFT on, with a selected ROI
   const roiFftActive = effectiveShowFft && roiActive && roiSelectedIdx >= 0 && roiSelectedIdx < (roiList?.length ?? 0);
@@ -2569,6 +4198,13 @@ function Show2D() {
         return;
       }
       if (engine) {
+        const gpuInfo = getGPUInfo().toLowerCase();
+        const nvidiaLinux = gpuInfo.includes("nvidia") && navigator.userAgent.toLowerCase().includes("linux");
+        if (nvidiaLinux) {
+          engine.destroy();
+          console.warn(`[Show2D] WebGPU colormap disabled on ${getGPUInfo()} Linux adapter after headed validation showed black canvas transfers; using CPU colormap fallback`);
+          return;
+        }
         gpuCmapRef.current = engine;
         gpuCmapReadyRef.current = true;
         setGpuCmapReadyVersion(v => v + 1);
@@ -2788,8 +4424,8 @@ function Show2D() {
   // gaussian/bin2/anscombe knobs here, right before the arrays feed the
   // colormap/FFT/histogram paths. sigmaDraft feeds the filter DIRECTLY during
   // drag, so scrubbing sigma is live with zero kernel round trips; the model
-  // commit still happens on release. tv/denova* panels arrive Python-filtered
-  // and are passed through untouched (browserFilterSupported is false).
+  // commit still happens on release. tv panels arrive Python-filtered and are
+  // passed through untouched (browserFilterSupported is false).
   const sigmaDraftForFilter = browserFilterActive ? sigmaDraft : null;
   const sigmaDraftPanel = sigmaDraftForFilter === null ? -1 : selectedIdx;
   const panelFilterKnobs = React.useCallback((panel: number) => {
@@ -3479,7 +5115,7 @@ function Show2D() {
     // change. The colormap loops below skip these panels so cmap/contrast/log
     // changes never overwrite the color pixels.
     if (isRgbFlags && isRgbFlags.some(Boolean)) {
-      for (let i = 0; i < nImages; i++) {
+      for (const i of visibleImageIndices) {
         if (!isRgbFlags[i]) continue;
         const rgb = rgbDataRef.current[i];
         const offscreen = mainOffscreensRef.current[i];
@@ -3589,7 +5225,7 @@ function Show2D() {
 
     const renderCpuFallback = () => {
       if (!isCurrentRender()) return;
-      for (let i = 0; i < nImages; i++) {
+      for (const i of visibleImageIndices) {
         if (isRgbFlags && isRgbFlags[i]) continue; // painted directly above
         const offscreen = mainOffscreensRef.current[i];
         const imgData = mainImgDatasRef.current[i];
@@ -3618,7 +5254,7 @@ function Show2D() {
       renderRaf = requestAnimationFrame(() => {
         renderRaf = null;
         void (async () => {
-          const indices = Array.from({ length: capturedNImages }, (_, i) => i);
+          const indices = visibleImageIndices.filter(i => i >= 0 && i < capturedNImages);
           let bitmaps: (ImageBitmap | null)[] | null = null;
           const closeBitmaps = () => {
             bitmaps?.forEach(bitmap => bitmap?.close());
@@ -3628,22 +5264,27 @@ function Show2D() {
             if (!isCurrentRender()) return;
             // Await GPU completion before snapshotting so the OffscreenCanvas
             // contains the colormap instead of the render pass's black clear.
-            bitmaps = await engine!.renderSlotsToImageBitmapAsync(indices, capturedRanges, capturedLogScale);
+            const bitmapRanges = indices.map(i => capturedRanges[i] || { vmin: 0, vmax: 1 });
+            bitmaps = await engine!.renderSlotsToImageBitmapAsync(indices, bitmapRanges, capturedLogScale);
             if (!isCurrentRender()) {
               closeBitmaps();
               return;
             }
             let painted = capturedIsRgb.some(Boolean);
             if (bitmaps && bitmaps.length > 0) {
-              for (let i = 0; i < bitmaps.length; i++) {
-                const bitmap = bitmaps[i];
+              for (let k = 0; k < bitmaps.length; k++) {
+                const bitmap = bitmaps[k];
                 if (!bitmap) continue;
+                const i = indices[k];
                 if (capturedIsRgb[i]) continue; // RGB offscreen already holds true color pixels
                 const offscreen = mainOffscreensRef.current[i];
                 const ctx = offscreen?.getContext("2d");
                 if (ctx && isCurrentRender()) {
                   ctx.drawImage(bitmap, 0, 0);
-                  painted = true;
+                  const range = capturedRanges[i] || { vmin: 0, vmax: 1 };
+                  if (range.vmax <= range.vmin || !canvasLooksBlank(offscreen)) {
+                    painted = true;
+                  }
                 }
               }
             }
@@ -3651,6 +5292,20 @@ function Show2D() {
             if (painted && isCurrentRender()) {
               setOffscreenVersion(v => v + 1);
               return;
+            }
+            if (isCurrentRender()) {
+              const offscreens = indices.map(i => mainOffscreensRef.current[i] ?? null);
+              const imgDatas = indices.map(i => mainImgDatasRef.current[i] ?? null);
+              const rendered = await engine!.renderSlots(indices, bitmapRanges, offscreens, imgDatas, capturedLogScale);
+              const readbackPainted = rendered > 0 && indices.some(i => {
+                const offscreen = mainOffscreensRef.current[i];
+                const range = capturedRanges[i] || { vmin: 0, vmax: 1 };
+                return !!offscreen && (range.vmax <= range.vmin || !canvasLooksBlank(offscreen));
+              });
+              if (readbackPainted && isCurrentRender()) {
+                setOffscreenVersion(v => v + 1);
+                return;
+              }
             }
           } catch (err) {
             closeBitmaps();
@@ -3674,7 +5329,7 @@ function Show2D() {
       cancelled = true;
       if (renderRaf !== null) window.cancelAnimationFrame(renderRaf);
     };
-  }, [dataVersion, gpuCmapVersion, autoContrastVersion, nImages, width, height, cmap, panelCmaps, panelCmapFor, logScale, autoContrast, linkedContrast, linkedContrastState, contrastStates, traitVmin, traitVmax, traitVmins, traitVmaxs, diffMode, isRgbFlags, canvasRepaintSignal]);
+  }, [dataVersion, gpuCmapVersion, autoContrastVersion, nImages, width, height, cmap, panelCmaps, panelCmapFor, logScale, autoContrast, linkedContrast, linkedContrastState, contrastStates, traitVmin, traitVmax, traitVmins, traitVmaxs, diffMode, isRgbFlags, canvasRepaintSignal, visibleImageIndices]);
 
   // -------------------------------------------------------------------------
   // Maps-style detail fetch (preview binned only, _display_bin_factor > 1).
@@ -3686,7 +5341,7 @@ function Show2D() {
     if (!displayBinFactor || displayBinFactor <= 1) return null;
     if (canvasW <= 0 || canvasH <= 0 || width <= 0 || height <= 0) return null;
     if (isRgbFlags && isRgbFlags[panel]) return null;
-    if (hiddenPanels && hiddenPanels.includes(panel)) return null;
+    if (hiddenPanelSet.has(panel)) return null;
     const zs = getZoomState(panel);
     // Canvas px painted per preview px: at or below 1 the preview already
     // saturates the screen, so full-res detail adds nothing visible.
@@ -3710,11 +5365,11 @@ function Show2D() {
       fullCol0: col0 * displayBinFactor,
       fullCol1: col1 * displayBinFactor,
     };
-  }, [displayBinFactor, canvasW, canvasH, width, height, isRgbFlags, hiddenPanels, getZoomState, displayScale]);
+  }, [displayBinFactor, canvasW, canvasH, width, height, isRgbFlags, hiddenPanelSet, getZoomState, displayScale]);
 
   React.useEffect(() => {
     if (!displayBinFactor || displayBinFactor <= 1) return;
-    const signature = Array.from({ length: nImages }, (_, i) => {
+    const signature = visibleImageIndices.map((i) => {
       const win = currentDetailWindow(i);
       if (!win) return `${i}:preview`;
       return `${i}:${Math.round(win.fullRow0)},${Math.round(win.fullRow1)},${Math.round(win.fullCol0)},${Math.round(win.fullCol1)},${win.bin}`;
@@ -3725,7 +5380,7 @@ function Show2D() {
     // a sharp rectangular tile over the new preview.
     detailRequestIdRef.current++;
     detailSentKeysRef.current.clear();
-  }, [displayBinFactor, nImages, currentDetailWindow, linkedZoomState, zoomStates, dataVersion]);
+  }, [displayBinFactor, visibleImageIndices, currentDetailWindow, linkedZoomState, zoomStates, dataVersion]);
 
   React.useEffect(() => {
     if (!displayBinFactor || displayBinFactor <= 1 || detailTilesRef.current.size === 0) return;
@@ -3758,7 +5413,7 @@ function Show2D() {
     if (canvasW <= 0 || canvasH <= 0 || width <= 0 || height <= 0) return;
     const timer = window.setTimeout(() => {
       const tiles: { panel: number; row0: number; row1: number; col0: number; col1: number; bin: number }[] = [];
-      for (let i = 0; i < nImages; i++) {
+      for (const i of visibleImageIndices) {
         const win = currentDetailWindow(i);
         if (!win) continue;
         const key = `${Math.round(win.row0)},${Math.round(win.row1)},${Math.round(win.col0)},${Math.round(win.col1)},${win.bin}`;
@@ -3775,7 +5430,7 @@ function Show2D() {
       setDetailRequest(JSON.stringify({ id: String(id), tiles }));
     }, 150);
     return () => window.clearTimeout(timer);
-  }, [displayBinFactor, canvasW, canvasH, width, height, nImages,
+  }, [displayBinFactor, canvasW, canvasH, width, height, visibleImageIndices,
       currentDetailWindow, dataVersion, setDetailRequest]);
 
   // Detail reply: decode the float32 tiles and stash per panel. Replies for
@@ -3828,7 +5483,7 @@ function Show2D() {
   React.useLayoutEffect(() => {
     if (mainOffscreensRef.current.length === 0) return;
 
-    for (let i = 0; i < nImages; i++) {
+    for (const i of visibleImageIndices) {
       const canvas = canvasRefs.current[i];
       const offscreen = mainOffscreensRef.current[i];
       if (!canvas || !offscreen) continue;
@@ -3843,14 +5498,37 @@ function Show2D() {
       const { zoom, panX, panY } = zs;
 
       ctx.save();
+      // Live notebook sessions still apply display rotations on the Python
+      // side so static PNG/state exports see the same orientation. Kernel-less
+      // standalone HTML cannot do that round trip, so it needs the canvas
+      // transform here. Keep this split explicit to avoid double-rotating live
+      // widgets after the backend sends rotated frame bytes.
+      const rotationTurns = offlineForTheme ? rotationForPanel(i) : 0;
+      const rotated = rotationTurns % 2 !== 0;
+      const drawW = rotated ? canvasH : canvasW;
+      const drawH = rotated ? canvasW : canvasH;
+      if (rotationTurns !== 0) {
+        ctx.translate(canvasW / 2, canvasH / 2);
+        // `image_rotations=1` matches Python `np.rot90(..., k=1)`, so keep the
+        // display transform CCW-positive instead of Canvas' default y-down
+        // clockwise visual direction.
+        ctx.rotate(-rotationTurns * Math.PI / 2);
+        ctx.translate(-drawW / 2, -drawH / 2);
+      }
       if (zoom !== 1 || panX !== 0 || panY !== 0) {
-        const cx = canvasW / 2;
-        const cy = canvasH / 2;
+        const cx = drawW / 2;
+        const cy = drawH / 2;
         ctx.translate(cx + panX, cy + panY);
         ctx.scale(zoom, zoom);
         ctx.translate(-cx, -cy);
       }
-      ctx.drawImage(offscreen, 0, 0, width, height, 0, 0, canvasW, canvasH);
+      const flipX = Boolean(imageFlipsHorizontal?.[i]);
+      const flipY = Boolean(imageFlipsVertical?.[i]);
+      if (flipX || flipY) {
+        ctx.translate(flipX ? drawW : 0, flipY ? drawH : 0);
+        ctx.scale(flipX ? -1 : 1, flipY ? -1 : 1);
+      }
+      ctx.drawImage(offscreen, 0, 0, width, height, 0, 0, drawW, drawH);
       // Detail tile on top of the preview (same zoom/pan transform): tile
       // coordinates are full-res pixels, so divide by the preview bin factor
       // to land in the preview's coordinate space. Outside the tile the
@@ -3868,8 +5546,8 @@ function Show2D() {
           && tileCol1 >= win.fullCol1 - eps
           && tile.bin <= win.bin;
         if (coversCurrentView) {
-          const sx = canvasW / width;
-          const sy = canvasH / height;
+          const sx = drawW / width;
+          const sy = drawH / height;
           const f = displayBinFactor;
           ctx.drawImage(tile.canvas, 0, 0, tile.cols, tile.rows,
             (tile.col0 / f) * sx, (tile.row0 / f) * sy,
@@ -3878,26 +5556,66 @@ function Show2D() {
       }
       ctx.restore();
     }
-  }, [offscreenVersion, detailPaintVersion, displayBinFactor, nImages, width, height, displayScale, canvasW, canvasH, canvasReady, linkedZoom, linkedZoomState, zoomStates, smooth, currentDetailWindow, canvasRepaintSignal]);
+  }, [offscreenVersion, detailPaintVersion, displayBinFactor, nImages, width, height, displayScale, canvasW, canvasH, canvasReady, linkedZoom, linkedZoomState, zoomStates, smooth, currentDetailWindow, canvasRepaintSignal, imageFlipsHorizontal, imageFlipsVertical, offlineForTheme, rotationForPanel, visibleImageIndices]);
 
   // -------------------------------------------------------------------------
   // Render Overlays (scale bar, colorbar, zoom indicator)
   // -------------------------------------------------------------------------
   React.useEffect(() => {
-    for (let i = 0; i < nImages; i++) {
+    for (const i of visibleImageIndices) {
       const overlay = overlayRefs.current[i];
       if (!overlay) continue;
       const ctx = overlay.getContext("2d");
       if (!ctx) continue;
 
-      if (scaleBarVisible) {
+      ctx.clearRect(0, 0, overlay.width, overlay.height);
+      if (panelHasScaleBar(i)) {
         const zs = getZoomState(i);
         const panelPixelSize = pixelSizeForPanel(i);
         const unit = panelPixelSize > 0 ? pixelUnit : "px";
         const pxSize = panelPixelSize > 0 ? panelPixelSize : 1;
-        drawScaleBarHiDPI(overlay, DPR, zs.zoom, pxSize, unit, width);
-      } else {
-        ctx.clearRect(0, 0, overlay.width, overlay.height);
+        const geom = show2dScaleBarGeometry(overlay.width / DPR, overlay.height / DPR, width, zs.zoom, pxSize, unit, scaleBarPosition, scaleBarLength, scaleBarLabel, scaleBarStyle);
+        if (geom) {
+          ctx.save();
+          ctx.scale(DPR, DPR);
+          const barColor = styleString(scaleBarStyle?.color, "#fff");
+          const shadowColor = styleString(scaleBarStyle?.shadow_color, "rgba(0,0,0,0.85)");
+          const outlineColor = styleString(scaleBarStyle?.outline_color, "rgba(0,0,0,0.85)");
+          const outlineWidth = Math.max(0, styleNumber(scaleBarStyle?.outline_width, 0));
+          const labelGap = styleNumber(scaleBarStyle?.label_gap, 4);
+          ctx.fillStyle = shadowColor;
+          ctx.globalAlpha = 0.5;
+          ctx.fillRect(geom.barX + 1, geom.barY + 1, geom.barPx, geom.barHeight);
+          ctx.globalAlpha = 1;
+          ctx.fillStyle = barColor;
+          ctx.fillRect(geom.barX, geom.barY, geom.barPx, geom.barHeight);
+          ctx.font = scaleBarCanvasFont(scaleBarStyle);
+          ctx.textAlign = "center";
+          ctx.textBaseline = "bottom";
+          const labelX = geom.barX + geom.barPx / 2;
+          const labelY = geom.barY - labelGap;
+          if (outlineWidth > 0) {
+            ctx.lineJoin = "round";
+            ctx.strokeStyle = outlineColor;
+            ctx.lineWidth = outlineWidth;
+            ctx.strokeText(geom.label, labelX, labelY);
+          } else {
+            ctx.fillStyle = shadowColor;
+            ctx.fillText(geom.label, labelX + 1, labelY + 1);
+          }
+          ctx.fillStyle = barColor;
+          ctx.fillText(geom.label, labelX, labelY);
+          if (showZoomIndicator) {
+            const zoomX = geom.scaleLeft ? overlay.width / DPR - 12 : 12;
+            ctx.textAlign = geom.scaleLeft ? "right" : "left";
+            const zoomText = formatZoomLabel(zs.zoom);
+            ctx.fillStyle = shadowColor;
+            ctx.fillText(zoomText, zoomX + 1, overlay.height / DPR - 6);
+            ctx.fillStyle = barColor;
+            ctx.fillText(zoomText, zoomX, overlay.height / DPR - 7);
+          }
+          ctx.restore();
+        }
       }
 
       // Colorbar (single image mode only) — uses cached vmin/vmax from data effect
@@ -3911,6 +5629,38 @@ function Show2D() {
         ctx.save();
         ctx.scale(DPR, DPR);
         drawColorbar(ctx, cssW, cssH, lut, vmin, vmax, logScale);
+        ctx.restore();
+      }
+
+      if (showInsetPlots !== false) {
+        ctx.save();
+        ctx.scale(DPR, DPR);
+        drawInsetPlot(
+          ctx,
+          insetPlotSpecFor(i),
+          i,
+          overlay.width / DPR,
+          overlay.height / DPR,
+          panelMarkerColor(i),
+          panelHasScaleBar(i),
+        );
+        ctx.restore();
+      }
+
+      const panelOverlaySpecs = panelOverlays?.[i] || [];
+      if (panelOverlaySpecs.length > 0) {
+        const zs = getZoomState(i);
+        const { zoom, panX, panY } = zs;
+        const cx = canvasW / 2;
+        const cy = canvasH / 2;
+        const toScreenX = (col: number) => (col * displayScale - cx) * zoom + cx + panX;
+        const toScreenY = (row: number) => (row * displayScale - cy) * zoom + cy + panY;
+        ctx.save();
+        ctx.scale(DPR, DPR);
+        drawPanelOverlays(ctx, panelOverlaySpecs, toScreenX, toScreenY, width, height);
+        if (overlaySelection?.panel === i) {
+          drawPanelOverlaySelection(ctx, panelOverlaySpecs[overlaySelection.overlay], toScreenX, toScreenY, width, height);
+        }
         ctx.restore();
       }
 
@@ -4095,7 +5845,7 @@ function Show2D() {
         ctx.restore();
       }
     }
-  }, [nImages, pixelSizeForPanel, pixelUnit, scaleBarVisible, selectedIdx, isGallery, canvasW, canvasH, width, displayScale, linkedZoom, linkedZoomState, zoomStates, dataVersion, showColorbar, cmap, offscreenVersion, logScale, profileActive, profilePoints, roiActive, roiList, roiSelectedIdx, isDraggingROI, themeColors, measureActive, measurePoints, canvasRepaintSignal]);
+  }, [nImages, pixelSizeForPanel, pixelUnit, panelHasScaleBar, scaleBarPosition, scaleBarLength, scaleBarLabel, scaleBarStyle, showZoomIndicator, selectedIdx, isGallery, canvasW, canvasH, width, height, displayScale, linkedZoom, linkedZoomState, zoomStates, dataVersion, showColorbar, cmap, offscreenVersion, logScale, profileActive, profilePoints, roiActive, roiList, roiSelectedIdx, isDraggingROI, themeColors, measureActive, measurePoints, canvasRepaintSignal, insetPlots, insetPlotSpecFor, insetDragVersion, showInsetPlots, panelMarkerColor, visibleImageIndices, panelOverlays, overlaySelection]);
 
   // -------------------------------------------------------------------------
   // Inset magnifier (lens) — renders magnified region at cursor in bottom-left
@@ -4649,6 +6399,10 @@ function Show2D() {
             const ctx = oc.getContext("2d");
             if (ctx) {
               ctx.drawImage(bitmaps[0], 0, 0);
+              if (vmax > vmin && canvasLooksBlank(oc)) {
+                renderCpu();
+                return;
+              }
               fftOffscreenRef.current = oc;
               setFftOffscreenVersion(v => v + 1);
             }
@@ -5193,6 +6947,7 @@ function Show2D() {
           }
           if (bitmaps && bitmaps.length > 0) {
             let painted = false;
+            let blankBitmap = false;
             try {
               for (let k = 0; k < bitmaps.length; k++) {
                 const bitmap = bitmaps[k];
@@ -5204,13 +6959,18 @@ function Show2D() {
                 const ctx = oc.getContext("2d");
                 if (!ctx) continue;
                 ctx.drawImage(bitmap, 0, 0);
+                const range = ranges[k] || { vmin: 0, vmax: 1 };
+                if (range.vmax > range.vmin && canvasLooksBlank(oc)) {
+                  blankBitmap = true;
+                  continue;
+                }
                 fftOffscreensRef.current[idx] = oc;
                 painted = true;
               }
             } finally {
               bitmaps.forEach(bitmap => bitmap?.close());
             }
-            if (painted) {
+            if (painted && !blankBitmap) {
               setGalleryFftOffscreenVersion(v => v + 1);
               return;
             }
@@ -5890,17 +7650,117 @@ function Show2D() {
     return Math.abs(dist - selectedRoi.radius_inner) < hitArea;
   };
 
+  const beginInsetPlotDrag = React.useCallback((e: React.MouseEvent, idx: number): boolean => {
+    if (showInsetPlots === false || !hasInsetPlots) return false;
+    const canvas = canvasRefs.current[idx];
+    if (!canvas) return false;
+    const spec = insetPlotSpecFor(idx);
+    const rect = canvas.getBoundingClientRect();
+    const cssX = (e.clientX - rect.left) * (canvas.width / Math.max(1, rect.width));
+    const cssY = (e.clientY - rect.top) * (canvas.height / Math.max(1, rect.height));
+    const geom = insetPlotGeometry(spec, canvas.width, canvas.height, scaleBarVisible);
+    if (!geom) return false;
+    const grabPad = 10;
+    if (
+      cssX < geom.x0 - grabPad ||
+      cssX > geom.x0 + geom.boxW + grabPad ||
+      cssY < geom.y0 - grabPad ||
+      cssY > geom.y0 + geom.boxH + grabPad
+    ) {
+      return false;
+    }
+    insetDragStateRef.current = {
+      idx,
+      offsetX: cssX - geom.x0,
+      offsetY: cssY - geom.y0,
+      boxW: geom.boxW,
+      boxH: geom.boxH,
+    };
+    insetDragDraftRef.current.set(idx, {
+      ...(spec || {}),
+      box: [geom.x0 / canvas.width, geom.y0 / canvas.height, geom.boxW / canvas.width, geom.boxH / canvas.height],
+    });
+    insetHoverKeyRef.current = "";
+    setInsetHoverInfo(null);
+    scheduleInsetDragPaint();
+    e.preventDefault();
+    e.stopPropagation();
+    return true;
+  }, [hasInsetPlots, insetPlotSpecFor, scaleBarVisible, scheduleInsetDragPaint, showInsetPlots]);
+
+  const updateInsetPlotDrag = React.useCallback((e: React.MouseEvent, idx: number): boolean => {
+    const drag = insetDragStateRef.current;
+    if (!drag || drag.idx !== idx) return false;
+    const canvas = canvasRefs.current[idx];
+    if (!canvas) return false;
+    const rect = canvas.getBoundingClientRect();
+    const cssX = (e.clientX - rect.left) * (canvas.width / Math.max(1, rect.width));
+    const cssY = (e.clientY - rect.top) * (canvas.height / Math.max(1, rect.height));
+    const x0 = Math.max(0, Math.min(canvas.width - drag.boxW, cssX - drag.offsetX));
+    const y0 = Math.max(0, Math.min(canvas.height - drag.boxH, cssY - drag.offsetY));
+    const base = insetPlotSpecFor(idx) || {};
+    insetDragDraftRef.current.set(idx, {
+      ...base,
+      box: [x0 / canvas.width, y0 / canvas.height, drag.boxW / canvas.width, drag.boxH / canvas.height],
+    });
+    scheduleInsetDragPaint();
+    e.preventDefault();
+    e.stopPropagation();
+    return true;
+  }, [insetPlotSpecFor, scheduleInsetDragPaint]);
+
+  const finishInsetPlotDrag = React.useCallback((e?: React.MouseEvent, idxArg?: number): boolean => {
+    const drag = insetDragStateRef.current;
+    if (!drag) return false;
+    const idx = idxArg ?? drag.idx;
+    const canvas = canvasRefs.current[idx];
+    const draft = insetDragDraftRef.current.get(idx);
+    if (canvas && draft) {
+      const geom = insetPlotGeometry(draft, canvas.width, canvas.height, scaleBarVisible);
+      if (geom) {
+        const right = geom.x0 + geom.boxW / 2 >= canvas.width / 2;
+        const bottom = geom.y0 + geom.boxH / 2 >= canvas.height / 2;
+        const position = `${bottom ? "bottom" : "top"}-${right ? "right" : "left"}` as InsetPlotSpec["position"];
+        const marginX = right ? canvas.width - geom.x0 - geom.boxW : geom.x0;
+        const bottomScaleBarOffset = scaleBarVisible && position === "bottom-right" ? 34 : 0;
+        const marginY = bottom ? canvas.height - geom.y0 - geom.boxH - bottomScaleBarOffset : geom.y0 - 18;
+        const { box: _box, ...rest } = draft;
+        const nextSpec: InsetPlotSpec = {
+          ...rest,
+          position,
+          margin: [
+            Math.max(0, Math.round(marginX)),
+            Math.max(0, Math.round(marginY)),
+          ],
+        };
+        const next = Array.isArray(insetPlots) ? insetPlots.slice() : [];
+        next[idx] = nextSpec;
+        setInsetPlots(next);
+      }
+    }
+    insetDragStateRef.current = null;
+    insetDragDraftRef.current.delete(idx);
+    scheduleInsetDragPaint();
+    if (e) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+    return true;
+  }, [insetPlots, scaleBarVisible, scheduleInsetDragPaint, setInsetPlots]);
+
   const handleMouseDown = (e: React.MouseEvent, idx: number) => {
     if (e.detail >= 2) {
       handleDoubleClick(e, idx);
       return;
     }
+    if (handlePanelSelectionMouseDown(e, idx)) return;
     const zs = getZoomState(idx);
     if (isGallery && idx !== selectedIdx) {
       setSelectedIdx(idx);
       // Continue to pan setup so click-drag on unselected panel pans immediately
       // (no double-click required to select first then drag).
     }
+    if (beginInsetPlotDrag(e, idx)) return;
     // Check if click is on the lens inset — edge = resize, interior = drag
     if (showLens && !isGallery && idx === 0) {
       const canvas = canvasRefs.current[0];
@@ -5927,6 +7787,33 @@ function Show2D() {
       }
     }
     clickStartRef.current = { x: e.clientX, y: e.clientY };
+    if (overlayEditMode) {
+      const { imgCol, imgRow } = screenToImg(e, idx);
+      const activeZoom = linkedZoom ? linkedZoomState.zoom : (zoomStates.get(idx) || initialZoomState).zoom;
+      const hitRadius = 10 / Math.max(0.01, displayScale * activeZoom);
+      const hit = panelOverlayHit(panelOverlays?.[idx], imgRow, imgCol, width, height, hitRadius);
+      if (hit) {
+        const original = panelOverlays?.[idx]?.[hit.overlay];
+        if (!original) return;
+        setOverlaySelection({ panel: idx, overlay: hit.overlay });
+        overlayDragRef.current = {
+          mode: hit.mode,
+          panel: idx,
+          overlay: hit.overlay,
+          handle: hit.handle,
+          startRow: imgRow,
+          startCol: imgCol,
+          original,
+        };
+        setIsDraggingOverlay(true);
+        setIsDraggingPan(false);
+        setPanStart(null);
+        setPanningIdx(null);
+        e.preventDefault();
+        return;
+      }
+      setOverlaySelection(null);
+    }
     if (profileActive) {
       const { imgCol, imgRow } = screenToImg(e, idx);
       if (profilePoints.length === 2) {
@@ -6006,6 +7893,19 @@ function Show2D() {
   };
 
   const handleMouseMove = (e: React.MouseEvent, idx: number) => {
+    if (updateInsetPlotDrag(e, idx)) return;
+    if (overlayDragRef.current) {
+      const drag = overlayDragRef.current;
+      if (idx !== drag.panel) return;
+      const { imgCol, imgRow } = screenToImg(e, idx);
+      updatePanelOverlay(
+        drag.panel,
+        drag.overlay,
+        updateOverlayFromDrag(drag.original, drag.mode, drag.startRow, drag.startCol, imgRow, imgCol, width, height, drag.handle),
+      );
+      e.preventDefault();
+      return;
+    }
     // Fast path: during pan drag, skip all cursor/hover/lens work — just update pan
     if (isDraggingPan && panStart && panningIdx !== null) {
       const canvas = canvasRefs.current[idx];
@@ -6026,6 +7926,22 @@ function Show2D() {
       const rect = canvas.getBoundingClientRect();
       const mouseCanvasX = (e.clientX - rect.left) * (canvas.width / rect.width);
       const mouseCanvasY = (e.clientY - rect.top) * (canvas.height / rect.height);
+      const insetHover = showInsetPlots !== false ? insetHoverAt(
+        insetPlotSpecFor(idx),
+        idx,
+        canvas.width,
+        canvas.height,
+        mouseCanvasX,
+        mouseCanvasY,
+        scaleBarVisible,
+      ) : null;
+      const insetHoverKey = insetHover
+        ? `${insetHover.idx}:${insetHover.text}:${insetHover.leftPct.toFixed(1)}:${insetHover.topPct.toFixed(1)}`
+        : "";
+      if (insetHoverKey !== insetHoverKeyRef.current) {
+        insetHoverKeyRef.current = insetHoverKey;
+        setInsetHoverInfo(insetHover);
+      }
       const zs = getZoomState(idx);
       const cx = canvasW / 2;
       const cy = canvasH / 2;
@@ -6176,6 +8092,16 @@ function Show2D() {
     } else {
       setIsHoveringLensEdge(false);
     }
+    if (overlayEditMode && !isDraggingPan) {
+      const { imgCol, imgRow } = screenToImg(e, idx);
+      const activeZoom = linkedZoom ? linkedZoomState.zoom : (zoomStates.get(idx) || initialZoomState).zoom;
+      const hitRadius = 10 / Math.max(0.01, displayScale * activeZoom);
+      const hit = panelOverlayHit(panelOverlays?.[idx], imgRow, imgCol, width, height, hitRadius);
+      setIsHoveringOverlay(Boolean(hit));
+      return;
+    } else if (isHoveringOverlay) {
+      setIsHoveringOverlay(false);
+    }
     // Hover detection for resize handles (show cursor on any ROI edge)
     if (roiActive && !isDraggingPan) {
       const { imgCol: ic, imgRow: ir } = screenToImg(e, idx);
@@ -6198,6 +8124,12 @@ function Show2D() {
   };
 
   const handleMouseUp = (e: React.MouseEvent, idx: number) => {
+    if (finishInsetPlotDrag(e, idx)) return;
+    if (overlayDragRef.current) {
+      overlayDragRef.current = null;
+      setIsDraggingOverlay(false);
+      return;
+    }
     if (isDraggingLens) {
       setIsDraggingLens(false);
       lensDragStartRef.current = null;
@@ -6298,6 +8230,16 @@ function Show2D() {
 
   const handleMouseLeave = (idx: number) => {
     setCursorInfo(null);
+    insetHoverKeyRef.current = "";
+    setInsetHoverInfo(null);
+    overlayDragRef.current = null;
+    setIsDraggingOverlay(false);
+    setIsHoveringOverlay(false);
+    if (insetDragStateRef.current?.idx === idx) {
+      insetDragStateRef.current = null;
+      insetDragDraftRef.current.delete(idx);
+      scheduleInsetDragPaint();
+    }
     // Don't clear lensPos — lens stays at last position when toggle is on
     setIsDraggingLens(false);
     setIsResizingLens(false);
@@ -6336,6 +8278,288 @@ function Show2D() {
       canvas.toBlob((b) => { if (b) downloadBlob(b, `show2d_${labels?.[selectedIdx] || "image"}.png`); }, "image/png");
     }
   }, [isGallery, selectedIdx, labels]);
+
+  const handleSvgExport = React.useCallback(async (scale: number = 3) => {
+    setExportAnchor(null);
+    const exportScale = Math.max(1, Math.min(8, Math.round(Number(scale) || 2)));
+    const panels = isGallery ? visibleImageIndices : [0];
+    if (panels.length === 0 || canvasW <= 0 || canvasH <= 0) {
+      setLocalExportStatus("Export failed: no visible Show2D panels");
+      return;
+    }
+    const cols = isGallery ? Math.max(1, Math.min(clampedNcols, panels.length)) : 1;
+    const rows = Math.max(1, Math.ceil(panels.length / cols));
+    const gap = isGallery ? galleryGapPx : 0;
+    const frame = gap > 0 && galleryGapColor ? gap : 0;
+    const titleHeight = showTitle !== false && title ? 30 : 0;
+    const svgWidth = 2 * frame + cols * canvasW + (cols - 1) * gap;
+    const svgHeight = titleHeight + 2 * frame + rows * canvasH + (rows - 1) * gap;
+    const filename = makeSvgExportFilename(title, panels.length, height, width, exportScale);
+
+    try {
+      const defs: string[] = [];
+      const body: string[] = [];
+      if (gap > 0 && galleryGapColor) {
+        body.push(`<rect x="0" y="${titleHeight}" width="${svgWidth}" height="${Math.max(0, svgHeight - titleHeight)}" fill="${escapeXmlAttr(galleryGapColor)}"/>`);
+      }
+      if (titleHeight > 0) {
+        body.push(
+          `<text x="${svgWidth / 2}" y="19" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="14" font-weight="700" fill="${escapeXmlAttr(themeColors.text)}">${escapeXmlText(title)}</text>`
+        );
+      }
+
+      const titleFontFamily = styleString(panelTitleStyle?.font_family, "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif");
+      const titleFg = styleString(panelTitleStyle?.fg, "#fff");
+      const titleWeight = panelTitleStyle?.font_weight ?? 700;
+      const titleOpacity = Math.max(0, Math.min(1, styleNumber(panelTitleStyle?.opacity, 0.95)));
+      const titleOutlineWidth = Math.max(0, styleNumber(panelTitleStyle?.outline_width, 0));
+      const titleOutlineColor = styleString(panelTitleStyle?.outline_color, "rgba(0,0,0,0.85)");
+      const titleOutlineAttrs = titleOutlineWidth > 0
+        ? ` stroke="${escapeXmlAttr(titleOutlineColor)}" stroke-width="${titleOutlineWidth}" stroke-linejoin="round" paint-order="stroke fill"`
+        : "";
+      const titleTextAnchor = (anchor: string): string => {
+        if (anchor.includes("right")) return "end";
+        if (anchor.includes("center")) return "middle";
+        return "start";
+      };
+      const titleBaselineY = (anchor: string, top: number, fontSize: number): number => {
+        if (anchor.includes("center")) return top + fontSize * 0.35;
+        if (anchor.includes("bottom")) return top;
+        return top + fontSize;
+      };
+      const titlePosition = (px: number, py: number, fontSize: number): { x: number; y: number; anchor: string } => {
+        const rawX = Number(panelTitleStyle?.x);
+        const rawY = Number(panelTitleStyle?.y);
+        const offset = Array.isArray(panelTitleStyle?.offset) ? panelTitleStyle.offset.map(Number) : [0, 0];
+        if (Number.isFinite(rawX) || Number.isFinite(rawY)) {
+          const anchor = styleString(panelTitleStyle?.anchor, "top-center").toLowerCase();
+          return {
+            x: px + (Number.isFinite(rawX) ? rawX : 0.5) * canvasW + Number(offset[0] || 0),
+            y: titleBaselineY(anchor, py + (Number.isFinite(rawY) ? rawY : 0) * canvasH + Number(offset[1] || 0), fontSize),
+            anchor: titleTextAnchor(anchor),
+          };
+        }
+        const align = styleString(panelTitleStyle?.align, "center").toLowerCase();
+        if (align === "left" || align === "start") return { x: px + 28, y: py + 6 + fontSize, anchor: "start" };
+        if (align === "right" || align === "end") return { x: px + canvasW - 28, y: py + 6 + fontSize, anchor: "end" };
+        return { x: px + canvasW / 2, y: py + 6 + fontSize, anchor: "middle" };
+      };
+
+      groupMarkerOverlays.forEach((marker) => {
+        body.push(
+          `<rect x="${marker.left}" y="${titleHeight + marker.top}" width="${marker.width}" height="${marker.height}" fill="none" stroke="${escapeXmlAttr(marker.color)}" stroke-width="3"/>`,
+          `<rect x="${marker.left + 3}" y="${titleHeight + marker.top + 3}" width="${Math.max(0, marker.width - 6)}" height="${Math.max(0, marker.height - 6)}" fill="none" stroke="#000" stroke-opacity="0.9" stroke-width="2"/>`
+        );
+      });
+
+      for (let slot = 0; slot < panels.length; slot += 1) {
+        const panel = panels[slot];
+        const canvas = canvasRefs.current[panel];
+        if (!canvas) continue;
+        const col = slot % cols;
+        const row = Math.floor(slot / cols);
+        const x = frame + col * (canvasW + gap);
+        const y = titleHeight + frame + row * (canvasH + gap);
+        const clipId = `show2d-svg-clip-${slot}`;
+        defs.push(`<clipPath id="${clipId}"><rect x="${x}" y="${y}" width="${canvasW}" height="${canvasH}"/></clipPath>`);
+        const dataUrl = scaledCanvasPngDataUrl(canvas, exportScale, smooth);
+        const panelStroke = frame > 0 && galleryGapColor ? galleryGapColor : themeColors.border;
+        body.push(
+          `<g id="show2d-panel-${panel}" data-show2d-panel="${panel}">`,
+          `<rect x="${x}" y="${y}" width="${canvasW}" height="${canvasH}" fill="#000"/>`,
+          `<image x="${x}" y="${y}" width="${canvasW}" height="${canvasH}" href="${escapeXmlAttr(dataUrl)}" preserveAspectRatio="none"/>`,
+          `<rect x="${x}" y="${y}" width="${canvasW}" height="${canvasH}" fill="none" stroke="${escapeXmlAttr(panelStroke)}" stroke-width="1"/>`
+        );
+        const markerColor = panelMarkerColor(panel);
+        if (markerAround) {
+          body.push(
+            `<rect x="${x + 1.5}" y="${y + 1.5}" width="${Math.max(0, canvasW - 3)}" height="${Math.max(0, canvasH - 3)}" fill="none" stroke="${escapeXmlAttr(markerColor)}" stroke-width="3"/>`,
+            `<rect x="${x + 4}" y="${y + 4}" width="${Math.max(0, canvasW - 8)}" height="${Math.max(0, canvasH - 8)}" fill="none" stroke="#000" stroke-opacity="0.9" stroke-width="2"/>`
+          );
+        } else {
+          body.push(`<rect x="${x}" y="${y}" width="5" height="${canvasH}" fill="${escapeXmlAttr(markerColor)}"/>`);
+        }
+
+        if (showPanelTitles !== false) {
+          const label = panelTitleText(panel);
+          if (label) {
+            const fontSize = Math.max(8, panelTitleFontSize || 11);
+            const richTitle = panelTitleSpans?.[panel];
+            body.push(
+              `<g clip-path="url(#${clipId})">`
+            );
+            if (richTitle?.length) {
+              const rich = svgTextFromRichSpans(richTitle, label);
+              const titlePos = titlePosition(x, y, fontSize);
+              const lineY = titlePos.y;
+              if (titleOutlineWidth <= 0) {
+                body.push(`<text x="${titlePos.x + 1}" y="${lineY + 1}" text-anchor="${titlePos.anchor}" font-family="${escapeXmlAttr(titleFontFamily)}" font-size="${fontSize}" font-weight="${escapeXmlAttr(titleWeight)}" fill="#000" fill-opacity="0.85">${escapeXmlText(rich.text)}</text>`);
+              }
+              body.push(`<text x="${titlePos.x}" y="${lineY}" text-anchor="${titlePos.anchor}" font-family="${escapeXmlAttr(titleFontFamily)}" font-size="${fontSize}" font-weight="${escapeXmlAttr(titleWeight)}" fill="${escapeXmlAttr(titleFg)}" fill-opacity="${titleOpacity}"${titleOutlineAttrs} data-show2d-panel-title-spans-svg="true">`);
+              rich.spans.forEach((span) => body.push(`<tspan${span.color ? ` fill="${escapeXmlAttr(span.color)}"` : ""}>${escapeXmlText(span.text)}</tspan>`));
+              body.push("</text>");
+            } else {
+              const titleLines = wrapSvgTextLines(label, fontSize, Math.max(24, canvasW - 56), 3);
+              titleLines.forEach((line, lineIdx) => {
+                const titlePos = titlePosition(x, y, fontSize);
+                const lineY = titlePos.y + lineIdx * fontSize * 1.2;
+                if (titleOutlineWidth <= 0) {
+                  body.push(`<text x="${titlePos.x + 1}" y="${lineY + 1}" text-anchor="${titlePos.anchor}" font-family="${escapeXmlAttr(titleFontFamily)}" font-size="${fontSize}" font-weight="${escapeXmlAttr(titleWeight)}" fill="#000" fill-opacity="0.85">${escapeXmlText(line)}</text>`);
+                }
+                body.push(`<text x="${titlePos.x}" y="${lineY}" text-anchor="${titlePos.anchor}" font-family="${escapeXmlAttr(titleFontFamily)}" font-size="${fontSize}" font-weight="${escapeXmlAttr(titleWeight)}" fill="${escapeXmlAttr(titleFg)}" fill-opacity="${titleOpacity}"${titleOutlineAttrs}>${escapeXmlText(line)}</text>`);
+              });
+            }
+            body.push(`</g>`);
+          }
+        }
+
+        const vectorLayer: string[] = [];
+        if (showInsetPlots !== false) {
+          vectorLayer.push(svgInsetPlotElement(insetPlotSpecFor(panel), panel, x, y, canvasW, canvasH, markerColor, panelHasScaleBar(panel)));
+        }
+        const panelOverlaySpecs = panelOverlays?.[panel] || [];
+        if (panelOverlaySpecs.length > 0) {
+          const zs = getZoomState(panel);
+          const cx = canvasW / 2;
+          const cy = canvasH / 2;
+          const toScreenX = (imgCol: number) => x + (imgCol * displayScale - cx) * zs.zoom + cx + zs.panX;
+          const toScreenY = (imgRow: number) => y + (imgRow * displayScale - cy) * zs.zoom + cy + zs.panY;
+          panelOverlaySpecs.forEach((overlay) => vectorLayer.push(svgPanelOverlayElement(overlay, toScreenX, toScreenY, width, height)));
+        }
+        if (showColorbar && !isGallery) {
+          const lut = COLORMAPS[cmap] || COLORMAPS.inferno;
+          const colorbarId = `show2d-svg-colorbar-${slot}`;
+          const colorbar = svgColorbarElements(lut, x, y, canvasW, canvasH, colorbarVminRef.current, colorbarVmaxRef.current, colorbarId);
+          defs.push(colorbar.def);
+          vectorLayer.push(colorbar.body);
+        }
+        (panelAnnotations?.[panel] || []).forEach((annotation) => {
+          vectorLayer.push(svgPanelAnnotationElement(annotation, x, y, canvasW, canvasH));
+        });
+        if (vectorLayer.some(Boolean)) {
+          body.push(`<g clip-path="url(#${clipId})" data-show2d-vector-layer="true">${vectorLayer.join("")}</g>`);
+        }
+
+        if (panelHasScaleBar(panel)) {
+          const zs = getZoomState(panel);
+          const panelPixelSize = pixelSizeForPanel(panel);
+          const pxSize = panelPixelSize > 0 ? panelPixelSize : 1;
+          const unit = panelPixelSize > 0 ? pixelUnit : "px";
+          const geom = show2dScaleBarGeometry(canvasW, canvasH, width, zs.zoom, pxSize, unit, scaleBarPosition, scaleBarLength, scaleBarLabel, scaleBarStyle);
+          if (geom) {
+            const barY = y + geom.barY;
+            const barX = x + geom.barX;
+            const barColor = styleString(scaleBarStyle?.color, "#fff");
+            const shadowColor = styleString(scaleBarStyle?.shadow_color, "#000");
+            const outlineColor = styleString(scaleBarStyle?.outline_color, "#000");
+            const outlineWidth = Math.max(0, styleNumber(scaleBarStyle?.outline_width, 0));
+            const labelGap = styleNumber(scaleBarStyle?.label_gap, 4);
+            const fontAttrs = scaleBarSvgFontAttrs(scaleBarStyle);
+            const labelX = barX + geom.barPx / 2;
+            const labelY = barY - labelGap;
+            body.push(
+              `<rect x="${barX + 1}" y="${barY + 1}" width="${geom.barPx}" height="${geom.barHeight}" fill="${escapeXmlAttr(shadowColor)}" fill-opacity="0.5"/>`,
+              `<rect x="${barX}" y="${barY}" width="${geom.barPx}" height="${geom.barHeight}" fill="${escapeXmlAttr(barColor)}"/>`
+            );
+            if (outlineWidth > 0) {
+              body.push(
+                `<text x="${labelX}" y="${labelY}" text-anchor="middle" ${fontAttrs} fill="${escapeXmlAttr(barColor)}" stroke="${escapeXmlAttr(outlineColor)}" stroke-width="${outlineWidth}" stroke-linejoin="round" paint-order="stroke fill">${escapeXmlText(geom.label)}</text>`
+              );
+            } else {
+              body.push(
+                `<text x="${labelX + 1}" y="${labelY + 1}" text-anchor="middle" ${fontAttrs} fill="${escapeXmlAttr(shadowColor)}" fill-opacity="0.85">${escapeXmlText(geom.label)}</text>`,
+                `<text x="${labelX}" y="${labelY}" text-anchor="middle" ${fontAttrs} fill="${escapeXmlAttr(barColor)}">${escapeXmlText(geom.label)}</text>`
+              );
+            }
+            if (showZoomIndicator) {
+              const zoomX = geom.scaleLeft ? x + canvasW - 12 : x + 12;
+              const anchor = geom.scaleLeft ? "end" : "start";
+              const zoomText = formatZoomLabel(zs.zoom);
+              body.push(
+                `<text x="${zoomX + 1}" y="${y + canvasH - 12 + 5 + 1}" text-anchor="${anchor}" ${fontAttrs} fill="${escapeXmlAttr(shadowColor)}" fill-opacity="0.85">${escapeXmlText(zoomText)}</text>`,
+                `<text x="${zoomX}" y="${y + canvasH - 12 + 5}" text-anchor="${anchor}" ${fontAttrs} fill="${escapeXmlAttr(barColor)}">${escapeXmlText(zoomText)}</text>`
+              );
+            }
+          }
+        }
+        body.push("</g>");
+      }
+
+      const svg = [
+        `<?xml version="1.0" encoding="UTF-8"?>`,
+        `<svg xmlns="http://www.w3.org/2000/svg" width="${svgWidth}" height="${svgHeight}" viewBox="0 0 ${svgWidth} ${svgHeight}" role="img" aria-label="${escapeXmlAttr(title || "Show2D SVG export")}" data-show2d-svg-export="true" data-raster-scale="${exportScale}">`,
+        `<defs>${defs.join("")}</defs>`,
+        body.join(""),
+        `</svg>`,
+      ].join("\n");
+      const blob = new Blob([svg], { type: "image/svg+xml;charset=utf-8" });
+      const picker = (window as Show2DWindow).showSaveFilePicker;
+      let handle: Show2DFileHandle | null = null;
+      if (picker) {
+        try {
+          handle = await picker({
+            suggestedName: filename,
+            types: [{ description: "SVG image", accept: { "image/svg+xml": [".svg"] } }],
+          });
+        } catch (err) {
+          if (isAbortLikeError(err)) {
+            setLocalExportStatus("Export canceled");
+            return;
+          }
+          throw err;
+        }
+      }
+      if (handle) {
+        const writable = await handle.createWritable();
+        await writable.write(blob);
+        await writable.close();
+      } else {
+        downloadBlob(blob, filename);
+      }
+      setLocalExportStatus(`Saved ${filename} (${formatSavedBytes(blob.size)})`);
+    } catch (err) {
+      setLocalExportStatus(`Export failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }, [
+    canvasH,
+    canvasW,
+    clampedNcols,
+    cmap,
+    galleryGapColor,
+    galleryGapPx,
+    getZoomState,
+    groupMarkerOverlays,
+    height,
+    displayScale,
+    insetPlotSpecFor,
+    isGallery,
+    markerAround,
+    panelMarkerColor,
+    panelHasScaleBar,
+    panelAnnotations,
+    panelOverlays,
+    panelTitleFontSize,
+    panelTitleStyle,
+    panelTitleSpans,
+    panelTitleText,
+    pixelSizeForPanel,
+    pixelUnit,
+    scaleBarPosition,
+    scaleBarLength,
+    scaleBarLabel,
+    scaleBarStyle,
+    showColorbar,
+    showInsetPlots,
+    showPanelTitles,
+    showTitle,
+    showZoomIndicator,
+    smooth,
+    themeColors.border,
+    themeColors.text,
+    title,
+    visibleImageIndices,
+    width,
+  ]);
 
   const handleHandoffToShow3D = React.useCallback(() => {
     const panels = visibleImageIndices;
@@ -6508,7 +8732,10 @@ function Show2D() {
         break;
       case "Delete":
       case "Backspace":
-        if (roiActive && roiSelectedIdx >= 0 && roiList && roiSelectedIdx < roiList.length) {
+        if (overlayEditMode && overlaySelection) {
+          e.preventDefault();
+          deleteSelectedOverlay();
+        } else if (roiActive && roiSelectedIdx >= 0 && roiList && roiSelectedIdx < roiList.length) {
           e.preventDefault();
           const newList = roiList.filter((_, i) => i !== roiSelectedIdx);
           setRoiList(newList);
@@ -6524,6 +8751,7 @@ function Show2D() {
   const needsReset = getZoomState(isGallery ? selectedIdx : 0).zoom !== 1 || getZoomState(isGallery ? selectedIdx : 0).panX !== 0 || getZoomState(isGallery ? selectedIdx : 0).panY !== 0;
   const statsIdx = isGallery ? selectedIdx : 0;
   const currentFrameStats = localPanelFrameStats.get(statsIdx);
+  const svgExportAvailable = canvasW > 0 && canvasH > 0 && visibleImageIndices.length > 0;
 
   // Calibrated cursor position - unit is whatever the user passed via sampling/units.
   const calibratedUnit = pixelSize > 0 ? pixelUnit : "";
@@ -6550,7 +8778,16 @@ function Show2D() {
   const diffControlAvailable = !isPaged && nImages >= 2 && (visibleGrayscaleIndices.length === 2 || diffMode);
   const moreActiveCount =
     (roiControlAvailable && roiActive ? 1 : 0) + (diffMode ? 1 : 0) + (denoiseEnabled ? 1 : 0)
-    + (frequencyFilterEnabled && Array.from({ length: nImages }, (_, panel) => panelFrequencyKnobs(panel)).some(knobs => frequencyFilterActive(knobs.mode)) ? 1 : 0);
+    + (hasInsetPlots && showInsetPlots !== false ? 1 : 0)
+    + (overlayEditMode ? 1 : 0)
+    + (frequencyFilterEnabled && Array.from({ length: nImages }, (_, panel) => panelFrequencyKnobs(panel)).some(knobs => frequencyFilterActive(knobs.mode)) ? 1 : 0)
+    + (isGallery && !colorShared ? 1 : 0)
+    + (Array.from({ length: nImages }, (_, panel) => rotationForPanel(panel)).some(k => k !== 0) ? 1 : 0);
+  const rotationActive = Array.from({ length: nImages }, (_, panel) => rotationForPanel(panel)).some(k => k !== 0);
+  const clearRotations = React.useCallback(() => {
+    setImageRotations(Array.from({ length: Math.max(1, nImages || 1) }, () => 0));
+    setShowRotationSettings(false);
+  }, [nImages, setImageRotations]);
   const frequencyUiKnobs = panelFrequencyKnobs(Math.min(Math.max(0, selectedIdx || 0), Math.max(0, nImages - 1)));
   const frequencyValueLabel = (value: number, panel = selectedIdx) => {
     const sampling = pixelSizeForPanel(Math.min(Math.max(0, panel || 0), Math.max(0, nImages - 1)));
@@ -6768,9 +9005,9 @@ function Show2D() {
         {/* Main panel */}
         <Box sx={{ width: "100%", maxWidth: galleryGridWidth, boxSizing: "border-box" }}>
           {/* Title row */}
-          {showTitle && <Typography variant="caption" sx={{ ...typography.label, color: themeColors.accent, mb: `${SPACING.XS}px`, display: "block", minHeight: 16, lineHeight: "16px", overflow: "visible" }}>
-            {title || (isGallery ? "Gallery" : "Image")}
-            {displayBinFactor > 1 && (
+          {(showTitle || showControls) && <Typography variant="caption" sx={{ ...typography.label, color: themeColors.accent, mb: `${SPACING.XS}px`, display: "block", minHeight: 16, lineHeight: "16px", overflow: "visible" }}>
+            {showTitle && <>{title || (isGallery ? "Gallery" : "Image")}</>}
+            {showTitle && displayBinFactor > 1 && (
               <Box component="span" sx={{ ml: 0.5, px: 0.5, py: 0, fontSize: 9, fontWeight: 600, borderRadius: "3px", backgroundColor: themeColors.accent + "22", color: themeColors.accent, border: `1px solid ${themeColors.accent}44` }}>
                 {displayBinFactor}× binned
               </Box>
@@ -6783,27 +9020,12 @@ function Show2D() {
                 {collapsedBannerLabel}
               </Box>
             )}
-            {displayBinFactor > 1 && (
+            {showTitle && displayBinFactor > 1 && (
               <Box component="span" sx={{ ml: 0.4, px: 0.5, py: 0, fontSize: 9, fontWeight: 500, borderRadius: "3px", backgroundColor: detailStreamStatus === "streaming" ? "rgba(255,193,7,0.18)" : themeColors.controlBg, color: detailStreamStatus === "streaming" ? "#b26a00" : themeColors.textMuted, border: `1px solid ${detailStreamStatus === "streaming" ? "rgba(255,193,7,0.45)" : themeColors.border}` }}>
                 {detailStreamStatus === "streaming" ? "streaming detail..." : detailStreamStatus === "ready" ? "detail ready" : "preview; streams on zoom"}
               </Box>
             )}
-            {(() => { const rk = (imageRotations?.[isGallery ? selectedIdx : 0] ?? 0) % 4; return rk !== 0 ? (
-              <Box
-                component="span"
-                onClick={() => {
-                  const ri = isGallery ? selectedIdx : 0;
-                  const rots = [...(imageRotations || [])];
-                  while (rots.length <= ri) rots.push(0);
-                  rots[ri] = (rots[ri] + 3) % 4;
-                  setImageRotations(rots);
-                }}
-                sx={{ ml: 0.5, color: themeColors.accent, cursor: "pointer", fontSize: "inherit", "&:hover": { opacity: 0.7 } }}
-              >
-                ({rk * 90}°)
-              </Box>
-            ) : null; })()}
-            {debug && <DebugPerfBadge widget="Show2D" fps={debugFps} themeColors={themeColors} />}
+            {showTitle && debug && <DebugPerfBadge widget="Show2D" fps={debugFps} themeColors={themeColors} />}
 	            {showControls && <InfoTooltip text={<Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
               <MetadataSection rows={[
                 ["Shape", isGallery ? `${nImages} x ${height} x ${width}` : `${height} x ${width}`],
@@ -6837,7 +9059,7 @@ function Show2D() {
 	                size="small"
 	                sx={{
 	                  ...compactButton,
-	                  ml: 0.75,
+	                  ml: showTitle ? 0.75 : 0,
 	                  py: 0,
 	                  px: 0.5,
 	                  minHeight: 16,
@@ -6855,112 +9077,149 @@ function Show2D() {
 	                Controls
 	              </Button>
 	            )}
+	            {showControls && controlsCollapsed && (exportEnabled || canDownloadCurrentHtml) && (
+	              <>
+	                <Button
+	                  size="small"
+	                  sx={{
+	                    ...compactButton,
+	                    ml: 0.5,
+	                    py: 0,
+	                    px: 0.5,
+	                    minHeight: 16,
+	                    lineHeight: "16px",
+	                    verticalAlign: "baseline",
+	                    color: themeColors.accent,
+	                  }}
+	                  disabled={exportBusy || (!exportEnabled && !canDownloadCurrentHtml)}
+	                  onClick={(e) => { setExportAnchor(e.currentTarget); }}
+	                  title={localExportStatus || exportStatus || (exportEnabled ? "Export standalone HTML" : canDownloadCurrentHtml ? "Export this standalone HTML" : "Export unavailable for this data")}
+	                >
+	                  {exportBusy ? "Exporting" : "Export"}
+	                </Button>
+	                <Menu anchorEl={exportAnchor} open={Boolean(exportAnchor)} onClose={() => setExportAnchor(null)} anchorOrigin={{ vertical: "bottom", horizontal: "right" }} transformOrigin={{ vertical: "top", horizontal: "right" }} {...themedTopMenuProps}>
+	                  {exportEnabled && <MenuItem onClick={() => handleHtmlExportSelect("exact")} sx={{ fontSize: 12 }}>HTML exact float32 ({exactHtmlSize})</MenuItem>}
+	                  {exportEnabled && <MenuItem onClick={() => handleHtmlExportSelect("quantized")} sx={{ fontSize: 12 }}>HTML quantized uint8 ({quantizedHtmlSize})</MenuItem>}
+	                  {canDownloadCurrentHtml && offline && <MenuItem disabled sx={{ fontSize: 12 }} title="This standalone export contains quantized uint8 data, not the original float32 array. Open the live widget to export exact float32.">{unavailableStandaloneHtmlLabel}</MenuItem>}
+	                  {canDownloadCurrentHtml && <MenuItem onClick={handleStandaloneHtmlDownload} sx={{ fontSize: 12 }}>{standaloneHtmlLabel}</MenuItem>}
+	                  {canDownloadCurrentHtml && !offline && <MenuItem disabled sx={{ fontSize: 12 }} title="Quantized export requires the Python backend to repack the current float32 data.">{unavailableStandaloneHtmlLabel}</MenuItem>}
+	                </Menu>
+	              </>
+	            )}
 	          </Typography>}
-	          {/* Controls row: viewer toggles on the left, actions on the right */}
+	          {/* Page navigation sits above the analysis toolbar, matching Show3D. */}
+	          {controlsVisible && isPaged && (
+	            <Box
+	              data-show2d-page-controls={pageKind || "comparison"}
+	              aria-label="Page navigation"
+	              sx={{
+	                display: "flex",
+	                alignItems: "center",
+	                flexWrap: "wrap",
+	                columnGap: "8px",
+	                rowGap: "3px",
+	                mb: "3px",
+	                minHeight: 26,
+	                pb: "3px",
+	                borderBottom: `1px solid ${themeColors.border}`,
+	              }}
+	            >
+	              <Box sx={{ display: "flex", alignItems: "baseline", gap: "5px", flex: "1 1 240px", minWidth: 0 }}>
+	                <Typography sx={{ ...typography.label, fontSize: 10, flexShrink: 0 }}>Page</Typography>
+	                <Typography
+	                  data-show2d-page-status="true"
+	                  title={pageControlStatus}
+	                  sx={{
+	                    ...typography.label,
+	                    fontSize: 10,
+	                    lineHeight: 1.25,
+	                    color: themeColors.accent,
+	                    minWidth: 0,
+	                    whiteSpace: "normal",
+	                    overflowWrap: "anywhere",
+	                    fontVariantNumeric: "tabular-nums",
+	                  }}
+	                >
+	                  {pageControlStatus}
+	                </Typography>
+	              </Box>
+	              <Box sx={{ display: "flex", alignItems: "center", gap: "4px", flex: "0 1 auto", minWidth: 0 }}>
+	                <Slider
+	                  value={pageControlIdx}
+	                  min={0}
+	                  max={Math.max(0, (nPages || 1) - 1)}
+	                  step={1}
+	                  onPointerDownCapture={() => {
+	                    stopPagePlayback();
+	                    setPageSliderPreviewIdx(currentPageIdx);
+	                  }}
+	                  onKeyDown={() => stopPagePlayback()}
+	                  onChange={(_, value) => {
+	                    const raw = Array.isArray(value) ? value[0] : value;
+	                    const next = clampPageIdx(Number(raw));
+	                    setPageSliderPreviewIdx(next);
+	                    commitPageIdx(next);
+	                  }}
+	                  onChangeCommitted={(_, value) => {
+	                    const raw = Array.isArray(value) ? value[0] : value;
+	                    const next = clampPageIdx(Number(raw));
+	                    stopPagePlayback();
+	                    setPageSliderPreviewIdx(next);
+	                    commitPageIdx(next, true);
+	                  }}
+	                  size="small"
+	                  sx={{ ...sliderStyles.small, width: 150, flex: "0 1 150px", minWidth: 92, color: themeColors.accent }}
+	                  aria-label="Page"
+	                />
+	                <IconButton
+	                  size="small"
+	                  onClick={() => setPagePlaying((value) => !value)}
+	                  title={pagePlaying ? "Pause page playback" : "Play pages"}
+	                  aria-label={pagePlaying ? "Pause page playback" : "Play pages"}
+	                  sx={{ width: 24, height: 24, p: 0, color: themeColors.accent }}
+	                >
+	                  {pagePlaying ? <PauseIcon sx={{ fontSize: 16 }} /> : <PlayArrowIcon sx={{ fontSize: 16 }} />}
+	                </IconButton>
+	                <Select
+	                  value={String(pagePlayFps)}
+	                  onChange={(e) => setPagePlayFps(Number(e.target.value) || 2)}
+	                  size="small"
+	                  sx={{ ...themedSelect, minWidth: 48, fontSize: 10 }}
+	                  MenuProps={themedTopMenuProps}
+	                  inputProps={{ "aria-label": "Page playback frames per second" }}
+	                  title="Page playback speed"
+	                >
+	                  {PAGE_PLAY_FPS_OPTIONS.map((fps) => (
+	                    <MenuItem key={fps} value={String(fps)}>{fps} fps</MenuItem>
+	                  ))}
+	                </Select>
+	                {pageKind !== "items" && (
+	                  <IconButton
+	                    size="small"
+	                    onClick={() => {
+	                      const next = Array.from({ length: Math.max(1, nPages || 1) }, (_, idx) => pageStarred?.[idx] ? 1 : 0);
+	                      next[pageControlIdx] = next[pageControlIdx] ? 0 : 1;
+	                      setPageStarred(next);
+	                    }}
+	                    title={(pageStarred?.[pageControlIdx] ? "Unstar " : "Star ") + pageControlLabel}
+	                    aria-label={(pageStarred?.[pageControlIdx] ? "Unstar " : "Star ") + pageControlLabel}
+	                    sx={{
+	                      width: 24,
+	                      height: 24,
+	                      p: 0,
+	                      color: pageStarred?.[pageControlIdx] ? "#ffc107" : themeColors.textMuted,
+	                      "&:hover": { color: pageStarred?.[pageControlIdx] ? "#ffc107" : themeColors.text },
+	                    }}
+	                  >
+	                    {pageStarred?.[pageControlIdx] ? "★" : "☆"}
+	                  </IconButton>
+	                )}
+	              </Box>
+	            </Box>
+	          )}
+	          {/* Analysis and display controls row. */}
 	          {controlsVisible && (
 	          <Stack direction="row" alignItems="center" spacing={`${SPACING.SM}px`} useFlexGap sx={{ mb: `${SPACING.XS}px`, minHeight: 28, flexWrap: "wrap", rowGap: `${SPACING.XS}px`, width: "100%", maxWidth: "100%", boxSizing: "border-box" }}>
-            {isPaged && (
-              <Box
-                data-show2d-page-controls={pageKind || "comparison"}
-                sx={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: `${SPACING.SM}px`,
-                  flex: "0 1 auto",
-                  minWidth: 0,
-                  maxWidth: "100%",
-                }}
-              >
-                <Typography sx={{ ...typography.label, fontSize: 10, flexShrink: 0 }}>Page</Typography>
-                <Typography
-                  title={pageControlStatus}
-                  sx={{
-                    ...typography.label,
-                    fontSize: 10,
-                    color: themeColors.accent,
-                    flex: "0 1 14ch",
-                    minWidth: "8ch",
-                    maxWidth: { xs: "11ch", sm: "16ch", md: "20ch" },
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                    whiteSpace: "nowrap",
-                    fontVariantNumeric: "tabular-nums",
-                  }}
-                >
-                  {pageControlStatus}
-                </Typography>
-                <Slider
-                  value={pageControlIdx}
-                  min={0}
-                  max={Math.max(0, (nPages || 1) - 1)}
-                  step={1}
-                  onPointerDownCapture={() => {
-                    stopPagePlayback();
-                    setPageSliderPreviewIdx(currentPageIdx);
-                  }}
-                  onKeyDown={() => stopPagePlayback()}
-                  onChange={(_, value) => {
-                    const raw = Array.isArray(value) ? value[0] : value;
-                    const next = clampPageIdx(Number(raw));
-                    setPageSliderPreviewIdx(next);
-                    commitPageIdx(next);
-                  }}
-                  onChangeCommitted={(_, value) => {
-                    const raw = Array.isArray(value) ? value[0] : value;
-                    const next = clampPageIdx(Number(raw));
-                    stopPagePlayback();
-                    setPageSliderPreviewIdx(next);
-                    commitPageIdx(next, true);
-                  }}
-                  size="small"
-                  sx={{ ...sliderStyles.small, width: 120, flex: "0 0 120px", color: themeColors.accent }}
-                  aria-label="Page"
-                />
-                <IconButton
-                  size="small"
-                  onClick={() => setPagePlaying((value) => !value)}
-                  title={pagePlaying ? "Pause page playback" : "Play pages"}
-                  aria-label={pagePlaying ? "Pause page playback" : "Play pages"}
-                  sx={{ width: 24, height: 24, p: 0, color: themeColors.accent }}
-                >
-                  {pagePlaying ? <PauseIcon sx={{ fontSize: 16 }} /> : <PlayArrowIcon sx={{ fontSize: 16 }} />}
-                </IconButton>
-                <Select
-                  value={String(pagePlayFps)}
-                  onChange={(e) => setPagePlayFps(Number(e.target.value) || 2)}
-                  size="small"
-                  sx={{ ...themedSelect, minWidth: 48, fontSize: 10 }}
-                  MenuProps={themedTopMenuProps}
-                  inputProps={{ "aria-label": "Page playback frames per second" }}
-                  title="Page playback speed"
-                >
-                  {PAGE_PLAY_FPS_OPTIONS.map((fps) => (
-                    <MenuItem key={fps} value={String(fps)}>{fps} fps</MenuItem>
-                  ))}
-                </Select>
-                {pageKind !== "items" && (
-                  <IconButton
-                    size="small"
-                    onClick={() => {
-                      const next = Array.from({ length: Math.max(1, nPages || 1) }, (_, idx) => pageStarred?.[idx] ? 1 : 0);
-                      next[pageControlIdx] = next[pageControlIdx] ? 0 : 1;
-                      setPageStarred(next);
-                    }}
-                    title={(pageStarred?.[pageControlIdx] ? "Unstar " : "Star ") + pageControlLabel}
-                    aria-label={(pageStarred?.[pageControlIdx] ? "Unstar " : "Star ") + pageControlLabel}
-                    sx={{
-                      width: 24,
-                      height: 24,
-                      p: 0,
-                      color: pageStarred?.[pageControlIdx] ? "#ffc107" : themeColors.textMuted,
-                      "&:hover": { color: pageStarred?.[pageControlIdx] ? "#ffc107" : themeColors.text },
-                    }}
-                  >
-                    {pageStarred?.[pageControlIdx] ? "★" : "☆"}
-                  </IconButton>
-                )}
-              </Box>
-            )}
             {isGallery && (
               <Box sx={controlPairSx}>
                 <Typography sx={compactLabelSx}>Cols</Typography>
@@ -7064,6 +9323,17 @@ function Show2D() {
                   >
                     {allCurrentPanelsVisible ? "Panels" : `Panels ${visibleImageCount}/${panelMenuTotal}`}
                   </Button>
+                  {selectedVisibleCount > 1 && selectedVisibleCount < visibleImageCount && (
+                    <Button
+                      size="small"
+                      sx={compactButton}
+                      onClick={() => setPanelsHidden(selectedVisiblePanels, true)}
+                      aria-label={`Hide ${selectedVisibleCount} selected panels`}
+                      title={`Hide ${selectedVisibleCount} selected panels`}
+                    >
+                      Hide {selectedVisibleCount}
+                    </Button>
+                  )}
                   <Menu
                     id="show2d-panels-menu"
                     anchorEl={panelMenuAnchor}
@@ -7087,7 +9357,7 @@ function Show2D() {
                             ? <VisibilityOffIcon sx={{ fontSize: 16, mr: 1, color: themeColors.textMuted }} />
                             : <VisibilityIcon sx={{ fontSize: 16, mr: 1, color: themeColors.accent }} />}
                           <Typography sx={{ fontSize: 11, color: disabled ? themeColors.textMuted : themeColors.text }}>
-                            {panelLabel(panel)}
+                            {panelTitleContent(panel)}
                           </Typography>
                         </MenuItem>
                       );
@@ -7105,6 +9375,23 @@ function Show2D() {
                     >
                       <VisibilityIcon sx={{ fontSize: 16, mr: 1, color: themeColors.accent }} />
                       <Typography sx={{ fontSize: 11 }}>Show all panels</Typography>
+                    </MenuItem>
+                    <MenuItem
+                      dense
+                      disabled={selectedVisibleCount <= 1 || selectedVisibleCount >= visibleImageCount}
+                      onClick={() => setPanelsHidden(selectedVisiblePanels, true)}
+                      title={selectedVisibleCount >= visibleImageCount ? "At least one panel must remain visible" : undefined}
+                    >
+                      <VisibilityOffIcon sx={{ fontSize: 16, mr: 1, color: themeColors.accent }} />
+                      <Typography sx={{ fontSize: 11 }}>Hide selected ({selectedVisibleCount})</Typography>
+                    </MenuItem>
+                    <MenuItem
+                      dense
+                      disabled={selectedVisibleCount <= 1}
+                      onClick={() => setSelectedPanels([selectedIdx])}
+                    >
+                      <VisibilityIcon sx={{ fontSize: 16, mr: 1, color: themeColors.textMuted }} />
+                      <Typography sx={{ fontSize: 11 }}>Clear selection</Typography>
                     </MenuItem>
                     <MenuItem
                       dense
@@ -7133,7 +9420,7 @@ function Show2D() {
                   aria-controls={moreMenuAnchor ? "show2d-more-menu" : undefined}
                   aria-expanded={moreMenuAnchor ? "true" : undefined}
                   aria-haspopup="menu"
-                  title="More tools: ROI, Denoise, Filter, Diff"
+                  title="More tools: ROI, Inset Chart, Denoise, Filter, Diff, Color"
                 >
                   More
                 </Button>
@@ -7201,6 +9488,55 @@ function Show2D() {
                     </Typography>
                   </Box>
                 )}
+                {hasPanelOverlays && (
+                  <MenuItem dense onClick={() => setOverlayEditMode(!overlayEditMode)} sx={{ fontSize: 12, gap: 1, color: overlayEditMode ? themeColors.accent : themeColors.text }}>
+                    <Typography sx={{ flex: 1, fontSize: 12, color: "inherit" }} title="Edit API-defined circles and rectangles: click to select, drag to move, drag an edge to resize.">
+                      Overlay Edit
+                    </Typography>
+                    <Switch
+                      checked={overlayEditMode}
+                      onClick={(event) => event.stopPropagation()}
+                      onChange={(event) => setOverlayEditMode(event.target.checked)}
+                      size="small"
+                      sx={switchStyles.small}
+                      slotProps={{ input: { "aria-label": "Toggle overlay editing" } }}
+                    />
+                  </MenuItem>
+                )}
+                {hasPanelOverlays && overlayBaselineRef.current && (
+                  <MenuItem dense onClick={resetPanelOverlays} sx={{ fontSize: 12, color: overlaySelection ? themeColors.accent : themeColors.text }}>
+                    Reset Overlays
+                  </MenuItem>
+                )}
+                <Box
+                  onClick={(event) => event.stopPropagation()}
+                  sx={{
+                    px: 1.5,
+                    py: 0.75,
+                    minWidth: 220,
+                    display: "grid",
+                    gridTemplateColumns: "1fr auto",
+                    gap: 1,
+                    alignItems: "center",
+                  }}
+                >
+                  <Typography sx={{ fontSize: 12, color: themeColors.text }} title="Apply a percentile contrast window. The histogram stays visible below the image.">
+                    Contrast
+                  </Typography>
+                  <Select
+                    size="small"
+                    value={contrastPreset || "manual"}
+                    onChange={(event) => applyContrastPreset(String(event.target.value))}
+                    renderValue={(value) => CONTRAST_PRESETS.find((preset) => preset.value === value)?.label || "Manual"}
+                    MenuProps={themedMenuProps}
+                    sx={{ ...themedSelect, minWidth: 76 }}
+                    inputProps={{ "aria-label": "Contrast percentile preset" }}
+                  >
+                    {CONTRAST_PRESETS.map((preset) => (
+                      <MenuItem key={preset.value} value={preset.value}>{preset.label}</MenuItem>
+                    ))}
+                  </Select>
+                </Box>
                 {roiControlAvailable && (
                   <MenuItem
                     dense
@@ -7215,6 +9551,23 @@ function Show2D() {
                       size="small"
                       sx={switchStyles.small}
                       slotProps={{ input: { "aria-label": "Toggle region of interest" } }}
+                    />
+                  </MenuItem>
+                )}
+                {hasInsetPlots && (
+                  <MenuItem
+                    dense
+                    onClick={() => setShowInsetPlots(!(showInsetPlots !== false))}
+                    sx={{ fontSize: 12, gap: 1, color: showInsetPlots !== false ? themeColors.accent : themeColors.text }}
+                  >
+                    <Typography sx={{ flex: 1, fontSize: 12, color: "inherit" }} title="Show/hide initialized inset charts. Drag a chart inside the image to move it; release snaps to the nearest corner.">Inset Chart</Typography>
+                    <Switch
+                      checked={showInsetPlots !== false}
+                      onClick={(e) => e.stopPropagation()}
+                      onChange={(e) => setShowInsetPlots(e.target.checked)}
+                      size="small"
+                      sx={switchStyles.small}
+                      slotProps={{ input: { "aria-label": "Toggle inset chart" } }}
                     />
                   </MenuItem>
                 )}
@@ -7264,6 +9617,125 @@ function Show2D() {
                       size="small"
                       sx={switchStyles.small}
                       slotProps={{ input: { "aria-label": "Toggle difference of visible panels" } }}
+                    />
+                  </MenuItem>
+                )}
+                <MenuItem
+                  dense
+                  onClick={() => togglePanelFlip(selectedIdx, "h")}
+                  sx={{ fontSize: 12, gap: 1, color: imageFlipsHorizontal?.[selectedIdx] ? themeColors.accent : themeColors.text }}
+                >
+                  <Typography sx={{ flex: 1, fontSize: 12, color: "inherit" }} title="Display-only horizontal flip for the selected panel. Raw data and coordinates stay unchanged.">Flip H</Typography>
+                  <Switch
+                    checked={Boolean(imageFlipsHorizontal?.[selectedIdx])}
+                    onClick={(e) => e.stopPropagation()}
+                    onChange={() => togglePanelFlip(selectedIdx, "h")}
+                    size="small"
+                    sx={switchStyles.small}
+                    slotProps={{ input: { "aria-label": "Toggle horizontal flip for selected panel" } }}
+                  />
+                </MenuItem>
+                <MenuItem
+                  dense
+                  onClick={() => togglePanelFlip(selectedIdx, "v")}
+                  sx={{ fontSize: 12, gap: 1, color: imageFlipsVertical?.[selectedIdx] ? themeColors.accent : themeColors.text }}
+                >
+                  <Typography sx={{ flex: 1, fontSize: 12, color: "inherit" }} title="Display-only vertical flip for the selected panel. Raw data and coordinates stay unchanged.">Flip V</Typography>
+                  <Switch
+                    checked={Boolean(imageFlipsVertical?.[selectedIdx])}
+                    onClick={(e) => e.stopPropagation()}
+                    onChange={() => togglePanelFlip(selectedIdx, "v")}
+                    size="small"
+                    sx={switchStyles.small}
+                    slotProps={{ input: { "aria-label": "Toggle vertical flip for selected panel" } }}
+                  />
+                </MenuItem>
+                <MenuItem
+                  dense
+                  onClick={() => {
+                    if (rotationActive) clearRotations();
+                    else setShowRotationSettings(!showRotationSettings);
+                  }}
+                  sx={{ fontSize: 12, gap: 1, color: (rotationActive || showRotationSettings) ? themeColors.accent : themeColors.text }}
+                >
+                  <Typography sx={{ flex: 1, fontSize: 12, color: "inherit" }} title="Display-only orientation review. Turn on to choose angle and scope.">Rotate</Typography>
+                  <Switch
+                    checked={rotationActive || showRotationSettings}
+                    onClick={(event) => event.stopPropagation()}
+                    onChange={(event) => {
+                      if (event.target.checked) setShowRotationSettings(true);
+                      else clearRotations();
+                    }}
+                    size="small"
+                    sx={switchStyles.small}
+                    slotProps={{ input: { "aria-label": "Toggle rotation settings" } }}
+                  />
+                </MenuItem>
+                {(rotationActive || showRotationSettings) && (
+                  <Box
+                    onClick={(event) => event.stopPropagation()}
+                    sx={{
+                      px: 1.5,
+                      pb: 1,
+                      minWidth: 250,
+                      display: "grid",
+                      gridTemplateColumns: "auto 1fr",
+                      gap: 0.75,
+                      alignItems: "center",
+                    }}
+                  >
+                    <Typography sx={{ fontSize: 12, color: themeColors.textMuted }}>Angle</Typography>
+                    <Select
+                      value={String(((rotationScope || "all") === "panel" ? rotationForPanel(selectedIdx) : rotationForPanel(0)) * 90)}
+                      onChange={(event) => setRotationForScope(Number(event.target.value) / 90)}
+                      size="small"
+                      sx={{ ...themedSelect, minWidth: 92 }}
+                      MenuProps={themedMenuProps}
+                      inputProps={{ "aria-label": "Display rotation" }}
+                      title="Display-only rotation; raw data coordinates stay unchanged"
+                    >
+                      <MenuItem value="0">0°</MenuItem>
+                      <MenuItem value="90">90°</MenuItem>
+                      <MenuItem value="180">180°</MenuItem>
+                      <MenuItem value="270">270°</MenuItem>
+                    </Select>
+                    {isGallery && (
+                      <>
+                        <Typography sx={{ fontSize: 12, color: themeColors.textMuted }}>Scope</Typography>
+                        <Select
+                          value={rotationScope || "all"}
+                          onChange={(event) => setRotationScope(String(event.target.value))}
+                          size="small"
+                          sx={{ ...themedSelect, minWidth: 92 }}
+                          MenuProps={themedMenuProps}
+                          inputProps={{ "aria-label": "Rotation scope" }}
+                        >
+                          <MenuItem value="all">All</MenuItem>
+                          <MenuItem value="panel">Panel</MenuItem>
+                        </Select>
+                      </>
+                    )}
+                    <Typography sx={{ gridColumn: "1 / -1", fontSize: 10, color: themeColors.textMuted }}>
+                      {isGallery && (rotationScope || "all") === "panel"
+                        ? `Selected panel: ${panelLabel(selectedIdx)}`
+                        : "Applies to every visible panel"}
+                    </Typography>
+                  </Box>
+                )}
+                {isGallery && (
+                  <MenuItem
+                    dense
+                    onClick={() => setColorShared(!colorShared)}
+                    sx={{ fontSize: 12, gap: 1, color: !colorShared ? themeColors.accent : themeColors.text }}
+                  >
+                    <Typography sx={{ flex: 1, fontSize: 12, color: "inherit" }} title="Shared keeps one colormap for every panel. Turn off to let the Color dropdown edit only the selected panel.">Color shared</Typography>
+                    <Switch
+                      checked={colorShared}
+                      onClick={(e) => e.stopPropagation()}
+                      onChange={(e) => setColorShared(e.target.checked)}
+                      size="small"
+                      sx={switchStyles.small}
+                      slotProps={{ input: { "aria-label": "Toggle shared panel colormap" } }}
                     />
                   </MenuItem>
                 )}
@@ -7352,13 +9824,14 @@ function Show2D() {
               <Button
                 size="small"
                 sx={{ ...compactButton, color: themeColors.accent }}
-                disabled={exportBusy || (!exportEnabled && !canDownloadCurrentHtml)}
+                disabled={exportBusy || (!exportEnabled && !canDownloadCurrentHtml && !svgExportAvailable)}
                 onClick={(e) => { setExportAnchor(e.currentTarget); }}
-                title={localExportStatus || exportStatus || (exportEnabled ? "Export standalone HTML" : canDownloadCurrentHtml ? "Export this standalone HTML" : "Export unavailable for this data")}
+                title={localExportStatus || exportStatus || (svgExportAvailable ? "Export SVG or standalone HTML" : exportEnabled ? "Export standalone HTML" : canDownloadCurrentHtml ? "Export this standalone HTML" : "Export unavailable for this data")}
               >
                 {exportBusy ? "Exporting" : "Export"}
               </Button>
               <Menu anchorEl={exportAnchor} open={Boolean(exportAnchor)} onClose={() => setExportAnchor(null)} anchorOrigin={{ vertical: "bottom", horizontal: "right" }} transformOrigin={{ vertical: "top", horizontal: "right" }} {...themedTopMenuProps}>
+                {svgExportAvailable && <MenuItem onClick={() => handleSvgExport(3)} sx={{ fontSize: 12 }}>SVG</MenuItem>}
                 {exportEnabled && <MenuItem onClick={() => handleHtmlExportSelect("exact")} sx={{ fontSize: 12 }}>HTML exact float32 ({exactHtmlSize})</MenuItem>}
                 {exportEnabled && <MenuItem onClick={() => handleHtmlExportSelect("quantized")} sx={{ fontSize: 12 }}>HTML quantized uint8 ({quantizedHtmlSize})</MenuItem>}
                 {canDownloadCurrentHtml && offline && <MenuItem disabled sx={{ fontSize: 12 }} title="This standalone export contains quantized uint8 data, not the original float32 array. Open the live widget to export exact float32.">{unavailableStandaloneHtmlLabel}</MenuItem>}
@@ -7403,13 +9876,23 @@ function Show2D() {
 
           {isGallery ? (
             /* Gallery mode */
-            <Box sx={{ display: "grid", gridTemplateColumns: galleryGridColumns, gap: `${galleryGapPx}px`, maxWidth: galleryGridWidth, width: "100%", boxSizing: "border-box", justifyContent: "start" }}>
+            <Box sx={{ position: "relative", maxWidth: galleryGridWidth, width: "100%", boxSizing: "border-box" }}>
+            <Box sx={{
+              display: "grid",
+              gridTemplateColumns: galleryGridColumns,
+              gap: `${galleryGapPx}px`,
+              p: galleryFramePx > 0 ? `${galleryFramePx}px` : 0,
+              width: "100%",
+              boxSizing: "border-box",
+              justifyContent: "start",
+              bgcolor: galleryFramePx > 0 ? galleryGapColor : "transparent",
+            }}>
               {visibleImageIndices.map((i) => (
                 <Box
                   key={i}
                   sx={{
                     minWidth: 0,
-                    cursor: reorderMode ? "grab" : i === selectedIdx ? ((isDraggingResize || isDraggingResizeInner || isHoveringResize || isHoveringResizeInner) ? "nwse-resize" : isDraggingROI ? "move" : (draggingProfileEndpoint !== null || isDraggingProfileLine) ? "grabbing" : (profileActive && (hoveredProfileEndpoint !== null || isHoveringProfileLine)) ? "grab" : (profileActive || roiActive || measureActive) ? "crosshair" : "grab") : ("pointer"),
+                    cursor: reorderMode ? "grab" : i === selectedIdx ? (overlayEditMode ? (isDraggingOverlay ? "grabbing" : isHoveringOverlay ? "nwse-resize" : "crosshair") : (isDraggingResize || isDraggingResizeInner || isHoveringResize || isHoveringResizeInner) ? "nwse-resize" : isDraggingROI ? "move" : (draggingProfileEndpoint !== null || isDraggingProfileLine) ? "grabbing" : (profileActive && (hoveredProfileEndpoint !== null || isHoveringProfileLine)) ? "grab" : (profileActive || roiActive || measureActive) ? "crosshair" : "grab") : ("pointer"),
                     opacity: draggedPanelRef.current === i ? 0.62 : 1,
                     transform: dragOverPanel === i ? "translateY(-2px)" : "translateY(0)",
                     transition: "transform 120ms ease, opacity 120ms ease",
@@ -7438,11 +9921,14 @@ function Show2D() {
 	                      "&::after": {
 	                        content: '""',
 	                        position: "absolute",
-	                        inset: 0,
-	                        pointerEvents: "none",
+                        inset: 0,
+                        pointerEvents: "none",
 	                        zIndex: 5,
-	                        boxShadow: `inset 0 0 0 2px ${reorderMode && dragOverPanel === i ? themeColors.accent : panelChromeVisible && i === selectedIdx ? themeColors.accent : "transparent"}`,
+	                        boxShadow: `inset 0 0 0 ${selectedPanelSet.has(i) ? 3 : 2}px ${reorderMode && dragOverPanel === i ? themeColors.accent : panelChromeVisible && (i === selectedIdx || selectedPanelSet.has(i)) ? themeColors.accent : "transparent"}`,
 	                      },
+                      "&::before": {
+                        display: "none",
+                      },
                       "&:hover .show2d-panel-hide-button, &:focus-within .show2d-panel-hide-button": {
                         opacity: 1,
                         pointerEvents: "auto",
@@ -7470,6 +9956,38 @@ function Show2D() {
                     onTouchEnd={reorderMode ? undefined : (e) => handleTouchEnd(e, i)}
                     onTouchCancel={reorderMode ? undefined : (e) => handleTouchEnd(e, i)}
                   >
+                    {markerAround ? (
+                      <Box
+                        data-show2d-marker-color={panelMarkerColor(i)}
+                        data-show2d-marker-style="around"
+                        title={`Panel marker ${panelMarkerColor(i)} · ${panelTitleText(i)}`}
+                        sx={{
+                          position: "absolute",
+                          inset: 0,
+                          boxSizing: "border-box",
+                          boxShadow: `inset 0 0 0 3px ${panelMarkerColor(i)}, inset 0 0 0 5px rgba(0,0,0,0.9)`,
+                          pointerEvents: "none",
+                          zIndex: 8,
+                        }}
+                      />
+                    ) : (
+                      <Box
+                        data-show2d-marker-color={panelMarkerColor(i)}
+                        data-show2d-marker-style="left"
+                        title={`Panel marker ${panelMarkerColor(i)} · ${panelTitleText(i)}`}
+                        sx={{
+                          position: "absolute",
+                          left: 0,
+                          top: 0,
+                          bottom: 0,
+                          width: 5,
+                          bgcolor: panelMarkerColor(i),
+                          boxShadow: "0 0 0 1px rgba(0,0,0,0.45)",
+                          pointerEvents: "none",
+                          zIndex: 8,
+                        }}
+                      />
+                    )}
                     <canvas
                       ref={(el) => { if (el && canvasRefs.current[i] !== el) { canvasRefs.current[i] = el; setCanvasReady(c => c + 1); } }}
                       width={canvasW} height={canvasH}
@@ -7488,9 +10006,47 @@ function Show2D() {
                         </Typography>
                       </Box>
                     )}
-                    {showPanelTitles !== false && (
+                    {panelChromeVisible && insetHoverInfo && insetHoverInfo.idx === i && (
                       <Box
                         sx={{
+                          position: "absolute",
+                          left: `${insetHoverInfo.leftPct}%`,
+                          top: `${insetHoverInfo.topPct}%`,
+                          transform: "translate(-8px, -100%)",
+                          bgcolor: "rgba(0,0,0,0.78)",
+                          color: "rgba(255,255,255,0.94)",
+                          border: "1px solid rgba(255,255,255,0.25)",
+                          px: 0.6,
+                          py: 0.25,
+                          pointerEvents: "none",
+                          zIndex: 12,
+                          boxShadow: "0 1px 3px rgba(0,0,0,0.45)",
+                        }}
+                      >
+                        <Typography sx={{ fontSize: 9, fontFamily: "monospace", whiteSpace: "nowrap", lineHeight: 1.2 }}>
+                          {insetHoverInfo.text}
+                        </Typography>
+                      </Box>
+                    )}
+                    {(panelAnnotations?.[i] || []).map((annotation, annotationIdx) => (
+                      <Box
+                        key={`panel-annotation-${i}-${annotationIdx}`}
+                        className={annotation.class_name}
+                        data-show2d-panel-annotation={i}
+                        data-show2d-panel-annotation-index={annotationIdx}
+                        data-show2d-panel-annotation-position={annotation.position || "top-left"}
+                        data-show2d-panel-annotation-variant={annotation.variant || "badge"}
+                        title={annotation.text}
+                        sx={panelAnnotationSx(annotation)}
+                      >
+                        {renderPanelAnnotation(annotation)}
+                      </Box>
+                    ))}
+                    {showPanelTitles !== false && (
+                      <Box
+                        data-show2d-panel-title={i}
+                        sx={{
+                          ...panelTitleChromeSx(panelTitleStyle, {
                           position: "absolute",
                           top: 6,
                           left: 28,
@@ -7510,9 +10066,10 @@ function Show2D() {
                           textOverflow: "clip",
                           overflowWrap: "anywhere",
                           zIndex: 2,
+                          }),
                         }}
                       >
-                        {panelLabel(i)}
+                        {panelTitleContent(i)}
                       </Box>
                     )}
                     {panelChromeVisible && (panelFrameCounts?.[i] || 1) > 1 && (
@@ -7714,25 +10271,37 @@ function Show2D() {
                         sx={resizeGripSx}
                       />
                     )}
-                  </Box>
-                  {(imageRotations?.[i] ?? 0) % 4 !== 0 && (
-                    <Typography sx={{ fontSize: 10, color: themeColors.textMuted, textAlign: "center", mt: 0.25 }}>
-                      {panelLabel(i)}
+                    {rotationForPanel(i) !== 0 && (
                       <Box
-                        component="span"
-                        onClick={(e: React.MouseEvent) => {
-                          e.stopPropagation();
-                          const rots = [...(imageRotations || [])];
-                          while (rots.length <= i) rots.push(0);
-                          rots[i] = (rots[i] + 3) % 4;
-                          setImageRotations(rots);
+                        onClick={(event: React.MouseEvent) => {
+                          event.stopPropagation();
+                          setRotationForPanel(i, 0);
                         }}
-                        sx={{ ml: 0.5, color: themeColors.accent, cursor: "pointer", "&:hover": { opacity: 0.7 } }}
+                        title="Display rotation active; click to clear"
+                        aria-label="Clear display rotation"
+                        sx={{
+                          position: "absolute",
+                          left: 43,
+                          bottom: 8,
+                          zIndex: 4,
+                          px: 0.6,
+                          py: 0.15,
+                          borderRadius: "5px",
+                          bgcolor: "rgba(0,0,0,0.50)",
+                          color: "rgba(255,255,255,0.95)",
+                          fontSize: 10,
+                          fontWeight: 700,
+                          lineHeight: 1.25,
+                          cursor: "pointer",
+                          userSelect: "none",
+                          textShadow: "0 1px 1px rgba(0,0,0,0.8)",
+                          "&:hover": { bgcolor: "rgba(0,0,0,0.72)" },
+                        }}
                       >
-                        ({(imageRotations[i] % 4) * 90}°)
+                        {rotationGlyph(rotationForPanel(i))}
                       </Box>
-                    </Typography>
-                  )}
+                    )}
+                  </Box>
                   {effectiveShowFft && (
                     <Box
                       ref={(el: HTMLDivElement | null) => { fftContainerRefs.current[i] = el; }}
@@ -7799,18 +10368,22 @@ function Show2D() {
                             right: 8,
                             display: "flex",
                             flexDirection: "column",
-                            alignItems: "stretch",
+                            alignItems: "flex-start",
                             rowGap: "2px",
                             minWidth: 0,
+                            maxWidth: "calc(100% - 16px)",
+                            overflow: "hidden",
                             pointerEvents: "none",
                             userSelect: "none",
-                            zIndex: 3,
+                            zIndex: 6,
                           }}
                         >
                           {showPanelTitles !== false && (
                             <Box
                               className="quantem-fft-panel-title"
+                              data-show2d-panel-title={i}
                               sx={{
+                                ...panelTitleChromeSx(panelTitleStyle, {
                                 px: 0.5,
                                 minWidth: 0,
                                 color: "rgba(255,255,255,0.95)",
@@ -7818,15 +10391,19 @@ function Show2D() {
                                 fontSize: Math.max(8, panelTitleFontSize || 11),
                                 fontWeight: 700,
                                 lineHeight: 1.2,
-                                textAlign: "center",
+                                textAlign: "left",
                                 textShadow: "1px 1px 0 rgba(0,0,0,0.85), 0 0 3px rgba(0,0,0,0.75)",
-                                whiteSpace: "normal",
-                                overflow: "visible",
-                                textOverflow: "clip",
-                                overflowWrap: "anywhere",
+                                bgcolor: "rgba(0,0,0,0.42)",
+                                borderRadius: "3px",
+                                maxWidth: "100%",
+                                boxSizing: "border-box",
+                                whiteSpace: "nowrap",
+                                overflow: "hidden",
+                                textOverflow: "ellipsis",
+                                }),
                               }}
                             >
-                              FFT · {panelLabel(i)}
+                              FFT · {panelTitleContent(i)}
                             </Box>
                           )}
                           {fftMetricsEnabled && galleryFftQuality[i] && (
@@ -7834,9 +10411,14 @@ function Show2D() {
                               className="quantem-fft-quality-label"
                               aria-label={`FFT quality for ${panelLabel(i)}: ${formatFftQualityLabel(galleryFftQuality[i])}`}
                               sx={{
+                                px: 0.5,
+                                py: 0.15,
                                 minWidth: 0,
                                 maxWidth: "100%",
+                                boxSizing: "border-box",
                                 color: "rgba(255,255,255,0.96)",
+                                bgcolor: "rgba(0,0,0,0.58)",
+                                borderRadius: "3px",
                                 fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
                                 fontSize: Math.max(9, Math.min(12, panelTitleFontSize || 11)),
                                 fontWeight: 700,
@@ -7845,6 +10427,7 @@ function Show2D() {
                                 overflow: "hidden",
                                 textOverflow: "ellipsis",
                                 textShadow: "1px 1px 0 rgba(0,0,0,0.9), 0 0 3px rgba(0,0,0,0.85)",
+                                alignSelf: "flex-start",
                               }}
                             >
                               {formatFftQualityLabel(galleryFftQuality[i])}
@@ -7856,6 +10439,18 @@ function Show2D() {
                         <Box sx={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", bgcolor: "rgba(0,0,0,0.6)", pointerEvents: "none" }}>
                           <Typography sx={{ fontSize: 10, color: "#aaa", fontFamily: "monospace", "@keyframes pulse": { "0%,100%": { opacity: 0.4 }, "50%": { opacity: 1 } }, animation: "pulse 1.2s ease-in-out infinite" }}>FFT…</Typography>
                         </Box>
+                      )}
+                      {showResizeControls && (
+                        <Box
+                          onMouseDown={(e: React.MouseEvent) => {
+                            e.stopPropagation();
+                            handleCanvasResizeStart(e);
+                          }}
+                          title="Resize FFT panels"
+                          aria-label={`Resize FFT panel for ${panelLabel(i)}`}
+                          data-show2d-fft-resize-handle={i}
+                          sx={{ ...resizeGripSx, zIndex: 7 }}
+                        />
                       )}
                     </Box>
                   )}
@@ -7888,11 +10483,31 @@ function Show2D() {
                 </Box>
               ))}
             </Box>
+            {groupMarkerOverlays.map((marker) => (
+              <Box
+                key={marker.key}
+                data-show2d-row-marker={marker.axis === "row" ? marker.key.slice(4) : undefined}
+                data-show2d-col-marker={marker.axis === "col" ? marker.key.slice(4) : undefined}
+                data-show2d-group-marker-color={marker.color}
+                sx={{
+                  position: "absolute",
+                  left: marker.left,
+                  top: marker.top,
+                  width: marker.width,
+                  height: marker.height,
+                  boxSizing: "border-box",
+                  boxShadow: `inset 0 0 0 3px ${marker.color}, inset 0 0 0 5px rgba(0,0,0,0.9)`,
+                  pointerEvents: "none",
+                  zIndex: 10,
+                }}
+              />
+            ))}
+            </Box>
           ) : (
             /* Single image mode */
             <Box
               ref={(el: HTMLDivElement | null) => { imageContainerRefs.current[0] = el; }}
-              sx={{ ...responsivePanelSx, border: `1px solid ${themeColors.border}`, cursor: isHoveringLensEdge ? "nwse-resize" : isDraggingROI ? "move" : (isDraggingResize || isDraggingResizeInner || isHoveringResize || isHoveringResizeInner) ? "nwse-resize" : (draggingProfileEndpoint !== null || isDraggingProfileLine) ? "grabbing" : (profileActive && (hoveredProfileEndpoint !== null || isHoveringProfileLine)) ? "grab" : (profileActive || roiActive || measureActive) ? "crosshair" : "grab" }}
+              sx={{ ...responsivePanelSx, border: `1px solid ${themeColors.border}`, cursor: overlayEditMode ? (isDraggingOverlay ? "grabbing" : isHoveringOverlay ? "nwse-resize" : "crosshair") : isHoveringLensEdge ? "nwse-resize" : isDraggingROI ? "move" : (isDraggingResize || isDraggingResizeInner || isHoveringResize || isHoveringResizeInner) ? "nwse-resize" : (draggingProfileEndpoint !== null || isDraggingProfileLine) ? "grabbing" : (profileActive && (hoveredProfileEndpoint !== null || isHoveringProfileLine)) ? "grab" : (profileActive || roiActive || measureActive) ? "crosshair" : "grab" }}
               onMouseDown={(e) => handleMouseDown(e, 0)}
               onMouseMove={(e) => handleMouseMove(e, 0)}
               onMouseUp={(e) => handleMouseUp(e, 0)}
@@ -7927,6 +10542,42 @@ function Show2D() {
                   </Typography>
 	                </Box>
 	              )}
+              {panelChromeVisible && insetHoverInfo && insetHoverInfo.idx === 0 && (
+                <Box
+                  sx={{
+                    position: "absolute",
+                    left: `${insetHoverInfo.leftPct}%`,
+                    top: `${insetHoverInfo.topPct}%`,
+                    transform: "translate(-8px, -100%)",
+                    bgcolor: "rgba(0,0,0,0.78)",
+                    color: "rgba(255,255,255,0.94)",
+                    border: "1px solid rgba(255,255,255,0.25)",
+                    px: 0.6,
+                    py: 0.25,
+                    pointerEvents: "none",
+                    zIndex: 12,
+                    boxShadow: "0 1px 3px rgba(0,0,0,0.45)",
+                  }}
+                >
+                  <Typography sx={{ fontSize: 9, fontFamily: "monospace", whiteSpace: "nowrap", lineHeight: 1.2 }}>
+                    {insetHoverInfo.text}
+                  </Typography>
+                </Box>
+              )}
+              {(panelAnnotations?.[0] || []).map((annotation, annotationIdx) => (
+                <Box
+                  key={`panel-annotation-0-${annotationIdx}`}
+                  className={annotation.class_name}
+                  data-show2d-panel-annotation={0}
+                  data-show2d-panel-annotation-index={annotationIdx}
+                  data-show2d-panel-annotation-position={annotation.position || "top-left"}
+                  data-show2d-panel-annotation-variant={annotation.variant || "badge"}
+                  title={annotation.text}
+                  sx={panelAnnotationSx(annotation)}
+                >
+                  {renderPanelAnnotation(annotation)}
+                </Box>
+              ))}
               {panelChromeVisible && (panelFrameCounts?.[0] || 1) > 1 && (
                 <Box
                   data-show2d-panel-frame-controls={0}
@@ -7998,7 +10649,7 @@ function Show2D() {
           {showStats && (
             <Box sx={{ mt: `${SPACING.XS}px`, px: 1, py: 0.5, bgcolor: themeColors.bgAlt, display: "flex", gap: 2, alignItems: "center", flexWrap: "wrap", maxWidth: "100%", boxSizing: "border-box", opacity: 1 }}>
               {isGallery && (
-                <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>{labels?.[statsIdx] || `#${statsIdx + 1}`}</Typography>
+                <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>{panelTitleContent(statsIdx)}</Typography>
               )}
               <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Mean <Box component="span" sx={{ color: themeColors.accent }}>{formatNumber(currentFrameStats?.mean ?? statsMean?.[statsIdx] ?? 0)}</Box></Typography>
               <Typography sx={{ fontSize: 11, color: themeColors.textMuted }}>Min <Box component="span" sx={{ color: themeColors.accent }}>{formatNumber(currentFrameStats?.min ?? statsMin?.[statsIdx] ?? 0)}</Box></Typography>
@@ -8070,7 +10721,15 @@ function Show2D() {
                     <Box sx={{ ...controlRow, ...mobileControlRowSx, border: `1px solid ${themeColors.border}`, bgcolor: themeColors.controlBg, opacity: 1, pointerEvents: "auto" }}>
                       <Box sx={controlPairSx}>
                         <Typography sx={compactLabelSx} title="Auto-contrast: recompute the display range from the current view's percentiles. Turn off to set the histogram range by hand.">Auto</Typography>
-                        <Switch checked={autoContrast} onChange={() => { setAutoContrast(!autoContrast); }} size="small" sx={switchStyles.small} />
+                        <Switch
+                          checked={autoContrast}
+                          onChange={(event) => {
+                            setAutoContrast(event.target.checked);
+                            if (event.target.checked) setContrastPreset("manual");
+                          }}
+                          size="small"
+                          sx={switchStyles.small}
+                        />
                       </Box>
                       <Box sx={controlPairSx}>
                         <Typography sx={compactLabelSx} title="CSS bilinear interpolation. Same data, the browser smooths visually, useful when upscaling small images on a large canvas.">Smooth</Typography>
@@ -8304,9 +10963,9 @@ function Show2D() {
                             <Box key={i} sx={isRgbPanel(i) ? { opacity: 0.35, pointerEvents: "none" } : undefined}
                               title={isRgbPanel(i) ? "RGB panel: contrast controls do not apply" : undefined}>
                               <Histogram data={histData} vminPct={cs.vminPct} vmaxPct={cs.vmaxPct}
-                                onRangeChange={(min, max) => { if (autoContrast) setAutoContrast(false); setContrastState(i, { vminPct: min, vmaxPct: max }); }}
-                                onRangePreview={(min, max) => { if (autoContrast) setAutoContrast(false); setContrastState(i, { vminPct: min, vmaxPct: max }, false); }}
-                                onRangeCommit={(min, max) => { if (autoContrast) setAutoContrast(false); setContrastState(i, { vminPct: min, vmaxPct: max }, true); }}
+                                onRangeChange={(min, max) => { if (autoContrast) setAutoContrast(false); setContrastPreset("manual"); setContrastState(i, { vminPct: min, vmaxPct: max }); }}
+                                onRangePreview={(min, max) => { if (autoContrast) setAutoContrast(false); setContrastPreset("manual"); setContrastState(i, { vminPct: min, vmaxPct: max }, false); }}
+                                onRangeCommit={(min, max) => { if (autoContrast) setAutoContrast(false); setContrastPreset("manual"); setContrastState(i, { vminPct: min, vmaxPct: max }, true); }}
                                 width={110} height={58} theme={themeInfo.theme === "dark" ? "dark" : "light"}
                                 dataMin={histRange?.min ?? imageDataRange.min}
                                 dataMax={histRange?.max ?? imageDataRange.max} />
@@ -8315,7 +10974,7 @@ function Show2D() {
                         })}
                       </Box>
                     ) : (
-                      <Histogram data={imageHistogramData} precomputedBins={imageHistogramBins} vminPct={imageVminPct} vmaxPct={imageVmaxPct} onRangeChange={(min, max) => { if (autoContrast) setAutoContrast(false); setContrastState(activeContrastIdx, { vminPct: min, vmaxPct: max }); }} onRangePreview={(min, max) => { if (autoContrast) setAutoContrast(false); setContrastState(activeContrastIdx, { vminPct: min, vmaxPct: max }, false); }} onRangeCommit={(min, max) => { if (autoContrast) setAutoContrast(false); setContrastState(activeContrastIdx, { vminPct: min, vmaxPct: max }, true); }} width={110} height={58} theme={themeInfo.theme === "dark" ? "dark" : "light"} dataMin={traitVmin != null && traitVmax != null ? displayValue(traitVmin, logScale) : imageDataRange.min} dataMax={traitVmin != null && traitVmax != null ? displayValue(traitVmax, logScale) : imageDataRange.max} binMin={imageDataRange.min} binMax={imageDataRange.max} />
+                      <Histogram data={imageHistogramData} precomputedBins={imageHistogramBins} vminPct={imageVminPct} vmaxPct={imageVmaxPct} onRangeChange={(min, max) => { if (autoContrast) setAutoContrast(false); setContrastPreset("manual"); setContrastState(activeContrastIdx, { vminPct: min, vmaxPct: max }); }} onRangePreview={(min, max) => { if (autoContrast) setAutoContrast(false); setContrastPreset("manual"); setContrastState(activeContrastIdx, { vminPct: min, vmaxPct: max }, false); }} onRangeCommit={(min, max) => { if (autoContrast) setAutoContrast(false); setContrastPreset("manual"); setContrastState(activeContrastIdx, { vminPct: min, vmaxPct: max }, true); }} width={110} height={58} theme={themeInfo.theme === "dark" ? "dark" : "light"} dataMin={traitVmin != null && traitVmax != null ? displayValue(traitVmin, logScale) : imageDataRange.min} dataMax={traitVmin != null && traitVmax != null ? displayValue(traitVmax, logScale) : imageDataRange.max} binMin={imageDataRange.min} binMax={imageDataRange.max} />
                     )}
                   </Box>
                 )}
@@ -8594,7 +11253,12 @@ function Show2D() {
                     top: 8,
                     left: 8,
                     maxWidth: "calc(100% - 16px)",
+                    px: 0.5,
+                    py: 0.15,
+                    boxSizing: "border-box",
                     color: "rgba(255,255,255,0.96)",
+                    bgcolor: "rgba(0,0,0,0.58)",
+                    borderRadius: "3px",
                     fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
                     fontSize: 11,
                     fontWeight: 700,

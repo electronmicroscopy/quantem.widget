@@ -50,6 +50,13 @@ tests/_browse_smoke_data/
 tests/_debug_before_click.png
 *_focus_test.ipynb
 
+# local real-data benchmark/profiling scratch (never upload unless promoted)
+docs/gpu-nvenc-denoise-movies-*.md
+make_movies_gpu.py
+scripts/make_movies_gpu*.py
+*_movie_contact_sheet.*
+*_profile_scratch/
+
 # agent artifacts
 .agents/
 

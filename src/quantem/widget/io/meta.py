@@ -72,7 +72,7 @@ def build_4dstem_meta(master_path, **fields) -> dict:
     ``semiangle_mrad`` from a ``<N>mrad`` filename token; ``fields`` supplies the
     rest (``voltage_kV``, ``sample``, ``source``, ``date``, and any known optionals).
     """
-    from quantem.live import io  # noqa: PLC0415
+    from quantem.gpu import io  # noqa: PLC0415
     header = io.get_metadata(str(master_path))
     meta = {
         "modality": "4dstem",

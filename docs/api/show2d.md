@@ -2,7 +2,9 @@
 
 One or many 2D images, including gallery panels with independent local slice
 stacks, plus contrast control, FFT, ROIs, line profiles, and a calibrated scale
-bar. See the [Show2D tutorial](../tutorials/show2d) for worked examples.
+bar. See the [Show2D tutorial](../tutorials/show2d) for worked examples and
+[Advanced Show2D](../tutorials/show2d_advanced) for report-ready galleries,
+rich labels, local annotations, overlays, inset plots, and export patterns.
 
 ## Reference
 
@@ -21,8 +23,13 @@ no console error, no NaN frame).
 | Control | Trait | Expected effect |
 |---|---|---|
 | Colormap dropdown | `cmap` | Canvas recolors to the chosen map |
+| More menu: Color shared | `panel_cmaps`, `panel_cmaps_memory` | Shared by default. Turn off to let the Color dropdown edit only the selected gallery panel; turn on for one shared colormap, then turn off again to restore the previous individual panel colormaps |
+| Panel identity markers | `marker_colors`, `identity_colors`, `marker_style`, `row_markers`, `col_markers` | Optional panel colors plus row/column group frames make panels easy to reference in notebooks, reports, and agent instructions |
+| Local panel annotations | `panel_annotations` | Optional multiple in-image labels per panel, placed by corner, normalized point, or normalized region box |
+| Geometric panel overlays | `panel_overlays` (`overlays` shorthand) | Optional circle, rectangle, and square overlays in data or relative coordinates, with stroke/fill opacity, dashed/dotted line styles, and z-order; More -> Overlay Edit allows live select, move, resize, delete, and reset |
 | Contrast min / max sliders | `vmin`, `vmax` | Display clamp changes; histogram markers move |
 | Auto-contrast toggle | `auto_contrast` | Re-fits `vmin`/`vmax` to the percentile range |
+| More menu: Contrast | `contrast_preset` | Applies scientist-friendly percentile ranges such as `1-99`, `2-98`, and `3-97`; the histogram stays visible below the image |
 | Log-scale toggle | `log_scale` | Intensity mapped through log |
 | FFT toggle | `show_fft` | Canvas shows the power spectrum; lattice spots appear |
 | FFT window toggle | `fft_window` | Apodization on/off (ringing at edges differs) |
@@ -32,8 +39,11 @@ no console error, no NaN frame).
 | Control visibility | `show_controls`, `controls_collapsed`; `collapse_controls()`, `expand_controls()`, `toggle_controls()` | Permanently remove controls or temporarily collapse them behind the top GUI toggle |
 | Title visibility | `show_title` | Top title row shows/hides |
 | Stats visibility | `show_stats` | Mean/min/max/std readout shows/hides |
-| Panel title visibility | `show_panel_titles`, `panel_title_font_size` | Per-panel labels show/hide and resize |
+| Panel title visibility | `show_panel_titles`, `panel_title_font_size`, `panel_title_style` | Per-panel labels show/hide, resize, and optionally get title chrome such as background, border, and padding |
+| Rich panel title spans | `panel_title_spans` | Optional structured `text` / `math` / `color` spans for symbols such as `λ` and `χ²` in panel titles, panel menus, stats, saved state, and exported HTML |
 | Scale bar toggle | `show_scale_bar` (`scale_bar_visible` in saved state) | Calibrated bar shows/hides (needs `pixel_size > 0`) |
+| Scale bar style | `scale_bar_panels`, `scale_bar_length`, `scale_bar_label`, `scale_bar_style` | Restrict scale bars to selected panels and control exact publication text, font, outline, label spacing, offset, and bar thickness |
+| Gallery gutters and frame | `gallery_gap_px`, `gallery_gap_color` | Adds fixed inter-panel gutters; when a color is set, the same thickness is also used as the outside frame and panel-frame stroke for pixel-perfect SVG grids |
 | Pan (drag) | per-image pan | Image translates; with `link_pan` all panels move together |
 | Zoom (wheel) | `initial_zoom`, `zoom_row`, `zoom_col` | Zooms about the cursor |
 | Smooth toggle | `smooth` | Bilinear vs nearest sampling |
@@ -52,6 +62,348 @@ no console error, no NaN frame).
 | View menu: Crop to view | `view_crop`; `crop_to_view()` | Commits the current viewport as the display extent (single panel, display-only, reversible) |
 | View menu: Padding | `pad_ratio`, `pad_ratios`, `pad_fill_mode`, `pad_fill_modes`, `pad_scope`; `set_padding()` | Adds a ratio-based display border with min/median/mean fill; gallery edits can apply to all panels or the selected panel |
 | View menu: Reset view | `reset_view_ops()` | Restores the uncropped, unpadded display bit-identically |
+| More menu: Flip | `image_flips_horizontal`, `image_flips_vertical` | Display-only horizontal/vertical flips help compare orientations and point-defect neighborhoods without changing stored arrays |
+| More menu: Rotate | `image_rotations`, `rotation_scope`; `rotation=`, `rotations=` | Display-only 0/90/180/270° rotation for every panel or the selected panel; raw data and `(row, col)` coordinates stay unchanged |
+| Panel inset plots | `inset_plots` | Optional per-panel mini line plots for calibration curves, ACF/R sweeps, or other scientific context; hover reports the nearest plotted coordinate |
+| Scale bar placement | `scale_bar_position`, `show_zoom_indicator` | Move the scale bar between bottom corners and hide the zoom badge when an inset plot needs that space |
+
+## Rich panel labels and math
+
+Panel labels can be plain strings, inline math strings, or structured rich
+spans. Use this for parameter sweeps where the compact panel chrome should say
+`λ`, `χ²`, `σ`, or similar symbols instead of spelling out the word.
+
+```python
+from quantem.widget import Show2D
+
+Show2D(
+    [raw, residual],
+    labels=[
+        r"$\lambda=0.03$ raw",
+        r"$\chi^2$/pixel residual",
+    ],
+    show_stats=True,
+)
+```
+
+The frontend renders common Greek symbols plus simple superscripts/subscripts
+without requiring MathJax or KaTeX. It also normalizes doubled backslashes from
+JSON/state files, so `\\lambda` is rendered as `λ` rather than as raw markup.
+The same rich label path is used by panel titles, the `Panels` menu, the stats
+row, and exported standalone HTML.
+
+For mixed color or explicit math spans, use `panel_title_spans`. Each span can
+contain `text`, `math`, and optional `color`:
+
+```python
+Show2D(
+    [raw, filtered, residual],
+    labels=["raw", "filtered", "residual"],
+    panel_title_spans=[
+        [{"math": r"\lambda=0.03"}, {"text": " raw"}],
+        [{"text": "filtered", "color": "#34d399"}],
+        [{"math": r"\chi^2"}, {"text": "/pixel residual"}],
+    ],
+)
+```
+
+Use `panel_annotations` when the label belongs to a local region inside a panel
+instead of the whole panel. An annotation can also use `math` or `spans`, so a
+panel can have both a rich title and multiple local callouts:
+
+```python
+Show2D(
+    [raw, residual],
+    panel_title_spans=[
+        [{"math": r"\lambda=0.03"}, {"text": " raw"}],
+        [{"math": r"\chi^2"}, {"text": "/pixel"}],
+    ],
+    panel_annotations={
+        0: [
+            {"math": r"\lambda", "position": "top-left", "variant": "pill"},
+            {
+                "spans": [{"text": "ROI "}, {"text": "A", "color": "#60a5fa"}],
+                "box": [0.18, 0.25, 0.30, 0.16],
+                "variant": "callout",
+            },
+        ],
+        1: {"math": r"\chi^2", "position": "top-right", "variant": "outline"},
+    },
+)
+```
+
+## Circle and rectangle overlays
+
+Use `panel_overlays` when the figure needs reproducible geometric callouts
+in addition to analysis ROIs. Overlay coordinates use microscope image
+coordinates by default: `(row, col)` for centers and `(row0, col0, row1, col1)`
+for boxes. The same state is rendered in live Jupyter widgets, saved notebook
+state, and standalone HTML exports.
+
+```python
+from quantem.widget import Show2D
+
+Show2D(
+    [raw, denoised, residual],
+    labels=["raw", "denoised", "residual"],
+    panel_overlays={
+        "raw": [
+            {
+                "shape": "circle",
+                "center": (96, 88),
+                "radius": 14,
+                "stroke": "#60a5fa",
+                "stroke_width": 3,
+                "line_style": "dashed",
+            },
+            {
+                "shape": "rect",
+                "box": (48, 58, 126, 146),
+                "stroke": "#facc15",
+                "fill": "#facc15",
+                "fill_opacity": 0.12,
+                "dash": [6, 2, 1, 2],
+                "z_order": 1,
+            },
+        ],
+        "denoised": {
+            "shape": "square",
+            "center": (96, 88),
+            "size": 42,
+            "stroke": "#34d399",
+            "stroke_width": 2,
+            "line_style": "dotted",
+        },
+    },
+)
+```
+
+Overlay strokes are solid by default. Set `line_style="dashed"`,
+`line_style="dotted"`, or `line_style="dashdot"` for common scientific
+callouts, or pass `dash=[on, off, ...]` for an exact canvas dash pattern.
+
+For a shared overlay on every panel, pass `overlays=[...]` instead of
+`panel_overlays`. Use `coords="relative"` when the geometry should follow
+normalized panel coordinates from 0 to 1:
+
+```python
+Show2D(
+    [raw, denoised],
+    labels=["raw", "denoised"],
+    overlays=[
+        {
+            "shape": "circle",
+            "center": (0.5, 0.5),
+            "radius": 0.08,
+            "coords": "relative",
+            "stroke": "#f87171",
+        }
+    ],
+)
+```
+
+The live widget and exported HTML also expose `More -> Overlay Edit` when
+overlays are present. In edit mode, click a circle or rectangle to select it,
+drag inside to move it, drag an edge to resize it, press Delete to remove the
+selected overlay, and choose `Reset Overlays` to restore the constructor state.
+Use ROIs when the shape should drive statistics, FFT crops, or Python
+readback through `get_roi_geometries()`.
+
+## Presentation and export chrome
+
+`ui_mode="presentation"` starts with controls collapsed so the scientific image
+gets the first view. It still leaves a compact `Controls` button for adjusting
+the widget and an `Export` button for saving the current standalone HTML:
+
+```python
+w = Show2D(
+    [raw, residual],
+    labels=[r"$\lambda=0.03$ raw", r"$\chi^2$/pixel"],
+    ui_mode="presentation",
+    show_stats=True,
+)
+w.export_html("lambda_sweep.html", encoding="uint8")
+```
+
+In live Jupyter, the Export menu can request exact or uint8 standalone HTML
+through the Python backend. In standalone HTML, the Export button downloads the
+current embedded page using the representation already present in that file.
+
+For Illustrator or Inkscape, use the Export menu's `SVG` item or call
+`w.export_svg(...)`. Show2D writes a hybrid publication SVG: measured image
+panels remain embedded rasters, while panel titles, annotations, geometric
+overlays, inset plots, scale bars, colorbars, and group markers are editable
+SVG objects that match the current figure state.
+
+## Publication SVG typography and layout keys
+
+Use these keys when `Show2D` should produce a publication figure that can go
+directly to Illustrator or Inkscape.
+
+### Panel title fonts
+
+`labels` set the panel title text. `panel_title_font_size` sets the size, and
+`panel_title_style` controls typography and placement:
+
+```python
+PUBLICATION_FONT = (
+    "Nimbus Sans, Helvetica, Arial, "
+    "Liberation Sans, DejaVu Sans, sans-serif"
+)
+
+Show2D(
+    panels,
+    labels=["a 0° scan", "b 90° scan", "c combined"],
+    panel_title_font_size=16,
+    panel_title_style={
+        "font_family": PUBLICATION_FONT,
+        "font_weight": 700,
+        "fg": "#ffffff",
+        "outline_color": "#000000",
+        "outline_width": 2.2,
+        "x": 0.035,
+        "y": 0.035,
+        "anchor": "top-left",
+        "align": "left",
+    },
+)
+```
+
+To match a published PDF, inspect its embedded fonts and put the matching
+family first:
+
+```bash
+pdffonts path/to/published_figure.pdf
+fc-match "Helvetica"
+```
+
+If the PDF text was outlined or rasterized, no editable text font may be
+reported; use the source figure script or the closest installed Helvetica-like
+family instead.
+
+Accepted `panel_title_style` keys:
+
+| Key | Meaning |
+| --- | --- |
+| `font_family` | CSS/SVG font-family stack, for example `"Helvetica, Arial, sans-serif"` |
+| `font_weight` | Numeric or named weight, for example `700` or `"bold"` |
+| `fg` | Text fill color |
+| `outline_color`, `outline_width` | Text stroke used for publication contrast |
+| `x`, `y` | Relative panel coordinates from 0 to 1 |
+| `anchor` | `top-left`, `top-center`, `top-right`, `center`, `bottom-left`, etc. |
+| `offset` | Pixel nudge `(dx, dy)` after relative placement |
+| `align` | Text alignment fallback when `x`/`y` are not supplied |
+| `bg`, `border_color`, `border_width`, `pad_x`, `pad_y`, `radius`, `opacity`, `max_width` | Optional title chrome |
+
+### Local annotation fonts
+
+Use `panel_annotations` for multiple labels inside the same image panel. Each
+annotation can have its own font, color, outline, and position:
+
+```python
+Show2D(
+    panels,
+    labels=["f composite on 0° HAADF"],
+    panel_annotations={
+        "f composite on 0° HAADF": [
+            {
+                "text": "Ba+Ti",
+                "x": 0.20,
+                "y": 0.15,
+                "anchor": "center",
+                "align": "center",
+                "font_family": PUBLICATION_FONT,
+                "font_size": 15,
+                "font_weight": 800,
+                "fg": "#ff4dff",
+                "outline_color": "#000000",
+                "outline_width": 1.8,
+                "variant": "plain",
+            },
+            {
+                "text": "Sr",
+                "x": 0.80,
+                "y": 0.15,
+                "anchor": "center",
+                "align": "center",
+                "font_family": PUBLICATION_FONT,
+                "font_size": 15,
+                "font_weight": 800,
+                "fg": "#58ff58",
+                "outline_color": "#000000",
+                "outline_width": 1.8,
+                "variant": "plain",
+            },
+        ],
+    },
+)
+```
+
+Use `x` and `y` to attach a label to a physical region of the panel. Use
+`box=[left, top, width, height]` when the label describes an area. Use
+`variant="plain"` for text-only publication labels, or `badge`, `pill`,
+`outline`, and `callout` for report-style labels.
+
+### Scale bar fonts and placement
+
+`scale_bar_panels` limits the bar to one or more panels. Values can be panel
+indices or label strings. `scale_bar_length` is in the physical unit implied by
+`sampling` and `units`; `scale_bar_label` overrides the displayed text.
+
+```python
+Show2D(
+    panels,
+    labels=labels,
+    sampling=0.0105,
+    units="nm",
+    scale_bar_panels=["f corrected combined"],
+    scale_bar_length=2.0,
+    scale_bar_label="2 nm",
+    scale_bar_style={
+        "font_family": PUBLICATION_FONT,
+        "font_size": 16,
+        "font_weight": 700,
+        "color": "#ffffff",
+        "outline_color": "#000000",
+        "outline_width": 1.3,
+        "bar_height": 5,
+        "label_gap": 5,
+        "offset": (0, -8),
+    },
+    show_zoom_indicator=False,
+)
+```
+
+Accepted `scale_bar_style` keys:
+
+| Key | Meaning |
+| --- | --- |
+| `font_family`, `font_size`, `font_weight` | Scale-bar label typography |
+| `color` | Bar and label fill color |
+| `outline_color`, `outline_width` | Label text stroke |
+| `shadow_color` | Fallback label/bar shadow when no outline is used |
+| `bar_height` | Bar thickness in SVG/browser CSS pixels |
+| `label_gap` | Pixels between label baseline and bar |
+| `offset` | Pixel nudge `(dx, dy)` for the whole scale bar |
+
+### Pixel-perfect gutters
+
+Use `gallery_gap_px` and `gallery_gap_color` for manuscript grids:
+
+```python
+Show2D(
+    panels,
+    labels=labels,
+    ncols=3,
+    gallery_gap_px=2,
+    gallery_gap_color="#000000",
+)
+```
+
+When `gallery_gap_color` is non-empty, the SVG and browser layout use the same
+thickness for internal gutters and the outside frame. A 2-pixel black grid puts
+the first image at `(2, 2)`, the next image after `panel_width + 2`, and uses
+black panel-frame strokes so Illustrator does not show a light seam.
 
 ## Which denoise filter should I use?
 
@@ -123,6 +475,58 @@ settings. They do **not** store another copy of `frame_bytes`,
 `panel_stack_bytes`, or raw source arrays. `state_dict()` includes the named
 bookmarks so a saved notebook can reopen with the same list of microscope-stage
 positions.
+
+## Add scientific inset plots to panels
+
+Advanced figure-making sometimes needs a compact plot inside each image panel:
+for example an autocorrelation score versus an `R` ratio while reviewing
+automatic denoising calibration. Use `inset_plots` for that per-panel context.
+The top-level parameter stays singular and readable, while each dictionary keeps
+the plot data, placement, labels, and style together.
+
+```python
+Show2D(
+    denoised_panels,
+    labels=["candidate A", "candidate B", "candidate C"],
+    inset_plots=[
+        {
+            "x": r_values,
+            "y": acf_values_for_panel,
+            "point": (best_r, best_acf),
+            "xlabel": "R",
+            "ylabel": "ACF",
+            "legend": "ACF/R",
+            "annotation": f"R*={best_r:.2f}",
+            "position": "bottom-right",
+            "margin": 24,
+            "size": 0.36,
+            "height": 0.26,
+            "show_ticks": True,
+            "xticks": [0, 1],
+            "yticks": [0, 1],
+            "line_width": 2.6,
+            "background_alpha": 0.58,
+            "border_width": 0,
+        }
+        for acf_values_for_panel, best_r, best_acf in calibration_results
+    ],
+    scale_bar_position="bottom-left",
+    show_zoom_indicator=False,
+)
+```
+
+For normal notebooks, prefer `position` plus `margin`, `size`, and `height`.
+Use `box=[left, top, width, height]` only when a publication figure needs exact
+normalized panel coordinates. `border_width=0` gives a clean no-frame look;
+increase `background_alpha` or use a subtle `border_color` when the underlying
+image is noisy. On hover, the live widget reports the nearest plotted
+coordinate using the axis labels, such as `R 0.465 · ACF 0.48`.
+
+If `inset_plots` is present, the live widget shows an `Inset Chart` switch in
+the `More` menu. A scientist can hide the chart during image inspection, turn
+it back on for reporting, or drag the chart inside the panel. Dragging previews
+freely and then snaps to the closest corner on release, updating `position` and
+`margin` in the widget state.
 
 ## Remove a background or isolate a periodicity
 

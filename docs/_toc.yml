@@ -28,6 +28,8 @@ parts:
       - file: tutorials/advanced
         title: Advanced
         sections:
+          - file: tutorials/show2d_advanced
+            title: Advanced Show2D
           - file: tutorials/showfolder
           - file: tutorials/widget_export
           - file: tutorials/movie_export
