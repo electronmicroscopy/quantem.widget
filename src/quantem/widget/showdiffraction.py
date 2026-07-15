@@ -27,7 +27,7 @@ from quantem.widget.utils.state_io import resolve_widget_version, save_state_fil
 from quantem.widget.utils.ui import UiMode, resolve_ui_mode
 
 
-# ========================= Crystal phases =========================
+# Crystal phases
 def _allow_all(*_) -> bool:
     return True
 
@@ -123,12 +123,10 @@ _ABSENCE_RULES = {
     "cuprite": _allow_cuprite,  # Pn-3m 2a/4b sites: mixed parity with odd sum absent
 }
 
-# Built-in standards: room-temperature lattice parameters in Å, each taken from
-# the license-clean source cited on its line (non-cubic entries: line above) —
-# NIST SRM certificates and NBS circulars/monographs (US public domain), the
-# Crystallography Open Database (COD, CC0), or primary literature (numerical
-# facts, cited for provenance). No values from proprietary compilations
-# (ICDD PDF, Pearson's Handbook).
+# Built-in standards: room-temperature lattice parameters in Å, cited per entry
+# from license-clean sources (NIST SRM, NBS circulars/monographs, COD, or
+# primary literature); no values from proprietary compilations. Non-cubic
+# entries carry their source on the line above.
 PHASE_LIBRARY = {
     # fcc metals
     "Au": {"a": 4.0782, "absences": "fcc"},  # COD 9008463 (Wyckoff 1963)
@@ -559,7 +557,7 @@ class Phase:
         return sorted(matches, key=lambda reflection: reflection["d_error"])
 
 
-# ========================= Center estimation =========================
+# Center estimation
 # --- Internal helpers ---
 def _bandpass(frame: np.ndarray, mask: np.ndarray | None = None, log: bool = True) -> np.ndarray:
     work = np.log1p(frame - frame.min()) if log else frame - frame.min()
@@ -826,7 +824,7 @@ def align_frames(
     return aligned, shifts, used
 
 
-# ========================= Reference-line matching =========================
+# Reference-line matching
 # out-of-tolerance pad cost
 _NO_MATCH_COST = 1.0e6
 
@@ -909,7 +907,7 @@ def match_sort_key(report: dict) -> tuple:
     )
 
 
-# ========================= Diffraction analysis =========================
+# Diffraction analysis
 BF_RADIUS_FRACTION = 0.125
 RING_FIT_MODELS = ("gaussian", "pseudo_voigt")
 
@@ -1941,9 +1939,7 @@ class ShowDiffraction(anywidget.AnyWidget):
     # Statistics
     dp_stats = traitlets.List(traitlets.Float(), default_value=[0.0, 0.0, 0.0, 0.0]).tag(sync=True)
 
-    # =========================================================================
-    # UI Visibility
-    # =========================================================================
+    # UI visibility
     show_title = traitlets.Bool(True).tag(sync=True)
     show_stats = traitlets.Bool(True).tag(sync=True)
     show_controls = traitlets.Bool(True).tag(sync=True)
@@ -3297,8 +3293,8 @@ class ShowDiffraction(anywidget.AnyWidget):
         """Rank library, custom, and extra phases against measured d-spacings.
 
         With ``custom_only`` (default: the ``identify_custom_only`` trait) the
-        library is skipped and only user candidates — custom phases plus
-        ``extra`` — are ranked.
+        library is skipped and only user candidates (custom phases plus
+        ``extra``) are ranked.
         """
         self._require_calibrated()
         observed = self._observed_d()
@@ -3871,7 +3867,6 @@ class ShowDiffraction(anywidget.AnyWidget):
         """Restore widget state from a dict; unknown keys are ignored."""
         deferred = {}
         for key, val in state.items():
-            # State restore
             if key not in self._STATE_FIELDS:
                 continue
             # measurement records last, so geometry restores do not resample them
@@ -3893,10 +3888,10 @@ class ShowDiffraction(anywidget.AnyWidget):
 
     def summary(self):
         """Print a text summary of calibration, spots, rings, and indexing."""
-        lines = [self.title or "ShowDiffraction", "═" * 32]
+        lines = [self.title or "ShowDiffraction"]
         lines.append(f"Frames:   {self.n_frames} (showing #{self.frame_idx})")
         k_info = f"{self.k_pixel_size:.4f} 1/Å/px" if self.k_calibrated else "uncalibrated"
-        lines.append(f"Detector: {self.det_rows}×{self.det_cols} ({k_info})")
+        lines.append(f"Detector: {self.det_rows}x{self.det_cols} ({k_info})")
         if self.k_calibrated:
             source = {
                 "from_phase": "phase",
@@ -3906,7 +3901,7 @@ class ShowDiffraction(anywidget.AnyWidget):
             cal = f"Calibration: {source}"
             if self.calibration_ref_d > 0:
                 cal += (
-                    f" (d={self.calibration_ref_d:.3f} Å @ r={self.calibration_ref_radius:.1f} px)"
+                    f" (d={self.calibration_ref_d:.3f} Å at r={self.calibration_ref_radius:.1f} px)"
                 )
             elif self.calibration_source == "from_phase":
                 cal += f" (rms {self.calibration_rms_px:.2f} px)"
@@ -3914,7 +3909,7 @@ class ShowDiffraction(anywidget.AnyWidget):
         if self.ellipse_ratio != 1.0:
             state = "corrected" if self.ellipse_corrected else "not corrected"
             lines.append(
-                f"Ellipse:  a/b={self.ellipse_ratio:.3f} @ {self.ellipse_angle:.1f}° ({state})"
+                f"Ellipse:  a/b={self.ellipse_ratio:.3f} at {self.ellipse_angle:.1f}° ({state})"
             )
         lines.append(
             f"Center:   ({self.center_row:.1f}, {self.center_col:.1f})  "
@@ -3929,7 +3924,7 @@ class ShowDiffraction(anywidget.AnyWidget):
                     label = f"d={d}"
                 else:
                     label = f"r={s['r_pixels']:.1f} px"
-                ang = f"  ∠={s['angle_deg']:.1f}°" if s.get("angle_deg") is not None else ""
+                ang = f"  angle={s['angle_deg']:.1f}°" if s.get("angle_deg") is not None else ""
                 hkl = f"  {s['hkl']}" if s.get("hkl") else ""
                 lines.append(f"  #{s['id']} ({s['row']:.1f}, {s['col']:.1f}) {label}{ang}{hkl}")
             if len(self.spots) > 5:

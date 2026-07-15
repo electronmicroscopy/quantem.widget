@@ -1,7 +1,7 @@
 /** ShowDiffraction browser-side measurement export.
  *
- * Mirrors the Python export schema (MEASUREMENT_COLUMNS, spot/ring records,
- * metadata block) so browser CSV/JSON downloads match export_measurements.
+ * Column schema kept in sync with the Python exporter so browser CSV/JSON
+ * downloads match the notebook output.
  */
 
 export const MEASUREMENT_COLUMNS = [
@@ -162,7 +162,7 @@ interface MetadataState {
   backgroundSubtracted: boolean;
 }
 
-/** Export metadata block matching Python's measurement_metadata. */
+/** Export metadata block for CSV/JSON downloads. */
 export function measurementMetadata(state: MetadataState): object {
   return {
     widget_name: "ShowDiffraction",

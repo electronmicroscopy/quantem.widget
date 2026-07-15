@@ -635,7 +635,7 @@ function ShowDiffraction() {
   const [showAzimuthal, setShowAzimuthal] = useModelState<boolean>("show_azimuthal");
   const [azimuthalData] = useModelState<DataView>("_azimuthal_data");
 
-  // Measurement export (schema mirrors Python export_measurements)
+  // CSV/JSON export; column schema kept in sync with the Python exporter
   const exportMeasurements = React.useCallback((format: "csv" | "json", kind: "spots" | "rings" | "all" = "all") => {
     const records = buildMeasurementRecords(
       kind === "rings" ? [] : spots || [],
