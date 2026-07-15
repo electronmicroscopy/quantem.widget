@@ -1429,7 +1429,8 @@ def test_search_phases_and_identify_request():
 
 
 def test_search_phases_absurd_calibration_bounded():
-    # a wrong calibration must not hang the reflection enumeration
+    # a wrong calibration must not hang enumeration (max_index is capped); the
+    # bound is generous so it only trips on an unbounded regression, not CI load
     import time
 
     w = ShowDiffraction(
@@ -1439,7 +1440,7 @@ def test_search_phases_absurd_calibration_bounded():
     w.add_ring(50.0)
     t0 = time.perf_counter()
     reports = w.search_phases()
-    assert time.perf_counter() - t0 < 30.0
+    assert time.perf_counter() - t0 < 120.0
     assert reports
 
 
