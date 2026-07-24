@@ -1,13 +1,5 @@
-/* Interactive widgets are wide. Give the article the full page width, drop the
-   right-hand in-page "Contents" sidebar, and let any still-wider output scroll
-   horizontally instead of being clipped. */
-
-/* Remove the secondary (right) table-of-contents sidebar. */
-.bd-sidebar-secondary,
-.bd-toc,
-div.bd-sidebar-secondary {
-  display: none !important;
-}
+/* Interactive widgets are wide. Give the article the full page width and let
+   any still-wider output scroll horizontally instead of being clipped. */
 
 /* Use the full available width for the page and article columns. */
 .bd-page-width,
@@ -15,6 +7,13 @@ div.bd-sidebar-secondary {
 .bd-article-container,
 .bd-article {
   max-width: 100% !important;
+}
+
+/* Contents sidebar toggle */
+@media (min-width: 960px) {
+  html.toc-hidden .bd-sidebar-secondary {
+    display: none !important;
+  }
 }
 
 /* Never clip a widget; scroll it if it is wider than the column. */

@@ -58,16 +58,17 @@ sphinx:
       - Quartz
     suppress_warnings:
       - "etoc.toctree"
-    # Drop the right-hand in-page "Contents" sidebar so wide widgets get the
-    # full column. custom.css enforces this and full-width article too.
+    # In-page Contents sidebar
     html_theme_options:
-      secondary_sidebar_items: []
+      secondary_sidebar_items: ["page-toc"]
     html_static_path:
       - "_static"
     html_extra_path:
       - "_extra"
     html_css_files:
       - custom.css
+    html_js_files:
+      - toc-toggle.js
     # Jupyter Book already injects the ipywidgets html-manager that rehydrates the
     # baked anywidget views, so we do NOT add our own embed-amd: a second manager
     # mounts every widget twice. (Confirmed: removing this kills the double render.)
