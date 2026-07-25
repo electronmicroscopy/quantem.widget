@@ -221,6 +221,57 @@ export class WebGPUFFT {
     return { real: realResult, imag: imagResult };
   }
   /**
+   * In-place 2D FFT on a caller-owned GPU buffer of interleaved complex data.
+   *
+   * `fft2D` owns its buffers: it uploads, dispatches, reads back, and destroys
+   * on every call, so a multi-stage pipeline built on it round-trips the whole
+   * array to the CPU at every stage boundary. This entry point does only the
+   * dispatches, letting a caller chain FFTs with other compute passes and read
+   * back once at the end. Width and height must already be powers of two and
+   * the buffer must hold width*height*2 floats.
+   */
+  async fft2DResident(
+    buffer: GPUBuffer, width: number, height: number, inverse: boolean = false,
+  ): Promise<void> {
+    await this.init();
+    if (width !== nextPow2(width) || height !== nextPow2(height)) {
+      throw new Error(`fft2DResident needs power-of-two dims, got ${width}x${height}`);
+    }
+    const log2Width = Math.log2(width), log2Height = Math.log2(height);
+    const paramsBuffer = this.device.createBuffer({
+      size: 24, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    const params = new ArrayBuffer(24);
+    const paramsU32 = new Uint32Array(params); const paramsF32 = new Float32Array(params);
+    const workgroupsX = Math.ceil(width / 16), workgroupsY = Math.ceil(height / 16);
+    const runPass = (pipeline: GPUComputePipeline) => {
+      const bindGroup = this.device.createBindGroup({
+        layout: pipeline.getBindGroupLayout(0),
+        entries: [{ binding: 0, resource: { buffer: paramsBuffer } }, { binding: 1, resource: { buffer } }],
+      });
+      const encoder = this.device.createCommandEncoder(); const pass = encoder.beginComputePass();
+      pass.setPipeline(pipeline); pass.setBindGroup(0, bindGroup);
+      pass.dispatchWorkgroups(workgroupsX, workgroupsY); pass.end();
+      this.device.queue.submit([encoder.finish()]);
+    };
+    paramsU32[0] = width; paramsU32[1] = height; paramsU32[2] = log2Width; paramsU32[3] = 0;
+    paramsF32[4] = inverse ? 1.0 : -1.0; paramsU32[5] = 1;
+    this.device.queue.writeBuffer(paramsBuffer, 0, params); runPass(this.pipelines2D!.bitReverseRows);
+    for (let stage = 0; stage < log2Width; stage++) {
+      paramsU32[3] = stage; this.device.queue.writeBuffer(paramsBuffer, 0, params);
+      runPass(this.pipelines2D!.butterflyRows);
+    }
+    paramsU32[2] = log2Height; paramsU32[3] = 0; paramsU32[5] = 0;
+    this.device.queue.writeBuffer(paramsBuffer, 0, params); runPass(this.pipelines2D!.bitReverseCols);
+    for (let stage = 0; stage < log2Height; stage++) {
+      paramsU32[3] = stage; this.device.queue.writeBuffer(paramsBuffer, 0, params);
+      runPass(this.pipelines2D!.butterflyCols);
+    }
+    if (inverse) runPass(this.pipelines2D!.normalize);
+    paramsBuffer.destroy();
+  }
+
+  /**
    * Batched 2D FFT: compute N forward FFTs with pipelined GPU submissions.
    * All images must have the same dimensions. Each image gets its own
    * submit (required because the params uniform changes per-pass), but
