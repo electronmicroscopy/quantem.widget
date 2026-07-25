@@ -1769,9 +1769,12 @@ function Show3DSlices() {
       setSliceAlignmentCached(true);
       sliceAlignmentCachedRef.current = true;
       sliceAlignmentModeRef.current = "auto";
+      // Name the backend: a silent CPU fallback is many times slower and would
+      // otherwise look identical to a WebGPU fit in the toolbar.
       setLocalAlignmentStatus(
         `Aligned row ${estimate.rowShiftPxPerSlice >= 0 ? "+" : ""}${estimate.rowShiftPxPerSlice.toFixed(3)} px/slice, `
-        + `col ${estimate.colShiftPxPerSlice >= 0 ? "+" : ""}${estimate.colShiftPxPerSlice.toFixed(3)} px/slice`,
+        + `col ${estimate.colShiftPxPerSlice >= 0 ? "+" : ""}${estimate.colShiftPxPerSlice.toFixed(3)} px/slice `
+        + `(${estimate.backend === "webgpu" ? "WebGPU" : "CPU fallback"})`,
       );
     } catch (err) {
       setLocalAlignmentStatus(`Alignment estimate failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -1798,7 +1801,12 @@ function Show3DSlices() {
       sliceAlignmentCachedRef.current = true;
       sliceAlignmentModeRef.current = "auto";
       lastAlignmentModeRef.current = "auto";
-      setLocalAlignmentStatus("");
+      // Re-enabling reuses the fit instead of paying for it again, but say so:
+      // a blank toolbar reads as "nothing happened".
+      setLocalAlignmentStatus(
+        `Aligned row ${auto.rowShift >= 0 ? "+" : ""}${auto.rowShift.toFixed(3)} px/slice, `
+        + `col ${auto.colShift >= 0 ? "+" : ""}${auto.colShift.toFixed(3)} px/slice (cached)`,
+      );
       return;
     }
     setSliceAlignment("auto");
@@ -3055,7 +3063,10 @@ function Show3DSlices() {
         ctx.drawImage(offscreen, 0, 0, srcW, srcH, 0, 0, cw, ch);
       }
     }
-  }, [allFloats, sliceX, sliceY, sliceZ, obliqueAngle, nx, ny, nz, cmap, logScale, autoContrast, zooms, sliceDims, canvasSizes, imageVminPct, imageVmaxPct, smooth, flip]);
+    // gpuSliceParams belongs here: toggling Align re-renders the offscreens with
+    // new depth shifts, but without this dependency the blit never re-runs and
+    // the visible canvases keep the previous alignment.
+  }, [allFloats, sliceX, sliceY, sliceZ, obliqueAngle, nx, ny, nz, cmap, logScale, autoContrast, zooms, sliceDims, canvasSizes, imageVminPct, imageVmaxPct, smooth, flip, gpuSliceParams]);
 
   // -------------------------------------------------------------------------
   // Render crosshair lines for the orthogonal slice intersections.
