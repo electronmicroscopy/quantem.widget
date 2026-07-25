@@ -5048,7 +5048,7 @@ function Show3DSlices() {
             <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>Colorbar displays a colorbar overlay on each slice canvas.</Typography>
             <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>Loop repeats playback. Drag end markers on slider for loop range.</Typography>
             <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>Bounce alternates forward and reverse playback.</Typography>
-            <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>Planes toggles the Top and angled vertical slice planes in the 3D volume view.</Typography>
+            <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>Planes toggles the Top and angled vertical slice planes, in the 3D volume view and as 2D panels.</Typography>
             <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>Align corrects a global tilt through depth: it fits one straight row/col drift per slice by registering adjacent slices, then shifts deeper slices back by that slope. Use it when a reconstruction leans through the stack so vertical columns look sheared in the side view. It is display-only - the stored volume is never modified - and Row/Col let you override the fitted slope by hand.</Typography>
             <Typography sx={{ fontSize: 11, fontWeight: "bold", mt: 0.5 }}>Keyboard</Typography>
             <KeyboardShortcuts items={[["Space", "Play / Pause"], ["← / →", "Active axis -/+"], ["↑ / ↓", "Angle -/+"], ["Home / End", "First / Last on active axis"], ["R", "Reset zoom"], ["Click panel", "Jump to voxel"], ["Scroll", "Zoom"], ["Dbl-click", "Reset view"]]} />
@@ -5202,7 +5202,13 @@ function Show3DSlices() {
           const { w: cw, h: ch, displayH: dh } = canvasSizes[a];
           const panelName = PANEL_NAMES[a] ?? "Slice";
           return (
-            <Box key={a} sx={{ minWidth: cw, gridArea: `a${a}` }}>
+            // Hidden with display:none rather than unmounted so the canvas refs
+            // and their painted contents survive - remounting would drop the
+            // direct-paint targets and force a full repaint on every toggle.
+            <Box
+              key={a}
+              sx={{ minWidth: cw, gridArea: `a${a}`, display: normalizedPlaneVisibility[a] ? undefined : "none" }}
+            >
               {/* Canvas with plane-colored border. dh = displayH (stretched for depth panels). */}
               <Box
                 ref={(el: HTMLDivElement | null) => { imageBoxRefs.current[a] = el; }}
