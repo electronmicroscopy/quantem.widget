@@ -1663,14 +1663,17 @@ function Show3DSlices() {
       explicit: false,
     };
   }, [obliqueProfileLine, nx, ny, sliceX, sliceY, obliqueAngle]);
-  const gpuSliceAlignment = React.useMemo(
-    () => alignmentActive
-      ? {
-        rowShift: liveRowShift,
-        colShift: liveColShift,
-        segment: { start: obliqueSegment.start, stop: obliqueSegment.stop },
-      }
-      : undefined,
+  // The oblique panel's geometry must reach the GPU slice shader on EVERY render,
+  // not only while alignment is on: the axis-3 shader walks from segment start to
+  // stop, so a missing segment collapses every output column onto voxel (0, 0, z)
+  // and the panel paints flat bands that ignore the angle and position sliders.
+  // Depth shifts stay zero unless alignment is active.
+  const gpuSliceParams = React.useMemo(
+    () => ({
+      rowShift: alignmentActive ? liveRowShift : 0,
+      colShift: alignmentActive ? liveColShift : 0,
+      segment: { start: obliqueSegment.start, stop: obliqueSegment.stop },
+    }),
     [alignmentActive, liveRowShift, liveColShift, obliqueSegment],
   );
   // SYNCHRONOUS data range (useMemo, not useState+effect). If this lands a frame
@@ -2353,8 +2356,8 @@ function Show3DSlices() {
     obliqueStartY: obliqueSegment.start.y,
     obliqueEndX: obliqueSegment.stop.x,
     obliqueEndY: obliqueSegment.stop.y,
-    rowShiftPxPerSlice: gpuSliceAlignment?.rowShift ?? 0,
-    colShiftPxPerSlice: gpuSliceAlignment?.colShift ?? 0,
+    rowShiftPxPerSlice: gpuSliceParams.rowShift,
+    colShiftPxPerSlice: gpuSliceParams.colShift,
     vmin: volTexRange.vmin, vmax: volTexRange.vmax,
   });
   volumeRenderParamsRef.current = {
@@ -2365,8 +2368,8 @@ function Show3DSlices() {
     obliqueStartY: obliqueSegment.start.y,
     obliqueEndX: obliqueSegment.stop.x,
     obliqueEndY: obliqueSegment.stop.y,
-    rowShiftPxPerSlice: gpuSliceAlignment?.rowShift ?? 0,
-    colShiftPxPerSlice: gpuSliceAlignment?.colShift ?? 0,
+    rowShiftPxPerSlice: gpuSliceParams.rowShift,
+    colShiftPxPerSlice: gpuSliceParams.colShift,
     vmin: volTexRange.vmin, vmax: volTexRange.vmax,
   };
   const bgColorRef = React.useRef<[number, number, number]>([0, 0, 0]);
@@ -2383,7 +2386,7 @@ function Show3DSlices() {
     const renderer = volumeRendererRef.current;
     if (!renderer || !volumeFloats || volumeFloats.length === 0) return;
     renderer.render(volumeRenderParamsRef.current, camera, bgColorRef.current, undefined, undefined, zStretch, orthographic);
-  }, [volumeFloats, sliceX, sliceY, sliceZ, obliqueAngle, obliqueSegment, nx, ny, nz, cmap, camera, volumeCanvasSize, tc.bg, slicePlaneMask, slicePlaneOpacity, volumeDrag, rendererReady, volTexRange, opacityA, zStretch, orthographic, flip, gpuSliceAlignment]);
+  }, [volumeFloats, sliceX, sliceY, sliceZ, obliqueAngle, obliqueSegment, nx, ny, nz, cmap, camera, volumeCanvasSize, tc.bg, slicePlaneMask, slicePlaneOpacity, volumeDrag, rendererReady, volTexRange, opacityA, zStretch, orthographic, flip, gpuSliceParams]);
 
   // First-frame paint guard: the very first synchronous render after the renderer
   // mounts can land before the canvas swapchain is ready (flush race) and commit a
@@ -2562,7 +2565,9 @@ function Show3DSlices() {
     setObliqueAngle(nextAngle);
     setObliqueProfileLine(profileLinePayload(start, stop));
     setObliquePositionBounds(null);
-    updateObliqueCenter((start.x + stop.x) / 2, (start.y + stop.y) / 2, nextAngle);
+    // Pass the freshly computed segment: the `obliqueSegment` default is a
+    // trait-derived memo that still holds the pre-drag geometry on this tick.
+    updateObliqueCenter((start.x + stop.x) / 2, (start.y + stop.y) / 2, nextAngle, { start, stop });
     scheduleLiveFft([1], { segment: { start, stop } });
     volumeRenderParamsRef.current = {
       ...volumeRenderParamsRef.current,
@@ -2766,12 +2771,12 @@ function Show3DSlices() {
     if (!allFloats || allFloats.length === 0) return;
 
     const prev = prevCacheRef.current;
-    const alignRowShift = gpuSliceAlignment?.rowShift ?? 0;
-    const alignColShift = gpuSliceAlignment?.colShift ?? 0;
-    const alignStartX = gpuSliceAlignment?.segment.start.x ?? 0;
-    const alignStartY = gpuSliceAlignment?.segment.start.y ?? 0;
-    const alignStopX = gpuSliceAlignment?.segment.stop.x ?? 0;
-    const alignStopY = gpuSliceAlignment?.segment.stop.y ?? 0;
+    const alignRowShift = gpuSliceParams.rowShift;
+    const alignColShift = gpuSliceParams.colShift;
+    const alignStartX = gpuSliceParams.segment.start.x;
+    const alignStartY = gpuSliceParams.segment.start.y;
+    const alignStopX = gpuSliceParams.segment.stop.x;
+    const alignStopY = gpuSliceParams.segment.stop.y;
     const globalChanged = allFloats !== prev.allFloats || cmap !== prev.cmap ||
       logScale !== prev.logScale || autoContrast !== prev.autoContrast ||
       imageVminPct !== prev.imageVminPct || imageVmaxPct !== prev.imageVmaxPct ||
@@ -2835,7 +2840,7 @@ function Show3DSlices() {
           flip,
           undefined,
           undefined,
-          gpuSliceAlignment,
+          gpuSliceParams,
         );
         if (bitmap) {
           let offscreen = sliceOffscreenRefs.current[a];
@@ -2870,14 +2875,14 @@ function Show3DSlices() {
       }
     }
     prevCacheRef.current = { sliceX, sliceY, sliceZ, cmap, logScale, autoContrast, imageVminPct, imageVmaxPct, imageRangeMin: displayDataRange.min, imageRangeMax: displayDataRange.max, allFloats, nx, ny, nz, traitVmin, traitVmax, flip, alignRowShift, alignColShift, alignStartX, alignStartY, alignStopX, alignStopY };
-  }, [allFloats, sliceX, sliceY, sliceZ, obliqueAngle, obliqueSegment, nx, ny, nz, cmap, logScale, autoContrast, sliceDims, imageVminPct, imageVmaxPct, displayDataRange, traitVmin, traitVmax, flip, cmapReady, gpuSliceAlignment]);
+  }, [allFloats, sliceX, sliceY, sliceZ, obliqueAngle, obliqueSegment, nx, ny, nz, cmap, logScale, autoContrast, sliceDims, imageVminPct, imageVmaxPct, displayDataRange, traitVmin, traitVmax, flip, cmapReady, gpuSliceParams]);
 
   // Snapshot of everything direct-paint needs, refreshed every render so the
   // slider handler (which fires faster than React commits) reads current values.
   React.useEffect(() => {
     paintParamsRef.current = {
       cmap, logScale, flip, autoContrast, imageVminPct, imageVmaxPct, imageDataRange: displayDataRange,
-      traitVmin, traitVmax, zooms, canvasSizes, smooth, alignment: gpuSliceAlignment,
+      traitVmin, traitVmax, zooms, canvasSizes, smooth, alignment: gpuSliceParams,
     };
   });
 
@@ -3702,6 +3707,19 @@ function Show3DSlices() {
       obliqueEndX: segment.stop.x,
       obliqueEndY: segment.stop.y,
     };
+    // Repaint the oblique panel straight from the resident GPU volume. The
+    // segment lives in anywidget model traits whose setters round-trip through
+    // the comm, and React batches those during a drag, so waiting for the render
+    // effect would only move the panel once the drag ENDS. Seeding the paint
+    // params with the segment we just computed keeps the panel live per frame.
+    const paint = paintParamsRef.current;
+    if (paint?.alignment) {
+      paintParamsRef.current = {
+        ...paint,
+        alignment: { ...paint.alignment, segment: { start: segment.start, stop: segment.stop } },
+      };
+    }
+    directPaintPlane(1, 0, "obliqueSegment");
     const renderer = volumeRendererRef.current;
     if (renderer && volumeFloats && volumeFloats.length > 0) {
       renderer.render(
