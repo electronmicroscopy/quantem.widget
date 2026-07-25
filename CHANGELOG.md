@@ -6,6 +6,40 @@ new `rcN` heading when that rc is published to TestPyPI.
 
 ## Unreleased
 
+- Show3DSlices oblique panel geometry is no longer tied to the Align control.
+  The GPU slice shader receives the cut's start/stop on every render, so the
+  Angle and Position sliders move the vertical cut whether or not slice
+  alignment is on. Previously, with Align off the shader received a degenerate
+  zero-length segment and every output column sampled the same corner voxel, so
+  the panel painted flat horizontal bands that ignored both sliders.
+- Show3DSlices oblique panel now repaints per drag frame, matching the slice
+  slider: the segment lives in comm-synced traits that React batches during a
+  drag, so the panel is direct-painted from the resident GPU volume instead of
+  waiting for the round-trip. Measured 8 of 8 mid-drag frames repainting where
+  3 of 8 did before.
+- Show3DSlices can estimate its global depth tilt in the browser. `Align` runs
+  the same registration the kernel does - median centering, Gaussian high pass,
+  Hann window, cross-correlation, upsampled-DFT subpixel refinement, linear fit
+  - entirely in WebGPU, so exported standalone HTML aligns a stack with no
+  Python attached and a live notebook skips a comm round-trip. The estimate is
+  GPU-resident: each slice uploads once and the spectra stay in device buffers,
+  so a 16 x 1688 x 1688 stack moves a few hundred KB back instead of about
+  1.2 GB. Fitted slopes match the kernel estimator to under 2e-3 px/slice on
+  real reconstructions, and the toolbar names the backend it used.
+- Show3DSlices `Planes` toggles now show and hide the matching 2D slice panel,
+  not just the plane inside the 3D volume view.
+- Show3DSlices Align toggle now repaints both slice panels when switched on or
+  off; the blit that copies each offscreen to its visible canvas had no
+  dependency on the alignment state, so the panels kept the previous shifts.
+- Show3DSlices reports the oblique plane center in fixed image pixels next to
+  Position. Position is measured along the plane normal, an axis that turns with
+  Angle, so its number moves under rotation even when the cut does not.
+
+- ShowPtycho on MPS now uses the phase/loss-only `quantem.gpu` SSB path for
+  interactive phase and loss updates instead of also accumulating the object
+  wave. On a private full 512x512 real-data Apple GPU timing gate this lowered
+  the prepared hot loop from about 229 ms to about 79 ms with only float32-level
+  loss differences.
 - Show4DSTEM WebGPU virtual-image/DPC mask construction now imports from the
   synced `quantem.gpu.webgpu` engine source; DPC row/col buttons can now use
   the browser WGSL backend even when no static DPC product maps were supplied.
