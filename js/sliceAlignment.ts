@@ -64,11 +64,55 @@ function gaussianKernel1d(sigma: number): Float32Array<ArrayBuffer> {
   return kernel;
 }
 
-/** Median of a copy, used to center each slice before registration. */
-function median(values: Float32Array): number {
-  const sorted = Float32Array.from(values).sort();
-  const mid = sorted.length >> 1;
-  return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+/**
+ * Partially reorder `values` so index `k` holds the value it would have after a
+ * full sort, and everything before it is no larger. Quickselect only recurses
+ * into the side containing `k`, so it is O(n) where a sort is O(n log n).
+ */
+function selectInPlace(values: Float32Array, k: number): number {
+  let left = 0;
+  let right = values.length - 1;
+  while (left < right) {
+    // Median-of-three pivot keeps already-sorted input off the O(n^2) path.
+    const middle = (left + right) >> 1;
+    if (values[middle] < values[left]) { const t = values[middle]; values[middle] = values[left]; values[left] = t; }
+    if (values[right] < values[left]) { const t = values[right]; values[right] = values[left]; values[left] = t; }
+    if (values[right] < values[middle]) { const t = values[right]; values[right] = values[middle]; values[middle] = t; }
+    const pivot = values[middle];
+    let i = left;
+    let j = right;
+    while (i <= j) {
+      while (values[i] < pivot) i++;
+      while (values[j] > pivot) j--;
+      if (i <= j) {
+        const t = values[i]; values[i] = values[j]; values[j] = t;
+        i++; j--;
+      }
+    }
+    if (k <= j) right = j;
+    else if (k >= i) left = i;
+    else break;
+  }
+  return values[k];
+}
+
+/**
+ * Median of a copy, used to center each slice before registration.
+ *
+ * Quickselect rather than a full sort: this runs once per slice on every pixel
+ * of the plane, and sorting 2.9M values per slice dominated the whole alignment
+ * estimate. The returned order statistic is identical either way.
+ */
+export function median(values: Float32Array): number {
+  const scratch = Float32Array.from(values);
+  const mid = scratch.length >> 1;
+  const upper = selectInPlace(scratch, mid);
+  if (scratch.length % 2) return upper;
+  // Even length averages the two central order statistics; everything below
+  // `mid` is already <= upper after the select, so the lower one is their max.
+  let lower = -Infinity;
+  for (let i = 0; i < mid; i++) if (scratch[i] > lower) lower = scratch[i];
+  return (lower + upper) / 2;
 }
 
 const BLUR_SHADER = /* wgsl */ `

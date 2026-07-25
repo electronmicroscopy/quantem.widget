@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { fft2d } from "./fft";
-import { estimateSliceAlignment } from "./sliceAlignment";
+import { estimateSliceAlignment, median } from "./sliceAlignment";
 
 /**
  * Mirrors `_texture` / `_fractionally_shifted_stack` in
@@ -107,5 +107,40 @@ describe("estimateSliceAlignment", () => {
     await expect(
       estimateSliceAlignment(new Float32Array(64), 8, 8, 1, null, null),
     ).rejects.toThrow(/at least 2 slices/);
+  });
+});
+
+describe("median", () => {
+  // The quickselect median must return exactly what a full sort would, or every
+  // registration image is centered on the wrong value.
+  function medianBySort(values: Float32Array): number {
+    const sorted = Float32Array.from(values).sort();
+    const mid = sorted.length >> 1;
+    return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+  }
+
+  it("matches a full sort across lengths and distributions", () => {
+    let seed = 12345;
+    const rand = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; };
+    for (const n of [1, 2, 3, 4, 5, 16, 17, 999, 1000, 4096, 100001]) {
+      for (const kind of ["random", "sorted", "reverse", "constant", "twovalue", "negative"]) {
+        const values = new Float32Array(n);
+        for (let i = 0; i < n; i++) {
+          values[i] = kind === "random" ? rand() * 200 - 100
+            : kind === "sorted" ? i
+            : kind === "reverse" ? n - i
+            : kind === "constant" ? 7
+            : kind === "twovalue" ? (i % 2 ? -3 : 11)
+            : -rand() * 50;
+        }
+        expect(median(values), `n=${n} ${kind}`).toBe(medianBySort(values));
+      }
+    }
+  });
+
+  it("does not modify its input", () => {
+    const values = Float32Array.from([5, 1, 4, 2, 3]);
+    median(values);
+    expect(Array.from(values)).toEqual([5, 1, 4, 2, 3]);
   });
 });
