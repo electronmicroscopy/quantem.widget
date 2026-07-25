@@ -3127,16 +3127,27 @@ function Show4DSTEM() {
         if (show4DSTEMHasLocalFiles() && /_master\.h5(?:[?#].*)?$/.test(sourceUrl)) {
           try {
             if (!disposed) setOfflineBackendStatus(`Loading local ${label}`);
+            const sourceScanRows = show4DSTEMOptionalGlobalInt("__QT_H5_SOURCE_SCAN_ROWS", 1, 100000) ?? scanRows;
+            const sourceScanCols = show4DSTEMOptionalGlobalInt("__QT_H5_SOURCE_SCAN_COLS", 1, 100000) ?? scanCols;
+            const scanRegion = show4DSTEMOptionalGlobalRegion("__QT_H5_SCAN_REGION");
             const local = await loadShow4DSTEMLocalH5Master(sourceUrl, {
-              scanRows,
-              scanCols,
+              scanRows: sourceScanRows,
+              scanCols: sourceScanCols,
+              scanRegion,
               embeddedBadPixelsJson: embeddedBadPxJson,
               decodeBatch: show4DSTEMOptionalGlobalInt("__QT_H5_DECODE_BATCH", 1, 16),
               groupSize: show4DSTEMOptionalGlobalInt("__QT_H5_LOCAL_GROUP", 1, 16),
               workerCount: show4DSTEMOptionalGlobalInt("__QT_H5_LOCAL_WORKERS", 0, 8),
+              detBin: show4DSTEMOptionalGlobalInt("__QT_H5_DET_BIN", 1, 16),
+              // Lossless decode override ("u2"/"uint16"/"native"): routes to the fused
+              // native-uint16 kernel so counts above 255 survive (the u8 default wraps).
+              decodeDtype: (globalThis as { __QT_H5_DECODE_DTYPE?: unknown }).__QT_H5_DECODE_DTYPE as
+                Parameters<typeof loadShow4DSTEMLocalH5Master>[1] extends infer O
+                  ? O extends { decodeDtype?: infer D } ? D : undefined
+                  : undefined,
             });
             if (local) {
-              const bytesPerPixel = local.profile.decodeDtype === "float32" ? 4 : 1;
+              const bytesPerPixel = local.mode === 2 ? 4 : local.mode === 0 ? 2 : 1;
               const decodedGB = local.profile.frames * local.detSize * bytesPerPixel / 1e9;
               (window as unknown as { __loadprof: unknown }).__loadprof = {
                 ...local.profile,
