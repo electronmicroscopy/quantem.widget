@@ -4716,6 +4716,11 @@ function Show3DSlices() {
     window.addEventListener("pointerup", onUp, true);
   };
   const obliqueCurrentOffset = obliqueCenterOffset(nx, ny, obliqueAngle, obliqueSegment.start, obliqueSegment.stop);
+  // Plane center in image coordinates. Position measures along the plane normal,
+  // which turns with Angle, so its number moves on rotation even when the cut
+  // does not; the center is stated in fixed image pixels instead.
+  const obliqueCenterCol = (obliqueSegment.start.x + obliqueSegment.stop.x) / 2;
+  const obliqueCenterRow = (obliqueSegment.start.y + obliqueSegment.stop.y) / 2;
   const [obliqueDeltaMin, obliqueDeltaMax] = obliqueSegmentOffsetBounds(
     nx,
     ny,
@@ -5391,6 +5396,24 @@ function Show3DSlices() {
                       />
                       <Typography sx={{ ...typography.value, color: tc.textMuted, minWidth: 36, textAlign: "right", flexShrink: 0 }}>
                         {boundedObliqueOffset}
+                      </Typography>
+                    </Box>
+                    {/* Position is measured along the plane normal, an axis that
+                        turns with Angle, so it shifts on rotation even when the cut
+                        has not moved. The center reports the same plane in fixed
+                        image pixels. It holds steady while a rotation leaves the
+                        chord inside the image; near an edge the endpoint clamp in
+                        handleObliqueAngleChange shortens the segment and does move
+                        the midpoint, so the center shifts there too. */}
+                    <Box sx={{ display: "flex", alignItems: "center", gap: `${SPACING.SM}px`, minHeight: 14 }}>
+                      <Typography
+                        sx={{ ...controlLabel, color: tc.textMuted, flexShrink: 0, minWidth: 42 }}
+                        title="Plane center in image pixels. Steady under rotation unless the cut is clamped at an image edge."
+                      >
+                        Center
+                      </Typography>
+                      <Typography sx={{ ...typography.value, color: tc.textMuted, flexShrink: 0 }}>
+                        {`(${Math.round(obliqueCenterRow)}, ${Math.round(obliqueCenterCol)})`}
                       </Typography>
                     </Box>
                   </>
