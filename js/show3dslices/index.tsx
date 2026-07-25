@@ -916,6 +916,8 @@ const upwardMenuProps = {
 import { COLORMAPS, COLORMAP_NAMES, renderToOffscreen, renderToOffscreenReuse, createGPUColormapEngine, GPUColormapEngine } from "../colormaps";
 
 import { WebGPUFFT, getWebGPUFFT, fft2d, fftshift, nextPow2, computeMagnitude, autoEnhanceFFT, applyHannWindow2D } from "../fft";
+import { getGPUDevice } from "../fft";
+import { estimateSliceAlignment } from "../sliceAlignment";
 
 // ============================================================================
 // Zoom constants (matching Show3D)
@@ -1730,6 +1732,54 @@ function Show3DSlices() {
     lastAlignmentModeRef.current = "auto";
     setSliceAlignmentRequest(JSON.stringify({ mode: "estimate", id, panel: safeActivePanel }));
   };
+  const alignmentEstimateBusyRef = React.useRef(false);
+  /**
+   * Fit the global row/col drift from the volume already loaded in the browser.
+   * Runs the same algorithm as the kernel estimator, so an exported HTML can
+   * align a stack with no Python attached; falls back to the kernel only when
+   * there is no volume in hand to fit.
+   */
+  const runBrowserSliceAlignmentEstimate = async () => {
+    if (alignmentEstimateBusyRef.current) return;
+    const floats = allFloats;
+    if (!floats || floats.length === 0 || nz < 2) {
+      if (!offline) requestSliceAlignmentEstimate();
+      return;
+    }
+    alignmentEstimateBusyRef.current = true;
+    lastAlignmentModeRef.current = "auto";
+    setLocalAlignmentStatus("Estimating slice alignment...");
+    try {
+      const planeCount = nx * ny * nz;
+      const panelOffset = safeActivePanel * planeCount;
+      const panelVolume = floats.subarray(panelOffset, panelOffset + planeCount);
+      const estimate = await estimateSliceAlignment(
+        panelVolume, nx, ny, nz, gpuFFTRef.current, await getGPUDevice(),
+      );
+      autoAlignmentRef.current = {
+        cached: true,
+        rowShift: estimate.rowShiftPxPerSlice,
+        colShift: estimate.colShiftPxPerSlice,
+      };
+      setLiveRowShift(estimate.rowShiftPxPerSlice);
+      setLiveColShift(estimate.colShiftPxPerSlice);
+      alignmentPreviewRef.current?.(estimate.rowShiftPxPerSlice, estimate.colShiftPxPerSlice);
+      setRowShiftPxPerSlice(estimate.rowShiftPxPerSlice);
+      setColShiftPxPerSlice(estimate.colShiftPxPerSlice);
+      setSliceAlignmentCached(true);
+      sliceAlignmentCachedRef.current = true;
+      sliceAlignmentModeRef.current = "auto";
+      setLocalAlignmentStatus(
+        `Aligned row ${estimate.rowShiftPxPerSlice >= 0 ? "+" : ""}${estimate.rowShiftPxPerSlice.toFixed(3)} px/slice, `
+        + `col ${estimate.colShiftPxPerSlice >= 0 ? "+" : ""}${estimate.colShiftPxPerSlice.toFixed(3)} px/slice`,
+      );
+    } catch (err) {
+      setLocalAlignmentStatus(`Alignment estimate failed: ${err instanceof Error ? err.message : String(err)}`);
+      setSliceAlignment("off");
+    } finally {
+      alignmentEstimateBusyRef.current = false;
+    }
+  };
   const handleSliceAlignmentToggle = (on: boolean) => {
     if (!on) {
       setSliceAlignment("off");
@@ -1751,12 +1801,11 @@ function Show3DSlices() {
       setLocalAlignmentStatus("");
       return;
     }
-    if (offline) {
-      setLocalAlignmentStatus("Estimate alignment in a live notebook before export.");
-      return;
-    }
     setSliceAlignment("auto");
-    requestSliceAlignmentEstimate();
+    // Estimate in the browser. The volume is already here for slice rendering,
+    // so WebGPU can fit the drift without a kernel - which is the only option in
+    // an exported HTML, and saves a comm round-trip when a kernel IS attached.
+    runBrowserSliceAlignmentEstimate();
   };
   const commitManualSliceAlignment = (rowShift: number, colShift: number) => {
     if (alignmentRafRef.current != null) {
@@ -4800,9 +4849,7 @@ function Show3DSlices() {
     Math.ceil(Math.max(nx, ny) / Math.max(1, nz - 1)),
   );
   const alignmentStatusText = localAlignmentStatus || (
-    !sliceAlignmentCached && alignmentActive
-      ? "Estimating..."
-      : offline && !sliceAlignmentCached ? "Estimate in notebook before export." : ""
+    !sliceAlignmentCached && alignmentActive ? "Estimating..." : ""
   );
   const topRightActions = (
     <Box sx={{
@@ -5002,6 +5049,7 @@ function Show3DSlices() {
             <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>Loop repeats playback. Drag end markers on slider for loop range.</Typography>
             <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>Bounce alternates forward and reverse playback.</Typography>
             <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>Planes toggles the Top and angled vertical slice planes in the 3D volume view.</Typography>
+            <Typography sx={{ fontSize: 11, lineHeight: 1.4 }}>Align corrects a global tilt through depth: it fits one straight row/col drift per slice by registering adjacent slices, then shifts deeper slices back by that slope. Use it when a reconstruction leans through the stack so vertical columns look sheared in the side view. It is display-only - the stored volume is never modified - and Row/Col let you override the fitted slope by hand.</Typography>
             <Typography sx={{ fontSize: 11, fontWeight: "bold", mt: 0.5 }}>Keyboard</Typography>
             <KeyboardShortcuts items={[["Space", "Play / Pause"], ["← / →", "Active axis -/+"], ["↑ / ↓", "Angle -/+"], ["Home / End", "First / Last on active axis"], ["R", "Reset zoom"], ["Click panel", "Jump to voxel"], ["Scroll", "Zoom"], ["Dbl-click", "Reset view"]]} />
           </Box>} theme={themeInfo.theme} />
@@ -5468,7 +5516,6 @@ function Show3DSlices() {
               <Switch
                 checked={alignmentActive}
                 onChange={(e) => handleSliceAlignmentToggle(e.target.checked)}
-                disabled={offline && !sliceAlignmentCached}
                 size="small"
                 sx={switchStyles.small}
                 inputProps={{ "aria-label": "Align slices with automatic global slice alignment" }}
