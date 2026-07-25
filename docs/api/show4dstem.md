@@ -487,6 +487,129 @@ The interactive section offers a size-sorted ladder of `uint8`/`uint16`,
 real-space-bin, and detector-bin presets so users can choose between a quick
 preview, a practical offline browser file, and exact raw 4D HTML deliberately.
 
+## Local HDF5 source: no-server WebGPU viewer
+
+The third export shape embeds no pixels at all. The HDF5 files stay on disk, the
+exported page carries only widget state, and the browser reads the compressed
+detector chunks itself and decodes bitshuffle-LZ4 in WebGPU. At view time there
+is no Python, no kernel, and no server: open the page, grant the folder, drive
+the widget.
+
+Use this when the recipient has the raw `*_master.h5` family and wants the real
+data rather than a report or a binned copy.
+
+### Build the viewer
+
+```python
+import numpy as np
+from quantem.widget import Show4DSTEM
+
+viewer = Show4DSTEM(
+    np.zeros((1, 1, 1, 1), dtype=np.uint8),  # placeholder; pixels come from the H5
+    h5_url="<dataset>_master.h5",            # resolved by basename against granted files
+    scan_shape=(512, 512),                   # required for an H5 source
+    detector_shape=(192, 192),               # required for an H5 source
+    backend="webgpu",
+    h5_uint8_lossless=True,                  # see "the low8 gate" below
+)
+viewer.export_html("viewer.html")
+```
+
+`h5_url` is stored as written and matched against the granted files by basename,
+so a bare file name is correct and keeps the page portable. `h5_urls=[...]`
+takes several masters and presents them as compare panels.
+
+### The low8 gate
+
+`h5_uint8_lossless=True` is not a cosmetic dtype hint. It sets
+`__BSLZ4_LOW8_ONLY`, which is the gate on the entire frame-cooperative low8
+decode family in the WGSL decoder. Without it the loader selects the
+`fused-clip-u8` kernel and every read-orchestration knob below is worth about
+2%. With it the decoder switches to `fused-frame-coop-low8`, and decode
+throughput rises roughly five-fold.
+
+Measured on one real `512x512x192x192` Arina-class acquisition (27 bslz4 data
+files, 2.84 GB compressed, 9.7 GB decoded stack) on an Apple GPU, full load to
+interactive:
+
+| Configuration | Load |
+|---|---|
+| Served over HTTP, defaults | 4.17 s |
+| Local files, defaults | 5.01 s |
+| Local files, tuning globals only, no low8 gate | 4.88 s |
+| Local files, tuning globals **and** `h5_uint8_lossless=True` | **1.34 s** |
+
+Virtual-image and diffraction statistics were bit-identical between the slow and
+fast runs, so the low8 path was lossless for that acquisition.
+
+```{warning}
+`h5_uint8_lossless=True` is an assertion, not an audit. Nothing verifies it.
+It is lossless only when every corrected detector count fits in 8 bits, which
+holds for electron-counting detectors at typical dose and does not hold for
+integrating detectors or high-dose acquisitions. Scan the data first; if any
+good-pixel count exceeds 255, leave the flag off and accept the slower path,
+because the fast kernel would clip. Exclude the detector bad-pixel sentinel
+(`0xFFFF`) from that scan using the master's `pixel_mask`, or every frame will
+look saturated.
+```
+
+### Tuning globals
+
+The loader reads its tuning from `globalThis` at page load. These are not yet
+plumbed through Python, so an exported page carries them by injecting a script
+into `<head>` before the widget bundle:
+
+```html
+<script>
+globalThis.__BSLZ4_FRAME_LOW8 = true;   // frame-cooperative low8 decoder
+globalThis.__BSLZ4_FRAME_WG = 32;       // WGSL workgroup size
+globalThis.__QT_H5_LOCAL_GROUP = 8;     // data files decoded per group
+globalThis.__QT_H5_LOCAL_WORKERS = 8;   // read workers
+</script>
+```
+
+`wg32`, group `8`, and worker count `8` are the promoted full-load values. Crop
+loads prefer group `4` and a smaller worker count. The full knob list, including
+`__QT_H5_DET_BIN`, `__QT_H5_SCAN_REGION`, and the remaining `__BSLZ4_*` decoder
+switches, lives in `quantem.gpu`; see its
+`docs/maintainer/backend-optimization-matrix.md` for the sweep evidence behind
+each promoted value.
+
+### What does not move the needle
+
+- **Block-index and frame-index sidecars.** `.qh5idx` files cut parse time but
+  improve full-stack local load by about 1%, because file read, compressed
+  upload, and WGSL decode dominate. They are a prerequisite for selected-block
+  product layouts, not a load-time fix.
+- **Transport.** Local files were slightly slower than HTTP at equal settings.
+  The decode kernel, not the byte source, sets the floor.
+
+```{note}
+Show4DSTEM reads `.qh5idx` block-index sidecars. ShowPtycho writes a different
+format, `*.chunks.u64`. They are not interchangeable, and a bundle carrying only
+the ShowPtycho sidecars gives Show4DSTEM no index at all, which shows up in the
+load profile as `blockIndexFiles: 0` and `parseMode: "h5-btree"`.
+```
+
+### Opening the page
+
+The **Local H5** button appears next to the diffraction panel whenever the
+widget has an H5 source. It tries `showDirectoryPicker` first and falls back to
+a multi-select file input, so the recipient either grants the folder once or
+selects the master plus its `_data_*.h5` siblings together. A master selected
+without its data siblings cannot resolve them; prefer the folder path.
+
+Confirm the load actually took the fast path by reading `window.__loadprof` in
+the console. `decodeVariant` should contain `fused-frame-coop-low8`, and
+`softwareAdapter` must be `false` — a software adapter makes every timing here
+meaningless.
+
+```{warning}
+The exported page currently loads `require.js` and the Jupyter widgets HTML
+manager from public CDNs, so a first open needs network access. Vendor both
+scripts next to the page before relying on it somewhere offline.
+```
+
 ## Reference
 
 ```{eval-rst}

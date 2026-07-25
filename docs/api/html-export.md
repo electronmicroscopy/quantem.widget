@@ -124,7 +124,7 @@ browse-quality or count-preserving.
 | Show2D | yes | `single` | `full`, `uint8` | planned | no | `uint8` stores display-scaled image data |
 | Show3D | yes | `single`; large reviews use `export_sidecar(...)` folder output | `full`, `uint8` | planned | yes, via `export_sidecar(...)` | `uint8` stores display-scaled volume data; folder output keeps the viewer HTML small and loads the stack from a nearby data file. See the [advanced tutorial](../tutorials/advanced.md) for the full-resolution folder workflow. |
 | Show3DSlices | yes | `single` | `full`, `uint8` | planned | no | `uint8` stores display-scaled volume data |
-| Show4DSTEM | yes | `single`, `folder` when data already uses a companion folder | `uint8`, `full` | `1`, `2`, `4`, `8` | sometimes | `uint8` detector downsample uses mean for compact browse export; full/uint16 export should document whether downsample is count-preserving sum or display-stable mean |
+| Show4DSTEM | yes | `single`, `folder` when data already uses a companion folder, plus a no-server local HDF5 source | `uint8`, `full` | `1`, `2`, `4`, `8` | sometimes | `uint8` detector downsample uses mean for compact browse export; full/uint16 export should document whether downsample is count-preserving sum or display-stable mean. Passing `h5_url=`/`h5_urls=` embeds no pixels at all: the browser reads the `*_master.h5` family off disk and decodes bslz4 in WebGPU. See [Local HDF5 source](show4dstem.md#local-hdf5-source-no-server-webgpu-viewer) for the build recipe, the `h5_uint8_lossless` gate, and the tuning globals. |
 | ShowEDS | yes | `single`, `folder` | `full` | `2`, `4` | yes | count-preserving sum downsample across spatial and energy axes |
 
 The public Python calls are:

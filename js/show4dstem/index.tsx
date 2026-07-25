@@ -4371,6 +4371,84 @@ function Show4DSTEM() {
         setOfflineBackendStatus("");
         setOfflineBackendLoading(false);
       }
+      // Fit the BF disk from the mean diffraction pattern before the presets warm.
+      // On the H5/WebGPU path Python never holds the pixels, so bf_radius keeps the
+      // det_size/8 guess and every BF/ABF/ADF preset samples the wrong disk: on real
+      // Arina data the true radius was 54 px against a 24 px guess, so "ADF" at twice
+      // bf_radius still sat inside the bright field. The pixels only exist in the
+      // browser, so the fit has to happen here.
+      const fitBfDiskFromMeanDp = async (): Promise<void> => {
+        if (!compute || disposed) return;
+        // Only override the ratio guess; an explicit user bf_radius must win.
+        const current = Number(model.get("bf_radius") || 0);
+        const ratioGuess = Math.min(detR, detC) * 0.125;
+        if (Math.abs(current - ratioGuess) > 0.51) return;
+        // A few thousand scan positions fix the disk edge; reducing all of them would
+        // read the whole stack and delay first paint for no extra accuracy.
+        const scanCount = scanRows * scanCols;
+        const stride = Math.max(1, Math.floor(scanCount / 16384));
+        const scanMask = new Uint32Array(scanCount);
+        for (let i = 0; i < scanCount; i += stride) scanMask[i] = 1;
+        const dp = await compute.reduceFrames(scanMask, true);
+        if (disposed || !dp || dp.length !== detR * detC) return;
+        let peak = -Infinity;
+        for (let i = 0; i < dp.length; i++) if (dp[i] > peak) peak = dp[i];
+        const median = Float32Array.from(dp).sort()[dp.length >> 1];
+        const threshold = 0.5 * (peak + median);
+        // Intensity-weighted centroid of the disk interior gives a sub-pixel centre;
+        // the beam is not exactly on the detector centre (measured 94.4, 96.6).
+        let weight = 0, rowSum = 0, colSum = 0;
+        for (let row = 0; row < detR; row++) {
+          for (let col = 0; col < detC; col++) {
+            const value = dp[row * detC + col];
+            if (value >= threshold) { weight += value; rowSum += row * value; colSum += col * value; }
+          }
+        }
+        if (!(weight > 0)) return;
+        const centerRow = rowSum / weight, centerCol = colSum / weight;
+        // Radial profile, then the half-max crossing: the disk is flat inside and
+        // falls off a cliff at the edge, so half-max is stable against hot pixels.
+        const maxRadius = Math.ceil(Math.hypot(
+          Math.max(centerRow, detR - centerRow), Math.max(centerCol, detC - centerCol)));
+        const radialSum = new Float64Array(maxRadius + 1);
+        const radialCount = new Float64Array(maxRadius + 1);
+        for (let row = 0; row < detR; row++) {
+          for (let col = 0; col < detC; col++) {
+            const radius = Math.round(Math.hypot(row - centerRow, col - centerCol));
+            if (radius <= maxRadius) { radialSum[radius] += dp[row * detC + col]; radialCount[radius] += 1; }
+          }
+        }
+        const profile = new Float64Array(maxRadius + 1);
+        for (let i = 0; i <= maxRadius; i++) profile[i] = radialCount[i] ? radialSum[i] / radialCount[i] : 0;
+        // Only radii that actually contain detector pixels carry a profile value. A
+        // sub-pixel centre usually leaves the radius-0 bin empty, and an empty bin
+        // reads as zero, which would otherwise look like the disk edge at r=0.
+        const filled: number[] = [];
+        for (let i = 0; i <= maxRadius; i++) if (radialCount[i] > 0) filled.push(i);
+        if (filled.length < 8) return;
+        const plateau = (profile[filled[0]] + profile[filled[1]] + profile[filled[2]]) / 3;
+        let background = 0, backgroundCount = 0;
+        for (const i of filled.slice(-10)) { background += profile[i]; backgroundCount++; }
+        background = backgroundCount ? background / backgroundCount : 0;
+        const halfMax = 0.5 * (plateau + background);
+        let edge = 0;
+        for (const i of filled) { if (i >= 2 && profile[i] < halfMax) { edge = i; break; } }
+        if (edge <= 1 || edge >= maxRadius) return;
+        const previousBf = current;
+        model.set("center_row", centerRow);
+        model.set("center_col", centerCol);
+        model.set("bf_radius", edge);
+        // roi_radius mirrors bf_radius at construction; keep it on the fitted disk
+        // unless the user has already moved it.
+        if (Math.abs(Number(model.get("roi_radius") || 0) - previousBf) < 0.51) {
+          model.set("roi_radius", edge);
+          model.set("roi_center_row", centerRow);
+          model.set("roi_center_col", centerCol);
+        }
+      };
+      await fitBfDiskFromMeanDp().catch((error) => {
+        console.warn("Show4DSTEM BF disk fit failed; keeping the default bf_radius", error);
+      });
       scheduleWarmStandardViCache();
       // Safety re-run: at first mount the offline stack / roi-detector traits can
       // still be settling, so the very first maskedSum can return an empty (zero)
