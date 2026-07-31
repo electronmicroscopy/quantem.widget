@@ -78,6 +78,8 @@ parts:
       - file: maintainer/index
         title: Maintainer guide
         sections:
+          - file: maintainer/docs-design
+            title: Docs design rules
           - file: changelog
             title: Changelog
           - file: maintainer/widget-release
