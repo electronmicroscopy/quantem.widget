@@ -4167,6 +4167,8 @@ class Show3D(WatchedImageFolderMixin, StaticFallbackMixin, anywidget.AnyWidget):
             "debug": self.debug,
             "show_controls": self.show_controls,
             "controls_collapsed": self.controls_collapsed,
+            "hideable": self.hideable,
+            "hidden_indices": list(self.hidden_indices),
             "max_cols": self.max_cols,
             "panel_gap": self.panel_gap,
             "inter_panel_gap_px": int(self.inter_panel_gap_px),

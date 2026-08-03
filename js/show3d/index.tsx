@@ -3129,7 +3129,19 @@ function Show3D() {
     u8: Uint8Array;
   } | null>(null);
   const [sidecarRamReady, setSidecarRamReady] = React.useState(false);
-  const [offlineStackFetchStatus, setOfflineStackFetchStatus] = React.useState<string>("");
+  const [offlineStackFetchStatus, setOfflineStackFetchStatusVisible] = React.useState<string>("");
+  // A display cache is an internal playback optimization, not report UI. In
+  // particular, updating a visible cache counter during its build causes extra
+  // React work precisely while the browser is preparing a smooth scrub/play
+  // path. Keep genuine sidecar-load messages and errors, but make all cache
+  // work silent and clear any preceding load message as it begins.
+  const setOfflineStackFetchStatus = React.useCallback((status: string) => {
+    if (/(?:display|playback) cache/i.test(status)) {
+      setOfflineStackFetchStatusVisible("");
+      return;
+    }
+    setOfflineStackFetchStatusVisible(status);
+  }, []);
   const sidecarMode = Boolean(
     (offlineStackUrl || "").trim()
     && !(offlineStackTrait && offlineStackTrait.byteLength > 0),
