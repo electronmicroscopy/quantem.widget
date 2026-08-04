@@ -118,4 +118,24 @@ def test_linked_zoom_preserves_unlinked_panel_auto_contrast(tmp_path):
         page.wait_for_timeout(300)
         reset = _anchor_patch(page)
         assert reset["median"] == before["median"]
+
+        # Hovering a panel reveals its top-left hide action without a Python
+        # option. Hiding repacks the visible gallery and the Panels menu can
+        # always restore it.
+        page.mouse.move(box["x"] + box["width"] / 4, box["y"] + box["height"] / 4)
+        page.wait_for_timeout(200)
+        hide_bf = page.get_by_role("button", name="Hide BF")
+        assert hide_bf.count() == 1
+        assert hide_bf.evaluate("el => getComputedStyle(el).opacity") == "1"
+        hide_bf.click()
+        page.wait_for_function(
+            "() => window.__quantemShow3DPerf?.embeddedPackedViewportPaint?.visibleCount === 2"
+        )
+
+        page.get_by_role("button", name="Choose visible panels").click()
+        page.get_by_text("Show all panels", exact=True).click()
+        page.wait_for_function(
+            "() => window.__quantemShow3DPerf?.embeddedPackedViewportPaint?.visibleCount === 3"
+        )
+        assert page_errors == []
         browser.close()

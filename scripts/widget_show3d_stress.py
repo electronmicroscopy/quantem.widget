@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""Stress-test Show3D exported HTML and folder exports in Chromium.
+"""Stress-test current Show3D HTML and legacy folder exports in Chromium.
 
 This is a local-only maintainer gate for real Show3D reports. It can open
-existing exact single-file HTML exports, serve Show3D folder exports with HTTP
-Range support, and generate a temporary sidecar export from an existing
-standalone Show3D HTML so the same dataset is exercised through both browser
-paths.
+current portable single-file HTML exports and serve already-created legacy
+Show3D folder exports with HTTP Range support. It does not create new sidecar
+exports.
 """
 
 from __future__ import annotations
@@ -26,7 +25,6 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
-import numpy as np
 from playwright.sync_api import sync_playwright
 
 from serve_sidecar_range import RangeRequestHandler
@@ -162,131 +160,6 @@ def _show3d_metadata_from_html(html_path: Path) -> dict[str, Any]:
     }
 
 
-def _decode_show3d_stack(html_path: Path, *, max_decode_mb: float) -> tuple[np.ndarray, dict[str, Any], dict[str, Any]]:
-    traits, model = _extract_widget_state(html_path)
-    n_slices = int(traits.get("n_slices", 0) or 0)
-    height = int(traits.get("height", 0) or 0)
-    width = int(traits.get("width", 0) or 0)
-    n_panels = int(traits.get("n_panels", 1) or 1)
-    if min(n_slices, height, width, n_panels) <= 0:
-        raise ValueError(
-            f"Show3D export has invalid shape n_slices={n_slices}, height={height}, "
-            f"width={width}, n_panels={n_panels}"
-        )
-
-    raw = _buffer_by_trait(model, "_offline_float_stack")
-    encoding = "float32"
-    channels = 1
-    if not raw:
-        raw = _buffer_by_trait(model, "_offline_stack")
-        encoding = "uint8"
-    if not raw:
-        raise ValueError(f"{html_path} has no embedded offline stack to convert into a sidecar")
-    raw_mb = len(raw) / 1024 / 1024
-    if raw_mb > float(max_decode_mb):
-        raise ValueError(
-            f"Refusing to decode {raw_mb:.1f} MB from {html_path}; "
-            f"raise --max-decode-mb if this local stress run has enough RAM."
-        )
-
-    expected = n_slices * height * width
-    if encoding == "float32":
-        arr = np.frombuffer(raw, dtype=np.float32)
-        if arr.size == expected * 3:
-            channels = 3
-            stack = arr.reshape(n_slices, height, width, 3)
-        elif arr.size == expected:
-            stack = arr.reshape(n_slices, height, width)
-        else:
-            raise ValueError(f"float32 offline stack has {arr.size} values, expected {expected} or {expected * 3}")
-    else:
-        arr = np.frombuffer(raw, dtype=np.uint8)
-        if arr.size == expected * 3:
-            channels = 3
-            stack = arr.reshape(n_slices, height, width, 3).astype(np.float32) / 255.0
-        elif arr.size == expected:
-            stack = arr.reshape(n_slices, height, width).astype(np.float32)
-        else:
-            raise ValueError(f"uint8 offline stack has {arr.size} values, expected {expected} or {expected * 3}")
-
-    metadata = {
-        "path": str(html_path),
-        "source_encoding": encoding,
-        "decoded_mb": round(raw_mb, 3),
-        "n_slices": n_slices,
-        "height": height,
-        "width": width,
-        "n_panels": n_panels,
-        "panel_width_px": int(traits.get("panel_width_px", 0) or 0),
-        "channels": channels,
-        "title": traits.get("title", ""),
-    }
-    return stack, traits, metadata
-
-
-def _generate_sidecar_from_html(html_path: Path, out_dir: Path, *, max_decode_mb: float) -> TargetSpec:
-    from quantem.widget import Show3D
-
-    stack, traits, metadata = _decode_show3d_stack(html_path, max_decode_mb=max_decode_mb)
-    panel_count = int(metadata["n_panels"])
-    panel_width = int(metadata["panel_width_px"]) or int(metadata["width"]) // panel_count
-    if panel_width <= 0 or panel_width * panel_count > int(metadata["width"]):
-        raise ValueError(f"cannot split panels from width={metadata['width']} and n_panels={panel_count}")
-
-    panels = []
-    for panel in range(panel_count):
-        start = panel * panel_width
-        stop = start + panel_width
-        panels.append(np.ascontiguousarray(stack[:, :, start:stop, ...] if stack.ndim == 4 else stack[:, :, start:stop]))
-
-    titles = traits.get("panel_titles") or [f"Panel {idx + 1}" for idx in range(panel_count)]
-    out_dir.mkdir(parents=True, exist_ok=True)
-    widget = Show3D(
-        *panels,
-        title=str(traits.get("title") or html_path.stem),
-        panel_titles=[str(title) for title in titles[:panel_count]],
-        cmap=str(traits.get("cmap") or "gray"),
-        max_cols=int(traits.get("max_cols", min(4, panel_count)) or min(4, panel_count)),
-        fps=float(traits.get("fps", 30.0) or 30.0),
-        avg_window=int(traits.get("avg_window", 1) or 1),
-        sampling=float(traits.get("pixel_size", 0.0) or 0.0),
-        units=str(traits.get("pixel_unit") or "A"),
-        show_fft=bool(traits.get("show_fft", False)),
-        fft_layout=str(traits.get("fft_layout") or "bottom"),
-        fft_overlay_position=str(traits.get("fft_overlay_position") or "top-left"),
-        fft_overlay_size=float(traits.get("fft_overlay_size", 0.35) or 0.35),
-        show_controls=True,
-        show_zoom_indicator=bool(traits.get("show_zoom_indicator", False)),
-        show_scale_bar=bool(traits.get("scale_bar_visible", True)),
-        debug=True,
-        inter_panel_gap_px=int(traits.get("inter_panel_gap_px", traits.get("panel_gap", 0)) or 0),
-        inter_panel_gap_color=str(traits.get("inter_panel_gap_color") or ""),
-        gallery_outer_border_px=int(traits.get("gallery_outer_border_px", 0) or 0),
-        gallery_outer_border_color=str(traits.get("gallery_outer_border_color") or ""),
-        panel_inner_border_px=float(traits.get("panel_inner_border_px", 0.0) or 0.0),
-        panel_inner_border_color=str(traits.get("panel_inner_border_color") or "#000000"),
-        verbose=False,
-    )
-    try:
-        html_path_out = widget.export_sidecar(out_dir, title=str(traits.get("title") or html_path.stem))
-    finally:
-        widget.free()
-
-    manifest_path = out_dir / "manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else {}
-    metadata.update({
-        "sidecar_dir": str(out_dir),
-        "sidecar_html": str(html_path_out),
-        "sidecar_stack_bytes": int((out_dir / "offline_stack.u8").stat().st_size),
-        "manifest": manifest,
-    })
-    return TargetSpec(
-        name=f"{_safe_name(html_path.stem)}-generated-sidecar",
-        mode="sidecar",
-        source=str(html_path),
-        root=out_dir.resolve(),
-        metadata=metadata,
-    )
 
 
 def _read_debug(page) -> dict[str, Any]:
@@ -1277,7 +1150,7 @@ def _write_report(artifact_dir: Path, report: dict[str, Any]) -> None:
 <body>
   <h1>Show3D stress report</h1>
   <p class="status">{status}</p>
-  <p>Local-only Chromium stress run for exact single-file HTML and folder sidecar paths.</p>
+  <p>Local-only Chromium stress run for single-file HTML and legacy folder sidecar paths.</p>
   <h2>Sources</h2>
   <ul>{sources_html}</ul>
   <h2>Summary</h2>
@@ -1309,12 +1182,8 @@ def _build_targets(args: argparse.Namespace, artifact_dir: Path) -> list[TargetS
         manifest_path = root / "manifest.json"
         metadata = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else {}
         targets.append(TargetSpec(name=_safe_name(root.name), mode="sidecar", source=str(root), root=root, metadata=metadata))
-    for html_path in args.make_sidecar_from_html:
-        source = Path(html_path).expanduser().resolve()
-        out_dir = artifact_dir / "generated-sidecars" / _safe_name(source.stem)
-        targets.append(_generate_sidecar_from_html(source, out_dir, max_decode_mb=args.max_decode_mb))
     if not targets:
-        raise SystemExit("Provide at least one --html, --url, --sidecar-dir, or --make-sidecar-from-html target.")
+        raise SystemExit("Provide at least one --html, --url, --sidecar-dir target.")
     return targets
 
 
@@ -1322,14 +1191,12 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--html", action="append", default=[], help="Existing standalone Show3D HTML file.")
     parser.add_argument("--url", action="append", default=[], help="Existing served Show3D HTML URL.")
-    parser.add_argument("--sidecar-dir", action="append", default=[], help="Folder export containing index.html and offline_stack.u8.")
-    parser.add_argument("--make-sidecar-from-html", action="append", default=[], help="Generate and stress a temporary sidecar from a standalone Show3D HTML file.")
+    parser.add_argument("--sidecar-dir", action="append", default=[], help="Existing legacy folder export containing index.html and offline_stack.u8.")
     parser.add_argument("--artifact-dir", default=str(_default_artifact_dir()), help="Output directory for report and screenshots.")
     parser.add_argument("--viewports", default="desktop", help="Comma-separated viewport names: desktop,wide,narrow.")
     parser.add_argument("--seconds", type=float, default=8.0, help="Zoom/pan stress seconds per case.")
     parser.add_argument("--timeout-ms", type=int, default=30000, help="Page load and first-paint timeout.")
     parser.add_argument("--min-fps", type=float, default=30.0, help="Minimum final requestAnimationFrame FPS.")
-    parser.add_argument("--max-decode-mb", type=float, default=4096.0, help="Safety guard for sidecar generation from embedded HTML.")
     parser.add_argument("--independent-contrast", action="store_true", help="Turn off linked panel contrast before screenshots/stress.")
     parser.add_argument("--headed", action="store_true", help="Open a visible browser window.")
     args = parser.parse_args(argv)
