@@ -48,6 +48,7 @@ import {
   standaloneWidgetStaticHtmlFromDocument,
 } from "../format";
 import { useHideStaticFallback } from "../staticFallback";
+import { packedPanelAutoByteRange } from "./packedPanelContrast";
 import { findDataRange, applyLogScale, applyLogScaleInPlace, percentileClip, sliderRange, computeStats, computeHistogramFromBytes } from "../stats";
 import { MetadataSection } from "../widgetInfo";
 import { EmbeddedWidgetView } from "../embeddedWidget";
@@ -1055,55 +1056,6 @@ function cachedAutoDisplayRange(
   return { vmin: signedLog1p(range.vmin), vmax: signedLog1p(range.vmax) };
 }
 
-const packedPanelAutoByteRangeCache = new WeakMap<
-  Uint8Array,
-  Map<string, { lo: number; hi: number }>
->();
-
-function packedPanelAutoByteRange(
-  data: Uint8Array,
-  frameWidth: number,
-  frameHeight: number,
-  panelX: number,
-  panelWidth: number,
-  lowPct: number,
-  highPct: number,
-): { lo: number; hi: number } | null {
-  if (frameWidth <= 0 || frameHeight <= 0 || data.length < frameWidth * frameHeight) return null;
-  const x0 = Math.max(0, Math.min(frameWidth - 1, Math.round(panelX)));
-  const x1 = Math.max(x0 + 1, Math.min(frameWidth, Math.round(panelX + panelWidth)));
-  const low = Math.max(0, Math.min(100, Number(lowPct) || 0));
-  const high = Math.max(low, Math.min(100, Number(highPct) || 100));
-  const key = `${frameWidth}:${frameHeight}:${x0}:${x1}:${low}:${high}`;
-  let frameCache = packedPanelAutoByteRangeCache.get(data);
-  const cached = frameCache?.get(key);
-  if (cached) return cached;
-  const counts = new Uint32Array(256);
-  for (let y = 0; y < frameHeight; y++) {
-    const row = y * frameWidth;
-    for (let x = x0; x < x1; x++) counts[data[row + x]]++;
-  }
-  const total = (x1 - x0) * frameHeight;
-  if (total <= 0) return null;
-  const byteAt = (pct: number): number => {
-    const target = Math.max(0, Math.min(total - 1, Math.floor((pct / 100) * (total - 1))));
-    let cumulative = 0;
-    for (let value = 0; value < counts.length; value++) {
-      cumulative += counts[value];
-      if (cumulative > target) return value;
-    }
-    return 255;
-  };
-  const lo = byteAt(low);
-  const hi = byteAt(high);
-  const range = { lo, hi: Math.max(lo + 1, hi) };
-  if (!frameCache) {
-    frameCache = new Map();
-    packedPanelAutoByteRangeCache.set(data, frameCache);
-  }
-  frameCache.set(key, range);
-  return range;
-}
 const show3dPerfDebugFallback: Record<string, unknown> = {};
 
 function show3dPerfDebug(): Record<string, unknown> | null {
