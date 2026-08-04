@@ -1055,6 +1055,55 @@ function cachedAutoDisplayRange(
   return { vmin: signedLog1p(range.vmin), vmax: signedLog1p(range.vmax) };
 }
 
+const packedPanelAutoByteRangeCache = new WeakMap<
+  Uint8Array,
+  Map<string, { lo: number; hi: number }>
+>();
+
+function packedPanelAutoByteRange(
+  data: Uint8Array,
+  frameWidth: number,
+  frameHeight: number,
+  panelX: number,
+  panelWidth: number,
+  lowPct: number,
+  highPct: number,
+): { lo: number; hi: number } | null {
+  if (frameWidth <= 0 || frameHeight <= 0 || data.length < frameWidth * frameHeight) return null;
+  const x0 = Math.max(0, Math.min(frameWidth - 1, Math.round(panelX)));
+  const x1 = Math.max(x0 + 1, Math.min(frameWidth, Math.round(panelX + panelWidth)));
+  const low = Math.max(0, Math.min(100, Number(lowPct) || 0));
+  const high = Math.max(low, Math.min(100, Number(highPct) || 100));
+  const key = `${frameWidth}:${frameHeight}:${x0}:${x1}:${low}:${high}`;
+  let frameCache = packedPanelAutoByteRangeCache.get(data);
+  const cached = frameCache?.get(key);
+  if (cached) return cached;
+  const counts = new Uint32Array(256);
+  for (let y = 0; y < frameHeight; y++) {
+    const row = y * frameWidth;
+    for (let x = x0; x < x1; x++) counts[data[row + x]]++;
+  }
+  const total = (x1 - x0) * frameHeight;
+  if (total <= 0) return null;
+  const byteAt = (pct: number): number => {
+    const target = Math.max(0, Math.min(total - 1, Math.floor((pct / 100) * (total - 1))));
+    let cumulative = 0;
+    for (let value = 0; value < counts.length; value++) {
+      cumulative += counts[value];
+      if (cumulative > target) return value;
+    }
+    return 255;
+  };
+  const lo = byteAt(low);
+  const hi = byteAt(high);
+  const range = { lo, hi: Math.max(lo + 1, hi) };
+  if (!frameCache) {
+    frameCache = new Map();
+    packedPanelAutoByteRangeCache.set(data, frameCache);
+  }
+  frameCache.set(key, range);
+  return range;
+}
 const show3dPerfDebugFallback: Record<string, unknown> = {};
 
 function show3dPerfDebug(): Record<string, unknown> | null {
@@ -11455,6 +11504,10 @@ function Show3D() {
       const panelState = linkPanels
         ? linkedStateLiveRef.current
         : (panelStatesLiveRef.current[panelIdx] || stateFor(panelIdx));
+      const panelContrastState =
+        panelStatesLiveRef.current[panelIdx]
+        || panelStates[panelIdx]
+        || stateFor(panelIdx);
       const drawView = clampPanelViewForDraw(panelState, outPanelWFloat, outPanelHFloat);
       const slotX0 = Math.max(0, Math.round((slot % cols) * (outPanelWFloat + gap)));
       const slotY0 = Math.max(0, Math.round(Math.floor(slot / cols) * (outPanelHFloat + gap)));
@@ -11465,7 +11518,7 @@ function Show3D() {
       if (realN && drawIdx >= realN) continue;
       const lut = COLORMAPS[panelCmapFor(panelIdx)] || COLORMAPS.inferno;
       const panelStateRange = !linkContrast && Math.max(1, nPanels || 1) > 1
-        ? panelState
+        ? panelContrastState
         : null;
       const panelPreview = panelHistogramPreviewPctRef.current.get(panelIdx) ?? null;
       const sharedPreview = imageHistogramPreviewPctRef.current;
@@ -11496,11 +11549,28 @@ function Show3D() {
         hiByte = clampByte((Number(preview[1]) || 100) * 2.55);
         byteRangeSource = "histogram-preview";
       } else if (autoContrast) {
-        const autoRange = cachedAutoDisplayRange(autoVmins, autoVmaxs, drawIdx, logScale)
+        const autoRange = !linkContrast
+          ? null
+          : cachedAutoDisplayRange(autoVmins, autoVmaxs, drawIdx, logScale)
           || cachedAutoDisplayRange(localAutoVminsRef.current, localAutoVmaxsRef.current, drawIdx, logScale);
+        const localAuto = !linkContrast ? panelStateRange : null;
+        const localAutoBytes = !linkContrast
+          ? packedPanelAutoByteRange(
+              u8, width, height, panelIdx * sourcePanelW, sourcePanelW,
+              percentileLow, percentileHigh,
+            )
+          : null;
         const mappedLo = autoRange ? valueToPanelByte(autoRange.vmin) : null;
         const mappedHi = autoRange ? valueToPanelByte(autoRange.vmax) : null;
-        if (mappedLo !== null && mappedHi !== null && mappedHi > mappedLo) {
+        if (localAutoBytes) {
+          loByte = localAutoBytes.lo;
+          hiByte = localAutoBytes.hi;
+          byteRangeSource = "auto-panel-percentile";
+        } else if (localAuto) {
+          loByte = clampByte((Number(localAuto.imageVminPct) || 0) * 2.55);
+          hiByte = clampByte((Number(localAuto.imageVmaxPct) || 100) * 2.55);
+          byteRangeSource = "auto-panel-state";
+        } else if (mappedLo !== null && mappedHi !== null && mappedHi > mappedLo) {
           loByte = mappedLo;
           hiByte = mappedHi;
           byteRangeSource = "auto-range";
@@ -11723,6 +11793,10 @@ function Show3D() {
       const panelState = linkPanels
         ? linkedStateLiveRef.current
         : (panelStatesLiveRef.current[panelIdx] || stateFor(panelIdx));
+      const panelContrastState =
+        panelStatesLiveRef.current[panelIdx]
+        || panelStates[panelIdx]
+        || stateFor(panelIdx);
       const drawView = clampPanelViewForDraw(panelState, outPanelWFloat, outPanelHFloat);
       const slotX0 = Math.max(0, Math.round((slot % cols) * (outPanelWFloat + gap)));
       const slotY0 = Math.max(0, Math.round(Math.floor(slot / cols) * (outPanelHFloat + gap)));
@@ -11732,7 +11806,7 @@ function Show3D() {
       const realN = panelRealFrames && panelRealFrames[panelIdx];
       if (realN && frameIdx >= realN) continue;
       const lut = COLORMAPS[panelCmapFor(panelIdx)] || COLORMAPS.inferno;
-      const panelStateRange = !linkContrast ? panelState : null;
+      const panelStateRange = !linkContrast ? panelContrastState : null;
       const panelPreview = panelHistogramPreviewPctRef.current.get(panelIdx) ?? null;
       const sharedPreview = imageHistogramPreviewPctRef.current;
       const preview = panelStateRange ? panelPreview : sharedPreview;
@@ -11760,11 +11834,26 @@ function Show3D() {
         loByte = clampByte((Number(preview[0]) || 0) * 2.55);
         hiByte = clampByte((Number(preview[1]) || 100) * 2.55);
       } else if (autoContrast) {
-        const autoRange = cachedAutoDisplayRange(autoVmins, autoVmaxs, frameIdx, logScale)
+        const autoRange = !linkContrast
+          ? null
+          : cachedAutoDisplayRange(autoVmins, autoVmaxs, frameIdx, logScale)
           || cachedAutoDisplayRange(localAutoVminsRef.current, localAutoVmaxsRef.current, frameIdx, logScale);
+        const localAuto = !linkContrast ? panelStateRange : null;
+        const localAutoBytes = !linkContrast
+          ? packedPanelAutoByteRange(
+              u8, width, height, panelIdx * sourcePanelW, sourcePanelW,
+              percentileLow, percentileHigh,
+            )
+          : null;
         const mappedLo = autoRange ? valueToPanelByte(autoRange.vmin) : null;
         const mappedHi = autoRange ? valueToPanelByte(autoRange.vmax) : null;
-        if (mappedLo !== null && mappedHi !== null && mappedHi > mappedLo) {
+        if (localAutoBytes) {
+          loByte = localAutoBytes.lo;
+          hiByte = localAutoBytes.hi;
+        } else if (localAuto) {
+          loByte = clampByte((Number(localAuto.imageVminPct) || 0) * 2.55);
+          hiByte = clampByte((Number(localAuto.imageVmaxPct) || 100) * 2.55);
+        } else if (mappedLo !== null && mappedHi !== null && mappedHi > mappedLo) {
           loByte = mappedLo;
           hiByte = mappedHi;
         } else {
@@ -13319,6 +13408,103 @@ function Show3D() {
         c.imageVminPct,
         c.imageVmaxPct,
       ));
+    }
+
+    // Keep packed multi-panel frames on the same independent-contrast path as
+    // the settled standalone paint. This function also refreshes the retained
+    // offscreen canvas used by wheel zoom and pan; colorizing the whole packed
+    // BF/DF/phase frame with one range makes the next transform repaint appear
+    // to change contrast even though only the viewport changed.
+    const panelCount = Math.max(1, nPanels || 1);
+    const perPanelContrast = (
+      panelCount > 1 &&
+      !c.linkContrast &&
+      !sharedPanelSource &&
+      c.width % panelCount === 0 &&
+      c.height > 0
+    );
+    if (perPanelContrast) {
+      const panelWidth = Math.max(1, Math.floor(c.width / panelCount));
+      const panels = (c.visiblePanelIndices.length ? c.visiblePanelIndices : visiblePanelIndices)
+        .filter((panel) => panel >= 0 && panel < panelCount);
+      const stackBounds = resolveDisplayBounds(
+        c.dataMin,
+        c.dataMax,
+        c.traitVmin,
+        c.traitVmax,
+        c.logScale,
+      );
+      const sharedAutoRange = c.autoContrast ? { vmin, vmax } : null;
+      const panelData = panels.map((panel) => extractPanelSlice(frame, panel, c.logScale));
+      const panelRanges = panels.map((panel, slot) => {
+        const data = panelData[slot];
+        const cachedRange = panelDataRanges[panel];
+        const bounds = data && data.length > 0
+          ? findDataRange(data)
+          : (cachedRange && cachedRange.max > cachedRange.min ? cachedRange : stackBounds);
+        return resolvePanelRenderRange(
+          panel,
+          bounds,
+          sharedAutoRange,
+          data,
+          c.autoContrast,
+          c.percentileLow,
+          c.percentileHigh,
+        );
+      });
+      const offCtx = mainOffscreenRef.current.getContext("2d");
+      let renderedPanels = false;
+      const engine = gpuCmapRef.current;
+      if (offCtx && engine && gpuCmapReadyRef.current) {
+        try {
+          engine.uploadLUT(c.cmap, lut);
+          engine.uploadData(0, frame, c.width, c.height);
+          const regions = panels.map((panel) => ({
+            x: panel * panelWidth,
+            y: 0,
+            width: panelWidth,
+            height: c.height,
+          }));
+          const bitmaps = engine.renderPerPanelGpuExplicit(
+            0,
+            regions,
+            panelRanges,
+            c.logScale,
+          );
+          if (bitmaps && bitmaps.length === panels.length) {
+            offCtx.clearRect(0, 0, c.width, c.height);
+            try {
+              for (let slot = 0; slot < panels.length; slot++) {
+                const bitmap = bitmaps[slot];
+                if (!bitmap) continue;
+                offCtx.drawImage(bitmap, panels[slot] * panelWidth, 0);
+              }
+              renderedPanels = bitmaps.every(Boolean);
+            } finally {
+              bitmaps.forEach((bitmap) => bitmap?.close());
+            }
+          }
+        } catch {
+          renderedPanels = false;
+        }
+      }
+      if (!renderedPanels && offCtx) {
+        offCtx.clearRect(0, 0, c.width, c.height);
+        const panelImage = offCtx.createImageData(panelWidth, c.height);
+        for (let slot = 0; slot < panels.length; slot++) {
+          const panel = panels[slot];
+          const data = panelData[slot];
+          if (!data) continue;
+          const panelLut = COLORMAPS[panelCmapFor(panel)] || lut;
+          const range = panelRanges[slot];
+          applyColormap(data, panelImage.data, panelLut, range.vmin, range.vmax);
+          offCtx.putImageData(panelImage, panel * panelWidth, 0);
+        }
+      }
+      const canvas = canvasRef.current;
+      const ctx = canvas?.getContext("2d");
+      if (ctx) drawMain(ctx, mainOffscreenRef.current);
+      return true;
     }
 
     let rendered = false;
