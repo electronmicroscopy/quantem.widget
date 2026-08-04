@@ -34,39 +34,17 @@ around a real question from the microscope room:
   panel, so a denoise or reconstruction sweep carries the metric that explains
   why the scientist should trust that panel.
 
-(full-resolution-show3d-folder-viewers)=
+(large-show3d-reviews)=
 
-## Full-resolution Show3D folder viewers
+## Large Show3D reviews
 
-Use a Show3D folder viewer when the review question is still a microscope
-question: "Does this denoise frame preserve the atom columns?", "Does the
-drift-corrected panel fail at the edge?", or "Can I scrub the full sweep without
-waiting for Python?" A single HTML file is convenient for email, but it is the
-wrong container for multi-GB, multi-panel, full-shape stacks.
-
-The folder export keeps the viewer HTML small and stores the frame data beside
-it:
-
-```text
-800C_1.3Mx_fullres/
-├── index.html
-├── manifest.json
-└── offline_stack.u8
-```
-
-The current advanced Show3D API for this path is `export_sidecar(...)`. In user
-docs, think of it as a folder export: the HTML is the viewer and the nearby data
-file is the microscope stack.
-
-Choose the export path by what the scientist needs to do:
+Show3D exports one portable HTML file. Choose the display payload explicitly:
 
 | Review need | Recommended path | What it means |
 | --- | --- | --- |
-| Email or attach one browseable artifact | `export_html(..., mode="single", encoding="uint8", downsample=...)` | Compact review copy. Any downsample is explicit. |
-| Scrub a multi-GB full-shape Show3D stack locally | `export_sidecar(out_dir)` | Small HTML plus nearby data file; serve over HTTP. |
-| Recompute, stream fresh frames, or inspect exact backend arrays | live Jupyter widget | Python owns the data and the browser is the viewer. |
-
-Create the review with the same panel structure a microscopist should inspect:
+| Email or attach one browseable artifact | `export_html(..., encoding="uint8", downsample=2)` | Compact review copy with explicit spatial reduction. |
+| Preserve the current display shape | `export_html(..., encoding="uint8", downsample=1)` | One portable HTML using display-scaled uint8 data. |
+| Recompute, stream fresh frames, or inspect exact backend arrays | live Jupyter widget | Python owns the arrays and the browser remains interactive. |
 
 ```python
 from quantem.widget import Show3D
@@ -76,142 +54,21 @@ w = Show3D(
     tikhonov_stack,
     tv2_stack,
     panel_titles=["raw", "Tikhonov", "TV2"],
-    title="800C 1.3Mx denoise full-resolution review",
+    title="800C 1.3Mx denoise review",
     display_bin=1,
     link_contrast=False,
     debug=True,
 )
-w.export_sidecar("/data/reports/800C_1.3Mx_fullres")
+w.export_html(
+    "/data/reports/800C_1.3Mx_review.html",
+    encoding="uint8",
+    downsample=1,
+)
 ```
 
-`display_bin=1` is the important claim: the browser review is built from the
-native panel shape. If you make a smaller browse copy, say so in the filename,
-title, report, and export option.
-
-Serve the folder with a Range-capable local HTTP server. Do not open the HTML
-with `file://`; the browser must be allowed to fetch `offline_stack.u8`.
-
-```bash
-# Use your project or lab helper that supports HTTP Range requests.
-python scripts/serve_sidecar_range.py \
-  --dir /data/reports/800C_1.3Mx_fullres \
-  --port 8803 --bind 127.0.0.1
-```
-
-Then open:
-
-```text
-http://127.0.0.1:8803/index.html
-```
-
-### Share with a colleague
-
-Share the entire folder export, not only `index.html`. The HTML is the viewer;
-`offline_stack.u8` is the frame data; `manifest.json` records the shape, panel
-count, display metadata, and file names.
-
-For a normal handoff, package or copy the directory as one unit:
-
-```bash
-# Option A: make one archive to upload or send through shared storage.
-tar -C /data/reports -czf 800C_1.3Mx_fullres.tgz 800C_1.3Mx_fullres
-
-# Option B: copy the folder directly to a shared project directory.
-rsync -av /data/reports/800C_1.3Mx_fullres/ \
-  /shared/projects/denoise/800C_1.3Mx_fullres/
-```
-
-Tell the colleague to unpack or open that folder locally, then serve it from the
-folder with the Range helper:
-
-```bash
-cd /path/to/quantem.widget
-python scripts/serve_sidecar_range.py \
-  --dir /path/to/800C_1.3Mx_fullres \
-  --port 8803 --bind 127.0.0.1
-```
-
-They should open `http://127.0.0.1:8803/index.html` in Chrome, Edge, Brave, or
-another modern Chromium-family browser. If they only double-click
-`index.html`, the browser may block or mishandle the nearby multi-GB data file.
-If they see a blank page, stale colors, or a load error, first verify that
-`offline_stack.u8` is next to `index.html`, the server is running from the
-right folder, and the Range probe below returns `206 Partial Content`.
-
-For shared lab storage, keep the source `.npz` or reconstruction output beside
-the review when possible, but mark the folder export as the interactive review
-copy. Do not put private workstation paths, Jupyter tokens, or SSH tunnel
-details into the README you send with the folder.
-
-For a correct full-resolution folder review, the scientist-facing behavior is:
-
-- The viewer shell appears immediately, before all frames are loaded.
-- A load banner says whether the stack is still loading, cached, or ready.
-- Real pixels appear as soon as the first visible frame is available.
-- After the stack is ready, scrubbing and playback use browser-local cached
-  frames instead of asking Python for each frame.
-- Histogram and colormap changes repaint the current microscope view quickly,
-  then rebuild any playback cache in the background.
-- Zooming into a panel should not make the widget recompute hidden panels or
-  unrelated frames before the visible view updates.
-
-Before trusting a full-resolution export, run a small Range probe. For a
-9-panel `2048 x 2048` uint8 stack, one frame is `9 * 2048 * 2048` bytes:
-
-```bash
-FRAME_BYTES=$((9 * 2048 * 2048))
-curl -sD /tmp/headers.txt -o /tmp/one-frame.u8 \
-  -H "Range: bytes=0-$((FRAME_BYTES - 1))" \
-  http://127.0.0.1:8803/offline_stack.u8
-head /tmp/headers.txt
-ls -lh /tmp/one-frame.u8
-```
-
-The response should be `206 Partial Content`, and the downloaded file should be
-one frame, not the whole multi-GB stack. This only proves delivery; it does not
-replace browser testing.
-
-Use this checklist for the browser signoff:
-
-| User story | What to drive | What to report |
-| --- | --- | --- |
-| Open the review | load the URL in a fresh browser | `load_s`, first visible frame, ready banner, errors |
-| Scrub like a microscopist | 20 ArrowRight or slider steps | advanced frame count, mean/p50/p95 ms |
-| Play the time series | 5 s playback | transitions, effective FPS, dropped/stuck frames |
-| Inspect detail | zoom into a panel, then scrub | visible panel updates, no hidden-panel stall |
-| Tune display | drag histogram for 5 s | preview FPS, p50/p95 interval, release ms, cache rebuild s |
-| Change contrast language | switch colormap and scale | menu/action latency, current image repaints |
-| Look for leaks | repeat buttons, scrub, play, histogram, zoom | JS heap, DOM nodes/listeners, cache counts, RSS trend |
-
-Example report line from a full-resolution `9 x 69 x 2048 x 2048` Show3D
-folder viewer on an Apple Silicon laptop:
-
-```text
-load_s=3.8; histogram drag 5 s: 114 preview paints, 22.8 fps,
-interval p50/p95=16.9/80.6 ms, render mean/p95=15.8/22.9 ms,
-release=5.2 ms, cache clean=1.3 s; scrub after change 20/20,
-mean/p95=2.1/4.5 ms; memory stress: JS heap +2 MB, listeners flat,
-GPU/cache frame counts stable, RSS plateaued after initial allocation.
-```
-
-That example is intentionally written like a test result, not a feeling. If the
-target is 30 FPS and the measured histogram drag is 22.8 FPS, report it as a
-partial pass even when the widget is usable.
-
-Common failure modes:
-
-- **Blank or white viewer**: the browser did not fetch the stack, loaded stale
-  HTML, or hit an allocation failure. Check the console and the load banner.
-- **`Array buffer allocation failed`**: avoid one contiguous multi-GB fetch and
-  restart the browser before final proof if repeated reloads fragmented memory.
-- **Scrub is slow after "ready"**: profile draw/colormap/upload/cache counters;
-  the data is probably in RAM, but the paint path is too expensive.
-- **Histogram feels slow**: test drag preview separately from release/cache
-  rebuild. The current view should update first; background cache can follow.
-- **Fast only because it is smaller**: check `display_bin`, `downsample`, title,
-  and report wording. Full-resolution claims must keep shape reduction explicit.
-
-(label-local-regions-inside-panels)=
+Large exact float32 files can exceed browser limits. Prefer uint8 for visual review,
+use an explicit `downsample` when needed, and keep exact multi-gigabyte analysis in
+the live widget rather than creating a companion sidecar folder.
 
 ## Label local regions inside panels
 

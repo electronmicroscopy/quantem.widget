@@ -62,6 +62,21 @@ def test_show3d_refuses_to_hide_every_panel() -> None:
         widget.hide_panel("SSB", "Mean DP")
 
 
+def test_show3d_exposes_a_hover_hide_action_for_each_panel() -> None:
+    frontend = pathlib.Path("js/show3d/index.tsx").read_text()
+
+    # The transient top-left action mirrors the top-right best-frame star.
+    # It is always shipped, follows the hovered panel, and retains the durable
+    # Panels menu as the recovery path for hidden panels.
+    assert 'className="show3d-panel-hide-button"' in frontend
+    assert "const hideVisible = cursorInfo?.panelIdx === i;" in frontend
+    assert "setPanelHidden(i, true);" in frontend
+    assert 'pointerEvents: hideVisible ? "auto" : "none"' in frontend
+    assert '`Hide ${panelLabel(i)}`' in frontend
+    assert 'aria-label="Choose visible panels"' in frontend
+    assert "setHiddenPanels([]);" in frontend
+
+
 def test_show3d_statistics_are_opt_in() -> None:
     widget = Show3D(np.zeros((3, 4, 5), dtype=np.float32), show_controls=False)
 

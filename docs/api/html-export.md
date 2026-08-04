@@ -122,7 +122,7 @@ browse-quality or count-preserving.
 |---|---|---|---|---|---|---|
 | Show1D | yes | `single` | `full` | `1`, `2`, `4`, `8` | no | preserves every trace/x sample; linked 2D snapshot and profile panels use a NaN-aware area mean, with pixel size and panel/profile coordinates rescaled |
 | Show2D | yes | `single` | `full`, `uint8` | planned | no | `uint8` stores display-scaled image data |
-| Show3D | yes | `single`; large reviews use `export_sidecar(...)` folder output | `full`, `uint8` | planned | yes, via `export_sidecar(...)` | `uint8` stores display-scaled volume data; folder output keeps the viewer HTML small and loads the stack from a nearby data file. See the [advanced tutorial](../tutorials/advanced.md) for the full-resolution folder workflow. |
+| Show3D | yes | `single` | `full`, `uint8` | `1`, `2`, `4`, `8` | no | `uint8` stores display-scaled volume data; use explicit downsampling for smaller portable reports. Legacy sidecar folders remain readable but cannot be newly created. |
 | Show3DSlices | yes | `single` | `full`, `uint8` | planned | no | `uint8` stores display-scaled volume data |
 | Show4DSTEM | yes | `single`; interactive exports may write a local launcher/folder when a companion payload must be served | `uint8`, `full`/`uint16` | detector: `1`, `2`, `4`, `8`; scan: `1`, `2`, `4`, `8` | yes, for companion-data interactive exports and HDF5 bundles | `export_kind="report"` writes static PNG virtual-image pages with no raw 4D; `export_kind="interactive"` writes browser WebGPU raw-4D payload. The CLI WebGPU folder keeps source HDF5 beside `index.html` and `Show4DSTEM.command`. `scan_bin` and `det_bin` are explicit mean-binning choices. |
 | ShowEDS | yes | `single`, `folder` | `full` | `2`, `4` | yes | count-preserving sum downsample across spatial and energy axes |
@@ -133,7 +133,7 @@ The public Python calls are:
 |---|---|
 | Show1D | `export_html(path=None, title=None, mode="single", encoding="full", downsample=None)` |
 | Show2D | `export_html(path=None, title=None, mode="single", encoding="full", downsample=None)` |
-| Show3D | `export_html(path=None, title=None, mode="single", encoding="full", downsample=None)`; multi-GB folder reviews use `export_sidecar(out_dir)` |
+| Show3D | `export_html(path=None, title=None, mode="single", encoding="full", downsample=None)` |
 | Show3DSlices | `export_html(path=None, title=None, mode="single", encoding="full", downsample=None)` |
 | Show4DSTEM | `export_html(path=None, title=None, mode="single", encoding=None, downsample=None, dtype="uint8", det_bin=1, scan_bin=1, real_space_bin=None, export_kind="interactive", dataset_scope="unhidden")`; for compact screening use `export_kind="report"` |
 | ShowPtycho | `export_webgpu_folder(out_dir)` for browser-side SSB review from compressed HDF5 source files; transient BF-indexed reducers are built in WebGPU |
@@ -149,7 +149,6 @@ Existing compatibility aliases remain supported:
 | `dtype="uint16"` | `encoding="full"` |
 | `det_bin=2` | `downsample=2` |
 | `binning=4` | `downsample=4` |
-| `mode="sidecar"` | `mode="folder"` |
 
 For Show4DSTEM, prefer the newer explicit names instead of the generic
 compatibility aliases: `dtype="uint8"` or `"uint16"`, `det_bin=...`,

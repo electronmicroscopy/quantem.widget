@@ -19751,41 +19751,78 @@ function Show3D() {
                 : starElsewhere
                   ? `Star is on frame ${starredFrame + 1}. Click to move it to frame ${visibleSliceIdx + 1}.`
                   : `Click to mark frame ${visibleSliceIdx + 1} as best for ${panelLabel(i)}.`;
+              const hideVisible = cursorInfo?.panelIdx === i;
               return (
-                <button
-                  key={`star-${i}`}
-                  onMouseDown={(event) => event.stopPropagation()}
-                  onClick={() => {
-                    const cur = Array.from({ length: totalPanelCount }, (_, k) => starred?.[k] ?? -1);
-                    cur[i] = isStarredHere ? -1 : visibleSliceIdx;
-                    setStarred(cur);
-                  }}
-                  title={tooltip}
-                  aria-label={tooltip}
-                  style={{
-                    position: "absolute",
-                    top: `${((panelTop + 6) / Math.max(1, canvasH)) * 100}%`,
-                    left: `calc(${((panelLeft + panelW) / Math.max(1, canvasW)) * 100}% - 26px)`,
-                    width: 20, height: 20,
-                    padding: 0,
-                    border: "none",
-                    background: "transparent",
-                    cursor: "pointer",
-                    fontSize: 18,
-                    lineHeight: "20px",
-                    textAlign: "center",
-                    color: isStarredHere
-                      ? "#ffc107"  // bright gold: star IS on this frame
-                      : starElsewhere
-                        ? "rgba(255, 193, 7, 0.45)"  // faded gold: star elsewhere on this panel
-                        : "rgba(255,255,255,0.5)",   // grey: no star on this panel
-                    textShadow: "0 0 3px rgba(0,0,0,0.8)",
-                    pointerEvents: "auto",
-                    userSelect: "none",
-                  }}
-                >
-                  {isStarredHere ? "★" : "☆"}
-                </button>
+                <React.Fragment key={`panel-actions-${i}`}>
+                  <IconButton
+                    className="show3d-panel-hide-button"
+                    size="small"
+                    disabled={visiblePanelCount <= 1}
+                    onMouseDown={(event) => event.stopPropagation()}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setPanelHidden(i, true);
+                    }}
+                    aria-label={visiblePanelCount <= 1 ? "Cannot hide the last visible panel" : `Hide ${panelLabel(i)}`}
+                    title={visiblePanelCount <= 1 ? "Cannot hide the last visible panel" : `Hide ${panelLabel(i)}`}
+                    sx={{
+                      position: "absolute",
+                      top: `${((panelTop + 6) / Math.max(1, canvasH)) * 100}%`,
+                      left: `${((panelLeft + 6) / Math.max(1, canvasW)) * 100}%`,
+                      width: 20,
+                      height: 20,
+                      p: 0,
+                      opacity: hideVisible ? 1 : 0,
+                      transform: hideVisible ? "translateY(0)" : "translateY(-3px)",
+                      transition: "opacity 120ms ease, transform 120ms ease, background-color 120ms ease, color 120ms ease",
+                      color: visiblePanelCount <= 1 ? "rgba(255,255,255,0.25)" : "rgba(255,255,255,0.78)",
+                      bgcolor: "rgba(0,0,0,0.22)",
+                      pointerEvents: hideVisible ? "auto" : "none",
+                      textShadow: "0 0 3px rgba(0,0,0,0.8)",
+                      zIndex: 3,
+                      "&:hover, &:focus-visible": {
+                        opacity: 1,
+                        bgcolor: "rgba(0,0,0,0.42)",
+                        color: "rgba(255,255,255,0.95)",
+                      },
+                    }}
+                  >
+                    <VisibilityOffIcon sx={{ fontSize: 15 }} />
+                  </IconButton>
+                  <button
+                    onMouseDown={(event) => event.stopPropagation()}
+                    onClick={() => {
+                      const cur = Array.from({ length: totalPanelCount }, (_, k) => starred?.[k] ?? -1);
+                      cur[i] = isStarredHere ? -1 : visibleSliceIdx;
+                      setStarred(cur);
+                    }}
+                    title={tooltip}
+                    aria-label={tooltip}
+                    style={{
+                      position: "absolute",
+                      top: `${((panelTop + 6) / Math.max(1, canvasH)) * 100}%`,
+                      left: `calc(${((panelLeft + panelW) / Math.max(1, canvasW)) * 100}% - 26px)`,
+                      width: 20, height: 20,
+                      padding: 0,
+                      border: "none",
+                      background: "transparent",
+                      cursor: "pointer",
+                      fontSize: 18,
+                      lineHeight: "20px",
+                      textAlign: "center",
+                      color: isStarredHere
+                        ? "#ffc107"  // bright gold: star IS on this frame
+                        : starElsewhere
+                          ? "rgba(255, 193, 7, 0.45)"  // faded gold: star elsewhere on this panel
+                          : "rgba(255,255,255,0.5)",   // grey: no star on this panel
+                      textShadow: "0 0 3px rgba(0,0,0,0.8)",
+                      pointerEvents: "auto",
+                      userSelect: "none",
+                    }}
+                  >
+                    {isStarredHere ? "★" : "☆"}
+                  </button>
+                </React.Fragment>
               );
             })}
             {panelChromeVisible && reorderMode && (nPanels || 1) > 1 && visiblePanelIndices.map((panel, slot) => {
