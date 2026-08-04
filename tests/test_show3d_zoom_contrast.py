@@ -40,6 +40,7 @@ def test_offline_viewport_caches_keep_unlinked_auto_contrast_per_panel() -> None
         "const panelStateRange = !linkContrast ? panelContrastState : null;"
     ) == 1
     assert "? panelContrastState\n        : null;" in frontend
-    assert frontend.count("packedPanelAutoByteRange(") == 3
+    assert 'import { packedPanelAutoByteRange } from "./packedPanelContrast";' in frontend
+    assert frontend.count("packedPanelAutoByteRange(") == 2
     assert frontend.count("const localAutoBytes = !linkContrast") == 2
     assert 'byteRangeSource = "auto-panel-percentile"' in frontend
