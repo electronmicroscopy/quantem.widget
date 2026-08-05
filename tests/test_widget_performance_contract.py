@@ -613,14 +613,14 @@ def test_browser_smoke_guards_zoom_canvas_continuity():
     assert 'if widget in {"show2d", "show3d", "showptycho"}:' in smoke
 
 
-def test_show3d_stress_runner_covers_exact_and_sidecar_exports():
-    """C1: real-data Show3D stress must cover both export transport paths."""
+def test_show3d_stress_runner_covers_portable_and_legacy_exports():
+    """C1: stress current single-file HTML and retain legacy-folder coverage."""
     script = (ROOT / "scripts" / "widget_show3d_stress.py").read_text(encoding="utf-8")
     docs = (ROOT / "docs" / "maintainer" / "performance-ui-testing.md").read_text(encoding="utf-8")
 
     assert "--html" in script
     assert "--sidecar-dir" in script
-    assert "--make-sidecar-from-html" in script
+    assert "--make-sidecar-from-html" not in script
     assert "--independent-contrast" in script
     assert '_set_labeled_switch_with_retry(page, "Contrast", False)' in script
     assert "attempts: int = 20" in script
@@ -633,7 +633,7 @@ def test_show3d_stress_runner_covers_exact_and_sidecar_exports():
     assert "canvas became blank after zoom/pan stress" in script
     assert "sidecar target did not request offline_stack.u8" in script
     assert "scripts/widget_show3d_stress.py" in docs
-    assert "exact single-file HTML and folder sidecar paths" in docs
+    assert "single-file HTML and legacy folder sidecar paths" in docs
 
 
 def test_show3d_filtered_playback_waits_for_cached_display_frames():
@@ -921,23 +921,20 @@ def test_show3d_embedded_packed_zoom_reuses_frame_cache_contract():
     assert "embedded-packed-composite-transform" in show3d
 
 
-def test_show3d_sidecar_export_preserves_display_contrast_contract():
-    """C1: folder export should preserve microscope contrast state."""
+def test_show3d_sidecar_creation_is_removed_but_legacy_reader_remains():
+    """C1: new exports stay portable while old folder reports still open."""
     show3d = (ROOT / "src" / "quantem" / "widget" / "show3d.py").read_text(encoding="utf-8")
-    export_body = show3d.split("    def export_sidecar(", 1)[1].split(
-        "    def _compress_html_if_requested", 1
-    )[0]
+    frontend = (ROOT / "js" / "show3d" / "index.tsx").read_text(encoding="utf-8")
 
-    assert "export_widget.auto_contrast = False" not in export_body
-    assert "export_widget.vmin = 0.0" not in export_body
-    assert "\"auto_contrast\": bool(export_widget.auto_contrast)" in export_body
-    assert "\"offline_mins\": list(export_widget._offline_mins or [])" in export_body
-    assert "serve_sidecar_range.py --dir ." in export_body
-    assert "python3 -m http.server" not in export_body
+    assert "def export_sidecar(" not in show3d
+    assert "export_sidecar()" not in show3d
+    assert "_offline_stack_url" in show3d
+    assert "const sidecarMode = Boolean(" in frontend
+    assert "Failed to load sidecar stack" in frontend
 
 
 def test_show3d_folder_review_range_server_is_shipped():
-    """C1: collaborators can serve folder exports without private lab scripts."""
+    """C1: collaborators can still serve existing folder exports."""
     server = (ROOT / "scripts" / "serve_sidecar_range.py").read_text(encoding="utf-8")
 
     assert "Accept-Ranges" in server

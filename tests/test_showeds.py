@@ -12,6 +12,7 @@ from quantem.widget.showeds import (
     detect_elements,
     detect_peaks,
     detector_fwhm_kev,
+    all_eds_lines,
     eds_line_hints,
     load_spectrum_image_sidecar,
     match_elements,
@@ -1324,3 +1325,16 @@ def test_detect_peaks_rejects_single_channel_spike():
     spectrum[700] += 50000.0
 
     assert detect_peaks(spectrum, energy) == []
+
+
+def test_line_hints_cap_keeps_major_lines_across_range():
+    hints = eds_line_hints(0.1, 12.0)
+    energies = [h["energy_keV"] for h in hints]
+    assert energies == sorted(energies)
+    assert any(abs(e - 6.404) < 0.01 for e in energies)  # Fe Ka1
+    assert any(abs(e - 8.048) < 0.02 for e in energies)  # Cu Ka1
+    assert any(abs(e - 9.713) < 0.02 for e in energies)  # Au La1
+    kept = {(h["element"], h["line"]) for h in hints}
+    dropped_satellites = [h for h in all_eds_lines()
+                          if 0.1 <= h["energy_keV"] <= 12.0 and (h["element"], h["line"]) not in kept]
+    assert all(h["line"] not in {"Ka1", "La1", "Ma"} for h in dropped_satellites)

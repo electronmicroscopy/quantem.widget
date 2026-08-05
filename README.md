@@ -47,6 +47,7 @@ ChooseLattice(np.random.rand(512, 512))
 Show1D(np.random.rand(100), x_label="frame", y_label="defocus", y_unit="nm")
 Show2D(np.random.rand(512, 512))
 Show4DSTEM(np.random.rand(64, 64, 128, 128))
+ShowDiffraction(np.random.rand(512, 512))
 ShowEDS(np.random.poisson(2, (64, 64, 256)).astype("uint16"))
 ShowFolder("/data/session")
 ```
